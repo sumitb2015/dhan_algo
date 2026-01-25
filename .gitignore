@@ -1,0 +1,30 @@
+# Virtual Environment
+venv/
+
+# Sensitive Credentials
+.env
+access_token.json
+credentials.json
+*.json
+*.token
+
+# Large Data & Media
+master_list.csv
+security_id_list.csv
+Options Data/
+
+# Python Cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Agent/Local Metadata
+.agent/
+.gemini/
+agent.md
+REORGANIZATION_SUMMARY.md
+
+# Debug Scripts
+debug_*.py
+temp_*.py

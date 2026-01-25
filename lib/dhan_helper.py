@@ -1,0 +1,2836 @@
+import pandas as pd
+import logging
+import os
+import io
+import requests
+from typing import Optional, Dict, List, Any, Tuple, Union, Callable
+from dhanhq import dhanhq
+from dhanhq.marketfeed import MarketFeed
+from datetime import datetime, timedelta
+import time
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
+
+class DhanHelper:
+    def __init__(self, dhan_client: dhanhq):
+        """
+        Initialize the Helper with an active Dhan SDK client.
+        """
+        self.dhan = dhan_client
+        self.live_data = {} # Shared store for latest WebSocket ticks
+        # Constants mapping for easier access
+        self.NSE = "NSE_EQ"
+        self.BSE = "BSE_EQ"
+        self.NSE_FNO = "NSE_FNO"
+        self.BSE_FNO = "BSE_FNO"
+        self.MCX = "MCX_COMM"
+        self.BUY = "BUY"
+        self.SELL = "SELL"
+        self.MARKET = "MARKET"
+        self.LIMIT = "LIMIT"
+        self.INTRA = "INTRADAY" 
+        self.CNC = "CNC"
+        self.MARGIN = "MARGIN"
+        self.CO = "CO"
+        self.BO = "BO"
+        
+        # Cache for performance
+        self._master_list = None
+        # Path absolute relative to the project root (parent of lib/)
+        lib_dir = os.path.dirname(os.path.abspath(__file__))
+        self._master_list_path = os.path.abspath(os.path.join(os.path.dirname(lib_dir), "master_list.csv"))
+        logger.info(f"Resolved Master List Path: {self._master_list_path}")
+        
+        self._symbol_map = {} # SYMBOL_NAME -> Records for O(1) lookup
+        self._resolution_cache = {} # Cache for _resolve_symbol
+        
+        # Pre-load master list during initialization for better performance
+        self._load_master_list()
+
+        # Check if master list is empty and fetch if needed
+        if self._master_list.empty:
+            logger.warning("Master list not found or empty. Attempting to download...")
+            if self.fetch_security_list():
+                logger.info("Master list downloaded successfully. Reloading...")
+                self._load_master_list(reload=True)
+            else:
+                logger.error("Failed to download master list.")
+        
+        # Validate session on init
+        self.validate_session()
+
+    def validate_session(self) -> bool:
+        """
+        Verify if the Dhan client session is still active and valid.
+        Fetches holdings as a lightweight health check.
+        """
+        try:
+            res = self.dhan.get_holdings()
+            if isinstance(res, dict) and res.get('status') == 'success':
+                logger.debug("Dhan session validated successfully.")
+                return True
+            else:
+                # Handle different error formats from SDK
+                err_details = res if isinstance(res, dict) else {'error': 'Response format error'}
+                logger.error(f"Dhan session validation failed: {err_details}")
+                
+                error_str = str(err_details).lower()
+                if "unauthorized" in error_str or "invalid" in error_str or "expired" in error_str:
+                    logger.warning("CRITICAL: Access Token is stale or invalid. Run login.py manually or restart script to trigger re-login.")
+                return False
+        except Exception as e:
+            logger.error(f"Error during session validation: {e}")
+            return False
+
+    # --- SECURITY ID LOOKUP ---
+    def _load_master_list(self, reload: bool = False) -> pd.DataFrame:
+        """
+        Load master security list from CSV with caching and specialized indexing.
+        First load takes a few seconds, subsequent calls are instant.
+        """
+        if self._master_list is None or reload:
+            try:
+                logger.info(f"Loading master list from {self._master_list_path}...")
+                self._master_list = pd.read_csv(
+                    self._master_list_path,
+                    low_memory=False
+                )
+                
+                if not self._master_list.empty:
+                    # Clean data types for faster exact matching
+                    self._master_list['SYMBOL_NAME'] = self._master_list['SYMBOL_NAME'].astype(str).str.upper()
+                    self._master_list['UNDERLYING_SYMBOL'] = self._master_list['UNDERLYING_SYMBOL'].astype(str).str.upper()
+                    self._master_list['INSTRUMENT'] = self._master_list['INSTRUMENT'].astype(str).str.upper()
+                    self._master_list['OPTION_TYPE'] = self._master_list['OPTION_TYPE'].astype(str).str.upper()
+                    self._master_list['SM_EXPIRY_DATE'] = self._master_list['SM_EXPIRY_DATE'].astype(str)
+                    
+                    # Ensure STRIKE_PRICE is float for precise numeric comparisons
+                    if 'STRIKE_PRICE' in self._master_list.columns:
+                        self._master_list['STRIKE_PRICE'] = pd.to_numeric(self._master_list['STRIKE_PRICE'], errors='coerce').fillna(0.0)
+
+                    logger.info(f"Master list loaded: {len(self._master_list)} records")
+                    
+                    # Specialized Optimization Map for Symbol Lookups
+                    # OPTIMIZATION: Groupby iteration on 170k rows is slow. Disabling pre-caching.
+                    # self._symbol_map = {}
+                    # for symbol, group in self._master_list.groupby('SYMBOL_NAME'):
+                    #     self._symbol_map[str(symbol)] = group
+                    
+                    logger.info("Master list loaded (Indexing skipped for performance)")
+                else:
+                    logger.warning(f"Master list loaded but is EMPTY. Check file content: {self._master_list_path}")
+                
+            except FileNotFoundError:
+                logger.error(f"Master list file not found: {self._master_list_path}")
+                self._master_list = pd.DataFrame()
+            except Exception as e:
+                logger.error(f"CRITICAL: Failed to load master list: {e}")
+                import traceback
+                logger.debug(traceback.format_exc())
+                self._master_list = pd.DataFrame()
+        return self._master_list
+
+    # --- FAST INSTRUMENT LOOKUPS (Exact Match) ---
+
+    def find_equity(self, symbol: str, exchange: str = "NSE") -> Optional[Dict]:
+        """
+        Fast lookup for Equity instruments.
+        """
+        df = self._load_master_list()
+        symbol = symbol.upper()
+        
+        # Explicit lookup
+        mask = (df['EXCH_ID'] == exchange) & \
+               (df['INSTRUMENT'] == 'EQUITY') & \
+               ((df['UNDERLYING_SYMBOL'] == symbol) | (df['SYMBOL_NAME'] == symbol))
+        
+        res = df[mask]
+        return res.iloc[0].to_dict() if not res.empty else None
+
+    def find_index(self, symbol: str, exchange: str = "NSE") -> Optional[Dict]:
+        """
+        Fast lookup for Index instruments.
+        """
+        df = self._load_master_list()
+        symbol = symbol.upper()
+        
+        # Mapping for common aliases
+        alias_map = {
+            "NIFTY 50": "NIFTY",
+            "NIFTY50": "NIFTY",
+            "NIFTY BANK": "BANKNIFTY",
+            "BANK NIFTY": "BANKNIFTY"
+        }
+        search_symbol = alias_map.get(symbol, symbol)
+        
+        # Explicit lookup
+        mask = (df['EXCH_ID'] == exchange) & \
+               (df['INSTRUMENT'] == 'INDEX') & \
+               (df['SYMBOL_NAME'] == search_symbol)
+        
+        res = df[mask]
+        return res.iloc[0].to_dict() if not res.empty else None
+
+    def find_future(self, underlying: str, expiry: Optional[str] = None, exchange: str = "NSE", instrument: str = "FUTIDX") -> Optional[Dict]:
+        """
+        Fast lookup for Futures.
+        """
+        df = self._load_master_list()
+        underlying = underlying.upper()
+        
+        # Explicit lookup
+        mask = (df['EXCH_ID'] == exchange) & \
+               (df['INSTRUMENT'] == instrument) & \
+               (df['UNDERLYING_SYMBOL'] == underlying)
+        
+        res = df[mask]
+        if res.empty: return None
+        
+        # Sort by expiry to handle "nearest" logic
+        res = res.sort_values(by='SM_EXPIRY_DATE')
+        
+        if expiry:
+            match = res[res['SM_EXPIRY_DATE'] == expiry]
+            return match.iloc[0].to_dict() if not match.empty else None
+        
+        return res.iloc[0].to_dict()
+
+    def find_option(self, underlying: str, expiry: str, strike: float, option_type: str, exchange: str = "NSE", instrument: str = "OPTIDX") -> Optional[Dict]:
+        """
+        Fast lookup for Options.
+        """
+        df = self._load_master_list()
+        underlying = underlying.upper()
+        option_type = option_type.upper()
+        
+        # Explicit lookup
+        mask = (df['EXCH_ID'] == exchange) & \
+               (df['INSTRUMENT'] == instrument) & \
+               (df['UNDERLYING_SYMBOL'] == underlying) & \
+               (df['SM_EXPIRY_DATE'] == expiry) & \
+               (df['STRIKE_PRICE'] == float(strike)) & \
+               (df['OPTION_TYPE'] == option_type)
+        
+        res = df[mask]
+        return res.iloc[0].to_dict() if not res.empty else None
+
+    # --- EXPLICIT FETCHERS (LTP) ---
+
+    def fetch_equity_ltp(self, symbol: str) -> float:
+        """Fetch LTP for an equity symbol using fast lookup."""
+        return self.get_ltp(symbol)
+
+    def fetch_index_ltp(self, symbol: str) -> float:
+        """Fetch LTP for an index symbol using fast lookup."""
+        return self.get_ltp(symbol)
+
+    def fetch_future_ltp(self, underlying: str, expiry: Optional[str] = None) -> float:
+        """Fetch LTP for a future contract."""
+        sec = self.find_future(underlying, expiry)
+        if sec:
+            return self.get_ltp(sec['SECURITY_ID'], sec['SEGMENT'])
+        return 0.0
+
+    def fetch_option_ltp(self, underlying: str, expiry: str, strike: float, option_type: str) -> float:
+        """Fetch LTP for an option contract."""
+        sec = self.find_option(underlying, expiry, strike, option_type)
+        if sec:
+            return self.get_ltp(sec['SECURITY_ID'], sec['SEGMENT'])
+        return 0.0
+
+    def get_security_id(
+        self,
+        symbol: Optional[str] = None,
+        exchange: Optional[str] = None,
+        segment: Optional[str] = None,
+        instrument: Optional[str] = None,
+        strike: Optional[float] = None,
+        option_type: Optional[str] = None,
+        expiry: Optional[str] = None,
+        underlying_symbol: Optional[str] = None,
+        return_multiple: bool = False,
+        quiet: bool = False
+    ) -> Optional[Dict | List[Dict]]:
+        """
+        Find security ID(s) from master list based on search criteria.
+        
+        Args:
+            symbol: Symbol name or pattern (case-insensitive, partial match)
+            exchange: Exchange code ("NSE", "BSE")
+            segment: Segment code ("E", "D", "C", etc.)
+            instrument: Instrument type ("EQUITY", "INDEX", "OPTIDX", "FUTIDX", etc.)
+            strike: Strike price for options/futures
+            option_type: Option type ("CE", "PE")
+            expiry: Expiry date in "YYYY-MM-DD" format
+            underlying_symbol: Underlying symbol for F&O contracts
+            return_multiple: If True, return all matches; if False, return first match
+            
+        Returns:
+            Dict with security details if found (or List of Dicts if return_multiple=True)
+            None if no match found (or empty list if return_multiple=True)
+        """
+        df = self._load_master_list()
+        
+        if df.empty:
+            logger.warning(f"Master list is empty. Path tried: {self._master_list_path}")
+            return [] if return_multiple else None
+        
+        if symbol:
+            symbol_up = symbol.upper()
+            
+            # FAST PATH: Check the symbol map first for exact match on SYMBOL_NAME
+            if symbol_up in self._symbol_map:
+                exact_match = self._symbol_map[symbol_up]
+            else:
+                # 1. Try Exact Match First (Whole Dataframe) - includes UNDERLYING and DISPLAY
+                exact_match = df[
+                    (df['SYMBOL_NAME'].str.upper() == symbol_up) | 
+                    (df['UNDERLYING_SYMBOL'].str.upper() == symbol_up) |
+                    (df['DISPLAY_NAME'].str.upper() == symbol_up)
+                ]
+            
+            if not exact_match.empty:
+                # Prioritize EQUITY if available
+                eq_match = exact_match[exact_match['INSTRUMENT'] == 'EQUITY']
+                if not eq_match.empty:
+                    result = eq_match
+                else:
+                    # For Indices, prioritize ID 13 (Nifty) and 25 (BankNifty)
+                    if symbol_up in ["NIFTY 50", "NIFTY", "NIFTY50"]:
+                        idx_match = exact_match[exact_match['SECURITY_ID'] == 13]
+                        result = idx_match if not idx_match.empty else exact_match
+                    elif symbol_up in ["BANKNIFTY", "NIFTY BANK", "BANK NIFTY"]:
+                        idx_match = exact_match[exact_match['SECURITY_ID'] == 25]
+                        result = idx_match if not idx_match.empty else exact_match
+                    else:
+                        result = exact_match
+            else:
+                # 2. Try partial match
+                result = df[
+                    df['SYMBOL_NAME'].str.contains(symbol, case=False, na=False) |
+                    df['DISPLAY_NAME'].str.contains(symbol, case=False, na=False) |
+                    df['UNDERLYING_SYMBOL'].str.contains(symbol, case=False, na=False)
+                ]
+        else:
+            result = df.copy()
+        
+        # Apply other filters on top of result - Optimized Order
+        if exchange:
+            result = result[result['EXCH_ID'].str.upper() == exchange.upper()]
+        
+        if instrument:
+            result = result[result['INSTRUMENT'].str.upper() == instrument.upper()]
+
+        if underlying_symbol:
+            # Prioritize exact match for underlying
+            underlying_up = underlying_symbol.upper()
+            exact_underlying = result[result['UNDERLYING_SYMBOL'].str.upper() == underlying_up]
+            if not exact_underlying.empty:
+                result = exact_underlying
+            else:
+                result = result[result['UNDERLYING_SYMBOL'].str.contains(underlying_symbol, case=False, na=False)]
+
+        if expiry:
+            result = result[result['SM_EXPIRY_DATE'] == expiry]
+
+        if segment:
+            result = result[result['SEGMENT'].str.upper() == segment.upper()]
+        
+        if strike is not None:
+            result = result[result['STRIKE_PRICE'] == strike]
+        
+        if option_type:
+            result = result[result['OPTION_TYPE'].str.upper() == option_type.upper()]
+        
+        # Return results
+        if result.empty:
+            if not quiet:
+                search_desc = symbol or underlying_symbol or "criteria"
+                logger.info(f"No matches found for: {search_desc}")
+            return [] if return_multiple else None
+        
+        if not quiet:
+            logger.info(f"Found {len(result)} match(es)")
+        
+        if return_multiple:
+            return result.to_dict('records')
+        else:
+            return result.iloc[0].to_dict()
+
+    def get_equity_id(
+        self,
+        symbol: str,
+        exchange: str = "NSE",
+        return_multiple: bool = False,
+        quiet: bool = False
+    ) -> Optional[Dict | List[Dict]]:
+        """
+        Quick lookup for equity securities.
+        """
+        return self.get_security_id(
+            symbol=symbol,
+            exchange=exchange,
+            instrument="EQUITY",
+            return_multiple=return_multiple,
+            quiet=quiet
+        )
+
+    def get_index_id(
+        self,
+        symbol: str,
+        exchange: str = "NSE",
+        return_multiple: bool = False,
+        quiet: bool = False
+    ) -> Optional[Dict | List[Dict]]:
+        """
+        Quick lookup for index securities.
+        """
+        return self.get_security_id(
+            symbol=symbol,
+            exchange=exchange,
+            instrument="INDEX",
+            return_multiple=return_multiple,
+            quiet=quiet
+        )
+
+    def get_option_id(
+        self,
+        underlying: str,
+        strike: float,
+        option_type: str,
+        expiry: str,
+        exchange: str = "NSE",
+        instrument: str = "OPTIDX"
+    ) -> Optional[Dict]:
+        """
+        Lookup option contract by strike and expiry.
+        
+        Args:
+            underlying: Underlying symbol (e.g., "NIFTY", "BANKNIFTY")
+            strike: Strike price
+            option_type: "CE" for Call, "PE" for Put
+            expiry: Expiry date "YYYY-MM-DD"
+            exchange: Exchange, default "NSE"
+            instrument: "OPTIDX" for index options, "OPTST K" for stock options
+            
+        Returns:
+            Dict with option contract details or None
+        """
+        return self.get_security_id(
+            underlying_symbol=underlying,
+            strike=strike,
+            option_type=option_type,
+            expiry=expiry,
+            exchange=exchange,
+            instrument=instrument,
+            return_multiple=False
+        )
+
+    def get_future_id(
+        self,
+        underlying: str,
+        expiry: str,
+        exchange: str = "NSE",
+        instrument: str = "FUTIDX"
+    ) -> Optional[Dict]:
+        """
+        Lookup future contract by expiry.
+        
+        Args:
+            underlying: Underlying symbol (e.g., "NIFTY", "BANKNIFTY")
+            expiry: Expiry date "YYYY-MM-DD"
+            exchange: Exchange, default "NSE"
+            instrument: "FUTIDX" for index futures, "FUTST K" for stock futures
+            
+        Returns:
+            Dict with future contract details or None
+        """
+        return self.get_security_id(
+            underlying_symbol=underlying,
+            expiry=expiry,
+            exchange=exchange,
+            instrument=instrument,
+            return_multiple=False
+        )
+
+    def search_symbols(
+        self,
+        pattern: str,
+        limit: int = 10,
+        exchange: Optional[str] = None,
+        instrument: Optional[str] = None
+    ) -> List[Dict]:
+        """
+        Fuzzy search for symbols matching a pattern.
+        
+        Args:
+            pattern: Search pattern (case-insensitive)
+            limit: Maximum number of results, default 10
+            exchange: Optional exchange filter
+            instrument: Optional instrument filter
+            
+        Returns:
+            List of matching securities (up to limit)
+        """
+        results = self.get_security_id(
+            symbol=pattern,
+            exchange=exchange,
+            instrument=instrument,
+            return_multiple=True
+        )
+        
+        if isinstance(results, list):
+            return results[:limit]
+        return []
+
+    # --- CONVENIENCE WRAPPERS FOR F&O ---
+    def get_option_quote(
+        self,
+        underlying: str,
+        strike: float,
+        option_type: str,
+        expiry: str,
+        exchange: str = "NSE",
+        instrument: str = "OPTIDX"
+    ) -> Optional[Dict]:
+        """
+        Get quote data for an option contract (combines lookup + quote fetch).
+        
+        Args:
+            underlying: Underlying symbol (e.g., "NIFTY", "BANKNIFTY")
+            strike: Strike price
+            option_type: "CE" or "PE"
+            expiry: Expiry date "YYYY-MM-DD"
+            exchange: Exchange, default "NSE"
+            instrument: "OPTIDX" for index options, "OPTSTK" for stock options
+            
+        Returns:
+            Dict with quote data or None
+        """
+        # Find the option contract
+        option = self.get_option_id(underlying, strike, option_type, expiry, exchange, instrument)
+        
+        if not option:
+            logger.warning(f"Option not found: {underlying} {strike} {option_type} {expiry}")
+            return None
+        
+        security_id = int(option['SECURITY_ID'])
+        
+        # Determine exchange segment for quote
+        exchange_segment = "NSE_FNO" if exchange == "NSE" else "BSE_FNO"
+        
+        # Fetch quote
+        res = self.dhan.quote_data(securities={exchange_segment: [security_id]})
+        quote = self._parse_market_data(res, exchange_segment, security_id)
+        
+        if quote:
+            # Add contract details to quote
+            quote['CONTRACT_INFO'] = {
+                'SYMBOL': option['SYMBOL_NAME'],
+                'STRIKE': strike,
+                'OPTION_TYPE': option_type,
+                'EXPIRY': expiry,
+                'LOT_SIZE': option.get('LOT_SIZE')
+            }
+            return quote
+        
+        return None
+
+    def get_option_ltp(
+        self,
+        underlying: str,
+        strike: float,
+        option_type: str,
+        expiry: str,
+        exchange: str = "NSE",
+        instrument: str = "OPTIDX"
+    ) -> float:
+        """
+        Get LTP for an option contract (combines lookup + LTP fetch).
+        
+        Args:
+            underlying: Underlying symbol
+            strike: Strike price
+            option_type: "CE" or "PE"
+            expiry: Expiry date "YYYY-MM-DD"
+            exchange: Exchange, default "NSE"
+            instrument: "OPTIDX" or "OPTSTK"
+            
+        Returns:
+            LTP as float, 0.0 if not found
+        """
+        quote = self.get_option_quote(underlying, strike, option_type, expiry, exchange, instrument)
+        if quote:
+            return float(quote.get('LTP', 0) or quote.get('last_price', 0))
+        return 0.0
+
+    def get_future_quote(
+        self,
+        underlying: str,
+        expiry: str,
+        exchange: str = "NSE",
+        instrument: str = "FUTIDX"
+    ) -> Optional[Dict]:
+        """
+        Get quote data for a future contract (combines lookup + quote fetch).
+        
+        Args:
+            underlying: Underlying symbol (e.g., "NIFTY", "BANKNIFTY")
+            expiry: Expiry date "YYYY-MM-DD"
+            exchange: Exchange, default "NSE"
+            instrument: "FUTIDX" for index futures, "FUTSTK" for stock futures
+            
+        Returns:
+            Dict with quote data or None
+        """
+        # Find the future contract
+        future = self.get_future_id(underlying, expiry, exchange, instrument)
+        
+        if not future:
+            logger.warning(f"Future not found: {underlying} {expiry}")
+            return None
+        
+        security_id = int(future['SECURITY_ID'])
+        
+        # Determine exchange segment for quote
+        exchange_segment = "NSE_FNO" if exchange == "NSE" else "BSE_FNO"
+        
+        # Fetch quote
+        res = self.dhan.quote_data(securities={exchange_segment: [security_id]})
+        quote = self._parse_market_data(res, exchange_segment, security_id)
+        
+        if quote:
+            # Add contract details to quote
+            quote['CONTRACT_INFO'] = {
+                'SYMBOL': future['SYMBOL_NAME'],
+                'EXPIRY': expiry,
+                'LOT_SIZE': future.get('LOT_SIZE')
+            }
+            return quote
+            
+        return None
+
+    def get_future_ltp(
+        self,
+        underlying: str,
+        expiry: str,
+        exchange: str = "NSE",
+        instrument: str = "FUTIDX"
+    ) -> float:
+        """
+        Get LTP for a future contract (combines lookup + LTP fetch).
+        
+        Args:
+            underlying: Underlying symbol
+            expiry: Expiry date "YYYY-MM-DD"
+            exchange: Exchange, default "NSE"
+            instrument: "FUTIDX" or "FUTSTK"
+            
+        Returns:
+            LTP as float, 0.0 if not found
+        """
+        quote = self.get_future_quote(underlying, expiry, exchange, instrument)
+        if quote:
+            return float(quote.get('LTP', 0) or quote.get('last_price', 0))
+        return 0.0
+
+
+    # --- SIMPLIFIED API FOR STRATEGY CODE ---
+    
+    def _resolve_symbol(self, symbol: str, instrument_hint: Optional[str] = None) -> Optional[Dict]:
+        """
+        Internal: Resolve symbol to security info with smart detection.
+        """
+        cache_key = f"{symbol}:{instrument_hint}"
+        if cache_key in self._resolution_cache:
+            return self._resolution_cache[cache_key]
+            
+        # Try exact match first (quietly)
+        # Try equity first
+        if not instrument_hint or instrument_hint == "EQUITY":
+            result = self.get_equity_id(symbol, return_multiple=False, quiet=True)
+            if result: 
+                self._resolution_cache[cache_key] = result
+                return result
+        
+        # Try index
+        if not instrument_hint or instrument_hint == "INDEX":
+            result = self.get_index_id(symbol, return_multiple=False, quiet=True)
+            if result:
+                self._resolution_cache[cache_key] = result
+                return result
+        
+        # Fallback to general search (not quiet, so we know if it truly fails)
+        result = self.get_security_id(symbol, instrument=instrument_hint, return_multiple=False)
+        if result:
+            self._resolution_cache[cache_key] = result
+        return result
+    
+    def get_lot_size(self, symbol: str) -> int:
+        """
+        Fetch the lot size for a given symbol (Index/Equity/Derivative).
+        
+        Args:
+            symbol: Symbol name (e.g., "NIFTY 50", "RELIANCE")
+            
+        Returns:
+            Lot size as integer (defaults to 1 for Equities)
+        """
+        sec = self._resolve_symbol(symbol)
+        if sec:
+            try:
+                return int(sec.get('LOT_SIZE', 1))
+            except:
+                return 1
+        return 1
+    
+    def _auto_detect_segment(self, security_info: Dict) -> str:
+        """
+        Internal: Auto-detect exchange segment from security info.
+        
+        Args:
+            security_info: Security information dict
+            
+        Returns:
+            Exchange segment string (e.g., "NSE_EQ", "NSE_FNO")
+        """
+        instrument = security_info.get('INSTRUMENT', '')
+        exchange = security_info.get('EXCH_ID', 'NSE')
+        
+        # F&O instruments
+        if instrument in ['OPTIDX', 'FUTIDX', 'OPTSTK', 'FUTSTK', 'OPTFUT', 'FUTCUR', 'OPTCUR']:
+            return f"{exchange}_FNO"
+        
+        # Equity
+        if instrument == 'EQUITY':
+            return f"{exchange}_EQ"
+        
+        # Index
+        if instrument == 'INDEX':
+            if exchange == "NSE": return "IDX_I"
+            if exchange == "BSE": return "BSE_IDX"
+        
+        # Default fallback
+        return f"{exchange}_EQ"
+    
+    def _get_nearest_expiry(self, underlying_id: int, exchange_segment: str = "IDX_I") -> Optional[str]:
+        """
+        Internal: Get nearest expiry for an underlying.
+        
+        Args:
+            underlying_id: Underlying security ID
+            exchange_segment: Exchange segment
+            
+        Returns:
+            Nearest expiry date string or None
+        """
+        expiries = self.get_expiry_list(underlying_id, exchange_segment)
+        return expiries[0] if expiries else None
+    
+    # --- SIMPLIFIED METHODS ---
+    
+    def ltp(self, symbol_or_id: Any, exchange_segment: Optional[str] = None) -> float:
+        """
+        Simplified LTP call. Alias for get_ltp.
+        """
+        if exchange_segment:
+             # If exact segment provided, we might want to pass it? 
+             # But get_ltp expects 'exchange' (NSE/BSE).
+             # If user passes "NSE_EQ", we should extract "NSE".
+             exchange = exchange_segment.split('_')[0] if '_' in exchange_segment else "NSE"
+             return self.get_ltp(symbol_or_id, exchange=exchange)
+        return self.get_ltp(symbol_or_id)
+
+    def bulk_ltp(self, symbols: List[str]) -> Dict[str, float]:
+        """
+        Fetch LTP for multiple symbols in a single API call.
+        
+        Args:
+            symbols: List of symbols (e.g., ["TCS", "NIFTY 50", "RELIANCE"])
+            
+        Returns:
+            Dict mapping symbol name to LTP float
+        """
+        mapping = {}
+        securities_to_fetch = {}
+        
+        for sym in symbols:
+            # Try fast lookup
+            sec = self.find_equity(sym)
+            if not sec:
+                sec = self.get_security_id(sym, return_multiple=False) # Helper method handles fuzzy/index
+                
+            if sec:
+                seg = sec['SEGMENT']
+                sid = int(sec['SECURITY_ID'])
+                
+                # Correction: Map CSV Segment 'E' to API 'NSE_EQ' if needed
+                # Same logic as get_latest_candles
+                exch_id = sec.get('EXCH_ID', 'NSE')
+                instr = sec.get('INSTRUMENT', 'EQUITY')
+                api_seg = "NSE_EQ"
+                if exch_id == "NSE":
+                    if instr == "INDEX": api_seg = "IDX_I"
+                    elif instr == "EQUITY": api_seg = "NSE_EQ"
+                    else: api_seg = "NSE_FNO"
+                elif exch_id == "BSE":
+                    if instr == "EQUITY": api_seg = "BSE_EQ"
+                    else: api_seg = "BSE_FNO"
+                elif exch_id == "MCX": api_seg = "MCX_COMM"
+                
+                if api_seg not in securities_to_fetch:
+                    securities_to_fetch[api_seg] = []
+                securities_to_fetch[api_seg].append(sid)
+                mapping[str(sid)] = sym
+        
+        if not securities_to_fetch:
+            return {}
+            
+        if not securities_to_fetch:
+            return {}
+            
+        results = {sym: 0.0 for sym in symbols}
+            
+        # Try ohlc_data first (Proven more reliable for Equities)
+        res = self.dhan.ohlc_data(securities=securities_to_fetch)
+        
+        # If bulk fails, fallback to sequential fetch to save what we can
+        if res.get('status') != 'success':
+            logger.warning("Bulk ohlc_data failed, trying individual fetches...")
+            for sym in symbols:
+                # Use simplified ltp() call which handles lookup & fetch
+                 try:
+                     val = self.ltp(sym)
+                     if val > 0:
+                         results[sym] = val
+                 except: pass
+            return results
+        
+        # Robust parsing for bulk data
+        data = res.get('data', {})
+        if isinstance(data, dict) and 'data' in data:
+            data = data['data']
+        
+        # If data is not a dict (e.g. empty string on failure), return zeros
+        if not isinstance(data, dict):
+            logger.error(f"Bulk fetch failed parsing. Data: {data}")
+            return results
+            
+        for segment, segment_data in data.items():
+            if not isinstance(segment_data, dict): continue
+            for sid, ticker in segment_data.items():
+                if not isinstance(ticker, dict): continue
+                sym_name = mapping.get(str(sid))
+                if sym_name:
+                    # ohlc_data returns 'close' or 'last_price' inside 'ohlc' dict sometimes?
+                    # structure: {'last_price': ..., 'ohlc': {...}}
+                    lp = float(ticker.get('last_price', 0))
+                    if lp == 0 and 'ohlc' in ticker:
+                         lp = float(ticker['ohlc'].get('close', 0))
+                    results[sym_name] = lp
+                    
+        return results
+    
+    def ohlc(self, symbol_or_id: Any, exchange_segment: Optional[str] = None) -> Dict:
+        """
+        Simplified OHLC call. Alias for get_ohlc.
+        """
+        # Smart resolution if string symbol passed without explicit segment
+        if not exchange_segment and isinstance(symbol_or_id, str) and not symbol_or_id.isdigit():
+             sec = self._resolve_symbol(symbol_or_id)
+             if sec:
+                 return self.get_ohlc(
+                     symbol=sec['SECURITY_ID'],
+                     exchange=sec.get('EXCH_ID', 'NSE'),
+                     instrument=sec.get('INSTRUMENT', 'EQUITY')
+                 )
+
+        if exchange_segment:
+             exchange = exchange_segment.split('_')[0] if '_' in exchange_segment else "NSE"
+             return self.get_ohlc(symbol_or_id, exchange=exchange)
+        return self.get_ohlc(symbol_or_id)
+    
+    def option(
+        self,
+        underlying: str,
+        strike: float,
+        option_type: str,
+        expiry_index: int = 0,
+        exchange: str = "NSE"
+    ) -> Optional[Dict]:
+        """
+        Get option quote with smart defaults (uses nearest expiry by default).
+        """
+        # Resolve underlying info to get segments and expiries
+        und = self.find_equity(underlying)
+        if not und:
+            und = self.get_security_id(underlying)
+            
+        if not und:
+            logger.warning(f"Underlying not found: {underlying}")
+            return None
+            
+        expiries = self.get_expiry_list(int(und['SECURITY_ID']), und['SEGMENT'])
+        if not expiries or expiry_index >= len(expiries):
+            logger.warning(f"No expiry available at index {expiry_index}")
+            return None
+            
+        expiry = expiries[expiry_index]
+        
+        # Fast option lookup
+        sec = self.find_option(underlying, expiry, strike, option_type)
+        if not sec:
+            # Fallback (rarely needed if master list is good)
+            sec = self.get_option_id(underlying, strike, option_type, expiry)
+            
+        if not sec:
+            return None
+            
+        return self.get_ohlc(
+            security_id=int(sec['SECURITY_ID']),
+            exchange_segment=sec['SEGMENT']
+        )
+    
+    def future(
+        self,
+        underlying: str,
+        expiry_index: int = 0,
+        exchange: str = "NSE"
+    ) -> Optional[Dict]:
+        """
+        Get future quote with smart defaults (uses nearest expiry by default).
+        """
+        # Resolve underlying info
+        und = self.find_equity(underlying)
+        if not und:
+            und = self.get_security_id(underlying)
+            
+        if not und:
+            logger.warning(f"Underlying not found: {underlying}")
+            return None
+            
+        expiries = self.get_expiry_list(int(und['SECURITY_ID']), und['SEGMENT'])
+        if not expiries or expiry_index >= len(expiries):
+            logger.warning(f"No expiry available at index {expiry_index}")
+            return None
+            
+        expiry = expiries[expiry_index]
+        
+        # Fast future lookup
+        sec = self.find_future(underlying, expiry)
+        if not sec:
+            # Fallback
+            sec = self.get_future_id(underlying, expiry)
+            
+        if not sec:
+            return None
+            
+        return self.get_ohlc(
+            security_id=int(sec['SECURITY_ID']),
+            exchange_segment=sec['SEGMENT']
+        )
+    
+    def buy(self, symbol: str, qty: int, price: Optional[float] = None, product: str = "INTRA") -> Optional[str]:
+        """
+        Place a BUY order. If price is None, it's a MARKET order.
+        """
+        # Try fast lookup
+        sec = self.find_equity(symbol)
+        if not sec:
+            sec = self.get_security_id(symbol)
+            
+        if not sec:
+            logger.error(f"Could not resolve symbol for buy order: {symbol}")
+            return None
+            
+        return self.place_order(
+            security_id=int(sec['SECURITY_ID']),
+            exchange_segment=sec['SEGMENT'],
+            transaction_type=self.BUY,
+            quantity=qty,
+            order_type=self.LIMIT if price else self.MARKET,
+            product_type=product,
+            price=price or 0.0
+        )
+
+    def sell(self, symbol: str, qty: int, price: Optional[float] = None, product: str = "INTRA") -> Optional[str]:
+        """
+        Place a SELL order. If price is None, it's a MARKET order.
+        """
+        # Try fast lookup
+        sec = self.find_equity(symbol)
+        if not sec:
+            sec = self.get_security_id(symbol)
+            
+        if not sec:
+            logger.error(f"Could not resolve symbol for sell order: {symbol}")
+            return None
+            
+        return self.place_order(
+            security_id=int(sec['SECURITY_ID']),
+            exchange_segment=sec['SEGMENT'],
+            transaction_type=self.SELL,
+            quantity=qty,
+            order_type=self.LIMIT if price else self.MARKET,
+            product_type=product,
+            price=price or 0.0
+        )
+    
+    def positions(self) -> pd.DataFrame:
+        """
+        Get current positions (simplified, no parameters needed).
+        
+        Returns:
+            DataFrame with positions
+            
+        Example:
+            >>> positions = helper.positions()
+            >>> print(positions[['tradingSymbol', 'netQty', 'realizedProfit']])
+        """
+        return self.get_positions()
+    
+    def holdings(self) -> pd.DataFrame:
+        """
+        Get current holdings (simplified, no parameters needed).
+        
+        Returns:
+            DataFrame with holdings
+            
+        Example:
+            >>> holdings = helper.holdings()
+            >>> print(holdings[['tradingSymbol', 'totalQty', 'avgCostPrice']])
+        """
+        return self.get_holdings()
+    
+    def funds(self) -> float:
+        """
+        Get available funds (simplified, returns just the number).
+        
+        Returns:
+            Available funds as float
+            
+        Example:
+            >>> balance = helper.funds()
+            >>> print(f"Available: Rs. {balance}")
+        """
+        return self.get_available_funds()
+
+
+
+    # --- FUND MANAGEMENT ---
+    def get_available_funds(self) -> float:
+        """Fetch available margin in the account."""
+        try:
+            res = self.dhan.get_fund_limits()
+            if res.get('status') == 'success':
+                data = res.get('data', {})
+                # Handle misspelled API field and standard fallbacks
+                funds = data.get('availabelBalance') or data.get('availableBalance') or data.get('availabelMargin') or 0.0
+                return float(funds)
+            logger.error(f"Failed to fetch funds: {res.get('remarks')}")
+        except Exception as e:
+            logger.error(f"Exception in get_available_funds: {e}")
+        return 0.0
+
+    def get_margin_required(self, symbol: str, quantity: int, direction: str, 
+                          order_type: str = "MARKET", product_type: str = "MARGIN", 
+                          price: float = 0.0, trigger_price: float = 0.0) -> Dict:
+        """
+        Calculate required margin for a trade.
+        
+        Args:
+            symbol: Trading symbol (e.g., 'RELIANCE', 'NIFTY 50')
+            quantity: Quantity to trade
+            direction: 'BUY' or 'SELL'
+            order_type: 'MARKET', 'LIMIT', etc.
+            product_type: 'CNC', 'MARGIN', 'INTRADAY', etc.
+            price: Order price (if 0.0, uses current LTP)
+            trigger_price: Trigger price for SL orders
+            
+        Returns:
+            Dictionary with margin details or empty dict on failure.
+        """
+        try:
+            sec = self._resolve_symbol(symbol)
+            if not sec:
+                logger.error(f"Symbol not found for margin calculation: {symbol}")
+                return {}
+            
+            # If market order and price is 0, fetch LTP
+            calc_price = price
+            if calc_price == 0.0:
+                calc_price = self.get_ltp(symbol)
+                
+            # Detect segment (API format like NSE_EQ)
+            segment = self._auto_detect_segment(sec)
+            
+            # Correct SDK signature: (security_id, exchange_segment, transaction_type, quantity, product_type, price, trigger_price=0)
+            res = self.dhan.margin_calculator(
+                security_id=str(sec['SECURITY_ID']),
+                exchange_segment=segment,
+                transaction_type=direction.upper(),
+                quantity=int(quantity),
+                product_type=product_type.upper(),
+                price=float(calc_price),
+                trigger_price=float(trigger_price)
+            )
+            
+            if isinstance(res, dict) and res.get('status') == 'success':
+                return res.get('data', {})
+            
+            error_msg = res.get('remarks') if isinstance(res, dict) else str(res)
+            logger.error(f"Margin calculation failed: {error_msg}")
+        except Exception as e:
+            logger.error(f"Exception in get_margin_required: {e}")
+        return {}
+
+    # --- PORTFOLIO ---
+    def get_positions(self) -> pd.DataFrame:
+        """Fetch current day positions as a Pandas DataFrame."""
+        try:
+            res = self.dhan.get_positions()
+            if res.get('status') == 'success':
+                data = res.get('data', [])
+                return pd.DataFrame(data)
+            logger.error(f"Failed to fetch positions: {res.get('remarks')}")
+        except Exception as e:
+            logger.error(f"Exception in get_positions: {e}")
+        return pd.DataFrame()
+
+    def get_holdings(self) -> pd.DataFrame:
+        """Fetch current holdings as a Pandas DataFrame."""
+        try:
+            res = self.dhan.get_holdings()
+            if res.get('status') == 'success':
+                data = res.get('data', [])
+                return pd.DataFrame(data)
+            logger.error(f"Failed to fetch holdings: {res.get('remarks')}")
+        except Exception as e:
+            logger.error(f"Exception in get_holdings: {e}")
+        return pd.DataFrame()
+
+    # --- ORDER MANAGEMENT ---
+    def place_order(self, 
+                    security_id: str, 
+                    exchange_segment: Any, 
+                    transaction_type: Any, 
+                    quantity: int, 
+                    order_type: Any = None, 
+                    product_type: Any = None, 
+                    price: float = 0, 
+                    trigger_price: float = 0,
+                    **kwargs) -> Optional[str]:
+        """
+        Generalized order placement helper.
+        Returns order_id if successful, None otherwise.
+        Accepts extra kwargs (e.g. after_market_order=True, amo_time='OPEN')
+        
+        NOTE: Manually handling AMO due to bug in current dhanhq SDK where amoTime is dropped.
+        """
+        order_type = order_type or self.MARKET
+        product_type = product_type or self.INTRA
+        
+        try:
+            # Check for AMO parameters in kwargs
+            after_market_order = kwargs.get('after_market_order', False) or kwargs.get('afterMarketOrder', False)
+            
+            if after_market_order:
+                # SDK BUG WORKAROUND: Construct payload manually
+                amo_time = kwargs.get('amo_time', 'OPEN')
+                validity = kwargs.get('validity', 'DAY')
+                disclosed_quantity = kwargs.get('disclosed_quantity', 0)
+                tag = kwargs.get('tag', '')
+                
+                payload = {
+                    "transactionType": transaction_type.upper(),
+                    "exchangeSegment": exchange_segment.upper(),
+                    "productType": product_type.upper(),
+                    "orderType": order_type.upper(),
+                    "validity": validity.upper(),
+                    "securityId": str(security_id),
+                    "quantity": int(quantity),
+                    "disclosedQuantity": int(disclosed_quantity),
+                    "price": float(price),
+                    "afterMarketOrder": True,
+                    "amoTime": amo_time,
+                    "triggerPrice": float(trigger_price)
+                }
+                
+                # Optional fields
+                if kwargs.get('bo_profit_value'): payload["boProfitValue"] = kwargs.get('bo_profit_value')
+                if kwargs.get('bo_stop_loss_Value'): payload["boStopLossValue"] = kwargs.get('bo_stop_loss_Value')
+                if tag: payload["correlationId"] = tag
+                    
+                logger.debug(f"Placing AMO with Manual Payload: {payload}")
+                res = self.dhan.dhan_http.post('/orders', payload)
+            else:
+                # Normal path
+                res = self.dhan.place_order(
+                    security_id=str(security_id),
+                    exchange_segment=exchange_segment,
+                    transaction_type=transaction_type,
+                    quantity=quantity,
+                    order_type=order_type,
+                    product_type=product_type,
+                    price=price,
+                    trigger_price=trigger_price,
+                    **kwargs
+                )
+
+            if res.get('status') == 'success':
+                order_id = res.get('data', {}).get('orderId')
+                logger.info(f"Order Placed Successfully! Order ID: {order_id}")
+                return order_id
+            else:
+                logger.error(f"Order Placement Failed: {res.get('remarks')}")
+        except Exception as e:
+            logger.error(f"Exception in place_order: {e}")
+        return None
+
+    def get_order_status(self, order_id: str) -> Optional[str]:
+        """Fetch status of a specific order."""
+        try:
+            # SDK Quirks: Sometimes returns a list of results, or throws an error on non-existent IDs
+            try:
+                res = self.dhan.get_order_by_id(order_id)
+            except Exception:
+                # Any SDK internal failure here implies order likely not found or API error
+                return None
+            
+            # Handle list response if SDK returns it
+            if isinstance(res, list) and len(res) > 0:
+                res = res[0]
+                
+            if isinstance(res, dict) and res.get('status') == 'success':
+                data = res.get('data', {})
+                # For non-existent ID, Dhan API returns data: [] (list)
+                if isinstance(data, dict):
+                    return data.get('orderStatus')
+                return None # data is [], meaning not found
+            
+            error_msg = res.get('remarks') if isinstance(res, dict) else str(res)
+            logger.error(f"Failed to fetch order status for {order_id}: {error_msg}")
+        except Exception as e:
+            logger.error(f"Exception in get_order_status for {order_id}: {e}")
+        return None
+
+    def is_order_filled(self, order_id: str) -> bool:
+        """Non-blocking: Check if an order is fully executed."""
+        status = self.get_order_status(order_id)
+        # Dhan statuses: TRADED (Filled), PENDING, CANCELLED, REJECTED, TRANSIT
+        return status == "TRADED"
+
+    def wait_for_fill(self, order_id: str, timeout: int = 30, poll_interval: float = 0.5) -> bool:
+        """Blocking: Wait until the order is filled or timeout reached."""
+        start_time = time.time()
+        logger.info(f"Waiting for order {order_id} to fill (Max {timeout}s)...")
+        
+        while time.time() - start_time < timeout:
+            status = self.get_order_status(order_id)
+            if status == "TRADED":
+                logger.info(f"Order {order_id} filled.")
+                return True
+            if status in ["CANCELLED", "REJECTED"]:
+                logger.warning(f"Order {order_id} terminated with status: {status}")
+                return False
+            
+            time.sleep(poll_interval)
+            
+        logger.warning(f"Timeout reached while waiting for order {order_id} to fill.")
+        return False
+
+    def modify_order(self, 
+                    order_id: str, 
+                    quantity: int, 
+                    order_type: Any, 
+                    price: float = 0, 
+                    trigger_price: float = 0) -> bool:
+        """Modify an existing pending order."""
+        try:
+            res = self.dhan.modify_order(
+                order_id=order_id,
+                order_type=order_type,
+                leg_name='ENTRY_LEG', # Default for single leg orders
+                quantity=quantity,
+                price=price,
+                trigger_price=trigger_price,
+                disclosed_quantity=0,
+                validity='DAY'
+            )
+            if res.get('status') == 'success':
+                logger.info(f"Order {order_id} modified successfully.")
+                return True
+            logger.error(f"Order modification failed: {res.get('remarks')}")
+        except Exception as e:
+            logger.error(f"Exception in modify_order: {e}")
+        return False
+
+    # --- MARKET DATA ---
+    def _parse_market_data(self, response: Dict, segment: str, security_id: Any) -> Dict:
+        """Helper to parse triple-nested data from Dhan response."""
+        if response.get('status') != 'success':
+            logger.error(f"API Response Failure: {response.get('remarks')}")
+            return {}
+        
+        # Handle triple nesting: res['data']['data'][segment][id]
+        data = response.get('data', {})
+        if isinstance(data, dict) and 'data' in data:
+            data = data['data']
+        
+        segment_data = data.get(segment, {})
+        if not segment_data:
+            logger.warning(f"No data for segment: {segment}. Available: {list(data.keys())}")
+            return {}
+            
+        ticker = segment_data.get(str(security_id)) or segment_data.get(int(security_id))
+        if not ticker:
+            logger.warning(f"No data for ID: {security_id} in segment {segment}. Available IDs: {list(segment_data.keys())}")
+            return {}
+            
+        # Flatten OHLC if present
+        if 'ohlc' in ticker and isinstance(ticker['ohlc'], dict):
+            ticker.update(ticker['ohlc'])
+            
+        return ticker
+
+    def get_ltp(self, symbol: Any, exchange: str = "NSE", instrument: str = "EQUITY", expiry: Optional[str] = None, strike: Optional[float] = None, option_type: Optional[str] = None) -> float:
+        """
+        Get Last Traded Price with explicit lookup parameters.
+        Dispatch logic:
+        - If symbol is digits -> Assume Security ID (Legacy/Direct)
+        - If instrument is INDEX -> find_index
+        - If instrument is EQUITY -> find_equity
+        - If instrument is FUTIDX/FUTSTK -> find_future
+        - If instrument is OPTIDX/OPTSTK -> find_option
+        """
+        time.sleep(1)
+        try:
+            # Case 1: Direct Security ID (Legacy support)
+            if str(symbol).isdigit():
+                sid = int(symbol)
+                # Map old segment names if needed, but prefer explicit exchange/instrument logic eventually
+                # For direct ID, we need segment. 
+                # Backward compat: Map common patterns or expect user knows what they are doing.
+                # If user passed "IDX_I" as exchange in old calls:
+                seg = exchange
+            else:
+                # Case 2: Explicit Lookup Dispatch
+                sec = None
+                
+                if instrument == "INDEX":
+                    sec = self.find_index(symbol, exchange)
+                elif instrument == "EQUITY":
+                    sec = self.find_equity(symbol, exchange)
+                elif instrument in ["FUTIDX", "FUTSTK"]:
+                    sec = self.find_future(symbol, expiry, exchange, instrument)
+                elif instrument in ["OPTIDX", "OPTSTK"]:
+                    if strike is None or option_type is None:
+                        logger.error("Strike and Option Type required for Options")
+                        return 0.0
+                    sec = self.find_option(symbol, expiry, strike, option_type, exchange, instrument)
+                else:
+                    # Fallback or unknown instrument
+                    logger.warning(f"Unknown instrument type: {instrument}")
+                    return 0.0
+
+                if not sec:
+                    logger.warning(f"Security not found for {symbol} ({instrument})")
+                    return 0.0
+                
+                if not sec:
+                    logger.warning(f"Security not found for {symbol} ({instrument})")
+                    return 0.0
+                
+                sid = int(sec['SECURITY_ID'])
+                # seg = sec.get('SEGMENT') # Not needed, we derive from arguments
+
+            # Derive API segment from Exchange and Instrument
+            # This is simpler and more reliable than mapping CSV codes
+            api_seg = "NSE_EQ" # Default
+            
+            if exchange == "NSE":
+                if instrument == "INDEX":
+                    api_seg = "IDX_I"
+                elif instrument == "EQUITY":
+                    api_seg = "NSE_EQ"
+                else:
+                    api_seg = "NSE_FNO" # FUTIDX, OPTIDX, FUTSTK, OPTSTK
+            elif exchange == "BSE":
+                if instrument == "EQUITY":
+                    api_seg = "BSE_EQ"
+                else:
+                    api_seg = "BSE_FNO"
+            elif exchange == "MCX":
+                api_seg = "MCX_COMM"
+
+            instruments = {api_seg: [sid]}
+            
+            instruments = {api_seg: [sid]}
+            
+            # Use ohlc_data as primary source (Verified working for NSE_EQ)
+            # Falls back to quote_data if needed? No, separate endpoints.
+            res = self.dhan.ohlc_data(securities=instruments)
+            
+            if res.get('status') != 'success':
+                 # Fallback for Index or if OHLC fails?
+                 # Try quote_data as fallback
+                 logger.debug(f"ohlc_data failed for {instruments}, trying quote_data...")
+                 res = self.dhan.quote_data(securities=instruments)
+            
+            if res.get('status') != 'success':
+                logger.error(f"API Response Failure for {instruments}: {res}")
+                return 0.0
+            
+            ticker_data = self._parse_market_data(res, api_seg, sid)
+            return float(ticker_data.get('last_price', 0))
+        except Exception as e:
+            logger.error(f"Exception in get_ltp: {e}")
+        return 0.0
+
+    def get_ohlc(self, symbol: Any, exchange: str = "NSE", instrument: str = "EQUITY", expiry: Optional[str] = None, strike: Optional[float] = None, option_type: Optional[str] = None) -> Dict:
+        """
+        Get OHLC with explicit lookup parameters.
+        """
+        time.sleep(1)
+        try:
+            # Case 1: Direct Security ID
+            if str(symbol).isdigit():
+                sid = int(symbol)
+                # seg = exchange # Legacy usage
+            else:
+                # Case 2: Explicit Lookup
+                sec = None
+                
+                if instrument == "INDEX":
+                    sec = self.find_index(symbol, exchange)
+                elif instrument == "EQUITY":
+                    sec = self.find_equity(symbol, exchange)
+                elif instrument in ["FUTIDX", "FUTSTK"]:
+                    sec = self.find_future(symbol, expiry, exchange, instrument)
+                elif instrument in ["OPTIDX", "OPTSTK"]:
+                    if strike is None or option_type is None:
+                        logger.error("Strike and Option Type required for Options")
+                        return {}
+                    sec = self.find_option(symbol, expiry, strike, option_type, exchange, instrument)
+                
+                if not sec:
+                    logger.warning(f"Security not found for {symbol} ({instrument})")
+                    return {}
+                
+                sid = int(sec['SECURITY_ID'])
+            
+            # Derive API segment
+            api_seg = "NSE_EQ"
+            if exchange == "NSE":
+                if instrument == "INDEX": api_seg = "IDX_I"
+                elif instrument == "EQUITY": api_seg = "NSE_EQ"
+                else: api_seg = "NSE_FNO"
+            elif exchange == "BSE":
+                if instrument == "EQUITY": api_seg = "BSE_EQ"
+                else: api_seg = "BSE_FNO"
+            elif exchange == "MCX":
+                api_seg = "MCX_COMM"
+
+            instruments = {api_seg: [sid]}
+            
+            # Use ohlc_data as primary source (Verified working for NSE_EQ)
+            res = self.dhan.ohlc_data(securities=instruments)
+            
+            if res.get('status') != 'success':
+                 # Fallback
+                 res = self.dhan.quote_data(securities=instruments)
+                 
+            return self._parse_market_data(res, api_seg, sid)
+        except Exception as e:
+            logger.error(f"Exception in get_ohlc: {e}")
+        return {}
+
+    def get_historical_data(self, 
+                            security_id: str, 
+                            exchange_segment: str, 
+                            instrument_type: str, 
+                            from_date: str, 
+                            to_date: str, 
+                            interval: str = "DAILY") -> pd.DataFrame:
+        """
+        Fetch historical data.
+        interval: "DAILY" or minute intervals (e.g., "1", "5", "15", "60")
+        """
+        try:
+            if interval.upper() == "DAILY":
+                res = self.dhan.historical_daily_data(
+                    security_id=int(security_id),
+                    exchange_segment=exchange_segment,
+                    instrument_type=instrument_type,
+                    from_date=from_date,
+                    to_date=to_date
+                )
+            else:
+                res = self.dhan.intraday_minute_data(
+                    security_id=int(security_id),
+                    exchange_segment=exchange_segment,
+                    instrument_type=instrument_type,
+                    interval=interval,
+                    from_date=from_date,
+                    to_date=to_date
+                )
+            
+            if res.get('status') == 'success':
+                return pd.DataFrame(res.get('data', []))
+            logger.error(f"Historical data fetch failed: {res.get('remarks')}")
+        except Exception as e:
+            logger.error(f"Exception in get_historical_data: {e}")
+        return pd.DataFrame()
+
+    # --- BULK OPERATIONS ---
+    def cancel_all_orders(self) -> int:
+        """Cancel all pending orders. Returns count of successfully cancelled orders."""
+        cancelled_count = 0
+        try:
+            res = self.dhan.get_order_list()
+            if res.get('status') == 'success':
+                orders = res.get('data', [])
+                for order in orders:
+                    if order.get('orderStatus') in ['PENDING', 'TRANSIT']:
+                        cancel_res = self.dhan.cancel_order(order.get('orderId'))
+                        if cancel_res.get('status') == 'success':
+                            cancelled_count += 1
+            else:
+                logger.error(f"Failed to fetch order list for cancellation: {res.get('remarks')}")
+        except Exception as e:
+            logger.error(f"Exception in cancel_all_orders: {e}")
+        return cancelled_count
+
+    def close_all_positions(self) -> int:
+        """
+        Close all open positions by placing market orders of opposite transaction type.
+        Returns count of positions successfully closed (orders placed).
+        """
+        closed_count = 0
+        try:
+            positions = self.get_positions()
+            if positions.empty:
+                return 0
+            
+            for _, pos in positions.iterrows():
+                net_qty = int(pos.get('netQty', 0))
+                if net_qty == 0:
+                    continue
+                
+                # Opposite transaction type
+                tx_type = self.SELL if net_qty > 0 else self.BUY
+                order_id = self.place_order(
+                    security_id=pos.get('securityId'),
+                    exchange_segment=pos.get('exchangeSegment'),
+                    transaction_type=tx_type,
+                    quantity=abs(net_qty),
+                    order_type=self.MARKET,
+                    product_type=pos.get('productType')
+                )
+                if order_id:
+                    closed_count += 1
+        except Exception as e:
+            logger.error(f"Exception in close_all_positions: {e}")
+        return closed_count
+
+    # --- UTILS ---
+    def epoch_to_datetime(self, epoch: int) -> str:
+        """Convert Dhan's epoch time to human-readable format."""
+        try:
+            return self.dhan.convert_to_date_time(epoch)
+        except:
+            return str(epoch)
+
+    # --- OPTION CHAIN ---
+
+
+    def get_expiry_list(self, under_security_id: int, under_exchange_segment: str = "IDX_I") -> List[str]:
+        """Fetch available expiry dates for an underlying."""
+        try:
+            res = self.dhan.expiry_list(
+                under_security_id=under_security_id,
+                under_exchange_segment=under_exchange_segment
+            )
+            if res.get('status') == 'success':
+                # Dhan nesting varies: res['data'] or res['data']['data'] or res['data']['data']['data']
+                data = res.get('data', {})
+                
+                # Check for triple/double nesting
+                if isinstance(data, dict) and 'data' in data:
+                    data = data['data']
+                if isinstance(data, dict) and 'data' in data:
+                    data = data['data']
+                
+                if isinstance(data, list):
+                    return data
+                if isinstance(data, dict):
+                    return data.get('data', [])
+                    
+                return []
+        except Exception as e:
+            logger.error(f"Exception in get_expiry_list: {e}")
+        return []
+
+    # --- FOREVER ORDERS (GTT) ---
+    def place_forever_order(self, 
+                             security_id: str, 
+                             exchange_segment: Any, 
+                             transaction_type: Any, 
+                             quantity: int, 
+                             price: float, 
+                             trigger_price: float,
+                             order_type: Any = None, 
+                             product_type: Any = None) -> Optional[str]:
+        """Place a Forever (GTT) order."""
+        order_type = order_type or self.LIMIT
+        product_type = product_type or self.CNC
+        try:
+            res = self.dhan.place_forever(
+                security_id=str(security_id),
+                exchange_segment=exchange_segment,
+                transaction_type=transaction_type,
+                quantity=quantity,
+                order_type=order_type,
+                product_type=product_type,
+                price=price,
+                trigger_Price=trigger_price
+            )
+            if res.get('status') == 'success':
+                return res.get('data', {}).get('orderId')
+        except Exception as e:
+            logger.error(f"Exception in place_forever_order: {e}")
+        return None
+
+    # --- EDIS / TPIN ---
+    def generate_tpin(self) -> bool:
+        """Trigger TPIN generation request from CDSL."""
+        try:
+            res = self.dhan.generate_tpin()
+            return res.get('status') == 'success'
+        except Exception as e:
+            logger.error(f"Exception in generate_tpin: {e}")
+        return False
+
+    def get_edis_status(self, isin: str = None) -> Dict:
+        """
+        Check status of eDIS authorizations.
+        isin: Optional ISIN code to check specific security status
+        """
+        try:
+            if isin:
+                res = self.dhan.edis_inquiry(isin)
+            else:
+                # Get all eDIS status - may require specific implementation
+                logger.warning("get_edis_status requires an ISIN parameter")
+                return {}
+            
+            if res.get('status') == 'success':
+                return res.get('data', {})
+        except Exception as e:
+            logger.error(f"Exception in get_edis_status: {e}")
+        return {}
+
+    def open_browser_for_tpin(self, isin: str, qty: int, exchange: str = 'NSE') -> bool:
+        """Open browser for TPIN entry in eDIS form."""
+        try:
+            res = self.dhan.open_browser_for_tpin(isin=isin, qty=qty, exchange=exchange)
+            return res.get('status') == 'success'
+        except Exception as e:
+            logger.error(f"Exception in open_browser_for_tpin: {e}")
+        return False
+
+    # --- ORDER BOOK & TRADE BOOK ---
+    def get_order_list(self) -> List[Dict]:
+        """Fetch all orders for the day."""
+        try:
+            res = self.dhan.get_order_list()
+            if res.get('status') == 'success':
+                return res.get('data', [])
+            logger.error(f"Failed to fetch order list: {res.get('remarks')}")
+        except Exception as e:
+            logger.error(f"Exception in get_order_list: {e}")
+        return []
+
+    def get_order_by_id(self, order_id: str) -> Optional[Dict]:
+        """Fetch details of a specific order by order ID."""
+        try:
+            res = self.dhan.get_order_by_id(order_id)
+            if res.get('status') == 'success':
+                return res.get('data', {})
+            logger.error(f"Failed to fetch order by ID: {res.get('remarks')}")
+        except Exception as e:
+            logger.error(f"Exception in get_order_by_id: {e}")
+        return None
+
+    def get_order_by_correlation_id(self, correlation_id: str) -> Optional[Dict]:
+        """Fetch order details by correlation ID."""
+        try:
+            res = self.dhan.get_order_by_corelationID(correlation_id)
+            if res.get('status') == 'success':
+                return res.get('data', {})
+            logger.error(f"Failed to fetch order by correlation ID: {res.get('remarks')}")
+        except Exception as e:
+            logger.error(f"Exception in get_order_by_correlation_id: {e}")
+        return None
+
+    def cancel_order(self, order_id: str) -> bool:
+        """Cancel a pending order."""
+        try:
+            res = self.dhan.cancel_order(order_id)
+            if res.get('status') == 'success':
+                logger.info(f"Order {order_id} cancelled successfully.")
+                return True
+            logger.error(f"Order cancellation failed: {res.get('remarks')}")
+        except Exception as e:
+            logger.error(f"Exception in cancel_order: {e}")
+        return False
+
+    def get_trade_book(self, order_id: str = None) -> List[Dict]:
+        """
+        Fetch trade book. If order_id is provided, fetches trades for that order.
+        Otherwise, fetches all trades for the day.
+        """
+        try:
+            res = self.dhan.get_trade_book(order_id) if order_id else self.dhan.get_trade_book()
+            if res.get('status') == 'success':
+                return res.get('data', [])
+            logger.error(f"Failed to fetch trade book: {res.get('remarks')}")
+        except Exception as e:
+            logger.error(f"Exception in get_trade_book: {e}")
+        return []
+
+    def get_trade_history(self, from_date: str, to_date: str, page_number: int = 0) -> pd.DataFrame:
+        """
+        Fetch trade history for a date range.
+        from_date, to_date: Format 'YYYY-MM-DD'
+        page_number: Pagination (default 0)
+        """
+        try:
+            res = self.dhan.get_trade_history(from_date, to_date, page_number)
+            if res.get('status') == 'success':
+                return pd.DataFrame(res.get('data', []))
+            logger.error(f"Failed to fetch trade history: {res.get('remarks')}")
+        except Exception as e:
+            logger.error(f"Exception in get_trade_history: {e}")
+        return pd.DataFrame()
+
+    # --- SECURITY / INSTRUMENT LIST ---
+    def fetch_security_list(self, segments: List[str] = ['NSE_EQ', 'NSE_FNO', 'BSE_EQ', 'BSE_FNO']) -> bool:
+        """
+        Fetch and combine security lists for specific segments using authenticated API.
+        Default: Equity (E) and Derivatives (D) for both NSE and BSE.
+        API Endpoint: https://api.dhan.co/v2/instrument/{SEGMENT}
+        """
+        try:
+            logger.info(f"Downloading compact master list for segments: {segments}...")
+            dfs = []
+            
+            # Extract credentials from dhanhq client
+            dhan_http = getattr(self.dhan, 'dhan_http', None)
+            if not dhan_http:
+                logger.error("Could not access dhan_http for credentials.")
+                return False
+                
+            client_id = getattr(dhan_http, 'client_id', None)
+            access_token = getattr(dhan_http, 'access_token', None)
+            
+            # Fallback if attributes are missing or named differently (robustness)
+            if not client_id: client_id = os.getenv("client_id")
+            # If access_token missing, we might need to read file, but usually it's there.
+            
+            headers = {
+                "access-token": access_token,
+                "client-id": client_id,
+                "Content-Type": "application/json"
+            }
+            
+            for seg in segments:
+                url = f"https://api.dhan.co/v2/instrument/{seg}"
+                # logger.info(f"Downloading {seg} from {url}...")
+                try:
+                    resp = requests.get(url, headers=headers)
+                    if resp.status_code == 200:
+                        # API returns CSV content directly
+                        df = pd.read_csv(io.StringIO(resp.text), low_memory=False)
+                        dfs.append(df)
+                        # logger.info(f"Downloaded {seg}: {len(df)} records")
+                    else:
+                        logger.error(f"Failed to download {seg}: {resp.status_code} - {resp.text[:100]}")
+                except Exception as e:
+                    logger.error(f"Exception downloading {seg}: {e}")
+            
+            if not dfs:
+                logger.error("No segments downloaded successfully.")
+                return False
+                
+            # Combine all segments
+            full_df = pd.concat(dfs, ignore_index=True)
+            
+            # Save to disk
+            full_df.to_csv(self._master_list_path, index=False)
+            logger.info(f"Saved compact master list to {self._master_list_path} ({len(full_df)} records)")
+            
+            # Reload in memory
+            self._load_master_list()
+            return True
+            
+        except Exception as e:
+            logger.error(f"Exception in fetch_security_list: {e}")
+            return False
+
+    # --- ADVANCED MARKET DATA ---
+    def get_ticker_data(self, securities: Dict[str, List[int]]) -> Dict:
+        """
+        Fetch LTP (ticker) data for multiple securities.
+        securities: {"NSE_EQ": [1333, 11915], "NSE_FNO": [52175]}
+        """
+        try:
+            res = self.dhan.ticker_data(securities)
+            if res.get('status') == 'success':
+                return res.get('data', {})
+            logger.error(f"Failed to fetch ticker data: {res.get('remarks')}")
+        except Exception as e:
+            logger.error(f"Exception in get_ticker_data: {e}")
+        return {}
+
+    def get_quote_data(self, securities: Dict[str, List[int]]) -> Dict:
+        """
+        Fetch quote data (OHLC + LTP + Volume) for multiple securities.
+        securities: {"NSE_EQ": [1333, 11915], "NSE_FNO": [52175]}
+        """
+        try:
+            res = self.dhan.quote_data(securities=securities)
+            if res.get('status') == 'success':
+                data = res.get('data', {})
+                if 'data' in data:
+                    return data['data']
+                return data
+            logger.error(f"Failed to fetch quote data: {res.get('remarks')}")
+        except Exception as e:
+            logger.error(f"Exception in get_quote_data: {e}")
+        return {}
+
+    def get_expired_options_data(self, 
+                               security_id: int,
+                               exchange_segment: str,
+                               instrument_type: str,
+                               expiry_flag: str,
+                               expiry_code: int,
+                               strike: Union[str, float, int],
+                               drv_option_type: str,
+                               required_data: List[str],
+                               from_date: str,
+                               to_date: str,
+                               interval: int = 1) -> pd.DataFrame:
+        """
+        Fetch historical data for expired options using manual API call (SDK missing method).
+        """
+        try:
+            logger.info(f"Fetching Expired Options Data for ID {security_id} ({from_date} to {to_date})")
+            
+            # --- Manual HTTP Request ---
+            # Endpoint: https://api.dhan.co/v2/charts/rollingoption
+            url = "https://api.dhan.co/v2/charts/rollingoption"
+            
+            # Get credentials
+            access_token = getattr(self.dhan.dhan_http, 'access_token', None)
+            client_id = getattr(self.dhan.dhan_http, 'client_id', None)
+            
+            if not access_token:
+                logger.error("Could not retrieve access_token for manual API call.")
+                return pd.DataFrame()
+                
+            headers = {
+                "access-token": access_token,
+                "client-id": client_id,
+                "Content-Type": "application/json",
+                "Accept": "application/json"
+            }
+            
+            payload = {
+                "dhanClientId": client_id,
+                "exchangeSegment": exchange_segment,
+                "interval": str(interval),
+                "securityId": str(security_id),
+                "instrument": instrument_type,
+                "expiryFlag": expiry_flag,
+                "expiryCode": int(expiry_code),
+                "strike": str(strike),
+                "drvOptionType": drv_option_type.upper(),
+                "requiredData": required_data,
+                "fromDate": from_date,
+                "toDate": to_date
+            }
+            
+            res = requests.post(url, headers=headers, json=payload)
+            try:
+                res_json = res.json()
+            except:
+                logger.error(f"Failed to parse JSON response: {res.text}")
+                return pd.DataFrame()
+            
+            if res_json.get('status') == 'success' or 'data' in res_json:
+                data = res_json.get('data', {})
+                
+                # The response structure is { "data": { "ce": { ... }, "pe": { ... } } }
+                if 'data' in data and isinstance(data['data'], dict):
+                    data = data['data']
+                
+                target_key = "ce" if drv_option_type.upper() == "CALL" else "pe"
+                inner_data = data.get(target_key)
+                
+                if inner_data and isinstance(inner_data, dict):
+                    # Check if keys have lists and at least one is not empty
+                    for v in inner_data.values():
+                        if isinstance(v, list) and len(v) > 0:
+                            df = pd.DataFrame(inner_data)
+                            # Add option type column
+                            df['option_type'] = drv_option_type.upper()
+                            # Convert timestamp if present
+                            if 'timestamp' in df.columns:
+                                # Convert Epoch UTC to IST (UTC+5:30)
+                                df['datetime'] = pd.to_datetime(df['timestamp'], unit='s').dt.tz_localize('UTC').dt.tz_convert('Asia/Kolkata').dt.tz_localize(None)
+                            return df
+                
+                logger.warning(f"No {target_key} data found in response.")
+            else:
+                logger.error(f"API Error: {res_json.get('remarks')} | Response: {res_json}")
+                
+        except Exception as e:
+            logger.error(f"Exception in get_expired_options_data: {e}")
+            
+        return pd.DataFrame()
+
+    # --- FUTURES LOOKUP ---
+    def find_current_month_future(self, symbol: str) -> Optional[Dict]:
+        """
+        Find the current month future contract for a given symbol (Index or Stock).
+        Returns the record from master list or None.
+        """
+        if self._master_list is None or self._master_list.empty:
+            logger.warning("Master list is empty, cannot find future.")
+            return None
+            
+        symbol_upper = symbol.upper()
+        today = datetime.now().date()
+        
+        # Determine Instrument Type based on symbol
+        # Indices: NIFTY, BANKNIFTY, FINNIFTY
+        is_index = symbol_upper in ['NIFTY', 'BANKNIFTY', 'FINNIFTY']
+        instrument_type = 'FUTIDX' if is_index else 'FUTSTK'
+        
+        # Filter Master List
+        # 1. Match Symbol (UNDERLYING_SYMBOL for Derivatives)
+        # 2. Match Instrument Type (FUTIDX or FUTSTK)
+        # 3. Expiry >= Today
+        
+        try:
+            mask = (
+                (self._master_list['UNDERLYING_SYMBOL'] == symbol_upper) & 
+                (self._master_list['INSTRUMENT'] == instrument_type) &
+                (self._master_list['SM_EXPIRY_DATE'] >= str(today))
+            )
+            
+            futures = self._master_list[mask].copy()
+            
+            if futures.empty:
+                logger.warning(f"No futures found for {symbol_upper}")
+                return None
+                
+            # Sort by Expiry Date to get nearest
+            futures.sort_values(by='SM_EXPIRY_DATE', inplace=True)
+            
+            # Return the first one (Nearest Expiry)
+            return futures.iloc[0].to_dict()
+            
+        except Exception as e:
+            logger.error(f"Error finding future for {symbol}: {e}")
+            return None
+
+    # --- OPTION CHAIN ---
+    def get_expiries(self, symbol: str) -> List[str]:
+        """
+        Fetch expiry list for a symbol (Equity/Index).
+        """
+        sec = self._resolve_symbol(symbol)
+        if not sec:
+            logger.error(f"Symbol not found for Expiry List: {symbol}")
+            return []
+            
+        sid = int(sec['SECURITY_ID'])
+        # Map Segment to API format
+        seg = "IDX_I" if sec['INSTRUMENT'] == "INDEX" else "NSE_EQ"
+        
+        return self.get_expiry_list(sid, seg)
+
+    def get_expiry_list(self, security_id: int, exchange_segment: str) -> List[str]:
+        """Fetch list of expiry dates for an underlying."""
+        try:
+            res = self.dhan.expiry_list(security_id, exchange_segment)
+            if res.get('status') == 'success':
+                data = res.get('data', [])
+                if isinstance(data, dict) and 'data' in data:
+                    expiries = data.get('data', [])
+                else:
+                    expiries = data
+                
+                # Sort to ensure they are chronological
+                if expiries:
+                    try:
+                        expiries.sort(key=lambda x: datetime.strptime(x, "%Y-%m-%d"))
+                    except: pass
+                return expiries
+            logger.error(f"Failed to fetch expiry list: {res.get('remarks')}")
+        except Exception as e:
+            logger.error(f"Exception in get_expiry_list: {e}")
+        return []
+
+    def get_nearest_expiry(self, symbol: str) -> Optional[str]:
+        """Get the closest upcoming expiry date for a symbol."""
+        expiries = self.get_expiries(symbol)
+        return expiries[0] if expiries else None
+
+    def days_to_expiry(self, symbol: str) -> Optional[int]:
+        """Returns number of days until the nearest expiry. 0 means today is expiry."""
+        expiry_str = self.get_nearest_expiry(symbol)
+        if not expiry_str:
+            return None
+        
+        try:
+            # Assumes system time is IST or UTC relative for the same day calculation
+            expiry_date = datetime.strptime(expiry_str, "%Y-%m-%d").date()
+            today = datetime.now().date()
+            diff = (expiry_date - today).days
+            return diff
+        except Exception as e:
+            logger.error(f"Error calculating days to expiry for {symbol}: {e}")
+            return None
+
+    # --- STRIKE ARITHMETIC ---
+    def select_strike(self, ltp: float, offset: int = 0, step: int = 50) -> float:
+        """
+        Calculate a strike price based on LTP and offset.
+        offset: Positive for OTM Calls / ITM Puts, Negative for ITM Calls / OTM Puts.
+        step: Strike interval (e.g., 50 for Nifty, 100 for BankNifty).
+        """
+        atm = round(ltp / step) * step
+        return float(atm + (offset * step))
+
+    def get_option_chain(self, symbol: str, expiry: str, exchange_segment: str = None) -> Dict:
+        """
+        Fetch Option Chain for a symbol (Equity/Index).
+        Auto-resolves symbol to Security ID.
+        """
+        try:
+            sec = self._resolve_symbol(symbol)
+            if not sec:
+                # If symbol is already an ID (int/str numeric), trust caller
+                if str(symbol).isdigit():
+                    security_id = int(symbol)
+                    # If segment not provided, guess? Hard to guess without lookup.
+                    if not exchange_segment:
+                        logger.error("Exchange Segment required when passing Security ID directly.")
+                        return {}
+                else:
+                    logger.error(f"Symbol not found for Option Chain: {symbol}")
+                    return {}
+            else:
+                security_id = int(sec['SECURITY_ID'])
+                # If segment not provided, derive it
+                if not exchange_segment:
+                     exchange_segment = "IDX_I" if sec['INSTRUMENT'] == "INDEX" else "NSE_EQ"
+            
+            logger.info(f"Fetching Option Chain for {symbol} ({security_id}) [{exchange_segment}] Expiry: {expiry}")
+            
+            res = self.dhan.option_chain(
+                under_security_id=security_id,
+                under_exchange_segment=exchange_segment,
+                expiry=expiry
+            )
+            
+            logger.debug(f"Option Chain Raw Response: {res}")
+            
+            if res.get('status') == 'success':
+                data = res.get('data', {})
+                if 'data' in data and isinstance(data['data'], dict): # Or checking if keys exist
+                     # For Option Chain, 'data' is usually the content
+                     # If double nested: {'data': {'last_price': ...}, 'status': 'success'}
+                     # We want the inner dict.
+                     return data.get('data', {}) if 'data' in data else data
+                return data
+            logger.error(f"Failed to fetch option chain: {res.get('remarks')}")
+            
+        except Exception as e:
+            logger.error(f"Error fetching option chain: {e}")
+        
+        return {}
+
+    def get_option_chain_df(self, symbol: str, expiry: str) -> pd.DataFrame:
+        """
+        Fetch Option Chain and return as a flattened DataFrame.
+        Columns: Strike, ce_last_price, ce_oi, ce_delta, ..., pe_last_price, ...
+        """
+        try:
+            chain_data = self.get_option_chain(symbol, expiry)
+            if not chain_data:
+                return pd.DataFrame()
+
+            oc_data = chain_data.get('oc', {})
+            if not oc_data:
+                logger.warning(f"No 'oc' key in chain data for {symbol}")
+                return pd.DataFrame()
+
+            rows = []
+            for strike, data in oc_data.items():
+                row = {'Strike': float(strike)}
+                
+                # Flatten CE
+                ce = data.get('ce', {})
+                for k, v in ce.items():
+                    if isinstance(v, dict):
+                        for sub_k, sub_v in v.items():
+                            # Handle nested greeks or other dicts
+                            prefix = f"ce_{k}_" if k != 'greeks' else "ce_"
+                            row[f"{prefix}{sub_k}"] = sub_v
+                    else:
+                        row[f'ce_{k}'] = v
+                        
+                # Flatten PE
+                pe = data.get('pe', {})
+                for k, v in pe.items():
+                    if isinstance(v, dict):
+                        for sub_k, sub_v in v.items():
+                            prefix = f"pe_{k}_" if k != 'greeks' else "pe_"
+                            row[f"{prefix}{sub_k}"] = sub_v
+                    else:
+                        row[f'pe_{k}'] = v
+                
+                rows.append(row)
+
+            df = pd.DataFrame(rows)
+            if not df.empty:
+                df.set_index('Strike', inplace=True)
+                df.sort_index(inplace=True)
+                
+                # --- NEW: Calculate Percentage Changes ---
+                # Calculations: (Current - Previous) / Previous * 100
+                # Handle division by zero by filling with 0.0 or keeping Inf (usually 0 is safer for logic)
+                
+                # CE Columns
+                if 'ce_previous_close_price' in df.columns:
+                    df['ce_price_change_pct'] = ((df['ce_last_price'] - df['ce_previous_close_price']) / 
+                                                 df['ce_previous_close_price'].replace(0, float('inf'))) * 100
+                    df['ce_price_change_pct'] = df['ce_price_change_pct'].replace([float('inf'), -float('inf')], 0.0).fillna(0.0)
+                
+                if 'ce_previous_oi' in df.columns:
+                    df['ce_oi_change_pct'] = ((df['ce_oi'] - df['ce_previous_oi']) / 
+                                              df['ce_previous_oi'].replace(0, float('inf'))) * 100
+                    df['ce_oi_change_pct'] = df['ce_oi_change_pct'].replace([float('inf'), -float('inf')], 0.0).fillna(0.0)
+                    
+                if 'ce_previous_volume' in df.columns:
+                    df['ce_vol_change_pct'] = ((df['ce_volume'] - df['ce_previous_volume']) / 
+                                               df['ce_previous_volume'].replace(0, float('inf'))) * 100
+                    df['ce_vol_change_pct'] = df['ce_vol_change_pct'].replace([float('inf'), -float('inf')], 0.0).fillna(0.0)
+
+                # PE Columns
+                if 'pe_previous_close_price' in df.columns:
+                    df['pe_price_change_pct'] = ((df['pe_last_price'] - df['pe_previous_close_price']) / 
+                                                 df['pe_previous_close_price'].replace(0, float('inf'))) * 100
+                    df['pe_price_change_pct'] = df['pe_price_change_pct'].replace([float('inf'), -float('inf')], 0.0).fillna(0.0)
+                
+                if 'pe_previous_oi' in df.columns:
+                    df['pe_oi_change_pct'] = ((df['pe_oi'] - df['pe_previous_oi']) / 
+                                              df['pe_previous_oi'].replace(0, float('inf'))) * 100
+                    df['pe_oi_change_pct'] = df['pe_oi_change_pct'].replace([float('inf'), -float('inf')], 0.0).fillna(0.0)
+                    
+                if 'pe_previous_volume' in df.columns:
+                    df['pe_vol_change_pct'] = ((df['pe_volume'] - df['pe_previous_volume']) / 
+                                               df['pe_previous_volume'].replace(0, float('inf'))) * 100
+                    df['pe_vol_change_pct'] = df['pe_vol_change_pct'].replace([float('inf'), -float('inf')], 0.0).fillna(0.0)
+                
+            # Add underlying_ltp as an attribute to the DF for convenience
+            df.attrs['underlying_ltp'] = chain_data.get('last_price', 0)
+            
+            return df
+
+        except Exception as e:
+            logger.error(f"Error generating Option Chain DF for {symbol}: {e}")
+            return pd.DataFrame()
+
+    def get_atm_strike(self, df: pd.DataFrame, underlying_ltp: float = None) -> float:
+        """
+        Find the ATM strike from the Option Chain DataFrame.
+        """
+        if df.empty:
+            return 0.0
+            
+        ltp = underlying_ltp or df.attrs.get('underlying_ltp', 0)
+        
+        # Fallback: if LTP is missing in DF attrs, try to guess or use 0
+        if ltp == 0:
+            logger.warning("Underlying LTP is 0 or missing. Cannot determine ATM strike.")
+            return 0.0
+            
+        strikes = df.index.to_series()
+        try:
+            return float(strikes.iloc[(strikes - ltp).abs().argmin()])
+        except Exception as e:
+            logger.error(f"Error finding ATM strike: {e}")
+            return 0.0
+
+    def get_atm_row(self, df: pd.DataFrame, underlying_ltp: float = None) -> pd.Series:
+        """
+        Get the entire row for the ATM strike.
+        """
+        if df.empty:
+            return pd.Series()
+            
+        atm_strike = self.get_atm_strike(df, underlying_ltp)
+        if atm_strike == 0:
+            return pd.Series()
+            
+        try:
+            return df.loc[atm_strike]
+        except KeyError:
+            logger.error(f"ATM Strike {atm_strike} not found in index.")
+            return pd.Series()
+        
+    def poll_option_chain(self, symbol: str, expiry: str, interval: int = 5, callback: Callable = None):
+        """
+        Poll option chain every 'interval' seconds.
+        Implements adaptive backoff on failures.
+        """
+        logger.info(f"Starting {interval}s polling for {symbol} ({expiry})")
+        
+        current_interval = interval
+        consecutive_failures = 0
+        
+        try:
+            while True:
+                df = self.get_option_chain_df(symbol, expiry)
+                
+                if not df.empty:
+                    # Success
+                    if consecutive_failures > 0:
+                        logger.info("Polling recovered.")
+                        consecutive_failures = 0
+                        current_interval = interval # Reset to baseline
+                    
+                    if callback:
+                        callback(df)
+                else:
+                    # Failure
+                    consecutive_failures += 1
+                    # backoff: interval + (failures * 2), capped at 30s
+                    backoff = min(current_interval + (consecutive_failures * 2), 30)
+                    logger.warning(f"Polling failed (Attempt {consecutive_failures}). Retrying in {backoff}s...")
+                    time.sleep(backoff)
+                    continue
+
+                time.sleep(current_interval)
+                
+        except KeyboardInterrupt:
+            logger.info("Polling stopped by user.")
+        except Exception as e:
+            logger.error(f"Polling error: {e}")
+        
+    def get_pcr_data(self, df: pd.DataFrame, window: int = 10) -> Dict:
+        """
+        Calculate OI PCR and Volume PCR for a given window around ATM.
+        window: Number of strikes above and below ATM to include (total window*2 + 1)
+        """
+        try:
+            if df.empty:
+                return {}
+                
+            ltp = df.attrs.get('underlying_ltp', 0)
+            if ltp == 0:
+                return {}
+            
+            # Find ATM Strike
+            strikes = df.index.to_series()
+            atm_idx = (strikes - ltp).abs().argmin()
+            
+            # Define range
+            start_pos = max(0, atm_idx - window)
+            end_pos = min(len(df), atm_idx + window + 1)
+            
+            subset = df.iloc[start_pos:end_pos]
+            
+            # OI PCR
+            sum_ce_oi = subset['ce_oi'].sum()
+            sum_pe_oi = subset['pe_oi'].sum()
+            oi_pcr = round(sum_pe_oi / sum_ce_oi, 2) if sum_ce_oi > 0 else 0
+            
+            # Volume PCR
+            sum_ce_vol = subset['ce_volume'].sum()
+            sum_pe_vol = subset['pe_volume'].sum()
+            vol_pcr = round(sum_pe_vol / sum_ce_vol, 2) if sum_ce_vol > 0 else 0
+            
+            return {
+                'atm_strike': float(strikes.iloc[atm_idx]),
+                'underlying_ltp': ltp,
+                'oi_pcr': oi_pcr,
+                'vol_pcr': vol_pcr,
+                'ce_oi_total': int(sum_ce_oi),
+                'pe_oi_total': int(sum_pe_oi),
+                'ce_vol_total': int(sum_ce_vol),
+                'pe_vol_total': int(sum_pe_vol),
+                'strikes_count': len(subset)
+            }
+        except Exception as e:
+            logger.error(f"Error calculating PCR: {e}")
+            return {}
+
+    # --- INTRADAY MINUTE DATA (with interval support) ---
+    def get_intraday_minute_data(self,
+                                   security_id: int,
+                                   exchange_segment: str,
+                                   instrument_type: str,
+                                   interval: str,
+                                   from_date: str,
+                                   to_date: str) -> pd.DataFrame:
+        """
+        Fetch intraday minute data with specific interval.
+        interval: "1", "5", "15", "25", "60"
+        """
+        try:
+            res = self.dhan.intraday_minute_data(
+                security_id=security_id,
+                exchange_segment=exchange_segment,
+                instrument_type=instrument_type,
+                interval=interval,
+                from_date=from_date,
+                to_date=to_date
+            )
+            if res.get('status') == 'success':
+                return pd.DataFrame(res.get('data', []))
+            logger.error(f"Failed to fetch intraday minute data: {res.get('remarks')}")
+        except Exception as e:
+            logger.error(f"Exception in get_intraday_minute_data: {e}")
+        return pd.DataFrame()
+
+    def get_historical_daily_data(self,
+                                    security_id: int,
+                                    exchange_segment: str,
+                                    instrument_type: str,
+                                    from_date: str,
+                                    to_date: str) -> pd.DataFrame:
+        """Fetch historical daily OHLC data."""
+        try:
+            res = self.dhan.historical_daily_data(
+                security_id=security_id,
+                exchange_segment=exchange_segment,
+                instrument_type=instrument_type,
+                from_date=from_date,
+                to_date=to_date
+            )
+            if res.get('status') == 'success':
+                return pd.DataFrame(res.get('data', []))
+            logger.error(f"Failed to fetch historical daily data: {res.get('remarks')}")
+        except Exception as e:
+            logger.error(f"Exception in get_historical_daily_data: {e}")
+        return pd.DataFrame()
+
+    # --- WEBSOCKET / LIVE FEED ---
+    def start_websocket(self, 
+                       instruments: List[Tuple[Any, str]], 
+                       on_connect: Callable = None, 
+                       on_message: Callable = None, 
+                       on_error: Callable = None, 
+                       on_close: Callable = None,
+                       version: str = "v2") -> Any:
+        """
+        Start a live WebSocket feed using DhanHQ MarketFeed.
+        """
+        try:
+            logger.info("Starting WebSocket connection...")
+            
+            # wrapper to update local live_data cache
+            def internal_on_message(instance, data):
+                # Update shared cache
+                if isinstance(data, dict):
+                    sid = str(data.get('security_id')) or str(data.get('SecurityId'))
+                    if sid:
+                        self.live_data[sid] = data
+                
+                # Call user callback if provided
+                if on_message:
+                    on_message(instance, data)
+
+            # Create an adapter to mimic DhanContext which MarketFeed expects
+            class DhanContextAdapter:
+                def __init__(self, dhan_client):
+                    self.client = dhan_client
+                def get_client_id(self):
+                    # Robust extraction
+                    if hasattr(self.client, 'dhan_http'):
+                        return getattr(self.client.dhan_http, 'client_id', "")
+                    return getattr(self.client, 'client_id', "")
+                def get_access_token(self):
+                    if hasattr(self.client, 'dhan_http'):
+                        return getattr(self.client.dhan_http, 'access_token', "")
+                    return getattr(self.client, 'access_token', "")
+
+            context_adapter = DhanContextAdapter(self.dhan)
+
+            self.feed = MarketFeed(
+                dhan_context=context_adapter,
+                instruments=instruments,
+                version=version,
+                on_connect=on_connect,
+                on_message=internal_on_message,
+                on_error=on_error,
+                on_close=on_close
+            )
+            
+            # Start in a separate thread (non-blocking)
+            self.feed.start()
+            logger.info("WebSocket started in background thread.")
+            return self.feed
+            
+        except Exception as e:
+            logger.error(f"Failed to start WebSocket: {e}")
+            return None
+
+    def subscribe_instruments(self, instruments: List[Tuple[Any, str, int]]):
+        """
+        Subscribe to additional instruments on an active WebSocket connection.
+        instruments: List of tuples (Exchange, SecurityID, RequestCode)
+        """
+        if hasattr(self, 'feed') and self.feed:
+            try:
+                self.feed.subscribe_symbols(instruments)
+                logger.info(f"Subscribed to {len(instruments)} new instruments.")
+                return True
+            except Exception as e:
+                logger.error(f"Error checking subscription: {e}")
+        else:
+            logger.warning("WebSocket feed not active. Cannot subscribe.")
+        return False
+
+    def unsubscribe_instruments(self, instruments: List[Tuple[Any, str, int]]):
+        """
+        Unsubscribe from instruments on an active WebSocket connection.
+        instruments: List of tuples (Exchange, SecurityID, RequestCode)
+        """
+        if hasattr(self, 'feed') and self.feed:
+            try:
+                logger.info(f"Unsubscribing from {len(instruments)} instruments...")
+                self.feed.unsubscribe_symbols(instruments)
+                
+                # Optional: Cleanup local cache (live_data)
+                # Note: We might want to keep last known price, or remove it. 
+                # For now, we keep it to avoid KeyErrors in other threads, but one could remove it:
+                # for _, sid, _ in instruments:
+                #     self.live_data.pop(str(sid), None)
+                
+                return True
+            except Exception as e:
+                logger.error(f"Error unsubscribing: {e}")
+        else:
+            logger.warning("WebSocket feed not active. Cannot unsubscribe.")
+        return False
+
+
+    def _resolve_symbols_to_instruments(self, symbols: List[str], request_code: int = 15) -> List[Tuple[Any, str, int]]:
+        """
+        Internal helper to resolve a list of symbols to instrument tuples.
+        request_code: 15=Ticker, 17=Quote, 21=Full (Depth)
+        """
+        instruments = []
+        resolved_names = []
+        
+        for sym in symbols:
+            # Try Index first
+            idx = self.find_index(sym)
+            if idx:
+                # Tuples: (Exchange, SecurityID, RequestCode)
+                instruments.append((self.dhan.INDEX, str(idx['SECURITY_ID']), request_code))
+                resolved_names.append(f"{sym} (IDX)")
+                continue
+                
+            # Try Equity
+            eq = self.find_equity(sym)
+            if eq:
+                instruments.append((self.dhan.NSE, str(eq['SECURITY_ID']), request_code))
+                resolved_names.append(f"{sym} (EQ)")
+                continue
+            
+            logger.warning(f"Could not resolve symbol: {sym}")
+            
+        if not instruments:
+            logger.error("No valid instruments resolved.")
+            return []
+            
+        logger.info(f"Connecting WebSocket (Code {request_code}) for: {resolved_names}")
+        return instruments
+
+    def connect_ticker(self, symbols: List[str], on_tick: Callable) -> Any:
+        """Subscribe to Ticker (LTP) Data."""
+        instruments = self._resolve_symbols_to_instruments(symbols, request_code=15)
+        if not instruments: return None
+        return self.start_websocket(instruments, on_message=on_tick)
+
+    def connect_quote(self, symbols: List[str], on_tick: Callable) -> Any:
+        """Subscribe to Quote (OHLC + LTP) Data."""
+        instruments = self._resolve_symbols_to_instruments(symbols, request_code=17)
+        if not instruments: return None
+        return self.start_websocket(instruments, on_message=on_tick)
+
+    def connect_full(self, symbols: List[str], on_tick: Callable) -> Any:
+        """Subscribe to Full Data (Depth + OI + OHLC)."""
+        instruments = self._resolve_symbols_to_instruments(symbols, request_code=21)
+        if not instruments: return None
+        return self.start_websocket(instruments, on_message=on_tick)
+
+    # ============================================================================
+    # HIGH-LEVEL STRATEGY ABSTRACTIONS
+    # ============================================================================
+
+    # --- POSITION MANAGEMENT ---
+
+    def get_net_quantity(self, symbol: str) -> int:
+        """
+        Get net quantity for a symbol. Positive = Long, Negative = Short.
+        Handles symbol resolution automatically.
+        """
+        try:
+            # Resolve symbol to get security ID
+            sec = self._resolve_symbol(symbol)
+            if not sec:
+                logger.error(f"Symbol not found for Position check: {symbol}")
+                return 0
+                
+            security_id = str(sec['SECURITY_ID'])
+            
+            # Fetch all positions
+            res = self.dhan.get_positions()
+            if res.get('status') != 'success':
+                # Log only if not successful (to avoid spamming logs on empty positions if API behaves that way)
+                # Some APIs return success with empty data, some fail. Robust handle:
+                return 0
+                
+            data = res.get('data', [])
+            net_qty = 0
+            
+            for pos in data:
+                # Check for matching Security ID
+                if str(pos.get('securityId')) == security_id:
+                    # 'netQty' is usually reliable for total open qty
+                    net_qty += int(pos.get('netQty', 0))
+            
+            return net_qty
+            
+        except Exception as e:
+            logger.error(f"Error getting net quantity for {symbol}: {e}")
+            return 0
+
+    def close_position(self, symbol: str) -> bool:
+        """
+        Close any open position for the symbol immediately.
+        Safely handles multiple product types (e.g. closing both INTRA and MARGIN if they exist).
+        """
+        try:
+            sec = self._resolve_symbol(symbol)
+            if not sec: 
+                logger.error(f"Symbol not found for Close Position: {symbol}")
+                return False
+            
+            security_id = str(sec['SECURITY_ID'])
+            exchange_segment = sec['SEGMENT']
+
+            res = self.dhan.get_positions()
+            if res.get('status') != 'success':
+                return True # No positions to close implies success in "being flat"
+                
+            data = res.get('data', [])
+            closed_any = False
+            
+            for pos in data:
+                if str(pos.get('securityId')) == security_id:
+                    net_qty = int(pos.get('netQty', 0))
+                    if net_qty != 0:
+                        # Close this specific position chunk
+                        t_type = self.SELL if net_qty > 0 else self.BUY
+                        qty_to_close = abs(net_qty)
+                        prod_type = pos.get('productType')
+                        
+                        logger.info(f"Closing {symbol} ({prod_type}): {qty_to_close} qty")
+                        
+                        self.place_order(
+                            security_id=security_id,
+                            exchange_segment=exchange_segment,
+                            transaction_type=t_type,
+                            quantity=qty_to_close,
+                            order_type=self.MARKET,
+                            product_type=prod_type
+                        )
+                        closed_any = True
+            
+            if not closed_any:
+                logger.info(f"No open position found to close for {symbol}.")
+                
+            return True
+            
+        except Exception as e:
+            logger.error(f"Error closing position for {symbol}: {e}")
+            return False
+
+    # --- ORDER MANAGEMENT ---
+
+    def place_entry(self, symbol: str, quantity: int, direction: str, 
+                   order_type: str = "MARKET", price: float = 0.0, trigger_price: float = 0.0,
+                   product_type: str = "MARGIN", after_market_order: bool = False, **kwargs) -> Optional[str]:
+        """
+        Unified entry point for placing orders.
+        direction: "BUY" or "SELL"
+        """
+        try:
+            sec = self._resolve_symbol(symbol)
+            if not sec:
+                logger.error(f"Symbol not found for Order: {symbol}")
+                return None
+            
+            txn_type = self.BUY if direction.upper() == "BUY" else self.SELL
+            
+            # Resolve segment to full API format (NSE_EQ, NSE_FNO, etc.)
+            segment = self._auto_detect_segment(sec)
+            
+            return self.place_order(
+                security_id=str(sec['SECURITY_ID']),
+                exchange_segment=segment,
+                transaction_type=txn_type,
+                quantity=quantity,
+                order_type=order_type,
+                price=price,
+                trigger_price=trigger_price,
+                product_type=product_type,
+                after_market_order=after_market_order,
+                **kwargs
+            )
+        except Exception as e:
+            logger.error(f"Error placing entry for {symbol}: {e}")
+            return None
+
+    def place_exi_limit(self, symbol: str, quantity: int, price: float, direction: str, product_type: str = "MARGIN") -> Optional[str]:
+        """
+        Place a Limit Exit order (Target).
+        """
+        return self.place_entry(
+            symbol=symbol,
+            quantity=quantity,
+            direction=direction,
+            order_type=self.LIMIT,
+            price=price,
+            product_type=product_type
+        )
+
+    def place_sl_market(self, symbol: str, quantity: int, trigger_price: float, direction: str, product_type: str = "MARGIN") -> Optional[str]:
+        """
+        Place a Stop Loss Market order (SL-M).
+        """
+        SLM_TYPE = getattr(self.dhan, 'SLM', 'STOP_LOSS_MARKET')
+        
+        return self.place_entry(
+            symbol=symbol,
+            quantity=quantity,
+            direction=direction,
+            order_type=SLM_TYPE,
+            trigger_price=trigger_price,
+            product_type=product_type
+        )
+
+    def update_trailing_sl(self, symbol: str, current_sl_id: str, new_trigger_price: float, quantity: int, direction: str, product_type: str = "MARGIN") -> Optional[str]:
+        """
+        Updates a trailing SL by cancelling the old one and placing a new one.
+        Returns the new order_id.
+        """
+        try:
+            # 1. Cancel existing
+            if current_sl_id:
+                self.cancel_order(current_sl_id)
+            
+            # 2. Place new
+            return self.place_sl_market(symbol, quantity, new_trigger_price, direction, product_type)
+        except Exception as e:
+            logger.error(f"Error in update_trailing_sl for {symbol}: {e}")
+            return None
+
+    def place_spread(self, leg1: Dict, leg2: Dict) -> Dict[str, Optional[str]]:
+        """
+        Place two orders rapidly (e.g., for a spread).
+        leg1/leg2 format: {'symbol': '...', 'quantity': ..., 'direction': '...', 'order_type': '...', 'price': ...}
+        """
+        results = {}
+        try:
+            logger.info("Placing Spread Strategy legs...")
+            results['leg1'] = self.place_entry(**leg1)
+            results['leg2'] = self.place_entry(**leg2)
+            return results
+        except Exception as e:
+            logger.error(f"Error placing spread: {e}")
+            return results
+        
+
+    # --- DATA HELPERS ---
+
+    def get_latest_candles(self, symbol: str, interval: str = "5", days: int = 5) -> pd.DataFrame:
+        """
+        Fetch historical/intraday candles and return a clean DataFrame.
+        interval: "1", "5", "15", "30", "60", "D" (Daily)
+        Returns DF with index=Datetime, columns=[Open, High, Low, Close, Volume]
+        """
+        sec = self._resolve_symbol(symbol)
+        if not sec: return pd.DataFrame()
+        
+        security_id = int(sec['SECURITY_ID'])
+        # exchange_segment = sec['SEGMENT'] # Raw CSV value "E" causes DH-905
+        
+        # Derive correct API Exchange Segment
+        exch_id = sec.get('EXCH_ID', 'NSE')
+        instr = sec.get('INSTRUMENT', 'EQUITY')
+        
+        exchange_segment = "NSE_EQ" # Default
+        if exch_id == "NSE":
+            if instr == "INDEX": exchange_segment = "IDX_I"
+            elif instr == "EQUITY": exchange_segment = "NSE_EQ"
+            else: exchange_segment = "NSE_FNO"
+        elif exch_id == "BSE":
+            if instr == "INDEX": exchange_segment = "BSE_IDX" 
+            elif instr == "EQUITY": exchange_segment = "BSE_EQ"
+            else: exchange_segment = "BSE_FNO"
+        elif exch_id == "MCX":
+            exchange_segment = "MCX_COMM"
+            
+        instrument_type = sec['INSTRUMENT']
+        
+        to_date_obj = datetime.now()
+        from_date_obj = to_date_obj - timedelta(days=days)
+        
+        to_date = to_date_obj.strftime("%Y-%m-%d")
+        from_date = from_date_obj.strftime("%Y-%m-%d")
+        
+        # Determine strict interval for minute API
+        # If user asks for "30", we might need to use "15" and resample, OR just pass "25" if supported? 
+        # Dhan supports 1, 5, 15, 25, 60.
+        api_interval = interval
+        if interval == "30": api_interval = "15" # Fallback to 15 to allow resampling later if needed (simple fallback for now)
+        
+        if interval.upper() in ["D", "1D", "DAILY"]:
+            df = self.get_historical_daily_data(
+                security_id, exchange_segment, instrument_type, from_date, to_date
+            )
+        else:
+            df = self.get_intraday_minute_data(
+                security_id, exchange_segment, instrument_type, api_interval, from_date, to_date
+            )
+            
+        if df.empty: return df
+        
+        # Normalize Data
+        # Typical Dhan keys: "start_Time", "open", "high", "low", "close", "volume" (case varies)
+        # We rename to Title Case standard
+        
+        # 1. Convert specific keys
+        rename_map = {
+            "start_time": "Datetime", "start_Time": "Datetime", "kline_time": "Datetime",
+            "open": "Open", "high": "High", "low": "Low", "close": "Close", "volume": "Volume"
+        }
+        # Check current columns to handle case sensitivity
+        cols = df.columns
+        new_map = {}
+        for c in cols:
+            low_c = c.lower()
+            if low_c in rename_map:
+                new_map[c] = rename_map[low_c]
+        
+        df = df.rename(columns=new_map)
+        
+        # Filter strictly standard columns
+        desired_cols = ["Datetime", "Open", "High", "Low", "Close", "Volume"]
+        available_cols = [c for c in desired_cols if c in df.columns]
+        df = df[available_cols]
+        
+        # 2. Convert Datetime to Object/Index
+        if "Datetime" in df.columns:
+            # Helper to convert epoch or string
+            first_val = df["Datetime"].iloc[0]
+            if isinstance(first_val, (int, float)): # likely epoch
+                # Dhan sometimes returns Dhan Time (seconds since 1980) or standard epoch
+                # Usually standard epoch in recent APIs.
+                df["Datetime"] = pd.to_datetime(df["Datetime"], unit='s') # Risk check? 
+            else:
+                df["Datetime"] = pd.to_datetime(df["Datetime"])
+            
+            df = df.set_index("Datetime")
+            df = df.sort_index()
+            
+        return df
+
+    def get_indicators(self, symbol: str, interval: str = "5", indicators: List[str] = ['EMA20', 'RSI14'], days: int = 5) -> pd.DataFrame:
+        """
+        Fetch candles and calculate requested technical indicators.
+        Returns the DataFrame with indicator columns added.
+        """
+        df = self.get_latest_candles(symbol, interval, days)
+        if df.empty:
+            return df
+            
+        for ind in indicators:
+            ind_upper = ind.upper()
+            try:
+                # 1. EMA (Exponential Moving Average) - Format: EMA20, EMA50
+                if ind_upper.startswith('EMA'):
+                    period = int(ind_upper.replace('EMA', ''))
+                    df[ind_upper] = df['Close'].ewm(span=period, adjust=False).mean()
+                
+                # 2. SMA (Simple Moving Average) - Format: SMA20, SMA200
+                elif ind_upper.startswith('SMA'):
+                    period = int(ind_upper.replace('SMA', ''))
+                    df[ind_upper] = df['Close'].rolling(window=period).mean()
+                
+                # 3. RSI (Relative Strength Index) - Format: RSI14
+                elif ind_upper.startswith('RSI'):
+                    period = int(ind_upper.replace('RSI', ''))
+                    delta = df['Close'].diff()
+                    gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
+                    loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
+                    rs = gain / loss
+                    df[ind_upper] = 100 - (100 / (1 + rs))
+                
+                # 4. ATR (Average True Range) - Format: ATR14
+                elif ind_upper.startswith('ATR'):
+                    period = int(ind_upper.replace('ATR', ''))
+                    high_low = df['High'] - df['Low']
+                    high_cp = (df['High'] - df['Close'].shift()).abs()
+                    low_cp = (df['Low'] - df['Close'].shift()).abs()
+                    # Use max of three
+                    tr = pd.concat([high_low, high_cp, low_cp], axis=1).max(axis=1)
+                    df[ind_upper] = tr.rolling(window=period).mean()
+            
+            except Exception as e:
+                logger.error(f"Error calculating indicator {ind} for {symbol}: {e}")
+                
+        return df
+
+    # --- UTILITIES ---
+
+    def is_market_open(self) -> bool:
+        """
+        Check if Indian Equity Market is open (09:15 - 15:30 IST, Mon-Fri).
+        """
+        now = datetime.now() # System time (Assuming IST system based on user instructions)
+        
+        # Weekend Check
+        if now.weekday() >= 5: # 5=Sat, 6=Sun
+            return False
+            
+        # Time Check
+        current_time = now.time()
+        start = datetime.strptime("09:15", "%H:%M").time()
+        end = datetime.strptime("15:30", "%H:%M").time()
+        
+        return start <= current_time <= end
+
+
