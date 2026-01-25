@@ -2403,6 +2403,92 @@ class DhanHelper:
             logger.error(f"Exception in get_historical_daily_data: {e}")
         return pd.DataFrame()
 
+    def get_historical_minute_data_long(self,
+                                         symbol: str,
+                                         from_date: str,
+                                         to_date: str,
+                                         interval: str = "1") -> pd.DataFrame:
+        """
+        Fetch intraday minute data for a long period by chunking requests.
+        Bypasses the 90-day API limit by using 85-day chunks.
+        Standardizes to IST and renames columns to standard format.
+        """
+        try:
+            sec = self._resolve_symbol(symbol)
+            if not sec:
+                logger.error(f"Could not resolve symbol {symbol} for long history.")
+                return pd.DataFrame()
+
+            security_id = int(sec['SECURITY_ID'])
+            # Derive segment details for raw API
+            exch_id = sec.get('EXCH_ID', 'NSE')
+            instr = sec.get('INSTRUMENT', 'EQUITY')
+            
+            segment = "NSE_EQ"
+            if exch_id == "NSE":
+                if instr == "INDEX": segment = "IDX_I"
+                elif instr == "EQUITY": segment = "NSE_EQ"
+                else: segment = "NSE_FNO"
+            
+            start_total = datetime.strptime(from_date, "%Y-%m-%d")
+            end_total = datetime.strptime(to_date, "%Y-%m-%d")
+            
+            current_start = start_total
+            all_chunks = []
+            chunk_days = 85 # Safe limit below 90
+            
+            print(f">>> Fetching Long History for {symbol} ({from_date} to {to_date})...")
+            
+            while current_start <= end_total:
+                current_end = min(current_start + timedelta(days=chunk_days), end_total)
+                
+                chunk_from = current_start.strftime("%Y-%m-%d")
+                chunk_to = current_end.strftime("%Y-%m-%d")
+                
+                logger.info(f"Fetching chunk: {chunk_from} to {chunk_to}")
+                
+                df_chunk = self.get_intraday_minute_data(
+                    security_id=security_id,
+                    exchange_segment=segment,
+                    instrument_type=instr,
+                    interval=interval,
+                    from_date=chunk_from,
+                    to_date=chunk_to
+                )
+                
+                if not df_chunk.empty:
+                    # Normalize using internal logic (duplicated here for independence)
+                    rename_map = {
+                        "start_time": "Datetime", "start_Time": "Datetime", "kline_time": "Datetime",
+                        "timestamp": "Datetime", "open": "Open", "high": "High", "low": "Low", 
+                        "close": "Close", "volume": "Volume"
+                    }
+                    df_chunk = df_chunk.rename(columns={c: rename_map[c.lower()] for c in df_chunk.columns if c.lower() in rename_map})
+                    
+                    if "Datetime" in df_chunk.columns:
+                        # Convert to IST
+                        df_chunk["Datetime"] = pd.to_datetime(df_chunk["Datetime"], unit='s').dt.tz_localize('UTC').dt.tz_convert('Asia/Kolkata').dt.tz_localize(None)
+                        df_chunk = df_chunk.set_index("Datetime").sort_index()
+                    
+                    # Filter standard columns
+                    desired = ["Open", "High", "Low", "Close", "Volume"]
+                    df_chunk = df_chunk[[c for c in desired if c in df_chunk.columns]]
+                    
+                    all_chunks.append(df_chunk)
+                
+                current_start = current_end + timedelta(days=1)
+                time.sleep(0.5) # Rate limit respect
+            
+            if all_chunks:
+                final_df = pd.concat(all_chunks)
+                final_df = final_df[~final_df.index.duplicated(keep='first')].sort_index()
+                return final_df
+                
+        except Exception as e:
+            logger.error(f"Error in get_historical_minute_data_long: {e}")
+            
+        return pd.DataFrame()
+
     # --- WEBSOCKET / LIVE FEED ---
     def start_websocket(self, 
                        instruments: List[Tuple[Any, str]], 
@@ -2806,6 +2892,7 @@ class DhanHelper:
         # 1. Convert specific keys
         rename_map = {
             "start_time": "Datetime", "start_Time": "Datetime", "kline_time": "Datetime",
+            "timestamp": "Datetime",
             "open": "Open", "high": "High", "low": "Low", "close": "Close", "volume": "Volume"
         }
         # Check current columns to handle case sensitivity
@@ -2823,15 +2910,15 @@ class DhanHelper:
         available_cols = [c for c in desired_cols if c in df.columns]
         df = df[available_cols]
         
-        # 2. Convert Datetime to Object/Index
+        # 2. Convert Datetime to Object/Index (Standardize to IST)
         if "Datetime" in df.columns:
             # Helper to convert epoch or string
             first_val = df["Datetime"].iloc[0]
             if isinstance(first_val, (int, float)): # likely epoch
-                # Dhan sometimes returns Dhan Time (seconds since 1980) or standard epoch
-                # Usually standard epoch in recent APIs.
-                df["Datetime"] = pd.to_datetime(df["Datetime"], unit='s') # Risk check? 
+                # Dhan returns UTC Epoch. We localize to UTC then convert to Asia/Kolkata
+                df["Datetime"] = pd.to_datetime(df["Datetime"], unit='s').dt.tz_localize('UTC').dt.tz_convert('Asia/Kolkata').dt.tz_localize(None)
             else:
+                # For string formats, ensure it's converted to datetime object
                 df["Datetime"] = pd.to_datetime(df["Datetime"])
             
             df = df.set_index("Datetime")

@@ -169,3 +169,8 @@ Redownloads the latest master security list from Dhan servers.
 
 ### `is_market_open()`
 Returns `True` if the current time is within Indian Equity Market hours (09:15 - 15:30 IST, Mon-Fri).
+
+### `get_historical_minute_data_long(symbol, from_date, to_date, interval="1")`
+Fetches minute-level historical data for any date range (even years).
+- **Auto-Chunking**: Automatically breaks the request into 85-day segments to bypass the 90-day API limit.
+- **Auto-Normalization**: Renames columns to standard formats and converts timestamps to **IST**.
