@@ -8,6 +8,11 @@ from dhanhq import dhanhq
 from dhanhq.marketfeed import MarketFeed
 from datetime import datetime, timedelta
 import time
+try:
+    import talib
+    HAS_TALIB = True
+except ImportError:
+    HAS_TALIB = False
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
@@ -2783,31 +2788,42 @@ class DhanHelper:
                 # 1. EMA (Exponential Moving Average) - Format: EMA20, EMA50
                 if ind_upper.startswith('EMA'):
                     period = int(ind_upper.replace('EMA', ''))
-                    df[ind_upper] = df['Close'].ewm(span=period, adjust=False).mean()
+                    if HAS_TALIB:
+                        df[ind_upper] = talib.EMA(df['Close'], timeperiod=period)
+                    else:
+                        df[ind_upper] = df['Close'].ewm(span=period, adjust=False).mean()
                 
                 # 2. SMA (Simple Moving Average) - Format: SMA20, SMA200
                 elif ind_upper.startswith('SMA'):
                     period = int(ind_upper.replace('SMA', ''))
-                    df[ind_upper] = df['Close'].rolling(window=period).mean()
+                    if HAS_TALIB:
+                        df[ind_upper] = talib.SMA(df['Close'], timeperiod=period)
+                    else:
+                        df[ind_upper] = df['Close'].rolling(window=period).mean()
                 
                 # 3. RSI (Relative Strength Index) - Format: RSI14
                 elif ind_upper.startswith('RSI'):
                     period = int(ind_upper.replace('RSI', ''))
-                    delta = df['Close'].diff()
-                    gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
-                    loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
-                    rs = gain / loss
-                    df[ind_upper] = 100 - (100 / (1 + rs))
+                    if HAS_TALIB:
+                        df[ind_upper] = talib.RSI(df['Close'], timeperiod=period)
+                    else:
+                        delta = df['Close'].diff()
+                        gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
+                        loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
+                        rs = gain / loss
+                        df[ind_upper] = 100 - (100 / (1 + rs))
                 
                 # 4. ATR (Average True Range) - Format: ATR14
                 elif ind_upper.startswith('ATR'):
                     period = int(ind_upper.replace('ATR', ''))
-                    high_low = df['High'] - df['Low']
-                    high_cp = (df['High'] - df['Close'].shift()).abs()
-                    low_cp = (df['Low'] - df['Close'].shift()).abs()
-                    # Use max of three
-                    tr = pd.concat([high_low, high_cp, low_cp], axis=1).max(axis=1)
-                    df[ind_upper] = tr.rolling(window=period).mean()
+                    if HAS_TALIB:
+                        df[ind_upper] = talib.ATR(df['High'], df['Low'], df['Close'], timeperiod=period)
+                    else:
+                        high_low = df['High'] - df['Low']
+                        high_cp = (df['High'] - df['Close'].shift()).abs()
+                        low_cp = (df['Low'] - df['Close'].shift()).abs()
+                        tr = pd.concat([high_low, high_cp, low_cp], axis=1).max(axis=1)
+                        df[ind_upper] = tr.rolling(window=period).mean()
             
             except Exception as e:
                 logger.error(f"Error calculating indicator {ind} for {symbol}: {e}")
