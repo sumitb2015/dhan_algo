@@ -26,7 +26,10 @@ TEST_MODULES = [
     "test_11_maintenance",
     "test_12_lot_size",
     "test_13_advanced_logic",
-    "test_14_margin"
+    "test_14_margin",
+    "test_15_indicators",
+    "test_16_comparison",
+    "test_17_traders_control"
 ]
 
 def main():

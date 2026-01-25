@@ -11,14 +11,15 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from login import get_dhan_client
 from lib.dhan_helper import DhanHelper
 
-def run():
+def run(helper=None):
     print("\n" + "="*60)
     print("TEST 15: INDICATOR VERIFICATION (5-MIN DATA)")
     print("="*60)
     
     try:
-        dhan = get_dhan_client()
-        helper = DhanHelper(dhan)
+        if helper is None:
+            dhan = get_dhan_client()
+            helper = DhanHelper(dhan)
         
         symbol = "RELIANCE"
         interval = "5" # 5-minute timeframe

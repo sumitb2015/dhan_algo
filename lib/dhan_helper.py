@@ -1538,6 +1538,72 @@ class DhanHelper:
             logger.error(f"Exception in close_all_positions: {e}")
         return closed_count
 
+    # --- TRADER'S CONTROL (KILL SWITCH) ---
+    def get_kill_switch_status(self) -> str:
+        """
+        Check if the Kill Switch is active for the account.
+        Returns 'ACTIVATE' or 'DEACTIVATE' status message.
+        """
+        try:
+            res = self.dhan.status_kill_switch()
+            if isinstance(res, dict) and res.get('status') == 'success':
+                return res.get('data', {}).get('killSwitchStatus', 'Unknown')
+            return f"Error: {res.get('remarks')}" if isinstance(res, dict) else str(res)
+        except Exception as e:
+            logger.error(f"Error fetching kill switch status: {e}")
+            return "ERROR"
+
+    def toggle_kill_switch(self, activate: bool = True) -> bool:
+        """
+        Enable or Disable the Kill Switch.
+        Note: Activating Kill Switch disables trading for the current day.
+        You must close all positions and cancel all orders before activating.
+        """
+        action = "ACTIVATE" if activate else "DEACTIVATE"
+        try:
+            res = self.dhan.kill_switch(action)
+            if isinstance(res, dict) and res.get('status') == 'success':
+                logger.info(f"Kill Switch {action} successfully.")
+                return True
+            
+            error_msg = res.get('remarks') if isinstance(res, dict) else str(res)
+            logger.error(f"Failed to {action} Kill Switch: {error_msg}")
+        except Exception as e:
+            logger.error(f"Exception while toggling Kill Switch: {e}")
+        return False
+
+    def emergency_stop(self) -> bool:
+        """
+        The 'Ultimate Nuclear Option':
+        1. Cancels all pending orders.
+        2. Closes all open positions.
+        3. Activates the Account Kill Switch (disables trading for the day).
+        Returns True if the final Kill Switch was successfully activated.
+        """
+        logger.warning("EMERGENCY STOP INITIATED!")
+        
+        # 1. Cancel all pending orders
+        c_count = self.cancel_all_orders()
+        logger.info(f"Phase 1: Cancelled {c_count} pending orders.")
+        
+        # 2. Close all positions
+        p_count = self.close_all_positions()
+        logger.info(f"Phase 2: Placed market orders to close {p_count} positions.")
+        
+        # Give a small buffer for orders to process
+        if p_count > 0:
+            logger.info("Waiting 2 seconds for position closing orders to process...")
+            time.sleep(2)
+            
+        # 3. Activate Kill Switch
+        success = self.toggle_kill_switch(activate=True)
+        if success:
+            logger.warning("EMERGENCY STOP COMPLETE: Kill Switch Activated. Trading disabled for today.")
+        else:
+            logger.error("EMERGENCY STOP FAILED: Could not activate Kill Switch (Check for remaining positions/orders).")
+            
+        return success
+
     # --- UTILS ---
     def epoch_to_datetime(self, epoch: int) -> str:
         """Convert Dhan's epoch time to human-readable format."""

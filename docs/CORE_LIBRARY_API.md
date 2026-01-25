@@ -146,6 +146,16 @@ Returns the current net quantity for a symbol across all products (Long is Posit
 ### `close_position(symbol)`
 **Panic/Exit Button**: Fetches all open chunks of a symbol and places market orders to go flat.
 
+### `emergency_stop()`
+The **Ultimate Nuclear Option**. It sequentially calls `cancel_all_orders()`, `close_all_positions()`, and finally activates the account **Kill Switch** to disable trading for the rest of the day.
+
+### `toggle_kill_switch(activate=True)`
+Directly activates or deactivates the Dhan Kill Switch for the account.
+- **Note**: Activating Kill Switch requires all positions to be closed first.
+
+### `get_kill_switch_status()`
+Returns the current status of the Kill Switch (e.g., `INACTIVE`).
+
 ---
 
 ## 9. Maintenance & Tools
