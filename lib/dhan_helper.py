@@ -1951,17 +1951,17 @@ class DhanHelper:
                 inner_data = data.get(target_key)
                 
                 if inner_data and isinstance(inner_data, dict):
-                    # Check if keys have lists and at least one is not empty
-                    for v in inner_data.values():
-                        if isinstance(v, list) and len(v) > 0:
-                            df = pd.DataFrame(inner_data)
-                            # Add option type column
-                            df['option_type'] = drv_option_type.upper()
-                            # Convert timestamp if present
-                            if 'timestamp' in df.columns:
-                                # Convert Epoch UTC to IST (UTC+5:30)
-                                df['datetime'] = pd.to_datetime(df['timestamp'], unit='s').dt.tz_localize('UTC').dt.tz_convert('Asia/Kolkata').dt.tz_localize(None)
-                            return df
+                    # Filter out empty lists to prevent "All arrays must be of the same length" error
+                    clean_inner = {k: v for k, v in inner_data.items() if isinstance(v, list) and len(v) > 0}
+                    if clean_inner:
+                        df = pd.DataFrame(clean_inner)
+                        # Add option type column
+                        df['option_type'] = drv_option_type.upper()
+                        # Convert timestamp if present
+                        if 'timestamp' in df.columns:
+                            # Convert Epoch UTC to IST (UTC+5:30)
+                            df['datetime'] = pd.to_datetime(df['timestamp'], unit='s').dt.tz_localize('UTC').dt.tz_convert('Asia/Kolkata').dt.tz_localize(None)
+                        return df
                 
                 logger.warning(f"No {target_key} data found in response.")
             else:

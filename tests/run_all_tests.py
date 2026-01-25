@@ -29,7 +29,8 @@ TEST_MODULES = [
     "test_14_margin",
     "test_15_indicators",
     "test_16_comparison",
-    "test_17_traders_control"
+    "test_17_traders_control",
+    "test_18_expired_options"
 ]
 
 def main():

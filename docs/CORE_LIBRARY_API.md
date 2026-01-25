@@ -156,6 +156,11 @@ Directly activates or deactivates the Dhan Kill Switch for the account.
 ### `get_kill_switch_status()`
 Returns the current status of the Kill Switch (e.g., `INACTIVE`).
 
+### `get_expired_options_data(...)`
+Fetches historical minute data for contracts that have already expired.
+- **Note**: This uses a specialized API endpoint as the standard historical API does not support expired contracts.
+- **Parameters**: `security_id`, `exchange_segment`, `instrument_type`, `expiry_flag`, `expiry_code`, `strike`, `drv_option_type`, `required_data`, `from_date`, `to_date`.
+
 ---
 
 ## 9. Maintenance & Tools
