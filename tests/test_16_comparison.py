@@ -7,7 +7,7 @@ import sys
 import os
 import pandas as pd
 import numpy as np
-import talib
+import pandas_ta as ta
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from login import get_dhan_client
@@ -60,15 +60,15 @@ def run(helper=None):
         for name, period in indicators:
             print(f"\nComparing {name}...")
             
-            # TA-Lib Version
+            # pandas-ta Version
             if 'EMA' in name:
-                ta_res = talib.EMA(df['Close'], timeperiod=period)
+                ta_res = df.ta.ema(length=period)
                 pd_res = calculate_pandas_ema(df, period)
             elif 'RSI' in name:
-                ta_res = talib.RSI(df['Close'], timeperiod=period)
+                ta_res = df.ta.rsi(length=period)
                 pd_res = calculate_pandas_rsi(df, period)
             elif 'ATR' in name:
-                ta_res = talib.ATR(df['High'], df['Low'], df['Close'], timeperiod=period)
+                ta_res = df.ta.atr(length=period)
                 pd_res = calculate_pandas_atr(df, period)
             
             # Calculate Differences

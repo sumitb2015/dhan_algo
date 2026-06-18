@@ -8,6 +8,7 @@ from dhanhq import dhanhq
 from dhanhq.marketfeed import MarketFeed
 from datetime import datetime, timedelta
 import time
+import threading
 try:
     import talib
     HAS_TALIB = True
@@ -48,6 +49,9 @@ class DhanHelper:
         
         self._symbol_map = {} # SYMBOL_NAME -> Records for O(1) lookup
         self._resolution_cache = {} # Cache for _resolve_symbol
+        self._ltp_cache = {} # Cache for LTP: {sid: (price, timestamp)}
+        self._expiry_cache = {} # Cache for expiries: {sid: (list, timestamp)}
+        self._option_chain_cache = {} # Cache for option chains: {(sid, expiry): (data, timestamp)}
         
         # Pre-load master list during initialization for better performance
         self._load_master_list()
@@ -61,6 +65,13 @@ class DhanHelper:
             else:
                 logger.error("Failed to download master list.")
         
+        # WebSocket management
+        self.ws_thread = None
+        self._ws_stop_flag = False
+        self._ws_lock = threading.Lock()
+        self.ws_instruments = []
+        self.user_on_message = None
+
         # Validate session on init
         self.validate_session()
 
@@ -875,7 +886,8 @@ class DhanHelper:
             logger.warning(f"Underlying not found: {underlying}")
             return None
             
-        expiries = self.get_expiry_list(int(und['SECURITY_ID']), und['SEGMENT'])
+        api_seg = self._auto_detect_segment(und)
+        expiries = self.get_expiry_list(int(und['SECURITY_ID']), api_seg)
         if not expiries or expiry_index >= len(expiries):
             logger.warning(f"No expiry available at index {expiry_index}")
             return None
@@ -891,10 +903,14 @@ class DhanHelper:
         if not sec:
             return None
             
-        return self.get_ohlc(
-            security_id=int(sec['SECURITY_ID']),
-            exchange_segment=sec['SEGMENT']
+        res = self.get_ohlc(
+            symbol=int(sec['SECURITY_ID']),
+            exchange=sec.get('EXCH_ID', 'NSE'),
+            instrument=sec.get('INSTRUMENT', 'OPTIDX')
         )
+        if res:
+            res['CONTRACT_INFO'] = sec.to_dict() if hasattr(sec, 'to_dict') else dict(sec)
+        return res
     
     def future(
         self,
@@ -914,7 +930,8 @@ class DhanHelper:
             logger.warning(f"Underlying not found: {underlying}")
             return None
             
-        expiries = self.get_expiry_list(int(und['SECURITY_ID']), und['SEGMENT'])
+        api_seg = self._auto_detect_segment(und)
+        expiries = self.get_expiry_list(int(und['SECURITY_ID']), api_seg)
         if not expiries or expiry_index >= len(expiries):
             logger.warning(f"No expiry available at index {expiry_index}")
             return None
@@ -930,10 +947,14 @@ class DhanHelper:
         if not sec:
             return None
             
-        return self.get_ohlc(
-            security_id=int(sec['SECURITY_ID']),
-            exchange_segment=sec['SEGMENT']
+        res = self.get_ohlc(
+            symbol=int(sec['SECURITY_ID']),
+            exchange=sec.get('EXCH_ID', 'NSE'),
+            instrument=sec.get('INSTRUMENT', 'FUTIDX')
         )
+        if res:
+            res['CONTRACT_INFO'] = sec.to_dict() if hasattr(sec, 'to_dict') else dict(sec)
+        return res
     
     def buy(self, symbol: str, qty: int, price: Optional[float] = None, product: str = "INTRA") -> Optional[str]:
         """
@@ -1301,27 +1322,17 @@ class DhanHelper:
     def get_ltp(self, symbol: Any, exchange: str = "NSE", instrument: str = "EQUITY", expiry: Optional[str] = None, strike: Optional[float] = None, option_type: Optional[str] = None) -> float:
         """
         Get Last Traded Price with explicit lookup parameters.
-        Dispatch logic:
-        - If symbol is digits -> Assume Security ID (Legacy/Direct)
-        - If instrument is INDEX -> find_index
-        - If instrument is EQUITY -> find_equity
-        - If instrument is FUTIDX/FUTSTK -> find_future
-        - If instrument is OPTIDX/OPTSTK -> find_option
+        Priority:
+        1. live_data (WebSocket)
+        2. _ltp_cache (1-second memory cache)
+        3. API (ohlc_data -> quote_data)
         """
-        time.sleep(1)
+        # --- PHASE 0: Resolve SID ---
         try:
-            # Case 1: Direct Security ID (Legacy support)
             if str(symbol).isdigit():
                 sid = int(symbol)
-                # Map old segment names if needed, but prefer explicit exchange/instrument logic eventually
-                # For direct ID, we need segment. 
-                # Backward compat: Map common patterns or expect user knows what they are doing.
-                # If user passed "IDX_I" as exchange in old calls:
-                seg = exchange
             else:
-                # Case 2: Explicit Lookup Dispatch
                 sec = None
-                
                 if instrument == "INDEX":
                     sec = self.find_index(symbol, exchange)
                 elif instrument == "EQUITY":
@@ -1334,60 +1345,75 @@ class DhanHelper:
                         return 0.0
                     sec = self.find_option(symbol, expiry, strike, option_type, exchange, instrument)
                 else:
-                    # Fallback or unknown instrument
                     logger.warning(f"Unknown instrument type: {instrument}")
                     return 0.0
 
                 if not sec:
                     logger.warning(f"Security not found for {symbol} ({instrument})")
                     return 0.0
-                
-                if not sec:
-                    logger.warning(f"Security not found for {symbol} ({instrument})")
-                    return 0.0
-                
                 sid = int(sec['SECURITY_ID'])
-                # seg = sec.get('SEGMENT') # Not needed, we derive from arguments
 
-            # Derive API segment from Exchange and Instrument
-            # This is simpler and more reliable than mapping CSV codes
-            api_seg = "NSE_EQ" # Default
+            # --- PHASE 1: Priority Check (Live & Cache) ---
+            sid_str = str(sid)
             
+            # 1. WebSocket Priority (Check live_data for ANY segment)
+            if sid_str in self.live_data:
+                live = self.live_data[sid_str]
+                # MarketFeed v2 uses 'LTP' or 'last_price' depending on request code
+                price = float(live.get('last_price') or live.get('LTP') or 0.0)
+                if price > 0:
+                    return price
+
+            # 2. Memory Cache (1 second)
+            if sid in self._ltp_cache:
+                cached_price, cached_time = self._ltp_cache[sid]
+                if time.time() - cached_time < 1.0:
+                    return cached_price
+
+            # --- PHASE 2: API Call (Rate Limited Safety) ---
+            # If we reach here, WebSocket is either not used for this SID or disconnected.
+            # We add a mandatory sleep to avoid hitting Dhan's 120-250 calls/min limit.
+            time.sleep(2) 
+            
+            # Derive API segment
+            api_seg = exchange # Default to what user passed
             if exchange == "NSE":
-                if instrument == "INDEX":
-                    api_seg = "IDX_I"
-                elif instrument == "EQUITY":
-                    api_seg = "NSE_EQ"
-                else:
-                    api_seg = "NSE_FNO" # FUTIDX, OPTIDX, FUTSTK, OPTSTK
+                if instrument == "INDEX": api_seg = "IDX_I"
+                elif instrument == "EQUITY": api_seg = "NSE_EQ"
+                else: api_seg = "NSE_FNO"
             elif exchange == "BSE":
-                if instrument == "EQUITY":
-                    api_seg = "BSE_EQ"
-                else:
-                    api_seg = "BSE_FNO"
+                if instrument == "EQUITY": api_seg = "BSE_EQ"
+                else: api_seg = "BSE_FNO"
             elif exchange == "MCX":
                 api_seg = "MCX_COMM"
+            
+            # If exchange already contains segment suffix, trust it
+            if "_" in str(exchange) or str(exchange) == "IDX_I":
+                api_seg = exchange
 
             instruments = {api_seg: [sid]}
             
-            instruments = {api_seg: [sid]}
-            
-            # Use ohlc_data as primary source (Verified working for NSE_EQ)
-            # Falls back to quote_data if needed? No, separate endpoints.
+            # Use ohlc_data as primary source
             res = self.dhan.ohlc_data(securities=instruments)
+            ticker_data = self._parse_market_data(res, api_seg, sid)
+            price = float(ticker_data.get('last_price', 0))
             
-            if res.get('status') != 'success':
-                 # Fallback for Index or if OHLC fails?
-                 # Try quote_data as fallback
-                 logger.debug(f"ohlc_data failed for {instruments}, trying quote_data...")
+            if res.get('status') != 'success' or price == 0.0:
+                 # Fallback to quote_data
+                 logger.debug(f"ohlc_data failed or empty for {instruments}, trying quote_data...")
                  res = self.dhan.quote_data(securities=instruments)
+                 ticker_data = self._parse_market_data(res, api_seg, sid)
+                 price = float(ticker_data.get('last_price', 0))
+            
+            if price > 0:
+                self._ltp_cache[sid] = (price, time.time())
+                return price
             
             if res.get('status') != 'success':
                 logger.error(f"API Response Failure for {instruments}: {res}")
                 return 0.0
             
-            ticker_data = self._parse_market_data(res, api_seg, sid)
-            return float(ticker_data.get('last_price', 0))
+            return price
         except Exception as e:
             logger.error(f"Exception in get_ltp: {e}")
         return 0.0
@@ -1425,7 +1451,7 @@ class DhanHelper:
                 sid = int(sec['SECURITY_ID'])
             
             # Derive API segment
-            api_seg = "NSE_EQ"
+            api_seg = exchange # Default to what user passed
             if exchange == "NSE":
                 if instrument == "INDEX": api_seg = "IDX_I"
                 elif instrument == "EQUITY": api_seg = "NSE_EQ"
@@ -1435,6 +1461,10 @@ class DhanHelper:
                 else: api_seg = "BSE_FNO"
             elif exchange == "MCX":
                 api_seg = "MCX_COMM"
+            
+            # If exchange already contains segment suffix, trust it
+            if "_" in str(exchange):
+                api_seg = exchange
 
             instruments = {api_seg: [sid]}
             
@@ -1614,33 +1644,6 @@ class DhanHelper:
 
     # --- OPTION CHAIN ---
 
-
-    def get_expiry_list(self, under_security_id: int, under_exchange_segment: str = "IDX_I") -> List[str]:
-        """Fetch available expiry dates for an underlying."""
-        try:
-            res = self.dhan.expiry_list(
-                under_security_id=under_security_id,
-                under_exchange_segment=under_exchange_segment
-            )
-            if res.get('status') == 'success':
-                # Dhan nesting varies: res['data'] or res['data']['data'] or res['data']['data']['data']
-                data = res.get('data', {})
-                
-                # Check for triple/double nesting
-                if isinstance(data, dict) and 'data' in data:
-                    data = data['data']
-                if isinstance(data, dict) and 'data' in data:
-                    data = data['data']
-                
-                if isinstance(data, list):
-                    return data
-                if isinstance(data, dict):
-                    return data.get('data', [])
-                    
-                return []
-        except Exception as e:
-            logger.error(f"Exception in get_expiry_list: {e}")
-        return []
 
     # --- FOREVER ORDERS (GTT) ---
     def place_forever_order(self, 
@@ -2035,8 +2038,15 @@ class DhanHelper:
         return self.get_expiry_list(sid, seg)
 
     def get_expiry_list(self, security_id: int, exchange_segment: str) -> List[str]:
-        """Fetch list of expiry dates for an underlying."""
+        """Fetch list of expiry dates for an underlying with caching."""
+        # Check cache (1 hour)
+        if security_id in self._expiry_cache:
+            data, timestamp = self._expiry_cache[security_id]
+            if time.time() - timestamp < 3600:
+                return data
+
         try:
+            time.sleep(1) # Rate limit protection
             res = self.dhan.expiry_list(security_id, exchange_segment)
             if res.get('status') == 'success':
                 data = res.get('data', [])
@@ -2050,6 +2060,9 @@ class DhanHelper:
                     try:
                         expiries.sort(key=lambda x: datetime.strptime(x, "%Y-%m-%d"))
                     except: pass
+                
+                if expiries:
+                    self._expiry_cache[security_id] = (expiries, time.time())
                 return expiries
             logger.error(f"Failed to fetch expiry list: {res.get('remarks')}")
         except Exception as e:
@@ -2089,7 +2102,7 @@ class DhanHelper:
 
     def get_option_chain(self, symbol: str, expiry: str, exchange_segment: str = None) -> Dict:
         """
-        Fetch Option Chain for a symbol (Equity/Index).
+        Fetch Option Chain for a symbol (Equity/Index) with caching.
         Auto-resolves symbol to Security ID.
         """
         try:
@@ -2111,23 +2124,29 @@ class DhanHelper:
                 if not exchange_segment:
                      exchange_segment = "IDX_I" if sec['INSTRUMENT'] == "INDEX" else "NSE_EQ"
             
+            # Check cache (5 seconds)
+            cache_key = (security_id, expiry)
+            if cache_key in self._option_chain_cache:
+                data, timestamp = self._option_chain_cache[cache_key]
+                if time.time() - timestamp < 5.0:
+                    return data
+
             logger.info(f"Fetching Option Chain for {symbol} ({security_id}) [{exchange_segment}] Expiry: {expiry}")
             
+            time.sleep(1) # Rate limit protection
             res = self.dhan.option_chain(
                 under_security_id=security_id,
                 under_exchange_segment=exchange_segment,
                 expiry=expiry
             )
             
-            logger.debug(f"Option Chain Raw Response: {res}")
-            
             if res.get('status') == 'success':
                 data = res.get('data', {})
-                if 'data' in data and isinstance(data['data'], dict): # Or checking if keys exist
-                     # For Option Chain, 'data' is usually the content
-                     # If double nested: {'data': {'last_price': ...}, 'status': 'success'}
-                     # We want the inner dict.
-                     return data.get('data', {}) if 'data' in data else data
+                if 'data' in data and isinstance(data['data'], dict):
+                     data = data.get('data', {})
+                
+                if data:
+                    self._option_chain_cache[cache_key] = (data, time.time())
                 return data
             logger.error(f"Failed to fetch option chain: {res.get('remarks')}")
             
@@ -2435,7 +2454,7 @@ class DhanHelper:
             
             current_start = start_total
             all_chunks = []
-            chunk_days = 85 # Safe limit below 90
+            chunk_days = 30 # Reduced for better reliability across all asset classes
             
             print(f">>> Fetching Long History for {symbol} ({from_date} to {to_date})...")
             
@@ -2491,70 +2510,107 @@ class DhanHelper:
 
     # --- WEBSOCKET / LIVE FEED ---
     def start_websocket(self, 
-                       instruments: List[Tuple[Any, str]], 
-                       on_connect: Callable = None, 
-                       on_message: Callable = None, 
-                       on_error: Callable = None, 
-                       on_close: Callable = None,
-                       version: str = "v2") -> Any:
+                       instruments: List[Tuple[Any, str, int]], 
+                       on_message: Optional[Callable] = None):
         """
-        Start a live WebSocket feed using DhanHQ MarketFeed.
+        Start WebSocket in a background thread with auto-reconnection.
+        instruments: List of (segment, security_id, request_code)
         """
+        self.ws_thread = None
+        self._ws_stop_flag = False
+        self._ws_lock = threading.Lock()
+
+    def start_websocket(self, 
+                       instruments: List[Tuple[Any, str, int]], 
+                       on_message: Optional[Callable] = None):
+        """
+        Start WebSocket in a background thread with auto-reconnection and rate-limit handling.
+        """
+        with self._ws_lock:
+            if self.ws_thread and self.ws_thread.is_alive():
+                logger.info("WebSocket thread already running. Updating instruments...")
+                self.subscribe_instruments(instruments)
+                return
+
+            self.ws_instruments = instruments 
+            self.user_on_message = on_message
+            self._ws_stop_flag = False
+
+            def run_ws():
+                retry_delay = 10
+                while not self._ws_stop_flag:
+                    try:
+                        logger.info("Starting WebSocket connection...")
+                        
+                        class DhanContextAdapter:
+                            def __init__(self, dhan_client):
+                                self.client = dhan_client
+                            def get_client_id(self):
+                                return getattr(self.client.dhan_http, 'client_id', "") if hasattr(self.client, 'dhan_http') else getattr(self.client, 'client_id', "")
+                            def get_access_token(self):
+                                return getattr(self.client.dhan_http, 'access_token', "") if hasattr(self.client, 'dhan_http') else getattr(self.client, 'access_token', "")
+
+                        context_adapter = DhanContextAdapter(self.dhan)
+
+                        self.feed = MarketFeed(
+                            dhan_context=context_adapter,
+                            instruments=self.ws_instruments,
+                            on_connect=self._on_ws_connect,
+                            on_message=self._on_ws_message,
+                            on_error=self._on_ws_error
+                        )
+                        
+                        # Reset delay on successful start attempt (actual connection check is in on_connect)
+                        self.feed.run()
+
+                    except Exception as e:
+                        err_str = str(e)
+                        if "429" in err_str:
+                            retry_delay = 30 # Aggressive backoff for rate limits
+                            logger.error(f"WebSocket Rate Limited (429). Waiting {retry_delay}s before retry...")
+                        else:
+                            retry_delay = 10
+                            logger.error(f"WebSocket execution failed: {e}. Retrying in {retry_delay}s...")
+                        
+                        if hasattr(self, 'feed') and self.feed:
+                            try: self.feed.close_connection()
+                            except: pass
+
+                    if not self._ws_stop_flag:
+                        time.sleep(retry_delay)
+
+            self.ws_thread = threading.Thread(target=run_ws, daemon=True)
+            self.ws_thread.start()
+            logger.info("WebSocket manager started in background thread.")
+
+    def _on_ws_connect(self, instance):
+        logger.info("WebSocket Connected Successfully")
+
+    def _on_ws_error(self, instance, error):
+        logger.error(f"WebSocket Error Observed: {error}")
+
+    def _on_ws_message(self, instance, message):
+        """Internal callback to update live_data cache."""
         try:
-            logger.info("Starting WebSocket connection...")
-            
-            # wrapper to update local live_data cache
-            def internal_on_message(instance, data):
-                # Update shared cache
-                if isinstance(data, dict):
-                    sid = str(data.get('security_id')) or str(data.get('SecurityId'))
-                    if sid:
-                        self.live_data[sid] = data
+            if isinstance(message, dict):
+                sid = str(message.get('security_id')) or str(message.get('SecurityId'))
+                if sid:
+                    self.live_data[sid] = message
                 
-                # Call user callback if provided
-                if on_message:
-                    on_message(instance, data)
-
-            # Create an adapter to mimic DhanContext which MarketFeed expects
-            class DhanContextAdapter:
-                def __init__(self, dhan_client):
-                    self.client = dhan_client
-                def get_client_id(self):
-                    # Robust extraction
-                    if hasattr(self.client, 'dhan_http'):
-                        return getattr(self.client.dhan_http, 'client_id', "")
-                    return getattr(self.client, 'client_id', "")
-                def get_access_token(self):
-                    if hasattr(self.client, 'dhan_http'):
-                        return getattr(self.client.dhan_http, 'access_token', "")
-                    return getattr(self.client, 'access_token', "")
-
-            context_adapter = DhanContextAdapter(self.dhan)
-
-            self.feed = MarketFeed(
-                dhan_context=context_adapter,
-                instruments=instruments,
-                version=version,
-                on_connect=on_connect,
-                on_message=internal_on_message,
-                on_error=on_error,
-                on_close=on_close
-            )
-            
-            # Start in a separate thread (non-blocking)
-            self.feed.start()
-            logger.info("WebSocket started in background thread.")
-            return self.feed
-            
+                if self.user_on_message:
+                    self.user_on_message(instance, message)
         except Exception as e:
-            logger.error(f"Failed to start WebSocket: {e}")
-            return None
+            logger.error(f"Error in WebSocket handler: {e}")
 
     def subscribe_instruments(self, instruments: List[Tuple[Any, str, int]]):
         """
         Subscribe to additional instruments on an active WebSocket connection.
-        instruments: List of tuples (Exchange, SecurityID, RequestCode)
         """
+        # Add to the master list so reconnection includes these
+        for inst in instruments:
+            if inst not in self.ws_instruments:
+                self.ws_instruments.append(inst)
+
         if hasattr(self, 'feed') and self.feed:
             try:
                 self.feed.subscribe_symbols(instruments)
@@ -2562,8 +2618,6 @@ class DhanHelper:
                 return True
             except Exception as e:
                 logger.error(f"Error checking subscription: {e}")
-        else:
-            logger.warning("WebSocket feed not active. Cannot subscribe.")
         return False
 
     def unsubscribe_instruments(self, instruments: List[Tuple[Any, str, int]]):

@@ -8,8 +8,15 @@ A comprehensive Python library for DhanHQ trading with helper functions, securit
 
 ```
 dhan_algo/
-├── lib/                          # Core library code
-│   └── dhan_helper.py           # Main DhanHelper class (997 lines, 40+ methods)
+├── debug/                        # Debug and utility scripts
+│   ├── debug_*.py               # Various debug utilities
+│   ├── check_*.py               # Validation checks
+│   └── inspect_*.py             # Inspection scripts
+│
+├── temp_data/                    # Temporary data (CSVs, Excel, Zips)
+│   ├── Nifty500_Report*.csv     # Generated reports
+│   ├── stock_analysis_report*.csv
+│   └── *.zip                    # Large archives
 │
 ├── docs/                         # Documentation
 │   ├── DHAN_HELPER_REFERENCE.md        # Complete API reference
@@ -20,25 +27,23 @@ dhan_algo/
 │   ├── NOTEBOOK_READY.md               # Quick start guide
 │   └── DHAN_HELPER_UPDATE_SUMMARY.md   # Change log
 │
-├── tests/                        # Test scripts
+├── tests/                        # Automated unit tests
 │   ├── test_security_lookup.py         # Security lookup tests
 │   ├── test_fno_convenience.py         # F&O convenience tests
-│   ├── test_dhan_helper.py             # General helper tests
-│   ├── debug_*.py                      # Debug utilities
-│   └── ...
+│   └── test_dhan_helper.py             # General helper tests
 │
 ├── examples/                     # Usage examples
 │   ├── example_option_chain_workflow.py  # Complete option chain workflow
 │   └── dhan_helper_quick_ref.py          # Quick reference snippets
 │
-├── scripts/                      # Utility scripts
-│   ├── check_ip.py                     # IP check utility
-│   └── fetch_historical.py             # Historical data fetcher
+├── scripts/                      # Integration and data scripts
+│   ├── download_nifty500_daily.py      # Daily data downloader
+│   └── ...
 │
 ├── login.py                      # Authentication handler
-├── master_list.csv              # Security master list (288K+ securities)
-├── DhanHQ_SDK_Complete_Testing.ipynb  # Jupyter notebook for testing
-└── .env                         # Environment variables (CLIENT_ID, etc.)
+├── master_list.csv              # Security master list (Cached)
+├── .env                         # Environment variables
+└── requirements.txt              # Project dependencies
 ```
 
 ---

@@ -27,3 +27,23 @@ REORGANIZATION_SUMMARY.md
 # Debug Scripts
 debug_*.py
 temp_*.py
+
+# Data Directories
+Stocks Daily Historical Data/
+Daily Historical Data/
+Stocks Historical Data/
+Stocks Historical Data Parquet/
+Historical Data/
+Historical Data Parquet/
+Options Data/
+temp_data/
+portfolio/
+
+# Data and Binary Files
+*.csv
+*.xlsx
+*.zip
+*.whl
+*.parquet
+*.log
+
