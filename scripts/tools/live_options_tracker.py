@@ -30,7 +30,7 @@ from datetime import datetime, date, timedelta
 from dhanhq.marketfeed import MarketFeed
 
 # Add project root to path
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 from login import get_dhan_client
 from lib.dhan_helper import DhanHelper
 

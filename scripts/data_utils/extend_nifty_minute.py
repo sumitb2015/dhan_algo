@@ -8,7 +8,7 @@ import os
 import pandas as pd
 import time
 from datetime import datetime, timedelta
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 from login import get_dhan_client
 from lib.dhan_helper import DhanHelper

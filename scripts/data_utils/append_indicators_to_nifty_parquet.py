@@ -5,7 +5,7 @@ import pandas_ta as ta
 import numpy as np
 
 # Add project root to path
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 from lib.dhan_helper import DhanHelper
 from login import get_dhan_client

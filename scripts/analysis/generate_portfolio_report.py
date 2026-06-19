@@ -6,7 +6,7 @@ import logging
 import math
 
 # Add project root to path for imports
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 from login import get_dhan_client
 from lib.dhan_helper import DhanHelper
@@ -140,7 +140,7 @@ def generate_report():
     
     # --- EXCEL GENERATION ---
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     report_dir = os.path.join(project_root, "portfolio")
     os.makedirs(report_dir, exist_ok=True)
     report_path = os.path.join(report_dir, f"Portfolio_Report_{timestamp}.xlsx")

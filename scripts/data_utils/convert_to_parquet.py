@@ -58,7 +58,7 @@ def convert_csv_to_parquet(source_dir, target_dir):
 
 if __name__ == "__main__":
     # Absolute paths relative to script location
-    base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    base_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
     # Convert General Historical Data
     src = os.path.join(base_dir, "Historical Data")

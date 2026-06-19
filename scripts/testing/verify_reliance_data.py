@@ -9,7 +9,7 @@ from datetime import datetime, timedelta
 def verify_reliance():
     # 1. Define Paths
     # Resolve relative to the project root folder
-    script_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    script_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     daily_file = os.path.join(script_dir, "Daily_Historical_Data_Fresh", "RELIANCE_Daily_2Y.csv")
     min_file = os.path.join(script_dir, "Stocks Historical Data", "RELIANCE_1Min_5Y.csv")
     

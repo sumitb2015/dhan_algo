@@ -17,7 +17,7 @@ from typing import List, Dict, Any, Optional
 warnings.filterwarnings("ignore")
 
 # Add project root to path
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 from login import get_dhan_client
 from lib.dhan_helper import DhanHelper

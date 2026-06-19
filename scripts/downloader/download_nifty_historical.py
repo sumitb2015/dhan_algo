@@ -12,7 +12,7 @@ from datetime import datetime, timedelta
 from typing import List, Tuple, Dict, Any, Optional
 
 # Add project root to path
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 from login import get_dhan_client
 from lib.dhan_helper import DhanHelper

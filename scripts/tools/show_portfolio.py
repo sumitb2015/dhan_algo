@@ -2,7 +2,7 @@ import sys
 import os
 
 # Ensure project root is in path
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 from login import get_dhan_client
 from lib.dhan_helper import DhanHelper
