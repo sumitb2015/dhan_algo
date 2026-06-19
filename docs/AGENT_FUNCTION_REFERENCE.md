@@ -60,19 +60,18 @@ These methods wrap complex logic into single-line calls. Use these for 90% clean
 
 ---
 
-## 4. Maintenance Scripts (`scripts/`)
-See the [SCRIPTS_DIRECTORY_GUIDE.md](file:///C:/Users/sumit/.gemini/antigravity/brain/93efc1c6-11d2-47c1-92bd-99dbaf905549/SCRIPTS_DIRECTORY_GUIDE.md) for a full list of all 24 scripts.
+## 4. Maintenance & Helper Scripts (`scripts/`)
+Organized under separate subdirectories for structured functionality.
 
-### Data Production (Essential)
-- **`download_nifty500_bulk.py`**: **Primary Sync**. Syncs 1-min data (Parquet) for all Nifty 500 stocks.
-- **`download_nifty_minute.py`**: Downloads 1-minute data for NIFTY index.
-- **`download_nifty_futures_1min.py`**: Downloads continuous futures data for the index.
-- **`download_nifty500_daily_fresh.py`**: Downloads 2-year daily data for Nifty 500.
+### Data Production & Fetching (`scripts/downloader/`)
+- **`download_nifty_historical.py`**: Consolidated NIFTY Spot Daily, Intraday (1m/5m/15m/60m), and Continuous Futures downloader.
+- **`download_nifty500_historical.py`**: Consolidated NIFTY 500 Stock Daily (bulk-optimized), 1m Parquet (resume sync), and Custom Downloader.
 
-### Reporting & Analysis
-- **`generate_portfolio_report.py`**: Generates holding performance and SIP plan excel.
-- **`generate_nifty500_report_1min.py`**: Advanced scan (Mansfield RS, VCP, Breadth) using 1-min data.
-- **`stock_analysis_repot.py`**: Simple absolute returns report (matching user dashboard).
+### Reporting & Analysis (`scripts/analysis/`)
+- **`nifty_distribution_analysis.py`**: Statistical distribution scanner with histogram and fitted normal curve.
+- **`generate_portfolio_report.py`**: Generates holdings performance report and automated SIP plan.
+- **`generate_nifty500_report_1min.py`**: Advanced scanner (Mansfield RS, VCP, Breadth) using 1-minute data.
+- **`stock_analysis_repot.py`**: Absolute returns tracker sheet generator.
 
 ---
 

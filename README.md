@@ -36,9 +36,12 @@ dhan_algo/
 │   ├── example_option_chain_workflow.py  # Complete option chain workflow
 │   └── dhan_helper_quick_ref.py          # Quick reference snippets
 │
-├── scripts/                      # Integration and data scripts
-│   ├── download_nifty500_daily.py      # Daily data downloader
-│   └── ...
+├── scripts/                      # Integration and data scripts (organized by functionality)
+│   ├── downloader/               # Spot Daily, Intraday, & Futures downloaders
+│   ├── analysis/                 # Report generators and volatility distribution analysis
+│   ├── data_utils/               # Indicator append, Parquet convert, & resampling tools
+│   ├── tools/                    # Options trackers & portfolio tools
+│   └── testing/                  # Websocket testing & validation checks
 │
 ├── login.py                      # Authentication handler
 ├── master_list.csv              # Security master list (Cached)

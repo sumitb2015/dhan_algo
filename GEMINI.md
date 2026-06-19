@@ -198,13 +198,13 @@ venv\Scripts\python.exe strategies/nifty_value_imbalance_strangle.py --live --lo
 
 ---
 
-### 2. Live Options Tracker (`scripts/live_options_tracker.py`)
+### 2. Live Options Tracker (`scripts/tools/live_options_tracker.py`)
 
 Opens an Excel workbook with 4 live sheets: **Live Options**, **Dashboard**, **Options Chain**, **Order Log**.
 
 ```powershell
 # Start the live tracker (opens Excel automatically)
-venv\Scripts\python.exe scripts/live_options_tracker.py
+venv\Scripts\python.exe scripts/tools/live_options_tracker.py
 ```
 
 - Stop with **Ctrl+C** in the terminal — the Excel file stays open.
