@@ -36,9 +36,10 @@ def fetch_nifty_candles():
 
     if not df.empty:
         print("\nSuccess! Historical Data Fetched:")
-        # Convert start_Time if it exists to human readable
-        if 'start_Time' in df.columns:
-            df['timestamp'] = df['start_Time'].apply(helper.epoch_to_datetime)
+        # Convert timestamp/start_Time if they exist to human readable format
+        for col in ['timestamp', 'start_Time']:
+            if col in df.columns:
+                df[col] = df[col].apply(helper.epoch_to_datetime)
         
         print(df[['timestamp', 'open', 'high', 'low', 'close', 'volume']].tail(10))
     else:

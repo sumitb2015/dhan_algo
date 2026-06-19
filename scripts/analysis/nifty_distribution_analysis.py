@@ -106,15 +106,13 @@ def main():
     ax.plot(x_range, y_normal, color='#d32f2f', linewidth=2.5, label=fr'Fitted Normal Curve ($\mu$={mean_val:.3f}%, $\sigma$={std_val:.3f}%)')
     
     # Highlight Standard Deviation Regions
-    # 1 SD region shading
-    x_1sd = np.linspace(sd1_low, sd1_high, 500)
-    ax.fill_between(x_1sd, stats.norm.pdf(x_1sd, mean_val, std_val), color='#4caf50', alpha=0.25, label=f'1 SD Band ({pct_1sd:.1f}% of days)')
+    # 2 SD region shading (entire band layered behind 1 SD)
+    x_2sd = np.linspace(sd2_low, sd2_high, 1000)
+    ax.fill_between(x_2sd, stats.norm.pdf(x_2sd, mean_val, std_val), color='#ff9800', alpha=0.12, label=f'2 SD Band ({pct_2sd:.1f}% of days)')
     
-    # 2 SD region shading
-    x_2sd_left = np.linspace(sd2_low, sd1_low, 300)
-    x_2sd_right = np.linspace(sd1_high, sd2_high, 300)
-    ax.fill_between(x_2sd_left, stats.norm.pdf(x_2sd_left, mean_val, std_val), color='#ff9800', alpha=0.18, label=f'2 SD Band ({pct_2sd - pct_1sd:.1f}% of days)')
-    ax.fill_between(x_2sd_right, stats.norm.pdf(x_2sd_right, mean_val, std_val), color='#ff9800', alpha=0.18)
+    # 1 SD region shading (layered in front)
+    x_1sd = np.linspace(sd1_low, sd1_high, 500)
+    ax.fill_between(x_1sd, stats.norm.pdf(x_1sd, mean_val, std_val), color='#4caf50', alpha=0.22, label=f'1 SD Band ({pct_1sd:.1f}% of days)')
     
     # Draw vertical lines for Mean and SDs
     ax.axvline(mean_val, color='#1d3f66', linestyle='--', linewidth=1.5, label=fr'Mean ($\mu$): {mean_val:+.3f}%')
@@ -146,7 +144,10 @@ def main():
             bbox=dict(boxstyle='round,pad=0.6', facecolor='#f5f5f5', edgecolor='#cfd8dc', alpha=0.9), fontsize=10)
     
     # Formatting axes and layout
-    ax.set_xlim(-4.5, 4.5)  # Limit X-axis to keep visualization readable
+    # Dynamic limits based on min/max returns to prevent clipping outliers (e.g. -5.93% on election day)
+    x_min = min(min_val - 0.5, -4.5)
+    x_max = max(max_val + 0.5, 4.5)
+    ax.set_xlim(x_min, x_max)
     ax.legend(loc='upper right', frameon=True, facecolor='white', framealpha=0.9, edgecolor='#cfd8dc', fontsize=9.5)
     
     plt.tight_layout()

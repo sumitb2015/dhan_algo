@@ -92,6 +92,27 @@ class ValueImbalanceStrangle:
         
         # Session Control
         self.last_adjustment_time = None 
+        self.consecutive_chain_failures = 0
+
+    def get_execution_price(self, order_id: str, fallback_price: float) -> float:
+        """Wait for fill and get the average execution price, or return fallback."""
+        if not order_id:
+            return fallback_price
+        # Wait for fill (up to 5 seconds for immediate execution on market order)
+        if self.helper.wait_for_fill(order_id, timeout=5):
+            order_details = self.helper.get_order_by_id(order_id)
+            if order_details:
+                fill_price = float(order_details.get('avgFilledPrice', 0.0) or order_details.get('price', 0.0))
+                if fill_price > 0:
+                    logger.info(f"Order {order_id} execution price confirmed: {fill_price:.2f}")
+                    return fill_price
+        return fallback_price
+
+    def is_quote_invalid(self, q):
+        if not q: return True
+        if isinstance(q, dict) and 'CONTRACT_INFO' in q:
+            return float(q.get('last_price', 0) or q.get('LTP', 0)) == 0
+        return False
 
     def _extract_quote_fields(self, quote, strike, option_type):
         """Extract needed fields from either helper.option() or chain fallback format."""
@@ -154,11 +175,23 @@ class ValueImbalanceStrangle:
         logger.warning(f"!!! EXITING ALL POSITIONS: {reason} !!!")
         if not self.dry_run:
             if self.ce_id:
-                try: self.helper.buy(str(self.ce_id), self.ce_lots * self.nifty_lot_size)
-                except Exception as e: logger.error(f"Exit CE Error: {e}")
+                try:
+                    ce_exit_id = self.helper.buy(str(self.ce_id), self.ce_lots * self.nifty_lot_size)
+                    if not ce_exit_id:
+                        logger.critical(f"CRITICAL ERROR: Emergency exit order failed for CE (ID: {self.ce_id})!")
+                    else:
+                        logger.info(f"CE Emergency exit order placed: {ce_exit_id}")
+                except Exception as e:
+                    logger.error(f"Exit CE Error: {e}")
             if self.pe_id:
-                try: self.helper.buy(str(self.pe_id), self.pe_lots * self.nifty_lot_size)
-                except Exception as e: logger.error(f"Exit PE Error: {e}")
+                try:
+                    pe_exit_id = self.helper.buy(str(self.pe_id), self.pe_lots * self.nifty_lot_size)
+                    if not pe_exit_id:
+                        logger.critical(f"CRITICAL ERROR: Emergency exit order failed for PE (ID: {self.pe_id})!")
+                    else:
+                        logger.info(f"PE Emergency exit order placed: {pe_exit_id}")
+                except Exception as e:
+                    logger.error(f"Exit PE Error: {e}")
         else:
             logger.info(f"[DRY RUN] Simulating Exit of all positions.")
 
@@ -184,6 +217,7 @@ class ValueImbalanceStrangle:
         self.pe_avg_price = 0.0
         self.entry_diff_pct = 0.0
         self.adjustment_count = 0
+        self.consecutive_chain_failures = 0
         self.peak_pnl = -999999.0
         self.trailing_sl_active = False
         self.last_adjustment_time = None
@@ -289,20 +323,14 @@ class ValueImbalanceStrangle:
             pe_quote = self.helper.option("NIFTY", self.pe_strike, "PE")
                 
             # --- Fallback to chain_df if initial quotes fail or lack price ---
-            def is_quote_invalid(q):
-                if not q: return True
-                if isinstance(q, dict) and 'CONTRACT_INFO' in q:
-                    return float(q.get('last_price', 0) or q.get('LTP', 0)) == 0
-                return False # Assume it's a valid fallback dict if it exists
-
-            if (is_quote_invalid(ce_quote) or is_quote_invalid(pe_quote)) and not chain_df.empty:
+            if (self.is_quote_invalid(ce_quote) or self.is_quote_invalid(pe_quote)) and not chain_df.empty:
                 logger.warning("Initial helper.option() failed or returned empty data. Falling back to option chain...")
-                if is_quote_invalid(ce_quote) and self.ce_strike in chain_df.index:
-                    ce_quote = chain_df.loc[self.ce_strike].to_dict()
+                if self.is_quote_invalid(ce_quote) and float(self.ce_strike) in chain_df.index:
+                    ce_quote = chain_df.loc[float(self.ce_strike)].to_dict()
                     logger.info(f"CE Fallback: {ce_quote.get('ce_last_price')} (ID: {int(ce_quote.get('ce_security_id', 0))})")
                 
-                if is_quote_invalid(pe_quote) and self.pe_strike in chain_df.index:
-                    pe_quote = chain_df.loc[self.pe_strike].to_dict()
+                if self.is_quote_invalid(pe_quote) and float(self.pe_strike) in chain_df.index:
+                    pe_quote = chain_df.loc[float(self.pe_strike)].to_dict()
                     logger.info(f"PE Fallback: {pe_quote.get('pe_last_price')} (ID: {int(pe_quote.get('pe_security_id', 0))})")
 
             # Extract fields from quotes (standardizes API vs Fallback formats)
@@ -367,7 +395,20 @@ class ValueImbalanceStrangle:
             if not self.dry_run:
                 ce_oid = self.helper.sell(str(self.ce_id), self.initial_lots * self.nifty_lot_size)
                 pe_oid = self.helper.sell(str(self.pe_id), self.initial_lots * self.nifty_lot_size)
-                if not ce_oid or not pe_oid: continue
+                if not ce_oid or not pe_oid:
+                    logger.error("Entry Failed. Rolling back any successful order to prevent orphaned legs.")
+                    if ce_oid and not pe_oid:
+                        logger.warning("Rolling back CE order...")
+                        try: self.helper.buy(str(self.ce_id), self.initial_lots * self.nifty_lot_size)
+                        except Exception as rollback_err: logger.error(f"CE Rollback exception: {rollback_err}")
+                    elif pe_oid and not ce_oid:
+                        logger.warning("Rolling back PE order...")
+                        try: self.helper.buy(str(self.pe_id), self.initial_lots * self.nifty_lot_size)
+                        except Exception as rollback_err: logger.error(f"PE Rollback exception: {rollback_err}")
+                    continue
+                # Confirm execution prices to account for slippage
+                self.ce_avg_price = self.get_execution_price(ce_oid, self.ce_avg_price)
+                self.pe_avg_price = self.get_execution_price(pe_oid, self.pe_avg_price)
             else:
                 logger.info(f"[DRY RUN] Simulating Entry: {self.ce_strike}CE/{self.pe_strike}PE")
 
@@ -444,16 +485,20 @@ class ValueImbalanceStrangle:
                         logger.info(f"!!! Lot Addition !!! Diff: {diff_pct:.2f}%")
                         symbol_id = str(self.ce_id) if winner == "CE" else str(self.pe_id)
                         new_price = self.helper.get_ltp(symbol_id, exchange="NSE_FNO", instrument="OPTIDX")
-                        if new_price > 0:
-                            if winner == "CE":
-                                self.ce_avg_price = ((self.ce_avg_price * self.ce_lots) + new_price) / (self.ce_lots + 1)
-                                self.ce_lots += 1
-                            else:
-                                self.pe_avg_price = ((self.pe_avg_price * self.pe_lots) + new_price) / (self.pe_lots + 1)
-                                self.pe_lots += 1
-                            if not self.dry_run: self.helper.sell(symbol_id, self.nifty_lot_size)
-                            self.adjustment_count += 1
-                            self.last_adjustment_time = current_bar
+                        oid = None
+                        if not self.dry_run:
+                            oid = self.helper.sell(symbol_id, self.nifty_lot_size)
+                        # Get actual execution price if live, else use new_price
+                        exec_price = self.get_execution_price(oid, new_price) if oid else new_price
+                        
+                        if winner == "CE":
+                            self.ce_avg_price = ((self.ce_avg_price * self.ce_lots) + exec_price) / (self.ce_lots + 1)
+                            self.ce_lots += 1
+                        else:
+                            self.pe_avg_price = ((self.pe_avg_price * self.pe_lots) + exec_price) / (self.pe_lots + 1)
+                            self.pe_lots += 1
+                        self.adjustment_count += 1
+                        self.last_adjustment_time = current_bar
                         continue
                     else:
                         # Winner leg already at max lots, cannot adjust further. Close all and re-enter.
@@ -468,6 +513,16 @@ class ValueImbalanceStrangle:
                 if diff_pct > (self.threshold_strike + self.entry_diff_pct) and (self.ce_lots == self.max_lots or self.pe_lots == self.max_lots):
                     logger.info(f"!!! Strike Adjustment !!! Diff: {diff_pct:.2f}%")
                     chain_df = self.helper.get_option_chain_df("NIFTY", self.expiry)
+                    if chain_df.empty:
+                        self.consecutive_chain_failures += 1
+                        logger.warning(f"Option Chain empty / failed. Consecutive failures: {self.consecutive_chain_failures}")
+                        if self.consecutive_chain_failures >= 10:
+                            self.exit_all_positions("Emergency Exit: 10 consecutive option chain failures during rebalance.")
+                            cycle_active = False
+                            break
+                        continue
+                    else:
+                        self.consecutive_chain_failures = 0
                     winner_val = ce_val if loser == "PE" else pe_val
                     old_loser_lots = self.pe_lots if loser == "PE" else self.ce_lots
                     new_loser_lots = 2  # Change/set to 2 lots for adjustments
@@ -478,15 +533,30 @@ class ValueImbalanceStrangle:
                         old_avg = self.ce_avg_price if loser == "CE" else self.pe_avg_price
                         exit_price = self.helper.get_ltp(old_id, exchange="NSE_FNO", instrument="OPTIDX")
                         if exit_price > 0:
+                            buy_oid = None
+                            if not self.dry_run:
+                                buy_oid = self.helper.buy(old_id, old_loser_lots * self.nifty_lot_size)
+                                if not buy_oid:
+                                    logger.error(f"Failed to place buy-to-close order for old leg {old_id}. Aborting strike adjustment to prevent orphaned legs.")
+                                    continue
+                            # Get actual exit price if live
+                            actual_exit_price = self.get_execution_price(buy_oid, exit_price) if buy_oid else exit_price
+                            
                             # Realize PnL based on the old lot count we bought back
-                            self.realized_pnl += (old_avg - exit_price) * (old_loser_lots * self.nifty_lot_size)
-                            if not self.dry_run: self.helper.buy(old_id, old_loser_lots * self.nifty_lot_size)
+                            self.realized_pnl += (old_avg - actual_exit_price) * (old_loser_lots * self.nifty_lot_size)
                             
                             new_quote = self.helper.option("NIFTY", new_strike, loser)
-                            if new_quote:
-                                new_id = str(new_quote['CONTRACT_INFO']['SECURITY_ID'])
-                                if 'CONTRACT_INFO' in new_quote:
-                                    self.nifty_lot_size = int(new_quote['CONTRACT_INFO'].get('LOT_SIZE', self.nifty_lot_size))
+                            if self.is_quote_invalid(new_quote) and not chain_df.empty:
+                                logger.warning(f"New quote fetch failed for adjustment strike {new_strike}. Falling back to option chain...")
+                                if float(new_strike) in chain_df.index:
+                                    new_quote = chain_df.loc[float(new_strike)].to_dict()
+
+                            new_id, price_from_quote, _, lot_size, symbol_name = \
+                                self._extract_quote_fields(new_quote, new_strike, loser)
+
+                            if new_id:
+                                self.nifty_lot_size = lot_size
+                                new_price = price_from_quote if price_from_quote > 0 else new_price
                                 
                                 # Update WebSocket subscription
                                 logger.info(f"Updating WebSocket: Unsubscribing {old_id}, Subscribing {new_id}")
@@ -496,12 +566,17 @@ class ValueImbalanceStrangle:
                                 except Exception as ws_err:
                                     logger.error(f"WebSocket update failed: {ws_err}")
  
+                                sell_oid = None
+                                if not self.dry_run:
+                                    sell_oid = self.helper.sell(str(new_id), new_loser_lots * self.nifty_lot_size)
+                                # Get actual entry price for the new strike
+                                actual_entry_price = self.get_execution_price(sell_oid, new_price) if sell_oid else new_price
+                                
                                 # Sell the new further OTM strike with the adjusted lot count (2 lots)
-                                if not self.dry_run: self.helper.sell(new_id, new_loser_lots * self.nifty_lot_size)
                                 if loser == "CE":
-                                    self.ce_strike, self.ce_id, self.ce_avg_price, self.ce_lots = new_strike, new_id, new_price, new_loser_lots
+                                    self.ce_strike, self.ce_id, self.ce_avg_price, self.ce_lots = new_strike, new_id, actual_entry_price, new_loser_lots
                                 else:
-                                    self.pe_strike, self.pe_id, self.pe_avg_price, self.pe_lots = new_strike, new_id, new_price, new_loser_lots
+                                    self.pe_strike, self.pe_id, self.pe_avg_price, self.pe_lots = new_strike, new_id, actual_entry_price, new_loser_lots
                         self.adjustment_count += 1
                         self.last_adjustment_time = current_bar
                     continue

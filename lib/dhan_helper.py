@@ -1542,7 +1542,9 @@ class DhanHelper:
                             instrument_type: str, 
                             from_date: str, 
                             to_date: str, 
-                            interval: str = "DAILY") -> pd.DataFrame:
+                            interval: str = "DAILY",
+                            oi: bool = False,
+                            expiry_code: int = 0) -> pd.DataFrame:
         """
         Fetch historical data.
         interval: "DAILY" or minute intervals (e.g., "1", "5", "15", "60")
@@ -1550,20 +1552,23 @@ class DhanHelper:
         try:
             if interval.upper() == "DAILY":
                 res = self.dhan.historical_daily_data(
-                    security_id=int(security_id),
+                    security_id=str(security_id),
                     exchange_segment=exchange_segment,
                     instrument_type=instrument_type,
                     from_date=from_date,
-                    to_date=to_date
+                    to_date=to_date,
+                    expiry_code=expiry_code,
+                    oi=oi
                 )
             else:
                 res = self.dhan.intraday_minute_data(
-                    security_id=int(security_id),
+                    security_id=str(security_id),
                     exchange_segment=exchange_segment,
                     instrument_type=instrument_type,
                     interval=interval,
                     from_date=from_date,
-                    to_date=to_date
+                    to_date=to_date,
+                    oi=oi
                 )
             
             if isinstance(res, dict) and res.get('status') == 'success':
@@ -1818,8 +1823,16 @@ class DhanHelper:
     def epoch_to_datetime(self, epoch: int) -> str:
         """Convert Dhan's epoch time to human-readable format."""
         try:
-            return self.dhan.convert_to_date_time(epoch)
-        except:
+            # Workaround for SDK bug where convert_to_date_time is decorated as staticmethod but accepts self
+            try:
+                dt = self.dhan.convert_to_date_time(None, epoch)
+            except TypeError:
+                dt = self.dhan.convert_to_date_time(epoch)
+            
+            if isinstance(dt, datetime):
+                return dt.strftime("%Y-%m-%d %H:%M:%S")
+            return str(dt)
+        except Exception:
             return str(epoch)
 
     # --- OPTION CHAIN ---
@@ -2559,24 +2572,26 @@ class DhanHelper:
 
     # --- INTRADAY MINUTE DATA (with interval support) ---
     def get_intraday_minute_data(self,
-                                   security_id: int,
+                                   security_id: Union[str, int],
                                    exchange_segment: str,
                                    instrument_type: str,
                                    interval: str,
                                    from_date: str,
-                                   to_date: str) -> pd.DataFrame:
+                                   to_date: str,
+                                   oi: bool = False) -> pd.DataFrame:
         """
         Fetch intraday minute data with specific interval.
         interval: "1", "5", "15", "25", "60"
         """
         try:
             res = self.dhan.intraday_minute_data(
-                security_id=security_id,
+                security_id=str(security_id),
                 exchange_segment=exchange_segment,
                 instrument_type=instrument_type,
                 interval=interval,
                 from_date=from_date,
-                to_date=to_date
+                to_date=to_date,
+                oi=oi
             )
             if isinstance(res, dict) and res.get('status') == 'success':
                 return pd.DataFrame(res.get('data', []))
@@ -2587,19 +2602,23 @@ class DhanHelper:
         return pd.DataFrame()
 
     def get_historical_daily_data(self,
-                                    security_id: int,
+                                    security_id: Union[str, int],
                                     exchange_segment: str,
                                     instrument_type: str,
                                     from_date: str,
-                                    to_date: str) -> pd.DataFrame:
+                                    to_date: str,
+                                    expiry_code: int = 0,
+                                    oi: bool = False) -> pd.DataFrame:
         """Fetch historical daily OHLC data."""
         try:
             res = self.dhan.historical_daily_data(
-                security_id=security_id,
+                security_id=str(security_id),
                 exchange_segment=exchange_segment,
                 instrument_type=instrument_type,
                 from_date=from_date,
-                to_date=to_date
+                to_date=to_date,
+                expiry_code=expiry_code,
+                oi=oi
             )
             if isinstance(res, dict) and res.get('status') == 'success':
                 return pd.DataFrame(res.get('data', []))
