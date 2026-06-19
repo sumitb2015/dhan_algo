@@ -3164,6 +3164,51 @@ class DhanHelper:
             df = df.set_index("Datetime")
             df = df.sort_index()
             
+        # Check and append today's daily candle if missing
+        if interval.upper() in ["D", "1D", "DAILY"]:
+            today = datetime.now().date()
+            if today not in df.index.date:
+                # Fetch today's 1m intraday data to construct daily candle
+                today_str = datetime.now().strftime("%Y-%m-%d")
+                logger.info(f"Today ({today}) missing from daily history. Fetching intraday to construct daily candle...")
+                today_df = self.get_intraday_minute_data(
+                    security_id, exchange_segment, instrument_type, "1", today_str, today_str
+                )
+                if not today_df.empty:
+                    cols_today = today_df.columns
+                    today_map = {}
+                    for c in cols_today:
+                        low_c = c.lower()
+                        if low_c in rename_map:
+                            today_map[c] = rename_map[low_c]
+                    today_df = today_df.rename(columns=today_map)
+                    
+                    if "Datetime" in today_df.columns:
+                        first_val = today_df["Datetime"].iloc[0]
+                        if isinstance(first_val, (int, float)):
+                            today_df["Datetime"] = pd.to_datetime(today_df["Datetime"], unit='s').dt.tz_localize('UTC').dt.tz_convert('Asia/Kolkata').dt.tz_localize(None)
+                        else:
+                            today_df["Datetime"] = pd.to_datetime(today_df["Datetime"])
+                        
+                        today_df = today_df.sort_values("Datetime")
+                        
+                        t_open = today_df["Open"].iloc[0]
+                        t_high = today_df["High"].max()
+                        t_low = today_df["Low"].min()
+                        t_close = today_df["Close"].iloc[-1]
+                        t_vol = today_df["Volume"].sum() if "Volume" in today_df.columns else 0.0
+                        
+                        today_midnight = pd.Timestamp(today)
+                        today_row = pd.DataFrame([{
+                            "Open": float(t_open),
+                            "High": float(t_high),
+                            "Low": float(t_low),
+                            "Close": float(t_close),
+                            "Volume": float(t_vol)
+                        }], index=[today_midnight])
+                        
+                        df = pd.concat([df, today_row])
+            
         return df
 
     def get_indicators(self, symbol: str, interval: str = "5", indicators: List[str] = ['EMA20', 'RSI14'], days: int = 5) -> pd.DataFrame:
