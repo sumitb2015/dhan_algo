@@ -34,13 +34,22 @@ def main():
         return
         
     try:
-        # Based on file inspection, skip 16 rows metadata
-        df_list = pd.read_csv(csv_path, skiprows=16)
+        # Auto-detect format: if it contains metadata, first column has non-symbol headers or it has metadata rows
+        df_temp = pd.read_csv(csv_path)
+        first_col_name = str(df_temp.columns[0]).upper().strip()
+        
+        # If the first column header contains SYMBOL, it is the clean format
+        if "SYMBOL" in first_col_name:
+            df_list = df_temp
+        else:
+            # Re-read skipping the 16 metadata rows
+            df_list = pd.read_csv(csv_path, skiprows=16)
+            
         # First column is SYMBOL
-        symbols = df_list.iloc[:, 0].str.strip().tolist()
+        symbols = df_list.iloc[:, 0].astype(str).str.strip().tolist()
         
         # Filter unwanted symbols
-        symbols = [s for s in symbols if s != "NIFTY 500" and isinstance(s, str) and len(s) > 0]
+        symbols = [s for s in symbols if s and s != "NIFTY 500" and not s.startswith("Note") and len(s) > 0 and s != 'nan']
         
     except Exception as e:
         print(f"[FAIL] Could not parse CSV symbols: {e}")

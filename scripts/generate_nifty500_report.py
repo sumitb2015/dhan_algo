@@ -65,8 +65,16 @@ def process_stock(file_path):
         if df.empty:
             return None
             
+        # Reset index if Datetime is the index
+        if df.index.name is not None and df.index.name.capitalize() == 'Datetime':
+            df.index.name = 'Datetime'
+            df = df.reset_index()
+            
+        # Standardize all columns to Title Case (e.g. close -> Close)
+        df.columns = [str(c).capitalize() for c in df.columns]
+            
         if 'Datetime' in df.columns:
-            df['Datetime'] = pd.to_datetime(df['Datetime'], dayfirst=True)
+            df['Datetime'] = pd.to_datetime(df['Datetime'])
             df = df.sort_values('Datetime')
         else:
             return None
@@ -129,13 +137,13 @@ def process_stock(file_path):
         return None
 
 def main():
-    data_dir = "Stocks Daily Historical Data"
+    data_dir = "Daily_Historical_Data_Fresh"
     search_pattern = os.path.join(data_dir, "*_Daily_2Y.csv")
     
     # Adjust for running from root or scripts dir
     if not os.path.exists(data_dir):
         # try one up
-        data_dir = os.path.join("..", "Stocks Daily Historical Data")
+        data_dir = os.path.join("..", "Daily_Historical_Data_Fresh")
         search_pattern = os.path.join(data_dir, "*_Daily_2Y.csv")
         
     files = glob.glob(search_pattern)

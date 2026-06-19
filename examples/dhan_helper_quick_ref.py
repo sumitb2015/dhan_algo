@@ -87,6 +87,19 @@ intraday = helper.get_intraday_minute_data(
     to_date="2025-01-23"
 )
 
+# Previous Day Key Levels (PDH / PDL / PDC)
+# Returns dict with 'high', 'low', 'close' keys, or None on failure.
+# Handles symbol resolution, date arithmetic, and column normalization internally.
+nifty_levels = helper.get_prev_day_levels("NIFTY")        # Nifty 50 index
+bn_levels    = helper.get_prev_day_levels("BANKNIFTY")     # BankNifty index
+rel_levels   = helper.get_prev_day_levels("RELIANCE")      # Any equity
+
+if nifty_levels:
+    pdh = nifty_levels["high"]
+    pdl = nifty_levels["low"]
+    pdc = nifty_levels["close"]
+    print(f"PDH: {pdh:.2f} | PDL: {pdl:.2f} | PDC: {pdc:.2f}")
+
 # Expired Options
 expired = helper.get_expired_options_data(
     security_id=13,

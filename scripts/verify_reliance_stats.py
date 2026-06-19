@@ -3,15 +3,17 @@ import os
 from datetime import datetime, timedelta
 
 def main():
-    file_path = "menv/../Stocks Daily Historical Data/RELIANCE_Daily_2Y.csv"
-    # Adjust path if running from root
+    file_path = "Daily_Historical_Data_Fresh/RELIANCE_Daily_2Y.csv"
+    # Adjust path if running from scripts dir
     if not os.path.exists(file_path):
-        file_path = "Stocks Daily Historical Data/RELIANCE_Daily_2Y.csv"
+        file_path = "../Daily_Historical_Data_Fresh/RELIANCE_Daily_2Y.csv"
         
     print(f"Loading data from: {file_path}")
     
     try:
         df = pd.read_csv(file_path)
+        if df.index.name == 'Datetime':
+            df = df.reset_index()
         df['Datetime'] = pd.to_datetime(df['Datetime'])
         df = df.sort_values('Datetime')
         

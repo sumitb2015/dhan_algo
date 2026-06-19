@@ -2,8 +2,8 @@ import pandas as pd
 import os
 
 def resample_nifty_data():
-    file_path = r'c:\dhan_algo\Historical Data\NIFTY_50_1Min_5Y.csv'
-    output_path = r'c:\dhan_algo\Historical Data\NIFTY_50_5Min.csv'
+    file_path = r'c:\dhan_algo\dhan_algo\Historical Data\NIFTY_50_1Min_5Y.csv'
+    output_path = r'c:\dhan_algo\dhan_algo\Historical Data\NIFTY_50_5Min.csv'
 
     print(f"Reading data from {file_path}...")
     try:

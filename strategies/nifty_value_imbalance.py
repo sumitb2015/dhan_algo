@@ -1,5 +1,6 @@
 import time
 import sys
+import argparse
 import os
 import logging
 import pandas as pd
@@ -44,7 +45,18 @@ class ValueImbalanceStrategy:
             raise Exception("Failed to connect to Dhan.")
         self.helper = DhanHelper(self.dhan)
         
-        self.nifty_lot_size = self.helper.get_lot_size("NIFTY 50")
+        # Start WebSocket for Nifty Spot (Essential for reliable LTP)
+        logger.info("Starting WebSocket for NIFTY Index...")
+        self.helper.start_websocket([("IDX_I", "13", 15)])
+        time.sleep(2) # Wait for initial tick
+        
+        # Fetch and log previous day OHLC levels via library method
+        _levels = self.helper.get_prev_day_levels("NIFTY")
+        self.prev_day_high  = _levels["high"]  if _levels else None
+        self.prev_day_low   = _levels["low"]   if _levels else None
+        self.prev_day_close = _levels["close"] if _levels else None
+        
+        self.nifty_lot_size = self.helper.get_lot_size("NIFTY")
         
         # State
         self.ce_strike = None
@@ -71,6 +83,7 @@ class ValueImbalanceStrategy:
         # Session Control
         self.last_adjustment_time = None 
 
+
     def _calculate_pnl(self, ce_ltp, pe_ltp):
         # PnL = (Entry - Current) * Qty (since we are selling)
         # self.realized_pnl contains profits from closed legs in previous adjustments
@@ -81,8 +94,8 @@ class ValueImbalanceStrategy:
 
     def get_pnl(self):
         # Kept for backward compatibility or external calls, but optimized internally
-        ce_ltp = self.helper.get_ltp(str(self.ce_id), exchange="NSE_FNO")
-        pe_ltp = self.helper.get_ltp(str(self.pe_id), exchange="NSE_FNO")
+        ce_ltp = self.helper.get_ltp(str(self.ce_id), exchange="NSE_FNO", instrument="OPTIDX")
+        pe_ltp = self.helper.get_ltp(str(self.pe_id), exchange="NSE_FNO", instrument="OPTIDX")
         
         if ce_ltp <= 0 or pe_ltp <= 0:
             return self.realized_pnl
@@ -90,8 +103,8 @@ class ValueImbalanceStrategy:
         return self._calculate_pnl(ce_ltp, pe_ltp)
 
     def get_traded_values(self):
-        ce_ltp = self.helper.get_ltp(str(self.ce_id), exchange="NSE_FNO")
-        pe_ltp = self.helper.get_ltp(str(self.pe_id), exchange="NSE_FNO")
+        ce_ltp = self.helper.get_ltp(str(self.ce_id), exchange="NSE_FNO", instrument="OPTIDX")
+        pe_ltp = self.helper.get_ltp(str(self.pe_id), exchange="NSE_FNO", instrument="OPTIDX")
         
         if ce_ltp <= 0 or pe_ltp <= 0:
             return None, None
@@ -102,20 +115,43 @@ class ValueImbalanceStrategy:
         return ce_value, pe_value
 
     def log_state(self, nifty_spot, ce_ltp, pe_ltp, ce_val, pe_val, diff_pct, total_pnl):
-        logger.info(f"Nifty: {nifty_spot:.2f} | Straddle: {self.ce_strike}CE / {self.pe_strike}PE | CE: {ce_ltp:.2f} ({self.ce_lots}L) Val: {ce_val:.2f} | PE: {pe_ltp:.2f} ({self.pe_lots}L) Val: {pe_val:.2f} | PnL: {total_pnl:.2f} | Diff: {diff_pct:.2f}% | Adj: {self.adjustment_count}")
+        # Determine active threshold
+        if self.ce_lots == self.max_lots or self.pe_lots == self.max_lots:
+            active_thresh = self.threshold_strike + self.entry_diff_pct
+            thresh_label = "Strike"
+        else:
+            active_thresh = self.threshold_lot + self.entry_diff_pct
+            thresh_label = "Lot"
+
+        logger.info(f"Nifty: {nifty_spot:.2f} | Straddle: {self.ce_strike}CE / {self.pe_strike}PE | CE: {ce_ltp:.2f} ({self.ce_lots}L) Val: {ce_val:.2f} | PE: {pe_ltp:.2f} ({self.pe_lots}L) Val: {pe_val:.2f} | PnL: {total_pnl:.2f} | Diff: {diff_pct:.2f}% (Thresh: {active_thresh:.2f}% {thresh_label}) | Adj: {self.adjustment_count}")
 
     def exit_all_positions(self, reason):
         logger.warning(f"!!! EXITING ALL POSITIONS: {reason} !!!")
         if not self.dry_run:
             if self.ce_id:
-                self.helper.buy(str(self.ce_id), self.ce_lots * self.nifty_lot_size)
+                try:
+                    self.helper.buy(str(self.ce_id), self.ce_lots * self.nifty_lot_size)
+                except Exception as e:
+                    logger.error(f"Exit CE Error: {e}")
             if self.pe_id:
-                self.helper.buy(str(self.pe_id), self.pe_lots * self.nifty_lot_size)
+                try:
+                    self.helper.buy(str(self.pe_id), self.pe_lots * self.nifty_lot_size)
+                except Exception as e:
+                    logger.error(f"Exit PE Error: {e}")
         else:
             logger.info(f"[DRY RUN] Simulating Exit of all positions.")
 
     def reset_session(self):
         """Resets session-specific variables for a new entry cycle."""
+        if self.ce_id and self.pe_id:
+            logger.info(f"Unsubscribing from old strikes: {self.ce_id}, {self.pe_id}")
+            try:
+                self.helper.unsubscribe_instruments([
+                    ("NSE_FNO", str(self.ce_id), 15),
+                    ("NSE_FNO", str(self.pe_id), 15)
+                ])
+            except: pass
+
         self.ce_strike = None
         self.pe_strike = None
         self.ce_lots = self.initial_lots
@@ -137,10 +173,13 @@ class ValueImbalanceStrategy:
         logger.info(f"Starting Nifty Value Imbalance Strategy (Dry Run: {self.dry_run})")
         
         while True:
+            # Wait for market open if closed (EOD is 15:17)
+            self.helper.wait_for_market_open(self.dry_run, eod_time="15:17")
+            
             # 1. Initialization / Re-initialization
             self.reset_session()
             
-            nifty_spot = self.helper.get_ltp("NIFTY", instrument="INDEX")
+            nifty_spot = self.helper.get_ltp("NIFTY", exchange="IDX_I", instrument="INDEX")
             if nifty_spot == 0:
                  logger.warning("Direct LTP failed for NIFTY Index. Falling back to Option Chain...")
                  nearest_expiry = self.helper.get_nearest_expiry("NIFTY")
@@ -181,27 +220,52 @@ class ValueImbalanceStrategy:
             
             logger.info(f"New Cycle: {self.ce_strike} CE/PE | Lot Size: {self.nifty_lot_size} | Expiry: {self.expiry}")
             
+            # Subscribe to WebSocket for real-time updates
+            logger.info(f"Subscribing to WebSocket for {self.ce_symbol_name} (ID: {self.ce_id}) and {self.pe_symbol_name} (ID: {self.pe_id})")
+            try:
+                self.helper.subscribe_instruments([
+                    ("NSE_FNO", str(self.ce_id), 15),
+                    ("NSE_FNO", str(self.pe_id), 15)
+                ])
+                time.sleep(2) # Wait for initial ticks to arrive in live_data
+            except Exception as e:
+                logger.error(f"Failed to subscribe to WebSocket: {e}")
+            
             # Wait for premiums to balance
             logger.info(f"Waiting for premiums to balance at ATM {self.ce_strike}...")
+            balanced = False
             while True:
                 # Check 15:17 even during waiting
                 if datetime.now().strftime("%H:%M") >= "15:17":
-                    logger.info("Market nearing close. Ending strategy.")
-                    return
+                    logger.info("Market nearing close. Waiting for next cycle...")
+                    break
 
-                ce_price = self.helper.get_ltp(str(self.ce_id), exchange="NSE_FNO")
-                pe_price = self.helper.get_ltp(str(self.pe_id), exchange="NSE_FNO")
+                # Check if ATM has changed while waiting
+                spot = self.helper.get_ltp("NIFTY", exchange="IDX_I", instrument="INDEX")
+                if spot > 0:
+                    current_atm = int(round(spot / 50) * 50)
+                    if current_atm != self.ce_strike:
+                        logger.info(f"ATM strike shifted from {self.ce_strike} to {current_atm} (Spot: {spot:.2f}). Restarting entry cycle...")
+                        break
+
+                ce_price = self.helper.get_ltp(str(self.ce_id), exchange="NSE_FNO", instrument="OPTIDX")
+                pe_price = self.helper.get_ltp(str(self.pe_id), exchange="NSE_FNO", instrument="OPTIDX")
                 
                 if ce_price > 0 and pe_price > 0:
                     max_prem = max(ce_price, pe_price)
                     diff_pct = abs(ce_price - pe_price) / max_prem * 100
+                    logger.info(f"Waiting for Balance... CE: {ce_price:.2f} | PE: {pe_price:.2f} | Diff: {diff_pct:.1f}% (Target: < 10%)")
                     if diff_pct < 10.0:
                         self.ce_avg_price = ce_price
                         self.pe_avg_price = pe_price
                         self.entry_diff_pct = diff_pct
                         logger.info(f"Balanced! Entry Diff: {self.entry_diff_pct:.2f}%. Entering.")
+                        balanced = True
                         break
                 time.sleep(5)
+
+            if not balanced:
+                continue
 
             if not self.dry_run:
                 ce_oid = self.helper.sell(str(self.ce_id), self.initial_lots * self.nifty_lot_size)
@@ -224,20 +288,20 @@ class ValueImbalanceStrategy:
 
                 if current_time_str >= "15:17":
                     self.exit_all_positions(f"Intraday Auto-Exit at {current_time_str}")
-                    return # End for the day
+                    break
 
                 if not self.helper.is_market_open() and not self.dry_run:
                     self.exit_all_positions("Market Closed")
-                    return # End for the day
+                    break
                     
-                ce_ltp = self.helper.get_ltp(str(self.ce_id), exchange="NSE_FNO")
-                pe_ltp = self.helper.get_ltp(str(self.pe_id), exchange="NSE_FNO")
+                ce_ltp = self.helper.get_ltp(str(self.ce_id), exchange="NSE_FNO", instrument="OPTIDX")
+                pe_ltp = self.helper.get_ltp(str(self.pe_id), exchange="NSE_FNO", instrument="OPTIDX")
                 if ce_ltp <= 0 or pe_ltp <= 0: continue
                 
                 total_pnl = self._calculate_pnl(ce_ltp, pe_ltp)
                 
                 # Fetch current spot for checks
-                curr_nifty = self.helper.get_ltp("NIFTY", instrument="INDEX", exchange="NSE")
+                curr_nifty = self.helper.get_ltp("NIFTY", exchange="IDX_I", instrument="INDEX")
                 if curr_nifty == 0: curr_nifty = nifty_spot # Fallback to start spot
 
                 # --- Phase 5: Straddle Shift (100pt Move) ---
@@ -268,10 +332,14 @@ class ValueImbalanceStrategy:
                 # --- Hard Targets ---
                 if total_pnl >= self.profit_target:
                     self.exit_all_positions(f"Profit Target Reached: {total_pnl:.2f}")
-                    return 
+                    self.helper.wait_for_next_day_market_open(self.dry_run)
+                    cycle_active = False
+                    break
                 if total_pnl <= self.stop_loss:
                     self.exit_all_positions(f"Global Stop Loss Hit: {total_pnl:.2f}")
-                    return
+                    self.helper.wait_for_next_day_market_open(self.dry_run)
+                    cycle_active = False
+                    break
 
                 ce_val = self.ce_lots * ce_ltp
                 pe_val = self.pe_lots * pe_ltp
@@ -279,7 +347,7 @@ class ValueImbalanceStrategy:
                 diff_pct = abs(ce_val - pe_val) / max_val * 100
                 
                 if time.time() - last_log_time >= 2:
-                    curr_nifty = self.helper.get_ltp("NIFTY", instrument="INDEX", exchange="NSE")
+                    curr_nifty = self.helper.get_ltp("NIFTY", exchange="IDX_I", instrument="INDEX")
                     self.log_state(curr_nifty or nifty_spot, ce_ltp, pe_ltp, ce_val, pe_val, diff_pct, total_pnl)
                     last_log_time = time.time()
 
@@ -290,23 +358,32 @@ class ValueImbalanceStrategy:
                 winner_lots = self.ce_lots if winner == "CE" else self.pe_lots
                 loser_lots = self.pe_lots if winner == "CE" else self.ce_lots
 
-                # Phase 3: Lot Addition
-                if diff_pct > (self.threshold_lot + self.entry_diff_pct) and winner_lots < self.max_lots:
-                    logger.info(f"!!! Lot Addition !!! Diff: {diff_pct:.2f}%")
-                    symbol_id = str(self.ce_id) if winner == "CE" else str(self.pe_id)
-                    new_price = self.helper.get_ltp(symbol_id)
-                    if new_price > 0:
-                        old_lots = winner_lots
-                        if winner == "CE":
-                            self.ce_avg_price = ((self.ce_avg_price * old_lots) + new_price) / (old_lots + 1)
-                            self.ce_lots += 1
-                        else:
-                            self.pe_avg_price = ((self.pe_avg_price * old_lots) + new_price) / (old_lots + 1)
-                            self.pe_lots += 1
-                        if not self.dry_run: self.helper.sell(symbol_id, self.nifty_lot_size)
-                        self.adjustment_count += 1
-                        self.last_adjustment_time = current_bar
-                    continue 
+                # Phase 3: Lot Addition or Exit on Max Lots Reached
+                if diff_pct > (self.threshold_lot + self.entry_diff_pct):
+                    if winner_lots < self.max_lots:
+                        logger.info(f"!!! Lot Addition !!! Diff: {diff_pct:.2f}%")
+                        symbol_id = str(self.ce_id) if winner == "CE" else str(self.pe_id)
+                        new_price = self.helper.get_ltp(symbol_id, exchange="NSE_FNO", instrument="OPTIDX")
+                        if new_price > 0:
+                            old_lots = winner_lots
+                            if winner == "CE":
+                                self.ce_avg_price = ((self.ce_avg_price * old_lots) + new_price) / (old_lots + 1)
+                                self.ce_lots += 1
+                            else:
+                                self.pe_avg_price = ((self.pe_avg_price * old_lots) + new_price) / (old_lots + 1)
+                                self.pe_lots += 1
+                            if not self.dry_run: self.helper.sell(symbol_id, self.nifty_lot_size)
+                            self.adjustment_count += 1
+                            self.last_adjustment_time = current_bar
+                        continue
+                    else:
+                        # Winner leg already at max lots, cannot adjust further. Close all and re-enter.
+                        self.exit_all_positions(
+                            f"Winner leg ({winner}) already at max lots ({self.max_lots}) and requires adjustment. "
+                            f"Closing all positions to start a new cycle."
+                        )
+                        cycle_active = False
+                        break 
 
                 # Phase 4 & 5: Strike Adjustment
                 if diff_pct > (self.threshold_strike + self.entry_diff_pct) and (self.ce_lots == self.max_lots or self.pe_lots == self.max_lots):
@@ -318,7 +395,7 @@ class ValueImbalanceStrategy:
                     if not new_strike: continue
                     old_id = str(self.ce_id) if loser == "CE" else str(self.pe_id)
                     old_avg = self.ce_avg_price if loser == "CE" else self.pe_avg_price
-                    exit_price = self.helper.get_ltp(old_id)
+                    exit_price = self.helper.get_ltp(old_id, exchange="NSE_FNO", instrument="OPTIDX")
                     if exit_price > 0:
                         realized = (old_avg - exit_price) * (loser_lots * self.nifty_lot_size)
                         self.realized_pnl += realized
@@ -326,6 +403,17 @@ class ValueImbalanceStrategy:
                         new_quote = self.helper.option("NIFTY", new_strike, loser)
                         if new_quote:
                             new_id = str(new_quote['CONTRACT_INFO']['SECURITY_ID'])
+                            if 'CONTRACT_INFO' in new_quote:
+                                self.nifty_lot_size = int(new_quote['CONTRACT_INFO'].get('LOT_SIZE', self.nifty_lot_size))
+                            
+                            # Update WebSocket subscription
+                            logger.info(f"Updating WebSocket: Unsubscribing {old_id}, Subscribing {new_id}")
+                            try:
+                                self.helper.unsubscribe_instruments([("NSE_FNO", str(old_id), 15)])
+                                self.helper.subscribe_instruments([("NSE_FNO", str(new_id), 15)])
+                            except Exception as ws_err:
+                                logger.error(f"WebSocket update failed: {ws_err}")
+
                             if not self.dry_run: self.helper.sell(new_id, loser_lots * self.nifty_lot_size)
                             if loser == "CE":
                                 self.ce_strike = new_strike
@@ -374,12 +462,46 @@ class ValueImbalanceStrategy:
         return int(best_strike), best_price
 
 if __name__ == "__main__":
-    # Default to dry run
-    # Usage: python strategies/nifty_value_imbalance.py [dry|live] [initial_lots]
-    mode = sys.argv[1] if len(sys.argv) > 1 else "dry"
-    initial_lots = int(sys.argv[2]) if len(sys.argv) > 2 else 1
-    
-    is_dry = True if mode == "dry" else False
-    
-    strat = ValueImbalanceStrategy(dry_run=is_dry, initial_lots=initial_lots)
+    parser = argparse.ArgumentParser(
+        description="Nifty Value Imbalance Straddle Strategy",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  # Dry run, 1 lot, default INR 4000 profit/loss targets
+  python strategies/nifty_value_imbalance.py
+
+  # Live run, 2 lots, default targets
+  python strategies/nifty_value_imbalance.py --live --lots 2
+
+  # Live run, custom profit and stop loss targets
+  python strategies/nifty_value_imbalance.py --live --lots 1 --target-profit 5000 --stop-loss 3000
+""")
+
+    # Run mode
+    parser.add_argument("--live", action="store_true", default=False,
+                        help="Run in LIVE mode (default: dry run)")
+
+    # Position sizing
+    parser.add_argument("--lots", type=int, default=1, metavar="N",
+                        help="Initial lots per leg (default: 1)")
+
+    # Risk targets
+    parser.add_argument("--target-profit", type=float, default=4000.0, metavar="AMT",
+                        help="Global profit target in INR (default: 4000.0)")
+    parser.add_argument("--stop-loss", type=float, default=4000.0, metavar="AMT",
+                        help="Global stop loss in INR (default: 4000.0). Can be passed as positive or negative.")
+
+    args = parser.parse_args()
+
+    mode_label = "LIVE" if args.live else "DRY"
+    stop_loss_val = abs(args.stop_loss)
+
+    logger.info(f"Config -> Mode: {mode_label} | Lots: {args.lots} | Profit Target: INR {args.target_profit:.0f} | Stop Loss: -INR {stop_loss_val:.0f}")
+
+    strat = ValueImbalanceStrategy(
+        dry_run=not args.live,
+        initial_lots=args.lots,
+        profit_target=args.target_profit,
+        stop_loss=stop_loss_val,
+    )
     strat.run()

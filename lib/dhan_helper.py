@@ -179,8 +179,10 @@ class DhanHelper:
         }
         search_symbol = alias_map.get(symbol, symbol)
         
+        lookup_exch = "NSE" if exchange.upper() == "IDX_I" else exchange.upper()
+        
         # Explicit lookup
-        mask = (df['EXCH_ID'] == exchange) & \
+        mask = (df['EXCH_ID'] == lookup_exch) & \
                (df['INSTRUMENT'] == 'INDEX') & \
                (df['SYMBOL_NAME'] == search_symbol)
         
@@ -292,10 +294,12 @@ class DhanHelper:
             return [] if return_multiple else None
         
         if symbol:
-            symbol_up = symbol.upper()
+            symbol_str = str(symbol)
+            symbol_up = symbol_str.upper()
             
-            # FAST PATH: Check the symbol map first for exact match on SYMBOL_NAME
-            if symbol_up in self._symbol_map:
+            if symbol_str.isdigit():
+                exact_match = df[df['SECURITY_ID'] == int(symbol_str)]
+            elif symbol_up in self._symbol_map:
                 exact_match = self._symbol_map[symbol_up]
             else:
                 # 1. Try Exact Match First (Whole Dataframe) - includes UNDERLYING and DISPLAY
@@ -536,7 +540,12 @@ class DhanHelper:
         exchange_segment = "NSE_FNO" if exchange == "NSE" else "BSE_FNO"
         
         # Fetch quote
-        res = self.dhan.quote_data(securities={exchange_segment: [security_id]})
+        try:
+            res = self.dhan.quote_data(securities={exchange_segment: [security_id]})
+        except Exception as e:
+            logger.error(f"Exception fetching option quote: {e}")
+            res = None
+
         quote = self._parse_market_data(res, exchange_segment, security_id)
         
         if quote:
@@ -612,7 +621,12 @@ class DhanHelper:
         exchange_segment = "NSE_FNO" if exchange == "NSE" else "BSE_FNO"
         
         # Fetch quote
-        res = self.dhan.quote_data(securities={exchange_segment: [security_id]})
+        try:
+            res = self.dhan.quote_data(securities={exchange_segment: [security_id]})
+        except Exception as e:
+            logger.error(f"Exception fetching future quote: {e}")
+            res = None
+
         quote = self._parse_market_data(res, exchange_segment, security_id)
         
         if quote:
@@ -694,6 +708,19 @@ class DhanHelper:
         """
         sec = self._resolve_symbol(symbol)
         if sec:
+            instrument = sec.get('INSTRUMENT', '')
+            if instrument == 'INDEX':
+                underlying = sec.get('SYMBOL_NAME', symbol).upper()
+                df = self._load_master_list()
+                fo_contracts = df[
+                    (df['UNDERLYING_SYMBOL'] == underlying) & 
+                    (df['INSTRUMENT'].isin(['OPTIDX', 'FUTIDX', 'OPTSTK', 'FUTSTK']))
+                ]
+                if not fo_contracts.empty:
+                    try:
+                        return int(fo_contracts.iloc[0].get('LOT_SIZE', 1))
+                    except:
+                        pass
             try:
                 return int(sec.get('LOT_SIZE', 1))
             except:
@@ -808,10 +835,14 @@ class DhanHelper:
         results = {sym: 0.0 for sym in symbols}
             
         # Try ohlc_data first (Proven more reliable for Equities)
-        res = self.dhan.ohlc_data(securities=securities_to_fetch)
+        try:
+            res = self.dhan.ohlc_data(securities=securities_to_fetch)
+        except Exception as e:
+            logger.warning(f"Bulk ohlc_data raised an exception: {e}, falling back to sequential...")
+            res = None
         
         # If bulk fails, fallback to sequential fetch to save what we can
-        if res.get('status') != 'success':
+        if not isinstance(res, dict) or res.get('status') != 'success':
             logger.warning("Bulk ohlc_data failed, trying individual fetches...")
             for sym in symbols:
                 # Use simplified ltp() call which handles lookup & fetch
@@ -880,7 +911,7 @@ class DhanHelper:
         # Resolve underlying info to get segments and expiries
         und = self.find_equity(underlying)
         if not und:
-            und = self.get_security_id(underlying)
+            und = self.get_security_id(underlying, quiet=True)
             
         if not und:
             logger.warning(f"Underlying not found: {underlying}")
@@ -924,7 +955,7 @@ class DhanHelper:
         # Resolve underlying info
         und = self.find_equity(underlying)
         if not und:
-            und = self.get_security_id(underlying)
+            und = self.get_security_id(underlying, quiet=True)
             
         if not und:
             logger.warning(f"Underlying not found: {underlying}")
@@ -956,22 +987,22 @@ class DhanHelper:
             res['CONTRACT_INFO'] = sec.to_dict() if hasattr(sec, 'to_dict') else dict(sec)
         return res
     
-    def buy(self, symbol: str, qty: int, price: Optional[float] = None, product: str = "INTRA") -> Optional[str]:
+    def buy(self, symbol: str, qty: int, price: Optional[float] = None, product: str = "INTRADAY") -> Optional[str]:
         """
         Place a BUY order. If price is None, it's a MARKET order.
+        Accepts numeric security-ID strings (e.g. "56384") as well as symbol names.
         """
-        # Try fast lookup
-        sec = self.find_equity(symbol)
-        if not sec:
-            sec = self.get_security_id(symbol)
-            
+        sec = self.get_security_id(symbol, quiet=True)
+
         if not sec:
             logger.error(f"Could not resolve symbol for buy order: {symbol}")
             return None
-            
+
+        # _auto_detect_segment maps raw SEGMENT codes (D/E/I) -> NSE_FNO / NSE_EQ etc.
+        exch_seg = self._auto_detect_segment(sec)
         return self.place_order(
             security_id=int(sec['SECURITY_ID']),
-            exchange_segment=sec['SEGMENT'],
+            exchange_segment=exch_seg,
             transaction_type=self.BUY,
             quantity=qty,
             order_type=self.LIMIT if price else self.MARKET,
@@ -979,22 +1010,22 @@ class DhanHelper:
             price=price or 0.0
         )
 
-    def sell(self, symbol: str, qty: int, price: Optional[float] = None, product: str = "INTRA") -> Optional[str]:
+    def sell(self, symbol: str, qty: int, price: Optional[float] = None, product: str = "INTRADAY") -> Optional[str]:
         """
         Place a SELL order. If price is None, it's a MARKET order.
+        Accepts numeric security-ID strings (e.g. "56384") as well as symbol names.
         """
-        # Try fast lookup
-        sec = self.find_equity(symbol)
-        if not sec:
-            sec = self.get_security_id(symbol)
-            
+        sec = self.get_security_id(symbol, quiet=True)
+
         if not sec:
             logger.error(f"Could not resolve symbol for sell order: {symbol}")
             return None
-            
+
+        # _auto_detect_segment maps raw SEGMENT codes (D/E/I) -> NSE_FNO / NSE_EQ etc.
+        exch_seg = self._auto_detect_segment(sec)
         return self.place_order(
             security_id=int(sec['SECURITY_ID']),
-            exchange_segment=sec['SEGMENT'],
+            exchange_segment=exch_seg,
             transaction_type=self.SELL,
             quantity=qty,
             order_type=self.LIMIT if price else self.MARKET,
@@ -1048,12 +1079,13 @@ class DhanHelper:
         """Fetch available margin in the account."""
         try:
             res = self.dhan.get_fund_limits()
-            if res.get('status') == 'success':
+            if isinstance(res, dict) and res.get('status') == 'success':
                 data = res.get('data', {})
                 # Handle misspelled API field and standard fallbacks
                 funds = data.get('availabelBalance') or data.get('availableBalance') or data.get('availabelMargin') or 0.0
                 return float(funds)
-            logger.error(f"Failed to fetch funds: {res.get('remarks')}")
+            error_msg = res.get('remarks') if isinstance(res, dict) else str(res)
+            logger.error(f"Failed to fetch funds: {error_msg}")
         except Exception as e:
             logger.error(f"Exception in get_available_funds: {e}")
         return 0.0
@@ -1115,10 +1147,11 @@ class DhanHelper:
         """Fetch current day positions as a Pandas DataFrame."""
         try:
             res = self.dhan.get_positions()
-            if res.get('status') == 'success':
+            if isinstance(res, dict) and res.get('status') == 'success':
                 data = res.get('data', [])
                 return pd.DataFrame(data)
-            logger.error(f"Failed to fetch positions: {res.get('remarks')}")
+            error_msg = res.get('remarks') if isinstance(res, dict) else str(res)
+            logger.error(f"Failed to fetch positions: {error_msg}")
         except Exception as e:
             logger.error(f"Exception in get_positions: {e}")
         return pd.DataFrame()
@@ -1127,10 +1160,11 @@ class DhanHelper:
         """Fetch current holdings as a Pandas DataFrame."""
         try:
             res = self.dhan.get_holdings()
-            if res.get('status') == 'success':
+            if isinstance(res, dict) and res.get('status') == 'success':
                 data = res.get('data', [])
                 return pd.DataFrame(data)
-            logger.error(f"Failed to fetch holdings: {res.get('remarks')}")
+            error_msg = res.get('remarks') if isinstance(res, dict) else str(res)
+            logger.error(f"Failed to fetch holdings: {error_msg}")
         except Exception as e:
             logger.error(f"Exception in get_holdings: {e}")
         return pd.DataFrame()
@@ -1155,6 +1189,10 @@ class DhanHelper:
         """
         order_type = order_type or self.MARKET
         product_type = product_type or self.INTRA
+        
+        # Normalize product_type in case 'INTRA' is passed
+        if isinstance(product_type, str) and product_type.upper() == "INTRA":
+            product_type = "INTRADAY"
         
         try:
             # Check for AMO parameters in kwargs
@@ -1203,12 +1241,13 @@ class DhanHelper:
                     **kwargs
                 )
 
-            if res.get('status') == 'success':
+            if isinstance(res, dict) and res.get('status') == 'success':
                 order_id = res.get('data', {}).get('orderId')
                 logger.info(f"Order Placed Successfully! Order ID: {order_id}")
                 return order_id
             else:
-                logger.error(f"Order Placement Failed: {res.get('remarks')}")
+                error_msg = res.get('remarks') if isinstance(res, dict) else str(res)
+                logger.error(f"Order Placement Failed: {error_msg}")
         except Exception as e:
             logger.error(f"Exception in place_order: {e}")
         return None
@@ -1283,10 +1322,11 @@ class DhanHelper:
                 disclosed_quantity=0,
                 validity='DAY'
             )
-            if res.get('status') == 'success':
+            if isinstance(res, dict) and res.get('status') == 'success':
                 logger.info(f"Order {order_id} modified successfully.")
                 return True
-            logger.error(f"Order modification failed: {res.get('remarks')}")
+            error_msg = res.get('remarks') if isinstance(res, dict) else str(res)
+            logger.error(f"Order modification failed: {error_msg}")
         except Exception as e:
             logger.error(f"Exception in modify_order: {e}")
         return False
@@ -1294,6 +1334,9 @@ class DhanHelper:
     # --- MARKET DATA ---
     def _parse_market_data(self, response: Dict, segment: str, security_id: Any) -> Dict:
         """Helper to parse triple-nested data from Dhan response."""
+        if not isinstance(response, dict):
+            logger.error(f"API Response is not a dict: {response}")
+            return {}
         if response.get('status') != 'success':
             logger.error(f"API Response Failure: {response.get('remarks')}")
             return {}
@@ -1398,10 +1441,14 @@ class DhanHelper:
             ticker_data = self._parse_market_data(res, api_seg, sid)
             price = float(ticker_data.get('last_price', 0))
             
-            if res.get('status') != 'success' or price == 0.0:
+            if not isinstance(res, dict) or res.get('status') != 'success' or price == 0.0:
                  # Fallback to quote_data
                  logger.debug(f"ohlc_data failed or empty for {instruments}, trying quote_data...")
-                 res = self.dhan.quote_data(securities=instruments)
+                 try:
+                     res = self.dhan.quote_data(securities=instruments)
+                 except Exception as e:
+                     logger.error(f"Exception fetching quote in get_ltp fallback: {e}")
+                     res = None
                  ticker_data = self._parse_market_data(res, api_seg, sid)
                  price = float(ticker_data.get('last_price', 0))
             
@@ -1409,7 +1456,7 @@ class DhanHelper:
                 self._ltp_cache[sid] = (price, time.time())
                 return price
             
-            if res.get('status') != 'success':
+            if not isinstance(res, dict) or res.get('status') != 'success':
                 logger.error(f"API Response Failure for {instruments}: {res}")
                 return 0.0
             
@@ -1469,11 +1516,20 @@ class DhanHelper:
             instruments = {api_seg: [sid]}
             
             # Use ohlc_data as primary source (Verified working for NSE_EQ)
-            res = self.dhan.ohlc_data(securities=instruments)
+            try:
+                res = self.dhan.ohlc_data(securities=instruments)
+            except Exception as e:
+                logger.error(f"Exception calling ohlc_data in get_ohlc: {e}")
+                res = None
             
-            if res.get('status') != 'success':
+            if not isinstance(res, dict) or res.get('status') != 'success':
                  # Fallback
-                 res = self.dhan.quote_data(securities=instruments)
+                 logger.debug(f"ohlc_data failed or empty for {instruments}, trying quote_data in get_ohlc...")
+                 try:
+                     res = self.dhan.quote_data(securities=instruments)
+                 except Exception as e:
+                     logger.error(f"Exception calling quote_data fallback in get_ohlc: {e}")
+                     res = None
                  
             return self._parse_market_data(res, api_seg, sid)
         except Exception as e:
@@ -1510,12 +1566,135 @@ class DhanHelper:
                     to_date=to_date
                 )
             
-            if res.get('status') == 'success':
+            if isinstance(res, dict) and res.get('status') == 'success':
                 return pd.DataFrame(res.get('data', []))
-            logger.error(f"Historical data fetch failed: {res.get('remarks')}")
+            error_msg = res.get('remarks') if isinstance(res, dict) else str(res)
+            logger.error(f"Historical data fetch failed: {error_msg}")
         except Exception as e:
             logger.error(f"Exception in get_historical_data: {e}")
         return pd.DataFrame()
+
+    def get_prev_day_levels(self, symbol: str = "NIFTY", days_back: int = 5) -> Optional[Dict[str, float]]:
+        """
+        Fetch the previous trading day's High (PDH), Low (PDL), and Close (PDC)
+        for any index or equity symbol.
+
+        Automatically resolves the symbol to its security_id, exchange_segment,
+        and instrument_type using the master list, then fetches daily OHLC data
+        and returns the most recent completed day's values.
+
+        Args:
+            symbol:    Symbol name as it appears in the master list.
+                       - For Nifty 50 index: "NIFTY"
+                       - For BankNifty index: "BANKNIFTY"
+                       - For stocks: "RELIANCE", "TCS", etc.
+            days_back: How many calendar days to look back when fetching history
+                       to ensure at least 2 trading days of data are returned.
+                       Default is 5 (handles long weekends & exchange holidays).
+
+        Returns:
+            Dict with keys 'high', 'low', 'close' as floats if successful.
+            Returns None if data cannot be fetched (e.g., bad symbol, API error).
+
+        Example::
+
+            levels = helper.get_prev_day_levels("NIFTY")
+            if levels:
+                print(f"PDH: {levels['high']}, PDL: {levels['low']}, PDC: {levels['close']}")
+
+            # For BankNifty
+            bn_levels = helper.get_prev_day_levels("BANKNIFTY")
+
+            # For equities
+            rel_levels = helper.get_prev_day_levels("RELIANCE")
+        """
+        from datetime import timedelta
+
+        try:
+            # --- 1. Resolve symbol to security info ---
+            sec = None
+            symbol_up = symbol.upper()
+
+            # Try index first (covers NIFTY, BANKNIFTY, etc.)
+            sec = self.find_index(symbol_up, exchange="IDX_I")
+            if sec:
+                exchange_segment = "IDX_I"
+                instrument_type  = "INDEX"
+            else:
+                # Try equity
+                sec = self.find_equity(symbol_up)
+                if sec:
+                    exchange_segment = "NSE_EQ"
+                    instrument_type  = "EQUITY"
+                else:
+                    logger.warning(f"get_prev_day_levels: Symbol '{symbol}' not found in master list.")
+                    return None
+
+            security_id = str(int(sec.get("SECURITY_ID", 0)))
+            if security_id == "0":
+                logger.warning(f"get_prev_day_levels: Could not resolve SECURITY_ID for '{symbol}'.")
+                return None
+
+            # --- 2. Build date range ---
+            today     = datetime.now().date()
+            from_date = (today - timedelta(days=days_back)).strftime("%Y-%m-%d")
+            to_date   = today.strftime("%Y-%m-%d")
+
+            logger.info(f"Fetching previous day OHLC for {symbol_up} (ID: {security_id}) ...")
+            hist_df = self.get_historical_data(
+                security_id      = security_id,
+                exchange_segment = exchange_segment,
+                instrument_type  = instrument_type,
+                from_date        = from_date,
+                to_date          = to_date,
+                interval         = "DAILY"
+            )
+
+            if hist_df.empty or len(hist_df) < 2:
+                logger.warning(
+                    f"get_prev_day_levels: Not enough historical rows for '{symbol}' "
+                    f"({len(hist_df)} row(s) returned). Need at least 2."
+                )
+                return None
+
+            # --- 3. Normalise column names (API may return 'high'/'h', 'low'/'l', 'close'/'c') ---
+            col_map = {}
+            for col in hist_df.columns:
+                col_lower = col.lower()
+                if col_lower in ("high",  "h"): col_map[col] = "high"
+                elif col_lower in ("low",  "l"): col_map[col] = "low"
+                elif col_lower in ("close","c"): col_map[col] = "close"
+            hist_df = hist_df.rename(columns=col_map)
+
+            if not all(k in hist_df.columns for k in ("high", "low", "close")):
+                logger.warning(
+                    f"get_prev_day_levels: Unexpected columns in history response: {list(hist_df.columns)}"
+                )
+                return None
+
+            # The last row is today's partial/ongoing candle; second-to-last is previous day
+            prev_row = hist_df.iloc[-2]
+            levels = {
+                "high":  float(prev_row["high"]),
+                "low":   float(prev_row["low"]),
+                "close": float(prev_row["close"]),
+            }
+
+            # --- 4. Log a clean banner ---
+            separator = "=" * 60
+            logger.info(separator)
+            logger.info(f"        {symbol_up} — PREVIOUS DAY KEY LEVELS")
+            logger.info(separator)
+            logger.info(f"  PDH  (Previous Day High)  : {levels['high']:.2f}")
+            logger.info(f"  PDL  (Previous Day Low)   : {levels['low']:.2f}")
+            logger.info(f"  PDC  (Previous Day Close) : {levels['close']:.2f}")
+            logger.info(separator)
+
+            return levels
+
+        except Exception as e:
+            logger.error(f"get_prev_day_levels: Exception for '{symbol}': {e}")
+            return None
 
     # --- BULK OPERATIONS ---
     def cancel_all_orders(self) -> int:
@@ -1523,15 +1702,16 @@ class DhanHelper:
         cancelled_count = 0
         try:
             res = self.dhan.get_order_list()
-            if res.get('status') == 'success':
+            if isinstance(res, dict) and res.get('status') == 'success':
                 orders = res.get('data', [])
                 for order in orders:
                     if order.get('orderStatus') in ['PENDING', 'TRANSIT']:
                         cancel_res = self.dhan.cancel_order(order.get('orderId'))
-                        if cancel_res.get('status') == 'success':
+                        if isinstance(cancel_res, dict) and cancel_res.get('status') == 'success':
                             cancelled_count += 1
             else:
-                logger.error(f"Failed to fetch order list for cancellation: {res.get('remarks')}")
+                error_msg = res.get('remarks') if isinstance(res, dict) else str(res)
+                logger.error(f"Failed to fetch order list for cancellation: {error_msg}")
         except Exception as e:
             logger.error(f"Exception in cancel_all_orders: {e}")
         return cancelled_count
@@ -1645,6 +1825,50 @@ class DhanHelper:
     # --- OPTION CHAIN ---
 
 
+    def get_expiry_list(self, under_security_id: int, under_exchange_segment: str = "IDX_I") -> List[str]:
+        """Fetch available expiry dates for an underlying with caching."""
+        # Check cache (1 hour)
+        if under_security_id in self._expiry_cache:
+            data, timestamp = self._expiry_cache[under_security_id]
+            if time.time() - timestamp < 3600:
+                return data
+
+        try:
+            time.sleep(1) # Rate limit protection
+            res = self.dhan.expiry_list(
+                under_security_id=under_security_id,
+                under_exchange_segment=under_exchange_segment
+            )
+            if isinstance(res, dict) and res.get('status') == 'success':
+                # Dhan nesting varies: res['data'] or res['data']['data'] or res['data']['data']['data']
+                data = res.get('data', {})
+                
+                # Check for triple/double nesting
+                if isinstance(data, dict) and 'data' in data:
+                    data = data['data']
+                if isinstance(data, dict) and 'data' in data:
+                    data = data['data']
+                
+                expiries = []
+                if isinstance(data, list):
+                    expiries = data
+                elif isinstance(data, dict):
+                    expiries = data.get('data', [])
+                    
+                # Sort to ensure they are chronological
+                if expiries:
+                    try:
+                        expiries.sort(key=lambda x: datetime.strptime(x, "%Y-%m-%d"))
+                    except: pass
+                
+                if expiries:
+                    self._expiry_cache[under_security_id] = (expiries, time.time())
+                return expiries
+            else:
+                logger.error(f"Failed to fetch expiry list: {res.get('remarks')}")
+        except Exception as e:
+            logger.error(f"Exception in get_expiry_list: {e}")
+        return []
     # --- FOREVER ORDERS (GTT) ---
     def place_forever_order(self, 
                              security_id: str, 
@@ -1669,7 +1893,7 @@ class DhanHelper:
                 price=price,
                 trigger_Price=trigger_price
             )
-            if res.get('status') == 'success':
+            if isinstance(res, dict) and res.get('status') == 'success':
                 return res.get('data', {}).get('orderId')
         except Exception as e:
             logger.error(f"Exception in place_forever_order: {e}")
@@ -1680,7 +1904,7 @@ class DhanHelper:
         """Trigger TPIN generation request from CDSL."""
         try:
             res = self.dhan.generate_tpin()
-            return res.get('status') == 'success'
+            return isinstance(res, dict) and res.get('status') == 'success'
         except Exception as e:
             logger.error(f"Exception in generate_tpin: {e}")
         return False
@@ -1698,7 +1922,7 @@ class DhanHelper:
                 logger.warning("get_edis_status requires an ISIN parameter")
                 return {}
             
-            if res.get('status') == 'success':
+            if isinstance(res, dict) and res.get('status') == 'success':
                 return res.get('data', {})
         except Exception as e:
             logger.error(f"Exception in get_edis_status: {e}")
@@ -1708,7 +1932,7 @@ class DhanHelper:
         """Open browser for TPIN entry in eDIS form."""
         try:
             res = self.dhan.open_browser_for_tpin(isin=isin, qty=qty, exchange=exchange)
-            return res.get('status') == 'success'
+            return isinstance(res, dict) and res.get('status') == 'success'
         except Exception as e:
             logger.error(f"Exception in open_browser_for_tpin: {e}")
         return False
@@ -1718,9 +1942,10 @@ class DhanHelper:
         """Fetch all orders for the day."""
         try:
             res = self.dhan.get_order_list()
-            if res.get('status') == 'success':
+            if isinstance(res, dict) and res.get('status') == 'success':
                 return res.get('data', [])
-            logger.error(f"Failed to fetch order list: {res.get('remarks')}")
+            error_msg = res.get('remarks') if isinstance(res, dict) else str(res)
+            logger.error(f"Failed to fetch order list: {error_msg}")
         except Exception as e:
             logger.error(f"Exception in get_order_list: {e}")
         return []
@@ -1729,9 +1954,10 @@ class DhanHelper:
         """Fetch details of a specific order by order ID."""
         try:
             res = self.dhan.get_order_by_id(order_id)
-            if res.get('status') == 'success':
+            if isinstance(res, dict) and res.get('status') == 'success':
                 return res.get('data', {})
-            logger.error(f"Failed to fetch order by ID: {res.get('remarks')}")
+            error_msg = res.get('remarks') if isinstance(res, dict) else str(res)
+            logger.error(f"Failed to fetch order by ID: {error_msg}")
         except Exception as e:
             logger.error(f"Exception in get_order_by_id: {e}")
         return None
@@ -1739,10 +1965,11 @@ class DhanHelper:
     def get_order_by_correlation_id(self, correlation_id: str) -> Optional[Dict]:
         """Fetch order details by correlation ID."""
         try:
-            res = self.dhan.get_order_by_corelationID(correlation_id)
-            if res.get('status') == 'success':
+            res = self.dhan.get_order_by_correlationID(correlation_id)
+            if isinstance(res, dict) and res.get('status') == 'success':
                 return res.get('data', {})
-            logger.error(f"Failed to fetch order by correlation ID: {res.get('remarks')}")
+            error_msg = res.get('remarks') if isinstance(res, dict) else str(res)
+            logger.error(f"Failed to fetch order by correlation ID: {error_msg}")
         except Exception as e:
             logger.error(f"Exception in get_order_by_correlation_id: {e}")
         return None
@@ -1751,10 +1978,11 @@ class DhanHelper:
         """Cancel a pending order."""
         try:
             res = self.dhan.cancel_order(order_id)
-            if res.get('status') == 'success':
+            if isinstance(res, dict) and res.get('status') == 'success':
                 logger.info(f"Order {order_id} cancelled successfully.")
                 return True
-            logger.error(f"Order cancellation failed: {res.get('remarks')}")
+            error_msg = res.get('remarks') if isinstance(res, dict) else str(res)
+            logger.error(f"Order cancellation failed: {error_msg}")
         except Exception as e:
             logger.error(f"Exception in cancel_order: {e}")
         return False
@@ -1766,9 +1994,10 @@ class DhanHelper:
         """
         try:
             res = self.dhan.get_trade_book(order_id) if order_id else self.dhan.get_trade_book()
-            if res.get('status') == 'success':
+            if isinstance(res, dict) and res.get('status') == 'success':
                 return res.get('data', [])
-            logger.error(f"Failed to fetch trade book: {res.get('remarks')}")
+            error_msg = res.get('remarks') if isinstance(res, dict) else str(res)
+            logger.error(f"Failed to fetch trade book: {error_msg}")
         except Exception as e:
             logger.error(f"Exception in get_trade_book: {e}")
         return []
@@ -1781,9 +2010,10 @@ class DhanHelper:
         """
         try:
             res = self.dhan.get_trade_history(from_date, to_date, page_number)
-            if res.get('status') == 'success':
+            if isinstance(res, dict) and res.get('status') == 'success':
                 return pd.DataFrame(res.get('data', []))
-            logger.error(f"Failed to fetch trade history: {res.get('remarks')}")
+            error_msg = res.get('remarks') if isinstance(res, dict) else str(res)
+            logger.error(f"Failed to fetch trade history: {error_msg}")
         except Exception as e:
             logger.error(f"Exception in get_trade_history: {e}")
         return pd.DataFrame()
@@ -1860,9 +2090,10 @@ class DhanHelper:
         """
         try:
             res = self.dhan.ticker_data(securities)
-            if res.get('status') == 'success':
+            if isinstance(res, dict) and res.get('status') == 'success':
                 return res.get('data', {})
-            logger.error(f"Failed to fetch ticker data: {res.get('remarks')}")
+            error_msg = res.get('remarks') if isinstance(res, dict) else str(res)
+            logger.error(f"Failed to fetch ticker data: {error_msg}")
         except Exception as e:
             logger.error(f"Exception in get_ticker_data: {e}")
         return {}
@@ -1874,12 +2105,13 @@ class DhanHelper:
         """
         try:
             res = self.dhan.quote_data(securities=securities)
-            if res.get('status') == 'success':
+            if isinstance(res, dict) and res.get('status') == 'success':
                 data = res.get('data', {})
-                if 'data' in data:
+                if isinstance(data, dict) and 'data' in data:
                     return data['data']
                 return data
-            logger.error(f"Failed to fetch quote data: {res.get('remarks')}")
+            error_msg = res.get('remarks') if isinstance(res, dict) else str(res)
+            logger.error(f"Failed to fetch quote data: {error_msg}")
         except Exception as e:
             logger.error(f"Exception in get_quote_data: {e}")
         return {}
@@ -1897,81 +2129,63 @@ class DhanHelper:
                                to_date: str,
                                interval: int = 1) -> pd.DataFrame:
         """
-        Fetch historical data for expired options using manual API call (SDK missing method).
+        Fetch historical data for expired options using the SDK's native method.
         """
         try:
             logger.info(f"Fetching Expired Options Data for ID {security_id} ({from_date} to {to_date})")
             
-            # --- Manual HTTP Request ---
-            # Endpoint: https://api.dhan.co/v2/charts/rollingoption
-            url = "https://api.dhan.co/v2/charts/rollingoption"
+            res = self.dhan.expired_options_data(
+                security_id=str(security_id),
+                exchange_segment=exchange_segment,
+                instrument_type=instrument_type,
+                expiry_flag=expiry_flag,
+                expiry_code=int(expiry_code),
+                strike=str(strike),
+                drv_option_type=drv_option_type.upper(),
+                required_data=required_data,
+                from_date=from_date,
+                to_date=to_date,
+                interval=interval
+            )
             
-            # Get credentials
-            access_token = getattr(self.dhan.dhan_http, 'access_token', None)
-            client_id = getattr(self.dhan.dhan_http, 'client_id', None)
-            
-            if not access_token:
-                logger.error("Could not retrieve access_token for manual API call.")
-                return pd.DataFrame()
-                
-            headers = {
-                "access-token": access_token,
-                "client-id": client_id,
-                "Content-Type": "application/json",
-                "Accept": "application/json"
-            }
-            
-            payload = {
-                "dhanClientId": client_id,
-                "exchangeSegment": exchange_segment,
-                "interval": str(interval),
-                "securityId": str(security_id),
-                "instrument": instrument_type,
-                "expiryFlag": expiry_flag,
-                "expiryCode": int(expiry_code),
-                "strike": str(strike),
-                "drvOptionType": drv_option_type.upper(),
-                "requiredData": required_data,
-                "fromDate": from_date,
-                "toDate": to_date
-            }
-            
-            res = requests.post(url, headers=headers, json=payload)
-            try:
-                res_json = res.json()
-            except:
-                logger.error(f"Failed to parse JSON response: {res.text}")
-                return pd.DataFrame()
-            
-            if res_json.get('status') == 'success' or 'data' in res_json:
-                data = res_json.get('data', {})
-                
-                # The response structure is { "data": { "ce": { ... }, "pe": { ... } } }
-                if 'data' in data and isinstance(data['data'], dict):
-                    data = data['data']
-                
-                target_key = "ce" if drv_option_type.upper() == "CALL" else "pe"
-                inner_data = data.get(target_key)
-                
-                if inner_data and isinstance(inner_data, dict):
-                    # Filter out empty lists to prevent "All arrays must be of the same length" error
-                    clean_inner = {k: v for k, v in inner_data.items() if isinstance(v, list) and len(v) > 0}
-                    if clean_inner:
-                        df = pd.DataFrame(clean_inner)
-                        # Add option type column
-                        df['option_type'] = drv_option_type.upper()
-                        # Convert timestamp if present
-                        if 'timestamp' in df.columns:
-                            # Convert Epoch UTC to IST (UTC+5:30)
-                            df['datetime'] = pd.to_datetime(df['timestamp'], unit='s').dt.tz_localize('UTC').dt.tz_convert('Asia/Kolkata').dt.tz_localize(None)
-                        return df
-                
-                logger.warning(f"No {target_key} data found in response.")
+            if isinstance(res, dict) and res.get('status') == 'success':
+                res_json = res.get('data', {})
+                # Note: The raw API response is in res_json. The SDK wraps it in {'status': 'success', 'data': res_json, 'remarks': ''}
+                if isinstance(res_json, dict) and (res_json.get('status') == 'success' or 'data' in res_json):
+                    data = res_json.get('data', {})
+                    
+                    # The response structure is { "data": { "ce": { ... }, "pe": { ... } } } or direct nesting
+                    if isinstance(data, dict) and 'data' in data and isinstance(data['data'], dict):
+                        data = data['data']
+                    
+                    target_key = "ce" if drv_option_type.upper() == "CALL" else "pe"
+                    inner_data = data.get(target_key) if isinstance(data, dict) else None
+                    
+                    if inner_data and isinstance(inner_data, dict):
+                        # Filter out empty lists to prevent "All arrays must be of the same length" error
+                        clean_inner = {k: v for k, v in inner_data.items() if isinstance(v, list) and len(v) > 0}
+                        if clean_inner:
+                            df = pd.DataFrame(clean_inner)
+                            # Add option type column
+                            df['option_type'] = drv_option_type.upper()
+                            # Convert timestamp if present
+                            if 'timestamp' in df.columns:
+                                # Convert Epoch UTC to IST (UTC+5:30)
+                                df['datetime'] = pd.to_datetime(df['timestamp'], unit='s').dt.tz_localize('UTC').dt.tz_convert('Asia/Kolkata').dt.tz_localize(None)
+                            return df
+                    
+                    logger.warning(f"No {target_key} data found in response.")
+                else:
+                    error_res_json = res_json.get('remarks') if isinstance(res_json, dict) else str(res_json)
+                    logger.error(f"API Error: {error_res_json} | Response: {res_json}")
             else:
-                logger.error(f"API Error: {res_json.get('remarks')} | Response: {res_json}")
+                error_msg = res.get('remarks') if isinstance(res, dict) else str(res)
+                logger.error(f"SDK Error: {error_msg}")
                 
         except Exception as e:
             logger.error(f"Exception in get_expired_options_data: {e}")
+            
+        return pd.DataFrame()
             
         return pd.DataFrame()
 
@@ -2037,37 +2251,7 @@ class DhanHelper:
         
         return self.get_expiry_list(sid, seg)
 
-    def get_expiry_list(self, security_id: int, exchange_segment: str) -> List[str]:
-        """Fetch list of expiry dates for an underlying with caching."""
-        # Check cache (1 hour)
-        if security_id in self._expiry_cache:
-            data, timestamp = self._expiry_cache[security_id]
-            if time.time() - timestamp < 3600:
-                return data
 
-        try:
-            time.sleep(1) # Rate limit protection
-            res = self.dhan.expiry_list(security_id, exchange_segment)
-            if res.get('status') == 'success':
-                data = res.get('data', [])
-                if isinstance(data, dict) and 'data' in data:
-                    expiries = data.get('data', [])
-                else:
-                    expiries = data
-                
-                # Sort to ensure they are chronological
-                if expiries:
-                    try:
-                        expiries.sort(key=lambda x: datetime.strptime(x, "%Y-%m-%d"))
-                    except: pass
-                
-                if expiries:
-                    self._expiry_cache[security_id] = (expiries, time.time())
-                return expiries
-            logger.error(f"Failed to fetch expiry list: {res.get('remarks')}")
-        except Exception as e:
-            logger.error(f"Exception in get_expiry_list: {e}")
-        return []
 
     def get_nearest_expiry(self, symbol: str) -> Optional[str]:
         """Get the closest upcoming expiry date for a symbol."""
@@ -2140,15 +2324,16 @@ class DhanHelper:
                 expiry=expiry
             )
             
-            if res.get('status') == 'success':
+            if isinstance(res, dict) and res.get('status') == 'success':
                 data = res.get('data', {})
-                if 'data' in data and isinstance(data['data'], dict):
+                if isinstance(data, dict) and 'data' in data and isinstance(data['data'], dict):
                      data = data.get('data', {})
                 
                 if data:
                     self._option_chain_cache[cache_key] = (data, time.time())
                 return data
-            logger.error(f"Failed to fetch option chain: {res.get('remarks')}")
+            error_msg = res.get('remarks') if isinstance(res, dict) else str(res)
+            logger.error(f"Failed to fetch option chain: {error_msg}")
             
         except Exception as e:
             logger.error(f"Error fetching option chain: {e}")
@@ -2393,9 +2578,10 @@ class DhanHelper:
                 from_date=from_date,
                 to_date=to_date
             )
-            if res.get('status') == 'success':
+            if isinstance(res, dict) and res.get('status') == 'success':
                 return pd.DataFrame(res.get('data', []))
-            logger.error(f"Failed to fetch intraday minute data: {res.get('remarks')}")
+            error_msg = res.get('remarks') if isinstance(res, dict) else str(res)
+            logger.error(f"Failed to fetch intraday minute data: {error_msg}")
         except Exception as e:
             logger.error(f"Exception in get_intraday_minute_data: {e}")
         return pd.DataFrame()
@@ -2415,9 +2601,10 @@ class DhanHelper:
                 from_date=from_date,
                 to_date=to_date
             )
-            if res.get('status') == 'success':
+            if isinstance(res, dict) and res.get('status') == 'success':
                 return pd.DataFrame(res.get('data', []))
-            logger.error(f"Failed to fetch historical daily data: {res.get('remarks')}")
+            error_msg = res.get('remarks') if isinstance(res, dict) else str(res)
+            logger.error(f"Failed to fetch historical daily data: {error_msg}")
         except Exception as e:
             logger.error(f"Exception in get_historical_daily_data: {e}")
         return pd.DataFrame()
@@ -2509,16 +2696,6 @@ class DhanHelper:
         return pd.DataFrame()
 
     # --- WEBSOCKET / LIVE FEED ---
-    def start_websocket(self, 
-                       instruments: List[Tuple[Any, str, int]], 
-                       on_message: Optional[Callable] = None):
-        """
-        Start WebSocket in a background thread with auto-reconnection.
-        instruments: List of (segment, security_id, request_code)
-        """
-        self.ws_thread = None
-        self._ws_stop_flag = False
-        self._ws_lock = threading.Lock()
 
     def start_websocket(self, 
                        instruments: List[Tuple[Any, str, int]], 
@@ -2594,9 +2771,18 @@ class DhanHelper:
         try:
             if isinstance(message, dict):
                 sid = str(message.get('security_id')) or str(message.get('SecurityId'))
-                if sid:
-                    self.live_data[sid] = message
-                
+                if sid and sid != 'None':
+                    # MERGE into existing entry instead of replacing it.
+                    # The SDK sends several binary packets per instrument per tick
+                    # (e.g. Full packet + OI packet + Prev-Close packet). Each is a
+                    # separate dict. If we replace the whole entry the later OI-only
+                    # packet would wipe out LTP / OHLC data from the earlier Full
+                    # packet — that is why the sheet showed only OI.
+                    if sid in self.live_data:
+                        self.live_data[sid].update(message)
+                    else:
+                        self.live_data[sid] = dict(message)
+
                 if self.user_on_message:
                     self.user_on_message(instance, message)
         except Exception as e:
@@ -2717,7 +2903,7 @@ class DhanHelper:
             
             # Fetch all positions
             res = self.dhan.get_positions()
-            if res.get('status') != 'success':
+            if not isinstance(res, dict) or res.get('status') != 'success':
                 # Log only if not successful (to avoid spamming logs on empty positions if API behaves that way)
                 # Some APIs return success with empty data, some fail. Robust handle:
                 return 0
@@ -2752,7 +2938,7 @@ class DhanHelper:
             exchange_segment = sec['SEGMENT']
 
             res = self.dhan.get_positions()
-            if res.get('status') != 'success':
+            if not isinstance(res, dict) or res.get('status') != 'success':
                 return True # No positions to close implies success in "being flat"
                 
             data = res.get('data', [])
@@ -3039,9 +3225,24 @@ class DhanHelper:
 
     # --- UTILITIES ---
 
-    def is_market_open(self) -> bool:
+    # NSE Holidays (2024-2026) - needed for correct market hour checks and calculations
+    NSE_HOLIDAYS = {
+        # 2024
+        "2024-01-26", "2024-03-08", "2024-03-25", "2024-03-29", "2024-04-10", "2024-04-17",
+        "2024-05-01", "2024-06-17", "2024-07-17", "2024-08-15", "2024-10-02", "2024-11-01",
+        "2024-11-15", "2024-12-25",
+        # 2025
+        "2025-02-26", "2025-03-14", "2025-03-31", "2025-04-10", "2025-04-14", "2025-04-18",
+        "2025-05-01", "2025-08-15", "2025-08-27", "2025-10-02", "2025-10-21", "2025-12-25",
+        # 2026
+        "2026-01-26", "2026-03-03", "2026-03-26", "2026-03-31", "2026-04-03", "2026-04-14",
+        "2026-05-01", "2026-05-28", "2026-06-26", "2026-09-14", "2026-10-02", "2026-10-20",
+        "2026-11-10", "2026-11-24", "2026-12-25"
+    }
+
+    def is_market_open(self, eod_time: str = "15:30") -> bool:
         """
-        Check if Indian Equity Market is open (09:15 - 15:30 IST, Mon-Fri).
+        Check if Indian Equity Market is open (09:15 - eod_time IST, Mon-Fri, not holiday).
         """
         now = datetime.now() # System time (Assuming IST system based on user instructions)
         
@@ -3049,11 +3250,90 @@ class DhanHelper:
         if now.weekday() >= 5: # 5=Sat, 6=Sun
             return False
             
+        # Holiday Check
+        if now.strftime("%Y-%m-%d") in self.NSE_HOLIDAYS:
+            return False
+            
         # Time Check
         current_time = now.time()
         start = datetime.strptime("09:15", "%H:%M").time()
-        end = datetime.strptime("15:30", "%H:%M").time()
+        end = datetime.strptime(eod_time, "%H:%M").time()
         
         return start <= current_time <= end
+
+    def get_next_market_open(self, start_from: datetime) -> datetime:
+        """
+        Calculates the next market open datetime (09:15 AM) starting from `start_from`,
+        skipping weekends and NSE holidays.
+        """
+        if start_from.time() < datetime.strptime("09:15", "%H:%M").time():
+            candidate = start_from.replace(hour=9, minute=15, second=0, microsecond=0)
+        else:
+            candidate = (start_from + timedelta(days=1)).replace(hour=9, minute=15, second=0, microsecond=0)
+            
+        while True:
+            # Check if weekend
+            if candidate.weekday() >= 5: # 5=Sat, 6=Sun
+                candidate = (candidate + timedelta(days=1)).replace(hour=9, minute=15, second=0, microsecond=0)
+                continue
+            # Check if holiday
+            date_str = candidate.strftime("%Y-%m-%d")
+            if date_str in self.NSE_HOLIDAYS:
+                logger.info(f"Skipping holiday: {date_str}")
+                candidate = (candidate + timedelta(days=1)).replace(hour=9, minute=15, second=0, microsecond=0)
+                continue
+            # Found valid weekday and not a holiday
+            break
+            
+        return candidate
+
+    def wait_for_market_open(self, dry_run: bool = False, sleep_chunk: int = 3600, eod_time: str = "15:30") -> None:
+        """
+        Blocks until the market opens.
+        If dry_run is True, it bypasses the wait so that simulation can run immediately.
+        """
+        if dry_run:
+            logger.info("[DRY RUN] Bypassing market hour check for simulation.")
+            return
+
+        while not self.is_market_open(eod_time):
+            now = datetime.now()
+            next_open = self.get_next_market_open(now)
+            time_diff = (next_open - now).total_seconds()
+            
+            logger.info(f"Market is closed. Next open: {next_open.strftime('%Y-%m-%d %H:%M')}. Sleeping for {int(time_diff)} seconds...")
+            
+            slept = 0
+            while slept < time_diff:
+                if self.is_market_open(eod_time):
+                    break
+                chunk = min(time_diff - slept, sleep_chunk)
+                time.sleep(chunk)
+                slept += chunk
+                
+            if self.is_market_open(eod_time):
+                break
+
+    def wait_for_next_day_market_open(self, dry_run: bool = False, sleep_chunk: int = 3600) -> None:
+        """
+        Blocks until the next trading day's market open (tomorrow or next Monday/valid day).
+        Useful when a strategy finishes its daily target/SL and wants to wait for the next session.
+        """
+        if dry_run:
+            logger.info("[DRY RUN] Bypassing forced next-day sleep for simulation.")
+            return
+
+        now = datetime.now()
+        tomorrow = (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+        next_open = self.get_next_market_open(tomorrow)
+        time_diff = (next_open - now).total_seconds()
+        
+        logger.info(f"Daily Target/SL reached. Waiting for next trading session at: {next_open.strftime('%Y-%m-%d %H:%M')}. Sleeping for {int(time_diff)} seconds...")
+        
+        slept = 0
+        while slept < time_diff:
+            chunk = min(time_diff - slept, sleep_chunk)
+            time.sleep(chunk)
+            slept += chunk
 
 

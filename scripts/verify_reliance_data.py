@@ -8,10 +8,10 @@ from datetime import datetime, timedelta
 
 def verify_reliance():
     # 1. Define Paths
-    # Adjust paths based on where script is running
-    base_dir = "c:\\dhan_algo"
-    daily_file = os.path.join(base_dir, "Stocks Daily Historical Data", "RELIANCE_Daily_2Y.csv")
-    min_file = os.path.join(base_dir, "Stocks Historical Data", "RELIANCE_1Min_5Y.csv")
+    # Resolve relative to the project root folder
+    script_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    daily_file = os.path.join(script_dir, "Daily_Historical_Data_Fresh", "RELIANCE_Daily_2Y.csv")
+    min_file = os.path.join(script_dir, "Stocks Historical Data", "RELIANCE_1Min_5Y.csv")
     
     print(f"Checking files...")
     if not os.path.exists(daily_file):
@@ -54,7 +54,9 @@ def verify_reliance():
     # 3. Load Official Daily Data
     print(f"Loading Daily data from {daily_file}...")
     df_daily = pd.read_csv(daily_file)
-    df_daily['Datetime'] = pd.to_datetime(df_daily['Datetime'], dayfirst=True)
+    if df_daily.index.name == 'Datetime':
+        df_daily = df_daily.reset_index()
+    df_daily['Datetime'] = pd.to_datetime(df_daily['Datetime'])
     df_daily['Date'] = df_daily['Datetime'].dt.date
     
     # Rename for merge

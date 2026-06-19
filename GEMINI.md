@@ -11,6 +11,18 @@ This file contains architecture, conventions, and key learnings for the Dhan Alg
 - **Argument Naming**: Always use `exchange` (e.g., "NSE", "IDX_I", "NSE_FNO") as the keyword argument in `get_ltp()`. 
     - **ERROR REFERENCE**: Do NOT use `exchange_segment=`. This will cause a `TypeError`.
 - **Lookups**: Explicitly pass `instrument` (e.g., "INDEX", "EQUITY", "FUTIDX", "OPTIDX") to avoid the helper defaulting to "EQUITY" and triggering "Security not found" warnings.
+- **Numeric Symbol Resolution**: The helper's `get_security_id` resolves numeric identifiers (e.g., option ID `"56380"`) directly against the `SECURITY_ID` column. There is no need to query by name or handle exception blocks for these lookups.
+- **Dynamic Lot Sizes via `get_lot_size`**: Use `helper.get_lot_size(symbol)` to fetch the actual lot size dynamically from the master list. It automatically checks the type of the resolved security; if the security is an `INDEX` (e.g., `"NIFTY"`), the function queries its associated derivative contracts (options/futures) to return the correct option lot size (e.g., `65`), instead of the index placeholder value of `1`.
+- **Previous Day Key Levels via `get_prev_day_levels`**: Use `helper.get_prev_day_levels(symbol)` to fetch PDH, PDL, and PDC for any index or equity in a single call. It resolves the symbol automatically (no need to look up security IDs or set `exchange_segment` / `instrument_type` manually), normalizes column names from the API response, and logs a formatted banner. Returns a `dict` with `'high'`, `'low'`, `'close'` float keys, or `None` on failure. Strategy code should store the result at startup and fall back gracefully when `None`.
+    ```python
+    levels = helper.get_prev_day_levels("NIFTY")   # also works for "BANKNIFTY", "RELIANCE", etc.
+    if levels:
+        pdh, pdl, pdc = levels["high"], levels["low"], levels["close"]
+    ```
+    - **Do NOT** inline your own `get_historical_data()` calls to fetch PDH/PDL/PDC — use this method instead.
+    - The `days_back` parameter (default `5`) controls how many calendar days to look back, ensuring data availability across long weekends and exchange holidays.
+
+
 
 ### WebSocket & Live Data
 - **Stable Connection**: Always use `feed.run()` to start the WebSocket. 
@@ -36,6 +48,8 @@ This file contains architecture, conventions, and key learnings for the Dhan Alg
 - **Bank Nifty Index**:
     - **Symbol**: Use `"BANKNIFTY"`.
     - **Exchange**: Must be `"IDX_I"`.
+- **Exchange Mismatch (IDX_I vs NSE)**: The Dhan master list lists index records under the `"NSE"` exchange. When retrieving the index from the master list using `find_index(symbol, exchange="IDX_I")`, the helper internally maps `"IDX_I"` to `"NSE"` to ensure successful lookup without triggering `"Security not found"` warnings.
+
 
 ### Lot Size Handling
 - **Dynamic Lot Sizes**: Always fetch the lot size from the contract's `CONTRACT_INFO` after resolving the security ID, rather than relying on hardcoded defaults.
@@ -115,3 +129,92 @@ The strategy operates in five distinct phases to manage the lifecycle of a strad
     - The strategy **exits all positions** (CE and PE).
     - It triggers a **5-minute pause** and then restarts from **Phase 1** at the new ATM.
     - This prevents holding ITM options with low decay and high price sensitivity.
+
+---
+
+## Running Strategies & Tools
+
+All commands must be run from the project root (`c:\dhan_algo\dhan_algo`) using the **venv Python interpreter**.
+
+### Quick-start: activate venv (one-time per terminal session)
+```powershell
+# Activate the virtual environment
+c:\dhan_algo\dhan_algo\venv\Scripts\activate
+```
+After activation, you can use plain `python` instead of the full path.
+
+---
+
+### 1. Nifty Value-Imbalance Strangle (`strategies/nifty_value_imbalance_strangle.py`)
+
+#### Default dry-run (safe — no real orders)
+```powershell
+# 200-pt symmetric strangle, 1 lot per leg, dry run
+venv\Scripts\python.exe strategies/nifty_value_imbalance_strangle.py
+```
+
+#### LIVE trading — distance mode (fixed point offset from spot)
+```powershell
+# 200-pt symmetric, 1 lot — LIVE
+venv\Scripts\python.exe strategies/nifty_value_imbalance_strangle.py --live
+
+# Wider 300-pt, 2 lots — LIVE
+venv\Scripts\python.exe strategies/nifty_value_imbalance_strangle.py --live --lots 2 --ce-offset 300 --pe-offset 300
+
+# Asymmetric: tighter CE (150 pts), wider PE (300 pts) — LIVE
+venv\Scripts\python.exe strategies/nifty_value_imbalance_strangle.py --live --ce-offset 150 --pe-offset 300
+```
+
+#### LIVE trading — delta mode (strike chosen by target delta)
+```powershell
+# Standard ~1 SD strangle (delta 0.20) — LIVE
+venv\Scripts\python.exe strategies/nifty_value_imbalance_strangle.py --live --delta --target-delta 0.20
+
+# Wider/safer strangle (delta 0.15), 2 lots — LIVE
+venv\Scripts\python.exe strategies/nifty_value_imbalance_strangle.py --live --lots 2 --delta --target-delta 0.15
+
+# Aggressive near-ATM (delta 0.30) — LIVE
+venv\Scripts\python.exe strategies/nifty_value_imbalance_strangle.py --live --delta --target-delta 0.30
+```
+
+#### Custom risk targets
+```powershell
+# 2 lots, profit target ₹6000, stop loss ₹3000 — LIVE
+venv\Scripts\python.exe strategies/nifty_value_imbalance_strangle.py --live --lots 2 --target-profit 6000 --stop-loss 3000
+```
+
+#### Full CLI reference
+| Flag | Default | Description |
+|---|---|---|
+| `--live` | off (dry run) | Enable real order placement |
+| `--lots N` | `1` | Initial lots per leg |
+| `--delta` | off | Use delta-based strike selection |
+| `--distance` | on | Use fixed-point offset (default) |
+| `--ce-offset PTS` | `200` | Points above spot for CE strike |
+| `--pe-offset PTS` | `200` | Points below spot for PE strike |
+| `--target-delta D` | `0.20` | Target absolute delta in delta mode |
+| `--target-profit AMT` | `4000` | Global profit target in ₹ |
+| `--stop-loss AMT` | `4000` | Global stop loss in ₹ |
+
+---
+
+### 2. Live Options Tracker (`scripts/live_options_tracker.py`)
+
+Opens an Excel workbook with 4 live sheets: **Live Options**, **Dashboard**, **Options Chain**, **Order Log**.
+
+```powershell
+# Start the live tracker (opens Excel automatically)
+venv\Scripts\python.exe scripts/live_options_tracker.py
+```
+
+- Stop with **Ctrl+C** in the terminal — the Excel file stays open.
+- Requires Excel to be installed and xlwings addin to be configured.
+
+---
+
+### 3. Login / Token Refresh (`login.py`)
+
+Run this first if the access token has expired (usually after 24 hours):
+```powershell
+venv\Scripts\python.exe login.py
+```

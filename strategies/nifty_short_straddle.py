@@ -41,27 +41,33 @@ def run_nifty_straddle_strategy(dry_run=True, num_lots=1):
         
     helper = DhanHelper(dhan)
     
+    # Start WebSocket for Nifty Spot (Essential for reliable LTP)
+    logger.info("Starting WebSocket for NIFTY Index...")
+    helper.start_websocket([("IDX_I", "13", 15)])
+    time.sleep(2) # Wait for initial tick
+    
     # Get Nifty Lot Size
-    nifty_lot_size = helper.get_lot_size("NIFTY 50")
+    nifty_lot_size = helper.get_lot_size("NIFTY")
     total_qty = nifty_lot_size * num_lots
     logger.info(f"Nifty Lot Size: {nifty_lot_size} | Total Qty: {total_qty} ({num_lots} lots)")
+    
+    # Fetch and log previous day OHLC levels via library method
+    _levels = helper.get_prev_day_levels("NIFTY")
+    prev_day_high  = _levels["high"]  if _levels else None
+    prev_day_low   = _levels["low"]   if _levels else None
+    prev_day_close = _levels["close"] if _levels else None
+
 
     # Track the last ATM we traded to prevent re-entering the same strike after SL
     last_traded_atm = None
 
     # Continuous Trading Loop
     while True:
-        # 2. Check Market Status
-        if not helper.is_market_open():
-            logger.warning("!!! MARKET IS CLOSED !!!")
-            if not dry_run:
-                logger.info("Exiting strategy as market is closed.")
-                break
-            else:
-                logger.info("[DRY RUN] Continuing for simulation...")
+        # 2. Wait for market open if closed
+        helper.wait_for_market_open(dry_run, eod_time="15:20")
         
         # 3. Get Nifty Spot and ATM Strike
-        nifty_spot = helper.ltp("NIFTY 50")
+        nifty_spot = helper.get_ltp("NIFTY", exchange="IDX_I", instrument="INDEX")
         if nifty_spot == 0:
             logger.error("Could not fetch Nifty Spot price. Retrying in 5s...")
             time.sleep(5)
@@ -115,6 +121,17 @@ def run_nifty_straddle_strategy(dry_run=True, num_lots=1):
         
         logger.info(f"Target: {target_points:.2f} | SL: {sl_points:.2f}")
 
+        # Subscribe to WebSocket for real-time updates
+        logger.info(f"Subscribing to WebSocket for {ce_symbol} (ID: {ce_id}) and {pe_symbol} (ID: {pe_id})")
+        try:
+            helper.subscribe_instruments([
+                ("NSE_FNO", str(ce_id), 15),
+                ("NSE_FNO", str(pe_id), 15)
+            ])
+            time.sleep(2) # Wait for initial ticks to arrive in live_data
+        except Exception as e:
+            logger.error(f"Failed to subscribe to WebSocket: {e}")
+
         ce_order_id = None
         pe_order_id = None
 
@@ -143,8 +160,8 @@ def run_nifty_straddle_strategy(dry_run=True, num_lots=1):
             time.sleep(5)
             
             # Fetch current prices
-            ce_curr = helper.ltp(ce_id)
-            pe_curr = helper.ltp(pe_id)
+            ce_curr = helper.get_ltp(str(ce_id), exchange="NSE_FNO", instrument="OPTIDX")
+            pe_curr = helper.get_ltp(str(pe_id), exchange="NSE_FNO", instrument="OPTIDX")
             
             if ce_curr == 0 or pe_curr == 0:
                 continue
@@ -177,11 +194,31 @@ def run_nifty_straddle_strategy(dry_run=True, num_lots=1):
         # 7. Exit Positions
         if not dry_run:
             logger.info(f"EXITING LIVE POSITIONS (Reason: {exit_reason})...")
-            ce_exit_id = helper.buy(ce_id, total_qty)
-            pe_exit_id = helper.buy(pe_id, total_qty)
-            logger.info(f"Exit Orders: CE: {ce_exit_id} | PE: {pe_exit_id}")
+            if ce_id:
+                try:
+                    ce_exit_id = helper.buy(ce_id, total_qty)
+                    logger.info(f"Exit CE Order ID: {ce_exit_id}")
+                except Exception as e:
+                    logger.error(f"Exit CE Error: {e}")
+            if pe_id:
+                try:
+                    pe_exit_id = helper.buy(pe_id, total_qty)
+                    logger.info(f"Exit PE Order ID: {pe_exit_id}")
+                except Exception as e:
+                    logger.error(f"Exit PE Error: {e}")
         else:
             logger.info(f"[DRY RUN] Simulating Position Exit (Reason: {exit_reason}).")
+
+        # Unsubscribe from old strikes to avoid cluttering connection
+        if ce_id and pe_id:
+            logger.info(f"Unsubscribing from old strikes: {ce_id}, {pe_id}")
+            try:
+                helper.unsubscribe_instruments([
+                    ("NSE_FNO", str(ce_id), 15),
+                    ("NSE_FNO", str(pe_id), 15)
+                ])
+            except:
+                pass
 
         if exit_reason in ["SL", "TARGET"]:
             last_traded_atm = current_atm # Mark this ATM as traded to avoid immediate re-entry
