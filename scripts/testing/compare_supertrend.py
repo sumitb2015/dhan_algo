@@ -102,6 +102,10 @@ def ExistingSupertrend(df, period, multiplier):
 
 def main():
     parquet_path = os.path.join("Historical Data Parquet", "NIFTY_50_1Min_5Y.parquet")
+    if not os.path.exists(parquet_path):
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        project_root = os.path.dirname(os.path.dirname(script_dir))
+        parquet_path = os.path.join(project_root, "Historical Data Parquet", "NIFTY_50_1Min_5Y.parquet")
     df_all = pd.read_parquet(parquet_path)
     
     # Take a chunk of data for testing (e.g., last 500 rows)

@@ -2,9 +2,13 @@ import py_compile
 import os
 import sys
 
+# Get project root (grandparent of scripts/testing)
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+PROJECT_ROOT = os.path.dirname(os.path.dirname(SCRIPT_DIR))
+
 files_to_check = [
-    r"c:\dhan_algo\lib\dhan_helper.py",
-    r"c:\dhan_algo\strategies\nifty_short_straddle.py"
+    os.path.join(PROJECT_ROOT, "lib", "dhan_helper.py"),
+    os.path.join(PROJECT_ROOT, "strategies", "nifty_short_straddle.py")
 ]
 
 print("Checking syntax...")
