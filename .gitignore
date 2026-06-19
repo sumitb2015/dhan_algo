@@ -38,6 +38,7 @@ Historical Data Parquet/
 Options Data/
 temp_data/
 portfolio/
+reports/
 
 # Data and Binary Files
 *.csv

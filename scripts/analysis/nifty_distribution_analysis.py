@@ -12,9 +12,9 @@ from datetime import datetime
 
 # Setup paths relative to the script location
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-PROJECT_ROOT = os.path.dirname(SCRIPT_DIR)
+PROJECT_ROOT = os.path.dirname(os.path.dirname(SCRIPT_DIR))
 CSV_PATH = os.path.join(PROJECT_ROOT, "Historical Data", "NIFTY_50_Daily_5Y.csv")
-SAVE_DIR = os.path.join(PROJECT_ROOT, "Historical Data")
+SAVE_DIR = os.path.join(PROJECT_ROOT, "reports")
 CHART_PATH = os.path.join(SAVE_DIR, "nifty_normal_distribution.png")
 REPORT_PATH = os.path.join(SAVE_DIR, "nifty_distribution_report.md")
 
@@ -22,6 +22,9 @@ def main():
     print(f"\n" + "="*60)
     print("NIFTY 50 DAILY DISTRIBUTION ANALYSIS")
     print("="*60)
+    
+    # Ensure save directory exists
+    os.makedirs(SAVE_DIR, exist_ok=True)
     
     # 1. Load Data
     if not os.path.exists(CSV_PATH):
@@ -187,9 +190,9 @@ def main():
         f.write(f"## Distribution Chart\n")
         f.write(f"The visualization below illustrates the distribution histogram of daily returns against the fitted normal curve. Standard deviation bands (1 SD and 2 SD) are shaded for clarity.\n\n")
         
-        # Absolute path link for easy viewing, plus standard markdown image format
-        # We write a relative link for markdown and absolute path reference
-        f.write(f"![Nifty Return Distribution Plot](file:///{CHART_PATH.replace(os.sep, '/')})\n\n")
+        # Relative link for standard markdown display, and absolute path for reference
+        f.write(f"![Nifty Return Distribution Plot](nifty_normal_distribution.png)\n")
+        f.write(f"*(Absolute Path: [nifty_normal_distribution.png](file:///{CHART_PATH.replace(os.sep, '/')}))*\n\n")
         
         f.write(f"## Outlier Days Analysis\n")
         f.write(f"Here are the top 5 largest single-day gains and losses recorded over the past 5 years.\n\n")

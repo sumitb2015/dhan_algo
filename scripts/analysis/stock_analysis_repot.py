@@ -257,21 +257,22 @@ def main():
         ]
         print(verification[cols_to_print].to_markdown(index=False, floatfmt=".2f"))
 
-        output_file_csv = "stock_analysis_report_v8.csv"
+        os.makedirs("reports", exist_ok=True)
+        output_file_csv = os.path.join("reports", "stock_analysis_report_v8.csv")
         try:
             df_results.to_csv(output_file_csv, index=False)
             print(f"\nFinal report saved to {output_file_csv}")
         except PermissionError:
-            output_file_csv = "stock_analysis_report_v8_backup.csv"
+            output_file_csv = os.path.join("reports", "stock_analysis_report_v8_backup.csv")
             df_results.to_csv(output_file_csv, index=False)
             print(f"\nWarning: stock_analysis_report_v8.csv was locked. Final CSV saved to backup: {output_file_csv}")
 
-        output_file_xlsx = "stock_analysis_report_v8.xlsx"
+        output_file_xlsx = os.path.join("reports", "stock_analysis_report_v8.xlsx")
         try:
             save_report_to_excel(df_results, output_file_xlsx)
             print(f"Excel report with conditional formatting saved to {output_file_xlsx}")
         except PermissionError:
-            output_file_xlsx = "stock_analysis_report_v8_backup.xlsx"
+            output_file_xlsx = os.path.join("reports", "stock_analysis_report_v8_backup.xlsx")
             save_report_to_excel(df_results, output_file_xlsx)
             print(f"Warning: stock_analysis_report_v8.xlsx was locked. Excel saved to backup: {output_file_xlsx}")
 

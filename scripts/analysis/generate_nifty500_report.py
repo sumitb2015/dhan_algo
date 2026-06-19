@@ -166,12 +166,13 @@ def main():
         df_results = df_results[cols]
         df_results.sort_values('Stock', inplace=True)
         
-        output_file = "Nifty500_Report_v2.csv"
+        os.makedirs("reports", exist_ok=True)
+        output_file = os.path.join("reports", "Nifty500_Report_v2.csv")
         try:
             df_results.to_csv(output_file, index=False)
             print(f"REPORT GENERATED: {output_file}")
         except PermissionError:
-            output_file = "Nifty500_Report_v3.csv"
+            output_file = os.path.join("reports", "Nifty500_Report_v3.csv")
             df_results.to_csv(output_file, index=False)
             print(f"REPORT GENERATED: {output_file} (v2 was locked)")
             

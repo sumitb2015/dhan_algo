@@ -547,7 +547,8 @@ def main():
         # Sort by RS Rating Descending (Strongest First)
         df_results.sort_values('RS Rating', ascending=False, inplace=True)
         
-        output_file = "Nifty500_Analysis.xlsx"
+        os.makedirs("reports", exist_ok=True)
+        output_file = os.path.join("reports", "Nifty500_Analysis.xlsx")
         try:
             with pd.ExcelWriter(output_file, engine='openpyxl') as writer:
                 df_results.to_excel(writer, sheet_name='All Stocks', index=False)
@@ -560,7 +561,7 @@ def main():
             print(f"REPORT GENERATED: {output_file}")
             
         except PermissionError:
-            output_file = "Nifty500_Analysis_v2.xlsx"
+            output_file = os.path.join("reports", "Nifty500_Analysis_v2.xlsx")
             try:
                 with pd.ExcelWriter(output_file, engine='openpyxl') as writer:
                     df_results.to_excel(writer, sheet_name='All Stocks', index=False)
