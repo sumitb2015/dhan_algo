@@ -3287,6 +3287,113 @@ class DhanHelper:
                 
         return df
 
+    def calculate_ta_indicators(self, df: pd.DataFrame, indicators: List[Union[str, Dict[str, Any]]]) -> pd.DataFrame:
+        """
+        Calculate indicators on a DataFrame using pandas_ta.
+        Supports string shortcuts (e.g., 'EMA20', 'RSI14', 'MACD', 'BBANDS') 
+        or detailed dict configurations.
+        
+        Args:
+            df: DataFrame containing at least Open, High, Low, Close, and Volume.
+            indicators: List of indicators to calculate. Example:
+                        ['EMA20', 'RSI14', {'kind': 'macd', 'fast': 12, 'slow': 26}]
+                        
+        Returns:
+            DataFrame with indicator columns appended.
+        """
+        if df.empty:
+            return df
+            
+        import pandas_ta as ta  # Import here to keep it localized
+        
+        df_ta = df.copy()
+        
+        # Ensure standard column names are lowercase so pandas_ta can auto-detect them.
+        rename_map = {
+            'Open': 'open', 'High': 'high', 'Low': 'low', 'Close': 'close', 'Volume': 'volume'
+        }
+        for col in rename_map:
+            if col in df_ta.columns and rename_map[col] not in df_ta.columns:
+                df_ta[rename_map[col]] = df_ta[col]
+
+        for ind in indicators:
+            try:
+                if isinstance(ind, str):
+                    ind_upper = ind.upper()
+                    
+                    if ind_upper.startswith('EMA'):
+                        length = int(ind_upper.replace('EMA', '') or 20)
+                        df_ta.ta.ema(length=length, append=True)
+                        
+                    elif ind_upper.startswith('SMA'):
+                        length = int(ind_upper.replace('SMA', '') or 20)
+                        df_ta.ta.sma(length=length, append=True)
+                        
+                    elif ind_upper.startswith('RSI'):
+                        length = int(ind_upper.replace('RSI', '') or 14)
+                        df_ta.ta.rsi(length=length, append=True)
+                        
+                    elif ind_upper.startswith('ATR'):
+                        length = int(ind_upper.replace('ATR', '') or 14)
+                        df_ta.ta.atr(length=length, append=True)
+                        
+                    elif ind_upper.startswith('ADX'):
+                        length = int(ind_upper.replace('ADX', '') or 14)
+                        df_ta.ta.adx(length=length, append=True)
+                        
+                    elif ind_upper == 'MACD':
+                        df_ta.ta.macd(fast=12, slow=26, signal=9, append=True)
+                        
+                    elif ind_upper in ['BBANDS', 'BB']:
+                        df_ta.ta.bbands(length=20, std=2, append=True)
+                        
+                    elif ind_upper == 'VWAP':
+                        df_ta.ta.vwap(append=True)
+                        
+                    elif ind_upper == 'SUPERTREND':
+                        df_ta.ta.supertrend(append=True)
+                        
+                    else:
+                        method_name = ind.lower()
+                        if hasattr(df_ta.ta, method_name):
+                            getattr(df_ta.ta, method_name)(append=True)
+                        else:
+                            logger.warning(f"Unknown pandas_ta indicator: {ind}")
+                            
+                elif isinstance(ind, dict):
+                    kind = ind.get('kind', '').lower()
+                    params = {k: v for k, v in ind.items() if k != 'kind'}
+                    if hasattr(df_ta.ta, kind):
+                        getattr(df_ta.ta, kind)(append=True, **params)
+                    else:
+                        logger.warning(f"Unknown pandas_ta method in dict: {kind}")
+                        
+            except Exception as e:
+                logger.error(f"Error calculating pandas_ta indicator {ind}: {e}")
+                
+        # Drop temporary lowercase columns to keep the DataFrame clean
+        for col in rename_map.values():
+            if col in df_ta.columns and col not in df.columns:
+                df_ta.drop(columns=[col], inplace=True)
+                
+        return df_ta
+
+    def get_indicators_ta(self, symbol: str, interval: str = "5", indicators: List[Union[str, Dict[str, Any]]] = ['EMA20', 'RSI14'], days: int = 5) -> pd.DataFrame:
+        """
+        Fetch candles and calculate requested indicators using pandas_ta.
+        
+        Args:
+            symbol: Symbol name (e.g. 'RELIANCE')
+            interval: Candle interval (e.g. '5', '15', 'DAILY')
+            indicators: List of indicators.
+            days: Days back to fetch history.
+            
+        Returns:
+            DataFrame with candles and indicators.
+        """
+        df = self.get_latest_candles(symbol, interval, days)
+        return self.calculate_ta_indicators(df, indicators)
+
     # --- UTILITIES ---
 
     # NSE Holidays (2024-2026) - needed for correct market hour checks and calculations
