@@ -21,6 +21,30 @@ This file contains architecture, conventions, and key learnings for the Dhan Alg
     ```
     - **Do NOT** inline your own `get_historical_data()` calls to fetch PDH/PDL/PDC — use this method instead.
     - The `days_back` parameter (default `5`) controls how many calendar days to look back, ensuring data availability across long weekends and exchange holidays.
+- **Technical Indicators via `pandas_ta`**: Use `helper.calculate_ta_indicators(df, indicators)` or `helper.get_indicators_ta(symbol, interval, indicators, days)` to perform technical analysis.
+    - It leverages `pandas_ta` to calculate indicators on standard OHLCV DataFrames.
+    - Columns are normalized dynamically, and computed indicator columns are cleanly appended.
+    ```python
+    # Fetch candles and calculate EMA and RSI in a single call
+    df = helper.get_indicators_ta(
+        symbol="NIFTY",
+        interval="15",
+        indicators=["EMA9", "RSI14", "MACD", "BB"],
+        days=5
+    )
+    # The resulting DataFrame contains:
+    # 'Open', 'High', 'Low', 'Close', 'Volume', 'EMA_9', 'RSI_14', 'MACD_12_26_9', etc.
+    ```
+    - Detailed configurations can also be passed as dictionaries for full param customization:
+    ```python
+    df = helper.get_indicators_ta(
+        symbol="RELIANCE",
+        indicators=[
+            {"kind": "supertrend", "period": 7, "multiplier": 3.0},
+            {"kind": "rsi", "length": 14}
+        ]
+    )
+    ```
 
 
 
