@@ -1,0 +1,617 @@
+import time
+import sys
+import argparse
+import os
+import logging
+import pandas as pd
+from datetime import datetime, timedelta
+from typing import Tuple, Dict, Optional, List
+
+# Adjust path to parent dir
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from login import get_dhan_client
+from lib.dhan_helper import DhanHelper
+
+# Configure Logging
+project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+debug_dir = os.path.join(project_root, "debug")
+os.makedirs(debug_dir, exist_ok=True)
+
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler(),
+        logging.FileHandler(os.path.join(debug_dir, f"spread_trend_{datetime.now().strftime('%Y%m%d')}.log"))
+    ]
+)
+logger = logging.getLogger(__name__)
+
+class NiftySpreadTrendStrategy:
+    def __init__(self, dry_run=True, symbol="NIFTY", interval="5",
+                 ema_period=20, supertrend_period=7, supertrend_multiplier=3.0,
+                 ce_offset=100, pe_offset=100, spread_width=100, lots=1,
+                 target_profit=2000.0, stop_loss=2000.0, exit_on_signal_change=True,
+                 eod_time="15:15", cooldown_minutes=5):
+        self.dry_run = dry_run
+        self.symbol = symbol.upper()
+        self.interval = interval
+        self.ema_period = ema_period
+        self.supertrend_period = supertrend_period
+        self.supertrend_multiplier = float(supertrend_multiplier)
+        self.ce_offset = ce_offset
+        self.pe_offset = pe_offset
+        self.spread_width = spread_width
+        self.lots = lots
+        self.target_profit = target_profit
+        self.stop_loss = -abs(stop_loss) # Ensure SL is a negative number
+        self.exit_on_signal_change = exit_on_signal_change
+        self.eod_time = eod_time
+        self.cooldown_minutes = cooldown_minutes
+
+        self.dhan = get_dhan_client()
+        if not self.dhan:
+            raise Exception("Failed to connect to Dhan API.")
+        self.helper = DhanHelper(self.dhan)
+
+        # Dynamic strike rounding steps
+        if self.symbol == "BANKNIFTY":
+            self.strike_step = 100
+        else:
+            self.strike_step = 50 # Default NIFTY / FINNIFTY
+
+        # Start websocket for spot index
+        logger.info(f"Resolving symbol ID for {self.symbol}...")
+        sec_info = self.helper.get_index_id(self.symbol)
+        if not sec_info:
+            sec_info = self.helper.get_security_id(self.symbol, instrument="INDEX")
+        if not sec_info:
+            raise Exception(f"Could not resolve index security ID for {self.symbol}")
+
+        self.index_security_id = str(sec_info['SECURITY_ID'])
+        self.index_segment = self.helper._auto_detect_segment(sec_info) # e.g. "IDX_I"
+
+        logger.info(f"Starting WebSocket for {self.symbol} (ID: {self.index_security_id}, Segment: {self.index_segment})...")
+        self.helper.start_websocket([(self.index_segment, self.index_security_id, 15)])
+        time.sleep(2) # wait for first tick
+
+        self.lot_size = self.helper.get_lot_size(self.symbol)
+        logger.info(f"Symbol: {self.symbol} | Index ID: {self.index_security_id} | Lot Size: {self.lot_size}")
+
+        # Active position state
+        self.active_spread = None # "BULL_PUT", "BEAR_CALL", or None
+        self.short_id = None
+        self.short_strike = None
+        self.short_symbol = None
+        self.short_entry_price = 0.0
+
+        self.long_id = None
+        self.long_strike = None
+        self.long_symbol = None
+        self.long_entry_price = 0.0
+
+        self.expiry = None
+        self.last_close_time = None # to prevent instant re-entry after cooldown
+        self.last_processed_candle_time = None
+
+    def get_signal(self) -> Tuple[str, float]:
+        """
+        Fetch indicators and check signal from the last completed candle.
+        Returns:
+            signal: "BULLISH", "BEARISH", or "NEUTRAL"
+            spot_close: Close price of the last completed candle.
+        """
+        try:
+            # Fetch candles with indicators
+            indicators = [
+                f"EMA{self.ema_period}",
+                {"kind": "supertrend", "length": self.supertrend_period, "multiplier": self.supertrend_multiplier}
+            ]
+            
+            df = self.helper.get_indicators_ta(
+                symbol=self.symbol,
+                interval=self.interval,
+                indicators=indicators,
+                days=5 # fetch 5 days of history to ensure EMA warmup
+            )
+            
+            if df.empty or len(df) < 2:
+                logger.warning("Empty or insufficient data for indicator calculations.")
+                return "NEUTRAL", 0.0
+                
+            # Get the last completed candle (index -2) to avoid whipsaws on the active uncompleted bar
+            row = df.iloc[-2]
+            close = float(row['Close'])
+            
+            # Find EMA column
+            ema_col = f"EMA_{self.ema_period}"
+            if ema_col not in df.columns:
+                ema_cols = [c for c in df.columns if 'EMA' in c]
+                if ema_cols:
+                    ema_col = ema_cols[0]
+                else:
+                    logger.error(f"EMA column not found in indicators DataFrame. Columns: {df.columns.tolist()}")
+                    return "NEUTRAL", 0.0
+                    
+            ema_val = float(row[ema_col])
+            
+            # Find Supertrend direction column dynamically
+            st_dir_cols = [c for c in df.columns if c.startswith('SUPERTd_')]
+            if not st_dir_cols:
+                logger.error(f"Supertrend direction column not found. Columns: {df.columns.tolist()}")
+                return "NEUTRAL", 0.0
+                
+            st_dir_col = st_dir_cols[0]
+            st_dir = float(row[st_dir_col])
+            
+            # Print indicator details periodically
+            candle_time = row.get('Datetime') or df.index[-2]
+            if candle_time != self.last_processed_candle_time:
+                logger.info(f"[SIGNAL CHECK] Candle Time: {candle_time} | Close: {close:.2f} | EMA({self.ema_period}): {ema_val:.2f} | Supertrend Dir: {st_dir:.1f}")
+                self.last_processed_candle_time = candle_time
+                
+            # Signal assessment
+            # Bullish: Close > EMA and Supertrend direction is 1 (uptrend)
+            if close > ema_val and st_dir == 1:
+                return "BULLISH", close
+            # Bearish: Close < EMA and Supertrend direction is -1 (downtrend)
+            elif close < ema_val and st_dir == -1:
+                return "BEARISH", close
+            else:
+                return "NEUTRAL", close
+                
+        except Exception as e:
+            logger.error(f"Error checking indicators/signal: {e}")
+            return "NEUTRAL", 0.0
+
+    def get_execution_price(self, order_id: str, fallback_price: float) -> float:
+        """Wait for fill and get the average execution price, or return fallback."""
+        if not order_id:
+            return fallback_price
+        if self.helper.wait_for_fill(order_id, timeout=5):
+            order_details = self.helper.get_order_by_id(order_id)
+            if order_details:
+                fill_price = float(order_details.get('avgFilledPrice', 0.0) or order_details.get('price', 0.0))
+                if fill_price > 0:
+                    logger.info(f"Order {order_id} execution price confirmed: {fill_price:.2f}")
+                    return fill_price
+        return fallback_price
+
+    def is_quote_invalid(self, q):
+        if not q: return True
+        if isinstance(q, dict) and 'CONTRACT_INFO' in q:
+            return float(q.get('last_price', 0) or q.get('LTP', 0)) == 0
+        return False
+
+    def _extract_quote_fields(self, quote, strike, option_type):
+        if not quote:
+            return None, 0.0, None, self.lot_size, None
+        
+        if isinstance(quote, dict) and 'CONTRACT_INFO' in quote:
+            ci = quote['CONTRACT_INFO']
+            return (
+                int(ci['SECURITY_ID']),
+                float(quote.get('last_price', 0.0) or quote.get('LTP', 0.0)),
+                ci.get('SM_EXPIRY_DATE') or self.expiry,
+                int(ci.get('LOT_SIZE', self.lot_size)),
+                ci.get('SYMBOL_NAME', f"{self.symbol}-{strike}-{option_type}")
+            )
+        return None, 0.0, None, self.lot_size, None
+
+    def enter_spread(self, spot: float, option_type: str):
+        """
+        Determines strikes, retrieves quotes, and places orders (Buy hedge first, Sell short second).
+        """
+        atm_strike = int(round(spot / self.strike_step) * self.strike_step)
+        
+        if option_type == "PE":
+            self.active_spread = "BULL_PUT"
+            short_strike = atm_strike - self.pe_offset
+            long_strike = short_strike - self.spread_width
+        else:
+            self.active_spread = "BEAR_CALL"
+            short_strike = atm_strike + self.ce_offset
+            long_strike = short_strike + self.spread_width
+            
+        short_strike = int(round(short_strike / self.strike_step) * self.strike_step)
+        long_strike = int(round(long_strike / self.strike_step) * self.strike_step)
+        
+        logger.info(f"Spread Strike Selection -> ATM: {atm_strike} | Short Strike: {short_strike} | Long Strike: {long_strike}")
+        
+        self.expiry = self.helper.get_nearest_expiry(self.symbol)
+        if not self.expiry:
+            logger.error("Could not determine nearest expiry date.")
+            self.active_spread = None
+            return
+            
+        # Get Quotes
+        short_quote = self.helper.option(self.symbol, short_strike, option_type)
+        long_quote = self.helper.option(self.symbol, long_strike, option_type)
+        
+        if self.is_quote_invalid(short_quote) or self.is_quote_invalid(long_quote):
+            logger.error(f"Failed to fetch valid quotes for options. Short: {short_strike} {option_type}, Long: {long_strike} {option_type}. Retrying in next loop.")
+            self.active_spread = None
+            return
+            
+        # Extract contract details
+        self.short_id, self.short_entry_price, _, _, self.short_symbol = \
+            self._extract_quote_fields(short_quote, short_strike, option_type)
+            
+        self.long_id, self.long_entry_price, _, _, self.long_symbol = \
+            self._extract_quote_fields(long_quote, long_strike, option_type)
+            
+        if not self.short_id or not self.long_id:
+            logger.error("Failed to extract security IDs from quotes.")
+            self.active_spread = None
+            return
+            
+        total_qty = self.lot_size * self.lots
+        logger.info(f"Entry Quotes -> Short: {self.short_symbol} (ID: {self.short_id}) @ {self.short_entry_price:.2f}")
+        logger.info(f"Entry Quotes -> Long: {self.long_symbol} (ID: {self.long_id}) @ {self.long_entry_price:.2f}")
+        logger.info(f"Expected Spread Credit: {self.short_entry_price - self.long_entry_price:.2f} points | Total Qty: {total_qty} ({self.lots} lots)")
+        
+        # Subscribe to websocket for live prices
+        logger.info(f"Subscribing to WebSocket for options: {self.short_symbol} & {self.long_symbol}")
+        try:
+            self.helper.subscribe_instruments([
+                ("NSE_FNO", str(self.short_id), 15),
+                ("NSE_FNO", str(self.long_id), 15)
+            ])
+            time.sleep(2) # wait for initial ticks
+        except Exception as e:
+            logger.error(f"WebSocket subscription failed: {e}")
+            
+        # Place orders (Long Leg first for margin benefit, Short Leg second)
+        if not self.dry_run:
+            logger.info("PLACING LIVE ENTRY ORDERS...")
+            # 1. Buy Long Leg (Hedge)
+            long_oid = self.helper.buy(str(self.long_id), total_qty)
+            if not long_oid:
+                logger.error("Failed to place Buy (Long Hedge) order. Aborting entry.")
+                self.active_spread = None
+                return
+                
+            # Wait for fill and confirm execution price (using 0.0 fallback to verify fill)
+            self.long_entry_price = self.get_execution_price(long_oid, 0.0)
+            if self.long_entry_price == 0.0:
+                logger.error("Long Hedge order was not filled within timeout. Cancelling order and aborting entry.")
+                try:
+                    self.helper.cancel_order(long_oid)
+                except Exception as cancel_err:
+                    logger.error(f"Failed to cancel unfilled Long Hedge order: {cancel_err}")
+                self.active_spread = None
+                return
+            
+            # 2. Sell Short Leg
+            short_oid = self.helper.sell(str(self.short_id), total_qty)
+            if not short_oid:
+                logger.error("Failed to place Sell (Short) order. Rolling back Long Hedge order immediately to prevent naked long.")
+                try:
+                    self.helper.sell(str(self.long_id), total_qty)
+                except Exception as rollback_err:
+                    logger.critical(f"Failed to sell-close Long Hedge order during rollback: {rollback_err}")
+                self.active_spread = None
+                return
+                
+            # Wait for fill and confirm execution price (using 0.0 fallback to verify fill)
+            self.short_entry_price = self.get_execution_price(short_oid, 0.0)
+            if self.short_entry_price == 0.0:
+                logger.error("Short Leg order was not filled within timeout. Cancelling Short Leg and rolling back Long Leg.")
+                try:
+                    self.helper.cancel_order(short_oid)
+                except Exception as cancel_err:
+                    logger.error(f"Failed to cancel unfilled Short Leg order: {cancel_err}")
+                try:
+                    self.helper.sell(str(self.long_id), total_qty)
+                except Exception as rollback_err:
+                    logger.critical(f"Failed to sell-close Long Hedge order during rollback: {rollback_err}")
+                self.active_spread = None
+                return
+            
+            logger.info(f"Position Entered. Short ID: {short_oid} (avg price: {self.short_entry_price:.2f}) | Long ID: {long_oid} (avg price: {self.long_entry_price:.2f})")
+        else:
+            logger.info("[DRY RUN] Simulating Position Entry.")
+
+    def monitor_position(self):
+        """
+        Monitors active positions, updates P&L, checks exit conditions, and handles order closing.
+        """
+        last_log_time = 0
+        total_qty = self.lot_size * self.lots
+        
+        while self.active_spread is not None:
+            time.sleep(1)
+            
+            # Fetch current prices
+            short_ltp = self.helper.get_ltp(str(self.short_id), exchange="NSE_FNO", instrument="OPTIDX")
+            long_ltp = self.helper.get_ltp(str(self.long_id), exchange="NSE_FNO", instrument="OPTIDX")
+            
+            if short_ltp <= 0 or long_ltp <= 0:
+                continue
+                
+            # Spread PnL calculation:
+            # Short Leg: (Entry - Current) * Qty (since we are short)
+            # Long Leg: (Current - Entry) * Qty (since we are long)
+            short_pnl = (self.short_entry_price - short_ltp) * total_qty
+            long_pnl = (long_ltp - self.long_entry_price) * total_qty
+            total_pnl = short_pnl + long_pnl
+            
+            now = datetime.now()
+            current_time_str = now.strftime("%H:%M")
+            
+            # Log status every 30 seconds
+            if time.time() - last_log_time >= 30:
+                logger.info(
+                    f"[MONITOR] {self.active_spread} | Short: {short_ltp:.2f} (Entry: {self.short_entry_price:.2f}) | "
+                    f"Long: {long_ltp:.2f} (Entry: {self.long_entry_price:.2f}) | PnL: ₹{total_pnl:.2f}"
+                )
+                last_log_time = time.time()
+                
+            # Exit Conditions:
+            
+            # 1. EOD Auto-Exit
+            if current_time_str >= self.eod_time:
+                self.exit_positions(f"Intraday Auto-Exit at {current_time_str}")
+                break
+                
+            # 2. Market Close
+            if not self.helper.is_market_open() and not self.dry_run:
+                self.exit_positions("Market Closed")
+                break
+                
+            # 3. Daily Profit Target
+            if total_pnl >= self.target_profit:
+                self.exit_positions(f"Profit Target Reached: ₹{total_pnl:.2f} (Target: ₹{self.target_profit:.2f})")
+                self.helper.wait_for_next_day_market_open(self.dry_run)
+                if self.dry_run:
+                    logger.info("[DRY RUN] Daily profit target hit. Sleeping 30s before restarting...")
+                    time.sleep(30)
+                break
+                
+            # 4. Daily Stop Loss
+            if total_pnl <= self.stop_loss:
+                self.exit_positions(f"Global Stop Loss Hit: ₹{total_pnl:.2f} (Limit: -₹{abs(self.stop_loss):.2f})")
+                self.helper.wait_for_next_day_market_open(self.dry_run)
+                if self.dry_run:
+                    logger.info("[DRY RUN] Daily stop loss hit. Sleeping 30s before restarting...")
+                    time.sleep(30)
+                break
+                
+            # 5. Signal Reversal (Early exit on trend flip)
+            if self.exit_on_signal_change:
+                signal, spot = self.get_signal()
+                if spot > 0:
+                    should_exit = False
+                    if self.active_spread == "BULL_PUT" and signal == "BEARISH":
+                        should_exit = True
+                    elif self.active_spread == "BEAR_CALL" and signal == "BULLISH":
+                        should_exit = True
+                        
+                    if should_exit:
+                        self.exit_positions(f"Signal Reversal / Trend Flip (New Signal: {signal}, Spot: {spot:.2f})", bypass_cooldown=True)
+                        break
+
+    def exit_positions(self, reason: str, bypass_cooldown: bool = False):
+        """
+        Exits both positions: Short leg first (buy back), Long hedge leg second (sell).
+        """
+        logger.warning(f"!!! EXITING ALL POSITIONS: {reason} !!!")
+        total_qty = self.lot_size * self.lots
+        
+        short_closed = False
+        if not self.dry_run:
+            # 1. Buy back Short Leg first (closes short, prevents naked short risk)
+            if self.short_id:
+                try:
+                    short_exit_oid = self.helper.buy(str(self.short_id), total_qty)
+                    if not short_exit_oid:
+                        logger.critical(f"CRITICAL ERROR: Failed to place buy-to-close order for Short Leg {self.short_symbol} (ID: {self.short_id})! Retaining hedge leg to prevent naked risk. HALTING STRATEGY.")
+                        sys.exit(1)
+                    else:
+                        logger.info(f"Short Leg buy-to-close order placed: {short_exit_oid}")
+                        if self.helper.wait_for_fill(short_exit_oid, timeout=10):
+                            short_closed = True
+                            logger.info("Short Leg close order filled.")
+                        else:
+                            # Re-check status before halting
+                            ord_details = self.helper.get_order_by_id(short_exit_oid)
+                            if ord_details and ord_details.get('orderStatus') == 'FILLED':
+                                short_closed = True
+                                logger.info("Short Leg close order confirmed filled via order status check.")
+                            else:
+                                logger.critical("CRITICAL ERROR: Short Leg close order did not fill. Retaining hedge leg to prevent naked risk. HALTING STRATEGY.")
+                                sys.exit(1)
+                except Exception as e:
+                    logger.error(f"Error closing Short Leg: {e}")
+                    sys.exit(1)
+            else:
+                short_closed = True
+                
+            # 2. Sell Long Leg second (closes hedge) - ONLY if short is confirmed closed!
+            if self.long_id and short_closed:
+                try:
+                    long_exit_oid = self.helper.sell(str(self.long_id), total_qty)
+                    if not long_exit_oid:
+                        logger.critical(f"CRITICAL ERROR: Failed to place sell-to-close order for Long Leg {self.long_symbol} (ID: {self.long_id})! HALTING STRATEGY.")
+                        sys.exit(1)
+                    else:
+                        logger.info(f"Long Leg sell-to-close order placed: {long_exit_oid}")
+                        self.helper.wait_for_fill(long_exit_oid, timeout=5)
+                except Exception as e:
+                    logger.error(f"Error closing Long Leg: {e}")
+                    sys.exit(1)
+        else:
+            logger.info("[DRY RUN] Simulating Position Exit.")
+            
+        # Unsubscribe WebSocket
+        if self.short_id and self.long_id:
+            logger.info(f"Unsubscribing from WebSocket for options: {self.short_id}, {self.long_id}")
+            try:
+                self.helper.unsubscribe_instruments([
+                    ("NSE_FNO", str(self.short_id), 15),
+                    ("NSE_FNO", str(self.long_id), 15)
+                ])
+            except Exception as e:
+                logger.error(f"Failed to unsubscribe options: {e}")
+                
+        # Reset State and start cooldown
+        self.active_spread = None
+        self.short_id = None
+        self.short_strike = None
+        self.short_symbol = None
+        self.short_entry_price = 0.0
+        self.long_id = None
+        self.long_strike = None
+        self.long_symbol = None
+        self.long_entry_price = 0.0
+        
+        if bypass_cooldown:
+            self.last_close_time = None
+            logger.info("Position exit complete. Reversal detected: Bypassing cool-down for immediate entry.")
+        else:
+            self.last_close_time = datetime.now()
+            logger.info(f"Position exit complete. Cool-down started at {self.last_close_time.strftime('%H:%M:%S')}.")
+
+    def run(self):
+        logger.info(f"Starting {self.symbol} Spread Trend Strategy (Dry Run: {self.dry_run})")
+        
+        while True:
+            try:
+                # Check if current time is past EOD time (non-market hours check)
+                now = datetime.now()
+                current_time_str = now.strftime("%H:%M")
+                if current_time_str >= self.eod_time:
+                    logger.info(f"Current time ({current_time_str}) is past EOD time ({self.eod_time}). Closing execution as we are in non-market hours.")
+                    break
+
+                # Wait for market open if closed
+                self.helper.wait_for_market_open(self.dry_run, eod_time=self.eod_time)
+                
+                # Check signal and spot
+                signal, spot = self.get_signal()
+                
+                if spot == 0:
+                    logger.error("Could not fetch index spot price. Retrying in 10s...")
+                    time.sleep(10)
+                    continue
+
+                # Cooldown check
+                if self.last_close_time is not None:
+                    elapsed = (datetime.now() - self.last_close_time).total_seconds() / 60.0
+                    if elapsed < self.cooldown_minutes:
+                        logger.info(f"In cool-down period. {self.cooldown_minutes - elapsed:.1f} minutes remaining. Skipping entries...")
+                        time.sleep(10)
+                        continue
+                    else:
+                        logger.info("Cool-down period completed. Resetting cooldown tracker.")
+                        self.last_close_time = None
+                
+                # Entry Logic
+                if signal == "BULLISH":
+                    logger.info(f"Bullish Trend detected (Spot: {spot:.2f}). Entering Bull Put Spread.")
+                    self.enter_spread(spot, "PE")
+                elif signal == "BEARISH":
+                    logger.info(f"Bearish Trend detected (Spot: {spot:.2f}). Entering Bear Call Spread.")
+                    self.enter_spread(spot, "CE")
+                else:
+                    logger.info(f"Market Trend is Neutral. Waiting for trend confirmation (Spot: {spot:.2f})...")
+                    time.sleep(10 if self.dry_run else 30) # Poll signal faster in dry run for testing
+                    continue
+                
+                # Monitoring loop for active position
+                self.monitor_position()
+                
+            except Exception as e:
+                logger.error(f"Error in main strategy execution: {e}")
+                import traceback
+                logger.debug(traceback.format_exc())
+                time.sleep(10)
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(
+        description="Nifty Spread Trend-Following Option Selling Strategy",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  # Dry run (default), 1 lot, standard Nifty setup
+  python strategies/nifty_spread_trend.py
+
+  # Live run, 2 lots, custom offsets and daily targets
+  python strategies/nifty_spread_trend.py --live --lots 2 --ce-offset 100 --pe-offset 100 --target-profit 3000 --stop-loss 1500
+""")
+
+    # Execution Mode
+    parser.add_argument("--live", action="store_true", default=False,
+                        help="Run in LIVE mode (default: dry run)")
+
+    # Underlying & Timeframe
+    parser.add_argument("--symbol", type=str, default="NIFTY",
+                        help="Symbol to trade (default: NIFTY)")
+    parser.add_argument("--interval", type=str, default="5",
+                        help="Candle timeframe interval in minutes: 1, 5, 15, 30, 60 (default: 5)")
+
+    # Technical Indicators Parameters
+    parser.add_argument("--ema-period", type=int, default=20,
+                        help="EMA period (default: 20)")
+    parser.add_argument("--supertrend-period", type=int, default=7,
+                        help="Supertrend period/length (default: 7)")
+    parser.add_argument("--supertrend-multiplier", type=float, default=3.0,
+                        help="Supertrend multiplier (default: 3.0)")
+
+    # Spread Configuration
+    parser.add_argument("--ce-offset", type=int, default=100,
+                        help="Offset in points above spot for Short Call strike in Bear Call Spread (default: 100)")
+    parser.add_argument("--pe-offset", type=int, default=100,
+                        help="Offset in points below spot for Short Put strike in Bull Put Spread (default: 100)")
+    parser.add_argument("--spread-width", type=int, default=100,
+                        help="Width of the option spread in points (default: 100)")
+
+    # Position sizing
+    parser.add_argument("--lots", type=int, default=1,
+                        help="Number of lots to trade per spread leg (default: 1)")
+
+    # Risk Management Target & Stop Loss
+    parser.add_argument("--target-profit", "--total-profit", type=float, default=2000.0,
+                        help="Global daily profit target in INR (default: 2000.0)")
+    parser.add_argument("--stop-loss", "--total-loss", type=float, default=2000.0,
+                        help="Global daily stop loss in INR (default: 2000.0). Can be passed as positive or negative.")
+
+    # Signals & Cooldown
+    parser.add_argument("--no-exit-on-signal-change", action="store_false", dest="exit_on_signal_change",
+                        help="Do not exit position early if indicator trend reverses (hold until SL/Target/EOD)")
+    parser.add_argument("--eod-time", type=str, default="15:15",
+                        help="End of day square-off time in HH:MM (default: 15:15)")
+    parser.add_argument("--cooldown-minutes", type=int, default=5,
+                        help="Cooldown period in minutes after closing a position before scan resumes (default: 5)")
+
+    args = parser.parse_args()
+
+    mode_label = "LIVE" if args.live else "DRY"
+    logger.info("=" * 60)
+    logger.info(f"LAUNCHING NIFTY SPREAD TREND STRATEGY IN {mode_label} MODE")
+    logger.info(f"Underlying: {args.symbol} | Interval: {args.interval}m")
+    logger.info(f"Indicators: EMA({args.ema_period}) + Supertrend({args.supertrend_period}, {args.supertrend_multiplier})")
+    logger.info(f"Spread Config: CE Offset +{args.ce_offset} | PE Offset -{args.pe_offset} | Width: {args.spread_width}")
+    logger.info(f"Lots: {args.lots} | Target Profit: ₹{args.target_profit:.0f} | Stop Loss: -₹{abs(args.stop_loss):.0f}")
+    logger.info(f"Exit on Trend Reversal: {args.exit_on_signal_change} | Cooldown: {args.cooldown_minutes}m")
+    logger.info("=" * 60)
+
+    strat = NiftySpreadTrendStrategy(
+        dry_run=not args.live,
+        symbol=args.symbol,
+        interval=args.interval,
+        ema_period=args.ema_period,
+        supertrend_period=args.supertrend_period,
+        supertrend_multiplier=args.supertrend_multiplier,
+        ce_offset=args.ce_offset,
+        pe_offset=args.pe_offset,
+        spread_width=args.spread_width,
+        lots=args.lots,
+        target_profit=args.target_profit,
+        stop_loss=args.stop_loss,
+        exit_on_signal_change=args.exit_on_signal_change,
+        eod_time=args.eod_time,
+        cooldown_minutes=args.cooldown_minutes
+    )
+    strat.run()

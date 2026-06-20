@@ -139,3 +139,61 @@ venv\Scripts\python.exe strategies/nifty_advanced_imbalance.py --live --entry-ty
 
 ### Risk/Reward in Reversal
 * **If Nifty crashes to 23,700 (Reversal)**: Your 2 lots of short 24000 PE are completely unhedged. As Nifty trends downwards, both PE options will expand rapidly to ₹300+, resulting in a large, uncapped loss that easily wipes out the premium collected on the CE side.
+
+---
+
+## 5. Nifty Spread Trend-Following Option Selling Strategy (`strategies/nifty_spread_trend.py`)
+
+This strategy implements a trend-following option selling system that sells **Bear Call Spreads** or **Bull Put Spreads** on index options (e.g. NIFTY) depending on the alignment of the price relative to the **EMA 20** and the **Supertrend (7, 3)** indicators.
+
+### Trend Definition
+Signals are evaluated on the last completed candle (avoiding active bar noise and whipsaws):
+*   **Bullish Trend**: `Close > EMA 20` AND `Supertrend Direction = 1` (Bullish).
+    *   *Action*: Enters a **Bull Put Spread** (Sells PE, Buys lower strike PE).
+*   **Bearish Trend**: `Close < EMA 20` AND `Supertrend Direction = -1` (Bearish).
+    *   *Action*: Enters a **Bear Call Spread** (Sells CE, Buys higher strike CE).
+*   **Neutral Trend**: Any conflicting or non-aligned indicator state. No positions are opened.
+
+### Margin-Efficient Execution Sequence
+To keep broker margins low and ensure safety:
+1.  **On Entry**: Buys the Long hedge leg first, confirms execution fill, then sells the Short option.
+2.  **On Exit**: Buys back the Short option first, confirms execution fill, then sells the Long hedge.
+
+### Cooldown and Immediate Reversals
+*   **Signal Reversal**: If the trend reverses (e.g. a Bull Put Spread is open and the signal shifts completely to `BEARISH`), the strategy exits the current spread and **immediately** triggers the opposite position (Bear Call Spread) on the next tick, bypassing the standard cooldown.
+*   **Standard Cooldown**: For regular exits (EOD auto-exit, profit targets, or stop loss), the strategy enforces a 5-minute cool-down period before starting to scan for trend signals again.
+
+### CLI Parameters Reference
+
+| Parameter | Type | Default | Description |
+| :--- | :--- | :--- | :--- |
+| **`--live`** | *Flag* | `False` (Dry run) | Enables live broker order placement. |
+| **`--symbol`** | `str` | `NIFTY` | Underlying index to trade (e.g. `NIFTY`, `BANKNIFTY`). |
+| **`--interval`** | `str` | `5` | Timeframe interval in minutes (`1`, `5`, `15`, `30`, `60`). |
+| **`--ema-period`** | `int` | `20` | EMA period parameter. |
+| **`--supertrend-period`** | `int` | `7` | Supertrend ATR lookback length. |
+| **`--supertrend-multiplier`** | `float` | `3.0` | Supertrend ATR multiplier. |
+| **`--ce-offset`** | `int` | `100` | Points above spot for the Short CE strike. |
+| **`--pe-offset`** | `int` | `100` | Points below spot for the Short PE strike. |
+| **`--spread-width`** | `int` | `100` | Width of the spread in points (Short strike to Long strike). |
+| **`--lots`** | `int` | `1` | Number of lots per spread leg. |
+| **`--target-profit`** or<br>**`--total-profit`** | `float` | `2000.0` | Global daily profit target in INR. |
+| **`--stop-loss`** or<br>**`--total-loss`** | `float` | `2000.0` | Global daily stop loss in INR. Can be passed as positive or negative. |
+| **`--no-exit-on-signal-change`**| *Flag* | `False` | Disables early exits on trend reversals (holds to SL/Target/EOD). |
+| **`--eod-time`** | `str` | `15:15` | EOD auto-square-off time (HH:MM). |
+| **`--cooldown-minutes`** | `int` | `5` | Cooldown period in minutes post standard exits. |
+
+### Command-Line Execution Examples
+```powershell
+# 1. Standard dry run (Nifty, 5-minute, 1 lot)
+python strategies/nifty_spread_trend.py
+
+# 2. Custom parameters dry run (Nifty, 15-minute, wider offsets, 2 lots)
+python strategies/nifty_spread_trend.py --interval 15 --ce-offset 150 --pe-offset 150 --spread-width 100 --lots 2
+
+# 3. Bank Nifty dry run (strike step auto-detects to 100 points)
+python strategies/nifty_spread_trend.py --symbol BANKNIFTY --ce-offset 200 --pe-offset 200 --spread-width 100
+
+# 4. Live execution with daily profit target and stop loss limit
+python strategies/nifty_spread_trend.py --live --lots 1 --target-profit 4000 --stop-loss 2000
+```
