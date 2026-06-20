@@ -198,7 +198,54 @@ venv\Scripts\python.exe strategies/nifty_value_imbalance_strangle.py --live --lo
 
 ---
 
-### 2. Live Options Tracker (`scripts/tools/live_options_tracker.py`)
+### 2. Nifty Advanced Value-Imbalance Straddle & Strangle (`strategies/nifty_advanced_imbalance.py`)
+
+Implements the core value-imbalance logic with four selectable adjustment modes designed to optimize yields and manage tail risk, supporting both **Straddle** and **Strangle** entries.
+
+#### Selectable Modes
+* **`winner_roll_atm`** (Default): Rolls the untested winner leg closer to the spot ATM strike, keeping a flat 1:1 lot ratio (eliminating margin inflation).
+* **`loser_ratio_roll`**: Rolls the challenged loser leg further OTM and increments quantity (ratio spread) to maintain premium collections safely.
+* **`hedged_addition`**: Adds short lots to the winner leg (like legacy) but buys further OTM wings (200 pts out) to hedge against market whipsaws.
+* **`legacy`**: Original unhedged winner lot addition strategy.
+
+#### Default dry-run execution
+```powershell
+# Straddle Entry, Winner Roll ATM mode, 1 lot, dry run
+venv\Scripts\python.exe strategies/nifty_advanced_imbalance.py --entry-type straddle --mode winner_roll_atm
+
+# Strangle Entry (Distance), Hedged Addition mode, 1 lot, dry run
+venv\Scripts\python.exe strategies/nifty_advanced_imbalance.py --entry-type strangle --ce-offset 150 --pe-offset 250 --mode hedged_addition
+
+# Strangle Entry (Delta), Winner Roll ATM mode, 1 lot, dry run
+venv\Scripts\python.exe strategies/nifty_advanced_imbalance.py --entry-type strangle --delta --target-delta 0.15 --mode winner_roll_atm
+```
+
+#### LIVE trading execution
+```powershell
+# Live Straddle execution with 2 lots using winner roll ATM adjustment
+venv\Scripts\python.exe strategies/nifty_advanced_imbalance.py --live --lots 2 --entry-type straddle --mode winner_roll_atm
+
+# Live Strangle (Delta) execution with 2 lots using loser ratio rolling
+venv\Scripts\python.exe strategies/nifty_advanced_imbalance.py --live --lots 2 --entry-type strangle --delta --target-delta 0.20 --mode loser_ratio_roll --target-profit 5000 --stop-loss 3000
+```
+
+#### Full CLI reference
+| Flag | Default | Description |
+|---|---|---|
+| `--live` | off (dry run) | Enable real order placement |
+| `--lots N` | `1` | Initial lots per leg |
+| `--mode MODE` | `winner_roll_atm` | Adjustment mode (`winner_roll_atm`, `loser_ratio_roll`, `hedged_addition`, `legacy`) |
+| `--entry-type TYPE`| `straddle` | Selects entry position type (`straddle`, `strangle`) |
+| `--delta` | off | Use delta-based strike selection for strangle |
+| `--target-delta D` | `0.20` | Target absolute delta in delta strangle mode |
+| `--ce-offset PTS` | `200` | Points above spot for CE strike in distance strangle |
+| `--pe-offset PTS` | `200` | Points below spot for PE strike in distance strangle |
+| `--target-profit AMT` | `4000.0` | Global profit target in ₹ |
+| `--stop-loss AMT` | `4000.0` | Global stop loss in ₹ |
+
+---
+
+### 3. Live Options Tracker (`scripts/tools/live_options_tracker.py`)
 
 Opens an Excel workbook with 4 live sheets: **Live Options**, **Dashboard**, **Options Chain**, **Order Log**.
 
@@ -212,7 +259,7 @@ venv\Scripts\python.exe scripts/tools/live_options_tracker.py
 
 ---
 
-### 3. Login / Token Refresh (`login.py`)
+### 4. Login / Token Refresh (`login.py`)
 
 Run this first if the access token has expired (usually after 24 hours):
 ```powershell
