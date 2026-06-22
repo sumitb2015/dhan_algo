@@ -11,7 +11,7 @@ import logging
 import warnings
 import pandas as pd
 from datetime import datetime, timedelta
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple
 
 # Suppress warnings
 warnings.filterwarnings("ignore")
@@ -119,6 +119,9 @@ def download_daily_bulk(helper: DhanHelper, symbols: List[str], save_dir: str):
     years_input = input("Enter number of lookback years [Default: 2]: ").strip()
     years = float(years_input) if years_input else 2.0
     
+    force_update_input = input("Force update existing files? (y/n) [Default: n]: ").strip().lower()
+    force_update = force_update_input == 'y'
+    
     output_dir = os.path.join(save_dir, "Daily_Historical_Data_Fresh")
     os.makedirs(output_dir, exist_ok=True)
     
@@ -145,7 +148,7 @@ def download_daily_bulk(helper: DhanHelper, symbols: List[str], save_dir: str):
         parquet_file = os.path.join(output_dir, f"{symbol}_Daily_2Y.parquet")
         
         # Resume capability - check if file already exists
-        if os.path.exists(csv_file) or os.path.exists(parquet_file):
+        if not force_update and (os.path.exists(csv_file) or os.path.exists(parquet_file)):
             print(f"[{i+1}/{len(symbols)}] Skipping {symbol} - Already exists.")
             success_count += 1
             continue
@@ -376,7 +379,7 @@ def show_menu():
 
 def main():
     csv_path = "MW-NIFTY-500-25-Jan-2026.csv"
-    save_dir = "Historical Data" # Target save dir in project root
+    save_dir = "." # Target save dir in project root
     os.makedirs(save_dir, exist_ok=True)
     
     # 1. Parse symbols first to verify

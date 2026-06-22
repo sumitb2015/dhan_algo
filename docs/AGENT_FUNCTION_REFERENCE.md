@@ -71,7 +71,8 @@ Organized under separate subdirectories for structured functionality.
 - **`nifty_distribution_analysis.py`**: Statistical distribution scanner with histogram and fitted normal curve.
 - **`generate_portfolio_report.py`**: Generates holdings performance report and automated SIP plan.
 - **`generate_nifty500_report_1min.py`**: Advanced scanner (Mansfield RS, VCP, Breadth) using 1-minute data.
-- **`stock_analysis_repot.py`**: Absolute returns tracker sheet generator.
+- **`nifty50_stock_analysis_report.py`**: Absolute returns tracker sheet generator for Nifty 50.
+- **`nifty500_stock_analysis_report.py`**: Absolute returns tracker sheet generator for Nifty 500.
 
 ---
 

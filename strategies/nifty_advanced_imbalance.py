@@ -32,7 +32,8 @@ class NiftyAdvancedImbalance:
                  threshold_lot=25.0, threshold_strike=40.0,
                  profit_target=4000.0, stop_loss=4000.0,
                  entry_type="straddle", use_delta=False, target_delta=0.20,
-                 ce_offset=200, pe_offset=200):
+                 ce_offset=200, pe_offset=200,
+                 use_premium=False, target_premium=50.0):
         self.mode = mode.lower()
         self.dry_run = dry_run
         self.initial_lots = initial_lots
@@ -46,6 +47,8 @@ class NiftyAdvancedImbalance:
         self.target_delta = target_delta
         self.ce_offset = ce_offset
         self.pe_offset = pe_offset
+        self.use_premium = use_premium
+        self.target_premium = target_premium
         
         self.dhan = get_dhan_client()
         if not self.dhan:
@@ -199,28 +202,48 @@ class NiftyAdvancedImbalance:
             # 1. Buy back short options
             if self.ce_id:
                 try:
-                    ce_exit_id = self.helper.buy(str(self.ce_id), self.ce_lots * self.nifty_lot_size)
-                    logger.info(f"CE short exit order placed: {ce_exit_id}")
+                    net_qty = self.helper.get_net_quantity(str(self.ce_id))
+                    if net_qty < 0:
+                        qty_to_buy = abs(net_qty)
+                        ce_exit_id = self.helper.buy(str(self.ce_id), qty_to_buy)
+                        logger.info(f"CE short exit order placed for {qty_to_buy} qty: {ce_exit_id}")
+                    else:
+                        logger.info(f"CE position already flat or long (Net Qty: {net_qty}). Skipping buy-to-close.")
                 except Exception as e:
                     logger.error(f"Exit CE Error: {e}")
             if self.pe_id:
                 try:
-                    pe_exit_id = self.helper.buy(str(self.pe_id), self.pe_lots * self.nifty_lot_size)
-                    logger.info(f"PE short exit order placed: {pe_exit_id}")
+                    net_qty = self.helper.get_net_quantity(str(self.pe_id))
+                    if net_qty < 0:
+                        qty_to_buy = abs(net_qty)
+                        pe_exit_id = self.helper.buy(str(self.pe_id), qty_to_buy)
+                        logger.info(f"PE short exit order placed for {qty_to_buy} qty: {pe_exit_id}")
+                    else:
+                        logger.info(f"PE position already flat or long (Net Qty: {net_qty}). Skipping buy-to-close.")
                 except Exception as e:
                     logger.error(f"Exit PE Error: {e}")
             
             # 2. Sell back long wings
             for wing in self.ce_wings:
                 try:
-                    wing_exit_id = self.helper.sell(str(wing['id']), wing['lots'] * self.nifty_lot_size)
-                    logger.info(f"CE long wing {wing['strike']} exit order placed: {wing_exit_id}")
+                    net_qty = self.helper.get_net_quantity(str(wing['id']))
+                    if net_qty > 0:
+                        qty_to_sell = net_qty
+                        wing_exit_id = self.helper.sell(str(wing['id']), qty_to_sell)
+                        logger.info(f"CE long wing {wing['strike']} exit order placed for {qty_to_sell} qty: {wing_exit_id}")
+                    else:
+                        logger.info(f"CE long wing {wing['strike']} already flat or short (Net Qty: {net_qty}). Skipping sell-to-close.")
                 except Exception as e:
                     logger.error(f"Exit CE Wing strike {wing['strike']} Error: {e}")
             for wing in self.pe_wings:
                 try:
-                    wing_exit_id = self.helper.sell(str(wing['id']), wing['lots'] * self.nifty_lot_size)
-                    logger.info(f"PE long wing {wing['strike']} exit order placed: {wing_exit_id}")
+                    net_qty = self.helper.get_net_quantity(str(wing['id']))
+                    if net_qty > 0:
+                        qty_to_sell = net_qty
+                        wing_exit_id = self.helper.sell(str(wing['id']), qty_to_sell)
+                        logger.info(f"PE long wing {wing['strike']} exit order placed for {qty_to_sell} qty: {wing_exit_id}")
+                    else:
+                        logger.info(f"PE long wing {wing['strike']} already flat or short (Net Qty: {net_qty}). Skipping sell-to-close.")
                 except Exception as e:
                     logger.error(f"Exit PE Wing strike {wing['strike']} Error: {e}")
         else:
@@ -305,7 +328,7 @@ class NiftyAdvancedImbalance:
             return None, 0.0
 
     def select_strikes(self, nifty_spot, chain_df):
-        """Selects CE and PE strikes based on straddle or strangle selection (distance or delta)."""
+        """Selects CE and PE strikes based on straddle or strangle selection (distance, delta, or premium)."""
         logger.info(f"Selecting strikes for Nifty Spot: {nifty_spot:.2f} using entry type: {self.entry_type}...")
         
         if self.entry_type == "straddle":
@@ -315,27 +338,68 @@ class NiftyAdvancedImbalance:
             return ce_strike, pe_strike
             
         elif self.entry_type == "strangle":
-            if self.use_delta:
-                if chain_df.empty:
-                    logger.warning("Empty option chain for delta selection. Falling back to distance offset.")
-                else:
-                    greek_df = chain_df[(chain_df['ce_delta'] != 0) | (chain_df['pe_delta'] != 0)].copy()
-                    if greek_df.empty:
-                        logger.warning("No Greeks found in option chain. Falling back to distance selection.")
-                    else:
-                        greek_df['ce_delta_diff'] = abs(abs(greek_df['ce_delta']) - self.target_delta)
-                        greek_df['pe_delta_diff'] = abs(abs(greek_df['pe_delta']) - self.target_delta)
-                        
-                        ce_strike = int(greek_df.sort_values('ce_delta_diff').index[0])
-                        pe_strike = int(greek_df.sort_values('pe_delta_diff').index[0])
-                        
-                        logger.info(f"Delta Strangle Selection: CE {ce_strike} (Delta: {greek_df.loc[ce_strike, 'ce_delta']:.2f}) | PE {pe_strike} (Delta: {greek_df.loc[pe_strike, 'pe_delta']:.2f})")
-                        return ce_strike, pe_strike
+            ce_strike = None
+            pe_strike = None
             
-            # Distance offset fallback or standard
-            ce_strike = int(round((nifty_spot + self.ce_offset) / 50) * 50)
-            pe_strike = int(round((nifty_spot - self.pe_offset) / 50) * 50)
-            logger.info(f"Distance Strangle Selection: {ce_strike} CE (+{self.ce_offset}) | {pe_strike} PE (-{self.pe_offset})")
+            if self.use_premium:
+                if chain_df.empty:
+                    logger.warning("Empty option chain for premium selection. Falling back to distance offset.")
+                else:
+                    # Filter CE: must have last price > 0 and be OTM (strike > spot)
+                    ce_df = chain_df[(chain_df['ce_last_price'] > 0) & (chain_df.index > nifty_spot)].copy()
+                    if not ce_df.empty:
+                        below_ce = ce_df[ce_df['ce_last_price'] <= self.target_premium]
+                        if not below_ce.empty:
+                            ce_strike = int(float(below_ce['ce_last_price'].idxmax()))
+                        else:
+                            ce_df['diff'] = abs(ce_df['ce_last_price'] - self.target_premium)
+                            ce_strike = int(float(ce_df.sort_values('diff').index[0]))
+                    else:
+                        ce_strike = int(round((nifty_spot + self.ce_offset) / 50) * 50)
+
+                    # Filter PE: must have last price > 0 and be OTM (strike < spot)
+                    pe_df = chain_df[(chain_df['pe_last_price'] > 0) & (chain_df.index < nifty_spot)].copy()
+                    if not pe_df.empty:
+                        below_pe = pe_df[pe_df['pe_last_price'] <= self.target_premium]
+                        if not below_pe.empty:
+                            pe_strike = int(float(below_pe['pe_last_price'].idxmax()))
+                        else:
+                            pe_df['diff'] = abs(pe_df['pe_last_price'] - self.target_premium)
+                            pe_strike = int(float(pe_df.sort_values('diff').index[0]))
+                    else:
+                        pe_strike = int(round((nifty_spot - self.pe_offset) / 50) * 50)
+
+                    ce_price = chain_df.loc[float(ce_strike), 'ce_last_price'] if float(ce_strike) in chain_df.index else 0.0
+                    pe_price = chain_df.loc[float(pe_strike), 'pe_last_price'] if float(pe_strike) in chain_df.index else 0.0
+                    logger.info(f"Premium Strangle Selection: CE {ce_strike} (Price: {ce_price:.2f}) | PE {pe_strike} (Price: {pe_price:.2f}) [Target: <= {self.target_premium:.2f}]")
+
+            if ce_strike is None or pe_strike is None:
+                if self.use_delta:
+                    if chain_df.empty:
+                        logger.warning("Empty option chain for delta selection. Falling back to distance offset.")
+                    else:
+                        greek_df = chain_df[(chain_df['ce_delta'] != 0) | (chain_df['pe_delta'] != 0)].copy()
+                        if greek_df.empty:
+                            logger.warning("No Greeks found in option chain. Falling back to distance selection.")
+                        else:
+                            greek_df['ce_delta_diff'] = abs(abs(greek_df['ce_delta']) - self.target_delta)
+                            greek_df['pe_delta_diff'] = abs(abs(greek_df['pe_delta']) - self.target_delta)
+                            
+                            ce_strike = int(greek_df.sort_values('ce_delta_diff').index[0])
+                            pe_strike = int(greek_df.sort_values('pe_delta_diff').index[0])
+                            
+                            logger.info(f"Delta Strangle Selection: CE {ce_strike} (Delta: {greek_df.loc[ce_strike, 'ce_delta']:.2f}) | PE {pe_strike} (Delta: {greek_df.loc[pe_strike, 'pe_delta']:.2f})")
+                
+            if ce_strike is None or pe_strike is None:
+                # Distance offset fallback or standard
+                ce_strike = int(round((nifty_spot + self.ce_offset) / 50) * 50)
+                pe_strike = int(round((nifty_spot - self.pe_offset) / 50) * 50)
+                logger.info(f"Distance Strangle Selection: {ce_strike} CE (+{self.ce_offset}) | {pe_strike} PE (-{self.pe_offset})")
+
+            # Check for inverted strikes
+            if ce_strike <= pe_strike:
+                logger.error(f"Inverted strikes detected! CE strike {ce_strike} must be strictly greater than PE strike {pe_strike}. Bypassing selection.")
+                return None, None
             return ce_strike, pe_strike
             
         return None, None
@@ -586,6 +650,17 @@ class NiftyAdvancedImbalance:
                         current_winner_strike = self.ce_strike if winner == "CE" else self.pe_strike
                         
                         if new_atm != current_winner_strike:
+                            # Prevent strike inversion during winner ATM roll - exit cycle
+                            if (winner == "CE" and new_atm <= self.pe_strike) or (winner == "PE" and new_atm >= self.ce_strike):
+                                self.exit_all_positions(
+                                    f"Blocked strike inversion adjustment (winner ATM roll): new {winner} strike {new_atm} "
+                                    f"would cross/equal opposite leg. Exiting cycle."
+                                )
+                                logger.info("Waiting 5 minutes before restart...")
+                                time.sleep(300)
+                                cycle_active = False
+                                break
+
                             # Roll winner to new ATM
                             old_id = str(self.ce_id) if winner == "CE" else str(self.pe_id)
                             old_avg = self.ce_avg_price if winner == "CE" else self.pe_avg_price
@@ -667,6 +742,17 @@ class NiftyAdvancedImbalance:
                         new_strike, new_price = self.find_rebalance_strike(loser, winner_val, new_loser_lots, chain_df, curr_nifty)
                         
                         if new_strike:
+                            # Prevent strike inversion during loser ratio roll - exit cycle
+                            if (loser == "CE" and new_strike <= self.pe_strike) or (loser == "PE" and new_strike >= self.ce_strike):
+                                self.exit_all_positions(
+                                    f"Blocked strike inversion adjustment (loser ratio roll): new {loser} strike {new_strike} "
+                                    f"would cross/equal opposite leg. Exiting cycle."
+                                )
+                                logger.info("Waiting 5 minutes before restart...")
+                                time.sleep(300)
+                                cycle_active = False
+                                break
+
                             old_id = str(self.ce_id) if loser == "CE" else str(self.pe_id)
                             old_avg = self.ce_avg_price if loser == "CE" else self.pe_avg_price
                             exit_price = self.helper.get_ltp(old_id, exchange="NSE_FNO", instrument="OPTIDX")
@@ -876,6 +962,12 @@ Examples:
     parser.add_argument("--target-delta", type=float, default=0.20, metavar="D",
                         help="Target absolute delta in delta strangle mode (default: 0.20)")
 
+    parser.add_argument("--premium", action="store_true", default=False,
+                        help="Use premium-based strike selection for strangle (default: False)")
+
+    parser.add_argument("--target-premium", type=float, default=50.0, metavar="PREM",
+                        help="Target premium value for premium strangle mode (default: 50.0)")
+
     parser.add_argument("--ce-offset", type=int, default=200, metavar="PTS",
                         help="Points above spot for CE in distance strangle mode (default: 200)")
 
@@ -887,8 +979,17 @@ Examples:
     mode_label = "LIVE" if args.live else "DRY"
     stop_loss_val = abs(args.stop_loss)
 
+    selection_label = "distance"
+    if args.entry_type == "strangle":
+        if args.premium:
+            selection_label = f"premium (<= {args.target_premium})"
+        elif args.delta:
+            selection_label = f"delta (target {args.target_delta})"
+        else:
+            selection_label = f"distance (CE +{args.ce_offset} | PE -{args.pe_offset})"
+
     logger.info(
-        f"Config -> Mode: {mode_label} | Sizing: {args.lots}L | Entry Type: {args.entry_type} | "
+        f"Config -> Mode: {mode_label} | Sizing: {args.lots}L | Entry Type: {args.entry_type} ({selection_label}) | "
         f"Adjustment Mode: {args.mode} | Profit Target: INR {args.target_profit:.0f} | Stop Loss: -INR {stop_loss_val:.0f}"
     )
 
@@ -902,6 +1003,8 @@ Examples:
         use_delta=args.delta,
         target_delta=args.target_delta,
         ce_offset=args.ce_offset,
-        pe_offset=args.pe_offset
+        pe_offset=args.pe_offset,
+        use_premium=args.premium,
+        target_premium=args.target_premium
     )
     strat.run()

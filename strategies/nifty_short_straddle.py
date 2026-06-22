@@ -196,14 +196,24 @@ def run_nifty_straddle_strategy(dry_run=True, num_lots=1):
             logger.info(f"EXITING LIVE POSITIONS (Reason: {exit_reason})...")
             if ce_id:
                 try:
-                    ce_exit_id = helper.buy(ce_id, total_qty)
-                    logger.info(f"Exit CE Order ID: {ce_exit_id}")
+                    net_qty = helper.get_net_quantity(str(ce_id))
+                    if net_qty < 0:
+                        qty_to_buy = abs(net_qty)
+                        ce_exit_id = helper.buy(str(ce_id), qty_to_buy)
+                        logger.info(f"Exit CE Order ID: {ce_exit_id} for {qty_to_buy} qty")
+                    else:
+                        logger.info(f"CE position already flat or long (Net Qty: {net_qty}). Skipping exit order.")
                 except Exception as e:
                     logger.error(f"Exit CE Error: {e}")
             if pe_id:
                 try:
-                    pe_exit_id = helper.buy(pe_id, total_qty)
-                    logger.info(f"Exit PE Order ID: {pe_exit_id}")
+                    net_qty = helper.get_net_quantity(str(pe_id))
+                    if net_qty < 0:
+                        qty_to_buy = abs(net_qty)
+                        pe_exit_id = helper.buy(str(pe_id), qty_to_buy)
+                        logger.info(f"Exit PE Order ID: {pe_exit_id} for {qty_to_buy} qty")
+                    else:
+                        logger.info(f"PE position already flat or long (Net Qty: {net_qty}). Skipping exit order.")
                 except Exception as e:
                     logger.error(f"Exit PE Error: {e}")
         else:

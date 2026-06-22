@@ -32,6 +32,21 @@ def process_stock(file_path):
         if df.empty:
             return None
         
+        # Rename date columns to standard 'Datetime' safely
+        found_col = None
+        date_cols = ['date', 'datetime', 'unnamed: 0']
+        for col in df.columns:
+            if col.strip().lower() in date_cols:
+                found_col = col
+                break
+        if found_col is None:
+            for col in df.columns:
+                if col.strip().lower() == 'timestamp':
+                    found_col = col
+                    break
+        if found_col and found_col != 'Datetime':
+            df.rename(columns={found_col: 'Datetime'}, inplace=True)
+            
         if 'Datetime' in df.columns:
             df['Datetime'] = pd.to_datetime(df['Datetime'])
             df.set_index('Datetime', inplace=True)
@@ -258,23 +273,23 @@ def main():
         print(verification[cols_to_print].to_markdown(index=False, floatfmt=".2f"))
 
         os.makedirs("reports", exist_ok=True)
-        output_file_csv = os.path.join("reports", "stock_analysis_report_v8.csv")
+        output_file_csv = os.path.join("reports", "nifty500_stock_analysis_report_v8.csv")
         try:
             df_results.to_csv(output_file_csv, index=False)
             print(f"\nFinal report saved to {output_file_csv}")
         except PermissionError:
-            output_file_csv = os.path.join("reports", "stock_analysis_report_v8_backup.csv")
+            output_file_csv = os.path.join("reports", "nifty500_stock_analysis_report_v8_backup.csv")
             df_results.to_csv(output_file_csv, index=False)
-            print(f"\nWarning: stock_analysis_report_v8.csv was locked. Final CSV saved to backup: {output_file_csv}")
+            print(f"\nWarning: nifty500_stock_analysis_report_v8.csv was locked. Final CSV saved to backup: {output_file_csv}")
 
-        output_file_xlsx = os.path.join("reports", "stock_analysis_report_v8.xlsx")
+        output_file_xlsx = os.path.join("reports", "nifty500_stock_analysis_report_v8.xlsx")
         try:
             save_report_to_excel(df_results, output_file_xlsx)
             print(f"Excel report with conditional formatting saved to {output_file_xlsx}")
         except PermissionError:
-            output_file_xlsx = os.path.join("reports", "stock_analysis_report_v8_backup.xlsx")
+            output_file_xlsx = os.path.join("reports", "nifty500_stock_analysis_report_v8_backup.xlsx")
             save_report_to_excel(df_results, output_file_xlsx)
-            print(f"Warning: stock_analysis_report_v8.xlsx was locked. Excel saved to backup: {output_file_xlsx}")
+            print(f"Warning: nifty500_stock_analysis_report_v8.xlsx was locked. Excel saved to backup: {output_file_xlsx}")
 
 if __name__ == "__main__":
     main()

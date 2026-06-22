@@ -190,20 +190,30 @@ class ValueImbalanceStrategy:
         if not self.dry_run:
             if self.ce_id:
                 try:
-                    ce_exit_id = self.helper.buy(str(self.ce_id), self.ce_lots * self.nifty_lot_size)
-                    if not ce_exit_id:
-                        logger.critical(f"CRITICAL ERROR: Emergency exit order failed for CE (ID: {self.ce_id})!")
+                    net_qty = self.helper.get_net_quantity(str(self.ce_id))
+                    if net_qty < 0:
+                        qty_to_buy = abs(net_qty)
+                        ce_exit_id = self.helper.buy(str(self.ce_id), qty_to_buy)
+                        if not ce_exit_id:
+                            logger.critical(f"CRITICAL ERROR: Emergency exit order failed for CE (ID: {self.ce_id})!")
+                        else:
+                            logger.info(f"CE Emergency exit order placed for {qty_to_buy} qty: {ce_exit_id}")
                     else:
-                        logger.info(f"CE Emergency exit order placed: {ce_exit_id}")
+                        logger.info(f"CE position already flat or long (Net Qty: {net_qty}). Skipping exit order.")
                 except Exception as e:
                     logger.error(f"Exit CE Error: {e}")
             if self.pe_id:
                 try:
-                    pe_exit_id = self.helper.buy(str(self.pe_id), self.pe_lots * self.nifty_lot_size)
-                    if not pe_exit_id:
-                        logger.critical(f"CRITICAL ERROR: Emergency exit order failed for PE (ID: {self.pe_id})!")
+                    net_qty = self.helper.get_net_quantity(str(self.pe_id))
+                    if net_qty < 0:
+                        qty_to_buy = abs(net_qty)
+                        pe_exit_id = self.helper.buy(str(self.pe_id), qty_to_buy)
+                        if not pe_exit_id:
+                            logger.critical(f"CRITICAL ERROR: Emergency exit order failed for PE (ID: {self.pe_id})!")
+                        else:
+                            logger.info(f"PE Emergency exit order placed for {qty_to_buy} qty: {pe_exit_id}")
                     else:
-                        logger.info(f"PE Emergency exit order placed: {pe_exit_id}")
+                        logger.info(f"PE position already flat or long (Net Qty: {net_qty}). Skipping exit order.")
                 except Exception as e:
                     logger.error(f"Exit PE Error: {e}")
         else:

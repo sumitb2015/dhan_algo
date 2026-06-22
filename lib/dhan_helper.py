@@ -3122,7 +3122,9 @@ class DhanHelper:
         instrument_type = sec['INSTRUMENT']
         
         to_date_obj = datetime.now()
-        from_date_obj = to_date_obj - timedelta(days=days)
+        # Enforce a minimum lookback of 5 days to avoid empty ranges and DH-905 errors on weekends/holidays
+        effective_days = max(days, 5)
+        from_date_obj = to_date_obj - timedelta(days=effective_days)
         
         to_date = to_date_obj.strftime("%Y-%m-%d")
         from_date = from_date_obj.strftime("%Y-%m-%d")

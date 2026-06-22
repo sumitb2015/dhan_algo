@@ -1,0 +1,16 @@
+// Nifty 50 constituent symbols (NSE symbols matching Daily_Historical_Data_Fresh filenames)
+// As of 2025 — update as index reconstitutions happen
+export const NIFTY50_SYMBOLS: string[] = [
+  'ADANIENT', 'ADANIPORTS', 'APOLLOHOSP', 'ASIANPAINT', 'AXISBANK',
+  'BAJAJ-AUTO', 'BAJFINANCE', 'BAJAJFINSV', 'BHARTIARTL', 'BPCL',
+  'BRITANNIA', 'CIPLA', 'COALINDIA', 'DIVISLAB', 'DRREDDY',
+  'EICHERMOT', 'ETERNAL', 'GRASIM', 'HCLTECH', 'HDFCBANK',
+  'HDFCLIFE', 'HEROMOTOCO', 'HINDALCO', 'HINDUNILVR', 'ICICIBANK',
+  'INDUSINDBK', 'INFY', 'ITC', 'JIOFIN', 'KOTAKBANK',
+  'LT', 'M&M', 'MARUTI', 'NESTLEIND', 'NTPC',
+  'ONGC', 'POWERGRID', 'RELIANCE', 'SBILIFE', 'SBIN',
+  'SHRIRAMFIN', 'SUNPHARMA', 'TATACONSUM', 'TATAMOTORS', 'TATASTEEL',
+  'TCS', 'TECHM', 'TITAN', 'ULTRACEMCO', 'WIPRO',
+];
+
+export const NIFTY50_SET = new Set(NIFTY50_SYMBOLS);

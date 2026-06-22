@@ -120,6 +120,11 @@ The `ValueImbalanceStrategy` relies on several key thresholds to manage risk and
 - **Stop Loss**: Default **-₹4,000**. Hard exit once reached.
 - **Intraday Auto-Exit**: Fixed at **15:17 (3:17 PM)**. Ensures all positions are squared off before broker-level auto-square-off.
 
+### Strangle Inversion Prevention
+- **Inverted Strike Prevention**: Strangle strategies strictly enforce `CE strike > PE strike`.
+  - **Initial Selection**: If the selected CE strike is equal to or less than the PE strike, the strategy logs a warning and bypasses the cycle entry.
+  - **Rebalance Roll Adjustments**: If a required winner ATM roll or loser OTM roll would cause the strikes to cross or touch, the strategy triggers an **emergency exit** (squares off all active legs), pauses for 5 minutes (300 seconds), and restarts a fresh strangle cycle at the new spot.
+
 ## Strategy Phases
 
 The strategy operates in five distinct phases to manage the lifecycle of a straddle.
@@ -190,7 +195,6 @@ venv\Scripts\python.exe strategies/nifty_value_imbalance_strangle.py --live --ce
 ```
 
 #### LIVE trading — delta mode (strike chosen by target delta)
-```powershell
 # Standard ~1 SD strangle (delta 0.20) — LIVE
 venv\Scripts\python.exe strategies/nifty_value_imbalance_strangle.py --live --delta --target-delta 0.20
 
@@ -199,6 +203,15 @@ venv\Scripts\python.exe strategies/nifty_value_imbalance_strangle.py --live --lo
 
 # Aggressive near-ATM (delta 0.30) — LIVE
 venv\Scripts\python.exe strategies/nifty_value_imbalance_strangle.py --live --delta --target-delta 0.30
+```
+
+#### LIVE trading — premium mode (strike chosen by target premium)
+```powershell
+# Premium mode (picks strikes <= ₹50.0), dry run
+venv\Scripts\python.exe strategies/nifty_value_imbalance_strangle.py --premium
+
+# Premium mode (picks strikes <= ₹35.0) — LIVE
+venv\Scripts\python.exe strategies/nifty_value_imbalance_strangle.py --live --premium --target-premium 35
 ```
 
 #### Custom risk targets
@@ -214,9 +227,11 @@ venv\Scripts\python.exe strategies/nifty_value_imbalance_strangle.py --live --lo
 | `--lots N` | `1` | Initial lots per leg |
 | `--delta` | off | Use delta-based strike selection |
 | `--distance` | on | Use fixed-point offset (default) |
+| `--premium` | off | Use premium-based strike selection |
 | `--ce-offset PTS` | `200` | Points above spot for CE strike |
 | `--pe-offset PTS` | `200` | Points below spot for PE strike |
 | `--target-delta D` | `0.20` | Target absolute delta in delta mode |
+| `--target-premium PREM`| `50.0` | Target premium in premium mode |
 | `--target-profit AMT` | `4000` | Global profit target in ₹ |
 | `--stop-loss AMT` | `4000` | Global stop loss in ₹ |
 
@@ -242,6 +257,9 @@ venv\Scripts\python.exe strategies/nifty_advanced_imbalance.py --entry-type stra
 
 # Strangle Entry (Delta), Winner Roll ATM mode, 1 lot, dry run
 venv\Scripts\python.exe strategies/nifty_advanced_imbalance.py --entry-type strangle --delta --target-delta 0.15 --mode winner_roll_atm
+
+# Strangle Entry (Premium), Loser Ratio Roll mode, 1 lot, dry run
+venv\Scripts\python.exe strategies/nifty_advanced_imbalance.py --entry-type strangle --premium --target-premium 35 --mode loser_ratio_roll
 ```
 
 #### LIVE trading execution
@@ -249,8 +267,8 @@ venv\Scripts\python.exe strategies/nifty_advanced_imbalance.py --entry-type stra
 # Live Straddle execution with 2 lots using winner roll ATM adjustment
 venv\Scripts\python.exe strategies/nifty_advanced_imbalance.py --live --lots 2 --entry-type straddle --mode winner_roll_atm
 
-# Live Strangle (Delta) execution with 2 lots using loser ratio rolling
-venv\Scripts\python.exe strategies/nifty_advanced_imbalance.py --live --lots 2 --entry-type strangle --delta --target-delta 0.20 --mode loser_ratio_roll --target-profit 5000 --stop-loss 3000
+# Live Strangle (Premium) execution with 2 lots using loser ratio rolling
+venv\Scripts\python.exe strategies/nifty_advanced_imbalance.py --live --lots 2 --entry-type strangle --premium --target-premium 40 --mode loser_ratio_roll --target-profit 5000 --stop-loss 3000
 ```
 
 #### Full CLI reference
@@ -261,7 +279,9 @@ venv\Scripts\python.exe strategies/nifty_advanced_imbalance.py --live --lots 2 -
 | `--mode MODE` | `winner_roll_atm` | Adjustment mode (`winner_roll_atm`, `loser_ratio_roll`, `hedged_addition`, `legacy`) |
 | `--entry-type TYPE`| `straddle` | Selects entry position type (`straddle`, `strangle`) |
 | `--delta` | off | Use delta-based strike selection for strangle |
+| `--premium`| off | Use premium-based strike selection for strangle |
 | `--target-delta D` | `0.20` | Target absolute delta in delta strangle mode |
+| `--target-premium PREM`| `50.0` | Target premium in premium strangle mode |
 | `--ce-offset PTS` | `200` | Points above spot for CE strike in distance strangle |
 | `--pe-offset PTS` | `200` | Points below spot for PE strike in distance strangle |
 | `--target-profit AMT` | `4000.0` | Global profit target in ₹ |

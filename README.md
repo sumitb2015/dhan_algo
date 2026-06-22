@@ -15,7 +15,8 @@ dhan_algo/
 │
 ├── temp_data/                    # Temporary data (CSVs, Excel, Zips)
 │   ├── Nifty500_Report*.csv     # Generated reports
-│   ├── stock_analysis_report*.csv
+│   ├── nifty50_stock_analysis_report*.csv
+│   ├── nifty500_stock_analysis_report*.csv
 │   └── *.zip                    # Large archives
 │
 ├── docs/                         # Documentation
