@@ -20,6 +20,9 @@ You can configure and launch the strategy using the following parameters:
 | **`--target-delta`**| *Float* | **`0.20`** | Target absolute delta in delta strangle mode (e.g. `0.20` targets $\approx 0.20$ delta). |
 | **`--ce-offset`** | *Integer* | **`200`** | Points above spot for CE strike in distance strangle mode. |
 | **`--pe-offset`** | *Integer* | **`200`** | Points below spot for PE strike in distance strangle mode. |
+| **`--premium`** | *Flag (Boolean)* | **`False`** | Use premium-based strike selection for Strangle entry. |
+| **`--target-premium`** | *Float* | **`50.0`** | Target premium value in premium strangle mode. |
+| **`--start-time`** | *String* | **`09:20`** | Market start monitoring time (HH:MM IST format). |
 
 ### Example Usages
 ```powershell
