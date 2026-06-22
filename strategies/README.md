@@ -200,3 +200,31 @@ python strategies/nifty_spread_trend.py --symbol BANKNIFTY --ce-offset 200 --pe-
 # 4. Live execution with daily profit target and stop loss limit
 python strategies/nifty_spread_trend.py --live --lots 1 --target-profit 4000 --stop-loss 2000
 ```
+
+---
+
+## 6. Nifty Value-Imbalance Straddle Strategy (`strategies/nifty_value_imbalance.py`)
+
+This strategy implements a standard unhedged short straddle on index options (e.g. NIFTY) that dynamically manages value imbalance by adding lots to the winning side or adjusting the strikes OTM.
+
+### CLI Parameters Reference
+
+| Parameter | Type | Default | Description |
+| :--- | :--- | :--- | :--- |
+| **`--live`** | *Flag* | `False` (Dry run) | Enables live broker order placement. |
+| **`--lots`** | `int` | `1` | Number of lots per leg. |
+| **`--target-profit`** | `float` | `4000.0` | Global daily profit target in INR. |
+| **`--stop-loss`** | `float` | `4000.0` | Global daily stop loss in INR. Can be passed as positive or negative. |
+| **`--start-time`** | `str` | `09:20` | Market start monitoring time (HH:MM IST). |
+
+### Command-Line Execution Examples
+```powershell
+# 1. Standard dry run (Nifty, 1 lot)
+python strategies/nifty_value_imbalance.py
+
+# 2. Live execution, 2 lots, default targets
+python strategies/nifty_value_imbalance.py --live --lots 2
+
+# 3. Live execution, custom targets and custom start time (09:25)
+python strategies/nifty_value_imbalance.py --live --lots 1 --target-profit 5000 --stop-loss 3000 --start-time 09:25
+```
