@@ -30,7 +30,7 @@ logger = logging.getLogger(__name__)
 class ValueImbalanceStrategy:
     def __init__(self, dry_run=True, initial_lots=1, max_lots=4, 
                  threshold_lot=25.0, threshold_strike=40.0, target_rebalance=5.0,
-                 profit_target=4000.0, stop_loss=4000.0):
+                 profit_target=4000.0, stop_loss=4000.0, start_time="09:20"):
         self.dry_run = dry_run
         self.initial_lots = initial_lots
         self.max_lots = max_lots
@@ -39,6 +39,7 @@ class ValueImbalanceStrategy:
         self.target_rebalance = target_rebalance
         self.profit_target = profit_target
         self.stop_loss = -abs(stop_loss) # Ensure it's negative
+        self.start_time = start_time
         
         self.dhan = get_dhan_client()
         if not self.dhan:
@@ -249,11 +250,11 @@ class ValueImbalanceStrategy:
         logger.info("Session state reset for new cycle.")
 
     def run(self):
-        logger.info(f"Starting Nifty Value Imbalance Strategy (Dry Run: {self.dry_run})")
+        logger.info(f"Starting Nifty Value Imbalance Strategy (Dry Run: {self.dry_run} | Start Time: {self.start_time})")
         
         while True:
             # Wait for market open if closed (EOD is 15:17)
-            self.helper.wait_for_market_open(self.dry_run, eod_time="15:17")
+            self.helper.wait_for_market_open(self.dry_run, start_time=self.start_time, eod_time="15:17")
             
             # 1. Initialization / Re-initialization
             self.reset_session()
@@ -612,6 +613,10 @@ Examples:
     parser.add_argument("--lots", type=int, default=1, metavar="N",
                         help="Initial lots per leg (default: 1)")
 
+    # Customizable Start Time
+    parser.add_argument("--start-time", type=str, default="09:20", metavar="TIME",
+                        help="Market start monitoring time (HH:MM IST, default: 09:20)")
+
     # Risk targets
     parser.add_argument("--target-profit", type=float, default=4000.0, metavar="AMT",
                         help="Global profit target in INR (default: 4000.0)")
@@ -623,11 +628,12 @@ Examples:
     mode_label = "LIVE" if args.live else "DRY"
     stop_loss_val = abs(args.stop_loss)
 
-    logger.info(f"Config -> Mode: {mode_label} | Lots: {args.lots} | Profit Target: INR {args.target_profit:.0f} | Stop Loss: -INR {stop_loss_val:.0f}")
+    logger.info(f"Config -> Mode: {mode_label} | Lots: {args.lots} | Start Time: {args.start_time} | Profit Target: INR {args.target_profit:.0f} | Stop Loss: -INR {stop_loss_val:.0f}")
 
     strat = ValueImbalanceStrategy(
         dry_run=not args.live,
         initial_lots=args.lots,
+        start_time=args.start_time,
         profit_target=args.target_profit,
         stop_loss=stop_loss_val,
     )

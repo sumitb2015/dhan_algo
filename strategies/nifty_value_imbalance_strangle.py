@@ -33,7 +33,8 @@ class ValueImbalanceStrangle:
                  profit_target=4000.0, stop_loss=4000.0,
                  strike_selection="distance", # "distance", "delta", or "premium"
                  ce_offset=200, pe_offset=200,
-                 target_delta=0.20, target_premium=50.0):
+                 target_delta=0.20, target_premium=50.0,
+                 start_time="09:20"):
         self.dry_run = dry_run
         self.initial_lots = initial_lots
         self.max_lots = max_lots
@@ -41,6 +42,7 @@ class ValueImbalanceStrangle:
         self.threshold_strike = threshold_strike
         self.profit_target = profit_target
         self.stop_loss = -abs(stop_loss) # Ensure it's negative
+        self.start_time = start_time
         
         # Selection Params
         self.strike_selection = strike_selection
@@ -338,14 +340,14 @@ class ValueImbalanceStrangle:
             logger.warning(f"Strike preview failed: {e}")
 
     def run(self):
-        logger.info(f"Starting Nifty Value Imbalance STRANGLE (Dry Run: {self.dry_run})")
+        logger.info(f"Starting Nifty Value Imbalance STRANGLE (Dry Run: {self.dry_run} | Start Time: {self.start_time})")
 
         # Show projected strikes immediately, even before market opens
         self._preview_strikes()
 
         while True:
             # Wait for market open if closed (EOD is 15:17)
-            self.helper.wait_for_market_open(self.dry_run, eod_time="15:17")
+            self.helper.wait_for_market_open(self.dry_run, start_time=self.start_time, eod_time="15:17")
             
             self.reset_session()
             
@@ -516,7 +518,7 @@ class ValueImbalanceStrangle:
                 if total_pnl >= self.profit_target or total_pnl <= self.stop_loss:
                     reason = "Profit Target Reached" if total_pnl >= self.profit_target else "Global Stop Loss Hit"
                     self.exit_all_positions(f"Target/SL Hit: {reason} ({total_pnl:.2f})")
-                    self.helper.wait_for_next_day_market_open(self.dry_run)
+                    self.helper.wait_for_next_day_market_open(self.dry_run, start_time=self.start_time)
                     cycle_active = False
                     break
 
@@ -725,6 +727,10 @@ Examples:
     parser.add_argument("--stop-loss", type=float, default=4000.0, metavar="AMT",
                         help="Global stop loss in INR (default: 4000.0). Can be passed as positive or negative.")
 
+    # Customizable Start Time
+    parser.add_argument("--start-time", type=str, default="09:20", metavar="TIME",
+                        help="Market start monitoring time (HH:MM IST, default: 09:20)")
+
     args = parser.parse_args()
 
     if args.premium:
@@ -740,11 +746,11 @@ Examples:
     stop_loss_val = abs(args.stop_loss)
 
     if selection == "delta":
-        logger.info(f"Config -> Mode: {mode_label} | Lots: {args.lots} | Selection: delta | Target Delta: ±{args.target_delta:.2f} | Profit Target: INR {args.target_profit:.0f} | Stop Loss: -INR {stop_loss_val:.0f}")
+        logger.info(f"Config -> Mode: {mode_label} | Lots: {args.lots} | Start Time: {args.start_time} | Selection: delta | Target Delta: ±{args.target_delta:.2f} | Profit Target: INR {args.target_profit:.0f} | Stop Loss: -INR {stop_loss_val:.0f}")
     elif selection == "premium":
-        logger.info(f"Config -> Mode: {mode_label} | Lots: {args.lots} | Selection: premium | Target Premium: <= {args.target_premium:.2f} | Profit Target: INR {args.target_profit:.0f} | Stop Loss: -INR {stop_loss_val:.0f}")
+        logger.info(f"Config -> Mode: {mode_label} | Lots: {args.lots} | Start Time: {args.start_time} | Selection: premium | Target Premium: <= {args.target_premium:.2f} | Profit Target: INR {args.target_profit:.0f} | Stop Loss: -INR {stop_loss_val:.0f}")
     else:
-        logger.info(f"Config -> Mode: {mode_label} | Lots: {args.lots} | Selection: distance | CE Offset: +{args.ce_offset} | PE Offset: -{args.pe_offset} | Profit Target: INR {args.target_profit:.0f} | Stop Loss: -INR {stop_loss_val:.0f}")
+        logger.info(f"Config -> Mode: {mode_label} | Lots: {args.lots} | Start Time: {args.start_time} | Selection: distance | CE Offset: +{args.ce_offset} | PE Offset: -{args.pe_offset} | Profit Target: INR {args.target_profit:.0f} | Stop Loss: -INR {stop_loss_val:.0f}")
 
     strat = ValueImbalanceStrangle(
         dry_run=not args.live,
@@ -756,5 +762,6 @@ Examples:
         target_premium=args.target_premium,
         profit_target=args.target_profit,
         stop_loss=stop_loss_val,
+        start_time=args.start_time,
     )
     strat.run()

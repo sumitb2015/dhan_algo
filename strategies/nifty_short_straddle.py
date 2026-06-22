@@ -25,7 +25,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-def run_nifty_straddle_strategy(dry_run=True, num_lots=1):
+def run_nifty_straddle_strategy(dry_run=True, num_lots=1, start_time="09:20"):
     """
     Executes a Nifty Short Straddle for the current expiry.
     Stop Loss: 20% on combined premium.
@@ -33,7 +33,7 @@ def run_nifty_straddle_strategy(dry_run=True, num_lots=1):
     """
     
     # 1. Initialize
-    logger.info(f"Starting Nifty Short Straddle Strategy (Dry Run: {dry_run})")
+    logger.info(f"Starting Nifty Short Straddle Strategy (Dry Run: {dry_run} | Start Time: {start_time})")
     dhan = get_dhan_client()
     if not dhan:
         logger.error("Failed to connect to Dhan. Exiting.")
@@ -64,7 +64,7 @@ def run_nifty_straddle_strategy(dry_run=True, num_lots=1):
     # Continuous Trading Loop
     while True:
         # 2. Wait for market open if closed
-        helper.wait_for_market_open(dry_run, eod_time="15:20")
+        helper.wait_for_market_open(dry_run, start_time=start_time, eod_time="15:20")
         
         # 3. Get Nifty Spot and ATM Strike
         nifty_spot = helper.get_ltp("NIFTY", exchange="IDX_I", instrument="INDEX")
@@ -239,10 +239,13 @@ def run_nifty_straddle_strategy(dry_run=True, num_lots=1):
         time.sleep(5)
 
 if __name__ == "__main__":
-    # Default to dry run for safety
-    # Usage: python strategies/nifty_short_straddle.py [live|dry] [num_lots]
-    mode = sys.argv[1] if len(sys.argv) > 1 else "dry"
-    lots = int(sys.argv[2]) if len(sys.argv) > 2 else 1
+    import argparse
+    parser = argparse.ArgumentParser(description="Nifty Short Straddle Strategy")
+    parser.add_argument("mode", nargs="?", default="dry", choices=["dry", "live"], help="Run mode (default: dry)")
+    parser.add_argument("lots", nargs="?", type=int, default=1, help="Number of lots (default: 1)")
+    parser.add_argument("--start-time", type=str, default="09:20", help="Market start monitoring time (HH:MM IST, default: 09:20)")
     
-    is_dry = True if mode == "dry" else False
-    run_nifty_straddle_strategy(dry_run=is_dry, num_lots=lots)
+    args = parser.parse_args()
+    is_dry = True if args.mode == "dry" else False
+    
+    run_nifty_straddle_strategy(dry_run=is_dry, num_lots=args.lots, start_time=args.start_time)

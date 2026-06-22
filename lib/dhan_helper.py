@@ -3413,9 +3413,9 @@ class DhanHelper:
         "2026-11-10", "2026-11-24", "2026-12-25"
     }
 
-    def is_market_open(self, eod_time: str = "15:30") -> bool:
+    def is_market_open(self, start_time: str = "09:15", eod_time: str = "15:30") -> bool:
         """
-        Check if Indian Equity Market is open (09:15 - eod_time IST, Mon-Fri, not holiday).
+        Check if Indian Equity Market is open (start_time - eod_time IST, Mon-Fri, not holiday).
         """
         now = datetime.now() # System time (Assuming IST system based on user instructions)
         
@@ -3429,67 +3429,68 @@ class DhanHelper:
             
         # Time Check
         current_time = now.time()
-        start = datetime.strptime("09:15", "%H:%M").time()
+        start = datetime.strptime(start_time, "%H:%M").time()
         end = datetime.strptime(eod_time, "%H:%M").time()
         
         return start <= current_time <= end
 
-    def get_next_market_open(self, start_from: datetime) -> datetime:
+    def get_next_market_open(self, start_from: datetime, start_time: str = "09:15") -> datetime:
         """
-        Calculates the next market open datetime (09:15 AM) starting from `start_from`,
+        Calculates the next market open datetime starting from `start_from` using custom start_time,
         skipping weekends and NSE holidays.
         """
-        if start_from.time() < datetime.strptime("09:15", "%H:%M").time():
-            candidate = start_from.replace(hour=9, minute=15, second=0, microsecond=0)
+        t = datetime.strptime(start_time, "%H:%M").time()
+        if start_from.time() < t:
+            candidate = start_from.replace(hour=t.hour, minute=t.minute, second=0, microsecond=0)
         else:
-            candidate = (start_from + timedelta(days=1)).replace(hour=9, minute=15, second=0, microsecond=0)
+            candidate = (start_from + timedelta(days=1)).replace(hour=t.hour, minute=t.minute, second=0, microsecond=0)
             
         while True:
             # Check if weekend
             if candidate.weekday() >= 5: # 5=Sat, 6=Sun
-                candidate = (candidate + timedelta(days=1)).replace(hour=9, minute=15, second=0, microsecond=0)
+                candidate = (candidate + timedelta(days=1)).replace(hour=t.hour, minute=t.minute, second=0, microsecond=0)
                 continue
             # Check if holiday
             date_str = candidate.strftime("%Y-%m-%d")
             if date_str in self.NSE_HOLIDAYS:
                 logger.info(f"Skipping holiday: {date_str}")
-                candidate = (candidate + timedelta(days=1)).replace(hour=9, minute=15, second=0, microsecond=0)
+                candidate = (candidate + timedelta(days=1)).replace(hour=t.hour, minute=t.minute, second=0, microsecond=0)
                 continue
             # Found valid weekday and not a holiday
             break
             
         return candidate
 
-    def wait_for_market_open(self, dry_run: bool = False, sleep_chunk: int = 3600, eod_time: str = "15:30") -> None:
+    def wait_for_market_open(self, dry_run: bool = False, sleep_chunk: int = 3600, start_time: str = "09:15", eod_time: str = "15:30") -> None:
         """
-        Blocks until the market opens.
+        Blocks until the market opens and the configured start time is reached.
         If dry_run is True, it bypasses the wait so that simulation can run immediately.
         """
         if dry_run:
             logger.info("[DRY RUN] Bypassing market hour check for simulation.")
             return
 
-        while not self.is_market_open(eod_time):
+        while not self.is_market_open(start_time, eod_time):
             now = datetime.now()
-            next_open = self.get_next_market_open(now)
+            next_open = self.get_next_market_open(now, start_time)
             time_diff = (next_open - now).total_seconds()
             
-            logger.info(f"Market is closed. Next open: {next_open.strftime('%Y-%m-%d %H:%M')}. Sleeping for {int(time_diff)} seconds...")
+            logger.info(f"Market is closed or start time not reached. Next open: {next_open.strftime('%Y-%m-%d %H:%M')}. Sleeping for {int(time_diff)} seconds...")
             
             slept = 0
             while slept < time_diff:
-                if self.is_market_open(eod_time):
+                if self.is_market_open(start_time, eod_time):
                     break
                 chunk = min(time_diff - slept, sleep_chunk)
                 time.sleep(chunk)
                 slept += chunk
                 
-            if self.is_market_open(eod_time):
+            if self.is_market_open(start_time, eod_time):
                 break
 
-    def wait_for_next_day_market_open(self, dry_run: bool = False, sleep_chunk: int = 3600) -> None:
+    def wait_for_next_day_market_open(self, dry_run: bool = False, sleep_chunk: int = 3600, start_time: str = "09:15") -> None:
         """
-        Blocks until the next trading day's market open (tomorrow or next Monday/valid day).
+        Blocks until the next trading day's market open / custom start_time.
         Useful when a strategy finishes its daily target/SL and wants to wait for the next session.
         """
         if dry_run:
@@ -3498,7 +3499,7 @@ class DhanHelper:
 
         now = datetime.now()
         tomorrow = (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
-        next_open = self.get_next_market_open(tomorrow)
+        next_open = self.get_next_market_open(tomorrow, start_time)
         time_diff = (next_open - now).total_seconds()
         
         logger.info(f"Daily Target/SL reached. Waiting for next trading session at: {next_open.strftime('%Y-%m-%d %H:%M')}. Sleeping for {int(time_diff)} seconds...")

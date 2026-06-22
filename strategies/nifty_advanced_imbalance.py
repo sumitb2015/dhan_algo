@@ -33,7 +33,8 @@ class NiftyAdvancedImbalance:
                  profit_target=4000.0, stop_loss=4000.0,
                  entry_type="straddle", use_delta=False, target_delta=0.20,
                  ce_offset=200, pe_offset=200,
-                 use_premium=False, target_premium=50.0):
+                 use_premium=False, target_premium=50.0,
+                 start_time="09:20"):
         self.mode = mode.lower()
         self.dry_run = dry_run
         self.initial_lots = initial_lots
@@ -49,6 +50,7 @@ class NiftyAdvancedImbalance:
         self.pe_offset = pe_offset
         self.use_premium = use_premium
         self.target_premium = target_premium
+        self.start_time = start_time
         
         self.dhan = get_dhan_client()
         if not self.dhan:
@@ -405,11 +407,11 @@ class NiftyAdvancedImbalance:
         return None, None
 
     def run(self):
-        logger.info(f"Starting Nifty Advanced Imbalance Strategy | Mode: {self.mode} | Dry Run: {self.dry_run}")
+        logger.info(f"Starting Nifty Advanced Imbalance Strategy | Mode: {self.mode} | Dry Run: {self.dry_run} | Start Time: {self.start_time}")
         
         while True:
             # Wait for market open if closed
-            self.helper.wait_for_market_open(self.dry_run, eod_time="15:17")
+            self.helper.wait_for_market_open(self.dry_run, start_time=self.start_time, eod_time="15:17")
             
             # 1. Initialization / Re-initialization
             self.reset_session()
@@ -614,12 +616,12 @@ class NiftyAdvancedImbalance:
                 # --- Hard Targets ---
                 if total_pnl >= self.profit_target:
                     self.exit_all_positions(f"Profit Target Reached: {total_pnl:.2f}")
-                    self.helper.wait_for_next_day_market_open(self.dry_run)
+                    self.helper.wait_for_next_day_market_open(self.dry_run, start_time=self.start_time)
                     cycle_active = False
                     break
                 if total_pnl <= self.stop_loss:
                     self.exit_all_positions(f"Global Stop Loss Hit: {total_pnl:.2f}")
-                    self.helper.wait_for_next_day_market_open(self.dry_run)
+                    self.helper.wait_for_next_day_market_open(self.dry_run, start_time=self.start_time)
                     cycle_active = False
                     break
 
@@ -974,6 +976,10 @@ Examples:
     parser.add_argument("--pe-offset", type=int, default=200, metavar="PTS",
                         help="Points below spot for PE in distance strangle mode (default: 200)")
 
+    # Customizable Start Time
+    parser.add_argument("--start-time", type=str, default="09:20", metavar="TIME",
+                        help="Market start monitoring time (HH:MM IST, default: 09:20)")
+
     args = parser.parse_args()
 
     mode_label = "LIVE" if args.live else "DRY"
@@ -989,7 +995,7 @@ Examples:
             selection_label = f"distance (CE +{args.ce_offset} | PE -{args.pe_offset})"
 
     logger.info(
-        f"Config -> Mode: {mode_label} | Sizing: {args.lots}L | Entry Type: {args.entry_type} ({selection_label}) | "
+        f"Config -> Mode: {mode_label} | Sizing: {args.lots}L | Start Time: {args.start_time} | Entry Type: {args.entry_type} ({selection_label}) | "
         f"Adjustment Mode: {args.mode} | Profit Target: INR {args.target_profit:.0f} | Stop Loss: -INR {stop_loss_val:.0f}"
     )
 
@@ -1005,6 +1011,7 @@ Examples:
         ce_offset=args.ce_offset,
         pe_offset=args.pe_offset,
         use_premium=args.premium,
-        target_premium=args.target_premium
+        target_premium=args.target_premium,
+        start_time=args.start_time,
     )
     strat.run()

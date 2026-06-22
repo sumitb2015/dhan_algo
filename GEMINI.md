@@ -234,6 +234,7 @@ venv\Scripts\python.exe strategies/nifty_value_imbalance_strangle.py --live --lo
 | `--target-premium PREM`| `50.0` | Target premium in premium mode |
 | `--target-profit AMT` | `4000` | Global profit target in ₹ |
 | `--stop-loss AMT` | `4000` | Global stop loss in ₹ |
+| `--start-time TIME` | `09:20` | Market start monitoring time (HH:MM IST) |
 
 ---
 
@@ -286,6 +287,7 @@ venv\Scripts\python.exe strategies/nifty_advanced_imbalance.py --live --lots 2 -
 | `--pe-offset PTS` | `200` | Points below spot for PE strike in distance strangle |
 | `--target-profit AMT` | `4000.0` | Global profit target in ₹ |
 | `--stop-loss AMT` | `4000.0` | Global stop loss in ₹ |
+| `--start-time TIME` | `09:20` | Market start monitoring time (HH:MM IST) |
 
 ---
 
