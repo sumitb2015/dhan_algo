@@ -238,7 +238,37 @@ venv\Scripts\python.exe strategies/nifty_value_imbalance_strangle.py --live --lo
 
 ---
 
-### 2. Nifty Advanced Value-Imbalance Straddle & Strangle (`strategies/nifty_advanced_imbalance.py`)
+### 2. Nifty Value-Imbalance Straddle (`strategies/nifty_value_imbalance.py`)
+
+Implements the standard value-imbalance short straddle strategy, starting with a neutral ATM straddle entry and adjusting dynamically via winner lot additions or strike adjustments when premium value imbalance limits are breached.
+
+#### Default dry-run execution
+```powershell
+# Straddle Entry, 1 lot per leg, dry run
+venv\Scripts\python.exe strategies/nifty_value_imbalance.py
+```
+
+#### LIVE trading execution
+```powershell
+# Live Straddle execution, 2 lots, default targets — LIVE
+venv\Scripts\python.exe strategies/nifty_value_imbalance.py --live --lots 2
+
+# Live Straddle execution, custom targets and custom start time (09:25) — LIVE
+venv\Scripts\python.exe strategies/nifty_value_imbalance.py --live --lots 1 --target-profit 5000 --stop-loss 3000 --start-time 09:25
+```
+
+#### Full CLI reference
+| Flag | Default | Description |
+|---|---|---|
+| `--live` | off (dry run) | Enable real order placement |
+| `--lots N` | `1` | Initial lots per leg |
+| `--target-profit AMT` | `4000.0` | Global daily profit target in ₹ |
+| `--stop-loss AMT` | `4000.0` | Global daily stop loss in ₹ |
+| `--start-time TIME` | `09:20` | Market start monitoring time (HH:MM IST) |
+
+---
+
+### 3. Nifty Advanced Value-Imbalance Straddle & Strangle (`strategies/nifty_advanced_imbalance.py`)
 
 Implements the core value-imbalance logic with four selectable adjustment modes designed to optimize yields and manage tail risk, supporting both **Straddle** and **Strangle** entries.
 
@@ -291,7 +321,7 @@ venv\Scripts\python.exe strategies/nifty_advanced_imbalance.py --live --lots 2 -
 
 ---
 
-### 3. Live Options Tracker (`scripts/tools/live_options_tracker.py`)
+### 4. Live Options Tracker (`scripts/tools/live_options_tracker.py`)
 
 Opens an Excel workbook with 4 live sheets: **Live Options**, **Dashboard**, **Options Chain**, **Order Log**.
 
@@ -305,7 +335,7 @@ venv\Scripts\python.exe scripts/tools/live_options_tracker.py
 
 ---
 
-### 4. Login / Token Refresh (`login.py`)
+### 5. Login / Token Refresh (`login.py`)
 
 Run this first if the access token has expired (usually after 24 hours):
 ```powershell
