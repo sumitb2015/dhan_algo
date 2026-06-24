@@ -186,8 +186,8 @@ class TestPremiumStrikeSelection(unittest.TestCase):
         # Wing 333 (long) should be sold back
         strat.helper.sell.assert_called_once_with("333", 75)
 
-    @patch('strategies.short_straddle.nifty_short_straddle.get_dhan_client')
-    @patch('strategies.short_straddle.nifty_short_straddle.DhanHelper')
+    @patch('strategies.Archives.nifty_short_straddle.get_dhan_client')
+    @patch('strategies.Archives.nifty_short_straddle.DhanHelper')
     def test_short_straddle_exit_all_positions_with_sync(self, mock_dhan_helper_cls, mock_get_dhan):
         mock_dhan = MagicMock()
         mock_get_dhan.return_value = mock_dhan
@@ -221,7 +221,7 @@ class TestPremiumStrikeSelection(unittest.TestCase):
         mock_helper.wait_for_market_open.side_effect = [None, TestCompleteException()]
         mock_helper.buy.reset_mock()
         
-        from strategies.short_straddle.nifty_short_straddle import run_nifty_straddle_strategy
+        from strategies.Archives.nifty_short_straddle import run_nifty_straddle_strategy
         
         with self.assertRaises(TestCompleteException):
             run_nifty_straddle_strategy(dry_run=False, num_lots=2)
@@ -278,6 +278,15 @@ class TestPremiumStrikeSelection(unittest.TestCase):
         strat.exit_all_positions("CE flat exit")
         
         strat.helper.buy.assert_called_once_with("888", 25)
+
+    def test_advanced_loser_ratio_lots_config(self):
+        # Verify default value of loser_ratio_lots is 1
+        strat_default = NiftyAdvancedImbalance(mode="loser_ratio_roll")
+        self.assertEqual(strat_default.loser_ratio_lots, 1)
+
+        # Verify custom value of loser_ratio_lots is accepted
+        strat_custom = NiftyAdvancedImbalance(mode="loser_ratio_roll", loser_ratio_lots=3)
+        self.assertEqual(strat_custom.loser_ratio_lots, 3)
 
 if __name__ == '__main__':
     unittest.main()

@@ -16,6 +16,7 @@ interface StrategyState {
   dry_run?: boolean;
   lots?: number;
   max_lots?: number;
+  loser_ratio_lots?: number;
   ce_strike?: number | null;
   pe_strike?: number | null;
   ce_lots?: number;
@@ -65,6 +66,7 @@ export default function StrategyCard({ meta, state, onRefresh }: StrategyCardPro
 
   // Strategy specific configurations
   const [mode, setMode] = useState<string>('winner_roll_atm'); // for advanced
+  const [loserRatioLots, setLoserRatioLots] = useState<number>(1);
   const [entryType, setEntryType] = useState<string>('straddle'); // straddle vs strangle
   const [strikeSelection, setStrikeSelection] = useState<string>('distance'); // distance, delta, premium
   const [ceOffset, setCeOffset] = useState<number>(200);
@@ -105,6 +107,11 @@ export default function StrategyCard({ meta, state, onRefresh }: StrategyCardPro
         args.push(entryType);
         args.push('--start-time');
         args.push(startTime);
+
+        if (mode === 'loser_ratio_roll') {
+          args.push('--loser-ratio-lots');
+          args.push(String(loserRatioLots));
+        }
 
         if (entryType === 'strangle') {
           if (strikeSelection === 'delta') {
@@ -438,6 +445,20 @@ export default function StrategyCard({ meta, state, onRefresh }: StrategyCardPro
                       <option value="legacy">Legacy Lot Addition (Naked)</option>
                     </select>
                   </div>
+
+                  {mode === 'loser_ratio_roll' && (
+                    <div className="flex flex-col gap-1.5">
+                      <label className="text-zinc-500 font-medium">Loser Ratio Roll Lots</label>
+                      <input
+                        type="number"
+                        value={loserRatioLots}
+                        onChange={(e) => setLoserRatioLots(parseInt(e.target.value) || 1)}
+                        min={1}
+                        max={20}
+                        className="px-3 py-2 bg-zinc-900 border border-zinc-800 rounded-lg text-white font-mono"
+                      />
+                    </div>
+                  )}
 
                   <div className="flex flex-col gap-1.5">
                     <label className="text-zinc-500 font-medium">Strangle vs Straddle Entry</label>

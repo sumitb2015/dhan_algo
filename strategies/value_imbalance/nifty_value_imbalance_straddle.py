@@ -71,6 +71,7 @@ class ValueImbalanceStrategy:
         # State
         self.ce_strike = None
         self.pe_strike = None
+        self.initial_ce_strike = None
         self.ce_lots = initial_lots
         self.pe_lots = initial_lots
         self.ce_id = None
@@ -289,6 +290,7 @@ class ValueImbalanceStrategy:
 
         self.ce_strike = None
         self.pe_strike = None
+        self.initial_ce_strike = None
         self.ce_lots = self.initial_lots
         self.pe_lots = self.initial_lots
         self.ce_id = None
@@ -341,6 +343,7 @@ class ValueImbalanceStrategy:
 
             self.ce_strike = int(round(nifty_spot / 50) * 50)
             self.pe_strike = self.ce_strike
+            self.initial_ce_strike = self.ce_strike
             
             # Check shutdown trigger before option quote fetches
             if check_shutdown_trigger("nifty_value_imbalance_straddle"):
@@ -509,8 +512,12 @@ class ValueImbalanceStrategy:
                 self.save_state(curr_nifty, ce_ltp, pe_ltp, total_pnl, status="RUNNING")
 
                 # --- Phase 5: Straddle Shift (100pt Move) ---
-                if abs(curr_nifty - self.ce_strike) >= 100:
-                    self.exit_all_positions(f"Phase 5: Straddle Shift! Nifty moved 100pts from {self.ce_strike} to {curr_nifty:.2f}")
+                current_atm = int(round(curr_nifty / 50) * 50)
+                if abs(current_atm - self.initial_ce_strike) >= 100:
+                    self.exit_all_positions(
+                        f"Phase 5: Straddle Shift! Current ATM strike {current_atm} shifted 100pts or more "
+                        f"from original strike {self.initial_ce_strike} (Spot: {curr_nifty:.2f})"
+                    )
                     logger.info("Waiting 5 minutes before re-centering straddle at new ATM...")
                     self.sleep_cooldown(300)
                     cycle_active = False

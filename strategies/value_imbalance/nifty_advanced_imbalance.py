@@ -41,7 +41,7 @@ class NiftyAdvancedImbalance:
                  entry_type="straddle", use_delta=False, target_delta=0.20,
                  ce_offset=200, pe_offset=200,
                  use_premium=False, target_premium=50.0,
-                 start_time="09:20"):
+                 start_time="09:20", loser_ratio_lots=1):
         self.mode = mode.lower()
         self.dry_run = dry_run
         self.initial_lots = initial_lots
@@ -58,6 +58,7 @@ class NiftyAdvancedImbalance:
         self.use_premium = use_premium
         self.target_premium = target_premium
         self.start_time = start_time
+        self.loser_ratio_lots = loser_ratio_lots
         
         self.dhan = get_dhan_client()
         if not self.dhan:
@@ -127,6 +128,7 @@ class NiftyAdvancedImbalance:
             "entry_type": self.entry_type,
             "lots": self.initial_lots,
             "max_lots": self.max_lots,
+            "loser_ratio_lots": self.loser_ratio_lots,
             "ce_strike": self.ce_strike,
             "pe_strike": self.pe_strike,
             "ce_lots": self.ce_lots,
@@ -672,8 +674,12 @@ class NiftyAdvancedImbalance:
 
                 # --- Phase 5: Position Shift ---
                 if self.entry_type == "straddle":
-                    if abs(curr_nifty - self.initial_ce_strike) >= 100:
-                        self.exit_all_positions(f"Straddle Shift! Nifty moved 100pts from original strike {self.initial_ce_strike} to {curr_nifty:.2f}")
+                    current_atm = int(round(curr_nifty / 50) * 50)
+                    if abs(current_atm - self.initial_ce_strike) >= 100:
+                        self.exit_all_positions(
+                            f"Straddle Shift! Current ATM strike {current_atm} shifted 100pts or more "
+                            f"from original strike {self.initial_ce_strike} (Spot: {curr_nifty:.2f})"
+                        )
                         logger.info("Waiting 5 minutes before re-centering straddle...")
                         self.sleep_cooldown(300)
                         cycle_active = False
@@ -756,17 +762,24 @@ class NiftyAdvancedImbalance:
                 active_thresh = (self.threshold_strike if (self.ce_lots == self.max_lots or self.pe_lots == self.max_lots) else self.threshold_lot) + self.entry_diff_pct
                 if diff_pct > active_thresh:
                     
-                    # --- MODE 1: winner_roll_atm (No Lot Expansion) ---
+                    # --- MODE 1: winner_roll_atm (Value-balanced Winner Roll) ---
                     if self.mode == "winner_roll_atm":
-                        logger.info(f"!!! Winner Roll ATM Triggered !!! Diff: {diff_pct:.2f}%")
-                        new_atm = int(round(curr_nifty / 50) * 50)
+                        logger.info(f"!!! Winner Value-balanced Roll Triggered !!! Diff: {diff_pct:.2f}%")
+                        
+                        chain_df = self.helper.get_option_chain_df("NIFTY", self.expiry)
+                        if chain_df.empty:
+                            logger.warning("Option Chain empty. Skipping adjustment loop.")
+                            continue
+                        
+                        loser_val = pe_val if winner == "CE" else ce_val
+                        new_strike, new_price = self.find_rebalance_strike(winner, loser_val, winner_lots, chain_df, curr_nifty)
                         current_winner_strike = self.ce_strike if winner == "CE" else self.pe_strike
                         
-                        if new_atm != current_winner_strike:
-                            # Prevent strike inversion during winner ATM roll - exit cycle
-                            if (winner == "CE" and new_atm <= self.pe_strike) or (winner == "PE" and new_atm >= self.ce_strike):
+                        if new_strike and new_strike != current_winner_strike:
+                            # Prevent strike inversion during winner roll - exit cycle
+                            if (winner == "CE" and new_strike <= self.pe_strike) or (winner == "PE" and new_strike >= self.ce_strike):
                                 self.exit_all_positions(
-                                    f"Blocked strike inversion adjustment (winner ATM roll): new {winner} strike {new_atm} "
+                                    f"Blocked strike inversion adjustment (winner roll): new {winner} strike {new_strike} "
                                     f"would cross/equal opposite leg. Exiting cycle."
                                 )
                                 logger.info("Waiting 5 minutes before restart...")
@@ -774,7 +787,7 @@ class NiftyAdvancedImbalance:
                                 cycle_active = False
                                 break
 
-                            # Roll winner to new ATM
+                            # Roll winner to new strike
                             old_id = str(self.ce_id) if winner == "CE" else str(self.pe_id)
                             old_avg = self.ce_avg_price if winner == "CE" else self.pe_avg_price
                             exit_price = self.helper.get_ltp(old_id, exchange="NSE_FNO", instrument="OPTIDX")
@@ -791,13 +804,17 @@ class NiftyAdvancedImbalance:
                                 realized = (old_avg - actual_exit_price) * (winner_lots * self.nifty_lot_size)
                                 self.realized_pnl += realized
                                 
-                                new_quote = self.helper.option("NIFTY", new_atm, winner)
+                                new_quote = self.helper.option("NIFTY", new_strike, winner)
+                                if self.is_quote_invalid(new_quote) and not chain_df.empty:
+                                    if float(new_strike) in chain_df.index:
+                                        new_quote = chain_df.loc[float(new_strike)].to_dict()
+                                        
                                 new_id, price_from_quote, _, lot_size, symbol_name = \
-                                    self._extract_quote_fields(new_quote, new_atm, winner)
+                                    self._extract_quote_fields(new_quote, new_strike, winner)
                                 
                                 if new_id:
                                     self.nifty_lot_size = lot_size
-                                    new_price = price_from_quote if price_from_quote > 0 else exit_price
+                                    new_price = price_from_quote if price_from_quote > 0 else new_price
                                     
                                     # Update WS subscription
                                     try:
@@ -810,19 +827,19 @@ class NiftyAdvancedImbalance:
                                     if not self.dry_run:
                                         sell_oid = self.helper.sell(str(new_id), winner_lots * self.nifty_lot_size)
                                         if not sell_oid:
-                                            logger.critical(f"CRITICAL ERROR: Failed to place sell order for new ATM winner strike {new_id}! Executing emergency exit.")
+                                            logger.critical(f"CRITICAL ERROR: Failed to place sell order for new winner strike {new_id}! Executing emergency exit.")
                                             self.exit_all_positions("Winner roll sell order failed")
                                             cycle_active = False
                                             break
                                     actual_entry_price = self.get_execution_price(sell_oid, new_price) if sell_oid else new_price
                                     
                                     if winner == "CE":
-                                        self.ce_strike = new_atm
+                                        self.ce_strike = new_strike
                                         self.ce_symbol_name = symbol_name
                                         self.ce_id = new_id
                                         self.ce_avg_price = actual_entry_price
                                     else:
-                                        self.pe_strike = new_atm
+                                        self.pe_strike = new_strike
                                         self.pe_symbol_name = symbol_name
                                         self.pe_id = new_id
                                         self.pe_avg_price = actual_entry_price
@@ -832,7 +849,7 @@ class NiftyAdvancedImbalance:
                                     self.update_baseline_imbalance()
                             continue
                         else:
-                            logger.info("Winner strike is already at current ATM. Rolling skipped.")
+                            logger.info(f"Winner strike is already at target value-balancing strike {new_strike}. Rolling skipped.")
                             continue
 
                     # --- MODE 2: loser_ratio_roll (OTM Roll with Quantity Increment) ---
@@ -844,7 +861,7 @@ class NiftyAdvancedImbalance:
                             continue
                             
                         # Increment lot count up to max lots
-                        new_loser_lots = min(self.max_lots, loser_lots + self.initial_lots)
+                        new_loser_lots = min(self.max_lots, loser_lots + self.loser_ratio_lots)
                         if new_loser_lots == loser_lots:
                             self.exit_all_positions(f"Loser already at max lots ({self.max_lots}). Exiting.")
                             cycle_active = False
@@ -1037,13 +1054,13 @@ if __name__ == "__main__":
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Available Adjustment Modes:
-  winner_roll_atm  : Roll the untested/winner strike closer to spot ATM (flat 1:1 lots)
+  winner_roll_atm  : Roll the untested/winner strike closer to spot to balance against losing leg's value (flat 1:1 lots)
   loser_ratio_roll : Roll the challenged loser strike further OTM and increase lots (OTM ratio)
   hedged_addition  : Sell winner leg lot (like legacy) but buy a further OTM protective wing (hedged)
   legacy           : Legacy lot addition on the winner leg (unhedged)
 
 Examples:
-  # Dry run with winner roll ATM adjustment
+  # Dry run with value-balanced winner roll adjustment
   python strategies/nifty_advanced_imbalance.py --mode winner_roll_atm
 
   # Live run with hedged addition adjustment, initial 2 lots
@@ -1092,6 +1109,9 @@ Examples:
     parser.add_argument("--start-time", type=str, default="09:20", metavar="TIME",
                         help="Market start monitoring time (HH:MM IST, default: 09:20)")
 
+    parser.add_argument("--loser-ratio-lots", type=int, default=1, metavar="N",
+                        help="Number of lots to add for loser ratio roll (default: 1)")
+
     args = parser.parse_args()
 
     mode_label = "LIVE" if args.live else "DRY"
@@ -1108,7 +1128,7 @@ Examples:
 
     logger.info(
         f"Config -> Mode: {mode_label} | Sizing: {args.lots}L | Start Time: {args.start_time} | Entry Type: {args.entry_type} ({selection_label}) | "
-        f"Adjustment Mode: {args.mode} | Profit Target: INR {args.target_profit:.0f} | Stop Loss: -INR {stop_loss_val:.0f}"
+        f"Adjustment Mode: {args.mode} (Loser Ratio Lots: {args.loser_ratio_lots}) | Profit Target: INR {args.target_profit:.0f} | Stop Loss: -INR {stop_loss_val:.0f}"
     )
 
     strat = NiftyAdvancedImbalance(
@@ -1125,6 +1145,7 @@ Examples:
         use_premium=args.premium,
         target_premium=args.target_premium,
         start_time=args.start_time,
+        loser_ratio_lots=args.loser_ratio_lots,
     )
     try:
         strat.run()

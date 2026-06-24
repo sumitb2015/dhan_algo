@@ -1,192 +1,214 @@
-# Nifty Advanced Imbalance Strategy: Execution & Adjustment Examples
+# Dhan Algo Trading — Strategies Documentation
 
-This documentation details command-line execution parameters and step-by-step examples of how each of the adjustment modes in `nifty_advanced_imbalance.py` handles position management during market trends and reversals.
+This folder contains the core algorithmic trading strategies implemented under the DhanHQ API framework. The codebase leverages custom mathematical models, technical indicators, and dynamic risk management to execute options trading in both straddles, strangles, and vertical spreads.
 
 ---
 
-## CLI Command-Line Parameters
+## 📁 Directory Structure & Strategy Paths
+For general project setup, SDK usage, and credentials setup, refer to the [Root README](file:///c:/dhan_algo/dhan_algo/README.md).
 
-You can configure and launch the strategy using the following parameters:
+```
+strategies/
+├── value_imbalance/
+│   ├── nifty_advanced_imbalance.py      # Core value-imbalance strategy with 4 selectable modes
+│   ├── nifty_value_imbalance_straddle.py # LegacyStraddle with lot additions
+│   └── nifty_value_imbalance_strangle.py # LegacyStrangle with target strike adjustments
+│
+├── spread_trend/
+│   └── nifty_spread_trend.py            # Trend-following vertical spreads (Supertrend + EMA20)
+│
+├── expiry/
+│   ├── nifty_expiry.py                  # 0DTE Expiry-day option selling with post-SL rebalancing
+│   └── strategy.md                      # Detailed walkthrough of the Expiry strategy
+│
+└── Archives/
+    └── nifty_short_straddle.py          # Archived basic straddle strategy
+```
 
-| Parameter | Type / Choices | Default | Description |
-| :--- | :--- | :--- | :--- |
-| **`--mode`** | `winner_roll_atm`<br>`loser_ratio_roll`<br>`hedged_addition`<br>`legacy` | **`winner_roll_atm`** | Selects the adjustment strategy mode to execute when value imbalance triggers. |
-| **`--live`** | *Flag (Boolean)* | **`False`** | If specified, enables live order placement with the broker. If omitted, runs in a safe dry-run simulation mode. |
-| **`--lots`** | *Integer* | **`1`** | Initial lot count to trade per leg (e.g. `--lots 2` starts with 2 lots on CE and 2 lots on PE). |
-| **`--target-profit`** | *Float* | **`4000.0`** | Global daily profit target in INR. The strategy exits all positions and halts for the day if this target is reached. |
-| **`--stop-loss`** | *Float* | **`4000.0`** | Global daily stop loss in INR. Exits all positions and halts for the day if hit. |
-| **`--entry-type`** | `straddle`<br>`strangle` | **`straddle`** | Selects the entry position type (Straddle ATM vs Strangle OTM). |
-| **`--delta`** | *Flag (Boolean)* | **`False`** | Use delta-based strike selection for Strangle entry. |
-| **`--target-delta`**| *Float* | **`0.20`** | Target absolute delta in delta strangle mode (e.g. `0.20` targets $\approx 0.20$ delta). |
-| **`--ce-offset`** | *Integer* | **`200`** | Points above spot for CE strike in distance strangle mode. |
-| **`--pe-offset`** | *Integer* | **`200`** | Points below spot for PE strike in distance strangle mode. |
-| **`--premium`** | *Flag (Boolean)* | **`False`** | Use premium-based strike selection for Strangle entry. |
-| **`--target-premium`** | *Float* | **`50.0`** | Target premium value in premium strangle mode. |
-| **`--start-time`** | *String* | **`09:20`** | Market start monitoring time (HH:MM IST format). |
+---
 
-### Example Usages
+## ⚙️ Global Risk Management & Rules
+Every strategy in this repository adheres to strict risk controls:
+*   **Intraday Auto-Exit**: Hardcoded or configurable square-offs between **15:15 and 15:17 IST** to avoid broker auto-square-off charges.
+*   **Global Profit Target & Stop Loss**: Monitored on a sub-second basis. Once breached, the strategy exits all legs and pauses operations for the day.
+*   **Martingale Caps**: Position additions are strictly capped (default: `max_lots = 4` per leg).
+*   **WebSocket Priority**: The helper's live WebSocket data feed is used to fetch LTPs instantly, bypassing REST API rate limits (120–250 calls/min).
+
+---
+
+## 1. Nifty Advanced Value-Imbalance Strategy (`nifty_advanced_imbalance.py`)
+
+This strategy executes straddles or strangles and uses four selectable adjustment modes designed to manage tail risk and optimize premium yield during market trends.
+
+```mermaid
+graph TD
+    Start([Start Strategy]) --> Phase1["Phase 1: Strike Selection (ATM/OTM)"]
+    Phase1 --> Phase2["Phase 2: Balanced Entry Check"]
+    Phase2 -- "Diff < entry_balance_threshold" --> Phase3["Phase 3: Value Balancing Loop"]
+    
+    subgraph Adjustments ["Adjustment Algorithm Modes"]
+        Phase3 -- "winner_roll_atm (Default)" --> RollATM["Roll winner leg to new ATM (Flat 1:1 lots)"]
+        Phase3 -- "loser_ratio_roll" --> RollOTM["Roll loser further OTM + increment lots (Configurable)"]
+        Phase3 -- "hedged_addition" --> HedgedAdd["Add winner short lot + buy protective OTM wing"]
+        Phase3 -- "legacy" --> LegacyAdd["Add winner short lot (Unhedged martingale)"]
+    end
+    
+    RollATM --> Phase3
+    RollOTM --> Phase3
+    HedgedAdd --> Phase3
+    LegacyAdd --> Phase3
+    
+    Phase3 -- "Profit Target / SL Hit / EOD" --> Exit["Exit All Positions"]
+    Phase3 -- "ATM Strike shifts >= 100 pts (Straddle) or Breaches Boundary (Strangle)" --> CycleReset["Cycle Reset: Exit all + wait 5m"] --> Phase1
+```
+
+### A. Core Mathematical Concepts
+
+*   **Entry Imbalance Offset**:
+    $$\text{entry\_diff\_pct} = \frac{|\text{CE\_val} - \text{PE\_val}|}{\max(\text{CE\_val}, \text{PE\_val})} \times 100$$
+*   **Active Imbalance Trigger Threshold**:
+    $$\text{Active Threshold} = \text{Threshold (Lot/Strike)} + \text{entry\_diff\_pct}$$
+
+### B. Selectable Adjustment Modes
+
+1.  **`winner_roll_atm`** (Default):
+    *   **Goal**: Rolls the untested winning leg closer to the spot ATM strike.
+    *   **Action**: Keeps a flat 1:1 lot ratio to eliminate margin inflation.
+2.  **`loser_ratio_roll`**:
+    *   **Goal**: Rolls the challenged losing leg further OTM and increments quantity (ratio spread) to maintain premium collections safely.
+    *   **Action**: Uses a configurable increment count (default: `1` lot increment via `--loser-ratio-lots`).
+3.  **`hedged_addition`**:
+    *   **Goal**: Adds short lots to the winner leg (martingale) but buys further OTM wings (200 pts out) to hedge against market whipsaws.
+4.  **`legacy`**:
+    *   **Goal**: Original legacy lot addition strategy on the winner leg (unhedged).
+
+### C. CLI Parameters
+
+| CLI Flag | Default | Description |
+| :--- | :--- | :--- |
+| **`--live`** | *Flag (Boolean)* | Enables live trading. If omitted, runs in simulated dry-run mode. |
+| **`--lots N`** | `1` | Initial lots traded per leg. |
+| **`--mode MODE`** | `winner_roll_atm` | Selects adjustment mode (`winner_roll_atm`, `loser_ratio_roll`, `hedged_addition`, `legacy`). |
+| **`--loser-ratio-lots N`** | `1` | Number of lots to increment during a loser ratio roll adjustment. |
+| **`--entry-type TYPE`** | `straddle` | Entry position type (`straddle` or `strangle`). |
+| **`--delta`** | *Flag* | Use delta-based strike selection for strangle mode. |
+| **`--target-delta D`** | `0.20` | Target absolute delta in delta strangle mode. |
+| **`--premium`** | *Flag* | Use premium-based strike selection for strangle mode. |
+| **`--target-premium P`** | `50.0` | Target premium value for premium strangle mode. |
+| **`--ce-offset PTS`** | `200` | Points above spot for CE strike in distance strangle. |
+| **`--pe-offset PTS`** | `200` | Points below spot for PE strike in distance strangle. |
+| **`--target-profit AMT`** | `4000.0` | Global daily profit target in INR. |
+| **`--stop-loss AMT`** | `4000.0` | Global daily stop loss in INR. |
+| **`--start-time TIME`** | `09:20` | Monitoring start time (HH:MM IST). |
+
+### D. Step-by-Step Walkthrough Example (`winner_roll_atm`)
+1.  **Balanced Entry**: Spot = 24,000. Sells 1x 24000 CE @ ₹150, Sells 1x 24000 PE @ ₹145. Initial imbalance offset = 3.3%. Trigger threshold = 25% + 3.3% = 28.3%.
+2.  **Market Shift**: Spot rises to 24,080. CE rises to ₹210, PE decays to ₹80. Imbalance = 61.9% (Breaches 28.3%).
+3.  **Adjustment**: Buys back 24000 PE @ ₹80 (Realized Profit: +₹65). Sells 1x new ATM 24100 PE @ ₹140.
+4.  **New Position**: 1x 24000 CE (avg ₹150) & 1x 24100 PE (avg ₹140).
+
+---
+
+## 2. Nifty Expiry (0DTE) Strategy (`nifty_expiry.py`)
+
+This strategy is optimized for expiry day trading. It monitors decay on both legs and applies individual stop losses with optional post-SL rebalancing.
+
+> [!NOTE]
+> For a deep-dive explanation of the execution mechanics, numerical calculations, and rebalancing flow, refer to the [Expiry Strategy Guide](file:///c:/dhan_algo/dhan_algo/strategies/expiry/strategy.md).
+
+### Quick Commands
+*   **Dry run with post-SL rebalancing**:
+    ```powershell
+    python strategies/expiry/nifty_expiry.py --adjustment winner_addition --post-sl-balance
+    ```
+*   **Live strangle entry using premium targets**:
+    ```powershell
+    python strategies/expiry/nifty_expiry.py --live --lots 1 --entry-type strangle --premium --target-premium 50.0 --adjustment winner_addition --post-sl-balance
+    ```
+
+---
+
+## 3. Nifty Value-Imbalance Straddle (`nifty_value_imbalance_straddle.py`)
+
+A classic Straddle writing strategy. It enters neutral ATM positions and manages trend expansions by adding lots to the winning side or shifting strikes.
+
+### CLI Parameters
+
+| CLI Flag | Default | Description |
+| :--- | :--- | :--- |
+| **`--live`** | *Flag* | Run in live order placement mode. |
+| **`--lots N`** | `1` | Initial lots per leg. |
+| **`--entry-balance-threshold`** | `15.0` | Initial balance threshold percentage for entry (e.g. 15%). |
+| **`--target-profit AMT`** | `4000.0` | Global daily profit target in INR. |
+| **`--stop-loss AMT`** | `4000.0` | Global daily stop loss in INR. |
+| **`--start-time TIME`** | `09:20` | Monitoring start time (HH:MM IST). |
+
+### Quick Commands
 ```powershell
-# 1. Standard Straddle dry run (Winner roll, 1 lot)
-venv\Scripts\python.exe strategies/value_imbalance/nifty_advanced_imbalance.py --entry-type straddle --mode winner_roll_atm
+# Dry run with custom entry balance threshold (5%)
+python strategies/value_imbalance/nifty_value_imbalance_straddle.py --entry-balance-threshold 5
 
-# 2. Distance Strangle dry run (asymmetric: tighter CE offset, wider PE offset)
-venv\Scripts\python.exe strategies/value_imbalance/nifty_advanced_imbalance.py --entry-type strangle --ce-offset 150 --pe-offset 250 --mode winner_roll_atm
-
-# 3. Delta-based Strangle dry run (Target 0.15 delta) with hedged additions
-venv\Scripts\python.exe strategies/value_imbalance/nifty_advanced_imbalance.py --entry-type strangle --delta --target-delta 0.15 --mode hedged_addition
-
-# 4. Live execution using OTM loser rolling with custom target & stop loss
-venv\Scripts\python.exe strategies/value_imbalance/nifty_advanced_imbalance.py --live --entry-type strangle --delta --target-delta 0.20 --mode loser_ratio_roll --target-profit 6000 --stop-loss 3000
+# Live execution, 2 lots
+python strategies/value_imbalance/nifty_value_imbalance_straddle.py --live --lots 2
 ```
 
 ---
 
-## Core Strategy Parameters
-* **Initial Lots**: 1 lot per leg.
-* **Max Lots**: 4 lots per leg.
-* **Lot Addition Threshold (`threshold_lot`)**: 25%.
-* **Strike Shift Threshold (`threshold_strike`)**: 40%.
-* **Initial Setup**: Rounded spot price determines the ATM strike. Let Nifty Spot = 24,000.
-  * **Short 24000 CE**: Sold 1 lot at ₹150 (Total Value: ₹150)
-  * **Short 24000 PE**: Sold 1 lot at ₹145 (Total Value: ₹145)
-  * **Entry Imbalance (`entry_diff_pct`)**: $\frac{150 - 145}{150} \times 100 = 3.3\%$
-  * **Lot Addition Trigger**: $25.0\% + 3.3\% = \mathbf{28.3\%}$
+## 4. Nifty Value-Imbalance Strangle (`nifty_value_imbalance_strangle.py`)
+
+Similar to the Straddle strategy but enters OTM strangle positions. Supports distance, delta, and premium-based entry options.
+
+### Quick Commands
+```powershell
+# 200-pt symmetric offset dry run
+python strategies/value_imbalance/nifty_value_imbalance_strangle.py --ce-offset 200 --pe-offset 200
+
+# Live execution using delta-based selection (Target 0.15 Delta)
+python strategies/value_imbalance/nifty_value_imbalance_strangle.py --live --delta --target-delta 0.15
+```
 
 ---
 
-## 1. Mode: `winner_roll_atm` (Untested Winner Leg Roll)
-* **Goal**: Collect more premium by rolling the winning leg closer to spot without increasing contract quantity (retaining a strict 1:1 lot ratio).
+## 5. Nifty Spread Trend-Following Strategy (`nifty_spread_trend.py`)
+
+A trend-following options selling strategy that sells Bear Call Spreads or Bull Put Spreads depending on the alignment of the price relative to the **EMA 20** and the **Supertrend (7, 3)** indicators.
+
+### A. Trend Definition
 
 ```
-[Entry] Short 1x 24000 CE (₹150) & 1x 24000 PE (₹145)
-   │
-   ▼ (Nifty spot rises from 24,000 to 24,080)
-[Imbalance Triggered] Short 1x CE spikes to ₹210, PE decays to ₹80 (Diff: 61.9% > 28.3%)
-   │
-   ▼ (Roll PE to new ATM 24,100)
-[Action] Buy back 1x 24000 PE at ₹80 (Realized Profit: +₹65)
-[Action] Sell-to-open 1x 24100 PE at ₹140
-   │
-   ▼
-[New State] Short 1x 24000 CE (avg ₹150) & 1x 24100 PE (avg ₹140)
+        Close > EMA 20  AND  Supertrend = Bullish (1)
+                        │
+                        ▼ Yes
+              [BULLISH TREND SIGNAL]
+            Sell Put Vertical Spread
+                        │
+                        ▼ No
+        Close < EMA 20  AND  Supertrend = Bearish (-1)
+                        │
+                        ▼ Yes
+             [BEARISH TREND SIGNAL]
+            Sell Call Vertical Spread
 ```
 
-### Risk/Reward in Reversal
-* **If Nifty reverses back to 24,000**: The CE decays back to ₹150, and the new 24100 PE increases. However, because you are holding a flat 1:1 lot ratio, the losses on the PE are naturally offset by the gains on the CE, and your total premium base is larger by the realized ₹65 profit.
+### B. Execution Security & Margin efficiency
+*   **On Entry**: Buys the Long hedge leg first, confirms execution fill, then sells the Short option. This locks in the margin benefit immediately and prevents high naked margin requirements.
+*   **On Exit**: Buys back the Short option first, confirms execution fill, then sells the Long hedge.
 
----
+### C. CLI Parameters
 
-## 2. Mode: `loser_ratio_roll` (OTM Challenged Loser Roll)
-* **Goal**: Close the challenged leg and roll it further OTM, using a larger lot count to finance the roll.
+| CLI Flag | Default | Description |
+| :--- | :--- | :--- |
+| **`--live`** | *Flag* | Run in live order placement mode. |
+| **`--symbol`** | `NIFTY` | Underlying index to trade (`NIFTY`, `BANKNIFTY`). |
+| **`--interval`** | `5` | Timeframe interval in minutes (`1`, `5`, `15`, `30`, `60`). |
+| **`--spread-width`** | `100` | Width of the vertical spread in points (Short strike to Long strike). |
+| **`--lots N`** | `1` | Number of lots per spread leg. |
+| **`--target-profit AMT`** | `2000.0` | Global daily profit target in INR. |
+| **`--stop-loss AMT`** | `2000.0` | Global daily stop loss in INR. |
+| **`--no-exit-on-signal-change`** | *Flag* | Disables early exits on trend reversals (holds to SL/Target/EOD). |
+| **`--cooldown-minutes N`** | `5` | Cooldown period in minutes post standard exits. |
 
-```
-[Entry] Short 1x 24000 CE (₹150) & 1x 24000 PE (₹145)
-   │
-   ▼ (Nifty spot rises from 24,000 to 24,080)
-[Imbalance Triggered] Short 1x CE spikes to ₹210, PE decays to ₹80 (Diff: 61.9% > 28.3%)
-   │
-   ▼ (Roll loser CE OTM and increment quantity to 2 lots)
-[Action] Buy back 1x 24000 CE at ₹210 (Realized Loss: -₹60)
-[Action] Target premium per option = Winner Value (80) / New Lots (2) = ₹40
-[Action] Sell-to-open 2x 24200 CE (closest strike) at ₹42
-   │
-   ▼
-[New State] Short 1x 24000 PE (avg ₹145) & 2x 24200 CE (avg ₹42)
-```
-
-### Risk/Reward in Reversal
-* **If Nifty continues to rise to 24,200**: The 24200 CE is challenged, and you roll it again to 3 lots of a further OTM strike (e.g. 24350 CE).
-* **If Nifty reverses to 24,000**: The 2x 24200 CE options decay rapidly to zero, providing double the decay velocity on the CE side, offsetting the rise in the 1x 24000 PE.
-
----
-
-## 3. Mode: `hedged_addition` (Hedged Winner Lot Addition)
-* **Goal**: Average down on the winning side to collect decay, but buy protective OTM options to prevent catastrophic reversal losses.
-
-```
-[Entry] Short 1x 24000 CE (₹150) & 1x 24000 PE (₹145)
-   │
-   ▼ (Nifty spot rises from 24,000 to 24,080)
-[Imbalance Triggered] Short 1x CE spikes to ₹210, PE decays to ₹80 (Diff: 61.9% > 28.3%)
-   │
-   ▼ (Add PE lot and hedge it)
-[Action] Buy-to-open 1x 23800 PE (200 pts OTM from 24000 PE) at ₹20
-[Action] Sell-to-open 1x 24000 PE at ₹80 (Net Credit added: +₹60)
-   │
-   ▼
-[New State] Short 1x 24000 CE (avg ₹150), Short 2x 24000 PE (avg ₹112.50) & Long 1x 23800 PE (buy price ₹20)
-```
-
-### Risk/Reward in Reversal
-* **If Nifty crashes to 23,700 (Reversal)**: The 2 lots of short 24000 PE spike in price. However, your long 23800 PE also spikes. The maximum loss on the added leg is capped at:
-  $$\text{Max Wing Loss} = \text{Strike Difference (200)} - \text{Net Credit (60)} = \mathbf{140\text{ points}}$$
-  This prevents the unhedged martingale explosion associated with legacy lot addition.
-
----
-
-## 4. Mode: `legacy` (Legacy Winner Lot Addition)
-* **Goal**: Average down on the winning side by selling additional naked options.
-
-```
-[Entry] Short 1x 24000 CE (₹150) & 1x 24000 PE (₹145)
-   │
-   ▼ (Nifty spot rises from 24,000 to 24,080)
-[Imbalance Triggered] Short 1x CE spikes to ₹210, PE decays to ₹80 (Diff: 61.9% > 28.3%)
-   │
-   ▼ (Add naked winner lot)
-[Action] Sell-to-open 1x 24000 PE at ₹80 (Unhedged)
-   │
-   ▼
-[New State] Short 1x 24000 CE (avg ₹150) & Short 2x 24000 PE (avg ₹112.50)
-```
-
-### Risk/Reward in Reversal
-* **If Nifty crashes to 23,700 (Reversal)**: Your 2 lots of short 24000 PE are completely unhedged. As Nifty trends downwards, both PE options will expand rapidly to ₹300+, resulting in a large, uncapped loss that easily wipes out the premium collected on the CE side.
-
----
-
-## 5. Nifty Spread Trend-Following Option Selling Strategy (`strategies/spread_trend/nifty_spread_trend.py`)
-
-This strategy implements a trend-following option selling system that sells **Bear Call Spreads** or **Bull Put Spreads** on index options (e.g. NIFTY) depending on the alignment of the price relative to the **EMA 20** and the **Supertrend (7, 3)** indicators.
-
-### Trend Definition
-Signals are evaluated on the last completed candle (avoiding active bar noise and whipsaws):
-*   **Bullish Trend**: `Close > EMA 20` AND `Supertrend Direction = 1` (Bullish).
-    *   *Action*: Enters a **Bull Put Spread** (Sells PE, Buys lower strike PE).
-*   **Bearish Trend**: `Close < EMA 20` AND `Supertrend Direction = -1` (Bearish).
-    *   *Action*: Enters a **Bear Call Spread** (Sells CE, Buys higher strike CE).
-*   **Neutral Trend**: Any conflicting or non-aligned indicator state. No positions are opened.
-
-### Margin-Efficient Execution Sequence
-To keep broker margins low and ensure safety:
-1.  **On Entry**: Buys the Long hedge leg first, confirms execution fill, then sells the Short option.
-2.  **On Exit**: Buys back the Short option first, confirms execution fill, then sells the Long hedge.
-
-### Cooldown and Immediate Reversals
-*   **Signal Reversal**: If the trend reverses (e.g. a Bull Put Spread is open and the signal shifts completely to `BEARISH`), the strategy exits the current spread and **immediately** triggers the opposite position (Bear Call Spread) on the next tick, bypassing the standard cooldown.
-*   **Standard Cooldown**: For regular exits (EOD auto-exit, profit targets, or stop loss), the strategy enforces a 5-minute cool-down period before starting to scan for trend signals again.
-
-### CLI Parameters Reference
-
-| Parameter | Type | Default | Description |
-| :--- | :--- | :--- | :--- |
-| **`--live`** | *Flag* | `False` (Dry run) | Enables live broker order placement. |
-| **`--symbol`** | `str` | `NIFTY` | Underlying index to trade (e.g. `NIFTY`, `BANKNIFTY`). |
-| **`--interval`** | `str` | `5` | Timeframe interval in minutes (`1`, `5`, `15`, `30`, `60`). |
-| **`--ema-period`** | `int` | `20` | EMA period parameter. |
-| **`--supertrend-period`** | `int` | `7` | Supertrend ATR lookback length. |
-| **`--supertrend-multiplier`** | `float` | `3.0` | Supertrend ATR multiplier. |
-| **`--ce-offset`** | `int` | `100` | Points above spot for the Short CE strike. |
-| **`--pe-offset`** | `int` | `100` | Points below spot for the Short PE strike. |
-| **`--spread-width`** | `int` | `100` | Width of the spread in points (Short strike to Long strike). |
-| **`--lots`** | `int` | `1` | Number of lots per spread leg. |
-| **`--target-profit`** or<br>**`--total-profit`** | `float` | `2000.0` | Global daily profit target in INR. |
-| **`--stop-loss`** or<br>**`--total-loss`** | `float` | `2000.0` | Global daily stop loss in INR. Can be passed as positive or negative. |
-| **`--no-exit-on-signal-change`**| *Flag* | `False` | Disables early exits on trend reversals (holds to SL/Target/EOD). |
-| **`--eod-time`** | `str` | `15:15` | EOD auto-square-off time (HH:MM). |
-| **`--cooldown-minutes`** | `int` | `5` | Cooldown period in minutes post standard exits. |
-
-### Command-Line Execution Examples
+### D. Execution Examples
 ```powershell
 # 1. Standard dry run (Nifty, 5-minute, 1 lot)
 python strategies/spread_trend/nifty_spread_trend.py
@@ -194,41 +216,9 @@ python strategies/spread_trend/nifty_spread_trend.py
 # 2. Custom parameters dry run (Nifty, 15-minute, wider offsets, 2 lots)
 python strategies/spread_trend/nifty_spread_trend.py --interval 15 --ce-offset 150 --pe-offset 150 --spread-width 100 --lots 2
 
-# 3. Bank Nifty dry run (strike step auto-detects to 100 points)
+# 3. Bank Nifty dry run
 python strategies/spread_trend/nifty_spread_trend.py --symbol BANKNIFTY --ce-offset 200 --pe-offset 200 --spread-width 100
 
 # 4. Live execution with daily profit target and stop loss limit
 python strategies/spread_trend/nifty_spread_trend.py --live --lots 1 --target-profit 4000 --stop-loss 2000
-```
-
----
-
-## 6. Nifty Value-Imbalance Straddle Strategy (`strategies/value_imbalance/nifty_value_imbalance_straddle.py`)
-
-This strategy implements a standard unhedged short straddle on index options (e.g. NIFTY) that dynamically manages value imbalance by adding lots to the winning side or adjusting the strikes OTM.
-
-### CLI Parameters Reference
-
-| Parameter | Type | Default | Description |
-| :--- | :--- | :--- | :--- |
-| **`--live`** | *Flag* | `False` (Dry run) | Enables live broker order placement. |
-| **`--lots`** | `int` | `1` | Number of lots per leg. |
-| **`--target-profit`** | `float` | `4000.0` | Global daily profit target in INR. |
-| **`--stop-loss`** | `float` | `4000.0` | Global daily stop loss in INR. Can be passed as positive or negative. |
-| **`--start-time`** | `str` | `09:20` | Market start monitoring time (HH:MM IST). |
-| **`--entry-balance-threshold`** | `float` | `15.0` | Initial balance threshold percentage for entry (e.g. `15.0` = 15%%). |
-
-### Command-Line Execution Examples
-```powershell
-# 1. Standard dry run (Nifty, 1 lot)
-python strategies/value_imbalance/nifty_value_imbalance_straddle.py
-
-# 2. Live execution, 2 lots, default targets
-python strategies/value_imbalance/nifty_value_imbalance_straddle.py --live --lots 2
-
-# 3. Live execution, custom targets and custom start time (09:25)
-python strategies/value_imbalance/nifty_value_imbalance_straddle.py --live --lots 1 --target-profit 5000 --stop-loss 3000 --start-time 09:25
-
-# 4. Live execution, custom entry balance threshold (5%)
-python strategies/value_imbalance/nifty_value_imbalance_straddle.py --live --entry-balance-threshold 5
 ```
