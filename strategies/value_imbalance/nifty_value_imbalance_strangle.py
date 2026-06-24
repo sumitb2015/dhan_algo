@@ -661,6 +661,9 @@ class ValueImbalanceStrangle:
                         oid = None
                         if not self.dry_run:
                             oid = self.helper.sell(symbol_id, self.nifty_lot_size)
+                            if not oid:
+                                logger.error(f"Failed to place sell order for lot addition ({winner}). Skipping adjustment.")
+                                continue
                         # Get actual execution price if live, else use new_price
                         exec_price = self.get_execution_price(oid, new_price) if oid else new_price
                         
@@ -744,17 +747,22 @@ class ValueImbalanceStrangle:
                                     sell_oid = None
                                     if not self.dry_run:
                                         sell_oid = self.helper.sell(str(new_id), new_loser_lots * self.nifty_lot_size)
+                                        if not sell_oid:
+                                            logger.critical(f"CRITICAL ERROR: Failed to place sell order for new {loser} strike {new_id}! Executing emergency exit.")
+                                            self.exit_all_positions("Strike adjustment sell order failed")
+                                            cycle_active = False
+                                            break
                                     # Get actual entry price for the new strike
                                     actual_entry_price = self.get_execution_price(sell_oid, new_price) if sell_oid else new_price
-                                    
+
                                     # Sell the new further OTM strike with the adjusted lot count (2 lots)
                                     if loser == "CE":
                                         self.ce_strike, self.ce_id, self.ce_avg_price, self.ce_lots = new_strike, new_id, actual_entry_price, new_loser_lots
                                     else:
                                         self.pe_strike, self.pe_id, self.pe_avg_price, self.pe_lots = new_strike, new_id, actual_entry_price, new_loser_lots
-                            self.adjustment_count += 1
-                            self.last_adjustment_time = current_bar
-                            self.update_baseline_imbalance()
+                                self.adjustment_count += 1
+                                self.last_adjustment_time = current_bar
+                                self.update_baseline_imbalance()
                         continue
 
     def find_rebalance_strike(self, option_type, target_value, lots, chain_df):

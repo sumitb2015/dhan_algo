@@ -765,16 +765,38 @@ class NiftyAdvancedImbalance:
                     # --- MODE 1: winner_roll_atm (Value-balanced Winner Roll) ---
                     if self.mode == "winner_roll_atm":
                         logger.info(f"!!! Winner Value-balanced Roll Triggered !!! Diff: {diff_pct:.2f}%")
-                        
+
+                        # Early deadlock detection: in a straddle (or when strikes have converged),
+                        # rolling the winner closer to ATM requires crossing the opposite leg — impossible.
+                        # PE winner needs to go UP but can't exceed CE strike; CE winner needs to go DOWN but can't go below PE strike.
+                        if winner == "PE" and self.pe_strike + 50 >= self.ce_strike:
+                            self.exit_all_positions(
+                                f"Structural deadlock: PE winner at {self.pe_strike} has no room to roll "
+                                f"closer to ATM without crossing CE at {self.ce_strike}. Exiting cycle."
+                            )
+                            logger.info("Waiting 5 minutes before restart...")
+                            self.sleep_cooldown(300)
+                            cycle_active = False
+                            break
+                        elif winner == "CE" and self.ce_strike - 50 <= self.pe_strike:
+                            self.exit_all_positions(
+                                f"Structural deadlock: CE winner at {self.ce_strike} has no room to roll "
+                                f"closer to ATM without crossing PE at {self.pe_strike}. Exiting cycle."
+                            )
+                            logger.info("Waiting 5 minutes before restart...")
+                            self.sleep_cooldown(300)
+                            cycle_active = False
+                            break
+
                         chain_df = self.helper.get_option_chain_df("NIFTY", self.expiry)
                         if chain_df.empty:
                             logger.warning("Option Chain empty. Skipping adjustment loop.")
                             continue
-                        
+
                         loser_val = pe_val if winner == "CE" else ce_val
                         new_strike, new_price = self.find_rebalance_strike(winner, loser_val, winner_lots, chain_df, curr_nifty)
                         current_winner_strike = self.ce_strike if winner == "CE" else self.pe_strike
-                        
+
                         if new_strike and new_strike != current_winner_strike:
                             # Prevent strike inversion during winner roll - exit cycle
                             if (winner == "CE" and new_strike <= self.pe_strike) or (winner == "PE" and new_strike >= self.ce_strike):
@@ -828,6 +850,10 @@ class NiftyAdvancedImbalance:
                                         sell_oid = self.helper.sell(str(new_id), winner_lots * self.nifty_lot_size)
                                         if not sell_oid:
                                             logger.critical(f"CRITICAL ERROR: Failed to place sell order for new winner strike {new_id}! Executing emergency exit.")
+                                            try:
+                                                self.helper.unsubscribe_instruments([("NSE_FNO", str(new_id), 15)])
+                                            except Exception:
+                                                pass
                                             self.exit_all_positions("Winner roll sell order failed")
                                             cycle_active = False
                                             break
@@ -850,6 +876,7 @@ class NiftyAdvancedImbalance:
                             continue
                         else:
                             logger.info(f"Winner strike is already at target value-balancing strike {new_strike}. Rolling skipped.")
+                            self.last_adjustment_time = current_bar  # prevent per-second retriggers
                             continue
 
                     # --- MODE 2: loser_ratio_roll (OTM Roll with Quantity Increment) ---
@@ -921,6 +948,10 @@ class NiftyAdvancedImbalance:
                                         sell_oid = self.helper.sell(str(new_id), new_loser_lots * self.nifty_lot_size)
                                         if not sell_oid:
                                             logger.critical(f"CRITICAL ERROR: Failed to place sell order for new OTM loser strike {new_id}! Executing emergency exit.")
+                                            try:
+                                                self.helper.unsubscribe_instruments([("NSE_FNO", str(new_id), 15)])
+                                            except Exception:
+                                                pass
                                             self.exit_all_positions("Loser roll sell order failed")
                                             cycle_active = False
                                             break
@@ -1113,6 +1144,70 @@ Examples:
                         help="Number of lots to add for loser ratio roll (default: 1)")
 
     args = parser.parse_args()
+
+    # --- Configuration Validation ---
+    _errors = []
+
+    # winner_roll_atm requires a strangle: in a straddle both legs share the same ATM strike,
+    # so rolling the winner closer to ATM always crosses the opposite leg (inversion).
+    if args.mode == "winner_roll_atm" and args.entry_type == "straddle":
+        _errors.append(
+            "--mode winner_roll_atm is incompatible with --entry-type straddle.\n"
+            "  Reason: in a straddle both legs are at the same ATM strike, so rolling the winner\n"
+            "  closer to ATM immediately crosses/equals the opposite leg (strike inversion).\n"
+            "  Fix: use --entry-type strangle with winner_roll_atm, OR switch to\n"
+            "       --mode hedged_addition / loser_ratio_roll / legacy with straddle."
+        )
+
+    # --delta and --premium are mutually exclusive strike selection methods
+    if args.delta and args.premium:
+        _errors.append(
+            "--delta and --premium are mutually exclusive.\n"
+            "  Use only one strike selection method at a time."
+        )
+
+    # Lot sizing sanity checks (max_lots is hardcoded to 4 in the constructor)
+    _MAX_LOTS = 4
+    if args.lots < 1:
+        _errors.append(f"--lots must be >= 1, got {args.lots}.")
+    if args.lots > _MAX_LOTS:
+        _errors.append(
+            f"--lots {args.lots} exceeds the strategy's internal max_lots ({_MAX_LOTS}).\n"
+            "  The initial lot count cannot exceed the adjustment ceiling."
+        )
+
+    # Strangle-only flags have no effect with straddle entry
+    if args.entry_type == "straddle":
+        if args.delta:
+            _errors.append("--delta requires --entry-type strangle (straddle always enters at ATM, ignoring delta selection).")
+        if args.premium:
+            _errors.append("--premium requires --entry-type strangle (straddle always enters at ATM, ignoring premium selection).")
+        if args.ce_offset != 200:
+            _errors.append(f"--ce-offset {args.ce_offset} has no effect with --entry-type straddle (straddle always enters at ATM).")
+        if args.pe_offset != 200:
+            _errors.append(f"--pe-offset {args.pe_offset} has no effect with --entry-type straddle (straddle always enters at ATM).")
+
+    # loser_ratio_roll-specific flag has no effect in other modes
+    if args.loser_ratio_lots != 1 and args.mode != "loser_ratio_roll":
+        _errors.append(
+            f"--loser-ratio-lots {args.loser_ratio_lots} has no effect in --mode {args.mode} "
+            f"(only used with loser_ratio_roll)."
+        )
+
+    # --target-delta has no effect without --delta
+    if args.target_delta != 0.20 and not args.delta:
+        _errors.append(f"--target-delta {args.target_delta} has no effect without --delta flag.")
+
+    # --target-premium has no effect without --premium
+    if args.target_premium != 50.0 and not args.premium:
+        _errors.append(f"--target-premium {args.target_premium} has no effect without --premium flag.")
+
+    if _errors:
+        for e in _errors:
+            logger.error(f"[CONFIG ERROR] {e}")
+        logger.error("Aborting: fix the configuration errors above and retry.")
+        sys.exit(1)
+    # --- End Validation ---
 
     mode_label = "LIVE" if args.live else "DRY"
     stop_loss_val = abs(args.stop_loss)

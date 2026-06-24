@@ -580,6 +580,9 @@ class ValueImbalanceStrategy:
                             oid = None
                             if not self.dry_run:
                                 oid = self.helper.sell(symbol_id, self.nifty_lot_size)
+                                if not oid:
+                                    logger.error(f"Failed to place sell order for lot addition ({winner}). Skipping adjustment.")
+                                    continue
                             # Get actual execution price if live, else use new_price
                             exec_price = self.get_execution_price(oid, new_price) if oid else new_price
                             
