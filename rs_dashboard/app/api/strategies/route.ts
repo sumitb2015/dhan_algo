@@ -1,0 +1,191 @@
+import { NextRequest, NextResponse } from 'next/server';
+import path from 'path';
+import fs from 'fs';
+import { execSync, spawn } from 'child_process';
+
+const PROJECT_ROOT = path.resolve(process.cwd(), '..');
+const DEBUG_DIR = path.join(PROJECT_ROOT, 'debug');
+const PYTHON_EXE = path.join(PROJECT_ROOT, 'venv', 'Scripts', 'python.exe');
+
+// Metadata mapping strategy key to display names and absolute paths
+const STRATEGIES_METADATA: Record<string, { name: string; path: string }> = {
+  nifty_advanced_imbalance: {
+    name: 'Nifty Advanced Imbalance',
+    path: path.join(PROJECT_ROOT, 'strategies', 'value_imbalance', 'nifty_advanced_imbalance.py')
+  },
+  nifty_spread_trend: {
+    name: 'Nifty Spread Trend-Following',
+    path: path.join(PROJECT_ROOT, 'strategies', 'spread_trend', 'nifty_spread_trend.py')
+  },
+  nifty_value_imbalance_strangle: {
+    name: 'Nifty Value Imbalance Strangle',
+    path: path.join(PROJECT_ROOT, 'strategies', 'value_imbalance', 'nifty_value_imbalance_strangle.py')
+  }
+};
+
+/**
+ * Checks if a given PID is still running on the system.
+ */
+function isPidRunning(pid: number): boolean {
+  try {
+    if (process.platform === 'win32') {
+      const output = execSync(`tasklist /FI "PID eq ${pid}"`, {
+        encoding: 'utf8',
+        stdio: ['pipe', 'pipe', 'ignore']
+      });
+      return output.toLowerCase().includes(pid.toString());
+    } else {
+      execSync(`ps -p ${pid}`, { stdio: 'ignore' });
+      return true;
+    }
+  } catch (e) {
+    return false;
+  }
+}
+
+/**
+ * GET handler: Returns the active status, parameters, and live states of all strategy processes.
+ */
+export async function GET() {
+  try {
+    const results: Record<string, any> = {};
+
+    // Ensure debug dir exists
+    if (!fs.existsSync(DEBUG_DIR)) {
+      fs.mkdirSync(DEBUG_DIR, { recursive: true });
+    }
+
+    for (const [key, meta] of Object.entries(STRATEGIES_METADATA)) {
+      const stateFile = path.join(DEBUG_DIR, `${key}_state.json`);
+      let state: any = {
+        strategy: key,
+        status: 'STOPPED',
+        total_pnl: 0,
+        realized_pnl: 0,
+        spot: 0,
+        adjustments: 0
+      };
+
+      if (fs.existsSync(stateFile)) {
+        try {
+          const content = fs.readFileSync(stateFile, 'utf8');
+          const data = JSON.parse(content);
+          
+          if (data && data.pid && isPidRunning(data.pid)) {
+            // Process is running, trust the file state
+            state = data;
+          } else {
+            // Process is not running anymore
+            state = {
+              ...data,
+              status: 'STOPPED'
+            };
+          }
+        } catch (err) {
+          console.error(`Error reading/parsing state file for ${key}:`, err);
+        }
+      }
+
+      results[key] = {
+        meta: {
+          key,
+          name: meta.name
+        },
+        state
+      };
+    }
+
+    return NextResponse.json({ success: true, strategies: results });
+  } catch (err) {
+    console.error('Error in GET strategies API:', err);
+    return NextResponse.json({ success: false, error: String(err) }, { status: 500 });
+  }
+}
+
+/**
+ * POST handler: Triggers start or graceful stop of the strategy processes.
+ */
+export async function POST(request: NextRequest) {
+  try {
+    const body = await request.json();
+    const { action, strategy, args = [] } = body;
+
+    if (!strategy || !STRATEGIES_METADATA[strategy]) {
+      return NextResponse.json({ success: false, error: 'Invalid or missing strategy key' }, { status: 400 });
+    }
+
+    const meta = STRATEGIES_METADATA[strategy];
+
+    if (!fs.existsSync(DEBUG_DIR)) {
+      fs.mkdirSync(DEBUG_DIR, { recursive: true });
+    }
+
+    if (action === 'start') {
+      // Check if it's already running
+      const stateFile = path.join(DEBUG_DIR, `${strategy}_state.json`);
+      if (fs.existsSync(stateFile)) {
+        try {
+          const data = JSON.parse(fs.readFileSync(stateFile, 'utf8'));
+          if (data.pid && isPidRunning(data.pid)) {
+            return NextResponse.json({ success: false, error: 'Strategy is already running' }, { status: 400 });
+          }
+        } catch (e) {}
+      }
+
+      // Ensure any old shutdown trigger file is removed
+      const triggerFile = path.join(DEBUG_DIR, `${strategy}_shutdown.trigger`);
+      if (fs.existsSync(triggerFile)) {
+        fs.unlinkSync(triggerFile);
+      }
+
+      // Spawn process in background
+      const processArgs = [meta.path, ...args];
+      console.log(`Spawning background strategy: ${PYTHON_EXE} ${processArgs.join(' ')}`);
+
+      const child = spawn(PYTHON_EXE, processArgs, {
+        cwd: PROJECT_ROOT,
+        detached: true,
+        stdio: 'ignore',
+        windowsHide: true
+      });
+
+      child.unref();
+
+      // Write initial state to prevent UI flicker
+      const initialState = {
+        strategy,
+        status: 'INITIALIZING',
+        pid: child.pid,
+        total_pnl: 0,
+        realized_pnl: 0,
+        spot: 0,
+        adjustments: 0,
+        last_update: new Date().toISOString()
+      };
+      
+      try {
+        fs.writeFileSync(stateFile, JSON.stringify(initialState, null, 2));
+      } catch (writeErr) {
+        console.error('Failed to write initial state file:', writeErr);
+      }
+
+      return NextResponse.json({ success: true, pid: child.pid });
+
+    } else if (action === 'stop') {
+      // Write trigger file for graceful shutdown
+      const triggerFile = path.join(DEBUG_DIR, `${strategy}_shutdown.trigger`);
+      console.log(`Writing shutdown trigger for strategy: ${strategy} at ${triggerFile}`);
+      
+      fs.writeFileSync(triggerFile, '');
+
+      return NextResponse.json({ success: true, message: 'Graceful shutdown trigger written successfully' });
+      
+    } else {
+      return NextResponse.json({ success: false, error: 'Invalid action, must be start or stop' }, { status: 400 });
+    }
+
+  } catch (err) {
+    console.error('Error in POST strategies API:', err);
+    return NextResponse.json({ success: false, error: String(err) }, { status: 500 });
+  }
+}

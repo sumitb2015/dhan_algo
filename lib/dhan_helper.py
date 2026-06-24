@@ -14,7 +14,7 @@ try:
     HAS_TALIB = True
 except ImportError:
     HAS_TALIB = False
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+# logging.basicConfig is configured by the main strategy application
 logger = logging.getLogger(__name__)
 
 class DhanHelper:
@@ -1268,8 +1268,12 @@ class DhanHelper:
                 
             if isinstance(res, dict) and res.get('status') == 'success':
                 data = res.get('data', {})
-                # For non-existent ID, Dhan API returns data: [] (list)
-                if isinstance(data, dict):
+                # Handle list format in data returned by Dhan API for get_order_by_id
+                if isinstance(data, list):
+                    if len(data) > 0:
+                        return data[0].get('orderStatus')
+                    return None # Empty list indicates order not found
+                elif isinstance(data, dict):
                     return data.get('orderStatus')
                 return None # data is [], meaning not found
             
@@ -1968,7 +1972,12 @@ class DhanHelper:
         try:
             res = self.dhan.get_order_by_id(order_id)
             if isinstance(res, dict) and res.get('status') == 'success':
-                return res.get('data', {})
+                data = res.get('data', {})
+                if isinstance(data, list):
+                    if len(data) > 0:
+                        return data[0]
+                    return {}
+                return data
             error_msg = res.get('remarks') if isinstance(res, dict) else str(res)
             logger.error(f"Failed to fetch order by ID: {error_msg}")
         except Exception as e:
@@ -1980,7 +1989,12 @@ class DhanHelper:
         try:
             res = self.dhan.get_order_by_correlationID(correlation_id)
             if isinstance(res, dict) and res.get('status') == 'success':
-                return res.get('data', {})
+                data = res.get('data', {})
+                if isinstance(data, list):
+                    if len(data) > 0:
+                        return data[0]
+                    return {}
+                return data
             error_msg = res.get('remarks') if isinstance(res, dict) else str(res)
             logger.error(f"Failed to fetch order by correlation ID: {error_msg}")
         except Exception as e:
@@ -3042,20 +3056,36 @@ class DhanHelper:
             product_type=product_type
         )
 
-    def place_sl_market(self, symbol: str, quantity: int, trigger_price: float, direction: str, product_type: str = "MARGIN") -> Optional[str]:
+    def place_sl_limit(self, symbol: str, quantity: int, trigger_price: float, limit_price: float, direction: str, product_type: str = "MARGIN") -> Optional[str]:
         """
-        Place a Stop Loss Market order (SL-M).
+        Place a Stop Loss Limit (SL-L) order.
         """
-        SLM_TYPE = getattr(self.dhan, 'SLM', 'STOP_LOSS_MARKET')
+        SL_TYPE = getattr(self.dhan, 'SL', 'STOP_LOSS')
+        
+        logger.info(f"place_sl_limit: Placing SL-L order. Symbol: {symbol} | Trigger: {trigger_price:.2f} | Limit: {limit_price:.2f} | Direction: {direction}")
         
         return self.place_entry(
             symbol=symbol,
             quantity=quantity,
             direction=direction,
-            order_type=SLM_TYPE,
+            order_type=SL_TYPE,
+            price=limit_price,
             trigger_price=trigger_price,
             product_type=product_type
         )
+
+    def place_sl_market(self, symbol: str, quantity: int, trigger_price: float, direction: str, product_type: str = "MARGIN") -> Optional[str]:
+        """
+        Place a Stop Loss Market order (SL-M).
+        NOTE: Since Dhan/exchanges do not support SL-M for Options F&O, this falls back to
+        placing a Stop Loss Limit (SL-L) order with a 5% price cushion.
+        """
+        if direction.upper() == "BUY":
+            limit_price = round(trigger_price * 1.05 * 20) / 20
+        else:
+            limit_price = round(trigger_price * 0.95 * 20) / 20
+            
+        return self.place_sl_limit(symbol, quantity, trigger_price, limit_price, direction, product_type)
 
     def update_trailing_sl(self, symbol: str, current_sl_id: str, new_trigger_price: float, quantity: int, direction: str, product_type: str = "MARGIN") -> Optional[str]:
         """

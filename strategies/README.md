@@ -27,16 +27,16 @@ You can configure and launch the strategy using the following parameters:
 ### Example Usages
 ```powershell
 # 1. Standard Straddle dry run (Winner roll, 1 lot)
-venv\Scripts\python.exe strategies/nifty_advanced_imbalance.py --entry-type straddle --mode winner_roll_atm
+venv\Scripts\python.exe strategies/value_imbalance/nifty_advanced_imbalance.py --entry-type straddle --mode winner_roll_atm
 
 # 2. Distance Strangle dry run (asymmetric: tighter CE offset, wider PE offset)
-venv\Scripts\python.exe strategies/nifty_advanced_imbalance.py --entry-type strangle --ce-offset 150 --pe-offset 250 --mode winner_roll_atm
+venv\Scripts\python.exe strategies/value_imbalance/nifty_advanced_imbalance.py --entry-type strangle --ce-offset 150 --pe-offset 250 --mode winner_roll_atm
 
 # 3. Delta-based Strangle dry run (Target 0.15 delta) with hedged additions
-venv\Scripts\python.exe strategies/nifty_advanced_imbalance.py --entry-type strangle --delta --target-delta 0.15 --mode hedged_addition
+venv\Scripts\python.exe strategies/value_imbalance/nifty_advanced_imbalance.py --entry-type strangle --delta --target-delta 0.15 --mode hedged_addition
 
 # 4. Live execution using OTM loser rolling with custom target & stop loss
-venv\Scripts\python.exe strategies/nifty_advanced_imbalance.py --live --entry-type strangle --delta --target-delta 0.20 --mode loser_ratio_roll --target-profit 6000 --stop-loss 3000
+venv\Scripts\python.exe strategies/value_imbalance/nifty_advanced_imbalance.py --live --entry-type strangle --delta --target-delta 0.20 --mode loser_ratio_roll --target-profit 6000 --stop-loss 3000
 ```
 
 ---
@@ -145,7 +145,7 @@ venv\Scripts\python.exe strategies/nifty_advanced_imbalance.py --live --entry-ty
 
 ---
 
-## 5. Nifty Spread Trend-Following Option Selling Strategy (`strategies/nifty_spread_trend.py`)
+## 5. Nifty Spread Trend-Following Option Selling Strategy (`strategies/spread_trend/nifty_spread_trend.py`)
 
 This strategy implements a trend-following option selling system that sells **Bear Call Spreads** or **Bull Put Spreads** on index options (e.g. NIFTY) depending on the alignment of the price relative to the **EMA 20** and the **Supertrend (7, 3)** indicators.
 
@@ -189,21 +189,21 @@ To keep broker margins low and ensure safety:
 ### Command-Line Execution Examples
 ```powershell
 # 1. Standard dry run (Nifty, 5-minute, 1 lot)
-python strategies/nifty_spread_trend.py
+python strategies/spread_trend/nifty_spread_trend.py
 
 # 2. Custom parameters dry run (Nifty, 15-minute, wider offsets, 2 lots)
-python strategies/nifty_spread_trend.py --interval 15 --ce-offset 150 --pe-offset 150 --spread-width 100 --lots 2
+python strategies/spread_trend/nifty_spread_trend.py --interval 15 --ce-offset 150 --pe-offset 150 --spread-width 100 --lots 2
 
 # 3. Bank Nifty dry run (strike step auto-detects to 100 points)
-python strategies/nifty_spread_trend.py --symbol BANKNIFTY --ce-offset 200 --pe-offset 200 --spread-width 100
+python strategies/spread_trend/nifty_spread_trend.py --symbol BANKNIFTY --ce-offset 200 --pe-offset 200 --spread-width 100
 
 # 4. Live execution with daily profit target and stop loss limit
-python strategies/nifty_spread_trend.py --live --lots 1 --target-profit 4000 --stop-loss 2000
+python strategies/spread_trend/nifty_spread_trend.py --live --lots 1 --target-profit 4000 --stop-loss 2000
 ```
 
 ---
 
-## 6. Nifty Value-Imbalance Straddle Strategy (`strategies/nifty_value_imbalance.py`)
+## 6. Nifty Value-Imbalance Straddle Strategy (`strategies/value_imbalance/nifty_value_imbalance_straddle.py`)
 
 This strategy implements a standard unhedged short straddle on index options (e.g. NIFTY) that dynamically manages value imbalance by adding lots to the winning side or adjusting the strikes OTM.
 
@@ -216,15 +216,19 @@ This strategy implements a standard unhedged short straddle on index options (e.
 | **`--target-profit`** | `float` | `4000.0` | Global daily profit target in INR. |
 | **`--stop-loss`** | `float` | `4000.0` | Global daily stop loss in INR. Can be passed as positive or negative. |
 | **`--start-time`** | `str` | `09:20` | Market start monitoring time (HH:MM IST). |
+| **`--entry-balance-threshold`** | `float` | `15.0` | Initial balance threshold percentage for entry (e.g. `15.0` = 15%%). |
 
 ### Command-Line Execution Examples
 ```powershell
 # 1. Standard dry run (Nifty, 1 lot)
-python strategies/nifty_value_imbalance.py
+python strategies/value_imbalance/nifty_value_imbalance_straddle.py
 
 # 2. Live execution, 2 lots, default targets
-python strategies/nifty_value_imbalance.py --live --lots 2
+python strategies/value_imbalance/nifty_value_imbalance_straddle.py --live --lots 2
 
 # 3. Live execution, custom targets and custom start time (09:25)
-python strategies/nifty_value_imbalance.py --live --lots 1 --target-profit 5000 --stop-loss 3000 --start-time 09:25
+python strategies/value_imbalance/nifty_value_imbalance_straddle.py --live --lots 1 --target-profit 5000 --stop-loss 3000 --start-time 09:25
+
+# 4. Live execution, custom entry balance threshold (5%)
+python strategies/value_imbalance/nifty_value_imbalance_straddle.py --live --entry-balance-threshold 5
 ```

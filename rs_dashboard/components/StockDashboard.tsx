@@ -7,6 +7,7 @@ import IndexSummary from './IndexSummary';
 import Leaderboard from './Leaderboard';
 import RSChart from './RSChart';
 import SectorHeatmap from './SectorHeatmap';
+import Link from 'next/link';
 
 export default function StockDashboard() {
   const [indexType, setIndexType] = useState<'nifty50' | 'nifty500'>('nifty50');
@@ -136,6 +137,21 @@ export default function StockDashboard() {
 
         {/* Global Controls */}
         <div className="flex flex-wrap items-center gap-4">
+          {/* Page Switcher */}
+          <div className="flex items-center bg-zinc-900/80 border border-zinc-850 p-1 rounded-xl">
+            <button
+              className="px-4 py-1.5 text-xs font-semibold rounded-lg bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 transition-all"
+            >
+              Mansfield RS Scanner
+            </button>
+            <Link
+              href="/strategies"
+              className="px-4 py-1.5 text-xs font-semibold rounded-lg text-zinc-500 hover:text-zinc-300 transition-all"
+            >
+              Algo Strategies
+            </Link>
+          </div>
+
           {/* Lookback Selector */}
           <div className="flex items-center bg-zinc-900/80 border border-zinc-850 p-1 rounded-xl">
             {([50, 100, 252] as const).map((lb) => (

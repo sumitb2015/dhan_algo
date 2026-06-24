@@ -7,23 +7,30 @@ import pandas as pd
 from datetime import datetime
 
 # Add parent directory to path to import login and lib
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 from login import get_dhan_client
 from lib.dhan_helper import DhanHelper
+from lib.strategy_state_helper import save_strategy_state, check_shutdown_trigger
 
 # Setup Logging
-project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 debug_dir = os.path.join(project_root, "debug")
 os.makedirs(debug_dir, exist_ok=True)
+
+class FlushingFileHandler(logging.FileHandler):
+    def emit(self, record):
+        super().emit(record)
+        self.flush()
 
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
         logging.StreamHandler(),
-        logging.FileHandler(os.path.join(debug_dir, f"advanced_imbalance_{datetime.now().strftime('%Y%m%d')}.log"))
-    ]
+        FlushingFileHandler(os.path.join(debug_dir, f"advanced_imbalance_{datetime.now().strftime('%Y%m%d')}.log"))
+    ],
+    force=True
 )
 logger = logging.getLogger(__name__)
 
@@ -102,6 +109,41 @@ class NiftyAdvancedImbalance:
         self.last_adjustment_time = None
         self.consecutive_chain_failures = 0
 
+    def sleep_cooldown(self, seconds):
+        """Shutdown-aware sleep for cooldowns and delays."""
+        for _ in range(seconds):
+            if check_shutdown_trigger("nifty_advanced_imbalance"):
+                logger.info("UI Shutdown Request during cooldown sleep. Exiting.")
+                self.save_state(0, 0, 0, 0, status="STOPPED")
+                sys.exit(0)
+            time.sleep(1)
+
+    def save_state(self, nifty_spot, ce_ltp, pe_ltp, total_pnl, status="RUNNING"):
+        state_dict = {
+            "strategy": "nifty_advanced_imbalance",
+            "status": status,
+            "mode": self.mode,
+            "dry_run": self.dry_run,
+            "entry_type": self.entry_type,
+            "lots": self.initial_lots,
+            "max_lots": self.max_lots,
+            "ce_strike": self.ce_strike,
+            "pe_strike": self.pe_strike,
+            "ce_lots": self.ce_lots,
+            "pe_lots": self.pe_lots,
+            "ce_ltp": ce_ltp,
+            "pe_ltp": pe_ltp,
+            "ce_avg_price": self.ce_avg_price,
+            "pe_avg_price": self.pe_avg_price,
+            "realized_pnl": self.realized_pnl,
+            "total_pnl": total_pnl,
+            "spot": nifty_spot,
+            "adjustments": self.adjustment_count,
+            "profit_target": self.profit_target,
+            "stop_loss": self.stop_loss
+        }
+        save_strategy_state("nifty_advanced_imbalance", state_dict)
+
     def get_execution_price(self, order_id: str, fallback_price: float) -> float:
         """Wait for fill and get the average execution price, or return fallback."""
         if not order_id:
@@ -109,7 +151,7 @@ class NiftyAdvancedImbalance:
         if self.helper.wait_for_fill(order_id, timeout=5):
             order_details = self.helper.get_order_by_id(order_id)
             if order_details:
-                fill_price = float(order_details.get('avgFilledPrice', 0.0) or order_details.get('price', 0.0))
+                fill_price = float(order_details.get('averageTradedPrice', 0.0) or order_details.get('avgFilledPrice', 0.0) or order_details.get('price', 0.0))
                 if fill_price > 0:
                     logger.info(f"Order {order_id} execution price confirmed: {fill_price:.2f}")
                     return fill_price
@@ -193,10 +235,24 @@ class NiftyAdvancedImbalance:
             wing_desc = f" | W_CE:{len(self.ce_wings)}L W_PE:{len(self.pe_wings)}L"
 
         logger.info(
-            f"Mode:{self.mode} | Nifty:{nifty_spot:.1f} | Straddle:{self.ce_strike}C / {self.pe_strike}P | "
+            f"Mode:{self.mode} | Straddle:{self.ce_strike}C / {self.pe_strike}P | "
             f"CE:{ce_ltp:.1f}({self.ce_lots}L) Val:{ce_val:.1f} | PE:{pe_ltp:.1f}({self.pe_lots}L) Val:{pe_val:.1f}{wing_desc} | "
-            f"PnL:{total_pnl:.1f} | Diff:{diff_pct:.1f}% (Thresh:{active_thresh:.1f}% {thresh_label}) | Adj:{self.adjustment_count}"
+            f"Diff:{diff_pct:.1f}% (Thresh:{active_thresh:.1f}% {thresh_label}) | Adj:{self.adjustment_count}"
         )
+
+    def update_baseline_imbalance(self):
+        """Update baseline imbalance (entry_diff_pct) after an adjustment using new LTPs."""
+        time.sleep(1) # Let the live feed stabilize
+        ce_ltp = self.helper.get_ltp(str(self.ce_id), exchange="NSE_FNO", instrument="OPTIDX")
+        pe_ltp = self.helper.get_ltp(str(self.pe_id), exchange="NSE_FNO", instrument="OPTIDX")
+        if ce_ltp > 0 and pe_ltp > 0:
+            ce_val = self.ce_lots * ce_ltp
+            pe_val = self.pe_lots * pe_ltp
+            max_val = max(ce_val, pe_val)
+            self.entry_diff_pct = abs(ce_val - pe_val) / max_val * 100 if max_val > 0 else 0.0
+        else:
+            self.entry_diff_pct = 0.0
+        logger.info(f"Post-Adjustment baseline imbalance updated to: {self.entry_diff_pct:.2f}%")
 
     def exit_all_positions(self, reason):
         logger.warning(f"!!! EXITING ALL POSITIONS: {reason} !!!")
@@ -410,6 +466,13 @@ class NiftyAdvancedImbalance:
         logger.info(f"Starting Nifty Advanced Imbalance Strategy | Mode: {self.mode} | Dry Run: {self.dry_run} | Start Time: {self.start_time}")
         
         while True:
+            # Check shutdown trigger
+            if check_shutdown_trigger("nifty_advanced_imbalance"):
+                logger.info("UI Shutdown Request in outer loop.")
+                self.save_state(0, 0, 0, 0, status="STOPPED")
+                sys.exit(0)
+            self.save_state(0, 0, 0, 0, status="INITIALIZING")
+
             # Wait for market open if closed
             self.helper.wait_for_market_open(self.dry_run, start_time=self.start_time, eod_time="15:17")
             
@@ -424,6 +487,10 @@ class NiftyAdvancedImbalance:
                  logger.warning("Direct LTP failed for NIFTY Index. Falling back to Option Chain...")
                  nifty_spot = chain_df.attrs.get('underlying_ltp', 0)
                   
+            if nifty_spot == 0 and self.prev_day_close and self.prev_day_close > 0:
+                 nifty_spot = self.prev_day_close
+                 logger.warning(f"Fallback to previous day close spot price: {nifty_spot:.2f} for dry-run simulation.")
+
             if nifty_spot == 0:
                  logger.error("Could not fetch Nifty Spot. Retrying in 30s...")
                  time.sleep(30)
@@ -437,6 +504,12 @@ class NiftyAdvancedImbalance:
             self.initial_ce_strike = self.ce_strike
             self.initial_pe_strike = self.pe_strike
             
+            # Check shutdown trigger before option quote fetches
+            if check_shutdown_trigger("nifty_advanced_imbalance"):
+                logger.info("UI Shutdown Request before option quote fetches.")
+                self.save_state(nifty_spot, 0, 0, 0.0, status="STOPPED")
+                sys.exit(0)
+
             ce_quote = self.helper.option("NIFTY", self.ce_strike, "CE")
             pe_quote = self.helper.option("NIFTY", self.pe_strike, "PE")
                 
@@ -462,6 +535,12 @@ class NiftyAdvancedImbalance:
             
             logger.info(f"New Cycle: {self.ce_strike}CE / {self.pe_strike}PE | Lot Size: {self.nifty_lot_size} | Expiry: {self.expiry}")
             
+            # Check shutdown trigger before websocket subscription
+            if check_shutdown_trigger("nifty_advanced_imbalance"):
+                logger.info("UI Shutdown Request before websocket subscription.")
+                self.save_state(nifty_spot, self.ce_avg_price, self.pe_avg_price, 0.0, status="STOPPED")
+                sys.exit(0)
+
             # Subscribe to WebSocket for real-time updates
             logger.info(f"Subscribing to WebSocket for {self.ce_symbol_name} (ID: {self.ce_id}) and {self.pe_symbol_name} (ID: {self.pe_id})")
             try:
@@ -478,6 +557,20 @@ class NiftyAdvancedImbalance:
             logger.info(f"Waiting for premiums to balance (Target: < {target_diff}%)...")
             balanced = False
             while True:
+                # Check shutdown trigger
+                if check_shutdown_trigger("nifty_advanced_imbalance"):
+                    logger.info("UI Shutdown Request during balanced entry wait.")
+                    ce_p = self.helper.get_ltp(str(self.ce_id), exchange="NSE_FNO", instrument="OPTIDX")
+                    pe_p = self.helper.get_ltp(str(self.pe_id), exchange="NSE_FNO", instrument="OPTIDX")
+                    self.save_state(nifty_spot, ce_p, pe_p, 0.0, status="STOPPED")
+                    self.reset_session()
+                    sys.exit(0)
+
+                # Save current balancing state
+                ce_p = self.helper.get_ltp(str(self.ce_id), exchange="NSE_FNO", instrument="OPTIDX")
+                pe_p = self.helper.get_ltp(str(self.pe_id), exchange="NSE_FNO", instrument="OPTIDX")
+                self.save_state(nifty_spot, ce_p, pe_p, 0.0, status="BALANCING")
+
                 if datetime.now().strftime("%H:%M") >= "15:17":
                     logger.info("Market nearing close. Waiting for next cycle...")
                     break
@@ -539,6 +632,20 @@ class NiftyAdvancedImbalance:
             # --- MAIN MONITORING LOOP ---
             while cycle_active:
                 time.sleep(1)
+                
+                # Check shutdown trigger first
+                if check_shutdown_trigger("nifty_advanced_imbalance"):
+                    c_ltp = self.helper.get_ltp(str(self.ce_id), exchange="NSE_FNO", instrument="OPTIDX")
+                    p_ltp = self.helper.get_ltp(str(self.pe_id), exchange="NSE_FNO", instrument="OPTIDX")
+                    ce_ltp_val = c_ltp if c_ltp > 0 else self.ce_avg_price
+                    pe_ltp_val = p_ltp if p_ltp > 0 else self.pe_avg_price
+                    total_pnl = self._calculate_pnl(ce_ltp_val, pe_ltp_val)
+                    curr_nifty = self.helper.get_ltp("NIFTY", exchange="IDX_I", instrument="INDEX")
+                    if curr_nifty <= 0: curr_nifty = nifty_spot
+                    self.exit_all_positions("UI Shutdown Request")
+                    self.save_state(curr_nifty, ce_ltp_val, pe_ltp_val, total_pnl, status="STOPPED")
+                    sys.exit(0)
+
                 now = datetime.now()
                 current_time_str = now.strftime("%H:%M")
                 current_bar = now.strftime("%Y-%m-%d %H:%M")
@@ -560,12 +667,15 @@ class NiftyAdvancedImbalance:
                 curr_nifty = self.helper.get_ltp("NIFTY", exchange="IDX_I", instrument="INDEX")
                 if curr_nifty == 0: curr_nifty = nifty_spot
 
+                # Save current state
+                self.save_state(curr_nifty, ce_ltp, pe_ltp, total_pnl, status="RUNNING")
+
                 # --- Phase 5: Position Shift ---
                 if self.entry_type == "straddle":
                     if abs(curr_nifty - self.initial_ce_strike) >= 100:
                         self.exit_all_positions(f"Straddle Shift! Nifty moved 100pts from original strike {self.initial_ce_strike} to {curr_nifty:.2f}")
                         logger.info("Waiting 5 minutes before re-centering straddle...")
-                        time.sleep(300)
+                        self.sleep_cooldown(300)
                         cycle_active = False
                         break
                 else:
@@ -592,7 +702,7 @@ class NiftyAdvancedImbalance:
                             f"(Boundaries: {lower_bound} - {upper_bound})"
                         )
                         logger.info("Waiting 5 minutes before re-centering strangle...")
-                        time.sleep(300)
+                        self.sleep_cooldown(300)
                         cycle_active = False
                         break
                 
@@ -609,7 +719,7 @@ class NiftyAdvancedImbalance:
                     if total_pnl <= current_sl:
                         self.exit_all_positions(f"Trailing SL Hit! Peak: {self.peak_pnl:.2f}, Final: {total_pnl:.2f}")
                         logger.info("Waiting 5 minutes before next re-entry cycle...")
-                        time.sleep(300)
+                        self.sleep_cooldown(300)
                         cycle_active = False
                         break
                 
@@ -643,7 +753,8 @@ class NiftyAdvancedImbalance:
                 loser_lots = self.pe_lots if winner == "CE" else self.ce_lots
 
                 # --- ADJUSTMENT TRIGGERS ---
-                if diff_pct > (self.threshold_lot + self.entry_diff_pct):
+                active_thresh = (self.threshold_strike if (self.ce_lots == self.max_lots or self.pe_lots == self.max_lots) else self.threshold_lot) + self.entry_diff_pct
+                if diff_pct > active_thresh:
                     
                     # --- MODE 1: winner_roll_atm (No Lot Expansion) ---
                     if self.mode == "winner_roll_atm":
@@ -659,7 +770,7 @@ class NiftyAdvancedImbalance:
                                     f"would cross/equal opposite leg. Exiting cycle."
                                 )
                                 logger.info("Waiting 5 minutes before restart...")
-                                time.sleep(300)
+                                self.sleep_cooldown(300)
                                 cycle_active = False
                                 break
 
@@ -718,8 +829,7 @@ class NiftyAdvancedImbalance:
                                         
                                     self.adjustment_count += 1
                                     self.last_adjustment_time = current_bar
-                                    # Reset entry diff pct offset to stabilize after adjustment
-                                    self.entry_diff_pct = 0.0
+                                    self.update_baseline_imbalance()
                             continue
                         else:
                             logger.info("Winner strike is already at current ATM. Rolling skipped.")
@@ -751,7 +861,7 @@ class NiftyAdvancedImbalance:
                                     f"would cross/equal opposite leg. Exiting cycle."
                                 )
                                 logger.info("Waiting 5 minutes before restart...")
-                                time.sleep(300)
+                                self.sleep_cooldown(300)
                                 cycle_active = False
                                 break
 
@@ -814,7 +924,7 @@ class NiftyAdvancedImbalance:
                                         
                                     self.adjustment_count += 1
                                     self.last_adjustment_time = current_bar
-                                    self.entry_diff_pct = 0.0
+                                    self.update_baseline_imbalance()
                             continue
 
                     # --- MODE 3: hedged_addition (Short Winner + Buy Protective Wing) ---
@@ -883,6 +993,7 @@ class NiftyAdvancedImbalance:
                                     
                                 self.adjustment_count += 1
                                 self.last_adjustment_time = current_bar
+                                self.update_baseline_imbalance()
                             continue
                         else:
                             self.exit_all_positions(f"Winner leg ({winner}) already at max lots ({self.max_lots}). Exiting.")
@@ -913,6 +1024,7 @@ class NiftyAdvancedImbalance:
                                     self.pe_lots += 1
                                 self.adjustment_count += 1
                                 self.last_adjustment_time = current_bar
+                                self.update_baseline_imbalance()
                             continue
                         else:
                             self.exit_all_positions(f"Winner leg ({winner}) already at max lots ({self.max_lots}). Exiting.")
@@ -1014,4 +1126,9 @@ Examples:
         target_premium=args.target_premium,
         start_time=args.start_time,
     )
-    strat.run()
+    try:
+        strat.run()
+    except KeyboardInterrupt:
+        logger.warning("KeyboardInterrupt detected. Gracefully exiting and squaring off all positions...")
+        strat.exit_all_positions("KeyboardInterrupt / Manual Stop")
+        sys.exit(0)

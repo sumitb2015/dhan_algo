@@ -7,8 +7,8 @@ from unittest.mock import MagicMock, patch
 # Add parent directory to path to import strategies and lib
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from strategies.nifty_value_imbalance_strangle import ValueImbalanceStrangle
-from strategies.nifty_advanced_imbalance import NiftyAdvancedImbalance
+from strategies.value_imbalance.nifty_value_imbalance_strangle import ValueImbalanceStrangle
+from strategies.value_imbalance.nifty_advanced_imbalance import NiftyAdvancedImbalance
 
 class TestPremiumStrikeSelection(unittest.TestCase):
     def setUp(self):
@@ -24,20 +24,20 @@ class TestPremiumStrikeSelection(unittest.TestCase):
         self.chain_df = pd.DataFrame(data, index=self.strikes)
         
         # Mock the get_dhan_client in setUp so we don't hit live OAuth prompts
-        self.patcher1 = patch('strategies.nifty_value_imbalance_strangle.get_dhan_client')
+        self.patcher1 = patch('strategies.value_imbalance.nifty_value_imbalance_strangle.get_dhan_client')
         self.mock_get_dhan1 = self.patcher1.start()
         self.mock_get_dhan1.return_value = MagicMock()
 
-        self.patcher2 = patch('strategies.nifty_advanced_imbalance.get_dhan_client')
+        self.patcher2 = patch('strategies.value_imbalance.nifty_advanced_imbalance.get_dhan_client')
         self.mock_get_dhan2 = self.patcher2.start()
         self.mock_get_dhan2.return_value = MagicMock()
 
         # Mock DhanHelper for both strategies
-        self.patcher3 = patch('strategies.nifty_value_imbalance_strangle.DhanHelper')
+        self.patcher3 = patch('strategies.value_imbalance.nifty_value_imbalance_strangle.DhanHelper')
         self.mock_helper1 = self.patcher3.start()
         self.mock_helper1.return_value = MagicMock()
 
-        self.patcher4 = patch('strategies.nifty_advanced_imbalance.DhanHelper')
+        self.patcher4 = patch('strategies.value_imbalance.nifty_advanced_imbalance.DhanHelper')
         self.mock_helper2 = self.patcher4.start()
         self.mock_helper2.return_value = MagicMock()
 
@@ -186,8 +186,8 @@ class TestPremiumStrikeSelection(unittest.TestCase):
         # Wing 333 (long) should be sold back
         strat.helper.sell.assert_called_once_with("333", 75)
 
-    @patch('strategies.nifty_short_straddle.get_dhan_client')
-    @patch('strategies.nifty_short_straddle.DhanHelper')
+    @patch('strategies.short_straddle.nifty_short_straddle.get_dhan_client')
+    @patch('strategies.short_straddle.nifty_short_straddle.DhanHelper')
     def test_short_straddle_exit_all_positions_with_sync(self, mock_dhan_helper_cls, mock_get_dhan):
         mock_dhan = MagicMock()
         mock_get_dhan.return_value = mock_dhan
@@ -221,7 +221,7 @@ class TestPremiumStrikeSelection(unittest.TestCase):
         mock_helper.wait_for_market_open.side_effect = [None, TestCompleteException()]
         mock_helper.buy.reset_mock()
         
-        from strategies.nifty_short_straddle import run_nifty_straddle_strategy
+        from strategies.short_straddle.nifty_short_straddle import run_nifty_straddle_strategy
         
         with self.assertRaises(TestCompleteException):
             run_nifty_straddle_strategy(dry_run=False, num_lots=2)
@@ -244,8 +244,8 @@ class TestPremiumStrikeSelection(unittest.TestCase):
         # Verify it only buys PE (67890)
         mock_helper.buy.assert_called_once_with("67890", 50)
 
-    @patch('strategies.nifty_value_imbalance.get_dhan_client')
-    @patch('strategies.nifty_value_imbalance.DhanHelper')
+    @patch('strategies.value_imbalance.nifty_value_imbalance_straddle.get_dhan_client')
+    @patch('strategies.value_imbalance.nifty_value_imbalance_straddle.DhanHelper')
     def test_value_imbalance_straddle_exit_all_positions_with_sync(self, mock_dhan_helper_cls, mock_get_dhan):
         mock_dhan = MagicMock()
         mock_get_dhan.return_value = mock_dhan
@@ -255,7 +255,7 @@ class TestPremiumStrikeSelection(unittest.TestCase):
         mock_helper.get_lot_size.return_value = 25
         mock_helper.get_prev_day_levels.return_value = {"high": 24000, "low": 23800, "close": 23900}
         
-        from strategies.nifty_value_imbalance import ValueImbalanceStrategy
+        from strategies.value_imbalance.nifty_value_imbalance_straddle import ValueImbalanceStrategy
         
         strat = ValueImbalanceStrategy(dry_run=False, initial_lots=1)
         strat.ce_id = 999

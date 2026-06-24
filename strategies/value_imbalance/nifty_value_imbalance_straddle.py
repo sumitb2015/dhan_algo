@@ -7,29 +7,37 @@ import pandas as pd
 from datetime import datetime
 
 # Add parent directory to path to import login and lib
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 from login import get_dhan_client
 from lib.dhan_helper import DhanHelper
+from lib.strategy_state_helper import save_strategy_state, check_shutdown_trigger
 
 # Setup Logging
-project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 debug_dir = os.path.join(project_root, "debug")
 os.makedirs(debug_dir, exist_ok=True)
+
+class FlushingFileHandler(logging.FileHandler):
+    def emit(self, record):
+        super().emit(record)
+        self.flush()
 
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
         logging.StreamHandler(),
-        logging.FileHandler(os.path.join(debug_dir, f"imbalance_{datetime.now().strftime('%Y%m%d')}.log"))
-    ]
+        FlushingFileHandler(os.path.join(debug_dir, f"imbalance_{datetime.now().strftime('%Y%m%d')}.log"))
+    ],
+    force=True
 )
 logger = logging.getLogger(__name__)
 
 class ValueImbalanceStrategy:
     def __init__(self, dry_run=True, initial_lots=1, max_lots=4, 
                  threshold_lot=25.0, threshold_strike=40.0, target_rebalance=5.0,
+                 entry_balance_threshold=15.0,
                  profit_target=4000.0, stop_loss=4000.0, start_time="09:20"):
         self.dry_run = dry_run
         self.initial_lots = initial_lots
@@ -37,6 +45,7 @@ class ValueImbalanceStrategy:
         self.threshold_lot = threshold_lot
         self.threshold_strike = threshold_strike
         self.target_rebalance = target_rebalance
+        self.entry_balance_threshold = entry_balance_threshold
         self.profit_target = profit_target
         self.stop_loss = -abs(stop_loss) # Ensure it's negative
         self.start_time = start_time
@@ -85,6 +94,39 @@ class ValueImbalanceStrategy:
         self.last_adjustment_time = None 
         self.consecutive_chain_failures = 0
 
+    def sleep_cooldown(self, seconds):
+        """Shutdown-aware sleep for cooldowns and delays."""
+        for _ in range(seconds):
+            if check_shutdown_trigger("nifty_value_imbalance_straddle"):
+                logger.info("UI Shutdown Request during cooldown sleep. Exiting.")
+                self.save_state(0, 0, 0, 0, status="STOPPED")
+                sys.exit(0)
+            time.sleep(1)
+
+    def save_state(self, nifty_spot, ce_ltp, pe_ltp, total_pnl, status="RUNNING"):
+        state_dict = {
+            "strategy": "nifty_value_imbalance_straddle",
+            "status": status,
+            "dry_run": self.dry_run,
+            "lots": self.initial_lots,
+            "max_lots": self.max_lots,
+            "ce_strike": self.ce_strike,
+            "pe_strike": self.pe_strike,
+            "ce_lots": self.ce_lots,
+            "pe_lots": self.pe_lots,
+            "ce_ltp": ce_ltp,
+            "pe_ltp": pe_ltp,
+            "ce_avg_price": self.ce_avg_price,
+            "pe_avg_price": self.pe_avg_price,
+            "realized_pnl": self.realized_pnl,
+            "total_pnl": total_pnl,
+            "spot": nifty_spot,
+            "adjustments": self.adjustment_count,
+            "profit_target": self.profit_target,
+            "stop_loss": self.stop_loss
+        }
+        save_strategy_state("nifty_value_imbalance_straddle", state_dict)
+
     def get_execution_price(self, order_id: str, fallback_price: float) -> float:
         """Wait for fill and get the average execution price, or return fallback."""
         if not order_id:
@@ -93,7 +135,7 @@ class ValueImbalanceStrategy:
         if self.helper.wait_for_fill(order_id, timeout=5):
             order_details = self.helper.get_order_by_id(order_id)
             if order_details:
-                fill_price = float(order_details.get('avgFilledPrice', 0.0) or order_details.get('price', 0.0))
+                fill_price = float(order_details.get('averageTradedPrice', 0.0) or order_details.get('avgFilledPrice', 0.0) or order_details.get('price', 0.0))
                 if fill_price > 0:
                     logger.info(f"Order {order_id} execution price confirmed: {fill_price:.2f}")
                     return fill_price
@@ -184,7 +226,21 @@ class ValueImbalanceStrategy:
             active_thresh = self.threshold_lot + self.entry_diff_pct
             thresh_label = "Lot"
 
-        logger.info(f"Nifty: {nifty_spot:.2f} | Straddle: {self.ce_strike}CE / {self.pe_strike}PE | CE: {ce_ltp:.2f} ({self.ce_lots}L) Val: {ce_val:.2f} | PE: {pe_ltp:.2f} ({self.pe_lots}L) Val: {pe_val:.2f} | PnL: {total_pnl:.2f} | Diff: {diff_pct:.2f}% (Thresh: {active_thresh:.2f}% {thresh_label}) | Adj: {self.adjustment_count}")
+        logger.info(f"Straddle: {self.ce_strike}CE / {self.pe_strike}PE | CE: {ce_ltp:.2f} ({self.ce_lots}L) Val: {ce_val:.2f} | PE: {pe_ltp:.2f} ({self.pe_lots}L) Val: {pe_val:.2f} | Diff: {diff_pct:.2f}% (Thresh: {active_thresh:.2f}% {thresh_label}) | Adj: {self.adjustment_count}")
+
+    def update_baseline_imbalance(self):
+        """Update baseline imbalance (entry_diff_pct) after an adjustment using new LTPs."""
+        time.sleep(1) # Let the live feed stabilize
+        ce_ltp = self.helper.get_ltp(str(self.ce_id), exchange="NSE_FNO", instrument="OPTIDX")
+        pe_ltp = self.helper.get_ltp(str(self.pe_id), exchange="NSE_FNO", instrument="OPTIDX")
+        if ce_ltp > 0 and pe_ltp > 0:
+            ce_val = self.ce_lots * ce_ltp
+            pe_val = self.pe_lots * pe_ltp
+            max_val = max(ce_val, pe_val)
+            self.entry_diff_pct = abs(ce_val - pe_val) / max_val * 100 if max_val > 0 else 0.0
+        else:
+            self.entry_diff_pct = 0.0
+        logger.info(f"Post-Adjustment baseline imbalance updated to: {self.entry_diff_pct:.2f}%")
 
     def exit_all_positions(self, reason):
         logger.warning(f"!!! EXITING ALL POSITIONS: {reason} !!!")
@@ -253,6 +309,13 @@ class ValueImbalanceStrategy:
         logger.info(f"Starting Nifty Value Imbalance Strategy (Dry Run: {self.dry_run} | Start Time: {self.start_time})")
         
         while True:
+            # Check shutdown trigger
+            if check_shutdown_trigger("nifty_value_imbalance_straddle"):
+                logger.info("UI Shutdown Request in outer loop.")
+                self.save_state(0, 0, 0, 0, status="STOPPED")
+                sys.exit(0)
+            self.save_state(0, 0, 0, 0, status="INITIALIZING")
+
             # Wait for market open if closed (EOD is 15:17)
             self.helper.wait_for_market_open(self.dry_run, start_time=self.start_time, eod_time="15:17")
             
@@ -267,6 +330,10 @@ class ValueImbalanceStrategy:
                  logger.warning("Direct LTP failed for NIFTY Index. Falling back to Option Chain...")
                  nifty_spot = chain_df.attrs.get('underlying_ltp', 0)
                   
+            if nifty_spot == 0 and self.prev_day_close and self.prev_day_close > 0:
+                 nifty_spot = self.prev_day_close
+                 logger.warning(f"Fallback to previous day close spot price: {nifty_spot:.2f} for dry-run simulation.")
+
             if nifty_spot == 0:
                  logger.error("Could not fetch Nifty Spot. Retrying in 30s...")
                  time.sleep(30)
@@ -275,6 +342,12 @@ class ValueImbalanceStrategy:
             self.ce_strike = int(round(nifty_spot / 50) * 50)
             self.pe_strike = self.ce_strike
             
+            # Check shutdown trigger before option quote fetches
+            if check_shutdown_trigger("nifty_value_imbalance_straddle"):
+                logger.info("UI Shutdown Request before option quote fetches.")
+                self.save_state(nifty_spot, 0, 0, 0.0, status="STOPPED")
+                sys.exit(0)
+
             ce_quote = self.helper.option("NIFTY", self.ce_strike, "CE")
             pe_quote = self.helper.option("NIFTY", self.pe_strike, "PE")
                 
@@ -303,6 +376,12 @@ class ValueImbalanceStrategy:
             
             logger.info(f"New Cycle: {self.ce_strike} CE/PE | Lot Size: {self.nifty_lot_size} | Expiry: {self.expiry}")
             
+            # Check shutdown trigger before websocket subscription
+            if check_shutdown_trigger("nifty_value_imbalance_straddle"):
+                logger.info("UI Shutdown Request before websocket subscription.")
+                self.save_state(nifty_spot, self.ce_avg_price, self.pe_avg_price, 0.0, status="STOPPED")
+                sys.exit(0)
+
             # Subscribe to WebSocket for real-time updates
             logger.info(f"Subscribing to WebSocket for {self.ce_symbol_name} (ID: {self.ce_id}) and {self.pe_symbol_name} (ID: {self.pe_id})")
             try:
@@ -318,6 +397,20 @@ class ValueImbalanceStrategy:
             logger.info(f"Waiting for premiums to balance at ATM {self.ce_strike}...")
             balanced = False
             while True:
+                # Check shutdown trigger
+                if check_shutdown_trigger("nifty_value_imbalance_straddle"):
+                    logger.info("UI Shutdown Request during balanced entry wait.")
+                    ce_p = self.helper.get_ltp(str(self.ce_id), exchange="NSE_FNO", instrument="OPTIDX")
+                    pe_p = self.helper.get_ltp(str(self.pe_id), exchange="NSE_FNO", instrument="OPTIDX")
+                    self.save_state(nifty_spot, ce_p, pe_p, 0.0, status="STOPPED")
+                    self.reset_session()
+                    sys.exit(0)
+
+                # Save current balancing state
+                ce_p = self.helper.get_ltp(str(self.ce_id), exchange="NSE_FNO", instrument="OPTIDX")
+                pe_p = self.helper.get_ltp(str(self.pe_id), exchange="NSE_FNO", instrument="OPTIDX")
+                self.save_state(nifty_spot, ce_p, pe_p, 0.0, status="BALANCING")
+
                 # Check 15:17 even during waiting
                 if datetime.now().strftime("%H:%M") >= "15:17":
                     logger.info("Market nearing close. Waiting for next cycle...")
@@ -337,8 +430,8 @@ class ValueImbalanceStrategy:
                 if ce_price > 0 and pe_price > 0:
                     max_prem = max(ce_price, pe_price)
                     diff_pct = abs(ce_price - pe_price) / max_prem * 100
-                    logger.info(f"Waiting for Balance... CE: {ce_price:.2f} | PE: {pe_price:.2f} | Diff: {diff_pct:.1f}% (Target: < 10%)")
-                    if diff_pct < 10.0:
+                    logger.info(f"Waiting for Balance... CE: {ce_price:.2f} | PE: {pe_price:.2f} | Diff: {diff_pct:.1f}% (Target: < {self.entry_balance_threshold}%)")
+                    if diff_pct < self.entry_balance_threshold:
                         self.ce_avg_price = ce_price
                         self.pe_avg_price = pe_price
                         self.entry_diff_pct = diff_pct
@@ -376,6 +469,20 @@ class ValueImbalanceStrategy:
             # --- MAIN MONITORING LOOP ---
             while cycle_active:
                 time.sleep(1)
+                
+                # Check shutdown trigger first
+                if check_shutdown_trigger("nifty_value_imbalance_straddle"):
+                    c_ltp = self.helper.get_ltp(str(self.ce_id), exchange="NSE_FNO", instrument="OPTIDX")
+                    p_ltp = self.helper.get_ltp(str(self.pe_id), exchange="NSE_FNO", instrument="OPTIDX")
+                    ce_ltp_val = c_ltp if c_ltp > 0 else self.ce_avg_price
+                    pe_ltp_val = p_ltp if p_ltp > 0 else self.pe_avg_price
+                    total_pnl = self._calculate_pnl(ce_ltp_val, pe_ltp_val)
+                    curr_nifty = self.helper.get_ltp("NIFTY", exchange="IDX_I", instrument="INDEX")
+                    if curr_nifty <= 0: curr_nifty = nifty_spot
+                    self.exit_all_positions("UI Shutdown Request")
+                    self.save_state(curr_nifty, ce_ltp_val, pe_ltp_val, total_pnl, status="STOPPED")
+                    sys.exit(0)
+
                 now = datetime.now()
                 current_time_str = now.strftime("%H:%M")
                 current_bar = now.strftime("%Y-%m-%d %H:%M")
@@ -398,11 +505,14 @@ class ValueImbalanceStrategy:
                 curr_nifty = self.helper.get_ltp("NIFTY", exchange="IDX_I", instrument="INDEX")
                 if curr_nifty == 0: curr_nifty = nifty_spot # Fallback to start spot
 
+                # Save current state
+                self.save_state(curr_nifty, ce_ltp, pe_ltp, total_pnl, status="RUNNING")
+
                 # --- Phase 5: Straddle Shift (100pt Move) ---
                 if abs(curr_nifty - self.ce_strike) >= 100:
                     self.exit_all_positions(f"Phase 5: Straddle Shift! Nifty moved 100pts from {self.ce_strike} to {curr_nifty:.2f}")
                     logger.info("Waiting 5 minutes before re-centering straddle at new ATM...")
-                    time.sleep(300)
+                    self.sleep_cooldown(300)
                     cycle_active = False
                     break
                 
@@ -419,7 +529,7 @@ class ValueImbalanceStrategy:
                     if total_pnl <= current_sl:
                         self.exit_all_positions(f"Trailing SL Hit! Peak: {self.peak_pnl:.2f}, Final: {total_pnl:.2f}")
                         logger.info("Waiting 5 minutes before next re-entry cycle...")
-                        time.sleep(300)
+                        self.sleep_cooldown(300)
                         cycle_active = False
                         break # Break inner loop to restart outer loop
                 
@@ -452,8 +562,9 @@ class ValueImbalanceStrategy:
                 winner_lots = self.ce_lots if winner == "CE" else self.pe_lots
                 loser_lots = self.pe_lots if winner == "CE" else self.ce_lots
 
-                # Phase 3: Lot Addition or Exit on Max Lots Reached
-                if diff_pct > (self.threshold_lot + self.entry_diff_pct):
+                # Phase 3 & 4: Adjustments
+                active_thresh = (self.threshold_strike if (self.ce_lots == self.max_lots or self.pe_lots == self.max_lots) else self.threshold_lot) + self.entry_diff_pct
+                if diff_pct > active_thresh:
                     if winner_lots < self.max_lots:
                         logger.info(f"!!! Lot Addition !!! Diff: {diff_pct:.2f}%")
                         symbol_id = str(self.ce_id) if winner == "CE" else str(self.pe_id)
@@ -473,89 +584,92 @@ class ValueImbalanceStrategy:
                                 self.pe_lots += 1
                             self.adjustment_count += 1
                             self.last_adjustment_time = current_bar
+                            self.update_baseline_imbalance()
                         continue
                     else:
-                        # Winner leg already at max lots, cannot adjust further. Close all and re-enter.
-                        self.exit_all_positions(
-                            f"Winner leg ({winner}) already at max lots ({self.max_lots}) and requires adjustment. "
-                            f"Closing all positions to start a new cycle."
-                        )
-                        cycle_active = False
-                        break 
-
-                # Phase 4 & 5: Strike Adjustment
-                if diff_pct > (self.threshold_strike + self.entry_diff_pct) and (self.ce_lots == self.max_lots or self.pe_lots == self.max_lots):
-                    logger.info(f"!!! Strike Adjustment !!! Diff: {diff_pct:.2f}%")
-                    chain_df = self.helper.get_option_chain_df("NIFTY", self.expiry)
-                    if chain_df.empty:
-                        self.consecutive_chain_failures += 1
-                        logger.warning(f"Option Chain empty / failed. Consecutive failures: {self.consecutive_chain_failures}")
-                        if self.consecutive_chain_failures >= 10:
-                            self.exit_all_positions("Emergency Exit: 10 consecutive option chain failures during rebalance.")
+                        logger.info(f"!!! Strike Adjustment !!! Diff: {diff_pct:.2f}%")
+                        chain_df = self.helper.get_option_chain_df("NIFTY", self.expiry)
+                        if chain_df.empty:
+                            self.consecutive_chain_failures += 1
+                            logger.warning(f"Option Chain empty / failed. Consecutive failures: {self.consecutive_chain_failures}")
+                            if self.consecutive_chain_failures >= 10:
+                                self.exit_all_positions("Emergency Exit: 10 consecutive option chain failures during rebalance.")
+                                cycle_active = False
+                                break
+                            continue
+                        else:
+                            self.consecutive_chain_failures = 0
+                        winner_val = ce_val if loser == "PE" else pe_val
+                        new_strike, new_price = self.find_rebalance_strike(loser, winner_val, loser_lots, chain_df)
+                        if not new_strike: continue
+                        
+                        # Prevent strike inversion during rebalance - exit cycle
+                        if (loser == "CE" and new_strike <= self.pe_strike) or (loser == "PE" and new_strike >= self.ce_strike):
+                            self.exit_all_positions(
+                                f"Blocked strike inversion adjustment: new {loser} strike {new_strike} "
+                                f"would cross/equal opposite leg. Exiting cycle."
+                            )
+                            logger.info("Waiting 5 minutes before restart...")
+                            self.sleep_cooldown(300)
                             cycle_active = False
                             break
-                        continue
-                    else:
-                        self.consecutive_chain_failures = 0
-                    winner_val = ce_val if loser == "PE" else pe_val
-                    new_strike, new_price = self.find_rebalance_strike(loser, winner_val, loser_lots, chain_df)
-                    if not new_strike: continue
-                    old_id = str(self.ce_id) if loser == "CE" else str(self.pe_id)
-                    old_avg = self.ce_avg_price if loser == "CE" else self.pe_avg_price
-                    exit_price = self.helper.get_ltp(old_id, exchange="NSE_FNO", instrument="OPTIDX")
-                    if exit_price > 0:
-                        buy_oid = None
-                        if not self.dry_run:
-                            buy_oid = self.helper.buy(old_id, loser_lots * self.nifty_lot_size)
-                            if not buy_oid:
-                                logger.error(f"Failed to place buy-to-close order for old leg {old_id}. Aborting strike adjustment to prevent orphaned legs.")
-                                continue
-                        # Get actual exit price if live
-                        actual_exit_price = self.get_execution_price(buy_oid, exit_price) if buy_oid else exit_price
-                        
-                        realized = (old_avg - actual_exit_price) * (loser_lots * self.nifty_lot_size)
-                        self.realized_pnl += realized
-                        
-                        new_quote = self.helper.option("NIFTY", new_strike, loser)
-                        if self.is_quote_invalid(new_quote) and not chain_df.empty:
-                            logger.warning(f"New quote fetch failed for adjustment strike {new_strike}. Falling back to option chain...")
-                            if float(new_strike) in chain_df.index:
-                                new_quote = chain_df.loc[float(new_strike)].to_dict()
-
-                        new_id, price_from_quote, _, lot_size, symbol_name = \
-                            self._extract_quote_fields(new_quote, new_strike, loser)
-
-                        if new_id:
-                            self.nifty_lot_size = lot_size
-                            new_price = price_from_quote if price_from_quote > 0 else new_price
-                            
-                            # Update WebSocket subscription
-                            logger.info(f"Updating WebSocket: Unsubscribing {old_id}, Subscribing {new_id}")
-                            try:
-                                self.helper.unsubscribe_instruments([("NSE_FNO", str(old_id), 15)])
-                                self.helper.subscribe_instruments([("NSE_FNO", str(new_id), 15)])
-                            except Exception as ws_err:
-                                logger.error(f"WebSocket update failed: {ws_err}")
- 
-                            sell_oid = None
+                        old_id = str(self.ce_id) if loser == "CE" else str(self.pe_id)
+                        old_avg = self.ce_avg_price if loser == "CE" else self.pe_avg_price
+                        exit_price = self.helper.get_ltp(old_id, exchange="NSE_FNO", instrument="OPTIDX")
+                        if exit_price > 0:
+                            buy_oid = None
                             if not self.dry_run:
-                                sell_oid = self.helper.sell(str(new_id), loser_lots * self.nifty_lot_size)
-                            # Get actual entry price for the new strike
-                            actual_entry_price = self.get_execution_price(sell_oid, new_price) if sell_oid else new_price
+                                buy_oid = self.helper.buy(old_id, loser_lots * self.nifty_lot_size)
+                                if not buy_oid:
+                                    logger.error(f"Failed to place buy-to-close order for old leg {old_id}. Aborting strike adjustment to prevent orphaned legs.")
+                                    continue
+                            # Get actual exit price if live
+                            actual_exit_price = self.get_execution_price(buy_oid, exit_price) if buy_oid else exit_price
                             
-                            if loser == "CE":
-                                self.ce_strike = new_strike
-                                self.ce_symbol_name = symbol_name
-                                self.ce_id = new_id
-                                self.ce_avg_price = actual_entry_price
-                            else:
-                                self.pe_strike = new_strike
-                                self.pe_symbol_name = symbol_name
-                                self.pe_id = new_id
-                                self.pe_avg_price = actual_entry_price
-                        self.adjustment_count += 1
-                        self.last_adjustment_time = current_bar
-                    continue
+                            realized = (old_avg - actual_exit_price) * (loser_lots * self.nifty_lot_size)
+                            self.realized_pnl += realized
+                            
+                            new_quote = self.helper.option("NIFTY", new_strike, loser)
+                            if self.is_quote_invalid(new_quote) and not chain_df.empty:
+                                logger.warning(f"New quote fetch failed for adjustment strike {new_strike}. Falling back to option chain...")
+                                if float(new_strike) in chain_df.index:
+                                    new_quote = chain_df.loc[float(new_strike)].to_dict()
+
+                            new_id, price_from_quote, _, lot_size, symbol_name = \
+                                self._extract_quote_fields(new_quote, new_strike, loser)
+
+                            if new_id:
+                                self.nifty_lot_size = lot_size
+                                new_price = price_from_quote if price_from_quote > 0 else new_price
+                                
+                                # Update WebSocket subscription
+                                logger.info(f"Updating WebSocket: Unsubscribing {old_id}, Subscribing {new_id}")
+                                try:
+                                    self.helper.unsubscribe_instruments([("NSE_FNO", str(old_id), 15)])
+                                    self.helper.subscribe_instruments([("NSE_FNO", str(new_id), 15)])
+                                except Exception as ws_err:
+                                    logger.error(f"WebSocket update failed: {ws_err}")
+      
+                                sell_oid = None
+                                if not self.dry_run:
+                                    sell_oid = self.helper.sell(str(new_id), loser_lots * self.nifty_lot_size)
+                                # Get actual entry price for the new strike
+                                actual_entry_price = self.get_execution_price(sell_oid, new_price) if sell_oid else new_price
+                                
+                                if loser == "CE":
+                                    self.ce_strike = new_strike
+                                    self.ce_symbol_name = symbol_name
+                                    self.ce_id = new_id
+                                    self.ce_avg_price = actual_entry_price
+                                else:
+                                    self.pe_strike = new_strike
+                                    self.pe_symbol_name = symbol_name
+                                    self.pe_id = new_id
+                                    self.pe_avg_price = actual_entry_price
+                            self.adjustment_count += 1
+                            self.last_adjustment_time = current_bar
+                            self.update_baseline_imbalance()
+                        continue
 
 
     def find_rebalance_strike(self, option_type, target_value, lots, chain_df):
@@ -622,19 +736,31 @@ Examples:
                         help="Global profit target in INR (default: 4000.0)")
     parser.add_argument("--stop-loss", type=float, default=4000.0, metavar="AMT",
                         help="Global stop loss in INR (default: 4000.0). Can be passed as positive or negative.")
+    
+    # Entry criteria
+    parser.add_argument("--entry-balance-threshold", type=float, default=15.0, metavar="PCT",
+                        help="Initial balance threshold percentage for entry (default: 15.0)")
 
     args = parser.parse_args()
 
     mode_label = "LIVE" if args.live else "DRY"
     stop_loss_val = abs(args.stop_loss)
 
-    logger.info(f"Config -> Mode: {mode_label} | Lots: {args.lots} | Start Time: {args.start_time} | Profit Target: INR {args.target_profit:.0f} | Stop Loss: -INR {stop_loss_val:.0f}")
+    logger.info(f"Config -> Mode: {mode_label} | Lots: {args.lots} | Start Time: {args.start_time} | "
+                f"Entry Balance Threshold: {args.entry_balance_threshold:.1f}% | "
+                f"Profit Target: INR {args.target_profit:.0f} | Stop Loss: -INR {stop_loss_val:.0f}")
 
     strat = ValueImbalanceStrategy(
         dry_run=not args.live,
         initial_lots=args.lots,
         start_time=args.start_time,
+        entry_balance_threshold=args.entry_balance_threshold,
         profit_target=args.target_profit,
         stop_loss=stop_loss_val,
     )
-    strat.run()
+    try:
+        strat.run()
+    except KeyboardInterrupt:
+        logger.warning("KeyboardInterrupt detected. Gracefully exiting and squaring off all positions...")
+        strat.exit_all_positions("KeyboardInterrupt / Manual Stop")
+        sys.exit(0)

@@ -8,23 +8,30 @@ from datetime import datetime, timedelta
 from typing import Tuple, Dict, Optional, List
 
 # Adjust path to parent dir
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 from login import get_dhan_client
 from lib.dhan_helper import DhanHelper
+from lib.strategy_state_helper import save_strategy_state, check_shutdown_trigger
 
 # Configure Logging
-project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 debug_dir = os.path.join(project_root, "debug")
 os.makedirs(debug_dir, exist_ok=True)
+
+class FlushingFileHandler(logging.FileHandler):
+    def emit(self, record):
+        super().emit(record)
+        self.flush()
 
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
         logging.StreamHandler(),
-        logging.FileHandler(os.path.join(debug_dir, f"spread_trend_{datetime.now().strftime('%Y%m%d')}.log"))
-    ]
+        FlushingFileHandler(os.path.join(debug_dir, f"spread_trend_{datetime.now().strftime('%Y%m%d')}.log"))
+    ],
+    force=True
 )
 logger = logging.getLogger(__name__)
 
@@ -94,6 +101,30 @@ class NiftySpreadTrendStrategy:
         self.expiry = None
         self.last_close_time = None # to prevent instant re-entry after cooldown
         self.last_processed_candle_time = None
+
+    def save_state(self, nifty_spot, short_ltp, long_ltp, total_pnl, status="RUNNING"):
+        state_dict = {
+            "strategy": "nifty_spread_trend",
+            "status": status,
+            "dry_run": self.dry_run,
+            "symbol": self.symbol,
+            "interval": self.interval,
+            "lots": self.lots,
+            "active_spread": self.active_spread,
+            "short_strike": self.short_strike,
+            "long_strike": self.long_strike,
+            "short_symbol": self.short_symbol,
+            "long_symbol": self.long_symbol,
+            "short_entry_price": self.short_entry_price,
+            "long_entry_price": self.long_entry_price,
+            "short_ltp": short_ltp,
+            "long_ltp": long_ltp,
+            "total_pnl": total_pnl,
+            "spot": nifty_spot,
+            "profit_target": self.target_profit,
+            "stop_loss": self.stop_loss
+        }
+        save_strategy_state("nifty_spread_trend", state_dict)
 
     def get_signal(self) -> Tuple[str, float]:
         """
@@ -172,7 +203,7 @@ class NiftySpreadTrendStrategy:
         if self.helper.wait_for_fill(order_id, timeout=5):
             order_details = self.helper.get_order_by_id(order_id)
             if order_details:
-                fill_price = float(order_details.get('avgFilledPrice', 0.0) or order_details.get('price', 0.0))
+                fill_price = float(order_details.get('averageTradedPrice', 0.0) or order_details.get('avgFilledPrice', 0.0) or order_details.get('price', 0.0))
                 if fill_price > 0:
                     logger.info(f"Order {order_id} execution price confirmed: {fill_price:.2f}")
                     return fill_price
@@ -203,6 +234,12 @@ class NiftySpreadTrendStrategy:
         """
         Determines strikes, retrieves quotes, and places orders (Buy hedge first, Sell short second).
         """
+        # Check shutdown trigger first
+        if check_shutdown_trigger("nifty_spread_trend"):
+            logger.info("UI Shutdown Request during enter_spread startup.")
+            self.save_state(spot, 0, 0, 0, status="STOPPED")
+            sys.exit(0)
+
         atm_strike = int(round(spot / self.strike_step) * self.strike_step)
         
         if option_type == "PE":
@@ -225,9 +262,29 @@ class NiftySpreadTrendStrategy:
             self.active_spread = None
             return
             
-        # Get Quotes
+        # Check shutdown trigger before short quote fetch
+        if check_shutdown_trigger("nifty_spread_trend"):
+            logger.info("UI Shutdown Request before short option quote fetch.")
+            self.save_state(spot, 0, 0, 0, status="STOPPED")
+            sys.exit(0)
+
+        # Get Short Quote
         short_quote = self.helper.option(self.symbol, short_strike, option_type)
+
+        # Check shutdown trigger before long quote fetch
+        if check_shutdown_trigger("nifty_spread_trend"):
+            logger.info("UI Shutdown Request before long option quote fetch.")
+            self.save_state(spot, 0, 0, 0, status="STOPPED")
+            sys.exit(0)
+
+        # Get Long Quote
         long_quote = self.helper.option(self.symbol, long_strike, option_type)
+
+        # Check shutdown trigger after quote fetches
+        if check_shutdown_trigger("nifty_spread_trend"):
+            logger.info("UI Shutdown Request after option quote fetches.")
+            self.save_state(spot, 0, 0, 0, status="STOPPED")
+            sys.exit(0)
         
         if self.is_quote_invalid(short_quote) or self.is_quote_invalid(long_quote):
             logger.error(f"Failed to fetch valid quotes for options. Short: {short_strike} {option_type}, Long: {long_strike} {option_type}. Retrying in next loop.")
@@ -323,12 +380,30 @@ class NiftySpreadTrendStrategy:
         while self.active_spread is not None:
             time.sleep(1)
             
+            # Check shutdown trigger first
+            if check_shutdown_trigger("nifty_spread_trend"):
+                s_ltp = self.helper.get_ltp(str(self.short_id), exchange="NSE_FNO", instrument="OPTIDX")
+                l_ltp = self.helper.get_ltp(str(self.long_id), exchange="NSE_FNO", instrument="OPTIDX")
+                short_ltp_val = s_ltp if s_ltp > 0 else self.short_entry_price
+                long_ltp_val = l_ltp if l_ltp > 0 else self.long_entry_price
+                spot_price = self.helper.get_ltp(self.index_security_id, exchange=self.index_segment, instrument="INDEX")
+                total_pnl = (self.short_entry_price - short_ltp_val + long_ltp_val - self.long_entry_price) * total_qty
+                self.exit_positions("UI Shutdown Request")
+                self.save_state(spot_price, short_ltp_val, long_ltp_val, total_pnl, status="STOPPED")
+                sys.exit(0)
+            
             # Fetch current prices
             short_ltp = self.helper.get_ltp(str(self.short_id), exchange="NSE_FNO", instrument="OPTIDX")
             long_ltp = self.helper.get_ltp(str(self.long_id), exchange="NSE_FNO", instrument="OPTIDX")
             
             if short_ltp <= 0 or long_ltp <= 0:
                 continue
+
+            # Fetch spot price
+            spot_price = self.helper.get_ltp(self.index_security_id, exchange=self.index_segment, instrument="INDEX")
+            
+            # Save state
+            self.save_state(spot_price, short_ltp, long_ltp, (self.short_entry_price - short_ltp + long_ltp - self.long_entry_price) * total_qty, status="RUNNING")
                 
             # Spread PnL calculation:
             # Short Leg: (Entry - Current) * Qty (since we are short)
@@ -416,7 +491,7 @@ class NiftySpreadTrendStrategy:
                         else:
                             # Re-check status before halting
                             ord_details = self.helper.get_order_by_id(short_exit_oid)
-                            if ord_details and ord_details.get('orderStatus') == 'FILLED':
+                            if ord_details and ord_details.get('orderStatus') == 'TRADED':
                                 short_closed = True
                                 logger.info("Short Leg close order confirmed filled via order status check.")
                             else:
@@ -477,6 +552,13 @@ class NiftySpreadTrendStrategy:
         logger.info(f"Starting {self.symbol} Spread Trend Strategy (Dry Run: {self.dry_run})")
         
         while True:
+            # Check shutdown trigger
+            if check_shutdown_trigger("nifty_spread_trend"):
+                logger.info("UI Shutdown Request in outer loop.")
+                self.save_state(0, 0, 0, 0, status="STOPPED")
+                sys.exit(0)
+            self.save_state(0, 0, 0, 0, status="INITIALIZING")
+
             try:
                 # Check if current time is past EOD time (non-market hours check)
                 now = datetime.now()
@@ -490,6 +572,9 @@ class NiftySpreadTrendStrategy:
                 
                 # Check signal and spot
                 signal, spot = self.get_signal()
+                
+                # Update scanning state
+                self.save_state(spot, 0, 0, 0, status="SCANNING")
                 
                 if spot == 0:
                     logger.error("Could not fetch index spot price. Retrying in 10s...")
@@ -614,4 +699,9 @@ Examples:
         eod_time=args.eod_time,
         cooldown_minutes=args.cooldown_minutes
     )
-    strat.run()
+    try:
+        strat.run()
+    except KeyboardInterrupt:
+        logger.warning("KeyboardInterrupt detected. Gracefully exiting and squaring off all positions...")
+        strat.exit_positions("KeyboardInterrupt / Manual Stop")
+        sys.exit(0)

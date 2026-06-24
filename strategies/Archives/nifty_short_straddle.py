@@ -5,7 +5,7 @@ import logging
 from datetime import datetime
 
 # Add parent directory to path to import login and lib
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 from login import get_dhan_client
 from lib.dhan_helper import DhanHelper
@@ -24,6 +24,62 @@ logging.basicConfig(
     ]
 )
 logger = logging.getLogger(__name__)
+
+# Global state to track active positions for graceful KeyboardInterrupt cleanup
+_active_trade_state = {
+    "helper": None,
+    "ce_id": None,
+    "pe_id": None,
+    "total_qty": 0,
+    "dry_run": True
+}
+
+def handle_graceful_exit():
+    helper = _active_trade_state["helper"]
+    ce_id = _active_trade_state["ce_id"]
+    pe_id = _active_trade_state["pe_id"]
+    qty = _active_trade_state["total_qty"]
+    dry_run = _active_trade_state["dry_run"]
+    
+    if not helper:
+        return
+        
+    logger.warning("!!! EMERGENCY EXIT IN PROGRESS: KeyboardInterrupt / Manual Stop !!!")
+    if not dry_run:
+        if ce_id:
+            try:
+                net_qty = helper.get_net_quantity(str(ce_id))
+                if net_qty < 0:
+                    qty_to_buy = abs(net_qty)
+                    ce_exit_id = helper.buy(str(ce_id), qty_to_buy)
+                    logger.info(f"Exit CE Order ID: {ce_exit_id} for {qty_to_buy} qty")
+                else:
+                    logger.info(f"CE position already flat or long (Net Qty: {net_qty}). Skipping exit order.")
+            except Exception as e:
+                logger.error(f"Exit CE Error: {e}")
+        if pe_id:
+            try:
+                net_qty = helper.get_net_quantity(str(pe_id))
+                if net_qty < 0:
+                    qty_to_buy = abs(net_qty)
+                    pe_exit_id = helper.buy(str(pe_id), qty_to_buy)
+                    logger.info(f"Exit PE Order ID: {pe_exit_id} for {qty_to_buy} qty")
+                else:
+                    logger.info(f"PE position already flat or long (Net Qty: {net_qty}). Skipping exit order.")
+            except Exception as e:
+                logger.error(f"Exit PE Error: {e}")
+    else:
+        logger.info(f"[DRY RUN] Simulating Position Exit (Reason: KeyboardInterrupt / Manual Stop).")
+
+    if ce_id and pe_id:
+        logger.info(f"Unsubscribing from old strikes: {ce_id}, {pe_id}")
+        try:
+            helper.unsubscribe_instruments([
+                ("NSE_FNO", str(ce_id), 15),
+                ("NSE_FNO", str(pe_id), 15)
+            ])
+        except:
+            pass
 
 def run_nifty_straddle_strategy(dry_run=True, num_lots=1, start_time="09:20"):
     """
@@ -50,6 +106,11 @@ def run_nifty_straddle_strategy(dry_run=True, num_lots=1, start_time="09:20"):
     nifty_lot_size = helper.get_lot_size("NIFTY")
     total_qty = nifty_lot_size * num_lots
     logger.info(f"Nifty Lot Size: {nifty_lot_size} | Total Qty: {total_qty} ({num_lots} lots)")
+    
+    # Update global tracking state
+    _active_trade_state["helper"] = helper
+    _active_trade_state["dry_run"] = dry_run
+    _active_trade_state["total_qty"] = total_qty
     
     # Fetch and log previous day OHLC levels via library method
     _levels = helper.get_prev_day_levels("NIFTY")
@@ -101,6 +162,8 @@ def run_nifty_straddle_strategy(dry_run=True, num_lots=1, start_time="09:20"):
         pe_symbol = pe_contract.get('SYMBOL_NAME') or pe_contract.get('SYMBOL', 'UNKNOWN_PE')
         ce_id = str(ce_contract.get('SECURITY_ID'))
         pe_id = str(pe_contract.get('SECURITY_ID'))
+        _active_trade_state["ce_id"] = ce_id
+        _active_trade_state["pe_id"] = pe_id
         expiry = ce_contract.get('SM_EXPIRY_DATE', 'UNKNOWN')
         
         ce_entry_price = ce_quote.get('last_price', 0) or ce_quote.get('LTP', 0)
@@ -229,6 +292,8 @@ def run_nifty_straddle_strategy(dry_run=True, num_lots=1, start_time="09:20"):
                 ])
             except:
                 pass
+        _active_trade_state["ce_id"] = None
+        _active_trade_state["pe_id"] = None
 
         if exit_reason in ["SL", "TARGET"]:
             last_traded_atm = current_atm # Mark this ATM as traded to avoid immediate re-entry
@@ -248,4 +313,8 @@ if __name__ == "__main__":
     args = parser.parse_args()
     is_dry = True if args.mode == "dry" else False
     
-    run_nifty_straddle_strategy(dry_run=is_dry, num_lots=args.lots, start_time=args.start_time)
+    try:
+        run_nifty_straddle_strategy(dry_run=is_dry, num_lots=args.lots, start_time=args.start_time)
+    except KeyboardInterrupt:
+        handle_graceful_exit()
+        sys.exit(0)

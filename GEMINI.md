@@ -137,7 +137,7 @@ The strategy operates in five distinct phases to manage the lifecycle of a strad
 ### Phase 2: Balanced Entry
 - The strategy **waits** and does not enter immediately.
 - Monitors the premium of the selected CE and PE.
-- Entry is triggered only when the premium difference between the two is **< 10%**.
+- Entry is triggered only when the premium difference between the two is **< 15%**.
 - This ensures the trade starts with a neutral Delta.
 
 ### Phase 3: Value Balancing (Lot Addition)
@@ -174,50 +174,50 @@ After activation, you can use plain `python` instead of the full path.
 
 ---
 
-### 1. Nifty Value-Imbalance Strangle (`strategies/nifty_value_imbalance_strangle.py`)
+### 1. Nifty Value-Imbalance Strangle (`strategies/value_imbalance/nifty_value_imbalance_strangle.py`)
 
 #### Default dry-run (safe — no real orders)
 ```powershell
 # 200-pt symmetric strangle, 1 lot per leg, dry run
-venv\Scripts\python.exe strategies/nifty_value_imbalance_strangle.py
+venv\Scripts\python.exe strategies/value_imbalance/nifty_value_imbalance_strangle.py
 ```
 
 #### LIVE trading — distance mode (fixed point offset from spot)
 ```powershell
 # 200-pt symmetric, 1 lot — LIVE
-venv\Scripts\python.exe strategies/nifty_value_imbalance_strangle.py --live
+venv\Scripts\python.exe strategies/value_imbalance/nifty_value_imbalance_strangle.py --live
 
 # Wider 300-pt, 2 lots — LIVE
-venv\Scripts\python.exe strategies/nifty_value_imbalance_strangle.py --live --lots 2 --ce-offset 300 --pe-offset 300
+venv\Scripts\python.exe strategies/value_imbalance/nifty_value_imbalance_strangle.py --live --lots 2 --ce-offset 300 --pe-offset 300
 
 # Asymmetric: tighter CE (150 pts), wider PE (300 pts) — LIVE
-venv\Scripts\python.exe strategies/nifty_value_imbalance_strangle.py --live --ce-offset 150 --pe-offset 300
+venv\Scripts\python.exe strategies/value_imbalance/nifty_value_imbalance_strangle.py --live --ce-offset 150 --pe-offset 300
 ```
 
 #### LIVE trading — delta mode (strike chosen by target delta)
 # Standard ~1 SD strangle (delta 0.20) — LIVE
-venv\Scripts\python.exe strategies/nifty_value_imbalance_strangle.py --live --delta --target-delta 0.20
+venv\Scripts\python.exe strategies/value_imbalance/nifty_value_imbalance_strangle.py --live --delta --target-delta 0.20
 
 # Wider/safer strangle (delta 0.15), 2 lots — LIVE
-venv\Scripts\python.exe strategies/nifty_value_imbalance_strangle.py --live --lots 2 --delta --target-delta 0.15
+venv\Scripts\python.exe strategies/value_imbalance/nifty_value_imbalance_strangle.py --live --lots 2 --delta --target-delta 0.15
 
 # Aggressive near-ATM (delta 0.30) — LIVE
-venv\Scripts\python.exe strategies/nifty_value_imbalance_strangle.py --live --delta --target-delta 0.30
+venv\Scripts\python.exe strategies/value_imbalance/nifty_value_imbalance_strangle.py --live --delta --target-delta 0.30
 ```
 
 #### LIVE trading — premium mode (strike chosen by target premium)
 ```powershell
 # Premium mode (picks strikes <= ₹50.0), dry run
-venv\Scripts\python.exe strategies/nifty_value_imbalance_strangle.py --premium
+venv\Scripts\python.exe strategies/value_imbalance/nifty_value_imbalance_strangle.py --premium
 
 # Premium mode (picks strikes <= ₹35.0) — LIVE
-venv\Scripts\python.exe strategies/nifty_value_imbalance_strangle.py --live --premium --target-premium 35
+venv\Scripts\python.exe strategies/value_imbalance/nifty_value_imbalance_strangle.py --live --premium --target-premium 35
 ```
 
 #### Custom risk targets
 ```powershell
 # 2 lots, profit target ₹6000, stop loss ₹3000 — LIVE
-venv\Scripts\python.exe strategies/nifty_value_imbalance_strangle.py --live --lots 2 --target-profit 6000 --stop-loss 3000
+venv\Scripts\python.exe strategies/value_imbalance/nifty_value_imbalance_strangle.py --live --lots 2 --target-profit 6000 --stop-loss 3000
 ```
 
 #### Full CLI reference
@@ -238,23 +238,26 @@ venv\Scripts\python.exe strategies/nifty_value_imbalance_strangle.py --live --lo
 
 ---
 
-### 2. Nifty Value-Imbalance Straddle (`strategies/nifty_value_imbalance.py`)
+### 2. Nifty Value-Imbalance Straddle (`strategies/value_imbalance/nifty_value_imbalance_straddle.py`)
 
 Implements the standard value-imbalance short straddle strategy, starting with a neutral ATM straddle entry and adjusting dynamically via winner lot additions or strike adjustments when premium value imbalance limits are breached.
 
 #### Default dry-run execution
 ```powershell
 # Straddle Entry, 1 lot per leg, dry run
-venv\Scripts\python.exe strategies/nifty_value_imbalance.py
+venv\Scripts\python.exe strategies/value_imbalance/nifty_value_imbalance_straddle.py
 ```
 
 #### LIVE trading execution
 ```powershell
 # Live Straddle execution, 2 lots, default targets — LIVE
-venv\Scripts\python.exe strategies/nifty_value_imbalance.py --live --lots 2
+venv\Scripts\python.exe strategies/value_imbalance/nifty_value_imbalance_straddle.py --live --lots 2
 
 # Live Straddle execution, custom targets and custom start time (09:25) — LIVE
-venv\Scripts\python.exe strategies/nifty_value_imbalance.py --live --lots 1 --target-profit 5000 --stop-loss 3000 --start-time 09:25
+venv\Scripts\python.exe strategies/value_imbalance/nifty_value_imbalance_straddle.py --live --lots 1 --target-profit 5000 --stop-loss 3000 --start-time 09:25
+
+# Live Straddle execution, custom entry balance threshold (5%) — LIVE
+venv\Scripts\python.exe strategies/value_imbalance/nifty_value_imbalance_straddle.py --live --entry-balance-threshold 5
 ```
 
 #### Full CLI reference
@@ -265,10 +268,11 @@ venv\Scripts\python.exe strategies/nifty_value_imbalance.py --live --lots 1 --ta
 | `--target-profit AMT` | `4000.0` | Global daily profit target in ₹ |
 | `--stop-loss AMT` | `4000.0` | Global daily stop loss in ₹ |
 | `--start-time TIME` | `09:20` | Market start monitoring time (HH:MM IST) |
+| `--entry-balance-threshold PCT` | `15.0` | Initial balance threshold percentage for entry |
 
 ---
 
-### 3. Nifty Advanced Value-Imbalance Straddle & Strangle (`strategies/nifty_advanced_imbalance.py`)
+### 3. Nifty Advanced Value-Imbalance Straddle & Strangle (`strategies/value_imbalance/nifty_advanced_imbalance.py`)
 
 Implements the core value-imbalance logic with four selectable adjustment modes designed to optimize yields and manage tail risk, supporting both **Straddle** and **Strangle** entries.
 
@@ -281,25 +285,25 @@ Implements the core value-imbalance logic with four selectable adjustment modes 
 #### Default dry-run execution
 ```powershell
 # Straddle Entry, Winner Roll ATM mode, 1 lot, dry run
-venv\Scripts\python.exe strategies/nifty_advanced_imbalance.py --entry-type straddle --mode winner_roll_atm
+venv\Scripts\python.exe strategies/value_imbalance/nifty_advanced_imbalance.py --entry-type straddle --mode winner_roll_atm
 
 # Strangle Entry (Distance), Hedged Addition mode, 1 lot, dry run
-venv\Scripts\python.exe strategies/nifty_advanced_imbalance.py --entry-type strangle --ce-offset 150 --pe-offset 250 --mode hedged_addition
+venv\Scripts\python.exe strategies/value_imbalance/nifty_advanced_imbalance.py --entry-type strangle --ce-offset 150 --pe-offset 250 --mode hedged_addition
 
 # Strangle Entry (Delta), Winner Roll ATM mode, 1 lot, dry run
-venv\Scripts\python.exe strategies/nifty_advanced_imbalance.py --entry-type strangle --delta --target-delta 0.15 --mode winner_roll_atm
+venv\Scripts\python.exe strategies/value_imbalance/nifty_advanced_imbalance.py --entry-type strangle --delta --target-delta 0.15 --mode winner_roll_atm
 
 # Strangle Entry (Premium), Loser Ratio Roll mode, 1 lot, dry run
-venv\Scripts\python.exe strategies/nifty_advanced_imbalance.py --entry-type strangle --premium --target-premium 35 --mode loser_ratio_roll
+venv\Scripts\python.exe strategies/value_imbalance/nifty_advanced_imbalance.py --entry-type strangle --premium --target-premium 35 --mode loser_ratio_roll
 ```
 
 #### LIVE trading execution
 ```powershell
 # Live Straddle execution with 2 lots using winner roll ATM adjustment
-venv\Scripts\python.exe strategies/nifty_advanced_imbalance.py --live --lots 2 --entry-type straddle --mode winner_roll_atm
+venv\Scripts\python.exe strategies/value_imbalance/nifty_advanced_imbalance.py --live --lots 2 --entry-type straddle --mode winner_roll_atm
 
 # Live Strangle (Premium) execution with 2 lots using loser ratio rolling
-venv\Scripts\python.exe strategies/nifty_advanced_imbalance.py --live --lots 2 --entry-type strangle --premium --target-premium 40 --mode loser_ratio_roll --target-profit 5000 --stop-loss 3000
+venv\Scripts\python.exe strategies/value_imbalance/nifty_advanced_imbalance.py --live --lots 2 --entry-type strangle --premium --target-premium 40 --mode loser_ratio_roll --target-profit 5000 --stop-loss 3000
 ```
 
 #### Full CLI reference
@@ -321,7 +325,55 @@ venv\Scripts\python.exe strategies/nifty_advanced_imbalance.py --live --lots 2 -
 
 ---
 
-### 4. Live Options Tracker (`scripts/tools/live_options_tracker.py`)
+### 4. Nifty Expiry Strategy (`strategies/expiry/nifty_expiry.py`)
+
+Implements a classic rule-based expiry (0DTE) option selling strategy (supporting ATM Straddles or OTM Strangles). It uses individual broker-side stop-losses and a dynamic `winner_addition` mechanism to average down the winning leg or roll it closer to spot when value imbalance exceeds configured limits.
+
+#### Dry-run execution
+```powershell
+# Straddle Entry, Winner Addition mode, dry run
+venv\Scripts\python.exe strategies/expiry/nifty_expiry.py --adjustment winner_addition
+
+# Straddle Entry, Winner Addition & Post-SL balancing mode, dry run
+venv\Scripts\python.exe strategies/expiry/nifty_expiry.py --adjustment winner_addition --post-sl-balance
+```
+
+#### LIVE trading execution
+```powershell
+# Live Strangle entry (Premium-based <= Rs.50), Winner Addition mode - LIVE
+venv\Scripts\python.exe strategies/expiry/nifty_expiry.py --live --lots 1 --entry-type strangle --premium --target-premium 50.0 --adjustment winner_addition --max-lots 4 --min-adjust-price 10.0
+
+# Live Strangle entry with Winner Addition and Post-SL Rebalancing - LIVE
+venv\Scripts\python.exe strategies/expiry/nifty_expiry.py --live --lots 1 --entry-type strangle --premium --target-premium 50.0 --adjustment winner_addition --max-lots 4 --min-adjust-price 10.0 --post-sl-balance
+```
+
+#### Full CLI reference
+| Flag | Default | Description |
+|---|---|---|
+| `--live` | off (dry run) | Enable real order placement |
+| `--lots N` | `1` | Initial lots per leg |
+| `--entry-type TYPE` | `straddle` | Position type (`straddle`, `strangle`) |
+| `--ce-offset PTS` | `100` | Points above spot for CE strike in distance strangle |
+| `--pe-offset PTS` | `100` | Points below spot for PE strike in distance strangle |
+| `--delta` | off | Use delta-based strike selection |
+| `--premium` | off | Use premium-based strike selection |
+| `--target-delta D` | `0.20` | Target absolute delta in delta strangle |
+| `--target-premium PREM`| `50.0` | Target premium in premium strangle |
+| `--leg-sl-pct PCT` | `40.0` | Stop loss percentage per leg |
+| `--adjustment MODE` | `c2c` | Adjustment mode (`c2c`, `roll_closer`, `restrangle`, `winner_addition`, `none`) |
+| `--max-adjustments N`| `3` | Maximum post-SL adjustments permitted |
+| `--imbalance-threshold T`| `50.0` | Imbalance percentage to trigger winner addition |
+| `--max-lots N` | `4` | Max lots permitted per leg in winner addition |
+| `--min-adjust-price P` | `10.0` | Option price below which roll closer is forced instead of addition |
+| `--post-sl-balance` | off | Rebalance stopped-out leg to match surviving leg's current premium and lots |
+| `--target-profit AMT` | `4000` | Global daily profit target in Rs. |
+| `--stop-loss AMT` | `4000` | Global daily stop loss in Rs. |
+| `--start-time TIME` | `09:20` | Entry monitoring start time (HH:MM IST) |
+| `--eod-time TIME` | `15:15` | EOD auto exit square-off time |
+
+---
+
+### 5. Live Options Tracker (`scripts/tools/live_options_tracker.py`)
 
 Opens an Excel workbook with 4 live sheets: **Live Options**, **Dashboard**, **Options Chain**, **Order Log**.
 
@@ -335,7 +387,7 @@ venv\Scripts\python.exe scripts/tools/live_options_tracker.py
 
 ---
 
-### 5. Login / Token Refresh (`login.py`)
+### 6. Login / Token Refresh (`login.py`)
 
 Run this first if the access token has expired (usually after 24 hours):
 ```powershell
