@@ -12,7 +12,8 @@ strategies/
 ├── value_imbalance/
 │   ├── nifty_advanced_imbalance.py      # Core value-imbalance strategy with 4 selectable modes
 │   ├── nifty_value_imbalance_straddle.py # LegacyStraddle with lot additions
-│   └── nifty_value_imbalance_strangle.py # LegacyStrangle with target strike adjustments
+│   ├── nifty_value_imbalance_strangle.py # LegacyStrangle with target strike adjustments
+│   └── strategy.md                      # Detailed guide to Value-Imbalance strategies
 │
 ├── spread_trend/
 │   └── nifty_spread_trend.py            # Trend-following vertical spreads (Supertrend + EMA20)
@@ -36,76 +37,30 @@ Every strategy in this repository adheres to strict risk controls:
 
 ---
 
-## 1. Nifty Advanced Value-Imbalance Strategy (`nifty_advanced_imbalance.py`)
+## 1. Nifty Value-Imbalance Strategies (`strategies/value_imbalance/`)
 
-This strategy executes straddles or strangles and uses four selectable adjustment modes designed to manage tail risk and optimize premium yield during market trends.
+These strategies execute straddles or strangles and dynamically rebalance them under market trends using four selectable adjustment modes, target OTM strike shifts, or lot additions.
 
-```mermaid
-graph TD
-    Start([Start Strategy]) --> Phase1["Phase 1: Strike Selection (ATM/OTM)"]
-    Phase1 --> Phase2["Phase 2: Balanced Entry Check"]
-    Phase2 -- "Diff < entry_balance_threshold" --> Phase3["Phase 3: Value Balancing Loop"]
-    
-    subgraph Adjustments ["Adjustment Algorithm Modes"]
-        Phase3 -- "winner_roll_atm (Default)" --> RollATM["Roll winner leg to new ATM (Flat 1:1 lots)"]
-        Phase3 -- "loser_ratio_roll" --> RollOTM["Roll loser further OTM + increment lots (Configurable)"]
-        Phase3 -- "hedged_addition" --> HedgedAdd["Add winner short lot + buy protective OTM wing"]
-        Phase3 -- "legacy" --> LegacyAdd["Add winner short lot (Unhedged martingale)"]
-    end
-    
-    RollATM --> Phase3
-    RollOTM --> Phase3
-    HedgedAdd --> Phase3
-    LegacyAdd --> Phase3
-    
-    Phase3 -- "Profit Target / SL Hit / EOD" --> Exit["Exit All Positions"]
-    Phase3 -- "ATM Strike shifts >= 100 pts (Straddle) or Breaches Boundary (Strangle)" --> CycleReset["Cycle Reset: Exit all + wait 5m"] --> Phase1
-```
+For detailed mechanics, mathematical formulas, CLI parameter reference tables, step-by-step walkthroughs, and detailed trade flow examples, refer to the [Value-Imbalance Strategy Guide](file:///c:/dhan_algo/dhan_algo/strategies/value_imbalance/strategy.md).
 
-### A. Core Mathematical Concepts
+### Quick Commands
 
-*   **Entry Imbalance Offset**:
-    $$\text{entry\_diff\_pct} = \frac{|\text{CE\_val} - \text{PE\_val}|}{\max(\text{CE\_val}, \text{PE\_val})} \times 100$$
-*   **Active Imbalance Trigger Threshold**:
-    $$\text{Active Threshold} = \text{Threshold (Lot/Strike)} + \text{entry\_diff\_pct}$$
-
-### B. Selectable Adjustment Modes
-
-1.  **`winner_roll_atm`** (Default):
-    *   **Goal**: Rolls the untested winning leg closer to the spot ATM strike.
-    *   **Action**: Keeps a flat 1:1 lot ratio to eliminate margin inflation.
-2.  **`loser_ratio_roll`**:
-    *   **Goal**: Rolls the challenged losing leg further OTM and increments quantity (ratio spread) to maintain premium collections safely.
-    *   **Action**: Uses a configurable increment count (default: `1` lot increment via `--loser-ratio-lots`).
-3.  **`hedged_addition`**:
-    *   **Goal**: Adds short lots to the winner leg (martingale) but buys further OTM wings (200 pts out) to hedge against market whipsaws.
-4.  **`legacy`**:
-    *   **Goal**: Original legacy lot addition strategy on the winner leg (unhedged).
-
-### C. CLI Parameters
-
-| CLI Flag | Default | Description |
-| :--- | :--- | :--- |
-| **`--live`** | *Flag (Boolean)* | Enables live trading. If omitted, runs in simulated dry-run mode. |
-| **`--lots N`** | `1` | Initial lots traded per leg. |
-| **`--mode MODE`** | `winner_roll_atm` | Selects adjustment mode (`winner_roll_atm`, `loser_ratio_roll`, `hedged_addition`, `legacy`). |
-| **`--loser-ratio-lots N`** | `1` | Number of lots to increment during a loser ratio roll adjustment. |
-| **`--entry-type TYPE`** | `straddle` | Entry position type (`straddle` or `strangle`). |
-| **`--delta`** | *Flag* | Use delta-based strike selection for strangle mode. |
-| **`--target-delta D`** | `0.20` | Target absolute delta in delta strangle mode. |
-| **`--premium`** | *Flag* | Use premium-based strike selection for strangle mode. |
-| **`--target-premium P`** | `50.0` | Target premium value for premium strangle mode. |
-| **`--ce-offset PTS`** | `200` | Points above spot for CE strike in distance strangle. |
-| **`--pe-offset PTS`** | `200` | Points below spot for PE strike in distance strangle. |
-| **`--target-profit AMT`** | `4000.0` | Global daily profit target in INR. |
-| **`--stop-loss AMT`** | `4000.0` | Global daily stop loss in INR. |
-| **`--start-time TIME`** | `09:20` | Monitoring start time (HH:MM IST). |
-
-### D. Step-by-Step Walkthrough Example (`winner_roll_atm`)
-1.  **Balanced Entry**: Spot = 24,000. Sells 1x 24000 CE @ ₹150, Sells 1x 24000 PE @ ₹145. Initial imbalance offset = 3.3%. Trigger threshold = 25% + 3.3% = 28.3%.
-2.  **Market Shift**: Spot rises to 24,080. CE rises to ₹210, PE decays to ₹80. Imbalance = 61.9% (Breaches 28.3%).
-3.  **Adjustment**: Buys back 24000 PE @ ₹80 (Realized Profit: +₹65). Sells 1x new ATM 24100 PE @ ₹140.
-4.  **New Position**: 1x 24000 CE (avg ₹150) & 1x 24100 PE (avg ₹140).
+*   **Advanced Straddle (Default Winner Roll, 1 lot dry run)**:
+    ```powershell
+    python strategies/value_imbalance/nifty_advanced_imbalance.py --mode winner_roll_atm
+    ```
+*   **Advanced Strangle (Distance, OTM Loser Ratio Roll with 2-lot increments)**:
+    ```powershell
+    python strategies/value_imbalance/nifty_advanced_imbalance.py --entry-type strangle --mode loser_ratio_roll --loser-ratio-lots 2
+    ```
+*   **Legacy Straddle (Lot Addition dry run)**:
+    ```powershell
+    python strategies/value_imbalance/nifty_value_imbalance_straddle.py
+    ```
+*   **Legacy Strangle (Premium-based entry <= Rs. 40 dry run)**:
+    ```powershell
+    python strategies/value_imbalance/nifty_value_imbalance_strangle.py --premium --target-premium 40.0
+    ```
 
 ---
 
@@ -128,48 +83,7 @@ This strategy is optimized for expiry day trading. It monitors decay on both leg
 
 ---
 
-## 3. Nifty Value-Imbalance Straddle (`nifty_value_imbalance_straddle.py`)
-
-A classic Straddle writing strategy. It enters neutral ATM positions and manages trend expansions by adding lots to the winning side or shifting strikes.
-
-### CLI Parameters
-
-| CLI Flag | Default | Description |
-| :--- | :--- | :--- |
-| **`--live`** | *Flag* | Run in live order placement mode. |
-| **`--lots N`** | `1` | Initial lots per leg. |
-| **`--entry-balance-threshold`** | `15.0` | Initial balance threshold percentage for entry (e.g. 15%). |
-| **`--target-profit AMT`** | `4000.0` | Global daily profit target in INR. |
-| **`--stop-loss AMT`** | `4000.0` | Global daily stop loss in INR. |
-| **`--start-time TIME`** | `09:20` | Monitoring start time (HH:MM IST). |
-
-### Quick Commands
-```powershell
-# Dry run with custom entry balance threshold (5%)
-python strategies/value_imbalance/nifty_value_imbalance_straddle.py --entry-balance-threshold 5
-
-# Live execution, 2 lots
-python strategies/value_imbalance/nifty_value_imbalance_straddle.py --live --lots 2
-```
-
----
-
-## 4. Nifty Value-Imbalance Strangle (`nifty_value_imbalance_strangle.py`)
-
-Similar to the Straddle strategy but enters OTM strangle positions. Supports distance, delta, and premium-based entry options.
-
-### Quick Commands
-```powershell
-# 200-pt symmetric offset dry run
-python strategies/value_imbalance/nifty_value_imbalance_strangle.py --ce-offset 200 --pe-offset 200
-
-# Live execution using delta-based selection (Target 0.15 Delta)
-python strategies/value_imbalance/nifty_value_imbalance_strangle.py --live --delta --target-delta 0.15
-```
-
----
-
-## 5. Nifty Spread Trend-Following Strategy (`nifty_spread_trend.py`)
+## 3. Nifty Spread Trend-Following Strategy (`nifty_spread_trend.py`)
 
 A trend-following options selling strategy that sells Bear Call Spreads or Bull Put Spreads depending on the alignment of the price relative to the **EMA 20** and the **Supertrend (7, 3)** indicators.
 

@@ -56,7 +56,7 @@ The standard straddle (`nifty_value_imbalance_straddle.py`) and strangle (`nifty
 
 ### Phase 2: Balanced Entry Check
 *   Monitors premium prices.
-*   Triggers entry only when the premium difference is below the threshold (default: `< 15.0%`).
+*   Triggers entry only when the premium difference is below the threshold (default: `< 15.0%` for straddle, `< 25.0%` for strangle).
 
 ### Phase 3: Value Balancing (Lot Addition)
 *   If the market trends and `diff_pct` exceeds the `threshold_lot` (default: `25.0%` + entry offset):
@@ -82,8 +82,8 @@ The standard straddle (`nifty_value_imbalance_straddle.py`) and strangle (`nifty
 The advanced script introduces selectable adjustment logic modes to optimize margin efficiency and hedge tail risk:
 
 ### A. `winner_roll_atm` (Default)
-*   **Action**: Rolls the winning leg closer to spot ATM instead of adding lots.
-*   **Benefit**: Keeps a flat 1:1 lot ratio, preventing margin inflation.
+*   **Action**: Checks the value of the losing leg and chooses the appropriate strike to balance the winner leg's premium against that value, maintaining a flat 1:1 lot ratio.
+*   **Benefit**: Eliminates margin inflation by keeping lot counts static.
 *   **Inversion Prevention**: Strictly enforces `CE strike > PE strike`. If a roll would cross strikes, it triggers an emergency cycle exit.
 
 ### B. `loser_ratio_roll`
@@ -100,7 +100,58 @@ The advanced script introduces selectable adjustment logic modes to optimize mar
 
 ---
 
-## 4. Execution Examples
+## 4. CLI Parameters Reference
+
+### A. Nifty Advanced Value-Imbalance Strategy (`nifty_advanced_imbalance.py`)
+
+| CLI Flag | Default | Description |
+| :--- | :--- | :--- |
+| **`--live`** | *Flag* | Enable real order placement (defaults to dry-run mode). |
+| **`--lots N`** | `1` | Initial lots per leg. |
+| **`--mode MODE`** | `winner_roll_atm` | Selects adjustment mode (`winner_roll_atm`, `loser_ratio_roll`, `hedged_addition`, `legacy`). |
+| **`--loser-ratio-lots N`** | `1` | Number of lots to increment during a loser ratio roll adjustment. |
+| **`--entry-type TYPE`** | `straddle` | Entry position type (`straddle`, `strangle`). |
+| **`--delta`** | *Flag* | Use delta-based strike selection for strangle. |
+| **`--target-delta D`** | `0.20` | Target absolute delta in delta strangle mode. |
+| **`--premium`** | *Flag* | Use premium-based strike selection for strangle. |
+| **`--target-premium PREM`** | `50.0` | Target premium in premium strangle mode. |
+| **`--ce-offset PTS`** | `200` | Points above spot for CE strike in distance strangle. |
+| **`--pe-offset PTS`** | `200` | Points below spot for PE strike in distance strangle. |
+| **`--target-profit AMT`** | `4000.0` | Global daily profit target in ₹. |
+| **`--stop-loss AMT`** | `4000.0` | Global daily stop loss in ₹. |
+| **`--start-time TIME`** | `09:20` | Market start monitoring time (HH:MM IST). |
+
+### B. Nifty Value-Imbalance Straddle Strategy (`nifty_value_imbalance_straddle.py`)
+
+| CLI Flag | Default | Description |
+| :--- | :--- | :--- |
+| **`--live`** | *Flag* | Enable real order placement (defaults to dry-run mode). |
+| **`--lots N`** | `1` | Initial lots per leg. |
+| **`--target-profit AMT`** | `4000.0` | Global daily profit target in ₹. |
+| **`--stop-loss AMT`** | `4000.0` | Global daily stop loss in ₹. |
+| **`--start-time TIME`** | `09:20` | Market start monitoring time (HH:MM IST). |
+| **`--entry-balance-threshold PCT`** | `15.0` | Initial balance threshold percentage for entry. |
+
+### C. Nifty Value-Imbalance Strangle Strategy (`nifty_value_imbalance_strangle.py`)
+
+| CLI Flag | Default | Description |
+| :--- | :--- | :--- |
+| **`--live`** | *Flag* | Enable real order placement (defaults to dry-run mode). |
+| **`--lots N`** | `1` | Initial lots per leg. |
+| **`--delta`** | *Flag* | Use delta-based strike selection. |
+| **`--distance`** | *Flag* | Use fixed-point offset strike selection (default). |
+| **`--premium`** | *Flag* | Use premium-based strike selection. |
+| **`--ce-offset PTS`** | `200` | Points above spot for CE strike. |
+| **`--pe-offset PTS`** | `200` | Points below spot for PE strike. |
+| **`--target-delta D`** | `0.20` | Target absolute delta in delta mode. |
+| **`--target-premium PREM`** | `50.0` | Target premium in premium mode. |
+| **`--target-profit AMT`** | `4000.0` | Global daily profit target in ₹. |
+| **`--stop-loss AMT`** | `4000.0` | Global daily stop loss in ₹. |
+| **`--start-time TIME`** | `09:20` | Market start monitoring time (HH:MM IST). |
+
+---
+
+## 5. Execution Examples
 
 > [!IMPORTANT]
 > All commands must be executed from the project root using the virtual environment python interpreter.
@@ -131,7 +182,7 @@ c:\dhan_algo\dhan_algo\venv\Scripts\activate
 
 ### Live Trading (Real Orders)
 
-*   **Live Advanced Straddle (Winner Roll ATM, 2 lots initial)**:
+*   **Live Advanced Straddle (Winner Roll, 2 lots initial)**:
     ```powershell
     python strategies/value_imbalance/nifty_advanced_imbalance.py --live --lots 2 --entry-type straddle --mode winner_roll_atm
     ```
@@ -146,7 +197,7 @@ c:\dhan_algo\dhan_algo\venv\Scripts\activate
 
 ---
 
-## 5. Detailed Trade Flow Examples
+## 6. Detailed Trade Flow Examples
 
 Here are step-by-step examples of how trades flow under different market conditions.
 
@@ -196,10 +247,11 @@ Here are step-by-step examples of how trades flow under different market conditi
 2.  **Market Trending Move**:
     *   Spot climbs to `24,070`.
     *   `24000 CE` spikes to ₹170; `24000 PE` decays to ₹70. Imbalance = $58.82\% > 29.17\%$.
-3.  **Adjustment (Winner Roll Closer)**:
-    *   Instead of adding lots, the strategy rolls the winning `24000 PE` leg to the new spot ATM.
+3.  **Adjustment (Winner Value-Balanced Roll)**:
+    *   Instead of adding lots or rolling blindly to ATM, the strategy checks the value of the losing PE leg (1 lot * ₹170 = ₹170) and selects the PE strike whose value matches ₹170.
     *   Action: Buys to close `24000 PE` @ ₹70 (Realized Profit: +₹45).
-    *   Action: Sells `1` lot on new ATM `24050 PE` @ ₹105.
+    *   Action: Queries option chain for the PE strike trading closest to ₹170 (e.g., `24050 PE` @ ₹105).
+    *   Action: Sells 1 lot `24050 PE` @ ₹105.
     *   New Position: `24000 CE` (1 lot @ avg ₹120) & `24050 PE` (1 lot @ avg ₹105).
     *   Premium balance is restored with zero margin inflation.
 
@@ -219,4 +271,3 @@ Here are step-by-step examples of how trades flow under different market conditi
     *   Since the ATM strike has shifted by $\ge 100$ points (meaning the strike that was originally 100 points above the initial ATM has now become the current ATM), the shift triggers.
     *   **Action**: Immediately buys to close all active straddle positions (`24000 CE` and `24000 PE`) to protect against extreme directional moves.
     *   Pauses for **5 minutes** (cooldown) and then restarts a fresh cycle at the new ATM strike (`24,100`).
-
