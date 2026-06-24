@@ -154,45 +154,115 @@ The advanced script introduces selectable adjustment logic modes to optimize mar
 ## 5. Execution Examples
 
 > [!IMPORTANT]
-> All commands must be executed from the project root using the virtual environment python interpreter.
+> All commands must be executed from the project root directory (`c:\dhan_algo\dhan_algo`) using the virtual environment python interpreter (`venv\Scripts\python.exe`).
 
-### Activate Virtual Environment
+### Activate Virtual Environment (One-time per terminal session)
 ```powershell
 c:\dhan_algo\dhan_algo\venv\Scripts\activate
 ```
 
-### Dry Run Simulations (Safe — No Real Orders)
+---
 
-*   **Advanced Straddle (Default Winner Roll, 1 lot)**:
+### A. Nifty Advanced Straddle & Strangle (`nifty_advanced_imbalance.py`)
+
+#### 1. Dry Run Simulations (Safe — No Orders Placed)
+*   **Straddle with Winner Roll (Default mode, 1 lot initial)**:
     ```powershell
-    python strategies/value_imbalance/nifty_advanced_imbalance.py --mode winner_roll_atm
+    venv\Scripts\python.exe strategies/value_imbalance/nifty_advanced_imbalance.py --entry-type straddle --mode winner_roll_atm
     ```
-*   **Advanced Strangle (Distance, OTM Loser Ratio Roll with 2-lot increments)**:
+*   **Strangle (Distance offset, Hedged Addition, 1 lot, custom offset)**:
     ```powershell
-    python strategies/value_imbalance/nifty_advanced_imbalance.py --entry-type strangle --mode loser_ratio_roll --loser-ratio-lots 2
+    venv\Scripts\python.exe strategies/value_imbalance/nifty_advanced_imbalance.py --entry-type strangle --ce-offset 150 --pe-offset 250 --mode hedged_addition
     ```
-*   **Legacy Straddle (Lot Addition)**:
+*   **Strangle (Delta-based selection, Winner Roll, target delta 0.15)**:
     ```powershell
-    python strategies/value_imbalance/nifty_value_imbalance_straddle.py
+    venv\Scripts\python.exe strategies/value_imbalance/nifty_advanced_imbalance.py --entry-type strangle --delta --target-delta 0.15 --mode winner_roll_atm
     ```
-*   **Legacy Strangle (Premium-based entry <= Rs. 40)**:
+*   **Strangle (Premium-based selection, Loser Ratio Roll, target premium <= 35, 1 lot increment)**:
     ```powershell
-    python strategies/value_imbalance/nifty_value_imbalance_strangle.py --premium --target-premium 40.0
+    venv\Scripts\python.exe strategies/value_imbalance/nifty_advanced_imbalance.py --entry-type strangle --premium --target-premium 35 --mode loser_ratio_roll --loser-ratio-lots 1
     ```
 
-### Live Trading (Real Orders)
+#### 2. Live Trading (Real Orders)
+*   **Live Straddle (Winner Roll, 2 lots initial)**:
+    ```powershell
+    venv\Scripts\python.exe strategies/value_imbalance/nifty_advanced_imbalance.py --live --lots 2 --entry-type straddle --mode winner_roll_atm
+    ```
+*   **Live Strangle (Premium-based, Loser Ratio Roll, target premium <= 40, 2-lot increments, custom profit/stop limits)**:
+    ```powershell
+    venv\Scripts\python.exe strategies/value_imbalance/nifty_advanced_imbalance.py --live --lots 2 --entry-type strangle --premium --target-premium 40 --mode loser_ratio_roll --loser-ratio-lots 2 --target-profit 5000 --stop-loss 3000
+    ```
+*   **Live Strangle (Delta-based 0.20, Hedged Addition, 1 lot initial, start at 09:25 IST)**:
+    ```powershell
+    venv\Scripts\python.exe strategies/value_imbalance/nifty_advanced_imbalance.py --live --lots 1 --entry-type strangle --delta --target-delta 0.20 --mode hedged_addition --start-time 09:25 --target-profit 4000 --stop-loss 4000
+    ```
 
-*   **Live Advanced Straddle (Winner Roll, 2 lots initial)**:
+---
+
+### B. Nifty Value-Imbalance Strangle Strategy (`nifty_value_imbalance_strangle.py`)
+
+#### 1. Dry Run Simulations (Safe — No Orders Placed)
+*   **Symmetric Strangle (Distance mode, CE/PE 200 pt offset, 1 lot)**:
     ```powershell
-    python strategies/value_imbalance/nifty_advanced_imbalance.py --live --lots 2 --entry-type straddle --mode winner_roll_atm
+    venv\Scripts\python.exe strategies/value_imbalance/nifty_value_imbalance_strangle.py --ce-offset 200 --pe-offset 200
     ```
-*   **Live Advanced Strangle (Delta-based 0.20, Hedged Addition, 1 lot initial)**:
+*   **Asymmetric Strangle (Distance mode, tighter CE offset 150 pt, wider PE offset 300 pt)**:
     ```powershell
-    python strategies/value_imbalance/nifty_advanced_imbalance.py --live --lots 1 --entry-type strangle --delta --target-delta 0.20 --mode hedged_addition --target-profit 5000 --stop-loss 3000
+    venv\Scripts\python.exe strategies/value_imbalance/nifty_value_imbalance_strangle.py --ce-offset 150 --pe-offset 300
     ```
-*   **Live Legacy Straddle (2 lots initial, custom entry balance 5%)**:
+*   **Strangle (Delta mode, target delta 0.20)**:
     ```powershell
-    python strategies/value_imbalance/nifty_value_imbalance_straddle.py --live --lots 2 --entry-balance-threshold 5
+    venv\Scripts\python.exe strategies/value_imbalance/nifty_value_imbalance_strangle.py --delta --target-delta 0.20
+    ```
+*   **Strangle (Premium mode, target premium <= 50.0)**:
+    ```powershell
+    venv\Scripts\python.exe strategies/value_imbalance/nifty_value_imbalance_strangle.py --premium --target-premium 50.0
+    ```
+
+#### 2. Live Trading (Real Orders)
+*   **Live Symmetric Strangle (Distance mode, 200 pt offset, 1 lot)**:
+    ```powershell
+    venv\Scripts\python.exe strategies/value_imbalance/nifty_value_imbalance_strangle.py --live
+    ```
+*   **Live Strangle (Distance mode, wider 300 pt offset, 2 lots, custom profit/loss target)**:
+    ```powershell
+    venv\Scripts\python.exe strategies/value_imbalance/nifty_value_imbalance_strangle.py --live --lots 2 --ce-offset 300 --pe-offset 300 --target-profit 6000 --stop-loss 3000
+    ```
+*   **Live Strangle (Delta mode, target delta 0.15, 2 lots)**:
+    ```powershell
+    venv\Scripts\python.exe strategies/value_imbalance/nifty_value_imbalance_strangle.py --live --lots 2 --delta --target-delta 0.15
+    ```
+*   **Live Strangle (Premium mode, target premium <= 35.0, 1 lot, start at 09:25 IST)**:
+    ```powershell
+    venv\Scripts\python.exe strategies/value_imbalance/nifty_value_imbalance_strangle.py --live --premium --target-premium 35 --start-time 09:25
+    ```
+
+---
+
+### C. Nifty Value-Imbalance Straddle Strategy (`nifty_value_imbalance_straddle.py`)
+
+#### 1. Dry Run Simulations (Safe — No Orders Placed)
+*   **ATM Straddle (Default settings, 1 lot)**:
+    ```powershell
+    venv\Scripts\python.exe strategies/value_imbalance/nifty_value_imbalance_straddle.py
+    ```
+*   **ATM Straddle (Custom entry balance threshold of 10%)**:
+    ```powershell
+    venv\Scripts\python.exe strategies/value_imbalance/nifty_value_imbalance_straddle.py --entry-balance-threshold 10
+    ```
+
+#### 2. Live Trading (Real Orders)
+*   **Live ATM Straddle (Default settings, 2 lots)**:
+    ```powershell
+    venv\Scripts\python.exe strategies/value_imbalance/nifty_value_imbalance_straddle.py --live --lots 2
+    ```
+*   **Live ATM Straddle (Custom risk targets, custom start time 09:25 IST)**:
+    ```powershell
+    venv\Scripts\python.exe strategies/value_imbalance/nifty_value_imbalance_straddle.py --live --lots 1 --target-profit 5000 --stop-loss 3000 --start-time 09:25
+    ```
+*   **Live ATM Straddle (Tighter initial entry balance threshold of 5%)**:
+    ```powershell
+    venv\Scripts\python.exe strategies/value_imbalance/nifty_value_imbalance_straddle.py --live --entry-balance-threshold 5
     ```
 
 ---
