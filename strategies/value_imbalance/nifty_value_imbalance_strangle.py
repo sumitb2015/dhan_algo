@@ -16,7 +16,8 @@ from lib.strategy_state_helper import save_strategy_state, check_shutdown_trigge
 # Setup Logging
 project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 debug_dir = os.path.join(project_root, "debug")
-os.makedirs(debug_dir, exist_ok=True)
+log_dir = os.path.join(debug_dir, "logs", "strangle")
+os.makedirs(log_dir, exist_ok=True)
 
 class FlushingFileHandler(logging.FileHandler):
     def emit(self, record):
@@ -28,7 +29,7 @@ logging.basicConfig(
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
         logging.StreamHandler(),
-        FlushingFileHandler(os.path.join(debug_dir, f"strangle_{datetime.now().strftime('%Y%m%d')}.log"))
+        FlushingFileHandler(os.path.join(log_dir, f"{datetime.now().strftime('%Y%m%d')}.log"))
     ],
     force=True
 )
@@ -212,7 +213,7 @@ class ValueImbalanceStrangle:
             thresh_label = "Lot"
 
         # Shortened labels for a cleaner one-liner
-        logger.info(f"{self.ce_strike}C:{ce_ltp:.1f}({self.ce_lots}L) | {self.pe_strike}P:{pe_ltp:.1f}({self.pe_lots}L) | Diff:{diff_pct:.1f}% (Thresh:{active_thresh:.1f}% {thresh_label}) | Adj:{self.adjustment_count}")
+        logger.info(f"{self.ce_strike}C:{ce_ltp:.1f}({self.ce_lots}L) | {self.pe_strike}P:{pe_ltp:.1f}({self.pe_lots}L) | Diff:{diff_pct:.1f}% (Thresh:{active_thresh:.1f}% {thresh_label}) | Adj:{self.adjustment_count} | PnL:{total_pnl:+.0f} (Real:{self.realized_pnl:+.0f})")
 
     def update_baseline_imbalance(self):
         """Update baseline imbalance (entry_diff_pct) after an adjustment using new LTPs."""
@@ -408,7 +409,7 @@ class ValueImbalanceStrangle:
             self.save_state(0, 0, 0, 0, status="INITIALIZING")
 
             # Wait for market open if closed (EOD is 15:17)
-            self.helper.wait_for_market_open(self.dry_run, start_time=self.start_time, eod_time="15:17")
+            self.helper.wait_for_market_open(self.dry_run, start_time=self.start_time, eod_time="15:17", shutdown_check=lambda: check_shutdown_trigger("nifty_value_imbalance_strangle"))
             
             self.reset_session()
             
@@ -632,7 +633,9 @@ class ValueImbalanceStrangle:
                 if total_pnl >= self.profit_target or total_pnl <= self.stop_loss:
                     reason = "Profit Target Reached" if total_pnl >= self.profit_target else "Global Stop Loss Hit"
                     self.exit_all_positions(f"Target/SL Hit: {reason} ({total_pnl:.2f})")
-                    self.helper.wait_for_next_day_market_open(self.dry_run, start_time=self.start_time)
+                    if not self.helper.wait_for_next_day_market_open(self.dry_run, start_time=self.start_time, shutdown_check=lambda: check_shutdown_trigger("nifty_value_imbalance_strangle")):
+                        self.save_state(0, 0, 0, 0, status="STOPPED")
+                        sys.exit(0)
                     cycle_active = False
                     break
 
@@ -808,6 +811,8 @@ Examples:
     # Position sizing
     parser.add_argument("--lots", type=int, default=1, metavar="N",
                         help="Initial lots per leg (default: 1)")
+    parser.add_argument("--max-lots", type=int, default=4, metavar="N",
+                        help="Maximum lots per leg before triggering a strike shift (default: 4)")
 
     # Strike selection mode
     mode_group = parser.add_mutually_exclusive_group()
@@ -869,6 +874,7 @@ Examples:
     strat = ValueImbalanceStrangle(
         dry_run=not args.live,
         initial_lots=args.lots,
+        max_lots=args.max_lots,
         strike_selection=selection,
         ce_offset=args.ce_offset,
         pe_offset=args.pe_offset,

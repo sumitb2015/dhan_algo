@@ -91,24 +91,82 @@ def generate_nifty_expiry_list(start_year: int, start_month: int, end_year: int,
 # --- DATA DOWNLOAD OPTIONS ---
 
 def download_spot_daily(helper: DhanHelper, save_dir: str):
-    """Download daily Spot data."""
+    """Download daily Spot data, chunked by year to work around the API per-call date range limit."""
     print("\n--- NIFTY 50 Daily Spot Downloader ---")
     days_input = input("Enter number of calendar days to look back [Default: 1825 (5 years)]: ").strip()
     days = int(days_input) if days_input else 1825
-    
+
     file_path = os.path.join(save_dir, "NIFTY_50_Daily_5Y.csv")
-    print(f">>> Fetching Daily candles for NIFTY 50 (Last {days} days)...")
-    
-    df = helper.get_latest_candles("NIFTY 50", interval="D", days=days)
-    if not df.empty:
-        df.to_csv(file_path)
+
+    symbol = "NIFTY 50"
+    sec = helper._resolve_symbol(symbol)
+    if not sec:
+        print(f"[FAIL] Could not resolve symbol: {symbol}")
+        return
+
+    security_id = int(sec['SECURITY_ID'])
+    exch_id = sec.get('EXCH_ID', 'NSE')
+    instr = sec.get('INSTRUMENT', 'EQUITY')
+    exchange_segment = "IDX_I" if instr == "INDEX" else "NSE_EQ"
+
+    end_total = datetime.now()
+    start_total = end_total - timedelta(days=days)
+    chunk_size = 365  # Dhan daily API limit per call
+
+    print(f">>> Fetching Daily candles for NIFTY 50 from {start_total.date()} to {end_total.date()} (chunked by {chunk_size} days)...")
+
+    all_chunks = []
+    current_start = start_total
+    while current_start < end_total:
+        current_end = min(current_start + timedelta(days=chunk_size), end_total)
+        from_str = current_start.strftime("%Y-%m-%d")
+        to_str = current_end.strftime("%Y-%m-%d")
+        print(f"    - Fetching chunk: {from_str} to {to_str}...")
+        try:
+            df_chunk = helper.get_historical_daily_data(
+                security_id=security_id,
+                exchange_segment=exchange_segment,
+                instrument_type=instr,
+                from_date=from_str,
+                to_date=to_str
+            )
+            if not df_chunk.empty:
+                rename_map = {
+                    "start_time": "Datetime", "start_Time": "Datetime", "kline_time": "Datetime",
+                    "timestamp": "Datetime",
+                    "open": "Open", "high": "High", "low": "Low", "close": "Close", "volume": "Volume"
+                }
+                df_chunk = df_chunk.rename(columns={c: rename_map[c.lower()] for c in df_chunk.columns if c.lower() in rename_map})
+                if "Datetime" in df_chunk.columns:
+                    first_val = df_chunk["Datetime"].iloc[0]
+                    if isinstance(first_val, (int, float)):
+                        df_chunk["Datetime"] = pd.to_datetime(df_chunk["Datetime"], unit='s').dt.tz_localize('UTC').dt.tz_convert('Asia/Kolkata').dt.tz_localize(None)
+                    else:
+                        df_chunk["Datetime"] = pd.to_datetime(df_chunk["Datetime"])
+                    df_chunk = df_chunk.set_index("Datetime").sort_index()
+                desired_cols = ["Open", "High", "Low", "Close", "Volume"]
+                df_chunk = df_chunk[[c for c in desired_cols if c in df_chunk.columns]]
+                all_chunks.append(df_chunk)
+                print(f"      [OK] Received {len(df_chunk)} rows.")
+            else:
+                print("      [SKIP] No data in this range.")
+        except Exception as e:
+            print(f"      [ERROR] Failed to fetch chunk: {e}")
+
+        current_start = current_end + timedelta(days=1)
+        time.sleep(0.3)
+
+    if all_chunks:
+        final_df = pd.concat(all_chunks)
+        final_df = final_df[~final_df.index.duplicated(keep='first')].sort_index()
+        final_df.to_csv(file_path)
         print(f"\n[SUCCESS] Daily Spot downloaded successfully.")
-        print(f"Total Rows: {len(df)}")
+        print(f"Total Rows: {len(final_df)}")
         print(f"File Path : {os.path.abspath(file_path)}")
         print("\n>>> Preview of last 5 rows:")
-        print(df.tail(5))
+        print(final_df.tail(5))
     else:
-        print("[FAIL] Failed to retrieve Daily Spot data.")
+        print("[FAIL] No data collected.")
 
 def download_spot_intraday_chunked(helper: DhanHelper, save_dir: str, interval: str = "1"):
     """Download Spot minute data with custom chunking for long history."""
@@ -303,7 +361,8 @@ def show_menu():
     print("="*50)
     
 def main():
-    save_dir = "Historical Data"
+    project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    save_dir = os.path.join(project_root, "Historical Data")
     os.makedirs(save_dir, exist_ok=True)
     
     print("Initializing Dhan connection...")

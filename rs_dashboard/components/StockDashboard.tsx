@@ -1,13 +1,24 @@
 'use client';
 
-import React, { useState, useEffect, useMemo } from 'react';
-import { LayoutGrid, List, RefreshCw, Layers } from 'lucide-react';
+import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
+import { LayoutGrid, List, RefreshCw, Layers, Clock, ChevronDown, DatabaseZap, Wifi, WifiOff } from 'lucide-react';
 import { RSResult } from '@/lib/rs';
 import IndexSummary from './IndexSummary';
 import Leaderboard from './Leaderboard';
 import RSChart from './RSChart';
 import SectorHeatmap from './SectorHeatmap';
+import DataRefreshPanel from './DataRefreshPanel';
 import Link from 'next/link';
+import { Button } from '@/components/ui/button';
+import { Badge } from '@/components/ui/badge';
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
+import {
+  DropdownMenu, DropdownMenuContent, DropdownMenuItem,
+  DropdownMenuTrigger, DropdownMenuSeparator, DropdownMenuLabel
+} from '@/components/ui/dropdown-menu';
+
+const AUTO_REFRESH_OPTIONS = [5, 15, 30] as const;
+type AutoRefreshInterval = typeof AUTO_REFRESH_OPTIONS[number] | null;
 
 export default function StockDashboard() {
   const [indexType, setIndexType] = useState<'nifty50' | 'nifty500'>('nifty50');
@@ -16,44 +27,58 @@ export default function StockDashboard() {
   const [selectedSymbol, setSelectedSymbol] = useState<string | null>(null);
   const [favorites, setFavorites] = useState<string[]>([]);
 
-  // API Data States
   const [stocks, setStocks] = useState<RSResult[]>([]);
   const [loadingStocks, setLoadingStocks] = useState(true);
   const [stocksError, setStocksError] = useState<string | null>(null);
-
   const [nifty50Stats, setNifty50Stats] = useState<any>(null);
   const [nifty500Stats, setNifty500Stats] = useState<any>(null);
   const [loadingSummary, setLoadingSummary] = useState(true);
 
-  // Load Watchlist/Favorites from LocalStorage
+  const [autoRefresh, setAutoRefresh] = useState<AutoRefreshInterval>(null);
+  const [countdown, setCountdown] = useState(0);
+  const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
+  const [syncPanelOpen, setSyncPanelOpen] = useState(false);
+  const countdownRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  const [istTime, setISTTime] = useState('');
+  const [marketOpen, setMarketOpen] = useState(false);
+
+  useEffect(() => {
+    const updateClock = () => {
+      const now = new Date();
+      const istStr = now.toLocaleTimeString('en-IN', {
+        timeZone: 'Asia/Kolkata',
+        hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false,
+      });
+      setISTTime(istStr);
+      const istDate = new Date(now.toLocaleString('en-US', { timeZone: 'Asia/Kolkata' }));
+      const day = istDate.getDay();
+      const totalMins = istDate.getHours() * 60 + istDate.getMinutes();
+      setMarketOpen(day >= 1 && day <= 5 && totalMins >= 555 && totalMins < 930);
+    };
+    updateClock();
+    const id = setInterval(updateClock, 1000);
+    return () => clearInterval(id);
+  }, []);
+
   useEffect(() => {
     try {
       const stored = localStorage.getItem('rs_watchlist');
-      if (stored) {
-        setFavorites(JSON.parse(stored));
-      }
-    } catch (e) {
-      console.error('Failed to load watchlist from localStorage', e);
-    }
+      if (stored) setFavorites(JSON.parse(stored));
+    } catch { /* ignore */ }
   }, []);
 
-  // Save Watchlist to LocalStorage
   const handleToggleFavorite = (symbol: string) => {
     setFavorites((prev) => {
       const updated = prev.includes(symbol)
         ? prev.filter((s) => s !== symbol)
         : [...prev, symbol];
-      try {
-        localStorage.setItem('rs_watchlist', JSON.stringify(updated));
-      } catch (e) {
-        console.error('Failed to save watchlist to localStorage', e);
-      }
+      try { localStorage.setItem('rs_watchlist', JSON.stringify(updated)); } catch { /* ignore */ }
       return updated;
     });
   };
 
-  // Fetch stocks when indexType changes
-  const fetchStocks = async () => {
+  const fetchStocks = useCallback(async () => {
     setLoadingStocks(true);
     setStocksError(null);
     try {
@@ -61,7 +86,6 @@ export default function StockDashboard() {
       const json = await res.json();
       if (json.success) {
         setStocks(json.data);
-        // Default select first symbol in list if nothing selected yet or symbol isn't in current list
         const symbolExists = json.data.some((item: any) => item.symbol === selectedSymbol);
         if (json.data.length > 0 && (!selectedSymbol || !symbolExists)) {
           setSelectedSymbol(json.data[0].symbol);
@@ -69,15 +93,15 @@ export default function StockDashboard() {
       } else {
         setStocksError(json.error || 'Failed to retrieve stocks list');
       }
-    } catch (err) {
+    } catch {
       setStocksError('Network error. Failed to retrieve stocks list.');
     } finally {
       setLoadingStocks(false);
+      setLastUpdated(new Date());
     }
-  };
+  }, [indexType, lookback, selectedSymbol]);
 
-  // Fetch index summary
-  const fetchSummary = async () => {
+  const fetchSummary = useCallback(async () => {
     setLoadingSummary(true);
     try {
       const res = await fetch('/api/summary');
@@ -86,131 +110,222 @@ export default function StockDashboard() {
         setNifty50Stats(json.nifty50);
         setNifty500Stats(json.nifty500);
       }
-    } catch (err) {
-      console.error('Failed to load index summary', err);
-    } finally {
-      setLoadingSummary(false);
-    }
-  };
-
-  useEffect(() => {
-    fetchStocks();
-  }, [indexType, lookback]);
-
-  useEffect(() => {
-    fetchSummary();
+    } catch { /* ignore */ }
+    finally { setLoadingSummary(false); }
   }, []);
 
-  // Compute stats for current stocks list
+  const handleRefresh = useCallback(() => {
+    fetchStocks();
+    fetchSummary();
+    if (autoRefresh && countdownRef.current) {
+      clearInterval(countdownRef.current);
+      setCountdown(autoRefresh * 60);
+      countdownRef.current = setInterval(() => {
+        setCountdown((c) => {
+          if (c <= 1) { fetchStocks(); fetchSummary(); return autoRefresh * 60; }
+          return c - 1;
+        });
+      }, 1000);
+    }
+  }, [fetchStocks, fetchSummary, autoRefresh]);
+
+  useEffect(() => { fetchStocks(); }, [indexType, lookback]);
+  useEffect(() => { fetchSummary(); }, []);
+
+  useEffect(() => {
+    if (countdownRef.current) clearInterval(countdownRef.current);
+    if (!autoRefresh) { setCountdown(0); return; }
+    setCountdown(autoRefresh * 60);
+    countdownRef.current = setInterval(() => {
+      setCountdown((c) => {
+        if (c <= 1) { fetchStocks(); fetchSummary(); return autoRefresh * 60; }
+        return c - 1;
+      });
+    }, 1000);
+    return () => { if (countdownRef.current) clearInterval(countdownRef.current); };
+  }, [autoRefresh]);
+
   const summaryStats = useMemo(() => {
-    let advances = 0;
-    let declines = 0;
+    let advances = 0, declines = 0;
     const ratingCounts = { A: 0, B: 0, C: 0, D: 0 };
-
     stocks.forEach((s) => {
-      if (s.priceChange1D >= 0) advances++;
-      else declines++;
-
-      if (s.rsRating in ratingCounts) {
-        ratingCounts[s.rsRating]++;
-      }
+      if (s.priceChange1D >= 0) advances++; else declines++;
+      if (s.rsRating in ratingCounts) ratingCounts[s.rsRating]++;
     });
-
     return { advances, declines, ratingCounts };
   }, [stocks]);
 
+  const countdownDisplay = autoRefresh
+    ? `${Math.floor(countdown / 60)}:${String(countdown % 60).padStart(2, '0')}`
+    : null;
+
+  const lastUpdatedDisplay = lastUpdated
+    ? lastUpdated.toLocaleTimeString('en-IN', { timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false })
+    : null;
+
   return (
-    <div className="flex flex-col flex-1 w-full bg-black min-h-screen text-zinc-150">
-      {/* Dynamic Header */}
-      <header className="relative w-full border-b border-zinc-900 bg-zinc-950/40 backdrop-blur-md px-6 py-4 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 z-20">
-        <div className="flex items-center gap-3">
-          <div className="h-10 w-10 rounded-xl bg-gradient-to-tr from-emerald-600 to-teal-400 flex items-center justify-center shadow-lg shadow-emerald-500/10">
-            <Layers className="h-5 w-5 text-white animate-pulse" />
+    <div className="flex flex-col h-screen overflow-hidden bg-black text-zinc-150">
+      {/* ── Header ── */}
+      <header className="flex-none w-full border-b border-zinc-900 bg-zinc-950/60 backdrop-blur-md px-5 py-2.5 flex items-center justify-between gap-4 z-20">
+        {/* Brand */}
+        <div className="flex items-center gap-3 shrink-0">
+          <div className="h-9 w-9 rounded-xl bg-gradient-to-tr from-emerald-600 to-teal-400 flex items-center justify-center shadow-lg shadow-emerald-500/10">
+            <Layers className="h-4.5 w-4.5 text-white" />
           </div>
           <div>
-            <h1 className="text-xl font-bold tracking-tight text-white bg-gradient-to-r from-white via-zinc-200 to-zinc-500 bg-clip-text text-transparent">
-              Relative Strength Trading Algo
+            <h1 className="text-base font-bold tracking-tight bg-gradient-to-r from-white via-zinc-200 to-zinc-500 bg-clip-text text-transparent leading-none">
+              Relative Strength Scanner
             </h1>
-            <p className="text-xs text-zinc-500 font-medium">Mansfield RS Line Scanner &amp; Sector Heatmap</p>
+            <p className="text-[10px] text-zinc-600 font-medium mt-0.5">Mansfield RS Line · NSE Equities</p>
           </div>
         </div>
 
-        {/* Global Controls */}
-        <div className="flex flex-wrap items-center gap-4">
+        {/* Controls */}
+        <div className="flex items-center gap-2 flex-wrap">
           {/* Page Switcher */}
-          <div className="flex items-center bg-zinc-900/80 border border-zinc-850 p-1 rounded-xl">
-            <button
-              className="px-4 py-1.5 text-xs font-semibold rounded-lg bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 transition-all"
-            >
-              Mansfield RS Scanner
+          <div className="flex items-center bg-zinc-900/80 border border-zinc-800 p-0.5 rounded-xl">
+            <button className="px-3 py-1.5 text-xs font-semibold rounded-lg bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
+              RS Scanner
             </button>
-            <Link
-              href="/strategies"
-              className="px-4 py-1.5 text-xs font-semibold rounded-lg text-zinc-500 hover:text-zinc-300 transition-all"
-            >
-              Algo Strategies
+            <Link href="/movers" className="px-3 py-1.5 text-xs font-semibold rounded-lg text-zinc-500 hover:text-zinc-300 transition-all">
+              Movers
+            </Link>
+            <Link href="/strategies" className="px-3 py-1.5 text-xs font-semibold rounded-lg text-zinc-500 hover:text-zinc-300 transition-all">
+              Strategies
+            </Link>
+            <Link href="/reports" className="px-3 py-1.5 text-xs font-semibold rounded-lg text-zinc-500 hover:text-zinc-300 transition-all">
+              Reports
             </Link>
           </div>
 
-          {/* Lookback Selector */}
-          <div className="flex items-center bg-zinc-900/80 border border-zinc-850 p-1 rounded-xl">
+          {/* Lookback */}
+          <div className="flex items-center bg-zinc-900/80 border border-zinc-800 p-0.5 rounded-xl">
             {([50, 100, 252] as const).map((lb) => (
               <button
                 key={lb}
                 onClick={() => setLookback(lb)}
-                className={`px-3 py-1.5 text-xs font-semibold rounded-lg transition-all ${
-                  lookback === lb
-                    ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20'
-                    : 'text-zinc-500 hover:text-zinc-300'
+                className={`px-2.5 py-1.5 text-xs font-semibold rounded-lg transition-all ${
+                  lookback === lb ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20' : 'text-zinc-500 hover:text-zinc-300'
                 }`}
                 title={`RS Lookback: ${lb} trading days`}
               >
-                {lb === 252 ? '252d (52w)' : `${lb}d`}
+                {lb === 252 ? '52w' : `${lb}d`}
               </button>
             ))}
           </div>
 
-          {/* Index Selector Tab */}
-          <div className="flex items-center bg-zinc-900/80 border border-zinc-850 p-1 rounded-xl">
-            <button
-              onClick={() => setIndexType('nifty50')}
-              className={`px-4 py-1.5 text-xs font-semibold rounded-lg transition-all ${
-                indexType === 'nifty50'
-                  ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20'
-                  : 'text-zinc-500 hover:text-zinc-300'
-              }`}
-            >
-              Nifty 50
-            </button>
-            <button
-              onClick={() => setIndexType('nifty500')}
-              className={`px-4 py-1.5 text-xs font-semibold rounded-lg transition-all ${
-                indexType === 'nifty500'
-                  ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20'
-                  : 'text-zinc-500 hover:text-zinc-300'
-              }`}
-            >
-              Nifty 500
-            </button>
+          {/* Index Selector */}
+          <div className="flex items-center bg-zinc-900/80 border border-zinc-800 p-0.5 rounded-xl">
+            {(['nifty50', 'nifty500'] as const).map((idx) => (
+              <button
+                key={idx}
+                onClick={() => setIndexType(idx)}
+                className={`px-3 py-1.5 text-xs font-semibold rounded-lg transition-all ${
+                  indexType === idx ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20' : 'text-zinc-500 hover:text-zinc-300'
+                }`}
+              >
+                {idx === 'nifty50' ? 'Nifty 50' : 'Nifty 500'}
+              </button>
+            ))}
           </div>
 
-          {/* Refresh Action */}
-          <button
-            onClick={() => {
-              fetchStocks();
-              fetchSummary();
-            }}
-            className="p-2 border border-zinc-800 rounded-xl bg-zinc-900/40 text-zinc-400 hover:text-white transition-all duration-200 hover:border-zinc-700 active:scale-95"
-            title="Refresh Dashboard Data"
-          >
-            <RefreshCw className="h-4 w-4" />
-          </button>
+          {/* Sync Data */}
+          <Tooltip>
+            <TooltipTrigger>
+              <Button
+                onClick={() => setSyncPanelOpen(true)}
+                variant="outline"
+                size="sm"
+                className="gap-1.5 border-zinc-800 bg-zinc-900/60 text-zinc-400 hover:text-emerald-400 hover:border-emerald-500/30 hover:bg-emerald-500/5 rounded-xl text-xs h-8"
+              >
+                <DatabaseZap className="h-3.5 w-3.5" />
+                Sync Data
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent>Sync latest market data from Dhan API</TooltipContent>
+          </Tooltip>
+
+          {/* Auto-refresh dropdown */}
+          <DropdownMenu>
+            <DropdownMenuTrigger>
+              <Button
+                variant="outline"
+                size="sm"
+                className={`gap-1.5 rounded-xl text-xs h-8 ${
+                  autoRefresh
+                    ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-400 hover:bg-emerald-500/15'
+                    : 'border-zinc-800 bg-zinc-900/60 text-zinc-400 hover:text-zinc-200'
+                }`}
+              >
+                {autoRefresh ? <Wifi className="h-3.5 w-3.5" /> : <WifiOff className="h-3.5 w-3.5" />}
+                <span>{autoRefresh ? `${autoRefresh}m` : 'Auto'}</span>
+                {countdownDisplay && <span className="font-mono text-[10px] opacity-80 tabular-nums">{countdownDisplay}</span>}
+                <ChevronDown className="h-3 w-3 opacity-50" />
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end" className="min-w-[160px]">
+              <DropdownMenuLabel className="text-[10px] uppercase tracking-wider">Auto-Refresh</DropdownMenuLabel>
+              <DropdownMenuSeparator />
+              <DropdownMenuItem
+                onClick={() => setAutoRefresh(null)}
+                className={!autoRefresh ? 'text-emerald-400' : ''}
+              >
+                Off
+              </DropdownMenuItem>
+              {AUTO_REFRESH_OPTIONS.map((min) => (
+                <DropdownMenuItem
+                  key={min}
+                  onClick={() => setAutoRefresh(min)}
+                  className={autoRefresh === min ? 'text-emerald-400' : ''}
+                >
+                  Every {min} minutes
+                </DropdownMenuItem>
+              ))}
+            </DropdownMenuContent>
+          </DropdownMenu>
+
+          {/* Refresh + last updated */}
+          <div className="flex items-center gap-1.5">
+            <Tooltip>
+              <TooltipTrigger>
+                <Button
+                  onClick={handleRefresh}
+                  variant="outline"
+                  size="icon"
+                  className="border-zinc-800 bg-zinc-900/40 text-zinc-400 hover:text-white hover:border-zinc-700 rounded-xl h-8 w-8"
+                >
+                  <RefreshCw className={`h-3.5 w-3.5 ${loadingStocks ? 'animate-spin text-emerald-400' : ''}`} />
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent>Refresh dashboard data</TooltipContent>
+            </Tooltip>
+            {lastUpdatedDisplay && (
+              <span className="text-[10px] text-zinc-600 font-mono hidden sm:block tabular-nums">
+                {lastUpdatedDisplay}
+              </span>
+            )}
+          </div>
+
+          {/* IST Clock + Market Status */}
+          <div className="flex items-center gap-2 px-3 py-1.5 rounded-xl border border-zinc-800/60 bg-zinc-900/40">
+            <div className={`w-1.5 h-1.5 rounded-full ${marketOpen ? 'bg-emerald-400 animate-pulse' : 'bg-zinc-600'}`} />
+            <Clock className="h-3 w-3 text-zinc-500" />
+            <span className="font-mono text-xs text-zinc-300 tabular-nums">{istTime || '--:--:--'}</span>
+            <Badge
+              className={`text-[9px] h-4 px-1.5 font-bold uppercase tracking-wide border-0 ${
+                marketOpen
+                  ? 'bg-emerald-500/15 text-emerald-400'
+                  : 'bg-zinc-800 text-zinc-500'
+              }`}
+            >
+              {marketOpen ? 'LIVE' : 'CLOSED'}
+            </Badge>
+          </div>
         </div>
       </header>
 
-      {/* Main Workspace Layout */}
-      <main className="flex-1 w-full max-w-[96%] mx-auto px-6 py-6 flex flex-col gap-6">
-        {/* Index Summary Section */}
+      {/* ── Index Summary ── */}
+      <div className="flex-none px-5 pt-3 pb-1">
         <IndexSummary
           nifty50={nifty50Stats}
           nifty500={nifty500Stats}
@@ -219,74 +334,76 @@ export default function StockDashboard() {
           declines={summaryStats.declines}
           ratingCounts={summaryStats.ratingCounts}
         />
+      </div>
 
-        {/* Full-width Charts Panel */}
-        <div className="w-full">
-          <RSChart symbol={selectedSymbol} indexType={indexType} lookback={lookback} />
-        </div>
-
-        {/* Workspaces Panel: Switcher + Scanner */}
-        <div className="w-full flex flex-col gap-4">
-          {/* View Switcher Bar */}
-          <div className="flex items-center justify-between border border-zinc-900 bg-zinc-950/40 backdrop-blur-md p-1.5 rounded-xl">
-            <div className="flex items-center gap-1">
+      {/* ── Main Split-Pane ── */}
+      <main className="flex-1 flex gap-3 px-5 pb-4 pt-3 min-h-0 overflow-hidden">
+        {/* Left Panel */}
+        <div className="flex flex-col min-h-0 w-[42%] shrink-0">
+          <div className="flex-none flex items-center justify-between mb-2">
+            <div className="flex items-center bg-zinc-900/80 border border-zinc-800 p-0.5 rounded-xl gap-0.5">
               <button
                 onClick={() => setActiveTab('leaderboard')}
-                className={`flex items-center gap-1.5 px-4 py-2 rounded-lg text-xs font-semibold tracking-wide transition-all ${
-                  activeTab === 'leaderboard'
-                    ? 'bg-zinc-850 text-white shadow-sm border border-zinc-800'
-                    : 'text-zinc-500 hover:text-zinc-300'
+                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold transition-all ${
+                  activeTab === 'leaderboard' ? 'bg-zinc-800 text-white border border-zinc-700' : 'text-zinc-500 hover:text-zinc-300'
                 }`}
               >
                 <List className="h-3.5 w-3.5" />
-                <span>Leaderboard Table</span>
+                Leaderboard
               </button>
               <button
                 onClick={() => setActiveTab('heatmap')}
-                className={`flex items-center gap-1.5 px-4 py-2 rounded-lg text-xs font-semibold tracking-wide transition-all ${
-                  activeTab === 'heatmap'
-                    ? 'bg-zinc-850 text-white shadow-sm border border-zinc-800'
-                    : 'text-zinc-500 hover:text-zinc-300'
+                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold transition-all ${
+                  activeTab === 'heatmap' ? 'bg-zinc-800 text-white border border-zinc-700' : 'text-zinc-500 hover:text-zinc-300'
                 }`}
               >
                 <LayoutGrid className="h-3.5 w-3.5" />
-                <span>Sector Heatmap</span>
+                Sectors
               </button>
             </div>
-
-            <div className="text-[10px] text-zinc-500 font-mono pr-2">
-              Scan count: {stocks.length} assets
-            </div>
+            <div className="text-[10px] text-zinc-600 font-mono">{stocks.length} assets</div>
           </div>
 
-          {/* Tab Panels */}
-          {loadingStocks ? (
-            <div className="flex flex-col items-center justify-center p-20 rounded-2xl border border-zinc-850 bg-zinc-950/60 backdrop-blur-md min-h-[450px]">
-              <RefreshCw className="h-8 w-8 text-emerald-500 animate-spin" />
-              <span className="text-zinc-500 text-xs mt-3">Analyzing daily historical charts and compiling Mansfield index relative strength ratios...</span>
-            </div>
-          ) : stocksError ? (
-            <div className="flex flex-col items-center justify-center p-12 rounded-2xl border border-red-500/25 bg-red-950/10 text-center text-zinc-400 min-h-[450px]">
-              <p className="text-sm font-semibold text-red-400">Failed to render workspace</p>
-              <p className="text-xs text-zinc-600 mt-1">{stocksError}</p>
-            </div>
-          ) : activeTab === 'leaderboard' ? (
-            <Leaderboard
-              data={stocks}
-              selectedSymbol={selectedSymbol}
-              onSelectSymbol={setSelectedSymbol}
-              favorites={favorites}
-              onToggleFavorite={handleToggleFavorite}
-            />
-          ) : (
-            <SectorHeatmap
-              data={stocks}
-              selectedSymbol={selectedSymbol}
-              onSelectSymbol={setSelectedSymbol}
-            />
-          )}
+          <div className="flex-1 min-h-0 overflow-hidden">
+            {loadingStocks ? (
+              <div className="flex flex-col items-center justify-center h-full rounded-2xl border border-zinc-800/80 bg-zinc-950/60 backdrop-blur-md">
+                <RefreshCw className="h-7 w-7 text-emerald-500 animate-spin" />
+                <span className="text-zinc-500 text-xs mt-3 text-center px-4">Computing Mansfield RS ratios...</span>
+              </div>
+            ) : stocksError ? (
+              <div className="flex flex-col items-center justify-center h-full rounded-2xl border border-red-500/20 bg-red-950/10 text-center">
+                <p className="text-sm font-semibold text-red-400">Failed to load</p>
+                <p className="text-xs text-zinc-600 mt-1 px-4">{stocksError}</p>
+              </div>
+            ) : activeTab === 'leaderboard' ? (
+              <Leaderboard
+                data={stocks}
+                selectedSymbol={selectedSymbol}
+                onSelectSymbol={setSelectedSymbol}
+                favorites={favorites}
+                onToggleFavorite={handleToggleFavorite}
+              />
+            ) : (
+              <SectorHeatmap
+                data={stocks}
+                selectedSymbol={selectedSymbol}
+                onSelectSymbol={setSelectedSymbol}
+              />
+            )}
+          </div>
+        </div>
+
+        {/* Right Panel */}
+        <div className="flex-1 min-h-0 overflow-y-auto">
+          <RSChart symbol={selectedSymbol} indexType={indexType} lookback={lookback} />
         </div>
       </main>
+
+      <DataRefreshPanel
+        open={syncPanelOpen}
+        onClose={() => setSyncPanelOpen(false)}
+        onRefreshComplete={() => { fetchStocks(); fetchSummary(); }}
+      />
     </div>
   );
 }

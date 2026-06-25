@@ -17,7 +17,8 @@ from lib.strategy_state_helper import save_strategy_state, check_shutdown_trigge
 # Configure Logging
 project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 debug_dir = os.path.join(project_root, "debug")
-os.makedirs(debug_dir, exist_ok=True)
+log_dir = os.path.join(debug_dir, "logs", "spread_trend")
+os.makedirs(log_dir, exist_ok=True)
 
 class FlushingFileHandler(logging.FileHandler):
     def emit(self, record):
@@ -29,7 +30,7 @@ logging.basicConfig(
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
         logging.StreamHandler(),
-        FlushingFileHandler(os.path.join(debug_dir, f"spread_trend_{datetime.now().strftime('%Y%m%d')}.log"))
+        FlushingFileHandler(os.path.join(log_dir, f"{datetime.now().strftime('%Y%m%d')}.log"))
     ],
     force=True
 )
@@ -438,16 +439,20 @@ class NiftySpreadTrendStrategy:
             # 3. Daily Profit Target
             if total_pnl >= self.target_profit:
                 self.exit_positions(f"Profit Target Reached: ₹{total_pnl:.2f} (Target: ₹{self.target_profit:.2f})")
-                self.helper.wait_for_next_day_market_open(self.dry_run)
+                if not self.helper.wait_for_next_day_market_open(self.dry_run, shutdown_check=lambda: check_shutdown_trigger("nifty_spread_trend")):
+                    self.save_state(0, 0, 0, total_pnl, status="STOPPED")
+                    sys.exit(0)
                 if self.dry_run:
                     logger.info("[DRY RUN] Daily profit target hit. Sleeping 30s before restarting...")
                     time.sleep(30)
                 break
-                
+
             # 4. Daily Stop Loss
             if total_pnl <= self.stop_loss:
                 self.exit_positions(f"Global Stop Loss Hit: ₹{total_pnl:.2f} (Limit: -₹{abs(self.stop_loss):.2f})")
-                self.helper.wait_for_next_day_market_open(self.dry_run)
+                if not self.helper.wait_for_next_day_market_open(self.dry_run, shutdown_check=lambda: check_shutdown_trigger("nifty_spread_trend")):
+                    self.save_state(0, 0, 0, total_pnl, status="STOPPED")
+                    sys.exit(0)
                 if self.dry_run:
                     logger.info("[DRY RUN] Daily stop loss hit. Sleeping 30s before restarting...")
                     time.sleep(30)
@@ -568,7 +573,7 @@ class NiftySpreadTrendStrategy:
                     break
 
                 # Wait for market open if closed
-                self.helper.wait_for_market_open(self.dry_run, eod_time=self.eod_time)
+                self.helper.wait_for_market_open(self.dry_run, eod_time=self.eod_time, shutdown_check=lambda: check_shutdown_trigger("nifty_spread_trend"))
                 
                 # Check signal and spot
                 signal, spot = self.get_signal()

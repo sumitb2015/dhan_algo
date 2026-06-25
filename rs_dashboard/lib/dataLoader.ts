@@ -5,8 +5,11 @@ import { OHLCVRow } from './rs';
 // ─── Paths ────────────────────────────────────────────────────────────────────
 const DATA_DIR = path.join(process.cwd(), '..', 'Daily_Historical_Data_Fresh');
 const HIST_DIR = path.join(process.cwd(), '..', 'Historical Data');
-const NIFTY50_INDEX_CSV = path.join(HIST_DIR, 'NIFTY_50_Daily_5Y.csv');
+const DEBUG_DIR = path.join(process.cwd(), '..', 'debug');
+const NIFTY50_5Y_CSV  = path.join(HIST_DIR, 'NIFTY_50_Daily_5Y.csv');
+const NIFTY50_1Y_CSV  = path.join(HIST_DIR, 'NIFTY_50_Daily_1Y.csv');
 const NIFTY500_INDEX_CSV = path.join(HIST_DIR, 'NIFTY_500_Daily.csv');
+const TODAY_QUOTES_JSON = path.join(DEBUG_DIR, 'today_quotes.json');
 
 // ─── Simple CSV Parser ────────────────────────────────────────────────────────
 function parseCSV(content: string): Record<string, string>[] {
@@ -66,6 +69,39 @@ export function readStockCSV(symbol: string): OHLCVRow[] {
       }))
       .sort((a, b) => a.date.localeCompare(b.date));
 
+    // Apply live-quote patch so today's data is accurate during market hours.
+    //
+    // Two cases handled:
+    // 1. CSV doesn't have today's row at all → append the live quote row.
+    // 2. CSV has today's row but `close` equals yesterday's close (Dhan API
+    //    returns the previous session's settlement price until EOD processing)
+    //    → replace today's close with the live LTP so 1D% is meaningful.
+    const todayIST = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
+    const last = parsed.length > 0 ? parsed[parsed.length - 1] : null;
+    const prev = parsed.length > 1 ? parsed[parsed.length - 2] : null;
+
+    const todayMissingFromCSV = !last || last.date < todayIST;
+    const todayCloseStale = last?.date === todayIST && prev !== null && last.close === prev.close;
+
+    if (todayMissingFromCSV || todayCloseStale) {
+      const liveRow = getTodayQuoteRow(symbol);
+      if (liveRow) {
+        if (todayMissingFromCSV) {
+          parsed.push(liveRow);
+        } else {
+          // Update close (and volume) in-place; keep CSV open/high/low
+          // as they may already reflect the full intraday range.
+          parsed[parsed.length - 1] = {
+            ...last!,
+            close: liveRow.close,
+            high: Math.max(last!.high, liveRow.high),
+            low: last!.low > 0 ? Math.min(last!.low, liveRow.low) : liveRow.low,
+            volume: liveRow.volume > 0 ? liveRow.volume : last!.volume,
+          };
+        }
+      }
+    }
+
     cacheSet(cacheKey, parsed);
     return parsed;
   } catch {
@@ -74,31 +110,69 @@ export function readStockCSV(symbol: string): OHLCVRow[] {
 }
 
 // ─── Nifty 50 Index Reader ────────────────────────────────────────────────────
-export function readNifty50Index(): OHLCVRow[] {
-  const cacheKey = 'index:nifty50';
-  const hit = cacheGet<OHLCVRow[]>(cacheKey);
-  if (hit) return hit;
 
+/** Pick the date field regardless of whether the CSV index column is named or blank. */
+function pickDate(r: Record<string, string>): string {
+  return (r.Datetime || r.Date || r[''] || '').slice(0, 10);
+}
+
+function parseNifty50CSV(filePath: string): OHLCVRow[] {
+  if (!fs.existsSync(filePath)) return [];
   try {
-    const content = fs.readFileSync(NIFTY50_INDEX_CSV, 'utf-8');
+    const content = fs.readFileSync(filePath, 'utf-8');
     const rows = parseCSV(content);
-    const parsed: OHLCVRow[] = rows
-      .filter((r) => (r.Datetime || r.Date) && r.Close && !isNaN(parseFloat(r.Close)))
+    return rows
+      .filter((r) => pickDate(r) && r.Close && !isNaN(parseFloat(r.Close)))
       .map((r) => ({
-        date: (r.Datetime || r.Date).slice(0, 10),
+        date: pickDate(r),
         open: parseFloat(r.Open) || 0,
         high: parseFloat(r.High) || 0,
         low: parseFloat(r.Low) || 0,
         close: parseFloat(r.Close),
         volume: parseFloat(r.Volume) || 0,
-      }))
-      .sort((a, b) => a.date.localeCompare(b.date));
-
-    cacheSet(cacheKey, parsed);
-    return parsed;
+      }));
   } catch {
     return [];
   }
+}
+
+export function readNifty50Index(): OHLCVRow[] {
+  const cacheKey = 'index:nifty50';
+  const hit = cacheGet<OHLCVRow[]>(cacheKey);
+  if (hit) return hit;
+
+  // Merge all available Nifty 50 daily files for maximum history coverage.
+  // This handles the case where the 5Y file was accidentally truncated.
+  const merged = new Map<string, OHLCVRow>();
+  for (const filePath of [NIFTY50_1Y_CSV, NIFTY50_5Y_CSV]) {
+    for (const row of parseNifty50CSV(filePath)) {
+      merged.set(row.date, row); // later files overwrite older ones for same date
+    }
+  }
+
+  const parsed = Array.from(merged.values()).sort((a, b) => a.date.localeCompare(b.date));
+
+  // If the benchmark CSV is one day behind (common before daily refresh runs),
+  // patch today's row using the live Nifty 50 quote from today_quotes.json
+  // (_NIFTY50_INDEX key written by fetch_today_quotes.py), or carry forward
+  // the last close as a fallback so stock data for today is not dropped by alignByDate.
+  const todayIST = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
+  const last = parsed.length > 0 ? parsed[parsed.length - 1] : null;
+  if (last && last.date < todayIST) {
+    const todayDay = new Date(todayIST + 'T00:00:00').getDay(); // 0=Sun,6=Sat
+    if (todayDay >= 1 && todayDay <= 5) {
+      const liveIdx = getTodayQuoteRow('_NIFTY50_INDEX');
+      if (liveIdx) {
+        parsed.push({ ...liveIdx, date: todayIST });
+      } else {
+        // Carry forward last known close until real data arrives
+        parsed.push({ ...last, date: todayIST });
+      }
+    }
+  }
+
+  if (parsed.length > 0) cacheSet(cacheKey, parsed);
+  return parsed;
 }
 
 // ─── Nifty 500 Index ─────────────────────────────────────────────────────────
@@ -120,9 +194,9 @@ export async function readNifty500Index(symbols: string[]): Promise<OHLCVRow[]> 
         const content = fs.readFileSync(NIFTY500_INDEX_CSV, 'utf-8');
         const rows = parseCSV(content);
         const parsed: OHLCVRow[] = rows
-          .filter((r) => (r.Datetime || r.Date) && r.Close && !isNaN(parseFloat(r.Close)))
+          .filter((r) => pickDate(r) && r.Close && !isNaN(parseFloat(r.Close)))
           .map((r) => ({
-            date: (r.Datetime || r.Date).slice(0, 10),
+            date: pickDate(r),
             open: parseFloat(r.Open) || 0,
             high: parseFloat(r.High) || 0,
             low: parseFloat(r.Low) || 0,
@@ -178,6 +252,71 @@ export async function readNifty500Index(symbols: string[]): Promise<OHLCVRow[]> 
   })();
 
   return nifty500Promise;
+}
+
+// ─── Today's live quote patch ─────────────────────────────────────────────────
+interface TodayQuote { open: number; high: number; low: number; close: number; volume: number; }
+interface TodayQuotesFile { date: string; updated_at: string; count?: number; quotes: Record<string, TodayQuote>; }
+
+let _todayQuotesCache: { data: TodayQuotesFile | null; ts: number } | null = null;
+const TODAY_QUOTES_TTL = 60 * 1000; // re-read file at most once per minute
+
+function readTodayQuotesFile(): TodayQuotesFile | null {
+  const now = Date.now();
+  if (_todayQuotesCache && now - _todayQuotesCache.ts < TODAY_QUOTES_TTL) {
+    return _todayQuotesCache.data;
+  }
+  try {
+    if (!fs.existsSync(TODAY_QUOTES_JSON)) {
+      _todayQuotesCache = { data: null, ts: now };
+      return null;
+    }
+    const raw = fs.readFileSync(TODAY_QUOTES_JSON, 'utf-8');
+    const parsed = JSON.parse(raw) as TodayQuotesFile;
+    _todayQuotesCache = { data: parsed, ts: now };
+    return parsed;
+  } catch {
+    _todayQuotesCache = { data: null, ts: now };
+    return null;
+  }
+}
+
+/** Returns today's OHLCV row for a symbol from the live quotes file, or null if unavailable. */
+export function getTodayQuoteRow(symbol: string): OHLCVRow | null {
+  const file = readTodayQuotesFile();
+  if (!file) return null;
+
+  // Only use quotes from today's date
+  const today = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' }); // YYYY-MM-DD
+  if (file.date !== today) return null;
+
+  const q = file.quotes[symbol];
+  if (!q || q.close <= 0) return null;
+
+  return {
+    date: today,
+    open:   q.open,
+    high:   q.high,
+    low:    q.low,
+    close:  q.close,
+    volume: q.volume,
+  };
+}
+
+/** Returns metadata about the today_quotes.json file for UI display. */
+export function getTodayQuotesMeta(): { date: string; updatedAt: string; count: number } | null {
+  const file = readTodayQuotesFile();
+  if (!file) return null;
+  return { date: file.date, updatedAt: file.updated_at, count: file.count ?? Object.keys(file.quotes).length };
+}
+
+// ─── Cache invalidation ───────────────────────────────────────────────────────
+export function clearCache(): void {
+  cache.clear();
+  _allSymbolsCache = null;
+  _nifty500ListCache = null;
+  _todayQuotesCache = null;
+  nifty500Promise = null;
 }
 
 // ─── List all available symbols from the data directory ───────────────────────

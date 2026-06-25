@@ -128,7 +128,7 @@ def main():
     helper = DhanHelper(dhan)
 
     watchlist = {
-        "NIFTY": {"id": 13, "segment": "NSE_FNO", "instrument": "OPTIDX"}
+        "NIFTY": {"id": 26000, "segment": "NSE_FNO", "instrument": "OPTIDX"}
     }
     
     # Generate relative strikes: ATM, ATM+1 to ATM+10, ATM-1 to ATM-10

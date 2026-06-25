@@ -31,14 +31,48 @@ venv\Scripts\python.exe login.py
 ### Running Strategies (examples)
 
 ```powershell
-# Dry run (no real orders) — always the default
+# Value Imbalance — advanced (dry run by default)
 venv\Scripts\python.exe strategies/value_imbalance/nifty_advanced_imbalance.py --entry-type straddle --mode winner_roll_atm
 
-# Live trade
+# Value Imbalance — advanced (live)
 venv\Scripts\python.exe strategies/value_imbalance/nifty_advanced_imbalance.py --live --lots 2 --entry-type straddle --mode winner_roll_atm
+
+# Value Imbalance — base straddle / strangle
+venv\Scripts\python.exe strategies/value_imbalance/nifty_value_imbalance_straddle.py --lots 1
+venv\Scripts\python.exe strategies/value_imbalance/nifty_value_imbalance_strangle.py --lots 1
+
+# Premium mean-reversion straddles (tick TWAP and true 1-min VWAP)
+venv\Scripts\python.exe strategies/value_imbalance/nifty_tick_mean_straddle.py --lots 1
+venv\Scripts\python.exe strategies/value_imbalance/nifty_vwap_1min_straddle.py --lots 1
+
+# Expiry-day straddle (0DTE)
+venv\Scripts\python.exe strategies/expiry/nifty_expiry.py --lots 1 --entry-type straddle --adjustment c2c
+
+# Spread trend (EMA20 + Supertrend — sells Bull Put or Bear Call spread)
+venv\Scripts\python.exe strategies/spread_trend/nifty_spread_trend.py --lots 1 --spread-width 100
+
+# OI Directional (PCR-based naked PE/CE sell)
+venv\Scripts\python.exe strategies/oi_directional/nifty_oi_directional.py --lots 1 --pcr-threshold 1.5
 ```
 
 Full CLI references for all strategies are in [GEMINI.md](GEMINI.md).
+
+### Dashboard Data Refresh
+
+```powershell
+# Full incremental refresh (Nifty 50 index + Nifty 500 index + all stocks)
+venv\Scripts\python.exe scripts/downloader/refresh_dashboard_data.py
+
+# Refresh specific target only
+venv\Scripts\python.exe scripts/downloader/refresh_dashboard_data.py --target nifty50
+venv\Scripts\python.exe scripts/downloader/refresh_dashboard_data.py --target nifty500-index
+venv\Scripts\python.exe scripts/downloader/refresh_dashboard_data.py --target stocks
+
+# Fetch live intraday quotes (patches today's row before EOD CSVs are available)
+venv\Scripts\python.exe scripts/downloader/fetch_today_quotes.py
+```
+
+The refresh script writes progress to `debug/refresh_status.json`; the dashboard polls this file and shows a progress panel. Write `debug/refresh_stop.trigger` to abort mid-run.
 
 ### Tests
 
@@ -73,18 +107,23 @@ lib/
   dhan_helper.py            # Core DhanHelper class — all strategies use this
   strategy_state_helper.py  # save_strategy_state() / check_shutdown_trigger()
 strategies/
-  value_imbalance/          # Straddle, Strangle, and Advanced Imbalance strategies
-  expiry/                   # 0DTE expiry-day strategy
-  spread_trend/             # Trend-following spread strategy
+  value_imbalance/          # Straddle, Strangle, Advanced Imbalance, and VWAP straddle strategies
+  expiry/                   # 0DTE expiry-day straddle/strangle with leg SL and adjustment modes
+  spread_trend/             # Trend-following Bear Call / Bull Put spread strategy (EMA20 + Supertrend)
+  oi_directional/           # OI imbalance + PCR-driven naked PE/CE sell strategy
+  Archives/                 # Retired/superseded strategies (kept for reference)
 templates/strategy_template.py  # Starting point for new strategies
 scripts/
-  downloader/               # Historical data downloaders
+  downloader/               # Historical data downloaders + dashboard data refresh scripts
   analysis/                 # Report generators and scanners
   data_utils/               # Parquet conversion, resampling, indicator append
-  tools/                    # Live options tracker, portfolio monitor
+  tools/                    # Live options tracker, portfolio monitor (get_portfolio_pnl.py)
   testing/                  # WebSocket and data validation checks
-debug/                      # Runtime state JSON files + log files (auto-created)
+Historical Data/            # Index CSVs: NIFTY_50_Daily_5Y.csv, NIFTY_500_Daily.csv
+Daily_Historical_Data_Fresh/ # Per-stock daily CSVs (<SYMBOL>_Daily_2Y.csv) for RS dashboard
+debug/                      # Runtime state JSON files, log files, refresh_status.json (auto-created)
 master_list.csv             # 288K-row security master list (~15 MB, cached)
+MW-NIFTY-500-25-Jan-2026.csv  # Nifty 500 constituent list used by refresh and quote scripts
 ```
 
 ### DhanHelper (`lib/dhan_helper.py`)
@@ -115,9 +154,14 @@ Strategies write their live state to `debug/<strategy_key>_state.json` every loo
 ### Next.js Dashboard (`rs_dashboard/`)
 
 - App Router layout under `app/`
-- API routes: `app/api/strategies/route.ts` — start/stop strategy processes via `spawn`; `app/api/strategies/logs/route.ts` — tail log files
-- Components: `StockDashboard` (root), `StrategyCard`, `LogConsole`, `RSChart`, `SectorHeatmap`, `Leaderboard`, `IndexSummary`
+- API routes:
+  - `app/api/strategies/route.ts` — start/stop strategy processes via `spawn`; `app/api/strategies/logs/route.ts` — tail log files
+  - `app/api/movers/route.ts` — computes top/bottom movers, volume surges, 52W proximity, MA alignment, RSI from stock CSVs
+  - `app/api/refresh/route.ts` — spawns `refresh_dashboard_data.py`, polls `debug/refresh_status.json`, exposes stop endpoint
+- Pages: `app/movers/` — Market Movers page
+- Components: `StockDashboard` (root), `StrategyCard`, `LogConsole`, `RSChart`, `SectorHeatmap`, `Leaderboard`, `IndexSummary`, `MarketMovers`, `DataRefreshPanel`
 - `PROJECT_ROOT` in API routes is `path.resolve(process.cwd(), '..')` (one level up from `rs_dashboard/`)
+- `debug/today_quotes.json` — live intraday OHLCV snapshot written by `fetch_today_quotes.py`; `dataLoader.ts` merges this to patch the missing today-row in stock CSVs before market close
 
 ---
 
@@ -141,6 +185,12 @@ These are not obvious and have caused runtime errors in the past (see [GEMINI.md
 - Intraday auto-exit is hardcoded at **15:17 IST** across all strategies.
 - Straddle/strangle inversion guard: `CE strike > PE strike` is enforced at entry and after each adjustment; violation triggers an emergency exit + 5-minute pause + fresh cycle.
 - New strategies must use `templates/strategy_template.py` as the starting point and must call `save_strategy_state()` and `check_shutdown_trigger()` in the main loop to integrate with the dashboard.
+- **Premium mean-reversion straddle strategies**: sell ATM straddle when combined CE+PE premium is at/below a reference mean; exit when premium exceeds mean + exit_buffer.
+  - `nifty_vwap_1min_straddle.py` — true volume-weighted VWAP: `Σ(TP×Vol)/Σ(Vol)` from 1-min OHLCV candles fetched via API.
+  - `nifty_tick_mean_straddle.py` — running arithmetic mean of combined premium from WebSocket ticks (no volume weighting; effectively TWAP by tick).
+- **Spread trend strategy** (`strategies/spread_trend/`): sells Bear Call or Bull Put spreads based on EMA20 + Supertrend(7,3) alignment. Both indicators must agree for entry. See `strategies/spread_trend/strategy.md` for full logic.
+- **OI Directional strategy** (`strategies/oi_directional/`): polls the option chain every `--poll-interval` seconds and computes `diff = sum(CE_OI) - sum(PE_OI)` across ±5 ATM strikes (11 strikes, 50-pt spacing). Expanding negative diff → BULLISH → sell naked PE at the strike where PCR > `--pcr-threshold`; expanding positive diff → BEARISH → sell naked CE. Exit when the entry-strike PCR unwinds by `--exit-pcr-change` %. Requires `--expansion-window` consecutive confirming snapshots before entry. See `strategies/oi_directional/strategy.md` for full logic.
+- **Expiry strategy** (`strategies/expiry/`): 0DTE straddle or strangle with per-leg SL (`--leg-sl-pct`) and configurable adjustment modes (`c2c`, `restrangle`, `roll_closer`, `winner_addition`, `none`). Supports delta-based (`--delta --target-delta`) or premium-based (`--premium --target-premium`) strike selection. See `strategies/expiry/strategy.md` for full logic.
 
 ## Environment
 

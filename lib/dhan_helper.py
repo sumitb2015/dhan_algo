@@ -3491,10 +3491,11 @@ class DhanHelper:
             
         return candidate
 
-    def wait_for_market_open(self, dry_run: bool = False, sleep_chunk: int = 3600, start_time: str = "09:15", eod_time: str = "15:30") -> None:
+    def wait_for_market_open(self, dry_run: bool = False, sleep_chunk: int = 3600, start_time: str = "09:15", eod_time: str = "15:30", shutdown_check=None) -> None:
         """
         Blocks until the market opens and the configured start time is reached.
         If dry_run is True, it bypasses the wait so that simulation can run immediately.
+        shutdown_check: optional callable returning True when a shutdown is requested.
         """
         if dry_run:
             logger.info("[DRY RUN] Bypassing market hour check for simulation.")
@@ -3504,40 +3505,47 @@ class DhanHelper:
             now = datetime.now()
             next_open = self.get_next_market_open(now, start_time)
             time_diff = (next_open - now).total_seconds()
-            
+
             logger.info(f"Market is closed or start time not reached. Next open: {next_open.strftime('%Y-%m-%d %H:%M')}. Sleeping for {int(time_diff)} seconds...")
-            
+
             slept = 0
             while slept < time_diff:
                 if self.is_market_open(start_time, eod_time):
                     break
-                chunk = min(time_diff - slept, sleep_chunk)
-                time.sleep(chunk)
-                slept += chunk
-                
+                if shutdown_check and shutdown_check():
+                    logger.info("Shutdown requested during market-open wait. Exiting.")
+                    return
+                time.sleep(1)
+                slept += 1
+
             if self.is_market_open(start_time, eod_time):
                 break
 
-    def wait_for_next_day_market_open(self, dry_run: bool = False, sleep_chunk: int = 3600, start_time: str = "09:15") -> None:
+    def wait_for_next_day_market_open(self, dry_run: bool = False, sleep_chunk: int = 3600, start_time: str = "09:15", shutdown_check=None) -> bool:
         """
         Blocks until the next trading day's market open / custom start_time.
         Useful when a strategy finishes its daily target/SL and wants to wait for the next session.
+        shutdown_check: optional callable returning True when a shutdown is requested.
+        Returns True if wait completed normally, False if interrupted by shutdown.
         """
         if dry_run:
             logger.info("[DRY RUN] Bypassing forced next-day sleep for simulation.")
-            return
+            return True
 
         now = datetime.now()
         tomorrow = (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
         next_open = self.get_next_market_open(tomorrow, start_time)
         time_diff = (next_open - now).total_seconds()
-        
+
         logger.info(f"Daily Target/SL reached. Waiting for next trading session at: {next_open.strftime('%Y-%m-%d %H:%M')}. Sleeping for {int(time_diff)} seconds...")
-        
+
         slept = 0
         while slept < time_diff:
-            chunk = min(time_diff - slept, sleep_chunk)
-            time.sleep(chunk)
-            slept += chunk
+            if shutdown_check and shutdown_check():
+                logger.info("Shutdown requested during next-day wait. Exiting.")
+                return False
+            time.sleep(1)
+            slept += 1
+        return True
 
 

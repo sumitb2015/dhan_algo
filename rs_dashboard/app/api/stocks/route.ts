@@ -32,7 +32,7 @@ async function getLeaderboard(indexType: 'nifty50' | 'nifty500', lookback: numbe
   }
 
   // Compute RS for each stock
-  const partials: Array<Omit<RSResult, 'rsScore' | 'rsRating'>> = [];
+  const partials: Array<Omit<RSResult, 'rsScore' | 'rsRating' | 'rsRank' | 'rsMomentum'>> = [];
   const ratios: Array<{ symbol: string; rsRatio: number }> = [];
 
   await Promise.all(
@@ -51,12 +51,17 @@ async function getLeaderboard(indexType: 'nifty50' | 'nifty500', lookback: numbe
 
   const scores = assignRSScores(ratios);
 
+  const totalStocks = partials.length;
   const results: RSResult[] = partials.map((p) => {
-    const s = scores.get(p.symbol) ?? { rsScore: 50, rsRating: 'C' as const };
+    const s = scores.get(p.symbol) ?? { rsScore: 50, rsRating: 'C' as const, rsRank: Math.ceil(totalStocks / 2) };
+    const rsMomentum: RSResult['rsMomentum'] =
+      p.rsChange1W > 0.005 ? 'rising' : p.rsChange1W < -0.005 ? 'falling' : 'neutral';
     return {
       ...p,
       rsScore: s.rsScore,
       rsRating: s.rsRating,
+      rsRank: s.rsRank,
+      rsMomentum,
       sector: getSector(p.symbol),
     } as RSResult;
   });

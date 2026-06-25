@@ -1,9 +1,10 @@
 # Nifty Value-Imbalance Strategies
 
-This document provides a detailed breakdown of the value-imbalance option selling strategies located in the `strategies/value_imbalance/` directory:
+This document covers all option selling strategies in `strategies/value_imbalance/`:
 1.  **Nifty Advanced Value-Imbalance Straddle & Strangle** (`nifty_advanced_imbalance.py`)
 2.  **Nifty Value-Imbalance Straddle** (`nifty_value_imbalance_straddle.py`)
 3.  **Nifty Value-Imbalance Strangle** (`nifty_value_imbalance_strangle.py`)
+4.  **Nifty VWAP Straddle** (`nifty_vwap_straddle.py`)
 
 ---
 
@@ -341,3 +342,121 @@ Here are step-by-step examples of how trades flow under different market conditi
     *   Since the ATM strike has shifted by $\ge 100$ points (meaning the strike that was originally 100 points above the initial ATM has now become the current ATM), the shift triggers.
     *   **Action**: Immediately buys to close all active straddle positions (`24000 CE` and `24000 PE`) to protect against extreme directional moves.
     *   Pauses for **5 minutes** (cooldown) and then restarts a fresh cycle at the new ATM strike (`24,100`).
+
+---
+
+## 7. Nifty 1-Min VWAP Straddle (`nifty_intraday_vwap_straddle.py`)
+
+A mean-reversion short straddle that uses the **true Volume-Weighted Average Price of the combined straddle premium** (CE + PE), computed from 1-minute OHLCV candles fetched via the Dhan API. There are no lot additions or strike adjustments — each cycle is a simple sell → monitor → exit → repeat loop.
+
+### A. Concept & VWAP Calculation
+
+At the start of every new completed 1-minute bar, the strategy re-fetches intraday candles for both CE and PE legs, merges them on timestamp, builds a combined straddle OHLCV series, and recomputes the session VWAP from the session open (09:15 IST):
+
+$$\text{VWAP} = \frac{\sum(\text{TP}_i \times V_i)}{\sum V_i}$$
+
+where:
+- $\text{TP}_i = \frac{(\text{CE\_High}_i + \text{PE\_High}_i) + (\text{CE\_Low}_i + \text{PE\_Low}_i) + (\text{CE\_Close}_i + \text{PE\_Close}_i)}{3}$ — combined straddle typical price per bar
+- $V_i = \frac{\text{CE\_Volume}_i + \text{PE\_Volume}_i}{2}$ — average leg volume per bar; zero-volume bars use $V_i = 1$ (TWAP fallback for quiet bars)
+
+A configurable warm-up (`--vwap-warmup-bars`, default 10 bars ≈ 10 min) must elapse before the VWAP is trusted for trade decisions.
+
+The VWAP resets whenever an ATM shift is detected (spot moves to a new 50-point bracket), because the underlying contracts change and the prior price history is no longer relevant.
+
+> **Implementation note**: Candles are fetched with a 2-day window (yesterday → today) to avoid a DH-905 API error that occurs on same-day-only requests.
+
+### B. State Machine
+
+```mermaid
+stateDiagram-v2
+    [*] --> WarmUp: Session starts, subscribe to ATM CE & PE\nBootstrap VWAP from existing candles
+    WarmUp --> Monitoring: vwap_bars >= vwap_warmup_bars
+    Monitoring --> InPosition: combined ≤ VWAP + entry_band\nAND declining over decline_ticks WS ticks\nAND |CE−PE| / max < max_premium_diff_pct
+    InPosition --> Monitoring: combined > VWAP + exit_buffer\n(buy back both legs)
+    InPosition --> InPosition: ATM shifted while in position\n(record pending_atm; hold until exit)
+    Monitoring --> WarmUp: ATM shifted while out of position\n(re-subscribe new CE/PE, reset VWAP)
+    InPosition --> [*]: Profit target, stop loss, or 15:17 auto-exit
+    Monitoring --> [*]: Profit target, stop loss, or 15:17 auto-exit
+```
+
+| Phase | Condition | Action |
+|---|---|---|
+| **Warm-up** | `vwap_bars < vwap_warmup_bars` | Refresh candles each minute; no trading |
+| **Entry** | All three gates pass (see §C) | Sell ATM CE + PE |
+| **Hold** | `combined ≤ VWAP + exit_buffer` | Stay in position; VWAP refreshes each minute |
+| **Exit** | `combined > VWAP + exit_buffer` | Buy back both legs, book PnL; re-enter on next signal |
+| **ATM shift (out)** | Spot moves to new 50-pt bracket, no position | Re-subscribe new ATM CE/PE, reset VWAP, warm up again |
+| **ATM shift (in)** | Spot moves to new 50-pt bracket, in position | Record pending ATM; re-center only after position is closed |
+
+### C. Entry Conditions
+
+All three gates must pass simultaneously before a position is opened:
+
+1. **VWAP ready** — `vwap_bars >= vwap_warmup_bars`
+   Ensures the VWAP has enough history to be a meaningful reference.
+
+2. **Price gate** — `combined_ltp ≤ candle_vwap + entry_band`
+   Ensures the straddle is sold at or near its volume-weighted average cost, not during a premium spike.
+
+3. **Decline gate** — `combined_ltp < recent_combined[0]` over the last `decline_ticks` WebSocket ticks
+   Requires the combined premium to be falling in the immediate short window, avoiding entries during an upswing.
+
+4. **Balance gate** — `|CE_LTP − PE_LTP| / max(CE_LTP, PE_LTP) × 100 < max_premium_diff_pct`
+   Guards against directionally skewed entries where one leg has already moved significantly.
+
+### D. CLI Parameter Reference
+
+| Flag | Default | Description |
+|---|---|---|
+| `--live` | off (dry run) | Enable real order placement |
+| `--lots N` | `1` | Lots per leg (CE and PE symmetric) |
+| `--start-time HH:MM` | `09:20` | Session start monitoring time (IST) |
+| `--entry-band PTS` | `5` | Max points **above** VWAP at which entry is permitted (`combined ≤ VWAP + entry_band`). |
+| `--decline-ticks N` | `5` | WebSocket-tick window: combined premium must be falling vs the oldest value in this window. |
+| `--exit-buffer PTS` | `10` | Points **above** VWAP that trigger exit (`combined > VWAP + exit_buffer`). Keep `exit_buffer ≥ entry_band`. |
+| `--max-premium-diff PCT` | `15` | Max allowed % difference between CE and PE premiums at entry. |
+| `--vwap-warmup-bars N` | `10` | Min completed 1-min bars (≈ 10 min) before VWAP is trusted for trading. |
+| `--target-profit INR` | `4000` | Session profit target — strategy pauses until next day once reached. |
+| `--stop-loss INR` | `4000` | Session stop loss (positive value) — strategy pauses until next day once total PnL < −stop_loss. |
+
+### E. Parameter Tuning Guide
+
+**`--entry-band`**
+Controls how eagerly the strategy enters. `0` = only enter at or below VWAP. `5` (default) allows entry up to 5 pts above VWAP, capturing the typical oscillation band. Raise to `8–10` on high-IV days when premiums are choppier.
+
+**`--decline-ticks`**
+Higher values (e.g., `8–10`) require a longer sustained decline before entry — fewer but higher-conviction trades. Lower values (e.g., `3`) respond faster but may enter during brief dips within an upswing.
+
+**`--exit-buffer`**
+Controls spike tolerance before exiting. Default `10` pts provides room for small intraday moves. Reduce to `5–7` for tighter risk control. Always keep `exit_buffer ≥ entry_band`.
+
+**`--max-premium-diff`**
+Lower values (e.g., `10`) demand more delta-neutral entries — fewer trades, higher quality. Default `15` is balanced. On volatile days raise to `20` for more entry opportunities.
+
+**`--vwap-warmup-bars`**
+Default `10` bars (≈ 10 min). Raise to `15–20` on open-of-day when premiums are noisy. The VWAP bootstraps from existing candles at strategy start, so warmup may complete quickly if the session is already underway.
+
+### F. Execution Examples
+
+```powershell
+# Dry run — 1 lot, all defaults
+venv\Scripts\python.exe strategies/value_imbalance/nifty_intraday_vwap_straddle.py
+
+# Live, 2 lots, defaults
+venv\Scripts\python.exe strategies/value_imbalance/nifty_intraday_vwap_straddle.py --live --lots 2
+
+# Tighter exit: exit when combined rises 8 pts above VWAP
+venv\Scripts\python.exe strategies/value_imbalance/nifty_intraday_vwap_straddle.py --live --exit-buffer 8
+
+# Stricter balance: only enter when CE/PE differ by < 10%
+venv\Scripts\python.exe strategies/value_imbalance/nifty_intraday_vwap_straddle.py --live --max-premium-diff 10
+
+# Wider entry band, longer decline confirmation
+venv\Scripts\python.exe strategies/value_imbalance/nifty_intraday_vwap_straddle.py --live --entry-band 8 --decline-ticks 8
+
+# Longer VWAP warm-up (15 bars ≈ 15 min), for post-open volatility
+venv\Scripts\python.exe strategies/value_imbalance/nifty_intraday_vwap_straddle.py --live --vwap-warmup-bars 15
+
+# Custom risk targets, later start time
+venv\Scripts\python.exe strategies/value_imbalance/nifty_intraday_vwap_straddle.py --live --lots 2 --target-profit 6000 --stop-loss 3000 --start-time 09:25
+```

@@ -93,8 +93,14 @@ def process_stock(file_path):
             if prev_close != 0:
                 daily_pct = ((current_close - prev_close) / prev_close) * 100
                 
-        # 2. Weekly (5 Days - User Rule)
-        weekly_pct = get_change_pct(df, latest_row, days_offset=4)
+        # 2. Weekly: compare to the previous completed week's Friday close.
+        # Compute how many calendar days back the last Friday was.
+        # weekday(): Mon=0, Tue=1, Wed=2, Thu=3, Fri=4
+        _weekday = latest_date.weekday()
+        _days_to_prev_fri = (_weekday - 4) % 7  # 0 when today IS Friday
+        if _days_to_prev_fri == 0:
+            _days_to_prev_fri = 7  # Friday -> go back to the PREVIOUS Friday
+        weekly_pct = get_change_pct(df, latest_row, days_offset=_days_to_prev_fri)
         
         # 3. Monthly (Start of Current Month - User Rule)
         # User updated requirement: "last date below the offset of 30 days"

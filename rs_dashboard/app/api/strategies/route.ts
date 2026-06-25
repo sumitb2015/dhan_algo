@@ -13,14 +13,30 @@ const STRATEGIES_METADATA: Record<string, { name: string; path: string }> = {
     name: 'Nifty Advanced Imbalance',
     path: path.join(PROJECT_ROOT, 'strategies', 'value_imbalance', 'nifty_advanced_imbalance.py')
   },
-  nifty_spread_trend: {
-    name: 'Nifty Spread Trend-Following',
-    path: path.join(PROJECT_ROOT, 'strategies', 'spread_trend', 'nifty_spread_trend.py')
+  nifty_value_imbalance_straddle: {
+    name: 'Nifty Value Imbalance Straddle',
+    path: path.join(PROJECT_ROOT, 'strategies', 'value_imbalance', 'nifty_value_imbalance_straddle.py')
   },
   nifty_value_imbalance_strangle: {
     name: 'Nifty Value Imbalance Strangle',
     path: path.join(PROJECT_ROOT, 'strategies', 'value_imbalance', 'nifty_value_imbalance_strangle.py')
-  }
+  },
+  nifty_tick_mean_straddle: {
+    name: 'Nifty Tick Mean Straddle',
+    path: path.join(PROJECT_ROOT, 'strategies', 'value_imbalance', 'nifty_tick_mean_straddle.py')
+  },
+  nifty_vwap_1min_straddle: {
+    name: 'Nifty VWAP 1-Min Straddle',
+    path: path.join(PROJECT_ROOT, 'strategies', 'value_imbalance', 'nifty_vwap_1min_straddle.py')
+  },
+  nifty_spread_trend: {
+    name: 'Nifty Spread Trend-Following',
+    path: path.join(PROJECT_ROOT, 'strategies', 'spread_trend', 'nifty_spread_trend.py')
+  },
+  nifty_oi_directional: {
+    name: 'Nifty OI Directional',
+    path: path.join(PROJECT_ROOT, 'strategies', 'oi_directional', 'nifty_oi_directional.py')
+  },
 };
 
 /**
@@ -110,15 +126,37 @@ export async function POST(request: NextRequest) {
     const body = await request.json();
     const { action, strategy, args = [] } = body;
 
+    if (!fs.existsSync(DEBUG_DIR)) {
+      fs.mkdirSync(DEBUG_DIR, { recursive: true });
+    }
+
+    // Global action: stop all running strategies
+    if (action === 'stop_all') {
+      const triggered: string[] = [];
+      for (const key of Object.keys(STRATEGIES_METADATA)) {
+        const stateFile = path.join(DEBUG_DIR, `${key}_state.json`);
+        let isRunning = false;
+        if (fs.existsSync(stateFile)) {
+          try {
+            const data = JSON.parse(fs.readFileSync(stateFile, 'utf8'));
+            isRunning = !!(data.pid && isPidRunning(data.pid));
+          } catch {}
+        }
+        if (isRunning) {
+          const triggerFile = path.join(DEBUG_DIR, `${key}_shutdown.trigger`);
+          fs.writeFileSync(triggerFile, '');
+          triggered.push(key);
+          console.log(`Global exit: shutdown trigger written for ${key}`);
+        }
+      }
+      return NextResponse.json({ success: true, triggered });
+    }
+
     if (!strategy || !STRATEGIES_METADATA[strategy]) {
       return NextResponse.json({ success: false, error: 'Invalid or missing strategy key' }, { status: 400 });
     }
 
     const meta = STRATEGIES_METADATA[strategy];
-
-    if (!fs.existsSync(DEBUG_DIR)) {
-      fs.mkdirSync(DEBUG_DIR, { recursive: true });
-    }
 
     if (action === 'start') {
       // Check if it's already running

@@ -445,22 +445,109 @@ export default function RSChart({ symbol, indexType, lookback }: RSChartProps) {
         </div>
       )}
       
-      {/* RS Interpretation Bar */}
-      <div className="mt-6 pt-4 border-t border-zinc-900/60 flex flex-wrap items-center justify-between gap-3 text-[11px] text-zinc-550 select-none">
-        <div className="flex items-center gap-1.5">
-          <span className="font-semibold text-zinc-400">How to Interpret {lookback === 252 ? '52-Week' : `${lookback}-Day`} RS:</span>
-        </div>
-        <div className="flex items-center gap-4">
-          <div className="flex items-center gap-1.5">
-            <span className="w-2 h-2 rounded-full bg-emerald-500 shadow-[0_0_8px_rgba(16,185,129,0.5)]" />
-            <span className="text-zinc-400"><strong className="text-emerald-400">RS above 0</strong> → Stock has outperformed the index</span>
+      {/* RS Signals & Interpretation Panel */}
+      {summary && (
+        <div className="mt-5 pt-5 border-t border-zinc-900/60 space-y-4">
+          {/* Signal Cards Row */}
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+            {/* RS Status */}
+            <div className={`rounded-xl border px-3 py-2.5 text-xs ${summary.currentRS >= 0 ? 'border-emerald-500/25 bg-emerald-950/20' : 'border-red-500/20 bg-red-950/10'}`}>
+              <div className="text-zinc-500 text-[10px] uppercase tracking-wide font-semibold mb-1">RS Status</div>
+              <div className={`font-black text-sm ${summary.currentRS >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                {summary.currentRS >= 0 ? 'Outperforming' : 'Underperforming'}
+              </div>
+              <div className="text-zinc-500 text-[10px] mt-0.5">
+                {Math.abs(summary.currentRS * 100).toFixed(1)}% {summary.currentRS >= 0 ? 'above' : 'below'} index
+              </div>
+            </div>
+
+            {/* RS Strength */}
+            <div className={`rounded-xl border px-3 py-2.5 text-xs ${
+              Math.abs(summary.currentRS) > 0.15 ? 'border-amber-500/25 bg-amber-950/15'
+              : Math.abs(summary.currentRS) > 0.05 ? 'border-blue-500/20 bg-blue-950/10'
+              : 'border-zinc-700/40 bg-zinc-900/30'
+            }`}>
+              <div className="text-zinc-500 text-[10px] uppercase tracking-wide font-semibold mb-1">RS Strength</div>
+              <div className={`font-black text-sm ${
+                Math.abs(summary.currentRS) > 0.15 ? 'text-amber-400'
+                : Math.abs(summary.currentRS) > 0.05 ? 'text-blue-400'
+                : 'text-zinc-400'
+              }`}>
+                {Math.abs(summary.currentRS) > 0.15 ? 'Strong' : Math.abs(summary.currentRS) > 0.05 ? 'Moderate' : 'Weak'}
+              </div>
+              <div className="text-zinc-500 text-[10px] mt-0.5">
+                {lookback === 252 ? '52-week' : `${lookback}-day`} lookback
+              </div>
+            </div>
+
+            {/* Price vs RS */}
+            <div className={`rounded-xl border px-3 py-2.5 text-xs ${
+              summary.priceChangePct >= 0 && summary.currentRS >= 0 ? 'border-emerald-500/25 bg-emerald-950/20'
+              : summary.priceChangePct < 0 && summary.currentRS >= 0 ? 'border-blue-500/25 bg-blue-950/15'
+              : 'border-zinc-700/40 bg-zinc-900/30'
+            }`}>
+              <div className="text-zinc-500 text-[10px] uppercase tracking-wide font-semibold mb-1">Price vs RS</div>
+              <div className={`font-black text-sm ${
+                summary.priceChangePct >= 0 && summary.currentRS >= 0 ? 'text-emerald-400'
+                : summary.priceChangePct < 0 && summary.currentRS >= 0 ? 'text-blue-400'
+                : 'text-zinc-400'
+              }`}>
+                {summary.priceChangePct >= 0 && summary.currentRS >= 0 ? 'Both Rising' :
+                 summary.priceChangePct < 0 && summary.currentRS >= 0 ? 'RS Diverging ↑' :
+                 summary.priceChangePct >= 0 && summary.currentRS < 0 ? 'RS Diverging ↓' :
+                 'Both Falling'}
+              </div>
+              <div className="text-zinc-500 text-[10px] mt-0.5">
+                Price: {summary.priceChangePct >= 0 ? '+' : ''}{summary.priceChangePct.toFixed(1)}%
+              </div>
+            </div>
+
+            {/* Investment Insight */}
+            <div className={`rounded-xl border px-3 py-2.5 text-xs ${
+              summary.currentRS >= 0.05 ? 'border-emerald-500/25 bg-emerald-950/20'
+              : summary.priceChangePct < 0 && summary.currentRS >= 0 ? 'border-cyan-500/25 bg-cyan-950/15'
+              : summary.currentRS < -0.1 ? 'border-red-500/20 bg-red-950/10'
+              : 'border-zinc-700/40 bg-zinc-900/30'
+            }`}>
+              <div className="text-zinc-500 text-[10px] uppercase tracking-wide font-semibold mb-1">Signal</div>
+              <div className={`font-black text-sm leading-tight ${
+                summary.currentRS >= 0.05 ? 'text-emerald-400'
+                : summary.priceChangePct < 0 && summary.currentRS >= 0 ? 'text-cyan-400'
+                : summary.currentRS < -0.1 ? 'text-red-400'
+                : 'text-zinc-400'
+              }`}>
+                {summary.currentRS >= 0.05 ? 'RS Leader' :
+                 summary.priceChangePct < 0 && summary.currentRS >= 0 ? 'Holding Strength' :
+                 summary.currentRS < -0.1 ? 'Avoid / Exit' :
+                 'Neutral — Watch'}
+              </div>
+              <div className="text-zinc-600 text-[10px] mt-0.5 leading-tight">
+                {summary.currentRS >= 0.05 ? 'Strong relative performer' :
+                 summary.priceChangePct < 0 && summary.currentRS >= 0 ? 'RS holding vs index dip' :
+                 summary.currentRS < -0.1 ? 'Significantly lagging index' :
+                 'No clear RS edge'}
+              </div>
+            </div>
           </div>
-          <div className="flex items-center gap-1.5">
-            <span className="w-2 h-2 rounded-full bg-red-500 shadow-[0_0_8px_rgba(239,68,68,0.5)]" />
-            <span className="text-zinc-400"><strong className="text-red-400">RS below 0</strong> → Stock has underperformed the index</span>
+
+          {/* How-to legend */}
+          <div className="flex flex-wrap items-center gap-x-5 gap-y-1.5 text-[10px] text-zinc-500 select-none">
+            <span className="font-semibold text-zinc-500 uppercase tracking-wide">RS Line:</span>
+            <span className="flex items-center gap-1.5">
+              <span className="w-2 h-2 rounded-full bg-emerald-500 shadow-[0_0_6px_rgba(16,185,129,0.5)]" />
+              <span><strong className="text-emerald-400">Above 0%</strong> — stock outperformed index over lookback</span>
+            </span>
+            <span className="flex items-center gap-1.5">
+              <span className="w-2 h-2 rounded-full bg-red-500 shadow-[0_0_6px_rgba(239,68,68,0.5)]" />
+              <span><strong className="text-red-400">Below 0%</strong> — stock underperformed index over lookback</span>
+            </span>
+            <span className="flex items-center gap-1.5">
+              <span className="w-5 h-0.5 border-t-2 border-dashed border-red-500" />
+              <span>Red dashed line = index baseline (zero RS)</span>
+            </span>
           </div>
         </div>
-      </div>
+      )}
     </div>
   );
 }

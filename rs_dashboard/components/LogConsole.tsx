@@ -82,9 +82,13 @@ export default function LogConsole({ strategyKey, isActive }: LogConsoleProps) {
     });
   };
 
+  const [copied, setCopied] = useState<boolean>(false);
+
   const copyToClipboard = () => {
-    navigator.clipboard.writeText(logs);
-    alert('Logs copied to clipboard!');
+    navigator.clipboard.writeText(logs).then(() => {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    });
   };
 
   return (
@@ -98,11 +102,15 @@ export default function LogConsole({ strategyKey, isActive }: LogConsoleProps) {
         <div className="flex items-center gap-2">
           <button
             onClick={copyToClipboard}
-            className="p-1 border border-zinc-800 rounded bg-zinc-900/80 hover:bg-zinc-800 text-zinc-400 hover:text-white transition-all text-xs flex items-center gap-1"
+            className={`p-1 border rounded text-xs flex items-center gap-1 transition-all duration-200 ${
+              copied
+                ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20'
+                : 'bg-zinc-900/80 border-zinc-800 text-zinc-400 hover:bg-zinc-800 hover:text-white'
+            }`}
             title="Copy logs"
           >
             <Clipboard className="h-3 w-3" />
-            <span className="text-[10px] hidden sm:inline">Copy</span>
+            <span className="text-[10px] hidden sm:inline">{copied ? 'Copied!' : 'Copy'}</span>
           </button>
           <button
             onClick={() => fetchLogs(true)}

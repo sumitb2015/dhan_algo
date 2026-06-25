@@ -3,87 +3,72 @@ import path from 'path';
 import fs from 'fs';
 
 const PROJECT_ROOT = path.resolve(process.cwd(), '..');
-const DEBUG_DIR = path.join(PROJECT_ROOT, 'debug');
+const LOGS_ROOT = path.join(PROJECT_ROOT, 'debug', 'logs');
 
-// Mapping strategy key to log file prefixes
-const STRATEGY_LOG_PREFIXES: Record<string, string> = {
-  nifty_advanced_imbalance: 'advanced_imbalance_',
-  nifty_spread_trend: 'spread_trend_',
-  nifty_value_imbalance_strangle: 'strangle_'
+// Maps strategy key → log subfolder name
+const STRATEGY_LOG_DIRS: Record<string, string> = {
+  nifty_advanced_imbalance:      'advanced_imbalance',
+  nifty_spread_trend:            'spread_trend',
+  nifty_value_imbalance_straddle:'straddle',
+  nifty_value_imbalance_strangle:'strangle',
+  nifty_vwap_straddle:           'vwap_straddle',
+  nifty_intraday_vwap_straddle:  'intraday_vwap',
+  nifty_vwap_1min_straddle:      'vwap_1min',
+  nifty_oi_directional:          'oi_directional',
 };
 
-/**
- * Finds the latest modified log file with the corresponding prefix in the debug folder.
- */
+/** Returns the path to the most-recently-modified .log file in the strategy's folder. */
 function getLatestLogFile(strategyKey: string): string | null {
-  const prefix = STRATEGY_LOG_PREFIXES[strategyKey];
-  if (!prefix) return null;
+  const folder = STRATEGY_LOG_DIRS[strategyKey];
+  if (!folder) return null;
+
+  const dir = path.join(LOGS_ROOT, folder);
+  if (!fs.existsSync(dir)) return null;
 
   try {
-    if (!fs.existsSync(DEBUG_DIR)) return null;
+    const files = fs.readdirSync(dir)
+      .filter(f => f.endsWith('.log'))
+      .map(f => ({ f, mtime: fs.statSync(path.join(dir, f)).mtimeMs }))
+      .sort((a, b) => b.mtime - a.mtime);
 
-    const files = fs.readdirSync(DEBUG_DIR)
-      .filter(file => file.startsWith(prefix) && file.endsWith('.log'))
-      .map(file => {
-        const filePath = path.join(DEBUG_DIR, file);
-        const stat = fs.statSync(filePath);
-        return { file, mtime: stat.mtimeMs };
-      });
-
-    if (files.length === 0) return null;
-
-    // Sort by modified time descending (newest first)
-    files.sort((a, b) => b.mtime - a.mtime);
-    return path.join(DEBUG_DIR, files[0].file);
-  } catch (err) {
-    console.error('Error finding latest log file:', err);
+    return files.length ? path.join(dir, files[0].f) : null;
+  } catch {
     return null;
   }
 }
 
-/**
- * Reads the last N lines from a file using standard Node filesystem buffer.
- */
-function tailFile(filePath: string, lineCount: number = 150): string {
+/** Reads the last N lines from a file. */
+function tailFile(filePath: string, lineCount = 150): string {
   try {
-    const fileBuffer = fs.readFileSync(filePath);
-    let index = fileBuffer.length - 1;
+    const buf = fs.readFileSync(filePath);
+    let idx = buf.length - 1;
     let newlines = 0;
-    while (index >= 0 && newlines < lineCount) {
-      if (fileBuffer[index] === 10) { // ASCII code for '\n'
-        newlines++;
-      }
-      index--;
+    while (idx >= 0 && newlines < lineCount) {
+      if (buf[idx] === 10) newlines++;
+      idx--;
     }
-    // Convert the tail portion of the buffer to a string
-    return fileBuffer.toString('utf8', index + 1);
-  } catch (err) {
-    console.error('Error tailing log file:', err);
+    return buf.toString('utf8', idx + 1);
+  } catch {
     return 'Error reading logs.';
   }
 }
 
-/**
- * GET handler: Returns the tail of the log file for a given strategy.
- */
 export async function GET(request: NextRequest) {
   try {
     const { searchParams } = new URL(request.url);
     const strategy = searchParams.get('strategy');
 
-    if (!strategy || !STRATEGY_LOG_PREFIXES[strategy]) {
+    if (!strategy || !STRATEGY_LOG_DIRS[strategy]) {
       return NextResponse.json({ success: false, error: 'Invalid or missing strategy key' }, { status: 400 });
     }
 
     const logFile = getLatestLogFile(strategy);
-    if (!logFile || !fs.existsSync(logFile)) {
-      return NextResponse.json({ success: true, logs: 'No logs available yet for this strategy. Please start it.' });
+    if (!logFile) {
+      return NextResponse.json({ success: true, logs: 'No logs available yet for this strategy. Start it to begin logging.' });
     }
 
-    const lines = tailFile(logFile, 150);
-    return NextResponse.json({ success: true, logs: lines });
+    return NextResponse.json({ success: true, logs: tailFile(logFile) });
   } catch (err) {
-    console.error('Error in strategy logs API:', err);
     return NextResponse.json({ success: false, error: String(err) }, { status: 500 });
   }
 }

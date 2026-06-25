@@ -16,7 +16,8 @@ from lib.strategy_state_helper import save_strategy_state, check_shutdown_trigge
 # Setup Logging
 project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 debug_dir = os.path.join(project_root, "debug")
-os.makedirs(debug_dir, exist_ok=True)
+log_dir = os.path.join(debug_dir, "logs", "straddle")
+os.makedirs(log_dir, exist_ok=True)
 
 class FlushingFileHandler(logging.FileHandler):
     def emit(self, record):
@@ -28,7 +29,7 @@ logging.basicConfig(
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
         logging.StreamHandler(),
-        FlushingFileHandler(os.path.join(debug_dir, f"imbalance_{datetime.now().strftime('%Y%m%d')}.log"))
+        FlushingFileHandler(os.path.join(log_dir, f"{datetime.now().strftime('%Y%m%d')}.log"))
     ],
     force=True
 )
@@ -227,7 +228,7 @@ class ValueImbalanceStrategy:
             active_thresh = self.threshold_lot + self.entry_diff_pct
             thresh_label = "Lot"
 
-        logger.info(f"Straddle: {self.ce_strike}CE / {self.pe_strike}PE | CE: {ce_ltp:.2f} ({self.ce_lots}L) Val: {ce_val:.2f} | PE: {pe_ltp:.2f} ({self.pe_lots}L) Val: {pe_val:.2f} | Diff: {diff_pct:.2f}% (Thresh: {active_thresh:.2f}% {thresh_label}) | Adj: {self.adjustment_count}")
+        logger.info(f"Straddle: {self.ce_strike}CE / {self.pe_strike}PE | CE: {ce_ltp:.2f} ({self.ce_lots}L) Val: {ce_val:.2f} | PE: {pe_ltp:.2f} ({self.pe_lots}L) Val: {pe_val:.2f} | Diff: {diff_pct:.2f}% (Thresh: {active_thresh:.2f}% {thresh_label}) | Adj: {self.adjustment_count} | PnL: {total_pnl:+.0f} (Real: {self.realized_pnl:+.0f})")
 
     def update_baseline_imbalance(self):
         """Update baseline imbalance (entry_diff_pct) after an adjustment using new LTPs."""
@@ -319,7 +320,7 @@ class ValueImbalanceStrategy:
             self.save_state(0, 0, 0, 0, status="INITIALIZING")
 
             # Wait for market open if closed (EOD is 15:17)
-            self.helper.wait_for_market_open(self.dry_run, start_time=self.start_time, eod_time="15:17")
+            self.helper.wait_for_market_open(self.dry_run, start_time=self.start_time, eod_time="15:17", shutdown_check=lambda: check_shutdown_trigger("nifty_value_imbalance_straddle"))
             
             # 1. Initialization / Re-initialization
             self.reset_session()
@@ -543,12 +544,16 @@ class ValueImbalanceStrategy:
                 # --- Hard Targets ---
                 if total_pnl >= self.profit_target:
                     self.exit_all_positions(f"Profit Target Reached: {total_pnl:.2f}")
-                    self.helper.wait_for_next_day_market_open(self.dry_run)
+                    if not self.helper.wait_for_next_day_market_open(self.dry_run, shutdown_check=lambda: check_shutdown_trigger("nifty_value_imbalance_straddle")):
+                        self.save_state(0, 0, 0, 0, status="STOPPED")
+                        sys.exit(0)
                     cycle_active = False
                     break
                 if total_pnl <= self.stop_loss:
                     self.exit_all_positions(f"Global Stop Loss Hit: {total_pnl:.2f}")
-                    self.helper.wait_for_next_day_market_open(self.dry_run)
+                    if not self.helper.wait_for_next_day_market_open(self.dry_run, shutdown_check=lambda: check_shutdown_trigger("nifty_value_imbalance_straddle")):
+                        self.save_state(0, 0, 0, 0, status="STOPPED")
+                        sys.exit(0)
                     cycle_active = False
                     break
 
@@ -736,6 +741,8 @@ Examples:
     # Position sizing
     parser.add_argument("--lots", type=int, default=1, metavar="N",
                         help="Initial lots per leg (default: 1)")
+    parser.add_argument("--max-lots", type=int, default=4, metavar="N",
+                        help="Maximum lots per leg before triggering a strike shift (default: 4)")
 
     # Customizable Start Time
     parser.add_argument("--start-time", type=str, default="09:20", metavar="TIME",
@@ -763,6 +770,7 @@ Examples:
     strat = ValueImbalanceStrategy(
         dry_run=not args.live,
         initial_lots=args.lots,
+        max_lots=args.max_lots,
         start_time=args.start_time,
         entry_balance_threshold=args.entry_balance_threshold,
         profit_target=args.target_profit,

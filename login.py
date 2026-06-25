@@ -104,6 +104,10 @@ def get_dhan_client():
             access_token = None
 
     if not access_token:
+        import sys
+        if not sys.stdin.isatty():
+            print("ERROR: Access token expired and no TTY available for interactive login. Run login.py manually first.")
+            return None
         access_token = get_new_access_token()
 
     if access_token:

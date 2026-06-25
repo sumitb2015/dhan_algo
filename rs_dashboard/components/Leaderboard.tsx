@@ -1,8 +1,18 @@
 'use client';
 
 import React, { useState, useMemo } from 'react';
-import { Search, ChevronDown, ChevronUp, Star, Filter } from 'lucide-react';
+import {
+  Search, ChevronDown, ChevronUp, Star,
+  TrendingUp, TrendingDown, Minus, ArrowUpRight, ArrowDownRight,
+  Download, Zap, Trophy, Flame, Eye
+} from 'lucide-react';
 import { RSResult } from '@/lib/rs';
+import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
+import { Badge } from '@/components/ui/badge';
+import {
+  Select, SelectContent, SelectItem, SelectTrigger, SelectValue
+} from '@/components/ui/select';
 
 interface LeaderboardProps {
   data: RSResult[];
@@ -12,43 +22,111 @@ interface LeaderboardProps {
   onToggleFavorite: (symbol: string) => void;
 }
 
-type SortField = 'symbol' | 'rsScore' | 'rsRatio' | 'priceChange1D' | 'priceChange1W' | 'priceChange1M' | 'priceChange3M' | 'priceChange1Y' | 'latestClose';
+type SortField =
+  | 'symbol' | 'rsScore' | 'rsRatio' | 'rsRank' | 'rsChange1W'
+  | 'priceChange1D' | 'priceChange1W' | 'priceChange1M' | 'priceChange3M' | 'priceChange1Y'
+  | 'latestClose' | 'pctFrom52WHigh';
 type SortOrder = 'asc' | 'desc';
+type MomentumFilter = 'all' | 'rising' | 'falling';
+
+type QuickPreset = 'none' | 'top20' | 'leaders' | 'momentum' | 'near52wh' | 'rsnewhi';
+
+const QUICK_PRESETS: { id: QuickPreset; label: string; icon: React.ReactNode; description: string }[] = [
+  { id: 'top20',    label: 'Top 20',       icon: <Trophy className="h-3 w-3" />,   description: 'Top 20 by RS Score' },
+  { id: 'leaders',  label: 'Grade A',      icon: <Zap className="h-3 w-3" />,      description: 'Grade A leaders only' },
+  { id: 'momentum', label: 'Rising RS',    icon: <Flame className="h-3 w-3" />,    description: 'Rising RS momentum' },
+  { id: 'near52wh', label: 'Near 52W Hi',  icon: <ArrowUpRight className="h-3 w-3" />, description: 'Within 5% of 52-week high' },
+  { id: 'rsnewhi',  label: 'RS New Hi',    icon: <TrendingUp className="h-3 w-3" />,   description: 'RS at 20-day high' },
+];
 
 function Sparkline({ data }: { data: number[] }) {
-  if (!data || data.length === 0) return <div className="text-zinc-600 text-xs">-</div>;
+  if (!data || data.length === 0) return <div className="text-zinc-600 text-xs">—</div>;
   const min = Math.min(...data);
   const max = Math.max(...data);
   const range = max - min === 0 ? 1 : max - min;
-  const width = 80;
+  const width = 64;
   const height = 24;
-  const padding = 2;
+  const pad = 2;
+
   const points = data
     .map((val, idx) => {
-      const x = padding + (idx / (data.length - 1)) * (width - padding * 2);
-      const y = padding + (1 - (val - min) / range) * (height - padding * 2);
+      const x = pad + (idx / (data.length - 1)) * (width - pad * 2);
+      const y = pad + (1 - (val - min) / range) * (height - pad * 2);
       return `${x.toFixed(1)},${y.toFixed(1)}`;
     })
     .join(' ');
 
-  const isUp = data[data.length - 1] >= data[0];
-  const strokeColor = isUp ? '#10b981' : '#ef4444'; // Emerald-500 / Red-500
+  const last = data[data.length - 1];
+  const first = data[0];
+  const isUp = last >= first;
+  const color = isUp ? '#10b981' : '#ef4444';
+  const lastX = pad + ((data.length - 1) / (data.length - 1)) * (width - pad * 2);
+  const lastY = pad + (1 - (last - min) / range) * (height - pad * 2);
 
   return (
-    <div className="flex items-center justify-center">
-      <svg width={width} height={height} className="overflow-visible">
-        {/* Subtle gradient fill below the line */}
-        <polyline
-          fill="none"
-          stroke={strokeColor}
-          strokeWidth="1.5"
-          strokeLinecap="round"
-          strokeLinejoin="round"
-          points={points}
-        />
-      </svg>
+    <svg width={width} height={height} className="overflow-visible">
+      <polyline fill="none" stroke={color} strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" points={points} />
+      <circle cx={lastX} cy={lastY} r="2" fill={color} />
+    </svg>
+  );
+}
+
+function MomentumBadge({ momentum, change }: { momentum: RSResult['rsMomentum']; change: number }) {
+  if (momentum === 'rising') {
+    return (
+      <div className="flex items-center gap-1 text-emerald-400">
+        <TrendingUp className="h-3 w-3" />
+        <span className="text-xs font-mono font-semibold">+{(change * 100).toFixed(2)}%</span>
+      </div>
+    );
+  }
+  if (momentum === 'falling') {
+    return (
+      <div className="flex items-center gap-1 text-red-400">
+        <TrendingDown className="h-3 w-3" />
+        <span className="text-xs font-mono font-semibold">{(change * 100).toFixed(2)}%</span>
+      </div>
+    );
+  }
+  return (
+    <div className="flex items-center gap-1 text-zinc-500">
+      <Minus className="h-3 w-3" />
+      <span className="text-xs font-mono">{(change * 100).toFixed(2)}%</span>
     </div>
   );
+}
+
+function exportToCSV(data: RSResult[]) {
+  const headers = [
+    'Symbol', 'Rank', 'RS Score', 'Grade', 'RS Momentum', 'RS Ratio', 'RS Change 1W',
+    'Close', '1D%', '1W%', '1M%', '3M%', '1Y%', '% From 52W Hi', 'Sector'
+  ];
+  const rows = data.map((s) => [
+    s.symbol,
+    s.rsRank,
+    s.rsScore,
+    s.rsRating,
+    s.rsMomentum,
+    (s.rsRatio * 100).toFixed(2),
+    (s.rsChange1W * 100).toFixed(2),
+    s.latestClose.toFixed(2),
+    s.priceChange1D.toFixed(2),
+    s.priceChange1W.toFixed(2),
+    s.priceChange1M.toFixed(2),
+    s.priceChange3M.toFixed(2),
+    s.priceChange1Y.toFixed(2),
+    (s.pctFrom52WHigh ?? 0).toFixed(2),
+    s.sector ?? '',
+  ]);
+
+  const csv = [headers, ...rows].map((r) => r.join(',')).join('\n');
+  const blob = new Blob([csv], { type: 'text/csv' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `rs_scanner_${new Date().toISOString().slice(0, 10)}.csv`;
+  a.click();
+  URL.revokeObjectURL(url);
 }
 
 export default function Leaderboard({
@@ -61,20 +139,20 @@ export default function Leaderboard({
   const [search, setSearch] = useState('');
   const [selectedSector, setSelectedSector] = useState('All');
   const [selectedRating, setSelectedRating] = useState('All');
+  const [momentumFilter, setMomentumFilter] = useState<MomentumFilter>('all');
   const [showFavoritesOnly, setShowFavoritesOnly] = useState(false);
+  const [activePreset, setActivePreset] = useState<QuickPreset>('none');
 
   const [sortField, setSortField] = useState<SortField>('rsScore');
   const [sortOrder, setSortOrder] = useState<SortOrder>('desc');
-
   const [page, setPage] = useState(1);
-  const pageSize = 15;
+  const [pageSize, setPageSize] = useState(20);
 
-  // Extract sectors dynamically
+  const totalStocks = data.length;
+
   const sectors = useMemo(() => {
     const set = new Set<string>();
-    data.forEach((item) => {
-      if (item.sector) set.add(item.sector);
-    });
+    data.forEach((item) => { if (item.sector) set.add(item.sector); });
     return ['All', ...Array.from(set).sort()];
   }, [data]);
 
@@ -88,158 +166,264 @@ export default function Leaderboard({
     setPage(1);
   };
 
-  // Filter and Sort Data
+  const handlePreset = (preset: QuickPreset) => {
+    setActivePreset(preset === activePreset ? 'none' : preset);
+    setPage(1);
+    // Reset other filters when applying a preset
+    if (preset !== activePreset) {
+      setSearch('');
+      setSelectedSector('All');
+      setSelectedRating('All');
+      setMomentumFilter('all');
+      setShowFavoritesOnly(false);
+    }
+  };
+
   const processedData = useMemo(() => {
-    let filtered = data.filter((item) => {
-      const matchesSearch = item.symbol.toLowerCase().includes(search.toLowerCase());
-      const matchesSector = selectedSector === 'All' || item.sector === selectedSector;
-      const matchesRating = selectedRating === 'All' || item.rsRating === selectedRating;
-      const matchesFav = !showFavoritesOnly || favorites.includes(item.symbol);
-      return matchesSearch && matchesSector && matchesRating && matchesFav;
-    });
+    let filtered = [...data];
 
-    filtered.sort((a, b) => {
-      let aVal = a[sortField];
-      let bVal = b[sortField];
+    // Apply quick preset
+    if (activePreset === 'top20') {
+      filtered = filtered.sort((a, b) => b.rsScore - a.rsScore).slice(0, 20);
+    } else if (activePreset === 'leaders') {
+      filtered = filtered.filter((s) => s.rsRating === 'A');
+    } else if (activePreset === 'momentum') {
+      filtered = filtered.filter((s) => s.rsMomentum === 'rising');
+    } else if (activePreset === 'near52wh') {
+      filtered = filtered.filter((s) => (s.pctFrom52WHigh ?? -100) >= -5);
+    } else if (activePreset === 'rsnewhi') {
+      filtered = filtered.filter((s) => s.isRSNewHigh);
+    } else {
+      // Manual filters
+      filtered = filtered.filter((item) => {
+        const matchesSearch = item.symbol.toLowerCase().includes(search.toLowerCase());
+        const matchesSector = selectedSector === 'All' || item.sector === selectedSector;
+        const matchesRating = selectedRating === 'All' || item.rsRating === selectedRating;
+        const matchesMomentum = momentumFilter === 'all' || item.rsMomentum === momentumFilter;
+        const matchesFav = !showFavoritesOnly || favorites.includes(item.symbol);
+        return matchesSearch && matchesSector && matchesRating && matchesMomentum && matchesFav;
+      });
+    }
 
-      // Handle undefined/null gracefully
-      if (aVal === undefined) return 1;
-      if (bVal === undefined) return -1;
-
-      if (typeof aVal === 'string') {
-        return sortOrder === 'asc'
-          ? (aVal as string).localeCompare(bVal as string)
-          : (bVal as string).localeCompare(aVal as string);
-      } else {
-        return sortOrder === 'asc'
-          ? (aVal as number) - (bVal as number)
-          : (bVal as number) - (aVal as number);
-      }
-    });
+    if (activePreset !== 'top20') {
+      filtered.sort((a, b) => {
+        const aVal = a[sortField as keyof RSResult] as number | string | undefined;
+        const bVal = b[sortField as keyof RSResult] as number | string | undefined;
+        if (aVal === undefined) return 1;
+        if (bVal === undefined) return -1;
+        if (typeof aVal === 'string') {
+          return sortOrder === 'asc' ? aVal.localeCompare(bVal as string) : (bVal as string).localeCompare(aVal);
+        }
+        return sortOrder === 'asc' ? (aVal as number) - (bVal as number) : (bVal as number) - (aVal as number);
+      });
+    }
 
     return filtered;
-  }, [data, search, selectedSector, selectedRating, showFavoritesOnly, favorites, sortField, sortOrder]);
+  }, [data, search, selectedSector, selectedRating, momentumFilter, showFavoritesOnly, favorites, sortField, sortOrder, activePreset]);
 
   const paginatedData = useMemo(() => {
-    const startIndex = (page - 1) * pageSize;
-    return processedData.slice(startIndex, startIndex + pageSize);
-  }, [processedData, page]);
+    const start = (page - 1) * pageSize;
+    return processedData.slice(start, start + pageSize);
+  }, [processedData, page, pageSize]);
 
   const totalPages = Math.max(1, Math.ceil(processedData.length / pageSize));
 
   const SortIcon = ({ field }: { field: SortField }) => {
-    if (sortField !== field) return null;
-    return sortOrder === 'asc' ? <ChevronUp className="inline h-4 w-4 ml-0.5" /> : <ChevronDown className="inline h-4 w-4 ml-0.5" />;
+    if (sortField !== field) return <ChevronDown className="inline h-3 w-3 ml-0.5 opacity-20" />;
+    return sortOrder === 'asc'
+      ? <ChevronUp className="inline h-3.5 w-3.5 ml-0.5 text-emerald-400" />
+      : <ChevronDown className="inline h-3.5 w-3.5 ml-0.5 text-emerald-400" />;
+  };
+
+  const gradeStyle: Record<string, string> = {
+    A: 'bg-emerald-500/15 text-emerald-300 border border-emerald-500/30',
+    B: 'bg-blue-500/15 text-blue-300 border border-blue-500/30',
+    C: 'bg-zinc-600/20 text-zinc-400 border border-zinc-600/40',
+    D: 'bg-red-500/10 text-red-400 border border-red-500/25',
+  };
+
+  const scoreBarStyle = (score: number) => {
+    if (score >= 80) return 'bg-gradient-to-r from-emerald-500 to-teal-400';
+    if (score >= 60) return 'bg-gradient-to-r from-blue-500 to-indigo-400';
+    if (score >= 40) return 'bg-zinc-500';
+    return 'bg-gradient-to-r from-red-600 to-orange-500';
+  };
+
+  const pctColor = (val: number) => val >= 0 ? 'text-emerald-400' : 'text-red-400';
+  const pctFmt = (val: number) => `${val >= 0 ? '+' : ''}${val.toFixed(2)}%`;
+
+  const from52WColor = (val: number) => {
+    if (val >= -2) return 'text-emerald-400';
+    if (val >= -5) return 'text-amber-400';
+    if (val >= -15) return 'text-zinc-300';
+    return 'text-zinc-500';
   };
 
   return (
     <div className="flex flex-col h-full rounded-2xl border border-zinc-800/80 bg-zinc-950/60 backdrop-blur-md overflow-hidden">
-      {/* Table Controls */}
-      <div className="p-4 border-b border-zinc-800/80 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between bg-zinc-900/20">
-        <div className="relative flex-1 max-w-sm">
-          <span className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
-            <Search className="h-4 w-4 text-zinc-500" />
-          </span>
-          <input
-            type="text"
-            placeholder="Search stock symbol..."
-            value={search}
-            onChange={(e) => {
-              setSearch(e.target.value);
-              setPage(1);
-            }}
-            className="block w-full pl-9 pr-3 py-2 border border-zinc-850 rounded-xl bg-zinc-900/60 text-white placeholder-zinc-500 text-sm focus:outline-none focus:ring-1 focus:ring-emerald-500/50 focus:border-emerald-500/50"
-          />
-        </div>
-
-        <div className="flex flex-wrap items-center gap-2">
-          {/* Sector Filter */}
-          <div className="relative">
-            <select
-              value={selectedSector}
-              onChange={(e) => {
-                setSelectedSector(e.target.value);
-                setPage(1);
-              }}
-              className="appearance-none bg-zinc-900/60 text-zinc-300 text-xs px-3 py-2 pr-8 border border-zinc-850 rounded-xl focus:outline-none focus:ring-1 focus:ring-emerald-500/50 cursor-pointer"
+      {/* ── Quick Presets ── */}
+      <div className="flex-none px-3 pt-3 pb-2 border-b border-zinc-800/60 bg-zinc-900/10">
+        <div className="flex items-center gap-1.5 flex-wrap">
+          {QUICK_PRESETS.map((preset) => (
+            <Button
+              key={preset.id}
+              onClick={() => handlePreset(preset.id)}
+              title={preset.description}
+              variant="outline"
+              size="xs"
+              className={`gap-1 rounded-lg text-[11px] font-semibold h-6 ${
+                activePreset === preset.id
+                  ? 'bg-emerald-500/15 text-emerald-400 border-emerald-500/30 hover:bg-emerald-500/20'
+                  : 'bg-zinc-900/60 text-zinc-500 border-zinc-800 hover:text-zinc-300 hover:border-zinc-700'
+              }`}
             >
-              <option value="All">All Sectors</option>
-              {sectors.filter((s) => s !== 'All').map((sec) => (
-                <option key={sec} value={sec}>{sec}</option>
-              ))}
-            </select>
-            <Filter className="absolute right-2.5 top-2.5 h-3 w-3 text-zinc-500 pointer-events-none" />
-          </div>
-
-          {/* Rating Filter */}
-          <div className="relative">
-            <select
-              value={selectedRating}
-              onChange={(e) => {
-                setSelectedRating(e.target.value);
-                setPage(1);
-              }}
-              className="appearance-none bg-zinc-900/60 text-zinc-300 text-xs px-3 py-2 pr-8 border border-zinc-850 rounded-xl focus:outline-none focus:ring-1 focus:ring-emerald-500/50 cursor-pointer"
+              {preset.icon}
+              {preset.label}
+            </Button>
+          ))}
+          {activePreset !== 'none' && (
+            <Button
+              onClick={() => setActivePreset('none')}
+              variant="ghost"
+              size="xs"
+              className="text-[10px] text-zinc-600 hover:text-zinc-400 h-6"
             >
-              <option value="All">All Grades</option>
-              <option value="A">Grade A (Leader)</option>
-              <option value="B">Grade B (Strong)</option>
-              <option value="C">Grade C (Neutral)</option>
-              <option value="D">Grade D (Lagging)</option>
-            </select>
-            <Filter className="absolute right-2.5 top-2.5 h-3 w-3 text-zinc-500 pointer-events-none" />
+              Clear
+            </Button>
+          )}
+          <div className="ml-auto flex items-center gap-1.5">
+            <Button
+              onClick={() => { setShowFavoritesOnly(!showFavoritesOnly); setActivePreset('none'); setPage(1); }}
+              variant="outline"
+              size="xs"
+              className={`gap-1 rounded-lg text-[11px] font-semibold h-6 ${
+                showFavoritesOnly
+                  ? 'bg-amber-500/10 border-amber-500/30 text-amber-400 hover:bg-amber-500/15'
+                  : 'bg-zinc-900/60 border-zinc-800 text-zinc-500 hover:text-zinc-300'
+              }`}
+            >
+              <Eye className="h-3 w-3" />
+              Watch
+            </Button>
+            <Button
+              onClick={() => exportToCSV(processedData)}
+              variant="outline"
+              size="xs"
+              className="gap-1 rounded-lg text-[11px] font-semibold h-6 border-zinc-800 bg-zinc-900/60 text-zinc-500 hover:text-zinc-300 hover:border-zinc-700"
+              title="Export filtered results to CSV"
+            >
+              <Download className="h-3 w-3" />
+              CSV
+            </Button>
           </div>
-
-          {/* Favorites Toggle */}
-          <button
-            onClick={() => {
-              setShowFavoritesOnly(!showFavoritesOnly);
-              setPage(1);
-            }}
-            className={`flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs border transition-all ${
-              showFavoritesOnly
-                ? 'bg-amber-500/10 border-amber-500/30 text-amber-400 font-semibold'
-                : 'bg-zinc-900/60 border-zinc-850 text-zinc-400 hover:text-zinc-200'
-            }`}
-          >
-            <Star className={`h-3.5 w-3.5 ${showFavoritesOnly ? 'fill-amber-400' : ''}`} />
-            <span>Watchlist</span>
-          </button>
         </div>
       </div>
 
-      {/* Table Contents */}
-      <div className="flex-1 overflow-x-auto">
-        <table className="w-full text-left border-collapse">
-          <thead>
-            <tr className="border-b border-zinc-800/80 bg-zinc-900/40 text-xs font-semibold uppercase tracking-wider text-zinc-400 select-none">
-              <th className="py-3 px-4 w-12 text-center">Fav</th>
-              <th className="py-3 px-4 cursor-pointer hover:text-white transition-colors" onClick={() => handleSort('symbol')}>
+      {/* ── Search & Filters ── */}
+      {activePreset === 'none' && (
+        <div className="flex-none px-3 py-2 border-b border-zinc-800/60 bg-zinc-900/10 flex flex-wrap items-center gap-2">
+          <div className="relative flex-1 min-w-[120px]">
+            <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-3 w-3 text-zinc-500 pointer-events-none" />
+            <Input
+              type="text"
+              placeholder="Search..."
+              value={search}
+              onChange={(e) => { setSearch(e.target.value); setPage(1); }}
+              className="pl-8 h-7 border-zinc-800 bg-zinc-900/60 text-white placeholder:text-zinc-600 text-xs rounded-lg focus-visible:ring-emerald-500/40"
+            />
+          </div>
+
+          {/* Momentum Filter */}
+          <div className="flex items-center bg-zinc-900/60 border border-zinc-800 p-0.5 rounded-lg">
+            {(['all', 'rising', 'falling'] as const).map((m) => (
+              <button
+                key={m}
+                onClick={() => { setMomentumFilter(m); setPage(1); }}
+                className={`flex items-center gap-1 px-2 py-1 text-[11px] font-semibold rounded-md transition-all ${
+                  momentumFilter === m
+                    ? m === 'rising' ? 'bg-emerald-500/15 text-emerald-400 border border-emerald-500/25'
+                      : m === 'falling' ? 'bg-red-500/15 text-red-400 border border-red-500/25'
+                      : 'bg-zinc-800 text-zinc-200 border border-zinc-700'
+                    : 'text-zinc-500 hover:text-zinc-300'
+                }`}
+              >
+                {m === 'rising' && <TrendingUp className="h-3 w-3" />}
+                {m === 'falling' && <TrendingDown className="h-3 w-3" />}
+                {m === 'all' && <Minus className="h-3 w-3" />}
+                <span className="capitalize hidden sm:block">{m}</span>
+              </button>
+            ))}
+          </div>
+
+          <Select value={selectedSector} onValueChange={(v) => { if (v) { setSelectedSector(v); setPage(1); } }}>
+            <SelectTrigger className="h-7 w-auto min-w-[110px] border-zinc-800 bg-zinc-900/60 text-zinc-300 text-xs rounded-lg focus-visible:ring-emerald-500/40">
+              <SelectValue placeholder="All Sectors" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="All">All Sectors</SelectItem>
+              {sectors.filter((s) => s !== 'All').map((sec) => (
+                <SelectItem key={sec} value={sec}>{sec}</SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+
+          <Select value={selectedRating} onValueChange={(v) => { if (v) { setSelectedRating(v); setPage(1); } }}>
+            <SelectTrigger className="h-7 w-auto min-w-[100px] border-zinc-800 bg-zinc-900/60 text-zinc-300 text-xs rounded-lg focus-visible:ring-emerald-500/40">
+              <SelectValue placeholder="All Grades" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="All">All Grades</SelectItem>
+              <SelectItem value="A">Grade A</SelectItem>
+              <SelectItem value="B">Grade B</SelectItem>
+              <SelectItem value="C">Grade C</SelectItem>
+              <SelectItem value="D">Grade D</SelectItem>
+            </SelectContent>
+          </Select>
+        </div>
+      )}
+
+      {/* ── Table ── */}
+      <div className="flex-1 min-h-0 overflow-auto">
+        <table className="w-full text-left border-collapse" style={{ minWidth: 720 }}>
+          <thead className="sticky top-0 z-10">
+            <tr className="border-b border-zinc-800/80 bg-zinc-950/95 backdrop-blur-sm text-[10px] font-semibold uppercase tracking-wider text-zinc-500 select-none">
+              <th className="py-2.5 px-2 w-8 text-center">★</th>
+              <th className="py-2.5 px-3 cursor-pointer hover:text-zinc-200 transition-colors whitespace-nowrap" onClick={() => handleSort('symbol')}>
                 Symbol <SortIcon field="symbol" />
               </th>
-              <th className="py-3 px-3 cursor-pointer text-center hover:text-white transition-colors" onClick={() => handleSort('rsScore')}>
-                RS Score <SortIcon field="rsScore" />
+              <th className="py-2.5 px-2 text-center cursor-pointer hover:text-zinc-200 transition-colors" onClick={() => handleSort('rsRank')} title="RS Rank (1 = strongest)">
+                Rank <SortIcon field="rsRank" />
               </th>
-              <th className="py-3 px-2 text-center">Grade</th>
-              <th className="py-3 px-3 cursor-pointer text-right hover:text-white transition-colors" onClick={() => handleSort('latestClose')}>
+              <th className="py-2.5 px-2 text-center cursor-pointer hover:text-zinc-200 transition-colors" onClick={() => handleSort('rsScore')}>
+                Score <SortIcon field="rsScore" />
+              </th>
+              <th className="py-2.5 px-2 text-center">Grade</th>
+              <th className="py-2.5 px-2 text-center cursor-pointer hover:text-zinc-200 transition-colors" onClick={() => handleSort('rsChange1W')} title="RS momentum: 5-day RS change">
+                RS Mom <SortIcon field="rsChange1W" />
+              </th>
+              <th className="py-2.5 px-2 text-right cursor-pointer hover:text-zinc-200 transition-colors" onClick={() => handleSort('latestClose')}>
                 Close <SortIcon field="latestClose" />
               </th>
-              <th className="py-3 px-3 cursor-pointer text-right hover:text-white transition-colors" onClick={() => handleSort('priceChange1D')}>
-                1D % <SortIcon field="priceChange1D" />
+              <th className="py-2.5 px-2 text-right cursor-pointer hover:text-zinc-200 transition-colors" onClick={() => handleSort('priceChange1D')}>
+                1D <SortIcon field="priceChange1D" />
               </th>
-              <th className="py-3 px-3 cursor-pointer text-right hover:text-white transition-colors" onClick={() => handleSort('priceChange1W')}>
-                1W % <SortIcon field="priceChange1W" />
+              <th className="py-2.5 px-2 text-right cursor-pointer hover:text-zinc-200 transition-colors" onClick={() => handleSort('priceChange3M')}>
+                3M <SortIcon field="priceChange3M" />
               </th>
-              <th className="py-3 px-3 cursor-pointer text-right hover:text-white transition-colors" onClick={() => handleSort('priceChange3M')}>
-                3M % <SortIcon field="priceChange3M" />
+              <th
+                className="py-2.5 px-2 text-right cursor-pointer hover:text-zinc-200 transition-colors whitespace-nowrap"
+                onClick={() => handleSort('pctFrom52WHigh')}
+                title="% below 52-week high (0% = at 52W high)"
+              >
+                52WH% <SortIcon field="pctFrom52WHigh" />
               </th>
-              <th className="py-3 px-4 text-center w-28">Trend (20d)</th>
+              <th className="py-2.5 px-3 text-center">Trend</th>
             </tr>
           </thead>
-          <tbody className="divide-y divide-zinc-900/60 text-sm">
+          <tbody className="divide-y divide-zinc-900/50 text-sm">
             {paginatedData.length === 0 ? (
               <tr>
-                <td colSpan={9} className="py-8 text-center text-zinc-500">
+                <td colSpan={11} className="py-10 text-center text-zinc-500 text-sm">
                   No matching stocks found.
                 </td>
               </tr>
@@ -247,91 +431,98 @@ export default function Leaderboard({
               paginatedData.map((item) => {
                 const isSelected = selectedSymbol === item.symbol;
                 const isFavorite = favorites.includes(item.symbol);
-
-                // Styling for Grade
-                let gradeClass = '';
-                if (item.rsRating === 'A') gradeClass = 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20';
-                else if (item.rsRating === 'B') gradeClass = 'bg-blue-500/10 text-blue-400 border border-blue-500/20';
-                else if (item.rsRating === 'C') gradeClass = 'bg-zinc-500/10 text-zinc-400 border border-zinc-550';
-                else gradeClass = 'bg-red-500/10 text-red-400 border border-red-500/20';
-
-                // Score bar color
-                let scoreBg = 'bg-zinc-700';
-                if (item.rsScore >= 80) scoreBg = 'bg-gradient-to-r from-emerald-500 to-teal-400';
-                else if (item.rsScore >= 60) scoreBg = 'bg-gradient-to-r from-blue-500 to-indigo-400';
-                else if (item.rsScore >= 40) scoreBg = 'bg-zinc-500';
-                else scoreBg = 'bg-gradient-to-r from-red-600 to-orange-500';
+                const pctFrom52W = item.pctFrom52WHigh ?? 0;
 
                 return (
                   <tr
                     key={item.symbol}
                     onClick={() => onSelectSymbol(item.symbol)}
-                    className={`cursor-pointer hover:bg-zinc-900/30 transition-all select-none duration-150 ${
-                      isSelected ? 'bg-emerald-950/20 border-l-2 border-l-emerald-500' : ''
+                    className={`cursor-pointer hover:bg-zinc-900/40 transition-all duration-100 select-none ${
+                      isSelected ? 'bg-emerald-950/20 border-l-2 border-l-emerald-500' : 'border-l-2 border-l-transparent'
                     }`}
                   >
-                    {/* Favorite Button */}
-                    <td
-                      className="py-3 px-4 text-center"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        onToggleFavorite(item.symbol);
-                      }}
-                    >
+                    {/* Favorite */}
+                    <td className="py-2.5 px-2 text-center" onClick={(e) => { e.stopPropagation(); onToggleFavorite(item.symbol); }}>
                       <button className="text-zinc-600 hover:text-amber-400 transition-colors">
-                        <Star className={`h-4 w-4 ${isFavorite ? 'fill-amber-400 text-amber-400' : ''}`} />
+                        <Star className={`h-3 w-3 ${isFavorite ? 'fill-amber-400 text-amber-400' : ''}`} />
                       </button>
                     </td>
 
-                    {/* Symbol & Sector */}
-                    <td className="py-3 px-4">
-                      <div className="font-semibold text-white tracking-wide">{item.symbol}</div>
-                      <div className="text-xs text-zinc-500 truncate max-w-[120px]">{item.sector || 'Unassigned'}</div>
+                    {/* Symbol + Sector + RS New High */}
+                    <td className="py-2.5 px-3">
+                      <div className="flex items-center gap-1.5">
+                        <span className="font-bold text-white tracking-wide text-sm leading-none">{item.symbol}</span>
+                        {item.isRSNewHigh && (
+                          <span className="inline-flex items-center gap-0.5 text-[9px] font-black px-1.5 py-0.5 rounded bg-purple-500/15 text-purple-400 border border-purple-500/25 uppercase tracking-wide leading-none">
+                            <Zap className="h-2.5 w-2.5" />NH
+                          </span>
+                        )}
+                      </div>
+                      <div className="text-[10px] text-zinc-600 truncate max-w-[100px] mt-0.5">{item.sector || 'Unassigned'}</div>
                     </td>
 
-                    {/* RS Score with visual bar */}
-                    <td className="py-3 px-3">
-                      <div className="flex flex-col items-center justify-center gap-1 min-w-[70px]">
-                        <span className="font-bold text-white text-base">{item.rsScore}</span>
+                    {/* Rank */}
+                    <td className="py-2.5 px-2 text-center">
+                      <span className={`font-mono text-xs font-bold ${item.rsRank <= Math.ceil(totalStocks * 0.1) ? 'text-emerald-400' : item.rsRank <= Math.ceil(totalStocks * 0.3) ? 'text-blue-400' : 'text-zinc-500'}`}>
+                        #{item.rsRank}
+                      </span>
+                    </td>
+
+                    {/* RS Score */}
+                    <td className="py-2.5 px-2">
+                      <div className="flex flex-col items-center gap-1 min-w-[52px]">
+                        <span className="font-black text-white text-sm leading-none">{item.rsScore}</span>
                         <div className="w-full h-1 bg-zinc-800 rounded-full overflow-hidden">
-                          <div className={`h-full ${scoreBg}`} style={{ width: `${item.rsScore}%` }} />
+                          <div className={`h-full rounded-full ${scoreBarStyle(item.rsScore)}`} style={{ width: `${item.rsScore}%` }} />
                         </div>
                       </div>
                     </td>
 
                     {/* Grade */}
-                    <td className="py-3 px-2 text-center">
-                      <span className={`inline-block text-xs font-bold px-2 py-0.5 rounded-full ${gradeClass}`}>
+                    <td className="py-2.5 px-2 text-center">
+                      <Badge className={`text-[11px] font-black px-2 h-5 rounded-full ${gradeStyle[item.rsRating]}`}>
                         {item.rsRating}
-                      </span>
+                      </Badge>
                     </td>
 
-                    {/* Closing Price */}
-                    <td className="py-3 px-3 text-right font-mono font-medium text-zinc-300">
+                    {/* RS Momentum */}
+                    <td className="py-2.5 px-2 text-center">
+                      <MomentumBadge momentum={item.rsMomentum} change={item.rsChange1W} />
+                    </td>
+
+                    {/* Close Price */}
+                    <td className="py-2.5 px-2 text-right font-mono text-zinc-200 text-xs font-medium">
                       ₹{item.latestClose.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
                     </td>
 
-                    {/* 1D Change */}
-                    <td className={`py-3 px-3 text-right font-mono font-medium ${item.priceChange1D >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
-                      {item.priceChange1D >= 0 ? '+' : ''}
-                      {item.priceChange1D.toFixed(2)}%
+                    {/* 1D */}
+                    <td className={`py-2.5 px-2 text-right font-mono text-xs font-semibold ${pctColor(item.priceChange1D)}`}>
+                      <div className="flex items-center justify-end gap-0.5">
+                        {item.priceChange1D >= 0 ? <ArrowUpRight className="h-3 w-3" /> : <ArrowDownRight className="h-3 w-3" />}
+                        {Math.abs(item.priceChange1D).toFixed(2)}%
+                      </div>
                     </td>
 
-                    {/* 1W Change */}
-                    <td className={`py-3 px-3 text-right font-mono text-xs font-medium ${item.priceChange1W >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
-                      {item.priceChange1W >= 0 ? '+' : ''}
-                      {item.priceChange1W.toFixed(2)}%
+                    {/* 3M */}
+                    <td className={`py-2.5 px-2 text-right font-mono text-xs font-medium ${pctColor(item.priceChange3M)}`}>
+                      {pctFmt(item.priceChange3M)}
                     </td>
 
-                    {/* 3M Change */}
-                    <td className={`py-3 px-3 text-right font-mono text-xs font-medium ${item.priceChange3M >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
-                      {item.priceChange3M >= 0 ? '+' : ''}
-                      {item.priceChange3M.toFixed(2)}%
+                    {/* % From 52W High */}
+                    <td className={`py-2.5 px-2 text-right font-mono text-xs font-medium ${from52WColor(pctFrom52W)}`}>
+                      <div className="flex flex-col items-end gap-0.5">
+                        <span>{pctFrom52W >= 0 ? '0.0%' : `${pctFrom52W.toFixed(1)}%`}</span>
+                        {pctFrom52W >= -2 && (
+                          <span className="text-[9px] text-emerald-500/80 leading-none">@ hi</span>
+                        )}
+                      </div>
                     </td>
 
-                    {/* Trend Sparkline */}
-                    <td className="py-3 px-4 text-center">
-                      <Sparkline data={item.trend} />
+                    {/* RS Trend Sparkline */}
+                    <td className="py-2.5 px-3 text-center">
+                      <div className="flex items-center justify-center">
+                        <Sparkline data={item.trend} />
+                      </div>
                     </td>
                   </tr>
                 );
@@ -341,30 +532,30 @@ export default function Leaderboard({
         </table>
       </div>
 
-      {/* Pagination Controls */}
-      <div className="p-4 border-t border-zinc-800/80 flex items-center justify-between bg-zinc-900/20 text-xs text-zinc-400">
-        <div>
-          Showing {Math.min(processedData.length, (page - 1) * pageSize + 1)} to{' '}
-          {Math.min(processedData.length, page * pageSize)} of {processedData.length} stocks
-        </div>
+      {/* ── Pagination ── */}
+      <div className="flex-none px-3 py-2 border-t border-zinc-800/60 bg-zinc-900/10 flex items-center justify-between text-[11px] text-zinc-400">
         <div className="flex items-center gap-2">
-          <button
-            disabled={page === 1}
-            onClick={() => setPage(page - 1)}
-            className="px-3 py-1.5 border border-zinc-800 rounded-lg hover:border-zinc-700 disabled:opacity-40 disabled:cursor-not-allowed hover:bg-zinc-900/50"
-          >
-            Prev
-          </button>
-          <span className="font-medium text-zinc-300">
-            Page {page} of {totalPages}
+          <span>
+            <span className="text-zinc-300 font-medium">{processedData.length}</span>
+            <span className="text-zinc-600"> / {totalStocks} stocks</span>
           </span>
-          <button
-            disabled={page === totalPages}
-            onClick={() => setPage(page + 1)}
-            className="px-3 py-1.5 border border-zinc-800 rounded-lg hover:border-zinc-700 disabled:opacity-40 disabled:cursor-not-allowed hover:bg-zinc-900/50"
-          >
-            Next
-          </button>
+          <Select value={String(pageSize)} onValueChange={(v) => { if (v) { setPageSize(Number(v)); setPage(1); } }}>
+            <SelectTrigger className="h-6 w-auto border-zinc-800 bg-zinc-900/60 text-zinc-400 text-[11px] rounded-lg">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {[15, 20, 30, 50].map((n) => (
+                <SelectItem key={n} value={String(n)}>{n}/page</SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </div>
+        <div className="flex items-center gap-1">
+          <Button disabled={page === 1} onClick={() => setPage(1)} variant="outline" size="xs" className="h-6 border-zinc-800 hover:border-zinc-700 rounded-lg">«</Button>
+          <Button disabled={page === 1} onClick={() => setPage(page - 1)} variant="outline" size="xs" className="h-6 border-zinc-800 hover:border-zinc-700 rounded-lg">‹</Button>
+          <span className="px-2 font-medium text-zinc-300 tabular-nums">{page} / {totalPages}</span>
+          <Button disabled={page === totalPages} onClick={() => setPage(page + 1)} variant="outline" size="xs" className="h-6 border-zinc-800 hover:border-zinc-700 rounded-lg">›</Button>
+          <Button disabled={page === totalPages} onClick={() => setPage(totalPages)} variant="outline" size="xs" className="h-6 border-zinc-800 hover:border-zinc-700 rounded-lg">»</Button>
         </div>
       </div>
     </div>
