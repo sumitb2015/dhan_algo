@@ -120,6 +120,7 @@ export default function StrategiesPage() {
               { href: '/', label: 'RS Scanner' },
               { href: '/movers', label: 'Market Movers' },
               { label: 'Strategies', active: true },
+              { href: '/portfolio', label: 'Portfolio' },
               { href: '/reports', label: 'Reports' },
             ].map((item) =>
               item.href ? (

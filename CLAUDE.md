@@ -162,6 +162,7 @@ Strategies write their live state to `debug/<strategy_key>_state.json` every loo
 - Components: `StockDashboard` (root), `StrategyCard`, `LogConsole`, `RSChart`, `SectorHeatmap`, `Leaderboard`, `IndexSummary`, `MarketMovers`, `DataRefreshPanel`
 - `PROJECT_ROOT` in API routes is `path.resolve(process.cwd(), '..')` (one level up from `rs_dashboard/`)
 - `debug/today_quotes.json` — live intraday OHLCV snapshot written by `fetch_today_quotes.py`; `dataLoader.ts` merges this to patch the missing today-row in stock CSVs before market close
+- **Table header style**: use `text-xs font-bold text-white` and solid `bg-zinc-800` (not `text-[10px]`, `font-semibold`, `text-zinc-300`, or any transparent bg variant) for `<thead>` / `TH` components in all dashboard tables. At 10px, white text anti-aliases to gray — 12px (`text-xs`) with `font-bold` is the minimum for headers to appear truly white on dark backgrounds.
 
 ---
 

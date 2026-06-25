@@ -70,7 +70,7 @@ export const SECTOR_MAP: Record<string, Sector> = {
   // Auto
   MARUTI: 'Auto', BAJAJ_AUTO: 'Auto', 'BAJAJ-AUTO': 'Auto',
   EICHERMOT: 'Auto', HEROMOTOCO: 'Auto', 'M&M': 'Auto', M_M: 'Auto',
-  TVSMOTOR: 'Auto', TATAMOTORS: 'Auto', ASHOKLEY: 'Auto',
+  TVSMOTOR: 'Auto', TATAMOTORS: 'Auto', TMPV: 'Auto', ASHOKLEY: 'Auto',
   BHARATFORG: 'Auto', EXIDEIND: 'Auto', AMNSIL: 'Auto',
   BALKRISIND: 'Auto', CEATLTD: 'Auto', APOLLOTYRE: 'Auto',
   MOTHERSON: 'Auto', UNOMINDA: 'Auto', SONACOMS: 'Auto',

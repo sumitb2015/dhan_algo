@@ -59,6 +59,14 @@ interface StrategyState {
   direction?: string;
   oi_diff?: number;
   pcr_threshold?: number;
+  // Reentry Straddle
+  ce_active?: boolean;
+  pe_active?: boolean;
+  ce_sl?: number;
+  pe_sl?: number;
+  combined_best_premium?: number | null;
+  trail_combined_buffer?: number;
+  leg_sl_pct?: number;
 }
 
 interface StrategyCardProps {
@@ -108,6 +116,10 @@ export default function StrategyCard({ meta, state, onRefresh }: StrategyCardPro
   const [pollInterval, setPollInterval] = useState<number>(60);
   const [expansionWindow, setExpansionWindow] = useState<number>(3);
 
+  // Reentry Straddle
+  const [trailCombinedBuffer, setTrailCombinedBuffer] = useState<number>(1.0);
+  const [legSlPct, setLegSlPct] = useState<number>(0.20);
+
   // Spread Trend
   const [symbol, setSymbol] = useState<string>('NIFTY');
   const [interval, setIntervalVal] = useState<string>('5');
@@ -140,9 +152,14 @@ export default function StrategyCard({ meta, state, onRefresh }: StrategyCardPro
 
       if (meta.key === 'nifty_advanced_imbalance') {
         args.push('--max-lots', String(maxLots));
-        args.push('--mode', mode, '--entry-type', entryType, '--start-time', startTime);
+        const effectiveEntryType = mode === 'reentry_straddle' ? 'straddle' : entryType;
+        args.push('--mode', mode, '--entry-type', effectiveEntryType, '--start-time', startTime);
         if (mode === 'loser_ratio_roll') args.push('--loser-ratio-lots', String(loserRatioLots));
-        if (entryType === 'strangle') {
+        if (mode === 'reentry_straddle') {
+          args.push('--trail-combined-buffer', String(trailCombinedBuffer));
+          args.push('--leg-sl-pct', String(legSlPct));
+        }
+        if (effectiveEntryType === 'strangle') {
           if (strikeSelection === 'delta') args.push('--delta', '--target-delta', String(targetDelta));
           else if (strikeSelection === 'premium') args.push('--premium', '--target-premium', String(targetPremium));
           else args.push('--ce-offset', String(ceOffset), '--pe-offset', String(peOffset));
@@ -464,6 +481,7 @@ export default function StrategyCard({ meta, state, onRefresh }: StrategyCardPro
                   <SelectItem value="loser_ratio_roll">Loser Ratio Roll</SelectItem>
                   <SelectItem value="hedged_addition">Hedged Addition</SelectItem>
                   <SelectItem value="legacy">Legacy (Naked)</SelectItem>
+                  <SelectItem value="reentry_straddle">Re-entry Straddle</SelectItem>
                 </SelectContent>
               </Select>
             </div>
@@ -473,21 +491,35 @@ export default function StrategyCard({ meta, state, onRefresh }: StrategyCardPro
                 <Input type="number" value={loserRatioLots} onChange={(e) => setLoserRatioLots(parseInt(e.target.value) || 1)} min={1} max={20} className={inputCls} />
               </div>
             )}
-            <div className={fieldCls}>
-              <label className={lbl}>Entry Type</label>
-              <Select value={entryType} onValueChange={(v) => v && setEntryType(v)}>
-                <SelectTrigger className={inputCls}><SelectValue /></SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="straddle">Straddle (ATM)</SelectItem>
-                  <SelectItem value="strangle">Strangle (OTM)</SelectItem>
-                </SelectContent>
-              </Select>
-            </div>
+            {mode === 'reentry_straddle' && (
+              <>
+                <div className={fieldCls}>
+                  <label className={lbl}>Trail Buffer (pts)</label>
+                  <Input type="number" step="0.5" value={trailCombinedBuffer} onChange={(e) => setTrailCombinedBuffer(parseFloat(e.target.value) || 1.0)} min={0.1} className={inputCls} />
+                </div>
+                <div className={fieldCls}>
+                  <label className={lbl}>Leg SL (%)</label>
+                  <Input type="number" step="1" value={Math.round(legSlPct * 100)} onChange={(e) => setLegSlPct((parseInt(e.target.value) || 20) / 100)} min={1} max={100} className={inputCls} />
+                </div>
+              </>
+            )}
+            {mode !== 'reentry_straddle' && (
+              <div className={fieldCls}>
+                <label className={lbl}>Entry Type</label>
+                <Select value={entryType} onValueChange={(v) => v && setEntryType(v)}>
+                  <SelectTrigger className={inputCls}><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="straddle">Straddle (ATM)</SelectItem>
+                    <SelectItem value="strangle">Strangle (OTM)</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+            )}
           </>
         )}
 
         {(meta.key === 'nifty_value_imbalance_strangle' ||
-          (meta.key === 'nifty_advanced_imbalance' && entryType === 'strangle')) && (
+          (meta.key === 'nifty_advanced_imbalance' && entryType === 'strangle' && mode !== 'reentry_straddle')) && (
           <>
             <div className={fieldCls}>
               <label className={lbl}>Strike Selection</label>
@@ -669,20 +701,42 @@ export default function StrategyCard({ meta, state, onRefresh }: StrategyCardPro
                     ) : (
                       <>
                         <span className={lbl}>CE Strike</span>
-                        <span className="font-mono font-bold text-emerald-400">{state.ce_strike || '—'}</span>
+                        <div className="flex items-center gap-1">
+                          <span className="font-mono font-bold text-emerald-400">{state.ce_strike || '—'}</span>
+                          {state.mode === 'reentry_straddle' && state.ce_active != null && (
+                            <span className={`text-[9px] font-bold px-1 rounded ${state.ce_active ? 'bg-emerald-500/20 text-emerald-400' : 'bg-amber-500/15 text-amber-400'}`}>
+                              {state.ce_active ? 'LIVE' : 'RE-ENTRY'}
+                            </span>
+                          )}
+                        </div>
                         <span className="text-[10px] text-zinc-300 font-mono whitespace-nowrap">
                           {state.ce_lots ?? 0}L{state.ce_ltp != null ? ` · ₹${state.ce_ltp.toFixed(0)}` : ''}{state.ce_avg_price ? ` (avg ${state.ce_avg_price.toFixed(0)})` : ''}
                         </span>
+                        {state.mode === 'reentry_straddle' && state.ce_sl != null && state.ce_sl > 0 && (
+                          <span className="text-[10px] text-rose-400/70 font-mono whitespace-nowrap">
+                            SL ₹{state.ce_sl.toFixed(0)}{state.leg_sl_pct != null ? ` (${Math.round(state.leg_sl_pct * 100)}%)` : ''}
+                          </span>
+                        )}
                       </>
                     )}
                   </div>
                   {meta.key !== 'nifty_spread_trend' && (
                     <div className="px-3 py-2 flex flex-col gap-1 flex-1 min-w-[90px]">
                       <span className={lbl}>PE Strike</span>
-                      <span className="font-mono font-bold text-rose-400">{state.pe_strike || '—'}</span>
+                      <div className="flex items-center gap-1">
+                        <span className="font-mono font-bold text-rose-400">{state.pe_strike || '—'}</span>
+                        {state.mode === 'reentry_straddle' && state.pe_active != null && (
+                          <span className={`text-[9px] font-bold px-1 rounded ${state.pe_active ? 'bg-emerald-500/20 text-emerald-400' : 'bg-amber-500/15 text-amber-400'}`}>
+                            {state.pe_active ? 'LIVE' : 'RE-ENTRY'}
+                          </span>
+                        )}
+                      </div>
                       <span className="text-[10px] text-zinc-300 font-mono whitespace-nowrap">
                         {state.pe_lots ?? 0}L{state.pe_ltp != null ? ` · ₹${state.pe_ltp.toFixed(0)}` : ''}{state.pe_avg_price ? ` (avg ${state.pe_avg_price.toFixed(0)})` : ''}
                       </span>
+                      {state.mode === 'reentry_straddle' && state.pe_sl != null && state.pe_sl > 0 && (
+                        <span className="text-[10px] text-rose-400/70 font-mono whitespace-nowrap">SL ₹{state.pe_sl.toFixed(0)}</span>
+                      )}
                     </div>
                   )}
                   <div className="px-3 py-2 flex flex-col gap-1 shrink-0">

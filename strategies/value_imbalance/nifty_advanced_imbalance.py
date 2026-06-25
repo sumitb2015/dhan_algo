@@ -43,7 +43,7 @@ class NiftyAdvancedImbalance:
                  ce_offset=200, pe_offset=200,
                  use_premium=False, target_premium=50.0,
                  start_time="09:20", loser_ratio_lots=1,
-                 trail_combined_buffer=1.0):
+                 trail_combined_buffer=1.0, leg_sl_pct=0.20):
         self.mode = mode.lower()
         self.dry_run = dry_run
         self.initial_lots = initial_lots
@@ -62,6 +62,7 @@ class NiftyAdvancedImbalance:
         self.start_time = start_time
         self.loser_ratio_lots = loser_ratio_lots
         self.trail_combined_buffer = trail_combined_buffer
+        self.leg_sl_pct = leg_sl_pct
         
         self.dhan = get_dhan_client()
         if not self.dhan:
@@ -164,6 +165,7 @@ class NiftyAdvancedImbalance:
             "pe_original_entry_premium": self.pe_original_entry_premium,
             "combined_best_premium": self.combined_best_premium,
             "trail_combined_buffer": self.trail_combined_buffer,
+            "leg_sl_pct": self.leg_sl_pct,
         }
         save_strategy_state("nifty_advanced_imbalance", state_dict)
 
@@ -370,7 +372,7 @@ class NiftyAdvancedImbalance:
             if success:
                 self.ce_avg_price = actual_entry
                 self.ce_lots = self.initial_lots
-                self.ce_sl = round(actual_entry * 1.20, 2)
+                self.ce_sl = round(actual_entry * (1 + self.leg_sl_pct), 2)
                 self.ce_active = True
                 self.combined_best_premium = None  # trail reinitialises from new combined on next tick
                 logger.info(f"CE Re-entered at {actual_entry:.2f} | New SL: {self.ce_sl:.2f}")
@@ -394,7 +396,7 @@ class NiftyAdvancedImbalance:
             if success:
                 self.pe_avg_price = actual_entry
                 self.pe_lots = self.initial_lots
-                self.pe_sl = round(actual_entry * 1.20, 2)
+                self.pe_sl = round(actual_entry * (1 + self.leg_sl_pct), 2)
                 self.pe_active = True
                 self.combined_best_premium = None
                 logger.info(f"PE Re-entered at {actual_entry:.2f} | New SL: {self.pe_sl:.2f}")
@@ -783,8 +785,8 @@ class NiftyAdvancedImbalance:
                 self.pe_active = True
                 self.ce_original_entry_premium = self.ce_avg_price
                 self.pe_original_entry_premium = self.pe_avg_price
-                self.ce_sl = round(self.ce_avg_price * 1.20, 2)
-                self.pe_sl = round(self.pe_avg_price * 1.20, 2)
+                self.ce_sl = round(self.ce_avg_price * (1 + self.leg_sl_pct), 2)
+                self.pe_sl = round(self.pe_avg_price * (1 + self.leg_sl_pct), 2)
                 logger.info(
                     f"Reentry Straddle Started | "
                     f"CE: {self.ce_avg_price:.2f} (SL: {self.ce_sl:.2f}) | "
@@ -1299,8 +1301,9 @@ Available Adjustment Modes:
   loser_ratio_roll : Roll the challenged loser strike further OTM and increase lots (OTM ratio)
   hedged_addition  : Sell winner leg lot (like legacy) but buy a further OTM protective wing (hedged)
   legacy           : Legacy lot addition on the winner leg (unhedged)
-  reentry_straddle : Sell ATM straddle; each leg has an independent 20% SL; stopped leg re-enters
-                     when its premium returns to the original entry level (requires --entry-type straddle)
+  reentry_straddle : Sell ATM straddle; each leg has an independent per-leg SL (see --leg-sl-pct);
+                     stopped leg re-enters when its premium returns to the original entry level
+                     (requires --entry-type straddle)
 
 Examples:
   # Dry run with value-balanced winner roll adjustment
@@ -1364,6 +1367,10 @@ Examples:
                         help="Points above the best combined premium that triggers trailing SL exit "
                              "in reentry_straddle mode (default: 1.0)")
 
+    parser.add_argument("--leg-sl-pct", type=float, default=0.20, metavar="PCT",
+                        help="Per-leg stop loss as a fraction of entry premium in reentry_straddle mode "
+                             "(default: 0.20 = 20%%). E.g. 0.30 triggers SL at 130%% of entry price.")
+
     args = parser.parse_args()
 
     # --- Configuration Validation ---
@@ -1396,6 +1403,16 @@ Examples:
 
     if args.trail_combined_buffer <= 0:
         _errors.append(f"--trail-combined-buffer must be > 0, got {args.trail_combined_buffer}.")
+
+    # --leg-sl-pct only applies to reentry_straddle
+    if args.leg_sl_pct != 0.20 and args.mode != "reentry_straddle":
+        _errors.append(
+            f"--leg-sl-pct {args.leg_sl_pct} has no effect in --mode {args.mode} "
+            f"(only used with reentry_straddle)."
+        )
+
+    if args.leg_sl_pct <= 0:
+        _errors.append(f"--leg-sl-pct must be > 0, got {args.leg_sl_pct}.")
 
     # --delta and --premium are mutually exclusive strike selection methods
     if args.delta and args.premium:
@@ -1482,6 +1499,7 @@ Examples:
         start_time=args.start_time,
         loser_ratio_lots=args.loser_ratio_lots,
         trail_combined_buffer=args.trail_combined_buffer,
+        leg_sl_pct=args.leg_sl_pct,
     )
     try:
         strat.run()
