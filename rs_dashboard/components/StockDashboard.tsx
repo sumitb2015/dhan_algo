@@ -193,6 +193,9 @@ export default function StockDashboard() {
             <Link href="/scanner" className="px-3 py-1.5 text-xs font-semibold rounded-lg text-zinc-500 hover:text-zinc-300 transition-all">
               Scanner
             </Link>
+            <Link href="/normalized" className="px-3 py-1.5 text-xs font-semibold rounded-lg text-zinc-500 hover:text-zinc-300 transition-all">
+              Charts
+            </Link>
             <Link href="/strategies" className="px-3 py-1.5 text-xs font-semibold rounded-lg text-zinc-500 hover:text-zinc-300 transition-all">
               Strategies
             </Link>

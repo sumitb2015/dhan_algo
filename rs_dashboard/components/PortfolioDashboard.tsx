@@ -1104,7 +1104,8 @@ export default function PortfolioDashboard() {
           <nav className="flex items-center bg-zinc-900/70 border border-zinc-800/60 p-0.5 rounded-lg gap-0.5 text-[11px]">
             <Link href="/" className="px-2.5 py-1 font-medium text-zinc-500 hover:text-zinc-300 rounded transition-all">RS Scanner</Link>
             <Link href="/movers" className="px-2.5 py-1 font-medium text-zinc-500 hover:text-zinc-300 rounded transition-all">Movers</Link>
-            <Link href="/scanner" className="px-2.5 py-1 font-medium text-zinc-500 hover:text-zinc-300 rounded transition-all">Scanner</Link>
+            <Link href="/scanner"    className="px-2.5 py-1 font-medium text-zinc-500 hover:text-zinc-300 rounded transition-all">Scanner</Link>
+            <Link href="/normalized" className="px-2.5 py-1 font-medium text-zinc-500 hover:text-zinc-300 rounded transition-all">Charts</Link>
             <Link href="/strategies" className="px-2.5 py-1 font-medium text-zinc-500 hover:text-zinc-300 rounded transition-all">Strategies</Link>
             <span className="px-2.5 py-1 font-semibold rounded bg-indigo-500/10 text-indigo-400">Portfolio</span>
             <Link href="/reports" className="px-2.5 py-1 font-medium text-zinc-500 hover:text-zinc-300 rounded transition-all">Reports</Link>
