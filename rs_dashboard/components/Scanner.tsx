@@ -128,7 +128,7 @@ function PctBadge({ v }: { v: number }) {
   return (
     <span className={cn(
       'text-[11px] font-semibold tabular-nums',
-      v > 0 ? 'text-emerald-400' : v < 0 ? 'text-red-400' : 'text-zinc-500',
+      v > 0 ? 'text-emerald-400' : v < 0 ? 'text-red-400' : 'text-white/55',
     )}>
       {v > 0 ? '+' : ''}{v.toFixed(2)}%
     </span>
@@ -271,7 +271,7 @@ export default function Scanner() {
   const thProps = { currentSort: sort, onSort: handleSort };
 
   return (
-    <div className="flex flex-col flex-1 w-full bg-black min-h-screen text-zinc-100">
+    <div className="flex flex-col flex-1 w-full bg-black min-h-screen text-white/90">
 
       {/* Header */}
       <header className="w-full border-b border-zinc-900 bg-zinc-950/90 backdrop-blur-md px-4 py-2 flex flex-wrap items-center gap-2.5 z-20 sticky top-0">
@@ -286,14 +286,14 @@ export default function Scanner() {
 
         {/* Nav */}
         <nav className="flex items-center bg-zinc-900 border border-zinc-800 p-0.5 rounded-lg text-[11px] gap-0.5">
-          <a href="/"           className="px-2.5 py-1 font-medium text-zinc-500 hover:text-zinc-300 rounded transition-all">RS Scanner</a>
-          <a href="/movers"     className="px-2.5 py-1 font-medium text-zinc-500 hover:text-zinc-300 rounded transition-all">Movers</a>
+          <a href="/"           className="px-2.5 py-1 font-medium text-white/55 hover:text-white/90 rounded transition-all">RS Scanner</a>
+          <a href="/movers"     className="px-2.5 py-1 font-medium text-white/55 hover:text-white/90 rounded transition-all">Movers</a>
           <span                 className="px-2.5 py-1 font-semibold rounded bg-emerald-500/10 text-emerald-400">Scanner</span>
-          <a href="/normalized" className="px-2.5 py-1 font-medium text-zinc-500 hover:text-zinc-300 rounded transition-all">Charts</a>
-          <a href="/live"       className="px-2.5 py-1 font-medium text-zinc-500 hover:text-zinc-300 rounded transition-all">Live</a>
-          <a href="/strategies" className="px-2.5 py-1 font-medium text-zinc-500 hover:text-zinc-300 rounded transition-all">Strategies</a>
-          <a href="/portfolio"  className="px-2.5 py-1 font-medium text-zinc-500 hover:text-zinc-300 rounded transition-all">Portfolio</a>
-          <a href="/reports"    className="px-2.5 py-1 font-medium text-zinc-500 hover:text-zinc-300 rounded transition-all">Reports</a>
+          <a href="/normalized" className="px-2.5 py-1 font-medium text-white/55 hover:text-white/90 rounded transition-all">Charts</a>
+          <a href="/live"       className="px-2.5 py-1 font-medium text-white/55 hover:text-white/90 rounded transition-all">Live</a>
+          <a href="/strategies" className="px-2.5 py-1 font-medium text-white/55 hover:text-white/90 rounded transition-all">Strategies</a>
+          <a href="/portfolio"  className="px-2.5 py-1 font-medium text-white/55 hover:text-white/90 rounded transition-all">Portfolio</a>
+          <a href="/reports"    className="px-2.5 py-1 font-medium text-white/55 hover:text-white/90 rounded transition-all">Reports</a>
         </nav>
 
         {/* Universe selector */}
@@ -304,7 +304,7 @@ export default function Scanner() {
               onClick={() => setUniverse(u.value)}
               className={cn(
                 'px-2.5 py-1 font-semibold rounded transition-all',
-                universe === u.value ? 'bg-emerald-500/10 text-emerald-400' : 'text-zinc-500 hover:text-zinc-300',
+                universe === u.value ? 'bg-emerald-500/10 text-emerald-400' : 'text-white/55 hover:text-white/90',
               )}
             >
               {u.label}
@@ -314,14 +314,14 @@ export default function Scanner() {
 
         <div className="flex items-center gap-2 ml-auto">
           {lastUpdated && (
-            <span className="text-[10px] text-zinc-600 hidden md:inline tabular-nums">
+            <span className="text-[10px] text-white/35 hidden md:inline tabular-nums">
               {lastUpdated.toLocaleTimeString('en-IN', { timeZone: 'Asia/Kolkata' })} IST
             </span>
           )}
           {data && (
             <button
               onClick={() => exportCSV(rows)}
-              className="h-7 px-2.5 flex items-center gap-1 rounded-lg border border-zinc-800 bg-zinc-900 text-zinc-500 hover:text-zinc-200 hover:bg-zinc-800 transition-all text-[11px] font-medium"
+              className="h-7 px-2.5 flex items-center gap-1 rounded-lg border border-zinc-800 bg-zinc-900 text-white/55 hover:text-white/90 hover:bg-zinc-800 transition-all text-[11px] font-medium"
             >
               <Download className="h-3 w-3" /> CSV
             </button>
@@ -329,7 +329,7 @@ export default function Scanner() {
           <button
             onClick={() => fetchData()}
             disabled={loading}
-            className="h-7 w-7 flex items-center justify-center rounded-lg border border-zinc-800 bg-zinc-900 text-zinc-500 hover:text-zinc-200 hover:bg-zinc-800 transition-all disabled:opacity-50"
+            className="h-7 w-7 flex items-center justify-center rounded-lg border border-zinc-800 bg-zinc-900 text-white/55 hover:text-white/90 hover:bg-zinc-800 transition-all disabled:opacity-50"
           >
             <RefreshCw className={cn('h-3.5 w-3.5', loading && 'animate-spin')} />
           </button>
@@ -355,7 +355,7 @@ export default function Scanner() {
             ].map((s) => (
               <div key={s.label} className="flex flex-col items-center bg-zinc-950 border border-zinc-800 rounded-lg px-2 py-2">
                 <span className={cn('text-[16px] font-bold tabular-nums leading-tight', s.color)}>{s.value}</span>
-                <span className="text-[9px] text-zinc-500 uppercase tracking-wide mt-0.5 text-center whitespace-nowrap">{s.label}</span>
+                <span className="text-[9px] text-white/55 uppercase tracking-wide mt-0.5 text-center whitespace-nowrap">{s.label}</span>
               </div>
             ))}
           </div>
@@ -365,13 +365,13 @@ export default function Scanner() {
         <div className="flex flex-wrap items-center gap-2">
           {/* Search */}
           <div className="flex items-center gap-1.5 bg-zinc-900 border border-zinc-800 rounded-lg px-2.5 py-1.5 flex-1 min-w-[160px] max-w-[280px]">
-            <Search className="h-3.5 w-3.5 text-zinc-600 shrink-0" />
+            <Search className="h-3.5 w-3.5 text-white/35 shrink-0" />
             <input
               type="text"
               value={search}
               onChange={(e) => setSearch(e.target.value)}
               placeholder="Search symbol / sector…"
-              className="bg-transparent text-[12px] text-zinc-200 placeholder:text-zinc-600 outline-none w-full"
+              className="bg-transparent text-[12px] text-white/90 placeholder:text-white/30 outline-none w-full"
             />
           </div>
 
@@ -383,7 +383,7 @@ export default function Scanner() {
                 onClick={() => setPreset(i)}
                 className={cn(
                   'px-2.5 py-1 font-semibold rounded transition-all',
-                  preset === i ? 'bg-emerald-500/10 text-emerald-400' : 'text-zinc-500 hover:text-zinc-300',
+                  preset === i ? 'bg-emerald-500/10 text-emerald-400' : 'text-white/55 hover:text-white/90',
                 )}
               >
                 {p.label}
@@ -392,7 +392,7 @@ export default function Scanner() {
           </div>
 
           {rows.length > 0 && (
-            <span className="text-[11px] text-zinc-500 ml-auto tabular-nums">{rows.length} stocks</span>
+            <span className="text-[11px] text-white/55 ml-auto tabular-nums">{rows.length} stocks</span>
           )}
         </div>
 
@@ -407,25 +407,25 @@ export default function Scanner() {
         {loading && (
           <div className="flex flex-col items-center justify-center p-16 rounded-lg border border-zinc-900 bg-zinc-950">
             <RefreshCw className="h-6 w-6 text-emerald-500 animate-spin" />
-            <span className="text-zinc-500 text-[12px] mt-3">
+            <span className="text-white/55 text-[12px] mt-3">
               Computing indicators for {universe === 'nifty50' ? 'Nifty 50' : universe === 'nifty500' ? 'Nifty 500' : 'all NSE'} stocks…
             </span>
             {universe === 'all' && (
-              <span className="text-zinc-600 text-[11px] mt-1">This may take 10–20 seconds for the full universe</span>
+              <span className="text-white/35 text-[11px] mt-1">This may take 10–20 seconds for the full universe</span>
             )}
           </div>
         )}
 
         {/* Legend */}
         {!loading && data && (
-          <div className="flex flex-wrap items-center gap-3 px-1 text-[10px] text-zinc-600">
-            <span className="font-semibold text-zinc-500 uppercase tracking-wide">Legend:</span>
+          <div className="flex flex-wrap items-center gap-3 px-1 text-[10px] text-white/35">
+            <span className="font-semibold text-white/55 uppercase tracking-wide">Legend:</span>
             <span>🟢 Strong Bullish</span>
             <span>✅ Bullish</span>
             <span>⚠️ Neutral</span>
             <span>❌ Bearish</span>
             <span>🔴 Strong Bearish</span>
-            <span className="ml-auto text-zinc-700">Data: {data.dataDate}</span>
+            <span className="ml-auto text-white/25">Data: {data.dataDate}</span>
           </div>
         )}
 
@@ -473,12 +473,12 @@ export default function Scanner() {
                     >
                       <TD className="sticky left-0 bg-zinc-950 group-hover:bg-zinc-800/20 text-left">
                         <div className="flex items-center gap-1.5">
-                          <span className="text-zinc-700 text-[10px] w-5 tabular-nums">{i + 1}</span>
-                          <span className="font-mono font-semibold text-zinc-100">{r.symbol}</span>
+                          <span className="text-white/25 text-[10px] w-5 tabular-nums">{i + 1}</span>
+                          <span className="font-mono font-semibold text-white/90">{r.symbol}</span>
                         </div>
                       </TD>
-                      <TD className="hidden lg:table-cell text-zinc-500 max-w-[100px] truncate text-left">{r.sector}</TD>
-                      <TD right className="text-zinc-300 tabular-nums">₹{r.latestClose.toFixed(2)}</TD>
+                      <TD className="hidden lg:table-cell text-white/55 max-w-[100px] truncate text-left">{r.sector}</TD>
+                      <TD right className="text-white/80 tabular-nums">₹{r.latestClose.toFixed(2)}</TD>
                       <TD right><PctBadge v={r.priceChange1D} /></TD>
                       <TD right><PctBadge v={r.priceChange1W} /></TD>
                       <TD right><PctBadge v={r.priceChange1M} /></TD>
@@ -490,12 +490,12 @@ export default function Scanner() {
                       <TD>{boolCell(r.supertrendBullish)}</TD>
                       <TD>
                         {rsiCell(r.rsi14)}
-                        <span className="ml-1 text-[10px] text-zinc-600 tabular-nums">{r.rsi14.toFixed(0)}</span>
+                        <span className="ml-1 text-[10px] text-white/35 tabular-nums">{r.rsi14.toFixed(0)}</span>
                       </TD>
                       <TD>{macdCell(r)}</TD>
                       <TD>
                         {adxCell(r.adx14)}
-                        <span className="ml-1 text-[10px] text-zinc-600 tabular-nums">{r.adx14.toFixed(0)}</span>
+                        <span className="ml-1 text-[10px] text-white/35 tabular-nums">{r.adx14.toFixed(0)}</span>
                       </TD>
                       {/* Volatility */}
                       <TD>{boolCell(r.bbExpanding)}</TD>
@@ -503,7 +503,7 @@ export default function Scanner() {
                       {/* Volume */}
                       <TD>
                         {volCell(r.volumeRatio)}
-                        <span className="ml-1 text-[10px] text-zinc-600 tabular-nums">{r.volumeRatio.toFixed(1)}×</span>
+                        <span className="ml-1 text-[10px] text-white/35 tabular-nums">{r.volumeRatio.toFixed(1)}×</span>
                       </TD>
                       {/* RS */}
                       <TD>{rsCell(r)}</TD>
@@ -512,7 +512,7 @@ export default function Scanner() {
                           'inline-flex items-center px-1.5 py-px rounded text-[10px] font-bold tabular-nums',
                           r.rsScore >= 80 ? 'bg-emerald-500/15 text-emerald-400' :
                           r.rsScore >= 60 ? 'bg-lime-500/15 text-lime-400' :
-                          r.rsScore >= 40 ? 'bg-zinc-700 text-zinc-400' :
+                          r.rsScore >= 40 ? 'bg-zinc-700 text-white/55' :
                           'bg-red-500/10 text-red-400',
                         )}>
                           {r.rsScore}
@@ -522,7 +522,7 @@ export default function Scanner() {
                       <TD>
                         {r.isNR4 && <span className="text-[10px] font-bold text-cyan-400">NR4</span>}
                         {r.isNR7 && <span className="text-[10px] font-bold text-sky-400 ml-0.5">NR7</span>}
-                        {!r.isNR4 && !r.isNR7 && <span className="text-zinc-700">—</span>}
+                        {!r.isNR4 && !r.isNR7 && <span className="text-white/25">—</span>}
                       </TD>
                       {/* Score */}
                       <TD right><ScoreBar score={r.score} /></TD>
@@ -536,8 +536,8 @@ export default function Scanner() {
 
         {!loading && rows.length === 0 && !error && data && (
           <div className="flex flex-col items-center justify-center p-12 rounded-lg border border-zinc-900 bg-zinc-950">
-            <TrendingUp className="h-8 w-8 text-zinc-700 mb-3" />
-            <p className="text-zinc-500 text-[13px]">No stocks match the current filter</p>
+            <TrendingUp className="h-8 w-8 text-white/25 mb-3" />
+            <p className="text-white/55 text-[13px]">No stocks match the current filter</p>
           </div>
         )}
 
