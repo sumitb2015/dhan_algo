@@ -3,85 +3,12 @@ import { readStockCSV, readNifty500List, readNifty50Index, readNifty500Index, li
 import { NIFTY50_SYMBOLS } from '@/lib/nifty50';
 import { getSector } from '@/lib/sectors';
 import { OHLCVRow, alignByDate } from '@/lib/rs';
+import type { ScannerParams, ScannerResult, ScannerResponse } from '@/lib/scannerTypes';
+import { DEFAULT_SCANNER_PARAMS } from '@/lib/scannerTypes';
 
-// ─── Types ────────────────────────────────────────────────────────────────────
-
-export interface ScannerResult {
-  symbol: string;
-  sector: string;
-  latestClose: number;
-  latestDate: string;
-
-  // EMA
-  ema20: number;
-  ema50: number;
-  ema200: number;
-  aboveEma20: boolean;
-  aboveEma50: boolean;
-  aboveEma200: boolean;
-  ema20AboveEma50: boolean;
-  ema50AboveEma200: boolean;
-
-  // RSI
-  rsi14: number;
-
-  // MACD (12-26-9)
-  macdLine: number;
-  macdSignal: number;
-  macdHistogram: number;
-  macdBullish: boolean;       // MACD line > Signal line
-  macdCrossover: boolean;     // MACD just crossed above Signal
-
-  // ADX (14)
-  adx14: number;
-  plusDI: number;
-  minusDI: number;
-
-  // Supertrend (7, 3)
-  supertrendBullish: boolean;
-
-  // Bollinger Bands (20, 2)
-  bbUpper: number;
-  bbMiddle: number;
-  bbLower: number;
-  bbExpanding: boolean;       // bandwidth widening vs previous day
-
-  // ATR (14)
-  atr14: number;
-  atrExpanding: boolean;      // current ATR > 20D average ATR
-
-  // Volume
-  latestVolume: number;
-  avgVolume20D: number;
-  volumeRatio: number;
-
-  // NR patterns
-  isNR4: boolean;
-  isNR7: boolean;
-
-  // RS vs benchmark
-  rsRatio: number;
-  rsRising20: boolean;        // RS line trending up over 20 sessions
-  rsAboveMA: boolean;         // RS line above its own 20-period SMA
-  rsScore: number;            // 0–100 percentile rank among cohort
-
-  // Price changes
-  priceChange1D: number;
-  priceChange1W: number;
-  priceChange1M: number;
-  priceChange3M: number;
-
-  // Composite score
-  score: number;              // 0–15 raw
-  scorePercent: number;       // 0–100 %
-}
-
-export interface ScannerResponse {
-  results: ScannerResult[];
-  dataDate: string;
-  universe: string;
-  totalScanned: number;
-}
+// Re-export so existing imports from this route file continue to work
+export type { ScannerParams, ScannerResult, ScannerResponse };
+export { DEFAULT_SCANNER_PARAMS };
 
 // ─── Cache ────────────────────────────────────────────────────────────────────
 interface ScannerCache { data: ScannerResponse; ts: number; }
@@ -99,12 +26,6 @@ function emaArray(values: number[], period: number): number[] {
     result[i] = values[i] * k + result[i - 1] * (1 - k);
   }
   return result;
-}
-
-function lastEma(closes: number[], period: number): number {
-  if (closes.length < period) return 0;
-  const arr = emaArray(closes, period);
-  return arr[arr.length - 1];
 }
 
 function simpleMA(values: number[], period: number): number {
@@ -132,26 +53,31 @@ function wilderRSI(closes: number[], period = 14): number {
   return 100 - 100 / (1 + avgGain / avgLoss);
 }
 
-function computeMACD(closes: number[]): { line: number; signal: number; histogram: number; bullish: boolean; crossover: boolean } {
+function computeMACD(
+  closes: number[],
+  fast = 12,
+  slow = 26,
+  signal = 9,
+): { line: number; signal: number; histogram: number; bullish: boolean; crossover: boolean } {
   const zero = { line: 0, signal: 0, histogram: 0, bullish: false, crossover: false };
-  if (closes.length < 35) return zero;
+  if (closes.length < slow + signal + 2) return zero;
 
-  const ema12arr = emaArray(closes, 12);
-  const ema26arr = emaArray(closes, 26);
+  const ema12arr = emaArray(closes, fast);
+  const ema26arr = emaArray(closes, slow);
   const macdArr = ema12arr.map((v, i) => v - ema26arr[i]);
-  const signalArr = emaArray(macdArr, 9);
+  const signalArr = emaArray(macdArr, signal);
 
   const n = macdArr.length;
   const line = macdArr[n - 1];
-  const signal = signalArr[n - 1];
+  const sig = signalArr[n - 1];
   const prevLine = n >= 2 ? macdArr[n - 2] : line;
-  const prevSignal = n >= 2 ? signalArr[n - 2] : signal;
+  const prevSignal = n >= 2 ? signalArr[n - 2] : sig;
 
-  const histogram = line - signal;
-  const bullish = line > signal;
-  const crossover = line > signal && prevLine <= prevSignal;
+  const histogram = line - sig;
+  const bullish = line > sig;
+  const crossover = line > sig && prevLine <= prevSignal;
 
-  return { line, signal, histogram, bullish, crossover };
+  return { line, signal: sig, histogram, bullish, crossover };
 }
 
 function computeADX(rows: OHLCVRow[], period = 14): { adx: number; plusDI: number; minusDI: number } {
@@ -200,7 +126,7 @@ function computeADX(rows: OHLCVRow[], period = 14): { adx: number; plusDI: numbe
   return { adx: adxVal, plusDI: lastPlusDI, minusDI: lastMinusDI };
 }
 
-// Supertrend (period=7, multiplier=3)
+// Supertrend
 function computeSupertrend(rows: OHLCVRow[], period = 7, multiplier = 3): boolean {
   if (rows.length < period + 1) return false;
 
@@ -357,42 +283,48 @@ function computeScore(r: Omit<ScannerResult, 'score' | 'scorePercent'>): { score
 
 // ─── Per-stock computation ────────────────────────────────────────────────────
 
-function computeScanner(symbol: string, rows: OHLCVRow[], indexRows: OHLCVRow[]): ScannerResult | null {
+function computeScanner(
+  symbol: string,
+  rows: OHLCVRow[],
+  indexRows: OHLCVRow[],
+  params: ScannerParams,
+): ScannerResult | null {
   if (rows.length < 60) return null;
 
   const latest = rows[rows.length - 1];
   const closes = rows.map((r) => r.close);
 
   // EMA
-  const ema20arr = emaArray(closes, 20);
-  const ema50arr = emaArray(closes, 50);
-  const ema200arr = emaArray(closes, 200);
-  const ema20 = ema20arr[ema20arr.length - 1];
-  const ema50 = ema50arr[ema50arr.length - 1];
-  const ema200 = rows.length >= 200 ? ema200arr[ema200arr.length - 1] : 0;
+  const ema1arr = emaArray(closes, params.emaPeriod1);
+  const ema2arr = emaArray(closes, params.emaPeriod2);
+  const ema3arr = emaArray(closes, params.emaPeriod3);
+  const ema20 = ema1arr[ema1arr.length - 1];
+  const ema50 = ema2arr[ema2arr.length - 1];
+  const ema200 = rows.length >= params.emaPeriod3 ? ema3arr[ema3arr.length - 1] : 0;
 
   // RSI
-  const rsi14 = wilderRSI(closes.slice(-60));
+  const rsiLookback = Math.max(60, params.rsiPeriod * 3);
+  const rsi14 = wilderRSI(closes.slice(-rsiLookback), params.rsiPeriod);
 
   // MACD
-  const macd = computeMACD(closes);
+  const macd = computeMACD(closes, params.macdFast, params.macdSlow, params.macdSignal);
 
   // ADX
-  const adx = computeADX(rows);
+  const adx = computeADX(rows, params.adxPeriod);
 
   // Supertrend
-  const supertrendBullish = computeSupertrend(rows);
+  const supertrendBullish = computeSupertrend(rows, params.stPeriod, params.stMultiplier);
 
   // Bollinger Bands
-  const bb = computeBollingerBands(closes);
+  const bb = computeBollingerBands(closes, params.bbPeriod);
 
   // ATR
-  const atrData = computeATR(rows);
+  const atrData = computeATR(rows, params.atrPeriod);
 
   // Volume
   const latestVolume = latest.volume;
-  const vol20 = rows.slice(-20).map((r) => r.volume);
-  const avgVolume20D = vol20.reduce((a, b) => a + b, 0) / vol20.length;
+  const volSlice = rows.slice(-params.volMaPeriod).map((r) => r.volume);
+  const avgVolume20D = volSlice.reduce((a, b) => a + b, 0) / volSlice.length;
   const volumeRatio = avgVolume20D > 0 ? latestVolume / avgVolume20D : 0;
 
   // NR patterns
@@ -453,7 +385,7 @@ function computeScanner(symbol: string, rows: OHLCVRow[], indexRows: OHLCVRow[])
     rsRatio: rs.rsRatio,
     rsRising20: rs.rsRising20,
     rsAboveMA: rs.rsAboveMA,
-    rsScore: 0, // assigned after all stocks computed
+    rsScore: 0,
 
     priceChange1D: pctChg1D(rows),
     priceChange1W: pctChg(rows, 6),
@@ -467,8 +399,9 @@ function computeScanner(symbol: string, rows: OHLCVRow[], indexRows: OHLCVRow[])
 
 // ─── Main scanner function ────────────────────────────────────────────────────
 
-async function runScanner(indexType: string): Promise<ScannerResponse> {
-  const cached = scannerCache.get(indexType);
+async function runScanner(indexType: string, params: ScannerParams): Promise<ScannerResponse> {
+  const cacheKey = `${indexType}:${Object.values(params).join(',')}`;
+  const cached = scannerCache.get(cacheKey);
   if (cached && Date.now() - cached.ts < SCANNER_TTL) return cached.data;
 
   let symbols: string[];
@@ -482,7 +415,6 @@ async function runScanner(indexType: string): Promise<ScannerResponse> {
     symbols = list;
     indexRows = await readNifty500Index(list);
   } else {
-    // 'all' — every available stock CSV, benchmarked against Nifty 500
     symbols = listAvailableSymbols();
     indexRows = await readNifty500Index(readNifty500List());
   }
@@ -492,7 +424,7 @@ async function runScanner(indexType: string): Promise<ScannerResponse> {
   await Promise.all(
     symbols.map(async (symbol) => {
       const rows = readStockCSV(symbol);
-      const r = computeScanner(symbol, rows, indexRows);
+      const r = computeScanner(symbol, rows, indexRows, params);
       if (r) results.push(r);
     })
   );
@@ -520,20 +452,48 @@ async function runScanner(indexType: string): Promise<ScannerResponse> {
     dataDate,
     universe: indexType,
     totalScanned: symbols.length,
+    params,
   };
 
-  scannerCache.set(indexType, { data, ts: Date.now() });
+  scannerCache.set(cacheKey, { data, ts: Date.now() });
   return data;
 }
 
 // ─── Route handler ────────────────────────────────────────────────────────────
 
+function parseIntParam(val: string | null, def: number): number {
+  const n = parseInt(val ?? '', 10);
+  return isNaN(n) ? def : n;
+}
+
+function parseFloatParam(val: string | null, def: number): number {
+  const n = parseFloat(val ?? '');
+  return isNaN(n) ? def : n;
+}
+
 export async function GET(request: NextRequest) {
   const { searchParams } = new URL(request.url);
   const indexType = searchParams.get('index') ?? 'nifty50';
 
+  const d = DEFAULT_SCANNER_PARAMS;
+  const params: ScannerParams = {
+    rsiPeriod:    parseIntParam(searchParams.get('rsiPeriod'),    d.rsiPeriod),
+    emaPeriod1:   parseIntParam(searchParams.get('emaPeriod1'),   d.emaPeriod1),
+    emaPeriod2:   parseIntParam(searchParams.get('emaPeriod2'),   d.emaPeriod2),
+    emaPeriod3:   parseIntParam(searchParams.get('emaPeriod3'),   d.emaPeriod3),
+    macdFast:     parseIntParam(searchParams.get('macdFast'),     d.macdFast),
+    macdSlow:     parseIntParam(searchParams.get('macdSlow'),     d.macdSlow),
+    macdSignal:   parseIntParam(searchParams.get('macdSignal'),   d.macdSignal),
+    stPeriod:     parseIntParam(searchParams.get('stPeriod'),     d.stPeriod),
+    stMultiplier: parseFloatParam(searchParams.get('stMultiplier'), d.stMultiplier),
+    bbPeriod:     parseIntParam(searchParams.get('bbPeriod'),     d.bbPeriod),
+    adxPeriod:    parseIntParam(searchParams.get('adxPeriod'),    d.adxPeriod),
+    atrPeriod:    parseIntParam(searchParams.get('atrPeriod'),    d.atrPeriod),
+    volMaPeriod:  parseIntParam(searchParams.get('volMaPeriod'),  d.volMaPeriod),
+  };
+
   try {
-    const data = await runScanner(indexType);
+    const data = await runScanner(indexType, params);
     return NextResponse.json({ success: true, data });
   } catch (err) {
     console.error('[/api/scanner] Error:', err);
