@@ -634,6 +634,7 @@ export default function Scanner() {
           <a href="/strategies"    className="px-2.5 py-1 font-medium text-white/75 hover:text-white rounded transition-all">Strategies</a>
           <a href="/portfolio"     className="px-2.5 py-1 font-medium text-white/75 hover:text-white rounded transition-all">Portfolio</a>
           <a href="/reports"       className="px-2.5 py-1 font-medium text-white/75 hover:text-white rounded transition-all">Reports</a>
+          <a href="/performance"   className="px-2.5 py-1 font-medium text-white/75 hover:text-white rounded transition-all">Performance</a>
         </nav>
 
         {/* Universe selector */}

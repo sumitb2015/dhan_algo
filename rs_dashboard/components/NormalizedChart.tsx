@@ -75,17 +75,17 @@ function FanChart({ dates, stocks, leaderHovered, onHoverChange }: FanChartProps
   // Which symbol is actively highlighted (chart crosshair takes priority)
   const activeSymbol = crosshair?.symbol ?? leaderHovered;
 
-  // Y range: P3 – P97 of final returns, with padding
+  // Y range: full min–max of final returns so every line is visible, with padding
   const { yMin, yMax } = useMemo(() => {
     const sorted = stocks.map((s) => s.finalReturn).sort((a, b) => a - b);
-    const p3  = sorted[Math.floor(sorted.length * 0.03)] ?? -20;
-    const p97 = sorted[Math.floor(sorted.length * 0.97)] ?? 60;
-    const pad = (p97 - p3) * 0.13;
-    return { yMin: Math.min(p3 - pad, -6), yMax: Math.max(p97 + pad, 6) };
+    const minV = sorted[0] ?? -20;
+    const maxV = sorted[sorted.length - 1] ?? 60;
+    const pad  = (maxV - minV) * 0.08;
+    return { yMin: Math.min(minV - pad, -6), yMax: Math.max(maxV + pad, 6) };
   }, [stocks]);
 
   const xS = (i: number) => M.left + (i / Math.max(dates.length - 1, 1)) * CW;
-  const yS = (v: number) => M.top  + CH - ((Math.min(Math.max(v, yMin), yMax) - yMin) / (yMax - yMin)) * CH;
+  const yS = (v: number) => M.top  + CH - ((v - yMin) / (yMax - yMin)) * CH;
   const y0 = yS(0);
 
   // Pre-build path strings (expensive – only recompute when data changes)
@@ -99,10 +99,10 @@ function FanChart({ dates, stocks, leaderHovered, onHoverChange }: FanChartProps
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }), [stocks, dates, yMin, yMax]);
 
-  // Y-axis ticks
+  // Y-axis ticks — step adapts to the full return range (can be 400%+ for 5Y Nifty 500)
   const yTicks = useMemo(() => {
     const range = yMax - yMin;
-    const step  = range > 250 ? 50 : range > 120 ? 25 : range > 60 ? 10 : range > 25 ? 5 : 2;
+    const step  = range > 800 ? 200 : range > 400 ? 100 : range > 200 ? 50 : range > 100 ? 25 : range > 50 ? 10 : range > 25 ? 5 : 2;
     const ticks: number[] = [];
     for (let v = Math.ceil(yMin / step) * step; v <= yMax; v += step) ticks.push(v);
     return ticks;
@@ -194,6 +194,13 @@ function FanChart({ dates, stocks, leaderHovered, onHoverChange }: FanChartProps
       className="w-full"
       style={{ display: 'block', background: 'transparent', minHeight: 420 }}
     >
+      {/* ── Clip path: prevents lines from drawing outside the chart area ── */}
+      <defs>
+        <clipPath id="chartClip">
+          <rect x={M.left} y={M.top} width={CW} height={CH} />
+        </clipPath>
+      </defs>
+
       {/* ── Grid ── */}
       {yTicks.map((v) => (
         <line key={v}
@@ -205,13 +212,15 @@ function FanChart({ dates, stocks, leaderHovered, onHoverChange }: FanChartProps
       ))}
 
       {/* ── Non-highlighted paths ── */}
-      {paths.map((p) => p.symbol !== activeSymbol && (
-        <path key={p.symbol} d={p.d} fill="none"
-          stroke={p.color}
-          strokeWidth={lineWidth(p.ret, false)}
-          strokeOpacity={lineOpacity(p.ret, !!activeSymbol, false)}
-        />
-      ))}
+      <g clipPath="url(#chartClip)">
+        {paths.map((p) => p.symbol !== activeSymbol && (
+          <path key={p.symbol} d={p.d} fill="none"
+            stroke={p.color}
+            strokeWidth={lineWidth(p.ret, false)}
+            strokeOpacity={lineOpacity(p.ret, !!activeSymbol, false)}
+          />
+        ))}
+      </g>
 
       {/* ── Crosshair ── */}
       {crosshair && (
@@ -234,7 +243,7 @@ function FanChart({ dates, stocks, leaderHovered, onHoverChange }: FanChartProps
       {leaderHovered && !crosshair && (() => {
         const p = paths.find((x) => x.symbol === leaderHovered);
         return p ? (
-          <path key={p.symbol + '_hl'} d={p.d} fill="none"
+          <path key={p.symbol + '_hl'} d={p.d} fill="none" clipPath="url(#chartClip)"
             stroke={p.color} strokeWidth={2.5} strokeOpacity={1} />
         ) : null;
       })()}
@@ -243,7 +252,7 @@ function FanChart({ dates, stocks, leaderHovered, onHoverChange }: FanChartProps
       {crosshair && (() => {
         const p = paths.find((x) => x.symbol === crosshair.symbol);
         return p ? (
-          <path key={p.symbol + '_hl'} d={p.d} fill="none"
+          <path key={p.symbol + '_hl'} d={p.d} fill="none" clipPath="url(#chartClip)"
             stroke={p.color} strokeWidth={2.5} strokeOpacity={1} />
         ) : null;
       })()}
@@ -437,14 +446,16 @@ export default function NormalizedChart() {
         </div>
         <div className="w-px h-5 bg-zinc-800 hidden sm:block" />
         <nav className="flex items-center bg-zinc-900 border border-zinc-800 p-0.5 rounded-lg text-[11px] gap-0.5">
-          <a href="/"           className="px-2.5 py-1 font-medium text-white/45 hover:text-white/75 rounded transition-all">RS Scanner</a>
-          <a href="/movers"     className="px-2.5 py-1 font-medium text-white/45 hover:text-white/75 rounded transition-all">Movers</a>
-          <a href="/scanner"    className="px-2.5 py-1 font-medium text-white/45 hover:text-white/75 rounded transition-all">Tech Scanner</a>
-          <span                 className="px-2.5 py-1 font-semibold rounded bg-sky-500/10 text-sky-400">Charts</span>
-          <a href="/live"       className="px-2.5 py-1 font-medium text-white/45 hover:text-white/75 rounded transition-all">Live</a>
-          <a href="/strategies" className="px-2.5 py-1 font-medium text-white/45 hover:text-white/75 rounded transition-all">Strategies</a>
-          <a href="/portfolio"  className="px-2.5 py-1 font-medium text-white/45 hover:text-white/75 rounded transition-all">Portfolio</a>
-          <a href="/reports"    className="px-2.5 py-1 font-medium text-white/45 hover:text-white/75 rounded transition-all">Reports</a>
+          <a href="/"              className="px-2.5 py-1 font-medium text-white/45 hover:text-white/75 rounded transition-all">RS Scanner</a>
+          <a href="/movers"        className="px-2.5 py-1 font-medium text-white/45 hover:text-white/75 rounded transition-all">Movers</a>
+          <a href="/scanner"       className="px-2.5 py-1 font-medium text-white/45 hover:text-white/75 rounded transition-all">Tech Scanner</a>
+          <span                    className="px-2.5 py-1 font-semibold rounded bg-sky-500/10 text-sky-400">Charts</span>
+          <a href="/distribution"  className="px-2.5 py-1 font-medium text-white/45 hover:text-white/75 rounded transition-all">Distribution</a>
+          <a href="/live"          className="px-2.5 py-1 font-medium text-white/45 hover:text-white/75 rounded transition-all">Live</a>
+          <a href="/strategies"    className="px-2.5 py-1 font-medium text-white/45 hover:text-white/75 rounded transition-all">Strategies</a>
+          <a href="/portfolio"     className="px-2.5 py-1 font-medium text-white/45 hover:text-white/75 rounded transition-all">Portfolio</a>
+          <a href="/reports"       className="px-2.5 py-1 font-medium text-white/45 hover:text-white/75 rounded transition-all">Reports</a>
+          <a href="/performance"   className="px-2.5 py-1 font-medium text-white/45 hover:text-white/75 rounded transition-all">Performance</a>
         </nav>
         <div className="flex items-center gap-2 ml-auto">
           {lastUpdated && (

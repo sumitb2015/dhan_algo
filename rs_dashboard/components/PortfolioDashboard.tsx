@@ -4,7 +4,7 @@ import React, { useState, useEffect, useCallback } from 'react';
 import {
   TrendingUp, TrendingDown, RefreshCw, Briefcase, Info,
   Activity, ArrowUp, ArrowDown, Minus, ShieldAlert,
-  ChevronUp, ChevronDown, ChevronsUpDown,
+  ChevronUp, ChevronDown, ChevronsUpDown, AlertTriangle,
 } from 'lucide-react';
 import {
   PieChart, Pie, Cell, Tooltip as ReTooltip, ResponsiveContainer,
@@ -1108,7 +1108,8 @@ export default function PortfolioDashboard() {
             <Link href="/normalized" className="px-2.5 py-1 font-medium text-zinc-500 hover:text-zinc-300 rounded transition-all">Charts</Link>
             <Link href="/strategies" className="px-2.5 py-1 font-medium text-zinc-500 hover:text-zinc-300 rounded transition-all">Strategies</Link>
             <span className="px-2.5 py-1 font-semibold rounded bg-indigo-500/10 text-indigo-400">Portfolio</span>
-            <Link href="/reports" className="px-2.5 py-1 font-medium text-zinc-500 hover:text-zinc-300 rounded transition-all">Reports</Link>
+            <Link href="/reports"      className="px-2.5 py-1 font-medium text-zinc-500 hover:text-zinc-300 rounded transition-all">Reports</Link>
+            <Link href="/performance"  className="px-2.5 py-1 font-medium text-zinc-500 hover:text-zinc-300 rounded transition-all">Performance</Link>
           </nav>
           <button
             onClick={() => fetchData(false)}
@@ -1169,6 +1170,16 @@ export default function PortfolioDashboard() {
           <div className="flex flex-col items-center justify-center p-12 rounded-xl border border-red-500/20 bg-red-950/10 min-h-[260px] gap-2">
             <p className="text-sm font-semibold text-red-400">Failed to Load Portfolio</p>
             <p className="text-xs text-zinc-600 max-w-md text-center">{error}</p>
+            {/auth|token|login/i.test(error) && (
+              <div className="flex items-center gap-2 mt-1 px-3 py-1.5 rounded-lg bg-amber-500/10 border border-amber-500/30">
+                <AlertTriangle className="h-3.5 w-3.5 text-amber-400 shrink-0" />
+                <span className="text-xs text-amber-400">
+                  Access token expired — run{' '}
+                  <code className="font-mono bg-amber-500/10 px-1 rounded">venv\Scripts\python.exe login.py</code>{' '}
+                  to re-login
+                </span>
+              </div>
+            )}
             <button onClick={() => fetchData(true)} className="mt-2 px-4 py-1.5 text-xs font-semibold bg-red-950/40 border border-red-800 text-red-400 rounded-lg hover:bg-red-900/40 transition-all">
               Retry
             </button>

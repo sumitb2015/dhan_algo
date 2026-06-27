@@ -9,7 +9,8 @@ import RSChart from './RSChart';
 import SectorHeatmap from './SectorHeatmap';
 import DataRefreshPanel from './DataRefreshPanel';
 import Link from 'next/link';
-import { Button } from '@/components/ui/button';
+import { Button, buttonVariants } from '@/components/ui/button';
+import { cn } from '@/lib/utils';
 import { Badge } from '@/components/ui/badge';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import {
@@ -196,6 +197,12 @@ export default function StockDashboard() {
             <Link href="/normalized" className="px-3 py-1.5 text-xs font-semibold rounded-lg text-zinc-500 hover:text-zinc-300 transition-all">
               Charts
             </Link>
+            <Link href="/distribution" className="px-3 py-1.5 text-xs font-semibold rounded-lg text-zinc-500 hover:text-zinc-300 transition-all">
+              Distribution
+            </Link>
+            <Link href="/breadth" className="px-3 py-1.5 text-xs font-semibold rounded-lg text-zinc-500 hover:text-zinc-300 transition-all">
+              Breadth
+            </Link>
             <Link href="/strategies" className="px-3 py-1.5 text-xs font-semibold rounded-lg text-zinc-500 hover:text-zinc-300 transition-all">
               Strategies
             </Link>
@@ -204,6 +211,12 @@ export default function StockDashboard() {
             </Link>
             <Link href="/reports" className="px-3 py-1.5 text-xs font-semibold rounded-lg text-zinc-500 hover:text-zinc-300 transition-all">
               Reports
+            </Link>
+            <Link href="/performance" className="px-3 py-1.5 text-xs font-semibold rounded-lg text-zinc-500 hover:text-zinc-300 transition-all">
+              Performance
+            </Link>
+            <Link href="/options" className="px-3 py-1.5 text-xs font-semibold rounded-lg text-zinc-500 hover:text-zinc-300 transition-all">
+              Options
             </Link>
           </div>
 
@@ -240,37 +253,25 @@ export default function StockDashboard() {
 
           {/* Sync Data */}
           <Tooltip>
-            <TooltipTrigger>
-              <Button
-                onClick={() => setSyncPanelOpen(true)}
-                variant="outline"
-                size="sm"
-                className="gap-1.5 border-zinc-800 bg-zinc-900/60 text-zinc-400 hover:text-emerald-400 hover:border-emerald-500/30 hover:bg-emerald-500/5 rounded-xl text-xs h-8"
-              >
-                <DatabaseZap className="h-3.5 w-3.5" />
-                Sync Data
-              </Button>
+            <TooltipTrigger
+              onClick={() => setSyncPanelOpen(true)}
+              render={<button className={cn(buttonVariants({ variant: 'outline', size: 'sm' }), 'gap-1.5 border-zinc-800 bg-zinc-900/60 text-zinc-400 hover:text-emerald-400 hover:border-emerald-500/30 hover:bg-emerald-500/5 rounded-xl text-xs h-8')} />}
+            >
+              <DatabaseZap className="h-3.5 w-3.5" />
+              Sync Data
             </TooltipTrigger>
             <TooltipContent>Sync latest market data from Dhan API</TooltipContent>
           </Tooltip>
 
           {/* Auto-refresh dropdown */}
           <DropdownMenu>
-            <DropdownMenuTrigger>
-              <Button
-                variant="outline"
-                size="sm"
-                className={`gap-1.5 rounded-xl text-xs h-8 ${
-                  autoRefresh
-                    ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-400 hover:bg-emerald-500/15'
-                    : 'border-zinc-800 bg-zinc-900/60 text-zinc-400 hover:text-zinc-200'
-                }`}
-              >
-                {autoRefresh ? <Wifi className="h-3.5 w-3.5" /> : <WifiOff className="h-3.5 w-3.5" />}
-                <span>{autoRefresh ? `${autoRefresh}m` : 'Auto'}</span>
-                {countdownDisplay && <span className="font-mono text-[10px] opacity-80 tabular-nums">{countdownDisplay}</span>}
-                <ChevronDown className="h-3 w-3 opacity-50" />
-              </Button>
+            <DropdownMenuTrigger
+              render={<button className={cn(buttonVariants({ variant: 'outline', size: 'sm' }), 'gap-1.5 rounded-xl text-xs h-8', autoRefresh ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-400 hover:bg-emerald-500/15' : 'border-zinc-800 bg-zinc-900/60 text-zinc-400 hover:text-zinc-200')} />}
+            >
+              {autoRefresh ? <Wifi className="h-3.5 w-3.5" /> : <WifiOff className="h-3.5 w-3.5" />}
+              <span>{autoRefresh ? `${autoRefresh}m` : 'Auto'}</span>
+              {countdownDisplay && <span className="font-mono text-[10px] opacity-80 tabular-nums">{countdownDisplay}</span>}
+              <ChevronDown className="h-3 w-3 opacity-50" />
             </DropdownMenuTrigger>
             <DropdownMenuContent align="end" className="min-w-[160px]">
               <DropdownMenuLabel className="text-[10px] uppercase tracking-wider">Auto-Refresh</DropdownMenuLabel>
@@ -296,15 +297,11 @@ export default function StockDashboard() {
           {/* Refresh + last updated */}
           <div className="flex items-center gap-1.5">
             <Tooltip>
-              <TooltipTrigger>
-                <Button
-                  onClick={handleRefresh}
-                  variant="outline"
-                  size="icon"
-                  className="border-zinc-800 bg-zinc-900/40 text-zinc-400 hover:text-white hover:border-zinc-700 rounded-xl h-8 w-8"
-                >
-                  <RefreshCw className={`h-3.5 w-3.5 ${loadingStocks ? 'animate-spin text-emerald-400' : ''}`} />
-                </Button>
+              <TooltipTrigger
+                onClick={handleRefresh}
+                render={<button className={cn(buttonVariants({ variant: 'outline', size: 'icon' }), 'border-zinc-800 bg-zinc-900/40 text-zinc-400 hover:text-white hover:border-zinc-700 rounded-xl h-8 w-8')} />}
+              >
+                <RefreshCw className={`h-3.5 w-3.5 ${loadingStocks ? 'animate-spin text-emerald-400' : ''}`} />
               </TooltipTrigger>
               <TooltipContent>Refresh dashboard data</TooltipContent>
             </Tooltip>

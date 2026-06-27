@@ -22,6 +22,14 @@ export async function GET() {
 
     return NextResponse.json(data);
   } catch (err: any) {
+    // execFile throws on non-zero exit; try to parse the JSON the script wrote to stdout
+    if (err.stdout) {
+      try {
+        const lines = String(err.stdout).trim().split('\n').filter(Boolean);
+        const data = JSON.parse(lines[lines.length - 1]);
+        return NextResponse.json(data);
+      } catch {}
+    }
     console.error('Portfolio holdings API error:', err.message, err.stderr ?? '');
     return NextResponse.json(
       { success: false, error: 'Failed to fetch portfolio holdings', detail: String(err.message) },

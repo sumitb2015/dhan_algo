@@ -180,7 +180,7 @@ export default function StrategiesPage() {
             </span>
           </div>
 
-          {portfolio && (
+          {portfolio && portfolio.success && (
             <>
               <div className="h-3.5 w-px bg-zinc-800" />
               <div className="flex items-center gap-1">
@@ -219,6 +219,15 @@ export default function StrategiesPage() {
           >
             <RefreshCw className={`h-2.5 w-2.5 ${portfolioLoading ? 'animate-spin' : ''}`} />
           </button>
+
+          {portfolio && !portfolio.success && (
+            <div className="flex items-center gap-1.5 px-2 py-0.5 rounded-md bg-amber-500/10 border border-amber-500/30">
+              <AlertTriangle className="h-3 w-3 text-amber-400 shrink-0" />
+              <span className="text-[10px] text-amber-400 font-medium">
+                Token expired — run <code className="font-mono bg-amber-500/10 px-0.5 rounded">login.py</code> to re-login
+              </span>
+            </div>
+          )}
         </div>
 
         {/* Global Exit */}
