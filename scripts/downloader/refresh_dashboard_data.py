@@ -597,7 +597,8 @@ def main():
             )
             write_status("quotes", f"  Output: {result.stdout[-500:] if result.stdout else '(none)'}")
             if result.returncode != 0:
-                write_status("quotes", f"  ✗ Quotes error: {result.stderr[-300:]}")
+                err_msg = result.stderr[-300:] if result.stderr else f"exit code {result.returncode}"
+                write_status("quotes", f"  ✗ Quotes error: {err_msg}", done=True, error=err_msg)
             else:
                 write_status("quotes", "  ✓ Live quotes written to debug/today_quotes.json", done=True)
         except Exception as e:

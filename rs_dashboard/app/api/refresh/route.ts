@@ -4,6 +4,7 @@ import fs from 'fs';
 import { spawn, execSync } from 'child_process';
 import { clearCache } from '@/lib/dataLoader';
 import { clearIndicesCache } from '@/app/api/indices-performance/route';
+import { clearMoversCache } from '@/app/api/movers/route';
 
 const PROJECT_ROOT  = path.resolve(process.cwd(), '..');
 const DEBUG_DIR     = path.join(PROJECT_ROOT, 'debug');
@@ -85,12 +86,14 @@ export async function GET() {
     try { fs.writeFileSync(STATUS_FILE, JSON.stringify(status)); } catch { /* ignore */ }
     clearCache();
     clearIndicesCache();
+    clearMoversCache();
   }
 
   // If it finished cleanly, also clear cache once
-  if (status.done && status.phase === 'done') {
+  if (status.done && (status.phase === 'done' || status.phase === 'quotes')) {
     clearCache();
     clearIndicesCache();
+    clearMoversCache();
   }
 
   return NextResponse.json({ running, status, stale, lastDate, lastTradingDay });
@@ -114,6 +117,15 @@ export async function POST(req: NextRequest) {
     const body = await req.json().catch(() => ({}));
     if (body?.target) target = body.target;
   } catch { /* no body */ }
+
+  // Reset status file so the poll doesn't see the previous run's done=true
+  try {
+    fs.writeFileSync(STATUS_FILE, JSON.stringify({
+      pid: null, phase: target, message: 'Starting…',
+      current: 0, total: 0, done: false, error: null,
+      log: [], updated_at: new Date().toISOString(),
+    }));
+  } catch { /* non-fatal */ }
 
   const child = spawn(PYTHON_EXE, [SCRIPT_PATH, '--target', target], {
     cwd: PROJECT_ROOT,

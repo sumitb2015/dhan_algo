@@ -62,6 +62,10 @@ interface MoversCache { data: MoversResponse; ts: number; }
 const moversCache = new Map<string, MoversCache>();
 const MOVERS_TTL = 5 * 60 * 1000;
 
+export function clearMoversCache(): void {
+  moversCache.clear();
+}
+
 function simpleMA(closes: number[], period: number): number {
   if (closes.length < period) return 0;
   const slice = closes.slice(-period);
