@@ -59,9 +59,18 @@ SECTOR_INDICES = [
     {"id": 33, "name": "NIFTY_PSU_BANK",    "label": "Nifty PSU Bank"},
     {"id": 15, "name": "NIFTY_PVT_BANK",    "label": "Nifty Private Bank"},
     {"id": 27, "name": "FINNIFTY",          "label": "Nifty Financial Services"},
-    {"id": 42, "name": "NIFTY_ENERGY",      "label": "Nifty Energy"},
-    {"id": 43, "name": "NIFTY_INFRA",       "label": "Nifty Infra"},
-    {"id": 21, "name": "INDIA_VIX",         "label": "India VIX"},
+    {"id": 42,  "name": "NIFTY_ENERGY",      "label": "Nifty Energy"},
+    {"id": 43,  "name": "NIFTY_INFRA",       "label": "Nifty Infra"},
+    {"id": 21,  "name": "INDIA_VIX",         "label": "India VIX"},
+    {"id": 30,  "name": "NIFTY_MEDIA",          "label": "Nifty Media"},
+    {"id": 447, "name": "NIFTY_HEALTHCARE",     "label": "Nifty Healthcare"},
+    {"id": 466, "name": "NIFTY_CONSR_DURBL",    "label": "Nifty Consumer Durables"},
+    {"id": 469, "name": "NIFTY_FINSRV25_50",    "label": "Nifty Financial Services 25/50"},
+    {"id": 470, "name": "NIFTY_OIL_GAS",        "label": "Nifty Oil and Gas"},
+    {"id": 471, "name": "NIFTY_MIDSML_HLTH",    "label": "Nifty MidSmall Healthcare"},
+    {"id": 495, "name": "NIFTY_FINSEREXBNK",    "label": "Nifty Fin Services Ex-Bank"},
+    {"id": 819, "name": "NIFTY_MS_FIN",         "label": "Nifty MidSmall Financial Services"},
+    {"id": 821, "name": "NIFTY_MS_IT_TELCM",    "label": "Nifty MidSmall IT & Telecom"},
 ]
 
 # ── Status writer ─────────────────────────────────────────────────────────────
