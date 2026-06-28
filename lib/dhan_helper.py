@@ -40,6 +40,8 @@ class DhanHelper:
         self.CO = "CO"
         self.BO = "BO"
         self.MTF = "MTF"
+        self.SL = "STOP_LOSS"
+        self.SLM = "STOP_LOSS_MARKET"
         
         # Cache for performance
         self._master_list = None
@@ -1239,8 +1241,84 @@ class DhanHelper:
             logger.error(f"Exception in get_holdings: {e}")
         return pd.DataFrame()
 
+    def convert_position(
+        self,
+        security_id: str,
+        trading_symbol: str,
+        exchange_segment: str,
+        position_type: str,
+        convert_qty: int,
+        from_product_type: str,
+        to_product_type: str,
+    ) -> bool:
+        """
+        Convert a position between product types (e.g. INTRADAY ↔ CNC/MARGIN).
+        Maps to POST /positions/convert.
+
+        Args:
+            security_id:       Security ID of the position.
+            trading_symbol:    Trading symbol (e.g. "RELIANCE-EQ").
+            exchange_segment:  e.g. "NSE_EQ", "NSE_FNO".
+            position_type:     "LONG" or "SHORT".
+            convert_qty:       Number of shares/lots to convert.
+            from_product_type: Current product type ("INTRADAY", "CNC", "MARGIN").
+            to_product_type:   Target product type ("INTRADAY", "CNC", "MARGIN").
+
+        Returns:
+            True if conversion was accepted (HTTP 202), False otherwise.
+        """
+        try:
+            res = self.dhan.convert_position(
+                security_id=str(security_id),
+                trading_symbol=trading_symbol,
+                exchange_segment=exchange_segment,
+                position_type=position_type.upper(),
+                convert_qty=int(convert_qty),
+                from_product_type=from_product_type.upper(),
+                to_product_type=to_product_type.upper(),
+            )
+            if isinstance(res, dict) and res.get('status') == 'success':
+                logger.info(
+                    f"Position converted: {trading_symbol} {convert_qty} qty "
+                    f"{from_product_type} → {to_product_type}"
+                )
+                return True
+            error_msg = res.get('remarks') if isinstance(res, dict) else str(res)
+            logger.error(f"Position conversion failed: {error_msg}")
+        except Exception as e:
+            logger.error(f"Exception in convert_position: {e}")
+        return False
+
+    def exit_all_positions(self) -> bool:
+        """
+        Liquidate all active positions and cancel all pending orders in one API call.
+        Maps to DELETE /positions.
+
+        Returns:
+            True if the request was accepted, False otherwise.
+
+        Note:
+            This is an atomic broker-side liquidation. For granular control (e.g.
+            closing individual legs), use close_all_positions() instead which places
+            individual market orders per position.
+        """
+        try:
+            dhan_http = getattr(self.dhan, 'dhan_http', None)
+            if not dhan_http:
+                logger.error("exit_all_positions: dhan_http not accessible.")
+                return False
+            res = dhan_http.delete('/positions')
+            if isinstance(res, dict) and res.get('status') == 'success':
+                logger.warning("exit_all_positions: All positions liquidated and pending orders cancelled.")
+                return True
+            error_msg = res.get('remarks') if isinstance(res, dict) else str(res)
+            logger.error(f"exit_all_positions failed: {error_msg}")
+        except Exception as e:
+            logger.error(f"Exception in exit_all_positions: {e}")
+        return False
+
     # --- ORDER MANAGEMENT ---
-    def place_order(self, 
+    def place_order(self,
                     security_id: str, 
                     exchange_segment: Any, 
                     transaction_type: Any, 
@@ -1356,45 +1434,48 @@ class DhanHelper:
     def is_order_filled(self, order_id: str) -> bool:
         """Non-blocking: Check if an order is fully executed."""
         status = self.get_order_status(order_id)
-        # Dhan statuses: TRADED (Filled), PENDING, CANCELLED, REJECTED, TRANSIT
+        # Dhan statuses: TRADED, PART_TRADED, PENDING, TRANSIT, CANCELLED, REJECTED, EXPIRED
         return status == "TRADED"
 
     def wait_for_fill(self, order_id: str, timeout: int = 30, poll_interval: float = 0.5) -> bool:
         """Blocking: Wait until the order is filled or timeout reached."""
         start_time = time.time()
         logger.info(f"Waiting for order {order_id} to fill (Max {timeout}s)...")
-        
+
         while time.time() - start_time < timeout:
             status = self.get_order_status(order_id)
             if status == "TRADED":
                 logger.info(f"Order {order_id} filled.")
                 return True
-            if status in ["CANCELLED", "REJECTED"]:
+            if status in ["CANCELLED", "REJECTED", "EXPIRED"]:
                 logger.warning(f"Order {order_id} terminated with status: {status}")
                 return False
-            
+
             time.sleep(poll_interval)
-            
+
         logger.warning(f"Timeout reached while waiting for order {order_id} to fill.")
         return False
 
-    def modify_order(self, 
-                    order_id: str, 
-                    quantity: int, 
-                    order_type: Any, 
-                    price: float = 0, 
-                    trigger_price: float = 0) -> bool:
-        """Modify an existing pending order."""
+    def modify_order(self,
+                    order_id: str,
+                    quantity: int,
+                    order_type: Any,
+                    price: float = 0,
+                    trigger_price: float = 0,
+                    leg_name: str = 'ENTRY_LEG',
+                    validity: str = 'DAY',
+                    disclosed_quantity: int = 0) -> bool:
+        """Modify an existing pending order. leg_name: 'ENTRY_LEG' (default), 'TARGET_LEG', or 'STOP_LOSS_LEG' for BO/CO orders."""
         try:
             res = self.dhan.modify_order(
                 order_id=order_id,
                 order_type=order_type,
-                leg_name='ENTRY_LEG', # Default for single leg orders
+                leg_name=leg_name,
                 quantity=quantity,
                 price=price,
                 trigger_price=trigger_price,
-                disclosed_quantity=0,
-                validity='DAY'
+                disclosed_quantity=disclosed_quantity,
+                validity=validity,
             )
             if isinstance(res, dict) and res.get('status') == 'success':
                 logger.info(f"Order {order_id} modified successfully.")
@@ -1957,16 +2038,23 @@ class DhanHelper:
             logger.error(f"Exception in get_expiry_list: {e}")
         return []
     # --- FOREVER ORDERS (GTT) ---
-    def place_forever_order(self, 
-                             security_id: str, 
-                             exchange_segment: Any, 
-                             transaction_type: Any, 
-                             quantity: int, 
-                             price: float, 
+    def place_forever_order(self,
+                             security_id: str,
+                             exchange_segment: Any,
+                             transaction_type: Any,
+                             quantity: int,
+                             price: float,
                              trigger_price: float,
-                             order_type: Any = None, 
-                             product_type: Any = None) -> Optional[str]:
-        """Place a Forever (GTT) order."""
+                             order_type: Any = None,
+                             product_type: Any = None,
+                             order_flag: str = "SINGLE",
+                             disclosed_quantity: int = 0,
+                             validity: str = "DAY",
+                             price1: float = 0,
+                             trigger_price1: float = 0,
+                             quantity1: int = 0,
+                             tag: str = None) -> Optional[str]:
+        """Place a Forever (GTT) order. order_flag='OCO' enables One-Cancels-Other with price1/trigger_price1/quantity1 as the target leg."""
         order_type = order_type or self.LIMIT
         product_type = product_type or self.CNC
         try:
@@ -1978,13 +2066,387 @@ class DhanHelper:
                 order_type=order_type,
                 product_type=product_type,
                 price=price,
-                trigger_Price=trigger_price
+                trigger_Price=trigger_price,
+                order_flag=order_flag,
+                disclosed_quantity=disclosed_quantity,
+                validity=validity,
+                price1=price1,
+                trigger_Price1=trigger_price1,
+                quantity1=quantity1,
+                tag=tag,
             )
             if isinstance(res, dict) and res.get('status') == 'success':
-                return res.get('data', {}).get('orderId')
+                order_id = res.get('data', {}).get('orderId')
+                logger.info(f"Forever order placed [{order_flag}]: {order_id}")
+                return order_id
+            logger.error(f"place_forever_order failed: {res.get('remarks') if isinstance(res, dict) else res}")
         except Exception as e:
             logger.error(f"Exception in place_forever_order: {e}")
         return None
+
+    def modify_forever_order(self,
+                              order_id: str,
+                              order_flag: str,
+                              order_type: Any,
+                              leg_name: str,
+                              quantity: int,
+                              price: float,
+                              trigger_price: float,
+                              disclosed_quantity: int = 0,
+                              validity: str = "DAY") -> bool:
+        """Modify an existing Forever order. leg_name: 'TARGET_LEG' or 'STOP_LOSS_LEG'."""
+        try:
+            res = self.dhan.modify_forever(
+                order_id=order_id,
+                order_flag=order_flag,
+                order_type=order_type,
+                leg_name=leg_name,
+                quantity=quantity,
+                price=price,
+                trigger_price=trigger_price,
+                disclosed_quantity=disclosed_quantity,
+                validity=validity,
+            )
+            if isinstance(res, dict) and res.get('status') == 'success':
+                logger.info(f"Forever order modified: {order_id}")
+                return True
+            logger.error(f"modify_forever_order failed: {res.get('remarks') if isinstance(res, dict) else res}")
+        except Exception as e:
+            logger.error(f"Exception in modify_forever_order: {e}")
+        return False
+
+    def cancel_forever_order(self, order_id: str) -> bool:
+        """Cancel a Forever order by order_id."""
+        try:
+            res = self.dhan.cancel_forever(order_id)
+            if isinstance(res, dict) and res.get('status') == 'success':
+                logger.info(f"Forever order cancelled: {order_id}")
+                return True
+            logger.error(f"cancel_forever_order failed: {res.get('remarks') if isinstance(res, dict) else res}")
+        except Exception as e:
+            logger.error(f"Exception in cancel_forever_order: {e}")
+        return False
+
+    def get_forever_orders(self) -> List[Dict]:
+        """Retrieve all active Forever orders."""
+        try:
+            res = self.dhan.get_forever()
+            if isinstance(res, dict) and res.get('status') == 'success':
+                data = res.get('data', [])
+                return data if isinstance(data, list) else []
+            logger.error(f"get_forever_orders failed: {res.get('remarks') if isinstance(res, dict) else res}")
+        except Exception as e:
+            logger.error(f"Exception in get_forever_orders: {e}")
+        return []
+
+    def place_forever(self,
+                      symbol: str,
+                      quantity: int,
+                      transaction_type: Any,
+                      price: float,
+                      trigger_price: float,
+                      order_type: Any = None,
+                      product_type: Any = None,
+                      order_flag: str = "SINGLE",
+                      disclosed_quantity: int = 0,
+                      validity: str = "DAY",
+                      price1: float = 0,
+                      trigger_price1: float = 0,
+                      quantity1: int = 0,
+                      tag: str = None,
+                      instrument: str = None) -> Optional[str]:
+        """Symbol-based convenience wrapper for place_forever_order(). Resolves symbol to security_id + exchange_segment automatically."""
+        try:
+            sec = self._resolve_symbol(symbol, instrument_hint=instrument)
+            if not sec:
+                logger.error(f"Symbol not found for Forever order: {symbol}")
+                return None
+            segment = self._auto_detect_segment(sec)
+            return self.place_forever_order(
+                security_id=str(sec['SECURITY_ID']),
+                exchange_segment=segment,
+                transaction_type=transaction_type,
+                quantity=quantity,
+                price=price,
+                trigger_price=trigger_price,
+                order_type=order_type,
+                product_type=product_type,
+                order_flag=order_flag,
+                disclosed_quantity=disclosed_quantity,
+                validity=validity,
+                price1=price1,
+                trigger_price1=trigger_price1,
+                quantity1=quantity1,
+                tag=tag,
+            )
+        except Exception as e:
+            logger.error(f"Exception in place_forever for {symbol}: {e}")
+        return None
+
+    # --- CONDITIONAL TRIGGERS (ALERTS) ---
+
+    def place_conditional_trigger(
+        self,
+        condition: Dict,
+        orders: List[Dict],
+    ) -> Optional[str]:
+        """
+        Create a conditional trigger that places orders when a market condition is met.
+        Maps to POST /alerts/orders.
+
+        Args:
+            condition: Trigger condition dict. Keys:
+                comparisonType (str)      — e.g. "TECHNICAL_WITH_VALUE"
+                exchangeSegment (str)     — "NSE_EQ", "BSE_EQ", or "IDX_I"
+                securityId (str)          — security ID string
+                indicatorName (str|None)  — e.g. "SMA_5"; None for raw price
+                timeFrame (str)           — "DATE", "ONE_MIN", "FIVE_MIN", "FIFTEEN_MIN"
+                operator (str)            — e.g. "CROSSING_UP", "CROSSING_DOWN"
+                comparingValue (float)    — price/indicator level to compare against
+                expDate (str)             — expiry date "YYYY-MM-DD"
+                frequency (str)           — "ONCE"
+                userNote (str)            — optional label
+            orders: List of order dicts to execute when condition fires. Each dict keys:
+                transactionType, exchangeSegment, productType, orderType,
+                securityId, quantity, validity, price, discQuantity, triggerPrice
+
+        Returns:
+            alertId string on success, None on failure.
+        """
+        try:
+            dhan_http = getattr(self.dhan, 'dhan_http', None)
+            if not dhan_http:
+                logger.error("place_conditional_trigger: dhan_http not accessible.")
+                return None
+            payload = {"condition": condition, "orders": orders}
+            res = dhan_http.post('/alerts/orders', payload)
+            if isinstance(res, dict) and res.get('status') == 'success':
+                alert_id = str(res.get('data', {}).get('alertId', ''))
+                logger.info(f"Conditional trigger created. alertId: {alert_id}")
+                return alert_id or None
+            error_msg = res.get('remarks') if isinstance(res, dict) else str(res)
+            logger.error(f"place_conditional_trigger failed: {error_msg}")
+        except Exception as e:
+            logger.error(f"Exception in place_conditional_trigger: {e}")
+        return None
+
+    def modify_conditional_trigger(
+        self,
+        alert_id: str,
+        condition: Dict,
+        orders: List[Dict],
+    ) -> bool:
+        """
+        Update an existing conditional trigger.
+        Maps to PUT /alerts/orders/{alertId}.
+
+        Args:
+            alert_id:  ID of the trigger to update (returned by place_conditional_trigger).
+            condition: Updated condition dict (same schema as place_conditional_trigger).
+            orders:    Updated orders list (same schema as place_conditional_trigger).
+
+        Returns:
+            True if update was accepted, False otherwise.
+        """
+        try:
+            dhan_http = getattr(self.dhan, 'dhan_http', None)
+            if not dhan_http:
+                logger.error("modify_conditional_trigger: dhan_http not accessible.")
+                return False
+            payload = {"condition": condition, "orders": orders}
+            res = dhan_http.put(f'/alerts/orders/{alert_id}', payload)
+            if isinstance(res, dict) and res.get('status') == 'success':
+                logger.info(f"Conditional trigger {alert_id} updated.")
+                return True
+            error_msg = res.get('remarks') if isinstance(res, dict) else str(res)
+            logger.error(f"modify_conditional_trigger failed: {error_msg}")
+        except Exception as e:
+            logger.error(f"Exception in modify_conditional_trigger: {e}")
+        return False
+
+    def cancel_conditional_trigger(self, alert_id: str) -> bool:
+        """
+        Cancel (delete) a conditional trigger.
+        Maps to DELETE /alerts/orders/{alertId}.
+
+        Args:
+            alert_id: ID of the trigger to cancel.
+
+        Returns:
+            True if cancellation was accepted, False otherwise.
+        """
+        try:
+            dhan_http = getattr(self.dhan, 'dhan_http', None)
+            if not dhan_http:
+                logger.error("cancel_conditional_trigger: dhan_http not accessible.")
+                return False
+            res = dhan_http.delete(f'/alerts/orders/{alert_id}')
+            if isinstance(res, dict) and res.get('status') == 'success':
+                logger.info(f"Conditional trigger {alert_id} cancelled.")
+                return True
+            error_msg = res.get('remarks') if isinstance(res, dict) else str(res)
+            logger.error(f"cancel_conditional_trigger failed: {error_msg}")
+        except Exception as e:
+            logger.error(f"Exception in cancel_conditional_trigger: {e}")
+        return False
+
+    def get_conditional_trigger(self, alert_id: str) -> Dict:
+        """
+        Retrieve details of a specific conditional trigger.
+        Maps to GET /alerts/orders/{alertId}.
+
+        Args:
+            alert_id: ID of the trigger to retrieve.
+
+        Returns:
+            Dict with alertId, alertStatus, condition, orders, timestamps, etc.
+            Empty dict on failure.
+        """
+        try:
+            dhan_http = getattr(self.dhan, 'dhan_http', None)
+            if not dhan_http:
+                logger.error("get_conditional_trigger: dhan_http not accessible.")
+                return {}
+            res = dhan_http.get(f'/alerts/orders/{alert_id}')
+            if isinstance(res, dict) and res.get('status') == 'success':
+                return res.get('data', {})
+            error_msg = res.get('remarks') if isinstance(res, dict) else str(res)
+            logger.error(f"get_conditional_trigger failed: {error_msg}")
+        except Exception as e:
+            logger.error(f"Exception in get_conditional_trigger: {e}")
+        return {}
+
+    def get_all_conditional_triggers(self) -> List[Dict]:
+        """
+        List all conditional triggers for the account.
+        Maps to GET /alerts/orders.
+
+        Returns:
+            List of trigger dicts, empty list on failure.
+        """
+        try:
+            dhan_http = getattr(self.dhan, 'dhan_http', None)
+            if not dhan_http:
+                logger.error("get_all_conditional_triggers: dhan_http not accessible.")
+                return []
+            res = dhan_http.get('/alerts/orders')
+            if isinstance(res, dict) and res.get('status') == 'success':
+                data = res.get('data', [])
+                return data if isinstance(data, list) else []
+            error_msg = res.get('remarks') if isinstance(res, dict) else str(res)
+            logger.error(f"get_all_conditional_triggers failed: {error_msg}")
+        except Exception as e:
+            logger.error(f"Exception in get_all_conditional_triggers: {e}")
+        return []
+
+    def create_price_trigger(
+        self,
+        symbol: str,
+        operator: str,
+        comparing_value: float,
+        transaction_type: str,
+        quantity: int,
+        order_type: str,
+        price: float,
+        product_type: str = "CNC",
+        validity: str = "DAY",
+        trigger_price: float = 0.0,
+        time_frame: str = "ONE_MIN",
+        exp_date: Optional[str] = None,
+        user_note: str = "",
+    ) -> Optional[str]:
+        """
+        High-level helper: create a price-based conditional trigger for a symbol.
+        Resolves the symbol to its security_id automatically.
+
+        Only Equities and Indices are supported by the Dhan API.
+
+        Args:
+            symbol:            Symbol name, e.g. "RELIANCE", "NIFTY".
+            operator:          Comparison operator, e.g. "CROSSING_UP", "CROSSING_DOWN".
+            comparing_value:   Price level that triggers the condition.
+            transaction_type:  "BUY" or "SELL".
+            quantity:          Number of shares/units.
+            order_type:        "LIMIT", "MARKET", "STOP_LOSS", "STOP_LOSS_MARKET".
+            price:             Order price (use 0.0 for MARKET orders).
+            product_type:      "CNC", "INTRADAY", "MARGIN", or "MTF". Default "CNC".
+            validity:          "DAY" or "IOC". Default "DAY".
+            trigger_price:     SL trigger price (required for STOP_LOSS orders).
+            time_frame:        Candle timeframe for condition evaluation.
+                               "DATE", "ONE_MIN", "FIVE_MIN", "FIFTEEN_MIN". Default "ONE_MIN".
+            exp_date:          Condition expiry date "YYYY-MM-DD". Defaults to 1 year from today.
+            user_note:         Optional label stored with the trigger.
+
+        Returns:
+            alertId string on success, None on failure.
+
+        Example::
+
+            alert_id = helper.create_price_trigger(
+                symbol="RELIANCE",
+                operator="CROSSING_UP",
+                comparing_value=1500.0,
+                transaction_type="BUY",
+                quantity=1,
+                order_type="LIMIT",
+                price=1501.0,
+            )
+        """
+        from datetime import timedelta as _td
+
+        sec = self._resolve_symbol(symbol)
+        if not sec:
+            sec = self.find_index(symbol)
+        if not sec:
+            logger.error(f"create_price_trigger: Symbol '{symbol}' not found.")
+            return None
+
+        instrument = sec.get('INSTRUMENT', '')
+        if instrument not in ('EQUITY', 'INDEX'):
+            logger.error(
+                f"create_price_trigger: Conditional triggers only support Equities and Indices. "
+                f"'{symbol}' resolved as '{instrument}'."
+            )
+            return None
+
+        security_id = str(int(sec['SECURITY_ID']))
+        exchange = sec.get('EXCH_ID', 'NSE')
+        if instrument == 'INDEX':
+            exchange_segment = 'IDX_I'
+        elif exchange == 'BSE':
+            exchange_segment = 'BSE_EQ'
+        else:
+            exchange_segment = 'NSE_EQ'
+
+        if not exp_date:
+            exp_date = (datetime.now() + _td(days=365)).strftime('%Y-%m-%d')
+
+        condition = {
+            'comparisonType': 'TECHNICAL_WITH_VALUE',
+            'exchangeSegment': exchange_segment,
+            'securityId': security_id,
+            'timeFrame': time_frame,
+            'operator': operator.upper(),
+            'comparingValue': float(comparing_value),
+            'expDate': exp_date,
+            'frequency': 'ONCE',
+            'userNote': user_note,
+        }
+
+        orders = [{
+            'transactionType': transaction_type.upper(),
+            'exchangeSegment': exchange_segment,
+            'productType': product_type.upper(),
+            'orderType': order_type.upper(),
+            'securityId': security_id,
+            'quantity': int(quantity),
+            'validity': validity.upper(),
+            'price': str(float(price)),
+            'discQuantity': '0',
+            'triggerPrice': str(float(trigger_price)),
+        }]
+
+        return self.place_conditional_trigger(condition, orders)
 
     # --- EDIS / TPIN ---
     def generate_tpin(self) -> bool:
@@ -2084,6 +2546,44 @@ class DhanHelper:
             logger.error(f"Exception in cancel_order: {e}")
         return False
 
+    def place_slice_order(self,
+                          security_id: str,
+                          exchange_segment: Any,
+                          transaction_type: Any,
+                          quantity: int,
+                          order_type: Any = None,
+                          product_type: Any = None,
+                          price: float = 0,
+                          trigger_price: float = 0,
+                          disclosed_quantity: int = 0,
+                          validity: str = 'DAY',
+                          tag: str = None) -> Optional[str]:
+        """Place a sliced order for F&O instruments that exceed the exchange freeze quantity limit. Automatically splits into multiple orders via /orders/slicing."""
+        order_type = order_type or self.LIMIT
+        product_type = product_type or self.MARGIN
+        try:
+            res = self.dhan.place_slice_order(
+                security_id=str(security_id),
+                exchange_segment=exchange_segment,
+                transaction_type=transaction_type,
+                quantity=quantity,
+                order_type=order_type,
+                product_type=product_type,
+                price=price,
+                trigger_price=trigger_price,
+                disclosed_quantity=disclosed_quantity,
+                validity=validity,
+                tag=tag,
+            )
+            if isinstance(res, dict) and res.get('status') == 'success':
+                order_id = res.get('data', {}).get('orderId')
+                logger.info(f"Slice order placed: {order_id}")
+                return order_id
+            logger.error(f"place_slice_order failed: {res.get('remarks') if isinstance(res, dict) else res}")
+        except Exception as e:
+            logger.error(f"Exception in place_slice_order: {e}")
+        return None
+
     def get_trade_book(self, order_id: str = None) -> List[Dict]:
         """
         Fetch trade book. If order_id is provided, fetches trades for that order.
@@ -2113,6 +2613,23 @@ class DhanHelper:
             logger.error(f"Failed to fetch trade history: {error_msg}")
         except Exception as e:
             logger.error(f"Exception in get_trade_history: {e}")
+        return pd.DataFrame()
+
+    def get_ledger_report(self, from_date: str, to_date: str) -> pd.DataFrame:
+        """
+        Fetch ledger report for a date range.
+        from_date, to_date: Format 'YYYY-MM-DD'
+        Returns DataFrame with columns: dhanClientId, narration, voucherdate,
+        exchange, voucherdesc, vouchernumber, debit, credit, runbal
+        """
+        try:
+            res = self.dhan.ledger_report(from_date, to_date)
+            if isinstance(res, dict) and res.get('status') == 'success':
+                return pd.DataFrame(res.get('data', []))
+            error_msg = res.get('remarks') if isinstance(res, dict) else str(res)
+            logger.error(f"Failed to fetch ledger report: {error_msg}")
+        except Exception as e:
+            logger.error(f"Exception in get_ledger_report: {e}")
         return pd.DataFrame()
 
     # --- SECURITY / INSTRUMENT LIST ---
