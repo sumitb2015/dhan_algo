@@ -6,6 +6,7 @@ import requests
 from typing import Optional, Dict, List, Any, Tuple, Union, Callable
 from dhanhq import dhanhq
 from dhanhq.marketfeed import MarketFeed
+from dhanhq.orderupdate import OrderUpdate
 from datetime import datetime, timedelta
 import time
 import threading
@@ -55,6 +56,7 @@ class DhanHelper:
         self._ltp_cache = {} # Cache for LTP: {sid: (price, timestamp)}
         self._expiry_cache = {} # Cache for expiries: {sid: (list, timestamp)}
         self._option_chain_cache = {} # Cache for option chains: {(sid, expiry): (data, timestamp)}
+        self._option_chain_last_call = 0.0 # Tracks last API call time for 3s rate limit
         
         # Pre-load master list during initialization for better performance
         self._load_master_list()
@@ -74,6 +76,13 @@ class DhanHelper:
         self._ws_lock = threading.Lock()
         self.ws_instruments = []
         self.user_on_message = None
+
+        # Order Update WebSocket
+        self.order_updates: Dict[str, dict] = {}  # order_id -> latest update payload
+        self._ou_thread = None
+        self._ou_stop_flag = False
+        self._ou_lock = threading.Lock()
+        self.user_on_order_update: Optional[Callable] = None
 
         # Validate session on init
         self.validate_session()
@@ -2002,7 +2011,10 @@ class DhanHelper:
                 return data
 
         try:
-            time.sleep(1) # Rate limit protection
+            elapsed = time.time() - self._option_chain_last_call
+            if elapsed < 3.0:
+                time.sleep(3.0 - elapsed)
+            self._option_chain_last_call = time.time()
             res = self.dhan.expiry_list(
                 under_security_id=under_security_id,
                 under_exchange_segment=under_exchange_segment
@@ -2076,7 +2088,7 @@ class DhanHelper:
                 tag=tag,
             )
             if isinstance(res, dict) and res.get('status') == 'success':
-                order_id = res.get('data', {}).get('orderId')
+                order_id = (res.get('data') or {}).get('orderId')
                 logger.info(f"Forever order placed [{order_flag}]: {order_id}")
                 return order_id
             logger.error(f"place_forever_order failed: {res.get('remarks') if isinstance(res, dict) else res}")
@@ -2221,7 +2233,7 @@ class DhanHelper:
             payload = {"condition": condition, "orders": orders}
             res = dhan_http.post('/alerts/orders', payload)
             if isinstance(res, dict) and res.get('status') == 'success':
-                alert_id = str(res.get('data', {}).get('alertId', ''))
+                alert_id = str((res.get('data') or {}).get('alertId', ''))
                 logger.info(f"Conditional trigger created. alertId: {alert_id}")
                 return alert_id or None
             error_msg = res.get('remarks') if isinstance(res, dict) else str(res)
@@ -2309,7 +2321,7 @@ class DhanHelper:
                 return {}
             res = dhan_http.get(f'/alerts/orders/{alert_id}')
             if isinstance(res, dict) and res.get('status') == 'success':
-                return res.get('data', {})
+                return res.get('data') or {}
             error_msg = res.get('remarks') if isinstance(res, dict) else str(res)
             logger.error(f"get_conditional_trigger failed: {error_msg}")
         except Exception as e:
@@ -2392,8 +2404,6 @@ class DhanHelper:
                 price=1501.0,
             )
         """
-        from datetime import timedelta as _td
-
         sec = self._resolve_symbol(symbol)
         if not sec:
             sec = self.find_index(symbol)
@@ -2411,6 +2421,8 @@ class DhanHelper:
 
         security_id = str(int(sec['SECURITY_ID']))
         exchange = sec.get('EXCH_ID', 'NSE')
+        # Not using _auto_detect_segment() here: the Alerts API only accepts IDX_I/NSE_EQ/BSE_EQ.
+        # _auto_detect_segment returns BSE_IDX for BSE Index instruments, which the API rejects.
         if instrument == 'INDEX':
             exchange_segment = 'IDX_I'
         elif exchange == 'BSE':
@@ -2419,7 +2431,7 @@ class DhanHelper:
             exchange_segment = 'NSE_EQ'
 
         if not exp_date:
-            exp_date = (datetime.now() + _td(days=365)).strftime('%Y-%m-%d')
+            exp_date = (datetime.now() + timedelta(days=365)).strftime('%Y-%m-%d')
 
         condition = {
             'comparisonType': 'TECHNICAL_WITH_VALUE',
@@ -2699,23 +2711,47 @@ class DhanHelper:
     # --- ADVANCED MARKET DATA ---
     def get_ticker_data(self, securities: Dict[str, List[int]]) -> Dict:
         """
-        Fetch LTP (ticker) data for multiple securities.
+        POST /marketfeed/ltp — LTP for up to 1000 instruments (1 req/s).
         securities: {"NSE_EQ": [1333, 11915], "NSE_FNO": [52175]}
+        Returns: {"NSE_EQ": {"1333": {"last_price": ...}}, ...}
         """
         try:
             res = self.dhan.ticker_data(securities)
             if isinstance(res, dict) and res.get('status') == 'success':
-                return res.get('data', {})
+                data = res.get('data', {})
+                if isinstance(data, dict) and 'data' in data:
+                    return data['data']
+                return data
             error_msg = res.get('remarks') if isinstance(res, dict) else str(res)
             logger.error(f"Failed to fetch ticker data: {error_msg}")
         except Exception as e:
             logger.error(f"Exception in get_ticker_data: {e}")
         return {}
 
+    def get_ohlc_data(self, securities: Dict[str, List[int]]) -> Dict:
+        """
+        POST /marketfeed/ohlc — OHLC + LTP for up to 1000 instruments (1 req/s).
+        securities: {"NSE_EQ": [1333, 11915], "NSE_FNO": [52175]}
+        Returns: {"NSE_EQ": {"1333": {"last_price": ..., "ohlc": {"open": ..., "high": ..., "low": ..., "close": ...}}}, ...}
+        """
+        try:
+            res = self.dhan.ohlc_data(securities=securities)
+            if isinstance(res, dict) and res.get('status') == 'success':
+                data = res.get('data', {})
+                if isinstance(data, dict) and 'data' in data:
+                    return data['data']
+                return data
+            error_msg = res.get('remarks') if isinstance(res, dict) else str(res)
+            logger.error(f"Failed to fetch OHLC data: {error_msg}")
+        except Exception as e:
+            logger.error(f"Exception in get_ohlc_data: {e}")
+        return {}
+
     def get_quote_data(self, securities: Dict[str, List[int]]) -> Dict:
         """
-        Fetch quote data (OHLC + LTP + Volume) for multiple securities.
-        securities: {"NSE_EQ": [1333, 11915], "NSE_FNO": [52175]}
+        POST /marketfeed/quote — Full market depth (L2) + OHLC + OI + volume + circuit limits (1 req/s).
+        securities: {"NSE_FNO": [49081]}
+        Returns: {"NSE_FNO": {"49081": {"last_price": ..., "depth": {"buy": [...], "sell": [...]}, "oi": ..., ...}}}
         """
         try:
             res = self.dhan.quote_data(securities=securities)
@@ -2930,8 +2966,11 @@ class DhanHelper:
                     return data
 
             logger.info(f"Fetching Option Chain for {symbol} ({security_id}) [{exchange_segment}] Expiry: {expiry}")
-            
-            time.sleep(1) # Rate limit protection
+
+            elapsed = time.time() - self._option_chain_last_call
+            if elapsed < 3.0:
+                time.sleep(3.0 - elapsed)
+            self._option_chain_last_call = time.time()
             res = self.dhan.option_chain(
                 under_security_id=security_id,
                 under_exchange_segment=exchange_segment,
@@ -3354,6 +3393,7 @@ class DhanHelper:
                             instruments=self.ws_instruments,
                             on_connect=self._on_ws_connect,
                             on_message=self._on_ws_message,
+                            on_close=self._on_ws_close,
                             on_error=self._on_ws_error
                         )
                         
@@ -3385,6 +3425,75 @@ class DhanHelper:
 
     def _on_ws_error(self, instance, error):
         logger.error(f"WebSocket Error Observed: {error}")
+
+    # --- ORDER UPDATE WEBSOCKET ---
+
+    def start_order_update_websocket(self, on_update: Optional[Callable] = None):
+        """
+        Start the Dhan order-update WebSocket in a background thread.
+
+        Connects to wss://api-order-update.dhan.co and receives real-time
+        order status changes (fills, rejections, cancellations, etc.).
+        Stores each update in self.order_updates[order_id] and optionally
+        calls on_update(payload) for every incoming message.
+        """
+        with self._ou_lock:
+            if on_update is not None:
+                self.user_on_order_update = on_update
+
+            if self._ou_thread and self._ou_thread.is_alive():
+                logger.info("Order Update WebSocket already running. Callback updated.")
+                return
+
+            self._ou_stop_flag = False
+
+            def _handle_order_update(payload: dict):
+                data = payload.get('Data', {})
+                order_id = data.get('orderNo') or data.get('OrderNo')
+                if order_id:
+                    self.order_updates[str(order_id)] = payload
+                status = data.get('status') or data.get('Status', '')
+                logger.info(f"Order update: id={order_id} status={status}")
+                if self.user_on_order_update and callable(self.user_on_order_update):
+                    self.user_on_order_update(payload)
+
+            def run_ou():
+                retry_delay = 10
+                while not self._ou_stop_flag:
+                    try:
+                        logger.info("Starting Order Update WebSocket connection...")
+
+                        class DhanContextAdapter:
+                            def __init__(self, dhan_client):
+                                self.client = dhan_client
+                            def get_client_id(self):
+                                return getattr(self.client.dhan_http, 'client_id', "") if hasattr(self.client, 'dhan_http') else getattr(self.client, 'client_id', "")
+                            def get_access_token(self):
+                                return getattr(self.client.dhan_http, 'access_token', "") if hasattr(self.client, 'dhan_http') else getattr(self.client, 'access_token', "")
+
+                        context_adapter = DhanContextAdapter(self.dhan)
+                        ou = OrderUpdate(context_adapter)
+                        ou.on_update = _handle_order_update
+                        ou.connect_to_dhan_websocket_sync()
+
+                    except Exception as e:
+                        logger.error(f"Order Update WebSocket failed: {e}. Retrying in {retry_delay}s...")
+
+                    if not self._ou_stop_flag:
+                        time.sleep(retry_delay)
+
+            self._ou_thread = threading.Thread(target=run_ou, daemon=True, name="order-update-ws")
+            self._ou_thread.start()
+            logger.info("Order Update WebSocket manager started in background thread.")
+
+    def stop_order_update_websocket(self):
+        """Stop the order-update WebSocket background thread."""
+        self._ou_stop_flag = True
+        logger.info("Order Update WebSocket stop requested.")
+
+    def get_order_update(self, order_id: str) -> Optional[dict]:
+        """Return the latest order-update payload for the given order_id, or None."""
+        return self.order_updates.get(str(order_id))
 
     def _on_ws_message(self, instance, message):
         """Internal callback to update live_data cache."""

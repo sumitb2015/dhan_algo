@@ -1,5 +1,6 @@
 'use client';
 import { useState, useEffect, useCallback } from 'react';
+import NavBar from './NavBar';
 import type { PersistenceResult, MoversPlusResponse } from '@/app/api/movers-plus/route';
 
 // ─── Settings ──────────────────────────────────────────────────────────────────
@@ -182,17 +183,26 @@ export default function MoversPlusDashboard() {
   }
 
   return (
-    <div className="min-h-screen bg-zinc-950 text-white p-4">
-      {/* Page title */}
-      <div className="mb-5">
-        <h1 className="text-lg font-bold text-white tracking-tight">Movers+</h1>
-        <p className="text-xs text-zinc-400 mt-0.5">
-          Mover Persistence — tracks profitable / loss sessions over a configurable window
-          {data && (
-            <span className="ml-2 text-zinc-500">· Data as of {data.dataDate}</span>
-          )}
-        </p>
-      </div>
+    <div className="flex flex-col min-h-screen bg-zinc-950 text-white">
+      {/* Header */}
+      <header className="w-full border-b border-zinc-900 bg-zinc-950/90 backdrop-blur-md px-4 py-2 flex flex-wrap items-center gap-2.5 z-20 sticky top-0">
+        <div className="flex items-center gap-2 mr-1">
+          <div className="h-6 w-6 rounded-md bg-gradient-to-tr from-emerald-600 to-teal-500 flex items-center justify-center shrink-0">
+            <span className="text-white text-[11px] font-bold">M+</span>
+          </div>
+          <span className="text-[14px] font-bold tracking-tight text-white">Movers+</span>
+        </div>
+        <div className="w-px h-5 bg-zinc-800 hidden sm:block" />
+        <NavBar />
+        {data && (
+          <span className="ml-auto text-[11px] text-zinc-500">Data as of {data.dataDate}</span>
+        )}
+      </header>
+
+      <div className="p-4">
+      <p className="text-xs text-zinc-400 mb-5">
+        Mover Persistence — tracks profitable / loss sessions over a configurable window
+      </p>
 
       {/* Settings bar */}
       <div className="flex flex-wrap items-end gap-4 mb-6 p-3 bg-zinc-900 border border-zinc-800 rounded-xl">
@@ -323,6 +333,7 @@ export default function MoversPlusDashboard() {
           </div>
         </>
       )}
+      </div>
     </div>
   );
 }
