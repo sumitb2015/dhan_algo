@@ -39,6 +39,7 @@ class DhanHelper:
         self.MARGIN = "MARGIN"
         self.CO = "CO"
         self.BO = "BO"
+        self.MTF = "MTF"
         
         # Cache for performance
         self._master_list = None
@@ -1075,23 +1076,33 @@ class DhanHelper:
 
 
     # --- FUND MANAGEMENT ---
-    def get_available_funds(self) -> float:
-        """Fetch available margin in the account."""
+    def get_fund_details(self) -> Dict:
+        """
+        Fetch complete fund limits from the account.
+
+        Returns all fields from the /fundlimit API response:
+            availabelBalance, sodLimit, collateralAmount, receiveableAmount,
+            utilizedAmount, blockedPayoutAmount, withdrawableBalance.
+        """
         try:
             res = self.dhan.get_fund_limits()
             if isinstance(res, dict) and res.get('status') == 'success':
-                data = res.get('data', {})
-                # Handle misspelled API field and standard fallbacks
-                funds = data.get('availabelBalance') or data.get('availableBalance') or data.get('availabelMargin') or 0.0
-                return float(funds)
+                return res.get('data') or {}
             error_msg = res.get('remarks') if isinstance(res, dict) else str(res)
-            logger.error(f"Failed to fetch funds: {error_msg}")
+            logger.error(f"Failed to fetch fund details: {error_msg}")
         except Exception as e:
-            logger.error(f"Exception in get_available_funds: {e}")
-        return 0.0
+            logger.error(f"Exception in get_fund_details: {e}")
+        return {}
 
-    def get_margin_required(self, symbol: str, quantity: int, direction: str, 
-                          order_type: str = "MARKET", product_type: str = "MARGIN", 
+    def get_available_funds(self) -> float:
+        """Fetch available margin in the account."""
+        data = self.get_fund_details()
+        # Handle misspelled API field and standard fallbacks
+        funds = data.get('availabelBalance') or data.get('availableBalance') or data.get('availabelMargin') or 0.0
+        return float(funds)
+
+    def get_margin_required(self, symbol: str, quantity: int, direction: str,
+                          order_type: str = "MARKET", product_type: str = "MARGIN",
                           price: float = 0.0, trigger_price: float = 0.0) -> Dict:
         """
         Calculate required margin for a trade.
@@ -1140,6 +1151,65 @@ class DhanHelper:
             logger.error(f"Margin calculation failed: {error_msg}")
         except Exception as e:
             logger.error(f"Exception in get_margin_required: {e}")
+        return {}
+
+    def get_margin_calculator_multi(
+        self,
+        scripts: List[Dict],
+        include_position: bool = True,
+        include_orders: bool = True
+    ) -> Dict:
+        """
+        Calculate combined margin for multiple orders in a single API call.
+        Uses POST /margincalculator/multi.
+
+        Args:
+            scripts: List of order dicts, each with keys:
+                exchangeSegment (str), transactionType (str), quantity (int),
+                productType (str), securityId (str), price (float),
+                triggerPrice (float, optional)
+            include_position: Include existing positions in margin calculation.
+            include_orders:   Include open orders in margin calculation.
+
+        Returns:
+            Dict with keys: total_margin, span_margin, exposure_margin,
+            equity_margin, fo_margin, commodity_margin, currency, hedge_benefit.
+            Empty dict on failure.
+
+        Example::
+
+            scripts = [
+                {"exchangeSegment": "NSE_FNO", "transactionType": "SELL",
+                 "quantity": 75, "productType": "MARGIN",
+                 "securityId": "52175", "price": 200.0},
+            ]
+            margin = helper.get_margin_calculator_multi(scripts)
+            print(f"Total margin required: {margin.get('total_margin')}")
+        """
+        try:
+            dhan_http = getattr(self.dhan, 'dhan_http', None)
+            if not dhan_http:
+                logger.error("get_margin_calculator_multi: dhan_http not accessible.")
+                return {}
+
+            # SDK _send_request auto-injects dhanClientId on every POST — no need to set it here.
+            # Key is "scripList" per Dhan API curl examples (consistent with their "availabelBalance" style).
+            payload = {
+                "includePosition": include_position,
+                "includeOrders": include_orders,
+                "scripList": scripts,
+            }
+
+            time.sleep(1)  # Rate limit protection (consistent with other API calls in this file)
+            res = dhan_http.post('/margincalculator/multi', payload)
+
+            if isinstance(res, dict) and res.get('status') == 'success':
+                return res.get('data') or {}
+
+            error_msg = res.get('remarks') if isinstance(res, dict) else str(res)
+            logger.error(f"Multi-margin calculation failed: {error_msg}")
+        except Exception as e:
+            logger.error(f"Exception in get_margin_calculator_multi: {e}")
         return {}
 
     # --- PORTFOLIO ---

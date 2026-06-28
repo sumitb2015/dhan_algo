@@ -42,7 +42,9 @@ export async function GET() {
   const history = readJson(HISTORY_FILE) as Record<string, unknown> | null;
   const status  = readJson(STATUS_FILE)  as Record<string, unknown> | null;
 
-  if (status && status.pid && status.status === 'RUNNING') {
+  // If the process is dead, reset both RUNNING and ERROR to STOPPED so stale
+  // error state from a previous crash doesn't persist across page loads.
+  if (status && status.pid && (status.status === 'RUNNING' || status.status === 'ERROR')) {
     if (!isPidRunning(Number(status.pid))) {
       (status as Record<string, unknown>).status = 'STOPPED';
     }

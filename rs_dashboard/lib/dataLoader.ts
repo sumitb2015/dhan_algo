@@ -335,6 +335,74 @@ export function listAvailableSymbols(): string[] {
   }
 }
 
+// ─── Sector Indices ───────────────────────────────────────────────────────────
+const INDICES_DIR = path.join(HIST_DIR, 'Indices');
+
+export interface IndexMeta {
+  key: string;
+  label: string;
+  file: string | null; // null = use readNifty50Index()
+}
+
+export const KNOWN_INDICES: IndexMeta[] = [
+  { key: 'NIFTY50',           label: 'Nifty 50',          file: null },
+  { key: 'NIFTY_100',         label: 'Nifty 100',          file: 'NIFTY_100.csv' },
+  { key: 'NIFTY_200',         label: 'Nifty 200',          file: 'NIFTY_200.csv' },
+  { key: 'NIFTY_500',         label: 'Nifty 500',          file: 'NIFTY_500_Daily.csv' }, // top-level
+  { key: 'NIFTY_NEXT50',      label: 'Nifty Next 50',      file: 'NIFTY_NEXT50.csv' },
+  { key: 'NIFTY_MIDCAP100',   label: 'Nifty Midcap 100',   file: 'NIFTY_MIDCAP100.csv' },
+  { key: 'NIFTY_SMALLCAP100', label: 'Nifty Smallcap 100', file: 'NIFTY_SMALLCAP100.csv' },
+  { key: 'BANKNIFTY',         label: 'Bank Nifty',         file: 'BANKNIFTY.csv' },
+  { key: 'FINNIFTY',          label: 'Fin Nifty',          file: 'FINNIFTY.csv' },
+  { key: 'NIFTYIT',           label: 'Nifty IT',           file: 'NIFTYIT.csv' },
+  { key: 'NIFTY_AUTO',        label: 'Nifty Auto',         file: 'NIFTY_AUTO.csv' },
+  { key: 'NIFTY_PHARMA',      label: 'Nifty Pharma',       file: 'NIFTY_PHARMA.csv' },
+  { key: 'NIFTY_FMCG',        label: 'Nifty FMCG',         file: 'NIFTY_FMCG.csv' },
+  { key: 'NIFTY_METAL',       label: 'Nifty Metal',        file: 'NIFTY_METAL.csv' },
+  { key: 'NIFTY_ENERGY',      label: 'Nifty Energy',       file: 'NIFTY_ENERGY.csv' },
+  { key: 'NIFTY_INFRA',       label: 'Nifty Infra',        file: 'NIFTY_INFRA.csv' },
+  { key: 'NIFTY_REALTY',      label: 'Nifty Realty',       file: 'NIFTY_REALTY.csv' },
+  { key: 'NIFTY_PSU_BANK',    label: 'Nifty PSU Bank',     file: 'NIFTY_PSU_BANK.csv' },
+  { key: 'NIFTY_PVT_BANK',    label: 'Nifty Pvt Bank',     file: 'NIFTY_PVT_BANK.csv' },
+  { key: 'INDIA_VIX',         label: 'India VIX',          file: 'INDIA_VIX.csv' },
+];
+
+export function readIndexCSV(meta: IndexMeta): OHLCVRow[] {
+  if (meta.file === null) return readNifty50Index();
+
+  const cacheKey = `idx-file:${meta.file}`;
+  const hit = cacheGet<OHLCVRow[]>(cacheKey);
+  if (hit) return hit;
+
+  // NIFTY_500 top-level CSV lives one level up from INDICES_DIR
+  const filePath = meta.key === 'NIFTY_500'
+    ? path.join(HIST_DIR, meta.file)
+    : path.join(INDICES_DIR, meta.file);
+
+  if (!fs.existsSync(filePath)) return [];
+
+  try {
+    const content = fs.readFileSync(filePath, 'utf-8');
+    const rows = parseCSV(content);
+    const parsed: OHLCVRow[] = rows
+      .filter((r) => r.Datetime && r.Close && !isNaN(parseFloat(r.Close)))
+      .map((r) => ({
+        date: r.Datetime.slice(0, 10),
+        open:   parseFloat(r.Open)   || 0,
+        high:   parseFloat(r.High)   || 0,
+        low:    parseFloat(r.Low)    || 0,
+        close:  parseFloat(r.Close),
+        volume: parseFloat(r.Volume) || 0,
+      }))
+      .sort((a, b) => a.date.localeCompare(b.date));
+
+    cacheSet(cacheKey, parsed);
+    return parsed;
+  } catch {
+    return [];
+  }
+}
+
 // ─── Read Nifty500 watchlist CSV ──────────────────────────────────────────────
 let _nifty500ListCache: string[] | null = null;
 export function readNifty500List(): string[] {

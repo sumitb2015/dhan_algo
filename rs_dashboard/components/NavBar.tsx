@@ -5,6 +5,7 @@ import { usePathname } from 'next/navigation';
 const NAV_LINKS = [
   { href: '/', label: 'RS Scanner' },
   { href: '/movers', label: 'Movers' },
+  { href: '/movers-plus', label: 'Movers+' },
   { href: '/scanner', label: 'Scanner' },
   { href: '/normalized', label: 'Charts' },
   { href: '/breadth', label: 'Breadth' },
@@ -12,6 +13,7 @@ const NAV_LINKS = [
   { href: '/live', label: 'Live' },
   { href: '/strategies', label: 'Strategies' },
   { href: '/portfolio', label: 'Portfolio' },
+  { href: '/portfolio-new', label: 'Portfolio+' },
   { href: '/reports', label: 'Reports' },
   { href: '/performance', label: 'Performance' },
   { href: '/options', label: 'Options' },
