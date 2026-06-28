@@ -3423,6 +3423,9 @@ class DhanHelper:
     def _on_ws_connect(self, instance):
         logger.info("WebSocket Connected Successfully")
 
+    def _on_ws_close(self, instance):
+        logger.warning("WebSocket closed by server (disconnect packet received). Outer loop will reconnect.")
+
     def _on_ws_error(self, instance, error):
         logger.error(f"WebSocket Error Observed: {error}")
 

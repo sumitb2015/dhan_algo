@@ -325,7 +325,9 @@ class MarketFeed:
     def process_data(self, data):
         """Read binary data and initiate processing in received format"""
         first_byte = struct.unpack('<B', data[0:1])[0]
-        if first_byte == 2:
+        if first_byte == 1:
+            return self.process_index(data)
+        elif first_byte == 2:
             return self.process_ticker(data)
         elif first_byte == 3:
             return self.process_market_depth(data)
@@ -341,6 +343,21 @@ class MarketFeed:
             return self.process_full(data)
         elif first_byte == 50:
             return self.server_disconnection(data)
+
+    def process_index(self, data):
+        """Parse Index Packet (response code 1) — same layout as Ticker Packet."""
+        try:
+            unpack_index = struct.unpack('<BHBIfI', data[0:16])
+            return {
+                "type": "Index Packet",
+                "exchange_segment": unpack_index[2],
+                "security_id": unpack_index[3],
+                "LTP": "{:.2f}".format(unpack_index[4]),
+                "LTT": self.utc_time(unpack_index[5])
+            }
+        except struct.error as e:
+            print(f"Warning: could not parse Index Packet (code 1): {e}. Raw length={len(data)}")
+            return None
 
     def process_ticker(self, data):
         """Parse and process Ticker Data"""
