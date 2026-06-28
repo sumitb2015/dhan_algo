@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Dhan Algo Trading: a Python library wrapping the DhanHQ broker SDK for live F&O strategy execution, plus a Next.js dashboard (`rs_dashboard/`) for monitoring and controlling running strategies.
+Dhan Algo Trading: a Python library wrapping the DhanHQ broker SDK for live F&O strategy execution, plus a Next.js dashboard (`rs_dashboard/`) for monitoring, analysis, and controlling running strategies.
 
 ---
 
@@ -74,6 +74,18 @@ venv\Scripts\python.exe scripts/downloader/fetch_today_quotes.py
 
 The refresh script writes progress to `debug/refresh_status.json`; the dashboard polls this file and shows a progress panel. Write `debug/refresh_stop.trigger` to abort mid-run.
 
+### Live WebSocket Bridges
+
+```powershell
+# Stream Nifty 50 equity ticks → debug/live_equity_quotes.json
+venv\Scripts\python.exe scripts/tools/live_equity_ws.py
+
+# Stream FNO option ticks → debug/live_options_quotes.json
+venv\Scripts\python.exe scripts/tools/live_options_ws.py
+```
+
+Write `debug/live_equity_stop.trigger` or `debug/live_options_stop.trigger` to stop the respective bridge gracefully (same pattern as `refresh_stop.trigger`).
+
 ### Tests
 
 ```powershell
@@ -115,13 +127,31 @@ strategies/
 templates/strategy_template.py  # Starting point for new strategies
 scripts/
   downloader/               # Historical data downloaders + dashboard data refresh scripts
-  analysis/                 # Report generators and scanners
+    download_indices.py     # Downloads 5Y daily OHLCV for NSE indices (Nifty 50, 500 + 9 sector indices)
+    refresh_dashboard_data.py
+    fetch_today_quotes.py
+  analysis/                 # Backtests, report generators, and screeners
+    backtest_nifty50_rs_v*.py   # 9-version RS-ranked equity backtest suite (v1–v9 + v6_excel)
+    backtest_ema_breakout.py
+    backtest_ab_test.py
+    backtest_supertrend_flip.py
+    generate_nifty50_stock_analysis_report.py
+    generate_nifty500_report.py
+    generate_market_regime_report.py
+    breakout_momentum_screener.py
+    portfolio_risk_screener.py
+    nifty_distribution_analysis.py
   data_utils/               # Parquet conversion, resampling, indicator append
-  tools/                    # Live options tracker, portfolio monitor (get_portfolio_pnl.py)
+  tools/                    # Live WebSocket bridges and data utilities
+    live_equity_ws.py       # Streams Nifty 50 equity ticks → debug/live_equity_quotes.json
+    live_options_ws.py      # Streams FNO option ticks → debug/live_options_quotes.json
+    options_straddle_candles.py  # 1-min CE+PE straddle candle data for dashboard
+    options_data_fetch.py   # One-off options chain/expiry/LTP fetch for API routes
+    get_portfolio_pnl.py    # Portfolio P&L calculator
   testing/                  # WebSocket and data validation checks
 Historical Data/            # Index CSVs: NIFTY_50_Daily_5Y.csv, NIFTY_500_Daily.csv
 Daily_Historical_Data_Fresh/ # Per-stock daily CSVs (<SYMBOL>_Daily_2Y.csv) for RS dashboard
-debug/                      # Runtime state JSON files, log files, refresh_status.json (auto-created)
+debug/                      # Runtime state JSON files, log files, trigger files (auto-created)
 master_list.csv             # 288K-row security master list (~15 MB, cached)
 MW-NIFTY-500-25-Jan-2026.csv  # Nifty 500 constituent list used by refresh and quote scripts
 ```
@@ -139,13 +169,16 @@ helper = DhanHelper(dhan)
 - Manages a background WebSocket thread with singleton lock and auto-reconnect.
 - Implements 1-second LTP cache and 30-second backoff on HTTP 429.
 - Exposes `helper.live_data` dict (populated by WebSocket); `get_ltp()` prioritises this over REST.
+- `_on_ws_message` uses a **merge strategy** — combines multiple binary packets per tick (Full + OI + PrevClose) to prevent an OI-only packet from overwriting LTP/OHLC in `live_data`.
+- v2 API compliant for orders/forever and funds/margin endpoints.
 
 Key method families (see [docs/AGENT_FUNCTION_REFERENCE.md](docs/AGENT_FUNCTION_REFERENCE.md) for full reference):
 - **Security lookup**: `find_equity`, `find_index`, `find_option`, `find_future`, `get_lot_size`
 - **Market data**: `get_ltp`, `get_latest_candles`, `get_option_chain_df`, `get_expiries`, `get_prev_day_levels`
 - **Technical indicators**: `get_indicators_ta(symbol, interval, indicators, days)` — uses `pandas_ta`
 - **Orders**: `place_entry`, `place_sl_market`, `close_position`, `cancel_all_orders`, `wait_for_fill`
-- **WebSocket**: `start_websocket([(exchange, security_id, feed_type)])`
+- **Market feed WebSocket**: `start_websocket([(exchange, security_id, feed_type)])`
+- **Order-update WebSocket**: `start_order_update_websocket(on_update?)`, `stop_order_update_websocket()`, `get_order_update(order_id)` — connects to `wss://api-order-update.dhan.co`; stores fills/rejections/cancellations in `self.order_updates[order_id]`; calls optional `on_update` callback per event.
 
 ### Strategy State Bridge
 
@@ -153,16 +186,50 @@ Strategies write their live state to `debug/<strategy_key>_state.json` every loo
 
 ### Next.js Dashboard (`rs_dashboard/`)
 
-- App Router layout under `app/`
-- API routes:
-  - `app/api/strategies/route.ts` — start/stop strategy processes via `spawn`; `app/api/strategies/logs/route.ts` — tail log files
-  - `app/api/movers/route.ts` — computes top/bottom movers, volume surges, 52W proximity, MA alignment, RSI from stock CSVs
-  - `app/api/refresh/route.ts` — spawns `refresh_dashboard_data.py`, polls `debug/refresh_status.json`, exposes stop endpoint
-- Pages: `app/movers/` — Market Movers page
-- Components: `StockDashboard` (root), `StrategyCard`, `LogConsole`, `RSChart`, `SectorHeatmap`, `Leaderboard`, `IndexSummary`, `MarketMovers`, `DataRefreshPanel`
-- `PROJECT_ROOT` in API routes is `path.resolve(process.cwd(), '..')` (one level up from `rs_dashboard/`)
-- `debug/today_quotes.json` — live intraday OHLCV snapshot written by `fetch_today_quotes.py`; `dataLoader.ts` merges this to patch the missing today-row in stock CSVs before market close
-- **Table header style**: use `text-xs font-bold text-white` and solid `bg-zinc-800` (not `text-[10px]`, `font-semibold`, `text-zinc-300`, or any transparent bg variant) for `<thead>` / `TH` components in all dashboard tables. At 10px, white text anti-aliases to gray — 12px (`text-xs`) with `font-bold` is the minimum for headers to appear truly white on dark backgrounds.
+App Router layout under `app/`. 14 pages, 29 API routes.
+
+**Pages:**
+
+| Route | Component | What it shows |
+|-------|-----------|---------------|
+| `/` | StockDashboard | RS leaderboard — Nifty 50/500 stocks ranked by relative strength |
+| `/movers` | MarketMovers | Gainers/losers, volume spikes, 52W proximity, RSI zones, NR4/NR7 |
+| `/movers-plus` | MoversPlusDashboard | Persistence movers — consecutive up/down day streaks |
+| `/live` | LiveDashboard | Real-time equity quotes via `live_equity_ws.py` WebSocket bridge |
+| `/portfolio` | PortfolioDashboard | Holdings with sector breakdown and P&L |
+| `/portfolio-new` | PortfolioNewDashboard | Enhanced portfolio analytics |
+| `/scanner` | Scanner | Technical scanner: EMA, RSI, MACD, ADX, Supertrend, Bollinger, NR patterns |
+| `/normalized` | NormalizedChart | Multi-stock normalized return fan chart with period selector |
+| `/distribution` | DistributionChart | Daily-returns histogram with normal curve, skew, kurtosis, outliers |
+| `/breadth` | BreadthAnalysis | Regime detection, % above EMAs, A/D ratio, participation score (0–100) |
+| `/options` | OptionsCharts | Options chain, Greeks, IV visualization |
+| `/performance` | PerformancePage | Sector indices performance (Nifty Bank, Auto, Pharma + 9 new sector indices) |
+| `/reports` | ReportsPage | Trigger Python analysis scripts; download XLSX/CSV output |
+| `/strategies` | StrategiesPage | Strategy control panel — start/stop, live P&L, logs |
+
+**Key API routes:**
+- `app/api/breadth/route.ts` — regime label, % above EMA 20/50/200, bull/bear power, participation score (0–100), A/D ratio, RSI zones from Nifty 500 CSV data.
+- `app/api/live-equity/route.ts` — manages `live_equity_ws.py`; POST `{action:"stop"}` writes `debug/live_equity_stop.trigger`.
+- `app/api/indices-performance/route.ts` — performance for all sector indices (standard + 9 new: Media, Healthcare, Oil & Gas, Consumer Durables, FinServices 25/50, MidSmall variants).
+- `app/api/scanner/route.ts` — full indicator matrix: EMA alignment, RSI, MACD, ADX, Supertrend, Bollinger, ATR, NR4/NR7, RS scoring.
+- `app/api/movers-plus/route.ts` — consecutive-day streak computation over configurable sessions.
+- `app/api/options/` — 5 sub-routes: `expiries`, `chain`, `spot`, `candles`, `live`.
+- `app/api/distribution/route.ts` — mean, std, skew, kurtosis, histogram bins, normal curve, outliers.
+- `app/api/normalized/route.ts` — aligned multi-stock normalized return series.
+- `app/api/strategies/route.ts` — start/stop strategy processes via `spawn`; reads state files and PIDs.
+- `app/api/refresh/route.ts` — spawns `refresh_dashboard_data.py`, polls `debug/refresh_status.json`.
+- `app/api/movers/route.ts` — top/bottom movers, volume surges, 52W proximity, MA alignment, RSI.
+
+**lib/ files:**
+- `rs.ts` — core RS computation and score assignment
+- `dataLoader.ts` — `readStockCSV()`, `readNifty50Index()`, `readNifty500Index()`; patches today's row from `debug/today_quotes.json` before EOD CSVs are available
+- `sectors.ts` — `getSector(symbol)` and sector color map
+- `scannerTypes.ts` — `ScannerParams`, `ScannerResult`, `ScannerResponse` TypeScript types
+- `nifty50.ts` — `NIFTY50_SYMBOLS` export
+
+**`PROJECT_ROOT`** in API routes is `path.resolve(process.cwd(), '..')` (one level up from `rs_dashboard/`).
+
+**Table header style**: use `text-xs font-bold text-white` and solid `bg-zinc-800` for `<thead>` / `TH` components in all dashboard tables. At 10px, white text anti-aliases to gray — 12px (`text-xs`) with `font-bold` is the minimum for headers to appear truly white on dark backgrounds.
 
 ---
 
@@ -175,7 +242,7 @@ These are not obvious and have caused runtime errors in the past (see [GEMINI.md
 - **Always pass `instrument=`** (e.g. `"INDEX"`, `"EQUITY"`, `"OPTIDX"`) to `get_ltp()` / `find_*` to prevent the helper from defaulting to `"EQUITY"` and logging "Security not found" warnings.
 - **NIFTY symbol**: use `"NIFTY"` (not `"NIFTY 50"`). Exchange `"IDX_I"` is mapped internally to `"NSE"` for master list lookups.
 - **NIFTY options underlying ID is `26000`**, not `13` (which is the Nifty 50 index security ID used for spot price and expiry list calls).
-- **WebSocket**: use `feed.run()` inside the background thread. `feed.run_forever()` returns immediately in the current SDK, causing a reconnection loop.
+- **Market feed WebSocket**: use `feed.run()` inside the background thread. `feed.run_forever()` returns immediately in the current SDK, causing a reconnection loop.
 - **Lot sizes are dynamic** — fetch with `helper.get_lot_size("NIFTY")`. For index symbols, this automatically queries derivative contracts to return the option lot size, not the index placeholder of `1`.
 - **Previous day levels**: use `helper.get_prev_day_levels("NIFTY")` — do not inline `get_historical_data()` calls for PDH/PDL/PDC.
 

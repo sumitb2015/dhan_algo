@@ -494,7 +494,6 @@ export default function PortfolioNewDashboard() {
   }
 
   const pnlPositive = totalPnl >= 0;
-  const availableCash = equity?.availableFunds ?? 0;
 
   // ─── Clock display ────────────────────────────────────────────────────────
 
@@ -518,7 +517,7 @@ export default function PortfolioNewDashboard() {
           </span>
           <span className="w-px h-3 bg-zinc-700" />
           <span className="text-[10px] font-mono text-zinc-500">{dateStr}</span>
-          <span className="text-[10px] font-mono text-amber-500/70">{timeStr}</span>
+          <span className="text-[10px] font-mono text-amber-500/70" suppressHydrationWarning>{timeStr}</span>
         </div>
         <div className="flex items-center gap-2">
           {lastUpdated && (
@@ -603,7 +602,7 @@ export default function PortfolioNewDashboard() {
             label="Alternatives"
             value={fmtINR(altCurrent)}
             pct={altInvested > 0 ? ((altCurrent - altInvested) / altInvested) * 100 : undefined}
-            subLabel="Gold · RE · Crypto · Other"
+            subLabel="Cash · Gold · RE · Crypto · Other"
             color="#8b5cf6"
             icon={<Gem size={12} />}
           />

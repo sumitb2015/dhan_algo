@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import { readNifty50Index, readStockCSV, readNifty500List } from '@/lib/dataLoader';
 import { OHLCVRow } from '@/lib/rs';
+import { NIFTY50_SYMBOLS } from '@/lib/nifty50';
 
 // ─── Cache ────────────────────────────────────────────────────────────────────
 let breadthCache: { data: BreadthResponse; ts: number } | null = null;
@@ -20,6 +21,7 @@ export interface IndexStats {
   chopIndex: number | null;
   trendState: string;
   dataDate: string;
+  nifty50BreadthPct: number;  // % of Nifty 50 stocks above their 200d SMA
 }
 
 export interface BreadthStats {
@@ -39,6 +41,16 @@ export interface BreadthStats {
   rsiOverbought: number;   // RSI > 70
   rsiNeutral: number;      // RSI 40–70
   rsiOversold: number;     // RSI < 40
+  participationScore: number;   // 0–100 composite breadth score
+  bullPowerCount: number;       // close > MA20 > MA50 > MA200
+  bullPowerPct: number;
+  bearPowerCount: number;       // close < MA20 < MA50 < MA200
+  bearPowerPct: number;
+  rsiAbove60: number;
+  rsiAbove60Pct: number;
+  rsiBelow40: number;
+  rsiBelow40Pct: number;
+  netAdvanceDecline: number;    // advancing1W - declining1W
 }
 
 export interface BreadthResponse {
@@ -207,6 +219,7 @@ function computeIndexStats(rows: OHLCVRow[]): IndexStats {
     chopIndex: chopIndex !== null ? +chopIndex.toFixed(2) : null,
     trendState,
     dataDate: last.date,
+    nifty50BreadthPct: 0,  // filled in GET handler after computeNifty50BreadthPct()
   };
 }
 
@@ -232,6 +245,8 @@ async function computeBreadthStats(symbols: string[]): Promise<BreadthStats> {
   let new52WHigh = 0, new52WLow = 0;
   let advancing1W = 0, declining1W = 0, unchanged1W = 0;
   let rsiOverbought = 0, rsiNeutral = 0, rsiOversold = 0;
+  let bullPower = 0, bearPower = 0;
+  let rsiAbove60 = 0, rsiBelow40 = 0;
   let total = 0;
 
   await Promise.all(symbols.map(async (symbol) => {
@@ -249,6 +264,12 @@ async function computeBreadthStats(symbols: string[]): Promise<BreadthStats> {
     if (latest.close > ma20 && ma20 > 0) aboveEma20++;
     if (latest.close > ma50 && ma50 > 0) aboveEma50++;
     if (latest.close > ma200 && ma200 > 0) aboveEma200++;
+
+    // Bull/Bear power — all three MAs aligned
+    if (ma20 > 0 && ma50 > 0 && ma200 > 0) {
+      if (latest.close > ma20 && ma20 > ma50 && ma50 > ma200) bullPower++;
+      if (latest.close < ma20 && ma20 < ma50 && ma50 < ma200) bearPower++;
+    }
 
     // 52W high/low: within 0.5%
     const last252 = rows.slice(-252);
@@ -270,19 +291,31 @@ async function computeBreadthStats(symbols: string[]): Promise<BreadthStats> {
     if (rsi > 70) rsiOverbought++;
     else if (rsi < 40) rsiOversold++;
     else rsiNeutral++;
+
+    if (rsi > 60) rsiAbove60++;
+    if (rsi < 40) rsiBelow40++;
   }));
 
   const pct = (n: number) => total > 0 ? +(n / total * 100).toFixed(1) : 0;
   const advDecRatio = declining1W > 0 ? +(advancing1W / declining1W).toFixed(2) : advancing1W > 0 ? 99 : 0;
+
+  const aboveEma200Pct = pct(aboveEma200);
+  const aboveEma50Pct = pct(aboveEma50);
+  const aboveEma20Pct = pct(aboveEma20);
+  const netAdvanceDecline = advancing1W - declining1W;
+  const participationScore = Math.round(
+    aboveEma200Pct * 0.4 + aboveEma50Pct * 0.3 + aboveEma20Pct * 0.2 +
+    (advDecRatio / (advDecRatio + 1)) * 100 * 0.1
+  );
 
   return {
     totalScanned: total,
     aboveEma20Count: aboveEma20,
     aboveEma50Count: aboveEma50,
     aboveEma200Count: aboveEma200,
-    aboveEma20Pct: pct(aboveEma20),
-    aboveEma50Pct: pct(aboveEma50),
-    aboveEma200Pct: pct(aboveEma200),
+    aboveEma20Pct,
+    aboveEma50Pct,
+    aboveEma200Pct,
     new52WHighCount: new52WHigh,
     new52WLowCount: new52WLow,
     advancing1W,
@@ -292,7 +325,31 @@ async function computeBreadthStats(symbols: string[]): Promise<BreadthStats> {
     rsiOverbought,
     rsiNeutral,
     rsiOversold,
+    participationScore,
+    bullPowerCount: bullPower,
+    bullPowerPct: pct(bullPower),
+    bearPowerCount: bearPower,
+    bearPowerPct: pct(bearPower),
+    rsiAbove60,
+    rsiAbove60Pct: pct(rsiAbove60),
+    rsiBelow40,
+    rsiBelow40Pct: pct(rsiBelow40),
+    netAdvanceDecline,
   };
+}
+
+function computeNifty50BreadthPct(): number {
+  let above = 0, total = 0;
+  for (const symbol of NIFTY50_SYMBOLS) {
+    const rows = readStockCSV(symbol);
+    if (rows.length < 200) continue;
+    total++;
+    const closes = rows.map((r) => r.close);
+    const ma200 = simpleMA(closes, 200);
+    const latest = closes[closes.length - 1];
+    if (latest > ma200 && ma200 > 0) above++;
+  }
+  return total > 0 ? +((above / total) * 100).toFixed(1) : 0;
 }
 
 function deriveRegime(aboveEma200Pct: number): { label: string; color: BreadthResponse['regimeColor'] } {
@@ -314,10 +371,13 @@ export async function GET() {
     const nifty50Rows = readNifty50Index();
     const nifty500Symbols = readNifty500List();
 
-    const [nifty50, nifty500Breadth] = await Promise.all([
+    const [nifty50, nifty500Breadth, nifty50BreadthPct] = await Promise.all([
       Promise.resolve(computeIndexStats(nifty50Rows)),
       computeBreadthStats(nifty500Symbols),
+      Promise.resolve(computeNifty50BreadthPct()),
     ]);
+
+    nifty50.nifty50BreadthPct = nifty50BreadthPct;
 
     const { label: regimeLabel, color: regimeColor } = deriveRegime(nifty500Breadth.aboveEma200Pct);
 

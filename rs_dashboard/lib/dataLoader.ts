@@ -362,9 +362,18 @@ export const KNOWN_INDICES: IndexMeta[] = [
   { key: 'NIFTY_ENERGY',      label: 'Nifty Energy',       file: 'NIFTY_ENERGY.csv' },
   { key: 'NIFTY_INFRA',       label: 'Nifty Infra',        file: 'NIFTY_INFRA.csv' },
   { key: 'NIFTY_REALTY',      label: 'Nifty Realty',       file: 'NIFTY_REALTY.csv' },
-  { key: 'NIFTY_PSU_BANK',    label: 'Nifty PSU Bank',     file: 'NIFTY_PSU_BANK.csv' },
-  { key: 'NIFTY_PVT_BANK',    label: 'Nifty Pvt Bank',     file: 'NIFTY_PVT_BANK.csv' },
-  { key: 'INDIA_VIX',         label: 'India VIX',          file: 'INDIA_VIX.csv' },
+  { key: 'NIFTY_PSU_BANK',    label: 'Nifty PSU Bank',              file: 'NIFTY_PSU_BANK.csv' },
+  { key: 'NIFTY_PVT_BANK',    label: 'Nifty Pvt Bank',              file: 'NIFTY_PVT_BANK.csv' },
+  { key: 'NIFTY_MEDIA',       label: 'Nifty Media',                 file: 'NIFTY_MEDIA.csv' },
+  { key: 'NIFTY_HEALTHCARE',  label: 'Nifty Healthcare',            file: 'NIFTY_HEALTHCARE.csv' },
+  { key: 'NIFTY_CONSR_DURBL', label: 'Nifty Consumer Durables',     file: 'NIFTY_CONSR_DURBL.csv' },
+  { key: 'NIFTY_FINSRV25_50', label: 'Nifty Fin Services 25/50',   file: 'NIFTY_FINSRV25_50.csv' },
+  { key: 'NIFTY_OIL_GAS',     label: 'Nifty Oil and Gas',          file: 'NIFTY_OIL_GAS.csv' },
+  { key: 'NIFTY_MIDSML_HLTH', label: 'Nifty MidSmall Healthcare',  file: 'NIFTY_MIDSML_HLTH.csv' },
+  { key: 'NIFTY_FINSEREXBNK', label: 'Nifty Fin Services Ex-Bank', file: 'NIFTY_FINSEREXBNK.csv' },
+  { key: 'NIFTY_MS_FIN',      label: 'Nifty MidSmall Fin Services',file: 'NIFTY_MS_FIN.csv' },
+  { key: 'NIFTY_MS_IT_TELCM', label: 'Nifty MidSmall IT & Telecom',file: 'NIFTY_MS_IT_TELCM.csv' },
+  { key: 'INDIA_VIX',         label: 'India VIX',                  file: 'INDIA_VIX.csv' },
 ];
 
 export function readIndexCSV(meta: IndexMeta): OHLCVRow[] {
