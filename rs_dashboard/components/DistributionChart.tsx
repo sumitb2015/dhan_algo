@@ -9,6 +9,7 @@ import type {
   DistributionResponse, DistributionStats, HistogramBin, NormalPoint, SymbolListItem,
 } from '@/app/api/distribution/route';
 import { cn } from '@/lib/utils';
+import NavBar from './NavBar';
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -573,18 +574,7 @@ export default function DistributionChart() {
         <div className="w-px h-5 bg-zinc-800 hidden sm:block" />
 
         {/* Nav */}
-        <nav className="flex items-center bg-zinc-900 border border-zinc-800 p-0.5 rounded-lg text-[11px] gap-0.5">
-          <a href="/"             className="px-2.5 py-1 font-medium text-white/75 hover:text-white rounded transition-all">RS Scanner</a>
-          <a href="/movers"       className="px-2.5 py-1 font-medium text-white/75 hover:text-white rounded transition-all">Movers</a>
-          <a href="/scanner"      className="px-2.5 py-1 font-medium text-white/75 hover:text-white rounded transition-all">Scanner</a>
-          <a href="/normalized"   className="px-2.5 py-1 font-medium text-white/75 hover:text-white rounded transition-all">Charts</a>
-          <span                   className="px-2.5 py-1 font-semibold rounded bg-violet-500/10 text-violet-400">Distribution</span>
-          <a href="/live"         className="px-2.5 py-1 font-medium text-white/75 hover:text-white rounded transition-all">Live</a>
-          <a href="/strategies"   className="px-2.5 py-1 font-medium text-white/75 hover:text-white rounded transition-all">Strategies</a>
-          <a href="/portfolio"    className="px-2.5 py-1 font-medium text-white/75 hover:text-white rounded transition-all">Portfolio</a>
-          <a href="/reports"      className="px-2.5 py-1 font-medium text-white/75 hover:text-white rounded transition-all">Reports</a>
-          <a href="/performance"  className="px-2.5 py-1 font-medium text-white/75 hover:text-white rounded transition-all">Performance</a>
-        </nav>
+        <NavBar />
 
         {/* Period selector */}
         <div className="flex items-center bg-zinc-900 border border-zinc-800 p-0.5 rounded-lg text-[11px] gap-0.5 ml-auto">

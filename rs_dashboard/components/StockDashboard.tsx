@@ -9,6 +9,7 @@ import RSChart from './RSChart';
 import SectorHeatmap from './SectorHeatmap';
 import DataRefreshPanel from './DataRefreshPanel';
 import Link from 'next/link';
+import NavBar from './NavBar';
 import { Button, buttonVariants } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
 import { Badge } from '@/components/ui/badge';
@@ -130,6 +131,29 @@ export default function StockDashboard() {
     }
   }, [fetchStocks, fetchSummary, autoRefresh]);
 
+  // Auto-sync on mount: if CSV data is behind the last trading day, start refresh and show panel
+  useEffect(() => {
+    const autoSyncIfStale = async () => {
+      try {
+        const res = await fetch('/api/refresh');
+        const json = await res.json();
+        if (json.running) {
+          setSyncPanelOpen(true); // already running (e.g. from a previous tab), show progress
+          return;
+        }
+        if (json.stale) {
+          await fetch('/api/refresh', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ target: 'all' }),
+          });
+          setSyncPanelOpen(true);
+        }
+      } catch { /* ignore network errors */ }
+    };
+    autoSyncIfStale();
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
   useEffect(() => { fetchStocks(); }, [indexType, lookback]);
   useEffect(() => { fetchSummary(); }, []);
 
@@ -167,7 +191,7 @@ export default function StockDashboard() {
   return (
     <div className="flex flex-col h-screen overflow-hidden bg-black text-zinc-150">
       {/* ── Header ── */}
-      <header className="flex-none w-full border-b border-zinc-900 bg-zinc-950/60 backdrop-blur-md px-5 py-2.5 flex items-center justify-between gap-4 z-20">
+      <header className="flex-none w-full border-b border-zinc-900 bg-zinc-950/60 backdrop-blur-md px-5 py-2.5 flex items-center gap-4 z-20 flex-wrap">
         {/* Brand */}
         <div className="flex items-center gap-3 shrink-0">
           <div className="h-9 w-9 rounded-xl bg-gradient-to-tr from-emerald-600 to-teal-400 flex items-center justify-center shadow-lg shadow-emerald-500/10">
@@ -181,44 +205,11 @@ export default function StockDashboard() {
           </div>
         </div>
 
+        {/* Page Switcher */}
+        <NavBar />
+
         {/* Controls */}
-        <div className="flex items-center gap-2 flex-wrap">
-          {/* Page Switcher */}
-          <div className="flex items-center bg-zinc-900/80 border border-zinc-800 p-0.5 rounded-xl">
-            <button className="px-3 py-1.5 text-xs font-semibold rounded-lg bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
-              RS Scanner
-            </button>
-            <Link href="/movers" className="px-3 py-1.5 text-xs font-semibold rounded-lg text-zinc-500 hover:text-zinc-300 transition-all">
-              Movers
-            </Link>
-            <Link href="/scanner" className="px-3 py-1.5 text-xs font-semibold rounded-lg text-zinc-500 hover:text-zinc-300 transition-all">
-              Scanner
-            </Link>
-            <Link href="/normalized" className="px-3 py-1.5 text-xs font-semibold rounded-lg text-zinc-500 hover:text-zinc-300 transition-all">
-              Charts
-            </Link>
-            <Link href="/distribution" className="px-3 py-1.5 text-xs font-semibold rounded-lg text-zinc-500 hover:text-zinc-300 transition-all">
-              Distribution
-            </Link>
-            <Link href="/breadth" className="px-3 py-1.5 text-xs font-semibold rounded-lg text-zinc-500 hover:text-zinc-300 transition-all">
-              Breadth
-            </Link>
-            <Link href="/strategies" className="px-3 py-1.5 text-xs font-semibold rounded-lg text-zinc-500 hover:text-zinc-300 transition-all">
-              Strategies
-            </Link>
-            <Link href="/portfolio" className="px-3 py-1.5 text-xs font-semibold rounded-lg text-zinc-500 hover:text-zinc-300 transition-all">
-              Portfolio
-            </Link>
-            <Link href="/reports" className="px-3 py-1.5 text-xs font-semibold rounded-lg text-zinc-500 hover:text-zinc-300 transition-all">
-              Reports
-            </Link>
-            <Link href="/performance" className="px-3 py-1.5 text-xs font-semibold rounded-lg text-zinc-500 hover:text-zinc-300 transition-all">
-              Performance
-            </Link>
-            <Link href="/options" className="px-3 py-1.5 text-xs font-semibold rounded-lg text-zinc-500 hover:text-zinc-300 transition-all">
-              Options
-            </Link>
-          </div>
+        <div className="flex items-center gap-2 flex-wrap ml-auto">
 
           {/* Lookback */}
           <div className="flex items-center bg-zinc-900/80 border border-zinc-800 p-0.5 rounded-xl">

@@ -2,8 +2,9 @@
 
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import Link from 'next/link';
+import NavBar from './NavBar';
 import {
-  LineChart, Line, XAxis, YAxis, CartesianGrid,
+  AreaChart, Area, LineChart, Line, XAxis, YAxis, CartesianGrid,
   Tooltip, Legend, ResponsiveContainer,
 } from 'recharts';
 
@@ -45,6 +46,10 @@ interface CandleRow {
   'CE LTP': number;
   'PE LTP': number;
   Straddle: number;
+  'CE Vol'?: number;
+  'PE Vol'?: number;
+  'CE OI'?: number;
+  'PE OI'?: number;
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────
@@ -66,18 +71,26 @@ function fmtNum(n: number, dec = 0): string {
   });
 }
 
+function fmtOI(n: number): string {
+  if (n >= 10_000_000) return `${(n / 10_000_000).toFixed(2)}Cr`;
+  if (n >= 100_000)    return `${(n / 100_000).toFixed(1)}L`;
+  return fmtNum(n);
+}
+
 // ─── Tooltip ──────────────────────────────────────────────────────
 
 const ChartTooltip = ({ active, payload, label }: Record<string, unknown>) => {
   if (!active || !Array.isArray(payload) || !payload.length) return null;
   return (
-    <div className="bg-zinc-900 border border-zinc-700 rounded-lg px-3 py-2 text-xs shadow-xl min-w-[150px]">
-      <p className="text-zinc-500 mb-1.5 font-medium">{String(label)}</p>
+    <div className="bg-zinc-950/95 border border-zinc-700/60 rounded-xl px-3.5 py-2.5 text-xs shadow-2xl min-w-[160px] backdrop-blur">
+      <p className="text-zinc-400 mb-2 font-semibold tracking-wide">{String(label)}</p>
       {(payload as Array<{ color: string; name: string; value: number }>).map(p => (
-        <div key={p.name} className="flex justify-between gap-4">
+        <div key={p.name} className="flex justify-between gap-6 mb-0.5">
           <span style={{ color: p.color }} className="font-semibold">{p.name}</span>
-          <span className="tabular-nums text-zinc-200 font-semibold">
-            {typeof p.value === 'number' ? fmtNum(p.value, 2) : p.value}
+          <span className="tabular-nums text-white font-bold">
+            {typeof p.value === 'number'
+              ? p.value > 10_000 ? fmtNum(p.value) : fmtNum(p.value, 2)
+              : p.value}
           </span>
         </div>
       ))}
@@ -129,11 +142,18 @@ export default function OptionsCharts() {
   const [candleData, setCandleData]     = useState<CandleRow[]>([]);
   const [candleLoading, setCandleLoading] = useState(false);
   const [candleError, setCandleError]   = useState('');
+  const [candleDate, setCandleDate]     = useState<string | null>(null);
+  const [candleIsToday, setCandleIsToday] = useState(true);
 
   const [bridgeLoading, setBridgeLoading]     = useState(false);
   const [expiriesLoading, setExpiriesLoading] = useState(false);
   const [error, setError] = useState('');
   const pollRef = useRef<NodeJS.Timeout | null>(null);
+
+  // Premium chart visibility toggles
+  const [showCE,   setShowCE]   = useState(true);
+  const [showPE,   setShowPE]   = useState(true);
+  const [showVWAP, setShowVWAP] = useState(false);
 
   // ── Fetch expiries ────────────────────────────────────────────────
   useEffect(() => {
@@ -179,13 +199,29 @@ export default function OptionsCharts() {
             .filter(n => !isNaN(n))
             .sort((a, b) => a - b);
           setChainStrikes(strikes);
-          setChainSpot(j.data.spot ?? 0);
 
-          if (j.data.spot > 0 && strikes.length) {
-            const atm     = Math.round(j.data.spot / 50) * 50;
-            const nearest = strikes.reduce((prev, cur) =>
-              Math.abs(cur - atm) < Math.abs(prev - atm) ? cur : prev);
-            setSelectedStrike(nearest);
+          const spotPrice = j.data.spot ?? 0;
+
+          const applySpot = (sp: number) => {
+            setChainSpot(sp);
+            if (sp > 0 && strikes.length) {
+              const atmStrike = Math.round(sp / 50) * 50;
+              const nearest   = strikes.reduce((prev, cur) =>
+                Math.abs(cur - atmStrike) < Math.abs(prev - atmStrike) ? cur : prev);
+              setSelectedStrike(nearest);
+            }
+          };
+
+          if (spotPrice > 0) {
+            applySpot(spotPrice);
+          } else {
+            // Fetch spot from dedicated LTP endpoint when chain doesn't return it
+            fetch(`/api/options/spot?underlying=${UNDERLYING}`)
+              .then(r => r.json())
+              .then((s: { success: boolean; spot?: number }) => {
+                if (s.success && s.spot && s.spot > 0) applySpot(s.spot);
+              })
+              .catch(() => {});
           }
         }
       })
@@ -201,9 +237,11 @@ export default function OptionsCharts() {
 
     fetch(`/api/options/candles?expiry=${exp}&strike=${strike}&interval=${interval}`)
       .then(r => r.json())
-      .then((j: { success: boolean; data?: CandleRow[]; error?: string }) => {
+      .then((j: { success: boolean; data?: CandleRow[]; error?: string; dataDate?: string; isToday?: boolean }) => {
         if (j.success && j.data?.length) {
           setCandleData(j.data);
+          setCandleDate(j.dataDate ?? null);
+          setCandleIsToday(j.isToday ?? true);
         } else {
           setCandleError(j.error ?? 'No candle data returned');
         }
@@ -299,6 +337,17 @@ export default function OptionsCharts() {
   const chartStrike    = selectedStrike ?? atm;
   const chartStrikeStr = String(chartStrike);
 
+  // ATM ±10 strikes for the dropdown, index-based
+  const visibleStrikes = (() => {
+    if (!strikeKeys.length) return strikeKeys;
+    const center = atm > 0 ? atm : selectedStrike ?? 0;
+    const nearestIdx = center > 0
+      ? strikeKeys.reduce((best, sk, i) =>
+          Math.abs(sk - center) < Math.abs(strikeKeys[best] - center) ? i : best, 0)
+      : Math.floor(strikeKeys.length / 2);
+    return strikeKeys.slice(Math.max(0, nearestIdx - 10), nearestIdx + 11);
+  })();
+
   // Live snapshot for stats (only meaningful when bridge is running)
   const liveData = quotes?.strikes[chartStrikeStr];
   const ceLtp    = liveData?.ce?.ltp ?? 0;
@@ -310,12 +359,60 @@ export default function OptionsCharts() {
     const sk = h.strikes[chartStrikeStr];
     const ce = sk?.ce?.ltp ?? 0;
     const pe = sk?.pe?.ltp ?? 0;
-    return { time: fmtTime(h.timestamp), 'CE LTP': ce, 'PE LTP': pe, Straddle: ce + pe };
+    return {
+      time: fmtTime(h.timestamp),
+      'CE LTP': ce,
+      'PE LTP': pe,
+      Straddle: ce + pe,
+      'CE OI': sk?.ce?.oi ?? 0,
+      'PE OI': sk?.pe?.oi ?? 0,
+    };
   });
 
-  const chartData    = isLive ? liveChartData : candleData;
-  const chartSource  = isLive ? 'WebSocket' : `${candleInterval}m candles`;
+  const rawChartData = isLive ? liveChartData : candleData;
+
+  // Compute cumulative intraday VWAP: Σ(Straddle × Vol) / Σ(Vol) where Vol = CE Vol + PE Vol.
+  // Falls back to equal-weight mean (TWAP) when volume is absent (live WebSocket mode).
+  const chartData = (() => {
+    let cumPV = 0;
+    let cumV  = 0;
+    return rawChartData.map(row => {
+      const vol = (row['CE Vol'] ?? 0) + (row['PE Vol'] ?? 0);
+      cumPV += row.Straddle * (vol > 0 ? vol : 1);
+      cumV  += vol > 0 ? vol : 1;
+      return { ...row, VWAP: parseFloat((cumPV / cumV).toFixed(2)) };
+    });
+  })();
+
+  const chartSource  = isLive
+    ? 'WebSocket'
+    : candleDate
+      ? `${candleInterval}m candles · ${candleIsToday ? 'today' : candleDate}`
+      : `${candleInterval}m candles`;
   const hasData      = chartData.length > 1;
+
+  // Latest OI values for stat tiles
+  const lastRow      = chartData.length > 0 ? chartData[chartData.length - 1] : null;
+  const latestCeOi   = isLive ? (liveData?.ce?.oi ?? 0) : (lastRow?.['CE OI'] ?? 0);
+  const latestPeOi   = isLive ? (liveData?.pe?.oi ?? 0) : (lastRow?.['PE OI'] ?? 0);
+  const hasOiData    = chartData.some(r => (r['CE OI'] ?? 0) > 0 || (r['PE OI'] ?? 0) > 0);
+  const pcr          = latestCeOi > 0 ? (latestPeOi / latestCeOi) : 0;
+  const xTickInterval = chartData.length > 0 ? Math.max(0, Math.floor(chartData.length / 10) - 1) : 0;
+
+  // Shared chart axes config
+  const xAxisProps = {
+    dataKey: 'time' as const,
+    tick: { fontSize: 10, fill: '#a1a1aa', fontWeight: 500 as const },
+    tickLine: false,
+    axisLine: { stroke: '#27272a' },
+    interval: xTickInterval,
+  };
+  const gridProps = { strokeDasharray: '4 4', stroke: '#27272a', vertical: false };
+  const tooltipProps = { content: <ChartTooltip />, cursor: { stroke: '#3f3f46', strokeWidth: 1 } };
+  const legendProps = {
+    wrapperStyle: { fontSize: 11, paddingTop: 12 },
+    formatter: (v: string) => <span style={{ color: '#d4d4d8', fontWeight: 600 }}>{v}</span>,
+  };
 
   // ── Render ────────────────────────────────────────────────────────
   return (
@@ -327,43 +424,23 @@ export default function OptionsCharts() {
         <div className="flex items-center gap-3">
           <div>
             <h1 className="text-sm font-bold text-white tracking-tight">Nifty Straddle Chart</h1>
-            <p className="text-[10px] text-zinc-600 font-medium">
-              {isLive ? 'Live WebSocket feed' : `Today's ${candleInterval}-min candles (static)`}
+            <p className="text-[10px] text-zinc-400 font-medium">
+              {isLive
+                ? 'Live WebSocket · OI & Premium'
+                : candleDate && !candleIsToday
+                  ? `Historical ${candleInterval}-min candles · ${candleDate}`
+                  : `Today's ${candleInterval}-min candles · OI & Premium`}
             </p>
           </div>
 
           {/* Page nav */}
-          <div className="flex items-center bg-zinc-900/80 border border-zinc-800 p-0.5 rounded-xl">
-            {([
-              ['/', 'RS Scanner'],
-              ['/movers', 'Movers'],
-              ['/scanner', 'Scanner'],
-              ['/normalized', 'Charts'],
-              ['/distribution', 'Distribution'],
-              ['/breadth', 'Breadth'],
-              ['/strategies', 'Strategies'],
-              ['/portfolio', 'Portfolio'],
-              ['/reports', 'Reports'],
-              ['/performance', 'Performance'],
-              ['/options', 'Options'],
-            ] as [string, string][]).map(([href, label]) =>
-              href === '/options' ? (
-                <span key={href} className="px-3 py-1.5 text-xs font-semibold rounded-lg bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
-                  {label}
-                </span>
-              ) : (
-                <Link key={href} href={href} className="px-3 py-1.5 text-xs font-semibold rounded-lg text-zinc-500 hover:text-zinc-300 transition-all">
-                  {label}
-                </Link>
-              )
-            )}
-          </div>
+          <NavBar />
         </div>
 
         <div className="flex items-center gap-2 flex-wrap">
           {/* Expiry */}
           <div className="flex items-center gap-1.5">
-            <span className="text-xs text-zinc-500 font-medium">Expiry</span>
+            <span className="text-xs text-zinc-300 font-medium">Expiry</span>
             <select
               value={expiry}
               onChange={e => setExpiry(e.target.value)}
@@ -384,7 +461,7 @@ export default function OptionsCharts() {
                   className={`px-2.5 py-1.5 text-xs font-semibold rounded-lg transition-all ${
                     candleInterval === s
                       ? 'bg-zinc-700 text-zinc-200 border border-zinc-600'
-                      : 'text-zinc-500 hover:text-zinc-300'
+                      : 'text-zinc-400 hover:text-zinc-200'
                   }`}>
                   {s}m
                 </button>
@@ -400,7 +477,7 @@ export default function OptionsCharts() {
                   className={`px-2.5 py-1.5 text-xs font-semibold rounded-lg transition-all ${
                     pollInterval === s
                       ? 'bg-blue-500/10 text-blue-400 border border-blue-500/20'
-                      : 'text-zinc-500 hover:text-zinc-300'
+                      : 'text-zinc-400 hover:text-zinc-200'
                   }`}>
                   {s}s
                 </button>
@@ -433,46 +510,53 @@ export default function OptionsCharts() {
 
       <div className="flex-1 flex flex-col gap-4 px-6 py-5">
 
-        {/* Stats */}
-        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+        {/* Stats — 6 tiles */}
+        <div className="grid grid-cols-3 sm:grid-cols-6 gap-3">
           {([
             { label: 'Spot',
               value: spot > 0 ? fmtNum(spot, 2) : '—',
-              color: 'text-white' },
+              color: 'text-white', accent: 'border-zinc-700/60' },
             { label: 'Strike',
               value: chartStrike > 0 ? fmtNum(chartStrike) : '—',
               sub: chartStrike > 0 && atm > 0
                 ? chartStrike === atm ? 'ATM'
-                  : chartStrike > atm ? `ATM + ${chartStrike - atm}` : `ATM − ${atm - chartStrike}`
+                  : chartStrike > atm ? `+${chartStrike - atm}` : `−${atm - chartStrike}`
                 : undefined,
-              color: 'text-zinc-200' },
+              color: 'text-zinc-100', accent: 'border-zinc-700/60' },
+            { label: 'CE OI',
+              value: latestCeOi > 0 ? fmtOI(latestCeOi) : '—',
+              sub: latestCeOi > 0 ? fmtNum(latestCeOi) : undefined,
+              color: 'text-blue-400', accent: 'border-blue-500/25' },
+            { label: 'PE OI',
+              value: latestPeOi > 0 ? fmtOI(latestPeOi) : '—',
+              sub: latestPeOi > 0 ? fmtNum(latestPeOi) : undefined,
+              color: 'text-red-400', accent: 'border-red-500/25' },
+            { label: 'PCR',
+              value: pcr > 0 ? pcr.toFixed(2) : '—',
+              sub: pcr > 1.3 ? 'Bullish' : pcr > 0 && pcr < 0.7 ? 'Bearish' : pcr > 0 ? 'Neutral' : undefined,
+              color: pcr > 1.3 ? 'text-emerald-400' : pcr > 0 && pcr < 0.7 ? 'text-red-400' : 'text-yellow-400',
+              accent: pcr > 1.3 ? 'border-emerald-500/25' : pcr > 0 && pcr < 0.7 ? 'border-red-500/25' : 'border-yellow-500/25' },
             { label: 'Straddle',
-              value: isLive && straddle > 0 ? fmtNum(straddle, 2) : '—',
-              sub: isLive ? undefined : 'live only',
-              color: 'text-emerald-400' },
-            { label: 'CE / PE',
-              value: isLive && (ceLtp > 0 || peLtp > 0)
-                ? `${fmtNum(ceLtp, 2)} / ${fmtNum(peLtp, 2)}` : '—',
-              sub: isLive ? undefined : 'live only',
-              color: 'text-zinc-300' },
-          ] as { label: string; value: string; color: string; sub?: string }[]).map(
-            ({ label, value, color, sub }) => (
-              <div key={label} className="bg-zinc-900 border border-zinc-800 rounded-xl px-4 py-3">
-                <p className="text-[10px] font-semibold text-zinc-500 uppercase tracking-wide">{label}</p>
-                <p className={`text-xl font-bold tabular-nums mt-0.5 ${color}`}>{value}</p>
-                {sub && <p className="text-[10px] text-zinc-600 mt-0.5">{sub}</p>}
-              </div>
-            )
-          )}
+              value: isLive && straddle > 0 ? fmtNum(straddle, 2)
+                : lastRow && (lastRow['CE LTP'] + lastRow['PE LTP']) > 0
+                  ? fmtNum(lastRow['CE LTP'] + lastRow['PE LTP'], 2)
+                  : '—',
+              sub: isLive ? `CE ${fmtNum(ceLtp, 2)} + PE ${fmtNum(peLtp, 2)}` : undefined,
+              color: 'text-emerald-400', accent: 'border-emerald-500/25' },
+          ]).map(({ label, value, color, sub, accent }) => (
+            <div key={label} className={`bg-zinc-900/70 border rounded-xl px-3 py-3 ${accent}`}>
+              <p className="text-[10px] font-bold text-zinc-400 uppercase tracking-widest mb-1">{label}</p>
+              <p className={`text-base font-bold tabular-nums ${color}`}>{value}</p>
+              {sub && <p className="text-[10px] text-zinc-400 mt-0.5 font-medium truncate">{sub}</p>}
+            </div>
+          ))}
         </div>
 
         {/* Strike selector */}
         <div className="flex items-center gap-3">
-          <span className="text-xs font-semibold text-zinc-500 uppercase tracking-wide whitespace-nowrap">
-            Strike
-          </span>
+          <span className="text-xs font-bold text-zinc-300 uppercase tracking-widest whitespace-nowrap">Strike</span>
           {chainLoading ? (
-            <span className="text-xs text-zinc-600">Loading strikes…</span>
+            <span className="text-xs text-zinc-400">Loading strikes…</span>
           ) : strikeKeys.length > 0 ? (
             <select
               value={chartStrike || ''}
@@ -480,19 +564,17 @@ export default function OptionsCharts() {
               className="bg-zinc-900 border border-zinc-700 text-zinc-200 text-sm font-semibold
                          rounded-lg px-3 py-1.5 focus:outline-none focus:border-emerald-500 w-48"
             >
-              {strikeKeys.map(sk => (
+              {visibleStrikes.map(sk => (
                 <option key={sk} value={sk}>
                   {fmtNum(sk)}{sk === atm ? '  ← ATM' : ''}
                 </option>
               ))}
             </select>
           ) : (
-            <span className="text-xs text-zinc-600">
+            <span className="text-xs text-zinc-400">
               {expiry ? 'Could not load chain — check auth token' : 'Select an expiry first'}
             </span>
           )}
-
-          {/* Refresh candles button (not live) */}
           {!isLive && selectedStrike && expiry && (
             <button
               onClick={() => fetchCandles(selectedStrike, expiry, candleInterval)}
@@ -503,96 +585,193 @@ export default function OptionsCharts() {
               {candleLoading ? '…' : 'Refresh'}
             </button>
           )}
-        </div>
-
-        {/* Straddle chart */}
-        <div className="bg-zinc-900 border border-zinc-800 rounded-xl p-4 flex-1 min-h-[360px]">
-          <div className="flex items-center justify-between mb-4">
-            <div>
-              <p className="text-xs font-bold text-white">
-                Straddle Premium
-                <span className="ml-2 text-zinc-400 font-normal">
-                  {chartStrike > 0 ? fmtNum(chartStrike) : '—'}
-                  {chartStrike === atm && atm > 0 && (
-                    <span className="ml-1 text-yellow-400 font-semibold text-[10px]">ATM</span>
-                  )}
-                </span>
-              </p>
-              <p className="text-[10px] text-zinc-500 mt-0.5">
-                NIFTY · {expiry || '—'} · {chartSource}
-                {hasData && ` · ${chartData.length} points`}
-              </p>
-            </div>
-            {isLive && bridgeStatus.last_update && (
-              <p className="text-[10px] text-zinc-600">
-                updated {fmtTime(bridgeStatus.last_update)}
-              </p>
-            )}
-          </div>
-
-          {hasData ? (
-            <ResponsiveContainer width="100%" height={300}>
-              <LineChart data={chartData} margin={{ top: 4, right: 12, left: 0, bottom: 0 }}>
-                <CartesianGrid strokeDasharray="3 3" stroke="#27272a" />
-                <XAxis
-                  dataKey="time"
-                  tick={{ fontSize: 10, fill: '#71717a' }}
-                  tickLine={false}
-                  interval="preserveStartEnd"
-                />
-                <YAxis
-                  tick={{ fontSize: 10, fill: '#71717a' }}
-                  tickLine={false}
-                  axisLine={false}
-                  domain={['auto', 'auto']}
-                  width={60}
-                  tickFormatter={v => fmtNum(v, 0)}
-                />
-                <Tooltip content={<ChartTooltip />} />
-                <Legend wrapperStyle={{ fontSize: 11, color: '#a1a1aa', paddingTop: 8 }} />
-                <Line type="monotone" dataKey="Straddle"
-                  stroke="#10b981" strokeWidth={2.5}
-                  dot={false} activeDot={{ r: 4, strokeWidth: 0 }} />
-                <Line type="monotone" dataKey="CE LTP"
-                  stroke="#60a5fa" strokeWidth={1.5}
-                  dot={false} strokeDasharray="5 3"
-                  activeDot={{ r: 3, strokeWidth: 0 }} />
-                <Line type="monotone" dataKey="PE LTP"
-                  stroke="#f87171" strokeWidth={1.5}
-                  dot={false} strokeDasharray="5 3"
-                  activeDot={{ r: 3, strokeWidth: 0 }} />
-              </LineChart>
-            </ResponsiveContainer>
-          ) : (
-            <div className="flex flex-col items-center justify-center h-[300px] gap-2">
-              {candleLoading ? (
-                <>
-                  <div className="w-5 h-5 border-2 border-zinc-600 border-t-zinc-300 rounded-full animate-spin" />
-                  <p className="text-sm text-zinc-600">Loading {candleInterval}-min candles…</p>
-                </>
-              ) : isLive ? (
-                <>
-                  <div className="w-5 h-5 border-2 border-emerald-600 border-t-transparent rounded-full animate-spin" />
-                  <p className="text-sm text-zinc-600">Accumulating live ticks…</p>
-                  <p className="text-xs text-zinc-700">Chart updates every {pollInterval}s</p>
-                </>
-              ) : candleError ? (
-                <>
-                  <p className="text-sm text-red-500">{candleError}</p>
-                  <button
-                    onClick={() => selectedStrike && fetchCandles(selectedStrike, expiry, candleInterval)}
-                    className="text-xs text-zinc-500 underline mt-1"
-                  >
-                    Retry
-                  </button>
-                </>
-              ) : (
-                <p className="text-sm text-zinc-600">Select a strike to load chart</p>
-              )}
+          {hasData && (
+            <span className="text-[10px] text-zinc-400 font-medium ml-1">
+              {chartData.length} candles · {chartSource}
+            </span>
+          )}
+          {isLive && bridgeStatus.last_update && (
+            <div className="flex items-center gap-1.5 text-[10px] text-zinc-400 ml-auto">
+              <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+              updated {fmtTime(bridgeStatus.last_update)}
             </div>
           )}
         </div>
 
+        {/* ── Dual charts ────────────────────────────────────────────── */}
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+
+          {/* OI chart */}
+          <div className="bg-zinc-900/60 border border-zinc-800 rounded-2xl p-5">
+            <div className="flex items-center justify-between mb-4">
+              <div>
+                <div className="flex items-center gap-2">
+                  <p className="text-sm font-bold text-white tracking-tight">Open Interest</p>
+                  {chartStrike > 0 && (
+                    <span className="text-[10px] font-bold text-zinc-300 bg-zinc-800 px-2 py-0.5 rounded-md">
+                      {fmtNum(chartStrike)}{chartStrike === atm && atm > 0 ? ' ATM' : ''}
+                    </span>
+                  )}
+                  {hasOiData && pcr > 0 && (
+                    <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full border ${
+                      pcr > 1.3 ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30'
+                      : pcr < 0.7 ? 'bg-red-500/10 text-red-400 border-red-500/30'
+                      : 'bg-yellow-500/10 text-yellow-400 border-yellow-500/30'
+                    }`}>PCR {pcr.toFixed(2)}</span>
+                  )}
+                </div>
+                <p className="text-[10px] text-zinc-400 mt-0.5">CE OI vs PE OI · NIFTY {expiry || '—'}</p>
+              </div>
+            </div>
+
+            {hasData && hasOiData ? (
+              <ResponsiveContainer width="100%" height={420}>
+                <AreaChart data={chartData} margin={{ top: 8, right: 16, left: 0, bottom: 0 }}>
+                  <defs>
+                    <linearGradient id="gradCE" x1="0" y1="0" x2="0" y2="1">
+                      <stop offset="5%"  stopColor="#60a5fa" stopOpacity={0.2} />
+                      <stop offset="95%" stopColor="#60a5fa" stopOpacity={0.01} />
+                    </linearGradient>
+                    <linearGradient id="gradPE" x1="0" y1="0" x2="0" y2="1">
+                      <stop offset="5%"  stopColor="#f87171" stopOpacity={0.2} />
+                      <stop offset="95%" stopColor="#f87171" stopOpacity={0.01} />
+                    </linearGradient>
+                  </defs>
+                  <CartesianGrid {...gridProps} />
+                  <XAxis {...xAxisProps} />
+                  <YAxis tick={{ fontSize: 10, fill: '#a1a1aa', fontWeight: 500 }} tickLine={false}
+                    axisLine={false} domain={['auto', 'auto']} width={52} tickFormatter={fmtOI} />
+                  <Tooltip {...tooltipProps} />
+                  <Legend {...legendProps} />
+                  <Area type="monotone" dataKey="CE OI" stroke="#60a5fa" strokeWidth={2}
+                    fill="url(#gradCE)" dot={false} activeDot={{ r: 4, fill: '#60a5fa', strokeWidth: 0 }} />
+                  <Area type="monotone" dataKey="PE OI" stroke="#f87171" strokeWidth={2}
+                    fill="url(#gradPE)" dot={false} activeDot={{ r: 4, fill: '#f87171', strokeWidth: 0 }} />
+                </AreaChart>
+              </ResponsiveContainer>
+            ) : (
+              <div className="flex flex-col items-center justify-center h-[420px] gap-3">
+                {candleLoading ? (
+                  <>
+                    <div className="w-6 h-6 border-2 border-zinc-700 border-t-zinc-400 rounded-full animate-spin" />
+                    <p className="text-sm text-zinc-300 font-medium">Loading candles…</p>
+                  </>
+                ) : isLive ? (
+                  <>
+                    <div className="w-6 h-6 border-2 border-emerald-700 border-t-emerald-400 rounded-full animate-spin" />
+                    <p className="text-sm text-zinc-300 font-medium">Accumulating live ticks…</p>
+                  </>
+                ) : hasData && !hasOiData ? (
+                  <p className="text-sm text-zinc-300 font-medium">OI not returned by API for this contract</p>
+                ) : candleError ? (
+                  <div className="flex flex-col items-center gap-2">
+                    <p className="text-sm text-red-500 font-medium">{candleError}</p>
+                    <button onClick={() => selectedStrike && fetchCandles(selectedStrike, expiry, candleInterval)}
+                      className="px-3 py-1.5 text-xs font-semibold rounded-lg border border-zinc-700 text-zinc-400 hover:text-zinc-200 transition-all">
+                      Retry
+                    </button>
+                  </div>
+                ) : (
+                  <p className="text-sm text-zinc-300 font-medium">Select a strike to load chart</p>
+                )}
+              </div>
+            )}
+          </div>
+
+          {/* Premium chart */}
+          <div className="bg-zinc-900/60 border border-zinc-800 rounded-2xl p-5">
+            <div className="flex items-center justify-between mb-4">
+              <div>
+                <div className="flex items-center gap-2">
+                  <p className="text-sm font-bold text-white tracking-tight">Straddle Premium</p>
+                  {chartStrike > 0 && (
+                    <span className="text-[10px] font-bold text-zinc-300 bg-zinc-800 px-2 py-0.5 rounded-md">
+                      {fmtNum(chartStrike)}{chartStrike === atm && atm > 0 ? ' ATM' : ''}
+                    </span>
+                  )}
+                </div>
+                <p className="text-[10px] text-zinc-400 mt-0.5">CE LTP + PE LTP · NIFTY {expiry || '—'}</p>
+              </div>
+              {/* Series toggles */}
+              <div className="flex items-center gap-1.5">
+                {([
+                  { key: 'CE',   label: 'CE',   active: showCE,   toggle: () => setShowCE(v => !v),   color: 'text-blue-400  border-blue-500/30  bg-blue-500/10  data-[on]:bg-blue-500/20'  },
+                  { key: 'PE',   label: 'PE',   active: showPE,   toggle: () => setShowPE(v => !v),   color: 'text-red-400   border-red-500/30   bg-red-500/10   data-[on]:bg-red-500/20'   },
+                  { key: 'VWAP', label: 'VWAP', active: showVWAP, toggle: () => setShowVWAP(v => !v), color: 'text-yellow-400 border-yellow-500/30 bg-yellow-500/10 data-[on]:bg-yellow-500/20' },
+                ] as const).map(({ key, label, active, toggle, color }) => (
+                  <button
+                    key={key}
+                    onClick={toggle}
+                    className={`px-2 py-1 text-[10px] font-bold rounded-lg border transition-all ${color} ${
+                      active ? 'opacity-100' : 'opacity-35'
+                    }`}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {hasData ? (
+              <ResponsiveContainer width="100%" height={420}>
+                <AreaChart data={chartData} margin={{ top: 8, right: 16, left: 0, bottom: 0 }}>
+                  <defs>
+                    <linearGradient id="gradStraddle" x1="0" y1="0" x2="0" y2="1">
+                      <stop offset="5%"  stopColor="#10b981" stopOpacity={0.18} />
+                      <stop offset="95%" stopColor="#10b981" stopOpacity={0.01} />
+                    </linearGradient>
+                  </defs>
+                  <CartesianGrid {...gridProps} />
+                  <XAxis {...xAxisProps} />
+                  <YAxis tick={{ fontSize: 10, fill: '#a1a1aa', fontWeight: 500 }} tickLine={false}
+                    axisLine={false} domain={['auto', 'auto']} width={52}
+                    tickFormatter={v => fmtNum(v, 0)} />
+                  <Tooltip {...tooltipProps} />
+                  <Legend {...legendProps} />
+                  <Area type="monotone" dataKey="Straddle" stroke="#10b981" strokeWidth={2.5}
+                    fill="url(#gradStraddle)" dot={false} activeDot={{ r: 4, fill: '#10b981', strokeWidth: 0 }} />
+                  {showCE && (
+                    <Line type="monotone" dataKey="CE LTP" stroke="#60a5fa" strokeWidth={1.5}
+                      strokeDasharray="5 3" dot={false} activeDot={{ r: 3, fill: '#60a5fa', strokeWidth: 0 }} />
+                  )}
+                  {showPE && (
+                    <Line type="monotone" dataKey="PE LTP" stroke="#f87171" strokeWidth={1.5}
+                      strokeDasharray="5 3" dot={false} activeDot={{ r: 3, fill: '#f87171', strokeWidth: 0 }} />
+                  )}
+                  {showVWAP && (
+                    <Line type="monotone" dataKey="VWAP" stroke="#facc15" strokeWidth={1.5}
+                      strokeDasharray="8 4" dot={false} activeDot={{ r: 3, fill: '#facc15', strokeWidth: 0 }} />
+                  )}
+                </AreaChart>
+              </ResponsiveContainer>
+            ) : (
+              <div className="flex flex-col items-center justify-center h-[420px] gap-3">
+                {candleLoading ? (
+                  <>
+                    <div className="w-6 h-6 border-2 border-zinc-700 border-t-zinc-400 rounded-full animate-spin" />
+                    <p className="text-sm text-zinc-300 font-medium">Loading candles…</p>
+                  </>
+                ) : isLive ? (
+                  <>
+                    <div className="w-6 h-6 border-2 border-emerald-700 border-t-emerald-400 rounded-full animate-spin" />
+                    <p className="text-sm text-zinc-300 font-medium">Accumulating live ticks…</p>
+                  </>
+                ) : candleError ? (
+                  <div className="flex flex-col items-center gap-2">
+                    <p className="text-sm text-red-500 font-medium">{candleError}</p>
+                    <button onClick={() => selectedStrike && fetchCandles(selectedStrike, expiry, candleInterval)}
+                      className="px-3 py-1.5 text-xs font-semibold rounded-lg border border-zinc-700 text-zinc-400 hover:text-zinc-200 transition-all">
+                      Retry
+                    </button>
+                  </div>
+                ) : (
+                  <p className="text-sm text-zinc-300 font-medium">Select a strike to load chart</p>
+                )}
+              </div>
+            )}
+          </div>
+
+        </div>
       </div>
     </div>
   );

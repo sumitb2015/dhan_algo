@@ -4,6 +4,7 @@ import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { RefreshCw, Download, Search, ChevronUp, ChevronDown, TrendingUp, BarChart2, Settings, X, RotateCcw } from 'lucide-react';
 import { ScannerResult, ScannerResponse, ScannerParams, DEFAULT_SCANNER_PARAMS } from '@/lib/scannerTypes';
 import { cn } from '@/lib/utils';
+import NavBar from './NavBar';
 
 // ─── Settings ─────────────────────────────────────────────────────────────────
 
@@ -624,18 +625,7 @@ export default function Scanner() {
         <div className="w-px h-5 bg-zinc-800 hidden sm:block" />
 
         {/* Nav */}
-        <nav className="flex items-center bg-zinc-900 border border-zinc-800 p-0.5 rounded-lg text-[11px] gap-0.5">
-          <a href="/"              className="px-2.5 py-1 font-medium text-white/75 hover:text-white rounded transition-all">RS Scanner</a>
-          <a href="/movers"        className="px-2.5 py-1 font-medium text-white/75 hover:text-white rounded transition-all">Movers</a>
-          <span                    className="px-2.5 py-1 font-semibold rounded bg-emerald-500/10 text-emerald-400">Scanner</span>
-          <a href="/normalized"    className="px-2.5 py-1 font-medium text-white/75 hover:text-white rounded transition-all">Charts</a>
-          <a href="/distribution"  className="px-2.5 py-1 font-medium text-white/75 hover:text-white rounded transition-all">Distribution</a>
-          <a href="/live"          className="px-2.5 py-1 font-medium text-white/75 hover:text-white rounded transition-all">Live</a>
-          <a href="/strategies"    className="px-2.5 py-1 font-medium text-white/75 hover:text-white rounded transition-all">Strategies</a>
-          <a href="/portfolio"     className="px-2.5 py-1 font-medium text-white/75 hover:text-white rounded transition-all">Portfolio</a>
-          <a href="/reports"       className="px-2.5 py-1 font-medium text-white/75 hover:text-white rounded transition-all">Reports</a>
-          <a href="/performance"   className="px-2.5 py-1 font-medium text-white/75 hover:text-white rounded transition-all">Performance</a>
-        </nav>
+        <NavBar />
 
         {/* Universe selector */}
         <div className="flex items-center bg-zinc-900 border border-zinc-800 p-0.5 rounded-lg text-[11px] gap-0.5">

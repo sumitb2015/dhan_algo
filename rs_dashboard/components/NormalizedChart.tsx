@@ -4,6 +4,7 @@ import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import { RefreshCw, TrendingUp, TrendingDown, Download, BarChart2 } from 'lucide-react';
 import { NormalizedResponse, StockSeries } from '@/app/api/normalized/route';
 import { cn } from '@/lib/utils';
+import NavBar from './NavBar';
 
 // ─── Config ───────────────────────────────────────────────────────────────────
 
@@ -445,18 +446,7 @@ export default function NormalizedChart() {
           <span className="text-[14px] font-bold tracking-tight text-white">Normalized Charts</span>
         </div>
         <div className="w-px h-5 bg-zinc-800 hidden sm:block" />
-        <nav className="flex items-center bg-zinc-900 border border-zinc-800 p-0.5 rounded-lg text-[11px] gap-0.5">
-          <a href="/"              className="px-2.5 py-1 font-medium text-white/45 hover:text-white/75 rounded transition-all">RS Scanner</a>
-          <a href="/movers"        className="px-2.5 py-1 font-medium text-white/45 hover:text-white/75 rounded transition-all">Movers</a>
-          <a href="/scanner"       className="px-2.5 py-1 font-medium text-white/45 hover:text-white/75 rounded transition-all">Tech Scanner</a>
-          <span                    className="px-2.5 py-1 font-semibold rounded bg-sky-500/10 text-sky-400">Charts</span>
-          <a href="/distribution"  className="px-2.5 py-1 font-medium text-white/45 hover:text-white/75 rounded transition-all">Distribution</a>
-          <a href="/live"          className="px-2.5 py-1 font-medium text-white/45 hover:text-white/75 rounded transition-all">Live</a>
-          <a href="/strategies"    className="px-2.5 py-1 font-medium text-white/45 hover:text-white/75 rounded transition-all">Strategies</a>
-          <a href="/portfolio"     className="px-2.5 py-1 font-medium text-white/45 hover:text-white/75 rounded transition-all">Portfolio</a>
-          <a href="/reports"       className="px-2.5 py-1 font-medium text-white/45 hover:text-white/75 rounded transition-all">Reports</a>
-          <a href="/performance"   className="px-2.5 py-1 font-medium text-white/45 hover:text-white/75 rounded transition-all">Performance</a>
-        </nav>
+        <NavBar />
         <div className="flex items-center gap-2 ml-auto">
           {lastUpdated && (
             <span className="text-[10px] text-white/30 hidden md:inline tabular-nums">

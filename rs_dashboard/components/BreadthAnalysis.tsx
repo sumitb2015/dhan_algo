@@ -1,24 +1,10 @@
 'use client';
 
 import React, { useState, useEffect, useCallback } from 'react';
-import Link from 'next/link';
 import { RefreshCw, Layers, Activity, TrendingUp, TrendingDown, BarChart2 } from 'lucide-react';
 import type { BreadthResponse, IndexStats, BreadthStats } from '@/app/api/breadth/route';
 import { cn } from '@/lib/utils';
-
-// ─── Nav links (shared header pattern) ───────────────────────────────────────
-
-const NAV_LINKS = [
-  { href: '/', label: 'RS Scanner' },
-  { href: '/movers', label: 'Movers' },
-  { href: '/scanner', label: 'Scanner' },
-  { href: '/normalized', label: 'Charts' },
-  { href: '/distribution', label: 'Distribution' },
-  { href: '/breadth', label: 'Breadth', active: true },
-  { href: '/strategies', label: 'Strategies' },
-  { href: '/portfolio', label: 'Portfolio' },
-  { href: '/reports', label: 'Reports' },
-];
+import NavBar from './NavBar';
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -496,7 +482,7 @@ export default function BreadthAnalysis() {
   return (
     <div className="flex flex-col h-screen overflow-hidden bg-black text-zinc-150">
       {/* ── Header ── */}
-      <header className="flex-none w-full border-b border-zinc-900 bg-zinc-950/60 backdrop-blur-md px-5 py-2.5 flex items-center justify-between gap-4 z-20">
+      <header className="flex-none w-full border-b border-zinc-900 bg-zinc-950/60 backdrop-blur-md px-5 py-2.5 flex items-center gap-4 z-20 flex-wrap">
         <div className="flex items-center gap-3 shrink-0">
           <div className="h-9 w-9 rounded-xl bg-gradient-to-tr from-emerald-600 to-teal-400 flex items-center justify-center shadow-lg shadow-emerald-500/10">
             <Layers className="h-4.5 w-4.5 text-white" />
@@ -509,22 +495,11 @@ export default function BreadthAnalysis() {
           </div>
         </div>
 
-        <div className="flex items-center gap-2 flex-wrap">
-          {/* Nav */}
-          <div className="flex items-center bg-zinc-900/80 border border-zinc-800 p-0.5 rounded-xl">
-            {NAV_LINKS.map((link) =>
-              link.active ? (
-                <span key={link.href} className="px-3 py-1.5 text-xs font-semibold rounded-lg bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
-                  {link.label}
-                </span>
-              ) : (
-                <Link key={link.href} href={link.href} className="px-3 py-1.5 text-xs font-semibold rounded-lg text-zinc-500 hover:text-zinc-300 transition-all">
-                  {link.label}
-                </Link>
-              )
-            )}
-          </div>
+        {/* Nav */}
+        <NavBar />
 
+        {/* Right controls */}
+        <div className="flex items-center gap-2 flex-wrap ml-auto">
           {/* Regime badge */}
           {regime && data && (
             <div className={cn('flex items-center gap-1.5 px-3 py-1.5 rounded-xl border text-xs font-bold', regime.bg, regime.text, regime.border)}>

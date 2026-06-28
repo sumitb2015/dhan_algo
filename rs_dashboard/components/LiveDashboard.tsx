@@ -7,6 +7,7 @@ import {
 } from 'lucide-react';
 import { MoverResult } from '@/app/api/movers/route';
 import { cn } from '@/lib/utils';
+import NavBar from './NavBar';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -316,16 +317,7 @@ export default function LiveDashboard() {
         <div className="w-px h-5 bg-zinc-800 hidden sm:block" />
 
         {/* Nav */}
-        <nav className="flex items-center bg-zinc-900 border border-zinc-800 p-0.5 rounded-lg text-[11px] gap-0.5">
-          <a href="/"           className="px-2.5 py-1 font-medium text-zinc-500 hover:text-zinc-300 rounded transition-all">RS Scanner</a>
-          <a href="/movers"     className="px-2.5 py-1 font-medium text-zinc-500 hover:text-zinc-300 rounded transition-all">Movers</a>
-          <a href="/scanner"    className="px-2.5 py-1 font-medium text-zinc-500 hover:text-zinc-300 rounded transition-all">Scanner</a>
-          <a href="/normalized" className="px-2.5 py-1 font-medium text-zinc-500 hover:text-zinc-300 rounded transition-all">Charts</a>
-          <span                 className="px-2.5 py-1 font-semibold rounded bg-emerald-500/10 text-emerald-400">Live</span>
-          <a href="/strategies" className="px-2.5 py-1 font-medium text-zinc-500 hover:text-zinc-300 rounded transition-all">Strategies</a>
-          <a href="/reports"    className="px-2.5 py-1 font-medium text-zinc-500 hover:text-zinc-300 rounded transition-all">Reports</a>
-          <a href="/performance" className="px-2.5 py-1 font-medium text-zinc-500 hover:text-zinc-300 rounded transition-all">Performance</a>
-        </nav>
+        <NavBar />
 
         {/* Bridge status */}
         <div className="flex items-center gap-1.5 ml-1">

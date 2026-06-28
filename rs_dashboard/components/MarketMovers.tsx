@@ -11,6 +11,7 @@ import { Card, CardContent } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Separator } from '@/components/ui/separator';
 import { cn } from '@/lib/utils';
+import NavBar from './NavBar';
 
 // ─── Formatters ───────────────────────────────────────────────────────────────
 function fmt(n: number, digits = 2) { return n.toFixed(digits); }
@@ -538,17 +539,7 @@ export default function MarketMovers() {
         <div className="w-px h-5 bg-zinc-800 hidden sm:block" />
 
         {/* Nav */}
-        <nav className="flex items-center bg-zinc-900 border border-zinc-800 p-0.5 rounded-lg text-[11px] gap-0.5">
-          <a href="/" className="px-2.5 py-1 font-medium text-zinc-500 hover:text-zinc-300 rounded transition-all">RS Scanner</a>
-          <span className="px-2.5 py-1 font-semibold rounded bg-violet-500/10 text-violet-400">Movers</span>
-          <a href="/scanner"    className="px-2.5 py-1 font-medium text-zinc-500 hover:text-zinc-300 rounded transition-all">Scanner</a>
-          <a href="/normalized" className="px-2.5 py-1 font-medium text-zinc-500 hover:text-zinc-300 rounded transition-all">Charts</a>
-          <a href="/live"       className="px-2.5 py-1 font-medium text-zinc-500 hover:text-zinc-300 rounded transition-all">Live</a>
-          <a href="/strategies" className="px-2.5 py-1 font-medium text-zinc-500 hover:text-zinc-300 rounded transition-all">Strategies</a>
-          <a href="/portfolio" className="px-2.5 py-1 font-medium text-zinc-500 hover:text-zinc-300 rounded transition-all">Portfolio</a>
-          <a href="/reports"      className="px-2.5 py-1 font-medium text-zinc-500 hover:text-zinc-300 rounded transition-all">Reports</a>
-          <a href="/performance"  className="px-2.5 py-1 font-medium text-zinc-500 hover:text-zinc-300 rounded transition-all">Performance</a>
-        </nav>
+        <NavBar />
 
         {/* Index toggle */}
         <div className="flex items-center bg-zinc-900 border border-zinc-800 p-0.5 rounded-lg text-[11px] gap-0.5">

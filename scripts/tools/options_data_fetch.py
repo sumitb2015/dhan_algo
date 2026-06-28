@@ -4,6 +4,7 @@ One-off helper for the Next.js API to fetch options data via Python.
 Usage:
     python options_data_fetch.py expiries --underlying NIFTY
     python options_data_fetch.py chain    --underlying NIFTY --expiry 2026-06-27
+    python options_data_fetch.py ltp      --underlying NIFTY
 
 Prints a single JSON line to stdout. Logs go to stderr.
 """
@@ -36,6 +37,9 @@ def main():
     p_chain.add_argument('--underlying', default='NIFTY')
     p_chain.add_argument('--expiry', required=True)
 
+    p_ltp = sub.add_parser('ltp')
+    p_ltp.add_argument('--underlying', default='NIFTY')
+
     args = parser.parse_args()
 
     dhan = get_dhan_client()
@@ -65,6 +69,10 @@ def main():
         # Also get spot for ATM calculation
         spot = helper.get_ltp(args.underlying.upper(), exchange='IDX_I', instrument='INDEX') or 0
         print(json.dumps({'chain': chain, 'spot': spot}))
+
+    elif args.cmd == 'ltp':
+        spot = helper.get_ltp(args.underlying.upper(), exchange='IDX_I', instrument='INDEX') or 0
+        print(json.dumps({'spot': spot}))
 
     else:
         print(json.dumps({'error': 'unknown command'}))

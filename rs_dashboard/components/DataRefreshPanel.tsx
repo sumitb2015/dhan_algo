@@ -45,6 +45,12 @@ const TARGETS = [
     icon: <BarChart2 className="h-4 w-4" />,
   },
   {
+    id: 'indices',
+    label: 'Sector Indices',
+    desc: 'Historical Data/Indices — BankNifty, IT, FMCG, Auto, Pharma and 13 more',
+    icon: <Layers className="h-4 w-4" />,
+  },
+  {
     id: 'stocks',
     label: 'Nifty 500 Stocks',
     desc: 'Daily_Historical_Data_Fresh — individual stock CSVs',
@@ -57,6 +63,7 @@ type TargetId = (typeof TARGETS)[number]['id'] | 'all';
 function phaseLabel(phase: string): string {
   if (phase === 'nifty50')        return 'Nifty 50 Index';
   if (phase === 'nifty500_index') return 'Nifty 500 Index';
+  if (phase === 'indices')        return 'Sector Indices';
   if (phase === 'stocks')         return 'Nifty 500 Stocks';
   if (phase === 'done')           return 'Complete';
   if (phase === 'error')          return 'Error';
@@ -188,7 +195,7 @@ export default function DataRefreshPanel({ open, onClose, onRefreshComplete }: D
             </div>
           </Button>
 
-          <div className="grid grid-cols-3 gap-2">
+          <div className="grid grid-cols-2 gap-2">
             {TARGETS.map((t) => (
               <Button
                 key={t.id}
@@ -235,10 +242,10 @@ export default function DataRefreshPanel({ open, onClose, onRefreshComplete }: D
               )}
             </div>
 
-            {status.total > 0 && status.phase === 'stocks' && (
+            {status.total > 0 && (status.phase === 'stocks' || status.phase === 'indices') && (
               <div className="space-y-1.5">
                 <div className="flex items-center justify-between text-[10px] text-zinc-500 font-mono">
-                  <span>{status.current} / {status.total} stocks</span>
+                  <span>{status.current} / {status.total} {status.phase === 'indices' ? 'indices' : 'stocks'}</span>
                   <span>{pct}%</span>
                 </div>
                 <Progress value={pct} className="h-1.5 bg-zinc-800 [&>div]:bg-gradient-to-r [&>div]:from-emerald-600 [&>div]:to-teal-400" />

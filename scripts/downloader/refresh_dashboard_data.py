@@ -5,6 +5,7 @@ Usage:
     venv\\Scripts\\python.exe scripts/downloader/refresh_dashboard_data.py
     venv\\Scripts\\python.exe scripts/downloader/refresh_dashboard_data.py --target nifty50
     venv\\Scripts\\python.exe scripts/downloader/refresh_dashboard_data.py --target nifty500-index
+    venv\\Scripts\\python.exe scripts/downloader/refresh_dashboard_data.py --target indices
     venv\\Scripts\\python.exe scripts/downloader/refresh_dashboard_data.py --target stocks
 
 Writes JSON status to debug/refresh_status.json for the dashboard to poll.
@@ -27,6 +28,7 @@ PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(_
 sys.path.insert(0, PROJECT_ROOT)
 
 HIST_DIR     = os.path.join(PROJECT_ROOT, "Historical Data")
+INDICES_DIR  = os.path.join(HIST_DIR, "Indices")
 STOCKS_DIR   = os.path.join(PROJECT_ROOT, "Daily_Historical_Data_Fresh")
 DEBUG_DIR    = os.path.join(PROJECT_ROOT, "debug")
 STATUS_FILE  = os.path.join(DEBUG_DIR, "refresh_status.json")
@@ -37,7 +39,30 @@ N500_LIST    = os.path.join(PROJECT_ROOT, "MW-NIFTY-500-25-Jan-2026.csv")
 
 os.makedirs(DEBUG_DIR, exist_ok=True)
 os.makedirs(HIST_DIR, exist_ok=True)
+os.makedirs(INDICES_DIR, exist_ok=True)
 os.makedirs(STOCKS_DIR, exist_ok=True)
+
+# Sector indices to refresh daily (Nifty 50=13 and Nifty 500=19 have dedicated phases above)
+SECTOR_INDICES = [
+    {"id": 38, "name": "NIFTY_NEXT50",     "label": "Nifty Next 50"},
+    {"id": 17, "name": "NIFTY_100",         "label": "Nifty 100"},
+    {"id": 18, "name": "NIFTY_200",         "label": "Nifty 200"},
+    {"id": 37, "name": "NIFTY_MIDCAP100",   "label": "Nifty Midcap 100"},
+    {"id": 5,  "name": "NIFTY_SMALLCAP100", "label": "Nifty Smallcap 100"},
+    {"id": 25, "name": "BANKNIFTY",         "label": "Nifty Bank"},
+    {"id": 29, "name": "NIFTYIT",           "label": "Nifty IT"},
+    {"id": 28, "name": "NIFTY_FMCG",        "label": "Nifty FMCG"},
+    {"id": 14, "name": "NIFTY_AUTO",        "label": "Nifty Auto"},
+    {"id": 32, "name": "NIFTY_PHARMA",      "label": "Nifty Pharma"},
+    {"id": 31, "name": "NIFTY_METAL",       "label": "Nifty Metal"},
+    {"id": 34, "name": "NIFTY_REALTY",      "label": "Nifty Realty"},
+    {"id": 33, "name": "NIFTY_PSU_BANK",    "label": "Nifty PSU Bank"},
+    {"id": 15, "name": "NIFTY_PVT_BANK",    "label": "Nifty Private Bank"},
+    {"id": 27, "name": "FINNIFTY",          "label": "Nifty Financial Services"},
+    {"id": 42, "name": "NIFTY_ENERGY",      "label": "Nifty Energy"},
+    {"id": 43, "name": "NIFTY_INFRA",       "label": "Nifty Infra"},
+    {"id": 21, "name": "INDIA_VIX",         "label": "India VIX"},
+]
 
 # ── Status writer ─────────────────────────────────────────────────────────────
 _log_lines: list[str] = []
@@ -73,6 +98,22 @@ def should_stop() -> bool:
 
 def mark_error(msg: str):
     write_status("error", msg, done=True, error=msg)
+
+
+# ── Trading day helpers ───────────────────────────────────────────────────────
+def get_last_trading_day() -> str:
+    """Return the most recent weekday (Mon–Fri) as YYYY-MM-DD.
+
+    Does not account for NSE-specific holidays, but eliminates spurious
+    refetch attempts on weekends where no new data exists.
+    """
+    d = datetime.now()
+    weekday = d.weekday()  # 0=Mon … 6=Sun
+    if weekday == 5:        # Saturday → Friday
+        d -= timedelta(days=1)
+    elif weekday == 6:      # Sunday → Friday
+        d -= timedelta(days=2)
+    return d.strftime("%Y-%m-%d")
 
 
 # ── CSV helpers ───────────────────────────────────────────────────────────────
@@ -149,9 +190,10 @@ def refresh_nifty50(helper):
     write_status("nifty50", "▶ Refreshing Nifty 50 daily index data...")
 
     today = datetime.now().strftime("%Y-%m-%d")
+    last_trading_day = get_last_trading_day()
     last_date = get_last_date(NIFTY50_CSV)
 
-    if last_date and last_date >= today:
+    if last_date and last_date >= last_trading_day:
         write_status("nifty50", f"✓ Nifty 50 already up to date (last: {last_date})")
         return True
 
@@ -192,7 +234,7 @@ def refresh_nifty50(helper):
             time.sleep(0.4)
 
         if not chunks:
-            write_status("nifty50", f"  ✓ Nifty 50 already at latest (no new rows from API)")
+            write_status("nifty50", f"  ✓ Nifty 50 up to date (no new trading data from API)")
             return True
 
         new_df = pd.concat(chunks)
@@ -225,9 +267,10 @@ def refresh_nifty500_index(helper):
     write_status("nifty500_index", "▶ Refreshing Nifty 500 daily index data...")
 
     today = datetime.now().strftime("%Y-%m-%d")
+    last_trading_day = get_last_trading_day()
     last_date = get_last_date(N500IDX_CSV)
 
-    if last_date and last_date >= today:
+    if last_date and last_date >= last_trading_day:
         write_status("nifty500_index", f"✓ Nifty 500 index already up to date (last: {last_date})")
         return True
 
@@ -250,7 +293,7 @@ def refresh_nifty500_index(helper):
         )
 
         if df.empty:
-            write_status("nifty500_index", "  ✓ Nifty 500 index: no new rows from API")
+            write_status("nifty500_index", "  ✓ Nifty 500 index up to date (no new trading data from API)")
             return True
 
         new_df = normalize_historical_df(df)
@@ -304,6 +347,7 @@ def refresh_stocks(helper):
     write_status("stocks", f"▶ Refreshing {total} stocks (incremental)...", current=0, total=total)
 
     today = datetime.now().strftime("%Y-%m-%d")
+    last_trading_day = get_last_trading_day()
     skipped = updated = failed = 0
 
     for i, symbol in enumerate(symbols, 1):
@@ -316,7 +360,7 @@ def refresh_stocks(helper):
         last_date = get_last_date(csv_path)
 
         # Already up to date?
-        if last_date and last_date >= today:
+        if last_date and last_date >= last_trading_day:
             skipped += 1
             write_status("stocks", f"  [{i}/{total}] {symbol}: up to date ({last_date})",
                          current=i, total=total)
@@ -359,7 +403,7 @@ def refresh_stocks(helper):
             )
 
             if df_new.empty:
-                write_status("stocks", f"  [{i}/{total}] {symbol}: no new data",
+                write_status("stocks", f"  [{i}/{total}] {symbol}: ✓ up to date (no new trading data from API)",
                              current=i, total=total)
                 skipped += 1
                 time.sleep(0.2)
@@ -397,11 +441,100 @@ def refresh_stocks(helper):
     write_status("stocks", summary, current=total, total=total)
 
 
+# ── Phase 4: Sector / broad-market indices ────────────────────────────────────
+def refresh_indices(helper):
+    total = len(SECTOR_INDICES)
+    write_status("indices", f"▶ Refreshing {total} sector/market indices...", current=0, total=total)
+
+    today = datetime.now().strftime("%Y-%m-%d")
+    last_trading_day = get_last_trading_day()
+    updated = skipped = failed = 0
+
+    for i, entry in enumerate(SECTOR_INDICES, 1):
+        if should_stop():
+            write_status("indices", f"⏹ Stopped at [{i}/{total}]", current=i, total=total, done=True)
+            return
+
+        csv_path = os.path.join(INDICES_DIR, f"{entry['name']}.csv")
+        last_date = get_last_date(csv_path)
+
+        if last_date and last_date >= last_trading_day:
+            skipped += 1
+            write_status("indices", f"  [{i}/{total}] {entry['label']}: up to date ({last_date})",
+                         current=i, total=total)
+            continue
+
+        from_date = (
+            (datetime.strptime(last_date, "%Y-%m-%d") + timedelta(days=1)).strftime("%Y-%m-%d")
+            if last_date
+            else (datetime.now() - timedelta(days=1825)).strftime("%Y-%m-%d")
+        )
+
+        write_status("indices", f"  [{i}/{total}] {entry['label']}: fetching from {from_date}...",
+                     current=i, total=total)
+
+        try:
+            chunks = []
+            cur = datetime.strptime(from_date, "%Y-%m-%d")
+            end = datetime.strptime(today, "%Y-%m-%d")
+            while cur <= end:
+                chunk_end = min(cur + timedelta(days=365), end)
+                df_chunk = helper.get_historical_daily_data(
+                    security_id=entry["id"],
+                    exchange_segment="IDX_I",
+                    instrument_type="INDEX",
+                    from_date=cur.strftime("%Y-%m-%d"),
+                    to_date=chunk_end.strftime("%Y-%m-%d"),
+                )
+                if not df_chunk.empty:
+                    chunks.append(normalize_historical_df(df_chunk))
+                cur = chunk_end + timedelta(days=1)
+                time.sleep(0.4)
+
+            if not chunks:
+                write_status("indices",
+                             f"  [{i}/{total}] {entry['label']}: ✓ up to date (no new trading data from API)",
+                             current=i, total=total)
+                skipped += 1
+                continue
+
+            new_df = pd.concat(chunks)
+            new_df = new_df[~new_df.index.duplicated(keep="last")].sort_index()
+
+            if last_date and os.path.exists(csv_path):
+                old = pd.read_csv(csv_path)
+                date_col = "Datetime" if "Datetime" in old.columns else old.columns[0]
+                old[date_col] = pd.to_datetime(old[date_col])
+                old = old.set_index(date_col).sort_index()
+                old.index.name = "Datetime"
+                old.columns = [str(c).capitalize() for c in old.columns]
+                combined = pd.concat([old, new_df])
+                combined = combined[~combined.index.duplicated(keep="last")].sort_index()
+            else:
+                combined = new_df
+
+            df_to_index_csv(combined, csv_path)
+            write_status("indices",
+                         f"  [{i}/{total}] {entry['label']}: +{len(new_df)} rows → {len(combined)} total",
+                         current=i, total=total)
+            updated += 1
+
+        except Exception as e:
+            write_status("indices", f"  [{i}/{total}] {entry['label']}: ERROR — {e}",
+                         current=i, total=total)
+            failed += 1
+
+        time.sleep(0.35)
+
+    write_status("indices", f"✓ Indices done: {updated} updated, {skipped} skipped, {failed} failed",
+                 current=total, total=total)
+
+
 # ── Main ──────────────────────────────────────────────────────────────────────
 def main():
     parser = argparse.ArgumentParser(description="Refresh RS dashboard data (incremental)")
     parser.add_argument("--target", default="all",
-                        choices=["all", "nifty50", "nifty500-index", "stocks", "quotes"])
+                        choices=["all", "nifty50", "nifty500-index", "indices", "stocks", "quotes"])
     args = parser.parse_args()
 
     # Remove any stale stop trigger
@@ -441,6 +574,12 @@ def main():
         refresh_nifty500_index(helper)
         if should_stop():
             write_status("stopped", "Stopped after Nifty 500 index.", done=True)
+            return
+
+    if args.target in ("all", "indices"):
+        refresh_indices(helper)
+        if should_stop():
+            write_status("stopped", "Stopped after indices.", done=True)
             return
 
     if args.target in ("all", "stocks"):

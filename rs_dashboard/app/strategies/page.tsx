@@ -4,6 +4,7 @@ import React, { useState, useEffect, useCallback } from 'react';
 import { Layers, RefreshCw, TrendingUp, TrendingDown, LogOut, AlertTriangle } from 'lucide-react';
 import StrategyCard from '@/components/StrategyCard';
 import Link from 'next/link';
+import NavBar from '@/components/NavBar';
 
 interface PortfolioData {
   success: boolean;
@@ -100,8 +101,8 @@ export default function StrategiesPage() {
     <div className="flex flex-col flex-1 w-full bg-black min-h-screen text-zinc-150">
 
       {/* Header */}
-      <header className="w-full border-b border-zinc-900 bg-zinc-950/60 backdrop-blur-md px-4 py-2.5 flex items-center justify-between gap-4 z-20">
-        <div className="flex items-center gap-2.5">
+      <header className="w-full border-b border-zinc-900 bg-zinc-950/60 backdrop-blur-md px-4 py-2.5 flex items-center gap-4 z-20 flex-wrap">
+        <div className="flex items-center gap-2.5 shrink-0">
           <div className="h-8 w-8 rounded-lg bg-gradient-to-tr from-emerald-600 to-teal-400 flex items-center justify-center shadow-md shadow-emerald-500/10 shrink-0">
             <Layers className="h-4 w-4 text-white" />
           </div>
@@ -113,43 +114,15 @@ export default function StrategiesPage() {
           </div>
         </div>
 
-        <div className="flex items-center gap-3">
-          {/* Nav tabs */}
-          <nav className="flex items-center bg-zinc-900/70 border border-zinc-800/60 p-0.5 rounded-lg gap-0.5">
-            {[
-              { href: '/', label: 'RS Scanner' },
-              { href: '/movers', label: 'Market Movers' },
-              { label: 'Strategies', active: true },
-              { href: '/portfolio', label: 'Portfolio' },
-              { href: '/reports', label: 'Reports' },
-            ].map((item) =>
-              item.href ? (
-                <Link
-                  key={item.label}
-                  href={item.href}
-                  className="px-3 py-1 text-[11px] font-semibold rounded-md text-zinc-500 hover:text-zinc-300 hover:bg-zinc-800/50 transition-all"
-                >
-                  {item.label}
-                </Link>
-              ) : (
-                <span
-                  key={item.label}
-                  className="px-3 py-1 text-[11px] font-semibold rounded-md bg-emerald-500/10 text-emerald-400"
-                >
-                  {item.label}
-                </span>
-              )
-            )}
-          </nav>
+        <NavBar />
 
-          <button
-            onClick={() => fetchStrategies(true)}
-            className="p-1.5 border border-zinc-800 rounded-lg bg-zinc-900/40 text-zinc-500 hover:text-white hover:border-zinc-700 transition-all active:scale-95"
-            title="Refresh"
-          >
-            <RefreshCw className="h-3.5 w-3.5" />
-          </button>
-        </div>
+        <button
+          onClick={() => fetchStrategies(true)}
+          className="p-1.5 border border-zinc-800 rounded-lg bg-zinc-900/40 text-zinc-500 hover:text-white hover:border-zinc-700 transition-all active:scale-95 ml-auto"
+          title="Refresh"
+        >
+          <RefreshCw className="h-3.5 w-3.5" />
+        </button>
       </header>
 
       {/* Portfolio P&L + Global Exit bar */}
