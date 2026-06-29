@@ -7,6 +7,7 @@ import {
   AreaChart, Area, LineChart, Line, XAxis, YAxis, CartesianGrid,
   Tooltip, Legend, ResponsiveContainer,
 } from 'recharts';
+import OptionsSkewTab from './OptionsSkewTab';
 
 // ─── Types ────────────────────────────────────────────────────────
 
@@ -154,6 +155,7 @@ export default function OptionsCharts() {
   const [showCE,   setShowCE]   = useState(true);
   const [showPE,   setShowPE]   = useState(true);
   const [showVWAP, setShowVWAP] = useState(false);
+  const [activeTab, setActiveTab] = useState<'premium' | 'skew'>('premium');
 
   // ── Fetch expiries ────────────────────────────────────────────────
   useEffect(() => {
@@ -510,6 +512,27 @@ export default function OptionsCharts() {
 
       <div className="flex-1 flex flex-col gap-4 px-6 py-5">
 
+          {/* Tab bar */}
+          <div className="flex border-b border-zinc-800 -mx-6 px-6 -mt-5 mb-1">
+            {(['premium', 'skew'] as const).map(tab => (
+              <button
+                key={tab}
+                onClick={() => setActiveTab(tab)}
+                className={`px-4 py-2.5 text-xs font-semibold capitalize transition-all border-b-2 -mb-px ${
+                  activeTab === tab
+                    ? 'text-white border-blue-500'
+                    : 'text-zinc-400 border-transparent hover:text-zinc-200'
+                }`}
+              >
+                {tab === 'premium' ? 'Premium' : 'Skew'}
+              </button>
+            ))}
+          </div>
+
+          {activeTab === 'skew' && <OptionsSkewTab expiry={expiries[0] ?? ''} />}
+
+          {activeTab === 'premium' && <>
+
         {/* Stats — 6 tiles */}
         <div className="grid grid-cols-3 sm:grid-cols-6 gap-3">
           {([
@@ -772,6 +795,7 @@ export default function OptionsCharts() {
           </div>
 
         </div>
+          </>}
       </div>
     </div>
   );
