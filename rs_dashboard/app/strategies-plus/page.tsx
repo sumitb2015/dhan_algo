@@ -3,7 +3,7 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import {
   Layers, RefreshCw, TrendingUp, TrendingDown, AlertTriangle,
-  Power, ShieldOff, Activity, Zap, LayoutList
+  Power, ShieldOff, Activity, Zap, LayoutList, ChevronDown, Shield
 } from 'lucide-react';
 import StrategyRowWide from '@/components/StrategyRowWide';
 import NavBar from '@/components/NavBar';
@@ -20,6 +20,14 @@ interface PortfolioData {
 
 type ToastType = 'success' | 'error' | 'info';
 interface Toast { id: number; type: ToastType; message: string }
+
+interface PnlGuardStatus {
+  pnlExitStatus: 'ACTIVE' | 'INACTIVE' | string;
+  profit?: number;
+  loss?: number;
+  productType?: string[];
+  enableKillSwitch?: boolean;
+}
 
 let toastCounter = 0;
 
@@ -40,6 +48,17 @@ export default function StrategiesPlusPage() {
   const [viewMode, setViewMode] = useState<'active' | 'all'>('active');
 
   const [toasts, setToasts] = useState<Toast[]>([]);
+
+  const [showPnlGuard, setShowPnlGuard] = useState(false);
+  const [pnlGuardStatus, setPnlGuardStatus] = useState<PnlGuardStatus | null>(null);
+  const [pnlGuardLoading, setPnlGuardLoading] = useState(false);
+  const [profitValue, setProfitValue] = useState('');
+  const [lossValue, setLossValue] = useState('');
+  const [productTypes, setProductTypes] = useState<string[]>(['INTRADAY']);
+  const [enableKillSwitch, setEnableKillSwitch] = useState(false);
+  const [confirmClear, setConfirmClear] = useState(false);
+  const [settingPnl, setSettingPnl] = useState(false);
+  const [clearingPnl, setClearingPnl] = useState(false);
 
   const addToast = (type: ToastType, message: string) => {
     const id = ++toastCounter;
@@ -85,6 +104,11 @@ export default function StrategiesPlusPage() {
     const iv = setInterval(fetchPortfolio, 20000);
     return () => clearInterval(iv);
   }, [fetchPortfolio]);
+
+  useEffect(() => {
+    if (showPnlGuard) fetchPnlGuardStatus();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [showPnlGuard]);
 
   const runningCount = Object.values(strategies).filter((s: any) => s.state?.status !== 'STOPPED').length;
   const pnl = portfolio?.total_pnl ?? 0;
@@ -141,6 +165,87 @@ export default function StrategiesPlusPage() {
       setExitingAll(false);
       setTimeout(() => fetchStrategies(false), 1000);
       setTimeout(fetchPortfolio, 2000);
+    }
+  };
+
+  /* ── P&L Guard ── */
+  const fetchPnlGuardStatus = async () => {
+    setPnlGuardLoading(true);
+    try {
+      const res = await fetch('/api/pnl-exit');
+      const data = await res.json();
+      if (data.success) {
+        setPnlGuardStatus(data.data ?? null);
+      } else {
+        setPnlGuardStatus(null);
+        addToast('error', 'Could not fetch P&L Guard status — check token.');
+      }
+    } catch {
+      setPnlGuardStatus(null);
+      addToast('error', 'Network error fetching P&L Guard status.');
+    } finally {
+      setPnlGuardLoading(false);
+    }
+  };
+
+  const handleSetPnl = async () => {
+    const p = parseFloat(profitValue) || 0;
+    const l = parseFloat(lossValue) || 0;
+    if (p <= 0 && l <= 0) {
+      addToast('error', 'Set at least one threshold (profit or loss) greater than 0.');
+      return;
+    }
+    if (productTypes.length === 0) {
+      addToast('error', 'Select at least one product type.');
+      return;
+    }
+    setSettingPnl(true);
+    try {
+      const res = await fetch('/api/pnl-exit', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          profitValue: p,
+          lossValue: l,
+          productTypes,
+          enableKillSwitch,
+        }),
+      });
+      const data = await res.json();
+      if (data.success) {
+        addToast('success', 'P&L Guard configured successfully.');
+        await fetchPnlGuardStatus();
+      } else {
+        addToast('error', data.error || 'Failed to configure P&L Guard.');
+      }
+    } catch {
+      addToast('error', 'Network error setting P&L Guard.');
+    } finally {
+      setSettingPnl(false);
+    }
+  };
+
+  const handleClearPnl = async () => {
+    if (!confirmClear) {
+      setConfirmClear(true);
+      setTimeout(() => setConfirmClear(false), 3000);
+      return;
+    }
+    setClearingPnl(true);
+    setConfirmClear(false);
+    try {
+      const res = await fetch('/api/pnl-exit', { method: 'DELETE' });
+      const data = await res.json();
+      if (data.success) {
+        addToast('success', 'P&L Guard cleared.');
+        await fetchPnlGuardStatus();
+      } else {
+        addToast('error', data.error || 'Failed to clear P&L Guard.');
+      }
+    } catch {
+      addToast('error', 'Network error clearing P&L Guard.');
+    } finally {
+      setClearingPnl(false);
     }
   };
 
@@ -264,6 +369,24 @@ export default function StrategiesPlusPage() {
         {/* Right: view tabs + running count + control buttons */}
         <div className="flex items-center gap-2 shrink-0">
 
+          {/* P&L Guard toggle */}
+          <button
+            onClick={() => setShowPnlGuard(v => !v)}
+            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[11px] font-bold border transition-all active:scale-95 ${
+              showPnlGuard
+                ? 'bg-amber-900/30 border-amber-600/50 text-amber-300'
+                : 'bg-zinc-900/60 border-zinc-700/60 text-zinc-400 hover:border-zinc-600 hover:text-zinc-200'
+            }`}
+            title="Configure automatic P&L-based exit"
+          >
+            <Shield className="h-3 w-3" />
+            P&L Guard
+            {pnlGuardStatus?.pnlExitStatus === 'ACTIVE' && (
+              <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 shrink-0" />
+            )}
+            <ChevronDown className={`h-3 w-3 transition-transform duration-200 ${showPnlGuard ? 'rotate-180' : ''}`} />
+          </button>
+
           {/* View mode tabs */}
           <div className="flex items-center rounded-lg border border-zinc-800 bg-zinc-900/60 p-0.5 gap-0.5">
             <button
@@ -338,6 +461,138 @@ export default function StrategiesPlusPage() {
           </button>
         </div>
       </div>
+
+      {/* ── P&L Guard Panel ── */}
+      {showPnlGuard && (
+        <div className="w-full border-b border-zinc-900 bg-zinc-950/60 px-4 py-3 flex items-center gap-4 flex-wrap">
+
+          {/* Status chip */}
+          <div className="flex items-center gap-2 shrink-0">
+            {pnlGuardLoading ? (
+              <RefreshCw className="h-3.5 w-3.5 text-zinc-600 animate-spin" />
+            ) : pnlGuardStatus?.pnlExitStatus === 'ACTIVE' ? (
+              <span className="flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-emerald-500/10 border border-emerald-500/30 text-emerald-400 text-[11px] font-bold">
+                <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 shrink-0" />
+                ACTIVE
+                {pnlGuardStatus.profit ? ` ₹${pnlGuardStatus.profit.toLocaleString('en-IN')} profit` : ''}
+                {pnlGuardStatus.profit && pnlGuardStatus.loss ? ' /' : ''}
+                {pnlGuardStatus.loss ? ` ₹${pnlGuardStatus.loss.toLocaleString('en-IN')} loss` : ''}
+              </span>
+            ) : pnlGuardStatus ? (
+              <span className="flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-zinc-800 border border-zinc-700 text-zinc-500 text-[11px] font-bold">
+                INACTIVE
+              </span>
+            ) : (
+              <span className="text-[11px] text-zinc-600">—</span>
+            )}
+          </div>
+
+          <div className="h-6 w-px bg-zinc-800 shrink-0" />
+
+          {/* Profit target */}
+          <div className="flex items-center gap-1.5 shrink-0">
+            <span className="text-[10px] text-zinc-500 font-semibold uppercase tracking-wider">Profit</span>
+            <div className="flex items-center gap-1 bg-zinc-900 border border-zinc-700 rounded-md px-2 py-1">
+              <span className="text-[11px] text-zinc-500">₹</span>
+              <input
+                type="number"
+                min="0"
+                value={profitValue}
+                onChange={e => setProfitValue(e.target.value)}
+                placeholder="e.g. 5000"
+                className="bg-transparent text-[11px] text-white w-24 outline-none placeholder-zinc-700 tabular-nums"
+              />
+            </div>
+          </div>
+
+          {/* Loss limit */}
+          <div className="flex items-center gap-1.5 shrink-0">
+            <span className="text-[10px] text-zinc-500 font-semibold uppercase tracking-wider">Loss</span>
+            <div className="flex items-center gap-1 bg-zinc-900 border border-zinc-700 rounded-md px-2 py-1">
+              <span className="text-[11px] text-zinc-500">₹</span>
+              <input
+                type="number"
+                min="0"
+                value={lossValue}
+                onChange={e => setLossValue(e.target.value)}
+                placeholder="e.g. 3000"
+                className="bg-transparent text-[11px] text-white w-24 outline-none placeholder-zinc-700 tabular-nums"
+              />
+            </div>
+          </div>
+
+          <div className="h-6 w-px bg-zinc-800 shrink-0" />
+
+          {/* Product type pills */}
+          <div className="flex items-center gap-1.5 shrink-0">
+            <span className="text-[10px] text-zinc-500 font-semibold uppercase tracking-wider">Type</span>
+            {(['INTRADAY', 'DELIVERY'] as const).map(pt => {
+              const selected = productTypes.includes(pt);
+              return (
+                <button
+                  key={pt}
+                  onClick={() => {
+                    if (selected && productTypes.length === 1) return;
+                    setProductTypes(prev =>
+                      selected ? prev.filter(x => x !== pt) : [...prev, pt]
+                    );
+                  }}
+                  className={`px-2.5 py-1 rounded-md text-[10px] font-bold border transition-all ${
+                    selected
+                      ? 'bg-zinc-700 border-zinc-500 text-white'
+                      : 'bg-zinc-900/40 border-zinc-800 text-zinc-600 hover:border-zinc-700 hover:text-zinc-400'
+                  }`}
+                >
+                  {pt}
+                </button>
+              );
+            })}
+          </div>
+
+          <div className="h-6 w-px bg-zinc-800 shrink-0" />
+
+          {/* Kill switch toggle */}
+          <label className="flex items-center gap-2 cursor-pointer shrink-0">
+            <div
+              onClick={() => setEnableKillSwitch(v => !v)}
+              className={`relative w-8 h-4 rounded-full transition-colors cursor-pointer ${
+                enableKillSwitch ? 'bg-red-600' : 'bg-zinc-700'
+              }`}
+            >
+              <div className={`absolute top-0.5 h-3 w-3 rounded-full bg-white shadow transition-transform ${
+                enableKillSwitch ? 'translate-x-4' : 'translate-x-0.5'
+              }`} />
+            </div>
+            <span className="text-[10px] text-zinc-500 font-semibold">Kill switch on trigger</span>
+          </label>
+
+          <div className="h-6 w-px bg-zinc-800 shrink-0" />
+
+          {/* Set button */}
+          <button
+            onClick={handleSetPnl}
+            disabled={settingPnl}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[11px] font-bold border transition-all active:scale-95 disabled:opacity-40 disabled:cursor-not-allowed bg-emerald-900/40 border-emerald-700/60 text-emerald-300 hover:bg-emerald-800/40 hover:border-emerald-600"
+          >
+            {settingPnl ? <RefreshCw className="h-3 w-3 animate-spin" /> : <Shield className="h-3 w-3" />}
+            {settingPnl ? 'Setting…' : 'Set Guard'}
+          </button>
+
+          {/* Clear button */}
+          <button
+            onClick={handleClearPnl}
+            disabled={clearingPnl}
+            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[11px] font-bold border transition-all active:scale-95 disabled:opacity-40 disabled:cursor-not-allowed ${
+              confirmClear
+                ? 'bg-red-600 border-red-500 text-white animate-pulse'
+                : 'bg-zinc-900/60 border-zinc-700/60 text-zinc-500 hover:border-red-800 hover:text-red-400'
+            }`}
+          >
+            {clearingPnl ? <RefreshCw className="h-3 w-3 animate-spin" /> : null}
+            {clearingPnl ? 'Clearing…' : confirmClear ? 'Confirm Clear?' : 'Clear'}
+          </button>
+        </div>
+      )}
 
       {/* ── Main Table ── */}
       <main className="flex-1 w-full">
