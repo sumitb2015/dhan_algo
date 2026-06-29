@@ -529,7 +529,7 @@ export default function OptionsCharts() {
             ))}
           </div>
 
-          {activeTab === 'skew' && <OptionsSkewTab expiry={expiries[0] ?? ''} />}
+          {activeTab === 'skew' && <OptionsSkewTab expiry={expiry} />}
 
           {activeTab === 'premium' && <>
 

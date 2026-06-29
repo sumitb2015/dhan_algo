@@ -128,6 +128,10 @@ export default function OptionsSkewTab({ expiry }: { expiry: string }) {
   useEffect(() => {
     if (!expiry) return;
     setLoading(true);
+    setSkewData([]);
+    setSpot(0);
+    setAtm(0);
+    setLastUpdated(null);
     void fetchSkew();
     intervalRef.current = setInterval(() => { void fetchSkew(); }, POLL_MS);
     return () => { if (intervalRef.current) clearInterval(intervalRef.current); };
