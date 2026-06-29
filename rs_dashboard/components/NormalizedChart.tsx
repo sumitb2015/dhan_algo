@@ -21,7 +21,7 @@ type FilterMode = 'all' | 'positive' | 'negative';
 
 // SVG viewport
 const SVG_W = 1200;
-const SVG_H = 620;
+const SVG_H = 800;
 const M = { top: 24, right: 24, bottom: 44, left: 66 };
 const CW = SVG_W - M.left - M.right;  // chart width
 const CH = SVG_H - M.top  - M.bottom; // chart height
@@ -77,12 +77,18 @@ function FanChart({ dates, stocks, leaderHovered, onHoverChange }: FanChartProps
   // Which symbol is actively highlighted (chart crosshair takes priority)
   const activeSymbol = crosshair?.symbol ?? leaderHovered;
 
-  // Y range: full min–max of final returns so every line is visible, with padding
+  // Y range: scan every data point so no line goes off-screen mid-period
   const { yMin, yMax } = useMemo(() => {
-    const sorted = stocks.map((s) => s.finalReturn).sort((a, b) => a - b);
-    const minV = sorted[0] ?? -20;
-    const maxV = sorted[sorted.length - 1] ?? 60;
-    const pad  = (maxV - minV) * 0.08;
+    let minV = Infinity, maxV = -Infinity;
+    for (const s of stocks) {
+      for (const v of s.values) {
+        if (v === null) continue;
+        if (v < minV) minV = v;
+        if (v > maxV) maxV = v;
+      }
+    }
+    if (!isFinite(minV)) { minV = -20; maxV = 60; }
+    const pad = (maxV - minV) * 0.08;
     return { yMin: Math.min(minV - pad, -6), yMax: Math.max(maxV + pad, 6) };
   }, [stocks]);
 
@@ -193,8 +199,9 @@ function FanChart({ dates, stocks, leaderHovered, onHoverChange }: FanChartProps
     <svg
       ref={svgRef}
       viewBox={`0 0 ${SVG_W} ${SVG_H}`}
-      className="w-full"
-      style={{ display: 'block', background: 'transparent', minHeight: 420 }}
+      className="w-full h-full"
+      preserveAspectRatio="none"
+      style={{ display: 'block', background: 'transparent', minHeight: 300 }}
     >
       {/* ── Clip path: prevents lines from drawing outside the chart area ── */}
       <defs>
@@ -545,11 +552,11 @@ export default function NormalizedChart() {
 
         {/* ── Chart + leaderboard ── */}
         {!loading && data && filtered.length > 0 && (
-          <div className="flex flex-col xl:flex-row gap-3 items-start">
+          <div className="flex flex-col xl:flex-row gap-3 items-stretch">
 
             {/* Chart */}
-            <div className="flex-1 min-w-0 rounded-xl border border-zinc-800 bg-zinc-950 p-4">
-              <div className="flex items-center justify-between mb-3 px-1">
+            <div className="flex-1 min-w-0 rounded-xl border border-zinc-800 bg-zinc-950 p-4 flex flex-col">
+              <div className="flex items-center justify-between mb-3 px-1 shrink-0">
                 <span className="text-[13px] font-semibold text-white/75">
                   {universe === 'nifty50' ? 'NIFTY 50' : universe === 'nifty500' ? 'NIFTY 500' : 'NSE Indices'} — {period} Normalised Performance
                 </span>
@@ -559,23 +566,25 @@ export default function NormalizedChart() {
                   <span className="hidden sm:inline text-white/20">Hover chart or leaderboard to highlight</span>
                 </div>
               </div>
-              <FanChart
-                dates={data.dates}
-                stocks={filtered}
-                leaderHovered={hovered}
-                onHoverChange={setHovered}
-              />
+              <div className="flex-1 min-h-0">
+                <FanChart
+                  dates={data.dates}
+                  stocks={filtered}
+                  leaderHovered={hovered}
+                  onHoverChange={setHovered}
+                />
+              </div>
             </div>
 
             {/* Leaderboard */}
-            <div className="flex flex-col gap-2 xl:w-[370px] shrink-0">
-              <div className="rounded-xl border border-zinc-800 bg-zinc-950 overflow-hidden">
-                <div className="flex items-center gap-2 px-3 py-2.5 border-b border-zinc-800/70">
+            <div className="flex flex-col gap-2 xl:w-[370px] shrink-0 h-full">
+              <div className="flex-1 rounded-xl border border-zinc-800 bg-zinc-950 overflow-hidden flex flex-col">
+                <div className="flex items-center gap-2 px-3 py-2.5 border-b border-zinc-800/70 shrink-0">
                   <TrendingUp className="h-3.5 w-3.5 text-emerald-400 shrink-0" />
                   <span className="text-[12px] font-semibold text-white/75 flex-1">Top Gainers</span>
                   <span className="text-[10px] text-white/45 tabular-nums">{stats?.positive} up</span>
                 </div>
-                <div className="py-1 px-1">
+                <div className="flex-1 overflow-y-auto py-1 px-1">
                   {gainers.filter((s) => s.finalReturn >= 0).length === 0
                     ? <p className="text-center text-[11px] text-white/30 py-4">No positive stocks</p>
                     : gainers.filter((s) => s.finalReturn >= 0).map((s, i) => (
@@ -584,13 +593,13 @@ export default function NormalizedChart() {
                     ))}
                 </div>
               </div>
-              <div className="rounded-xl border border-zinc-800 bg-zinc-950 overflow-hidden">
-                <div className="flex items-center gap-2 px-3 py-2.5 border-b border-zinc-800/70">
+              <div className="flex-1 rounded-xl border border-zinc-800 bg-zinc-950 overflow-hidden flex flex-col">
+                <div className="flex items-center gap-2 px-3 py-2.5 border-b border-zinc-800/70 shrink-0">
                   <TrendingDown className="h-3.5 w-3.5 text-red-400 shrink-0" />
                   <span className="text-[12px] font-semibold text-white/75 flex-1">Top Losers</span>
                   <span className="text-[10px] text-white/45 tabular-nums">{stats?.negative} down</span>
                 </div>
-                <div className="py-1 px-1">
+                <div className="flex-1 overflow-y-auto py-1 px-1">
                   {losers.filter((s) => s.finalReturn < 0).length === 0
                     ? <p className="text-center text-[11px] text-white/30 py-4">No negative stocks</p>
                     : losers.filter((s) => s.finalReturn < 0).map((s, i) => (
