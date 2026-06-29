@@ -36,7 +36,7 @@ export async function GET() {
     const { clientId, token } = getToken();
     const res  = await fetch(DHAN_PNL_EXIT, { headers: dhanHeaders(clientId, token) });
     const json = await res.json() as { status?: string; data?: unknown; remarks?: string };
-    if (json.status === 'success') {
+    if (String(json.status).toUpperCase() === 'SUCCESS') {
       return NextResponse.json({ success: true, data: json.data });
     }
     return NextResponse.json({ success: false, error: json.remarks ?? 'Failed to retrieve P&L exit config' });
@@ -72,7 +72,7 @@ export async function POST(req: NextRequest) {
     console.error('[/api/pnl-exit POST] Dhan raw response:', res.status, text);
     let json: Record<string, unknown> = {};
     try { json = JSON.parse(text); } catch {}
-    if (json.status === 'success') return NextResponse.json({ success: true });
+    if (String(json.status).toUpperCase() === 'SUCCESS') return NextResponse.json({ success: true });
     const errMsg = (json.remarks ?? json.errorMessage ?? json.message ?? json.errorType ?? text) as string;
     return NextResponse.json({ success: false, error: errMsg || 'Failed to configure P&L exit' });
   } catch (err) {
@@ -90,7 +90,7 @@ export async function DELETE() {
       headers: dhanHeaders(clientId, token),
     });
     const json = await res.json() as { status?: string; remarks?: string };
-    if (json.status === 'success') return NextResponse.json({ success: true });
+    if (String(json.status).toUpperCase() === 'SUCCESS') return NextResponse.json({ success: true });
     return NextResponse.json({ success: false, error: json.remarks ?? 'Failed to disable P&L exit' });
   } catch (err) {
     console.error('[/api/pnl-exit DELETE]', err);
