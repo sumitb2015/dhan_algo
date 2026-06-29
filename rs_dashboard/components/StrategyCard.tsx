@@ -92,7 +92,7 @@ export default function StrategyCard({ meta, state, onRefresh }: StrategyCardPro
   const [maxLots, setMaxLots] = useState<number>(4);
   const [mode, setMode] = useState<string>('winner_roll_atm');
   const [loserRatioLots, setLoserRatioLots] = useState<number>(1);
-  const [entryType, setEntryType] = useState<string>('straddle');
+  const [entryType, setEntryType] = useState<string>('strangle');
   const [strikeSelection, setStrikeSelection] = useState<string>('distance');
   const [ceOffset, setCeOffset] = useState<number>(200);
   const [peOffset, setPeOffset] = useState<number>(200);

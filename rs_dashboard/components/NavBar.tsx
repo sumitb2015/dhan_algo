@@ -12,6 +12,7 @@ const NAV_LINKS = [
   { href: '/distribution', label: 'Distribution' },
   { href: '/live', label: 'Live' },
   { href: '/strategies', label: 'Strategies' },
+  { href: '/strategies-plus', label: 'Strategies+' },
   { href: '/portfolio', label: 'Portfolio' },
   { href: '/portfolio-new', label: 'Portfolio+' },
   { href: '/reports', label: 'Reports' },
