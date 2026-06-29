@@ -60,6 +60,7 @@ export default function Scalper() {
   const [allStrikes, setAllStrikes]     = useState<number[]>([]);
   const [prevClose, setPrevClose]       = useState<Record<string, { ce: number; pe: number }>>({});
   const [chainSpot, setChainSpot]       = useState(0);
+  const [prevSpot, setPrevSpot]         = useState(0);
 
   // WS bridge live data
   const [liveQuotes, setLiveQuotes]   = useState<LiveQuotes | null>(null);
@@ -119,6 +120,13 @@ export default function Scalper() {
           setExpiries(j.data);
           setExpiry(j.data[0]);
         }
+      })
+      .catch(() => {});
+
+    fetch('/api/scalper/nifty-prev-close')
+      .then(r => r.json())
+      .then((j: { success: boolean; prevClose?: number }) => {
+        if (j.success && j.prevClose) setPrevSpot(j.prevClose);
       })
       .catch(() => {});
   }, []);
@@ -368,6 +376,30 @@ export default function Scalper() {
           </div>
         </div>
       </div>
+
+      {/* Centered NIFTY spot price strip */}
+      {spot > 0 && (() => {
+        const chg    = prevSpot > 0 ? spot - prevSpot : 0;
+        const chgPct = prevSpot > 0 ? (chg / prevSpot) * 100 : 0;
+        const isUp   = chg >= 0;
+        return (
+          <div className="flex justify-center items-center px-4 pb-1 pt-0">
+            <div className="flex items-baseline gap-3 bg-zinc-900/60 border border-zinc-800 rounded-2xl px-8 py-3">
+              <span className="text-xs font-bold text-zinc-500 uppercase tracking-widest">NIFTY</span>
+              <span className="text-3xl font-bold font-mono tabular-nums text-white">
+                {spot.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+              </span>
+              {prevSpot > 0 && (
+                <div className={`flex items-baseline gap-1.5 text-sm font-semibold font-mono tabular-nums ${isUp ? 'text-emerald-400' : 'text-rose-400'}`}>
+                  <span>{isUp ? '▲' : '▼'}</span>
+                  <span>{Math.abs(chg).toFixed(2)}</span>
+                  <span className="text-xs opacity-80">({isUp ? '+' : ''}{chgPct.toFixed(2)}%)</span>
+                </div>
+              )}
+            </div>
+          </div>
+        );
+      })()}
 
       {/* Trading panels */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-3 p-4">
