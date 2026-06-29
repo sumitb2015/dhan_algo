@@ -11,6 +11,7 @@ import NavBar from './NavBar';
 const UNIVERSES = [
   { value: 'nifty50',  label: 'NIFTY 50' },
   { value: 'nifty500', label: 'NIFTY 500' },
+  { value: 'indices',  label: 'Indices' },
 ] as const;
 type Universe = typeof UNIVERSES[number]['value'];
 
@@ -503,8 +504,8 @@ export default function NormalizedChart() {
           </div>
           {data && (
             <span className="text-[11px] text-white/45 ml-auto tabular-nums">
-              {filtered.length} stocks · {fmtDate(data.actualStart)} → {fmtDate(data.actualEnd)}
-              {longPeriod && <span className="text-amber-500/80 ml-1.5">(stock data limited to ~2Y)</span>}
+              {filtered.length} {universe === 'indices' ? 'indices' : 'stocks'} · {fmtDate(data.actualStart)} → {fmtDate(data.actualEnd)}
+              {longPeriod && universe !== 'indices' && <span className="text-amber-500/80 ml-1.5">(stock data limited to ~2Y)</span>}
             </span>
           )}
         </div>
@@ -537,7 +538,7 @@ export default function NormalizedChart() {
           <div className="flex flex-col items-center justify-center p-16 rounded-lg border border-zinc-900 bg-zinc-950">
             <RefreshCw className="h-6 w-6 text-sky-500 animate-spin" />
             <span className="text-white/45 text-[12px] mt-3">
-              Loading normalized data for {universe === 'nifty50' ? 'Nifty 50' : 'Nifty 500'}…
+              Loading normalized data for {universe === 'nifty50' ? 'Nifty 50' : universe === 'nifty500' ? 'Nifty 500' : 'All Indices'}…
             </span>
           </div>
         )}
@@ -550,7 +551,7 @@ export default function NormalizedChart() {
             <div className="flex-1 min-w-0 rounded-xl border border-zinc-800 bg-zinc-950 p-4">
               <div className="flex items-center justify-between mb-3 px-1">
                 <span className="text-[13px] font-semibold text-white/75">
-                  {universe === 'nifty50' ? 'NIFTY 50' : 'NIFTY 500'} — {period} Normalised Performance
+                  {universe === 'nifty50' ? 'NIFTY 50' : universe === 'nifty500' ? 'NIFTY 500' : 'NSE Indices'} — {period} Normalised Performance
                 </span>
                 <div className="flex items-center gap-4 text-[10px] text-white/30">
                   <span className="flex items-center gap-1.5"><span className="inline-block w-5 h-0.5 bg-emerald-400 rounded" /> Positive</span>
@@ -572,7 +573,7 @@ export default function NormalizedChart() {
                 <div className="flex items-center gap-2 px-3 py-2.5 border-b border-zinc-800/70">
                   <TrendingUp className="h-3.5 w-3.5 text-emerald-400 shrink-0" />
                   <span className="text-[12px] font-semibold text-white/75 flex-1">Top Gainers</span>
-                  <span className="text-[10px] text-white/45 tabular-nums">{stats?.positive} positive</span>
+                  <span className="text-[10px] text-white/45 tabular-nums">{stats?.positive} up</span>
                 </div>
                 <div className="py-1 px-1">
                   {gainers.filter((s) => s.finalReturn >= 0).length === 0
@@ -587,7 +588,7 @@ export default function NormalizedChart() {
                 <div className="flex items-center gap-2 px-3 py-2.5 border-b border-zinc-800/70">
                   <TrendingDown className="h-3.5 w-3.5 text-red-400 shrink-0" />
                   <span className="text-[12px] font-semibold text-white/75 flex-1">Top Losers</span>
-                  <span className="text-[10px] text-white/45 tabular-nums">{stats?.negative} negative</span>
+                  <span className="text-[10px] text-white/45 tabular-nums">{stats?.negative} down</span>
                 </div>
                 <div className="py-1 px-1">
                   {losers.filter((s) => s.finalReturn < 0).length === 0

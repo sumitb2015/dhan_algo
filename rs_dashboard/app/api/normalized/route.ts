@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { readStockCSV, readNifty500List } from '@/lib/dataLoader';
+import { readStockCSV, readNifty500List, readIndexCSV, KNOWN_INDICES } from '@/lib/dataLoader';
 import { NIFTY50_SYMBOLS } from '@/lib/nifty50';
 import { getSector } from '@/lib/sectors';
 import { OHLCVRow } from '@/lib/rs';
@@ -101,24 +101,35 @@ function alignToCanonical(
 // ─── Core computation ─────────────────────────────────────────────────────────
 
 async function computeNormalized(
-  indexType: 'nifty50' | 'nifty500',
+  indexType: 'nifty50' | 'nifty500' | 'indices',
   period: string,
 ): Promise<NormalizedResponse> {
   const cacheKey = `${indexType}:${period}`;
   const cached = normCache.get(cacheKey);
   if (cached && Date.now() - cached.ts < NORM_TTL) return cached.data;
 
-  const symbols = indexType === 'nifty50' ? NIFTY50_SYMBOLS : readNifty500List();
   const tradingDays = PERIOD_DAYS[period] ?? 252;
   const calendarDays = tradingToCalendar(tradingDays);
 
-  // Load all stock rows in parallel
-  const allData = await Promise.all(
-    symbols.map(async (symbol) => {
-      const rows = readStockCSV(symbol);
-      return { symbol, rows };
-    })
-  );
+  // Load rows — indices use readIndexCSV; stocks use readStockCSV
+  let allData: { symbol: string; label: string; rows: OHLCVRow[] }[];
+
+  if (indexType === 'indices') {
+    allData = KNOWN_INDICES.map((meta) => ({
+      symbol: meta.key,
+      label: meta.label,
+      rows: readIndexCSV(meta),
+    }));
+  } else {
+    const symbols = indexType === 'nifty50' ? NIFTY50_SYMBOLS : readNifty500List();
+    allData = await Promise.all(
+      symbols.map(async (symbol) => ({
+        symbol,
+        label: getSector(symbol),
+        rows: readStockCSV(symbol),
+      }))
+    );
+  }
 
   // Find the latest end date (most recent trading day across all stocks)
   let globalEnd = '';
@@ -128,12 +139,12 @@ async function computeNormalized(
       if (last > globalEnd) globalEnd = last;
     }
   }
-  if (!globalEnd) return { dates: [], stocks: [], periodLabel: period, requestedStart: '', actualStart: '', actualEnd: '', totalScanned: symbols.length };
+  const totalScanned = allData.length;
+  if (!globalEnd) return { dates: [], stocks: [], periodLabel: period, requestedStart: '', actualStart: '', actualEnd: '', totalScanned };
 
   const requestedStart = subtractCalendarDays(globalEnd, calendarDays);
 
-  // Determine canonical dates from the stock with the most data in the period
-  // (all NSE stocks share the same trading calendar, so any complete stock works)
+  // Determine canonical dates from the series with the most data in the period
   let canonicalSource: OHLCVRow[] = [];
   for (const { rows } of allData) {
     const sliced = rows.filter((r) => r.date >= requestedStart);
@@ -143,7 +154,7 @@ async function computeNormalized(
   const canonicalDates = sampledCanonical.map((r) => r.date);
 
   if (canonicalDates.length === 0) {
-    return { dates: [], stocks: [], periodLabel: period, requestedStart, actualStart: '', actualEnd: globalEnd, totalScanned: symbols.length };
+    return { dates: [], stocks: [], periodLabel: period, requestedStart, actualStart: '', actualEnd: globalEnd, totalScanned };
   }
 
   const periodStart = canonicalDates[0];
@@ -152,7 +163,7 @@ async function computeNormalized(
   // Compute each stock's normalized series
   const stocks: StockSeries[] = [];
 
-  for (const { symbol, rows } of allData) {
+  for (const { symbol, label, rows } of allData) {
     if (rows.length < 5) continue;
 
     const sliced = rows.filter((r) => r.date >= requestedStart);
@@ -172,7 +183,7 @@ async function computeNormalized(
 
     stocks.push({
       symbol,
-      sector: getSector(symbol),
+      sector: label,
       finalReturn,
       values,
       hasFullHistory,
@@ -189,7 +200,7 @@ async function computeNormalized(
     requestedStart,
     actualStart: periodStart,
     actualEnd: periodEnd,
-    totalScanned: symbols.length,
+    totalScanned,
   };
 
   normCache.set(cacheKey, { data, ts: Date.now() });
@@ -200,7 +211,7 @@ async function computeNormalized(
 
 export async function GET(request: NextRequest) {
   const { searchParams } = new URL(request.url);
-  const indexType = (searchParams.get('index') ?? 'nifty50') as 'nifty50' | 'nifty500';
+  const indexType = (searchParams.get('index') ?? 'nifty50') as 'nifty50' | 'nifty500' | 'indices';
   const period = searchParams.get('period') ?? '1Y';
 
   try {
