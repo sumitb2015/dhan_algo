@@ -10,7 +10,7 @@ interface CacheEntry { data: ChainResponse; ts: number }
 interface ChainResponse { chain: Record<string, unknown>; spot: number }
 
 const cache = new Map<string, CacheEntry>();
-const CACHE_TTL = 30_000; // 30 s
+const CACHE_TTL = 10_000; // 10 s
 
 export async function GET(request: NextRequest) {
   const { searchParams } = new URL(request.url);
