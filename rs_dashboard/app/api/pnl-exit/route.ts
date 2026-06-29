@@ -54,6 +54,7 @@ export async function POST(req: NextRequest) {
       productTypes?: string[];
       enableKillSwitch?: boolean;
     };
+    tokenCache = null; // always re-read token for mutating operations
     const { clientId, token } = getToken();
     const payload = {
       dhanClientId:    clientId,
@@ -67,9 +68,13 @@ export async function POST(req: NextRequest) {
       headers: dhanHeaders(clientId, token),
       body:    JSON.stringify(payload),
     });
-    const json = await res.json() as { status?: string; remarks?: string };
+    const text = await res.text();
+    console.error('[/api/pnl-exit POST] Dhan raw response:', res.status, text);
+    let json: Record<string, unknown> = {};
+    try { json = JSON.parse(text); } catch {}
     if (json.status === 'success') return NextResponse.json({ success: true });
-    return NextResponse.json({ success: false, error: json.remarks ?? 'Failed to configure P&L exit' });
+    const errMsg = (json.remarks ?? json.errorMessage ?? json.message ?? json.errorType ?? text) as string;
+    return NextResponse.json({ success: false, error: errMsg || 'Failed to configure P&L exit' });
   } catch (err) {
     console.error('[/api/pnl-exit POST]', err);
     return NextResponse.json({ success: false, error: String(err) }, { status: 500 });
@@ -78,6 +83,7 @@ export async function POST(req: NextRequest) {
 
 export async function DELETE() {
   try {
+    tokenCache = null;
     const { clientId, token } = getToken();
     const res  = await fetch(DHAN_PNL_EXIT, {
       method:  'DELETE',
