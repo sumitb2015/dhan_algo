@@ -542,13 +542,14 @@ def run_live_tracker():
     last_fallback    = 0.0
     last_heartbeat   = 0.0
     nifty_spot       = 0.0
+    last_nifty_spot  = 0.0
     nifty_prev_close = 0.0   # fetched once at startup via get_prev_day_levels
 
     # ── 4. WebSocket — Nifty Index as canary ─────────────────────────────────
     # MarketFeed.IDX = 0  (index segment), security_id "13" = Nifty 50
     logger.info("Starting WebSocket (Nifty Index canary, IDX/13)…")
     helper.start_websocket(
-        [(MarketFeed.IDX, "13", MarketFeed.Full)],
+        [(MarketFeed.IDX, "13", MarketFeed.Ticker)],
         on_message=lambda instance, data: None
     )
 
@@ -614,6 +615,10 @@ def run_live_tracker():
                     sheet.range("L1").value      = ("🟢 Open" if is_open
                                                      else "🔴 Closed")
                     sheet.range("O1").value      = now_str
+
+                    if nifty_spot != last_nifty_spot:
+                        logger.info(f"Nifty Spot Tick: {nifty_spot:,.2f} ({n_chg:+.2f}  {n_pct:+.2f}%)")
+                        last_nifty_spot = nifty_spot
 
                 # ==============================================================
                 # PHASE B — Input processing + order placement

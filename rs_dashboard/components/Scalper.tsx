@@ -11,6 +11,8 @@ interface StrikeData  { strike: number; ce: OptionSide; pe: OptionSide }
 
 interface LiveQuotes {
   updated_at: string | null;
+  underlying?: string;
+  expiry?: string;
   spot: number;
   atm: number;
   straddle_premium: number;
@@ -91,10 +93,11 @@ export default function Scalper() {
   const [toasts, setToasts] = useState<Toast[]>([]);
 
   // Bottom tabs
-  const [activeTab, setActiveTab]       = useState<'positions' | 'orders' | 'trades'>('positions');
+  const [activeTab, setActiveTab]       = useState<'positions' | 'orders' | 'trades' | 'funds'>('positions');
   const [positionsData, setPositionsData] = useState<Record<string, unknown>[]>([]);
   const [ordersData, setOrdersData]       = useState<Record<string, unknown>[]>([]);
   const [tradesData, setTradesData]       = useState<Record<string, unknown>[]>([]);
+  const [fundsData, setFundsData]         = useState<Record<string, any> | null>(null);
   const [tabLoading, setTabLoading]       = useState(false);
 
   // P&L Guard
@@ -242,8 +245,20 @@ export default function Scalper() {
         .then((j: { success: boolean; status: BridgeStatus; quotes: LiveQuotes }) => {
           if (j.success) {
             setBridgeStatus(j.status ?? { status: 'STOPPED' });
-            if (j.quotes?.strikes) {
-              setLiveQuotes(j.quotes);
+
+            const q = j.quotes;
+            // Guard 1: quotes must belong to the currently selected expiry
+            if (q?.expiry && q.expiry !== expiry) return;
+
+            // Guard 2: reject stale data older than 10 seconds
+            if (q?.updated_at) {
+              const ageMs = Date.now() - new Date(q.updated_at).getTime();
+              if (ageMs > 10_000) return;
+            }
+
+            // Guard 3: must have at least one strike entry (empty {} is truthy in JS)
+            if (q?.strikes && Object.keys(q.strikes).length > 0) {
+              setLiveQuotes(q);
               setLastUpdated(new Date().toLocaleTimeString('en-IN', {
                 hour: '2-digit', minute: '2-digit', second: '2-digit',
               }));
@@ -254,7 +269,7 @@ export default function Scalper() {
     };
 
     poll();
-    pollRef.current = setInterval(poll, 500);
+    pollRef.current = setInterval(poll, 100);
     return () => { if (pollRef.current) clearInterval(pollRef.current); };
   }, [expiry]);
 
@@ -262,25 +277,39 @@ export default function Scalper() {
 
   const fetchTabData = useCallback(() => {
     setTabLoading(true);
-    Promise.all([
-      fetch('/api/scalper/positions').then(r => r.json()).catch(() => ({ success: false, data: [] })),
-      fetch('/api/scalper/orders').then(r => r.json()).catch(() => ({ success: false, data: [] })),
-      fetch('/api/scalper/trades').then(r => r.json()).catch(() => ({ success: false, data: [] })),
-    ]).then(([pos, ord, trd]) => {
-      const p = pos as { success: boolean; data?: Record<string, unknown>[] };
-      const o = ord as { success: boolean; data?: Record<string, unknown>[] };
-      const t = trd as { success: boolean; data?: Record<string, unknown>[] };
-      if (p.success) setPositionsData(p.data ?? []);
-      if (o.success) setOrdersData(o.data ?? []);
-      if (t.success) setTradesData(t.data ?? []);
-    }).finally(() => setTabLoading(false));
+    fetch('/api/scalper/all')
+      .then(r => r.json())
+      .then((j: { success: boolean; positions?: Record<string, unknown>[]; orders?: Record<string, unknown>[]; trades?: Record<string, unknown>[]; funds?: Record<string, any>; pnl_guard?: any }) => {
+        if (j.success) {
+          setPositionsData(j.positions ?? []);
+          setOrdersData(j.orders ?? []);
+          setTradesData(j.trades ?? []);
+          setFundsData(j.funds ?? null);
+          setPnlGuardStatus(j.pnl_guard ?? null);
+        }
+      })
+      .catch(() => {})
+      .finally(() => setTabLoading(false));
+  }, []);
+
+  const pollTabData = useCallback(() => {
+    fetch('/api/scalper/poll')
+      .then(r => r.json())
+      .then((j: { success: boolean; positions?: Record<string, unknown>[]; orders?: Record<string, unknown>[]; trades?: Record<string, unknown>[] }) => {
+        if (j.success) {
+          setPositionsData(j.positions ?? []);
+          setOrdersData(j.orders ?? []);
+          setTradesData(j.trades ?? []);
+        }
+      })
+      .catch(() => {});
   }, []);
 
   useEffect(() => {
     fetchTabData();
-    const id = setInterval(fetchTabData, 5000);
+    const id = setInterval(pollTabData, 5000);
     return () => clearInterval(id);
-  }, [fetchTabData]);
+  }, [fetchTabData, pollTabData]);
 
   // ─── Toast helper ─────────────────────────────────────────────────
 
@@ -361,9 +390,7 @@ export default function Scalper() {
     }
   }, []);
 
-  useEffect(() => {
-    if (showPnlGuard) fetchPnlGuardStatus();
-  }, [showPnlGuard, fetchPnlGuardStatus]);
+
 
   const handleSetPnl = async () => {
     const p = parseFloat(profitTarget) || 0;
@@ -504,7 +531,16 @@ export default function Scalper() {
                   : 'bg-zinc-900 border-zinc-700 text-zinc-400 hover:text-zinc-200'
               }`}>
               <Shield className="w-3.5 h-3.5" />
-              P&amp;L Guard
+              <span>
+                P&amp;L Guard
+                {pnlGuardStatus?.pnlExitStatus === 'ACTIVE' && (
+                  <span className="ml-1 text-[10px] font-bold font-mono">
+                    ({pnlGuardStatus.profit ? `🎯₹${pnlGuardStatus.profit}` : ''}
+                    {pnlGuardStatus.profit && pnlGuardStatus.loss ? ' | ' : ''}
+                    {pnlGuardStatus.loss ? `🛑₹${pnlGuardStatus.loss}` : ''})
+                  </span>
+                )}
+              </span>
               <ChevronDown className={`w-3 h-3 transition-transform ${showPnlGuard ? 'rotate-180' : ''}`} />
             </button>
           </div>
@@ -668,6 +704,7 @@ export default function Scalper() {
             ['positions', positionsData] as const,
             ['orders',    ordersData]    as const,
             ['trades',    tradesData]    as const,
+            ['funds',     []]            as const,
           ]).map(([tab, data]) => (
             <button key={tab} onClick={() => setActiveTab(tab as typeof activeTab)}
               className={`px-3 py-1.5 text-xs font-semibold rounded-lg transition-all capitalize ${
@@ -689,10 +726,17 @@ export default function Scalper() {
 
         {/* Table content */}
         <div className="flex-1 overflow-auto">
-          <TabTable
-            tab={activeTab}
-            data={activeTab === 'positions' ? positionsData : activeTab === 'orders' ? ordersData : tradesData}
-          />
+          {activeTab === 'funds' ? (
+            <FundsView
+              data={fundsData}
+              realizedPnl={positionsData.reduce((sum, p) => sum + (Number(p.realizedProfit) || 0), 0)}
+            />
+          ) : (
+            <TabTable
+              tab={activeTab}
+              data={activeTab === 'positions' ? positionsData : activeTab === 'orders' ? ordersData : tradesData}
+            />
+          )}
         </div>
       </div>
     </div>
@@ -880,5 +924,76 @@ function TabTable({ tab, data }: TabTableProps) {
         ))}
       </tbody>
     </table>
+  );
+}
+
+// ─── FundsView ────────────────────────────────────────────────────
+
+interface FundsViewProps {
+  data: Record<string, any> | null;
+  realizedPnl: number;
+}
+
+function formatFundsValue(val: number): string {
+  if (val === 0) return '0';
+  if (Number.isInteger(val)) {
+    return val.toLocaleString('en-IN');
+  }
+  return val.toLocaleString('en-IN', { minimumFractionDigits: 1, maximumFractionDigits: 2 });
+}
+
+function FundsView({ data, realizedPnl }: FundsViewProps) {
+  if (!data) {
+    return (
+      <div className="flex items-center justify-center h-32 text-zinc-600 text-sm">
+        No funds data available
+      </div>
+    );
+  }
+
+  const available = Number(data.availabelBalance) || 0;
+  const used = Number(data.utilizedAmount) || 0;
+  const total = available + used;
+
+  const rows = [
+    { label: 'Total Balance', value: total },
+    { label: 'Used Margin', value: used },
+    { label: 'Realized P&L', value: realizedPnl },
+    { label: 'Available', value: available },
+  ];
+
+  const renderSection = (title: string) => (
+    <div className="flex-1 min-w-[280px] bg-zinc-900/20 border border-zinc-800/60 rounded-xl p-5">
+      <h3 className="text-zinc-200 text-sm font-semibold mb-4 tracking-wide border-b border-zinc-800/80 pb-2">{title}</h3>
+      <table className="w-full text-xs font-mono">
+        <thead>
+          <tr className="border-b border-zinc-800/40 text-zinc-500 font-semibold text-left">
+            <th className="pb-2 font-medium">Type</th>
+            <th className="pb-2 text-right font-medium">Balance</th>
+          </tr>
+        </thead>
+        <tbody className="divide-y divide-zinc-800/20 text-zinc-300">
+          {rows.map((row) => (
+            <tr key={row.label} className="hover:bg-zinc-800/10 transition-colors">
+              <td className="py-3 text-left text-zinc-400">{row.label}</td>
+              <td className={`py-3 text-right font-semibold ${
+                row.label === 'Realized P&L' && row.value !== 0
+                  ? row.value > 0 ? 'text-emerald-400' : 'text-rose-400'
+                  : 'text-zinc-100'
+              }`}>
+                {formatFundsValue(row.value)}
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+
+  return (
+    <div className="flex flex-wrap gap-5 p-5">
+      {renderSection('NSE - Derivatives')}
+      {renderSection('NSE - Equity')}
+    </div>
   );
 }

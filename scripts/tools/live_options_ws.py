@@ -53,22 +53,31 @@ def _f(val, default: float = 0.0) -> float:
 
 def atomic_write(path: str, data: dict):
     tmp = path + '.tmp'
-    with open(tmp, 'w') as f:
-        json.dump(data, f)
-    os.replace(tmp, path)
+    try:
+        with open(tmp, 'w') as f:
+            json.dump(data, f)
+        os.replace(tmp, path)
+    except PermissionError:
+        # File is locked by Next.js reader, skip this cycle
+        pass
+    except Exception as e:
+        print(f"[live_options_ws] Warning: failed to write {path} ({e})", flush=True)
 
 
 def write_status(status: str, underlying: str = '', expiry: str = '',
                  subscribed: int = 0, started_at: str = ''):
-    atomic_write(STATUS_FILE, {
-        'status': status,
-        'pid': os.getpid(),
-        'underlying': underlying,
-        'expiry': expiry,
-        'subscribed': subscribed,
-        'started_at': started_at or datetime.now().isoformat(),
-        'last_update': datetime.now().isoformat(),
-    })
+    try:
+        atomic_write(STATUS_FILE, {
+            'status': status,
+            'pid': os.getpid(),
+            'underlying': underlying,
+            'expiry': expiry,
+            'subscribed': subscribed,
+            'started_at': started_at or datetime.now().isoformat(),
+            'last_update': datetime.now().isoformat(),
+        })
+    except Exception as e:
+        print(f"[live_options_ws] Warning: failed to write status ({e})", flush=True)
 
 
 def main():
@@ -123,7 +132,7 @@ def main():
             instruments.append((NSE_FNO, sid, FULL))
 
     # Subscribe to Nifty index as spot canary
-    instruments.append((IDX, '13', FULL))
+    instruments.append((IDX, '13', 15))
 
     n = len(instruments) - 1  # exclude index canary
     print(f'[live_options_ws] Subscribing to {n} option contracts + index canary…', flush=True)
@@ -137,11 +146,20 @@ def main():
     helper.start_websocket(instruments)
     time.sleep(3)  # wait for connection + first tick batch
 
+    # Diagnostic: check if index canary received a tick
+    idx_initial = helper.live_data.get('13')
+    if idx_initial:
+        initial_ltp = _f(idx_initial.get('LTP') or idx_initial.get('last_price'))
+        print(f'[live_options_ws] Index tick received — LTP={initial_ltp:.2f}', flush=True)
+    else:
+        print('[live_options_ws] WARNING: No index tick received after 3s; will use REST spot as fallback', flush=True)
+
     write_status('RUNNING', underlying=args.underlying, expiry=args.expiry,
                  subscribed=n, started_at=started_at)
     print('[live_options_ws] WebSocket connected. Writing quotes every 2s…', flush=True)
 
-    history: list[dict] = []
+    last_print = 0.0
+    last_quotes = None
 
     try:
         while True:
@@ -196,36 +214,27 @@ def main():
 
             now_iso = datetime.now().isoformat()
 
-            # Append time-series point
-            history.append({
-                'timestamp': now_iso,
-                'spot':              round(spot, 2),
-                'atm':               atm,
-                'straddle_premium':  straddle,
-                # Per-strike snapshot for selected-strike chart
-                'strikes': strikes_data,
-            })
-            if len(history) > MAX_HISTORY:
-                history = history[-MAX_HISTORY:]
-
-            atomic_write(QUOTES_FILE, {
-                'updated_at':        now_iso,
+            current_quotes = {
                 'underlying':        args.underlying,
                 'expiry':            args.expiry,
                 'spot':              round(spot, 2),
                 'atm':               atm,
                 'straddle_premium':  straddle,
                 'strikes':           strikes_data,
-            })
-            atomic_write(HISTORY_FILE, {
-                'underlying': args.underlying,
-                'expiry':     args.expiry,
-                'history':    history,
-            })
-            write_status('RUNNING', underlying=args.underlying, expiry=args.expiry,
-                         subscribed=n, started_at=started_at)
+            }
 
-            time.sleep(2)
+            if current_quotes != last_quotes:
+                current_quotes['updated_at'] = now_iso
+                atomic_write(QUOTES_FILE, current_quotes)
+                last_quotes = current_quotes
+
+            # Print status update to terminal every 10 seconds
+            now_ts = time.time()
+            if now_ts - last_print > 10:
+                print(f'[live_options_ws] Spot={spot:.2f} | ATM={atm} | Straddle={straddle:.2f} | Subscribed={n}', flush=True)
+                last_print = now_ts
+
+            time.sleep(0.1)
 
     except KeyboardInterrupt:
         print('[live_options_ws] KeyboardInterrupt — shutting down.', flush=True)

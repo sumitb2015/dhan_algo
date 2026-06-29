@@ -51,6 +51,15 @@ def main():
     # trades subcommand
     p_trd = sub.add_parser('trades')
 
+    # funds subcommand
+    p_fund = sub.add_parser('funds')
+
+    # all subcommand
+    p_all = sub.add_parser('all')
+
+    # poll subcommand
+    p_poll = sub.add_parser('poll')
+
     args = parser.parse_args()
 
     dhan = get_dhan_client()
@@ -140,6 +149,52 @@ def main():
     elif args.cmd == 'trades':
         data = helper.get_trade_book()
         print(json.dumps({'success': True, 'data': data or []}))
+
+    elif args.cmd == 'funds':
+        data = helper.get_fund_details()
+        print(json.dumps({'success': True, 'data': data or {}}))
+
+    elif args.cmd == 'all':
+        # Positions
+        positions = []
+        df = helper.get_positions()
+        if df is not None and not df.empty:
+            df = df.where(pd.notnull(df), None)
+            positions = df.to_dict('records')
+            
+        # Orders, Trades, Funds, P&L Guard
+        orders = helper.get_order_list() or []
+        trades = helper.get_trade_book() or []
+        funds = helper.get_fund_details() or {}
+        pnl_guard = helper.get_pnl_exit()
+        
+        print(json.dumps({
+            'success': True,
+            'positions': positions,
+            'orders': orders,
+            'trades': trades,
+            'funds': funds,
+            'pnl_guard': pnl_guard
+        }))
+
+    elif args.cmd == 'poll':
+        # Positions
+        positions = []
+        df = helper.get_positions()
+        if df is not None and not df.empty:
+            df = df.where(pd.notnull(df), None)
+            positions = df.to_dict('records')
+            
+        # Orders, Trades
+        orders = helper.get_order_list() or []
+        trades = helper.get_trade_book() or []
+        
+        print(json.dumps({
+            'success': True,
+            'positions': positions,
+            'orders': orders,
+            'trades': trades
+        }))
 
     else:
         print(json.dumps({'error': 'unknown command'}))

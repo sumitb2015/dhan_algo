@@ -138,24 +138,25 @@ class NiftySpreadTrendStrategy:
             # Fetch candles with indicators
             indicators = [
                 f"EMA{self.ema_period}",
-                {"kind": "supertrend", "length": self.supertrend_period, "multiplier": self.supertrend_multiplier}
+                {"kind": "supertrend", "length": self.supertrend_period, "multiplier": self.supertrend_multiplier},
+                "VWAP"
             ]
-            
+
             df = self.helper.get_indicators_ta(
                 symbol=self.symbol,
                 interval=self.interval,
                 indicators=indicators,
                 days=5 # fetch 5 days of history to ensure EMA warmup
             )
-            
+
             if df.empty or len(df) < 2:
                 logger.warning("Empty or insufficient data for indicator calculations.")
                 return "NEUTRAL", 0.0
-                
+
             # Get the last completed candle (index -2) to avoid whipsaws on the active uncompleted bar
             row = df.iloc[-2]
             close = float(row['Close'])
-            
+
             # Find EMA column
             ema_col = f"EMA_{self.ema_period}"
             if ema_col not in df.columns:
@@ -165,30 +166,38 @@ class NiftySpreadTrendStrategy:
                 else:
                     logger.error(f"EMA column not found in indicators DataFrame. Columns: {df.columns.tolist()}")
                     return "NEUTRAL", 0.0
-                    
+
             ema_val = float(row[ema_col])
-            
+
             # Find Supertrend direction column dynamically
             st_dir_cols = [c for c in df.columns if c.startswith('SUPERTd_')]
             if not st_dir_cols:
                 logger.error(f"Supertrend direction column not found. Columns: {df.columns.tolist()}")
                 return "NEUTRAL", 0.0
-                
+
             st_dir_col = st_dir_cols[0]
             st_dir = float(row[st_dir_col])
-            
+
+            # Find VWAP column dynamically
+            vwap_cols = [c for c in df.columns if 'VWAP' in c.upper()]
+            if not vwap_cols:
+                logger.error(f"VWAP column not found. Columns: {df.columns.tolist()}")
+                return "NEUTRAL", 0.0
+
+            vwap_val = float(row[vwap_cols[0]])
+
             # Print indicator details periodically
             candle_time = row.get('Datetime') or df.index[-2]
             if candle_time != self.last_processed_candle_time:
-                logger.info(f"[SIGNAL CHECK] Candle Time: {candle_time} | Close: {close:.2f} | EMA({self.ema_period}): {ema_val:.2f} | Supertrend Dir: {st_dir:.1f}")
+                logger.info(f"[SIGNAL CHECK] Candle Time: {candle_time} | Close: {close:.2f} | EMA({self.ema_period}): {ema_val:.2f} | Supertrend Dir: {st_dir:.1f} | VWAP: {vwap_val:.2f}")
                 self.last_processed_candle_time = candle_time
-                
+
             # Signal assessment
-            # Bullish: Close > EMA and Supertrend direction is 1 (uptrend)
-            if close > ema_val and st_dir == 1:
+            # Bullish: Close > EMA, Supertrend uptrend, and Close > VWAP
+            if close > ema_val and st_dir == 1 and close > vwap_val:
                 return "BULLISH", close
-            # Bearish: Close < EMA and Supertrend direction is -1 (downtrend)
-            elif close < ema_val and st_dir == -1:
+            # Bearish: Close < EMA, Supertrend downtrend, and Close < VWAP
+            elif close < ema_val and st_dir == -1 and close < vwap_val:
                 return "BEARISH", close
             else:
                 return "NEUTRAL", close
@@ -439,23 +448,13 @@ class NiftySpreadTrendStrategy:
             # 3. Daily Profit Target
             if total_pnl >= self.target_profit:
                 self.exit_positions(f"Profit Target Reached: ₹{total_pnl:.2f} (Target: ₹{self.target_profit:.2f})")
-                if not self.helper.wait_for_next_day_market_open(self.dry_run, shutdown_check=lambda: check_shutdown_trigger("nifty_spread_trend")):
-                    self.save_state(0, 0, 0, total_pnl, status="STOPPED")
-                    sys.exit(0)
-                if self.dry_run:
-                    logger.info("[DRY RUN] Daily profit target hit. Sleeping 30s before restarting...")
-                    time.sleep(30)
+                logger.info(f"Profit target hit. Cooling down for {self.cooldown_minutes} minutes before re-scanning...")
                 break
 
             # 4. Daily Stop Loss
             if total_pnl <= self.stop_loss:
                 self.exit_positions(f"Global Stop Loss Hit: ₹{total_pnl:.2f} (Limit: -₹{abs(self.stop_loss):.2f})")
-                if not self.helper.wait_for_next_day_market_open(self.dry_run, shutdown_check=lambda: check_shutdown_trigger("nifty_spread_trend")):
-                    self.save_state(0, 0, 0, total_pnl, status="STOPPED")
-                    sys.exit(0)
-                if self.dry_run:
-                    logger.info("[DRY RUN] Daily stop loss hit. Sleeping 30s before restarting...")
-                    time.sleep(30)
+                logger.info(f"Stop loss hit. Cooling down for {self.cooldown_minutes} minutes before re-scanning...")
                 break
                 
             # 5. Signal Reversal (Early exit on trend flip)

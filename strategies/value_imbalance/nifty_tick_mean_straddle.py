@@ -106,6 +106,9 @@ class NiftyTickMeanStraddle:
         self.lot_size = self.helper.get_lot_size("NIFTY")
         logger.info(f"NIFTY lot size: {self.lot_size}")
 
+        levels = self.helper.get_prev_day_levels("NIFTY")
+        self.prev_day_close: float = levels.get("close", 0.0) if levels else 0.0
+
         # Position state
         self._reset_position()
 
@@ -202,7 +205,22 @@ class NiftyTickMeanStraddle:
         return self.helper.get_ltp(security_id, exchange="NSE_FNO", instrument="OPTIDX")
 
     def _nifty_spot(self) -> float:
-        return self.helper.get_ltp("NIFTY", exchange="IDX_I", instrument="INDEX")
+        spot = self.helper.get_ltp("NIFTY", exchange="IDX_I", instrument="INDEX")
+        if spot > 0:
+            return spot
+        # Fallback 1: option chain underlying LTP
+        expiry = self.helper.get_nearest_expiry("NIFTY")
+        if expiry:
+            chain_df = self.helper.get_option_chain_df("NIFTY", expiry)
+            spot = float(chain_df.attrs.get("underlying_ltp", 0)) if not chain_df.empty else 0.0
+        if spot > 0:
+            logger.warning(f"NIFTY spot via option chain underlying_ltp: {spot:.2f}")
+            return spot
+        # Fallback 2: previous day close
+        if self.prev_day_close > 0:
+            logger.warning(f"NIFTY spot fallback to prev day close: {self.prev_day_close:.2f}")
+            return self.prev_day_close
+        return 0.0
 
     def _atm(self, spot: float) -> int:
         return int(round(spot / 50) * 50)
