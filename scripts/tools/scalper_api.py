@@ -37,6 +37,11 @@ def main():
     p_order.add_argument('--type', default='MARKET')
     p_order.add_argument('--price', type=float, default=0.0)
 
+    # lookup subcommand — returns security IDs for all strikes of an expiry in one master-list load
+    p_lkp = sub.add_parser('lookup')
+    p_lkp.add_argument('--underlying', default='NIFTY')
+    p_lkp.add_argument('--expiry', required=True)
+
     # positions subcommand
     p_pos = sub.add_parser('positions')
 
@@ -55,7 +60,36 @@ def main():
 
     helper = DhanHelper(dhan)
 
-    if args.cmd == 'order':
+    if args.cmd == 'lookup':
+        df = helper._load_master_list()
+        mask = (
+            (df['EXCH_ID'] == 'NSE') &
+            (df['INSTRUMENT'] == 'OPTIDX') &
+            (df['UNDERLYING_SYMBOL'] == args.underlying.upper()) &
+            (df['SM_EXPIRY_DATE'] == args.expiry)
+        )
+        rows = df[mask][['STRIKE_PRICE', 'OPTION_TYPE', 'SECURITY_ID', 'LOT_SIZE']].copy()
+        if rows.empty:
+            print(json.dumps({'success': False, 'error': f'No options found for {args.underlying} {args.expiry}'}))
+            sys.exit(0)
+
+        strikes: dict = {}
+        lot_size = 75
+        for _, row in rows.iterrows():
+            strike = int(float(row['STRIKE_PRICE']))
+            opt = str(row['OPTION_TYPE']).upper()
+            sec_id = str(int(float(row['SECURITY_ID'])))
+            lot_size = int(float(row['LOT_SIZE']) or 75)
+            if strike not in strikes:
+                strikes[strike] = {}
+            if opt == 'CE':
+                strikes[strike]['ceId'] = sec_id
+            elif opt == 'PE':
+                strikes[strike]['peId'] = sec_id
+
+        print(json.dumps({'success': True, 'data': {'lotSize': lot_size, 'strikes': strikes}}))
+
+    elif args.cmd == 'order':
         # Find the option
         sec = helper.find_option(args.underlying, args.expiry, args.strike, args.option)
         if not sec:

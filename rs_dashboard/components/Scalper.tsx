@@ -70,6 +70,10 @@ export default function Scalper() {
   const [chainSpot, setChainSpot]       = useState(0);
   const [prevSpot, setPrevSpot]         = useState(0);
 
+  // Security ID map per strike — enables fast-order (no Python per order)
+  const [strikeMap, setStrikeMap]   = useState<Record<string, { ceId?: string; peId?: string }>>({});
+  const [lotSize, setLotSize]       = useState(75);
+
   // WS bridge live data
   const [liveQuotes, setLiveQuotes]   = useState<LiveQuotes | null>(null);
   const [bridgeStatus, setBridgeStatus] = useState<BridgeStatus>({ status: 'STOPPED' });
@@ -165,6 +169,7 @@ export default function Scalper() {
     setAllStrikes([]);
     setPrevClose({});
     setLiveQuotes(null);
+    setStrikeMap({});
 
     // One-time chain fetch for prev close prices + strike list
     fetch(`/api/options/chain?underlying=NIFTY&expiry=${expiry}`)
@@ -196,6 +201,17 @@ export default function Scalper() {
             : strikes[Math.floor(strikes.length / 2)];
           setCeStrike(nearest);
           setPeStrike(nearest);
+        }
+      })
+      .catch(() => {});
+
+    // Lookup security IDs for all strikes of this expiry — enables fast-order path
+    fetch(`/api/scalper/lookup?underlying=NIFTY&expiry=${expiry}`)
+      .then(r => r.json())
+      .then((j: { success: boolean; data?: { lotSize: number; strikes: Record<string, { ceId?: string; peId?: string }> } }) => {
+        if (j.success && j.data) {
+          setStrikeMap(j.data.strikes);
+          setLotSize(j.data.lotSize);
         }
       })
       .catch(() => {});
@@ -294,16 +310,34 @@ export default function Scalper() {
     const setter = option === 'CE' ? setCeLoading : setPeLoading;
     setter(true);
     try {
-      const body: Record<string, unknown> = {
-        underlying: 'NIFTY', expiry, strike, option, side, lots, type: orderMode,
-      };
-      if (orderMode === 'LIMIT') body.price = Number(limitPrice);
+      // Fast path: direct Dhan REST call (no Python spawn, no CSV load)
+      const secId = strikeMap[String(strike)]?.[option === 'CE' ? 'ceId' : 'peId'];
+      let res: Response;
+      if (secId) {
+        res = await fetch('/api/scalper/fast-order', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            securityId: secId,
+            quantity: lots * lotSize,
+            side,
+            orderType: orderMode,
+            ...(orderMode === 'LIMIT' ? { price: Number(limitPrice) } : {}),
+          }),
+        });
+      } else {
+        // Fallback: Python path (strikeMap not yet loaded)
+        const body: Record<string, unknown> = {
+          underlying: 'NIFTY', expiry, strike, option, side, lots, type: orderMode,
+        };
+        if (orderMode === 'LIMIT') body.price = Number(limitPrice);
+        res = await fetch('/api/scalper/order', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        });
+      }
 
-      const res = await fetch('/api/scalper/order', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
-      });
       const j = await res.json() as { success: boolean; order_id?: string; error?: string };
       if (j.success) {
         addToast('success', `${side} ${option} placed`, `ID: ${j.order_id}`);
@@ -316,7 +350,7 @@ export default function Scalper() {
     } finally {
       setter(false);
     }
-  }, [ceStrike, peStrike, ceLimitPrice, peLimitPrice, expiry, lots, orderMode, addToast, fetchTabData]);
+  }, [ceStrike, peStrike, ceLimitPrice, peLimitPrice, expiry, lots, lotSize, strikeMap, orderMode, addToast, fetchTabData]);
 
   // ─── P&L Guard ────────────────────────────────────────────────────
 
