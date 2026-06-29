@@ -1983,7 +1983,7 @@ class DhanHelper:
             
         return success
 
-    def get_pnl_exit(self):
+    def get_pnl_exit(self) -> dict | None:
         """
         Retrieve the current P&L exit configuration for the trading day.
         Returns the data dict on success, or None on failure.
