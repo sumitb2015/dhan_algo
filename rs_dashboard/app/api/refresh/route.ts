@@ -15,13 +15,28 @@ const STOP_FILE     = path.join(DEBUG_DIR, 'refresh_stop.trigger');
 
 const NIFTY50_CSV = path.join(PROJECT_ROOT, 'Historical Data', 'NIFTY_50_Daily_5Y.csv');
 
-/** Last weekday (Mon–Fri) as YYYY-MM-DD in local time. */
+// NSE market holidays. Historical data is published the following day,
+// so we never treat today as the reference — always work from yesterday back.
+const NSE_HOLIDAYS = new Set([
+  '2026-01-15', '2026-01-26', '2026-03-03', '2026-03-26',
+  '2026-03-31', '2026-04-03', '2026-04-14', '2026-05-01',
+  '2026-05-28', '2026-06-26', '2026-09-14', '2026-10-02',
+  '2026-10-20', '2026-11-10', '2026-11-24', '2026-12-25',
+]);
+
+/** Most recent completed trading day as YYYY-MM-DD.
+ *  Starts from yesterday (Dhan historical API does not publish same-day data)
+ *  and steps back over weekends and NSE holidays. */
 function getLastTradingDay(): string {
   const d = new Date();
-  const day = d.getDay(); // 0=Sun, 6=Sat
-  if (day === 0) d.setDate(d.getDate() - 2);
-  else if (day === 6) d.setDate(d.getDate() - 1);
-  return d.toLocaleDateString('en-CA'); // YYYY-MM-DD
+  d.setDate(d.getDate() - 1); // start from yesterday
+  for (let i = 0; i < 14; i++) {
+    const day = d.getDay(); // 0=Sun, 6=Sat
+    const dateStr = d.toLocaleDateString('en-CA');
+    if (day !== 0 && day !== 6 && !NSE_HOLIDAYS.has(dateStr)) return dateStr;
+    d.setDate(d.getDate() - 1);
+  }
+  return d.toLocaleDateString('en-CA');
 }
 
 /** Read the date from the last data row of a CSV (first column, YYYY-MM-DD). */
@@ -45,7 +60,7 @@ function getLastCsvDate(csvPath: string): string | null {
 function isPidRunning(pid: number): boolean {
   try {
     if (process.platform === 'win32') {
-      const out = execSync(`tasklist /FI "PID eq ${pid}"`, { encoding: 'utf8', stdio: ['pipe', 'pipe', 'ignore'] });
+      const out = execSync(`tasklist /FI "PID eq ${pid}"`, { encoding: 'utf8', stdio: ['pipe', 'pipe', 'ignore'], windowsHide: true });
       return out.includes(pid.toString());
     }
     execSync(`ps -p ${pid}`, { stdio: 'ignore' });
@@ -131,6 +146,7 @@ export async function POST(req: NextRequest) {
     cwd: PROJECT_ROOT,
     detached: true,
     stdio: 'ignore',
+    windowsHide: true,
     env: { ...process.env, PYTHONIOENCODING: 'utf-8' },
   });
   child.unref();

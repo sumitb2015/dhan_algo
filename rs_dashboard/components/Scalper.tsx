@@ -797,8 +797,8 @@ function OptionPanel({
       </div>
 
       {/* LTP + % change */}
-      <div className="bg-zinc-800/50 rounded-xl p-4">
-        <p className="text-[10px] font-bold text-zinc-500 uppercase tracking-widest mb-1">LTP</p>
+      <div className="bg-zinc-800/50 rounded-xl p-4 text-center">
+        <p className="text-[10px] font-bold text-white uppercase tracking-widest mb-1">LTP</p>
         <p className="text-3xl font-bold font-mono tabular-nums text-white leading-none">
           {fmtLTP(ltp)}
         </p>
@@ -807,7 +807,7 @@ function OptionPanel({
             {isPos(pct) ? '▲' : '▼'} {Math.abs(pct).toFixed(2)}%
           </p>
         ) : (
-          <p className="text-xs text-zinc-600 mt-1.5">— vs prev close</p>
+          <p className="text-xs text-zinc-300 mt-1.5">— vs prev close</p>
         )}
       </div>
 

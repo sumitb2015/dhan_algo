@@ -27,6 +27,7 @@ function isPidRunning(pid: number): boolean {
       const output = execSync(`tasklist /FI "PID eq ${pid}"`, {
         encoding: 'utf8',
         stdio: ['pipe', 'pipe', 'ignore'],
+        windowsHide: true,
       });
       return output.toLowerCase().includes(pid.toString());
     } else {
@@ -43,6 +44,7 @@ function forceKillPid(pid: number): boolean {
     if (process.platform === 'win32') {
       execSync(`taskkill /F /PID ${pid}`, {
         stdio: ['pipe', 'pipe', 'ignore'],
+        windowsHide: true,
       });
     } else {
       execSync(`kill -9 ${pid}`, { stdio: 'ignore' });
@@ -114,6 +116,7 @@ export async function POST() {
       const { stdout } = await execFileAsync(PYTHON_EXE, [EXIT_SCRIPT], {
         cwd: PROJECT_ROOT,
         timeout: 20000,
+        windowsHide: true,
       });
       const lines = stdout.trim().split('\n').filter(Boolean);
       const result = JSON.parse(lines[lines.length - 1]);

@@ -40,7 +40,7 @@ export async function GET(request: NextRequest) {
   const result = spawnSync(
     PYTHON_EXE,
     [FETCH_SCRIPT, 'ltp', '--underlying', underlying],
-    { encoding: 'utf8', timeout: 15_000 },
+    { encoding: 'utf8', timeout: 15_000, windowsHide: true },
   );
 
   let spot = 0;

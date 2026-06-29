@@ -22,6 +22,10 @@ function getToken(): { clientId: string; token: string } {
   return { clientId: tokenCache.clientId, token: tokenCache.token };
 }
 
+export async function GET(): Promise<NextResponse> {
+  return NextResponse.json({ ready: true });
+}
+
 export async function POST(req: NextRequest): Promise<NextResponse> {
   const body = await req.json() as {
     securityId: string;
@@ -69,13 +73,15 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       body: JSON.stringify(payload),
     });
 
-    const json = await res.json() as { status?: string; data?: { orderId?: string }; remarks?: string; message?: string };
+    const json = await res.json() as Record<string, unknown>;
 
-    if (json.status === 'success') {
-      return NextResponse.json({ success: true, order_id: json.data?.orderId ?? '' });
+    // Dhan order API returns {orderId, orderStatus:"TRANSIT"} on success — no "status" field
+    const orderId = String(json.orderId ?? (json.data as Record<string, unknown> | undefined)?.orderId ?? '');
+    if (orderId) {
+      return NextResponse.json({ success: true, order_id: orderId });
     }
 
-    const errMsg = json.remarks ?? json.message ?? JSON.stringify(json);
+    const errMsg = String(json.remarks ?? json.message ?? JSON.stringify(json));
     console.error('[scalper/fast-order] Dhan API error:', errMsg, 'HTTP', res.status);
     return NextResponse.json({ success: false, error: errMsg });
 

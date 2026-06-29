@@ -110,18 +110,27 @@ def mark_error(msg: str):
 
 
 # ── Trading day helpers ───────────────────────────────────────────────────────
-def get_last_trading_day() -> str:
-    """Return the most recent weekday (Mon–Fri) as YYYY-MM-DD.
+# NSE market holidays. Historical data is published the following day,
+# so we never treat today as the reference — always work from yesterday back.
+_NSE_HOLIDAYS = {
+    "2026-01-15", "2026-01-26", "2026-03-03", "2026-03-26",
+    "2026-03-31", "2026-04-03", "2026-04-14", "2026-05-01",
+    "2026-05-28", "2026-06-26", "2026-09-14", "2026-10-02",
+    "2026-10-20", "2026-11-10", "2026-11-24", "2026-12-25",
+}
 
-    Does not account for NSE-specific holidays, but eliminates spurious
-    refetch attempts on weekends where no new data exists.
+def get_last_trading_day() -> str:
+    """Return the most recent trading day as YYYY-MM-DD (includes today if it's a trading day).
+
+    Used as the upper-bound skip threshold in the fetch loop — if the CSV
+    already has data up to this date we skip the API call. Skips weekends and
+    NSE holidays so we don't attempt to fetch on non-trading days.
     """
-    d = datetime.now()
-    weekday = d.weekday()  # 0=Mon … 6=Sun
-    if weekday == 5:        # Saturday → Friday
+    d = datetime.now().date()
+    for _ in range(14):
+        if d.weekday() < 5 and d.strftime("%Y-%m-%d") not in _NSE_HOLIDAYS:
+            return d.strftime("%Y-%m-%d")
         d -= timedelta(days=1)
-    elif weekday == 6:      # Sunday → Friday
-        d -= timedelta(days=2)
     return d.strftime("%Y-%m-%d")
 
 
@@ -594,7 +603,10 @@ def main():
     if args.target in ("all", "stocks"):
         refresh_stocks(helper)
 
-    if args.target == "quotes":
+    if args.target in ("all", "quotes"):
+        # Dhan historical API only publishes prior-day EOD data (next-morning lag).
+        # Fetch today's live quotes via quote_data so the dashboard can show
+        # the current day's row without waiting for tomorrow's historical publish.
         write_status("quotes", "▶ Fetching live quotes for today's data...")
         try:
             import subprocess
@@ -602,17 +614,21 @@ def main():
             python_exe = sys.executable
             result = subprocess.run(
                 [python_exe, quotes_script],
-                capture_output=True, text=True, cwd=PROJECT_ROOT
+                capture_output=True, text=True, cwd=PROJECT_ROOT,
+                env={**os.environ, "PYTHONIOENCODING": "utf-8"},
             )
             write_status("quotes", f"  Output: {result.stdout[-500:] if result.stdout else '(none)'}")
             if result.returncode != 0:
                 err_msg = result.stderr[-300:] if result.stderr else f"exit code {result.returncode}"
-                write_status("quotes", f"  ✗ Quotes error: {err_msg}", done=True, error=err_msg)
+                write_status("quotes", f"  ✗ Quotes error: {err_msg}")
             else:
-                write_status("quotes", "  ✓ Live quotes written to debug/today_quotes.json", done=True)
+                write_status("quotes", "  ✓ Live quotes written to debug/today_quotes.json")
         except Exception as e:
-            write_status("quotes", f"  ✗ Quotes fetch failed: {e}", done=True, error=str(e))
-        return
+            write_status("quotes", f"  ✗ Quotes fetch failed: {e}")
+
+        if args.target == "quotes":
+            write_status("quotes", "✅ Live quotes refresh complete.", done=True)
+            return
 
     write_status("done", "✅ Data refresh complete.", done=True)
 

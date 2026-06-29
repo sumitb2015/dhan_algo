@@ -47,7 +47,8 @@ function isPidRunning(pid: number): boolean {
     if (process.platform === 'win32') {
       const output = execSync(`tasklist /FI "PID eq ${pid}"`, {
         encoding: 'utf8',
-        stdio: ['pipe', 'pipe', 'ignore']
+        stdio: ['pipe', 'pipe', 'ignore'],
+        windowsHide: true,
       });
       return output.toLowerCase().includes(pid.toString());
     } else {

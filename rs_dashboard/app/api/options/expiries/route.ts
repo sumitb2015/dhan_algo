@@ -21,7 +21,7 @@ export async function GET(request: NextRequest) {
   const result = spawnSync(
     PYTHON_EXE,
     [FETCH_SCRIPT, 'expiries', '--underlying', underlying],
-    { encoding: 'utf8', timeout: 30_000 },
+    { encoding: 'utf8', timeout: 30_000, windowsHide: true },
   );
 
   if (result.error) {

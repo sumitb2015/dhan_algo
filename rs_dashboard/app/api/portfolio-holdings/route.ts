@@ -14,6 +14,7 @@ export async function GET() {
     const { stdout } = await execFileAsync(PYTHON_EXE, [SCRIPT], {
       cwd: PROJECT_ROOT,
       timeout: 25000,
+      windowsHide: true,
     });
 
     const lines = stdout.trim().split('\n').filter(Boolean);

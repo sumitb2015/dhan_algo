@@ -12,6 +12,7 @@ interface SkewRow {
   strike: number;
   ceIV: number;
   peIV: number;
+  skewIV: number;   // average IV shown on skew chart
   diff: number;
   ceLTP: number;
   peLTP: number;
@@ -46,17 +47,32 @@ function fmtPct(n: number): string {
 
 // ─── Tooltips ─────────────────────────────────────────────────────
 
-const SmileTooltip = ({ active, payload, label }: Record<string, unknown>) => {
+const SkewTooltip = ({ active, payload, label, atm }: Record<string, unknown> & { atm?: number }) => {
   if (!active || !Array.isArray(payload) || !payload.length) return null;
+  const strike = Number(label);
+  const iv = (payload as Array<{ value: number }>)[0]?.value ?? 0;
+  const row = (payload as Array<{ payload: SkewRow }>)[0]?.payload;
   return (
-    <div className="bg-zinc-950/95 border border-zinc-700/60 rounded-xl px-3.5 py-2.5 text-xs shadow-2xl backdrop-blur">
-      <p className="text-zinc-400 mb-2 font-semibold">Strike {String(label)}</p>
-      {(payload as Array<{ color: string; name: string; value: number }>).map(p => (
-        <div key={p.name} className="flex justify-between gap-6 mb-0.5">
-          <span style={{ color: p.color }} className="font-semibold">{p.name}</span>
-          <span className="tabular-nums text-white font-bold">{fmtPct(p.value)}</span>
-        </div>
-      ))}
+    <div className="bg-white border border-zinc-200 rounded-lg px-3 py-2.5 text-xs shadow-lg">
+      <p className="text-zinc-500 mb-1.5 font-semibold">
+        Strike {strike.toLocaleString('en-IN')}{strike === atm ? ' (ATM)' : ''}
+      </p>
+      <div className="flex justify-between gap-6 mb-0.5">
+        <span style={{ color: '#f97316' }} className="font-semibold">Skew IV</span>
+        <span className="tabular-nums font-bold text-zinc-900">{iv.toFixed(2)}%</span>
+      </div>
+      {row && (
+        <>
+          <div className="flex justify-between gap-6 text-zinc-400 mt-1">
+            <span>CE IV</span>
+            <span className="tabular-nums">{row.ceIV.toFixed(2)}%</span>
+          </div>
+          <div className="flex justify-between gap-6 text-zinc-400">
+            <span>PE IV</span>
+            <span className="tabular-nums">{row.peIV.toFixed(2)}%</span>
+          </div>
+        </>
+      )}
     </div>
   );
 };
@@ -83,6 +99,7 @@ export default function OptionsSkewTab({ expiry }: { expiry: string }) {
   const [lastUpdated, setLastUpdated] = useState<string | null>(null);
   const [loading, setLoading]         = useState(false);
   const [error, setError]             = useState('');
+  const [tableOpen, setTableOpen]     = useState(false);
   const intervalRef = useRef<NodeJS.Timeout | null>(null);
 
   const fetchSkew = async () => {
@@ -108,9 +125,20 @@ export default function OptionsSkewTab({ expiry }: { expiry: string }) {
           const strike = Number(k);
           const ceIV   = getIV(v.ce);
           const peIV   = getIV(v.pe);
-          return { strike, ceIV, peIV, diff: ceIV - peIV, ceLTP: v.ce?.last_price ?? 0, peLTP: v.pe?.last_price ?? 0 };
+          // Use OTM option IV only — ITM IV is unreliable (intrinsic value dominated)
+          const rawSkew = strike < atmStrike ? peIV : strike > atmStrike ? ceIV : (ceIV + peIV) / 2;
+          const skewIV = +rawSkew.toFixed(2);
+          return { strike, ceIV, peIV, skewIV, diff: ceIV - peIV, ceLTP: v.ce?.last_price ?? 0, peLTP: v.pe?.last_price ?? 0 };
         })
-        .filter(r => !isNaN(r.strike) && Math.abs(r.strike - atmStrike) <= WING_COUNT * STRIKE_STEP)
+        .filter(r => {
+          if (isNaN(r.strike)) return false;
+          if (Math.abs(r.strike - atmStrike) > WING_COUNT * STRIKE_STEP) return false;
+          // Drop strikes where the OTM side has no valid IV (illiquid / not yet priced)
+          if (r.strike < atmStrike && r.peIV <= 0) return false;
+          if (r.strike > atmStrike && r.ceIV <= 0) return false;
+          if (r.skewIV <= 0) return false;
+          return true;
+        })
         .sort((a, b) => a.strike - b.strike);
 
       setSpot(spotPrice);
@@ -178,47 +206,57 @@ export default function OptionsSkewTab({ expiry }: { expiry: string }) {
         </div>
       )}
 
-      {/* IV Smile */}
-      <div className="bg-zinc-900 rounded-xl border border-zinc-800 p-4">
-        <h3 className="text-xs font-bold text-white mb-3">IV Smile</h3>
-        <ResponsiveContainer width="100%" height={280}>
-          <LineChart data={skewData} margin={{ top: 4, right: 24, left: 0, bottom: 4 }}>
-            <CartesianGrid strokeDasharray="4 4" stroke="#27272a" vertical={false} />
+      {/* Volatility Skew — Dhan-style single orange curve */}
+      <div className="bg-white rounded-xl border border-zinc-200 p-4">
+        <ResponsiveContainer width="100%" height={780}>
+          <LineChart data={skewData} margin={{ top: 16, right: 32, left: 8, bottom: 20 }}>
+            <CartesianGrid strokeDasharray="0" stroke="#f0f0f0" vertical={false} />
             <XAxis
               dataKey="strike"
-              tick={{ fill: '#a1a1aa', fontSize: 11 }}
+              tick={{ fill: '#6b7280', fontSize: 11 }}
               tickLine={false}
-              axisLine={{ stroke: '#27272a' }}
+              axisLine={{ stroke: '#e5e7eb' }}
+              tickFormatter={(v: number) => v.toLocaleString('en-IN')}
             />
             <YAxis
-              tick={{ fill: '#a1a1aa', fontSize: 11 }}
+              tick={{ fill: '#6b7280', fontSize: 11 }}
               tickLine={false}
               axisLine={false}
-              tickFormatter={(v: number) => `${v}%`}
+              tickFormatter={(v: number) => String(v)}
+              label={{ value: 'IV', angle: -90, position: 'insideLeft', fill: '#6b7280', fontSize: 11, dy: 10 }}
+              domain={['auto', 'auto']}
             />
-            <Tooltip content={<SmileTooltip />} cursor={{ stroke: '#3f3f46', strokeWidth: 1 }} />
-            <Legend
-              wrapperStyle={{ fontSize: 11, paddingTop: 12 }}
-              formatter={(v: string) => <span style={{ color: '#d4d4d8', fontWeight: 600 }}>{v}</span>}
-            />
+            <Tooltip content={<SkewTooltip atm={atm} />} cursor={{ stroke: '#9ca3af', strokeWidth: 1, strokeDasharray: '4 4' }} />
             {atm > 0 && (
               <ReferenceLine
                 x={atm}
-                stroke="#a1a1aa"
-                strokeDasharray="4 4"
-                label={{ value: 'ATM', fill: '#a1a1aa', fontSize: 10, position: 'top' }}
+                stroke="#9ca3af"
+                strokeDasharray="5 4"
+                label={{ value: 'ATM', fill: '#6b7280', fontSize: 10, position: 'top' }}
               />
             )}
-            <Line type="monotone" dataKey="ceIV" name="CE IV" stroke="#60a5fa" dot={false} strokeWidth={2} />
-            <Line type="monotone" dataKey="peIV" name="PE IV" stroke="#fbbf24" dot={false} strokeWidth={2} />
+            <Line
+              type="monotone"
+              dataKey="skewIV"
+              name="Volatility Skew"
+              stroke="#f97316"
+              strokeWidth={2}
+              dot={{ r: 3.5, fill: '#f97316', stroke: '#f97316', strokeWidth: 0 }}
+              activeDot={{ r: 5, fill: '#f97316', stroke: '#fff', strokeWidth: 2 }}
+            />
+            <Legend
+              verticalAlign="bottom"
+              wrapperStyle={{ paddingTop: 16, fontSize: 11 }}
+              formatter={() => <span style={{ color: '#f97316', fontWeight: 600 }}>Volatility Skew</span>}
+            />
           </LineChart>
         </ResponsiveContainer>
       </div>
 
       {/* IV Differential */}
-      <div className="bg-zinc-900 rounded-xl border border-zinc-800 p-4">
-        <h3 className="text-xs font-bold text-white mb-3">IV Differential (CE − PE)</h3>
-        <ResponsiveContainer width="100%" height={160}>
+      <div className="bg-zinc-900 rounded-xl border border-zinc-800 p-3">
+        <h3 className="text-xs font-semibold text-zinc-400 mb-2">IV Differential (CE − PE)</h3>
+        <ResponsiveContainer width="100%" height={100}>
           <BarChart data={skewData} margin={{ top: 4, right: 24, left: 0, bottom: 4 }}>
             <CartesianGrid strokeDasharray="4 4" stroke="#27272a" vertical={false} />
             <XAxis
@@ -245,9 +283,16 @@ export default function OptionsSkewTab({ expiry }: { expiry: string }) {
         </ResponsiveContainer>
       </div>
 
-      {/* Raw data table */}
+      {/* Raw data table — collapsible */}
       <div className="bg-zinc-900 rounded-xl border border-zinc-800 overflow-hidden">
-        <table className="w-full text-xs">
+        <button
+          onClick={() => setTableOpen(o => !o)}
+          className="w-full flex items-center justify-between px-4 py-2.5 text-xs font-bold text-white hover:bg-zinc-800/60 transition-colors"
+        >
+          <span>Strike Data Table</span>
+          <span className="text-zinc-400 text-[10px] tracking-widest">{tableOpen ? '▲ HIDE' : '▼ SHOW'}</span>
+        </button>
+        {tableOpen && <table className="w-full text-xs border-t border-zinc-800">
           <thead className="bg-zinc-800">
             <tr>
               {['Strike', 'CE IV', 'PE IV', 'CE−PE', 'CE LTP', 'PE LTP'].map(h => (
@@ -277,7 +322,7 @@ export default function OptionsSkewTab({ expiry }: { expiry: string }) {
               </tr>
             ))}
           </tbody>
-        </table>
+        </table>}
       </div>
 
     </div>

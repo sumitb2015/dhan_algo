@@ -146,6 +146,10 @@ export default function OptionsCharts() {
   const [candleDate, setCandleDate]     = useState<string | null>(null);
   const [candleIsToday, setCandleIsToday] = useState(true);
 
+  // Historical seed for live mode — candles from 9:15 AM prepended to live WS history
+  const [liveSeedData, setLiveSeedData]         = useState<CandleRow[]>([]);
+  const [liveSeedStrike, setLiveSeedStrike]     = useState<number | null>(null);
+
   const [bridgeLoading, setBridgeLoading]     = useState(false);
   const [expiriesLoading, setExpiriesLoading] = useState(false);
   const [error, setError] = useState('');
@@ -259,6 +263,38 @@ export default function OptionsCharts() {
     fetchCandles(selectedStrike, expiry, candleInterval);
   }, [selectedStrike, expiry, candleInterval, bridgeStatus.status, fetchCandles]);
 
+  // Seed live chart with today's 1-min candles from 9:15 AM when bridge is running.
+  // Refreshes every 60 s (matching server-side cache TTL) so newly closed 1-min
+  // candles extend the seed base as the session progresses.
+  const seedRefreshRef = useRef<NodeJS.Timeout | null>(null);
+  useEffect(() => {
+    if (seedRefreshRef.current) clearInterval(seedRefreshRef.current);
+
+    if (bridgeStatus.status !== 'RUNNING') {
+      setLiveSeedData([]);
+      setLiveSeedStrike(null);
+      return;
+    }
+    if (!selectedStrike || !expiry) return;
+
+    const fetchSeed = () => {
+      fetch(`/api/options/candles?expiry=${expiry}&strike=${selectedStrike}&interval=1`)
+        .then(r => r.json())
+        .then((j: { success: boolean; data?: CandleRow[] }) => {
+          if (j.success && j.data?.length) setLiveSeedData(j.data);
+        })
+        .catch(() => {});
+    };
+
+    if (selectedStrike !== liveSeedStrike) {
+      setLiveSeedStrike(selectedStrike);
+      fetchSeed();
+    }
+
+    seedRefreshRef.current = setInterval(fetchSeed, 60_000);
+    return () => { if (seedRefreshRef.current) clearInterval(seedRefreshRef.current); };
+  }, [bridgeStatus.status, selectedStrike, expiry, liveSeedStrike]);
+
   // ── Poll live data ────────────────────────────────────────────────
   const pollLive = useCallback(() => {
     fetch('/api/options/live')
@@ -356,22 +392,38 @@ export default function OptionsCharts() {
   const peLtp    = liveData?.pe?.ltp ?? 0;
   const straddle = ceLtp + peLtp;
 
-  // Chart data: live WebSocket history when running, candle data otherwise
-  const liveChartData: CandleRow[] = history.map(h => {
-    const sk = h.strikes[chartStrikeStr];
-    const ce = sk?.ce?.ltp ?? 0;
-    const pe = sk?.pe?.ltp ?? 0;
-    return {
-      time: fmtTime(h.timestamp),
-      'CE LTP': ce,
-      'PE LTP': pe,
-      Straddle: ce + pe,
-      'CE OI': sk?.ce?.oi ?? 0,
-      'PE OI': sk?.pe?.oi ?? 0,
-    };
-  });
+  // Chart data: live WebSocket history when running, candle data otherwise.
+  // When seed is present, only include live ticks that come AFTER the last seed
+  // candle minute to prevent time discontinuity (stale WS history from an earlier
+  // bridge session would otherwise appear to the right of newer seed candles).
+  const lastSeedMins = liveSeedData.length > 0
+    ? (() => {
+        const [hh, mm] = liveSeedData[liveSeedData.length - 1].time.split(':').map(Number);
+        return hh * 60 + (mm || 0);
+      })()
+    : -1;
 
-  const rawChartData = isLive ? liveChartData : candleData;
+  const liveChartData: CandleRow[] = history
+    .filter(h => {
+      if (lastSeedMins < 0) return true;
+      const d = new Date(h.timestamp);
+      return d.getHours() * 60 + d.getMinutes() > lastSeedMins;
+    })
+    .map(h => {
+      const sk = h.strikes[chartStrikeStr];
+      const ce = sk?.ce?.ltp ?? 0;
+      const pe = sk?.pe?.ltp ?? 0;
+      return {
+        time: fmtTime(h.timestamp),
+        'CE LTP': ce,
+        'PE LTP': pe,
+        Straddle: ce + pe,
+        'CE OI': sk?.ce?.oi ?? 0,
+        'PE OI': sk?.pe?.oi ?? 0,
+      };
+    });
+
+  const rawChartData = isLive ? [...liveSeedData, ...liveChartData] : candleData;
 
   // Compute cumulative intraday VWAP: Σ(Straddle × Vol) / Σ(Vol) where Vol = CE Vol + PE Vol.
   // Falls back to equal-weight mean (TWAP) when volume is absent (live WebSocket mode).
@@ -455,8 +507,8 @@ export default function OptionsCharts() {
             </select>
           </div>
 
-          {/* Candle interval (only when not live) */}
-          {!isLive && (
+          {/* Candle interval (only when not live, premium tab only) */}
+          {activeTab === 'premium' && !isLive && (
             <div className="flex items-center bg-zinc-900 border border-zinc-800 p-0.5 rounded-xl">
               {(['1', '5'] as const).map(s => (
                 <button key={s} onClick={() => setCandleInterval(s)}
@@ -471,8 +523,8 @@ export default function OptionsCharts() {
             </div>
           )}
 
-          {/* Live poll interval */}
-          {isLive && (
+          {/* Live poll interval (premium tab only) */}
+          {activeTab === 'premium' && isLive && (
             <div className="flex items-center bg-zinc-900 border border-zinc-800 p-0.5 rounded-xl">
               {([2, 5, 10] as const).map(s => (
                 <button key={s} onClick={() => setPollInterval(s)}
@@ -487,20 +539,22 @@ export default function OptionsCharts() {
             </div>
           )}
 
-          {/* Start / Stop */}
-          <button
-            onClick={isLive ? stopBridge : startBridge}
-            disabled={bridgeLoading || !expiry}
-            className={`px-3 py-1.5 text-xs font-semibold rounded-lg border transition-all disabled:opacity-50 ${
-              isLive
-                ? 'bg-red-500/10 text-red-400 border-red-500/20 hover:bg-red-500/20'
-                : 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20 hover:bg-emerald-500/20'
-            }`}
-          >
-            {bridgeLoading ? '…' : isLive ? 'Stop' : 'Go Live'}
-          </button>
+          {/* Start / Stop — premium tab only */}
+          {activeTab === 'premium' && (
+            <button
+              onClick={isLive ? stopBridge : startBridge}
+              disabled={bridgeLoading || !expiry}
+              className={`px-3 py-1.5 text-xs font-semibold rounded-lg border transition-all disabled:opacity-50 ${
+                isLive
+                  ? 'bg-red-500/10 text-red-400 border-red-500/20 hover:bg-red-500/20'
+                  : 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20 hover:bg-emerald-500/20'
+              }`}
+            >
+              {bridgeLoading ? '…' : isLive ? 'Stop' : 'Go Live'}
+            </button>
+          )}
 
-          <StatusBadge status={bridgeStatus.status} />
+          {activeTab === 'premium' && <StatusBadge status={bridgeStatus.status} />}
         </div>
       </div>
 

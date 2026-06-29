@@ -25,7 +25,7 @@ function isPidRunning(pid: number): boolean {
   try {
     if (process.platform === 'win32') {
       const out = execSync(`tasklist /FI "PID eq ${pid}"`, {
-        encoding: 'utf8', stdio: ['pipe', 'pipe', 'ignore'],
+        encoding: 'utf8', stdio: ['pipe', 'pipe', 'ignore'], windowsHide: true,
       });
       return out.includes(String(pid));
     }
@@ -105,7 +105,7 @@ export async function POST(request: NextRequest) {
     const child = spawn(
       PYTHON_EXE,
       [BRIDGE_SCRIPT, '--underlying', underlying, '--expiry', expiry, '--num-strikes', String(numStrikes)],
-      { detached: true, stdio: 'ignore' },
+      { detached: true, stdio: 'ignore', windowsHide: true },
     );
     child.unref();
 

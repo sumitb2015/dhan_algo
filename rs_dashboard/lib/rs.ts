@@ -130,14 +130,14 @@ function pctChange(arr: Array<{ stockClose: number }>, n: number): number {
  * processing finishes (~4 PM IST).  Falls back to `open` so the value is
  * meaningful during market hours.
  */
-function pctChange1D(arr: Array<{ stockClose: number; stockOpen: number }>): number {
+function pctChange1D(arr: Array<{ stockClose: number; stockOpen?: number }>): number {
   if (arr.length < 2) return 0;
   const curr = arr[arr.length - 1];
   const prev = arr[arr.length - 2];
   if (prev.stockClose === 0) return 0;
 
   let currPrice = curr.stockClose;
-  if (currPrice === prev.stockClose && curr.stockOpen > 0) {
+  if (currPrice === prev.stockClose && curr.stockOpen && curr.stockOpen > 0) {
     currPrice = curr.stockOpen;
   }
   return ((currPrice - prev.stockClose) / prev.stockClose) * 100;

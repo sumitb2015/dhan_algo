@@ -34,9 +34,14 @@ STOP_TRIGGER = os.path.join(DEBUG_DIR, 'live_options_stop.trigger')
 MAX_HISTORY  = 300   # ~10 min at 2s ticks
 
 # MarketFeed constants
-NSE_FNO = 2   # NSE F&O segment
-IDX     = 0   # Index segment
-FULL    = 21  # Full packet — includes OI
+NSE_FNO     = 2   # NSE F&O segment
+IDX         = 0   # Index segment
+FULL        = 21  # Full packet — includes OI
+FEED_QUOTE  = 17  # Quote packet — LTP + OHLC + volume (includes prev_close)
+
+# Security IDs
+NIFTY_IDX_SID = '13'   # NIFTY 50 index (spot canary)
+VIX_SID       = '21'   # India VIX index
 
 # Strike step per underlying
 STRIKE_STEP = {'NIFTY': 50, 'BANKNIFTY': 100, 'FINNIFTY': 50}
@@ -131,8 +136,9 @@ def main():
             sid_map[sid] = {'strike': int(strike), 'type': opt_type}
             instruments.append((NSE_FNO, sid, FULL))
 
-    # Subscribe to Nifty index as spot canary
-    instruments.append((IDX, '13', 15))
+    # Subscribe to NIFTY index (spot canary) and India VIX
+    instruments.append((IDX, NIFTY_IDX_SID, FEED_QUOTE))
+    instruments.append((IDX, VIX_SID, FEED_QUOTE))
 
     n = len(instruments) - 1  # exclude index canary
     print(f'[live_options_ws] Subscribing to {n} option contracts + index canary…', flush=True)
@@ -147,7 +153,7 @@ def main():
     time.sleep(3)  # wait for connection + first tick batch
 
     # Diagnostic: check if index canary received a tick
-    idx_initial = helper.live_data.get('13')
+    idx_initial = helper.live_data.get(NIFTY_IDX_SID)
     if idx_initial:
         initial_ltp = _f(idx_initial.get('LTP') or idx_initial.get('last_price'))
         print(f'[live_options_ws] Index tick received — LTP={initial_ltp:.2f}', flush=True)
@@ -172,12 +178,28 @@ def main():
                 break
 
             # Update spot from index canary
-            idx_tick = helper.live_data.get('13')
+            idx_tick = helper.live_data.get(NIFTY_IDX_SID)
             if idx_tick:
                 live_spot = _f(idx_tick.get('LTP') or idx_tick.get('last_price'))
                 if live_spot > 0:
                     spot = live_spot
                     atm  = round(spot / step) * step
+
+            # Read India VIX from WebSocket
+            vix_data: dict | None = None
+            vix_tick = helper.live_data.get(VIX_SID)
+            if vix_tick:
+                vix_ltp        = _f(vix_tick.get('LTP') or vix_tick.get('last_price'))
+                vix_prev_close = _f(vix_tick.get('prev_close') or vix_tick.get('close'))
+                if vix_ltp > 0:
+                    vix_chg     = round(vix_ltp - vix_prev_close, 2) if vix_prev_close else 0.0
+                    vix_chg_pct = round(vix_chg / vix_prev_close * 100, 4) if vix_prev_close else 0.0
+                    vix_data = {
+                        'ltp':        round(vix_ltp, 2),
+                        'prev_close': round(vix_prev_close, 2),
+                        'change':     vix_chg,
+                        'change_pct': vix_chg_pct,
+                    }
 
             # Build per-strike quotes
             strikes_data: dict[str, dict] = {}
@@ -221,6 +243,7 @@ def main():
                 'atm':               atm,
                 'straddle_premium':  straddle,
                 'strikes':           strikes_data,
+                'vix':               vix_data,
             }
 
             if current_quotes != last_quotes:

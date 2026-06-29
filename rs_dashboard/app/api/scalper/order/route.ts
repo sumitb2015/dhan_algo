@@ -30,6 +30,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     encoding: 'utf8',
     cwd: PROJECT_ROOT,
     timeout: 30_000,
+    windowsHide: true,
   });
 
   if (result.error) {

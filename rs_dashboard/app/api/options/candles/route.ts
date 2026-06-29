@@ -32,7 +32,7 @@ export async function GET(request: NextRequest) {
   const result = spawnSync(
     PYTHON_EXE,
     [CANDLE_SCRIPT, '--expiry', expiry, '--strike', strike, '--interval', interval],
-    { encoding: 'utf8', timeout: 45_000 },
+    { encoding: 'utf8', timeout: 45_000, windowsHide: true },
   );
 
   if (result.error) {

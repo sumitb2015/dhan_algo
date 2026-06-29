@@ -14,6 +14,7 @@ export async function GET(): Promise<NextResponse> {
     const { stdout } = await execFileAsync(PYTHON_EXE, [SCALPER_SCRIPT, 'all'], {
       cwd: PROJECT_ROOT,
       timeout: 30_000,
+      windowsHide: true,
     });
     const lines = stdout.trim().split('\n').filter(Boolean);
     const data = JSON.parse(lines[lines.length - 1]);

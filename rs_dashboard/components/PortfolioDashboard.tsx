@@ -479,7 +479,7 @@ function HoldingsTable({
                         <div className="flex items-center gap-1">
                           <span className="font-semibold text-white">{h.symbol}</span>
                           {isConcentrated && (
-                            <ShieldAlert className="h-3 w-3 text-amber-400" title={`${(weight * 100).toFixed(1)}% of portfolio`} />
+                            <ShieldAlert className="h-3 w-3 text-amber-400" aria-label={`${(weight * 100).toFixed(1)}% of portfolio`} />
                           )}
                         </div>
                         <div className="flex items-center gap-1">
