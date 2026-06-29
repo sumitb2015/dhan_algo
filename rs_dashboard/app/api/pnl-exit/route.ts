@@ -1,69 +1,93 @@
 import { NextRequest, NextResponse } from 'next/server';
 import path from 'path';
-import { execFile } from 'child_process';
-import { promisify } from 'util';
-
-const execFileAsync = promisify(execFile);
+import fs from 'fs';
 
 const PROJECT_ROOT = path.resolve(process.cwd(), '..');
-const PYTHON_EXE = path.join(PROJECT_ROOT, 'venv', 'Scripts', 'python.exe');
-const SCRIPT = path.join(PROJECT_ROOT, 'scripts', 'tools', 'pnl_exit.py');
+const TOKEN_FILE   = path.join(PROJECT_ROOT, 'access_token.json');
+const DHAN_PNL_EXIT = 'https://api.dhan.co/v2/pnlExit';
 
-function parseScriptOutput(stdout: string) {
-  const lines = stdout.trim().split('\n').filter(Boolean);
-  return JSON.parse(lines[lines.length - 1]);
+interface TokenCache { clientId: string; token: string; ts: number }
+let tokenCache: TokenCache | null = null;
+const TOKEN_TTL = 5 * 60 * 1000;
+
+function getToken(): { clientId: string; token: string } {
+  if (tokenCache && Date.now() - tokenCache.ts < TOKEN_TTL) {
+    return { clientId: tokenCache.clientId, token: tokenCache.token };
+  }
+  const raw = JSON.parse(fs.readFileSync(TOKEN_FILE, 'utf8')) as {
+    dhanClientId: string;
+    accessToken: string;
+  };
+  tokenCache = { clientId: raw.dhanClientId, token: raw.accessToken, ts: Date.now() };
+  return { clientId: tokenCache.clientId, token: tokenCache.token };
+}
+
+function dhanHeaders(clientId: string, token: string) {
+  return {
+    'access-token': token,
+    'client-id': clientId,
+    'Content-Type': 'application/json',
+    'Accept': 'application/json',
+  };
 }
 
 export async function GET() {
   try {
-    const { stdout } = await execFileAsync(PYTHON_EXE, [SCRIPT, '--action', 'get'], {
-      cwd: PROJECT_ROOT,
-      timeout: 15000,
-    });
-    return NextResponse.json(parseScriptOutput(stdout));
-  } catch (err: any) {
-    if (err.stdout) {
-      try { return NextResponse.json(parseScriptOutput(String(err.stdout))); } catch {}
+    const { clientId, token } = getToken();
+    const res  = await fetch(DHAN_PNL_EXIT, { headers: dhanHeaders(clientId, token) });
+    const json = await res.json() as { status?: string; data?: unknown; remarks?: string };
+    if (json.status === 'success') {
+      return NextResponse.json({ success: true, data: json.data });
     }
-    return NextResponse.json({ success: false, error: String(err.message) }, { status: 500 });
+    return NextResponse.json({ success: false, error: json.remarks ?? 'Failed to retrieve P&L exit config' });
+  } catch (err) {
+    console.error('[/api/pnl-exit GET]', err);
+    return NextResponse.json({ success: false, error: String(err) }, { status: 500 });
   }
 }
 
 export async function POST(req: NextRequest) {
   try {
-    const { profitValue, lossValue, productTypes, enableKillSwitch } = await req.json();
-    const args = [
-      SCRIPT,
-      '--action', 'set',
-      '--profit', String(profitValue ?? 0),
-      '--loss', String(lossValue ?? 0),
-      '--product-types', ...(productTypes ?? ['INTRADAY']),
-      '--kill-switch', enableKillSwitch ? 'true' : 'false',
-    ];
-    const { stdout } = await execFileAsync(PYTHON_EXE, args, {
-      cwd: PROJECT_ROOT,
-      timeout: 15000,
+    const { profitValue, lossValue, productTypes, enableKillSwitch } = await req.json() as {
+      profitValue?: number;
+      lossValue?: number;
+      productTypes?: string[];
+      enableKillSwitch?: boolean;
+    };
+    const { clientId, token } = getToken();
+    const payload = {
+      dhanClientId:    clientId,
+      profitValue:     Number(profitValue ?? 0),
+      lossValue:       Number(lossValue ?? 0),
+      productType:     productTypes ?? ['INTRADAY'],
+      enableKillSwitch: enableKillSwitch ?? false,
+    };
+    const res  = await fetch(DHAN_PNL_EXIT, {
+      method:  'POST',
+      headers: dhanHeaders(clientId, token),
+      body:    JSON.stringify(payload),
     });
-    return NextResponse.json(parseScriptOutput(stdout));
-  } catch (err: any) {
-    if (err.stdout) {
-      try { return NextResponse.json(parseScriptOutput(String(err.stdout))); } catch {}
-    }
-    return NextResponse.json({ success: false, error: String(err.message) }, { status: 500 });
+    const json = await res.json() as { status?: string; remarks?: string };
+    if (json.status === 'success') return NextResponse.json({ success: true });
+    return NextResponse.json({ success: false, error: json.remarks ?? 'Failed to configure P&L exit' });
+  } catch (err) {
+    console.error('[/api/pnl-exit POST]', err);
+    return NextResponse.json({ success: false, error: String(err) }, { status: 500 });
   }
 }
 
 export async function DELETE() {
   try {
-    const { stdout } = await execFileAsync(PYTHON_EXE, [SCRIPT, '--action', 'delete'], {
-      cwd: PROJECT_ROOT,
-      timeout: 15000,
+    const { clientId, token } = getToken();
+    const res  = await fetch(DHAN_PNL_EXIT, {
+      method:  'DELETE',
+      headers: dhanHeaders(clientId, token),
     });
-    return NextResponse.json(parseScriptOutput(stdout));
-  } catch (err: any) {
-    if (err.stdout) {
-      try { return NextResponse.json(parseScriptOutput(String(err.stdout))); } catch {}
-    }
-    return NextResponse.json({ success: false, error: String(err.message) }, { status: 500 });
+    const json = await res.json() as { status?: string; remarks?: string };
+    if (json.status === 'success') return NextResponse.json({ success: true });
+    return NextResponse.json({ success: false, error: json.remarks ?? 'Failed to disable P&L exit' });
+  } catch (err) {
+    console.error('[/api/pnl-exit DELETE]', err);
+    return NextResponse.json({ success: false, error: String(err) }, { status: 500 });
   }
 }

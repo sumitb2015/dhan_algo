@@ -157,6 +157,13 @@ export default function Scalper() {
         if (j.success && j.prevClose) setPrevSpot(j.prevClose);
       })
       .catch(() => {});
+
+    fetch('/api/pnl-exit')
+      .then(r => r.json())
+      .then((j: { success: boolean; data?: PnlGuardStatus }) => {
+        if (j.success && j.data) setPnlGuardStatus(j.data as PnlGuardStatus);
+      })
+      .catch(() => {});
   }, []);
 
   // ─── useEffect 2: On expiry change — reset, fetch chain, start WS ─
