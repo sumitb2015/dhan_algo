@@ -2,7 +2,7 @@
 
 import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import NavBar from './NavBar';
-import { Zap, RefreshCw } from 'lucide-react';
+import { Zap, RefreshCw, Shield, ChevronDown } from 'lucide-react';
 
 // ─── Types ────────────────────────────────────────────────────────
 
@@ -33,6 +33,14 @@ interface Toast {
   type: 'success' | 'error';
   message: string;
   detail?: string;
+}
+
+interface PnlGuardStatus {
+  pnlExitStatus: 'ACTIVE' | 'INACTIVE' | string;
+  profit?: number;
+  loss?: number;
+  productType?: string[];
+  enableKillSwitch?: boolean;
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────
@@ -87,6 +95,18 @@ export default function Scalper() {
   const [tradesData, setTradesData]       = useState<Record<string, unknown>[]>([]);
   const [tabLoading, setTabLoading]       = useState(false);
 
+  // P&L Guard
+  const [showPnlGuard, setShowPnlGuard]       = useState(false);
+  const [pnlGuardStatus, setPnlGuardStatus]   = useState<PnlGuardStatus | null>(null);
+  const [pnlGuardLoading, setPnlGuardLoading] = useState(false);
+  const [profitTarget, setProfitTarget]       = useState('');
+  const [lossLimit, setLossLimit]             = useState('');
+  const [guardProductTypes, setGuardProductTypes] = useState<string[]>(['INTRADAY']);
+  const [enableKillSwitch, setEnableKillSwitch]   = useState(false);
+  const [settingPnl, setSettingPnl]     = useState(false);
+  const [clearingPnl, setClearingPnl]   = useState(false);
+  const [confirmClear, setConfirmClear] = useState(false);
+
   const pollRef = useRef<NodeJS.Timeout | null>(null);
 
   // ─── Derived values ──────────────────────────────────────────────
@@ -109,6 +129,9 @@ export default function Scalper() {
   const pePrevClose = peStrike != null ? (prevClose[String(peStrike)]?.pe ?? 0) : 0;
   const cePct = (ceLtp > 0 && cePrevClose > 0) ? ((ceLtp - cePrevClose) / cePrevClose) * 100 : null;
   const pePct = (peLtp > 0 && pePrevClose > 0) ? ((peLtp - pePrevClose) / pePrevClose) * 100 : null;
+
+  const totalPnl = positionsData.reduce((sum, p) =>
+    sum + (Number(p.realizedProfit) || 0) + (Number(p.unrealizedProfit) || 0), 0);
 
   // ─── useEffect 1: Load expiries on mount ─────────────────────────
 
@@ -295,6 +318,62 @@ export default function Scalper() {
     }
   }, [ceStrike, peStrike, ceLimitPrice, peLimitPrice, expiry, lots, orderMode, addToast, fetchTabData]);
 
+  // ─── P&L Guard ────────────────────────────────────────────────────
+
+  const fetchPnlGuardStatus = useCallback(async () => {
+    setPnlGuardLoading(true);
+    try {
+      const res = await fetch('/api/pnl-exit');
+      const j = await res.json();
+      setPnlGuardStatus(j.success ? (j.data ?? null) : null);
+    } catch {
+      setPnlGuardStatus(null);
+    } finally {
+      setPnlGuardLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (showPnlGuard) fetchPnlGuardStatus();
+  }, [showPnlGuard, fetchPnlGuardStatus]);
+
+  const handleSetPnl = async () => {
+    const p = parseFloat(profitTarget) || 0;
+    const l = parseFloat(lossLimit) || 0;
+    if (p <= 0 && l <= 0) { addToast('error', 'Enter a profit target or loss limit'); return; }
+    setSettingPnl(true);
+    try {
+      const res = await fetch('/api/pnl-exit', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ profitValue: p, lossValue: l, productTypes: guardProductTypes, enableKillSwitch }),
+      });
+      const j = await res.json();
+      if (j.success) { addToast('success', 'P&L Guard set'); await fetchPnlGuardStatus(); }
+      else addToast('error', 'Failed to set P&L Guard', j.error);
+    } catch (e) {
+      addToast('error', 'Network error', String(e));
+    } finally {
+      setSettingPnl(false);
+    }
+  };
+
+  const handleClearPnl = async () => {
+    if (!confirmClear) { setConfirmClear(true); setTimeout(() => setConfirmClear(false), 3000); return; }
+    setClearingPnl(true);
+    try {
+      const res = await fetch('/api/pnl-exit', { method: 'DELETE' });
+      const j = await res.json();
+      if (j.success) { addToast('success', 'P&L Guard cleared'); setPnlGuardStatus(null); }
+      else addToast('error', 'Failed to clear P&L Guard', j.error);
+    } catch (e) {
+      addToast('error', 'Network error', String(e));
+    } finally {
+      setClearingPnl(false);
+      setConfirmClear(false);
+    }
+  };
+
   // ─── JSX ─────────────────────────────────────────────────────────
 
   return (
@@ -373,8 +452,127 @@ export default function Scalper() {
               }`} />
               {lastUpdated && <span className="text-[10px] text-zinc-500 font-mono">{lastUpdated}</span>}
             </div>
+
+            {/* Today's P&L chip */}
+            {positionsData.length > 0 && (
+              <span className={`px-2.5 py-1.5 rounded-lg text-xs font-bold font-mono tabular-nums border ${
+                totalPnl > 0
+                  ? 'bg-emerald-900/40 border-emerald-500/30 text-emerald-400'
+                  : totalPnl < 0
+                  ? 'bg-rose-900/40 border-rose-500/30 text-rose-400'
+                  : 'bg-zinc-900 border-zinc-700 text-zinc-400'
+              }`}>
+                {totalPnl >= 0 ? '+' : ''}₹{totalPnl.toFixed(0)}
+              </span>
+            )}
+
+            {/* P&L Guard toggle */}
+            <button onClick={() => setShowPnlGuard(v => !v)}
+              className={`flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-semibold rounded-lg border transition-all ${
+                showPnlGuard
+                  ? 'bg-violet-900/40 border-violet-500/40 text-violet-300'
+                  : pnlGuardStatus?.pnlExitStatus === 'ACTIVE'
+                  ? 'bg-emerald-900/30 border-emerald-500/30 text-emerald-400'
+                  : 'bg-zinc-900 border-zinc-700 text-zinc-400 hover:text-zinc-200'
+              }`}>
+              <Shield className="w-3.5 h-3.5" />
+              P&amp;L Guard
+              <ChevronDown className={`w-3 h-3 transition-transform ${showPnlGuard ? 'rotate-180' : ''}`} />
+            </button>
           </div>
         </div>
+
+        {/* P&L Guard panel */}
+        {showPnlGuard && (
+          <div className="mt-2 pt-2 border-t border-zinc-800">
+            {pnlGuardLoading ? (
+              <p className="text-xs text-zinc-500 px-1">Loading…</p>
+            ) : (
+              <div className="flex items-center gap-3 flex-wrap">
+                {/* Status chip */}
+                <span className={`px-2 py-1 rounded text-[10px] font-bold uppercase tracking-wider ${
+                  pnlGuardStatus?.pnlExitStatus === 'ACTIVE'
+                    ? 'bg-emerald-900/60 text-emerald-400 border border-emerald-500/30'
+                    : 'bg-zinc-800 text-zinc-500 border border-zinc-700'
+                }`}>
+                  {pnlGuardStatus?.pnlExitStatus === 'ACTIVE' ? 'ACTIVE' : 'INACTIVE'}
+                </span>
+
+                {/* Profit target */}
+                <div className="flex items-center gap-1.5">
+                  <span className="text-[10px] text-zinc-500 font-semibold">TARGET ₹</span>
+                  <input type="number" placeholder="e.g. 5000" value={profitTarget}
+                    onChange={e => setProfitTarget(e.target.value)}
+                    className="w-24 bg-zinc-900 border border-zinc-700 text-zinc-200 text-xs font-mono
+                               rounded px-2 py-1 focus:outline-none focus:border-emerald-500" />
+                </div>
+
+                {/* Loss limit */}
+                <div className="flex items-center gap-1.5">
+                  <span className="text-[10px] text-zinc-500 font-semibold">SL ₹</span>
+                  <input type="number" placeholder="e.g. 2000" value={lossLimit}
+                    onChange={e => setLossLimit(e.target.value)}
+                    className="w-24 bg-zinc-900 border border-zinc-700 text-zinc-200 text-xs font-mono
+                               rounded px-2 py-1 focus:outline-none focus:border-rose-500" />
+                </div>
+
+                {/* Product types */}
+                <div className="flex items-center gap-1">
+                  {['INTRADAY', 'CNC', 'MARGIN'].map(pt => (
+                    <button key={pt} onClick={() => setGuardProductTypes(prev =>
+                      prev.includes(pt) ? prev.filter(x => x !== pt) : [...prev, pt]
+                    )}
+                      className={`px-2 py-1 rounded text-[10px] font-bold border transition-all ${
+                        guardProductTypes.includes(pt)
+                          ? 'bg-violet-900/50 border-violet-500/40 text-violet-300'
+                          : 'bg-zinc-900 border-zinc-700 text-zinc-500 hover:text-zinc-300'
+                      }`}>
+                      {pt}
+                    </button>
+                  ))}
+                </div>
+
+                {/* Kill switch */}
+                <button onClick={() => setEnableKillSwitch(v => !v)}
+                  className={`flex items-center gap-1.5 px-2.5 py-1 rounded text-[10px] font-bold border transition-all ${
+                    enableKillSwitch
+                      ? 'bg-rose-900/50 border-rose-500/40 text-rose-300'
+                      : 'bg-zinc-900 border-zinc-700 text-zinc-500 hover:text-zinc-300'
+                  }`}>
+                  🔴 Kill Switch {enableKillSwitch ? 'ON' : 'OFF'}
+                </button>
+
+                {/* Set button */}
+                <button onClick={handleSetPnl} disabled={settingPnl}
+                  className="px-3 py-1.5 text-xs font-bold rounded-lg bg-violet-600 hover:bg-violet-500
+                             text-white border border-violet-500/40 transition-all disabled:opacity-50">
+                  {settingPnl ? 'Setting…' : 'Set Guard'}
+                </button>
+
+                {/* Clear button */}
+                {pnlGuardStatus?.pnlExitStatus === 'ACTIVE' && (
+                  <button onClick={handleClearPnl} disabled={clearingPnl}
+                    className={`px-3 py-1.5 text-xs font-bold rounded-lg border transition-all disabled:opacity-50 ${
+                      confirmClear
+                        ? 'bg-rose-600 border-rose-500/40 text-white'
+                        : 'bg-zinc-900 border-zinc-700 text-zinc-400 hover:text-zinc-200'
+                    }`}>
+                    {clearingPnl ? 'Clearing…' : confirmClear ? 'Confirm Clear?' : 'Clear Guard'}
+                  </button>
+                )}
+
+                {/* Current guard values */}
+                {pnlGuardStatus?.pnlExitStatus === 'ACTIVE' && (
+                  <span className="text-[10px] text-zinc-500 font-mono">
+                    {pnlGuardStatus.profit ? `🎯 ₹${pnlGuardStatus.profit}` : ''}
+                    {pnlGuardStatus.profit && pnlGuardStatus.loss ? '  ' : ''}
+                    {pnlGuardStatus.loss ? `🛑 ₹${pnlGuardStatus.loss}` : ''}
+                  </span>
+                )}
+              </div>
+            )}
+          </div>
+        )}
       </div>
 
       {/* Centered NIFTY spot price strip */}
