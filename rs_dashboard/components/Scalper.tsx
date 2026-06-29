@@ -86,8 +86,6 @@ export default function Scalper() {
   const [peStrike, setPeStrike]   = useState<number | null>(null);
   const [ceLimitPrice, setCeLimitPrice] = useState('');
   const [peLimitPrice, setPeLimitPrice] = useState('');
-  const [ceLoading, setCeLoading] = useState(false);
-  const [peLoading, setPeLoading] = useState(false);
 
   // Toasts
   const [toasts, setToasts] = useState<Toast[]>([]);
@@ -307,8 +305,6 @@ export default function Scalper() {
       }
     }
 
-    const setter = option === 'CE' ? setCeLoading : setPeLoading;
-    setter(true);
     try {
       // Fast path: direct Dhan REST call (no Python spawn, no CSV load)
       const secId = strikeMap[String(strike)]?.[option === 'CE' ? 'ceId' : 'peId'];
@@ -347,8 +343,6 @@ export default function Scalper() {
       }
     } catch (e) {
       addToast('error', 'Network error', String(e));
-    } finally {
-      setter(false);
     }
   }, [ceStrike, peStrike, ceLimitPrice, peLimitPrice, expiry, lots, lotSize, strikeMap, orderMode, addToast, fetchTabData]);
 
@@ -645,7 +639,6 @@ export default function Scalper() {
           pct={cePct}
           limitPrice={ceLimitPrice}
           orderMode={orderMode}
-          loading={ceLoading}
           onStrikeChange={v => setCeStrike(v)}
           onLimitPriceChange={setCeLimitPrice}
           onBuy={() => placeOrder('BUY', 'CE')}
@@ -661,7 +654,6 @@ export default function Scalper() {
           pct={pePct}
           limitPrice={peLimitPrice}
           orderMode={orderMode}
-          loading={peLoading}
           onStrikeChange={v => setPeStrike(v)}
           onLimitPriceChange={setPeLimitPrice}
           onBuy={() => placeOrder('BUY', 'PE')}
@@ -719,7 +711,6 @@ interface OptionPanelProps {
   pct: number | null;
   limitPrice: string;
   orderMode: 'MARKET' | 'LIMIT';
-  loading: boolean;
   onStrikeChange: (s: number) => void;
   onLimitPriceChange: (p: string) => void;
   onBuy: () => void;
@@ -728,7 +719,7 @@ interface OptionPanelProps {
 
 function OptionPanel({
   side, label, strike, visibleStrikes, atm, ltp, pct,
-  limitPrice, orderMode, loading, onStrikeChange, onLimitPriceChange, onBuy, onSell,
+  limitPrice, orderMode, onStrikeChange, onLimitPriceChange, onBuy, onSell,
 }: OptionPanelProps) {
   const isPos = (v: number) => v >= 0;
 
@@ -789,23 +780,23 @@ function OptionPanel({
       <div className="grid grid-cols-2 gap-3">
         <button
           onClick={onBuy}
-          disabled={loading || !strike}
+          disabled={!strike}
           className="py-3.5 px-4 text-sm font-bold rounded-xl transition-all active:scale-95
                      bg-emerald-600 hover:bg-emerald-500 text-white
-                     disabled:opacity-40 disabled:cursor-not-allowed disabled:active:scale-100
+                     disabled:opacity-40 disabled:cursor-not-allowed
                      shadow-lg shadow-emerald-900/20"
         >
-          {loading ? '…' : `BUY ${side}`}
+          BUY {side}
         </button>
         <button
           onClick={onSell}
-          disabled={loading || !strike}
+          disabled={!strike}
           className="py-3.5 px-4 text-sm font-bold rounded-xl transition-all active:scale-95
                      bg-rose-600 hover:bg-rose-500 text-white
-                     disabled:opacity-40 disabled:cursor-not-allowed disabled:active:scale-100
+                     disabled:opacity-40 disabled:cursor-not-allowed
                      shadow-lg shadow-rose-900/20"
         >
-          {loading ? '…' : `SELL ${side}`}
+          SELL {side}
         </button>
       </div>
     </div>
