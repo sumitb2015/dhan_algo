@@ -1983,6 +1983,67 @@ class DhanHelper:
             
         return success
 
+    def get_pnl_exit(self):
+        """
+        Retrieve the current P&L exit configuration for the trading day.
+        Returns the data dict on success, or None on failure.
+        """
+        dhan_http = getattr(self.dhan, 'dhan_http', None)
+        if not dhan_http:
+            logger.error("get_pnl_exit: dhan_http not accessible.")
+            return None
+        try:
+            res = dhan_http.get('/pnlExit')
+            if isinstance(res, dict) and res.get('status') == 'success':
+                return res.get('data', {})
+            logger.error(f"get_pnl_exit failed: {res.get('remarks') if isinstance(res, dict) else res}")
+        except Exception as e:
+            logger.error(f"Exception in get_pnl_exit: {e}")
+        return None
+
+    def set_pnl_exit(self, profit_value: float, loss_value: float,
+                     product_types: list, enable_kill_switch: bool) -> bool:
+        """
+        Configure P&L-based automatic exit. The broker exits all matching positions
+        when profit_value or loss_value thresholds are breached.
+        product_types: list of 'INTRADAY' and/or 'DELIVERY'.
+        """
+        dhan_http = getattr(self.dhan, 'dhan_http', None)
+        if not dhan_http:
+            logger.error("set_pnl_exit: dhan_http not accessible.")
+            return False
+        try:
+            payload = {
+                "profitValue": profit_value,
+                "lossValue": loss_value,
+                "productType": product_types,
+                "enableKillSwitch": enable_kill_switch,
+            }
+            res = dhan_http.post('/pnlExit', payload)
+            if isinstance(res, dict) and res.get('status') == 'success':
+                logger.info(f"P&L exit configured: profit={profit_value}, loss={loss_value}, types={product_types}")
+                return True
+            logger.error(f"set_pnl_exit failed: {res.get('remarks') if isinstance(res, dict) else res}")
+        except Exception as e:
+            logger.error(f"Exception in set_pnl_exit: {e}")
+        return False
+
+    def delete_pnl_exit(self) -> bool:
+        """Disable active P&L exit configuration for the current day."""
+        dhan_http = getattr(self.dhan, 'dhan_http', None)
+        if not dhan_http:
+            logger.error("delete_pnl_exit: dhan_http not accessible.")
+            return False
+        try:
+            res = dhan_http.delete('/pnlExit')
+            if isinstance(res, dict) and res.get('status') == 'success':
+                logger.info("P&L exit disabled.")
+                return True
+            logger.error(f"delete_pnl_exit failed: {res.get('remarks') if isinstance(res, dict) else res}")
+        except Exception as e:
+            logger.error(f"Exception in delete_pnl_exit: {e}")
+        return False
+
     # --- UTILS ---
     def epoch_to_datetime(self, epoch: int) -> str:
         """Convert Dhan's epoch time to human-readable format."""
