@@ -92,13 +92,16 @@ def get_last_date(csv_path: str):
 
 
 def get_last_trading_day() -> str:
-    """Return the most recent weekday (Mon–Fri) as YYYY-MM-DD."""
-    d = datetime.now()
-    weekday = d.weekday()
-    if weekday == 5:
+    """Return the most recent COMPLETED trading day as YYYY-MM-DD (never today).
+
+    Starts from yesterday because the Dhan historical API does not publish
+    same-day EOD data — requesting today's date causes a DH-905 error.
+    """
+    d = datetime.now().date() - timedelta(days=1)
+    for _ in range(7):
+        if d.weekday() < 5:  # Mon–Fri
+            return d.strftime("%Y-%m-%d")
         d -= timedelta(days=1)
-    elif weekday == 6:
-        d -= timedelta(days=2)
     return d.strftime("%Y-%m-%d")
 
 
@@ -116,7 +119,6 @@ def save_csv(df: pd.DataFrame, path: str):
 
 def download_index(helper, entry: dict, force: bool = False) -> bool:
     csv_path = os.path.join(INDICES_DIR, f"{entry['name']}.csv")
-    today = datetime.now().strftime("%Y-%m-%d")
     last_trading_day = get_last_trading_day()
     last_date = None if force else get_last_date(csv_path)
 
@@ -130,12 +132,12 @@ def download_index(helper, entry: dict, force: bool = False) -> bool:
         else (datetime.now() - timedelta(days=1825)).strftime("%Y-%m-%d")
     )
 
-    print(f"  ↓ {entry['label']} [id={entry['id']}]: {from_date} → {today} ...", end=" ", flush=True)
+    print(f"  ↓ {entry['label']} [id={entry['id']}]: {from_date} → {last_trading_day} ...", end=" ", flush=True)
 
     try:
         chunks = []
         cur = datetime.strptime(from_date, "%Y-%m-%d")
-        end = datetime.strptime(today, "%Y-%m-%d")
+        end = datetime.strptime(last_trading_day, "%Y-%m-%d")
         while cur <= end:
             chunk_end = min(cur + timedelta(days=365), end)
             df_chunk = helper.get_historical_daily_data(

@@ -1,4 +1,4 @@
-'use client';
+﻿'use client';
 
 import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { RefreshCw, TrendingUp, TrendingDown, Download, BarChart2 } from 'lucide-react';
@@ -355,8 +355,8 @@ function LeaderRow({ rank, stock, maxAbs, isHighlighted, onHover }: {
       onMouseEnter={() => onHover(stock.symbol)}
       onMouseLeave={() => onHover(null)}
     >
-      <span className="text-[10px] text-white/30 w-5 tabular-nums text-right shrink-0">{rank}</span>
-      <span className="font-mono font-semibold text-[12px] text-white/75 w-[86px] shrink-0 truncate">{stock.symbol}</span>
+      <span className="text-[10px] text-zinc-600 w-5 tabular-nums text-right shrink-0">{rank}</span>
+      <span className="font-mono font-semibold text-[12px] text-zinc-300 w-[86px] shrink-0 truncate">{stock.symbol}</span>
       <div className="flex-1 h-1.5 bg-zinc-800 rounded-full overflow-hidden">
         <div className={cn('h-full rounded-full', pos ? 'bg-emerald-500' : 'bg-red-500')}
           style={{ width: `${barPct}%` }} />
@@ -443,7 +443,7 @@ export default function NormalizedChart() {
   const longPeriod  = ['3Y', '4Y', '5Y'].includes(period);
 
   return (
-    <div className="flex flex-col flex-1 w-full bg-black min-h-screen text-white/75">
+    <div className="flex flex-col flex-1 w-full bg-black min-h-screen text-zinc-300">
 
       {/* ── Header ── */}
       <header className="w-full border-b border-zinc-900 bg-zinc-950/90 backdrop-blur-md px-4 py-2 flex flex-wrap items-center gap-2.5 z-20 sticky top-0">
@@ -457,18 +457,18 @@ export default function NormalizedChart() {
         <NavBar />
         <div className="flex items-center gap-2 ml-auto">
           {lastUpdated && (
-            <span className="text-[10px] text-white/30 hidden md:inline tabular-nums">
+            <span className="text-[10px] text-zinc-600 hidden md:inline tabular-nums">
               {lastUpdated.toLocaleTimeString('en-IN', { timeZone: 'Asia/Kolkata' })} IST
             </span>
           )}
           {data && (
             <button onClick={() => exportCSV(data, filtered)}
-              className="h-7 px-2.5 flex items-center gap-1 rounded-lg border border-zinc-800 bg-zinc-900 text-white/45 hover:text-white/75 hover:bg-zinc-800 transition-all text-[11px] font-medium">
+              className="h-7 px-2.5 flex items-center gap-1 rounded-lg border border-zinc-800 bg-zinc-900 text-zinc-500 hover:text-zinc-300 hover:bg-zinc-800 transition-all text-[11px] font-medium">
               <Download className="h-3 w-3" /> CSV
             </button>
           )}
           <button onClick={fetchData} disabled={loading}
-            className="h-7 w-7 flex items-center justify-center rounded-lg border border-zinc-800 bg-zinc-900 text-white/45 hover:text-white/75 hover:bg-zinc-800 transition-all disabled:opacity-50">
+            className="h-7 w-7 flex items-center justify-center rounded-lg border border-zinc-800 bg-zinc-900 text-zinc-500 hover:text-zinc-300 hover:bg-zinc-800 transition-all disabled:opacity-50">
             <RefreshCw className={cn('h-3.5 w-3.5', loading && 'animate-spin')} />
           </button>
         </div>
@@ -482,7 +482,7 @@ export default function NormalizedChart() {
             {UNIVERSES.map((u) => (
               <button key={u.value} onClick={() => setUniverse(u.value)}
                 className={cn('px-2.5 py-1 font-semibold rounded transition-all',
-                  universe === u.value ? 'bg-sky-500/10 text-sky-400' : 'text-white/45 hover:text-white/75')}>
+                  universe === u.value ? 'bg-sky-500/10 text-sky-400' : 'text-zinc-500 hover:text-zinc-300')}>
                 {u.label}
               </button>
             ))}
@@ -491,7 +491,7 @@ export default function NormalizedChart() {
             {PERIODS.map((p) => (
               <button key={p} onClick={() => setPeriod(p)}
                 className={cn('px-2.5 py-1 font-semibold rounded transition-all',
-                  period === p ? 'bg-sky-500/10 text-sky-400' : 'text-white/45 hover:text-white/75')}>
+                  period === p ? 'bg-sky-500/10 text-sky-400' : 'text-zinc-500 hover:text-zinc-300')}>
                 {p}
               </button>
             ))}
@@ -504,13 +504,13 @@ export default function NormalizedChart() {
                     ? f === 'positive' ? 'bg-emerald-500/10 text-emerald-400'
                       : f === 'negative' ? 'bg-red-500/10 text-red-400'
                       : 'bg-sky-500/10 text-sky-400'
-                    : 'text-white/45 hover:text-white/75')}>
+                    : 'text-zinc-500 hover:text-zinc-300')}>
                 {f === 'all' ? 'All' : f === 'positive' ? '▲ Positive' : '▼ Negative'}
               </button>
             ))}
           </div>
           {data && (
-            <span className="text-[11px] text-white/45 ml-auto tabular-nums">
+            <span className="text-[11px] text-zinc-500 ml-auto tabular-nums">
               {filtered.length} {universe === 'indices' ? 'indices' : 'stocks'} · {fmtDate(data.actualStart)} → {fmtDate(data.actualEnd)}
               {longPeriod && universe !== 'indices' && <span className="text-amber-500/80 ml-1.5">(stock data limited to ~2Y)</span>}
             </span>
@@ -532,7 +532,7 @@ export default function NormalizedChart() {
             ].map((s) => (
               <div key={s.label} className="flex flex-col items-center bg-zinc-950 border border-zinc-800 rounded-lg px-2 py-2">
                 <span className={cn('text-[14px] font-bold tabular-nums leading-tight', s.color)}>{s.value}</span>
-                <span className="text-[9px] text-white/45 uppercase tracking-wide mt-0.5 text-center whitespace-nowrap">{s.label}</span>
+                <span className="text-[9px] text-zinc-500 uppercase tracking-wide mt-0.5 text-center whitespace-nowrap">{s.label}</span>
               </div>
             ))}
           </div>
@@ -544,7 +544,7 @@ export default function NormalizedChart() {
         {loading && (
           <div className="flex flex-col items-center justify-center p-16 rounded-lg border border-zinc-900 bg-zinc-950">
             <RefreshCw className="h-6 w-6 text-sky-500 animate-spin" />
-            <span className="text-white/45 text-[12px] mt-3">
+            <span className="text-zinc-500 text-[12px] mt-3">
               Loading normalized data for {universe === 'nifty50' ? 'Nifty 50' : universe === 'nifty500' ? 'Nifty 500' : 'All Indices'}…
             </span>
           </div>
@@ -557,13 +557,13 @@ export default function NormalizedChart() {
             {/* Chart */}
             <div className="flex-1 min-w-0 rounded-xl border border-zinc-800 bg-zinc-950 p-4 flex flex-col">
               <div className="flex items-center justify-between mb-3 px-1 shrink-0">
-                <span className="text-[13px] font-semibold text-white/75">
+                <span className="text-[13px] font-semibold text-zinc-300">
                   {universe === 'nifty50' ? 'NIFTY 50' : universe === 'nifty500' ? 'NIFTY 500' : 'NSE Indices'} — {period} Normalised Performance
                 </span>
-                <div className="flex items-center gap-4 text-[10px] text-white/30">
+                <div className="flex items-center gap-4 text-[10px] text-zinc-600">
                   <span className="flex items-center gap-1.5"><span className="inline-block w-5 h-0.5 bg-emerald-400 rounded" /> Positive</span>
                   <span className="flex items-center gap-1.5"><span className="inline-block w-5 h-0.5 bg-red-500 rounded" /> Negative</span>
-                  <span className="hidden sm:inline text-white/20">Hover chart or leaderboard to highlight</span>
+                  <span className="hidden sm:inline text-zinc-700">Hover chart or leaderboard to highlight</span>
                 </div>
               </div>
               <div className="flex-1 min-h-0">
@@ -581,12 +581,12 @@ export default function NormalizedChart() {
               <div className="flex-1 rounded-xl border border-zinc-800 bg-zinc-950 overflow-hidden flex flex-col">
                 <div className="flex items-center gap-2 px-3 py-2.5 border-b border-zinc-800/70 shrink-0">
                   <TrendingUp className="h-3.5 w-3.5 text-emerald-400 shrink-0" />
-                  <span className="text-[12px] font-semibold text-white/75 flex-1">Top Gainers</span>
-                  <span className="text-[10px] text-white/45 tabular-nums">{stats?.positive} up</span>
+                  <span className="text-[12px] font-semibold text-zinc-300 flex-1">Top Gainers</span>
+                  <span className="text-[10px] text-zinc-500 tabular-nums">{stats?.positive} up</span>
                 </div>
                 <div className="flex-1 overflow-y-auto py-1 px-1">
                   {gainers.filter((s) => s.finalReturn >= 0).length === 0
-                    ? <p className="text-center text-[11px] text-white/30 py-4">No positive stocks</p>
+                    ? <p className="text-center text-[11px] text-zinc-600 py-4">No positive stocks</p>
                     : gainers.filter((s) => s.finalReturn >= 0).map((s, i) => (
                       <LeaderRow key={s.symbol} rank={i + 1} stock={s} maxAbs={maxGain}
                         isHighlighted={hovered === s.symbol} onHover={setHovered} />
@@ -596,12 +596,12 @@ export default function NormalizedChart() {
               <div className="flex-1 rounded-xl border border-zinc-800 bg-zinc-950 overflow-hidden flex flex-col">
                 <div className="flex items-center gap-2 px-3 py-2.5 border-b border-zinc-800/70 shrink-0">
                   <TrendingDown className="h-3.5 w-3.5 text-red-400 shrink-0" />
-                  <span className="text-[12px] font-semibold text-white/75 flex-1">Top Losers</span>
-                  <span className="text-[10px] text-white/45 tabular-nums">{stats?.negative} down</span>
+                  <span className="text-[12px] font-semibold text-zinc-300 flex-1">Top Losers</span>
+                  <span className="text-[10px] text-zinc-500 tabular-nums">{stats?.negative} down</span>
                 </div>
                 <div className="flex-1 overflow-y-auto py-1 px-1">
                   {losers.filter((s) => s.finalReturn < 0).length === 0
-                    ? <p className="text-center text-[11px] text-white/30 py-4">No negative stocks</p>
+                    ? <p className="text-center text-[11px] text-zinc-600 py-4">No negative stocks</p>
                     : losers.filter((s) => s.finalReturn < 0).map((s, i) => (
                       <LeaderRow key={s.symbol} rank={i + 1} stock={s} maxAbs={maxLoss}
                         isHighlighted={hovered === s.symbol} onHover={setHovered} />
@@ -614,8 +614,8 @@ export default function NormalizedChart() {
 
         {!loading && filtered.length === 0 && !error && data && (
           <div className="flex flex-col items-center justify-center p-12 rounded-lg border border-zinc-900 bg-zinc-950">
-            <BarChart2 className="h-8 w-8 text-white/20 mb-3" />
-            <p className="text-white/45 text-[13px]">No stocks match the current filter</p>
+            <BarChart2 className="h-8 w-8 text-zinc-700 mb-3" />
+            <p className="text-zinc-500 text-[13px]">No stocks match the current filter</p>
           </div>
         )}
       </main>

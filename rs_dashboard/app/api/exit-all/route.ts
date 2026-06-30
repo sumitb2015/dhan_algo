@@ -1,4 +1,4 @@
-import { NextResponse } from 'next/server';
+﻿import { NextResponse } from 'next/server';
 import path from 'path';
 import fs from 'fs';
 import { execFile, execSync } from 'child_process';
@@ -8,7 +8,7 @@ const execFileAsync = promisify(execFile);
 
 const PROJECT_ROOT = path.resolve(process.cwd(), '..');
 const DEBUG_DIR = path.join(PROJECT_ROOT, 'debug');
-const PYTHON_EXE = path.join(PROJECT_ROOT, 'venv', 'Scripts', 'python.exe');
+const PYTHON_EXE = path.join(PROJECT_ROOT, 'venv', 'Scripts', 'pythonw.exe');
 const EXIT_SCRIPT = path.join(PROJECT_ROOT, 'scripts', 'tools', 'exit_all_positions.py');
 
 const STRATEGY_KEYS = [
@@ -90,7 +90,7 @@ function clearStrategyState(key: string, existingState: Record<string, any>) {
     fs.writeFileSync(tmpPath, JSON.stringify(cleared, null, 2));
     fs.renameSync(tmpPath, stateFile);
   } catch {
-    // Non-fatal — dashboard will eventually re-read
+    // Non-fatal â€” dashboard will eventually re-read
   }
 }
 
@@ -108,8 +108,8 @@ export async function POST() {
       fs.mkdirSync(DEBUG_DIR, { recursive: true });
     }
 
-    // ── Step 1: Broker-level nuclear exit (DELETE /positions) ──────────────
-    // Do this FIRST — strategies must not race to close positions themselves.
+    // â”€â”€ Step 1: Broker-level nuclear exit (DELETE /positions) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // Do this FIRST â€” strategies must not race to close positions themselves.
     let brokerExit = false;
     let brokerError: string | null = null;
     try {
@@ -134,7 +134,7 @@ export async function POST() {
       if (!brokerExit) brokerError = String(err.message);
     }
 
-    // ── Step 2: Sync all strategy processes ────────────────────────────────
+    // â”€â”€ Step 2: Sync all strategy processes â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     // Positions are already closed at the broker. Force-kill each running
     // strategy so it cannot attempt its own position-close or re-enter.
     // Then immediately clear its state file so the dashboard shows STOPPED.
@@ -154,7 +154,7 @@ export async function POST() {
 
       const pid: number | undefined = existingState.pid;
       if (!pid || !isPidRunning(pid)) {
-        // Process already dead — just clear state and remove any stale trigger
+        // Process already dead â€” just clear state and remove any stale trigger
         cleanTriggerFile(key);
         if (existingState.status !== 'STOPPED') clearStrategyState(key, existingState);
         continue;
@@ -164,7 +164,7 @@ export async function POST() {
       if (didKill) {
         killed.push(key);
       } else {
-        // Kill failed (permissions?) — fall back to graceful shutdown trigger
+        // Kill failed (permissions?) â€” fall back to graceful shutdown trigger
         const triggerFile = path.join(DEBUG_DIR, `${key}_shutdown.trigger`);
         fs.writeFileSync(triggerFile, '');
         triggerFallback.push(key);

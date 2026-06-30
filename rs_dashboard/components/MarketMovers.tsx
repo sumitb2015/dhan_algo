@@ -822,6 +822,11 @@ export default function MarketMovers() {
           ))}
         </div>
         <div className="flex items-center gap-2 ml-auto">
+          {data?.dataDate && (
+            <span className="text-[10px] font-mono font-bold text-zinc-400 hidden md:inline px-2 py-0.5 rounded-sm bg-zinc-900 border border-zinc-800 uppercase tracking-wide">
+              DATA: {data.dataDate}
+            </span>
+          )}
           {data && !loading && (
             <span className="text-[10px] text-zinc-600 tabular-nums font-mono hidden md:inline">
               AUTO {fmtCountdown(autoIn)}

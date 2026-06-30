@@ -11,7 +11,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 
 from login import get_dhan_client
 from lib.dhan_helper import DhanHelper
-from lib.strategy_state_helper import save_strategy_state, check_shutdown_trigger
+from lib.strategy_state_helper import save_strategy_state, check_shutdown_trigger, exit_if_market_closed
 
 # Setup Logging
 project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -617,6 +617,7 @@ class NiftyAdvancedImbalance:
         return None, None
 
     def run(self):
+        exit_if_market_closed(self.helper, self.dry_run)
         logger.info(f"Starting Nifty Advanced Imbalance Strategy | Mode: {self.mode} | Dry Run: {self.dry_run} | Start Time: {self.start_time}")
         
         while True:

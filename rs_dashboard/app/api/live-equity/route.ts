@@ -1,11 +1,11 @@
-import { NextRequest, NextResponse } from 'next/server';
+﻿import { NextRequest, NextResponse } from 'next/server';
 import path from 'path';
 import fs from 'fs';
 import { execSync, spawn } from 'child_process';
 
 const PROJECT_ROOT = path.resolve(process.cwd(), '..');
 const DEBUG_DIR    = path.join(PROJECT_ROOT, 'debug');
-const PYTHON_EXE   = path.join(PROJECT_ROOT, 'venv', 'Scripts', 'python.exe');
+const PYTHON_EXE   = path.join(PROJECT_ROOT, 'venv', 'Scripts', 'pythonw.exe');
 const BRIDGE_SCRIPT = path.join(PROJECT_ROOT, 'scripts', 'tools', 'live_equity_ws.py');
 const QUOTES_FILE  = path.join(DEBUG_DIR, 'live_equity_quotes.json');
 const STATUS_FILE  = path.join(DEBUG_DIR, 'live_equity_status.json');
@@ -35,7 +35,7 @@ function isPidRunning(pid: number): boolean {
   }
 }
 
-/** GET — return live quotes + bridge status */
+/** GET â€” return live quotes + bridge status */
 export async function GET() {
   const quotes = readJson(QUOTES_FILE);
   const status = readJson(STATUS_FILE);
@@ -54,20 +54,20 @@ export async function GET() {
   });
 }
 
-/** POST — start or stop the WebSocket bridge */
+/** POST â€” start or stop the WebSocket bridge */
 export async function POST(request: NextRequest) {
   const body = await request.json().catch(() => ({}));
   const action: string = body.action ?? '';
 
   if (!fs.existsSync(DEBUG_DIR)) fs.mkdirSync(DEBUG_DIR, { recursive: true });
 
-  // ── Stop ────────────────────────────────────────────────────────────────
+  // â”€â”€ Stop â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   if (action === 'stop') {
     fs.writeFileSync(STOP_TRIGGER, '');
     return NextResponse.json({ success: true, message: 'Stop trigger written' });
   }
 
-  // ── Start ────────────────────────────────────────────────────────────────
+  // â”€â”€ Start â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   if (action === 'start') {
     // Prevent duplicate bridge
     const status = readJson(STATUS_FILE);

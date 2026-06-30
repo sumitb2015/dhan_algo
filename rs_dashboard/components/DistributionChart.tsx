@@ -1,4 +1,4 @@
-'use client';
+﻿'use client';
 
 import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import {
@@ -325,9 +325,9 @@ function StatCard({
 }: { label: string; value: string; sub?: string; color?: string }) {
   return (
     <div className="flex flex-col bg-zinc-950 border border-zinc-800 rounded-lg px-4 py-3 min-w-0">
-      <span className="text-[10px] text-white/70 uppercase tracking-wider font-medium mb-1">{label}</span>
+      <span className="text-[10px] text-zinc-300 uppercase tracking-wider font-medium mb-1">{label}</span>
       <span className={cn('text-[15px] font-bold tabular-nums leading-tight', color)}>{value}</span>
-      {sub && <span className="text-[10px] text-white/65 mt-0.5">{sub}</span>}
+      {sub && <span className="text-[10px] text-zinc-400 mt-0.5">{sub}</span>}
     </div>
   );
 }
@@ -341,7 +341,7 @@ function CoverageBar({
   return (
     <div className="flex flex-col gap-1 bg-zinc-950 border border-zinc-800 rounded-lg px-4 py-3">
       <div className="flex items-center justify-between">
-        <span className="text-[10px] text-white/70 uppercase tracking-wider font-medium">{label}</span>
+        <span className="text-[10px] text-zinc-300 uppercase tracking-wider font-medium">{label}</span>
         <span className={cn('text-[11px] font-bold tabular-nums', color)}>{actual.toFixed(2)}%</span>
       </div>
       <div className="w-full h-1.5 bg-zinc-800 rounded-full overflow-hidden">
@@ -351,7 +351,7 @@ function CoverageBar({
         />
       </div>
       <div className="flex items-center justify-between">
-        <span className="text-[9px] text-white/60">Theory: {theory}%</span>
+        <span className="text-[9px] text-zinc-400">Theory: {theory}%</span>
         <span className={cn('text-[9px] tabular-nums font-medium', diff >= 0 ? 'text-emerald-400' : 'text-red-400')}>
           {diff >= 0 ? '+' : ''}{diff.toFixed(2)}%
         </span>
@@ -384,18 +384,18 @@ function OutlierTable({
       <table className="w-full">
         <thead>
           <tr className="bg-zinc-900">
-            <th className="px-4 py-2 text-xs font-bold text-white text-left whitespace-nowrap bg-zinc-800">#</th>
-            <th className="px-4 py-2 text-xs font-bold text-white text-left whitespace-nowrap bg-zinc-800">Date</th>
-            <th className="px-4 py-2 text-xs font-bold text-white text-right whitespace-nowrap bg-zinc-800">Close</th>
-            <th className="px-4 py-2 text-xs font-bold text-white text-right whitespace-nowrap bg-zinc-800">Change</th>
+            <th className="px-4 py-2 text-xs font-bold text-zinc-100 text-left whitespace-nowrap bg-zinc-800">#</th>
+            <th className="px-4 py-2 text-xs font-bold text-zinc-100 text-left whitespace-nowrap bg-zinc-800">Date</th>
+            <th className="px-4 py-2 text-xs font-bold text-zinc-100 text-right whitespace-nowrap bg-zinc-800">Close</th>
+            <th className="px-4 py-2 text-xs font-bold text-zinc-100 text-right whitespace-nowrap bg-zinc-800">Change</th>
           </tr>
         </thead>
         <tbody>
           {rows.map((r, i) => (
             <tr key={r.date} className="border-b border-zinc-900/60 hover:bg-zinc-800/20 transition-colors">
-              <td className="px-4 py-2 text-[11px] text-white/60 tabular-nums">{i + 1}</td>
-              <td className="px-4 py-2 text-[12px] text-white/90">{fmtDate(r.date)}</td>
-              <td className="px-4 py-2 text-[12px] text-white/80 text-right tabular-nums">
+              <td className="px-4 py-2 text-[11px] text-zinc-400 tabular-nums">{i + 1}</td>
+              <td className="px-4 py-2 text-[12px] text-zinc-100">{fmtDate(r.date)}</td>
+              <td className="px-4 py-2 text-[12px] text-zinc-200 text-right tabular-nums">
                 {r.close.toFixed(2)}
               </td>
               <td className={cn(
@@ -435,17 +435,17 @@ function SymbolSidebar({ symbols, selected, onSelect }: SidebarProps) {
       {/* Search */}
       <div className="px-3 py-2.5 border-b border-zinc-800">
         <div className="flex items-center gap-2 bg-zinc-900 border border-zinc-800 rounded-lg px-2.5 py-1.5">
-          <Search className="h-3.5 w-3.5 text-white/60 shrink-0" />
+          <Search className="h-3.5 w-3.5 text-zinc-400 shrink-0" />
           <input
             ref={inputRef}
             type="text"
             value={search}
             onChange={(e) => setSearch(e.target.value)}
             placeholder="Search symbol…"
-            className="bg-transparent text-[12px] text-white placeholder:text-white/50 outline-none w-full"
+            className="bg-transparent text-[12px] text-white placeholder:text-zinc-500 outline-none w-full"
           />
           {search && (
-            <button onClick={() => setSearch('')} className="text-white/60 hover:text-white/90">
+            <button onClick={() => setSearch('')} className="text-zinc-400 hover:text-zinc-100">
               <X className="h-3 w-3" />
             </button>
           )}
@@ -455,7 +455,7 @@ function SymbolSidebar({ symbols, selected, onSelect }: SidebarProps) {
       {/* Symbol list */}
       <div className="flex-1 overflow-y-auto">
         {filtered.length === 0 && (
-          <div className="px-4 py-6 text-center text-[12px] text-white/60">No symbols found</div>
+          <div className="px-4 py-6 text-center text-[12px] text-zinc-400">No symbols found</div>
         )}
         {filtered.map((s, idx) => {
           const prev = filtered[idx - 1];
@@ -470,7 +470,7 @@ function SymbolSidebar({ symbols, selected, onSelect }: SidebarProps) {
                   'w-full text-left px-3 py-2 flex items-center gap-2 transition-colors text-[12px]',
                   selected === s.value
                     ? 'bg-violet-500/10 text-violet-300 font-semibold border-l-2 border-violet-500'
-                    : 'text-white/80 hover:bg-zinc-800/50 hover:text-white border-l-2 border-transparent',
+                    : 'text-zinc-200 hover:bg-zinc-800/50 hover:text-white border-l-2 border-transparent',
                 )}
               >
                 {s.isIndex && (
@@ -485,7 +485,7 @@ function SymbolSidebar({ symbols, selected, onSelect }: SidebarProps) {
         })}
       </div>
 
-      <div className="px-3 py-2 border-t border-zinc-800 text-[10px] text-white/55 text-center">
+      <div className="px-3 py-2 border-t border-zinc-800 text-[10px] text-zinc-500 text-center">
         {filtered.length} of {symbols.length} symbols
       </div>
     </div>
@@ -504,7 +504,7 @@ function interpretKurtosis(k: number): { label: string; color: string; desc: str
 function interpretSkewness(s: number): { label: string; color: string } {
   if (s < -0.3) return { label: 'Left Skewed (−)', color: 'text-red-400' };
   if (s > 0.3) return { label: 'Right Skewed (+)', color: 'text-emerald-400' };
-  return { label: 'Near Symmetric', color: 'text-white/90' };
+  return { label: 'Near Symmetric', color: 'text-zinc-100' };
 }
 
 // ─── Main Component ───────────────────────────────────────────────────────────
@@ -586,7 +586,7 @@ export default function DistributionChart() {
                 'px-2.5 py-1 font-semibold rounded transition-all',
                 period === p.value
                   ? 'bg-violet-500/15 text-violet-300'
-                  : 'text-white/75 hover:text-white',
+                  : 'text-zinc-300 hover:text-white',
               )}
             >
               {p.label}
@@ -595,7 +595,7 @@ export default function DistributionChart() {
         </div>
 
         {lastFetched && (
-          <span className="text-[10px] text-white/60 hidden md:inline tabular-nums">
+          <span className="text-[10px] text-zinc-400 hidden md:inline tabular-nums">
             {lastFetched.toLocaleTimeString('en-IN', { timeZone: 'Asia/Kolkata' })} IST
           </span>
         )}
@@ -603,7 +603,7 @@ export default function DistributionChart() {
         <button
           onClick={fetchData}
           disabled={loading}
-          className="h-7 w-7 flex items-center justify-center rounded-lg border border-zinc-800 bg-zinc-900 text-white/75 hover:text-white hover:bg-zinc-800 transition-all disabled:opacity-40"
+          className="h-7 w-7 flex items-center justify-center rounded-lg border border-zinc-800 bg-zinc-900 text-zinc-300 hover:text-white hover:bg-zinc-800 transition-all disabled:opacity-40"
         >
           <RefreshCw className={cn('h-3.5 w-3.5', loading && 'animate-spin')} />
         </button>
@@ -618,7 +618,7 @@ export default function DistributionChart() {
             ? (
               <div className="flex flex-col items-center justify-center flex-1 gap-2">
                 <RefreshCw className="h-4 w-4 text-violet-500 animate-spin" />
-                <span className="text-[11px] text-white/60">Loading symbols…</span>
+                <span className="text-[11px] text-zinc-400">Loading symbols…</span>
               </div>
             )
             : (
@@ -642,10 +642,10 @@ export default function DistributionChart() {
                   {data?.label ?? selected}
                 </h1>
                 {data && (
-                  <p className="text-[11px] text-white/70 mt-0.5">
+                  <p className="text-[11px] text-zinc-300 mt-0.5">
                     {fmtDate(data.startDate)} – {fmtDate(data.endDate)}
                     {' · '}
-                    <span className="text-white/80">{data.daysAvailable} trading days</span>
+                    <span className="text-zinc-200">{data.daysAvailable} trading days</span>
                     {data.daysAvailable < data.daysRequested && (
                       <span className="ml-1.5 text-amber-400">
                         (max available for {period})
@@ -658,13 +658,13 @@ export default function DistributionChart() {
 
             {data && stats && (
               <div className="flex items-center gap-2 text-[11px]">
-                <span className="bg-zinc-900 border border-zinc-800 rounded px-2 py-1 text-white/75">
+                <span className="bg-zinc-900 border border-zinc-800 rounded px-2 py-1 text-zinc-300">
                   μ = <span className="text-white font-mono">{fmtPct(stats.mean, 4)}</span>
                 </span>
-                <span className="bg-zinc-900 border border-zinc-800 rounded px-2 py-1 text-white/75">
+                <span className="bg-zinc-900 border border-zinc-800 rounded px-2 py-1 text-zinc-300">
                   σ = <span className="text-white font-mono">{stats.std.toFixed(4)}%</span>
                 </span>
-                <span className="bg-zinc-900 border border-zinc-800 rounded px-2 py-1 text-white/75">
+                <span className="bg-zinc-900 border border-zinc-800 rounded px-2 py-1 text-zinc-300">
                   n = <span className="text-white font-mono">{stats.n}</span>
                 </span>
               </div>
@@ -683,7 +683,7 @@ export default function DistributionChart() {
           {loading && (
             <div className="rounded-xl border border-zinc-800 bg-zinc-950 flex flex-col items-center justify-center py-24 gap-3">
               <RefreshCw className="h-7 w-7 text-violet-500 animate-spin" />
-              <span className="text-white/70 text-[13px]">Computing distribution for {selected}…</span>
+              <span className="text-zinc-300 text-[13px]">Computing distribution for {selected}…</span>
             </div>
           )}
 
@@ -765,29 +765,29 @@ export default function DistributionChart() {
               {kInterp && sInterp && (
                 <div className="rounded-xl border border-zinc-800 bg-zinc-950 px-4 py-3 flex flex-wrap gap-4 text-[12px]">
                   <div className="flex items-start gap-2 flex-1 min-w-[200px]">
-                    <Info className="h-3.5 w-3.5 text-white/60 mt-0.5 shrink-0" />
+                    <Info className="h-3.5 w-3.5 text-zinc-400 mt-0.5 shrink-0" />
                     <div>
-                      <span className="text-white/70">Tail risk: </span>
+                      <span className="text-zinc-300">Tail risk: </span>
                       <span className={cn('font-semibold', kInterp.color)}>{kInterp.label}</span>
-                      <span className="text-white/65"> — {kInterp.desc}</span>
+                      <span className="text-zinc-400"> — {kInterp.desc}</span>
                     </div>
                   </div>
                   <div className="flex items-start gap-2 flex-1 min-w-[200px]">
-                    <Info className="h-3.5 w-3.5 text-white/60 mt-0.5 shrink-0" />
+                    <Info className="h-3.5 w-3.5 text-zinc-400 mt-0.5 shrink-0" />
                     <div>
-                      <span className="text-white/70">Outside 2σ: </span>
+                      <span className="text-zinc-300">Outside 2σ: </span>
                       <span className={cn('font-semibold', (100 - stats.within2SD) > 4.55 ? 'text-orange-400' : 'text-green-400')}>
                         {(100 - stats.within2SD).toFixed(2)}% of days
                       </span>
-                      <span className="text-white/65"> (theory: 4.55%) — options writers note</span>
+                      <span className="text-zinc-400"> (theory: 4.55%) — options writers note</span>
                     </div>
                   </div>
                   <div className="flex items-start gap-2 flex-1 min-w-[200px]">
-                    <Info className="h-3.5 w-3.5 text-white/60 mt-0.5 shrink-0" />
+                    <Info className="h-3.5 w-3.5 text-zinc-400 mt-0.5 shrink-0" />
                     <div>
-                      <span className="text-white/70">Asymmetry: </span>
+                      <span className="text-zinc-300">Asymmetry: </span>
                       <span className={cn('font-semibold', sInterp.color)}>{sInterp.label}</span>
-                      <span className="text-white/65"> (skew {fmtPct(stats.skewness * 100, 0)})</span>
+                      <span className="text-zinc-400"> (skew {fmtPct(stats.skewness * 100, 0)})</span>
                     </div>
                   </div>
                 </div>
@@ -812,8 +812,8 @@ export default function DistributionChart() {
           {/* Empty state when no data and not loading */}
           {!loading && !data && !error && (
             <div className="rounded-xl border border-zinc-800 bg-zinc-950 flex flex-col items-center justify-center py-24 gap-3">
-              <BarChart2 className="h-8 w-8 text-white/50" />
-              <p className="text-white/70 text-[13px]">Select a symbol to view its return distribution</p>
+              <BarChart2 className="h-8 w-8 text-zinc-500" />
+              <p className="text-zinc-300 text-[13px]">Select a symbol to view its return distribution</p>
             </div>
           )}
         </main>

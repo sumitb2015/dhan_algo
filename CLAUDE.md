@@ -231,6 +231,10 @@ App Router layout under `app/`. 14 pages, 29 API routes.
 
 **Table header style**: use `text-xs font-bold text-white` and solid `bg-zinc-800` for `<thead>` / `TH` components in all dashboard tables. At 10px, white text anti-aliases to gray — 12px (`text-xs`) with `font-bold` is the minimum for headers to appear truly white on dark backgrounds.
 
+**No text color opacity modifiers**: never use Tailwind's slash-opacity notation on text colors (e.g. `text-white/70`, `text-zinc-400/50`). Use solid zinc colors instead: `text-zinc-100` (near-white), `text-zinc-200`, `text-zinc-300` (body), `text-zinc-400` (secondary), `text-zinc-500` (muted), `text-zinc-600` (very dim). Opacity modifiers are fine on backgrounds (`bg-emerald-500/10`) but not on text.
+
+**Data date in page headers**: pages that display stock/market data must show a `DATA: YYYY-MM-DD` chip in the sticky header so users always know the currency of the data on screen.
+
 ---
 
 ## Critical API Conventions

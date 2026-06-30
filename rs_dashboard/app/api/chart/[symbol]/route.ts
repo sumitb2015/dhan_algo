@@ -50,7 +50,27 @@ export async function GET(
 
     // Align and compute RS line
     const aligned = alignByDate(stockRows, benchmarkRows);
-    const chartData: ChartPoint[] = computeRSLine(aligned, period, lookback);
+
+    // If the requested lookback exceeds available history, degrade gracefully
+    // to the longest lookback we can actually compute rather than returning an error.
+    let effectiveLookback = lookback;
+    let chartData: ChartPoint[] = computeRSLine(aligned, period, lookback);
+
+    if (chartData.length === 0 && aligned.length > 10) {
+      const candidates = [100, 50, 20];
+      for (const candidate of candidates) {
+        if (candidate < effectiveLookback && aligned.length > candidate) {
+          effectiveLookback = candidate;
+          chartData = computeRSLine(aligned, period, candidate);
+          if (chartData.length > 0) break;
+        }
+      }
+      // Last resort: use as much history as we have minus a small buffer
+      if (chartData.length === 0) {
+        effectiveLookback = Math.max(aligned.length - 5, 5);
+        chartData = computeRSLine(aligned, period, effectiveLookback);
+      }
+    }
 
     if (chartData.length === 0) {
       return NextResponse.json({ success: false, error: 'Insufficient aligned data' }, { status: 404 });
@@ -73,6 +93,7 @@ export async function GET(
       latestClose: last.stockClose,
       latestDate: last.date,
       priceChangePct: +priceChange.toFixed(2),
+      effectiveLookback,
       data: chartData.map((p) => ({
         date: p.date,
         stockClose: +p.stockClose.toFixed(2),

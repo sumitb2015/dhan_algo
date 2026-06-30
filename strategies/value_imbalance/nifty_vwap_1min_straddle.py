@@ -49,7 +49,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 
 from login import get_dhan_client
 from lib.dhan_helper import DhanHelper
-from lib.strategy_state_helper import save_strategy_state, check_shutdown_trigger
+from lib.strategy_state_helper import save_strategy_state, check_shutdown_trigger, exit_if_market_closed
 
 # ── Logging setup ────────────────────────────────────────────────────────────
 project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -509,6 +509,7 @@ class NiftyVWAP1MinStraddle:
     # ── main loop ────────────────────────────────────────────────────────────
 
     def run(self):
+        exit_if_market_closed(self.helper, self.dry_run)
         logger.info(
             f"NiftyVWAP1MinStraddle START | dry_run={self.dry_run} | lots={self.lots}"
             f" | entry_band={self.entry_band}pts | decline_ticks={self.decline_ticks}"

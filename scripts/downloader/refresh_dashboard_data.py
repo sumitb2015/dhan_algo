@@ -120,13 +120,12 @@ _NSE_HOLIDAYS = {
 }
 
 def get_last_trading_day() -> str:
-    """Return the most recent trading day as YYYY-MM-DD (includes today if it's a trading day).
+    """Return the most recent COMPLETED trading day as YYYY-MM-DD (never includes today).
 
-    Used as the upper-bound skip threshold in the fetch loop — if the CSV
-    already has data up to this date we skip the API call. Skips weekends and
-    NSE holidays so we don't attempt to fetch on non-trading days.
+    Starts from yesterday because the Dhan historical API does not publish
+    same-day EOD data. Skips weekends and NSE holidays.
     """
-    d = datetime.now().date()
+    d = datetime.now().date() - timedelta(days=1)
     for _ in range(14):
         if d.weekday() < 5 and d.strftime("%Y-%m-%d") not in _NSE_HOLIDAYS:
             return d.strftime("%Y-%m-%d")
@@ -203,13 +202,62 @@ def normalize_historical_df(df: pd.DataFrame) -> pd.DataFrame:
     return df[wanted]
 
 
+def _daily_from_intraday(helper, security_id, exchange_segment, instrument_type, from_date, to_date):
+    """Fallback: compute daily OHLCV from 1-min intraday data when the daily historical API is down."""
+    try:
+        df_raw = helper.get_intraday_minute_data(
+            security_id=security_id,
+            exchange_segment=exchange_segment,
+            instrument_type=instrument_type,
+            interval=1,
+            from_date=from_date,
+            to_date=to_date,
+        )
+        if df_raw.empty:
+            return pd.DataFrame()
+        df = normalize_historical_df(df_raw)
+        if df.empty:
+            return pd.DataFrame()
+        daily = df.resample("D").agg(
+            Open=("Open", "first"),
+            High=("High", "max"),
+            Low=("Low", "min"),
+            Close=("Close", "last"),
+            Volume=("Volume", "sum"),
+        ).dropna(subset=["Open", "Close"])
+        daily.index = daily.index.normalize()
+        daily.index.name = "Datetime"
+        return daily
+    except Exception:
+        return pd.DataFrame()
+
+
+MIN_INDEX_ROWS = 200  # below this we treat the CSV as corrupt and force a full re-download
+
+def _csv_row_count(csv_path: str) -> int:
+    """Return number of data rows in a CSV (excludes header line)."""
+    try:
+        with open(csv_path, "r", encoding="utf-8") as f:
+            return max(0, sum(1 for _ in f) - 1)
+    except Exception:
+        return 0
+
+
 # ── Phase 1: Nifty 50 index ───────────────────────────────────────────────────
 def refresh_nifty50(helper):
     write_status("nifty50", "▶ Refreshing Nifty 50 daily index data...")
 
-    today = datetime.now().strftime("%Y-%m-%d")
-    last_trading_day = get_last_trading_day()
+    today = get_last_trading_day()
+    last_trading_day = today
     last_date = get_last_date(NIFTY50_CSV)
+
+    # Detect corrupt/truncated CSV and force a full re-download
+    if last_date and os.path.exists(NIFTY50_CSV):
+        row_count = _csv_row_count(NIFTY50_CSV)
+        if row_count < MIN_INDEX_ROWS:
+            write_status("nifty50",
+                         f"  ⚠ Nifty 50 CSV appears truncated ({row_count} rows) — forcing full 5Y re-download")
+            last_date = None
 
     if last_date and last_date >= last_trading_day:
         write_status("nifty50", f"✓ Nifty 50 already up to date (last: {last_date})")
@@ -252,8 +300,12 @@ def refresh_nifty50(helper):
             time.sleep(0.4)
 
         if not chunks:
-            write_status("nifty50", f"  ✓ Nifty 50 up to date (no new trading data from API)")
-            return True
+            write_status("nifty50", "  ↺ Daily API returned no data — trying intraday fallback...")
+            fb = _daily_from_intraday(helper, security_id, segment, instr, from_date, today)
+            if fb.empty:
+                write_status("nifty50", "  ✓ Nifty 50 up to date (no new data from daily or intraday API)")
+                return True
+            chunks.append(fb)
 
         new_df = pd.concat(chunks)
         new_df = new_df[~new_df.index.duplicated(keep="last")].sort_index()
@@ -284,9 +336,17 @@ def refresh_nifty50(helper):
 def refresh_nifty500_index(helper):
     write_status("nifty500_index", "▶ Refreshing Nifty 500 daily index data...")
 
-    today = datetime.now().strftime("%Y-%m-%d")
-    last_trading_day = get_last_trading_day()
+    today = get_last_trading_day()
+    last_trading_day = today
     last_date = get_last_date(N500IDX_CSV)
+
+    # Detect corrupt/truncated CSV and force a full re-download
+    if last_date and os.path.exists(N500IDX_CSV):
+        row_count = _csv_row_count(N500IDX_CSV)
+        if row_count < MIN_INDEX_ROWS:
+            write_status("nifty500_index",
+                         f"  ⚠ Nifty 500 index CSV appears truncated ({row_count} rows) — forcing full 5Y re-download")
+            last_date = None
 
     if last_date and last_date >= last_trading_day:
         write_status("nifty500_index", f"✓ Nifty 500 index already up to date (last: {last_date})")
@@ -301,20 +361,33 @@ def refresh_nifty500_index(helper):
     write_status("nifty500_index", f"  Fetching Nifty 500 index from {from_date} to {today}...")
 
     try:
-        # Nifty 500 Index: security_id=19, segment=IDX_I, instrument=INDEX
-        df = helper.get_historical_daily_data(
-            security_id=19,
-            exchange_segment="IDX_I",
-            instrument_type="INDEX",
-            from_date=from_date,
-            to_date=today,
-        )
+        # Chunk by year to stay within API date-range limits (security_id=19)
+        chunks = []
+        cur = datetime.strptime(from_date, "%Y-%m-%d")
+        end = datetime.strptime(today, "%Y-%m-%d")
+        while cur <= end:
+            chunk_end = min(cur + timedelta(days=365), end)
+            df_chunk = helper.get_historical_daily_data(
+                security_id=19,
+                exchange_segment="IDX_I",
+                instrument_type="INDEX",
+                from_date=cur.strftime("%Y-%m-%d"),
+                to_date=chunk_end.strftime("%Y-%m-%d"),
+            )
+            if not df_chunk.empty:
+                chunks.append(normalize_historical_df(df_chunk))
+            cur = chunk_end + timedelta(days=1)
+            time.sleep(0.4)
 
-        if df.empty:
-            write_status("nifty500_index", "  ✓ Nifty 500 index up to date (no new trading data from API)")
-            return True
+        if not chunks:
+            write_status("nifty500_index", "  ↺ Daily API returned no data — trying intraday fallback...")
+            fb = _daily_from_intraday(helper, 19, "IDX_I", "INDEX", from_date, today)
+            if fb.empty:
+                write_status("nifty500_index", "  ✓ Nifty 500 index up to date (no new data from daily or intraday API)")
+                return True
+            chunks.append(fb)
 
-        new_df = normalize_historical_df(df)
+        new_df = pd.concat(chunks)
         new_df = new_df[~new_df.index.duplicated(keep="last")].sort_index()
 
         # Merge with existing
@@ -364,8 +437,8 @@ def refresh_stocks(helper):
     total = len(symbols)
     write_status("stocks", f"▶ Refreshing {total} stocks (incremental)...", current=0, total=total)
 
-    today = datetime.now().strftime("%Y-%m-%d")
-    last_trading_day = get_last_trading_day()
+    today = get_last_trading_day()
+    last_trading_day = today
     skipped = updated = failed = 0
 
     for i, symbol in enumerate(symbols, 1):
@@ -464,8 +537,8 @@ def refresh_indices(helper):
     total = len(SECTOR_INDICES)
     write_status("indices", f"▶ Refreshing {total} sector/market indices...", current=0, total=total)
 
-    today = datetime.now().strftime("%Y-%m-%d")
-    last_trading_day = get_last_trading_day()
+    today = get_last_trading_day()
+    last_trading_day = today
     updated = skipped = failed = 0
 
     for i, entry in enumerate(SECTOR_INDICES, 1):
@@ -510,11 +583,14 @@ def refresh_indices(helper):
                 time.sleep(0.4)
 
             if not chunks:
-                write_status("indices",
-                             f"  [{i}/{total}] {entry['label']}: ✓ up to date (no new trading data from API)",
-                             current=i, total=total)
-                skipped += 1
-                continue
+                fb = _daily_from_intraday(helper, entry["id"], "IDX_I", "INDEX", from_date, today)
+                if fb.empty:
+                    write_status("indices",
+                                 f"  [{i}/{total}] {entry['label']}: ✓ up to date (no new data from daily or intraday API)",
+                                 current=i, total=total)
+                    skipped += 1
+                    continue
+                chunks.append(fb)
 
             new_df = pd.concat(chunks)
             new_df = new_df[~new_df.index.duplicated(keep="last")].sort_index()

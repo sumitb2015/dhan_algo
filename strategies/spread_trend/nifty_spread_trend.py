@@ -12,7 +12,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 
 from login import get_dhan_client
 from lib.dhan_helper import DhanHelper
-from lib.strategy_state_helper import save_strategy_state, check_shutdown_trigger
+from lib.strategy_state_helper import save_strategy_state, check_shutdown_trigger, exit_if_market_closed
 
 # Configure Logging
 project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -562,6 +562,7 @@ class NiftySpreadTrendStrategy:
             logger.info(f"Position exit complete. Cool-down started at {self.last_close_time.strftime('%H:%M:%S')}.")
 
     def run(self):
+        exit_if_market_closed(self.helper, self.dry_run)
         logger.info(f"Starting {self.symbol} Spread Trend Strategy (Dry Run: {self.dry_run})")
         
         while True:

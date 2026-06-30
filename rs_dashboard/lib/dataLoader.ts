@@ -205,6 +205,19 @@ export async function readNifty500Index(symbols: string[]): Promise<OHLCVRow[]> 
           }))
           .sort((a, b) => a.date.localeCompare(b.date));
         if (parsed.length > 0) {
+          const todayIST = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
+          const last500 = parsed[parsed.length - 1];
+          if (last500 && last500.date < todayIST) {
+            const todayDay = new Date(todayIST + 'T00:00:00').getDay();
+            if (todayDay >= 1 && todayDay <= 5) {
+              const liveIdx = getTodayQuoteRow('_NIFTY500_INDEX');
+              if (liveIdx) {
+                parsed.push({ ...liveIdx, date: todayIST });
+              } else {
+                parsed.push({ ...last500, date: todayIST });
+              }
+            }
+          }
           cacheSet(cacheKey, parsed);
           nifty500Promise = null;
           return parsed;

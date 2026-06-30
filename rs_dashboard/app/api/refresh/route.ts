@@ -1,4 +1,4 @@
-import { NextRequest, NextResponse } from 'next/server';
+﻿import { NextRequest, NextResponse } from 'next/server';
 import path from 'path';
 import fs from 'fs';
 import { spawn, execSync } from 'child_process';
@@ -8,7 +8,7 @@ import { clearMoversCache } from '@/app/api/movers/route';
 
 const PROJECT_ROOT  = path.resolve(process.cwd(), '..');
 const DEBUG_DIR     = path.join(PROJECT_ROOT, 'debug');
-const PYTHON_EXE    = path.join(PROJECT_ROOT, 'venv', 'Scripts', 'python.exe');
+const PYTHON_EXE    = path.join(PROJECT_ROOT, 'venv', 'Scripts', 'pythonw.exe');
 const SCRIPT_PATH   = path.join(PROJECT_ROOT, 'scripts', 'downloader', 'refresh_dashboard_data.py');
 const STATUS_FILE   = path.join(DEBUG_DIR, 'refresh_status.json');
 const STOP_FILE     = path.join(DEBUG_DIR, 'refresh_stop.trigger');
@@ -16,7 +16,7 @@ const STOP_FILE     = path.join(DEBUG_DIR, 'refresh_stop.trigger');
 const NIFTY50_CSV = path.join(PROJECT_ROOT, 'Historical Data', 'NIFTY_50_Daily_5Y.csv');
 
 // NSE market holidays. Historical data is published the following day,
-// so we never treat today as the reference — always work from yesterday back.
+// so we never treat today as the reference â€” always work from yesterday back.
 const NSE_HOLIDAYS = new Set([
   '2026-01-15', '2026-01-26', '2026-03-03', '2026-03-26',
   '2026-03-31', '2026-04-03', '2026-04-14', '2026-05-01',
@@ -79,7 +79,7 @@ function readStatus() {
   }
 }
 
-/** GET — return current refresh status + staleness check */
+/** GET â€” return current refresh status + staleness check */
 export async function GET() {
   const lastTradingDay = getLastTradingDay();
   const lastDate = getLastCsvDate(NIFTY50_CSV);
@@ -114,7 +114,7 @@ export async function GET() {
   return NextResponse.json({ running, status, stale, lastDate, lastTradingDay });
 }
 
-/** POST — start the refresh process */
+/** POST â€” start the refresh process */
 export async function POST(req: NextRequest) {
   // Check if already running
   const existing = readStatus();
@@ -136,7 +136,7 @@ export async function POST(req: NextRequest) {
   // Reset status file so the poll doesn't see the previous run's done=true
   try {
     fs.writeFileSync(STATUS_FILE, JSON.stringify({
-      pid: null, phase: target, message: 'Starting…',
+      pid: null, phase: target, message: 'Startingâ€¦',
       current: 0, total: 0, done: false, error: null,
       log: [], updated_at: new Date().toISOString(),
     }));
@@ -154,7 +154,7 @@ export async function POST(req: NextRequest) {
   return NextResponse.json({ started: true, pid: child.pid, target });
 }
 
-/** DELETE — stop the running refresh */
+/** DELETE â€” stop the running refresh */
 export async function DELETE() {
   if (!fs.existsSync(DEBUG_DIR)) fs.mkdirSync(DEBUG_DIR, { recursive: true });
   fs.writeFileSync(STOP_FILE, '1');

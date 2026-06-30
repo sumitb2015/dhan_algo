@@ -128,7 +128,11 @@ export default function MoversPlusDashboard() {
         </div>
         <div className="w-px h-5 bg-zinc-800 hidden sm:block" />
         <NavBar />
-        {data && <span className="ml-auto text-[10px] text-zinc-600 font-mono">DATA: {data.dataDate}</span>}
+        {data && (
+          <span className="ml-auto text-[10px] font-mono font-bold text-zinc-400 px-2 py-0.5 rounded-sm bg-zinc-900 border border-zinc-800 uppercase tracking-wide">
+            DATA: {data.dataDate}
+          </span>
+        )}
       </header>
 
       <main className="flex-1 px-3 py-2 flex flex-col gap-2 max-w-[1800px] mx-auto w-full">

@@ -28,6 +28,7 @@ export default function RSChart({ symbol, indexType, lookback }: RSChartProps) {
     latestClose: number;
     priceChangePct: number;
     latestDate: string;
+    effectiveLookback: number;
   } | null>(null);
 
   useEffect(() => {
@@ -46,6 +47,7 @@ export default function RSChart({ symbol, indexType, lookback }: RSChartProps) {
             latestClose: json.latestClose,
             priceChangePct: json.priceChangePct,
             latestDate: json.latestDate,
+            effectiveLookback: json.effectiveLookback ?? lookback,
           });
         } else {
           setError(json.error || 'Failed to load chart data');
@@ -103,7 +105,7 @@ export default function RSChart({ symbol, indexType, lookback }: RSChartProps) {
             <span className="text-zinc-400">₹{point.indexClose.toLocaleString('en-IN', { minimumFractionDigits: 2 })}</span>
           </div>
           <div className="flex items-center justify-between gap-8 py-0.5 mt-1 pt-1 border-t border-zinc-900/40">
-            <span className="text-zinc-500 font-sans">RS Line ({lookback === 252 ? '52w' : `${lookback}d`}):</span>
+            <span className="text-zinc-500 font-sans">RS Line ({summary?.effectiveLookback === 252 ? '52w' : `${summary?.effectiveLookback ?? lookback}d`}):</span>
             <span className={`font-bold ${rsLineVal >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
               {rsLineFormatted}
             </span>
@@ -223,6 +225,17 @@ export default function RSChart({ symbol, indexType, lookback }: RSChartProps) {
         </div>
       </div>
 
+      {/* Lookback fallback warning */}
+      {summary && summary.effectiveLookback !== lookback && (
+        <div className="mb-4 px-3 py-2 rounded-lg border border-amber-500/25 bg-amber-950/15 text-[11px] text-amber-400 flex items-center gap-2">
+          <span>⚠</span>
+          <span>
+            Not enough index history for {lookback === 252 ? '52w' : `${lookback}d`} RS — showing {summary.effectiveLookback}d lookback instead.
+            Run <code className="bg-zinc-900 px-1 rounded text-amber-300">refresh_dashboard_data.py --target nifty50</code> to restore full history.
+          </span>
+        </div>
+      )}
+
       {/* Chart Body */}
       {loading ? (
         <div className="flex items-center justify-center min-h-[380px] w-full">
@@ -280,7 +293,7 @@ export default function RSChart({ symbol, indexType, lookback }: RSChartProps) {
           {/* Lower Pane: RS Line Chart */}
           <div className="h-[32%] w-full relative">
             <div className="absolute top-2 left-2 text-[10px] uppercase font-bold text-zinc-550 bg-zinc-950/80 px-2 py-0.5 border border-zinc-850 rounded tracking-wider z-10">
-              Relative Strength ({lookback === 252 ? '52w' : `${lookback}d`} performance-based)
+              Relative Strength ({(summary?.effectiveLookback ?? lookback) === 252 ? '52w' : `${summary?.effectiveLookback ?? lookback}d`} performance-based)
             </div>
             <ResponsiveContainer width="100%" height="100%" minWidth={0} minHeight={0}>
               <LineChart data={processedData} syncId="rs_dashboard_chart" margin={{ top: 5, right: 10, left: -10, bottom: 5 }}>
@@ -476,7 +489,7 @@ export default function RSChart({ symbol, indexType, lookback }: RSChartProps) {
                 {Math.abs(summary.currentRS) > 0.15 ? 'Strong' : Math.abs(summary.currentRS) > 0.05 ? 'Moderate' : 'Weak'}
               </div>
               <div className="text-zinc-500 text-[10px] mt-0.5">
-                {lookback === 252 ? '52-week' : `${lookback}-day`} lookback
+                {(summary?.effectiveLookback ?? lookback) === 252 ? '52-week' : `${summary?.effectiveLookback ?? lookback}-day`} lookback
               </div>
             </div>
 
@@ -532,7 +545,7 @@ export default function RSChart({ symbol, indexType, lookback }: RSChartProps) {
 
           {/* How-to legend */}
           <div className="flex flex-wrap items-center gap-x-5 gap-y-1.5 text-[10px] text-zinc-500 select-none">
-            <span className="font-semibold text-zinc-500 uppercase tracking-wide">RS Line:</span>
+            <span className="font-semibold text-zinc-500 uppercase tracking-wide">RS Line ({(summary?.effectiveLookback ?? lookback)}d):</span>
             <span className="flex items-center gap-1.5">
               <span className="w-2 h-2 rounded-full bg-emerald-500 shadow-[0_0_6px_rgba(16,185,129,0.5)]" />
               <span><strong className="text-emerald-400">Above 0%</strong> — stock outperformed index over lookback</span>

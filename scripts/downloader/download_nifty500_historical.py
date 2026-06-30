@@ -125,9 +125,13 @@ def download_daily_bulk(helper: DhanHelper, symbols: List[str], save_dir: str):
     output_dir = os.path.join(save_dir, "Daily_Historical_Data_Fresh")
     os.makedirs(output_dir, exist_ok=True)
     
-    to_date = datetime.now().strftime("%Y-%m-%d")
+    # Dhan historical API does not publish same-day EOD data — cap at yesterday.
+    _d = datetime.now().date() - timedelta(days=1)
+    while _d.weekday() >= 5:
+        _d -= timedelta(days=1)
+    to_date = _d.strftime("%Y-%m-%d")
     from_date = (datetime.now() - timedelta(days=int(years * 365))).strftime("%Y-%m-%d")
-    today_str = to_date
+    today_str = datetime.now().strftime("%Y-%m-%d")  # kept for same-day quote append logic
     
     print("\nResolving symbols and fetching bulk quotes to handle same-day data...")
     security_map, nse_ids, bse_ids = resolve_securities(helper, symbols)
@@ -378,8 +382,9 @@ def show_menu():
     print("="*55)
 
 def main():
-    csv_path = "MW-NIFTY-500-25-Jan-2026.csv"
-    save_dir = "." # Target save dir in project root
+    PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    csv_path = os.path.join(PROJECT_ROOT, "MW-NIFTY-500-25-Jan-2026.csv")
+    save_dir = PROJECT_ROOT
     os.makedirs(save_dir, exist_ok=True)
     
     # 1. Parse symbols first to verify

@@ -13,8 +13,9 @@ from login import get_dhan_client
 from lib.dhan_helper import DhanHelper
 
 def main():
-    csv_path = "MW-NIFTY-500-25-Jan-2026.csv"
-    save_dir = "Stocks Historical Data"
+    PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    csv_path = os.path.join(PROJECT_ROOT, "MW-NIFTY-500-25-Jan-2026.csv")
+    save_dir = os.path.join(PROJECT_ROOT, "Stocks Historical Data")
     os.makedirs(save_dir, exist_ok=True)
     
     print(f"\n" + "="*60)

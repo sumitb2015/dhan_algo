@@ -1,4 +1,5 @@
 import os
+import sys
 import json
 import logging
 from datetime import datetime
@@ -31,6 +32,20 @@ def save_strategy_state(strategy_name, state_dict):
         os.replace(temp_path, file_path)
     except Exception as e:
         logger.error(f"Failed to save strategy state for {strategy_name}: {e}")
+
+def exit_if_market_closed(helper, dry_run=False):
+    """Exit immediately if the NSE market is not currently open. No-op in dry_run mode."""
+    if dry_run:
+        return
+    if not helper.is_market_open():
+        now = datetime.now()
+        msg = (
+            f"Market is closed ({now.strftime('%A %d-%b %Y %H:%M')}). "
+            "Run with --dry-run to bypass. Exiting."
+        )
+        print(msg)
+        logger.info(msg)
+        sys.exit(0)
 
 def check_shutdown_trigger(strategy_name):
     """

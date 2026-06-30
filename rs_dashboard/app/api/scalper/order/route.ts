@@ -1,9 +1,9 @@
-import { NextRequest, NextResponse } from 'next/server';
+﻿import { NextRequest, NextResponse } from 'next/server';
 import path from 'path';
 import { spawnSync } from 'child_process';
 
 const PROJECT_ROOT   = path.resolve(process.cwd(), '..');
-const PYTHON_EXE     = path.join(PROJECT_ROOT, 'venv', 'Scripts', 'python.exe');
+const PYTHON_EXE     = path.join(PROJECT_ROOT, 'venv', 'Scripts', 'pythonw.exe');
 const SCALPER_SCRIPT = path.join(PROJECT_ROOT, 'scripts', 'tools', 'scalper_api.py');
 
 export async function POST(req: NextRequest): Promise<NextResponse> {

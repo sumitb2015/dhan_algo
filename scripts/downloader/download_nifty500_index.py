@@ -30,7 +30,11 @@ def main():
     segment = "IDX_I"
     instrument = "INDEX"
     
-    to_date = datetime.now().strftime("%Y-%m-%d")
+    # Dhan historical API does not publish same-day EOD data — always cap at yesterday.
+    _d = datetime.now().date() - timedelta(days=1)
+    while _d.weekday() >= 5:
+        _d -= timedelta(days=1)
+    to_date = _d.strftime("%Y-%m-%d")
     from_date = (datetime.now() - timedelta(days=5 * 365)).strftime("%Y-%m-%d")
     
     print(f"Downloading Nifty 500 Index daily data from {from_date} to {to_date}...")

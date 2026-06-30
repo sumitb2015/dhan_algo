@@ -109,7 +109,11 @@ def download_spot_daily(helper: DhanHelper, save_dir: str):
     instr = sec.get('INSTRUMENT', 'EQUITY')
     exchange_segment = "IDX_I" if instr == "INDEX" else "NSE_EQ"
 
-    end_total = datetime.now()
+    # Dhan historical API does not publish same-day EOD data — cap at yesterday.
+    _d = datetime.now().date() - timedelta(days=1)
+    while _d.weekday() >= 5:
+        _d -= timedelta(days=1)
+    end_total = datetime.combine(_d, datetime.min.time())
     start_total = end_total - timedelta(days=days)
     chunk_size = 365  # Dhan daily API limit per call
 

@@ -45,6 +45,14 @@ interface PnlGuardStatus {
   enableKillSwitch?: boolean;
 }
 
+interface PositionGuard {
+  target: string;        // take-profit price (₹)
+  sl: string;            // stop-loss price (₹); also the anchor for trailing SL
+  trailEnabled: boolean; // checkbox: trail SL 1:1 with profit from the configured SL level
+  bestPrice: number;     // best price achieved (max LTP for long, min LTP for short); 0 = not yet set
+  triggered: boolean;    // prevents double-fire while order is in flight
+}
+
 // ─── Helpers ──────────────────────────────────────────────────────
 
 function fmtLTP(n: number): string {
@@ -112,7 +120,14 @@ export default function Scalper() {
   const [clearingPnl, setClearingPnl]   = useState(false);
   const [confirmClear, setConfirmClear] = useState(false);
 
+  // Per-position guards (target / SL / trailing SL)
+  const [posGuards, setPosGuards] = useState<Record<string, PositionGuard>>({});
+  const [closingPositions, setClosingPositions] = useState<Set<string>>(new Set());
+
   const pollRef = useRef<NodeJS.Timeout | null>(null);
+  // Refs for guard monitor interval — avoids stale closures
+  const positionsRef = useRef<Record<string, unknown>[]>([]);
+  const posGuardsRef = useRef<Record<string, PositionGuard>>({});
 
   // ─── Derived values ──────────────────────────────────────────────
 
@@ -318,6 +333,10 @@ export default function Scalper() {
     return () => clearInterval(id);
   }, [fetchTabData, pollTabData]);
 
+  // Keep refs in sync so the guard interval always reads latest values without stale closures
+  useEffect(() => { positionsRef.current = positionsData; }, [positionsData]);
+  useEffect(() => { posGuardsRef.current = posGuards; }, [posGuards]);
+
   // ─── Toast helper ─────────────────────────────────────────────────
 
   const addToast = useCallback((type: 'success' | 'error', message: string, detail?: string) => {
@@ -381,6 +400,171 @@ export default function Scalper() {
       addToast('error', 'Network error', String(e));
     }
   }, [ceStrike, peStrike, ceLimitPrice, peLimitPrice, expiry, lots, lotSize, strikeMap, orderMode, addToast, fetchTabData]);
+
+  // ─── Per-position close ───────────────────────────────────────────
+
+  const closePosition = useCallback(async (pos: Record<string, unknown>, reason: string) => {
+    const sym = String(pos.tradingSymbol ?? '');
+    const fallbackSecId = String(pos.securityId ?? pos.security_id ?? '');
+
+    if (!sym || !fallbackSecId) {
+      addToast('error', `Cannot close ${sym || 'position'}`, 'Missing security ID');
+      return;
+    }
+
+    // Prevent double-fire while order is in flight
+    setPosGuards(prev => prev[sym] ? { ...prev, [sym]: { ...prev[sym], triggered: true } } : prev);
+    setClosingPositions(prev => new Set([...prev, sym]));
+
+    try {
+      // Fetch live positions to get the current open quantity (avoids acting on stale data)
+      let liveNetQty = 0;
+      let liveSecId = fallbackSecId;
+      try {
+        const posRes = await fetch('/api/scalper/positions');
+        const posJson = await posRes.json() as { success: boolean; data?: Record<string, unknown>[] };
+        if (posJson.success && posJson.data) {
+          const match = posJson.data.find(p => String(p.tradingSymbol) === sym);
+          if (match) {
+            liveNetQty = Number(match.netQty);
+            liveSecId = String(match.securityId ?? match.security_id ?? fallbackSecId);
+          }
+        }
+      } catch {
+        // Fall back to the quantity from the position object passed in
+        liveNetQty = Number(pos.netQty);
+      }
+
+      if (liveNetQty === 0) {
+        addToast('success', `${sym} already flat`, `(${reason})`);
+        setPosGuards(prev => { const next = { ...prev }; delete next[sym]; return next; });
+        fetchTabData();
+        return;
+      }
+
+      const side = liveNetQty > 0 ? 'SELL' : 'BUY';
+      const qty = Math.abs(liveNetQty);
+
+      const res = await fetch('/api/scalper/fast-order', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ securityId: liveSecId, quantity: qty, side, orderType: 'MARKET' }),
+      });
+      const j = await res.json() as { success: boolean; order_id?: string; error?: string };
+      if (j.success) {
+        addToast('success', `Closed ${sym} (${reason})`, `${qty} qty · ID: ${j.order_id}`);
+        setTimeout(fetchTabData, 800);
+      } else {
+        addToast('error', `Close failed: ${sym}`, j.error ?? 'Unknown error');
+        setPosGuards(prev => prev[sym] ? { ...prev, [sym]: { ...prev[sym], triggered: false } } : prev);
+      }
+    } catch (e) {
+      addToast('error', 'Network error closing position', String(e));
+      setPosGuards(prev => prev[sym] ? { ...prev, [sym]: { ...prev[sym], triggered: false } } : prev);
+    } finally {
+      setClosingPositions(prev => { const s = new Set(prev); s.delete(sym); return s; });
+    }
+  }, [addToast, fetchTabData]);
+
+  const handleGuardChange = useCallback((sym: string, field: 'target' | 'sl', value: string) => {
+    setPosGuards(prev => {
+      const existing: PositionGuard = prev[sym] ?? { target: '', sl: '', trailEnabled: false, bestPrice: 0, triggered: false };
+      return {
+        ...prev,
+        [sym]: { ...existing, [field]: value, triggered: false },
+      };
+    });
+  }, []);
+
+  const handleTrailToggle = useCallback((sym: string) => {
+    setPosGuards(prev => {
+      const existing: PositionGuard = prev[sym] ?? { target: '', sl: '', trailEnabled: false, bestPrice: 0, triggered: false };
+      return {
+        ...prev,
+        [sym]: { ...existing, trailEnabled: !existing.trailEnabled, bestPrice: 0, triggered: false },
+      };
+    });
+  }, []);
+
+  // Guard monitoring — 1s interval reads LTP from positions data and fires closes
+  useEffect(() => {
+    const id = setInterval(() => {
+      const guards = posGuardsRef.current;
+      const positions = positionsRef.current;
+      const peakUpdates: Record<string, number> = {};
+
+      for (const pos of positions) {
+        const sym = String(pos.tradingSymbol ?? '');
+        const guard = guards[sym];
+        if (!guard || guard.triggered) continue;
+
+        const ltp = Number(pos.lastTradedPrice);
+        const netQty = Number(pos.netQty);
+        if (ltp <= 0 || netQty === 0) continue;
+
+        const isLong = netQty > 0;
+
+        // Target (take profit)
+        const targetNum = parseFloat(guard.target);
+        if (!isNaN(targetNum) && targetNum > 0) {
+          if ((isLong && ltp >= targetNum) || (!isLong && ltp <= targetNum)) {
+            closePosition(pos, 'Target hit');
+            continue;
+          }
+        }
+
+        if (guard.trailEnabled) {
+          // Trailing SL: 1:1 with profit, anchored to the configured SL level
+          const slNum = parseFloat(guard.sl);
+          if (!isNaN(slNum) && slNum > 0) {
+            const entryPrice = isLong ? Number(pos.buyAvg) : Number(pos.sellAvg);
+            if (entryPrice > 0) {
+              const initialRisk = Math.abs(slNum - entryPrice);
+              const currentBest = guard.bestPrice;
+              const newBest = currentBest === 0
+                ? ltp
+                : (isLong ? Math.max(currentBest, ltp) : Math.min(currentBest, ltp));
+              if (newBest !== currentBest) peakUpdates[sym] = newBest;
+
+              const effectiveBest = peakUpdates[sym] ?? currentBest;
+              if (effectiveBest > 0) {
+                const trailSLPrice = isLong
+                  ? effectiveBest - initialRisk
+                  : effectiveBest + initialRisk;
+                // Only enforce once trail SL is tighter than the original SL
+                const trailActive = isLong ? trailSLPrice > slNum : trailSLPrice < slNum;
+                if (trailActive && ((isLong && ltp <= trailSLPrice) || (!isLong && ltp >= trailSLPrice))) {
+                  closePosition(pos, 'Trail SL hit');
+                  continue;
+                }
+              }
+            }
+          }
+        } else {
+          // Hard SL (no trailing)
+          const slNum = parseFloat(guard.sl);
+          if (!isNaN(slNum) && slNum > 0) {
+            if ((isLong && ltp <= slNum) || (!isLong && ltp >= slNum)) {
+              closePosition(pos, 'SL hit');
+              continue;
+            }
+          }
+        }
+      }
+
+      if (Object.keys(peakUpdates).length > 0) {
+        setPosGuards(prev => {
+          const next = { ...prev };
+          for (const [s, best] of Object.entries(peakUpdates)) {
+            if (next[s]) next[s] = { ...next[s], bestPrice: best };
+          }
+          return next;
+        });
+      }
+    }, 1000);
+
+    return () => clearInterval(id);
+  }, [closePosition]);
 
   // ─── P&L Guard ────────────────────────────────────────────────────
 
@@ -738,10 +922,19 @@ export default function Scalper() {
               data={fundsData}
               realizedPnl={positionsData.reduce((sum, p) => sum + (Number(p.realizedProfit) || 0), 0)}
             />
+          ) : activeTab === 'positions' ? (
+            <PositionsTable
+              data={positionsData}
+              guards={posGuards}
+              closingPositions={closingPositions}
+              onGuardChange={handleGuardChange}
+              onTrailToggle={handleTrailToggle}
+              onClose={pos => closePosition(pos, 'Manual')}
+            />
           ) : (
             <TabTable
               tab={activeTab}
-              data={activeTab === 'positions' ? positionsData : activeTab === 'orders' ? ordersData : tradesData}
+              data={activeTab === 'orders' ? ordersData : tradesData}
             />
           )}
         </div>
@@ -851,6 +1044,152 @@ function OptionPanel({
         </button>
       </div>
     </div>
+  );
+}
+
+// ─── PositionsTable ───────────────────────────────────────────────
+
+interface PositionsTableProps {
+  data: Record<string, unknown>[];
+  guards: Record<string, PositionGuard>;
+  closingPositions: Set<string>;
+  onGuardChange: (sym: string, field: 'target' | 'sl', value: string) => void;
+  onTrailToggle: (sym: string) => void;
+  onClose: (pos: Record<string, unknown>) => void;
+}
+
+function PositionsTable({ data, guards, closingPositions, onGuardChange, onTrailToggle, onClose }: PositionsTableProps) {
+  if (!data.length) {
+    return (
+      <div className="flex items-center justify-center h-32 text-zinc-600 text-sm">
+        No positions data
+      </div>
+    );
+  }
+
+  return (
+    <table className="w-full text-xs">
+      <thead className="sticky top-0 bg-zinc-800 z-10">
+        <tr>
+          <th className="px-3 py-2.5 text-xs font-bold text-white text-left whitespace-nowrap">Symbol</th>
+          <th className="px-3 py-2.5 text-xs font-bold text-white text-right whitespace-nowrap">Qty</th>
+          <th className="px-3 py-2.5 text-xs font-bold text-white text-right whitespace-nowrap">Buy Avg</th>
+          <th className="px-3 py-2.5 text-xs font-bold text-white text-right whitespace-nowrap">Sell Avg</th>
+          <th className="px-3 py-2.5 text-xs font-bold text-white text-right whitespace-nowrap">LTP</th>
+          <th className="px-3 py-2.5 text-xs font-bold text-white text-right whitespace-nowrap">Real P&L</th>
+          <th className="px-3 py-2.5 text-xs font-bold text-white text-right whitespace-nowrap">Unreal P&L</th>
+          <th className="px-3 py-2.5 text-xs font-bold text-white text-left whitespace-nowrap">Product</th>
+          <th className="px-3 py-2.5 text-xs font-bold text-emerald-400 text-center whitespace-nowrap">Target ₹</th>
+          <th className="px-3 py-2.5 text-xs font-bold text-rose-400 text-center whitespace-nowrap">SL ₹</th>
+          <th className="px-3 py-2.5 text-xs font-bold text-amber-400 text-center whitespace-nowrap">Trail SL</th>
+          <th className="px-3 py-2.5 text-xs font-bold text-white text-center whitespace-nowrap">Close</th>
+        </tr>
+      </thead>
+      <tbody className="divide-y divide-zinc-800/50">
+        {data.map((row, i) => {
+          const sym = String(row.tradingSymbol ?? '');
+          const guard = guards[sym];
+          const isClosing = closingPositions.has(sym);
+          const netQty = Number(row.netQty);
+          const ltp = Number(row.lastTradedPrice);
+          const isLong = netQty > 0;
+          const realPnl = Number(row.realizedProfit);
+          const unrealPnl = Number(row.unrealizedProfit);
+          const buyAvg = Number(row.buyAvg);
+          const sellAvg = Number(row.sellAvg);
+
+          // Compute current effective trailing SL price to show below the checkbox
+          const slNum = parseFloat(guard?.sl ?? '');
+          const entryPrice = isLong ? buyAvg : sellAvg;
+          const initialRisk = (entryPrice > 0 && !isNaN(slNum) && slNum > 0) ? Math.abs(slNum - entryPrice) : 0;
+          const trailBest = guard?.bestPrice ?? 0;
+          const effectiveTrailSL = (guard?.trailEnabled && trailBest > 0 && initialRisk > 0)
+            ? (isLong ? trailBest - initialRisk : trailBest + initialRisk)
+            : null;
+
+          const hasGuard = guard && (guard.target || guard.sl || guard.trailEnabled);
+
+          return (
+            <tr key={i} className={`hover:bg-zinc-800/40 transition-colors ${isClosing ? 'opacity-40' : ''} ${guard?.triggered ? 'bg-zinc-800/20' : ''}`}>
+              <td className="px-3 py-2 whitespace-nowrap font-mono text-zinc-300">
+                <div className="flex items-center gap-1.5">
+                  {hasGuard && !guard.triggered && (
+                    <span className="w-1.5 h-1.5 rounded-full bg-violet-400 flex-shrink-0" title="Guard active" />
+                  )}
+                  {sym}
+                </div>
+              </td>
+              <td className="px-3 py-2 whitespace-nowrap font-mono text-right tabular-nums text-zinc-300">{netQty}</td>
+              <td className="px-3 py-2 whitespace-nowrap font-mono text-right tabular-nums text-zinc-300">{buyAvg > 0 ? buyAvg.toFixed(2) : '—'}</td>
+              <td className="px-3 py-2 whitespace-nowrap font-mono text-right tabular-nums text-zinc-300">{sellAvg > 0 ? sellAvg.toFixed(2) : '—'}</td>
+              <td className="px-3 py-2 whitespace-nowrap font-mono text-right tabular-nums text-zinc-300">{ltp > 0 ? ltp.toFixed(2) : '—'}</td>
+              <td className={`px-3 py-2 whitespace-nowrap font-mono text-right tabular-nums ${!isNaN(realPnl) && realPnl !== 0 ? (realPnl > 0 ? 'text-emerald-400' : 'text-rose-400') : 'text-zinc-400'}`}>
+                {isNaN(realPnl) ? '—' : realPnl.toFixed(0)}
+              </td>
+              <td className={`px-3 py-2 whitespace-nowrap font-mono text-right tabular-nums ${!isNaN(unrealPnl) && unrealPnl !== 0 ? (unrealPnl > 0 ? 'text-emerald-400' : 'text-rose-400') : 'text-zinc-400'}`}>
+                {isNaN(unrealPnl) ? '—' : unrealPnl.toFixed(0)}
+              </td>
+              <td className="px-3 py-2 whitespace-nowrap font-mono text-zinc-300">{String(row.productType ?? '—')}</td>
+
+              {/* Target input */}
+              <td className="px-2 py-1.5">
+                <input
+                  type="number" step="0.05" min="0"
+                  value={guard?.target ?? ''}
+                  onChange={e => onGuardChange(sym, 'target', e.target.value)}
+                  placeholder="—"
+                  disabled={isClosing}
+                  className="w-20 bg-zinc-900 border border-zinc-700 text-emerald-300 text-xs font-mono rounded px-2 py-1 focus:outline-none focus:border-emerald-500 tabular-nums text-right placeholder:text-zinc-600 disabled:opacity-40"
+                />
+              </td>
+
+              {/* SL input */}
+              <td className="px-2 py-1.5">
+                <input
+                  type="number" step="0.05" min="0"
+                  value={guard?.sl ?? ''}
+                  onChange={e => onGuardChange(sym, 'sl', e.target.value)}
+                  placeholder="—"
+                  disabled={isClosing}
+                  className="w-20 bg-zinc-900 border border-zinc-700 text-rose-300 text-xs font-mono rounded px-2 py-1 focus:outline-none focus:border-rose-500 tabular-nums text-right placeholder:text-zinc-600 disabled:opacity-40"
+                />
+              </td>
+
+              {/* Trail SL checkbox + effective SL price when active */}
+              <td className="px-2 py-1.5 text-center">
+                <div className="flex flex-col items-center gap-0.5">
+                  <input
+                    type="checkbox"
+                    checked={guard?.trailEnabled ?? false}
+                    onChange={() => onTrailToggle(sym)}
+                    disabled={isClosing || !guard?.sl}
+                    title={guard?.sl ? 'Trail SL 1:1 with profit' : 'Set SL first'}
+                    className="w-4 h-4 accent-amber-400 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
+                  />
+                  {effectiveTrailSL !== null && (
+                    <span className="text-[10px] font-mono text-amber-400 tabular-nums">
+                      @{effectiveTrailSL.toFixed(1)}
+                    </span>
+                  )}
+                </div>
+              </td>
+
+              {/* Manual close button */}
+              <td className="px-2 py-1.5 text-center">
+                <button
+                  onClick={() => onClose(row)}
+                  disabled={isClosing || netQty === 0}
+                  title={`Market close ${sym}`}
+                  className="px-2.5 py-1 text-[11px] font-bold rounded border transition-all disabled:opacity-40 disabled:cursor-not-allowed bg-rose-900/40 border-rose-500/30 text-rose-400 hover:bg-rose-800/60 hover:text-rose-200 active:scale-95"
+                >
+                  {isClosing ? '…' : 'Close'}
+                </button>
+              </td>
+            </tr>
+          );
+        })}
+      </tbody>
+    </table>
   );
 }
 

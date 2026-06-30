@@ -1,11 +1,11 @@
-import { NextRequest, NextResponse } from 'next/server';
+﻿import { NextRequest, NextResponse } from 'next/server';
 import path from 'path';
 import fs from 'fs';
 import { execSync, spawn } from 'child_process';
 
 const PROJECT_ROOT   = path.resolve(process.cwd(), '..');
 const DEBUG_DIR      = path.join(PROJECT_ROOT, 'debug');
-const PYTHON_EXE     = path.join(PROJECT_ROOT, 'venv', 'Scripts', 'python.exe');
+const PYTHON_EXE     = path.join(PROJECT_ROOT, 'venv', 'Scripts', 'pythonw.exe');
 const BRIDGE_SCRIPT  = path.join(PROJECT_ROOT, 'scripts', 'tools', 'live_options_ws.py');
 const QUOTES_FILE    = path.join(DEBUG_DIR, 'live_options_quotes.json');
 const HISTORY_FILE   = path.join(DEBUG_DIR, 'live_options_history.json');
@@ -36,7 +36,7 @@ function isPidRunning(pid: number): boolean {
   }
 }
 
-/** GET — return live quotes + history + bridge status */
+/** GET â€” return live quotes + history + bridge status */
 export async function GET() {
   const quotes  = readJson(QUOTES_FILE)  as Record<string, unknown> | null;
   const history = readJson(HISTORY_FILE) as Record<string, unknown> | null;
@@ -58,20 +58,20 @@ export async function GET() {
   });
 }
 
-/** POST — start or stop the WebSocket bridge */
+/** POST â€” start or stop the WebSocket bridge */
 export async function POST(request: NextRequest) {
   const body = await request.json().catch(() => ({})) as Record<string, unknown>;
   const action = String(body.action ?? '');
 
   if (!fs.existsSync(DEBUG_DIR)) fs.mkdirSync(DEBUG_DIR, { recursive: true });
 
-  // ── Stop ─────────────────────────────────────────────────────────────────
+  // â”€â”€ Stop â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   if (action === 'stop') {
     fs.writeFileSync(STOP_TRIGGER, '');
     return NextResponse.json({ success: true, message: 'Stop trigger written' });
   }
 
-  // ── Start ────────────────────────────────────────────────────────────────
+  // â”€â”€ Start â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   if (action === 'start') {
     const underlying = String(body.underlying ?? 'NIFTY').toUpperCase();
     const expiry     = String(body.expiry ?? '');

@@ -1,10 +1,10 @@
-import { NextRequest, NextResponse } from 'next/server';
+﻿import { NextRequest, NextResponse } from 'next/server';
 import path from 'path';
 import fs from 'fs';
 import { spawnSync } from 'child_process';
 
 const PROJECT_ROOT = path.resolve(process.cwd(), '..');
-const PYTHON_EXE   = path.join(PROJECT_ROOT, 'venv', 'Scripts', 'python.exe');
+const PYTHON_EXE   = path.join(PROJECT_ROOT, 'venv', 'Scripts', 'pythonw.exe');
 const FETCH_SCRIPT = path.join(PROJECT_ROOT, 'scripts', 'tools', 'options_data_fetch.py');
 const NIFTY_CSV    = path.join(PROJECT_ROOT, 'Historical Data', 'NIFTY_50_Daily_5Y.csv');
 
@@ -20,7 +20,7 @@ function lastCsvClose(): number {
     fs.closeSync(fd);
     const lines = buf.toString('utf8').trim().split('\n');
     const last  = lines[lines.length - 1].split(',');
-    // CSV: date,open,high,low,close,volume  — close is index 4
+    // CSV: date,open,high,low,close,volume  â€” close is index 4
     const close = parseFloat(last[4]);
     return isNaN(close) ? 0 : close;
   } catch {

@@ -42,7 +42,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 
 from login import get_dhan_client
 from lib.dhan_helper import DhanHelper
-from lib.strategy_state_helper import save_strategy_state, check_shutdown_trigger
+from lib.strategy_state_helper import save_strategy_state, check_shutdown_trigger, exit_if_market_closed
 
 # ── Logging setup ────────────────────────────────────────────────────────────
 project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -420,6 +420,7 @@ class NiftyOIDirectional:
     # ── main loop ────────────────────────────────────────────────────────────
 
     def run(self):
+        exit_if_market_closed(self.helper, self.dry_run)
         logger.info(
             f"NiftyOIDirectional START | dry_run={self.dry_run} | lots={self.lots}"
             f" | pcr_threshold={self.pcr_threshold}"
