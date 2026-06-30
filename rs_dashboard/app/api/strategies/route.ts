@@ -233,19 +233,23 @@ export async function POST(request: NextRequest) {
       if (!pid || !isPidRunning(pid)) {
         return NextResponse.json({ success: true, message: 'Process is not running' });
       }
+      // /T kills the process tree (child processes too); /F forces termination
+      // taskkill exits non-zero if the process is already gone — that's fine, swallow it
       try {
-        // /T kills the process tree (child processes too); /F forces termination
-        execSync(`taskkill /PID ${pid} /T /F`, { stdio: 'ignore', windowsHide: true });
-        console.log(`Force-killed PID ${pid} for strategy ${strategy}`);
-        // Mark state as stopped
-        try {
-          const data = JSON.parse(fs.readFileSync(stateFile, 'utf8'));
-          fs.writeFileSync(stateFile, JSON.stringify({ ...data, status: 'STOPPED' }, null, 2));
-        } catch {}
-        return NextResponse.json({ success: true, message: `Process ${pid} force-killed` });
-      } catch (killErr) {
-        return NextResponse.json({ success: false, error: `taskkill failed: ${killErr}` }, { status: 500 });
+        execSync(`taskkill /PID ${pid} /T /F`, { stdio: 'pipe', windowsHide: true });
+      } catch {
+        // Ignore — check below whether the process is actually gone
       }
+      // Source of truth: is the process still alive?
+      if (isPidRunning(pid)) {
+        return NextResponse.json({ success: false, error: `Process ${pid} could not be killed — try running as administrator` }, { status: 500 });
+      }
+      console.log(`Force-killed PID ${pid} for strategy ${strategy}`);
+      try {
+        const data = JSON.parse(fs.readFileSync(stateFile, 'utf8'));
+        fs.writeFileSync(stateFile, JSON.stringify({ ...data, status: 'STOPPED' }, null, 2));
+      } catch {}
+      return NextResponse.json({ success: true, message: `Process ${pid} force-killed` });
 
     } else {
       return NextResponse.json({ success: false, error: 'Invalid action, must be start, stop, or force_stop' }, { status: 400 });
