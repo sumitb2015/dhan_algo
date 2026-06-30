@@ -27,11 +27,11 @@ export default function NavBar() {
     <div className="flex items-center bg-zinc-900/80 border border-zinc-800 p-0.5 rounded-xl flex-wrap">
       {NAV_LINKS.map(({ href, label }) =>
         pathname === href ? (
-          <span key={href} className="px-3 py-1.5 text-xs font-semibold rounded-lg bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
+          <span key={href} className="px-3 py-1.5 text-xs font-bold rounded-lg bg-emerald-500/10 text-emerald-300 border border-emerald-500/30">
             {label}
           </span>
         ) : (
-          <Link key={href} href={href} className="px-3 py-1.5 text-xs font-semibold rounded-lg text-zinc-500 hover:text-zinc-300 transition-all">
+          <Link key={href} href={href} className="px-3 py-1.5 text-xs font-bold rounded-lg text-zinc-300 hover:text-white transition-all">
             {label}
           </Link>
         )

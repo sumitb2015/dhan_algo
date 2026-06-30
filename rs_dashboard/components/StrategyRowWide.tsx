@@ -29,6 +29,7 @@ interface StrategyState {
   current_ltp?: number; direction?: string; oi_diff?: number; pcr_threshold?: number;
   ce_active?: boolean; pe_active?: boolean; ce_sl?: number; pe_sl?: number;
   combined_best_premium?: number | null; trail_combined_buffer?: number; leg_sl_pct?: number;
+  use_ema?: boolean; use_supertrend?: boolean;
 }
 
 interface Props { meta: StrategyMeta; state: StrategyState; onRefresh: () => void }
@@ -78,6 +79,10 @@ export default function StrategyRowWide({ meta, state, onRefresh }: Props) {
   const [exitOnSignalChange, setExitOnSignalChange] = useState(true);
   const [eodTime, setEodTime] = useState('15:15');
   const [cooldownMinutes, setCooldownMinutes] = useState(5);
+  const [useEma, setUseEma] = useState(true);
+  const [useSupertrend, setUseSupertrend] = useState(true);
+
+  const spreadTrendNoIndicators = meta.key === 'nifty_spread_trend' && !useEma && !useSupertrend;
 
   const isRunning = state.status !== 'STOPPED';
   const pnl = state.total_pnl ?? 0;
@@ -151,6 +156,8 @@ export default function StrategyRowWide({ meta, state, onRefresh }: Props) {
         args.push('--eod-time', eodTime);
         args.push('--cooldown-minutes', String(cooldownMinutes));
         if (!exitOnSignalChange) args.push('--no-exit-on-signal-change');
+        if (!useEma) args.push('--no-ema');
+        if (!useSupertrend) args.push('--no-supertrend');
       }
 
       const res = await fetch('/api/strategies', {
@@ -255,6 +262,14 @@ export default function StrategyRowWide({ meta, state, onRefresh }: Props) {
             <div className="font-mono font-bold text-xs text-sky-400">{state.active_spread || '—'}</div>
             <div className="text-[9px] text-zinc-300 font-mono whitespace-nowrap">
               S:{state.short_strike || '-'} · L:{state.long_strike || '-'}
+            </div>
+            <div className="flex gap-1 mt-0.5">
+              {(state.use_ema !== false) && (
+                <span className="text-[9px] font-bold px-1 rounded bg-indigo-500/15 text-indigo-400">EMA</span>
+              )}
+              {(state.use_supertrend !== false) && (
+                <span className="text-[9px] font-bold px-1 rounded bg-violet-500/15 text-violet-400">ST</span>
+              )}
             </div>
           </div>
           <div className="px-3 flex flex-col justify-center shrink-0">
@@ -388,9 +403,30 @@ export default function StrategyRowWide({ meta, state, onRefresh }: Props) {
             <div className={fieldCls}><label className={lbl}>Spread (pts)</label><Input type="number" value={spreadWidth} onChange={e => setSpreadWidth(parseInt(e.target.value)||100)} className={inputCls} style={{width:72}}/></div>
             <div className={fieldCls}><label className={lbl}>CE Offset</label><Input type="number" value={ceOffset} onChange={e=>setCeOffset(parseInt(e.target.value)||100)} className={inputCls} style={{width:72}}/></div>
             <div className={fieldCls}><label className={lbl}>PE Offset</label><Input type="number" value={peOffset} onChange={e=>setPeOffset(parseInt(e.target.value)||100)} className={inputCls} style={{width:72}}/></div>
-            <div className={fieldCls}><label className={lbl}>EMA Period</label><Input type="number" value={emaPeriod} onChange={e=>setEmaPeriod(parseInt(e.target.value)||20)} className={inputCls} style={{width:64}}/></div>
-            <div className={fieldCls}><label className={lbl}>ST Period</label><Input type="number" value={supertrendPeriod} onChange={e=>setSupertrendPeriod(parseInt(e.target.value)||7)} className={inputCls} style={{width:64}}/></div>
-            <div className={fieldCls}><label className={lbl}>ST Multi</label><Input type="number" step="0.5" value={supertrendMultiplier} onChange={e=>setSupertrendMultiplier(parseFloat(e.target.value)||3.0)} className={inputCls} style={{width:64}}/></div>
+            <div className={fieldCls}>
+              <div className="flex items-center gap-2 h-5">
+                <input type="checkbox" id={`use-ema-${meta.key}`} checked={useEma} onChange={e => setUseEma(e.target.checked)}
+                  className="h-3.5 w-3.5 rounded border-zinc-700 bg-zinc-900 accent-emerald-500" />
+                <label htmlFor={`use-ema-${meta.key}`} className={lbl}>EMA</label>
+              </div>
+              {useEma && <Input type="number" value={emaPeriod} onChange={e=>setEmaPeriod(parseInt(e.target.value)||20)} className={inputCls} style={{width:64}} placeholder="Period"/>}
+            </div>
+            <div className={fieldCls}>
+              <div className="flex items-center gap-2 h-5">
+                <input type="checkbox" id={`use-st-${meta.key}`} checked={useSupertrend} onChange={e => setUseSupertrend(e.target.checked)}
+                  className="h-3.5 w-3.5 rounded border-zinc-700 bg-zinc-900 accent-emerald-500" />
+                <label htmlFor={`use-st-${meta.key}`} className={lbl}>Supertrend</label>
+              </div>
+              {useSupertrend && <>
+                <Input type="number" value={supertrendPeriod} onChange={e=>setSupertrendPeriod(parseInt(e.target.value)||7)} className={inputCls} style={{width:64}} placeholder="Period"/>
+                <Input type="number" step="0.5" value={supertrendMultiplier} onChange={e=>setSupertrendMultiplier(parseFloat(e.target.value)||3.0)} className={inputCls} style={{width:64}} placeholder="Multi"/>
+              </>}
+            </div>
+            {spreadTrendNoIndicators && (
+              <div className="px-2.5 py-1.5 rounded-lg bg-amber-500/10 border border-amber-500/30 text-[10px] text-amber-400 font-medium">
+                Enable at least one indicator to launch.
+              </div>
+            )}
             <div className={fieldCls}><label className={lbl}>EOD Time</label><Input type="text" value={eodTime} onChange={e=>setEodTime(e.target.value)} placeholder="15:15" className={inputCls} style={{width:72}}/></div>
             <div className={fieldCls}><label className={lbl}>Cooldown (min)</label><Input type="number" value={cooldownMinutes} onChange={e=>setCooldownMinutes(parseInt(e.target.value)||5)} className={inputCls} style={{width:64}}/></div>
             <div className={fieldCls}>
@@ -502,8 +538,8 @@ export default function StrategyRowWide({ meta, state, onRefresh }: Props) {
 
         {/* Launch button inline in config */}
         <div className="flex items-end">
-          <Button onClick={handleStart} disabled={submitting}
-            className="h-7 px-4 gap-1.5 bg-gradient-to-tr from-emerald-600 to-teal-500 text-white font-bold rounded-lg shadow-md shadow-emerald-500/10 hover:from-emerald-500 hover:to-teal-400 active:scale-[0.98] transition-all text-xs border-0">
+          <Button onClick={handleStart} disabled={submitting || spreadTrendNoIndicators}
+            className="h-7 px-4 gap-1.5 bg-gradient-to-tr from-emerald-600 to-teal-500 text-white font-bold rounded-lg shadow-md shadow-emerald-500/10 hover:from-emerald-500 hover:to-teal-400 active:scale-[0.98] transition-all text-xs border-0 disabled:opacity-50 disabled:cursor-not-allowed">
             {submitting ? <Loader2 className="h-3 w-3 animate-spin" /> : <Play className="h-3 w-3 fill-white" />}
             {submitting ? 'Launching…' : 'Launch'}
           </Button>
@@ -626,8 +662,8 @@ export default function StrategyRowWide({ meta, state, onRefresh }: Props) {
                 {showConfig ? <ChevronUp className="h-3 w-3" /> : <Settings className="h-3 w-3" />}
                 Configure
               </button>
-              <Button onClick={handleStart} disabled={submitting}
-                className="h-7 px-3 gap-1 bg-emerald-600/80 hover:bg-emerald-500/80 text-white font-bold rounded-md text-[11px] border-0 shadow-none active:scale-95 transition-all">
+              <Button onClick={handleStart} disabled={submitting || spreadTrendNoIndicators}
+                className="h-7 px-3 gap-1 bg-emerald-600/80 hover:bg-emerald-500/80 text-white font-bold rounded-md text-[11px] border-0 shadow-none active:scale-95 transition-all disabled:opacity-50 disabled:cursor-not-allowed">
                 <Play className="h-2.5 w-2.5 fill-white" />
                 Launch
               </Button>

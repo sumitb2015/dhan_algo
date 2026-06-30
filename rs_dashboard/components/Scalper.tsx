@@ -685,7 +685,7 @@ export default function Scalper() {
                 <Zap className="w-3.5 h-3.5 text-yellow-400" />
                 NIFTY SCALPER
               </h1>
-              <p className="text-xs font-mono tabular-nums text-zinc-400">
+              <p className="text-xs font-bold font-mono tabular-nums text-zinc-200">
                 {spot > 0
                   ? `NIFTY ${spot.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
                   : 'Loading…'}

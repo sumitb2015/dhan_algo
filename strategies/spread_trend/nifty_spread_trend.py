@@ -106,6 +106,100 @@ class NiftySpreadTrendStrategy:
         self.last_close_time = None # to prevent instant re-entry after cooldown
         self.last_processed_candle_time = None
 
+        # Short-option VWAP + Supertrend exit tracking
+        self.option_vwap: float = 0.0
+        self.option_st_level: float = 0.0
+
+    def _fetch_option_candles(self, security_id: str) -> pd.DataFrame:
+        """Fetch 1-min intraday candles for the short option, normalised and filtered to today's session."""
+        try:
+            today = datetime.now().date()
+            from_date = (today - timedelta(days=2)).isoformat()
+            to_date = today.isoformat()
+
+            raw = self.helper.get_intraday_minute_data(
+                security_id=security_id,
+                exchange_segment="NSE_FNO",
+                instrument_type="OPTIDX",
+                interval="1",
+                from_date=from_date,
+                to_date=to_date,
+            )
+            if raw.empty:
+                return pd.DataFrame()
+
+            rename_map = {
+                "start_time": "Datetime", "start_Time": "Datetime",
+                "kline_time": "Datetime", "timestamp": "Datetime",
+                "open": "Open", "high": "High", "low": "Low",
+                "close": "Close", "volume": "Volume",
+            }
+            new_map = {c: rename_map[c.lower()] for c in raw.columns if c.lower() in rename_map}
+            df = raw.rename(columns=new_map)
+            df = df[[c for c in ["Datetime", "Open", "High", "Low", "Close", "Volume"] if c in df.columns]]
+
+            if "Datetime" in df.columns:
+                first_val = df["Datetime"].iloc[0]
+                if isinstance(first_val, (int, float)):
+                    df["Datetime"] = (
+                        pd.to_datetime(df["Datetime"], unit="s")
+                        .dt.tz_localize("UTC")
+                        .dt.tz_convert("Asia/Kolkata")
+                        .dt.tz_localize(None)
+                    )
+                else:
+                    df["Datetime"] = pd.to_datetime(df["Datetime"])
+                df = df.set_index("Datetime").sort_index()
+
+            # Keep only today's session from 09:15 onwards
+            today_mask = df.index.date == today
+            session_mask = df.index.strftime("%H:%M") >= "09:15"
+            return df[today_mask & session_mask]
+
+        except Exception as e:
+            logger.error(f"Error fetching option candles for {security_id}: {e}")
+            return pd.DataFrame()
+
+    def _refresh_option_indicators(self) -> None:
+        """Recompute session VWAP and Supertrend level for the short option."""
+        if not self.short_id:
+            return
+
+        df = self._fetch_option_candles(str(self.short_id))
+        if df.empty:
+            logger.debug("No option candles available yet for VWAP/ST computation.")
+            return
+
+        # Session VWAP
+        try:
+            typical = (df["High"] + df["Low"] + df["Close"]) / 3
+            vol = df["Volume"].clip(lower=1)  # avoid division by zero on zero-volume candles
+            vwap = float((typical * vol).sum() / vol.sum())
+            if vwap > 0:
+                self.option_vwap = vwap
+        except Exception as e:
+            logger.error(f"Option VWAP computation error: {e}")
+
+        # Supertrend level
+        try:
+            st_ind = [{"kind": "supertrend", "length": self.supertrend_period, "multiplier": self.supertrend_multiplier}]
+            df_ta = self.helper.calculate_ta_indicators(df.copy(), st_ind)
+            supert_cols = [
+                c for c in df_ta.columns
+                if c.startswith("SUPERT_") and not any(c.startswith(p) for p in ("SUPERTd_", "SUPERTl_", "SUPERTs_"))
+            ]
+            if supert_cols:
+                st_val = float(df_ta[supert_cols[0]].iloc[-1])
+                if not pd.isna(st_val) and st_val > 0:
+                    self.option_st_level = st_val
+        except Exception as e:
+            logger.error(f"Option Supertrend computation error: {e}")
+
+        logger.info(
+            f"[OPTION IND] {self.short_symbol} | candles={len(df)}"
+            f" | VWAP={self.option_vwap:.2f} | ST={self.option_st_level:.2f}"
+        )
+
     def save_state(self, nifty_spot, short_ltp, long_ltp, total_pnl, status="RUNNING"):
         state_dict = {
             "strategy": "nifty_spread_trend",
@@ -128,7 +222,9 @@ class NiftySpreadTrendStrategy:
             "total_pnl": total_pnl,
             "spot": nifty_spot,
             "profit_target": self.target_profit,
-            "stop_loss": self.stop_loss
+            "stop_loss": self.stop_loss,
+            "option_vwap": round(self.option_vwap, 2),
+            "option_st_level": round(self.option_st_level, 2),
         }
         save_strategy_state("nifty_spread_trend", state_dict)
 
@@ -395,9 +491,16 @@ class NiftySpreadTrendStrategy:
         """
         last_log_time = 0
         total_qty = self.lot_size * self.lots
-        
+        last_indicator_minute = ""  # refresh once per 1-min candle boundary
+
         while self.active_spread is not None:
             time.sleep(1)
+
+            # Refresh short-option VWAP and Supertrend on each new 1-min candle
+            current_minute = datetime.now().strftime("%H:%M")
+            if current_minute != last_indicator_minute:
+                self._refresh_option_indicators()
+                last_indicator_minute = current_minute
             
             # Check shutdown trigger first
             if check_shutdown_trigger("nifty_spread_trend"):
@@ -436,9 +539,10 @@ class NiftySpreadTrendStrategy:
             
             # Log status every 30 seconds
             if time.time() - last_log_time >= 30:
+                vwap_info = f"VWAP={self.option_vwap:.2f} ST={self.option_st_level:.2f}" if self.option_vwap > 0 else "VWAP=—"
                 logger.info(
                     f"[MONITOR] {self.active_spread} | Short: {short_ltp:.2f} (Entry: {self.short_entry_price:.2f}) | "
-                    f"Long: {long_ltp:.2f} (Entry: {self.long_entry_price:.2f}) | PnL: ₹{total_pnl:.2f}"
+                    f"Long: {long_ltp:.2f} (Entry: {self.long_entry_price:.2f}) | PnL: ₹{total_pnl:.2f} | {vwap_info}"
                 )
                 last_log_time = time.time()
                 
@@ -465,8 +569,19 @@ class NiftySpreadTrendStrategy:
                 self.exit_positions(f"Global Stop Loss Hit: ₹{total_pnl:.2f} (Limit: -₹{abs(self.stop_loss):.2f})")
                 logger.info(f"Stop loss hit. Cooling down for {self.cooldown_minutes} minutes before re-scanning...")
                 break
-                
-            # 5. Signal Reversal (Early exit on trend flip)
+
+            # 5. Short option above session VWAP and Supertrend
+            if (self.option_vwap > 0 and self.option_st_level > 0
+                    and short_ltp > self.option_vwap
+                    and short_ltp > self.option_st_level):
+                self.exit_positions(
+                    f"Short option LTP {short_ltp:.2f} above VWAP ({self.option_vwap:.2f})"
+                    f" and Supertrend ({self.option_st_level:.2f})"
+                )
+                logger.info(f"Option VWAP/ST exit. Cooling down for {self.cooldown_minutes} minutes.")
+                break
+
+            # 6. Signal Reversal (Early exit on trend flip)
             if self.exit_on_signal_change:
                 signal, spot = self.get_signal()
                 if spot > 0:
@@ -553,6 +668,8 @@ class NiftySpreadTrendStrategy:
         self.long_strike = None
         self.long_symbol = None
         self.long_entry_price = 0.0
+        self.option_vwap = 0.0
+        self.option_st_level = 0.0
         
         if bypass_cooldown:
             self.last_close_time = None

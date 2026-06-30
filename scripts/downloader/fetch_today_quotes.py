@@ -90,32 +90,17 @@ def build_security_id_map(symbols: list[str]) -> dict[str, int]:
         return {}
 
 
-def fetch_batch(helper, symbol_to_sid: dict[str, int]) -> dict[str, dict]:
-    """
-    Fetch quote_data for one batch of ≤100 NSE_EQ securities.
-    Returns {symbol: {open, high, low, close, volume}} where close = LTP.
-    """
-    sid_to_symbol = {v: k for k, v in symbol_to_sid.items()}
-    sids = list(symbol_to_sid.values())
-
-    try:
-        res = helper.dhan.quote_data(securities={"NSE_EQ": sids})
-    except Exception as e:
-        print(f"  [ERROR] quote_data call failed: {e}")
-        return {}
-
+def _parse_segment_response(res: dict, segment: str, sid_to_symbol: dict[int, str]) -> dict[str, dict]:
+    """Parse an ohlc_data/quote_data response and return {symbol: ohlcv}."""
     if not isinstance(res, dict) or res.get("status") != "success":
-        print(f"  [ERROR] quote_data non-success: {res}")
         return {}
 
-    # Navigate nested data — response may be data.data or just data
     raw = res.get("data", {})
     if isinstance(raw, dict) and "data" in raw:
         raw = raw["data"]
 
-    segment_data = raw.get("NSE_EQ", raw) if isinstance(raw, dict) else {}
+    segment_data = raw.get(segment, raw) if isinstance(raw, dict) else {}
     if not isinstance(segment_data, dict):
-        print(f"  [WARN] Unexpected segment_data shape: {type(segment_data)}")
         return {}
 
     quotes = {}
@@ -141,6 +126,59 @@ def fetch_batch(helper, symbol_to_sid: dict[str, int]) -> dict[str, dict]:
             quotes[sym] = {"open": o, "high": h, "low": l, "close": ltp, "volume": v}
 
     return quotes
+
+
+def fetch_batch(helper, symbol_to_sid: dict[str, int]) -> dict[str, dict]:
+    """
+    Fetch ohlc_data for one batch of ≤100 NSE_EQ securities.
+    Returns {symbol: {open, high, low, close, volume}} where close = LTP.
+    Falls back to quote_data if ohlc_data fails.
+    """
+    sid_to_symbol = {v: k for k, v in symbol_to_sid.items()}
+    sids = list(symbol_to_sid.values())
+
+    # Try ohlc_data first (lighter endpoint, higher reliability)
+    try:
+        res = helper.dhan.ohlc_data(securities={"NSE_EQ": sids})
+        if isinstance(res, dict) and res.get("status") == "success":
+            result = _parse_segment_response(res, "NSE_EQ", sid_to_symbol)
+            if result:
+                return result
+        else:
+            print(f"  [WARN] ohlc_data non-success: {res} — trying quote_data fallback")
+    except Exception as e:
+        print(f"  [WARN] ohlc_data call failed: {e} — trying quote_data fallback")
+
+    # Fallback: quote_data
+    try:
+        res = helper.dhan.quote_data(securities={"NSE_EQ": sids})
+        if isinstance(res, dict) and res.get("status") == "success":
+            return _parse_segment_response(res, "NSE_EQ", sid_to_symbol)
+        else:
+            print(f"  [ERROR] quote_data non-success: {res}")
+    except Exception as e:
+        print(f"  [ERROR] quote_data call failed: {e}")
+
+    # Last resort: split batch in half and retry each sub-batch
+    if len(sids) > 1:
+        print(f"  [RETRY] Splitting batch of {len(sids)} into halves...")
+        mid = len(sids) // 2
+        half1 = {sym: sid for sym, sid in symbol_to_sid.items() if sid in sids[:mid]}
+        half2 = {sym: sid for sym, sid in symbol_to_sid.items() if sid in sids[mid:]}
+        result = {}
+        for half in (half1, half2):
+            if not half:
+                continue
+            try:
+                r = helper.dhan.ohlc_data(securities={"NSE_EQ": list(half.values())})
+                if isinstance(r, dict) and r.get("status") == "success":
+                    result.update(_parse_segment_response(r, "NSE_EQ", {v: k for k, v in half.items()}))
+            except Exception:
+                pass
+            time.sleep(RATE_DELAY)
+        return result
+
+    return {}
 
 
 # ── CSV upsert ────────────────────────────────────────────────────────────────
@@ -297,39 +335,81 @@ def main():
     print("  Fetching index quotes (Nifty 50 + Nifty 500)...")
     nifty50_ohlcv = None
     nifty500_ohlcv = None
+
+    def _parse_idx(ticker) -> dict | None:
+        if not isinstance(ticker, dict):
+            return None
+        ltp = float(ticker.get("last_price", 0) or ticker.get("LTP", 0))
+        if ltp <= 0:
+            return None
+        ohlc = ticker.get("ohlc", {}) or {}
+        return {
+            "open":   float(ticker.get("open", 0) or ohlc.get("open", 0) or ltp),
+            "high":   float(ticker.get("high", 0) or ohlc.get("high", 0) or ltp),
+            "low":    float(ticker.get("low",  0) or ohlc.get("low",  0) or ltp),
+            "close":  ltp,
+            "volume": int(ticker.get("volume", 0) or 0),
+        }
+
+    def _fetch_index_quotes_batch(method_name: str) -> dict | None:
+        """Try ohlc_data/quote_data/ticker_data for IDX_I indices. Returns raw idx_data dict or None."""
+        try:
+            method = getattr(helper.dhan, method_name)
+            res = method(securities={"IDX_I": [13, 19]})
+            if not isinstance(res, dict) or res.get("status") != "success":
+                return None
+            raw = res.get("data", {})
+            if isinstance(raw, dict) and "data" in raw:
+                raw = raw["data"]
+            return raw.get("IDX_I", raw) if isinstance(raw, dict) else None
+        except Exception:
+            return None
+
+    def _ltp_to_ohlcv(ltp: float) -> dict:
+        return {"open": ltp, "high": ltp, "low": ltp, "close": ltp, "volume": 0}
+
     try:
-        res = helper.dhan.quote_data(securities={"IDX_I": [13, 19]})
-        raw = res.get("data", {}) if isinstance(res, dict) else {}
-        if isinstance(raw, dict) and "data" in raw:
-            raw = raw["data"]
-        idx_data = raw.get("IDX_I", raw) if isinstance(raw, dict) else {}
+        # Try batch REST endpoints in order of reliability
+        idx_data = (
+            _fetch_index_quotes_batch("ohlc_data")
+            or _fetch_index_quotes_batch("quote_data")
+            or _fetch_index_quotes_batch("ticker_data")
+        )
 
-        def _parse_idx(ticker) -> dict | None:
-            if not isinstance(ticker, dict):
-                return None
-            ltp = float(ticker.get("last_price", 0) or ticker.get("LTP", 0))
-            if ltp <= 0:
-                return None
-            ohlc = ticker.get("ohlc", {}) or {}
-            return {
-                "open":   float(ticker.get("open", 0) or ohlc.get("open", 0) or ltp),
-                "high":   float(ticker.get("high", 0) or ohlc.get("high", 0) or ltp),
-                "low":    float(ticker.get("low",  0) or ohlc.get("low",  0) or ltp),
-                "close":  ltp,
-                "volume": int(ticker.get("volume", 0) or 0),
-            }
+        if isinstance(idx_data, dict):
+            for key in ("13", 13):
+                t = idx_data.get(key)
+                if t:
+                    nifty50_ohlcv = _parse_idx(t)
+                    break
 
-        for key in ("13", 13):
-            t = idx_data.get(key) if isinstance(idx_data, dict) else None
-            if t:
-                nifty50_ohlcv = _parse_idx(t)
-                break
+            for key in ("19", 19):
+                t = idx_data.get(key)
+                if t:
+                    nifty500_ohlcv = _parse_idx(t)
+                    break
 
-        for key in ("19", 19):
-            t = idx_data.get(key) if isinstance(idx_data, dict) else None
-            if t:
-                nifty500_ohlcv = _parse_idx(t)
-                break
+        # Fallback: use DhanHelper.get_ltp() for individual index LTPs
+        if not nifty50_ohlcv:
+            try:
+                ltp = helper.get_ltp("NIFTY", instrument="INDEX")
+                if ltp and ltp > 0:
+                    nifty50_ohlcv = _ltp_to_ohlcv(float(ltp))
+                    print("    [INFO] Nifty 50 LTP via helper.get_ltp()")
+            except Exception as e:
+                print(f"    [WARN] helper.get_ltp NIFTY failed: {e}")
+
+        if not nifty500_ohlcv:
+            try:
+                ltp = helper.get_ltp("NIFTY 500", instrument="INDEX")
+                if ltp and ltp > 0:
+                    nifty500_ohlcv = _ltp_to_ohlcv(float(ltp))
+                    print("    [INFO] Nifty 500 LTP via helper.get_ltp()")
+            except Exception as e:
+                print(f"    [WARN] helper.get_ltp NIFTY 500 failed: {e}")
+
+        if not nifty50_ohlcv and not nifty500_ohlcv:
+            print("    [WARN] No valid IDX_I data from any method")
 
         if nifty50_ohlcv:
             all_quotes["_NIFTY50_INDEX"] = nifty50_ohlcv
