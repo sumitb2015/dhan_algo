@@ -38,8 +38,8 @@ interface BridgeStatus {
 }
 
 interface ChainOcEntry {
-  ce?: { last_price?: number; oi?: number };
-  pe?: { last_price?: number; oi?: number };
+  ce?: { last_price?: number; oi?: number; implied_volatility?: number; greeks?: { iv?: number } };
+  pe?: { last_price?: number; oi?: number; implied_volatility?: number; greeks?: { iv?: number } };
 }
 
 interface CandleRow {
@@ -53,7 +53,13 @@ interface CandleRow {
   'PE OI'?: number;
 }
 
+interface IvPoint { time: string; ceIV: number; peIV: number }
+
 // ─── Helpers ──────────────────────────────────────────────────────
+
+function extractIV(side?: { implied_volatility?: number; greeks?: { iv?: number } }): number {
+  return side?.implied_volatility ?? side?.greeks?.iv ?? 0;
+}
 
 function fmtTime(iso: string): string {
   try {
@@ -160,6 +166,12 @@ export default function OptionsCharts() {
   const [showPE,   setShowPE]   = useState(true);
   const [showVWAP, setShowVWAP] = useState(false);
   const [activeTab, setActiveTab] = useState<'premium' | 'skew'>('premium');
+
+  // IV time-series state
+  const [ivHistory, setIvHistory] = useState<IvPoint[]>([]);
+  const [showCeIV, setShowCeIV]   = useState(true);
+  const [showPeIV, setShowPeIV]   = useState(true);
+  const ivPollRef = useRef<NodeJS.Timeout | null>(null);
 
   // ── Fetch expiries ────────────────────────────────────────────────
   useEffect(() => {
@@ -325,6 +337,34 @@ export default function OptionsCharts() {
     pollRef.current = setInterval(pollLive, pollInterval * 1000);
     return () => { if (pollRef.current) clearInterval(pollRef.current); };
   }, [pollLive, pollInterval]);
+
+  // ── IV time-series polling ────────────────────────────────────────
+  useEffect(() => {
+    if (!expiry || !selectedStrike) return;
+    setIvHistory([]);
+
+    const fetchIV = () => {
+      fetch(`/api/options/chain?underlying=${UNDERLYING}&expiry=${expiry}`)
+        .then(r => r.json())
+        .then((j: { success: boolean; data?: { chain: { oc?: Record<string, ChainOcEntry> } } }) => {
+          if (!j.success || !j.data?.chain?.oc) return;
+          const entry = j.data.chain.oc[String(selectedStrike)];
+          if (!entry) return;
+          const ceIV = extractIV(entry.ce);
+          const peIV = extractIV(entry.pe);
+          if (ceIV === 0 && peIV === 0) return;
+          const time = new Date().toLocaleTimeString('en-IN', {
+            hour: '2-digit', minute: '2-digit', second: '2-digit',
+          });
+          setIvHistory(prev => [...prev, { time, ceIV, peIV }]);
+        })
+        .catch(() => {});
+    };
+
+    fetchIV();
+    ivPollRef.current = setInterval(fetchIV, 30_000);
+    return () => { if (ivPollRef.current) clearInterval(ivPollRef.current); };
+  }, [expiry, selectedStrike]);
 
   // ── Bridge start / stop ───────────────────────────────────────────
   const startBridge = async () => {
@@ -849,6 +889,79 @@ export default function OptionsCharts() {
           </div>
 
         </div>
+
+        {/* ── IV time-series ──────────────────────────────────────────── */}
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+          {([
+            { key: 'ceIV' as const, label: 'CE IV', color: '#60a5fa', show: showCeIV, setShow: setShowCeIV,
+              badgeCls: 'text-blue-400 border-blue-500/30 bg-blue-500/10' },
+            { key: 'peIV' as const, label: 'PE IV', color: '#fbbf24', show: showPeIV, setShow: setShowPeIV,
+              badgeCls: 'text-amber-400 border-amber-500/30 bg-amber-500/10' },
+          ]).map(({ key, label, color, show, setShow, badgeCls }) => (
+            <div key={key} className="bg-zinc-900/60 border border-zinc-800 rounded-2xl p-5">
+              <div className="flex items-center justify-between mb-3">
+                <div>
+                  <p className="text-sm font-bold text-white tracking-tight">
+                    {label}
+                    {chartStrike > 0 && (
+                      <span className="ml-2 text-[10px] font-bold text-zinc-300 bg-zinc-800 px-2 py-0.5 rounded-md">
+                        {fmtNum(chartStrike)}{chartStrike === atm && atm > 0 ? ' ATM' : ''}
+                      </span>
+                    )}
+                  </p>
+                  <p className="text-[10px] text-zinc-400 mt-0.5">
+                    sampled every 30s · {ivHistory.length} point{ivHistory.length !== 1 ? 's' : ''}
+                  </p>
+                </div>
+                <button
+                  onClick={() => setShow(v => !v)}
+                  className={`px-2 py-1 text-[10px] font-bold rounded-lg border transition-all ${badgeCls} ${show ? 'opacity-100' : 'opacity-35'}`}
+                >
+                  {label}
+                </button>
+              </div>
+
+              {ivHistory.length < 2 ? (
+                <div className="flex items-center justify-center h-[420px] text-zinc-500 text-xs">
+                  {chartStrike > 0
+                    ? 'IV chart builds as data accumulates — first point appears within 30s'
+                    : 'Select a strike to start tracking IV'}
+                </div>
+              ) : (
+                <ResponsiveContainer width="100%" height={420}>
+                  <LineChart data={ivHistory} margin={{ top: 8, right: 16, left: 0, bottom: 0 }}>
+                    <CartesianGrid {...gridProps} />
+                    <XAxis
+                      dataKey="time"
+                      tick={{ fontSize: 10, fill: '#a1a1aa', fontWeight: 500 }}
+                      tickLine={false}
+                      axisLine={{ stroke: '#27272a' }}
+                      interval={Math.max(0, Math.floor(ivHistory.length / 10) - 1)}
+                    />
+                    <YAxis
+                      tick={{ fontSize: 10, fill: '#a1a1aa', fontWeight: 500 }}
+                      tickLine={false}
+                      axisLine={false}
+                      domain={['auto', 'auto']}
+                      width={40}
+                      tickFormatter={(v: number) => `${v.toFixed(1)}%`}
+                    />
+                    <Tooltip
+                      contentStyle={{ background: '#18181b', border: '1px solid #3f3f46', borderRadius: 8, fontSize: 11 }}
+                      labelStyle={{ color: '#a1a1aa', fontWeight: 600, marginBottom: 4 }}
+                      formatter={(v: unknown) => [typeof v === 'number' ? `${v.toFixed(2)}%` : '—', label]}
+                    />
+                    {show && (
+                      <Line type="monotone" dataKey={key} name={label} stroke={color}
+                        strokeWidth={2} dot={false} activeDot={{ r: 4, fill: color, strokeWidth: 0 }} />
+                    )}
+                  </LineChart>
+                </ResponsiveContainer>
+              )}
+            </div>
+          ))}
+        </div>
+
           </>}
       </div>
     </div>
