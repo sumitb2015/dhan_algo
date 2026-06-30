@@ -150,6 +150,15 @@ export default function Scalper() {
   const cePct = (ceLtp > 0 && cePrevClose > 0) ? ((ceLtp - cePrevClose) / cePrevClose) * 100 : null;
   const pePct = (peLtp > 0 && pePrevClose > 0) ? ((peLtp - pePrevClose) / pePrevClose) * 100 : null;
 
+  const secIdToStrikeSide = useMemo(() => {
+    const map: Record<string, { strike: number; side: 'ce' | 'pe' }> = {};
+    for (const [strike, ids] of Object.entries(strikeMap)) {
+      if (ids.ceId) map[ids.ceId] = { strike: Number(strike), side: 'ce' };
+      if (ids.peId) map[ids.peId] = { strike: Number(strike), side: 'pe' };
+    }
+    return map;
+  }, [strikeMap]);
+
   const totalPnl = positionsData.reduce((sum, p) =>
     sum + (Number(p.realizedProfit) || 0) + (Number(p.unrealizedProfit) || 0), 0);
 
