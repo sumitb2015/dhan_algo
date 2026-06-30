@@ -8,6 +8,7 @@ import {
 import { MoverResult } from '@/app/api/movers/route';
 import { cn } from '@/lib/utils';
 import NavBar from './NavBar';
+import LiveNormalizedTab from './LiveNormalizedTab';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -199,6 +200,7 @@ export default function LiveDashboard() {
   const [indexType]                       = useState<'nifty50'>('nifty50');
   const [lastTick, setLastTick]           = useState<Date | null>(null);
   const [actionLoading, setActionLoading] = useState(false);
+  const [activeTab, setActiveTab] = useState<'market' | 'normalized'>('market');
   const [flashMap, setFlashMap]           = useState<Record<string, 'up' | 'down'>>({});
   const prevLtpRef                        = useRef<Record<string, number>>({});
   const pollRef                           = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -316,56 +318,80 @@ export default function LiveDashboard() {
 
         <div className="w-px h-5 bg-zinc-800 hidden sm:block" />
 
+        {/* Tab switcher */}
+        <div className="flex items-center bg-zinc-900 border border-zinc-800 rounded-lg p-0.5 gap-0.5">
+          {(['market', 'normalized'] as const).map((tab) => (
+            <button
+              key={tab}
+              onClick={() => setActiveTab(tab)}
+              className={cn(
+                'px-3 py-1 rounded-md text-[11px] font-semibold transition-all capitalize',
+                activeTab === tab
+                  ? 'bg-zinc-700 text-zinc-100'
+                  : 'text-zinc-500 hover:text-zinc-300',
+              )}
+            >
+              {tab === 'market' ? 'Market' : 'Normalized'}
+            </button>
+          ))}
+        </div>
+
         {/* Nav */}
         <NavBar />
 
-        {/* Bridge status */}
-        <div className="flex items-center gap-1.5 ml-1">
-          <LiveDot active={isLive} />
-          <span className={cn(
-            'text-[11px] font-medium',
-            isLive ? 'text-emerald-400' : isStarting ? 'text-amber-400' : 'text-zinc-500',
-          )}>
-            {isLive
-              ? `Live · ${bridgeStatus.subscribed ?? 0} symbols`
-              : isStarting ? 'Connecting…'
-              : 'Offline'}
-          </span>
-        </div>
+        {/* Bridge status — only on Market tab */}
+        {activeTab === 'market' && (
+          <div className="flex items-center gap-1.5 ml-1">
+            <LiveDot active={isLive} />
+            <span className={cn(
+              'text-[11px] font-medium',
+              isLive ? 'text-emerald-400' : isStarting ? 'text-amber-400' : 'text-zinc-500',
+            )}>
+              {isLive
+                ? `Live · ${bridgeStatus.subscribed ?? 0} symbols`
+                : isStarting ? 'Connecting…'
+                : 'Offline'}
+            </span>
+          </div>
+        )}
 
-        {/* Start / Stop */}
-        <button
-          onClick={() => sendAction(isLive || isStarting ? 'stop' : 'start')}
-          disabled={actionLoading}
-          className={cn(
-            'flex items-center gap-1.5 px-2.5 py-1 rounded-lg border text-[11px] font-semibold transition-all disabled:opacity-50',
-            isLive || isStarting
-              ? 'border-red-500/30 bg-red-500/10 text-red-400 hover:bg-red-500/20'
-              : 'border-emerald-500/30 bg-emerald-500/10 text-emerald-400 hover:bg-emerald-500/20',
-          )}
-        >
-          {actionLoading
-            ? <RefreshCw className="h-3 w-3 animate-spin" />
-            : isLive || isStarting
-              ? <Square className="h-3 w-3" />
-              : <Play className="h-3 w-3" />}
-          {isLive || isStarting ? 'Stop Feed' : 'Start Feed'}
-        </button>
+        {/* Start/Stop — only on Market tab */}
+        {activeTab === 'market' && (
+          <button
+            onClick={() => sendAction(isLive || isStarting ? 'stop' : 'start')}
+            disabled={actionLoading}
+            className={cn(
+              'flex items-center gap-1.5 px-2.5 py-1 rounded-lg border text-[11px] font-semibold transition-all disabled:opacity-50',
+              isLive || isStarting
+                ? 'border-red-500/30 bg-red-500/10 text-red-400 hover:bg-red-500/20'
+                : 'border-emerald-500/30 bg-emerald-500/10 text-emerald-400 hover:bg-emerald-500/20',
+            )}
+          >
+            {actionLoading
+              ? <RefreshCw className="h-3 w-3 animate-spin" />
+              : isLive || isStarting
+                ? <Square className="h-3 w-3" />
+                : <Play className="h-3 w-3" />}
+            {isLive || isStarting ? 'Stop Feed' : 'Start Feed'}
+          </button>
+        )}
 
-        {/* Search */}
-        <div className="flex items-center gap-1.5 bg-zinc-900 border border-zinc-800 rounded-lg px-2.5 py-1 ml-auto">
-          <Search className="h-3 w-3 text-zinc-600 shrink-0" />
-          <input
-            type="text"
-            placeholder="Symbol / sector…"
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            className="bg-transparent text-[11px] text-zinc-300 placeholder-zinc-600 outline-none w-32"
-          />
-        </div>
+        {/* Search — only on Market tab */}
+        {activeTab === 'market' && (
+          <div className="flex items-center gap-1.5 bg-zinc-900 border border-zinc-800 rounded-lg px-2.5 py-1 ml-auto">
+            <Search className="h-3 w-3 text-zinc-600 shrink-0" />
+            <input
+              type="text"
+              placeholder="Symbol / sector…"
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              className="bg-transparent text-[11px] text-zinc-300 placeholder-zinc-600 outline-none w-32"
+            />
+          </div>
+        )}
 
-        {/* Last tick */}
-        {lastTick && (
+        {/* Last tick — only on Market tab */}
+        {activeTab === 'market' && lastTick && (
           <span className={cn('text-[10px] tabular-nums hidden md:block', staleQuotes ? 'text-amber-400' : 'text-zinc-600')}>
             {staleQuotes ? <AlertTriangle className="inline h-3 w-3 mr-0.5" /> : null}
             {lastTick.toLocaleTimeString('en-IN', { timeZone: 'Asia/Kolkata' })} IST
@@ -375,6 +401,11 @@ export default function LiveDashboard() {
 
       {/* ── Content ── */}
       <main className="flex-1 w-full max-w-[1800px] mx-auto px-4 py-3 flex flex-col gap-3">
+
+        {activeTab === 'normalized' ? (
+          <LiveNormalizedTab />
+        ) : (
+        <>
 
         {/* No-feed banner */}
         {!isLive && !isStarting && (
@@ -546,6 +577,9 @@ export default function LiveDashboard() {
             <MiniLeader rows={rows} title="Top Gainers" type="gain" />
             <MiniLeader rows={rows} title="Top Losers"  type="loss" />
           </div>
+        )}
+
+        </>
         )}
       </main>
     </div>
