@@ -8,6 +8,7 @@ import {
   Tooltip, Legend, ResponsiveContainer,
 } from 'recharts';
 import OptionsSkewTab from './OptionsSkewTab';
+import OptionsOITab from './OptionsOITab';
 
 // ─── Types ────────────────────────────────────────────────────────
 
@@ -165,7 +166,7 @@ export default function OptionsCharts() {
   const [showCE,   setShowCE]   = useState(true);
   const [showPE,   setShowPE]   = useState(true);
   const [showVWAP, setShowVWAP] = useState(false);
-  const [activeTab, setActiveTab] = useState<'premium' | 'skew'>('premium');
+  const [activeTab, setActiveTab] = useState<'premium' | 'skew' | 'oi'>('premium');
 
   // IV time-series state
   const [ivHistory, setIvHistory] = useState<IvPoint[]>([]);
@@ -547,7 +548,7 @@ export default function OptionsCharts() {
             </select>
           </div>
 
-          {/* Candle interval (only when not live, premium tab only) */}
+          {/* Candle interval (premium tab only, not live) */}
           {activeTab === 'premium' && !isLive && (
             <div className="flex items-center bg-zinc-900 border border-zinc-800 p-0.5 rounded-xl">
               {(['1', '5'] as const).map(s => (
@@ -608,22 +609,27 @@ export default function OptionsCharts() {
 
           {/* Tab bar */}
           <div className="flex border-b border-zinc-800 -mx-6 px-6 -mt-5 mb-1">
-            {(['premium', 'skew'] as const).map(tab => (
+            {([
+              { key: 'premium', label: 'Premium' },
+              { key: 'skew',    label: 'Skew'    },
+              { key: 'oi',      label: 'Open Interest' },
+            ] as const).map(({ key, label }) => (
               <button
-                key={tab}
-                onClick={() => setActiveTab(tab)}
+                key={key}
+                onClick={() => setActiveTab(key)}
                 className={`px-4 py-2.5 text-xs font-semibold capitalize transition-all border-b-2 -mb-px ${
-                  activeTab === tab
+                  activeTab === key
                     ? 'text-white border-blue-500'
                     : 'text-zinc-400 border-transparent hover:text-zinc-200'
                 }`}
               >
-                {tab === 'premium' ? 'Premium' : 'Skew'}
+                {label}
               </button>
             ))}
           </div>
 
           {activeTab === 'skew' && <OptionsSkewTab expiry={expiry} />}
+          {activeTab === 'oi'   && <OptionsOITab  expiry={expiry} />}
 
           {activeTab === 'premium' && <>
 
