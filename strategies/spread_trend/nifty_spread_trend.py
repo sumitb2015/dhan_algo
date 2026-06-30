@@ -41,7 +41,8 @@ class NiftySpreadTrendStrategy:
                  ema_period=20, supertrend_period=7, supertrend_multiplier=3.0,
                  ce_offset=100, pe_offset=100, spread_width=100, lots=1,
                  target_profit=2000.0, stop_loss=2000.0, exit_on_signal_change=True,
-                 eod_time="15:15", cooldown_minutes=5):
+                 eod_time="15:15", cooldown_minutes=5,
+                 use_ema=True, use_supertrend=True):
         self.dry_run = dry_run
         self.symbol = symbol.upper()
         self.interval = interval
@@ -57,6 +58,8 @@ class NiftySpreadTrendStrategy:
         self.exit_on_signal_change = exit_on_signal_change
         self.eod_time = eod_time
         self.cooldown_minutes = cooldown_minutes
+        self.use_ema = use_ema
+        self.use_supertrend = use_supertrend
 
         self.dhan = get_dhan_client()
         if not self.dhan:
@@ -110,6 +113,8 @@ class NiftySpreadTrendStrategy:
             "dry_run": self.dry_run,
             "symbol": self.symbol,
             "interval": self.interval,
+            "use_ema": self.use_ema,
+            "use_supertrend": self.use_supertrend,
             "lots": self.lots,
             "active_spread": self.active_spread,
             "short_strike": self.short_strike,
@@ -129,79 +134,81 @@ class NiftySpreadTrendStrategy:
 
     def get_signal(self) -> Tuple[str, float]:
         """
-        Fetch indicators and check signal from the last completed candle.
-        Returns:
-            signal: "BULLISH", "BEARISH", or "NEUTRAL"
-            spot_close: Close price of the last completed candle.
+        Fetch enabled indicators and determine signal from the last completed candle.
+        Returns (signal, spot_close) where signal is "BULLISH", "BEARISH", or "NEUTRAL".
         """
         try:
-            # Fetch candles with indicators
-            indicators = [
-                f"EMA{self.ema_period}",
-                {"kind": "supertrend", "length": self.supertrend_period, "multiplier": self.supertrend_multiplier},
-                "VWAP"
-            ]
+            if not self.use_ema and not self.use_supertrend:
+                logger.warning("No indicators enabled — returning NEUTRAL.")
+                return "NEUTRAL", 0.0
+
+            indicators = []
+            if self.use_ema:
+                indicators.append(f"EMA{self.ema_period}")
+            if self.use_supertrend:
+                indicators.append({
+                    "kind": "supertrend",
+                    "length": self.supertrend_period,
+                    "multiplier": self.supertrend_multiplier,
+                })
 
             df = self.helper.get_indicators_ta(
                 symbol=self.symbol,
                 interval=self.interval,
                 indicators=indicators,
-                days=5 # fetch 5 days of history to ensure EMA warmup
+                days=5,
             )
 
             if df.empty or len(df) < 2:
                 logger.warning("Empty or insufficient data for indicator calculations.")
                 return "NEUTRAL", 0.0
 
-            # Get the last completed candle (index -2) to avoid whipsaws on the active uncompleted bar
             row = df.iloc[-2]
-            close = float(row['Close'])
+            close = float(row["Close"])
 
-            # Find EMA column
-            ema_col = f"EMA_{self.ema_period}"
-            if ema_col not in df.columns:
-                ema_cols = [c for c in df.columns if 'EMA' in c]
-                if ema_cols:
+            bullish_votes = []
+            bearish_votes = []
+
+            if self.use_ema:
+                ema_col = f"EMA_{self.ema_period}"
+                if ema_col not in df.columns:
+                    ema_cols = [c for c in df.columns if "EMA" in c]
+                    if not ema_cols:
+                        logger.error(f"EMA column not found. Columns: {df.columns.tolist()}")
+                        return "NEUTRAL", 0.0
                     ema_col = ema_cols[0]
-                else:
-                    logger.error(f"EMA column not found in indicators DataFrame. Columns: {df.columns.tolist()}")
+                ema_val = float(row[ema_col])
+                bullish_votes.append(close > ema_val)
+                bearish_votes.append(close < ema_val)
+
+            if self.use_supertrend:
+                st_dir_cols = [c for c in df.columns if c.startswith("SUPERTd_")]
+                if not st_dir_cols:
+                    logger.error(f"Supertrend direction column not found. Columns: {df.columns.tolist()}")
                     return "NEUTRAL", 0.0
+                st_dir = float(row[st_dir_cols[0]])
+                bullish_votes.append(st_dir == 1)
+                bearish_votes.append(st_dir == -1)
 
-            ema_val = float(row[ema_col])
-
-            # Find Supertrend direction column dynamically
-            st_dir_cols = [c for c in df.columns if c.startswith('SUPERTd_')]
-            if not st_dir_cols:
-                logger.error(f"Supertrend direction column not found. Columns: {df.columns.tolist()}")
-                return "NEUTRAL", 0.0
-
-            st_dir_col = st_dir_cols[0]
-            st_dir = float(row[st_dir_col])
-
-            # Find VWAP column dynamically
-            vwap_cols = [c for c in df.columns if 'VWAP' in c.upper()]
-            if not vwap_cols:
-                logger.error(f"VWAP column not found. Columns: {df.columns.tolist()}")
-                return "NEUTRAL", 0.0
-
-            vwap_val = float(row[vwap_cols[0]])
-
-            # Print indicator details periodically
-            candle_time = row.get('Datetime') or df.index[-2]
+            candle_time = row.get("Datetime") or df.index[-2]
             if candle_time != self.last_processed_candle_time:
-                logger.info(f"[SIGNAL CHECK] Candle Time: {candle_time} | Close: {close:.2f} | EMA({self.ema_period}): {ema_val:.2f} | Supertrend Dir: {st_dir:.1f} | VWAP: {vwap_val:.2f}")
+                active = []
+                if self.use_ema:
+                    active.append(f"EMA({self.ema_period})={ema_val:.2f}")
+                if self.use_supertrend:
+                    active.append(f"ST_dir={st_dir:.1f}")
+                logger.info(
+                    f"[SIGNAL CHECK] Candle: {candle_time} | Close: {close:.2f} | "
+                    + " | ".join(active)
+                )
                 self.last_processed_candle_time = candle_time
 
-            # Signal assessment
-            # Bullish: Close > EMA, Supertrend uptrend, and Close > VWAP
-            if close > ema_val and st_dir == 1 and close > vwap_val:
+            if all(bullish_votes):
                 return "BULLISH", close
-            # Bearish: Close < EMA, Supertrend downtrend, and Close < VWAP
-            elif close < ema_val and st_dir == -1 and close < vwap_val:
+            if all(bearish_votes):
                 return "BEARISH", close
-            else:
-                return "NEUTRAL", close
-                
+            return "NEUTRAL", close
+
         except Exception as e:
             logger.error(f"Error checking indicators/signal: {e}")
             return "NEUTRAL", 0.0
@@ -647,6 +654,20 @@ Examples:
                         help="Supertrend period/length (default: 7)")
     parser.add_argument("--supertrend-multiplier", type=float, default=3.0,
                         help="Supertrend multiplier (default: 3.0)")
+    parser.add_argument(
+        "--no-ema",
+        action="store_false",
+        dest="use_ema",
+        default=True,
+        help="Disable the EMA filter (default: enabled)",
+    )
+    parser.add_argument(
+        "--no-supertrend",
+        action="store_false",
+        dest="use_supertrend",
+        default=True,
+        help="Disable the Supertrend filter (default: enabled)",
+    )
 
     # Spread Configuration
     parser.add_argument("--ce-offset", type=int, default=100,
@@ -677,10 +698,15 @@ Examples:
     args = parser.parse_args()
 
     mode_label = "LIVE" if args.live else "DRY"
+    active_indicators = []
+    if args.use_ema:
+        active_indicators.append(f"EMA({args.ema_period})")
+    if args.use_supertrend:
+        active_indicators.append(f"Supertrend({args.supertrend_period}, {args.supertrend_multiplier})")
     logger.info("=" * 60)
     logger.info(f"LAUNCHING NIFTY SPREAD TREND STRATEGY IN {mode_label} MODE")
     logger.info(f"Underlying: {args.symbol} | Interval: {args.interval}m")
-    logger.info(f"Indicators: EMA({args.ema_period}) + Supertrend({args.supertrend_period}, {args.supertrend_multiplier})")
+    logger.info(f"Indicators: {' + '.join(active_indicators) if active_indicators else 'NONE (will not trade)'}")
     logger.info(f"Spread Config: CE Offset +{args.ce_offset} | PE Offset -{args.pe_offset} | Width: {args.spread_width}")
     logger.info(f"Lots: {args.lots} | Target Profit: ₹{args.target_profit:.0f} | Stop Loss: -₹{abs(args.stop_loss):.0f}")
     logger.info(f"Exit on Trend Reversal: {args.exit_on_signal_change} | Cooldown: {args.cooldown_minutes}m")
@@ -701,7 +727,9 @@ Examples:
         stop_loss=args.stop_loss,
         exit_on_signal_change=args.exit_on_signal_change,
         eod_time=args.eod_time,
-        cooldown_minutes=args.cooldown_minutes
+        cooldown_minutes=args.cooldown_minutes,
+        use_ema=args.use_ema,
+        use_supertrend=args.use_supertrend,
     )
     try:
         strat.run()
