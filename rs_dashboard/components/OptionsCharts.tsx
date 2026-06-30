@@ -9,6 +9,7 @@ import {
 } from 'recharts';
 import OptionsSkewTab from './OptionsSkewTab';
 import OptionsOITab from './OptionsOITab';
+import OptionsCumulativeOITab from './OptionsCumulativeOITab';
 
 // ─── Types ────────────────────────────────────────────────────────
 
@@ -166,7 +167,7 @@ export default function OptionsCharts() {
   const [showCE,   setShowCE]   = useState(true);
   const [showPE,   setShowPE]   = useState(true);
   const [showVWAP, setShowVWAP] = useState(false);
-  const [activeTab, setActiveTab] = useState<'premium' | 'skew' | 'oi'>('premium');
+  const [activeTab, setActiveTab] = useState<'premium' | 'skew' | 'oi' | 'cumulative'>('premium');
 
   // IV time-series state
   const [ivHistory, setIvHistory] = useState<IvPoint[]>([]);
@@ -610,9 +611,10 @@ export default function OptionsCharts() {
           {/* Tab bar */}
           <div className="flex border-b border-zinc-800 -mx-6 px-6 -mt-5 mb-1">
             {([
-              { key: 'premium', label: 'Premium' },
-              { key: 'skew',    label: 'Skew'    },
-              { key: 'oi',      label: 'Open Interest' },
+              { key: 'premium',    label: 'Premium'       },
+              { key: 'skew',       label: 'Skew'          },
+              { key: 'oi',         label: 'Open Interest' },
+              { key: 'cumulative', label: 'Cumulative OI' },
             ] as const).map(({ key, label }) => (
               <button
                 key={key}
@@ -628,8 +630,9 @@ export default function OptionsCharts() {
             ))}
           </div>
 
-          {activeTab === 'skew' && <OptionsSkewTab expiry={expiry} />}
-          {activeTab === 'oi'   && <OptionsOITab  expiry={expiry} />}
+          {activeTab === 'skew'       && <OptionsSkewTab         expiry={expiry} />}
+          {activeTab === 'oi'         && <OptionsOITab           expiry={expiry} />}
+          {activeTab === 'cumulative' && <OptionsCumulativeOITab expiry={expiry} />}
 
           {activeTab === 'premium' && <>
 
