@@ -84,6 +84,8 @@ export default function StrategyCard({ meta, state, onRefresh }: StrategyCardPro
   const [submitting, setSubmitting] = useState<boolean>(false);
   const [confirmStop, setConfirmStop] = useState<boolean>(false);
   const [confirmTimeoutId, setConfirmTimeoutId] = useState<NodeJS.Timeout | null>(null);
+  const [gracefulStopSent, setGracefulStopSent] = useState<boolean>(false);
+  const [forceKilling, setForceKilling] = useState<boolean>(false);
   const [startError, setStartError] = useState<string | null>(null);
 
   const [isLive, setIsLive] = useState<boolean>(false);
@@ -142,9 +144,12 @@ export default function StrategyCard({ meta, state, onRefresh }: StrategyCardPro
   const isRunning = state.status !== 'STOPPED';
   const pnl = state.total_pnl ?? 0;
 
-  // Reset submitting when the strategy finishes stopping so the Launch button re-enables.
+  // Reset stop state when the strategy finishes stopping so the Launch button re-enables.
   useEffect(() => {
-    if (!isRunning && submitting) setSubmitting(false);
+    if (!isRunning) {
+      if (submitting) setSubmitting(false);
+      if (gracefulStopSent) setGracefulStopSent(false);
+    }
   }, [isRunning]);
   const isPnlPositive = pnl >= 0;
 
@@ -249,6 +254,7 @@ export default function StrategyCard({ meta, state, onRefresh }: StrategyCardPro
       });
       const data = await res.json();
       if (data.success) {
+        setGracefulStopSent(true);
         setTimeout(onRefresh, 1500);
         // Keep submitting=true so spinner shows until isRunning → false
       } else {
@@ -258,6 +264,29 @@ export default function StrategyCard({ meta, state, onRefresh }: StrategyCardPro
     } catch (e) {
       setStartError(`Network error: ${e}`);
       setSubmitting(false);
+    }
+  };
+
+  const handleForceKill = async () => {
+    setForceKilling(true);
+    try {
+      const res = await fetch('/api/strategies', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'force_stop', strategy: meta.key }),
+      });
+      const data = await res.json();
+      if (data.success) {
+        setGracefulStopSent(false);
+        setSubmitting(false);
+        setTimeout(onRefresh, 500);
+      } else {
+        setStartError(data.error || 'Force kill failed');
+      }
+    } catch (e) {
+      setStartError(`Network error: ${e}`);
+    } finally {
+      setForceKilling(false);
     }
   };
 
@@ -855,6 +884,17 @@ export default function StrategyCard({ meta, state, onRefresh }: StrategyCardPro
                     <><Square className="h-3.5 w-3.5 fill-red-400" />Square Off & Stop</>
                   )}
                 </Button>
+                {gracefulStopSent && isRunning && (
+                  <Button
+                    onClick={handleForceKill}
+                    disabled={forceKilling}
+                    title="Process is not responding to graceful stop — force kill it"
+                    className="h-8 px-2.5 gap-1 rounded-lg font-semibold text-xs border border-orange-500/40 bg-orange-950/30 text-orange-400 hover:bg-orange-900/40 hover:border-orange-500/60 transition-all active:scale-95 disabled:opacity-50"
+                  >
+                    {forceKilling ? <Loader2 className="h-3 w-3 animate-spin" /> : <ShieldAlert className="h-3 w-3" />}
+                    {forceKilling ? 'Killing…' : 'Force Kill'}
+                  </Button>
+                )}
                 <Button
                   onClick={() => setShowLogs(!showLogs)}
                   className={`h-8 px-3 rounded-lg font-semibold text-xs border transition-colors ${

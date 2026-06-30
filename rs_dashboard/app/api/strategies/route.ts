@@ -1,11 +1,11 @@
-import { NextRequest, NextResponse } from 'next/server';
+﻿import { NextRequest, NextResponse } from 'next/server';
 import path from 'path';
 import fs from 'fs';
 import { execSync, spawn } from 'child_process';
 
 const PROJECT_ROOT = path.resolve(process.cwd(), '..');
 const DEBUG_DIR = path.join(PROJECT_ROOT, 'debug');
-const PYTHON_EXE = path.join(PROJECT_ROOT, 'venv', 'Scripts', 'python.exe');
+const PYTHON_EXE = path.join(PROJECT_ROOT, 'venv', 'Scripts', 'pythonw.exe');
 
 // Metadata mapping strategy key to display names and absolute paths
 const STRATEGIES_METADATA: Record<string, { name: string; path: string }> = {
@@ -214,13 +214,41 @@ export async function POST(request: NextRequest) {
       // Write trigger file for graceful shutdown
       const triggerFile = path.join(DEBUG_DIR, `${strategy}_shutdown.trigger`);
       console.log(`Writing shutdown trigger for strategy: ${strategy} at ${triggerFile}`);
-      
       fs.writeFileSync(triggerFile, '');
-
       return NextResponse.json({ success: true, message: 'Graceful shutdown trigger written successfully' });
-      
+
+    } else if (action === 'force_stop') {
+      // Force-kill the process by PID (used when graceful stop hangs)
+      const stateFile = path.join(DEBUG_DIR, `${strategy}_state.json`);
+      if (!fs.existsSync(stateFile)) {
+        return NextResponse.json({ success: false, error: 'No state file found — strategy may already be stopped' }, { status: 404 });
+      }
+      let pid: number | null = null;
+      try {
+        const data = JSON.parse(fs.readFileSync(stateFile, 'utf8'));
+        pid = data.pid ?? null;
+      } catch {
+        return NextResponse.json({ success: false, error: 'Could not read PID from state file' }, { status: 500 });
+      }
+      if (!pid || !isPidRunning(pid)) {
+        return NextResponse.json({ success: true, message: 'Process is not running' });
+      }
+      try {
+        // /T kills the process tree (child processes too); /F forces termination
+        execSync(`taskkill /PID ${pid} /T /F`, { stdio: 'ignore', windowsHide: true });
+        console.log(`Force-killed PID ${pid} for strategy ${strategy}`);
+        // Mark state as stopped
+        try {
+          const data = JSON.parse(fs.readFileSync(stateFile, 'utf8'));
+          fs.writeFileSync(stateFile, JSON.stringify({ ...data, status: 'STOPPED' }, null, 2));
+        } catch {}
+        return NextResponse.json({ success: true, message: `Process ${pid} force-killed` });
+      } catch (killErr) {
+        return NextResponse.json({ success: false, error: `taskkill failed: ${killErr}` }, { status: 500 });
+      }
+
     } else {
-      return NextResponse.json({ success: false, error: 'Invalid action, must be start or stop' }, { status: 400 });
+      return NextResponse.json({ success: false, error: 'Invalid action, must be start, stop, or force_stop' }, { status: 400 });
     }
 
   } catch (err) {
