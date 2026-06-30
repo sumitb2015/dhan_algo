@@ -382,7 +382,7 @@ export default function LiveNormalizedTab() {
 
       {/* ── Market closed state ── */}
       {!isMarketOpen && (
-        <div className="rounded-lg border border-zinc-800 bg-zinc-950 flex flex-col items-center justify-center h-[420px] gap-2">
+        <div className="rounded-lg border border-zinc-800 bg-zinc-950 flex flex-col items-center justify-center h-[600px] gap-2">
           <Activity className="h-6 w-6 text-zinc-700" />
           <span className="text-zinc-400 text-[13px] font-semibold">
             {currentIST < MARKET_OPEN_SECS ? 'Pre-market' : 'Market Closed'}
@@ -419,14 +419,14 @@ export default function LiveNormalizedTab() {
       {isMarketOpen && (
         <div className="rounded-lg border border-zinc-800 bg-zinc-950 overflow-hidden">
           {pctTicks.length < 2 ? (
-            <div className="flex flex-col items-center justify-center h-[420px] gap-2">
+            <div className="flex flex-col items-center justify-center h-[600px] gap-2">
               {isLive || isStarting
                 ? <><RefreshCw className="h-5 w-5 text-zinc-600 animate-spin" /><span className="text-zinc-500 text-[12px]">Waiting for first ticks…</span></>
                 : <><Activity className="h-5 w-5 text-zinc-700" /><span className="text-zinc-600 text-[12px]">Start the indices feed to see the chart</span></>
               }
             </div>
           ) : (
-            <ResponsiveContainer width="100%" height={420}>
+            <ResponsiveContainer width="100%" height={600}>
               <LineChart data={pctTicks} margin={{ top: 12, right: 16, left: 0, bottom: 4 }}>
                 <XAxis
                   dataKey="ts"
