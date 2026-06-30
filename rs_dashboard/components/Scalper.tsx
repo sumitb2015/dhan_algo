@@ -187,7 +187,7 @@ export default function Scalper() {
     });
   }, [positionsData, liveQuotes, secIdToStrikeSide]);
 
-  const totalPnl = positionsData.reduce((sum, p) =>
+  const totalPnl = enrichedPositions.reduce((sum, p) =>
     sum + (Number(p.realizedProfit) || 0) + (Number(p.unrealizedProfit) || 0), 0);
 
   // ─── useEffect 1: Load expiries on mount ─────────────────────────
@@ -371,7 +371,7 @@ export default function Scalper() {
   }, [fetchTabData, pollTabData]);
 
   // Keep refs in sync so the guard interval always reads latest values without stale closures
-  useEffect(() => { positionsRef.current = positionsData; }, [positionsData]);
+  useEffect(() => { positionsRef.current = enrichedPositions; }, [enrichedPositions]);
   useEffect(() => { posGuardsRef.current = posGuards; }, [posGuards]);
 
   // ─── Toast helper ─────────────────────────────────────────────────
@@ -961,7 +961,7 @@ export default function Scalper() {
             />
           ) : activeTab === 'positions' ? (
             <PositionsTable
-              data={positionsData}
+              data={enrichedPositions}
               guards={posGuards}
               closingPositions={closingPositions}
               onGuardChange={handleGuardChange}
