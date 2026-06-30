@@ -203,6 +203,8 @@ class NiftySpreadTrendStrategy:
                 )
                 self.last_processed_candle_time = candle_time
 
+            if not bullish_votes:
+                return "NEUTRAL", close
             if all(bullish_votes):
                 return "BULLISH", close
             if all(bearish_votes):
@@ -645,7 +647,7 @@ Examples:
     parser.add_argument("--symbol", type=str, default="NIFTY",
                         help="Symbol to trade (default: NIFTY)")
     parser.add_argument("--interval", type=str, default="5",
-                        help="Candle timeframe interval in minutes: 1, 5, 15, 30, 60 (default: 5)")
+                        help="Candle timeframe interval in minutes: 1, 3, 5 (default: 5)")
 
     # Technical Indicators Parameters
     parser.add_argument("--ema-period", type=int, default=20,
