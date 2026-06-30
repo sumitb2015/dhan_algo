@@ -159,6 +159,34 @@ export default function Scalper() {
     return map;
   }, [strikeMap]);
 
+  const enrichedPositions = useMemo(() => {
+    if (!liveQuotes?.strikes || Object.keys(secIdToStrikeSide).length === 0)
+      return positionsData;
+
+    return positionsData.map(pos => {
+      const secId = String(pos.securityId ?? (pos as Record<string, unknown>).security_id ?? '');
+      const mapping = secIdToStrikeSide[secId];
+      if (!mapping) return pos;
+
+      const strikeData = liveQuotes.strikes[String(mapping.strike)];
+      if (!strikeData) return pos;
+
+      const liveLtp = strikeData[mapping.side]?.ltp ?? 0;
+      if (liveLtp <= 0) return pos;
+
+      const netQty = Number(pos.netQty);
+      const buyAvg = Number(pos.buyAvg);
+      const sellAvg = Number(pos.sellAvg);
+      const unrealizedProfit = netQty === 0
+        ? Number(pos.unrealizedProfit)
+        : netQty > 0
+          ? netQty * (liveLtp - buyAvg)
+          : Math.abs(netQty) * (sellAvg - liveLtp);
+
+      return { ...pos, lastTradedPrice: liveLtp, unrealizedProfit };
+    });
+  }, [positionsData, liveQuotes, secIdToStrikeSide]);
+
   const totalPnl = positionsData.reduce((sum, p) =>
     sum + (Number(p.realizedProfit) || 0) + (Number(p.unrealizedProfit) || 0), 0);
 
