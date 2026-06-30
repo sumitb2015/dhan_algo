@@ -76,6 +76,33 @@ function colorFor(sym: string): string {
 const STORAGE_KEY = 'live_normalized_selected_indices';
 const PINNED = new Set(['NIFTY', 'BANKNIFTY']);
 
+// ─── Market hours (IST) ───────────────────────────────────────────────────────
+
+const MARKET_OPEN_SECS  = 9 * 3600 + 15 * 60;  // 09:15:00
+const MARKET_CLOSE_SECS = 15 * 3600 + 30 * 60; // 15:30:00
+
+// Explicit X-axis ticks every 30 minutes from open to close
+const X_AXIS_TICKS: number[] = [];
+for (let s = MARKET_OPEN_SECS; s <= MARKET_CLOSE_SECS; s += 30 * 60) X_AXIS_TICKS.push(s);
+
+function istSecs(): number {
+  const now = new Date();
+  const utcMs = now.getTime() + now.getTimezoneOffset() * 60_000;
+  const ist   = new Date(utcMs + (5 * 60 + 30) * 60_000);
+  return ist.getHours() * 3600 + ist.getMinutes() * 60 + ist.getSeconds();
+}
+
+function secsToHHMM(s: number): string {
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
+}
+
+function timeStrToSecs(t: string): number {
+  const [hh, mm, ss] = t.split(':').map(Number);
+  return hh * 3600 + mm * 60 + (ss ?? 0);
+}
+
 // ─── Custom tooltip ───────────────────────────────────────────────────────────
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -101,7 +128,9 @@ function PctTooltip({ active, payload, label, opens, labels, activeSymbols }: Pc
 
   return (
     <div className="bg-zinc-900 border border-zinc-700 rounded-lg p-2.5 text-[11px] shadow-xl min-w-[200px]">
-      <div className="text-zinc-400 font-semibold mb-1.5 pb-1 border-b border-zinc-800">{label}</div>
+      <div className="text-zinc-400 font-semibold mb-1.5 pb-1 border-b border-zinc-800">
+        {typeof label === 'number' ? secsToHHMM(label) : String(label)}
+      </div>
       {entries.map(({ sym, pct, ltp }) => (
         <div key={sym} className="flex items-center justify-between gap-4 py-0.5">
           <span className="flex items-center gap-1.5">
@@ -163,8 +192,15 @@ export default function LiveNormalizedTab() {
   const [selected, setSelected]         = useState<Set<string>>(new Set(PINNED));
   const [actionLoading, setActionLoading] = useState(false);
   const [lastTick, setLastTick]         = useState<Date | null>(null);
+  const [currentIST, setCurrentIST]     = useState<number>(istSecs);
   const pollRef                         = useRef<ReturnType<typeof setInterval> | null>(null);
   const initializedRef                  = useRef(false);
+
+  // ── Update IST clock every 30 s for market-hours gating ───────────────────
+  useEffect(() => {
+    const id = setInterval(() => setCurrentIST(istSecs()), 30_000);
+    return () => clearInterval(id);
+  }, []);
 
   // ── Restore selection from localStorage ────────────────────────────────────
   useEffect(() => {
@@ -236,11 +272,13 @@ export default function LiveNormalizedTab() {
     });
   }, []);
 
-  // ── Normalise ticks to % from open ────────────────────────────────────────
+  // ── Normalise ticks to % from open; add numeric ts for fixed X-axis ───────
   const pctTicks = useMemo(() => {
     if (!history?.ticks?.length || !history.opens) return [];
     return history.ticks.map((tick) => {
-      const entry: Record<string, string | number> = { t: tick.t as string };
+      const t  = tick.t as string;
+      const ts = timeStrToSecs(t);
+      const entry: Record<string, string | number> = { t, ts };
       for (const sym of history.available) {
         const ltp  = tick[sym] as number | undefined;
         const open = history.opens[sym];
@@ -256,9 +294,10 @@ export default function LiveNormalizedTab() {
     ? history.available.filter((s) => selected.has(s))
     : [];
 
-  const isLive     = bridgeStatus.status === 'RUNNING';
-  const isStarting = bridgeStatus.status === 'STARTING';
+  const isLive      = bridgeStatus.status === 'RUNNING';
+  const isStarting  = bridgeStatus.status === 'STARTING';
   const staleQuotes = lastTick && (Date.now() - lastTick.getTime() > 15_000);
+  const isMarketOpen = currentIST >= MARKET_OPEN_SECS && currentIST <= MARKET_CLOSE_SECS;
 
   // Group available indices by category
   const byCategory = useMemo(() => {
@@ -271,11 +310,6 @@ export default function LiveNormalizedTab() {
     }
     return map;
   }, [history]);
-
-  // X-axis tick spacing: show ~12 ticks max
-  const xInterval = pctTicks.length > 12
-    ? Math.floor(pctTicks.length / 12)
-    : 0;
 
   return (
     <div className="flex flex-col gap-3">
@@ -324,7 +358,7 @@ export default function LiveNormalizedTab() {
       </div>
 
       {/* ── Offline banner ── */}
-      {!isLive && !isStarting && (
+      {isMarketOpen && !isLive && !isStarting && (
         <div className="flex flex-wrap items-center gap-2.5 px-3 py-2.5 rounded-lg border border-zinc-700/50 bg-zinc-900/40 text-[12px]">
           <WifiOff className="h-4 w-4 text-zinc-500 shrink-0" />
           <span className="text-zinc-400">Indices WebSocket feed is offline — start the feed to see live normalized charts.</span>
@@ -339,15 +373,26 @@ export default function LiveNormalizedTab() {
       )}
 
       {/* ── Connecting banner ── */}
-      {isStarting && (
+      {isMarketOpen && isStarting && (
         <div className="flex items-center gap-2.5 px-3 py-2 rounded-lg border border-amber-500/25 bg-amber-500/5 text-[12px] text-amber-300">
           <RefreshCw className="h-3.5 w-3.5 animate-spin shrink-0" />
           Connecting to index WebSocket — first ticks usually arrive within 5–10 seconds…
         </div>
       )}
 
-      {/* ── Index selector grid ── */}
-      {history && history.available.length > 0 && (
+      {/* ── Market closed state ── */}
+      {!isMarketOpen && (
+        <div className="rounded-lg border border-zinc-800 bg-zinc-950 flex flex-col items-center justify-center h-[420px] gap-2">
+          <Activity className="h-6 w-6 text-zinc-700" />
+          <span className="text-zinc-400 text-[13px] font-semibold">
+            {currentIST < MARKET_OPEN_SECS ? 'Pre-market' : 'Market Closed'}
+          </span>
+          <span className="text-zinc-600 text-[11px]">Trading session: 09:15 – 15:30 IST</span>
+        </div>
+      )}
+
+      {/* ── Index selector grid (market hours only) ── */}
+      {isMarketOpen && history && history.available.length > 0 && (
         <div className="rounded-lg border border-zinc-800 bg-zinc-950 p-3 flex flex-col gap-2.5">
           {Object.entries(byCategory).map(([cat, syms]) => (
             <div key={cat}>
@@ -370,64 +415,69 @@ export default function LiveNormalizedTab() {
         </div>
       )}
 
-      {/* ── Chart area ── */}
-      <div className="rounded-lg border border-zinc-800 bg-zinc-950 overflow-hidden">
-        {pctTicks.length < 2 ? (
-          <div className="flex flex-col items-center justify-center h-[420px] gap-2">
-            {isLive || isStarting
-              ? <><RefreshCw className="h-5 w-5 text-zinc-600 animate-spin" /><span className="text-zinc-500 text-[12px]">Waiting for first ticks…</span></>
-              : <><Activity className="h-5 w-5 text-zinc-700" /><span className="text-zinc-600 text-[12px]">Start the indices feed to see the chart</span><span className="text-zinc-700 text-[11px]">Market hours: 09:15 – 15:30 IST</span></>
-            }
-          </div>
-        ) : (
-          <ResponsiveContainer width="100%" height={420}>
-            <LineChart data={pctTicks} margin={{ top: 12, right: 16, left: 0, bottom: 4 }}>
-              <XAxis
-                dataKey="t"
-                tick={{ fontSize: 10, fill: '#a1a1aa', fontWeight: 500 }}
-                tickLine={false}
-                axisLine={{ stroke: '#27272a' }}
-                interval={xInterval}
-                tickFormatter={(v: string) => v.slice(0, 5)}
-              />
-              <YAxis
-                tick={{ fontSize: 10, fill: '#a1a1aa', fontWeight: 500 }}
-                tickLine={false}
-                axisLine={false}
-                width={52}
-                tickFormatter={(v: number) => `${v >= 0 ? '+' : ''}${v.toFixed(2)}%`}
-                domain={['auto', 'auto']}
-              />
-              <ReferenceLine y={0} stroke="#3f3f46" strokeDasharray="4 2" />
-              <Tooltip
-                content={(props) => (
-                  <PctTooltip
-                    {...props}
-                    opens={history?.opens ?? {}}
-                    labels={history?.labels ?? {}}
-                    activeSymbols={activeSymbols}
-                  />
-                )}
-              />
-              {activeSymbols.map((sym) => (
-                <Line
-                  key={sym}
-                  type="monotone"
-                  dataKey={sym}
-                  stroke={colorFor(sym)}
-                  strokeWidth={1.5}
-                  dot={false}
-                  isAnimationActive={false}
-                  connectNulls
+      {/* ── Chart area (market hours only) ── */}
+      {isMarketOpen && (
+        <div className="rounded-lg border border-zinc-800 bg-zinc-950 overflow-hidden">
+          {pctTicks.length < 2 ? (
+            <div className="flex flex-col items-center justify-center h-[420px] gap-2">
+              {isLive || isStarting
+                ? <><RefreshCw className="h-5 w-5 text-zinc-600 animate-spin" /><span className="text-zinc-500 text-[12px]">Waiting for first ticks…</span></>
+                : <><Activity className="h-5 w-5 text-zinc-700" /><span className="text-zinc-600 text-[12px]">Start the indices feed to see the chart</span></>
+              }
+            </div>
+          ) : (
+            <ResponsiveContainer width="100%" height={420}>
+              <LineChart data={pctTicks} margin={{ top: 12, right: 16, left: 0, bottom: 4 }}>
+                <XAxis
+                  dataKey="ts"
+                  type="number"
+                  scale="linear"
+                  domain={[MARKET_OPEN_SECS, MARKET_CLOSE_SECS]}
+                  ticks={X_AXIS_TICKS}
+                  tick={{ fontSize: 10, fill: '#a1a1aa', fontWeight: 500 }}
+                  tickLine={false}
+                  axisLine={{ stroke: '#27272a' }}
+                  tickFormatter={(v: number) => secsToHHMM(v)}
                 />
-              ))}
-            </LineChart>
-          </ResponsiveContainer>
-        )}
-      </div>
+                <YAxis
+                  tick={{ fontSize: 10, fill: '#a1a1aa', fontWeight: 500 }}
+                  tickLine={false}
+                  axisLine={false}
+                  width={52}
+                  tickFormatter={(v: number) => `${v >= 0 ? '+' : ''}${v.toFixed(2)}%`}
+                  domain={['auto', 'auto']}
+                />
+                <ReferenceLine y={0} stroke="#3f3f46" strokeDasharray="4 2" />
+                <Tooltip
+                  content={(props) => (
+                    <PctTooltip
+                      {...props}
+                      opens={history?.opens ?? {}}
+                      labels={history?.labels ?? {}}
+                      activeSymbols={activeSymbols}
+                    />
+                  )}
+                />
+                {activeSymbols.map((sym) => (
+                  <Line
+                    key={sym}
+                    type="monotone"
+                    dataKey={sym}
+                    stroke={colorFor(sym)}
+                    strokeWidth={1.5}
+                    dot={false}
+                    isAnimationActive={false}
+                    connectNulls
+                  />
+                ))}
+              </LineChart>
+            </ResponsiveContainer>
+          )}
+        </div>
+      )}
 
       {/* ── Footer note ── */}
-      {pctTicks.length > 1 && (
+      {isMarketOpen && pctTicks.length > 1 && (
         <div className="text-[10px] text-zinc-700 text-right px-1">
           {pctTicks.length} ticks · normalised to session open · {activeSymbols.length} of {history?.available.length ?? 0} indices shown
         </div>
