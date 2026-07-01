@@ -10,6 +10,7 @@ const NAV_LINKS = [
   { href: '/normalized', label: 'Charts' },
   { href: '/breadth', label: 'Breadth' },
   { href: '/diffusion', label: 'Diffusion' },
+  { href: '/futures', label: 'Futures' },
   { href: '/distribution', label: 'Distribution' },
   { href: '/live', label: 'Live' },
   { href: '/strategies', label: 'Strategies' },
