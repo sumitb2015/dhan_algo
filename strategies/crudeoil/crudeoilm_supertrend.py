@@ -288,9 +288,10 @@ class CrudeOilMSupertrendStrategy:
             now_ts = time.time()
             if now_ts - last_log_time >= 30:
                 total = self.cumulative_pnl + self.position_pnl
+                vwap_str = f" | VWAP: {self.vwap:.2f}" if self.use_vwap and self.vwap > 0 else ""
                 logger.info(
-                    "[MONITOR] Dir: %s | Entry: %.2f | LTP: %.2f | ST SL: %.2f | Pos P&L: %.2f | Day P&L: %.2f",
-                    self.direction, self.entry_price, ltp, self.st_level, self.position_pnl, total
+                    "[MONITOR] Dir: %s | Entry: %.2f | LTP: %.2f | ST: %.2f%s | Pos P&L: %.2f | Day P&L: %.2f",
+                    self.direction, self.entry_price, ltp, self.st_level, vwap_str, self.position_pnl, total
                 )
                 last_log_time = now_ts
 
