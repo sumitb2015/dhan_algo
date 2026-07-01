@@ -22,12 +22,22 @@ interface BridgeStatus {
 interface IndexHistory {
   session_date: string;
   updated_at: string;
-  available: string[];
+  catalogue?: string[];  // all subscribed symbols (for dropdown)
+  available: string[];   // currently active/selected subset
   labels: Record<string, string>;
   categories: Record<string, string>;
   opens: Record<string, number>;
   ltps: Record<string, number>;
   ticks: Array<Record<string, string | number>>;
+}
+
+// Fire-and-forget: write selection to bridge's selection file
+function syncSelection(syms: Set<string>) {
+  fetch('/api/live-indices', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ action: 'select', symbols: [...syms] }),
+  }).catch(() => {});
 }
 
 // ─── Colour palette ───────────────────────────────────────────────────────────
@@ -302,24 +312,32 @@ export default function LiveNormalizedTab() {
     return () => clearInterval(id);
   }, []);
 
-  // ── Restore selection from localStorage ────────────────────────────────────
+  // ── Restore selection from localStorage and sync to bridge ────────────────
   useEffect(() => {
     try {
       const stored = localStorage.getItem(STORAGE_KEY);
       if (stored) {
         const parsed: string[] = JSON.parse(stored);
-        setSelected(new Set([...PINNED, ...parsed]));
+        const next = new Set([...PINNED, ...parsed]);
+        setSelected(next);
+        syncSelection(next);
+      } else {
+        syncSelection(new Set(PINNED));
       }
     } catch { /* ignore */ }
   }, []);
 
-  // ── When history first arrives, select all available indices ───────────────
+  // ── When history first arrives, select all catalogue symbols ──────────────
   useEffect(() => {
     if (!history || initializedRef.current) return;
     const stored = localStorage.getItem(STORAGE_KEY);
-    if (!stored && history.available.length > 0) {
-      // First ever load — select everything
-      setSelected(new Set(history.available));
+    if (!stored) {
+      const allSyms = history.catalogue ?? history.available;
+      if (allSyms.length > 0) {
+        const next = new Set(allSyms);
+        setSelected(next);
+        syncSelection(next);
+      }
     }
     initializedRef.current = true;
   }, [history]);
@@ -364,6 +382,7 @@ export default function LiveNormalizedTab() {
         const toStore = [...next].filter((s) => !PINNED.has(s));
         localStorage.setItem(STORAGE_KEY, JSON.stringify(toStore));
       } catch { /* ignore */ }
+      syncSelection(next);
       return next;
     });
   }, []);
@@ -371,12 +390,13 @@ export default function LiveNormalizedTab() {
   // ── Select all / clear all handlers ───────────────────────────────────────
   const selectAll = useCallback(() => {
     if (!history) return;
-    const next = new Set(history.available);
+    const next = new Set(history.catalogue ?? history.available);
     setSelected(next);
     try {
       const toStore = [...next].filter((s) => !PINNED.has(s));
       localStorage.setItem(STORAGE_KEY, JSON.stringify(toStore));
     } catch { /* ignore */ }
+    syncSelection(next);
   }, [history]);
 
   const clearAll = useCallback(() => {
@@ -385,6 +405,7 @@ export default function LiveNormalizedTab() {
     try {
       localStorage.setItem(STORAGE_KEY, JSON.stringify([]));
     } catch { /* ignore */ }
+    syncSelection(next);
   }, []);
 
   // ── Normalise ticks to % from open; add numeric ts for fixed X-axis ───────
@@ -448,9 +469,9 @@ export default function LiveNormalizedTab() {
           {isLive || isStarting ? 'Stop Indices Feed' : 'Start Indices Feed'}
         </button>
 
-        {history && history.available.length > 0 && (
+        {history && (history.catalogue ?? history.available).length > 0 && (
           <IndexDropdown
-            available={history.available}
+            available={history.catalogue ?? history.available}
             labels={history.labels}
             categories={history.categories}
             selected={selected}

@@ -3,13 +3,14 @@ import path from 'path';
 import fs from 'fs';
 import { execSync, spawn } from 'child_process';
 
-const PROJECT_ROOT  = path.resolve(process.cwd(), '..');
-const DEBUG_DIR     = path.join(PROJECT_ROOT, 'debug');
-const PYTHON_EXE    = path.join(PROJECT_ROOT, 'venv', 'Scripts', 'pythonw.exe');
-const BRIDGE_SCRIPT = path.join(PROJECT_ROOT, 'scripts', 'tools', 'live_indices_ws.py');
-const HISTORY_FILE  = path.join(DEBUG_DIR, 'live_indices_history.json');
-const STATUS_FILE   = path.join(DEBUG_DIR, 'live_indices_status.json');
-const STOP_TRIGGER  = path.join(DEBUG_DIR, 'live_indices_stop.trigger');
+const PROJECT_ROOT   = path.resolve(process.cwd(), '..');
+const DEBUG_DIR      = path.join(PROJECT_ROOT, 'debug');
+const PYTHON_EXE     = path.join(PROJECT_ROOT, 'venv', 'Scripts', 'pythonw.exe');
+const BRIDGE_SCRIPT  = path.join(PROJECT_ROOT, 'scripts', 'tools', 'live_indices_ws.py');
+const HISTORY_FILE   = path.join(DEBUG_DIR, 'live_indices_history.json');
+const STATUS_FILE    = path.join(DEBUG_DIR, 'live_indices_status.json');
+const STOP_TRIGGER   = path.join(DEBUG_DIR, 'live_indices_stop.trigger');
+const SELECTION_FILE = path.join(DEBUG_DIR, 'live_indices_selection.json');
 
 function readJson(file: string): any | null {
   try {
@@ -63,6 +64,12 @@ export async function POST(request: NextRequest) {
   if (action === 'stop') {
     fs.writeFileSync(STOP_TRIGGER, '');
     return NextResponse.json({ success: true, message: 'Stop trigger written' });
+  }
+
+  if (action === 'select') {
+    const symbols = Array.isArray(body.symbols) ? (body.symbols as string[]) : [];
+    fs.writeFileSync(SELECTION_FILE, JSON.stringify({ selected: symbols }));
+    return NextResponse.json({ success: true, message: 'Selection updated' });
   }
 
   if (action === 'start') {

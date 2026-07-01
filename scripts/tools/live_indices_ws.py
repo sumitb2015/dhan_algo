@@ -31,10 +31,11 @@ sys.path.insert(0, ROOT)
 from login import get_dhan_client
 from lib.dhan_helper import DhanHelper
 
-DEBUG_DIR    = os.path.join(ROOT, 'debug')
-HISTORY_FILE = os.path.join(DEBUG_DIR, 'live_indices_history.json')
-STATUS_FILE  = os.path.join(DEBUG_DIR, 'live_indices_status.json')
-STOP_TRIGGER = os.path.join(DEBUG_DIR, 'live_indices_stop.trigger')
+DEBUG_DIR        = os.path.join(ROOT, 'debug')
+HISTORY_FILE     = os.path.join(DEBUG_DIR, 'live_indices_history.json')
+STATUS_FILE      = os.path.join(DEBUG_DIR, 'live_indices_status.json')
+STOP_TRIGGER     = os.path.join(DEBUG_DIR, 'live_indices_stop.trigger')
+SELECTION_FILE   = os.path.join(DEBUG_DIR, 'live_indices_selection.json')
 
 # MarketFeed segment/type constants (from dhanhq SDK)
 IDX        = 0   # Index segment
@@ -73,6 +74,19 @@ INDEX_CATALOGUE = [
     # Volatility
     ('INDIA VIX',          'India VIX',           'Volatility'),
 ]
+
+
+def read_selection() -> set | None:
+    """Return set of selected symbols from selection file, or None if not set."""
+    try:
+        if os.path.exists(SELECTION_FILE):
+            data = json.loads(open(SELECTION_FILE).read())
+            sel = data.get('selected')
+            if isinstance(sel, list):
+                return set(sel)
+    except Exception:
+        pass
+    return None
 
 
 def atomic_write(path: str, data: dict):
@@ -181,7 +195,12 @@ def main():
                 print('[live_indices_ws] Stop trigger detected - exiting.', flush=True)
                 break
 
-            # ── Collect snapshot ──────────────────────────────────────────────
+            # ── Determine active symbols from selection file ──────────────────
+            selection = read_selection()
+            all_syms  = set(sid_to_symbol.values())
+            active_symbols = (selection & all_syms) if selection is not None else all_syms
+
+            # ── Collect snapshot for ALL subscribed (keeps last_known complete) ─
             snapshot: dict[str, float] = {}
             for sid, sym in sid_to_symbol.items():
                 tick = helper.live_data.get(sid)
@@ -189,28 +208,34 @@ def main():
                     ltp = float(tick.get('LTP') or tick.get('last_price') or 0)
                     if ltp > 0:
                         last_known[sym] = ltp
-                # forward-fill if no new tick
                 if sym in last_known:
                     snapshot[sym] = last_known[sym]
 
             if snapshot:
-                # Capture session open on first valid tick per symbol
+                # Preserve session opens for ALL symbols (so re-adding a symbol
+                # keeps its original open for correct normalisation)
                 for sym, ltp in snapshot.items():
                     if sym not in opens:
                         opens[sym] = ltp
 
-                entry: dict = {'t': ist_time()}
-                entry.update(snapshot)
-                ticks.append(entry)
+                # Tick entry: only active symbols
+                active_snapshot = {sym: ltp for sym, ltp in snapshot.items()
+                                   if sym in active_symbols}
+                if active_snapshot:
+                    entry: dict = {'t': ist_time()}
+                    entry.update(active_snapshot)
+                    ticks.append(entry)
 
-            # ── Build current LTPs map ────────────────────────────────────────
-            ltps = {sym: last_known[sym] for sym in last_known}
+            # ── Build LTPs for active symbols only ────────────────────────────
+            ltps = {sym: last_known[sym] for sym in active_symbols if sym in last_known}
 
             # ── Write history file ────────────────────────────────────────────
-            available = list(sid_to_symbol.values())
+            catalogue = list(sid_to_symbol.values())  # all subscribed
+            available = [sym for sym in catalogue if sym in active_symbols]
             atomic_write(HISTORY_FILE, {
                 'session_date': session_date,
                 'updated_at':   datetime.now().isoformat(),
+                'catalogue':    catalogue,
                 'available':    available,
                 'labels':       labels,
                 'categories':   categories,
@@ -218,7 +243,7 @@ def main():
                 'ltps':         ltps,
                 'ticks':        ticks,
             })
-            write_status('RUNNING', subscribed=n, started_at=started_at)
+            write_status('RUNNING', subscribed=len(active_symbols), started_at=started_at)
 
             time.sleep(args.interval)
 
