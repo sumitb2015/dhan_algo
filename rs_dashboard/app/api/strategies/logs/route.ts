@@ -15,6 +15,7 @@ const STRATEGY_LOG_DIRS: Record<string, string> = {
   nifty_intraday_vwap_straddle:  'intraday_vwap',
   nifty_vwap_1min_straddle:      'vwap_1min',
   nifty_oi_directional:          'oi_directional',
+  crudeoilm_supertrend:          'crudeoil',
 };
 
 /** Returns the path to the most-recently-modified .log file in the strategy's folder. */
