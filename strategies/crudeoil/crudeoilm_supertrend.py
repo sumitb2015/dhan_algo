@@ -56,8 +56,8 @@ class CrudeOilMSupertrendStrategy:
         supertrend_multiplier: float = 3.0,
         target_profit: float = 3000.0,
         stop_loss: float = 3000.0,
-        start_time: str = "17:00",
-        eod_time: str = "23:25",
+        start_time: str = "09:00",
+        eod_time: str = "23:30",
         cooldown_candles: int = 1,
         use_vwap: bool = False,
     ):
@@ -401,7 +401,7 @@ class CrudeOilMSupertrendStrategy:
             now_str = now.strftime("%H:%M")
             if now_str >= self.eod_time:
                 return  # let outer loop handle EOD
-            if now.weekday() < 5 and now_str >= self.start_time:
+            if now_str >= self.start_time:
                 return  # session is open
             next_check = 60 if not self.dry_run else 5
             logger.info("Waiting for MCX session to open (%s IST). Current: %s", self.start_time, now_str)
@@ -516,10 +516,10 @@ Examples:
                         help="Daily profit target in INR (default: 3000)")
     parser.add_argument("--stop-loss", type=float, default=3000.0,
                         help="Daily stop loss in INR (default: 3000)")
-    parser.add_argument("--start-time", type=str, default="17:00",
-                        help="Session start time HH:MM IST (default: 17:00)")
-    parser.add_argument("--eod-time", type=str, default="23:25",
-                        help="End-of-day time HH:MM IST (default: 23:25)")
+    parser.add_argument("--start-time", type=str, default="09:00",
+                        help="Session start time HH:MM IST (default: 09:00)")
+    parser.add_argument("--eod-time", type=str, default="23:30",
+                        help="End-of-day time HH:MM IST (default: 23:30)")
     parser.add_argument("--cooldown-candles", type=int, default=1,
                         help="Candles to skip after exit before re-entry (default: 1)")
     parser.add_argument("--use-vwap", action="store_true", default=False,

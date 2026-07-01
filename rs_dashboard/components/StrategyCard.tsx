@@ -153,8 +153,8 @@ export default function StrategyCard({ meta, state, onRefresh }: StrategyCardPro
   const [crudeoilInterval, setCrudeoilInterval] = useState<string>('5');
   const [crudeoilStPeriod, setCrudeoilStPeriod] = useState<number>(7);
   const [crudeoilStMultiplier, setCrudeoilStMultiplier] = useState<number>(3.0);
-  const [crudeoilStartTime, setCrudeoilStartTime] = useState<string>('17:00');
-  const [crudeoilEodTime, setCrudeoilEodTime] = useState<string>('23:25');
+  const [crudeoilStartTime, setCrudeoilStartTime] = useState<string>('09:00');
+  const [crudeoilEodTime, setCrudeoilEodTime] = useState<string>('23:30');
   const [crudeoilUseVwap, setCrudeoilUseVwap] = useState<boolean>(false);
 
   const spreadTrendNoIndicators =

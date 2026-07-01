@@ -88,8 +88,8 @@ export default function StrategyRowWide({ meta, state, onRefresh }: Props) {
   const [crudeoilInterval, setCrudeoilInterval] = useState('5');
   const [crudeoilStPeriod, setCrudeoilStPeriod] = useState(7);
   const [crudeoilStMultiplier, setCrudeoilStMultiplier] = useState(3.0);
-  const [crudeoilStartTime, setCrudeoilStartTime] = useState('17:00');
-  const [crudeoilEodTime, setCrudeoilEodTime] = useState('23:25');
+  const [crudeoilStartTime, setCrudeoilStartTime] = useState('09:00');
+  const [crudeoilEodTime, setCrudeoilEodTime] = useState('23:30');
   const [crudeoilUseVwap, setCrudeoilUseVwap] = useState(false);
 
   const spreadTrendNoIndicators = meta.key === 'nifty_spread_trend' && !useEma && !useSupertrend;
