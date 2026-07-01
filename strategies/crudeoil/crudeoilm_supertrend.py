@@ -460,6 +460,32 @@ class CrudeOilMSupertrendStrategy:
             return 999
 
     # ------------------------------------------------------------------
+    # Contract Resolution
+    # ------------------------------------------------------------------
+
+    def _ensure_contract_resolved(self) -> None:
+        """Resolve and cache the nearest CRUDEOILM futures contract if not already done."""
+        if self.security_id:
+            return
+        future = self.helper.find_future(SYMBOL, exchange=EXCHANGE, instrument=INSTRUMENT)
+        if future is None:
+            return
+        self.security_id = str(future.get("securityId") or future.get("security_id", ""))
+        self.expiry = str(future.get("expiryDate") or future.get("expiry", ""))
+        try:
+            self.lot_size = int(future.get("lotSize") or future.get("lot_size", 10))
+        except (ValueError, TypeError):
+            self.lot_size = 10
+        self.qty = self.lot_size * self.lots
+
+    def _get_ltp_safe(self) -> float:
+        """Fetch current LTP; resolves contract lazily. Returns 0.0 on failure."""
+        self._ensure_contract_resolved()
+        if not self.security_id:
+            return 0.0
+        return self.helper.get_ltp(self.security_id, exchange=SEGMENT, instrument=INSTRUMENT)
+
+    # ------------------------------------------------------------------
     # MCX Session Wait
     # ------------------------------------------------------------------
 
@@ -528,6 +554,8 @@ class CrudeOilMSupertrendStrategy:
                     self.save_state(status="STOPPED")
                     break
 
+                # Resolve contract early so LTP is available during scan
+                self._ensure_contract_resolved()
                 self.save_state(status="SCANNING")
 
                 signal, _, initial_st = self.get_signal()
@@ -548,7 +576,9 @@ class CrudeOilMSupertrendStrategy:
                     if success:
                         self.monitor_position()
                 else:
-                    logger.info("Signal: NEUTRAL. Waiting for trend confirmation...")
+                    current_ltp = self._get_ltp_safe()
+                    price_str = f" | {SYMBOL} LTP: {current_ltp:.2f}" if current_ltp > 0 else ""
+                    logger.info("Signal: NEUTRAL. Waiting for trend confirmation...%s", price_str)
                     time.sleep(20 if self.dry_run else 30)
 
             except Exception as e:
