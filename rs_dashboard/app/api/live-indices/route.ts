@@ -68,6 +68,9 @@ export async function POST(request: NextRequest) {
 
   if (action === 'select') {
     const symbols = Array.isArray(body.symbols) ? (body.symbols as string[]) : [];
+    if (symbols.length === 0) {
+      return NextResponse.json({ success: false, error: 'symbols must be non-empty' }, { status: 400 });
+    }
     fs.writeFileSync(SELECTION_FILE, JSON.stringify({ selected: symbols }));
     return NextResponse.json({ success: true, message: 'Selection updated' });
   }

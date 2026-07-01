@@ -25,16 +25,20 @@ export async function GET(request: NextRequest) {
 
   const stream = new ReadableStream({
     start(controller) {
-      let lastUpdatedAt = '';
+      let lastChangeKey = '';
 
       const tick = () => {
-        const history = readJson(HISTORY_FILE);
-        const status  = readJson(STATUS_FILE) ?? { status: 'STOPPED', subscribed: 0 };
-        const updatedAt = (history?.updated_at as string) ?? '';
+        const history   = readJson(HISTORY_FILE);
+        const status    = readJson(STATUS_FILE) ?? { status: 'STOPPED', subscribed: 0 };
+        const historyAt = (history?.updated_at   as string) ?? '';
+        const statusAt  = (status.last_update    as string) ?? '';
+        // Combined key: fires when history changes OR when status changes (e.g. bridge stops).
+        // Also fires on the very first call because '' !== '|' is true, guaranteeing
+        // an immediate event even when no history file exists yet.
+        const changeKey = `${historyAt}|${statusAt}`;
 
-        // Send immediately on first call (lastUpdatedAt === ''), then only on change
-        if (updatedAt !== lastUpdatedAt) {
-          lastUpdatedAt = updatedAt;
+        if (changeKey !== lastChangeKey) {
+          lastChangeKey = changeKey;
           const payload = { success: true, status, history: history ?? null };
           try {
             controller.enqueue(encoder.encode(`data: ${JSON.stringify(payload)}\n\n`));

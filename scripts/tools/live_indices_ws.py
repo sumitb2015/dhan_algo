@@ -80,7 +80,8 @@ def read_selection() -> set | None:
     """Return set of selected symbols from selection file, or None if not set."""
     try:
         if os.path.exists(SELECTION_FILE):
-            data = json.loads(open(SELECTION_FILE).read())
+            with open(SELECTION_FILE) as f:
+                data = json.loads(f.read())
             sel = data.get('selected')
             if isinstance(sel, list):
                 return set(sel)
@@ -171,16 +172,23 @@ def main():
 
     try:
         if os.path.exists(HISTORY_FILE):
-            existing = json.loads(open(HISTORY_FILE).read())
+            with open(HISTORY_FILE) as f:
+                existing = json.loads(f.read())
             if existing.get('session_date') == session_date:
-                opens = existing.get('opens', {})
-                ticks = existing.get('ticks', [])
-                print(f'[live_indices_ws] Restored {len(opens)} opens and '
-                      f'{len(ticks)} ticks from existing history', flush=True)
+                opens      = existing.get('opens', {})
+                ticks      = existing.get('ticks', [])
+                # Restore forward-fill buffer so slow-ticking symbols don't gap
+                last_known = dict(existing.get('ltps', {}))
+                print(f'[live_indices_ws] Restored {len(opens)} opens, '
+                      f'{len(ticks)} ticks, {len(last_known)} last-known LTPs', flush=True)
     except Exception as e:
         print(f'[live_indices_ws] WARNING: could not restore history: {e}', flush=True)
 
-    write_status('RUNNING', subscribed=n, started_at=started_at)
+    # Use the current selection to report the correct initial subscribed count
+    initial_sel    = read_selection()
+    all_syms       = set(sid_to_symbol.values())
+    initial_active = (initial_sel & all_syms) if initial_sel is not None else all_syms
+    write_status('RUNNING', subscribed=len(initial_active), started_at=started_at)
     print('[live_indices_ws] WebSocket connected. Writing history every '
           f'{args.interval}s...', flush=True)
 

@@ -321,9 +321,12 @@ export default function LiveNormalizedTab() {
         const next = new Set([...PINNED, ...parsed]);
         setSelected(next);
         syncSelection(next);
-      } else {
-        syncSelection(new Set(PINNED));
+        // Mark as initialized so the history effect doesn't override with all-symbols
+        initializedRef.current = true;
       }
+      // No else-branch sync: the initializedRef effect handles first-ever load
+      // by selecting all catalogue symbols once history arrives, avoiding a race
+      // where two POSTs fight over the selection file.
     } catch { /* ignore */ }
   }, []);
 
@@ -579,7 +582,7 @@ export default function LiveNormalizedTab() {
                     strokeWidth={1.5}
                     dot={false}
                     isAnimationActive={false}
-                    connectNulls
+                    connectNulls={false}
                   />
                 ))}
               </LineChart>
