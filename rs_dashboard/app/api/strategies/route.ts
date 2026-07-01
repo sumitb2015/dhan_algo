@@ -37,6 +37,10 @@ const STRATEGIES_METADATA: Record<string, { name: string; path: string }> = {
     name: 'Nifty OI Directional',
     path: path.join(PROJECT_ROOT, 'strategies', 'oi_directional', 'nifty_oi_directional.py')
   },
+  crudeoilm_supertrend: {
+    name: 'CrudeOil Mini Supertrend',
+    path: path.join(PROJECT_ROOT, 'strategies', 'crudeoil', 'crudeoilm_supertrend.py')
+  },
 };
 
 /**
