@@ -51,6 +51,7 @@ def fetch_chunk(url: str, headers: dict, security_id: str, segment: str,
         "exchangeSegment": segment,
         "instrument": "FUTIDX",
         "interval": 1,
+        "oi": True,
         "fromDate": from_dt.strftime("%Y-%m-%d %H:%M:%S"),
         "toDate":   to_dt.strftime("%Y-%m-%d %H:%M:%S"),
     }
@@ -89,6 +90,7 @@ def fetch_daily_chunk(url: str, headers: dict, security_id: str, segment: str,
         "securityId": security_id,
         "exchangeSegment": segment,
         "instrument": "FUTIDX",
+        "oi": True,
         "fromDate": from_date,
         "toDate":   to_date,
     }
@@ -164,7 +166,10 @@ def download_futures_daily(helper: DhanHelper, url: str, headers: dict,
         return
 
     df_final = pd.concat(all_chunks)
-    df_final = df_final[~df_final.index.duplicated(keep="first")].sort_index()
+    df_final = (df_final.reset_index()
+                .drop_duplicates(subset=["Datetime", "Contract"])
+                .sort_values(["Datetime", "Contract"])
+                .set_index("Datetime"))
 
     out = os.path.join(save_dir, f"{underlying}_Futures_Daily.csv")
     df_final.to_csv(out)
@@ -205,7 +210,7 @@ def download_futures(helper: DhanHelper, url: str, headers: dict,
         contract_end   = min(expiry_dt, datetime.now())
 
         print(f"\n  Contract: {name} (ID:{sec_id})")
-        print(f"  Fetching: {contract_start.date()} → {contract_end.date()}")
+        print(f"  Fetching: {contract_start.date()} to {contract_end.date()}")
 
         cur = contract_start
         while cur < contract_end:
@@ -225,14 +230,125 @@ def download_futures(helper: DhanHelper, url: str, headers: dict,
         return
 
     df_final = pd.concat(all_chunks)
-    df_final = df_final[~df_final.index.duplicated(keep="first")].sort_index()
+    # Reset index so Datetime becomes a column, deduplicate per (Datetime, Contract) pair
+    # to handle chunked-fetch overlaps without dropping rows from different contracts.
+    df_final = df_final.reset_index()
+    df_final = (df_final
+                .drop_duplicates(subset=["Datetime", "Contract"])
+                .sort_values(["Datetime", "Contract"])
+                .set_index("Datetime"))
 
     out = os.path.join(save_dir, f"{underlying}_Futures_1min_Manual.csv")
     df_final.to_csv(out)
     print(f"\n  [SUCCESS] Saved → {out}")
     print(f"  Rows: {len(df_final)} | {df_final.index[0]} → {df_final.index[-1]}")
+    print(f"  Contracts: {sorted(df_final['Contract'].unique().tolist())}")
     print("\n  NOTE: Only contracts currently in the Dhan master list are included.")
     print("  To build a longer history, run this script monthly before each contract expires.")
+
+
+def download_futstk_oi_snapshot(helper: DhanHelper, url: str, headers: dict, save_dir: str):
+    """Fetch near-month FUTSTK daily OI for all F&O stocks and write a classification snapshot."""
+    print("\n>>> STOCK FUTURES OI SNAPSHOT <<<")
+
+    df_master = helper._load_master_list()
+    futstk = df_master[df_master["INSTRUMENT"] == "FUTSTK"].copy()
+    # Exclude test contracts (symbols starting with a digit)
+    futstk = futstk[~futstk["UNDERLYING_SYMBOL"].str[0].str.isdigit()]
+    futstk["SM_EXPIRY_DATE"] = pd.to_datetime(futstk["SM_EXPIRY_DATE"])
+    # Keep near-month only: lowest future expiry per underlying
+    futstk = futstk[futstk["SM_EXPIRY_DATE"] > pd.Timestamp(datetime.now())]
+    near_month = (futstk.sort_values("SM_EXPIRY_DATE")
+                  .drop_duplicates("UNDERLYING_SYMBOL", keep="first"))
+
+    total = len(near_month)
+    print(f"  Found {total} near-month FUTSTK contracts")
+
+    from_date = (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d")
+    to_date   = datetime.now().strftime("%Y-%m-%d")
+
+    rows = []
+    skipped = 0
+
+    for i, (_, row) in enumerate(near_month.iterrows()):
+        sec_id = str(row["SECURITY_ID"])
+        symbol = row["UNDERLYING_SYMBOL"]
+        expiry = row["SM_EXPIRY_DATE"].strftime("%Y-%m-%d")
+
+        if (i + 1) % 20 == 0:
+            _write_status(f"Stock futures OI: {i + 1}/{total}…")
+            print(f"  [{i + 1}/{total}] processed (last: {symbol})")
+
+        payload = {
+            "securityId": sec_id,
+            "exchangeSegment": "NSE_FNO",
+            "instrument": "FUTSTK",
+            "oi": True,
+            "fromDate": from_date,
+            "toDate":   to_date,
+        }
+        try:
+            resp = requests.post(url, headers=headers, json=payload, timeout=30)
+        except Exception:
+            skipped += 1
+            continue
+
+        if resp.status_code != 200:
+            skipped += 1
+            continue
+
+        data = resp.json()
+        if not isinstance(data, dict) or not data.get("close") or len(data["close"]) < 2:
+            skipped += 1
+            continue
+
+        closes = data["close"]
+        ois    = data.get("open_interest", [0] * len(closes))
+
+        close_today = closes[-1]
+        close_prev  = closes[-2]
+        oi_today    = ois[-1]
+        oi_prev     = ois[-2]
+
+        if oi_prev == 0:
+            skipped += 1
+            continue
+
+        price_chg_pct = (close_today - close_prev) / close_prev * 100
+        oi_chg_pct    = (oi_today - oi_prev) / oi_prev * 100
+
+        if price_chg_pct >= 0 and oi_chg_pct >= 0:
+            category = "LONG_BUILDUP"
+        elif price_chg_pct < 0 and oi_chg_pct >= 0:
+            category = "SHORT_BUILDUP"
+        elif price_chg_pct >= 0 and oi_chg_pct < 0:
+            category = "SHORT_COVERING"
+        else:
+            category = "LONG_UNWINDING"
+
+        rows.append({
+            "Symbol":      symbol,
+            "Expiry":      expiry,
+            "Price":       round(close_today, 2),
+            "PriceChgPct": round(price_chg_pct, 2),
+            "OI":          int(oi_today),
+            "OIChgPct":    round(oi_chg_pct, 2),
+            "Category":    category,
+        })
+        time.sleep(0.2)
+
+    if not rows:
+        print(f"  [FAIL] No FUTSTK OI data collected ({skipped} skipped)")
+        return
+
+    df_out = pd.DataFrame(rows)
+    out = os.path.join(save_dir, "FUTSTK_OI_Snapshot.csv")
+    df_out.to_csv(out, index=False)
+
+    counts = df_out["Category"].value_counts()
+    print(f"  [SUCCESS] {out} ({len(df_out)} stocks, {skipped} skipped)")
+    for cat, n in counts.items():
+        print(f"    {cat}: {n}")
 
 
 def main():
@@ -266,6 +382,9 @@ def main():
             download_futures(helper, intraday_url, headers, underlying, segment, save_dir)
             _write_status(f"Downloading {underlying} daily OI data…")
             download_futures_daily(helper, daily_url, headers, underlying, segment, save_dir)
+
+        _write_status("Downloading stock futures OI snapshot…")
+        download_futstk_oi_snapshot(helper, daily_url, headers, save_dir)
 
         _write_status("Done", done=True)
         print("\n[COMPLETE] All futures data downloaded.")
