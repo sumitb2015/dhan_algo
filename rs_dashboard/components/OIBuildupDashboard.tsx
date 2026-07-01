@@ -39,8 +39,8 @@ function QuadrantTable({
   onSort: (key: SortKey) => void;
 }) {
   const sorted = [...rows].sort((a, b) => {
-    const av = a[sortKey];
-    const bv = b[sortKey];
+    const av = a[sortKey] as string | number;
+    const bv = b[sortKey] as string | number;
     const cmp = av < bv ? -1 : av > bv ? 1 : 0;
     return sortDir === 'asc' ? cmp : -cmp;
   });
