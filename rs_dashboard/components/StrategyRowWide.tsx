@@ -30,6 +30,10 @@ interface StrategyState {
   ce_active?: boolean; pe_active?: boolean; ce_sl?: number; pe_sl?: number;
   leg_sl_pct?: number;
   use_ema?: boolean; use_supertrend?: boolean;
+  // CrudeOil Mini Supertrend
+  entry_price?: number; st_level?: number; daily_pnl?: number;
+  expiry?: string; supertrend_period?: number; supertrend_multiplier?: number;
+  ltp?: number; target_profit?: number; use_vwap?: boolean; vwap?: number;
 }
 
 interface Props { meta: StrategyMeta; state: StrategyState; onRefresh: () => void }
@@ -80,6 +84,13 @@ export default function StrategyRowWide({ meta, state, onRefresh }: Props) {
   const [cooldownMinutes, setCooldownMinutes] = useState(5);
   const [useEma, setUseEma] = useState(true);
   const [useSupertrend, setUseSupertrend] = useState(true);
+  // CrudeOil Mini Supertrend
+  const [crudeoilInterval, setCrudeoilInterval] = useState('5');
+  const [crudeoilStPeriod, setCrudeoilStPeriod] = useState(7);
+  const [crudeoilStMultiplier, setCrudeoilStMultiplier] = useState(3.0);
+  const [crudeoilStartTime, setCrudeoilStartTime] = useState('17:00');
+  const [crudeoilEodTime, setCrudeoilEodTime] = useState('23:25');
+  const [crudeoilUseVwap, setCrudeoilUseVwap] = useState(false);
 
   const spreadTrendNoIndicators = meta.key === 'nifty_spread_trend' && !useEma && !useSupertrend;
 
@@ -144,6 +155,13 @@ export default function StrategyRowWide({ meta, state, onRefresh }: Props) {
         args.push('--exit-pcr-change', String(exitPcrChange));
         args.push('--poll-interval', String(pollInterval));
         args.push('--expansion-window', String(expansionWindow));
+      } else if (meta.key === 'crudeoilm_supertrend') {
+        args.push('--interval', crudeoilInterval);
+        args.push('--supertrend-period', String(crudeoilStPeriod));
+        args.push('--supertrend-multiplier', String(crudeoilStMultiplier));
+        args.push('--start-time', crudeoilStartTime);
+        args.push('--eod-time', crudeoilEodTime);
+        if (crudeoilUseVwap) args.push('--use-vwap');
       } else if (meta.key === 'nifty_spread_trend') {
         args.push('--symbol', symbol, '--interval', interval);
         args.push('--ce-offset', String(ceOffset), '--pe-offset', String(peOffset));
@@ -247,6 +265,52 @@ export default function StrategyRowWide({ meta, state, onRefresh }: Props) {
             <div className={lbl}>PCR</div>
             <div className={val}>{state.entry_pcr ? state.entry_pcr.toFixed(3) : '—'}</div>
             {state.exit_pcr_level && <div className="text-[9px] text-zinc-300 font-mono">exit @{state.exit_pcr_level.toFixed(3)}</div>}
+          </div>
+        </div>
+      );
+    }
+
+    if (meta.key === 'crudeoilm_supertrend') {
+      return (
+        <div className="flex items-stretch divide-x divide-zinc-800/60">
+          <div className="px-3 flex flex-col justify-center shrink-0">
+            <div className={lbl}>Direction</div>
+            <div className={`font-mono font-bold text-xs leading-tight ${state.direction === 'LONG' ? 'text-emerald-400' : state.direction === 'SHORT' ? 'text-rose-400' : 'text-zinc-500'}`}>
+              {state.direction || 'NONE'}
+            </div>
+            {state.expiry && <div className="text-[9px] text-zinc-500 font-mono">{state.expiry}</div>}
+          </div>
+          <div className="px-3 flex flex-col justify-center min-w-[110px]">
+            <div className={lbl}>Entry / LTP</div>
+            {state.direction && state.direction !== 'NONE' ? (
+              <>
+                <div className={val}>{state.ltp != null ? state.ltp.toFixed(2) : '—'}</div>
+                <div className="text-[9px] text-zinc-400 font-mono whitespace-nowrap">avg ₹{state.entry_price?.toFixed(2) ?? '—'}</div>
+              </>
+            ) : (
+              <div className="text-xs font-mono text-zinc-600">—</div>
+            )}
+          </div>
+          <div className="px-3 flex flex-col justify-center shrink-0">
+            <div className={lbl}>ST SL</div>
+            <div className="font-mono font-bold text-xs text-amber-400 leading-tight">
+              {state.st_level != null && state.st_level > 0 ? state.st_level.toFixed(2) : '—'}
+            </div>
+            <div className="text-[9px] text-zinc-500 font-mono">
+              {state.interval ? `${state.interval}m ST(${state.supertrend_period ?? 7},${state.supertrend_multiplier ?? 3})${state.use_vwap ? ' +VWAP' : ''}` : ''}
+            </div>
+            {state.use_vwap && state.vwap != null && state.vwap > 0 && (
+              <div className="text-[9px] text-sky-400 font-mono">VWAP {state.vwap.toFixed(2)}</div>
+            )}
+          </div>
+          <div className="px-3 flex flex-col justify-center shrink-0">
+            <div className={lbl}>Day P&amp;L</div>
+            <div className={`font-mono font-bold text-xs leading-tight ${(state.daily_pnl ?? 0) >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
+              {(state.daily_pnl ?? 0) >= 0 ? '+' : ''}₹{(state.daily_pnl ?? 0).toFixed(0)}
+            </div>
+            <div className="text-[9px] text-zinc-500 font-mono whitespace-nowrap">
+              tgt ₹{state.target_profit?.toFixed(0) ?? '—'} · sl ₹{state.stop_loss?.toFixed(0) ?? '—'}
+            </div>
           </div>
         </div>
       );
@@ -361,7 +425,7 @@ export default function StrategyRowWide({ meta, state, onRefresh }: Props) {
           </div>
         )}
 
-        {meta.key !== 'nifty_spread_trend' && (
+        {meta.key !== 'nifty_spread_trend' && meta.key !== 'crudeoilm_supertrend' && (
           <div className={fieldCls}>
             <label className={lbl}>Start Time</label>
             <Input type="text" value={startTime} onChange={e => setStartTime(e.target.value)} placeholder="09:20" className={inputCls} style={{ width: 72 }} />
@@ -434,6 +498,35 @@ export default function StrategyRowWide({ meta, state, onRefresh }: Props) {
                 <input type="checkbox" id={`exit-sig-${meta.key}`} checked={exitOnSignalChange} onChange={e=>setExitOnSignalChange(e.target.checked)}
                   className="h-3.5 w-3.5 rounded border-zinc-800 bg-zinc-900 accent-emerald-500" />
                 <label htmlFor={`exit-sig-${meta.key}`} className="text-white font-semibold text-xs">Enabled</label>
+              </div>
+            </div>
+          </>
+        )}
+
+        {meta.key === 'crudeoilm_supertrend' && (
+          <>
+            <div className={fieldCls}>
+              <label className={lbl}>Timeframe</label>
+              <Select value={crudeoilInterval} onValueChange={v => v && setCrudeoilInterval(v)}>
+                <SelectTrigger className={inputCls} style={{ width: 90 }}><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="1">1 Min</SelectItem>
+                  <SelectItem value="3">3 Min</SelectItem>
+                  <SelectItem value="5">5 Min</SelectItem>
+                  <SelectItem value="15">15 Min</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+            <div className={fieldCls}><label className={lbl}>ST Period</label><Input type="number" value={crudeoilStPeriod} onChange={e => setCrudeoilStPeriod(parseInt(e.target.value) || 7)} min={2} className={inputCls} style={{ width: 64 }} /></div>
+            <div className={fieldCls}><label className={lbl}>ST Multiplier</label><Input type="number" step="0.5" value={crudeoilStMultiplier} onChange={e => setCrudeoilStMultiplier(parseFloat(e.target.value) || 3.0)} min={0.5} className={inputCls} style={{ width: 64 }} /></div>
+            <div className={fieldCls}><label className={lbl}>Start Time</label><Input type="text" value={crudeoilStartTime} onChange={e => setCrudeoilStartTime(e.target.value)} placeholder="17:00" className={inputCls} style={{ width: 72 }} /></div>
+            <div className={fieldCls}><label className={lbl}>EOD Time</label><Input type="text" value={crudeoilEodTime} onChange={e => setCrudeoilEodTime(e.target.value)} placeholder="23:25" className={inputCls} style={{ width: 72 }} /></div>
+            <div className={fieldCls}>
+              <label className={lbl}>VWAP Filter</label>
+              <div className="flex items-center gap-2 h-7">
+                <input type="checkbox" id={`vwap-${meta.key}`} checked={crudeoilUseVwap} onChange={e => setCrudeoilUseVwap(e.target.checked)}
+                  className="h-3.5 w-3.5 rounded border-zinc-800 bg-zinc-900 accent-emerald-500" />
+                <label htmlFor={`vwap-${meta.key}`} className="text-zinc-300 text-xs">Require above/below VWAP</label>
               </div>
             </div>
           </>
