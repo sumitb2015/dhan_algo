@@ -9,6 +9,7 @@ const NAV_LINKS = [
   { href: '/scanner', label: 'Scanner' },
   { href: '/normalized', label: 'Charts' },
   { href: '/breadth', label: 'Breadth' },
+  { href: '/diffusion', label: 'Diffusion' },
   { href: '/distribution', label: 'Distribution' },
   { href: '/live', label: 'Live' },
   { href: '/strategies', label: 'Strategies' },
