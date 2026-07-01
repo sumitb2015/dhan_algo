@@ -560,7 +560,7 @@ export default function PerformancePage() {
         if (!json.success) throw new Error(json.error || 'API error');
         setIdxData(json.data as IndicesResponse);
       } else {
-        const res = await fetch('/api/movers?index=nifty500');
+        const res = await fetch(`/api/movers?index=nifty500${bust ? '&bust=1' : ''}`);
         const json = await res.json();
         if (!json.success) throw new Error(json.error || 'API error');
         setStockData(json.data as MoversResponse);

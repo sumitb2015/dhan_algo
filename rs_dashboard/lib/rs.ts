@@ -113,15 +113,39 @@ export function computeCurrentRS(
 }
 
 /**
- * Compute percentage change between first and last item.
+ * Find the stockClose for the latest row whose date is <= targetDate (YYYY-MM-DD).
+ * Skips the last element (today). Returns null if no row qualifies.
  */
-function pctChange(arr: Array<{ stockClose: number }>, n: number): number {
+function findCloseOnOrBefore(
+  arr: Array<{ date: string; stockClose: number }>,
+  targetDate: string
+): number | null {
+  for (let i = arr.length - 2; i >= 0; i--) {
+    if (arr[i].date <= targetDate) return arr[i].stockClose;
+  }
+  return null;
+}
+
+/**
+ * Compute % change from the close on/before targetDate to the latest close.
+ */
+function pctChangeByDate(
+  arr: Array<{ date: string; stockClose: number }>,
+  targetDate: string
+): number {
   if (arr.length < 2) return 0;
-  const slice = arr.slice(-Math.min(n, arr.length));
-  const first = slice[0].stockClose;
-  const last = slice[slice.length - 1].stockClose;
-  if (first === 0) return 0;
-  return ((last - first) / first) * 100;
+  const latest = arr[arr.length - 1].stockClose;
+  const base = findCloseOnOrBefore(arr, targetDate);
+  if (base === null || base === 0) return 0;
+  return ((latest - base) / base) * 100;
+}
+
+function shiftDate(dateStr: string, days?: number, months?: number, years?: number): string {
+  const d = new Date(dateStr + 'T00:00:00Z');
+  if (days)   d.setUTCDate(d.getUTCDate() - days);
+  if (months) d.setUTCMonth(d.getUTCMonth() - months);
+  if (years)  d.setUTCFullYear(d.getUTCFullYear() - years);
+  return d.toISOString().slice(0, 10);
 }
 
 /**
@@ -207,17 +231,19 @@ export function buildRSResult(
   const trendPrev = trend.slice(0, -1);
   const isRSNewHigh = trendPrev.length >= 4 && rsRatio >= Math.max(...trendPrev);
 
+  const latestDate = latest?.date ?? '';
+
   return {
     symbol,
     rsRatio,
     rsChange1W,
     priceChange1D: pctChange1D(aligned),
-    priceChange1W: pctChange(aligned, 6),
-    priceChange1M: pctChange(aligned, 22),
-    priceChange3M: pctChange(aligned, 63),
-    priceChange1Y: pctChange(aligned, 252),
+    priceChange1W: pctChangeByDate(aligned, shiftDate(latestDate, 7)),
+    priceChange1M: pctChangeByDate(aligned, shiftDate(latestDate, undefined, 1)),
+    priceChange3M: pctChangeByDate(aligned, shiftDate(latestDate, undefined, 3)),
+    priceChange1Y: pctChangeByDate(aligned, shiftDate(latestDate, undefined, undefined, 1)),
     latestClose,
-    latestDate: latest?.date ?? '',
+    latestDate,
     trend,
     high52W,
     pctFrom52WHigh,

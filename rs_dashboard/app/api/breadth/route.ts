@@ -231,13 +231,27 @@ function simpleMA(closes: number[], period: number): number {
   return slice.reduce((a, b) => a + b, 0) / period;
 }
 
-function pctChg(rows: OHLCVRow[], n: number): number {
+function findCloseOnOrBefore(rows: OHLCVRow[], targetDate: string): number | null {
+  for (let i = rows.length - 2; i >= 0; i--) {
+    if (rows[i].date <= targetDate) return rows[i].close;
+  }
+  return null;
+}
+
+function shiftDate(dateStr: string, days?: number, months?: number, years?: number): string {
+  const d = new Date(dateStr + 'T00:00:00Z');
+  if (days)   d.setUTCDate(d.getUTCDate() - days);
+  if (months) d.setUTCMonth(d.getUTCMonth() - months);
+  if (years)  d.setUTCFullYear(d.getUTCFullYear() - years);
+  return d.toISOString().slice(0, 10);
+}
+
+function pctChgByDate(rows: OHLCVRow[], targetDate: string): number {
   if (rows.length < 2) return 0;
-  const slice = rows.slice(-Math.min(n, rows.length));
-  const first = slice[0].close;
-  const last = slice[slice.length - 1].close;
-  if (first === 0) return 0;
-  return ((last - first) / first) * 100;
+  const latest = rows[rows.length - 1].close;
+  const base = findCloseOnOrBefore(rows, targetDate);
+  if (base === null || base === 0) return 0;
+  return ((latest - base) / base) * 100;
 }
 
 async function computeBreadthStats(symbols: string[]): Promise<BreadthStats> {
@@ -281,7 +295,7 @@ async function computeBreadthStats(symbols: string[]): Promise<BreadthStats> {
     if (pctFromLow <= 0.5) new52WLow++;
 
     // 1W performance
-    const chg1W = pctChg(rows, 6);
+    const chg1W = pctChgByDate(rows, shiftDate(latest.date, 7));
     if (chg1W > 0) advancing1W++;
     else if (chg1W < 0) declining1W++;
     else unchanged1W++;

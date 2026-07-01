@@ -116,13 +116,27 @@ function wilderRSI(closes: number[], period = 14): number {
   return 100 - 100 / (1 + avgGain / avgLoss);
 }
 
-function pctChg(rows: OHLCVRow[], n: number): number {
+function findCloseOnOrBefore(rows: OHLCVRow[], targetDate: string): number | null {
+  for (let i = rows.length - 2; i >= 0; i--) {
+    if (rows[i].date <= targetDate) return rows[i].close;
+  }
+  return null;
+}
+
+function shiftDate(dateStr: string, days?: number, months?: number, years?: number): string {
+  const d = new Date(dateStr + 'T00:00:00Z');
+  if (days)   d.setUTCDate(d.getUTCDate() - days);
+  if (months) d.setUTCMonth(d.getUTCMonth() - months);
+  if (years)  d.setUTCFullYear(d.getUTCFullYear() - years);
+  return d.toISOString().slice(0, 10);
+}
+
+function pctChgByDate(rows: OHLCVRow[], targetDate: string): number {
   if (rows.length < 2) return 0;
-  const slice = rows.slice(-Math.min(n, rows.length));
-  const first = slice[0].close;
-  const last  = slice[slice.length - 1].close;
-  if (first === 0) return 0;
-  return ((last - first) / first) * 100;
+  const latest = rows[rows.length - 1].close;
+  const base = findCloseOnOrBefore(rows, targetDate);
+  if (base === null || base === 0) return 0;
+  return ((latest - base) / base) * 100;
 }
 
 function pctChg1D(rows: OHLCVRow[]): number {
@@ -235,10 +249,10 @@ export async function GET(req: Request) {
       latestClose: latest.close,
       latestDate: latest.date,
       priceChange1D: pctChg1D(rows),
-      priceChange1W: pctChg(rows, 6),
-      priceChange1M: pctChg(rows, 22),
-      priceChange3M: pctChg(rows, 65),
-      priceChange1Y: pctChg(rows, 252),
+      priceChange1W: pctChgByDate(rows, shiftDate(latest.date, 7)),
+      priceChange1M: pctChgByDate(rows, shiftDate(latest.date, 29)),
+      priceChange3M: pctChgByDate(rows, shiftDate(latest.date, 91)),
+      priceChange1Y: pctChgByDate(rows, shiftDate(latest.date, 364)),
       high52W,
       low52W,
       pctFrom52WHigh: high52W > 0 ? ((latest.close - high52W) / high52W) * 100 : 0,

@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import Link from 'next/link';
 import NavBar from './NavBar';
 import {
@@ -174,6 +174,18 @@ export default function OptionsCharts() {
   const [showCeIV, setShowCeIV]   = useState(true);
   const [showPeIV, setShowPeIV]   = useState(true);
   const ivPollRef = useRef<NodeJS.Timeout | null>(null);
+
+  // Ticks every 10 points (~5 min at 30s sampling) for the IV x-axis
+  const ivTicks = useMemo(() => {
+    if (ivHistory.length === 0) return [];
+    const result: string[] = [];
+    for (let i = 0; i < ivHistory.length; i += 10) {
+      result.push(ivHistory[i].time);
+    }
+    const last = ivHistory[ivHistory.length - 1].time;
+    if (result[result.length - 1] !== last) result.push(last);
+    return result;
+  }, [ivHistory]);
 
   // ── Fetch expiries ────────────────────────────────────────────────
   useEffect(() => {
@@ -947,13 +959,14 @@ export default function OptionsCharts() {
                       tick={{ fontSize: 10, fill: '#a1a1aa', fontWeight: 500 }}
                       tickLine={false}
                       axisLine={{ stroke: '#27272a' }}
-                      interval={Math.max(0, Math.floor(ivHistory.length / 10) - 1)}
+                      ticks={ivTicks}
+                      tickFormatter={(t: string) => t.replace(/(\d{2}:\d{2}):\d{2}.*/, '$1')}
                     />
                     <YAxis
                       tick={{ fontSize: 10, fill: '#a1a1aa', fontWeight: 500 }}
                       tickLine={false}
                       axisLine={false}
-                      domain={['auto', 'auto']}
+                      domain={[0, 'auto']}
                       width={40}
                       tickFormatter={(v: number) => `${v.toFixed(1)}%`}
                     />

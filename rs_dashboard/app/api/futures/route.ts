@@ -135,13 +135,29 @@ function buildContracts(
 
     const latestClose = todayRows.length ? todayRows[todayRows.length - 1].close : 0;
 
-    // OI stats from daily CSV (most reliable source)
-    const hasOI = dRows.some(r => r.oi > 0);
-    const latestOI = dRows.length ? dRows[dRows.length - 1].oi : 0;
-    const prevOI   = dRows.length > 1 ? dRows[dRows.length - 2].oi : 0;
+    // OI stats: prefer daily CSV; fall back to intraday OI for same-day contracts
+    const dailyHasOI = dRows.some(r => r.oi > 0);
+    const intradayHasOI = todayRows.some(r => r.oi > 0);
+    const hasOI = dailyHasOI || intradayHasOI;
 
-    // Sparkline: last 30 daily OI data points
-    const sparkline = dRows.slice(-30).map(r => ({ time: r.datetime, oi: r.oi }));
+    let latestOI = 0;
+    let prevOI = 0;
+    let sparkline: { time: string; oi: number }[] = [];
+
+    if (dailyHasOI) {
+      latestOI = dRows[dRows.length - 1].oi;
+      prevOI   = dRows.length > 1 ? dRows[dRows.length - 2].oi : 0;
+      sparkline = dRows.slice(-30).map(r => ({ time: r.datetime, oi: r.oi }));
+    } else if (intradayHasOI) {
+      // New contract on first trading day: use intraday OI (last tick of the session)
+      latestOI = todayRows[todayRows.length - 1].oi;
+      prevOI   = todayRows[0].oi;
+      // Sample ~30 evenly-spaced intraday ticks as a mini sparkline
+      const step = Math.max(1, Math.floor(todayRows.length / 30));
+      sparkline = todayRows
+        .filter((_, i) => i % step === 0 || i === todayRows.length - 1)
+        .map(r => ({ time: toTime(r.datetime), oi: r.oi }));
+    }
 
     const expiryMs = new Date(expiry).getTime();
     const daysToExpiry = Math.ceil((expiryMs - Date.now()) / 86400000);
