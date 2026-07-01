@@ -258,8 +258,20 @@ function IndexDropdown({
                         checked={checked}
                         disabled={pinned}
                         onChange={() => !pinned && onToggle(sym)}
-                        className="accent-violet-500 w-3 h-3 shrink-0"
+                        className="sr-only"
                       />
+                      <span className={cn(
+                        'w-3.5 h-3.5 shrink-0 rounded-sm border flex items-center justify-center transition-colors',
+                        checked
+                          ? pinned ? 'bg-zinc-600 border-zinc-600' : 'bg-violet-500 border-violet-500'
+                          : 'bg-zinc-900 border-zinc-500',
+                      )}>
+                        {checked && (
+                          <svg className="w-2.5 h-2.5 text-white" viewBox="0 0 10 10" fill="none">
+                            <path d="M2 5l2.5 2.5L8 3" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+                          </svg>
+                        )}
+                      </span>
                       {labels[sym] ?? sym}
                     </label>
                   );
