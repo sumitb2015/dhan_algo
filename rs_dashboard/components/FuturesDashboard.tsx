@@ -19,7 +19,7 @@ function fmtLakh(v: number): string {
 }
 
 function fmtChange(v: number): string {
-  return (v >= 0 ? '+' : '') + fmtLakh(Math.abs(v));
+  return (v >= 0 ? '+' : '-') + fmtLakh(Math.abs(v));
 }
 
 function fmtBasis(v: number | null): string {
@@ -237,7 +237,7 @@ export default function FuturesDashboard() {
     <div className="flex flex-col min-h-screen bg-black text-zinc-100">
 
       {/* Header */}
-      <header className="w-full border-b border-zinc-900 bg-zinc-950/60 backdrop-blur-md px-5 py-3 flex items-center gap-4 z-20 flex-wrap">
+      <header className="sticky top-0 w-full border-b border-zinc-900 bg-zinc-950/60 backdrop-blur-md px-5 py-3 flex items-center gap-4 z-20 flex-wrap">
         <div className="flex items-center gap-3 shrink-0">
           <div className="h-9 w-9 rounded-xl bg-gradient-to-tr from-sky-600 to-cyan-400 flex items-center justify-center shadow-lg shadow-sky-500/10">
             <Activity className="h-4 w-4 text-white" />
