@@ -19,7 +19,7 @@ export interface ContractStats {
   oiChange: number;
   oiHasData: boolean;
   basis: number | null;
-  sparkline: { time: string; oi: number }[];
+  sparkline: { time: string; oi: number }[]; // daily OI points (last 30 sessions)
 }
 
 export interface FuturesResponse {
@@ -99,33 +99,50 @@ function niftySpotClose(): number | null {
 // ─── Per-contract computation ─────────────────────────────────────────────────
 
 function buildContracts(
-  rows: Row[],
+  intradayRows: Row[],  // 1-min OHLCV — for today's price/volume
+  dailyRows: Row[],     // daily OHLCV+OI — for OI stats and sparkline
   spotClose: number | null,
   useSpot: boolean
 ): ContractStats[] {
-  const byContract = new Map<string, Row[]>();
-  for (const row of rows) {
-    if (!byContract.has(row.contract)) byContract.set(row.contract, []);
-    byContract.get(row.contract)!.push(row);
+  // Index daily rows by contract
+  const dailyByContract = new Map<string, Row[]>();
+  for (const row of dailyRows) {
+    if (!dailyByContract.has(row.contract)) dailyByContract.set(row.contract, []);
+    dailyByContract.get(row.contract)!.push(row);
   }
 
+  // Index intraday rows by contract
+  const intradayByContract = new Map<string, Row[]>();
+  for (const row of intradayRows) {
+    if (!intradayByContract.has(row.contract)) intradayByContract.set(row.contract, []);
+    intradayByContract.get(row.contract)!.push(row);
+  }
+
+  // Union of all contract expiry keys
+  const expiries = new Set([...intradayByContract.keys(), ...dailyByContract.keys()]);
   const result: ContractStats[] = [];
 
-  for (const [expiry, cRows] of byContract) {
-    cRows.sort((a, b) => a.datetime.localeCompare(b.datetime));
+  for (const expiry of expiries) {
+    const cRows = (intradayByContract.get(expiry) ?? [])
+      .sort((a, b) => a.datetime.localeCompare(b.datetime));
+    const dRows = (dailyByContract.get(expiry) ?? [])
+      .sort((a, b) => a.datetime.localeCompare(b.datetime));
 
-    const dates = [...new Set(cRows.map(r => toDate(r.datetime)))].sort();
-    const latestDate = dates[dates.length - 1];
-    const prevDate = dates.length > 1 ? dates[dates.length - 2] : null;
-
+    // Price stats from intraday (today's session)
+    const intradayDates = [...new Set(cRows.map(r => toDate(r.datetime)))].sort();
+    const latestDate = intradayDates[intradayDates.length - 1] ?? '';
     const todayRows = cRows.filter(r => toDate(r.datetime) === latestDate);
-    const prevRows = prevDate ? cRows.filter(r => toDate(r.datetime) === prevDate) : [];
-
-    const hasOI = todayRows.some(r => r.oi > 0);
-    const latestOI = todayRows.length ? todayRows[todayRows.length - 1].oi : 0;
-    const prevOI = prevRows.length ? prevRows[prevRows.length - 1].oi : 0;
 
     const latestClose = todayRows.length ? todayRows[todayRows.length - 1].close : 0;
+
+    // OI stats from daily CSV (most reliable source)
+    const hasOI = dRows.some(r => r.oi > 0);
+    const latestOI = dRows.length ? dRows[dRows.length - 1].oi : 0;
+    const prevOI   = dRows.length > 1 ? dRows[dRows.length - 2].oi : 0;
+
+    // Sparkline: last 30 daily OI data points
+    const sparkline = dRows.slice(-30).map(r => ({ time: r.datetime, oi: r.oi }));
+
     const expiryMs = new Date(expiry).getTime();
     const daysToExpiry = Math.ceil((expiryMs - Date.now()) / 86400000);
 
@@ -142,7 +159,7 @@ function buildContracts(
       oiChange: latestOI - prevOI,
       oiHasData: hasOI,
       basis: useSpot && spotClose !== null ? latestClose - spotClose : null,
-      sparkline: todayRows.map(r => ({ time: toTime(r.datetime), oi: r.oi })),
+      sparkline,
     });
   }
 
@@ -171,8 +188,15 @@ export async function GET() {
       });
     }
 
-    const niftyContracts = buildContracts(niftyRows, spotClose, true);
-    const bnfContracts = buildContracts(bnfRows, null, false);
+    const niftyDaily = parseFuturesCsv(
+      path.join(PROJECT_ROOT, 'Historical Data', 'NIFTY_Futures_Daily.csv')
+    );
+    const bnfDaily = parseFuturesCsv(
+      path.join(PROJECT_ROOT, 'Historical Data', 'BANKNIFTY_Futures_Daily.csv')
+    );
+
+    const niftyContracts = buildContracts(niftyRows, niftyDaily, spotClose, true);
+    const bnfContracts = buildContracts(bnfRows, bnfDaily, null, false);
 
     const allDates = [...niftyRows, ...bnfRows]
       .map(r => toDate(r.datetime))

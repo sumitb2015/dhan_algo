@@ -1,9 +1,10 @@
 'use client';
 
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import NavBar from '@/components/NavBar';
-import { Activity, RefreshCw, AlertCircle, Loader2 } from 'lucide-react';
+import { Activity, RefreshCw, AlertCircle, Loader2, Download } from 'lucide-react';
 import type { ContractStats, FuturesResponse } from '@/app/api/futures/route';
+import type { FuturesRefreshStatus } from '@/app/api/futures-refresh/route';
 
 // ─── Formatters ───────────────────────────────────────────────────────────────
 
@@ -181,7 +182,7 @@ function ContractCard({
       {/* OI Sparkline */}
       <div className="border-t border-zinc-800 pt-3">
         <div className="text-[10px] text-zinc-500 font-semibold uppercase tracking-wider mb-1.5">
-          Intraday OI
+          OI Trend (daily)
         </div>
         {contract.oiHasData ? (
           <OISparkline data={contract.sparkline} />
@@ -218,6 +219,8 @@ export default function FuturesDashboard() {
   const [data, setData] = useState<FuturesResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [dlStatus, setDlStatus] = useState<FuturesRefreshStatus | null>(null);
+  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const fetchData = useCallback(async () => {
     setLoading(true);
@@ -234,7 +237,35 @@ export default function FuturesDashboard() {
     }
   }, []);
 
-  useEffect(() => { fetchData(); }, [fetchData]);
+  const pollDownload = useCallback(async () => {
+    try {
+      const res = await fetch('/api/futures-refresh');
+      const json: FuturesRefreshStatus = await res.json();
+      setDlStatus(json);
+      if (!json.running && json.done) {
+        if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; }
+        fetchData();
+      }
+    } catch { /* ignore */ }
+  }, [fetchData]);
+
+  const startDownload = useCallback(async () => {
+    try {
+      const res = await fetch('/api/futures-refresh', { method: 'POST' });
+      if (!res.ok) return;
+      setDlStatus({ running: true, done: false, message: 'Starting…', error: null });
+      if (pollRef.current) clearInterval(pollRef.current);
+      pollRef.current = setInterval(pollDownload, 2000);
+    } catch { /* ignore */ }
+  }, [pollDownload]);
+
+  useEffect(() => {
+    fetchData();
+    // Check if a download is already running on mount
+    pollDownload();
+  }, [fetchData, pollDownload]);
+
+  useEffect(() => () => { if (pollRef.current) clearInterval(pollRef.current); }, []);
 
   return (
     <div className="flex flex-col min-h-screen bg-black text-zinc-100">
@@ -259,14 +290,33 @@ export default function FuturesDashboard() {
 
         <NavBar />
 
-        <button
-          onClick={fetchData}
-          disabled={loading}
-          className="p-1.5 border border-zinc-800 rounded-lg bg-zinc-900/40 text-zinc-400 hover:text-white transition-all hover:border-zinc-700 disabled:opacity-40 ml-auto"
-          title="Reload data"
-        >
-          <RefreshCw className={`h-3.5 w-3.5 ${loading ? 'animate-spin' : ''}`} />
-        </button>
+        <div className="ml-auto flex items-center gap-2">
+          {/* Download button — runs the Python script in background */}
+          {dlStatus?.running ? (
+            <div className="flex items-center gap-1.5 text-[11px] text-sky-400">
+              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              <span>{dlStatus.message || 'Downloading…'}</span>
+            </div>
+          ) : (
+            <button
+              onClick={startDownload}
+              className="flex items-center gap-1.5 px-3 py-1.5 text-[11px] font-semibold rounded-lg border border-sky-500/25 bg-sky-500/10 text-sky-400 hover:bg-sky-500/15 hover:border-sky-500/35 transition-all"
+              title="Download fresh futures data (runs download_futures_manual.py)"
+            >
+              <Download className="h-3 w-3" />
+              Download Data
+            </button>
+          )}
+          {/* Reload from disk */}
+          <button
+            onClick={fetchData}
+            disabled={loading}
+            className="p-1.5 border border-zinc-800 rounded-lg bg-zinc-900/40 text-zinc-400 hover:text-white transition-all hover:border-zinc-700 disabled:opacity-40"
+            title="Reload from disk"
+          >
+            <RefreshCw className={`h-3.5 w-3.5 ${loading ? 'animate-spin' : ''}`} />
+          </button>
+        </div>
       </header>
 
       {/* Body */}

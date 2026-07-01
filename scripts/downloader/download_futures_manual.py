@@ -1,12 +1,20 @@
 """
-Download 1-minute futures data for NIFTY and BANKNIFTY from the Dhan v2 intraday API.
+Download 1-minute futures data (price) and daily futures data (price + OI) for
+NIFTY and BANKNIFTY from the Dhan v2 API.
 
-LIMITATION: The Dhan intraday API requires the specific contract securityId, which is
-only available in the live master list for currently active contracts (~3 near months).
-Expired contracts are purged from the master list and cannot be retrieved this way.
+NOTE: The intraday API does NOT return open_interest for FUTIDX — OI is only
+available from the daily historical endpoint (v2/charts/historical).
 
-For each available contract, data is downloaded from its listing date to expiry.
+Output files:
+  Historical Data/NIFTY_Futures_1min_Manual.csv   — 1-min OHLCV (no OI)
+  Historical Data/NIFTY_Futures_Daily.csv         — daily OHLCV + OI
+  Historical Data/BANKNIFTY_Futures_1min_Manual.csv
+  Historical Data/BANKNIFTY_Futures_Daily.csv
+
+LIMITATION: Only contracts currently active in the Dhan master list (~3 near
+months) are available. Run this script monthly before each contract expires.
 """
+import json
 import requests
 import os
 import sys
@@ -18,6 +26,22 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(
 
 from login import get_dhan_client
 from lib.dhan_helper import DhanHelper
+
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+DEBUG_DIR    = os.path.join(PROJECT_ROOT, "debug")
+STATUS_FILE  = os.path.join(DEBUG_DIR, "futures_refresh_status.json")
+
+
+def _write_status(message: str, done: bool = False, error: str | None = None) -> None:
+    os.makedirs(DEBUG_DIR, exist_ok=True)
+    with open(STATUS_FILE, "w") as f:
+        json.dump({
+            "pid": os.getpid(),
+            "message": message,
+            "done": done,
+            "error": error,
+            "updated_at": datetime.now().isoformat(),
+        }, f)
 
 
 def fetch_chunk(url: str, headers: dict, security_id: str, segment: str,
@@ -56,6 +80,96 @@ def fetch_chunk(url: str, headers: dict, security_id: str, segment: str,
     })
     df.set_index("Datetime", inplace=True)
     return df
+
+
+def fetch_daily_chunk(url: str, headers: dict, security_id: str, segment: str,
+                      from_date: str, to_date: str) -> pd.DataFrame:
+    """Fetch daily OHLCV + OI from the Dhan v2/charts/historical endpoint."""
+    payload = {
+        "securityId": security_id,
+        "exchangeSegment": segment,
+        "instrument": "FUTIDX",
+        "fromDate": from_date,
+        "toDate":   to_date,
+    }
+    try:
+        resp = requests.post(url, headers=headers, json=payload, timeout=30)
+    except Exception as e:
+        print(f"      [EXCEPTION] {e}")
+        return pd.DataFrame()
+
+    if resp.status_code != 200:
+        print(f"      [HTTP {resp.status_code}] {resp.text[:150]}")
+        return pd.DataFrame()
+
+    data = resp.json()
+    if not isinstance(data, dict) or not data.get("open"):
+        return pd.DataFrame()
+
+    dates = (pd.to_datetime(data["timestamp"], unit="s")
+               .tz_localize("UTC").tz_convert("Asia/Kolkata").tz_localize(None)
+               .strftime("%Y-%m-%d"))
+    df = pd.DataFrame({
+        "Datetime": dates,
+        "Open":   data["open"],
+        "High":   data["high"],
+        "Low":    data["low"],
+        "Close":  data["close"],
+        "Volume": data["volume"],
+        "OI":     data.get("open_interest", [0] * len(data["open"])),
+    })
+    df.set_index("Datetime", inplace=True)
+    return df
+
+
+def download_futures_daily(helper: DhanHelper, url: str, headers: dict,
+                           underlying: str, segment: str, save_dir: str):
+    """Fetch daily OHLCV + OI for all available contracts and save to CSV."""
+    print(f"\n>>> {underlying} DAILY FUTURES (OI) <<<")
+
+    df_master = helper._load_master_list()
+    contracts = df_master[
+        (df_master["INSTRUMENT"] == "FUTIDX") &
+        (df_master["UNDERLYING_SYMBOL"].str.upper() == underlying.upper())
+    ][["SECURITY_ID", "SYMBOL_NAME", "SM_EXPIRY_DATE"]].sort_values("SM_EXPIRY_DATE")
+
+    if contracts.empty:
+        print(f"  [SKIP] No {underlying} FUTIDX contracts found.")
+        return
+
+    all_chunks = []
+
+    for _, row in contracts.iterrows():
+        sec_id  = str(row["SECURITY_ID"])
+        name    = row["SYMBOL_NAME"]
+        expiry  = row["SM_EXPIRY_DATE"]
+        expiry_dt = datetime.strptime(expiry, "%Y-%m-%d")
+
+        from_date = (expiry_dt - timedelta(days=90)).strftime("%Y-%m-%d")
+        to_date   = min(expiry_dt, datetime.now()).strftime("%Y-%m-%d")
+
+        print(f"  Contract: {name} — {from_date} → {to_date}")
+        df = fetch_daily_chunk(url, headers, sec_id, segment, from_date, to_date)
+        if not df.empty:
+            df["Contract"] = expiry
+            all_chunks.append(df)
+            oi_ok = df["OI"].sum() > 0
+            print(f"    [OK] {len(df)} rows  OI={'yes' if oi_ok else 'MISSING'}")
+        else:
+            print(f"    [SKIP] No data returned")
+        time.sleep(0.3)
+
+    if not all_chunks:
+        print(f"  [FAIL] No daily data collected for {underlying}")
+        return
+
+    df_final = pd.concat(all_chunks)
+    df_final = df_final[~df_final.index.duplicated(keep="first")].sort_index()
+
+    out = os.path.join(save_dir, f"{underlying}_Futures_Daily.csv")
+    df_final.to_csv(out)
+    oi_ok = df_final["OI"].sum() > 0
+    print(f"  [SUCCESS] {out}  ({len(df_final)} rows, OI={'yes' if oi_ok else 'MISSING — API may not return OI for this instrument'})")
 
 
 def download_futures(helper: DhanHelper, url: str, headers: dict,
@@ -122,29 +236,42 @@ def download_futures(helper: DhanHelper, url: str, headers: dict,
 
 
 def main():
-    dhan = get_dhan_client()
-    helper = DhanHelper(dhan)
+    _write_status("Initialising…")
+    try:
+        dhan = get_dhan_client()
+        helper = DhanHelper(dhan)
 
-    dhan_http = getattr(dhan, "dhan_http", None)
-    access_token = getattr(dhan_http, "access_token", None) if dhan_http else getattr(dhan, "access_token", None)
-    client_id    = getattr(dhan_http, "client_id",    None) if dhan_http else getattr(dhan, "client_id",    None)
-    if not access_token or not client_id:
-        print("[FAIL] Could not retrieve credentials from Dhan client.")
-        return
+        dhan_http = getattr(dhan, "dhan_http", None)
+        access_token = getattr(dhan_http, "access_token", None) if dhan_http else getattr(dhan, "access_token", None)
+        client_id    = getattr(dhan_http, "client_id",    None) if dhan_http else getattr(dhan, "client_id",    None)
+        if not access_token or not client_id:
+            _write_status("Failed: could not read credentials", done=True, error="No credentials")
+            print("[FAIL] Could not retrieve credentials from Dhan client.")
+            return
 
-    url = "https://api.dhan.co/v2/charts/intraday"
-    headers = {
-        "access-token": access_token,
-        "client-id":    client_id,
-        "Content-Type": "application/json",
-        "Accept":       "application/json",
-    }
+        intraday_url = "https://api.dhan.co/v2/charts/intraday"
+        daily_url    = "https://api.dhan.co/v2/charts/historical"
+        headers = {
+            "access-token": access_token,
+            "client-id":    client_id,
+            "Content-Type": "application/json",
+            "Accept":       "application/json",
+        }
 
-    save_dir = "Historical Data"
-    os.makedirs(save_dir, exist_ok=True)
+        save_dir = "Historical Data"
+        os.makedirs(save_dir, exist_ok=True)
 
-    for underlying, segment in [("NIFTY", "NSE_FNO"), ("BANKNIFTY", "NSE_FNO")]:
-        download_futures(helper, url, headers, underlying, segment, save_dir)
+        for underlying, segment in [("NIFTY", "NSE_FNO"), ("BANKNIFTY", "NSE_FNO")]:
+            _write_status(f"Downloading {underlying} 1-min data…")
+            download_futures(helper, intraday_url, headers, underlying, segment, save_dir)
+            _write_status(f"Downloading {underlying} daily OI data…")
+            download_futures_daily(helper, daily_url, headers, underlying, segment, save_dir)
+
+        _write_status("Done", done=True)
+        print("\n[COMPLETE] All futures data downloaded.")
+    except Exception as e:
+        _write_status(f"Error: {e}", done=True, error=str(e))
+        raise
 
 
 if __name__ == "__main__":
