@@ -33,9 +33,9 @@ export async function GET(request: NextRequest) {
         const historyAt = (history?.updated_at   as string) ?? '';
         const statusAt  = (status.last_update    as string) ?? '';
         // Combined key: fires when history changes OR when status changes (e.g. bridge stops).
-        // Also fires on the very first call because '' !== '|' is true, guaranteeing
-        // an immediate event even when no history file exists yet.
-        const changeKey = `${historyAt}|${statusAt}`;
+        // JSON.stringify([a, b]) is structurally collision-free regardless of field content.
+        // Also fires on the very first call because '' !== JSON.stringify([...]).
+        const changeKey = JSON.stringify([historyAt, statusAt]);
 
         if (changeKey !== lastChangeKey) {
           lastChangeKey = changeKey;

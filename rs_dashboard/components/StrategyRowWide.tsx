@@ -28,7 +28,7 @@ interface StrategyState {
   entry_pcr?: number; exit_pcr_level?: number; avg_price?: number;
   current_ltp?: number; direction?: string; oi_diff?: number; pcr_threshold?: number;
   ce_active?: boolean; pe_active?: boolean; ce_sl?: number; pe_sl?: number;
-  combined_best_premium?: number | null; trail_combined_buffer?: number; leg_sl_pct?: number;
+  leg_sl_pct?: number;
   use_ema?: boolean; use_supertrend?: boolean;
 }
 
@@ -68,7 +68,6 @@ export default function StrategyRowWide({ meta, state, onRefresh }: Props) {
   const [exitPcrChange, setExitPcrChange] = useState(30);
   const [pollInterval, setPollInterval] = useState(60);
   const [expansionWindow, setExpansionWindow] = useState(3);
-  const [trailCombinedBuffer, setTrailCombinedBuffer] = useState(1.0);
   const [legSlPct, setLegSlPct] = useState(0.20);
   const [symbol, setSymbol] = useState('NIFTY');
   const [interval, setIntervalVal] = useState('5');
@@ -103,12 +102,11 @@ export default function StrategyRowWide({ meta, state, onRefresh }: Props) {
       args.push('--stop-loss', String(stopLoss));
 
       if (meta.key === 'nifty_advanced_imbalance') {
-        args.push('--max-lots', String(maxLots));
+        if (mode !== 'reentry_straddle') args.push('--max-lots', String(maxLots));
         const effectiveEntryType = mode === 'reentry_straddle' ? 'straddle' : entryType;
         args.push('--mode', mode, '--entry-type', effectiveEntryType, '--start-time', startTime);
         if (mode === 'loser_ratio_roll') args.push('--loser-ratio-lots', String(loserRatioLots));
         if (mode === 'reentry_straddle') {
-          args.push('--trail-combined-buffer', String(trailCombinedBuffer));
           args.push('--leg-sl-pct', String(legSlPct));
         }
         if (effectiveEntryType === 'strangle') {
@@ -329,7 +327,7 @@ export default function StrategyRowWide({ meta, state, onRefresh }: Props) {
         <div className="px-3 flex flex-col justify-center shrink-0">
           <div className={lbl}>Adj</div>
           <div className={val}>{state.adjustments ?? 0}</div>
-          {state.max_lots != null && <div className="text-[9px] text-zinc-300 font-mono">max {state.max_lots}L</div>}
+          {state.max_lots != null && state.mode !== 'reentry_straddle' && <div className="text-[9px] text-zinc-300 font-mono">max {state.max_lots}L</div>}
         </div>
       </div>
     );
@@ -355,7 +353,8 @@ export default function StrategyRowWide({ meta, state, onRefresh }: Props) {
           <Input type="number" value={lots} onChange={e => setLots(parseInt(e.target.value) || 1)} min={1} max={20} className={inputCls} style={{ width: 64 }} />
         </div>
 
-        {(meta.key === 'nifty_advanced_imbalance' || meta.key === 'nifty_value_imbalance_straddle' || meta.key === 'nifty_value_imbalance_strangle') && (
+        {(meta.key === 'nifty_value_imbalance_straddle' || meta.key === 'nifty_value_imbalance_strangle' ||
+          (meta.key === 'nifty_advanced_imbalance' && mode !== 'reentry_straddle')) && (
           <div className={fieldCls}>
             <label className={lbl}>Max Lots</label>
             <Input type="number" value={maxLots} onChange={e => setMaxLots(parseInt(e.target.value) || 4)} min={1} max={20} className={inputCls} style={{ width: 64 }} />
@@ -487,10 +486,7 @@ export default function StrategyRowWide({ meta, state, onRefresh }: Props) {
               <div className={fieldCls}><label className={lbl}>Ratio Lots</label><Input type="number" value={loserRatioLots} onChange={e=>setLoserRatioLots(parseInt(e.target.value)||1)} min={1} max={20} className={inputCls} style={{width:64}}/></div>
             )}
             {mode === 'reentry_straddle' && (
-              <>
-                <div className={fieldCls}><label className={lbl}>Trail Buffer</label><Input type="number" step="0.5" value={trailCombinedBuffer} onChange={e=>setTrailCombinedBuffer(parseFloat(e.target.value)||1.0)} min={0.1} className={inputCls} style={{width:72}}/></div>
-                <div className={fieldCls}><label className={lbl}>Leg SL%</label><Input type="number" step="1" value={Math.round(legSlPct*100)} onChange={e=>setLegSlPct((parseInt(e.target.value)||20)/100)} min={1} max={100} className={inputCls} style={{width:64}}/></div>
-              </>
+              <div className={fieldCls}><label className={lbl}>Leg SL%</label><Input type="number" step="1" value={Math.round(legSlPct*100)} onChange={e=>setLegSlPct((parseInt(e.target.value)||20)/100)} min={1} max={100} className={inputCls} style={{width:64}}/></div>
             )}
             {mode !== 'reentry_straddle' && (
               <div className={fieldCls}>

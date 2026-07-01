@@ -37,6 +37,8 @@ function syncSelection(syms: Set<string>) {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ action: 'select', symbols: [...syms] }),
+  }).then(res => {
+    if (!res.ok) console.warn('[syncSelection] server rejected selection update:', res.status);
   }).catch(() => {});
 }
 
@@ -323,10 +325,13 @@ export default function LiveNormalizedTab() {
         syncSelection(next);
         // Mark as initialized so the history effect doesn't override with all-symbols
         initializedRef.current = true;
+      } else {
+        // No stored prefs — write PINNED defaults immediately so the bridge has a
+        // valid selection file even if history never arrives (bridge not yet running).
+        syncSelection(new Set(PINNED));
+        // Leave initializedRef.current = false so the history effect can upgrade
+        // to the full catalogue once the bridge starts and history arrives.
       }
-      // No else-branch sync: the initializedRef effect handles first-ever load
-      // by selecting all catalogue symbols once history arrives, avoiding a race
-      // where two POSTs fight over the selection file.
     } catch { /* ignore */ }
   }, []);
 
@@ -355,7 +360,9 @@ export default function LiveNormalizedTab() {
         setBridgeStatus(json.status);
         if (json.history) {
           setHistory(json.history);
-          if (json.history.ticks?.length > 0) setLastTick(new Date());
+          if (json.history.ticks?.length > 0) {
+            setLastTick(new Date());
+          }
         }
       } catch { /* ignore */ }
     };
@@ -437,6 +444,7 @@ export default function LiveNormalizedTab() {
   const isStarting  = bridgeStatus.status === 'STARTING';
   const staleQuotes = lastTick && (Date.now() - lastTick.getTime() > 15_000);
   const isMarketOpen = currentIST >= MARKET_OPEN_SECS && currentIST <= MARKET_CLOSE_SECS;
+  const clampedIST   = Math.min(currentIST, MARKET_CLOSE_SECS);
 
   return (
     <div className="flex flex-col gap-3">
@@ -547,8 +555,8 @@ export default function LiveNormalizedTab() {
                   dataKey="ts"
                   type="number"
                   scale="linear"
-                  domain={[MARKET_OPEN_SECS, MARKET_CLOSE_SECS]}
-                  ticks={X_AXIS_TICKS}
+                  domain={[MARKET_OPEN_SECS, clampedIST]}
+                  ticks={X_AXIS_TICKS.filter((t) => t <= clampedIST)}
                   tick={{ fontSize: 10, fill: '#a1a1aa', fontWeight: 500 }}
                   tickLine={false}
                   axisLine={{ stroke: '#27272a' }}

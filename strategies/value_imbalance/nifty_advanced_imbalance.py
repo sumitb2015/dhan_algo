@@ -43,7 +43,7 @@ class NiftyAdvancedImbalance:
                  ce_offset=200, pe_offset=200,
                  use_premium=False, target_premium=50.0,
                  start_time="09:20", loser_ratio_lots=1,
-                 trail_combined_buffer=1.0, leg_sl_pct=0.20):
+                 leg_sl_pct=0.20):
         self.mode = mode.lower()
         self.dry_run = dry_run
         self.initial_lots = initial_lots
@@ -61,7 +61,6 @@ class NiftyAdvancedImbalance:
         self.target_premium = target_premium
         self.start_time = start_time
         self.loser_ratio_lots = loser_ratio_lots
-        self.trail_combined_buffer = trail_combined_buffer
         self.leg_sl_pct = leg_sl_pct
         
         self.dhan = get_dhan_client()
@@ -121,8 +120,6 @@ class NiftyAdvancedImbalance:
         self.pe_sl = 0.0
         self.ce_original_entry_premium = 0.0
         self.pe_original_entry_premium = 0.0
-        # combined trailing SL: None = uninitialized; resets whenever any leg changes state
-        self.combined_best_premium = None
 
     def sleep_cooldown(self, seconds):
         """Shutdown-aware sleep for cooldowns and delays."""
@@ -163,8 +160,6 @@ class NiftyAdvancedImbalance:
             "pe_sl": self.pe_sl,
             "ce_original_entry_premium": self.ce_original_entry_premium,
             "pe_original_entry_premium": self.pe_original_entry_premium,
-            "combined_best_premium": self.combined_best_premium,
-            "trail_combined_buffer": self.trail_combined_buffer,
             "leg_sl_pct": self.leg_sl_pct,
         }
         save_strategy_state("nifty_advanced_imbalance", state_dict)
@@ -297,9 +292,13 @@ class NiftyAdvancedImbalance:
                     buy_oid = self.helper.buy(str(self.ce_id), abs(net_qty))
                     if buy_oid:
                         actual_exit = self.get_execution_price(buy_oid, ce_ltp)
-                        do_state_update = True
                     else:
-                        logger.error("CE SL exit order failed. Will retry next tick.")
+                        logger.critical(
+                            f"CE SL exit order FAILED (buy returned None). "
+                            f"Marking leg inactive at LTP {actual_exit:.2f} to prevent a duplicate order. "
+                            f"Verify CE position manually!"
+                        )
+                    do_state_update = True
                 else:
                     logger.warning(f"CE net qty {net_qty} — already flat, marking inactive.")
                     do_state_update = True
@@ -316,7 +315,6 @@ class NiftyAdvancedImbalance:
                 self.ce_avg_price = 0.0
                 self.ce_lots = 0
                 self.ce_active = False
-                self.combined_best_premium = None
 
         # --- PE: Stop Loss Check ---
         if self.pe_active and pe_ltp >= self.pe_sl:
@@ -332,9 +330,13 @@ class NiftyAdvancedImbalance:
                     buy_oid = self.helper.buy(str(self.pe_id), abs(net_qty))
                     if buy_oid:
                         actual_exit = self.get_execution_price(buy_oid, pe_ltp)
-                        do_state_update = True
                     else:
-                        logger.error("PE SL exit order failed. Will retry next tick.")
+                        logger.critical(
+                            f"PE SL exit order FAILED (buy returned None). "
+                            f"Marking leg inactive at LTP {actual_exit:.2f} to prevent a duplicate order. "
+                            f"Verify PE position manually!"
+                        )
+                    do_state_update = True
                 else:
                     logger.warning(f"PE net qty {net_qty} — already flat, marking inactive.")
                     do_state_update = True
@@ -351,7 +353,6 @@ class NiftyAdvancedImbalance:
                 self.pe_avg_price = 0.0
                 self.pe_lots = 0
                 self.pe_active = False
-                self.combined_best_premium = None
 
         # --- CE: Re-entry Check ---
         if not self.ce_active and ce_ltp > 0 and ce_ltp <= self.ce_original_entry_premium:
@@ -374,7 +375,6 @@ class NiftyAdvancedImbalance:
                 self.ce_lots = self.initial_lots
                 self.ce_sl = round(actual_entry * (1 + self.leg_sl_pct), 2)
                 self.ce_active = True
-                self.combined_best_premium = None  # trail reinitialises from new combined on next tick
                 logger.info(f"CE Re-entered at {actual_entry:.2f} | New SL: {self.ce_sl:.2f}")
 
         # --- PE: Re-entry Check ---
@@ -398,7 +398,6 @@ class NiftyAdvancedImbalance:
                 self.pe_lots = self.initial_lots
                 self.pe_sl = round(actual_entry * (1 + self.leg_sl_pct), 2)
                 self.pe_active = True
-                self.combined_best_premium = None
                 logger.info(f"PE Re-entered at {actual_entry:.2f} | New SL: {self.pe_sl:.2f}")
 
     def exit_all_positions(self, reason):
@@ -499,7 +498,6 @@ class NiftyAdvancedImbalance:
         self.pe_sl = 0.0
         self.ce_original_entry_premium = 0.0
         self.pe_original_entry_premium = 0.0
-        self.combined_best_premium = None
         logger.info("Session state reset.")
 
     def find_rebalance_strike(self, option_type, target_value, lots, chain_df, spot):
@@ -911,42 +909,15 @@ class NiftyAdvancedImbalance:
                     cycle_active = False
                     break
 
-                # --- MODE 5: reentry_straddle (independent per-leg SL + combined trailing SL) ---
+                # --- MODE 5: reentry_straddle (independent per-leg SL + re-entry) ---
                 if self.mode == "reentry_straddle":
-                    # Combined trailing SL — only active when both legs are short
-                    if self.ce_active and self.pe_active:
-                        combined_ltp = ce_ltp + pe_ltp
-                        if self.combined_best_premium is None:
-                            # First tick with both legs active: anchor the trail here
-                            self.combined_best_premium = combined_ltp
-                            logger.info(
-                                f"Combined trail anchored at {combined_ltp:.2f} "
-                                f"(SL fires if combined > {combined_ltp + self.trail_combined_buffer:.2f})"
-                            )
-                        elif combined_ltp < self.combined_best_premium:
-                            self.combined_best_premium = combined_ltp
-                        elif combined_ltp > self.combined_best_premium + self.trail_combined_buffer:
-                            logger.warning(
-                                f"Combined Trailing SL! combined={combined_ltp:.2f} > "
-                                f"best={self.combined_best_premium:.2f} + buf={self.trail_combined_buffer:.2f}"
-                            )
-                            self.exit_all_positions("Reentry Straddle: Combined Trailing SL")
-                            self.sleep_cooldown(300)
-                            cycle_active = False
-                            break
-
                     # Periodic logging
                     if time.time() - last_log_time >= 5:
                         ce_status = f"ACTIVE SL:{self.ce_sl:.1f}" if self.ce_active else f"FLAT(reenter@<={self.ce_original_entry_premium:.1f})"
                         pe_status = f"ACTIVE SL:{self.pe_sl:.1f}" if self.pe_active else f"FLAT(reenter@<={self.pe_original_entry_premium:.1f})"
-                        trail_info = (
-                            f" | Trail best:{self.combined_best_premium:.1f} SL>{self.combined_best_premium + self.trail_combined_buffer:.1f}"
-                            if self.ce_active and self.pe_active and self.combined_best_premium is not None
-                            else ""
-                        )
                         logger.info(
                             f"ReentryStraddle | CE:{ce_ltp:.1f} [{ce_status}] | "
-                            f"PE:{pe_ltp:.1f} [{pe_status}]{trail_info} | "
+                            f"PE:{pe_ltp:.1f} [{pe_status}] | "
                             f"PnL:{total_pnl:+.0f} (Real:{self.realized_pnl:+.0f})"
                         )
                         last_log_time = time.time()
@@ -1303,7 +1274,8 @@ Available Adjustment Modes:
   hedged_addition  : Sell winner leg lot (like legacy) but buy a further OTM protective wing (hedged)
   legacy           : Legacy lot addition on the winner leg (unhedged)
   reentry_straddle : Sell ATM straddle; each leg has an independent per-leg SL (see --leg-sl-pct);
-                     stopped leg re-enters when its premium returns to the original entry level
+                     stopped leg re-enters when its premium returns to the original entry level;
+                     global profit/SL targets and straddle-shift exit still apply
                      (requires --entry-type straddle)
 
 Examples:
@@ -1364,9 +1336,6 @@ Examples:
     parser.add_argument("--loser-ratio-lots", type=int, default=1, metavar="N",
                         help="Number of lots to add for loser ratio roll (default: 1)")
 
-    parser.add_argument("--trail-combined-buffer", type=float, default=1.0, metavar="PTS",
-                        help="Points above the best combined premium that triggers trailing SL exit "
-                             "in reentry_straddle mode (default: 1.0)")
 
     parser.add_argument("--leg-sl-pct", type=float, default=0.20, metavar="PCT",
                         help="Per-leg stop loss as a fraction of entry premium in reentry_straddle mode "
@@ -1395,15 +1364,6 @@ Examples:
             "  Reason: this mode sells ATM CE and PE and manages each leg independently."
         )
 
-    # --trail-combined-buffer only applies to reentry_straddle
-    if args.trail_combined_buffer != 1.0 and args.mode != "reentry_straddle":
-        _errors.append(
-            f"--trail-combined-buffer {args.trail_combined_buffer} has no effect in --mode {args.mode} "
-            f"(only used with reentry_straddle)."
-        )
-
-    if args.trail_combined_buffer <= 0:
-        _errors.append(f"--trail-combined-buffer must be > 0, got {args.trail_combined_buffer}.")
 
     # --leg-sl-pct only applies to reentry_straddle
     if args.leg_sl_pct != 0.20 and args.mode != "reentry_straddle":
@@ -1414,6 +1374,14 @@ Examples:
 
     if args.leg_sl_pct <= 0:
         _errors.append(f"--leg-sl-pct must be > 0, got {args.leg_sl_pct}.")
+
+    # --max-lots has no effect in reentry_straddle (always re-enters at initial lot size)
+    if args.mode == "reentry_straddle" and args.max_lots != 4:
+        _errors.append(
+            f"--max-lots {args.max_lots} has no effect in --mode reentry_straddle "
+            f"(this mode always re-enters at the initial lot size; "
+            f"lot scaling is not used)."
+        )
 
     # --delta and --premium are mutually exclusive strike selection methods
     if args.delta and args.premium:
@@ -1499,7 +1467,6 @@ Examples:
         target_premium=args.target_premium,
         start_time=args.start_time,
         loser_ratio_lots=args.loser_ratio_lots,
-        trail_combined_buffer=args.trail_combined_buffer,
         leg_sl_pct=args.leg_sl_pct,
     )
     try:
