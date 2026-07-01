@@ -1548,7 +1548,7 @@ class DhanHelper:
                     sec = self.find_index(symbol, exchange)
                 elif instrument == "EQUITY":
                     sec = self.find_equity(symbol, exchange)
-                elif instrument in ["FUTIDX", "FUTSTK"]:
+                elif instrument in ["FUTIDX", "FUTSTK", "FUTCOM"]:
                     sec = self.find_future(symbol, expiry, exchange, instrument)
                 elif instrument in ["OPTIDX", "OPTSTK"]:
                     if strike is None or option_type is None:
@@ -1651,7 +1651,7 @@ class DhanHelper:
                     sec = self.find_index(symbol, exchange)
                 elif instrument == "EQUITY":
                     sec = self.find_equity(symbol, exchange)
-                elif instrument in ["FUTIDX", "FUTSTK"]:
+                elif instrument in ["FUTIDX", "FUTSTK", "FUTCOM"]:
                     sec = self.find_future(symbol, expiry, exchange, instrument)
                 elif instrument in ["OPTIDX", "OPTSTK"]:
                     if strike is None or option_type is None:

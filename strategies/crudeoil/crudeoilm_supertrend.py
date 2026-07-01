@@ -174,13 +174,14 @@ class CrudeOilMSupertrendStrategy:
             logger.error("Could not find %s futures contract. Skipping entry.", SYMBOL)
             return False
 
-        self.security_id = str(future.get("securityId") or future.get("security_id", ""))
-        self.expiry = str(future.get("expiryDate") or future.get("expiry", ""))
+        self.security_id = str(future.get("SECURITY_ID", ""))
+        self.expiry = str(future.get("SM_EXPIRY_DATE", ""))
+        # Master list LOT_SIZE for MCX shows 1 (Dhan convention); keep hardcoded default of 10 barrels/lot
         try:
-            self.lot_size = int(future.get("lotSize") or future.get("lot_size", 10))
+            lot_from_master = int(float(future.get("LOT_SIZE", 1)))
+            self.lot_size = lot_from_master if lot_from_master > 1 else self.lot_size
         except (ValueError, TypeError):
-            logger.warning("Could not parse lot size from master list, defaulting to 10. Verify CRUDEOILM contract specs.")
-            self.lot_size = 10
+            pass
         self.qty = self.lot_size * self.lots
 
         # Subscribe WebSocket for live ticks
@@ -470,12 +471,13 @@ class CrudeOilMSupertrendStrategy:
         future = self.helper.find_future(SYMBOL, exchange=EXCHANGE, instrument=INSTRUMENT)
         if future is None:
             return
-        self.security_id = str(future.get("securityId") or future.get("security_id", ""))
-        self.expiry = str(future.get("expiryDate") or future.get("expiry", ""))
+        self.security_id = str(future.get("SECURITY_ID", ""))
+        self.expiry = str(future.get("SM_EXPIRY_DATE", ""))
         try:
-            self.lot_size = int(future.get("lotSize") or future.get("lot_size", 10))
+            lot_from_master = int(float(future.get("LOT_SIZE", 1)))
+            self.lot_size = lot_from_master if lot_from_master > 1 else self.lot_size
         except (ValueError, TypeError):
-            self.lot_size = 10
+            pass
         self.qty = self.lot_size * self.lots
 
     def _get_ltp_safe(self) -> float:
