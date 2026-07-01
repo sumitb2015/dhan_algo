@@ -255,13 +255,17 @@ class CrudeOilMSupertrendStrategy:
 
             # Exit condition 1: shutdown trigger
             if check_shutdown_trigger(STRATEGY_KEY):
-                self._exit_position("UI Shutdown Request")
+                realized = self._exit_position("UI Shutdown Request")
+                self.cumulative_pnl += realized
+                self.position_pnl = 0.0
                 self.save_state(status="STOPPED")
                 sys.exit(0)
 
             # Exit condition 2: EOD
             if datetime.now().strftime("%H:%M") >= self.eod_time:
-                self._exit_position("EOD Auto-Exit")
+                realized = self._exit_position("EOD Auto-Exit")
+                self.cumulative_pnl += realized
+                self.position_pnl = 0.0
                 break
 
             # Fetch LTP
@@ -293,28 +297,28 @@ class CrudeOilMSupertrendStrategy:
 
             # Exit condition 3: daily profit target
             if total_day_pnl >= self.target_profit:
-                self._exit_position(f"Daily Profit Target Hit ({total_day_pnl:.2f} >= {self.target_profit:.2f})")
-                self.cumulative_pnl += self.position_pnl
+                realized = self._exit_position(f"Daily Profit Target Hit ({total_day_pnl:.2f} >= {self.target_profit:.2f})")
+                self.cumulative_pnl += realized
                 self.position_pnl = 0.0
                 break
 
             # Exit condition 4: daily stop loss
             if total_day_pnl <= -self.stop_loss:
-                self._exit_position(f"Daily Stop Loss Hit ({total_day_pnl:.2f} <= -{self.stop_loss:.2f})")
-                self.cumulative_pnl += self.position_pnl
+                realized = self._exit_position(f"Daily Stop Loss Hit ({total_day_pnl:.2f} <= -{self.stop_loss:.2f})")
+                self.cumulative_pnl += realized
                 self.position_pnl = 0.0
                 break
 
             # Exit condition 5: trailing SL (Supertrend band)
             if self.direction == "LONG" and ltp < self.st_level:
-                self._exit_position(f"Trailing SL Hit: LTP {ltp:.2f} < ST {self.st_level:.2f}")
-                self.cumulative_pnl += self.position_pnl
+                realized = self._exit_position(f"Trailing SL Hit: LTP {ltp:.2f} < ST {self.st_level:.2f}")
+                self.cumulative_pnl += realized
                 self.position_pnl = 0.0
                 break
 
             if self.direction == "SHORT" and ltp > self.st_level:
-                self._exit_position(f"Trailing SL Hit: LTP {ltp:.2f} > ST {self.st_level:.2f}")
-                self.cumulative_pnl += self.position_pnl
+                realized = self._exit_position(f"Trailing SL Hit: LTP {ltp:.2f} > ST {self.st_level:.2f}")
+                self.cumulative_pnl += realized
                 self.position_pnl = 0.0
                 break
 
@@ -324,9 +328,11 @@ class CrudeOilMSupertrendStrategy:
     # Exit
     # ------------------------------------------------------------------
 
-    def _exit_position(self, reason: str) -> None:
+    def _exit_position(self, reason: str) -> float:
+        """Exit the current position. Returns realized P&L (entry_price → fill price, sign-correct)."""
         logger.warning("!!! EXITING: %s !!!", reason)
 
+        exit_price = 0.0
         if not self.dry_run:
             if self.direction == "LONG":
                 order_id = self.helper.sell(self.security_id, self.qty)
@@ -337,14 +343,33 @@ class CrudeOilMSupertrendStrategy:
                 logger.critical("Exit order placement FAILED for %s %s. Manual intervention required!", self.direction, SYMBOL)
                 sys.exit(1)
 
-            filled = self.helper.wait_for_fill(order_id, timeout=10)
-            if not filled:
-                order_data = self.helper.get_order_by_id(order_id) or {}
-                if order_data.get("orderStatus") != "TRADED":
-                    logger.critical("Exit order %s not confirmed as TRADED. Manual intervention required!", order_id)
-                    sys.exit(1)
+            self.helper.wait_for_fill(order_id, timeout=10)
+            order_data = self.helper.get_order_by_id(order_id) or {}
+            if order_data.get("orderStatus") != "TRADED":
+                logger.critical("Exit order %s not confirmed as TRADED. Manual intervention required!", order_id)
+                sys.exit(1)
+
+            exit_price = float(
+                order_data.get("averageTradedPrice")
+                or order_data.get("avgFilledPrice")
+                or order_data.get("price")
+                or 0.0
+            )
+            if exit_price == 0.0:
+                exit_price = self.helper.get_ltp(self.security_id, exchange=SEGMENT, instrument=INSTRUMENT)
         else:
-            logger.info("[DRY RUN] Simulating exit of %s position.", self.direction)
+            exit_price = self.ltp if self.ltp > 0 else self.helper.get_ltp(self.security_id, exchange=SEGMENT, instrument=INSTRUMENT)
+            logger.info("[DRY RUN] Simulating exit of %s position @ %.2f", self.direction, exit_price)
+
+        # Compute realized P&L from actual fill price before resetting state
+        if exit_price > 0 and self.entry_price > 0:
+            if self.direction == "LONG":
+                realized_pnl = (exit_price - self.entry_price) * self.qty
+            else:
+                realized_pnl = (self.entry_price - exit_price) * self.qty
+        else:
+            realized_pnl = self.position_pnl  # fallback: use last LTP-based estimate
+        logger.info("Realized P&L: %.2f (entry %.2f → exit %.2f, qty %d)", realized_pnl, self.entry_price, exit_price, self.qty)
 
         # Unsubscribe WebSocket
         try:
@@ -358,9 +383,11 @@ class CrudeOilMSupertrendStrategy:
         self.direction = "NONE"
         self.entry_price = 0.0
         self.st_level = 0.0
+        self.ltp = 0.0
         self.entry_time = None
         self.security_id = None
         self.expiry = None
+        return realized_pnl
 
     # ------------------------------------------------------------------
     # State Persistence
@@ -391,6 +418,46 @@ class CrudeOilMSupertrendStrategy:
             "use_vwap": self.use_vwap,
             "vwap": round(self.vwap, 2),
         })
+
+    # ------------------------------------------------------------------
+    # State Restore
+    # ------------------------------------------------------------------
+
+    def _restore_daily_pnl(self) -> None:
+        """Restore cumulative_pnl from today's state file on process restart."""
+        import json
+        state_file = os.path.join(debug_dir, f"{STRATEGY_KEY}_state.json")
+        try:
+            if not os.path.exists(state_file):
+                return
+            # Only restore if the file was written today
+            mtime = datetime.fromtimestamp(os.path.getmtime(state_file))
+            if mtime.date() != datetime.now().date():
+                return
+            with open(state_file) as f:
+                saved = json.load(f)
+            restored = float(saved.get("daily_pnl", 0.0))
+            if restored != 0.0:
+                self.cumulative_pnl = restored
+                logger.info("Restored daily P&L from state file: %.2f", restored)
+        except Exception as e:
+            logger.warning("Could not restore daily P&L from state file: %s", e)
+
+    # ------------------------------------------------------------------
+    # Re-entry Cooldown
+    # ------------------------------------------------------------------
+
+    def _candles_since_exit(self) -> int:
+        """Return how many full candles have elapsed since the last exit."""
+        if self.exit_candle_time is None or self.last_processed_candle_time is None:
+            return 999
+        try:
+            exit_dt = datetime.fromisoformat(str(self.exit_candle_time)[:19])
+            current_dt = datetime.fromisoformat(str(self.last_processed_candle_time)[:19])
+            elapsed_min = max(0.0, (current_dt - exit_dt).total_seconds() / 60)
+            return int(elapsed_min // int(self.interval))
+        except Exception:
+            return 999
 
     # ------------------------------------------------------------------
     # MCX Session Wait
@@ -430,6 +497,7 @@ class CrudeOilMSupertrendStrategy:
             f"{'='*60}\n"
         )
         self.save_state(status="INITIALIZING")
+        self._restore_daily_pnl()
 
         while True:
             # Shutdown check
@@ -464,11 +532,12 @@ class CrudeOilMSupertrendStrategy:
 
                 signal, _, initial_st = self.get_signal()
 
-                # Re-entry guard: skip if we just exited this candle
-                if self.exit_candle_time is not None and self.last_processed_candle_time == self.exit_candle_time:
+                # Re-entry cooldown: wait cooldown_candles full candles after an exit
+                candles_elapsed = self._candles_since_exit()
+                if candles_elapsed < self.cooldown_candles:
                     logger.info(
-                        "Re-entry guard: last exit was on candle %s. Waiting for next candle.",
-                        self.exit_candle_time
+                        "Cooldown: %d/%d candles elapsed since last exit on %s.",
+                        candles_elapsed, self.cooldown_candles, self.exit_candle_time
                     )
                     time.sleep(15)
                     continue
@@ -552,5 +621,8 @@ Examples:
     except KeyboardInterrupt:
         logger.warning("KeyboardInterrupt. Exiting cleanly.")
         if strat.direction != "NONE":
-            strat._exit_position("KeyboardInterrupt / Manual Stop")
+            realized = strat._exit_position("KeyboardInterrupt / Manual Stop")
+            strat.cumulative_pnl += realized
+            strat.position_pnl = 0.0
+            strat.save_state(status="STOPPED")
         sys.exit(0)
