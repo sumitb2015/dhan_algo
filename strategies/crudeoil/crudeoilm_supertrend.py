@@ -1,0 +1,507 @@
+import time
+import sys
+import argparse
+import os
+import logging
+import pandas as pd
+from datetime import datetime
+from typing import Tuple, Optional
+
+# Adjust path to project root (two levels up from strategies/crudeoil/)
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+
+from login import get_dhan_client
+from lib.dhan_helper import DhanHelper
+from lib.strategy_state_helper import save_strategy_state, check_shutdown_trigger
+
+# --- Constants ---
+STRATEGY_KEY = "crudeoilm_supertrend"
+SYMBOL = "CRUDEOILM"
+EXCHANGE = "MCX"
+INSTRUMENT = "FUTCOM"
+SEGMENT = "MCX_COMM"
+
+# --- Logging Setup ---
+project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+debug_dir = os.path.join(project_root, "debug")
+log_dir = os.path.join(debug_dir, "logs", "crudeoil")
+os.makedirs(log_dir, exist_ok=True)
+
+
+class FlushingFileHandler(logging.FileHandler):
+    def emit(self, record):
+        super().emit(record)
+        self.flush()
+
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - %(message)s",
+    handlers=[
+        logging.StreamHandler(),
+        FlushingFileHandler(os.path.join(log_dir, f"{datetime.now().strftime('%Y%m%d')}.log")),
+    ],
+    force=True,
+)
+logger = logging.getLogger(__name__)
+
+
+class CrudeOilMSupertrendStrategy:
+    def __init__(
+        self,
+        dry_run: bool = True,
+        lots: int = 1,
+        interval: str = "5",
+        supertrend_period: int = 7,
+        supertrend_multiplier: float = 3.0,
+        target_profit: float = 3000.0,
+        stop_loss: float = 3000.0,
+        start_time: str = "17:00",
+        eod_time: str = "23:25",
+        cooldown_candles: int = 1,
+    ):
+        self.dry_run = dry_run
+        self.lots = lots
+        self.interval = interval
+        self.supertrend_period = supertrend_period
+        self.supertrend_multiplier = supertrend_multiplier
+        self.target_profit = target_profit
+        self.stop_loss = stop_loss
+        self.start_time = start_time
+        self.eod_time = eod_time
+        self.cooldown_candles = cooldown_candles
+
+        # Instance state
+        self.security_id: Optional[str] = None
+        self.expiry: Optional[str] = None
+        self.lot_size: int = 10  # MCX crude mini default
+        self.qty: int = 0
+        self.direction: str = "NONE"   # "LONG", "SHORT", or "NONE"
+        self.entry_price: float = 0.0
+        self.st_level: float = 0.0     # trailing SL reference (Supertrend band)
+        self.entry_time: Optional[datetime] = None
+        self.ltp: float = 0.0
+        self.position_pnl: float = 0.0   # unrealized P&L of current open position
+        self.cumulative_pnl: float = 0.0  # sum of all closed position P&Ls today
+        self.exit_candle_time: Optional[str] = None        # candle timestamp of last exit bar
+        self.last_processed_candle_time: Optional[str] = None
+
+        # Init DhanHelper
+        dhan = get_dhan_client()
+        self.helper = DhanHelper(dhan)
+
+    # ------------------------------------------------------------------
+    # Signal
+    # ------------------------------------------------------------------
+
+    def get_signal(self) -> Tuple[str, float, float]:
+        """Returns (signal, close, st_level) where signal is LONG, SHORT, or NEUTRAL."""
+        indicators = [{"kind": "supertrend", "length": self.supertrend_period, "multiplier": self.supertrend_multiplier}]
+        df = self.helper.get_indicators_ta(symbol=SYMBOL, interval=self.interval, indicators=indicators, days=3)
+        if df.empty or len(df) < 2:
+            return "NEUTRAL", 0.0, 0.0
+
+        row = df.iloc[-2]  # last CONFIRMED closed candle (second-to-last)
+        close = float(row["Close"])
+
+        # Direction column: SUPERTd_<period>_<mult>
+        dir_cols = [c for c in df.columns if c.startswith("SUPERTd_")]
+        if not dir_cols:
+            logger.error("Supertrend direction column missing. Available: %s", df.columns.tolist())
+            return "NEUTRAL", close, 0.0
+        st_dir = float(row[dir_cols[0]])
+
+        # Level column: SUPERT_<period>_<mult>  (not SUPERTd_, SUPERTl_, SUPERTs_)
+        level_cols = [c for c in df.columns if c.startswith("SUPERT_") and not any(c.startswith(p) for p in ("SUPERTd_", "SUPERTl_", "SUPERTs_"))]
+        st_val = float(row[level_cols[0]]) if level_cols and not pd.isna(row[level_cols[0]]) else 0.0
+
+        # Log only on new candle
+        candle_ts = str(df.index[-2])
+        if candle_ts != self.last_processed_candle_time:
+            logger.info("[SIGNAL] Candle: %s | Close: %.2f | STd: %.1f | ST_level: %.2f", candle_ts, close, st_dir, st_val)
+            self.last_processed_candle_time = candle_ts
+
+        if st_dir == 1.0:
+            return "LONG", close, st_val
+        elif st_dir == -1.0:
+            return "SHORT", close, st_val
+        return "NEUTRAL", close, st_val
+
+    def _refresh_st_level(self) -> None:
+        """Refresh the Supertrend trailing stop level from the latest closed candle."""
+        _, _, st_val = self.get_signal()
+        if st_val > 0:
+            if st_val != self.st_level:
+                logger.info("[ST REFRESH] ST level updated: %.2f → %.2f", self.st_level, st_val)
+            self.st_level = st_val
+
+    # ------------------------------------------------------------------
+    # Entry
+    # ------------------------------------------------------------------
+
+    def enter_position(self, direction: str, initial_st_level: float) -> bool:
+        """Open a futures position. Returns True on success."""
+        if check_shutdown_trigger(STRATEGY_KEY):
+            logger.info("Shutdown triggered before entry.")
+            return False
+
+        future = self.helper.find_future(SYMBOL, exchange=EXCHANGE, instrument=INSTRUMENT)
+        if future is None:
+            logger.error("Could not find %s futures contract. Skipping entry.", SYMBOL)
+            return False
+
+        self.security_id = str(future.get("securityId") or future.get("security_id", ""))
+        self.expiry = str(future.get("expiryDate") or future.get("expiry", ""))
+        try:
+            self.lot_size = int(future.get("lotSize") or future.get("lot_size", 10))
+        except (ValueError, TypeError):
+            self.lot_size = 10
+        self.qty = self.lot_size * self.lots
+
+        # Subscribe WebSocket for live ticks
+        try:
+            self.helper.start_websocket([(SEGMENT, self.security_id, 15)])
+            time.sleep(2)
+        except Exception as e:
+            logger.warning("WebSocket subscribe failed (will use REST fallback): %s", e)
+
+        if not self.dry_run:
+            # Place real order
+            if direction == "LONG":
+                order_id = self.helper.buy(self.security_id, self.qty)
+            else:
+                order_id = self.helper.sell(self.security_id, self.qty)
+
+            if order_id is None:
+                logger.error("Order placement failed for %s %s.", direction, SYMBOL)
+                return False
+
+            filled = self.helper.wait_for_fill(order_id, timeout=10)
+            if not filled:
+                logger.warning("Order %s did not fill in time. Cancelling.", order_id)
+                self.helper.cancel_all_orders()
+                return False
+
+            order_data = self.helper.get_order_by_id(order_id) or {}
+            fill_price = float(
+                order_data.get("averageTradedPrice")
+                or order_data.get("avgFilledPrice")
+                or order_data.get("price")
+                or 0.0
+            )
+            if fill_price == 0:
+                fill_price = self.helper.get_ltp(self.security_id, exchange=SEGMENT, instrument=INSTRUMENT)
+            self.entry_price = fill_price
+        else:
+            # Dry run — simulate
+            ltp = self.helper.get_ltp(self.security_id, exchange=SEGMENT, instrument=INSTRUMENT)
+            self.entry_price = ltp if ltp > 0 else 5000.0
+            logger.info("[DRY RUN] Simulating %s entry @ %.2f", direction, self.entry_price)
+
+        self.direction = direction
+        if initial_st_level > 0:
+            self.st_level = initial_st_level
+        else:
+            self.st_level = self.entry_price * (0.98 if direction == "LONG" else 1.02)
+        self.entry_time = datetime.now()
+        logger.info(
+            "Entered %s @ %.2f | ST SL: %.2f | Qty: %d | Expiry: %s",
+            direction, self.entry_price, self.st_level, self.qty, self.expiry
+        )
+        return True
+
+    # ------------------------------------------------------------------
+    # Monitor
+    # ------------------------------------------------------------------
+
+    def monitor_position(self) -> None:
+        """1-second tick loop monitoring open position until exit."""
+        last_indicator_candle = ""
+        last_log_time = 0.0
+        interval_min = int(self.interval)
+
+        while self.direction != "NONE":
+            # Refresh ST level on each new candle boundary
+            now = datetime.now()
+            candle_mark = f"{now.strftime('%Y-%m-%d %H:')}{(now.minute // interval_min) * interval_min:02d}"
+            if candle_mark != last_indicator_candle:
+                self._refresh_st_level()
+                last_indicator_candle = candle_mark
+
+            # Exit condition 1: shutdown trigger
+            if check_shutdown_trigger(STRATEGY_KEY):
+                self._exit_position("UI Shutdown Request")
+                self.save_state(status="STOPPED")
+                sys.exit(0)
+
+            # Exit condition 2: EOD
+            if datetime.now().strftime("%H:%M") >= self.eod_time:
+                self._exit_position("EOD Auto-Exit")
+                break
+
+            # Fetch LTP
+            ltp = self.helper.get_ltp(self.security_id, exchange=SEGMENT, instrument=INSTRUMENT)
+            if ltp <= 0:
+                time.sleep(1)
+                continue
+            self.ltp = ltp
+
+            # Compute position P&L
+            if self.direction == "LONG":
+                self.position_pnl = (ltp - self.entry_price) * self.qty
+            else:
+                self.position_pnl = (self.entry_price - ltp) * self.qty
+
+            self.save_state()
+
+            # Log every 30s
+            now_ts = time.time()
+            if now_ts - last_log_time >= 30:
+                total = self.cumulative_pnl + self.position_pnl
+                logger.info(
+                    "[MONITOR] Dir: %s | Entry: %.2f | LTP: %.2f | ST SL: %.2f | Pos P&L: %.2f | Day P&L: %.2f",
+                    self.direction, self.entry_price, ltp, self.st_level, self.position_pnl, total
+                )
+                last_log_time = now_ts
+
+            total_day_pnl = self.cumulative_pnl + self.position_pnl
+
+            # Exit condition 3: daily profit target
+            if total_day_pnl >= self.target_profit:
+                self._exit_position(f"Daily Profit Target Hit ({total_day_pnl:.2f} >= {self.target_profit:.2f})")
+                self.cumulative_pnl += self.position_pnl
+                self.position_pnl = 0.0
+                break
+
+            # Exit condition 4: daily stop loss
+            if total_day_pnl <= -self.stop_loss:
+                self._exit_position(f"Daily Stop Loss Hit ({total_day_pnl:.2f} <= -{self.stop_loss:.2f})")
+                self.cumulative_pnl += self.position_pnl
+                self.position_pnl = 0.0
+                break
+
+            # Exit condition 5: trailing SL (Supertrend band)
+            if self.direction == "LONG" and ltp < self.st_level:
+                self._exit_position(f"Trailing SL Hit: LTP {ltp:.2f} < ST {self.st_level:.2f}")
+                self.cumulative_pnl += self.position_pnl
+                self.position_pnl = 0.0
+                break
+
+            if self.direction == "SHORT" and ltp > self.st_level:
+                self._exit_position(f"Trailing SL Hit: LTP {ltp:.2f} > ST {self.st_level:.2f}")
+                self.cumulative_pnl += self.position_pnl
+                self.position_pnl = 0.0
+                break
+
+            time.sleep(1)
+
+    # ------------------------------------------------------------------
+    # Exit
+    # ------------------------------------------------------------------
+
+    def _exit_position(self, reason: str) -> None:
+        logger.warning("!!! EXITING: %s !!!", reason)
+
+        if not self.dry_run:
+            if self.direction == "LONG":
+                order_id = self.helper.sell(self.security_id, self.qty)
+            else:
+                order_id = self.helper.buy(self.security_id, self.qty)
+
+            if order_id is None:
+                logger.critical("Exit order placement FAILED for %s %s. Manual intervention required!", self.direction, SYMBOL)
+                sys.exit(1)
+
+            filled = self.helper.wait_for_fill(order_id, timeout=10)
+            if not filled:
+                order_data = self.helper.get_order_by_id(order_id) or {}
+                if order_data.get("orderStatus") != "TRADED":
+                    logger.critical("Exit order %s not confirmed as TRADED. Manual intervention required!", order_id)
+                    sys.exit(1)
+        else:
+            logger.info("[DRY RUN] Simulating exit of %s position.", self.direction)
+
+        # Unsubscribe WebSocket
+        try:
+            self.helper.unsubscribe_instruments([(SEGMENT, self.security_id, 15)])
+        except Exception as e:
+            logger.warning("WebSocket unsubscribe failed (non-fatal): %s", e)
+
+        self.exit_candle_time = self.last_processed_candle_time
+
+        # Reset state
+        self.direction = "NONE"
+        self.entry_price = 0.0
+        self.st_level = 0.0
+        self.entry_time = None
+        self.security_id = None
+        self.expiry = None
+
+    # ------------------------------------------------------------------
+    # State Persistence
+    # ------------------------------------------------------------------
+
+    def save_state(self, status: str = "RUNNING") -> None:
+        save_strategy_state(STRATEGY_KEY, {
+            "strategy": STRATEGY_KEY,
+            "status": status,
+            "dry_run": self.dry_run,
+            "symbol": SYMBOL,
+            "interval": self.interval,
+            "supertrend_period": self.supertrend_period,
+            "supertrend_multiplier": self.supertrend_multiplier,
+            "direction": self.direction,
+            "entry_price": round(self.entry_price, 2),
+            "ltp": round(self.ltp, 2),
+            "st_level": round(self.st_level, 2),
+            "qty": self.qty,
+            "lots": self.lots,
+            "daily_pnl": round(self.cumulative_pnl + self.position_pnl, 2),
+            "target_profit": self.target_profit,
+            "stop_loss": self.stop_loss,
+            "start_time": self.start_time,
+            "eod_time": self.eod_time,
+            "expiry": self.expiry or "",
+        })
+
+    # ------------------------------------------------------------------
+    # Main Loop
+    # ------------------------------------------------------------------
+
+    def run(self) -> None:
+        mode = "LIVE" if not self.dry_run else "DRY RUN"
+        print(
+            f"\n{'='*60}\n"
+            f"  CrudeOilM Supertrend Strategy\n"
+            f"  Mode        : {mode}\n"
+            f"  Interval    : {self.interval}m\n"
+            f"  Supertrend  : period={self.supertrend_period}, mult={self.supertrend_multiplier}\n"
+            f"  Session     : {self.start_time} – {self.eod_time} IST\n"
+            f"  Lots        : {self.lots} (qty per lot: {self.lot_size})\n"
+            f"{'='*60}\n"
+        )
+        self.save_state(status="INITIALIZING")
+
+        while True:
+            # Shutdown check
+            if check_shutdown_trigger(STRATEGY_KEY):
+                logger.info("UI Shutdown Request in outer loop.")
+                self.save_state(status="STOPPED")
+                sys.exit(0)
+
+            # EOD guard
+            if datetime.now().strftime("%H:%M") >= self.eod_time:
+                logger.info("Past EOD time (%s). Stopping.", self.eod_time)
+                self.save_state(status="STOPPED")
+                break
+
+            try:
+                # Wait for session open
+                self.helper.wait_for_market_open(
+                    self.dry_run,
+                    start_time=self.start_time,
+                    eod_time=self.eod_time,
+                    shutdown_check=lambda: check_shutdown_trigger(STRATEGY_KEY),
+                )
+
+                # Daily P&L caps (before new position)
+                if self.cumulative_pnl >= self.target_profit:
+                    logger.info("Daily profit target already reached (%.2f). Done for the day.", self.cumulative_pnl)
+                    self.save_state(status="STOPPED")
+                    break
+                if self.cumulative_pnl <= -self.stop_loss:
+                    logger.info("Daily stop loss already hit (%.2f). Done for the day.", self.cumulative_pnl)
+                    self.save_state(status="STOPPED")
+                    break
+
+                self.save_state(status="SCANNING")
+
+                signal, _, initial_st = self.get_signal()
+
+                # Re-entry guard: skip if we just exited this candle
+                if self.exit_candle_time is not None and self.last_processed_candle_time == self.exit_candle_time:
+                    logger.info(
+                        "Re-entry guard: last exit was on candle %s. Waiting for next candle.",
+                        self.exit_candle_time
+                    )
+                    time.sleep(15)
+                    continue
+
+                if signal in ("LONG", "SHORT"):
+                    logger.info("Signal: %s | Initial ST SL: %.2f", signal, initial_st)
+                    success = self.enter_position(signal, initial_st)
+                    if success:
+                        self.monitor_position()
+                else:
+                    logger.info("Signal: NEUTRAL. Waiting for trend confirmation...")
+                    time.sleep(20 if self.dry_run else 30)
+
+            except Exception as e:
+                logger.error("Error in main loop: %s", e)
+                import traceback
+                logger.debug(traceback.format_exc())
+                time.sleep(10)
+
+
+# ---------------------------------------------------------------------------
+# CLI Entry Point
+# ---------------------------------------------------------------------------
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(
+        description="MCX CrudeOilM Supertrend Futures Strategy",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  # Dry run (default), 1 lot, 5m candles
+  python strategies/crudeoil/crudeoilm_supertrend.py
+
+  # Live trading, 2 lots
+  python strategies/crudeoil/crudeoilm_supertrend.py --live --lots 2
+
+  # Custom session window
+  python strategies/crudeoil/crudeoilm_supertrend.py --start-time 09:00 --eod-time 23:00
+""",
+    )
+    parser.add_argument("--live", action="store_true", default=False,
+                        help="Enable live trading (default: dry run)")
+    parser.add_argument("--lots", type=int, default=1,
+                        help="Number of lots to trade (default: 1)")
+    parser.add_argument("--interval", type=str, default="5",
+                        help="Candle interval in minutes: 1/3/5/15 (default: 5)")
+    parser.add_argument("--supertrend-period", type=int, default=7,
+                        help="Supertrend ATR period (default: 7)")
+    parser.add_argument("--supertrend-multiplier", type=float, default=3.0,
+                        help="Supertrend multiplier (default: 3.0)")
+    parser.add_argument("--target-profit", type=float, default=3000.0,
+                        help="Daily profit target in INR (default: 3000)")
+    parser.add_argument("--stop-loss", type=float, default=3000.0,
+                        help="Daily stop loss in INR (default: 3000)")
+    parser.add_argument("--start-time", type=str, default="17:00",
+                        help="Session start time HH:MM IST (default: 17:00)")
+    parser.add_argument("--eod-time", type=str, default="23:25",
+                        help="End-of-day time HH:MM IST (default: 23:25)")
+    parser.add_argument("--cooldown-candles", type=int, default=1,
+                        help="Candles to skip after exit before re-entry (default: 1)")
+    args = parser.parse_args()
+
+    strat = CrudeOilMSupertrendStrategy(
+        dry_run=not args.live,
+        lots=args.lots,
+        interval=args.interval,
+        supertrend_period=args.supertrend_period,
+        supertrend_multiplier=args.supertrend_multiplier,
+        target_profit=args.target_profit,
+        stop_loss=args.stop_loss,
+        start_time=args.start_time,
+        eod_time=args.eod_time,
+        cooldown_candles=args.cooldown_candles,
+    )
+
+    try:
+        strat.run()
+    except KeyboardInterrupt:
+        logger.warning("KeyboardInterrupt. Exiting cleanly.")
+        if strat.direction != "NONE":
+            strat._exit_position("KeyboardInterrupt / Manual Stop")
+        sys.exit(0)
