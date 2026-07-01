@@ -79,6 +79,8 @@ interface StrategyState {
   expiry?: string;
   supertrend_period?: number;
   supertrend_multiplier?: number;
+  use_vwap?: boolean;
+  vwap?: number;
 }
 
 interface StrategyCardProps {
@@ -153,6 +155,7 @@ export default function StrategyCard({ meta, state, onRefresh }: StrategyCardPro
   const [crudeoilStMultiplier, setCrudeoilStMultiplier] = useState<number>(3.0);
   const [crudeoilStartTime, setCrudeoilStartTime] = useState<string>('17:00');
   const [crudeoilEodTime, setCrudeoilEodTime] = useState<string>('23:25');
+  const [crudeoilUseVwap, setCrudeoilUseVwap] = useState<boolean>(false);
 
   const spreadTrendNoIndicators =
     meta.key === 'nifty_spread_trend' && !useEma && !useSupertrend;
@@ -241,6 +244,7 @@ export default function StrategyCard({ meta, state, onRefresh }: StrategyCardPro
         args.push('--supertrend-multiplier', String(crudeoilStMultiplier));
         args.push('--start-time', crudeoilStartTime);
         args.push('--eod-time', crudeoilEodTime);
+        if (crudeoilUseVwap) args.push('--use-vwap');
       }
 
       const res = await fetch('/api/strategies', {
@@ -588,6 +592,21 @@ export default function StrategyCard({ meta, state, onRefresh }: StrategyCardPro
                 className={inputCls}
               />
             </div>
+            <div className={fieldCls}>
+              <label className={lbl}>VWAP Filter</label>
+              <div className="flex items-center gap-2 h-7">
+                <input
+                  type="checkbox"
+                  id={`vwap-${meta.key}`}
+                  checked={crudeoilUseVwap}
+                  onChange={(e) => setCrudeoilUseVwap(e.target.checked)}
+                  className="h-3.5 w-3.5 rounded border-zinc-800 bg-zinc-900 accent-emerald-500"
+                />
+                <label htmlFor={`vwap-${meta.key}`} className="text-zinc-300 text-xs">
+                  Require price above/below VWAP
+                </label>
+              </div>
+            </div>
           </>
         )}
 
@@ -879,8 +898,11 @@ export default function StrategyCard({ meta, state, onRefresh }: StrategyCardPro
                       {state.st_level != null && state.st_level > 0 ? state.st_level.toFixed(2) : '—'}
                     </span>
                     <span className="text-[10px] text-zinc-500 font-mono">
-                      {state.interval ? `${state.interval}m ST(${state.supertrend_period ?? 7},${state.supertrend_multiplier ?? 3})` : ''}
+                      {state.interval ? `${state.interval}m ST(${state.supertrend_period ?? 7},${state.supertrend_multiplier ?? 3})${state.use_vwap ? ' +VWAP' : ''}` : ''}
                     </span>
+                    {state.use_vwap && state.vwap != null && state.vwap > 0 && (
+                      <span className="text-[10px] text-sky-400 font-mono">VWAP {state.vwap.toFixed(2)}</span>
+                    )}
                   </div>
                   <div className="px-3 py-2 flex flex-col gap-1 shrink-0">
                     <span className={lbl}>Day P&amp;L</span>

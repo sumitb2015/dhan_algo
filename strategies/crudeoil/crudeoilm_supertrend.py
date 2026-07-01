@@ -59,6 +59,7 @@ class CrudeOilMSupertrendStrategy:
         start_time: str = "17:00",
         eod_time: str = "23:25",
         cooldown_candles: int = 1,
+        use_vwap: bool = False,
     ):
         self.dry_run = dry_run
         self.lots = lots
@@ -70,6 +71,7 @@ class CrudeOilMSupertrendStrategy:
         self.start_time = start_time
         self.eod_time = eod_time
         self.cooldown_candles = cooldown_candles
+        self.use_vwap = use_vwap
 
         # Instance state
         self.security_id: Optional[str] = None
@@ -79,6 +81,7 @@ class CrudeOilMSupertrendStrategy:
         self.direction: str = "NONE"   # "LONG", "SHORT", or "NONE"
         self.entry_price: float = 0.0
         self.st_level: float = 0.0     # trailing SL reference (Supertrend band)
+        self.vwap: float = 0.0
         self.entry_time: Optional[datetime] = None
         self.ltp: float = 0.0
         self.position_pnl: float = 0.0   # unrealized P&L of current open position
@@ -97,6 +100,8 @@ class CrudeOilMSupertrendStrategy:
     def get_signal(self) -> Tuple[str, float, float]:
         """Returns (signal, close, st_level) where signal is LONG, SHORT, or NEUTRAL."""
         indicators = [{"kind": "supertrend", "length": self.supertrend_period, "multiplier": self.supertrend_multiplier}]
+        if self.use_vwap:
+            indicators.append({"kind": "vwap", "anchor": "D"})
         df = self.helper.get_indicators_ta(symbol=SYMBOL, interval=self.interval, indicators=indicators, days=3)
         if df.empty or len(df) < 2:
             return "NEUTRAL", 0.0, 0.0
@@ -115,15 +120,30 @@ class CrudeOilMSupertrendStrategy:
         level_cols = [c for c in df.columns if c.startswith("SUPERT_") and not any(c.startswith(p) for p in ("SUPERTd_", "SUPERTl_", "SUPERTs_"))]
         st_val = float(row[level_cols[0]]) if level_cols and not pd.isna(row[level_cols[0]]) else 0.0
 
+        # VWAP filter
+        vwap_val = 0.0
+        if self.use_vwap:
+            vwap_cols = [c for c in df.columns if c.startswith("VWAP")]
+            if vwap_cols and not pd.isna(row[vwap_cols[0]]):
+                vwap_val = float(row[vwap_cols[0]])
+            self.vwap = vwap_val
+
         # Log only on new candle
         candle_ts = str(df.index[-2])
         if candle_ts != self.last_processed_candle_time:
-            logger.info("[SIGNAL] Candle: %s | Close: %.2f | STd: %.1f | ST_level: %.2f", candle_ts, close, st_dir, st_val)
+            vwap_info = f" | VWAP: {vwap_val:.2f}" if self.use_vwap else ""
+            logger.info("[SIGNAL] Candle: %s | Close: %.2f | STd: %.1f | ST: %.2f%s", candle_ts, close, st_dir, st_val, vwap_info)
             self.last_processed_candle_time = candle_ts
 
         if st_dir == 1.0:
+            if self.use_vwap and vwap_val > 0 and close <= vwap_val:
+                logger.info("[VWAP FILTER] LONG blocked: Close %.2f <= VWAP %.2f", close, vwap_val)
+                return "NEUTRAL", close, st_val
             return "LONG", close, st_val
         elif st_dir == -1.0:
+            if self.use_vwap and vwap_val > 0 and close >= vwap_val:
+                logger.info("[VWAP FILTER] SHORT blocked: Close %.2f >= VWAP %.2f", close, vwap_val)
+                return "NEUTRAL", close, st_val
             return "SHORT", close, st_val
         return "NEUTRAL", close, st_val
 
@@ -363,6 +383,8 @@ class CrudeOilMSupertrendStrategy:
             "start_time": self.start_time,
             "eod_time": self.eod_time,
             "expiry": self.expiry or "",
+            "use_vwap": self.use_vwap,
+            "vwap": round(self.vwap, 2),
         })
 
     # ------------------------------------------------------------------
@@ -397,6 +419,7 @@ class CrudeOilMSupertrendStrategy:
             f"  Mode        : {mode}\n"
             f"  Interval    : {self.interval}m\n"
             f"  Supertrend  : period={self.supertrend_period}, mult={self.supertrend_multiplier}\n"
+            f"  VWAP Filter : {'ON (buy only above VWAP, sell only below VWAP)' if self.use_vwap else 'OFF'}\n"
             f"  Session     : {self.start_time} – {self.eod_time} IST\n"
             f"  Lots        : {self.lots} (qty per lot: {self.lot_size})\n"
             f"{'='*60}\n"
@@ -499,6 +522,8 @@ Examples:
                         help="End-of-day time HH:MM IST (default: 23:25)")
     parser.add_argument("--cooldown-candles", type=int, default=1,
                         help="Candles to skip after exit before re-entry (default: 1)")
+    parser.add_argument("--use-vwap", action="store_true", default=False,
+                        help="Require price above VWAP for LONG, below VWAP for SHORT (default: off)")
     args = parser.parse_args()
 
     strat = CrudeOilMSupertrendStrategy(
@@ -512,6 +537,7 @@ Examples:
         start_time=args.start_time,
         eod_time=args.eod_time,
         cooldown_candles=args.cooldown_candles,
+        use_vwap=args.use_vwap,
     )
 
     try:
