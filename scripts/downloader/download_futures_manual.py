@@ -282,15 +282,36 @@ def download_futstk_oi_snapshot(helper: DhanHelper, url: str, headers: dict, sav
     total = len(near_month)
     print(f"  Found {total} near-month FUTSTK contracts")
 
+    # Determine previous trading day from NIFTY daily futures file
+    nifty_daily_path = os.path.join(save_dir, "NIFTY_Futures_Daily.csv")
+    today_str = datetime.now().strftime("%Y-%m-%d")
+    prev_trading_day = None
+    if os.path.exists(nifty_daily_path):
+        try:
+            df_nifty = pd.read_csv(nifty_daily_path)
+            dates = df_nifty["Datetime"].tolist()
+            if len(dates) >= 2:
+                if dates[-1] == today_str:
+                    prev_trading_day = dates[-2]
+                else:
+                    prev_trading_day = dates[-1]
+            elif len(dates) == 1:
+                prev_trading_day = dates[0]
+        except Exception as e:
+            print(f"  Error reading NIFTY daily file: {e}")
+
+    if not prev_trading_day:
+        prev_trading_day = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+    print(f"  Previous trading day determined as: {prev_trading_day}")
+
     # Fetch live quotes for all near-month contracts in batches
     security_ids = [str(row["SECURITY_ID"]) for _, row in near_month.iterrows()]
-    print(f"  Fetching live quotes for {total} contracts to include today's real-time data...")
+    print(f"  Fetching live quotes for {total} contracts...")
     _write_status("Fetching live quotes...")
     quotes = fetch_all_quotes(helper, security_ids)
     print(f"  Fetched {len(quotes)} live quotes.")
 
-    from_date = (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d")
-    to_date   = datetime.now().strftime("%Y-%m-%d")
+    intraday_url = "https://api.dhan.co/v2/charts/intraday"
 
     rows = []
     skipped = 0
@@ -304,91 +325,74 @@ def download_futstk_oi_snapshot(helper: DhanHelper, url: str, headers: dict, sav
             _write_status(f"Stock futures OI: {i + 1}/{total}...")
             print(f"  [{i + 1}/{total}] processed (last: {symbol})")
 
+        quote = quotes.get(sec_id)
+        if not quote or not isinstance(quote, dict):
+            skipped += 1
+            continue
+
+        close_today = quote.get("last_price", 0)
+        oi_today    = quote.get("oi", 0)
+        if close_today == 0 or oi_today == 0:
+            skipped += 1
+            continue
+
+        # Get yesterday's close and OI from intraday EOD 1-minute query to bypass Dhan's buggy daily historical charts OI
+        close_prev = None
+        oi_prev    = None
         try:
-            payload = {
+            payload_prev = {
                 "securityId": sec_id,
                 "exchangeSegment": "NSE_FNO",
                 "instrument": "FUTSTK",
+                "interval": 1,
                 "oi": True,
-                "fromDate": from_date,
-                "toDate":   to_date,
+                "fromDate": f"{prev_trading_day} 15:28:00",
+                "toDate":   f"{prev_trading_day} 15:30:00",
             }
-            try:
-                resp = requests.post(url, headers=headers, json=payload, timeout=30)
-            except Exception:
-                skipped += 1
-                continue
+            resp = requests.post(intraday_url, headers=headers, json=payload_prev, timeout=10)
+            if resp.status_code == 200:
+                data_prev = resp.json()
+                if isinstance(data_prev, dict) and "close" in data_prev and len(data_prev["close"]) > 0:
+                    close_prev = data_prev["close"][-1]
+                    ois_prev = data_prev.get("open_interest", [])
+                    if ois_prev and len(ois_prev) > 0:
+                        oi_prev = ois_prev[-1]
+        except Exception:
+            pass
 
-            if resp.status_code != 200:
-                skipped += 1
-                continue
+        # Fallback to Quote's previous close if intraday query failed
+        if not close_prev:
+            ohlc = quote.get("ohlc", {})
+            close_prev = ohlc.get("close", 0)
 
-            try:
-                data = resp.json()
-            except Exception:
-                skipped += 1
-                continue
+        # Skip if we still don't have previous day's close or OI
+        if not close_prev or not oi_prev or close_prev == 0 or oi_prev == 0:
+            skipped += 1
+            continue
 
-            if not isinstance(data, dict) or not data.get("close") or len(data["close"]) < 1:
-                skipped += 1
-                continue
+        price_chg_pct = (close_today - close_prev) / close_prev * 100
+        oi_chg_pct    = (oi_today - oi_prev) / oi_prev * 100
 
-            closes = list(data["close"])
-            ois    = list(data.get("open_interest", [0] * len(closes)))
+        if price_chg_pct >= 0 and oi_chg_pct >= 0:
+            category = "LONG_BUILDUP"
+        elif price_chg_pct < 0 and oi_chg_pct >= 0:
+            category = "SHORT_BUILDUP"
+        elif price_chg_pct >= 0 and oi_chg_pct < 0:
+            category = "SHORT_COVERING"
+        else:
+            category = "LONG_UNWINDING"
 
-            # Append live quote today if not already present in the historical daily data
-            quote = quotes.get(sec_id)
-            if quote and isinstance(quote, dict):
-                last_price = quote.get("last_price", 0)
-                oi = quote.get("oi", 0)
-                if last_price > 0:
-                    if "timestamp" in data and len(data["timestamp"]) > 0:
-                        last_ts = data["timestamp"][-1]
-                        last_dt = (pd.to_datetime([last_ts], unit="s")
-                                   .tz_localize("UTC").tz_convert("Asia/Kolkata").tz_localize(None)
-                                   .strftime("%Y-%m-%d")[0])
-                        today_str = datetime.now().strftime("%Y-%m-%d")
-                        if last_dt < today_str:
-                            closes.append(last_price)
-                            ois.append(oi)
-
-            if len(closes) < 2:
-                skipped += 1
-                continue
-
-            close_today = closes[-1]
-            close_prev  = closes[-2]
-            oi_today    = ois[-1]
-            oi_prev     = ois[-2]
-
-            if close_prev == 0 or oi_prev == 0:
-                skipped += 1
-                continue
-
-            price_chg_pct = (close_today - close_prev) / close_prev * 100
-            oi_chg_pct    = (oi_today - oi_prev) / oi_prev * 100
-
-            if price_chg_pct >= 0 and oi_chg_pct >= 0:
-                category = "LONG_BUILDUP"
-            elif price_chg_pct < 0 and oi_chg_pct >= 0:
-                category = "SHORT_BUILDUP"
-            elif price_chg_pct >= 0 and oi_chg_pct < 0:
-                category = "SHORT_COVERING"
-            else:
-                category = "LONG_UNWINDING"
-
-            rows.append({
-                "Symbol":      symbol,
-                "Expiry":      expiry,
-                "Price":       round(close_today, 2),
-                "PriceChgPct": round(price_chg_pct, 2),
-                "OI":          int(oi_today),
-                "OIChgPct":    round(oi_chg_pct, 2),
-                "Category":    category,
-                "DataDate":    to_date,
-            })
-        finally:
-            time.sleep(0.1)
+        rows.append({
+            "Symbol":      symbol,
+            "Expiry":      expiry,
+            "Price":       round(close_today, 2),
+            "PriceChgPct": round(price_chg_pct, 2),
+            "OI":          int(oi_today),
+            "OIChgPct":    round(oi_chg_pct, 2),
+            "Category":    category,
+            "DataDate":    today_str,
+        })
+        time.sleep(0.08)
 
     if not rows:
         print(f"  [FAIL] No FUTSTK OI data collected ({skipped} skipped)")
