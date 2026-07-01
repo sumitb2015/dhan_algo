@@ -350,8 +350,10 @@ export default function OptionsCharts() {
         .then(r => r.json())
         .then((j: { success: boolean; data?: { chain: { oc?: Record<string, ChainOcEntry> } } }) => {
           if (!j.success || !j.data?.chain?.oc) return;
-          const entry = j.data.chain.oc[String(selectedStrike)];
-          if (!entry) return;
+          const oc = j.data.chain.oc as Record<string, ChainOcEntry>;
+          const entryKey = Object.keys(oc).find(k => Number(k) === selectedStrike);
+          if (!entryKey) return;
+          const entry = oc[entryKey];
           const ceIV = extractIV(entry.ce);
           const peIV = extractIV(entry.pe);
           if (ceIV === 0 && peIV === 0) return;
