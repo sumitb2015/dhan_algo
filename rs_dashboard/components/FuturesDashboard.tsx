@@ -101,6 +101,9 @@ function ContractCard({
   contracts: ContractStats[];
 }) {
   const [activeIdx, setActiveIdx] = useState(0);
+
+  useEffect(() => { setActiveIdx(0); }, [contracts]);
+
   const contract = contracts[activeIdx] ?? contracts[0];
 
   if (!contract) {
