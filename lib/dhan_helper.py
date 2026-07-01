@@ -751,7 +751,11 @@ class DhanHelper:
         """
         instrument = security_info.get('INSTRUMENT', '')
         exchange = security_info.get('EXCH_ID', 'NSE')
-        
+
+        # MCX commodity instruments always use MCX_COMM
+        if exchange == 'MCX':
+            return 'MCX_COMM'
+
         # F&O instruments
         if instrument in ['OPTIDX', 'FUTIDX', 'OPTSTK', 'FUTSTK', 'OPTFUT', 'FUTCUR', 'OPTCUR']:
             return f"{exchange}_FNO"

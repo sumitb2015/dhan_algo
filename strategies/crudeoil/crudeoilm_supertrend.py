@@ -357,12 +357,33 @@ class CrudeOilMSupertrendStrategy:
             "qty": self.qty,
             "lots": self.lots,
             "daily_pnl": round(self.cumulative_pnl + self.position_pnl, 2),
+            "total_pnl": round(self.cumulative_pnl + self.position_pnl, 2),
             "target_profit": self.target_profit,
             "stop_loss": self.stop_loss,
             "start_time": self.start_time,
             "eod_time": self.eod_time,
             "expiry": self.expiry or "",
         })
+
+    # ------------------------------------------------------------------
+    # MCX Session Wait
+    # ------------------------------------------------------------------
+
+    def _wait_for_mcx_session(self) -> None:
+        """Wait for MCX session window using weekday+time check only (no NSE holiday filter)."""
+        while True:
+            if check_shutdown_trigger(STRATEGY_KEY):
+                self.save_state(status="STOPPED")
+                sys.exit(0)
+            now = datetime.now()
+            now_str = now.strftime("%H:%M")
+            if now_str >= self.eod_time:
+                return  # let outer loop handle EOD
+            if now.weekday() < 5 and now_str >= self.start_time:
+                return  # session is open
+            next_check = 60 if not self.dry_run else 5
+            logger.info("Waiting for MCX session to open (%s IST). Current: %s", self.start_time, now_str)
+            time.sleep(next_check)
 
     # ------------------------------------------------------------------
     # Main Loop
@@ -397,12 +418,7 @@ class CrudeOilMSupertrendStrategy:
 
             try:
                 # Wait for session open
-                self.helper.wait_for_market_open(
-                    self.dry_run,
-                    start_time=self.start_time,
-                    eod_time=self.eod_time,
-                    shutdown_check=lambda: check_shutdown_trigger(STRATEGY_KEY),
-                )
+                self._wait_for_mcx_session()
 
                 # Daily P&L caps (before new position)
                 if self.cumulative_pnl >= self.target_profit:
