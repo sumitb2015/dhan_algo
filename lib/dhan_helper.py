@@ -2710,7 +2710,7 @@ class DhanHelper:
         return pd.DataFrame()
 
     # --- SECURITY / INSTRUMENT LIST ---
-    def fetch_security_list(self, segments: List[str] = ['NSE_EQ', 'NSE_FNO', 'BSE_EQ', 'BSE_FNO']) -> bool:
+    def fetch_security_list(self, segments: List[str] = ['NSE_EQ', 'NSE_FNO', 'BSE_EQ', 'BSE_FNO', 'MCX_COMM']) -> bool:
         """
         Fetch and combine security lists for specific segments using authenticated API.
         Default: Equity (E) and Derivatives (D) for both NSE and BSE.
