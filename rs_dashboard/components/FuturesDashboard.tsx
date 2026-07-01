@@ -5,6 +5,7 @@ import NavBar from '@/components/NavBar';
 import { Activity, RefreshCw, AlertCircle, Loader2, Download } from 'lucide-react';
 import type { ContractStats, FuturesResponse } from '@/app/api/futures/route';
 import type { FuturesRefreshStatus } from '@/app/api/futures-refresh/route';
+import OIBuildupDashboard from '@/components/OIBuildupDashboard';
 
 // ─── Formatters ───────────────────────────────────────────────────────────────
 
@@ -221,6 +222,8 @@ export default function FuturesDashboard() {
   const [error, setError] = useState<string | null>(null);
   const [dlStatus, setDlStatus] = useState<FuturesRefreshStatus | null>(null);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const [activeTab, setActiveTab]   = useState<'index' | 'oi'>('index');
+  const [refreshKey, setRefreshKey] = useState(0);
 
   const fetchData = useCallback(async () => {
     setLoading(true);
@@ -245,6 +248,7 @@ export default function FuturesDashboard() {
       if (!json.running && json.done) {
         if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; }
         fetchData();
+        setRefreshKey(k => k + 1);
       }
     } catch { /* ignore */ }
   }, [fetchData]);
@@ -290,6 +294,23 @@ export default function FuturesDashboard() {
 
         <NavBar />
 
+        {/* Tab selector */}
+        <div className="flex items-center gap-1 p-0.5 bg-zinc-950/60 border border-zinc-800 rounded-xl shrink-0">
+          {(['index', 'oi'] as const).map(tab => (
+            <button
+              key={tab}
+              onClick={() => setActiveTab(tab)}
+              className={`px-3 py-1 text-[11px] font-semibold rounded-lg transition-all ${
+                activeTab === tab
+                  ? 'bg-sky-500/15 text-sky-400 border border-sky-500/25'
+                  : 'text-zinc-400 hover:text-zinc-200'
+              }`}
+            >
+              {tab === 'index' ? 'Index Futures' : 'OI Buildup'}
+            </button>
+          ))}
+        </div>
+
         <div className="ml-auto flex items-center gap-2">
           {/* Download button — runs the Python script in background */}
           {dlStatus?.running ? (
@@ -320,23 +341,27 @@ export default function FuturesDashboard() {
       </header>
 
       {/* Body */}
-      <main className="flex-1 px-5 py-6 max-w-screen-xl mx-auto w-full">
-        {loading ? (
-          <div className="flex items-center justify-center py-32 gap-2 text-zinc-400">
-            <Loader2 className="h-5 w-5 animate-spin" />
-            <span className="text-sm">Loading futures data…</span>
-          </div>
-        ) : error ? (
-          <div className="flex flex-col items-center justify-center py-32 gap-3 text-red-400">
-            <AlertCircle className="h-8 w-8" />
-            <span className="text-sm text-center max-w-md">{error}</span>
-          </div>
-        ) : data ? (
-          <div className="flex gap-5 flex-wrap">
-            <ContractCard name="NIFTY" contracts={data.instruments.NIFTY} />
-            <ContractCard name="BANKNIFTY" contracts={data.instruments.BANKNIFTY} />
-          </div>
-        ) : null}
+      <main className="flex-1 px-5 py-6 max-w-screen-2xl mx-auto w-full">
+        {activeTab === 'index' ? (
+          loading ? (
+            <div className="flex items-center justify-center py-32 gap-2 text-zinc-400">
+              <Loader2 className="h-5 w-5 animate-spin" />
+              <span className="text-sm">Loading futures data…</span>
+            </div>
+          ) : error ? (
+            <div className="flex flex-col items-center justify-center py-32 gap-3 text-red-400">
+              <AlertCircle className="h-8 w-8" />
+              <span className="text-sm text-center max-w-md">{error}</span>
+            </div>
+          ) : data ? (
+            <div className="flex gap-5 flex-wrap">
+              <ContractCard name="NIFTY" contracts={data.instruments.NIFTY} />
+              <ContractCard name="BANKNIFTY" contracts={data.instruments.BANKNIFTY} />
+            </div>
+          ) : null
+        ) : (
+          <OIBuildupDashboard refreshKey={refreshKey} />
+        )}
       </main>
     </div>
   );
