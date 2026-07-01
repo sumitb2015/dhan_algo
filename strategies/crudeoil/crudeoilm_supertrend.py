@@ -149,7 +149,11 @@ class CrudeOilMSupertrendStrategy:
 
     def _refresh_st_level(self) -> None:
         """Refresh the Supertrend trailing stop level from the latest closed candle."""
+        # Save and restore last_processed_candle_time so this refresh does not
+        # affect the re-entry cooldown guard in the outer scan loop.
+        saved_ts = self.last_processed_candle_time
         _, _, st_val = self.get_signal()
+        self.last_processed_candle_time = saved_ts
         if st_val > 0:
             if st_val != self.st_level:
                 logger.info("[ST REFRESH] ST level updated: %.2f → %.2f", self.st_level, st_val)
@@ -175,6 +179,7 @@ class CrudeOilMSupertrendStrategy:
         try:
             self.lot_size = int(future.get("lotSize") or future.get("lot_size", 10))
         except (ValueError, TypeError):
+            logger.warning("Could not parse lot size from master list, defaulting to 10. Verify CRUDEOILM contract specs.")
             self.lot_size = 10
         self.qty = self.lot_size * self.lots
 
@@ -392,7 +397,7 @@ class CrudeOilMSupertrendStrategy:
     # ------------------------------------------------------------------
 
     def _wait_for_mcx_session(self) -> None:
-        """Wait for MCX session window using weekday+time check only (no NSE holiday filter)."""
+        """Wait for MCX session window using time-only check (no weekday or holiday filter)."""
         while True:
             if check_shutdown_trigger(STRATEGY_KEY):
                 self.save_state(status="STOPPED")
@@ -442,6 +447,8 @@ class CrudeOilMSupertrendStrategy:
             try:
                 # Wait for session open
                 self._wait_for_mcx_session()
+                if datetime.now().strftime("%H:%M") >= self.eod_time:
+                    continue
 
                 # Daily P&L caps (before new position)
                 if self.cumulative_pnl >= self.target_profit:

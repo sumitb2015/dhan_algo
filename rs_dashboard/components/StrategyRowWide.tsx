@@ -519,7 +519,7 @@ export default function StrategyRowWide({ meta, state, onRefresh }: Props) {
             </div>
             <div className={fieldCls}><label className={lbl}>ST Period</label><Input type="number" value={crudeoilStPeriod} onChange={e => setCrudeoilStPeriod(parseInt(e.target.value) || 7)} min={2} className={inputCls} style={{ width: 64 }} /></div>
             <div className={fieldCls}><label className={lbl}>ST Multiplier</label><Input type="number" step="0.5" value={crudeoilStMultiplier} onChange={e => setCrudeoilStMultiplier(parseFloat(e.target.value) || 3.0)} min={0.5} className={inputCls} style={{ width: 64 }} /></div>
-            <div className={fieldCls}><label className={lbl}>Start Time</label><Input type="text" value={crudeoilStartTime} onChange={e => setCrudeoilStartTime(e.target.value)} placeholder="17:00" className={inputCls} style={{ width: 72 }} /></div>
+            <div className={fieldCls}><label className={lbl}>Start Time</label><Input type="text" value={crudeoilStartTime} onChange={e => setCrudeoilStartTime(e.target.value)} placeholder="09:00" className={inputCls} style={{ width: 72 }} /></div>
             <div className={fieldCls}><label className={lbl}>EOD Time</label><Input type="text" value={crudeoilEodTime} onChange={e => setCrudeoilEodTime(e.target.value)} placeholder="23:25" className={inputCls} style={{ width: 72 }} /></div>
             <div className={fieldCls}>
               <label className={lbl}>VWAP Filter</label>

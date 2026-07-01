@@ -578,7 +578,7 @@ export default function StrategyCard({ meta, state, onRefresh }: StrategyCardPro
                 type="text"
                 value={crudeoilStartTime}
                 onChange={(e) => setCrudeoilStartTime(e.target.value)}
-                placeholder="17:00"
+                placeholder="09:00"
                 className={inputCls}
               />
             </div>
