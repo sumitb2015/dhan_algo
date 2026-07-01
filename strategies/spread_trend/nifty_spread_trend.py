@@ -42,7 +42,7 @@ class NiftySpreadTrendStrategy:
                  ce_offset=100, pe_offset=100, spread_width=100, lots=1,
                  target_profit=2000.0, stop_loss=2000.0, exit_on_signal_change=True,
                  eod_time="15:15", cooldown_minutes=5,
-                 use_ema=True, use_supertrend=True):
+                 use_ema=True, use_supertrend=True, min_hold_minutes=5):
         self.dry_run = dry_run
         self.symbol = symbol.upper()
         self.interval = interval
@@ -60,6 +60,7 @@ class NiftySpreadTrendStrategy:
         self.cooldown_minutes = cooldown_minutes
         self.use_ema = use_ema
         self.use_supertrend = use_supertrend
+        self.min_hold_minutes = min_hold_minutes
 
         self.dhan = get_dhan_client()
         if not self.dhan:
@@ -109,6 +110,7 @@ class NiftySpreadTrendStrategy:
         # Short-option VWAP + Supertrend exit tracking
         self.option_vwap: float = 0.0
         self.option_st_level: float = 0.0
+        self.entry_time: datetime | None = None
 
     def _fetch_option_candles(self, security_id: str) -> pd.DataFrame:
         """Fetch 1-min intraday candles for the short option, normalised and filtered to today's session."""
@@ -365,6 +367,7 @@ class NiftySpreadTrendStrategy:
             self.active_spread = "BEAR_CALL"
             short_strike = atm_strike + self.ce_offset
             long_strike = short_strike + self.spread_width
+        self.entry_time = datetime.now()
             
         short_strike = int(round(short_strike / self.strike_step) * self.strike_step)
         long_strike = int(round(long_strike / self.strike_step) * self.strike_step)
@@ -571,7 +574,9 @@ class NiftySpreadTrendStrategy:
                 break
 
             # 5. Short option above session VWAP and Supertrend
-            if (self.option_vwap > 0 and self.option_st_level > 0
+            hold_elapsed = (datetime.now() - self.entry_time).total_seconds() / 60 if self.entry_time else 0
+            if (hold_elapsed >= self.min_hold_minutes
+                    and self.option_vwap > 0 and self.option_st_level > 0
                     and short_ltp > self.option_vwap
                     and short_ltp > self.option_st_level):
                 self.exit_positions(
@@ -814,6 +819,8 @@ Examples:
                         help="End of day square-off time in HH:MM (default: 15:15)")
     parser.add_argument("--cooldown-minutes", type=int, default=5,
                         help="Cooldown period in minutes after closing a position before scan resumes (default: 5)")
+    parser.add_argument("--min-hold-minutes", type=int, default=5,
+                        help="Minimum hold time in minutes before the VWAP/ST exit can trigger (default: 5)")
 
     args = parser.parse_args()
 
@@ -829,7 +836,7 @@ Examples:
     logger.info(f"Indicators: {' + '.join(active_indicators) if active_indicators else 'NONE (will not trade)'}")
     logger.info(f"Spread Config: CE Offset +{args.ce_offset} | PE Offset -{args.pe_offset} | Width: {args.spread_width}")
     logger.info(f"Lots: {args.lots} | Target Profit: ₹{args.target_profit:.0f} | Stop Loss: -₹{abs(args.stop_loss):.0f}")
-    logger.info(f"Exit on Trend Reversal: {args.exit_on_signal_change} | Cooldown: {args.cooldown_minutes}m")
+    logger.info(f"Exit on Trend Reversal: {args.exit_on_signal_change} | Cooldown: {args.cooldown_minutes}m | Min Hold: {args.min_hold_minutes}m")
     logger.info("=" * 60)
 
     strat = NiftySpreadTrendStrategy(
@@ -850,6 +857,7 @@ Examples:
         cooldown_minutes=args.cooldown_minutes,
         use_ema=args.use_ema,
         use_supertrend=args.use_supertrend,
+        min_hold_minutes=args.min_hold_minutes,
     )
     try:
         strat.run()
