@@ -279,63 +279,70 @@ def download_futstk_oi_snapshot(helper: DhanHelper, url: str, headers: dict, sav
             _write_status(f"Stock futures OI: {i + 1}/{total}…")
             print(f"  [{i + 1}/{total}] processed (last: {symbol})")
 
-        payload = {
-            "securityId": sec_id,
-            "exchangeSegment": "NSE_FNO",
-            "instrument": "FUTSTK",
-            "oi": True,
-            "fromDate": from_date,
-            "toDate":   to_date,
-        }
         try:
-            resp = requests.post(url, headers=headers, json=payload, timeout=30)
-        except Exception:
-            skipped += 1
-            continue
+            payload = {
+                "securityId": sec_id,
+                "exchangeSegment": "NSE_FNO",
+                "instrument": "FUTSTK",
+                "oi": True,
+                "fromDate": from_date,
+                "toDate":   to_date,
+            }
+            try:
+                resp = requests.post(url, headers=headers, json=payload, timeout=30)
+            except Exception:
+                skipped += 1
+                continue
 
-        if resp.status_code != 200:
-            skipped += 1
-            continue
+            if resp.status_code != 200:
+                skipped += 1
+                continue
 
-        data = resp.json()
-        if not isinstance(data, dict) or not data.get("close") or len(data["close"]) < 2:
-            skipped += 1
-            continue
+            try:
+                data = resp.json()
+            except Exception:
+                skipped += 1
+                continue
 
-        closes = data["close"]
-        ois    = data.get("open_interest", [0] * len(closes))
+            if not isinstance(data, dict) or not data.get("close") or len(data["close"]) < 2:
+                skipped += 1
+                continue
 
-        close_today = closes[-1]
-        close_prev  = closes[-2]
-        oi_today    = ois[-1]
-        oi_prev     = ois[-2]
+            closes = data["close"]
+            ois    = data.get("open_interest", [0] * len(closes))
 
-        if oi_prev == 0:
-            skipped += 1
-            continue
+            close_today = closes[-1]
+            close_prev  = closes[-2]
+            oi_today    = ois[-1]
+            oi_prev     = ois[-2]
 
-        price_chg_pct = (close_today - close_prev) / close_prev * 100
-        oi_chg_pct    = (oi_today - oi_prev) / oi_prev * 100
+            if close_prev == 0 or oi_prev == 0:
+                skipped += 1
+                continue
 
-        if price_chg_pct >= 0 and oi_chg_pct >= 0:
-            category = "LONG_BUILDUP"
-        elif price_chg_pct < 0 and oi_chg_pct >= 0:
-            category = "SHORT_BUILDUP"
-        elif price_chg_pct >= 0 and oi_chg_pct < 0:
-            category = "SHORT_COVERING"
-        else:
-            category = "LONG_UNWINDING"
+            price_chg_pct = (close_today - close_prev) / close_prev * 100
+            oi_chg_pct    = (oi_today - oi_prev) / oi_prev * 100
 
-        rows.append({
-            "Symbol":      symbol,
-            "Expiry":      expiry,
-            "Price":       round(close_today, 2),
-            "PriceChgPct": round(price_chg_pct, 2),
-            "OI":          int(oi_today),
-            "OIChgPct":    round(oi_chg_pct, 2),
-            "Category":    category,
-        })
-        time.sleep(0.2)
+            if price_chg_pct >= 0 and oi_chg_pct >= 0:
+                category = "LONG_BUILDUP"
+            elif price_chg_pct < 0 and oi_chg_pct >= 0:
+                category = "SHORT_BUILDUP"
+            elif price_chg_pct >= 0 and oi_chg_pct < 0:
+                category = "SHORT_COVERING"
+            else:
+                category = "LONG_UNWINDING"
+
+            rows.append({
+                "Symbol":      symbol,
+                "Expiry":      expiry,
+                "Price":       round(close_today, 2),
+                "PriceChgPct": round(price_chg_pct, 2),
+                "OI":          int(oi_today),
+                "OIChgPct":    round(oi_chg_pct, 2),
+                "Category":    category,
+            })
+        finally:
+            time.sleep(0.2)
 
     if not rows:
         print(f"  [FAIL] No FUTSTK OI data collected ({skipped} skipped)")
