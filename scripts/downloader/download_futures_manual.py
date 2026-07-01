@@ -150,7 +150,7 @@ def download_futures_daily(helper: DhanHelper, url: str, headers: dict,
         from_date = (expiry_dt - timedelta(days=90)).strftime("%Y-%m-%d")
         to_date   = min(expiry_dt, datetime.now()).strftime("%Y-%m-%d")
 
-        print(f"  Contract: {name} — {from_date} → {to_date}")
+        print(f"  Contract: {name} - {from_date} -> {to_date}")
         df = fetch_daily_chunk(url, headers, sec_id, segment, from_date, to_date)
         if not df.empty:
             df["Contract"] = expiry
@@ -174,7 +174,7 @@ def download_futures_daily(helper: DhanHelper, url: str, headers: dict,
     out = os.path.join(save_dir, f"{underlying}_Futures_Daily.csv")
     df_final.to_csv(out)
     oi_ok = df_final["OI"].sum() > 0
-    print(f"  [SUCCESS] {out}  ({len(df_final)} rows, OI={'yes' if oi_ok else 'MISSING — API may not return OI for this instrument'})")
+    print(f"  [SUCCESS] {out}  ({len(df_final)} rows, OI={'yes' if oi_ok else 'MISSING - API may not return OI for this instrument'})")
 
 
 def download_futures(helper: DhanHelper, url: str, headers: dict,
@@ -219,9 +219,9 @@ def download_futures(helper: DhanHelper, url: str, headers: dict,
             if not df.empty:
                 df["Contract"] = expiry
                 all_chunks.append(df)
-                print(f"    [OK] {cur.date()} → {chunk_end.date()} — {len(df)} rows")
+                print(f"    [OK] {cur.date()} -> {chunk_end.date()} - {len(df)} rows")
             else:
-                print(f"    [SKIP] No data {cur.date()} → {chunk_end.date()}")
+                print(f"    [SKIP] No data {cur.date()} -> {chunk_end.date()}")
             cur = chunk_end + timedelta(seconds=1)
             time.sleep(0.3)
 
@@ -240,11 +240,29 @@ def download_futures(helper: DhanHelper, url: str, headers: dict,
 
     out = os.path.join(save_dir, f"{underlying}_Futures_1min_Manual.csv")
     df_final.to_csv(out)
-    print(f"\n  [SUCCESS] Saved → {out}")
-    print(f"  Rows: {len(df_final)} | {df_final.index[0]} → {df_final.index[-1]}")
+    print(f"\n  [SUCCESS] Saved -> {out}")
+    print(f"  Rows: {len(df_final)} | {df_final.index[0]} -> {df_final.index[-1]}")
     print(f"  Contracts: {sorted(df_final['Contract'].unique().tolist())}")
     print("\n  NOTE: Only contracts currently in the Dhan master list are included.")
     print("  To build a longer history, run this script monthly before each contract expires.")
+
+
+def fetch_all_quotes(helper: DhanHelper, security_ids: list) -> dict:
+    """Fetch quotes for a list of security IDs in batches of 50 to avoid rate limits."""
+    quotes = {}
+    batch_size = 50
+    for i in range(0, len(security_ids), batch_size):
+        batch = security_ids[i:i + batch_size]
+        try:
+            res = helper.get_quote_data({"NSE_FNO": [int(sid) for sid in batch]})
+            if isinstance(res, dict) and "NSE_FNO" in res:
+                quotes.update(res["NSE_FNO"])
+            elif isinstance(res, dict):
+                quotes.update(res)
+        except Exception as e:
+            print(f"Error fetching quote batch: {e}")
+        time.sleep(1.0)
+    return quotes
 
 
 def download_futstk_oi_snapshot(helper: DhanHelper, url: str, headers: dict, save_dir: str):
@@ -256,13 +274,20 @@ def download_futstk_oi_snapshot(helper: DhanHelper, url: str, headers: dict, sav
     # Exclude test contracts (symbols starting with a digit)
     futstk = futstk[~futstk["UNDERLYING_SYMBOL"].str[0].str.isdigit()]
     futstk["SM_EXPIRY_DATE"] = pd.to_datetime(futstk["SM_EXPIRY_DATE"])
-    # Keep near-month only: lowest future expiry per underlying
-    futstk = futstk[futstk["SM_EXPIRY_DATE"] > pd.Timestamp(datetime.now())]
+    # Keep near-month only: lowest future expiry per underlying (including expiry day itself)
+    futstk = futstk[futstk["SM_EXPIRY_DATE"] >= pd.Timestamp(datetime.now().date())]
     near_month = (futstk.sort_values("SM_EXPIRY_DATE")
                   .drop_duplicates("UNDERLYING_SYMBOL", keep="first"))
 
     total = len(near_month)
     print(f"  Found {total} near-month FUTSTK contracts")
+
+    # Fetch live quotes for all near-month contracts in batches
+    security_ids = [str(row["SECURITY_ID"]) for _, row in near_month.iterrows()]
+    print(f"  Fetching live quotes for {total} contracts to include today's real-time data...")
+    _write_status("Fetching live quotes...")
+    quotes = fetch_all_quotes(helper, security_ids)
+    print(f"  Fetched {len(quotes)} live quotes.")
 
     from_date = (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d")
     to_date   = datetime.now().strftime("%Y-%m-%d")
@@ -276,7 +301,7 @@ def download_futstk_oi_snapshot(helper: DhanHelper, url: str, headers: dict, sav
         expiry = row["SM_EXPIRY_DATE"].strftime("%Y-%m-%d")
 
         if (i + 1) % 20 == 0:
-            _write_status(f"Stock futures OI: {i + 1}/{total}…")
+            _write_status(f"Stock futures OI: {i + 1}/{total}...")
             print(f"  [{i + 1}/{total}] processed (last: {symbol})")
 
         try:
@@ -304,12 +329,32 @@ def download_futstk_oi_snapshot(helper: DhanHelper, url: str, headers: dict, sav
                 skipped += 1
                 continue
 
-            if not isinstance(data, dict) or not data.get("close") or len(data["close"]) < 2:
+            if not isinstance(data, dict) or not data.get("close") or len(data["close"]) < 1:
                 skipped += 1
                 continue
 
-            closes = data["close"]
-            ois    = data.get("open_interest", [0] * len(closes))
+            closes = list(data["close"])
+            ois    = list(data.get("open_interest", [0] * len(closes)))
+
+            # Append live quote today if not already present in the historical daily data
+            quote = quotes.get(sec_id)
+            if quote and isinstance(quote, dict):
+                last_price = quote.get("last_price", 0)
+                oi = quote.get("oi", 0)
+                if last_price > 0:
+                    if "timestamp" in data and len(data["timestamp"]) > 0:
+                        last_ts = data["timestamp"][-1]
+                        last_dt = (pd.to_datetime([last_ts], unit="s")
+                                   .tz_localize("UTC").tz_convert("Asia/Kolkata").tz_localize(None)
+                                   .strftime("%Y-%m-%d")[0])
+                        today_str = datetime.now().strftime("%Y-%m-%d")
+                        if last_dt < today_str:
+                            closes.append(last_price)
+                            ois.append(oi)
+
+            if len(closes) < 2:
+                skipped += 1
+                continue
 
             close_today = closes[-1]
             close_prev  = closes[-2]
@@ -343,7 +388,7 @@ def download_futstk_oi_snapshot(helper: DhanHelper, url: str, headers: dict, sav
                 "DataDate":    to_date,
             })
         finally:
-            time.sleep(0.2)
+            time.sleep(0.1)
 
     if not rows:
         print(f"  [FAIL] No FUTSTK OI data collected ({skipped} skipped)")
