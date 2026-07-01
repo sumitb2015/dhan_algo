@@ -13,6 +13,8 @@ export interface OIRow {
   priceChgPct: number;
   oi: number;
   oiChgPct: number;
+  category?: string;
+  dataDate?: string;
 }
 
 export interface OIBuildupResponse {
@@ -27,7 +29,7 @@ export interface OIBuildupResponse {
 
 // ─── CSV parser ───────────────────────────────────────────────────────────────
 
-function parseSnapshot(filePath: string): (OIRow & { category: string })[] {
+function parseSnapshot(filePath: string): (OIRow & { category: string; dataDate: string })[] {
   const content = fs.readFileSync(filePath, 'utf-8');
   const lines = content.trim().split('\n');
   if (lines.length < 2) return [];
@@ -43,9 +45,10 @@ function parseSnapshot(filePath: string): (OIRow & { category: string })[] {
       expiry:      get('Expiry'),
       price:       parseFloat(get('Price')) || 0,
       priceChgPct: parseFloat(get('PriceChgPct')) || 0,
-      oi:          parseInt(get('OI')) || 0,
+      oi:          parseInt(get('OI'), 10) || 0,
       oiChgPct:    parseFloat(get('OIChgPct')) || 0,
       category:    get('Category'),
+      dataDate:    get('DataDate'),
     }];
   });
 }
@@ -73,7 +76,7 @@ export async function GET() {
     const filterSort = (cat: string): OIRow[] =>
       sortByAbsOI(allRows.filter(r => r.category === cat));
 
-    const dataDate = new Date(fs.statSync(filePath).mtime)
+    const dataDate = allRows[0]?.dataDate ?? new Date(fs.statSync(filePath).mtime)
       .toISOString().split('T')[0];
 
     return NextResponse.json<OIBuildupResponse>({

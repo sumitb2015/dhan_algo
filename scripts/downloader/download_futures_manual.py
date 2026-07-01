@@ -340,6 +340,7 @@ def download_futstk_oi_snapshot(helper: DhanHelper, url: str, headers: dict, sav
                 "OI":          int(oi_today),
                 "OIChgPct":    round(oi_chg_pct, 2),
                 "Category":    category,
+                "DataDate":    to_date,
             })
         finally:
             time.sleep(0.2)
