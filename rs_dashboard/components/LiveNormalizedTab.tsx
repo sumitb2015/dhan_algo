@@ -6,7 +6,7 @@ import {
   ResponsiveContainer,
 } from 'recharts';
 import type { TooltipContentProps } from 'recharts';
-import { Activity, Play, Square, RefreshCw, WifiOff } from 'lucide-react';
+import { Activity, Play, Square, RefreshCw, WifiOff, ChevronDown } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -160,27 +160,116 @@ function LiveDot({ active }: { active: boolean }) {
   );
 }
 
-function IndexChip({
-  sym, label, color, selected, pinned, onToggle,
+function IndexDropdown({
+  available,
+  labels,
+  categories,
+  selected,
+  onToggle,
+  onSelectAll,
+  onClearAll,
 }: {
-  sym: string; label: string; color: string; selected: boolean; pinned: boolean; onToggle: () => void;
+  available: string[];
+  labels: Record<string, string>;
+  categories: Record<string, string>;
+  selected: Set<string>;
+  onToggle: (sym: string) => void;
+  onSelectAll: () => void;
+  onClearAll: () => void;
 }) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const handler = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+    };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, [open]);
+
+  const byCategory: Record<string, string[]> = {};
+  for (const sym of available) {
+    const cat = categories[sym] ?? 'Other';
+    if (!byCategory[cat]) byCategory[cat] = [];
+    byCategory[cat].push(sym);
+  }
+
+  const selectedCount = available.filter((s) => selected.has(s)).length;
+
   return (
-    <button
-      onClick={pinned ? undefined : onToggle}
-      className={cn(
-        'flex items-center gap-1.5 px-2 py-1 rounded-md text-[11px] font-semibold border transition-all',
-        pinned
-          ? 'border-zinc-600 bg-zinc-800 text-zinc-200 cursor-default'
-          : selected
-            ? 'border-zinc-600 bg-zinc-800 text-zinc-200 hover:bg-zinc-700'
-            : 'border-zinc-800 bg-zinc-950 text-zinc-600 hover:border-zinc-700 hover:text-zinc-400',
+    <div ref={ref} className="relative">
+      <button
+        onClick={() => setOpen((v) => !v)}
+        className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg border border-zinc-700 bg-zinc-900 text-[11px] font-semibold text-zinc-300 hover:bg-zinc-800 transition-all"
+      >
+        Indices ({selectedCount} / {available.length})
+        <ChevronDown className={cn('h-3 w-3 transition-transform', open && 'rotate-180')} />
+      </button>
+
+      {open && (
+        <div className="absolute left-0 top-full mt-1 z-50 w-72 bg-zinc-900 border border-zinc-700 rounded-lg shadow-xl p-3 flex flex-col gap-2.5 max-h-[70vh] overflow-y-auto">
+          {/* Header */}
+          <div className="flex items-center justify-between border-b border-zinc-800 pb-2">
+            <span className="text-[10px] text-zinc-500 font-medium">
+              {selectedCount} of {available.length} selected
+            </span>
+            <div className="flex gap-3">
+              <button
+                onClick={onSelectAll}
+                className="text-[10px] text-violet-400 hover:text-violet-300 font-semibold"
+              >
+                All
+              </button>
+              <button
+                onClick={onClearAll}
+                className="text-[10px] text-zinc-500 hover:text-zinc-400"
+              >
+                Clear
+              </button>
+            </div>
+          </div>
+
+          {/* Categories */}
+          {Object.entries(byCategory).map(([cat, syms]) => (
+            <div key={cat}>
+              <div className="text-[9px] font-bold text-zinc-600 uppercase tracking-widest mb-1.5">
+                {cat}
+              </div>
+              <div className="flex flex-wrap gap-x-4 gap-y-1.5">
+                {syms.map((sym) => {
+                  const pinned = PINNED.has(sym);
+                  const checked = selected.has(sym);
+                  return (
+                    <label
+                      key={sym}
+                      className={cn(
+                        'flex items-center gap-1.5 text-[11px] select-none',
+                        pinned
+                          ? 'text-zinc-500 cursor-default'
+                          : checked
+                          ? 'text-zinc-200 cursor-pointer'
+                          : 'text-zinc-500 cursor-pointer hover:text-zinc-300',
+                      )}
+                    >
+                      <input
+                        type="checkbox"
+                        checked={checked}
+                        disabled={pinned}
+                        onChange={() => !pinned && onToggle(sym)}
+                        className="accent-violet-500 w-3 h-3 shrink-0"
+                      />
+                      {labels[sym] ?? sym}
+                    </label>
+                  );
+                })}
+              </div>
+            </div>
+          ))}
+        </div>
       )}
-    >
-      <span className="w-2 h-2 rounded-full shrink-0" style={{ background: selected ? color : '#52525b' }} />
-      {label}
-      {pinned && <span className="text-[9px] text-zinc-500 ml-0.5">●</span>}
-    </button>
+    </div>
   );
 }
 
@@ -193,7 +282,6 @@ export default function LiveNormalizedTab() {
   const [actionLoading, setActionLoading] = useState(false);
   const [lastTick, setLastTick]         = useState<Date | null>(null);
   const [currentIST, setCurrentIST]     = useState<number>(istSecs);
-  const pollRef                         = useRef<ReturnType<typeof setInterval> | null>(null);
   const initializedRef                  = useRef(false);
 
   // ── Update IST clock every 30 s for market-hours gating ───────────────────
@@ -224,25 +312,22 @@ export default function LiveNormalizedTab() {
     initializedRef.current = true;
   }, [history]);
 
-  // ── Poll /api/live-indices ─────────────────────────────────────────────────
-  const pollLive = useCallback(async () => {
-    try {
-      const res  = await fetch('/api/live-indices');
-      const json = await res.json();
-      if (!json.success) return;
-      setBridgeStatus(json.status);
-      if (json.history) {
-        setHistory(json.history);
-        if (json.history.ticks?.length > 0) setLastTick(new Date());
-      }
-    } catch { /* ignore */ }
-  }, []);
-
+  // ── SSE connection — replaces polling ─────────────────────────────────────
   useEffect(() => {
-    pollLive();
-    pollRef.current = setInterval(pollLive, 3000);
-    return () => { if (pollRef.current) clearInterval(pollRef.current); };
-  }, [pollLive]);
+    const es = new EventSource('/api/live-indices/stream');
+    es.onmessage = (e) => {
+      try {
+        const json = JSON.parse(e.data as string);
+        if (!json.success) return;
+        setBridgeStatus(json.status);
+        if (json.history) {
+          setHistory(json.history);
+          if (json.history.ticks?.length > 0) setLastTick(new Date());
+        }
+      } catch { /* ignore */ }
+    };
+    return () => es.close();
+  }, []);
 
   // ── Bridge start / stop ────────────────────────────────────────────────────
   const sendAction = useCallback(async (action: 'start' | 'stop') => {
@@ -253,10 +338,9 @@ export default function LiveNormalizedTab() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ action }),
       });
-      setTimeout(pollLive, 1000);
     } catch { /* ignore */ }
     finally { setActionLoading(false); }
-  }, [pollLive]);
+  }, []);
 
   // ── Toggle index selection ─────────────────────────────────────────────────
   const toggleIndex = useCallback((sym: string) => {
@@ -270,6 +354,25 @@ export default function LiveNormalizedTab() {
       } catch { /* ignore */ }
       return next;
     });
+  }, []);
+
+  // ── Select all / clear all handlers ───────────────────────────────────────
+  const selectAll = useCallback(() => {
+    if (!history) return;
+    const next = new Set(history.available);
+    setSelected(next);
+    try {
+      const toStore = [...next].filter((s) => !PINNED.has(s));
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(toStore));
+    } catch { /* ignore */ }
+  }, [history]);
+
+  const clearAll = useCallback(() => {
+    const next = new Set(PINNED);
+    setSelected(next);
+    try {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify([]));
+    } catch { /* ignore */ }
   }, []);
 
   // ── Normalise ticks to % from open; add numeric ts for fixed X-axis ───────
@@ -298,18 +401,6 @@ export default function LiveNormalizedTab() {
   const isStarting  = bridgeStatus.status === 'STARTING';
   const staleQuotes = lastTick && (Date.now() - lastTick.getTime() > 15_000);
   const isMarketOpen = currentIST >= MARKET_OPEN_SECS && currentIST <= MARKET_CLOSE_SECS;
-
-  // Group available indices by category
-  const byCategory = useMemo(() => {
-    if (!history) return {} as Record<string, string[]>;
-    const map: Record<string, string[]> = {};
-    for (const sym of history.available) {
-      const cat = history.categories[sym] ?? 'Other';
-      if (!map[cat]) map[cat] = [];
-      map[cat].push(sym);
-    }
-    return map;
-  }, [history]);
 
   return (
     <div className="flex flex-col gap-3">
@@ -344,6 +435,18 @@ export default function LiveNormalizedTab() {
               : <Play className="h-3 w-3" />}
           {isLive || isStarting ? 'Stop Indices Feed' : 'Start Indices Feed'}
         </button>
+
+        {history && history.available.length > 0 && (
+          <IndexDropdown
+            available={history.available}
+            labels={history.labels}
+            categories={history.categories}
+            selected={selected}
+            onToggle={toggleIndex}
+            onSelectAll={selectAll}
+            onClearAll={clearAll}
+          />
+        )}
 
         {lastTick && (
           <span className={cn('text-[10px] tabular-nums ml-auto hidden md:block', staleQuotes ? 'text-amber-400' : 'text-zinc-600')}>
@@ -388,30 +491,6 @@ export default function LiveNormalizedTab() {
             {currentIST < MARKET_OPEN_SECS ? 'Pre-market' : 'Market Closed'}
           </span>
           <span className="text-zinc-600 text-[11px]">Trading session: 09:15 – 15:30 IST</span>
-        </div>
-      )}
-
-      {/* ── Index selector grid (market hours only) ── */}
-      {isMarketOpen && history && history.available.length > 0 && (
-        <div className="rounded-lg border border-zinc-800 bg-zinc-950 p-3 flex flex-col gap-2.5">
-          {Object.entries(byCategory).map(([cat, syms]) => (
-            <div key={cat}>
-              <div className="text-[9px] font-bold text-zinc-600 uppercase tracking-widest mb-1.5">{cat}</div>
-              <div className="flex flex-wrap gap-1.5">
-                {syms.map((sym) => (
-                  <IndexChip
-                    key={sym}
-                    sym={sym}
-                    label={history.labels[sym] ?? sym}
-                    color={colorFor(sym)}
-                    selected={selected.has(sym)}
-                    pinned={PINNED.has(sym)}
-                    onToggle={() => toggleIndex(sym)}
-                  />
-                ))}
-              </div>
-            </div>
-          ))}
         </div>
       )}
 
