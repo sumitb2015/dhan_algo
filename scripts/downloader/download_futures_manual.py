@@ -52,9 +52,8 @@ def fetch_chunk(url: str, headers: dict, security_id: str, segment: str,
         "Low":    data["low"],
         "Close":  data["close"],
         "Volume": data["volume"],
+        "OI":     data.get("open_interest", [0] * len(data["open"])),
     })
-    if "open_interest" in data:
-        df["OI"] = data["open_interest"]
     df.set_index("Datetime", inplace=True)
     return df
 
