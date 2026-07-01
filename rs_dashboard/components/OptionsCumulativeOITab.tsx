@@ -19,14 +19,11 @@ interface TimePoint {
   diff: number; // PE OI − CE OI
 }
 
-// Session window: 9:15 AM – 3:30 PM IST today
-function sessionDomain(): [number, number] {
-  const now = new Date();
-  const start = new Date(now);
-  start.setHours(9, 15, 0, 0);
-  const end = new Date(now);
+// Session end: 3:30 PM IST today
+function sessionEnd(): number {
+  const end = new Date();
   end.setHours(15, 30, 0, 0);
-  return [start.getTime(), end.getTime()];
+  return end.getTime();
 }
 
 function fmtTick(ts: number): string {
@@ -142,10 +139,12 @@ export default function OptionsCumulativeOITab({ expiry }: { expiry: string }) {
   const [lastUpdated, setLastUpdated] = useState<string | null>(null);
   const [loading, setLoading]         = useState(false);
   const [error, setError]             = useState('');
-  const [pollMs, setPollMs]           = useState<PollMs>(20_000);
+  const [pollMs, setPollMs]           = useState<PollMs>(60_000);
   const [wingCount, setWingCount]     = useState(10);
 
-  const intervalRef = useRef<NodeJS.Timeout | null>(null);
+  const intervalRef  = useRef<NodeJS.Timeout | null>(null);
+  // Locked to mount time so the chart always starts from when the user opened this tab
+  const pageOpenTs   = useRef<number>(Date.now());
 
   const fetchAndAppend = useCallback(async () => {
     if (!expiry) return;
@@ -178,7 +177,11 @@ export default function OptionsCumulativeOITab({ expiry }: { expiry: string }) {
       });
 
       const { ts, time } = nowHMS();
-      setSeries(prev => [...prev, { ts, time, ceOI, peOI, diff: peOI - ceOI }]);
+      setSeries(prev => {
+        const last = prev[prev.length - 1];
+        if (last && last.ceOI === ceOI && last.peOI === peOI) return prev;
+        return [...prev, { ts, time, ceOI, peOI, diff: peOI - ceOI }];
+      });
       setSpot(spotPrice);
       setAtm(atmStrike);
       setLastUpdated(time);
@@ -215,24 +218,29 @@ export default function OptionsCumulativeOITab({ expiry }: { expiry: string }) {
   const diffColor= diff > 0 ? 'text-emerald-400' : diff < 0 ? 'text-red-400' : 'text-zinc-400';
   const diffLabel= diff > 0 ? 'PE dominant' : diff < 0 ? 'CE dominant' : undefined;
 
-  const [domainStart, domainEnd] = sessionDomain();
-  const chartSeries = series.filter(p => p.ts >= domainStart && p.ts <= domainEnd);
-  // Ticks at 9:30, 10:00, 10:30 … 15:30 (13 ticks, round 30-min marks)
-  const sessionTicks = Array.from(
-    { length: 13 },
-    (_, i) => domainStart + (15 + i * 30) * 60_000,
-  );
+  const domainEnd    = sessionEnd();
+  const xDomainStart = pageOpenTs.current;
+  // Only show data from when the tab was opened
+  const chartSeries  = series.filter(p => p.ts >= xDomainStart && p.ts <= domainEnd);
+  // Ticks at round 30-min marks from the first mark after page open until 15:30
+  const sessionTicks = (() => {
+    const interval = 30 * 60_000;
+    const first    = Math.ceil(xDomainStart / interval) * interval;
+    const ticks: number[] = [];
+    for (let t = first; t <= domainEnd; t += interval) ticks.push(t);
+    return ticks;
+  })();
   const xAxisProps = {
-    dataKey:          'ts' as const,
-    type:             'number' as const,
-    scale:            'time' as const,
-    domain:           [domainStart, domainEnd] as [number, number],
-    ticks:            sessionTicks,
-    tickFormatter:    fmtTick,
+    dataKey:           'ts' as const,
+    type:              'number' as const,
+    scale:             'time' as const,
+    domain:            [xDomainStart, domainEnd] as [number, number],
+    ticks:             sessionTicks,
+    tickFormatter:     fmtTick,
     allowDataOverflow: false,
-    tick:             { fontSize: 10, fill: '#a1a1aa', fontWeight: 500 as const },
-    tickLine:         false,
-    axisLine:         { stroke: '#27272a' },
+    tick:              { fontSize: 10, fill: '#a1a1aa', fontWeight: 500 as const },
+    tickLine:          false,
+    axisLine:          { stroke: '#27272a' },
   };
   const gridProps = { strokeDasharray: '4 4', stroke: '#27272a', vertical: false as const };
 
@@ -335,11 +343,9 @@ export default function OptionsCumulativeOITab({ expiry }: { expiry: string }) {
         <div className="flex items-center justify-center py-24 text-zinc-500 text-sm">
           {!expiry
             ? 'Select an expiry to start tracking'
-            : Date.now() < domainStart
-              ? 'Market opens at 09:15 AM IST'
-              : Date.now() > domainEnd
-                ? 'Market closed — data available during 09:15 AM – 03:30 PM IST'
-                : 'Accumulating data — first point appears shortly…'}
+            : Date.now() > domainEnd
+              ? 'Market closed — data available during 09:15 AM – 03:30 PM IST'
+              : 'Accumulating data — first point appears shortly…'}
         </div>
       ) : (<>
 
