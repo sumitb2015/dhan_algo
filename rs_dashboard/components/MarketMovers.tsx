@@ -733,11 +733,12 @@ export default function MarketMovers() {
   const autoRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const fetchDataRef = useRef<(showLoading?: boolean) => Promise<void>>(async () => {});
 
-  const fetchData = useCallback(async (showLoading = true) => {
+  const fetchData = useCallback(async (showLoading = true, bust = false) => {
     if (showLoading) setLoading(true);
     setError(null);
     try {
-      const res = await fetch(`/api/movers?index=${indexType}`);
+      const url = bust ? `/api/movers?index=${indexType}&bust` : `/api/movers?index=${indexType}`;
+      const res = await fetch(url);
       const json = await res.json();
       if (json.success) { setData(json.data); setLastUpdated(new Date()); }
       else setError(json.error ?? 'Unknown error');
@@ -776,7 +777,7 @@ export default function MarketMovers() {
           const sj = await (await fetch('/api/refresh')).json();
           const done = sj.status?.done || (!sj.running && sj.status?.phase === 'done');
           if (sj.status?.error) { setQuoteStatus('error'); setQuoteFetching(false); clearInterval(quotePollRef.current!); }
-          else if (done) { setQuoteStatus('done'); setQuoteFetching(false); clearInterval(quotePollRef.current!); setTimeout(() => fetchData(false), 500); }
+          else if (done) { setQuoteStatus('done'); setQuoteFetching(false); clearInterval(quotePollRef.current!); setTimeout(() => fetchData(false, true), 500); }
         } catch { /* ignore */ }
       }, 1500);
     } catch { setQuoteStatus('error'); setQuoteFetching(false); }

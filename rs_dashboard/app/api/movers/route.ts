@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { readStockCSV, readNifty500List, getTodayQuotesMeta } from '@/lib/dataLoader';
+import { readStockCSV, readNifty500List, getTodayQuotesMeta, clearCache } from '@/lib/dataLoader';
 import { NIFTY50_SYMBOLS } from '@/lib/nifty50';
 import { getSector } from '@/lib/sectors';
 import { OHLCVRow } from '@/lib/rs';
@@ -333,6 +333,7 @@ export async function GET(request: NextRequest) {
 
   if (bust) {
     clearMoversCache();
+    clearCache(); // also flush readStockCSV + today_quotes caches in dataLoader
   }
 
   try {

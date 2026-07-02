@@ -139,8 +139,10 @@ def get_last_date(csv_path: str) -> Optional[str]:
     if not os.path.exists(csv_path):
         return None
     try:
-        df = pd.read_csv(csv_path)
-        # Try named 'Datetime' column first, fall back to index col
+        # on_bad_lines='skip' handles CSVs where fetch_today_quotes appended a
+        # Timestamp column (7 values) to a 6-column file — pandas 3.x would
+        # otherwise raise ParserError on the mismatched row count.
+        df = pd.read_csv(csv_path, on_bad_lines='skip')
         if 'Datetime' in df.columns:
             dates = pd.to_datetime(df['Datetime'], errors='coerce').dropna()
         elif len(df.columns) >= 1:
@@ -453,9 +455,6 @@ def refresh_stocks(helper):
     # toDate is non-inclusive in the daily API; add 1 day so last_trading_day is included
     to_date_api = (datetime.strptime(last_trading_day, "%Y-%m-%d") + timedelta(days=1)).strftime("%Y-%m-%d")
     skipped = updated = failed = 0
-    # Set to True once we confirm last_trading_day data is not yet published by the API.
-    # Avoids 500+ redundant API calls when Dhan hasn't released EOD data yet.
-    gap_fill_blocked = False
 
     for i, symbol in enumerate(symbols, 1):
         if should_stop():
@@ -471,11 +470,6 @@ def refresh_stocks(helper):
             if last_date > last_trading_day:
                 # fetch_today_quotes.py may have inserted today's live row while
                 # last_trading_day's historical data is still missing — fill the gap.
-                if gap_fill_blocked:
-                    skipped += 1
-                    write_status("stocks", f"  [{i}/{total}] {symbol}: gap-fill skipped (API data not yet published)",
-                                 current=i, total=total)
-                    continue
                 from_date = last_trading_day
             else:
                 skipped += 1
@@ -520,16 +514,8 @@ def refresh_stocks(helper):
             )
 
             if df_new.empty:
-                if from_date >= last_trading_day:
-                    # API has no data for last_trading_day yet — block gap-fill for all
-                    # remaining stocks to avoid 500 redundant failing API calls.
-                    gap_fill_blocked = True
-                    write_status("stocks",
-                                 f"  [{i}/{total}] {symbol}: {last_trading_day} not yet published — skipping gap-fill for remaining stocks",
-                                 current=i, total=total)
-                else:
-                    write_status("stocks", f"  [{i}/{total}] {symbol}: ✓ up to date (no new trading data from API)",
-                                 current=i, total=total)
+                write_status("stocks", f"  [{i}/{total}] {symbol}: ✓ up to date (no new data from API)",
+                             current=i, total=total)
                 skipped += 1
                 time.sleep(0.2)
                 continue
@@ -544,12 +530,15 @@ def refresh_stocks(helper):
                 continue
 
             if last_date and os.path.exists(csv_path):
-                old = pd.read_csv(csv_path)
+                old = pd.read_csv(csv_path, on_bad_lines='skip')
                 date_col = "Datetime" if "Datetime" in old.columns else old.columns[0]
                 old[date_col] = pd.to_datetime(old[date_col])
                 old = old.set_index(date_col).sort_index()
                 old.index.name = "Datetime"
                 old.columns = [str(c).capitalize() for c in old.columns]
+                # Keep only canonical OHLCV columns — drops Timestamp added by fetch_today_quotes
+                ohlcv_cols = [c for c in ["Open", "High", "Low", "Close", "Volume"] if c in old.columns]
+                old = old[ohlcv_cols]
                 combined = pd.concat([old, new_df])
                 combined = combined[~combined.index.duplicated(keep="last")].sort_index()
             else:

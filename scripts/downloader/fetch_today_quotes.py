@@ -24,7 +24,7 @@ NIFTY50_CSV    = os.path.join(HIST_DIR, "NIFTY_50_Daily_5Y.csv")
 NIFTY500_CSV   = os.path.join(HIST_DIR, "NIFTY_500_Daily.csv")
 
 BATCH_SIZE   = 100   # Dhan API limit per quote_data call
-RATE_DELAY   = 0.35  # seconds between batches
+RATE_DELAY   = 2.0   # seconds between batches — 0.35s was too short, causing alternating batch failures due to rate limiting
 
 os.makedirs(DEBUG_DIR, exist_ok=True)
 

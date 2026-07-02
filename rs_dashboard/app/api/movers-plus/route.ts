@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { readStockCSV, readNifty500List, readIndexCSV, KNOWN_INDICES } from '@/lib/dataLoader';
+import { readStockCSV, readNifty500List, readIndexCSV, KNOWN_INDICES, clearCache } from '@/lib/dataLoader';
 import { NIFTY50_SYMBOLS } from '@/lib/nifty50';
 import { getSector } from '@/lib/sectors';
 import type { OHLCVRow } from '@/lib/rs';
@@ -147,6 +147,12 @@ export async function GET(req: NextRequest) {
   const indexType = searchParams.get('index') ?? 'nifty50';
   const sessions = Math.min(60, Math.max(3, parseInt(searchParams.get('sessions') ?? '10', 10)));
   const minAppearances = Math.max(1, parseInt(searchParams.get('min') ?? '2', 10));
+  const bust = searchParams.has('bust');
+
+  if (bust) {
+    cache.clear();
+    clearCache(); // flush readStockCSV + today_quotes caches in dataLoader
+  }
 
   try {
     const data = await getMoversPlus(indexType, sessions, minAppearances);

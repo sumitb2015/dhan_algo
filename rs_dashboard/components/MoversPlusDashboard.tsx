@@ -100,10 +100,11 @@ export default function MoversPlusDashboard() {
   const [pendingSessions, setPendingSessions] = useState(DEFAULT.sessions);
   const [pendingMin, setPendingMin] = useState(DEFAULT.minAppearances);
 
-  const fetchData = useCallback(async (s: Settings) => {
+  const fetchData = useCallback(async (s: Settings, bust = false) => {
     setLoading(true); setError(null);
     try {
-      const res = await fetch(`/api/movers-plus?index=${s.index}&sessions=${s.sessions}&min=${s.minAppearances}`);
+      const bust_param = bust ? '&bust' : '';
+      const res = await fetch(`/api/movers-plus?index=${s.index}&sessions=${s.sessions}&min=${s.minAppearances}${bust_param}`);
       if (!res.ok) throw new Error(await res.text());
       setData(await res.json());
     } catch (e) { setError(e instanceof Error ? e.message : 'Unknown error'); }
@@ -192,7 +193,7 @@ export default function MoversPlusDashboard() {
                 className="px-3 py-1 text-[11px] font-bold font-mono uppercase tracking-wide rounded-sm bg-amber-500/10 border border-amber-500/30 text-amber-300 hover:bg-amber-500/20 transition-all disabled:opacity-50">
                 Apply
               </button>
-              <button onClick={() => fetchData(settings)} disabled={loading}
+              <button onClick={() => fetchData(settings, true)} disabled={loading}
                 className="h-6 w-6 flex items-center justify-center rounded-sm border border-zinc-800 bg-zinc-900 text-zinc-500 hover:text-amber-400 hover:border-amber-900/40 transition-all disabled:opacity-50">
                 <RefreshCw className={cn('h-3 w-3', loading && 'animate-spin')} />
               </button>
