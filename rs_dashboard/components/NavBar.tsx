@@ -20,6 +20,7 @@ const NAV_LINKS = [
   { href: '/reports', label: 'Reports' },
   { href: '/performance', label: 'Performance' },
   { href: '/options', label: 'Options' },
+  { href: '/iv-charts', label: 'IV Charts' },
   { href: '/scalper', label: 'Scalper' },
 ];
 

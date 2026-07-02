@@ -594,6 +594,12 @@ export default function DistributionChart() {
           ))}
         </div>
 
+        {data?.endDate && (
+          <span className="text-[10px] font-semibold bg-zinc-800 border border-zinc-700 rounded px-2 py-0.5 text-zinc-300 hidden md:inline tabular-nums">
+            DATA: {data.endDate}
+          </span>
+        )}
+
         {lastFetched && (
           <span className="text-[10px] text-zinc-400 hidden md:inline tabular-nums">
             {lastFetched.toLocaleTimeString('en-IN', { timeZone: 'Asia/Kolkata' })} IST
