@@ -10,6 +10,7 @@ import {
 import OptionsSkewTab from './OptionsSkewTab';
 import OptionsOITab from './OptionsOITab';
 import OptionsCumulativeOITab from './OptionsCumulativeOITab';
+import OptionsSmartChainTab from './OptionsSmartChainTab';
 
 // ─── Types ────────────────────────────────────────────────────────
 
@@ -161,7 +162,7 @@ export default function OptionsCharts() {
   const [showCE,   setShowCE]   = useState(true);
   const [showPE,   setShowPE]   = useState(true);
   const [showVWAP, setShowVWAP] = useState(false);
-  const [activeTab, setActiveTab] = useState<'premium' | 'skew' | 'oi' | 'cumulative'>('premium');
+  const [activeTab, setActiveTab] = useState<'premium' | 'skew' | 'oi' | 'cumulative' | 'chain'>('premium');
 
   // ── Fetch expiries ────────────────────────────────────────────────
   useEffect(() => {
@@ -575,6 +576,7 @@ export default function OptionsCharts() {
               { key: 'skew',       label: 'Skew'          },
               { key: 'oi',         label: 'Open Interest' },
               { key: 'cumulative', label: 'Cumulative OI' },
+              { key: 'chain',      label: 'Smart Chain'   },
             ] as const).map(({ key, label }) => (
               <button
                 key={key}
@@ -593,6 +595,7 @@ export default function OptionsCharts() {
           {activeTab === 'skew'       && <OptionsSkewTab         expiry={expiry} />}
           {activeTab === 'oi'         && <OptionsOITab           expiry={expiry} />}
           {activeTab === 'cumulative' && <OptionsCumulativeOITab expiry={expiry} />}
+          {activeTab === 'chain'      && <OptionsSmartChainTab   expiry={expiry} />}
 
           {activeTab === 'premium' && <>
 
