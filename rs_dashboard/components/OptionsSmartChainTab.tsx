@@ -20,9 +20,12 @@ interface ProcessedRow {
   ceOIPct: number;
   peOIPct: number;
   pcr: number | null;
+  ivSkew: number | null;   // CE IV − PE IV
+  straddle: number;        // CE LTP + PE LTP
   isATM: boolean;
   isMaxCEOI: boolean;
   isMaxPEOI: boolean;
+  isMinStraddle: boolean;
 }
 
 // ─── Constants ────────────────────────────────────────────────────
@@ -132,7 +135,7 @@ function OIBar({ pct, side }: { pct: number; side: 'ce' | 'pe' }) {
           style={{ width, backgroundColor: barColor }}
         />
       )}
-      <span className={`relative z-10 text-xs tabular-nums text-zinc-400 ${side === 'ce' ? 'float-right' : 'float-left'}`}>
+      <span className={`relative z-10 text-xs tabular-nums font-bold text-zinc-200 ${side === 'ce' ? 'float-right' : 'float-left'}`}>
         {pct.toFixed(1)}%
       </span>
     </div>
@@ -149,6 +152,7 @@ export default function OptionsSmartChainTab({ expiry }: { expiry: string }) {
   const [maxPain, setMaxPain]         = useState<number | null>(null);
   const [totalCEOI, setTotalCEOI]     = useState(0);
   const [totalPEOI, setTotalPEOI]     = useState(0);
+  const [atmStraddle, setAtmStraddle] = useState<number | null>(null);
   const [wings, setWings]             = useState<Wings>(10);
   const [lastUpdated, setLastUpdated] = useState<string | null>(null);
   const [loading, setLoading]         = useState(false);
@@ -201,23 +205,42 @@ export default function OptionsSmartChainTab({ expiry }: { expiry: string }) {
         if (peOI > maxPEOI) { maxPEOI = peOI; maxPEStrike = strike; }
       }
 
+      // First pass: compute straddle per row, find min straddle strike
+      const straddleMap = new Map<number, number>();
+      let minStraddle = Infinity, minStraddleStrike = 0;
+      for (const { strike, entry } of visible) {
+        const s = (entry.ce?.last_price ?? 0) + (entry.pe?.last_price ?? 0);
+        straddleMap.set(strike, s);
+        if (s > 0 && s < minStraddle) { minStraddle = s; minStraddleStrike = strike; }
+      }
+
       const processed: ProcessedRow[] = visible.map(({ strike, entry }) => {
-        const ce   = entry.ce ?? null;
-        const pe   = entry.pe ?? null;
-        const ceOI = ce?.oi ?? 0;
-        const peOI = pe?.oi ?? 0;
+        const ce    = entry.ce ?? null;
+        const pe    = entry.pe ?? null;
+        const ceOI  = ce?.oi ?? 0;
+        const peOI  = pe?.oi ?? 0;
+        const ceIV  = ce?.implied_volatility ?? 0;
+        const peIV  = pe?.implied_volatility ?? 0;
+        const strad = straddleMap.get(strike) ?? 0;
         return {
           strike,
           ce,
           pe,
-          ceOIPct:   maxCEOI > 0 ? (ceOI / maxCEOI) * 100 : 0,
-          peOIPct:   maxPEOI > 0 ? (peOI / maxPEOI) * 100 : 0,
-          pcr:       ceOI > 0 ? peOI / ceOI : null,
-          isATM:     strike === atmStrike,
-          isMaxCEOI: strike === maxCEStrike && maxCEOI > 0,
-          isMaxPEOI: strike === maxPEStrike && maxPEOI > 0,
+          ceOIPct:       maxCEOI > 0 ? (ceOI / maxCEOI) * 100 : 0,
+          peOIPct:       maxPEOI > 0 ? (peOI / maxPEOI) * 100 : 0,
+          pcr:           ceOI > 0 ? peOI / ceOI : null,
+          ivSkew:        (ceIV > 0 || peIV > 0) ? ceIV - peIV : null,
+          straddle:      strad,
+          isATM:         strike === atmStrike,
+          isMaxCEOI:     strike === maxCEStrike && maxCEOI > 0,
+          isMaxPEOI:     strike === maxPEStrike && maxPEOI > 0,
+          isMinStraddle: strike === minStraddleStrike && minStraddle < Infinity,
         };
       });
+
+      // ATM straddle for expected move
+      const atmRow = processed.find(r => r.isATM);
+      const atmStrad = atmRow ? atmRow.straddle : null;
 
       setSpot(spotPrice);
       setAtm(atmStrike);
@@ -226,6 +249,7 @@ export default function OptionsSmartChainTab({ expiry }: { expiry: string }) {
       setTotalPEOI(totPE);
       setChainPCR(totCE > 0 ? totPE / totCE : null);
       setMaxPain(mpStrike);
+      setAtmStraddle(atmStrad && atmStrad > 0 ? atmStrad : null);
       setLastUpdated(new Date().toLocaleTimeString('en-IN', {
         hour: '2-digit', minute: '2-digit', second: '2-digit',
       }));
@@ -263,6 +287,19 @@ export default function OptionsSmartChainTab({ expiry }: { expiry: string }) {
         <StatChip label="Max Pain"     value={maxPain !== null ? fmtStrike(maxPain) : '—'} color="text-violet-300" />
         <StatChip label="Total CE OI"  value={fmtOI(totalCEOI)} color="text-blue-400" />
         <StatChip label="Total PE OI"  value={fmtOI(totalPEOI)} color="text-red-400" />
+        <StatChip
+          label="Exp Move (±)"
+          value={atmStraddle ? `±${atmStraddle.toFixed(0)}` : '—'}
+          color="text-cyan-300"
+        />
+        {atmStraddle && atm ? (
+          <div className="flex flex-col px-4 border-r border-zinc-800">
+            <span className="text-[10px] font-bold text-zinc-400 uppercase tracking-widest">Range</span>
+            <span className="text-sm font-bold tabular-nums text-cyan-300">
+              {(atm - atmStraddle).toFixed(0)}–{(atm + atmStraddle).toFixed(0)}
+            </span>
+          </div>
+        ) : null}
         <StatChip
           label="OI Delta (CE−PE)"
           value={(totalCEOI === 0 && totalPEOI === 0) ? '—' : (totalCEOI - totalPEOI >= 0 ? '+' : '') + fmtOI(totalCEOI - totalPEOI)}
@@ -317,6 +354,8 @@ export default function OptionsSmartChainTab({ expiry }: { expiry: string }) {
               <th className={`${thCls} text-right text-blue-300`}>CE LTP</th>
               {/* Center */}
               <th className={`${thCls} text-center text-amber-300 border-x border-zinc-700`}>STRIKE</th>
+              <th className={`${thCls} text-center text-cyan-300`}>STRADDLE</th>
+              <th className={`${thCls} text-center text-violet-300`}>IV SKEW</th>
               <th className={`${thCls} text-center`}>PCR</th>
               {/* PE side headers */}
               <th className={`${thCls} text-left text-red-300`}>PE LTP</th>
@@ -330,8 +369,8 @@ export default function OptionsSmartChainTab({ expiry }: { expiry: string }) {
               const isITM_CE = row.strike < spot && spot > 0;
               const isITM_PE = row.strike > spot && spot > 0;
 
-              const ceDim  = isITM_CE ? 'text-zinc-500' : 'text-zinc-200';
-              const peDim  = isITM_PE ? 'text-zinc-500' : 'text-zinc-200';
+              const ceDim  = isITM_CE ? 'text-zinc-400' : 'text-white';
+              const peDim  = isITM_PE ? 'text-zinc-400' : 'text-white';
 
               const ceBg   = row.ce?.oi ? `rgba(59,130,246,${Math.min(row.ceOIPct * 0.006, 0.55)})` : 'transparent';
               const peBg   = row.pe?.oi ? `rgba(239,68,68,${Math.min(row.peOIPct * 0.006, 0.55)})` : 'transparent';
@@ -361,7 +400,7 @@ export default function OptionsSmartChainTab({ expiry }: { expiry: string }) {
                       {row.isMaxCEOI && (
                         <span className="text-[10px] font-bold text-blue-400 bg-blue-500/20 px-1.5 py-0.5 rounded">MAX</span>
                       )}
-                      <span className={`tabular-nums font-semibold ${ceDim}`}>
+                      <span className={`tabular-nums font-bold ${ceDim}`}>
                         {fmtOI(row.ce?.oi ?? 0)}
                       </span>
                     </div>
@@ -373,21 +412,52 @@ export default function OptionsSmartChainTab({ expiry }: { expiry: string }) {
                   </td>
 
                   {/* CE IV */}
-                  <td className={`px-3 py-2 text-right tabular-nums ${isITM_CE ? 'text-zinc-600' : 'text-violet-300'}`}>
+                  <td className={`px-3 py-2 text-right tabular-nums font-bold ${isITM_CE ? 'text-zinc-500' : 'text-violet-200'}`}>
                     {fmtIV(row.ce?.implied_volatility ?? row.ce?.greeks?.iv)}
                   </td>
 
                   {/* CE LTP */}
-                  <td className={`px-3 py-2 text-right tabular-nums font-semibold ${isITM_CE ? 'text-zinc-500' : 'text-zinc-100'}`}>
+                  <td className={`px-3 py-2 text-right tabular-nums font-bold ${isITM_CE ? 'text-zinc-400' : 'text-white'}`}>
                     {fmtLTP(row.ce?.last_price)}
                   </td>
 
                   {/* Strike */}
                   <td className={`px-4 py-2 text-center font-bold tabular-nums border-x border-zinc-700 ${
-                    row.isATM ? 'text-amber-300 text-sm' : 'text-zinc-300'
+                    row.isATM ? 'text-amber-300 text-sm' : 'text-zinc-100'
                   }`}>
                     {fmtStrike(row.strike)}
                     {row.isATM && <span className="ml-1 text-[10px] text-amber-500">ATM</span>}
+                  </td>
+
+                  {/* Straddle */}
+                  <td className="px-3 py-2 text-center">
+                    {row.straddle > 0 ? (
+                      <div className="flex items-center justify-center gap-1">
+                        <span className="tabular-nums font-bold text-cyan-200">
+                          ₹{row.straddle.toFixed(1)}
+                        </span>
+                        {row.isMinStraddle && (
+                          <span className="text-[10px] font-bold text-amber-400 bg-amber-500/20 px-1 py-0.5 rounded">MIN</span>
+                        )}
+                      </div>
+                    ) : (
+                      <span className="text-zinc-600">—</span>
+                    )}
+                  </td>
+
+                  {/* IV Skew (CE IV − PE IV) */}
+                  <td className="px-3 py-2 text-center">
+                    {row.ivSkew !== null ? (
+                      <span className={`tabular-nums font-bold text-xs ${
+                        row.ivSkew > 0.5  ? 'text-emerald-400' :
+                        row.ivSkew < -0.5 ? 'text-red-400' :
+                        'text-zinc-400'
+                      }`}>
+                        {row.ivSkew > 0 ? '+' : ''}{row.ivSkew.toFixed(1)}%
+                      </span>
+                    ) : (
+                      <span className="text-zinc-600">—</span>
+                    )}
                   </td>
 
                   {/* PCR */}
@@ -396,12 +466,12 @@ export default function OptionsSmartChainTab({ expiry }: { expiry: string }) {
                   </td>
 
                   {/* PE LTP */}
-                  <td className={`px-3 py-2 text-left tabular-nums font-semibold ${isITM_PE ? 'text-zinc-500' : 'text-zinc-100'}`}>
+                  <td className={`px-3 py-2 text-left tabular-nums font-bold ${isITM_PE ? 'text-zinc-400' : 'text-white'}`}>
                     {fmtLTP(row.pe?.last_price)}
                   </td>
 
                   {/* PE IV */}
-                  <td className={`px-3 py-2 text-left tabular-nums ${isITM_PE ? 'text-zinc-600' : 'text-violet-300'}`}>
+                  <td className={`px-3 py-2 text-left tabular-nums font-bold ${isITM_PE ? 'text-zinc-500' : 'text-violet-200'}`}>
                     {fmtIV(row.pe?.implied_volatility ?? row.pe?.greeks?.iv)}
                   </td>
 
@@ -413,7 +483,7 @@ export default function OptionsSmartChainTab({ expiry }: { expiry: string }) {
                   {/* PE OI */}
                   <td className="px-3 py-2 text-left" style={{ backgroundColor: peBg }}>
                     <div className="flex items-center gap-1.5">
-                      <span className={`tabular-nums font-semibold ${peDim}`}>
+                      <span className={`tabular-nums font-bold ${peDim}`}>
                         {fmtOI(row.pe?.oi ?? 0)}
                       </span>
                       {row.isMaxPEOI && (
@@ -427,7 +497,7 @@ export default function OptionsSmartChainTab({ expiry }: { expiry: string }) {
 
             {rows.length === 0 && !loading && (
               <tr>
-                <td colSpan={10} className="text-center text-zinc-500 py-12">
+                <td colSpan={12} className="text-center text-zinc-500 py-12">
                   {expiry ? 'No chain data available' : 'Select an expiry to load chain'}
                 </td>
               </tr>
