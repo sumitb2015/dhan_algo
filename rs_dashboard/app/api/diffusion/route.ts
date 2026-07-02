@@ -237,7 +237,17 @@ async function computeDiffusion(universe: 'nifty50' | 'nifty500'): Promise<Diffu
   const new1QLowPct9d = s1QL;
   const new1YLowPct9d = s1YL;
 
-  const dataDate = dates[dates.length - 1] ?? '';
+  // Use the last date where at least 50% of the universe contributed data.
+  // This prevents a single stale or erroneous stock from pushing dataDate
+  // to a spurious date (e.g. a stock with a data-error future row).
+  const minStocksForDate = Math.max(1, Math.floor(symbols.length * 0.5));
+  let dataDate = dates[dates.length - 1] ?? '';
+  for (let i = dates.length - 1; i >= 0; i--) {
+    if ((acc.get(dates[i])?.n ?? 0) >= minStocksForDate) {
+      dataDate = dates[i];
+      break;
+    }
+  }
 
   return {
     dates,
@@ -268,14 +278,19 @@ export async function GET(req: NextRequest) {
   const universe = (searchParams.get('index') === 'nifty500' ? 'nifty500' : 'nifty50') as
     'nifty50' | 'nifty500';
 
-  const cached = cache.get(universe);
+  // Include today's IST date in the cache key so the cache auto-busts at midnight
+  // and never serves a prior trading day's computation as "fresh" for a new day.
+  const todayIST = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
+  const cacheKey = `${universe}:${todayIST}`;
+
+  const cached = cache.get(cacheKey);
   if (cached && Date.now() - cached.ts < TTL) {
     return NextResponse.json(cached.data);
   }
 
   try {
     const data = await computeDiffusion(universe);
-    cache.set(universe, { data, ts: Date.now() });
+    cache.set(cacheKey, { data, ts: Date.now() });
     return NextResponse.json(data);
   } catch (err) {
     console.error('[diffusion]', err);
