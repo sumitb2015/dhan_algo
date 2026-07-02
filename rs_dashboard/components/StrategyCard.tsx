@@ -67,6 +67,13 @@ interface StrategyState {
   combined_best_premium?: number | null;
   trail_combined_buffer?: number;
   leg_sl_pct?: number;
+  // Combined-premium trailing SL
+  trail_active?: boolean;
+  trail_start_pct?: number;
+  trail_gap_pts?: number;
+  entry_combined_pts?: number;
+  best_combined_pts?: number;
+  trail_exit_combined?: number | null;
   // Spread Trend
   use_ema?: boolean;
   use_supertrend?: boolean;
@@ -136,6 +143,10 @@ export default function StrategyCard({ meta, state, onRefresh }: StrategyCardPro
   const [trailCombinedBuffer, setTrailCombinedBuffer] = useState<number>(1.0);
   const [legSlPct, setLegSlPct] = useState<number>(0.20);
 
+  // Combined-premium trailing SL (straddle / strangle / advanced)
+  const [trailStartPct, setTrailStartPct] = useState<number>(5.0);
+  const [trailGapPts, setTrailGapPts] = useState<number>(15.0);
+
   // Spread Trend
   const [symbol, setSymbol] = useState<string>('NIFTY');
   const [interval, setIntervalVal] = useState<string>('5');
@@ -196,10 +207,14 @@ export default function StrategyCard({ meta, state, onRefresh }: StrategyCardPro
           else if (strikeSelection === 'premium') args.push('--premium', '--target-premium', String(targetPremium));
           else args.push('--ce-offset', String(ceOffset), '--pe-offset', String(peOffset));
         }
+        args.push('--trail-start-pct', String(trailStartPct));
+        args.push('--trail-gap-pts', String(trailGapPts));
       } else if (meta.key === 'nifty_value_imbalance_straddle') {
         args.push('--max-lots', String(maxLots));
         args.push('--start-time', startTime);
         args.push('--entry-balance-threshold', String(entryBalanceThreshold));
+        args.push('--trail-start-pct', String(trailStartPct));
+        args.push('--trail-gap-pts', String(trailGapPts));
       } else if (meta.key === 'nifty_tick_mean_straddle') {
         args.push('--start-time', startTime);
         args.push('--entry-band', String(entryBand));
@@ -220,6 +235,8 @@ export default function StrategyCard({ meta, state, onRefresh }: StrategyCardPro
         if (strikeSelection === 'delta') args.push('--delta', '--target-delta', String(targetDelta));
         else if (strikeSelection === 'premium') args.push('--premium', '--target-premium', String(targetPremium));
         else args.push('--ce-offset', String(ceOffset), '--pe-offset', String(peOffset));
+        args.push('--trail-start-pct', String(trailStartPct));
+        args.push('--trail-gap-pts', String(trailGapPts));
       } else if (meta.key === 'nifty_oi_directional') {
         args.push('--start-time', startTime);
         args.push('--pcr-threshold', String(pcrThreshold));
@@ -618,6 +635,22 @@ export default function StrategyCard({ meta, state, onRefresh }: StrategyCardPro
           </div>
         )}
 
+        {/* Combined-premium trailing SL — straddle, strangle, and advanced imbalance */}
+        {(meta.key === 'nifty_advanced_imbalance' ||
+          meta.key === 'nifty_value_imbalance_straddle' ||
+          meta.key === 'nifty_value_imbalance_strangle') && (
+          <>
+            <div className={fieldCls}>
+              <label className={lbl}>Trail Start (%)</label>
+              <Input type="number" step="0.5" value={trailStartPct} onChange={(e) => setTrailStartPct(parseFloat(e.target.value) || 5.0)} min={0.5} className={inputCls} />
+            </div>
+            <div className={fieldCls}>
+              <label className={lbl}>Trail Gap (pts)</label>
+              <Input type="number" step="0.5" value={trailGapPts} onChange={(e) => setTrailGapPts(parseFloat(e.target.value) || 15.0)} min={0.5} className={inputCls} />
+            </div>
+          </>
+        )}
+
         {/* VWAP shared params (both tick and candle variants) */}
         {(meta.key === 'nifty_tick_mean_straddle' || meta.key === 'nifty_vwap_1min_straddle') && (
           <>
@@ -996,6 +1029,26 @@ export default function StrategyCard({ meta, state, onRefresh }: StrategyCardPro
                       <span className="text-[10px] text-zinc-300 font-mono whitespace-nowrap">max {state.max_lots}L</span>
                     )}
                   </div>
+                  {state.entry_combined_pts != null && state.entry_combined_pts > 0 && (
+                    <div className="px-3 py-2 flex flex-col gap-1 shrink-0">
+                      <span className={lbl}>Trail SL</span>
+                      {state.trail_active ? (
+                        <>
+                          <span className="font-mono font-bold text-amber-400 text-xs">ACTIVE</span>
+                          <span className="text-[10px] text-zinc-300 font-mono whitespace-nowrap">
+                            best {state.best_combined_pts?.toFixed(1)} · exit@{state.trail_exit_combined?.toFixed(1) ?? '—'}
+                          </span>
+                        </>
+                      ) : (
+                        <>
+                          <span className="font-mono text-zinc-500 text-xs">inactive</span>
+                          <span className="text-[10px] text-zinc-600 font-mono whitespace-nowrap">
+                            entry {state.entry_combined_pts.toFixed(1)}
+                          </span>
+                        </>
+                      )}
+                    </div>
+                  )}
                 </>
               )}
             </div>

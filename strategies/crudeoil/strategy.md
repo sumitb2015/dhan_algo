@@ -5,7 +5,7 @@ Directional MCX CRUDEOILM futures strategy. Buys or sells the nearest futures co
 when Supertrend confirms a trend direction. Trails stop via the Supertrend band level.
 
 ## Session
-Default: 17:00–23:25 IST (US crude volatility window). Configurable via `--start-time` / `--eod-time`.
+Default: 09:00–23:30 IST (covers both MCX day and evening sessions). Configurable via `--start-time` / `--eod-time`.
 
 ## Signal
 - Uses pandas_ta Supertrend on configurable-interval candles (default 5m)
@@ -31,6 +31,8 @@ After any exit, waits for one full new candle before re-evaluating signal.
 --supertrend-multiplier FLOAT  Multiplier (default: 3.0)
 --target-profit FLOAT         Daily profit cap INR (default: 3000)
 --stop-loss FLOAT             Daily loss cap INR (default: 3000)
---start-time STR              Session start HH:MM (default: 17:00)
---eod-time STR                EOD HH:MM (default: 23:25)
+--start-time STR              Session start HH:MM (default: 09:00)
+--eod-time STR                EOD HH:MM (default: 23:30)
+--cooldown-candles INT        Candles to wait after exit before re-entry scan (default: 1)
+--use-vwap                    Use VWAP as an additional exit signal (flag, default: off)
 ```

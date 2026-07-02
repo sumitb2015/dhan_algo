@@ -43,7 +43,8 @@ class NiftyAdvancedImbalance:
                  ce_offset=200, pe_offset=200,
                  use_premium=False, target_premium=50.0,
                  start_time="09:20", loser_ratio_lots=1,
-                 leg_sl_pct=0.20):
+                 leg_sl_pct=0.20,
+                 trail_start_pct=5.0, trail_gap_pts=15.0):
         self.mode = mode.lower()
         self.dry_run = dry_run
         self.initial_lots = initial_lots
@@ -62,7 +63,9 @@ class NiftyAdvancedImbalance:
         self.start_time = start_time
         self.loser_ratio_lots = loser_ratio_lots
         self.leg_sl_pct = leg_sl_pct
-        
+        self.trail_start_pct = trail_start_pct
+        self.trail_gap_pts = trail_gap_pts
+
         self.dhan = get_dhan_client()
         if not self.dhan:
             raise Exception("Failed to connect to Dhan.")
@@ -104,11 +107,10 @@ class NiftyAdvancedImbalance:
         self.pe_wings = []
         
         # Trailing Stop Loss State
-        self.trail_threshold = 1500.0
-        self.trail_offset = 500.0
-        self.peak_pnl = -999999.0
-        self.trailing_sl_active = False
-        
+        self.trail_active = False
+        self.entry_combined_pts = 0.0
+        self.best_combined_pts = 0.0
+
         # Session Control
         self.last_adjustment_time = None
         self.consecutive_chain_failures = 0
@@ -161,6 +163,12 @@ class NiftyAdvancedImbalance:
             "ce_original_entry_premium": self.ce_original_entry_premium,
             "pe_original_entry_premium": self.pe_original_entry_premium,
             "leg_sl_pct": self.leg_sl_pct,
+            "trail_active": self.trail_active,
+            "trail_start_pct": self.trail_start_pct,
+            "trail_gap_pts": self.trail_gap_pts,
+            "entry_combined_pts": self.entry_combined_pts,
+            "best_combined_pts": self.best_combined_pts,
+            "trail_exit_combined": round(self.best_combined_pts + self.trail_gap_pts, 2) if self.trail_active else None,
         }
         save_strategy_state("nifty_advanced_imbalance", state_dict)
 
@@ -487,8 +495,9 @@ class NiftyAdvancedImbalance:
         self.entry_diff_pct = 0.0
         self.adjustment_count = 0
         self.consecutive_chain_failures = 0
-        self.peak_pnl = -999999.0
-        self.trailing_sl_active = False
+        self.trail_active = False
+        self.entry_combined_pts = 0.0
+        self.best_combined_pts = 0.0
         self.last_adjustment_time = None
         self.ce_wings = []
         self.pe_wings = []
@@ -779,6 +788,9 @@ class NiftyAdvancedImbalance:
             else:
                 logger.info(f"[DRY RUN] Simulating Entry: {self.ce_strike} CE/PE")
 
+            self.entry_combined_pts = self.ce_avg_price + self.pe_avg_price
+            logger.info(f"Trail SL reference: entry_combined={self.entry_combined_pts:.2f} pts (CE={self.ce_avg_price:.2f} + PE={self.pe_avg_price:.2f})")
+
             if self.mode == "reentry_straddle":
                 self.ce_active = True
                 self.pe_active = True
@@ -876,22 +888,33 @@ class NiftyAdvancedImbalance:
                         cycle_active = False
                         break
                 
-                # --- Trailing Stop Loss Logic ---
-                if total_pnl >= self.trail_threshold:
-                    if not self.trailing_sl_active:
-                        logger.info(f"Trailing SL Activated at {total_pnl:.2f}")
-                        self.trailing_sl_active = True
-                    if total_pnl > self.peak_pnl:
-                        self.peak_pnl = total_pnl
-                
-                if self.trailing_sl_active:
-                    current_sl = self.peak_pnl - self.trail_offset
-                    if total_pnl <= current_sl:
-                        self.exit_all_positions(f"Trailing SL Hit! Peak: {self.peak_pnl:.2f}, Final: {total_pnl:.2f}")
-                        logger.info("Waiting 5 minutes before next re-entry cycle...")
-                        self.sleep_cooldown(300)
-                        cycle_active = False
-                        break
+                # --- Trailing Stop Loss Logic (combined-premium points) ---
+                if self.entry_combined_pts > 0:
+                    current_combined_pts = ce_ltp + pe_ltp
+                    profit_pts = self.entry_combined_pts - current_combined_pts
+                    trail_trigger = self.trail_start_pct / 100.0 * self.entry_combined_pts
+
+                    if not self.trail_active and profit_pts >= trail_trigger:
+                        self.trail_active = True
+                        self.best_combined_pts = current_combined_pts
+                        logger.info(
+                            f"Trail SL activated: combined={current_combined_pts:.2f}, "
+                            f"entry={self.entry_combined_pts:.2f}, trigger={trail_trigger:.2f}pts"
+                        )
+
+                    if self.trail_active:
+                        if current_combined_pts < self.best_combined_pts:
+                            self.best_combined_pts = current_combined_pts
+                        trail_exit = self.best_combined_pts + self.trail_gap_pts
+                        if current_combined_pts > trail_exit:
+                            self.exit_all_positions(
+                                f"Trailing SL Hit! Combined: {current_combined_pts:.2f} > exit: {trail_exit:.2f} "
+                                f"(best: {self.best_combined_pts:.2f})"
+                            )
+                            logger.info("Waiting 5 minutes before next re-entry cycle...")
+                            self.sleep_cooldown(300)
+                            cycle_active = False
+                            break
                 
                 # --- Hard Targets ---
                 if total_pnl >= self.profit_target:
@@ -1340,6 +1363,10 @@ Examples:
     parser.add_argument("--leg-sl-pct", type=float, default=0.20, metavar="PCT",
                         help="Per-leg stop loss as a fraction of entry premium in reentry_straddle mode "
                              "(default: 0.20 = 20%%). E.g. 0.30 triggers SL at 130%% of entry price.")
+    parser.add_argument("--trail-start-pct", type=float, default=5.0,
+                        help="Activate trailing SL when profit reaches this %% of entry combined premium (default: 5.0)")
+    parser.add_argument("--trail-gap-pts", type=float, default=15.0,
+                        help="Exit if combined premium rises this many pts above its best level (default: 15.0)")
 
     args = parser.parse_args()
 
@@ -1468,6 +1495,8 @@ Examples:
         start_time=args.start_time,
         loser_ratio_lots=args.loser_ratio_lots,
         leg_sl_pct=args.leg_sl_pct,
+        trail_start_pct=args.trail_start_pct,
+        trail_gap_pts=args.trail_gap_pts,
     )
     try:
         strat.run()

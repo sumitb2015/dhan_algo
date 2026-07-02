@@ -44,13 +44,22 @@ Both indicators must agree — a single indicator flip does not trigger a trade.
 |---|---|---|
 | `--live` | off (dry run) | Enable real order placement |
 | `--symbol SYM` | `NIFTY` | Underlying index (`NIFTY`, `BANKNIFTY`) |
-| `--interval MIN` | `5` | Candle interval in minutes (`1`, `5`, `15`, `30`, `60`) |
+| `--interval MIN` | `5` | Candle interval in minutes (`1`, `3`, `5`) |
+| `--ema-period N` | `20` | EMA period used for trend filter |
+| `--supertrend-period N` | `7` | Supertrend ATR period |
+| `--supertrend-multiplier F` | `3.0` | Supertrend ATR multiplier |
+| `--no-ema` | off | Disable the EMA filter (trade on Supertrend alone) |
+| `--no-supertrend` | off | Disable the Supertrend filter (trade on EMA alone) |
+| `--ce-offset PTS` | `100` | Points above spot for the short Call strike (Bear Call Spread) |
+| `--pe-offset PTS` | `100` | Points below spot for the short Put strike (Bull Put Spread) |
 | `--spread-width PTS` | `100` | Width of the vertical spread — points between the short and long strike |
 | `--lots N` | `1` | Lots per spread leg |
 | `--target-profit INR` | `2000` | Global daily profit target in ₹ |
 | `--stop-loss INR` | `2000` | Global daily stop loss in ₹ |
+| `--eod-time HH:MM` | `15:15` | EOD auto-square-off time (IST) |
 | `--no-exit-on-signal-change` | off | Disables early exits on trend reversals; holds to SL / target / EOD instead |
 | `--cooldown-minutes N` | `5` | Cooldown period in minutes after a standard exit before re-entry is permitted |
+| `--min-hold-minutes N` | `5` | Minimum hold time in minutes before a signal-change exit can trigger |
 
 ---
 

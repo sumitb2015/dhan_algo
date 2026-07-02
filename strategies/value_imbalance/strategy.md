@@ -4,7 +4,8 @@ This document covers all option selling strategies in `strategies/value_imbalanc
 1.  **Nifty Advanced Value-Imbalance Straddle & Strangle** (`nifty_advanced_imbalance.py`)
 2.  **Nifty Value-Imbalance Straddle** (`nifty_value_imbalance_straddle.py`)
 3.  **Nifty Value-Imbalance Strangle** (`nifty_value_imbalance_strangle.py`)
-4.  **Nifty VWAP Straddle** (`nifty_vwap_straddle.py`)
+4.  **Nifty 1-Min VWAP Straddle** (`nifty_vwap_1min_straddle.py`)
+5.  **Nifty Tick Mean Straddle** (`nifty_tick_mean_straddle.py`)
 
 ---
 
@@ -121,6 +122,7 @@ The advanced script introduces selectable adjustment logic modes to optimize mar
 | **`--target-profit AMT`** | `4000.0` | Global daily profit target in ₹. |
 | **`--stop-loss AMT`** | `4000.0` | Global daily stop loss in ₹. |
 | **`--start-time TIME`** | `09:20` | Market start monitoring time (HH:MM IST). |
+| **`--leg-sl-pct PCT`** | `0.20` | Per-leg broker-side stop-loss as a fraction of entry premium (e.g. `0.20` = 20%). Applies when the mode uses SL orders. |
 
 ### B. Nifty Value-Imbalance Straddle Strategy (`nifty_value_imbalance_straddle.py`)
 
@@ -345,7 +347,7 @@ Here are step-by-step examples of how trades flow under different market conditi
 
 ---
 
-## 7. Nifty 1-Min VWAP Straddle (`nifty_intraday_vwap_straddle.py`)
+## 7. Nifty 1-Min VWAP Straddle (`nifty_vwap_1min_straddle.py`)
 
 A mean-reversion short straddle that uses the **true Volume-Weighted Average Price of the combined straddle premium** (CE + PE), computed from 1-minute OHLCV candles fetched via the Dhan API. There are no lot additions or strike adjustments — each cycle is a simple sell → monitor → exit → repeat loop.
 
@@ -440,23 +442,81 @@ Default `10` bars (≈ 10 min). Raise to `15–20` on open-of-day when premiums 
 
 ```powershell
 # Dry run — 1 lot, all defaults
-venv\Scripts\python.exe strategies/value_imbalance/nifty_intraday_vwap_straddle.py
+venv\Scripts\python.exe strategies/value_imbalance/nifty_vwap_1min_straddle.py
 
 # Live, 2 lots, defaults
-venv\Scripts\python.exe strategies/value_imbalance/nifty_intraday_vwap_straddle.py --live --lots 2
+venv\Scripts\python.exe strategies/value_imbalance/nifty_vwap_1min_straddle.py --live --lots 2
 
 # Tighter exit: exit when combined rises 8 pts above VWAP
-venv\Scripts\python.exe strategies/value_imbalance/nifty_intraday_vwap_straddle.py --live --exit-buffer 8
+venv\Scripts\python.exe strategies/value_imbalance/nifty_vwap_1min_straddle.py --live --exit-buffer 8
 
 # Stricter balance: only enter when CE/PE differ by < 10%
-venv\Scripts\python.exe strategies/value_imbalance/nifty_intraday_vwap_straddle.py --live --max-premium-diff 10
+venv\Scripts\python.exe strategies/value_imbalance/nifty_vwap_1min_straddle.py --live --max-premium-diff 10
 
 # Wider entry band, longer decline confirmation
-venv\Scripts\python.exe strategies/value_imbalance/nifty_intraday_vwap_straddle.py --live --entry-band 8 --decline-ticks 8
+venv\Scripts\python.exe strategies/value_imbalance/nifty_vwap_1min_straddle.py --live --entry-band 8 --decline-ticks 8
 
 # Longer VWAP warm-up (15 bars ≈ 15 min), for post-open volatility
-venv\Scripts\python.exe strategies/value_imbalance/nifty_intraday_vwap_straddle.py --live --vwap-warmup-bars 15
+venv\Scripts\python.exe strategies/value_imbalance/nifty_vwap_1min_straddle.py --live --vwap-warmup-bars 15
 
 # Custom risk targets, later start time
-venv\Scripts\python.exe strategies/value_imbalance/nifty_intraday_vwap_straddle.py --live --lots 2 --target-profit 6000 --stop-loss 3000 --start-time 09:25
+venv\Scripts\python.exe strategies/value_imbalance/nifty_vwap_1min_straddle.py --live --lots 2 --target-profit 6000 --stop-loss 3000 --start-time 09:25
+```
+
+---
+
+## 8. Nifty Tick Mean Straddle (`nifty_tick_mean_straddle.py`)
+
+A mean-reversion short straddle that uses a **running arithmetic mean of the combined CE+PE premium** accumulated from WebSocket ticks since the ATM cycle was set up. There are no lot additions or strike adjustments — each cycle is a simple sell → monitor → exit → repeat loop.
+
+Unlike the 1-min VWAP strategy, there is no volume weighting or candle fetching — the mean is updated every tick (effectively TWAP by tick count). The VWAP state resets whenever the ATM shifts (spot moves to a new 50-point bracket) because prior price history no longer reflects the new contracts.
+
+### A. Mean Calculation
+
+At every WebSocket tick the running mean is updated via an incremental sum:
+
+$$\text{VWAP}_t = \frac{\sum_{i=1}^{t} \text{combined}_i}{t}$$
+
+where `combined_i = CE_LTP_i + PE_LTP_i` per tick. No volume data is used.
+
+### B. State Machine
+
+Same state machine as the 1-min VWAP straddle (§7.B), but:
+- **Warm-up** is measured in **ticks** (`--vwap-warmup`, default 60 ticks ≈ 1 min at 1 s/tick) rather than completed 1-min bars.
+- **VWAP refresh** happens continuously each tick (no API candle fetches).
+- **ATM shift while out of position** → reset mean and re-subscribe new ATM CE/PE.
+- **ATM shift while in position** → hold current strikes until exit, then re-center.
+
+### C. CLI Parameter Reference
+
+| Flag | Default | Description |
+|---|---|---|
+| `--live` | off (dry run) | Enable real order placement |
+| `--lots N` | `1` | Lots per leg (CE and PE symmetric) |
+| `--start-time HH:MM` | `09:20` | Session start monitoring time (IST) |
+| `--entry-band PTS` | `5` | Max points **above** VWAP at which entry is permitted (`combined ≤ VWAP + entry_band`). |
+| `--decline-ticks N` | `5` | Tick window: combined premium must be falling vs the oldest value in this window. |
+| `--exit-buffer PTS` | `10` | Points **above** VWAP that trigger exit (`combined > VWAP + exit_buffer`). |
+| `--max-premium-diff PCT` | `15` | Max allowed % difference between CE and PE premiums at entry. |
+| `--vwap-warmup TICKS` | `60` | Min ticks (≈ 1 min at 1 s/tick) before the running mean is trusted for trading. |
+| `--target-profit INR` | `4000` | Session profit target in ₹. |
+| `--stop-loss INR` | `4000` | Session stop loss (positive value) in ₹. |
+
+### D. Execution Examples
+
+```powershell
+# Dry run — 1 lot, all defaults
+venv\Scripts\python.exe strategies/value_imbalance/nifty_tick_mean_straddle.py
+
+# Live, 2 lots, defaults
+venv\Scripts\python.exe strategies/value_imbalance/nifty_tick_mean_straddle.py --live --lots 2
+
+# Tighter exit: exit when combined rises 8 pts above mean
+venv\Scripts\python.exe strategies/value_imbalance/nifty_tick_mean_straddle.py --live --exit-buffer 8
+
+# Longer warmup (120 ticks ≈ 2 min), stricter balance gate
+venv\Scripts\python.exe strategies/value_imbalance/nifty_tick_mean_straddle.py --live --vwap-warmup 120 --max-premium-diff 10
+
+# Custom risk targets
+venv\Scripts\python.exe strategies/value_imbalance/nifty_tick_mean_straddle.py --live --lots 2 --target-profit 6000 --stop-loss 3000 --start-time 09:25
 ```

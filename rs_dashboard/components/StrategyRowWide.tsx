@@ -29,6 +29,9 @@ interface StrategyState {
   current_ltp?: number; direction?: string; oi_diff?: number; pcr_threshold?: number;
   ce_active?: boolean; pe_active?: boolean; ce_sl?: number; pe_sl?: number;
   leg_sl_pct?: number;
+  // Combined-premium trailing SL
+  trail_active?: boolean; trail_start_pct?: number; trail_gap_pts?: number;
+  entry_combined_pts?: number; best_combined_pts?: number; trail_exit_combined?: number | null;
   use_ema?: boolean; use_supertrend?: boolean;
   // CrudeOil Mini Supertrend
   entry_price?: number; st_level?: number; daily_pnl?: number;
@@ -73,6 +76,8 @@ export default function StrategyRowWide({ meta, state, onRefresh }: Props) {
   const [pollInterval, setPollInterval] = useState(60);
   const [expansionWindow, setExpansionWindow] = useState(3);
   const [legSlPct, setLegSlPct] = useState(0.20);
+  const [trailStartPct, setTrailStartPct] = useState(5.0);
+  const [trailGapPts, setTrailGapPts] = useState(15.0);
   const [symbol, setSymbol] = useState('NIFTY');
   const [interval, setIntervalVal] = useState('5');
   const [spreadWidth, setSpreadWidth] = useState(100);
@@ -125,10 +130,14 @@ export default function StrategyRowWide({ meta, state, onRefresh }: Props) {
           else if (strikeSelection === 'premium') args.push('--premium', '--target-premium', String(targetPremium));
           else args.push('--ce-offset', String(ceOffset), '--pe-offset', String(peOffset));
         }
+        args.push('--trail-start-pct', String(trailStartPct));
+        args.push('--trail-gap-pts', String(trailGapPts));
       } else if (meta.key === 'nifty_value_imbalance_straddle') {
         args.push('--max-lots', String(maxLots));
         args.push('--start-time', startTime);
         args.push('--entry-balance-threshold', String(entryBalanceThreshold));
+        args.push('--trail-start-pct', String(trailStartPct));
+        args.push('--trail-gap-pts', String(trailGapPts));
       } else if (meta.key === 'nifty_tick_mean_straddle') {
         args.push('--start-time', startTime);
         args.push('--entry-band', String(entryBand));
@@ -149,6 +158,8 @@ export default function StrategyRowWide({ meta, state, onRefresh }: Props) {
         if (strikeSelection === 'delta') args.push('--delta', '--target-delta', String(targetDelta));
         else if (strikeSelection === 'premium') args.push('--premium', '--target-premium', String(targetPremium));
         else args.push('--ce-offset', String(ceOffset), '--pe-offset', String(peOffset));
+        args.push('--trail-start-pct', String(trailStartPct));
+        args.push('--trail-gap-pts', String(trailGapPts));
       } else if (meta.key === 'nifty_oi_directional') {
         args.push('--start-time', startTime);
         args.push('--pcr-threshold', String(pcrThreshold));
@@ -393,6 +404,26 @@ export default function StrategyRowWide({ meta, state, onRefresh }: Props) {
           <div className={val}>{state.adjustments ?? 0}</div>
           {state.max_lots != null && state.mode !== 'reentry_straddle' && <div className="text-[9px] text-zinc-300 font-mono">max {state.max_lots}L</div>}
         </div>
+        {state.entry_combined_pts != null && state.entry_combined_pts > 0 && (
+          <div className="px-3 flex flex-col justify-center shrink-0">
+            <div className={lbl}>Trail SL</div>
+            {state.trail_active ? (
+              <>
+                <div className="font-mono font-bold text-[10px] text-amber-400">ACTIVE</div>
+                <div className="text-[9px] text-zinc-300 font-mono whitespace-nowrap">
+                  best {state.best_combined_pts?.toFixed(1)} · exit@{state.trail_exit_combined?.toFixed(1) ?? '—'}
+                </div>
+              </>
+            ) : (
+              <>
+                <div className="font-mono text-[10px] text-zinc-500">inactive</div>
+                <div className="text-[9px] text-zinc-600 font-mono whitespace-nowrap">
+                  entry {state.entry_combined_pts.toFixed(1)}
+                </div>
+              </>
+            )}
+          </div>
+        )}
       </div>
     );
   };
@@ -622,6 +653,22 @@ export default function StrategyRowWide({ meta, state, onRefresh }: Props) {
             {strikeSelection === 'premium' && (
               <div className={fieldCls}><label className={lbl}>Target Prem ₹</label><Input type="number" value={targetPremium} onChange={e=>setTargetPremium(parseFloat(e.target.value)||50.0)} className={inputCls} style={{width:80}}/></div>
             )}
+          </>
+        )}
+
+        {/* Combined-premium trailing SL */}
+        {(meta.key === 'nifty_advanced_imbalance' ||
+          meta.key === 'nifty_value_imbalance_straddle' ||
+          meta.key === 'nifty_value_imbalance_strangle') && (
+          <>
+            <div className={fieldCls}>
+              <label className={lbl}>Trail Start (%)</label>
+              <Input type="number" step="0.5" value={trailStartPct} onChange={e => setTrailStartPct(parseFloat(e.target.value) || 5.0)} min={0.5} className={inputCls} style={{ width: 72 }} />
+            </div>
+            <div className={fieldCls}>
+              <label className={lbl}>Trail Gap (pts)</label>
+              <Input type="number" step="0.5" value={trailGapPts} onChange={e => setTrailGapPts(parseFloat(e.target.value) || 15.0)} min={0.5} className={inputCls} style={{ width: 72 }} />
+            </div>
           </>
         )}
 

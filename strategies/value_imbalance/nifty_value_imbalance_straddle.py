@@ -36,10 +36,11 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 class ValueImbalanceStrategy:
-    def __init__(self, dry_run=True, initial_lots=1, max_lots=4, 
+    def __init__(self, dry_run=True, initial_lots=1, max_lots=4,
                  threshold_lot=25.0, threshold_strike=40.0, target_rebalance=5.0,
                  entry_balance_threshold=15.0,
-                 profit_target=4000.0, stop_loss=4000.0, start_time="09:20"):
+                 profit_target=4000.0, stop_loss=4000.0, start_time="09:20",
+                 trail_start_pct=5.0, trail_gap_pts=15.0):
         self.dry_run = dry_run
         self.initial_lots = initial_lots
         self.max_lots = max_lots
@@ -50,7 +51,9 @@ class ValueImbalanceStrategy:
         self.profit_target = profit_target
         self.stop_loss = -abs(stop_loss) # Ensure it's negative
         self.start_time = start_time
-        
+        self.trail_start_pct = trail_start_pct
+        self.trail_gap_pts = trail_gap_pts
+
         self.dhan = get_dhan_client()
         if not self.dhan:
             raise Exception("Failed to connect to Dhan.")
@@ -87,11 +90,10 @@ class ValueImbalanceStrategy:
         self.expiry = None
         
         # Trailing Stop Loss State
-        self.trail_threshold = 1500.0
-        self.trail_offset = 500.0
-        self.peak_pnl = -999999.0 # Track highest PnL reached
-        self.trailing_sl_active = False
-        
+        self.trail_active = False
+        self.entry_combined_pts = 0.0
+        self.best_combined_pts = 0.0
+
         # Session Control
         self.last_adjustment_time = None 
         self.consecutive_chain_failures = 0
@@ -125,7 +127,13 @@ class ValueImbalanceStrategy:
             "spot": nifty_spot,
             "adjustments": self.adjustment_count,
             "profit_target": self.profit_target,
-            "stop_loss": self.stop_loss
+            "stop_loss": self.stop_loss,
+            "trail_active": self.trail_active,
+            "trail_start_pct": self.trail_start_pct,
+            "trail_gap_pts": self.trail_gap_pts,
+            "entry_combined_pts": self.entry_combined_pts,
+            "best_combined_pts": self.best_combined_pts,
+            "trail_exit_combined": round(self.best_combined_pts + self.trail_gap_pts, 2) if self.trail_active else None,
         }
         save_strategy_state("nifty_value_imbalance_straddle", state_dict)
 
@@ -303,8 +311,9 @@ class ValueImbalanceStrategy:
         self.entry_diff_pct = 0.0
         self.adjustment_count = 0
         self.consecutive_chain_failures = 0
-        self.peak_pnl = -999999.0
-        self.trailing_sl_active = False
+        self.trail_active = False
+        self.entry_combined_pts = 0.0
+        self.best_combined_pts = 0.0
         self.last_adjustment_time = None
         logger.info("Session state reset for new cycle.")
 
@@ -468,6 +477,9 @@ class ValueImbalanceStrategy:
             else:
                 logger.info(f"[DRY RUN] Simulating Entry: {self.ce_strike} CE/PE")
 
+            self.entry_combined_pts = self.ce_avg_price + self.pe_avg_price
+            logger.info(f"Trail SL reference: entry_combined={self.entry_combined_pts:.2f} pts (CE={self.ce_avg_price:.2f} + PE={self.pe_avg_price:.2f})")
+
             last_log_time = time.time()
             cycle_active = True
 
@@ -525,22 +537,33 @@ class ValueImbalanceStrategy:
                     cycle_active = False
                     break
                 
-                # --- Trailing Stop Loss Logic ---
-                if total_pnl >= self.trail_threshold:
-                    if not self.trailing_sl_active:
-                        logger.info(f"Trailing SL Activated at {total_pnl:.2f}")
-                        self.trailing_sl_active = True
-                    if total_pnl > self.peak_pnl:
-                        self.peak_pnl = total_pnl
-                
-                if self.trailing_sl_active:
-                    current_sl = self.peak_pnl - self.trail_offset
-                    if total_pnl <= current_sl:
-                        self.exit_all_positions(f"Trailing SL Hit! Peak: {self.peak_pnl:.2f}, Final: {total_pnl:.2f}")
-                        logger.info("Waiting 5 minutes before next re-entry cycle...")
-                        self.sleep_cooldown(300)
-                        cycle_active = False
-                        break # Break inner loop to restart outer loop
+                # --- Trailing Stop Loss Logic (combined-premium points) ---
+                if self.entry_combined_pts > 0:
+                    current_combined_pts = ce_ltp + pe_ltp
+                    profit_pts = self.entry_combined_pts - current_combined_pts
+                    trail_trigger = self.trail_start_pct / 100.0 * self.entry_combined_pts
+
+                    if not self.trail_active and profit_pts >= trail_trigger:
+                        self.trail_active = True
+                        self.best_combined_pts = current_combined_pts
+                        logger.info(
+                            f"Trail SL activated: combined={current_combined_pts:.2f}, "
+                            f"entry={self.entry_combined_pts:.2f}, trigger={trail_trigger:.2f}pts"
+                        )
+
+                    if self.trail_active:
+                        if current_combined_pts < self.best_combined_pts:
+                            self.best_combined_pts = current_combined_pts
+                        trail_exit = self.best_combined_pts + self.trail_gap_pts
+                        if current_combined_pts > trail_exit:
+                            self.exit_all_positions(
+                                f"Trailing SL Hit! Combined: {current_combined_pts:.2f} > exit: {trail_exit:.2f} "
+                                f"(best: {self.best_combined_pts:.2f})"
+                            )
+                            logger.info("Waiting 5 minutes before next re-entry cycle...")
+                            self.sleep_cooldown(300)
+                            cycle_active = False
+                            break
                 
                 # --- Hard Targets ---
                 if total_pnl >= self.profit_target:
@@ -758,6 +781,10 @@ Examples:
     # Entry criteria
     parser.add_argument("--entry-balance-threshold", type=float, default=15.0, metavar="PCT",
                         help="Initial balance threshold percentage for entry (default: 15.0)")
+    parser.add_argument("--trail-start-pct", type=float, default=5.0,
+                        help="Activate trailing SL when profit reaches this %% of entry combined premium (default: 5.0)")
+    parser.add_argument("--trail-gap-pts", type=float, default=15.0,
+                        help="Exit if combined premium rises this many pts above its best level (default: 15.0)")
 
     args = parser.parse_args()
 
@@ -776,6 +803,8 @@ Examples:
         entry_balance_threshold=args.entry_balance_threshold,
         profit_target=args.target_profit,
         stop_loss=stop_loss_val,
+        trail_start_pct=args.trail_start_pct,
+        trail_gap_pts=args.trail_gap_pts,
     )
     try:
         strat.run()

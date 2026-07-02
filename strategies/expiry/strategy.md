@@ -80,10 +80,13 @@ If the imbalance exceeds the trigger threshold (e.g., `50.0%` + initial entry im
 | **`--min-adjust-price`**| *Float* | `10.0` | Minimum option price below which lot addition is bypassed and roll closer is triggered. |
 | **`--post-sl-balance`** | *Flag (Boolean)* | `False` | Rebalances stopped-out leg to match surviving leg's current premium and lots. |
 | **`--max-lots`** | *Integer* | `4` | Maximum lots permitted per leg in `winner_addition` mode. |
+| **`--imbalance-threshold`** | *Float* | `50.0` | Base imbalance percentage (added to entry offset) that triggers adjustments. |
+| **`--max-adjustments`** | *Integer* | `3` | Maximum number of post-SL rebalancing events allowed per session. |
 | **`--target-profit`** | *Float* | `4000.0` | Global daily profit target in INR. |
 | **`--stop-loss`** | *Float* | `4000.0` | Global daily stop loss in INR. |
 | **`--start-time`** | *String* | `09:20` | Market start monitoring time (HH:MM IST). |
 | **`--eod-time`** | *String* | `15:15` | EOD auto-square-off time (HH:MM IST). |
+| **`--product-type`** | `INTRADAY`\|`MARGIN`\|`CNC` | `INTRADAY` | Order product type for all legs. |
 
 ---
 
