@@ -33,6 +33,10 @@ export async function GET(request: NextRequest) {
   const date  = searchParams.get('date')  ?? todayIST();
   const wings = Math.min(Math.max(parseInt(searchParams.get('wings') ?? '10', 10), 1), 10);
 
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+    return NextResponse.json(EMPTY_RESPONSE(date));
+  }
+
   const csvPath = path.join(DEBUG_DIR, `iv_snapshots_${date}.csv`);
   if (!fs.existsSync(csvPath)) {
     return NextResponse.json(EMPTY_RESPONSE(date));

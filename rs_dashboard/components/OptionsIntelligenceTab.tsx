@@ -169,6 +169,7 @@ export default function OptionsIntelligenceTab({ expiry }: { expiry: string }) {
   const [expectedMove, setExpectedMove] = useState<number>(0);
   const [gexProfile, setGexProfile]     = useState<GexProfileEntry[]>([]);
   const [gexFlipStrike, setGexFlipStrike] = useState<number | null>(null);
+  const [chainPcr, setChainPcr] = useState(0);
   const [loading, setLoading]   = useState(false);
   const [error, setError]       = useState('');
 
@@ -217,15 +218,19 @@ export default function OptionsIntelligenceTab({ expiry }: { expiry: string }) {
 
       setMaxPain(computeMaxPain(allEntries));
 
-      // CE/PE OI walls from ATM±10
+      // CE/PE OI walls from ATM±10; also accumulate totals for chain PCR fallback
       let maxCE = 0, maxPE = 0, ceW = 0, peW = 0;
+      let totCE = 0, totPE = 0;
       for (const { strike, entry } of allEntries) {
         if (Math.abs(strike - atmStrike) > 10 * STRIKE_STEP) continue;
         const ceOI = entry.ce?.oi ?? 0;
         const peOI = entry.pe?.oi ?? 0;
+        totCE += ceOI;
+        totPE += peOI;
         if (ceOI > maxCE) { maxCE = ceOI; ceW = strike; }
         if (peOI > maxPE) { maxPE = peOI; peW = strike; }
       }
+      setChainPcr(totCE > 0 ? Math.round((totPE / totCE) * 100) / 100 : 0);
       setCeWall(ceW);
       setPeWall(peW);
 
@@ -267,7 +272,7 @@ export default function OptionsIntelligenceTab({ expiry }: { expiry: string }) {
   const current    = intel?.current ?? null;
   const hasData    = intel?.hasData ?? false;
   const netGex     = current?.net_gex ?? (gexProfile.reduce((s, e) => s + e.net_gex, 0));
-  const pcr        = current?.pcr ?? 0;
+  const pcr        = current?.pcr ?? chainPcr;
   const atmIV      = current?.atm_iv ?? 0;
   const ivMin      = current?.iv_min ?? 0;
   const ivMax      = current?.iv_max ?? 0;
