@@ -37,7 +37,7 @@ export default function RRGDashboard() {
         setPlayhead((d.symbols[0]?.history.length ?? 1) - 1);
       })
       .catch(err => { if (err.name !== 'AbortError') console.error(err); })
-      .finally(() => setLoading(false));
+      .finally(() => { if (!ctrl.signal.aborted) setLoading(false); });
     return () => ctrl.abort();
   }, [universe, timeframe]);
 

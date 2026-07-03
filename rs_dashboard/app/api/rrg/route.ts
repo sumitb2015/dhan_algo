@@ -65,7 +65,7 @@ function rollingStd(arr: number[], i: number): number {
  *
  * RS_raw(t)      = stockClose(t) / indexClose(t) × 100
  * RS_Ratio(t)    = 100 + (RS_raw(t) − SMA10(RS_raw)(t)) / STDEV10(RS_raw)(t)
- * RS_Momentum(t) = 100 + (RS_Ratio(t) − RS_Ratio(t−1)) / STDEV10(RS_Ratio)(t)
+ * RS_Momentum(t) = 100 + (RS_Ratio(t) − SMA10(RS_Ratio)(t)) / STDEV10(RS_Ratio)(t)
  *
  * First valid RS_Ratio: i = WINDOW-1 = 9
  * First valid RS_Momentum: i = 2*WINDOW-2 = 18  (needs STDEV of RS_Ratio over 10 pts)
