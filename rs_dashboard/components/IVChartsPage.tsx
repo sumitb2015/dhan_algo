@@ -4,7 +4,7 @@ import React, { useState, useEffect, useRef, useMemo } from 'react';
 import NavBar from './NavBar';
 import {
   LineChart, Line, XAxis, YAxis, CartesianGrid,
-  Tooltip, ResponsiveContainer,
+  Tooltip, ResponsiveContainer, Legend,
 } from 'recharts';
 
 // ─── Types ────────────────────────────────────────────────────────
@@ -66,6 +66,7 @@ export default function IVChartsPage() {
   const [error, setError]                   = useState('');
   const [showCeIV, setShowCeIV]             = useState(true);
   const [showPeIV, setShowPeIV]             = useState(true);
+  const [viewMode, setViewMode]             = useState<'separate' | 'combined'>('separate');
   const pollRef        = useRef<NodeJS.Timeout | null>(null);
   // Ref keeps the interval callback from closing over a stale selectedStrike
   const strikeRef      = useRef<number | null>(null);
@@ -167,6 +168,23 @@ export default function IVChartsPage() {
             </span>
           )}
 
+          {/* Combined / Separate toggle */}
+          <div className="flex items-center bg-zinc-900 border border-zinc-800 p-0.5 rounded-xl">
+            {(['separate', 'combined'] as const).map(m => (
+              <button
+                key={m}
+                onClick={() => setViewMode(m)}
+                className={`px-2.5 py-1.5 text-xs font-semibold rounded-lg transition-all ${
+                  viewMode === m
+                    ? 'bg-zinc-700 text-zinc-200 border border-zinc-600'
+                    : 'text-zinc-400 hover:text-zinc-200'
+                }`}
+              >
+                {m === 'separate' ? 'Separate' : 'Combined'}
+              </button>
+            ))}
+          </div>
+
           {/* Strike selector */}
           {strikes.length > 0 && (
             <div className="flex items-center gap-1.5">
@@ -210,7 +228,84 @@ export default function IVChartsPage() {
           </div>
         )}
 
-        {!loading && !error && (
+        {!loading && !error && viewMode === 'combined' && (
+          <div className="bg-zinc-900/60 border border-zinc-800 rounded-2xl p-5">
+            <div className="flex items-center justify-between mb-3">
+              <div>
+                <p className="text-sm font-bold text-white tracking-tight">
+                  CE IV &amp; PE IV
+                  {selectedStrike != null && (
+                    <span className="ml-2 text-[10px] font-bold text-zinc-300 bg-zinc-800 px-2 py-0.5 rounded-md">
+                      {fmtNum(selectedStrike)}{selectedStrike === atm && atm > 0 ? ' ATM' : ''}
+                    </span>
+                  )}
+                </p>
+                <p className="text-[10px] text-zinc-400 mt-0.5">
+                  sampled every 30s · {data.length} point{data.length !== 1 ? 's' : ''}
+                </p>
+              </div>
+              <div className="flex items-center gap-1.5">
+                {charts.map(({ label, show, setShow, badgeCls }) => (
+                  <button
+                    key={label}
+                    onClick={() => setShow(v => !v)}
+                    className={`px-2 py-1 text-[10px] font-bold rounded-lg border transition-all ${badgeCls} ${show ? 'opacity-100' : 'opacity-35'}`}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {data.length < 2 ? (
+              <div className="flex items-center justify-center h-[420px] text-zinc-500 text-xs">
+                {selectedStrike != null
+                  ? 'IV chart builds as data accumulates — first point appears within 30s of collector start'
+                  : 'Select a strike to view IV'}
+              </div>
+            ) : (
+              <ResponsiveContainer width="100%" height={420}>
+                <LineChart data={data} margin={{ top: 8, right: 16, left: 0, bottom: 0 }}>
+                  <CartesianGrid {...gridProps} />
+                  <XAxis {...xAxisProps} />
+                  <YAxis
+                    tick={{ fontSize: 10, fill: '#a1a1aa', fontWeight: 500 }}
+                    tickLine={false}
+                    axisLine={false}
+                    domain={[0, 'auto']}
+                    width={40}
+                    tickFormatter={(v: number) => `${v.toFixed(1)}%`}
+                  />
+                  <Tooltip
+                    content={<ChartTooltip />}
+                    cursor={{ stroke: '#3f3f46', strokeWidth: 1 }}
+                  />
+                  <Legend
+                    wrapperStyle={{ fontSize: 11, paddingTop: 8 }}
+                    formatter={(value) => (
+                      <span style={{ color: '#a1a1aa', fontWeight: 600 }}>{value}</span>
+                    )}
+                  />
+                  {charts.map(({ key, label, color, show }) => (
+                    <Line
+                      key={key}
+                      type="monotone"
+                      dataKey={key}
+                      name={label}
+                      stroke={color}
+                      strokeWidth={2}
+                      dot={false}
+                      activeDot={{ r: 4, fill: color, strokeWidth: 0 }}
+                      hide={!show}
+                    />
+                  ))}
+                </LineChart>
+              </ResponsiveContainer>
+            )}
+          </div>
+        )}
+
+        {!loading && !error && viewMode === 'separate' && (
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
             {charts.map(({ key, label, color, show, setShow, badgeCls }) => (
               <div key={key} className="bg-zinc-900/60 border border-zinc-800 rounded-2xl p-5">

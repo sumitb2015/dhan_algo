@@ -99,13 +99,36 @@ def extract_side(side: dict) -> dict:
     }
 
 
-def build_rows(ts: str, spot: float, expiry: str, strikes: list, oc: dict) -> list:
+def build_oc_lookup(oc: dict) -> dict:
+    """Convert the raw oc dict to a float-keyed lookup, handling any numeric string format."""
+    lookup = {}
+    for k, v in oc.items():
+        try:
+            lookup[float(k)] = v
+        except (ValueError, TypeError):
+            pass
+    return lookup
+
+
+def build_rows(ts: str, spot: float, expiry: str, strikes: list, oc: dict,
+               _logged_keys: list = None) -> list:
     """Build one CSV row per strike from the raw `oc` dict."""
+    oc_lookup = build_oc_lookup(oc)
+
+    # One-time diagnostic: log actual key samples when nothing matches
+    if _logged_keys is not None and not _logged_keys and not oc_lookup:
+        sample = list(oc.keys())[:5]
+        log.warning('OC dict has %d keys but none are numeric. Sample keys: %s', len(oc), sample)
+        _logged_keys.append(True)
+    elif _logged_keys is not None and not _logged_keys and oc_lookup:
+        sample_keys = list(oc.keys())[:5]
+        log.info('OC key format sample (first 5): %s', sample_keys)
+        _logged_keys.append(True)
+
     rows = []
     missed = []
     for strike in strikes:
-        # Dhan may serialise strike keys as int-string or float-string; try both
-        entry = oc.get(str(int(strike))) or oc.get(str(float(strike)))
+        entry = oc_lookup.get(float(strike))
         if not entry:
             missed.append(strike)
             entry = {}
@@ -141,7 +164,7 @@ def build_rows(ts: str, spot: float, expiry: str, strikes: list, oc: dict) -> li
         }
         rows.append(row)
     if missed:
-        log.warning('Strikes not found in OC response: %s (check key format)', missed)
+        log.warning('Strikes not found in OC response: %d/%d missing', len(missed), len(strikes))
     return rows
 
 
@@ -211,6 +234,9 @@ def main():
 
     # ── Main loop ─────────────────────────────────────────────────────
     iteration = 0
+    consecutive_failures = 0
+    _key_format_logged = []  # sentinel: log oc key format exactly once
+
     while True:
         now = ist_now()
 
@@ -232,9 +258,13 @@ def main():
             oc = chain_data.get('oc', {}) if chain_data else {}
 
             if not oc:
-                log.warning('[%s] Empty option chain response — skipping', ts)
+                consecutive_failures += 1
+                log.warning('[%s] Empty option chain response — skipping (failure #%d)',
+                            ts, consecutive_failures)
             else:
-                rows = build_rows(ts, live_spot, expiry, strikes, oc)
+                consecutive_failures = 0
+                rows = build_rows(ts, live_spot, expiry, strikes, oc,
+                                  _logged_keys=_key_format_logged)
                 if args.dry_run:
                     for row in rows:
                         print(row)
@@ -244,9 +274,19 @@ def main():
                 log.info('[%s] Wrote %d rows (spot=%.2f)', ts, len(rows), live_spot)
 
         except Exception as exc:
+            consecutive_failures += 1
             log.error('[%s] Error: %s', ts, exc)
 
         iteration += 1
+
+        # Exponential backoff on consecutive failures: 30s → 60s → 120s → 300s (cap)
+        if consecutive_failures > 0:
+            backoff = min(30 * (2 ** (consecutive_failures - 1)), 300)
+            if consecutive_failures == 1 or consecutive_failures % 5 == 0:
+                log.info('Backing off %ds after %d consecutive failures', backoff, consecutive_failures)
+            time.sleep(backoff)
+        else:
+            time.sleep(POLL_SEC)
         time.sleep(POLL_SEC)
 
 
