@@ -160,9 +160,9 @@ export default function OptionsCharts() {
   const pollRef = useRef<NodeJS.Timeout | null>(null);
 
   // Premium chart visibility toggles
-  const [showCE,   setShowCE]   = useState(true);
-  const [showPE,   setShowPE]   = useState(true);
-  const [showVWAP, setShowVWAP] = useState(false);
+  const [showVWAP,   setShowVWAP]   = useState(true);
+  const [showCELine, setShowCELine] = useState(true);
+  const [showPELine, setShowPELine] = useState(true);
   const [activeTab, setActiveTab] = useState<'premium' | 'skew' | 'oi' | 'cumulative' | 'chain' | 'intelligence'>('premium');
 
   // ── Fetch expiries ────────────────────────────────────────────────
@@ -784,24 +784,14 @@ export default function OptionsCharts() {
                 </div>
                 <p className="text-[10px] text-zinc-400 mt-0.5">CE LTP + PE LTP · NIFTY {expiry || '—'}</p>
               </div>
-              {/* Series toggles */}
-              <div className="flex items-center gap-1.5">
-                {([
-                  { key: 'CE',   label: 'CE',   active: showCE,   toggle: () => setShowCE(v => !v),   color: 'text-blue-400  border-blue-500/30  bg-blue-500/10  data-[on]:bg-blue-500/20'  },
-                  { key: 'PE',   label: 'PE',   active: showPE,   toggle: () => setShowPE(v => !v),   color: 'text-red-400   border-red-500/30   bg-red-500/10   data-[on]:bg-red-500/20'   },
-                  { key: 'VWAP', label: 'VWAP', active: showVWAP, toggle: () => setShowVWAP(v => !v), color: 'text-yellow-400 border-yellow-500/30 bg-yellow-500/10 data-[on]:bg-yellow-500/20' },
-                ] as const).map(({ key, label, active, toggle, color }) => (
-                  <button
-                    key={key}
-                    onClick={toggle}
-                    className={`px-2 py-1 text-[10px] font-bold rounded-lg border transition-all ${color} ${
-                      active ? 'opacity-100' : 'opacity-35'
-                    }`}
-                  >
-                    {label}
-                  </button>
-                ))}
-              </div>
+              {/* VWAP toggle */}
+              <button
+                onClick={() => setShowVWAP(v => !v)}
+                className={`px-2 py-1 text-[10px] font-bold rounded-lg border transition-all
+                  text-yellow-400 border-yellow-500/30 bg-yellow-500/10 ${showVWAP ? 'opacity-100' : 'opacity-35'}`}
+              >
+                VWAP
+              </button>
             </div>
 
             {hasData ? (
@@ -822,14 +812,6 @@ export default function OptionsCharts() {
                   <Legend {...legendProps} />
                   <Area type="monotone" dataKey="Straddle" stroke="#10b981" strokeWidth={2.5}
                     fill="url(#gradStraddle)" dot={false} activeDot={{ r: 4, fill: '#10b981', strokeWidth: 0 }} />
-                  {showCE && (
-                    <Line type="monotone" dataKey="CE LTP" stroke="#60a5fa" strokeWidth={1.5}
-                      strokeDasharray="5 3" dot={false} activeDot={{ r: 3, fill: '#60a5fa', strokeWidth: 0 }} />
-                  )}
-                  {showPE && (
-                    <Line type="monotone" dataKey="PE LTP" stroke="#f87171" strokeWidth={1.5}
-                      strokeDasharray="5 3" dot={false} activeDot={{ r: 3, fill: '#f87171', strokeWidth: 0 }} />
-                  )}
                   {showVWAP && (
                     <Line type="monotone" dataKey="VWAP" stroke="#facc15" strokeWidth={1.5}
                       strokeDasharray="8 4" dot={false} activeDot={{ r: 3, fill: '#facc15', strokeWidth: 0 }} />
@@ -863,6 +845,63 @@ export default function OptionsCharts() {
             )}
           </div>
 
+        </div>
+
+        {/* CE & PE Premium chart */}
+        <div className="bg-zinc-900/60 border border-zinc-800 rounded-2xl p-5">
+          <div className="flex items-center justify-between mb-4">
+            <div>
+              <div className="flex items-center gap-2">
+                <p className="text-sm font-bold text-white tracking-tight">CE &amp; PE Premium</p>
+                {chartStrike > 0 && (
+                  <span className="text-[10px] font-bold text-zinc-300 bg-zinc-800 px-2 py-0.5 rounded-md">
+                    {fmtNum(chartStrike)}{chartStrike === atm && atm > 0 ? ' ATM' : ''}
+                  </span>
+                )}
+              </div>
+              <p className="text-[10px] text-zinc-400 mt-0.5">CE LTP vs PE LTP · NIFTY {expiry || '—'}</p>
+            </div>
+            {/* CE / PE toggles */}
+            <div className="flex items-center gap-1.5">
+              {([
+                { key: 'CE', label: 'CE', active: showCELine, toggle: () => setShowCELine(v => !v), color: 'text-blue-400 border-blue-500/30 bg-blue-500/10' },
+                { key: 'PE', label: 'PE', active: showPELine, toggle: () => setShowPELine(v => !v), color: 'text-red-400 border-red-500/30 bg-red-500/10'   },
+              ] as const).map(({ key, label, active, toggle, color }) => (
+                <button key={key} onClick={toggle}
+                  className={`px-2 py-1 text-[10px] font-bold rounded-lg border transition-all ${color} ${active ? 'opacity-100' : 'opacity-35'}`}>
+                  {label}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {hasData ? (
+            <ResponsiveContainer width="100%" height={280}>
+              <LineChart data={chartData} margin={{ top: 8, right: 16, left: 0, bottom: 0 }}>
+                <CartesianGrid {...gridProps} />
+                <XAxis {...xAxisProps} />
+                <YAxis tick={{ fontSize: 10, fill: '#a1a1aa', fontWeight: 500 }} tickLine={false}
+                  axisLine={false} domain={['auto', 'auto']} width={52}
+                  tickFormatter={v => fmtNum(v, 0)} />
+                <Tooltip {...tooltipProps} />
+                <Legend {...legendProps} />
+                {showCELine && (
+                  <Line type="monotone" dataKey="CE LTP" stroke="#60a5fa" strokeWidth={2}
+                    dot={false} activeDot={{ r: 4, fill: '#60a5fa', strokeWidth: 0 }} />
+                )}
+                {showPELine && (
+                  <Line type="monotone" dataKey="PE LTP" stroke="#f87171" strokeWidth={2}
+                    dot={false} activeDot={{ r: 4, fill: '#f87171', strokeWidth: 0 }} />
+                )}
+              </LineChart>
+            </ResponsiveContainer>
+          ) : (
+            <div className="flex items-center justify-center h-[280px]">
+              <p className="text-sm text-zinc-300 font-medium">
+                {candleLoading ? 'Loading candles…' : isLive ? 'Accumulating live ticks…' : 'Select a strike to load chart'}
+              </p>
+            </div>
+          )}
         </div>
 
         {/* IV charts moved to dedicated page */}
