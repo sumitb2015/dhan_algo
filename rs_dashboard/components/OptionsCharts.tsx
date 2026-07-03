@@ -12,6 +12,7 @@ import OptionsOITab from './OptionsOITab';
 import OptionsCumulativeOITab from './OptionsCumulativeOITab';
 import OptionsSmartChainTab from './OptionsSmartChainTab';
 import OptionsIntelligenceTab from './OptionsIntelligenceTab';
+import OptionsVixTab from './OptionsVixTab';
 
 // ─── Types ────────────────────────────────────────────────────────
 
@@ -163,7 +164,7 @@ export default function OptionsCharts() {
   const [showVWAP,   setShowVWAP]   = useState(true);
   const [showCELine, setShowCELine] = useState(true);
   const [showPELine, setShowPELine] = useState(true);
-  const [activeTab, setActiveTab] = useState<'premium' | 'skew' | 'oi' | 'cumulative' | 'chain' | 'intelligence'>('premium');
+  const [activeTab, setActiveTab] = useState<'premium' | 'skew' | 'oi' | 'cumulative' | 'chain' | 'intelligence' | 'vix'>('premium');
 
   // ── Fetch expiries ────────────────────────────────────────────────
   useEffect(() => {
@@ -497,6 +498,7 @@ export default function OptionsCharts() {
 
         <div className="flex items-center gap-2 flex-wrap">
           {/* Expiry */}
+          {activeTab !== 'vix' && (
           <div className="flex items-center gap-1.5">
             <span className="text-xs text-zinc-300 font-medium">Expiry</span>
             <select
@@ -510,6 +512,7 @@ export default function OptionsCharts() {
               {expiries.map(e => <option key={e} value={e}>{e}</option>)}
             </select>
           </div>
+          )}
 
           {/* Candle interval (premium tab only, not live) */}
           {activeTab === 'premium' && !isLive && (
@@ -579,6 +582,7 @@ export default function OptionsCharts() {
               { key: 'cumulative',   label: 'Cumulative OI' },
               { key: 'chain',        label: 'Smart Chain'   },
               { key: 'intelligence', label: 'Intelligence'  },
+              { key: 'vix',         label: 'India VIX'     },
             ] as const).map(({ key, label }) => (
               <button
                 key={key}
@@ -599,6 +603,7 @@ export default function OptionsCharts() {
           {activeTab === 'cumulative' && <OptionsCumulativeOITab expiry={expiry} />}
           {activeTab === 'chain'      && <OptionsSmartChainTab   expiry={expiry} />}
           {activeTab === 'intelligence' && <OptionsIntelligenceTab expiry={expiry} />}
+          {activeTab === 'vix'          && <OptionsVixTab />}
 
           {activeTab === 'premium' && <>
 
