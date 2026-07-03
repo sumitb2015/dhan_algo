@@ -50,6 +50,16 @@ function fmtVix(n: number): string {
   return n.toFixed(2);
 }
 
+function fmtChg(spot: number, prevClose: number): { text: string; color: string } {
+  if (prevClose === 0) return { text: '—', color: 'text-zinc-400' };
+  const pct = (spot - prevClose) / prevClose * 100;
+  const sign = pct >= 0 ? '+' : '';
+  return {
+    text: `${sign}${pct.toFixed(2)}%`,
+    color: pct > 0 ? 'text-emerald-400' : pct < 0 ? 'text-red-400' : 'text-zinc-400',
+  };
+}
+
 // Show every 30th 1-min candle label on X axis (≈ every 30 min)
 function xTickFormatter(value: string, index: number): string {
   return index % 30 === 0 ? value : '';
@@ -144,6 +154,7 @@ export default function OptionsVixTab() {
   const rocData = data?.candles.filter(c => c.roc5 != null) ?? [];
 
   const regime = data ? regimeLabel(data.spot) : null;
+  const chg    = data ? fmtChg(data.spot, data.prev_close) : null;
 
   if (loading) {
     return (
@@ -199,6 +210,7 @@ export default function OptionsVixTab() {
         <StatTile label="High"       value={data ? fmtVix(data.day_high)   : '—'} valueClass="text-emerald-400"  />
         <StatTile label="Low"        value={data ? fmtVix(data.day_low)    : '—'} valueClass="text-red-400"      />
         <StatTile label="Prev Close" value={data ? fmtVix(data.prev_close) : '—'} valueClass="text-zinc-400"     />
+        {chg && <StatTile label="CHG %" value={chg.text} valueClass={chg.color} />}
       </div>
 
       {/* Main VIX line chart */}
