@@ -19,6 +19,7 @@ const NAV_LINKS = [
   { href: '/portfolio-new', label: 'Portfolio+' },
   { href: '/reports', label: 'Reports' },
   { href: '/performance', label: 'Performance' },
+  { href: '/rrg', label: 'RRG' },
   { href: '/options', label: 'Options' },
   { href: '/iv-charts', label: 'IV Charts' },
   { href: '/scalper', label: 'Scalper' },
