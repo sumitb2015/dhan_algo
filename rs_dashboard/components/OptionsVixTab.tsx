@@ -216,7 +216,7 @@ export default function OptionsVixTab() {
       {/* Main VIX line chart */}
       <div className="bg-zinc-900 border border-zinc-800 rounded-xl p-4">
         <p className="text-xs font-semibold text-zinc-400 mb-3">India VIX — 1 min</p>
-        <ResponsiveContainer width="100%" height={220}>
+        <ResponsiveContainer width="100%" aspect={2}>
           <LineChart data={data?.candles ?? []} margin={{ top: 4, right: 16, bottom: 0, left: 0 }}>
             <CartesianGrid strokeDasharray="3 3" stroke="#27272a" />
             <XAxis
@@ -258,7 +258,7 @@ export default function OptionsVixTab() {
       {/* ROC histogram */}
       <div className="bg-zinc-900 border border-zinc-800 rounded-xl p-4">
         <p className="text-xs font-semibold text-zinc-400 mb-3">VIX Velocity — 5-min ROC %</p>
-        <ResponsiveContainer width="100%" height={130}>
+        <ResponsiveContainer width="100%" aspect={2}>
           <BarChart data={rocData} margin={{ top: 4, right: 16, bottom: 0, left: 0 }}>
             <CartesianGrid strokeDasharray="3 3" stroke="#27272a" />
             <XAxis
