@@ -79,10 +79,11 @@ function phaseStatusBadge(phase: string) {
 }
 
 function logLineColor(line: string): string {
-  if (line.startsWith('✅') || line.startsWith('✓')) return 'text-emerald-400';
-  if (line.startsWith('✗') || line.includes('ERROR') || line.includes('error')) return 'text-red-400';
-  if (line.startsWith('⏹') || line.includes('Stopped')) return 'text-amber-400';
-  if (line.startsWith('▶') || line.startsWith('  [')) return 'text-zinc-300';
+  const t = line.trimStart();
+  if (t.startsWith('✅') || t.startsWith('✓')) return 'text-emerald-400';
+  if (t.startsWith('✗') || line.includes('ERROR') || /\berror\b/i.test(line)) return 'text-red-400';
+  if (t.startsWith('⏹') || line.includes('Stopped')) return 'text-amber-400';
+  if (t.startsWith('▶') || t.startsWith('[')) return 'text-zinc-300';
   return 'text-zinc-500';
 }
 
