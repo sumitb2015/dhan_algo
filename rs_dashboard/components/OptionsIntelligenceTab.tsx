@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useRef, useCallback, useId } from 'react';
 import {
   BarChart, Bar, Cell, LineChart, Line, AreaChart, Area,
   XAxis, YAxis, CartesianGrid, Tooltip, ReferenceLine, ResponsiveContainer,
@@ -135,9 +135,9 @@ function KeyTile({ label, value, sub }: { label: string; value: string; sub?: st
   );
 }
 
-function GexTooltip({ active, payload }: Record<string, unknown>) {
+function GexTooltip({ active, payload }: { active?: boolean; payload?: Array<{ payload: GexProfileEntry }> }) {
   if (!active || !Array.isArray(payload) || !payload.length) return null;
-  const d = (payload[0] as { payload: GexProfileEntry }).payload;
+  const d = payload[0].payload;
   return (
     <div className="bg-zinc-950/95 border border-zinc-700/60 rounded-xl px-3.5 py-2.5 text-xs shadow-2xl min-w-[180px] backdrop-blur">
       <p className="text-zinc-300 font-bold mb-1.5">Strike {fmtStrike(d.strike)}</p>
@@ -174,12 +174,13 @@ export default function OptionsIntelligenceTab({ expiry }: { expiry: string }) {
 
   const chainTimerRef = useRef<NodeJS.Timeout | null>(null);
   const intelTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const intelRef      = useRef<IntelResponse | null>(null);
 
   const fetchIntel = useCallback(async () => {
     try {
       const res  = await fetch('/api/options/intelligence');
       const json = await res.json() as IntelResponse;
-      if (json.success) setIntel(json);
+      if (json.success) { setIntel(json); intelRef.current = json; }
     } catch {
       // silent — chain data still provides GEX profile
     }
@@ -234,9 +235,9 @@ export default function OptionsIntelligenceTab({ expiry }: { expiry: string }) {
       setExpectedMove(Math.round(atmStraddle));
 
       // GEX profile: use snapshot history if available, else compute from chain greeks
-      if (intel?.hasData && intel.gex_profile.length > 0) {
-        setGexProfile(intel.gex_profile);
-        setGexFlipStrike(intel.gex_flip_strike);
+      if (intelRef.current?.hasData && (intelRef.current.gex_profile.length ?? 0) > 0) {
+        setGexProfile(intelRef.current.gex_profile);
+        setGexFlipStrike(intelRef.current.gex_flip_strike);
       } else {
         const profile = computeGexFromChain(oc, atmStrike, spotPrice, 10);
         setGexProfile(profile);
@@ -247,7 +248,7 @@ export default function OptionsIntelligenceTab({ expiry }: { expiry: string }) {
     } finally {
       setLoading(false);
     }
-  }, [expiry, intel]);
+  }, [expiry]);
 
   useEffect(() => {
     fetchIntel();
@@ -282,9 +283,18 @@ export default function OptionsIntelligenceTab({ expiry }: { expiry: string }) {
     ? `${fmtStrike(atm - expectedMove)}–${fmtStrike(atm + expectedMove)}`
     : '—';
 
+  // Unique prefix for SVG gradient IDs (prevents collisions when multiple instances render)
+  const uid = useId();
+
   // X-axis domain 09:15–15:30 IST
   const SESSION_START = new Date(`${(intel?.date ?? new Date().toISOString().slice(0, 10))}T09:15:00+05:30`).getTime();
   const SESSION_END   = new Date(`${(intel?.date ?? new Date().toISOString().slice(0, 10))}T15:30:00+05:30`).getTime();
+
+  // Hourly ticks 09:15–15:15 plus explicit 15:30 close
+  const SESSION_TICKS = [0, 1, 2, 3, 4, 5, 6].map(i => SESSION_START + i * 60 * 60 * 1000).concat([SESSION_END]);
+
+  // Net GEX sign based on the last timeline entry (drives gradient colour)
+  const netGexPositive = (timeline[timeline.length - 1]?.net_gex ?? 0) >= 0;
 
   return (
     <div className="flex flex-col gap-5">
@@ -406,7 +416,7 @@ export default function OptionsIntelligenceTab({ expiry }: { expiry: string }) {
                   <CartesianGrid strokeDasharray="3 3" stroke="#27272a" vertical={false} />
                   <XAxis dataKey="ts" type="number" scale="time" domain={[SESSION_START, SESSION_END]}
                     tickFormatter={ts => new Date(ts).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', hour12: false })}
-                    tick={{ fill: '#71717a', fontSize: 9 }} ticks={[...Array(7)].map((_, i) => SESSION_START + i * 60 * 60 * 1000)} />
+                    tick={{ fill: '#71717a', fontSize: 9 }} ticks={SESSION_TICKS} />
                   <YAxis tick={{ fill: '#71717a', fontSize: 9 }} width={36} domain={['auto', 'auto']} />
                   <Tooltip
                     labelFormatter={ts => new Date(Number(ts)).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', hour12: false })}
@@ -426,7 +436,7 @@ export default function OptionsIntelligenceTab({ expiry }: { expiry: string }) {
                   <CartesianGrid strokeDasharray="3 3" stroke="#27272a" vertical={false} />
                   <XAxis dataKey="ts" type="number" scale="time" domain={[SESSION_START, SESSION_END]}
                     tickFormatter={ts => new Date(ts).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', hour12: false })}
-                    tick={{ fill: '#71717a', fontSize: 9 }} ticks={[...Array(7)].map((_, i) => SESSION_START + i * 60 * 60 * 1000)} />
+                    tick={{ fill: '#71717a', fontSize: 9 }} ticks={SESSION_TICKS} />
                   <YAxis tick={{ fill: '#71717a', fontSize: 9 }} width={36} domain={['auto', 'auto']} />
                   <Tooltip
                     labelFormatter={ts => new Date(Number(ts)).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', hour12: false })}
@@ -442,11 +452,11 @@ export default function OptionsIntelligenceTab({ expiry }: { expiry: string }) {
               <ResponsiveContainer width="100%" height={150}>
                 <AreaChart data={timeline} margin={{ top: 4, right: 16, bottom: 4, left: 0 }}>
                   <defs>
-                    <linearGradient id="gexGreen" x1="0" y1="0" x2="0" y2="1">
+                    <linearGradient id={`${uid}-gexGreen`} x1="0" y1="0" x2="0" y2="1">
                       <stop offset="5%"  stopColor="#10b981" stopOpacity={0.3} />
                       <stop offset="95%" stopColor="#10b981" stopOpacity={0.05} />
                     </linearGradient>
-                    <linearGradient id="gexRed" x1="0" y1="0" x2="0" y2="1">
+                    <linearGradient id={`${uid}-gexRed`} x1="0" y1="0" x2="0" y2="1">
                       <stop offset="5%"  stopColor="#ef4444" stopOpacity={0.3} />
                       <stop offset="95%" stopColor="#ef4444" stopOpacity={0.05} />
                     </linearGradient>
@@ -454,7 +464,7 @@ export default function OptionsIntelligenceTab({ expiry }: { expiry: string }) {
                   <CartesianGrid strokeDasharray="3 3" stroke="#27272a" vertical={false} />
                   <XAxis dataKey="ts" type="number" scale="time" domain={[SESSION_START, SESSION_END]}
                     tickFormatter={ts => new Date(ts).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', hour12: false })}
-                    tick={{ fill: '#71717a', fontSize: 9 }} ticks={[...Array(7)].map((_, i) => SESSION_START + i * 60 * 60 * 1000)} />
+                    tick={{ fill: '#71717a', fontSize: 9 }} ticks={SESSION_TICKS} />
                   <YAxis tick={{ fill: '#71717a', fontSize: 9 }} width={48} tickFormatter={v => fmtGex(Number(v))} />
                   <Tooltip
                     labelFormatter={ts => new Date(Number(ts)).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', hour12: false })}
@@ -463,8 +473,9 @@ export default function OptionsIntelligenceTab({ expiry }: { expiry: string }) {
                     contentStyle={{ background: '#09090b', border: '1px solid #3f3f46', borderRadius: 8, fontSize: 11 }}
                     labelStyle={{ color: '#a1a1aa' }} />
                   <ReferenceLine y={0} stroke="#52525b" strokeWidth={1.5} />
-                  <Area type="monotone" dataKey="net_gex" stroke="#10b981" strokeWidth={1.5} dot={false}
-                    fill="url(#gexGreen)" name="Net GEX" />
+                  <Area type="monotone" dataKey="net_gex"
+                    stroke={netGexPositive ? '#10b981' : '#ef4444'} strokeWidth={1.5} dot={false}
+                    fill={`url(#${uid}-${netGexPositive ? 'gexGreen' : 'gexRed'})`} name="Net GEX" />
                 </AreaChart>
               </ResponsiveContainer>
             </div>
