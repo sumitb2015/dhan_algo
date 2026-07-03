@@ -86,7 +86,7 @@ function computeJdK(
   const result: RRGPoint[] = [];
   for (let i = 2 * WINDOW - 2; i < n; i++) {
     const std = rollingStd(rsRatioArr, i);
-    const momentum = std === 0 ? 100 : 100 + (rsRatioArr[i] - rsRatioArr[i - 1]) / std;
+    const momentum = std === 0 ? 100 : 100 + (rsRatioArr[i] - rollingMean(rsRatioArr, i)) / std;
     result.push({ date: aligned[i].date, rsRatio: rsRatioArr[i], rsMomentum: momentum });
   }
 
@@ -99,9 +99,10 @@ function toWeekly<T extends { date: string }>(rows: T[]): T[] {
   const weeks = new Map<string, T>();
   for (const row of rows) {
     const d = new Date(row.date);
-    const monday = new Date(d);
-    monday.setDate(d.getDate() - ((d.getDay() + 6) % 7));
-    weeks.set(monday.toISOString().slice(0, 10), row); // last trading day of each week wins
+    const monday = new Date(row.date);  // fresh Date from string
+    monday.setUTCDate(d.getUTCDate() - ((d.getUTCDay() + 6) % 7));
+    const key = monday.toISOString().slice(0, 10);
+    weeks.set(key, row); // last trading day of each week wins
   }
   return [...weeks.values()].sort((a, b) => a.date.localeCompare(b.date));
 }

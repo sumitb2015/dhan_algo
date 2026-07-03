@@ -25,22 +25,29 @@ export default function RRGDashboard() {
 
   // ── Fetch ──────────────────────────────────────────────────────────────────
   useEffect(() => {
+    const ctrl = new AbortController();
     setLoading(true);
-    setSearch('');
     setIsPlaying(false);
-    fetch(`/api/rrg?universe=${universe}&timeframe=${timeframe}&lookback=252`)
+    setSearch('');
+    fetch(`/api/rrg?universe=${universe}&timeframe=${timeframe}&lookback=252`, { signal: ctrl.signal })
       .then(r => r.json())
       .then(({ data: d }: { data: RRGResponse }) => {
         setData(d);
         setActiveSymbols(new Set(d.symbols.map(s => s.symbol)));
         setPlayhead((d.symbols[0]?.history.length ?? 1) - 1);
       })
-      .catch(console.error)
+      .catch(err => { if (err.name !== 'AbortError') console.error(err); })
       .finally(() => setLoading(false));
+    return () => ctrl.abort();
   }, [universe, timeframe]);
 
   // ── Animation ─────────────────────────────────────────────────────────────
-  const maxPlayhead = (data?.symbols[0]?.history.length ?? 1) - 1;
+  const maxPlayhead = useMemo(() => {
+    if (!data || data.symbols.length === 0) return 0;
+    const active = data.symbols.filter(s => activeSymbols.has(s.symbol));
+    if (active.length === 0) return (data.symbols[0]?.history.length ?? 1) - 1;
+    return Math.min(...active.map(s => s.history.length)) - 1;
+  }, [data, activeSymbols]);
 
   useEffect(() => {
     if (!isPlaying) return;
@@ -80,7 +87,8 @@ export default function RRGDashboard() {
   const cx100 = xS(100);
   const cy100 = yS(100);
 
-  const currentDate = data?.symbols[0]?.history[playhead]?.date ?? data?.dataDate ?? '';
+  const firstActive = data?.symbols.find(s => activeSymbols.has(s.symbol));
+  const currentDate = firstActive?.history[playhead]?.date ?? data?.dataDate ?? '';
 
   const toggleSymbol = (sym: string) =>
     setActiveSymbols(prev => {
