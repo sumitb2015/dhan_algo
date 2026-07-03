@@ -11,6 +11,7 @@ import OptionsSkewTab from './OptionsSkewTab';
 import OptionsOITab from './OptionsOITab';
 import OptionsCumulativeOITab from './OptionsCumulativeOITab';
 import OptionsSmartChainTab from './OptionsSmartChainTab';
+import OptionsIntelligenceTab from './OptionsIntelligenceTab';
 
 // ─── Types ────────────────────────────────────────────────────────
 
@@ -162,7 +163,7 @@ export default function OptionsCharts() {
   const [showCE,   setShowCE]   = useState(true);
   const [showPE,   setShowPE]   = useState(true);
   const [showVWAP, setShowVWAP] = useState(false);
-  const [activeTab, setActiveTab] = useState<'premium' | 'skew' | 'oi' | 'cumulative' | 'chain'>('premium');
+  const [activeTab, setActiveTab] = useState<'premium' | 'skew' | 'oi' | 'cumulative' | 'chain' | 'intelligence'>('premium');
 
   // ── Fetch expiries ────────────────────────────────────────────────
   useEffect(() => {
@@ -572,11 +573,12 @@ export default function OptionsCharts() {
           {/* Tab bar */}
           <div className="flex border-b border-zinc-800 -mx-6 px-6 -mt-5 mb-1">
             {([
-              { key: 'premium',    label: 'Premium'       },
-              { key: 'skew',       label: 'Skew'          },
-              { key: 'oi',         label: 'Open Interest' },
-              { key: 'cumulative', label: 'Cumulative OI' },
-              { key: 'chain',      label: 'Smart Chain'   },
+              { key: 'premium',      label: 'Premium'       },
+              { key: 'skew',         label: 'Skew'          },
+              { key: 'oi',           label: 'Open Interest' },
+              { key: 'cumulative',   label: 'Cumulative OI' },
+              { key: 'chain',        label: 'Smart Chain'   },
+              { key: 'intelligence', label: 'Intelligence'  },
             ] as const).map(({ key, label }) => (
               <button
                 key={key}
@@ -596,6 +598,7 @@ export default function OptionsCharts() {
           {activeTab === 'oi'         && <OptionsOITab           expiry={expiry} />}
           {activeTab === 'cumulative' && <OptionsCumulativeOITab expiry={expiry} />}
           {activeTab === 'chain'      && <OptionsSmartChainTab   expiry={expiry} />}
+          {activeTab === 'intelligence' && <OptionsIntelligenceTab expiry={expiry} />}
 
           {activeTab === 'premium' && <>
 
