@@ -15,6 +15,7 @@ interface VixCandle {
   low: number;
   close: number;
   roc5: number | null;
+  nifty: number | null;
 }
 
 interface VixData {
@@ -71,12 +72,18 @@ const VixTooltip = ({ active, payload, label }: Record<string, unknown>) => {
   if (!active || !Array.isArray(payload) || !payload.length) return null;
   const row = (payload as Array<{ payload: VixCandle }>)[0]?.payload;
   return (
-    <div className="bg-zinc-950/95 border border-zinc-700/60 rounded-xl px-3.5 py-2.5 text-xs shadow-2xl min-w-[140px] backdrop-blur">
+    <div className="bg-zinc-950/95 border border-zinc-700/60 rounded-xl px-3.5 py-2.5 text-xs shadow-2xl min-w-[160px] backdrop-blur">
       <p className="text-zinc-400 mb-2 font-semibold">{String(label)}</p>
       <div className="flex justify-between gap-4 mb-0.5">
         <span className="text-indigo-400 font-semibold">VIX</span>
-        <span className="text-white font-bold tabular-nums">{fmtVix(row?.close ?? 0)}</span>
+        <span className="text-zinc-100 font-bold tabular-nums">{fmtVix(row?.close ?? 0)}</span>
       </div>
+      {row?.nifty != null && (
+        <div className="flex justify-between gap-4 mb-0.5">
+          <span className="text-amber-400 font-semibold">Nifty</span>
+          <span className="text-zinc-100 font-bold tabular-nums">{row.nifty.toLocaleString('en-IN', { maximumFractionDigits: 2 })}</span>
+        </div>
+      )}
       {row?.roc5 != null && (
         <div className="flex justify-between gap-4">
           <span className="text-zinc-400 font-semibold">ROC 5m</span>
@@ -217,7 +224,7 @@ export default function OptionsVixTab() {
       <div className="bg-zinc-900 border border-zinc-800 rounded-xl p-4">
         <p className="text-xs font-semibold text-zinc-400 mb-3">India VIX — 1 min</p>
         <ResponsiveContainer width="100%" aspect={8/3}>
-          <LineChart data={data?.candles ?? []} margin={{ top: 4, right: 16, bottom: 0, left: 0 }}>
+          <LineChart data={data?.candles ?? []} margin={{ top: 4, right: 56, bottom: 0, left: 0 }}>
             <CartesianGrid strokeDasharray="3 3" stroke="#27272a" />
             <XAxis
               dataKey="time"
@@ -226,17 +233,32 @@ export default function OptionsVixTab() {
               interval={29}
             />
             <YAxis
-              tick={{ fill: '#71717a', fontSize: 10 }}
+              yAxisId="vix"
+              tick={{ fill: '#818cf8', fontSize: 10 }}
               tickFormatter={(v: number) => v.toFixed(2)}
               domain={([min, max]: readonly [number, number]): [number, number] => [
                 parseFloat((min * 0.95).toFixed(2)),
                 parseFloat((max * 1.05).toFixed(2)),
               ]}
               width={44}
+              label={{ value: 'VIX', angle: -90, position: 'insideLeft', fill: '#818cf8', fontSize: 9, dx: -4 }}
+            />
+            <YAxis
+              yAxisId="nifty"
+              orientation="right"
+              tick={{ fill: '#f59e0b', fontSize: 10 }}
+              tickFormatter={(v: number) => v.toLocaleString('en-IN', { maximumFractionDigits: 0 })}
+              domain={([min, max]: readonly [number, number]): [number, number] => [
+                Math.floor(min * 0.999),
+                Math.ceil(max * 1.001),
+              ]}
+              width={56}
+              label={{ value: 'Nifty', angle: 90, position: 'insideRight', fill: '#f59e0b', fontSize: 9, dx: 12 }}
             />
             <Tooltip content={<VixTooltip />} />
             {data && (
               <ReferenceLine
+                yAxisId="vix"
                 y={data.prev_close}
                 stroke="#52525b"
                 strokeDasharray="4 3"
@@ -244,12 +266,23 @@ export default function OptionsVixTab() {
               />
             )}
             <Line
+              yAxisId="vix"
               type="monotone"
               dataKey="close"
               stroke="#818cf8"
               strokeWidth={1.5}
               dot={false}
               activeDot={{ r: 3, fill: '#818cf8' }}
+            />
+            <Line
+              yAxisId="nifty"
+              type="monotone"
+              dataKey="nifty"
+              stroke="#f59e0b"
+              strokeWidth={1.5}
+              dot={false}
+              connectNulls
+              activeDot={{ r: 3, fill: '#f59e0b' }}
             />
           </LineChart>
         </ResponsiveContainer>

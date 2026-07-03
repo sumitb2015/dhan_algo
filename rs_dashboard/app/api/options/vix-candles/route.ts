@@ -13,6 +13,7 @@ export interface VixCandle {
   low: number;
   close: number;
   roc5: number | null;
+  nifty: number | null;
 }
 
 interface VixPayload {

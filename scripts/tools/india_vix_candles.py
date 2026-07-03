@@ -17,7 +17,8 @@ sys.path.insert(0, ROOT)
 from login import get_dhan_client
 from lib.dhan_helper import DhanHelper
 
-VIX_SECURITY_ID = "21"
+VIX_SECURITY_ID   = "21"
+NIFTY_SECURITY_ID = "13"
 VIX_CSV = os.path.join(ROOT, "Historical Data", "Indices", "INDIA_VIX.csv")
 
 
@@ -67,31 +68,44 @@ def main():
 
     helper = DhanHelper(dhan)
 
-    df = helper.get_intraday_minute_data(
-        security_id=VIX_SECURITY_ID,
-        exchange_segment="IDX_I",
-        instrument_type="INDEX",
-        interval="1",
-        from_date=lookback_str,
-        to_date=today_str,
-    )
+    import pandas as pd
 
+    def _fetch(security_id):
+        return helper.get_intraday_minute_data(
+            security_id=security_id,
+            exchange_segment="IDX_I",
+            instrument_type="INDEX",
+            interval="1",
+            from_date=lookback_str,
+            to_date=today_str,
+        )
+
+    def _filter_last_day(raw_df):
+        if raw_df is None or raw_df.empty:
+            return raw_df, None
+        tc = _col(raw_df, "start_Time", "timestamp", "time", "date")
+        col = raw_df[tc]
+        dates = pd.to_datetime(col, unit="s").dt.date if col.dtype in ("int64", "float64") else pd.to_datetime(col, errors="coerce").dt.date
+        last = dates.max()
+        return raw_df[dates == last].copy(), str(last)
+
+    df, data_date = _filter_last_day(_fetch(VIX_SECURITY_ID))
     if df is None or df.empty:
         print(json.dumps({"error": "No intraday data returned for India VIX — check auth token"}))
         return
 
-    # Keep only most recent trading day
-    import pandas as pd
-    ts_col = _col(df, "start_Time", "timestamp", "time", "date")
-    col = df[ts_col]
-    if col.dtype in ("int64", "float64"):
-        dates = pd.to_datetime(col, unit="s").dt.date
-    else:
-        dates = pd.to_datetime(col, errors="coerce").dt.date
-    last_day = dates.max()
-    df = df[dates == last_day].copy()
-    data_date = str(last_day)
     is_today = data_date == today_str
+
+    # Nifty candles — build time→close map for overlay (best-effort; missing = null)
+    nifty_df, _ = _filter_last_day(_fetch(NIFTY_SECURITY_ID))
+    nifty_map: dict = {}
+    if nifty_df is not None and not nifty_df.empty:
+        n_ts  = _col(nifty_df, "start_Time", "timestamp", "time", "date")
+        n_cls = _col(nifty_df, "close", "Close", "c")
+        for _, row in nifty_df.iterrows():
+            nifty_map[_to_hhmm(row[n_ts])] = round(float(row[n_cls]), 2)
+
+    ts_col = _col(df, "start_Time", "timestamp", "time", "date")
 
     open_col  = _col(df, "open",  "Open",  "o")
     high_col  = _col(df, "high",  "High",  "h")
@@ -119,6 +133,7 @@ def main():
             "low":   round(lows[i],   2),
             "close": round(closes[i], 2),
             "roc5":  roc5[i],
+            "nifty": nifty_map.get(t),  # None if no matching Nifty candle
         })
 
     spot      = round(closes[-1], 2) if closes else 0.0
