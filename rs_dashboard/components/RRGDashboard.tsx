@@ -26,6 +26,7 @@ export default function RRGDashboard() {
   // ── Fetch ──────────────────────────────────────────────────────────────────
   useEffect(() => {
     setLoading(true);
+    setSearch('');
     setIsPlaying(false);
     fetch(`/api/rrg?universe=${universe}&timeframe=${timeframe}&lookback=252`)
       .then(r => r.json())
