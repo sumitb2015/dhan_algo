@@ -124,12 +124,12 @@ export default function OptionsVixTab() {
         setData(json as VixData);
         setError('');
         setLastUpdated(new Date());
-        setCountdown(COUNTDOWN);
       }
     } catch (e) {
       setError(String(e));
     } finally {
       setLoading(false);
+      setCountdown(COUNTDOWN);
     }
   }, []);
 
@@ -211,7 +211,7 @@ export default function OptionsVixTab() {
               dataKey="time"
               tick={{ fill: '#71717a', fontSize: 10 }}
               tickFormatter={xTickFormatter}
-              interval={0}
+              interval={29}
             />
             <YAxis
               tick={{ fill: '#71717a', fontSize: 10 }}
@@ -253,7 +253,7 @@ export default function OptionsVixTab() {
               dataKey="time"
               tick={{ fill: '#71717a', fontSize: 10 }}
               tickFormatter={xTickFormatter}
-              interval={0}
+              interval={29}
             />
             <YAxis
               tick={{ fill: '#71717a', fontSize: 10 }}
@@ -263,7 +263,7 @@ export default function OptionsVixTab() {
             />
             <Tooltip content={<RocTooltip />} />
             <ReferenceLine y={0} stroke="#52525b" strokeDasharray="3 3" />
-            <Bar dataKey="roc5" maxBarSize={6} radius={[1, 1, 0, 0]}>
+            <Bar dataKey="roc5" maxBarSize={6}>
               {rocData.map((entry, index) => (
                 <Cell
                   key={`cell-${index}`}
@@ -280,6 +280,11 @@ export default function OptionsVixTab() {
         {data && (
           <span className="px-2 py-0.5 bg-zinc-800 border border-zinc-700 rounded text-zinc-300 font-mono text-[10px]">
             DATA: {data.data_date}
+          </span>
+        )}
+        {data && !data.is_today && (
+          <span className="px-2 py-0.5 bg-amber-500/15 border border-amber-500/30 rounded text-amber-400 font-semibold text-[10px]">
+            NOT TODAY
           </span>
         )}
         {lastUpdated && (
