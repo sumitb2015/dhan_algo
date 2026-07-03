@@ -9,9 +9,9 @@ import { spawn, execSync } from 'child_process';
 
 const PROJECT_ROOT = path.resolve(process.cwd(), '..');
 const DEBUG_DIR    = path.join(PROJECT_ROOT, 'debug');
-// Use python.exe (not pythonw.exe) so that sys.stderr is a real file handle
-// and logging output reaches the log file. windowsHide: true suppresses the console window.
-const PYTHON_EXE   = path.join(PROJECT_ROOT, 'venv', 'Scripts', 'python.exe');
+// pythonw.exe runs without a console window on Windows. The collector writes logs
+// directly to its log file (not sys.stderr), so windowless mode works fine.
+const PYTHON_EXE   = path.join(PROJECT_ROOT, 'venv', 'Scripts', 'pythonw.exe');
 const COLLECTOR    = path.join(PROJECT_ROOT, 'scripts', 'tools', 'iv_snapshot_collector.py');
 const PID_FILE     = path.join(DEBUG_DIR, 'iv_snapshot_collector.pid');
 const STOP_TRIGGER = path.join(DEBUG_DIR, 'iv_snapshots_stop.trigger');
@@ -59,17 +59,12 @@ if (h > 15 || (h === 15 && m >= 30)) {
   if (!alreadyRunning) {
     fs.mkdirSync(DEBUG_DIR, { recursive: true });
 
-    const logFile = path.join(DEBUG_DIR, 'iv_snapshot_collector.log');
-    const logFd   = fs.openSync(logFile, 'a');
-
     const proc = spawn(PYTHON_EXE, [COLLECTOR], {
-      detached:    true,
-      stdio:       ['ignore', logFd, logFd],
-      windowsHide: true,
+      detached: true,
+      stdio:    'ignore',
     });
 
     proc.unref();
-    fs.closeSync(logFd);
 
     if (proc.pid) {
       fs.writeFileSync(PID_FILE, String(proc.pid), 'utf8');

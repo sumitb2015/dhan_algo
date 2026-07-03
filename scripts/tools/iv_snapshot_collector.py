@@ -26,11 +26,14 @@ sys.path.insert(0, ROOT)
 from login import get_dhan_client
 from lib.dhan_helper import DhanHelper
 
+_LOG_FILE = os.path.join(ROOT, 'debug', 'iv_snapshot_collector.log')
+os.makedirs(os.path.join(ROOT, 'debug'), exist_ok=True)
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s  %(levelname)s  %(message)s',
     datefmt='%H:%M:%S',
-    stream=sys.stderr,
+    filename=_LOG_FILE,
+    filemode='a',
 )
 log = logging.getLogger(__name__)
 
