@@ -1,6 +1,6 @@
 'use client';
 import Link from 'next/link';
-import { usePathname } from 'next/navigation';
+import { usePathname, useRouter } from 'next/navigation';
 
 const NAV_LINKS = [
   { href: '/', label: 'RS Scanner' },
@@ -27,6 +27,13 @@ const NAV_LINKS = [
 
 export default function NavBar() {
   const pathname = usePathname();
+  const router   = useRouter();
+
+  async function handleDisconnect() {
+    await fetch('/api/auth/logout', { method: 'POST' });
+    router.push('/login');
+  }
+
   return (
     <div className="flex items-center bg-zinc-900/80 border border-zinc-800 p-0.5 rounded-xl flex-wrap">
       {NAV_LINKS.map(({ href, label }) =>
@@ -40,6 +47,13 @@ export default function NavBar() {
           </Link>
         )
       )}
+      <span className="w-px h-4 bg-zinc-700 mx-1 shrink-0" />
+      <button
+        onClick={handleDisconnect}
+        className="px-2.5 py-1 text-xs font-medium rounded-lg text-zinc-400 hover:text-red-400 hover:bg-zinc-800 transition-colors whitespace-nowrap"
+      >
+        Disconnect
+      </button>
     </div>
   );
 }
