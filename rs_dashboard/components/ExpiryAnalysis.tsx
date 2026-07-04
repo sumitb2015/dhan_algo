@@ -17,15 +17,15 @@ import NavBar from '@/components/NavBar';
 import type { WeeklyBucket } from '@/app/api/expiry-analysis/route';
 
 interface ClassifiedBucket extends WeeklyBucket {
-  tueTimestamp: number;
+  endTimestamp: number;
   status: 'within' | 'upside' | 'downside';
 }
 
 interface ScatterPoint {
   x: number;
   y: number;
-  wedDate: string;
-  tueDate: string;
+  startDate: string;
+  endDate: string;
   returnPct: number;
   status: 'within' | 'upside' | 'downside';
 }
@@ -79,7 +79,7 @@ function CustomTooltip({ active, payload }: { active?: boolean; payload?: { payl
   return (
     <div className="bg-zinc-900 border border-zinc-700 rounded-lg px-3 py-2 text-xs shadow-xl">
       <div className="text-zinc-400 mb-1">
-        {fmtDate(d.wedDate)} → {fmtDate(d.tueDate)}
+        {fmtDate(d.startDate)} → {fmtDate(d.endDate)}
       </div>
       <div style={{ color }} className="font-mono font-bold text-sm">
         {signChar}{d.returnPct.toFixed(2)}%
@@ -145,16 +145,16 @@ export default function ExpiryAnalysis() {
 
     const classified: ClassifiedBucket[] = weeks.map((w) => ({
       ...w,
-      tueTimestamp: new Date(w.tueDate + 'T00:00:00Z').getTime(),
+      endTimestamp: new Date(w.endDate + 'T00:00:00Z').getTime(),
       status:
         w.returnPct < lower ? 'downside' : w.returnPct > upper ? 'upside' : 'within',
     }));
 
     const toPoint = (c: ClassifiedBucket): ScatterPoint => ({
-      x: c.tueTimestamp,
+      x: c.endTimestamp,
       y: c.returnPct,
-      wedDate: c.wedDate,
-      tueDate: c.tueDate,
+      startDate: c.startDate,
+      endDate: c.endDate,
       returnPct: c.returnPct,
       status: c.status,
     });
@@ -188,7 +188,7 @@ export default function ExpiryAnalysis() {
         <TrendingUp className="text-emerald-400 w-5 h-5 flex-shrink-0" />
         <div className="flex-shrink-0">
           <h1 className="text-sm font-bold text-white leading-tight">Expiry Analysis</h1>
-          <p className="text-xs text-zinc-500 leading-tight">Weekly OC Return Distribution</p>
+          <p className="text-xs text-zinc-500 leading-tight">Weekly OC Return · Fri→Thu pre-Sep 2025 / Wed→Tue from Sep 2025</p>
         </div>
         <div className="flex-1 min-w-0">
           <NavBar />
@@ -404,10 +404,10 @@ export default function ExpiryAnalysis() {
                 <thead>
                   <tr>
                     <th className="text-xs font-bold text-white bg-zinc-800 px-4 py-2.5 text-left">
-                      Start Date (Wed)
+                      Start Date (Fri/Wed)
                     </th>
                     <th className="text-xs font-bold text-white bg-zinc-800 px-4 py-2.5 text-left">
-                      End Date (Tue)
+                      End Date / Expiry (Thu/Tue)
                     </th>
                     <th className="text-xs font-bold text-white bg-zinc-800 px-4 py-2.5 text-right">
                       Weekly Return %
@@ -422,11 +422,11 @@ export default function ExpiryAnalysis() {
                     const isUp = w.status === 'upside';
                     return (
                       <tr
-                        key={w.tueDate}
+                        key={w.endDate}
                         className={i % 2 === 0 ? 'bg-zinc-900' : 'bg-zinc-950'}
                       >
-                        <td className="px-4 py-2 font-mono text-zinc-300">{fmtDate(w.wedDate)}</td>
-                        <td className="px-4 py-2 font-mono text-zinc-300">{fmtDate(w.tueDate)}</td>
+                        <td className="px-4 py-2 font-mono text-zinc-300">{fmtDate(w.startDate)}</td>
+                        <td className="px-4 py-2 font-mono text-zinc-300">{fmtDate(w.endDate)}</td>
                         <td
                           className={`px-4 py-2 font-mono font-bold text-right ${
                             isUp ? 'text-emerald-400' : 'text-red-400'

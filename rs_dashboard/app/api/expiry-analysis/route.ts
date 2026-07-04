@@ -2,12 +2,15 @@ import { NextRequest, NextResponse } from 'next/server';
 import { readNifty50Index } from '@/lib/dataLoader';
 
 export interface WeeklyBucket {
-  wedDate: string;
-  tueDate: string;
-  wedOpen: number;
-  tueClose: number;
+  startDate: string;  // window open date (Fri pre-2025-09-01, Wed from 2025-09-01)
+  endDate: string;    // expiry date     (Thu pre-2025-09-01, Tue from 2025-09-01)
+  startOpen: number;
+  endClose: number;
   returnPct: number;
 }
+
+// SEBI mandated expiry day change: Thursday → Tuesday effective 2025-09-01
+const REGIME_CHANGE_DATE = '2025-09-01';
 
 // 5-minute in-memory cache keyed by startDate+endDate
 const cache = new Map<string, { data: unknown; ts: number }>();
@@ -34,29 +37,32 @@ export async function GET(req: NextRequest) {
       return true;
     });
 
-    // Bucket Wed (open) → Tue (close) weeks
-    // getDay(): 0=Sun 1=Mon 2=Tue 3=Wed 4=Thu 5=Fri 6=Sat
+    // Two regimes (getUTCDay: 0=Sun 1=Mon 2=Tue 3=Wed 4=Thu 5=Fri 6=Sat):
+    //   Old (< 2025-09-01): Fri open (5) → Thu close (4)  [expiry Thursday]
+    //   New (≥ 2025-09-01): Wed open (3) → Tue close (2)  [expiry Tuesday]
     const weeks: WeeklyBucket[] = [];
-    let openBucket: { wedDate: string; wedOpen: number } | null = null;
+    let openBucket: { startDate: string; startOpen: number; regime: 'old' | 'new' } | null = null;
 
     for (const row of filtered) {
-      // Use UTC to avoid TZ-shifting the date string
+      const regime: 'old' | 'new' = row.date < REGIME_CHANGE_DATE ? 'old' : 'new';
+      const openDay  = regime === 'old' ? 5 : 3; // Fri or Wed
+      const closeDay = regime === 'old' ? 4 : 2; // Thu or Tue
       const dayOfWeek = new Date(row.date + 'T00:00:00Z').getUTCDay();
 
-      if (dayOfWeek === 3) {
-        // Wednesday → open a new bucket (replace any previously unclosed one)
-        openBucket = { wedDate: row.date, wedOpen: row.open };
-      } else if (dayOfWeek === 2 && openBucket) {
-        // Tuesday → close the bucket
-        if (openBucket.wedOpen <= 0) {
+      if (dayOfWeek === openDay) {
+        // Open day for this regime — start (or restart) a bucket
+        openBucket = { startDate: row.date, startOpen: row.open, regime };
+      } else if (dayOfWeek === closeDay && openBucket && openBucket.regime === regime) {
+        // Close day, same regime as the open — close the bucket
+        if (openBucket.startOpen <= 0) {
           openBucket = null;
         } else {
-          const raw = ((row.close - openBucket.wedOpen) / openBucket.wedOpen) * 100;
+          const raw = ((row.close - openBucket.startOpen) / openBucket.startOpen) * 100;
           weeks.push({
-            wedDate: openBucket.wedDate,
-            tueDate: row.date,
-            wedOpen: openBucket.wedOpen,
-            tueClose: row.close,
+            startDate: openBucket.startDate,
+            endDate: row.date,
+            startOpen: openBucket.startOpen,
+            endClose: row.close,
             returnPct: Math.round(raw * 100) / 100,
           });
           openBucket = null;
