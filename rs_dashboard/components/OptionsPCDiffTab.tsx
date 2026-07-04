@@ -26,11 +26,30 @@ function fmtOI(n: number): string {
   return n.toLocaleString('en-IN', { maximumFractionDigits: 0 });
 }
 
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const DiffTooltip = ({ active, payload, label }: any) => {
+  if (!active || !payload?.length) return null;
+  const d: number = payload[0]?.payload?.diff ?? 0;
+  return (
+    <div style={{ background: '#09090b', border: '1px solid #3f3f46', borderRadius: 8, padding: '6px 10px', fontSize: 11 }}>
+      <p style={{ color: '#a1a1aa', marginBottom: 4 }}>{label}</p>
+      <p style={{ color: d >= 0 ? '#10b981' : '#ef4444', fontWeight: 700, fontVariantNumeric: 'tabular-nums' }}>
+        {(d >= 0 ? '+' : '') + fmtOI(d)}
+      </p>
+    </div>
+  );
+};
+
 export default function OptionsPCDiffTab({ candles, interval, isLive }: Props) {
-  const data = candles.map(row => ({
-    time: row.time,
-    diff: (row['PE OI'] ?? 0) - (row['CE OI'] ?? 0),
-  }));
+  const data = candles.map(row => {
+    const d = (row['PE OI'] ?? 0) - (row['CE OI'] ?? 0);
+    return {
+      time: row.time,
+      diff: d,
+      pos: Math.max(0, d),
+      neg: Math.min(0, d),
+    };
+  });
 
   const lastRow = candles[candles.length - 1];
   const ceOI    = lastRow?.['CE OI'] ?? 0;
@@ -109,12 +128,12 @@ export default function OptionsPCDiffTab({ candles, interval, isLive }: Props) {
           <AreaChart data={data} margin={{ top: 8, right: 16, left: 0, bottom: 0 }}>
             <defs>
               <linearGradient id="pcDiffGreen" x1="0" y1="0" x2="0" y2="1">
-                <stop offset="5%"  stopColor="#10b981" stopOpacity={0.3} />
-                <stop offset="95%" stopColor="#10b981" stopOpacity={0.02} />
+                <stop offset="5%"  stopColor="#10b981" stopOpacity={0.35} />
+                <stop offset="95%" stopColor="#10b981" stopOpacity={0.04} />
               </linearGradient>
               <linearGradient id="pcDiffRed" x1="0" y1="0" x2="0" y2="1">
-                <stop offset="5%"  stopColor="#ef4444" stopOpacity={0.02} />
-                <stop offset="95%" stopColor="#ef4444" stopOpacity={0.3} />
+                <stop offset="5%"  stopColor="#ef4444" stopOpacity={0.04} />
+                <stop offset="95%" stopColor="#ef4444" stopOpacity={0.35} />
               </linearGradient>
             </defs>
             <CartesianGrid strokeDasharray="3 3" stroke="#27272a" vertical={false} />
@@ -129,24 +148,34 @@ export default function OptionsPCDiffTab({ candles, interval, isLive }: Props) {
               tickLine={false}
               axisLine={false}
               width={62}
+              domain={['auto', 'auto']}
               tickFormatter={v => (Number(v) >= 0 ? '+' : '') + fmtOI(Number(v))}
             />
-            <Tooltip
-              // eslint-disable-next-line @typescript-eslint/no-explicit-any
-              formatter={(v: any) => [(Number(v) >= 0 ? '+' : '') + fmtOI(Number(v)), 'PE − CE OI']}
-              contentStyle={{ background: '#09090b', border: '1px solid #3f3f46', borderRadius: 8, fontSize: 11 }}
-              labelStyle={{ color: '#a1a1aa' }}
-            />
-            <ReferenceLine y={0} stroke="#52525b" strokeWidth={1.5} />
+            <Tooltip content={<DiffTooltip />} cursor={{ stroke: '#3f3f46', strokeWidth: 1 }} />
+            <ReferenceLine y={0} stroke="#71717a" strokeWidth={1} strokeDasharray="4 3" />
+            {/* Positive area — green above zero */}
             <Area
               type="monotone"
-              dataKey="diff"
-              name="PE − CE OI"
-              stroke={diffPos ? '#10b981' : '#ef4444'}
-              strokeWidth={2}
-              fill={diffPos ? 'url(#pcDiffGreen)' : 'url(#pcDiffRed)'}
+              dataKey="pos"
+              stroke="#10b981"
+              strokeWidth={1.5}
+              fill="url(#pcDiffGreen)"
               dot={false}
-              activeDot={{ r: 4, fill: diffPos ? '#10b981' : '#ef4444', strokeWidth: 0 }}
+              activeDot={false}
+              legendType="none"
+              isAnimationActive={false}
+            />
+            {/* Negative area — red below zero */}
+            <Area
+              type="monotone"
+              dataKey="neg"
+              stroke="#ef4444"
+              strokeWidth={1.5}
+              fill="url(#pcDiffRed)"
+              dot={false}
+              activeDot={false}
+              legendType="none"
+              isAnimationActive={false}
             />
           </AreaChart>
         </ResponsiveContainer>
