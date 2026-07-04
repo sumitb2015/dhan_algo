@@ -517,8 +517,8 @@ export default function OptionsCharts() {
           </div>
           )}
 
-          {/* Candle interval (premium / multi-strike tabs, not live) */}
-          {(activeTab === 'premium' || activeTab === 'multistrike') && !isLive && (
+          {/* Candle interval (premium / multi-strike / pcdiff tabs, not live) */}
+          {(activeTab === 'premium' || activeTab === 'multistrike' || activeTab === 'pcdiff') && !isLive && (
             <div className="flex items-center bg-zinc-900 border border-zinc-800 p-0.5 rounded-xl">
               {(['1', '5'] as const).map(s => (
                 <button key={s} onClick={() => setCandleInterval(s)}
@@ -533,8 +533,8 @@ export default function OptionsCharts() {
             </div>
           )}
 
-          {/* Live poll interval (premium / multi-strike tabs) */}
-          {(activeTab === 'premium' || activeTab === 'multistrike') && isLive && (
+          {/* Live poll interval (premium / multi-strike / pcdiff tabs) */}
+          {(activeTab === 'premium' || activeTab === 'multistrike' || activeTab === 'pcdiff') && isLive && (
             <div className="flex items-center bg-zinc-900 border border-zinc-800 p-0.5 rounded-xl">
               {([2, 5, 10] as const).map(s => (
                 <button key={s} onClick={() => setPollInterval(s)}
@@ -549,8 +549,8 @@ export default function OptionsCharts() {
             </div>
           )}
 
-          {/* Start / Stop — premium / multi-strike tabs */}
-          {(activeTab === 'premium' || activeTab === 'multistrike') && (
+          {/* Start / Stop — premium / multi-strike / pcdiff tabs */}
+          {(activeTab === 'premium' || activeTab === 'multistrike' || activeTab === 'pcdiff') && (
             <button
               onClick={isLive ? stopBridge : startBridge}
               disabled={bridgeLoading || !expiry}
@@ -564,7 +564,7 @@ export default function OptionsCharts() {
             </button>
           )}
 
-          {(activeTab === 'premium' || activeTab === 'multistrike') && <StatusBadge status={bridgeStatus.status} />}
+          {(activeTab === 'premium' || activeTab === 'multistrike' || activeTab === 'pcdiff') && <StatusBadge status={bridgeStatus.status} />}
         </div>
       </div>
 
@@ -622,6 +622,54 @@ export default function OptionsCharts() {
             />
           )}
 
+          {/* Strike selector — shared by premium and pcdiff tabs */}
+          {(activeTab === 'premium' || activeTab === 'pcdiff') && (
+            <div className="flex items-center gap-3">
+              <span className="text-xs font-bold text-zinc-300 uppercase tracking-widest whitespace-nowrap">Strike</span>
+              {chainLoading ? (
+                <span className="text-xs text-zinc-400">Loading strikes…</span>
+              ) : strikeKeys.length > 0 ? (
+                <select
+                  value={chartStrike || ''}
+                  onChange={e => setSelectedStrike(Number(e.target.value))}
+                  className="bg-zinc-900 border border-zinc-700 text-zinc-200 text-sm font-semibold
+                             rounded-lg px-3 py-1.5 focus:outline-none focus:border-emerald-500 w-48"
+                >
+                  {visibleStrikes.map(sk => (
+                    <option key={sk} value={sk}>
+                      {fmtNum(sk)}{sk === atm ? '  ← ATM' : ''}
+                    </option>
+                  ))}
+                </select>
+              ) : (
+                <span className="text-xs text-zinc-400">
+                  {expiry ? 'Could not load chain — check auth token' : 'Select an expiry first'}
+                </span>
+              )}
+              {!isLive && selectedStrike && expiry && (
+                <button
+                  onClick={() => fetchCandles(selectedStrike, expiry, candleInterval)}
+                  disabled={candleLoading}
+                  className="px-2.5 py-1.5 text-xs font-semibold rounded-lg border border-zinc-700
+                             bg-zinc-900 text-zinc-400 hover:text-zinc-200 disabled:opacity-50 transition-all"
+                >
+                  {candleLoading ? '…' : 'Refresh'}
+                </button>
+              )}
+              {hasData && (
+                <span className="text-[10px] text-zinc-400 font-medium ml-1">
+                  {chartData.length} candles · {chartSource}
+                </span>
+              )}
+              {isLive && bridgeStatus.last_update && (
+                <div className="flex items-center gap-1.5 text-[10px] text-zinc-400 ml-auto">
+                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+                  updated {fmtTime(bridgeStatus.last_update)}
+                </div>
+              )}
+            </div>
+          )}
+
           {activeTab === 'pcdiff' && (
             <OptionsPCDiffTab
               candles={chartData}
@@ -672,52 +720,6 @@ export default function OptionsCharts() {
               {sub && <p className="text-[10px] text-zinc-400 mt-0.5 font-medium truncate">{sub}</p>}
             </div>
           ))}
-        </div>
-
-        {/* Strike selector */}
-        <div className="flex items-center gap-3">
-          <span className="text-xs font-bold text-zinc-300 uppercase tracking-widest whitespace-nowrap">Strike</span>
-          {chainLoading ? (
-            <span className="text-xs text-zinc-400">Loading strikes…</span>
-          ) : strikeKeys.length > 0 ? (
-            <select
-              value={chartStrike || ''}
-              onChange={e => setSelectedStrike(Number(e.target.value))}
-              className="bg-zinc-900 border border-zinc-700 text-zinc-200 text-sm font-semibold
-                         rounded-lg px-3 py-1.5 focus:outline-none focus:border-emerald-500 w-48"
-            >
-              {visibleStrikes.map(sk => (
-                <option key={sk} value={sk}>
-                  {fmtNum(sk)}{sk === atm ? '  ← ATM' : ''}
-                </option>
-              ))}
-            </select>
-          ) : (
-            <span className="text-xs text-zinc-400">
-              {expiry ? 'Could not load chain — check auth token' : 'Select an expiry first'}
-            </span>
-          )}
-          {!isLive && selectedStrike && expiry && (
-            <button
-              onClick={() => fetchCandles(selectedStrike, expiry, candleInterval)}
-              disabled={candleLoading}
-              className="px-2.5 py-1.5 text-xs font-semibold rounded-lg border border-zinc-700
-                         bg-zinc-900 text-zinc-400 hover:text-zinc-200 disabled:opacity-50 transition-all"
-            >
-              {candleLoading ? '…' : 'Refresh'}
-            </button>
-          )}
-          {hasData && (
-            <span className="text-[10px] text-zinc-400 font-medium ml-1">
-              {chartData.length} candles · {chartSource}
-            </span>
-          )}
-          {isLive && bridgeStatus.last_update && (
-            <div className="flex items-center gap-1.5 text-[10px] text-zinc-400 ml-auto">
-              <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
-              updated {fmtTime(bridgeStatus.last_update)}
-            </div>
-          )}
         </div>
 
         {/* ── Dual charts ────────────────────────────────────────────── */}
