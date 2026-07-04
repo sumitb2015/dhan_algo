@@ -573,8 +573,8 @@ function MAPenetrationTable({ n50, n500 }: { n50: BreadthStats; n500: BreadthSta
 function RSIDistribution({ n50, n500 }: { n50: BreadthStats; n500: BreadthStats }) {
   function buildSegs(stats: BreadthStats) {
     const total = stats.totalScanned;
-    const elevated = stats.rsiAbove60 - stats.rsiOverbought;
-    const neutral = stats.rsiBucket40to70 - elevated;
+    const elevated = Math.max(0, stats.rsiAbove60 - stats.rsiOverbought);
+    const neutral = Math.max(0, stats.rsiBucket40to70 - elevated);
     return [
       { label: '>70 Overbought', count: stats.rsiOverbought, pct: total > 0 ? (stats.rsiOverbought / total) * 100 : 0, bg: 'bg-red-500' },
       { label: '60–70 Elevated', count: elevated, pct: total > 0 ? (elevated / total) * 100 : 0, bg: 'bg-orange-500' },
