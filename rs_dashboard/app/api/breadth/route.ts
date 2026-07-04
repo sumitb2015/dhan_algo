@@ -2,10 +2,36 @@ import { NextResponse } from 'next/server';
 import { readNifty50Index, readStockCSV, readNifty500List } from '@/lib/dataLoader';
 import { OHLCVRow } from '@/lib/rs';
 import { NIFTY50_SYMBOLS } from '@/lib/nifty50';
+import fs from 'fs';
+import path from 'path';
 
 // ─── Cache ────────────────────────────────────────────────────────────────────
 let breadthCache: { data: BreadthResponse; ts: number } | null = null;
 const CACHE_TTL = 5 * 60 * 1000;
+
+// File-based daily cache — survives server restarts, invalidates at midnight IST
+const PROJECT_ROOT = path.resolve(process.cwd(), '..');
+const DAILY_CACHE_FILE = path.join(PROJECT_ROOT, 'debug', 'breadth_daily_cache.json');
+
+function todayIST(): string {
+  return new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' }); // YYYY-MM-DD
+}
+
+function readDailyCache(): BreadthResponse | null {
+  try {
+    if (!fs.existsSync(DAILY_CACHE_FILE)) return null;
+    const raw = JSON.parse(fs.readFileSync(DAILY_CACHE_FILE, 'utf-8'));
+    if (raw.cacheDate === todayIST()) return raw.data as BreadthResponse;
+  } catch { /* ignore corrupt file */ }
+  return null;
+}
+
+function writeDailyCache(data: BreadthResponse): void {
+  try {
+    fs.mkdirSync(path.dirname(DAILY_CACHE_FILE), { recursive: true });
+    fs.writeFileSync(DAILY_CACHE_FILE, JSON.stringify({ cacheDate: todayIST(), data }));
+  } catch { /* non-fatal */ }
+}
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -364,10 +390,19 @@ function deriveRegime(aboveEma200Pct: number): { label: string; color: BreadthRe
 
 export async function GET() {
   try {
+    // 1. 5-minute in-memory cache (fastest)
     if (breadthCache && Date.now() - breadthCache.ts < CACHE_TTL) {
       return NextResponse.json({ success: true, data: breadthCache.data });
     }
 
+    // 2. File-based daily cache — survives server restarts
+    const daily = readDailyCache();
+    if (daily) {
+      breadthCache = { data: daily, ts: Date.now() };
+      return NextResponse.json({ success: true, data: daily });
+    }
+
+    // 3. Full computation (once per day)
     const nifty50Rows = readNifty50Index();
     const nifty500Symbols = readNifty500List();
 
@@ -389,6 +424,7 @@ export async function GET() {
     };
 
     breadthCache = { data, ts: Date.now() };
+    writeDailyCache(data);
     return NextResponse.json({ success: true, data });
   } catch (err) {
     console.error('[/api/breadth] Error:', err);
