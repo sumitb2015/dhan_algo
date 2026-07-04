@@ -201,131 +201,6 @@ function ContractTable({ name, contracts }: { name: string; contracts: ContractS
   );
 }
 
-// ─── OI Trend Chart ───────────────────────────────────────────────────────────
-
-const CHART_COLORS = ['#38bdf8', '#a78bfa', '#fbbf24']; // sky-400, violet-400, amber-400
-
-function OITrendChart({ contracts }: { contracts: ContractStats[] }) {
-  const W = 800, H = 160, padL = 52, padR = 16, padT = 20, padB = 28;
-  const innerW = W - padL - padR;
-  const innerH = H - padT - padB;
-
-  // Union of all date strings across all sparklines
-  const allDates = [...new Set(
-    contracts.flatMap(c => c.sparkline.map(d => d.time.split(' ')[0]))
-  )].sort();
-
-  const allOI = contracts.flatMap(c => c.sparkline.map(d => d.oi)).filter(v => v > 0);
-
-  if (allOI.length === 0) {
-    return (
-      <div className="h-40 flex items-center justify-center text-[11px] text-zinc-600 border border-zinc-800 rounded-xl bg-zinc-950/30">
-        OI data not available — run download_futures_manual.py to fetch OI
-      </div>
-    );
-  }
-
-  const minOI  = Math.min(...allOI) * 0.95;
-  const maxOI  = Math.max(...allOI) * 1.05;
-  const range  = maxOI - minOI || 1;
-
-  const xOf = (dateStr: string): number => {
-    const idx = allDates.indexOf(dateStr);
-    return padL + (idx / Math.max(allDates.length - 1, 1)) * innerW;
-  };
-  const yOf = (oi: number): number =>
-    padT + innerH - ((oi - minOI) / range) * innerH;
-
-  const yTicks = Array.from({ length: 5 }, (_, i) => minOI + (range * i / 4));
-
-  const monthBoundaries = allDates.filter((d, i) =>
-    i === 0 || d.substring(0, 7) !== allDates[i - 1].substring(0, 7)
-  );
-
-  const contractLabels = ['Near', 'Mid', 'Far'];
-
-  return (
-    <div className="rounded-xl border border-zinc-800 overflow-hidden bg-zinc-950/30">
-      <svg viewBox={`0 0 ${W} ${H}`} className="w-full" style={{ height: H }}
-        preserveAspectRatio="none">
-        <defs>
-          {contracts.map((c, i) => (
-            <linearGradient key={c.expiry} id={`oi-fill-${i}`} x1="0" y1="0" x2="0" y2="1">
-              <stop offset="0%" stopColor={CHART_COLORS[i]} stopOpacity="0.12" />
-              <stop offset="100%" stopColor={CHART_COLORS[i]} stopOpacity="0" />
-            </linearGradient>
-          ))}
-        </defs>
-
-        {/* Y grid lines + labels */}
-        {yTicks.map((v, i) => {
-          const y = yOf(v);
-          return (
-            <g key={i}>
-              <line x1={padL} y1={y} x2={W - padR} y2={y}
-                stroke="#27272a" strokeWidth="1" />
-              <text x={padL - 4} y={y + 3.5}
-                textAnchor="end" fontSize="9" fill="#71717a">
-                {fmtLakh(v)}
-              </text>
-            </g>
-          );
-        })}
-
-        {/* X axis: month labels */}
-        {monthBoundaries.map(d => {
-          const x = xOf(d);
-          const label = new Date(d + 'T00:00:00').toLocaleString('en', { month: 'short' });
-          return (
-            <text key={d} x={x} y={H - 6}
-              textAnchor="middle" fontSize="9" fill="#71717a">
-              {label}
-            </text>
-          );
-        })}
-
-        {/* Lines + gradient fills */}
-        {contracts.map((c, i) => {
-          if (!c.oiHasData || c.sparkline.length < 2) return null;
-          const pts = c.sparkline.map(d => {
-            const x = xOf(d.time.split(' ')[0]);
-            const y = yOf(d.oi);
-            return `${x.toFixed(1)},${y.toFixed(1)}`;
-          });
-          const firstX = xOf(c.sparkline[0].time.split(' ')[0]).toFixed(1);
-          const lastX  = xOf(c.sparkline[c.sparkline.length - 1].time.split(' ')[0]).toFixed(1);
-          const bottom = (padT + innerH).toFixed(1);
-          const fillPts = `${firstX},${bottom} ${pts.join(' ')} ${lastX},${bottom}`;
-          return (
-            <g key={c.expiry}>
-              <polygon points={fillPts} fill={`url(#oi-fill-${i})`} />
-              <polyline points={pts.join(' ')} fill="none"
-                stroke={CHART_COLORS[i]} strokeWidth="1.5"
-                strokeLinejoin="round" strokeLinecap="round" />
-            </g>
-          );
-        })}
-
-        {/* Legend (top-right) */}
-        {contracts.map((c, i) => {
-          const legendX = W - padR - 90 * (contracts.length - i);
-          return (
-            <g key={`leg-${c.expiry}`} transform={`translate(${legendX}, ${padT - 10})`}>
-              <circle cx="5" cy="5" r="3.5"
-                fill={CHART_COLORS[i]}
-                fillOpacity={c.oiHasData ? 1 : 0.3} />
-              <text x="13" y="9" fontSize="9"
-                fill={c.oiHasData ? '#d4d4d8' : '#52525b'}>
-                {contractLabels[i] ?? c.label}
-                {!c.oiHasData ? ' (no data)' : ''}
-              </text>
-            </g>
-          );
-        })}
-      </svg>
-    </div>
-  );
-}
 
 // ─── CoC Callout ──────────────────────────────────────────────────────────────
 
@@ -366,7 +241,6 @@ function InstrumentSection({ name, contracts }: { name: string; contracts: Contr
       </div>
       <div className="space-y-3">
         <ContractTable name={name} contracts={contracts} />
-        <OITrendChart contracts={contracts} />
         {name === 'NIFTY' && <CoCCallout contracts={contracts} />}
       </div>
     </section>
