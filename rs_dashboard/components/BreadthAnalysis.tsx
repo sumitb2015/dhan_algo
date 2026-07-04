@@ -511,7 +511,230 @@ function BreadthColumn({ title, subtitle, stats }: { title: string; subtitle: st
   );
 }
 
-// ─── Main component (stub — sections added in Tasks 3–6) ─────────────────────
+// ─── MAPenetrationTable ───────────────────────────────────────────────────────
+
+function MAPenetrationTable({ n50, n500 }: { n50: BreadthStats; n500: BreadthStats }) {
+  const rows = (stats: BreadthStats) => [
+    {
+      label: 'Above SMA 20', count: stats.aboveEma20Count, pct: stats.aboveEma20Pct,
+      signal: stats.aboveEma20Pct > 60 ? 'Short-term broadly bullish' : stats.aboveEma20Pct > 40 ? 'Mixed; watch for expansion' : 'Short-term breadth weak',
+    },
+    {
+      label: 'Above SMA 50', count: stats.aboveEma50Count, pct: stats.aboveEma50Pct,
+      signal: stats.aboveEma50Pct > 55 ? 'Medium-term healthy breadth' : stats.aboveEma50Pct > 40 ? 'Neutral; caution advised' : 'Medium-term deteriorating',
+    },
+    {
+      label: 'Above SMA 200', count: stats.aboveEma200Count, pct: stats.aboveEma200Pct,
+      signal: stats.aboveEma200Pct >= 60 ? 'Structural bull' : stats.aboveEma200Pct >= 50 ? 'Cautiously positive' : stats.aboveEma200Pct >= 40 ? 'Transition zone' : 'Structural bear',
+    },
+  ];
+
+  return (
+    <div>
+      <div className="text-xs font-bold text-zinc-400 uppercase tracking-widest mb-3">MA Penetration Detail</div>
+      <div className="grid grid-cols-2 gap-4">
+        {([['NIFTY 50 STOCKS', n50], ['NIFTY 500 STOCKS', n500]] as [string, BreadthStats][]).map(([label, stats]) => (
+          <SectionCard key={label}>
+            <CardHeader title={label} subtitle="Simple moving average penetration" />
+            <div className="overflow-x-auto">
+              <table className="w-full">
+                <thead>
+                  <tr className="bg-zinc-800">
+                    {['Indicator', 'Count', '% Universe', 'Below', 'Signal'].map(h => (
+                      <th key={h} className="text-left px-3 py-2 text-xs font-bold text-white uppercase tracking-widest border-b border-zinc-700">{h}</th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {rows(stats).map(row => {
+                    const rowBg = row.pct >= 60 ? 'bg-emerald-950/40' : row.pct < 40 ? 'bg-red-950/40' : '';
+                    return (
+                      <tr key={row.label} className={`border-b border-zinc-800/50 ${rowBg}`}>
+                        <td className="px-3 py-2.5 text-xs text-zinc-300">{row.label}</td>
+                        <td className={`px-3 py-2.5 text-sm font-bold tabular-nums ${pctSignalClass(row.pct)}`}>{row.count}</td>
+                        <td className={`px-3 py-2.5 text-sm font-bold tabular-nums ${pctSignalClass(row.pct)}`}>{row.pct}%</td>
+                        <td className="px-3 py-2.5 text-xs text-zinc-500">{stats.totalScanned - row.count} ({(100 - row.pct).toFixed(1)}%)</td>
+                        <td className="px-3 py-2.5 text-xs text-zinc-400">{row.signal}</td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          </SectionCard>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// ─── RSIDistribution ──────────────────────────────────────────────────────────
+
+function RSIDistribution({ n50, n500 }: { n50: BreadthStats; n500: BreadthStats }) {
+  function buildSegs(stats: BreadthStats) {
+    const total = stats.totalScanned;
+    const elevated = stats.rsiAbove60 - stats.rsiOverbought;
+    const neutral = stats.rsiBucket40to70 - elevated;
+    return [
+      { label: '>70 Overbought', count: stats.rsiOverbought, pct: total > 0 ? (stats.rsiOverbought / total) * 100 : 0, bg: 'bg-red-500' },
+      { label: '60–70 Elevated', count: elevated, pct: total > 0 ? (elevated / total) * 100 : 0, bg: 'bg-orange-500' },
+      { label: '40–60 Neutral', count: neutral, pct: total > 0 ? (neutral / total) * 100 : 0, bg: 'bg-zinc-600' },
+      { label: '<40 Oversold', count: stats.rsiOversold, pct: total > 0 ? (stats.rsiOversold / total) * 100 : 0, bg: 'bg-emerald-500' },
+    ];
+  }
+
+  return (
+    <div>
+      <div className="text-xs font-bold text-zinc-400 uppercase tracking-widest mb-3">
+        <Tooltip label="RSI Distribution (14-Period)" content="Wilder RSI computed over trailing 60 closes per stock. Buckets: >70 overbought, 60–70 elevated, 40–60 neutral, <40 oversold." />
+      </div>
+      <div className="grid grid-cols-2 gap-4">
+        {([['NIFTY 50 STOCKS', n50], ['NIFTY 500 STOCKS', n500]] as [string, BreadthStats][]).map(([label, stats]) => {
+          const segs = buildSegs(stats);
+          return (
+            <SectionCard key={label}>
+              <CardHeader title={label} subtitle="RSI zone breakdown" />
+              <div className="px-4 py-4">
+                <div className="h-10 flex rounded overflow-hidden gap-px mb-4">
+                  {segs.map(seg => (
+                    <div
+                      key={seg.label}
+                      className={`${seg.bg} flex items-center justify-center`}
+                      style={{ width: `${seg.pct}%`, minWidth: seg.pct > 0 ? 2 : 0 }}
+                    >
+                      {seg.pct > 8 && (
+                        <span className="text-xs text-white font-bold">{seg.pct.toFixed(0)}%</span>
+                      )}
+                    </div>
+                  ))}
+                </div>
+                <div className="grid grid-cols-2 gap-y-2">
+                  {segs.map(seg => (
+                    <div key={seg.label} className="flex items-center justify-between pr-4">
+                      <div className="flex items-center gap-1.5">
+                        <div className={`w-2 h-2 rounded-sm flex-shrink-0 ${seg.bg}`} />
+                        <span className="text-xs text-zinc-400">{seg.label}</span>
+                      </div>
+                      <span className="text-xs font-semibold tabular-nums text-zinc-200">
+                        {seg.count} <span className="text-zinc-500">({seg.pct.toFixed(1)}%)</span>
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </SectionCard>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+// ─── Extremes52W ──────────────────────────────────────────────────────────────
+
+function Extremes52W({ n50, n500 }: { n50: BreadthStats; n500: BreadthStats }) {
+  function Panel({ stats, label }: { stats: BreadthStats; label: string }) {
+    const total = stats.totalScanned;
+    const highPct = total > 0 ? (stats.new52WHighCount / total) * 100 : 0;
+    const lowPct = total > 0 ? (stats.new52WLowCount / total) * 100 : 0;
+    const ratio = stats.new52WLowCount > 0 ? stats.new52WHighCount / stats.new52WLowCount : stats.new52WHighCount;
+    const ratioClass = ratio >= 2 ? 'text-emerald-400' : ratio >= 1 ? 'text-yellow-400' : 'text-red-400';
+    const ratioLabel = ratio >= 2 ? 'Bullish — highs dominating' : ratio >= 1 ? 'Slightly bullish' : ratio >= 0.5 ? 'Slightly bearish' : 'Bearish — lows dominating';
+
+    return (
+      <SectionCard>
+        <CardHeader title={label} subtitle="Within 0.5% of 52-week extreme" />
+        <div className="px-4 py-4 space-y-4">
+          <div>
+            <div className="flex justify-between mb-1.5">
+              <Tooltip label="New 52W Highs" content="Stocks within 0.5% of their 52-week high. Formula: (close − high52W) / high52W ≥ −0.005." />
+              <span className="text-emerald-400 text-sm font-semibold tabular-nums">
+                {stats.new52WHighCount} <span className="text-zinc-500 text-xs">({highPct.toFixed(1)}%)</span>
+              </span>
+            </div>
+            <div className="h-2 bg-zinc-800 rounded-full">
+              <div className="h-full bg-emerald-500 rounded-full" style={{ width: `${highPct}%` }} />
+            </div>
+          </div>
+
+          <div>
+            <div className="flex justify-between mb-1.5">
+              <Tooltip label="New 52W Lows" content="Stocks within 0.5% of their 52-week low. Formula: (close − low52W) / low52W ≤ 0.005." />
+              <span className="text-red-400 text-sm font-semibold tabular-nums">
+                {stats.new52WLowCount} <span className="text-zinc-500 text-xs">({lowPct.toFixed(1)}%)</span>
+              </span>
+            </div>
+            <div className="h-2 bg-zinc-800 rounded-full">
+              <div className="h-full bg-red-500 rounded-full" style={{ width: `${lowPct}%` }} />
+            </div>
+          </div>
+
+          <div className="pt-3 border-t border-zinc-800">
+            <Tooltip
+              label="H/L Ratio"
+              content="New 52W Highs ÷ New 52W Lows. Positive divergence: N50 highs dominate while N500 shows fewer — signals narrow market leadership."
+              scale="≥2 bullish · ≥1 slightly bullish · <0.5 bearish"
+            />
+            <div className={`text-2xl font-bold tabular-nums mt-1 ${ratioClass}`}>
+              {stats.new52WLowCount > 0 ? ratio.toFixed(2) + 'x' : `${stats.new52WHighCount}H / 0L`}
+            </div>
+            <div className={`text-xs mt-0.5 ${ratioClass}`}>{ratioLabel}</div>
+          </div>
+        </div>
+      </SectionCard>
+    );
+  }
+
+  return (
+    <div>
+      <div className="text-xs font-bold text-zinc-400 uppercase tracking-widest mb-3">52-Week Extremes</div>
+      <div className="grid grid-cols-2 gap-4">
+        <Panel stats={n50} label="NIFTY 50 STOCKS" />
+        <Panel stats={n500} label="NIFTY 500 STOCKS" />
+      </div>
+    </div>
+  );
+}
+
+// ─── RegimeGuide ──────────────────────────────────────────────────────────────
+
+function RegimeGuide({ activeColor }: { activeColor: BreadthResponse['regimeColor'] }) {
+  return (
+    <SectionCard>
+      <CardHeader title="REGIME INTERPRETATION GUIDE" subtitle="Breadth-derived market regime thresholds — based on Nifty 500 % above 200d SMA" />
+      <div className="overflow-x-auto">
+        <table className="w-full">
+          <thead>
+            <tr className="bg-zinc-800">
+              {['Regime', 'Condition (Nifty 500)', 'Trading Action'].map(h => (
+                <th key={h} className="text-left px-4 py-2.5 text-xs font-bold text-white uppercase tracking-widest border-b border-zinc-700">{h}</th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {(Object.entries(REGIME_META) as [BreadthResponse['regimeColor'], typeof REGIME_META[keyof typeof REGIME_META]][]).map(([key, meta]) => {
+              const isActive = key === activeColor;
+              return (
+                <tr
+                  key={key}
+                  className={`border-b border-zinc-800/50 border-l-4 ${isActive ? `${meta.bg} ${meta.accent}` : 'border-l-transparent'}`}
+                >
+                  <td className={`px-4 py-3 text-sm font-semibold ${isActive ? meta.text : 'text-zinc-600'}`}>
+                    {isActive && <span className="mr-1.5">▶</span>}{meta.label}
+                  </td>
+                  <td className={`px-4 py-3 text-sm ${isActive ? 'text-zinc-200' : 'text-zinc-600'}`}>{meta.condition}</td>
+                  <td className={`px-4 py-3 text-sm ${isActive ? 'text-zinc-300' : 'text-zinc-700'}`}>{meta.action}</td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+    </SectionCard>
+  );
+}
+
+// ─── Main component ───────────────────────────────────────────────────────────
 
 export default function BreadthAnalysis() {
   const [data, setData] = useState<BreadthResponse | null>(null);
@@ -586,7 +809,6 @@ export default function BreadthAnalysis() {
         </div>
       )}
 
-      {/* Content — populated in Tasks 3–6 */}
       {data && (
         <main className="flex-1 overflow-y-auto">
           <RegimeBanner data={data} />
@@ -597,6 +819,11 @@ export default function BreadthAnalysis() {
               <BreadthColumn title="NIFTY 50 STOCKS" subtitle="50 constituents" stats={data.nifty50Breadth} />
               <BreadthColumn title="NIFTY 500 STOCKS" subtitle="500 universe" stats={data.nifty500Breadth} />
             </div>
+
+            <MAPenetrationTable n50={data.nifty50Breadth} n500={data.nifty500Breadth} />
+            <RSIDistribution n50={data.nifty50Breadth} n500={data.nifty500Breadth} />
+            <Extremes52W n50={data.nifty50Breadth} n500={data.nifty500Breadth} />
+            <RegimeGuide activeColor={data.regimeColor} />
           </div>
         </main>
       )}
