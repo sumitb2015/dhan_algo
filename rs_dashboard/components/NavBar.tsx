@@ -1,29 +1,75 @@
 'use client';
 import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
+import { cn } from '@/lib/utils';
+import {
+  TrendingUp,
+  Layers,
+  Activity,
+  Cpu,
+  Briefcase,
+  ChevronDown,
+} from 'lucide-react';
+import {
+  DropdownMenu,
+  DropdownMenuTrigger,
+  DropdownMenuContent,
+  DropdownMenuItem,
+} from './ui/dropdown-menu';
 
-const NAV_LINKS = [
-  { href: '/', label: 'RS Scanner' },
-  { href: '/movers', label: 'Movers' },
-  { href: '/movers-plus', label: 'Movers+' },
-  { href: '/scanner', label: 'Scanner' },
-  { href: '/normalized', label: 'Charts' },
-  { href: '/breadth', label: 'Breadth' },
-  { href: '/diffusion', label: 'Diffusion' },
-  { href: '/futures', label: 'Futures' },
-  { href: '/distribution', label: 'Distribution' },
-  { href: '/live', label: 'Live' },
-  { href: '/strategies', label: 'Strategies' },
-  { href: '/strategies-plus', label: 'Strategies+' },
-  { href: '/portfolio', label: 'Portfolio' },
-  { href: '/portfolio-new', label: 'Portfolio+' },
-  { href: '/reports', label: 'Reports' },
-  { href: '/performance', label: 'Performance' },
-  { href: '/rrg', label: 'RRG' },
-  { href: '/options', label: 'Options' },
-  { href: '/iv-charts', label: 'IV Charts' },
-  { href: '/scalper', label: 'Scalper' },
+const NAV_GROUPS = [
+  {
+    label: 'Equity',
+    icon: TrendingUp,
+    links: [
+      { href: '/', label: 'RS Scanner', desc: 'Relative strength scanner vs Nifty index' },
+      { href: '/scanner', label: 'Scanner', desc: 'Custom criteria and queries scanner' },
+      { href: '/movers', label: 'Movers', desc: 'Top gainers, losers & volume breakouts' },
+      { href: '/movers-plus', label: 'Movers+', desc: 'Multi-timeframe activity dashboard' },
+      { href: '/rrg', label: 'RRG', desc: 'Relative Rotation Graphs & sector trends' },
+      { href: '/normalized', label: 'Charts', desc: 'Multi-asset normalized charts comparisons' },
+    ],
+  },
+  {
+    label: 'Derivatives',
+    icon: Layers,
+    links: [
+      { href: '/futures', label: 'Futures', desc: 'OI buildup & short/long coverage analysis' },
+      { href: '/options', label: 'Options', desc: 'Max pain, PCR & live options chain' },
+      { href: '/iv-charts', label: 'IV Charts', desc: 'Implied Volatility history & skew' },
+      { href: '/scalper', label: 'Scalper', desc: 'Multi-window active trading & scalping order ticket' },
+    ],
+  },
+  {
+    label: 'Market Health',
+    icon: Activity,
+    links: [
+      { href: '/breadth', label: 'Breadth', desc: 'Market index moving average breadth status' },
+      { href: '/diffusion', label: 'Diffusion', desc: 'Diffusion index indicators & trend line charts' },
+      { href: '/distribution', label: 'Distribution', desc: 'Returns frequency & statistical distribution' },
+      { href: '/live', label: 'Live', desc: 'Live ticking market breadth & indexes' },
+    ],
+  },
+  {
+    label: 'Algo',
+    icon: Cpu,
+    links: [
+      { href: '/strategies', label: 'Strategies', desc: 'Automated execution control panel' },
+      { href: '/strategies-plus', label: 'Strategies+', desc: 'Advanced multi-leg algorithm inputs' },
+    ],
+  },
+  {
+    label: 'Portfolio',
+    icon: Briefcase,
+    links: [
+      { href: '/portfolio', label: 'Portfolio', desc: 'Live positions, P&L & margin monitoring' },
+      { href: '/portfolio-new', label: 'Portfolio+', desc: 'Multi-account advanced tracker & assets' },
+      { href: '/performance', label: 'Performance', desc: 'Historical backtests & drawdown statistics' },
+      { href: '/reports', label: 'Reports', desc: 'Trade journals & execution logs' },
+    ],
+  },
 ];
+
 
 export default function NavBar() {
   const pathname = usePathname();
@@ -34,26 +80,77 @@ export default function NavBar() {
     router.push('/login');
   }
 
+  const isGroupActive = (group: typeof NAV_GROUPS[0]) => {
+    return group.links.some(link => link.href === pathname);
+  };
+
   return (
-    <div className="flex items-center bg-zinc-900/80 border border-zinc-800 p-0.5 rounded-xl flex-wrap">
-      {NAV_LINKS.map(({ href, label }) =>
-        pathname === href ? (
-          <span key={href} className="px-3 py-1.5 text-xs font-bold rounded-lg bg-emerald-500/10 text-emerald-300 border border-emerald-500/30">
-            {label}
-          </span>
-        ) : (
-          <Link key={href} href={href} className="px-3 py-1.5 text-xs font-bold rounded-lg text-zinc-300 hover:text-white transition-all">
-            {label}
-          </Link>
-        )
-      )}
-      <span className="w-px h-4 bg-zinc-700 mx-1 shrink-0" />
+    <div className="flex items-center bg-zinc-950/40 backdrop-blur-md border border-zinc-850 p-1 rounded-xl flex-wrap gap-1 shadow-lg shadow-black/30">
+      {NAV_GROUPS.map((group) => {
+        const Icon = group.icon;
+        const active = isGroupActive(group);
+        return (
+          <DropdownMenu key={group.label}>
+            <DropdownMenuTrigger
+              render={
+                <button
+                  className={cn(
+                    "flex items-center gap-1.5 px-3 py-1.8 text-xs font-bold rounded-lg transition-all duration-200 outline-none border cursor-pointer select-none",
+                    active
+                      ? "bg-emerald-500/10 text-emerald-300 border-emerald-500/30 shadow-[0_0_12px_rgba(16,185,129,0.04)]"
+                      : "border-transparent text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800/40 hover:border-zinc-800/30"
+                  )}
+                />
+              }
+            >
+              <Icon className={cn("h-3.5 w-3.5 transition-colors duration-200", active ? "text-emerald-400" : "text-zinc-400")} />
+              <span>{group.label}</span>
+              <ChevronDown className="h-3 w-3 opacity-55 transition-transform duration-200 group-hover:translate-y-0.5" />
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="start" className="min-w-[240px] max-w-[280px] bg-zinc-950/95 backdrop-blur-xl border border-zinc-800/80 rounded-xl shadow-2xl p-1.5 gap-1 flex flex-col z-50">
+              {group.links.map((link) => {
+                const isLinkActive = pathname === link.href;
+                return (
+                  <DropdownMenuItem
+                    key={link.href}
+                    render={
+                      <Link
+                        href={link.href}
+                        className="w-full flex flex-col items-start text-left cursor-pointer p-2 transition-all duration-150 rounded-lg"
+                      />
+                    }
+                    className={cn(
+                      "cursor-pointer text-zinc-300 hover:text-zinc-100 hover:bg-zinc-900",
+                      isLinkActive && "bg-emerald-500/10 text-emerald-300 hover:text-emerald-300 hover:bg-emerald-500/12 focus:bg-emerald-500/12 focus:text-emerald-300"
+                    )}
+                  >
+                    <div className="flex items-center justify-between w-full">
+                      <span className={cn("text-xs font-bold transition-colors", isLinkActive ? "text-emerald-300" : "text-zinc-200")}>
+                        {link.label}
+                      </span>
+                      {isLinkActive && <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 animate-pulse" />}
+                    </div>
+                    {link.desc && (
+                      <span className={cn("text-[10px] font-normal leading-tight mt-0.5 block transition-colors", isLinkActive ? "text-emerald-400/70" : "text-zinc-400")}>
+                        {link.desc}
+                      </span>
+                    )}
+                  </DropdownMenuItem>
+                );
+              })}
+            </DropdownMenuContent>
+          </DropdownMenu>
+        );
+      })}
+      <span className="w-px h-5 bg-zinc-850 mx-1 shrink-0" />
       <button
         onClick={handleDisconnect}
-        className="px-2.5 py-1 text-xs font-medium rounded-lg text-zinc-400 hover:text-red-400 hover:bg-zinc-800 transition-colors whitespace-nowrap"
+        className="px-3 py-1.8 text-xs font-semibold rounded-lg text-zinc-400 hover:text-red-400 hover:bg-red-500/10 border border-transparent hover:border-red-500/20 active:scale-[0.98] transition-all duration-200 whitespace-nowrap cursor-pointer"
       >
         Disconnect
       </button>
     </div>
   );
 }
+
+
