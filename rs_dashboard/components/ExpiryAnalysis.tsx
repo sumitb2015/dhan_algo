@@ -60,6 +60,7 @@ function computeBoundaries(
   probability: number,
 ): { lower: number; upper: number } {
   if (returnPcts.length === 0) return { lower: 0, upper: 0 };
+  if (returnPcts.length === 1) return { lower: returnPcts[0], upper: returnPcts[0] };
   const sorted = [...returnPcts].sort((a, b) => a - b);
   const n = sorted.length;
   const tail = (1 - probability) / 2;
@@ -81,7 +82,7 @@ function CustomTooltip({ active, payload }: { active?: boolean; payload?: { payl
   const d = payload[0].payload;
   const color =
     d.status === 'upside' ? '#34d399' : d.status === 'downside' ? '#f87171' : '#71717a';
-  const sign = d.returnPct >= 0 ? '+' : '';
+  const signChar = d.returnPct >= 0 ? '+' : '';
   const label =
     d.status === 'within' ? 'Within boundary' : d.status + ' outlier';
   return (
@@ -90,7 +91,7 @@ function CustomTooltip({ active, payload }: { active?: boolean; payload?: { payl
         {fmtDate(d.wedDate)} → {fmtDate(d.tueDate)}
       </div>
       <div style={{ color }} className="font-mono font-bold text-sm">
-        {sign}{d.returnPct.toFixed(2)}%
+        {signChar}{d.returnPct.toFixed(2)}%
       </div>
       <div className="text-zinc-500 capitalize mt-0.5">{label}</div>
     </div>
@@ -427,8 +428,8 @@ export default function ExpiryAnalysis() {
                         key={w.tueDate}
                         className={i % 2 === 0 ? 'bg-zinc-900' : 'bg-zinc-950'}
                       >
-                        <td className="px-4 py-2 font-mono text-zinc-300">{w.wedDate}</td>
-                        <td className="px-4 py-2 font-mono text-zinc-300">{w.tueDate}</td>
+                        <td className="px-4 py-2 font-mono text-zinc-300">{fmtDate(w.wedDate)}</td>
+                        <td className="px-4 py-2 font-mono text-zinc-300">{fmtDate(w.tueDate)}</td>
                         <td
                           className={`px-4 py-2 font-mono font-bold text-right ${
                             isUp ? 'text-emerald-400' : 'text-red-400'
