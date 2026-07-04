@@ -84,12 +84,13 @@ def fetch_chunk(url: str, headers: dict, security_id: str, segment: str,
 
 
 def fetch_daily_chunk(url: str, headers: dict, security_id: str, segment: str,
-                      from_date: str, to_date: str) -> pd.DataFrame:
+                      from_date: str, to_date: str,
+                      instrument: str = "FUTIDX") -> pd.DataFrame:
     """Fetch daily OHLCV + OI from the Dhan v2/charts/historical endpoint."""
     payload = {
         "securityId": security_id,
         "exchangeSegment": segment,
-        "instrument": "FUTIDX",
+        "instrument": instrument,
         "oi": True,
         "fromDate": from_date,
         "toDate":   to_date,
@@ -265,8 +266,18 @@ def fetch_all_quotes(helper: DhanHelper, security_ids: list) -> dict:
     return quotes
 
 
-def download_futstk_oi_snapshot(helper: DhanHelper, url: str, headers: dict, save_dir: str):
-    """Fetch near-month FUTSTK daily OI for all F&O stocks and write a classification snapshot."""
+def download_futstk_oi_snapshot(helper: DhanHelper, daily_url: str, headers: dict, save_dir: str):
+    """
+    Fetch near-month FUTSTK daily OI for all F&O stocks and write a classification snapshot.
+
+    Strategy:
+      - oi_today  / close_today  = last row in the daily historical API for today's date
+                                   (or yesterday if today is not yet available).
+      - oi_prev   / close_prev   = the row immediately before that (previous trading day).
+    Using the daily historical API for both days gives reliable, consistent EOD OI values.
+    The old intraday 15:28 hack was unreliable: it returned OI = today's mid-session value
+    for the 'prev' day, causing oi_chg = 0 for every stock.
+    """
     print("\n>>> STOCK FUTURES OI SNAPSHOT <<<")
 
     df_master = helper._load_master_list()
@@ -280,38 +291,12 @@ def download_futstk_oi_snapshot(helper: DhanHelper, url: str, headers: dict, sav
                   .drop_duplicates("UNDERLYING_SYMBOL", keep="first"))
 
     total = len(near_month)
+    today_str  = datetime.now().strftime("%Y-%m-%d")
+    # Look back 10 calendar days to cover weekends/holidays and get at least 2 trading days
+    from_date  = (datetime.now() - timedelta(days=10)).strftime("%Y-%m-%d")
+    to_date    = today_str
     print(f"  Found {total} near-month FUTSTK contracts")
-
-    # Determine previous trading day from NIFTY daily futures file
-    nifty_daily_path = os.path.join(save_dir, "NIFTY_Futures_Daily.csv")
-    today_str = datetime.now().strftime("%Y-%m-%d")
-    prev_trading_day = None
-    if os.path.exists(nifty_daily_path):
-        try:
-            df_nifty = pd.read_csv(nifty_daily_path)
-            dates = df_nifty["Datetime"].tolist()
-            if len(dates) >= 2:
-                if dates[-1] == today_str:
-                    prev_trading_day = dates[-2]
-                else:
-                    prev_trading_day = dates[-1]
-            elif len(dates) == 1:
-                prev_trading_day = dates[0]
-        except Exception as e:
-            print(f"  Error reading NIFTY daily file: {e}")
-
-    if not prev_trading_day:
-        prev_trading_day = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
-    print(f"  Previous trading day determined as: {prev_trading_day}")
-
-    # Fetch live quotes for all near-month contracts in batches
-    security_ids = [str(row["SECURITY_ID"]) for _, row in near_month.iterrows()]
-    print(f"  Fetching live quotes for {total} contracts...")
-    _write_status("Fetching live quotes...")
-    quotes = fetch_all_quotes(helper, security_ids)
-    print(f"  Fetched {len(quotes)} live quotes.")
-
-    intraday_url = "https://api.dhan.co/v2/charts/intraday"
+    print(f"  Fetching daily OI from {from_date} → {to_date} via daily historical API")
 
     rows = []
     skipped = 0
@@ -325,48 +310,28 @@ def download_futstk_oi_snapshot(helper: DhanHelper, url: str, headers: dict, sav
             _write_status(f"Stock futures OI: {i + 1}/{total}...")
             print(f"  [{i + 1}/{total}] processed (last: {symbol})")
 
-        quote = quotes.get(sec_id)
-        if not quote or not isinstance(quote, dict):
+        # Fetch last 10 calendar days of daily data for this contract
+        df_daily = fetch_daily_chunk(
+            daily_url, headers, sec_id, "NSE_FNO", from_date, to_date,
+            instrument="FUTSTK"
+        )
+
+        if df_daily.empty or len(df_daily) < 2:
             skipped += 1
             continue
 
-        close_today = quote.get("last_price", 0)
-        oi_today    = quote.get("oi", 0)
-        if close_today == 0 or oi_today == 0:
+        # Ensure we have OI data
+        if df_daily["OI"].sum() == 0:
             skipped += 1
             continue
 
-        # Get yesterday's close and OI from intraday EOD 1-minute query to bypass Dhan's buggy daily historical charts OI
-        close_prev = None
-        oi_prev    = None
-        try:
-            payload_prev = {
-                "securityId": sec_id,
-                "exchangeSegment": "NSE_FNO",
-                "instrument": "FUTSTK",
-                "interval": 1,
-                "oi": True,
-                "fromDate": f"{prev_trading_day} 15:28:00",
-                "toDate":   f"{prev_trading_day} 15:30:00",
-            }
-            resp = requests.post(intraday_url, headers=headers, json=payload_prev, timeout=10)
-            if resp.status_code == 200:
-                data_prev = resp.json()
-                if isinstance(data_prev, dict) and "close" in data_prev and len(data_prev["close"]) > 0:
-                    close_prev = data_prev["close"][-1]
-                    ois_prev = data_prev.get("open_interest", [])
-                    if ois_prev and len(ois_prev) > 0:
-                        oi_prev = ois_prev[-1]
-        except Exception:
-            pass
+        # Use last two rows: today (or latest available) vs previous trading day
+        close_today = float(df_daily["Close"].iloc[-1])
+        oi_today    = float(df_daily["OI"].iloc[-1])
+        close_prev  = float(df_daily["Close"].iloc[-2])
+        oi_prev     = float(df_daily["OI"].iloc[-2])
 
-        # Fallback to Quote's previous close if intraday query failed
-        if not close_prev:
-            ohlc = quote.get("ohlc", {})
-            close_prev = ohlc.get("close", 0)
-
-        # Skip if we still don't have previous day's close or OI
-        if not close_prev or not oi_prev or close_prev == 0 or oi_prev == 0:
+        if close_prev == 0 or oi_prev == 0 or close_today == 0 or oi_today == 0:
             skipped += 1
             continue
 
@@ -382,6 +347,7 @@ def download_futstk_oi_snapshot(helper: DhanHelper, url: str, headers: dict, sav
         else:
             category = "LONG_UNWINDING"
 
+        data_date = df_daily.index[-1]  # actual date of the latest row used
         rows.append({
             "Symbol":      symbol,
             "Expiry":      expiry,
@@ -390,7 +356,7 @@ def download_futstk_oi_snapshot(helper: DhanHelper, url: str, headers: dict, sav
             "OI":          int(oi_today),
             "OIChgPct":    round(oi_chg_pct, 2),
             "Category":    category,
-            "DataDate":    today_str,
+            "DataDate":    str(data_date),
         })
         time.sleep(0.08)
 
