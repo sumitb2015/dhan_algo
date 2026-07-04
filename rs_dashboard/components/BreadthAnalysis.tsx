@@ -194,6 +194,133 @@ function RegimeBanner({ data }: { data: BreadthResponse }) {
   );
 }
 
+// ─── TrendBadge + helpers ─────────────────────────────────────────────────────
+
+function TrendBadge({ state }: { state: string }) {
+  const cls =
+    state === 'Strong Uptrend' ? 'bg-emerald-950 text-emerald-400 border-emerald-800' :
+    state === 'Uptrend'        ? 'bg-lime-950 text-lime-400 border-lime-800' :
+    state === 'Above EMA 200'  ? 'bg-yellow-950 text-yellow-400 border-yellow-800' :
+    state === 'Below EMA 200'  ? 'bg-orange-950 text-orange-400 border-orange-800' :
+    state === 'Downtrend'      ? 'bg-red-950 text-red-400 border-red-800' :
+    'bg-zinc-800 text-zinc-400 border-zinc-700';
+  return (
+    <span className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-semibold border ${cls}`}>
+      {state}
+    </span>
+  );
+}
+
+function adxInfo(adx: number | null): { label: string; cls: string } {
+  if (adx === null) return { label: 'N/A', cls: 'text-zinc-500' };
+  if (adx >= 40) return { label: 'Strong Trend', cls: 'text-emerald-400' };
+  if (adx >= 25) return { label: 'Trending', cls: 'text-lime-400' };
+  if (adx >= 20) return { label: 'Weak Trend', cls: 'text-yellow-400' };
+  return { label: 'No Trend / Choppy', cls: 'text-orange-400' };
+}
+
+function chopInfo(chop: number | null): { label: string; cls: string } {
+  if (chop === null) return { label: 'N/A', cls: 'text-zinc-500' };
+  if (chop < 38.2) return { label: 'Trending', cls: 'text-emerald-400' };
+  if (chop < 61.8) return { label: 'Transitioning', cls: 'text-yellow-400' };
+  return { label: 'Choppy', cls: 'text-orange-400' };
+}
+
+// ─── IndexColumn ──────────────────────────────────────────────────────────────
+
+function IndexColumn({ stats }: { stats: IndexStats }) {
+  const score = getTrendStrengthScore(stats);
+  const scoreClass = score >= 70 ? 'text-emerald-400' : score >= 55 ? 'text-lime-400' : score >= 45 ? 'text-yellow-400' : score >= 35 ? 'text-orange-400' : 'text-red-400';
+  const scoreLabel = score >= 70 ? 'Strong' : score >= 55 ? 'Good' : score >= 45 ? 'Neutral' : score >= 35 ? 'Weakening' : 'Weak';
+  const adx = adxInfo(stats.adx14);
+  const chop = chopInfo(stats.chopIndex);
+
+  return (
+    <SectionCard>
+      <CardHeader title="NIFTY 50 INDEX" subtitle="Trend analysis — EMA-based" />
+      <div className="px-4 py-2">
+        {/* Close — prominent */}
+        <div className="py-3 border-b border-zinc-800/50">
+          <div className="text-xs text-zinc-500 uppercase tracking-widest mb-1">Close</div>
+          <div className="text-3xl font-bold tabular-nums text-zinc-100">{fmt(stats.close)}</div>
+        </div>
+
+        <MetricRow
+          label="Trend State"
+          tooltip="EMA alignment: Strong Uptrend = Close > EMA20 > EMA50 > EMA200. Each step down removes one condition."
+          tooltipScale="Strong Uptrend · Uptrend · Above EMA200 · Below EMA200 · Downtrend"
+        >
+          <TrendBadge state={stats.trendState} />
+        </MetricRow>
+
+        <MetricRow
+          label="EMA 20"
+          tooltip="20-day exponential moving average. Multiplier k = 2/(20+1) = 0.0952. Index uses EMA; stock breadth uses SMA."
+        >
+          <span>
+            <span className="text-zinc-200 font-semibold tabular-nums">{fmt(stats.ema20)}</span>
+            <span className={`text-xs ml-2 ${valueColorClass(stats.pctVsEma20)}`}>{fmtPct(stats.pctVsEma20)}</span>
+          </span>
+        </MetricRow>
+
+        <MetricRow
+          label="EMA 50"
+          tooltip="50-day EMA — medium-term trend anchor. Index uses EMA; stock breadth uses SMA."
+        >
+          <span>
+            <span className="text-zinc-200 font-semibold tabular-nums">{fmt(stats.ema50)}</span>
+            <span className={`text-xs ml-2 ${valueColorClass(stats.pctVsEma50)}`}>{fmtPct(stats.pctVsEma50)}</span>
+          </span>
+        </MetricRow>
+
+        <MetricRow
+          label="EMA 200"
+          tooltip="200-day EMA — long-term structural trend level. Primary input for regime classification."
+        >
+          <span>
+            <span className="text-zinc-200 font-semibold tabular-nums">{fmt(stats.ema200)}</span>
+            <span className={`text-xs ml-2 ${valueColorClass(stats.pctVsEma200)}`}>{fmtPct(stats.pctVsEma200)}</span>
+          </span>
+        </MetricRow>
+
+        <MetricRow
+          label="ADX (14)"
+          tooltip="Average Directional Index (Wilder smoothing, 14-period). Measures trend strength regardless of direction."
+          tooltipScale=">40 strong trend · 25–40 trending · 20–25 weak · <20 no trend / choppy"
+        >
+          <span>
+            <span className={`font-bold tabular-nums ${adx.cls}`}>{stats.adx14?.toFixed(1) ?? 'N/A'}</span>
+            <span className={`text-xs ml-2 ${adx.cls}`}>{adx.label}</span>
+          </span>
+        </MetricRow>
+
+        <MetricRow
+          label="Chop Index"
+          tooltip="Choppiness Index = 100 × log₁₀(ΣTR₁₄ / (HH₁₄ − LL₁₄)) / log₁₀(14). Below 38.2 = directional trend."
+          tooltipScale="<38.2 trending · 38.2–61.8 transitioning · >61.8 choppy / ranging"
+        >
+          <span>
+            <span className={`font-bold tabular-nums ${chop.cls}`}>{stats.chopIndex?.toFixed(1) ?? 'N/A'}</span>
+            <span className={`text-xs ml-2 ${chop.cls}`}>{chop.label}</span>
+          </span>
+        </MetricRow>
+
+        <MetricRow
+          label="Trend Strength Score"
+          tooltip="Composite: base 50; +20 Strong Uptrend / +10 Uptrend / +5 Above EMA200 / −10 Below EMA200 / −20 Downtrend. +15 if ADX≥25, −5 if ADX<20. Clamped 0–100."
+          tooltipScale="≥70 strong · 55–70 good · 45–55 neutral · 35–45 weakening · <35 bearish"
+        >
+          <span>
+            <span className={`text-xl font-bold tabular-nums ${scoreClass}`}>{score}</span>
+            <span className="text-zinc-500 text-sm">/100</span>
+            <span className={`text-xs ml-2 ${scoreClass}`}>{scoreLabel}</span>
+          </span>
+        </MetricRow>
+      </div>
+    </SectionCard>
+  );
+}
+
 // ─── Main component (stub — sections added in Tasks 3–6) ─────────────────────
 
 export default function BreadthAnalysis() {
@@ -273,8 +400,13 @@ export default function BreadthAnalysis() {
       {data && (
         <main className="flex-1 overflow-y-auto">
           <RegimeBanner data={data} />
-          <div className="px-4 py-6">
-            <p className="text-zinc-500 text-sm">Grid loading…</p>
+          <div className="px-4 py-6 space-y-8">
+            {/* Three-column comparison grid */}
+            <div className="grid grid-cols-3 gap-4">
+              <IndexColumn stats={data.nifty50} />
+              <div className="bg-zinc-900 border border-zinc-800 rounded-lg flex items-center justify-center text-zinc-600 text-sm p-8">N50 Stocks — Task 5</div>
+              <div className="bg-zinc-900 border border-zinc-800 rounded-lg flex items-center justify-center text-zinc-600 text-sm p-8">N500 Stocks — Task 5</div>
+            </div>
           </div>
         </main>
       )}
