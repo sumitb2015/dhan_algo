@@ -94,7 +94,8 @@ def get_dhan_client():
                 
                 if expiry_str:
                     expiry_dt = datetime.fromisoformat(expiry_str)
-                    if datetime.now() > expiry_dt:
+                    now = datetime.now(expiry_dt.tzinfo) if expiry_dt.tzinfo else datetime.now()
+                    if now > expiry_dt:
                         print(f"Cached token expired on {expiry_str}. Forcing re-login.")
                         access_token = None
                     else:
