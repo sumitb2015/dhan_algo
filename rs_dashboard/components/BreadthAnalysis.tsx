@@ -129,6 +129,71 @@ function CardHeader({ title, subtitle }: { title: string; subtitle: string }) {
   );
 }
 
+// ─── Regime Banner ────────────────────────────────────────────────────────────
+
+function RegimeBanner({ data }: { data: BreadthResponse }) {
+  const meta = REGIME_META[data.regimeColor];
+  const b = data.nifty500Breadth;
+
+  const partClass = b.participationScore >= 70 ? 'text-emerald-400' : b.participationScore >= 55 ? 'text-lime-400' : b.participationScore >= 45 ? 'text-yellow-400' : b.participationScore >= 35 ? 'text-orange-400' : 'text-red-400';
+  const partLabel = b.participationScore >= 70 ? 'Strong Participation' : b.participationScore >= 55 ? 'Good Participation' : b.participationScore >= 45 ? 'Neutral' : b.participationScore >= 35 ? 'Weak Participation' : 'Very Weak';
+
+  const adClass = b.advDecRatio >= 2 ? 'text-emerald-400' : b.advDecRatio >= 1 ? 'text-lime-400' : b.advDecRatio >= 0.5 ? 'text-yellow-400' : 'text-red-400';
+  const adLabel = b.advDecRatio >= 3 ? 'Strongly Bullish' : b.advDecRatio >= 2 ? 'Bullish' : b.advDecRatio >= 1 ? 'Neutral-Bull' : b.advDecRatio >= 0.5 ? 'Neutral-Bear' : 'Bearish';
+
+  const netClass = b.netAdvanceDecline >= 0 ? 'text-emerald-400' : 'text-red-400';
+  const netStr = (b.netAdvanceDecline > 0 ? '+' : '') + b.netAdvanceDecline;
+
+  return (
+    <div className={`${meta.bg} ${meta.border} border-b border-l-4 ${meta.accent} px-6 py-5 flex items-center gap-8 flex-wrap`}>
+      <div>
+        <div className="text-xs text-zinc-500 uppercase tracking-widest mb-1">Market Regime · Nifty 500</div>
+        <div className={`text-3xl font-black tracking-wider ${meta.text}`}>{meta.label}</div>
+      </div>
+
+      <div className="w-px h-12 bg-zinc-800 hidden sm:block" />
+
+      <KPITile
+        label="Participation Score"
+        tooltip="Weighted composite of Nifty 500 breadth metrics."
+        tooltipScale="SMA200 pct ×0.40 + SMA50 pct ×0.30 + SMA20 pct ×0.20 + A/D transform ×0.10"
+        value={<>{b.participationScore}<span className="text-base text-zinc-500">/100</span></>}
+        valueClass={partClass}
+        subLabel={partLabel}
+        subClass={partClass}
+      />
+
+      <div className="w-px h-12 bg-zinc-800 hidden sm:block" />
+
+      <KPITile
+        label="A/D Ratio (1W)"
+        tooltip="Advancing ÷ Declining stocks over past 7 calendar days. Nifty 500 universe."
+        tooltipScale="≥3 strongly bullish · ≥2 bullish · ≥1 neutral-bull · <0.5 bearish"
+        value={<>{b.advDecRatio.toFixed(2)}<span className="text-base text-zinc-500">x</span></>}
+        valueClass={adClass}
+        subLabel={adLabel}
+        subClass={adClass}
+      />
+
+      <div className="w-px h-12 bg-zinc-800 hidden sm:block" />
+
+      <KPITile
+        label="Net Advance-Decline"
+        tooltip="Advancing minus Declining stocks (past 7 calendar days). Nifty 500 universe."
+        value={netStr}
+        valueClass={netClass}
+        subLabel={`${b.advancing1W} adv · ${b.declining1W} dec`}
+        subClass="text-zinc-500"
+      />
+
+      <div className="ml-auto text-right hidden lg:block max-w-xs">
+        <div className="text-xs text-zinc-500 uppercase tracking-widest">{meta.condition}</div>
+        <div className="text-sm text-zinc-300 mt-1">{meta.action}</div>
+      </div>
+    </div>
+  );
+}
+
 // ─── Main component (stub — sections added in Tasks 3–6) ─────────────────────
 
 export default function BreadthAnalysis() {
@@ -207,8 +272,9 @@ export default function BreadthAnalysis() {
       {/* Content — populated in Tasks 3–6 */}
       {data && (
         <main className="flex-1 overflow-y-auto">
+          <RegimeBanner data={data} />
           <div className="px-4 py-6">
-            <p className="text-zinc-500 text-sm">Sections loading…</p>
+            <p className="text-zinc-500 text-sm">Grid loading…</p>
           </div>
         </main>
       )}
