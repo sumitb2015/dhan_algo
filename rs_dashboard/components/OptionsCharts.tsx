@@ -13,6 +13,7 @@ import OptionsCumulativeOITab from './OptionsCumulativeOITab';
 import OptionsSmartChainTab from './OptionsSmartChainTab';
 import OptionsIntelligenceTab from './OptionsIntelligenceTab';
 import OptionsVixTab from './OptionsVixTab';
+import OptionsBuildupTab from './OptionsBuildupTab';
 
 // ─── Types ────────────────────────────────────────────────────────
 
@@ -164,7 +165,7 @@ export default function OptionsCharts() {
   const [showVWAP,   setShowVWAP]   = useState(true);
   const [showCELine, setShowCELine] = useState(true);
   const [showPELine, setShowPELine] = useState(true);
-  const [activeTab, setActiveTab] = useState<'premium' | 'skew' | 'oi' | 'cumulative' | 'chain' | 'intelligence' | 'vix'>('premium');
+  const [activeTab, setActiveTab] = useState<'premium' | 'skew' | 'oi' | 'cumulative' | 'chain' | 'intelligence' | 'vix' | 'buildup'>('premium');
 
   // ── Fetch expiries ────────────────────────────────────────────────
   useEffect(() => {
@@ -583,6 +584,7 @@ export default function OptionsCharts() {
               { key: 'chain',        label: 'Smart Chain'   },
               { key: 'intelligence', label: 'Intelligence'  },
               { key: 'vix',         label: 'India VIX'     },
+              { key: 'buildup',     label: 'Buildup'       },
             ] as const).map(({ key, label }) => (
               <button
                 key={key}
@@ -604,6 +606,7 @@ export default function OptionsCharts() {
           {activeTab === 'chain'      && <OptionsSmartChainTab   expiry={expiry} />}
           {activeTab === 'intelligence' && <OptionsIntelligenceTab expiry={expiry} />}
           {activeTab === 'vix'          && <OptionsVixTab />}
+          {activeTab === 'buildup'      && <OptionsBuildupTab expiry={expiry} />}
 
           {activeTab === 'premium' && <>
 
