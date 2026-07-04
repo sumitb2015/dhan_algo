@@ -64,8 +64,8 @@ function QuadrantTable({
               <th className={thCls}    onClick={() => onSort('symbol')}>SYMBOL{arrow('symbol')}</th>
               <th className={thRCls}   onClick={() => onSort('price')}>PRICE{arrow('price')}</th>
               <th className={thRCls}   onClick={() => onSort('priceChgPct')}>CHANGE%{arrow('priceChgPct')}</th>
-              <th className={thRCls}   onClick={() => onSort('oi')}>OI{arrow('oi')}</th>
-              <th className={thRCls}   onClick={() => onSort('oiChgPct')}>CHANGE OI%{arrow('oiChgPct')}</th>
+              <th className={thRCls}   onClick={() => onSort('oi')}>OI (contracts){arrow('oi')}</th>
+              <th className={thRCls}   onClick={() => onSort('oiChgPct')}>OI Δ%{arrow('oiChgPct')}</th>
             </tr>
           </thead>
           <tbody>

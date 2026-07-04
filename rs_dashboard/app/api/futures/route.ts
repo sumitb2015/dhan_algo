@@ -19,6 +19,7 @@ export interface ContractStats {
   oiChange: number;
   oiHasData: boolean;
   basis: number | null;
+  coc: number | null;          // annualised cost of carry %
   sparkline: { time: string; oi: number }[]; // daily OI points (last 30 sessions)
 }
 
@@ -162,6 +163,11 @@ function buildContracts(
     const expiryMs = new Date(expiry).getTime();
     const daysToExpiry = Math.ceil((expiryMs - Date.now()) / 86400000);
 
+    const coc =
+      useSpot && spotClose !== null && spotClose > 0 && daysToExpiry > 0
+        ? ((latestClose - spotClose) / spotClose) * (365 / daysToExpiry) * 100
+        : null;
+
     result.push({
       expiry,
       label: fmtLabel(expiry),
@@ -175,6 +181,7 @@ function buildContracts(
       oiChange: latestOI - prevOI,
       oiHasData: hasOI,
       basis: useSpot && spotClose !== null ? latestClose - spotClose : null,
+      coc,
       sparkline,
     });
   }
