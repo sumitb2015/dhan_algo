@@ -1,0 +1,711 @@
+# Futures Page Redesign Implementation Plan
+
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+
+**Goal:** Replace the current tab-split futures page with a single unified scrollable dashboard — summary strip, per-instrument contract tables with CoC%, multi-line OI trend charts, and OI Buildup — and fix the unlabelled OI unit ambiguity.
+
+**Architecture:** Three files change. The API route gains a `coc` field computed server-side. `FuturesDashboard.tsx` is a full rewrite — no tabs, five components (`SummaryCard`, `ContractTable`, `OITrendChart`, `CoCCallout`, `InstrumentSection`) assembled in a scrollable `<main>`. `OIBuildupDashboard.tsx` gets a column-header label fix only.
+
+**Tech Stack:** Next.js App Router (TypeScript), Tailwind CSS, lucide-react, inline SVG for charts.
+
+## Global Constraints
+
+- No `text-white/70` or any slash-opacity on text — use solid zinc scale (`text-zinc-100` … `text-zinc-600`)
+- Table header row: `bg-zinc-800 text-xs font-bold text-white` (CLAUDE.md convention)
+- `PROJECT_ROOT` in API routes = `path.resolve(process.cwd(), '..')` (one level above `rs_dashboard/`)
+- Dev server: `cd rs_dashboard && npm run dev` → http://localhost:3000
+- No new dependencies — all charts are inline SVG
+
+---
+
+### Task 1: Add `coc` field to the futures API
+
+**Files:**
+- Modify: `rs_dashboard/app/api/futures/route.ts`
+
+**Interfaces:**
+- Produces: `ContractStats.coc: number | null` — consumed by Task 2
+
+- [ ] **Step 1: Add `coc` to the `ContractStats` interface**
+
+In `rs_dashboard/app/api/futures/route.ts`, replace the interface block (lines 9–23):
+
+```ts
+export interface ContractStats {
+  expiry: string;
+  label: string;
+  daysToExpiry: number;
+  price: number;
+  open: number;
+  high: number;
+  low: number;
+  volume: number;
+  oi: number;
+  oiChange: number;
+  oiHasData: boolean;
+  basis: number | null;
+  coc: number | null;          // annualised cost of carry %
+  sparkline: { time: string; oi: number }[];
+}
+```
+
+- [ ] **Step 2: Compute `coc` in `buildContracts`**
+
+Inside `buildContracts`, just before `result.push(...)` (after the `basis` line), add:
+
+```ts
+const coc =
+  useSpot && spotClose !== null && spotClose > 0 && daysToExpiry > 0
+    ? ((latestClose - spotClose) / spotClose) * (365 / daysToExpiry) * 100
+    : null;
+```
+
+Then add `coc` to the `result.push({...})` call — the object now includes `coc` between `basis` and `sparkline`:
+
+```ts
+result.push({
+  expiry,
+  label: fmtLabel(expiry),
+  daysToExpiry,
+  price: latestClose,
+  open: todayRows.length ? todayRows[0].open : 0,
+  high: todayRows.length ? Math.max(...todayRows.map(r => r.high)) : 0,
+  low: todayRows.length ? Math.min(...todayRows.map(r => r.low)) : 0,
+  volume: todayRows.reduce((s, r) => s + r.volume, 0),
+  oi: latestOI,
+  oiChange: latestOI - prevOI,
+  oiHasData: hasOI,
+  basis: useSpot && spotClose !== null ? latestClose - spotClose : null,
+  coc,
+  sparkline,
+});
+```
+
+- [ ] **Step 3: Verify TypeScript compiles**
+
+```powershell
+cd rs_dashboard; npx tsc --noEmit
+```
+
+Expected: no errors (or only pre-existing errors unrelated to this file).
+
+- [ ] **Step 4: Verify API response includes `coc`**
+
+Start dev server (`npm run dev`), then in a browser open:
+`http://localhost:3000/api/futures`
+
+Expected: JSON response where each contract in `NIFTY` has a numeric `coc` field (e.g. `0.82`) and each contract in `BANKNIFTY` has `"coc": null`.
+
+- [ ] **Step 5: Commit**
+
+```powershell
+git add rs_dashboard/app/api/futures/route.ts
+git commit -m "feat(futures): add annualised cost-of-carry (coc) to ContractStats"
+```
+
+---
+
+### Task 2: Rewrite FuturesDashboard.tsx
+
+**Files:**
+- Modify: `rs_dashboard/components/FuturesDashboard.tsx` (full rewrite)
+
+**Interfaces:**
+- Consumes: `ContractStats` (with `coc: number | null` from Task 1), `FuturesResponse`, `FuturesRefreshStatus`
+- Produces: default export `FuturesDashboard` — unchanged signature, consumed by `rs_dashboard/app/futures/page.tsx`
+
+- [ ] **Step 1: Replace the full file**
+
+Overwrite `rs_dashboard/components/FuturesDashboard.tsx` with:
+
+```tsx
+'use client';
+
+import React, { useState, useEffect, useCallback, useRef } from 'react';
+import NavBar from '@/components/NavBar';
+import { Activity, RefreshCw, AlertCircle, Loader2, Download } from 'lucide-react';
+import type { ContractStats, FuturesResponse } from '@/app/api/futures/route';
+import type { FuturesRefreshStatus } from '@/app/api/futures-refresh/route';
+import OIBuildupDashboard from '@/components/OIBuildupDashboard';
+
+// ─── Formatters ───────────────────────────────────────────────────────────────
+
+function fmtPrice(v: number): string {
+  return v.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+
+function fmtLakh(v: number): string {
+  if (v >= 10000000) return (v / 10000000).toFixed(2) + 'Cr';
+  if (v >= 100000)   return (v / 100000).toFixed(1) + 'L';
+  if (v >= 1000)     return (v / 1000).toFixed(1) + 'K';
+  return v.toFixed(0);
+}
+
+function fmtChange(v: number): string {
+  return (v >= 0 ? '+' : '-') + fmtLakh(Math.abs(v));
+}
+
+function fmtBasis(v: number | null): string {
+  if (v === null) return '—';
+  return (v >= 0 ? '+' : '') + v.toFixed(2);
+}
+
+function oiChangeColor(v: number): string {
+  if (v > 0) return 'text-emerald-400';
+  if (v < 0) return 'text-red-400';
+  return 'text-zinc-400';
+}
+
+function basisColor(v: number | null): string {
+  if (v === null) return 'text-zinc-500';
+  if (v > 0) return 'text-emerald-400';
+  if (v < 0) return 'text-red-400';
+  return 'text-zinc-300';
+}
+
+function cocColor(v: number | null): string {
+  if (v === null) return 'text-zinc-500';
+  if (v > 0) return 'text-emerald-400';
+  if (v < 0) return 'text-red-400';
+  return 'text-zinc-300';
+}
+
+function dteColor(days: number): string {
+  if (days <= 5) return 'text-red-400';
+  if (days <= 15) return 'text-amber-400';
+  return 'text-zinc-300';
+}
+
+function dteChipClass(days: number): string {
+  if (days <= 5) return 'bg-red-500/10 text-red-400 border-red-500/20';
+  if (days <= 15) return 'bg-amber-500/10 text-amber-400 border-amber-500/20';
+  return 'bg-zinc-800 text-zinc-400 border-zinc-700';
+}
+
+// ─── SummaryCard ──────────────────────────────────────────────────────────────
+
+function SummaryCard({ name, contracts }: { name: string; contracts: ContractStats[] }) {
+  const near = contracts[0];
+  if (!near) {
+    return (
+      <div className="flex-1 min-w-[260px] rounded-2xl border border-zinc-800 bg-zinc-900/40 p-4 flex items-center justify-center text-zinc-600 text-sm">
+        No {name} data
+      </div>
+    );
+  }
+
+  type OIDir = 'building' | 'unwinding' | 'neutral' | 'nodata';
+  const oiDir: OIDir = !near.oiHasData ? 'nodata'
+    : near.oiChange > 0 ? 'building'
+    : near.oiChange < 0 ? 'unwinding'
+    : 'neutral';
+
+  const oiBadge: Record<OIDir, { label: string; cls: string }> = {
+    building:  { label: '▲ Building',  cls: 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20' },
+    unwinding: { label: '▼ Unwinding', cls: 'bg-red-500/10 text-red-400 border-red-500/20' },
+    neutral:   { label: '— Neutral',   cls: 'bg-zinc-800 text-zinc-400 border-zinc-700' },
+    nodata:    { label: '— No OI',     cls: 'bg-zinc-800 text-zinc-500 border-zinc-700' },
+  };
+  const badge = oiBadge[oiDir];
+
+  return (
+    <div className="flex-1 min-w-[260px] rounded-2xl border border-zinc-800 bg-zinc-900/40 p-4 flex flex-col gap-2">
+      <div className="flex items-center justify-between">
+        <span className="text-sm font-bold text-zinc-100">{name}</span>
+        <span className={`text-[10px] font-semibold px-2 py-0.5 rounded-full border ${dteChipClass(near.daysToExpiry)}`}>
+          {near.daysToExpiry}d to expiry
+        </span>
+      </div>
+      <div className="text-2xl font-bold tabular-nums text-white">{fmtPrice(near.price)}</div>
+      <div className="flex items-center gap-2 flex-wrap">
+        {near.basis !== null && (
+          <span className={`text-[11px] font-semibold px-2 py-0.5 rounded-full border ${
+            near.basis > 0 ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20'
+            : near.basis < 0 ? 'bg-red-500/10 text-red-400 border-red-500/20'
+            : 'bg-zinc-800 text-zinc-400 border-zinc-700'
+          }`}>
+            Basis {fmtBasis(near.basis)}
+          </span>
+        )}
+        <span className={`text-[11px] font-semibold px-2 py-0.5 rounded-full border ${badge.cls}`}>
+          {badge.label}
+        </span>
+      </div>
+    </div>
+  );
+}
+
+// ─── ContractTable ────────────────────────────────────────────────────────────
+
+function ContractTable({ name, contracts }: { name: string; contracts: ContractStats[] }) {
+  const labels = ['Near', 'Mid', 'Far'];
+  const showBasisCoc = name === 'NIFTY';
+  const thCls  = 'px-3 py-2 text-xs font-bold text-white whitespace-nowrap text-left';
+  const thRCls = 'px-3 py-2 text-xs font-bold text-white whitespace-nowrap text-right';
+
+  return (
+    <div className="overflow-x-auto rounded-xl border border-zinc-800">
+      <table className="w-full text-[12px] border-collapse">
+        <thead>
+          <tr className="bg-zinc-800">
+            <th className={thCls}>Contract</th>
+            <th className={thRCls}>Price</th>
+            <th className={thRCls}>Open</th>
+            <th className={thRCls}>High</th>
+            <th className={thRCls}>Low</th>
+            <th className={thRCls}>Volume</th>
+            <th className={thRCls}>OI (contracts)</th>
+            <th className={thRCls}>OI Δ</th>
+            {showBasisCoc && <th className={thRCls}>Basis</th>}
+            {showBasisCoc && <th className={thRCls}>CoC%</th>}
+            <th className={thRCls}>DTE</th>
+          </tr>
+        </thead>
+        <tbody>
+          {contracts.slice(0, 3).map((c, i) => (
+            <tr key={c.expiry} className="border-t border-zinc-800/50 hover:bg-zinc-800/30 transition-colors">
+              <td className="px-3 py-2.5">
+                <span className="font-semibold text-zinc-100">{c.label}</span>
+                <span className="ml-2 text-[10px] text-zinc-500">{labels[i] ?? ''}</span>
+              </td>
+              <td className="px-3 py-2.5 text-right tabular-nums font-bold text-zinc-100">
+                {fmtPrice(c.price)}
+              </td>
+              <td className="px-3 py-2.5 text-right tabular-nums text-zinc-300">
+                {fmtPrice(c.open)}
+              </td>
+              <td className="px-3 py-2.5 text-right tabular-nums text-emerald-400">
+                {fmtPrice(c.high)}
+              </td>
+              <td className="px-3 py-2.5 text-right tabular-nums text-red-400">
+                {fmtPrice(c.low)}
+              </td>
+              <td className="px-3 py-2.5 text-right tabular-nums text-zinc-300">
+                {fmtLakh(c.volume)}
+              </td>
+              <td className="px-3 py-2.5 text-right tabular-nums text-zinc-200">
+                {c.oiHasData ? fmtLakh(c.oi) : '—'}
+              </td>
+              <td className={`px-3 py-2.5 text-right tabular-nums font-semibold ${
+                c.oiHasData ? oiChangeColor(c.oiChange) : 'text-zinc-600'
+              }`}>
+                {c.oiHasData ? fmtChange(c.oiChange) : '—'}
+              </td>
+              {showBasisCoc && (
+                <td className={`px-3 py-2.5 text-right tabular-nums ${basisColor(c.basis)}`}>
+                  {fmtBasis(c.basis)}
+                </td>
+              )}
+              {showBasisCoc && (
+                <td className={`px-3 py-2.5 text-right tabular-nums font-semibold ${cocColor(c.coc)}`}>
+                  {c.coc !== null
+                    ? (c.coc >= 0 ? '+' : '') + c.coc.toFixed(2) + '%'
+                    : '—'}
+                </td>
+              )}
+              <td className={`px-3 py-2.5 text-right tabular-nums ${dteColor(c.daysToExpiry)}`}>
+                {c.daysToExpiry}d
+              </td>
+            </tr>
+          ))}
+          {contracts.length === 0 && (
+            <tr>
+              <td colSpan={showBasisCoc ? 11 : 9}
+                className="px-3 py-8 text-center text-zinc-600 text-[11px]">
+                No contract data
+              </td>
+            </tr>
+          )}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+// ─── OI Trend Chart ───────────────────────────────────────────────────────────
+
+const CHART_COLORS = ['#38bdf8', '#a78bfa', '#fbbf24']; // sky-400, violet-400, amber-400
+
+function OITrendChart({ contracts }: { contracts: ContractStats[] }) {
+  const W = 800, H = 160, padL = 52, padR = 16, padT = 20, padB = 28;
+  const innerW = W - padL - padR;
+  const innerH = H - padT - padB;
+
+  // Union of all date strings across all sparklines
+  const allDates = [...new Set(
+    contracts.flatMap(c => c.sparkline.map(d => d.time.split(' ')[0]))
+  )].sort();
+
+  const allOI = contracts.flatMap(c => c.sparkline.map(d => d.oi)).filter(v => v > 0);
+
+  if (allOI.length === 0) {
+    return (
+      <div className="h-40 flex items-center justify-center text-[11px] text-zinc-600 border border-zinc-800 rounded-xl bg-zinc-950/30">
+        OI data not available — run download_futures_manual.py to fetch OI
+      </div>
+    );
+  }
+
+  const minOI  = Math.min(...allOI) * 0.95;
+  const maxOI  = Math.max(...allOI) * 1.05;
+  const range  = maxOI - minOI || 1;
+
+  const xOf = (dateStr: string): number => {
+    const idx = allDates.indexOf(dateStr);
+    return padL + (idx / Math.max(allDates.length - 1, 1)) * innerW;
+  };
+  const yOf = (oi: number): number =>
+    padT + innerH - ((oi - minOI) / range) * innerH;
+
+  const yTicks = Array.from({ length: 5 }, (_, i) => minOI + (range * i / 4));
+
+  const monthBoundaries = allDates.filter((d, i) =>
+    i === 0 || d.substring(0, 7) !== allDates[i - 1].substring(0, 7)
+  );
+
+  const contractLabels = ['Near', 'Mid', 'Far'];
+
+  return (
+    <div className="rounded-xl border border-zinc-800 overflow-hidden bg-zinc-950/30">
+      <svg viewBox={`0 0 ${W} ${H}`} className="w-full" style={{ height: H }}
+        preserveAspectRatio="none">
+        <defs>
+          {contracts.map((c, i) => (
+            <linearGradient key={c.expiry} id={`oi-fill-${i}`} x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0%" stopColor={CHART_COLORS[i]} stopOpacity="0.12" />
+              <stop offset="100%" stopColor={CHART_COLORS[i]} stopOpacity="0" />
+            </linearGradient>
+          ))}
+        </defs>
+
+        {/* Y grid lines + labels */}
+        {yTicks.map((v, i) => {
+          const y = yOf(v);
+          return (
+            <g key={i}>
+              <line x1={padL} y1={y} x2={W - padR} y2={y}
+                stroke="#27272a" strokeWidth="1" />
+              <text x={padL - 4} y={y + 3.5}
+                textAnchor="end" fontSize="9" fill="#71717a">
+                {fmtLakh(v)}
+              </text>
+            </g>
+          );
+        })}
+
+        {/* X axis: month labels */}
+        {monthBoundaries.map(d => {
+          const x = xOf(d);
+          const label = new Date(d + 'T00:00:00').toLocaleString('en', { month: 'short' });
+          return (
+            <text key={d} x={x} y={H - 6}
+              textAnchor="middle" fontSize="9" fill="#71717a">
+              {label}
+            </text>
+          );
+        })}
+
+        {/* Lines + gradient fills */}
+        {contracts.map((c, i) => {
+          if (!c.oiHasData || c.sparkline.length < 2) return null;
+          const pts = c.sparkline.map(d => {
+            const x = xOf(d.time.split(' ')[0]);
+            const y = yOf(d.oi);
+            return `${x.toFixed(1)},${y.toFixed(1)}`;
+          });
+          const firstX = xOf(c.sparkline[0].time.split(' ')[0]).toFixed(1);
+          const lastX  = xOf(c.sparkline[c.sparkline.length - 1].time.split(' ')[0]).toFixed(1);
+          const bottom = (padT + innerH).toFixed(1);
+          const fillPts = `${firstX},${bottom} ${pts.join(' ')} ${lastX},${bottom}`;
+          return (
+            <g key={c.expiry}>
+              <polygon points={fillPts} fill={`url(#oi-fill-${i})`} />
+              <polyline points={pts.join(' ')} fill="none"
+                stroke={CHART_COLORS[i]} strokeWidth="1.5"
+                strokeLinejoin="round" strokeLinecap="round" />
+            </g>
+          );
+        })}
+
+        {/* Legend (top-right) */}
+        {contracts.map((c, i) => {
+          const legendX = W - padR - 90 * (contracts.length - i);
+          return (
+            <g key={`leg-${c.expiry}`} transform={`translate(${legendX}, ${padT - 10})`}>
+              <circle cx="5" cy="5" r="3.5"
+                fill={CHART_COLORS[i]}
+                fillOpacity={c.oiHasData ? 1 : 0.3} />
+              <text x="13" y="9" fontSize="9"
+                fill={c.oiHasData ? '#d4d4d8' : '#52525b'}>
+                {contractLabels[i] ?? c.label}
+                {!c.oiHasData ? ' (no data)' : ''}
+              </text>
+            </g>
+          );
+        })}
+      </svg>
+    </div>
+  );
+}
+
+// ─── CoC Callout ──────────────────────────────────────────────────────────────
+
+function CoCCallout({ contracts }: { contracts: ContractStats[] }) {
+  const items = contracts
+    .slice(0, 3)
+    .map((c, i) => ({ label: ['Near', 'Mid', 'Far'][i] ?? c.label, coc: c.coc }))
+    .filter(item => item.coc !== null) as { label: string; coc: number }[];
+
+  if (items.length === 0) return null;
+
+  return (
+    <div className="flex items-center gap-6 flex-wrap text-[11px]">
+      {items.map(item => (
+        <span key={item.label} className="flex items-center gap-1">
+          <span className="text-zinc-500">{item.label}-month CoC:</span>
+          <span className={`font-semibold ${cocColor(item.coc)}`}>
+            {(item.coc >= 0 ? '+' : '') + item.coc.toFixed(2)}% p.a.
+          </span>
+          <span className="text-zinc-600">
+            ({item.coc > 0 ? 'contango' : item.coc < 0 ? 'backwardation' : 'at par'})
+          </span>
+        </span>
+      ))}
+    </div>
+  );
+}
+
+// ─── InstrumentSection ────────────────────────────────────────────────────────
+
+function InstrumentSection({ name, contracts }: { name: string; contracts: ContractStats[] }) {
+  return (
+    <section>
+      <div className="flex items-center gap-3 mb-4">
+        <div className="h-5 border-l-2 border-sky-500" />
+        <h2 className="text-sm font-bold text-zinc-100">{name} Futures</h2>
+      </div>
+      <div className="space-y-3">
+        <ContractTable name={name} contracts={contracts} />
+        <OITrendChart contracts={contracts} />
+        {name === 'NIFTY' && <CoCCallout contracts={contracts} />}
+      </div>
+    </section>
+  );
+}
+
+// ─── Main dashboard ───────────────────────────────────────────────────────────
+
+export default function FuturesDashboard() {
+  const [data, setData]         = useState<FuturesResponse | null>(null);
+  const [loading, setLoading]   = useState(true);
+  const [error, setError]       = useState<string | null>(null);
+  const [dlStatus, setDlStatus] = useState<FuturesRefreshStatus | null>(null);
+  const [refreshKey, setRefreshKey] = useState(0);
+  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  const fetchData = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const res  = await fetch('/api/futures');
+      const json: FuturesResponse = await res.json();
+      if (!json.success) throw new Error(json.error ?? 'API error');
+      setData(json);
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : 'Failed to load data');
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  const pollDownload = useCallback(async () => {
+    try {
+      const res  = await fetch('/api/futures-refresh');
+      const json: FuturesRefreshStatus = await res.json();
+      setDlStatus(json);
+      if (!json.running && json.done) {
+        if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; }
+        fetchData();
+        setRefreshKey(k => k + 1);
+      }
+    } catch { /* ignore */ }
+  }, [fetchData]);
+
+  const startDownload = useCallback(async () => {
+    try {
+      const res = await fetch('/api/futures-refresh', { method: 'POST' });
+      if (!res.ok) return;
+      setDlStatus({ running: true, done: false, message: 'Starting…', error: null });
+      if (pollRef.current) clearInterval(pollRef.current);
+      pollRef.current = setInterval(pollDownload, 2000);
+    } catch { /* ignore */ }
+  }, [pollDownload]);
+
+  useEffect(() => {
+    fetchData();
+    pollDownload();
+  }, [fetchData, pollDownload]);
+
+  useEffect(() => () => { if (pollRef.current) clearInterval(pollRef.current); }, []);
+
+  return (
+    <div className="flex flex-col min-h-screen bg-black text-zinc-100">
+
+      {/* Sticky header */}
+      <header className="sticky top-0 w-full border-b border-zinc-900 bg-zinc-950/60 backdrop-blur-md px-5 py-3 flex items-center gap-4 z-20 flex-wrap">
+        <div className="flex items-center gap-3 shrink-0">
+          <div className="h-9 w-9 rounded-xl bg-gradient-to-tr from-sky-600 to-cyan-400 flex items-center justify-center shadow-lg shadow-sky-500/10">
+            <Activity className="h-4 w-4 text-white" />
+          </div>
+          <div>
+            <h1 className="text-base font-bold tracking-tight bg-gradient-to-r from-white via-zinc-200 to-zinc-500 bg-clip-text text-transparent leading-none">
+              Futures Monitor
+            </h1>
+            {data?.dataDate && (
+              <p className="text-[10px] text-zinc-400 font-medium mt-0.5">
+                DATA: {data.dataDate}
+              </p>
+            )}
+          </div>
+        </div>
+
+        <NavBar />
+
+        <div className="ml-auto flex items-center gap-2">
+          {dlStatus?.running ? (
+            <div className="flex items-center gap-1.5 text-[11px] text-sky-400">
+              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              <span>{dlStatus.message || 'Downloading…'}</span>
+            </div>
+          ) : (
+            <button
+              onClick={startDownload}
+              className="flex items-center gap-1.5 px-3 py-1.5 text-[11px] font-semibold rounded-lg border border-sky-500/25 bg-sky-500/10 text-sky-400 hover:bg-sky-500/15 hover:border-sky-500/35 transition-all"
+              title="Download fresh futures data (runs download_futures_manual.py)"
+            >
+              <Download className="h-3 w-3" />
+              Download Data
+            </button>
+          )}
+          <button
+            onClick={fetchData}
+            disabled={loading}
+            className="p-1.5 border border-zinc-800 rounded-lg bg-zinc-900/40 text-zinc-400 hover:text-white transition-all hover:border-zinc-700 disabled:opacity-40"
+            title="Reload from disk"
+          >
+            <RefreshCw className={`h-3.5 w-3.5 ${loading ? 'animate-spin' : ''}`} />
+          </button>
+        </div>
+      </header>
+
+      {/* Body */}
+      <main className="flex-1 px-5 py-6 max-w-screen-2xl mx-auto w-full">
+        {loading ? (
+          <div className="flex items-center justify-center py-32 gap-2 text-zinc-400">
+            <Loader2 className="h-5 w-5 animate-spin" />
+            <span className="text-sm">Loading futures data…</span>
+          </div>
+        ) : error ? (
+          <div className="flex flex-col items-center justify-center py-32 gap-3 text-red-400">
+            <AlertCircle className="h-8 w-8" />
+            <span className="text-sm text-center max-w-md">{error}</span>
+          </div>
+        ) : data ? (
+          <div className="space-y-8">
+
+            {/* Summary strip */}
+            <div className="flex gap-4 flex-wrap">
+              <SummaryCard name="NIFTY"     contracts={data.instruments.NIFTY} />
+              <SummaryCard name="BANKNIFTY" contracts={data.instruments.BANKNIFTY} />
+            </div>
+
+            {/* NIFTY instrument section */}
+            <InstrumentSection name="NIFTY" contracts={data.instruments.NIFTY} />
+
+            {/* BANKNIFTY instrument section */}
+            <InstrumentSection name="BANKNIFTY" contracts={data.instruments.BANKNIFTY} />
+
+            {/* OI Buildup */}
+            <section className="border-t border-zinc-800 pt-6">
+              <div className="flex items-center gap-3 mb-4">
+                <div className="h-5 border-l-2 border-sky-500" />
+                <h2 className="text-sm font-bold text-zinc-100">Stock Futures — OI Buildup</h2>
+              </div>
+              <OIBuildupDashboard refreshKey={refreshKey} />
+            </section>
+
+          </div>
+        ) : null}
+      </main>
+    </div>
+  );
+}
+```
+
+- [ ] **Step 2: Check TypeScript**
+
+```powershell
+cd rs_dashboard; npx tsc --noEmit
+```
+
+Expected: no errors from `FuturesDashboard.tsx`.
+
+- [ ] **Step 3: Open the futures page in a browser**
+
+Navigate to `http://localhost:3000/futures`.
+
+Verify:
+- Header shows "Futures Monitor" + DATA chip, no tabs
+- Two summary cards appear side-by-side (NIFTY and BANKNIFTY)
+- Each summary card shows: price, DTE chip, Basis chip, OI direction badge
+- NIFTY section has a table with columns ending in Basis and CoC%
+- BANKNIFTY section has a table without Basis/CoC% columns
+- OI Trend Chart appears below each table (or shows "OI data not available")
+- CoCCallout text appears below NIFTY chart (if data has `coc` values)
+- OI Buildup section appears at the bottom
+
+- [ ] **Step 4: Commit**
+
+```powershell
+git add rs_dashboard/components/FuturesDashboard.tsx
+git commit -m "feat(futures): unified scrollable dashboard — summary strip, contract tables, OI chart, CoC%"
+```
+
+---
+
+### Task 3: Fix OI column label in OIBuildupDashboard
+
+**Files:**
+- Modify: `rs_dashboard/components/OIBuildupDashboard.tsx`
+
+**Interfaces:**
+- No interface changes — UI-only fix
+
+- [ ] **Step 1: Update column headers**
+
+In `rs_dashboard/components/OIBuildupDashboard.tsx`, in `QuadrantTable`, replace the two `<th>` elements for OI:
+
+Find (around line 67–68):
+```tsx
+<th className={thRCls}   onClick={() => onSort('oi')}>OI{arrow('oi')}</th>
+<th className={thRCls}   onClick={() => onSort('oiChgPct')}>CHANGE OI%{arrow('oiChgPct')}</th>
+```
+
+Replace with:
+```tsx
+<th className={thRCls}   onClick={() => onSort('oi')}>OI (contracts){arrow('oi')}</th>
+<th className={thRCls}   onClick={() => onSort('oiChgPct')}>OI Δ%{arrow('oiChgPct')}</th>
+```
+
+- [ ] **Step 2: Verify in browser**
+
+Navigate to `http://localhost:3000/futures`, scroll to the OI Buildup section.
+
+Verify: the OI column header now reads "OI (contracts)" and the change column reads "OI Δ%".
+
+- [ ] **Step 3: Commit**
+
+```powershell
+git add rs_dashboard/components/OIBuildupDashboard.tsx
+git commit -m "fix(futures): label OI columns as 'OI (contracts)' to remove unit ambiguity"
+```
