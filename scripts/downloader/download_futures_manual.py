@@ -296,7 +296,7 @@ def download_futstk_oi_snapshot(helper: DhanHelper, daily_url: str, headers: dic
     from_date  = (datetime.now() - timedelta(days=10)).strftime("%Y-%m-%d")
     to_date    = today_str
     print(f"  Found {total} near-month FUTSTK contracts")
-    print(f"  Fetching daily OI from {from_date} → {to_date} via daily historical API")
+    print(f"  Fetching daily OI from {from_date} -> {to_date} via daily historical API")
 
     rows = []
     skipped = 0
