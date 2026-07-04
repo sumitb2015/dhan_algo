@@ -166,6 +166,8 @@ def main():
 
     last_print = 0.0
     last_quotes = None
+    last_history_write = 0.0
+    history_ticks: list = []
 
     try:
         while True:
@@ -251,8 +253,24 @@ def main():
                 atomic_write(QUOTES_FILE, current_quotes)
                 last_quotes = current_quotes
 
-            # Print status update to terminal every 10 seconds
             now_ts = time.time()
+
+            # Write history every 2 seconds
+            if now_ts - last_history_write >= 2.0:
+                tick = {
+                    'timestamp': now_iso,
+                    'spot':              round(spot, 2),
+                    'atm':               atm,
+                    'straddle_premium':  straddle,
+                    'strikes':           strikes_data,
+                }
+                history_ticks.append(tick)
+                if len(history_ticks) > MAX_HISTORY:
+                    history_ticks = history_ticks[-MAX_HISTORY:]
+                atomic_write(HISTORY_FILE, {'history': history_ticks})
+                last_history_write = now_ts
+
+            # Print status update to terminal every 10 seconds
             if now_ts - last_print > 10:
                 print(f'[live_options_ws] Spot={spot:.2f} | ATM={atm} | Straddle={straddle:.2f} | Subscribed={n}', flush=True)
                 last_print = now_ts

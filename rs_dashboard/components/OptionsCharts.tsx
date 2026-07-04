@@ -14,6 +14,7 @@ import OptionsSmartChainTab from './OptionsSmartChainTab';
 import OptionsIntelligenceTab from './OptionsIntelligenceTab';
 import OptionsVixTab from './OptionsVixTab';
 import OptionsBuildupTab from './OptionsBuildupTab';
+import OptionsMultiStrikeTab from './OptionsMultiStrikeTab';
 
 // ─── Types ────────────────────────────────────────────────────────
 
@@ -165,7 +166,7 @@ export default function OptionsCharts() {
   const [showVWAP,   setShowVWAP]   = useState(true);
   const [showCELine, setShowCELine] = useState(true);
   const [showPELine, setShowPELine] = useState(true);
-  const [activeTab, setActiveTab] = useState<'premium' | 'skew' | 'oi' | 'cumulative' | 'chain' | 'intelligence' | 'vix' | 'buildup'>('premium');
+  const [activeTab, setActiveTab] = useState<'premium' | 'skew' | 'oi' | 'cumulative' | 'chain' | 'intelligence' | 'vix' | 'buildup' | 'multistrike'>('premium');
 
   // ── Fetch expiries ────────────────────────────────────────────────
   useEffect(() => {
@@ -515,8 +516,8 @@ export default function OptionsCharts() {
           </div>
           )}
 
-          {/* Candle interval (premium tab only, not live) */}
-          {activeTab === 'premium' && !isLive && (
+          {/* Candle interval (premium / multi-strike tabs, not live) */}
+          {(activeTab === 'premium' || activeTab === 'multistrike') && !isLive && (
             <div className="flex items-center bg-zinc-900 border border-zinc-800 p-0.5 rounded-xl">
               {(['1', '5'] as const).map(s => (
                 <button key={s} onClick={() => setCandleInterval(s)}
@@ -531,8 +532,8 @@ export default function OptionsCharts() {
             </div>
           )}
 
-          {/* Live poll interval (premium tab only) */}
-          {activeTab === 'premium' && isLive && (
+          {/* Live poll interval (premium / multi-strike tabs) */}
+          {(activeTab === 'premium' || activeTab === 'multistrike') && isLive && (
             <div className="flex items-center bg-zinc-900 border border-zinc-800 p-0.5 rounded-xl">
               {([2, 5, 10] as const).map(s => (
                 <button key={s} onClick={() => setPollInterval(s)}
@@ -547,8 +548,8 @@ export default function OptionsCharts() {
             </div>
           )}
 
-          {/* Start / Stop — premium tab only */}
-          {activeTab === 'premium' && (
+          {/* Start / Stop — premium / multi-strike tabs */}
+          {(activeTab === 'premium' || activeTab === 'multistrike') && (
             <button
               onClick={isLive ? stopBridge : startBridge}
               disabled={bridgeLoading || !expiry}
@@ -562,7 +563,7 @@ export default function OptionsCharts() {
             </button>
           )}
 
-          {activeTab === 'premium' && <StatusBadge status={bridgeStatus.status} />}
+          {(activeTab === 'premium' || activeTab === 'multistrike') && <StatusBadge status={bridgeStatus.status} />}
         </div>
       </div>
 
@@ -583,8 +584,9 @@ export default function OptionsCharts() {
               { key: 'cumulative',   label: 'Cumulative OI' },
               { key: 'chain',        label: 'Smart Chain'   },
               { key: 'intelligence', label: 'Intelligence'  },
-              { key: 'vix',         label: 'India VIX'     },
-              { key: 'buildup',     label: 'Buildup'       },
+              { key: 'vix',          label: 'India VIX'    },
+              { key: 'buildup',      label: 'Buildup'      },
+              { key: 'multistrike',  label: 'Multi-Strike' },
             ] as const).map(({ key, label }) => (
               <button
                 key={key}
@@ -607,6 +609,16 @@ export default function OptionsCharts() {
           {activeTab === 'intelligence' && <OptionsIntelligenceTab expiry={expiry} />}
           {activeTab === 'vix'          && <OptionsVixTab />}
           {activeTab === 'buildup'      && <OptionsBuildupTab expiry={expiry} />}
+          {activeTab === 'multistrike'  && (
+            <OptionsMultiStrikeTab
+              expiry={expiry}
+              isLive={isLive}
+              quotes={quotes}
+              history={history}
+              candleInterval={candleInterval}
+              atm={atm}
+            />
+          )}
 
           {activeTab === 'premium' && <>
 
