@@ -418,6 +418,21 @@ export function readIndexCSV(meta: IndexMeta): OHLCVRow[] {
       }))
       .sort((a, b) => a.date.localeCompare(b.date));
 
+    // Carry forward/patch today's row so that alignByDate doesn't drop today's data point
+    const todayIST = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
+    const last = parsed.length > 0 ? parsed[parsed.length - 1] : null;
+    if (last && last.date < todayIST) {
+      const todayDay = new Date(todayIST + 'T00:00:00').getDay();
+      if (todayDay >= 1 && todayDay <= 5) {
+        const liveIdx = getTodayQuoteRow(meta.key);
+        if (liveIdx) {
+          parsed.push({ ...liveIdx, date: todayIST });
+        } else {
+          parsed.push({ ...last, date: todayIST });
+        }
+      }
+    }
+
     cacheSet(cacheKey, parsed);
     return parsed;
   } catch {

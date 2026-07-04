@@ -331,10 +331,74 @@ def main():
 
     print(f"\n  Total quotes fetched: {len(all_quotes)}")
 
+    # Map index key in today_quotes.json to security ID in Dhan
+    INDEX_MAP = {
+        "_NIFTY50_INDEX": 13,
+        "_NIFTY500_INDEX": 19,
+        "NIFTY_100": 17,
+        "NIFTY_200": 18,
+        "NIFTY_NEXT50": 38,
+        "NIFTY_MIDCAP100": 37,
+        "NIFTY_SMALLCAP100": 5,
+        "BANKNIFTY": 25,
+        "FINNIFTY": 27,
+        "NIFTYIT": 29,
+        "NIFTY_AUTO": 14,
+        "NIFTY_PHARMA": 32,
+        "NIFTY_FMCG": 28,
+        "NIFTY_METAL": 31,
+        "NIFTY_ENERGY": 42,
+        "NIFTY_INFRA": 43,
+        "NIFTY_REALTY": 34,
+        "NIFTY_PSU_BANK": 33,
+        "NIFTY_PVT_BANK": 15,
+        "NIFTY_MEDIA": 30,
+        "NIFTY_HEALTHCARE": 447,
+        "NIFTY_CONSR_DURBL": 466,
+        "NIFTY_FINSRV25_50": 469,
+        "NIFTY_OIL_GAS": 470,
+        "NIFTY_MIDSML_HLTH": 471,
+        "NIFTY_FINSEREXBNK": 495,
+        "NIFTY_MS_FIN": 819,
+        "NIFTY_MS_IT_TELCM": 821,
+    }
+
+    # Map index key in today_quotes.json to (CSV file path, label)
+    INDEX_CSV_MAP = {
+        "_NIFTY50_INDEX": (os.path.join(HIST_DIR, "NIFTY_50_Daily_1Y.csv"), "Nifty 50 (1Y)"),
+        "_NIFTY50_INDEX_5Y": (NIFTY50_CSV, "Nifty 50 (5Y)"),
+        "_NIFTY500_INDEX": (NIFTY500_CSV, "Nifty 500"),
+        "NIFTY_100": (os.path.join(HIST_DIR, "Indices", "NIFTY_100.csv"), "Nifty 100"),
+        "NIFTY_200": (os.path.join(HIST_DIR, "Indices", "NIFTY_200.csv"), "Nifty 200"),
+        "NIFTY_NEXT50": (os.path.join(HIST_DIR, "Indices", "NIFTY_NEXT50.csv"), "Nifty Next 50"),
+        "NIFTY_MIDCAP100": (os.path.join(HIST_DIR, "Indices", "NIFTY_MIDCAP100.csv"), "Nifty Midcap 100"),
+        "NIFTY_SMALLCAP100": (os.path.join(HIST_DIR, "Indices", "NIFTY_SMALLCAP100.csv"), "Nifty Smallcap 100"),
+        "BANKNIFTY": (os.path.join(HIST_DIR, "Indices", "BANKNIFTY.csv"), "Bank Nifty"),
+        "FINNIFTY": (os.path.join(HIST_DIR, "Indices", "FINNIFTY.csv"), "Fin Nifty"),
+        "NIFTYIT": (os.path.join(HIST_DIR, "Indices", "NIFTYIT.csv"), "Nifty IT"),
+        "NIFTY_AUTO": (os.path.join(HIST_DIR, "Indices", "NIFTY_AUTO.csv"), "Nifty Auto"),
+        "NIFTY_PHARMA": (os.path.join(HIST_DIR, "Indices", "NIFTY_PHARMA.csv"), "Nifty Pharma"),
+        "NIFTY_FMCG": (os.path.join(HIST_DIR, "Indices", "NIFTY_FMCG.csv"), "Nifty FMCG"),
+        "NIFTY_METAL": (os.path.join(HIST_DIR, "Indices", "NIFTY_METAL.csv"), "Nifty Metal"),
+        "NIFTY_ENERGY": (os.path.join(HIST_DIR, "Indices", "NIFTY_ENERGY.csv"), "Nifty Energy"),
+        "NIFTY_INFRA": (os.path.join(HIST_DIR, "Indices", "NIFTY_INFRA.csv"), "Nifty Infra"),
+        "NIFTY_REALTY": (os.path.join(HIST_DIR, "Indices", "NIFTY_REALTY.csv"), "Nifty Realty"),
+        "NIFTY_PSU_BANK": (os.path.join(HIST_DIR, "Indices", "NIFTY_PSU_BANK.csv"), "Nifty PSU Bank"),
+        "NIFTY_PVT_BANK": (os.path.join(HIST_DIR, "Indices", "NIFTY_PVT_BANK.csv"), "Nifty Pvt Bank"),
+        "NIFTY_MEDIA": (os.path.join(HIST_DIR, "Indices", "NIFTY_MEDIA.csv"), "Nifty Media"),
+        "NIFTY_HEALTHCARE": (os.path.join(HIST_DIR, "Indices", "NIFTY_HEALTHCARE.csv"), "Nifty Healthcare"),
+        "NIFTY_CONSR_DURBL": (os.path.join(HIST_DIR, "Indices", "NIFTY_CONSR_DURBL.csv"), "Nifty Consumer Durables"),
+        "NIFTY_FINSRV25_50": (os.path.join(HIST_DIR, "Indices", "NIFTY_FINSRV25_50.csv"), "Nifty Fin Services 25/50"),
+        "NIFTY_OIL_GAS": (os.path.join(HIST_DIR, "Indices", "NIFTY_OIL_GAS.csv"), "Nifty Oil and Gas"),
+        "NIFTY_MIDSML_HLTH": (os.path.join(HIST_DIR, "Indices", "NIFTY_MIDSML_HLTH.csv"), "Nifty MidSmall Healthcare"),
+        "NIFTY_FINSEREXBNK": (os.path.join(HIST_DIR, "Indices", "NIFTY_FINSEREXBNK.csv"), "Nifty Fin Services Ex-Bank"),
+        "NIFTY_MS_FIN": (os.path.join(HIST_DIR, "Indices", "NIFTY_MS_FIN.csv"), "Nifty MidSmall Fin Services"),
+        "NIFTY_MS_IT_TELCM": (os.path.join(HIST_DIR, "Indices", "NIFTY_MS_IT_TELCM.csv"), "Nifty MidSmall IT & Telecom"),
+    }
+
     # Fetch Nifty 50 index quote (security_id=13, segment=IDX_I)
-    print("  Fetching index quotes (Nifty 50 + Nifty 500)...")
-    nifty50_ohlcv = None
-    nifty500_ohlcv = None
+    print("  Fetching index quotes...")
+    sids = list(INDEX_MAP.values())
 
     def _parse_idx(ticker) -> dict | None:
         if not isinstance(ticker, dict):
@@ -351,11 +415,11 @@ def main():
             "volume": int(ticker.get("volume", 0) or 0),
         }
 
-    def _fetch_index_quotes_batch(method_name: str) -> dict | None:
+    def _fetch_index_quotes_batch(method_name: str, sids: list[int]) -> dict | None:
         """Try ohlc_data/quote_data/ticker_data for IDX_I indices. Returns raw idx_data dict or None."""
         try:
             method = getattr(helper.dhan, method_name)
-            res = method(securities={"IDX_I": [13, 19]})
+            res = method(securities={"IDX_I": sids})
             if not isinstance(res, dict) or res.get("status") != "success":
                 return None
             raw = res.get("data", {})
@@ -371,57 +435,63 @@ def main():
     try:
         # Try batch REST endpoints in order of reliability
         idx_data = (
-            _fetch_index_quotes_batch("ohlc_data")
-            or _fetch_index_quotes_batch("quote_data")
-            or _fetch_index_quotes_batch("ticker_data")
+            _fetch_index_quotes_batch("ohlc_data", sids)
+            or _fetch_index_quotes_batch("quote_data", sids)
+            or _fetch_index_quotes_batch("ticker_data", sids)
         )
 
         if isinstance(idx_data, dict):
-            for key in ("13", 13):
-                t = idx_data.get(key)
+            for today_key, sid in INDEX_MAP.items():
+                t = idx_data.get(str(sid)) or idx_data.get(sid)
                 if t:
-                    nifty50_ohlcv = _parse_idx(t)
-                    break
+                    ohlcv = _parse_idx(t)
+                    if ohlcv:
+                        all_quotes[today_key] = ohlcv
 
-            for key in ("19", 19):
-                t = idx_data.get(key)
-                if t:
-                    nifty500_ohlcv = _parse_idx(t)
-                    break
+        # Fallback for any missing indices: use DhanHelper.get_ltp()
+        GET_LTP_SYMBOL_MAP = {
+            "_NIFTY50_INDEX": ("NIFTY", "IDX_I"),
+            "_NIFTY500_INDEX": ("NIFTY 500", "IDX_I"),
+            "NIFTY_100": ("NIFTY 100", "NSE"),
+            "NIFTY_200": ("NIFTY 200", "NSE"),
+            "NIFTY_NEXT50": ("NIFTY NEXT 50", "NSE"),
+            "NIFTY_MIDCAP100": ("NIFTY MID100 FREE", "NSE"),
+            "NIFTY_SMALLCAP100": ("NIFTY SMALLCAP 100", "NSE"),
+            "BANKNIFTY": ("BANKNIFTY", "IDX_I"),
+            "FINNIFTY": ("FINNIFTY", "IDX_I"),
+            "NIFTYIT": ("NIFTYIT", "NSE"),
+            "NIFTY_AUTO": ("NIFTY AUTO", "NSE"),
+            "NIFTY_PHARMA": ("NIFTY PHARMA", "NSE"),
+            "NIFTY_FMCG": ("NIFTY FMCG", "NSE"),
+            "NIFTY_METAL": ("NIFTY METAL", "NSE"),
+            "NIFTY_ENERGY": ("NIFTY ENERGY", "NSE"),
+            "NIFTY_INFRA": ("NIFTYINFRA", "NSE"),
+            "NIFTY_REALTY": ("NIFTY REALTY", "NSE"),
+            "NIFTY_PSU_BANK": ("NIFTY PSU BANK", "NSE"),
+            "NIFTY_PVT_BANK": ("NIFTY PVT BANK", "NSE"),
+            "NIFTY_MEDIA": ("NIFTY MEDIA", "NSE"),
+            "NIFTY_HEALTHCARE": ("NIFTY HEALTHCARE", "NSE"),
+            "NIFTY_CONSR_DURBL": ("NIFTY CONSR DURBL", "NSE"),
+            "NIFTY_FINSRV25_50": ("NIFTY FINSRV25 50", "NSE"),
+            "NIFTY_OIL_GAS": ("NIFTY OIL AND GAS", "NSE"),
+            "NIFTY_MIDSML_HLTH": ("NIFTY MIDSML HLTH", "NSE"),
+            "NIFTY_FINSEREXBNK": ("NIFTY FINSEREXBNK", "NSE"),
+            "NIFTY_MS_FIN": ("Nifty MS Fin Serv", "NSE"),
+            "NIFTY_MS_IT_TELCM": ("Nifty MS IT Telcm", "NSE"),
+        }
 
-        # Fallback: use DhanHelper.get_ltp() for individual index LTPs
-        if not nifty50_ohlcv:
-            try:
-                ltp = helper.get_ltp("NIFTY", instrument="INDEX")
-                if ltp and ltp > 0:
-                    nifty50_ohlcv = _ltp_to_ohlcv(float(ltp))
-                    print("    [INFO] Nifty 50 LTP via helper.get_ltp()")
-            except Exception as e:
-                print(f"    [WARN] helper.get_ltp NIFTY failed: {e}")
+        for today_key, (symbol, exch) in GET_LTP_SYMBOL_MAP.items():
+            if today_key not in all_quotes:
+                try:
+                    ltp = helper.get_ltp(symbol, exchange=exch, instrument="INDEX")
+                    if ltp and ltp > 0:
+                        all_quotes[today_key] = _ltp_to_ohlcv(float(ltp))
+                        print(f"    [INFO] {today_key} LTP via helper.get_ltp() ({symbol})")
+                except Exception as e:
+                    print(f"    [WARN] helper.get_ltp {symbol} ({exch}) failed: {e}")
 
-        if not nifty500_ohlcv:
-            try:
-                ltp = helper.get_ltp("NIFTY 500", instrument="INDEX")
-                if ltp and ltp > 0:
-                    nifty500_ohlcv = _ltp_to_ohlcv(float(ltp))
-                    print("    [INFO] Nifty 500 LTP via helper.get_ltp()")
-            except Exception as e:
-                print(f"    [WARN] helper.get_ltp NIFTY 500 failed: {e}")
-
-        if not nifty50_ohlcv and not nifty500_ohlcv:
-            print("    [WARN] No valid IDX_I data from any method")
-
-        if nifty50_ohlcv:
-            all_quotes["_NIFTY50_INDEX"] = nifty50_ohlcv
-            print(f"    -> Nifty 50  LTP: {nifty50_ohlcv['close']}")
-        else:
-            print("    -> No valid LTP for Nifty 50 index")
-
-        if nifty500_ohlcv:
-            all_quotes["_NIFTY500_INDEX"] = nifty500_ohlcv
-            print(f"    -> Nifty 500 LTP: {nifty500_ohlcv['close']}")
-        else:
-            print("    -> No valid LTP for Nifty 500 index")
+        # Print all indices fetched
+        print(f"  Indices fetched successfully: {len(all_quotes)} / {len(INDEX_MAP)}")
 
     except Exception as e:
         print(f"    -> Index fetch failed: {e}")
@@ -431,11 +501,18 @@ def main():
     appended, updated, errors = update_stock_csvs(all_quotes, today)
     print(f"  OK Stocks: {appended} appended, {updated} updated, {errors} errors")
 
-    # ── Write today's row into index CSVs ────────────────────────────────────
-    if nifty50_ohlcv:
-        update_index_csv(NIFTY50_CSV, "Nifty 50", nifty50_ohlcv, today)
-    if nifty500_ohlcv:
-        update_index_csv(NIFTY500_CSV, "Nifty 500", nifty500_ohlcv, today)
+    # ── Write today's row into index EOD CSVs ────────────────────────────────
+    print(f"\n  Updating index CSVs...")
+    for today_key, ohlcv in all_quotes.items():
+        if today_key == "_NIFTY50_INDEX":
+            # Nifty 50 has two CSVs to update (1Y and 5Y)
+            p1, l1 = INDEX_CSV_MAP["_NIFTY50_INDEX"]
+            p2, l2 = INDEX_CSV_MAP["_NIFTY50_INDEX_5Y"]
+            update_index_csv(p1, l1, ohlcv, today)
+            update_index_csv(p2, l2, ohlcv, today)
+        elif today_key in INDEX_CSV_MAP:
+            p, l = INDEX_CSV_MAP[today_key]
+            update_index_csv(p, l, ohlcv, today)
 
     # ── Write today_quotes.json (used by dataLoader.ts in-memory patch) ──────
     output = {

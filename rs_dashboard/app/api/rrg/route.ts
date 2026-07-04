@@ -22,6 +22,8 @@ export interface RRGSeries {
   label: string;
   color: string;
   history: RRGPoint[];
+  latestClose: number;
+  priceChange1D: number; // percent
 }
 
 export interface RRGResponse {
@@ -29,6 +31,7 @@ export interface RRGResponse {
   timeframe: 'daily' | 'weekly';
   dataDate: string;
   symbols: RRGSeries[];
+  benchmarkHistory: Array<{ date: string; close: number }>;
 }
 
 // ── Palette ───────────────────────────────────────────────────────────────────
@@ -44,50 +47,102 @@ const PALETTE = [
 
 // ── Math ──────────────────────────────────────────────────────────────────────
 
-const WINDOW = 10;
-
-function rollingMean(arr: number[], i: number): number {
+function rollingMean(arr: number[], i: number, windowSize: number): number {
   let sum = 0;
-  for (let j = i - WINDOW + 1; j <= i; j++) sum += arr[j];
-  return sum / WINDOW;
+  for (let j = i - windowSize + 1; j <= i; j++) sum += arr[j];
+  return sum / windowSize;
 }
 
-function rollingStd(arr: number[], i: number): number {
-  const mean = rollingMean(arr, i);
+function rollingStd(arr: number[], i: number, windowSize: number): number {
+  const mean = rollingMean(arr, i, windowSize);
   let sq = 0;
-  for (let j = i - WINDOW + 1; j <= i; j++) sq += (arr[j] - mean) ** 2;
-  return Math.sqrt(sq / WINDOW);
+  for (let j = i - windowSize + 1; j <= i; j++) {
+    if (!isNaN(arr[j])) {
+      sq += (arr[j] - mean) ** 2;
+    }
+  }
+  const divisor = windowSize - 1;
+  return divisor <= 0 ? 0 : Math.sqrt(sq / divisor);
 }
 
 /**
- * Computes JdK RS-Ratio and RS-Momentum for a symbol aligned with benchmark.
- * Returns last `lookback` valid points (chronological).
- *
- * RS_raw(t)      = stockClose(t) / indexClose(t) × 100
- * RS_Ratio(t)    = 100 + (RS_raw(t) − SMA10(RS_raw)(t)) / STDEV10(RS_raw)(t)
- * RS_Momentum(t) = 100 + (RS_Ratio(t) − SMA10(RS_Ratio)(t)) / STDEV10(RS_Ratio)(t)
- *
- * First valid RS_Ratio: i = WINDOW-1 = 9
- * First valid RS_Momentum: i = 2*WINDOW-2 = 18  (needs STDEV of RS_Ratio over 10 pts)
+ * Computes JdK RS-Ratio and RS-Momentum using the BennyThadikaran RRG-Lite formulas.
  */
 function computeJdK(
   aligned: Array<{ date: string; stockClose: number; indexClose: number }>,
-  lookback: number
+  lookback: number,
+  windowSize: number,
+  periodSize: number,
+  method: 'EMA' | 'SMA'
 ): RRGPoint[] {
   const n = aligned.length;
+  if (n === 0) return [];
   const rsRaw = aligned.map(r => (r.stockClose / r.indexClose) * 100);
 
   const rsRatioArr = new Array<number>(n).fill(NaN);
-  for (let i = WINDOW - 1; i < n; i++) {
-    const std = rollingStd(rsRaw, i);
-    rsRatioArr[i] = std === 0 ? 100 : 100 + (rsRaw[i] - rollingMean(rsRaw, i)) / std;
+  
+  if (method === 'EMA') {
+    const alpha = 2 / (windowSize + 1);
+    let mean = rsRaw[0];
+    let variance = 0;
+    rsRatioArr[0] = 100;
+    
+    for (let i = 1; i < n; i++) {
+      mean = alpha * rsRaw[i] + (1 - alpha) * mean;
+      variance = alpha * ((rsRaw[i] - mean) ** 2) + (1 - alpha) * variance;
+      const std = Math.sqrt(variance);
+      rsRatioArr[i] = std < 1e-8 ? 100 : 100 + (rsRaw[i] - mean) / std;
+    }
+  } else {
+    for (let i = windowSize - 1; i < n; i++) {
+      const std = rollingStd(rsRaw, i, windowSize);
+      rsRatioArr[i] = std === 0 ? 100 : 100 + (rsRaw[i] - rollingMean(rsRaw, i, windowSize)) / std;
+    }
+  }
+
+  const rsRocArr = new Array<number>(n).fill(NaN);
+  for (let i = periodSize; i < n; i++) {
+    const baseRs = rsRatioArr[i - periodSize];
+    if (isNaN(baseRs) || baseRs === 0) continue;
+    rsRocArr[i] = ((rsRatioArr[i] / baseRs) - 1) * 100;
   }
 
   const result: RRGPoint[] = [];
-  for (let i = 2 * WINDOW - 2; i < n; i++) {
-    const std = rollingStd(rsRatioArr, i);
-    const momentum = std === 0 ? 100 : 100 + (rsRatioArr[i] - rollingMean(rsRatioArr, i)) / std;
-    result.push({ date: aligned[i].date, rsRatio: rsRatioArr[i], rsMomentum: momentum });
+  const startIdx = method === 'EMA' ? periodSize + 1 : periodSize + 2 * windowSize - 2;
+  
+  if (method === 'EMA') {
+    const alpha = 2 / (windowSize + 1);
+    let firstValidIdx = -1;
+    for (let i = 0; i < n; i++) {
+      if (!isNaN(rsRocArr[i])) {
+        firstValidIdx = i;
+        break;
+      }
+    }
+    
+    if (firstValidIdx !== -1) {
+      let mean = rsRocArr[firstValidIdx];
+      let variance = 0;
+      
+      for (let i = firstValidIdx; i < n; i++) {
+        if (i > firstValidIdx) {
+          mean = alpha * rsRocArr[i] + (1 - alpha) * mean;
+          variance = alpha * ((rsRocArr[i] - mean) ** 2) + (1 - alpha) * variance;
+        }
+        const std = Math.sqrt(variance);
+        const momentum = std < 1e-8 ? 100 : 100 + (rsRocArr[i] - mean) / std;
+        if (!isNaN(rsRatioArr[i]) && !isNaN(momentum) && i >= startIdx) {
+          result.push({ date: aligned[i].date, rsRatio: rsRatioArr[i], rsMomentum: momentum });
+        }
+      }
+    }
+  } else {
+    for (let i = startIdx; i < n; i++) {
+      const std = rollingStd(rsRocArr, i, windowSize);
+      const momentum = std === 0 ? 100 : 100 + (rsRocArr[i] - rollingMean(rsRocArr, i, windowSize)) / std;
+      if (isNaN(rsRatioArr[i]) || isNaN(momentum)) continue;
+      result.push({ date: aligned[i].date, rsRatio: rsRatioArr[i], rsMomentum: momentum });
+    }
   }
 
   return result.slice(-lookback);
@@ -119,12 +174,20 @@ export async function GET(req: NextRequest) {
   const { searchParams } = new URL(req.url);
   const universe = (searchParams.get('universe') ?? 'indices') as 'indices' | 'nifty50';
   const timeframe = (searchParams.get('timeframe') ?? 'daily') as 'daily' | 'weekly';
+  const method = (searchParams.get('method') ?? 'EMA') as 'EMA' | 'SMA';
   const lookback = Math.max(1, Math.min(1260, parseInt(searchParams.get('lookback') ?? '252', 10)));
+  
+  // Dynamic defaults: Weekly EMA: w=125, p=12; Daily EMA: w=100, p=14; Weekly SMA: w=14, p=52; Daily SMA: w=10, p=14
+  const defaultWindow = timeframe === 'weekly' ? (method === 'EMA' ? 125 : 14) : (method === 'EMA' ? 100 : 10);
+  const defaultPeriod = timeframe === 'weekly' ? (method === 'EMA' ? 12 : 52) : 14;
 
-  const cacheKey = `${universe}:${timeframe}`;
+  const window = Math.max(2, Math.min(200, parseInt(searchParams.get('window') ?? String(defaultWindow), 10)));
+  const period = Math.max(1, Math.min(200, parseInt(searchParams.get('period') ?? String(defaultPeriod), 10)));
+
+  const cacheKey = `${universe}:${timeframe}:${window}:${period}:${method}`;
   const cached = rrgCache.get(cacheKey);
   if (cached && Date.now() - cached.ts < TTL) {
-    const sliced = {
+    const sliced: RRGResponse = {
       ...cached.data,
       symbols: cached.data.symbols.map(s => ({ ...s, history: s.history.slice(-lookback) })),
     };
@@ -133,6 +196,9 @@ export async function GET(req: NextRequest) {
 
   try {
     const benchmarkRows = readNifty50Index();
+
+    // Build benchmark history (last 252 points, daily close)
+    const benchmarkHistory = benchmarkRows.slice(-252).map(r => ({ date: r.date, close: r.close }));
 
     const symbolEntries: Array<{ symbol: string; label: string; rows: ReturnType<typeof readNifty50Index> }> =
       universe === 'indices'
@@ -147,9 +213,12 @@ export async function GET(req: NextRequest) {
       if (rows.length === 0) continue;
       let aligned = alignByDate(rows, benchmarkRows);
       if (timeframe === 'weekly') aligned = toWeekly(aligned);
-      const history = computeJdK(aligned, 1260); // cache full history; trim per-request
+      const history = computeJdK(aligned, 1260, window, period, method); // cache full history; trim per-request
       if (history.length === 0) continue;
-      seriesList.push({ symbol, label, color: PALETTE[idx % PALETTE.length], history });
+      const latestClose = rows[rows.length - 1]?.close ?? 0;
+      const prevClose = rows[rows.length - 2]?.close ?? latestClose;
+      const priceChange1D = prevClose === 0 ? 0 : ((latestClose - prevClose) / prevClose) * 100;
+      seriesList.push({ symbol, label, color: PALETTE[idx % PALETTE.length], history, latestClose, priceChange1D });
     }
 
     const dataDate = seriesList.reduce((best, s) => {
@@ -157,7 +226,7 @@ export async function GET(req: NextRequest) {
       return last > best ? last : best;
     }, '');
 
-    const response: RRGResponse = { universe, timeframe, dataDate, symbols: seriesList };
+    const response: RRGResponse = { universe, timeframe, dataDate, symbols: seriesList, benchmarkHistory };
     rrgCache.set(cacheKey, { data: response, ts: Date.now() });
 
     const sliced = {
