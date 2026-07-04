@@ -321,6 +321,196 @@ function IndexColumn({ stats }: { stats: IndexStats }) {
   );
 }
 
+// ─── BreadthColumn ────────────────────────────────────────────────────────────
+
+function BreadthColumn({ title, subtitle, stats }: { title: string; subtitle: string; stats: BreadthStats }) {
+  const total = stats.totalScanned;
+
+  const partClass = stats.participationScore >= 70 ? 'text-emerald-400' : stats.participationScore >= 55 ? 'text-lime-400' : stats.participationScore >= 45 ? 'text-yellow-400' : stats.participationScore >= 35 ? 'text-orange-400' : 'text-red-400';
+  const partLabel = stats.participationScore >= 70 ? 'Strong' : stats.participationScore >= 55 ? 'Good' : stats.participationScore >= 45 ? 'Neutral' : stats.participationScore >= 35 ? 'Weak' : 'Very Weak';
+
+  const adClass = stats.advDecRatio >= 2 ? 'text-emerald-400' : stats.advDecRatio >= 1 ? 'text-lime-400' : stats.advDecRatio >= 0.5 ? 'text-yellow-400' : 'text-red-400';
+  const adLabel = stats.advDecRatio >= 3 ? 'Strongly Bullish' : stats.advDecRatio >= 2 ? 'Bullish' : stats.advDecRatio >= 1 ? 'Neutral-Bull' : stats.advDecRatio >= 0.5 ? 'Neutral-Bear' : 'Bearish';
+  const netClass = stats.netAdvanceDecline >= 0 ? 'text-emerald-400' : 'text-red-400';
+
+  const rsiElevated = stats.rsiAbove60 - stats.rsiOverbought;
+  const rsiNeutral40to60 = stats.rsiBucket40to70 - rsiElevated;
+
+  const hlRatio = stats.new52WLowCount > 0 ? stats.new52WHighCount / stats.new52WLowCount : stats.new52WHighCount;
+  const hlClass = hlRatio >= 2 ? 'text-emerald-400' : hlRatio >= 1 ? 'text-yellow-400' : 'text-red-400';
+
+  return (
+    <SectionCard>
+      <CardHeader title={title} subtitle={subtitle} />
+      <div className="px-4 py-2">
+        {/* Participation Score prominent */}
+        <div className="py-3 border-b border-zinc-800/50">
+          <div className="mb-1">
+            <Tooltip
+              label="Participation Score"
+              content="Weighted composite of breadth metrics."
+              scale="SMA200 pct ×0.40 + SMA50 pct ×0.30 + SMA20 pct ×0.20 + A/D transform ×0.10"
+            />
+          </div>
+          <div className="flex items-baseline gap-2">
+            <span className={`text-3xl font-bold tabular-nums ${partClass}`}>{stats.participationScore}</span>
+            <span className="text-base text-zinc-500">/100</span>
+            <span className={`text-xs ${partClass}`}>{partLabel}</span>
+          </div>
+        </div>
+
+        <MetricRow
+          label="Above SMA 200"
+          tooltip="Stocks with close > 200-day simple moving average. Primary breadth/regime indicator. Note: stock breadth uses SMA; Nifty 50 Index uses EMA."
+          tooltipScale="≥60% bull · 50–60% cautious · 45–50% caution/chop · 40–45% transition · <40% bear"
+          bar={{ pct: stats.aboveEma200Pct, colorClass: pctBarClass(stats.aboveEma200Pct) }}
+        >
+          <span>
+            <span className={`text-xl font-bold tabular-nums ${pctSignalClass(stats.aboveEma200Pct)}`}>{stats.aboveEma200Pct}%</span>
+            <span className="text-xs text-zinc-500 ml-1">({stats.aboveEma200Count}/{total})</span>
+          </span>
+        </MetricRow>
+
+        <MetricRow
+          label="Above SMA 50"
+          tooltip="Stocks above 50-day simple moving average — medium-term market breadth."
+          bar={{ pct: stats.aboveEma50Pct, colorClass: pctBarClass(stats.aboveEma50Pct) }}
+        >
+          <span>
+            <span className={`text-xl font-bold tabular-nums ${pctSignalClass(stats.aboveEma50Pct)}`}>{stats.aboveEma50Pct}%</span>
+            <span className="text-xs text-zinc-500 ml-1">({stats.aboveEma50Count}/{total})</span>
+          </span>
+        </MetricRow>
+
+        <MetricRow
+          label="Above SMA 20"
+          tooltip="Stocks above 20-day simple moving average — short-term breadth momentum."
+          bar={{ pct: stats.aboveEma20Pct, colorClass: pctBarClass(stats.aboveEma20Pct) }}
+        >
+          <span>
+            <span className={`text-xl font-bold tabular-nums ${pctSignalClass(stats.aboveEma20Pct)}`}>{stats.aboveEma20Pct}%</span>
+            <span className="text-xs text-zinc-500 ml-1">({stats.aboveEma20Count}/{total})</span>
+          </span>
+        </MetricRow>
+
+        <MetricRow
+          label="Bull Power"
+          tooltip="Close > SMA20 > SMA50 > SMA200 — all three MAs fully bullish-aligned. Strongest structural buy signal."
+        >
+          <span>
+            <span className="text-emerald-400 font-bold tabular-nums">{stats.bullPowerCount}</span>
+            <span className="text-xs text-zinc-500 ml-1">({stats.bullPowerPct}%)</span>
+          </span>
+        </MetricRow>
+
+        <MetricRow
+          label="Bear Power"
+          tooltip="Close < SMA20 < SMA50 < SMA200 — all three MAs fully bearish-aligned. Strongest structural sell signal."
+        >
+          <span>
+            <span className="text-red-400 font-bold tabular-nums">{stats.bearPowerCount}</span>
+            <span className="text-xs text-zinc-500 ml-1">({stats.bearPowerPct}%)</span>
+          </span>
+        </MetricRow>
+
+        <MetricRow
+          label="A/D Ratio (1W)"
+          tooltip="Advancing ÷ Declining stocks over past 7 calendar days (not trading days — weekend gaps included)."
+          tooltipScale="≥3 strongly bullish · ≥2 bullish · ≥1 neutral-bull · <0.5 bearish"
+        >
+          <span>
+            <span className={`font-bold tabular-nums ${adClass}`}>{stats.advDecRatio.toFixed(2)}x</span>
+            <span className={`text-xs ml-1 ${adClass}`}>{adLabel}</span>
+          </span>
+        </MetricRow>
+
+        <MetricRow
+          label="Net A/D"
+          tooltip="Advancing stocks minus Declining stocks (past 7 calendar days)."
+        >
+          <span className={`font-semibold tabular-nums ${netClass}`}>
+            {stats.netAdvanceDecline > 0 ? '+' : ''}{stats.netAdvanceDecline}
+          </span>
+        </MetricRow>
+
+        <MetricRow
+          label="RSI Overbought >70"
+          tooltip="14-period Wilder RSI > 70. High reading = crowded market, elevated mean-reversion risk."
+          bar={{ pct: total > 0 ? (stats.rsiOverbought / total) * 100 : 0, colorClass: 'bg-red-500' }}
+        >
+          <span>
+            <span className="text-red-400 font-semibold tabular-nums">{stats.rsiOverbought}</span>
+            <span className="text-xs text-zinc-500 ml-1">({total > 0 ? ((stats.rsiOverbought / total) * 100).toFixed(1) : 0}%)</span>
+          </span>
+        </MetricRow>
+
+        <MetricRow
+          label="RSI Elevated 60–70"
+          tooltip="RSI 60–70 = bullish momentum zone, not yet overextended. Derived: rsiAbove60 − rsiOverbought."
+          bar={{ pct: total > 0 ? (rsiElevated / total) * 100 : 0, colorClass: 'bg-orange-500' }}
+        >
+          <span>
+            <span className="text-orange-400 font-semibold tabular-nums">{rsiElevated}</span>
+            <span className="text-xs text-zinc-500 ml-1">({total > 0 ? ((rsiElevated / total) * 100).toFixed(1) : 0}%)</span>
+          </span>
+        </MetricRow>
+
+        <MetricRow
+          label="RSI Neutral 40–60"
+          tooltip="RSI 40–60 = neutral zone, no strong directional momentum. Derived: rsiBucket40to70 − (rsiAbove60 − rsiOverbought)."
+          bar={{ pct: total > 0 ? (rsiNeutral40to60 / total) * 100 : 0, colorClass: 'bg-zinc-500' }}
+        >
+          <span>
+            <span className="text-zinc-400 font-semibold tabular-nums">{rsiNeutral40to60}</span>
+            <span className="text-xs text-zinc-500 ml-1">({total > 0 ? ((rsiNeutral40to60 / total) * 100).toFixed(1) : 0}%)</span>
+          </span>
+        </MetricRow>
+
+        <MetricRow
+          label="RSI Oversold <40"
+          tooltip="14-period Wilder RSI < 40. Potential mean-reversion / oversold bounce candidates."
+          bar={{ pct: total > 0 ? (stats.rsiOversold / total) * 100 : 0, colorClass: 'bg-emerald-500' }}
+        >
+          <span>
+            <span className="text-emerald-400 font-semibold tabular-nums">{stats.rsiOversold}</span>
+            <span className="text-xs text-zinc-500 ml-1">({total > 0 ? ((stats.rsiOversold / total) * 100).toFixed(1) : 0}%)</span>
+          </span>
+        </MetricRow>
+
+        <MetricRow
+          label="52W Highs"
+          tooltip="Stocks within 0.5% of their 52-week high (trailing 252 trading days). Threshold: (close − high52W) / high52W ≥ −0.005."
+        >
+          <span>
+            <span className="text-emerald-400 font-semibold tabular-nums">{stats.new52WHighCount}</span>
+            <span className="text-xs text-zinc-500 ml-1">({total > 0 ? ((stats.new52WHighCount / total) * 100).toFixed(1) : 0}%)</span>
+          </span>
+        </MetricRow>
+
+        <MetricRow
+          label="52W Lows"
+          tooltip="Stocks within 0.5% of their 52-week low (trailing 252 trading days). Threshold: (close − low52W) / low52W ≤ 0.005."
+        >
+          <span>
+            <span className="text-red-400 font-semibold tabular-nums">{stats.new52WLowCount}</span>
+            <span className="text-xs text-zinc-500 ml-1">({total > 0 ? ((stats.new52WLowCount / total) * 100).toFixed(1) : 0}%)</span>
+          </span>
+        </MetricRow>
+
+        <MetricRow
+          label="H/L Ratio"
+          tooltip="New 52W Highs ÷ New 52W Lows. Measures balance of bullish vs bearish price extremes."
+          tooltipScale="≥2 bullish · ≥1 slightly bullish · <0.5 bearish"
+        >
+          <span className={`font-bold tabular-nums ${hlClass}`}>
+            {stats.new52WLowCount > 0 ? hlRatio.toFixed(2) + 'x' : `${stats.new52WHighCount}H / 0L`}
+          </span>
+        </MetricRow>
+      </div>
+    </SectionCard>
+  );
+}
+
 // ─── Main component (stub — sections added in Tasks 3–6) ─────────────────────
 
 export default function BreadthAnalysis() {
@@ -404,8 +594,8 @@ export default function BreadthAnalysis() {
             {/* Three-column comparison grid */}
             <div className="grid grid-cols-3 gap-4">
               <IndexColumn stats={data.nifty50} />
-              <div className="bg-zinc-900 border border-zinc-800 rounded-lg flex items-center justify-center text-zinc-600 text-sm p-8">N50 Stocks — Task 5</div>
-              <div className="bg-zinc-900 border border-zinc-800 rounded-lg flex items-center justify-center text-zinc-600 text-sm p-8">N500 Stocks — Task 5</div>
+              <BreadthColumn title="NIFTY 50 STOCKS" subtitle="50 constituents" stats={data.nifty50Breadth} />
+              <BreadthColumn title="NIFTY 500 STOCKS" subtitle="500 universe" stats={data.nifty500Breadth} />
             </div>
           </div>
         </main>
