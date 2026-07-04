@@ -23,12 +23,22 @@ export interface ContractStats {
   sparkline: { time: string; oi: number }[]; // daily OI points (last 30 sessions)
 }
 
+export interface ChartPoint {
+  date: string;
+  futureClose: number;
+  spotClose: number | null;
+}
+
 export interface FuturesResponse {
   success: boolean;
   dataDate: string;
   instruments: {
     NIFTY: ContractStats[];
     BANKNIFTY: ContractStats[];
+  };
+  charts: {
+    NIFTY: ChartPoint[];
+    BANKNIFTY: ChartPoint[];
   };
   error?: string;
 }
@@ -95,6 +105,52 @@ function niftySpotClose(): number | null {
   if (closeIdx === -1) return null;
   const last = lines[lines.length - 1].split(',');
   return parseFloat(last[closeIdx]) || null;
+}
+
+function readSpotDailySeries(n: number): { date: string; close: number }[] {
+  const p = path.join(PROJECT_ROOT, 'Historical Data', 'NIFTY_50_Daily_5Y.csv');
+  if (!fs.existsSync(p)) return [];
+  const lines = fs.readFileSync(p, 'utf-8').trim().split('\n');
+  if (lines.length < 2) return [];
+  const headers = lines[0].split(',').map(h => h.trim());
+  const closeIdx = headers.indexOf('Close');
+  const dateIdx  = headers.indexOf('Datetime') !== -1
+    ? headers.indexOf('Datetime') : headers.indexOf('Date') !== -1
+    ? headers.indexOf('Date') : 0;
+  if (closeIdx === -1) return [];
+  return lines.slice(1).slice(-n).map(line => {
+    const v = line.split(',');
+    const date  = ((v[dateIdx] ?? '').trim()).split(' ')[0]; // strip time component if present
+    const close = parseFloat((v[closeIdx] ?? '').trim()) || 0;
+    return { date, close };
+  }).filter(r => r.date && r.close > 0);
+}
+
+function buildDailyChart(
+  dailyRows: Row[],
+  spotSeries: { date: string; close: number }[],
+  days: number
+): ChartPoint[] {
+  // Find near-month expiry (earliest)
+  const expiries = [...new Set(dailyRows.map(r => r.contract))].sort();
+  const nearExpiry = expiries[0];
+  if (!nearExpiry) return [];
+
+  const nearRows = dailyRows
+    .filter(r => r.contract === nearExpiry)
+    .sort((a, b) => a.datetime.localeCompare(b.datetime))
+    .slice(-days);
+
+  const spotMap = new Map(spotSeries.map(s => [s.date, s.close]));
+
+  return nearRows.map(r => {
+    const date = toDate(r.datetime);
+    return {
+      date,
+      futureClose: r.close,
+      spotClose: spotMap.get(date) ?? null,
+    };
+  });
 }
 
 // ─── Per-contract computation ─────────────────────────────────────────────────
@@ -207,6 +263,7 @@ export async function GET() {
         success: false,
         dataDate: '',
         instruments: { NIFTY: [], BANKNIFTY: [] },
+        charts: { NIFTY: [], BANKNIFTY: [] },
         error: 'No futures data found. Run scripts/downloader/download_futures_manual.py first.',
       });
     }
@@ -221,6 +278,10 @@ export async function GET() {
     const niftyContracts = buildContracts(niftyRows, niftyDaily, spotClose, true);
     const bnfContracts = buildContracts(bnfRows, bnfDaily, null, false);
 
+    const spotSeries = readSpotDailySeries(7);
+    const niftyChart = buildDailyChart(niftyDaily, spotSeries, 7);
+    const bnfChart   = buildDailyChart(bnfDaily, [], 7);
+
     const allDates = [...niftyRows, ...bnfRows]
       .map(r => toDate(r.datetime))
       .filter(Boolean)
@@ -231,12 +292,14 @@ export async function GET() {
       success: true,
       dataDate,
       instruments: { NIFTY: niftyContracts, BANKNIFTY: bnfContracts },
+      charts: { NIFTY: niftyChart, BANKNIFTY: bnfChart },
     });
   } catch (e: unknown) {
     return NextResponse.json<FuturesResponse>({
       success: false,
       dataDate: '',
       instruments: { NIFTY: [], BANKNIFTY: [] },
+      charts: { NIFTY: [], BANKNIFTY: [] },
       error: e instanceof Error ? e.message : 'Unknown error',
     });
   }

@@ -3,7 +3,7 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import NavBar from '@/components/NavBar';
 import { Activity, RefreshCw, AlertCircle, Loader2, Download } from 'lucide-react';
-import type { ContractStats, FuturesResponse } from '@/app/api/futures/route';
+import type { ContractStats, ChartPoint, FuturesResponse } from '@/app/api/futures/route';
 import type { FuturesRefreshStatus } from '@/app/api/futures-refresh/route';
 import OIBuildupDashboard from '@/components/OIBuildupDashboard';
 
@@ -229,9 +229,153 @@ function CoCCallout({ contracts }: { contracts: ContractStats[] }) {
   );
 }
 
+// ─── Spot × Futures Chart ─────────────────────────────────────────────────────
+
+function SpotFutureChart({ points, name }: { points: ChartPoint[]; name: string }) {
+  if (!points.length) return null;
+
+  const W = 800, H = 180, padL = 64, padR = 20, padT = 28, padB = 28;
+  const innerW = W - padL - padR;
+  const innerH = H - padT - padB;
+
+  const futureVals = points.map(p => p.futureClose).filter(v => v > 0);
+  const spotVals   = points.filter(p => p.spotClose !== null).map(p => p.spotClose as number);
+  const allVals    = [...futureVals, ...spotVals];
+  if (!allVals.length) return null;
+
+  // Tight range — futures and spot are very close in value
+  const minV  = Math.min(...allVals) * 0.9997;
+  const maxV  = Math.max(...allVals) * 1.0003;
+  const range = maxV - minV || 1;
+
+  const xOf  = (i: number) => padL + (i / Math.max(points.length - 1, 1)) * innerW;
+  const yOf  = (v: number) => padT + innerH - ((v - minV) / range) * innerH;
+  const yTicks = Array.from({ length: 5 }, (_, i) => minV + (range * i / 4));
+
+  const fmtTick = (v: number) => v.toLocaleString('en-IN', { maximumFractionDigits: 0 });
+  const fmtDate = (d: string) => {
+    const dt = new Date(d + 'T00:00:00');
+    return dt.toLocaleDateString('en', { weekday: 'short', day: 'numeric', month: 'short' });
+  };
+
+  const futurePts = points
+    .filter(p => p.futureClose > 0)
+    .map((p, i) => `${xOf(i).toFixed(1)},${yOf(p.futureClose).toFixed(1)}`)
+    .join(' ');
+
+  const spotPts = points
+    .map((p, i) => ({ p, i }))
+    .filter(({ p }) => p.spotClose !== null && (p.spotClose as number) > 0)
+    .map(({ p, i }) => `${xOf(i).toFixed(1)},${yOf(p.spotClose as number).toFixed(1)}`)
+    .join(' ');
+
+  const hasSpot   = spotVals.length > 0;
+  const firstXF   = xOf(0).toFixed(1);
+  const lastXF    = xOf(points.filter(p => p.futureClose > 0).length - 1).toFixed(1);
+  const bottomY   = (padT + innerH).toFixed(1);
+  const fillFuture = `${firstXF},${bottomY} ${futurePts} ${lastXF},${bottomY}`;
+
+  const spotFiltered = points.map((p, i) => ({ p, i })).filter(({ p }) => p.spotClose !== null && (p.spotClose as number) > 0);
+  const firstXS = spotFiltered.length ? xOf(spotFiltered[0].i).toFixed(1) : '0';
+  const lastXS  = spotFiltered.length ? xOf(spotFiltered[spotFiltered.length - 1].i).toFixed(1) : '0';
+  const fillSpot = `${firstXS},${bottomY} ${spotPts} ${lastXS},${bottomY}`;
+
+  return (
+    <div className="rounded-xl border border-zinc-800 overflow-hidden bg-zinc-950/30">
+      <div className="px-3 pt-2.5 pb-1 flex items-center gap-2">
+        <span className="text-[10px] font-semibold text-zinc-500 uppercase tracking-wider">Daily Close — Last {points.length} sessions</span>
+        <div className="flex items-center gap-3 ml-auto">
+          <span className="flex items-center gap-1.5 text-[10px] text-zinc-400">
+            <span className="inline-block w-6 h-0.5 bg-sky-400 rounded" />
+            Near Futures
+          </span>
+          {hasSpot && (
+            <span className="flex items-center gap-1.5 text-[10px] text-zinc-400">
+              <span className="inline-block w-6 border-t border-dashed border-emerald-400" />
+              {name} Spot
+            </span>
+          )}
+        </div>
+      </div>
+      <svg viewBox={`0 0 ${W} ${H}`} className="w-full" style={{ height: H }} preserveAspectRatio="none">
+        <defs>
+          <linearGradient id={`fill-future-${name}`} x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0%" stopColor="#38bdf8" stopOpacity="0.10" />
+            <stop offset="100%" stopColor="#38bdf8" stopOpacity="0" />
+          </linearGradient>
+          {hasSpot && (
+            <linearGradient id={`fill-spot-${name}`} x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0%" stopColor="#34d399" stopOpacity="0.08" />
+              <stop offset="100%" stopColor="#34d399" stopOpacity="0" />
+            </linearGradient>
+          )}
+        </defs>
+
+        {/* Y grid + price labels */}
+        {yTicks.map((v, i) => (
+          <g key={i}>
+            <line x1={padL} y1={yOf(v)} x2={W - padR} y2={yOf(v)} stroke="#27272a" strokeWidth="1" />
+            <text x={padL - 4} y={yOf(v) + 3.5} textAnchor="end" fontSize="9" fill="#71717a">
+              {fmtTick(v)}
+            </text>
+          </g>
+        ))}
+
+        {/* X axis date labels */}
+        {points.map((p, i) => (
+          <text key={p.date} x={xOf(i)} y={H - 6} textAnchor="middle" fontSize="8.5" fill="#71717a">
+            {fmtDate(p.date)}
+          </text>
+        ))}
+
+        {/* Spot fill + line (dashed, behind futures) */}
+        {hasSpot && spotPts && (
+          <g>
+            <polygon points={fillSpot} fill={`url(#fill-spot-${name})`} />
+            <polyline points={spotPts} fill="none" stroke="#34d399" strokeWidth="1.5"
+              strokeLinejoin="round" strokeLinecap="round" strokeDasharray="5 3" />
+          </g>
+        )}
+
+        {/* Futures fill + line (solid, on top) */}
+        {futurePts && (
+          <g>
+            <polygon points={fillFuture} fill={`url(#fill-future-${name})`} />
+            <polyline points={futurePts} fill="none" stroke="#38bdf8" strokeWidth="2"
+              strokeLinejoin="round" strokeLinecap="round" />
+          </g>
+        )}
+
+        {/* Dot at latest future close */}
+        {points.length > 0 && points[points.length - 1].futureClose > 0 && (
+          <circle
+            cx={xOf(points.length - 1)}
+            cy={yOf(points[points.length - 1].futureClose)}
+            r="3" fill="#38bdf8" />
+        )}
+        {/* Dot at latest spot close */}
+        {hasSpot && spotFiltered.length > 0 && (
+          <circle
+            cx={xOf(spotFiltered[spotFiltered.length - 1].i)}
+            cy={yOf(spotFiltered[spotFiltered.length - 1].p.spotClose as number)}
+            r="3" fill="#34d399" />
+        )}
+      </svg>
+    </div>
+  );
+}
+
 // ─── InstrumentSection ────────────────────────────────────────────────────────
 
-function InstrumentSection({ name, contracts }: { name: string; contracts: ContractStats[] }) {
+function InstrumentSection({
+  name,
+  contracts,
+  chartPoints,
+}: {
+  name: string;
+  contracts: ContractStats[];
+  chartPoints: ChartPoint[];
+}) {
   return (
     <section className="border-t border-zinc-800 pt-6">
       <div className="flex items-center gap-3 mb-4">
@@ -241,6 +385,7 @@ function InstrumentSection({ name, contracts }: { name: string; contracts: Contr
       </div>
       <div className="space-y-3">
         <ContractTable name={name} contracts={contracts} />
+        <SpotFutureChart points={chartPoints} name={name} />
         {name === 'NIFTY' && <CoCCallout contracts={contracts} />}
       </div>
     </section>
@@ -374,10 +519,18 @@ export default function FuturesDashboard() {
             </div>
 
             {/* NIFTY instrument section */}
-            <InstrumentSection name="NIFTY" contracts={data.instruments.NIFTY} />
+            <InstrumentSection
+              name="NIFTY"
+              contracts={data.instruments.NIFTY}
+              chartPoints={data.charts?.NIFTY ?? []}
+            />
 
             {/* BANKNIFTY instrument section */}
-            <InstrumentSection name="BANKNIFTY" contracts={data.instruments.BANKNIFTY} />
+            <InstrumentSection
+              name="BANKNIFTY"
+              contracts={data.instruments.BANKNIFTY}
+              chartPoints={data.charts?.BANKNIFTY ?? []}
+            />
 
             {/* OI Buildup */}
             <section className="border-t border-zinc-800 pt-6 mt-0">
