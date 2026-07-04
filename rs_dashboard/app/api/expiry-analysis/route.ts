@@ -48,15 +48,19 @@ export async function GET(req: NextRequest) {
         openBucket = { wedDate: row.date, wedOpen: row.open };
       } else if (dayOfWeek === 2 && openBucket) {
         // Tuesday → close the bucket
-        const raw = ((row.close - openBucket.wedOpen) / openBucket.wedOpen) * 100;
-        weeks.push({
-          wedDate: openBucket.wedDate,
-          tueDate: row.date,
-          wedOpen: openBucket.wedOpen,
-          tueClose: row.close,
-          returnPct: Math.round(raw * 100) / 100,
-        });
-        openBucket = null;
+        if (openBucket.wedOpen <= 0) {
+          openBucket = null;
+        } else {
+          const raw = ((row.close - openBucket.wedOpen) / openBucket.wedOpen) * 100;
+          weeks.push({
+            wedDate: openBucket.wedDate,
+            tueDate: row.date,
+            wedOpen: openBucket.wedOpen,
+            tueClose: row.close,
+            returnPct: Math.round(raw * 100) / 100,
+          });
+          openBucket = null;
+        }
       }
     }
 

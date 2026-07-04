@@ -14,16 +14,7 @@ import {
 } from 'recharts';
 import { TrendingUp } from 'lucide-react';
 import NavBar from '@/components/NavBar';
-
-// ─── Types ────────────────────────────────────────────────────────────────────
-
-interface WeeklyBucket {
-  wedDate: string;
-  tueDate: string;
-  wedOpen: number;
-  tueClose: number;
-  returnPct: number;
-}
+import type { WeeklyBucket } from '@/app/api/expiry-analysis/route';
 
 interface ClassifiedBucket extends WeeklyBucket {
   tueTimestamp: number;
@@ -60,12 +51,12 @@ function computeBoundaries(
   probability: number,
 ): { lower: number; upper: number } {
   if (returnPcts.length === 0) return { lower: 0, upper: 0 };
-  if (returnPcts.length === 1) return { lower: returnPcts[0], upper: returnPcts[0] };
   const sorted = [...returnPcts].sort((a, b) => a - b);
   const n = sorted.length;
+  if (n < 4) return { lower: sorted[0], upper: sorted[n - 1] };
   const tail = (1 - probability) / 2;
   const lowerIdx = Math.max(0, Math.floor(tail * n));
-  const upperIdx = Math.min(n - 1, Math.floor((1 - tail) * n) - 1);
+  const upperIdx = Math.min(n - 1, n - 1 - lowerIdx);
   return { lower: sorted[lowerIdx], upper: sorted[upperIdx] };
 }
 
@@ -126,17 +117,23 @@ export default function ExpiryAnalysis() {
 
   // Fetch whenever date range changes
   useEffect(() => {
+    const controller = new AbortController();
     setLoading(true);
     setError(null);
-    fetch(`/api/expiry-analysis?startDate=${startDate}&endDate=${endDate}`)
+    fetch(`/api/expiry-analysis?startDate=${startDate}&endDate=${endDate}`, {
+      signal: controller.signal,
+    })
       .then((r) => r.json())
       .then((data) => {
         if (data.error) throw new Error(data.error);
         setWeeks(data.weeks ?? []);
         setDataEnd(data.dataEnd ?? '');
       })
-      .catch((e: Error) => setError(e.message))
+      .catch((e: Error) => {
+        if (e.name !== 'AbortError') setError(e.message);
+      })
       .finally(() => setLoading(false));
+    return () => controller.abort();
   }, [startDate, endDate]);
 
   // Re-classify whenever weeks or probability changes (no API call)
@@ -343,7 +340,7 @@ export default function ExpiryAnalysis() {
                   strokeDasharray="6 3"
                   strokeWidth={1.5}
                   label={{
-                    value: `Lower Boundary (${lower.toFixed(2)}%)`,
+                    value: `Lower Boundary (${sign(lower)}${lower.toFixed(2)}%)`,
                     position: 'right',
                     fontSize: 9,
                     fill: '#f87171',
