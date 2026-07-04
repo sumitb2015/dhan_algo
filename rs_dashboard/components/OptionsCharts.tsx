@@ -15,6 +15,7 @@ import OptionsIntelligenceTab from './OptionsIntelligenceTab';
 import OptionsVixTab from './OptionsVixTab';
 import OptionsBuildupTab from './OptionsBuildupTab';
 import OptionsMultiStrikeTab from './OptionsMultiStrikeTab';
+import OptionsPCDiffTab from './OptionsPCDiffTab';
 
 // ─── Types ────────────────────────────────────────────────────────
 
@@ -166,7 +167,7 @@ export default function OptionsCharts() {
   const [showVWAP,   setShowVWAP]   = useState(true);
   const [showCELine, setShowCELine] = useState(true);
   const [showPELine, setShowPELine] = useState(true);
-  const [activeTab, setActiveTab] = useState<'premium' | 'skew' | 'oi' | 'cumulative' | 'chain' | 'intelligence' | 'vix' | 'buildup' | 'multistrike'>('premium');
+  const [activeTab, setActiveTab] = useState<'premium' | 'skew' | 'oi' | 'cumulative' | 'chain' | 'intelligence' | 'vix' | 'buildup' | 'multistrike' | 'pcdiff'>('premium');
 
   // ── Fetch expiries ────────────────────────────────────────────────
   useEffect(() => {
@@ -587,6 +588,7 @@ export default function OptionsCharts() {
               { key: 'vix',          label: 'India VIX'    },
               { key: 'buildup',      label: 'Buildup'      },
               { key: 'multistrike',  label: 'Multi-Strike' },
+              { key: 'pcdiff',       label: 'PC Diff'      },
             ] as const).map(({ key, label }) => (
               <button
                 key={key}
@@ -617,6 +619,14 @@ export default function OptionsCharts() {
               history={history}
               candleInterval={candleInterval}
               atm={atm}
+            />
+          )}
+
+          {activeTab === 'pcdiff' && (
+            <OptionsPCDiffTab
+              candles={chartData}
+              interval={candleInterval}
+              isLive={isLive}
             />
           )}
 
