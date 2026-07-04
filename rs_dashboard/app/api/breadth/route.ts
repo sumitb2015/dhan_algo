@@ -21,7 +21,6 @@ export interface IndexStats {
   chopIndex: number | null;
   trendState: string;
   dataDate: string;
-  nifty50BreadthPct: number;  // % of Nifty 50 stocks above their 200d SMA
 }
 
 export interface BreadthStats {
@@ -39,7 +38,7 @@ export interface BreadthStats {
   unchanged1W: number;
   advDecRatio: number;
   rsiOverbought: number;   // RSI > 70
-  rsiNeutral: number;      // RSI 40–70
+  rsiBucket40to70: number;   // RSI 40–70 (split in UI into 60–70 elevated + 40–60 neutral)
   rsiOversold: number;     // RSI < 40
   participationScore: number;   // 0–100 composite breadth score
   bullPowerCount: number;       // close > MA20 > MA50 > MA200
@@ -55,6 +54,7 @@ export interface BreadthStats {
 
 export interface BreadthResponse {
   nifty50: IndexStats;
+  nifty50Breadth: BreadthStats;   // ← N50 constituent breadth suite
   nifty500Breadth: BreadthStats;
   regimeLabel: string;
   regimeColor: 'green' | 'lime' | 'yellow' | 'orange' | 'red';
@@ -219,7 +219,7 @@ function computeIndexStats(rows: OHLCVRow[]): IndexStats {
     chopIndex: chopIndex !== null ? +chopIndex.toFixed(2) : null,
     trendState,
     dataDate: last.date,
-    nifty50BreadthPct: 0,  // filled in GET handler after computeNifty50BreadthPct()
+    // nifty50BreadthPct removed — now in nifty50Breadth.aboveEma200Pct
   };
 }
 
@@ -337,7 +337,7 @@ async function computeBreadthStats(symbols: string[]): Promise<BreadthStats> {
     unchanged1W,
     advDecRatio,
     rsiOverbought,
-    rsiNeutral,
+    rsiBucket40to70: rsiNeutral,   // ← renamed field, same value
     rsiOversold,
     participationScore,
     bullPowerCount: bullPower,
@@ -350,20 +350,6 @@ async function computeBreadthStats(symbols: string[]): Promise<BreadthStats> {
     rsiBelow40Pct: pct(rsiBelow40),
     netAdvanceDecline,
   };
-}
-
-function computeNifty50BreadthPct(): number {
-  let above = 0, total = 0;
-  for (const symbol of NIFTY50_SYMBOLS) {
-    const rows = readStockCSV(symbol);
-    if (rows.length < 200) continue;
-    total++;
-    const closes = rows.map((r) => r.close);
-    const ma200 = simpleMA(closes, 200);
-    const latest = closes[closes.length - 1];
-    if (latest > ma200 && ma200 > 0) above++;
-  }
-  return total > 0 ? +((above / total) * 100).toFixed(1) : 0;
 }
 
 function deriveRegime(aboveEma200Pct: number): { label: string; color: BreadthResponse['regimeColor'] } {
@@ -385,18 +371,17 @@ export async function GET() {
     const nifty50Rows = readNifty50Index();
     const nifty500Symbols = readNifty500List();
 
-    const [nifty50, nifty500Breadth, nifty50BreadthPct] = await Promise.all([
+    const [nifty50, nifty50Breadth, nifty500Breadth] = await Promise.all([
       Promise.resolve(computeIndexStats(nifty50Rows)),
+      computeBreadthStats(NIFTY50_SYMBOLS),
       computeBreadthStats(nifty500Symbols),
-      Promise.resolve(computeNifty50BreadthPct()),
     ]);
-
-    nifty50.nifty50BreadthPct = nifty50BreadthPct;
 
     const { label: regimeLabel, color: regimeColor } = deriveRegime(nifty500Breadth.aboveEma200Pct);
 
     const data: BreadthResponse = {
       nifty50,
+      nifty50Breadth,
       nifty500Breadth,
       regimeLabel,
       regimeColor,
