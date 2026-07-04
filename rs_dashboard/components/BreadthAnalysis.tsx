@@ -333,8 +333,8 @@ function BreadthColumn({ title, subtitle, stats }: { title: string; subtitle: st
   const adLabel = stats.advDecRatio >= 3 ? 'Strongly Bullish' : stats.advDecRatio >= 2 ? 'Bullish' : stats.advDecRatio >= 1 ? 'Neutral-Bull' : stats.advDecRatio >= 0.5 ? 'Neutral-Bear' : 'Bearish';
   const netClass = stats.netAdvanceDecline >= 0 ? 'text-emerald-400' : 'text-red-400';
 
-  const rsiElevated = stats.rsiAbove60 - stats.rsiOverbought;
-  const rsiNeutral40to60 = stats.rsiBucket40to70 - rsiElevated;
+  const rsiElevated = Math.max(0, stats.rsiAbove60 - stats.rsiOverbought);
+  const rsiNeutral40to60 = Math.max(0, stats.rsiBucket40to70 - rsiElevated);
 
   const hlRatio = stats.new52WLowCount > 0 ? stats.new52WHighCount / stats.new52WLowCount : stats.new52WHighCount;
   const hlClass = hlRatio >= 2 ? 'text-emerald-400' : hlRatio >= 1 ? 'text-yellow-400' : 'text-red-400';
