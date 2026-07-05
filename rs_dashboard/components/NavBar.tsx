@@ -39,6 +39,7 @@ const NAV_GROUPS = [
       { href: '/iv-charts', label: 'IV Charts', desc: 'Implied Volatility history & skew' },
       { href: '/scalper', label: 'Scalper', desc: 'Multi-window active trading & scalping order ticket' },
       { href: '/straddle-analysis', label: 'Straddle Analysis', desc: 'ATM straddle premium patterns by weekday, DTE & regime' },
+      { href: '/strangle-analysis', label: 'Strangle Analysis', desc: 'OTM strangle premium patterns by offset, weekday, DTE & regime' },
     ],
   },
   {
