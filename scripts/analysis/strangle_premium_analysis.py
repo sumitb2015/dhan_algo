@@ -156,14 +156,15 @@ def compute_regime_stats(daily: pd.DataFrame, merged: pd.DataFrame) -> dict:
                    (full["time_str"] <= "15:30")]
         if len(sub) == 0:
             continue
-        agg_df = (
-            sub.groupby("time_str")["straddle_close"]
-            .agg(avg="mean",
-                 p25=lambda x: x.quantile(0.25),
-                 p75=lambda x: x.quantile(0.75))
-            .reset_index()
-            .sort_values("time_str")
-        )
+        grouped = sub.groupby("time_str")["straddle_close"]
+        avg_series = grouped.mean()
+        p25_series = grouped.quantile(0.25)
+        p75_series = grouped.quantile(0.75)
+        agg_df = pd.DataFrame({
+            "avg": avg_series,
+            "p25": p25_series,
+            "p75": p75_series
+        }).reset_index().sort_values("time_str")
         intraday_decay[bucket] = [
             {"time": row["time_str"],
              "avg":  round(float(row["avg"]), 2),
@@ -289,10 +290,6 @@ def build_offset(df_all: pd.DataFrame, offset: int) -> dict:
         empty = compute_regime_stats(pd.DataFrame(), pd.DataFrame())
         return {"regimes": {"all": empty, "pre_sep2025": empty, "post_sep2025": empty}}
 
-    df["expiry_date"] = pd.to_datetime(df["expiry"]).dt.date
-    df["trade_date"]  = df["datetime"].dt.date
-    df["time_str"]    = df["datetime"].dt.strftime("%H:%M")
-
     # CE rows are option_type == 'CE'; PE rows are option_type == 'PE'
     idx = ["expiry", "datetime", "trade_date", "expiry_date", "time_str", "spot"]
     ce = df[df["option_type"] == "CE"].set_index(idx)[["open", "high", "low", "close"]]
@@ -333,11 +330,13 @@ def build_offset(df_all: pd.DataFrame, offset: int) -> dict:
 
     daily["expiry_date"]   = pd.to_datetime(daily["expiry_date"])
     daily["trade_date_dt"] = pd.to_datetime(daily["trade_date"])
-    # Vectorised busday_count — far faster than a Python-level loop
+    
+    # Vectorised busday_count with clean cast to datetime64[D]
     daily["dte"] = np.busday_count(
-        daily["trade_date"].astype(str).values,
-        daily["expiry_date"].dt.date.astype(str).values,
+        daily["trade_date"].values.astype('datetime64[D]'),
+        daily["expiry_date"].values.astype('datetime64[D]')
     ).astype(int)
+    
     daily["weekday"]    = daily["trade_date_dt"].dt.weekday.map(
                               {i: n for i, n in enumerate(WEEKDAY_NAMES)}
                           )
@@ -369,22 +368,41 @@ def main() -> None:
         print(f"ERROR: {DB_PATH} not found", file=sys.stderr)
         sys.exit(1)
 
+    # Fetch unique expiries from directory filenames to leverage indexes
+    write_status("running", 2, "Resolving expiries...")
+    atm_dir = PROJECT_ROOT / "Options Data" / "NIFTY" / "ATM"
+    expiries = []
+    if atm_dir.exists():
+        for p in atm_dir.glob("*.csv"):
+            date_str = p.stem
+            if len(date_str) == 10 and date_str >= str(REGIME_CUTOFF):
+                expiries.append(date_str)
+    expiries = sorted(list(set(expiries)))
+
     conn = sqlite3.connect(str(DB_PATH))
-    
-    # Load all required CE and PE relative strikes in one fast query
-    write_status("running", 5, "Loading options data from database...")
-    
+
+    if not expiries:
+        # Fallback to querying the database for expiries (slower but safe)
+        cursor = conn.cursor()
+        cursor.execute(f"SELECT DISTINCT expiry FROM option_prices WHERE datetime >= '{REGIME_CUTOFF}'")
+        expiries = [r[0] for r in cursor.fetchall()]
+
     labels = []
     for offset in OFFSETS:
         labels.append(f"ATM+{offset}")
         labels.append(f"ATM-{offset}")
     labels_placeholder = ",".join(f"'{l}'" for l in labels)
+    expiries_placeholder = ",".join(f"'{e}'" for e in expiries)
 
+    # Load all required CE and PE relative strikes in one fast query
+    write_status("running", 5, "Loading options data from database...")
+    
     df_all = pd.read_sql(
         f"""
         SELECT expiry, datetime, option_type, strike_relative, open, high, low, close, spot
         FROM option_prices
-        WHERE strike_relative IN ({labels_placeholder})
+        WHERE expiry IN ({expiries_placeholder})
+          AND strike_relative IN ({labels_placeholder})
           AND datetime >= '{REGIME_CUTOFF}'
         ORDER BY expiry, datetime, option_type
         """,
@@ -396,6 +414,12 @@ def main() -> None:
     if df_all.empty:
         write_status("error", 0, "No option data found in database.")
         sys.exit(1)
+
+    # Precompute conversions once on df_all to save time inside build_offset loop
+    write_status("running", 8, "Pre-processing datetime conversions...")
+    df_all["expiry_date"] = pd.to_datetime(df_all["expiry"]).dt.date
+    df_all["trade_date"]  = df_all["datetime"].dt.date
+    df_all["time_str"]    = df_all["datetime"].dt.strftime("%H:%M")
 
     output: dict = {
         "generated_at":  datetime.now().isoformat(),
