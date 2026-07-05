@@ -38,6 +38,7 @@ const NAV_GROUPS = [
       { href: '/options', label: 'Options', desc: 'Max pain, PCR & live options chain' },
       { href: '/iv-charts', label: 'IV Charts', desc: 'Implied Volatility history & skew' },
       { href: '/scalper', label: 'Scalper', desc: 'Multi-window active trading & scalping order ticket' },
+      { href: '/straddle-analysis', label: 'Straddle Analysis', desc: 'ATM straddle premium patterns by weekday, DTE & regime' },
     ],
   },
   {
