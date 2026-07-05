@@ -216,7 +216,7 @@ function StatsTable({
     <div className="overflow-x-auto mt-4">
       <table className="w-full text-xs border-collapse">
         <thead>
-          <tr className="bg-zinc-900">
+          <tr className="bg-zinc-800">
             <th className="text-left px-3 py-2 text-xs font-bold text-white whitespace-nowrap">Segment</th>
             {columns.map((c) => (
               <th key={c.header} className={`px-3 py-2 text-xs font-bold text-white whitespace-nowrap text-right ${c.className ?? ''}`}>
@@ -960,7 +960,7 @@ export default function StrangleAnalysis() {
           <div className="overflow-x-auto mt-4">
             <table className="w-full text-xs border-collapse">
               <thead>
-                <tr className="bg-zinc-900">
+                <tr className="bg-zinc-800">
                   {['DTE', 'Avg Opening', 'Avg Range', 'Range / Open', 'Seller Win%'].map((h) => (
                     <th key={h} className="px-3 py-2 text-xs font-bold text-white whitespace-nowrap text-right first:text-left">{h}</th>
                   ))}
