@@ -11,6 +11,7 @@ Writes debug/strangle_premium_analysis.json.
 """
 
 import json
+import os
 import sqlite3
 import sys
 import time
@@ -289,7 +290,6 @@ def process_one_offset(offset: int, expiries_placeholder: str) -> dict:
         FROM option_prices
         WHERE expiry IN ({expiries_placeholder})
           AND strike_relative IN ('ATM+{offset}', 'ATM-{offset}')
-        ORDER BY expiry, datetime, option_type
         """,
         conn
     )
@@ -304,9 +304,10 @@ def process_one_offset(offset: int, expiries_placeholder: str) -> dict:
     df["time_str"] = df["datetime"].str[11:16]
     df["expiry_date"] = df["expiry"]
 
-    # CE rows are option_type == 'CE'; PE rows are option_type == 'PE'
-    idx = ["expiry", "datetime", "trade_date", "expiry_date", "time_str", "spot"]
-    ce = df[df["option_type"] == "CE"].set_index(idx)[["open", "high", "low", "close"]]
+    # Optimize MultiIndex join by indexing only on ['expiry', 'datetime']
+    idx = ["expiry", "datetime"]
+    cols = ["trade_date", "expiry_date", "time_str", "spot", "open", "high", "low", "close"]
+    ce = df[df["option_type"] == "CE"].set_index(idx)[cols]
     pe = df[df["option_type"] == "PE"].set_index(idx)[["open", "high", "low", "close"]]
     merged = ce.join(pe, lsuffix="_ce", rsuffix="_pe", how="inner").reset_index()
 
@@ -318,9 +319,9 @@ def process_one_offset(offset: int, expiries_placeholder: str) -> dict:
         ["expiry", "trade_date", "expiry_date", "straddle_close"]
     ].rename(columns={"straddle_close": "open_premium"})
 
+    # Since the SQL query reads rows via the index (sorted by datetime), no sort_values needed!
     close_rows = (
-        merged.sort_values("datetime")
-        .groupby(["expiry", "trade_date"])
+        merged.groupby(["expiry", "trade_date"])
         .last()
         .reset_index()[["expiry", "trade_date", "straddle_close"]]
         .rename(columns={"straddle_close": "close_premium"})
@@ -420,7 +421,8 @@ def main() -> None:
     print(f"Computing strangle analysis for {len(expiries)} expiries across all offsets (1-10)...")
     
     completed_count = 0
-    with ProcessPoolExecutor(max_workers=4) as executor:
+    max_workers = min(os.cpu_count() or 4, 10)
+    with ProcessPoolExecutor(max_workers=max_workers) as executor:
         futures = {
             executor.submit(process_one_offset, offset, expiries_placeholder): offset 
             for offset in range(1, 11)
