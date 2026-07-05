@@ -333,11 +333,11 @@ def build_offset(df_all: pd.DataFrame, offset: int) -> dict:
 
     daily["expiry_date"]   = pd.to_datetime(daily["expiry_date"])
     daily["trade_date_dt"] = pd.to_datetime(daily["trade_date"])
-    daily["dte"] = [
-        int(np.busday_count(str(td), str(ex)))
-        for td, ex in zip(daily["trade_date"], daily["expiry_date"].dt.date)
-    ]
-    daily["dte_label"]  = daily["dte"].apply(lambda x: str(x) if x < 5 else "5+")
+    # Vectorised busday_count — far faster than a Python-level loop
+    daily["dte"] = np.busday_count(
+        daily["trade_date"].astype(str).values,
+        daily["expiry_date"].dt.date.astype(str).values,
+    ).astype(int)
     daily["weekday"]    = daily["trade_date_dt"].dt.weekday.map(
                               {i: n for i, n in enumerate(WEEKDAY_NAMES)}
                           )
@@ -348,16 +348,15 @@ def build_offset(df_all: pd.DataFrame, offset: int) -> dict:
     daily["month"]      = daily["trade_date_dt"].dt.to_period("M").astype(str)
     daily["year"]       = daily["trade_date_dt"].dt.year
 
-    daily_pre   = daily[daily["trade_date"] < REGIME_CUTOFF].copy()
-    daily_post  = daily[daily["trade_date"] >= REGIME_CUTOFF].copy()
-    merged_pre  = merged[merged["trade_date"] < REGIME_CUTOFF].copy()
-    merged_post = merged[merged["trade_date"] >= REGIME_CUTOFF].copy()
-
+    # All loaded data is post-REGIME_CUTOFF (query is filtered), so compute once
+    # and reuse for both 'all' and 'post_sep2025' — pre_sep2025 is always empty.
+    stats = compute_regime_stats(daily, merged)
+    empty = compute_regime_stats(pd.DataFrame(), pd.DataFrame())
     return {
         "regimes": {
-            "all":          compute_regime_stats(daily, merged),
-            "pre_sep2025":  compute_regime_stats(daily_pre, merged_pre),
-            "post_sep2025": compute_regime_stats(daily_post, merged_post),
+            "all":          stats,
+            "pre_sep2025":  empty,
+            "post_sep2025": stats,
         }
     }
 
