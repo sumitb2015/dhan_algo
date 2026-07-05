@@ -3,21 +3,15 @@
 Strangle Premium Analysis
 Queries nifty_options.db for OTM CE+PE pairs at offsets 1-10 from ATM.
 For each offset N, joins ATM+N (CE) with ATM-N (PE) and computes the same
-statistics as the straddle analysis across three regime views:
-  - all          : full history
-  - pre_sep2025  : before 2025-09-01 (NSE weekly expiry was Thursday)
-  - post_sep2025 : from 2025-09-01 onwards (NSE weekly expiry changed to Tuesday)
+statistics as the straddle analysis across three regime views.
 Writes debug/strangle_premium_analysis.json.
 """
 
 import json
-import os
 import sqlite3
 import sys
-import time
 from datetime import datetime, date
 from pathlib import Path
-from concurrent.futures import ProcessPoolExecutor, as_completed
 
 import numpy as np
 import pandas as pd
@@ -162,15 +156,14 @@ def compute_regime_stats(daily: pd.DataFrame, merged: pd.DataFrame) -> dict:
                    (full["time_str"] <= "15:30")]
         if len(sub) == 0:
             continue
-        grouped = sub.groupby("time_str")["straddle_close"]
-        avg_series = grouped.mean()
-        p25_series = grouped.quantile(0.25)
-        p75_series = grouped.quantile(0.75)
-        agg_df = pd.DataFrame({
-            "avg": avg_series,
-            "p25": p25_series,
-            "p75": p75_series
-        }).reset_index().sort_values("time_str")
+        agg_df = (
+            sub.groupby("time_str")["straddle_close"]
+            .agg(avg="mean",
+                 p25=lambda x: x.quantile(0.25),
+                 p75=lambda x: x.quantile(0.75))
+            .reset_index()
+            .sort_values("time_str")
+        )
         intraday_decay[bucket] = [
             {"time": row["time_str"],
              "avg":  round(float(row["avg"]), 2),
@@ -281,27 +274,30 @@ def compute_regime_stats(daily: pd.DataFrame, merged: pd.DataFrame) -> dict:
     }
 
 
-def process_one_offset(offset: int, df_offset: pd.DataFrame) -> dict:
-    """Process options data for a single OTM offset in memory."""
-    if df_offset.empty:
+def build_offset(df_all: pd.DataFrame, offset: int) -> dict:
+    """Filter ATM+N CE and ATM-N PE rows from df_all, build daily metrics, return three regime dicts."""
+    ce_label = f"ATM+{offset}"
+    pe_label = f"ATM-{offset}"
+
+    # Filter CE and PE rows in memory from df_all
+    df = df_all[
+        ((df_all["option_type"] == "CE") & (df_all["strike_relative"] == ce_label)) |
+        ((df_all["option_type"] == "PE") & (df_all["strike_relative"] == pe_label))
+    ].copy()
+
+    if df.empty:
         empty = compute_regime_stats(pd.DataFrame(), pd.DataFrame())
         return {"regimes": {"all": empty, "pre_sep2025": empty, "post_sep2025": empty}}
 
-    # Fast string slicing for trade_date and time_str
-    df_offset["trade_date"] = df_offset["datetime"].str[:10]
-    df_offset["time_str"] = df_offset["datetime"].str[11:16]
-    df_offset["expiry_date"] = df_offset["expiry"]
+    df["expiry_date"] = pd.to_datetime(df["expiry"]).dt.date
+    df["trade_date"]  = df["datetime"].dt.date
+    df["time_str"]    = df["datetime"].dt.strftime("%H:%M")
 
-    # Optimize MultiIndex join by indexing only on ['expiry', 'datetime']
-    idx = ["expiry", "datetime"]
-    cols = ["trade_date", "expiry_date", "time_str", "spot", "open", "high", "low", "close"]
-    ce = df_offset[df_offset["option_type"] == "CE"].set_index(idx)[cols]
-    pe = df_offset[df_offset["option_type"] == "PE"].set_index(idx)[["open", "high", "low", "close"]]
+    # CE rows are option_type == 'CE'; PE rows are option_type == 'PE'
+    idx = ["expiry", "datetime", "trade_date", "expiry_date", "time_str", "spot"]
+    ce = df[df["option_type"] == "CE"].set_index(idx)[["open", "high", "low", "close"]]
+    pe = df[df["option_type"] == "PE"].set_index(idx)[["open", "high", "low", "close"]]
     merged = ce.join(pe, lsuffix="_ce", rsuffix="_pe", how="inner").reset_index()
-
-    if merged.empty:
-        empty = compute_regime_stats(pd.DataFrame(), pd.DataFrame())
-        return {"regimes": {"all": empty, "pre_sep2025": empty, "post_sep2025": empty}}
 
     merged["straddle_close"] = merged["close_ce"] + merged["close_pe"]
     merged["straddle_high"]  = merged["high_ce"]  + merged["high_pe"]
@@ -311,9 +307,9 @@ def process_one_offset(offset: int, df_offset: pd.DataFrame) -> dict:
         ["expiry", "trade_date", "expiry_date", "straddle_close"]
     ].rename(columns={"straddle_close": "open_premium"})
 
-    # Since the SQL query reads rows via the index (sorted by datetime), no sort_values needed!
     close_rows = (
-        merged.groupby(["expiry", "trade_date"])
+        merged.sort_values("datetime")
+        .groupby(["expiry", "trade_date"])
         .last()
         .reset_index()[["expiry", "trade_date", "straddle_close"]]
         .rename(columns={"straddle_close": "close_premium"})
@@ -332,15 +328,16 @@ def process_one_offset(offset: int, df_offset: pd.DataFrame) -> dict:
     )
     daily = daily[(daily["open_premium"] > 0) & (daily["close_premium"] > 0)].copy()
 
+    daily["_trade_dow"] = pd.to_datetime(daily["trade_date"]).dt.weekday
+    daily = daily[daily["_trade_dow"] < 5].drop(columns=["_trade_dow"])
+
     daily["expiry_date"]   = pd.to_datetime(daily["expiry_date"])
     daily["trade_date_dt"] = pd.to_datetime(daily["trade_date"])
-    
-    # Vectorised busday_count with clean cast to datetime64[D]
-    daily["dte"] = np.busday_count(
-        pd.to_datetime(daily["trade_date"]).values.astype('datetime64[D]'),
-        pd.to_datetime(daily["expiry_date"]).values.astype('datetime64[D]')
-    ).astype(int)
-    
+    daily["dte"] = [
+        int(np.busday_count(str(td), str(ex)))
+        for td, ex in zip(daily["trade_date"], daily["expiry_date"].dt.date)
+    ]
+    daily["dte_label"]  = daily["dte"].apply(lambda x: str(x) if x < 5 else "5+")
     daily["weekday"]    = daily["trade_date_dt"].dt.weekday.map(
                               {i: n for i, n in enumerate(WEEKDAY_NAMES)}
                           )
@@ -351,22 +348,16 @@ def process_one_offset(offset: int, df_offset: pd.DataFrame) -> dict:
     daily["month"]      = daily["trade_date_dt"].dt.to_period("M").astype(str)
     daily["year"]       = daily["trade_date_dt"].dt.year
 
-    # Split into pre and post Sep 2025 regimes
-    cutoff_dt  = pd.to_datetime(REGIME_CUTOFF)
-    daily_pre  = daily[daily["trade_date_dt"] < cutoff_dt].copy()
-    daily_post = daily[daily["trade_date_dt"] >= cutoff_dt].copy()
-    merged_pre  = merged[merged["trade_date"] < str(REGIME_CUTOFF)].copy()
-    merged_post = merged[merged["trade_date"] >= str(REGIME_CUTOFF)].copy()
-
-    stats_all  = compute_regime_stats(daily, merged)
-    stats_pre  = compute_regime_stats(daily_pre, merged_pre)
-    stats_post = compute_regime_stats(daily_post, merged_post)
+    daily_pre   = daily[daily["trade_date"] < REGIME_CUTOFF].copy()
+    daily_post  = daily[daily["trade_date"] >= REGIME_CUTOFF].copy()
+    merged_pre  = merged[merged["trade_date"] < REGIME_CUTOFF].copy()
+    merged_post = merged[merged["trade_date"] >= REGIME_CUTOFF].copy()
 
     return {
         "regimes": {
-            "all":          stats_all,
-            "pre_sep2025":  stats_pre,
-            "post_sep2025": stats_post,
+            "all":          compute_regime_stats(daily, merged),
+            "pre_sep2025":  compute_regime_stats(daily_pre, merged_pre),
+            "post_sep2025": compute_regime_stats(daily_post, merged_post),
         }
     }
 
@@ -379,74 +370,44 @@ def main() -> None:
         print(f"ERROR: {DB_PATH} not found", file=sys.stderr)
         sys.exit(1)
 
-    # Fetch unique expiries from directory filenames to leverage indexes
-    write_status("running", 2, "Resolving expiries...")
-    atm_dir = PROJECT_ROOT / "Options Data" / "NIFTY" / "ATM"
-    expiries = []
-    if atm_dir.exists():
-        for p in atm_dir.glob("*.csv"):
-            date_str = p.stem
-            if len(date_str) == 10:
-                expiries.append(date_str)
-    expiries = sorted(list(set(expiries)))
+    conn = sqlite3.connect(str(DB_PATH))
+    
+    # Load all required CE and PE relative strikes in one fast query
+    write_status("running", 5, "Loading options data from database...")
+    
+    labels = []
+    for offset in OFFSETS:
+        labels.append(f"ATM+{offset}")
+        labels.append(f"ATM-{offset}")
+    labels_placeholder = ",".join(f"'{l}'" for l in labels)
 
-    if not expiries:
-        # Fallback to querying the database for expiries (slower but safe)
-        conn = sqlite3.connect(str(DB_PATH))
-        cursor = conn.cursor()
-        cursor.execute("SELECT DISTINCT expiry FROM option_prices")
-        expiries = [r[0] for r in cursor.fetchall()]
-        conn.close()
+    df_all = pd.read_sql(
+        f"""
+        SELECT expiry, datetime, option_type, strike_relative, open, high, low, close, spot
+        FROM option_prices
+        WHERE strike_relative IN ({labels_placeholder})
+          AND datetime >= '{REGIME_CUTOFF}'
+        ORDER BY expiry, datetime, option_type
+        """,
+        conn,
+        parse_dates=["datetime"],
+    )
+    conn.close()
 
-    expiries_placeholder = ",".join(f"'{e}'" for e in expiries)
+    if df_all.empty:
+        write_status("error", 0, "No option data found in database.")
+        sys.exit(1)
 
     output: dict = {
         "generated_at":  datetime.now().isoformat(),
         "regime_cutoff": str(REGIME_CUTOFF),
     }
 
-    write_status("running", 5, "Loading options data from database...")
-    print(f"Loading options data for {len(expiries)} expiries across all offsets (1-10)...")
-    
-    # Build list of all OTM relative strikes
-    relative_strikes = []
-    for i in range(1, 11):
-        relative_strikes.extend([f"ATM+{i}", f"ATM-{i}"])
-    strikes_placeholder = ",".join(f"'{s}'" for s in relative_strikes)
-
-    # Query once
-    conn = sqlite3.connect(str(DB_PATH))
-    df_all = pd.read_sql(
-        f"""
-        SELECT expiry, datetime, option_type, strike_relative, open, high, low, close, spot
-        FROM option_prices
-        WHERE expiry IN ({expiries_placeholder})
-          AND strike_relative IN ({strikes_placeholder})
-        """,
-        conn
-    )
-    conn.close()
-
-    if df_all.empty:
-        write_status("error", 0, "No options data found in database.")
-        print("ERROR: No options data found in database.", file=sys.stderr)
-        sys.exit(1)
-
-    for offset in range(1, 11):
-        pct = 5 + (offset - 1) * 9
-        write_status("running", pct, f"Processing offset {offset}/10...")
-        print(f"Processing offset {offset}/10...")
-        
-        ce_label = f"ATM+{offset}"
-        pe_label = f"ATM-{offset}"
-        df_offset = df_all[df_all["strike_relative"].isin([ce_label, pe_label])].copy()
-        
-        try:
-            output[f"offset_{offset}"] = process_one_offset(offset, df_offset)
-        except Exception as e:
-            print(f"ERROR: Offset {offset} failed: {e}", file=sys.stderr)
-            write_status("error", 0, f"Offset {offset} failed: {e}")
-            sys.exit(1)
+    for i, offset in enumerate(OFFSETS):
+        pct_start = 10 + i * 8
+        write_status("running", pct_start, f"Processing ATM+{offset}/ATM-{offset} strangle ({i+1}/10)...")
+        output[f"offset_{offset}"] = build_offset(df_all, offset)
+        write_status("running", pct_start + 7, f"Offset {offset} done.")
 
     OUTPUT_PATH.parent.mkdir(exist_ok=True)
     print(f"Writing text of length {len(json.dumps(output))} to {OUTPUT_PATH}...")
