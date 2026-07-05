@@ -3,15 +3,20 @@
 Strangle Premium Analysis
 Queries nifty_options.db for OTM CE+PE pairs at offsets 1-10 from ATM.
 For each offset N, joins ATM+N (CE) with ATM-N (PE) and computes the same
-statistics as the straddle analysis across three regime views.
+statistics as the straddle analysis across three regime views:
+  - all          : full history
+  - pre_sep2025  : before 2025-09-01 (NSE weekly expiry was Thursday)
+  - post_sep2025 : from 2025-09-01 onwards (NSE weekly expiry changed to Tuesday)
 Writes debug/strangle_premium_analysis.json.
 """
 
 import json
 import sqlite3
 import sys
+import time
 from datetime import datetime, date
 from pathlib import Path
+from concurrent.futures import ProcessPoolExecutor, as_completed
 
 import numpy as np
 import pandas as pd
@@ -275,20 +280,29 @@ def compute_regime_stats(daily: pd.DataFrame, merged: pd.DataFrame) -> dict:
     }
 
 
-def build_offset(df_all: pd.DataFrame, offset: int) -> dict:
-    """Filter ATM+N CE and ATM-N PE rows from df_all, build daily metrics, return three regime dicts."""
-    ce_label = f"ATM+{offset}"
-    pe_label = f"ATM-{offset}"
-
-    # Filter CE and PE rows in memory from df_all
-    df = df_all[
-        ((df_all["option_type"] == "CE") & (df_all["strike_relative"] == ce_label)) |
-        ((df_all["option_type"] == "PE") & (df_all["strike_relative"] == pe_label))
-    ].copy()
+def process_one_offset(offset: int, expiries_placeholder: str) -> dict:
+    """Load and process options data for a single OTM offset from database across all history."""
+    conn = sqlite3.connect(str(DB_PATH))
+    df = pd.read_sql(
+        f"""
+        SELECT expiry, datetime, option_type, strike_relative, open, high, low, close, spot
+        FROM option_prices
+        WHERE expiry IN ({expiries_placeholder})
+          AND strike_relative IN ('ATM+{offset}', 'ATM-{offset}')
+        ORDER BY expiry, datetime, option_type
+        """,
+        conn
+    )
+    conn.close()
 
     if df.empty:
         empty = compute_regime_stats(pd.DataFrame(), pd.DataFrame())
         return {"regimes": {"all": empty, "pre_sep2025": empty, "post_sep2025": empty}}
+
+    # Fast string slicing for trade_date and time_str
+    df["trade_date"] = df["datetime"].str[:10]
+    df["time_str"] = df["datetime"].str[11:16]
+    df["expiry_date"] = df["expiry"]
 
     # CE rows are option_type == 'CE'; PE rows are option_type == 'PE'
     idx = ["expiry", "datetime", "trade_date", "expiry_date", "time_str", "spot"]
@@ -347,15 +361,22 @@ def build_offset(df_all: pd.DataFrame, offset: int) -> dict:
     daily["month"]      = daily["trade_date_dt"].dt.to_period("M").astype(str)
     daily["year"]       = daily["trade_date_dt"].dt.year
 
-    # All loaded data is post-REGIME_CUTOFF (query is filtered), so compute once
-    # and reuse for both 'all' and 'post_sep2025' — pre_sep2025 is always empty.
-    stats = compute_regime_stats(daily, merged)
-    empty = compute_regime_stats(pd.DataFrame(), pd.DataFrame())
+    # Split into pre and post Sep 2025 regimes
+    cutoff_dt  = pd.to_datetime(REGIME_CUTOFF)
+    daily_pre  = daily[daily["trade_date_dt"] < cutoff_dt].copy()
+    daily_post = daily[daily["trade_date_dt"] >= cutoff_dt].copy()
+    merged_pre  = merged[merged["trade_date"] < str(REGIME_CUTOFF)].copy()
+    merged_post = merged[merged["trade_date"] >= str(REGIME_CUTOFF)].copy()
+
+    stats_all  = compute_regime_stats(daily, merged)
+    stats_pre  = compute_regime_stats(daily_pre, merged_pre)
+    stats_post = compute_regime_stats(daily_post, merged_post)
+
     return {
         "regimes": {
-            "all":          stats,
-            "pre_sep2025":  empty,
-            "post_sep2025": stats,
+            "all":          stats_all,
+            "pre_sep2025":  stats_pre,
+            "post_sep2025": stats_post,
         }
     }
 
@@ -375,62 +396,46 @@ def main() -> None:
     if atm_dir.exists():
         for p in atm_dir.glob("*.csv"):
             date_str = p.stem
-            if len(date_str) == 10 and date_str >= str(REGIME_CUTOFF):
+            if len(date_str) == 10:
                 expiries.append(date_str)
     expiries = sorted(list(set(expiries)))
 
-    conn = sqlite3.connect(str(DB_PATH))
-
     if not expiries:
         # Fallback to querying the database for expiries (slower but safe)
+        conn = sqlite3.connect(str(DB_PATH))
         cursor = conn.cursor()
-        cursor.execute(f"SELECT DISTINCT expiry FROM option_prices WHERE datetime >= '{REGIME_CUTOFF}'")
+        cursor.execute("SELECT DISTINCT expiry FROM option_prices")
         expiries = [r[0] for r in cursor.fetchall()]
+        conn.close()
 
-    labels = []
-    for offset in OFFSETS:
-        labels.append(f"ATM+{offset}")
-        labels.append(f"ATM-{offset}")
-    labels_placeholder = ",".join(f"'{l}'" for l in labels)
     expiries_placeholder = ",".join(f"'{e}'" for e in expiries)
-
-    # Load all required CE and PE relative strikes in one fast query
-    write_status("running", 5, "Loading options data from database...")
-    
-    df_all = pd.read_sql(
-        f"""
-        SELECT expiry, datetime, option_type, strike_relative, open, high, low, close, spot
-        FROM option_prices
-        WHERE expiry IN ({expiries_placeholder})
-          AND strike_relative IN ({labels_placeholder})
-          AND datetime >= '{REGIME_CUTOFF}'
-        ORDER BY expiry, datetime, option_type
-        """,
-        conn,
-        parse_dates=["datetime"],
-    )
-    conn.close()
-
-    if df_all.empty:
-        write_status("error", 0, "No option data found in database.")
-        sys.exit(1)
-
-    # Precompute conversions once on df_all to save time inside build_offset loop
-    write_status("running", 8, "Pre-processing datetime conversions...")
-    df_all["expiry_date"] = pd.to_datetime(df_all["expiry"]).dt.date
-    df_all["trade_date"]  = df_all["datetime"].dt.date
-    df_all["time_str"]    = df_all["datetime"].dt.strftime("%H:%M")
 
     output: dict = {
         "generated_at":  datetime.now().isoformat(),
         "regime_cutoff": str(REGIME_CUTOFF),
     }
 
-    for i, offset in enumerate(OFFSETS):
-        pct_start = 10 + i * 8
-        write_status("running", pct_start, f"Processing ATM+{offset}/ATM-{offset} strangle ({i+1}/10)...")
-        output[f"offset_{offset}"] = build_offset(df_all, offset)
-        write_status("running", pct_start + 7, f"Offset {offset} done.")
+    # Parallel processing of offsets using ProcessPoolExecutor
+    write_status("running", 5, "Starting parallel strangle computation...")
+    print(f"Computing strangle analysis for {len(expiries)} expiries across all offsets (1-10)...")
+    
+    completed_count = 0
+    with ProcessPoolExecutor(max_workers=4) as executor:
+        futures = {
+            executor.submit(process_one_offset, offset, expiries_placeholder): offset 
+            for offset in range(1, 11)
+        }
+        for future in as_completed(futures):
+            offset = futures[future]
+            try:
+                output[f"offset_{offset}"] = future.result()
+            except Exception as e:
+                print(f"ERROR: Offset {offset} failed: {e}", file=sys.stderr)
+                write_status("error", 0, f"Offset {offset} failed: {e}")
+                sys.exit(1)
+            completed_count += 1
+            pct = 5 + completed_count * 9
+            write_status("running", pct, f"Processed {completed_count}/10 offsets...")
 
     OUTPUT_PATH.parent.mkdir(exist_ok=True)
     print(f"Writing text of length {len(json.dumps(output))} to {OUTPUT_PATH}...")
