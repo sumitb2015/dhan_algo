@@ -57,6 +57,7 @@ const NAV_GROUPS = [
     links: [
       { href: '/strategies', label: 'Strategies', desc: 'Automated execution control panel' },
       { href: '/strategies-plus', label: 'Strategies+', desc: 'Advanced multi-leg algorithm inputs' },
+      { href: '/backtest', label: 'Backtest', desc: 'Short straddle historical simulation' },
     ],
   },
   {

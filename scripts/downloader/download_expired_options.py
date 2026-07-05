@@ -15,8 +15,23 @@ from lib.dhan_helper import DhanHelper
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-# NSE Holidays (2024-2026) - needed for correct expiry calculation
+# NSE Holidays (2021-2026) - needed for correct expiry calculation
+# Wednesday exceptions in 2021: 10-Mar, 12-May, 18-Aug, 3-Nov → Thursday holidays on 11-Mar, 13-May, 19-Aug, 4-Nov
+# Wednesday exception in 2022: 13-Apr → Thursday holiday on 14-Apr
+# Wednesday exceptions in 2023: 25-Jan, 29-Mar → Thursday holidays on 26-Jan, 30-Mar
 NSE_HOLIDAYS = {
+    # 2021
+    "2021-01-26", "2021-03-11", "2021-03-29", "2021-04-02", "2021-04-14", "2021-04-21",
+    "2021-05-13", "2021-07-21", "2021-08-19", "2021-09-10", "2021-10-15", "2021-11-04",
+    "2021-11-05", "2021-11-19",
+    # 2022
+    "2022-01-26", "2022-03-01", "2022-03-18", "2022-04-14", "2022-04-15", "2022-05-03",
+    "2022-08-09", "2022-08-15", "2022-08-31", "2022-10-02", "2022-10-05", "2022-10-24",
+    "2022-10-26", "2022-11-08",
+    # 2023
+    "2023-01-26", "2023-03-07", "2023-03-30", "2023-04-04", "2023-04-07", "2023-04-14",
+    "2023-05-01", "2023-06-28", "2023-08-15", "2023-09-19", "2023-10-02", "2023-10-24",
+    "2023-11-13", "2023-11-27", "2023-12-25",
     # 2024
     "2024-01-26", "2024-03-08", "2024-03-25", "2024-03-29", "2024-04-10", "2024-04-17",
     "2024-05-01", "2024-06-17", "2024-07-17", "2024-08-15", "2024-10-02", "2024-11-01",
@@ -128,7 +143,7 @@ def main():
     helper = DhanHelper(dhan)
 
     watchlist = {
-        "NIFTY": {"id": 26000, "segment": "NSE_FNO", "instrument": "OPTIDX"}
+        "NIFTY": {"id": 13, "segment": "NSE_FNO", "instrument": "OPTIDX"}
     }
     
     # Generate relative strikes: ATM, ATM+1 to ATM+10, ATM-1 to ATM-10
@@ -142,8 +157,8 @@ def main():
     for name, info in watchlist.items():
         logger.info(f"Processing {name}...")
         
-        # 2. Calculate expiries between Jan 1, 2025 and Today using Hybrid Rules
-        start_date = datetime(2025, 1, 1)
+        # 2. Calculate expiries between Jan 1, 2021 and Today using Hybrid Rules
+        start_date = datetime(2021, 1, 1)
         end_date = datetime.now()
         
         expiries = generate_hybrid_expiries(start_date, end_date, name)

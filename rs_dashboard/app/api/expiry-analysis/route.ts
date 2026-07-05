@@ -42,6 +42,7 @@ export async function GET(req: NextRequest) {
     //   New (≥ 2025-09-01): Wed open (3) → Tue close (2)  [expiry Tuesday]
     const weeks: WeeklyBucket[] = [];
     let openBucket: { startDate: string; startOpen: number; regime: 'old' | 'new' } | null = null;
+    let lastRow: (typeof filtered)[0] | null = null;
 
     for (const row of filtered) {
       const regime: 'old' | 'new' = row.date < REGIME_CHANGE_DATE ? 'old' : 'new';
@@ -50,13 +51,22 @@ export async function GET(req: NextRequest) {
       const dayOfWeek = new Date(row.date + 'T00:00:00Z').getUTCDay();
 
       if (dayOfWeek === openDay) {
-        // Open day for this regime — start (or restart) a bucket
+        // If a prior bucket is still open, the expected close day was a holiday (no CSV row).
+        // Backfill the close using lastRow — the last trading day before this new-week open.
+        if (openBucket && lastRow && openBucket.startOpen > 0) {
+          const raw = ((lastRow.close - openBucket.startOpen) / openBucket.startOpen) * 100;
+          weeks.push({
+            startDate: openBucket.startDate,
+            endDate: lastRow.date,
+            startOpen: openBucket.startOpen,
+            endClose: lastRow.close,
+            returnPct: Math.round(raw * 100) / 100,
+          });
+        }
         openBucket = { startDate: row.date, startOpen: row.open, regime };
       } else if (dayOfWeek === closeDay && openBucket && openBucket.regime === regime) {
-        // Close day, same regime as the open — close the bucket
-        if (openBucket.startOpen <= 0) {
-          openBucket = null;
-        } else {
+        // Normal (non-holiday) close — expiry day row exists in CSV
+        if (openBucket.startOpen > 0) {
           const raw = ((row.close - openBucket.startOpen) / openBucket.startOpen) * 100;
           weeks.push({
             startDate: openBucket.startDate,
@@ -65,9 +75,11 @@ export async function GET(req: NextRequest) {
             endClose: row.close,
             returnPct: Math.round(raw * 100) / 100,
           });
-          openBucket = null;
         }
+        openBucket = null;
       }
+
+      lastRow = row;
     }
 
     const dataStart = rows.length > 0 ? rows[0].date : '';
