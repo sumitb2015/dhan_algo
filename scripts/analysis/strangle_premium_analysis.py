@@ -274,21 +274,16 @@ def compute_regime_stats(daily: pd.DataFrame, merged: pd.DataFrame) -> dict:
     }
 
 
-def build_offset(conn: sqlite3.Connection, offset: int) -> dict:
-    """Load ATM+N CE and ATM-N PE rows, build daily metrics, return three regime dicts."""
+def build_offset(df_all: pd.DataFrame, offset: int) -> dict:
+    """Filter ATM+N CE and ATM-N PE rows from df_all, build daily metrics, return three regime dicts."""
     ce_label = f"ATM+{offset}"
     pe_label = f"ATM-{offset}"
 
-    df = pd.read_sql(
-        f"""
-        SELECT expiry, datetime, option_type, open, high, low, close, spot
-        FROM option_prices
-        WHERE strike_relative IN ('{ce_label}', '{pe_label}')
-        ORDER BY expiry, datetime, option_type
-        """,
-        conn,
-        parse_dates=["datetime"],
-    )
+    # Filter CE and PE rows in memory from df_all
+    df = df_all[
+        ((df_all["option_type"] == "CE") & (df_all["strike_relative"] == ce_label)) |
+        ((df_all["option_type"] == "PE") & (df_all["strike_relative"] == pe_label))
+    ].copy()
 
     if df.empty:
         empty = compute_regime_stats(pd.DataFrame(), pd.DataFrame())
@@ -376,20 +371,48 @@ def main() -> None:
         sys.exit(1)
 
     conn = sqlite3.connect(str(DB_PATH))
+    
+    # Load all required CE and PE relative strikes in one fast query
+    write_status("running", 5, "Loading options data from database...")
+    
+    labels = []
+    for offset in OFFSETS:
+        labels.append(f"ATM+{offset}")
+        labels.append(f"ATM-{offset}")
+    labels_placeholder = ",".join(f"'{l}'" for l in labels)
+
+    df_all = pd.read_sql(
+        f"""
+        SELECT expiry, datetime, option_type, strike_relative, open, high, low, close, spot
+        FROM option_prices
+        WHERE strike_relative IN ({labels_placeholder})
+          AND datetime >= '{REGIME_CUTOFF}'
+        ORDER BY expiry, datetime, option_type
+        """,
+        conn,
+        parse_dates=["datetime"],
+    )
+    conn.close()
+
+    if df_all.empty:
+        write_status("error", 0, "No option data found in database.")
+        sys.exit(1)
+
     output: dict = {
         "generated_at":  datetime.now().isoformat(),
         "regime_cutoff": str(REGIME_CUTOFF),
     }
 
     for i, offset in enumerate(OFFSETS):
-        pct_start = 5 + i * 9
+        pct_start = 10 + i * 8
         write_status("running", pct_start, f"Processing ATM+{offset}/ATM-{offset} strangle ({i+1}/10)...")
-        output[f"offset_{offset}"] = build_offset(conn, offset)
-        write_status("running", pct_start + 8, f"Offset {offset} done.")
+        output[f"offset_{offset}"] = build_offset(df_all, offset)
+        write_status("running", pct_start + 7, f"Offset {offset} done.")
 
-    conn.close()
     OUTPUT_PATH.parent.mkdir(exist_ok=True)
+    print(f"Writing text of length {len(json.dumps(output))} to {OUTPUT_PATH}...")
     OUTPUT_PATH.write_text(json.dumps(output, indent=2), encoding="utf-8")
+    print(f"File exists right after write: {OUTPUT_PATH.exists()}, size: {OUTPUT_PATH.stat().st_size if OUTPUT_PATH.exists() else 0}")
     write_status("done", 100, "Strangle analysis complete for all 10 offsets.")
     print(f"Done. -> {OUTPUT_PATH}")
 
