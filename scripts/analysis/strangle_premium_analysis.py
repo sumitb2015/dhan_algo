@@ -281,35 +281,27 @@ def compute_regime_stats(daily: pd.DataFrame, merged: pd.DataFrame) -> dict:
     }
 
 
-def process_one_offset(offset: int, expiries_placeholder: str) -> dict:
-    """Load and process options data for a single OTM offset from database across all history."""
-    conn = sqlite3.connect(str(DB_PATH))
-    df = pd.read_sql(
-        f"""
-        SELECT expiry, datetime, option_type, strike_relative, open, high, low, close, spot
-        FROM option_prices
-        WHERE expiry IN ({expiries_placeholder})
-          AND strike_relative IN ('ATM+{offset}', 'ATM-{offset}')
-        """,
-        conn
-    )
-    conn.close()
-
-    if df.empty:
+def process_one_offset(offset: int, df_offset: pd.DataFrame) -> dict:
+    """Process options data for a single OTM offset in memory."""
+    if df_offset.empty:
         empty = compute_regime_stats(pd.DataFrame(), pd.DataFrame())
         return {"regimes": {"all": empty, "pre_sep2025": empty, "post_sep2025": empty}}
 
     # Fast string slicing for trade_date and time_str
-    df["trade_date"] = df["datetime"].str[:10]
-    df["time_str"] = df["datetime"].str[11:16]
-    df["expiry_date"] = df["expiry"]
+    df_offset["trade_date"] = df_offset["datetime"].str[:10]
+    df_offset["time_str"] = df_offset["datetime"].str[11:16]
+    df_offset["expiry_date"] = df_offset["expiry"]
 
     # Optimize MultiIndex join by indexing only on ['expiry', 'datetime']
     idx = ["expiry", "datetime"]
     cols = ["trade_date", "expiry_date", "time_str", "spot", "open", "high", "low", "close"]
-    ce = df[df["option_type"] == "CE"].set_index(idx)[cols]
-    pe = df[df["option_type"] == "PE"].set_index(idx)[["open", "high", "low", "close"]]
+    ce = df_offset[df_offset["option_type"] == "CE"].set_index(idx)[cols]
+    pe = df_offset[df_offset["option_type"] == "PE"].set_index(idx)[["open", "high", "low", "close"]]
     merged = ce.join(pe, lsuffix="_ce", rsuffix="_pe", how="inner").reset_index()
+
+    if merged.empty:
+        empty = compute_regime_stats(pd.DataFrame(), pd.DataFrame())
+        return {"regimes": {"all": empty, "pre_sep2025": empty, "post_sep2025": empty}}
 
     merged["straddle_close"] = merged["close_ce"] + merged["close_pe"]
     merged["straddle_high"]  = merged["high_ce"]  + merged["high_pe"]
@@ -339,9 +331,6 @@ def process_one_offset(offset: int, expiries_placeholder: str) -> dict:
         .merge(extremes,   on=["expiry", "trade_date"], how="left")
     )
     daily = daily[(daily["open_premium"] > 0) & (daily["close_premium"] > 0)].copy()
-
-    daily["_trade_dow"] = pd.to_datetime(daily["trade_date"]).dt.weekday
-    daily = daily[daily["_trade_dow"] < 5].drop(columns=["_trade_dow"])
 
     daily["expiry_date"]   = pd.to_datetime(daily["expiry_date"])
     daily["trade_date_dt"] = pd.to_datetime(daily["trade_date"])
@@ -416,28 +405,48 @@ def main() -> None:
         "regime_cutoff": str(REGIME_CUTOFF),
     }
 
-    # Parallel processing of offsets using ProcessPoolExecutor
-    write_status("running", 5, "Starting parallel strangle computation...")
-    print(f"Computing strangle analysis for {len(expiries)} expiries across all offsets (1-10)...")
+    write_status("running", 5, "Loading options data from database...")
+    print(f"Loading options data for {len(expiries)} expiries across all offsets (1-10)...")
     
-    completed_count = 0
-    max_workers = min(os.cpu_count() or 4, 10)
-    with ProcessPoolExecutor(max_workers=max_workers) as executor:
-        futures = {
-            executor.submit(process_one_offset, offset, expiries_placeholder): offset 
-            for offset in range(1, 11)
-        }
-        for future in as_completed(futures):
-            offset = futures[future]
-            try:
-                output[f"offset_{offset}"] = future.result()
-            except Exception as e:
-                print(f"ERROR: Offset {offset} failed: {e}", file=sys.stderr)
-                write_status("error", 0, f"Offset {offset} failed: {e}")
-                sys.exit(1)
-            completed_count += 1
-            pct = 5 + completed_count * 9
-            write_status("running", pct, f"Processed {completed_count}/10 offsets...")
+    # Build list of all OTM relative strikes
+    relative_strikes = []
+    for i in range(1, 11):
+        relative_strikes.extend([f"ATM+{i}", f"ATM-{i}"])
+    strikes_placeholder = ",".join(f"'{s}'" for s in relative_strikes)
+
+    # Query once
+    conn = sqlite3.connect(str(DB_PATH))
+    df_all = pd.read_sql(
+        f"""
+        SELECT expiry, datetime, option_type, strike_relative, open, high, low, close, spot
+        FROM option_prices
+        WHERE expiry IN ({expiries_placeholder})
+          AND strike_relative IN ({strikes_placeholder})
+        """,
+        conn
+    )
+    conn.close()
+
+    if df_all.empty:
+        write_status("error", 0, "No options data found in database.")
+        print("ERROR: No options data found in database.", file=sys.stderr)
+        sys.exit(1)
+
+    for offset in range(1, 11):
+        pct = 5 + (offset - 1) * 9
+        write_status("running", pct, f"Processing offset {offset}/10...")
+        print(f"Processing offset {offset}/10...")
+        
+        ce_label = f"ATM+{offset}"
+        pe_label = f"ATM-{offset}"
+        df_offset = df_all[df_all["strike_relative"].isin([ce_label, pe_label])].copy()
+        
+        try:
+            output[f"offset_{offset}"] = process_one_offset(offset, df_offset)
+        except Exception as e:
+            print(f"ERROR: Offset {offset} failed: {e}", file=sys.stderr)
+            write_status("error", 0, f"Offset {offset} failed: {e}")
+            sys.exit(1)
 
     OUTPUT_PATH.parent.mkdir(exist_ok=True)
     print(f"Writing text of length {len(json.dumps(output))} to {OUTPUT_PATH}...")
