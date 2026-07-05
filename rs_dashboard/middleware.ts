@@ -21,12 +21,25 @@ async function verifySessionCookie(cookieValue: string): Promise<boolean> {
 }
 
 export async function middleware(req: NextRequest): Promise<NextResponse> {
+  const { pathname } = req.nextUrl;
   const cookieValue = req.cookies.get(SESSION_COOKIE)?.value;
+
+  console.log(`[middleware] path: ${pathname}, hasCookie: ${!!cookieValue}`);
 
   if (cookieValue && await verifySessionCookie(cookieValue)) {
     return NextResponse.next();
   }
 
+  // Do not redirect API requests to the login HTML page; return a 401 JSON response instead!
+  if (pathname.startsWith('/api/')) {
+    console.log(`[middleware] unauthorized API request: ${pathname} - returning 401`);
+    return new NextResponse(JSON.stringify({ success: false, error: 'Unauthorized' }), {
+      status: 401,
+      headers: { 'Content-Type': 'application/json' },
+    });
+  }
+
+  console.log(`[middleware] redirecting to /login from: ${pathname}`);
   const loginUrl = new URL('/login', req.url);
   return NextResponse.redirect(loginUrl);
 }
