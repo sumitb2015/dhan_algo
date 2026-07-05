@@ -227,7 +227,7 @@ function StatsTable({
         </thead>
         <tbody>
           {rows.map((r, i) => (
-            <tr key={r.key} className={i % 2 === 0 ? 'bg-zinc-800' : 'bg-zinc-850'}>
+            <tr key={r.key} className={i % 2 === 0 ? 'bg-zinc-800' : 'bg-zinc-900'}>
               <td className="px-3 py-2 whitespace-nowrap">
                 <div className="flex items-center gap-2">
                   {r.color && <span className="w-2 h-2 rounded-full flex-shrink-0" style={{ background: r.color }} />}
@@ -279,6 +279,10 @@ export default function StrangleAnalysis() {
   }, []);
 
   useEffect(() => { fetchData(); }, [fetchData]);
+
+  useEffect(() => {
+    return () => { if (pollRef.current) clearInterval(pollRef.current); };
+  }, []);
 
   const startRegen = async () => {
     setRegenerating(true);
