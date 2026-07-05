@@ -347,8 +347,8 @@ def process_one_offset(offset: int, expiries_placeholder: str) -> dict:
     
     # Vectorised busday_count with clean cast to datetime64[D]
     daily["dte"] = np.busday_count(
-        daily["trade_date"].values.astype('datetime64[D]'),
-        daily["expiry_date"].values.astype('datetime64[D]')
+        pd.to_datetime(daily["trade_date"]).values.astype('datetime64[D]'),
+        pd.to_datetime(daily["expiry_date"]).values.astype('datetime64[D]')
     ).astype(int)
     
     daily["weekday"]    = daily["trade_date_dt"].dt.weekday.map(

@@ -103,9 +103,25 @@ def main():
         csv_files = [f for f in os.listdir(folder_path) if f.endswith(".csv") and len(f) == 14]
         for fname in csv_files:
             tasks.append((sf, fname))
-            
     total_files = len(tasks)
     print(f"Found {total_files} CSV files to process across {len(all_offset_folders)} offset folders.")
+    sys.stdout.flush()
+    
+    # Optimize: Skip files that are already loaded in SQLite
+    if os.path.exists(DB_PATH):
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        try:
+            cursor.execute("SELECT DISTINCT strike_relative, expiry FROM option_prices")
+            existing = {(r[0], r[1]) for r in cursor.fetchall()}
+            original_count = len(tasks)
+            tasks = [(sf, fname) for sf, fname in tasks if (sf, fname[:-4]) not in existing]
+            print(f"Skipping {original_count - len(tasks)} files already in database. Remaining to process: {len(tasks)}")
+        except sqlite3.OperationalError:
+            pass
+        finally:
+            conn.close()
+    
     sys.stdout.flush()
     
     # 3. Read and parse files sequentially
