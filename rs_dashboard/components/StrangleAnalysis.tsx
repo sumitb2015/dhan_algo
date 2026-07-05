@@ -375,6 +375,153 @@ export default function StrangleAnalysis() {
     );
   }
 
+  if (data.total_days === 0) {
+    return (
+      <div className="min-h-screen bg-zinc-900 text-zinc-300">
+        <NavBar />
+        
+        {/* Sticky header */}
+        <div className="sticky top-0 z-30 bg-zinc-900 border-b border-zinc-800 px-4 py-3">
+          <div className="max-w-screen-xl mx-auto flex flex-wrap items-center gap-3">
+            <h1 className="text-base font-bold text-white">
+              ATM+{selectedOffset} / ATM-{selectedOffset} Strangle Premium Analysis
+            </h1>
+            <span className="text-xs font-mono bg-zinc-800 text-zinc-400 px-2 py-0.5 rounded">
+              NIFTY · Strangle
+            </span>
+            <span className="text-xs font-mono bg-zinc-800 text-emerald-400 px-2 py-0.5 rounded">
+              DATA: {dataDate(fullData.generated_at as string)}
+            </span>
+            <span className="text-xs text-zinc-500">
+              {data.date_range.from} → {data.date_range.to}
+            </span>
+
+            <div className="ml-auto flex flex-wrap items-center gap-2">
+              {/* Regime toggle */}
+              <div className="flex rounded-md overflow-hidden border border-zinc-700 text-xs">
+                {([
+                  { key: 'all',          label: 'All',            title: 'Full history' },
+                  { key: 'pre_sep2025',  label: 'Pre Sep\'25',    title: 'Before 2025-09-01 · Thu weekly expiry' },
+                  { key: 'post_sep2025', label: 'Post Sep\'25',   title: 'From 2025-09-01 · Tue weekly expiry' },
+                ] as { key: RegimeKey; label: string; title: string }[]).map(({ key, label, title }) => (
+                  <button
+                    key={key}
+                    onClick={() => setRegime(key)}
+                    title={title}
+                    className={`px-3 py-1 font-medium transition-colors whitespace-nowrap ${
+                      regime === key
+                        ? key === 'pre_sep2025'
+                          ? 'bg-amber-600 text-white'
+                          : key === 'post_sep2025'
+                            ? 'bg-violet-600 text-white'
+                            : 'bg-sky-600 text-white'
+                        : 'bg-zinc-800 text-zinc-400 hover:text-zinc-200'
+                    }`}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
+
+              {/* Regime label chip */}
+              {regime !== 'all' && (
+                <span className={`text-xs font-medium px-2 py-0.5 rounded ${
+                  regime === 'pre_sep2025'
+                    ? 'bg-amber-900 text-amber-300'
+                    : 'bg-violet-900 text-violet-300'
+                }`}>
+                  {regime === 'pre_sep2025' ? 'Thu expiry' : 'Tue expiry'}
+                </span>
+              )}
+
+              {/* Offset selector */}
+              <div className="flex items-center gap-1.5">
+                <span className="text-xs text-zinc-400 font-medium">Offset:</span>
+                <div className="flex gap-0.5">
+                  {[1,2,3,4,5,6,7,8,9,10].map((n) => (
+                    <button
+                      key={n}
+                      onClick={() => setSelectedOffset(n)}
+                      className={`px-2 py-1 rounded text-xs font-medium transition-colors ${
+                        selectedOffset === n
+                          ? 'bg-emerald-600 text-white'
+                          : 'bg-zinc-700 text-zinc-300 hover:bg-zinc-600'
+                      }`}
+                    >
+                      {n}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {/* Date filter */}
+              <div className="flex rounded-md overflow-hidden border border-zinc-700 text-xs">
+                {(['all', '3y', '2y', '1y'] as const).map((f) => (
+                  <button
+                    key={f}
+                    onClick={() => setDateFilter(f)}
+                    className={`px-3 py-1 font-medium transition-colors ${
+                      dateFilter === f
+                        ? 'bg-sky-600 text-white'
+                        : 'bg-zinc-800 text-zinc-400 hover:text-zinc-200'
+                    }`}
+                  >
+                    {f === 'all' ? 'All' : f.toUpperCase()}
+                  </button>
+                ))}
+              </div>
+
+              {/* Regenerate */}
+              {regenerating ? (
+                <div className="flex items-center gap-2 min-w-48">
+                  <div className="flex-1 bg-zinc-700 rounded-full h-1.5">
+                    <div
+                      className="bg-sky-500 h-1.5 rounded-full transition-all duration-500"
+                      style={{ width: `${regenProgress}%` }}
+                    />
+                  </div>
+                  <span className="text-xs text-zinc-400 whitespace-nowrap">{regenProgress}%</span>
+                </div>
+              ) : (
+                <button
+                  onClick={startRegen}
+                  className="px-3 py-1 text-xs bg-zinc-800 hover:bg-zinc-700 border border-zinc-700 text-zinc-300 rounded-md transition-colors"
+                >
+                  Regenerate
+                </button>
+              )}
+            </div>
+          </div>
+        </div>
+
+        {/* Main content body showing friendly alert */}
+        <div className="max-w-screen-xl mx-auto px-4 py-12">
+          <div className="bg-zinc-800 border border-zinc-750 rounded-xl p-12 text-center max-w-lg mx-auto shadow-xl">
+            <div className="text-5xl mb-4">📊</div>
+            <h3 className="text-white text-lg font-bold mb-2">No Historical Data Available</h3>
+            <p className="text-zinc-400 text-sm mb-6">
+              Strangle data is only loaded from <strong>September 1, 2025</strong> onwards (when the NSE weekly options expiry changed to Tuesdays). There is no data available for the Pre-Sep 2025 weekly expiry regime.
+            </p>
+            <div className="flex justify-center gap-3">
+              <button
+                onClick={() => setRegime('post_sep2025')}
+                className="px-4 py-2 bg-violet-600 hover:bg-violet-500 text-white text-xs font-semibold rounded-lg transition-colors"
+              >
+                Switch to Post-Sep '25 (Tue Expiry)
+              </button>
+              <button
+                onClick={() => setRegime('all')}
+                className="px-4 py-2 bg-zinc-700 hover:bg-zinc-650 text-zinc-200 text-xs font-semibold rounded-lg transition-colors"
+              >
+                Show All History
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   // ── Derived chart data ────────────────────────────────────────────────────
   const weekdayChartData = WEEKDAYS
     .filter((d) => data.by_weekday[d])
