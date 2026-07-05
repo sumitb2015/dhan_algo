@@ -291,7 +291,7 @@ export default function StrangleAnalysis() {
     await fetch('/api/strangle-analysis', { method: 'POST', body: JSON.stringify({ action: 'regenerate' }) });
     pollRef.current = setInterval(async () => {
       try {
-        const res = await fetch('/api/strangle-analysis/status');
+        const res = await fetch('/api/strangle-analysis?status=true');
         const s: StatusData = await res.json();
         setRegenProgress(s.pct ?? 0);
         setRegenMessage(s.message ?? '');

@@ -10,7 +10,21 @@ const SCRIPT_PATH  = path.join(PROJECT_ROOT, 'scripts', 'analysis', 'strangle_pr
 const DATA_FILE    = path.join(DEBUG_DIR, 'strangle_premium_analysis.json');
 const STATUS_FILE  = path.join(DEBUG_DIR, 'strangle_analysis_status.json');
 
-export async function GET() {
+export async function GET(req: NextRequest) {
+  const { searchParams } = new URL(req.url);
+  const getStatus = searchParams.get('status') === 'true';
+
+  if (getStatus) {
+    if (!fs.existsSync(STATUS_FILE)) {
+      return NextResponse.json({ status: 'idle', pct: 0, message: '' });
+    }
+    try {
+      return NextResponse.json(JSON.parse(fs.readFileSync(STATUS_FILE, 'utf-8')));
+    } catch {
+      return NextResponse.json({ status: 'idle', pct: 0, message: '' });
+    }
+  }
+
   if (!fs.existsSync(DATA_FILE)) {
     return NextResponse.json({ error: 'not_generated' }, { status: 404 });
   }
