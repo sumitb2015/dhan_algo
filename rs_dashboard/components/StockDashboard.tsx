@@ -1,13 +1,12 @@
 'use client';
 
 import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
-import { LayoutGrid, List, RefreshCw, Layers, Clock, ChevronDown, DatabaseZap, Wifi, WifiOff } from 'lucide-react';
+import { LayoutGrid, List, RefreshCw, Layers, Clock, ChevronDown, Wifi, WifiOff } from 'lucide-react';
 import { RSResult } from '@/lib/rs';
 import IndexSummary from './IndexSummary';
 import Leaderboard from './Leaderboard';
 import RSChart from './RSChart';
 import SectorHeatmap from './SectorHeatmap';
-import DataRefreshPanel from './DataRefreshPanel';
 import Link from 'next/link';
 import NavBar from './NavBar';
 import { Button, buttonVariants } from '@/components/ui/button';
@@ -39,7 +38,6 @@ export default function StockDashboard() {
   const [autoRefresh, setAutoRefresh] = useState<AutoRefreshInterval>(null);
   const [countdown, setCountdown] = useState(0);
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
-  const [syncPanelOpen, setSyncPanelOpen] = useState(false);
   const countdownRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const [istTime, setISTTime] = useState('');
@@ -131,24 +129,18 @@ export default function StockDashboard() {
     }
   }, [fetchStocks, fetchSummary, autoRefresh]);
 
-  // Auto-sync on mount: if CSV data is behind the last trading day, start refresh and show panel
+  // Auto-sync on mount: if CSV data is behind the last trading day, start refresh in background
   useEffect(() => {
     const autoSyncIfStale = async () => {
       try {
         const res = await fetch('/api/refresh');
         const json = await res.json();
-        if (json.running) {
-          setSyncPanelOpen(true); // already running (e.g. from a previous tab), show progress
-          return;
-        }
-        if (json.stale) {
-          await fetch('/api/refresh', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ target: 'all' }),
-          });
-          setSyncPanelOpen(true);
-        }
+        if (json.running || !json.stale) return;
+        await fetch('/api/refresh', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ target: 'all' }),
+        });
       } catch { /* ignore network errors */ }
     };
     autoSyncIfStale();
@@ -241,18 +233,6 @@ export default function StockDashboard() {
               </button>
             ))}
           </div>
-
-          {/* Sync Data */}
-          <Tooltip>
-            <TooltipTrigger
-              onClick={() => setSyncPanelOpen(true)}
-              render={<button className={cn(buttonVariants({ variant: 'outline', size: 'sm' }), 'gap-1.5 border-zinc-800 bg-zinc-900/60 text-zinc-400 hover:text-emerald-400 hover:border-emerald-500/30 hover:bg-emerald-500/5 rounded-xl text-xs h-8')} />}
-            >
-              <DatabaseZap className="h-3.5 w-3.5" />
-              Sync Data
-            </TooltipTrigger>
-            <TooltipContent>Sync latest market data from Dhan API</TooltipContent>
-          </Tooltip>
 
           {/* Auto-refresh dropdown */}
           <DropdownMenu>
@@ -396,11 +376,6 @@ export default function StockDashboard() {
         </div>
       </main>
 
-      <DataRefreshPanel
-        open={syncPanelOpen}
-        onClose={() => setSyncPanelOpen(false)}
-        onRefreshComplete={() => { fetchStocks(); fetchSummary(); }}
-      />
     </div>
   );
 }
