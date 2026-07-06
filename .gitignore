@@ -5,7 +5,6 @@ venv/
 .env
 access_token.json
 credentials.json
-*.json
 *.token
 
 # Large Data & Media
@@ -28,6 +27,7 @@ REORGANIZATION_SUMMARY.md
 # Runtime debug artifacts
 debug/*.txt
 debug/*.pid
+debug/*.json
 
 # Debug Scripts
 debug_*.py
