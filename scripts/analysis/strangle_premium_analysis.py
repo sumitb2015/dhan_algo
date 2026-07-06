@@ -20,6 +20,7 @@ from scipy import stats as scipy_stats
 PROJECT_ROOT  = Path(__file__).resolve().parents[2]
 DB_PATH       = PROJECT_ROOT / "Options Data" / "nifty_options.db"
 OUTPUT_PATH   = PROJECT_ROOT / "debug" / "strangle_premium_analysis.json"
+STRATEGY_PARAMS_PATH = PROJECT_ROOT / "debug" / "strangle_strategy_params.json"
 STATUS_PATH   = PROJECT_ROOT / "debug" / "strangle_analysis_status.json"
 
 WEEKDAY_NAMES = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"]
@@ -274,6 +275,25 @@ def compute_regime_stats(daily: pd.DataFrame, merged: pd.DataFrame) -> dict:
     }
 
 
+def distill_strategy_params(regime_stats: dict) -> dict:
+    """Reduce a regime stats dict's by_weekday/by_dte entries to the fields a live
+    strategy needs: avg_premium, seller_win_pct, count."""
+    def _reduce(segment: dict) -> dict:
+        return {
+            key: {
+                "avg_premium":    entry["avg"],
+                "seller_win_pct": entry["seller_win_pct"],
+                "count":          entry["count"],
+            }
+            for key, entry in segment.items()
+        }
+
+    return {
+        "by_weekday": _reduce(regime_stats.get("by_weekday", {})),
+        "by_dte":     _reduce(regime_stats.get("by_dte", {})),
+    }
+
+
 def build_offset(df_all: pd.DataFrame, offset: int) -> dict:
     """Filter ATM+N CE and ATM-N PE rows from df_all, build daily metrics, return three regime dicts."""
     ce_label = f"ATM+{offset}"
@@ -403,10 +423,14 @@ def main() -> None:
         "regime_cutoff": str(REGIME_CUTOFF),
     }
 
+    strategy_params: dict = {}
     for i, offset in enumerate(OFFSETS):
         pct_start = 10 + i * 8
         write_status("running", pct_start, f"Processing ATM+{offset}/ATM-{offset} strangle ({i+1}/10)...")
         output[f"offset_{offset}"] = build_offset(df_all, offset)
+        strategy_params[str(offset)] = distill_strategy_params(
+            output[f"offset_{offset}"]["regimes"]["post_sep2025"]
+        )
         write_status("running", pct_start + 7, f"Offset {offset} done.")
 
     OUTPUT_PATH.parent.mkdir(exist_ok=True)
@@ -414,6 +438,14 @@ def main() -> None:
     OUTPUT_PATH.write_text(json.dumps(output, indent=2), encoding="utf-8")
     print(f"File exists right after write: {OUTPUT_PATH.exists()}, size: {OUTPUT_PATH.stat().st_size if OUTPUT_PATH.exists() else 0}")
     write_status("done", 100, "Strangle analysis complete for all 10 offsets.")
+
+    strategy_params_output = {
+        "generated_at": output["generated_at"],
+        "regime": "post_sep2025",
+        "offsets": strategy_params,
+    }
+    STRATEGY_PARAMS_PATH.write_text(json.dumps(strategy_params_output, indent=2), encoding="utf-8")
+    print(f"Also wrote strategy params -> {STRATEGY_PARAMS_PATH}")
     print(f"Done. -> {OUTPUT_PATH}")
 
 
