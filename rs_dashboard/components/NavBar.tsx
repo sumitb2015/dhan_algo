@@ -45,6 +45,7 @@ const NAV_GROUPS = [
       { href: '/scalper', label: 'Scalper', desc: 'Multi-window active trading & scalping order ticket' },
       { href: '/straddle-analysis', label: 'Straddle Analysis', desc: 'ATM straddle premium patterns by weekday, DTE & regime' },
       { href: '/strangle-analysis', label: 'Strangle Analysis', desc: 'OTM strangle premium patterns by offset, weekday, DTE & regime' },
+      { href: '/strategy-builder', label: 'Strategy Builder', desc: 'Build & track multi-leg NIFTY options strategies' },
     ],
   },
   {
