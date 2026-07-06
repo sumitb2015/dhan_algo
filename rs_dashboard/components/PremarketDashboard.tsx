@@ -73,7 +73,7 @@ export default function PremarketDashboard() {
   useEffect(() => { void fetchData(); }, [fetchData]);
 
   const dataDate = data
-    ? new Date(data.fetchedAt).toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' })
+    ? new Date(data.fetchedAt).toISOString().slice(0, 10)
     : '—';
 
   return (
@@ -173,8 +173,11 @@ export default function PremarketDashboard() {
               />
               <StatTile
                 label="Expected Day Range (±1σ)"
-                value={`±${fmt(data.nifty.spot * (data.options.atmIV / 100) / 15.87, 0)} pts`}
-                sub={`Based on ATM IV ${data.options.atmIV.toFixed(1)}%`}
+                value={data.options.atmIV > 0
+                  ? `±${fmt(data.nifty.spot * (data.options.atmIV / 100) / 15.87, 0)} pts`
+                  : '—'
+                }
+                sub={data.options.atmIV > 0 ? `Based on ATM IV ${data.options.atmIV.toFixed(1)}%` : 'Chain unavailable'}
               />
             </div>
           </div>
@@ -235,7 +238,7 @@ export default function PremarketDashboard() {
           {/* Section 5 — Global Markets */}
           <div>
             <SectionHeader title="Global Markets — Previous Close" />
-            {!data.globalMarkets ? (
+            {(!data.globalMarkets || data.globalMarkets.length === 0) ? (
               <p className="text-sm text-zinc-500">Global market data unavailable.</p>
             ) : (
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
