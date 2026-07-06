@@ -43,6 +43,9 @@ export default function StrategyBuilder() {
   const [margin, setMargin] = useState<MarginData | null>(null);
   const [marginLoading, setMarginLoading] = useState(false);
 
+  const [entering, setEntering] = useState(false);
+  const [orderResult, setOrderResult] = useState<{ success: boolean; message: string } | null>(null);
+
   const selectedTemplate = selectedId ? getTemplate(selectedId) : undefined;
 
   // Fetch expiries once on mount
@@ -76,10 +79,12 @@ export default function StrategyBuilder() {
     setStats(null);
     setMargin(null);
     setTargetBreakevens(null);
+    setOrderResult(null);
   }, []);
 
   const handleAnalyze = useCallback(() => {
     if (!selectedTemplate) return;
+    setOrderResult(null);
     const atm = computeAtm(spot);
     const specs = selectedTemplate.legs(params);
     const { legs, missingStrikes: missing } = resolveLegs(specs, atm, Math.max(1, lots), chainOc);
@@ -135,7 +140,7 @@ export default function StrategyBuilder() {
       entry_net_premium: stats.netPremium,
       legs: resolvedLegs.map((l) => ({
         strike: l.strike, option_type: l.type, side: l.side, qty_lots: l.qtyLots,
-        entry_price: l.price, entry_delta: l.delta, security_id: null,
+        entry_price: l.price, entry_delta: l.delta, security_id: l.securityId,
       })),
       notes: null,
     };
@@ -145,6 +150,39 @@ export default function StrategyBuilder() {
       body: JSON.stringify(payload),
     }).catch(() => {});
   }, [selectedTemplate, resolvedLegs, stats, selectedExpiry, lots, params, spot]);
+
+  const handleEnterTrade = useCallback(() => {
+    if (!resolvedLegs) return;
+    setEntering(true);
+    setOrderResult(null);
+
+    const legsPayload = resolvedLegs.map((l) => ({
+      securityId: l.securityId,
+      quantity: l.qtyLots * LOT_SIZE,
+      side: l.side,
+    }));
+
+    fetch('/api/options/order', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ legs: legsPayload, mode }),
+    })
+      .then((r) => r.json())
+      .then((json) => {
+        if (json.success) {
+          const ids = json.data.map((o: any) => o.orderId).join(', ');
+          setOrderResult({ success: true, message: `Strategy entered successfully. Order IDs: ${ids}` });
+        } else {
+          setOrderResult({ success: false, message: json.error || 'Failed to place orders.' });
+        }
+      })
+      .catch((err) => {
+        setOrderResult({ success: false, message: String(err) });
+      })
+      .finally(() => {
+        setEntering(false);
+      });
+  }, [resolvedLegs, mode]);
 
   const handleUpdateLegStrike = useCallback((index: number, newStrike: number) => {
     if (!resolvedLegs) return;
@@ -165,6 +203,7 @@ export default function StrategyBuilder() {
       price: legData.last_price,
       delta: legData.greeks?.delta ?? null,
       iv: legData.implied_volatility ?? null,
+      securityId: legData.security_id ? String(legData.security_id) : null,
     };
     
     setResolvedLegs(updated);
@@ -225,7 +264,7 @@ export default function StrategyBuilder() {
           <>
             <StrategyCardGrid templates={STRATEGY_TEMPLATES} selectedId={selectedId} onSelect={handleSelectStrategy} />
 
-            {selectedTemplate && (
+             {selectedTemplate && (
               <StrategySettingsPanel
                 template={selectedTemplate}
                 params={params}
@@ -242,12 +281,25 @@ export default function StrategyBuilder() {
                 onAnalyze={handleAnalyze}
                 onSave={handleSave}
                 canSave={mode === 'positional' && stats !== null}
+                onEnterTrade={handleEnterTrade}
+                canEnter={stats !== null && resolvedLegs !== null && resolvedLegs.every(l => l.securityId !== null)}
+                entering={entering}
               />
             )}
 
             {missingStrikes.length > 0 && (
               <div className="bg-rose-950 border border-rose-800 text-rose-300 text-xs rounded-lg px-4 py-2.5">
                 Chain data unavailable for strike(s): {missingStrikes.join(', ')}. Try a different expiry or offsets.
+              </div>
+            )}
+
+            {orderResult && (
+              <div className={`border rounded-lg px-4 py-2.5 text-xs font-semibold ${
+                orderResult.success
+                  ? 'bg-emerald-950/80 border-emerald-800 text-emerald-300'
+                  : 'bg-rose-950/80 border-rose-800 text-rose-300'
+              }`}>
+                {orderResult.message}
               </div>
             )}
 

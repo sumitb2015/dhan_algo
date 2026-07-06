@@ -18,12 +18,15 @@ interface StrategySettingsPanelProps {
   onAnalyze: () => void;
   onSave: () => void;
   canSave: boolean;
+  onEnterTrade: () => void;
+  canEnter: boolean;
+  entering: boolean;
 }
 
 export default function StrategySettingsPanel({
   template, params, onParamsChange, lots, onLotsChange, mode, onModeChange,
   expiryKindFilter, onExpiryKindFilterChange, expiries, selectedExpiry, onExpiryChange,
-  onAnalyze, onSave, canSave,
+  onAnalyze, onSave, canSave, onEnterTrade, canEnter, entering,
 }: StrategySettingsPanelProps) {
   const visibleExpiries = expiries.filter((e) => expiryKindFilter === 'all' || e.kind === expiryKindFilter);
 
@@ -123,6 +126,14 @@ export default function StrategySettingsPanel({
             Save Strategy
           </button>
         )}
+
+        <button
+          onClick={onEnterTrade}
+          disabled={!canEnter || entering}
+          className="px-4 py-1.5 bg-orange-600 hover:bg-orange-500 disabled:bg-zinc-700 disabled:text-zinc-500 text-white text-sm font-semibold rounded-lg transition-colors"
+        >
+          {entering ? 'Entering...' : 'Enter Trade (Dhan)'}
+        </button>
       </div>
     </div>
   );

@@ -27,6 +27,7 @@ interface StrategyDetail extends StrategyRow {
     qty_lots: number;
     entry_price: number;
     entry_delta: number | null;
+    security_id: string | null;
   }[];
 }
 
@@ -39,6 +40,8 @@ export default function SavedStrategiesTab() {
   const [liveStats, setLiveStats] = useState<PayoffStats | null>(null);
   const [liveCurve, setLiveCurve] = useState<{ spot: number; pnl: number }[]>([]);
   const [loadingDetail, setLoadingDetail] = useState(false);
+  const [exitingId, setExitingId] = useState<number | null>(null);
+  const [exitResult, setExitResult] = useState<{ success: boolean; message: string } | null>(null);
 
   const refreshList = useCallback(() => {
     fetch('/api/saved-strategies')
@@ -83,6 +86,7 @@ export default function SavedStrategiesTab() {
             price: chainLeg?.last_price ?? leg.entry_price,
             delta: chainLeg?.greeks?.delta ?? leg.entry_delta,
             iv: chainLeg?.implied_volatility ?? null,
+            securityId: chainLeg?.security_id ? String(chainLeg.security_id) : leg.security_id,
           };
         });
 
@@ -104,6 +108,40 @@ export default function SavedStrategiesTab() {
       body: JSON.stringify({ status: 'closed' }),
     }).then(() => refreshList());
   }, [refreshList]);
+
+  const handleExitTrade = useCallback((id: number) => {
+    if (!detail || !liveLegs) return;
+    setExitingId(id);
+    setExitResult(null);
+
+    const legsPayload = liveLegs.map((l) => ({
+      securityId: l.securityId,
+      quantity: l.qtyLots * detail.lot_size,
+      side: l.side === 'BUY' ? 'SELL' : 'BUY',
+    }));
+
+    fetch('/api/options/order', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ legs: legsPayload, mode: detail.mode }),
+    })
+      .then((r) => r.json())
+      .then((json) => {
+        if (json.success) {
+          const ids = json.data.map((o: any) => o.orderId).join(', ');
+          setExitResult({ success: true, message: `Strategy exited successfully. Order IDs: ${ids}` });
+          handleClose(id);
+        } else {
+          setExitResult({ success: false, message: json.error || 'Failed to place exit orders.' });
+        }
+      })
+      .catch((err) => {
+        setExitResult({ success: false, message: String(err) });
+      })
+      .finally(() => {
+        setExitingId(null);
+      });
+  }, [detail, liveLegs, handleClose]);
 
   const handleDelete = useCallback((id: number) => {
     fetch(`/api/saved-strategies/${id}`, { method: 'DELETE' }).then(() => {
@@ -242,6 +280,26 @@ export default function SavedStrategiesTab() {
                 </div>
 
                 <div className="space-y-4">
+                  {exitResult && (
+                    <div className={`border rounded-lg px-3 py-2 text-[11px] font-semibold ${
+                      exitResult.success
+                        ? 'bg-emerald-950/80 border-emerald-800 text-emerald-300'
+                        : 'bg-rose-950/80 border-rose-800 text-rose-300'
+                    }`}>
+                      {exitResult.message}
+                    </div>
+                  )}
+
+                  {detail.status === 'open' && (
+                    <button
+                      onClick={() => handleExitTrade(detail.id)}
+                      disabled={exitingId === detail.id}
+                      className="w-full py-2 bg-orange-600 hover:bg-orange-500 disabled:bg-zinc-700 disabled:text-zinc-500 text-white font-semibold text-xs rounded-lg transition-colors"
+                    >
+                      {exitingId === detail.id ? 'Exiting Trade...' : 'Exit Trade (Dhan)'}
+                    </button>
+                  )}
+
                   <div className="bg-zinc-950/40 rounded-xl p-4 border border-zinc-800/80 space-y-3">
                     <h4 className="text-xs font-bold text-white uppercase tracking-wider border-b border-zinc-800 pb-1.5">Strategy Legs</h4>
                     <div className="space-y-2 text-xs">

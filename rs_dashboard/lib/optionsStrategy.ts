@@ -155,6 +155,7 @@ export interface ChainLegData {
   last_price: number;
   oi?: number;
   implied_volatility?: number;
+  security_id?: number;
   greeks?: { delta?: number; theta?: number; gamma?: number; vega?: number };
 }
 export interface ChainOc {
@@ -169,6 +170,7 @@ export interface ResolvedLeg {
   price: number;
   delta: number | null;
   iv: number | null;
+  securityId: string | null;
 }
 
 /**
@@ -204,6 +206,7 @@ export function resolveLegs(
       price: legData.last_price,
       delta: legData.greeks?.delta ?? null,
       iv: legData.implied_volatility ?? null,
+      securityId: legData.security_id ? String(legData.security_id) : null,
     });
   }
 
