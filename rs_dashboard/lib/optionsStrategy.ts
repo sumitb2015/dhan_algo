@@ -188,8 +188,7 @@ export function resolveLegs(
 
   for (const spec of specs) {
     const strike = atm + spec.offsetStrikes * STRIKE_STEP;
-    const strikeKey = String(strike);
-    const entry = oc[strikeKey];
+    const entry = oc[String(strike)] ?? oc[strike.toFixed(6)] ?? Object.entries(oc).find(([k]) => Math.abs(parseFloat(k) - strike) < 0.01)?.[1];
     const legData = spec.type === 'CE' ? entry?.ce : entry?.pe;
 
     if (!legData || typeof legData.last_price !== 'number') {

@@ -73,8 +73,8 @@ export default function SavedStrategiesTab() {
         const oc: ChainOc = chainRes?.data?.chain?.oc ?? {};
 
         const resolved: ResolvedLeg[] = d.legs_json.map((leg) => {
-          const strikeKey = String(leg.strike);
-          const chainLeg = leg.option_type === 'CE' ? oc[strikeKey]?.ce : oc[strikeKey]?.pe;
+          const entry = oc[String(leg.strike)] ?? oc[leg.strike.toFixed(6)] ?? Object.entries(oc).find(([k]) => Math.abs(parseFloat(k) - leg.strike) < 0.01)?.[1];
+          const chainLeg = leg.option_type === 'CE' ? entry?.ce : entry?.pe;
           return {
             strike: leg.strike,
             type: leg.option_type,
