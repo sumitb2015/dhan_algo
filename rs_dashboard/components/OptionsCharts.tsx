@@ -4,8 +4,8 @@ import React, { useState, useEffect, useRef, useCallback } from 'react';
 import Link from 'next/link';
 import NavBar from './NavBar';
 import {
-  AreaChart, Area, LineChart, Line, XAxis, YAxis, CartesianGrid,
-  Tooltip, Legend, ResponsiveContainer,
+  AreaChart, Area, LineChart, Line, BarChart, Bar, Cell, XAxis, YAxis, CartesianGrid,
+  Tooltip, Legend, ResponsiveContainer, ReferenceLine,
 } from 'recharts';
 import OptionsSkewTab from './OptionsSkewTab';
 import OptionsOITab from './OptionsOITab';
@@ -442,7 +442,11 @@ export default function OptionsCharts() {
       const vol = (row['CE Vol'] ?? 0) + (row['PE Vol'] ?? 0);
       cumPV += row.Straddle * (vol > 0 ? vol : 1);
       cumV  += vol > 0 ? vol : 1;
-      return { ...row, VWAP: parseFloat((cumPV / cumV).toFixed(2)) };
+      return {
+        ...row,
+        VWAP: parseFloat((cumPV / cumV).toFixed(2)),
+        'OI Diff': (row['PE OI'] ?? 0) - (row['CE OI'] ?? 0),
+      };
     });
   })();
 
@@ -879,61 +883,119 @@ export default function OptionsCharts() {
 
         </div>
 
-        {/* CE & PE Premium chart */}
-        <div className="bg-zinc-900/60 border border-zinc-800 rounded-2xl p-5">
-          <div className="flex items-center justify-between mb-4">
-            <div>
-              <div className="flex items-center gap-2">
-                <p className="text-sm font-bold text-white tracking-tight">CE &amp; PE Premium</p>
-                {chartStrike > 0 && (
-                  <span className="text-[10px] font-bold text-zinc-300 bg-zinc-800 px-2 py-0.5 rounded-md">
-                    {fmtNum(chartStrike)}{chartStrike === atm && atm > 0 ? ' ATM' : ''}
-                  </span>
-                )}
+        {/* CE & PE Premium + OI Diff charts */}
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+
+          {/* CE & PE Premium chart */}
+          <div className="bg-zinc-900/60 border border-zinc-800 rounded-2xl p-5">
+            <div className="flex items-center justify-between mb-4">
+              <div>
+                <div className="flex items-center gap-2">
+                  <p className="text-sm font-bold text-white tracking-tight">CE &amp; PE Premium</p>
+                  {chartStrike > 0 && (
+                    <span className="text-[10px] font-bold text-zinc-300 bg-zinc-800 px-2 py-0.5 rounded-md">
+                      {fmtNum(chartStrike)}{chartStrike === atm && atm > 0 ? ' ATM' : ''}
+                    </span>
+                  )}
+                </div>
+                <p className="text-[10px] text-zinc-400 mt-0.5">CE LTP vs PE LTP · NIFTY {expiry || '—'}</p>
               </div>
-              <p className="text-[10px] text-zinc-400 mt-0.5">CE LTP vs PE LTP · NIFTY {expiry || '—'}</p>
+              {/* CE / PE toggles */}
+              <div className="flex items-center gap-1.5">
+                {([
+                  { key: 'CE', label: 'CE', active: showCELine, toggle: () => setShowCELine(v => !v), color: 'text-blue-400 border-blue-500/30 bg-blue-500/10' },
+                  { key: 'PE', label: 'PE', active: showPELine, toggle: () => setShowPELine(v => !v), color: 'text-red-400 border-red-500/30 bg-red-500/10'   },
+                ] as const).map(({ key, label, active, toggle, color }) => (
+                  <button key={key} onClick={toggle}
+                    className={`px-2 py-1 text-[10px] font-bold rounded-lg border transition-all ${color} ${active ? 'opacity-100' : 'opacity-35'}`}>
+                    {label}
+                  </button>
+                ))}
+              </div>
             </div>
-            {/* CE / PE toggles */}
-            <div className="flex items-center gap-1.5">
-              {([
-                { key: 'CE', label: 'CE', active: showCELine, toggle: () => setShowCELine(v => !v), color: 'text-blue-400 border-blue-500/30 bg-blue-500/10' },
-                { key: 'PE', label: 'PE', active: showPELine, toggle: () => setShowPELine(v => !v), color: 'text-red-400 border-red-500/30 bg-red-500/10'   },
-              ] as const).map(({ key, label, active, toggle, color }) => (
-                <button key={key} onClick={toggle}
-                  className={`px-2 py-1 text-[10px] font-bold rounded-lg border transition-all ${color} ${active ? 'opacity-100' : 'opacity-35'}`}>
-                  {label}
-                </button>
-              ))}
-            </div>
+
+            {hasData ? (
+              <ResponsiveContainer width="100%" height={420}>
+                <LineChart data={chartData} margin={{ top: 8, right: 16, left: 0, bottom: 0 }}>
+                  <CartesianGrid {...gridProps} />
+                  <XAxis {...xAxisProps} />
+                  <YAxis tick={{ fontSize: 10, fill: '#a1a1aa', fontWeight: 500 }} tickLine={false}
+                    axisLine={false} domain={['auto', 'auto']} width={52}
+                    tickFormatter={v => fmtNum(v, 0)} />
+                  <Tooltip {...tooltipProps} />
+                  <Legend {...legendProps} />
+                  {showCELine && (
+                    <Line type="monotone" dataKey="CE LTP" stroke="#60a5fa" strokeWidth={2}
+                      dot={false} activeDot={{ r: 4, fill: '#60a5fa', strokeWidth: 0 }} />
+                  )}
+                  {showPELine && (
+                    <Line type="monotone" dataKey="PE LTP" stroke="#f87171" strokeWidth={2}
+                      dot={false} activeDot={{ r: 4, fill: '#f87171', strokeWidth: 0 }} />
+                  )}
+                </LineChart>
+              </ResponsiveContainer>
+            ) : (
+              <div className="flex items-center justify-center h-[420px]">
+                <p className="text-sm text-zinc-300 font-medium">
+                  {candleLoading ? 'Loading candles…' : isLive ? 'Accumulating live ticks…' : 'Select a strike to load chart'}
+                </p>
+              </div>
+            )}
           </div>
 
-          {hasData ? (
-            <ResponsiveContainer width="100%" height={280}>
-              <LineChart data={chartData} margin={{ top: 8, right: 16, left: 0, bottom: 0 }}>
-                <CartesianGrid {...gridProps} />
-                <XAxis {...xAxisProps} />
-                <YAxis tick={{ fontSize: 10, fill: '#a1a1aa', fontWeight: 500 }} tickLine={false}
-                  axisLine={false} domain={['auto', 'auto']} width={52}
-                  tickFormatter={v => fmtNum(v, 0)} />
-                <Tooltip {...tooltipProps} />
-                <Legend {...legendProps} />
-                {showCELine && (
-                  <Line type="monotone" dataKey="CE LTP" stroke="#60a5fa" strokeWidth={2}
-                    dot={false} activeDot={{ r: 4, fill: '#60a5fa', strokeWidth: 0 }} />
-                )}
-                {showPELine && (
-                  <Line type="monotone" dataKey="PE LTP" stroke="#f87171" strokeWidth={2}
-                    dot={false} activeDot={{ r: 4, fill: '#f87171', strokeWidth: 0 }} />
-                )}
-              </LineChart>
-            </ResponsiveContainer>
-          ) : (
-            <div className="flex items-center justify-center h-[280px]">
-              <p className="text-sm text-zinc-300 font-medium">
-                {candleLoading ? 'Loading candles…' : isLive ? 'Accumulating live ticks…' : 'Select a strike to load chart'}
-              </p>
+          {/* OI Difference chart (CE OI − PE OI) */}
+          <div className="bg-zinc-900/60 border border-zinc-800 rounded-2xl p-5">
+            <div className="flex items-center justify-between mb-4">
+              <div>
+                <div className="flex items-center gap-2">
+                  <p className="text-sm font-bold text-white tracking-tight">OI Difference (PE − CE)</p>
+                  {chartStrike > 0 && (
+                    <span className="text-[10px] font-bold text-zinc-300 bg-zinc-800 px-2 py-0.5 rounded-md">
+                      {fmtNum(chartStrike)}{chartStrike === atm && atm > 0 ? ' ATM' : ''}
+                    </span>
+                  )}
+                </div>
+                <p className="text-[10px] text-zinc-400 mt-0.5">PE OI − CE OI · +ve = PE heavy · −ve = CE heavy</p>
+              </div>
             </div>
-          )}
+
+            {hasData && hasOiData ? (
+              <ResponsiveContainer width="100%" height={420}>
+                <BarChart data={chartData} margin={{ top: 8, right: 16, left: 0, bottom: 0 }} barCategoryGap="15%">
+                  <CartesianGrid {...gridProps} />
+                  <XAxis {...xAxisProps} />
+                  <YAxis tick={{ fontSize: 10, fill: '#a1a1aa', fontWeight: 500 }} tickLine={false}
+                    axisLine={false} domain={['auto', 'auto']} width={52} tickFormatter={fmtOI} />
+                  <Tooltip {...tooltipProps} />
+                  <ReferenceLine y={0} stroke="#52525b" strokeWidth={1} strokeDasharray="4 4" />
+                  <Bar dataKey="OI Diff" name="PE OI − CE OI" radius={[2, 2, 0, 0]}>
+                    {chartData.map((entry, i) => (
+                      <Cell key={i} fill={(entry['OI Diff'] ?? 0) > 0 ? '#f87171' : '#4ade80'} fillOpacity={0.85} />
+                    ))}
+                  </Bar>
+                </BarChart>
+              </ResponsiveContainer>
+            ) : (
+              <div className="flex flex-col items-center justify-center h-[420px] gap-3">
+                {candleLoading ? (
+                  <>
+                    <div className="w-6 h-6 border-2 border-zinc-700 border-t-zinc-400 rounded-full animate-spin" />
+                    <p className="text-sm text-zinc-300 font-medium">Loading candles…</p>
+                  </>
+                ) : isLive ? (
+                  <>
+                    <div className="w-6 h-6 border-2 border-emerald-700 border-t-emerald-400 rounded-full animate-spin" />
+                    <p className="text-sm text-zinc-300 font-medium">Accumulating live ticks…</p>
+                  </>
+                ) : hasData && !hasOiData ? (
+                  <p className="text-sm text-zinc-300 font-medium">OI not returned by API for this contract</p>
+                ) : (
+                  <p className="text-sm text-zinc-300 font-medium">Select a strike to load chart</p>
+                )}
+              </div>
+            )}
+          </div>
+
         </div>
 
         {/* IV charts moved to dedicated page */}
