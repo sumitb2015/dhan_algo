@@ -41,6 +41,16 @@ export default function PayoffDiagram({ curve, currentSpot, breakevens }: Payoff
 
   const offPct = (off * 100).toFixed(1);
 
+  const dataMin = curve.length > 0 ? curve[0].spot : currentSpot * 0.98;
+  const dataMax = curve.length > 0 ? curve[curve.length - 1].spot : currentSpot * 1.02;
+  const ticks = [
+    dataMin,
+    dataMin + (currentSpot - dataMin) / 2,
+    currentSpot,
+    currentSpot + (dataMax - currentSpot) / 2,
+    dataMax,
+  ];
+
   return (
     <div className="h-[400px] w-full">
       <ResponsiveContainer width="100%" height="100%">
@@ -58,6 +68,7 @@ export default function PayoffDiagram({ curve, currentSpot, breakevens }: Payoff
             dataKey="spot"
             type="number"
             domain={['dataMin', 'dataMax']}
+            ticks={ticks}
             tick={{ fill: '#71717a', fontSize: 10, fontFamily: 'monospace' }}
             axisLine={{ stroke: '#27272a' }}
             tickLine={false}

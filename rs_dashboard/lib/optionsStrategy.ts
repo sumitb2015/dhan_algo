@@ -274,10 +274,15 @@ function buildSpotSamples(legs: ResolvedLeg[], spot: number): number[] {
   const lo = Math.min(spot - pctSpan, minStrike - pad);
   const hi = Math.max(spot + pctSpan, maxStrike + pad);
 
+  // Make bounds symmetric around spot
+  const maxDiff = Math.max(spot - lo, hi - spot);
+  const symLo = spot - maxDiff;
+  const symHi = spot + maxDiff;
+
   const samples = new Set<number>();
   const stepCount = 150;
   for (let i = 0; i <= stepCount; i++) {
-    samples.add(Math.round((lo + ((hi - lo) * i) / stepCount) * 100) / 100);
+    samples.add(Math.round((symLo + ((symHi - symLo) * i) / stepCount) * 100) / 100);
   }
   for (const leg of legs) samples.add(leg.strike);
   return [...samples].sort((a, b) => a - b);
