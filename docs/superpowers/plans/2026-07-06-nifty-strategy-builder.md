@@ -21,6 +21,7 @@
 - `rs_dashboard/AGENTS.md` warns this Next.js version has non-standard/breaking conventions — read the relevant guide under `rs_dashboard/node_modules/next/dist/docs/` before writing new route handlers if anything in Task 5/6 behaves unexpectedly.
 - NIFTY strike step is fixed at 50 points (`STRIKE_STEP = 50`).
 - The option chain's raw per-leg fields (confirmed from `lib/dhan_helper.py`'s Dhan API usage) are: `last_price` (number), `oi` (number), `implied_volatility` (number, may be absent), and a nested `greeks: { delta, theta, gamma, vega }` (numbers, may be absent). The chain is keyed as `chain.oc[strikeString].ce` / `.pe`, and the chain object also carries a top-level `last_price` for the underlying (not to be confused with a leg's `last_price`).
+- **Path note (discovered during Task 5, resolved with the user):** the saved-strategies CRUD API lives at `/api/saved-strategies` and `/api/saved-strategies/[id]`, NOT `/api/strategies` — that path is already taken by the existing live strategy-process control API (`rs_dashboard/app/api/strategies/route.ts`, consumed by the production `/strategies` and `/strategies-plus` pages to start/stop trading bots). This plan originally specified `/api/strategies` for the new feature before the collision was caught; every task below already uses the corrected `/api/saved-strategies` path.
 
 ---
 
@@ -1121,18 +1122,18 @@ git commit -m "feat(strategy-builder): add payoff curve, max P/L, breakeven, POP
 
 **Files:**
 - Create: `rs_dashboard/app/api/options/margin/route.ts`
-- Create: `rs_dashboard/app/api/strategies/route.ts`
-- Create: `rs_dashboard/app/api/strategies/[id]/route.ts`
+- Create: `rs_dashboard/app/api/saved-strategies/route.ts`
+- Create: `rs_dashboard/app/api/saved-strategies/[id]/route.ts`
 
 **Interfaces:**
 - Consumes: `scripts/tools/options_margin.py` (Task 2) and `scripts/tools/strategy_store.py` (Task 1) via `spawnSync`.
 - Produces (consumed by Task 9/10's components):
   - `POST /api/options/margin` body `{underlying, expiry, legs: [{strike, type, side, qtyLots, price}]}` → `{success: true, data: {total_margin, span_margin, exposure_margin, hedge_benefit, available_funds}}` or `{success: false, error}`.
-  - `GET /api/strategies` → `{success: true, data: StrategyRow[]}`.
-  - `POST /api/strategies` body = full `StrategyPayload` (Task 1's shape) → `{success: true, data: {id}}`.
-  - `GET /api/strategies/[id]` → `{success: true, data: StrategyRow}` (with `legs_json`/`params_json` as parsed objects) or `{success: false, error: 'not_found'}` (404).
-  - `PATCH /api/strategies/[id]` body `{status: 'open'|'closed'}` → `{success: true}`.
-  - `DELETE /api/strategies/[id]` → `{success: true}`.
+  - `GET /api/saved-strategies` → `{success: true, data: StrategyRow[]}`.
+  - `POST /api/saved-strategies` body = full `StrategyPayload` (Task 1's shape) → `{success: true, data: {id}}`.
+  - `GET /api/saved-strategies/[id]` → `{success: true, data: StrategyRow}` (with `legs_json`/`params_json` as parsed objects) or `{success: false, error: 'not_found'}` (404).
+  - `PATCH /api/saved-strategies/[id]` body `{status: 'open'|'closed'}` → `{success: true}`.
+  - `DELETE /api/saved-strategies/[id]` → `{success: true}`.
 
 - [ ] **Step 1: Write the margin route**
 
@@ -1203,7 +1204,7 @@ export async function POST(request: NextRequest) {
 
 - [ ] **Step 2: Write the strategies list/save route**
 
-Create `rs_dashboard/app/api/strategies/route.ts`:
+Create `rs_dashboard/app/api/saved-strategies/route.ts`:
 
 ```ts
 import { NextRequest, NextResponse } from 'next/server';
@@ -1252,7 +1253,7 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ success: true, data: parsed });
   } catch (err) {
     const stderr = (result.stderr ?? '').slice(0, 500);
-    console.error('[/api/strategies POST] parse error:', err, stderr);
+    console.error('[/api/saved-strategies POST] parse error:', err, stderr);
     return NextResponse.json({ success: false, error: `Parse error: ${String(err)}` }, { status: 500 });
   }
 }
@@ -1260,7 +1261,7 @@ export async function POST(request: NextRequest) {
 
 - [ ] **Step 3: Write the single-strategy route**
 
-Create `rs_dashboard/app/api/strategies/[id]/route.ts`:
+Create `rs_dashboard/app/api/saved-strategies/[id]/route.ts`:
 
 ```ts
 import { NextRequest, NextResponse } from 'next/server';
@@ -1343,16 +1344,16 @@ npm run dev
 ```
 In a second terminal, once the server is up on `http://localhost:3000`:
 ```bash
-curl -s -X POST http://localhost:3000/api/strategies -H "Content-Type: application/json" -d "{\"strategy_type\":\"short_straddle\",\"display_name\":\"Short Straddle\",\"underlying\":\"NIFTY\",\"expiry\":\"2026-07-30\",\"mode\":\"positional\",\"lots\":1,\"lot_size\":75,\"params\":{},\"entry_spot\":25010.5,\"entry_net_premium\":290.0,\"legs\":[{\"strike\":25000,\"option_type\":\"CE\",\"side\":\"SELL\",\"qty_lots\":1,\"entry_price\":150.0,\"entry_delta\":-0.52,\"security_id\":\"49081\"},{\"strike\":25000,\"option_type\":\"PE\",\"side\":\"SELL\",\"qty_lots\":1,\"entry_price\":140.0,\"entry_delta\":0.48,\"security_id\":\"49082\"}]}"
+curl -s -X POST http://localhost:3000/api/saved-strategies -H "Content-Type: application/json" -d "{\"strategy_type\":\"short_straddle\",\"display_name\":\"Short Straddle\",\"underlying\":\"NIFTY\",\"expiry\":\"2026-07-30\",\"mode\":\"positional\",\"lots\":1,\"lot_size\":75,\"params\":{},\"entry_spot\":25010.5,\"entry_net_premium\":290.0,\"legs\":[{\"strike\":25000,\"option_type\":\"CE\",\"side\":\"SELL\",\"qty_lots\":1,\"entry_price\":150.0,\"entry_delta\":-0.52,\"security_id\":\"49081\"},{\"strike\":25000,\"option_type\":\"PE\",\"side\":\"SELL\",\"qty_lots\":1,\"entry_price\":140.0,\"entry_delta\":0.48,\"security_id\":\"49082\"}]}"
 ```
 Expected: `{"success":true,"data":{"id":<some id>}}`. Then:
 ```bash
-curl -s http://localhost:3000/api/strategies
-curl -s http://localhost:3000/api/strategies/<id-from-above>
-curl -s -X PATCH http://localhost:3000/api/strategies/<id> -H "Content-Type: application/json" -d "{\"status\":\"closed\"}"
-curl -s -X DELETE http://localhost:3000/api/strategies/<id>
+curl -s http://localhost:3000/api/saved-strategies
+curl -s http://localhost:3000/api/saved-strategies/<id-from-above>
+curl -s -X PATCH http://localhost:3000/api/saved-strategies/<id> -H "Content-Type: application/json" -d "{\"status\":\"closed\"}"
+curl -s -X DELETE http://localhost:3000/api/saved-strategies/<id>
 ```
-Expected: each returns `{"success":true,...}` matching the shapes above; the `GET /api/strategies` list includes the saved row; the final `GET` after `DELETE` returns 404 with `{"success":false,"error":"not_found"}`.
+Expected: each returns `{"success":true,...}` matching the shapes above; the `GET /api/saved-strategies` list includes the saved row; the final `GET` after `DELETE` returns 404 with `{"success":false,"error":"not_found"}`.
 
 The margin route requires a live Dhan session (see Task 2's note) — if one isn't available in this environment, confirm at minimum that a request with a clearly-bad expiry returns a clean `{"success":false,"error":...}` rather than a crash, and defer the full live check to Task 9's end-to-end browser verification.
 
@@ -1361,7 +1362,7 @@ Stop the dev server (Ctrl+C) when done.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add rs_dashboard/app/api/options/margin/route.ts rs_dashboard/app/api/strategies/route.ts "rs_dashboard/app/api/strategies/[id]/route.ts"
+git add rs_dashboard/app/api/options/margin/route.ts rs_dashboard/app/api/saved-strategies/route.ts "rs_dashboard/app/api/saved-strategies/[id]/route.ts"
 git commit -m "feat(strategy-builder): add margin and saved-strategies API routes"
 ```
 
@@ -1873,7 +1874,7 @@ git commit -m "feat(strategy-builder): add strategy summary panel (P/L, breakeve
 - Create: `rs_dashboard/components/StrategyBuilder.tsx`
 
 **Interfaces:**
-- Consumes: everything from Tasks 3, 4, 6, 7, 8; existing `/api/options/expiries`, `/api/options/chain`, `/api/options/spot` routes; new `/api/options/margin`, `/api/strategies` routes (Task 5).
+- Consumes: everything from Tasks 3, 4, 6, 7, 8; existing `/api/options/expiries`, `/api/options/chain`, `/api/options/spot` routes; new `/api/options/margin`, `/api/saved-strategies` routes (Task 5).
 - Produces: the default export rendered by `app/strategy-builder/page.tsx` (Task 6).
 
 - [ ] **Step 1: Write the component**
@@ -2022,7 +2023,7 @@ export default function StrategyBuilder() {
       })),
       notes: null,
     };
-    fetch('/api/strategies', {
+    fetch('/api/saved-strategies', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
@@ -2141,7 +2142,7 @@ git commit -m "feat(strategy-builder): wire up main orchestrator component"
 - Create: `rs_dashboard/components/strategy/SavedStrategiesTab.tsx`
 
 **Interfaces:**
-- Consumes: `GET /api/strategies`, `GET /api/strategies/[id]`, `PATCH /api/strategies/[id]`, `DELETE /api/strategies/[id]` (Task 5), `/api/options/chain` (existing), `computePayoffStats`/`buildPayoffCurve` (Task 4).
+- Consumes: `GET /api/saved-strategies`, `GET /api/saved-strategies/[id]`, `PATCH /api/saved-strategies/[id]`, `DELETE /api/saved-strategies/[id]` (Task 5), `/api/options/chain` (existing), `computePayoffStats`/`buildPayoffCurve` (Task 4).
 - Produces: default export used by `StrategyBuilder.tsx` (Task 9) as `<SavedStrategiesTab />`. It takes no props: each saved strategy carries its own `underlying`/`expiry`/`lot_size` in its DB record, since the saved-strategies list can span multiple underlyings/expiries, not just the one currently selected in the Builder tab.
 
 - [ ] **Step 1: Write the component**
@@ -2184,7 +2185,7 @@ export default function SavedStrategiesTab() {
   const [liveCurve, setLiveCurve] = useState<{ spot: number; pnl: number }[]>([]);
 
   const refreshList = useCallback(() => {
-    fetch('/api/strategies').then((r) => r.json()).then((json) => setRows(json?.data ?? [])).catch(() => {});
+    fetch('/api/saved-strategies').then((r) => r.json()).then((json) => setRows(json?.data ?? [])).catch(() => {});
   }, []);
 
   useEffect(() => { refreshList(); }, [refreshList]);
@@ -2195,7 +2196,7 @@ export default function SavedStrategiesTab() {
     setLiveLegs(null);
     setLiveStats(null);
 
-    fetch(`/api/strategies/${id}`)
+    fetch(`/api/saved-strategies/${id}`)
       .then((r) => r.json())
       .then(async (json) => {
         if (!json?.success) return;
@@ -2232,7 +2233,7 @@ export default function SavedStrategiesTab() {
   }, []);
 
   const handleClose = useCallback((id: number) => {
-    fetch(`/api/strategies/${id}`, {
+    fetch(`/api/saved-strategies/${id}`, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ status: 'closed' }),
@@ -2240,7 +2241,7 @@ export default function SavedStrategiesTab() {
   }, [refreshList]);
 
   const handleDelete = useCallback((id: number) => {
-    fetch(`/api/strategies/${id}`, { method: 'DELETE' }).then(() => {
+    fetch(`/api/saved-strategies/${id}`, { method: 'DELETE' }).then(() => {
       refreshList();
       if (openId === id) { setOpenId(null); setDetail(null); }
     });
