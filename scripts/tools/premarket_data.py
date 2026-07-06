@@ -213,7 +213,12 @@ def main():
 
     helper = DhanHelper(dhan)
 
-    nifty_sid, nifty_expiry, mcx_found, ohlc_raw = get_all_market_data(helper)
+    # Gracefully degrade: if market data fetch fails, other sections proceed independently
+    try:
+        nifty_sid, nifty_expiry, mcx_found, ohlc_raw = get_all_market_data(helper)
+    except Exception as e:
+        logger.error(f"get_all_market_data failed: {e}")
+        nifty_sid, nifty_expiry, mcx_found, ohlc_raw = None, None, [], None
 
     result = {
         "futures":     build_futures(nifty_sid, nifty_expiry, ohlc_raw),
