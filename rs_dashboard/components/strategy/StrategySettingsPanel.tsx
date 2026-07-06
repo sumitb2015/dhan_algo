@@ -135,7 +135,7 @@ export default function StrategySettingsPanel({
           disabled={!canEnter || entering || exiting}
           className="px-4 py-1.5 bg-orange-600 hover:bg-orange-500 disabled:bg-zinc-700 disabled:text-zinc-500 text-white text-sm font-semibold rounded-lg transition-colors"
         >
-          {entering ? 'Entering...' : 'Enter (Dhan)'}
+          {entering ? 'Entering...' : 'Enter'}
         </button>
 
         <button
@@ -143,7 +143,7 @@ export default function StrategySettingsPanel({
           disabled={!canExit || entering || exiting}
           className="px-4 py-1.5 bg-rose-600 hover:bg-rose-500 disabled:bg-zinc-700 disabled:text-zinc-500 text-white text-sm font-semibold rounded-lg transition-colors"
         >
-          {exiting ? 'Exiting...' : 'Exit (Dhan)'}
+          {exiting ? 'Exiting...' : 'Exit'}
         </button>
       </div>
     </div>
