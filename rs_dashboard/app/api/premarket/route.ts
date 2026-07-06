@@ -15,7 +15,7 @@ const VIX_ID          = 21;
 // ── exported types ─────────────────────────────────────────────────────
 export interface NiftyData { spot: number; spotPrevClose: number; futuresLtp: number; futuresPremium: number; futuresExpiry: string }
 export interface VixData { vix: number; vixPrevClose: number; vixPctChange: number }
-export interface OptionsData { atmIV: number; pcr: number; maxCeOiStrike: number; maxPeOiStrike: number; chainFetchedAt: string; error?: string }
+export interface OptionsData { expiry: string; atmIV: number; pcr: number; maxCeOiStrike: number; maxPeOiStrike: number; chainFetchedAt: string; error?: string }
 export interface CommodityItem { name: string; ltp: number; prevClose: number; pctChange: number }
 export interface GlobalMarketItem { name: string; region: 'US' | 'Asia'; prevClose: number; pctChange: number }
 export interface BiasFactor { label: string; direction: 'positive' | 'negative' | 'neutral' }
@@ -130,10 +130,12 @@ function computeBias(
     }
   }
 
-  if (vix < 14)       { score += 1;  factors.push({ label: `VIX Low (${vix.toFixed(1)})`,      direction: 'positive' }); }
-  else if (vix <= 18) {               factors.push({ label: `VIX Moderate (${vix.toFixed(1)})`, direction: 'neutral'  }); }
-  else if (vix <= 25) { score -= 1;  factors.push({ label: `VIX Elevated (${vix.toFixed(1)})`, direction: 'negative' }); }
-  else                { score -= 2;  factors.push({ label: `VIX Extreme (${vix.toFixed(1)})`,  direction: 'negative' }); }
+  if (vix > 0) {
+    if (vix < 14)       { score += 1;  factors.push({ label: `VIX Low (${vix.toFixed(1)})`,      direction: 'positive' }); }
+    else if (vix <= 18) {               factors.push({ label: `VIX Moderate (${vix.toFixed(1)})`, direction: 'neutral'  }); }
+    else if (vix <= 25) { score -= 1;  factors.push({ label: `VIX Elevated (${vix.toFixed(1)})`, direction: 'negative' }); }
+    else                { score -= 2;  factors.push({ label: `VIX Extreme (${vix.toFixed(1)})`,  direction: 'negative' }); }
+  }
 
   if (pcr > 1.2)       { score += 1; factors.push({ label: `PCR Bullish (${pcr.toFixed(2)})`,  direction: 'positive' }); }
   else if (pcr >= 0.8) {              factors.push({ label: `PCR Neutral (${pcr.toFixed(2)})`,  direction: 'neutral'  }); }
@@ -191,7 +193,7 @@ export async function GET() {
     spot:           dhanData.spot,
     spotPrevClose:  dhanData.spotPrevClose,
     futuresLtp:     pyData.futures?.ltp ?? 0,
-    futuresPremium: (pyData.futures?.ltp ?? 0) - dhanData.spot,
+    futuresPremium: dhanData.spot > 0 ? (pyData.futures?.ltp ?? 0) - dhanData.spot : 0,
     futuresExpiry:  pyData.futures?.expiry ?? '',
   };
 
@@ -202,7 +204,7 @@ export async function GET() {
 
   const options: OptionsData = pyData.options
     ? { ...pyData.options }
-    : { atmIV: 0, pcr: 1, maxCeOiStrike: 0, maxPeOiStrike: 0, chainFetchedAt: '', error: pyData.error ?? 'Chain unavailable' };
+    : { expiry: '', atmIV: 0, pcr: 1, maxCeOiStrike: 0, maxPeOiStrike: 0, chainFetchedAt: '', error: pyData.error ?? 'Chain unavailable' };
 
   const commodities: CommodityItem[] = pyData.commodities ?? [];
 
