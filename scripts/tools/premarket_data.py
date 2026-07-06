@@ -218,7 +218,7 @@ def main():
         nifty_sid, nifty_expiry, mcx_found, ohlc_raw = get_all_market_data(helper)
     except Exception as e:
         logger.error(f"get_all_market_data failed: {e}")
-        nifty_sid, nifty_expiry, mcx_found, ohlc_raw = None, None, [], None
+        nifty_sid, nifty_expiry, mcx_found, ohlc_raw = None, None, [], {}
 
     result = {
         "futures":     build_futures(nifty_sid, nifty_expiry, ohlc_raw),
