@@ -138,8 +138,11 @@ export default function OptionsPositionsTab() {
 
         if (!data.has_positions) return;
 
-        // lock entry premium to first non-zero value (history seed takes priority)
-        if (entryPremiumRef.current === null && data.net_premium !== 0) {
+        // Skip data points where premium is 0 — means LTPs are unavailable (market closed / API issue)
+        if (data.net_premium === 0) return;
+
+        // lock entry premium to first non-zero value
+        if (entryPremiumRef.current === null) {
           entryPremiumRef.current = data.net_premium;
         }
 

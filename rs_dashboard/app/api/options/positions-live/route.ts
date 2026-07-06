@@ -203,40 +203,22 @@ export async function GET(request: NextRequest) {
     return isOptSegment && (hasOptType || symMatch) && (p.netQty ?? 0) !== 0;
   });
 
-  // ── Step B: fetch option LTPs and VIX in parallel (separate calls) ─
-  const secIds: number[] = optLegs.map(p => Number(p.securityId)).filter(Boolean);
-
+  // ── Step B: fetch VIX; use lastPrice from positions for option LTPs ─
+  // The /v2/positions response includes lastTradedPrice per leg — no OHLC call needed.
   type OhlcJson = { status?: string; data?: Record<string, Record<string, { last_price?: number }>> };
 
-  let ltpMap: Record<string, number> = {};
   let vix = 0;
-
-  const [fnoResult, vixResult] = await Promise.allSettled([
-    // FNO call — only if there are option legs
-    secIds.length > 0
-      ? fetch(OHLC_URL, {
-          method: 'POST', headers,
-          body: JSON.stringify({ NSE_FNO: secIds }),
-          signal: AbortSignal.timeout(6000),
-        }).then(r => r.json() as Promise<OhlcJson>)
-      : Promise.resolve({ status: 'success', data: {} } as OhlcJson),
-    // VIX call — dedicated, never mixed with FNO
-    fetch(OHLC_URL, {
+  try {
+    const vixRes = await fetch(OHLC_URL, {
       method: 'POST', headers,
       body: JSON.stringify({ NSE_IDX: [VIX_ID] }),
       signal: AbortSignal.timeout(6000),
-    }).then(r => r.json() as Promise<OhlcJson>),
-  ]);
-
-  if (fnoResult.status === 'fulfilled' && fnoResult.value.status === 'success') {
-    const fnoData = fnoResult.value.data?.NSE_FNO ?? {};
-    for (const [id, entry] of Object.entries(fnoData)) {
-      ltpMap[id] = entry.last_price ?? 0;
+    });
+    const vixJson = await vixRes.json() as OhlcJson;
+    if (vixJson.status === 'success') {
+      vix = vixJson.data?.NSE_IDX?.[String(VIX_ID)]?.last_price ?? 0;
     }
-  }
-  if (vixResult.status === 'fulfilled' && vixResult.value.status === 'success') {
-    vix = vixResult.value.data?.NSE_IDX?.[String(VIX_ID)]?.last_price ?? 0;
-  }
+  } catch { /* vix stays 0 */ }
 
   // ── Step C: build legs + compute net premium ──────────────────────
   type Leg = {
@@ -246,7 +228,7 @@ export async function GET(request: NextRequest) {
 
   let netPremium = 0;
   const legs: Leg[] = optLegs.map(p => {
-    const ltp  = ltpMap[String(p.securityId)] ?? (p.lastPrice ?? 0);
+    const ltp  = p.lastPrice ?? 0;
     const qty  = p.netQty ?? 0;
     const side: 'SELL' | 'BUY' = qty < 0 ? 'SELL' : 'BUY';
     const sym  = p.tradingSymbol ?? '';
