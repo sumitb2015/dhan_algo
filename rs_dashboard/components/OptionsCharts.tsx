@@ -446,6 +446,9 @@ export default function OptionsCharts() {
         ...row,
         VWAP: parseFloat((cumPV / cumV).toFixed(2)),
         'OI Diff': (row['PE OI'] ?? 0) - (row['CE OI'] ?? 0),
+        PCR: (row['CE OI'] ?? 0) > 0
+          ? parseFloat(((row['PE OI'] ?? 0) / (row['CE OI'] ?? 0)).toFixed(3))
+          : null,
       };
     });
   })();
@@ -463,6 +466,7 @@ export default function OptionsCharts() {
   const latestPeOi   = isLive ? (liveData?.pe?.oi ?? 0) : (lastRow?.['PE OI'] ?? 0);
   const hasOiData    = chartData.some(r => (r['CE OI'] ?? 0) > 0 || (r['PE OI'] ?? 0) > 0);
   const pcr          = latestCeOi > 0 ? (latestPeOi / latestCeOi) : 0;
+  const pcrLineColor = pcr > 1.3 ? '#34d399' : pcr > 0 && pcr < 0.7 ? '#f87171' : '#facc15';
   const xTickInterval = chartData.length > 0 ? Math.max(0, Math.floor(chartData.length / 10) - 1) : 0;
 
   // Shared chart axes config
@@ -996,6 +1000,79 @@ export default function OptionsCharts() {
             )}
           </div>
 
+        </div>
+
+        {/* PCR Over Time */}
+        <div className="bg-zinc-900/60 border border-zinc-800 rounded-2xl p-5">
+          <div className="flex items-center justify-between mb-4">
+            <div>
+              <div className="flex items-center gap-2">
+                <p className="text-sm font-bold text-white tracking-tight">PCR Over Time</p>
+                {chartStrike > 0 && (
+                  <span className="text-[10px] font-bold text-zinc-300 bg-zinc-800 px-2 py-0.5 rounded-md">
+                    {fmtNum(chartStrike)}{chartStrike === atm && atm > 0 ? ' ATM' : ''}
+                  </span>
+                )}
+                {hasOiData && pcr > 0 && (
+                  <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full border ${
+                    pcr > 1.3 ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30'
+                    : pcr < 0.7 ? 'bg-red-500/10 text-red-400 border-red-500/30'
+                    : 'bg-yellow-500/10 text-yellow-400 border-yellow-500/30'
+                  }`}>PCR {pcr.toFixed(2)}</span>
+                )}
+              </div>
+              <p className="text-[10px] text-zinc-400 mt-0.5">PE OI ÷ CE OI · NIFTY {expiry || '—'}</p>
+            </div>
+          </div>
+
+          {hasData && hasOiData ? (
+            <ResponsiveContainer width="100%" height={280}>
+              <LineChart data={chartData} margin={{ top: 8, right: 16, left: 0, bottom: 0 }}>
+                <CartesianGrid {...gridProps} />
+                <XAxis {...xAxisProps} />
+                <YAxis
+                  tick={{ fontSize: 10, fill: '#a1a1aa', fontWeight: 500 }}
+                  tickLine={false}
+                  axisLine={false}
+                  domain={[0, 'auto']}
+                  width={40}
+                  tickFormatter={v => Number(v).toFixed(2)}
+                />
+                <Tooltip {...tooltipProps} />
+                <ReferenceLine y={1.3} stroke="#34d399" strokeWidth={1} strokeDasharray="5 4"
+                  label={{ value: 'Bullish 1.3', position: 'insideTopRight', fontSize: 9, fill: '#34d399' }} />
+                <ReferenceLine y={0.7} stroke="#f87171" strokeWidth={1} strokeDasharray="5 4"
+                  label={{ value: 'Bearish 0.7', position: 'insideBottomRight', fontSize: 9, fill: '#f87171' }} />
+                <Line
+                  type="monotone"
+                  dataKey="PCR"
+                  stroke={pcrLineColor}
+                  strokeWidth={2}
+                  dot={false}
+                  connectNulls={false}
+                  activeDot={{ r: 4, fill: pcrLineColor, strokeWidth: 0 }}
+                />
+              </LineChart>
+            </ResponsiveContainer>
+          ) : (
+            <div className="flex flex-col items-center justify-center h-[280px] gap-3">
+              {candleLoading ? (
+                <>
+                  <div className="w-6 h-6 border-2 border-zinc-700 border-t-zinc-400 rounded-full animate-spin" />
+                  <p className="text-sm text-zinc-300 font-medium">Loading candles…</p>
+                </>
+              ) : isLive ? (
+                <>
+                  <div className="w-6 h-6 border-2 border-emerald-700 border-t-emerald-400 rounded-full animate-spin" />
+                  <p className="text-sm text-zinc-300 font-medium">Accumulating live ticks…</p>
+                </>
+              ) : hasData && !hasOiData ? (
+                <p className="text-sm text-zinc-300 font-medium">OI not returned by API for this contract</p>
+              ) : (
+                <p className="text-sm text-zinc-300 font-medium">Select a strike to load chart</p>
+              )}
+            </div>
+          )}
         </div>
 
         {/* IV charts moved to dedicated page */}
