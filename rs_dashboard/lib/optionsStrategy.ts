@@ -265,7 +265,7 @@ export function findBreakevens(curve: { spot: number; pnl: number }[]): number[]
  * only occur at strikes, so max/min and breakevens must be evaluated exactly there).
  */
 function buildSpotSamples(legs: ResolvedLeg[], spot: number): number[] {
-  const pctSpan = spot * 0.035; // +/- 3.5% of spot
+  const pctSpan = spot * 0.02; // +/- 2% of spot
   const strikes = legs.map((l) => l.strike);
   const minStrike = strikes.length > 0 ? Math.min(...strikes) : spot;
   const maxStrike = strikes.length > 0 ? Math.max(...strikes) : spot;
