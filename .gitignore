@@ -28,6 +28,7 @@ REORGANIZATION_SUMMARY.md
 debug/*.txt
 debug/*.pid
 debug/*.json
+debug/*.db
 
 # Debug Scripts
 debug_*.py
