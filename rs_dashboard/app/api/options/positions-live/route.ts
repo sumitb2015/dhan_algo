@@ -126,6 +126,7 @@ export async function GET(request: NextRequest) {
       cwd: PROJECT_ROOT,
     });
     if (result.status !== 0 || result.error) {
+      if (result.stderr) console.error('[positions-live] positions_history.py stderr:', result.stderr);
       return NextResponse.json({ history: [], error: 'script_error' });
     }
     const lastLine = (result.stdout || '').trim().split('\n').pop() ?? '{}';

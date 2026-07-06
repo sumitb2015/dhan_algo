@@ -108,7 +108,6 @@ export default function OptionsPositionsTab() {
   const [error, setError]             = useState<string | null>(null);
   const [pollMs, setPollMs]           = useState<PollMs>(30000);
   const entryPremiumRef               = useRef<number | null>(null);
-  const historySeededRef              = useRef(false);
 
   // ── One-time history seed on mount ───────────────────────────────
   useEffect(() => {
@@ -118,7 +117,6 @@ export default function OptionsPositionsTab() {
         if (data.history && data.history.length > 0) {
           setDataPoints(data.history);
           entryPremiumRef.current = data.history[0].netPremium;
-          historySeededRef.current = true;
           setLoading(false);
         }
       })
@@ -162,7 +160,7 @@ export default function OptionsPositionsTab() {
           netPremium: data.net_premium,
           vix:        data.vix,
         };
-        setDataPoints(prev => [...prev, point]);
+        setDataPoints(prev => [...prev.slice(-1999), point]);
       } catch {
         if (!cancelled) setError('Network error fetching positions.');
       }
@@ -188,19 +186,19 @@ export default function OptionsPositionsTab() {
     ? 'text-zinc-400'
     : changeBeneficial ? 'text-emerald-400' : 'text-red-400';
 
-  // Y axis domain helpers — add 10 % padding
+  // Y axis domain helpers — sign-safe 10 % padding
   const premiums = dataPoints.map(d => d.netPremium);
   const vixes    = dataPoints.map(d => d.vix);
   const premiumDomain = premiums.length > 1
     ? [
-        Math.floor(Math.min(...premiums) * 0.9),
-        Math.ceil(Math.max(...premiums)  * 1.1),
+        Math.floor(Math.min(...premiums) - Math.abs(Math.min(...premiums)) * 0.1),
+        Math.ceil( Math.max(...premiums) + Math.abs(Math.max(...premiums)) * 0.1),
       ]
     : ['auto', 'auto'];
   const vixDomain = vixes.length > 1
     ? [
-        Math.floor(Math.min(...vixes) * 0.95 * 10) / 10,
-        Math.ceil( Math.max(...vixes) * 1.05 * 10) / 10,
+        Math.floor((Math.min(...vixes) - Math.abs(Math.min(...vixes)) * 0.05) * 10) / 10,
+        Math.ceil( (Math.max(...vixes) + Math.abs(Math.max(...vixes)) * 0.05) * 10) / 10,
       ]
     : ['auto', 'auto'];
 

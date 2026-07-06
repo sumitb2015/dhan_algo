@@ -97,11 +97,12 @@ def main():
         return
 
     # ── Fetch 1-min candles for each leg ─────────────────────────────
-    leg_maps = {}  # secId → {'side': 'SELL'|'BUY', 'close_map': {epoch: close}}
+    leg_maps = {}  # secId → {'side', 'abs_qty', 'close_map'}
     for row in opt_rows:
-        sid  = str(row.get('securityId', '') or '')
-        qty  = int(row.get('netQty', 0) or 0)
-        side = 'SELL' if qty < 0 else 'BUY'
+        sid     = str(row.get('securityId', '') or '')
+        qty     = int(row.get('netQty', 0) or 0)
+        side    = 'SELL' if qty < 0 else 'BUY'
+        abs_qty = abs(qty)
         if not sid:
             continue
         try:
@@ -119,6 +120,7 @@ def main():
             ts_ser = _to_epoch_series(df)
             leg_maps[sid] = {
                 'side':      side,
+                'abs_qty':   abs_qty,
                 'close_map': dict(zip(ts_ser.tolist(), df['close'].tolist())),
             }
         except Exception as e:
@@ -155,8 +157,9 @@ def main():
     for ts in common_ts:
         net_premium = 0.0
         for info in leg_maps.values():
-            ltp = float(info['close_map'].get(ts, 0) or 0)
-            net_premium += ltp if info['side'] == 'SELL' else -ltp
+            ltp     = float(info['close_map'].get(ts, 0) or 0)
+            abs_qty = info['abs_qty']
+            net_premium += ltp * abs_qty if info['side'] == 'SELL' else -ltp * abs_qty
 
         vix_val = float(vix_map.get(ts, 0) or 0)
 
