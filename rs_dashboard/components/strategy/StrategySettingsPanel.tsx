@@ -19,14 +19,17 @@ interface StrategySettingsPanelProps {
   onSave: () => void;
   canSave: boolean;
   onEnterTrade: () => void;
+  onExitTrade: () => void;
   canEnter: boolean;
+  canExit: boolean;
   entering: boolean;
+  exiting: boolean;
 }
 
 export default function StrategySettingsPanel({
   template, params, onParamsChange, lots, onLotsChange, mode, onModeChange,
   expiryKindFilter, onExpiryKindFilterChange, expiries, selectedExpiry, onExpiryChange,
-  onAnalyze, onSave, canSave, onEnterTrade, canEnter, entering,
+  onAnalyze, onSave, canSave, onEnterTrade, onExitTrade, canEnter, canExit, entering, exiting,
 }: StrategySettingsPanelProps) {
   const visibleExpiries = expiries.filter((e) => expiryKindFilter === 'all' || e.kind === expiryKindFilter);
 
@@ -129,10 +132,18 @@ export default function StrategySettingsPanel({
 
         <button
           onClick={onEnterTrade}
-          disabled={!canEnter || entering}
+          disabled={!canEnter || entering || exiting}
           className="px-4 py-1.5 bg-orange-600 hover:bg-orange-500 disabled:bg-zinc-700 disabled:text-zinc-500 text-white text-sm font-semibold rounded-lg transition-colors"
         >
-          {entering ? 'Entering...' : 'Enter Trade (Dhan)'}
+          {entering ? 'Entering...' : 'Enter (Dhan)'}
+        </button>
+
+        <button
+          onClick={onExitTrade}
+          disabled={!canExit || entering || exiting}
+          className="px-4 py-1.5 bg-rose-600 hover:bg-rose-500 disabled:bg-zinc-700 disabled:text-zinc-500 text-white text-sm font-semibold rounded-lg transition-colors"
+        >
+          {exiting ? 'Exiting...' : 'Exit (Dhan)'}
         </button>
       </div>
     </div>

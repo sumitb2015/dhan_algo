@@ -44,6 +44,7 @@ export default function StrategyBuilder() {
   const [marginLoading, setMarginLoading] = useState(false);
 
   const [entering, setEntering] = useState(false);
+  const [exiting, setExiting] = useState(false);
   const [orderResult, setOrderResult] = useState<{ success: boolean; message: string } | null>(null);
 
   const selectedTemplate = selectedId ? getTemplate(selectedId) : undefined;
@@ -184,6 +185,39 @@ export default function StrategyBuilder() {
       });
   }, [resolvedLegs, mode]);
 
+  const handleExitTrade = useCallback(() => {
+    if (!resolvedLegs) return;
+    setExiting(true);
+    setOrderResult(null);
+
+    const legsPayload = resolvedLegs.map((l) => ({
+      securityId: l.securityId,
+      quantity: l.qtyLots * LOT_SIZE,
+      side: l.side === 'BUY' ? 'SELL' : 'BUY',
+    }));
+
+    fetch('/api/options/order', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ legs: legsPayload, mode }),
+    })
+      .then((r) => r.json())
+      .then((json) => {
+        if (json.success) {
+          const ids = json.data.map((o: any) => o.orderId).join(', ');
+          setOrderResult({ success: true, message: `Strategy exited successfully. Order IDs: ${ids}` });
+        } else {
+          setOrderResult({ success: false, message: json.error || 'Failed to place exit orders.' });
+        }
+      })
+      .catch((err) => {
+        setOrderResult({ success: false, message: String(err) });
+      })
+      .finally(() => {
+        setExiting(false);
+      });
+  }, [resolvedLegs, mode]);
+
   const handleUpdateLegStrike = useCallback((index: number, newStrike: number) => {
     if (!resolvedLegs) return;
     const updated = [...resolvedLegs];
@@ -282,8 +316,11 @@ export default function StrategyBuilder() {
                 onSave={handleSave}
                 canSave={mode === 'positional' && stats !== null}
                 onEnterTrade={handleEnterTrade}
+                onExitTrade={handleExitTrade}
                 canEnter={stats !== null && resolvedLegs !== null && resolvedLegs.every(l => l.securityId !== null)}
+                canExit={stats !== null && resolvedLegs !== null && resolvedLegs.every(l => l.securityId !== null)}
                 entering={entering}
+                exiting={exiting}
               />
             )}
 
