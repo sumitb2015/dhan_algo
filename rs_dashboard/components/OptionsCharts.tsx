@@ -484,6 +484,11 @@ export default function OptionsCharts() {
     wrapperStyle: { fontSize: 11, paddingTop: 12 },
     formatter: (v: string) => <span style={{ color: '#d4d4d8', fontWeight: 600 }}>{v}</span>,
   };
+  // Stable Y-axis domain for live data: 3% padding so small movements don't rescale wildly
+  const liveDomain: [(v: number) => number, (v: number) => number] = [
+    (dataMin: number) => Math.floor(dataMin * 0.97),
+    (dataMax: number) => Math.ceil(dataMax * 1.03),
+  ];
 
   // ── Render ────────────────────────────────────────────────────────
   return (
@@ -849,7 +854,7 @@ export default function OptionsCharts() {
                   <CartesianGrid {...gridProps} />
                   <XAxis {...xAxisProps} />
                   <YAxis tick={{ fontSize: 10, fill: '#a1a1aa', fontWeight: 500 }} tickLine={false}
-                    axisLine={false} domain={['auto', 'auto']} width={52}
+                    axisLine={false} domain={isLive ? liveDomain : ['auto', 'auto']} width={52}
                     tickFormatter={v => fmtNum(v, 0)} />
                   <Tooltip {...tooltipProps} />
                   <Legend {...legendProps} />
@@ -927,7 +932,7 @@ export default function OptionsCharts() {
                   <CartesianGrid {...gridProps} />
                   <XAxis {...xAxisProps} />
                   <YAxis tick={{ fontSize: 10, fill: '#a1a1aa', fontWeight: 500 }} tickLine={false}
-                    axisLine={false} domain={['auto', 'auto']} width={52}
+                    axisLine={false} domain={isLive ? liveDomain : ['auto', 'auto']} width={52}
                     tickFormatter={v => fmtNum(v, 0)} />
                   <Tooltip {...tooltipProps} />
                   <Legend {...legendProps} />
