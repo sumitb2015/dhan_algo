@@ -203,34 +203,39 @@ export async function GET(request: NextRequest) {
     return isOptSegment && (hasOptType || symMatch) && (p.netQty ?? 0) !== 0;
   });
 
-  // ── Step B: fetch LTPs for option legs + VIX in one OHLC call ────
+  // ── Step B: fetch option LTPs and VIX in parallel (separate calls) ─
   const secIds: number[] = optLegs.map(p => Number(p.securityId)).filter(Boolean);
 
-  const ohlcBody: Record<string, number[]> = { NSE_IDX: [VIX_ID] };
-  if (secIds.length > 0) ohlcBody['NSE_FNO'] = secIds;
+  type OhlcJson = { status?: string; data?: Record<string, Record<string, { last_price?: number }>> };
 
   let ltpMap: Record<string, number> = {};
   let vix = 0;
-  try {
-    const res = await fetch(OHLC_URL, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify(ohlcBody),
+
+  const [fnoResult, vixResult] = await Promise.allSettled([
+    // FNO call — only if there are option legs
+    secIds.length > 0
+      ? fetch(OHLC_URL, {
+          method: 'POST', headers,
+          body: JSON.stringify({ NSE_FNO: secIds }),
+          signal: AbortSignal.timeout(6000),
+        }).then(r => r.json() as Promise<OhlcJson>)
+      : Promise.resolve({ status: 'success', data: {} } as OhlcJson),
+    // VIX call — dedicated, never mixed with FNO
+    fetch(OHLC_URL, {
+      method: 'POST', headers,
+      body: JSON.stringify({ NSE_IDX: [VIX_ID] }),
       signal: AbortSignal.timeout(6000),
-    });
-    const json = await res.json() as {
-      status?: string;
-      data?: Record<string, Record<string, { last_price?: number }>>;
-    };
-    if (json.status === 'success' && json.data) {
-      vix = json.data?.NSE_IDX?.[String(VIX_ID)]?.last_price ?? 0;
-      const fnoData = json.data?.NSE_FNO ?? {};
-      for (const [id, entry] of Object.entries(fnoData)) {
-        ltpMap[id] = entry.last_price ?? 0;
-      }
+    }).then(r => r.json() as Promise<OhlcJson>),
+  ]);
+
+  if (fnoResult.status === 'fulfilled' && fnoResult.value.status === 'success') {
+    const fnoData = fnoResult.value.data?.NSE_FNO ?? {};
+    for (const [id, entry] of Object.entries(fnoData)) {
+      ltpMap[id] = entry.last_price ?? 0;
     }
-  } catch {
-    // VIX and LTPs will be 0; proceed with what we have
+  }
+  if (vixResult.status === 'fulfilled' && vixResult.value.status === 'success') {
+    vix = vixResult.value.data?.NSE_IDX?.[String(VIX_ID)]?.last_price ?? 0;
   }
 
   // ── Step C: build legs + compute net premium ──────────────────────
