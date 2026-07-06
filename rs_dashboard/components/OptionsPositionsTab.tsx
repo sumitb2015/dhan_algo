@@ -23,6 +23,8 @@ interface Leg {
   type: 'CE' | 'PE';
   side: 'SELL' | 'BUY';
   ltp: number;
+  entryPrice: number;
+  pnl: number;
   netQty: number;
 }
 
@@ -115,8 +117,10 @@ export default function OptionsPositionsTab() {
       .then(r => r.json())
       .then((data: { history?: DataPoint[]; error?: string }) => {
         if (data.history && data.history.length > 0) {
-          setDataPoints(data.history);
-          entryPremiumRef.current = data.history[0].netPremium;
+          // Format ISO UTC timestamps to IST display strings
+          const formatted = data.history.map(pt => ({ ...pt, time: fmtTime(pt.time) }));
+          setDataPoints(formatted);
+          entryPremiumRef.current = formatted[0].netPremium;
           setLoading(false);
         }
       })
@@ -178,6 +182,7 @@ export default function OptionsPositionsTab() {
   const netPremium   = latest?.netPremium ?? 0;
   const vix          = latest?.vix ?? 0;
   const changeFromEntry = entryPremium !== null ? netPremium - entryPremium : null;
+  const totalPnl     = legs.reduce((sum, l) => sum + (l.pnl ?? 0), 0);
 
   // For a net-sell position, premium decreasing is good (profit)
   // We colour by direction of change relative to entry
@@ -253,6 +258,12 @@ export default function OptionsPositionsTab() {
           label="India VIX"
           value={fmtNum(vix)}
           valueClass="text-amber-400"
+        />
+        <StatTile
+          label="Total P&L"
+          value={(totalPnl >= 0 ? '+' : '') + fmtNum(totalPnl)}
+          sub="sum of all legs"
+          valueClass={totalPnl > 0 ? 'text-emerald-400' : totalPnl < 0 ? 'text-red-400' : 'text-zinc-400'}
         />
         <StatTile
           label="Open Legs"
@@ -383,7 +394,9 @@ export default function OptionsPositionsTab() {
               <th className="text-center px-4 py-2.5 text-xs font-bold text-white">Strike</th>
               <th className="text-center px-4 py-2.5 text-xs font-bold text-white">Type</th>
               <th className="text-center px-4 py-2.5 text-xs font-bold text-white">Side</th>
+              <th className="text-right px-4 py-2.5 text-xs font-bold text-white">Entry</th>
               <th className="text-right px-4 py-2.5 text-xs font-bold text-white">LTP</th>
+              <th className="text-right px-4 py-2.5 text-xs font-bold text-white">P&amp;L</th>
               <th className="text-right px-4 py-2.5 text-xs font-bold text-white">Qty</th>
             </tr>
           </thead>
@@ -406,7 +419,13 @@ export default function OptionsPositionsTab() {
                     {leg.side}
                   </span>
                 </td>
+                <td className="px-4 py-2.5 text-right text-zinc-400">{fmtNum(leg.entryPrice)}</td>
                 <td className="px-4 py-2.5 text-right text-zinc-200 font-semibold">{fmtNum(leg.ltp)}</td>
+                <td className={`px-4 py-2.5 text-right font-semibold ${
+                  leg.pnl > 0 ? 'text-emerald-400' : leg.pnl < 0 ? 'text-red-400' : 'text-zinc-400'
+                }`}>
+                  {leg.pnl >= 0 ? '+' : ''}{fmtNum(leg.pnl)}
+                </td>
                 <td className="px-4 py-2.5 text-right text-zinc-400">{leg.netQty}</td>
               </tr>
             ))}

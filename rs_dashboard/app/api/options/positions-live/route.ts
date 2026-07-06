@@ -236,7 +236,7 @@ export async function GET(request: NextRequest) {
   // ── Step C: build legs + compute net premium ──────────────────────
   type Leg = {
     symbol: string; strike: number; type: 'CE' | 'PE';
-    side: 'SELL' | 'BUY'; ltp: number; netQty: number;
+    side: 'SELL' | 'BUY'; ltp: number; entryPrice: number; pnl: number; netQty: number;
   };
 
   let netPremium = 0;
@@ -245,7 +245,12 @@ export async function GET(request: NextRequest) {
     const qty  = p.netQty ?? 0;
     const side: 'SELL' | 'BUY' = qty < 0 ? 'SELL' : 'BUY';
     const sym  = p.tradingSymbol ?? '';
-    
+
+    // Entry price: for sells use sellAvg, for buys use buyAvg
+    const entryPrice = side === 'SELL'
+      ? (p.sellAvg ?? p.costPrice ?? 0)
+      : (p.buyAvg  ?? p.costPrice ?? 0);
+
     let cepe: 'CE' | 'PE' = 'CE';
     if (p.drvOptionType === 'CALL') {
       cepe = 'CE';
@@ -275,7 +280,12 @@ export async function GET(request: NextRequest) {
       netPremium -= ltp * absQty;
     }
 
-    return { symbol: sym, strike, type: cepe, side, ltp, netQty: qty };
+    // Per-leg P&L: sell profits when ltp falls; buy profits when ltp rises
+    const pnl = side === 'SELL'
+      ? (entryPrice - ltp) * absQty
+      : (ltp - entryPrice) * absQty;
+
+    return { symbol: sym, strike, type: cepe, side, ltp, entryPrice: Math.round(entryPrice * 100) / 100, pnl: Math.round(pnl * 100) / 100, netQty: qty };
   });
 
   const payload = {
@@ -321,6 +331,9 @@ interface DhanPosition {
   securityId?: string | number;
   netQty?: number;
   lastPrice?: number;
+  buyAvg?: number;
+  sellAvg?: number;
+  costPrice?: number;
   exchangeSegment?: string;
   drvOptionType?: string;
   drvStrikePrice?: number | string;
