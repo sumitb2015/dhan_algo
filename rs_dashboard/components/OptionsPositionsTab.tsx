@@ -106,9 +106,26 @@ export default function OptionsPositionsTab() {
   const [legs, setLegs]               = useState<Leg[]>([]);
   const [loading, setLoading]         = useState(true);
   const [error, setError]             = useState<string | null>(null);
-  const [pollMs, setPollMs]           = useState<PollMs>(5000);
+  const [pollMs, setPollMs]           = useState<PollMs>(30000);
   const entryPremiumRef               = useRef<number | null>(null);
+  const historySeededRef              = useRef(false);
 
+  // ── One-time history seed on mount ───────────────────────────────
+  useEffect(() => {
+    fetch('/api/options/positions-live?history=true')
+      .then(r => r.json())
+      .then((data: { history?: DataPoint[]; error?: string }) => {
+        if (data.history && data.history.length > 0) {
+          setDataPoints(data.history);
+          entryPremiumRef.current = data.history[0].netPremium;
+          historySeededRef.current = true;
+          setLoading(false);
+        }
+      })
+      .catch(() => {}); // non-fatal; polling will still provide live points
+  }, []);
+
+  // ── Live polling ─────────────────────────────────────────────────
   useEffect(() => {
     let cancelled = false;
 
@@ -135,7 +152,7 @@ export default function OptionsPositionsTab() {
 
         if (!data.has_positions) return;
 
-        // lock entry premium to first non-zero value
+        // lock entry premium to first non-zero value (history seed takes priority)
         if (entryPremiumRef.current === null && data.net_premium !== 0) {
           entryPremiumRef.current = data.net_premium;
         }
