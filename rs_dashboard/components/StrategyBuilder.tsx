@@ -146,6 +146,50 @@ export default function StrategyBuilder() {
     }).catch(() => {});
   }, [selectedTemplate, resolvedLegs, stats, selectedExpiry, lots, params, spot]);
 
+  const handleUpdateLegStrike = useCallback((index: number, newStrike: number) => {
+    if (!resolvedLegs) return;
+    const updated = [...resolvedLegs];
+    const leg = updated[index];
+    
+    const strikeKey = String(newStrike);
+    const entry = chainOc[strikeKey] ?? chainOc[newStrike.toFixed(6)] ?? Object.entries(chainOc).find(([k]) => Math.abs(parseFloat(k) - newStrike) < 0.01)?.[1];
+    const legData = leg.type === 'CE' ? entry?.ce : entry?.pe;
+    
+    if (!legData || typeof legData.last_price !== 'number') {
+      return;
+    }
+    
+    updated[index] = {
+      ...leg,
+      strike: newStrike,
+      price: legData.last_price,
+      delta: legData.greeks?.delta ?? null,
+      iv: legData.implied_volatility ?? null,
+    };
+    
+    setResolvedLegs(updated);
+    
+    const payoffStats = computePayoffStats(updated, spot, LOT_SIZE);
+    setStats(payoffStats);
+    setCurve(buildPayoffCurve(updated, spot, LOT_SIZE));
+    setTargetBreakevens(null);
+    
+    setMarginLoading(true);
+    fetch('/api/options/margin', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        underlying: UNDERLYING,
+        expiry: selectedExpiry,
+        legs: updated.map((l) => ({ strike: l.strike, type: l.type, side: l.side, qtyLots: l.qtyLots, price: l.price })),
+      }),
+    })
+      .then((r) => r.json())
+      .then((json) => setMargin(json?.success ? json.data : null))
+      .catch(() => setMargin(null))
+      .finally(() => setMarginLoading(false));
+  }, [resolvedLegs, chainOc, spot, selectedExpiry]);
+
   const displayedCurve = useMemo(() => curve, [curve]);
 
   return (
@@ -204,6 +248,71 @@ export default function StrategyBuilder() {
             {missingStrikes.length > 0 && (
               <div className="bg-rose-950 border border-rose-800 text-rose-300 text-xs rounded-lg px-4 py-2.5">
                 Chain data unavailable for strike(s): {missingStrikes.join(', ')}. Try a different expiry or offsets.
+              </div>
+            )}
+
+            {resolvedLegs && resolvedLegs.length > 0 && (
+              <div className="bg-zinc-900/60 border border-zinc-800 rounded-2xl p-5 space-y-4">
+                <h3 className="text-sm font-bold text-white uppercase tracking-wider border-b border-zinc-800 pb-2">Strategy Legs</h3>
+                <div className="overflow-x-auto">
+                  <table className="w-full text-xs border-collapse">
+                    <thead>
+                      <tr className="border-b border-zinc-800 text-zinc-400 font-semibold">
+                        <th className="px-3 py-2 text-left">B/S</th>
+                        <th className="px-3 py-2 text-left">Expiry</th>
+                        <th className="px-3 py-2 text-center w-40">Strike</th>
+                        <th className="px-3 py-2 text-left">Type</th>
+                        <th className="px-3 py-2 text-left">Price (LTP)</th>
+                        <th className="px-3 py-2 text-left">Lots</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-zinc-800/40">
+                      {resolvedLegs.map((leg, idx) => {
+                        const sideColor = leg.side === 'BUY' ? 'text-sky-400 bg-sky-500/10 border border-sky-500/20' : 'text-rose-400 bg-rose-500/10 border border-rose-500/20';
+                        return (
+                          <tr key={idx} className="hover:bg-zinc-850/50 transition-colors">
+                            <td className="px-3 py-3">
+                              <span className={`inline-flex px-1.5 py-0.5 rounded text-[10px] font-bold ${sideColor}`}>
+                                {leg.side === 'BUY' ? 'BUY' : 'SELL'}
+                              </span>
+                            </td>
+                            <td className="px-3 py-3 text-zinc-300 font-mono">
+                              {selectedExpiry}
+                            </td>
+                            <td className="px-3 py-3">
+                              <div className="flex items-center justify-center gap-2">
+                                <button
+                                  onClick={() => handleUpdateLegStrike(idx, leg.strike - 50)}
+                                  className="w-6 h-6 flex items-center justify-center bg-zinc-800 hover:bg-zinc-700 active:bg-zinc-650 border border-zinc-700 rounded text-zinc-300 font-semibold"
+                                >
+                                  -
+                                </button>
+                                <span className="font-mono font-bold text-zinc-100 w-16 text-center">{leg.strike}</span>
+                                <button
+                                  onClick={() => handleUpdateLegStrike(idx, leg.strike + 50)}
+                                  className="w-6 h-6 flex items-center justify-center bg-zinc-800 hover:bg-zinc-700 active:bg-zinc-650 border border-zinc-700 rounded text-zinc-300 font-semibold"
+                                >
+                                  +
+                                </button>
+                              </div>
+                            </td>
+                            <td className="px-3 py-3">
+                              <span className={`font-semibold font-mono ${leg.type === 'CE' ? 'text-emerald-400' : 'text-rose-400'}`}>
+                                {leg.type}
+                              </span>
+                            </td>
+                            <td className="px-3 py-3 text-zinc-300 font-mono">
+                              ₹{leg.price.toFixed(1)}
+                            </td>
+                            <td className="px-3 py-3 text-zinc-300 font-mono">
+                              {leg.qtyLots}
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
               </div>
             )}
 
