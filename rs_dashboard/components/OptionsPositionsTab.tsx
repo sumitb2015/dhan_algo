@@ -2,7 +2,7 @@
 
 import React, { useState, useEffect, useRef } from 'react';
 import {
-  ComposedChart, Line, XAxis, YAxis, CartesianGrid,
+  ComposedChart, LineChart, Line, XAxis, YAxis, CartesianGrid,
   Tooltip, Legend, ResponsiveContainer, ReferenceLine,
 } from 'recharts';
 
@@ -25,6 +25,7 @@ interface Leg {
   ltp: number;
   entryPrice: number;
   pnl: number;
+  realizedPnl: number;
   netQty: number;
 }
 
@@ -41,6 +42,14 @@ interface DataPoint {
   time: string;
   netPremium: number;
   vix: number;
+}
+
+interface PremiumPoint { time: string; premium: number }
+
+function isMarketHours(): boolean {
+  const now = new Date();
+  const hm  = now.getHours() * 100 + now.getMinutes();
+  return hm >= 915 && hm <= 1530;
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────
@@ -111,6 +120,13 @@ export default function OptionsPositionsTab() {
   const [pollMs, setPollMs]           = useState<PollMs>(30000);
   const entryPremiumRef               = useRef<number | null>(null);
 
+  const [premiumData, setPremiumData]               = useState<PremiumPoint[]>([]);
+  const [currentPremium, setCurrentPremium]         = useState<number>(0);
+  const [premiumLastUpdated, setPremiumLastUpdated] = useState<string>('');
+  const [isPostSession, setIsPostSession]           = useState<boolean>(false);
+  const [premiumError, setPremiumError]             = useState<string | null>(null);
+  const [premiumRefreshKey, setPremiumRefreshKey]   = useState(0);
+
   // ── Live polling ─────────────────────────────────────────────────
   useEffect(() => {
     let cancelled = false;
@@ -162,21 +178,52 @@ export default function OptionsPositionsTab() {
     return () => { cancelled = true; clearInterval(id); };
   }, [pollMs]); // restart interval when poll rate changes
 
+  // ── Premium chart (tradebook-based) ─────────────────────────────────
+  useEffect(() => {
+    const postSession = !isMarketHours();
+    setIsPostSession(postSession);
+
+    async function fetchPremiumChart() {
+      try {
+        const res  = await fetch('/api/options/premium-chart');
+        const data = await res.json() as {
+          success: boolean;
+          data: PremiumPoint[];
+          current_premium: number;
+          error?: string;
+        };
+        if (!data.success) {
+          setPremiumError(data.error ?? 'Failed to load premium chart');
+          return;
+        }
+        setPremiumData(data.data);
+        setCurrentPremium(data.current_premium);
+        setPremiumLastUpdated(
+          new Date().toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' }),
+        );
+        setPremiumError(null);
+      } catch {
+        setPremiumError('Network error fetching premium chart');
+      }
+    }
+
+    fetchPremiumChart();
+    if (!postSession) {
+      const id = setInterval(fetchPremiumChart, 30_000);
+      return () => clearInterval(id);
+    }
+  }, [premiumRefreshKey]);
+
   // ── Derived values ───────────────────────────────────────────────
 
-  const latest       = dataPoints[dataPoints.length - 1];
-  const entryPremium = entryPremiumRef.current;
-  const netPremium   = latest?.netPremium ?? 0;
-  const vix          = latest?.vix ?? 0;
-  const changeFromEntry = entryPremium !== null ? netPremium - entryPremium : null;
-  const totalPnl     = legs.reduce((sum, l) => sum + (l.pnl ?? 0), 0);
-
-  // For a net-sell position, premium decreasing is good (profit)
-  // We colour by direction of change relative to entry
-  const changeBeneficial = changeFromEntry !== null && changeFromEntry < 0;
-  const changeColour = changeFromEntry === null
-    ? 'text-zinc-400'
-    : changeBeneficial ? 'text-emerald-400' : 'text-red-400';
+  const latest             = dataPoints[dataPoints.length - 1];
+  const entryPremium       = entryPremiumRef.current;
+  const netPremium         = latest?.netPremium ?? 0;
+  const vix                = latest?.vix ?? 0;
+  // unrealized P&L: Dhan-computed per leg (sign-correct for buyers and sellers)
+  const totalUnrealizedPnl = legs.reduce((sum, l) => sum + (l.pnl ?? 0), 0);
+  // realized P&L: from closed intraday trades
+  const totalRealizedPnl   = legs.reduce((sum, l) => sum + (l.realizedPnl ?? 0), 0);
 
   // Y axis domain helpers — sign-safe 10 % padding
   const premiums = dataPoints.map(d => d.netPremium);
@@ -216,41 +263,40 @@ export default function OptionsPositionsTab() {
     );
   }
 
-  if (!legs.length) {
-    return (
-      <div className="flex items-center justify-center h-64 text-zinc-500 text-sm">
-        No open F&amp;O option positions
-      </div>
-    );
-  }
-
   return (
     <div className="flex flex-col gap-5">
 
-      {/* Stat row */}
+      {!legs.length && (
+        <div className="flex items-center justify-center h-32 text-zinc-500 text-sm border border-zinc-800 rounded-2xl bg-zinc-900/40">
+          No open F&amp;O option positions
+        </div>
+      )}
+
+      {legs.length > 0 && (
+      <>{/* Stat row */}
       <div className="flex gap-3 flex-wrap">
         <StatTile
           label="Net Premium"
           value={fmtNum(netPremium)}
-          sub={netPremium >= 0 ? 'Net credit' : 'Net debit'}
+          sub={entryPremium !== null ? `Start: ${fmtNum(entryPremium)}` : 'Net credit'}
           valueClass={netPremium >= 0 ? 'text-emerald-400' : 'text-red-400'}
         />
         <StatTile
-          label="Change from Entry"
-          value={changeFromEntry !== null ? (changeFromEntry >= 0 ? '+' : '') + fmtNum(changeFromEntry) : '—'}
-          sub={entryPremium !== null ? `Entry: ${fmtNum(entryPremium)}` : undefined}
-          valueClass={changeColour}
+          label="Unrealized P&L"
+          value={(totalUnrealizedPnl >= 0 ? '+' : '') + fmtNum(totalUnrealizedPnl)}
+          sub="Dhan computed"
+          valueClass={totalUnrealizedPnl > 0 ? 'text-emerald-400' : totalUnrealizedPnl < 0 ? 'text-red-400' : 'text-zinc-400'}
+        />
+        <StatTile
+          label="Realized P&L"
+          value={(totalRealizedPnl >= 0 ? '+' : '') + fmtNum(totalRealizedPnl)}
+          sub="closed intraday"
+          valueClass={totalRealizedPnl > 0 ? 'text-emerald-400' : totalRealizedPnl < 0 ? 'text-red-400' : 'text-zinc-400'}
         />
         <StatTile
           label="India VIX"
           value={fmtNum(vix)}
           valueClass="text-amber-400"
-        />
-        <StatTile
-          label="Total P&L"
-          value={(totalPnl >= 0 ? '+' : '') + fmtNum(totalPnl)}
-          sub="sum of all legs"
-          valueClass={totalPnl > 0 ? 'text-emerald-400' : totalPnl < 0 ? 'text-red-400' : 'text-zinc-400'}
         />
         <StatTile
           label="Open Legs"
@@ -338,7 +384,7 @@ export default function OptionsPositionsTab() {
                   strokeDasharray="4 3"
                   strokeOpacity={0.4}
                   label={{
-                    value: 'Entry',
+                    value: 'Start',
                     position: 'insideTopLeft',
                     fill: '#a1a1aa',
                     fontSize: 10,
@@ -418,6 +464,93 @@ export default function OptionsPositionsTab() {
             ))}
           </tbody>
         </table>
+      </div>
+
+      </>)}
+
+      {/* Combined Open Premium Chart */}
+      <div className="bg-zinc-900/60 border border-zinc-800 rounded-2xl p-5">
+        <div className="flex items-center justify-between gap-2 mb-4 flex-wrap">
+          <div className="flex items-center gap-2">
+            <h3 className="text-sm font-bold text-white">Combined Open Premium</h3>
+            {isPostSession ? (
+              <span className="px-2 py-0.5 text-[10px] font-bold rounded-full bg-zinc-700 text-zinc-400 border border-zinc-600">
+                POST-SESSION
+              </span>
+            ) : (
+              <span className="px-2 py-0.5 text-[10px] font-bold rounded-full bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
+                LIVE
+              </span>
+            )}
+            {premiumLastUpdated && (
+              <span className="px-2 py-0.5 text-[10px] font-bold rounded-full bg-zinc-800 text-zinc-400 border border-zinc-700">
+                DATA: {premiumLastUpdated}
+              </span>
+            )}
+          </div>
+          <button
+            onClick={() => setPremiumRefreshKey(k => k + 1)}
+            className="p-1.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-400 hover:text-zinc-200 transition-colors"
+            title="Refresh premium chart"
+          >
+            <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8" />
+              <path d="M21 3v5h-5" />
+              <path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16" />
+              <path d="M3 21v-5h5" />
+            </svg>
+          </button>
+        </div>
+
+        <div className="mb-4">
+          <StatTile
+            label="Open Sell Premium"
+            value={fmtNum(currentPremium)}
+            sub="pts/lot · open positions only"
+            valueClass={currentPremium > 0 ? 'text-emerald-400' : 'text-zinc-400'}
+          />
+        </div>
+
+        {premiumError ? (
+          <div className="px-4 py-3 bg-red-900/20 border border-red-700/40 rounded-xl text-sm text-red-400">
+            {premiumError}
+          </div>
+        ) : premiumData.length < 2 ? (
+          <div className="flex items-center justify-center h-[280px] text-zinc-500 text-sm">
+            {premiumData.length === 0 ? 'No FNO trades today' : 'Collecting data…'}
+          </div>
+        ) : (
+          <ResponsiveContainer width="100%" height={280}>
+            <LineChart data={premiumData} margin={{ top: 5, right: 20, left: 10, bottom: 5 }}>
+              <CartesianGrid strokeDasharray="3 3" stroke="#27272a" vertical={false} />
+              <XAxis
+                dataKey="time"
+                tick={{ fill: '#71717a', fontSize: 11 }}
+                axisLine={{ stroke: '#3f3f46' }}
+                tickLine={false}
+                tickFormatter={(v: string, i: number) => i % 30 === 0 ? v : ''}
+              />
+              <YAxis
+                tick={{ fill: '#71717a', fontSize: 11 }}
+                axisLine={false}
+                tickLine={false}
+                width={55}
+                tickFormatter={(v: number) => v.toFixed(0)}
+              />
+              <Tooltip content={<ChartTooltip />} />
+              <ReferenceLine y={0} stroke="#52525b" strokeDasharray="3 3" />
+              <Line
+                type="stepAfter"
+                dataKey="premium"
+                name="Open Premium"
+                stroke="#10b981"
+                strokeWidth={2}
+                dot={false}
+                activeDot={{ r: 3 }}
+              />
+            </LineChart>
+          </ResponsiveContainer>
+        )}
       </div>
 
     </div>
