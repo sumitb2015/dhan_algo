@@ -23,7 +23,7 @@ VIX_CSV = os.path.join(ROOT, "Historical Data", "Indices", "INDIA_VIX.csv")
 
 
 def _prev_close_from_csv() -> float:
-    """Return last row's Close from daily INDIA_VIX.csv as prev close."""
+    """Return last row's Close from daily INDIA_VIX.csv as prev close (CSV fallback only)."""
     try:
         with open(VIX_CSV, encoding="utf-8") as f:
             lines = [l for l in f.read().splitlines() if l.strip()]
@@ -31,6 +31,32 @@ def _prev_close_from_csv() -> float:
             return 0.0
         last_row = lines[-1].split(",")
         return float(last_row[4])  # close is index 4
+    except Exception:
+        return 0.0
+
+
+def _prev_day_close_from_intraday(raw_df, today_date_str: str) -> float:
+    """
+    From the multi-day intraday DataFrame, return the last close of the most
+    recent trading day before today_date_str. More reliable than the CSV when
+    the daily CSV has not been refreshed.
+    """
+    try:
+        import pandas as pd
+        if raw_df is None or raw_df.empty:
+            return 0.0
+        tc = _col(raw_df, "start_Time", "timestamp", "time", "date")
+        col = raw_df[tc]
+        dates = (pd.to_datetime(col, unit="s").dt.date
+                 if col.dtype in ("int64", "float64")
+                 else pd.to_datetime(col, errors="coerce").dt.date)
+        prev_days = sorted(d for d in dates.unique() if str(d) < today_date_str)
+        if not prev_days:
+            return 0.0
+        prev_day = prev_days[-1]
+        prev_df = raw_df[dates == prev_day]
+        close_col = _col(prev_df, "close", "Close", "c")
+        return round(float(prev_df[close_col].iloc[-1]), 2)
     except Exception:
         return 0.0
 
@@ -89,7 +115,8 @@ def main():
         last = dates.max()
         return raw_df[dates == last].copy(), str(last)
 
-    df, data_date = _filter_last_day(_fetch(VIX_SECURITY_ID))
+    raw_vix_df = _fetch(VIX_SECURITY_ID)
+    df, data_date = _filter_last_day(raw_vix_df)
     if df is None or df.empty:
         print(json.dumps({"error": "No intraday data returned for India VIX — check auth token"}))
         return
@@ -140,7 +167,7 @@ def main():
     day_open  = round(opens[0],   2) if opens  else 0.0
     day_high  = round(max(highs),  2) if highs  else 0.0
     day_low   = round(min(lows),   2) if lows   else 0.0
-    prev_close = _prev_close_from_csv()
+    prev_close = _prev_day_close_from_intraday(raw_vix_df, data_date) or _prev_close_from_csv()
 
     print(json.dumps({
         "candles":    candles,

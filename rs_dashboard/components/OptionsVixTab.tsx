@@ -236,10 +236,10 @@ export default function OptionsVixTab() {
               yAxisId="vix"
               tick={{ fill: '#818cf8', fontSize: 10 }}
               tickFormatter={(v: number) => v.toFixed(2)}
-              domain={([min, max]: readonly [number, number]): [number, number] => [
-                parseFloat((min * 0.95).toFixed(2)),
-                parseFloat((max * 1.05).toFixed(2)),
-              ]}
+              domain={([min, max]: readonly [number, number]): [number, number] => {
+                const pad = Math.max((max - min) * 0.25, 0.1);
+                return [parseFloat((min - pad).toFixed(2)), parseFloat((max + pad).toFixed(2))];
+              }}
               width={44}
               label={{ value: 'VIX', angle: -90, position: 'insideLeft', fill: '#818cf8', fontSize: 9, dx: -4 }}
             />
