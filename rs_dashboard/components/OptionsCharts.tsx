@@ -16,6 +16,7 @@ import OptionsVixTab from './OptionsVixTab';
 import OptionsBuildupTab from './OptionsBuildupTab';
 import OptionsMultiStrikeTab from './OptionsMultiStrikeTab';
 import OptionsPCDiffTab from './OptionsPCDiffTab';
+import OptionsPositionsTab from './OptionsPositionsTab';
 
 // ─── Types ────────────────────────────────────────────────────────
 
@@ -167,7 +168,7 @@ export default function OptionsCharts() {
   const [showVWAP,   setShowVWAP]   = useState(true);
   const [showCELine, setShowCELine] = useState(true);
   const [showPELine, setShowPELine] = useState(true);
-  const [activeTab, setActiveTab] = useState<'premium' | 'skew' | 'oi' | 'cumulative' | 'chain' | 'intelligence' | 'vix' | 'buildup' | 'multistrike' | 'pcdiff'>('premium');
+  const [activeTab, setActiveTab] = useState<'premium' | 'skew' | 'oi' | 'cumulative' | 'chain' | 'intelligence' | 'vix' | 'buildup' | 'multistrike' | 'pcdiff' | 'positions'>('premium');
 
   // ── Fetch expiries ────────────────────────────────────────────────
   useEffect(() => {
@@ -509,7 +510,7 @@ export default function OptionsCharts() {
 
         <div className="flex items-center gap-2 flex-wrap">
           {/* Expiry */}
-          {activeTab !== 'vix' && (
+          {activeTab !== 'vix' && activeTab !== 'positions' && (
           <div className="flex items-center gap-1.5">
             <span className="text-xs text-zinc-300 font-medium">Expiry</span>
             <select
@@ -597,6 +598,7 @@ export default function OptionsCharts() {
               { key: 'buildup',      label: 'Buildup'      },
               { key: 'multistrike',  label: 'Multi-Strike' },
               { key: 'pcdiff',       label: 'PC Diff'      },
+              { key: 'positions',    label: 'Positions'    },
             ] as const).map(({ key, label }) => (
               <button
                 key={key}
@@ -618,6 +620,7 @@ export default function OptionsCharts() {
           {activeTab === 'chain'      && <OptionsSmartChainTab   expiry={expiry} />}
           {activeTab === 'intelligence' && <OptionsIntelligenceTab expiry={expiry} />}
           {activeTab === 'vix'          && <OptionsVixTab />}
+          {activeTab === 'positions'    && <OptionsPositionsTab />}
           {activeTab === 'buildup'      && <OptionsBuildupTab expiry={expiry} />}
           {activeTab === 'multistrike'  && (
             <OptionsMultiStrikeTab
