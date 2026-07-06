@@ -14,6 +14,7 @@ import sys
 import os
 import re
 import json
+import urllib.request
 from datetime import datetime, timezone
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -23,6 +24,7 @@ from login import get_dhan_client
 from lib.dhan_helper import DhanHelper
 
 VIX_ID = 21
+OHLC_URL = 'https://api.dhan.co/v2/marketfeed/ohlc'
 
 
 def main():
@@ -63,23 +65,41 @@ def main():
     ltp_map: dict = {}
     vix = 0.0
 
+    # Fetch option LTPs via SDK — response is double-nested: res['data']['data']['NSE_FNO']
     try:
-        securities = {'NSE_IDX': [VIX_ID]}
         if sec_ids:
-            securities['NSE_FNO'] = sec_ids
-
-        res = dhan.ohlc_data(securities=securities)
-        if isinstance(res, dict) and res.get('status') == 'success':
-            data = res.get('data', {})
-            for sid, entry in (data.get('NSE_FNO') or {}).items():
-                ltp_map[str(sid)] = float(entry.get('last_price', 0) or 0)
-            idx_entry = (data.get('NSE_IDX') or {}).get(str(VIX_ID), {})
-            vix = float(idx_entry.get('last_price', 0) or 0)
-        else:
-            print(f'WARN: ohlc_data status={res.get("status") if isinstance(res, dict) else res}',
-                  file=sys.stderr)
+            fno_res = dhan.ohlc_data(securities={'NSE_FNO': sec_ids})
+            if isinstance(fno_res, dict) and fno_res.get('status') == 'success':
+                fno_data = (fno_res.get('data') or {})
+                # SDK wraps response: {'data': {'data': {'NSE_FNO': {...}}, 'status': 'success'}}
+                if 'data' in fno_data:
+                    fno_data = fno_data['data']
+                for sid_key, entry in (fno_data.get('NSE_FNO') or {}).items():
+                    ltp_map[str(sid_key)] = float(entry.get('last_price', 0) or 0)
     except Exception as e:
-        print(f'WARN: ohlc_data failed: {e}', file=sys.stderr)
+        print(f'WARN: FNO ohlc_data failed: {e}', file=sys.stderr)
+
+    # Fetch VIX via direct REST — SDK ohlc_data() does not support NSE_IDX
+    try:
+        token = dhan.dhan_http.access_token
+        client_id = dhan.dhan_http.client_id
+        body = json.dumps({'NSE_IDX': [VIX_ID]}).encode()
+        req = urllib.request.Request(
+            OHLC_URL, data=body, method='POST',
+            headers={
+                'access-token': token,
+                'client-id': client_id,
+                'Content-Type': 'application/json',
+                'Accept': 'application/json',
+            }
+        )
+        with urllib.request.urlopen(req, timeout=6) as resp:
+            vix_res = json.loads(resp.read())
+        if vix_res.get('status') == 'success':
+            idx_entry = (vix_res.get('data') or {}).get('NSE_IDX', {}).get(str(VIX_ID), {})
+            vix = float(idx_entry.get('last_price', 0) or 0)
+    except Exception as e:
+        print(f'WARN: VIX REST failed: {e}', file=sys.stderr)
 
     # Build legs and compute net premium
     legs = []
