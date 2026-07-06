@@ -111,22 +111,6 @@ export default function OptionsPositionsTab() {
   const [pollMs, setPollMs]           = useState<PollMs>(30000);
   const entryPremiumRef               = useRef<number | null>(null);
 
-  // ── One-time history seed on mount ───────────────────────────────
-  useEffect(() => {
-    fetch('/api/options/positions-live?history=true')
-      .then(r => r.json())
-      .then((data: { history?: DataPoint[]; error?: string }) => {
-        if (data.history && data.history.length > 0) {
-          // Format ISO UTC timestamps to IST display strings
-          const formatted = data.history.map(pt => ({ ...pt, time: fmtTime(pt.time) }));
-          setDataPoints(formatted);
-          entryPremiumRef.current = formatted[0].netPremium;
-          setLoading(false);
-        }
-      })
-      .catch(() => {}); // non-fatal; polling will still provide live points
-  }, []);
-
   // ── Live polling ─────────────────────────────────────────────────
   useEffect(() => {
     let cancelled = false;
