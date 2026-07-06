@@ -23,6 +23,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DB_PATH      = PROJECT_ROOT / "Options Data" / "nifty_options.db"
 OUTPUT_PATH  = PROJECT_ROOT / "debug" / "straddle_premium_analysis.json"
 STATUS_PATH  = PROJECT_ROOT / "debug" / "straddle_analysis_status.json"
+STRATEGY_PARAMS_PATH = PROJECT_ROOT / "debug" / "straddle_strategy_params.json"
 
 WEEKDAY_NAMES  = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"]
 REGIME_CUTOFF  = date(2025, 9, 1)   # NSE changed Thu->Tue weekly expiry on this date
@@ -275,6 +276,25 @@ def compute_regime_stats(daily: pd.DataFrame, merged: pd.DataFrame) -> dict:
     }
 
 
+def distill_strategy_params(regime_stats: dict) -> dict:
+    """Reduce a regime stats dict's by_weekday/by_dte entries to the fields a live
+    strategy needs: avg_premium, seller_win_pct, count."""
+    def _reduce(segment: dict) -> dict:
+        return {
+            key: {
+                "avg_premium":    entry["avg"],
+                "seller_win_pct": entry["seller_win_pct"],
+                "count":          entry["count"],
+            }
+            for key, entry in segment.items()
+        }
+
+    return {
+        "by_weekday": _reduce(regime_stats.get("by_weekday", {})),
+        "by_dte":     _reduce(regime_stats.get("by_dte", {})),
+    }
+
+
 def main() -> None:
     write_status("running", 0, "Connecting to database...")
 
@@ -397,6 +417,14 @@ def main() -> None:
     OUTPUT_PATH.write_text(json.dumps(output, indent=2), encoding="utf-8")
     write_status("done", 100, f"Analysis complete. {len(daily):,} trading days processed.")
     print(f"Done. {len(daily):,} days -> {OUTPUT_PATH}")
+
+    strategy_params = {
+        "generated_at": output["generated_at"],
+        "regime": "post_sep2025",
+        **distill_strategy_params(regime_post),
+    }
+    STRATEGY_PARAMS_PATH.write_text(json.dumps(strategy_params, indent=2), encoding="utf-8")
+    print(f"Also wrote strategy params -> {STRATEGY_PARAMS_PATH}")
 
 
 if __name__ == "__main__":
