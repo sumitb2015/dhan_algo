@@ -76,8 +76,16 @@ export default function StrategySettingsPanel({
             type="number"
             min={1}
             step={1}
-            value={lots}
-            onChange={(e) => onLotsChange(Math.max(1, Number(e.target.value)))}
+            value={lots || ''}
+            onChange={(e) => {
+              const val = e.target.value;
+              if (val === '') {
+                onLotsChange(0);
+              } else {
+                const parsed = parseInt(val, 10);
+                onLotsChange(isNaN(parsed) ? 1 : parsed);
+              }
+            }}
             className="bg-zinc-800 border border-zinc-700 rounded-md text-sm text-zinc-100 px-2 py-1 w-20"
           />
         </label>

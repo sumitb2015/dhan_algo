@@ -82,7 +82,7 @@ export default function StrategyBuilder() {
     if (!selectedTemplate) return;
     const atm = computeAtm(spot);
     const specs = selectedTemplate.legs(params);
-    const { legs, missingStrikes: missing } = resolveLegs(specs, atm, lots, chainOc);
+    const { legs, missingStrikes: missing } = resolveLegs(specs, atm, Math.max(1, lots), chainOc);
     setMissingStrikes(missing);
     if (missing.length > 0) {
       setResolvedLegs(null);
@@ -128,7 +128,7 @@ export default function StrategyBuilder() {
       underlying: UNDERLYING,
       expiry: selectedExpiry,
       mode: 'positional',
-      lots,
+      lots: Math.max(1, lots),
       lot_size: LOT_SIZE,
       params,
       entry_spot: spot,
