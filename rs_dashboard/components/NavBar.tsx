@@ -51,6 +51,7 @@ const NAV_GROUPS = [
       { href: '/distribution', label: 'Distribution', desc: 'Returns frequency & statistical distribution' },
       { href: '/live', label: 'Live', desc: 'Live ticking market breadth & indexes' },
       { href: '/expiry-analysis', label: 'Expiry Analysis', desc: 'Weekly OC return distribution & outlier analysis' },
+      { href: '/premarket', label: 'Premarket', desc: 'Morning market bias, VIX, OI levels & global snapshot' },
     ],
   },
   {
