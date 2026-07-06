@@ -167,7 +167,10 @@ def get_options_data(helper):
         atm_entry = oc.get(str(int(atm)), {})
         ce_iv     = (atm_entry.get("ce") or {}).get("implied_volatility") or 0
         pe_iv     = (atm_entry.get("pe") or {}).get("implied_volatility") or 0
-        atm_iv    = (ce_iv + pe_iv) / 2 if (ce_iv + pe_iv) > 0 else max(ce_iv, pe_iv)
+        if ce_iv > 0 and pe_iv > 0:
+            atm_iv = (ce_iv + pe_iv) / 2
+        else:
+            atm_iv = max(ce_iv, pe_iv)
 
         # PCR and max OI
         total_ce_oi = total_pe_oi = 0

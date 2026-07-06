@@ -168,8 +168,14 @@ export default function PremarketDashboard() {
               <StatTile
                 label="Prev Close"
                 value={fmt(data.nifty.spotPrevClose, 2)}
-                sub={`${pctSign((data.nifty.spot - data.nifty.spotPrevClose) / data.nifty.spotPrevClose * 100)} today`}
-                subColor={pctColor((data.nifty.spot - data.nifty.spotPrevClose) / data.nifty.spotPrevClose * 100)}
+                sub={data.nifty.spotPrevClose > 0
+                  ? `${pctSign((data.nifty.spot - data.nifty.spotPrevClose) / data.nifty.spotPrevClose * 100)} today`
+                  : 'No data'
+                }
+                subColor={data.nifty.spotPrevClose > 0
+                  ? pctColor((data.nifty.spot - data.nifty.spotPrevClose) / data.nifty.spotPrevClose * 100)
+                  : 'text-zinc-500'
+                }
               />
               <StatTile
                 label="Expected Day Range (±1σ)"
