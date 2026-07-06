@@ -231,3 +231,161 @@ export function classifyExpiries(dates: string[]): { date: string; kind: ExpiryK
   }
   return dates.map((d) => ({ date: d, kind: monthly.has(d) ? 'monthly' : 'weekly' }));
 }
+
+// ── Payoff engine ────────────────────────────────────────────────────────────
+
+/** Per-unit-of-lot payoff at a given expiry spot price (not yet scaled by lotSize). */
+export function legPayoffAtExpiry(spot: number, leg: ResolvedLeg): number {
+  const intrinsic = leg.type === 'CE' ? Math.max(spot - leg.strike, 0) : Math.max(leg.strike - spot, 0);
+  const perUnit = leg.side === 'SELL' ? (leg.price - intrinsic) : (intrinsic - leg.price);
+  return perUnit * leg.qtyLots;
+}
+
+function netPnlAtExpiry(legs: ResolvedLeg[], spot: number, lotSize: number): number {
+  return legs.reduce((sum, leg) => sum + legPayoffAtExpiry(spot, leg), 0) * lotSize;
+}
+
+/** Zero-crossings of a piecewise-linear {spot, pnl} curve, via linear interpolation between adjacent samples. */
+export function findBreakevens(curve: { spot: number; pnl: number }[]): number[] {
+  const breakevens: number[] = [];
+  for (let i = 1; i < curve.length; i++) {
+    const [s0, p0] = [curve[i - 1].spot, curve[i - 1].pnl];
+    const [s1, p1] = [curve[i].spot, curve[i].pnl];
+    if (p0 === 0) { breakevens.push(s0); continue; }
+    if ((p0 < 0 && p1 > 0) || (p0 > 0 && p1 < 0)) {
+      const be = s0 + (0 - p0) * (s1 - s0) / (p1 - p0);
+      breakevens.push(Math.round(be * 100) / 100);
+    }
+  }
+  return breakevens;
+}
+
+/**
+ * Sample spot range covering all wings for a NIFTY strategy: +/-15% of spot, with
+ * every leg's strike forced in as an exact sample point (piecewise-linear kinks
+ * only occur at strikes, so max/min and breakevens must be evaluated exactly there).
+ */
+function buildSpotSamples(legs: ResolvedLeg[], spot: number): number[] {
+  const lo = spot * 0.85;
+  const hi = spot * 1.15;
+  const samples = new Set<number>();
+  const stepCount = 200;
+  for (let i = 0; i <= stepCount; i++) {
+    samples.add(Math.round((lo + ((hi - lo) * i) / stepCount) * 100) / 100);
+  }
+  for (const leg of legs) samples.add(leg.strike);
+  return [...samples].sort((a, b) => a - b);
+}
+
+export function buildPayoffCurve(
+  legs: ResolvedLeg[], spot: number, lotSize: number,
+): { spot: number; pnl: number }[] {
+  return buildSpotSamples(legs, spot).map((s) => ({ spot: s, pnl: netPnlAtExpiry(legs, s, lotSize) }));
+}
+
+export interface PayoffStats {
+  maxProfit: number | 'Unlimited';
+  maxLoss: number | 'Unlimited';
+  breakevensExpiry: number[];
+  rewardRisk: number | null;
+  netPremium: number;      // per lot, credit(+)/debit(-)
+  intrinsicValue: number;  // rupees, at current spot
+  timeValue: number;       // rupees, at current spot
+  popPct: number | null;
+}
+
+export function computePayoffStats(legs: ResolvedLeg[], spot: number, lotSize: number): PayoffStats {
+  const curve = buildPayoffCurve(legs, spot, lotSize);
+
+  // Net qty per side (signed lots): >0 means net SHORT that option type -> unbounded loss on that tail.
+  const netCallQty = legs.filter(l => l.type === 'CE').reduce((s, l) => s + (l.side === 'SELL' ? l.qtyLots : -l.qtyLots), 0);
+  const netPutQty  = legs.filter(l => l.type === 'PE').reduce((s, l) => s + (l.side === 'SELL' ? l.qtyLots : -l.qtyLots), 0);
+
+  const upsideUnlimited = netCallQty > 0;
+  const downsideUnlimited = netPutQty > 0;
+
+  const pnls = curve.map(c => c.pnl);
+  const maxProfit = Math.max(...pnls);
+  const boundedMinLoss = Math.min(...pnls);
+  const maxLoss: number | 'Unlimited' = (upsideUnlimited || downsideUnlimited) ? 'Unlimited' : boundedMinLoss;
+
+  const rewardRisk = (maxLoss === 'Unlimited' || maxLoss === 0) ? null : Math.abs(maxProfit / maxLoss);
+
+  const netPremium = legs.reduce((sum, leg) => sum + (leg.side === 'SELL' ? leg.price : -leg.price) * leg.qtyLots, 0);
+
+  let intrinsicValue = 0;
+  let timeValue = 0;
+  for (const leg of legs) {
+    const intrinsicNow = leg.type === 'CE' ? Math.max(spot - leg.strike, 0) : Math.max(leg.strike - spot, 0);
+    const sideSign = leg.side === 'SELL' ? 1 : -1;
+    intrinsicValue += sideSign * leg.qtyLots * intrinsicNow * lotSize;
+    timeValue += sideSign * leg.qtyLots * (leg.price - intrinsicNow) * lotSize;
+  }
+
+  // POP: delta-based approximation. Net effective short delta = short legs' |delta| minus
+  // hedge (long) legs' |delta| on the same side, floored at 0.
+  const hasAllDeltas = legs.every(l => l.delta !== null);
+  let popPct: number | null = null;
+  if (hasAllDeltas) {
+    const shortAbsDelta = legs.filter(l => l.side === 'SELL').reduce((s, l) => s + Math.abs(l.delta as number), 0);
+    const longAbsDelta  = legs.filter(l => l.side === 'BUY').reduce((s, l) => s + Math.abs(l.delta as number), 0);
+    const effShortDelta = Math.max(0, shortAbsDelta - longAbsDelta);
+    popPct = Math.round(Math.min(1, Math.max(0, 1 - effShortDelta)) * 100);
+  }
+
+  return {
+    maxProfit,
+    maxLoss,
+    breakevensExpiry: findBreakevens(curve),
+    rewardRisk,
+    netPremium,
+    intrinsicValue,
+    timeValue,
+    popPct,
+  };
+}
+
+// ── Minimal Black-Scholes pricer for "Target" (pre-expiry) breakevens ──────────
+
+/** Standard normal CDF via the Abramowitz-Stegun 7.1.26 erf approximation (no external dependency). */
+function normCdf(x: number): number {
+  const sign = x < 0 ? -1 : 1;
+  const ax = Math.abs(x) / Math.SQRT2;
+  const a1=0.254829592, a2=-0.284496736, a3=1.421413741, a4=-1.453152027, a5=1.061405429, p=0.3275911;
+  const t = 1 / (1 + p * ax);
+  const y = 1 - (((((a5*t + a4)*t) + a3)*t + a2)*t + a1) * t * Math.exp(-ax*ax);
+  return 0.5 * (1 + sign * y);
+}
+
+/** Black-Scholes European option price. t in years, iv as a fraction (e.g. 0.13), r default 6.5%. */
+export function bsPrice(type: OptType, S: number, K: number, t: number, iv: number, r = 0.065): number {
+  if (t <= 0 || iv <= 0) {
+    return type === 'CE' ? Math.max(S - K, 0) : Math.max(K - S, 0);
+  }
+  const d1 = (Math.log(S / K) + (r + (iv * iv) / 2) * t) / (iv * Math.sqrt(t));
+  const d2 = d1 - iv * Math.sqrt(t);
+  if (type === 'CE') {
+    return S * normCdf(d1) - K * Math.exp(-r * t) * normCdf(d2);
+  }
+  return K * Math.exp(-r * t) * normCdf(-d2) - S * normCdf(-d1);
+}
+
+/**
+ * "Target" (pre-expiry, today) P&L curve using each leg's current IV and current DTE.
+ * Falls back to intrinsic-only pricing for a leg with no IV (documented limitation,
+ * surfaced by the caller via an InfoButton — see Task 8).
+ */
+export function buildTargetPayoffCurve(
+  legs: ResolvedLeg[], spot: number, lotSize: number, daysToExpiry: number,
+): { spot: number; pnl: number }[] {
+  const t = Math.max(daysToExpiry, 0) / 365;
+  return buildSpotSamples(legs, spot).map((s) => {
+    const pnl = legs.reduce((sum, leg) => {
+      const iv = leg.iv ?? 0;
+      const price = iv > 0 ? bsPrice(leg.type, s, leg.strike, t, iv) : (leg.type === 'CE' ? Math.max(s - leg.strike, 0) : Math.max(leg.strike - s, 0));
+      const perUnit = leg.side === 'SELL' ? (leg.price - price) : (price - leg.price);
+      return sum + perUnit * leg.qtyLots;
+    }, 0) * lotSize;
+    return { spot: s, pnl };
+  });
+}
