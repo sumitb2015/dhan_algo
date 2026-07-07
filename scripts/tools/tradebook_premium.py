@@ -1,13 +1,13 @@
 """
-Outputs minute-by-minute combined open sell premium (mark-to-market) from today's FNO tradebook.
-For each open position at each minute, uses the current 1-min candle close price × lots,
-so that real option premium decay is visible rather than fixed entry prices.
+Outputs minute-by-minute combined open sell premium (mark-to-market).
+Uses the positions API for correct net lots, and 1-min candle closes for prices.
+The tradebook is only used to find entry minutes for currently-open positions.
+current_premium uses live LTPs (not candle closes) for accuracy.
 """
 import sys
 import os
 import json
 import time
-from collections import deque
 from datetime import datetime, date, timedelta
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
@@ -68,7 +68,6 @@ def fetch_price_series(
     if df.empty or 'close' not in df.columns or 'timestamp' not in df.columns:
         return {}
 
-    # Build raw {HH:MM: close} from epoch timestamps
     raw: dict[str, float] = {}
     for _, row in df.iterrows():
         try:
@@ -77,7 +76,6 @@ def fetch_price_series(
         except Exception:
             continue
 
-    # Forward-fill across all session minutes
     filled: dict[str, float] = {}
     last = 0.0
     for m in all_minutes:
@@ -99,107 +97,149 @@ def main() -> None:
     trades     = helper.get_trade_book()
     fno_trades = [t for t in trades if t.get('exchangeSegment') == 'NSE_FNO']
 
-    if not fno_trades:
-        print(json.dumps({'success': True, 'data': [], 'current_premium': 0.0,
-                          'session_date': today, 'trades_count': 0}))
-        return
-
-    # Look up lot sizes and instrument types by securityId from master list
+    # ── Lot size / instrument helpers ────────────────────────────────────
     master        = helper._load_master_list()
     master_by_sid = master.copy()
     master_by_sid['_sid_str'] = master_by_sid['SECURITY_ID'].astype(str)
     master_by_sid = master_by_sid.set_index('_sid_str')
 
-    def get_lot_size(sid: str) -> float:
+    _lot_cache: dict[str, float] = {}
+
+    def get_lot_size(sid: str, trading_symbol: str = '') -> float:
         try:
-            return float(master_by_sid.loc[sid, 'LOT_SIZE']) or 1.0
+            val = master_by_sid.loc[sid, 'LOT_SIZE']
+            if hasattr(val, 'iloc'):
+                val = val.iloc[0]
+            lot = float(val)
+            if lot > 1:
+                return lot
         except (KeyError, TypeError, ValueError):
-            return 1.0
+            pass
+        underlying = trading_symbol.split('-')[0] if trading_symbol else ''
+        if underlying:
+            if underlying not in _lot_cache:
+                try:
+                    _lot_cache[underlying] = float(helper.get_lot_size(underlying))
+                except Exception:
+                    _lot_cache[underlying] = 1.0
+            return _lot_cache[underlying]
+        return 1.0
 
     def get_instrument(sid: str) -> str:
         try:
-            return str(master_by_sid.loc[sid, 'INSTRUMENT'])
+            val = master_by_sid.loc[sid, 'INSTRUMENT']
+            if hasattr(val, 'iloc'):
+                val = val.iloc[0]
+            return str(val)
         except (KeyError, TypeError):
             return 'OPTIDX'
 
-    # Sort trades chronologically
+    def short_name(sym: str) -> str:
+        parts = sym.split('-')
+        return f"{parts[-2]} {parts[-1]}" if len(parts) >= 2 else sym
+
+    # ── Current open SELL positions (source of truth for lots) ───────────
+    pos_df = helper.get_positions()
+    open_positions: list[dict] = []
+    if pos_df is not None and not pos_df.empty:
+        for _, row in pos_df.iterrows():
+            if str(row.get('exchangeSegment', '')) != 'NSE_FNO':
+                continue
+            qty = int(row.get('netQty', 0) or 0)
+            if qty >= 0:
+                continue
+            sid = str(row.get('securityId', '') or '')
+            sym = str(row.get('tradingSymbol', '') or '')
+            ls  = get_lot_size(sid, sym)
+            open_positions.append({'sid': sid, 'sym': sym, 'lots': abs(qty) / ls})
+
+    if not open_positions:
+        print(json.dumps({
+            'success': True, 'data': [], 'by_symbol': {}, 'symbols': [],
+            'current_premium': 0.0, 'session_date': today,
+            'trades_count': len(fno_trades),
+        }))
+        return
+
+    # ── Find each position's entry minute from the tradebook ─────────────
     fno_trades.sort(key=lambda t: (t.get('exchangeTime') or t.get('createTime') or ''))
-
-    # FIFO open-position tracking → position windows
-    # Each window: {security_id, lots, open_minute, close_minute (None = still open)}
-    position_windows: list[dict] = []
-    open_queues: dict[str, deque] = {}
-
+    open_sid_set = {p['sid'] for p in open_positions}
+    entry_minutes: dict[str, str] = {}
     for trade in fno_trades:
-        sid    = str(trade.get('securityId', ''))
-        lots   = float(trade.get('tradedQuantity') or 0) / get_lot_size(sid)
-        txn    = trade.get('transactionType', '')
-        minute = get_trade_minute(trade)
+        sid = str(trade.get('securityId', ''))
+        if sid in open_sid_set and trade.get('transactionType') == 'SELL':
+            if sid not in entry_minutes:
+                entry_minutes[sid] = get_trade_minute(trade)
+    for p in open_positions:
+        entry_minutes.setdefault(p['sid'], SESSION_START)
 
-        if txn == 'SELL':
-            if sid not in open_queues:
-                open_queues[sid] = deque()
-            open_queues[sid].append({'lots': lots, 'open_minute': minute})
-
-        elif txn == 'BUY':
-            q         = open_queues.get(sid, deque())
-            remaining = lots
-            while remaining > 0 and q:
-                front = q[0]
-                if front['lots'] <= remaining:
-                    position_windows.append({
-                        'security_id': sid, 'lots': front['lots'],
-                        'open_minute': front['open_minute'], 'close_minute': minute,
-                    })
-                    remaining -= front['lots']
-                    q.popleft()
-                else:
-                    position_windows.append({
-                        'security_id': sid, 'lots': remaining,
-                        'open_minute': front['open_minute'], 'close_minute': minute,
-                    })
-                    front['lots'] -= remaining
-                    remaining      = 0
-
-    # Still-open positions
-    for sid, q in open_queues.items():
-        for entry in q:
-            position_windows.append({
-                'security_id': sid, 'lots': entry['lots'],
-                'open_minute': entry['open_minute'], 'close_minute': None,
-            })
-
-    now_hm      = datetime.now().strftime('%H:%M')
-    is_post     = now_hm > SESSION_END
+    # ── Minute list ───────────────────────────────────────────────────────
+    now_hm  = datetime.now().strftime('%H:%M')
+    is_post = now_hm > SESSION_END
     all_minutes = build_minute_list(is_post)
 
-    # Fetch 1-min candle price series for each unique security
-    unique_sids = {pw['security_id'] for pw in position_windows}
+    # ── Fetch 1-min candles for each currently-open security ─────────────
     price_maps: dict[str, dict[str, float]] = {}
-    for sid in unique_sids:
-        instrument = get_instrument(sid)
-        price_maps[sid] = fetch_price_series(helper, sid, instrument, today, all_minutes)
-        time.sleep(0.3)  # avoid rate-limit bursts when fetching many symbols
+    for p in open_positions:
+        price_maps[p['sid']] = fetch_price_series(
+            helper, p['sid'], get_instrument(p['sid']), today, all_minutes,
+        )
+        time.sleep(0.3)
 
-    # Build minute-by-minute mark-to-market combined premium
+    # ── Combined series: open positions × candle closes since entry ───────
     series: list[dict] = []
     for minute in all_minutes:
         combined = 0.0
-        for pw in position_windows:
-            if pw['open_minute'] > minute:
+        for p in open_positions:
+            if entry_minutes[p['sid']] > minute:
                 continue
-            if pw['close_minute'] is not None and pw['close_minute'] <= minute:
-                continue
-            price     = price_maps.get(pw['security_id'], {}).get(minute, 0.0)
-            combined += pw['lots'] * price
+            combined += p['lots'] * price_maps.get(p['sid'], {}).get(minute, 0.0)
         series.append({'time': minute, 'premium': round(combined, 2)})
 
-    current_premium = series[-1]['premium'] if series else 0.0
+    # ── Per-symbol series ─────────────────────────────────────────────────
+    by_symbol: dict[str, list[dict]] = {}
+    for p in open_positions:
+        entry_min = entry_minutes[p['sid']]
+        sym_series: list[dict] = []
+        for minute in all_minutes:
+            if entry_min > minute:
+                sym_series.append({'time': minute, 'premium': 0.0})
+                continue
+            price = price_maps.get(p['sid'], {}).get(minute, 0.0)
+            sym_series.append({'time': minute, 'premium': round(p['lots'] * price, 2)})
+        by_symbol[p['sym']] = sym_series
+
+    symbols = sorted(
+        [{'securityId': p['sid'], 'tradingSymbol': p['sym'], 'displayName': short_name(p['sym'])}
+         for p in open_positions],
+        key=lambda s: s['displayName'],
+    )
+
+    # ── current_premium: positions × live LTP (not candle closes) ────────
+    current_premium = 0.0
+    try:
+        pos_sids = [int(p['sid']) for p in open_positions if p['sid']]
+        pos_ltp_map: dict[str, float] = {}
+        if pos_sids:
+            ltp_res = dhan.ohlc_data(securities={'NSE_FNO': pos_sids})
+            if isinstance(ltp_res, dict) and ltp_res.get('status') == 'success':
+                ltp_data = ltp_res.get('data') or {}
+                if 'data' in ltp_data:
+                    ltp_data = ltp_data['data']
+                for k, v in (ltp_data.get('NSE_FNO') or {}).items():
+                    pos_ltp_map[str(k)] = float(v.get('last_price', 0) or 0)
+        for p in open_positions:
+            current_premium += p['lots'] * pos_ltp_map.get(p['sid'], 0.0)
+    except Exception as e:
+        print(f'WARN: current_premium LTP fetch failed: {e}', file=sys.stderr)
+    current_premium = round(current_premium, 2)
 
     print(json.dumps({
         'success':         True,
         'data':            series,
-        'current_premium': round(current_premium, 2),
+        'by_symbol':       by_symbol,
+        'symbols':         symbols,
+        'current_premium': current_premium,
         'session_date':    today,
         'trades_count':    len(fno_trades),
     }))

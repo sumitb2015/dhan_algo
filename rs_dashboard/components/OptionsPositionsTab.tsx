@@ -45,6 +45,7 @@ interface DataPoint {
 }
 
 interface PremiumPoint { time: string; premium: number }
+interface SymbolMeta { securityId: string; tradingSymbol: string; displayName: string }
 
 function isMarketHours(): boolean {
   const now = new Date();
@@ -121,8 +122,23 @@ export default function OptionsPositionsTab() {
   const entryPremiumRef               = useRef<number | null>(null);
 
   const [premiumData, setPremiumData]               = useState<PremiumPoint[]>([]);
+  const [bySymbol, setBySymbol]                     = useState<Record<string, PremiumPoint[]>>({});
+  const [premiumSymbols, setPremiumSymbols]         = useState<SymbolMeta[]>([]);
+  const [selectedStrike, setSelectedStrike]         = useState<string>('all');
+  const [selectedType, setSelectedType]             = useState<string>('all');
   const [currentPremium, setCurrentPremium]         = useState<number>(0);
   const [premiumLastUpdated, setPremiumLastUpdated] = useState<string>('');
+
+  const handleRowClick = (strike: number, type: 'CE' | 'PE') => {
+    const strikeStr = String(strike);
+    if (selectedStrike === strikeStr && selectedType === type) {
+      setSelectedStrike('all');
+      setSelectedType('all');
+    } else {
+      setSelectedStrike(strikeStr);
+      setSelectedType(type);
+    }
+  };
   const [isPostSession, setIsPostSession]           = useState<boolean>(false);
   const [premiumError, setPremiumError]             = useState<string | null>(null);
   const [premiumRefreshKey, setPremiumRefreshKey]   = useState(0);
@@ -189,6 +205,8 @@ export default function OptionsPositionsTab() {
         const data = await res.json() as {
           success: boolean;
           data: PremiumPoint[];
+          by_symbol: Record<string, PremiumPoint[]>;
+          symbols: SymbolMeta[];
           current_premium: number;
           error?: string;
         };
@@ -197,7 +215,9 @@ export default function OptionsPositionsTab() {
           return;
         }
         setPremiumData(data.data);
-        setCurrentPremium(data.current_premium);
+        setBySymbol(data.by_symbol ?? {});
+        setPremiumSymbols(data.symbols ?? []);
+        setCurrentPremium(data.current_premium ?? 0);
         setPremiumLastUpdated(
           new Date().toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' }),
         );
@@ -215,6 +235,65 @@ export default function OptionsPositionsTab() {
   }, [premiumRefreshKey]);
 
   // ── Derived values ───────────────────────────────────────────────
+
+  const uniqueStrikes = React.useMemo(() => {
+    const strikes = premiumSymbols.map(s => {
+      const parts = s.tradingSymbol.split('-');
+      return parts.length >= 2 ? parts[parts.length - 2] : '';
+    }).filter(Boolean);
+    return Array.from(new Set(strikes)).sort((a, b) => Number(a) - Number(b));
+  }, [premiumSymbols]);
+
+  const activePremiumData = React.useMemo(() => {
+    if (selectedStrike === 'all' && selectedType === 'all') {
+      return premiumData;
+    }
+
+    const matchingSymbols = Object.keys(bySymbol).filter(sym => {
+      const parts = sym.split('-');
+      if (parts.length < 2) return false;
+      const strike = parts[parts.length - 2];
+      const type = parts[parts.length - 1]; // 'CE' or 'PE'
+
+      const strikeMatch = selectedStrike === 'all' || strike === selectedStrike;
+      const typeMatch = selectedType === 'all' || type === selectedType;
+      return strikeMatch && typeMatch;
+    });
+
+    if (matchingSymbols.length === 0) return [];
+
+    // Combine minute-by-minute across matching symbols
+    const timeMap: Record<string, number> = {};
+    matchingSymbols.forEach(sym => {
+      const points = bySymbol[sym] ?? [];
+      points.forEach(p => {
+        timeMap[p.time] = (timeMap[p.time] ?? 0) + p.premium;
+      });
+    });
+
+    return Object.entries(timeMap)
+      .map(([time, premium]) => ({ time, premium: Number(premium.toFixed(2)) }))
+      .sort((a, b) => a.time.localeCompare(b.time));
+  }, [premiumData, bySymbol, selectedStrike, selectedType]);
+
+  const activeCurrentPremium = React.useMemo(() => {
+    if (selectedStrike === 'all' && selectedType === 'all') {
+      return currentPremium;
+    }
+    if (activePremiumData.length > 0) {
+      return activePremiumData[activePremiumData.length - 1].premium;
+    }
+    return 0;
+  }, [activePremiumData, currentPremium, selectedStrike, selectedType]);
+
+  const statSub = React.useMemo(() => {
+    if (selectedStrike === 'all' && selectedType === 'all') {
+      return 'pts/lot · all open positions';
+    }
+    const strikeText = selectedStrike === 'all' ? 'All Strikes' : selectedStrike;
+    const typeText = selectedType === 'all' ? 'Combined' : selectedType;
+    return `pts/lot · ${strikeText} ${typeText}`;
+  }, [selectedStrike, selectedType]);
 
   const latest             = dataPoints[dataPoints.length - 1];
   const entryPremium       = entryPremiumRef.current;
@@ -434,34 +513,43 @@ export default function OptionsPositionsTab() {
             </tr>
           </thead>
           <tbody>
-            {legs.map((leg, i) => (
-              <tr key={i} className="border-t border-zinc-800 hover:bg-zinc-800/40 transition-colors">
-                <td className="px-4 py-2.5 text-zinc-300 font-mono text-[11px]">{leg.symbol}</td>
-                <td className="px-4 py-2.5 text-center text-zinc-200 font-semibold">{leg.strike.toLocaleString('en-IN')}</td>
-                <td className="px-4 py-2.5 text-center">
-                  <span className={`font-bold ${leg.type === 'CE' ? 'text-blue-400' : 'text-red-400'}`}>
-                    {leg.type}
-                  </span>
-                </td>
-                <td className="px-4 py-2.5 text-center">
-                  <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${
-                    leg.side === 'SELL'
-                      ? 'bg-red-500/10 text-red-400 border border-red-500/20'
-                      : 'bg-blue-500/10 text-blue-400 border border-blue-500/20'
+            {legs.map((leg, i) => {
+              const isSelected = selectedStrike === String(leg.strike) && (selectedType === 'all' || selectedType === leg.type);
+              return (
+                <tr
+                  key={i}
+                  onClick={() => handleRowClick(leg.strike, leg.type)}
+                  className={`border-t border-zinc-800 hover:bg-zinc-800/40 cursor-pointer transition-colors ${
+                    isSelected ? 'bg-zinc-800/80 border-l-2 border-emerald-500' : ''
+                  }`}
+                >
+                  <td className="px-4 py-2.5 text-zinc-300 font-mono text-[11px]">{leg.symbol}</td>
+                  <td className="px-4 py-2.5 text-center text-zinc-200 font-semibold">{leg.strike.toLocaleString('en-IN')}</td>
+                  <td className="px-4 py-2.5 text-center">
+                    <span className={`font-bold ${leg.type === 'CE' ? 'text-blue-400' : 'text-red-400'}`}>
+                      {leg.type}
+                    </span>
+                  </td>
+                  <td className="px-4 py-2.5 text-center">
+                    <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${
+                      leg.side === 'SELL'
+                        ? 'bg-red-500/10 text-red-400 border border-red-500/20'
+                        : 'bg-blue-500/10 text-blue-400 border border-blue-500/20'
+                    }`}>
+                      {leg.side}
+                    </span>
+                  </td>
+                  <td className="px-4 py-2.5 text-right text-zinc-400">{fmtNum(leg.entryPrice)}</td>
+                  <td className="px-4 py-2.5 text-right text-zinc-200 font-semibold">{fmtNum(leg.ltp)}</td>
+                  <td className={`px-4 py-2.5 text-right font-semibold ${
+                    leg.pnl > 0 ? 'text-emerald-400' : leg.pnl < 0 ? 'text-red-400' : 'text-zinc-400'
                   }`}>
-                    {leg.side}
-                  </span>
-                </td>
-                <td className="px-4 py-2.5 text-right text-zinc-400">{fmtNum(leg.entryPrice)}</td>
-                <td className="px-4 py-2.5 text-right text-zinc-200 font-semibold">{fmtNum(leg.ltp)}</td>
-                <td className={`px-4 py-2.5 text-right font-semibold ${
-                  leg.pnl > 0 ? 'text-emerald-400' : leg.pnl < 0 ? 'text-red-400' : 'text-zinc-400'
-                }`}>
-                  {leg.pnl >= 0 ? '+' : ''}{fmtNum(leg.pnl)}
-                </td>
-                <td className="px-4 py-2.5 text-right text-zinc-400">{leg.netQty}</td>
-              </tr>
-            ))}
+                    {leg.pnl >= 0 ? '+' : ''}{fmtNum(leg.pnl)}
+                  </td>
+                  <td className="px-4 py-2.5 text-right text-zinc-400">{leg.netQty}</td>
+                </tr>
+              );
+            })}
           </tbody>
         </table>
       </div>
@@ -502,12 +590,80 @@ export default function OptionsPositionsTab() {
           </button>
         </div>
 
+        {/* Filters: Strike & Option Type */}
+        {premiumSymbols.length > 0 && (
+          <div className="flex flex-col gap-2 mb-4 bg-zinc-900/40 p-3 rounded-xl border border-zinc-800">
+            {/* Strike price selector */}
+            <div className="flex items-center gap-2 flex-wrap">
+              <span className="text-zinc-500 text-[10px] uppercase font-bold tracking-wider w-12">Strike:</span>
+              <button
+                onClick={() => setSelectedStrike('all')}
+                className={`px-2.5 py-1 text-[11px] font-semibold rounded-lg border transition-all ${
+                  selectedStrike === 'all'
+                    ? 'bg-emerald-500/15 text-emerald-400 border-emerald-500/30'
+                    : 'bg-zinc-800 text-zinc-400 border-zinc-700 hover:text-zinc-200 hover:border-zinc-600'
+                }`}
+              >
+                All
+              </button>
+              {uniqueStrikes.map(strike => (
+                <button
+                  key={strike}
+                  onClick={() => setSelectedStrike(strike)}
+                  className={`px-2.5 py-1 text-[11px] font-semibold rounded-lg border transition-all ${
+                    selectedStrike === strike
+                      ? 'bg-blue-500/15 text-blue-400 border-blue-500/30'
+                      : 'bg-zinc-800 text-zinc-400 border-zinc-700 hover:text-zinc-200 hover:border-zinc-600'
+                  }`}
+                >
+                  {strike}
+                </button>
+              ))}
+            </div>
+
+            {/* Option type selector */}
+            <div className="flex items-center gap-2 flex-wrap">
+              <span className="text-zinc-500 text-[10px] uppercase font-bold tracking-wider w-12">Type:</span>
+              <button
+                onClick={() => setSelectedType('all')}
+                className={`px-2.5 py-1 text-[11px] font-semibold rounded-lg border transition-all ${
+                  selectedType === 'all'
+                    ? 'bg-emerald-500/15 text-emerald-400 border-emerald-500/30'
+                    : 'bg-zinc-800 text-zinc-400 border-zinc-700 hover:text-zinc-200 hover:border-zinc-600'
+                }`}
+              >
+                All
+              </button>
+              <button
+                onClick={() => setSelectedType('CE')}
+                className={`px-2.5 py-1 text-[11px] font-semibold rounded-lg border transition-all ${
+                  selectedType === 'CE'
+                    ? 'bg-blue-500/15 text-blue-400 border-blue-500/30'
+                    : 'bg-zinc-800 text-zinc-400 border-zinc-700 hover:text-zinc-200 hover:border-zinc-600'
+                }`}
+              >
+                Calls (CE)
+              </button>
+              <button
+                onClick={() => setSelectedType('PE')}
+                className={`px-2.5 py-1 text-[11px] font-semibold rounded-lg border transition-all ${
+                  selectedType === 'PE'
+                    ? 'bg-red-500/15 text-red-400 border-red-500/30'
+                    : 'bg-zinc-800 text-zinc-400 border-zinc-700 hover:text-zinc-200 hover:border-zinc-600'
+                }`}
+              >
+                Puts (PE)
+              </button>
+            </div>
+          </div>
+        )}
+
         <div className="mb-4">
           <StatTile
             label="Open Sell Premium"
-            value={fmtNum(currentPremium)}
-            sub="pts/lot · open positions only"
-            valueClass={currentPremium > 0 ? 'text-emerald-400' : 'text-zinc-400'}
+            value={fmtNum(activeCurrentPremium)}
+            sub={statSub}
+            valueClass={activeCurrentPremium > 0 ? 'text-emerald-400' : 'text-zinc-400'}
           />
         </div>
 
@@ -515,13 +671,13 @@ export default function OptionsPositionsTab() {
           <div className="px-4 py-3 bg-red-900/20 border border-red-700/40 rounded-xl text-sm text-red-400">
             {premiumError}
           </div>
-        ) : premiumData.length < 2 ? (
+        ) : activePremiumData.length < 2 ? (
           <div className="flex items-center justify-center h-[280px] text-zinc-500 text-sm">
             {premiumData.length === 0 ? 'No FNO trades today' : 'Collecting data…'}
           </div>
         ) : (
           <ResponsiveContainer width="100%" height={280}>
-            <LineChart data={premiumData} margin={{ top: 5, right: 20, left: 10, bottom: 5 }}>
+            <LineChart data={activePremiumData} margin={{ top: 5, right: 20, left: 10, bottom: 5 }}>
               <CartesianGrid strokeDasharray="3 3" stroke="#27272a" vertical={false} />
               <XAxis
                 dataKey="time"
