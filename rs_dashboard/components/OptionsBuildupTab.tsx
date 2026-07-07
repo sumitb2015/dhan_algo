@@ -373,12 +373,14 @@ export default function OptionsBuildupTab({ expiry }: { expiry: string }) {
                     }
                   </td>
                   <td className="px-3 py-2 text-center font-bold tabular-nums text-zinc-100">
-                    {row.strike.toLocaleString('en-IN')}
-                    {row.strike < atm && atm > 0 && (
-                      <span className="ml-1 text-[9px] text-zinc-500">
-                        ({atm - row.strike > 0 ? `-${atm - row.strike}` : ''})
-                      </span>
-                    )}
+                    <span className="relative inline-block">
+                      {row.strike.toLocaleString('en-IN')}
+                      {row.strike < atm && atm > 0 && (
+                        <span className="absolute left-full ml-1.5 whitespace-nowrap text-[9px] text-zinc-500 font-medium">
+                          ({atm - row.strike > 0 ? `-${atm - row.strike}` : ''})
+                        </span>
+                      )}
+                    </span>
                   </td>
                   <td className="px-3 py-2 text-right font-bold tabular-nums text-red-300">
                     {fmtOI(row.oi)}
@@ -434,12 +436,14 @@ export default function OptionsBuildupTab({ expiry }: { expiry: string }) {
                     }
                   </td>
                   <td className="px-3 py-2 text-center font-bold tabular-nums text-zinc-100">
-                    {row.strike.toLocaleString('en-IN')}
-                    {row.strike > atm && atm > 0 && (
-                      <span className="ml-1 text-[9px] text-zinc-500">
-                        (+{row.strike - atm})
-                      </span>
-                    )}
+                    <span className="relative inline-block">
+                      {row.strike.toLocaleString('en-IN')}
+                      {row.strike > atm && atm > 0 && (
+                        <span className="absolute left-full ml-1.5 whitespace-nowrap text-[9px] text-zinc-500 font-medium">
+                          (+{row.strike - atm})
+                        </span>
+                      )}
+                    </span>
                   </td>
                   <td className="px-3 py-2 text-right font-bold tabular-nums text-blue-300">
                     {fmtOI(row.oi)}
@@ -541,8 +545,14 @@ export default function OptionsBuildupTab({ expiry }: { expiry: string }) {
                     <td className={`px-4 py-2 text-center font-bold tabular-nums border-x border-zinc-700 ${
                       isATM ? 'text-amber-300 text-sm' : 'text-zinc-100'
                     }`}>
-                      {row.strike.toLocaleString('en-IN')}
-                      {isATM && <span className="ml-1 text-[10px] text-amber-500">ATM</span>}
+                      <span className="relative inline-block">
+                        {row.strike.toLocaleString('en-IN')}
+                        {isATM && (
+                          <span className="absolute left-full ml-1.5 whitespace-nowrap text-[10px] text-amber-500 font-medium">
+                            ATM
+                          </span>
+                        )}
+                      </span>
                     </td>
 
                     {/* PE OI */}
