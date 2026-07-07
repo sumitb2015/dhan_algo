@@ -17,11 +17,17 @@ export async function GET(request: NextRequest) {
   const expiry     = searchParams.get('expiry') ?? '';
   const interval   = searchParams.get('interval') ?? '15';
 
+  const supertrendPeriod     = searchParams.get('supertrendPeriod') ?? '7';
+  const supertrendMultiplier = searchParams.get('supertrendMultiplier') ?? '3.0';
+  const rsiPeriod            = searchParams.get('rsiPeriod') ?? '14';
+  const ema20Period          = searchParams.get('ema20Period') ?? '20';
+  const ema50Period          = searchParams.get('ema50Period') ?? '50';
+
   if (!expiry) {
     return NextResponse.json({ success: false, error: 'expiry required' }, { status: 400 });
   }
 
-  const cacheKey = `${underlying}:${expiry}:${interval}`;
+  const cacheKey = `${underlying}:${expiry}:${interval}:${supertrendPeriod}:${supertrendMultiplier}:${rsiPeriod}:${ema20Period}:${ema50Period}`;
   const hit = cache.get(cacheKey);
   if (hit && Date.now() - hit.ts < CACHE_TTL) {
     return NextResponse.json({ success: true, data: hit.data });
@@ -29,7 +35,17 @@ export async function GET(request: NextRequest) {
 
   const result = spawnSync(
     PYTHON_EXE,
-    [ANALYZER_SCRIPT, '--underlying', underlying, '--expiry', expiry, '--interval', interval],
+    [
+      ANALYZER_SCRIPT, 
+      '--underlying', underlying, 
+      '--expiry', expiry, 
+      '--interval', interval,
+      '--supertrend-period', supertrendPeriod,
+      '--supertrend-multiplier', supertrendMultiplier,
+      '--rsi-period', rsiPeriod,
+      '--ema20-period', ema20Period,
+      '--ema50-period', ema50Period
+    ],
     { encoding: 'utf8', timeout: 45_000, windowsHide: true },
   );
 

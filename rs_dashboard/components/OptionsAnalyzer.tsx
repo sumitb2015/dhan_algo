@@ -1,7 +1,7 @@
 'use client';
 
 import React, { useState, useEffect, useMemo, useCallback } from 'react';
-import { Check, HelpCircle, AlertCircle, RefreshCw, BarChart2, CheckSquare, Square, Info, Layers } from 'lucide-react';
+import { Check, HelpCircle, AlertCircle, RefreshCw, BarChart2, CheckSquare, Square, Info, Layers, Settings } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { motion, AnimatePresence } from 'framer-motion';
 import NavBar from '@/components/NavBar';
@@ -53,81 +53,28 @@ interface Factor {
   formatValue: (contract: OptionContractData) => string;
 }
 
-const FACTORS: Factor[] = [
-  {
-    id: 'price_change',
-    label: 'Price Change',
-    desc: 'Seller perspective: Favorable if option price went down (Change < 0)',
-    check: (c) => {
-      const change = c.ltp - c.prev_close;
-      return change < 0;
-    },
-    formatValue: (c) => {
-      const change = c.ltp - c.prev_close;
-      const pct = c.prev_close > 0 ? (change / c.prev_close) * 100 : 0;
-      return `${pct >= 0 ? '+' : ''}${pct.toFixed(2)}% (₹${change.toFixed(1)})`;
-    }
-  },
-  {
-    id: 'oi_change',
-    label: 'OI Change',
-    desc: 'Seller perspective: Favorable if open interest increased (OI Change > 0), showing writing interest',
-    check: (c) => {
-      const change = c.oi - c.prev_oi;
-      return change > 0;
-    },
-    formatValue: (c) => {
-      const change = c.oi - c.prev_oi;
-      const pct = c.prev_oi > 0 ? (change / c.prev_oi) * 100 : 0;
-      return `${pct >= 0 ? '+' : ''}${pct.toFixed(1)}% (${change.toLocaleString('en-IN')})`;
-    }
-  },
-  {
-    id: 'rsi',
-    label: 'RSI (14)',
-    desc: 'Seller perspective: Favorable if RSI < 50 (indicating bearish trend on option price)',
-    check: (c) => (c.rsi !== null ? c.rsi < 50 : null),
-    formatValue: (c) => (c.rsi !== null ? `RSI: ${c.rsi.toFixed(1)}` : 'N/A')
-  },
-  {
-    id: 'supertrend',
-    label: 'Supertrend',
-    desc: 'Seller perspective: Favorable if Supertrend is Bearish',
-    check: (c) => (c.supertrend_dir !== null ? c.supertrend_dir === -1 : null),
-    formatValue: (c) => {
-      if (c.supertrend_dir === 1) return 'Bullish';
-      if (c.supertrend_dir === -1) return 'Bearish';
-      return 'N/A';
-    }
-  },
-  {
-    id: 'vwap',
-    label: 'VWAP',
-    desc: 'Seller perspective: Favorable if option price is below VWAP (LTP < VWAP)',
-    check: (c) => (c.vwap !== null ? c.ltp < c.vwap : null),
-    formatValue: (c) => (c.vwap !== null ? `LTP: ₹${c.ltp.toFixed(1)} vs VWAP: ₹${c.vwap.toFixed(1)}` : 'N/A')
-  },
-  {
-    id: 'ema20',
-    label: '20 EMA',
-    desc: 'Seller perspective: Favorable if option price is below 20 EMA (LTP < 20 EMA)',
-    check: (c) => (c.ema20 !== null ? c.ltp < c.ema20 : null),
-    formatValue: (c) => (c.ema20 !== null ? `LTP: ₹${c.ltp.toFixed(1)} vs 20 EMA: ₹${c.ema20.toFixed(1)}` : 'N/A')
-  },
-  {
-    id: 'ema50',
-    label: '50 EMA',
-    desc: 'Seller perspective: Favorable if option price is below 50 EMA (LTP < 50 EMA)',
-    check: (c) => (c.ema50 !== null ? c.ltp < c.ema50 : null),
-    formatValue: (c) => (c.ema50 !== null ? `LTP: ₹${c.ltp.toFixed(1)} vs 50 EMA: ₹${c.ema50.toFixed(1)}` : 'N/A')
-  }
-];
-
 export default function OptionsAnalyzer() {
   const [underlying, setUnderlying] = useState<typeof UNDERLYINGS[number]>('NIFTY');
   const [expiries, setExpiries] = useState<string[]>([]);
   const [selectedExpiry, setSelectedExpiry] = useState<string>('');
   const [interval, setInterval] = useState<string>('5');
+
+  // Indicator Settings States
+  const [supertrendPeriod, setSupertrendPeriod] = useState<number>(7);
+  const [supertrendMultiplier, setSupertrendMultiplier] = useState<number>(3.0);
+  const [rsiPeriod, setRsiPeriod] = useState<number>(14);
+  const [ema20Period, setEma20Period] = useState<number>(20);
+  const [ema50Period, setEma50Period] = useState<number>(50);
+
+  // Temporary Settings input states for Modal
+  const [tempSupertrendPeriod, setTempSupertrendPeriod] = useState<number>(7);
+  const [tempSupertrendMultiplier, setTempSupertrendMultiplier] = useState<number>(3.0);
+  const [tempRsiPeriod, setTempRsiPeriod] = useState<number>(14);
+  const [tempEma20Period, setTempEma20Period] = useState<number>(20);
+  const [tempEma50Period, setTempEma50Period] = useState<number>(50);
+
+  const [settingsOpen, setSettingsOpen] = useState(false);
+
   const [activeFactors, setActiveFactors] = useState<Record<string, boolean>>({
     price_change: true,
     oi_change: true,
@@ -142,6 +89,96 @@ export default function OptionsAnalyzer() {
   const [data, setData] = useState<AnalyzerResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [hoveredMetric, setHoveredMetric] = useState<{ contractId: number, factorId: string, text: string } | null>(null);
+
+  // Dynamic Factors Definition based on current settings
+  const factors = useMemo<Factor[]>(() => [
+    {
+      id: 'price_change',
+      label: 'Price Change',
+      desc: 'Seller perspective: Favorable if option price went down (Change < 0)',
+      check: (c) => {
+        const change = c.ltp - c.prev_close;
+        return change < 0;
+      },
+      formatValue: (c) => {
+        const change = c.ltp - c.prev_close;
+        const pct = c.prev_close > 0 ? (change / c.prev_close) * 100 : 0;
+        return `${pct >= 0 ? '+' : ''}${pct.toFixed(2)}% (₹${change.toFixed(1)})`;
+      }
+    },
+    {
+      id: 'oi_change',
+      label: 'OI Change',
+      desc: 'Seller perspective: Favorable if open interest increased (OI Change > 0), showing writing interest',
+      check: (c) => {
+        const change = c.oi - c.prev_oi;
+        return change > 0;
+      },
+      formatValue: (c) => {
+        const change = c.oi - c.prev_oi;
+        const pct = c.prev_oi > 0 ? (change / c.prev_oi) * 100 : 0;
+        return `${pct >= 0 ? '+' : ''}${pct.toFixed(1)}% (${change.toLocaleString('en-IN')})`;
+      }
+    },
+    {
+      id: 'rsi',
+      label: `RSI (${rsiPeriod})`,
+      desc: `Seller perspective: Favorable if RSI < 50 (indicating bearish momentum on option premium)`,
+      check: (c) => (c.rsi !== null ? c.rsi < 50 : null),
+      formatValue: (c) => (c.rsi !== null ? `RSI: ${c.rsi.toFixed(1)}` : 'N/A')
+    },
+    {
+      id: 'supertrend',
+      label: `Supertrend (${supertrendPeriod}, ${supertrendMultiplier})`,
+      desc: 'Seller perspective: Favorable if Supertrend is Bearish',
+      check: (c) => (c.supertrend_dir !== null ? c.supertrend_dir === -1 : null),
+      formatValue: (c) => {
+        if (c.supertrend_dir === 1) return 'Bullish';
+        if (c.supertrend_dir === -1) return 'Bearish';
+        return 'N/A';
+      }
+    },
+    {
+      id: 'vwap',
+      label: 'VWAP',
+      desc: 'Seller perspective: Favorable if option price is below VWAP (LTP < VWAP)',
+      check: (c) => (c.vwap !== null ? c.ltp < c.vwap : null),
+      formatValue: (c) => (c.vwap !== null ? `LTP: ₹${c.ltp.toFixed(1)} vs VWAP: ₹${c.vwap.toFixed(1)}` : 'N/A')
+    },
+    {
+      id: 'ema20',
+      label: `${ema20Period} EMA`,
+      desc: `Seller perspective: Favorable if option price is below ${ema20Period} EMA (LTP < ${ema20Period} EMA)`,
+      check: (c) => (c.ema20 !== null ? c.ltp < c.ema20 : null),
+      formatValue: (c) => (c.ema20 !== null ? `LTP: ₹${c.ltp.toFixed(1)} vs ${ema20Period} EMA: ₹${c.ema20.toFixed(1)}` : 'N/A')
+    },
+    {
+      id: 'ema50',
+      label: `${ema50Period} EMA`,
+      desc: `Seller perspective: Favorable if option price is below ${ema50Period} EMA (LTP < ${ema50Period} EMA)`,
+      check: (c) => (c.ema50 !== null ? c.ltp < c.ema50 : null),
+      formatValue: (c) => (c.ema50 !== null ? `LTP: ₹${c.ltp.toFixed(1)} vs ${ema50Period} EMA: ₹${c.ema50.toFixed(1)}` : 'N/A')
+    }
+  ], [rsiPeriod, supertrendPeriod, supertrendMultiplier, ema20Period, ema50Period]);
+
+  // Open settings & initialize temp variables
+  const openSettings = () => {
+    setTempSupertrendPeriod(supertrendPeriod);
+    setTempSupertrendMultiplier(supertrendMultiplier);
+    setTempRsiPeriod(rsiPeriod);
+    setTempEma20Period(ema20Period);
+    setTempEma50Period(ema50Period);
+    setSettingsOpen(true);
+  };
+
+  const saveSettings = () => {
+    setSupertrendPeriod(tempSupertrendPeriod);
+    setSupertrendMultiplier(tempSupertrendMultiplier);
+    setRsiPeriod(tempRsiPeriod);
+    setEma20Period(tempEma20Period);
+    setEma50Period(tempEma50Period);
+    setSettingsOpen(false);
+  };
 
   // Fetch expiries
   const loadExpiries = useCallback(async (symbol: string) => {
@@ -173,7 +210,17 @@ export default function OptionsAnalyzer() {
     try {
       setLoading(true);
       setError(null);
-      const res = await fetch(`/api/options/analyzer?underlying=${underlying}&expiry=${selectedExpiry}&interval=${interval}`);
+      const queryParams = new URLSearchParams({
+        underlying,
+        expiry: selectedExpiry,
+        interval,
+        supertrendPeriod: String(supertrendPeriod),
+        supertrendMultiplier: String(supertrendMultiplier),
+        rsiPeriod: String(rsiPeriod),
+        ema20Period: String(ema20Period),
+        ema50Period: String(ema50Period)
+      });
+      const res = await fetch(`/api/options/analyzer?${queryParams.toString()}`);
       const json = await res.json();
       if (json.success && json.data) {
         setData(json.data);
@@ -186,7 +233,7 @@ export default function OptionsAnalyzer() {
     } finally {
       setLoading(false);
     }
-  }, [underlying, selectedExpiry, interval]);
+  }, [underlying, selectedExpiry, interval, supertrendPeriod, supertrendMultiplier, rsiPeriod, ema20Period, ema50Period]);
 
   useEffect(() => {
     fetchAnalysis();
@@ -215,7 +262,7 @@ export default function OptionsAnalyzer() {
     let greenCount = 0;
     let consideredCount = 0;
 
-    FACTORS.forEach(factor => {
+    factors.forEach(factor => {
       if (activeFactors[factor.id]) {
         const checkResult = factor.check(contract);
         if (checkResult !== null) {
@@ -232,7 +279,7 @@ export default function OptionsAnalyzer() {
       total: consideredCount,
       pct: consideredCount > 0 ? (greenCount / consideredCount) * 100 : 0
     };
-  }, [activeFactors]);
+  }, [activeFactors, factors]);
 
   // Processed Ranking Data
   const rankedContracts = useMemo(() => {
@@ -302,394 +349,477 @@ export default function OptionsAnalyzer() {
       <div className="flex-1 overflow-auto p-4 sm:p-6 max-w-7xl mx-auto w-full flex flex-col gap-6">
         {/* Upper Control Bar */}
         <div className="bg-zinc-950/40 backdrop-blur-md border border-zinc-850 p-4 rounded-2xl flex flex-wrap items-center justify-between gap-4 shadow-xl">
-        <div className="flex flex-wrap items-center gap-4">
-          {/* Underlying Selector */}
-          <div className="flex bg-zinc-900/60 p-1 border border-zinc-800 rounded-xl">
-            {UNDERLYINGS.map(sym => (
-              <button
-                key={sym}
-                onClick={() => setUnderlying(sym)}
-                className={cn(
-                  "px-4 py-1.5 rounded-lg text-xs font-bold transition-all duration-200 cursor-pointer select-none",
-                  underlying === sym 
-                    ? "bg-emerald-500/10 text-emerald-300 border border-emerald-500/25 shadow-lg shadow-emerald-500/5" 
-                    : "text-zinc-400 hover:text-zinc-100 border border-transparent"
-                )}
-              >
-                {sym}
-              </button>
-            ))}
-          </div>
-
-          {/* Expiry Selector */}
-          <div className="flex flex-col gap-1">
-            <select
-              value={selectedExpiry}
-              onChange={(e) => setSelectedExpiry(e.target.value)}
-              className="bg-zinc-900 border border-zinc-850 rounded-xl px-3 py-1.5 text-xs font-bold text-zinc-200 outline-none focus:border-emerald-500/30"
-              disabled={loading && expiries.length === 0}
-            >
-              {expiries.map(exp => (
-                <option key={exp} value={exp}>
-                  {new Date(exp).toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' }).toUpperCase()}
-                </option>
+          <div className="flex flex-wrap items-center gap-4">
+            {/* Underlying Selector */}
+            <div className="flex bg-zinc-900/60 p-1 border border-zinc-800 rounded-xl">
+              {UNDERLYINGS.map(sym => (
+                <button
+                  key={sym}
+                  onClick={() => setUnderlying(sym)}
+                  className={cn(
+                    "px-4 py-1.5 rounded-lg text-xs font-bold transition-all duration-200 cursor-pointer select-none",
+                    underlying === sym 
+                      ? "bg-emerald-500/10 text-emerald-300 border border-emerald-500/25 shadow-lg shadow-emerald-500/5" 
+                      : "text-zinc-400 hover:text-zinc-100 border border-transparent"
+                  )}
+                >
+                  {sym}
+                </button>
               ))}
-            </select>
+            </div>
+
+            {/* Expiry Selector */}
+            <div className="flex flex-col gap-1">
+              <select
+                value={selectedExpiry}
+                onChange={(e) => setSelectedExpiry(e.target.value)}
+                className="bg-zinc-900 border border-zinc-850 rounded-xl px-3 py-1.5 text-xs font-bold text-zinc-200 outline-none focus:border-emerald-500/30"
+                disabled={loading && expiries.length === 0}
+              >
+                {expiries.map(exp => (
+                  <option key={exp} value={exp}>
+                    {new Date(exp).toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' }).toUpperCase()}
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            {/* Interval Selector */}
+            <div className="flex bg-zinc-900/60 p-1 border border-zinc-800 rounded-xl">
+              {INTERVALS.map(int => (
+                <button
+                  key={int.value}
+                  onClick={() => setInterval(int.value)}
+                  className={cn(
+                    "px-3 py-1.5 rounded-lg text-xs font-bold transition-all duration-200 cursor-pointer select-none",
+                    interval === int.value 
+                      ? "bg-emerald-500/10 text-emerald-300 border border-emerald-500/25 shadow-lg shadow-emerald-500/5" 
+                      : "text-zinc-400 hover:text-zinc-100 border border-transparent"
+                  )}
+                >
+                  {int.label}
+                </button>
+              ))}
+            </div>
           </div>
 
-          {/* Interval Selector */}
-          <div className="flex bg-zinc-900/60 p-1 border border-zinc-800 rounded-xl">
-            {INTERVALS.map(int => (
-              <button
-                key={int.value}
-                onClick={() => setInterval(int.value)}
-                className={cn(
-                  "px-3 py-1.5 rounded-lg text-xs font-bold transition-all duration-200 cursor-pointer select-none",
-                  interval === int.value 
-                    ? "bg-emerald-500/10 text-emerald-300 border border-emerald-500/25 shadow-lg shadow-emerald-500/5" 
-                    : "text-zinc-400 hover:text-zinc-100 border border-transparent"
-                )}
+          {/* Live Info Chips */}
+          {data && (
+            <div className="flex items-center gap-4 text-xs font-semibold">
+              <div className="flex flex-col items-end">
+                <span className="text-[10px] text-zinc-500 uppercase tracking-wider font-bold">Spot Price</span>
+                <span className="text-zinc-100 tabular-nums text-sm font-bold">₹{data.spot.toLocaleString('en-IN', { minimumFractionDigits: 2 })}</span>
+              </div>
+              <div className="h-6 w-px bg-zinc-800" />
+              <div className="flex flex-col items-end">
+                <span className="text-[10px] text-zinc-500 uppercase tracking-wider font-bold">ATM Strike</span>
+                <span className="text-emerald-400 tabular-nums text-sm font-bold">{data.atm.toLocaleString('en-IN')}</span>
+              </div>
+              <div className="flex items-center gap-1.5">
+                <button
+                  onClick={openSettings}
+                  className="p-2 border border-zinc-800 bg-zinc-900/60 hover:bg-zinc-800/80 hover:border-zinc-700 active:scale-95 transition-all duration-200 rounded-xl cursor-pointer"
+                  title="Configure Technical Indicators Settings"
+                >
+                  <Settings className="h-3.5 w-3.5 text-zinc-400 hover:text-emerald-400" />
+                </button>
+                <button
+                  onClick={fetchAnalysis}
+                  className="p-2 border border-zinc-800 bg-zinc-900/60 hover:bg-zinc-800/80 hover:border-zinc-700 active:scale-95 transition-all duration-200 rounded-xl cursor-pointer"
+                  title="Refresh analysis"
+                  disabled={loading}
+                >
+                  <RefreshCw className={cn("h-3.5 w-3.5 text-zinc-400", loading && "animate-spin text-emerald-400")} />
+                </button>
+              </div>
+            </div>
+          )}
+        </div>
+
+        {/* Factors / Filters Checklist Panel */}
+        <div className="bg-zinc-950/40 backdrop-blur-md border border-zinc-850 p-4.5 rounded-2xl shadow-xl flex flex-col gap-3.5">
+          <div className="flex items-center justify-between border-b border-zinc-850 pb-2">
+            <div className="flex items-center gap-2">
+              <BarChart2 className="h-4 w-4 text-emerald-400" />
+              <span className="text-xs font-bold uppercase tracking-widest text-zinc-300">Factors To Consider (Option Seller Perspective)</span>
+            </div>
+            <div className="flex items-center gap-3">
+              <button 
+                onClick={() => selectAllFactors(true)}
+                className="text-[11px] font-semibold text-emerald-400 hover:text-emerald-300 transition-colors cursor-pointer"
               >
-                {int.label}
+                Select All
               </button>
-            ))}
+              <span className="text-zinc-700">|</span>
+              <button 
+                onClick={() => selectAllFactors(false)}
+                className="text-[11px] font-semibold text-zinc-400 hover:text-zinc-200 transition-colors cursor-pointer"
+              >
+                Clear All
+              </button>
+            </div>
+          </div>
+
+          {/* Checkboxes Grid */}
+          <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-7 gap-3">
+            {factors.map(f => {
+              const checked = activeFactors[f.id];
+              return (
+                <div 
+                  key={f.id}
+                  onClick={() => toggleFactor(f.id)}
+                  className={cn(
+                    "p-2.5 rounded-xl border flex flex-col gap-1 cursor-pointer select-none transition-all duration-200 hover:-translate-y-0.5",
+                    checked
+                      ? "bg-emerald-500/5 border-emerald-500/35 shadow-[0_0_12px_rgba(16,185,129,0.02)]"
+                      : "bg-zinc-900/30 border-zinc-850 hover:border-zinc-700 hover:bg-zinc-800/10"
+                  )}
+                  title={f.desc}
+                >
+                  <div className="flex items-center gap-1.8">
+                    {checked ? (
+                      <CheckSquare className="h-4 w-4 text-emerald-400 flex-shrink-0" />
+                    ) : (
+                      <Square className="h-4 w-4 text-zinc-600 flex-shrink-0" />
+                    )}
+                    <span className="text-xs font-bold text-zinc-200">{f.label}</span>
+                  </div>
+                  <span className="text-[10px] text-zinc-500 leading-tight block">{f.id === 'price_change' ? 'Change < 0' : f.id === 'oi_change' ? 'OI Change > 0' : f.id === 'rsi' ? `RSI < 50` : f.id === 'supertrend' ? 'Trend Bearish' : f.id === 'vwap' ? 'LTP < VWAP' : 'LTP < EMA'}</span>
+                </div>
+              );
+            })}
           </div>
         </div>
 
-        {/* Live Info Chips */}
+        {/* Global Loading / Error / Main View */}
+        {loading && !data && (
+          <div className="flex flex-col items-center justify-center p-20 bg-zinc-950/20 border border-zinc-850/50 rounded-2xl gap-3">
+            <RefreshCw className="h-8 w-8 text-emerald-400 animate-spin" />
+            <span className="text-xs font-semibold text-zinc-400">Loading ATM+/-10 contracts indicators & ranking...</span>
+          </div>
+        )}
+
+        {error && (
+          <div className="bg-red-500/10 border border-red-500/25 p-4 rounded-xl flex items-start gap-3">
+            <AlertCircle className="h-5 w-5 text-red-400 mt-0.5 flex-shrink-0" />
+            <div className="flex flex-col gap-1">
+              <span className="text-xs font-bold text-red-300">Execution Error</span>
+              <span className="text-xs text-red-400/90 leading-relaxed">{error}</span>
+            </div>
+          </div>
+        )}
+
         {data && (
-          <div className="flex items-center gap-4 text-xs font-semibold">
-            <div className="flex flex-col items-end">
-              <span className="text-[10px] text-zinc-500 uppercase tracking-wider font-bold">Spot Price</span>
-              <span className="text-zinc-100 tabular-nums text-sm font-bold">₹{data.spot.toLocaleString('en-IN', { minimumFractionDigits: 2 })}</span>
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+            
+            {/* CALL OPTIONS TABLE (CE) */}
+            <div className="bg-zinc-950/40 backdrop-blur-md border border-zinc-850 rounded-2xl p-4 shadow-xl flex flex-col gap-3">
+              <div className="flex items-center justify-between border-b border-zinc-850 pb-2">
+                <div className="flex items-center gap-2">
+                  <span className="h-2 w-2 rounded-full bg-emerald-500 shadow-[0_0_8px_rgba(16,185,129,0.5)]" />
+                  <span className="text-sm font-bold text-zinc-200">Call Options (CE) Ranking</span>
+                </div>
+                <span className="text-[10px] text-zinc-400 font-medium uppercase tracking-wider">Sorted by Seller Score & Premium</span>
+              </div>
+              
+              <div className="overflow-x-auto">
+                <table className="w-full text-left border-collapse">
+                  <thead>
+                    <tr className="border-b border-zinc-850/60 text-[10px] uppercase font-bold text-zinc-500 tracking-wider">
+                      <th className="py-2.5 px-2">Strike</th>
+                      <th className="py-2.5 px-2">LTP</th>
+                      <th className="py-2.5 px-2">OI</th>
+                      <th className="py-2.5 px-2 text-center">Score</th>
+                      {factors.map(f => activeFactors[f.id] && (
+                        <th key={f.id} className="py-2.5 px-1.5 text-center font-bold" title={f.desc}>{f.label}</th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {rankedContracts.ce.map(c => {
+                      const isATM = Math.abs(c.strike - data.atm) < 1;
+                      return (
+                        <tr 
+                          key={c.security_id} 
+                          className={cn(
+                            "border-b border-zinc-900/50 hover:bg-zinc-900/20 transition-colors text-xs font-semibold text-zinc-300",
+                            isATM && "bg-emerald-500/5 hover:bg-emerald-500/8 border-l border-l-emerald-500/40"
+                          )}
+                        >
+                          <td className="py-3 px-2 font-bold tabular-nums">
+                            {c.strike.toLocaleString('en-IN')}
+                            {isATM && <span className="ml-1 text-[8px] px-1 bg-emerald-500/20 text-emerald-400 rounded-sm font-bold">ATM</span>}
+                          </td>
+                          <td className="py-3 px-2 font-bold tabular-nums text-zinc-100">₹{c.ltp.toFixed(1)}</td>
+                          <td className="py-3 px-2 tabular-nums text-zinc-400">{c.oi.toLocaleString('en-IN')}</td>
+                          
+                          {/* Score Ring / Badge */}
+                          <td className="py-3 px-2 text-center">
+                            <span 
+                              className={cn(
+                                "px-2 py-0.8 rounded-md text-[10px] font-bold shadow-md",
+                                c.scoreInfo.pct >= 70 && "bg-emerald-500/15 text-emerald-400 border border-emerald-500/30",
+                                c.scoreInfo.pct < 70 && c.scoreInfo.pct >= 40 && "bg-amber-500/15 text-amber-400 border border-amber-500/30",
+                                c.scoreInfo.pct < 40 && "bg-red-500/15 text-red-400 border border-red-500/30"
+                              )}
+                            >
+                              {c.scoreInfo.score}/{c.scoreInfo.total} ({c.scoreInfo.pct.toFixed(0)}%)
+                            </span>
+                          </td>
+
+                          {/* Dynamic Factors Circles */}
+                          {factors.map(f => {
+                            if (!activeFactors[f.id]) return null;
+                            const checkResult = f.check(c);
+                            const formattedText = f.formatValue(c);
+
+                            return (
+                              <td key={f.id} className="py-3 px-1.5 text-center">
+                                <div 
+                                  className="flex items-center justify-center relative cursor-help"
+                                  onMouseEnter={() => setHoveredMetric({ contractId: c.security_id, factorId: f.id, text: formattedText })}
+                                  onMouseLeave={() => setHoveredMetric(null)}
+                                >
+                                  <span 
+                                    className={cn(
+                                      "h-3 w-3 rounded-full border transition-all duration-200",
+                                      checkResult === true && "bg-emerald-500 border-emerald-400 shadow-[0_0_8px_rgba(16,185,129,0.4)]",
+                                      checkResult === false && "bg-red-500 border-red-400 shadow-[0_0_8px_rgba(239,68,68,0.4)]",
+                                      checkResult === null && "bg-zinc-800 border-zinc-700"
+                                    )}
+                                  />
+                                </div>
+                              </td>
+                            );
+                          })}
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
             </div>
-            <div className="h-6 w-px bg-zinc-800" />
-            <div className="flex flex-col items-end">
-              <span className="text-[10px] text-zinc-500 uppercase tracking-wider font-bold">ATM Strike</span>
-              <span className="text-emerald-400 tabular-nums text-sm font-bold">{data.atm.toLocaleString('en-IN')}</span>
+
+            {/* PUT OPTIONS TABLE (PE) */}
+            <div className="bg-zinc-950/40 backdrop-blur-md border border-zinc-850 rounded-2xl p-4 shadow-xl flex flex-col gap-3">
+              <div className="flex items-center justify-between border-b border-zinc-850 pb-2">
+                <div className="flex items-center gap-2">
+                  <span className="h-2 w-2 rounded-full bg-red-500 shadow-[0_0_8px_rgba(239,68,68,0.5)]" />
+                  <span className="text-sm font-bold text-zinc-200">Put Options (PE) Ranking</span>
+                </div>
+                <span className="text-[10px] text-zinc-400 font-medium uppercase tracking-wider">Sorted by Seller Score & Premium</span>
+              </div>
+              
+              <div className="overflow-x-auto">
+                <table className="w-full text-left border-collapse">
+                  <thead>
+                    <tr className="border-b border-zinc-850/60 text-[10px] uppercase font-bold text-zinc-500 tracking-wider">
+                      <th className="py-2.5 px-2">Strike</th>
+                      <th className="py-2.5 px-2">LTP</th>
+                      <th className="py-2.5 px-2">OI</th>
+                      <th className="py-2.5 px-2 text-center">Score</th>
+                      {factors.map(f => activeFactors[f.id] && (
+                        <th key={f.id} className="py-2.5 px-1.5 text-center font-bold" title={f.desc}>{f.label}</th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {rankedContracts.pe.map(c => {
+                      const isATM = Math.abs(c.strike - data.atm) < 1;
+                      return (
+                        <tr 
+                          key={c.security_id} 
+                          className={cn(
+                            "border-b border-zinc-900/50 hover:bg-zinc-900/20 transition-colors text-xs font-semibold text-zinc-300",
+                            isATM && "bg-red-500/5 hover:bg-red-500/8 border-l border-l-red-500/40"
+                          )}
+                        >
+                          <td className="py-3 px-2 font-bold tabular-nums">
+                            {c.strike.toLocaleString('en-IN')}
+                            {isATM && <span className="ml-1 text-[8px] px-1 bg-red-500/20 text-red-400 rounded-sm font-bold">ATM</span>}
+                          </td>
+                          <td className="py-3 px-2 font-bold tabular-nums text-zinc-100">₹{c.ltp.toFixed(1)}</td>
+                          <td className="py-3 px-2 tabular-nums text-zinc-400">{c.oi.toLocaleString('en-IN')}</td>
+                          
+                          {/* Score Ring / Badge */}
+                          <td className="py-3 px-2 text-center">
+                            <span 
+                              className={cn(
+                                "px-2 py-0.8 rounded-md text-[10px] font-bold shadow-md",
+                                c.scoreInfo.pct >= 70 && "bg-emerald-500/15 text-emerald-400 border border-emerald-500/30",
+                                c.scoreInfo.pct < 70 && c.scoreInfo.pct >= 40 && "bg-amber-500/15 text-amber-400 border border-amber-500/30",
+                                c.scoreInfo.pct < 40 && "bg-red-500/15 text-red-400 border border-red-500/30"
+                              )}
+                            >
+                              {c.scoreInfo.score}/{c.scoreInfo.total} ({c.scoreInfo.pct.toFixed(0)}%)
+                            </span>
+                          </td>
+
+                          {/* Dynamic Factors Circles */}
+                          {factors.map(f => {
+                            if (!activeFactors[f.id]) return null;
+                            const checkResult = f.check(c);
+                            const formattedText = f.formatValue(c);
+
+                            return (
+                              <td key={f.id} className="py-3 px-1.5 text-center">
+                                <div 
+                                  className="flex items-center justify-center relative cursor-help"
+                                  onMouseEnter={() => setHoveredMetric({ contractId: c.security_id, factorId: f.id, text: formattedText })}
+                                  onMouseLeave={() => setHoveredMetric(null)}
+                                >
+                                  <span 
+                                    className={cn(
+                                      "h-3 w-3 rounded-full border transition-all duration-200",
+                                      checkResult === true && "bg-emerald-500 border-emerald-400 shadow-[0_0_8px_rgba(16,185,129,0.4)]",
+                                      checkResult === false && "bg-red-500 border-red-400 shadow-[0_0_8px_rgba(239,68,68,0.4)]",
+                                      checkResult === null && "bg-zinc-800 border-zinc-700"
+                                    )}
+                                  />
+                                </div>
+                              </td>
+                            );
+                          })}
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
             </div>
-            <button
-              onClick={fetchAnalysis}
-              className="p-2 border border-zinc-800 bg-zinc-900/60 hover:bg-zinc-800/80 hover:border-zinc-700 active:scale-95 transition-all duration-200 rounded-xl cursor-pointer"
-              title="Refresh analysis"
-              disabled={loading}
-            >
-              <RefreshCw className={cn("h-3.5 w-3.5 text-zinc-400", loading && "animate-spin text-emerald-400")} />
-            </button>
           </div>
         )}
       </div>
 
-      {/* Factors / Filters Checklist Panel */}
-      <div className="bg-zinc-950/40 backdrop-blur-md border border-zinc-850 p-4.5 rounded-2xl shadow-xl flex flex-col gap-3.5">
-        <div className="flex items-center justify-between border-b border-zinc-850 pb-2">
-          <div className="flex items-center gap-2">
-            <BarChart2 className="h-4 w-4 text-emerald-400" />
-            <span className="text-xs font-bold uppercase tracking-widest text-zinc-300">Factors To Consider (Option Seller Perspective)</span>
-          </div>
-          <div className="flex items-center gap-3">
-            <button 
-              onClick={() => selectAllFactors(true)}
-              className="text-[11px] font-semibold text-emerald-400 hover:text-emerald-300 transition-colors cursor-pointer"
+      {/* Floating Hover Tooltip */}
+      <AnimatePresence>
+        {hoveredMetric && (
+          <div className="fixed bottom-6 right-6 z-50 pointer-events-none">
+            <motion.div
+              initial={{ opacity: 0, y: 10, scale: 0.95 }}
+              animate={{ opacity: 1, y: 0, scale: 1 }}
+              exit={{ opacity: 0, y: 10, scale: 0.95 }}
+              className="bg-zinc-950 border border-zinc-800/80 px-4 py-2.5 rounded-xl shadow-2xl flex items-center gap-2 max-w-sm pointer-events-none"
             >
-              Select All
-            </button>
-            <span className="text-zinc-700">|</span>
-            <button 
-              onClick={() => selectAllFactors(false)}
-              className="text-[11px] font-semibold text-zinc-400 hover:text-zinc-200 transition-colors cursor-pointer"
-            >
-              Clear All
-            </button>
+              <Info className="h-4 w-4 text-emerald-400 flex-shrink-0" />
+              <span className="text-xs font-semibold text-zinc-200 leading-tight">{hoveredMetric.text}</span>
+            </motion.div>
           </div>
-        </div>
+        )}
+      </AnimatePresence>
 
-        {/* Checkboxes Grid */}
-        <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-7 gap-3">
-          {FACTORS.map(f => {
-            const checked = activeFactors[f.id];
-            return (
-              <div 
-                key={f.id}
-                onClick={() => toggleFactor(f.id)}
-                className={cn(
-                  "p-2.5 rounded-xl border flex flex-col gap-1 cursor-pointer select-none transition-all duration-200 hover:-translate-y-0.5",
-                  checked
-                    ? "bg-emerald-500/5 border-emerald-500/35 shadow-[0_0_12px_rgba(16,185,129,0.02)]"
-                    : "bg-zinc-900/30 border-zinc-850 hover:border-zinc-700 hover:bg-zinc-800/10"
-                )}
-                title={f.desc}
-              >
+      {/* Indicator Settings Modal */}
+      <AnimatePresence>
+        {settingsOpen && (
+          <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50 p-4">
+            <motion.div
+              initial={{ opacity: 0, scale: 0.95, y: 10 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.95, y: 10 }}
+              className="bg-zinc-950 border border-zinc-850 p-6 rounded-2xl shadow-2xl max-w-sm w-full flex flex-col gap-4 text-zinc-200"
+            >
+              <div className="flex items-center justify-between border-b border-zinc-850 pb-3">
                 <div className="flex items-center gap-2">
-                  <div className="shrink-0 text-emerald-400">
-                    {checked ? (
-                      <CheckSquare className="h-4 w-4 fill-emerald-500/10 stroke-[2.5]" />
-                    ) : (
-                      <Square className="h-4 w-4 text-zinc-600 stroke-[2]" />
-                    )}
-                  </div>
-                  <span className={cn("text-xs font-bold transition-colors duration-150", checked ? "text-emerald-300" : "text-zinc-400")}>
-                    {f.label}
-                  </span>
+                  <Settings className="h-4.5 w-4.5 text-emerald-400" />
+                  <span className="font-bold text-sm uppercase tracking-wider text-zinc-200">Indicator Settings</span>
+                </div>
+                <button
+                  onClick={() => setSettingsOpen(false)}
+                  className="text-xs text-zinc-500 hover:text-zinc-300 font-bold select-none cursor-pointer"
+                >
+                  ✕
+                </button>
+              </div>
+
+              {/* Form Input fields */}
+              <div className="flex flex-col gap-4 py-2">
+                
+                {/* Supertrend Period */}
+                <div className="grid grid-cols-2 items-center gap-3">
+                  <label className="text-xs font-semibold text-zinc-400">Supertrend Period</label>
+                  <input
+                    type="number"
+                    value={tempSupertrendPeriod}
+                    onChange={(e) => setTempSupertrendPeriod(parseInt(e.target.value) || 7)}
+                    className="bg-zinc-900 border border-zinc-800 rounded-lg px-2.5 py-1 text-xs text-zinc-200 font-bold outline-none focus:border-emerald-500/30 text-right"
+                    min="1"
+                    max="100"
+                  />
+                </div>
+
+                {/* Supertrend Multiplier */}
+                <div className="grid grid-cols-2 items-center gap-3">
+                  <label className="text-xs font-semibold text-zinc-400">Supertrend Multiplier</label>
+                  <input
+                    type="number"
+                    step="0.1"
+                    value={tempSupertrendMultiplier}
+                    onChange={(e) => setTempSupertrendMultiplier(parseFloat(e.target.value) || 3.0)}
+                    className="bg-zinc-900 border border-zinc-800 rounded-lg px-2.5 py-1 text-xs text-zinc-200 font-bold outline-none focus:border-emerald-500/30 text-right"
+                    min="0.1"
+                    max="20"
+                  />
+                </div>
+
+                {/* RSI Period */}
+                <div className="grid grid-cols-2 items-center gap-3">
+                  <label className="text-xs font-semibold text-zinc-400">RSI Period</label>
+                  <input
+                    type="number"
+                    value={tempRsiPeriod}
+                    onChange={(e) => setTempRsiPeriod(parseInt(e.target.value) || 14)}
+                    className="bg-zinc-900 border border-zinc-800 rounded-lg px-2.5 py-1 text-xs text-zinc-200 font-bold outline-none focus:border-emerald-500/30 text-right"
+                    min="1"
+                    max="100"
+                  />
+                </div>
+
+                {/* EMA 20 Period */}
+                <div className="grid grid-cols-2 items-center gap-3">
+                  <label className="text-xs font-semibold text-zinc-400">20 EMA Period</label>
+                  <input
+                    type="number"
+                    value={tempEma20Period}
+                    onChange={(e) => setTempEma20Period(parseInt(e.target.value) || 20)}
+                    className="bg-zinc-900 border border-zinc-800 rounded-lg px-2.5 py-1 text-xs text-zinc-200 font-bold outline-none focus:border-emerald-500/30 text-right"
+                    min="1"
+                    max="200"
+                  />
+                </div>
+
+                {/* EMA 50 Period */}
+                <div className="grid grid-cols-2 items-center gap-3">
+                  <label className="text-xs font-semibold text-zinc-400">50 EMA Period</label>
+                  <input
+                    type="number"
+                    value={tempEma50Period}
+                    onChange={(e) => setTempEma50Period(parseInt(e.target.value) || 50)}
+                    className="bg-zinc-900 border border-zinc-800 rounded-lg px-2.5 py-1 text-xs text-zinc-200 font-bold outline-none focus:border-emerald-500/30 text-right"
+                    min="1"
+                    max="500"
+                  />
                 </div>
               </div>
-            );
-          })}
-        </div>
-      </div>
 
-      {/* Main Ranking Display */}
-      {error && (
-        <div className="bg-red-500/10 border border-red-500/20 text-red-300 p-4 rounded-xl flex items-start gap-3 shadow-lg animate-pulse">
-          <AlertCircle className="h-5 w-5 shrink-0 mt-0.5" />
-          <div className="flex flex-col gap-1">
-            <span className="text-sm font-bold">Analysis Failed</span>
-            <span className="text-xs font-medium text-red-300/80">{error}</span>
-            <button 
-              onClick={fetchAnalysis}
-              className="mt-2 text-xs font-semibold underline text-red-300 hover:text-white cursor-pointer w-fit"
-            >
-              Retry executing analysis
-            </button>
-          </div>
-        </div>
-      )}
-
-      {loading && !data && (
-        <div className="flex flex-col items-center justify-center py-20 gap-4">
-          <RefreshCw className="h-10 w-10 text-emerald-400 animate-spin" />
-          <span className="text-sm text-zinc-400 font-semibold animate-pulse">Executing script & compiling indicators (ATM +/- 10)...</span>
-        </div>
-      )}
-
-      {data && (
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 relative">
-          
-          {/* Floating Metric Info Box */}
-          <AnimatePresence>
-            {hoveredMetric && (
-              <motion.div 
-                initial={{ opacity: 0, y: 10 }}
-                animate={{ opacity: 1, y: 0 }}
-                exit={{ opacity: 0, y: 10 }}
-                className="absolute z-50 bg-zinc-950 border border-zinc-800 p-2.5 rounded-xl shadow-2xl max-w-xs text-xs font-medium text-zinc-300"
-                style={{
-                  top: '15%',
-                  left: '50%',
-                  transform: 'translateX(-50%)',
-                }}
-              >
-                <div className="flex items-center gap-1.5 text-zinc-400 border-b border-zinc-800 pb-1 mb-1 font-bold text-[10px] uppercase tracking-wider">
-                  <Info className="h-3 w-3 text-emerald-400" />
-                  {FACTORS.find(f => f.id === hoveredMetric.factorId)?.label}
-                </div>
-                <span>{hoveredMetric.text}</span>
-              </motion.div>
-            )}
-          </AnimatePresence>
-
-          {/* CALLS (CE) TABLE */}
-          <div className="bg-zinc-950/40 backdrop-blur-md border border-zinc-850 p-4 rounded-2xl flex flex-col gap-4 shadow-xl">
-            <div className="flex items-center justify-between border-b border-zinc-850 pb-2">
-              <div className="flex items-center gap-2">
-                <span className="h-2 w-2 rounded-full bg-blue-400 shadow-[0_0_8px_rgba(96,165,250,0.5)]" />
-                <span className="text-xs font-bold uppercase tracking-widest text-zinc-300">CALLS (CE) SELLER RANKING</span>
+              {/* Actions */}
+              <div className="flex gap-2 justify-end border-t border-zinc-850 pt-3 mt-1">
+                <button
+                  onClick={() => setSettingsOpen(false)}
+                  className="px-4 py-1.5 rounded-lg text-xs font-bold text-zinc-400 hover:text-zinc-200 bg-zinc-900 border border-zinc-800 hover:bg-zinc-800/60 cursor-pointer"
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={saveSettings}
+                  className="px-4 py-1.5 rounded-lg text-xs font-bold text-emerald-300 bg-emerald-500/10 border border-emerald-500/25 hover:bg-emerald-500/15 cursor-pointer shadow-lg shadow-emerald-500/5"
+                >
+                  Apply Settings
+                </button>
               </div>
-              <span className="text-[10px] text-zinc-400 font-bold bg-zinc-900 border border-zinc-800 px-2 py-0.5 rounded-md">
-                Best Sell Candidates Top
-              </span>
-            </div>
-
-            <div className="overflow-x-auto">
-              <table className="w-full text-left border-collapse">
-                <thead>
-                  <tr className="border-b border-zinc-900 text-[10px] uppercase font-bold text-zinc-500 tracking-wider">
-                    <th className="py-2.5 px-2">Rank</th>
-                    <th className="py-2.5 px-2">Strike</th>
-                    <th className="py-2.5 px-2">LTP</th>
-                    <th className="py-2.5 px-2 text-center">Seller Score</th>
-                    {FACTORS.map(f => activeFactors[f.id] && (
-                      <th key={f.id} className="py-2.5 px-1.5 text-center text-[9px] font-bold" title={f.desc}>
-                        {f.label.split(' ')[0]}
-                      </th>
-                    ))}
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-zinc-900 text-xs font-semibold">
-                  {rankedContracts.ce.map((c, idx) => {
-                    const isATM = Math.abs(c.strike - data.spot) < 25; // Nifty ATM check
-                    return (
-                      <tr 
-                        key={c.security_id} 
-                        className={cn(
-                          "hover:bg-zinc-900/40 transition-colors duration-150",
-                          isATM && "bg-blue-500/3 hover:bg-blue-500/5"
-                        )}
-                      >
-                        <td className="py-3 px-2 font-bold text-zinc-500 tabular-nums">
-                          #{idx + 1}
-                        </td>
-                        <td className="py-3 px-2 tabular-nums">
-                          <span className={cn(isATM ? "text-blue-400 font-bold" : "text-zinc-200")}>
-                            {c.strike.toLocaleString('en-IN')}
-                          </span>
-                          {isATM && <span className="ml-1 text-[9px] font-bold bg-blue-500/10 text-blue-300 border border-blue-500/20 px-1 rounded-sm">ATM</span>}
-                        </td>
-                        <td className="py-3 px-2 text-zinc-300 font-bold tabular-nums">
-                          ₹{c.ltp.toFixed(2)}
-                        </td>
-                        <td className="py-3 px-2">
-                          <div className="flex flex-col items-center gap-1">
-                            <span className="text-[11px] font-bold text-emerald-400 tabular-nums">
-                              {c.scoreInfo.pct.toFixed(0)}%
-                            </span>
-                            <div className="w-12 h-1 bg-zinc-900 rounded-full overflow-hidden border border-zinc-800/40">
-                              <div 
-                                className="h-full bg-emerald-500 transition-all duration-500" 
-                                style={{ width: `${c.scoreInfo.pct}%` }} 
-                              />
-                            </div>
-                            <span className="text-[8px] text-zinc-500 font-bold tracking-tighter tabular-nums">
-                              ({c.scoreInfo.score}/{c.scoreInfo.total})
-                            </span>
-                          </div>
-                        </td>
-                        
-                        {/* Indicators Dots */}
-                        {FACTORS.map(f => {
-                          if (!activeFactors[f.id]) return null;
-                          const checkResult = f.check(c);
-                          const formattedText = f.formatValue(c);
-
-                          return (
-                            <td key={f.id} className="py-3 px-1.5 text-center">
-                              <div 
-                                className="flex items-center justify-center"
-                                onMouseEnter={() => setHoveredMetric({ contractId: c.security_id, factorId: f.id, text: formattedText })}
-                                onMouseLeave={() => setHoveredMetric(null)}
-                              >
-                                <span 
-                                  className={cn(
-                                    "h-3 w-3 rounded-full border transition-all duration-200 cursor-help",
-                                    checkResult === true && "bg-emerald-500 border-emerald-400 shadow-[0_0_8px_rgba(16,185,129,0.4)]",
-                                    checkResult === false && "bg-red-500 border-red-400 shadow-[0_0_8px_rgba(239,68,68,0.4)]",
-                                    checkResult === null && "bg-zinc-800 border-zinc-700"
-                                  )}
-                                />
-                              </div>
-                            </td>
-                          );
-                        })}
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-            </div>
+            </motion.div>
           </div>
-
-          {/* PUTS (PE) TABLE */}
-          <div className="bg-zinc-950/40 backdrop-blur-md border border-zinc-850 p-4 rounded-2xl flex flex-col gap-4 shadow-xl">
-            <div className="flex items-center justify-between border-b border-zinc-850 pb-2">
-              <div className="flex items-center gap-2">
-                <span className="h-2 w-2 rounded-full bg-rose-400 shadow-[0_0_8px_rgba(251,113,133,0.5)]" />
-                <span className="text-xs font-bold uppercase tracking-widest text-zinc-300">PUTS (PE) SELLER RANKING</span>
-              </div>
-              <span className="text-[10px] text-zinc-400 font-bold bg-zinc-900 border border-zinc-800 px-2 py-0.5 rounded-md">
-                Best Sell Candidates Top
-              </span>
-            </div>
-
-            <div className="overflow-x-auto">
-              <table className="w-full text-left border-collapse">
-                <thead>
-                  <tr className="border-b border-zinc-900 text-[10px] uppercase font-bold text-zinc-500 tracking-wider">
-                    <th className="py-2.5 px-2">Rank</th>
-                    <th className="py-2.5 px-2">Strike</th>
-                    <th className="py-2.5 px-2">LTP</th>
-                    <th className="py-2.5 px-2 text-center">Seller Score</th>
-                    {FACTORS.map(f => activeFactors[f.id] && (
-                      <th key={f.id} className="py-2.5 px-1.5 text-center text-[9px] font-bold" title={f.desc}>
-                        {f.label.split(' ')[0]}
-                      </th>
-                    ))}
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-zinc-900 text-xs font-semibold">
-                  {rankedContracts.pe.map((c, idx) => {
-                    const isATM = Math.abs(c.strike - data.spot) < 25; // Nifty ATM check
-                    return (
-                      <tr 
-                        key={c.security_id} 
-                        className={cn(
-                          "hover:bg-zinc-900/40 transition-colors duration-150",
-                          isATM && "bg-rose-500/3 hover:bg-rose-500/5"
-                        )}
-                      >
-                        <td className="py-3 px-2 font-bold text-zinc-500 tabular-nums">
-                          #{idx + 1}
-                        </td>
-                        <td className="py-3 px-2 tabular-nums">
-                          <span className={cn(isATM ? "text-rose-400 font-bold" : "text-zinc-200")}>
-                            {c.strike.toLocaleString('en-IN')}
-                          </span>
-                          {isATM && <span className="ml-1 text-[9px] font-bold bg-rose-500/10 text-rose-300 border border-rose-500/20 px-1 rounded-sm">ATM</span>}
-                        </td>
-                        <td className="py-3 px-2 text-zinc-300 font-bold tabular-nums">
-                          ₹{c.ltp.toFixed(2)}
-                        </td>
-                        <td className="py-3 px-2">
-                          <div className="flex flex-col items-center gap-1">
-                            <span className="text-[11px] font-bold text-emerald-400 tabular-nums">
-                              {c.scoreInfo.pct.toFixed(0)}%
-                            </span>
-                            <div className="w-12 h-1 bg-zinc-900 rounded-full overflow-hidden border border-zinc-800/40">
-                              <div 
-                                className="h-full bg-emerald-500 transition-all duration-500" 
-                                style={{ width: `${c.scoreInfo.pct}%` }} 
-                              />
-                            </div>
-                            <span className="text-[8px] text-zinc-500 font-bold tracking-tighter tabular-nums">
-                              ({c.scoreInfo.score}/{c.scoreInfo.total})
-                            </span>
-                          </div>
-                        </td>
-                        
-                        {/* Indicators Dots */}
-                        {FACTORS.map(f => {
-                          if (!activeFactors[f.id]) return null;
-                          const checkResult = f.check(c);
-                          const formattedText = f.formatValue(c);
-
-                          return (
-                            <td key={f.id} className="py-3 px-1.5 text-center">
-                              <div 
-                                className="flex items-center justify-center"
-                                onMouseEnter={() => setHoveredMetric({ contractId: c.security_id, factorId: f.id, text: formattedText })}
-                                onMouseLeave={() => setHoveredMetric(null)}
-                              >
-                                <span 
-                                  className={cn(
-                                    "h-3 w-3 rounded-full border transition-all duration-200 cursor-help",
-                                    checkResult === true && "bg-emerald-500 border-emerald-400 shadow-[0_0_8px_rgba(16,185,129,0.4)]",
-                                    checkResult === false && "bg-red-500 border-red-400 shadow-[0_0_8px_rgba(239,68,68,0.4)]",
-                                    checkResult === null && "bg-zinc-800 border-zinc-700"
-                                  )}
-                                />
-                              </div>
-                            </td>
-                          );
-                        })}
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-            </div>
-          </div>
-        </div>
-      )}
-      </div>
+        )}
+      </AnimatePresence>
     </div>
   );
 }

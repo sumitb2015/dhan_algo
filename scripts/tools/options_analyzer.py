@@ -3,7 +3,7 @@ Rank ATM+/-10 options strikes for NIFTY/BANKNIFTY/FINNIFTY based on:
 Price Change, OI Change, RSI, Supertrend, VWAP, EMA 20, EMA 50
 
 Usage:
-    python options_analyzer.py --underlying NIFTY --expiry 2026-07-14 --interval 15
+    python options_analyzer.py --underlying NIFTY --expiry 2026-07-14 --interval 15 --supertrend-period 7 --supertrend-multiplier 3.0
 """
 import sys
 import os
@@ -153,7 +153,7 @@ def fetch_candles_for_sec(helper, sec, interval, days):
     return df
 
 
-def analyze_single_contract(helper, sec, contract_info, option_type, strike, interval):
+def analyze_single_contract(helper, sec, contract_info, option_type, strike, interval, indicator_settings):
     try:
         if not sec:
             return {
@@ -194,15 +194,48 @@ def analyze_single_contract(helper, sec, contract_info, option_type, strike, int
                 'supertrend_dir': None
             }
             
-        df_ta = helper.calculate_ta_indicators(df, ['EMA20', 'EMA50', 'RSI14', 'VWAP', 'SUPERTREND'])
+        # Build custom indicators configuration list
+        indicators = [
+            {'kind': 'ema', 'length': indicator_settings['ema20_period']},
+            {'kind': 'ema', 'length': indicator_settings['ema50_period']},
+            {'kind': 'rsi', 'length': indicator_settings['rsi_period']},
+            'VWAP',
+            {
+                'kind': 'supertrend', 
+                'length': indicator_settings['supertrend_period'], 
+                'multiplier': indicator_settings['supertrend_multiplier']
+            }
+        ]
+        
+        df_ta = helper.calculate_ta_indicators(df, indicators)
         
         last_row = df_ta.iloc[-1]
         
-        rsi = float(last_row.get('RSI_14')) if not pd.isna(last_row.get('RSI_14')) else None
-        vwap = float(last_row.get('VWAP_D')) if not pd.isna(last_row.get('VWAP_D')) else None
-        ema20 = float(last_row.get('EMA_20')) if not pd.isna(last_row.get('EMA_20')) else None
-        ema50 = float(last_row.get('EMA_50')) if not pd.isna(last_row.get('EMA_50')) else None
-        supertrend_dir = int(last_row.get('SUPERTd_7_3.0')) if not pd.isna(last_row.get('SUPERTd_7_3.0')) else None
+        # Generate custom column names based on configuration
+        rsi_col = f"RSI_{indicator_settings['rsi_period']}"
+        ema20_col = f"EMA_{indicator_settings['ema20_period']}"
+        ema50_col = f"EMA_{indicator_settings['ema50_period']}"
+        
+        # Supertrend columns: multiplier is format as float, e.g. SUPERTd_7_3.0
+        # Find column dynamically starting with SUPERTd_{period}_ to avoid parsing float representations
+        supertrend_dir_col = None
+        for col in df_ta.columns:
+            if col.startswith(f"SUPERTd_{indicator_settings['supertrend_period']}_"):
+                supertrend_dir_col = col
+                break
+                
+        if not supertrend_dir_col:
+            # Fallback
+            supertrend_dir_col = f"SUPERTd_{indicator_settings['supertrend_period']}_{indicator_settings['supertrend_multiplier']}"
+        
+        rsi = float(last_row.get(rsi_col)) if rsi_col in last_row and not pd.isna(last_row[rsi_col]) else None
+        vwap = float(last_row.get('VWAP_D')) if 'VWAP_D' in last_row and not pd.isna(last_row['VWAP_D']) else None
+        ema20 = float(last_row.get(ema20_col)) if ema20_col in last_row and not pd.isna(last_row[ema20_col]) else None
+        ema50 = float(last_row.get(ema50_col)) if ema50_col in last_row and not pd.isna(last_row[ema50_col]) else None
+        
+        supertrend_dir = None
+        if supertrend_dir_col in last_row and not pd.isna(last_row[supertrend_dir_col]):
+            supertrend_dir = int(last_row[supertrend_dir_col])
         
         ltp = float(last_row.get('Close', contract_info.get('last_price', 0)))
         prev_close = float(contract_info.get('previous_close_price', 0))
@@ -245,6 +278,14 @@ def main():
     parser.add_argument('--underlying', default='NIFTY')
     parser.add_argument('--expiry', required=True)
     parser.add_argument('--interval', default='15')
+    
+    # Custom indicator settings
+    parser.add_argument('--supertrend-period', type=int, default=7)
+    parser.add_argument('--supertrend-multiplier', type=float, default=3.0)
+    parser.add_argument('--rsi-period', type=int, default=14)
+    parser.add_argument('--ema20-period', type=int, default=20)
+    parser.add_argument('--ema50-period', type=int, default=50)
+    
     args = parser.parse_args()
     
     dhan = get_dhan_client()
@@ -316,13 +357,22 @@ def main():
                 if sec_rec:
                     resolved_info[sid] = sec_rec
                     
+    # Pack custom indicator settings
+    indicator_settings = {
+        'supertrend_period': args.supertrend_period,
+        'supertrend_multiplier': args.supertrend_multiplier,
+        'rsi_period': args.rsi_period,
+        'ema20_period': args.ema20_period,
+        'ema50_period': args.ema50_period,
+    }
+                    
     # Fetch and compute in parallel (using 4 workers managed by rate limiter)
     results_map = {}
     
     def process_contract(sid, contract_info, opt_type, strike_price):
         sec_rec = resolved_info.get(str(sid))
         res = analyze_single_contract(
-            helper, sec_rec, contract_info, opt_type, strike_price, args.interval
+            helper, sec_rec, contract_info, opt_type, strike_price, args.interval, indicator_settings
         )
         results_map[f"{strike_price}_{opt_type}"] = res
 
