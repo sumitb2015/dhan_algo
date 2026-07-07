@@ -37,6 +37,7 @@ interface LiveQuotes {
   atm: number;
   straddle_premium: number;
   strikes: Record<string, StrikeData>;
+  vix?: { ltp: number; prev_close: number; change: number; change_pct: number };
 }
 
 interface BridgeStatus {
@@ -169,6 +170,23 @@ export default function OptionsCharts() {
   const [showCELine, setShowCELine] = useState(true);
   const [showPELine, setShowPELine] = useState(true);
   const [activeTab, setActiveTab] = useState<'premium' | 'skew' | 'oi' | 'cumulative' | 'chain' | 'intelligence' | 'vix' | 'buildup' | 'multistrike' | 'pcdiff' | 'positions'>('premium');
+
+  const [vixData, setVixData] = useState<{ vix: number; prevClose: number } | null>(null);
+
+  // When NOT live: poll vix-candles for spot + prev_close (60s)
+  useEffect(() => {
+    if (bridgeStatus.status === 'RUNNING') return;
+    async function fetchVix() {
+      try {
+        const res  = await fetch('/api/options/vix-candles');
+        const data = await res.json() as { success: boolean; spot: number; prev_close: number };
+        if (data.success) setVixData({ vix: data.spot, prevClose: data.prev_close });
+      } catch {}
+    }
+    fetchVix();
+    const id = setInterval(fetchVix, 60_000);
+    return () => clearInterval(id);
+  }, [bridgeStatus.status]);
 
   // ── Fetch expiries ────────────────────────────────────────────────
   useEffect(() => {
@@ -696,8 +714,8 @@ export default function OptionsCharts() {
 
           {activeTab === 'premium' && <>
 
-        {/* Stats — 6 tiles */}
-        <div className="grid grid-cols-3 sm:grid-cols-6 gap-3">
+        {/* Stats — 7 tiles */}
+        <div className="grid grid-cols-3 sm:grid-cols-4 lg:grid-cols-7 gap-3">
           {([
             { label: 'Spot',
               value: spot > 0 ? fmtNum(spot, 2) : '—',
@@ -729,6 +747,20 @@ export default function OptionsCharts() {
                   : '—',
               sub: isLive ? `CE ${fmtNum(ceLtp, 2)} + PE ${fmtNum(peLtp, 2)}` : undefined,
               color: 'text-emerald-400', accent: 'border-emerald-500/25' },
+            (() => {
+              const wsVix = isLive ? quotes?.vix : undefined;
+              const vixLtp  = wsVix ? wsVix.ltp  : vixData?.vix       ?? 0;
+              const vixPrev = wsVix ? wsVix.prev_close : vixData?.prevClose ?? 0;
+              const pct = vixLtp > 0 && vixPrev > 0
+                ? ((vixLtp - vixPrev) / vixPrev) * 100 : null;
+              return {
+                label: 'India VIX',
+                value: vixLtp > 0 ? fmtNum(vixLtp, 2) : '—',
+                sub: pct !== null ? `${pct >= 0 ? '+' : ''}${pct.toFixed(2)}% vs prev` : undefined,
+                color: pct === null ? 'text-amber-400' : pct > 0 ? 'text-red-400' : 'text-emerald-400',
+                accent: 'border-amber-500/25',
+              };
+            })(),
           ]).map(({ label, value, color, sub, accent }) => (
             <div key={label} className={`bg-zinc-900/70 border rounded-xl px-3 py-3 ${accent}`}>
               <p className="text-[10px] font-bold text-zinc-400 uppercase tracking-widest mb-1">{label}</p>

@@ -7,6 +7,7 @@ Security ID 21 = India VIX on Dhan NSE_IDX segment.
 import sys
 import os
 import json
+import urllib.request
 from datetime import date, timedelta, datetime, timezone
 
 _IST = timezone(timedelta(hours=5, minutes=30))
@@ -19,7 +20,36 @@ from lib.dhan_helper import DhanHelper
 
 VIX_SECURITY_ID   = "21"
 NIFTY_SECURITY_ID = "13"
-VIX_CSV = os.path.join(ROOT, "Historical Data", "Indices", "INDIA_VIX.csv")
+VIX_CSV  = os.path.join(ROOT, "Historical Data", "Indices", "INDIA_VIX.csv")
+OHLC_URL = "https://api.dhan.co/v2/marketfeed/ohlc"
+
+
+def _prev_close_from_ohlc_api(dhan) -> float:
+    """Fetch official prev-session close from Dhan OHLC API — matches what Dhan's app shows."""
+    try:
+        token     = dhan.dhan_http.access_token
+        client_id = dhan.dhan_http.client_id
+        body = json.dumps({"NSE_IDX": [int(VIX_SECURITY_ID)]}).encode()
+        req  = urllib.request.Request(
+            OHLC_URL, data=body, method="POST",
+            headers={
+                "access-token":  token,
+                "client-id":     client_id,
+                "Content-Type":  "application/json",
+                "Accept":        "application/json",
+            },
+        )
+        with urllib.request.urlopen(req, timeout=6) as resp:
+            res = json.loads(resp.read())
+        if res.get("status") == "success":
+            entry = (res.get("data") or {}).get("NSE_IDX", {}).get(VIX_SECURITY_ID, {})
+            ohlc  = entry.get("ohlc") or {}
+            val   = float(ohlc.get("close") or 0)
+            if val > 0:
+                return round(val, 2)
+    except Exception as e:
+        print(f"WARN: VIX OHLC prev_close fetch failed: {e}", file=sys.stderr)
+    return 0.0
 
 
 def _prev_close_from_csv() -> float:
@@ -167,7 +197,9 @@ def main():
     day_open  = round(opens[0],   2) if opens  else 0.0
     day_high  = round(max(highs),  2) if highs  else 0.0
     day_low   = round(min(lows),   2) if lows   else 0.0
-    prev_close = _prev_day_close_from_intraday(raw_vix_df, data_date) or _prev_close_from_csv()
+    prev_close = (_prev_close_from_ohlc_api(dhan)
+                  or _prev_day_close_from_intraday(raw_vix_df, data_date)
+                  or _prev_close_from_csv())
 
     print(json.dumps({
         "candles":    candles,

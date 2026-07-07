@@ -16,6 +16,7 @@ import os
 import json
 import time
 import argparse
+import urllib.request
 from datetime import datetime, date
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -42,6 +43,36 @@ FEED_QUOTE  = 17  # Quote packet — LTP + OHLC + volume (includes prev_close)
 # Security IDs
 NIFTY_IDX_SID = '13'   # NIFTY 50 index (spot canary)
 VIX_SID       = '21'   # India VIX index
+
+OHLC_URL = 'https://api.dhan.co/v2/marketfeed/ohlc'
+
+
+def _fetch_vix_prev_close(dhan) -> float:
+    """Fetch VIX official previous-session close from Dhan OHLC API once at startup."""
+    try:
+        token     = dhan.dhan_http.access_token
+        client_id = dhan.dhan_http.client_id
+        body = json.dumps({'NSE_IDX': [int(VIX_SID)]}).encode()
+        req  = urllib.request.Request(
+            OHLC_URL, data=body, method='POST',
+            headers={
+                'access-token':  token,
+                'client-id':     client_id,
+                'Content-Type':  'application/json',
+                'Accept':        'application/json',
+            },
+        )
+        with urllib.request.urlopen(req, timeout=6) as resp:
+            res = json.loads(resp.read())
+        if res.get('status') == 'success':
+            entry = (res.get('data') or {}).get('NSE_IDX', {}).get(VIX_SID, {})
+            ohlc  = entry.get('ohlc') or {}
+            val   = float(ohlc.get('close') or 0)
+            if val > 0:
+                return round(val, 2)
+    except Exception as e:
+        print(f'[live_options_ws] WARN: VIX prev_close fetch failed: {e}', flush=True)
+    return 0.0
 
 # Strike step per underlying
 STRIKE_STEP = {'NIFTY': 50, 'BANKNIFTY': 100, 'FINNIFTY': 50}
@@ -112,6 +143,10 @@ def main():
 
     helper = DhanHelper(dhan)
     step = STRIKE_STEP.get(args.underlying, 50)
+
+    # Fetch VIX prev_close once at startup — used for % change throughout the session
+    vix_prev_close = _fetch_vix_prev_close(dhan)
+    print(f'[live_options_ws] VIX prev_close={vix_prev_close}', flush=True)
 
     # Get spot to determine ATM
     print('[live_options_ws] Fetching spot price…', flush=True)
@@ -187,12 +222,11 @@ def main():
                     spot = live_spot
                     atm  = round(spot / step) * step
 
-            # Read India VIX from WebSocket
+            # Read India VIX from WebSocket; prev_close is the value fetched at startup
             vix_data: dict | None = None
             vix_tick = helper.live_data.get(VIX_SID)
             if vix_tick:
-                vix_ltp        = _f(vix_tick.get('LTP') or vix_tick.get('last_price'))
-                vix_prev_close = _f(vix_tick.get('prev_close') or vix_tick.get('close'))
+                vix_ltp = _f(vix_tick.get('LTP') or vix_tick.get('last_price'))
                 if vix_ltp > 0:
                     vix_chg     = round(vix_ltp - vix_prev_close, 2) if vix_prev_close else 0.0
                     vix_chg_pct = round(vix_chg / vix_prev_close * 100, 4) if vix_prev_close else 0.0
