@@ -60,6 +60,8 @@ export default function PctStrangleTab({ spot, chainOc, expiries, selectedExpiry
   const [orderResult, setOrderResult] = useState<{ success: boolean; message: string } | null>(null);
   const [saveResult, setSaveResult] = useState<{ success: boolean; message: string } | null>(null);
   const [breakevenMode, setBreakevenMode] = useState<'target' | 'expiry'>('expiry');
+  const [margin, setMargin] = useState<{ total_margin: number; hedge_benefit: number; available_funds: number } | null>(null);
+  const [marginLoading, setMarginLoading] = useState(false);
 
   // Own expiry + chain state — independent of parent's selectedExpiry
   const [pctExpiry, setPctExpiry] = useState(selectedExpiry || expiries[0]?.date || '');
@@ -123,6 +125,30 @@ export default function PctStrangleTab({ spot, chainOc, expiries, selectedExpiry
   );
 
   const breakevens = useMemo(() => findBreakevens(curve), [curve]);
+
+  // Fetch margin whenever resolved legs change
+  useEffect(() => {
+    if (resolvedLegs.length !== 2 || !pctExpiry) {
+      setMargin(null);
+      return;
+    }
+    setMarginLoading(true);
+    fetch('/api/options/margin', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        underlying: UNDERLYING,
+        expiry: pctExpiry,
+        legs: resolvedLegs.map(l => ({ strike: l.strike, type: l.type, side: l.side, qtyLots: l.qtyLots, price: l.price })),
+      }),
+    })
+      .then(r => r.json())
+      .then((json: { success?: boolean; data?: { total_margin: number; hedge_benefit: number; available_funds: number } }) => {
+        setMargin(json?.success ? (json.data ?? null) : null);
+      })
+      .catch(() => setMargin(null))
+      .finally(() => setMarginLoading(false));
+  }, [resolvedLegs, pctExpiry]);
 
   const ceDefaultStrike = Math.round((spot * (1 + cePct / 100)) / STRIKE_STEP) * STRIKE_STEP;
   const peDefaultStrike = Math.round((spot * (1 - pePct / 100)) / STRIKE_STEP) * STRIKE_STEP;
@@ -470,8 +496,8 @@ export default function PctStrangleTab({ spot, chainOc, expiries, selectedExpiry
             targetBreakevens={null}
             breakevenMode={breakevenMode}
             onBreakevenModeChange={setBreakevenMode}
-            margin={null}
-            marginLoading={false}
+            margin={margin}
+            marginLoading={marginLoading}
             spot={spot}
           />
           <PayoffDiagram
