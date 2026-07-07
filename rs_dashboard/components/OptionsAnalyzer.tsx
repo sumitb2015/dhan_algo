@@ -1,7 +1,7 @@
 'use client';
 
-import React, { useState, useEffect, useMemo, useCallback } from 'react';
-import { Check, HelpCircle, AlertCircle, RefreshCw, BarChart2, CheckSquare, Square, Info, Layers, Settings } from 'lucide-react';
+import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
+import { AlertCircle, RefreshCw, BarChart2, CheckSquare, Square, Info, Layers, Settings, Activity, ZapOff } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { motion, AnimatePresence } from 'framer-motion';
 import NavBar from '@/components/NavBar';
@@ -91,6 +91,13 @@ export default function OptionsAnalyzer() {
   const [data, setData] = useState<AnalyzerResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [hoveredMetric, setHoveredMetric] = useState<{ contractId: number, factorId: string, text: string } | null>(null);
+
+  // Live auto-refresh state
+  const [isLive, setIsLive] = useState(false);
+  const [countdown, setCountdown] = useState(0);
+  const [lastRefreshed, setLastRefreshed] = useState<Date | null>(null);
+  const liveIntervalRef = useRef<NodeJS.Timeout | null>(null);
+  const countdownRef = useRef<NodeJS.Timeout | null>(null);
 
   // Dynamic Factors Definition based on current settings
   const factors = useMemo<Factor[]>(() => [
@@ -242,6 +249,45 @@ export default function OptionsAnalyzer() {
   useEffect(() => {
     fetchAnalysis();
   }, [selectedExpiry, interval, fetchAnalysis]);
+
+  // Stop live mode when key params change
+  useEffect(() => {
+    setIsLive(false);
+  }, [underlying, selectedExpiry, interval]);
+
+  // Live auto-refresh timer management
+  useEffect(() => {
+    const stopTimers = () => {
+      if (liveIntervalRef.current) { clearInterval(liveIntervalRef.current); liveIntervalRef.current = null; }
+      if (countdownRef.current) { clearInterval(countdownRef.current); countdownRef.current = null; }
+    };
+
+    if (!isLive) {
+      stopTimers();
+      setCountdown(0);
+      return;
+    }
+
+    const intervalMins = parseInt(interval);
+    const intervalSecs = intervalMins * 60;
+
+    // Kick off first refresh immediately when going live
+    fetchAnalysis().then(() => setLastRefreshed(new Date()));
+    setCountdown(intervalSecs);
+
+    // Countdown tick — every second
+    countdownRef.current = setInterval(() => {
+      setCountdown(prev => (prev <= 1 ? intervalSecs : prev - 1));
+    }, 1000);
+
+    // Main refresh interval
+    liveIntervalRef.current = setInterval(() => {
+      setCountdown(intervalSecs);
+      fetchAnalysis().then(() => setLastRefreshed(new Date()));
+    }, intervalSecs * 1000);
+
+    return stopTimers;
+  }, [isLive, interval]); // intentionally exclude fetchAnalysis to avoid re-creating timer on every render
 
   // Toggle factors
   const toggleFactor = (id: string) => {
@@ -435,7 +481,59 @@ export default function OptionsAnalyzer() {
                 <span className="text-[10px] text-zinc-500 uppercase tracking-wider font-bold">ATM Strike</span>
                 <span className="text-emerald-400 tabular-nums text-sm font-bold">{data.atm.toLocaleString('en-IN')}</span>
               </div>
-              <div className="flex items-center gap-1.5">
+              {/* Action buttons: Go Live + Settings + Refresh */}
+              <div className="flex items-center gap-2">
+
+                {/* Go Live toggle */}
+                <button
+                  onClick={() => setIsLive(prev => !prev)}
+                  className={cn(
+                    "flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold border transition-all duration-200 cursor-pointer active:scale-95 select-none",
+                    isLive
+                      ? "bg-red-500/10 border-red-500/35 text-red-400 hover:bg-red-500/15 shadow-[0_0_12px_rgba(239,68,68,0.1)]"
+                      : "bg-emerald-500/10 border-emerald-500/25 text-emerald-300 hover:bg-emerald-500/15 shadow-[0_0_12px_rgba(16,185,129,0.05)]"
+                  )}
+                  title={isLive ? 'Stop live auto-refresh' : `Start live auto-refresh (every ${interval} min)`}
+                >
+                  {isLive ? (
+                    <>
+                      <span className="relative flex h-2 w-2">
+                        <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-red-400 opacity-75" />
+                        <span className="relative inline-flex rounded-full h-2 w-2 bg-red-500" />
+                      </span>
+                      <ZapOff className="h-3 w-3" />
+                      Stop Live
+                    </>
+                  ) : (
+                    <>
+                      <Activity className="h-3 w-3" />
+                      Go Live
+                    </>
+                  )}
+                </button>
+
+                {/* Countdown badge — only shown when live */}
+                {isLive && countdown > 0 && (
+                  <div className="flex flex-col items-center px-2 py-1 bg-zinc-900/80 border border-zinc-800 rounded-xl">
+                    <span className="text-[9px] text-zinc-500 uppercase tracking-wider font-bold leading-none">Next</span>
+                    <span className={cn(
+                      "text-xs font-bold tabular-nums leading-none mt-0.5",
+                      countdown <= 10 ? "text-amber-400" : "text-zinc-300"
+                    )}>
+                      {Math.floor(countdown / 60) > 0 ? `${Math.floor(countdown / 60)}m ` : ''}{(countdown % 60).toString().padStart(2, '0')}s
+                    </span>
+                  </div>
+                )}
+
+                {/* Last refreshed */}
+                {lastRefreshed && isLive && (
+                  <span className="text-[10px] text-zinc-600 font-medium hidden sm:block">
+                    {lastRefreshed.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', second: '2-digit' })}
+                  </span>
+                )}
+
+                <div className="h-5 w-px bg-zinc-800" />
+
                 <button
                   onClick={openSettings}
                   className="p-2 border border-zinc-800 bg-zinc-900/60 hover:bg-zinc-800/80 hover:border-zinc-700 active:scale-95 transition-all duration-200 rounded-xl cursor-pointer"
@@ -444,9 +542,9 @@ export default function OptionsAnalyzer() {
                   <Settings className="h-3.5 w-3.5 text-zinc-400 hover:text-emerald-400" />
                 </button>
                 <button
-                  onClick={fetchAnalysis}
+                  onClick={() => { fetchAnalysis().then(() => setLastRefreshed(new Date())); }}
                   className="p-2 border border-zinc-800 bg-zinc-900/60 hover:bg-zinc-800/80 hover:border-zinc-700 active:scale-95 transition-all duration-200 rounded-xl cursor-pointer"
-                  title="Refresh analysis"
+                  title="Manual refresh"
                   disabled={loading}
                 >
                   <RefreshCw className={cn("h-3.5 w-3.5 text-zinc-400", loading && "animate-spin text-emerald-400")} />
