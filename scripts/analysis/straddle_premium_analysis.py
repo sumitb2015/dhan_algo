@@ -303,9 +303,18 @@ def main() -> None:
         print(f"ERROR: {DB_PATH} not found", file=sys.stderr)
         sys.exit(1)
 
+    # Ensure optimized index exists for fast query performance
+    write_status("running", 2, "Ensuring database indexes are optimized...")
+    conn = sqlite3.connect(str(DB_PATH))
+    cursor = conn.cursor()
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_strike_relative "
+        "ON option_prices (strike_relative, expiry, datetime, option_type)"
+    )
+    conn.commit()
+
     # ── Load all ATM rows ──────────────────────────────────────────────────────
     write_status("running", 5, "Loading ATM option data from database...")
-    conn = sqlite3.connect(str(DB_PATH))
     df = pd.read_sql(
         """
         SELECT expiry, datetime, option_type, open, high, low, close, spot
