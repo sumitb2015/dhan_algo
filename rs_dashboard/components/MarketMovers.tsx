@@ -623,12 +623,12 @@ function BreadthStrip({ breadth, data }: { breadth: BreadthData; data: MoversRes
       <div className="flex flex-wrap divide-x divide-zinc-800/60">
         {groups.map(g => (
           <div key={g.label} className="flex flex-col px-4 py-2 gap-1 min-w-fit">
-            <span className="text-[9px] font-bold text-zinc-600 uppercase tracking-widest mb-0.5">{g.label}</span>
+            <span className="text-[9px] font-bold text-white/90 uppercase tracking-widest mb-0.5">{g.label}</span>
             <div className="flex gap-4 flex-wrap">
               {g.items.map(item => (
                 <div key={item.label} className="flex flex-col items-center min-w-[36px]">
                   <span className={cn('text-[15px] font-bold tabular-nums font-mono leading-tight', item.color)}>{item.value}</span>
-                  <span className="text-[9px] text-zinc-600 uppercase tracking-wide mt-0.5 whitespace-nowrap">{item.label}</span>
+                  <span className="text-[9px] text-zinc-300 uppercase tracking-wide mt-0.5 whitespace-nowrap">{item.label}</span>
                 </div>
               ))}
             </div>

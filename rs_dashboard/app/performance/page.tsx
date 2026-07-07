@@ -192,7 +192,7 @@ type StockColKey =
   | 'symbol' | 'sector' | 'price'
   | '1d' | '1w' | '1m' | '3m' | '1y'
   | 'rsi'
-  | 'high52w' | 'from52wH' | 'from52wL'
+  | 'high52w' | 'low52w' | 'from52wH' | 'from52wL'
   | 'from50dma' | 'from200dma';
 
 interface StockCol {
@@ -254,6 +254,11 @@ const STOCK_COLS: StockCol[] = [
     key: 'high52w', label: '52W High', align: 'right',
     render: row => <span className="text-zinc-200">{numFmt(row.high52W)}</span>,
     sortVal: row => row.high52W,
+  },
+  {
+    key: 'low52w', label: '52W Low', align: 'right',
+    render: row => <span className="text-zinc-200">{numFmt(row.low52W)}</span>,
+    sortVal: row => row.low52W,
   },
   {
     key: 'from52wH', label: 'vs 52W Hi', title: '% from 52-week high (0 = at high)', align: 'right',
@@ -355,7 +360,7 @@ function StockTable({ rows, search }: { rows: MoverResult[]; search: string }) {
 
 // ─── Indices table ────────────────────────────────────────────────────────────
 
-type IdxColKey = 'label' | 'category' | 'price' | '1d' | '1w' | '1m' | '3m' | '1y' | 'rsi' | 'high52w' | 'from52wH' | 'from52wL' | 'from50dma' | 'from200dma';
+type IdxColKey = 'label' | 'category' | 'price' | '1d' | '1w' | '1m' | '3m' | '1y' | 'rsi' | 'high52w' | 'low52w' | 'from52wH' | 'from52wL' | 'from50dma' | 'from200dma';
 
 interface IdxCol {
   key: IdxColKey;
@@ -421,6 +426,11 @@ const IDX_COLS: IdxCol[] = [
     key: 'high52w', label: '52W High', align: 'right',
     render: row => <span className="text-zinc-200">{row.hasData ? numFmt(row.high52W, row.high52W > 100 ? 2 : 4) : '—'}</span>,
     sortVal: row => row.high52W,
+  },
+  {
+    key: 'low52w', label: '52W Low', align: 'right',
+    render: row => <span className="text-zinc-200">{row.hasData ? numFmt(row.low52W, row.low52W > 100 ? 2 : 4) : '—'}</span>,
+    sortVal: row => row.low52W,
   },
   {
     key: 'from52wH', label: 'vs 52W Hi', title: '% from 52-week high', align: 'right',
