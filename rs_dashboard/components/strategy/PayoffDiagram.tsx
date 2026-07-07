@@ -69,7 +69,7 @@ export default function PayoffDiagram({ curve, currentSpot, breakevens }: Payoff
   const ticks = Array.from(new Set([...rawTicks.map((t) => Math.round(t / STEP) * STEP), Math.round(currentSpot / STEP) * STEP])).sort((a, b) => a - b);
 
   return (
-    <div className="h-[400px] w-full">
+    <div className="h-[260px] w-full">
       <ResponsiveContainer width="100%" height="100%">
         <ComposedChart data={visible} margin={{ top: 24, right: 24, bottom: 8, left: 10 }}>
           <defs>
