@@ -57,7 +57,7 @@ export default function OptionsAnalyzer() {
   const [underlying, setUnderlying] = useState<typeof UNDERLYINGS[number]>('NIFTY');
   const [expiries, setExpiries] = useState<string[]>([]);
   const [selectedExpiry, setSelectedExpiry] = useState<string>('');
-  const [interval, setInterval] = useState<string>('5');
+  const [candleInterval, setCandleInterval] = useState<string>('5');
 
   // Indicator Settings States
   const [supertrendPeriod, setSupertrendPeriod] = useState<number>(7);
@@ -74,6 +74,8 @@ export default function OptionsAnalyzer() {
   const [tempEma50Period, setTempEma50Period] = useState<number>(50);
   const [otmWeight, setOtmWeight] = useState<number>(30);      // % weight for OTM distance in composite score
   const [tempOtmWeight, setTempOtmWeight] = useState<number>(30);
+  const [minPremiumThreshold, setMinPremiumThreshold] = useState<number>(20); // min LTP for adequate premium
+  const [tempMinPremiumThreshold, setTempMinPremiumThreshold] = useState<number>(20);
 
   const [settingsOpen, setSettingsOpen] = useState(false);
 
@@ -85,6 +87,7 @@ export default function OptionsAnalyzer() {
     vwap: true,
     ema20: true,
     ema50: true,
+    min_premium: true,
   });
 
   const [loading, setLoading] = useState(false);
@@ -168,8 +171,15 @@ export default function OptionsAnalyzer() {
       desc: `Seller perspective: Favorable if option price is below ${ema50Period} EMA (LTP < ${ema50Period} EMA)`,
       check: (c) => (c.ema50 !== null ? c.ltp < c.ema50 : null),
       formatValue: (c) => (c.ema50 !== null ? `LTP: ₹${c.ltp.toFixed(1)} vs ${ema50Period} EMA: ₹${c.ema50.toFixed(1)}` : 'N/A')
+    },
+    {
+      id: 'min_premium',
+      label: `Min Premium (≥₹${minPremiumThreshold})`,
+      desc: `Seller perspective: Premium must be ≥ ₹${minPremiumThreshold} to cover costs and be worth selling`,
+      check: (c) => c.ltp >= minPremiumThreshold,
+      formatValue: (c) => `LTP: ₹${c.ltp.toFixed(1)} (threshold: ₹${minPremiumThreshold})`
     }
-  ], [rsiPeriod, supertrendPeriod, supertrendMultiplier, ema20Period, ema50Period]);
+  ], [rsiPeriod, supertrendPeriod, supertrendMultiplier, ema20Period, ema50Period, minPremiumThreshold]);
 
   // Open settings & initialize temp variables
   const openSettings = () => {
@@ -179,6 +189,7 @@ export default function OptionsAnalyzer() {
     setTempEma20Period(ema20Period);
     setTempEma50Period(ema50Period);
     setTempOtmWeight(otmWeight);
+    setTempMinPremiumThreshold(minPremiumThreshold);
     setSettingsOpen(true);
   };
 
@@ -189,8 +200,19 @@ export default function OptionsAnalyzer() {
     setEma20Period(tempEma20Period);
     setEma50Period(tempEma50Period);
     setOtmWeight(Math.max(0, Math.min(100, tempOtmWeight)));
+    setMinPremiumThreshold(Math.max(1, tempMinPremiumThreshold));
     setSettingsOpen(false);
   };
+
+  // Derived: Days To Expiry
+  const daysToExpiry = useMemo(() => {
+    if (!selectedExpiry) return null;
+    const expDate = new Date(selectedExpiry);
+    expDate.setHours(15, 30, 0, 0); // expire at 3:30 PM
+    const now = new Date();
+    const diff = Math.ceil((expDate.getTime() - now.getTime()) / (1000 * 60 * 60 * 24));
+    return Math.max(0, diff);
+  }, [selectedExpiry]);
 
   // Fetch expiries
   const loadExpiries = useCallback(async (symbol: string) => {
@@ -216,16 +238,16 @@ export default function OptionsAnalyzer() {
     loadExpiries(underlying);
   }, [underlying, loadExpiries]);
 
-  // Fetch analysis data
-  const fetchAnalysis = useCallback(async () => {
-    if (!selectedExpiry) return;
+  // Fetch analysis data. Returns true on success, false on failure/skip.
+  const fetchAnalysis = useCallback(async (): Promise<boolean> => {
+    if (!selectedExpiry) return false;
     try {
       setLoading(true);
       setError(null);
       const queryParams = new URLSearchParams({
         underlying,
         expiry: selectedExpiry,
-        interval,
+        interval: candleInterval,
         supertrendPeriod: String(supertrendPeriod),
         supertrendMultiplier: String(supertrendMultiplier),
         rsiPeriod: String(rsiPeriod),
@@ -236,25 +258,27 @@ export default function OptionsAnalyzer() {
       const json = await res.json();
       if (json.success && json.data) {
         setData(json.data);
+        return true;
       } else {
         throw new Error(json.error || 'Failed to fetch options ranking data');
       }
     } catch (err: any) {
       console.error(err);
       setError(err.message || 'Error executing options ranking analyzer');
+      return false;
     } finally {
       setLoading(false);
     }
-  }, [underlying, selectedExpiry, interval, supertrendPeriod, supertrendMultiplier, rsiPeriod, ema20Period, ema50Period]);
+  }, [underlying, selectedExpiry, candleInterval, supertrendPeriod, supertrendMultiplier, rsiPeriod, ema20Period, ema50Period]);
 
   useEffect(() => {
     fetchAnalysis();
-  }, [selectedExpiry, interval, fetchAnalysis]);
+  }, [selectedExpiry, candleInterval, fetchAnalysis]);
 
   // Stop live mode when key params change
   useEffect(() => {
     setIsLive(false);
-  }, [underlying, selectedExpiry, interval]);
+  }, [underlying, selectedExpiry, candleInterval]);
 
   // Live auto-refresh timer management
   useEffect(() => {
@@ -269,11 +293,11 @@ export default function OptionsAnalyzer() {
       return;
     }
 
-    const intervalMins = parseInt(interval);
+    const intervalMins = parseInt(candleInterval);
     const intervalSecs = intervalMins * 60;
 
     // Kick off first refresh immediately when going live
-    fetchAnalysis().then(() => setLastRefreshed(new Date()));
+    fetchAnalysis().then(ok => { if (ok) setLastRefreshed(new Date()); });
     setCountdown(intervalSecs);
 
     // Countdown tick — every second
@@ -284,11 +308,13 @@ export default function OptionsAnalyzer() {
     // Main refresh interval
     liveIntervalRef.current = setInterval(() => {
       setCountdown(intervalSecs);
-      fetchAnalysis().then(() => setLastRefreshed(new Date()));
+      fetchAnalysis().then(ok => { if (ok) setLastRefreshed(new Date()); });
     }, intervalSecs * 1000);
 
     return stopTimers;
-  }, [isLive, interval]); // intentionally exclude fetchAnalysis to avoid re-creating timer on every render
+    // Re-creates the timer whenever fetchAnalysis changes (e.g. indicator settings edited while live),
+    // so live mode always refreshes with current settings instead of a stale closure.
+  }, [isLive, candleInterval, fetchAnalysis]);
 
   // Toggle factors
   const toggleFactor = (id: string) => {
@@ -358,7 +384,10 @@ export default function OptionsAnalyzer() {
         const factorNorm = fs.pct / 100;
         // For CE: OTM = strike > ATM. Only apply OTM bonus for genuinely OTM strikes
         const ceIsOtm = row.strike >= atm;
-        const ceOtmScore = ceIsOtm ? otmNorm : 0;
+        // Deny the OTM-distance bonus for contracts below the premium floor, so cheap
+        // deep-OTM strikes can't outrank pricier ones on distance alone
+        const cePremiumOk = !activeFactors['min_premium'] || row.ce.ltp >= minPremiumThreshold;
+        const ceOtmScore = (ceIsOtm && cePremiumOk) ? otmNorm : 0;
         const composite = (factorNorm * (1 - otmW) + ceOtmScore * otmW) * 100;
         ceContracts.push({
           ...row.ce, strike: row.strike,
@@ -372,7 +401,8 @@ export default function OptionsAnalyzer() {
         const factorNorm = fs.pct / 100;
         // For PE: OTM = strike < ATM. Only apply OTM bonus for genuinely OTM strikes
         const peIsOtm = row.strike <= atm;
-        const peOtmScore = peIsOtm ? otmNorm : 0;
+        const pePremiumOk = !activeFactors['min_premium'] || row.pe.ltp >= minPremiumThreshold;
+        const peOtmScore = (peIsOtm && pePremiumOk) ? otmNorm : 0;
         const composite = (factorNorm * (1 - otmW) + peOtmScore * otmW) * 100;
         peContracts.push({
           ...row.pe, strike: row.strike,
@@ -389,7 +419,7 @@ export default function OptionsAnalyzer() {
       ce: [...ceContracts].sort(sortFn),
       pe: [...peContracts].sort(sortFn)
     };
-  }, [data, computeFactorScore, otmWeight]);
+  }, [data, computeFactorScore, otmWeight, activeFactors, minPremiumThreshold]);
 
   return (
     <div className="flex flex-col min-h-screen bg-black text-zinc-100">
@@ -408,6 +438,16 @@ export default function OptionsAnalyzer() {
             </p>
           </div>
         </div>
+
+        {isLive && (
+          <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-red-500/10 border border-red-500/30 shrink-0">
+            <span className="relative flex h-1.5 w-1.5">
+              <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-red-400 opacity-75" />
+              <span className="relative inline-flex rounded-full h-1.5 w-1.5 bg-red-500" />
+            </span>
+            <span className="text-[10px] font-bold uppercase tracking-widest text-red-400">Live</span>
+          </div>
+        )}
 
         <NavBar />
       </header>
@@ -456,10 +496,10 @@ export default function OptionsAnalyzer() {
               {INTERVALS.map(int => (
                 <button
                   key={int.value}
-                  onClick={() => setInterval(int.value)}
+                  onClick={() => setCandleInterval(int.value)}
                   className={cn(
                     "px-3 py-1.5 rounded-lg text-xs font-bold transition-all duration-200 cursor-pointer select-none",
-                    interval === int.value 
+                    candleInterval === int.value
                       ? "bg-emerald-500/10 text-emerald-300 border border-emerald-500/25 shadow-lg shadow-emerald-500/5" 
                       : "text-zinc-400 hover:text-zinc-100 border border-transparent"
                   )}
@@ -482,6 +522,19 @@ export default function OptionsAnalyzer() {
                 <span className="text-[10px] text-zinc-500 uppercase tracking-wider font-bold">ATM Strike</span>
                 <span className="text-emerald-400 tabular-nums text-sm font-bold">{data.atm.toLocaleString('en-IN')}</span>
               </div>
+              <div className="h-6 w-px bg-zinc-800" />
+              {/* DTE chip */}
+              {daysToExpiry !== null && (
+                <div className="flex flex-col items-end">
+                  <span className="text-[10px] text-zinc-500 uppercase tracking-wider font-bold">Expiry</span>
+                  <span className={cn(
+                    "tabular-nums text-sm font-bold",
+                    daysToExpiry <= 2 ? "text-red-400" : daysToExpiry <= 5 ? "text-amber-400" : "text-zinc-200"
+                  )}>
+                    {daysToExpiry === 0 ? 'Today' : `${daysToExpiry}d`}
+                  </span>
+                </div>
+              )}
               {/* Action buttons: Go Live + Settings + Refresh */}
               <div className="flex items-center gap-2">
 
@@ -494,7 +547,7 @@ export default function OptionsAnalyzer() {
                       ? "bg-red-500/10 border-red-500/35 text-red-400 hover:bg-red-500/15 shadow-[0_0_12px_rgba(239,68,68,0.1)]"
                       : "bg-emerald-500/10 border-emerald-500/25 text-emerald-300 hover:bg-emerald-500/15 shadow-[0_0_12px_rgba(16,185,129,0.05)]"
                   )}
-                  title={isLive ? 'Stop live auto-refresh' : `Start live auto-refresh (every ${interval} min)`}
+                  title={isLive ? 'Stop live auto-refresh' : `Start live auto-refresh (every ${candleInterval} min)`}
                 >
                   {isLive ? (
                     <>
@@ -555,6 +608,16 @@ export default function OptionsAnalyzer() {
           )}
         </div>
 
+        {/* Near-expiry warning banner */}
+        {daysToExpiry !== null && daysToExpiry <= 3 && (
+          <div className="bg-amber-500/10 border border-amber-500/25 px-4 py-2.5 rounded-xl flex items-center gap-3">
+            <AlertCircle className="h-4 w-4 text-amber-400 flex-shrink-0" />
+            <span className="text-xs font-semibold text-amber-300">
+              ⚠️ Expiry in {daysToExpiry === 0 ? 'today' : `${daysToExpiry} day${daysToExpiry === 1 ? '' : 's'}`} — premiums are thin and gamma risk is extreme near expiry. Consider switching to a later expiry.
+            </span>
+          </div>
+        )}
+
         {/* Factors / Filters Checklist Panel */}
         <div className="bg-zinc-950/40 backdrop-blur-md border border-zinc-850 p-4.5 rounded-2xl shadow-xl flex flex-col gap-3.5">
           <div className="flex items-center justify-between border-b border-zinc-850 pb-2">
@@ -580,7 +643,7 @@ export default function OptionsAnalyzer() {
           </div>
 
           {/* Checkboxes Grid */}
-          <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-7 gap-3">
+          <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-8 gap-3">
             {factors.map(f => {
               const checked = activeFactors[f.id];
               return (
@@ -603,7 +666,7 @@ export default function OptionsAnalyzer() {
                     )}
                     <span className="text-xs font-bold text-zinc-200">{f.label}</span>
                   </div>
-                  <span className="text-[10px] text-zinc-500 leading-tight block">{f.id === 'price_change' ? 'Change < 0' : f.id === 'oi_change' ? 'OI Change > 0' : f.id === 'rsi' ? `RSI < 50` : f.id === 'supertrend' ? 'Trend Bearish' : f.id === 'vwap' ? 'LTP < VWAP' : 'LTP < EMA'}</span>
+                  <span className="text-[10px] text-zinc-500 leading-tight block">{f.id === 'price_change' ? 'Change < 0' : f.id === 'oi_change' ? 'OI Change > 0' : f.id === 'rsi' ? `RSI < 50` : f.id === 'supertrend' ? 'Trend Bearish' : f.id === 'vwap' ? 'LTP < VWAP' : f.id === 'min_premium' ? `LTP ≥ ₹${minPremiumThreshold}` : 'LTP < EMA'}</span>
                 </div>
               );
             })}
@@ -1030,6 +1093,21 @@ export default function OptionsAnalyzer() {
                     className="bg-zinc-900 border border-zinc-800 rounded-lg px-2.5 py-1 text-xs text-zinc-200 font-bold outline-none focus:border-emerald-500/30 text-right"
                     min="1"
                     max="500"
+                  />
+                </div>
+                {/* Min Premium Threshold */}
+                <div className="grid grid-cols-2 items-center gap-3 pt-1 border-t border-zinc-850">
+                  <div>
+                    <label className="text-xs font-semibold text-zinc-400 block">Min Premium (₹)</label>
+                    <span className="text-[10px] text-zinc-600">LTP ≥ threshold to score green</span>
+                  </div>
+                  <input
+                    type="number"
+                    value={tempMinPremiumThreshold}
+                    onChange={(e) => setTempMinPremiumThreshold(parseInt(e.target.value) || 20)}
+                    className="bg-zinc-900 border border-zinc-800 rounded-lg px-2.5 py-1 text-xs text-zinc-200 font-bold outline-none focus:border-emerald-500/30 text-right"
+                    min="1"
+                    max="5000"
                   />
                 </div>
               </div>
