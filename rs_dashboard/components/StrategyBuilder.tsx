@@ -8,6 +8,7 @@ import PayoffDiagram from '@/components/strategy/PayoffDiagram';
 import StrategySummaryPanel from '@/components/strategy/StrategySummaryPanel';
 import SavedStrategiesTab from '@/components/strategy/SavedStrategiesTab';
 import PositionalTradesTab from '@/components/strategy/PositionalTradesTab';
+import PctStrangleTab from '@/components/strategy/PctStrangleTab';
 import {
   STRATEGY_TEMPLATES, getTemplate, defaultParams, classifyExpiries, computeAtm,
   resolveLegs, computePayoffStats, buildPayoffCurve, buildTargetPayoffCurve, findBreakevens,
@@ -20,7 +21,7 @@ const LOT_SIZE = 75;
 type MarginData = { total_margin: number; hedge_benefit: number; available_funds: number };
 
 export default function StrategyBuilder() {
-  const [activeTab, setActiveTab] = useState<'builder' | 'saved' | 'positions'>('builder');
+  const [activeTab, setActiveTab] = useState<'builder' | 'saved' | 'positions' | 'pct_strangle'>('builder');
   const [target, setTarget] = useState<number | null>(null);
   const [stoploss, setStoploss] = useState<number | null>(null);
 
@@ -417,7 +418,7 @@ export default function StrategyBuilder() {
           <span className="text-xs font-mono bg-zinc-800 text-emerald-400 px-2 py-0.5 rounded">Spot: {spot.toFixed(1)}</span>
 
           <div className="ml-auto flex rounded-md overflow-hidden border border-zinc-700 text-xs">
-            {(['builder', 'saved', 'positions'] as const).map((t) => (
+            {(['builder', 'pct_strangle', 'saved', 'positions'] as const).map((t) => (
               <button
                 key={t}
                 onClick={() => setActiveTab(t)}
@@ -425,7 +426,7 @@ export default function StrategyBuilder() {
                   activeTab === t ? 'bg-sky-600 text-white' : 'bg-zinc-800 text-zinc-400 hover:text-zinc-200'
                 }`}
               >
-                {t === 'builder' ? 'Builder' : t === 'saved' ? 'Saved Strategies' : 'Positions'}
+                {t === 'builder' ? 'Builder' : t === 'pct_strangle' ? '% Strangle' : t === 'saved' ? 'Saved Strategies' : 'Positions'}
               </button>
             ))}
           </div>
@@ -437,6 +438,13 @@ export default function StrategyBuilder() {
           <PositionalTradesTab />
         ) : activeTab === 'saved' ? (
           <SavedStrategiesTab />
+        ) : activeTab === 'pct_strangle' ? (
+          <PctStrangleTab
+            spot={spot}
+            chainOc={chainOc}
+            expiries={expiries}
+            selectedExpiry={selectedExpiry}
+          />
         ) : (
           <>
             <StrategyCardGrid templates={STRATEGY_TEMPLATES} selectedId={selectedId} onSelect={handleSelectStrategy} />
