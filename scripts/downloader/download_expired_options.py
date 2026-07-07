@@ -6,10 +6,30 @@ import pandas as pd
 import time
 
 # Ensure project root is in path
-sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.append(PROJECT_ROOT)
 
 from login import get_dhan_client
 from lib.dhan_helper import DhanHelper
+
+import json
+DEBUG_DIR = os.path.join(PROJECT_ROOT, "debug")
+STATUS_FILE = os.path.join(DEBUG_DIR, "options_refresh_status.json")
+
+def _write_status(message: str, done: bool = False, error: str | None = None) -> None:
+    try:
+        os.makedirs(DEBUG_DIR, exist_ok=True)
+        status = {
+            "done": done,
+            "message": message,
+            "error": error,
+            "pid": os.getpid(),
+            "updated_at": datetime.now().isoformat(),
+        }
+        with open(STATUS_FILE, "w") as f:
+            json.dump(status, f)
+    except Exception:
+        pass
 
 # Configure Logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -136,94 +156,105 @@ def generate_hybrid_expiries(start_date, end_date, symbol_name):
     return expiries
 
 def main():
-    dhan = get_dhan_client()
-    if not dhan: 
-        logger.error("Dhan login failed.")
-        return
-    helper = DhanHelper(dhan)
+    _write_status("Initialising…")
+    try:
+        dhan = get_dhan_client()
+        if not dhan: 
+            logger.error("Dhan login failed.")
+            _write_status("Failed: login failed", done=True, error="Dhan login failed")
+            return
+        helper = DhanHelper(dhan)
 
-    watchlist = {
-        "NIFTY": {"id": 13, "segment": "NSE_FNO", "instrument": "OPTIDX"}
-    }
-    
-    # Generate relative strikes: ATM, ATM+1 to ATM+10, ATM-1 to ATM-10
-    strikes = ["ATM"]
-    for i in range(1, 11):
-        strikes.append(f"ATM+{i}")
-        strikes.append(f"ATM-{i}")
-    
-    required_data = ["open", "high", "low", "close", "volume", "oi", "strike", "iv", "spot"]
-    
-    for name, info in watchlist.items():
-        logger.info(f"Processing {name}...")
+        watchlist = {
+            "NIFTY": {"id": 13, "segment": "NSE_FNO", "instrument": "OPTIDX"}
+        }
         
-        # 2. Calculate expiries between Jan 1, 2021 and Today using Hybrid Rules
-        start_date = datetime(2021, 1, 1)
-        end_date = datetime.now()
+        # Generate relative strikes: ATM, ATM+1 to ATM+10, ATM-1 to ATM-10
+        strikes = ["ATM"]
+        for i in range(1, 11):
+            strikes.append(f"ATM+{i}")
+            strikes.append(f"ATM-{i}")
         
-        expiries = generate_hybrid_expiries(start_date, end_date, name)
-        logger.info(f"Target Weekly Expiries ({start_date.date()} to {end_date.date()}): {expiries}")
+        required_data = ["open", "high", "low", "close", "volume", "oi", "strike", "iv", "spot"]
         
-        for expiry in expiries:
-            expiry_dt = datetime.strptime(expiry, "%Y-%m-%d")
-            to_date = expiry
-            # We fetch data for the week leading up to expiry
-            from_date = (expiry_dt - timedelta(days=7)).strftime("%Y-%m-%d")
+        for name, info in watchlist.items():
+            logger.info(f"Processing {name}...")
             
-            logger.info(f"--- Processing Expiry: {expiry} (Data from {from_date}) ---")
+            # 2. Calculate expiries between Jan 1, 2021 and Today using Hybrid Rules
+            start_date = datetime(2021, 1, 1)
+            end_date = datetime.now()
+            
+            expiries = generate_hybrid_expiries(start_date, end_date, name)
+            logger.info(f"Target Weekly Expiries ({start_date.date()} to {end_date.date()}): {expiries}")
+            
+            total_exp = len(expiries)
+            for idx, expiry in enumerate(expiries, 1):
+                expiry_dt = datetime.strptime(expiry, "%Y-%m-%d")
+                to_date = expiry
+                # We fetch data for the week leading up to expiry
+                from_date = (expiry_dt - timedelta(days=7)).strftime("%Y-%m-%d")
+                
+                logger.info(f"--- Processing Expiry: {expiry} (Data from {from_date}) ---")
+                _write_status(f"Expiry {expiry} ({idx}/{total_exp})")
 
-            for strike_rel in strikes:
-                # Folder structure example: Options Data/NIFTY/ATM/2025-01-23.csv
-                save_dir = os.path.join("Options Data", name, strike_rel)
-                os.makedirs(save_dir, exist_ok=True)
-                file_path = os.path.join(save_dir, f"{expiry}.csv")
-                
-                if os.path.exists(file_path):
-                    logger.info(f"Skipping {name} {strike_rel} {expiry} - File exists.")
-                    continue
-                
-                logger.info(f"Downloading: {name} | {strike_rel} | Expiry: {expiry}...")
-                
-                all_data = []
-                for o_type in ["CALL", "PUT"]:
-                    df = helper.get_expired_options_data(
-                        security_id=info["id"],
-                        exchange_segment=info["segment"],
-                        instrument_type=info["instrument"],
-                        expiry_flag="WEEK",
-                        expiry_code=1, # 1 = Near Week (Current Week relative to date range)
-                        strike=strike_rel,
-                        drv_option_type=o_type,
-                        required_data=required_data,
-                        from_date=from_date,
-                        to_date=to_date,
-                        interval=1
-                    )
-                    if not df.empty:
-                        # Ensure we distinguish CE vs PE in the saved file
-                        # The helper already adds 'option_type' column if found
-                        # But let's enforce a clean column name if not present or standardize it
-                        if 'option_type' not in df.columns:
-                            df['option_type'] = "CE" if o_type == "CALL" else "PE"
-                        else:
-                            df['option_type'] = df['option_type'].apply(lambda x: "CE" if x == "CALL" else "PE")
-                            
-                        all_data.append(df)
-                    time.sleep(0.2) # Small delay to respect rate limits
-                
-                if all_data:
-                    final_df = pd.concat(all_data, ignore_index=True)
-                    # Add simple column for easy filtering by user
-                    final_df['strike_relative'] = strike_rel
+                for strike_rel in strikes:
+                    # Folder structure example: Options Data/NIFTY/ATM/2025-01-23.csv
+                    save_dir = os.path.join("Options Data", name, strike_rel)
+                    os.makedirs(save_dir, exist_ok=True)
+                    file_path = os.path.join(save_dir, f"{expiry}.csv")
                     
-                    # Reorder columns slightly for better readability if possible, but not strictly required
-                    cols = ['datetime', 'option_type', 'strike_relative'] + [c for c in final_df.columns if c not in ['datetime', 'option_type', 'strike_relative']]
-                    final_df = final_df[cols]
+                    if os.path.exists(file_path):
+                        logger.info(f"Skipping {name} {strike_rel} {expiry} - File exists.")
+                        continue
                     
-                    final_df.to_csv(file_path, index=False)
-                    logger.info(f"Saved: {file_path} ({len(final_df)} rows)")
-                else:
-                    logger.warning(f"No data for {name} {strike_rel} {expiry}")
+                    logger.info(f"Downloading: {name} | {strike_rel} | Expiry: {expiry}...")
+                    _write_status(f"Downloading {name} {strike_rel} {expiry} ({idx}/{total_exp})")
+                    
+                    all_data = []
+                    for o_type in ["CALL", "PUT"]:
+                        df = helper.get_expired_options_data(
+                            security_id=info["id"],
+                            exchange_segment=info["segment"],
+                            instrument_type=info["instrument"],
+                            expiry_flag="WEEK",
+                            expiry_code=1, # 1 = Near Week (Current Week relative to date range)
+                            strike=strike_rel,
+                            drv_option_type=o_type,
+                            required_data=required_data,
+                            from_date=from_date,
+                            to_date=to_date,
+                            interval=1
+                        )
+                        if not df.empty:
+                            # Ensure we distinguish CE vs PE in the saved file
+                            # The helper already adds 'option_type' column if found
+                            # But let's enforce a clean column name if not present or standardize it
+                            if 'option_type' not in df.columns:
+                                df['option_type'] = "CE" if o_type == "CALL" else "PE"
+                            else:
+                                df['option_type'] = df['option_type'].apply(lambda x: "CE" if x == "CALL" else "PE")
+                                
+                            all_data.append(df)
+                        time.sleep(0.2) # Small delay to respect rate limits
+                    
+                    if all_data:
+                        final_df = pd.concat(all_data, ignore_index=True)
+                        # Add simple column for easy filtering by user
+                        final_df['strike_relative'] = strike_rel
+                        
+                        # Reorder columns slightly for better readability if possible, but not strictly required
+                        cols = ['datetime', 'option_type', 'strike_relative'] + [c for c in final_df.columns if c not in ['datetime', 'option_type', 'strike_relative']]
+                        final_df = final_df[cols]
+                        
+                        final_df.to_csv(file_path, index=False)
+                        logger.info(f"Saved: {file_path} ({len(final_df)} rows)")
+                    else:
+                        logger.warning(f"No data for {name} {strike_rel} {expiry}")
+
+        _write_status("Done", done=True)
+    except Exception as e:
+        logger.error(f"Downloader failed: {e}")
+        _write_status(f"Error: {e}", done=True, error=str(e))
 
 if __name__ == "__main__":
     main()

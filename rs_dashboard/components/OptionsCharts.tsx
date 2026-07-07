@@ -3,6 +3,7 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import Link from 'next/link';
 import NavBar from './NavBar';
+import { Download } from 'lucide-react';
 import {
   AreaChart, Area, LineChart, Line, BarChart, Bar, Cell, XAxis, YAxis, CartesianGrid,
   Tooltip, Legend, ResponsiveContainer, ReferenceLine,
@@ -185,6 +186,15 @@ export default function OptionsCharts() {
   const [vixData, setVixData] = useState<VixDataState | null>(null);
   const [vixCandles, setVixCandles] = useState<any[]>([]);
 
+  interface OptionsRefreshStatus {
+    running: boolean;
+    done: boolean;
+    message: string;
+    error: string | null;
+  }
+  const [dlStatus, setDlStatus] = useState<OptionsRefreshStatus | null>(null);
+  const dlPollRef = useRef<NodeJS.Timeout | null>(null);
+
   const [expiriesLoading, setExpiriesLoading] = useState(false);
   const [error, setError] = useState('');
   const pollRef = useRef<NodeJS.Timeout | null>(null);
@@ -337,6 +347,40 @@ export default function OptionsCharts() {
       .catch(e => setCandleError(String(e)))
       .finally(() => setCandleLoading(false));
   }, []);
+
+  const pollDownload = useCallback(async () => {
+    try {
+      const res = await fetch('/api/options-refresh');
+      const json: OptionsRefreshStatus = await res.json();
+      setDlStatus(json);
+      if (!json.running && json.done) {
+        if (dlPollRef.current) {
+          clearInterval(dlPollRef.current);
+          dlPollRef.current = null;
+        }
+        if (selectedStrike && expiry) {
+          fetchCandles(selectedStrike, expiry, candleInterval);
+        }
+      }
+    } catch { /* ignore */ }
+  }, [selectedStrike, expiry, candleInterval, fetchCandles]);
+
+  const startDownload = useCallback(async () => {
+    try {
+      const res = await fetch('/api/options-refresh', { method: 'POST' });
+      if (!res.ok) return;
+      setDlStatus({ running: true, done: false, message: 'Starting…', error: null });
+      if (dlPollRef.current) clearInterval(dlPollRef.current);
+      dlPollRef.current = setInterval(pollDownload, 2000);
+    } catch { /* ignore */ }
+  }, [pollDownload]);
+
+  useEffect(() => {
+    pollDownload();
+    return () => {
+      if (dlPollRef.current) clearInterval(dlPollRef.current);
+    };
+  }, [pollDownload]);
 
   // Trigger candle fetch whenever strike, expiry, or interval changes and bridge is not live
   useEffect(() => {
@@ -677,6 +721,29 @@ export default function OptionsCharts() {
             >
               {bridgeLoading ? '…' : isLive ? 'Stop' : 'Go Live'}
             </button>
+          )}
+
+          {/* Download Options Data Button */}
+          {!isLive && (
+            <>
+              {dlStatus?.running ? (
+                <div className="flex items-center gap-1.5 px-3 py-1.5 text-xs text-sky-400 bg-sky-950/20 border border-sky-500/20 rounded-lg">
+                  <span className="w-1.5 h-1.5 rounded-full bg-sky-400 animate-pulse" />
+                  <span className="font-mono text-[11px] truncate max-w-[160px]" title={dlStatus.message}>
+                    {dlStatus.message || 'Downloading…'}
+                  </span>
+                </div>
+              ) : (
+                <button
+                  onClick={startDownload}
+                  className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-lg border border-sky-500/25 bg-sky-500/10 text-sky-400 hover:bg-sky-500/15 hover:border-sky-500/35 transition-all"
+                  title="Download fresh historical options data (runs download_expired_options.py)"
+                >
+                  <Download className="h-3.5 w-3.5" />
+                  Download Options
+                </button>
+              )}
+            </>
           )}
 
           {(activeTab === 'premium' || activeTab === 'multistrike' || activeTab === 'pcdiff') && <StatusBadge status={bridgeStatus.status} />}

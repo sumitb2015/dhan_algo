@@ -95,6 +95,46 @@ export default function DataRefreshPanel({ open, onClose, onRefreshComplete }: D
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const didCompleteRef = useRef(false);
 
+  interface OptionsRefreshStatus {
+    running: boolean;
+    done: boolean;
+    message: string;
+    error: string | null;
+  }
+  const [optStatus, setOptStatus] = useState<OptionsRefreshStatus | null>(null);
+  const optPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  const fetchOptStatus = useCallback(async () => {
+    try {
+      const res = await fetch('/api/options-refresh');
+      const json: OptionsRefreshStatus = await res.json();
+      setOptStatus(json);
+      if (!json.running && json.done) {
+        if (optPollRef.current) { clearInterval(optPollRef.current); optPollRef.current = null; }
+      }
+    } catch { /* ignore */ }
+  }, []);
+
+  const startOptDownload = useCallback(async () => {
+    try {
+      const res = await fetch('/api/options-refresh', { method: 'POST' });
+      if (!res.ok) return;
+      setOptStatus({ running: true, done: false, message: 'Starting…', error: null });
+      if (optPollRef.current) clearInterval(optPollRef.current);
+      optPollRef.current = setInterval(fetchOptStatus, 2000);
+    } catch { /* ignore */ }
+  }, [fetchOptStatus]);
+
+  useEffect(() => {
+    if (!open) {
+      if (optPollRef.current) { clearInterval(optPollRef.current); optPollRef.current = null; }
+      return;
+    }
+    fetchOptStatus();
+    optPollRef.current = setInterval(fetchOptStatus, 2000);
+    return () => { if (optPollRef.current) clearInterval(optPollRef.current); };
+  }, [open, fetchOptStatus]);
+
   const fetchStatus = useCallback(async () => {
     try {
       const res = await fetch('/api/refresh');
@@ -210,6 +250,34 @@ export default function DataRefreshPanel({ open, onClose, onRefreshComplete }: D
                 {t.label}
               </Button>
             ))}
+          </div>
+
+          <Separator className="my-3 bg-zinc-800/60" />
+
+          <div className="space-y-2">
+            <span className="text-[10px] font-semibold uppercase tracking-widest text-zinc-500">Historical Options Data</span>
+            {optStatus?.running ? (
+              <div className="w-full flex items-center justify-between bg-sky-950/20 border border-sky-500/20 rounded-xl h-11 px-4 text-sky-400">
+                <div className="flex items-center gap-2 text-sm font-semibold">
+                  <RefreshCw className="h-4 w-4 animate-spin" />
+                  <span className="font-mono text-[11px] truncate max-w-[280px]" title={optStatus.message}>
+                    {optStatus.message || 'Downloading…'}
+                  </span>
+                </div>
+              </div>
+            ) : (
+              <Button
+                onClick={startOptDownload}
+                className="w-full flex items-center justify-between bg-sky-500/10 hover:bg-sky-500/15 text-sky-400 border border-sky-500/30 rounded-xl h-11 px-4"
+                variant="ghost"
+                title="Download expired weekly options 1-min data since 2021"
+              >
+                <div className="flex items-center gap-2 font-semibold text-sm">
+                  <Download className="h-4 w-4" />
+                  Download Expired Options
+                </div>
+              </Button>
+            )}
           </div>
         </div>
 
