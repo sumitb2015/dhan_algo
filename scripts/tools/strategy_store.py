@@ -70,6 +70,16 @@ def cmd_init() -> dict:
 
 
 def cmd_save(payload: dict) -> dict:
+    REQUIRED = ["strategy_type", "display_name", "underlying", "expiry", "mode",
+                "lots", "lot_size", "entry_spot", "entry_net_premium", "legs"]
+    missing = [f for f in REQUIRED if f not in payload or payload[f] is None]
+    if missing:
+        return {"error": f"Missing required fields: {', '.join(missing)}"}
+    if not isinstance(payload["legs"], list) or len(payload["legs"]) == 0:
+        return {"error": "legs must be a non-empty list"}
+    if int(payload.get("lots", 0)) < 1:
+        return {"error": "lots must be at least 1"}
+
     now = datetime.now(timezone.utc).isoformat()
     conn = get_connection()
     try:

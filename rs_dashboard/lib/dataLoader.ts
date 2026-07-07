@@ -330,6 +330,14 @@ export function clearCache(): void {
   _nifty500ListCache = null;
   _todayQuotesCache = null;
   nifty500Promise = null;
+
+  // Clear breadth daily cache file if exists
+  try {
+    const breadthCacheFile = path.join(DEBUG_DIR, 'breadth_daily_cache.json');
+    if (fs.existsSync(breadthCacheFile)) {
+      fs.unlinkSync(breadthCacheFile);
+    }
+  } catch { /* ignore */ }
 }
 
 // ─── List all available symbols from the data directory ───────────────────────

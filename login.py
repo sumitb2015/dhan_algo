@@ -65,8 +65,12 @@ def get_new_access_token():
         
         access_token = token_res.get('accessToken')
         if access_token:
+            # Ensure dhanClientId is stored correctly from .env (the raw API response
+            # may put a phone number in 'clientId' — always persist the correct Dhan ID)
+            dhan_client_id = os.getenv("client_id", "")
+            token_res_to_save = {**token_res, "dhanClientId": dhan_client_id}
             with open(TOKEN_FILE, 'w') as f:
-                json.dump(token_res, f)
+                json.dump(token_res_to_save, f)
             print("Successfully obtained and saved Access Token!")
             return access_token
         else:

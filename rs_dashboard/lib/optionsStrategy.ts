@@ -103,34 +103,38 @@ export const STRATEGY_TEMPLATES: StrategyTemplate[] = [
     ],
   },
   {
-    id: 'batman', name: 'Batman', undefinedRisk: false,
+    id: 'batman', name: 'Batman', undefinedRisk: true,
     params: [
-      { key: 'N', label: 'Inner short offset (strikes)', default: 2, min: 1, max: 8, step: 1 },
-      { key: 'W', label: 'Outer wing offset (strikes)', default: 5, min: 2, max: 15, step: 1 },
+      { key: 'N', label: 'Inner buy offset (strikes)', default: 5, min: 1, max: 10, step: 1 },
+      { key: 'W', label: 'Spread width (strikes)', default: 1, min: 1, max: 5, step: 1 },
     ],
     legs: (p) => [
-      { offsetStrikes: 0, type: 'CE', side: 'SELL', qtyRatio: 1 },
-      { offsetStrikes: 0, type: 'PE', side: 'SELL', qtyRatio: 1 },
-      { offsetStrikes: +p.N, type: 'CE', side: 'SELL', qtyRatio: 1 },
-      { offsetStrikes: -p.N, type: 'PE', side: 'SELL', qtyRatio: 1 },
-      { offsetStrikes: +p.W, type: 'CE', side: 'BUY', qtyRatio: 1 },
-      { offsetStrikes: -p.W, type: 'PE', side: 'BUY', qtyRatio: 1 },
+      // Call side: Buy inner call (qtyRatio 1), Sell outer call (qtyRatio 2)
+      { offsetStrikes: +p.N, type: 'CE', side: 'BUY', qtyRatio: 1 },
+      { offsetStrikes: +(p.N + p.W), type: 'CE', side: 'SELL', qtyRatio: 2 },
+      // Put side: Buy inner put (qtyRatio 1), Sell outer put (qtyRatio 2)
+      { offsetStrikes: -p.N, type: 'PE', side: 'BUY', qtyRatio: 1 },
+      { offsetStrikes: -(p.N + p.W), type: 'PE', side: 'SELL', qtyRatio: 2 },
     ],
   },
   {
     id: 'double_plateau', name: 'Double Plateau', undefinedRisk: false,
     params: [
-      { key: 'N1', label: 'Inner short offset (strikes)', default: 2, min: 1, max: 8, step: 1 },
-      { key: 'N2', label: 'Outer short offset (strikes)', default: 4, min: 2, max: 12, step: 1 },
-      { key: 'W', label: 'Wing width (strikes)', default: 3, min: 1, max: 8, step: 1 },
+      { key: 'N', label: 'Inner buy offset (strikes)', default: 4, min: 1, max: 10, step: 1 },
+      { key: 'W1', label: 'Spread width (strikes)', default: 5, min: 1, max: 10, step: 1 },
+      { key: 'W2', label: 'Plateau width (strikes)', default: 5, min: 1, max: 10, step: 1 },
     ],
     legs: (p) => [
-      { offsetStrikes: +p.N1, type: 'CE', side: 'SELL', qtyRatio: 1 },
-      { offsetStrikes: -p.N1, type: 'PE', side: 'SELL', qtyRatio: 1 },
-      { offsetStrikes: +p.N2, type: 'CE', side: 'SELL', qtyRatio: 1 },
-      { offsetStrikes: -p.N2, type: 'PE', side: 'SELL', qtyRatio: 1 },
-      { offsetStrikes: +(p.N2 + p.W), type: 'CE', side: 'BUY', qtyRatio: 1 },
-      { offsetStrikes: -(p.N2 + p.W), type: 'PE', side: 'BUY', qtyRatio: 1 },
+      // Call side: C1 (Buy), C2 (Sell), C3 (Sell), C4 (Buy)
+      { offsetStrikes: +p.N, type: 'CE', side: 'BUY', qtyRatio: 1 },
+      { offsetStrikes: +(p.N + p.W1), type: 'CE', side: 'SELL', qtyRatio: 1 },
+      { offsetStrikes: +(p.N + p.W1 + p.W2), type: 'CE', side: 'SELL', qtyRatio: 1 },
+      { offsetStrikes: +(p.N + 2 * p.W1 + p.W2), type: 'CE', side: 'BUY', qtyRatio: 1 },
+      // Put side: P1 (Buy), P2 (Sell), P3 (Sell), P4 (Buy)
+      { offsetStrikes: -p.N, type: 'PE', side: 'BUY', qtyRatio: 1 },
+      { offsetStrikes: -(p.N + p.W1), type: 'PE', side: 'SELL', qtyRatio: 1 },
+      { offsetStrikes: -(p.N + p.W1 + p.W2), type: 'PE', side: 'SELL', qtyRatio: 1 },
+      { offsetStrikes: -(p.N + 2 * p.W1 + p.W2), type: 'PE', side: 'BUY', qtyRatio: 1 },
     ],
   },
 ];

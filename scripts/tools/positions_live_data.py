@@ -122,25 +122,27 @@ def main():
             cepe = 'CE' if re.search(r'-CE', sym, re.I) else 'PE'
 
         strike      = float(row.get('drvStrikePrice', 0) or 0)
-        entry_price = float(row.get('sellAvg', 0) or 0) if side == 'SELL' \
-                      else float(row.get('buyAvg', 0) or 0)
+        # costPrice is the net break-even per unit for the current position
+        entry_price = float(row.get('costPrice', 0) or 0)
+        # Use Dhan's unrealizedProfit directly — correct even with partial buybacks/adjustments
+        unrealized_pnl  = float(row.get('unrealizedProfit', 0) or 0)
+        realized_pnl    = float(row.get('realizedProfit', 0) or 0)
 
         if side == 'SELL':
             net_premium += ltp * abs_qty
         else:
             net_premium -= ltp * abs_qty
 
-        pnl = (entry_price - ltp) * abs_qty if side == 'SELL' else (ltp - entry_price) * abs_qty
-
         legs.append({
-            'symbol':     sym,
-            'strike':     strike,
-            'type':       cepe,
-            'side':       side,
-            'ltp':        round(ltp, 2),
-            'entryPrice': round(entry_price, 2),
-            'pnl':        round(pnl, 2),
-            'netQty':     qty,
+            'symbol':       sym,
+            'strike':       strike,
+            'type':         cepe,
+            'side':         side,
+            'ltp':          round(ltp, 2),
+            'entryPrice':   round(entry_price, 2),
+            'pnl':          round(unrealized_pnl, 2),
+            'realizedPnl':  round(realized_pnl, 2),
+            'netQty':       qty,
         })
 
     print(json.dumps({

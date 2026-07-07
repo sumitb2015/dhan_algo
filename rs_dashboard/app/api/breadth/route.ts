@@ -33,6 +33,15 @@ function writeDailyCache(data: BreadthResponse): void {
   } catch { /* non-fatal */ }
 }
 
+export function clearBreadthCache(): void {
+  breadthCache = null;
+  try {
+    if (fs.existsSync(DAILY_CACHE_FILE)) {
+      fs.unlinkSync(DAILY_CACHE_FILE);
+    }
+  } catch { /* ignore */ }
+}
+
 // ─── Types ────────────────────────────────────────────────────────────────────
 
 export interface IndexStats {

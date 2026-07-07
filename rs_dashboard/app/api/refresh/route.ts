@@ -1,10 +1,11 @@
-﻿import { NextRequest, NextResponse } from 'next/server';
+import { NextRequest, NextResponse } from 'next/server';
 import path from 'path';
 import fs from 'fs';
 import { spawn, execSync } from 'child_process';
 import { clearCache } from '@/lib/dataLoader';
 import { clearIndicesCache } from '@/app/api/indices-performance/route';
 import { clearMoversCache } from '@/app/api/movers/route';
+import { clearBreadthCache } from '@/app/api/breadth/route';
 
 const PROJECT_ROOT  = path.resolve(process.cwd(), '..');
 const DEBUG_DIR     = path.join(PROJECT_ROOT, 'debug');
@@ -102,6 +103,7 @@ export async function GET() {
     clearCache();
     clearIndicesCache();
     clearMoversCache();
+    clearBreadthCache();
   }
 
   // If it finished cleanly, also clear cache once
@@ -109,6 +111,7 @@ export async function GET() {
     clearCache();
     clearIndicesCache();
     clearMoversCache();
+    clearBreadthCache();
   }
 
   return NextResponse.json({ running, status, stale, lastDate, lastTradingDay });

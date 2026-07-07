@@ -8,9 +8,13 @@ const PREMIUM_SCRIPT = path.join(PROJECT_ROOT, 'scripts', 'tools', 'tradebook_pr
 
 interface PremiumPoint { time: string; premium: number }
 
+interface SymbolMeta { securityId: string; tradingSymbol: string; displayName: string }
+
 interface ScriptResponse {
   success: boolean;
   data: PremiumPoint[];
+  by_symbol: Record<string, PremiumPoint[]>;
+  symbols: SymbolMeta[];
   current_premium: number;
   session_date: string;
   trades_count: number;

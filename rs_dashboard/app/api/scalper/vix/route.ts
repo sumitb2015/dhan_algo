@@ -2,9 +2,10 @@ import { NextResponse } from 'next/server';
 import fs from 'fs';
 import path from 'path';
 
-const TOKEN_FILE    = path.join(process.cwd(), '..', 'access_token.json');
-const VIX_CSV       = path.join(process.cwd(), '..', 'Historical Data', 'Indices', 'INDIA_VIX.csv');
-const DHAN_OHLC_URL = 'https://api.dhan.co/v2/marketfeed/ohlc';
+const PROJECT_ROOT   = path.resolve(process.cwd(), '..');
+const TOKEN_FILE     = path.join(PROJECT_ROOT, 'access_token.json');
+const VIX_CSV        = path.join(PROJECT_ROOT, 'Historical Data', 'Indices', 'INDIA_VIX.csv');
+const DHAN_OHLC_URL  = 'https://api.dhan.co/v2/marketfeed/ohlc';
 
 // India VIX security ID on Dhan (NSE_IDX segment)
 const VIX_SECURITY_ID = 21;
@@ -18,11 +19,25 @@ function getToken(): { clientId: string; token: string } | null {
     if (tokenCache && Date.now() - tokenCache.ts < TOKEN_TTL) {
       return { clientId: tokenCache.clientId, token: tokenCache.token };
     }
+    
+    // Read parent .env file to get client_id
+    let envClientId = '';
+    const envFile = path.join(PROJECT_ROOT, '.env');
+    if (fs.existsSync(envFile)) {
+      const content = fs.readFileSync(envFile, 'utf8');
+      const match = content.match(/^client_id\s*=\s*["']?([^"'\r\n]+)["']?/m);
+      if (match) {
+        envClientId = match[1].trim();
+      }
+    }
+
     const raw = JSON.parse(fs.readFileSync(TOKEN_FILE, 'utf8')) as {
-      dhanClientId: string;
+      dhanClientId?: string;
+      clientId?: string;
       accessToken: string;
     };
-    tokenCache = { clientId: raw.dhanClientId, token: raw.accessToken, ts: Date.now() };
+    const clientId = envClientId || process.env.client_id || raw.dhanClientId || raw.clientId || '';
+    tokenCache = { clientId, token: raw.accessToken, ts: Date.now() };
     return { clientId: tokenCache.clientId, token: tokenCache.token };
   } catch {
     return null;

@@ -11,7 +11,9 @@ function runStore(args: string[]) {
 }
 
 function parseLastJsonLine(stdout: string | null): any {
-  const jsonLine = (stdout ?? '').trim().split('\n').pop() ?? '{}';
+  const trimmed = (stdout ?? '').trim();
+  if (!trimmed) return { error: 'No output from script (process may have crashed).' };
+  const jsonLine = trimmed.split('\n').pop() ?? '{}';
   return JSON.parse(jsonLine);
 }
 

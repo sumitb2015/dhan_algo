@@ -106,7 +106,16 @@ export default function SavedStrategiesTab() {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ status: 'closed' }),
-    }).then(() => refreshList());
+    })
+      .then((r) => r.json())
+      .then((json) => {
+        if (json.success) {
+          // Update detail status so Exit Trade button disappears immediately
+          setDetail((prev) => prev && prev.id === id ? { ...prev, status: 'closed' } : prev);
+          refreshList();
+        }
+      })
+      .catch(() => {});
   }, [refreshList]);
 
   const handleExitTrade = useCallback((id: number) => {
@@ -119,6 +128,14 @@ export default function SavedStrategiesTab() {
       quantity: l.qtyLots * detail.lot_size,
       side: l.side === 'BUY' ? 'SELL' : 'BUY',
     }));
+
+    // Guard: all legs must have resolved security IDs
+    const unresolved = legsPayload.filter((l) => !l.securityId);
+    if (unresolved.length > 0) {
+      setExitResult({ success: false, message: 'Cannot exit — some leg security IDs are unresolved. Re-open the strategy to refresh chain data.' });
+      setExitingId(null);
+      return;
+    }
 
     fetch('/api/options/order', {
       method: 'POST',

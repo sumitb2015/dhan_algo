@@ -7,6 +7,7 @@ import StrategySettingsPanel from '@/components/strategy/StrategySettingsPanel';
 import PayoffDiagram from '@/components/strategy/PayoffDiagram';
 import StrategySummaryPanel from '@/components/strategy/StrategySummaryPanel';
 import SavedStrategiesTab from '@/components/strategy/SavedStrategiesTab';
+import PositionalTradesTab from '@/components/strategy/PositionalTradesTab';
 import {
   STRATEGY_TEMPLATES, getTemplate, defaultParams, classifyExpiries, computeAtm,
   resolveLegs, computePayoffStats, buildPayoffCurve, buildTargetPayoffCurve, findBreakevens,
@@ -19,7 +20,9 @@ const LOT_SIZE = 75;
 type MarginData = { total_margin: number; hedge_benefit: number; available_funds: number };
 
 export default function StrategyBuilder() {
-  const [activeTab, setActiveTab] = useState<'builder' | 'saved'>('builder');
+  const [activeTab, setActiveTab] = useState<'builder' | 'saved' | 'positions'>('builder');
+  const [target, setTarget] = useState<number | null>(null);
+  const [stoploss, setStoploss] = useState<number | null>(null);
 
   const [expiries, setExpiries] = useState<{ date: string; kind: 'weekly' | 'monthly' }[]>([]);
   const [expiryKindFilter, setExpiryKindFilter] = useState<'weekly' | 'monthly' | 'all'>('all');
@@ -32,6 +35,7 @@ export default function StrategyBuilder() {
   const [params, setParams] = useState<Record<string, number>>({});
   const [lots, setLots] = useState(1);
   const [mode, setMode] = useState<'intraday' | 'positional'>('intraday');
+  const [tradingType, setTradingType] = useState<'live' | 'demo'>('demo');
 
   const [resolvedLegs, setResolvedLegs] = useState<ResolvedLeg[] | null>(null);
   const [missingStrikes, setMissingStrikes] = useState<number[]>([]);
@@ -45,6 +49,8 @@ export default function StrategyBuilder() {
 
   const [entering, setEntering] = useState(false);
   const [exiting, setExiting] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [saveResult, setSaveResult] = useState<{ success: boolean; message: string } | null>(null);
   const [orderResult, setOrderResult] = useState<{ success: boolean; message: string } | null>(null);
 
   const selectedTemplate = selectedId ? getTemplate(selectedId) : undefined;
@@ -127,7 +133,9 @@ export default function StrategyBuilder() {
   }, [breakevenMode, resolvedLegs, targetBreakevens, selectedExpiry, spot]);
 
   const handleSave = useCallback(() => {
-    if (!selectedTemplate || !resolvedLegs || !stats) return;
+    if (!selectedTemplate || !resolvedLegs || !stats || saving) return;
+    setSaving(true);
+    setSaveResult(null);
     const payload = {
       strategy_type: selectedTemplate.id,
       display_name: selectedTemplate.name,
@@ -149,19 +157,84 @@ export default function StrategyBuilder() {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
-    }).catch(() => {});
-  }, [selectedTemplate, resolvedLegs, stats, selectedExpiry, lots, params, spot]);
+    })
+      .then((r) => r.json())
+      .then((json) => {
+        if (json.success) {
+          setSaveResult({ success: true, message: `Strategy saved (ID: ${json.data?.id ?? '?'}).` });
+        } else {
+          setSaveResult({ success: false, message: json.error || 'Failed to save strategy.' });
+        }
+      })
+      .catch((err) => {
+        setSaveResult({ success: false, message: String(err) });
+      })
+      .finally(() => {
+        setSaving(false);
+      });
+  }, [selectedTemplate, resolvedLegs, stats, selectedExpiry, lots, params, spot, saving]);
 
   const handleEnterTrade = useCallback(() => {
     if (!resolvedLegs) return;
     setEntering(true);
     setOrderResult(null);
 
+    const saveDemoTrade = () => {
+      if (stats && selectedTemplate) {
+        const newTrade = {
+          id: String(Date.now()),
+          strategyId: selectedTemplate.id,
+          strategyName: selectedTemplate.name,
+          expiry: selectedExpiry,
+          lots: Math.max(1, lots),
+          params,
+          entrySpot: spot,
+          entryNetPremium: stats.netPremium,
+          target: target,
+          stoploss: stoploss,
+          status: 'active',
+          isDemo: true,
+          mode: mode,
+          createdAt: new Date().toISOString(),
+          legs: resolvedLegs.map((l) => ({
+            strike: l.strike,
+            type: l.type,
+            side: l.side,
+            qtyRatio: l.qtyLots / Math.max(1, lots),
+            entryPrice: l.price,
+            securityId: l.securityId,
+          })),
+        };
+
+        const existingStr = localStorage.getItem('positional_trades');
+        const trades = existingStr ? JSON.parse(existingStr) : [];
+        trades.unshift(newTrade);
+        localStorage.setItem('positional_trades', JSON.stringify(trades));
+      }
+    };
+
+    if (tradingType === 'demo') {
+      setTimeout(() => {
+        saveDemoTrade();
+        setOrderResult({ success: true, message: `Demo strategy entered successfully (Paper Trade).` });
+        setEntering(false);
+      }, 500);
+      return;
+    }
+
     const legsPayload = resolvedLegs.map((l) => ({
       securityId: l.securityId,
       quantity: l.qtyLots * LOT_SIZE,
       side: l.side,
     }));
+
+    // Guard: all legs must have resolved security IDs before touching the broker
+    const unresolved = legsPayload.filter((l) => !l.securityId);
+    if (unresolved.length > 0) {
+      setOrderResult({ success: false, message: 'Cannot enter trade — option chain not fully loaded. Try refreshing the strategy analysis.' });
+      setEntering(false);
+      return;
+    }
 
     fetch('/api/options/order', {
       method: 'POST',
@@ -173,8 +246,42 @@ export default function StrategyBuilder() {
         if (json.success) {
           const ids = json.data.map((o: any) => o.orderId).join(', ');
           setOrderResult({ success: true, message: `Strategy entered successfully. Order IDs: ${ids}` });
+
+          // Only persist to Positions tab after confirmed broker success
+          if (mode === 'positional' && stats && selectedTemplate) {
+            const newTrade = {
+              id: String(Date.now()),
+              strategyId: selectedTemplate.id,
+              strategyName: selectedTemplate.name,
+              expiry: selectedExpiry,
+              lots: Math.max(1, lots),
+              params,
+              entrySpot: spot,
+              entryNetPremium: stats.netPremium,
+              target: target,
+              stoploss: stoploss,
+              status: 'active',
+              isDemo: false,
+              mode: 'positional',
+              orderIds: ids,
+              createdAt: new Date().toISOString(),
+              legs: resolvedLegs.map((l) => ({
+                strike: l.strike,
+                type: l.type,
+                side: l.side,
+                qtyRatio: l.qtyLots / Math.max(1, lots),
+                entryPrice: l.price,
+                securityId: l.securityId,
+              })),
+            };
+
+            const existingStr = localStorage.getItem('positional_trades');
+            const trades = existingStr ? JSON.parse(existingStr) : [];
+            trades.unshift(newTrade);
+            localStorage.setItem('positional_trades', JSON.stringify(trades));
+          }
         } else {
-          setOrderResult({ success: false, message: json.error || 'Failed to place orders.' });
+          setOrderResult({ success: false, message: json.error || 'Order failed. No positions were recorded.' });
         }
       })
       .catch((err) => {
@@ -183,7 +290,7 @@ export default function StrategyBuilder() {
       .finally(() => {
         setEntering(false);
       });
-  }, [resolvedLegs, mode]);
+  }, [resolvedLegs, mode, stats, selectedTemplate, selectedExpiry, lots, params, spot, target, stoploss, tradingType]);
 
   const handleExitTrade = useCallback(() => {
     if (!resolvedLegs) return;
@@ -195,6 +302,14 @@ export default function StrategyBuilder() {
       quantity: l.qtyLots * LOT_SIZE,
       side: l.side === 'BUY' ? 'SELL' : 'BUY',
     }));
+
+    // Guard: all legs must have resolved security IDs
+    const unresolved = legsPayload.filter((l) => !l.securityId);
+    if (unresolved.length > 0) {
+      setOrderResult({ success: false, message: 'Cannot exit trade — option chain not fully loaded. Refresh and retry.' });
+      setExiting(false);
+      return;
+    }
 
     fetch('/api/options/order', {
       method: 'POST',
@@ -276,7 +391,7 @@ export default function StrategyBuilder() {
           <span className="text-xs font-mono bg-zinc-800 text-emerald-400 px-2 py-0.5 rounded">Spot: {spot.toFixed(1)}</span>
 
           <div className="ml-auto flex rounded-md overflow-hidden border border-zinc-700 text-xs">
-            {(['builder', 'saved'] as const).map((t) => (
+            {(['builder', 'saved', 'positions'] as const).map((t) => (
               <button
                 key={t}
                 onClick={() => setActiveTab(t)}
@@ -284,7 +399,7 @@ export default function StrategyBuilder() {
                   activeTab === t ? 'bg-sky-600 text-white' : 'bg-zinc-800 text-zinc-400 hover:text-zinc-200'
                 }`}
               >
-                {t === 'builder' ? 'Builder' : 'Saved Strategies'}
+                {t === 'builder' ? 'Builder' : t === 'saved' ? 'Saved Strategies' : 'Positions'}
               </button>
             ))}
           </div>
@@ -292,7 +407,9 @@ export default function StrategyBuilder() {
       </div>
 
       <div className="max-w-screen-xl mx-auto px-4 py-6 space-y-6">
-        {activeTab === 'saved' ? (
+        {activeTab === 'positions' ? (
+          <PositionalTradesTab />
+        ) : activeTab === 'saved' ? (
           <SavedStrategiesTab />
         ) : (
           <>
@@ -305,8 +422,14 @@ export default function StrategyBuilder() {
                 onParamsChange={setParams}
                 lots={lots}
                 onLotsChange={setLots}
+                target={target}
+                onTargetChange={setTarget}
+                stoploss={stoploss}
+                onStoplossChange={setStoploss}
                 mode={mode}
                 onModeChange={setMode}
+                tradingType={tradingType}
+                onTradingTypeChange={setTradingType}
                 expiryKindFilter={expiryKindFilter}
                 onExpiryKindFilterChange={setExpiryKindFilter}
                 expiries={expiries}
@@ -314,7 +437,7 @@ export default function StrategyBuilder() {
                 onExpiryChange={setSelectedExpiry}
                 onAnalyze={handleAnalyze}
                 onSave={handleSave}
-                canSave={mode === 'positional' && stats !== null}
+                canSave={mode === 'positional' && stats !== null && !saving}
                 onEnterTrade={handleEnterTrade}
                 onExitTrade={handleExitTrade}
                 canEnter={stats !== null && resolvedLegs !== null && resolvedLegs.every(l => l.securityId !== null)}
@@ -337,6 +460,16 @@ export default function StrategyBuilder() {
                   : 'bg-rose-950/80 border-rose-800 text-rose-300'
               }`}>
                 {orderResult.message}
+              </div>
+            )}
+
+            {saveResult && (
+              <div className={`border rounded-lg px-4 py-2.5 text-xs font-semibold ${
+                saveResult.success
+                  ? 'bg-sky-950/80 border-sky-800 text-sky-300'
+                  : 'bg-rose-950/80 border-rose-800 text-rose-300'
+              }`}>
+                {saveResult.message}
               </div>
             )}
 

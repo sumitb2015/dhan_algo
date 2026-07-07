@@ -8,8 +8,14 @@ interface StrategySettingsPanelProps {
   onParamsChange: (params: Record<string, number>) => void;
   lots: number;
   onLotsChange: (lots: number) => void;
+  target: number | null;
+  onTargetChange: (val: number | null) => void;
+  stoploss: number | null;
+  onStoplossChange: (val: number | null) => void;
   mode: 'intraday' | 'positional';
   onModeChange: (mode: 'intraday' | 'positional') => void;
+  tradingType: 'live' | 'demo';
+  onTradingTypeChange: (val: 'live' | 'demo') => void;
   expiryKindFilter: 'weekly' | 'monthly' | 'all';
   onExpiryKindFilterChange: (k: 'weekly' | 'monthly' | 'all') => void;
   expiries: { date: string; kind: 'weekly' | 'monthly' }[];
@@ -27,7 +33,10 @@ interface StrategySettingsPanelProps {
 }
 
 export default function StrategySettingsPanel({
-  template, params, onParamsChange, lots, onLotsChange, mode, onModeChange,
+  template, params, onParamsChange, lots, onLotsChange,
+  target, onTargetChange, stoploss, onStoplossChange,
+  mode, onModeChange,
+  tradingType, onTradingTypeChange,
   expiryKindFilter, onExpiryKindFilterChange, expiries, selectedExpiry, onExpiryChange,
   onAnalyze, onSave, canSave, onEnterTrade, onExitTrade, canEnter, canExit, entering, exiting,
 }: StrategySettingsPanelProps) {
@@ -96,6 +105,38 @@ export default function StrategySettingsPanel({
           />
         </label>
 
+        <label className="flex flex-col gap-1 text-xs text-zinc-400">
+          Target Profit (₹)
+          <input
+            type="number"
+            min={0}
+            step={100}
+            placeholder="Optional"
+            value={target !== null ? target : ''}
+            onChange={(e) => {
+              const val = e.target.value;
+              onTargetChange(val === '' ? null : Number(val));
+            }}
+            className="bg-zinc-800 border border-zinc-700 rounded-md text-sm text-zinc-100 px-2 py-1 w-24"
+          />
+        </label>
+
+        <label className="flex flex-col gap-1 text-xs text-zinc-400">
+          Stop Loss (₹)
+          <input
+            type="number"
+            min={0}
+            step={100}
+            placeholder="Optional"
+            value={stoploss !== null ? stoploss : ''}
+            onChange={(e) => {
+              const val = e.target.value;
+              onStoplossChange(val === '' ? null : Number(val));
+            }}
+            className="bg-zinc-800 border border-zinc-700 rounded-md text-sm text-zinc-100 px-2 py-1 w-24"
+          />
+        </label>
+
         <div className="flex flex-col gap-1 text-xs text-zinc-400">
           Mode
           <div className="flex rounded-md overflow-hidden border border-zinc-700">
@@ -108,6 +149,23 @@ export default function StrategySettingsPanel({
                 }`}
               >
                 {m}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        <div className="flex flex-col gap-1 text-xs text-zinc-400">
+          Trading Type
+          <div className="flex rounded-md overflow-hidden border border-zinc-700">
+            {(['live', 'demo'] as const).map((t) => (
+              <button
+                key={t}
+                onClick={() => onTradingTypeChange(t)}
+                className={`px-3 py-1 text-xs font-medium capitalize ${
+                  tradingType === t ? 'bg-sky-600 text-white' : 'bg-zinc-800 text-zinc-400 hover:text-zinc-200'
+                }`}
+              >
+                {t}
               </button>
             ))}
           </div>

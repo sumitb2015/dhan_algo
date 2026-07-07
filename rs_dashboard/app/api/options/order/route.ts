@@ -30,6 +30,10 @@ function getToken(): { clientId: string; token: string } {
     clientId?: string;
     accessToken: string;
   };
+
+  // Prefer .env > process.env > JWT-embedded dhanClientId > file clientId
+  // NOTE: access_token.json 'clientId' field may contain a phone number, not the Dhan client ID
+  // Always prefer dhanClientId (which is the actual Dhan account ID embedded in the JWT)
   const clientId = envClientId || process.env.client_id || raw.dhanClientId || raw.clientId || '';
   tokenCache = { clientId, token: raw.accessToken, ts: Date.now() };
   return { clientId, token: raw.accessToken };
@@ -46,6 +50,23 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   }
 
   const { legs, mode = 'intraday' } = body;
+
+  // Validate every leg before touching the broker — fail fast with a clear message
+  const invalidLegs: string[] = [];
+  for (const leg of legs) {
+    if (!leg.securityId || String(leg.securityId) === 'null' || String(leg.securityId).trim() === '') {
+      invalidLegs.push(`leg ${leg.securityId ?? 'unknown'}: missing securityId (option chain data may not have loaded yet)`);
+    }
+    if (!Number.isFinite(leg.quantity) || leg.quantity <= 0) {
+      invalidLegs.push(`leg ${leg.securityId}: invalid quantity=${leg.quantity}`);
+    }
+  }
+  if (invalidLegs.length > 0) {
+    return NextResponse.json({
+      success: false,
+      error: `Cannot place order — invalid leg(s): ${invalidLegs.join('; ')}`,
+    }, { status: 400 });
+  }
 
   try {
     const { clientId, token } = getToken();
