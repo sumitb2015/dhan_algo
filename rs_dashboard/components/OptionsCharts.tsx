@@ -34,6 +34,8 @@ interface HistoryPoint {
 interface LiveQuotes {
   updated_at: string | null;
   spot: number;
+  spot_change?: number;
+  spot_change_pct?: number;
   atm: number;
   straddle_premium: number;
   strikes: Record<string, StrikeData>;
@@ -147,6 +149,7 @@ export default function OptionsCharts() {
   // Static chain for strike list
   const [chainStrikes, setChainStrikes] = useState<number[]>([]);
   const [chainSpot, setChainSpot]       = useState(0);
+  const [spotChangePctState, setSpotChangePctState] = useState<number | null>(null);
   const [chainLoading, setChainLoading] = useState(false);
 
   // Intraday candle data (shown when bridge is stopped)
@@ -161,6 +164,18 @@ export default function OptionsCharts() {
   const [liveSeedStrike, setLiveSeedStrike]     = useState<number | null>(null);
 
   const [bridgeLoading, setBridgeLoading]     = useState(false);
+  
+  interface VixDataState {
+    vix: number;
+    prevClose: number;
+    niftySpot?: number;
+    niftyPrevClose?: number;
+    niftyChange?: number;
+    niftyChangePct?: number;
+  }
+  const [vixData, setVixData] = useState<VixDataState | null>(null);
+  const [vixCandles, setVixCandles] = useState<any[]>([]);
+
   const [expiriesLoading, setExpiriesLoading] = useState(false);
   const [error, setError] = useState('');
   const pollRef = useRef<NodeJS.Timeout | null>(null);
@@ -171,22 +186,40 @@ export default function OptionsCharts() {
   const [showPELine, setShowPELine] = useState(true);
   const [activeTab, setActiveTab] = useState<'premium' | 'skew' | 'oi' | 'cumulative' | 'chain' | 'intelligence' | 'vix' | 'buildup' | 'multistrike' | 'pcdiff' | 'positions'>('premium');
 
-  const [vixData, setVixData] = useState<{ vix: number; prevClose: number } | null>(null);
-
-  // When NOT live: poll vix-candles for spot + prev_close (60s)
+  // Poll vix-candles for spot, prev_close, and candles (60s)
   useEffect(() => {
-    if (bridgeStatus.status === 'RUNNING') return;
     async function fetchVix() {
       try {
         const res  = await fetch('/api/options/vix-candles');
-        const data = await res.json() as { success: boolean; spot: number; prev_close: number };
-        if (data.success) setVixData({ vix: data.spot, prevClose: data.prev_close });
-      } catch {}
+        const data = await res.json() as {
+          success: boolean;
+          spot: number;
+          prev_close: number;
+          candles?: any[];
+          nifty_spot?: number;
+          nifty_prev_close?: number;
+          nifty_change?: number;
+          nifty_change_pct?: number;
+        };
+        if (data.success) {
+          setVixData({
+            vix: data.spot,
+            prevClose: data.prev_close,
+            niftySpot: data.nifty_spot,
+            niftyPrevClose: data.nifty_prev_close,
+            niftyChange: data.nifty_change,
+            niftyChangePct: data.nifty_change_pct,
+          });
+          if (data.candles) setVixCandles(data.candles);
+        }
+      } catch (err) {
+        console.error('Failed to fetch VIX candles:', err);
+      }
     }
     fetchVix();
     const id = setInterval(fetchVix, 60_000);
     return () => clearInterval(id);
-  }, [bridgeStatus.status]);
+  }, []);
 
   // ── Fetch expiries ────────────────────────────────────────────────
   useEffect(() => {
@@ -251,8 +284,11 @@ export default function OptionsCharts() {
             // Fetch spot from dedicated LTP endpoint when chain doesn't return it
             fetch(`/api/options/spot?underlying=${UNDERLYING}`)
               .then(r => r.json())
-              .then((s: { success: boolean; spot?: number }) => {
-                if (s.success && s.spot && s.spot > 0) applySpot(s.spot);
+              .then((s: { success: boolean; spot?: number; change_pct?: number }) => {
+                if (s.success && s.spot && s.spot > 0) {
+                  applySpot(s.spot);
+                  if (s.change_pct !== undefined) setSpotChangePctState(s.change_pct);
+                }
               })
               .catch(() => {});
           }
@@ -486,6 +522,16 @@ export default function OptionsCharts() {
   const hasOiData    = chartData.some(r => (r['CE OI'] ?? 0) > 0 || (r['PE OI'] ?? 0) > 0);
   const pcr          = latestCeOi > 0 ? (latestPeOi / latestCeOi) : 0;
   const pcrLineColor = pcr > 1.3 ? '#34d399' : pcr > 0 && pcr < 0.7 ? '#f87171' : '#facc15';
+
+  const spotChangePct = isLive
+    ? (quotes?.spot_change_pct ?? null)
+    : (spotChangePctState ?? vixData?.niftyChangePct ?? null);
+
+  const wsVix = isLive ? quotes?.vix : undefined;
+  const vixLtp  = wsVix ? wsVix.ltp  : vixData?.vix       ?? 0;
+  const vixPrev = wsVix ? wsVix.prev_close : vixData?.prevClose ?? 0;
+  const vixPct = vixLtp > 0 && vixPrev > 0
+    ? ((vixLtp - vixPrev) / vixPrev) * 100 : null;
   const xTickInterval = chartData.length > 0 ? Math.max(0, Math.floor(chartData.length / 10) - 1) : 0;
 
   // Shared chart axes config
@@ -707,8 +753,13 @@ export default function OptionsCharts() {
           {activeTab === 'pcdiff' && (
             <OptionsPCDiffTab
               candles={chartData}
+              vixCandles={vixCandles}
               interval={candleInterval}
               isLive={isLive}
+              niftyPrice={spot}
+              niftyChangePct={spotChangePct}
+              vixPrice={vixLtp}
+              vixChangePct={vixPct}
             />
           )}
 
@@ -747,20 +798,13 @@ export default function OptionsCharts() {
                   : '—',
               sub: isLive ? `CE ${fmtNum(ceLtp, 2)} + PE ${fmtNum(peLtp, 2)}` : undefined,
               color: 'text-emerald-400', accent: 'border-emerald-500/25' },
-            (() => {
-              const wsVix = isLive ? quotes?.vix : undefined;
-              const vixLtp  = wsVix ? wsVix.ltp  : vixData?.vix       ?? 0;
-              const vixPrev = wsVix ? wsVix.prev_close : vixData?.prevClose ?? 0;
-              const pct = vixLtp > 0 && vixPrev > 0
-                ? ((vixLtp - vixPrev) / vixPrev) * 100 : null;
-              return {
-                label: 'India VIX',
-                value: vixLtp > 0 ? fmtNum(vixLtp, 2) : '—',
-                sub: pct !== null ? `${pct >= 0 ? '+' : ''}${pct.toFixed(2)}% vs prev` : undefined,
-                color: pct === null ? 'text-amber-400' : pct > 0 ? 'text-red-400' : 'text-emerald-400',
-                accent: 'border-amber-500/25',
-              };
-            })(),
+            {
+              label: 'India VIX',
+              value: vixLtp > 0 ? fmtNum(vixLtp, 2) : '—',
+              sub: vixPct !== null ? `${vixPct >= 0 ? '+' : ''}${vixPct.toFixed(2)}% vs prev` : undefined,
+              color: vixPct === null ? 'text-amber-400' : vixPct > 0 ? 'text-red-400' : 'text-emerald-400',
+              accent: 'border-amber-500/25',
+            },
           ]).map(({ label, value, color, sub, accent }) => (
             <div key={label} className={`bg-zinc-900/70 border rounded-xl px-3 py-3 ${accent}`}>
               <p className="text-[10px] font-bold text-zinc-400 uppercase tracking-widest mb-1">{label}</p>

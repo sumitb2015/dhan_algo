@@ -1,4 +1,4 @@
-﻿import { NextRequest, NextResponse } from 'next/server';
+import { NextRequest, NextResponse } from 'next/server';
 import path from 'path';
 import fs from 'fs';
 import { spawnSync } from 'child_process';
@@ -8,7 +8,7 @@ const PYTHON_EXE   = path.join(PROJECT_ROOT, 'venv', 'Scripts', 'pythonw.exe');
 const FETCH_SCRIPT = path.join(PROJECT_ROOT, 'scripts', 'tools', 'options_data_fetch.py');
 const NIFTY_CSV    = path.join(PROJECT_ROOT, 'Historical Data', 'NIFTY_50_Daily_5Y.csv');
 
-let cache: { spot: number; ts: number } | null = null;
+let cache: { spot: number; prev_close: number; change: number; change_pct: number; ts: number } | null = null;
 const CACHE_TTL = 5_000; // 5 s
 
 function lastCsvClose(): number {
@@ -20,7 +20,7 @@ function lastCsvClose(): number {
     fs.closeSync(fd);
     const lines = buf.toString('utf8').trim().split('\n');
     const last  = lines[lines.length - 1].split(',');
-    // CSV: date,open,high,low,close,volume  â€” close is index 4
+    // CSV: date,open,high,low,close,volume  — close is index 4
     const close = parseFloat(last[4]);
     return isNaN(close) ? 0 : close;
   } catch {
@@ -33,7 +33,13 @@ export async function GET(request: NextRequest) {
   const underlying = (searchParams.get('underlying') ?? 'NIFTY').toUpperCase();
 
   if (cache && Date.now() - cache.ts < CACHE_TTL) {
-    return NextResponse.json({ success: true, spot: cache.spot });
+    return NextResponse.json({
+      success: true,
+      spot: cache.spot,
+      prev_close: cache.prev_close,
+      change: cache.change,
+      change_pct: cache.change_pct
+    });
   }
 
   // Try live LTP first
@@ -44,11 +50,25 @@ export async function GET(request: NextRequest) {
   );
 
   let spot = 0;
+  let prev_close = 0;
+  let change = 0;
+  let change_pct = 0;
   if (!result.error) {
     try {
       const jsonLine = (result.stdout ?? '').trim().split('\n').pop() ?? '{}';
-      const parsed = JSON.parse(jsonLine) as { spot?: number; error?: string };
-      if (!parsed.error) spot = parsed.spot ?? 0;
+      const parsed = JSON.parse(jsonLine) as {
+        spot?: number;
+        prev_close?: number;
+        change?: number;
+        change_pct?: number;
+        error?: string;
+      };
+      if (!parsed.error) {
+        spot = parsed.spot ?? 0;
+        prev_close = parsed.prev_close ?? 0;
+        change = parsed.change ?? 0;
+        change_pct = parsed.change_pct ?? 0;
+      }
     } catch { /* ignore */ }
   }
 
@@ -61,6 +81,12 @@ export async function GET(request: NextRequest) {
     return NextResponse.json({ success: false, error: 'Could not determine spot price' }, { status: 500 });
   }
 
-  cache = { spot, ts: Date.now() };
-  return NextResponse.json({ success: true, spot });
+  cache = { spot, prev_close, change, change_pct, ts: Date.now() };
+  return NextResponse.json({
+    success: true,
+    spot,
+    prev_close,
+    change,
+    change_pct
+  });
 }

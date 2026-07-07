@@ -44,15 +44,22 @@ FEED_QUOTE  = 17  # Quote packet — LTP + OHLC + volume (includes prev_close)
 NIFTY_IDX_SID = '13'   # NIFTY 50 index (spot canary)
 VIX_SID       = '21'   # India VIX index
 
+UNDERLYING_SIDS = {
+    'NIFTY':     '13',
+    'BANKNIFTY': '25',
+    'FINNIFTY':  '27',
+}
+
 OHLC_URL = 'https://api.dhan.co/v2/marketfeed/ohlc'
 
 
-def _fetch_vix_prev_close(dhan) -> float:
-    """Fetch VIX official previous-session close from Dhan OHLC API once at startup."""
+def _fetch_prev_closes(dhan, underlying_sid: str) -> dict:
+    """Fetch previous-session closes for both VIX and the underlying index."""
+    closes = {underlying_sid: 0.0, VIX_SID: 0.0}
     try:
         token     = dhan.dhan_http.access_token
         client_id = dhan.dhan_http.client_id
-        body = json.dumps({'NSE_IDX': [int(VIX_SID)]}).encode()
+        body = json.dumps({'NSE_IDX': [int(underlying_sid), int(VIX_SID)]}).encode()
         req  = urllib.request.Request(
             OHLC_URL, data=body, method='POST',
             headers={
@@ -65,14 +72,17 @@ def _fetch_vix_prev_close(dhan) -> float:
         with urllib.request.urlopen(req, timeout=6) as resp:
             res = json.loads(resp.read())
         if res.get('status') == 'success':
-            entry = (res.get('data') or {}).get('NSE_IDX', {}).get(VIX_SID, {})
-            ohlc  = entry.get('ohlc') or {}
-            val   = float(ohlc.get('close') or 0)
-            if val > 0:
-                return round(val, 2)
+            data = res.get('data', {}) or {}
+            idx_data = data.get('NSE_IDX', {}) or {}
+            for sid in (underlying_sid, VIX_SID):
+                entry = idx_data.get(sid, {}) or {}
+                ohlc  = entry.get('ohlc') or {}
+                val   = float(ohlc.get('close') or 0)
+                if val > 0:
+                    closes[sid] = round(val, 2)
     except Exception as e:
-        print(f'[live_options_ws] WARN: VIX prev_close fetch failed: {e}', flush=True)
-    return 0.0
+        print(f'[live_options_ws] WARN: prev_closes fetch failed: {e}', flush=True)
+    return closes
 
 # Strike step per underlying
 STRIKE_STEP = {'NIFTY': 50, 'BANKNIFTY': 100, 'FINNIFTY': 50}
@@ -143,10 +153,13 @@ def main():
 
     helper = DhanHelper(dhan)
     step = STRIKE_STEP.get(args.underlying, 50)
+    underlying_sid = UNDERLYING_SIDS.get(args.underlying.upper(), '13')
 
-    # Fetch VIX prev_close once at startup — used for % change throughout the session
-    vix_prev_close = _fetch_vix_prev_close(dhan)
-    print(f'[live_options_ws] VIX prev_close={vix_prev_close}', flush=True)
+    # Fetch prev_closes once at startup — used for % change throughout the session
+    closes = _fetch_prev_closes(dhan, underlying_sid)
+    underlying_prev_close = closes.get(underlying_sid, 0.0)
+    vix_prev_close = closes.get(VIX_SID, 0.0)
+    print(f'[live_options_ws] prev_closes: underlying={underlying_prev_close}, VIX={vix_prev_close}', flush=True)
 
     # Get spot to determine ATM
     print('[live_options_ws] Fetching spot price…', flush=True)
@@ -171,8 +184,8 @@ def main():
             sid_map[sid] = {'strike': int(strike), 'type': opt_type}
             instruments.append((NSE_FNO, sid, FULL))
 
-    # Subscribe to NIFTY index (spot canary) and India VIX
-    instruments.append((IDX, NIFTY_IDX_SID, FEED_QUOTE))
+    # Subscribe to underlying index (spot canary) and India VIX
+    instruments.append((IDX, underlying_sid, FEED_QUOTE))
     instruments.append((IDX, VIX_SID, FEED_QUOTE))
 
     n = len(instruments) - 1  # exclude index canary
@@ -188,7 +201,7 @@ def main():
     time.sleep(3)  # wait for connection + first tick batch
 
     # Diagnostic: check if index canary received a tick
-    idx_initial = helper.live_data.get(NIFTY_IDX_SID)
+    idx_initial = helper.live_data.get(underlying_sid)
     if idx_initial:
         initial_ltp = _f(idx_initial.get('LTP') or idx_initial.get('last_price'))
         print(f'[live_options_ws] Index tick received — LTP={initial_ltp:.2f}', flush=True)
@@ -215,7 +228,7 @@ def main():
                 break
 
             # Update spot from index canary
-            idx_tick = helper.live_data.get(NIFTY_IDX_SID)
+            idx_tick = helper.live_data.get(underlying_sid)
             if idx_tick:
                 live_spot = _f(idx_tick.get('LTP') or idx_tick.get('last_price'))
                 if live_spot > 0:
@@ -272,10 +285,18 @@ def main():
 
             now_iso = datetime.now().isoformat()
 
+            spot_chg = 0.0
+            spot_chg_pct = 0.0
+            if spot > 0 and underlying_prev_close > 0:
+                spot_chg = round(spot - underlying_prev_close, 2)
+                spot_chg_pct = round(spot_chg / underlying_prev_close * 100, 4)
+
             current_quotes = {
                 'underlying':        args.underlying,
                 'expiry':            args.expiry,
                 'spot':              round(spot, 2),
+                'spot_change':       spot_chg,
+                'spot_change_pct':   spot_chg_pct,
                 'atm':               atm,
                 'straddle_premium':  straddle,
                 'strikes':           strikes_data,

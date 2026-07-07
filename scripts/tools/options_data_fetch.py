@@ -72,7 +72,16 @@ def main():
 
     elif args.cmd == 'ltp':
         spot = helper.get_ltp(args.underlying.upper(), exchange='IDX_I', instrument='INDEX') or 0
-        print(json.dumps({'spot': spot}))
+        levels = helper.get_prev_day_levels(args.underlying.upper())
+        prev_close = levels['close'] if levels else 0.0
+        change = round(spot - prev_close, 2) if (spot > 0 and prev_close > 0) else 0.0
+        change_pct = round(change / prev_close * 100, 4) if prev_close > 0 else 0.0
+        print(json.dumps({
+            'spot': spot,
+            'prev_close': prev_close,
+            'change': change,
+            'change_pct': change_pct
+        }))
 
     else:
         print(json.dumps({'error': 'unknown command'}))

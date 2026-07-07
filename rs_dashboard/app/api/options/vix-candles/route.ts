@@ -25,6 +25,10 @@ interface VixPayload {
   prev_close: number;
   data_date: string;
   is_today: boolean;
+  nifty_spot?: number;
+  nifty_prev_close?: number;
+  nifty_change?: number;
+  nifty_change_pct?: number;
 }
 
 interface CacheEntry { data: VixPayload; ts: number }

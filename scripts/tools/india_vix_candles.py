@@ -24,12 +24,13 @@ VIX_CSV  = os.path.join(ROOT, "Historical Data", "Indices", "INDIA_VIX.csv")
 OHLC_URL = "https://api.dhan.co/v2/marketfeed/ohlc"
 
 
-def _prev_close_from_ohlc_api(dhan) -> float:
-    """Fetch official prev-session close from Dhan OHLC API — matches what Dhan's app shows."""
+def _fetch_prev_closes(dhan) -> dict:
+    """Fetch previous-session closes for both India VIX and Nifty."""
+    closes = {VIX_SECURITY_ID: 0.0, NIFTY_SECURITY_ID: 0.0}
     try:
         token     = dhan.dhan_http.access_token
         client_id = dhan.dhan_http.client_id
-        body = json.dumps({"NSE_IDX": [int(VIX_SECURITY_ID)]}).encode()
+        body = json.dumps({"NSE_IDX": [int(VIX_SECURITY_ID), int(NIFTY_SECURITY_ID)]}).encode()
         req  = urllib.request.Request(
             OHLC_URL, data=body, method="POST",
             headers={
@@ -42,14 +43,17 @@ def _prev_close_from_ohlc_api(dhan) -> float:
         with urllib.request.urlopen(req, timeout=6) as resp:
             res = json.loads(resp.read())
         if res.get("status") == "success":
-            entry = (res.get("data") or {}).get("NSE_IDX", {}).get(VIX_SECURITY_ID, {})
-            ohlc  = entry.get("ohlc") or {}
-            val   = float(ohlc.get("close") or 0)
-            if val > 0:
-                return round(val, 2)
+            data = res.get("data", {}) or {}
+            idx_data = data.get("NSE_IDX", {}) or {}
+            for sid in (VIX_SECURITY_ID, NIFTY_SECURITY_ID):
+                entry = idx_data.get(sid, {}) or {}
+                ohlc  = entry.get("ohlc") or {}
+                val   = float(ohlc.get("close") or 0)
+                if val > 0:
+                    closes[sid] = round(val, 2)
     except Exception as e:
-        print(f"WARN: VIX OHLC prev_close fetch failed: {e}", file=sys.stderr)
-    return 0.0
+        print(f"WARN: prev_closes fetch failed: {e}", file=sys.stderr)
+    return closes
 
 
 def _prev_close_from_csv() -> float:
@@ -197,9 +201,22 @@ def main():
     day_open  = round(opens[0],   2) if opens  else 0.0
     day_high  = round(max(highs),  2) if highs  else 0.0
     day_low   = round(min(lows),   2) if lows   else 0.0
-    prev_close = (_prev_close_from_ohlc_api(dhan)
+
+    closes_data = _fetch_prev_closes(dhan)
+    vix_prev = closes_data.get(VIX_SECURITY_ID, 0.0)
+    nifty_prev = closes_data.get(NIFTY_SECURITY_ID, 0.0)
+
+    prev_close = (vix_prev
                   or _prev_day_close_from_intraday(raw_vix_df, data_date)
                   or _prev_close_from_csv())
+
+    nifty_spot = 0.0
+    if nifty_df is not None and not nifty_df.empty:
+        n_cls = _col(nifty_df, "close", "Close", "c")
+        nifty_spot = round(float(nifty_df[n_cls].iloc[-1]), 2)
+
+    nifty_change = round(nifty_spot - nifty_prev, 2) if (nifty_spot > 0 and nifty_prev > 0) else 0.0
+    nifty_change_pct = round(nifty_change / nifty_prev * 100, 4) if nifty_prev > 0 else 0.0
 
     print(json.dumps({
         "candles":    candles,
@@ -210,6 +227,10 @@ def main():
         "prev_close": prev_close,
         "data_date":  data_date,
         "is_today":   is_today,
+        "nifty_spot":       nifty_spot,
+        "nifty_prev_close": nifty_prev,
+        "nifty_change":     nifty_change,
+        "nifty_change_pct": nifty_change_pct,
     }))
 
 
