@@ -3,7 +3,7 @@ import path from 'path';
 import { spawnSync } from 'child_process';
 
 const PROJECT_ROOT = path.resolve(process.cwd(), '..');
-const PYTHON_EXE    = path.join(PROJECT_ROOT, 'venv', 'Scripts', 'pythonw.exe');
+const PYTHON_EXE    = path.join(PROJECT_ROOT, 'venv', 'Scripts', 'python.exe');
 const MARGIN_SCRIPT = path.join(PROJECT_ROOT, 'scripts', 'tools', 'options_margin.py');
 
 interface MarginLegInput { strike: number; type: 'CE' | 'PE'; side: 'BUY' | 'SELL'; qtyLots: number; price: number }

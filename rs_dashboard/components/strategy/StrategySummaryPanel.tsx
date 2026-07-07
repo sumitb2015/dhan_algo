@@ -89,16 +89,26 @@ export default function StrategySummaryPanel({
         ) : (
           <div className="space-y-2">
             <div>
-              <div className="text-xs text-zinc-500">Standalone Funds</div>
-              <div className="text-sm text-zinc-200 tabular-nums">{fmtRupee(margin.total_margin + margin.hedge_benefit)}</div>
+              <div className="text-xs text-zinc-500">Margin Required</div>
+              <div className={`text-sm font-semibold tabular-nums ${margin.total_margin > 0 ? 'text-amber-300' : 'text-zinc-400'}`}>
+                {margin.total_margin > 0 ? fmtRupee(margin.total_margin) : <span className="text-xs">—  (market closed)</span>}
+              </div>
             </div>
+            {margin.hedge_benefit > 0 && (
+              <div>
+                <div className="text-xs text-zinc-500">Hedge Benefit</div>
+                <div className="text-sm text-emerald-400 tabular-nums">−{fmtRupee(margin.hedge_benefit)}</div>
+              </div>
+            )}
             <div>
-              <div className="text-xs text-zinc-500">Margin Needed</div>
-              <div className="text-sm text-zinc-200 tabular-nums">{fmtRupee(margin.total_margin)}</div>
-            </div>
-            <div>
-              <div className="text-xs text-zinc-500">Margin Available</div>
-              <div className="text-sm text-zinc-200 tabular-nums">{fmtRupee(margin.available_funds)}</div>
+              <div className="text-xs text-zinc-500">Funds Available</div>
+              <div className={`text-sm font-semibold tabular-nums ${
+                margin.total_margin > 0 && margin.available_funds < margin.total_margin
+                  ? 'text-rose-400'
+                  : 'text-emerald-400'
+              }`}>
+                {fmtRupee(margin.available_funds)}
+              </div>
             </div>
           </div>
         )}
