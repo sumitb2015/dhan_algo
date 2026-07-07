@@ -68,10 +68,31 @@ export default function PayoffDiagram({ curve, currentSpot, breakevens }: Payoff
   const rawTicks = [xMin, xMin + span * 0.25, xMin + span * 0.5, xMin + span * 0.75, xMax];
   const ticks = Array.from(new Set([...rawTicks.map((t) => Math.round(t / STEP) * STEP), Math.round(currentSpot / STEP) * STEP])).sort((a, b) => a - b);
 
+  // Custom label renderer for reference lines — stacks labels by index so they never collide
+  const makeSpotLabel = () => (props: any) => {
+    const x = props?.viewBox?.x ?? 0;
+    return (
+      <text x={x + 5} y={14} fill="#38bdf8" fontSize={10} fontFamily="monospace" fontWeight="bold" textAnchor="start">
+        {currentSpot.toFixed(0)}
+      </text>
+    );
+  };
+
+  const makeBeLabel = (be: number, i: number) => (props: any) => {
+    const x = props?.viewBox?.x ?? 0;
+    // Stack each BE label 16px below the previous; spot label occupies y=14
+    const y = 14 + (i + 1) * 16;
+    return (
+      <text x={x + 5} y={y} fill="#fbbf24" fontSize={10} fontFamily="monospace" fontWeight="bold" textAnchor="start">
+        BE {be.toFixed(0)}
+      </text>
+    );
+  };
+
   return (
-    <div className="h-[260px] w-full">
+    <div className="h-[320px] w-full">
       <ResponsiveContainer width="100%" height="100%">
-        <ComposedChart data={visible} margin={{ top: 24, right: 24, bottom: 8, left: 10 }}>
+        <ComposedChart data={visible} margin={{ top: 10, right: 24, bottom: 8, left: 10 }}>
           <defs>
             <linearGradient id="pnlSplit" x1="0" y1="0" x2="0" y2="1">
               <stop offset="0%" stopColor="#10b981" stopOpacity={0.25} />
@@ -112,15 +133,7 @@ export default function PayoffDiagram({ curve, currentSpot, breakevens }: Payoff
             stroke="#0ea5e9"
             strokeWidth={1.5}
             strokeDasharray="4 3"
-            label={{
-              value: `${currentSpot.toFixed(0)}`,
-              fill: '#38bdf8',
-              fontSize: 10,
-              fontFamily: 'monospace',
-              fontWeight: 'bold',
-              position: 'insideTopRight',
-              offset: 6,
-            }}
+            label={makeSpotLabel()}
           />
           {breakevens.map((be, i) => (
             <ReferenceLine
@@ -129,16 +142,7 @@ export default function PayoffDiagram({ curve, currentSpot, breakevens }: Payoff
               stroke="#f59e0b"
               strokeWidth={1.5}
               strokeDasharray="4 3"
-              label={{
-                value: `BE ${be.toFixed(0)}`,
-                fill: '#fbbf24',
-                fontSize: 10,
-                fontFamily: 'monospace',
-                fontWeight: 'bold',
-                // Alternate above/below so two BEs don't overlap
-                position: i % 2 === 0 ? 'insideTopLeft' : 'insideTopRight',
-                offset: 6,
-              }}
+              label={makeBeLabel(be, i)}
             />
           ))}
           <Area
