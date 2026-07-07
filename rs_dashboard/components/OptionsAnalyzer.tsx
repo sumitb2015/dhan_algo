@@ -72,6 +72,8 @@ export default function OptionsAnalyzer() {
   const [tempRsiPeriod, setTempRsiPeriod] = useState<number>(14);
   const [tempEma20Period, setTempEma20Period] = useState<number>(20);
   const [tempEma50Period, setTempEma50Period] = useState<number>(50);
+  const [otmWeight, setOtmWeight] = useState<number>(30);      // % weight for OTM distance in composite score
+  const [tempOtmWeight, setTempOtmWeight] = useState<number>(30);
 
   const [settingsOpen, setSettingsOpen] = useState(false);
 
@@ -168,6 +170,7 @@ export default function OptionsAnalyzer() {
     setTempRsiPeriod(rsiPeriod);
     setTempEma20Period(ema20Period);
     setTempEma50Period(ema50Period);
+    setTempOtmWeight(otmWeight);
     setSettingsOpen(true);
   };
 
@@ -177,6 +180,7 @@ export default function OptionsAnalyzer() {
     setRsiPeriod(tempRsiPeriod);
     setEma20Period(tempEma20Period);
     setEma50Period(tempEma50Period);
+    setOtmWeight(Math.max(0, Math.min(100, tempOtmWeight)));
     setSettingsOpen(false);
   };
 
@@ -255,8 +259,8 @@ export default function OptionsAnalyzer() {
     setActiveFactors(updated);
   };
 
-  // Score Calculator
-  const computeScore = useCallback((contract: OptionContractData | null) => {
+  // Score Calculator — returns factor score only (for circle display)
+  const computeFactorScore = useCallback((contract: OptionContractData | null) => {
     if (!contract) return { score: 0, total: 0, pct: 0 };
     
     let greenCount = 0;
@@ -267,9 +271,7 @@ export default function OptionsAnalyzer() {
         const checkResult = factor.check(contract);
         if (checkResult !== null) {
           consideredCount++;
-          if (checkResult) {
-            greenCount++;
-          }
+          if (checkResult) greenCount++;
         }
       }
     });
@@ -281,48 +283,66 @@ export default function OptionsAnalyzer() {
     };
   }, [activeFactors, factors]);
 
-  // Processed Ranking Data
+  // Processed Ranking Data with composite score = factorScore × (1-otmW) + otmScore × otmW
   const rankedContracts = useMemo(() => {
     if (!data?.strikes) return { ce: [], pe: [] };
 
-    const ceContracts: (OptionContractData & { strike: number; scoreInfo: { score: number, total: number, pct: number } })[] = [];
-    const peContracts: (OptionContractData & { strike: number; scoreInfo: { score: number, total: number, pct: number } })[] = [];
+    const atm = data.atm;
+    const allStrikes = data.strikes.map(s => s.strike);
+    const maxDist = allStrikes.reduce((max, s) => Math.max(max, Math.abs(s - atm)), 0) || 1;
+    const otmW = otmWeight / 100;
+
+    type RankedContract = OptionContractData & {
+      strike: number;
+      scoreInfo: { score: number; total: number; pct: number };
+      otmDistPct: number;   // % distance from ATM (0 = ATM, 100 = max OTM in range)
+      compositeScore: number; // 0–100, used for sorting
+    };
+
+    const ceContracts: RankedContract[] = [];
+    const peContracts: RankedContract[] = [];
 
     data.strikes.forEach(row => {
+      const otmDist = Math.abs(row.strike - atm);
+      const otmNorm = otmDist / maxDist; // 0 (ATM) → 1 (most OTM)
+
       if (row.ce) {
+        const fs = computeFactorScore(row.ce);
+        const factorNorm = fs.pct / 100;
+        // For CE: OTM = strike > ATM. Only apply OTM bonus for genuinely OTM strikes
+        const ceIsOtm = row.strike >= atm;
+        const ceOtmScore = ceIsOtm ? otmNorm : 0;
+        const composite = (factorNorm * (1 - otmW) + ceOtmScore * otmW) * 100;
         ceContracts.push({
-          ...row.ce,
-          strike: row.strike,
-          scoreInfo: computeScore(row.ce)
+          ...row.ce, strike: row.strike,
+          scoreInfo: fs,
+          otmDistPct: (otmDist / atm) * 100,
+          compositeScore: composite
         });
       }
       if (row.pe) {
+        const fs = computeFactorScore(row.pe);
+        const factorNorm = fs.pct / 100;
+        // For PE: OTM = strike < ATM. Only apply OTM bonus for genuinely OTM strikes
+        const peIsOtm = row.strike <= atm;
+        const peOtmScore = peIsOtm ? otmNorm : 0;
+        const composite = (factorNorm * (1 - otmW) + peOtmScore * otmW) * 100;
         peContracts.push({
-          ...row.pe,
-          strike: row.strike,
-          scoreInfo: computeScore(row.pe)
+          ...row.pe, strike: row.strike,
+          scoreInfo: fs,
+          otmDistPct: (otmDist / atm) * 100,
+          compositeScore: composite
         });
       }
     });
 
-    // Sort CE options (Highest Seller Score first, then lower strike first to break ties)
-    const sortedCE = [...ceContracts].sort((a, b) => {
-      if (b.scoreInfo.pct !== a.scoreInfo.pct) {
-        return b.scoreInfo.pct - a.scoreInfo.pct;
-      }
-      return b.ltp - a.ltp; // higher premium is more attractive to sell
-    });
+    const sortFn = (a: RankedContract, b: RankedContract) => b.compositeScore - a.compositeScore;
 
-    // Sort PE options (Highest Seller Score first, then higher strike first to break ties)
-    const sortedPE = [...peContracts].sort((a, b) => {
-      if (b.scoreInfo.pct !== a.scoreInfo.pct) {
-        return b.scoreInfo.pct - a.scoreInfo.pct;
-      }
-      return b.ltp - a.ltp; // higher premium is more attractive to sell
-    });
-
-    return { ce: sortedCE, pe: sortedPE };
-  }, [data, computeScore]);
+    return {
+      ce: [...ceContracts].sort(sortFn),
+      pe: [...peContracts].sort(sortFn)
+    };
+  }, [data, computeFactorScore, otmWeight]);
 
   return (
     <div className="flex flex-col min-h-screen bg-black text-zinc-100">
@@ -529,7 +549,8 @@ export default function OptionsAnalyzer() {
                       <th className="py-2.5 px-2">Strike</th>
                       <th className="py-2.5 px-2">LTP</th>
                       <th className="py-2.5 px-2">OI</th>
-                      <th className="py-2.5 px-2 text-center">Score</th>
+                      <th className="py-2.5 px-2 text-center" title="OTM distance as % of ATM strike. More OTM = safer to sell.">OTM%</th>
+                      <th className="py-2.5 px-2 text-center" title={`Composite = Factors×${100-otmWeight}% + OTM×${otmWeight}%`}>Score</th>
                       {factors.map(f => activeFactors[f.id] && (
                         <th key={f.id} className="py-2.5 px-1.5 text-center font-bold" title={f.desc}>{f.label}</th>
                       ))}
@@ -553,18 +574,33 @@ export default function OptionsAnalyzer() {
                           <td className="py-3 px-2 font-bold tabular-nums text-zinc-100">₹{c.ltp.toFixed(1)}</td>
                           <td className="py-3 px-2 tabular-nums text-zinc-400">{c.oi.toLocaleString('en-IN')}</td>
                           
-                          {/* Score Ring / Badge */}
+                          {/* OTM Distance column */}
                           <td className="py-3 px-2 text-center">
-                            <span 
-                              className={cn(
-                                "px-2 py-0.8 rounded-md text-[10px] font-bold shadow-md",
-                                c.scoreInfo.pct >= 70 && "bg-emerald-500/15 text-emerald-400 border border-emerald-500/30",
-                                c.scoreInfo.pct < 70 && c.scoreInfo.pct >= 40 && "bg-amber-500/15 text-amber-400 border border-amber-500/30",
-                                c.scoreInfo.pct < 40 && "bg-red-500/15 text-red-400 border border-red-500/30"
-                              )}
-                            >
-                              {c.scoreInfo.score}/{c.scoreInfo.total} ({c.scoreInfo.pct.toFixed(0)}%)
+                            <span className={cn(
+                              "px-1.5 py-0.5 rounded text-[10px] font-bold tabular-nums",
+                              c.strike > data.atm
+                                ? "bg-blue-500/10 text-blue-400 border border-blue-500/20"
+                                : "bg-zinc-800/60 text-zinc-500 border border-zinc-700/40"
+                            )}>
+                              {c.otmDistPct.toFixed(2)}%
                             </span>
+                          </td>
+
+                          {/* Composite Score Badge */}
+                          <td className="py-3 px-2 text-center">
+                            <div className="flex flex-col items-center gap-0.5">
+                              <span 
+                                className={cn(
+                                  "px-2 py-0.5 rounded-md text-[10px] font-bold shadow-md",
+                                  c.compositeScore >= 70 && "bg-emerald-500/15 text-emerald-400 border border-emerald-500/30",
+                                  c.compositeScore < 70 && c.compositeScore >= 40 && "bg-amber-500/15 text-amber-400 border border-amber-500/30",
+                                  c.compositeScore < 40 && "bg-red-500/15 text-red-400 border border-red-500/30"
+                                )}
+                              >
+                                {c.compositeScore.toFixed(0)}%
+                              </span>
+                              <span className="text-[9px] text-zinc-600 tabular-nums">{c.scoreInfo.score}/{c.scoreInfo.total} sig</span>
+                            </div>
                           </td>
 
                           {/* Dynamic Factors Circles */}
@@ -617,7 +653,8 @@ export default function OptionsAnalyzer() {
                       <th className="py-2.5 px-2">Strike</th>
                       <th className="py-2.5 px-2">LTP</th>
                       <th className="py-2.5 px-2">OI</th>
-                      <th className="py-2.5 px-2 text-center">Score</th>
+                      <th className="py-2.5 px-2 text-center" title="OTM distance as % of ATM strike. More OTM = safer to sell.">OTM%</th>
+                      <th className="py-2.5 px-2 text-center" title={`Composite = Factors×${100-otmWeight}% + OTM×${otmWeight}%`}>Score</th>
                       {factors.map(f => activeFactors[f.id] && (
                         <th key={f.id} className="py-2.5 px-1.5 text-center font-bold" title={f.desc}>{f.label}</th>
                       ))}
@@ -641,18 +678,33 @@ export default function OptionsAnalyzer() {
                           <td className="py-3 px-2 font-bold tabular-nums text-zinc-100">₹{c.ltp.toFixed(1)}</td>
                           <td className="py-3 px-2 tabular-nums text-zinc-400">{c.oi.toLocaleString('en-IN')}</td>
                           
-                          {/* Score Ring / Badge */}
+                          {/* OTM Distance column */}
                           <td className="py-3 px-2 text-center">
-                            <span 
-                              className={cn(
-                                "px-2 py-0.8 rounded-md text-[10px] font-bold shadow-md",
-                                c.scoreInfo.pct >= 70 && "bg-emerald-500/15 text-emerald-400 border border-emerald-500/30",
-                                c.scoreInfo.pct < 70 && c.scoreInfo.pct >= 40 && "bg-amber-500/15 text-amber-400 border border-amber-500/30",
-                                c.scoreInfo.pct < 40 && "bg-red-500/15 text-red-400 border border-red-500/30"
-                              )}
-                            >
-                              {c.scoreInfo.score}/{c.scoreInfo.total} ({c.scoreInfo.pct.toFixed(0)}%)
+                            <span className={cn(
+                              "px-1.5 py-0.5 rounded text-[10px] font-bold tabular-nums",
+                              c.strike < data.atm
+                                ? "bg-blue-500/10 text-blue-400 border border-blue-500/20"
+                                : "bg-zinc-800/60 text-zinc-500 border border-zinc-700/40"
+                            )}>
+                              {c.otmDistPct.toFixed(2)}%
                             </span>
+                          </td>
+
+                          {/* Composite Score Badge */}
+                          <td className="py-3 px-2 text-center">
+                            <div className="flex flex-col items-center gap-0.5">
+                              <span 
+                                className={cn(
+                                  "px-2 py-0.5 rounded-md text-[10px] font-bold shadow-md",
+                                  c.compositeScore >= 70 && "bg-emerald-500/15 text-emerald-400 border border-emerald-500/30",
+                                  c.compositeScore < 70 && c.compositeScore >= 40 && "bg-amber-500/15 text-amber-400 border border-amber-500/30",
+                                  c.compositeScore < 40 && "bg-red-500/15 text-red-400 border border-red-500/30"
+                                )}
+                              >
+                                {c.compositeScore.toFixed(0)}%
+                              </span>
+                              <span className="text-[9px] text-zinc-600 tabular-nums">{c.scoreInfo.score}/{c.scoreInfo.total} sig</span>
+                            </div>
                           </td>
 
                           {/* Dynamic Factors Circles */}
@@ -785,6 +837,26 @@ export default function OptionsAnalyzer() {
                     min="1"
                     max="200"
                   />
+                </div>
+
+                {/* OTM Weight */}
+                <div className="flex flex-col gap-2 pt-1 border-t border-zinc-850">
+                  <div className="flex items-center justify-between">
+                    <label className="text-xs font-semibold text-zinc-400">OTM Safety Weight</label>
+                    <span className="text-xs font-bold text-blue-400 tabular-nums">{tempOtmWeight}%</span>
+                  </div>
+                  <input
+                    type="range"
+                    min="0"
+                    max="60"
+                    step="5"
+                    value={tempOtmWeight}
+                    onChange={(e) => setTempOtmWeight(parseInt(e.target.value))}
+                    className="w-full accent-emerald-500 cursor-pointer"
+                  />
+                  <p className="text-[10px] text-zinc-600 leading-tight">
+                    Composite = Factors×{100 - tempOtmWeight}% + OTM Distance×{tempOtmWeight}%. Higher weight promotes safer OTM strikes when factors are tied.
+                  </p>
                 </div>
 
                 {/* EMA 50 Period */}
