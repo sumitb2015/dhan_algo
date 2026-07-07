@@ -333,6 +333,32 @@ export default function StrategyBuilder() {
       });
   }, [resolvedLegs, mode]);
 
+  const handleUpdateLegLots = useCallback((index: number, delta: number) => {
+    if (!resolvedLegs) return;
+    const updated = [...resolvedLegs];
+    const newLots = Math.max(1, updated[index].qtyLots + delta);
+    updated[index] = { ...updated[index], qtyLots: newLots };
+    setResolvedLegs(updated);
+    const payoffStats = computePayoffStats(updated, spot, LOT_SIZE);
+    setStats(payoffStats);
+    setCurve(buildPayoffCurve(updated, spot, LOT_SIZE));
+    setTargetBreakevens(null);
+    setMarginLoading(true);
+    fetch('/api/options/margin', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        underlying: UNDERLYING,
+        expiry: selectedExpiry,
+        legs: updated.map((l) => ({ strike: l.strike, type: l.type, side: l.side, qtyLots: l.qtyLots, price: l.price })),
+      }),
+    })
+      .then((r) => r.json())
+      .then((json) => setMargin(json?.success ? json.data : null))
+      .catch(() => setMargin(null))
+      .finally(() => setMarginLoading(false));
+  }, [resolvedLegs, spot, selectedExpiry]);
+
   const handleUpdateLegStrike = useCallback((index: number, newStrike: number) => {
     if (!resolvedLegs) return;
     const updated = [...resolvedLegs];
@@ -526,8 +552,22 @@ export default function StrategyBuilder() {
                             <td className="px-3 py-3 text-zinc-300 font-mono">
                               ₹{leg.price.toFixed(1)}
                             </td>
-                            <td className="px-3 py-3 text-zinc-300 font-mono">
-                              {leg.qtyLots}
+                            <td className="px-3 py-3">
+                              <div className="flex items-center gap-2">
+                                <button
+                                  onClick={() => handleUpdateLegLots(idx, -1)}
+                                  className="w-6 h-6 flex items-center justify-center bg-zinc-800 hover:bg-zinc-700 border border-zinc-700 rounded text-zinc-300 font-semibold"
+                                >
+                                  -
+                                </button>
+                                <span className="font-mono font-bold text-zinc-100 w-6 text-center">{leg.qtyLots}</span>
+                                <button
+                                  onClick={() => handleUpdateLegLots(idx, 1)}
+                                  className="w-6 h-6 flex items-center justify-center bg-zinc-800 hover:bg-zinc-700 border border-zinc-700 rounded text-zinc-300 font-semibold"
+                                >
+                                  +
+                                </button>
+                              </div>
                             </td>
                           </tr>
                         );
