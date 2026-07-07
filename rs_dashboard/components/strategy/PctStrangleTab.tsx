@@ -157,6 +157,14 @@ export default function PctStrangleTab({ spot, chainOc, expiries, selectedExpiry
     setExiting(true);
     setOrderResult(null);
 
+    if (tradingType === 'demo') {
+      setTimeout(() => {
+        setOrderResult({ success: true, message: 'Demo strangle exited (Paper Trade).' });
+        setExiting(false);
+      }, 500);
+      return;
+    }
+
     const legsPayload = resolvedLegs.map(l => ({
       securityId: l.securityId,
       quantity: l.qtyLots * LOT_SIZE,
@@ -179,7 +187,7 @@ export default function PctStrangleTab({ spot, chainOc, expiries, selectedExpiry
       })
       .catch((err: unknown) => setOrderResult({ success: false, message: String(err) }))
       .finally(() => setExiting(false));
-  }, [canExit, resolvedLegs, mode]);
+  }, [canExit, tradingType, resolvedLegs, mode]);
 
   const expiry = selectedExpiry || expiries[0]?.date || '';
 
@@ -278,6 +286,12 @@ export default function PctStrangleTab({ spot, chainOc, expiries, selectedExpiry
           <span className="font-mono text-zinc-300">{expiry}</span>
         </div>
       </div>
+
+      {resolvedLegs.length === 2 && resolvedLegs.some(l => l.securityId === null) && (
+        <div className="border rounded-lg px-4 py-2.5 text-xs font-semibold bg-amber-950/80 border-amber-800 text-amber-300">
+          One or more legs resolved without a security ID — chain data may be incomplete. Refresh the page or try a different expiry.
+        </div>
+      )}
 
       {/* Leg table */}
       {resolvedLegs.length > 0 && (
