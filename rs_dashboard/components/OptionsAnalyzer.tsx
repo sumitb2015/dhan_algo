@@ -91,6 +91,7 @@ export default function OptionsAnalyzer() {
   const [data, setData] = useState<AnalyzerResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [hoveredMetric, setHoveredMetric] = useState<{ contractId: number, factorId: string, text: string } | null>(null);
+  const [minScore, setMinScore] = useState<number>(0); // minimum composite score filter (0-100)
 
   // Live auto-refresh state
   const [isLive, setIsLive] = useState(false);
@@ -607,6 +608,68 @@ export default function OptionsAnalyzer() {
               );
             })}
           </div>
+
+          {/* Min Score Filter Slider */}
+          <div className="flex flex-col gap-2 pt-3 border-t border-zinc-850/60 mt-1">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <span className="text-[10px] font-bold uppercase tracking-widest text-zinc-500">Min Score Filter</span>
+                <span className="text-[10px] text-zinc-600">— show only strikes with composite score ≥</span>
+              </div>
+              <div className="flex items-center gap-2">
+                {data && (
+                  <span className="text-[10px] text-zinc-500 tabular-nums">
+                    CE: <span className="text-zinc-300 font-bold">{rankedContracts.ce.filter(c => c.compositeScore >= minScore).length}</span>/{rankedContracts.ce.length}
+                    {' · '}
+                    PE: <span className="text-zinc-300 font-bold">{rankedContracts.pe.filter(c => c.compositeScore >= minScore).length}</span>/{rankedContracts.pe.length}
+                  </span>
+                )}
+                <span className={cn(
+                  "text-sm font-bold tabular-nums min-w-[3.5rem] text-right",
+                  minScore >= 80 ? "text-emerald-400" : minScore >= 50 ? "text-amber-400" : "text-zinc-400"
+                )}>
+                  {minScore}%
+                </span>
+                {minScore > 0 && (
+                  <button
+                    onClick={() => setMinScore(0)}
+                    className="text-[10px] text-zinc-600 hover:text-zinc-300 font-bold cursor-pointer transition-colors"
+                    title="Reset filter"
+                  >
+                    Reset
+                  </button>
+                )}
+              </div>
+            </div>
+            <div className="flex items-center gap-3">
+              <span className="text-[10px] text-zinc-700 w-6 text-right">0</span>
+              <input
+                type="range"
+                min="0"
+                max="100"
+                step="5"
+                value={minScore}
+                onChange={(e) => setMinScore(parseInt(e.target.value))}
+                className="flex-1 accent-emerald-500 cursor-pointer"
+              />
+              <span className="text-[10px] text-zinc-700 w-8">100</span>
+            </div>
+            {/* Score threshold tick marks */}
+            <div className="flex justify-between px-6 -mt-1">
+              {[0, 25, 50, 75, 100].map(v => (
+                <button
+                  key={v}
+                  onClick={() => setMinScore(v)}
+                  className={cn(
+                    "text-[9px] font-bold cursor-pointer transition-colors px-1 rounded",
+                    minScore === v ? "text-emerald-400" : "text-zinc-700 hover:text-zinc-400"
+                  )}
+                >
+                  {v}%
+                </button>
+              ))}
+            </div>
+          </div>
         </div>
 
         {/* Global Loading / Error / Main View */}
@@ -655,7 +718,7 @@ export default function OptionsAnalyzer() {
                     </tr>
                   </thead>
                   <tbody>
-                    {rankedContracts.ce.map(c => {
+                    {rankedContracts.ce.filter(c => c.compositeScore >= minScore).map(c => {
                       const isATM = Math.abs(c.strike - data.atm) < 1;
                       return (
                         <tr 
@@ -759,7 +822,7 @@ export default function OptionsAnalyzer() {
                     </tr>
                   </thead>
                   <tbody>
-                    {rankedContracts.pe.map(c => {
+                    {rankedContracts.pe.filter(c => c.compositeScore >= minScore).map(c => {
                       const isATM = Math.abs(c.strike - data.atm) < 1;
                       return (
                         <tr 
