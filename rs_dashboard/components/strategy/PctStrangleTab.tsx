@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useMemo, useCallback } from 'react';
+import { useState, useMemo, useCallback, useEffect } from 'react';
 import {
   ChainOc, ResolvedLeg,
   computePayoffStats, buildPayoffCurve, findBreakevens,
@@ -10,6 +10,7 @@ import StrategySummaryPanel from '@/components/strategy/StrategySummaryPanel';
 import PayoffDiagram from '@/components/strategy/PayoffDiagram';
 
 const LOT_SIZE = 75;
+const UNDERLYING = 'NIFTY';
 
 export interface PctStrangleTabProps {
   spot: number;
@@ -55,16 +56,55 @@ export default function PctStrangleTab({ spot, chainOc, expiries, selectedExpiry
   const [peStrikeOverride, setPeStrikeOverride] = useState<number | undefined>(undefined);
   const [entering, setEntering] = useState(false);
   const [exiting, setExiting] = useState(false);
+  const [saving, setSaving] = useState(false);
   const [orderResult, setOrderResult] = useState<{ success: boolean; message: string } | null>(null);
+  const [saveResult, setSaveResult] = useState<{ success: boolean; message: string } | null>(null);
   const [breakevenMode, setBreakevenMode] = useState<'target' | 'expiry'>('expiry');
 
+  // Own expiry + chain state — independent of parent's selectedExpiry
+  const [pctExpiry, setPctExpiry] = useState(selectedExpiry || expiries[0]?.date || '');
+  const [localChainOc, setLocalChainOc] = useState<ChainOc>(chainOc);
+  const [chainLoading, setChainLoading] = useState(false);
+
+  // Sync initial expiry once parent expiries load
+  useEffect(() => {
+    if (!pctExpiry && expiries.length > 0) {
+      setPctExpiry(expiries[0].date);
+    }
+  }, [expiries, pctExpiry]);
+
+  // Fetch chain whenever pctExpiry changes
+  useEffect(() => {
+    if (!pctExpiry) return;
+    // Use parent's already-loaded chain if the expiry matches
+    if (pctExpiry === selectedExpiry && Object.keys(chainOc).length > 0) {
+      setLocalChainOc(chainOc);
+      return;
+    }
+    setChainLoading(true);
+    fetch(`/api/options/chain?underlying=${UNDERLYING}&expiry=${pctExpiry}`)
+      .then(r => r.json())
+      .then((json: { success?: boolean; data?: { chain?: { oc?: ChainOc } } }) => {
+        setLocalChainOc(json?.data?.chain?.oc ?? {});
+      })
+      .catch(() => setLocalChainOc({}))
+      .finally(() => setChainLoading(false));
+  }, [pctExpiry, selectedExpiry, chainOc]);
+
+  // Also update when parent chain refreshes and expiry matches
+  useEffect(() => {
+    if (pctExpiry === selectedExpiry) {
+      setLocalChainOc(chainOc);
+    }
+  }, [chainOc, pctExpiry, selectedExpiry]);
+
   const celeg = useMemo(
-    () => resolveToLeg(spot, cePct, 'CE', chainOc, lots, ceStrikeOverride),
-    [spot, cePct, chainOc, lots, ceStrikeOverride],
+    () => resolveToLeg(spot, cePct, 'CE', localChainOc, lots, ceStrikeOverride),
+    [spot, cePct, localChainOc, lots, ceStrikeOverride],
   );
   const peleg = useMemo(
-    () => resolveToLeg(spot, pePct, 'PE', chainOc, lots, peStrikeOverride),
-    [spot, pePct, chainOc, lots, peStrikeOverride],
+    () => resolveToLeg(spot, pePct, 'PE', localChainOc, lots, peStrikeOverride),
+    [spot, pePct, localChainOc, lots, peStrikeOverride],
   );
 
   const resolvedLegs = useMemo<ResolvedLeg[]>(
@@ -112,8 +152,17 @@ export default function PctStrangleTab({ spot, chainOc, expiries, selectedExpiry
     setOrderResult(null);
   };
 
+  const handleExpiryChange = (date: string) => {
+    setPctExpiry(date);
+    setCeStrikeOverride(undefined);
+    setPeStrikeOverride(undefined);
+    setOrderResult(null);
+    setSaveResult(null);
+  };
+
   const canEnter = resolvedLegs.length === 2 && resolvedLegs.every(l => l.securityId !== null) && !entering;
   const canExit = resolvedLegs.length === 2 && resolvedLegs.every(l => l.securityId !== null) && !exiting;
+  const canSave = stats !== null && resolvedLegs.length === 2 && !saving;
 
   const handleEnterTrade = useCallback(() => {
     if (!canEnter) return;
@@ -189,7 +238,52 @@ export default function PctStrangleTab({ spot, chainOc, expiries, selectedExpiry
       .finally(() => setExiting(false));
   }, [canExit, tradingType, resolvedLegs, mode]);
 
-  const expiry = selectedExpiry || expiries[0]?.date || '';
+  const handleSave = useCallback(() => {
+    if (!canSave || !stats) return;
+    setSaving(true);
+    setSaveResult(null);
+
+    const payload = {
+      strategy_type: 'pct_strangle',
+      display_name: `% Strangle (CE ${cePct}% / PE ${pePct}%)`,
+      underlying: UNDERLYING,
+      expiry: pctExpiry,
+      mode: 'positional',
+      lots,
+      lot_size: LOT_SIZE,
+      params: { cePct, pePct },
+      entry_spot: spot,
+      entry_net_premium: stats.netPremium,
+      legs: resolvedLegs.map(l => ({
+        strike: l.strike,
+        option_type: l.type,
+        side: l.side,
+        qty_lots: l.qtyLots,
+        entry_price: l.price,
+        entry_delta: l.delta,
+        security_id: l.securityId,
+      })),
+      notes: null,
+    };
+
+    fetch('/api/saved-strategies', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    })
+      .then(r => r.json())
+      .then((json: { success: boolean; data?: { id?: string }; error?: string }) => {
+        if (json.success) {
+          setSaveResult({ success: true, message: `Strategy saved (ID: ${json.data?.id ?? '?'}).` });
+        } else {
+          setSaveResult({ success: false, message: json.error ?? 'Failed to save.' });
+        }
+      })
+      .catch((err: unknown) => setSaveResult({ success: false, message: String(err) }))
+      .finally(() => setSaving(false));
+  }, [canSave, stats, cePct, pePct, pctExpiry, lots, spot, resolvedLegs]);
+
+  const expiry = pctExpiry || expiries[0]?.date || '';
 
   return (
     <div className="space-y-6">
@@ -216,6 +310,21 @@ export default function PctStrangleTab({ spot, chainOc, expiries, selectedExpiry
               onChange={e => handlePePctChange(Math.max(0.1, parseFloat(e.target.value) || 0.1))}
               className="w-24 bg-zinc-800 border border-zinc-700 rounded-lg px-2 py-1.5 text-sm font-mono text-rose-400 text-center focus:outline-none focus:border-rose-500"
             />
+          </div>
+
+          <div className="flex flex-col gap-1">
+            <label className="text-xs text-zinc-500 uppercase tracking-wide">Expiry</label>
+            <select
+              value={expiry}
+              onChange={e => handleExpiryChange(e.target.value)}
+              className="bg-zinc-800 border border-zinc-700 rounded-lg px-2 py-1.5 text-sm font-mono text-zinc-200 focus:outline-none focus:border-sky-500"
+            >
+              {expiries.map(ex => (
+                <option key={ex.date} value={ex.date}>
+                  {ex.date} ({ex.kind})
+                </option>
+              ))}
+            </select>
           </div>
 
           <div className="flex flex-col gap-1">
@@ -265,9 +374,11 @@ export default function PctStrangleTab({ spot, chainOc, expiries, selectedExpiry
           celeg ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-300' : 'bg-rose-950 border-rose-800 text-rose-300'
         }`}>
           <span className="text-[10px] font-bold px-1.5 py-0.5 rounded bg-emerald-500/20 text-emerald-400">CE SELL</span>
-          {celeg
-            ? <><span className="font-mono">{ceActualStrike}</span><span className="text-zinc-400 text-xs ml-1">(+{ceActualPct.toFixed(1)}%)</span></>
-            : <span className="text-xs">Strike {ceActualStrike} not in chain</span>
+          {chainLoading
+            ? <span className="text-zinc-500 text-xs">loading…</span>
+            : celeg
+              ? <><span className="font-mono">{ceActualStrike}</span><span className="text-zinc-400 text-xs ml-1">(+{ceActualPct.toFixed(1)}%)</span></>
+              : <span className="text-xs">Strike {ceActualStrike} not in chain</span>
           }
         </div>
 
@@ -275,21 +386,18 @@ export default function PctStrangleTab({ spot, chainOc, expiries, selectedExpiry
           peleg ? 'bg-rose-500/10 border-rose-500/30 text-rose-300' : 'bg-rose-950 border-rose-800 text-rose-300'
         }`}>
           <span className="text-[10px] font-bold px-1.5 py-0.5 rounded bg-rose-500/20 text-rose-400">PE SELL</span>
-          {peleg
-            ? <><span className="font-mono">{peActualStrike}</span><span className="text-zinc-400 text-xs ml-1">(−{peActualPct.toFixed(1)}%)</span></>
-            : <span className="text-xs">Strike {peActualStrike} not in chain</span>
+          {chainLoading
+            ? <span className="text-zinc-500 text-xs">loading…</span>
+            : peleg
+              ? <><span className="font-mono">{peActualStrike}</span><span className="text-zinc-400 text-xs ml-1">(−{peActualPct.toFixed(1)}%)</span></>
+              : <span className="text-xs">Strike {peActualStrike} not in chain</span>
           }
-        </div>
-
-        <div className="ml-auto flex items-center gap-2 text-xs text-zinc-500">
-          <span>Expiry:</span>
-          <span className="font-mono text-zinc-300">{expiry}</span>
         </div>
       </div>
 
       {resolvedLegs.length === 2 && resolvedLegs.some(l => l.securityId === null) && (
         <div className="border rounded-lg px-4 py-2.5 text-xs font-semibold bg-amber-950/80 border-amber-800 text-amber-300">
-          One or more legs resolved without a security ID — chain data may be incomplete. Refresh the page or try a different expiry.
+          One or more legs resolved without a security ID — chain data may be incomplete. Refresh or try a different expiry.
         </div>
       )}
 
@@ -391,13 +499,20 @@ export default function PctStrangleTab({ spot, chainOc, expiries, selectedExpiry
           >
             {exiting ? 'Exiting…' : 'Exit Trade'}
           </button>
+          <button
+            onClick={handleSave}
+            disabled={!canSave}
+            className="px-5 py-2 rounded-lg text-sm font-semibold bg-sky-700 hover:bg-sky-600 disabled:opacity-40 disabled:cursor-not-allowed text-white transition-colors"
+          >
+            {saving ? 'Saving…' : 'Save Strategy'}
+          </button>
           {tradingType === 'live' && (
             <span className="text-xs text-amber-400 font-semibold">⚡ LIVE MODE — real orders will be placed</span>
           )}
         </div>
       )}
 
-      {/* Result banner */}
+      {/* Result banners */}
       {orderResult && (
         <div className={`border rounded-lg px-4 py-2.5 text-xs font-semibold ${
           orderResult.success
@@ -405,6 +520,15 @@ export default function PctStrangleTab({ spot, chainOc, expiries, selectedExpiry
             : 'bg-rose-950/80 border-rose-800 text-rose-300'
         }`}>
           {orderResult.message}
+        </div>
+      )}
+      {saveResult && (
+        <div className={`border rounded-lg px-4 py-2.5 text-xs font-semibold ${
+          saveResult.success
+            ? 'bg-sky-950/80 border-sky-800 text-sky-300'
+            : 'bg-rose-950/80 border-rose-800 text-rose-300'
+        }`}>
+          {saveResult.message}
         </div>
       )}
 
