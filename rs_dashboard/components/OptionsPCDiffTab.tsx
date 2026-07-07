@@ -24,6 +24,8 @@ interface Props {
   niftyChangePct: number | null;
   vixPrice: number;
   vixChangePct: number | null;
+  ceChangePct: number | null;
+  peChangePct: number | null;
 }
 
 function fmtOI(n: number): string {
@@ -86,7 +88,7 @@ const VixTabTooltip = ({ active, payload, label }: any) => {
 };
 
 export default function OptionsPCDiffTab({
-  candles, vixCandles, interval, isLive, niftyPrice, niftyChangePct, vixPrice, vixChangePct
+  candles, vixCandles, interval, isLive, niftyPrice, niftyChangePct, vixPrice, vixChangePct, ceChangePct, peChangePct
 }: Props) {
   const data = candles.map(row => {
     const d = (row['PE OI'] ?? 0) - (row['CE OI'] ?? 0);
@@ -164,12 +166,16 @@ export default function OptionsPCDiffTab({
           {
             label: 'CE Premium',
             value: lastCeLtp > 0 ? lastCeLtp.toFixed(2) : '—',
+            sub: ceChangePct !== null ? `${ceChangePct >= 0 ? '+' : ''}${ceChangePct.toFixed(2)}%` : undefined,
+            subColor: ceChangePct !== null && ceChangePct >= 0 ? 'text-emerald-400' : 'text-red-400',
             color: 'text-blue-400',
             accent: 'border-blue-500/25',
           },
           {
             label: 'PE Premium',
             value: lastPeLtp > 0 ? lastPeLtp.toFixed(2) : '—',
+            sub: peChangePct !== null ? `${peChangePct >= 0 ? '+' : ''}${peChangePct.toFixed(2)}%` : undefined,
+            subColor: peChangePct !== null && peChangePct >= 0 ? 'text-emerald-400' : 'text-red-400',
             color: 'text-red-400',
             accent: 'border-red-500/25',
           },
@@ -197,13 +203,13 @@ export default function OptionsPCDiffTab({
             color: diffPos ? 'text-emerald-400' : 'text-red-400',
             accent: diffPos ? 'border-emerald-500/25' : 'border-red-500/25',
           },
-        ]).map(({ label, value, sub, color, accent }) => (
+        ]).map(({ label, value, sub, subColor, color, accent }) => (
           <div key={label} className={`bg-zinc-900/70 border rounded-xl px-3 py-3 flex flex-col justify-between ${accent}`}>
             <div>
               <p className="text-[10px] font-bold text-zinc-400 uppercase tracking-widest mb-1">{label}</p>
               <p className={`text-base font-bold tabular-nums ${color}`}>{value}</p>
             </div>
-            {sub && <p className={`text-[10px] font-medium mt-1 ${color}`}>{sub}</p>}
+            {sub && <p className={`text-[10px] font-medium mt-1 ${subColor || color}`}>{sub}</p>}
           </div>
         ))}
       </div>

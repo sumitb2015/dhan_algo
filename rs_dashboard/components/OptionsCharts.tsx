@@ -20,7 +20,14 @@ import OptionsPositionsTab from './OptionsPositionsTab';
 
 // ─── Types ────────────────────────────────────────────────────────
 
-interface OptionSide { ltp: number; oi: number; volume: number }
+interface OptionSide {
+  ltp: number;
+  oi: number;
+  volume: number;
+  prev_close?: number;
+  change?: number;
+  change_pct?: number;
+}
 interface StrikeData  { strike: number; ce: OptionSide; pe: OptionSide }
 
 interface HistoryPoint {
@@ -150,6 +157,8 @@ export default function OptionsCharts() {
   const [chainStrikes, setChainStrikes] = useState<number[]>([]);
   const [chainSpot, setChainSpot]       = useState(0);
   const [spotChangePctState, setSpotChangePctState] = useState<number | null>(null);
+  const [cePrevCloseState, setCePrevCloseState] = useState<number | null>(null);
+  const [pePrevCloseState, setPePrevCloseState] = useState<number | null>(null);
   const [chainLoading, setChainLoading] = useState(false);
 
   // Intraday candle data (shown when bridge is stopped)
@@ -306,11 +315,21 @@ export default function OptionsCharts() {
 
     fetch(`/api/options/candles?expiry=${exp}&strike=${strike}&interval=${interval}`)
       .then(r => r.json())
-      .then((j: { success: boolean; data?: CandleRow[]; error?: string; dataDate?: string; isToday?: boolean }) => {
+      .then((j: {
+        success: boolean;
+        data?: CandleRow[];
+        error?: string;
+        dataDate?: string;
+        isToday?: boolean;
+        ce_prev_close?: number;
+        pe_prev_close?: number;
+      }) => {
         if (j.success && j.data?.length) {
           setCandleData(j.data);
           setCandleDate(j.dataDate ?? null);
           setCandleIsToday(j.isToday ?? true);
+          if (j.ce_prev_close !== undefined) setCePrevCloseState(j.ce_prev_close);
+          if (j.pe_prev_close !== undefined) setPePrevCloseState(j.pe_prev_close);
         } else {
           setCandleError(j.error ?? 'No candle data returned');
         }
@@ -532,6 +551,24 @@ export default function OptionsCharts() {
   const vixPrev = wsVix ? wsVix.prev_close : vixData?.prevClose ?? 0;
   const vixPct = vixLtp > 0 && vixPrev > 0
     ? ((vixLtp - vixPrev) / vixPrev) * 100 : null;
+
+  const activeCeLtp = isLive ? (liveData?.ce?.ltp ?? 0) : (lastRow?.['CE LTP'] ?? 0);
+  const activePeLtp = isLive ? (liveData?.pe?.ltp ?? 0) : (lastRow?.['PE LTP'] ?? 0);
+
+  const ceChangePct = isLive
+    ? (liveData?.ce?.change_pct ?? null)
+    : (() => {
+        const cePrev = cePrevCloseState ?? 0;
+        return activeCeLtp > 0 && cePrev > 0 ? ((activeCeLtp - cePrev) / cePrev) * 100 : null;
+      })();
+
+  const peChangePct = isLive
+    ? (liveData?.pe?.change_pct ?? null)
+    : (() => {
+        const pePrev = pePrevCloseState ?? 0;
+        return activePeLtp > 0 && pePrev > 0 ? ((activePeLtp - pePrev) / pePrev) * 100 : null;
+      })();
+
   const xTickInterval = chartData.length > 0 ? Math.max(0, Math.floor(chartData.length / 10) - 1) : 0;
 
   // Shared chart axes config
@@ -760,6 +797,8 @@ export default function OptionsCharts() {
               niftyChangePct={spotChangePct}
               vixPrice={vixLtp}
               vixChangePct={vixPct}
+              ceChangePct={ceChangePct}
+              peChangePct={peChangePct}
             />
           )}
 

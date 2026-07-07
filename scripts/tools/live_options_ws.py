@@ -257,8 +257,8 @@ def main():
                 if sk_key not in strikes_data:
                     strikes_data[sk_key] = {
                         'strike': meta['strike'],
-                        'ce': {'ltp': 0, 'oi': 0, 'volume': 0},
-                        'pe': {'ltp': 0, 'oi': 0, 'volume': 0},
+                        'ce': {'ltp': 0, 'oi': 0, 'volume': 0, 'prev_close': 0.0, 'change': 0.0, 'change_pct': 0.0},
+                        'pe': {'ltp': 0, 'oi': 0, 'volume': 0, 'prev_close': 0.0, 'change': 0.0, 'change_pct': 0.0},
                     }
 
                 tick = helper.live_data.get(sid)
@@ -266,6 +266,15 @@ def main():
                     ltp = _f(tick.get('LTP') or tick.get('last_price'))
                     oi  = int(tick.get('OI', 0) or tick.get('oi', 0) or 0)
                     vol = int(tick.get('volume', 0) or 0)
+                    
+                    prev_close = _f(tick.get('prev_close') or tick.get('close'))
+                    if prev_close == 0.0:
+                        ohlc = tick.get('ohlc') or {}
+                        prev_close = _f(ohlc.get('close'))
+                    
+                    change = ltp - prev_close if prev_close > 0 else 0.0
+                    change_pct = (change / prev_close * 100) if prev_close > 0 else 0.0
+
                     strikes_data[sk_key][meta['type'].lower()] = {
                         'ltp':    round(ltp, 2),
                         'oi':     oi,
@@ -273,6 +282,9 @@ def main():
                         'open':   round(_f(tick.get('open')), 2),
                         'high':   round(_f(tick.get('high')), 2),
                         'low':    round(_f(tick.get('low')), 2),
+                        'prev_close': round(prev_close, 2),
+                        'change':     round(change, 2),
+                        'change_pct': round(change_pct, 4),
                     }
 
             # ATM straddle premium

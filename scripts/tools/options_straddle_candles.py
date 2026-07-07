@@ -68,7 +68,7 @@ def _filter_last_day(df) -> tuple:
 def _find_last_trading_day(helper, ce_sid: str, pe_sid: str, interval: str, lookback: int = 7):
     """
     Fetch a date range in TWO API calls (not one per day) and slice out the
-    last trading day.  Returns (ce_df, pe_df, date_used).
+    last trading day.  Returns (ce_df, pe_df, date_used, ce_all, pe_all).
     """
     today      = date.today()
     from_date  = (today - timedelta(days=lookback)).strftime('%Y-%m-%d')
@@ -82,9 +82,46 @@ def _find_last_trading_day(helper, ce_sid: str, pe_sid: str, interval: str, look
 
     data_date = ce_date or pe_date
     if data_date is None:
-        return None, None, None
+        return None, None, None, None, None
 
-    return ce_df, pe_df, data_date
+    return ce_df, pe_df, data_date, ce_all, pe_all
+
+
+def _prev_day_close_from_intraday(raw_df, today_date_str: str) -> float:
+    try:
+        if raw_df is None or raw_df.empty:
+            return 0.0
+        # Determine timestamp column
+        tc = None
+        for c in ('start_Time', 'timestamp', 'time', 'date'):
+            if c in raw_df.columns:
+                tc = c
+                break
+        if tc is None:
+            tc = raw_df.columns[0]
+        
+        col = raw_df[tc]
+        dates = (pd.to_datetime(col, unit='s').dt.date
+                 if col.dtype in ('int64', 'float64')
+                 else pd.to_datetime(col, errors='coerce').dt.date)
+        prev_days = sorted(d for d in dates.unique() if str(d) < today_date_str)
+        if not prev_days:
+            return 0.0
+        prev_day = prev_days[-1]
+        prev_df = raw_df[dates == prev_day]
+        
+        # Determine close column
+        cc = None
+        for c in ('close', 'Close', 'c'):
+            if c in prev_df.columns:
+                cc = c
+                break
+        if cc is None:
+            cc = prev_df.columns[-1]
+            
+        return round(float(prev_df[cc].iloc[-1]), 2)
+    except Exception:
+        return 0.0
 
 
 def main():
@@ -116,7 +153,7 @@ def main():
     pe_sid = str(int(pe_opt['SECURITY_ID']))
 
     # Fetch candles: try today first, fall back up to 5 calendar days to find the last trading day
-    ce_df, pe_df, data_date = _find_last_trading_day(
+    ce_df, pe_df, data_date, ce_all, pe_all = _find_last_trading_day(
         helper, ce_sid, pe_sid, args.interval, lookback=5
     )
 
@@ -207,12 +244,17 @@ def main():
             'PE OI':    pe_oi,
         })
 
+    ce_prev = _prev_day_close_from_intraday(ce_all, data_date)
+    pe_prev = _prev_day_close_from_intraday(pe_all, data_date)
+
     print(json.dumps({
         'candles':   rows,
         'strike':    int(args.strike),
         'expiry':    args.expiry,
         'data_date': data_date,
         'is_today':  is_today,
+        'ce_prev_close': ce_prev,
+        'pe_prev_close': pe_prev,
     }))
 
 
