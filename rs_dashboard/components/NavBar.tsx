@@ -41,6 +41,7 @@ const NAV_GROUPS = [
     links: [
       { href: '/futures', label: 'Futures', desc: 'OI buildup & short/long coverage analysis' },
       { href: '/options', label: 'Options', desc: 'Max pain, PCR & live options chain' },
+      { href: '/options/analyzer', label: 'Option Analyzer', desc: 'Rank strikes based on technical indicators & OI change' },
       { href: '/iv-charts', label: 'IV Charts', desc: 'Implied Volatility history & skew' },
       { href: '/scalper', label: 'Scalper', desc: 'Multi-window active trading & scalping order ticket' },
       { href: '/straddle-analysis', label: 'Straddle Analysis', desc: 'ATM straddle premium patterns by weekday, DTE & regime' },
