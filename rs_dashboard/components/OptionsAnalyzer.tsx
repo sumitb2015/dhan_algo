@@ -36,7 +36,7 @@ interface AnalyzerResponse {
   strikes: StrikeRow[];
 }
 
-const UNDERLYINGS = ['NIFTY', 'BANKNIFTY', 'FINNIFTY'] as const;
+const UNDERLYINGS = ['NIFTY', 'BANKNIFTY'] as const;
 const INTERVALS = [
   { label: '1 Min', value: '1' },
   { label: '2 Min', value: '2' },
