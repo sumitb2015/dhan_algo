@@ -490,9 +490,11 @@ export default function OptionsBuildupTab({ expiry }: { expiry: string }) {
                 <th className={`${thCls} text-right  text-blue-200`}>LTP CHG</th>
                 <th className={`${thCls} text-right  text-blue-200`}>OI CHG%</th>
                 <th className={`${thCls} text-right  text-blue-300`}>CE OI</th>
+                <th className={`${thCls} text-right  text-blue-300`}>CE LTP</th>
                 {/* Center */}
                 <th className={`${thCls} text-center text-amber-300 border-x border-zinc-700`}>STRIKE</th>
                 {/* PE side */}
+                <th className={`${thCls} text-left   text-red-300`}>PE LTP</th>
                 <th className={`${thCls} text-left   text-red-300`}>PE OI</th>
                 <th className={`${thCls} text-left   text-red-200`}>OI CHG%</th>
                 <th className={`${thCls} text-left   text-red-200`}>LTP CHG</th>
@@ -541,6 +543,11 @@ export default function OptionsBuildupTab({ expiry }: { expiry: string }) {
                       {ceOI > 0 ? fmtOI(ceOI) : <span className="text-zinc-600">—</span>}
                     </td>
 
+                    {/* CE LTP */}
+                    <td className="px-3 py-2 text-right tabular-nums font-bold text-blue-100">
+                      {(row.ce.last_price ?? 0) > 0 ? `₹${row.ce.last_price!.toFixed(2)}` : <span className="text-zinc-600">—</span>}
+                    </td>
+
                     {/* Strike */}
                     <td className={`px-4 py-2 text-center font-bold tabular-nums border-x border-zinc-700 ${
                       isATM ? 'text-amber-300 text-sm' : 'text-zinc-100'
@@ -553,6 +560,11 @@ export default function OptionsBuildupTab({ expiry }: { expiry: string }) {
                           </span>
                         )}
                       </span>
+                    </td>
+
+                    {/* PE LTP */}
+                    <td className="px-3 py-2 text-left tabular-nums font-bold text-red-100">
+                      {(row.pe.last_price ?? 0) > 0 ? `₹${row.pe.last_price!.toFixed(2)}` : <span className="text-zinc-600">—</span>}
                     </td>
 
                     {/* PE OI */}
