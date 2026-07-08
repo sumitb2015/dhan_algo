@@ -9,11 +9,20 @@ const FETCH_SCRIPT = path.join(PROJECT_ROOT, 'scripts', 'tools', 'options_data_f
 const cache = new Map<string, { data: string[]; ts: number }>();
 const CACHE_TTL = 60 * 60 * 1000; // 1 hour
 
+// Today's date in IST, as YYYY-MM-DD — used to both scope the cache key
+// (so a stale entry can never survive a day rollover) and to filter out
+// any already-lapsed expiry dates the broker/cache might still hand back.
+function todayIST(): string {
+  return new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Kolkata' }).format(new Date());
+}
+
 export async function GET(request: NextRequest) {
   const { searchParams } = new URL(request.url);
   const underlying = (searchParams.get('underlying') ?? 'NIFTY').toUpperCase();
+  const today = todayIST();
+  const cacheKey = `${underlying}:${today}`;
 
-  const hit = cache.get(underlying);
+  const hit = cache.get(cacheKey);
   if (hit && Date.now() - hit.ts < CACHE_TTL) {
     return NextResponse.json({ success: true, data: hit.data });
   }
@@ -41,8 +50,8 @@ export async function GET(request: NextRequest) {
       return NextResponse.json({ success: false, error: parsed.error }, { status: 500 });
     }
 
-    const expiries = parsed.expiries ?? [];
-    if (expiries.length) cache.set(underlying, { data: expiries, ts: Date.now() });
+    const expiries = (parsed.expiries ?? []).filter((d) => d >= today);
+    if (expiries.length) cache.set(cacheKey, { data: expiries, ts: Date.now() });
     return NextResponse.json({ success: true, data: expiries });
   } catch (err) {
     const stderr = (result.stderr ?? '').slice(0, 500);

@@ -1,4 +1,4 @@
-﻿import { NextRequest, NextResponse } from 'next/server';
+import { NextRequest, NextResponse } from 'next/server';
 import path from 'path';
 import fs from 'fs';
 import { execSync, spawn } from 'child_process';
@@ -23,13 +23,14 @@ function readJson(file: string): any | null {
 function isPidRunning(pid: number): boolean {
   try {
     if (process.platform === 'win32') {
-      const out = execSync(`tasklist /FI "PID eq ${pid}"`, {
+      const out = execSync(`tasklist /FI "PID eq ${pid}" /FO CSV /NH`, {
         encoding: 'utf8', stdio: ['pipe', 'pipe', 'ignore'], windowsHide: true,
       });
-      return out.includes(String(pid));
+      const lower = out.toLowerCase();
+      return lower.includes('python') && lower.includes(pid.toString());
     }
-    execSync(`ps -p ${pid}`, { stdio: 'ignore' });
-    return true;
+    const out = execSync(`ps -p ${pid} -o comm=`, { encoding: 'utf8', stdio: ['pipe', 'pipe', 'ignore'] });
+    return out.toLowerCase().includes('python');
   } catch {
     return false;
   }

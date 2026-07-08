@@ -36,6 +36,7 @@ HISTORY_FILE     = os.path.join(DEBUG_DIR, 'live_indices_history.json')
 STATUS_FILE      = os.path.join(DEBUG_DIR, 'live_indices_status.json')
 STOP_TRIGGER     = os.path.join(DEBUG_DIR, 'live_indices_stop.trigger')
 SELECTION_FILE   = os.path.join(DEBUG_DIR, 'live_indices_selection.json')
+SETTINGS_FILE    = os.path.join(DEBUG_DIR, 'live_indices_settings.json')
 
 # MarketFeed segment/type constants (from dhanhq SDK)
 IDX        = 0   # Index segment
@@ -90,6 +91,19 @@ def read_selection() -> set | None:
     return None
 
 
+def read_interval(default: float = 20.0) -> float:
+    """Read the tick interval (seconds) from the settings file. Clamped 1–300."""
+    try:
+        if os.path.exists(SETTINGS_FILE):
+            with open(SETTINGS_FILE) as f:
+                data = json.loads(f.read())
+            interval = float(data.get('interval', default))
+            return max(1.0, min(300.0, interval))
+    except Exception:
+        pass
+    return default
+
+
 def atomic_write(path: str, data: dict):
     tmp = path + '.tmp'
     with open(tmp, 'w') as f:
@@ -115,8 +129,8 @@ def ist_time() -> str:
 
 def main():
     parser = argparse.ArgumentParser(description='Live indices WebSocket bridge')
-    parser.add_argument('--interval', type=float, default=2.0,
-                        help='Write interval in seconds (default: 2)')
+    parser.add_argument('--interval', type=float, default=20.0,
+                        help='Write interval in seconds (default: 20; overridden by settings file)')
     args = parser.parse_args()
 
     os.makedirs(DEBUG_DIR, exist_ok=True)
@@ -181,6 +195,15 @@ def main():
                 last_known = dict(existing.get('ltps', {}))
                 print(f'[live_indices_ws] Restored {len(opens)} opens, '
                       f'{len(ticks)} ticks, {len(last_known)} last-known LTPs', flush=True)
+            else:
+                # New trading day — explicitly delete stale data to avoid leakage
+                old_date = existing.get('session_date', 'unknown')
+                print(f'[live_indices_ws] New session day ({old_date} -> {session_date}) '
+                      f'- clearing history file.', flush=True)
+                try:
+                    os.remove(HISTORY_FILE)
+                except OSError as rm_err:
+                    print(f'[live_indices_ws] WARNING: could not delete old history: {rm_err}', flush=True)
     except Exception as e:
         print(f'[live_indices_ws] WARNING: could not restore history: {e}', flush=True)
 
@@ -253,7 +276,9 @@ def main():
             })
             write_status('RUNNING', subscribed=len(active_symbols), started_at=started_at)
 
-            time.sleep(args.interval)
+            # Re-read interval each cycle so UI changes take effect without restart
+            interval = read_interval(default=args.interval)
+            time.sleep(interval)
 
     except KeyboardInterrupt:
         print('[live_indices_ws] KeyboardInterrupt - shutting down.', flush=True)

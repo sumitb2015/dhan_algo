@@ -1,4 +1,4 @@
-﻿import { NextRequest, NextResponse } from 'next/server';
+import { NextRequest, NextResponse } from 'next/server';
 import path from 'path';
 import fs from 'fs';
 import { execSync, spawn } from 'child_process';
@@ -49,17 +49,15 @@ const STRATEGIES_METADATA: Record<string, { name: string; path: string }> = {
 function isPidRunning(pid: number): boolean {
   try {
     if (process.platform === 'win32') {
-      const output = execSync(`tasklist /FI "PID eq ${pid}"`, {
-        encoding: 'utf8',
-        stdio: ['pipe', 'pipe', 'ignore'],
-        windowsHide: true,
+      const out = execSync(`tasklist /FI "PID eq ${pid}" /FO CSV /NH`, {
+        encoding: 'utf8', stdio: ['pipe', 'pipe', 'ignore'], windowsHide: true,
       });
-      return output.toLowerCase().includes(pid.toString());
-    } else {
-      execSync(`ps -p ${pid}`, { stdio: 'ignore' });
-      return true;
+      const lower = out.toLowerCase();
+      return lower.includes('python') && lower.includes(pid.toString());
     }
-  } catch (e) {
+    const out = execSync(`ps -p ${pid} -o comm=`, { encoding: 'utf8', stdio: ['pipe', 'pipe', 'ignore'] });
+    return out.toLowerCase().includes('python');
+  } catch {
     return false;
   }
 }

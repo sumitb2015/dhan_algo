@@ -11,6 +11,9 @@ const HISTORY_FILE   = path.join(DEBUG_DIR, 'live_indices_history.json');
 const STATUS_FILE    = path.join(DEBUG_DIR, 'live_indices_status.json');
 const STOP_TRIGGER   = path.join(DEBUG_DIR, 'live_indices_stop.trigger');
 const SELECTION_FILE = path.join(DEBUG_DIR, 'live_indices_selection.json');
+const SETTINGS_FILE  = path.join(DEBUG_DIR, 'live_indices_settings.json');
+
+const DEFAULT_INTERVAL = 20; // seconds
 
 function readJson(file: string): any | null {
   try {
@@ -24,22 +27,24 @@ function readJson(file: string): any | null {
 function isPidRunning(pid: number): boolean {
   try {
     if (process.platform === 'win32') {
-      const out = execSync(`tasklist /FI "PID eq ${pid}"`, {
+      const out = execSync(`tasklist /FI "PID eq ${pid}" /FO CSV /NH`, {
         encoding: 'utf8', stdio: ['pipe', 'pipe', 'ignore'], windowsHide: true,
       });
-      return out.includes(String(pid));
+      const lower = out.toLowerCase();
+      return lower.includes('python') && lower.includes(pid.toString());
     }
-    execSync(`ps -p ${pid}`, { stdio: 'ignore' });
-    return true;
+    const out = execSync(`ps -p ${pid} -o comm=`, { encoding: 'utf8', stdio: ['pipe', 'pipe', 'ignore'] });
+    return out.toLowerCase().includes('python');
   } catch {
     return false;
   }
 }
 
-/** GET — return history + bridge status */
+/** GET — return history + bridge status + settings */
 export async function GET() {
-  const history = readJson(HISTORY_FILE);
-  const status  = readJson(STATUS_FILE);
+  const history  = readJson(HISTORY_FILE);
+  const status   = readJson(STATUS_FILE);
+  const settings = readJson(SETTINGS_FILE) ?? { interval: DEFAULT_INTERVAL };
 
   if (status && status.pid && status.status === 'RUNNING') {
     if (!isPidRunning(Number(status.pid))) {
@@ -49,8 +54,9 @@ export async function GET() {
 
   return NextResponse.json({
     success: true,
-    status:  status ?? { status: 'STOPPED', subscribed: 0 },
-    history: history ?? null,
+    status:   status ?? { status: 'STOPPED', subscribed: 0 },
+    history:  history ?? null,
+    settings: { interval: settings.interval ?? DEFAULT_INTERVAL },
   });
 }
 
@@ -73,6 +79,15 @@ export async function POST(request: NextRequest) {
     }
     fs.writeFileSync(SELECTION_FILE, JSON.stringify({ selected: symbols }));
     return NextResponse.json({ success: true, message: 'Selection updated' });
+  }
+
+  if (action === 'settings') {
+    const interval = Number(body.interval);
+    if (!isFinite(interval) || interval < 1 || interval > 300) {
+      return NextResponse.json({ success: false, error: 'interval must be 1–300 seconds' }, { status: 400 });
+    }
+    fs.writeFileSync(SETTINGS_FILE, JSON.stringify({ interval }));
+    return NextResponse.json({ success: true, message: 'Settings saved', interval });
   }
 
   if (action === 'start') {

@@ -6,7 +6,7 @@ import {
   ResponsiveContainer,
 } from 'recharts';
 import type { TooltipContentProps } from 'recharts';
-import { Activity, Play, Square, RefreshCw, WifiOff, ChevronDown } from 'lucide-react';
+import { Activity, Play, Square, RefreshCw, WifiOff, ChevronDown, Settings2, Check } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -308,6 +308,52 @@ export default function LiveNormalizedTab() {
   const [currentIST, setCurrentIST]     = useState<number>(istSecs);
   const initializedRef                  = useRef(false);
 
+  // ── Settings state ────────────────────────────────────────────────────────
+  const [settingsOpen, setSettingsOpen]   = useState(false);
+  const [interval, setIntervalVal]        = useState(20);   // displayed value
+  const [draftInterval, setDraftInterval] = useState(20);   // editing draft
+  const [settingsSaved, setSettingsSaved] = useState(false);
+  const settingsRef                       = useRef<HTMLDivElement>(null);
+
+  // Close settings panel on outside click
+  useEffect(() => {
+    if (!settingsOpen) return;
+    const handler = (e: MouseEvent) => {
+      if (settingsRef.current && !settingsRef.current.contains(e.target as Node)) {
+        setSettingsOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, [settingsOpen]);
+
+  // Load settings from API on mount
+  useEffect(() => {
+    fetch('/api/live-indices')
+      .then(r => r.json())
+      .then(j => {
+        if (j.success && j.settings?.interval) {
+          setIntervalVal(j.settings.interval);
+          setDraftInterval(j.settings.interval);
+        }
+      })
+      .catch(() => {});
+  }, []);
+
+  const saveSettings = useCallback(async () => {
+    const clamped = Math.max(1, Math.min(300, Math.round(draftInterval)));
+    await fetch('/api/live-indices', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'settings', interval: clamped }),
+    }).catch(() => {});
+    setIntervalVal(clamped);
+    setDraftInterval(clamped);
+    setSettingsSaved(true);
+    setTimeout(() => { setSettingsSaved(false); setSettingsOpen(false); }, 1000);
+  }, [draftInterval]);
+
+
   // ── Update IST clock every 30 s for market-hours gating ───────────────────
   useEffect(() => {
     const id = setInterval(() => setCurrentIST(istSecs()), 30_000);
@@ -461,6 +507,8 @@ export default function LiveNormalizedTab() {
             : isStarting ? 'Connecting to indices…'
             : 'Indices feed offline'}
         </span>
+        <span className="text-[10px] text-zinc-700 font-mono">every {interval}s</span>
+
 
         <button
           onClick={() => sendAction(isLive || isStarting ? 'stop' : 'start')}
@@ -502,6 +550,93 @@ export default function LiveNormalizedTab() {
             DATA: {isLive ? <span className="text-emerald-500">LIVE</span> : <span className="text-zinc-500">OFFLINE</span>}
           </span>
         )}
+
+        {/* ── Settings button + panel ── */}
+        <div ref={settingsRef} className="relative ml-auto">
+          <button
+            onClick={() => { setSettingsOpen(v => !v); setDraftInterval(interval); }}
+            className={cn(
+              'flex items-center gap-1.5 px-2.5 py-1 rounded-lg border text-[11px] font-semibold transition-all',
+              settingsOpen
+                ? 'border-violet-500/40 bg-violet-500/10 text-violet-300'
+                : 'border-zinc-700 bg-zinc-900 text-zinc-500 hover:text-zinc-300 hover:border-zinc-600',
+            )}
+            title="Feed settings"
+          >
+            <Settings2 className="h-3 w-3" />
+            <span className="hidden sm:inline">Settings</span>
+          </button>
+
+          {settingsOpen && (
+            <div className="absolute right-0 top-full mt-1.5 z-50 w-72 bg-zinc-900 border border-zinc-700 rounded-xl shadow-2xl p-4 flex flex-col gap-3">
+              <div className="text-[11px] font-bold text-zinc-200 tracking-wide">Feed Settings</div>
+
+              {/* Interval control */}
+              <div className="flex flex-col gap-2">
+                <div className="flex items-center justify-between">
+                  <label className="text-[11px] text-zinc-400">Tick interval</label>
+                  <div className="flex items-center gap-1.5">
+                    <input
+                      type="number"
+                      min={1} max={300}
+                      value={draftInterval}
+                      onChange={e => setDraftInterval(Number(e.target.value))}
+                      className="w-16 text-right bg-zinc-800 border border-zinc-700 rounded-md px-2 py-0.5 text-[12px] font-mono text-zinc-200 focus:outline-none focus:border-violet-500"
+                    />
+                    <span className="text-[11px] text-zinc-500">sec</span>
+                  </div>
+                </div>
+
+                {/* Slider */}
+                <input
+                  type="range"
+                  min={1} max={300} step={1}
+                  value={draftInterval}
+                  onChange={e => setDraftInterval(Number(e.target.value))}
+                  className="w-full accent-violet-500 cursor-pointer"
+                />
+
+                {/* Presets */}
+                <div className="flex gap-1.5 flex-wrap">
+                  {[5, 10, 20, 30, 60].map(v => (
+                    <button
+                      key={v}
+                      onClick={() => setDraftInterval(v)}
+                      className={cn(
+                        'px-2 py-0.5 rounded-md text-[10px] font-semibold border transition-all',
+                        draftInterval === v
+                          ? 'bg-violet-500/20 border-violet-500/40 text-violet-300'
+                          : 'bg-zinc-800 border-zinc-700 text-zinc-500 hover:text-zinc-300',
+                      )}
+                    >
+                      {v}s
+                    </button>
+                  ))}
+                </div>
+
+                <p className="text-[10px] text-zinc-600 leading-tight">
+                  How often the bridge snapshots LTPs to the history file.
+                  Changes take effect on the next tick without restarting the feed.
+                </p>
+              </div>
+
+              {/* Save button */}
+              <button
+                onClick={saveSettings}
+                className={cn(
+                  'flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-lg border text-[11px] font-semibold transition-all',
+                  settingsSaved
+                    ? 'bg-emerald-500/15 border-emerald-500/30 text-emerald-400'
+                    : 'bg-violet-500/15 border-violet-500/30 text-violet-300 hover:bg-violet-500/25',
+                )}
+              >
+                {settingsSaved
+                  ? <><Check className="h-3 w-3" /> Saved!</>
+                  : 'Apply'}
+              </button>
+            </div>
+          )}
+        </div>
       </div>
 
       {/* ── Offline banner ── */}

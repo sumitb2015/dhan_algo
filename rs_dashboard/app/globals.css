@@ -46,7 +46,22 @@
   --radius-2xl: calc(var(--radius) * 1.8);
   --radius-3xl: calc(var(--radius) * 2.2);
   --radius-4xl: calc(var(--radius) * 2.6);
+
+  /*
+   * Zinc color overrides for dark-background readability.
+   * Default zinc-500 (#71717a) has poor contrast on near-black backgrounds.
+   * Shift the mid-range steps up so secondary/muted text is clearly legible.
+   *
+   *  zinc-400: #a1a1aa  → keep (used for active labels)
+   *  zinc-500: bumped from #71717a → #a1a1aa  (was zinc-400, now the new "muted")
+   *  zinc-600: bumped from #52525b → #71717a  (was zinc-500, now the new "subtle muted")
+   *  zinc-700: bumped from #3f3f46 → #52525b  (was zinc-600, keeps border/divider feel)
+   */
+  --color-zinc-500: #a1a1aa;
+  --color-zinc-600: #71717a;
+  --color-zinc-700: #52525b;
 }
+
 
 body {
   background-color: #030303;
