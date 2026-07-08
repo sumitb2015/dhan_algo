@@ -169,15 +169,18 @@ def main():
     today = date.today().strftime('%Y-%m-%d')
 
     for symbol, kind in INSTRUMENTS.items():
-        df, sym_date, err = _fetch_symbol_candles(helper, symbol, kind)
-        if err:
-            errors[symbol] = err
-            continue
-        rows = _extract_rows(df)
-        series[symbol] = _normalize_series(rows)
-        if data_date is None:
-            data_date = sym_date
-            is_today_flag = sym_date == today
+        try:
+            df, sym_date, err = _fetch_symbol_candles(helper, symbol, kind)
+            if err:
+                errors[symbol] = err
+                continue
+            rows = _extract_rows(df)
+            series[symbol] = _normalize_series(rows)
+            if data_date is None:
+                data_date = sym_date
+                is_today_flag = sym_date == today
+        except Exception as exc:
+            errors[symbol] = f'Unexpected error: {exc}'
 
     if not series:
         print(json.dumps({'success': False, 'error': 'Could not fetch candles for any instrument', 'errors': errors}))
