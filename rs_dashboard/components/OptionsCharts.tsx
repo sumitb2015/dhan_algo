@@ -318,10 +318,12 @@ export default function OptionsCharts() {
   }, [expiry]);
 
   // ── Fetch today's 1-min candles (when bridge is stopped) ──────────
-  const fetchCandles = useCallback((strike: number, exp: string, interval: string) => {
-    setCandleData([]);
-    setCandleError('');
-    setCandleLoading(true);
+  const fetchCandles = useCallback((strike: number, exp: string, interval: string, silent = false) => {
+    if (!silent) {
+      setCandleData([]);
+      setCandleError('');
+      setCandleLoading(true);
+    }
 
     fetch(`/api/options/candles?expiry=${exp}&strike=${strike}&interval=${interval}`)
       .then(r => r.json())
@@ -340,12 +342,16 @@ export default function OptionsCharts() {
           setCandleIsToday(j.isToday ?? true);
           if (j.ce_prev_close !== undefined) setCePrevCloseState(j.ce_prev_close);
           if (j.pe_prev_close !== undefined) setPePrevCloseState(j.pe_prev_close);
-        } else {
+        } else if (!silent) {
           setCandleError(j.error ?? 'No candle data returned');
         }
       })
-      .catch(e => setCandleError(String(e)))
-      .finally(() => setCandleLoading(false));
+      .catch(e => {
+        if (!silent) setCandleError(String(e));
+      })
+      .finally(() => {
+        if (!silent) setCandleLoading(false);
+      });
   }, []);
 
   const pollDownload = useCallback(async () => {
@@ -388,6 +394,19 @@ export default function OptionsCharts() {
     if (!selectedStrike || !expiry) return;
     fetchCandles(selectedStrike, expiry, candleInterval);
   }, [selectedStrike, expiry, candleInterval, bridgeStatus.status, fetchCandles]);
+
+  // Poll candle data when not in live and viewing today's data
+  useEffect(() => {
+    if (bridgeStatus.status === 'RUNNING') return;
+    if (!selectedStrike || !expiry || !candleIsToday) return;
+
+    const ms = parseInt(candleInterval, 10) * 60_000;
+    const intervalId = setInterval(() => {
+      fetchCandles(selectedStrike, expiry, candleInterval, true);
+    }, ms);
+
+    return () => clearInterval(intervalId);
+  }, [selectedStrike, expiry, candleInterval, bridgeStatus.status, candleIsToday, fetchCandles]);
 
   // Seed live chart with today's 1-min candles from 9:15 AM when bridge is running.
   // Refreshes every 60 s (matching server-side cache TTL) so newly closed 1-min
@@ -803,6 +822,7 @@ export default function OptionsCharts() {
               history={history}
               candleInterval={candleInterval}
               atm={atm}
+              candleIsToday={candleIsToday}
             />
           )}
 

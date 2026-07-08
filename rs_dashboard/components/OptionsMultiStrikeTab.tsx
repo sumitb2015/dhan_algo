@@ -45,6 +45,7 @@ interface Props {
   history: HistoryPoint[];
   candleInterval: '1' | '5';
   atm: number;
+  candleIsToday?: boolean;
 }
 
 // ─── Constants ────────────────────────────────────────────────────
@@ -106,13 +107,9 @@ function OITooltip({ active, payload, label }: {
   );
 }
 
-// ─── Empty state ──────────────────────────────────────────────────
+// ─── Chart Loading / Empty State ──────────────────────────────────
 
-function EmptyState({ isLive, isLoading, hasStrikes }: {
-  isLive: boolean;
-  isLoading: boolean;
-  hasStrikes: boolean;
-}) {
+function ChartPlaceholder({ isLive, isLoading, hasStrikes }: { isLive: boolean; isLoading: boolean; hasStrikes: boolean }) {
   if (!hasStrikes) {
     return (
       <div className="flex items-center justify-center h-[360px]">
@@ -122,16 +119,13 @@ function EmptyState({ isLive, isLoading, hasStrikes }: {
   }
   if (isLoading || (isLive && !isLoading)) {
     return (
-      <div className="flex flex-col items-center justify-center h-[360px] gap-3">
+      <div className="flex flex-col items-center justify-center h-[360px] gap-2">
         <div className={`w-6 h-6 border-2 rounded-full animate-spin ${
           isLive ? 'border-emerald-700 border-t-emerald-400' : 'border-zinc-700 border-t-zinc-400'
         }`} />
         <p className="text-sm text-zinc-300 font-medium">
           {isLive ? 'Waiting for live history…' : 'Loading OI data…'}
         </p>
-        {isLive && (
-          <p className="text-xs text-zinc-500">History accumulates every 2 s once the bridge is running</p>
-        )}
       </div>
     );
   }
@@ -145,7 +139,7 @@ function EmptyState({ isLive, isLoading, hasStrikes }: {
 // ─── Main component ───────────────────────────────────────────────
 
 export default function OptionsMultiStrikeTab({
-  expiry, isLive, quotes, history, candleInterval, atm,
+  expiry, isLive, quotes, history, candleInterval, atm, candleIsToday,
 }: Props) {
   const [selectedStrikes, setSelectedStrikes] = useState<Set<number>>(new Set());
   const [strikeCandleData, setStrikeCandleData] = useState<Record<string, CandleRow[]>>({});
@@ -211,6 +205,41 @@ export default function OptionsMultiStrikeTab({
       });
     });
   }, [selectedStrikes, isLive, expiry, candleInterval, strikeCandleData]);
+
+  // Poll/refresh candle data when not live and viewing today's data
+  useEffect(() => {
+    if (isLive || !expiry || !candleIsToday) return;
+
+    const ms = parseInt(candleInterval, 10) * 60_000;
+    const intervalId = setInterval(() => {
+      const strikesToFetch = [...selectedStrikes];
+      if (!strikesToFetch.length) return;
+
+      Promise.all(
+        strikesToFetch.map(sk =>
+          fetch(`/api/options/candles?expiry=${expiry}&strike=${sk}&interval=${candleInterval}`)
+            .then(r => r.json())
+            .then((j: { success: boolean; data?: CandleRow[] }) => ({
+              strike: sk,
+              rows: (j.success && j.data) ? j.data : ([] as CandleRow[]),
+            }))
+            .catch(() => ({ strike: sk, rows: [] as CandleRow[] }))
+        )
+      ).then(results => {
+        setStrikeCandleData(prev => {
+          const next = { ...prev };
+          results.forEach(({ strike, rows }) => {
+            if (rows.length > 0) {
+              next[String(strike)] = rows;
+            }
+          });
+          return next;
+        });
+      });
+    }, ms);
+
+    return () => clearInterval(intervalId);
+  }, [selectedStrikes, isLive, expiry, candleInterval, candleIsToday]);
 
   // Sorted selected strikes (stable order for consistent color assignment)
   const orderedStrikes = useMemo(
@@ -436,7 +465,7 @@ export default function OptionsMultiStrikeTab({
               </LineChart>
             </ResponsiveContainer>
           ) : (
-            <EmptyState isLive={isLive} isLoading={isLoading} hasStrikes={orderedStrikes.length > 0} />
+            <ChartPlaceholder isLive={isLive} isLoading={isLoading} hasStrikes={orderedStrikes.length > 0} />
           )}
         </div>
       ) : (
@@ -478,7 +507,7 @@ export default function OptionsMultiStrikeTab({
                 </LineChart>
               </ResponsiveContainer>
             ) : (
-              <EmptyState isLive={isLive} isLoading={isLoading} hasStrikes={orderedStrikes.length > 0} />
+              <ChartPlaceholder isLive={isLive} isLoading={isLoading} hasStrikes={orderedStrikes.length > 0} />
             )}
           </div>
 
@@ -518,7 +547,7 @@ export default function OptionsMultiStrikeTab({
                 </LineChart>
               </ResponsiveContainer>
             ) : (
-              <EmptyState isLive={isLive} isLoading={isLoading} hasStrikes={orderedStrikes.length > 0} />
+              <ChartPlaceholder isLive={isLive} isLoading={isLoading} hasStrikes={orderedStrikes.length > 0} />
             )}
           </div>
         </>
