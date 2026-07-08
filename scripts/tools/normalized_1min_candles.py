@@ -135,23 +135,77 @@ def _extract_rows(df):
     return rows
 
 
-def _normalize_series(rows):
+def _normalize_series(rows, baseline=None):
     """
     rows: list of {"time","open","close"} sorted ascending by time.
+    baseline: if provided, this value is used to compute percentage change.
+              Otherwise, the FIRST row's open is used as the baseline.
     Returns list of {"time","close","pct"} where pct is % change of close
-    vs the FIRST row's open (the instrument's own session-open baseline).
-    A zero/missing first open degrades to flat 0.0% rather than raising.
+    vs the baseline.
+    A zero/missing baseline/open degrades to flat 0.0% rather than raising.
     """
     if not rows:
         return []
-    base_open = rows[0]['open']
-    if not base_open:
+    base = baseline if baseline is not None else rows[0]['open']
+    if not base:
         return [{'time': r['time'], 'close': round(r['close'], 4), 'pct': 0.0} for r in rows]
     out = []
     for r in rows:
-        pct = (r['close'] - base_open) / base_open * 100
+        pct = (r['close'] - base) / base * 100
         out.append({'time': r['time'], 'close': round(r['close'], 4), 'pct': round(pct, 4)})
     return out
+
+
+def _get_prev_close(helper, symbol, kind, data_date):
+    """
+    Robustly fetch the previous trading day's close price strictly prior to data_date.
+    Converts daily history timestamps to Asia/Kolkata timezone to determine correct trading dates.
+    """
+    resolved = _resolve(helper, symbol, kind)
+    if not resolved:
+        return None
+
+    from datetime import datetime, timedelta
+    try:
+        dt = datetime.strptime(data_date, "%Y-%m-%d").date()
+    except ValueError:
+        return None
+
+    from_date = (dt - timedelta(days=10)).strftime("%Y-%m-%d")
+    to_date = data_date
+
+    df = helper.get_historical_data(
+        security_id=resolved['security_id'],
+        exchange_segment=resolved['exchange_segment'],
+        instrument_type=resolved['instrument_type'],
+        from_date=from_date,
+        to_date=to_date,
+        interval="DAILY"
+    )
+    if df.empty:
+        return None
+
+    col_map = {}
+    for col in df.columns:
+        col_lower = col.lower()
+        if col_lower in ("close", "c"): col_map[col] = "close"
+        elif col_lower in ("timestamp", "time", "date"): col_map[col] = "timestamp"
+    df = df.rename(columns=col_map)
+
+    if "close" not in df.columns or "timestamp" not in df.columns:
+        return None
+
+    import pandas as pd
+    # Convert timestamps to Asia/Kolkata timezone date strings
+    df['date_str'] = pd.to_datetime(df['timestamp'], unit='s', utc=True).dt.tz_convert('Asia/Kolkata').dt.strftime('%Y-%m-%d')
+
+    prior = df[df['date_str'] < data_date]
+    if prior.empty:
+        return None
+
+    prior = prior.sort_values('date_str')
+    prev_candle = prior.iloc[-1]
+    return float(prev_candle['close'])
 
 
 def main():
@@ -175,7 +229,21 @@ def main():
                 errors[symbol] = err
                 continue
             rows = _extract_rows(df)
-            series[symbol] = _normalize_series(rows)
+
+            # Fetch previous day close (PDC) for NIFTY and BANKNIFTY
+            baseline = None
+            if symbol in ('NIFTY', 'BANKNIFTY') and sym_date:
+                try:
+                    prev_close = _get_prev_close(helper, symbol, kind, sym_date)
+                    if prev_close:
+                        baseline = prev_close
+                        sys.stderr.write(f"[normalized_1min_candles] {symbol} baseline: {baseline} (robust prev close prior to {sym_date})\n")
+                    else:
+                        sys.stderr.write(f"[normalized_1min_candles] Warning: Could not get robust prev close for {symbol}, using session open.\n")
+                except Exception as ex:
+                    sys.stderr.write(f"[normalized_1min_candles] Error calculating robust prev close for {symbol}: {ex}, using session open.\n")
+
+            series[symbol] = _normalize_series(rows, baseline)
             if data_date is None:
                 data_date = sym_date
                 is_today_flag = sym_date == today

@@ -61,16 +61,74 @@ export default function NormalizedIntradayTab() {
 
   const merged = useMemo(() => {
     if (!data?.series) return [];
+    
+    // 1. Gather all unique time strings from the fetched series
     const allTimes = new Set<string>();
     for (const sym of SYMBOLS) {
       (data.series[sym] ?? []).forEach((p) => allTimes.add(p.time));
     }
-    const sortedTimes = [...allTimes].sort();
+    const sortedFetchedTimes = [...allTimes].sort();
+
+    // 2. Determine startTime and endTime
+    let startTime = '09:15';
+    if (sortedFetchedTimes.length > 0 && sortedFetchedTimes[0] < startTime) {
+      startTime = sortedFetchedTimes[0];
+    }
+    
+    let endTime = '15:30';
+    if (sortedFetchedTimes.length > 0 && sortedFetchedTimes[sortedFetchedTimes.length - 1] > endTime) {
+      endTime = sortedFetchedTimes[sortedFetchedTimes.length - 1];
+    }
+
+    if (data.is_today) {
+      const getISTTimeStr = (): string => {
+        const d = new Date();
+        return d.toLocaleTimeString('en-US', {
+          timeZone: 'Asia/Kolkata',
+          hour: '2-digit',
+          minute: '2-digit',
+          hour12: false,
+        });
+      };
+      const istNow = getISTTimeStr();
+      const maxLimit = '23:30';
+      const targetEnd = istNow > maxLimit ? maxLimit : istNow;
+      if (targetEnd > startTime) {
+        endTime = targetEnd;
+      } else {
+        endTime = startTime;
+      }
+    }
+
+    // 3. Generate all minutes in sequence from startTime to endTime
+    const minutesBetween = (start: string, end: string): string[] => {
+      const res: string[] = [];
+      let [sh, sm] = start.split(':').map(Number);
+      const [eh, em] = end.split(':').map(Number);
+      
+      while (sh < eh || (sh === eh && sm <= em)) {
+        const hh = String(sh).padStart(2, '0');
+        const mm = String(sm).padStart(2, '0');
+        res.push(`${hh}:${mm}`);
+        sm++;
+        if (sm >= 60) {
+          sm = 0;
+          sh++;
+        }
+      }
+      return res;
+    };
+    
+    const timeRange = minutesBetween(startTime, endTime);
+
+    // 4. Map existing series data points by symbol and time
     const bySymTime: Record<string, Map<string, number>> = {};
     for (const sym of SYMBOLS) {
       bySymTime[sym] = new Map((data.series[sym] ?? []).map((p) => [p.time, p.pct]));
     }
-    return sortedTimes.map((t) => {
+
+    // 5. Build the final merged array containing every minute in the range
+    return timeRange.map((t) => {
       const row: Record<string, string | number> = { time: t };
       for (const sym of SYMBOLS) {
         const v = bySymTime[sym].get(t);
@@ -207,7 +265,7 @@ export default function NormalizedIntradayTab() {
 
       {hasAnyData && (
         <div className="text-[10px] text-zinc-700 text-right px-1">
-          {merged.length} candles · normalised to each instrument&apos;s session open
+          {merged.length} candles · Nifty &amp; Bank Nifty compared to previous close, Crude Oil compared to session open
         </div>
       )}
     </div>

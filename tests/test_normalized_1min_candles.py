@@ -30,8 +30,21 @@ def test_normalize_series_zero_open_does_not_crash():
     assert result == [{'time': '09:15', 'close': 5.0, 'pct': 0.0}]
 
 
+def test_normalize_series_with_baseline():
+    rows = [
+        {'time': '09:15', 'open': 100.0, 'close': 100.0},
+        {'time': '09:16', 'open': 100.5, 'close': 101.0},
+        {'time': '09:17', 'open': 101.0, 'close': 99.0},
+    ]
+    result = _normalize_series(rows, baseline=98.0)
+    assert abs(result[0]['pct'] - 2.0408) < 0.001, result
+    assert abs(result[1]['pct'] - 3.0612) < 0.001, result
+    assert abs(result[2]['pct'] - 1.0204) < 0.001, result
+
+
 if __name__ == '__main__':
     test_normalize_series_basis_is_first_open()
     test_normalize_series_empty_input()
     test_normalize_series_zero_open_does_not_crash()
+    test_normalize_series_with_baseline()
     print('OK - all normalized_1min_candles tests passed')
