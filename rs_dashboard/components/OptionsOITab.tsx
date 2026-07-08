@@ -11,6 +11,7 @@ import {
 interface OcSide {
   last_price?: number;
   oi?: number;
+  previous_oi?: number;
   implied_volatility?: number;
   greeks?: { iv?: number };
 }
@@ -135,10 +136,8 @@ export default function OptionsOITab({ expiry }: { expiry: string }) {
   const [lastUpdated, setLastUpdated] = useState<string | null>(null);
   const [loading, setLoading]         = useState(false);
   const [error, setError]             = useState('');
-  const [pollMs, setPollMs]           = useState<PollMs>(20_000);
+  const [pollMs, setPollMs]           = useState<PollMs>(30_000);
 
-  // Snapshot of OI from the previous poll, keyed by strike
-  const prevOIRef = useRef<Map<number, { ceOI: number; peOI: number }>>(new Map());
   const intervalRef = useRef<NodeJS.Timeout | null>(null);
 
   const fetchOI = useCallback(async () => {
@@ -165,13 +164,14 @@ export default function OptionsOITab({ expiry }: { expiry: string }) {
           const strike = Number(k);
           const ceOI   = v.ce?.oi ?? 0;
           const peOI   = v.pe?.oi ?? 0;
-          const prev   = prevOIRef.current.get(strike);
+          const cePrev = v.ce?.previous_oi ?? 0;
+          const pePrev = v.pe?.previous_oi ?? 0;
           return {
             strike,
             ceOI,
             peOI,
-            ceDelta: prev != null ? ceOI - prev.ceOI : 0,
-            peDelta: prev != null ? peOI - prev.peOI : 0,
+            ceDelta: ceOI - cePrev,
+            peDelta: peOI - pePrev,
             isATM:   strike === atmStrike,
           };
         })
@@ -181,11 +181,6 @@ export default function OptionsOITab({ expiry }: { expiry: string }) {
           return (r.ceOI > 0 || r.peOI > 0);
         })
         .sort((a, b) => a.strike - b.strike);
-
-      // Persist current snapshot for next delta
-      const nextPrev = new Map<number, { ceOI: number; peOI: number }>();
-      newRows.forEach(r => nextPrev.set(r.strike, { ceOI: r.ceOI, peOI: r.peOI }));
-      prevOIRef.current = nextPrev;
 
       setSpot(spotPrice);
       setAtm(atmStrike);
@@ -203,7 +198,6 @@ export default function OptionsOITab({ expiry }: { expiry: string }) {
 
   useEffect(() => {
     if (!expiry) return;
-    prevOIRef.current = new Map();
     setRows([]);
     setSpot(0);
     setAtm(0);
@@ -218,7 +212,6 @@ export default function OptionsOITab({ expiry }: { expiry: string }) {
   const totalCeOI = rows.reduce((s, r) => s + r.ceOI, 0);
   const totalPeOI = rows.reduce((s, r) => s + r.peOI, 0);
   const chainPCR  = totalCeOI > 0 ? totalPeOI / totalCeOI : 0;
-  const hasDelta  = rows.some(r => r.ceDelta !== 0 || r.peDelta !== 0);
 
   const pcrColor  = chainPCR > 1.3 ? 'text-emerald-400'
                   : chainPCR > 0 && chainPCR < 0.7 ? 'text-red-400'
@@ -389,9 +382,7 @@ export default function OptionsOITab({ expiry }: { expiry: string }) {
             <div>
               <p className="text-sm font-bold text-white tracking-tight">Change in Open Interest</p>
               <p className="text-[10px] text-zinc-400 mt-0.5">
-                {hasDelta
-                  ? 'CE ΔOI vs PE ΔOI · change since previous snapshot'
-                  : 'Δ will appear after first 20s poll'}
+                CE ΔOI vs PE ΔOI · change since session start
               </p>
             </div>
             <div className="flex items-center gap-3 text-[10px] font-semibold">
@@ -406,59 +397,52 @@ export default function OptionsOITab({ expiry }: { expiry: string }) {
             </div>
           </div>
 
-          {!hasDelta ? (
-            <div className="flex flex-col items-center justify-center h-[220px] gap-2">
-              <div className="w-5 h-5 border-2 border-zinc-700 border-t-zinc-400 rounded-full animate-spin" />
-              <p className="text-xs text-zinc-500">Waiting for first delta snapshot…</p>
-            </div>
-          ) : (
-            <ResponsiveContainer width="100%" height={220}>
-              <BarChart data={rows} margin={{ top: 8, right: 16, left: 0, bottom: 0 }} barCategoryGap="20%" barGap={2}>
-                <CartesianGrid {...gridProps} />
-                <XAxis {...xAxisProps} />
-                <YAxis
-                  tick={{ fontSize: 10, fill: '#a1a1aa', fontWeight: 500 }}
-                  tickLine={false}
-                  axisLine={false}
-                  width={54}
-                  tickFormatter={fmtOI}
+          <ResponsiveContainer width="100%" height={220}>
+            <BarChart data={rows} margin={{ top: 8, right: 16, left: 0, bottom: 0 }} barCategoryGap="20%" barGap={2}>
+              <CartesianGrid {...gridProps} />
+              <XAxis {...xAxisProps} />
+              <YAxis
+                tick={{ fontSize: 10, fill: '#a1a1aa', fontWeight: 500 }}
+                tickLine={false}
+                axisLine={false}
+                width={54}
+                tickFormatter={fmtOI}
+              />
+              <Tooltip content={<DeltaTooltip />} cursor={{ fill: '#27272a', opacity: 0.5 }} />
+              <Legend
+                wrapperStyle={{ fontSize: 11, paddingTop: 12 }}
+                formatter={(v: string) => <span style={{ color: '#d4d4d8', fontWeight: 600 }}>{v}</span>}
+              />
+              <ReferenceLine y={0} stroke="#52525b" strokeWidth={1.5} />
+              {atm > 0 && (
+                <ReferenceLine
+                  x={atm}
+                  stroke="#71717a"
+                  strokeDasharray="5 4"
+                  strokeWidth={1.5}
+                  label={{ value: 'ATM', position: 'top', fill: '#a1a1aa', fontSize: 10, fontWeight: 700 }}
                 />
-                <Tooltip content={<DeltaTooltip />} cursor={{ fill: '#27272a', opacity: 0.5 }} />
-                <Legend
-                  wrapperStyle={{ fontSize: 11, paddingTop: 12 }}
-                  formatter={(v: string) => <span style={{ color: '#d4d4d8', fontWeight: 600 }}>{v}</span>}
-                />
-                <ReferenceLine y={0} stroke="#52525b" strokeWidth={1.5} />
-                {atm > 0 && (
-                  <ReferenceLine
-                    x={atm}
-                    stroke="#71717a"
-                    strokeDasharray="5 4"
-                    strokeWidth={1.5}
-                    label={{ value: 'ATM', position: 'top', fill: '#a1a1aa', fontSize: 10, fontWeight: 700 }}
+              )}
+              <Bar dataKey="ceDelta" name="CE ΔOI" radius={[3, 3, 0, 0]}>
+                {rows.map(r => (
+                  <Cell
+                    key={r.strike}
+                    fill={r.ceDelta >= 0 ? '#60a5fa' : '#1d4ed8'}
+                    fillOpacity={r.isATM ? 1 : 0.85}
                   />
-                )}
-                <Bar dataKey="ceDelta" name="CE ΔOI" radius={[3, 3, 0, 0]}>
-                  {rows.map(r => (
-                    <Cell
-                      key={r.strike}
-                      fill={r.ceDelta >= 0 ? '#60a5fa' : '#1d4ed8'}
-                      fillOpacity={r.isATM ? 1 : 0.85}
-                    />
-                  ))}
-                </Bar>
-                <Bar dataKey="peDelta" name="PE ΔOI" radius={[3, 3, 0, 0]}>
-                  {rows.map(r => (
-                    <Cell
-                      key={r.strike}
-                      fill={r.peDelta >= 0 ? '#f87171' : '#b91c1c'}
-                      fillOpacity={r.isATM ? 1 : 0.85}
-                    />
-                  ))}
-                </Bar>
-              </BarChart>
-            </ResponsiveContainer>
-          )}
+                ))}
+              </Bar>
+              <Bar dataKey="peDelta" name="PE ΔOI" radius={[3, 3, 0, 0]}>
+                {rows.map(r => (
+                  <Cell
+                    key={r.strike}
+                    fill={r.peDelta >= 0 ? '#f87171' : '#b91c1c'}
+                    fillOpacity={r.isATM ? 1 : 0.85}
+                  />
+                ))}
+              </Bar>
+            </BarChart>
+          </ResponsiveContainer>
         </div>
 
       </>)}

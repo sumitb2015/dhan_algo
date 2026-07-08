@@ -93,6 +93,26 @@ export default function OptionsAnalyzer() {
   const [loading, setLoading] = useState(false);
   const [data, setData] = useState<AnalyzerResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
+
+  const underlyingRef = useRef(underlying);
+  const selectedExpiryRef = useRef(selectedExpiry);
+
+  useEffect(() => {
+    underlyingRef.current = underlying;
+  }, [underlying]);
+
+  useEffect(() => {
+    selectedExpiryRef.current = selectedExpiry;
+  }, [selectedExpiry]);
+
+  const handleUnderlyingChange = (sym: typeof UNDERLYINGS[number]) => {
+    if (sym === underlying) return;
+    setUnderlying(sym);
+    setExpiries([]);
+    setSelectedExpiry('');
+    setData(null);
+    setError(null);
+  };
   const [hoveredMetric, setHoveredMetric] = useState<{ contractId: number, factorId: string, text: string } | null>(null);
   const [minScore, setMinScore] = useState<number>(0); // minimum composite score filter (0-100)
 
@@ -240,13 +260,15 @@ export default function OptionsAnalyzer() {
 
   // Fetch analysis data. Returns true on success, false on failure/skip.
   const fetchAnalysis = useCallback(async (): Promise<boolean> => {
-    if (!selectedExpiry) return false;
+    if (!selectedExpiry || !expiries.includes(selectedExpiry)) return false;
+    const fetchUnderlying = underlying;
+    const fetchExpiry = selectedExpiry;
     try {
       setLoading(true);
       setError(null);
       const queryParams = new URLSearchParams({
-        underlying,
-        expiry: selectedExpiry,
+        underlying: fetchUnderlying,
+        expiry: fetchExpiry,
         interval: candleInterval,
         supertrendPeriod: String(supertrendPeriod),
         supertrendMultiplier: String(supertrendMultiplier),
@@ -256,6 +278,11 @@ export default function OptionsAnalyzer() {
       });
       const res = await fetch(`/api/options/analyzer?${queryParams.toString()}`);
       const json = await res.json();
+
+      if (underlyingRef.current !== fetchUnderlying || selectedExpiryRef.current !== fetchExpiry) {
+        return false;
+      }
+
       if (json.success && json.data) {
         setData(json.data);
         return true;
@@ -263,13 +290,17 @@ export default function OptionsAnalyzer() {
         throw new Error(json.error || 'Failed to fetch options ranking data');
       }
     } catch (err: any) {
-      console.error(err);
-      setError(err.message || 'Error executing options ranking analyzer');
+      if (underlyingRef.current === fetchUnderlying && selectedExpiryRef.current === fetchExpiry) {
+        console.error(err);
+        setError(err.message || 'Error executing options ranking analyzer');
+      }
       return false;
     } finally {
-      setLoading(false);
+      if (underlyingRef.current === fetchUnderlying && selectedExpiryRef.current === fetchExpiry) {
+        setLoading(false);
+      }
     }
-  }, [underlying, selectedExpiry, candleInterval, supertrendPeriod, supertrendMultiplier, rsiPeriod, ema20Period, ema50Period]);
+  }, [underlying, selectedExpiry, expiries, candleInterval, supertrendPeriod, supertrendMultiplier, rsiPeriod, ema20Period, ema50Period]);
 
   useEffect(() => {
     fetchAnalysis();
@@ -462,7 +493,7 @@ export default function OptionsAnalyzer() {
               {UNDERLYINGS.map(sym => (
                 <button
                   key={sym}
-                  onClick={() => setUnderlying(sym)}
+                  onClick={() => handleUnderlyingChange(sym)}
                   className={cn(
                     "px-4 py-1.5 rounded-lg text-xs font-bold transition-all duration-200 cursor-pointer select-none",
                     underlying === sym 
