@@ -484,7 +484,7 @@ export default function OptionsAnalyzer() {
       </header>
 
       {/* Main Content Wrapper */}
-      <div className="flex-1 overflow-auto p-4 sm:p-6 max-w-7xl mx-auto w-full flex flex-col gap-6">
+      <div className="flex-1 overflow-auto p-4 sm:p-6 w-full flex flex-col gap-6">
         {/* Upper Control Bar */}
         <div className="bg-zinc-950/40 backdrop-blur-md border border-zinc-850 p-4 rounded-2xl flex flex-wrap items-center justify-between gap-4 shadow-xl">
           <div className="flex flex-wrap items-center gap-4">
