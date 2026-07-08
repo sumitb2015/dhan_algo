@@ -471,6 +471,27 @@ export default function OptionsCharts() {
     return () => { if (pollRef.current) clearInterval(pollRef.current); };
   }, [pollLive, pollInterval]);
 
+  // Poll spot price when bridge is not running (non-live mode)
+  useEffect(() => {
+    if (bridgeStatus.status === 'RUNNING') return;
+
+    const fetchSpot = () => {
+      fetch(`/api/options/spot?underlying=${UNDERLYING}`)
+        .then(r => r.json())
+        .then((s: { success: boolean; spot?: number; change_pct?: number }) => {
+          if (s.success && s.spot && s.spot > 0) {
+            setChainSpot(s.spot);
+            if (s.change_pct !== undefined) setSpotChangePctState(s.change_pct);
+          }
+        })
+        .catch(() => {});
+    };
+
+    fetchSpot();
+    const intervalId = setInterval(fetchSpot, 10_000);
+    return () => clearInterval(intervalId);
+  }, [bridgeStatus.status]);
+
   // ── Bridge start / stop ───────────────────────────────────────────
   const startBridge = async () => {
     if (!expiry) { setError('Select an expiry first'); return; }
