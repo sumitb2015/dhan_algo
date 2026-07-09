@@ -24,7 +24,7 @@ from lib.dhan_helper import DhanHelper
 INSTRUMENTS = {
     'NIFTY':     'index',
     'BANKNIFTY': 'index',
-    'CRUDEOILM': 'future',
+    'CRUDEOIL':  'future',
 }
 
 LOOKBACK_DAYS = 5
@@ -222,17 +222,25 @@ def main():
     is_today_flag = False
     today = date.today().strftime('%Y-%m-%d')
 
+    import time
+
+    first = True
     for symbol, kind in INSTRUMENTS.items():
         try:
+            if not first:
+                time.sleep(1.1)
+            first = False
+
             df, sym_date, err = _fetch_symbol_candles(helper, symbol, kind)
             if err:
                 errors[symbol] = err
                 continue
             rows = _extract_rows(df)
 
-            # Fetch previous day close (PDC) for NIFTY and BANKNIFTY
+            # Fetch previous day close (PDC) for NIFTY, BANKNIFTY, and CRUDEOIL
             baseline = None
-            if symbol in ('NIFTY', 'BANKNIFTY') and sym_date:
+            if symbol in ('NIFTY', 'BANKNIFTY', 'CRUDEOIL') and sym_date:
+                time.sleep(1.1)
                 try:
                     prev_close = _get_prev_close(helper, symbol, kind, sym_date)
                     if prev_close:

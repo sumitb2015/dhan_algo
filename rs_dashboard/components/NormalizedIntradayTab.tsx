@@ -18,19 +18,19 @@ interface ApiResponse {
   error?: string;
 }
 
-const SYMBOLS = ['NIFTY', 'BANKNIFTY', 'CRUDEOILM'] as const;
+const SYMBOLS = ['NIFTY', 'BANKNIFTY', 'CRUDEOIL'] as const;
 type Symbol = typeof SYMBOLS[number];
 
 const COLORS: Record<Symbol, string> = {
   NIFTY: '#10b981',
   BANKNIFTY: '#8b5cf6',
-  CRUDEOILM: '#f59e0b',
+  CRUDEOIL: '#f59e0b',
 };
 
 const LABELS: Record<Symbol, string> = {
   NIFTY: 'Nifty 50',
   BANKNIFTY: 'Nifty Bank',
-  CRUDEOILM: 'Crude Oil Mini',
+  CRUDEOIL: 'Crude Oil Futures',
 };
 
 const POLL_MS = 45_000;
@@ -146,13 +146,62 @@ export default function NormalizedIntradayTab() {
   const hasAnyData = merged.length > 0;
   const availableSymbols = SYMBOLS.filter((s) => (data?.series?.[s]?.length ?? 0) > 0);
 
+  // Find the last index in the merged array for each symbol
+  const lastIndices = useMemo(() => {
+    const res: Record<Symbol, number> = { NIFTY: -1, BANKNIFTY: -1, CRUDEOIL: -1 };
+    for (const sym of SYMBOLS) {
+      for (let i = merged.length - 1; i >= 0; i--) {
+        if (merged[i][sym] !== undefined) {
+          res[sym] = i;
+          break;
+        }
+      }
+    }
+    return res;
+  }, [merged]);
+
+  const renderLastLabel = useCallback((sym: Symbol) => (props: any) => {
+    const { x, y, value, index } = props;
+    const lastIndex = lastIndices[sym];
+    if (index !== lastIndex || value === undefined || value === null) {
+      return null;
+    }
+    const valStr = `${value >= 0 ? '+' : ''}${Number(value).toFixed(2)}%`;
+    const rectWidth = valStr.length * 6.8 + 8;
+    return (
+      <g>
+        <rect
+          x={x + 5}
+          y={y - 9}
+          width={rectWidth}
+          height={17}
+          rx={3}
+          fill="#09090b"
+          stroke={COLORS[sym]}
+          strokeWidth={1}
+          opacity={0.85}
+        />
+        <text
+          x={x + 9}
+          y={y + 3.5}
+          fill={COLORS[sym]}
+          fontSize={11}
+          fontWeight="bold"
+          fontFamily="monospace"
+        >
+          {valStr}
+        </text>
+      </g>
+    );
+  }, [lastIndices]);
+
   return (
     <div className="flex flex-col gap-3">
       {/* Header strip */}
       <div className="flex flex-wrap items-center gap-2.5 px-3 py-2 rounded-lg border border-zinc-800 bg-zinc-950">
         <Activity className="h-3.5 w-3.5 text-violet-400" />
         <span className="text-[11px] font-medium text-zinc-300">
-          1-Min Normalized · NIFTY / BANKNIFTY / CRUDEOILM
+          1-Min Normalized · NIFTY / BANKNIFTY / CRUDEOIL
         </span>
         <span className="text-[10px] text-zinc-700 font-mono">poll every {POLL_MS / 1000}s</span>
 
@@ -214,26 +263,26 @@ export default function NormalizedIntradayTab() {
           </div>
         ) : (
           <ResponsiveContainer width="100%" height={600}>
-            <LineChart data={merged} margin={{ top: 12, right: 16, left: 0, bottom: 4 }}>
+            <LineChart data={merged} margin={{ top: 12, right: 64, left: 0, bottom: 4 }}>
               <XAxis
                 dataKey="time"
-                tick={{ fontSize: 10, fill: '#a1a1aa', fontWeight: 500 }}
+                tick={{ fontSize: 11, fill: '#a1a1aa', fontWeight: 500 }}
                 tickLine={false}
                 axisLine={{ stroke: '#27272a' }}
                 interval="preserveStartEnd"
                 minTickGap={40}
               />
               <YAxis
-                tick={{ fontSize: 10, fill: '#a1a1aa', fontWeight: 500 }}
+                tick={{ fontSize: 11, fill: '#a1a1aa', fontWeight: 500 }}
                 tickLine={false}
                 axisLine={false}
-                width={52}
+                width={56}
                 tickFormatter={(v: number) => `${v >= 0 ? '+' : ''}${v.toFixed(2)}%`}
                 domain={['auto', 'auto']}
               />
               <ReferenceLine y={0} stroke="#3f3f46" strokeDasharray="4 2" />
               <Tooltip
-                contentStyle={{ background: '#18181b', border: '1px solid #3f3f46', borderRadius: 8, fontSize: 11 }}
+                contentStyle={{ background: '#18181b', border: '1px solid #3f3f46', borderRadius: 8, fontSize: 12 }}
                 labelStyle={{ color: '#a1a1aa' }}
                 formatter={((value: any, name: string) => [
                   value !== undefined ? `${value >= 0 ? '+' : ''}${value.toFixed(2)}%` : '',
@@ -242,7 +291,7 @@ export default function NormalizedIntradayTab() {
               />
               <Legend
                 formatter={(name: string) => (
-                  <span style={{ color: '#d4d4d8', fontSize: 11 }}>{LABELS[name as Symbol] ?? name}</span>
+                  <span style={{ color: '#d4d4d8', fontSize: 12 }}>{LABELS[name as Symbol] ?? name}</span>
                 )}
               />
               {availableSymbols.map((sym) => (
@@ -256,6 +305,7 @@ export default function NormalizedIntradayTab() {
                   dot={false}
                   isAnimationActive={false}
                   connectNulls={false}
+                  label={renderLastLabel(sym)}
                 />
               ))}
             </LineChart>
@@ -265,7 +315,7 @@ export default function NormalizedIntradayTab() {
 
       {hasAnyData && (
         <div className="text-[10px] text-zinc-700 text-right px-1">
-          {merged.length} candles · Nifty &amp; Bank Nifty compared to previous close, Crude Oil compared to session open
+          {merged.length} candles · Nifty, Bank Nifty &amp; Crude Oil compared to previous close
         </div>
       )}
     </div>

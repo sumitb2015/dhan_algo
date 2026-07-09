@@ -53,6 +53,18 @@ interface Factor {
   formatValue: (contract: OptionContractData) => string;
 }
 
+// Option Seller Factor Weights (summing to 1.0)
+const FACTOR_WEIGHTS: Record<string, number> = {
+  price_change: 0.20,
+  oi_change: 0.15,
+  vwap: 0.20,
+  supertrend: 0.15,
+  ema20: 0.10,
+  ema50: 0.10,
+  rsi: 0.05,
+  min_premium: 0.05,
+};
+
 export default function OptionsAnalyzer() {
   const [underlying, setUnderlying] = useState<typeof UNDERLYINGS[number]>('NIFTY');
   const [expiries, setExpiries] = useState<string[]>([]);
@@ -78,6 +90,7 @@ export default function OptionsAnalyzer() {
   const [tempMinPremiumThreshold, setTempMinPremiumThreshold] = useState<number>(20);
 
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [scoreInfoOpen, setScoreInfoOpen] = useState(false);
 
   const [activeFactors, setActiveFactors] = useState<Record<string, boolean>>({
     price_change: true,
@@ -369,13 +382,52 @@ export default function OptionsAnalyzer() {
     
     let greenCount = 0;
     let consideredCount = 0;
+    let totalWeight = 0;
+    let earnedWeight = 0;
+
+    // Check if both price_change and oi_change are active to apply quadrant logic
+    const useCombinedBuildup = activeFactors['price_change'] && activeFactors['oi_change'];
+
+    if (useCombinedBuildup) {
+      const priceChangeVal = contract.ltp - contract.prev_close;
+      const oiChangeVal = contract.oi - contract.prev_oi;
+      const combinedWeight = FACTOR_WEIGHTS['price_change'] + FACTOR_WEIGHTS['oi_change']; // 0.35
+      totalWeight += combinedWeight;
+      consideredCount += 2;
+
+      if (priceChangeVal < 0 && oiChangeVal > 0) {
+        // Short Buildup (Price Decrease, OI Increase): Highly Favorable (1.0)
+        earnedWeight += combinedWeight * 1.0;
+        greenCount += 2;
+      } else if (priceChangeVal < 0 && oiChangeVal <= 0) {
+        // Long Unwinding (Price Decrease, OI Decrease): Favorable (0.7)
+        earnedWeight += combinedWeight * 0.7;
+        greenCount += 1;
+      } else if (priceChangeVal >= 0 && oiChangeVal <= 0) {
+        // Short Covering (Price Increase, OI Decrease): Unfavorable/Risky (0.2)
+        earnedWeight += combinedWeight * 0.2;
+      } else {
+        // Long Buildup (Price Increase, OI Increase): Highly Unfavorable (0.0)
+        earnedWeight += combinedWeight * 0.0;
+      }
+    }
 
     factors.forEach(factor => {
-      if (activeFactors[factor.id]) {
-        const checkResult = factor.check(contract);
-        if (checkResult !== null) {
-          consideredCount++;
-          if (checkResult) greenCount++;
+      if (!activeFactors[factor.id]) return;
+
+      // Skip individual processing of price & oi change if combined buildup is used
+      if (useCombinedBuildup && (factor.id === 'price_change' || factor.id === 'oi_change')) {
+        return;
+      }
+
+      const checkResult = factor.check(contract);
+      if (checkResult !== null) {
+        const weight = FACTOR_WEIGHTS[factor.id] || 0;
+        totalWeight += weight;
+        consideredCount++;
+        if (checkResult) {
+          earnedWeight += weight;
+          greenCount++;
         }
       }
     });
@@ -383,7 +435,7 @@ export default function OptionsAnalyzer() {
     return {
       score: greenCount,
       total: consideredCount,
-      pct: consideredCount > 0 ? (greenCount / consideredCount) * 100 : 0
+      pct: totalWeight > 0 ? (earnedWeight / totalWeight) * 100 : 0
     };
   }, [activeFactors, factors]);
 
@@ -805,7 +857,18 @@ export default function OptionsAnalyzer() {
                       <th className="py-2.5 px-2">LTP</th>
                       <th className="py-2.5 px-2">OI</th>
                       <th className="py-2.5 px-2 text-center" title="OTM distance as % of ATM strike. More OTM = safer to sell.">OTM%</th>
-                      <th className="py-2.5 px-2 text-center" title={`Composite = Factors×${100-otmWeight}% + OTM×${otmWeight}%`}>Score</th>
+                      <th className="py-2.5 px-2 text-center">
+                        <div className="flex items-center justify-center gap-1">
+                          <span>Score</span>
+                          <button
+                            onClick={() => setScoreInfoOpen(true)}
+                            className="p-0.5 hover:bg-zinc-900 rounded transition-colors text-zinc-500 hover:text-emerald-400 cursor-pointer"
+                            title="How is this score calculated?"
+                          >
+                            <Info className="h-3 w-3" />
+                          </button>
+                        </div>
+                      </th>
                       {factors.map(f => activeFactors[f.id] && (
                         <th key={f.id} className="py-2.5 px-1.5 text-center font-bold" title={f.desc}>{f.label}</th>
                       ))}
@@ -909,7 +972,18 @@ export default function OptionsAnalyzer() {
                       <th className="py-2.5 px-2">LTP</th>
                       <th className="py-2.5 px-2">OI</th>
                       <th className="py-2.5 px-2 text-center" title="OTM distance as % of ATM strike. More OTM = safer to sell.">OTM%</th>
-                      <th className="py-2.5 px-2 text-center" title={`Composite = Factors×${100-otmWeight}% + OTM×${otmWeight}%`}>Score</th>
+                      <th className="py-2.5 px-2 text-center">
+                        <div className="flex items-center justify-center gap-1">
+                          <span>Score</span>
+                          <button
+                            onClick={() => setScoreInfoOpen(true)}
+                            className="p-0.5 hover:bg-zinc-900 rounded transition-colors text-zinc-500 hover:text-emerald-400 cursor-pointer"
+                            title="How is this score calculated?"
+                          >
+                            <Info className="h-3 w-3" />
+                          </button>
+                        </div>
+                      </th>
                       {factors.map(f => activeFactors[f.id] && (
                         <th key={f.id} className="py-2.5 px-1.5 text-center font-bold" title={f.desc}>{f.label}</th>
                       ))}
@@ -1156,6 +1230,135 @@ export default function OptionsAnalyzer() {
                   className="px-4 py-1.5 rounded-lg text-xs font-bold text-emerald-300 bg-emerald-500/10 border border-emerald-500/25 hover:bg-emerald-500/15 cursor-pointer shadow-lg shadow-emerald-500/5"
                 >
                   Apply Settings
+                </button>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      {/* Score Explanation Modal */}
+      <AnimatePresence>
+        {scoreInfoOpen && (
+          <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50 p-4">
+            <motion.div
+              initial={{ opacity: 0, scale: 0.95, y: 10 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.95, y: 10 }}
+              className="bg-zinc-950 border border-zinc-850 p-6 rounded-2xl shadow-2xl max-w-lg w-full flex flex-col gap-4 text-zinc-200"
+            >
+              <div className="flex items-center justify-between border-b border-zinc-850 pb-3">
+                <div className="flex items-center gap-2">
+                  <Info className="h-4.5 w-4.5 text-emerald-400" />
+                  <span className="font-bold text-sm uppercase tracking-wider text-zinc-200">Score Calculation Details</span>
+                </div>
+                <button
+                  onClick={() => setScoreInfoOpen(false)}
+                  className="text-xs text-zinc-500 hover:text-zinc-300 font-bold select-none cursor-pointer"
+                >
+                  ✕
+                </button>
+              </div>
+
+              <div className="flex flex-col gap-4 py-2 overflow-y-auto max-h-[60vh] pr-1">
+                {/* 1. Main formula */}
+                <div className="flex flex-col gap-1 bg-zinc-900/40 border border-zinc-850 p-3 rounded-xl">
+                  <span className="text-[10px] font-bold uppercase tracking-wider text-zinc-500">1. Composite Score Formula</span>
+                  <div className="text-xs font-semibold text-zinc-200 mt-1 space-y-1">
+                    <p className="font-bold text-emerald-400">
+                      Score = [Factor Score × {100 - otmWeight}%] + [OTM Distance Score × {otmWeight}%]
+                    </p>
+                    <p className="text-[10px] text-zinc-400 leading-normal">
+                      • <strong className="text-zinc-200">Factor Score</strong>: Weighted combination of checked technical indicators (0–100%).
+                      <br />
+                      • <strong className="text-zinc-200">OTM Distance Score</strong>: Percentage distance from ATM strike to reward safer premium selling strikes (0–100%).
+                    </p>
+                  </div>
+                </div>
+
+                {/* 2. Factor Weights */}
+                <div className="flex flex-col gap-2 bg-zinc-900/40 border border-zinc-850 p-3 rounded-xl">
+                  <span className="text-[10px] font-bold uppercase tracking-wider text-zinc-500">2. Technical Indicator Weights</span>
+                  <div className="grid grid-cols-2 gap-x-4 gap-y-2 text-xs font-semibold">
+                    <div className="flex justify-between border-b border-zinc-850/60 pb-1">
+                      <span className="text-zinc-400">Buildup (Price + OI)</span>
+                      <span className="text-emerald-400 font-bold">35%</span>
+                    </div>
+                    <div className="flex justify-between border-b border-zinc-850/60 pb-1">
+                      <span className="text-zinc-400">VWAP</span>
+                      <span className="text-emerald-400 font-bold">20%</span>
+                    </div>
+                    <div className="flex justify-between border-b border-zinc-850/60 pb-1">
+                      <span className="text-zinc-400">Supertrend</span>
+                      <span className="text-emerald-400 font-bold">15%</span>
+                    </div>
+                    <div className="flex justify-between border-b border-zinc-850/60 pb-1">
+                      <span className="text-zinc-400">EMA 20</span>
+                      <span className="text-emerald-400 font-bold">10%</span>
+                    </div>
+                    <div className="flex justify-between border-b border-zinc-850/60 pb-1">
+                      <span className="text-zinc-400">EMA 50</span>
+                      <span className="text-emerald-400 font-bold">10%</span>
+                    </div>
+                    <div className="flex justify-between border-b border-zinc-850/60 pb-1">
+                      <span className="text-zinc-400">RSI</span>
+                      <span className="text-emerald-400 font-bold">5%</span>
+                    </div>
+                    <div className="flex justify-between border-b border-zinc-850/60 pb-1">
+                      <span className="text-zinc-400">Min Premium</span>
+                      <span className="text-emerald-400 font-bold">5%</span>
+                    </div>
+                  </div>
+                  <p className="text-[10px] text-zinc-500 italic mt-1 leading-normal">
+                    * If you uncheck any indicator, the remaining checked indicators' weights are automatically normalized to total 100%.
+                  </p>
+                </div>
+
+                {/* 3. Buildup breakdown */}
+                <div className="flex flex-col gap-2 bg-zinc-900/40 border border-zinc-850 p-3 rounded-xl">
+                  <span className="text-[10px] font-bold uppercase tracking-wider text-zinc-500">3. Interactive Buildup Scoring (35% total)</span>
+                  <p className="text-[10px] text-zinc-400 leading-normal mb-1">
+                    When both Price Change and OI Change are selected, they are scored interactively as a single metric:
+                  </p>
+                  <div className="flex flex-col gap-1.5 text-xs font-semibold">
+                    <div className="flex justify-between items-center bg-emerald-500/5 border border-emerald-500/20 px-2.5 py-1.5 rounded-lg">
+                      <div className="flex flex-col">
+                        <span className="text-emerald-400 font-bold">Short Buildup</span>
+                        <span className="text-[9px] text-zinc-500">Price Down, OI Up</span>
+                      </div>
+                      <span className="bg-emerald-500/10 text-emerald-400 px-2 py-0.5 rounded text-[10px] border border-emerald-500/30">100% (35 pts)</span>
+                    </div>
+                    <div className="flex justify-between items-center bg-zinc-900 border border-zinc-800 px-2.5 py-1.5 rounded-lg">
+                      <div className="flex flex-col">
+                        <span className="text-zinc-200">Long Unwinding</span>
+                        <span className="text-[9px] text-zinc-500">Price Down, OI Down</span>
+                      </div>
+                      <span className="bg-zinc-800 text-zinc-300 px-2 py-0.5 rounded text-[10px] border border-zinc-700">70% (24.5 pts)</span>
+                    </div>
+                    <div className="flex justify-between items-center bg-zinc-900 border border-zinc-800 px-2.5 py-1.5 rounded-lg">
+                      <div className="flex flex-col">
+                        <span className="text-zinc-300">Short Covering</span>
+                        <span className="text-[9px] text-zinc-500">Price Up, OI Down</span>
+                      </div>
+                      <span className="bg-zinc-850 text-zinc-400 px-2 py-0.5 rounded text-[10px] border border-zinc-800">20% (7 pts)</span>
+                    </div>
+                    <div className="flex justify-between items-center bg-red-500/5 border border-red-500/10 px-2.5 py-1.5 rounded-lg">
+                      <div className="flex flex-col">
+                        <span className="text-red-400 font-bold">Long Buildup</span>
+                        <span className="text-[9px] text-zinc-500">Price Up, OI Up</span>
+                      </div>
+                      <span className="bg-red-500/10 text-red-400 px-2 py-0.5 rounded text-[10px] border border-red-500/20">0% (0 pts)</span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <div className="border-t border-zinc-850 pt-3 flex justify-end">
+                <button
+                  onClick={() => setScoreInfoOpen(false)}
+                  className="px-5 py-2 bg-emerald-500/10 border border-emerald-500/25 text-emerald-300 hover:bg-emerald-500/15 rounded-xl text-xs font-bold transition-all duration-200 cursor-pointer shadow-lg shadow-emerald-500/5"
+                >
+                  Got It
                 </button>
               </div>
             </motion.div>
