@@ -366,7 +366,9 @@ export default function OptionsDeltaPage() {
           <div className="bg-zinc-900/60 border border-zinc-800/80 rounded-2xl px-5 py-4">
             <p className="text-[10px] font-bold text-zinc-500 uppercase tracking-widest mb-1.5 flex items-center gap-1">
               Net Delta (Index)
-              <Info className="h-3 w-3 text-zinc-600" title="Index-equivalent units. 1.00 Net Delta is equivalent to holding 1 share of Nifty index." />
+              <span title="Index-equivalent units. 1.00 Net Delta is equivalent to holding 1 share of Nifty index.">
+                <Info className="h-3 w-3 text-zinc-600 cursor-help" />
+              </span>
             </p>
             <h2 className={`text-2xl font-black tracking-tight tabular-nums ${
               netDelta > 1 ? 'text-emerald-400' : netDelta < -1 ? 'text-red-400' : 'text-zinc-200'
@@ -382,7 +384,9 @@ export default function OptionsDeltaPage() {
           <div className="bg-zinc-900/60 border border-zinc-800/80 rounded-2xl px-5 py-4">
             <p className="text-[10px] font-bold text-zinc-500 uppercase tracking-widest mb-1.5 flex items-center gap-1">
               Net Delta (Lots)
-              <Info className="h-3 w-3 text-zinc-600" title="Calculated based on standard index contract lot size (e.g. 65 for Nifty)." />
+              <span title="Calculated based on standard index contract lot size (e.g. 65 for Nifty).">
+                <Info className="h-3 w-3 text-zinc-600 cursor-help" />
+              </span>
             </p>
             <h2 className={`text-2xl font-black tracking-tight tabular-nums ${
               netLotDelta > 0.05 ? 'text-emerald-400' : netLotDelta < -0.05 ? 'text-red-400' : 'text-zinc-200'
