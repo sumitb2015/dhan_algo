@@ -182,6 +182,7 @@ def main():
     parser.add_argument('--underlying', default='NIFTY')
     parser.add_argument('--expiry',     default='', help='Expiry date YYYY-MM-DD; auto-detects nearest if omitted')
     parser.add_argument('--dry-run',    action='store_true', help='Print rows to stdout, do not write CSV')
+    parser.add_argument('--ignore-market-hours', action='store_true', help='Ignore market open/close times')
     args = parser.parse_args()
 
     underlying = args.underlying.upper()
@@ -194,11 +195,12 @@ def main():
     helper = DhanHelper(dhan)
 
     # ── Wait for market open ──────────────────────────────────────────
-    while is_before_open(ist_now()):
-        now = ist_now()
-        wait_mins = (MARKET_OPEN[0] * 60 + MARKET_OPEN[1]) - minutes_since_midnight(now)
-        log.info('Market not open yet — sleeping %d min', wait_mins)
-        time.sleep(min(wait_mins * 60, 60))
+    if not args.ignore_market_hours:
+        while is_before_open(ist_now()):
+            now = ist_now()
+            wait_mins = (MARKET_OPEN[0] * 60 + MARKET_OPEN[1]) - minutes_since_midnight(now)
+            log.info('Market not open yet — sleeping %d min', wait_mins)
+            time.sleep(min(wait_mins * 60, 60))
 
     # ── Resolve expiry ────────────────────────────────────────────────
     expiry = args.expiry
@@ -240,7 +242,7 @@ def main():
     while True:
         now = ist_now()
 
-        if is_after_close(now):
+        if not args.ignore_market_hours and is_after_close(now):
             log.info('Market closed (15:30) — exiting')
             break
 
