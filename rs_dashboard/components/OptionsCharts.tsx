@@ -207,9 +207,9 @@ export default function OptionsCharts() {
 
   // Poll vix-candles for spot, prev_close, and candles (60s)
   useEffect(() => {
-    async function fetchVix() {
+    async function fetchVix(signal: AbortSignal) {
       try {
-        const res  = await fetch('/api/options/vix-candles');
+        const res  = await fetch('/api/options/vix-candles', { signal });
         const data = await res.json() as {
           success: boolean;
           spot: number;
@@ -232,12 +232,17 @@ export default function OptionsCharts() {
           if (data.candles) setVixCandles(data.candles);
         }
       } catch (err) {
+        if (err instanceof DOMException && err.name === 'AbortError') return;
         console.error('Failed to fetch VIX candles:', err);
       }
     }
-    fetchVix();
-    const id = setInterval(fetchVix, 60_000);
-    return () => clearInterval(id);
+    const controller = new AbortController();
+    fetchVix(controller.signal);
+    const id = setInterval(() => fetchVix(controller.signal), 60_000);
+    return () => {
+      clearInterval(id);
+      controller.abort();
+    };
   }, []);
 
   // ── Fetch expiries ────────────────────────────────────────────────

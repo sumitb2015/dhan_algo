@@ -94,10 +94,11 @@ function OITooltip({ active, payload, label }: {
   label?: string;
 }) {
   if (!active || !payload?.length) return null;
+  const sorted = [...payload].sort((a, b) => Number(b.value) - Number(a.value));
   return (
     <div className="bg-zinc-950/95 border border-zinc-700/60 rounded-xl px-3.5 py-2.5 text-xs shadow-2xl min-w-[180px] backdrop-blur">
       <p className="text-zinc-400 mb-2 font-semibold tracking-wide">{label}</p>
-      {payload.map(p => (
+      {sorted.map(p => (
         <div key={p.name} className="flex justify-between gap-6 mb-0.5">
           <span style={{ color: p.color }} className="font-semibold">{p.name}</span>
           <span className="tabular-nums text-white font-bold">{fmtOI(Number(p.value))}</span>
