@@ -445,11 +445,11 @@ export default function OptionsSmartChainTab({ expiry }: { expiry: string }) {
               <th className={`${thCls} text-right text-blue-300`}>CE LTP</th>
               {/* Center */}
               <th className={`${thCls} text-center text-amber-300 border-x border-zinc-700`}>STRIKE</th>
+              <th className={`${thCls} text-left text-red-300 border-r border-zinc-700`}>PE LTP</th>
               <th className={`${thCls} text-center text-cyan-300`}>STRADDLE</th>
               <th className={`${thCls} text-center text-violet-300`}>IV SKEW</th>
               <th className={`${thCls} text-center`}>PCR</th>
               {/* PE side headers */}
-              <th className={`${thCls} text-left text-red-300`}>PE LTP</th>
               <th className={`${thCls} text-left text-red-300`}>PE IV</th>
               <th className={`${thCls} text-left text-red-300`}>PE OI ▌</th>
               <th className={`${thCls} text-left text-red-300`}>PE OI</th>
@@ -542,6 +542,33 @@ export default function OptionsSmartChainTab({ expiry }: { expiry: string }) {
                     {row.isATM && <span className="ml-1 text-[10px] text-amber-500">ATM</span>}
                   </td>
 
+                  {/* PE LTP */}
+                  <td className={`px-3 py-2 text-left tabular-nums font-bold border-r border-zinc-700 ${isITM_PE ? 'text-zinc-400' : 'text-white'}`}>
+                    <div className="flex items-center justify-start gap-2">
+                      {row.pe?.security_id && (
+                        <div className="flex gap-1">
+                          <button
+                            disabled={ordering}
+                            onClick={() => handlePlaceOrder(row.pe!.security_id!, 'BUY')}
+                            className="bg-emerald-500/10 text-emerald-400 hover:bg-emerald-500 hover:text-white disabled:opacity-50 disabled:pointer-events-none border border-emerald-500/30 rounded px-1.5 py-0.5 font-bold transition-all text-[10px]"
+                            title="Market Buy Option"
+                          >
+                            B
+                          </button>
+                          <button
+                            disabled={ordering}
+                            onClick={() => handlePlaceOrder(row.pe!.security_id!, 'SELL')}
+                            className="bg-red-500/10 text-red-400 hover:bg-red-500 hover:text-white disabled:opacity-50 disabled:pointer-events-none border border-red-500/30 rounded px-1.5 py-0.5 font-bold transition-all text-[10px]"
+                            title="Market Sell Option"
+                          >
+                            S
+                          </button>
+                        </div>
+                      )}
+                      <span>{fmtLTP(row.pe?.last_price)}</span>
+                    </div>
+                  </td>
+
                   {/* Straddle */}
                   <td className="px-3 py-2 text-center">
                     {row.straddle > 0 ? (
@@ -576,33 +603,6 @@ export default function OptionsSmartChainTab({ expiry }: { expiry: string }) {
                   {/* PCR */}
                   <td className="px-3 py-2 text-center">
                     <PCRPill pcr={row.pcr} />
-                  </td>
-
-                  {/* PE LTP */}
-                  <td className={`px-3 py-2 text-left tabular-nums font-bold ${isITM_PE ? 'text-zinc-400' : 'text-white'}`}>
-                    <div className="flex items-center justify-start gap-2">
-                      {row.pe?.security_id && (
-                        <div className="flex gap-1">
-                          <button
-                            disabled={ordering}
-                            onClick={() => handlePlaceOrder(row.pe!.security_id!, 'BUY')}
-                            className="bg-emerald-500/10 text-emerald-400 hover:bg-emerald-500 hover:text-white disabled:opacity-50 disabled:pointer-events-none border border-emerald-500/30 rounded px-1.5 py-0.5 font-bold transition-all text-[10px]"
-                            title="Market Buy Option"
-                          >
-                            B
-                          </button>
-                          <button
-                            disabled={ordering}
-                            onClick={() => handlePlaceOrder(row.pe!.security_id!, 'SELL')}
-                            className="bg-red-500/10 text-red-400 hover:bg-red-500 hover:text-white disabled:opacity-50 disabled:pointer-events-none border border-red-500/30 rounded px-1.5 py-0.5 font-bold transition-all text-[10px]"
-                            title="Market Sell Option"
-                          >
-                            S
-                          </button>
-                        </div>
-                      )}
-                      <span>{fmtLTP(row.pe?.last_price)}</span>
-                    </div>
                   </td>
 
                   {/* PE IV */}
