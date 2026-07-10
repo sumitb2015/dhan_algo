@@ -18,6 +18,7 @@ import OptionsBuildupTab from './OptionsBuildupTab';
 import OptionsMultiStrikeTab from './OptionsMultiStrikeTab';
 import OptionsPCDiffTab from './OptionsPCDiffTab';
 import OptionsPositionsTab from './OptionsPositionsTab';
+import OptionsPremiumBarTab from './OptionsPremiumBarTab';
 
 // ─── Types ────────────────────────────────────────────────────────
 
@@ -203,7 +204,7 @@ export default function OptionsCharts() {
   const [showVWAP,   setShowVWAP]   = useState(true);
   const [showCELine, setShowCELine] = useState(true);
   const [showPELine, setShowPELine] = useState(true);
-  const [activeTab, setActiveTab] = useState<'premium' | 'skew' | 'oi' | 'cumulative' | 'chain' | 'intelligence' | 'vix' | 'buildup' | 'multistrike' | 'pcdiff' | 'positions'>('premium');
+  const [activeTab, setActiveTab] = useState<'premium' | 'premium-bar' | 'skew' | 'oi' | 'cumulative' | 'chain' | 'intelligence' | 'vix' | 'buildup' | 'multistrike' | 'pcdiff' | 'positions'>('premium');
 
   // Poll vix-candles for spot, prev_close, and candles (60s)
   useEffect(() => {
@@ -821,6 +822,7 @@ export default function OptionsCharts() {
           <div className="flex border-b border-zinc-800 -mx-6 px-6 -mt-5 mb-1">
             {([
               { key: 'premium',      label: 'Premium'       },
+              { key: 'premium-bar',  label: 'Premium Bar'   },
               { key: 'skew',         label: 'Skew'          },
               { key: 'oi',           label: 'Open Interest' },
               { key: 'cumulative',   label: 'Cumulative OI' },
@@ -846,6 +848,7 @@ export default function OptionsCharts() {
             ))}
           </div>
 
+          {activeTab === 'premium-bar' && <OptionsPremiumBarTab expiry={expiry} />}
           {activeTab === 'skew'       && <OptionsSkewTab         expiry={expiry} />}
           {activeTab === 'oi'         && <OptionsOITab           expiry={expiry} />}
           {activeTab === 'cumulative' && <OptionsCumulativeOITab expiry={expiry} />}
