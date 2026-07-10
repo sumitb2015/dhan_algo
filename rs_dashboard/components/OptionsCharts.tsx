@@ -699,6 +699,13 @@ export default function OptionsCharts() {
             </p>
           </div>
 
+          <Link
+            href="/options/crudeoil"
+            className="text-[10px] font-bold px-2.5 py-1 rounded-lg bg-zinc-900 border border-zinc-800 hover:bg-zinc-800 text-indigo-400 hover:text-indigo-300 transition-colors"
+          >
+            Switch to Crude Oil Options →
+          </Link>
+
           {/* Page nav */}
           <NavBar />
         </div>

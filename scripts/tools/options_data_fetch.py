@@ -50,30 +50,63 @@ def main():
     helper = DhanHelper(dhan)
 
     if args.cmd == 'expiries':
-        uid = UNDERLYING_IDS.get(args.underlying.upper())
-        if not uid:
-            print(json.dumps({'error': f'unknown underlying: {args.underlying}'}))
-            sys.exit(0)
+        under = args.underlying.upper()
+        if under == 'CRUDEOIL':
+            from scripts.tools.premarket_data import _find_nearest_future
+            fut = _find_nearest_future(helper, "CRUDEOIL", exchange="MCX", instrument="FUTCOM")
+            if not fut:
+                print(json.dumps({'error': 'CRUDEOIL future contract not found'}))
+                sys.exit(0)
+            uid = int(fut["SECURITY_ID"])
+            seg = 'MCX_COMM'
+        else:
+            uid = UNDERLYING_IDS.get(under)
+            if not uid:
+                print(json.dumps({'error': f'unknown underlying: {args.underlying}'}))
+                sys.exit(0)
+            seg = 'IDX_I'
         expiries = helper.get_expiry_list(
             under_security_id=uid,
-            under_exchange_segment='IDX_I',
+            under_exchange_segment=seg,
         )
         print(json.dumps({'expiries': expiries}))
 
     elif args.cmd == 'chain':
+        under = args.underlying.upper()
+        is_crude = (under == 'CRUDEOIL')
+        seg = 'MCX_COMM' if is_crude else 'IDX_I'
         chain = helper.get_option_chain(
-            symbol=args.underlying.upper(),
+            symbol=under,
             expiry=args.expiry,
-            exchange_segment='IDX_I',
+            exchange_segment=seg,
         )
         # Also get spot for ATM calculation
-        spot = helper.get_ltp(args.underlying.upper(), exchange='IDX_I', instrument='INDEX') or 0
+        if is_crude:
+            from scripts.tools.premarket_data import _find_nearest_future
+            fut = _find_nearest_future(helper, "CRUDEOIL", exchange="MCX", instrument="FUTCOM")
+            spot = helper.get_ltp(int(fut["SECURITY_ID"]), exchange="MCX", instrument="FUTCOM") if fut else 0
+        else:
+            spot = helper.get_ltp(under, exchange='IDX_I', instrument='INDEX') or 0
         print(json.dumps({'chain': chain, 'spot': spot}))
 
     elif args.cmd == 'ltp':
-        spot = helper.get_ltp(args.underlying.upper(), exchange='IDX_I', instrument='INDEX') or 0
-        levels = helper.get_prev_day_levels(args.underlying.upper())
-        prev_close = levels['close'] if levels else 0.0
+        under = args.underlying.upper()
+        is_crude = (under == 'CRUDEOIL')
+        if is_crude:
+            from scripts.tools.premarket_data import _find_nearest_future
+            fut = _find_nearest_future(helper, "CRUDEOIL", exchange="MCX", instrument="FUTCOM")
+            if fut:
+                sid = int(fut["SECURITY_ID"])
+                ohlc_raw = helper.get_ohlc_data({"MCX_COMM": [sid]})
+                entry = ohlc_raw.get("MCX_COMM", {}).get(str(sid), {})
+                spot = entry.get("last_price") or 0.0
+                prev_close = entry.get("ohlc", {}).get("close") or 0.0
+            else:
+                spot, prev_close = 0, 0.0
+        else:
+            spot = helper.get_ltp(under, exchange='IDX_I', instrument='INDEX') or 0
+            levels = helper.get_prev_day_levels(under)
+            prev_close = levels['close'] if levels else 0.0
         change = round(spot - prev_close, 2) if (spot > 0 and prev_close > 0) else 0.0
         change_pct = round(change / prev_close * 100, 4) if prev_close > 0 else 0.0
         print(json.dumps({

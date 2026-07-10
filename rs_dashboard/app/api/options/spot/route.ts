@@ -8,7 +8,8 @@ const PYTHON_EXE   = path.join(PROJECT_ROOT, 'venv', 'Scripts', 'pythonw.exe');
 const FETCH_SCRIPT = path.join(PROJECT_ROOT, 'scripts', 'tools', 'options_data_fetch.py');
 const NIFTY_CSV    = path.join(PROJECT_ROOT, 'Historical Data', 'NIFTY_50_Daily_5Y.csv');
 
-let cache: { spot: number; prev_close: number; change: number; change_pct: number; ts: number } | null = null;
+interface CacheEntry { spot: number; prev_close: number; change: number; change_pct: number; ts: number }
+const cacheMap = new Map<string, CacheEntry>();
 const CACHE_TTL = 5_000; // 5 s
 
 function lastCsvClose(): number {
@@ -32,13 +33,14 @@ export async function GET(request: NextRequest) {
   const { searchParams } = new URL(request.url);
   const underlying = (searchParams.get('underlying') ?? 'NIFTY').toUpperCase();
 
-  if (cache && Date.now() - cache.ts < CACHE_TTL) {
+  const cached = cacheMap.get(underlying);
+  if (cached && Date.now() - cached.ts < CACHE_TTL) {
     return NextResponse.json({
       success: true,
-      spot: cache.spot,
-      prev_close: cache.prev_close,
-      change: cache.change,
-      change_pct: cache.change_pct
+      spot: cached.spot,
+      prev_close: cached.prev_close,
+      change: cached.change,
+      change_pct: cached.change_pct
     });
   }
 
@@ -81,7 +83,7 @@ export async function GET(request: NextRequest) {
     return NextResponse.json({ success: false, error: 'Could not determine spot price' }, { status: 500 });
   }
 
-  cache = { spot, prev_close, change, change_pct, ts: Date.now() };
+  cacheMap.set(underlying, { spot, prev_close, change, change_pct, ts: Date.now() });
   return NextResponse.json({
     success: true,
     spot,
