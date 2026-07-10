@@ -164,7 +164,17 @@ def get_options_data(helper):
             return None
 
         atm       = min(strikes, key=lambda s: abs(s - spot))
-        atm_entry = oc.get(str(int(atm)), {})
+        # Find the original key string that matches the float value (e.g. "24200.000000")
+        atm_key = None
+        for k in oc.keys():
+            try:
+                if abs(float(k) - atm) < 0.01:
+                    atm_key = k
+                    break
+            except ValueError:
+                pass
+
+        atm_entry = oc.get(atm_key, {}) if atm_key else {}
         ce_iv     = (atm_entry.get("ce") or {}).get("implied_volatility") or 0
         pe_iv     = (atm_entry.get("pe") or {}).get("implied_volatility") or 0
         if ce_iv > 0 and pe_iv > 0:

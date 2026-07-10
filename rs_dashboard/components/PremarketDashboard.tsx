@@ -1,7 +1,7 @@
 'use client';
 
 import React, { useState, useEffect, useCallback } from 'react';
-import { RefreshCw, Sun, Loader2, AlertCircle } from 'lucide-react';
+import { RefreshCw, Sun, Loader2, AlertCircle, Clock } from 'lucide-react';
 import NavBar from './NavBar';
 import type { PremarketData, GlobalMarketItem, CommodityItem, BiasFactor } from '@/app/api/premarket/route';
 
@@ -33,6 +33,9 @@ function biasColors(label: string): { text: string; border: string; bg: string }
 function factorDot(dir: BiasFactor['direction']): string {
   return dir === 'positive' ? 'bg-emerald-400' : dir === 'negative' ? 'bg-red-400' : 'bg-zinc-500';
 }
+function istHourNow(): number {
+  return new Date(Date.now() + 5.5 * 60 * 60 * 1000).getUTCHours();
+}
 
 // ── primitives ─────────────────────────────────────────────────────────
 function StatTile({ label, value, sub, subColor }: { label: string; value: React.ReactNode; sub?: React.ReactNode; subColor?: string }) {
@@ -51,16 +54,26 @@ function SectionHeader({ title }: { title: string }) {
 
 // ── main component ─────────────────────────────────────────────────────
 export default function PremarketDashboard() {
-  const [data, setData]       = useState<PremarketData | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError]     = useState<string | null>(null);
+  const [data, setData]           = useState<PremarketData | null>(null);
+  const [loading, setLoading]     = useState(true);
+  const [error, setError]         = useState<string | null>(null);
+  const [marketOpen, setMarketOpen] = useState(false);
 
   const fetchData = useCallback(async () => {
+    if (false && istHourNow() >= 9) { // TEMP: cutoff disabled for testing — restore `if (istHourNow() >= 9)` before shipping
+      setMarketOpen(true);
+      setLoading(false);
+      return;
+    }
     setLoading(true);
     setError(null);
     try {
       const res  = await fetch('/api/premarket');
-      const json = await res.json() as { success: boolean; data?: PremarketData; error?: string };
+      const json = await res.json() as { success: boolean; data?: PremarketData; error?: string; marketOpen?: boolean };
+      if (json.marketOpen) {
+        setMarketOpen(true);
+        return;
+      }
       if (!json.success || !json.data) throw new Error(json.error ?? 'Unknown error');
       setData(json.data);
     } catch (e) {
@@ -94,25 +107,33 @@ export default function PremarketDashboard() {
           <span className="text-[10px] font-bold text-zinc-500 bg-zinc-900 border border-zinc-800 px-2 py-1 rounded-lg">
             DATA: {dataDate}
           </span>
-          <button
-            onClick={fetchData}
-            disabled={loading}
-            className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-zinc-400 hover:text-zinc-100 bg-zinc-900 hover:bg-zinc-800 border border-zinc-800 rounded-lg transition-colors disabled:opacity-50"
-          >
-            <RefreshCw className={`h-3.5 w-3.5 ${loading ? 'animate-spin' : ''}`} />
-            Refresh
-          </button>
+          {!marketOpen && (
+            <button
+              onClick={fetchData}
+              disabled={loading}
+              className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-zinc-400 hover:text-zinc-100 bg-zinc-900 hover:bg-zinc-800 border border-zinc-800 rounded-lg transition-colors disabled:opacity-50"
+            >
+              <RefreshCw className={`h-3.5 w-3.5 ${loading ? 'animate-spin' : ''}`} />
+              Refresh
+            </button>
+          )}
         </div>
       </header>
 
-      {/* ── Loading / Error ── */}
-      {loading && (
+      {/* ── Loading / Error / Market Open ── */}
+      {loading && !marketOpen && (
         <div className="flex flex-col items-center justify-center h-64 gap-3">
           <Loader2 className="h-8 w-8 animate-spin text-zinc-500" />
           <span className="text-sm text-zinc-500">Fetching premarket data…</span>
         </div>
       )}
-      {!loading && error && (
+      {marketOpen && (
+        <div className="flex flex-col items-center justify-center h-64 gap-2 text-zinc-400">
+          <Clock className="h-6 w-6" />
+          <span className="text-sm">Market is open — premarket snapshot is only shown before 9:00 AM IST.</span>
+        </div>
+      )}
+      {!loading && !marketOpen && error && (
         <div className="flex items-center justify-center h-64 gap-2 text-red-400">
           <AlertCircle className="h-5 w-5" />
           <span className="text-sm">{error}</span>
@@ -120,7 +141,7 @@ export default function PremarketDashboard() {
       )}
 
       {/* ── Content ── */}
-      {!loading && !error && data && (
+      {!loading && !marketOpen && !error && data && (
         <main className="max-w-7xl mx-auto px-4 py-6 space-y-6">
 
           {/* Section 1 — Market Bias */}
@@ -188,10 +209,10 @@ export default function PremarketDashboard() {
             </div>
           </div>
 
-          {/* Section 3 — India VIX */}
+          {/* Section 3 — India VIX & Currency */}
           <div>
-            <SectionHeader title="India VIX" />
-            <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
+            <SectionHeader title="India VIX & Currency" />
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
               <StatTile
                 label="Current VIX"
                 value={
@@ -202,11 +223,27 @@ export default function PremarketDashboard() {
                 sub={vixMeta(data.vix.vix).label}
                 subColor={vixMeta(data.vix.vix).color}
               />
-              <StatTile label="VIX Prev Close" value={data.vix.vixPrevClose.toFixed(2)} />
               <StatTile
                 label="VIX Change"
                 value={<span className={pctColor(data.vix.vixPctChange)}>{pctSign(data.vix.vixPctChange)}</span>}
                 sub={data.vix.vixPctChange > 0 ? 'Volatility rising' : data.vix.vixPctChange < 0 ? 'Volatility falling' : 'Unchanged'}
+              />
+              <StatTile
+                label="USD / INR Spot"
+                value={data.usdInr && data.usdInr.price > 0 ? `${data.usdInr.price.toFixed(3)}` : '—'}
+                sub={data.usdInr && data.usdInr.price > 0 ? `Prev: ${data.usdInr.prevClose.toFixed(3)}` : '—'}
+              />
+              <StatTile
+                label="USD / INR Change"
+                value={
+                  data.usdInr && data.usdInr.price > 0 ? (
+                    <span className={pctColor(data.usdInr.pctChange)}>{pctSign(data.usdInr.pctChange)}</span>
+                  ) : (
+                    '—'
+                  )
+                }
+                sub={data.usdInr && data.usdInr.price > 0 ? (data.usdInr.pctChange > 0 ? 'INR weakening' : data.usdInr.pctChange < 0 ? 'INR strengthening' : 'Unchanged') : '—'}
+                subColor={data.usdInr && data.usdInr.price > 0 ? pctColor(data.usdInr.pctChange) : 'text-zinc-500'}
               />
             </div>
           </div>

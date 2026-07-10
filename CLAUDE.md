@@ -53,6 +53,9 @@ venv\Scripts\python.exe strategies/spread_trend/nifty_spread_trend.py --lots 1 -
 
 # OI Directional (PCR-based naked PE/CE sell)
 venv\Scripts\python.exe strategies/oi_directional/nifty_oi_directional.py --lots 1 --pcr-threshold 1.5
+
+# CrudeOil Mini Supertrend (directional MCX futures)
+venv\Scripts\python.exe strategies/crudeoil/crudeoilm_supertrend.py --lots 1 --interval 5
 ```
 
 Full CLI references for all strategies are in [GEMINI.md](GEMINI.md).
@@ -123,8 +126,13 @@ strategies/
   expiry/                   # 0DTE expiry-day straddle/strangle with leg SL and adjustment modes
   spread_trend/             # Trend-following Bear Call / Bull Put spread strategy (EMA20 + Supertrend)
   oi_directional/           # OI imbalance + PCR-driven naked PE/CE sell strategy
+  crudeoil/                 # MCX CRUDEOILM Supertrend-following futures strategy
   Archives/                 # Retired/superseded strategies (kept for reference)
 templates/strategy_template.py  # Starting point for new strategies
+docs/
+  AGENT_FUNCTION_REFERENCE.md  # Full DhanHelper method reference
+  STRATEGY_GUIDELINES.md       # How to structure a new strategy
+  OPTION_CHAIN_QUICK_REF.md    # Option chain response shape cheat sheet
 scripts/
   downloader/               # Historical data downloaders + dashboard data refresh scripts
     download_indices.py     # Downloads 5Y daily OHLCV for NSE indices (Nifty 50, 500 + 9 sector indices)
@@ -154,6 +162,9 @@ Daily_Historical_Data_Fresh/ # Per-stock daily CSVs (<SYMBOL>_Daily_2Y.csv) for 
 debug/                      # Runtime state JSON files, log files, trigger files (auto-created)
 master_list.csv             # 288K-row security master list (~15 MB, cached)
 MW-NIFTY-500-25-Jan-2026.csv  # Nifty 500 constituent list used by refresh and quote scripts
+Options Data/nifty_options.db  # SQLite cache of historical/expired option chain data, built by
+                                # scripts/analysis/convert_options_to_sqlite.py; read by backtests
+                                # (e.g. backtest_short_straddle.py) and tests/test_18_expired_options.py
 ```
 
 ### DhanHelper (`lib/dhan_helper.py`)
@@ -186,39 +197,28 @@ Strategies write their live state to `debug/<strategy_key>_state.json` every loo
 
 ### Next.js Dashboard (`rs_dashboard/`)
 
-App Router layout under `app/`. 14 pages, 29 API routes.
+App Router layout under `app/`. ~27 pages, ~39 API routes — grown well past the original RS-leaderboard scope. Grouped by domain (component names match page folder unless noted):
 
-**Pages:**
+- **Relative strength / screening**: `/` (StockDashboard — RS leaderboard), `/movers` (MarketMovers), `/movers-plus` (MoversPlusDashboard — streak persistence), `/scanner` (Scanner — EMA/RSI/MACD/ADX/Supertrend/Bollinger/NR), `/rrg` (RRGDashboard — relative rotation graph), `/normalized` (NormalizedChart), `/distribution` (DistributionChart), `/breadth` (BreadthAnalysis), `/performance` (PerformancePage — sector indices).
+- **Options**: `/options` (OptionsCharts — chain/Greeks/IV), `/iv-charts` (IVChartsPage), `/straddle-analysis` / `/strangle-analysis` (StraddleAnalysis / StrangleAnalysis), `/expiry-analysis` (ExpiryAnalysis), `/diffusion` (DiffusionDashboard).
+- **Live / intraday**: `/live` (LiveDashboard — equity WebSocket bridge), `/premarket` (PremarketDashboard), `/scalper` (Scalper), `/futures` (FuturesDashboard — MCX).
+- **Strategy ops**: `/strategies` (StrategiesPage — start/stop, live P&L, logs), `/strategies-plus` (StrategyRowWide — wide multi-strategy view), `/strategy-builder` (StrategyBuilder), `/backtest` (backtest runner UI).
+- **Portfolio & reporting**: `/portfolio` (PortfolioDashboard), `/portfolio-new` (PortfolioNewDashboard), `/reports` (ReportsPage — trigger Python analysis scripts, download XLSX/CSV).
+- **Auth**: `/login`.
 
-| Route | Component | What it shows |
-|-------|-----------|---------------|
-| `/` | StockDashboard | RS leaderboard — Nifty 50/500 stocks ranked by relative strength |
-| `/movers` | MarketMovers | Gainers/losers, volume spikes, 52W proximity, RSI zones, NR4/NR7 |
-| `/movers-plus` | MoversPlusDashboard | Persistence movers — consecutive up/down day streaks |
-| `/live` | LiveDashboard | Real-time equity quotes via `live_equity_ws.py` WebSocket bridge |
-| `/portfolio` | PortfolioDashboard | Holdings with sector breakdown and P&L |
-| `/portfolio-new` | PortfolioNewDashboard | Enhanced portfolio analytics |
-| `/scanner` | Scanner | Technical scanner: EMA, RSI, MACD, ADX, Supertrend, Bollinger, NR patterns |
-| `/normalized` | NormalizedChart | Multi-stock normalized return fan chart with period selector |
-| `/distribution` | DistributionChart | Daily-returns histogram with normal curve, skew, kurtosis, outliers |
-| `/breadth` | BreadthAnalysis | Regime detection, % above EMAs, A/D ratio, participation score (0–100) |
-| `/options` | OptionsCharts | Options chain, Greeks, IV visualization |
-| `/performance` | PerformancePage | Sector indices performance (Nifty Bank, Auto, Pharma + 9 new sector indices) |
-| `/reports` | ReportsPage | Trigger Python analysis scripts; download XLSX/CSV output |
-| `/strategies` | StrategiesPage | Strategy control panel — start/stop, live P&L, logs |
+Run `find rs_dashboard/app -maxdepth 1 -type d` for the authoritative current list rather than trusting this table as pages get added often.
 
-**Key API routes:**
-- `app/api/breadth/route.ts` — regime label, % above EMA 20/50/200, bull/bear power, participation score (0–100), A/D ratio, RSI zones from Nifty 500 CSV data.
-- `app/api/live-equity/route.ts` — manages `live_equity_ws.py`; POST `{action:"stop"}` writes `debug/live_equity_stop.trigger`.
-- `app/api/indices-performance/route.ts` — performance for all sector indices (standard + 9 new: Media, Healthcare, Oil & Gas, Consumer Durables, FinServices 25/50, MidSmall variants).
-- `app/api/scanner/route.ts` — full indicator matrix: EMA alignment, RSI, MACD, ADX, Supertrend, Bollinger, ATR, NR4/NR7, RS scoring.
-- `app/api/movers-plus/route.ts` — consecutive-day streak computation over configurable sessions.
-- `app/api/options/` — 5 sub-routes: `expiries`, `chain`, `spot`, `candles`, `live`.
-- `app/api/distribution/route.ts` — mean, std, skew, kurtosis, histogram bins, normal curve, outliers.
-- `app/api/normalized/route.ts` — aligned multi-stock normalized return series.
-- `app/api/strategies/route.ts` — start/stop strategy processes via `spawn`; reads state files and PIDs.
-- `app/api/refresh/route.ts` — spawns `refresh_dashboard_data.py`, polls `debug/refresh_status.json`.
-- `app/api/movers/route.ts` — top/bottom movers, volume surges, 52W proximity, MA alignment, RSI.
+**Key API routes** (`app/api/`, one subfolder per page above unless noted):
+- `breadth/route.ts` — regime label, % above EMA 20/50/200, bull/bear power, participation score (0–100), A/D ratio, RSI zones from Nifty 500 CSV data.
+- `live-equity/`, `live-indices/`, `live-normalized-1min/`, `live-normalized-1min-stocks/` — manage the Python WebSocket bridges; POST `{action:"stop"}` writes the matching `debug/*_stop.trigger`.
+- `indices-performance/route.ts` — performance for all sector indices (standard + 9 new: Media, Healthcare, Oil & Gas, Consumer Durables, FinServices 25/50, MidSmall variants).
+- `scanner/route.ts` — full indicator matrix: EMA alignment, RSI, MACD, ADX, Supertrend, Bollinger, ATR, NR4/NR7, RS scoring.
+- `options/` — sub-routes: `expiries`, `chain`, `spot`, `candles`, `live`.
+- `strategies/route.ts` / `saved-strategies/route.ts` — start/stop strategy processes via `spawn`; reads state files and PIDs.
+- `refresh/route.ts`, `futures-refresh/route.ts`, `options-refresh/route.ts` — spawn the matching Python refresh script, poll its `debug/*_status.json`.
+- `exit-all/route.ts`, `pnl-exit/route.ts` — square off open positions from the dashboard.
+- `portfolio/`, `portfolio-holdings/`, `portfolio-settings/` — portfolio data and user-configurable settings.
+- `movers/route.ts`, `movers-plus/route.ts` — top/bottom movers, volume surges, 52W proximity, MA alignment, RSI, and consecutive-day streaks.
 
 **lib/ files:**
 - `rs.ts` — core RS computation and score assignment
@@ -226,6 +226,10 @@ App Router layout under `app/`. 14 pages, 29 API routes.
 - `sectors.ts` — `getSector(symbol)` and sector color map
 - `scannerTypes.ts` — `ScannerParams`, `ScannerResult`, `ScannerResponse` TypeScript types
 - `nifty50.ts` — `NIFTY50_SYMBOLS` export
+- `indicators.ts` — shared TA indicator math for scanner/breadth routes
+- `optionsStrategy.ts` — options payoff/strategy helpers
+- `auth.ts` — login/session handling for `/login`
+- `utils.ts` — misc shared helpers
 
 **`PROJECT_ROOT`** in API routes is `path.resolve(process.cwd(), '..')` (one level up from `rs_dashboard/`).
 
@@ -263,6 +267,7 @@ These are not obvious and have caused runtime errors in the past (see [GEMINI.md
 - **Spread trend strategy** (`strategies/spread_trend/`): sells Bear Call or Bull Put spreads based on EMA20 + Supertrend(7,3) alignment. Both indicators must agree for entry. See `strategies/spread_trend/strategy.md` for full logic.
 - **OI Directional strategy** (`strategies/oi_directional/`): polls the option chain every `--poll-interval` seconds and computes `diff = sum(CE_OI) - sum(PE_OI)` across ±5 ATM strikes (11 strikes, 50-pt spacing). Expanding negative diff → BULLISH → sell naked PE at the strike where PCR > `--pcr-threshold`; expanding positive diff → BEARISH → sell naked CE. Exit when the entry-strike PCR unwinds by `--exit-pcr-change` %. Requires `--expansion-window` consecutive confirming snapshots before entry. See `strategies/oi_directional/strategy.md` for full logic.
 - **Expiry strategy** (`strategies/expiry/`): 0DTE straddle or strangle with per-leg SL (`--leg-sl-pct`) and configurable adjustment modes (`c2c`, `restrangle`, `roll_closer`, `winner_addition`, `none`). Supports delta-based (`--delta --target-delta`) or premium-based (`--premium --target-premium`) strike selection. See `strategies/expiry/strategy.md` for full logic.
+- **CrudeOil Mini Supertrend** (`strategies/crudeoil/`): directional MCX CRUDEOILM futures strategy — buys/sells the nearest futures contract on Supertrend confirmation, trails SL via the Supertrend band, daily profit/loss caps, default 09:00–23:30 IST session covering both MCX sessions. See `strategies/crudeoil/strategy.md` for full logic.
 
 ## Environment
 

@@ -10,6 +10,7 @@ import { cn } from '@/lib/utils';
 import NavBar from './NavBar';
 import LiveNormalizedTab from './LiveNormalizedTab';
 import NormalizedIntradayTab from './NormalizedIntradayTab';
+import NormalizedIntradayStocksTab from './NormalizedIntradayStocksTab';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -201,7 +202,7 @@ export default function LiveDashboard() {
   const [indexType]                       = useState<'nifty50'>('nifty50');
   const [lastTick, setLastTick]           = useState<Date | null>(null);
   const [actionLoading, setActionLoading] = useState(false);
-  const [activeTab, setActiveTab] = useState<'market' | 'normalized' | 'intraday1min'>('market');
+  const [activeTab, setActiveTab] = useState<'market' | 'normalized' | 'intraday1min' | 'intraday1minStocks'>('market');
   const [flashMap, setFlashMap]           = useState<Record<string, 'up' | 'down'>>({});
   const prevLtpRef                        = useRef<Record<string, number>>({});
   const pollRef                           = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -321,7 +322,7 @@ export default function LiveDashboard() {
 
         {/* Tab switcher */}
         <div className="flex items-center bg-zinc-900 border border-zinc-800 rounded-lg p-0.5 gap-0.5">
-          {(['market', 'normalized', 'intraday1min'] as const).map((tab) => (
+          {(['market', 'normalized', 'intraday1min', 'intraday1minStocks'] as const).map((tab) => (
             <button
               key={tab}
               onClick={() => setActiveTab(tab)}
@@ -332,7 +333,13 @@ export default function LiveDashboard() {
                   : 'text-zinc-500 hover:text-zinc-300',
               )}
             >
-              {tab === 'market' ? 'Market' : tab === 'normalized' ? 'Normalized' : '1-Min Normalized'}
+              {tab === 'market'
+                ? 'Market'
+                : tab === 'normalized'
+                ? 'Normalized'
+                : tab === 'intraday1min'
+                ? '1-Min Normalized'
+                : '1-Min Stocks'}
             </button>
           ))}
         </div>
@@ -407,6 +414,8 @@ export default function LiveDashboard() {
           <LiveNormalizedTab />
         ) : activeTab === 'intraday1min' ? (
           <NormalizedIntradayTab />
+        ) : activeTab === 'intraday1minStocks' ? (
+          <NormalizedIntradayStocksTab />
         ) : (
         <>
 

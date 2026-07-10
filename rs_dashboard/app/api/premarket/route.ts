@@ -12,9 +12,16 @@ const DHAN_OHLC_URL   = 'https://api.dhan.co/v2/marketfeed/ohlc';
 const NIFTY_SPOT_ID   = 13;
 const VIX_ID          = 21;
 
+// ── IST market-open cutoff ─────────────────────────────────────────────
+function istHourMinute(): [number, number] {
+  const now = new Date(Date.now() + 5.5 * 60 * 60 * 1000);
+  return [now.getUTCHours(), now.getUTCMinutes()];
+}
+
 // ── exported types ─────────────────────────────────────────────────────
 export interface NiftyData { spot: number; spotPrevClose: number; futuresLtp: number; futuresPremium: number; futuresExpiry: string }
 export interface VixData { vix: number; vixPrevClose: number; vixPctChange: number }
+export interface UsdInrData { price: number; prevClose: number; pctChange: number }
 export interface OptionsData { expiry: string; atmIV: number; pcr: number; maxCeOiStrike: number; maxPeOiStrike: number; chainFetchedAt: string; error?: string }
 export interface CommodityItem { name: string; ltp: number; prevClose: number; pctChange: number }
 export interface GlobalMarketItem { name: string; region: 'US' | 'Asia'; prevClose: number; pctChange: number }
@@ -24,6 +31,7 @@ export interface PremarketData {
   fetchedAt: string;
   nifty: NiftyData;
   vix: VixData;
+  usdInr: UsdInrData;
   options: OptionsData;
   commodities: CommodityItem[];
   globalMarkets: GlobalMarketItem[] | null;
@@ -80,12 +88,12 @@ async function fetchDhanSpotVix(auth: { clientId: string; token: string }): Prom
     const res = await fetch(DHAN_OHLC_URL, {
       method: 'POST',
       headers: { 'access-token': auth.token, 'client-id': auth.clientId, 'Content-Type': 'application/json', Accept: 'application/json' },
-      body: JSON.stringify({ NSE_IDX: [NIFTY_SPOT_ID, VIX_ID] }),
+      body: JSON.stringify({ IDX_I: [NIFTY_SPOT_ID, VIX_ID] }),
       signal: AbortSignal.timeout(5000),
     });
     const json = await res.json() as { status?: string; data?: Record<string, Record<string, { last_price?: number; ohlc?: { close?: number } }>> };
     if (json.status !== 'success') return fallback;
-    const idx = json.data?.NSE_IDX ?? {};
+    const idx = json.data?.IDX_I ?? {};
     const spot = idx[String(NIFTY_SPOT_ID)]?.last_price ?? 0;
     const spotPrev = idx[String(NIFTY_SPOT_ID)]?.ohlc?.close ?? 0;
     const vix = idx[String(VIX_ID)]?.last_price ?? 0;
@@ -113,16 +121,33 @@ async function fetchGlobalMarkets(): Promise<GlobalMarketItem[] | null> {
           headers: { 'User-Agent': 'Mozilla/5.0' },
           signal: AbortSignal.timeout(8000),
         });
-        const json = await res.json() as { chart: { result: Array<{ meta: { regularMarketPrice: number; previousClose: number } }> } };
+        const json = await res.json() as { chart: { result: Array<{ meta: { regularMarketPrice: number; chartPreviousClose: number } }> } };
         const meta = json.chart.result[0].meta;
         const prevClose = meta.regularMarketPrice;
-        const prevPrev  = meta.previousClose;
+        const prevPrev  = meta.chartPreviousClose;
         const pctChange = prevPrev > 0 ? (prevClose - prevPrev) / prevPrev * 100 : 0;
         return { name, region, prevClose, pctChange };
       })
     );
     return results;
   } catch { return null; }
+}
+
+async function fetchUsdInr(): Promise<{ price: number; prevClose: number; pctChange: number }> {
+  const fallback = { price: 0, prevClose: 0, pctChange: 0 };
+  try {
+    const url = `https://query1.finance.yahoo.com/v8/finance/chart/USDINR%3DX?range=5d&interval=1d`;
+    const res = await fetch(url, {
+      headers: { 'User-Agent': 'Mozilla/5.0' },
+      signal: AbortSignal.timeout(5000),
+    });
+    const json = await res.json() as { chart: { result: Array<{ meta: { regularMarketPrice: number; chartPreviousClose: number } }> } };
+    const meta = json.chart.result[0].meta;
+    const price = meta.regularMarketPrice;
+    const prevClose = meta.chartPreviousClose;
+    const pctChange = prevClose > 0 ? (price - prevClose) / prevClose * 100 : 0;
+    return { price, prevClose, pctChange };
+  } catch { return fallback; }
 }
 
 // ── Bias computation ───────────────────────────────────────────────────
@@ -182,16 +207,26 @@ function computeBias(
 
 // ── Route handler ──────────────────────────────────────────────────────
 export async function GET() {
+  const [h] = istHourMinute();
+  if (false && h >= 9) { // TEMP: cutoff disabled for testing — restore `if (h >= 9)` before shipping
+    return NextResponse.json({
+      success: false,
+      marketOpen: true,
+      error: 'Market is open — premarket data is only available before 9:00 AM IST.',
+    });
+  }
+
   const auth = getToken();
   if (!auth) {
     return NextResponse.json({ success: false, error: 'Auth token not found — run login.py' }, { status: 500 });
   }
 
-  // Run all three in parallel
-  const [pythonRaw, dhanData, globalMarkets] = await Promise.all([
+  // Run all four in parallel
+  const [pythonRaw, dhanData, globalMarkets, usdInr] = await Promise.all([
     runScript(PYTHON_EXE, [PREMARKET_PY], 40_000),
     fetchDhanSpotVix(auth),
     fetchGlobalMarkets(),
+    fetchUsdInr(),
   ]);
 
   // Parse Python output
@@ -233,6 +268,7 @@ export async function GET() {
     fetchedAt: new Date().toISOString(),
     nifty,
     vix,
+    usdInr,
     options,
     commodities,
     globalMarkets,

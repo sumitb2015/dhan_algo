@@ -71,7 +71,7 @@ export async function GET() {
           'Content-Type': 'application/json',
           'Accept':       'application/json',
         },
-        body: JSON.stringify({ NSE_IDX: [VIX_SECURITY_ID] }),
+        body: JSON.stringify({ IDX_I: [VIX_SECURITY_ID] }),
         signal: AbortSignal.timeout(5000),
       });
 
@@ -84,7 +84,7 @@ export async function GET() {
       };
 
       if (json.status === 'success') {
-        const entry = json.data?.NSE_IDX?.[String(VIX_SECURITY_ID)];
+        const entry = json.data?.IDX_I?.[String(VIX_SECURITY_ID)];
         const ltp   = entry?.last_price ?? 0;
         const prevClose = entry?.ohlc?.close ?? 0;
 
