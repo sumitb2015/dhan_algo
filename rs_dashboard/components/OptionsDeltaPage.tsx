@@ -256,6 +256,7 @@ export default function OptionsDeltaPage() {
 
   // Derived properties
   const openLegsCount = legs.length;
+  const totalPnl = useMemo(() => legs.reduce((sum, l) => sum + l.pnl, 0), [legs]);
   const bias = netLotDelta > 0.1 ? 'BULLISH' : netLotDelta < -0.1 ? 'BEARISH' : 'NEUTRAL';
   const biasClass = 
     bias === 'BULLISH' ? 'text-emerald-400 border-emerald-500/20 bg-emerald-500/10' :
@@ -291,6 +292,19 @@ export default function OptionsDeltaPage() {
           </Link>
 
           <NavBar />
+
+          {legs.length > 0 && (
+            <div className={`text-[11px] font-bold px-2.5 py-1 rounded-lg border tabular-nums flex items-center gap-1.5 shrink-0 ${
+              totalPnl > 0 
+                ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20' 
+                : totalPnl < 0 
+                  ? 'bg-red-500/10 text-red-400 border-red-500/20' 
+                  : 'bg-zinc-900 border-zinc-800 text-zinc-400'
+            }`}>
+              <span className="text-[9px] uppercase text-zinc-500 font-extrabold tracking-wider">Total P&L:</span>
+              <span>{totalPnl >= 0 ? '+' : ''}₹{fmtNum(totalPnl)}</span>
+            </div>
+          )}
         </div>
 
         {/* Polling / Mock Controls */}
