@@ -17,7 +17,7 @@ try:
     with open(csv_path, newline='') as f:
         reader = csv.DictReader(f)
         for row in reader:
-            if row.get('UNDERLYING_SYMBOL') == '${symbol}' and row.get('INSTRUMENT') == 'OPTIDX':
+            if row.get('UNDERLYING_SYMBOL') == '${symbol}' and row.get('INSTRUMENT') in ('OPTIDX', 'OPTFUT', 'OPTCOM', 'FUTIDX', 'FUTCOM'):
                 lot = int(float(row.get('LOT_SIZE', 75) or 75))
                 break
 except Exception as e:
