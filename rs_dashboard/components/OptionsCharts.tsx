@@ -706,6 +706,13 @@ export default function OptionsCharts() {
             Switch to Crude Oil Options →
           </Link>
 
+          <Link
+            href="/options/delta"
+            className="text-[10px] font-bold px-2.5 py-1 rounded-lg bg-zinc-900 border border-zinc-800 hover:bg-zinc-800 text-emerald-400 hover:text-emerald-300 transition-colors"
+          >
+            Net Delta →
+          </Link>
+
           {/* Page nav */}
           <NavBar />
         </div>
