@@ -445,14 +445,14 @@ export default function OptionsSmartChainTab({ expiry }: { expiry: string }) {
               <th className={`${thCls} text-right text-blue-300`}>CE LTP</th>
               {/* Center */}
               <th className={`${thCls} text-center text-amber-300 border-x border-zinc-700`}>STRIKE</th>
-              <th className={`${thCls} text-left text-red-300 border-r border-zinc-700`}>PE LTP</th>
+              <th className={`${thCls} text-left text-red-300`}>PE LTP</th>
+              <th className={`${thCls} text-left text-red-300`}>PE IV</th>
+              <th className={`${thCls} text-left text-red-300`}>PE OI ▌</th>
+              <th className={`${thCls} text-left text-red-300 border-r border-zinc-700`}>PE OI</th>
+              {/* Joint stats */}
               <th className={`${thCls} text-center text-cyan-300`}>STRADDLE</th>
               <th className={`${thCls} text-center text-violet-300`}>IV SKEW</th>
               <th className={`${thCls} text-center`}>PCR</th>
-              {/* PE side headers */}
-              <th className={`${thCls} text-left text-red-300`}>PE IV</th>
-              <th className={`${thCls} text-left text-red-300`}>PE OI ▌</th>
-              <th className={`${thCls} text-left text-red-300`}>PE OI</th>
             </tr>
           </thead>
           <tbody>
@@ -543,7 +543,7 @@ export default function OptionsSmartChainTab({ expiry }: { expiry: string }) {
                   </td>
 
                   {/* PE LTP */}
-                  <td className={`px-3 py-2 text-left tabular-nums font-bold border-r border-zinc-700 ${isITM_PE ? 'text-zinc-400' : 'text-white'}`}>
+                  <td className={`px-3 py-2 text-left tabular-nums font-bold ${isITM_PE ? 'text-zinc-400' : 'text-white'}`}>
                     <div className="flex items-center justify-start gap-2">
                       {row.pe?.security_id && (
                         <div className="flex gap-1">
@@ -566,6 +566,28 @@ export default function OptionsSmartChainTab({ expiry }: { expiry: string }) {
                         </div>
                       )}
                       <span>{fmtLTP(row.pe?.last_price)}</span>
+                    </div>
+                  </td>
+
+                  {/* PE IV */}
+                  <td className={`px-3 py-2 text-left tabular-nums font-bold ${isITM_PE ? 'text-zinc-500' : 'text-violet-200'}`}>
+                    {fmtIV(row.pe?.implied_volatility ?? row.pe?.greeks?.iv)}
+                  </td>
+
+                  {/* PE OI% bar */}
+                  <td className="px-3 py-2 w-24">
+                    <OIBar pct={row.peOIPct} side="pe" />
+                  </td>
+
+                  {/* PE OI */}
+                  <td className="px-3 py-2 text-left border-r border-zinc-700" style={{ backgroundColor: peBg }}>
+                    <div className="flex items-center gap-1.5">
+                      <span className={`tabular-nums font-bold ${peDim}`}>
+                        {fmtOI(row.pe?.oi ?? 0)}
+                      </span>
+                      {row.isMaxPEOI && (
+                        <span className="text-[10px] font-bold text-red-400 bg-red-500/20 px-1.5 py-0.5 rounded">MAX</span>
+                      )}
                     </div>
                   </td>
 
@@ -603,28 +625,6 @@ export default function OptionsSmartChainTab({ expiry }: { expiry: string }) {
                   {/* PCR */}
                   <td className="px-3 py-2 text-center">
                     <PCRPill pcr={row.pcr} />
-                  </td>
-
-                  {/* PE IV */}
-                  <td className={`px-3 py-2 text-left tabular-nums font-bold ${isITM_PE ? 'text-zinc-500' : 'text-violet-200'}`}>
-                    {fmtIV(row.pe?.implied_volatility ?? row.pe?.greeks?.iv)}
-                  </td>
-
-                  {/* PE OI% bar */}
-                  <td className="px-3 py-2 w-24">
-                    <OIBar pct={row.peOIPct} side="pe" />
-                  </td>
-
-                  {/* PE OI */}
-                  <td className="px-3 py-2 text-left" style={{ backgroundColor: peBg }}>
-                    <div className="flex items-center gap-1.5">
-                      <span className={`tabular-nums font-bold ${peDim}`}>
-                        {fmtOI(row.pe?.oi ?? 0)}
-                      </span>
-                      {row.isMaxPEOI && (
-                        <span className="text-[10px] font-bold text-red-400 bg-red-500/20 px-1.5 py-0.5 rounded">MAX</span>
-                      )}
-                    </div>
                   </td>
                 </tr>
               );
