@@ -13,7 +13,7 @@ import type { OHLCVRow } from '@/lib/rs';
 
 export interface DiffusionResponse {
   dates: string[];
-  indexSeries: number[];
+  indexSeries: (number | null)[];
 
   // SMA % (0-100)
   pctAboveSma20: number[];
@@ -195,7 +195,7 @@ async function computeDiffusion(universe: 'nifty50' | 'nifty500'): Promise<Diffu
   const pctMacdBullish = new Array<number>(len).fill(0);
   const pctRsiAbove50 = new Array<number>(len).fill(0);
   const pctAdxAbove25 = new Array<number>(len).fill(0);
-  const indexSeries = new Array<number>(len).fill(0);
+  const indexSeries = new Array<number | null>(len).fill(null);
 
   for (let i = 0; i < len; i++) {
     const d = dates[i];
@@ -218,7 +218,7 @@ async function computeDiffusion(universe: 'nifty50' | 'nifty500'): Promise<Diffu
     raw1YHigh[i] = (day.new1YH / base) * 100;
     raw1YLow[i] = (day.new1YL / base) * 100;
 
-    indexSeries[i] = idxMap.get(d) ?? (i > 0 ? indexSeries[i - 1] : 0);
+    indexSeries[i] = idxMap.get(d) ?? (i > 0 ? indexSeries[i - 1] : null);
   }
 
   // 9-day smoothing of high series

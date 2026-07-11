@@ -9,6 +9,7 @@ import {
   Tooltip,
   ResponsiveContainer,
   CartesianGrid,
+  LabelList,
 } from 'recharts';
 import type { DiffusionResponse } from '@/app/api/diffusion/route';
 import NavBar from './NavBar';
@@ -106,14 +107,45 @@ function buildXAxisTicks(dates: string[], sampleIdx: number[]): { idx: number; l
   return ticks;
 }
 
+// ─── Final-tick percentage label ─────────────────────────────────────────────
+
+function LastPointPercentLabel(props: {
+  x?: string | number;
+  y?: string | number;
+  index?: number;
+  value?: unknown;
+  totalPoints: number;
+}) {
+  const { x, y, index, value, totalPoints } = props;
+  if (x === undefined || y === undefined || index === undefined || value === undefined || value === null) return null;
+  if (index !== totalPoints - 1) return null;
+  const numX = Number(x);
+  const numY = Number(y);
+  const numValue = Number(value as string | number);
+  if (Number.isNaN(numValue)) return null;
+  return (
+    <text
+      x={numX + 6}
+      y={numY}
+      dy={4}
+      textAnchor="start"
+      fontSize={11}
+      fontWeight={700}
+      fill="#0ea5e9"
+    >
+      {numValue.toFixed(1)}%
+    </text>
+  );
+}
+
 // ─── Custom Tooltip ───────────────────────────────────────────────────────────
 
 function IndexTooltip({ active, payload, label }: {
   active?: boolean;
-  payload?: { value: number }[];
+  payload?: { value: number | null }[];
   label?: string;
 }) {
-  if (!active || !payload?.length) return null;
+  if (!active || !payload?.length || payload[0].value === null) return null;
   return (
     <div className="bg-zinc-900 border border-zinc-700 rounded px-3 py-1.5 text-xs">
       <div className="text-zinc-400">{label}</div>
@@ -345,7 +377,7 @@ export default function DiffusionDashboard() {
               {selectedItem?.label ?? ''} — {universe === 'nifty50' ? 'Nifty 50' : 'Nifty 500'}
             </div>
             <ResponsiveContainer width="100%" height="90%">
-              <LineChart data={indicatorChartData} margin={{ top: 4, right: 16, bottom: 4, left: 8 }}>
+              <LineChart data={indicatorChartData} margin={{ top: 4, right: 48, bottom: 4, left: 8 }}>
                 <CartesianGrid stroke="#27272a" strokeDasharray="3 3" vertical={false} />
                 <XAxis
                   dataKey="date"
@@ -375,7 +407,14 @@ export default function DiffusionDashboard() {
                   dot={false}
                   activeDot={{ r: 3, fill: '#0ea5e9' }}
                   isAnimationActive={false}
-                />
+                >
+                  <LabelList
+                    dataKey="value"
+                    content={(props) => (
+                      <LastPointPercentLabel {...props} totalPoints={indicatorChartData.length} />
+                    )}
+                  />
+                </Line>
               </LineChart>
             </ResponsiveContainer>
           </div>
