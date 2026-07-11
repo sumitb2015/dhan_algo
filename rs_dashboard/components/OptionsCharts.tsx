@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import Link from 'next/link';
 import NavBar from './NavBar';
 import { Download } from 'lucide-react';
@@ -99,6 +99,30 @@ function fmtOI(n: number): string {
   return fmtNum(n);
 }
 
+interface StrikeEntry { key: string; strike: number; entry: ChainOcEntry }
+
+function parseStrikeEntries(oc: Record<string, ChainOcEntry>): StrikeEntry[] {
+  return Object.entries(oc)
+    .map(([key, entry]) => ({ key, strike: Number(key), entry }))
+    .filter(x => !isNaN(x.strike))
+    .sort((a, b) => a.strike - b.strike);
+}
+
+function computeMaxPain(entries: StrikeEntry[]): number {
+  if (!entries.length) return 0;
+  let maxPain = entries[0].strike;
+  let minPayout = Infinity;
+  for (const { strike: K } of entries) {
+    let payout = 0;
+    for (const { strike: s, entry } of entries) {
+      payout += (entry.ce?.oi ?? 0) * Math.max(0, K - s);
+      payout += (entry.pe?.oi ?? 0) * Math.max(0, s - K);
+    }
+    if (payout < minPayout) { minPayout = payout; maxPain = K; }
+  }
+  return maxPain;
+}
+
 // ─── Tooltip ──────────────────────────────────────────────────────
 
 const ChartTooltip = ({ active, payload, label }: Record<string, unknown>) => {
@@ -157,6 +181,7 @@ export default function OptionsCharts() {
 
   // Static chain for strike list
   const [chainStrikes, setChainStrikes] = useState<number[]>([]);
+  const [chainOc, setChainOc]           = useState<Record<string, ChainOcEntry>>({});
   const [chainSpot, setChainSpot]       = useState(0);
   const [spotChangePctState, setSpotChangePctState] = useState<number | null>(null);
   const [cePrevCloseState, setCePrevCloseState] = useState<number | null>(null);
@@ -273,6 +298,7 @@ export default function OptionsCharts() {
   useEffect(() => {
     if (!expiry) return;
     setChainStrikes([]);
+    setChainOc({});
     setSelectedStrike(null);
     setCandleData([]);
     setChainLoading(true);
@@ -285,11 +311,13 @@ export default function OptionsCharts() {
         error?: string;
       }) => {
         if (j.success && j.data?.chain?.oc) {
-          const strikes = Object.keys(j.data.chain.oc)
+          const oc = j.data.chain.oc;
+          const strikes = Object.keys(oc)
             .map(Number)
             .filter(n => !isNaN(n))
             .sort((a, b) => a - b);
           setChainStrikes(strikes);
+          setChainOc(oc);
 
           const spotPrice = j.data.spot ?? 0;
 
@@ -631,6 +659,7 @@ export default function OptionsCharts() {
   const hasOiData    = chartData.some(r => (r['CE OI'] ?? 0) > 0 || (r['PE OI'] ?? 0) > 0);
   const pcr          = latestCeOi > 0 ? (latestPeOi / latestCeOi) : 0;
   const pcrLineColor = pcr > 1.3 ? '#34d399' : pcr > 0 && pcr < 0.7 ? '#f87171' : '#facc15';
+  const maxPain       = useMemo(() => computeMaxPain(parseStrikeEntries(chainOc)), [chainOc]);
 
   const spotChangePct = isLive
     ? (quotes?.spot_change_pct ?? null)
@@ -934,8 +963,8 @@ export default function OptionsCharts() {
 
           {activeTab === 'premium' && <>
 
-        {/* Stats — 7 tiles */}
-        <div className="grid grid-cols-3 sm:grid-cols-4 lg:grid-cols-7 gap-3">
+        {/* Stats — 8 tiles */}
+        <div className="grid grid-cols-3 sm:grid-cols-4 lg:grid-cols-8 gap-3">
           {([
             { label: 'Spot',
               value: spot > 0 ? fmtNum(spot, 2) : '—',
@@ -974,6 +1003,10 @@ export default function OptionsCharts() {
               color: vixPct === null ? 'text-amber-400' : vixPct > 0 ? 'text-red-400' : 'text-emerald-400',
               accent: 'border-amber-500/25',
             },
+            { label: 'Max Pain',
+              value: maxPain > 0 ? `₹${fmtNum(maxPain)}` : '—',
+              sub: "Sellers' sweet spot",
+              color: 'text-white', accent: 'border-zinc-700/60' },
           ]).map(({ label, value, color, sub, accent }) => (
             <div key={label} className={`bg-zinc-900/70 border rounded-xl px-3 py-3 ${accent}`}>
               <p className="text-[10px] font-bold text-zinc-400 uppercase tracking-widest mb-1">{label}</p>
