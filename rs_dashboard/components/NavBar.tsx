@@ -33,6 +33,7 @@ const NAV_GROUPS = [
       { href: '/movers-plus', label: 'Movers+', desc: 'Multi-timeframe activity dashboard' },
       { href: '/rrg', label: 'RRG', desc: 'Relative Rotation Graphs & sector trends' },
       { href: '/normalized', label: 'Charts', desc: 'Multi-asset normalized charts comparisons' },
+      { href: '/candlestick', label: 'Candlestick', desc: 'Plotly candlestick charts for Nifty 50 stocks' },
     ],
   },
   {
