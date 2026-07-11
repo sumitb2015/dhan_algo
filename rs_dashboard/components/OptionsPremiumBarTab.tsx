@@ -2,7 +2,7 @@
 
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import {
-  BarChart, Bar, XAxis, YAxis, CartesianGrid,
+  BarChart, ComposedChart, Bar, Line, XAxis, YAxis, CartesianGrid,
   Tooltip, Legend, ResponsiveContainer, ReferenceLine, Cell,
 } from 'recharts';
 
@@ -22,7 +22,16 @@ interface PremiumRow {
   cePremium: number;
   pePremium: number;
   straddlePremium: number;
+  ceOi: number;
+  peOi: number;
   isATM: boolean;
+}
+
+function fmtOi(n: number): string {
+  if (n >= 1e7) return `${(n / 1e7).toFixed(2)}Cr`;
+  if (n >= 1e5) return `${(n / 1e5).toFixed(2)}L`;
+  if (n >= 1e3) return `${(n / 1e3).toFixed(1)}K`;
+  return n.toLocaleString('en-IN');
 }
 
 // ─── Constants ────────────────────────────────────────────────────
@@ -75,11 +84,19 @@ const PremiumTooltip = ({ active, payload, label }: Record<string, unknown>) => 
         <span className="text-zinc-400">Straddle</span>
         <span className="text-emerald-400 font-bold tabular-nums">{fmtPrice(row?.straddlePremium ?? 0)}</span>
       </div>
-      <div className="flex justify-between gap-8">
+      <div className="flex justify-between gap-8 mb-2">
         <span className="text-zinc-400">Difference</span>
         <span className={`font-bold tabular-nums ${diff >= 0 ? 'text-blue-400' : 'text-red-400'}`}>
           {diff >= 0 ? '+' : ''}{diff.toFixed(2)}
         </span>
+      </div>
+      <div className="pt-2 border-t border-zinc-800 flex justify-between gap-8 mb-1">
+        <span className="text-cyan-400 font-semibold">CE OI</span>
+        <span className="text-white font-bold tabular-nums">{fmtOi(row?.ceOi ?? 0)}</span>
+      </div>
+      <div className="flex justify-between gap-8">
+        <span className="text-amber-400 font-semibold">PE OI</span>
+        <span className="text-white font-bold tabular-nums">{fmtOi(row?.peOi ?? 0)}</span>
       </div>
     </div>
   );
@@ -133,13 +150,23 @@ export default function OptionsPremiumBarTab({ expiry }: { expiry: string }) {
   const [loading, setLoading]         = useState(false);
   const [error, setError]             = useState('');
   const [pollMs, setPollMs]           = useState<PollMs>(30_000);
+  const [showOi, setShowOi]           = useState(true);
 
   const intervalRef = useRef<NodeJS.Timeout | null>(null);
+  const abortRef     = useRef<AbortController | null>(null);
 
   const fetchPremium = useCallback(async () => {
     if (!expiry) return;
+    if (document.hidden) return; // skip polling while tab is backgrounded
+
+    abortRef.current?.abort();
+    const controller = new AbortController();
+    abortRef.current = controller;
+
     try {
-      const res  = await fetch(`/api/options/chain?underlying=${UNDERLYING}&expiry=${expiry}`);
+      const res  = await fetch(`/api/options/chain?underlying=${UNDERLYING}&expiry=${expiry}`, {
+        signal: controller.signal,
+      });
       const json = await res.json() as {
         success: boolean;
         data?: { chain: { oc?: Record<string, OcEntry> }; spot: number };
@@ -165,6 +192,8 @@ export default function OptionsPremiumBarTab({ expiry }: { expiry: string }) {
             cePremium,
             pePremium,
             straddlePremium: cePremium + pePremium,
+            ceOi:            v.ce?.oi ?? 0,
+            peOi:            v.pe?.oi ?? 0,
             isATM:           strike === atmStrike,
           };
         })
@@ -183,6 +212,7 @@ export default function OptionsPremiumBarTab({ expiry }: { expiry: string }) {
       }));
       setError('');
     } catch (e) {
+      if (e instanceof DOMException && e.name === 'AbortError') return;
       setError(String(e));
     } finally {
       setLoading(false);
@@ -198,7 +228,15 @@ export default function OptionsPremiumBarTab({ expiry }: { expiry: string }) {
     setLoading(true);
     void fetchPremium();
     intervalRef.current = setInterval(() => { void fetchPremium(); }, pollMs);
-    return () => { if (intervalRef.current) clearInterval(intervalRef.current); };
+
+    const onVisibilityChange = () => { if (!document.hidden) void fetchPremium(); };
+    document.addEventListener('visibilitychange', onVisibilityChange);
+
+    return () => {
+      if (intervalRef.current) clearInterval(intervalRef.current);
+      document.removeEventListener('visibilitychange', onVisibilityChange);
+      abortRef.current?.abort();
+    };
   }, [expiry, fetchPremium, pollMs]);
 
   // ── Derived stats ─────────────────────────────────────────────────
@@ -305,7 +343,7 @@ export default function OptionsPremiumBarTab({ expiry }: { expiry: string }) {
         </div>
       ) : (<>
 
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+        <div className="grid grid-cols-1 gap-4">
           {/* CE vs PE Premium Side-by-Side Bar Chart */}
           <div className="bg-zinc-900/60 border border-zinc-800 rounded-2xl p-5">
             <div className="flex items-center justify-between mb-4">
@@ -324,20 +362,59 @@ export default function OptionsPremiumBarTab({ expiry }: { expiry: string }) {
                   <span className="w-3 h-3 rounded-sm bg-red-500" />
                   <span className="text-zinc-300">PE Premium</span>
                 </span>
+                <div className="w-px h-4 bg-zinc-700 mx-0.5" />
+                <button
+                  onClick={() => setShowOi(v => !v)}
+                  className={`flex items-center gap-2 pl-1 pr-2 py-1 rounded-full border transition-colors ${
+                    showOi
+                      ? 'border-cyan-500/40 bg-cyan-500/10 text-zinc-100'
+                      : 'border-zinc-700 bg-zinc-800/60 text-zinc-500 hover:text-zinc-300'
+                  }`}
+                  title={showOi ? 'Hide OI overlay' : 'Show OI overlay'}
+                >
+                  <span
+                    className={`relative inline-flex h-4 w-7 items-center rounded-full transition-colors ${
+                      showOi ? 'bg-cyan-500' : 'bg-zinc-600'
+                    }`}
+                  >
+                    <span
+                      className={`inline-block h-3 w-3 transform rounded-full bg-white transition-transform ${
+                        showOi ? 'translate-x-3.5' : 'translate-x-0.5'
+                      }`}
+                    />
+                  </span>
+                  <span className="flex items-center gap-1">
+                    <span className="w-3 h-0.5 bg-cyan-400" />
+                    <span className="w-3 h-0.5 bg-amber-400" />
+                    <span>OI Overlay</span>
+                  </span>
+                </button>
               </div>
             </div>
 
-            <ResponsiveContainer width="100%" height={380}>
-              <BarChart data={rows} margin={{ top: 8, right: 16, left: 0, bottom: 0 }} barCategoryGap="20%" barGap={2}>
+            <ResponsiveContainer width="100%" height={620}>
+              <ComposedChart data={rows} margin={{ top: 8, right: 16, left: 0, bottom: 0 }} barCategoryGap="20%" barGap={2}>
                 <CartesianGrid {...gridProps} />
                 <XAxis {...xAxisProps} />
                 <YAxis
+                  yAxisId="premium"
                   tick={{ fontSize: 10, fill: '#a1a1aa', fontWeight: 500 }}
                   tickLine={false}
                   axisLine={false}
                   width={54}
                   tickFormatter={v => `₹${v}`}
                 />
+                {showOi && (
+                  <YAxis
+                    yAxisId="oi"
+                    orientation="right"
+                    tick={{ fontSize: 10, fill: '#a1a1aa', fontWeight: 500 }}
+                    tickLine={false}
+                    axisLine={false}
+                    width={54}
+                    tickFormatter={fmtOi}
+                  />
+                )}
                 <Tooltip content={<PremiumTooltip />} cursor={{ fill: '#27272a', opacity: 0.5 }} />
                 <Legend
                   wrapperStyle={{ fontSize: 11, paddingTop: 12 }}
@@ -345,6 +422,7 @@ export default function OptionsPremiumBarTab({ expiry }: { expiry: string }) {
                 />
                 {atm > 0 && (
                   <ReferenceLine
+                    yAxisId="premium"
                     x={atm}
                     stroke="#71717a"
                     strokeDasharray="5 4"
@@ -352,7 +430,7 @@ export default function OptionsPremiumBarTab({ expiry }: { expiry: string }) {
                     label={{ value: 'ATM', position: 'top', fill: '#a1a1aa', fontSize: 10, fontWeight: 700 }}
                   />
                 )}
-                <Bar dataKey="cePremium" name="CE Premium" radius={[3, 3, 0, 0]}>
+                <Bar yAxisId="premium" dataKey="cePremium" name="CE Premium" radius={[3, 3, 0, 0]}>
                   {rows.map(r => (
                     <Cell
                       key={r.strike}
@@ -361,7 +439,7 @@ export default function OptionsPremiumBarTab({ expiry }: { expiry: string }) {
                     />
                   ))}
                 </Bar>
-                <Bar dataKey="pePremium" name="PE Premium" radius={[3, 3, 0, 0]}>
+                <Bar yAxisId="premium" dataKey="pePremium" name="PE Premium" radius={[3, 3, 0, 0]}>
                   {rows.map(r => (
                     <Cell
                       key={r.strike}
@@ -370,7 +448,31 @@ export default function OptionsPremiumBarTab({ expiry }: { expiry: string }) {
                     />
                   ))}
                 </Bar>
-              </BarChart>
+                {showOi && (
+                  <Line
+                    yAxisId="oi"
+                    type="monotone"
+                    dataKey="ceOi"
+                    name="CE OI"
+                    stroke="#22d3ee"
+                    strokeWidth={2}
+                    dot={false}
+                    activeDot={{ r: 4 }}
+                  />
+                )}
+                {showOi && (
+                  <Line
+                    yAxisId="oi"
+                    type="monotone"
+                    dataKey="peOi"
+                    name="PE OI"
+                    stroke="#fbbf24"
+                    strokeWidth={2}
+                    dot={false}
+                    activeDot={{ r: 4 }}
+                  />
+                )}
+              </ComposedChart>
             </ResponsiveContainer>
           </div>
 
@@ -391,7 +493,7 @@ export default function OptionsPremiumBarTab({ expiry }: { expiry: string }) {
               </div>
             </div>
 
-            <ResponsiveContainer width="100%" height={380}>
+            <ResponsiveContainer width="100%" height={620}>
               <BarChart data={rows} margin={{ top: 8, right: 16, left: 0, bottom: 0 }} barCategoryGap="25%">
                 <CartesianGrid {...gridProps} />
                 <XAxis {...xAxisProps} />
