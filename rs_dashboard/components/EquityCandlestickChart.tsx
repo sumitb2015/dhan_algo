@@ -1,9 +1,9 @@
 'use client';
 
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import { RefreshCw, CandlestickChart } from 'lucide-react';
 import type { EquityCandlesResponse } from '@/app/api/equity-candles/route';
-import type { SymbolsResponse } from '@/app/api/symbols/route';
+import type { SymbolsResponse, IndexOption } from '@/app/api/symbols/route';
 import { cn } from '@/lib/utils';
 import NavBar from './NavBar';
 import LightweightCandlestickChart from './LightweightCandlestickChart';
@@ -43,15 +43,26 @@ export default function EquityCandlestickChart() {
   const [error, setError] = useState<string | null>(null);
   const [lastFetched, setLastFetched] = useState<Date | null>(null);
   const [symbols, setSymbols] = useState<string[]>([]);
+  const [indices, setIndices] = useState<IndexOption[]>([]);
 
   useEffect(() => {
     fetch('/api/symbols')
       .then((res) => res.json())
       .then((json: SymbolsResponse) => {
-        if (json.success) setSymbols(json.symbols);
+        if (json.success) {
+          setSymbols(json.symbols);
+          setIndices(json.indices);
+        }
       })
       .catch(() => {});
   }, []);
+
+  // Indices are searched/selected by their display label (e.g. "Nifty 50")
+  // while stocks are searched/selected by ticker — both share one combobox.
+  const indexLabelToKey = useMemo(() => new Map(indices.map((i) => [i.label, i.key])), [indices]);
+  const indexKeyToLabel = useMemo(() => new Map(indices.map((i) => [i.key, i.label])), [indices]);
+  const comboItems = useMemo(() => [...indices.map((i) => i.label), ...symbols], [indices, symbols]);
+  const displayValue = indexKeyToLabel.get(symbol) ?? symbol;
 
   const fetchData = useCallback(async () => {
     setLoading(true);
@@ -96,19 +107,22 @@ export default function EquityCandlestickChart() {
 
         <NavBar />
 
-        {/* Symbol search */}
+        {/* Symbol / index search */}
         <Combobox
-          items={symbols}
-          value={symbol}
-          onValueChange={(v) => v && handleSymbolChange(v)}
+          items={comboItems}
+          value={displayValue}
+          onValueChange={(v) => v && handleSymbolChange(indexLabelToKey.get(v) ?? v)}
         >
-          <ComboboxInput placeholder="Search stock…" className="w-56 ml-auto" />
+          <ComboboxInput placeholder="Search stock or index…" className="w-56 ml-auto" />
           <ComboboxContent>
-            <ComboboxEmpty>No matching stock</ComboboxEmpty>
+            <ComboboxEmpty>No matching symbol</ComboboxEmpty>
             <ComboboxList>
               {(item: string) => (
                 <ComboboxItem key={item} value={item}>
                   {item}
+                  {indexLabelToKey.has(item) && (
+                    <span className="ml-1.5 text-[9px] font-semibold text-emerald-400/80">INDEX</span>
+                  )}
                 </ComboboxItem>
               )}
             </ComboboxList>

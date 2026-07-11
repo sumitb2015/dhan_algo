@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { readStockCSV, readNifty500List, listAvailableSymbols } from '@/lib/dataLoader';
+import { readStockCSV, readNifty500List, listAvailableSymbols, KNOWN_INDICES, readIndexCSV } from '@/lib/dataLoader';
 
 export interface CandleRow {
   date: string;
@@ -22,10 +22,12 @@ export async function GET(request: NextRequest) {
   const { searchParams } = new URL(request.url);
   const symbol = (searchParams.get('symbol') ?? '').toUpperCase().trim();
 
+  const indexMeta = KNOWN_INDICES.find((m) => m.key === symbol);
+
   const available = new Set(listAvailableSymbols());
   const validSymbols = readNifty500List().filter((s) => available.has(s));
 
-  if (!symbol || !validSymbols.includes(symbol)) {
+  if (!symbol || (!indexMeta && !validSymbols.includes(symbol))) {
     return NextResponse.json(
       { success: false, symbol, candles: [], dataDate: null, error: 'Unknown or missing symbol' } satisfies EquityCandlesResponse,
       { status: 400 }
@@ -36,7 +38,7 @@ export async function GET(request: NextRequest) {
     // Return the full available history — the client controls the visible
     // window (period buttons) so users can pan/zoom back into older data
     // that's already loaded instead of hitting a server-side truncation wall.
-    const rows = readStockCSV(symbol);
+    const rows = indexMeta ? readIndexCSV(indexMeta) : readStockCSV(symbol);
     const candles: CandleRow[] = rows.map((r) => ({
       date: r.date,
       open: r.open,
