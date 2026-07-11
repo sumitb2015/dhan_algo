@@ -77,13 +77,17 @@ export function readStockCSV(symbol: string): OHLCVRow[] {
     //    returns the previous session's settlement price until EOD processing)
     //    → replace today's close with the live LTP so 1D% is meaningful.
     const todayIST = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
+    const todayDay = new Date(todayIST + 'T00:00:00').getDay(); // 0=Sun,6=Sat
+    const isTradingDay = todayDay >= 1 && todayDay <= 5;
     const last = parsed.length > 0 ? parsed[parsed.length - 1] : null;
     const prev = parsed.length > 1 ? parsed[parsed.length - 2] : null;
 
     const todayMissingFromCSV = !last || last.date < todayIST;
     const todayCloseStale = last?.date === todayIST && prev !== null && last.close === prev.close;
 
-    if (todayMissingFromCSV || todayCloseStale) {
+    // Never inject/patch a "today" row on a non-trading day (weekend) — the
+    // live quotes file can carry a stale Saturday/Sunday snapshot forward.
+    if (isTradingDay && (todayMissingFromCSV || todayCloseStale)) {
       const liveRow = getTodayQuoteRow(symbol);
       if (liveRow) {
         if (todayMissingFromCSV) {
