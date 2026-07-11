@@ -1,6 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { readStockCSV } from '@/lib/dataLoader';
-import { NIFTY50_SYMBOLS } from '@/lib/nifty50';
+import { readStockCSV, readNifty500List, listAvailableSymbols } from '@/lib/dataLoader';
 
 export interface CandleRow {
   date: string;
@@ -23,7 +22,10 @@ export async function GET(request: NextRequest) {
   const { searchParams } = new URL(request.url);
   const symbol = (searchParams.get('symbol') ?? '').toUpperCase().trim();
 
-  if (!symbol || !NIFTY50_SYMBOLS.includes(symbol)) {
+  const available = new Set(listAvailableSymbols());
+  const validSymbols = readNifty500List().filter((s) => available.has(s));
+
+  if (!symbol || !validSymbols.includes(symbol)) {
     return NextResponse.json(
       { success: false, symbol, candles: [], dataDate: null, error: 'Unknown or missing symbol' } satisfies EquityCandlesResponse,
       { status: 400 }

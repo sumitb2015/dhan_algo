@@ -3,10 +3,18 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { RefreshCw, CandlestickChart } from 'lucide-react';
 import type { EquityCandlesResponse } from '@/app/api/equity-candles/route';
-import { NIFTY50_SYMBOLS } from '@/lib/nifty50';
+import type { SymbolsResponse } from '@/app/api/symbols/route';
 import { cn } from '@/lib/utils';
 import NavBar from './NavBar';
 import LightweightCandlestickChart from './LightweightCandlestickChart';
+import {
+  Combobox,
+  ComboboxInput,
+  ComboboxContent,
+  ComboboxList,
+  ComboboxItem,
+  ComboboxEmpty,
+} from './ui/combobox';
 
 const PERIODS = ['1M', '3M', '6M', '1Y', '2Y', 'ALL'] as const;
 type Period = typeof PERIODS[number];
@@ -34,6 +42,16 @@ export default function EquityCandlestickChart() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [lastFetched, setLastFetched] = useState<Date | null>(null);
+  const [symbols, setSymbols] = useState<string[]>([]);
+
+  useEffect(() => {
+    fetch('/api/symbols')
+      .then((res) => res.json())
+      .then((json: SymbolsResponse) => {
+        if (json.success) setSymbols(json.symbols);
+      })
+      .catch(() => {});
+  }, []);
 
   const fetchData = useCallback(async () => {
     setLoading(true);
@@ -78,16 +96,24 @@ export default function EquityCandlestickChart() {
 
         <NavBar />
 
-        {/* Symbol selector */}
-        <select
+        {/* Symbol search */}
+        <Combobox
+          items={symbols}
           value={symbol}
-          onChange={(e) => handleSymbolChange(e.target.value)}
-          className="bg-zinc-900 border border-zinc-800 rounded-lg text-xs font-semibold text-zinc-200 px-2.5 py-1.5 outline-none cursor-pointer hover:border-zinc-700 ml-auto"
+          onValueChange={(v) => v && handleSymbolChange(v)}
         >
-          {NIFTY50_SYMBOLS.map((s) => (
-            <option key={s} value={s}>{s}</option>
-          ))}
-        </select>
+          <ComboboxInput placeholder="Search stock…" className="w-56 ml-auto" />
+          <ComboboxContent>
+            <ComboboxEmpty>No matching stock</ComboboxEmpty>
+            <ComboboxList>
+              {(item: string) => (
+                <ComboboxItem key={item} value={item}>
+                  {item}
+                </ComboboxItem>
+              )}
+            </ComboboxList>
+          </ComboboxContent>
+        </Combobox>
 
         {/* Period selector */}
         <div className="flex items-center bg-zinc-900 border border-zinc-800 p-0.5 rounded-lg text-[11px] gap-0.5">
