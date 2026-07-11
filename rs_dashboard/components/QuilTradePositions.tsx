@@ -136,8 +136,11 @@ export default function QuilTradePositions() {
   const [error, setError] = useState('');
   const [stale, setStale] = useState(false);
   const intervalRef = useRef<NodeJS.Timeout | null>(null);
+  const inFlightRef = useRef(false);
 
   const fetchPoll = useCallback(async () => {
+    if (inFlightRef.current) return;
+    inFlightRef.current = true;
     try {
       const res  = await fetch('/api/quiltrade/poll');
       const json = await res.json() as PollResponse;
@@ -152,6 +155,8 @@ export default function QuilTradePositions() {
     } catch (e) {
       setError(String(e));
       setStale(true);
+    } finally {
+      inFlightRef.current = false;
     }
   }, []);
 

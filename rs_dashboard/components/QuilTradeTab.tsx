@@ -27,7 +27,9 @@ export default function QuilTradeTab() {
   const [expiriesError, setExpiriesError] = useState('');
 
   const [pnl, setPnl] = useState<PortfolioResponse | null>(null);
+  const [dataUpdated, setDataUpdated] = useState('');
   const pnlIntervalRef = useRef<NodeJS.Timeout | null>(null);
+  const pnlInFlightRef = useRef(false);
 
   useEffect(() => {
     setExpiriesLoading(true);
@@ -46,12 +48,20 @@ export default function QuilTradeTab() {
   }, []);
 
   const fetchPnl = useCallback(async () => {
+    if (pnlInFlightRef.current) return;
+    pnlInFlightRef.current = true;
     try {
       const res  = await fetch('/api/portfolio');
       const json = await res.json() as PortfolioResponse;
-      setPnl(json);
+      if (json.success) {
+        setPnl(json);
+        setDataUpdated(new Date().toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', second: '2-digit' }));
+      }
+      // keep last-known P&L when the route reports success: false
     } catch {
       // keep last-known P&L on transient failure
+    } finally {
+      pnlInFlightRef.current = false;
     }
   }, []);
 
@@ -86,6 +96,12 @@ export default function QuilTradeTab() {
               <span className="text-[9px] uppercase text-zinc-500 font-extrabold tracking-wider">P&amp;L:</span>
               <span>{fmtPnl(totalPnl)}</span>
             </div>
+          )}
+
+          {dataUpdated && (
+            <span className="px-2 py-0.5 text-[10px] font-bold rounded-full bg-zinc-800 text-zinc-400 border border-zinc-700">
+              DATA: {dataUpdated}
+            </span>
           )}
         </div>
 
