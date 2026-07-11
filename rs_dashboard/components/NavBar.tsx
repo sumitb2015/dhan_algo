@@ -43,6 +43,7 @@ const NAV_GROUPS = [
     links: [
       { href: '/futures', label: 'Futures', desc: 'OI buildup & short/long coverage analysis' },
       { href: '/options', label: 'Options', desc: 'Max pain, PCR & live options chain' },
+      { href: '/options/quiltrade', label: 'QuilTrade', desc: 'OI buildup quadrants, live positions & P&L' },
       { href: '/options/delta', label: 'Net Delta', desc: 'Track live delta risk and net delta exposure of active positions' },
       { href: '/options/crudeoil', label: 'Crude Oil Options', desc: 'Max pain, PCR & live option chain for MCX Crude Oil' },
       { href: '/options/analyzer', label: 'Option Analyzer', desc: 'Rank strikes based on technical indicators & OI change' },
