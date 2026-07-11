@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { readStockCSV } from '@/lib/dataLoader';
+import { readStockCSV, KNOWN_INDICES, readIndexCSV } from '@/lib/dataLoader';
 import { OHLCVRow } from '@/lib/rs';
 
 export interface SeasonalityCell {
@@ -41,7 +41,8 @@ export async function GET(req: NextRequest) {
       return NextResponse.json({ success: false, error: 'symbol is required' }, { status: 400 });
     }
 
-    const rows = readStockCSV(symbol);
+    const indexMeta = KNOWN_INDICES.find((m) => m.key === symbol);
+    const rows = indexMeta ? readIndexCSV(indexMeta) : readStockCSV(symbol);
     if (rows.length === 0) {
       return NextResponse.json({ success: false, error: `No data found for ${symbol}` }, { status: 404 });
     }

@@ -1,8 +1,9 @@
 'use client';
 
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import { CalendarRange, Loader2 } from 'lucide-react';
 import type { SeasonalityResponse, SeasonalityCell } from '@/app/api/seasonality/route';
+import type { SymbolsResponse, IndexOption } from '@/app/api/symbols/route';
 import { NIFTY50_SYMBOLS } from '@/lib/nifty50';
 import { cn } from '@/lib/utils';
 import NavBar from './NavBar';
@@ -55,6 +56,23 @@ export default function SeasonalityHeatmap() {
   const [data, setData] = useState<SeasonalityResponse | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [indices, setIndices] = useState<IndexOption[]>([]);
+
+  useEffect(() => {
+    fetch('/api/symbols')
+      .then((res) => res.json())
+      .then((json: SymbolsResponse) => {
+        if (json.success) setIndices(json.indices);
+      })
+      .catch(() => {});
+  }, []);
+
+  // Indices are searched/selected by their display label (e.g. "Nifty 50")
+  // while stocks are searched/selected by ticker — both share one combobox.
+  const indexLabelToKey = useMemo(() => new Map(indices.map((i) => [i.label, i.key])), [indices]);
+  const indexKeyToLabel = useMemo(() => new Map(indices.map((i) => [i.key, i.label])), [indices]);
+  const comboItems = useMemo(() => [...indices.map((i) => i.label), ...NIFTY50_SYMBOLS], [indices]);
+  const displayValue = indexKeyToLabel.get(symbol) ?? symbol;
 
   const fetchData = useCallback(async (sym: string) => {
     setLoading(true);
@@ -107,20 +125,23 @@ export default function SeasonalityHeatmap() {
         {/* Toolbar */}
         <div className="flex items-center gap-3 flex-wrap">
           <Combobox
-            items={NIFTY50_SYMBOLS}
-            value={symbol}
-            onValueChange={(v) => v && setSymbol(v)}
+            items={comboItems}
+            value={displayValue}
+            onValueChange={(v) => v && setSymbol(indexLabelToKey.get(v) ?? v)}
           >
             <ComboboxInput
-              placeholder="Search stock…"
+              placeholder="Search stock or index…"
               className="w-56"
             />
             <ComboboxContent>
-              <ComboboxEmpty>No matching stock</ComboboxEmpty>
+              <ComboboxEmpty>No matching symbol</ComboboxEmpty>
               <ComboboxList>
                 {(item: string) => (
                   <ComboboxItem key={item} value={item}>
                     {item}
+                    {indexLabelToKey.has(item) && (
+                      <span className="ml-1.5 text-[9px] font-semibold text-emerald-400/80">INDEX</span>
+                    )}
                   </ComboboxItem>
                 )}
               </ComboboxList>
