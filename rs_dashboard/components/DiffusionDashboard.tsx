@@ -168,11 +168,26 @@ function IndicatorTooltip({ active, payload, label }: {
   );
 }
 
+// ─── Range options ────────────────────────────────────────────────────────────
+
+type RangeKey = '3m' | '6m' | '1y' | '2y' | '3y' | '5y' | 'all';
+
+const RANGE_OPTIONS: { key: RangeKey; label: string; months: number | null }[] = [
+  { key: '3m', label: '3M', months: 3 },
+  { key: '6m', label: '6M', months: 6 },
+  { key: '1y', label: '1Y', months: 12 },
+  { key: '2y', label: '2Y', months: 24 },
+  { key: '3y', label: '3Y', months: 36 },
+  { key: '5y', label: '5Y', months: 60 },
+  { key: 'all', label: 'All', months: null },
+];
+
 // ─── Component ────────────────────────────────────────────────────────────────
 
 export default function DiffusionDashboard() {
   const [universe, setUniverse] = useState<'nifty50' | 'nifty500'>('nifty50');
   const [selectedKey, setSelectedKey] = useState<SeriesKey>('pctAboveSma20');
+  const [range, setRange] = useState<RangeKey>('all');
   const [data, setData] = useState<DiffusionResponse | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -208,7 +223,19 @@ export default function DiffusionDashboard() {
   const { indexChartData, indicatorChartData, xTicks } = useMemo(() => {
     if (!data) return { indexChartData: [], indicatorChartData: [], xTicks: [] };
 
-    const idxs = sampleDates(data.dates, 600);
+    const months = RANGE_OPTIONS.find((r) => r.key === range)?.months ?? null;
+    let startIdx = 0;
+    if (months !== null && data.dates.length > 0) {
+      const lastDate = new Date(data.dates[data.dates.length - 1]);
+      const cutoff = new Date(lastDate);
+      cutoff.setMonth(cutoff.getMonth() - months);
+      const cutoffIso = cutoff.toISOString().slice(0, 10);
+      const found = data.dates.findIndex((d) => d >= cutoffIso);
+      startIdx = found === -1 ? 0 : found;
+    }
+    const filteredDates = data.dates.slice(startIdx);
+
+    const idxs = sampleDates(filteredDates, 600).map((i) => i + startIdx);
     const ticks = buildXAxisTicks(data.dates, idxs);
     const series = data[selectedKey] as number[];
 
@@ -224,7 +251,7 @@ export default function DiffusionDashboard() {
     }));
 
     return { indexChartData: indexCD, indicatorChartData: indicatorCD, xTicks: ticks };
-  }, [data, selectedKey]);
+  }, [data, selectedKey, range]);
 
   const toggleCat = (label: string) =>
     setCollapsed((prev) => ({ ...prev, [label]: !prev[label] }));
@@ -250,6 +277,23 @@ export default function DiffusionDashboard() {
               }`}
             >
               {u === 'nifty50' ? 'Nifty 50' : 'Nifty 500'}
+            </button>
+          ))}
+        </div>
+
+        {/* Range selector */}
+        <div className="flex items-center gap-1 bg-zinc-900 border border-zinc-700 rounded-lg p-0.5">
+          {RANGE_OPTIONS.map((r) => (
+            <button
+              key={r.key}
+              onClick={() => setRange(r.key)}
+              className={`px-2.5 py-1 text-xs font-bold rounded-md transition-all ${
+                range === r.key
+                  ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30'
+                  : 'text-zinc-400 hover:text-white'
+              }`}
+            >
+              {r.label}
             </button>
           ))}
         </div>
