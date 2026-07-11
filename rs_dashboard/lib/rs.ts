@@ -98,16 +98,30 @@ export function computeRSLine(
 }
 
 /**
+ * Clamp the requested lookback down to what the aligned series can actually
+ * support. Recently-listed stocks (IPOs, post-demerger relistings) have far
+ * less than a year of history — without this, computeCurrentRS would silently
+ * return 0 (a fake "inline with index" reading) instead of a real RS ratio
+ * computed over the stock's available history, corrupting its rank/score.
+ */
+function effectiveLookback(alignedLength: number, lookback: number): number {
+  return Math.min(lookback, alignedLength - 1);
+}
+
+/**
  * Compute the RS ratio at a single point in time.
  * currentRS = (stockClose[-1] / stockClose[-52w]) / (indexClose[-1] / indexClose[-52w]) - 1
+ * Falls back to the longest lookback the aligned series supports (min 20 rows)
+ * when the stock has less history than requested, rather than returning 0.
  */
 export function computeCurrentRS(
   aligned: Array<{ stockClose: number; indexClose: number }>,
   lookback: number = 252 // dynamic lookback period (50, 100, 252 etc)
 ): number {
-  if (aligned.length <= lookback) return 0;
+  const lb = effectiveLookback(aligned.length, lookback);
+  if (lb < 20) return 0;
   const curr = aligned[aligned.length - 1];
-  const base = aligned[aligned.length - 1 - lookback];
+  const base = aligned[aligned.length - 1 - lb];
   if (base.stockClose === 0 || base.indexClose === 0) return 0;
   return ((curr.stockClose / base.stockClose) / (curr.indexClose / base.indexClose)) - 1;
 }
@@ -207,16 +221,21 @@ export function buildRSResult(
   );
   const rsChange1W = rsRatio - rsRatio1WAgo;
 
-  // Trend: last 20 RS values
+  // Trend: last 20 RS values, using the same degraded lookback as rsRatio
+  // above so short-history stocks (recent IPOs/relistings) still get a
+  // populated sparkline and a real isRSNewHigh check instead of an empty one.
+  const lb = effectiveLookback(aligned.length, lookback);
   const trend: number[] = [];
-  const startIndex = Math.max(lookback, aligned.length - 20);
-  for (let i = startIndex; i < aligned.length; i++) {
-    const curr = aligned[i];
-    const base = aligned[i - lookback];
-    if (base.stockClose > 0 && base.indexClose > 0) {
-      trend.push(
-        ((curr.stockClose / base.stockClose) / (curr.indexClose / base.indexClose)) - 1
-      );
+  if (lb >= 20) {
+    const startIndex = Math.max(lb, aligned.length - 20);
+    for (let i = startIndex; i < aligned.length; i++) {
+      const curr = aligned[i];
+      const base = aligned[i - lb];
+      if (base.stockClose > 0 && base.indexClose > 0) {
+        trend.push(
+          ((curr.stockClose / base.stockClose) / (curr.indexClose / base.indexClose)) - 1
+        );
+      }
     }
   }
 

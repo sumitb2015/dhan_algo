@@ -224,14 +224,20 @@ function computeRS(
   lookback = 252,
 ): { rsRatio: number; rsRising20: boolean; rsAboveMA: boolean } {
   const aligned = alignByDate(stockRows, indexRows);
-  if (aligned.length < lookback + 21) return { rsRatio: 0, rsRising20: false, rsAboveMA: false };
+  if (aligned.length < 21) return { rsRatio: 0, rsRising20: false, rsAboveMA: false };
+
+  // Degrade the lookback for short-history stocks (recent IPOs/relistings)
+  // instead of zeroing them out — mirrors the fallback in lib/rs.ts so the
+  // leaderboard and scanner agree on how a stock like a fresh listing is scored.
+  const effLookback = Math.min(lookback, aligned.length - 1);
+  if (effLookback < 20) return { rsRatio: 0, rsRising20: false, rsAboveMA: false };
 
   const rsValues: number[] = [];
   const n = aligned.length;
-  const start = Math.max(lookback, n - 21);
+  const start = Math.max(effLookback, n - 21);
   for (let i = start; i < n; i++) {
     const curr = aligned[i];
-    const base = aligned[i - lookback];
+    const base = aligned[i - effLookback];
     if (base.stockClose === 0 || base.indexClose === 0) continue;
     rsValues.push(((curr.stockClose / base.stockClose) / (curr.indexClose / base.indexClose)) - 1);
   }
