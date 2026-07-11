@@ -48,9 +48,14 @@ function Sparkline({ data }: { data: number[] }) {
   const height = 24;
   const pad = 2;
 
+  // A single-point trend (e.g. a recently-listed stock with < 20 trading
+  // days of RS history) has no span to divide across — treat it as width 1
+  // so x/y positions resolve instead of dividing by zero into NaN.
+  const denom = data.length - 1 || 1;
+
   const points = data
     .map((val, idx) => {
-      const x = pad + (idx / (data.length - 1)) * (width - pad * 2);
+      const x = pad + (idx / denom) * (width - pad * 2);
       const y = pad + (1 - (val - min) / range) * (height - pad * 2);
       return `${x.toFixed(1)},${y.toFixed(1)}`;
     })
@@ -60,7 +65,7 @@ function Sparkline({ data }: { data: number[] }) {
   const first = data[0];
   const isUp = last >= first;
   const color = isUp ? '#10b981' : '#ef4444';
-  const lastX = pad + ((data.length - 1) / (data.length - 1)) * (width - pad * 2);
+  const lastX = pad + ((data.length - 1) / denom) * (width - pad * 2);
   const lastY = pad + (1 - (last - min) / range) * (height - pad * 2);
 
   return (
