@@ -277,13 +277,40 @@ def update_index_csv(csv_path: str, name: str, ohlcv: dict, today: str):
         print(f"  {name} index CSV: {result}")
 
 
+def is_trading_day() -> bool:
+    """NSE never trades on weekends. Running this script on a Saturday/Sunday
+    (e.g. via an unattended daily scheduled task) would otherwise write a
+    bogus dated row carrying Friday's stale LTP forward as if it were a real
+    session."""
+    return datetime.now().weekday() < 5
+
+
+def _is_genuine_ohlc(q: dict) -> bool:
+    """True if `q` looks like real intraday OHLC rather than a bare LTP
+    snapshot. The batch OHLC/quote APIs sometimes fail to return a real
+    intraday range and callers here fall back to Open=High=Low=Close=LTP,
+    Volume=0 — writing that into the permanent CSV produces a flat/degenerate
+    candle that never gets corrected by the normal incremental refresh."""
+    o, h, l, c, v = q.get("open", 0), q.get("high", 0), q.get("low", 0), q.get("close", 0), q.get("volume", 0)
+    if o <= 0 or h <= 0 or l <= 0:
+        return False
+    if o == h == l == c and v == 0:
+        return False
+    return True
+
+
 def main():
     parser = argparse.ArgumentParser(description="Fetch live OHLCV quotes for all dashboard stocks")
     parser.add_argument("--symbols", nargs="*", help="Specific symbols to fetch (default: all)")
+    parser.add_argument("--force", action="store_true", help="Fetch/write even on a non-trading day (debugging only)")
     args = parser.parse_args()
 
     today = datetime.now().strftime("%Y-%m-%d")
     print(f"=== fetch_today_quotes.py  {today} ===")
+
+    if not is_trading_day() and not args.force:
+        print(f"[SKIP] {today} is a weekend — not a trading day. Not fetching or writing anything.")
+        return
 
     symbols = load_symbols(args.symbols)
     if not symbols:
@@ -497,13 +524,24 @@ def main():
         print(f"    -> Index fetch failed: {e}")
 
     # ── Write today's row into each stock CSV ────────────────────────────────
+    # Only quotes with genuine intraday OHLC get persisted to CSV — a bare-LTP
+    # fallback (Open=High=Low=Close, Volume=0) would otherwise bake a flat/
+    # degenerate candle into history that the normal incremental refresh never
+    # retroactively corrects. LTP-only quotes still go into today_quotes.json
+    # below for the dashboard's live in-memory patch.
+    csv_quotes = {sym: q for sym, q in all_quotes.items() if _is_genuine_ohlc(q)}
+    skipped_ltp_only = len(all_quotes) - len(csv_quotes)
+    if skipped_ltp_only:
+        print(f"\n  [INFO] {skipped_ltp_only} quote(s) are LTP-only (no real OHLC) — kept in "
+              f"today_quotes.json but not written to CSV")
+
     print(f"\n  Updating stock CSVs...")
-    appended, updated, errors = update_stock_csvs(all_quotes, today)
+    appended, updated, errors = update_stock_csvs(csv_quotes, today)
     print(f"  OK Stocks: {appended} appended, {updated} updated, {errors} errors")
 
     # ── Write today's row into index EOD CSVs ────────────────────────────────
     print(f"\n  Updating index CSVs...")
-    for today_key, ohlcv in all_quotes.items():
+    for today_key, ohlcv in csv_quotes.items():
         if today_key == "_NIFTY50_INDEX":
             # Nifty 50 has two CSVs to update (1Y and 5Y)
             p1, l1 = INDEX_CSV_MAP["_NIFTY50_INDEX"]

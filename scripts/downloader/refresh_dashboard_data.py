@@ -156,6 +156,53 @@ def get_last_date(csv_path: str) -> Optional[str]:
         return None
 
 
+def find_earliest_bad_date(csv_path: str, window_days: int = 10) -> Optional[str]:
+    """Return the earliest date within the last `window_days` whose row looks
+    like a flat/degenerate LTP-only placeholder (Open==High==Low==Close with
+    Volume==0), or None if the recent window looks clean.
+
+    The normal incremental logic below only ever fills forward from the
+    file's last date — once a bad placeholder row (written by
+    fetch_today_quotes.py's LTP-only fallback) lands on what's already the
+    "last date", the file looks up to date forever and nothing ever
+    retroactively re-fetches real EOD data for it. Callers use this to widen
+    `from_date` backward far enough to force a repair fetch.
+    """
+    if not os.path.exists(csv_path):
+        return None
+    try:
+        df = pd.read_csv(csv_path, on_bad_lines='skip')
+        date_col = 'Datetime' if 'Datetime' in df.columns else df.columns[0]
+        df[date_col] = pd.to_datetime(df[date_col], errors='coerce')
+        df = df.dropna(subset=[date_col])
+        if not {'Open', 'High', 'Low', 'Close'}.issubset(df.columns):
+            return None
+        cutoff = datetime.now() - timedelta(days=window_days)
+        recent = df[df[date_col] >= cutoff]
+        if recent.empty:
+            return None
+        volume = recent['Volume'].fillna(0) if 'Volume' in recent.columns else 0
+        flat = recent[
+            (recent['Open'] == recent['High']) &
+            (recent['High'] == recent['Low']) &
+            (recent['Low'] == recent['Close']) &
+            (volume == 0)
+        ]
+        if flat.empty:
+            return None
+        return flat[date_col].min().strftime("%Y-%m-%d")
+    except Exception:
+        return None
+
+
+def strip_weekend_rows(df: pd.DataFrame) -> pd.DataFrame:
+    """NSE never trades on weekends — drop any row that landed on one (e.g.
+    from fetch_today_quotes.py running on a non-trading day)."""
+    if df.empty:
+        return df
+    return df[df.index.dayofweek < 5]
+
+
 def df_to_stock_csv(df: pd.DataFrame, csv_path: str):
     """Save DataFrame (DatetimeIndex) to CSV in the format readStockCSV expects."""
     df_save = df.reset_index()
@@ -262,11 +309,16 @@ def refresh_nifty50(helper):
                          f"  ⚠ Nifty 50 CSV appears truncated ({row_count} rows) — forcing full 5Y re-download")
             last_date = None
 
+    bad_date = find_earliest_bad_date(NIFTY50_CSV)
+
     if last_date and last_date >= last_trading_day:
         if last_date > last_trading_day:
             # fetch_today_quotes.py may have inserted today's live row while
             # last_trading_day's historical data is still missing — fill the gap.
             from_date = last_trading_day
+        elif bad_date:
+            from_date = bad_date
+            write_status("nifty50", f"  ⚠ Degenerate row(s) found from {bad_date} — re-fetching to repair")
         else:
             write_status("nifty50", f"✓ Nifty 50 already up to date (last: {last_date})")
             return True
@@ -276,6 +328,8 @@ def refresh_nifty50(helper):
             if last_date
             else (datetime.now() - timedelta(days=1825)).strftime("%Y-%m-%d")
         )
+        if bad_date and bad_date < from_date:
+            from_date = bad_date
 
     write_status("nifty50", f"  Fetching Nifty 50 from {from_date} to {last_trading_day} (api to_date={to_date_api})...")
 
@@ -332,6 +386,7 @@ def refresh_nifty50(helper):
             combined = combined[~combined.index.duplicated(keep="last")].sort_index()
         else:
             combined = new_df
+        combined = strip_weekend_rows(combined)
 
         df_to_index_csv(combined, NIFTY50_CSV)
         write_status("nifty50", f"  ✓ Nifty 50 updated: {len(new_df)} new rows (total {len(combined)})")
@@ -358,9 +413,14 @@ def refresh_nifty500_index(helper):
                          f"  ⚠ Nifty 500 index CSV appears truncated ({row_count} rows) — forcing full 5Y re-download")
             last_date = None
 
+    bad_date = find_earliest_bad_date(N500IDX_CSV)
+
     if last_date and last_date >= last_trading_day:
         if last_date > last_trading_day:
             from_date = last_trading_day
+        elif bad_date:
+            from_date = bad_date
+            write_status("nifty500_index", f"  ⚠ Degenerate row(s) found from {bad_date} — re-fetching to repair")
         else:
             write_status("nifty500_index", f"✓ Nifty 500 index already up to date (last: {last_date})")
             return True
@@ -370,6 +430,8 @@ def refresh_nifty500_index(helper):
             if last_date
             else (datetime.now() - timedelta(days=1825)).strftime("%Y-%m-%d")
         )
+        if bad_date and bad_date < from_date:
+            from_date = bad_date
 
     write_status("nifty500_index", f"  Fetching Nifty 500 index from {from_date} to {last_trading_day} (api to_date={to_date_api})...")
 
@@ -416,6 +478,7 @@ def refresh_nifty500_index(helper):
             combined = combined[~combined.index.duplicated(keep="last")].sort_index()
         else:
             combined = new_df
+        combined = strip_weekend_rows(combined)
 
         df_to_index_csv(combined, N500IDX_CSV)
         write_status("nifty500_index", f"  ✓ Nifty 500 index updated: {len(new_df)} new rows (total {len(combined)})")
@@ -464,6 +527,7 @@ def refresh_stocks(helper):
 
         csv_path = os.path.join(STOCKS_DIR, f"{symbol}_Daily_2Y.csv")
         last_date = get_last_date(csv_path)
+        bad_date = find_earliest_bad_date(csv_path)
 
         # Already up to date?
         if last_date and last_date >= last_trading_day:
@@ -471,6 +535,10 @@ def refresh_stocks(helper):
                 # fetch_today_quotes.py may have inserted today's live row while
                 # last_trading_day's historical data is still missing — fill the gap.
                 from_date = last_trading_day
+            elif bad_date:
+                from_date = bad_date
+                write_status("stocks", f"  [{i}/{total}] {symbol}: degenerate row(s) from {bad_date} — repairing",
+                             current=i, total=total)
             else:
                 skipped += 1
                 write_status("stocks", f"  [{i}/{total}] {symbol}: up to date ({last_date})",
@@ -482,6 +550,8 @@ def refresh_stocks(helper):
                 if last_date
                 else (datetime.now() - timedelta(days=730)).strftime("%Y-%m-%d")
             )
+            if bad_date and bad_date < from_date:
+                from_date = bad_date
 
         write_status("stocks", f"  [{i}/{total}] {symbol}: fetching from {from_date}...",
                      current=i, total=total)
@@ -543,6 +613,7 @@ def refresh_stocks(helper):
                 combined = combined[~combined.index.duplicated(keep="last")].sort_index()
             else:
                 combined = new_df
+            combined = strip_weekend_rows(combined)
 
             df_to_stock_csv(combined, csv_path)
             write_status("stocks",
@@ -577,10 +648,15 @@ def refresh_indices(helper):
 
         csv_path = os.path.join(INDICES_DIR, f"{entry['name']}.csv")
         last_date = get_last_date(csv_path)
+        bad_date = find_earliest_bad_date(csv_path)
 
         if last_date and last_date >= last_trading_day:
             if last_date > last_trading_day:
                 from_date = last_trading_day
+            elif bad_date:
+                from_date = bad_date
+                write_status("indices", f"  [{i}/{total}] {entry['label']}: degenerate row(s) from {bad_date} — repairing",
+                             current=i, total=total)
             else:
                 skipped += 1
                 write_status("indices", f"  [{i}/{total}] {entry['label']}: up to date ({last_date})",
@@ -592,6 +668,8 @@ def refresh_indices(helper):
                 if last_date
                 else (datetime.now() - timedelta(days=1825)).strftime("%Y-%m-%d")
             )
+            if bad_date and bad_date < from_date:
+                from_date = bad_date
 
         write_status("indices", f"  [{i}/{total}] {entry['label']}: fetching from {from_date}...",
                      current=i, total=total)
@@ -639,6 +717,7 @@ def refresh_indices(helper):
                 combined = combined[~combined.index.duplicated(keep="last")].sort_index()
             else:
                 combined = new_df
+            combined = strip_weekend_rows(combined)
 
             df_to_index_csv(combined, csv_path)
             write_status("indices",
