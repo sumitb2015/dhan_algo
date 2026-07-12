@@ -48,7 +48,7 @@ export async function GET(): Promise<NextResponse> {
         return NextResponse.json(filterToNifty(JSON.parse(lines[lines.length - 1])));
       } catch {}
     }
-    console.error('[/api/quiltrade/poll] error:', e.message, e.stderr ?? '');
+    console.error('[/api/quiktrade/poll] error:', e.message, e.stderr ?? '');
     return NextResponse.json(
       { success: false, error: 'Failed to fetch positions', detail: String(e.message) },
       { status: 500 },

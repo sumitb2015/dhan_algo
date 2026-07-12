@@ -130,7 +130,7 @@ function DataTable({ tab, rows }: { tab: TabKey; rows: Record<string, unknown>[]
 
 // ─── Main ─────────────────────────────────────────────────────────
 
-export default function QuilTradePositions() {
+export default function QuikTradePositions() {
   const [activeTab, setActiveTab] = useState<TabKey>('positions');
   const [data, setData] = useState<PollResponse>({ success: true, positions: [], orders: [], trades: [] });
   const [error, setError] = useState('');
@@ -142,7 +142,7 @@ export default function QuilTradePositions() {
     if (inFlightRef.current) return;
     inFlightRef.current = true;
     try {
-      const res  = await fetch('/api/quiltrade/poll');
+      const res  = await fetch('/api/quiktrade/poll');
       const json = await res.json() as PollResponse;
       if (!json.success) {
         setError(json.error ?? 'Failed to fetch positions');

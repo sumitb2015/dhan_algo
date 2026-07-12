@@ -2,8 +2,8 @@
 
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import NavBar from './NavBar';
-import QuilTradeQuadrants from './QuilTradeQuadrants';
-import QuilTradePositions from './QuilTradePositions';
+import QuikTradeQuadrants from './QuikTradeQuadrants';
+import QuikTradePositions from './QuikTradePositions';
 
 const UNDERLYING = 'NIFTY';
 const PNL_POLL_MS = 5_000;
@@ -20,7 +20,7 @@ function fmtPnl(n: number): string {
   return (n >= 0 ? '+' : '') + '₹' + n.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 }
 
-export default function QuilTradeTab() {
+export default function QuikTradeTab() {
   const [expiries, setExpiries] = useState<string[]>([]);
   const [expiry, setExpiry] = useState('');
   const [expiriesLoading, setExpiriesLoading] = useState(false);
@@ -79,7 +79,7 @@ export default function QuilTradeTab() {
                       px-6 py-3 border-b border-zinc-800 bg-zinc-950/95 backdrop-blur">
         <div className="flex items-center gap-3 flex-wrap">
           <div>
-            <h1 className="text-sm font-bold text-white tracking-tight">QuilTrade</h1>
+            <h1 className="text-sm font-bold text-white tracking-tight">QuikTrade</h1>
             <p className="text-[10px] text-zinc-400 font-medium">OI buildup quadrants &amp; live trading terminal</p>
           </div>
 
@@ -125,8 +125,8 @@ export default function QuilTradeTab() {
           </div>
         )}
 
-        <QuilTradeQuadrants expiry={expiry} />
-        <QuilTradePositions />
+        <QuikTradeQuadrants expiry={expiry} />
+        <QuikTradePositions />
       </div>
     </div>
   );

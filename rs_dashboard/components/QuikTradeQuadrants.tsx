@@ -1,6 +1,7 @@
 'use client';
 
 import React, { useState, useEffect, useRef, useCallback } from 'react';
+import { Button } from '@/components/ui/button';
 
 // ─── Types ────────────────────────────────────────────────────────
 
@@ -27,6 +28,13 @@ interface Tile {
   ltp: number;
   priceChgPct: number | null;
   oiChgPct: number | null;
+}
+
+interface Toast {
+  id: string;
+  kind: 'success' | 'error';
+  message: string;
+  detail?: string;
 }
 
 // ─── Constants ────────────────────────────────────────────────────
@@ -87,9 +95,16 @@ function fmtPct(pct: number | null): string {
 
 // ─── Tile ─────────────────────────────────────────────────────────
 
-function QuadrantTile({ tile, label }: { tile: Tile; label: QuadrantLabel }) {
+function QuadrantTile({
+  tile, label, pending, onTrade,
+}: {
+  tile: Tile;
+  label: QuadrantLabel;
+  pending: boolean;
+  onTrade: (tile: Tile, side: 'BUY' | 'SELL') => void;
+}) {
   return (
-    <div className={`flex flex-col gap-0.5 px-2.5 py-2 rounded-lg border text-[11px] font-semibold tabular-nums ${TILE_CLASSES[label]}`}>
+    <div className={`flex flex-col gap-1.5 px-2.5 py-2 rounded-lg border text-[11px] font-semibold tabular-nums ${TILE_CLASSES[label]}`}>
       <div className="flex items-center gap-1.5">
         <span className="font-bold">{tile.strike.toLocaleString('en-IN')}</span>
         <span className="text-[9px] px-1 py-0.5 rounded bg-black/20">{tile.type}</span>
@@ -99,19 +114,78 @@ function QuadrantTile({ tile, label }: { tile: Tile; label: QuadrantLabel }) {
         <span>{fmtPct(tile.priceChgPct)}</span>
         <span>OI {fmtPct(tile.oiChgPct)}</span>
       </div>
+      <div className="flex items-center gap-1 pt-0.5 border-t border-white/10 mt-0.5">
+        <Button
+          size="icon-xs"
+          disabled={pending}
+          onClick={() => onTrade(tile, 'BUY')}
+          className="flex-1 h-5 bg-emerald-600 hover:bg-emerald-500 text-white font-extrabold text-[10px] disabled:opacity-40"
+          title={`Buy ${tile.strike} ${tile.type}`}
+        >
+          B
+        </Button>
+        <Button
+          size="icon-xs"
+          disabled={pending}
+          onClick={() => onTrade(tile, 'SELL')}
+          className="flex-1 h-5 bg-rose-600 hover:bg-rose-500 text-white font-extrabold text-[10px] disabled:opacity-40"
+          title={`Sell ${tile.strike} ${tile.type}`}
+        >
+          S
+        </Button>
+      </div>
     </div>
   );
 }
 
 // ─── Main ─────────────────────────────────────────────────────────
 
-export default function QuilTradeQuadrants({ expiry }: { expiry: string }) {
+export default function QuikTradeQuadrants({ expiry }: { expiry: string }) {
   const [allStrikes, setAllStrikes]   = useState<ParsedStrike[]>([]);
   const [spot, setSpot]               = useState(0);
   const [lastUpdated, setLastUpdated] = useState<string | null>(null);
   const [loading, setLoading]         = useState(false);
   const [error, setError]             = useState('');
+  const [lots, setLots]               = useState(1);
+  const [pendingKey, setPendingKey]   = useState<string | null>(null);
+  const [toasts, setToasts]           = useState<Toast[]>([]);
   const intervalRef = useRef<NodeJS.Timeout | null>(null);
+
+  const addToast = useCallback((kind: 'success' | 'error', message: string, detail?: string) => {
+    const id = `${Date.now()}-${Math.random()}`;
+    setToasts(prev => [...prev, { id, kind, message, detail }]);
+    setTimeout(() => setToasts(prev => prev.filter(t => t.id !== id)), 3000);
+  }, []);
+
+  const placeOrder = useCallback(async (tile: Tile, side: 'BUY' | 'SELL') => {
+    const key = `${tile.strike}-${tile.type}`;
+    setPendingKey(key);
+    try {
+      const res = await fetch('/api/scalper/order', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          underlying: UNDERLYING,
+          expiry,
+          strike: tile.strike,
+          option: tile.type,
+          side,
+          lots,
+          type: 'MARKET',
+        }),
+      });
+      const j = await res.json() as { success: boolean; order_id?: string; error?: string };
+      if (j.success) {
+        addToast('success', `${side} ${tile.strike} ${tile.type} placed`, `ID: ${j.order_id}`);
+      } else {
+        addToast('error', `${side} ${tile.strike} ${tile.type} failed`, j.error ?? 'Unknown error');
+      }
+    } catch (e) {
+      addToast('error', 'Network error', String(e));
+    } finally {
+      setPendingKey(null);
+    }
+  }, [expiry, lots, addToast]);
 
   const fetchChain = useCallback(async () => {
     if (!expiry) return;
@@ -182,7 +256,21 @@ export default function QuilTradeQuadrants({ expiry }: { expiry: string }) {
   }
 
   return (
-    <div className="flex flex-col gap-3">
+    <div className="flex flex-col gap-3 relative">
+      {/* Toast overlay */}
+      <div className="fixed top-4 right-4 z-50 flex flex-col gap-2 pointer-events-none">
+        {toasts.map(t => (
+          <div key={t.id} className={`pointer-events-auto px-4 py-3 rounded-xl border text-sm font-semibold
+            shadow-2xl max-w-xs
+            ${t.kind === 'success'
+              ? 'bg-emerald-900/95 border-emerald-500/40 text-emerald-200'
+              : 'bg-rose-900/95 border-rose-500/40 text-rose-200'}`}>
+            <p>{t.message}</p>
+            {t.detail && <p className="text-xs opacity-70 mt-0.5 font-mono">{t.detail}</p>}
+          </div>
+        ))}
+      </div>
+
       <div className="flex items-center gap-4 text-[10px] text-zinc-500 font-medium">
         {loading && <span className="text-zinc-400 animate-pulse">Refreshing…</span>}
         {lastUpdated && <span>Updated {lastUpdated}</span>}
@@ -191,7 +279,16 @@ export default function QuilTradeQuadrants({ expiry }: { expiry: string }) {
             ATM {atm.toLocaleString('en-IN')}
           </span>
         )}
-        <span className="ml-auto">Auto-refresh: 30s · ATM ±{WINGS} strikes</span>
+        <div className="ml-auto flex items-center gap-2">
+          <label className="text-[10px] text-zinc-500 font-semibold uppercase tracking-wide">Lots</label>
+          <input
+            type="number" min={1} step={1}
+            value={lots}
+            onChange={e => setLots(Math.max(1, Number(e.target.value) || 1))}
+            className="w-12 bg-zinc-900 border border-zinc-800 rounded-md px-1.5 py-0.5 text-[11px] font-bold text-zinc-200 tabular-nums focus:outline-none focus:border-emerald-500"
+          />
+          <span>Auto-refresh: 30s · ATM ±{WINGS} strikes</span>
+        </div>
       </div>
 
       {error && (
@@ -212,7 +309,13 @@ export default function QuilTradeQuadrants({ expiry }: { expiry: string }) {
             </div>
             <div className="flex flex-wrap gap-2">
               {tilesByQuadrant[q.label].map(tile => (
-                <QuadrantTile key={`${tile.strike}-${tile.type}`} tile={tile} label={q.label} />
+                <QuadrantTile
+                  key={`${tile.strike}-${tile.type}`}
+                  tile={tile}
+                  label={q.label}
+                  pending={pendingKey === `${tile.strike}-${tile.type}`}
+                  onTrade={placeOrder}
+                />
               ))}
               {tilesByQuadrant[q.label].length === 0 && (
                 <span className="text-[11px] text-zinc-600 py-2">

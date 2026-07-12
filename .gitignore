@@ -20,6 +20,7 @@ __pycache__/
 # Agent/Local Metadata
 .agent/
 .gemini/
+.claude/
 .playwright-mcp/
 agent.md
 REORGANIZATION_SUMMARY.md
@@ -29,6 +30,10 @@ debug/*.txt
 debug/*.pid
 debug/*.json
 debug/*.db
+debug/*.trigger
+
+# Nested clones under scratch/
+scratch/rrg-lite-clone/
 
 # Debug Scripts
 debug_*.py
