@@ -595,19 +595,19 @@ export default function CrudeOilOptions() {
                             <div className="flex gap-1">
                               <button
                                 disabled={ordering}
-                                onClick={() => handlePlaceOrder(row.ce!.security_id!, 'BUY')}
-                                className="bg-emerald-500/10 text-emerald-400 hover:bg-emerald-500 hover:text-white disabled:opacity-50 disabled:pointer-events-none border border-emerald-500/30 rounded px-1.5 py-0.5 font-bold transition-all text-[10px]"
-                                title="Market Buy Option"
-                              >
-                                B
-                              </button>
-                              <button
-                                disabled={ordering}
                                 onClick={() => handlePlaceOrder(row.ce!.security_id!, 'SELL')}
                                 className="bg-red-500/10 text-red-400 hover:bg-red-500 hover:text-white disabled:opacity-50 disabled:pointer-events-none border border-red-500/30 rounded px-1.5 py-0.5 font-bold transition-all text-[10px]"
                                 title="Market Sell Option"
                               >
                                 S
+                              </button>
+                              <button
+                                disabled={ordering}
+                                onClick={() => handlePlaceOrder(row.ce!.security_id!, 'BUY')}
+                                className="bg-emerald-500/10 text-emerald-400 hover:bg-emerald-500 hover:text-white disabled:opacity-50 disabled:pointer-events-none border border-emerald-500/30 rounded px-1.5 py-0.5 font-bold transition-all text-[10px]"
+                                title="Market Buy Option"
+                              >
+                                B
                               </button>
                             </div>
                           )}
