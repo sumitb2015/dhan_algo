@@ -1,7 +1,11 @@
 import { NextRequest, NextResponse } from 'next/server';
 import fs from 'fs';
 import path from 'path';
-import { spawn, spawnSync, execSync } from 'child_process';
+import { spawn, execFile } from 'child_process';
+import { promisify } from 'util';
+import { isPidRunning } from '@/lib/processCheck';
+
+const execFileAsync = promisify(execFile);
 
 const PROJECT_ROOT   = path.resolve(process.cwd(), '..');
 const DEBUG_DIR      = path.join(PROJECT_ROOT, 'debug');
@@ -12,23 +16,14 @@ const PYTHON_EXE      = path.join(PROJECT_ROOT, 'venv', 'Scripts', 'pythonw.exe'
 const PYTHON_SYNC     = path.join(PROJECT_ROOT, 'venv', 'Scripts', 'python.exe');
 const BRIDGE_SCRIPT   = path.join(PROJECT_ROOT, 'scripts', 'tools', 'live_positions_ws.py');
 const HISTORY_SCRIPT  = path.join(PROJECT_ROOT, 'scripts', 'tools', 'positions_history.py');
+const LIVE_SCRIPT     = path.join(PROJECT_ROOT, 'scripts', 'tools', 'positions_live_data.py');
 
-
-function isPidRunning(pid: number): boolean {
-  try {
-    if (process.platform === 'win32') {
-      const out = execSync(`tasklist /FI "PID eq ${pid}" /FO CSV /NH`, {
-        encoding: 'utf8', stdio: ['pipe', 'pipe', 'ignore'], windowsHide: true,
-      });
-      const lower = out.toLowerCase();
-      return lower.includes('python') && lower.includes(pid.toString());
-    }
-    const out = execSync(`ps -p ${pid} -o comm=`, { encoding: 'utf8', stdio: ['pipe', 'pipe', 'ignore'] });
-    return out.toLowerCase().includes('python');
-  } catch {
-    return false;
-  }
-}
+// positions_live_data.py takes a couple seconds (master-list load + Dhan REST calls).
+// OptionsPositionsTab polls this every `pollMs` (default 30s, adjustable down to 2s)
+// without a `mode` param, so it always lands on the REST branch below — cache briefly
+// so back-to-back polls (or multiple open tabs) don't each pay for a fresh spawn.
+const REST_CACHE_TTL = 3000;
+let restCache: { data: Record<string, unknown>; ts: number } | null = null;
 
 function getBridgeStatus() {
   let bridge_status = { status: 'STOPPED', subscribed: 0, pid: 0 };
@@ -81,21 +76,26 @@ export async function GET(request: NextRequest) {
 
   // ── History seed mode: spawn Python script for full intraday candle history ──
   if (wantHistory) {
-    const result = spawnSync(PYTHON_SYNC, [HISTORY_SCRIPT], {
-      timeout: 45000,
-      encoding: 'utf8',
-      cwd: PROJECT_ROOT,
-    });
-    if (result.status !== 0 || result.error) {
-      if (result.stderr) console.error('[positions-live] positions_history.py stderr:', result.stderr);
-      return NextResponse.json({ history: [], error: 'script_error' });
-    }
-    const lastLine = (result.stdout || '').trim().split('\n').pop() ?? '{}';
     try {
+      const { stdout } = await execFileAsync(PYTHON_SYNC, [HISTORY_SCRIPT], {
+        timeout: 45000,
+        encoding: 'utf8',
+        cwd: PROJECT_ROOT,
+      });
+      const lastLine = (stdout || '').trim().split('\n').pop() ?? '{}';
       const parsed = JSON.parse(lastLine) as { history?: unknown[]; error?: string };
       return NextResponse.json({ history: parsed.history ?? [], error: parsed.error });
-    } catch {
-      return NextResponse.json({ history: [], error: 'parse_error' });
+    } catch (err: unknown) {
+      const e = err as { stdout?: string; stderr?: string };
+      if (e.stdout) {
+        try {
+          const lastLine = String(e.stdout).trim().split('\n').pop() ?? '{}';
+          const parsed = JSON.parse(lastLine) as { history?: unknown[]; error?: string };
+          return NextResponse.json({ history: parsed.history ?? [], error: parsed.error });
+        } catch {}
+      }
+      if (e.stderr) console.error('[positions-live] positions_history.py stderr:', e.stderr);
+      return NextResponse.json({ history: [], error: 'script_error' });
     }
   }
 
@@ -129,24 +129,33 @@ export async function GET(request: NextRequest) {
   }
 
   // ── Python script: positions + LTPs + VIX via DhanHelper SDK ────────
-  const LIVE_SCRIPT = path.join(PROJECT_ROOT, 'scripts', 'tools', 'positions_live_data.py');
-  const result = spawnSync(PYTHON_SYNC, [LIVE_SCRIPT], {
-    timeout: 20000,
-    encoding: 'utf8',
-    cwd: PROJECT_ROOT,
-  });
-
-  if (result.error || result.status !== 0) {
-    if (result.stderr) console.error('[positions-live] positions_live_data.py stderr:', result.stderr);
-    return NextResponse.json({ has_positions: false, net_premium: 0, vix: 0, legs: [], timestamp: new Date().toISOString(), error: 'script_error', bridge_status });
+  if (restCache && Date.now() - restCache.ts < REST_CACHE_TTL) {
+    return NextResponse.json({ ...restCache.data, bridge_status });
   }
 
-  const lastLine = (result.stdout || '').trim().split('\n').pop() ?? '{}';
+  const fallback = { has_positions: false, net_premium: 0, vix: 0, legs: [], timestamp: new Date().toISOString() };
   try {
+    const { stdout } = await execFileAsync(PYTHON_SYNC, [LIVE_SCRIPT], {
+      timeout: 20000,
+      encoding: 'utf8',
+      cwd: PROJECT_ROOT,
+    });
+    const lastLine = (stdout || '').trim().split('\n').pop() ?? '{}';
     const parsed = JSON.parse(lastLine) as Record<string, unknown>;
+    restCache = { data: parsed, ts: Date.now() };
     return NextResponse.json({ ...parsed, bridge_status });
-  } catch {
-    return NextResponse.json({ has_positions: false, net_premium: 0, vix: 0, legs: [], timestamp: new Date().toISOString(), error: 'parse_error', bridge_status });
+  } catch (err: unknown) {
+    const e = err as { stdout?: string; stderr?: string };
+    if (e.stdout) {
+      try {
+        const lastLine = String(e.stdout).trim().split('\n').pop() ?? '{}';
+        const parsed = JSON.parse(lastLine) as Record<string, unknown>;
+        restCache = { data: parsed, ts: Date.now() };
+        return NextResponse.json({ ...parsed, bridge_status });
+      } catch {}
+    }
+    if (e.stderr) console.error('[positions-live] positions_live_data.py stderr:', e.stderr);
+    return NextResponse.json({ ...fallback, error: 'script_error', bridge_status });
   }
 }
 

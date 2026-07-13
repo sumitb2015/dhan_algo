@@ -1,6 +1,9 @@
 import { NextRequest, NextResponse } from 'next/server';
 import path from 'path';
-import { spawnSync } from 'child_process';
+import { execFile } from 'child_process';
+import { promisify } from 'util';
+
+const execFileAsync = promisify(execFile);
 
 const PROJECT_ROOT = path.resolve(process.cwd(), '..');
 const PYTHON_SYNC  = path.join(PROJECT_ROOT, 'venv', 'Scripts', 'python.exe');
@@ -30,25 +33,13 @@ export async function GET(request: NextRequest) {
   }
 
   try {
-    const result = spawnSync(PYTHON_SYNC, [SCRIPT_PATH], {
+    const { stdout } = await execFileAsync(PYTHON_SYNC, [SCRIPT_PATH], {
       timeout: 25000,
       encoding: 'utf8',
       cwd: PROJECT_ROOT,
     });
 
-    if (result.error || result.status !== 0) {
-      if (result.stderr) console.error('[positions-delta] positions_delta_data.py stderr:', result.stderr);
-      return NextResponse.json({
-        has_positions: false,
-        net_delta: 0,
-        net_lot_delta: 0,
-        legs: [],
-        timestamp: new Date().toISOString(),
-        error: 'script_error'
-      }, { status: 500 });
-    }
-
-    const lastLine = (result.stdout || '').trim().split('\n').pop() ?? '{}';
+    const lastLine = (stdout || '').trim().split('\n').pop() ?? '{}';
     const parsed = JSON.parse(lastLine) as PositionDeltaResponse;
 
     cacheEntry = {
@@ -57,15 +48,24 @@ export async function GET(request: NextRequest) {
     };
 
     return NextResponse.json(parsed);
-  } catch (err) {
-    console.error('[positions-delta] Exception in API route:', err);
+  } catch (err: unknown) {
+    const e = err as { stdout?: string; message?: string; stderr?: string };
+    if (e.stdout) {
+      try {
+        const lastLine = String(e.stdout).trim().split('\n').pop() ?? '{}';
+        const parsed = JSON.parse(lastLine) as PositionDeltaResponse;
+        cacheEntry = { data: parsed, ts: Date.now() };
+        return NextResponse.json(parsed);
+      } catch {}
+    }
+    console.error('[positions-delta] positions_delta_data.py error:', e.message, e.stderr ?? '');
     return NextResponse.json({
       has_positions: false,
       net_delta: 0,
       net_lot_delta: 0,
       legs: [],
       timestamp: new Date().toISOString(),
-      error: 'parse_error'
+      error: 'script_error'
     }, { status: 500 });
   }
 }

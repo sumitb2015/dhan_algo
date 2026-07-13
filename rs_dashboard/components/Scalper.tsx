@@ -128,6 +128,9 @@ export default function Scalper() {
   // Refs for guard monitor interval — avoids stale closures
   const positionsRef = useRef<Record<string, unknown>[]>([]);
   const posGuardsRef = useRef<Record<string, PositionGuard>>({});
+  // Tracks the latest expiry so an out-of-order lookup response can detect it's stale
+  const expiryRef = useRef('');
+  useEffect(() => { expiryRef.current = expiry; }, [expiry]);
 
   // ─── Derived values ──────────────────────────────────────────────
 
@@ -265,10 +268,15 @@ export default function Scalper() {
       })
       .catch(() => {});
 
-    // Lookup security IDs for all strikes of this expiry — enables fast-order path
+    // Lookup security IDs for all strikes of this expiry — enables fast-order path.
+    // Capture the expiry this request was made for: if the user switches expiries again
+    // before this resolves, an out-of-order response must not overwrite strikeMap with
+    // stale security IDs from a different contract (Dhan rejects those as DH-905).
+    const requestedExpiry = expiry;
     fetch(`/api/scalper/lookup?underlying=NIFTY&expiry=${expiry}`)
       .then(r => r.json())
       .then((j: { success: boolean; data?: { lotSize: number; strikes: Record<string, { ceId?: string; peId?: string }> } }) => {
+        if (requestedExpiry !== expiryRef.current) return;
         if (j.success && j.data) {
           setStrikeMap(j.data.strikes);
           setLotSize(j.data.lotSize);

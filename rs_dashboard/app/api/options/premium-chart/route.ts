@@ -1,10 +1,18 @@
 import { NextResponse } from 'next/server';
 import path from 'path';
-import { spawnSync } from 'child_process';
+import { execFile } from 'child_process';
+import { promisify } from 'util';
+
+const execFileAsync = promisify(execFile);
 
 const PROJECT_ROOT   = path.resolve(process.cwd(), '..');
 const PYTHON_EXE     = path.join(PROJECT_ROOT, 'venv', 'Scripts', 'pythonw.exe');
 const PREMIUM_SCRIPT = path.join(PROJECT_ROOT, 'scripts', 'tools', 'tradebook_premium.py');
+
+// Polled every 30s by OptionsPositionsTab with zero prior caching — a fresh spawn on
+// every poll blocks the whole single-threaded dev server for the script's full runtime.
+const CACHE_TTL = 5_000;
+let cacheEntry: { data: ScriptResponse; ts: number } | null = null;
 
 interface PremiumPoint { time: string; premium: number }
 
@@ -22,30 +30,38 @@ interface ScriptResponse {
 }
 
 export async function GET() {
-  const result = spawnSync(
-    PYTHON_EXE,
-    [PREMIUM_SCRIPT],
-    { encoding: 'utf8', timeout: 30_000, windowsHide: true },
-  );
-
-  if (result.error) {
-    console.error('[/api/options/premium-chart] spawn error:', result.error);
-    return NextResponse.json({ success: false, error: String(result.error) }, { status: 500 });
+  if (cacheEntry && Date.now() - cacheEntry.ts < CACHE_TTL) {
+    return NextResponse.json(cacheEntry.data);
   }
 
   try {
-    const stdout   = result.stdout ?? '';
-    const jsonLine = stdout.trim().split('\n').pop() ?? '{}';
+    const { stdout } = await execFileAsync(PYTHON_EXE, [PREMIUM_SCRIPT], {
+      encoding: 'utf8', timeout: 30_000, windowsHide: true,
+    });
+
+    const jsonLine = (stdout ?? '').trim().split('\n').pop() ?? '{}';
     const parsed   = JSON.parse(jsonLine) as ScriptResponse;
 
     if (!parsed.success) {
-      console.error('[/api/options/premium-chart]', parsed.error, (result.stderr ?? '').slice(0, 400));
+      console.error('[/api/options/premium-chart]', parsed.error);
       return NextResponse.json({ success: false, error: parsed.error ?? 'Script error' }, { status: 500 });
     }
 
+    cacheEntry = { data: parsed, ts: Date.now() };
     return NextResponse.json(parsed);
-  } catch (err) {
-    console.error('[/api/options/premium-chart] parse error:', err, '\nstdout:', result.stdout);
-    return NextResponse.json({ success: false, error: `Parse error: ${String(err)}` }, { status: 500 });
+  } catch (err: unknown) {
+    const e = err as { stdout?: string; stderr?: string; message?: string };
+    if (e.stdout) {
+      try {
+        const jsonLine = String(e.stdout).trim().split('\n').pop() ?? '{}';
+        const parsed = JSON.parse(jsonLine) as ScriptResponse;
+        if (parsed.success) {
+          cacheEntry = { data: parsed, ts: Date.now() };
+          return NextResponse.json(parsed);
+        }
+      } catch {}
+    }
+    console.error('[/api/options/premium-chart] error:', e.message, e.stderr ?? '');
+    return NextResponse.json({ success: false, error: `Script error: ${String(e.message)}` }, { status: 500 });
   }
 }

@@ -1,29 +1,14 @@
 import { NextResponse } from 'next/server';
 import path from 'path';
 import fs from 'fs';
-import { spawn, execSync } from 'child_process';
+import { spawn } from 'child_process';
+import { isPidRunning } from '@/lib/processCheck';
 
 const PROJECT_ROOT = path.resolve(process.cwd(), '..');
 const DEBUG_DIR    = path.join(PROJECT_ROOT, 'debug');
 const PYTHON_EXE   = path.join(PROJECT_ROOT, 'venv', 'Scripts', 'pythonw.exe');
 const SCRIPT_PATH  = path.join(PROJECT_ROOT, 'scripts', 'downloader', 'download_expired_options.py');
 const STATUS_FILE  = path.join(DEBUG_DIR, 'options_refresh_status.json');
-
-function isPidRunning(pid: number): boolean {
-  try {
-    if (process.platform === 'win32') {
-      const out = execSync(`tasklist /FI "PID eq ${pid}" /FO CSV /NH`, {
-        encoding: 'utf8', stdio: ['pipe', 'pipe', 'ignore'], windowsHide: true,
-      });
-      const lower = out.toLowerCase();
-      return lower.includes('python') && lower.includes(pid.toString());
-    }
-    const out = execSync(`ps -p ${pid} -o comm=`, { encoding: 'utf8', stdio: ['pipe', 'pipe', 'ignore'] });
-    return out.toLowerCase().includes('python');
-  } catch {
-    return false;
-  }
-}
 
 function readStatus() {
   try {

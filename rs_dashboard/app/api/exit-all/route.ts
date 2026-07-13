@@ -3,6 +3,7 @@ import path from 'path';
 import fs from 'fs';
 import { execFile, execSync } from 'child_process';
 import { promisify } from 'util';
+import { isPidRunning } from '@/lib/processCheck';
 
 const execFileAsync = promisify(execFile);
 
@@ -20,22 +21,6 @@ const STRATEGY_KEYS = [
   'nifty_spread_trend',
   'nifty_oi_directional',
 ];
-
-function isPidRunning(pid: number): boolean {
-  try {
-    if (process.platform === 'win32') {
-      const out = execSync(`tasklist /FI "PID eq ${pid}" /FO CSV /NH`, {
-        encoding: 'utf8', stdio: ['pipe', 'pipe', 'ignore'], windowsHide: true,
-      });
-      const lower = out.toLowerCase();
-      return lower.includes('python') && lower.includes(pid.toString());
-    }
-    const out = execSync(`ps -p ${pid} -o comm=`, { encoding: 'utf8', stdio: ['pipe', 'pipe', 'ignore'] });
-    return out.toLowerCase().includes('python');
-  } catch {
-    return false;
-  }
-}
 
 function forceKillPid(pid: number): boolean {
   try {

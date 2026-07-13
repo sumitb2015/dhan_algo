@@ -1,7 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server';
 import path from 'path';
 import fs from 'fs';
-import { execSync, spawn } from 'child_process';
+import { spawn } from 'child_process';
+import { isPidRunning } from '@/lib/processCheck';
 
 const PROJECT_ROOT   = path.resolve(process.cwd(), '..');
 const DEBUG_DIR      = path.join(PROJECT_ROOT, 'debug');
@@ -21,26 +22,16 @@ function readJson(file: string): unknown {
   }
 }
 
-function isPidRunning(pid: number): boolean {
-  try {
-    if (process.platform === 'win32') {
-      const out = execSync(`tasklist /FI "PID eq ${pid}" /FO CSV /NH`, {
-        encoding: 'utf8', stdio: ['pipe', 'pipe', 'ignore'], windowsHide: true,
-      });
-      const lower = out.toLowerCase();
-      return lower.includes('python') && lower.includes(pid.toString());
-    }
-    const out = execSync(`ps -p ${pid} -o comm=`, { encoding: 'utf8', stdio: ['pipe', 'pipe', 'ignore'] });
-    return out.toLowerCase().includes('python');
-  } catch {
-    return false;
-  }
-}
+/** GET â€” return live quotes + bridge status (+ history when explicitly requested).
+ *  live_options_history.json holds 300 full-chain snapshots (~6MB) â€” reading and
+ *  JSON.parse-ing it synchronously on every request blocks the event loop. Scalper
+ *  polls this endpoint every 100ms and never uses `history`, so only pay that cost
+ *  for callers (OptionsCharts) that ask for it via ?history=1. */
+export async function GET(request: NextRequest) {
+  const includeHistory = request.nextUrl.searchParams.get('history') === '1';
 
-/** GET â€” return live quotes + history + bridge status */
-export async function GET() {
   const quotes  = readJson(QUOTES_FILE)  as Record<string, unknown> | null;
-  const history = readJson(HISTORY_FILE) as Record<string, unknown> | null;
+  const history = includeHistory ? (readJson(HISTORY_FILE) as Record<string, unknown> | null) : null;
   const status  = readJson(STATUS_FILE)  as Record<string, unknown> | null;
 
   // If the process is dead, reset both RUNNING and ERROR to STOPPED so stale
