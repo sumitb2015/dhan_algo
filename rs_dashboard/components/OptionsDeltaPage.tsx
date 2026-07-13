@@ -2,12 +2,12 @@
 
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import Link from 'next/link';
-import { 
-  ShieldAlert, 
-  RotateCw, 
-  TrendingUp, 
-  TrendingDown, 
-  Minus, 
+import {
+  ShieldAlert,
+  RotateCw,
+  TrendingUp,
+  TrendingDown,
+  Minus,
   Info,
   Layers,
   ArrowUpDown,
@@ -16,6 +16,11 @@ import {
   ToggleRight
 } from 'lucide-react';
 import NavBar from './NavBar';
+import { Button } from '@/components/ui/button';
+import { Badge } from '@/components/ui/badge';
+import { Card } from '@/components/ui/card';
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
+import { cn } from '@/lib/utils';
 
 // ── Types ────────────────────────────────────────────────────────────
 
@@ -48,11 +53,14 @@ interface ApiResponse {
   error?: string;
 }
 
+// Each poll spawns a live broker request (positions + option chain Greeks).
+// Dhan's option-chain endpoint is rate-limited, so the fastest offered interval
+// is 15s — well clear of the limit even with other pages/strategies polling concurrently.
 const POLL_INTERVALS = [
   { label: 'Manual', ms: 0 },
-  { label: '2s', ms: 2000 },
-  { label: '5s', ms: 5000 },
-  { label: '10s', ms: 10000 },
+  { label: '15s', ms: 15000 },
+  { label: '30s', ms: 30000 },
+  { label: '60s', ms: 60000 },
 ] as const;
 
 // ── Mock Data for Testing ────────────────────────────────────────────
@@ -145,7 +153,7 @@ export default function OptionsDeltaPage() {
   const [timestamp, setTimestamp] = useState('');
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [pollMs, setPollMs] = useState<number>(5000);
+  const [pollMs, setPollMs] = useState<number>(30000);
   const [useMock, setUseMock] = useState(false);
   const [sortField, setSortField] = useState<keyof Leg>('symbol');
   const [sortAsc, setSortAsc] = useState(true);
@@ -294,142 +302,172 @@ export default function OptionsDeltaPage() {
           <NavBar />
 
           {legs.length > 0 && (
-            <div className={`text-[11px] font-bold px-2.5 py-1 rounded-lg border tabular-nums flex items-center gap-1.5 shrink-0 ${
-              totalPnl > 0 
-                ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20' 
-                : totalPnl < 0 
-                  ? 'bg-red-500/10 text-red-400 border-red-500/20' 
-                  : 'bg-zinc-900 border-zinc-800 text-zinc-400'
-            }`}>
+            <Badge
+              variant="outline"
+              className={cn(
+                'h-auto text-[11px] font-bold px-2.5 py-1 tabular-nums gap-1.5 rounded-lg',
+                totalPnl > 0
+                  ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20'
+                  : totalPnl < 0
+                    ? 'bg-red-500/10 text-red-400 border-red-500/20'
+                    : 'bg-zinc-900 border-zinc-800 text-zinc-400'
+              )}
+            >
               <span className="text-[9px] uppercase text-zinc-500 font-extrabold tracking-wider">Total P&L:</span>
               <span>{totalPnl >= 0 ? '+' : ''}₹{fmtNum(totalPnl)}</span>
-            </div>
+            </Badge>
           )}
         </div>
 
         {/* Polling / Mock Controls */}
         <div className="flex items-center gap-2 flex-wrap">
           {/* Mock Mode Toggle */}
-          <button
+          <Button
             onClick={handleToggleMock}
-            className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-lg border transition-all ${
-              useMock 
+            variant="outline"
+            size="sm"
+            className={cn(
+              'gap-1.5 font-semibold',
+              useMock
                 ? 'bg-amber-500/10 border-amber-500/30 text-amber-400 hover:bg-amber-500/20'
                 : 'bg-zinc-900 border-zinc-800 text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200'
-            }`}
+            )}
           >
             {useMock ? <ToggleRight className="h-4 w-4 text-amber-400" /> : <ToggleLeft className="h-4 w-4 text-zinc-500" />}
             Demo Mode {useMock ? 'On' : 'Off'}
-          </button>
+          </Button>
 
           {/* Polling selector */}
-          <div className="flex items-center bg-zinc-900 border border-zinc-800 p-0.5 rounded-xl">
-            {POLL_INTERVALS.map(({ label, ms }) => (
-              <button
-                key={label}
-                onClick={() => setPollMs(ms)}
-                className={`px-2.5 py-1.5 text-xs font-semibold rounded-lg transition-all ${
-                  pollMs === ms
-                    ? 'bg-blue-500/10 text-blue-400 border border-blue-500/20'
-                    : 'text-zinc-400 hover:text-zinc-200'
-                }`}
-              >
-                {label}
-              </button>
-            ))}
+          <div className="flex items-center gap-1.5">
+            <div className="flex items-center bg-zinc-900 border border-zinc-800 p-0.5 rounded-xl">
+              {POLL_INTERVALS.map(({ label, ms }) => (
+                <Button
+                  key={label}
+                  onClick={() => setPollMs(ms)}
+                  variant="ghost"
+                  size="sm"
+                  className={cn(
+                    'font-semibold rounded-lg',
+                    pollMs === ms
+                      ? 'bg-blue-500/10 text-blue-400 border border-blue-500/20 hover:bg-blue-500/10 hover:text-blue-400'
+                      : 'text-zinc-400 hover:text-zinc-200'
+                  )}
+                >
+                  {label}
+                </Button>
+              ))}
+            </div>
+            <Tooltip>
+              <TooltipTrigger render={<span className="cursor-help" />}>
+                <Info className="h-3.5 w-3.5 text-zinc-600" />
+              </TooltipTrigger>
+              <TooltipContent>Each refresh queries live broker positions — kept at 15s+ to stay clear of Dhan's rate limits</TooltipContent>
+            </Tooltip>
           </div>
 
           {/* Manual Refresh */}
-          <button
+          <Button
             onClick={fetchData}
             disabled={loading}
-            className="p-1.5 rounded-lg bg-zinc-800 hover:bg-zinc-750 border border-zinc-700 text-zinc-400 hover:text-zinc-200 transition-colors disabled:opacity-50"
+            variant="outline"
+            size="icon-sm"
+            className="bg-zinc-800 hover:bg-zinc-750 border-zinc-700 text-zinc-400 hover:text-zinc-200"
             title="Refresh delta risk"
           >
-            <RotateCw className={`h-4 w-4 ${loading ? 'animate-spin' : ''}`} />
-          </button>
+            <RotateCw className={cn('h-4 w-4', loading && 'animate-spin')} />
+          </Button>
 
           {/* CSV Export */}
-          <button
+          <Button
             onClick={handleExportCSV}
             disabled={legs.length === 0}
-            className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-lg border border-zinc-750 bg-zinc-900 text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200 transition-all disabled:opacity-35"
+            variant="outline"
+            size="sm"
+            className="gap-1.5 font-semibold border-zinc-750 bg-zinc-900 text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200 disabled:opacity-35"
             title="Export positions to CSV"
           >
             <Download className="h-3.5 w-3.5" />
             Export
-          </button>
+          </Button>
         </div>
       </div>
 
       {/* Main Content */}
       <div className="flex-1 flex flex-col gap-4 px-6 py-5">
         {error && (
-          <div className="flex items-start gap-2.5 px-4 py-3 bg-red-950/20 border border-red-750/30 rounded-xl text-xs text-red-400">
+          <Card className="flex-row items-start gap-2.5 px-4 py-3 bg-red-950/20 border-red-750/30 text-xs text-red-400">
             <ShieldAlert className="h-4.5 w-4.5 shrink-0 mt-0.5" />
             <div>
               <p className="font-semibold">Failed to fetch live delta exposure</p>
               <p className="text-[11px] text-red-400/80 mt-0.5">{error}</p>
             </div>
-          </div>
+          </Card>
         )}
 
         {/* Stats Row */}
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
           {/* Card 1: Net Delta (Index Units) */}
-          <div className="bg-zinc-900/60 border border-zinc-800/80 rounded-2xl px-5 py-4">
+          <Card className="bg-zinc-900/60 border-zinc-800/80 rounded-2xl px-5 py-4">
             <p className="text-[10px] font-bold text-zinc-500 uppercase tracking-widest mb-1.5 flex items-center gap-1">
               Net Delta (Index)
-              <span title="Index-equivalent units. 1.00 Net Delta is equivalent to holding 1 share of Nifty index.">
-                <Info className="h-3 w-3 text-zinc-600 cursor-help" />
-              </span>
+              <Tooltip>
+                <TooltipTrigger render={<span className="cursor-help" />}>
+                  <Info className="h-3 w-3 text-zinc-600" />
+                </TooltipTrigger>
+                <TooltipContent>Index-equivalent units. 1.00 Net Delta is equivalent to holding 1 share of Nifty index.</TooltipContent>
+              </Tooltip>
             </p>
-            <h2 className={`text-2xl font-black tracking-tight tabular-nums ${
+            <h2 className={cn(
+              'text-2xl font-black tracking-tight tabular-nums',
               netDelta > 1 ? 'text-emerald-400' : netDelta < -1 ? 'text-red-400' : 'text-zinc-200'
-            }`}>
+            )}>
               {netDelta > 0 ? '+' : ''}{fmtNum(netDelta)}
             </h2>
             <p className="text-[10px] text-zinc-500 mt-1 font-medium">
               Index share equivalents
             </p>
-          </div>
+          </Card>
 
           {/* Card 2: Net Delta (Lots) */}
-          <div className="bg-zinc-900/60 border border-zinc-800/80 rounded-2xl px-5 py-4">
+          <Card className="bg-zinc-900/60 border-zinc-800/80 rounded-2xl px-5 py-4">
             <p className="text-[10px] font-bold text-zinc-500 uppercase tracking-widest mb-1.5 flex items-center gap-1">
               Net Delta (Lots)
-              <span title="Calculated based on standard index contract lot size (e.g. 65 for Nifty).">
-                <Info className="h-3 w-3 text-zinc-600 cursor-help" />
-              </span>
+              <Tooltip>
+                <TooltipTrigger render={<span className="cursor-help" />}>
+                  <Info className="h-3 w-3 text-zinc-600" />
+                </TooltipTrigger>
+                <TooltipContent>Calculated based on standard index contract lot size (e.g. 65 for Nifty).</TooltipContent>
+              </Tooltip>
             </p>
-            <h2 className={`text-2xl font-black tracking-tight tabular-nums ${
+            <h2 className={cn(
+              'text-2xl font-black tracking-tight tabular-nums',
               netLotDelta > 0.05 ? 'text-emerald-400' : netLotDelta < -0.05 ? 'text-red-400' : 'text-zinc-200'
-            }`}>
+            )}>
               {netLotDelta > 0 ? '+' : ''}{fmtNum(netLotDelta, 3)}
             </h2>
             <p className="text-[10px] text-zinc-500 mt-1 font-medium">
               Index contract lot equivalents
             </p>
-          </div>
+          </Card>
 
           {/* Card 3: Exposure Directional Bias */}
-          <div className="bg-zinc-900/60 border border-zinc-800/80 rounded-2xl px-5 py-4">
+          <Card className="bg-zinc-900/60 border-zinc-800/80 rounded-2xl px-5 py-4">
             <p className="text-[10px] font-bold text-zinc-500 uppercase tracking-widest mb-1.5">
               Directional Bias
             </p>
             <div className="flex items-center gap-2 mt-1">
-              <span className={`inline-flex items-center gap-1 px-3 py-1 rounded-full text-xs font-bold border ${biasClass}`}>
+              <Badge variant="outline" className={cn('h-auto px-3 py-1 rounded-full text-xs font-bold gap-1', biasClass)}>
                 {biasIcon}
                 {bias}
-              </span>
+              </Badge>
             </div>
             <p className="text-[10px] text-zinc-500 mt-2 font-medium">
               Based on net lot delta exposure
             </p>
-          </div>
+          </Card>
 
           {/* Card 4: Open Legs */}
-          <div className="bg-zinc-900/60 border border-zinc-800/80 rounded-2xl px-5 py-4">
+          <Card className="bg-zinc-900/60 border-zinc-800/80 rounded-2xl px-5 py-4">
             <p className="text-[10px] font-bold text-zinc-500 uppercase tracking-widest mb-1.5">
               Open Option Legs
             </p>
@@ -440,27 +478,27 @@ export default function OptionsDeltaPage() {
               <span>Active F&amp;O Positions</span>
               {timestamp && <span className="font-mono text-[9px] text-zinc-600">Updated: {fmtTime(timestamp)}</span>}
             </p>
-          </div>
+          </Card>
         </div>
 
         {/* Positions Table Grid */}
-        <div className="bg-zinc-900/60 border border-zinc-850 rounded-2xl overflow-hidden shadow-2xl">
+        <Card className="bg-zinc-900/60 border-zinc-850 rounded-2xl overflow-hidden shadow-2xl p-0 gap-0">
           <div className="px-5 py-4 border-b border-zinc-850 flex items-center justify-between flex-wrap gap-2">
             <div>
               <h3 className="text-sm font-bold text-white tracking-tight">Active Option Positions &amp; Greeks</h3>
               <p className="text-[10px] text-zinc-400 mt-0.5">Click column headers to sort positions</p>
             </div>
             {useMock && (
-              <span className="px-2 py-0.5 text-[9px] font-bold rounded bg-amber-500/10 text-amber-400 border border-amber-500/20">
+              <Badge variant="outline" className="text-[9px] font-bold bg-amber-500/10 text-amber-400 border-amber-500/20">
                 DISPLAYING DEMO DATA
-              </span>
+              </Badge>
             )}
           </div>
 
           <div className="overflow-x-auto">
             <table className="w-full text-xs text-left border-collapse">
               <thead>
-                <tr className="bg-zinc-850/60 text-zinc-400 font-bold border-b border-zinc-800 select-none">
+                <tr className="bg-zinc-900 text-zinc-400 font-bold border-b border-zinc-800 select-none">
                   <th onClick={() => toggleSort('symbol')} className="px-4 py-3 cursor-pointer hover:bg-zinc-800/50 transition-colors">
                     <div className="flex items-center gap-1">Symbol <ArrowUpDown className="h-3 w-3" /></div>
                   </th>
@@ -510,7 +548,7 @@ export default function OptionsDeltaPage() {
 
                   return (
                     <tr key={i} className="border-t border-zinc-850 hover:bg-zinc-800/25 transition-colors font-medium">
-                      <td className="px-4 py-3.5 font-mono text-[11px] text-zinc-300">
+                      <td className="px-4 py-3.5 font-mono text-[11px] text-zinc-300 whitespace-nowrap">
                         <div className="font-bold text-zinc-100">{leg.symbol}</div>
                         <div className="text-[9px] text-zinc-500 font-sans mt-0.5">{leg.displayName}</div>
                       </td>
@@ -521,22 +559,24 @@ export default function OptionsDeltaPage() {
                         {leg.strike.toLocaleString('en-IN')}
                       </td>
                       <td className="px-4 py-3.5 text-center">
-                        <span className={`px-2 py-0.5 rounded text-[10px] font-bold border ${
+                        <Badge variant="outline" className={cn(
+                          'text-[10px] font-bold',
                           isCall
                             ? 'bg-blue-500/10 text-blue-400 border-blue-500/25'
                             : 'bg-red-500/10 text-red-400 border-red-500/25'
-                        }`}>
+                        )}>
                           {leg.type}
-                        </span>
+                        </Badge>
                       </td>
                       <td className="px-4 py-3.5 text-center">
-                        <span className={`px-2 py-0.5 rounded text-[10px] font-bold border ${
+                        <Badge variant="outline" className={cn(
+                          'text-[10px] font-bold',
                           leg.side === 'BUY'
                             ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/25'
                             : 'bg-rose-500/10 text-rose-400 border-rose-500/25'
-                        }`}>
+                        )}>
                           {leg.side}
-                        </span>
+                        </Badge>
                       </td>
                       <td className={`px-4 py-3.5 text-right font-bold tabular-nums ${qtyColor}`}>
                         {leg.netQty > 0 ? '+' : ''}{leg.netQty}
@@ -589,11 +629,11 @@ export default function OptionsDeltaPage() {
               </tbody>
             </table>
           </div>
-        </div>
+        </Card>
 
         {/* Explainers block */}
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mt-2">
-          <div className="bg-zinc-900/40 border border-zinc-850 rounded-2xl p-5">
+          <Card className="bg-zinc-900/40 border-zinc-850 rounded-2xl p-5">
             <h4 className="text-xs font-bold text-zinc-300 uppercase tracking-widest mb-2.5">Understanding Delta</h4>
             <ul className="text-[11px] text-zinc-400 space-y-2 leading-relaxed list-disc pl-4">
               <li><strong>Delta</strong> measures the expected change in option price per 1-point move in the underlying index spot price.</li>
@@ -601,16 +641,16 @@ export default function OptionsDeltaPage() {
               <li><strong>Position Delta</strong> adjusts the contract delta for your trade size: <code className="bg-zinc-950 px-1 py-0.5 rounded text-zinc-300 font-mono">Net Quantity × Unit Delta</code>.</li>
               <li>A net positive delta means a bullish exposure (portfolio value rises as spot rises); a net negative delta represents bearish exposure.</li>
             </ul>
-          </div>
+          </Card>
 
-          <div className="bg-zinc-900/40 border border-zinc-850 rounded-2xl p-5">
+          <Card className="bg-zinc-900/40 border-zinc-850 rounded-2xl p-5">
             <h4 className="text-xs font-bold text-zinc-300 uppercase tracking-widest mb-2.5">Dynamic Risk Calculations</h4>
             <ul className="text-[11px] text-zinc-400 space-y-2 leading-relaxed list-disc pl-4">
               <li>This dashboard queries live Dhan position records and pulls matching Greek values from the active option chain contracts.</li>
               <li>If broker Greeks are temporarily unavailable (e.g. pre-market or over the weekend), the system falls back to calculating theoretical Black-Scholes deltas using current VIX as input.</li>
               <li><strong>Lot Delta</strong> normalizes your exposure in terms of index lot sizes, providing a standard gauge of leverage across different indexes.</li>
             </ul>
-          </div>
+          </Card>
         </div>
       </div>
     </div>
