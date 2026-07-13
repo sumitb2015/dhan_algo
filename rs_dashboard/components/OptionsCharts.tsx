@@ -172,7 +172,7 @@ export default function OptionsCharts() {
   const [expiry, setExpiry]     = useState('');
   const [expiries, setExpiries] = useState<string[]>([]);
   const [selectedStrike, setSelectedStrike] = useState<number | null>(null);
-  const [pollInterval, setPollInterval]     = useState<2 | 5 | 10>(2);
+  const [pollInterval, setPollInterval]     = useState<2 | 5 | 10 | 30>(30);
   const [candleInterval, setCandleInterval] = useState<'1' | '5'>('1');
 
   const [bridgeStatus, setBridgeStatus] = useState<BridgeStatus>({ status: 'STOPPED' });
@@ -784,7 +784,7 @@ export default function OptionsCharts() {
           {/* Live poll interval (premium / multi-strike / pcdiff tabs) */}
           {(activeTab === 'premium' || activeTab === 'multistrike' || activeTab === 'pcdiff') && isLive && (
             <div className="flex items-center bg-zinc-900 border border-zinc-800 p-0.5 rounded-xl">
-              {([2, 5, 10] as const).map(s => (
+              {([2, 5, 10, 30] as const).map(s => (
                 <button key={s} onClick={() => setPollInterval(s)}
                   className={`px-2.5 py-1.5 text-xs font-semibold rounded-lg transition-all ${
                     pollInterval === s
