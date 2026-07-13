@@ -34,7 +34,7 @@ interface ProcessedRow {
 // ─── Constants ────────────────────────────────────────────────────
 
 const UNDERLYING  = 'CRUDEOIL';
-const STRIKE_STEP = 50;
+const STRIKE_STEP = 100;
 const POLL_MS     = 15_000;
 
 const WING_OPTIONS = [5, 10, 15, 20] as const;
@@ -264,7 +264,7 @@ export default function CrudeOilOptions() {
       const atmStrike = Math.round(spotPrice / STRIKE_STEP) * STRIKE_STEP;
       const oc        = json.data.chain.oc;
 
-      const allEntries = parseStrikeEntries(oc);
+      const allEntries = parseStrikeEntries(oc).filter(({ strike }) => strike % STRIKE_STEP === 0);
       const mpStrike = computeMaxPain(allEntries);
 
       // Slicing window around ATM

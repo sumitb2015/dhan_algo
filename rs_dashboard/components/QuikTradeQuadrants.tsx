@@ -95,6 +95,17 @@ function fmtPct(pct: number | null): string {
 
 // ─── Tile ─────────────────────────────────────────────────────────
 
+// CE/PE get a fixed identity color independent of buildup-quadrant color,
+// so option type reads at a glance regardless of which quadrant a tile sits in.
+const OPTION_TYPE_CLASSES: Record<'CE' | 'PE', string> = {
+  CE: 'border-l-4 border-l-cyan-400',
+  PE: 'border-l-4 border-l-fuchsia-400',
+};
+const OPTION_TYPE_BADGE: Record<'CE' | 'PE', string> = {
+  CE: 'bg-cyan-500 text-cyan-950',
+  PE: 'bg-fuchsia-500 text-fuchsia-950',
+};
+
 function QuadrantTile({
   tile, label, pending, onTrade,
 }: {
@@ -104,10 +115,10 @@ function QuadrantTile({
   onTrade: (tile: Tile, side: 'BUY' | 'SELL') => void;
 }) {
   return (
-    <div className={`flex flex-col gap-1.5 px-2.5 py-2 rounded-lg border text-[11px] font-semibold tabular-nums ${TILE_CLASSES[label]}`}>
+    <div className={`flex flex-col gap-1.5 px-2.5 py-2 rounded-lg border text-[11px] font-semibold tabular-nums ${TILE_CLASSES[label]} ${OPTION_TYPE_CLASSES[tile.type]}`}>
       <div className="flex items-center gap-1.5">
         <span className="font-bold">{tile.strike.toLocaleString('en-IN')}</span>
-        <span className="text-[9px] px-1 py-0.5 rounded bg-black/20">{tile.type}</span>
+        <span className={`text-[9px] font-extrabold px-1.5 py-0.5 rounded ${OPTION_TYPE_BADGE[tile.type]}`}>{tile.type}</span>
       </div>
       <div className="flex items-center gap-2 text-[10px] opacity-90">
         <span>₹{tile.ltp.toFixed(1)}</span>
@@ -307,22 +318,38 @@ export default function QuikTradeQuadrants({ expiry }: { expiry: string }) {
                 {tilesByQuadrant[q.label].length} legs
               </span>
             </div>
-            <div className="flex flex-wrap gap-2">
-              {tilesByQuadrant[q.label].map(tile => (
-                <QuadrantTile
-                  key={`${tile.strike}-${tile.type}`}
-                  tile={tile}
-                  label={q.label}
-                  pending={pendingKey === `${tile.strike}-${tile.type}`}
-                  onTrade={placeOrder}
-                />
-              ))}
-              {tilesByQuadrant[q.label].length === 0 && (
-                <span className="text-[11px] text-zinc-600 py-2">
-                  {loading ? 'Loading…' : 'No legs'}
-                </span>
-              )}
-            </div>
+            {tilesByQuadrant[q.label].length === 0 ? (
+              <span className="text-[11px] text-zinc-600 py-2">
+                {loading ? 'Loading…' : 'No legs'}
+              </span>
+            ) : (
+              <div className="grid grid-cols-2 gap-3">
+                {(['CE', 'PE'] as const).map(type => {
+                  const legs = tilesByQuadrant[q.label].filter(t => t.type === type);
+                  return (
+                    <div key={type} className="flex flex-col gap-2">
+                      <span className={`text-[9px] font-extrabold uppercase tracking-wider px-1.5 py-0.5 rounded self-start ${OPTION_TYPE_BADGE[type]}`}>
+                        {type === 'CE' ? 'Calls' : 'Puts'}
+                      </span>
+                      <div className="flex flex-wrap gap-2">
+                        {legs.map(tile => (
+                          <QuadrantTile
+                            key={`${tile.strike}-${tile.type}`}
+                            tile={tile}
+                            label={q.label}
+                            pending={pendingKey === `${tile.strike}-${tile.type}`}
+                            onTrade={placeOrder}
+                          />
+                        ))}
+                        {legs.length === 0 && (
+                          <span className="text-[10px] text-zinc-600 py-1">None</span>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
           </div>
         ))}
       </div>
