@@ -56,6 +56,9 @@ venv\Scripts\python.exe strategies/oi_directional/nifty_oi_directional.py --lots
 
 # CrudeOil Mini Supertrend (directional MCX futures)
 venv\Scripts\python.exe strategies/crudeoil/crudeoilm_supertrend.py --lots 1 --interval 5
+
+# CrudeOil Mini Renko SAR (always-in stop-and-reverse MCX futures)
+venv\Scripts\python.exe strategies/crudeoil/crudeoilm_renko_sar.py --lots 1 --box-size 5 --reverse-bricks 3
 ```
 
 Full CLI references for all strategies are in [GEMINI.md](GEMINI.md).
@@ -268,6 +271,7 @@ These are not obvious and have caused runtime errors in the past (see [GEMINI.md
 - **OI Directional strategy** (`strategies/oi_directional/`): polls the option chain every `--poll-interval` seconds and computes `diff = sum(CE_OI) - sum(PE_OI)` across ±5 ATM strikes (11 strikes, 50-pt spacing). Expanding negative diff → BULLISH → sell naked PE at the strike where PCR > `--pcr-threshold`; expanding positive diff → BEARISH → sell naked CE. Exit when the entry-strike PCR unwinds by `--exit-pcr-change` %. Requires `--expansion-window` consecutive confirming snapshots before entry. See `strategies/oi_directional/strategy.md` for full logic.
 - **Expiry strategy** (`strategies/expiry/`): 0DTE straddle or strangle with per-leg SL (`--leg-sl-pct`) and configurable adjustment modes (`c2c`, `restrangle`, `roll_closer`, `winner_addition`, `none`). Supports delta-based (`--delta --target-delta`) or premium-based (`--premium --target-premium`) strike selection. See `strategies/expiry/strategy.md` for full logic.
 - **CrudeOil Mini Supertrend** (`strategies/crudeoil/`): directional MCX CRUDEOILM futures strategy — buys/sells the nearest futures contract on Supertrend confirmation, trails SL via the Supertrend band, daily profit/loss caps, default 09:00–23:30 IST session covering both MCX sessions. See `strategies/crudeoil/strategy.md` for full logic.
+- **CrudeOil Mini Renko SAR** (`strategies/crudeoil/crudeoilm_renko_sar.py`): always-in stop-and-reverse on close-only Renko bricks from 5-min candles (default 5-pt box, 2×box reversal rule); flips after 3 consecutive opposite bricks; no daily P&L caps, EOD flatten at 23:30. See `strategies/crudeoil/strategy.md` for full logic.
 
 ## Environment
 

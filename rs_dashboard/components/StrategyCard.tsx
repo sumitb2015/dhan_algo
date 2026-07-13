@@ -88,6 +88,14 @@ interface StrategyState {
   supertrend_multiplier?: number;
   use_vwap?: boolean;
   vwap?: number;
+  // CrudeOil Mini Renko SAR
+  box_size?: number;
+  reverse_bricks?: number;
+  brick_count?: number;
+  last_brick_color?: string;
+  last_brick_close?: number;
+  consecutive_opposite?: number;
+  position_pnl?: number;
 }
 
 interface StrategyCardProps {
@@ -168,6 +176,10 @@ export default function StrategyCard({ meta, state, onRefresh }: StrategyCardPro
   const [crudeoilEodTime, setCrudeoilEodTime] = useState<string>('23:30');
   const [crudeoilUseVwap, setCrudeoilUseVwap] = useState<boolean>(false);
 
+  // CrudeOil Mini Renko SAR (shares crudeoilInterval/StartTime/EodTime above)
+  const [renkoBoxSize, setRenkoBoxSize] = useState<number>(5);
+  const [renkoReverseBricks, setRenkoReverseBricks] = useState<number>(3);
+
   const spreadTrendNoIndicators =
     meta.key === 'nifty_spread_trend' && !useEma && !useSupertrend;
 
@@ -190,8 +202,11 @@ export default function StrategyCard({ meta, state, onRefresh }: StrategyCardPro
       const args: string[] = [];
       if (isLive) args.push('--live');
       args.push('--lots', String(lots));
-      args.push('--target-profit', String(profitTarget));
-      args.push('--stop-loss', String(stopLoss));
+      if (meta.key !== 'crudeoilm_renko_sar') {
+        // Renko SAR is a pure stop-and-reverse system with no daily P&L caps
+        args.push('--target-profit', String(profitTarget));
+        args.push('--stop-loss', String(stopLoss));
+      }
 
       if (meta.key === 'nifty_advanced_imbalance') {
         args.push('--max-lots', String(maxLots));
@@ -262,6 +277,12 @@ export default function StrategyCard({ meta, state, onRefresh }: StrategyCardPro
         args.push('--start-time', crudeoilStartTime);
         args.push('--eod-time', crudeoilEodTime);
         if (crudeoilUseVwap) args.push('--use-vwap');
+      } else if (meta.key === 'crudeoilm_renko_sar') {
+        args.push('--interval', crudeoilInterval);
+        args.push('--box-size', String(renkoBoxSize));
+        args.push('--reverse-bricks', String(renkoReverseBricks));
+        args.push('--start-time', crudeoilStartTime);
+        args.push('--eod-time', crudeoilEodTime);
       }
 
       const res = await fetch('/api/strategies', {
@@ -398,22 +419,26 @@ export default function StrategyCard({ meta, state, onRefresh }: StrategyCardPro
           </div>
         )}
 
-        {meta.key !== 'nifty_spread_trend' && meta.key !== 'crudeoilm_supertrend' && (
+        {meta.key !== 'nifty_spread_trend' && meta.key !== 'crudeoilm_supertrend' && meta.key !== 'crudeoilm_renko_sar' && (
           <div className={fieldCls}>
             <label className={lbl}>Start Time</label>
             <Input type="text" value={startTime} onChange={(e) => setStartTime(e.target.value)} placeholder="09:20" className={inputCls} />
           </div>
         )}
 
-        <div className={fieldCls}>
-          <label className={lbl}>Target ₹</label>
-          <Input type="number" value={profitTarget} onChange={(e) => setProfitTarget(parseInt(e.target.value) || 1000)} className={inputCls} />
-        </div>
+        {meta.key !== 'crudeoilm_renko_sar' && (
+          <>
+            <div className={fieldCls}>
+              <label className={lbl}>Target ₹</label>
+              <Input type="number" value={profitTarget} onChange={(e) => setProfitTarget(parseInt(e.target.value) || 1000)} className={inputCls} />
+            </div>
 
-        <div className={fieldCls}>
-          <label className={lbl}>Stop Loss ₹</label>
-          <Input type="number" value={stopLoss} onChange={(e) => setStopLoss(parseInt(e.target.value) || 1000)} className={inputCls} />
-        </div>
+            <div className={fieldCls}>
+              <label className={lbl}>Stop Loss ₹</label>
+              <Input type="number" value={stopLoss} onChange={(e) => setStopLoss(parseInt(e.target.value) || 1000)} className={inputCls} />
+            </div>
+          </>
+        )}
 
         {meta.key === 'nifty_spread_trend' && (
           <>
@@ -623,6 +648,65 @@ export default function StrategyCard({ meta, state, onRefresh }: StrategyCardPro
                   Require price above/below VWAP
                 </label>
               </div>
+            </div>
+          </>
+        )}
+
+        {/* CrudeOil Mini Renko SAR-specific */}
+        {meta.key === 'crudeoilm_renko_sar' && (
+          <>
+            <div className={fieldCls}>
+              <label className={lbl}>Timeframe</label>
+              <Select value={crudeoilInterval} onValueChange={(v) => v && setCrudeoilInterval(v)}>
+                <SelectTrigger className={inputCls}><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="1">1 Min</SelectItem>
+                  <SelectItem value="3">3 Min</SelectItem>
+                  <SelectItem value="5">5 Min</SelectItem>
+                  <SelectItem value="15">15 Min</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+            <div className={fieldCls}>
+              <label className={lbl}>Brick Size (pts)</label>
+              <Input
+                type="number"
+                step="0.5"
+                value={renkoBoxSize}
+                onChange={(e) => setRenkoBoxSize(parseFloat(e.target.value) || 5)}
+                min={0.5}
+                className={inputCls}
+              />
+            </div>
+            <div className={fieldCls}>
+              <label className={lbl}>Reverse Bricks</label>
+              <Input
+                type="number"
+                value={renkoReverseBricks}
+                onChange={(e) => setRenkoReverseBricks(parseInt(e.target.value) || 3)}
+                min={1}
+                className={inputCls}
+              />
+            </div>
+            <div className={fieldCls}>
+              <label className={lbl}>Start Time</label>
+              <Input
+                type="text"
+                value={crudeoilStartTime}
+                onChange={(e) => setCrudeoilStartTime(e.target.value)}
+                placeholder="09:00"
+                className={inputCls}
+              />
+            </div>
+            <div className={fieldCls}>
+              <label className={lbl}>EOD Time</label>
+              <Input
+                type="text"
+                value={crudeoilEodTime}
+                onChange={(e) => setCrudeoilEodTime(e.target.value)}
+                placeholder="23:30"
+                className={inputCls}
+              />
             </div>
           </>
         )}
@@ -944,6 +1028,57 @@ export default function StrategyCard({ meta, state, onRefresh }: StrategyCardPro
                     </span>
                     <span className="text-[10px] text-zinc-500 font-mono whitespace-nowrap">
                       tgt ₹{state.target_profit?.toFixed(0) ?? '—'} · sl ₹{state.stop_loss?.toFixed(0) ?? '—'}
+                    </span>
+                  </div>
+                </>
+              ) : meta.key === 'crudeoilm_renko_sar' ? (
+                <>
+                  <div className="px-3 py-2 flex flex-col gap-1 shrink-0">
+                    <span className={lbl}>Direction</span>
+                    <span className={`font-mono font-bold ${
+                      state.direction === 'LONG' ? 'text-emerald-400' :
+                      state.direction === 'SHORT' ? 'text-rose-400' : 'text-zinc-500'
+                    }`}>
+                      {state.direction || 'NONE'}
+                    </span>
+                    {state.expiry && (
+                      <span className="text-[10px] text-zinc-500 font-mono">{state.expiry}</span>
+                    )}
+                  </div>
+                  <div className="px-3 py-2 flex flex-col gap-1 flex-1 min-w-[110px]">
+                    <span className={lbl}>Entry / LTP</span>
+                    {state.direction && state.direction !== 'NONE' ? (
+                      <>
+                        <span className="font-mono font-bold text-zinc-200">
+                          {state.ltp != null ? state.ltp.toFixed(2) : '—'}
+                        </span>
+                        <span className="text-[10px] text-zinc-400 font-mono whitespace-nowrap">
+                          avg ₹{state.entry_price?.toFixed(2) ?? '—'}
+                        </span>
+                      </>
+                    ) : (
+                      <span className="font-mono text-zinc-600">—</span>
+                    )}
+                  </div>
+                  <div className="px-3 py-2 flex flex-col gap-1 shrink-0">
+                    <span className={lbl}>Renko</span>
+                    <span className={`font-mono font-bold ${
+                      state.last_brick_color === 'GREEN' ? 'text-emerald-400' :
+                      state.last_brick_color === 'RED' ? 'text-rose-400' : 'text-zinc-500'
+                    }`}>
+                      {state.last_brick_color || '—'}
+                    </span>
+                    <span className="text-[10px] text-zinc-500 font-mono whitespace-nowrap">
+                      {state.interval ?? 5}m · box {state.box_size ?? 5} · opp {state.consecutive_opposite ?? 0}/{state.reverse_bricks ?? 3}
+                    </span>
+                  </div>
+                  <div className="px-3 py-2 flex flex-col gap-1 shrink-0">
+                    <span className={lbl}>Day P&amp;L</span>
+                    <span className={`font-mono font-bold text-sm ${(state.daily_pnl ?? 0) >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
+                      {(state.daily_pnl ?? 0) >= 0 ? '+' : ''}₹{(state.daily_pnl ?? 0).toFixed(0)}
+                    </span>
+                    <span className="text-[10px] text-zinc-500 font-mono whitespace-nowrap">
+                      {state.brick_count ?? 0} bricks
                     </span>
                   </div>
                 </>

@@ -525,8 +525,9 @@ class CrudeOilMSupertrendStrategy:
             f"  Lots        : {self.lots} (qty per lot: {self.lot_size})\n"
             f"{'='*60}\n"
         )
-        self.save_state(status="INITIALIZING")
+        # Restore BEFORE the first save_state, which overwrites the state file
         self._restore_daily_pnl()
+        self.save_state(status="INITIALIZING")
 
         while True:
             # Shutdown check

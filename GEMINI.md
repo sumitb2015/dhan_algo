@@ -171,6 +171,7 @@ Full CLI references, parameter explanations, and examples live in each strategy 
 | `strategies/value_imbalance/` | [`strategy.md`](strategies/value_imbalance/strategy.md) — Advanced imbalance, legacy straddle/strangle, VWAP straddle |
 | `strategies/expiry/` | [`strategy.md`](strategies/expiry/strategy.md) — 0DTE expiry strategy |
 | `strategies/spread_trend/` | [`strategy.md`](strategies/spread_trend/strategy.md) — Trend-following vertical spread |
+| `strategies/crudeoil/` | [`strategy.md`](strategies/crudeoil/strategy.md) — CRUDEOILM Supertrend & Renko stop-and-reverse futures |
 
 ### Quick-start
 

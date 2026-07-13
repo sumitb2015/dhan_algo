@@ -37,6 +37,9 @@ interface StrategyState {
   entry_price?: number; st_level?: number; daily_pnl?: number;
   expiry?: string; supertrend_period?: number; supertrend_multiplier?: number;
   ltp?: number; target_profit?: number; use_vwap?: boolean; vwap?: number;
+  // CrudeOil Mini Renko SAR
+  box_size?: number; reverse_bricks?: number; brick_count?: number;
+  last_brick_color?: string; consecutive_opposite?: number;
 }
 
 interface Props { meta: StrategyMeta; state: StrategyState; onRefresh: () => void }
@@ -96,6 +99,9 @@ export default function StrategyRowWide({ meta, state, onRefresh }: Props) {
   const [crudeoilStartTime, setCrudeoilStartTime] = useState('09:00');
   const [crudeoilEodTime, setCrudeoilEodTime] = useState('23:30');
   const [crudeoilUseVwap, setCrudeoilUseVwap] = useState(false);
+  // CrudeOil Mini Renko SAR (shares crudeoilInterval/StartTime/EodTime above)
+  const [renkoBoxSize, setRenkoBoxSize] = useState(5);
+  const [renkoReverseBricks, setRenkoReverseBricks] = useState(3);
 
   const spreadTrendNoIndicators = meta.key === 'nifty_spread_trend' && !useEma && !useSupertrend;
 
@@ -114,8 +120,11 @@ export default function StrategyRowWide({ meta, state, onRefresh }: Props) {
       const args: string[] = [];
       if (isLive) args.push('--live');
       args.push('--lots', String(lots));
-      args.push('--target-profit', String(profitTarget));
-      args.push('--stop-loss', String(stopLoss));
+      if (meta.key !== 'crudeoilm_renko_sar') {
+        // Renko SAR is a pure stop-and-reverse system with no daily P&L caps
+        args.push('--target-profit', String(profitTarget));
+        args.push('--stop-loss', String(stopLoss));
+      }
 
       if (meta.key === 'nifty_advanced_imbalance') {
         if (mode !== 'reentry_straddle') args.push('--max-lots', String(maxLots));
@@ -173,6 +182,12 @@ export default function StrategyRowWide({ meta, state, onRefresh }: Props) {
         args.push('--start-time', crudeoilStartTime);
         args.push('--eod-time', crudeoilEodTime);
         if (crudeoilUseVwap) args.push('--use-vwap');
+      } else if (meta.key === 'crudeoilm_renko_sar') {
+        args.push('--interval', crudeoilInterval);
+        args.push('--box-size', String(renkoBoxSize));
+        args.push('--reverse-bricks', String(renkoReverseBricks));
+        args.push('--start-time', crudeoilStartTime);
+        args.push('--eod-time', crudeoilEodTime);
       } else if (meta.key === 'nifty_spread_trend') {
         args.push('--symbol', symbol, '--interval', interval);
         args.push('--ce-offset', String(ceOffset), '--pe-offset', String(peOffset));
@@ -327,6 +342,49 @@ export default function StrategyRowWide({ meta, state, onRefresh }: Props) {
       );
     }
 
+    if (meta.key === 'crudeoilm_renko_sar') {
+      return (
+        <div className="flex items-stretch divide-x divide-zinc-800/60">
+          <div className="px-3 flex flex-col justify-center shrink-0">
+            <div className={lbl}>Direction</div>
+            <div className={`font-mono font-bold text-xs leading-tight ${state.direction === 'LONG' ? 'text-emerald-400' : state.direction === 'SHORT' ? 'text-rose-400' : 'text-zinc-500'}`}>
+              {state.direction || 'NONE'}
+            </div>
+            {state.expiry && <div className="text-[9px] text-zinc-500 font-mono">{state.expiry}</div>}
+          </div>
+          <div className="px-3 flex flex-col justify-center min-w-[110px]">
+            <div className={lbl}>Entry / LTP</div>
+            {state.direction && state.direction !== 'NONE' ? (
+              <>
+                <div className={val}>{state.ltp != null ? state.ltp.toFixed(2) : '—'}</div>
+                <div className="text-[9px] text-zinc-400 font-mono whitespace-nowrap">avg ₹{state.entry_price?.toFixed(2) ?? '—'}</div>
+              </>
+            ) : (
+              <div className="text-xs font-mono text-zinc-600">—</div>
+            )}
+          </div>
+          <div className="px-3 flex flex-col justify-center shrink-0">
+            <div className={lbl}>Renko</div>
+            <div className={`font-mono font-bold text-xs leading-tight ${state.last_brick_color === 'GREEN' ? 'text-emerald-400' : state.last_brick_color === 'RED' ? 'text-rose-400' : 'text-zinc-500'}`}>
+              {state.last_brick_color || '—'}
+            </div>
+            <div className="text-[9px] text-zinc-500 font-mono whitespace-nowrap">
+              {state.interval ?? 5}m · box {state.box_size ?? 5} · opp {state.consecutive_opposite ?? 0}/{state.reverse_bricks ?? 3}
+            </div>
+          </div>
+          <div className="px-3 flex flex-col justify-center shrink-0">
+            <div className={lbl}>Day P&amp;L</div>
+            <div className={`font-mono font-bold text-xs leading-tight ${(state.daily_pnl ?? 0) >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
+              {(state.daily_pnl ?? 0) >= 0 ? '+' : ''}₹{(state.daily_pnl ?? 0).toFixed(0)}
+            </div>
+            <div className="text-[9px] text-zinc-500 font-mono whitespace-nowrap">
+              {state.brick_count ?? 0} bricks
+            </div>
+          </div>
+        </div>
+      );
+    }
+
     if (meta.key === 'nifty_spread_trend') {
       return (
         <div className="flex items-stretch divide-x divide-zinc-800/60">
@@ -456,22 +514,26 @@ export default function StrategyRowWide({ meta, state, onRefresh }: Props) {
           </div>
         )}
 
-        {meta.key !== 'nifty_spread_trend' && meta.key !== 'crudeoilm_supertrend' && (
+        {meta.key !== 'nifty_spread_trend' && meta.key !== 'crudeoilm_supertrend' && meta.key !== 'crudeoilm_renko_sar' && (
           <div className={fieldCls}>
             <label className={lbl}>Start Time</label>
             <Input type="text" value={startTime} onChange={e => setStartTime(e.target.value)} placeholder="09:20" className={inputCls} style={{ width: 72 }} />
           </div>
         )}
 
-        <div className={fieldCls}>
-          <label className={lbl}>Target ₹</label>
-          <Input type="number" value={profitTarget} onChange={e => setProfitTarget(parseInt(e.target.value) || 1000)} className={inputCls} style={{ width: 80 }} />
-        </div>
+        {meta.key !== 'crudeoilm_renko_sar' && (
+          <>
+            <div className={fieldCls}>
+              <label className={lbl}>Target ₹</label>
+              <Input type="number" value={profitTarget} onChange={e => setProfitTarget(parseInt(e.target.value) || 1000)} className={inputCls} style={{ width: 80 }} />
+            </div>
 
-        <div className={fieldCls}>
-          <label className={lbl}>Stop Loss ₹</label>
-          <Input type="number" value={stopLoss} onChange={e => setStopLoss(parseInt(e.target.value) || 1000)} className={inputCls} style={{ width: 80 }} />
-        </div>
+            <div className={fieldCls}>
+              <label className={lbl}>Stop Loss ₹</label>
+              <Input type="number" value={stopLoss} onChange={e => setStopLoss(parseInt(e.target.value) || 1000)} className={inputCls} style={{ width: 80 }} />
+            </div>
+          </>
+        )}
 
         {meta.key === 'nifty_spread_trend' && (
           <>
@@ -560,6 +622,27 @@ export default function StrategyRowWide({ meta, state, onRefresh }: Props) {
                 <label htmlFor={`vwap-${meta.key}`} className="text-zinc-300 text-xs">Require above/below VWAP</label>
               </div>
             </div>
+          </>
+        )}
+
+        {meta.key === 'crudeoilm_renko_sar' && (
+          <>
+            <div className={fieldCls}>
+              <label className={lbl}>Timeframe</label>
+              <Select value={crudeoilInterval} onValueChange={v => v && setCrudeoilInterval(v)}>
+                <SelectTrigger className={inputCls} style={{ width: 90 }}><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="1">1 Min</SelectItem>
+                  <SelectItem value="3">3 Min</SelectItem>
+                  <SelectItem value="5">5 Min</SelectItem>
+                  <SelectItem value="15">15 Min</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+            <div className={fieldCls}><label className={lbl}>Brick Size (pts)</label><Input type="number" step="0.5" value={renkoBoxSize} onChange={e => setRenkoBoxSize(parseFloat(e.target.value) || 5)} min={0.5} className={inputCls} style={{ width: 72 }} /></div>
+            <div className={fieldCls}><label className={lbl}>Reverse Bricks</label><Input type="number" value={renkoReverseBricks} onChange={e => setRenkoReverseBricks(parseInt(e.target.value) || 3)} min={1} className={inputCls} style={{ width: 64 }} /></div>
+            <div className={fieldCls}><label className={lbl}>Start Time</label><Input type="text" value={crudeoilStartTime} onChange={e => setCrudeoilStartTime(e.target.value)} placeholder="09:00" className={inputCls} style={{ width: 72 }} /></div>
+            <div className={fieldCls}><label className={lbl}>EOD Time</label><Input type="text" value={crudeoilEodTime} onChange={e => setCrudeoilEodTime(e.target.value)} placeholder="23:30" className={inputCls} style={{ width: 72 }} /></div>
           </>
         )}
 

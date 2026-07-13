@@ -42,6 +42,10 @@ const STRATEGIES_METADATA: Record<string, { name: string; path: string }> = {
     name: 'CrudeOil Mini Supertrend',
     path: path.join(PROJECT_ROOT, 'strategies', 'crudeoil', 'crudeoilm_supertrend.py')
   },
+  crudeoilm_renko_sar: {
+    name: 'CrudeOil Mini Renko SAR',
+    path: path.join(PROJECT_ROOT, 'strategies', 'crudeoil', 'crudeoilm_renko_sar.py')
+  },
 };
 
 /**

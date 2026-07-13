@@ -36,3 +36,67 @@ After any exit, waits for one full new candle before re-evaluating signal.
 --cooldown-candles INT        Candles to wait after exit before re-entry scan (default: 1)
 --use-vwap                    Use VWAP as an additional exit signal (flag, default: off)
 ```
+
+---
+
+# CrudeOil Mini Renko Stop-and-Reverse Strategy
+
+## Overview
+Continuous stop-and-reverse (SAR) MCX CRUDEOILM futures strategy driven by Renko
+bricks built from 5-minute candle closes. Always holds a position during session
+hours: enters in the direction of the latest completed brick, flips only after
+N consecutive opposite-colored bricks (default 3).
+
+## Renko Brick Rules
+- **Close-only**: bricks form from candle closes; highs/lows are ignored.
+- **Box size**: default 5 points (`--box-size`).
+- **Anchor**: first candle close of the lookback window, rounded down to a box
+  multiple. The window start is pinned on the first fetch so the brick series
+  is stable across polls.
+- **Continuation**: a new same-color brick each full box beyond the leading edge.
+- **Reversal**: requires a 2×box move from the leading edge (classic
+  non-overlapping bricks).
+- **Gaps**: one candle spanning N boxes emits N bricks, each counting toward
+  the consecutive-opposite counter.
+- Signals only fire on fully completed bricks — the in-progress 5-min candle is
+  excluded.
+
+## SAR Logic
+- Initial entry (and any restart): direction of the latest completed brick
+  (green → LONG, red → SHORT).
+- While LONG: hold through 1–2 red bricks; 3 consecutive red bricks → exit and
+  immediately enter SHORT. Symmetric for SHORT. The counter resets whenever a
+  same-direction brick prints (it is the trailing same-color run).
+- No daily profit/loss caps — pure SAR. Only the EOD time (default 23:30)
+  flattens the position.
+- If the reversal's re-entry order fails, the strategy stays flat and retries
+  on the next poll (desired direction is re-derived from the brick series).
+
+## Restart Behavior
+Only the day's realized P&L is restored from the state file. Positions are NOT
+recovered — on a live restart while holding a position, flatten manually first.
+
+## Key CLI Flags
+```
+--live                Real orders (default: dry run)
+--lots INT            Position size (default: 1, qty = lots × 10)
+--box-size FLOAT      Renko box in points (default: 5)
+--reverse-bricks INT  Consecutive opposite bricks to flip (default: 3)
+--interval STR        Source candle minutes (default: 5)
+--days INT            Candle lookback for the brick series (default: 5)
+--poll-seconds INT    Main loop cadence (default: 15)
+--start-time STR      Session start HH:MM (default: 09:00)
+--eod-time STR        EOD flatten HH:MM (default: 23:30)
+```
+
+## Examples
+```
+# Dry run (default)
+python strategies/crudeoil/crudeoilm_renko_sar.py
+
+# Live, 2 lots
+python strategies/crudeoil/crudeoilm_renko_sar.py --live --lots 2
+
+# Wider bricks, faster flips
+python strategies/crudeoil/crudeoilm_renko_sar.py --box-size 10 --reverse-bricks 2
+```
