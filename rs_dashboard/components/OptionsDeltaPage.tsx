@@ -15,7 +15,6 @@ import {
   ToggleLeft,
   ToggleRight
 } from 'lucide-react';
-import NavBar from './NavBar';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Card } from '@/components/ui/card';
@@ -299,7 +298,6 @@ export default function OptionsDeltaPage() {
             ← Straddle Charts
           </Link>
 
-          <NavBar />
 
           {legs.length > 0 && (
             <Badge

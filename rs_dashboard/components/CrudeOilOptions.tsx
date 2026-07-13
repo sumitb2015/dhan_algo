@@ -2,7 +2,6 @@
 
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import Link from 'next/link';
-import NavBar from './NavBar';
 import { RefreshCw, AlertCircle, Loader2 } from 'lucide-react';
 
 // ─── Types ────────────────────────────────────────────────────────
@@ -369,7 +368,6 @@ export default function CrudeOilOptions() {
           </div>
         </div>
 
-        <NavBar />
 
         {/* Nifty toggle button */}
         <Link

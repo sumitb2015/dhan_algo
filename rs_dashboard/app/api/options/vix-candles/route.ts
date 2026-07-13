@@ -1,10 +1,8 @@
 import { NextResponse } from 'next/server';
 import path from 'path';
-import { spawnSync } from 'child_process';
+import { PROJECT_ROOT, runPythonJson, dedupe } from '@/lib/pyExec';
 
-const PROJECT_ROOT = path.resolve(process.cwd(), '..');
-const PYTHON_EXE   = path.join(PROJECT_ROOT, 'venv', 'Scripts', 'pythonw.exe');
-const VIX_SCRIPT   = path.join(PROJECT_ROOT, 'scripts', 'tools', 'india_vix_candles.py');
+const VIX_SCRIPT = path.join(PROJECT_ROOT, 'scripts', 'tools', 'india_vix_candles.py');
 
 export interface VixCandle {
   time: string;
@@ -40,31 +38,20 @@ export async function GET() {
     return NextResponse.json({ success: true, ...cache.data });
   }
 
-  const result = spawnSync(
-    PYTHON_EXE,
-    [VIX_SCRIPT],
-    { encoding: 'utf8', timeout: 45_000, windowsHide: true },
-  );
-
-  if (result.error) {
-    console.error('[/api/options/vix-candles] spawn error:', result.error);
-    return NextResponse.json({ success: false, error: String(result.error) }, { status: 500 });
-  }
-
   try {
-    const stdout   = result.stdout ?? '';
-    const jsonLine = stdout.trim().split('\n').pop() ?? '{}';
-    const parsed   = JSON.parse(jsonLine) as VixPayload & { error?: string };
+    const parsed = await dedupe('vix-candles', () =>
+      runPythonJson<VixPayload & { error?: string }>(VIX_SCRIPT, [], 45_000)
+    );
 
     if (parsed.error) {
-      console.error('[/api/options/vix-candles]', parsed.error, (result.stderr ?? '').slice(0, 400));
+      console.error('[/api/options/vix-candles]', parsed.error);
       return NextResponse.json({ success: false, error: parsed.error }, { status: 500 });
     }
 
     cache = { data: parsed, ts: Date.now() };
     return NextResponse.json({ success: true, ...parsed });
   } catch (err) {
-    console.error('[/api/options/vix-candles] parse error:', err, '\nstdout:', result.stdout);
-    return NextResponse.json({ success: false, error: `Parse error: ${String(err)}` }, { status: 500 });
+    console.error('[/api/options/vix-candles] error:', err);
+    return NextResponse.json({ success: false, error: String(err) }, { status: 500 });
   }
 }

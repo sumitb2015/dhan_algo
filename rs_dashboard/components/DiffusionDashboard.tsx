@@ -12,7 +12,7 @@ import {
   LabelList,
 } from 'recharts';
 import type { DiffusionResponse } from '@/app/api/diffusion/route';
-import NavBar from './NavBar';
+import { cachedFetch } from '@/lib/clientCache';
 
 // ─── Indicator catalogue ──────────────────────────────────────────────────────
 
@@ -206,9 +206,7 @@ export default function DiffusionDashboard() {
     setLoading(true);
     setError(null);
     try {
-      const res = await fetch(`/api/diffusion?index=${universe}`);
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const json: DiffusionResponse = await res.json();
+      const json = await cachedFetch<DiffusionResponse>(`/api/diffusion?index=${universe}`, 5 * 60_000);
       setData(json);
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Failed to load data');
@@ -262,7 +260,6 @@ export default function DiffusionDashboard() {
       {/* ── Header ── */}
       <div className="sticky top-0 z-20 bg-black border-b border-zinc-800 px-4 py-2 flex items-center gap-4 flex-shrink-0 flex-wrap">
         <span className="text-sm font-bold text-white whitespace-nowrap">Diffusion Indicators</span>
-        <NavBar />
 
         {/* Index selector */}
         <div className="flex items-center gap-1 bg-zinc-900 border border-zinc-700 rounded-lg p-0.5">

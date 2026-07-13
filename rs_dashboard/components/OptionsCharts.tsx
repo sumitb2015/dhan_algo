@@ -2,23 +2,30 @@
 
 import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import Link from 'next/link';
-import NavBar from './NavBar';
 import { Download } from 'lucide-react';
+import { cachedFetch } from '@/lib/clientCache';
 import {
   AreaChart, Area, LineChart, Line, BarChart, Bar, Cell, XAxis, YAxis, CartesianGrid,
   Tooltip, Legend, ResponsiveContainer, ReferenceLine,
 } from 'recharts';
-import OptionsSkewTab from './OptionsSkewTab';
-import OptionsOITab from './OptionsOITab';
-import OptionsCumulativeOITab from './OptionsCumulativeOITab';
-import OptionsSmartChainTab from './OptionsSmartChainTab';
-import OptionsIntelligenceTab from './OptionsIntelligenceTab';
-import OptionsVixTab from './OptionsVixTab';
-import OptionsBuildupTab from './OptionsBuildupTab';
-import OptionsMultiStrikeTab from './OptionsMultiStrikeTab';
-import OptionsPCDiffTab from './OptionsPCDiffTab';
-import OptionsPositionsTab from './OptionsPositionsTab';
-import OptionsPremiumBarTab from './OptionsPremiumBarTab';
+import dynamic from 'next/dynamic';
+
+// Lazy-load tab components so only the active tab's code (recharts-heavy)
+// is compiled and shipped; other tabs load on first click.
+const TabLoading = () => (
+  <div className="h-72 bg-zinc-900/60 border border-zinc-800/60 rounded-xl animate-pulse" />
+);
+const OptionsSkewTab         = dynamic(() => import('./OptionsSkewTab'), { ssr: false, loading: TabLoading });
+const OptionsOITab           = dynamic(() => import('./OptionsOITab'), { ssr: false, loading: TabLoading });
+const OptionsCumulativeOITab = dynamic(() => import('./OptionsCumulativeOITab'), { ssr: false, loading: TabLoading });
+const OptionsSmartChainTab   = dynamic(() => import('./OptionsSmartChainTab'), { ssr: false, loading: TabLoading });
+const OptionsIntelligenceTab = dynamic(() => import('./OptionsIntelligenceTab'), { ssr: false, loading: TabLoading });
+const OptionsVixTab          = dynamic(() => import('./OptionsVixTab'), { ssr: false, loading: TabLoading });
+const OptionsBuildupTab      = dynamic(() => import('./OptionsBuildupTab'), { ssr: false, loading: TabLoading });
+const OptionsMultiStrikeTab  = dynamic(() => import('./OptionsMultiStrikeTab'), { ssr: false, loading: TabLoading });
+const OptionsPCDiffTab       = dynamic(() => import('./OptionsPCDiffTab'), { ssr: false, loading: TabLoading });
+const OptionsPositionsTab    = dynamic(() => import('./OptionsPositionsTab'), { ssr: false, loading: TabLoading });
+const OptionsPremiumBarTab   = dynamic(() => import('./OptionsPremiumBarTab'), { ssr: false, loading: TabLoading });
 
 // ─── Types ────────────────────────────────────────────────────────
 
@@ -233,10 +240,9 @@ export default function OptionsCharts() {
 
   // Poll vix-candles for spot, prev_close, and candles (60s)
   useEffect(() => {
-    async function fetchVix(signal: AbortSignal) {
+    async function fetchVix() {
       try {
-        const res  = await fetch('/api/options/vix-candles', { signal });
-        const data = await res.json() as {
+        const data = await cachedFetch<{
           success: boolean;
           spot: number;
           prev_close: number;
@@ -245,7 +251,7 @@ export default function OptionsCharts() {
           nifty_prev_close?: number;
           nifty_change?: number;
           nifty_change_pct?: number;
-        };
+        }>('/api/options/vix-candles', 55_000);
         if (data.success) {
           setVixData({
             vix: data.spot,
@@ -258,17 +264,12 @@ export default function OptionsCharts() {
           if (data.candles) setVixCandles(data.candles);
         }
       } catch (err) {
-        if (err instanceof DOMException && err.name === 'AbortError') return;
         console.error('Failed to fetch VIX candles:', err);
       }
     }
-    const controller = new AbortController();
-    fetchVix(controller.signal);
-    const id = setInterval(() => fetchVix(controller.signal), 60_000);
-    return () => {
-      clearInterval(id);
-      controller.abort();
-    };
+    fetchVix();
+    const id = setInterval(fetchVix, 60_000);
+    return () => clearInterval(id);
   }, []);
 
   // ── Fetch expiries ────────────────────────────────────────────────
@@ -280,9 +281,9 @@ export default function OptionsCharts() {
     setError('');
     setExpiriesLoading(true);
 
-    fetch(`/api/options/expiries?underlying=${UNDERLYING}`)
-      .then(r => r.json())
-      .then((j: { success: boolean; data?: string[]; error?: string }) => {
+    cachedFetch<{ success: boolean; data?: string[]; error?: string }>(
+      `/api/options/expiries?underlying=${UNDERLYING}`, 10 * 60_000)
+      .then(j => {
         if (j.success && j.data?.length) {
           setExpiries(j.data);
           setExpiry(j.data[0]);
@@ -303,13 +304,12 @@ export default function OptionsCharts() {
     setCandleData([]);
     setChainLoading(true);
 
-    fetch(`/api/options/chain?underlying=${UNDERLYING}&expiry=${expiry}`)
-      .then(r => r.json())
-      .then((j: {
-        success: boolean;
-        data?: { chain: { oc?: Record<string, ChainOcEntry> }; spot: number };
-        error?: string;
-      }) => {
+    cachedFetch<{
+      success: boolean;
+      data?: { chain: { oc?: Record<string, ChainOcEntry> }; spot: number };
+      error?: string;
+    }>(`/api/options/chain?underlying=${UNDERLYING}&expiry=${expiry}`, 30_000)
+      .then(j => {
         if (j.success && j.data?.chain?.oc) {
           const oc = j.data.chain.oc;
           const strikes = Object.keys(oc)
@@ -359,17 +359,18 @@ export default function OptionsCharts() {
       setCandleLoading(true);
     }
 
-    fetch(`/api/options/candles?expiry=${exp}&strike=${strike}&interval=${interval}`)
-      .then(r => r.json())
-      .then((j: {
-        success: boolean;
-        data?: CandleRow[];
-        error?: string;
-        dataDate?: string;
-        isToday?: boolean;
-        ce_prev_close?: number;
-        pe_prev_close?: number;
-      }) => {
+    cachedFetch<{
+      success: boolean;
+      data?: CandleRow[];
+      error?: string;
+      dataDate?: string;
+      isToday?: boolean;
+      ce_prev_close?: number;
+      pe_prev_close?: number;
+      // 25 s TTL: shorter than any poll interval so silent refreshes stay
+      // fresh, long enough that a page revisit repaints instantly
+    }>(`/api/options/candles?expiry=${exp}&strike=${strike}&interval=${interval}`, 25_000)
+      .then(j => {
         if (j.success && j.data?.length) {
           setCandleData(j.data);
           setCandleDate(j.dataDate ?? null);
@@ -743,8 +744,6 @@ export default function OptionsCharts() {
             Net Delta →
           </Link>
 
-          {/* Page nav */}
-          <NavBar />
         </div>
 
         <div className="flex items-center gap-2 flex-wrap">

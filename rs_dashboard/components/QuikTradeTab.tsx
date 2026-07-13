@@ -1,7 +1,6 @@
 'use client';
 
 import React, { useState, useEffect, useCallback, useRef } from 'react';
-import NavBar from './NavBar';
 import QuikTradeQuadrants from './QuikTradeQuadrants';
 import QuikTradePositions from './QuikTradePositions';
 
@@ -83,7 +82,6 @@ export default function QuikTradeTab() {
             <p className="text-[10px] text-zinc-400 font-medium">OI buildup quadrants &amp; live trading terminal</p>
           </div>
 
-          <NavBar />
 
           {totalPnl !== null && (
             <div className={`text-[11px] font-bold px-2.5 py-1 rounded-lg border tabular-nums flex items-center gap-1.5 shrink-0 ${

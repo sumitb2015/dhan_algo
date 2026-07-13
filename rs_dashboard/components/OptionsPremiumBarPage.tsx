@@ -1,7 +1,6 @@
 'use client';
 
 import React, { useState, useEffect } from 'react';
-import NavBar from './NavBar';
 import OptionsPremiumBarTab from './OptionsPremiumBarTab';
 
 const UNDERLYING = 'NIFTY';
@@ -46,7 +45,6 @@ export default function OptionsPremiumBarPage() {
             </p>
           </div>
 
-          <NavBar />
         </div>
 
         <div className="flex items-center gap-2 flex-wrap">

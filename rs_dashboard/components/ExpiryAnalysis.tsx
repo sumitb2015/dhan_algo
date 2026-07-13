@@ -18,8 +18,8 @@ import {
   Legend,
 } from 'recharts';
 import { TrendingUp } from 'lucide-react';
-import NavBar from '@/components/NavBar';
 import type { WeeklyBucket, DailyStats, DailyRow } from '@/app/api/expiry-analysis/route';
+import { cachedFetch } from '@/lib/clientCache';
 
 // ─── Nifty 50 constituents + index ────────────────────────────────────────────
 const SYMBOL_OPTIONS: { value: string; label: string; group: string }[] = [
@@ -253,14 +253,15 @@ export default function ExpiryAnalysis() {
   const selectedOption = SYMBOL_OPTIONS.find((o) => o.value === symbol) ?? SYMBOL_OPTIONS[0];
 
   useEffect(() => {
-    const controller = new AbortController();
+    let cancelled = false;
     setLoading(true);
     setError(null);
-    fetch(`/api/expiry-analysis?symbol=${encodeURIComponent(symbol)}&startDate=${startDate}&endDate=${endDate}`, {
-      signal: controller.signal,
-    })
-      .then((r) => r.json())
+    cachedFetch<Record<string, any>>(
+      `/api/expiry-analysis?symbol=${encodeURIComponent(symbol)}&startDate=${startDate}&endDate=${endDate}`,
+      5 * 60_000,
+    )
       .then((data) => {
+        if (cancelled) return;
         if (data.error) throw new Error(data.error);
         setWeeks(data.weeks ?? []);
         setDailyStats(data.dailyStats ?? null);
@@ -269,10 +270,12 @@ export default function ExpiryAnalysis() {
         setDataEnd(data.dataEnd ?? '');
       })
       .catch((e: Error) => {
-        if (e.name !== 'AbortError') setError(e.message);
+        if (!cancelled) setError(e.message);
       })
-      .finally(() => setLoading(false));
-    return () => controller.abort();
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => { cancelled = true; };
   }, [symbol, startDate, endDate]);
 
   const { lower, upper, withinData, upsideData, downsideData, outliers } = useMemo(() => {
@@ -620,7 +623,6 @@ export default function ExpiryAnalysis() {
           </p>
         </div>
         <div className="flex-1 min-w-0">
-          <NavBar />
         </div>
         {dataEnd && (
           <span className="flex-shrink-0 text-xs text-zinc-400 font-mono border border-zinc-700 rounded px-2 py-0.5 whitespace-nowrap">

@@ -1,16 +1,14 @@
 import { NextRequest, NextResponse } from 'next/server';
 import path from 'path';
 import fs from 'fs';
-import { spawnSync } from 'child_process';
+import { PROJECT_ROOT, runPythonJson, dedupe } from '@/lib/pyExec';
 
-const PROJECT_ROOT = path.resolve(process.cwd(), '..');
-const PYTHON_EXE   = path.join(PROJECT_ROOT, 'venv', 'Scripts', 'pythonw.exe');
 const FETCH_SCRIPT = path.join(PROJECT_ROOT, 'scripts', 'tools', 'options_data_fetch.py');
 const NIFTY_CSV    = path.join(PROJECT_ROOT, 'Historical Data', 'NIFTY_50_Daily_5Y.csv');
 
 interface CacheEntry { spot: number; prev_close: number; change: number; change_pct: number; ts: number }
 const cacheMap = new Map<string, CacheEntry>();
-const CACHE_TTL = 5_000; // 5 s
+const CACHE_TTL = 9_000; // 9 s — just under the 10 s client poll so polls usually hit cache
 
 function lastCsvClose(): number {
   try {
@@ -45,34 +43,27 @@ export async function GET(request: NextRequest) {
   }
 
   // Try live LTP first
-  const result = spawnSync(
-    PYTHON_EXE,
-    [FETCH_SCRIPT, 'ltp', '--underlying', underlying],
-    { encoding: 'utf8', timeout: 15_000, windowsHide: true },
-  );
-
   let spot = 0;
   let prev_close = 0;
   let change = 0;
   let change_pct = 0;
-  if (!result.error) {
-    try {
-      const jsonLine = (result.stdout ?? '').trim().split('\n').pop() ?? '{}';
-      const parsed = JSON.parse(jsonLine) as {
+  try {
+    const parsed = await dedupe(`spot:${underlying}`, () =>
+      runPythonJson<{
         spot?: number;
         prev_close?: number;
         change?: number;
         change_pct?: number;
         error?: string;
-      };
-      if (!parsed.error) {
-        spot = parsed.spot ?? 0;
-        prev_close = parsed.prev_close ?? 0;
-        change = parsed.change ?? 0;
-        change_pct = parsed.change_pct ?? 0;
-      }
-    } catch { /* ignore */ }
-  }
+      }>(FETCH_SCRIPT, ['ltp', '--underlying', underlying], 15_000)
+    );
+    if (!parsed.error) {
+      spot = parsed.spot ?? 0;
+      prev_close = parsed.prev_close ?? 0;
+      change = parsed.change ?? 0;
+      change_pct = parsed.change_pct ?? 0;
+    }
+  } catch { /* fall through to CSV fallback */ }
 
   // Fall back to last daily close from NIFTY CSV
   if (spot === 0 && underlying === 'NIFTY') {

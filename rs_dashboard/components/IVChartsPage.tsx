@@ -1,11 +1,11 @@
 'use client';
 
 import React, { useState, useEffect, useRef, useMemo } from 'react';
-import NavBar from './NavBar';
 import {
   LineChart, Line, XAxis, YAxis, CartesianGrid,
   Tooltip, ResponsiveContainer, Legend,
 } from 'recharts';
+import { cachedFetch } from '@/lib/clientCache';
 
 // ─── Types ────────────────────────────────────────────────────────
 
@@ -75,9 +75,8 @@ export default function IVChartsPage() {
   const fetchData = (strike?: number) => {
     const resolved    = strike ?? strikeRef.current;
     const strikeParam = resolved !== null ? `&strike=${resolved}` : '';
-    fetch(`/api/options/iv-history?${strikeParam}`)
-      .then(r => r.json())
-      .then((j: IVHistoryResponse) => {
+    cachedFetch<IVHistoryResponse>(`/api/options/iv-history?${strikeParam}`, 25_000)
+      .then(j => {
         if (j.success) {
           setResponse(j);
           setError('');
@@ -158,7 +157,6 @@ export default function IVChartsPage() {
               Implied Volatility time-series · NIFTY {expiry || '—'}
             </p>
           </div>
-          <NavBar />
         </div>
 
         <div className="flex items-center gap-3 flex-wrap">

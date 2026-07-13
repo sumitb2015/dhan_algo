@@ -6,7 +6,7 @@ import {
   ComposedChart, XAxis, YAxis, CartesianGrid, Tooltip,
   ReferenceLine, ResponsiveContainer, Legend, Cell,
 } from 'recharts';
-import NavBar from '@/components/NavBar';
+import { getCached, setCached } from '@/lib/clientCache';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -259,16 +259,23 @@ export default function StraddleAnalysis() {
   const data: AnalysisData | null = fullData ? fullData.regimes[regime] : null;
 
   const fetchData = useCallback(async () => {
+    // Paint instantly from the session cache, then revalidate in background
+    const cached = getCached<FullData>('/api/straddle-analysis');
+    if (cached) {
+      setFullData(cached);
+      setLoadState('loaded');
+    }
     try {
       const res = await fetch('/api/straddle-analysis');
       if (res.status === 404) { setLoadState('not_generated'); return; }
-      if (!res.ok) { setLoadState('error'); return; }
+      if (!res.ok) { if (!cached) setLoadState('error'); return; }
       const json = await res.json();
       if (json.error) { setLoadState('not_generated'); return; }
+      setCached('/api/straddle-analysis', json);
       setFullData(json);
       setLoadState('loaded');
     } catch {
-      setLoadState('error');
+      if (!cached) setLoadState('error');
     }
   }, []);
 
@@ -313,7 +320,6 @@ export default function StraddleAnalysis() {
   if (loadState === 'loading') {
     return (
       <div className="min-h-screen bg-zinc-900">
-        <NavBar />
         <div className="flex items-center justify-center h-64 text-zinc-400 text-sm">Loading analysis data…</div>
       </div>
     );
@@ -322,7 +328,6 @@ export default function StraddleAnalysis() {
   if (loadState === 'not_generated') {
     return (
       <div className="min-h-screen bg-zinc-900">
-        <NavBar />
         <div className="max-w-lg mx-auto mt-24 text-center px-4">
           <div className="bg-zinc-800 rounded-xl p-8">
             <div className="text-4xl mb-4">📊</div>
@@ -359,7 +364,6 @@ export default function StraddleAnalysis() {
   if (loadState === 'error' || !fullData || !data) {
     return (
       <div className="min-h-screen bg-zinc-900">
-        <NavBar />
         <div className="flex items-center justify-center h-64 text-rose-400 text-sm">
           Failed to load analysis data.
         </div>
@@ -414,7 +418,6 @@ export default function StraddleAnalysis() {
   // ── Render ────────────────────────────────────────────────────────────────
   return (
     <div className="min-h-screen bg-zinc-900 text-zinc-300">
-      <NavBar />
 
       {/* ── Sticky header ──────────────────────────────────────────────────── */}
       <div className="sticky top-0 z-30 bg-zinc-900 border-b border-zinc-800 px-4 py-3">

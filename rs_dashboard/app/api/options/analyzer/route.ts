@@ -1,9 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import path from 'path';
-import { spawnSync } from 'child_process';
+import { PROJECT_ROOT, runPythonJson, dedupe } from '@/lib/pyExec';
 
-const PROJECT_ROOT = path.resolve(process.cwd(), '..');
-const PYTHON_EXE   = path.join(PROJECT_ROOT, 'venv', 'Scripts', 'pythonw.exe');
 const ANALYZER_SCRIPT = path.join(PROJECT_ROOT, 'scripts', 'tools', 'options_analyzer.py');
 
 interface CacheEntry { data: any; ts: number }
@@ -33,31 +31,23 @@ export async function GET(request: NextRequest) {
     return NextResponse.json({ success: true, data: hit.data });
   }
 
-  const result = spawnSync(
-    PYTHON_EXE,
-    [
-      ANALYZER_SCRIPT, 
-      '--underlying', underlying, 
-      '--expiry', expiry, 
-      '--interval', interval,
-      '--supertrend-period', supertrendPeriod,
-      '--supertrend-multiplier', supertrendMultiplier,
-      '--rsi-period', rsiPeriod,
-      '--ema20-period', ema20Period,
-      '--ema50-period', ema50Period
-    ],
-    { encoding: 'utf8', timeout: 45_000, windowsHide: true },
-  );
-
-  if (result.error) {
-    console.error('[/api/options/analyzer] spawn error:', result.error);
-    return NextResponse.json({ success: false, error: String(result.error) }, { status: 500 });
-  }
-
   try {
-    const stdout = result.stdout ?? '';
-    const jsonLine = stdout.trim().split('\n').pop() ?? '{}';
-    const parsed = JSON.parse(jsonLine);
+    const parsed = await dedupe(`analyzer:${cacheKey}`, () =>
+      runPythonJson<{ error?: string } & Record<string, unknown>>(
+        ANALYZER_SCRIPT,
+        [
+          '--underlying', underlying,
+          '--expiry', expiry,
+          '--interval', interval,
+          '--supertrend-period', supertrendPeriod,
+          '--supertrend-multiplier', supertrendMultiplier,
+          '--rsi-period', rsiPeriod,
+          '--ema20-period', ema20Period,
+          '--ema50-period', ema50Period
+        ],
+        45_000
+      )
+    );
 
     if (parsed.error) {
       console.error('[/api/options/analyzer] script error:', parsed.error);
@@ -67,8 +57,7 @@ export async function GET(request: NextRequest) {
     cache.set(cacheKey, { data: parsed, ts: Date.now() });
     return NextResponse.json({ success: true, data: parsed });
   } catch (err) {
-    const stderr = (result.stderr ?? '').slice(0, 500);
-    console.error('[/api/options/analyzer] parse error:', err, '\nstdout:', result.stdout, '\nstderr:', stderr);
-    return NextResponse.json({ success: false, error: `Parse error: ${String(err)}` }, { status: 500 });
+    console.error('[/api/options/analyzer] error:', err);
+    return NextResponse.json({ success: false, error: `${String(err)}` }, { status: 500 });
   }
 }
