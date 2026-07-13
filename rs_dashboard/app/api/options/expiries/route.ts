@@ -1,6 +1,9 @@
 ﻿import { NextRequest, NextResponse } from 'next/server';
 import path from 'path';
-import { spawnSync } from 'child_process';
+import { execFile } from 'child_process';
+import { promisify } from 'util';
+
+const execFileAsync = promisify(execFile);
 
 const PROJECT_ROOT = path.resolve(process.cwd(), '..');
 const PYTHON_EXE   = path.join(PROJECT_ROOT, 'venv', 'Scripts', 'pythonw.exe');
@@ -27,35 +30,39 @@ export async function GET(request: NextRequest) {
     return NextResponse.json({ success: true, data: hit.data });
   }
 
-  const result = spawnSync(
-    PYTHON_EXE,
-    [FETCH_SCRIPT, 'expiries', '--underlying', underlying],
-    { encoding: 'utf8', timeout: 30_000, windowsHide: true },
-  );
-
-  if (result.error) {
-    console.error('[/api/options/expiries] spawn error:', result.error);
-    return NextResponse.json({ success: false, error: String(result.error) }, { status: 500 });
-  }
-
   try {
+    const { stdout, stderr } = await execFileAsync(
+      PYTHON_EXE,
+      [FETCH_SCRIPT, 'expiries', '--underlying', underlying],
+      { encoding: 'utf8', timeout: 30_000, windowsHide: true },
+    );
+
     // Script prints one JSON line to stdout; Python/DhanHelper logs go to stderr.
-    const stdout = result.stdout ?? '';
     const jsonLine = stdout.trim().split('\n').pop() ?? '{}';
     const parsed = JSON.parse(jsonLine) as { expiries?: string[]; error?: string };
 
     if (parsed.error) {
-      const stderr = (result.stderr ?? '').slice(0, 500);
-      console.error('[/api/options/expiries] script error:', parsed.error, stderr);
+      console.error('[/api/options/expiries] script error:', parsed.error, (stderr ?? '').slice(0, 500));
       return NextResponse.json({ success: false, error: parsed.error }, { status: 500 });
     }
 
     const expiries = (parsed.expiries ?? []).filter((d) => d >= today);
     if (expiries.length) cache.set(cacheKey, { data: expiries, ts: Date.now() });
     return NextResponse.json({ success: true, data: expiries });
-  } catch (err) {
-    const stderr = (result.stderr ?? '').slice(0, 500);
-    console.error('[/api/options/expiries] parse error:', err, '\nstdout:', result.stdout, '\nstderr:', stderr);
-    return NextResponse.json({ success: false, error: `Parse error: ${String(err)}` }, { status: 500 });
+  } catch (err: unknown) {
+    const e = err as { stdout?: string; stderr?: string; message?: string };
+    if (e.stdout) {
+      try {
+        const jsonLine = String(e.stdout).trim().split('\n').pop() ?? '{}';
+        const parsed = JSON.parse(jsonLine) as { expiries?: string[]; error?: string };
+        if (!parsed.error) {
+          const expiries = (parsed.expiries ?? []).filter((d) => d >= today);
+          if (expiries.length) cache.set(cacheKey, { data: expiries, ts: Date.now() });
+          return NextResponse.json({ success: true, data: expiries });
+        }
+      } catch {}
+    }
+    console.error('[/api/options/expiries] error:', e.message, e.stderr ?? '');
+    return NextResponse.json({ success: false, error: `Script error: ${String(e.message)}` }, { status: 500 });
   }
 }
