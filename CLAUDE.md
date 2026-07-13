@@ -58,7 +58,7 @@ venv\Scripts\python.exe strategies/oi_directional/nifty_oi_directional.py --lots
 venv\Scripts\python.exe strategies/crudeoil/crudeoilm_supertrend.py --lots 1 --interval 5
 
 # CrudeOil Mini Renko SAR (always-in stop-and-reverse MCX futures)
-venv\Scripts\python.exe strategies/crudeoil/crudeoilm_renko_sar.py --lots 1 --box-size 5 --reverse-bricks 3
+venv\Scripts\python.exe strategies/crudeoil/crudeoilm_renko_sar.py --qty 10 --box-size 5 --reverse-bricks 3
 ```
 
 Full CLI references for all strategies are in [GEMINI.md](GEMINI.md).

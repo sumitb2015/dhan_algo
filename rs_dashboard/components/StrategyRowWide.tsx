@@ -39,7 +39,7 @@ interface StrategyState {
   ltp?: number; target_profit?: number; use_vwap?: boolean; vwap?: number;
   // CrudeOil Mini Renko SAR
   box_size?: number; reverse_bricks?: number; brick_count?: number;
-  last_brick_color?: string; consecutive_opposite?: number;
+  last_brick_color?: string; consecutive_opposite?: number; qty?: number;
 }
 
 interface Props { meta: StrategyMeta; state: StrategyState; onRefresh: () => void }
@@ -100,6 +100,7 @@ export default function StrategyRowWide({ meta, state, onRefresh }: Props) {
   const [crudeoilEodTime, setCrudeoilEodTime] = useState('23:30');
   const [crudeoilUseVwap, setCrudeoilUseVwap] = useState(false);
   // CrudeOil Mini Renko SAR (shares crudeoilInterval/StartTime/EodTime above)
+  const [renkoQty, setRenkoQty] = useState(10);
   const [renkoBoxSize, setRenkoBoxSize] = useState(5);
   const [renkoReverseBricks, setRenkoReverseBricks] = useState(3);
 
@@ -119,9 +120,12 @@ export default function StrategyRowWide({ meta, state, onRefresh }: Props) {
     try {
       const args: string[] = [];
       if (isLive) args.push('--live');
-      args.push('--lots', String(lots));
-      if (meta.key !== 'crudeoilm_renko_sar') {
-        // Renko SAR is a pure stop-and-reverse system with no daily P&L caps
+      if (meta.key === 'crudeoilm_renko_sar') {
+        // Renko SAR takes order quantity directly (barrels), not lots
+        args.push('--qty', String(renkoQty));
+        // and is a pure stop-and-reverse system with no daily P&L caps
+      } else {
+        args.push('--lots', String(lots));
         args.push('--target-profit', String(profitTarget));
         args.push('--stop-loss', String(stopLoss));
       }
@@ -357,7 +361,7 @@ export default function StrategyRowWide({ meta, state, onRefresh }: Props) {
             {state.direction && state.direction !== 'NONE' ? (
               <>
                 <div className={val}>{state.ltp != null ? state.ltp.toFixed(2) : '—'}</div>
-                <div className="text-[9px] text-zinc-400 font-mono whitespace-nowrap">avg ₹{state.entry_price?.toFixed(2) ?? '—'}</div>
+                <div className="text-[9px] text-zinc-400 font-mono whitespace-nowrap">avg ₹{state.entry_price?.toFixed(2) ?? '—'} · qty {state.qty ?? '—'}</div>
               </>
             ) : (
               <div className="text-xs font-mono text-zinc-600">—</div>
@@ -501,10 +505,17 @@ export default function StrategyRowWide({ meta, state, onRefresh }: Props) {
           </div>
         </div>
 
-        <div className={fieldCls}>
-          <label className={lbl}>Lots</label>
-          <Input type="number" value={lots} onChange={e => setLots(parseInt(e.target.value) || 1)} min={1} max={20} className={inputCls} style={{ width: 64 }} />
-        </div>
+        {meta.key === 'crudeoilm_renko_sar' ? (
+          <div className={fieldCls}>
+            <label className={lbl}>Quantity</label>
+            <Input type="number" value={renkoQty} onChange={e => setRenkoQty(parseInt(e.target.value) || 10)} min={1} step={1} className={inputCls} style={{ width: 72 }} />
+          </div>
+        ) : (
+          <div className={fieldCls}>
+            <label className={lbl}>Lots</label>
+            <Input type="number" value={lots} onChange={e => setLots(parseInt(e.target.value) || 1)} min={1} max={20} className={inputCls} style={{ width: 64 }} />
+          </div>
+        )}
 
         {(meta.key === 'nifty_value_imbalance_straddle' || meta.key === 'nifty_value_imbalance_strangle' ||
           (meta.key === 'nifty_advanced_imbalance' && mode !== 'reentry_straddle')) && (

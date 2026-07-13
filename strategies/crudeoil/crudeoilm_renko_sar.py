@@ -129,7 +129,7 @@ class CrudeOilMRenkoSARStrategy:
     def __init__(
         self,
         dry_run: bool = True,
-        lots: int = 1,
+        qty: int = 10,
         box_size: float = 5.0,
         reverse_bricks: int = 3,
         interval: str = "5",
@@ -139,7 +139,7 @@ class CrudeOilMRenkoSARStrategy:
         eod_time: str = "23:30",
     ):
         self.dry_run = dry_run
-        self.lots = lots
+        self.qty = qty
         self.box_size = box_size
         self.reverse_bricks = reverse_bricks
         self.interval = interval
@@ -151,8 +151,7 @@ class CrudeOilMRenkoSARStrategy:
         # Instance state
         self.security_id: Optional[str] = None
         self.expiry: Optional[str] = None
-        self.lot_size: int = 10  # MCX crude mini default
-        self.qty: int = 0
+        self.lot_size: int = 10  # MCX crude mini default — used only to sanity-check qty
         self.direction: str = "NONE"   # "LONG", "SHORT", or "NONE"
         self.entry_price: float = 0.0
         self.entry_time: Optional[datetime] = None
@@ -365,7 +364,6 @@ class CrudeOilMRenkoSARStrategy:
             "entry_price": round(self.entry_price, 2),
             "ltp": round(self.ltp, 2),
             "qty": self.qty,
-            "lots": self.lots,
             "brick_count": len(self.bricks),
             "last_brick_color": ("GREEN" if tail_dir == +1 else "RED") if self.bricks else "",
             "last_brick_close": round(self.bricks[-1].close, 2) if self.bricks else 0.0,
@@ -420,7 +418,14 @@ class CrudeOilMRenkoSARStrategy:
             self.lot_size = lot_from_master if lot_from_master > 1 else self.lot_size
         except (ValueError, TypeError):
             pass
-        self.qty = self.lot_size * self.lots
+        if self.qty % self.lot_size != 0:
+            nearest_lo = (self.qty // self.lot_size) * self.lot_size
+            nearest_hi = nearest_lo + self.lot_size
+            logger.warning(
+                "Quantity %d is not a multiple of the MCX lot size (%d). "
+                "The broker will reject this order — use %d or %d instead.",
+                self.qty, self.lot_size, nearest_lo, nearest_hi
+            )
 
     # ------------------------------------------------------------------
     # MCX Session Wait
@@ -479,7 +484,7 @@ class CrudeOilMRenkoSARStrategy:
             f"  Box Size    : {self.box_size}\n"
             f"  Reverse     : {self.reverse_bricks} consecutive opposite bricks\n"
             f"  Session     : {self.start_time} – {self.eod_time} IST\n"
-            f"  Lots        : {self.lots} (qty per lot: {self.lot_size})\n"
+            f"  Quantity    : {self.qty} (MCX lot size: {self.lot_size})\n"
             f"{'='*60}\n"
         )
         # Restore BEFORE the first save_state, which overwrites the state file
@@ -567,11 +572,11 @@ if __name__ == "__main__":
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # Dry run (default), 1 lot, 5-pt bricks, flip on 3 opposite bricks
+  # Dry run (default), 1 lot (10 barrels), 5-pt bricks, flip on 3 opposite bricks
   python strategies/crudeoil/crudeoilm_renko_sar.py
 
-  # Live trading, 2 lots
-  python strategies/crudeoil/crudeoilm_renko_sar.py --live --lots 2
+  # Live trading, 2 lots (20 barrels)
+  python strategies/crudeoil/crudeoilm_renko_sar.py --live --qty 20
 
   # Wider bricks, faster flips
   python strategies/crudeoil/crudeoilm_renko_sar.py --box-size 10 --reverse-bricks 2
@@ -579,8 +584,8 @@ Examples:
     )
     parser.add_argument("--live", action="store_true", default=False,
                         help="Enable live trading (default: dry run)")
-    parser.add_argument("--lots", type=int, default=1,
-                        help="Number of lots to trade (default: 1)")
+    parser.add_argument("--qty", type=int, default=10,
+                        help="Order quantity in barrels (MCX CRUDEOILM lot size is 10; default: 10 = 1 lot)")
     parser.add_argument("--box-size", type=float, default=5.0,
                         help="Renko box size in points (default: 5)")
     parser.add_argument("--reverse-bricks", type=int, default=3,
@@ -599,7 +604,7 @@ Examples:
 
     strat = CrudeOilMRenkoSARStrategy(
         dry_run=not args.live,
-        lots=args.lots,
+        qty=args.qty,
         box_size=args.box_size,
         reverse_bricks=args.reverse_bricks,
         interval=args.interval,

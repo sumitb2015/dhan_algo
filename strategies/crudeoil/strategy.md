@@ -79,7 +79,7 @@ recovered — on a live restart while holding a position, flatten manually first
 ## Key CLI Flags
 ```
 --live                Real orders (default: dry run)
---lots INT            Position size (default: 1, qty = lots × 10)
+--qty INT             Order quantity in barrels (default: 10 = 1 lot; MCX lot size is 10)
 --box-size FLOAT      Renko box in points (default: 5)
 --reverse-bricks INT  Consecutive opposite bricks to flip (default: 3)
 --interval STR        Source candle minutes (default: 5)
@@ -89,13 +89,20 @@ recovered — on a live restart while holding a position, flatten manually first
 --eod-time STR        EOD flatten HH:MM (default: 23:30)
 ```
 
+Unlike the other crudeoil strategy (which takes `--lots` and multiplies by the
+lot size internally), Renko SAR takes the order quantity directly since the
+dashboard exposes a "Quantity" field rather than "Lots" for this strategy. If
+`--qty` isn't a multiple of the resolved MCX lot size (10), the strategy logs
+a warning at startup but still proceeds — the broker will reject an invalid
+order size.
+
 ## Examples
 ```
-# Dry run (default)
+# Dry run (default), 1 lot (10 barrels)
 python strategies/crudeoil/crudeoilm_renko_sar.py
 
-# Live, 2 lots
-python strategies/crudeoil/crudeoilm_renko_sar.py --live --lots 2
+# Live, 2 lots (20 barrels)
+python strategies/crudeoil/crudeoilm_renko_sar.py --live --qty 20
 
 # Wider bricks, faster flips
 python strategies/crudeoil/crudeoilm_renko_sar.py --box-size 10 --reverse-bricks 2
