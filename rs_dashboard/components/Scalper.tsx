@@ -349,10 +349,11 @@ export default function Scalper() {
             // Guard 1: quotes must belong to the currently selected expiry
             if (q?.expiry && q.expiry !== expiry) return;
 
-            // Guard 2: reject stale data older than 10 seconds
+            // Guard 2: reject stale data older than 10 seconds.
+            // An unparseable timestamp gives NaN — fail safe and treat as stale.
             if (q?.updated_at) {
               const ageMs = Date.now() - new Date(q.updated_at).getTime();
-              if (ageMs > 10_000) return;
+              if (!(ageMs <= 10_000)) return;
             }
 
             // Guard 3: must have at least one strike entry (empty {} is truthy in JS)
@@ -993,7 +994,7 @@ export default function Scalper() {
           pct={cePct}
           limitPrice={ceLimitPrice}
           orderMode={orderMode}
-          onStrikeChange={v => setCeStrike(v)}
+          onStrikeChange={v => { setCeStrike(v); setCeLimitPrice(''); }}
           onLimitPriceChange={setCeLimitPrice}
           onBuy={() => placeOrder('BUY', 'CE')}
           onSell={() => placeOrder('SELL', 'CE')}
@@ -1008,7 +1009,7 @@ export default function Scalper() {
           pct={pePct}
           limitPrice={peLimitPrice}
           orderMode={orderMode}
-          onStrikeChange={v => setPeStrike(v)}
+          onStrikeChange={v => { setPeStrike(v); setPeLimitPrice(''); }}
           onLimitPriceChange={setPeLimitPrice}
           onBuy={() => placeOrder('BUY', 'PE')}
           onSell={() => placeOrder('SELL', 'PE')}

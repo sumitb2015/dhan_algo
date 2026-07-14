@@ -293,9 +293,11 @@ export default function AdvancedScalper() {
             const q = j.quotes;
             if (q?.expiry && q.expiry !== expiry) return;
 
+            // Reject stale data older than 10 seconds. An unparseable
+            // timestamp gives NaN — fail safe and treat as stale.
             if (q?.updated_at) {
               const ageMs = Date.now() - new Date(q.updated_at).getTime();
-              if (ageMs > 10_000) return;
+              if (!(ageMs <= 10_000)) return;
             }
 
             if (q?.strikes && Object.keys(q.strikes).length > 0) {
@@ -979,7 +981,7 @@ export default function AdvancedScalper() {
                 pct={pct}
                 limitPrice={box.limitPrice}
                 orderMode={orderMode}
-                onStrikeChange={v => updateBox(box.id, { strike: v })}
+                onStrikeChange={v => updateBox(box.id, { strike: v, limitPrice: '' })}
                 onLimitPriceChange={v => updateBox(box.id, { limitPrice: v })}
                 onBuy={() => placeOrder(box.id, 'BUY')}
                 onSell={() => placeOrder(box.id, 'SELL')}
@@ -988,7 +990,7 @@ export default function AdvancedScalper() {
                 onRemove={() => removeBox(box.id)}
                 canRemove={boxes.length > MIN_BOXES && !hasOpenPosition}
                 pnl={boxPnl}
-                onSideChange={s => updateBox(box.id, { side: s })}
+                onSideChange={s => updateBox(box.id, { side: s, limitPrice: '' })}
               />
             </div>
           );
