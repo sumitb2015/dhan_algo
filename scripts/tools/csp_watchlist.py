@@ -14,6 +14,7 @@ Prints a single JSON line to stdout. Logs go to stderr.
 import sys
 import os
 import json
+import logging
 import argparse
 from datetime import datetime, timezone
 
@@ -24,6 +25,27 @@ from lib.dhan_helper import DhanHelper
 
 # Orders in these statuses are still working and can be cancelled/modified.
 ACTIVE_ORDER_STATUSES = {"TRANSIT", "PENDING", "TRIGGER_PENDING", "MODIFIED", "PART_TRADED"}
+
+
+class _ErrorCapture(logging.Handler):
+    """Captures helper WARNING+ log records so the API rejection reason can be
+    returned in the JSON payload instead of dying silently on stderr."""
+
+    def __init__(self):
+        super().__init__(level=logging.WARNING)
+        self.messages: list = []
+
+    def emit(self, record):
+        self.messages.append(record.getMessage())
+
+
+_helper_errors = _ErrorCapture()
+logging.getLogger('lib.dhan_helper').addHandler(_helper_errors)
+
+
+def _fail(base_message: str) -> dict:
+    detail = _helper_errors.messages[-1] if _helper_errors.messages else ''
+    return {"success": False, "error": f"{base_message}: {detail}" if detail else base_message}
 
 
 def _get_helper() -> DhanHelper:
@@ -37,6 +59,28 @@ def _underlying_of(trading_symbol: str) -> str:
     return trading_symbol.split('-')[0].strip().upper() if trading_symbol else ''
 
 
+def _option_instrument(helper: DhanHelper, symbol: str) -> str:
+    """Stock underlyings trade OPTSTK contracts; only indices are OPTIDX."""
+    return "OPTIDX" if helper.find_index(symbol) else "OPTSTK"
+
+
+def _fo_lot_size(helper: DhanHelper, symbol: str) -> int:
+    """Option-contract lot size. get_lot_size() returns the equity placeholder
+    of 1 for stock underlyings, so read it off the derivative contracts."""
+    try:
+        df = helper._load_master_list()
+        fo = df[(df['UNDERLYING_SYMBOL'] == symbol) &
+                (df['INSTRUMENT'].isin(['OPTSTK', 'OPTIDX', 'FUTSTK', 'FUTIDX']))]
+        if not fo.empty:
+            return int(float(fo.iloc[0]['LOT_SIZE']))
+    except Exception:
+        pass
+    try:
+        return int(helper.get_lot_size(symbol))
+    except Exception:
+        return 0
+
+
 def cmd_list(helper: DhanHelper, symbols: list) -> dict:
     ltp_by_symbol = {}
     lot_by_symbol = {}
@@ -45,10 +89,7 @@ def cmd_list(helper: DhanHelper, symbols: list) -> dict:
             ltp_by_symbol[sym] = helper.get_ltp(sym, instrument="INDEX" if helper.find_index(sym) else "EQUITY")
         except Exception:
             ltp_by_symbol[sym] = 0.0
-        try:
-            lot_by_symbol[sym] = int(helper.get_lot_size(sym))
-        except Exception:
-            lot_by_symbol[sym] = 0
+        lot_by_symbol[sym] = _fo_lot_size(helper, sym)
 
     orders_by_underlying: dict = {}
     for o in helper.get_order_list():
@@ -138,13 +179,16 @@ def cmd_chain(helper: DhanHelper, args) -> dict:
 
 
 def cmd_place(helper: DhanHelper, args) -> dict:
-    sec = helper.find_option(args.symbol, args.expiry, args.strike, "PE")
+    instrument = _option_instrument(helper, args.symbol)
+    sec = helper.find_option(args.symbol, args.expiry, args.strike, "PE", instrument=instrument)
     if not sec:
-        return {"success": False, "error": f"Option not found: {args.symbol} {args.expiry} {args.strike} PE"}
+        return {"success": False, "error": f"Option not found: {args.symbol} {args.expiry} {args.strike} PE ({instrument})"}
 
     order_id = helper.place_order(
-        security_id=str(sec['SECURITY_ID']),
-        exchange_segment=sec['SEGMENT'],
+        security_id=str(int(sec['SECURITY_ID'])),
+        # Raw master-list SEGMENT is 'D' which the order API rejects (DH-905);
+        # _auto_detect_segment maps INSTRUMENT+EXCH_ID -> 'NSE_FNO'.
+        exchange_segment=helper._auto_detect_segment(sec),
         transaction_type=helper.SELL,
         quantity=args.quantity,
         order_type=args.order_type,
@@ -153,14 +197,14 @@ def cmd_place(helper: DhanHelper, args) -> dict:
     )
     if order_id:
         return {"success": True, "orderId": order_id}
-    return {"success": False, "error": "Failed to place Cash Secured Put order"}
+    return _fail("Failed to place Cash Secured Put order")
 
 
 def cmd_cancel(helper: DhanHelper, args) -> dict:
     ok = helper.cancel_order(args.order_id)
     if ok:
         return {"success": True}
-    return {"success": False, "error": "Failed to cancel order"}
+    return _fail("Failed to cancel order")
 
 
 def cmd_exit(helper: DhanHelper, args) -> dict:
@@ -174,7 +218,7 @@ def cmd_exit(helper: DhanHelper, args) -> dict:
     )
     if order_id:
         return {"success": True, "orderId": order_id}
-    return {"success": False, "error": "Failed to place exit order"}
+    return _fail("Failed to place exit order")
 
 
 def main():

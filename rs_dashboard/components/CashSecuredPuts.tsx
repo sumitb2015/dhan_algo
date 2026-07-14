@@ -212,19 +212,25 @@ function SellPutPanel({ form, onChange, onExpiryChange, onCancel, onSubmit }: {
       <div className="flex flex-wrap gap-2 items-center">
         <select
           value={form.orderType}
-          onChange={(e) => onChange({ ...form, orderType: e.target.value as 'MARKET' | 'LIMIT' })}
+          onChange={(e) => {
+            const orderType = e.target.value as 'MARKET' | 'LIMIT';
+            const selected = form.strikes.find((s) => String(s.strike) === form.strike);
+            const price = orderType === 'LIMIT' && !form.price && selected ? String(selected.ltp) : form.price;
+            onChange({ ...form, orderType, price });
+          }}
           className="bg-zinc-950 border border-zinc-800 rounded-sm px-1.5 py-1 font-mono"
         >
           <option value="MARKET">MARKET</option>
           <option value="LIMIT">LIMIT</option>
         </select>
-        {form.orderType === 'LIMIT' && (
-          <input
-            type="number" placeholder="Price" value={form.price}
-            onChange={(e) => onChange({ ...form, price: e.target.value })}
-            className="w-24 bg-zinc-950 border border-zinc-800 rounded-sm px-1.5 py-1 font-mono"
-          />
-        )}
+        <input
+          type="number"
+          placeholder={form.orderType === 'LIMIT' ? 'Limit price' : 'At market'}
+          value={form.orderType === 'LIMIT' ? form.price : ''}
+          disabled={form.orderType !== 'LIMIT'}
+          onChange={(e) => onChange({ ...form, price: e.target.value })}
+          className="w-24 bg-zinc-950 border border-zinc-800 rounded-sm px-1.5 py-1 font-mono disabled:opacity-40"
+        />
         <select
           value={form.productType}
           onChange={(e) => onChange({ ...form, productType: e.target.value as 'MARGIN' | 'CNC' })}
@@ -249,7 +255,11 @@ function SellPutPanel({ form, onChange, onExpiryChange, onCancel, onSubmit }: {
           {!form.loadingChain && form.strikes.map((s) => (
             <button
               key={s.strike}
-              onClick={() => onChange({ ...form, strike: String(s.strike) })}
+              onClick={() => onChange({
+                ...form,
+                strike: String(s.strike),
+                price: form.orderType === 'LIMIT' ? String(s.ltp) : form.price,
+              })}
               className={cn('w-full flex justify-between px-2 py-0.5 text-left hover:bg-zinc-800',
                 String(s.strike) === form.strike && 'bg-amber-500/10 text-amber-300')}
             >
