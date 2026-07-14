@@ -162,11 +162,35 @@ export default function Scalper() {
     return map;
   }, [strikeMap]);
 
+  // Dhan's /positions endpoint occasionally reports realizedProfit=0 for a
+  // fully-closed position even though buyQty/sellQty/buyAvg/sellAvg show a
+  // real matched profit (observed on NIFTY-Jul2026-23900-PE: buyQty=sellQty=195,
+  // buyAvg=4.7, sellAvg=8.2 => realized should be 682.5, API returned 0).
+  // For any position that's flat (netQty === 0), recompute realizedProfit
+  // from buyQty/sellQty/buyAvg/sellAvg instead of trusting the field as-is.
+  const realizedFixedPositions = useMemo(() => {
+    return positionsData.map(pos => {
+      const netQty = Number(pos.netQty);
+      if (netQty !== 0) return pos;
+
+      const buyQty = Number(pos.buyQty);
+      const sellQty = Number(pos.sellQty);
+      const buyAvg = Number(pos.buyAvg);
+      const sellAvg = Number(pos.sellAvg);
+      if (!buyQty || !sellQty) return pos;
+
+      const recomputedRealized = sellQty * sellAvg - buyQty * buyAvg;
+      if (Number(pos.realizedProfit) === recomputedRealized) return pos;
+
+      return { ...pos, realizedProfit: recomputedRealized };
+    });
+  }, [positionsData]);
+
   const enrichedPositions = useMemo(() => {
     if (!liveQuotes?.strikes || Object.keys(secIdToStrikeSide).length === 0)
-      return positionsData;
+      return realizedFixedPositions;
 
-    return positionsData.map(pos => {
+    return realizedFixedPositions.map(pos => {
       const secId = String(pos.securityId ?? (pos as Record<string, unknown>).security_id ?? '');
       const mapping = secIdToStrikeSide[secId];
       if (!mapping) return pos;
@@ -188,7 +212,7 @@ export default function Scalper() {
 
       return { ...pos, lastTradedPrice: liveLtp, unrealizedProfit };
     });
-  }, [positionsData, liveQuotes, secIdToStrikeSide]);
+  }, [realizedFixedPositions, liveQuotes, secIdToStrikeSide]);
 
   const totalPnl = enrichedPositions.reduce((sum, p) =>
     sum + (Number(p.realizedProfit) || 0) + (Number(p.unrealizedProfit) || 0), 0);
@@ -965,7 +989,7 @@ export default function Scalper() {
           {activeTab === 'funds' ? (
             <FundsView
               data={fundsData}
-              realizedPnl={positionsData.reduce((sum, p) => sum + (Number(p.realizedProfit) || 0), 0)}
+              realizedPnl={enrichedPositions.reduce((sum, p) => sum + (Number(p.realizedProfit) || 0), 0)}
             />
           ) : activeTab === 'positions' ? (
             <PositionsTable
