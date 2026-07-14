@@ -6,7 +6,7 @@ import { Zap, RefreshCw, Shield, ChevronDown, ChevronUp } from 'lucide-react';
 
 // ─── Types ────────────────────────────────────────────────────────
 
-export interface OptionSide { ltp: number; oi: number; volume: number }
+export interface OptionSide { ltp: number; oi: number; volume: number; high?: number; low?: number }
 export interface StrikeData  { strike: number; ce: OptionSide; pe: OptionSide }
 
 export interface LiveQuotes {
@@ -155,6 +155,11 @@ export default function Scalper() {
 
   const ceLtp = ceStrike != null ? (liveQuotes?.strikes?.[String(ceStrike)]?.ce?.ltp ?? 0) : 0;
   const peLtp = peStrike != null ? (liveQuotes?.strikes?.[String(peStrike)]?.pe?.ltp ?? 0) : 0;
+
+  const ceHigh = ceStrike != null ? (liveQuotes?.strikes?.[String(ceStrike)]?.ce?.high ?? 0) : 0;
+  const ceLow  = ceStrike != null ? (liveQuotes?.strikes?.[String(ceStrike)]?.ce?.low ?? 0) : 0;
+  const peHigh = peStrike != null ? (liveQuotes?.strikes?.[String(peStrike)]?.pe?.high ?? 0) : 0;
+  const peLow  = peStrike != null ? (liveQuotes?.strikes?.[String(peStrike)]?.pe?.low ?? 0) : 0;
 
   const cePrevClose = ceStrike != null ? (prevClose[String(ceStrike)]?.ce ?? 0) : 0;
   const pePrevClose = peStrike != null ? (prevClose[String(peStrike)]?.pe ?? 0) : 0;
@@ -992,6 +997,8 @@ export default function Scalper() {
           atm={atm}
           ltp={ceLtp}
           pct={cePct}
+          high={ceHigh}
+          low={ceLow}
           limitPrice={ceLimitPrice}
           orderMode={orderMode}
           onStrikeChange={v => { setCeStrike(v); setCeLimitPrice(''); }}
@@ -1007,6 +1014,8 @@ export default function Scalper() {
           atm={atm}
           ltp={peLtp}
           pct={pePct}
+          high={peHigh}
+          low={peLow}
           limitPrice={peLimitPrice}
           orderMode={orderMode}
           onStrikeChange={v => { setPeStrike(v); setPeLimitPrice(''); }}
@@ -1085,6 +1094,9 @@ export interface OptionPanelProps {
   atm: number;
   ltp: number;
   pct: number | null;
+  /** Day high/low of the selected strike (0 or omitted hides the H/L row) */
+  high?: number;
+  low?: number;
   limitPrice: string;
   orderMode: 'MARKET' | 'LIMIT';
   onStrikeChange: (s: number) => void;
@@ -1104,7 +1116,7 @@ export interface OptionPanelProps {
 }
 
 export function OptionPanel({
-  side, label, strike, visibleStrikes, atm, ltp, pct,
+  side, label, strike, visibleStrikes, atm, ltp, pct, high, low,
   limitPrice, orderMode, onStrikeChange, onLimitPriceChange, onBuy, onSell,
   lots, onLotsChange, onRemove, canRemove, pnl, onSideChange,
 }: OptionPanelProps) {
@@ -1186,6 +1198,15 @@ export function OptionPanel({
           </p>
         ) : (
           <p className="text-xs text-zinc-300 mt-1.5">— vs prev close</p>
+        )}
+        {(high ?? 0) > 0 && (low ?? 0) > 0 && (
+          <p className="text-xs font-mono tabular-nums mt-1.5">
+            <span className="text-zinc-500 font-bold">H </span>
+            <span className="text-emerald-400">{fmtLTP(high!)}</span>
+            <span className="text-zinc-600 mx-1.5">·</span>
+            <span className="text-zinc-500 font-bold">L </span>
+            <span className="text-rose-400">{fmtLTP(low!)}</span>
+          </p>
         )}
         {pnl !== undefined && (
           <p className={`text-xs font-bold font-mono tabular-nums mt-2 ${pnl > 0 ? 'text-emerald-400' : pnl < 0 ? 'text-rose-400' : 'text-zinc-500'}`}>

@@ -964,6 +964,12 @@ export default function AdvancedScalper() {
             : 0;
           const pct = (ltp > 0 && pc > 0) ? ((ltp - pc) / pc) * 100 : null;
 
+          const sideData = box.strike != null
+            ? liveQuotes?.strikes?.[String(box.strike)]?.[box.side === 'CE' ? 'ce' : 'pe']
+            : undefined;
+          const high = sideData?.high ?? 0;
+          const low  = sideData?.low ?? 0;
+
           const secId = boxSecId(box);
           const pos = secId ? positionsBySecId[secId] : undefined;
           const boxPnl = pos ? (Number(pos.realizedProfit) || 0) + (Number(pos.unrealizedProfit) || 0) : undefined;
@@ -979,6 +985,8 @@ export default function AdvancedScalper() {
                 atm={atm}
                 ltp={ltp}
                 pct={pct}
+                high={high}
+                low={low}
                 limitPrice={box.limitPrice}
                 orderMode={orderMode}
                 onStrikeChange={v => updateBox(box.id, { strike: v, limitPrice: '' })}
