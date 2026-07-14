@@ -154,6 +154,7 @@ export default function OptionsPremiumBarTab({ expiry }: { expiry: string }) {
 
   const intervalRef = useRef<NodeJS.Timeout | null>(null);
   const abortRef     = useRef<AbortController | null>(null);
+  const atmRef       = useRef(0); // last known-good ATM strike, survives transient spot=0 glitches
 
   const fetchPremium = useCallback(async () => {
     if (!expiry) return;
@@ -179,7 +180,13 @@ export default function OptionsPremiumBarTab({ expiry }: { expiry: string }) {
       }
 
       const spotPrice = json.data.spot ?? 0;
-      const atmStrike = Math.round(spotPrice / STRIKE_STEP) * STRIKE_STEP;
+      // The spot-price lookup is a separate call from the option chain fetch and can
+      // transiently return 0 (rate limit / momentary lookup miss) even when the chain
+      // itself is valid. Falling back to the last known-good ATM avoids filtering out
+      // every strike (and blanking the chart) over a spot-only hiccup.
+      const atmStrike = spotPrice > 0
+        ? Math.round(spotPrice / STRIKE_STEP) * STRIKE_STEP
+        : atmRef.current;
       const oc        = json.data.chain.oc;
 
       const newRows: PremiumRow[] = Object.entries(oc)
@@ -204,7 +211,8 @@ export default function OptionsPremiumBarTab({ expiry }: { expiry: string }) {
         })
         .sort((a, b) => a.strike - b.strike);
 
-      setSpot(spotPrice);
+      atmRef.current = atmStrike;
+      if (spotPrice > 0) setSpot(spotPrice); // don't overwrite a good spot with a transient 0
       setAtm(atmStrike);
       setRows(newRows);
       setLastUpdated(new Date().toLocaleTimeString('en-IN', {
@@ -224,6 +232,7 @@ export default function OptionsPremiumBarTab({ expiry }: { expiry: string }) {
     setRows([]);
     setSpot(0);
     setAtm(0);
+    atmRef.current = 0;
     setLastUpdated(null);
     setLoading(true);
     void fetchPremium();
