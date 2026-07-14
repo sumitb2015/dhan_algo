@@ -11,6 +11,7 @@ Prints a single JSON line to stdout. Logs go to stderr.
 import sys
 import os
 import json
+import time
 import argparse
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -80,6 +81,17 @@ def main():
             expiry=args.expiry,
             exchange_segment=seg,
         )
+        if not chain:
+            # Empty chain almost always means the Dhan option-chain API
+            # rate limit (~1 call/3s per token) was hit — the helper's
+            # in-process spacing can't protect across processes. One
+            # spaced retry resolves the common transient case.
+            time.sleep(3.5)
+            chain = helper.get_option_chain(
+                symbol=under,
+                expiry=args.expiry,
+                exchange_segment=seg,
+            )
         # Also get spot for ATM calculation
         if is_crude:
             from scripts.tools.premarket_data import _find_nearest_future

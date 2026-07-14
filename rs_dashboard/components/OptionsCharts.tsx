@@ -296,8 +296,10 @@ export default function OptionsCharts() {
   }, []);
 
   // ── Fetch static chain when expiry changes ────────────────────────
-  useEffect(() => {
-    if (!expiry) return;
+  // Extracted into a callback so a transient failure (expired Dhan token,
+  // chain-API 429) can be retried from the UI instead of sticking until
+  // the expiry changes.
+  const fetchChain = useCallback((exp: string) => {
     setChainStrikes([]);
     setChainOc({});
     setSelectedStrike(null);
@@ -308,7 +310,7 @@ export default function OptionsCharts() {
       success: boolean;
       data?: { chain: { oc?: Record<string, ChainOcEntry> }; spot: number };
       error?: string;
-    }>(`/api/options/chain?underlying=${UNDERLYING}&expiry=${expiry}`, 30_000)
+    }>(`/api/options/chain?underlying=${UNDERLYING}&expiry=${exp}`, 30_000)
       .then(j => {
         if (j.success && j.data?.chain?.oc) {
           const oc = j.data.chain.oc;
@@ -349,7 +351,12 @@ export default function OptionsCharts() {
       })
       .catch(() => {})
       .finally(() => setChainLoading(false));
-  }, [expiry]);
+  }, []);
+
+  useEffect(() => {
+    if (!expiry) return;
+    fetchChain(expiry);
+  }, [expiry, fetchChain]);
 
   // ── Fetch today's 1-min candles (when bridge is stopped) ──────────
   const fetchCandles = useCallback((strike: number, exp: string, interval: string, silent = false) => {
@@ -917,8 +924,17 @@ export default function OptionsCharts() {
                   ))}
                 </select>
               ) : (
-                <span className="text-xs text-zinc-400">
-                  {expiry ? 'Could not load chain — check auth token' : 'Select an expiry first'}
+                <span className="text-xs text-zinc-400 flex items-center gap-2">
+                  {expiry ? 'Could not load chain — token expired or rate-limited' : 'Select an expiry first'}
+                  {expiry && (
+                    <button
+                      onClick={() => fetchChain(expiry)}
+                      className="px-2 py-1 text-xs font-semibold rounded-lg border border-zinc-700
+                                 bg-zinc-900 text-zinc-300 hover:text-white transition-all"
+                    >
+                      Retry
+                    </button>
+                  )}
                 </span>
               )}
               {!isLive && selectedStrike && expiry && (

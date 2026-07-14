@@ -2,11 +2,10 @@
 import path from 'path';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
+import { PROJECT_ROOT, PYTHON_EXE, dedupe } from '@/lib/pyExec';
 
 const execFileAsync = promisify(execFile);
 
-const PROJECT_ROOT = path.resolve(process.cwd(), '..');
-const PYTHON_EXE   = path.join(PROJECT_ROOT, 'venv', 'Scripts', 'pythonw.exe');
 const FETCH_SCRIPT = path.join(PROJECT_ROOT, 'scripts', 'tools', 'options_data_fetch.py');
 
 interface CacheEntry { data: ChainResponse; ts: number }
@@ -31,10 +30,15 @@ export async function GET(request: NextRequest) {
   }
 
   try {
-    const { stdout } = await execFileAsync(
-      PYTHON_EXE,
-      [FETCH_SCRIPT, 'chain', '--underlying', underlying, '--expiry', expiry],
-      { encoding: 'utf8', timeout: 45_000, windowsHide: true },
+    // Dedupe concurrent identical requests: the Dhan chain API is rate-limited
+    // (~1 call / 3s), so parallel Python spawns for the same expiry would 429
+    // each other. Concurrent callers share one spawn.
+    const { stdout } = await dedupe(`options-chain:${cacheKey}`, () =>
+      execFileAsync(
+        PYTHON_EXE,
+        [FETCH_SCRIPT, 'chain', '--underlying', underlying, '--expiry', expiry],
+        { encoding: 'utf8', timeout: 45_000, windowsHide: true },
+      ),
     );
 
     const jsonLine = (stdout ?? '').trim().split('\n').pop() ?? '{}';
@@ -45,7 +49,18 @@ export async function GET(request: NextRequest) {
       return NextResponse.json({ success: false, error: parsed.error }, { status: 500 });
     }
 
-    const data: ChainResponse = { chain: parsed.chain ?? {}, spot: parsed.spot ?? 0 };
+    // The Python helper returns an empty chain on Dhan API failures
+    // (rate limit 429, expired token). Never cache or report that as
+    // success — surface it so the client can show a retry.
+    if (!parsed.chain || Object.keys(parsed.chain).length === 0) {
+      console.error('[/api/options/chain] empty chain — Dhan rate limit or expired token');
+      return NextResponse.json(
+        { success: false, error: 'Empty chain from Dhan API (rate-limited or token expired)' },
+        { status: 502 },
+      );
+    }
+
+    const data: ChainResponse = { chain: parsed.chain, spot: parsed.spot ?? 0 };
     cache.set(cacheKey, { data, ts: Date.now() });
     return NextResponse.json({ success: true, data });
   } catch (err: unknown) {
@@ -54,8 +69,8 @@ export async function GET(request: NextRequest) {
       try {
         const jsonLine = String(e.stdout).trim().split('\n').pop() ?? '{}';
         const parsed = JSON.parse(jsonLine) as { chain?: Record<string, unknown>; spot?: number; error?: string };
-        if (!parsed.error) {
-          const data: ChainResponse = { chain: parsed.chain ?? {}, spot: parsed.spot ?? 0 };
+        if (!parsed.error && parsed.chain && Object.keys(parsed.chain).length > 0) {
+          const data: ChainResponse = { chain: parsed.chain, spot: parsed.spot ?? 0 };
           cache.set(cacheKey, { data, ts: Date.now() });
           return NextResponse.json({ success: true, data });
         }
