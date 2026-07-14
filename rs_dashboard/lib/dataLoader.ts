@@ -46,16 +46,8 @@ function cacheSet<T>(key: string, data: T): void {
 }
 
 // ─── Stock CSV Reader ─────────────────────────────────────────────────────────
-export function readStockCSV(symbol: string): OHLCVRow[] {
-  const cacheKey = `stock:${symbol}`;
-  const hit = cacheGet<OHLCVRow[]>(cacheKey);
-  if (hit) return hit;
-
-  const filePath = path.join(DATA_DIR, `${symbol}_Daily_2Y.csv`);
-  if (!fs.existsSync(filePath)) return [];
-
+function parseAndPatchStockRows(symbol: string, content: string): OHLCVRow[] {
   try {
-    const content = fs.readFileSync(filePath, 'utf-8');
     const rows = parseCSV(content);
     const parsed: OHLCVRow[] = rows
       .filter((r) => r.Datetime && r.Close && !isNaN(parseFloat(r.Close)))
@@ -106,11 +98,59 @@ export function readStockCSV(symbol: string): OHLCVRow[] {
       }
     }
 
-    cacheSet(cacheKey, parsed);
     return parsed;
   } catch {
     return [];
   }
+}
+
+export function readStockCSV(symbol: string): OHLCVRow[] {
+  const cacheKey = `stock:${symbol}`;
+  const hit = cacheGet<OHLCVRow[]>(cacheKey);
+  if (hit) return hit;
+
+  const filePath = path.join(DATA_DIR, `${symbol}_Daily_2Y.csv`);
+  let content: string;
+  try {
+    content = fs.readFileSync(filePath, 'utf-8');
+  } catch {
+    return [];
+  }
+  const parsed = parseAndPatchStockRows(symbol, content);
+  cacheSet(cacheKey, parsed);
+  return parsed;
+}
+
+// True-async variant: fs.promises.readFile never blocks the event loop, so
+// cold-cache fan-outs over ~500 symbols (Promise.all in the screener routes)
+// actually overlap I/O instead of running one long synchronous burst.
+// Shares the same cache as readStockCSV; in-flight map prevents concurrent
+// routes from double-reading the same file.
+const stockInflight = new Map<string, Promise<OHLCVRow[]>>();
+
+export function readStockCSVAsync(symbol: string): Promise<OHLCVRow[]> {
+  const cacheKey = `stock:${symbol}`;
+  const hit = cacheGet<OHLCVRow[]>(cacheKey);
+  if (hit) return Promise.resolve(hit);
+
+  const existing = stockInflight.get(symbol);
+  if (existing) return existing;
+
+  const p = (async () => {
+    const filePath = path.join(DATA_DIR, `${symbol}_Daily_2Y.csv`);
+    let content: string;
+    try {
+      content = await fs.promises.readFile(filePath, 'utf-8');
+    } catch {
+      return [];
+    }
+    const parsed = parseAndPatchStockRows(symbol, content);
+    cacheSet(cacheKey, parsed);
+    return parsed;
+  })().finally(() => stockInflight.delete(symbol));
+
+  stockInflight.set(symbol, p);
+  return p;
 }
 
 // ─── Nifty 50 Index Reader ────────────────────────────────────────────────────
@@ -237,8 +277,8 @@ export async function readNifty500Index(symbols: string[]): Promise<OHLCVRow[]> 
     for (let i = 0; i < symbols.length; i += BATCH) {
       const batch = symbols.slice(i, i + BATCH);
       await Promise.all(
-        batch.map((sym) => {
-          const rows = readStockCSV(sym);
+        batch.map(async (sym) => {
+          const rows = await readStockCSVAsync(sym);
           for (const row of rows) {
             const entry = dateMap.get(row.date) ?? { sum: 0, count: 0 };
             entry.sum += row.close;

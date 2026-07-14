@@ -29,8 +29,21 @@ export interface OIBuildupResponse {
 
 // ─── CSV parser ───────────────────────────────────────────────────────────────
 
-function parseSnapshot(filePath: string): (OIRow & { category: string; dataDate: string })[] {
-  const content = fs.readFileSync(filePath, 'utf-8');
+// Re-parse only when the snapshot file's mtime changes; polls in between
+// serve the cached rows without touching the filesystem beyond a stat.
+let snapCache: { mtimeMs: number; rows: (OIRow & { category: string; dataDate: string })[] } | null = null;
+
+async function parseSnapshot(filePath: string): Promise<(OIRow & { category: string; dataDate: string })[]> {
+  const stat = await fs.promises.stat(filePath);
+  if (snapCache && snapCache.mtimeMs === stat.mtimeMs) return snapCache.rows;
+
+  const content = await fs.promises.readFile(filePath, 'utf-8');
+  const rows = parseSnapshotContent(content);
+  snapCache = { mtimeMs: stat.mtimeMs, rows };
+  return rows;
+}
+
+function parseSnapshotContent(content: string): (OIRow & { category: string; dataDate: string })[] {
   const lines = content.trim().split('\n');
   if (lines.length < 2) return [];
   const headers = lines[0].split(',').map(h => h.trim());
@@ -72,11 +85,11 @@ export async function GET() {
   }
 
   try {
-    const allRows = parseSnapshot(filePath);
+    const allRows = await parseSnapshot(filePath);
     const filterSort = (cat: string): OIRow[] =>
       sortByAbsOI(allRows.filter(r => r.category === cat));
 
-    const dataDate = allRows[0]?.dataDate ?? new Date(fs.statSync(filePath).mtime)
+    const dataDate = allRows[0]?.dataDate ?? new Date((await fs.promises.stat(filePath)).mtime)
       .toISOString().split('T')[0];
 
     return NextResponse.json<OIBuildupResponse>({

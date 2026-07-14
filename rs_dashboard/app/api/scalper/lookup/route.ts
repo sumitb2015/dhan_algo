@@ -1,9 +1,7 @@
-﻿import { NextRequest, NextResponse } from 'next/server';
+import { NextRequest, NextResponse } from 'next/server';
 import path from 'path';
-import { spawnSync } from 'child_process';
+import { PROJECT_ROOT, runPythonJson, dedupe } from '@/lib/pyExec';
 
-const PROJECT_ROOT   = path.resolve(process.cwd(), '..');
-const PYTHON_EXE     = path.join(PROJECT_ROOT, 'venv', 'Scripts', 'pythonw.exe');
 const SCALPER_SCRIPT = path.join(PROJECT_ROOT, 'scripts', 'tools', 'scalper_api.py');
 
 interface StrikeLookup { ceId?: string; peId?: string }
@@ -11,7 +9,7 @@ interface LookupData   { lotSize: number; strikes: Record<string, StrikeLookup> 
 interface CacheEntry   { data: LookupData; ts: number }
 
 const cache = new Map<string, CacheEntry>();
-const CACHE_TTL = 4 * 60 * 60 * 1000; // 4 hours â€” strike IDs don't change intraday
+const CACHE_TTL = 4 * 60 * 60 * 1000; // 4 hours — strike IDs don't change intraday
 
 export async function GET(req: NextRequest) {
   const { searchParams } = new URL(req.url);
@@ -28,25 +26,20 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({ success: true, data: hit.data });
   }
 
-  const result = spawnSync(
-    PYTHON_EXE,
-    [SCALPER_SCRIPT, 'lookup', '--underlying', underlying, '--expiry', expiry],
-    { encoding: 'utf8', cwd: PROJECT_ROOT, timeout: 30_000, windowsHide: true },
-  );
-
-  if (result.error) {
-    return NextResponse.json({ success: false, error: String(result.error) }, { status: 500 });
-  }
-
   try {
-    const lines = (result.stdout ?? '').trim().split('\n').filter(Boolean);
-    const parsed = JSON.parse(lines[lines.length - 1] ?? '{}') as { success: boolean; data?: LookupData; error?: string };
+    const parsed = await dedupe(`scalper-lookup:${key}`, () =>
+      runPythonJson<{ success: boolean; data?: LookupData; error?: string }>(
+        SCALPER_SCRIPT,
+        ['lookup', '--underlying', underlying, '--expiry', expiry],
+        30_000,
+      ),
+    );
     if (parsed.success && parsed.data) {
       cache.set(key, { data: parsed.data, ts: Date.now() });
     }
     return NextResponse.json(parsed);
   } catch (err) {
-    console.error('[scalper/lookup] parse error:', err, result.stdout);
-    return NextResponse.json({ success: false, error: `Parse error: ${String(err)}` }, { status: 500 });
+    console.error('[scalper/lookup] error:', err);
+    return NextResponse.json({ success: false, error: String(err) }, { status: 500 });
   }
 }

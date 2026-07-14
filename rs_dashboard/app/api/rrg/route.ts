@@ -4,7 +4,7 @@ import {
   KNOWN_INDICES,
   readIndexCSV,
   readNifty50Index,
-  readStockCSV,
+  readStockCSVAsync,
 } from '@/lib/dataLoader';
 import { alignByDate } from '@/lib/rs';
 import { NIFTY50_SYMBOLS } from '@/lib/nifty50';
@@ -205,7 +205,9 @@ export async function GET(req: NextRequest) {
         ? KNOWN_INDICES
             .filter(m => m.key !== 'INDIA_VIX' && m.key !== 'NIFTY50')
             .map(m => ({ symbol: m.key, label: m.label, rows: readIndexCSV(m) }))
-        : NIFTY50_SYMBOLS.map(sym => ({ symbol: sym, label: sym, rows: readStockCSV(sym) }));
+        : await Promise.all(
+            NIFTY50_SYMBOLS.map(async sym => ({ symbol: sym, label: sym, rows: await readStockCSVAsync(sym) }))
+          );
 
     const seriesList: RRGSeries[] = [];
     for (let idx = 0; idx < symbolEntries.length; idx++) {

@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { readStockCSV, readNifty500List, getTodayQuotesMeta, clearCache } from '@/lib/dataLoader';
+import { readStockCSVAsync, readNifty500List, getTodayQuotesMeta, clearCache } from '@/lib/dataLoader';
 import { NIFTY50_SYMBOLS } from '@/lib/nifty50';
 import { getSector } from '@/lib/sectors';
 import { OHLCVRow } from '@/lib/rs';
@@ -243,7 +243,7 @@ async function getMovers(indexType: 'nifty50' | 'nifty500'): Promise<MoversRespo
   const movers: MoverResult[] = [];
   await Promise.all(
     symbols.map(async (symbol) => {
-      const rows = readStockCSV(symbol);
+      const rows = await readStockCSVAsync(symbol);
       const m = computeMover(symbol, rows);
       if (m) movers.push(m);
     })

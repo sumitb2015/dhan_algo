@@ -66,7 +66,8 @@ export default function StrategiesPlusPage() {
     setTimeout(() => setToasts(prev => prev.filter(t => t.id !== id)), 5000);
   };
 
-  const fetchStrategies = async (showLoading = false) => {
+  // Stable reference so memoized StrategyRowWide rows don't re-render on every poll
+  const fetchStrategies = useCallback(async (showLoading = false) => {
     if (showLoading) setLoading(true);
     try {
       const res = await fetch('/api/strategies');
@@ -78,7 +79,7 @@ export default function StrategiesPlusPage() {
     } finally {
       if (showLoading) setLoading(false);
     }
-  };
+  }, []);
 
   const fetchPortfolio = useCallback(async () => {
     setPortfolioLoading(true);

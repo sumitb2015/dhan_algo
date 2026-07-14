@@ -105,7 +105,7 @@ interface StrategyCardProps {
   onRefresh: () => void;
 }
 
-export default function StrategyCard({ meta, state, onRefresh }: StrategyCardProps) {
+function StrategyCard({ meta, state, onRefresh }: StrategyCardProps) {
   const [showConfig, setShowConfig] = useState<boolean>(false);
   const [showLogs, setShowLogs] = useState<boolean>(false);
   const [submitting, setSubmitting] = useState<boolean>(false);
@@ -1279,3 +1279,12 @@ export default function StrategyCard({ meta, state, onRefresh }: StrategyCardPro
     </div>
   );
 }
+
+// The /api/strategies poll rebuilds meta/state objects every 2s even when
+// nothing changed, so identity comparison would re-render every card each
+// tick. Compare by content instead (small objects; N is a handful of cards).
+export default React.memo(StrategyCard, (prev, next) =>
+  prev.onRefresh === next.onRefresh &&
+  JSON.stringify(prev.meta) === JSON.stringify(next.meta) &&
+  JSON.stringify(prev.state) === JSON.stringify(next.state)
+);

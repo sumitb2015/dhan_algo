@@ -1,10 +1,8 @@
 import { NextResponse } from 'next/server';
 import path from 'path';
-import { spawnSync } from 'child_process';
+import { PROJECT_ROOT, runPythonJson, dedupe } from '@/lib/pyExec';
 
-const PROJECT_ROOT = path.resolve(process.cwd(), '..');
-const PYTHON_EXE    = path.join(PROJECT_ROOT, 'venv', 'Scripts', 'pythonw.exe');
-const SCRIPT_PATH   = path.join(PROJECT_ROOT, 'scripts', 'tools', 'normalized_1min_candles.py');
+const SCRIPT_PATH = path.join(PROJECT_ROOT, 'scripts', 'tools', 'normalized_1min_candles.py');
 
 interface CandlePoint { time: string; close: number; pct: number }
 interface ApiPayload {
@@ -28,31 +26,20 @@ export async function GET() {
     return NextResponse.json(cacheHolder.entry.data);
   }
 
-  const result = spawnSync(PYTHON_EXE, [SCRIPT_PATH], {
-    encoding: 'utf8',
-    timeout: 45_000,
-    windowsHide: true,
-  });
-
-  if (result.error) {
-    console.error('[/api/live-normalized-1min] spawn error:', result.error);
-    return NextResponse.json({ success: false, error: String(result.error) }, { status: 500 });
-  }
-
   try {
-    const stdout   = result.stdout ?? '';
-    const jsonLine = stdout.trim().split('\n').pop() ?? '{}';
-    const parsed   = JSON.parse(jsonLine) as ApiPayload;
+    const parsed = await dedupe('live-normalized-1min', () =>
+      runPythonJson<ApiPayload>(SCRIPT_PATH, [], 45_000),
+    );
 
     if (!parsed.success) {
-      console.error('[/api/live-normalized-1min]', parsed.error, (result.stderr ?? '').slice(0, 400));
+      console.error('[/api/live-normalized-1min]', parsed.error);
       return NextResponse.json(parsed, { status: 500 });
     }
 
     cacheHolder.entry = { data: parsed, ts: Date.now() };
     return NextResponse.json(parsed);
   } catch (err) {
-    console.error('[/api/live-normalized-1min] parse error:', err, '\nstdout:', result.stdout);
-    return NextResponse.json({ success: false, error: `Parse error: ${String(err)}` }, { status: 500 });
+    console.error('[/api/live-normalized-1min] error:', err);
+    return NextResponse.json({ success: false, error: String(err) }, { status: 500 });
   }
 }

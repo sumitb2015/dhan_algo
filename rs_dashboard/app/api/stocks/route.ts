@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { readStockCSV, readNifty50Index, readNifty500Index, readNifty500List } from '@/lib/dataLoader';
+import { readStockCSVAsync, readNifty50Index, readNifty500Index, readNifty500List } from '@/lib/dataLoader';
 import { NIFTY50_SYMBOLS } from '@/lib/nifty50';
 import { alignByDate, computeCurrentRS, buildRSResult, assignRSScores, RSResult } from '@/lib/rs';
 import { getSector } from '@/lib/sectors';
@@ -37,7 +37,7 @@ async function getLeaderboard(indexType: 'nifty50' | 'nifty500', lookback: numbe
 
   await Promise.all(
     symbols.map(async (symbol) => {
-      const stockRows = readStockCSV(symbol);
+      const stockRows = await readStockCSVAsync(symbol);
       if (stockRows.length < 20) return;
 
       const aligned = alignByDate(stockRows, benchmarkRows);

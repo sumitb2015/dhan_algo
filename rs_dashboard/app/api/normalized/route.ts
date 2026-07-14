@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { readStockCSV, readNifty500List, readIndexCSV, KNOWN_INDICES } from '@/lib/dataLoader';
+import { readStockCSVAsync, readNifty500List, readIndexCSV, KNOWN_INDICES } from '@/lib/dataLoader';
 import { NIFTY50_SYMBOLS } from '@/lib/nifty50';
 import { getSector } from '@/lib/sectors';
 import { OHLCVRow } from '@/lib/rs';
@@ -126,7 +126,7 @@ async function computeNormalized(
       symbols.map(async (symbol) => ({
         symbol,
         label: getSector(symbol),
-        rows: readStockCSV(symbol),
+        rows: await readStockCSVAsync(symbol),
       }))
     );
   }

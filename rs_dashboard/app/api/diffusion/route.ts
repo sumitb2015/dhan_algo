@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import {
-  readStockCSV,
+  readStockCSVAsync,
   readNifty500List,
   readNifty50Index,
   readNifty500Index,
@@ -91,7 +91,7 @@ async function computeDiffusion(universe: 'nifty50' | 'nifty500'): Promise<Diffu
     universe === 'nifty50'
       ? Promise.resolve(readNifty50Index())
       : readNifty500Index(symbols),
-    ...symbols.map((s) => Promise.resolve(readStockCSV(s))),
+    ...symbols.map((s) => readStockCSVAsync(s)),
   ]);
 
   // Build index close lookup by date

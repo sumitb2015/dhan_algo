@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { readStockCSV, readNifty500List, readNifty50Index, readNifty500Index, listAvailableSymbols } from '@/lib/dataLoader';
+import { readStockCSVAsync, readNifty500List, readNifty50Index, readNifty500Index, listAvailableSymbols } from '@/lib/dataLoader';
 import { NIFTY50_SYMBOLS } from '@/lib/nifty50';
 import { getSector } from '@/lib/sectors';
 import { OHLCVRow, alignByDate } from '@/lib/rs';
@@ -444,7 +444,7 @@ async function runScanner(indexType: string, params: ScannerParams): Promise<Sca
 
   await Promise.all(
     symbols.map(async (symbol) => {
-      const rows = readStockCSV(symbol);
+      const rows = await readStockCSVAsync(symbol);
       const r = computeScanner(symbol, rows, indexRows, params);
       if (r) results.push(r);
     })

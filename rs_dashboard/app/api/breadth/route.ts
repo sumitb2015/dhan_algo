@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server';
-import { readNifty50Index, readStockCSV, readNifty500List } from '@/lib/dataLoader';
+import { readNifty50Index, readStockCSVAsync, readNifty500List } from '@/lib/dataLoader';
 import { OHLCVRow } from '@/lib/rs';
 import { NIFTY50_SYMBOLS } from '@/lib/nifty50';
 import fs from 'fs';
@@ -299,7 +299,7 @@ async function computeBreadthStats(symbols: string[]): Promise<BreadthStats> {
   let total = 0;
 
   await Promise.all(symbols.map(async (symbol) => {
-    const rows = readStockCSV(symbol);
+    const rows = await readStockCSVAsync(symbol);
     if (rows.length < 22) return;
 
     total++;

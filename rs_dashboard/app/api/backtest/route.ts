@@ -1,6 +1,9 @@
 import { NextRequest, NextResponse } from 'next/server';
 import path from 'path';
-import { execFileSync } from 'child_process';
+import { execFile } from 'child_process';
+import { promisify } from 'util';
+
+const execFileAsync = promisify(execFile);
 
 const PROJECT_ROOT = path.resolve(process.cwd(), '..');
 const PYTHON_EXE = path.join(PROJECT_ROOT, 'venv', 'Scripts', 'python.exe');
@@ -38,10 +41,11 @@ export async function POST(req: NextRequest) {
   ];
 
   try {
-    const stdout = execFileSync(PYTHON_EXE, args, {
+    const { stdout } = await execFileAsync(PYTHON_EXE, args, {
       cwd: PROJECT_ROOT,
       encoding: 'utf-8',
       maxBuffer: 64 * 1024 * 1024,
+      timeout: 10 * 60 * 1000,
       env: { ...process.env, PYTHONIOENCODING: 'utf-8' },
       windowsHide: true,
     });

@@ -27,7 +27,8 @@ export default function StrategiesPage() {
   const [confirmGlobalExit, setConfirmGlobalExit] = useState<boolean>(false);
   const [globalExiting, setGlobalExiting] = useState<boolean>(false);
 
-  const fetchStrategies = async (showLoading = false) => {
+  // Stable reference so memoized StrategyCard rows don't re-render on every poll
+  const fetchStrategies = useCallback(async (showLoading = false) => {
     if (showLoading) setLoading(true);
     try {
       const res = await fetch('/api/strategies');
@@ -43,7 +44,7 @@ export default function StrategiesPage() {
     } finally {
       if (showLoading) setLoading(false);
     }
-  };
+  }, []);
 
   const fetchPortfolio = useCallback(async () => {
     setPortfolioLoading(true);

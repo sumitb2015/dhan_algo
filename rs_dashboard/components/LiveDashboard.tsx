@@ -8,9 +8,16 @@ import {
 import { MoverResult } from '@/app/api/movers/route';
 import { cn } from '@/lib/utils';
 import NavBar from './NavBar';
-import LiveNormalizedTab from './LiveNormalizedTab';
-import NormalizedIntradayTab from './NormalizedIntradayTab';
-import NormalizedIntradayStocksTab from './NormalizedIntradayStocksTab';
+import dynamic from 'next/dynamic';
+
+// Lazy-load the recharts-heavy chart tabs so the default 'market' tab
+// doesn't ship recharts in its initial bundle; each loads on first click.
+const TabLoading = () => (
+  <div className="h-72 bg-zinc-900/60 border border-zinc-800/60 rounded-xl animate-pulse" />
+);
+const LiveNormalizedTab = dynamic(() => import('./LiveNormalizedTab'), { ssr: false, loading: TabLoading });
+const NormalizedIntradayTab = dynamic(() => import('./NormalizedIntradayTab'), { ssr: false, loading: TabLoading });
+const NormalizedIntradayStocksTab = dynamic(() => import('./NormalizedIntradayStocksTab'), { ssr: false, loading: TabLoading });
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -266,34 +273,39 @@ export default function LiveDashboard() {
     finally { setActionLoading(false); }
   }, [pollLive]);
 
-  // ── Merge baseline + live ─────────────────────────────────────────────
-  const rows: LiveRow[] = baseline.map((b): LiveRow => {
-    const q = liveQuotes?.quotes[b.symbol] ?? null;
-    return {
-      ...b,
-      liveQuote:       q,
-      ltp:             q ? q.ltp : b.latestClose,
-      changePct:       q ? q.change_pct : b.priceChange1D,
-      changeAbs:       q ? q.change : 0,
-      liveOpen:        q ? q.open : 0,
-      liveHigh:        q ? q.high : 0,
-      liveLow:         q ? q.low : 0,
-      liveVolume:      q ? q.volume : b.latestVolume,
-      liveVolumeRatio: q && b.avgVolume20D > 0 ? q.volume / b.avgVolume20D : b.volumeRatio,
-    };
-  });
+  // ── Merge baseline + live, filter + sort ──────────────────────────────
+  // Memoized so flash-map renders (600ms clear cycle) reuse the computed rows
+  // instead of rebuilding and re-sorting the whole table — flashMap must
+  // stay out of the deps for that reason.
+  const rows: LiveRow[] = React.useMemo(() =>
+    baseline.map((b): LiveRow => {
+      const q = liveQuotes?.quotes[b.symbol] ?? null;
+      return {
+        ...b,
+        liveQuote:       q,
+        ltp:             q ? q.ltp : b.latestClose,
+        changePct:       q ? q.change_pct : b.priceChange1D,
+        changeAbs:       q ? q.change : 0,
+        liveOpen:        q ? q.open : 0,
+        liveHigh:        q ? q.high : 0,
+        liveLow:         q ? q.low : 0,
+        liveVolume:      q ? q.volume : b.latestVolume,
+        liveVolumeRatio: q && b.avgVolume20D > 0 ? q.volume / b.avgVolume20D : b.volumeRatio,
+      };
+    }), [baseline, liveQuotes]);
 
-  // ── Filter + Sort ──────────────────────────────────────────────────────
-  const filtered = rows.filter((r) =>
-    !search || r.symbol.toLowerCase().includes(search.toLowerCase()) || r.sector?.toLowerCase().includes(search.toLowerCase()),
-  );
+  const sorted = React.useMemo(() => {
+    const filtered = rows.filter((r) =>
+      !search || r.symbol.toLowerCase().includes(search.toLowerCase()) || r.sector?.toLowerCase().includes(search.toLowerCase()),
+    );
 
-  const sorted = [...filtered].sort((a, b) => {
-    const va = a[sortKey] as number | string;
-    const vb = b[sortKey] as number | string;
-    if (typeof va === 'string') return sortDir === 'asc' ? va.localeCompare(vb as string) : (vb as string).localeCompare(va);
-    return sortDir === 'asc' ? (va as number) - (vb as number) : (vb as number) - (va as number);
-  });
+    return [...filtered].sort((a, b) => {
+      const va = a[sortKey] as number | string;
+      const vb = b[sortKey] as number | string;
+      if (typeof va === 'string') return sortDir === 'asc' ? va.localeCompare(vb as string) : (vb as string).localeCompare(va);
+      return sortDir === 'asc' ? (va as number) - (vb as number) : (vb as number) - (va as number);
+    });
+  }, [rows, search, sortKey, sortDir]);
 
   const handleSort = (k: SortKey) => {
     if (k === sortKey) setSortDir((d) => (d === 'asc' ? 'desc' : 'asc'));

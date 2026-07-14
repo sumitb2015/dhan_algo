@@ -44,7 +44,7 @@ interface StrategyState {
 
 interface Props { meta: StrategyMeta; state: StrategyState; onRefresh: () => void }
 
-export default function StrategyRowWide({ meta, state, onRefresh }: Props) {
+function StrategyRowWide({ meta, state, onRefresh }: Props) {
   const [showConfig, setShowConfig] = useState(false);
   const [showLogs, setShowLogs] = useState(false);
   const [submitting, setSubmitting] = useState(false);
@@ -920,3 +920,12 @@ export default function StrategyRowWide({ meta, state, onRefresh }: Props) {
     </div>
   );
 }
+
+// The /api/strategies poll rebuilds meta/state objects every 2s even when
+// nothing changed, so identity comparison would re-render every row each
+// tick. Compare by content instead (small objects; N is a handful of rows).
+export default React.memo(StrategyRowWide, (prev, next) =>
+  prev.onRefresh === next.onRefresh &&
+  JSON.stringify(prev.meta) === JSON.stringify(next.meta) &&
+  JSON.stringify(prev.state) === JSON.stringify(next.state)
+);

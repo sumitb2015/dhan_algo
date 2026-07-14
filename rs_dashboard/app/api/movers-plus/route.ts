@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { readStockCSV, readNifty500List, readIndexCSV, KNOWN_INDICES, clearCache } from '@/lib/dataLoader';
+import { readStockCSVAsync, readNifty500List, readIndexCSV, KNOWN_INDICES, clearCache } from '@/lib/dataLoader';
 import { NIFTY50_SYMBOLS } from '@/lib/nifty50';
 import { getSector } from '@/lib/sectors';
 import type { OHLCVRow } from '@/lib/rs';
@@ -74,8 +74,8 @@ function buildPersistence(
   };
 }
 
-function computeStockPersistence(symbol: string, sessions: number): PersistenceResult | null {
-  const rows = readStockCSV(symbol);
+async function computeStockPersistence(symbol: string, sessions: number): Promise<PersistenceResult | null> {
+  const rows = await readStockCSVAsync(symbol);
   return buildPersistence(symbol, getSector(symbol), rows, sessions);
 }
 
@@ -104,10 +104,12 @@ async function getMoversPlus(
   } else {
     const symbols = indexType === 'nifty50' ? NIFTY50_SYMBOLS : readNifty500List();
     results = [];
-    for (const sym of symbols) {
-      const r = computeStockPersistence(sym, sessions);
-      if (r) results.push(r);
-    }
+    await Promise.all(
+      symbols.map(async (sym) => {
+        const r = await computeStockPersistence(sym, sessions);
+        if (r) results.push(r);
+      })
+    );
   }
 
   // Consensus latest date = the most recent date present across all stocks.
