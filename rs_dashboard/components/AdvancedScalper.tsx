@@ -393,6 +393,13 @@ export default function AdvancedScalper() {
       if (!box) return prev;
 
       const secId = boxSecId(box);
+      // Fail safe: if the box has a strike but the strike→securityId map hasn't
+      // loaded yet (e.g. right after an expiry change), we can't verify whether
+      // an open position backs this box — block removal instead of assuming flat.
+      if (box.strike != null && !secId) {
+        addToast('error', 'Cannot remove box', 'Strike data still loading — try again in a moment');
+        return prev;
+      }
       const pos = secId ? positionsBySecId[secId] : undefined;
       if (pos && Number(pos.netQty) !== 0) {
         addToast('error', 'Cannot remove box', 'Square off the open position first');

@@ -55,21 +55,35 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     return NextResponse.json({ success: false, error: 'Missing required fields: securityId, quantity, side' }, { status: 400 });
   }
 
+  const qtyNum = Number(quantity);
+  if (!Number.isInteger(qtyNum) || qtyNum <= 0) {
+    return NextResponse.json({ success: false, error: `Invalid quantity: ${quantity} (must be a positive integer)` }, { status: 400 });
+  }
+
+  const sideUpper = String(side).toUpperCase();
+  if (sideUpper !== 'BUY' && sideUpper !== 'SELL') {
+    return NextResponse.json({ success: false, error: `Invalid side: ${side} (must be BUY or SELL)` }, { status: 400 });
+  }
+
+  const isLimitOrder = String(orderType).toUpperCase() === 'LIMIT';
+  if (isLimitOrder && !(Number(price) > 0)) {
+    return NextResponse.json({ success: false, error: `Invalid price for LIMIT order: ${price}` }, { status: 400 });
+  }
+
   try {
     const { clientId, token } = getToken();
-    const isLimit = String(orderType).toUpperCase() === 'LIMIT';
 
     const payload = {
       dhanClientId:     clientId,
-      transactionType:  String(side).toUpperCase(),
+      transactionType:  sideUpper,
       exchangeSegment:  'NSE_FNO',
       productType:      'INTRADAY',
-      orderType:        isLimit ? 'LIMIT' : 'MARKET',
+      orderType:        isLimitOrder ? 'LIMIT' : 'MARKET',
       validity:         'DAY',
       securityId:       String(securityId),
-      quantity:         Number(quantity),
+      quantity:         qtyNum,
       disclosedQuantity: 0,
-      price:            isLimit ? Number(price) : 0,
+      price:            isLimitOrder ? Number(price) : 0,
       afterMarketOrder: false,
       boProfitValue:    0,
       boStopLossValue:  0,

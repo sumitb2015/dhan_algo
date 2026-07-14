@@ -17,6 +17,20 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     return NextResponse.json({ success: false, error: 'Missing required fields: expiry, strike, option, side' }, { status: 400 });
   }
 
+  const lotsNum = Number(lots);
+  if (!Number.isInteger(lotsNum) || lotsNum <= 0) {
+    return NextResponse.json({ success: false, error: `Invalid lots: ${lots} (must be a positive integer)` }, { status: 400 });
+  }
+
+  const sideUpper = String(side).toUpperCase();
+  if (sideUpper !== 'BUY' && sideUpper !== 'SELL') {
+    return NextResponse.json({ success: false, error: `Invalid side: ${side} (must be BUY or SELL)` }, { status: 400 });
+  }
+
+  if (String(type).toUpperCase() === 'LIMIT' && !(Number(price) > 0)) {
+    return NextResponse.json({ success: false, error: `Invalid price for LIMIT order: ${price}` }, { status: 400 });
+  }
+
   const args = [
     SCALPER_SCRIPT, 'order',
     '--underlying', String(underlying),
