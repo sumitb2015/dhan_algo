@@ -39,6 +39,15 @@ export default function NormalizedIntradayTab() {
   const [data, setData]           = useState<ApiResponse | null>(null);
   const [loading, setLoading]     = useState(true);
   const [lastFetch, setLastFetch] = useState<Date | null>(null);
+  const [visible, setVisible]     = useState<Set<Symbol>>(new Set(SYMBOLS));
+
+  const toggleSymbol = useCallback((sym: Symbol) => {
+    setVisible((prev) => {
+      const next = new Set(prev);
+      if (next.has(sym)) next.delete(sym); else next.add(sym);
+      return next;
+    });
+  }, []);
 
   const fetchData = useCallback(async () => {
     try {
@@ -225,12 +234,23 @@ export default function NormalizedIntradayTab() {
         {SYMBOLS.map((sym) => {
           const pct = lastPct(sym);
           const err = data?.errors?.[sym];
+          const active = visible.has(sym);
           return (
-            <div
+            <button
               key={sym}
-              className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg border border-zinc-800 bg-zinc-950"
+              type="button"
+              onClick={() => toggleSymbol(sym)}
+              title={active ? `Hide ${LABELS[sym]}` : `Show ${LABELS[sym]}`}
+              className={cn(
+                'flex items-center gap-1.5 px-2.5 py-1 rounded-lg border bg-zinc-950 transition-opacity',
+                active ? 'border-zinc-800' : 'border-zinc-900 opacity-50 hover:opacity-75',
+              )}
+              style={active ? { borderLeftColor: COLORS[sym], borderLeftWidth: 2 } : undefined}
             >
-              <span className="w-2 h-2 rounded-full shrink-0" style={{ background: COLORS[sym] }} />
+              <span
+                className="w-2 h-2 rounded-full shrink-0"
+                style={{ background: active ? COLORS[sym] : '#3f3f46' }}
+              />
               <span className="text-[11px] text-zinc-300 font-medium">{LABELS[sym]}</span>
               {pct !== null ? (
                 <span className={cn(
@@ -247,7 +267,7 @@ export default function NormalizedIntradayTab() {
                   <AlertTriangle className="h-3 w-3 text-amber-500" />
                 </span>
               )}
-            </div>
+            </button>
           );
         })}
       </div>
@@ -294,7 +314,7 @@ export default function NormalizedIntradayTab() {
                   <span style={{ color: '#d4d4d8', fontSize: 12 }}>{LABELS[name as Symbol] ?? name}</span>
                 )}
               />
-              {availableSymbols.map((sym) => (
+              {availableSymbols.filter((s) => visible.has(s)).map((sym) => (
                 <Line
                   key={sym}
                   type="monotone"
