@@ -2,74 +2,29 @@
 
 import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import NavBar from './NavBar';
-import { Zap, RefreshCw, Shield, ChevronDown, ChevronUp } from 'lucide-react';
+import { Zap, RefreshCw, Shield, Plus } from 'lucide-react';
+import {
+  OptionPanel, PositionsTable, TabTable, FundsView,
+  type LiveQuotes, type BridgeStatus, type ChainOcEntry, type Toast,
+  type PnlGuardStatus, type PositionGuard, type SortState,
+} from './Scalper';
 
 // ─── Types ────────────────────────────────────────────────────────
 
-export interface OptionSide { ltp: number; oi: number; volume: number }
-export interface StrikeData  { strike: number; ce: OptionSide; pe: OptionSide }
-
-export interface LiveQuotes {
-  updated_at: string | null;
-  underlying?: string;
-  expiry?: string;
-  spot: number;
-  atm: number;
-  straddle_premium: number;
-  strikes: Record<string, StrikeData>;
-}
-
-export interface BridgeStatus {
-  status: 'RUNNING' | 'STOPPED' | 'STARTING' | 'ERROR';
-  pid?: number;
-  subscribed?: number;
-}
-
-export interface ChainOcEntry {
-  ce?: { last_price?: number; previous_close?: number };
-  pe?: { last_price?: number; previous_close?: number };
-}
-
-export interface Toast {
+interface BoxConfig {
   id: string;
-  type: 'success' | 'error';
-  message: string;
-  detail?: string;
+  side: 'CE' | 'PE';
+  strike: number | null;
+  lots: number;
+  limitPrice: string;
 }
 
-export interface PnlGuardStatus {
-  pnlExitStatus: 'ACTIVE' | 'INACTIVE' | string;
-  profit?: number;
-  loss?: number;
-  productType?: string[];
-  enableKillSwitch?: boolean;
-}
-
-export interface PositionGuard {
-  target: string;        // take-profit price (₹)
-  sl: string;            // stop-loss price (₹); also the anchor for trailing SL
-  trailEnabled: boolean; // checkbox: trail SL 1:1 with profit from the configured SL level
-  bestPrice: number;     // best price achieved (max LTP for long, min LTP for short); 0 = not yet set
-  triggered: boolean;    // prevents double-fire while order is in flight
-}
-
-// ─── Helpers ──────────────────────────────────────────────────────
-
-export function fmtLTP(n: number): string {
-  return n > 0
-    ? `₹${n.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
-    : '—';
-}
-
-function fmtOI(n: number): string {
-  if (n >= 10_000_000) return `${(n / 10_000_000).toFixed(2)}Cr`;
-  if (n >= 100_000)    return `${(n / 100_000).toFixed(1)}L`;
-  return n > 0 ? n.toLocaleString('en-IN') : '—';
-}
+const MIN_BOXES = 2;
+const MAX_BOXES = 5;
 
 // ─── Main Component ───────────────────────────────────────────────
 
-export default function Scalper() {
+export default function AdvancedScalper() {
   // Expiry
   const [expiries, setExpiries]   = useState<string[]>([]);
   const [expiry, setExpiry]       = useState('');
@@ -90,12 +45,12 @@ export default function Scalper() {
   const [lastUpdated, setLastUpdated]   = useState('');
 
   // Trading controls
-  const [lots, setLots]           = useState(1);
   const [orderMode, setOrderMode] = useState<'MARKET' | 'LIMIT'>('MARKET');
-  const [ceStrike, setCeStrike]   = useState<number | null>(null);
-  const [peStrike, setPeStrike]   = useState<number | null>(null);
-  const [ceLimitPrice, setCeLimitPrice] = useState('');
-  const [peLimitPrice, setPeLimitPrice] = useState('');
+  const boxCounterRef = useRef(2);
+  const [boxes, setBoxes] = useState<BoxConfig[]>([
+    { id: 'box-1', side: 'CE', strike: null, lots: 1, limitPrice: '' },
+    { id: 'box-2', side: 'PE', strike: null, lots: 1, limitPrice: '' },
+  ]);
 
   // Toasts
   const [toasts, setToasts] = useState<Toast[]>([]);
@@ -107,7 +62,7 @@ export default function Scalper() {
   const [tradesData, setTradesData]       = useState<Record<string, unknown>[]>([]);
   const [fundsData, setFundsData]         = useState<Record<string, any> | null>(null);
   const [tabLoading, setTabLoading]       = useState(false);
-  const [tableSort, setTableSort] = useState<{ key: string; dir: 'asc' | 'desc' }>({ key: 'none', dir: 'asc' });
+  const [tableSort, setTableSort] = useState<SortState>({ key: 'none', dir: 'asc' });
   const handleTableSort = useCallback((key: string) => {
     setTableSort(prev => ({ key, dir: prev.key === key && prev.dir === 'asc' ? 'desc' : 'asc' }));
   }, []);
@@ -129,10 +84,8 @@ export default function Scalper() {
   const [closingPositions, setClosingPositions] = useState<Set<string>>(new Set());
 
   const pollRef = useRef<NodeJS.Timeout | null>(null);
-  // Refs for guard monitor interval — avoids stale closures
   const positionsRef = useRef<Record<string, unknown>[]>([]);
   const posGuardsRef = useRef<Record<string, PositionGuard>>({});
-  // Tracks the latest expiry so an out-of-order lookup response can detect it's stale
   const expiryRef = useRef('');
   useEffect(() => { expiryRef.current = expiry; }, [expiry]);
 
@@ -149,14 +102,6 @@ export default function Scalper() {
     return allStrikes.slice(Math.max(0, idx - 10), idx + 11);
   }, [allStrikes, atm]);
 
-  const ceLtp = ceStrike != null ? (liveQuotes?.strikes?.[String(ceStrike)]?.ce?.ltp ?? 0) : 0;
-  const peLtp = peStrike != null ? (liveQuotes?.strikes?.[String(peStrike)]?.pe?.ltp ?? 0) : 0;
-
-  const cePrevClose = ceStrike != null ? (prevClose[String(ceStrike)]?.ce ?? 0) : 0;
-  const pePrevClose = peStrike != null ? (prevClose[String(peStrike)]?.pe ?? 0) : 0;
-  const cePct = (ceLtp > 0 && cePrevClose > 0) ? ((ceLtp - cePrevClose) / cePrevClose) * 100 : null;
-  const pePct = (peLtp > 0 && pePrevClose > 0) ? ((peLtp - pePrevClose) / pePrevClose) * 100 : null;
-
   const secIdToStrikeSide = useMemo(() => {
     const map: Record<string, { strike: number; side: 'ce' | 'pe' }> = {};
     for (const [strike, ids] of Object.entries(strikeMap)) {
@@ -166,12 +111,7 @@ export default function Scalper() {
     return map;
   }, [strikeMap]);
 
-  // Dhan's /positions endpoint occasionally reports realizedProfit=0 for a
-  // fully-closed position even though buyQty/sellQty/buyAvg/sellAvg show a
-  // real matched profit (observed on NIFTY-Jul2026-23900-PE: buyQty=sellQty=195,
-  // buyAvg=4.7, sellAvg=8.2 => realized should be 682.5, API returned 0).
-  // For any position that's flat (netQty === 0), recompute realizedProfit
-  // from buyQty/sellQty/buyAvg/sellAvg instead of trusting the field as-is.
+  // Same realizedProfit=0-on-flat-position fix as the base Scalper (Dhan quirk, see Scalper.tsx)
   const realizedFixedPositions = useMemo(() => {
     return positionsData.map(pos => {
       const netQty = Number(pos.netQty);
@@ -221,6 +161,21 @@ export default function Scalper() {
   const totalPnl = enrichedPositions.reduce((sum, p) =>
     sum + (Number(p.realizedProfit) || 0) + (Number(p.unrealizedProfit) || 0), 0);
 
+  // Position row keyed by security ID — lets each box look up its own open position/P&L
+  const positionsBySecId = useMemo(() => {
+    const map: Record<string, Record<string, unknown>> = {};
+    for (const pos of enrichedPositions) {
+      const secId = String(pos.securityId ?? (pos as Record<string, unknown>).security_id ?? '');
+      if (secId) map[secId] = pos;
+    }
+    return map;
+  }, [enrichedPositions]);
+
+  const boxSecId = useCallback((box: BoxConfig): string | undefined => {
+    if (box.strike == null) return undefined;
+    return strikeMap[String(box.strike)]?.[box.side === 'CE' ? 'ceId' : 'peId'];
+  }, [strikeMap]);
+
   // ─── useEffect 1: Load expiries on mount ─────────────────────────
 
   useEffect(() => {
@@ -254,15 +209,13 @@ export default function Scalper() {
   useEffect(() => {
     if (!expiry) return;
 
-    // Reset strike state when expiry changes
-    setCeStrike(null);
-    setPeStrike(null);
+    // Reset strike selections when expiry changes; lots/side presets are preserved
+    setBoxes(prev => prev.map(b => ({ ...b, strike: null })));
     setAllStrikes([]);
     setPrevClose({});
     setLiveQuotes(null);
     setStrikeMap({});
 
-    // One-time chain fetch for prev close prices + strike list
     fetch(`/api/options/chain?underlying=NIFTY&expiry=${expiry}`)
       .then(r => r.json())
       .then((j: { success: boolean; data?: { chain: { oc?: Record<string, ChainOcEntry> }; spot: number } }) => {
@@ -271,7 +224,6 @@ export default function Scalper() {
         const strikes = Object.keys(oc).map(Number).filter(n => !isNaN(n)).sort((a, b) => a - b);
         setAllStrikes(strikes);
 
-        // Extract prev close for each strike
         const pc: Record<string, { ce: number; pe: number }> = {};
         for (const [sk, entry] of Object.entries(oc)) {
           pc[sk] = {
@@ -284,22 +236,17 @@ export default function Scalper() {
         const spotPrice = j.data.spot ?? 0;
         if (spotPrice > 0) setChainSpot(spotPrice);
 
-        // Default both strikes to ATM
+        // Default every box's strike to ATM
         if (strikes.length) {
           const atmTarget = spotPrice > 0 ? Math.round(spotPrice / 50) * 50 : 0;
           const nearest = atmTarget > 0
             ? strikes.reduce((prev, cur) => Math.abs(cur - atmTarget) < Math.abs(prev - atmTarget) ? cur : prev)
             : strikes[Math.floor(strikes.length / 2)];
-          setCeStrike(nearest);
-          setPeStrike(nearest);
+          setBoxes(prev => prev.map(b => ({ ...b, strike: nearest })));
         }
       })
       .catch(() => {});
 
-    // Lookup security IDs for all strikes of this expiry — enables fast-order path.
-    // Capture the expiry this request was made for: if the user switches expiries again
-    // before this resolves, an out-of-order response must not overwrite strikeMap with
-    // stale security IDs from a different contract (Dhan rejects those as DH-905).
     const requestedExpiry = expiry;
     fetch(`/api/scalper/lookup?underlying=NIFTY&expiry=${expiry}`)
       .then(r => r.json())
@@ -312,14 +259,12 @@ export default function Scalper() {
       })
       .catch(() => {});
 
-    // Start WS bridge
     fetch('/api/options/live', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ action: 'start', underlying: 'NIFTY', expiry, numStrikes: 30 }),
     }).catch(() => {});
 
-    // Cleanup: stop bridge when expiry changes or component unmounts
     return () => {
       fetch('/api/options/live', {
         method: 'POST',
@@ -329,7 +274,7 @@ export default function Scalper() {
     };
   }, [expiry]);
 
-  // ─── useEffect 3: Poll live data at 500ms ────────────────────────
+  // ─── useEffect 3: Poll live data at 100ms ────────────────────────
 
   useEffect(() => {
     if (!expiry) return;
@@ -342,16 +287,13 @@ export default function Scalper() {
             setBridgeStatus(j.status ?? { status: 'STOPPED' });
 
             const q = j.quotes;
-            // Guard 1: quotes must belong to the currently selected expiry
             if (q?.expiry && q.expiry !== expiry) return;
 
-            // Guard 2: reject stale data older than 10 seconds
             if (q?.updated_at) {
               const ageMs = Date.now() - new Date(q.updated_at).getTime();
               if (ageMs > 10_000) return;
             }
 
-            // Guard 3: must have at least one strike entry (empty {} is truthy in JS)
             if (q?.strikes && Object.keys(q.strikes).length > 0) {
               setLiveQuotes(q);
               setLastUpdated(new Date().toLocaleTimeString('en-IN', {
@@ -406,7 +348,6 @@ export default function Scalper() {
     return () => clearInterval(id);
   }, [fetchTabData, pollTabData]);
 
-  // Keep refs in sync so the guard interval always reads latest values without stale closures
   useEffect(() => { positionsRef.current = enrichedPositions; }, [enrichedPositions]);
   useEffect(() => { posGuardsRef.current = posGuards; }, [posGuards]);
 
@@ -418,24 +359,62 @@ export default function Scalper() {
     setTimeout(() => setToasts(prev => prev.filter(t => t.id !== id)), type === 'error' ? 7000 : 3000);
   }, []);
 
+  // ─── Box management ─────────────────────────────────────────────
+
+  const updateBox = useCallback((id: string, patch: Partial<BoxConfig>) => {
+    setBoxes(prev => prev.map(b => (b.id === id ? { ...b, ...patch } : b)));
+  }, []);
+
+  const addBox = useCallback(() => {
+    setBoxes(prev => {
+      if (prev.length >= MAX_BOXES) return prev;
+      const ceCount = prev.filter(b => b.side === 'CE').length;
+      const peCount = prev.filter(b => b.side === 'PE').length;
+      const side: 'CE' | 'PE' = ceCount <= peCount ? 'CE' : 'PE';
+      boxCounterRef.current += 1;
+      return [...prev, {
+        id: `box-${boxCounterRef.current}`,
+        side,
+        strike: atm > 0 ? atm : null,
+        lots: 1,
+        limitPrice: '',
+      }];
+    });
+  }, [atm]);
+
+  const removeBox = useCallback((id: string) => {
+    setBoxes(prev => {
+      if (prev.length <= MIN_BOXES) return prev;
+      const box = prev.find(b => b.id === id);
+      if (!box) return prev;
+
+      const secId = boxSecId(box);
+      const pos = secId ? positionsBySecId[secId] : undefined;
+      if (pos && Number(pos.netQty) !== 0) {
+        addToast('error', 'Cannot remove box', 'Square off the open position first');
+        return prev;
+      }
+
+      return prev.filter(b => b.id !== id);
+    });
+  }, [boxSecId, positionsBySecId, addToast]);
+
   // ─── placeOrder ───────────────────────────────────────────────────
 
-  const placeOrder = useCallback(async (side: 'BUY' | 'SELL', option: 'CE' | 'PE') => {
-    const strike = option === 'CE' ? ceStrike : peStrike;
-    const limitPrice = option === 'CE' ? ceLimitPrice : peLimitPrice;
-    if (!strike || !expiry) return;
+  const placeOrder = useCallback(async (boxId: string, side: 'BUY' | 'SELL') => {
+    const box = boxes.find(b => b.id === boxId);
+    if (!box || !box.strike || !expiry) return;
 
     if (orderMode === 'LIMIT') {
-      const priceNum = Number(limitPrice);
-      if (!limitPrice || isNaN(priceNum) || priceNum <= 0) {
+      const priceNum = Number(box.limitPrice);
+      if (!box.limitPrice || isNaN(priceNum) || priceNum <= 0) {
         addToast('error', 'Enter a valid limit price');
         return;
       }
     }
 
     try {
-      // Fast path: direct Dhan REST call (no Python spawn, no CSV load)
-      const secId = strikeMap[String(strike)]?.[option === 'CE' ? 'ceId' : 'peId'];
+      const secId = strikeMap[String(box.strike)]?.[box.side === 'CE' ? 'ceId' : 'peId'];
       let res: Response;
       if (secId) {
         res = await fetch('/api/scalper/fast-order', {
@@ -443,18 +422,17 @@ export default function Scalper() {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             securityId: secId,
-            quantity: lots * lotSize,
+            quantity: box.lots * lotSize,
             side,
             orderType: orderMode,
-            ...(orderMode === 'LIMIT' ? { price: Number(limitPrice) } : {}),
+            ...(orderMode === 'LIMIT' ? { price: Number(box.limitPrice) } : {}),
           }),
         });
       } else {
-        // Fallback: Python path (strikeMap not yet loaded)
         const body: Record<string, unknown> = {
-          underlying: 'NIFTY', expiry, strike, option, side, lots, type: orderMode,
+          underlying: 'NIFTY', expiry, strike: box.strike, option: box.side, side, lots: box.lots, type: orderMode,
         };
-        if (orderMode === 'LIMIT') body.price = Number(limitPrice);
+        if (orderMode === 'LIMIT') body.price = Number(box.limitPrice);
         res = await fetch('/api/scalper/order', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -464,15 +442,15 @@ export default function Scalper() {
 
       const j = await res.json() as { success: boolean; order_id?: string; error?: string };
       if (j.success) {
-        addToast('success', `${side} ${option} placed`, `ID: ${j.order_id}`);
+        addToast('success', `${side} ${box.side} placed`, `ID: ${j.order_id}`);
         setTimeout(fetchTabData, 1000);
       } else {
-        addToast('error', `${side} ${option} failed`, j.error ?? 'Unknown error');
+        addToast('error', `${side} ${box.side} failed`, j.error ?? 'Unknown error');
       }
     } catch (e) {
       addToast('error', 'Network error', String(e));
     }
-  }, [ceStrike, peStrike, ceLimitPrice, peLimitPrice, expiry, lots, lotSize, strikeMap, orderMode, addToast, fetchTabData]);
+  }, [boxes, expiry, lotSize, strikeMap, orderMode, addToast, fetchTabData]);
 
   // ─── Per-position close ───────────────────────────────────────────
 
@@ -485,12 +463,10 @@ export default function Scalper() {
       return;
     }
 
-    // Prevent double-fire while order is in flight
     setPosGuards(prev => prev[sym] ? { ...prev, [sym]: { ...prev[sym], triggered: true } } : prev);
     setClosingPositions(prev => new Set([...prev, sym]));
 
     try {
-      // Fetch live positions to get the current open quantity (avoids acting on stale data)
       let liveNetQty = 0;
       let liveSecId = fallbackSecId;
       try {
@@ -504,7 +480,6 @@ export default function Scalper() {
           }
         }
       } catch {
-        // Fall back to the quantity from the position object passed in
         liveNetQty = Number(pos.netQty);
       }
 
@@ -577,7 +552,6 @@ export default function Scalper() {
 
         const isLong = netQty > 0;
 
-        // Target (take profit)
         const targetNum = parseFloat(guard.target);
         if (!isNaN(targetNum) && targetNum > 0) {
           if ((isLong && ltp >= targetNum) || (!isLong && ltp <= targetNum)) {
@@ -587,7 +561,6 @@ export default function Scalper() {
         }
 
         if (guard.trailEnabled) {
-          // Trailing SL: 1:1 with profit, anchored to the configured SL level
           const slNum = parseFloat(guard.sl);
           if (!isNaN(slNum) && slNum > 0) {
             const entryPrice = isLong ? Number(pos.buyAvg) : Number(pos.sellAvg);
@@ -604,7 +577,6 @@ export default function Scalper() {
                 const trailSLPrice = isLong
                   ? effectiveBest - initialRisk
                   : effectiveBest + initialRisk;
-                // Only enforce once trail SL is tighter than the original SL
                 const trailActive = isLong ? trailSLPrice > slNum : trailSLPrice < slNum;
                 if (trailActive && ((isLong && ltp <= trailSLPrice) || (!isLong && ltp >= trailSLPrice))) {
                   closePosition(pos, 'Trail SL hit');
@@ -614,7 +586,6 @@ export default function Scalper() {
             }
           }
         } else {
-          // Hard SL (no trailing)
           const slNum = parseFloat(guard.sl);
           if (!isNaN(slNum) && slNum > 0) {
             if ((isLong && ltp <= slNum) || (!isLong && ltp >= slNum)) {
@@ -676,7 +647,6 @@ export default function Scalper() {
       }
     }, 1500);
   }, []);
-
 
   const handleSetPnl = async () => {
     // The field collects a positive loss magnitude ("exit when loss reaches ₹X"),
@@ -764,7 +734,7 @@ export default function Scalper() {
             <div>
               <h1 className="text-sm font-bold text-white tracking-tight flex items-center gap-1.5">
                 <Zap className="w-3.5 h-3.5 text-yellow-400" />
-                NIFTY SCALPER
+                NIFTY ADVANCED SCALPER
               </h1>
               <p className="text-xs font-bold font-mono tabular-nums text-zinc-200">
                 {spot > 0
@@ -782,16 +752,14 @@ export default function Scalper() {
               {expiries.map(ex => <option key={ex} value={ex}>{ex}</option>)}
             </select>
 
-            {/* Lots +/- */}
-            <div className="flex items-center bg-zinc-900 border border-zinc-700 rounded-lg overflow-hidden">
-              <button onClick={() => setLots(l => Math.max(1, l - 1))}
-                className="px-2.5 py-1.5 text-zinc-400 hover:text-white hover:bg-zinc-800 transition-colors font-bold text-sm">−</button>
-              <span className="px-2 text-xs font-mono tabular-nums text-zinc-200 min-w-[3.5rem] text-center border-x border-zinc-700">
-                {lots} lot{lots !== 1 ? 's' : ''}
-              </span>
-              <button onClick={() => setLots(l => l + 1)}
-                className="px-2.5 py-1.5 text-zinc-400 hover:text-white hover:bg-zinc-800 transition-colors font-bold text-sm">+</button>
-            </div>
+            {/* Add Box */}
+            <button onClick={addBox} disabled={boxes.length >= MAX_BOXES}
+              className="flex items-center gap-1 px-2.5 py-1.5 text-xs font-bold rounded-lg
+                         border border-emerald-600/40 bg-emerald-900/30 text-emerald-400
+                         hover:bg-emerald-800/40 transition-all disabled:opacity-40 disabled:cursor-not-allowed">
+              <Plus className="w-3.5 h-3.5" /> Add Box
+            </button>
+            <span className="text-[10px] text-zinc-500 font-mono">{boxes.length}/{MAX_BOXES} boxes</span>
 
             {/* MARKET / LIMIT toggle */}
             <div className="flex items-center bg-zinc-900 border border-zinc-800 p-0.5 rounded-xl">
@@ -817,7 +785,7 @@ export default function Scalper() {
               {lastUpdated && <span className="text-[10px] text-zinc-500 font-mono">{lastUpdated}</span>}
             </div>
 
-            {/* Today's P&L chip */}
+            {/* Combined P&L chip across all boxes/positions */}
             {positionsData.length > 0 && (
               <span className={`px-2.5 py-1.5 rounded-lg text-xs font-bold font-mono tabular-nums border ${
                 totalPnl > 0
@@ -854,12 +822,10 @@ export default function Scalper() {
                   <Shield className="w-3 h-3" /> P&amp;L Guard
                 </span>
 
-                {/* Status chip */}
                 <span className={`px-2 py-1 rounded text-[10px] font-bold uppercase tracking-wider ${guardChipCls}`}>
                   {guardLabel}
                 </span>
 
-                {/* Profit target — always a positive magnitude */}
                 <div className="flex items-center gap-1.5">
                   <span className="text-[10px] text-zinc-500 font-semibold">TARGET ₹</span>
                   <input type="number" min="0" placeholder="e.g. 5000" value={profitTarget}
@@ -877,7 +843,6 @@ export default function Scalper() {
                                rounded px-2 py-1 focus:outline-none focus:border-rose-500" />
                 </div>
 
-                {/* Product types */}
                 <div className="flex items-center gap-1">
                   {['INTRADAY', 'CNC', 'MARGIN'].map(pt => (
                     <button key={pt} onClick={() => setGuardProductTypes(prev =>
@@ -893,7 +858,6 @@ export default function Scalper() {
                   ))}
                 </div>
 
-                {/* Kill switch */}
                 <button onClick={() => setEnableKillSwitch(v => !v)}
                   className={`flex items-center gap-1.5 px-2.5 py-1 rounded text-[10px] font-bold border transition-all ${
                     enableKillSwitch
@@ -903,14 +867,12 @@ export default function Scalper() {
                   🔴 Kill Switch {enableKillSwitch ? 'ON' : 'OFF'}
                 </button>
 
-                {/* Set button */}
                 <button onClick={handleSetPnl} disabled={settingPnl}
                   className="px-3 py-1.5 text-xs font-bold rounded-lg bg-violet-600 hover:bg-violet-500
                              text-white border border-violet-500/40 transition-all disabled:opacity-50">
                   {settingPnl ? 'Setting…' : 'Set Guard'}
                 </button>
 
-                {/* Clear button */}
                 {hasConfig && (
                   <button onClick={handleClearPnl} disabled={clearingPnl}
                     className={`px-3 py-1.5 text-xs font-bold rounded-lg border transition-all disabled:opacity-50 ${
@@ -922,7 +884,6 @@ export default function Scalper() {
                   </button>
                 )}
 
-                {/* Current guard values — shown whenever configured, not just when broker confirms ACTIVE */}
                 {hasConfig && (
                   <span className="text-[10px] text-zinc-500 font-mono">
                     {Number(pnlGuardStatus?.profit) > 0 ? `🎯 ₹${pnlGuardStatus?.profit}` : ''}
@@ -965,38 +926,48 @@ export default function Scalper() {
         );
       })()}
 
-      {/* Trading panels */}
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-3 p-4">
-        <OptionPanel
-          side="CE"
-          label="CALLS"
-          strike={ceStrike}
-          visibleStrikes={visibleStrikes}
-          atm={atm}
-          ltp={ceLtp}
-          pct={cePct}
-          limitPrice={ceLimitPrice}
-          orderMode={orderMode}
-          onStrikeChange={v => setCeStrike(v)}
-          onLimitPriceChange={setCeLimitPrice}
-          onBuy={() => placeOrder('BUY', 'CE')}
-          onSell={() => placeOrder('SELL', 'CE')}
-        />
-        <OptionPanel
-          side="PE"
-          label="PUTS"
-          strike={peStrike}
-          visibleStrikes={visibleStrikes}
-          atm={atm}
-          ltp={peLtp}
-          pct={pePct}
-          limitPrice={peLimitPrice}
-          orderMode={orderMode}
-          onStrikeChange={v => setPeStrike(v)}
-          onLimitPriceChange={setPeLimitPrice}
-          onBuy={() => placeOrder('BUY', 'PE')}
-          onSell={() => placeOrder('SELL', 'PE')}
-        />
+      {/* Trading panels — always one row, box width adjusts to how many are active */}
+      <div className="flex flex-row gap-3 p-4">
+        {boxes.map(box => {
+          const ltp = box.strike != null
+            ? (liveQuotes?.strikes?.[String(box.strike)]?.[box.side === 'CE' ? 'ce' : 'pe']?.ltp ?? 0)
+            : 0;
+          const pc = box.strike != null
+            ? (prevClose[String(box.strike)]?.[box.side === 'CE' ? 'ce' : 'pe'] ?? 0)
+            : 0;
+          const pct = (ltp > 0 && pc > 0) ? ((ltp - pc) / pc) * 100 : null;
+
+          const secId = boxSecId(box);
+          const pos = secId ? positionsBySecId[secId] : undefined;
+          const boxPnl = pos ? (Number(pos.realizedProfit) || 0) + (Number(pos.unrealizedProfit) || 0) : undefined;
+          const hasOpenPosition = !!pos && Number(pos.netQty) !== 0;
+
+          return (
+            <div key={box.id} className="flex-1 min-w-0">
+              <OptionPanel
+                side={box.side}
+                label={box.side === 'CE' ? 'CALLS' : 'PUTS'}
+                strike={box.strike}
+                visibleStrikes={visibleStrikes}
+                atm={atm}
+                ltp={ltp}
+                pct={pct}
+                limitPrice={box.limitPrice}
+                orderMode={orderMode}
+                onStrikeChange={v => updateBox(box.id, { strike: v })}
+                onLimitPriceChange={v => updateBox(box.id, { limitPrice: v })}
+                onBuy={() => placeOrder(box.id, 'BUY')}
+                onSell={() => placeOrder(box.id, 'SELL')}
+                lots={box.lots}
+                onLotsChange={l => updateBox(box.id, { lots: l })}
+                onRemove={() => removeBox(box.id)}
+                canRemove={boxes.length > MIN_BOXES && !hasOpenPosition}
+                pnl={boxPnl}
+                onSideChange={s => updateBox(box.id, { side: s })}
+              />
+            </div>
+          );
+        })}
       </div>
 
       {/* Bottom tabs panel */}
@@ -1054,550 +1025,6 @@ export default function Scalper() {
           )}
         </div>
       </div>
-    </div>
-  );
-}
-
-// ─── OptionPanel ──────────────────────────────────────────────────
-
-export interface OptionPanelProps {
-  side: 'CE' | 'PE';
-  label: string;
-  strike: number | null;
-  visibleStrikes: number[];
-  atm: number;
-  ltp: number;
-  pct: number | null;
-  limitPrice: string;
-  orderMode: 'MARKET' | 'LIMIT';
-  onStrikeChange: (s: number) => void;
-  onLimitPriceChange: (p: string) => void;
-  onBuy: () => void;
-  onSell: () => void;
-  /** Per-box lot count (defaults to shared/global lots when omitted, matching original 2-box Scalper) */
-  lots?: number;
-  onLotsChange?: (l: number) => void;
-  /** Shows a remove ("×") control in the header when provided; used by Advanced Scalper's dynamic box list */
-  onRemove?: () => void;
-  canRemove?: boolean;
-  /** Per-box realized+unrealized P&L, shown under the LTP tile when provided */
-  pnl?: number;
-  /** Turns the CE/PE badge into a toggle when provided; used by Advanced Scalper's per-box side switch */
-  onSideChange?: (side: 'CE' | 'PE') => void;
-}
-
-export function OptionPanel({
-  side, label, strike, visibleStrikes, atm, ltp, pct,
-  limitPrice, orderMode, onStrikeChange, onLimitPriceChange, onBuy, onSell,
-  lots, onLotsChange, onRemove, canRemove, pnl, onSideChange,
-}: OptionPanelProps) {
-  const isPos = (v: number) => v >= 0;
-
-  return (
-    <div className="bg-zinc-900/60 border border-zinc-800 rounded-2xl p-5 flex flex-col gap-4 min-w-0">
-      {/* Header: badge + strike selector + remove */}
-      <div className="flex items-center justify-between gap-3">
-        {onSideChange ? (
-          <div className="flex items-center bg-zinc-900 border border-zinc-800 p-0.5 rounded-lg">
-            {(['CE', 'PE'] as const).map(s => (
-              <button key={s} onClick={() => onSideChange(s)}
-                className={`px-2.5 py-1 text-xs font-bold uppercase tracking-widest rounded-md transition-all ${
-                  side === s
-                    ? (s === 'CE'
-                        ? 'bg-sky-500/10 text-sky-400 border border-sky-500/20'
-                        : 'bg-rose-500/10 text-rose-400 border border-rose-500/20')
-                    : 'text-zinc-500 hover:text-zinc-300 border border-transparent'
-                }`}>
-                {s}
-              </button>
-            ))}
-          </div>
-        ) : (
-          <span className={`text-xs font-bold uppercase tracking-widest px-2.5 py-1 rounded-lg border ${
-            side === 'CE'
-              ? 'bg-sky-500/10 text-sky-400 border-sky-500/20'
-              : 'bg-rose-500/10 text-rose-400 border-rose-500/20'
-          }`}>{label} ({side})</span>
-        )}
-
-        <div className="flex items-center gap-2">
-          <select value={strike ?? ''} onChange={e => onStrikeChange(Number(e.target.value))}
-            className="bg-zinc-800 border border-zinc-700 text-zinc-200 text-xs font-mono font-semibold
-                       rounded-lg px-2.5 py-1.5 focus:outline-none focus:border-emerald-500 tabular-nums">
-            {!strike && <option value="">— select —</option>}
-            {visibleStrikes.map(sk => (
-              <option key={sk} value={sk}>
-                {sk.toLocaleString('en-IN')}{sk === atm ? ' ← ATM' : ''}
-              </option>
-            ))}
-          </select>
-          {onRemove && (
-            <button
-              onClick={onRemove}
-              disabled={!canRemove}
-              title={canRemove ? 'Remove box' : 'Square off position before removing'}
-              className="w-6 h-6 flex items-center justify-center rounded-lg border border-zinc-700
-                         bg-zinc-800 text-zinc-400 hover:text-rose-300 hover:border-rose-500/40
-                         disabled:opacity-30 disabled:cursor-not-allowed transition-all text-sm font-bold"
-            >×</button>
-          )}
-        </div>
-      </div>
-
-      {/* Per-box lot stepper (only rendered when caller passes lots/onLotsChange) */}
-      {lots !== undefined && onLotsChange && (
-        <div className="flex items-center justify-center bg-zinc-900 border border-zinc-700 rounded-lg overflow-hidden self-center">
-          <button onClick={() => onLotsChange(Math.max(1, lots - 1))}
-            className="px-2.5 py-1 text-zinc-400 hover:text-white hover:bg-zinc-800 transition-colors font-bold text-sm">−</button>
-          <span className="px-2 text-xs font-mono tabular-nums text-zinc-200 min-w-[3.5rem] text-center border-x border-zinc-700">
-            {lots} lot{lots !== 1 ? 's' : ''}
-          </span>
-          <button onClick={() => onLotsChange(lots + 1)}
-            className="px-2.5 py-1 text-zinc-400 hover:text-white hover:bg-zinc-800 transition-colors font-bold text-sm">+</button>
-        </div>
-      )}
-
-      {/* LTP + % change */}
-      <div className="bg-zinc-800/50 rounded-xl p-4 text-center">
-        <p className="text-[10px] font-bold text-white uppercase tracking-widest mb-1">LTP</p>
-        <p className="text-3xl font-bold font-mono tabular-nums text-white leading-none">
-          {fmtLTP(ltp)}
-        </p>
-        {pct !== null ? (
-          <p className={`text-sm font-semibold font-mono mt-1.5 ${isPos(pct) ? 'text-emerald-400' : 'text-rose-400'}`}>
-            {isPos(pct) ? '▲' : '▼'} {Math.abs(pct).toFixed(2)}%
-          </p>
-        ) : (
-          <p className="text-xs text-zinc-300 mt-1.5">— vs prev close</p>
-        )}
-        {pnl !== undefined && (
-          <p className={`text-xs font-bold font-mono tabular-nums mt-2 ${pnl > 0 ? 'text-emerald-400' : pnl < 0 ? 'text-rose-400' : 'text-zinc-500'}`}>
-            P&amp;L {pnl >= 0 ? '+' : ''}₹{pnl.toFixed(0)}
-          </p>
-        )}
-      </div>
-
-      {/* Limit price input (only in LIMIT mode) */}
-      {orderMode === 'LIMIT' && (
-        <div className="flex items-center gap-2">
-          <span className="text-xs text-zinc-400 font-medium whitespace-nowrap">Limit ₹</span>
-          <input
-            type="number" step="0.05" min="0.05"
-            value={limitPrice}
-            onChange={e => onLimitPriceChange(e.target.value)}
-            placeholder="0.00"
-            className="flex-1 bg-zinc-800 border border-zinc-700 text-zinc-200 text-sm font-mono
-                       rounded-lg px-3 py-2 focus:outline-none focus:border-emerald-500 tabular-nums
-                       placeholder:text-zinc-600"
-          />
-        </div>
-      )}
-
-      {/* BUY / SELL buttons */}
-      <div className="grid grid-cols-2 gap-3">
-        <button
-          onClick={onBuy}
-          disabled={!strike}
-          className="py-3.5 px-4 text-sm font-bold rounded-xl transition-all active:scale-95
-                     bg-emerald-600 hover:bg-emerald-500 text-white
-                     disabled:opacity-40 disabled:cursor-not-allowed
-                     shadow-lg shadow-emerald-900/20"
-        >
-          BUY {side}
-        </button>
-        <button
-          onClick={onSell}
-          disabled={!strike}
-          className="py-3.5 px-4 text-sm font-bold rounded-xl transition-all active:scale-95
-                     bg-rose-600 hover:bg-rose-500 text-white
-                     disabled:opacity-40 disabled:cursor-not-allowed
-                     shadow-lg shadow-rose-900/20"
-        >
-          SELL {side}
-        </button>
-      </div>
-    </div>
-  );
-}
-
-// ─── Sorting helpers ────────────────────────────────────────────────
-
-export type SortState = { key: string; dir: 'asc' | 'desc' };
-
-export function sortRows(data: Record<string, unknown>[], sort: SortState): Record<string, unknown>[] {
-  if (sort.key === 'none') return data;
-  const dir = sort.dir === 'asc' ? 1 : -1;
-  return [...data].sort((a, b) => {
-    const av = a[sort.key], bv = b[sort.key];
-    const an = Number(av), bn = Number(bv);
-    if (av !== '' && bv !== '' && av != null && bv != null && !isNaN(an) && !isNaN(bn)) return (an - bn) * dir;
-    return String(av ?? '').localeCompare(String(bv ?? '')) * dir;
-  });
-}
-
-export function SortableTH({ children, sortKey, currentSort, onSort, align = 'left', className = '' }: {
-  children: React.ReactNode;
-  sortKey: string;
-  currentSort: SortState;
-  onSort: (key: string) => void;
-  align?: 'left' | 'right' | 'center';
-  className?: string;
-}) {
-  const active = currentSort.key === sortKey;
-  const alignCls = align === 'right' ? 'text-right' : align === 'center' ? 'text-center' : 'text-left';
-  return (
-    <th
-      className={`px-3 py-2.5 text-xs font-bold text-white ${alignCls} whitespace-nowrap cursor-pointer select-none hover:bg-zinc-700 ${className}`}
-      onClick={() => onSort(sortKey)}
-    >
-      <span className={`inline-flex items-center gap-1 ${align === 'right' ? 'flex-row-reverse' : ''}`}>
-        {children}
-        {active && (currentSort.dir === 'asc' ? <ChevronUp size={12} /> : <ChevronDown size={12} />)}
-      </span>
-    </th>
-  );
-}
-
-// ─── GuardStepper ─────────────────────────────────────────────────
-
-export function GuardStepper({ value, onChange, colorCls, disabled }: {
-  value: string;
-  onChange: (v: string) => void;
-  colorCls: string;
-  disabled?: boolean;
-}) {
-  const step = (delta: number) => {
-    const cur = parseFloat(value) || 0;
-    const next = Math.max(0, cur + delta);
-    onChange(next.toFixed(2));
-  };
-  return (
-    <div className="flex flex-col">
-      <button type="button" onClick={() => step(1)} tabIndex={-1} disabled={disabled}
-        className={`leading-none text-[9px] px-1 rounded-t border border-b-0 border-zinc-700 bg-zinc-800 hover:bg-zinc-700 disabled:opacity-40 disabled:cursor-not-allowed ${colorCls}`}>▲</button>
-      <button type="button" onClick={() => step(-1)} tabIndex={-1} disabled={disabled}
-        className={`leading-none text-[9px] px-1 rounded-b border border-zinc-700 bg-zinc-800 hover:bg-zinc-700 disabled:opacity-40 disabled:cursor-not-allowed ${colorCls}`}>▼</button>
-    </div>
-  );
-}
-
-// ─── PositionsTable ───────────────────────────────────────────────
-
-export interface PositionsTableProps {
-  data: Record<string, unknown>[];
-  guards: Record<string, PositionGuard>;
-  closingPositions: Set<string>;
-  onGuardChange: (sym: string, field: 'target' | 'sl', value: string) => void;
-  onTrailToggle: (sym: string) => void;
-  onClose: (pos: Record<string, unknown>) => void;
-  sort: SortState;
-  onSort: (key: string) => void;
-}
-
-export function PositionsTable({ data, guards, closingPositions, onGuardChange, onTrailToggle, onClose, sort, onSort }: PositionsTableProps) {
-  const sortedData = useMemo(() => sortRows(data, sort), [data, sort]);
-
-  if (!data.length) {
-    return (
-      <div className="flex items-center justify-center h-32 text-zinc-600 text-sm">
-        No positions data
-      </div>
-    );
-  }
-
-  return (
-    <table className="w-full text-xs">
-      <thead className="sticky top-0 bg-zinc-800 z-10">
-        <tr>
-          <SortableTH sortKey="tradingSymbol" currentSort={sort} onSort={onSort}>Symbol</SortableTH>
-          <SortableTH sortKey="netQty" currentSort={sort} onSort={onSort} align="right">Qty</SortableTH>
-          <SortableTH sortKey="buyAvg" currentSort={sort} onSort={onSort} align="right">Buy Avg</SortableTH>
-          <SortableTH sortKey="sellAvg" currentSort={sort} onSort={onSort} align="right">Sell Avg</SortableTH>
-          <SortableTH sortKey="lastTradedPrice" currentSort={sort} onSort={onSort} align="right">LTP</SortableTH>
-          <SortableTH sortKey="realizedProfit" currentSort={sort} onSort={onSort} align="right">Real P&L</SortableTH>
-          <SortableTH sortKey="unrealizedProfit" currentSort={sort} onSort={onSort} align="right">Unreal P&L</SortableTH>
-          <SortableTH sortKey="productType" currentSort={sort} onSort={onSort}>Product</SortableTH>
-          <th className="px-3 py-2.5 text-xs font-bold text-emerald-400 text-center whitespace-nowrap">Target ₹</th>
-          <th className="px-3 py-2.5 text-xs font-bold text-rose-400 text-center whitespace-nowrap">SL ₹</th>
-          <th className="px-3 py-2.5 text-xs font-bold text-amber-400 text-center whitespace-nowrap">Trail SL</th>
-          <th className="px-3 py-2.5 text-xs font-bold text-white text-center whitespace-nowrap">Close</th>
-        </tr>
-      </thead>
-      <tbody className="divide-y divide-zinc-800/50">
-        {sortedData.map((row, i) => {
-          const sym = String(row.tradingSymbol ?? '');
-          const guard = guards[sym];
-          const isClosing = closingPositions.has(sym);
-          const netQty = Number(row.netQty);
-          const ltp = Number(row.lastTradedPrice);
-          const isLong = netQty > 0;
-          const realPnl = Number(row.realizedProfit);
-          const unrealPnl = Number(row.unrealizedProfit);
-          const buyAvg = Number(row.buyAvg);
-          const sellAvg = Number(row.sellAvg);
-
-          // Compute current effective trailing SL price to show below the checkbox
-          const slNum = parseFloat(guard?.sl ?? '');
-          const entryPrice = isLong ? buyAvg : sellAvg;
-          const initialRisk = (entryPrice > 0 && !isNaN(slNum) && slNum > 0) ? Math.abs(slNum - entryPrice) : 0;
-          const trailBest = guard?.bestPrice ?? 0;
-          const effectiveTrailSL = (guard?.trailEnabled && trailBest > 0 && initialRisk > 0)
-            ? (isLong ? trailBest - initialRisk : trailBest + initialRisk)
-            : null;
-
-          const hasGuard = guard && (guard.target || guard.sl || guard.trailEnabled);
-
-          return (
-            <tr key={i} className={`hover:bg-zinc-800/40 transition-colors ${isClosing ? 'opacity-40' : ''} ${guard?.triggered ? 'bg-zinc-800/20' : ''}`}>
-              <td className="px-3 py-2 whitespace-nowrap font-mono text-zinc-300">
-                <div className="flex items-center gap-1.5">
-                  {hasGuard && !guard.triggered && (
-                    <span className="w-1.5 h-1.5 rounded-full bg-violet-400 flex-shrink-0" title="Guard active" />
-                  )}
-                  {sym}
-                </div>
-              </td>
-              <td className="px-3 py-2 whitespace-nowrap font-mono text-right tabular-nums text-zinc-300">{netQty}</td>
-              <td className="px-3 py-2 whitespace-nowrap font-mono text-right tabular-nums text-zinc-300">{buyAvg > 0 ? buyAvg.toFixed(2) : '—'}</td>
-              <td className="px-3 py-2 whitespace-nowrap font-mono text-right tabular-nums text-zinc-300">{sellAvg > 0 ? sellAvg.toFixed(2) : '—'}</td>
-              <td className="px-3 py-2 whitespace-nowrap font-mono text-right tabular-nums text-zinc-300">{ltp > 0 ? ltp.toFixed(2) : '—'}</td>
-              <td className={`px-3 py-2 whitespace-nowrap font-mono text-right tabular-nums ${!isNaN(realPnl) && realPnl !== 0 ? (realPnl > 0 ? 'text-emerald-400' : 'text-rose-400') : 'text-zinc-400'}`}>
-                {isNaN(realPnl) ? '—' : realPnl.toFixed(0)}
-              </td>
-              <td className={`px-3 py-2 whitespace-nowrap font-mono text-right tabular-nums ${!isNaN(unrealPnl) && unrealPnl !== 0 ? (unrealPnl > 0 ? 'text-emerald-400' : 'text-rose-400') : 'text-zinc-400'}`}>
-                {isNaN(unrealPnl) ? '—' : unrealPnl.toFixed(0)}
-              </td>
-              <td className="px-3 py-2 whitespace-nowrap font-mono text-zinc-300">{String(row.productType ?? '—')}</td>
-
-              {/* Target input */}
-              <td className="px-2 py-1.5">
-                <div className="flex items-center gap-1">
-                  <input
-                    type="number" step="0.05" min="0"
-                    value={guard?.target ?? ''}
-                    onChange={e => onGuardChange(sym, 'target', e.target.value)}
-                    placeholder="—"
-                    disabled={isClosing}
-                    className="w-20 bg-zinc-900 border border-zinc-700 text-emerald-300 text-xs font-mono rounded px-2 py-1 focus:outline-none focus:border-emerald-500 tabular-nums text-right placeholder:text-zinc-600 disabled:opacity-40"
-                  />
-                  <GuardStepper
-                    value={guard?.target ?? ''}
-                    onChange={v => onGuardChange(sym, 'target', v)}
-                    colorCls="text-emerald-300"
-                    disabled={isClosing}
-                  />
-                </div>
-              </td>
-
-              {/* SL input */}
-              <td className="px-2 py-1.5">
-                <div className="flex items-center gap-1">
-                  <input
-                    type="number" step="0.05" min="0"
-                    value={guard?.sl ?? ''}
-                    onChange={e => onGuardChange(sym, 'sl', e.target.value)}
-                    placeholder="—"
-                    disabled={isClosing}
-                    className="w-20 bg-zinc-900 border border-zinc-700 text-rose-300 text-xs font-mono rounded px-2 py-1 focus:outline-none focus:border-rose-500 tabular-nums text-right placeholder:text-zinc-600 disabled:opacity-40"
-                  />
-                  <GuardStepper
-                    value={guard?.sl ?? ''}
-                    onChange={v => onGuardChange(sym, 'sl', v)}
-                    colorCls="text-rose-300"
-                    disabled={isClosing}
-                  />
-                </div>
-              </td>
-
-              {/* Trail SL checkbox + effective SL price when active */}
-              <td className="px-2 py-1.5 text-center">
-                <div className="flex flex-col items-center gap-0.5">
-                  <input
-                    type="checkbox"
-                    checked={guard?.trailEnabled ?? false}
-                    onChange={() => onTrailToggle(sym)}
-                    disabled={isClosing || !guard?.sl}
-                    title={guard?.sl ? 'Trail SL 1:1 with profit' : 'Set SL first'}
-                    className="w-4 h-4 accent-amber-400 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
-                  />
-                  {effectiveTrailSL !== null && (
-                    <span className="text-[10px] font-mono text-amber-400 tabular-nums">
-                      @{effectiveTrailSL.toFixed(1)}
-                    </span>
-                  )}
-                </div>
-              </td>
-
-              {/* Manual close button */}
-              <td className="px-2 py-1.5 text-center">
-                <button
-                  onClick={() => onClose(row)}
-                  disabled={isClosing || netQty === 0}
-                  title={`Market close ${sym}`}
-                  className="px-2.5 py-1 text-[11px] font-bold rounded border transition-all disabled:opacity-40 disabled:cursor-not-allowed bg-rose-900/40 border-rose-500/30 text-rose-400 hover:bg-rose-800/60 hover:text-rose-200 active:scale-95"
-                >
-                  {isClosing ? '…' : 'Close'}
-                </button>
-              </td>
-            </tr>
-          );
-        })}
-      </tbody>
-    </table>
-  );
-}
-
-// ─── TabTable ─────────────────────────────────────────────────────
-
-export interface TabTableProps {
-  tab: 'positions' | 'orders' | 'trades';
-  data: Record<string, unknown>[];
-  sort: SortState;
-  onSort: (key: string) => void;
-}
-
-export const COLUMNS: Record<string, { key: string; label: string; numeric?: boolean; highlight?: 'side' | 'pnl' }[]> = {
-  positions: [
-    { key: 'tradingSymbol',    label: 'Symbol' },
-    { key: 'netQty',           label: 'Qty',          numeric: true },
-    { key: 'buyAvg',           label: 'Buy Avg',      numeric: true },
-    { key: 'sellAvg',          label: 'Sell Avg',     numeric: true },
-    { key: 'lastTradedPrice',  label: 'LTP',          numeric: true },
-    { key: 'realizedProfit',   label: 'Realized P&L', numeric: true, highlight: 'pnl' },
-    { key: 'unrealizedProfit', label: 'Unreal. P&L',  numeric: true, highlight: 'pnl' },
-    { key: 'productType',      label: 'Product' },
-  ],
-  orders: [
-    { key: 'tradingSymbol',   label: 'Symbol' },
-    { key: 'orderStatus',     label: 'Status' },
-    { key: 'transactionType', label: 'Side',   highlight: 'side' },
-    { key: 'quantity',        label: 'Qty',    numeric: true },
-    { key: 'price',           label: 'Price',  numeric: true },
-    { key: 'orderType',       label: 'Type' },
-    { key: 'createTime',      label: 'Time' },
-  ],
-  trades: [
-    { key: 'tradingSymbol',   label: 'Symbol' },
-    { key: 'transactionType', label: 'Side',   highlight: 'side' },
-    { key: 'tradedQuantity',  label: 'Qty',    numeric: true },
-    { key: 'tradedPrice',     label: 'Price',  numeric: true },
-    { key: 'createTime',      label: 'Time' },
-  ],
-};
-
-export function TabTable({ tab, data, sort, onSort }: TabTableProps) {
-  const cols = COLUMNS[tab];
-  const sortedData = useMemo(() => sortRows(data, sort), [data, sort]);
-
-  if (!data.length) {
-    return (
-      <div className="flex items-center justify-center h-32 text-zinc-600 text-sm">
-        No {tab} data
-      </div>
-    );
-  }
-  return (
-    <table className="w-full text-xs">
-      <thead className="sticky top-0 bg-zinc-800 z-10">
-        <tr>
-          {cols.map(c => (
-            <SortableTH key={c.key} sortKey={c.key} currentSort={sort} onSort={onSort} align={c.numeric ? 'right' : 'left'}>
-              {c.label}
-            </SortableTH>
-          ))}
-        </tr>
-      </thead>
-      <tbody className="divide-y divide-zinc-800/50">
-        {sortedData.map((row, i) => (
-          <tr key={i} className="hover:bg-zinc-800/40 transition-colors">
-            {cols.map(c => {
-              const val = row[c.key];
-              const str = val == null ? '—' : String(val);
-              let cls = `px-3 py-2 whitespace-nowrap font-mono ${c.numeric ? 'text-right tabular-nums' : ''}`;
-              if (c.highlight === 'side') {
-                cls += str === 'BUY' ? ' text-emerald-400 font-bold' : str === 'SELL' ? ' text-rose-400 font-bold' : ' text-zinc-300';
-              } else if (c.highlight === 'pnl') {
-                const n = Number(val);
-                cls += !isNaN(n) && n !== 0 ? (n > 0 ? ' text-emerald-400' : ' text-rose-400') : ' text-zinc-400';
-              } else {
-                cls += ' text-zinc-300';
-              }
-              return <td key={c.key} className={cls}>{str}</td>;
-            })}
-          </tr>
-        ))}
-      </tbody>
-    </table>
-  );
-}
-
-// ─── FundsView ────────────────────────────────────────────────────
-
-export interface FundsViewProps {
-  data: Record<string, any> | null;
-  realizedPnl: number;
-}
-
-function formatFundsValue(val: number): string {
-  if (val === 0) return '0';
-  if (Number.isInteger(val)) {
-    return val.toLocaleString('en-IN');
-  }
-  return val.toLocaleString('en-IN', { minimumFractionDigits: 1, maximumFractionDigits: 2 });
-}
-
-export function FundsView({ data, realizedPnl }: FundsViewProps) {
-  if (!data) {
-    return (
-      <div className="flex items-center justify-center h-32 text-zinc-600 text-sm">
-        No funds data available
-      </div>
-    );
-  }
-
-  const available = Number(data.availabelBalance) || 0;
-  const used = Number(data.utilizedAmount) || 0;
-  const total = available + used;
-
-  const rows = [
-    { label: 'Total Balance', value: total },
-    { label: 'Used Margin', value: used },
-    { label: 'Realized P&L', value: realizedPnl },
-    { label: 'Available', value: available },
-  ];
-
-  const renderSection = (title: string) => (
-    <div className="flex-1 min-w-[280px] bg-zinc-900/20 border border-zinc-800/60 rounded-xl p-5">
-      <h3 className="text-zinc-200 text-sm font-semibold mb-4 tracking-wide border-b border-zinc-800/80 pb-2">{title}</h3>
-      <table className="w-full text-xs font-mono">
-        <thead>
-          <tr className="border-b border-zinc-800/40 text-zinc-500 font-semibold text-left">
-            <th className="pb-2 font-medium">Type</th>
-            <th className="pb-2 text-right font-medium">Balance</th>
-          </tr>
-        </thead>
-        <tbody className="divide-y divide-zinc-800/20 text-zinc-300">
-          {rows.map((row) => (
-            <tr key={row.label} className="hover:bg-zinc-800/10 transition-colors">
-              <td className="py-3 text-left text-zinc-400">{row.label}</td>
-              <td className={`py-3 text-right font-semibold ${
-                row.label === 'Realized P&L' && row.value !== 0
-                  ? row.value > 0 ? 'text-emerald-400' : 'text-rose-400'
-                  : 'text-zinc-100'
-              }`}>
-                {formatFundsValue(row.value)}
-              </td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </div>
-  );
-
-  return (
-    <div className="flex flex-wrap gap-5 p-5">
-      {renderSection('NSE - Derivatives')}
-      {renderSection('NSE - Equity')}
     </div>
   );
 }
