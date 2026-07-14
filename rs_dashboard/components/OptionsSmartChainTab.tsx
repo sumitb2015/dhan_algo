@@ -229,6 +229,13 @@ export default function OptionsSmartChainTab({ expiry }: { expiry: string }) {
       }
 
       const spotPrice = json.data.spot ?? 0;
+      if (spotPrice <= 0) {
+        // A zero/missing spot would center the strike window on the wrong
+        // end of the chain (picks whichever strike is closest to 0) — keep
+        // showing the last good render instead of a bogus strike window.
+        setError('Spot price unavailable — showing last known chain');
+        return;
+      }
       const atmStrike = Math.round(spotPrice / STRIKE_STEP) * STRIKE_STEP;
       const oc        = json.data.chain.oc;
 

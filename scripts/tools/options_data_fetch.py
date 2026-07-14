@@ -92,8 +92,14 @@ def main():
                 expiry=args.expiry,
                 exchange_segment=seg,
             )
-        # Also get spot for ATM calculation
-        if is_crude:
+        # Also get spot for ATM calculation. The option-chain response already
+        # carries the underlying's last_price — prefer that over a second,
+        # un-retried get_ltp() call, which can independently 429/return 0 and
+        # leave the chain's own (valid, retried) data paired with a bogus spot.
+        chain_spot = (chain or {}).get('last_price') or 0
+        if chain_spot:
+            spot = chain_spot
+        elif is_crude:
             from scripts.tools.premarket_data import _find_nearest_future
             fut = _find_nearest_future(helper, "CRUDEOIL", exchange="MCX", instrument="FUTCOM")
             spot = helper.get_ltp(int(fut["SECURITY_ID"]), exchange="MCX", instrument="FUTCOM") if fut else 0

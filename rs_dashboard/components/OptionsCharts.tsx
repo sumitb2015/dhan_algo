@@ -240,7 +240,7 @@ export default function OptionsCharts() {
 
   // Poll vix-candles for spot, prev_close, and candles (60s)
   useEffect(() => {
-    async function fetchVix() {
+    async function fetchVix(retriesLeft = 2) {
       try {
         const data = await cachedFetch<{
           success: boolean;
@@ -265,10 +265,15 @@ export default function OptionsCharts() {
         }
       } catch (err) {
         console.error('Failed to fetch VIX candles:', err);
+        // Transient network/HMR blips (dev mode) shouldn't leave the ribbon
+        // stuck for a full 60s cycle — retry a couple of times with backoff.
+        if (retriesLeft > 0) {
+          setTimeout(() => fetchVix(retriesLeft - 1), 5_000);
+        }
       }
     }
     fetchVix();
-    const id = setInterval(fetchVix, 60_000);
+    const id = setInterval(() => fetchVix(), 60_000);
     return () => clearInterval(id);
   }, []);
 
