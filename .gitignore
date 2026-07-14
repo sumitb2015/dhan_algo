@@ -50,8 +50,8 @@ Historical Data/
 Historical Data Parquet/
 Options Data/
 temp_data/
-portfolio/
-reports/
+/portfolio/
+/reports/
 
 # Data and Binary Files
 *.csv
