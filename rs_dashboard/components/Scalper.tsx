@@ -2,7 +2,7 @@
 
 import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import NavBar from './NavBar';
-import { Zap, RefreshCw, Shield, ChevronDown } from 'lucide-react';
+import { Zap, RefreshCw, Shield, ChevronDown, ChevronUp } from 'lucide-react';
 
 // ─── Types ────────────────────────────────────────────────────────
 
@@ -107,6 +107,10 @@ export default function Scalper() {
   const [tradesData, setTradesData]       = useState<Record<string, unknown>[]>([]);
   const [fundsData, setFundsData]         = useState<Record<string, any> | null>(null);
   const [tabLoading, setTabLoading]       = useState(false);
+  const [tableSort, setTableSort] = useState<{ key: string; dir: 'asc' | 'desc' }>({ key: 'none', dir: 'asc' });
+  const handleTableSort = useCallback((key: string) => {
+    setTableSort(prev => ({ key, dir: prev.key === key && prev.dir === 'asc' ? 'desc' : 'asc' }));
+  }, []);
 
   // P&L Guard
   const [showPnlGuard, setShowPnlGuard]       = useState(false);
@@ -966,7 +970,7 @@ export default function Scalper() {
             ['trades',    tradesData]    as const,
             ['funds',     []]            as const,
           ]).map(([tab, data]) => (
-            <button key={tab} onClick={() => setActiveTab(tab as typeof activeTab)}
+            <button key={tab} onClick={() => { setActiveTab(tab as typeof activeTab); setTableSort({ key: 'none', dir: 'asc' }); }}
               className={`px-3 py-1.5 text-xs font-semibold rounded-lg transition-all capitalize ${
                 activeTab === tab
                   ? 'bg-zinc-700 text-zinc-100 border border-zinc-600'
@@ -999,11 +1003,15 @@ export default function Scalper() {
               onGuardChange={handleGuardChange}
               onTrailToggle={handleTrailToggle}
               onClose={pos => closePosition(pos, 'Manual')}
+              sort={tableSort}
+              onSort={handleTableSort}
             />
           ) : (
             <TabTable
               tab={activeTab}
               data={activeTab === 'orders' ? ordersData : tradesData}
+              sort={tableSort}
+              onSort={handleTableSort}
             />
           )}
         </div>
@@ -1116,6 +1124,67 @@ function OptionPanel({
   );
 }
 
+// ─── Sorting helpers ────────────────────────────────────────────────
+
+type SortState = { key: string; dir: 'asc' | 'desc' };
+
+function sortRows(data: Record<string, unknown>[], sort: SortState): Record<string, unknown>[] {
+  if (sort.key === 'none') return data;
+  const dir = sort.dir === 'asc' ? 1 : -1;
+  return [...data].sort((a, b) => {
+    const av = a[sort.key], bv = b[sort.key];
+    const an = Number(av), bn = Number(bv);
+    if (av !== '' && bv !== '' && av != null && bv != null && !isNaN(an) && !isNaN(bn)) return (an - bn) * dir;
+    return String(av ?? '').localeCompare(String(bv ?? '')) * dir;
+  });
+}
+
+function SortableTH({ children, sortKey, currentSort, onSort, align = 'left', className = '' }: {
+  children: React.ReactNode;
+  sortKey: string;
+  currentSort: SortState;
+  onSort: (key: string) => void;
+  align?: 'left' | 'right' | 'center';
+  className?: string;
+}) {
+  const active = currentSort.key === sortKey;
+  const alignCls = align === 'right' ? 'text-right' : align === 'center' ? 'text-center' : 'text-left';
+  return (
+    <th
+      className={`px-3 py-2.5 text-xs font-bold text-white ${alignCls} whitespace-nowrap cursor-pointer select-none hover:bg-zinc-700 ${className}`}
+      onClick={() => onSort(sortKey)}
+    >
+      <span className={`inline-flex items-center gap-1 ${align === 'right' ? 'flex-row-reverse' : ''}`}>
+        {children}
+        {active && (currentSort.dir === 'asc' ? <ChevronUp size={12} /> : <ChevronDown size={12} />)}
+      </span>
+    </th>
+  );
+}
+
+// ─── GuardStepper ─────────────────────────────────────────────────
+
+function GuardStepper({ value, onChange, colorCls, disabled }: {
+  value: string;
+  onChange: (v: string) => void;
+  colorCls: string;
+  disabled?: boolean;
+}) {
+  const step = (delta: number) => {
+    const cur = parseFloat(value) || 0;
+    const next = Math.max(0, cur + delta);
+    onChange(next.toFixed(2));
+  };
+  return (
+    <div className="flex flex-col">
+      <button type="button" onClick={() => step(1)} tabIndex={-1} disabled={disabled}
+        className={`leading-none text-[9px] px-1 rounded-t border border-b-0 border-zinc-700 bg-zinc-800 hover:bg-zinc-700 disabled:opacity-40 disabled:cursor-not-allowed ${colorCls}`}>▲</button>
+      <button type="button" onClick={() => step(-1)} tabIndex={-1} disabled={disabled}
+        className={`leading-none text-[9px] px-1 rounded-b border border-zinc-700 bg-zinc-800 hover:bg-zinc-700 disabled:opacity-40 disabled:cursor-not-allowed ${colorCls}`}>▼</button>
+    </div>
+  );
+}
+
 // ─── PositionsTable ───────────────────────────────────────────────
 
 interface PositionsTableProps {
@@ -1125,9 +1194,13 @@ interface PositionsTableProps {
   onGuardChange: (sym: string, field: 'target' | 'sl', value: string) => void;
   onTrailToggle: (sym: string) => void;
   onClose: (pos: Record<string, unknown>) => void;
+  sort: SortState;
+  onSort: (key: string) => void;
 }
 
-function PositionsTable({ data, guards, closingPositions, onGuardChange, onTrailToggle, onClose }: PositionsTableProps) {
+function PositionsTable({ data, guards, closingPositions, onGuardChange, onTrailToggle, onClose, sort, onSort }: PositionsTableProps) {
+  const sortedData = useMemo(() => sortRows(data, sort), [data, sort]);
+
   if (!data.length) {
     return (
       <div className="flex items-center justify-center h-32 text-zinc-600 text-sm">
@@ -1140,14 +1213,14 @@ function PositionsTable({ data, guards, closingPositions, onGuardChange, onTrail
     <table className="w-full text-xs">
       <thead className="sticky top-0 bg-zinc-800 z-10">
         <tr>
-          <th className="px-3 py-2.5 text-xs font-bold text-white text-left whitespace-nowrap">Symbol</th>
-          <th className="px-3 py-2.5 text-xs font-bold text-white text-right whitespace-nowrap">Qty</th>
-          <th className="px-3 py-2.5 text-xs font-bold text-white text-right whitespace-nowrap">Buy Avg</th>
-          <th className="px-3 py-2.5 text-xs font-bold text-white text-right whitespace-nowrap">Sell Avg</th>
-          <th className="px-3 py-2.5 text-xs font-bold text-white text-right whitespace-nowrap">LTP</th>
-          <th className="px-3 py-2.5 text-xs font-bold text-white text-right whitespace-nowrap">Real P&L</th>
-          <th className="px-3 py-2.5 text-xs font-bold text-white text-right whitespace-nowrap">Unreal P&L</th>
-          <th className="px-3 py-2.5 text-xs font-bold text-white text-left whitespace-nowrap">Product</th>
+          <SortableTH sortKey="tradingSymbol" currentSort={sort} onSort={onSort}>Symbol</SortableTH>
+          <SortableTH sortKey="netQty" currentSort={sort} onSort={onSort} align="right">Qty</SortableTH>
+          <SortableTH sortKey="buyAvg" currentSort={sort} onSort={onSort} align="right">Buy Avg</SortableTH>
+          <SortableTH sortKey="sellAvg" currentSort={sort} onSort={onSort} align="right">Sell Avg</SortableTH>
+          <SortableTH sortKey="lastTradedPrice" currentSort={sort} onSort={onSort} align="right">LTP</SortableTH>
+          <SortableTH sortKey="realizedProfit" currentSort={sort} onSort={onSort} align="right">Real P&L</SortableTH>
+          <SortableTH sortKey="unrealizedProfit" currentSort={sort} onSort={onSort} align="right">Unreal P&L</SortableTH>
+          <SortableTH sortKey="productType" currentSort={sort} onSort={onSort}>Product</SortableTH>
           <th className="px-3 py-2.5 text-xs font-bold text-emerald-400 text-center whitespace-nowrap">Target ₹</th>
           <th className="px-3 py-2.5 text-xs font-bold text-rose-400 text-center whitespace-nowrap">SL ₹</th>
           <th className="px-3 py-2.5 text-xs font-bold text-amber-400 text-center whitespace-nowrap">Trail SL</th>
@@ -1155,7 +1228,7 @@ function PositionsTable({ data, guards, closingPositions, onGuardChange, onTrail
         </tr>
       </thead>
       <tbody className="divide-y divide-zinc-800/50">
-        {data.map((row, i) => {
+        {sortedData.map((row, i) => {
           const sym = String(row.tradingSymbol ?? '');
           const guard = guards[sym];
           const isClosing = closingPositions.has(sym);
@@ -1202,26 +1275,42 @@ function PositionsTable({ data, guards, closingPositions, onGuardChange, onTrail
 
               {/* Target input */}
               <td className="px-2 py-1.5">
-                <input
-                  type="number" step="0.05" min="0"
-                  value={guard?.target ?? ''}
-                  onChange={e => onGuardChange(sym, 'target', e.target.value)}
-                  placeholder="—"
-                  disabled={isClosing}
-                  className="w-20 bg-zinc-900 border border-zinc-700 text-emerald-300 text-xs font-mono rounded px-2 py-1 focus:outline-none focus:border-emerald-500 tabular-nums text-right placeholder:text-zinc-600 disabled:opacity-40"
-                />
+                <div className="flex items-center gap-1">
+                  <input
+                    type="number" step="0.05" min="0"
+                    value={guard?.target ?? ''}
+                    onChange={e => onGuardChange(sym, 'target', e.target.value)}
+                    placeholder="—"
+                    disabled={isClosing}
+                    className="w-20 bg-zinc-900 border border-zinc-700 text-emerald-300 text-xs font-mono rounded px-2 py-1 focus:outline-none focus:border-emerald-500 tabular-nums text-right placeholder:text-zinc-600 disabled:opacity-40"
+                  />
+                  <GuardStepper
+                    value={guard?.target ?? ''}
+                    onChange={v => onGuardChange(sym, 'target', v)}
+                    colorCls="text-emerald-300"
+                    disabled={isClosing}
+                  />
+                </div>
               </td>
 
               {/* SL input */}
               <td className="px-2 py-1.5">
-                <input
-                  type="number" step="0.05" min="0"
-                  value={guard?.sl ?? ''}
-                  onChange={e => onGuardChange(sym, 'sl', e.target.value)}
-                  placeholder="—"
-                  disabled={isClosing}
-                  className="w-20 bg-zinc-900 border border-zinc-700 text-rose-300 text-xs font-mono rounded px-2 py-1 focus:outline-none focus:border-rose-500 tabular-nums text-right placeholder:text-zinc-600 disabled:opacity-40"
-                />
+                <div className="flex items-center gap-1">
+                  <input
+                    type="number" step="0.05" min="0"
+                    value={guard?.sl ?? ''}
+                    onChange={e => onGuardChange(sym, 'sl', e.target.value)}
+                    placeholder="—"
+                    disabled={isClosing}
+                    className="w-20 bg-zinc-900 border border-zinc-700 text-rose-300 text-xs font-mono rounded px-2 py-1 focus:outline-none focus:border-rose-500 tabular-nums text-right placeholder:text-zinc-600 disabled:opacity-40"
+                  />
+                  <GuardStepper
+                    value={guard?.sl ?? ''}
+                    onChange={v => onGuardChange(sym, 'sl', v)}
+                    colorCls="text-rose-300"
+                    disabled={isClosing}
+                  />
+                </div>
               </td>
 
               {/* Trail SL checkbox + effective SL price when active */}
@@ -1267,6 +1356,8 @@ function PositionsTable({ data, guards, closingPositions, onGuardChange, onTrail
 interface TabTableProps {
   tab: 'positions' | 'orders' | 'trades';
   data: Record<string, unknown>[];
+  sort: SortState;
+  onSort: (key: string) => void;
 }
 
 const COLUMNS: Record<string, { key: string; label: string; numeric?: boolean; highlight?: 'side' | 'pnl' }[]> = {
@@ -1298,8 +1389,10 @@ const COLUMNS: Record<string, { key: string; label: string; numeric?: boolean; h
   ],
 };
 
-function TabTable({ tab, data }: TabTableProps) {
+function TabTable({ tab, data, sort, onSort }: TabTableProps) {
   const cols = COLUMNS[tab];
+  const sortedData = useMemo(() => sortRows(data, sort), [data, sort]);
+
   if (!data.length) {
     return (
       <div className="flex items-center justify-center h-32 text-zinc-600 text-sm">
@@ -1312,14 +1405,14 @@ function TabTable({ tab, data }: TabTableProps) {
       <thead className="sticky top-0 bg-zinc-800 z-10">
         <tr>
           {cols.map(c => (
-            <th key={c.key} className={`px-3 py-2.5 text-xs font-bold text-white text-left whitespace-nowrap ${c.numeric ? 'text-right' : ''}`}>
+            <SortableTH key={c.key} sortKey={c.key} currentSort={sort} onSort={onSort} align={c.numeric ? 'right' : 'left'}>
               {c.label}
-            </th>
+            </SortableTH>
           ))}
         </tr>
       </thead>
       <tbody className="divide-y divide-zinc-800/50">
-        {data.map((row, i) => (
+        {sortedData.map((row, i) => (
           <tr key={i} className="hover:bg-zinc-800/40 transition-colors">
             {cols.map(c => {
               const val = row[c.key];
