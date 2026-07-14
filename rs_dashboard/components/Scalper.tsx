@@ -604,10 +604,16 @@ export default function Scalper() {
                 const trailSLPrice = isLong
                   ? effectiveBest - initialRisk
                   : effectiveBest + initialRisk;
-                // Only enforce once trail SL is tighter than the original SL
+                // Only enforce the trail once it's tighter than the original SL;
+                // otherwise fall back to the original SL so the position stays protected.
                 const trailActive = isLong ? trailSLPrice > slNum : trailSLPrice < slNum;
-                if (trailActive && ((isLong && ltp <= trailSLPrice) || (!isLong && ltp >= trailSLPrice))) {
-                  closePosition(pos, 'Trail SL hit');
+                if (trailActive) {
+                  if ((isLong && ltp <= trailSLPrice) || (!isLong && ltp >= trailSLPrice)) {
+                    closePosition(pos, 'Trail SL hit');
+                    continue;
+                  }
+                } else if ((isLong && ltp <= slNum) || (!isLong && ltp >= slNum)) {
+                  closePosition(pos, 'SL hit');
                   continue;
                 }
               }
