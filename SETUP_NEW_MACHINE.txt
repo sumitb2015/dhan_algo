@@ -1,0 +1,112 @@
+DHAN ALGO TRADING — SETUP ON A NEW MACHINE
+============================================
+
+This app is NOT multi-tenant — each person who runs it needs their own
+Dhan API credentials and their own local copy of the environment/data.
+This guide sets up a fresh, independent copy on another machine.
+
+--------------------------------------------------------------
+1. PREREQUISITES
+--------------------------------------------------------------
+- Python 3.12 (matches the venv this project was built with)
+- Node.js (for the Next.js dashboard, rs_dashboard/)
+- A Dhan trading account with API access enabled
+  (client_id, api_key, api_secret from the Dhan developer portal)
+
+--------------------------------------------------------------
+2. GET THE CODE
+--------------------------------------------------------------
+Clone or copy the repository to the new machine. Do NOT copy the local
+venv/ folder — it will be recreated in step 3. The following are
+git-ignored and will NOT come with the repo; they're handled below:
+  - venv/
+  - .env
+  - access_token.json
+  - master_list.csv
+  - Historical Data / Daily_Historical_Data_Fresh / Options Data / etc.
+
+--------------------------------------------------------------
+3. PYTHON ENVIRONMENT
+--------------------------------------------------------------
+From the project root:
+
+    python -m venv venv
+    .\venv\Scripts\activate
+    pip install -r requirements.txt
+
+--------------------------------------------------------------
+4. DASHBOARD (Next.js) DEPENDENCIES
+--------------------------------------------------------------
+    cd rs_dashboard
+    npm install
+    cd ..
+
+--------------------------------------------------------------
+5. CREDENTIALS
+--------------------------------------------------------------
+Create a .env file in the project root with THEIR OWN Dhan credentials:
+
+    client_id=...
+    api_key=...
+    api_secret=...
+
+Then generate their access token (expires ~24h, re-run whenever it lapses):
+
+    venv\Scripts\python.exe login.py
+
+--------------------------------------------------------------
+6. SECURITY MASTER LIST (master_list.csv)
+--------------------------------------------------------------
+This ~15MB file lists all tradable securities and is required for
+symbol lookups. It's not in git and must be generated locally, after
+step 5 (it needs a valid access token). In a Python shell or short
+script:
+
+    from lib.dhan_helper import DhanHelper
+    from login import get_dhan_client   # or however the client is built
+
+    dhan = get_dhan_client()
+    helper = DhanHelper(dhan)
+    helper.fetch_security_list()   # downloads NSE/BSE/MCX segments, writes master_list.csv
+
+(Check login.py / templates/strategy_template.py for the exact client
+bootstrap call used elsewhere in the project.)
+
+--------------------------------------------------------------
+7. HISTORICAL DATA (only needed for dashboard analysis pages)
+--------------------------------------------------------------
+If they only want to run live strategies, this step can be skipped.
+For the RS dashboard / backtests / reports pages, populate historical
+data with:
+
+    venv\Scripts\python.exe scripts/downloader/refresh_dashboard_data.py
+
+This is a full incremental download and may take a while the first run.
+
+--------------------------------------------------------------
+8. VERIFY
+--------------------------------------------------------------
+    cd tests
+    ..\venv\Scripts\python.exe run_all_tests.py
+
+--------------------------------------------------------------
+9. RUNNING
+--------------------------------------------------------------
+Python strategies (see CLAUDE.md / GEMINI.md for full CLI reference):
+
+    venv\Scripts\python.exe strategies\value_imbalance\nifty_advanced_imbalance.py --entry-type straddle --mode winner_roll_atm
+
+Dashboard:
+
+    cd rs_dashboard
+    npm run dev
+    (open http://localhost:3000)
+
+--------------------------------------------------------------
+NOTES
+--------------------------------------------------------------
+- All strategies default to DRY RUN (no real orders) unless --live is
+  passed. Recommend the new user runs dry first to confirm setup works.
+- Access tokens expire after ~24h — login.py must be re-run daily.
+- Since credentials/state are per-machine, the two installs (yours and
+  theirs) are fully independent — nothing needs to be kept in sync.
