@@ -54,6 +54,7 @@ const NAV_GROUPS = [
       { href: '/straddle-analysis', label: 'Straddle Analysis', desc: 'ATM straddle premium patterns by weekday, DTE & regime' },
       { href: '/strangle-analysis', label: 'Strangle Analysis', desc: 'OTM strangle premium patterns by offset, weekday, DTE & regime' },
       { href: '/strategy-builder', label: 'Strategy Builder', desc: 'Build & track multi-leg NIFTY options strategies' },
+      { href: '/cash-secured-puts', label: 'Cash Secured Puts', desc: 'Track underlyings, sell PUTs, monitor active orders & trades' },
     ],
   },
   {
