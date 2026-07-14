@@ -86,6 +86,10 @@ export default function AdvancedScalper() {
   const pollRef = useRef<NodeJS.Timeout | null>(null);
   const positionsRef = useRef<Record<string, unknown>[]>([]);
   const posGuardsRef = useRef<Record<string, PositionGuard>>({});
+  // Synchronous re-entrancy lock: React state updates are async, so the guard
+  // loop and a manual Close click can both enter closePosition before either
+  // sees the other's `triggered`/`closingPositions` update.
+  const closingInFlightRef = useRef<Set<string>>(new Set());
   const expiryRef = useRef('');
   useEffect(() => { expiryRef.current = expiry; }, [expiry]);
 
@@ -463,6 +467,9 @@ export default function AdvancedScalper() {
       return;
     }
 
+    // Prevent double-fire while order is in flight
+    if (closingInFlightRef.current.has(sym)) return;
+    closingInFlightRef.current.add(sym);
     setPosGuards(prev => prev[sym] ? { ...prev, [sym]: { ...prev[sym], triggered: true } } : prev);
     setClosingPositions(prev => new Set([...prev, sym]));
 
@@ -501,6 +508,9 @@ export default function AdvancedScalper() {
       const j = await res.json() as { success: boolean; order_id?: string; error?: string };
       if (j.success) {
         addToast('success', `Closed ${sym} (${reason})`, `${qty} qty · ID: ${j.order_id}`);
+        // Drop the guard entirely — leaving it would carry stale bestPrice /
+        // trailEnabled into a future re-entry on the same symbol.
+        setPosGuards(prev => { const next = { ...prev }; delete next[sym]; return next; });
         setTimeout(fetchTabData, 800);
       } else {
         addToast('error', `Close failed: ${sym}`, j.error ?? 'Unknown error');
@@ -510,6 +520,7 @@ export default function AdvancedScalper() {
       addToast('error', 'Network error closing position', String(e));
       setPosGuards(prev => prev[sym] ? { ...prev, [sym]: { ...prev[sym], triggered: false } } : prev);
     } finally {
+      closingInFlightRef.current.delete(sym);
       setClosingPositions(prev => { const s = new Set(prev); s.delete(sym); return s; });
     }
   }, [addToast, fetchTabData]);
