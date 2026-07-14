@@ -2,7 +2,7 @@
 
 import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import NavBar from '@/components/NavBar';
-import { TrendingUp, RefreshCw, Search, ChevronUp, ChevronDown, Loader2, AlertCircle, AlertTriangle, Download, CheckCircle2, Square } from 'lucide-react';
+import { TrendingUp, RefreshCw, Search, ChevronUp, ChevronDown, Loader2, AlertCircle, AlertTriangle, Download, CheckCircle2, Square, History } from 'lucide-react';
 import { NIFTY50_SET } from '@/lib/nifty50';
 import type { MoverResult, MoversResponse } from '@/app/api/movers/route';
 import type { IndexResult, IndicesResponse, IndexCategory } from '@/app/api/indices-performance/route';
@@ -84,15 +84,19 @@ function useRefreshStatus(active: boolean) {
 
 // ─── Per-tab refresh banner ───────────────────────────────────────────────────
 
+// Both the nifty50 and nifty500 tabs render per-stock rows from /api/movers
+// (Daily_Historical_Data_Fresh/*.csv), so both need the 'stocks' refresh
+// target — refreshing 'nifty50'/'nifty500-index' would only touch the
+// unrelated aggregate index CSV that neither tab actually displays.
 const TAB_TARGETS: Record<string, string> = {
-  nifty50:  'nifty50',
-  nifty500: 'nifty500-index',
+  nifty50:  'stocks',
+  nifty500: 'stocks',
   indices:  'indices',
 };
 
 const TAB_LABELS: Record<string, string> = {
-  nifty50:  'Nifty 50',
-  nifty500: 'Nifty 500 Index',
+  nifty50:  'Nifty 50 stocks',
+  nifty500: 'Nifty 500 stocks',
   indices:  'Sector Indices',
 };
 
@@ -126,7 +130,7 @@ function RefreshBanner({
   }, [running, status?.done, onComplete]);
 
   const phaseMap: Record<string, string> = {
-    nifty50: 'nifty50', nifty500: 'nifty500_index', indices: 'indices',
+    nifty50: 'stocks', nifty500: 'stocks', indices: 'indices',
   };
   const myPhase = phaseMap[tab];
   const isMyPhase = status?.phase === myPhase;
@@ -183,6 +187,150 @@ function RefreshBanner({
       <Download className="h-3 w-3" />
       Fetch {label} data
     </button>
+  );
+}
+
+// ─── One-time deep history backfill (stocks + indices, since e.g. 2019) ────────
+
+interface BackfillStatus {
+  pid: number; message: string; current: number; total: number; done: boolean; error: string | null;
+}
+
+function useBackfillStatus(target: 'stocks' | 'indices') {
+  const [running, setRunning] = useState(false);
+  const [status, setStatus] = useState<BackfillStatus | null>(null);
+  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  const poll = useCallback(async () => {
+    try {
+      const res = await fetch(`/api/backfill?target=${target}`);
+      const json = await res.json();
+      setRunning(json.running);
+      setStatus(json.status ?? null);
+    } catch { /* ignore */ }
+  }, [target]);
+
+  useEffect(() => {
+    poll();
+    pollRef.current = setInterval(poll, 2000);
+    return () => { if (pollRef.current) clearInterval(pollRef.current); };
+  }, [poll]);
+
+  const trigger = useCallback(async (startDate: string) => {
+    await fetch('/api/backfill', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ target, startDate }),
+    });
+    await poll();
+  }, [target, poll]);
+
+  const stop = useCallback(async () => {
+    await fetch(`/api/backfill?target=${target}`, { method: 'DELETE' });
+    await poll();
+  }, [target, poll]);
+
+  return { running, status, trigger, stop };
+}
+
+function BackfillRow({
+  label, startDate, running, status, onTrigger, onStop,
+}: {
+  label: string; startDate: string; running: boolean; status: BackfillStatus | null;
+  onTrigger: (startDate: string) => void; onStop: () => void;
+}) {
+  const pct = status && status.total > 0 ? Math.round((status.current / status.total) * 100) : 0;
+
+  return (
+    <div className="flex items-center justify-between gap-3 py-1.5">
+      <span className="text-xs font-semibold text-zinc-200 w-24 shrink-0">{label}</span>
+      {running ? (
+        <div className="flex items-center gap-2 flex-1 justify-end">
+          <div className="flex items-center gap-1.5 text-[11px] text-sky-400">
+            <Loader2 className="h-3 w-3 animate-spin" />
+            {status && status.total > 0 ? <span>{status.current}/{status.total} ({pct}%)</span> : <span>Starting…</span>}
+          </div>
+          <button
+            onClick={onStop}
+            className="flex items-center gap-1 text-[11px] text-red-400 hover:text-red-300 border border-red-500/25 bg-red-500/10 rounded-lg px-2 py-1 transition-all"
+          >
+            <Square className="h-2.5 w-2.5" /> Stop
+          </button>
+        </div>
+      ) : (
+        <div className="flex items-center gap-2 flex-1 justify-end">
+          {status?.done && (
+            <span className={`text-[11px] ${status.error ? 'text-red-400' : 'text-emerald-400'}`}>
+              {status.error ? 'Failed' : 'Done'}
+            </span>
+          )}
+          <button
+            onClick={() => onTrigger(startDate)}
+            className="flex items-center gap-1.5 px-2.5 py-1 text-[11px] font-semibold rounded-lg border border-sky-500/25 bg-sky-500/10 text-sky-400 hover:bg-sky-500/15 transition-all"
+          >
+            <Download className="h-3 w-3" /> Backfill
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function BackfillPanel({ onComplete }: { onComplete: () => void }) {
+  const [open, setOpen] = useState(false);
+  const [startDate, setStartDate] = useState('2019-01-01');
+  const stocksBackfill  = useBackfillStatus('stocks');
+  const indicesBackfill = useBackfillStatus('indices');
+
+  const anyRunning = stocksBackfill.running || indicesBackfill.running;
+  const wasRunningRef = useRef(false);
+  useEffect(() => {
+    if (anyRunning) wasRunningRef.current = true;
+    else if (wasRunningRef.current) { wasRunningRef.current = false; onComplete(); }
+  }, [anyRunning, onComplete]);
+
+  return (
+    <div className="relative">
+      <button
+        onClick={() => setOpen(o => !o)}
+        className="flex items-center gap-1.5 px-2.5 py-1.5 text-[11px] font-semibold rounded-lg border border-zinc-800 bg-zinc-900/40 text-zinc-300 hover:text-white hover:border-zinc-700 transition-all"
+        title="One-time deep history backfill for stocks and indices — use this on a fresh install where the data folders are empty"
+      >
+        <History className="h-3.5 w-3.5" />
+        Backfill history
+        <ChevronDown className={`h-3 w-3 transition-transform ${open ? 'rotate-180' : ''}`} />
+      </button>
+      {open && (
+        <div className="absolute right-0 top-full mt-2 w-72 p-3 rounded-xl border border-zinc-800 bg-zinc-950 shadow-xl z-30">
+          <p className="text-[10px] text-zinc-500 mb-2 leading-relaxed">
+            Fetches full daily history back to the date below for all Nifty 500
+            stocks and all indices, merging into existing CSVs. Only needed
+            once (e.g. right after a fresh install).
+          </p>
+          <label className="flex items-center gap-2 mb-2.5 text-[11px] text-zinc-400">
+            Since
+            <input
+              type="date"
+              value={startDate}
+              onChange={e => setStartDate(e.target.value)}
+              className="flex-1 px-2 py-1 text-[11px] bg-zinc-900 border border-zinc-800 rounded-lg text-zinc-200 focus:outline-none focus:border-zinc-600"
+            />
+          </label>
+          <div className="divide-y divide-zinc-900">
+            <BackfillRow
+              label="Stocks" startDate={startDate}
+              running={stocksBackfill.running} status={stocksBackfill.status}
+              onTrigger={stocksBackfill.trigger} onStop={stocksBackfill.stop}
+            />
+            <BackfillRow
+              label="Indices" startDate={startDate}
+              running={indicesBackfill.running} status={indicesBackfill.status}
+              onTrigger={indicesBackfill.trigger} onStop={indicesBackfill.stop}
+            />
+          </div>
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -617,14 +765,17 @@ export default function PerformancePage() {
 
         <NavBar />
 
-        <button
-          onClick={() => fetchData(true)}
-          disabled={loading}
-          className="p-1.5 border border-zinc-800 rounded-lg bg-zinc-900/40 text-zinc-400 hover:text-white transition-all hover:border-zinc-700 disabled:opacity-40 ml-auto"
-          title="Reload from disk (clears server cache)"
-        >
-          <RefreshCw className={`h-3.5 w-3.5 ${loading ? 'animate-spin' : ''}`} />
-        </button>
+        <div className="flex items-center gap-2 ml-auto">
+          <BackfillPanel onComplete={() => fetchData(true)} />
+          <button
+            onClick={() => fetchData(true)}
+            disabled={loading}
+            className="p-1.5 border border-zinc-800 rounded-lg bg-zinc-900/40 text-zinc-400 hover:text-white transition-all hover:border-zinc-700 disabled:opacity-40"
+            title="Reload from disk (clears server cache)"
+          >
+            <RefreshCw className={`h-3.5 w-3.5 ${loading ? 'animate-spin' : ''}`} />
+          </button>
+        </div>
       </header>
 
       {/* ── Body ───────────────────────────────────────────────────────────── */}
