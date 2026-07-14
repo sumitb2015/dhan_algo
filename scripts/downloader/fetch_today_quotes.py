@@ -443,18 +443,27 @@ def main():
         }
 
     def _fetch_index_quotes_batch(method_name: str, sids: list[int]) -> dict | None:
-        """Try ohlc_data/quote_data/ticker_data for IDX_I indices. Returns raw idx_data dict or None."""
-        try:
-            method = getattr(helper.dhan, method_name)
-            res = method(securities={"IDX_I": sids})
-            if not isinstance(res, dict) or res.get("status") != "success":
-                return None
-            raw = res.get("data", {})
-            if isinstance(raw, dict) and "data" in raw:
-                raw = raw["data"]
-            return raw.get("IDX_I", raw) if isinstance(raw, dict) else None
-        except Exception:
-            return None
+        """Try ohlc_data/quote_data/ticker_data for IDX_I indices. Returns raw idx_data dict or None.
+
+        The index call lands right after the ~502-symbol NSE_EQ quote burst above,
+        which trips Dhan's short-window rate limit and comes back as a graceful
+        {"status": "failure"} body (not an HTTP error) — so it needs its own
+        retry/backoff rather than failing straight through to the flat-LTP fallback.
+        """
+        method = getattr(helper.dhan, method_name)
+        for attempt in range(3):
+            try:
+                res = method(securities={"IDX_I": sids})
+                if isinstance(res, dict) and res.get("status") == "success":
+                    raw = res.get("data", {})
+                    if isinstance(raw, dict) and "data" in raw:
+                        raw = raw["data"]
+                    return raw.get("IDX_I", raw) if isinstance(raw, dict) else None
+                print(f"    [WARN] {method_name} non-success (attempt {attempt + 1}/3): {res}")
+            except Exception as e:
+                print(f"    [WARN] {method_name} exception (attempt {attempt + 1}/3): {e!r}")
+            time.sleep(RATE_DELAY)
+        return None
 
     def _ltp_to_ohlcv(ltp: float) -> dict:
         return {"open": ltp, "high": ltp, "low": ltp, "close": ltp, "volume": 0}
