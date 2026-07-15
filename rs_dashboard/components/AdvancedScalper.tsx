@@ -2,7 +2,7 @@
 
 import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import NavBar from './NavBar';
-import { Zap, RefreshCw, Shield, Plus } from 'lucide-react';
+import { Zap, RefreshCw, Shield, ShieldOff, Plus } from 'lucide-react';
 import {
   OptionPanel, PositionsTable, TabTable, FundsView,
   type LiveQuotes, type BridgeStatus, type ChainOcEntry, type Toast,
@@ -53,6 +53,10 @@ export default function AdvancedScalper() {
 
   // Toasts
   const [toasts, setToasts] = useState<Toast[]>([]);
+
+  // Exit-all confirm-arm
+  const [confirmExitAll, setConfirmExitAll] = useState(false);
+  const [exitingAll, setExitingAll] = useState(false);
 
   // Bottom tabs
   const [activeTab, setActiveTab]       = useState<'positions' | 'orders' | 'trades' | 'funds'>('positions');
@@ -497,6 +501,34 @@ export default function AdvancedScalper() {
     }
   }, [addToast, fetchTabData]);
 
+  const handleExitAll = useCallback(async () => {
+    if (!confirmExitAll) {
+      setConfirmExitAll(true);
+      setTimeout(() => setConfirmExitAll(false), 3000);
+      return;
+    }
+    setExitingAll(true);
+    setConfirmExitAll(false);
+    try {
+      const res = await fetch('/api/exit-all', { method: 'POST' });
+      const data = await res.json();
+      if (data.broker_exit) {
+        const killed = data.killed?.length ?? 0;
+        const fallback = data.trigger_fallback?.length ?? 0;
+        const detail = killed > 0 ? ` ${killed} strategy process${killed === 1 ? '' : 'es'} terminated.` : '';
+        const fb = fallback > 0 ? ` ${fallback} sent graceful shutdown.` : '';
+        addToast('success', `All positions liquidated at broker.${detail}${fb}`);
+      } else {
+        addToast('error', data.error || 'Broker exit failed — check Dhan account manually.');
+      }
+    } catch (e) {
+      addToast('error', 'Network error calling exit-all API.', String(e));
+    } finally {
+      setExitingAll(false);
+      setTimeout(fetchTabData, 1000);
+    }
+  }, [confirmExitAll, addToast, fetchTabData]);
+
   const handleGuardChange = useCallback((sym: string, field: 'target' | 'sl', value: string) => {
     setPosGuards(prev => {
       const existing: PositionGuard = prev[sym] ?? { target: '', sl: '', trailEnabled: false, bestPrice: 0, triggered: false };
@@ -880,6 +912,20 @@ export default function AdvancedScalper() {
                     {clearingPnl ? 'Clearing…' : confirmClear ? 'Confirm Clear?' : 'Clear Guard'}
                   </button>
                 )}
+
+                {/* Exit ALL Positions (broker-level nuclear) */}
+                <button onClick={handleExitAll} disabled={exitingAll}
+                  className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[11px] font-bold border transition-all active:scale-95 disabled:opacity-40 disabled:cursor-not-allowed ${
+                    exitingAll
+                      ? 'bg-red-900/40 border-red-800 text-red-400'
+                      : confirmExitAll
+                      ? 'bg-red-600 border-red-500 text-white animate-pulse shadow-lg shadow-red-500/20'
+                      : 'bg-red-950/60 border-red-900/60 text-red-400 hover:bg-red-900/40 hover:border-red-700 hover:text-red-300'
+                  }`}
+                  title="Immediately liquidate ALL positions at broker level (DELETE /positions)">
+                  {exitingAll ? <RefreshCw className="h-3 w-3 animate-spin" /> : <ShieldOff className="h-3 w-3" />}
+                  {exitingAll ? 'Exiting…' : confirmExitAll ? 'Confirm EXIT ALL?' : 'EXIT ALL Positions'}
+                </button>
 
                 {hasConfig && (
                   <span className="text-[10px] text-zinc-500 font-mono">
