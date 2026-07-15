@@ -208,7 +208,9 @@ export default function CrudeOilOptions() {
   const intervalRef = useRef<NodeJS.Timeout | null>(null);
 
   const [lots, setLots]               = useState(1);
-  const [lotSize, setLotSize]         = useState(100); // CRUDEOIL option lot size default is 100
+  // MCX order quantity is in LOTS (verified from live order book), so lot size is 1 —
+  // NOT 100 (that's barrels per lot, already baked into the contract)
+  const [lotSize, setLotSize]         = useState(1);
   const [orderMessage, setOrderMessage] = useState<{ text: string; isError: boolean } | null>(null);
   const [ordering, setOrdering]       = useState(false);
 
@@ -512,11 +514,7 @@ export default function CrudeOilOptions() {
     return () => { if (tradesIntervalRef.current) clearInterval(tradesIntervalRef.current); };
   }, [fetchCrudeTrades]);
 
-  // --- SL and Target: Broker-Level Orders ---
-  // brokerOrders tracks placed order IDs so we can cancel them if the user clears the field
-  type BrokerOrderEntry = { orderId: string; price: number; type: 'sl' | 'target'; placing?: boolean };
-  const [brokerOrders, setBrokerOrders] = useState<Record<string, { sl?: BrokerOrderEntry; target?: BrokerOrderEntry }>>({});
-  const brokerOrdersRef = useRef<Record<string, { sl?: BrokerOrderEntry; target?: BrokerOrderEntry }>>({});
+  // --- SL and Target: dashboard-level thresholds ---
   const [editingConfigs, setEditingConfigs] = useState<Record<string, { sl?: string; target?: string }>>({});
 
   // riskConfigs holds committed threshold values (these are only dashboard-level triggers — NOT broker orders)
@@ -542,12 +540,14 @@ export default function CrudeOilOptions() {
   };
 
   // Called when user presses Enter or blurs the input
-  // Only stores a threshold locally — never touches the broker here
-  const handleInputCommit = useCallback((symbol: string, key: 'sl' | 'target') => {
+  // Only stores a threshold locally — never touches the broker here.
+  // `overrideValue` bypasses the editing buffer (setState is async, so a caller that
+  // just queued a value can't rely on editingConfigs having it yet — e.g. the ✕ button).
+  const handleInputCommit = useCallback((symbol: string, key: 'sl' | 'target', overrideValue?: string) => {
     const editState = editingConfigs[symbol];
-    if (!editState || editState[key] === undefined) return;
+    if (overrideValue === undefined && (!editState || editState[key] === undefined)) return;
 
-    const rawVal = editState[key]!;
+    const rawVal = overrideValue !== undefined ? overrideValue : editState![key]!;
     const price = (rawVal === '' || isNaN(parseFloat(rawVal))) ? null : parseFloat(rawVal);
 
     // Always clear the editing buffer
@@ -1163,8 +1163,7 @@ export default function CrudeOilOptions() {
                                 👁 SL ₹{committed}
                               </span>
                               <button type="button" title="Remove SL threshold" onClick={() => {
-                                handleInputChange(p.symbol, 'sl', '');
-                                handleInputCommit(p.symbol, 'sl');
+                                handleInputCommit(p.symbol, 'sl', '');
                               }} className="text-zinc-500 hover:text-red-400 transition-colors cursor-pointer text-xs">✕</button>
                             </div>
                           );
@@ -1176,8 +1175,7 @@ export default function CrudeOilOptions() {
                                 👁 TGT ₹{committed}
                               </span>
                               <button type="button" title="Remove Target threshold" onClick={() => {
-                                handleInputChange(p.symbol, 'target', '');
-                                handleInputCommit(p.symbol, 'target');
+                                handleInputCommit(p.symbol, 'target', '');
                               }} className="text-zinc-500 hover:text-red-400 transition-colors cursor-pointer text-xs">✕</button>
                             </div>
                           );
