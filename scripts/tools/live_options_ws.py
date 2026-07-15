@@ -131,17 +131,21 @@ def _f(val, default: float = 0.0) -> float:
         return default
 
 
-def atomic_write(path: str, data: dict):
+def atomic_write(path: str, data: dict) -> bool:
     tmp = path + '.tmp'
     try:
         with open(tmp, 'w') as f:
             json.dump(data, f)
         os.replace(tmp, path)
+        return True
     except PermissionError:
-        # File is locked by Next.js reader, skip this cycle
-        pass
+        # File is locked by a concurrent reader (e.g. the Next.js API route) — skip
+        # this cycle. Caller must NOT advance its "last written" bookkeeping on
+        # failure, or the dropped write is never retried and the file goes stale.
+        return False
     except Exception as e:
         print(f"[live_options_ws] Warning: failed to write {path} ({e})", flush=True)
+        return False
 
 
 def write_status(status: str, underlying: str = '', expiry: str = '',
@@ -360,8 +364,11 @@ def main():
 
             if current_quotes != last_quotes:
                 current_quotes['updated_at'] = now_iso
-                atomic_write(QUOTES_FILE, current_quotes)
-                last_quotes = current_quotes
+                if atomic_write(QUOTES_FILE, current_quotes):
+                    last_quotes = current_quotes
+                # else: write was dropped (e.g. lock contention) — leave last_quotes
+                # unchanged so this same state is retried on the next loop tick
+                # instead of going stale until the next real market data change.
 
             now_ts = time.time()
 
