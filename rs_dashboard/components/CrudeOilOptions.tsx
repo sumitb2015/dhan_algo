@@ -108,6 +108,11 @@ function fmtLTP(n: number | undefined): string {
   return `₹${n.toLocaleString('en-IN', { minimumFractionDigits: 1, maximumFractionDigits: 1 })}`;
 }
 
+function fmtPnl(n: number): string {
+  const abs = Math.abs(n).toLocaleString('en-IN', { minimumFractionDigits: 1, maximumFractionDigits: 1 });
+  return `${n < 0 ? '-' : '+'}₹${abs}`;
+}
+
 function pctColor(n: number): string {
   return n > 0 ? 'text-emerald-400' : n < 0 ? 'text-red-400' : 'text-zinc-400';
 }
@@ -238,6 +243,10 @@ export default function CrudeOilOptions() {
 
   const activePositions = crudePositions.filter(p => p.netQty !== 0);
   const activePositionsCount = activePositions.length;
+
+  const totalRealized   = crudePositions.reduce((sum, p) => sum + p.realizedProfit, 0);
+  const totalUnrealized = crudePositions.reduce((sum, p) => sum + p.unrealizedProfit, 0);
+  const totalPnl        = totalRealized + totalUnrealized;
 
   const handleExitAll = async () => {
     if (activePositions.length === 0) return;
@@ -720,6 +729,17 @@ export default function CrudeOilOptions() {
 
         {/* Action Controls & Navigation */}
         <div className="ml-auto flex items-center gap-3">
+          {crudePositions.length > 0 && (
+            <div className="flex items-center gap-2.5 px-3.5 py-1.5 rounded-lg border border-zinc-800 bg-zinc-900">
+              <span className="text-[10px] font-bold text-zinc-500 uppercase tracking-wider">Crude P&L</span>
+              <span className={`text-sm font-bold tabular-nums ${totalPnl > 0 ? 'text-emerald-400' : totalPnl < 0 ? 'text-red-400' : 'text-zinc-300'}`}>
+                {fmtPnl(totalPnl)}
+              </span>
+              <span className="text-[10px] text-zinc-500 tabular-nums whitespace-nowrap">
+                R {fmtPnl(totalRealized)} · U {fmtPnl(totalUnrealized)}
+              </span>
+            </div>
+          )}
           <button
             type="button"
             onClick={handleExitAll}
