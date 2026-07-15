@@ -504,154 +504,175 @@ export default function CrudeOilOptions() {
     return () => { if (tradesIntervalRef.current) clearInterval(tradesIntervalRef.current); };
   }, [fetchCrudeTrades]);
 
-  // --- SL and Target Risk Management ---
-  const [riskConfigs, setRiskConfigs] = useState<Record<string, { sl: number | null; target: number | null }>>({});
+  // --- SL and Target: Broker-Level Orders ---
+  // brokerOrders tracks placed order IDs so we can cancel them if the user clears the field
+  type BrokerOrderEntry = { orderId: string; price: number; type: 'sl' | 'target'; placing?: boolean };
+  const [brokerOrders, setBrokerOrders] = useState<Record<string, { sl?: BrokerOrderEntry; target?: BrokerOrderEntry }>>({});
+  const brokerOrdersRef = useRef<Record<string, { sl?: BrokerOrderEntry; target?: BrokerOrderEntry }>>({});
   const [editingConfigs, setEditingConfigs] = useState<Record<string, { sl?: string; target?: string }>>({});
 
   useEffect(() => {
     try {
-      const saved = localStorage.getItem('crude_risk_configs');
-      if (saved) setRiskConfigs(JSON.parse(saved));
+      const saved = localStorage.getItem('crude_broker_orders');
+      if (saved) setBrokerOrders(JSON.parse(saved));
     } catch {}
   }, []);
+
+  const saveBrokerOrders = (updated: typeof brokerOrders) => {
+    brokerOrdersRef.current = updated;
+    setBrokerOrders(updated);
+    localStorage.setItem('crude_broker_orders', JSON.stringify(updated));
+  };
 
   const handleInputChange = (symbol: string, key: 'sl' | 'target', value: string) => {
     setEditingConfigs(prev => ({
       ...prev,
-      [symbol]: {
-        ...(prev[symbol] || {}),
-        [key]: value,
-      },
+      [symbol]: { ...(prev[symbol] || {}), [key]: value },
     }));
   };
 
-  const handleInputCommit = (symbol: string, key: 'sl' | 'target') => {
+  // Called when user presses Enter or blurs the input
+  const handleInputCommit = useCallback((symbol: string, key: 'sl' | 'target') => {
     const editState = editingConfigs[symbol];
     if (!editState || editState[key] === undefined) return;
 
     const rawVal = editState[key]!;
-    const num = (rawVal === '' || isNaN(parseFloat(rawVal))) ? null : parseFloat(rawVal);
+    const price = (rawVal === '' || isNaN(parseFloat(rawVal))) ? null : parseFloat(rawVal);
 
-    const updated = {
-      ...riskConfigs,
-      [symbol]: {
-        ...(riskConfigs[symbol] || { sl: null, target: null }),
-        [key]: num,
-      },
-    };
-    setRiskConfigs(updated);
-    localStorage.setItem('crude_risk_configs', JSON.stringify(updated));
-
-    // Remove from editing states once committed
+    // Clear the editing buffer
     setEditingConfigs(prev => {
       const copy = { ...prev };
       if (copy[symbol]) {
         delete copy[symbol][key];
-        if (Object.keys(copy[symbol]).length === 0) {
-          delete copy[symbol];
-        }
+        if (Object.keys(copy[symbol]).length === 0) delete copy[symbol];
       }
       return copy;
     });
-  };
 
-  const handleAutoExits = useCallback(async (
-    triggers: { position: CrudePosition; type: 'SL' | 'Target'; targetPrice: number }[]
-  ) => {
-    const legs = triggers.map(t => {
-      const p = t.position;
-      return {
-        securityId: p.securityId || '',
-        quantity: Math.abs(p.netQty),
-        side: (p.netQty > 0 ? 'SELL' : 'BUY') as 'BUY' | 'SELL',
-        exchangeSegment: p.exchangeSegment || 'MCX_COMM',
+    if (price === null || price <= 0) {
+      // User cleared the field → cancel existing broker order if any
+      const existing = brokerOrdersRef.current[symbol]?.[key];
+      if (existing?.orderId) {
+        void (async () => {
+          try {
+            await fetch('/api/options/order/cancel', {
+              method: 'DELETE',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ orderId: existing.orderId }),
+            });
+          } catch {}
+          const updated = { ...brokerOrdersRef.current };
+          if (updated[symbol]) {
+            delete updated[symbol][key];
+            if (Object.keys(updated[symbol]).length === 0) delete updated[symbol];
+          }
+          saveBrokerOrders(updated);
+          setOrderMessage({ text: `${key.toUpperCase()} order for ${symbol} cancelled.`, isError: false });
+        })();
+      }
+      return;
+    }
+
+    // Find the position to determine side
+    const pos = crudePositions.find(p => p.symbol === symbol && p.netQty !== 0);
+    if (!pos || !pos.securityId) {
+      setOrderMessage({ text: `Cannot place ${key.toUpperCase()} order: position not found.`, isError: true });
+      return;
+    }
+
+    // If an existing order exists for this key, cancel it first
+    const existingOrderId = brokerOrdersRef.current[symbol]?.[key]?.orderId;
+
+    // Determine direction:
+    // SHORT position (netQty < 0): SL = BUY if price rises; Target = BUY if price falls
+    // LONG position (netQty > 0): SL = SELL if price falls; Target = SELL if price rises
+    const closeSide: 'BUY' | 'SELL' = pos.netQty < 0 ? 'BUY' : 'SELL';
+
+    // Order type:
+    // SL → STOP_LOSS_MARKET (executes at market when triggered — safest for options)
+    // Target → LIMIT (sits at the exchange at the specified price)
+    const orderType = key === 'sl' ? 'STOP_LOSS_MARKET' : 'LIMIT';
+
+    // Mark as placing using the current stable ref
+    const preSnapshot = { ...brokerOrdersRef.current };
+    saveBrokerOrders({
+      ...preSnapshot,
+      [symbol]: {
+        ...(preSnapshot[symbol] || {}),
+        [key]: { orderId: '', price, type: key, placing: true },
+      },
+    });
+
+    void (async () => {
+      // Cancel previous order if any
+      if (existingOrderId) {
+        try {
+          await fetch('/api/options/order/cancel', {
+            method: 'DELETE',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ orderId: existingOrderId }),
+          });
+        } catch {}
+      }
+
+      // Place new broker order
+      const leg = {
+        securityId: pos.securityId!,
+        quantity: Math.abs(pos.netQty),
+        side: closeSide,
+        exchangeSegment: pos.exchangeSegment || 'MCX_COMM',
+        orderType,
+        ...(key === 'sl'     ? { triggerPrice: price, price: 0 } : {}),
+        ...(key === 'target' ? { price, triggerPrice: 0 }        : {}),
       };
-    });
 
-    // Clear triggered configs immediately to prevent duplicate runs
-    const updated = { ...riskConfigs };
-    triggers.forEach(t => { delete updated[t.position.symbol]; });
-    setRiskConfigs(updated);
-    localStorage.setItem('crude_risk_configs', JSON.stringify(updated));
+      try {
+        const res = await fetch('/api/options/order', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ legs: [leg], mode: 'intraday' }),
+        });
+        const json = await res.json() as { success: boolean; data?: { orderId: string }[]; error?: string };
 
-    // Clear editing configs
-    setEditingConfigs(prev => {
-      const copy = { ...prev };
-      triggers.forEach(t => { delete copy[t.position.symbol]; });
-      return copy;
-    });
-
-    const triggerNames = triggers.map(t => `${t.position.symbol} (${t.type} hit at ₹${t.targetPrice})`).join(', ');
-    setOrderMessage({ text: `Auto-exit triggered: ${triggerNames}. Placing orders…`, isError: false });
-
-    try {
-      const res = await fetch('/api/options/order', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ legs, mode: 'intraday' }),
-      });
-      const json = await res.json() as { success: boolean; error?: string };
-      if (json.success) {
-        setOrderMessage({ text: `Auto-exit square-off completed for: ${triggerNames}.`, isError: false });
-        void fetchCrudeTrades();
-      } else {
-        setOrderMessage({ text: `Auto-exit order failed: ${json.error ?? 'Unknown error'}`, isError: true });
+        if (json.success && json.data?.[0]?.orderId) {
+          const orderId = json.data[0].orderId;
+          const afterSnap = { ...brokerOrdersRef.current };
+          saveBrokerOrders({
+            ...afterSnap,
+            [symbol]: {
+              ...(afterSnap[symbol] || {}),
+              [key]: { orderId, price, type: key, placing: false },
+            },
+          });
+          const label = key === 'sl' ? 'Stop-Loss Market' : 'Limit Target';
+          setOrderMessage({ text: `${label} order placed for ${symbol} @ ₹${price} (ID: ${orderId})`, isError: false });
+        } else {
+          const afterSnap = { ...brokerOrdersRef.current };
+          if (afterSnap[symbol]) { delete afterSnap[symbol][key]; }
+          saveBrokerOrders(afterSnap);
+          setOrderMessage({ text: `Failed to place ${key.toUpperCase()} order: ${json.error ?? 'Unknown error'}`, isError: true });
+        }
+      } catch (err) {
+        const afterSnap = { ...brokerOrdersRef.current };
+        if (afterSnap[symbol]) { delete afterSnap[symbol][key]; }
+        saveBrokerOrders(afterSnap);
+        setOrderMessage({ text: `Error placing ${key.toUpperCase()} order: ${String(err)}`, isError: true });
       }
-    } catch (err) {
-      setOrderMessage({ text: `Error during auto-exit order: ${String(err)}`, isError: true });
-    }
-  }, [riskConfigs, fetchCrudeTrades]);
+    })();
+  }, [editingConfigs, crudePositions]);
 
-  // Monitor positions for SL/Target hits and stale configurations
+  // Prune stale broker order entries when positions close
   useEffect(() => {
-    if (crudePositions.length === 0) return;
-    
-    const active = crudePositions.filter(p => p.netQty !== 0);
-    const triggers: { position: CrudePosition; type: 'SL' | 'Target'; targetPrice: number }[] = [];
-    
-    // Prune stale configs
+    if (Object.keys(brokerOrders).length === 0) return;
     let hasStale = false;
-    const cleanedRiskConfigs = { ...riskConfigs };
-    Object.keys(riskConfigs).forEach(sym => {
+    const cleaned = { ...brokerOrders };
+    Object.keys(cleaned).forEach(sym => {
       const pos = crudePositions.find(p => p.symbol === sym);
-      if (!pos || pos.netQty === 0) {
-        delete cleanedRiskConfigs[sym];
-        hasStale = true;
-      }
+      if (!pos || pos.netQty === 0) { delete cleaned[sym]; hasStale = true; }
     });
-
-    if (hasStale) {
-      setRiskConfigs(cleanedRiskConfigs);
-      localStorage.setItem('crude_risk_configs', JSON.stringify(cleanedRiskConfigs));
-    }
-    
-    // Check triggers on remaining configurations
-    active.forEach(p => {
-      const config = cleanedRiskConfigs[p.symbol];
-      if (!config) return;
-      
-      const price = p.lastPrice;
-      if (price <= 0) return;
-      
-      if (p.netQty > 0) {
-        if (config.sl !== null && config.sl > 0 && price <= config.sl) {
-          triggers.push({ position: p, type: 'SL', targetPrice: config.sl });
-        } else if (config.target !== null && config.target > 0 && price >= config.target) {
-          triggers.push({ position: p, type: 'Target', targetPrice: config.target });
-        }
-      } else if (p.netQty < 0) {
-        if (config.sl !== null && config.sl > 0 && price >= config.sl) {
-          triggers.push({ position: p, type: 'SL', targetPrice: config.sl });
-        } else if (config.target !== null && config.target > 0 && price <= config.target) {
-          triggers.push({ position: p, type: 'Target', targetPrice: config.target });
-        }
-      }
-    });
-
-    if (triggers.length > 0) {
-      void handleAutoExits(triggers);
-    }
-  }, [crudePositions, riskConfigs, handleAutoExits]);
+    if (hasStale) saveBrokerOrders(cleaned);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [crudePositions]);
 
   // Style helpers
   const thCls = 'text-xs font-bold text-zinc-300 bg-zinc-800/80 px-3 py-2.5 whitespace-nowrap border-b border-zinc-700';
@@ -1084,8 +1105,8 @@ export default function CrudeOilOptions() {
                     <th className={thCls}>Buy Avg</th>
                     <th className={thCls}>Sell Avg</th>
                     <th className={thCls}>LTP</th>
-                    <th className={`${thCls} w-24 text-center`}>SL Price</th>
-                    <th className={`${thCls} w-24 text-center`}>Target Price</th>
+                    <th className={`${thCls} w-28 text-center`}>SL (SLM Order)</th>
+                    <th className={`${thCls} w-28 text-center`}>Target (LMT Order)</th>
                     <th className={thCls}>Realized</th>
                     <th className={thCls}>Unrealized</th>
                   </tr>
@@ -1097,17 +1118,93 @@ export default function CrudeOilOptions() {
                     <tr><td colSpan={10} className="px-4 py-8 text-center text-zinc-500">No open positions</td></tr>
                   ) : (
                     crudePositions.map((p, i) => {
-                      const config = riskConfigs[p.symbol] || { sl: null, target: null };
-                      
-                      const isEditingSL = editingConfigs[p.symbol]?.sl !== undefined;
-                      const slVal = isEditingSL 
-                        ? editingConfigs[p.symbol].sl! 
-                        : (config.sl !== null ? String(config.sl) : '');
+                      const bOrders = brokerOrders[p.symbol] || {};
+                      const slOrder   = bOrders.sl;
+                      const tgtOrder  = bOrders.target;
 
+                      const isEditingSL     = editingConfigs[p.symbol]?.sl !== undefined;
+                      const slInputVal      = isEditingSL ? editingConfigs[p.symbol].sl! : (slOrder?.price ? String(slOrder.price) : '');
                       const isEditingTarget = editingConfigs[p.symbol]?.target !== undefined;
-                      const targetVal = isEditingTarget 
-                        ? editingConfigs[p.symbol].target! 
-                        : (config.target !== null ? String(config.target) : '');
+                      const tgtInputVal     = isEditingTarget ? editingConfigs[p.symbol].target! : (tgtOrder?.price ? String(tgtOrder.price) : '');
+
+                      const renderOrderCell = (
+                        key: 'sl' | 'target',
+                        order: typeof slOrder,
+                        inputVal: string,
+                        isEditing: boolean,
+                      ) => {
+                        if (p.netQty === 0) return <span className="text-zinc-600">—</span>;
+
+                        // Order is placed and confirmed at broker → show badge + cancel
+                        if (order && order.orderId && !order.placing) {
+                          const isSlKey = key === 'sl';
+                          return (
+                            <div className="flex items-center gap-1 justify-center">
+                              <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded-md border ${
+                                isSlKey
+                                  ? 'text-red-300 bg-red-950/40 border-red-800/60'
+                                  : 'text-emerald-300 bg-emerald-950/40 border-emerald-800/60'
+                              }`}>
+                                {isSlKey ? 'SLM' : 'LMT'} ₹{order.price}
+                              </span>
+                              <button
+                                type="button"
+                                title="Cancel this broker order"
+                                onClick={() => {
+                                  handleInputChange(p.symbol, key, '');
+                                  void (async () => {
+                                    try {
+                                      await fetch('/api/options/order/cancel', {
+                                        method: 'DELETE',
+                                        headers: { 'Content-Type': 'application/json' },
+                                        body: JSON.stringify({ orderId: order.orderId }),
+                                      });
+                                    } catch {}
+                                    const updated = { ...brokerOrders };
+                                    if (updated[p.symbol]) {
+                                      delete updated[p.symbol][key];
+                                      if (Object.keys(updated[p.symbol]).length === 0) delete updated[p.symbol];
+                                    }
+                                    saveBrokerOrders(updated);
+                                    setOrderMessage({ text: `${key.toUpperCase()} order for ${p.symbol} cancelled.`, isError: false });
+                                    void fetchCrudeTrades();
+                                  })();
+                                }}
+                                className="text-zinc-500 hover:text-red-400 transition-colors cursor-pointer"
+                              >
+                                ✕
+                              </button>
+                            </div>
+                          );
+                        }
+
+                        // Order is being placed → spinner
+                        if (order?.placing) {
+                          return (
+                            <div className="flex items-center gap-1 justify-center text-zinc-500 text-[10px]">
+                              <Loader2 className="h-3 w-3 animate-spin" /> Placing…
+                            </div>
+                          );
+                        }
+
+                        // No order yet → show input
+                        return (
+                          <input
+                            type="number"
+                            step="0.1"
+                            placeholder="None"
+                            value={inputVal}
+                            onChange={(e) => handleInputChange(p.symbol, key, e.target.value)}
+                            onBlur={() => handleInputCommit(p.symbol, key)}
+                            onKeyDown={(e) => { if (e.key === 'Enter') e.currentTarget.blur(); }}
+                            className={`w-20 bg-zinc-950/80 border rounded text-center py-1 text-xs tabular-nums focus:outline-none focus:ring-1 transition-all font-semibold ${
+                              key === 'sl'
+                                ? 'border-zinc-800 focus:border-red-500/50 focus:ring-red-500/20 text-zinc-200'
+                                : 'border-zinc-800 focus:border-emerald-500/50 focus:ring-emerald-500/20 text-zinc-200'
+                            }`}
+                          />
+                        );
+                      };
 
                       return (
                         <tr key={`${p.symbol}-${i}`} className="border-t border-zinc-800/80 hover:bg-zinc-800/20 transition-colors">
@@ -1117,43 +1214,8 @@ export default function CrudeOilOptions() {
                           <td className="px-3 py-2 tabular-nums text-zinc-400">{fmtLTP(p.buyAvg)}</td>
                           <td className="px-3 py-2 tabular-nums text-zinc-400">{fmtLTP(p.sellAvg)}</td>
                           <td className="px-3 py-2 tabular-nums text-zinc-200">{fmtLTP(p.lastPrice)}</td>
-                          
-                          {/* SL input */}
-                          <td className="px-2 py-1 text-center">
-                            {p.netQty !== 0 ? (
-                              <input
-                                type="number"
-                                step="0.1"
-                                placeholder="None"
-                                value={slVal}
-                                onChange={(e) => handleInputChange(p.symbol, 'sl', e.target.value)}
-                                onBlur={() => handleInputCommit(p.symbol, 'sl')}
-                                onKeyDown={(e) => { if (e.key === 'Enter') e.currentTarget.blur(); }}
-                                className="w-20 bg-zinc-950/80 border border-zinc-800 focus:border-red-500/50 text-zinc-200 rounded text-center py-1 text-xs tabular-nums focus:outline-none focus:ring-1 focus:ring-red-500/20 transition-all font-semibold"
-                              />
-                            ) : (
-                              <span className="text-zinc-600">—</span>
-                            )}
-                          </td>
-
-                          {/* Target input */}
-                          <td className="px-2 py-1 text-center">
-                            {p.netQty !== 0 ? (
-                              <input
-                                type="number"
-                                step="0.1"
-                                placeholder="None"
-                                value={targetVal}
-                                onChange={(e) => handleInputChange(p.symbol, 'target', e.target.value)}
-                                onBlur={() => handleInputCommit(p.symbol, 'target')}
-                                onKeyDown={(e) => { if (e.key === 'Enter') e.currentTarget.blur(); }}
-                                className="w-20 bg-zinc-950/80 border border-zinc-800 focus:border-emerald-500/50 text-zinc-200 rounded text-center py-1 text-xs tabular-nums focus:outline-none focus:ring-1 focus:ring-emerald-500/20 transition-all font-semibold"
-                              />
-                            ) : (
-                              <span className="text-zinc-600">—</span>
-                            )}
-                          </td>
-
+                          <td className="px-2 py-1 text-center">{renderOrderCell('sl',     slOrder,  slInputVal,  isEditingSL)}</td>
+                          <td className="px-2 py-1 text-center">{renderOrderCell('target', tgtOrder, tgtInputVal, isEditingTarget)}</td>
                           <td className={`px-3 py-2 tabular-nums font-semibold ${pctColor(p.realizedProfit)}`}>{fmtLTP(p.realizedProfit)}</td>
                           <td className={`px-3 py-2 tabular-nums font-semibold ${pctColor(p.unrealizedProfit)}`}>{fmtLTP(p.unrealizedProfit)}</td>
                         </tr>

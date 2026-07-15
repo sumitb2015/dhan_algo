@@ -41,7 +41,15 @@ function getToken(): { clientId: string; token: string } {
 
 export async function POST(req: NextRequest): Promise<NextResponse> {
   const body = await req.json().catch(() => null) as {
-    legs?: { securityId: string; quantity: number; side: 'BUY' | 'SELL'; exchangeSegment?: string }[];
+    legs?: {
+      securityId: string;
+      quantity: number;
+      side: 'BUY' | 'SELL';
+      exchangeSegment?: string;
+      orderType?: 'MARKET' | 'LIMIT' | 'STOP_LOSS_MARKET' | 'STOP_LOSS';
+      price?: number;        // limit price (for LIMIT and STOP_LOSS orders)
+      triggerPrice?: number; // trigger price (for STOP_LOSS_MARKET and STOP_LOSS orders)
+    }[];
     mode?: 'intraday' | 'positional';
   } | null;
 
@@ -60,6 +68,13 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     if (!Number.isFinite(leg.quantity) || leg.quantity <= 0) {
       invalidLegs.push(`leg ${leg.securityId}: invalid quantity=${leg.quantity}`);
     }
+    const ot = leg.orderType ?? 'MARKET';
+    if ((ot === 'STOP_LOSS_MARKET' || ot === 'STOP_LOSS') && (!leg.triggerPrice || leg.triggerPrice <= 0)) {
+      invalidLegs.push(`leg ${leg.securityId}: SL/trigger order requires a valid triggerPrice`);
+    }
+    if (ot === 'LIMIT' && (!leg.price || leg.price <= 0)) {
+      invalidLegs.push(`leg ${leg.securityId}: LIMIT order requires a valid price`);
+    }
   }
   if (invalidLegs.length > 0) {
     return NextResponse.json({
@@ -73,21 +88,26 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     const productType = mode === 'positional' ? 'MARGIN' : 'INTRADAY';
 
     const orderPromises = legs.map(async (leg) => {
+      const orderType = leg.orderType ?? 'MARKET';
+      // For STOP_LOSS_MARKET: price=0, triggerPrice=trigger
+      // For STOP_LOSS (limit): price=leg.price, triggerPrice=trigger
+      // For LIMIT: price=leg.price, triggerPrice=0
+      // For MARKET: price=0, triggerPrice=0
       const payload = {
         dhanClientId:     clientId,
         transactionType:  leg.side,
         exchangeSegment:  leg.exchangeSegment || 'NSE_FNO',
         productType,
-        orderType:        'MARKET',
+        orderType,
         validity:         'DAY',
         securityId:       String(leg.securityId),
         quantity:         Number(leg.quantity),
         disclosedQuantity: 0,
-        price:            0,
+        price:            leg.price ?? 0,
         afterMarketOrder: false,
         boProfitValue:    0,
         boStopLossValue:  0,
-        triggerPrice:     0,
+        triggerPrice:     leg.triggerPrice ?? 0,
       };
 
       try {
