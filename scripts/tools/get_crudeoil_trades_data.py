@@ -47,7 +47,7 @@ def main():
                     "buyAvg": float(row.get('buyAvg', 0) or 0),
                     "sellAvg": float(row.get('sellAvg', 0) or 0),
                     "lastPrice": ltp,
-                    "realizedProfit": float(row.get('realizedProfit', 0) or 0) * multiplier,
+                    "realizedProfit": float(row.get('realizedProfit', 0) or 0),
                     "unrealizedProfit": float(row.get('unrealizedProfit', 0) or 0) * multiplier,
                 })
     except Exception:
