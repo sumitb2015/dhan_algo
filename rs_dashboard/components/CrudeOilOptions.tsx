@@ -222,6 +222,8 @@ export default function CrudeOilOptions() {
 
   const [activeTab, setActiveTab]           = useState<'chain' | 'oi' | 'cumulative'>('chain');
 
+
+
   const [exitingAll, setExitingAll]         = useState(false);
 
   const activePositions = crudePositions.filter(p => p.netQty !== 0);
@@ -501,6 +503,103 @@ export default function CrudeOilOptions() {
     tradesIntervalRef.current = setInterval(fetchCrudeTrades, POLL_MS);
     return () => { if (tradesIntervalRef.current) clearInterval(tradesIntervalRef.current); };
   }, [fetchCrudeTrades]);
+
+  // --- SL and Target Risk Management ---
+  const [riskConfigs, setRiskConfigs] = useState<Record<string, { sl: number | null; target: number | null }>>({});
+
+  useEffect(() => {
+    try {
+      const saved = localStorage.getItem('crude_risk_configs');
+      if (saved) setRiskConfigs(JSON.parse(saved));
+    } catch {}
+  }, []);
+
+  const updateRiskConfig = (symbol: string, key: 'sl' | 'target', val: string) => {
+    const num = val === '' ? null : parseFloat(val);
+    const updated = {
+      ...riskConfigs,
+      [symbol]: {
+        ...(riskConfigs[symbol] || { sl: null, target: null }),
+        [key]: num,
+      },
+    };
+    setRiskConfigs(updated);
+    localStorage.setItem('crude_risk_configs', JSON.stringify(updated));
+  };
+
+  const handleAutoExits = useCallback(async (
+    triggers: { position: CrudePosition; type: 'SL' | 'Target'; targetPrice: number }[]
+  ) => {
+    const legs = triggers.map(t => {
+      const p = t.position;
+      return {
+        securityId: p.securityId || '',
+        quantity: Math.abs(p.netQty),
+        side: (p.netQty > 0 ? 'SELL' : 'BUY') as 'BUY' | 'SELL',
+        exchangeSegment: p.exchangeSegment || 'MCX_COMM',
+      };
+    });
+
+    // Clear triggered configs immediately to prevent duplicate runs
+    const updated = { ...riskConfigs };
+    triggers.forEach(t => { delete updated[t.position.symbol]; });
+    setRiskConfigs(updated);
+    localStorage.setItem('crude_risk_configs', JSON.stringify(updated));
+
+    const triggerNames = triggers.map(t => `${t.position.symbol} (${t.type} hit at ₹${t.targetPrice})`).join(', ');
+    setOrderMessage({ text: `Auto-exit triggered: ${triggerNames}. Placing orders…`, isError: false });
+
+    try {
+      const res = await fetch('/api/options/order', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ legs, mode: 'intraday' }),
+      });
+      const json = await res.json() as { success: boolean; error?: string };
+      if (json.success) {
+        setOrderMessage({ text: `Auto-exit square-off completed for: ${triggerNames}.`, isError: false });
+        void fetchCrudeTrades();
+      } else {
+        setOrderMessage({ text: `Auto-exit order failed: ${json.error ?? 'Unknown error'}`, isError: true });
+      }
+    } catch (err) {
+      setOrderMessage({ text: `Error during auto-exit order: ${String(err)}`, isError: true });
+    }
+  }, [riskConfigs, fetchCrudeTrades]);
+
+  // Monitor positions for SL/Target hits
+  useEffect(() => {
+    if (crudePositions.length === 0) return;
+    
+    const active = crudePositions.filter(p => p.netQty !== 0);
+    const triggers: { position: CrudePosition; type: 'SL' | 'Target'; targetPrice: number }[] = [];
+    
+    active.forEach(p => {
+      const config = riskConfigs[p.symbol];
+      if (!config) return;
+      
+      const price = p.lastPrice;
+      if (price <= 0) return;
+      
+      if (p.netQty > 0) {
+        if (config.sl !== null && config.sl > 0 && price <= config.sl) {
+          triggers.push({ position: p, type: 'SL', targetPrice: config.sl });
+        } else if (config.target !== null && config.target > 0 && price >= config.target) {
+          triggers.push({ position: p, type: 'Target', targetPrice: config.target });
+        }
+      } else if (p.netQty < 0) {
+        if (config.sl !== null && config.sl > 0 && price >= config.sl) {
+          triggers.push({ position: p, type: 'SL', targetPrice: config.sl });
+        } else if (config.target !== null && config.target > 0 && price <= config.target) {
+          triggers.push({ position: p, type: 'Target', targetPrice: config.target });
+        }
+      }
+    });
+
+    if (triggers.length > 0) {
+      void handleAutoExits(triggers);
+    }
+  }, [crudePositions, riskConfigs, handleAutoExits]);
 
   // Style helpers
   const thCls = 'text-xs font-bold text-zinc-300 bg-zinc-800/80 px-3 py-2.5 whitespace-nowrap border-b border-zinc-700';
@@ -933,28 +1032,66 @@ export default function CrudeOilOptions() {
                     <th className={thCls}>Buy Avg</th>
                     <th className={thCls}>Sell Avg</th>
                     <th className={thCls}>LTP</th>
+                    <th className={`${thCls} w-24 text-center`}>SL Price</th>
+                    <th className={`${thCls} w-24 text-center`}>Target Price</th>
                     <th className={thCls}>Realized</th>
                     <th className={thCls}>Unrealized</th>
                   </tr>
                 </thead>
                 <tbody>
                   {tradesLoading ? (
-                    <tr><td colSpan={8} className="px-4 py-8 text-center text-zinc-500">Loading positions…</td></tr>
+                    <tr><td colSpan={10} className="px-4 py-8 text-center text-zinc-500">Loading positions…</td></tr>
                   ) : crudePositions.length === 0 ? (
-                    <tr><td colSpan={8} className="px-4 py-8 text-center text-zinc-500">No open positions</td></tr>
+                    <tr><td colSpan={10} className="px-4 py-8 text-center text-zinc-500">No open positions</td></tr>
                   ) : (
-                    crudePositions.map((p, i) => (
-                      <tr key={`${p.symbol}-${i}`} className="border-t border-zinc-800/80 hover:bg-zinc-800/20 transition-colors">
-                        <td className="px-3 py-2 text-zinc-200 font-semibold">{p.symbol}</td>
-                        <td className="px-3 py-2 text-zinc-400">{p.positionType}</td>
-                        <td className="px-3 py-2 tabular-nums text-zinc-200">{p.netQty}</td>
-                        <td className="px-3 py-2 tabular-nums text-zinc-400">{fmtLTP(p.buyAvg)}</td>
-                        <td className="px-3 py-2 tabular-nums text-zinc-400">{fmtLTP(p.sellAvg)}</td>
-                        <td className="px-3 py-2 tabular-nums text-zinc-200">{fmtLTP(p.lastPrice)}</td>
-                        <td className={`px-3 py-2 tabular-nums font-semibold ${pctColor(p.realizedProfit)}`}>{fmtLTP(p.realizedProfit)}</td>
-                        <td className={`px-3 py-2 tabular-nums font-semibold ${pctColor(p.unrealizedProfit)}`}>{fmtLTP(p.unrealizedProfit)}</td>
-                      </tr>
-                    ))
+                    crudePositions.map((p, i) => {
+                      const config = riskConfigs[p.symbol] || { sl: null, target: null };
+                      return (
+                        <tr key={`${p.symbol}-${i}`} className="border-t border-zinc-800/80 hover:bg-zinc-800/20 transition-colors">
+                          <td className="px-3 py-2 text-zinc-200 font-semibold">{p.symbol}</td>
+                          <td className="px-3 py-2 text-zinc-400">{p.positionType}</td>
+                          <td className="px-3 py-2 tabular-nums text-zinc-200">{p.netQty}</td>
+                          <td className="px-3 py-2 tabular-nums text-zinc-400">{fmtLTP(p.buyAvg)}</td>
+                          <td className="px-3 py-2 tabular-nums text-zinc-400">{fmtLTP(p.sellAvg)}</td>
+                          <td className="px-3 py-2 tabular-nums text-zinc-200">{fmtLTP(p.lastPrice)}</td>
+                          
+                          {/* SL input */}
+                          <td className="px-2 py-1 text-center">
+                            {p.netQty !== 0 ? (
+                              <input
+                                type="number"
+                                step="0.1"
+                                placeholder="None"
+                                value={config.sl !== null ? config.sl : ''}
+                                onChange={(e) => updateRiskConfig(p.symbol, 'sl', e.target.value)}
+                                className="w-20 bg-zinc-950/80 border border-zinc-800 focus:border-red-500/50 text-zinc-200 rounded text-center py-1 text-xs tabular-nums focus:outline-none focus:ring-1 focus:ring-red-500/20 transition-all font-semibold"
+                              />
+                            ) : (
+                              <span className="text-zinc-600">—</span>
+                            )}
+                          </td>
+
+                          {/* Target input */}
+                          <td className="px-2 py-1 text-center">
+                            {p.netQty !== 0 ? (
+                              <input
+                                type="number"
+                                step="0.1"
+                                placeholder="None"
+                                value={config.target !== null ? config.target : ''}
+                                onChange={(e) => updateRiskConfig(p.symbol, 'target', e.target.value)}
+                                className="w-20 bg-zinc-950/80 border border-zinc-800 focus:border-emerald-500/50 text-zinc-200 rounded text-center py-1 text-xs tabular-nums focus:outline-none focus:ring-1 focus:ring-emerald-500/20 transition-all font-semibold"
+                              />
+                            ) : (
+                              <span className="text-zinc-600">—</span>
+                            )}
+                          </td>
+
+                          <td className={`px-3 py-2 tabular-nums font-semibold ${pctColor(p.realizedProfit)}`}>{fmtLTP(p.realizedProfit)}</td>
+                          <td className={`px-3 py-2 tabular-nums font-semibold ${pctColor(p.unrealizedProfit)}`}>{fmtLTP(p.unrealizedProfit)}</td>
+                        </tr>
+                      );
+                    })
                   )}
                 </tbody>
               </table>
