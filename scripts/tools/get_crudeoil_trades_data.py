@@ -35,6 +35,11 @@ def main():
                 if not is_crude(symbol):
                     continue
                 ltp = float(row.get('lastPrice', 0) or row.get('lastTradedPrice', 0) or 0)
+                
+                # Check if it is a crude oil option contract to multiply P&L by the lot size (100)
+                is_option = any(suffix in symbol.upper() for suffix in ["-CE", "-PE", "CALL", "PUT"])
+                multiplier = 100 if is_option else 1
+
                 positions_list.append({
                     "symbol": symbol,
                     "positionType": str(row.get('positionType', '')),
@@ -42,8 +47,8 @@ def main():
                     "buyAvg": float(row.get('buyAvg', 0) or 0),
                     "sellAvg": float(row.get('sellAvg', 0) or 0),
                     "lastPrice": ltp,
-                    "realizedProfit": float(row.get('realizedProfit', 0) or 0),
-                    "unrealizedProfit": float(row.get('unrealizedProfit', 0) or 0),
+                    "realizedProfit": float(row.get('realizedProfit', 0) or 0) * multiplier,
+                    "unrealizedProfit": float(row.get('unrealizedProfit', 0) or 0) * multiplier,
                 })
     except Exception:
         pass
