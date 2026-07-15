@@ -584,9 +584,55 @@ export default function CrudeOilOptions() {
     const existingOrderId = brokerOrdersRef.current[symbol]?.[key]?.orderId;
 
     // Determine direction:
-    // SHORT position (netQty < 0): SL = BUY if price rises; Target = BUY if price falls
-    // LONG position (netQty > 0): SL = SELL if price falls; Target = SELL if price rises
+    // SHORT position (netQty < 0): to close → BUY. SL triggers when price RISES, Target triggers when price FALLS.
+    // LONG position  (netQty > 0): to close → SELL. SL triggers when price FALLS, Target triggers when price RISES.
     const closeSide: 'BUY' | 'SELL' = pos.netQty < 0 ? 'BUY' : 'SELL';
+    const isShort = pos.netQty < 0;
+    const ltp = pos.lastPrice;
+
+    // ─── Direction validation ────────────────────────────────────────────────────
+    // For STOP_LOSS_MARKET BUY:  exchange fires when LTP ≥ triggerPrice (covers shorts)
+    //   → trigger must be ABOVE current LTP, otherwise fires immediately
+    // For STOP_LOSS_MARKET SELL: exchange fires when LTP ≤ triggerPrice (covers longs)
+    //   → trigger must be BELOW current LTP, otherwise fires immediately
+    // For LIMIT BUY (target for short): executes when LTP ≤ limitPrice
+    //   → limit price must be BELOW current LTP
+    // For LIMIT SELL (target for long): executes when LTP ≥ limitPrice
+    //   → limit price must be ABOVE current LTP
+    if (ltp > 0) {
+      if (key === 'sl') {
+        if (isShort && price <= ltp) {
+          setOrderMessage({
+            text: `SL rejected: For a SHORT position, SL (₹${price}) must be ABOVE the current LTP (₹${ltp.toFixed(1)}). Enter a higher value.`,
+            isError: true,
+          });
+          return;
+        }
+        if (!isShort && price >= ltp) {
+          setOrderMessage({
+            text: `SL rejected: For a LONG position, SL (₹${price}) must be BELOW the current LTP (₹${ltp.toFixed(1)}). Enter a lower value.`,
+            isError: true,
+          });
+          return;
+        }
+      } else {
+        // target
+        if (isShort && price >= ltp) {
+          setOrderMessage({
+            text: `Target rejected: For a SHORT position, Target (₹${price}) must be BELOW the current LTP (₹${ltp.toFixed(1)}). Enter a lower value.`,
+            isError: true,
+          });
+          return;
+        }
+        if (!isShort && price <= ltp) {
+          setOrderMessage({
+            text: `Target rejected: For a LONG position, Target (₹${price}) must be ABOVE the current LTP (₹${ltp.toFixed(1)}). Enter a higher value.`,
+            isError: true,
+          });
+          return;
+        }
+      }
+    }
 
     // Order type:
     // SL → STOP_LOSS_MARKET (executes at market when triggered — safest for options)
@@ -1105,8 +1151,8 @@ export default function CrudeOilOptions() {
                     <th className={thCls}>Buy Avg</th>
                     <th className={thCls}>Sell Avg</th>
                     <th className={thCls}>LTP</th>
-                    <th className={`${thCls} w-28 text-center`}>SL (SLM Order)</th>
-                    <th className={`${thCls} w-28 text-center`}>Target (LMT Order)</th>
+                    <th className={`${thCls} w-28 text-center`} title="SHORT: SL must be ABOVE current LTP (price rises = loss). LONG: SL must be BELOW current LTP (price falls = loss). Places a Stop-Loss Market order at the broker.">SL (SLM Order) ℹ</th>
+                    <th className={`${thCls} w-28 text-center`} title="SHORT: Target must be BELOW current LTP (price decays = profit). LONG: Target must be ABOVE current LTP (price rises = profit). Places a Limit order at the broker.">Target (LMT Order) ℹ</th>
                     <th className={thCls}>Realized</th>
                     <th className={thCls}>Unrealized</th>
                   </tr>
