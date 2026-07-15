@@ -34,7 +34,17 @@ def main():
                 symbol = str(row.get('tradingSymbol', ''))
                 if not is_crude(symbol):
                     continue
-                ltp = float(row.get('lastPrice', 0) or row.get('lastTradedPrice', 0) or 0)
+                # Calculate LTP mathematically from costPrice and unrealizedProfit (since lastPrice is not returned by the positions API)
+                net_qty = int(row.get('netQty', 0) or 0)
+                cost_price = float(row.get('costPrice', 0) or 0)
+                raw_unrealized = float(row.get('unrealizedProfit', 0) or 0)
+                
+                if net_qty > 0:
+                    ltp = cost_price + raw_unrealized
+                elif net_qty < 0:
+                    ltp = cost_price - raw_unrealized
+                else:
+                    ltp = float(row.get('lastPrice', 0) or row.get('lastTradedPrice', 0) or 0)
                 
                 # Check if it is a crude oil option contract to multiply P&L by the lot size (100)
                 is_option = any(suffix in symbol.upper() for suffix in ["-CE", "-PE", "CALL", "PUT"])
