@@ -282,16 +282,16 @@ export default function CrudeOilOITab({ expiry }: { expiry: string }) {
         </div>
       )}
 
-      {/* Charts Grid */}
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+      {/* Charts Stack (Vertical Alignment, Wide & Big) */}
+      <div className="flex flex-col gap-6">
         {/* Open Interest Bar Chart */}
-        <div className="border border-zinc-800 bg-zinc-950 rounded-xl p-4 flex flex-col gap-3 min-h-[420px]">
+        <div className="border border-zinc-800 bg-zinc-950 rounded-xl p-6 flex flex-col gap-3 min-h-[520px]">
           <div>
             <h3 className="text-xs font-bold text-zinc-200 uppercase tracking-widest">Open Interest (OI)</h3>
             <p className="text-[10px] text-zinc-500 mt-0.5">Total open option contracts per strike</p>
           </div>
 
-          <div className="flex-1 w-full min-h-[320px]">
+          <div className="flex-1 w-full min-h-[420px]">
             <ResponsiveContainer width="100%" height="100%">
               <BarChart data={rows} margin={{ top: 10, right: 5, left: -25, bottom: 5 }}>
                 <CartesianGrid {...gridProps} />
@@ -313,13 +313,13 @@ export default function CrudeOilOITab({ expiry }: { expiry: string }) {
         </div>
 
         {/* OI Change Bar Chart */}
-        <div className="border border-zinc-800 bg-zinc-950 rounded-xl p-4 flex flex-col gap-3 min-h-[420px]">
+        <div className="border border-zinc-800 bg-zinc-950 rounded-xl p-6 flex flex-col gap-3 min-h-[520px]">
           <div>
             <h3 className="text-xs font-bold text-zinc-200 uppercase tracking-widest">OI Change (Delta)</h3>
             <p className="text-[10px] text-zinc-500 mt-0.5">Daily change in open interest contracts</p>
           </div>
 
-          <div className="flex-1 w-full min-h-[320px]">
+          <div className="flex-1 w-full min-h-[420px]">
             <ResponsiveContainer width="100%" height="100%">
               <BarChart data={rows} margin={{ top: 10, right: 5, left: -25, bottom: 5 }}>
                 <CartesianGrid {...gridProps} />

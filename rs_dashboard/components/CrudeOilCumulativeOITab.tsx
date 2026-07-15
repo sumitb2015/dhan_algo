@@ -234,15 +234,15 @@ export default function CrudeOilCumulativeOITab({ expiry: _expiry }: { expiry: s
       )}
 
       {data.length > 0 && (
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+        <div className="flex flex-col gap-6">
           {/* Cumulative Area Chart */}
-          <div className="border border-zinc-800 bg-zinc-950 rounded-xl p-4 flex flex-col gap-3 min-h-[420px]">
+          <div className="border border-zinc-800 bg-zinc-950 rounded-xl p-6 flex flex-col gap-3 min-h-[520px]">
             <div>
               <h3 className="text-xs font-bold text-zinc-200 uppercase tracking-widest">Cumulative Open Interest</h3>
               <p className="text-[10px] text-zinc-500 mt-0.5">Sum of CE vs PE contracts within ATM ± {wingCount} strikes</p>
             </div>
 
-            <div className="flex-1 w-full min-h-[320px]">
+            <div className="flex-1 w-full min-h-[420px]">
               <ResponsiveContainer width="100%" height="100%">
                 <AreaChart data={data} margin={{ top: 10, right: 5, left: -25, bottom: 5 }}>
                   <defs>
@@ -297,13 +297,13 @@ export default function CrudeOilCumulativeOITab({ expiry: _expiry }: { expiry: s
           </div>
 
           {/* Difference Line Chart */}
-          <div className="border border-zinc-800 bg-zinc-950 rounded-xl p-4 flex flex-col gap-3 min-h-[420px]">
+          <div className="border border-zinc-800 bg-zinc-950 rounded-xl p-6 flex flex-col gap-3 min-h-[520px]">
             <div>
               <h3 className="text-xs font-bold text-zinc-200 uppercase tracking-widest">OI Difference (PE − CE)</h3>
               <p className="text-[10px] text-zinc-500 mt-0.5">Bullish/Bearish bias indicator over the session</p>
             </div>
 
-            <div className="flex-1 w-full min-h-[320px]">
+            <div className="flex-1 w-full min-h-[420px]">
               <ResponsiveContainer width="100%" height="100%">
                 <LineChart data={data} margin={{ top: 10, right: 5, left: -25, bottom: 5 }}>
                   <CartesianGrid strokeDasharray="4 4" stroke="#27272a" vertical={false} />
