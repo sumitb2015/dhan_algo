@@ -291,7 +291,7 @@ export default function CrudeOilOITab({ expiry }: { expiry: string }) {
             <p className="text-[10px] text-zinc-500 mt-0.5">Total open option contracts per strike</p>
           </div>
 
-          <div className="flex-1 w-full min-h-[420px]">
+          <div className="w-full h-[450px]">
             <ResponsiveContainer width="100%" height="100%">
               <BarChart data={rows} margin={{ top: 10, right: 5, left: -25, bottom: 5 }}>
                 <CartesianGrid {...gridProps} />
@@ -319,7 +319,7 @@ export default function CrudeOilOITab({ expiry }: { expiry: string }) {
             <p className="text-[10px] text-zinc-500 mt-0.5">Daily change in open interest contracts</p>
           </div>
 
-          <div className="flex-1 w-full min-h-[420px]">
+          <div className="w-full h-[450px]">
             <ResponsiveContainer width="100%" height="100%">
               <BarChart data={rows} margin={{ top: 10, right: 5, left: -25, bottom: 5 }}>
                 <CartesianGrid {...gridProps} />

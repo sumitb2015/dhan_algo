@@ -242,7 +242,7 @@ export default function CrudeOilCumulativeOITab({ expiry: _expiry }: { expiry: s
               <p className="text-[10px] text-zinc-500 mt-0.5">Sum of CE vs PE contracts within ATM ± {wingCount} strikes</p>
             </div>
 
-            <div className="flex-1 w-full min-h-[420px]">
+            <div className="w-full h-[450px]">
               <ResponsiveContainer width="100%" height="100%">
                 <AreaChart data={data} margin={{ top: 10, right: 5, left: -25, bottom: 5 }}>
                   <defs>
@@ -303,7 +303,7 @@ export default function CrudeOilCumulativeOITab({ expiry: _expiry }: { expiry: s
               <p className="text-[10px] text-zinc-500 mt-0.5">Bullish/Bearish bias indicator over the session</p>
             </div>
 
-            <div className="flex-1 w-full min-h-[420px]">
+            <div className="w-full h-[450px]">
               <ResponsiveContainer width="100%" height="100%">
                 <LineChart data={data} margin={{ top: 10, right: 5, left: -25, bottom: 5 }}>
                   <CartesianGrid strokeDasharray="4 4" stroke="#27272a" vertical={false} />
