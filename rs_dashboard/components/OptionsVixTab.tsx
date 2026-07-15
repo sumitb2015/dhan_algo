@@ -3,7 +3,7 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import {
   LineChart, Line, BarChart, Bar, XAxis, YAxis, CartesianGrid,
-  Tooltip, ResponsiveContainer, ReferenceLine, Cell,
+  Tooltip, ResponsiveContainer, ReferenceLine, ReferenceDot, Cell,
 } from 'recharts';
 
 // ─── Types ────────────────────────────────────────────────────────
@@ -160,6 +160,8 @@ export default function OptionsVixTab() {
   // ROC chart data: filter out null roc5 values
   const rocData = data?.candles.filter(c => c.roc5 != null) ?? [];
 
+  const lastCandle = data && data.candles.length ? data.candles[data.candles.length - 1] : null;
+
   const regime = data ? regimeLabel(data.spot) : null;
   const chg    = data ? fmtChg(data.spot, data.prev_close) : null;
 
@@ -284,6 +286,41 @@ export default function OptionsVixTab() {
               connectNulls
               activeDot={{ r: 3, fill: '#f59e0b' }}
             />
+            {lastCandle && (
+              <ReferenceDot
+                yAxisId="vix"
+                x={lastCandle.time}
+                y={lastCandle.close}
+                r={3}
+                fill="#818cf8"
+                stroke="none"
+                label={{
+                  value: fmtVix(lastCandle.close),
+                  position: 'right',
+                  fill: '#818cf8',
+                  fontSize: 10,
+                  fontWeight: 700,
+                }}
+              />
+            )}
+            {lastCandle?.nifty != null && (
+              <ReferenceDot
+                yAxisId="nifty"
+                x={lastCandle.time}
+                y={lastCandle.nifty}
+                r={3}
+                fill="#f59e0b"
+                stroke="none"
+                label={{
+                  value: lastCandle.nifty.toLocaleString('en-IN', { maximumFractionDigits: 0 }),
+                  position: 'right',
+                  fill: '#f59e0b',
+                  fontSize: 10,
+                  fontWeight: 700,
+                  dy: 14,
+                }}
+              />
+            )}
           </LineChart>
         </ResponsiveContainer>
       </div>
