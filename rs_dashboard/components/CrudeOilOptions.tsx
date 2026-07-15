@@ -3,6 +3,8 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import Link from 'next/link';
 import { RefreshCw, AlertCircle, Loader2 } from 'lucide-react';
+import CrudeOilOITab from './CrudeOilOITab';
+import CrudeOilCumulativeOITab from './CrudeOilCumulativeOITab';
 
 // ─── Types ────────────────────────────────────────────────────────
 
@@ -215,6 +217,8 @@ export default function CrudeOilOptions() {
   const [tradesLoading, setTradesLoading]   = useState(true);
   const [activeActivityTab, setActiveActivityTab] = useState<'positions' | 'orders' | 'trades'>('positions');
   const tradesIntervalRef = useRef<NodeJS.Timeout | null>(null);
+
+  const [activeTab, setActiveTab]           = useState<'chain' | 'oi' | 'cumulative'>('chain');
 
   useEffect(() => {
     fetch(`/api/lotsize?symbol=${UNDERLYING}`)
@@ -491,72 +495,108 @@ export default function CrudeOilOptions() {
           </div>
         )}
 
-        {/* Stats Grid */}
-        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-          <StatTile
-            label="Crude Spot (Fut)"
-            value={spot ? `₹${fmtNum(spot)}` : '—'}
-            sub={spot && prevClose > 0 ? (
-              <span className={pctColor(changePct)}>
-                {change >= 0 ? '+' : ''}{fmtNum(change, 1)} ({pctSign(changePct)})
-              </span>
-            ) : 'Fetching...'}
-            subColor="text-zinc-400"
-          />
-
-          <StatTile
-            label="Put-Call Ratio (PCR)"
-            value={chainPCR !== null ? chainPCR.toFixed(3) : '—'}
-            sub={chainPCR !== null ? (chainPCR > 1.2 ? 'Bullish Sentiment' : chainPCR < 0.8 ? 'Bearish Sentiment' : 'Neutral') : '—'}
-            subColor={chainPCR !== null ? (chainPCR > 1.2 ? 'text-emerald-400' : chainPCR < 0.8 ? 'text-red-400' : 'text-zinc-500') : 'text-zinc-500'}
-          />
-
-          <StatTile
-            label="Max Pain Strike"
-            value={maxPain !== null ? `₹${fmtNum(maxPain)}` : '—'}
-            sub="Options sellers' sweet spot"
-          />
-
-          <StatTile
-            label="ATM Straddle Premium"
-            value={atmStraddle ? `₹${fmtNum(atmStraddle, 1)}` : '—'}
-            sub={atmStraddle && atm ? `Range: ${fmtNum(atm - atmStraddle)} – ${fmtNum(atm + atmStraddle)}` : '—'}
-            subColor="text-cyan-400"
-          />
-        </div>
-
-        {/* Additional Stats Row */}
-        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-          <StatTile label="Total Call OI" value={fmtOI(totalCEOI)} sub="Resistance Walls" subColor="text-blue-400" />
-          <StatTile label="Total Put OI" value={fmtOI(totalPEOI)} sub="Support Walls" subColor="text-red-400" />
-          <StatTile
-            label="OI Bias (CE − PE)"
-            value={(totalCEOI === 0 && totalPEOI === 0) ? '—' : (totalCEOI - totalPEOI >= 0 ? '+' : '') + fmtOI(totalCEOI - totalPEOI)}
-            sub={totalCEOI - totalPEOI > 0 ? 'Heavy Resistance' : totalCEOI - totalPEOI < 0 ? 'Heavy Support' : 'Balanced'}
-            subColor={totalCEOI - totalPEOI > 0 ? 'text-red-400' : totalCEOI - totalPEOI < 0 ? 'text-emerald-400' : 'text-zinc-500'}
-          />
-        </div>
-
-        {/* Controls and Selectors */}
-        <div className="flex flex-wrap items-center gap-4 bg-zinc-900 border border-zinc-800 rounded-xl px-4 py-3">
-          <div className="flex items-center gap-2">
-            <span className="text-xs font-bold text-zinc-400 uppercase tracking-wider">Expiry Date:</span>
-            {expiries.length === 0 ? (
-              <Loader2 className="h-4 w-4 animate-spin text-zinc-500" />
-            ) : (
-              <select
-                value={expiry}
-                onChange={(e) => setExpiry(e.target.value)}
-                className="bg-zinc-800 border border-zinc-700 rounded-lg text-xs font-semibold text-zinc-100 px-3 py-1.5 focus:outline-none focus:border-indigo-500"
+        {/* Tab Selection Bar with Expiry Selector */}
+        <div className="flex flex-wrap items-center justify-between border-b border-zinc-800 pb-0 mb-6 gap-3">
+          <div className="flex gap-1 -mb-px">
+            {([
+              { key: 'chain',      label: 'Option Chain' },
+              { key: 'oi',         label: 'Open Interest' },
+              { key: 'cumulative', label: 'Cumulative OI' },
+            ] as const).map(({ key, label }) => (
+              <button
+                key={key}
+                type="button"
+                onClick={() => setActiveTab(key)}
+                className={`px-4 py-2.5 text-xs font-semibold capitalize transition-all border-b-2 cursor-pointer -mb-px ${
+                  activeTab === key
+                    ? 'text-white border-blue-500 font-bold'
+                    : 'text-zinc-400 border-transparent hover:text-zinc-200'
+                }`}
               >
-                {expiries.map(exp => (
-                  <option key={exp} value={exp}>
-                    {new Date(exp).toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' })}
-                  </option>
-                ))}
-              </select>
-            )}
+                {label}
+              </button>
+            ))}
           </div>
+
+          {/* Expiry Selector (shown for Chain and OI tabs) */}
+          {(activeTab === 'chain' || activeTab === 'oi') && (
+            <div className="flex items-center gap-2 mb-2 sm:mb-0">
+              <span className="text-[10px] font-bold text-zinc-400 uppercase tracking-wider">Expiry:</span>
+              {expiries.length === 0 ? (
+                <Loader2 className="h-3.5 w-3.5 animate-spin text-zinc-500" />
+              ) : (
+                <select
+                  value={expiry}
+                  onChange={(e) => setExpiry(e.target.value)}
+                  className="bg-zinc-900 border border-zinc-800 rounded-lg text-xs font-semibold text-zinc-200 px-3 py-1.5 focus:outline-none focus:border-blue-500 cursor-pointer"
+                >
+                  {expiries.map(exp => (
+                    <option key={exp} value={exp}>
+                      {new Date(exp).toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' })}
+                    </option>
+                  ))}
+                </select>
+              )}
+            </div>
+          )}
+        </div>
+
+        {/* Stats Grid */}
+        {(activeTab === 'chain' || activeTab === 'oi') && (
+          <>
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+              <StatTile
+                label="Crude Spot (Fut)"
+                value={spot ? `₹${fmtNum(spot)}` : '—'}
+                sub={spot && prevClose > 0 ? (
+                  <span className={pctColor(changePct)}>
+                    {change >= 0 ? '+' : ''}{fmtNum(change, 1)} ({pctSign(changePct)})
+                  </span>
+                ) : 'Fetching...'}
+                subColor="text-zinc-400"
+              />
+
+              <StatTile
+                label="Put-Call Ratio (PCR)"
+                value={chainPCR !== null ? chainPCR.toFixed(3) : '—'}
+                sub={chainPCR !== null ? (chainPCR > 1.2 ? 'Bullish Sentiment' : chainPCR < 0.8 ? 'Bearish Sentiment' : 'Neutral') : '—'}
+                subColor={chainPCR !== null ? (chainPCR > 1.2 ? 'text-emerald-400' : chainPCR < 0.8 ? 'text-red-400' : 'text-zinc-500') : 'text-zinc-500'}
+              />
+
+              <StatTile
+                label="Max Pain Strike"
+                value={maxPain !== null ? `₹${fmtNum(maxPain)}` : '—'}
+                sub="Options sellers' sweet spot"
+              />
+
+              <StatTile
+                label="ATM Straddle Premium"
+                value={atmStraddle ? `₹${fmtNum(atmStraddle, 1)}` : '—'}
+                sub={atmStraddle && atm ? `Range: ${fmtNum(atm - atmStraddle)} – ${fmtNum(atm + atmStraddle)}` : '—'}
+                subColor="text-cyan-400"
+              />
+            </div>
+
+            {/* Additional Stats Row */}
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+              <StatTile label="Total Call OI" value={fmtOI(totalCEOI)} sub="Resistance Walls" subColor="text-blue-400" />
+              <StatTile label="Total Put OI" value={fmtOI(totalPEOI)} sub="Support Walls" subColor="text-red-400" />
+              <StatTile
+                label="OI Bias (CE − PE)"
+                value={(totalCEOI === 0 && totalPEOI === 0) ? '—' : (totalCEOI - totalPEOI >= 0 ? '+' : '') + fmtOI(totalCEOI - totalPEOI)}
+                sub={totalCEOI - totalPEOI > 0 ? 'Heavy Resistance' : totalCEOI - totalPEOI < 0 ? 'Heavy Support' : 'Balanced'}
+                subColor={totalCEOI - totalPEOI > 0 ? 'text-red-400' : totalCEOI - totalPEOI < 0 ? 'text-emerald-400' : 'text-zinc-500'}
+              />
+            </div>
+          </>
+        )}
+
+        {/* Dynamic Tab Content: Option Chain Tab */}
+        {activeTab === 'chain' && (
+          <>
+            {/* Controls and Selectors */}
+            <div className="flex flex-wrap items-center gap-4 bg-zinc-900 border border-zinc-800 rounded-xl px-4 py-3">
+
 
           <div className="flex items-center gap-2">
             <span className="text-xs font-bold text-zinc-400 uppercase tracking-wider">Visible strikes:</span>
@@ -938,6 +978,18 @@ export default function CrudeOilOptions() {
             </div>
           )}
         </div>
+          </>
+        )}
+
+        {/* Dynamic Tab Content: Open Interest Tab */}
+        {activeTab === 'oi' && (
+          <CrudeOilOITab expiry={expiry} />
+        )}
+
+        {/* Dynamic Tab Content: Cumulative OI Tab */}
+        {activeTab === 'cumulative' && (
+          <CrudeOilCumulativeOITab expiry={expiry} />
+        )}
 
       </main>
     </div>

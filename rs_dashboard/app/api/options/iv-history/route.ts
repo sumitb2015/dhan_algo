@@ -24,12 +24,16 @@ function istStringToEpoch(ts: string): number {
 
 export async function GET(request: NextRequest) {
   const { searchParams } = new URL(request.url);
-  const date   = searchParams.get('date') ?? todayIST();
-  const mode   = searchParams.get('mode') ?? 'iv';                           // 'iv' | 'cumulative'
-  const strike = searchParams.get('strike') ? parseInt(searchParams.get('strike')!, 10) : null;
-  const wings  = searchParams.get('wings')  ? parseInt(searchParams.get('wings')!,  10) : 10;
+  const date       = searchParams.get('date') ?? todayIST();
+  const mode       = searchParams.get('mode') ?? 'iv';                           // 'iv' | 'cumulative'
+  const underlying = (searchParams.get('underlying') ?? 'NIFTY').toUpperCase();
+  const isCrude    = underlying === 'CRUDEOIL';
+  const strike     = searchParams.get('strike') ? parseInt(searchParams.get('strike')!, 10) : null;
+  const defaultWings = isCrude ? 6 : 10;
+  const wings      = searchParams.get('wings')  ? parseInt(searchParams.get('wings')!,  10) : defaultWings;
 
-  const csvPath = path.join(DEBUG_DIR, `iv_snapshots_${date}.csv`);
+  const csvFile = isCrude ? `crudeoil_oi_snapshots_${date}.csv` : `iv_snapshots_${date}.csv`;
+  const csvPath = path.join(DEBUG_DIR, csvFile);
 
   if (!fs.existsSync(csvPath)) {
     return NextResponse.json(
@@ -91,15 +95,17 @@ export async function GET(request: NextRequest) {
   }
 
   const firstRow = allRows[0];
+  const strikeStep = isCrude ? 100 : 50;
   // ATM is locked at 9:15 (first snapshot) — the collector records a constant strike set per day
-  const atm    = Math.round(firstRow.spot / 50) * 50;
+  const atm    = Math.round(firstRow.spot / strikeStep) * strikeStep;
   const expiry = firstRow.expiry;
 
   // ── Cumulative OI mode ────────────────────────────────────────────
   if (mode === 'cumulative') {
-    // Collector captures ATM±10 (500pt); clamp to avoid silent partial-data responses
-    const clampedWings = Math.min(Math.max(wings, 1), 10);
-    const wingRange = clampedWings * 50;
+    // Collector captures ATM±10 (500pt) for Nifty, ATM±6 (600pt) for Crude — clamp to avoid silent partial-data responses
+    const maxWings = isCrude ? 6 : 10;
+    const clampedWings = Math.min(Math.max(wings, 1), maxWings);
+    const wingRange = clampedWings * strikeStep;
 
     // Group by timestamp, sum OI for strikes within atm±wings
     const byTs = new Map<string, { spot: number; ceOI: number; peOI: number }>();
