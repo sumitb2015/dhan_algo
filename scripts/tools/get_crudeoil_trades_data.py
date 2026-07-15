@@ -39,10 +39,8 @@ def main():
                 cost_price = float(row.get('costPrice', 0) or 0)
                 raw_unrealized = float(row.get('unrealizedProfit', 0) or 0)
                 
-                if net_qty > 0:
-                    ltp = cost_price + raw_unrealized
-                elif net_qty < 0:
-                    ltp = cost_price - raw_unrealized
+                if net_qty != 0:
+                    ltp = cost_price + (raw_unrealized / net_qty)
                 else:
                     ltp = float(row.get('lastPrice', 0) or row.get('lastTradedPrice', 0) or 0)
                 
