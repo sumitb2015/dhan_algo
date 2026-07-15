@@ -238,6 +238,10 @@ export default function OptionsSmartChainTab({ expiry }: { expiry: string }) {
       }
       const atmStrike = Math.round(spotPrice / STRIKE_STEP) * STRIKE_STEP;
       const oc        = json.data.chain.oc;
+      if (!oc || Object.keys(oc).length === 0) {
+        setError('Option chain data empty — showing last known chain');
+        return;
+      }
 
       // Parse all strikes, preserving original keys for correct lookups
       const allEntries = parseStrikeEntries(oc);

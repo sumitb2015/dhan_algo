@@ -318,8 +318,17 @@ export default function CrudeOilOptions() {
       }
 
       const spotPrice = json.data.spot ?? 0;
+      if (spotPrice <= 0) {
+        setError('Spot price unavailable — showing last known chain');
+        return;
+      }
       const atmStrike = Math.round(spotPrice / STRIKE_STEP) * STRIKE_STEP;
+
       const oc        = json.data.chain.oc;
+      if (!oc || Object.keys(oc).length === 0) {
+        setError('Option chain data empty — showing last known chain');
+        return;
+      }
 
       const allEntries = parseStrikeEntries(oc).filter(({ strike }) => strike % STRIKE_STEP === 0);
       const mpStrike = computeMaxPain(allEntries);
