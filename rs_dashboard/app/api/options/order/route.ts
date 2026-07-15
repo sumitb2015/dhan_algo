@@ -41,7 +41,7 @@ function getToken(): { clientId: string; token: string } {
 
 export async function POST(req: NextRequest): Promise<NextResponse> {
   const body = await req.json().catch(() => null) as {
-    legs?: { securityId: string; quantity: number; side: 'BUY' | 'SELL' }[];
+    legs?: { securityId: string; quantity: number; side: 'BUY' | 'SELL'; exchangeSegment?: string }[];
     mode?: 'intraday' | 'positional';
   } | null;
 
@@ -76,7 +76,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       const payload = {
         dhanClientId:     clientId,
         transactionType:  leg.side,
-        exchangeSegment:  'NSE_FNO',
+        exchangeSegment:  leg.exchangeSegment || 'NSE_FNO',
         productType,
         orderType:        'MARKET',
         validity:         'DAY',

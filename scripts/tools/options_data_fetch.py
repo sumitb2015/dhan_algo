@@ -96,15 +96,23 @@ def main():
         # carries the underlying's last_price — prefer that over a second,
         # un-retried get_ltp() call, which can independently 429/return 0 and
         # leave the chain's own (valid, retried) data paired with a bogus spot.
-        chain_spot = (chain or {}).get('last_price') or 0
-        if chain_spot:
-            spot = chain_spot
-        elif is_crude:
+        # Exception: For Crude Oil, options are based on the futures contract, so we need the futures LTP.
+        if is_crude:
             from scripts.tools.premarket_data import _find_nearest_future
             fut = _find_nearest_future(helper, "CRUDEOIL", exchange="MCX", instrument="FUTCOM")
-            spot = helper.get_ltp(int(fut["SECURITY_ID"]), exchange="MCX", instrument="FUTCOM") if fut else 0
+            spot = 0
+            if fut:
+                sid = int(fut["SECURITY_ID"])
+                ohlc_raw = helper.get_ohlc_data({"MCX_COMM": [sid]})
+                spot = ohlc_raw.get("MCX_COMM", {}).get(str(sid), {}).get("last_price") or 0.0
+                if not spot:
+                    spot = helper.get_ltp(sid, exchange="MCX", instrument="FUTCOM") or 0.0
         else:
-            spot = helper.get_ltp(under, exchange='IDX_I', instrument='INDEX') or 0
+            chain_spot = (chain or {}).get('last_price') or 0
+            if chain_spot:
+                spot = chain_spot
+            else:
+                spot = helper.get_ltp(under, exchange='IDX_I', instrument='INDEX') or 0
         print(json.dumps({'chain': chain, 'spot': spot}))
 
     elif args.cmd == 'ltp':

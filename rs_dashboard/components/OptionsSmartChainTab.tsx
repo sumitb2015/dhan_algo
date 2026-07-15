@@ -254,12 +254,15 @@ export default function OptionsSmartChainTab({ expiry }: { expiry: string }) {
 
       // Totals and max-OI detection over visible window
       let totCE = 0, totPE = 0;
+      for (const { entry } of allEntries) {
+        totCE += entry.ce?.oi ?? 0;
+        totPE += entry.pe?.oi ?? 0;
+      }
+
       let maxCEOI = 0, maxPEOI = 0, maxCEStrike = 0, maxPEStrike = 0;
       for (const { strike, entry } of visible) {
         const ceOI = entry.ce?.oi ?? 0;
         const peOI = entry.pe?.oi ?? 0;
-        totCE += ceOI;
-        totPE += peOI;
         if (ceOI > maxCEOI) { maxCEOI = ceOI; maxCEStrike = strike; }
         if (peOI > maxPEOI) { maxPEOI = peOI; maxPEStrike = strike; }
       }
