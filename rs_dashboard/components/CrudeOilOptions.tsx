@@ -212,6 +212,14 @@ export default function CrudeOilOptions() {
   const [orderMessage, setOrderMessage] = useState<{ text: string; isError: boolean } | null>(null);
   const [ordering, setOrdering]       = useState(false);
 
+  // Confirmation dialog for SL/Target auto-exit
+  type ConfirmPayload = {
+    symbol: string;
+    reason: string;
+    leg: { securityId: string; quantity: number; side: 'BUY' | 'SELL'; exchangeSegment: string };
+  };
+  const [pendingConfirm, setPendingConfirm] = useState<ConfirmPayload | null>(null);
+
   const [crudePositions, setCrudePositions] = useState<CrudePosition[]>([]);
   const [crudeOrders, setCrudeOrders]       = useState<CrudeOrder[]>([]);
   const [crudeTrades, setCrudeTrades]       = useState<CrudeTrade[]>([]);
@@ -511,17 +519,19 @@ export default function CrudeOilOptions() {
   const brokerOrdersRef = useRef<Record<string, { sl?: BrokerOrderEntry; target?: BrokerOrderEntry }>>({});
   const [editingConfigs, setEditingConfigs] = useState<Record<string, { sl?: string; target?: string }>>({});
 
+  // riskConfigs holds committed threshold values (these are only dashboard-level triggers — NOT broker orders)
+  const [riskConfigs, setRiskConfigs] = useState<Record<string, { sl: number | null; target: number | null }>>({});
+
   useEffect(() => {
     try {
-      const saved = localStorage.getItem('crude_broker_orders');
-      if (saved) setBrokerOrders(JSON.parse(saved));
+      const saved = localStorage.getItem('crude_risk_configs_v2');
+      if (saved) setRiskConfigs(JSON.parse(saved));
     } catch {}
   }, []);
 
-  const saveBrokerOrders = (updated: typeof brokerOrders) => {
-    brokerOrdersRef.current = updated;
-    setBrokerOrders(updated);
-    localStorage.setItem('crude_broker_orders', JSON.stringify(updated));
+  const saveRiskConfigs = (updated: typeof riskConfigs) => {
+    setRiskConfigs(updated);
+    localStorage.setItem('crude_risk_configs_v2', JSON.stringify(updated));
   };
 
   const handleInputChange = (symbol: string, key: 'sl' | 'target', value: string) => {
@@ -532,6 +542,7 @@ export default function CrudeOilOptions() {
   };
 
   // Called when user presses Enter or blurs the input
+  // Only stores a threshold locally — never touches the broker here
   const handleInputCommit = useCallback((symbol: string, key: 'sl' | 'target') => {
     const editState = editingConfigs[symbol];
     if (!editState || editState[key] === undefined) return;
@@ -539,7 +550,7 @@ export default function CrudeOilOptions() {
     const rawVal = editState[key]!;
     const price = (rawVal === '' || isNaN(parseFloat(rawVal))) ? null : parseFloat(rawVal);
 
-    // Clear the editing buffer
+    // Always clear the editing buffer
     setEditingConfigs(prev => {
       const copy = { ...prev };
       if (copy[symbol]) {
@@ -550,175 +561,144 @@ export default function CrudeOilOptions() {
     });
 
     if (price === null || price <= 0) {
-      // User cleared the field → cancel existing broker order if any
-      const existing = brokerOrdersRef.current[symbol]?.[key];
-      if (existing?.orderId) {
-        void (async () => {
-          try {
-            await fetch('/api/options/order/cancel', {
-              method: 'DELETE',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ orderId: existing.orderId }),
-            });
-          } catch {}
-          const updated = { ...brokerOrdersRef.current };
-          if (updated[symbol]) {
-            delete updated[symbol][key];
-            if (Object.keys(updated[symbol]).length === 0) delete updated[symbol];
-          }
-          saveBrokerOrders(updated);
-          setOrderMessage({ text: `${key.toUpperCase()} order for ${symbol} cancelled.`, isError: false });
-        })();
+      // User cleared the field → just remove the threshold
+      const updated = { ...riskConfigs };
+      if (updated[symbol]) {
+        updated[symbol] = { ...updated[symbol], [key]: null };
+        if (updated[symbol].sl === null && updated[symbol].target === null) delete updated[symbol];
       }
+      saveRiskConfigs(updated);
+      setOrderMessage({ text: `${key === 'sl' ? 'Stop-Loss' : 'Target'} removed for ${symbol}.`, isError: false });
       return;
     }
 
-    // Find the position to determine side
+    // Find the position to validate direction against current LTP
     const pos = crudePositions.find(p => p.symbol === symbol && p.netQty !== 0);
-    if (!pos || !pos.securityId) {
-      setOrderMessage({ text: `Cannot place ${key.toUpperCase()} order: position not found.`, isError: true });
+    if (!pos) {
+      setOrderMessage({ text: `Cannot set ${key.toUpperCase()}: active position not found for ${symbol}.`, isError: true });
       return;
     }
 
-    // If an existing order exists for this key, cancel it first
-    const existingOrderId = brokerOrdersRef.current[symbol]?.[key]?.orderId;
-
-    // Determine direction:
-    // SHORT position (netQty < 0): to close → BUY. SL triggers when price RISES, Target triggers when price FALLS.
-    // LONG position  (netQty > 0): to close → SELL. SL triggers when price FALLS, Target triggers when price RISES.
-    const closeSide: 'BUY' | 'SELL' = pos.netQty < 0 ? 'BUY' : 'SELL';
-    const isShort = pos.netQty < 0;
     const ltp = pos.lastPrice;
+    const isShort = pos.netQty < 0;
 
-    // ─── Direction validation ────────────────────────────────────────────────────
-    // For STOP_LOSS_MARKET BUY:  exchange fires when LTP ≥ triggerPrice (covers shorts)
-    //   → trigger must be ABOVE current LTP, otherwise fires immediately
-    // For STOP_LOSS_MARKET SELL: exchange fires when LTP ≤ triggerPrice (covers longs)
-    //   → trigger must be BELOW current LTP, otherwise fires immediately
-    // For LIMIT BUY (target for short): executes when LTP ≤ limitPrice
-    //   → limit price must be BELOW current LTP
-    // For LIMIT SELL (target for long): executes when LTP ≥ limitPrice
-    //   → limit price must be ABOVE current LTP
-    if (ltp > 0) {
-      if (key === 'sl') {
-        if (isShort && price <= ltp) {
-          setOrderMessage({
-            text: `SL rejected: For a SHORT position, SL (₹${price}) must be ABOVE the current LTP (₹${ltp.toFixed(1)}). Enter a higher value.`,
-            isError: true,
-          });
-          return;
-        }
-        if (!isShort && price >= ltp) {
-          setOrderMessage({
-            text: `SL rejected: For a LONG position, SL (₹${price}) must be BELOW the current LTP (₹${ltp.toFixed(1)}). Enter a lower value.`,
-            isError: true,
-          });
-          return;
-        }
-      } else {
-        // target
-        if (isShort && price >= ltp) {
-          setOrderMessage({
-            text: `Target rejected: For a SHORT position, Target (₹${price}) must be BELOW the current LTP (₹${ltp.toFixed(1)}). Enter a lower value.`,
-            isError: true,
-          });
-          return;
-        }
-        if (!isShort && price <= ltp) {
-          setOrderMessage({
-            text: `Target rejected: For a LONG position, Target (₹${price}) must be ABOVE the current LTP (₹${ltp.toFixed(1)}). Enter a higher value.`,
-            isError: true,
-          });
-          return;
-        }
+    // Require a known LTP — reject if 0/unavailable
+    if (ltp <= 0) {
+      setOrderMessage({ text: `Cannot set ${key.toUpperCase()}: LTP for ${symbol} is not yet available. Wait for price data and try again.`, isError: true });
+      return;
+    }
+
+    // ─── Direction validation ─────────────────────────────────────────────────────────
+    // SHORT (sold options): price must RISE to hit SL, FALL to hit Target
+    //   SL must be ABOVE ltp    |   Target must be BELOW ltp
+    // LONG (bought options): price must FALL to hit SL, RISE to hit Target
+    //   SL must be BELOW ltp    |   Target must be ABOVE ltp
+    if (key === 'sl') {
+      if (isShort && price <= ltp) {
+        setOrderMessage({
+          text: `❌ SL rejected: You are SHORT ${symbol} (LTP ₹${ltp.toFixed(1)}). SL (₹${price}) must be ABOVE the current price. The monitor fires when price rises to your SL.`,
+          isError: true,
+        });
+        return;
+      }
+      if (!isShort && price >= ltp) {
+        setOrderMessage({
+          text: `❌ SL rejected: You are LONG ${symbol} (LTP ₹${ltp.toFixed(1)}). SL (₹${price}) must be BELOW the current price. The monitor fires when price falls to your SL.`,
+          isError: true,
+        });
+        return;
+      }
+    } else {
+      if (isShort && price >= ltp) {
+        setOrderMessage({
+          text: `❌ Target rejected: You are SHORT ${symbol} (LTP ₹${ltp.toFixed(1)}). Target (₹${price}) must be BELOW the current price. The monitor fires when the option decays to your target.`,
+          isError: true,
+        });
+        return;
+      }
+      if (!isShort && price <= ltp) {
+        setOrderMessage({
+          text: `❌ Target rejected: You are LONG ${symbol} (LTP ₹${ltp.toFixed(1)}). Target (₹${price}) must be ABOVE the current price.`,
+          isError: true,
+        });
+        return;
       }
     }
 
-    // Order type:
-    // SL → STOP_LOSS_MARKET (executes at market when triggered — safest for options)
-    // Target → LIMIT (sits at the exchange at the specified price)
-    const orderType = key === 'sl' ? 'STOP_LOSS_MARKET' : 'LIMIT';
-
-    // Mark as placing using the current stable ref
-    const preSnapshot = { ...brokerOrdersRef.current };
-    saveBrokerOrders({
-      ...preSnapshot,
+    // All checks passed — save threshold locally
+    const updated = {
+      ...riskConfigs,
       [symbol]: {
-        ...(preSnapshot[symbol] || {}),
-        [key]: { orderId: '', price, type: key, placing: true },
+        ...(riskConfigs[symbol] || { sl: null, target: null }),
+        [key]: price,
       },
+    };
+    saveRiskConfigs(updated);
+    const dir = key === 'sl'
+      ? (isShort ? 'will fire when price RISES to' : 'will fire when price FALLS to')
+      : (isShort ? 'will fire when price FALLS to' : 'will fire when price RISES to');
+    setOrderMessage({
+      text: `✅ ${key === 'sl' ? 'Stop-Loss' : 'Target'} set for ${symbol}: monitor ${dir} ₹${price}. A confirmation dialog will appear before any order is placed.`,
+      isError: false,
     });
+  }, [editingConfigs, crudePositions, riskConfigs]);
 
-    void (async () => {
-      // Cancel previous order if any
-      if (existingOrderId) {
-        try {
-          await fetch('/api/options/order/cancel', {
-            method: 'DELETE',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ orderId: existingOrderId }),
-          });
-        } catch {}
-      }
-
-      // Place new broker order
-      const leg = {
-        securityId: pos.securityId!,
-        quantity: Math.abs(pos.netQty),
-        side: closeSide,
-        exchangeSegment: pos.exchangeSegment || 'MCX_COMM',
-        orderType,
-        ...(key === 'sl'     ? { triggerPrice: price, price: 0 } : {}),
-        ...(key === 'target' ? { price, triggerPrice: 0 }        : {}),
-      };
-
-      try {
-        const res = await fetch('/api/options/order', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ legs: [leg], mode: 'intraday' }),
-        });
-        const json = await res.json() as { success: boolean; data?: { orderId: string }[]; error?: string };
-
-        if (json.success && json.data?.[0]?.orderId) {
-          const orderId = json.data[0].orderId;
-          const afterSnap = { ...brokerOrdersRef.current };
-          saveBrokerOrders({
-            ...afterSnap,
-            [symbol]: {
-              ...(afterSnap[symbol] || {}),
-              [key]: { orderId, price, type: key, placing: false },
-            },
-          });
-          const label = key === 'sl' ? 'Stop-Loss Market' : 'Limit Target';
-          setOrderMessage({ text: `${label} order placed for ${symbol} @ ₹${price} (ID: ${orderId})`, isError: false });
-        } else {
-          const afterSnap = { ...brokerOrdersRef.current };
-          if (afterSnap[symbol]) { delete afterSnap[symbol][key]; }
-          saveBrokerOrders(afterSnap);
-          setOrderMessage({ text: `Failed to place ${key.toUpperCase()} order: ${json.error ?? 'Unknown error'}`, isError: true });
-        }
-      } catch (err) {
-        const afterSnap = { ...brokerOrdersRef.current };
-        if (afterSnap[symbol]) { delete afterSnap[symbol][key]; }
-        saveBrokerOrders(afterSnap);
-        setOrderMessage({ text: `Error placing ${key.toUpperCase()} order: ${String(err)}`, isError: true });
-      }
-    })();
-  }, [editingConfigs, crudePositions]);
-
-  // Prune stale broker order entries when positions close
+  // Prune stale configs when positions close
   useEffect(() => {
-    if (Object.keys(brokerOrders).length === 0) return;
+    if (Object.keys(riskConfigs).length === 0) return;
     let hasStale = false;
-    const cleaned = { ...brokerOrders };
+    const cleaned = { ...riskConfigs };
     Object.keys(cleaned).forEach(sym => {
       const pos = crudePositions.find(p => p.symbol === sym);
       if (!pos || pos.netQty === 0) { delete cleaned[sym]; hasStale = true; }
     });
-    if (hasStale) saveBrokerOrders(cleaned);
+    if (hasStale) saveRiskConfigs(cleaned);
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [crudePositions]);
+
+  // ─── Auto-exit monitor: check SL/Target thresholds each poll tick ─────────────────
+  // When breached, set pendingConfirm so the user sees a dialog BEFORE any order fires.
+  useEffect(() => {
+    if (crudePositions.length === 0 || pendingConfirm) return;
+
+    for (const p of crudePositions) {
+      if (p.netQty === 0) continue;
+      const config = riskConfigs[p.symbol];
+      if (!config) continue;
+      const ltp = p.lastPrice;
+      if (ltp <= 0) continue;
+
+      const isShort = p.netQty < 0;
+      let triggered: { type: 'SL' | 'Target'; threshold: number } | null = null;
+
+      if (isShort) {
+        if (config.sl   !== null && config.sl   > 0 && ltp >= config.sl)   triggered = { type: 'SL',     threshold: config.sl };
+        if (config.target !== null && config.target > 0 && ltp <= config.target) triggered = { type: 'Target', threshold: config.target };
+      } else {
+        if (config.sl   !== null && config.sl   > 0 && ltp <= config.sl)   triggered = { type: 'SL',     threshold: config.sl };
+        if (config.target !== null && config.target > 0 && ltp >= config.target) triggered = { type: 'Target', threshold: config.target };
+      }
+
+      if (triggered && p.securityId) {
+        // Immediately clear the config to prevent re-triggering on next tick
+        const cleaned = { ...riskConfigs };
+        delete cleaned[p.symbol];
+        saveRiskConfigs(cleaned);
+
+        setPendingConfirm({
+          symbol: p.symbol,
+          reason: `${triggered.type} hit! LTP ₹${ltp.toFixed(1)} ${triggered.type === 'SL' ? (isShort ? '≥' : '≤') : (isShort ? '≤' : '≥')} threshold ₹${triggered.threshold}`,
+          leg: {
+            securityId: p.securityId,
+            quantity: Math.abs(p.netQty),
+            side: (isShort ? 'BUY' : 'SELL') as 'BUY' | 'SELL',
+            exchangeSegment: p.exchangeSegment || 'MCX_COMM',
+          },
+        });
+        break; // Handle one at a time
+      }
+    }
+  }, [crudePositions, riskConfigs, pendingConfirm]);
 
   // Style helpers
   const thCls = 'text-xs font-bold text-zinc-300 bg-zinc-800/80 px-3 py-2.5 whitespace-nowrap border-b border-zinc-700';
@@ -1151,8 +1131,8 @@ export default function CrudeOilOptions() {
                     <th className={thCls}>Buy Avg</th>
                     <th className={thCls}>Sell Avg</th>
                     <th className={thCls}>LTP</th>
-                    <th className={`${thCls} w-28 text-center`} title="SHORT: SL must be ABOVE current LTP (price rises = loss). LONG: SL must be BELOW current LTP (price falls = loss). Places a Stop-Loss Market order at the broker.">SL (SLM Order) ℹ</th>
-                    <th className={`${thCls} w-28 text-center`} title="SHORT: Target must be BELOW current LTP (price decays = profit). LONG: Target must be ABOVE current LTP (price rises = profit). Places a Limit order at the broker.">Target (LMT Order) ℹ</th>
+                    <th className={`${thCls} w-28 text-center`} title="SHORT: SL must be ABOVE current LTP. LONG: SL must be BELOW current LTP.">SL Threshold ℹ</th>
+                    <th className={`${thCls} w-28 text-center`} title="SHORT: Target must be BELOW current LTP. LONG: Target must be ABOVE current LTP.">Target Threshold ℹ</th>
                     <th className={thCls}>Realized</th>
                     <th className={thCls}>Unrealized</th>
                   </tr>
@@ -1164,88 +1144,58 @@ export default function CrudeOilOptions() {
                     <tr><td colSpan={10} className="px-4 py-8 text-center text-zinc-500">No open positions</td></tr>
                   ) : (
                     crudePositions.map((p, i) => {
-                      const bOrders = brokerOrders[p.symbol] || {};
-                      const slOrder   = bOrders.sl;
-                      const tgtOrder  = bOrders.target;
-
+                      const config = riskConfigs[p.symbol] || { sl: null, target: null };
                       const isEditingSL     = editingConfigs[p.symbol]?.sl !== undefined;
-                      const slInputVal      = isEditingSL ? editingConfigs[p.symbol].sl! : (slOrder?.price ? String(slOrder.price) : '');
                       const isEditingTarget = editingConfigs[p.symbol]?.target !== undefined;
-                      const tgtInputVal     = isEditingTarget ? editingConfigs[p.symbol].target! : (tgtOrder?.price ? String(tgtOrder.price) : '');
+                      const slInputVal      = isEditingSL     ? editingConfigs[p.symbol].sl!     : (config.sl     !== null ? String(config.sl)     : '');
+                      const tgtInputVal     = isEditingTarget ? editingConfigs[p.symbol].target! : (config.target !== null ? String(config.target) : '');
 
-                      const renderOrderCell = (
-                        key: 'sl' | 'target',
-                        order: typeof slOrder,
-                        inputVal: string,
-                        isEditing: boolean,
-                      ) => {
+                      const renderThresholdCell = (key: 'sl' | 'target', thresholdVal: string) => {
                         if (p.netQty === 0) return <span className="text-zinc-600">—</span>;
+                        const committed = key === 'sl' ? config.sl : config.target;
+                        const isSl = key === 'sl';
 
-                        // Order is placed and confirmed at broker → show badge + cancel
-                        if (order && order.orderId && !order.placing) {
-                          const isSlKey = key === 'sl';
+                        // Show active threshold badge + clear button
+                        if (committed !== null && !isEditingSL && key === 'sl') {
                           return (
                             <div className="flex items-center gap-1 justify-center">
-                              <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded-md border ${
-                                isSlKey
-                                  ? 'text-red-300 bg-red-950/40 border-red-800/60'
-                                  : 'text-emerald-300 bg-emerald-950/40 border-emerald-800/60'
-                              }`}>
-                                {isSlKey ? 'SLM' : 'LMT'} ₹{order.price}
+                              <span className="text-[10px] font-bold px-1.5 py-0.5 rounded-md border text-orange-300 bg-orange-950/40 border-orange-800/60 animate-pulse">
+                                👁 SL ₹{committed}
                               </span>
-                              <button
-                                type="button"
-                                title="Cancel this broker order"
-                                onClick={() => {
-                                  handleInputChange(p.symbol, key, '');
-                                  void (async () => {
-                                    try {
-                                      await fetch('/api/options/order/cancel', {
-                                        method: 'DELETE',
-                                        headers: { 'Content-Type': 'application/json' },
-                                        body: JSON.stringify({ orderId: order.orderId }),
-                                      });
-                                    } catch {}
-                                    const updated = { ...brokerOrders };
-                                    if (updated[p.symbol]) {
-                                      delete updated[p.symbol][key];
-                                      if (Object.keys(updated[p.symbol]).length === 0) delete updated[p.symbol];
-                                    }
-                                    saveBrokerOrders(updated);
-                                    setOrderMessage({ text: `${key.toUpperCase()} order for ${p.symbol} cancelled.`, isError: false });
-                                    void fetchCrudeTrades();
-                                  })();
-                                }}
-                                className="text-zinc-500 hover:text-red-400 transition-colors cursor-pointer"
-                              >
-                                ✕
-                              </button>
+                              <button type="button" title="Remove SL threshold" onClick={() => {
+                                handleInputChange(p.symbol, 'sl', '');
+                                handleInputCommit(p.symbol, 'sl');
+                              }} className="text-zinc-500 hover:text-red-400 transition-colors cursor-pointer text-xs">✕</button>
                             </div>
                           );
                         }
-
-                        // Order is being placed → spinner
-                        if (order?.placing) {
+                        if (committed !== null && !isEditingTarget && key === 'target') {
                           return (
-                            <div className="flex items-center gap-1 justify-center text-zinc-500 text-[10px]">
-                              <Loader2 className="h-3 w-3 animate-spin" /> Placing…
+                            <div className="flex items-center gap-1 justify-center">
+                              <span className="text-[10px] font-bold px-1.5 py-0.5 rounded-md border text-emerald-300 bg-emerald-950/40 border-emerald-800/60 animate-pulse">
+                                👁 TGT ₹{committed}
+                              </span>
+                              <button type="button" title="Remove Target threshold" onClick={() => {
+                                handleInputChange(p.symbol, 'target', '');
+                                handleInputCommit(p.symbol, 'target');
+                              }} className="text-zinc-500 hover:text-red-400 transition-colors cursor-pointer text-xs">✕</button>
                             </div>
                           );
                         }
 
-                        // No order yet → show input
+                        // Input field
                         return (
                           <input
                             type="number"
                             step="0.1"
-                            placeholder="None"
-                            value={inputVal}
+                            placeholder={isSl ? "SL price" : "Target price"}
+                            value={thresholdVal}
                             onChange={(e) => handleInputChange(p.symbol, key, e.target.value)}
                             onBlur={() => handleInputCommit(p.symbol, key)}
                             onKeyDown={(e) => { if (e.key === 'Enter') e.currentTarget.blur(); }}
                             className={`w-20 bg-zinc-950/80 border rounded text-center py-1 text-xs tabular-nums focus:outline-none focus:ring-1 transition-all font-semibold ${
-                              key === 'sl'
-                                ? 'border-zinc-800 focus:border-red-500/50 focus:ring-red-500/20 text-zinc-200'
+                              isSl
+                                ? 'border-zinc-800 focus:border-orange-500/50 focus:ring-orange-500/20 text-zinc-200'
                                 : 'border-zinc-800 focus:border-emerald-500/50 focus:ring-emerald-500/20 text-zinc-200'
                             }`}
                           />
@@ -1260,8 +1210,8 @@ export default function CrudeOilOptions() {
                           <td className="px-3 py-2 tabular-nums text-zinc-400">{fmtLTP(p.buyAvg)}</td>
                           <td className="px-3 py-2 tabular-nums text-zinc-400">{fmtLTP(p.sellAvg)}</td>
                           <td className="px-3 py-2 tabular-nums text-zinc-200">{fmtLTP(p.lastPrice)}</td>
-                          <td className="px-2 py-1 text-center">{renderOrderCell('sl',     slOrder,  slInputVal,  isEditingSL)}</td>
-                          <td className="px-2 py-1 text-center">{renderOrderCell('target', tgtOrder, tgtInputVal, isEditingTarget)}</td>
+                          <td className="px-2 py-1 text-center">{renderThresholdCell('sl', slInputVal)}</td>
+                          <td className="px-2 py-1 text-center">{renderThresholdCell('target', tgtInputVal)}</td>
                           <td className={`px-3 py-2 tabular-nums font-semibold ${pctColor(p.realizedProfit)}`}>{fmtLTP(p.realizedProfit)}</td>
                           <td className={`px-3 py-2 tabular-nums font-semibold ${pctColor(p.unrealizedProfit)}`}>{fmtLTP(p.unrealizedProfit)}</td>
                         </tr>
@@ -1270,6 +1220,66 @@ export default function CrudeOilOptions() {
                   )}
                 </tbody>
               </table>
+            </div>
+          )}
+
+          {/* ─── Confirmation Dialog for SL/Target auto-exit ─────────────────────────── */}
+          {pendingConfirm && (
+            <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm">
+              <div className="bg-zinc-900 border border-zinc-700 rounded-2xl shadow-2xl p-6 max-w-sm w-full mx-4 flex flex-col gap-4">
+                <div className="flex items-center gap-3">
+                  <div className="w-10 h-10 rounded-full bg-red-900/40 border border-red-700/60 flex items-center justify-center shrink-0">
+                    <AlertCircle className="h-5 w-5 text-red-400" />
+                  </div>
+                  <div>
+                    <div className="text-sm font-bold text-zinc-100">Exit Position?</div>
+                    <div className="text-xs text-zinc-400 mt-0.5">{pendingConfirm.symbol}</div>
+                  </div>
+                </div>
+                <div className="text-xs text-zinc-300 bg-zinc-800/60 rounded-xl px-4 py-3 leading-relaxed border border-zinc-700/40">
+                  {pendingConfirm.reason}
+                </div>
+                <div className="text-xs text-zinc-500">
+                  A <span className="font-bold text-zinc-300">MARKET {pendingConfirm.leg.side}</span> order for{' '}
+                  <span className="font-bold text-zinc-300">{pendingConfirm.leg.quantity} units</span> will be sent to the broker.
+                </div>
+                <div className="flex gap-3">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const { leg } = pendingConfirm;
+                      setPendingConfirm(null);
+                      void (async () => {
+                        try {
+                          const res = await fetch('/api/options/order', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ legs: [{ ...leg, orderType: 'MARKET' }], mode: 'intraday' }),
+                          });
+                          const json = await res.json() as { success: boolean; error?: string };
+                          setOrderMessage(json.success
+                            ? { text: `Exit order placed for ${pendingConfirm.symbol}.`, isError: false }
+                            : { text: `Exit order failed: ${json.error ?? 'Unknown error'}`, isError: true }
+                          );
+                          void fetchCrudeTrades();
+                        } catch (err) {
+                          setOrderMessage({ text: `Exit order error: ${String(err)}`, isError: true });
+                        }
+                      })();
+                    }}
+                    className="flex-1 py-2 rounded-xl text-xs font-bold bg-red-600 hover:bg-red-500 text-white transition-all cursor-pointer"
+                  >
+                    ✓ Confirm Exit
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setPendingConfirm(null)}
+                    className="flex-1 py-2 rounded-xl text-xs font-bold bg-zinc-800 hover:bg-zinc-700 text-zinc-300 transition-all cursor-pointer border border-zinc-700"
+                  >
+                    ✗ Cancel
+                  </button>
+                </div>
+              </div>
             </div>
           )}
 
