@@ -987,6 +987,8 @@ export default function AdvancedScalper() {
                 pct={pct}
                 high={high}
                 low={low}
+                buildup={sideData?.buildup ?? ''}
+                oiChgPct={sideData?.oi_chg_pct ?? 0}
                 limitPrice={box.limitPrice}
                 orderMode={orderMode}
                 onStrikeChange={v => updateBox(box.id, { strike: v, limitPrice: '' })}

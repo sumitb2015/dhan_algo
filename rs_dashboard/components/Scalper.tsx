@@ -6,7 +6,11 @@ import { Zap, RefreshCw, Shield, ChevronDown, ChevronUp } from 'lucide-react';
 
 // ─── Types ────────────────────────────────────────────────────────
 
-export interface OptionSide { ltp: number; oi: number; volume: number; high?: number; low?: number }
+export interface OptionSide {
+  ltp: number; oi: number; volume: number; high?: number; low?: number;
+  /** Prev-day OI change % and 4-way buildup label ('LB'|'SB'|'SC'|'LU'|'') from the WS bridge */
+  oi_chg_pct?: number; buildup?: string;
+}
 export interface StrikeData  { strike: number; ce: OptionSide; pe: OptionSide }
 
 export interface LiveQuotes {
@@ -160,6 +164,11 @@ export default function Scalper() {
   const ceLow  = ceStrike != null ? (liveQuotes?.strikes?.[String(ceStrike)]?.ce?.low ?? 0) : 0;
   const peHigh = peStrike != null ? (liveQuotes?.strikes?.[String(peStrike)]?.pe?.high ?? 0) : 0;
   const peLow  = peStrike != null ? (liveQuotes?.strikes?.[String(peStrike)]?.pe?.low ?? 0) : 0;
+
+  const ceBuildup = ceStrike != null ? (liveQuotes?.strikes?.[String(ceStrike)]?.ce?.buildup ?? '') : '';
+  const peBuildup = peStrike != null ? (liveQuotes?.strikes?.[String(peStrike)]?.pe?.buildup ?? '') : '';
+  const ceOiChgPct = ceStrike != null ? (liveQuotes?.strikes?.[String(ceStrike)]?.ce?.oi_chg_pct ?? 0) : 0;
+  const peOiChgPct = peStrike != null ? (liveQuotes?.strikes?.[String(peStrike)]?.pe?.oi_chg_pct ?? 0) : 0;
 
   const cePrevClose = ceStrike != null ? (prevClose[String(ceStrike)]?.ce ?? 0) : 0;
   const pePrevClose = peStrike != null ? (prevClose[String(peStrike)]?.pe ?? 0) : 0;
@@ -999,6 +1008,8 @@ export default function Scalper() {
           pct={cePct}
           high={ceHigh}
           low={ceLow}
+          buildup={ceBuildup}
+          oiChgPct={ceOiChgPct}
           limitPrice={ceLimitPrice}
           orderMode={orderMode}
           onStrikeChange={v => { setCeStrike(v); setCeLimitPrice(''); }}
@@ -1016,6 +1027,8 @@ export default function Scalper() {
           pct={pePct}
           high={peHigh}
           low={peLow}
+          buildup={peBuildup}
+          oiChgPct={peOiChgPct}
           limitPrice={peLimitPrice}
           orderMode={orderMode}
           onStrikeChange={v => { setPeStrike(v); setPeLimitPrice(''); }}
@@ -1097,6 +1110,10 @@ export interface OptionPanelProps {
   /** Day high/low of the selected strike (0 or omitted hides the H/L row) */
   high?: number;
   low?: number;
+  /** 4-way OI buildup label ('LB'|'SB'|'SC'|'LU'); empty/omitted hides the chip */
+  buildup?: string;
+  /** OI change vs prev day (%), shown alongside the buildup label */
+  oiChgPct?: number;
   limitPrice: string;
   orderMode: 'MARKET' | 'LIMIT';
   onStrikeChange: (s: number) => void;
@@ -1115,12 +1132,20 @@ export interface OptionPanelProps {
   onSideChange?: (side: 'CE' | 'PE') => void;
 }
 
+const BUILDUP_STYLES: Record<string, { text: string; cls: string }> = {
+  LB: { text: 'Long Buildup',   cls: 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20' },
+  SB: { text: 'Short Buildup',  cls: 'bg-rose-500/10 text-rose-400 border-rose-500/20' },
+  SC: { text: 'Short Covering', cls: 'bg-amber-500/10 text-amber-400 border-amber-500/20' },
+  LU: { text: 'Long Unwinding', cls: 'bg-zinc-500/10 text-zinc-400 border-zinc-600' },
+};
+
 export function OptionPanel({
-  side, label, strike, visibleStrikes, atm, ltp, pct, high, low,
+  side, label, strike, visibleStrikes, atm, ltp, pct, high, low, buildup, oiChgPct,
   limitPrice, orderMode, onStrikeChange, onLimitPriceChange, onBuy, onSell,
   lots, onLotsChange, onRemove, canRemove, pnl, onSideChange,
 }: OptionPanelProps) {
   const isPos = (v: number) => v >= 0;
+  const buildupStyle = buildup ? BUILDUP_STYLES[buildup] : undefined;
 
   return (
     <div className="bg-zinc-900/60 border border-zinc-800 rounded-2xl p-5 flex flex-col gap-4 min-w-0">
@@ -1206,6 +1231,18 @@ export function OptionPanel({
             <span className="text-zinc-600 mx-1.5">·</span>
             <span className="text-zinc-500 font-bold">L </span>
             <span className="text-rose-400">{fmtLTP(low!)}</span>
+          </p>
+        )}
+        {buildupStyle && (
+          <p className="mt-2">
+            <span className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded-md border text-[11px] font-bold ${buildupStyle.cls}`}>
+              {buildupStyle.text}
+              {(oiChgPct ?? 0) !== 0 && (
+                <span className="font-mono tabular-nums font-semibold">
+                  OI {oiChgPct! > 0 ? '+' : ''}{oiChgPct!.toFixed(1)}%
+                </span>
+              )}
+            </span>
           </p>
         )}
         {pnl !== undefined && (

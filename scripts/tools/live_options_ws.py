@@ -84,6 +84,40 @@ def _fetch_prev_closes(dhan, underlying_sid: str) -> dict:
         print(f'[live_options_ws] WARN: prev_closes fetch failed: {e}', flush=True)
     return closes
 
+def _fetch_prev_oi(helper, underlying: str, expiry: str) -> dict:
+    """Fetch previous-day OI per strike/side from the option chain (once at startup).
+
+    Returns {strike_int: {'ce': prev_oi, 'pe': prev_oi}}. Empty dict on failure —
+    buildup labels are simply omitted for the session.
+    """
+    prev_oi: dict = {}
+    try:
+        chain = helper.get_option_chain(underlying, expiry, exchange_segment='IDX_I')
+        for strike_str, data in ((chain or {}).get('oc') or {}).items():
+            strike = int(float(strike_str))
+            prev_oi[strike] = {
+                'ce': int(_f((data.get('ce') or {}).get('previous_oi'))),
+                'pe': int(_f((data.get('pe') or {}).get('previous_oi'))),
+            }
+    except Exception as e:
+        print(f'[live_options_ws] WARN: prev_oi fetch failed: {e}', flush=True)
+    return prev_oi
+
+
+# Buildup dead-bands — below these the label is suppressed to avoid flicker
+BUILDUP_MIN_PRICE_PCT = 2.0
+BUILDUP_MIN_OI_PCT    = 0.5
+
+
+def _classify_buildup(change_pct: float, oi_chg_pct: float) -> str:
+    """4-way OI buildup label: LB/SB (OI up), SC/LU (OI down); '' inside dead-band."""
+    if abs(change_pct) < BUILDUP_MIN_PRICE_PCT or abs(oi_chg_pct) < BUILDUP_MIN_OI_PCT:
+        return ''
+    if oi_chg_pct > 0:
+        return 'LB' if change_pct > 0 else 'SB'
+    return 'SC' if change_pct > 0 else 'LU'
+
+
 # Strike step per underlying
 STRIKE_STEP = {'NIFTY': 50, 'BANKNIFTY': 100, 'FINNIFTY': 50}
 
@@ -160,6 +194,10 @@ def main():
     underlying_prev_close = closes.get(underlying_sid, 0.0)
     vix_prev_close = closes.get(VIX_SID, 0.0)
     print(f'[live_options_ws] prev_closes: underlying={underlying_prev_close}, VIX={vix_prev_close}', flush=True)
+
+    # Fetch prev-day OI per strike once at startup — baseline for buildup labels
+    prev_oi_map = _fetch_prev_oi(helper, args.underlying, args.expiry)
+    print(f'[live_options_ws] prev_oi baseline: {len(prev_oi_map)} strikes', flush=True)
 
     # Get spot to determine ATM
     print('[live_options_ws] Fetching spot price…', flush=True)
@@ -257,8 +295,8 @@ def main():
                 if sk_key not in strikes_data:
                     strikes_data[sk_key] = {
                         'strike': meta['strike'],
-                        'ce': {'ltp': 0, 'oi': 0, 'volume': 0, 'prev_close': 0.0, 'change': 0.0, 'change_pct': 0.0},
-                        'pe': {'ltp': 0, 'oi': 0, 'volume': 0, 'prev_close': 0.0, 'change': 0.0, 'change_pct': 0.0},
+                        'ce': {'ltp': 0, 'oi': 0, 'volume': 0, 'prev_close': 0.0, 'change': 0.0, 'change_pct': 0.0, 'oi_chg_pct': 0.0, 'buildup': ''},
+                        'pe': {'ltp': 0, 'oi': 0, 'volume': 0, 'prev_close': 0.0, 'change': 0.0, 'change_pct': 0.0, 'oi_chg_pct': 0.0, 'buildup': ''},
                     }
 
                 tick = helper.live_data.get(sid)
@@ -275,6 +313,9 @@ def main():
                     change = ltp - prev_close if prev_close > 0 else 0.0
                     change_pct = (change / prev_close * 100) if prev_close > 0 else 0.0
 
+                    side_prev_oi = (prev_oi_map.get(meta['strike']) or {}).get(meta['type'].lower(), 0)
+                    oi_chg_pct = ((oi - side_prev_oi) / side_prev_oi * 100) if side_prev_oi > 0 and oi > 0 else 0.0
+
                     strikes_data[sk_key][meta['type'].lower()] = {
                         'ltp':    round(ltp, 2),
                         'oi':     oi,
@@ -285,6 +326,8 @@ def main():
                         'prev_close': round(prev_close, 2),
                         'change':     round(change, 2),
                         'change_pct': round(change_pct, 4),
+                        'oi_chg_pct': round(oi_chg_pct, 2),
+                        'buildup':    _classify_buildup(change_pct, oi_chg_pct),
                     }
 
             # ATM straddle premium
