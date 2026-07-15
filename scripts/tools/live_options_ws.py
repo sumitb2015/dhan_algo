@@ -15,9 +15,14 @@ import sys
 import os
 import json
 import time
+import queue
+import asyncio
 import argparse
+import threading
 import urllib.request
-from datetime import datetime, date
+from datetime import datetime, date, timezone
+
+from websockets.asyncio.server import serve as ws_serve, broadcast as ws_broadcast
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, ROOT)
@@ -131,6 +136,21 @@ def _f(val, default: float = 0.0) -> float:
         return default
 
 
+def atomic_write_text(path: str, text: str) -> bool:
+    """Atomic write of pre-serialized JSON text (see atomic_write for semantics)."""
+    tmp = path + '.tmp'
+    try:
+        with open(tmp, 'w') as f:
+            f.write(text)
+        os.replace(tmp, path)
+        return True
+    except PermissionError:
+        return False
+    except Exception as e:
+        print(f"[live_options_ws] Warning: failed to write {path} ({e})", flush=True)
+        return False
+
+
 def atomic_write(path: str, data: dict) -> bool:
     tmp = path + '.tmp'
     try:
@@ -149,7 +169,7 @@ def atomic_write(path: str, data: dict) -> bool:
 
 
 def write_status(status: str, underlying: str = '', expiry: str = '',
-                 subscribed: int = 0, started_at: str = ''):
+                 subscribed: int = 0, started_at: str = '', ws_port=None):
     try:
         atomic_write(STATUS_FILE, {
             'status': status,
@@ -157,11 +177,99 @@ def write_status(status: str, underlying: str = '', expiry: str = '',
             'underlying': underlying,
             'expiry': expiry,
             'subscribed': subscribed,
+            'ws_port': ws_port,
             'started_at': started_at or datetime.now().isoformat(),
             'last_update': datetime.now().isoformat(),
         })
     except Exception as e:
         print(f"[live_options_ws] Warning: failed to write status ({e})", flush=True)
+
+
+class QuotePushServer:
+    """Localhost WebSocket push server. Runs in its own thread with its own
+    asyncio loop; the bridge main loop hands it pre-serialized JSON payloads
+    via broadcast(), which is thread-safe. Bound to 127.0.0.1 only."""
+
+    def __init__(self, port: int):
+        self.port = port
+        self.clients: set = set()
+        self.loop = None
+        self.server = None
+        self.thread = None
+        self.bound = False
+        self._latest_payload: str | None = None
+        self._started = threading.Event()
+
+    async def _handler(self, ws):
+        self.clients.add(ws)
+        try:
+            # Greet new connections with the latest snapshot so a fresh tab
+            # paints immediately instead of waiting for the next market tick.
+            if self._latest_payload:
+                await ws.send(self._latest_payload)
+            async for _ in ws:   # drain and ignore anything the client sends
+                pass
+        except Exception:
+            pass
+        finally:
+            self.clients.discard(ws)
+
+    def _run(self):
+        self.loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(self.loop)
+
+        async def _bind():
+            self.server = await ws_serve(self._handler, '127.0.0.1', self.port)
+            self.bound = True
+
+        try:
+            self.loop.run_until_complete(_bind())
+        except OSError as e:
+            print(f'[live_options_ws] WARN: WS push server failed to bind port {self.port}: {e} '
+                  f'— continuing file-only', flush=True)
+        finally:
+            self._started.set()
+
+        if self.bound:
+            try:
+                self.loop.run_forever()
+            finally:
+                try:
+                    self.server.close()
+                    self.loop.run_until_complete(self.server.wait_closed())
+                except Exception:
+                    pass
+                self.loop.close()
+
+    def start(self) -> bool:
+        self.thread = threading.Thread(target=self._run, daemon=True, name='quote-push-ws')
+        self.thread.start()
+        self._started.wait(timeout=5)
+        return self.bound
+
+    def _do_broadcast(self, payload: str):
+        self._latest_payload = payload
+        if self.clients:
+            ws_broadcast(self.clients, payload)
+
+    def broadcast(self, payload: str):
+        """Thread-safe: called from the bridge main loop."""
+        if not self.bound or self.loop is None:
+            self._latest_payload = payload
+            return
+        try:
+            self.loop.call_soon_threadsafe(self._do_broadcast, payload)
+        except RuntimeError:
+            pass  # loop already closed during shutdown
+
+    def stop(self):
+        if self.bound and self.loop is not None:
+            try:
+                self.loop.call_soon_threadsafe(self.loop.stop)
+            except RuntimeError:
+                pass
+        if self.thread is not None:
+            self.thread.join(timeout=2)
 
 
 def main():
@@ -172,12 +280,20 @@ def main():
                         help='Expiry date YYYY-MM-DD')
     parser.add_argument('--num-strikes', type=int, default=10,
                         help='Number of strikes each side of ATM (default 10)')
+    parser.add_argument('--ws-port', type=int, default=8765,
+                        help='Localhost WebSocket push server port (default 8765)')
     args = parser.parse_args()
 
     os.makedirs(DEBUG_DIR, exist_ok=True)
     started_at = datetime.now().isoformat()
+
+    push_server = QuotePushServer(args.ws_port)
+    ws_port = args.ws_port if push_server.start() else None
+    if ws_port:
+        print(f'[live_options_ws] WS push server listening on ws://127.0.0.1:{ws_port}', flush=True)
+
     write_status('STARTING', underlying=args.underlying, expiry=args.expiry,
-                 started_at=started_at)
+                 started_at=started_at, ws_port=ws_port)
 
     print(f'[live_options_ws] Starting — underlying={args.underlying} expiry={args.expiry}',
           flush=True)
@@ -203,9 +319,16 @@ def main():
     prev_oi_map = _fetch_prev_oi(helper, args.underlying, args.expiry)
     print(f'[live_options_ws] prev_oi baseline: {len(prev_oi_map)} strikes', flush=True)
 
-    # Get spot to determine ATM
+    # Get spot to determine ATM — retry on transient REST failures (429s):
+    # spot=0 here means zero strikes resolved and a crippled session.
     print('[live_options_ws] Fetching spot price…', flush=True)
-    spot = helper.get_ltp(args.underlying, exchange='IDX_I', instrument='INDEX') or 0.0
+    spot = 0.0
+    for attempt in range(5):
+        spot = helper.get_ltp(args.underlying, exchange='IDX_I', instrument='INDEX') or 0.0
+        if spot > 0:
+            break
+        print(f'[live_options_ws] WARN: spot fetch failed (attempt {attempt + 1}/5), retrying in 5s…', flush=True)
+        time.sleep(5)
     atm  = round(spot / step) * step if spot > 0 else 0
     print(f'[live_options_ws] Spot={spot:.2f} ATM={atm} step={step}', flush=True)
 
@@ -230,16 +353,20 @@ def main():
     instruments.append((IDX, underlying_sid, FEED_QUOTE))
     instruments.append((IDX, VIX_SID, FEED_QUOTE))
 
-    n = len(instruments) - 1  # exclude index canary
+    n = len(sid_map)  # actual option contracts (excludes index canary + VIX)
     print(f'[live_options_ws] Subscribing to {n} option contracts + index canary…', flush=True)
 
     if n == 0:
         print('[live_options_ws] ERROR: no contracts resolved — aborting', flush=True)
         write_status('ERROR', underlying=args.underlying, expiry=args.expiry,
-                     started_at=started_at)
+                     started_at=started_at, ws_port=ws_port)
         sys.exit(1)
 
-    helper.start_websocket(instruments)
+    # Dirty flag set by the feed thread on every incoming packet. DhanHelper
+    # merges the packet into live_data BEFORE invoking this callback, so the
+    # data is already readable when the main loop wakes.
+    dirty = threading.Event()
+    helper.start_websocket(instruments, on_message=lambda inst, msg: dirty.set())
     time.sleep(3)  # wait for connection + first tick batch
 
     # Diagnostic: check if index canary received a tick
@@ -251,16 +378,44 @@ def main():
         print('[live_options_ws] WARNING: No index tick received after 3s; will use REST spot as fallback', flush=True)
 
     write_status('RUNNING', underlying=args.underlying, expiry=args.expiry,
-                 subscribed=n, started_at=started_at)
-    print('[live_options_ws] WebSocket connected. Writing quotes every 2s…', flush=True)
+                 subscribed=n, started_at=started_at, ws_port=ws_port)
+    print('[live_options_ws] WebSocket connected. Pushing on tick; file every 0.5s…', flush=True)
 
     last_print = 0.0
     last_quotes = None
+    last_pushed = None
+    last_file_write = 0.0
     last_history_write = 0.0
-    history_ticks: list = []
+    # Each history tick is serialized to JSON ONCE when it's captured (~20KB,
+    # ~1ms). The writer thread only joins the pre-serialized strings and writes
+    # the ~6MB file. Never re-json.dumps the whole 300-snapshot history:
+    # that's 300-800ms of GIL-held CPU that stalls the feed thread AND the
+    # push loop — it was the source of the multi-hundred-ms push latency.
+    hist_json_parts: list = []
+
+    hist_q: queue.Queue = queue.Queue(maxsize=1)
+
+    def _history_writer():
+        while True:
+            parts = hist_q.get()
+            if parts is None:
+                return
+            atomic_write_text(HISTORY_FILE, '{"history":[' + ','.join(parts) + ']}')
+
+    hist_thread = threading.Thread(target=_history_writer, daemon=True, name='history-writer')
+    hist_thread.start()
 
     try:
         while True:
+            # Event-driven pacing: wake instantly on a market tick (dirty flag
+            # set by the feed thread), or every 250ms as a heartbeat for the
+            # stop-trigger check. After a wake, sleep 20ms so the multi-packet
+            # burst per tick (Full + OI + PrevClose) coalesces into ONE
+            # snapshot build + push (~40 pushes/sec max).
+            if dirty.wait(timeout=0.25):
+                dirty.clear()
+                time.sleep(0.02)
+
             if os.path.exists(STOP_TRIGGER):
                 try:
                     os.remove(STOP_TRIGGER)
@@ -342,7 +497,7 @@ def main():
                 pe_ltp = strikes_data[atm_key].get('pe', {}).get('ltp', 0)
                 straddle = round(ce_ltp + pe_ltp, 2)
 
-            now_iso = datetime.now().isoformat()
+            now_iso = datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z')
 
             spot_chg = 0.0
             spot_chg_pct = 0.0
@@ -362,17 +517,33 @@ def main():
                 'vix':               vix_data,
             }
 
-            if current_quotes != last_quotes:
-                current_quotes['updated_at'] = now_iso
-                if atomic_write(QUOTES_FILE, current_quotes):
+            now_ts = time.time()
+
+            # WS push (hot path): push immediately whenever the snapshot changed.
+            # Compare the core payload BEFORE stamping volatile fields
+            # (updated_at/pushed_at) so identical market data never re-pushes.
+            if current_quotes != last_pushed:
+                payload = dict(current_quotes)
+                payload['type']       = 'quotes'
+                payload['updated_at'] = now_iso
+                payload['pushed_at']  = now_ts
+                push_server.broadcast(json.dumps(payload))
+                last_pushed = current_quotes
+
+            # Quotes file (fallback + other consumers): relaxed 500ms cadence —
+            # the scalper hot path no longer reads this file.
+            if current_quotes != last_quotes and now_ts - last_file_write >= 0.5:
+                file_payload = dict(current_quotes)
+                file_payload['updated_at'] = now_iso
+                if atomic_write(QUOTES_FILE, file_payload):
                     last_quotes = current_quotes
+                    last_file_write = now_ts
                 # else: write was dropped (e.g. lock contention) — leave last_quotes
                 # unchanged so this same state is retried on the next loop tick
                 # instead of going stale until the next real market data change.
 
-            now_ts = time.time()
-
-            # Write history every 2 seconds
+            # Queue history snapshot every 2 seconds. Only THIS tick is
+            # serialized here (~20KB); the writer thread joins the parts.
             if now_ts - last_history_write >= 2.0:
                 tick = {
                     'timestamp': now_iso,
@@ -381,24 +552,30 @@ def main():
                     'straddle_premium':  straddle,
                     'strikes':           strikes_data,
                 }
-                history_ticks.append(tick)
-                if len(history_ticks) > MAX_HISTORY:
-                    history_ticks = history_ticks[-MAX_HISTORY:]
-                atomic_write(HISTORY_FILE, {'history': history_ticks})
+                hist_json_parts.append(json.dumps(tick))
+                if len(hist_json_parts) > MAX_HISTORY:
+                    hist_json_parts = hist_json_parts[-MAX_HISTORY:]
+                try:
+                    hist_q.put_nowait(list(hist_json_parts))
+                except queue.Full:
+                    pass  # writer busy — next 2s tick retries
                 last_history_write = now_ts
 
             # Print status update to terminal every 10 seconds
             if now_ts - last_print > 10:
-                print(f'[live_options_ws] Spot={spot:.2f} | ATM={atm} | Straddle={straddle:.2f} | Subscribed={n}', flush=True)
+                print(f'[live_options_ws] Spot={spot:.2f} | ATM={atm} | Straddle={straddle:.2f} | Subscribed={n} | WS clients={len(push_server.clients)}', flush=True)
                 last_print = now_ts
-
-            time.sleep(0.1)
 
     except KeyboardInterrupt:
         print('[live_options_ws] KeyboardInterrupt — shutting down.', flush=True)
     finally:
+        try:
+            hist_q.put_nowait(None)   # stop the history writer
+        except queue.Full:
+            pass
+        push_server.stop()
         write_status('STOPPED', underlying=args.underlying, expiry=args.expiry,
-                     subscribed=0, started_at=started_at)
+                     subscribed=0, started_at=started_at, ws_port=None)
         print('[live_options_ws] Stopped.', flush=True)
 
 

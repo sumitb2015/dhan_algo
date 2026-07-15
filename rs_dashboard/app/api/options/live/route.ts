@@ -29,6 +29,7 @@ function readJson(file: string): unknown {
  *  for callers (OptionsCharts) that ask for it via ?history=1. */
 export async function GET(request: NextRequest) {
   const includeHistory = request.nextUrl.searchParams.get('history') === '1';
+  const checkPid       = request.nextUrl.searchParams.get('checkPid') === '1';
 
   const quotes  = readJson(QUOTES_FILE)  as Record<string, unknown> | null;
   const history = includeHistory ? (readJson(HISTORY_FILE) as Record<string, unknown> | null) : null;
@@ -36,7 +37,10 @@ export async function GET(request: NextRequest) {
 
   // If the process is dead, reset both RUNNING and ERROR to STOPPED so stale
   // error state from a previous crash doesn't persist across page loads.
-  if (status && status.pid && (status.status === 'RUNNING' || status.status === 'ERROR')) {
+  // Only when ?checkPid=1 — isPidRunning spawns a blocking `tasklist` on cache
+  // miss (~50-200ms event-loop stall), so fast poll loops must not trigger it.
+  // The scalper's 5s status poll passes it; the 100ms fallback poll does not.
+  if (checkPid && status && status.pid && (status.status === 'RUNNING' || status.status === 'ERROR')) {
     if (!isPidRunning(Number(status.pid))) {
       (status as Record<string, unknown>).status = 'STOPPED';
     }
@@ -96,7 +100,8 @@ export async function POST(request: NextRequest) {
 
     const child = spawn(
       PYTHON_EXE,
-      [BRIDGE_SCRIPT, '--underlying', underlying, '--expiry', expiry, '--num-strikes', String(numStrikes)],
+      [BRIDGE_SCRIPT, '--underlying', underlying, '--expiry', expiry,
+       '--num-strikes', String(numStrikes), '--ws-port', '8765'],
       { detached: true, stdio: 'ignore', windowsHide: true },
     );
     child.unref();

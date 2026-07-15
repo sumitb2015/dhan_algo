@@ -489,7 +489,7 @@ export default function OptionsCharts() {
 
   // ── Poll live data ────────────────────────────────────────────────
   const pollLive = useCallback(() => {
-    fetch('/api/options/live?history=1')
+    fetch('/api/options/live?history=1&checkPid=1')
       .then(r => r.json())
       .then((j: {
         success: boolean;

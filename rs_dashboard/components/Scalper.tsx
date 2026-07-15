@@ -3,6 +3,7 @@
 import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import NavBar from './NavBar';
 import { Zap, RefreshCw, Shield, ChevronDown, ChevronUp } from 'lucide-react';
+import { useLiveOptionsWS } from '@/lib/useLiveOptionsWS';
 
 // ─── Types ────────────────────────────────────────────────────────
 
@@ -88,10 +89,8 @@ export default function Scalper() {
   const [strikeMap, setStrikeMap]   = useState<Record<string, { ceId?: string; peId?: string }>>({});
   const [lotSize, setLotSize]       = useState(75);
 
-  // WS bridge live data
-  const [liveQuotes, setLiveQuotes]   = useState<LiveQuotes | null>(null);
-  const [bridgeStatus, setBridgeStatus] = useState<BridgeStatus>({ status: 'STOPPED' });
-  const [lastUpdated, setLastUpdated]   = useState('');
+  // Live data: direct WebSocket to the Python bridge (HTTP polling fallback)
+  const { liveQuotes, bridgeStatus, lastUpdated, transport } = useLiveOptionsWS(expiry);
 
   // Trading controls
   const [lots, setLots]           = useState(1);
@@ -132,7 +131,6 @@ export default function Scalper() {
   const [posGuards, setPosGuards] = useState<Record<string, PositionGuard>>({});
   const [closingPositions, setClosingPositions] = useState<Set<string>>(new Set());
 
-  const pollRef = useRef<NodeJS.Timeout | null>(null);
   // Refs for guard monitor interval — avoids stale closures
   const positionsRef = useRef<Record<string, unknown>[]>([]);
   const posGuardsRef = useRef<Record<string, PositionGuard>>({});
@@ -236,8 +234,9 @@ export default function Scalper() {
     });
   }, [realizedFixedPositions, liveQuotes, secIdToStrikeSide]);
 
-  const totalPnl = enrichedPositions.reduce((sum, p) =>
-    sum + (Number(p.realizedProfit) || 0) + (Number(p.unrealizedProfit) || 0), 0);
+  const totalPnl = useMemo(() => enrichedPositions.reduce((sum, p) =>
+    sum + (Number(p.realizedProfit) || 0) + (Number(p.unrealizedProfit) || 0), 0),
+    [enrichedPositions]);
 
   // ─── useEffect 1: Load expiries on mount ─────────────────────────
 
@@ -277,8 +276,7 @@ export default function Scalper() {
     setPeStrike(null);
     setAllStrikes([]);
     setPrevClose({});
-    setLiveQuotes(null);
-    setStrikeMap({});
+    setStrikeMap({});   // liveQuotes reset is handled inside useLiveOptionsWS
 
     // One-time chain fetch for prev close prices + strike list
     fetch(`/api/options/chain?underlying=NIFTY&expiry=${expiry}`)
@@ -347,45 +345,9 @@ export default function Scalper() {
     };
   }, [expiry]);
 
-  // ─── useEffect 3: Poll live data at 500ms ────────────────────────
-
-  useEffect(() => {
-    if (!expiry) return;
-
-    const poll = () => {
-      fetch('/api/options/live')
-        .then(r => r.json())
-        .then((j: { success: boolean; status: BridgeStatus; quotes: LiveQuotes }) => {
-          if (j.success) {
-            setBridgeStatus(j.status ?? { status: 'STOPPED' });
-
-            const q = j.quotes;
-            // Guard 1: quotes must belong to the currently selected expiry
-            if (q?.expiry && q.expiry !== expiry) return;
-
-            // Guard 2: reject stale data older than 10 seconds.
-            // An unparseable timestamp gives NaN — fail safe and treat as stale.
-            if (q?.updated_at) {
-              const ageMs = Date.now() - new Date(q.updated_at).getTime();
-              if (!(ageMs <= 10_000)) return;
-            }
-
-            // Guard 3: must have at least one strike entry (empty {} is truthy in JS)
-            if (q?.strikes && Object.keys(q.strikes).length > 0) {
-              setLiveQuotes(q);
-              setLastUpdated(new Date().toLocaleTimeString('en-IN', {
-                hour: '2-digit', minute: '2-digit', second: '2-digit',
-              }));
-            }
-          }
-        })
-        .catch(() => {});
-    };
-
-    poll();
-    pollRef.current = setInterval(poll, 100);
-    return () => { if (pollRef.current) clearInterval(pollRef.current); };
-  }, [expiry]);
+  // Live quotes arrive via useLiveOptionsWS (direct WebSocket push from the
+  // Python bridge, rAF-coalesced; falls back to 100ms HTTP polling if the WS
+  // is unavailable). The old useEffect-3 poll loop lived here.
 
   // ─── useEffect 4: Poll positions/orders/trades every 5s ──────────
 
@@ -769,6 +731,17 @@ export default function Scalper() {
     }
   };
 
+  // Stable OptionPanel callbacks — inline arrows would defeat React.memo and
+  // force both panels to re-render on every quote push.
+  const handleCeStrikeChange = useCallback((v: number) => { setCeStrike(v); setCeLimitPrice(''); }, []);
+  const handlePeStrikeChange = useCallback((v: number) => { setPeStrike(v); setPeLimitPrice(''); }, []);
+  const handleCeBuy  = useCallback(() => placeOrder('BUY',  'CE'), [placeOrder]);
+  const handleCeSell = useCallback(() => placeOrder('SELL', 'CE'), [placeOrder]);
+  const handlePeBuy  = useCallback(() => placeOrder('BUY',  'PE'), [placeOrder]);
+  const handlePeSell = useCallback(() => placeOrder('SELL', 'PE'), [placeOrder]);
+  const handleClosePosition = useCallback(
+    (pos: Record<string, unknown>) => closePosition(pos, 'Manual'), [closePosition]);
+
   // ─── JSX ─────────────────────────────────────────────────────────
 
   return (
@@ -838,13 +811,20 @@ export default function Scalper() {
               ))}
             </div>
 
-            {/* Bridge status dot + timestamp */}
+            {/* Bridge status dot + transport badge + timestamp */}
             <div className="flex items-center gap-1.5">
               <span className={`w-2 h-2 rounded-full ${
                 bridgeStatus.status === 'RUNNING'  ? 'bg-emerald-400 animate-pulse' :
                 bridgeStatus.status === 'STARTING' ? 'bg-yellow-400 animate-pulse'  :
                 bridgeStatus.status === 'ERROR'    ? 'bg-rose-400'                  : 'bg-zinc-600'
               }`} />
+              <span className={`text-[9px] font-bold px-1 py-0.5 rounded border ${
+                transport === 'ws'
+                  ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20'
+                  : 'bg-zinc-800 text-zinc-500 border-zinc-700'
+              }`} title={transport === 'ws' ? 'Realtime WebSocket push' : 'HTTP polling fallback'}>
+                {transport === 'ws' ? 'WS' : 'HTTP'}
+              </span>
               {lastUpdated && <span className="text-[10px] text-zinc-500 font-mono">{lastUpdated}</span>}
             </div>
 
@@ -1012,10 +992,10 @@ export default function Scalper() {
           oiChgPct={ceOiChgPct}
           limitPrice={ceLimitPrice}
           orderMode={orderMode}
-          onStrikeChange={v => { setCeStrike(v); setCeLimitPrice(''); }}
+          onStrikeChange={handleCeStrikeChange}
           onLimitPriceChange={setCeLimitPrice}
-          onBuy={() => placeOrder('BUY', 'CE')}
-          onSell={() => placeOrder('SELL', 'CE')}
+          onBuy={handleCeBuy}
+          onSell={handleCeSell}
         />
         <OptionPanel
           side="PE"
@@ -1031,10 +1011,10 @@ export default function Scalper() {
           oiChgPct={peOiChgPct}
           limitPrice={peLimitPrice}
           orderMode={orderMode}
-          onStrikeChange={v => { setPeStrike(v); setPeLimitPrice(''); }}
+          onStrikeChange={handlePeStrikeChange}
           onLimitPriceChange={setPeLimitPrice}
-          onBuy={() => placeOrder('BUY', 'PE')}
-          onSell={() => placeOrder('SELL', 'PE')}
+          onBuy={handlePeBuy}
+          onSell={handlePeSell}
         />
       </div>
 
@@ -1079,7 +1059,7 @@ export default function Scalper() {
               closingPositions={closingPositions}
               onGuardChange={handleGuardChange}
               onTrailToggle={handleTrailToggle}
-              onClose={pos => closePosition(pos, 'Manual')}
+              onClose={handleClosePosition}
               sort={tableSort}
               onSort={handleTableSort}
             />
@@ -1139,7 +1119,7 @@ const BUILDUP_STYLES: Record<string, { text: string; cls: string }> = {
   LU: { text: 'Long Unwinding', cls: 'bg-zinc-500/10 text-zinc-400 border-zinc-600' },
 };
 
-export function OptionPanel({
+export const OptionPanel = React.memo(function OptionPanel({
   side, label, strike, visibleStrikes, atm, ltp, pct, high, low, buildup, oiChgPct,
   limitPrice, orderMode, onStrikeChange, onLimitPriceChange, onBuy, onSell,
   lots, onLotsChange, onRemove, canRemove, pnl, onSideChange,
@@ -1293,7 +1273,7 @@ export function OptionPanel({
       </div>
     </div>
   );
-}
+});
 
 // ─── Sorting helpers ────────────────────────────────────────────────
 
@@ -1369,7 +1349,7 @@ export interface PositionsTableProps {
   onSort: (key: string) => void;
 }
 
-export function PositionsTable({ data, guards, closingPositions, onGuardChange, onTrailToggle, onClose, sort, onSort }: PositionsTableProps) {
+export const PositionsTable = React.memo(function PositionsTable({ data, guards, closingPositions, onGuardChange, onTrailToggle, onClose, sort, onSort }: PositionsTableProps) {
   const sortedData = useMemo(() => sortRows(data, sort), [data, sort]);
 
   if (!data.length) {
@@ -1520,7 +1500,7 @@ export function PositionsTable({ data, guards, closingPositions, onGuardChange, 
       </tbody>
     </table>
   );
-}
+});
 
 // ─── TabTable ─────────────────────────────────────────────────────
 

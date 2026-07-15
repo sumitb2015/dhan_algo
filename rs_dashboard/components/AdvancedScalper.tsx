@@ -8,6 +8,7 @@ import {
   type LiveQuotes, type BridgeStatus, type ChainOcEntry, type Toast,
   type PnlGuardStatus, type PositionGuard, type SortState,
 } from './Scalper';
+import { useLiveOptionsWS } from '@/lib/useLiveOptionsWS';
 
 // ─── Types ────────────────────────────────────────────────────────
 
@@ -39,10 +40,8 @@ export default function AdvancedScalper() {
   const [strikeMap, setStrikeMap]   = useState<Record<string, { ceId?: string; peId?: string }>>({});
   const [lotSize, setLotSize]       = useState(75);
 
-  // WS bridge live data
-  const [liveQuotes, setLiveQuotes]   = useState<LiveQuotes | null>(null);
-  const [bridgeStatus, setBridgeStatus] = useState<BridgeStatus>({ status: 'STOPPED' });
-  const [lastUpdated, setLastUpdated]   = useState('');
+  // Live data: direct WebSocket to the Python bridge (HTTP polling fallback)
+  const { liveQuotes, bridgeStatus, lastUpdated, transport } = useLiveOptionsWS(expiry);
 
   // Trading controls
   const [orderMode, setOrderMode] = useState<'MARKET' | 'LIMIT'>('MARKET');
@@ -83,7 +82,6 @@ export default function AdvancedScalper() {
   const [posGuards, setPosGuards] = useState<Record<string, PositionGuard>>({});
   const [closingPositions, setClosingPositions] = useState<Set<string>>(new Set());
 
-  const pollRef = useRef<NodeJS.Timeout | null>(null);
   const positionsRef = useRef<Record<string, unknown>[]>([]);
   const posGuardsRef = useRef<Record<string, PositionGuard>>({});
   // Synchronous re-entrancy lock: React state updates are async, so the guard
@@ -217,8 +215,7 @@ export default function AdvancedScalper() {
     setBoxes(prev => prev.map(b => ({ ...b, strike: null })));
     setAllStrikes([]);
     setPrevClose({});
-    setLiveQuotes(null);
-    setStrikeMap({});
+    setStrikeMap({});   // liveQuotes reset is handled inside useLiveOptionsWS
 
     fetch(`/api/options/chain?underlying=NIFTY&expiry=${expiry}`)
       .then(r => r.json())
@@ -278,43 +275,9 @@ export default function AdvancedScalper() {
     };
   }, [expiry]);
 
-  // ─── useEffect 3: Poll live data at 100ms ────────────────────────
-
-  useEffect(() => {
-    if (!expiry) return;
-
-    const poll = () => {
-      fetch('/api/options/live')
-        .then(r => r.json())
-        .then((j: { success: boolean; status: BridgeStatus; quotes: LiveQuotes }) => {
-          if (j.success) {
-            setBridgeStatus(j.status ?? { status: 'STOPPED' });
-
-            const q = j.quotes;
-            if (q?.expiry && q.expiry !== expiry) return;
-
-            // Reject stale data older than 10 seconds. An unparseable
-            // timestamp gives NaN — fail safe and treat as stale.
-            if (q?.updated_at) {
-              const ageMs = Date.now() - new Date(q.updated_at).getTime();
-              if (!(ageMs <= 10_000)) return;
-            }
-
-            if (q?.strikes && Object.keys(q.strikes).length > 0) {
-              setLiveQuotes(q);
-              setLastUpdated(new Date().toLocaleTimeString('en-IN', {
-                hour: '2-digit', minute: '2-digit', second: '2-digit',
-              }));
-            }
-          }
-        })
-        .catch(() => {});
-    };
-
-    poll();
-    pollRef.current = setInterval(poll, 100);
-    return () => { if (pollRef.current) clearInterval(pollRef.current); };
-  }, [expiry]);
+  // Live quotes arrive via useLiveOptionsWS (direct WebSocket push from the
+  // Python bridge, rAF-coalesced; falls back to 100ms HTTP polling if the WS
+  // is unavailable). The old useEffect-3 poll loop lived here.
 
   // ─── useEffect 4: Poll positions/orders/trades every 5s ──────────
 
@@ -802,13 +765,20 @@ export default function AdvancedScalper() {
               ))}
             </div>
 
-            {/* Bridge status dot + timestamp */}
+            {/* Bridge status dot + transport badge + timestamp */}
             <div className="flex items-center gap-1.5">
               <span className={`w-2 h-2 rounded-full ${
                 bridgeStatus.status === 'RUNNING'  ? 'bg-emerald-400 animate-pulse' :
                 bridgeStatus.status === 'STARTING' ? 'bg-yellow-400 animate-pulse'  :
                 bridgeStatus.status === 'ERROR'    ? 'bg-rose-400'                  : 'bg-zinc-600'
               }`} />
+              <span className={`text-[9px] font-bold px-1 py-0.5 rounded border ${
+                transport === 'ws'
+                  ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20'
+                  : 'bg-zinc-800 text-zinc-500 border-zinc-700'
+              }`} title={transport === 'ws' ? 'Realtime WebSocket push' : 'HTTP polling fallback'}>
+                {transport === 'ws' ? 'WS' : 'HTTP'}
+              </span>
               {lastUpdated && <span className="text-[10px] text-zinc-500 font-mono">{lastUpdated}</span>}
             </div>
 
