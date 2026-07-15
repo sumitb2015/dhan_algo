@@ -506,6 +506,7 @@ export default function CrudeOilOptions() {
 
   // --- SL and Target Risk Management ---
   const [riskConfigs, setRiskConfigs] = useState<Record<string, { sl: number | null; target: number | null }>>({});
+  const [editingConfigs, setEditingConfigs] = useState<Record<string, { sl?: string; target?: string }>>({});
 
   useEffect(() => {
     try {
@@ -514,8 +515,23 @@ export default function CrudeOilOptions() {
     } catch {}
   }, []);
 
-  const updateRiskConfig = (symbol: string, key: 'sl' | 'target', val: string) => {
-    const num = val === '' ? null : parseFloat(val);
+  const handleInputChange = (symbol: string, key: 'sl' | 'target', value: string) => {
+    setEditingConfigs(prev => ({
+      ...prev,
+      [symbol]: {
+        ...(prev[symbol] || {}),
+        [key]: value,
+      },
+    }));
+  };
+
+  const handleInputCommit = (symbol: string, key: 'sl' | 'target') => {
+    const editState = editingConfigs[symbol];
+    if (!editState || editState[key] === undefined) return;
+
+    const rawVal = editState[key]!;
+    const num = (rawVal === '' || isNaN(parseFloat(rawVal))) ? null : parseFloat(rawVal);
+
     const updated = {
       ...riskConfigs,
       [symbol]: {
@@ -525,6 +541,18 @@ export default function CrudeOilOptions() {
     };
     setRiskConfigs(updated);
     localStorage.setItem('crude_risk_configs', JSON.stringify(updated));
+
+    // Remove from editing states once committed
+    setEditingConfigs(prev => {
+      const copy = { ...prev };
+      if (copy[symbol]) {
+        delete copy[symbol][key];
+        if (Object.keys(copy[symbol]).length === 0) {
+          delete copy[symbol];
+        }
+      }
+      return copy;
+    });
   };
 
   const handleAutoExits = useCallback(async (
@@ -545,6 +573,13 @@ export default function CrudeOilOptions() {
     triggers.forEach(t => { delete updated[t.position.symbol]; });
     setRiskConfigs(updated);
     localStorage.setItem('crude_risk_configs', JSON.stringify(updated));
+
+    // Clear editing configs
+    setEditingConfigs(prev => {
+      const copy = { ...prev };
+      triggers.forEach(t => { delete copy[t.position.symbol]; });
+      return copy;
+    });
 
     const triggerNames = triggers.map(t => `${t.position.symbol} (${t.type} hit at ₹${t.targetPrice})`).join(', ');
     setOrderMessage({ text: `Auto-exit triggered: ${triggerNames}. Placing orders…`, isError: false });
@@ -567,15 +602,32 @@ export default function CrudeOilOptions() {
     }
   }, [riskConfigs, fetchCrudeTrades]);
 
-  // Monitor positions for SL/Target hits
+  // Monitor positions for SL/Target hits and stale configurations
   useEffect(() => {
     if (crudePositions.length === 0) return;
     
     const active = crudePositions.filter(p => p.netQty !== 0);
     const triggers: { position: CrudePosition; type: 'SL' | 'Target'; targetPrice: number }[] = [];
     
+    // Prune stale configs
+    let hasStale = false;
+    const cleanedRiskConfigs = { ...riskConfigs };
+    Object.keys(riskConfigs).forEach(sym => {
+      const pos = crudePositions.find(p => p.symbol === sym);
+      if (!pos || pos.netQty === 0) {
+        delete cleanedRiskConfigs[sym];
+        hasStale = true;
+      }
+    });
+
+    if (hasStale) {
+      setRiskConfigs(cleanedRiskConfigs);
+      localStorage.setItem('crude_risk_configs', JSON.stringify(cleanedRiskConfigs));
+    }
+    
+    // Check triggers on remaining configurations
     active.forEach(p => {
-      const config = riskConfigs[p.symbol];
+      const config = cleanedRiskConfigs[p.symbol];
       if (!config) return;
       
       const price = p.lastPrice;
@@ -1046,6 +1098,17 @@ export default function CrudeOilOptions() {
                   ) : (
                     crudePositions.map((p, i) => {
                       const config = riskConfigs[p.symbol] || { sl: null, target: null };
+                      
+                      const isEditingSL = editingConfigs[p.symbol]?.sl !== undefined;
+                      const slVal = isEditingSL 
+                        ? editingConfigs[p.symbol].sl! 
+                        : (config.sl !== null ? String(config.sl) : '');
+
+                      const isEditingTarget = editingConfigs[p.symbol]?.target !== undefined;
+                      const targetVal = isEditingTarget 
+                        ? editingConfigs[p.symbol].target! 
+                        : (config.target !== null ? String(config.target) : '');
+
                       return (
                         <tr key={`${p.symbol}-${i}`} className="border-t border-zinc-800/80 hover:bg-zinc-800/20 transition-colors">
                           <td className="px-3 py-2 text-zinc-200 font-semibold">{p.symbol}</td>
@@ -1062,8 +1125,10 @@ export default function CrudeOilOptions() {
                                 type="number"
                                 step="0.1"
                                 placeholder="None"
-                                value={config.sl !== null ? config.sl : ''}
-                                onChange={(e) => updateRiskConfig(p.symbol, 'sl', e.target.value)}
+                                value={slVal}
+                                onChange={(e) => handleInputChange(p.symbol, 'sl', e.target.value)}
+                                onBlur={() => handleInputCommit(p.symbol, 'sl')}
+                                onKeyDown={(e) => { if (e.key === 'Enter') e.currentTarget.blur(); }}
                                 className="w-20 bg-zinc-950/80 border border-zinc-800 focus:border-red-500/50 text-zinc-200 rounded text-center py-1 text-xs tabular-nums focus:outline-none focus:ring-1 focus:ring-red-500/20 transition-all font-semibold"
                               />
                             ) : (
@@ -1078,8 +1143,10 @@ export default function CrudeOilOptions() {
                                 type="number"
                                 step="0.1"
                                 placeholder="None"
-                                value={config.target !== null ? config.target : ''}
-                                onChange={(e) => updateRiskConfig(p.symbol, 'target', e.target.value)}
+                                value={targetVal}
+                                onChange={(e) => handleInputChange(p.symbol, 'target', e.target.value)}
+                                onBlur={() => handleInputCommit(p.symbol, 'target')}
+                                onKeyDown={(e) => { if (e.key === 'Enter') e.currentTarget.blur(); }}
                                 className="w-20 bg-zinc-950/80 border border-zinc-800 focus:border-emerald-500/50 text-zinc-200 rounded text-center py-1 text-xs tabular-nums focus:outline-none focus:ring-1 focus:ring-emerald-500/20 transition-all font-semibold"
                               />
                             ) : (
