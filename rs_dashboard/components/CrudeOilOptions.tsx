@@ -213,6 +213,7 @@ export default function CrudeOilOptions() {
   const [crudeTrades, setCrudeTrades]       = useState<CrudeTrade[]>([]);
   const [tradesError, setTradesError]       = useState<string | null>(null);
   const [tradesLoading, setTradesLoading]   = useState(true);
+  const [activeActivityTab, setActiveActivityTab] = useState<'positions' | 'orders' | 'trades'>('positions');
   const tradesIntervalRef = useRef<NodeJS.Timeout | null>(null);
 
   useEffect(() => {
@@ -765,7 +766,43 @@ export default function CrudeOilOptions() {
 
         {/* Crude Oil Positions / Orders / Trades */}
         <div className="space-y-4">
-          <h2 className="text-sm font-bold text-zinc-300 uppercase tracking-wider">Crude Oil Activity</h2>
+          <div className="flex flex-wrap items-center justify-between gap-4 border-b border-zinc-800 pb-2">
+            <h2 className="text-sm font-bold text-zinc-300 uppercase tracking-wider">Crude Oil Activity</h2>
+            
+            {/* Tab Switchers */}
+            <div className="flex bg-zinc-900/80 border border-zinc-850 rounded-lg p-0.5 shadow-inner">
+              {(['positions', 'orders', 'trades'] as const).map((tab) => {
+                const isActive = activeActivityTab === tab;
+                const label = tab.charAt(0).toUpperCase() + tab.slice(1);
+                
+                let count = 0;
+                if (tab === 'positions') count = crudePositions.length;
+                else if (tab === 'orders') count = crudeOrders.length;
+                else if (tab === 'trades') count = crudeTrades.length;
+
+                return (
+                  <button
+                    key={tab}
+                    onClick={() => setActiveActivityTab(tab)}
+                    className={`relative px-4 py-1.5 rounded-md text-xs font-bold transition-all duration-255 flex items-center gap-2 ${
+                      isActive
+                        ? 'bg-zinc-800 text-zinc-100 shadow-sm border border-zinc-700/50'
+                        : 'text-zinc-400 hover:text-zinc-200 border border-transparent'
+                    }`}
+                  >
+                    <span>{label}</span>
+                    {count > 0 && (
+                      <span className={`px-1.5 py-0.5 text-[10px] font-mono font-extrabold rounded-full transition-colors ${
+                        isActive ? 'bg-indigo-600 text-white' : 'bg-zinc-800 text-zinc-500'
+                      }`}>
+                        {count}
+                      </span>
+                    )}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
 
           {tradesError && (
             <div className="flex items-center gap-2 text-red-400 bg-red-500/10 border border-red-500/30 rounded-xl px-4 py-3 text-sm">
@@ -774,117 +811,123 @@ export default function CrudeOilOptions() {
             </div>
           )}
 
-          {/* Positions */}
-          <div className="bg-zinc-900 border border-zinc-800 rounded-xl overflow-x-auto">
-            <table className="w-full text-xs">
-              <thead>
-                <tr>
-                  <th className={thCls}>Symbol</th>
-                  <th className={thCls}>Type</th>
-                  <th className={thCls}>Net Qty</th>
-                  <th className={thCls}>Buy Avg</th>
-                  <th className={thCls}>Sell Avg</th>
-                  <th className={thCls}>LTP</th>
-                  <th className={thCls}>Realized</th>
-                  <th className={thCls}>Unrealized</th>
-                </tr>
-              </thead>
-              <tbody>
-                {tradesLoading ? (
-                  <tr><td colSpan={8} className="px-4 py-4 text-center text-zinc-500">Loading…</td></tr>
-                ) : crudePositions.length === 0 ? (
-                  <tr><td colSpan={8} className="px-4 py-4 text-center text-zinc-500">No open positions</td></tr>
-                ) : (
-                  crudePositions.map((p, i) => (
-                    <tr key={`${p.symbol}-${i}`} className="border-t border-zinc-800">
-                      <td className="px-3 py-2 text-zinc-200 font-semibold">{p.symbol}</td>
-                      <td className="px-3 py-2 text-zinc-400">{p.positionType}</td>
-                      <td className="px-3 py-2 tabular-nums text-zinc-200">{p.netQty}</td>
-                      <td className="px-3 py-2 tabular-nums text-zinc-400">{fmtLTP(p.buyAvg)}</td>
-                      <td className="px-3 py-2 tabular-nums text-zinc-400">{fmtLTP(p.sellAvg)}</td>
-                      <td className="px-3 py-2 tabular-nums text-zinc-200">{fmtLTP(p.lastPrice)}</td>
-                      <td className={`px-3 py-2 tabular-nums font-semibold ${pctColor(p.realizedProfit)}`}>{fmtLTP(p.realizedProfit)}</td>
-                      <td className={`px-3 py-2 tabular-nums font-semibold ${pctColor(p.unrealizedProfit)}`}>{fmtLTP(p.unrealizedProfit)}</td>
-                    </tr>
-                  ))
-                )}
-              </tbody>
-            </table>
-          </div>
+          {/* Positions Tab */}
+          {activeActivityTab === 'positions' && (
+            <div className="bg-zinc-900 border border-zinc-800 rounded-xl overflow-x-auto animate-fadeIn">
+              <table className="w-full text-xs">
+                <thead>
+                  <tr>
+                    <th className={thCls}>Symbol</th>
+                    <th className={thCls}>Type</th>
+                    <th className={thCls}>Net Qty</th>
+                    <th className={thCls}>Buy Avg</th>
+                    <th className={thCls}>Sell Avg</th>
+                    <th className={thCls}>LTP</th>
+                    <th className={thCls}>Realized</th>
+                    <th className={thCls}>Unrealized</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {tradesLoading ? (
+                    <tr><td colSpan={8} className="px-4 py-8 text-center text-zinc-500">Loading positions…</td></tr>
+                  ) : crudePositions.length === 0 ? (
+                    <tr><td colSpan={8} className="px-4 py-8 text-center text-zinc-500">No open positions</td></tr>
+                  ) : (
+                    crudePositions.map((p, i) => (
+                      <tr key={`${p.symbol}-${i}`} className="border-t border-zinc-800/80 hover:bg-zinc-800/20 transition-colors">
+                        <td className="px-3 py-2 text-zinc-200 font-semibold">{p.symbol}</td>
+                        <td className="px-3 py-2 text-zinc-400">{p.positionType}</td>
+                        <td className="px-3 py-2 tabular-nums text-zinc-200">{p.netQty}</td>
+                        <td className="px-3 py-2 tabular-nums text-zinc-400">{fmtLTP(p.buyAvg)}</td>
+                        <td className="px-3 py-2 tabular-nums text-zinc-400">{fmtLTP(p.sellAvg)}</td>
+                        <td className="px-3 py-2 tabular-nums text-zinc-200">{fmtLTP(p.lastPrice)}</td>
+                        <td className={`px-3 py-2 tabular-nums font-semibold ${pctColor(p.realizedProfit)}`}>{fmtLTP(p.realizedProfit)}</td>
+                        <td className={`px-3 py-2 tabular-nums font-semibold ${pctColor(p.unrealizedProfit)}`}>{fmtLTP(p.unrealizedProfit)}</td>
+                      </tr>
+                    ))
+                  )}
+                </tbody>
+              </table>
+            </div>
+          )}
 
-          {/* Orders */}
-          <div className="bg-zinc-900 border border-zinc-800 rounded-xl overflow-x-auto">
-            <table className="w-full text-xs">
-              <thead>
-                <tr>
-                  <th className={thCls}>Order ID</th>
-                  <th className={thCls}>Symbol</th>
-                  <th className={thCls}>Side</th>
-                  <th className={thCls}>Product</th>
-                  <th className={thCls}>Qty</th>
-                  <th className={thCls}>Filled</th>
-                  <th className={thCls}>Price</th>
-                  <th className={thCls}>Status</th>
-                  <th className={thCls}>Time</th>
-                </tr>
-              </thead>
-              <tbody>
-                {tradesLoading ? (
-                  <tr><td colSpan={9} className="px-4 py-4 text-center text-zinc-500">Loading…</td></tr>
-                ) : crudeOrders.length === 0 ? (
-                  <tr><td colSpan={9} className="px-4 py-4 text-center text-zinc-500">No orders today</td></tr>
-                ) : (
-                  crudeOrders.map((o) => (
-                    <tr key={o.orderId} className="border-t border-zinc-800">
-                      <td className="px-3 py-2 text-zinc-400">{o.orderId}</td>
-                      <td className="px-3 py-2 text-zinc-200 font-semibold">{o.symbol}</td>
-                      <td className={`px-3 py-2 font-bold ${o.transactionType === 'SELL' ? 'text-red-400' : 'text-emerald-400'}`}>{o.transactionType}</td>
-                      <td className="px-3 py-2 text-zinc-400">{o.productType}</td>
-                      <td className="px-3 py-2 tabular-nums text-zinc-200">{o.quantity}</td>
-                      <td className="px-3 py-2 tabular-nums text-zinc-400">{o.filledQty}</td>
-                      <td className="px-3 py-2 tabular-nums text-zinc-200">{fmtLTP(o.price)}</td>
-                      <td className={`px-3 py-2 font-semibold ${statusColor(o.status)}`}>{o.status}</td>
-                      <td className="px-3 py-2 text-zinc-500">{o.updateTime || o.createTime}</td>
-                    </tr>
-                  ))
-                )}
-              </tbody>
-            </table>
-          </div>
+          {/* Orders Tab */}
+          {activeActivityTab === 'orders' && (
+            <div className="bg-zinc-900 border border-zinc-800 rounded-xl overflow-x-auto animate-fadeIn">
+              <table className="w-full text-xs">
+                <thead>
+                  <tr>
+                    <th className={thCls}>Order ID</th>
+                    <th className={thCls}>Symbol</th>
+                    <th className={thCls}>Side</th>
+                    <th className={thCls}>Product</th>
+                    <th className={thCls}>Qty</th>
+                    <th className={thCls}>Filled</th>
+                    <th className={thCls}>Price</th>
+                    <th className={thCls}>Status</th>
+                    <th className={thCls}>Time</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {tradesLoading ? (
+                    <tr><td colSpan={9} className="px-4 py-8 text-center text-zinc-500">Loading orders…</td></tr>
+                  ) : crudeOrders.length === 0 ? (
+                    <tr><td colSpan={9} className="px-4 py-8 text-center text-zinc-500">No orders today</td></tr>
+                  ) : (
+                    crudeOrders.map((o) => (
+                      <tr key={o.orderId} className="border-t border-zinc-800/80 hover:bg-zinc-800/20 transition-colors">
+                        <td className="px-3 py-2 text-zinc-400">{o.orderId}</td>
+                        <td className="px-3 py-2 text-zinc-200 font-semibold">{o.symbol}</td>
+                        <td className={`px-3 py-2 font-bold ${o.transactionType === 'SELL' ? 'text-red-400' : 'text-emerald-400'}`}>{o.transactionType}</td>
+                        <td className="px-3 py-2 text-zinc-400">{o.productType}</td>
+                        <td className="px-3 py-2 tabular-nums text-zinc-200">{o.quantity}</td>
+                        <td className="px-3 py-2 tabular-nums text-zinc-400">{o.filledQty}</td>
+                        <td className="px-3 py-2 tabular-nums text-zinc-200">{fmtLTP(o.price)}</td>
+                        <td className={`px-3 py-2 font-semibold ${statusColor(o.status)}`}>{o.status}</td>
+                        <td className="px-3 py-2 text-zinc-500">{o.updateTime || o.createTime}</td>
+                      </tr>
+                    ))
+                  )}
+                </tbody>
+              </table>
+            </div>
+          )}
 
-          {/* Trades */}
-          <div className="bg-zinc-900 border border-zinc-800 rounded-xl overflow-x-auto">
-            <table className="w-full text-xs">
-              <thead>
-                <tr>
-                  <th className={thCls}>Order ID</th>
-                  <th className={thCls}>Symbol</th>
-                  <th className={thCls}>Side</th>
-                  <th className={thCls}>Qty</th>
-                  <th className={thCls}>Price</th>
-                  <th className={thCls}>Exchange Time</th>
-                </tr>
-              </thead>
-              <tbody>
-                {tradesLoading ? (
-                  <tr><td colSpan={6} className="px-4 py-4 text-center text-zinc-500">Loading…</td></tr>
-                ) : crudeTrades.length === 0 ? (
-                  <tr><td colSpan={6} className="px-4 py-4 text-center text-zinc-500">No trades today</td></tr>
-                ) : (
-                  crudeTrades.map((t, i) => (
-                    <tr key={`${t.orderId}-${i}`} className="border-t border-zinc-800">
-                      <td className="px-3 py-2 text-zinc-400">{t.orderId}</td>
-                      <td className="px-3 py-2 text-zinc-200 font-semibold">{t.symbol}</td>
-                      <td className={`px-3 py-2 font-bold ${t.transactionType === 'SELL' ? 'text-red-400' : 'text-emerald-400'}`}>{t.transactionType}</td>
-                      <td className="px-3 py-2 tabular-nums text-zinc-200">{t.tradedQuantity}</td>
-                      <td className="px-3 py-2 tabular-nums text-zinc-200">{fmtLTP(t.tradedPrice)}</td>
-                      <td className="px-3 py-2 text-zinc-500">{t.exchangeTime}</td>
-                    </tr>
-                  ))
-                )}
-              </tbody>
-            </table>
-          </div>
+          {/* Trades Tab */}
+          {activeActivityTab === 'trades' && (
+            <div className="bg-zinc-900 border border-zinc-800 rounded-xl overflow-x-auto animate-fadeIn">
+              <table className="w-full text-xs">
+                <thead>
+                  <tr>
+                    <th className={thCls}>Order ID</th>
+                    <th className={thCls}>Symbol</th>
+                    <th className={thCls}>Side</th>
+                    <th className={thCls}>Qty</th>
+                    <th className={thCls}>Price</th>
+                    <th className={thCls}>Exchange Time</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {tradesLoading ? (
+                    <tr><td colSpan={6} className="px-4 py-8 text-center text-zinc-500">Loading trades…</td></tr>
+                  ) : crudeTrades.length === 0 ? (
+                    <tr><td colSpan={6} className="px-4 py-8 text-center text-zinc-500">No trades today</td></tr>
+                  ) : (
+                    crudeTrades.map((t, i) => (
+                      <tr key={`${t.orderId}-${i}`} className="border-t border-zinc-800/80 hover:bg-zinc-800/20 transition-colors">
+                        <td className="px-3 py-2 text-zinc-400">{t.orderId}</td>
+                        <td className="px-3 py-2 text-zinc-200 font-semibold">{t.symbol}</td>
+                        <td className={`px-3 py-2 font-bold ${t.transactionType === 'SELL' ? 'text-red-400' : 'text-emerald-400'}`}>{t.transactionType}</td>
+                        <td className="px-3 py-2 tabular-nums text-zinc-200">{t.tradedQuantity}</td>
+                        <td className="px-3 py-2 tabular-nums text-zinc-200">{fmtLTP(t.tradedPrice)}</td>
+                        <td className="px-3 py-2 text-zinc-500">{t.exchangeTime}</td>
+                      </tr>
+                    ))
+                  )}
+                </tbody>
+              </table>
+            </div>
+          )}
         </div>
 
       </main>
