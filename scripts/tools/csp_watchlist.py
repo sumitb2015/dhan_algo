@@ -4,7 +4,8 @@ CLI for the Cash Secured Puts dashboard page.
 Usage:
     python csp_watchlist.py list  --symbols RELIANCE,TCS,NIFTY
     python csp_watchlist.py place --symbol RELIANCE --expiry 2026-08-28 --strike 1400 \
-                                   --quantity 500 --order-type LIMIT --price 12.5 --product-type MARGIN
+                                   --quantity 500 --order-type LIMIT --price 12.5 --product-type MARGIN \
+                                   [--trigger-price 12.0] [--after-market-order --amo-time OPEN]
     python csp_watchlist.py cancel --order-id 1100...
     python csp_watchlist.py exit   --security-id 49081 --exchange-segment NSE_FNO \
                                     --quantity 500 --product-type MARGIN
@@ -184,6 +185,10 @@ def cmd_place(helper: DhanHelper, args) -> dict:
     if not sec:
         return {"success": False, "error": f"Option not found: {args.symbol} {args.expiry} {args.strike} PE ({instrument})"}
 
+    order_type = args.order_type
+    price = args.price if order_type in ("LIMIT", "STOP_LOSS") else 0
+    trigger_price = args.trigger_price if order_type in ("STOP_LOSS", "STOP_LOSS_MARKET") else 0
+
     order_id = helper.place_order(
         security_id=str(int(sec['SECURITY_ID'])),
         # Raw master-list SEGMENT is 'D' which the order API rejects (DH-905);
@@ -191,9 +196,12 @@ def cmd_place(helper: DhanHelper, args) -> dict:
         exchange_segment=helper._auto_detect_segment(sec),
         transaction_type=helper.SELL,
         quantity=args.quantity,
-        order_type=args.order_type,
+        order_type=order_type,
         product_type=args.product_type,
-        price=args.price if args.order_type == "LIMIT" else 0,
+        price=price,
+        trigger_price=trigger_price,
+        after_market_order=args.after_market_order,
+        amo_time=args.amo_time,
     )
     if order_id:
         return {"success": True, "orderId": order_id}
@@ -240,8 +248,12 @@ def main():
     p_place.add_argument('--expiry', required=True)
     p_place.add_argument('--strike', required=True, type=float)
     p_place.add_argument('--quantity', required=True, type=int)
-    p_place.add_argument('--order-type', default='MARKET', choices=['MARKET', 'LIMIT'], dest='order_type')
+    p_place.add_argument('--order-type', default='MARKET',
+                          choices=['MARKET', 'LIMIT', 'STOP_LOSS', 'STOP_LOSS_MARKET'], dest='order_type')
     p_place.add_argument('--price', type=float, default=0)
+    p_place.add_argument('--trigger-price', type=float, default=0, dest='trigger_price')
+    p_place.add_argument('--after-market-order', action='store_true', dest='after_market_order')
+    p_place.add_argument('--amo-time', default='OPEN', choices=['OPEN', 'OPEN_30', 'OPEN_60'], dest='amo_time')
     p_place.add_argument('--product-type', default='MARGIN', choices=['MARGIN', 'CNC'], dest='product_type')
 
     p_cancel = sub.add_parser('cancel')

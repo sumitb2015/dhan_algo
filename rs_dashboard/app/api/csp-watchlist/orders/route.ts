@@ -20,14 +20,21 @@ export async function POST(req: NextRequest) {
       quantity,
       orderType = 'MARKET',
       price,
+      triggerPrice,
+      afterMarketOrder = false,
+      amoTime = 'OPEN',
       productType = 'MARGIN',
     } = body ?? {};
 
     if (!symbol || !expiry || strike == null || !quantity) {
       return NextResponse.json({ success: false, error: 'Missing required fields' }, { status: 400 });
     }
-    if (String(orderType).toUpperCase() === 'LIMIT' && price == null) {
+    const orderTypeUpper = String(orderType).toUpperCase();
+    if (orderTypeUpper === 'LIMIT' && price == null) {
       return NextResponse.json({ success: false, error: 'price is required for LIMIT orders' }, { status: 400 });
+    }
+    if ((orderTypeUpper === 'STOP_LOSS' || orderTypeUpper === 'STOP_LOSS_MARKET') && triggerPrice == null) {
+      return NextResponse.json({ success: false, error: 'triggerPrice is required for STOP_LOSS orders' }, { status: 400 });
     }
 
     const args = [
@@ -36,10 +43,14 @@ export async function POST(req: NextRequest) {
       '--expiry', String(expiry),
       '--strike', String(strike),
       '--quantity', String(quantity),
-      '--order-type', String(orderType).toUpperCase(),
+      '--order-type', orderTypeUpper,
       '--price', String(price ?? 0),
+      '--trigger-price', String(triggerPrice ?? 0),
       '--product-type', String(productType).toUpperCase(),
     ];
+    if (afterMarketOrder) {
+      args.push('--after-market-order', '--amo-time', String(amoTime).toUpperCase());
+    }
 
     const result = await runPythonJson<OrderResult>(SCRIPT, args, 20_000);
     return NextResponse.json(result, { status: result.success ? 200 : 500 });

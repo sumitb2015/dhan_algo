@@ -114,8 +114,11 @@ interface SellPutFormState {
   strikes: StrikeRow[];
   strike: string;
   lots: string;
-  orderType: 'MARKET' | 'LIMIT';
+  orderType: 'MARKET' | 'LIMIT' | 'STOP_LOSS' | 'STOP_LOSS_MARKET';
   price: string;
+  triggerPrice: string;
+  afterMarketOrder: boolean;
+  amoTime: 'OPEN' | 'OPEN_30' | 'OPEN_60';
   productType: 'MARGIN' | 'CNC';
   confirming: boolean;
   submitting: boolean;
@@ -132,6 +135,9 @@ function blankSellPutForm(symbol: string, lotSize: number): SellPutFormState {
     lots: '1',
     orderType: 'MARKET',
     price: '',
+    triggerPrice: '',
+    afterMarketOrder: false,
+    amoTime: 'OPEN',
     productType: 'MARGIN',
     confirming: false,
     submitting: false,
@@ -149,7 +155,12 @@ function SellPutPanel({ form, onChange, onExpiryChange, onCancel, onSubmit }: {
   onSubmit: () => void;
 }) {
   const quantity = (Number(form.lots) || 0) * form.lotSize;
-  const summary = `SELL ${quantity || '?'} qty (${form.lots || '?'} lot${form.lots === '1' ? '' : 's'}) of ${form.symbol} ${form.strike || '?'} PE, expiry ${form.expiry || '?'}${form.orderType === 'LIMIT' ? ` @ ₹${form.price || '?'}` : ' at MARKET'} — ${form.productType}`;
+  const needsPrice = form.orderType === 'LIMIT' || form.orderType === 'STOP_LOSS';
+  const needsTrigger = form.orderType === 'STOP_LOSS' || form.orderType === 'STOP_LOSS_MARKET';
+  const priceSuffix = needsPrice ? ` @ ₹${form.price || '?'}` : form.orderType === 'MARKET' ? ' at MARKET' : '';
+  const triggerSuffix = needsTrigger ? ` trigger ₹${form.triggerPrice || '?'}` : '';
+  const amoSuffix = form.afterMarketOrder ? ` (AMO ${form.amoTime})` : '';
+  const summary = `SELL ${quantity || '?'} qty (${form.lots || '?'} lot${form.lots === '1' ? '' : 's'}) of ${form.symbol} ${form.strike || '?'} PE, expiry ${form.expiry || '?'} ${form.orderType}${priceSuffix}${triggerSuffix}${amoSuffix} — ${form.productType}`;
 
   if (form.confirming) {
     return (
@@ -213,22 +224,33 @@ function SellPutPanel({ form, onChange, onExpiryChange, onCancel, onSubmit }: {
         <select
           value={form.orderType}
           onChange={(e) => {
-            const orderType = e.target.value as 'MARKET' | 'LIMIT';
+            const orderType = e.target.value as 'MARKET' | 'LIMIT' | 'STOP_LOSS' | 'STOP_LOSS_MARKET';
             const selected = form.strikes.find((s) => String(s.strike) === form.strike);
-            const price = orderType === 'LIMIT' && !form.price && selected ? String(selected.ltp) : form.price;
+            const needsPrice = orderType === 'LIMIT' || orderType === 'STOP_LOSS';
+            const price = needsPrice && !form.price && selected ? String(selected.ltp) : form.price;
             onChange({ ...form, orderType, price });
           }}
           className="bg-zinc-950 border border-zinc-800 rounded-sm px-1.5 py-1 font-mono"
         >
           <option value="MARKET">MARKET</option>
           <option value="LIMIT">LIMIT</option>
+          <option value="STOP_LOSS">SL</option>
+          <option value="STOP_LOSS_MARKET">SL-M</option>
         </select>
         <input
           type="number"
-          placeholder={form.orderType === 'LIMIT' ? 'Limit price' : 'At market'}
-          value={form.orderType === 'LIMIT' ? form.price : ''}
-          disabled={form.orderType !== 'LIMIT'}
+          placeholder={needsPrice ? 'Limit price' : 'At market'}
+          value={needsPrice ? form.price : ''}
+          disabled={!needsPrice}
           onChange={(e) => onChange({ ...form, price: e.target.value })}
+          className="w-24 bg-zinc-950 border border-zinc-800 rounded-sm px-1.5 py-1 font-mono disabled:opacity-40"
+        />
+        <input
+          type="number"
+          placeholder="Trigger price"
+          value={needsTrigger ? form.triggerPrice : ''}
+          disabled={!needsTrigger}
+          onChange={(e) => onChange({ ...form, triggerPrice: e.target.value })}
           className="w-24 bg-zinc-950 border border-zinc-800 rounded-sm px-1.5 py-1 font-mono disabled:opacity-40"
         />
         <select
@@ -239,6 +261,28 @@ function SellPutPanel({ form, onChange, onExpiryChange, onCancel, onSubmit }: {
           <option value="MARGIN">MARGIN</option>
           <option value="CNC">CNC</option>
         </select>
+      </div>
+      <div className="flex flex-wrap gap-2 items-center">
+        <label className="flex items-center gap-1.5 text-zinc-300 cursor-pointer">
+          <input
+            type="checkbox"
+            checked={form.afterMarketOrder}
+            onChange={(e) => onChange({ ...form, afterMarketOrder: e.target.checked })}
+            className="accent-amber-500"
+          />
+          AMO
+        </label>
+        {form.afterMarketOrder && (
+          <select
+            value={form.amoTime}
+            onChange={(e) => onChange({ ...form, amoTime: e.target.value as 'OPEN' | 'OPEN_30' | 'OPEN_60' })}
+            className="bg-zinc-950 border border-zinc-800 rounded-sm px-1.5 py-1 font-mono"
+          >
+            <option value="OPEN">OPEN</option>
+            <option value="OPEN_30">OPEN_30</option>
+            <option value="OPEN_60">OPEN_60</option>
+          </select>
+        )}
       </div>
       {form.error && !form.confirming && (
         <div className="flex items-start gap-1.5 text-red-400">
@@ -258,7 +302,7 @@ function SellPutPanel({ form, onChange, onExpiryChange, onCancel, onSubmit }: {
               onClick={() => onChange({
                 ...form,
                 strike: String(s.strike),
-                price: form.orderType === 'LIMIT' ? String(s.ltp) : form.price,
+                price: needsPrice ? String(s.ltp) : form.price,
               })}
               className={cn('w-full flex justify-between px-2 py-0.5 text-left hover:bg-zinc-800',
                 String(s.strike) === form.strike && 'bg-amber-500/10 text-amber-300')}
@@ -272,7 +316,7 @@ function SellPutPanel({ form, onChange, onExpiryChange, onCancel, onSubmit }: {
       <div className="flex gap-2">
         <button
           onClick={() => onChange({ ...form, confirming: true })}
-          disabled={!form.expiry || !form.strike || !form.lots || (form.orderType === 'LIMIT' && !form.price)}
+          disabled={!form.expiry || !form.strike || !form.lots || (needsPrice && !form.price) || (needsTrigger && !form.triggerPrice)}
           className="px-2 py-1 rounded-sm bg-zinc-800 text-zinc-100 font-bold uppercase tracking-wide disabled:opacity-40"
         >
           Review
@@ -356,13 +400,15 @@ export default function CashSecuredPuts() {
   }, [addSymbol, fetchData]);
 
   const handleRemoveSymbol = useCallback(async (symbol: string) => {
+    const row = rows.find((r) => r.symbol === symbol);
+    if (row && (row.activeOrders.length > 0 || row.activeTrades.length > 0)) return;
     await fetch('/api/csp-watchlist', {
       method: 'DELETE',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ symbol }),
     });
     fetchData(false);
-  }, [fetchData]);
+  }, [rows, fetchData]);
 
   const openSellForm = useCallback(async (symbol: string, lotSize: number) => {
     const form = blankSellPutForm(symbol, lotSize);
@@ -407,7 +453,10 @@ export default function CashSecuredPuts() {
           strike: Number(sellForm.strike),
           quantity: (Number(sellForm.lots) || 0) * sellForm.lotSize,
           orderType: sellForm.orderType,
-          price: sellForm.orderType === 'LIMIT' ? Number(sellForm.price) : undefined,
+          price: (sellForm.orderType === 'LIMIT' || sellForm.orderType === 'STOP_LOSS') ? Number(sellForm.price) : undefined,
+          triggerPrice: (sellForm.orderType === 'STOP_LOSS' || sellForm.orderType === 'STOP_LOSS_MARKET') ? Number(sellForm.triggerPrice) : undefined,
+          afterMarketOrder: sellForm.afterMarketOrder,
+          amoTime: sellForm.amoTime,
           productType: sellForm.productType,
         }),
       });
@@ -650,8 +699,11 @@ export default function CashSecuredPuts() {
                     <TD right>
                       <button
                         onClick={() => handleRemoveSymbol(r.symbol)}
-                        title="Remove from watchlist"
-                        className="text-zinc-600 hover:text-red-400"
+                        disabled={r.activeOrders.length > 0 || r.activeTrades.length > 0}
+                        title={r.activeOrders.length > 0 || r.activeTrades.length > 0
+                          ? 'Cancel active orders and exit open trades before removing this symbol'
+                          : 'Remove from watchlist'}
+                        className="text-zinc-600 hover:text-red-400 disabled:opacity-30 disabled:hover:text-zinc-600 disabled:cursor-not-allowed"
                       >
                         <X className="h-3.5 w-3.5" />
                       </button>
