@@ -30,6 +30,48 @@ interface ProcessedRow {
   isMinStraddle: boolean;
 }
 
+interface CrudePosition {
+  symbol: string;
+  positionType: string;
+  netQty: number;
+  buyAvg: number;
+  sellAvg: number;
+  lastPrice: number;
+  realizedProfit: number;
+  unrealizedProfit: number;
+}
+
+interface CrudeOrder {
+  orderId: string;
+  symbol: string;
+  exchange: string;
+  orderType: string;
+  transactionType: string;
+  productType: string;
+  quantity: number;
+  filledQty: number;
+  price: number;
+  triggerPrice: number;
+  tradedPrice: number;
+  status: string;
+  validity: string;
+  createTime: string;
+  updateTime: string;
+}
+
+interface CrudeTrade {
+  orderId: string;
+  symbol: string;
+  exchange: string;
+  transactionType: string;
+  productType: string;
+  tradedQuantity: number;
+  tradedPrice: number;
+  tradeId: string;
+  createTime: string;
+  exchangeTime: string;
+}
+
 // ─── Constants ────────────────────────────────────────────────────
 
 const UNDERLYING  = 'CRUDEOIL';
@@ -68,6 +110,14 @@ function pctColor(n: number): string {
 
 function pctSign(n: number): string {
   return (n > 0 ? '+' : '') + n.toFixed(2) + '%';
+}
+
+function statusColor(status: string): string {
+  const s = status.toUpperCase();
+  if (s.includes('TRADED') || s.includes('EXECUTED') || s.includes('COMPLETE')) return 'text-emerald-400';
+  if (s.includes('REJECT') || s.includes('CANCEL')) return 'text-red-400';
+  if (s.includes('PENDING') || s.includes('OPEN') || s.includes('TRANSIT')) return 'text-amber-400';
+  return 'text-zinc-400';
 }
 
 interface StrikeEntry { key: string; strike: number; entry: RawChainEntry }
@@ -157,6 +207,13 @@ export default function CrudeOilOptions() {
   const [lotSize, setLotSize]         = useState(100); // CRUDEOIL option lot size default is 100
   const [orderMessage, setOrderMessage] = useState<{ text: string; isError: boolean } | null>(null);
   const [ordering, setOrdering]       = useState(false);
+
+  const [crudePositions, setCrudePositions] = useState<CrudePosition[]>([]);
+  const [crudeOrders, setCrudeOrders]       = useState<CrudeOrder[]>([]);
+  const [crudeTrades, setCrudeTrades]       = useState<CrudeTrade[]>([]);
+  const [tradesError, setTradesError]       = useState<string | null>(null);
+  const [tradesLoading, setTradesLoading]   = useState(true);
+  const tradesIntervalRef = useRef<NodeJS.Timeout | null>(null);
 
   useEffect(() => {
     fetch(`/api/lotsize?symbol=${UNDERLYING}`)
@@ -350,6 +407,38 @@ export default function CrudeOilOptions() {
     intervalRef.current = setInterval(runPoll, POLL_MS);
     return () => { if (intervalRef.current) clearInterval(intervalRef.current); };
   }, [expiry, runPoll]);
+
+  // Fetch crude oil positions/orders/trades (independent poll loop)
+  const fetchCrudeTrades = useCallback(async () => {
+    try {
+      const res = await fetch('/api/crudeoil-trades');
+      const json = await res.json() as {
+        success: boolean;
+        positions?: CrudePosition[];
+        orders?: CrudeOrder[];
+        trades?: CrudeTrade[];
+        error?: string;
+      };
+      if (json.success) {
+        setCrudePositions(json.positions ?? []);
+        setCrudeOrders(json.orders ?? []);
+        setCrudeTrades(json.trades ?? []);
+        setTradesError(null);
+      } else {
+        setTradesError(json.error ?? 'Failed to load crude oil trades data');
+      }
+    } catch (err) {
+      setTradesError(String(err));
+    } finally {
+      setTradesLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void fetchCrudeTrades();
+    tradesIntervalRef.current = setInterval(fetchCrudeTrades, POLL_MS);
+    return () => { if (tradesIntervalRef.current) clearInterval(tradesIntervalRef.current); };
+  }, [fetchCrudeTrades]);
 
   // Style helpers
   const thCls = 'text-xs font-bold text-zinc-300 bg-zinc-800/80 px-3 py-2.5 whitespace-nowrap border-b border-zinc-700';
@@ -669,6 +758,130 @@ export default function CrudeOilOptions() {
               )}
             </tbody>
           </table>
+        </div>
+
+        {/* Crude Oil Positions / Orders / Trades */}
+        <div className="space-y-4">
+          <h2 className="text-sm font-bold text-zinc-300 uppercase tracking-wider">Crude Oil Activity</h2>
+
+          {tradesError && (
+            <div className="flex items-center gap-2 text-red-400 bg-red-500/10 border border-red-500/30 rounded-xl px-4 py-3 text-sm">
+              <AlertCircle className="h-5 w-5 shrink-0" />
+              <span>{tradesError}</span>
+            </div>
+          )}
+
+          {/* Positions */}
+          <div className="bg-zinc-900 border border-zinc-800 rounded-xl overflow-x-auto">
+            <table className="w-full text-xs">
+              <thead>
+                <tr>
+                  <th className={thCls}>Symbol</th>
+                  <th className={thCls}>Type</th>
+                  <th className={thCls}>Net Qty</th>
+                  <th className={thCls}>Buy Avg</th>
+                  <th className={thCls}>Sell Avg</th>
+                  <th className={thCls}>LTP</th>
+                  <th className={thCls}>Realized</th>
+                  <th className={thCls}>Unrealized</th>
+                </tr>
+              </thead>
+              <tbody>
+                {tradesLoading ? (
+                  <tr><td colSpan={8} className="px-4 py-4 text-center text-zinc-500">Loading…</td></tr>
+                ) : crudePositions.length === 0 ? (
+                  <tr><td colSpan={8} className="px-4 py-4 text-center text-zinc-500">No open positions</td></tr>
+                ) : (
+                  crudePositions.map((p, i) => (
+                    <tr key={`${p.symbol}-${i}`} className="border-t border-zinc-800">
+                      <td className="px-3 py-2 text-zinc-200 font-semibold">{p.symbol}</td>
+                      <td className="px-3 py-2 text-zinc-400">{p.positionType}</td>
+                      <td className="px-3 py-2 tabular-nums text-zinc-200">{p.netQty}</td>
+                      <td className="px-3 py-2 tabular-nums text-zinc-400">{fmtLTP(p.buyAvg)}</td>
+                      <td className="px-3 py-2 tabular-nums text-zinc-400">{fmtLTP(p.sellAvg)}</td>
+                      <td className="px-3 py-2 tabular-nums text-zinc-200">{fmtLTP(p.lastPrice)}</td>
+                      <td className={`px-3 py-2 tabular-nums font-semibold ${pctColor(p.realizedProfit)}`}>{fmtLTP(p.realizedProfit)}</td>
+                      <td className={`px-3 py-2 tabular-nums font-semibold ${pctColor(p.unrealizedProfit)}`}>{fmtLTP(p.unrealizedProfit)}</td>
+                    </tr>
+                  ))
+                )}
+              </tbody>
+            </table>
+          </div>
+
+          {/* Orders */}
+          <div className="bg-zinc-900 border border-zinc-800 rounded-xl overflow-x-auto">
+            <table className="w-full text-xs">
+              <thead>
+                <tr>
+                  <th className={thCls}>Order ID</th>
+                  <th className={thCls}>Symbol</th>
+                  <th className={thCls}>Side</th>
+                  <th className={thCls}>Product</th>
+                  <th className={thCls}>Qty</th>
+                  <th className={thCls}>Filled</th>
+                  <th className={thCls}>Price</th>
+                  <th className={thCls}>Status</th>
+                  <th className={thCls}>Time</th>
+                </tr>
+              </thead>
+              <tbody>
+                {tradesLoading ? (
+                  <tr><td colSpan={9} className="px-4 py-4 text-center text-zinc-500">Loading…</td></tr>
+                ) : crudeOrders.length === 0 ? (
+                  <tr><td colSpan={9} className="px-4 py-4 text-center text-zinc-500">No orders today</td></tr>
+                ) : (
+                  crudeOrders.map((o) => (
+                    <tr key={o.orderId} className="border-t border-zinc-800">
+                      <td className="px-3 py-2 text-zinc-400">{o.orderId}</td>
+                      <td className="px-3 py-2 text-zinc-200 font-semibold">{o.symbol}</td>
+                      <td className={`px-3 py-2 font-bold ${o.transactionType === 'SELL' ? 'text-red-400' : 'text-emerald-400'}`}>{o.transactionType}</td>
+                      <td className="px-3 py-2 text-zinc-400">{o.productType}</td>
+                      <td className="px-3 py-2 tabular-nums text-zinc-200">{o.quantity}</td>
+                      <td className="px-3 py-2 tabular-nums text-zinc-400">{o.filledQty}</td>
+                      <td className="px-3 py-2 tabular-nums text-zinc-200">{fmtLTP(o.price)}</td>
+                      <td className={`px-3 py-2 font-semibold ${statusColor(o.status)}`}>{o.status}</td>
+                      <td className="px-3 py-2 text-zinc-500">{o.updateTime || o.createTime}</td>
+                    </tr>
+                  ))
+                )}
+              </tbody>
+            </table>
+          </div>
+
+          {/* Trades */}
+          <div className="bg-zinc-900 border border-zinc-800 rounded-xl overflow-x-auto">
+            <table className="w-full text-xs">
+              <thead>
+                <tr>
+                  <th className={thCls}>Order ID</th>
+                  <th className={thCls}>Symbol</th>
+                  <th className={thCls}>Side</th>
+                  <th className={thCls}>Qty</th>
+                  <th className={thCls}>Price</th>
+                  <th className={thCls}>Exchange Time</th>
+                </tr>
+              </thead>
+              <tbody>
+                {tradesLoading ? (
+                  <tr><td colSpan={6} className="px-4 py-4 text-center text-zinc-500">Loading…</td></tr>
+                ) : crudeTrades.length === 0 ? (
+                  <tr><td colSpan={6} className="px-4 py-4 text-center text-zinc-500">No trades today</td></tr>
+                ) : (
+                  crudeTrades.map((t, i) => (
+                    <tr key={`${t.orderId}-${i}`} className="border-t border-zinc-800">
+                      <td className="px-3 py-2 text-zinc-400">{t.orderId}</td>
+                      <td className="px-3 py-2 text-zinc-200 font-semibold">{t.symbol}</td>
+                      <td className={`px-3 py-2 font-bold ${t.transactionType === 'SELL' ? 'text-red-400' : 'text-emerald-400'}`}>{t.transactionType}</td>
+                      <td className="px-3 py-2 tabular-nums text-zinc-200">{t.tradedQuantity}</td>
+                      <td className="px-3 py-2 tabular-nums text-zinc-200">{fmtLTP(t.tradedPrice)}</td>
+                      <td className="px-3 py-2 text-zinc-500">{t.exchangeTime}</td>
+                    </tr>
+                  ))
+                )}
+              </tbody>
+            </table>
+          </div>
         </div>
 
       </main>
