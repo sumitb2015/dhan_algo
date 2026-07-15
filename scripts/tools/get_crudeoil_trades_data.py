@@ -42,6 +42,8 @@ def main():
 
                 positions_list.append({
                     "symbol": symbol,
+                    "securityId": str(row.get('securityId', '')),
+                    "exchangeSegment": str(row.get('exchangeSegment', '')),
                     "positionType": str(row.get('positionType', '')),
                     "netQty": int(row.get('netQty', 0) or 0),
                     "buyAvg": float(row.get('buyAvg', 0) or 0),

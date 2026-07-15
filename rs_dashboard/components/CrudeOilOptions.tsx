@@ -34,6 +34,8 @@ interface ProcessedRow {
 
 interface CrudePosition {
   symbol: string;
+  securityId?: string;
+  exchangeSegment?: string;
   positionType: string;
   netQty: number;
   buyAvg: number;
@@ -219,6 +221,49 @@ export default function CrudeOilOptions() {
   const tradesIntervalRef = useRef<NodeJS.Timeout | null>(null);
 
   const [activeTab, setActiveTab]           = useState<'chain' | 'oi' | 'cumulative'>('chain');
+
+  const [exitingAll, setExitingAll]         = useState(false);
+
+  const activePositions = crudePositions.filter(p => p.netQty !== 0);
+  const activePositionsCount = activePositions.length;
+
+  const handleExitAll = async () => {
+    if (activePositions.length === 0) return;
+
+    if (!confirm(`Are you sure you want to close ALL ${activePositions.length} open Crude Oil positions immediately?`)) {
+      return;
+    }
+
+    setExitingAll(true);
+    setOrderMessage(null);
+
+    const legs = activePositions.map(p => ({
+      securityId: p.securityId || '',
+      quantity: Math.abs(p.netQty),
+      side: (p.netQty > 0 ? 'SELL' : 'BUY') as 'BUY' | 'SELL',
+      exchangeSegment: p.exchangeSegment || 'MCX_COMM',
+    }));
+
+    try {
+      const res = await fetch('/api/options/order', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ legs, mode: 'intraday' }),
+      });
+
+      const json = await res.json() as { success: boolean; error?: string };
+      if (json.success) {
+        setOrderMessage({ text: 'Square-off orders placed successfully for all active positions.', isError: false });
+        void fetchCrudeTrades();
+      } else {
+        setOrderMessage({ text: json.error ?? 'Failed to square off some positions.', isError: true });
+      }
+    } catch (err) {
+      setOrderMessage({ text: `Error during square off: ${String(err)}`, isError: true });
+    } finally {
+      setExitingAll(false);
+    }
+  };
 
   useEffect(() => {
     fetch(`/api/lotsize?symbol=${UNDERLYING}`)
@@ -475,13 +520,29 @@ export default function CrudeOilOptions() {
         </div>
 
 
-        {/* Nifty toggle button */}
-        <Link
-          href="/options"
-          className="ml-auto text-xs font-bold px-3 py-1.5 rounded-lg border border-zinc-800 bg-zinc-900 hover:bg-zinc-800 transition-colors text-zinc-300 hover:text-zinc-100"
-        >
-          ← Go to Nifty Options
-        </Link>
+        {/* Action Controls & Navigation */}
+        <div className="ml-auto flex items-center gap-3">
+          <button
+            type="button"
+            onClick={handleExitAll}
+            disabled={exitingAll || activePositionsCount === 0}
+            className="text-xs font-bold px-3.5 py-1.5 rounded-lg border border-red-900/60 bg-red-950/20 hover:bg-red-900/40 hover:border-red-700/80 transition-all duration-200 text-red-400 hover:text-red-200 disabled:opacity-40 disabled:pointer-events-none flex items-center gap-1.5 cursor-pointer shadow-md"
+          >
+            {exitingAll ? (
+              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+            ) : (
+              <AlertCircle className="h-3.5 w-3.5" />
+            )}
+            Exit All Positions ({activePositionsCount})
+          </button>
+
+          <Link
+            href="/options"
+            className="text-xs font-bold px-3 py-1.5 rounded-lg border border-zinc-800 bg-zinc-900 hover:bg-zinc-800 transition-colors text-zinc-300 hover:text-zinc-100"
+          >
+            ← Go to Nifty Options
+          </Link>
+        </div>
       </header>
 
       {/* Main Content */}
