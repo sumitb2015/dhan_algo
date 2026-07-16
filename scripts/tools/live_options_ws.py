@@ -89,24 +89,34 @@ def _fetch_prev_closes(dhan, underlying_sid: str) -> dict:
         print(f'[live_options_ws] WARN: prev_closes fetch failed: {e}', flush=True)
     return closes
 
-def _fetch_prev_oi(helper, underlying: str, expiry: str) -> dict:
-    """Fetch previous-day OI per strike/side from the option chain (once at startup).
+def _fetch_prev_oi(helper, underlying: str, expiry: str, attempts: int = 5, delay: float = 5.0) -> dict:
+    """Fetch previous-day OI per strike/side from the option chain (at startup).
 
-    Returns {strike_int: {'ce': prev_oi, 'pe': prev_oi}}. Empty dict on failure —
-    buildup labels are simply omitted for the session.
+    Retries on transient failures (429s, empty chain) since a single missed
+    fetch would otherwise disable buildup labels for the whole session.
+    Returns {strike_int: {'ce': prev_oi, 'pe': prev_oi}}. Empty dict if every
+    attempt fails — buildup labels are simply omitted for the session.
     """
-    prev_oi: dict = {}
-    try:
-        chain = helper.get_option_chain(underlying, expiry, exchange_segment='IDX_I')
-        for strike_str, data in ((chain or {}).get('oc') or {}).items():
-            strike = int(float(strike_str))
-            prev_oi[strike] = {
-                'ce': int(_f((data.get('ce') or {}).get('previous_oi'))),
-                'pe': int(_f((data.get('pe') or {}).get('previous_oi'))),
-            }
-    except Exception as e:
-        print(f'[live_options_ws] WARN: prev_oi fetch failed: {e}', flush=True)
-    return prev_oi
+    for attempt in range(attempts):
+        prev_oi: dict = {}
+        try:
+            chain = helper.get_option_chain(underlying, expiry, exchange_segment='IDX_I')
+            for strike_str, data in ((chain or {}).get('oc') or {}).items():
+                strike = int(float(strike_str))
+                prev_oi[strike] = {
+                    'ce': int(_f((data.get('ce') or {}).get('previous_oi'))),
+                    'pe': int(_f((data.get('pe') or {}).get('previous_oi'))),
+                }
+        except Exception as e:
+            print(f'[live_options_ws] WARN: prev_oi fetch failed (attempt {attempt + 1}/{attempts}): {e}', flush=True)
+            prev_oi = {}
+
+        if prev_oi:
+            return prev_oi
+        if attempt < attempts - 1:
+            print(f'[live_options_ws] WARN: prev_oi fetch returned no strikes (attempt {attempt + 1}/{attempts}), retrying in {delay:.0f}s…', flush=True)
+            time.sleep(delay)
+    return {}
 
 
 # Buildup dead-bands — below these the label is suppressed to avoid flicker
