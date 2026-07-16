@@ -202,6 +202,19 @@ class NiftySpreadTrendStrategy:
             f" | VWAP={self.option_vwap:.2f} | ST={self.option_st_level:.2f}"
         )
 
+    def fetch_ltps(self):
+        """Batched short-leg/long-leg/spot LTP fetch — at most one REST call on WebSocket miss."""
+        ltps = self.helper.get_ltps([
+            ("NSE_FNO", self.short_id),
+            ("NSE_FNO", self.long_id),
+            (self.index_segment, self.index_security_id),
+        ])
+        return (
+            ltps.get(str(self.short_id), 0.0),
+            ltps.get(str(self.long_id), 0.0),
+            ltps.get(str(self.index_security_id), 0.0),
+        )
+
     def save_state(self, nifty_spot, short_ltp, long_ltp, total_pnl, status="RUNNING"):
         state_dict = {
             "strategy": "nifty_spread_trend",
@@ -507,26 +520,20 @@ class NiftySpreadTrendStrategy:
             
             # Check shutdown trigger first
             if check_shutdown_trigger("nifty_spread_trend"):
-                s_ltp = self.helper.get_ltp(str(self.short_id), exchange="NSE_FNO", instrument="OPTIDX")
-                l_ltp = self.helper.get_ltp(str(self.long_id), exchange="NSE_FNO", instrument="OPTIDX")
+                s_ltp, l_ltp, spot_price = self.fetch_ltps()
                 short_ltp_val = s_ltp if s_ltp > 0 else self.short_entry_price
                 long_ltp_val = l_ltp if l_ltp > 0 else self.long_entry_price
-                spot_price = self.helper.get_ltp(self.index_security_id, exchange=self.index_segment, instrument="INDEX")
                 total_pnl = (self.short_entry_price - short_ltp_val + long_ltp_val - self.long_entry_price) * total_qty
                 self.exit_positions("UI Shutdown Request")
                 self.save_state(spot_price, short_ltp_val, long_ltp_val, total_pnl, status="STOPPED")
                 sys.exit(0)
-            
-            # Fetch current prices
-            short_ltp = self.helper.get_ltp(str(self.short_id), exchange="NSE_FNO", instrument="OPTIDX")
-            long_ltp = self.helper.get_ltp(str(self.long_id), exchange="NSE_FNO", instrument="OPTIDX")
-            
+
+            # Fetch current prices + spot in one batched call
+            short_ltp, long_ltp, spot_price = self.fetch_ltps()
+
             if short_ltp <= 0 or long_ltp <= 0:
                 continue
 
-            # Fetch spot price
-            spot_price = self.helper.get_ltp(self.index_security_id, exchange=self.index_segment, instrument="INDEX")
-            
             # Save state
             self.save_state(spot_price, short_ltp, long_ltp, (self.short_entry_price - short_ltp + long_ltp - self.long_entry_price) * total_qty, status="RUNNING")
                 

@@ -95,8 +95,10 @@ class ValueImbalanceStrategy:
         self.best_combined_pts = 0.0
 
         # Session Control
-        self.last_adjustment_time = None 
+        self.last_adjustment_time = None
         self.consecutive_chain_failures = 0
+
+        self.NIFTY_SPOT_SID = 13  # Nifty 50 index (IDX_I) for spot price
 
     def sleep_cooldown(self, seconds):
         """Shutdown-aware sleep for cooldowns and delays."""
@@ -106,6 +108,19 @@ class ValueImbalanceStrategy:
                 self.save_state(0, 0, 0, 0, status="STOPPED")
                 sys.exit(0)
             time.sleep(1)
+
+    def fetch_ltps(self):
+        """Batched CE/PE/spot LTP fetch — at most one REST call when the WebSocket misses."""
+        ltps = self.helper.get_ltps([
+            ("NSE_FNO", self.ce_id),
+            ("NSE_FNO", self.pe_id),
+            ("IDX_I", self.NIFTY_SPOT_SID),
+        ])
+        return (
+            ltps.get(str(self.ce_id), 0.0),
+            ltps.get(str(self.pe_id), 0.0),
+            ltps.get(str(self.NIFTY_SPOT_SID), 0.0),
+        )
 
     def save_state(self, nifty_spot, ce_ltp, pe_ltp, total_pnl, status="RUNNING"):
         state_dict = {
@@ -241,8 +256,7 @@ class ValueImbalanceStrategy:
     def update_baseline_imbalance(self):
         """Update baseline imbalance (entry_diff_pct) after an adjustment using new LTPs."""
         time.sleep(1) # Let the live feed stabilize
-        ce_ltp = self.helper.get_ltp(str(self.ce_id), exchange="NSE_FNO", instrument="OPTIDX")
-        pe_ltp = self.helper.get_ltp(str(self.pe_id), exchange="NSE_FNO", instrument="OPTIDX")
+        ce_ltp, pe_ltp, _ = self.fetch_ltps()
         if ce_ltp > 0 and pe_ltp > 0:
             ce_val = self.ce_lots * ce_ltp
             pe_val = self.pe_lots * pe_ltp
@@ -411,19 +425,18 @@ class ValueImbalanceStrategy:
             logger.info(f"Waiting for premiums to balance at ATM {self.ce_strike}...")
             balanced = False
             while True:
+                # One batched fetch per iteration covers CE, PE and spot
+                ce_price, pe_price, spot = self.fetch_ltps()
+
                 # Check shutdown trigger
                 if check_shutdown_trigger("nifty_value_imbalance_straddle"):
                     logger.info("UI Shutdown Request during balanced entry wait.")
-                    ce_p = self.helper.get_ltp(str(self.ce_id), exchange="NSE_FNO", instrument="OPTIDX")
-                    pe_p = self.helper.get_ltp(str(self.pe_id), exchange="NSE_FNO", instrument="OPTIDX")
-                    self.save_state(nifty_spot, ce_p, pe_p, 0.0, status="STOPPED")
+                    self.save_state(nifty_spot, ce_price, pe_price, 0.0, status="STOPPED")
                     self.reset_session()
                     sys.exit(0)
 
                 # Save current balancing state
-                ce_p = self.helper.get_ltp(str(self.ce_id), exchange="NSE_FNO", instrument="OPTIDX")
-                pe_p = self.helper.get_ltp(str(self.pe_id), exchange="NSE_FNO", instrument="OPTIDX")
-                self.save_state(nifty_spot, ce_p, pe_p, 0.0, status="BALANCING")
+                self.save_state(nifty_spot, ce_price, pe_price, 0.0, status="BALANCING")
 
                 # Check 15:17 even during waiting
                 if datetime.now().strftime("%H:%M") >= "15:17":
@@ -431,16 +444,13 @@ class ValueImbalanceStrategy:
                     break
 
                 # Check if ATM has changed while waiting
-                spot = self.helper.get_ltp("NIFTY", exchange="IDX_I", instrument="INDEX")
                 if spot > 0:
                     current_atm = int(round(spot / 50) * 50)
                     if current_atm != self.ce_strike:
                         logger.info(f"ATM strike shifted from {self.ce_strike} to {current_atm} (Spot: {spot:.2f}). Restarting entry cycle...")
                         break
 
-                ce_price = self.helper.get_ltp(str(self.ce_id), exchange="NSE_FNO", instrument="OPTIDX")
-                pe_price = self.helper.get_ltp(str(self.pe_id), exchange="NSE_FNO", instrument="OPTIDX")
-                
+
                 if ce_price > 0 and pe_price > 0:
                     max_prem = max(ce_price, pe_price)
                     diff_pct = abs(ce_price - pe_price) / max_prem * 100
@@ -489,12 +499,10 @@ class ValueImbalanceStrategy:
                 
                 # Check shutdown trigger first
                 if check_shutdown_trigger("nifty_value_imbalance_straddle"):
-                    c_ltp = self.helper.get_ltp(str(self.ce_id), exchange="NSE_FNO", instrument="OPTIDX")
-                    p_ltp = self.helper.get_ltp(str(self.pe_id), exchange="NSE_FNO", instrument="OPTIDX")
+                    c_ltp, p_ltp, curr_nifty = self.fetch_ltps()
                     ce_ltp_val = c_ltp if c_ltp > 0 else self.ce_avg_price
                     pe_ltp_val = p_ltp if p_ltp > 0 else self.pe_avg_price
                     total_pnl = self._calculate_pnl(ce_ltp_val, pe_ltp_val)
-                    curr_nifty = self.helper.get_ltp("NIFTY", exchange="IDX_I", instrument="INDEX")
                     if curr_nifty <= 0: curr_nifty = nifty_spot
                     self.exit_all_positions("UI Shutdown Request")
                     self.save_state(curr_nifty, ce_ltp_val, pe_ltp_val, total_pnl, status="STOPPED")
@@ -512,14 +520,12 @@ class ValueImbalanceStrategy:
                     self.exit_all_positions("Market Closed")
                     break
                     
-                ce_ltp = self.helper.get_ltp(str(self.ce_id), exchange="NSE_FNO", instrument="OPTIDX")
-                pe_ltp = self.helper.get_ltp(str(self.pe_id), exchange="NSE_FNO", instrument="OPTIDX")
+                # One batched fetch per iteration covers CE, PE and spot
+                ce_ltp, pe_ltp, curr_nifty = self.fetch_ltps()
                 if ce_ltp <= 0 or pe_ltp <= 0: continue
-                
+
                 total_pnl = self._calculate_pnl(ce_ltp, pe_ltp)
-                
-                # Fetch current spot for checks
-                curr_nifty = self.helper.get_ltp("NIFTY", exchange="IDX_I", instrument="INDEX")
+
                 if curr_nifty == 0: curr_nifty = nifty_spot # Fallback to start spot
 
                 # Save current state
@@ -587,7 +593,6 @@ class ValueImbalanceStrategy:
                 diff_pct = abs(ce_val - pe_val) / max_val * 100
                 
                 if time.time() - last_log_time >= 2:
-                    curr_nifty = self.helper.get_ltp("NIFTY", exchange="IDX_I", instrument="INDEX")
                     self.log_state(curr_nifty or nifty_spot, ce_ltp, pe_ltp, ce_val, pe_val, diff_pct, total_pnl)
                     last_log_time = time.time()
 

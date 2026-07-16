@@ -114,6 +114,24 @@ class NiftyExpiry:
         self.adjustment_count = 0
         self._last_sl_check = {}
 
+        self.NIFTY_SPOT_SID = 13  # Nifty 50 index (IDX_I) for spot price
+
+    def fetch_ltps(self):
+        """Batched CE/PE/spot LTP fetch — at most one REST call when the WebSocket misses.
+
+        Inactive legs (qty 0) are skipped and returned as 0.0, matching the
+        previous per-leg behaviour.
+        """
+        instruments = [("IDX_I", self.NIFTY_SPOT_SID)]
+        if self.ce_id and self.ce_qty > 0:
+            instruments.append(("NSE_FNO", self.ce_id))
+        if self.pe_id and self.pe_qty > 0:
+            instruments.append(("NSE_FNO", self.pe_id))
+        ltps = self.helper.get_ltps(instruments)
+        ce_ltp = ltps.get(str(self.ce_id), 0.0) if (self.ce_id and self.ce_qty > 0) else 0.0
+        pe_ltp = ltps.get(str(self.pe_id), 0.0) if (self.pe_id and self.pe_qty > 0) else 0.0
+        return ce_ltp, pe_ltp, ltps.get(str(self.NIFTY_SPOT_SID), 0.0)
+
     def save_state(self, nifty_spot, ce_ltp, pe_ltp, total_pnl, status="RUNNING"):
         state_dict = {
             "strategy": "nifty_expiry",
@@ -230,8 +248,7 @@ class NiftyExpiry:
     def update_baseline_imbalance(self):
         """Update baseline imbalance (entry_diff_pct) after an adjustment using new LTPs."""
         time.sleep(1) # Let the live feed stabilize
-        ce_ltp = self.helper.get_ltp(str(self.ce_id), exchange="NSE_FNO", instrument="OPTIDX")
-        pe_ltp = self.helper.get_ltp(str(self.pe_id), exchange="NSE_FNO", instrument="OPTIDX")
+        ce_ltp, pe_ltp, _ = self.fetch_ltps()
         if ce_ltp > 0 and pe_ltp > 0:
             ce_val = self.ce_lots * ce_ltp
             pe_val = self.pe_lots * pe_ltp
@@ -510,10 +527,8 @@ class NiftyExpiry:
                     cycle_active = False
                     break
 
-                # Fetch active prices
-                ce_ltp = self.helper.get_ltp(str(self.ce_id), exchange="NSE_FNO", instrument="OPTIDX") if self.ce_qty > 0 else 0.0
-                pe_ltp = self.helper.get_ltp(str(self.pe_id), exchange="NSE_FNO", instrument="OPTIDX") if self.pe_qty > 0 else 0.0
-                curr_spot = self.helper.get_ltp("NIFTY", exchange="IDX_I", instrument="INDEX")
+                # Fetch active prices in one batched call (CE + PE + spot)
+                ce_ltp, pe_ltp, curr_spot = self.fetch_ltps()
 
                 if (self.ce_qty > 0 and ce_ltp <= 0) or (self.pe_qty > 0 and pe_ltp <= 0):
                     continue
