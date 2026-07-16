@@ -1429,6 +1429,66 @@ export function GuardStepper({ value, onChange, colorCls, disabled }: {
   );
 }
 
+// ─── GuardInput ───────────────────────────────────────────────────
+// Number input + stepper whose typed value commits only on Enter or blur.
+// Keystrokes stay in a local draft so the 1s guard monitor never acts on a
+// partially typed price (e.g. "1" while typing "150"). Escape reverts the
+// draft; stepper clicks still commit immediately. An amber border marks an
+// uncommitted draft.
+
+export function GuardInput({ value, onCommit, colorCls, focusBorderCls, disabled }: {
+  value: string;
+  onCommit: (v: string) => void;
+  colorCls: string;
+  focusBorderCls: string;
+  disabled?: boolean;
+}) {
+  const [draft, setDraftState] = useState<string | null>(null);
+  const draftRef = useRef<string | null>(null);
+  const setDraft = (v: string | null) => { draftRef.current = v; setDraftState(v); };
+
+  const shown = draft ?? value;
+  const dirty = draft !== null && draft !== value;
+
+  const commit = () => {
+    const d = draftRef.current;
+    if (d !== null && d !== value) onCommit(d);
+    setDraft(null);
+  };
+
+  return (
+    <div className="flex items-center gap-1">
+      <input
+        type="number" step="0.05" min="0"
+        value={shown}
+        onChange={e => setDraft(e.target.value)}
+        onBlur={commit}
+        onKeyDown={e => {
+          if (e.key === 'Enter') {
+            commit();
+            e.currentTarget.blur();
+          } else if (e.key === 'Escape') {
+            setDraft(null);
+            e.currentTarget.blur();
+          }
+        }}
+        placeholder="—"
+        disabled={disabled}
+        title="Press Enter or click away to apply"
+        className={`w-20 bg-zinc-900 border text-xs font-mono rounded px-2 py-1 focus:outline-none tabular-nums text-right placeholder:text-zinc-600 disabled:opacity-40 ${colorCls} ${
+          dirty ? 'border-amber-400' : `border-zinc-700 ${focusBorderCls}`
+        }`}
+      />
+      <GuardStepper
+        value={shown}
+        onChange={v => { setDraft(null); onCommit(v); }}
+        colorCls={colorCls}
+        disabled={disabled}
+      />
+    </div>
+  );
+}
+
 // ─── PositionsTable ───────────────────────────────────────────────
 
 export interface PositionsTableProps {
@@ -1517,44 +1577,26 @@ export const PositionsTable = React.memo(function PositionsTable({ data, guards,
               </td>
               <td className="px-3 py-2 whitespace-nowrap font-mono text-zinc-300">{String(row.productType ?? '—')}</td>
 
-              {/* Target input */}
+              {/* Target input — commits on Enter/blur only */}
               <td className="px-2 py-1.5">
-                <div className="flex items-center gap-1">
-                  <input
-                    type="number" step="0.05" min="0"
-                    value={guard?.target ?? ''}
-                    onChange={e => onGuardChange(sym, 'target', e.target.value)}
-                    placeholder="—"
-                    disabled={isClosing}
-                    className="w-20 bg-zinc-900 border border-zinc-700 text-emerald-300 text-xs font-mono rounded px-2 py-1 focus:outline-none focus:border-emerald-500 tabular-nums text-right placeholder:text-zinc-600 disabled:opacity-40"
-                  />
-                  <GuardStepper
-                    value={guard?.target ?? ''}
-                    onChange={v => onGuardChange(sym, 'target', v)}
-                    colorCls="text-emerald-300"
-                    disabled={isClosing}
-                  />
-                </div>
+                <GuardInput
+                  value={guard?.target ?? ''}
+                  onCommit={v => onGuardChange(sym, 'target', v)}
+                  colorCls="text-emerald-300"
+                  focusBorderCls="focus:border-emerald-500"
+                  disabled={isClosing}
+                />
               </td>
 
-              {/* SL input */}
+              {/* SL input — commits on Enter/blur only */}
               <td className="px-2 py-1.5">
-                <div className="flex items-center gap-1">
-                  <input
-                    type="number" step="0.05" min="0"
-                    value={guard?.sl ?? ''}
-                    onChange={e => onGuardChange(sym, 'sl', e.target.value)}
-                    placeholder="—"
-                    disabled={isClosing}
-                    className="w-20 bg-zinc-900 border border-zinc-700 text-rose-300 text-xs font-mono rounded px-2 py-1 focus:outline-none focus:border-rose-500 tabular-nums text-right placeholder:text-zinc-600 disabled:opacity-40"
-                  />
-                  <GuardStepper
-                    value={guard?.sl ?? ''}
-                    onChange={v => onGuardChange(sym, 'sl', v)}
-                    colorCls="text-rose-300"
-                    disabled={isClosing}
-                  />
-                </div>
+                <GuardInput
+                  value={guard?.sl ?? ''}
+                  onCommit={v => onGuardChange(sym, 'sl', v)}
+                  colorCls="text-rose-300"
+                  focusBorderCls="focus:border-rose-500"
+                  disabled={isClosing}
+                />
               </td>
 
               {/* Trail SL checkbox + effective SL price when active */}
