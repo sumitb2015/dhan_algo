@@ -4,6 +4,7 @@ import argparse
 import os
 import math
 import logging
+import threading
 from collections import namedtuple
 from datetime import datetime, timedelta
 from typing import List, Optional, Tuple
@@ -166,9 +167,36 @@ class CrudeOilMRenkoSARStrategy:
         dhan = get_dhan_client()
         self.helper = DhanHelper(dhan)
 
+        # Background brick poller: owns the candle fetch + build_renko work
+        # (every poll_seconds) so the main loop can tick at 1s for shutdown,
+        # EOD and P&L checks without stalling on network/CPU.
+        self._bricks_thread = None
+
     # ------------------------------------------------------------------
     # Renko series
     # ------------------------------------------------------------------
+
+    def _bricks_poller_loop(self):
+        """Daemon thread: rebuild the Renko series every poll_seconds.
+
+        Only this thread calls get_bricks(), so its mutations of
+        self.bricks / pinned_start_ts / last_brick_ts stay single-threaded;
+        the main loop just reads the latest self.bricks list reference.
+        """
+        while True:
+            try:
+                self.get_bricks()
+            except Exception as e:
+                logger.error("Brick poller error: %s", e)
+            time.sleep(self.poll_seconds)
+
+    def _start_bricks_poller(self):
+        if self._bricks_thread is None or not self._bricks_thread.is_alive():
+            self._bricks_thread = threading.Thread(
+                target=self._bricks_poller_loop, daemon=True, name="renko-bricks-poller"
+            )
+            self._bricks_thread.start()
+            logger.info("Background Renko brick poller started (every %ds).", self.poll_seconds)
 
     def get_bricks(self) -> List[Brick]:
         """Fetch 5-min candles, keep only fully closed ones, rebuild the brick series."""
@@ -446,13 +474,6 @@ class CrudeOilMRenkoSARStrategy:
             logger.info("Waiting for MCX session to open (%s IST). Current: %s", self.start_time, now_str)
             time.sleep(next_check)
 
-    def _sleep_poll(self) -> None:
-        """Sleep poll_seconds in 1s slices, exiting cleanly if the Stop button is hit."""
-        for _ in range(self.poll_seconds):
-            if check_shutdown_trigger(STRATEGY_KEY):
-                self._shutdown_and_exit("UI Shutdown Request during poll sleep")
-            time.sleep(1)
-
     def _shutdown_and_exit(self, reason: str) -> None:
         logger.info(reason)
         if self.direction != "NONE":
@@ -500,7 +521,10 @@ class CrudeOilMRenkoSARStrategy:
             except Exception as e:
                 logger.warning("WebSocket subscribe failed (will use REST fallback): %s", e)
 
+        self._start_bricks_poller()
+
         last_log_time = 0.0
+        last_scan_log_time = 0.0
         while True:
             try:
                 if check_shutdown_trigger(STRATEGY_KEY):
@@ -515,11 +539,14 @@ class CrudeOilMRenkoSARStrategy:
                     self.save_state(status="STOPPED")
                     break
 
-                bricks = self.get_bricks()
+                # Latest snapshot from the background poller (refreshed every poll_seconds)
+                bricks = self.bricks
                 if not bricks:
-                    logger.info("No Renko bricks yet (waiting for price to travel one full box).")
+                    if time.time() - last_scan_log_time >= self.poll_seconds:
+                        logger.info("No Renko bricks yet (waiting for price to travel one full box).")
+                        last_scan_log_time = time.time()
                     self.save_state(status="SCANNING")
-                    self._sleep_poll()
+                    time.sleep(1)
                     continue
 
                 want = desired_direction(bricks, self.reverse_bricks, self.direction)
@@ -528,8 +555,16 @@ class CrudeOilMRenkoSARStrategy:
                 elif want != self.direction:
                     self.reverse_position(want)
 
-                # Update LTP / unrealized P&L
-                ltp = self.helper.get_ltp(self.security_id, exchange=SEGMENT, instrument=INSTRUMENT) if self.security_id else 0.0
+                # Update LTP / unrealized P&L. At 1s cadence only consult the
+                # WebSocket cache; fall back to REST at the old poll_seconds
+                # cadence so the REST rate does not increase vs the 15s loop.
+                ltp = 0.0
+                if self.security_id:
+                    if str(self.security_id) in self.helper.live_data:
+                        ltp = self.helper.get_ltp(self.security_id, exchange=SEGMENT, instrument=INSTRUMENT)
+                    elif time.time() - getattr(self, "_last_rest_ltp_ts", 0.0) >= self.poll_seconds:
+                        ltp = self.helper.get_ltp(self.security_id, exchange=SEGMENT, instrument=INSTRUMENT)
+                        self._last_rest_ltp_ts = time.time()
                 if ltp > 0:
                     self.ltp = ltp
                     if self.direction == "LONG":
@@ -551,7 +586,9 @@ class CrudeOilMRenkoSARStrategy:
                     )
                     last_log_time = now_ts
 
-                self._sleep_poll()
+                # 1s cadence: brick refresh happens on the poller thread, so the
+                # loop stays responsive to shutdown/EOD/reversals between polls.
+                time.sleep(1)
 
             except SystemExit:
                 raise

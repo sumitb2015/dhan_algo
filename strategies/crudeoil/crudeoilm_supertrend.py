@@ -3,6 +3,7 @@ import sys
 import argparse
 import os
 import logging
+import threading
 import pandas as pd
 from datetime import datetime
 from typing import Tuple, Optional
@@ -93,9 +94,47 @@ class CrudeOilMSupertrendStrategy:
         dhan = get_dhan_client()
         self.helper = DhanHelper(dhan)
 
+        # Background ST-refresh thread: while a position is open, the candle
+        # fetch + Supertrend compute runs off-loop at each candle boundary so
+        # the 1s SL-monitoring loop never stalls on it. The thread is the only
+        # get_signal() caller while the event is set (the scan loop in run()
+        # is idle then), so there is no concurrent indicator computation.
+        self._st_lock = threading.Lock()
+        self._st_snapshot = None  # (st_level, timestamp)
+        self._st_thread = None
+        self._st_active = threading.Event()
+
     # ------------------------------------------------------------------
     # Signal
     # ------------------------------------------------------------------
+
+    def _st_poller_loop(self):
+        interval_min = int(self.interval)
+        last_candle = ""
+        while True:
+            if self._st_active.is_set():
+                now = datetime.now()
+                candle_mark = f"{now.strftime('%Y-%m-%d %H:')}{(now.minute // interval_min) * interval_min:02d}"
+                if candle_mark != last_candle:
+                    try:
+                        saved_ts = self.last_processed_candle_time
+                        _, _, st_val = self.get_signal()
+                        self.last_processed_candle_time = saved_ts
+                        if st_val > 0:
+                            with self._st_lock:
+                                self._st_snapshot = (st_val, time.time())
+                        last_candle = candle_mark
+                    except Exception as e:
+                        logger.error("ST poller error: %s", e)
+            time.sleep(2)
+
+    def _start_st_poller(self):
+        if self._st_thread is None or not self._st_thread.is_alive():
+            self._st_thread = threading.Thread(
+                target=self._st_poller_loop, daemon=True, name="supertrend-st-poller"
+            )
+            self._st_thread.start()
+            logger.info("Background Supertrend refresh thread started.")
 
     def get_signal(self) -> Tuple[str, float, float]:
         """Returns (signal, close, st_level) where signal is LONG, SHORT, or NEUTRAL."""
@@ -146,18 +185,6 @@ class CrudeOilMSupertrendStrategy:
                 return "NEUTRAL", close, st_val
             return "SHORT", close, st_val
         return "NEUTRAL", close, st_val
-
-    def _refresh_st_level(self) -> None:
-        """Refresh the Supertrend trailing stop level from the latest closed candle."""
-        # Save and restore last_processed_candle_time so this refresh does not
-        # affect the re-entry cooldown guard in the outer scan loop.
-        saved_ts = self.last_processed_candle_time
-        _, _, st_val = self.get_signal()
-        self.last_processed_candle_time = saved_ts
-        if st_val > 0:
-            if st_val != self.st_level:
-                logger.info("[ST REFRESH] ST level updated: %.2f → %.2f", self.st_level, st_val)
-            self.st_level = st_val
 
     # ------------------------------------------------------------------
     # Entry
@@ -242,17 +269,26 @@ class CrudeOilMSupertrendStrategy:
 
     def monitor_position(self) -> None:
         """1-second tick loop monitoring open position until exit."""
-        last_indicator_candle = ""
         last_log_time = 0.0
-        interval_min = int(self.interval)
 
+        # Hand ST refreshing to the background thread for the life of the position
+        with self._st_lock:
+            self._st_snapshot = None  # drop any snapshot from a previous position
+        self._start_st_poller()
+        self._st_active.set()
+        try:
+            self._monitor_position_loop(last_log_time)
+        finally:
+            self._st_active.clear()
+
+    def _monitor_position_loop(self, last_log_time: float) -> None:
         while self.direction != "NONE":
-            # Refresh ST level on each new candle boundary
-            now = datetime.now()
-            candle_mark = f"{now.strftime('%Y-%m-%d %H:')}{(now.minute // interval_min) * interval_min:02d}"
-            if candle_mark != last_indicator_candle:
-                self._refresh_st_level()
-                last_indicator_candle = candle_mark
+            # Apply the latest background ST refresh (computed at candle boundaries)
+            with self._st_lock:
+                snap = self._st_snapshot
+            if snap and snap[0] > 0 and snap[0] != self.st_level:
+                logger.info("[ST REFRESH] ST level updated: %.2f → %.2f", self.st_level, snap[0])
+                self.st_level = snap[0]
 
             # Exit condition 1: shutdown trigger
             if check_shutdown_trigger(STRATEGY_KEY):
@@ -269,8 +305,15 @@ class CrudeOilMSupertrendStrategy:
                 self.position_pnl = 0.0
                 break
 
-            # Fetch LTP
-            ltp = self.helper.get_ltp(self.security_id, exchange=SEGMENT, instrument=INSTRUMENT)
+            # Fetch LTP. At 1s cadence only consult the WebSocket cache; fall
+            # back to REST every 3s so a WS outage doesn't hammer the API.
+            if str(self.security_id) in self.helper.live_data:
+                ltp = self.helper.get_ltp(self.security_id, exchange=SEGMENT, instrument=INSTRUMENT)
+            elif time.time() - getattr(self, "_last_rest_ltp_ts", 0.0) >= 3.0:
+                ltp = self.helper.get_ltp(self.security_id, exchange=SEGMENT, instrument=INSTRUMENT)
+                self._last_rest_ltp_ts = time.time()
+            else:
+                ltp = 0.0
             if ltp <= 0:
                 time.sleep(1)
                 continue
