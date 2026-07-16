@@ -1,40 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
-import path from 'path';
-import fs from 'fs';
+import { getDhanCredentials } from '@/lib/dhanToken';
 
-const PROJECT_ROOT = path.resolve(process.cwd(), '..');
-const TOKEN_FILE   = path.join(PROJECT_ROOT, 'access_token.json');
-const DHAN_ORDERS  = 'https://api.dhan.co/v2/orders';
-
-interface TokenCache { clientId: string; token: string; ts: number }
-let tokenCache: TokenCache | null = null;
-const TOKEN_TTL = 5 * 60 * 1000; // re-read file every 5 min in case of token refresh
-
-function getToken(): { clientId: string; token: string } {
-  if (tokenCache && Date.now() - tokenCache.ts < TOKEN_TTL) {
-    return { clientId: tokenCache.clientId, token: tokenCache.token };
-  }
-  
-  // Read parent .env file to get client_id
-  let envClientId = '';
-  const envFile = path.join(PROJECT_ROOT, '.env');
-  if (fs.existsSync(envFile)) {
-    const content = fs.readFileSync(envFile, 'utf8');
-    const match = content.match(/^client_id\s*=\s*["']?([^"'\r\n]+)["']?/m);
-    if (match) {
-      envClientId = match[1].trim();
-    }
-  }
-
-  const raw = JSON.parse(fs.readFileSync(TOKEN_FILE, 'utf8')) as {
-    dhanClientId?: string;
-    clientId?: string;
-    accessToken: string;
-  };
-  const clientId = envClientId || process.env.client_id || raw.dhanClientId || raw.clientId || '';
-  tokenCache = { clientId, token: raw.accessToken, ts: Date.now() };
-  return { clientId: tokenCache.clientId, token: tokenCache.token };
-}
+const DHAN_ORDERS = 'https://api.dhan.co/v2/orders';
 
 export async function GET(): Promise<NextResponse> {
   return NextResponse.json({ ready: true });
@@ -71,7 +38,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   }
 
   try {
-    const { clientId, token } = getToken();
+    const { clientId, token } = getDhanCredentials();
 
     const payload = {
       dhanClientId:     clientId,

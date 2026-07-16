@@ -1,16 +1,13 @@
 import { NextResponse } from 'next/server';
 import path from 'path';
 import fs from 'fs';
-import { execFile, execSync } from 'child_process';
-import { promisify } from 'util';
+import { execSync } from 'child_process';
 import { isPidRunning } from '@/lib/processCheck';
-
-const execFileAsync = promisify(execFile);
+import { getDhanCredentials } from '@/lib/dhanToken';
 
 const PROJECT_ROOT = path.resolve(process.cwd(), '..');
 const DEBUG_DIR = path.join(PROJECT_ROOT, 'debug');
-const PYTHON_EXE = path.join(PROJECT_ROOT, 'venv', 'Scripts', 'pythonw.exe');
-const EXIT_SCRIPT = path.join(PROJECT_ROOT, 'scripts', 'tools', 'exit_all_positions.py');
+const DHAN_POSITIONS = 'https://api.dhan.co/v2/positions';
 
 const STRATEGY_KEYS = [
   'nifty_advanced_imbalance',
@@ -93,28 +90,37 @@ export async function POST() {
 
     // â”€â”€ Step 1: Broker-level nuclear exit (DELETE /positions) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     // Do this FIRST â€” strategies must not race to close positions themselves.
+    // Called directly against the Dhan REST API (same pattern as
+    // scalper/fast-order): the old exit_all_positions.py subprocess spent
+    // ~10s on interpreter + DhanHelper startup before sending this one call.
     let brokerExit = false;
     let brokerError: string | null = null;
     try {
-      const { stdout } = await execFileAsync(PYTHON_EXE, [EXIT_SCRIPT], {
-        cwd: PROJECT_ROOT,
-        timeout: 20000,
-        windowsHide: true,
+      const { clientId, token } = getDhanCredentials();
+      const res = await fetch(DHAN_POSITIONS, {
+        method: 'DELETE',
+        headers: {
+          'access-token': token,
+          'client-id': clientId,
+          'Accept': 'application/json',
+        },
+        signal: AbortSignal.timeout(15_000),
       });
-      const lines = stdout.trim().split('\n').filter(Boolean);
-      const result = JSON.parse(lines[lines.length - 1]);
-      brokerExit = result.success === true;
-      if (!brokerExit) brokerError = result.error || 'Unknown error';
-    } catch (err: any) {
-      if (err.stdout) {
+
+      if (res.ok) {
+        brokerExit = true;
+      } else {
+        let detail = `HTTP ${res.status}`;
         try {
-          const lines = String(err.stdout).trim().split('\n').filter(Boolean);
-          const result = JSON.parse(lines[lines.length - 1]);
-          brokerExit = result.success === true;
-          if (!brokerExit) brokerError = result.error || 'Script failed';
+          const json = await res.json() as Record<string, unknown>;
+          detail = String(json.remarks ?? json.message ?? (json.errorMessage as string) ?? JSON.stringify(json));
         } catch {}
+        brokerError = detail;
+        console.error('[exit-all] Dhan DELETE /positions failed:', detail);
       }
-      if (!brokerExit) brokerError = String(err.message);
+    } catch (err) {
+      brokerError = String((err as Error).message ?? err);
+      console.error('[exit-all] Dhan DELETE /positions error:', brokerError);
     }
 
     // â”€â”€ Step 2: Sync all strategy processes â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
