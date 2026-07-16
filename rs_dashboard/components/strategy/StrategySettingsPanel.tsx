@@ -1,6 +1,17 @@
 'use client';
 
 import { StrategyTemplate } from '@/lib/optionsStrategy';
+import { Card, CardContent } from '@/components/ui/card';
+import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
+import { Label } from '@/components/ui/label';
+import { Separator } from '@/components/ui/separator';
+import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group';
+import {
+  Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
+} from '@/components/ui/select';
+import { Activity, LogIn, LogOut, Save, Zap } from 'lucide-react';
+import { cn } from '@/lib/utils';
 
 interface StrategySettingsPanelProps {
   template: StrategyTemplate;
@@ -32,6 +43,14 @@ interface StrategySettingsPanelProps {
   exiting: boolean;
 }
 
+function FieldLabel({ children, htmlFor }: { children: React.ReactNode; htmlFor?: string }) {
+  return (
+    <Label htmlFor={htmlFor} className="text-[11px] font-semibold uppercase tracking-wider text-zinc-500">
+      {children}
+    </Label>
+  );
+}
+
 export default function StrategySettingsPanel({
   template, params, onParamsChange, lots, onLotsChange,
   target, onTargetChange, stoploss, onStoplossChange,
@@ -41,169 +60,210 @@ export default function StrategySettingsPanel({
   onAnalyze, onSave, canSave, onEnterTrade, onExitTrade, canEnter, canExit, entering, exiting,
 }: StrategySettingsPanelProps) {
   const visibleExpiries = expiries.filter((e) => expiryKindFilter === 'all' || e.kind === expiryKindFilter);
+  const live = tradingType === 'live';
 
   return (
-    <div className="bg-zinc-900/60 border border-zinc-800 rounded-2xl p-4 space-y-4">
-      <div className="flex flex-wrap items-center gap-3">
-        <div className="flex rounded-md overflow-hidden border border-zinc-700 text-xs">
-          {(['weekly', 'monthly', 'all'] as const).map((k) => (
-            <button
-              key={k}
-              onClick={() => onExpiryKindFilterChange(k)}
-              className={`px-3 py-1 font-medium capitalize ${
-                expiryKindFilter === k ? 'bg-sky-600 text-white' : 'bg-zinc-800 text-zinc-400 hover:text-zinc-200'
-              }`}
+    <Card
+      className={cn(
+        'bg-card/80 backdrop-blur-sm transition-shadow',
+        live && 'ring-amber-500/40 shadow-[0_0_24px_-8px_rgba(245,158,11,0.35)]',
+      )}
+    >
+      <CardContent className="space-y-4">
+        {/* Contract row */}
+        <div className="flex flex-wrap items-end gap-x-6 gap-y-3">
+          <div className="flex flex-col gap-1.5">
+            <FieldLabel>Expiry series</FieldLabel>
+            <ToggleGroup
+              value={[expiryKindFilter]}
+              onValueChange={(v: unknown[]) => {
+                const next = v[v.length - 1] as typeof expiryKindFilter | undefined;
+                if (next) onExpiryKindFilterChange(next);
+              }}
+              variant="outline"
+              size="sm"
+              spacing={0}
             >
-              {k}
-            </button>
-          ))}
-        </div>
-        <select
-          value={selectedExpiry}
-          onChange={(e) => onExpiryChange(e.target.value)}
-          className="bg-zinc-800 border border-zinc-700 rounded-md text-xs text-zinc-200 px-2 py-1"
-        >
-          {visibleExpiries.map((e) => (
-            <option key={e.date} value={e.date}>{e.date} ({e.kind})</option>
-          ))}
-        </select>
-      </div>
+              {(['weekly', 'monthly', 'all'] as const).map((k) => (
+                <ToggleGroupItem key={k} value={k} className="capitalize aria-pressed:bg-sky-500/15 aria-pressed:text-sky-400">
+                  {k}
+                </ToggleGroupItem>
+              ))}
+            </ToggleGroup>
+          </div>
 
-      <div className="flex flex-wrap items-end gap-4">
-        {template.params.map((p) => (
-          <label key={p.key} className="flex flex-col gap-1 text-xs text-zinc-400">
-            {p.label}
-            <input
+          <div className="flex flex-col gap-1.5">
+            <FieldLabel>Expiry</FieldLabel>
+            <Select
+              value={selectedExpiry}
+              onValueChange={(v) => { if (typeof v === 'string' && v) onExpiryChange(v); }}
+            >
+              <SelectTrigger size="sm" className="min-w-44 font-mono">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {visibleExpiries.map((e) => (
+                  <SelectItem key={e.date} value={e.date} className="font-mono">
+                    {e.date} · {e.kind}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+
+          <div className="flex flex-col gap-1.5">
+            <FieldLabel>Mode</FieldLabel>
+            <ToggleGroup
+              value={[mode]}
+              onValueChange={(v: unknown[]) => {
+                const next = v[v.length - 1] as typeof mode | undefined;
+                if (next) onModeChange(next);
+              }}
+              variant="outline"
+              size="sm"
+              spacing={0}
+            >
+              {(['intraday', 'positional'] as const).map((m) => (
+                <ToggleGroupItem key={m} value={m} className="capitalize aria-pressed:bg-sky-500/15 aria-pressed:text-sky-400">
+                  {m}
+                </ToggleGroupItem>
+              ))}
+            </ToggleGroup>
+          </div>
+
+          <div className="flex flex-col gap-1.5">
+            <FieldLabel>Execution</FieldLabel>
+            <ToggleGroup
+              value={[tradingType]}
+              onValueChange={(v: unknown[]) => {
+                const next = v[v.length - 1] as typeof tradingType | undefined;
+                if (next) onTradingTypeChange(next);
+              }}
+              variant="outline"
+              size="sm"
+              spacing={0}
+            >
+              <ToggleGroupItem value="demo" className="aria-pressed:bg-sky-500/15 aria-pressed:text-sky-400">
+                Paper
+              </ToggleGroupItem>
+              <ToggleGroupItem value="live" className="aria-pressed:bg-amber-500/20 aria-pressed:text-amber-400">
+                <Zap data-icon="inline-start" /> Live
+              </ToggleGroupItem>
+            </ToggleGroup>
+          </div>
+        </div>
+
+        {/* Sizing & risk row */}
+        <div className="flex flex-wrap items-end gap-x-6 gap-y-3">
+          {template.params.map((p) => (
+            <div key={p.key} className="flex flex-col gap-1.5">
+              <FieldLabel htmlFor={`param-${p.key}`}>{p.label}</FieldLabel>
+              <Input
+                id={`param-${p.key}`}
+                type="number"
+                min={p.min}
+                max={p.max}
+                step={p.step}
+                value={params[p.key] ?? p.default}
+                onChange={(e) => onParamsChange({ ...params, [p.key]: Number(e.target.value) })}
+                className="h-8 w-24 font-mono tabular-nums"
+              />
+            </div>
+          ))}
+
+          <div className="flex flex-col gap-1.5">
+            <FieldLabel htmlFor="lots-input">Lots</FieldLabel>
+            <Input
+              id="lots-input"
               type="number"
-              min={p.min}
-              max={p.max}
-              step={p.step}
-              value={params[p.key] ?? p.default}
-              onChange={(e) => onParamsChange({ ...params, [p.key]: Number(e.target.value) })}
-              className="bg-zinc-800 border border-zinc-700 rounded-md text-sm text-zinc-100 px-2 py-1 w-20"
+              min={1}
+              step={1}
+              value={lots || ''}
+              onChange={(e) => {
+                const val = e.target.value;
+                if (val === '') {
+                  onLotsChange(0);
+                } else {
+                  const parsed = parseInt(val, 10);
+                  onLotsChange(isNaN(parsed) ? 1 : parsed);
+                }
+              }}
+              className="h-8 w-20 font-mono tabular-nums"
             />
-          </label>
-        ))}
+          </div>
 
-        <label className="flex flex-col gap-1 text-xs text-zinc-400">
-          Lots
-          <input
-            type="number"
-            min={1}
-            step={1}
-            value={lots || ''}
-            onChange={(e) => {
-              const val = e.target.value;
-              if (val === '') {
-                onLotsChange(0);
-              } else {
-                const parsed = parseInt(val, 10);
-                onLotsChange(isNaN(parsed) ? 1 : parsed);
-              }
-            }}
-            className="bg-zinc-800 border border-zinc-700 rounded-md text-sm text-zinc-100 px-2 py-1 w-20"
-          />
-        </label>
+          <div className="flex flex-col gap-1.5">
+            <FieldLabel htmlFor="target-input">Target profit ₹</FieldLabel>
+            <Input
+              id="target-input"
+              type="number"
+              min={0}
+              step={100}
+              placeholder="Optional"
+              value={target !== null ? target : ''}
+              onChange={(e) => {
+                const val = e.target.value;
+                onTargetChange(val === '' ? null : Number(val));
+              }}
+              className="h-8 w-28 font-mono tabular-nums"
+            />
+          </div>
 
-        <label className="flex flex-col gap-1 text-xs text-zinc-400">
-          Target Profit (₹)
-          <input
-            type="number"
-            min={0}
-            step={100}
-            placeholder="Optional"
-            value={target !== null ? target : ''}
-            onChange={(e) => {
-              const val = e.target.value;
-              onTargetChange(val === '' ? null : Number(val));
-            }}
-            className="bg-zinc-800 border border-zinc-700 rounded-md text-sm text-zinc-100 px-2 py-1 w-24"
-          />
-        </label>
-
-        <label className="flex flex-col gap-1 text-xs text-zinc-400">
-          Stop Loss (₹)
-          <input
-            type="number"
-            min={0}
-            step={100}
-            placeholder="Optional"
-            value={stoploss !== null ? stoploss : ''}
-            onChange={(e) => {
-              const val = e.target.value;
-              onStoplossChange(val === '' ? null : Number(val));
-            }}
-            className="bg-zinc-800 border border-zinc-700 rounded-md text-sm text-zinc-100 px-2 py-1 w-24"
-          />
-        </label>
-
-        <div className="flex flex-col gap-1 text-xs text-zinc-400">
-          Mode
-          <div className="flex rounded-md overflow-hidden border border-zinc-700">
-            {(['intraday', 'positional'] as const).map((m) => (
-              <button
-                key={m}
-                onClick={() => onModeChange(m)}
-                className={`px-3 py-1 text-xs font-medium capitalize ${
-                  mode === m ? 'bg-emerald-600 text-white' : 'bg-zinc-800 text-zinc-400 hover:text-zinc-200'
-                }`}
-              >
-                {m}
-              </button>
-            ))}
+          <div className="flex flex-col gap-1.5">
+            <FieldLabel htmlFor="stoploss-input">Stop loss ₹</FieldLabel>
+            <Input
+              id="stoploss-input"
+              type="number"
+              min={0}
+              step={100}
+              placeholder="Optional"
+              value={stoploss !== null ? stoploss : ''}
+              onChange={(e) => {
+                const val = e.target.value;
+                onStoplossChange(val === '' ? null : Number(val));
+              }}
+              className="h-8 w-28 font-mono tabular-nums"
+            />
           </div>
         </div>
 
-        <div className="flex flex-col gap-1 text-xs text-zinc-400">
-          Trading Type
-          <div className="flex rounded-md overflow-hidden border border-zinc-700">
-            {(['live', 'demo'] as const).map((t) => (
-              <button
-                key={t}
-                onClick={() => onTradingTypeChange(t)}
-                className={`px-3 py-1 text-xs font-medium capitalize ${
-                  tradingType === t ? 'bg-sky-600 text-white' : 'bg-zinc-800 text-zinc-400 hover:text-zinc-200'
-                }`}
-              >
-                {t}
-              </button>
-            ))}
+        <Separator />
+
+        {/* Action row */}
+        <div className="flex flex-wrap items-center gap-2">
+          <Button variant="secondary" onClick={onAnalyze}>
+            <Activity data-icon="inline-start" /> Analyze
+          </Button>
+
+          {mode === 'positional' && (
+            <Button variant="outline" onClick={onSave} disabled={!canSave}>
+              <Save data-icon="inline-start" /> Save strategy
+            </Button>
+          )}
+
+          <div className="ms-auto flex items-center gap-2">
+            {live && (
+              <span className="inline-flex items-center gap-1.5 text-xs font-semibold text-amber-400">
+                <Zap className="size-3.5" /> Live — real orders will be placed
+              </span>
+            )}
+            <Button
+              onClick={onEnterTrade}
+              disabled={!canEnter || entering || exiting}
+              className="bg-emerald-600 text-white hover:bg-emerald-500"
+            >
+              <LogIn data-icon="inline-start" /> {entering ? 'Entering…' : 'Enter trade'}
+            </Button>
+            <Button
+              variant="destructive"
+              onClick={onExitTrade}
+              disabled={!canExit || entering || exiting}
+            >
+              <LogOut data-icon="inline-start" /> {exiting ? 'Exiting…' : 'Exit trade'}
+            </Button>
           </div>
         </div>
-
-        <button
-          onClick={onAnalyze}
-          className="px-4 py-1.5 bg-sky-600 hover:bg-sky-500 text-white text-sm font-semibold rounded-lg transition-colors"
-        >
-          Analyze
-        </button>
-
-        {mode === 'positional' && (
-          <button
-            onClick={onSave}
-            disabled={!canSave}
-            className="px-4 py-1.5 bg-emerald-600 hover:bg-emerald-500 disabled:bg-zinc-700 disabled:text-zinc-500 text-white text-sm font-semibold rounded-lg transition-colors"
-          >
-            Save Strategy
-          </button>
-        )}
-
-        <button
-          onClick={onEnterTrade}
-          disabled={!canEnter || entering || exiting}
-          className="px-4 py-1.5 bg-orange-600 hover:bg-orange-500 disabled:bg-zinc-700 disabled:text-zinc-500 text-white text-sm font-semibold rounded-lg transition-colors"
-        >
-          {entering ? 'Entering...' : 'Enter'}
-        </button>
-
-        <button
-          onClick={onExitTrade}
-          disabled={!canExit || entering || exiting}
-          className="px-4 py-1.5 bg-rose-600 hover:bg-rose-500 disabled:bg-zinc-700 disabled:text-zinc-500 text-white text-sm font-semibold rounded-lg transition-colors"
-        >
-          {exiting ? 'Exiting...' : 'Exit'}
-        </button>
-      </div>
-    </div>
+      </CardContent>
+    </Card>
   );
 }

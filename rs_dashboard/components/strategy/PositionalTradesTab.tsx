@@ -12,7 +12,7 @@ import {
 import { Trash2, AlertTriangle, TrendingUp, TrendingDown, Clock, Activity, Check, ChevronDown, ChevronRight } from 'lucide-react';
 
 const UNDERLYING = 'NIFTY';
-const LOT_SIZE = 75;
+const FALLBACK_LOT_SIZE = 75;
 
 interface PositionalTrade {
   id: string;
@@ -29,6 +29,7 @@ interface PositionalTrade {
   status: 'active' | 'exited';
   isDemo?: boolean;
   mode?: 'intraday' | 'positional';
+  lotSize?: number;           // Lot size at entry time; older trades may lack it
   orderIds?: string;          // Broker order IDs (only on confirmed live trades)
   createdAt: string;
   exitedAt?: string;
@@ -43,7 +44,11 @@ interface PositionalTrade {
   }[];
 }
 
-export default function PositionalTradesTab() {
+export default function PositionalTradesTab({ lotSize }: { lotSize: number | null }) {
+  const tradeLotSize = useCallback(
+    (trade: PositionalTrade) => trade.lotSize ?? lotSize ?? FALLBACK_LOT_SIZE,
+    [lotSize],
+  );
   const [trades, setTrades] = useState<PositionalTrade[]>([]);
   const [openId, setOpenId] = useState<string | null>(null);
   
@@ -129,9 +134,19 @@ export default function PositionalTradesTab() {
       return;
     }
 
+    // Guard: without a stored lot size, don't fall back to a guess for a live order
+    if (trade.lotSize === undefined && lotSize === null) {
+      setExitMessages((prev) => ({
+        ...prev,
+        [trade.id]: { success: false, message: 'Cannot exit — lot size not loaded yet. Wait a moment and retry.' },
+      }));
+      setExitingIds((prev) => { const next = new Set(prev); next.delete(trade.id); return next; });
+      return;
+    }
+
     const legsPayload = trade.legs.map((l) => ({
       securityId: l.securityId,
-      quantity: l.qtyRatio * trade.lots * LOT_SIZE,
+      quantity: l.qtyRatio * trade.lots * tradeLotSize(trade),
       side: l.side === 'BUY' ? 'SELL' : 'BUY',
     }));
 
@@ -196,7 +211,7 @@ export default function PositionalTradesTab() {
         return next;
       });
     }
-  }, [trades, spot, chainCache, exitingIds]);
+  }, [trades, spot, chainCache, exitingIds, lotSize, tradeLotSize]);
 
   // Calculate live P&L for a trade
   const calculatePnl = (trade: PositionalTrade, currentSpot: number, oc?: ChainOc): number => {
@@ -212,7 +227,7 @@ export default function PositionalTradesTab() {
       return sum + (l.side === 'SELL' ? currentPrice : -currentPrice) * l.qtyRatio * trade.lots;
     }, 0);
 
-    return (trade.entryNetPremium - currentNetPremium) * LOT_SIZE;
+    return (trade.entryNetPremium - currentNetPremium) * tradeLotSize(trade);
   };
 
   // Main polling logic for spot and options chains
@@ -321,8 +336,8 @@ export default function PositionalTradesTab() {
 
     const activeSpot = spot || trade.entrySpot;
     return {
-      stats: computePayoffStats(resolved, activeSpot, LOT_SIZE),
-      curve: buildPayoffCurve(resolved, activeSpot, LOT_SIZE),
+      stats: computePayoffStats(resolved, activeSpot, tradeLotSize(trade)),
+      curve: buildPayoffCurve(resolved, activeSpot, tradeLotSize(trade)),
       resolvedLegs: resolved,
       liveSpot: activeSpot,
     };
@@ -680,13 +695,13 @@ export default function PositionalTradesTab() {
                   <div>
                     <span className="text-zinc-500 block">Entry Net Premium</span>
                     <span className="font-mono font-semibold text-zinc-300">
-                      ₹{(trade.entryNetPremium * LOT_SIZE).toLocaleString('en-IN', { maximumFractionDigits: 0 })}
+                      ₹{(trade.entryNetPremium * tradeLotSize(trade)).toLocaleString('en-IN', { maximumFractionDigits: 0 })}
                     </span>
                   </div>
                   <div>
                     <span className="text-zinc-500 block">Live Net Premium</span>
                     <span className="font-mono font-semibold text-zinc-300">
-                      {liveStats.netPremium ? `₹${(liveStats.netPremium * LOT_SIZE).toLocaleString('en-IN', { maximumFractionDigits: 0 })}` : 'Calculating...'}
+                      {liveStats.netPremium ? `₹${(liveStats.netPremium * tradeLotSize(trade)).toLocaleString('en-IN', { maximumFractionDigits: 0 })}` : 'Calculating...'}
                     </span>
                   </div>
                   <div>

@@ -14,9 +14,19 @@ import {
   resolveLegs, computePayoffStats, buildPayoffCurve, buildTargetPayoffCurve, findBreakevens,
   ChainOc, ResolvedLeg, PayoffStats,
 } from '@/lib/optionsStrategy';
+import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
+import { Badge } from '@/components/ui/badge';
+import { Button } from '@/components/ui/button';
+import { Alert, AlertTitle } from '@/components/ui/alert';
+import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs';
+import {
+  Table, TableBody, TableCell, TableHead, TableHeader, TableRow,
+} from '@/components/ui/table';
+import { AlertTriangle, CheckIcon, Minus, Plus } from 'lucide-react';
+import { cn } from '@/lib/utils';
 
 const UNDERLYING = 'NIFTY';
-const LOT_SIZE = 75;
+const FALLBACK_LOT_SIZE = 75;
 
 type MarginData = { total_margin: number; hedge_benefit: number; available_funds: number };
 
@@ -31,6 +41,9 @@ export default function StrategyBuilder() {
 
   const [spot, setSpot] = useState(0);
   const [chainOc, setChainOc] = useState<ChainOc>({});
+  // null until fetched — orders are blocked until the real lot size is known
+  const [lotSize, setLotSize] = useState<number | null>(null);
+  const effectiveLotSize = lotSize ?? FALLBACK_LOT_SIZE;
 
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [params, setParams] = useState<Record<string, number>>({});
@@ -55,6 +68,17 @@ export default function StrategyBuilder() {
   const [orderResult, setOrderResult] = useState<{ success: boolean; message: string } | null>(null);
 
   const selectedTemplate = selectedId ? getTemplate(selectedId) : undefined;
+
+  // Fetch the current lot size from the master list once on mount
+  useEffect(() => {
+    fetch(`/api/lotsize?symbol=${UNDERLYING}`)
+      .then((r) => r.json())
+      .then((json) => {
+        const lot = Number(json?.lot_size);
+        if (Number.isFinite(lot) && lot > 0) setLotSize(lot);
+      })
+      .catch(() => {});
+  }, []);
 
   // Fetch expiries once on mount
   useEffect(() => {
@@ -103,9 +127,9 @@ export default function StrategyBuilder() {
       return;
     }
     setResolvedLegs(legs);
-    const payoffStats = computePayoffStats(legs, spot, LOT_SIZE);
+    const payoffStats = computePayoffStats(legs, spot, effectiveLotSize);
     setStats(payoffStats);
-    setCurve(buildPayoffCurve(legs, spot, LOT_SIZE));
+    setCurve(buildPayoffCurve(legs, spot, effectiveLotSize));
     setTargetBreakevens(null); // recomputed lazily below when breakevenMode === 'target'
 
     setMarginLoading(true);
@@ -122,16 +146,16 @@ export default function StrategyBuilder() {
       .then((json) => setMargin(json?.success ? json.data : null))
       .catch(() => setMargin(null))
       .finally(() => setMarginLoading(false));
-  }, [selectedTemplate, params, lots, spot, chainOc, selectedExpiry]);
+  }, [selectedTemplate, params, lots, spot, chainOc, selectedExpiry, effectiveLotSize]);
 
   // Recompute target breakevens on demand when the toggle is switched to 'target'
   useEffect(() => {
     if (breakevenMode !== 'target' || !resolvedLegs || targetBreakevens !== null) return;
     const expiryDate = new Date(selectedExpiry);
     const daysToExpiry = Math.max(0, Math.round((expiryDate.getTime() - Date.now()) / 86_400_000));
-    const targetCurve = buildTargetPayoffCurve(resolvedLegs, spot, LOT_SIZE, daysToExpiry);
+    const targetCurve = buildTargetPayoffCurve(resolvedLegs, spot, effectiveLotSize, daysToExpiry);
     setTargetBreakevens(findBreakevens(targetCurve));
-  }, [breakevenMode, resolvedLegs, targetBreakevens, selectedExpiry, spot]);
+  }, [breakevenMode, resolvedLegs, targetBreakevens, selectedExpiry, spot, effectiveLotSize]);
 
   const handleSave = useCallback(() => {
     if (!selectedTemplate || !resolvedLegs || !stats || saving) return;
@@ -144,7 +168,7 @@ export default function StrategyBuilder() {
       expiry: selectedExpiry,
       mode: 'positional',
       lots: Math.max(1, lots),
-      lot_size: LOT_SIZE,
+      lot_size: effectiveLotSize,
       params,
       entry_spot: spot,
       entry_net_premium: stats.netPremium,
@@ -173,7 +197,7 @@ export default function StrategyBuilder() {
       .finally(() => {
         setSaving(false);
       });
-  }, [selectedTemplate, resolvedLegs, stats, selectedExpiry, lots, params, spot, saving]);
+  }, [selectedTemplate, resolvedLegs, stats, selectedExpiry, lots, params, spot, saving, effectiveLotSize]);
 
   const handleEnterTrade = useCallback(() => {
     if (!resolvedLegs) return;
@@ -196,6 +220,7 @@ export default function StrategyBuilder() {
           status: 'active',
           isDemo: true,
           mode: mode,
+          lotSize: effectiveLotSize,
           createdAt: new Date().toISOString(),
           legs: resolvedLegs.map((l) => ({
             strike: l.strike,
@@ -223,9 +248,16 @@ export default function StrategyBuilder() {
       return;
     }
 
+    // Guard: never place live orders with the fallback lot size
+    if (lotSize === null) {
+      setOrderResult({ success: false, message: 'Cannot enter trade — lot size not loaded yet. Wait a moment and retry.' });
+      setEntering(false);
+      return;
+    }
+
     const legsPayload = resolvedLegs.map((l) => ({
       securityId: l.securityId,
-      quantity: l.qtyLots * LOT_SIZE,
+      quantity: l.qtyLots * lotSize,
       side: l.side,
     }));
 
@@ -264,6 +296,7 @@ export default function StrategyBuilder() {
               status: 'active',
               isDemo: false,
               mode: 'positional',
+              lotSize,
               orderIds: ids,
               createdAt: new Date().toISOString(),
               legs: resolvedLegs.map((l) => ({
@@ -291,16 +324,23 @@ export default function StrategyBuilder() {
       .finally(() => {
         setEntering(false);
       });
-  }, [resolvedLegs, mode, stats, selectedTemplate, selectedExpiry, lots, params, spot, target, stoploss, tradingType]);
+  }, [resolvedLegs, mode, stats, selectedTemplate, selectedExpiry, lots, params, spot, target, stoploss, tradingType, lotSize, effectiveLotSize]);
 
   const handleExitTrade = useCallback(() => {
     if (!resolvedLegs) return;
     setExiting(true);
     setOrderResult(null);
 
+    // Guard: never place live orders with the fallback lot size
+    if (lotSize === null) {
+      setOrderResult({ success: false, message: 'Cannot exit trade — lot size not loaded yet. Wait a moment and retry.' });
+      setExiting(false);
+      return;
+    }
+
     const legsPayload = resolvedLegs.map((l) => ({
       securityId: l.securityId,
-      quantity: l.qtyLots * LOT_SIZE,
+      quantity: l.qtyLots * lotSize,
       side: l.side === 'BUY' ? 'SELL' : 'BUY',
     }));
 
@@ -332,7 +372,7 @@ export default function StrategyBuilder() {
       .finally(() => {
         setExiting(false);
       });
-  }, [resolvedLegs, mode]);
+  }, [resolvedLegs, mode, lotSize]);
 
   const handleUpdateLegLots = useCallback((index: number, delta: number) => {
     if (!resolvedLegs) return;
@@ -340,9 +380,9 @@ export default function StrategyBuilder() {
     const newLots = Math.max(1, updated[index].qtyLots + delta);
     updated[index] = { ...updated[index], qtyLots: newLots };
     setResolvedLegs(updated);
-    const payoffStats = computePayoffStats(updated, spot, LOT_SIZE);
+    const payoffStats = computePayoffStats(updated, spot, effectiveLotSize);
     setStats(payoffStats);
-    setCurve(buildPayoffCurve(updated, spot, LOT_SIZE));
+    setCurve(buildPayoffCurve(updated, spot, effectiveLotSize));
     setTargetBreakevens(null);
     setMarginLoading(true);
     fetch('/api/options/margin', {
@@ -358,7 +398,7 @@ export default function StrategyBuilder() {
       .then((json) => setMargin(json?.success ? json.data : null))
       .catch(() => setMargin(null))
       .finally(() => setMarginLoading(false));
-  }, [resolvedLegs, spot, selectedExpiry]);
+  }, [resolvedLegs, spot, selectedExpiry, effectiveLotSize]);
 
   const handleUpdateLegStrike = useCallback((index: number, newStrike: number) => {
     if (!resolvedLegs) return;
@@ -383,10 +423,10 @@ export default function StrategyBuilder() {
     };
     
     setResolvedLegs(updated);
-    
-    const payoffStats = computePayoffStats(updated, spot, LOT_SIZE);
+
+    const payoffStats = computePayoffStats(updated, spot, effectiveLotSize);
     setStats(payoffStats);
-    setCurve(buildPayoffCurve(updated, spot, LOT_SIZE));
+    setCurve(buildPayoffCurve(updated, spot, effectiveLotSize));
     setTargetBreakevens(null);
     
     setMarginLoading(true);
@@ -403,39 +443,43 @@ export default function StrategyBuilder() {
       .then((json) => setMargin(json?.success ? json.data : null))
       .catch(() => setMargin(null))
       .finally(() => setMarginLoading(false));
-  }, [resolvedLegs, chainOc, spot, selectedExpiry]);
+  }, [resolvedLegs, chainOc, spot, selectedExpiry, effectiveLotSize]);
 
   const displayedCurve = useMemo(() => curve, [curve]);
 
   return (
-    <div className="min-h-screen bg-zinc-900 text-zinc-300">
+    <div className="min-h-screen text-zinc-300">
       <NavBar />
 
-      <div className="sticky top-0 z-30 bg-zinc-900 border-b border-zinc-800 px-4 py-3">
+      <div className="sticky top-0 z-30 border-b border-zinc-800 bg-zinc-950/80 px-4 py-3 backdrop-blur-md">
         <div className="max-w-screen-xl mx-auto flex flex-wrap items-center gap-3">
-          <h1 className="text-sm font-bold text-white mr-2">Strategy Builder</h1>
-          <span className="text-xs font-mono bg-zinc-800 text-zinc-400 px-2 py-0.5 rounded">NIFTY</span>
-          <span className="text-xs font-mono bg-zinc-800 text-emerald-400 px-2 py-0.5 rounded">Spot: {spot.toFixed(1)}</span>
+          <h1 className="mr-2 text-sm font-bold text-white">Strategy Builder</h1>
+          <Badge variant="outline" className="border-zinc-700 bg-zinc-900 font-mono text-zinc-300">NIFTY</Badge>
+          <Badge variant="outline" className="border-emerald-500/30 bg-emerald-500/10 font-mono tabular-nums text-emerald-400">
+            SPOT {spot > 0 ? spot.toFixed(1) : '—'}
+          </Badge>
+          <Badge variant="outline" className="border-zinc-700 bg-zinc-900 font-mono tabular-nums text-zinc-400">
+            LOT {lotSize ?? '…'}
+          </Badge>
 
-          <div className="ml-auto flex rounded-md overflow-hidden border border-zinc-700 text-xs">
-            {(['builder', 'pct_strangle', 'saved', 'positions'] as const).map((t) => (
-              <button
-                key={t}
-                onClick={() => setActiveTab(t)}
-                className={`px-3 py-1 font-medium capitalize ${
-                  activeTab === t ? 'bg-sky-600 text-white' : 'bg-zinc-800 text-zinc-400 hover:text-zinc-200'
-                }`}
-              >
-                {t === 'builder' ? 'Builder' : t === 'pct_strangle' ? '% Strangle' : t === 'saved' ? 'Saved Strategies' : 'Positions'}
-              </button>
-            ))}
-          </div>
+          <Tabs
+            value={activeTab}
+            onValueChange={(v) => setActiveTab(v as typeof activeTab)}
+            className="ml-auto"
+          >
+            <TabsList className="bg-zinc-900">
+              <TabsTrigger value="builder">Builder</TabsTrigger>
+              <TabsTrigger value="pct_strangle">% Strangle</TabsTrigger>
+              <TabsTrigger value="saved">Saved Strategies</TabsTrigger>
+              <TabsTrigger value="positions">Positions</TabsTrigger>
+            </TabsList>
+          </Tabs>
         </div>
       </div>
 
       <div className="max-w-screen-xl mx-auto px-4 py-6 space-y-6">
         {activeTab === 'positions' ? (
-          <PositionalTradesTab />
+          <PositionalTradesTab lotSize={lotSize} />
         ) : activeTab === 'saved' ? (
           <SavedStrategiesTab />
         ) : activeTab === 'pct_strangle' ? (
@@ -444,6 +488,7 @@ export default function StrategyBuilder() {
             chainOc={chainOc}
             expiries={expiries}
             selectedExpiry={selectedExpiry}
+            lotSize={lotSize}
           />
         ) : (
           <>
@@ -482,119 +527,154 @@ export default function StrategyBuilder() {
             )}
 
             {missingStrikes.length > 0 && (
-              <div className="bg-rose-950 border border-rose-800 text-rose-300 text-xs rounded-lg px-4 py-2.5">
-                Chain data unavailable for strike(s): {missingStrikes.join(', ')}. Try a different expiry or offsets.
-              </div>
+              <Alert className="border-rose-800/60 bg-rose-950/60 text-rose-300">
+                <AlertTriangle />
+                <AlertTitle className="text-xs font-semibold text-rose-300">
+                  Chain data unavailable for strike(s): {missingStrikes.join(', ')}. Try a different expiry or offsets.
+                </AlertTitle>
+              </Alert>
             )}
 
             {orderResult && (
-              <div className={`border rounded-lg px-4 py-2.5 text-xs font-semibold ${
-                orderResult.success
-                  ? 'bg-emerald-950/80 border-emerald-800 text-emerald-300'
-                  : 'bg-rose-950/80 border-rose-800 text-rose-300'
-              }`}>
-                {orderResult.message}
-              </div>
+              <Alert
+                className={cn(
+                  orderResult.success
+                    ? 'border-emerald-800/60 bg-emerald-950/60 text-emerald-300'
+                    : 'border-rose-800/60 bg-rose-950/60 text-rose-300',
+                )}
+              >
+                {orderResult.success ? <CheckIcon /> : <AlertTriangle />}
+                <AlertTitle className={cn('text-xs font-semibold', orderResult.success ? 'text-emerald-300' : 'text-rose-300')}>
+                  {orderResult.message}
+                </AlertTitle>
+              </Alert>
             )}
 
             {saveResult && (
-              <div className={`border rounded-lg px-4 py-2.5 text-xs font-semibold ${
-                saveResult.success
-                  ? 'bg-sky-950/80 border-sky-800 text-sky-300'
-                  : 'bg-rose-950/80 border-rose-800 text-rose-300'
-              }`}>
-                {saveResult.message}
-              </div>
+              <Alert
+                className={cn(
+                  saveResult.success
+                    ? 'border-sky-800/60 bg-sky-950/60 text-sky-300'
+                    : 'border-rose-800/60 bg-rose-950/60 text-rose-300',
+                )}
+              >
+                {saveResult.success ? <CheckIcon /> : <AlertTriangle />}
+                <AlertTitle className={cn('text-xs font-semibold', saveResult.success ? 'text-sky-300' : 'text-rose-300')}>
+                  {saveResult.message}
+                </AlertTitle>
+              </Alert>
             )}
 
             {resolvedLegs && resolvedLegs.length > 0 && (
-              <div className="bg-zinc-900/60 border border-zinc-800 rounded-2xl p-5 space-y-4">
-                <h3 className="text-sm font-bold text-white uppercase tracking-wider border-b border-zinc-800 pb-2">Strategy Legs</h3>
-                <div className="overflow-x-auto">
-                  <table className="w-full text-xs border-collapse">
-                    <thead>
-                      <tr className="border-b border-zinc-800 text-zinc-400 font-semibold">
-                        <th className="px-3 py-2 text-left">B/S</th>
-                        <th className="px-3 py-2 text-left">Expiry</th>
-                        <th className="px-3 py-2 text-center w-40">Strike</th>
-                        <th className="px-3 py-2 text-left">Type</th>
-                        <th className="px-3 py-2 text-left">Price (LTP)</th>
-                        <th className="px-3 py-2 text-left">Lots</th>
-                      </tr>
-                    </thead>
-                    <tbody className="divide-y divide-zinc-800/40">
-                      {resolvedLegs.map((leg, idx) => {
-                        const sideColor = leg.side === 'BUY' ? 'text-sky-400 bg-sky-500/10 border border-sky-500/20' : 'text-rose-400 bg-rose-500/10 border border-rose-500/20';
-                        return (
-                          <tr key={idx} className="hover:bg-zinc-850/50 transition-colors">
-                            <td className="px-3 py-3">
-                              <span className={`inline-flex px-1.5 py-0.5 rounded text-[10px] font-bold ${sideColor}`}>
-                                {leg.side === 'BUY' ? 'BUY' : 'SELL'}
-                              </span>
-                            </td>
-                            <td className="px-3 py-3 text-zinc-300 font-mono">
-                              {selectedExpiry}
-                            </td>
-                            <td className="px-3 py-3">
-                              <div className="flex items-center justify-center gap-2">
-                                <button
-                                  onClick={() => handleUpdateLegStrike(idx, leg.strike - 50)}
-                                  className="w-6 h-6 flex items-center justify-center bg-zinc-800 hover:bg-zinc-700 active:bg-zinc-650 border border-zinc-700 rounded text-zinc-300 font-semibold"
-                                >
-                                  -
-                                </button>
-                                <span className="font-mono font-bold text-zinc-100 w-16 text-center">{leg.strike}</span>
-                                <button
-                                  onClick={() => handleUpdateLegStrike(idx, leg.strike + 50)}
-                                  className="w-6 h-6 flex items-center justify-center bg-zinc-800 hover:bg-zinc-700 active:bg-zinc-650 border border-zinc-700 rounded text-zinc-300 font-semibold"
-                                >
-                                  +
-                                </button>
-                              </div>
-                            </td>
-                            <td className="px-3 py-3">
-                              <span className={`font-semibold font-mono ${leg.type === 'CE' ? 'text-emerald-400' : 'text-rose-400'}`}>
-                                {leg.type}
-                              </span>
-                            </td>
-                            <td className="px-3 py-3 text-zinc-300 font-mono">
-                              ₹{leg.price.toFixed(1)}
-                            </td>
-                            <td className="px-3 py-3">
-                              <div className="flex items-center gap-2">
-                                <button
-                                  onClick={() => handleUpdateLegLots(idx, -1)}
-                                  className="w-6 h-6 flex items-center justify-center bg-zinc-800 hover:bg-zinc-700 border border-zinc-700 rounded text-zinc-300 font-semibold"
-                                >
-                                  -
-                                </button>
-                                <span className="font-mono font-bold text-zinc-100 w-6 text-center">{leg.qtyLots}</span>
-                                <button
-                                  onClick={() => handleUpdateLegLots(idx, 1)}
-                                  className="w-6 h-6 flex items-center justify-center bg-zinc-800 hover:bg-zinc-700 border border-zinc-700 rounded text-zinc-300 font-semibold"
-                                >
-                                  +
-                                </button>
-                              </div>
-                            </td>
-                          </tr>
-                        );
-                      })}
-                    </tbody>
-                  </table>
-                </div>
-              </div>
+              <Card className="bg-card/80">
+                <CardHeader className="border-b [.border-b]:pb-3">
+                  <CardTitle className="text-xs font-bold uppercase tracking-wider text-white">Strategy legs</CardTitle>
+                </CardHeader>
+                <CardContent className="px-0">
+                  <Table className="text-xs">
+                    <TableHeader>
+                      <TableRow className="bg-zinc-800 hover:bg-zinc-800">
+                        <TableHead className="px-4 text-xs font-bold text-white">B/S</TableHead>
+                        <TableHead className="text-xs font-bold text-white">Expiry</TableHead>
+                        <TableHead className="w-40 text-center text-xs font-bold text-white">Strike</TableHead>
+                        <TableHead className="text-xs font-bold text-white">Type</TableHead>
+                        <TableHead className="text-xs font-bold text-white">LTP</TableHead>
+                        <TableHead className="text-xs font-bold text-white">IV</TableHead>
+                        <TableHead className="text-xs font-bold text-white">Delta</TableHead>
+                        <TableHead className="text-xs font-bold text-white">Lots</TableHead>
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      {resolvedLegs.map((leg, idx) => (
+                        <TableRow key={idx} className="border-zinc-800/60">
+                          <TableCell className="px-4 py-3">
+                            <Badge
+                              variant="outline"
+                              className={cn(
+                                'rounded-md text-[10px] font-bold',
+                                leg.side === 'BUY'
+                                  ? 'border-sky-500/30 bg-sky-500/10 text-sky-400'
+                                  : 'border-rose-500/30 bg-rose-500/10 text-rose-400',
+                              )}
+                            >
+                              {leg.side}
+                            </Badge>
+                          </TableCell>
+                          <TableCell className="py-3 font-mono text-zinc-300">{selectedExpiry}</TableCell>
+                          <TableCell className="py-3">
+                            <div className="flex items-center justify-center gap-1.5">
+                              <Button
+                                variant="outline"
+                                size="icon-xs"
+                                aria-label={`Decrease ${leg.type} strike`}
+                                onClick={() => handleUpdateLegStrike(idx, leg.strike - 50)}
+                              >
+                                <Minus />
+                              </Button>
+                              <span className="w-16 text-center font-mono font-bold tabular-nums text-zinc-100">{leg.strike}</span>
+                              <Button
+                                variant="outline"
+                                size="icon-xs"
+                                aria-label={`Increase ${leg.type} strike`}
+                                onClick={() => handleUpdateLegStrike(idx, leg.strike + 50)}
+                              >
+                                <Plus />
+                              </Button>
+                            </div>
+                          </TableCell>
+                          <TableCell className={cn('py-3 font-mono font-semibold', leg.type === 'CE' ? 'text-emerald-400' : 'text-rose-400')}>
+                            {leg.type}
+                          </TableCell>
+                          <TableCell className="py-3 font-mono tabular-nums text-zinc-200">₹{leg.price.toFixed(1)}</TableCell>
+                          <TableCell className="py-3 font-mono tabular-nums text-zinc-400">
+                            {leg.iv !== null ? `${(leg.iv * 100).toFixed(1)}%` : '—'}
+                          </TableCell>
+                          <TableCell className="py-3 font-mono tabular-nums text-zinc-400">
+                            {leg.delta !== null ? leg.delta.toFixed(2) : '—'}
+                          </TableCell>
+                          <TableCell className="py-3">
+                            <div className="flex items-center gap-1.5">
+                              <Button
+                                variant="outline"
+                                size="icon-xs"
+                                aria-label={`Decrease ${leg.type} lots`}
+                                onClick={() => handleUpdateLegLots(idx, -1)}
+                              >
+                                <Minus />
+                              </Button>
+                              <span className="w-6 text-center font-mono font-bold tabular-nums text-zinc-100">{leg.qtyLots}</span>
+                              <Button
+                                variant="outline"
+                                size="icon-xs"
+                                aria-label={`Increase ${leg.type} lots`}
+                                onClick={() => handleUpdateLegLots(idx, 1)}
+                              >
+                                <Plus />
+                              </Button>
+                            </div>
+                          </TableCell>
+                        </TableRow>
+                      ))}
+                    </TableBody>
+                  </Table>
+                </CardContent>
+              </Card>
             )}
 
             {stats && (
               <>
-                <div className="bg-zinc-900/60 border border-zinc-800 rounded-2xl p-4">
-                  <PayoffDiagram
-                    curve={displayedCurve}
-                    currentSpot={spot}
-                    breakevens={breakevenMode === 'expiry' ? stats.breakevensExpiry : (targetBreakevens ?? [])}
-                  />
-                </div>
+                <Card className="bg-card/80">
+                  <CardHeader className="border-b [.border-b]:pb-3">
+                    <CardTitle className="text-xs font-bold uppercase tracking-wider text-white">Payoff at expiry</CardTitle>
+                  </CardHeader>
+                  <CardContent>
+                    <PayoffDiagram
+                      curve={displayedCurve}
+                      currentSpot={spot}
+                      breakevens={breakevenMode === 'expiry' ? stats.breakevensExpiry : (targetBreakevens ?? [])}
+                    />
+                  </CardContent>
+                </Card>
                 <StrategySummaryPanel
                   stats={stats}
                   targetBreakevens={targetBreakevens}

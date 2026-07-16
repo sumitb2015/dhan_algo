@@ -8,8 +8,23 @@ import {
 } from '@/lib/optionsStrategy';
 import StrategySummaryPanel from '@/components/strategy/StrategySummaryPanel';
 import PayoffDiagram from '@/components/strategy/PayoffDiagram';
+import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
+import { Badge } from '@/components/ui/badge';
+import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
+import { Label } from '@/components/ui/label';
+import { Alert, AlertTitle } from '@/components/ui/alert';
+import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group';
+import {
+  Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
+} from '@/components/ui/select';
+import {
+  Table, TableBody, TableCell, TableHead, TableHeader, TableRow,
+} from '@/components/ui/table';
+import { AlertTriangle, CheckIcon, LogIn, LogOut, Minus, Plus, Save, Zap } from 'lucide-react';
+import { cn } from '@/lib/utils';
 
-const LOT_SIZE = 75;
+const FALLBACK_LOT_SIZE = 75;
 const UNDERLYING = 'NIFTY';
 
 export interface PctStrangleTabProps {
@@ -17,6 +32,7 @@ export interface PctStrangleTabProps {
   chainOc: ChainOc;
   expiries: { date: string; kind: 'weekly' | 'monthly' }[];
   selectedExpiry: string;
+  lotSize: number | null; // null until fetched — live orders are blocked until known
 }
 
 function resolveToLeg(
@@ -46,7 +62,8 @@ function resolveToLeg(
   };
 }
 
-export default function PctStrangleTab({ spot, chainOc, expiries, selectedExpiry }: PctStrangleTabProps) {
+export default function PctStrangleTab({ spot, chainOc, expiries, selectedExpiry, lotSize }: PctStrangleTabProps) {
+  const effectiveLotSize = lotSize ?? FALLBACK_LOT_SIZE;
   const [cePct, setCePct] = useState(3.0);
   const [pePct, setPePct] = useState(2.0);
   const [lots, setLots] = useState(1);
@@ -115,13 +132,13 @@ export default function PctStrangleTab({ spot, chainOc, expiries, selectedExpiry
   );
 
   const stats = useMemo(
-    () => (resolvedLegs.length === 2 ? computePayoffStats(resolvedLegs, spot, LOT_SIZE) : null),
-    [resolvedLegs, spot],
+    () => (resolvedLegs.length === 2 ? computePayoffStats(resolvedLegs, spot, effectiveLotSize) : null),
+    [resolvedLegs, spot, effectiveLotSize],
   );
 
   const curve = useMemo(
-    () => (resolvedLegs.length === 2 ? buildPayoffCurve(resolvedLegs, spot, LOT_SIZE) : []),
-    [resolvedLegs, spot],
+    () => (resolvedLegs.length === 2 ? buildPayoffCurve(resolvedLegs, spot, effectiveLotSize) : []),
+    [resolvedLegs, spot, effectiveLotSize],
   );
 
   const breakevens = useMemo(() => findBreakevens(curve), [curve]);
@@ -203,9 +220,16 @@ export default function PctStrangleTab({ spot, chainOc, expiries, selectedExpiry
       return;
     }
 
+    // Guard: never place live orders with the fallback lot size
+    if (lotSize === null) {
+      setOrderResult({ success: false, message: 'Cannot enter — lot size not loaded yet. Wait a moment and retry.' });
+      setEntering(false);
+      return;
+    }
+
     const legsPayload = resolvedLegs.map(l => ({
       securityId: l.securityId,
-      quantity: l.qtyLots * LOT_SIZE,
+      quantity: l.qtyLots * lotSize,
       side: l.side,
     }));
 
@@ -225,7 +249,7 @@ export default function PctStrangleTab({ spot, chainOc, expiries, selectedExpiry
       })
       .catch((err: unknown) => setOrderResult({ success: false, message: String(err) }))
       .finally(() => setEntering(false));
-  }, [canEnter, tradingType, resolvedLegs, mode]);
+  }, [canEnter, tradingType, resolvedLegs, mode, lotSize]);
 
   const handleExitTrade = useCallback(() => {
     if (!canExit) return;
@@ -240,9 +264,16 @@ export default function PctStrangleTab({ spot, chainOc, expiries, selectedExpiry
       return;
     }
 
+    // Guard: never place live orders with the fallback lot size
+    if (lotSize === null) {
+      setOrderResult({ success: false, message: 'Cannot exit — lot size not loaded yet. Wait a moment and retry.' });
+      setExiting(false);
+      return;
+    }
+
     const legsPayload = resolvedLegs.map(l => ({
       securityId: l.securityId,
-      quantity: l.qtyLots * LOT_SIZE,
+      quantity: l.qtyLots * lotSize,
       side: (l.side === 'BUY' ? 'SELL' : 'BUY') as 'BUY' | 'SELL',
     }));
 
@@ -262,7 +293,7 @@ export default function PctStrangleTab({ spot, chainOc, expiries, selectedExpiry
       })
       .catch((err: unknown) => setOrderResult({ success: false, message: String(err) }))
       .finally(() => setExiting(false));
-  }, [canExit, tradingType, resolvedLegs, mode]);
+  }, [canExit, tradingType, resolvedLegs, mode, lotSize]);
 
   const handleSave = useCallback(() => {
     if (!canSave || !stats) return;
@@ -276,7 +307,7 @@ export default function PctStrangleTab({ spot, chainOc, expiries, selectedExpiry
       expiry: pctExpiry,
       mode: 'positional',
       lots,
-      lot_size: LOT_SIZE,
+      lot_size: effectiveLotSize,
       params: { cePct, pePct },
       entry_spot: spot,
       entry_net_premium: stats.netPremium,
@@ -307,7 +338,7 @@ export default function PctStrangleTab({ spot, chainOc, expiries, selectedExpiry
       })
       .catch((err: unknown) => setSaveResult({ success: false, message: String(err) }))
       .finally(() => setSaving(false));
-  }, [canSave, stats, cePct, pePct, pctExpiry, lots, spot, resolvedLegs]);
+  }, [canSave, stats, cePct, pePct, pctExpiry, lots, spot, resolvedLegs, effectiveLotSize]);
 
   const expiry = pctExpiry || expiries[0]?.date || '';
 
@@ -315,177 +346,215 @@ export default function PctStrangleTab({ spot, chainOc, expiries, selectedExpiry
     <div className="space-y-6">
 
       {/* Controls row */}
-      <div className="bg-zinc-900/60 border border-zinc-800 rounded-2xl p-4">
-        <div className="flex flex-wrap items-end gap-4">
-
-          <div className="flex flex-col gap-1">
-            <label className="text-xs text-zinc-500 uppercase tracking-wide">Call OTM %</label>
-            <input
+      <Card
+        className={cn(
+          'bg-card/80 backdrop-blur-sm transition-shadow',
+          tradingType === 'live' && 'ring-amber-500/40 shadow-[0_0_24px_-8px_rgba(245,158,11,0.35)]',
+        )}
+      >
+        <CardContent className="flex flex-wrap items-end gap-x-6 gap-y-3">
+          <div className="flex flex-col gap-1.5">
+            <Label htmlFor="ce-pct" className="text-[11px] font-semibold uppercase tracking-wider text-zinc-500">Call OTM %</Label>
+            <Input
+              id="ce-pct"
               type="number" step="0.1" min="0.1" max="20"
               value={cePct}
               onChange={e => handleCePctChange(Math.max(0.1, parseFloat(e.target.value) || 0.1))}
-              className="w-24 bg-zinc-800 border border-zinc-700 rounded-lg px-2 py-1.5 text-sm font-mono text-emerald-400 text-center focus:outline-none focus:border-emerald-500"
+              className="h-8 w-24 text-center font-mono tabular-nums text-emerald-400"
             />
           </div>
 
-          <div className="flex flex-col gap-1">
-            <label className="text-xs text-zinc-500 uppercase tracking-wide">Put OTM %</label>
-            <input
+          <div className="flex flex-col gap-1.5">
+            <Label htmlFor="pe-pct" className="text-[11px] font-semibold uppercase tracking-wider text-zinc-500">Put OTM %</Label>
+            <Input
+              id="pe-pct"
               type="number" step="0.1" min="0.1" max="20"
               value={pePct}
               onChange={e => handlePePctChange(Math.max(0.1, parseFloat(e.target.value) || 0.1))}
-              className="w-24 bg-zinc-800 border border-zinc-700 rounded-lg px-2 py-1.5 text-sm font-mono text-rose-400 text-center focus:outline-none focus:border-rose-500"
+              className="h-8 w-24 text-center font-mono tabular-nums text-rose-400"
             />
           </div>
 
-          <div className="flex flex-col gap-1">
-            <label className="text-xs text-zinc-500 uppercase tracking-wide">Expiry</label>
-            <select
+          <div className="flex flex-col gap-1.5">
+            <Label className="text-[11px] font-semibold uppercase tracking-wider text-zinc-500">Expiry</Label>
+            <Select
               value={expiry}
-              onChange={e => handleExpiryChange(e.target.value)}
-              className="bg-zinc-800 border border-zinc-700 rounded-lg px-2 py-1.5 text-sm font-mono text-zinc-200 focus:outline-none focus:border-sky-500"
+              onValueChange={(v) => { if (typeof v === 'string' && v) handleExpiryChange(v); }}
             >
-              {expiries.map(ex => (
-                <option key={ex.date} value={ex.date}>
-                  {ex.date} ({ex.kind})
-                </option>
-              ))}
-            </select>
+              <SelectTrigger size="sm" className="min-w-44 font-mono">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {expiries.map(ex => (
+                  <SelectItem key={ex.date} value={ex.date} className="font-mono">
+                    {ex.date} · {ex.kind}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
           </div>
 
-          <div className="flex flex-col gap-1">
-            <label className="text-xs text-zinc-500 uppercase tracking-wide">Lots</label>
-            <div className="flex items-center gap-1">
-              <button
-                onClick={() => setLots(l => Math.max(1, l - 1))}
-                className="w-7 h-7 flex items-center justify-center bg-zinc-800 border border-zinc-700 rounded text-zinc-300 hover:bg-zinc-700 font-bold"
-              >−</button>
-              <span className="w-8 text-center font-mono text-sm text-white">{lots}</span>
-              <button
-                onClick={() => setLots(l => l + 1)}
-                className="w-7 h-7 flex items-center justify-center bg-zinc-800 border border-zinc-700 rounded text-zinc-300 hover:bg-zinc-700 font-bold"
-              >+</button>
+          <div className="flex flex-col gap-1.5">
+            <Label className="text-[11px] font-semibold uppercase tracking-wider text-zinc-500">Lots</Label>
+            <div className="flex items-center gap-1.5">
+              <Button variant="outline" size="icon-sm" aria-label="Decrease lots" onClick={() => setLots(l => Math.max(1, l - 1))}>
+                <Minus />
+              </Button>
+              <span className="w-8 text-center font-mono text-sm tabular-nums text-white">{lots}</span>
+              <Button variant="outline" size="icon-sm" aria-label="Increase lots" onClick={() => setLots(l => l + 1)}>
+                <Plus />
+              </Button>
             </div>
           </div>
 
-          <div className="flex flex-col gap-1">
-            <label className="text-xs text-zinc-500 uppercase tracking-wide">Mode</label>
-            <div className="flex rounded-md overflow-hidden border border-zinc-700 text-xs">
+          <div className="flex flex-col gap-1.5">
+            <Label className="text-[11px] font-semibold uppercase tracking-wider text-zinc-500">Mode</Label>
+            <ToggleGroup
+              value={[mode]}
+              onValueChange={(v: unknown[]) => {
+                const next = v[v.length - 1] as typeof mode | undefined;
+                if (next) setMode(next);
+              }}
+              variant="outline"
+              size="sm"
+              spacing={0}
+            >
               {(['intraday', 'positional'] as const).map(m => (
-                <button key={m} onClick={() => setMode(m)}
-                  className={`px-3 py-1.5 font-medium capitalize ${mode === m ? 'bg-sky-600 text-white' : 'bg-zinc-800 text-zinc-400 hover:text-zinc-200'}`}
-                >{m}</button>
+                <ToggleGroupItem key={m} value={m} className="capitalize aria-pressed:bg-sky-500/15 aria-pressed:text-sky-400">
+                  {m}
+                </ToggleGroupItem>
               ))}
-            </div>
+            </ToggleGroup>
           </div>
 
-          <div className="flex flex-col gap-1">
-            <label className="text-xs text-zinc-500 uppercase tracking-wide">Type</label>
-            <div className="flex rounded-md overflow-hidden border border-zinc-700 text-xs">
-              <button onClick={() => setTradingType('demo')}
-                className={`px-3 py-1.5 font-medium ${tradingType === 'demo' ? 'bg-sky-600 text-white' : 'bg-zinc-800 text-zinc-400 hover:text-zinc-200'}`}
-              >Demo</button>
-              <button onClick={() => setTradingType('live')}
-                className={`px-3 py-1.5 font-medium ${tradingType === 'live' ? 'bg-amber-600 text-white' : 'bg-zinc-800 text-zinc-400 hover:text-zinc-200'}`}
-              >Live</button>
-            </div>
+          <div className="flex flex-col gap-1.5">
+            <Label className="text-[11px] font-semibold uppercase tracking-wider text-zinc-500">Execution</Label>
+            <ToggleGroup
+              value={[tradingType]}
+              onValueChange={(v: unknown[]) => {
+                const next = v[v.length - 1] as typeof tradingType | undefined;
+                if (next) setTradingType(next);
+              }}
+              variant="outline"
+              size="sm"
+              spacing={0}
+            >
+              <ToggleGroupItem value="demo" className="aria-pressed:bg-sky-500/15 aria-pressed:text-sky-400">
+                Paper
+              </ToggleGroupItem>
+              <ToggleGroupItem value="live" className="aria-pressed:bg-amber-500/20 aria-pressed:text-amber-400">
+                <Zap data-icon="inline-start" /> Live
+              </ToggleGroupItem>
+            </ToggleGroup>
           </div>
-
-        </div>
-      </div>
+        </CardContent>
+      </Card>
 
       {/* Strike preview chips */}
       <div className="flex flex-wrap items-center gap-4">
-        <div className={`flex items-center gap-2 px-4 py-2.5 rounded-xl border text-sm font-semibold ${
-          celeg ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-300' : 'bg-rose-950 border-rose-800 text-rose-300'
-        }`}>
-          <span className="text-[10px] font-bold px-1.5 py-0.5 rounded bg-emerald-500/20 text-emerald-400">CE SELL</span>
+        <div className={cn(
+          'flex items-center gap-2.5 rounded-xl px-4 py-2.5 text-sm font-semibold ring-1',
+          celeg ? 'bg-emerald-500/10 ring-emerald-500/30 text-emerald-300' : 'bg-rose-950/60 ring-rose-800 text-rose-300',
+        )}>
+          <Badge variant="outline" className="rounded-md border-emerald-500/30 bg-emerald-500/15 text-[10px] font-bold text-emerald-400">CE SELL</Badge>
           {chainLoading
-            ? <span className="text-zinc-500 text-xs">loading…</span>
+            ? <span className="text-xs text-zinc-500">loading…</span>
             : celeg
-              ? <><span className="font-mono">{ceActualStrike}</span><span className="text-zinc-400 text-xs ml-1">(+{ceActualPct.toFixed(1)}%)</span></>
+              ? <><span className="font-mono tabular-nums">{ceActualStrike}</span><span className="text-xs text-zinc-400">(+{ceActualPct.toFixed(1)}%)</span></>
               : <span className="text-xs">Strike {ceActualStrike} not in chain</span>
           }
         </div>
 
-        <div className={`flex items-center gap-2 px-4 py-2.5 rounded-xl border text-sm font-semibold ${
-          peleg ? 'bg-rose-500/10 border-rose-500/30 text-rose-300' : 'bg-rose-950 border-rose-800 text-rose-300'
-        }`}>
-          <span className="text-[10px] font-bold px-1.5 py-0.5 rounded bg-rose-500/20 text-rose-400">PE SELL</span>
+        <div className={cn(
+          'flex items-center gap-2.5 rounded-xl px-4 py-2.5 text-sm font-semibold ring-1',
+          peleg ? 'bg-rose-500/10 ring-rose-500/30 text-rose-300' : 'bg-rose-950/60 ring-rose-800 text-rose-300',
+        )}>
+          <Badge variant="outline" className="rounded-md border-rose-500/30 bg-rose-500/15 text-[10px] font-bold text-rose-400">PE SELL</Badge>
           {chainLoading
-            ? <span className="text-zinc-500 text-xs">loading…</span>
+            ? <span className="text-xs text-zinc-500">loading…</span>
             : peleg
-              ? <><span className="font-mono">{peActualStrike}</span><span className="text-zinc-400 text-xs ml-1">(−{peActualPct.toFixed(1)}%)</span></>
+              ? <><span className="font-mono tabular-nums">{peActualStrike}</span><span className="text-xs text-zinc-400">(−{peActualPct.toFixed(1)}%)</span></>
               : <span className="text-xs">Strike {peActualStrike} not in chain</span>
           }
         </div>
       </div>
 
       {resolvedLegs.length === 2 && resolvedLegs.some(l => l.securityId === null) && (
-        <div className="border rounded-lg px-4 py-2.5 text-xs font-semibold bg-amber-950/80 border-amber-800 text-amber-300">
-          One or more legs resolved without a security ID — chain data may be incomplete. Refresh or try a different expiry.
-        </div>
+        <Alert className="border-amber-800/60 bg-amber-950/60 text-amber-300">
+          <AlertTriangle />
+          <AlertTitle className="text-xs font-semibold text-amber-300">
+            One or more legs resolved without a security ID — chain data may be incomplete. Refresh or try a different expiry.
+          </AlertTitle>
+        </Alert>
       )}
 
       {/* Leg table */}
       {resolvedLegs.length > 0 && (
-        <div className="bg-zinc-900/60 border border-zinc-800 rounded-2xl p-5 space-y-4">
-          <h3 className="text-sm font-bold text-white uppercase tracking-wider border-b border-zinc-800 pb-2">Strategy Legs</h3>
-          <div className="overflow-x-auto">
-            <table className="w-full text-xs border-collapse">
-              <thead>
-                <tr className="border-b border-zinc-800 bg-zinc-800">
-                  <th className="px-3 py-2 text-left text-xs font-bold text-white">B/S</th>
-                  <th className="px-3 py-2 text-left text-xs font-bold text-white">Expiry</th>
-                  <th className="px-3 py-2 text-center w-40 text-xs font-bold text-white">Strike</th>
-                  <th className="px-3 py-2 text-left text-xs font-bold text-white">Type</th>
-                  <th className="px-3 py-2 text-left text-xs font-bold text-white">LTP</th>
-                  <th className="px-3 py-2 text-left text-xs font-bold text-white">IV</th>
-                  <th className="px-3 py-2 text-left text-xs font-bold text-white">Delta</th>
-                  <th className="px-3 py-2 text-left text-xs font-bold text-white">Lots</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-zinc-800/40">
+        <Card className="bg-card/80">
+          <CardHeader className="border-b [.border-b]:pb-3">
+            <CardTitle className="text-xs font-bold uppercase tracking-wider text-white">Strategy legs</CardTitle>
+          </CardHeader>
+          <CardContent className="px-0">
+            <Table className="text-xs">
+              <TableHeader>
+                <TableRow className="bg-zinc-800 hover:bg-zinc-800">
+                  <TableHead className="px-4 text-xs font-bold text-white">B/S</TableHead>
+                  <TableHead className="text-xs font-bold text-white">Expiry</TableHead>
+                  <TableHead className="w-40 text-center text-xs font-bold text-white">Strike</TableHead>
+                  <TableHead className="text-xs font-bold text-white">Type</TableHead>
+                  <TableHead className="text-xs font-bold text-white">LTP</TableHead>
+                  <TableHead className="text-xs font-bold text-white">IV</TableHead>
+                  <TableHead className="text-xs font-bold text-white">Delta</TableHead>
+                  <TableHead className="text-xs font-bold text-white">Lots</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
                 {resolvedLegs.map((leg, idx) => (
-                  <tr key={idx} className="hover:bg-zinc-800/30 transition-colors">
-                    <td className="px-3 py-3">
-                      <span className="inline-flex px-1.5 py-0.5 rounded text-[10px] font-bold text-rose-400 bg-rose-500/10 border border-rose-500/20">
+                  <TableRow key={idx} className="border-zinc-800/60">
+                    <TableCell className="px-4 py-3">
+                      <Badge variant="outline" className="rounded-md border-rose-500/30 bg-rose-500/10 text-[10px] font-bold text-rose-400">
                         SELL
-                      </span>
-                    </td>
-                    <td className="px-3 py-3 text-zinc-300 font-mono">{expiry}</td>
-                    <td className="px-3 py-3">
-                      <div className="flex items-center justify-center gap-2">
-                        <button
+                      </Badge>
+                    </TableCell>
+                    <TableCell className="py-3 font-mono text-zinc-300">{expiry}</TableCell>
+                    <TableCell className="py-3">
+                      <div className="flex items-center justify-center gap-1.5">
+                        <Button
+                          variant="outline"
+                          size="icon-xs"
+                          aria-label={`Decrease ${leg.type} strike`}
                           onClick={() => handleNudgeStrike(leg.type, -1)}
-                          className="w-6 h-6 flex items-center justify-center bg-zinc-800 hover:bg-zinc-700 border border-zinc-700 rounded text-zinc-300 font-semibold"
-                        >−</button>
-                        <span className="font-mono font-bold text-zinc-100 w-16 text-center">{leg.strike}</span>
-                        <button
+                        >
+                          <Minus />
+                        </Button>
+                        <span className="w-16 text-center font-mono font-bold tabular-nums text-zinc-100">{leg.strike}</span>
+                        <Button
+                          variant="outline"
+                          size="icon-xs"
+                          aria-label={`Increase ${leg.type} strike`}
                           onClick={() => handleNudgeStrike(leg.type, 1)}
-                          className="w-6 h-6 flex items-center justify-center bg-zinc-800 hover:bg-zinc-700 border border-zinc-700 rounded text-zinc-300 font-semibold"
-                        >+</button>
+                        >
+                          <Plus />
+                        </Button>
                       </div>
-                    </td>
-                    <td className="px-3 py-3">
-                      <span className={`font-semibold font-mono ${leg.type === 'CE' ? 'text-emerald-400' : 'text-rose-400'}`}>
-                        {leg.type}
-                      </span>
-                    </td>
-                    <td className="px-3 py-3 font-mono text-zinc-200">₹{leg.price.toFixed(2)}</td>
-                    <td className="px-3 py-3 font-mono text-zinc-400">
+                    </TableCell>
+                    <TableCell className={cn('py-3 font-mono font-semibold', leg.type === 'CE' ? 'text-emerald-400' : 'text-rose-400')}>
+                      {leg.type}
+                    </TableCell>
+                    <TableCell className="py-3 font-mono tabular-nums text-zinc-200">₹{leg.price.toFixed(2)}</TableCell>
+                    <TableCell className="py-3 font-mono tabular-nums text-zinc-400">
                       {leg.iv !== null ? `${(leg.iv * 100).toFixed(1)}%` : '—'}
-                    </td>
-                    <td className="px-3 py-3 font-mono text-zinc-400">
+                    </TableCell>
+                    <TableCell className="py-3 font-mono tabular-nums text-zinc-400">
                       {leg.delta !== null ? leg.delta.toFixed(2) : '—'}
-                    </td>
-                    <td className="px-3 py-3 text-zinc-300">{leg.qtyLots}</td>
-                  </tr>
+                    </TableCell>
+                    <TableCell className="py-3 font-mono tabular-nums text-zinc-300">{leg.qtyLots}</TableCell>
+                  </TableRow>
                 ))}
-              </tbody>
-            </table>
-          </div>
-        </div>
+              </TableBody>
+            </Table>
+          </CardContent>
+        </Card>
       )}
 
       {/* Stats + payoff diagram */}
@@ -500,62 +569,73 @@ export default function PctStrangleTab({ spot, chainOc, expiries, selectedExpiry
             marginLoading={marginLoading}
             spot={spot}
           />
-          <PayoffDiagram
-            curve={curve}
-            currentSpot={spot}
-            breakevens={breakevens}
-          />
+          <Card className="bg-card/80">
+            <CardHeader className="border-b [.border-b]:pb-3">
+              <CardTitle className="text-xs font-bold uppercase tracking-wider text-white">Payoff at expiry</CardTitle>
+            </CardHeader>
+            <CardContent>
+              <PayoffDiagram
+                curve={curve}
+                currentSpot={spot}
+                breakevens={breakevens}
+              />
+            </CardContent>
+          </Card>
         </>
       )}
 
       {/* Action bar */}
       {resolvedLegs.length === 2 && (
-        <div className="flex flex-wrap items-center gap-3">
-          <button
+        <div className="flex flex-wrap items-center gap-2">
+          <Button
             onClick={handleEnterTrade}
             disabled={!canEnter}
-            className="px-5 py-2 rounded-lg text-sm font-semibold bg-emerald-600 hover:bg-emerald-500 disabled:opacity-40 disabled:cursor-not-allowed text-white transition-colors"
+            className="bg-emerald-600 text-white hover:bg-emerald-500"
           >
-            {entering ? 'Entering…' : 'Enter Trade'}
-          </button>
-          <button
-            onClick={handleExitTrade}
-            disabled={!canExit}
-            className="px-5 py-2 rounded-lg text-sm font-semibold bg-rose-700 hover:bg-rose-600 disabled:opacity-40 disabled:cursor-not-allowed text-white transition-colors"
-          >
-            {exiting ? 'Exiting…' : 'Exit Trade'}
-          </button>
-          <button
-            onClick={handleSave}
-            disabled={!canSave}
-            className="px-5 py-2 rounded-lg text-sm font-semibold bg-sky-700 hover:bg-sky-600 disabled:opacity-40 disabled:cursor-not-allowed text-white transition-colors"
-          >
-            {saving ? 'Saving…' : 'Save Strategy'}
-          </button>
+            <LogIn data-icon="inline-start" /> {entering ? 'Entering…' : 'Enter trade'}
+          </Button>
+          <Button variant="destructive" onClick={handleExitTrade} disabled={!canExit}>
+            <LogOut data-icon="inline-start" /> {exiting ? 'Exiting…' : 'Exit trade'}
+          </Button>
+          <Button variant="outline" onClick={handleSave} disabled={!canSave}>
+            <Save data-icon="inline-start" /> {saving ? 'Saving…' : 'Save strategy'}
+          </Button>
           {tradingType === 'live' && (
-            <span className="text-xs text-amber-400 font-semibold">⚡ LIVE MODE — real orders will be placed</span>
+            <span className="ms-auto inline-flex items-center gap-1.5 text-xs font-semibold text-amber-400">
+              <Zap className="size-3.5" /> Live — real orders will be placed
+            </span>
           )}
         </div>
       )}
 
       {/* Result banners */}
       {orderResult && (
-        <div className={`border rounded-lg px-4 py-2.5 text-xs font-semibold ${
-          orderResult.success
-            ? 'bg-emerald-950/80 border-emerald-800 text-emerald-300'
-            : 'bg-rose-950/80 border-rose-800 text-rose-300'
-        }`}>
-          {orderResult.message}
-        </div>
+        <Alert
+          className={cn(
+            orderResult.success
+              ? 'border-emerald-800/60 bg-emerald-950/60 text-emerald-300'
+              : 'border-rose-800/60 bg-rose-950/60 text-rose-300',
+          )}
+        >
+          {orderResult.success ? <CheckIcon /> : <AlertTriangle />}
+          <AlertTitle className={cn('text-xs font-semibold', orderResult.success ? 'text-emerald-300' : 'text-rose-300')}>
+            {orderResult.message}
+          </AlertTitle>
+        </Alert>
       )}
       {saveResult && (
-        <div className={`border rounded-lg px-4 py-2.5 text-xs font-semibold ${
-          saveResult.success
-            ? 'bg-sky-950/80 border-sky-800 text-sky-300'
-            : 'bg-rose-950/80 border-rose-800 text-rose-300'
-        }`}>
-          {saveResult.message}
-        </div>
+        <Alert
+          className={cn(
+            saveResult.success
+              ? 'border-sky-800/60 bg-sky-950/60 text-sky-300'
+              : 'border-rose-800/60 bg-rose-950/60 text-rose-300',
+          )}
+        >
+          {saveResult.success ? <CheckIcon /> : <AlertTriangle />}
+          <AlertTitle className={cn('text-xs font-semibold', saveResult.success ? 'text-sky-300' : 'text-rose-300')}>
+            {saveResult.message}
+          </AlertTitle>
+        </Alert>
       )}
 
     </div>
