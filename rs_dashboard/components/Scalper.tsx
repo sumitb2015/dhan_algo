@@ -4,6 +4,7 @@ import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react'
 import NavBar from './NavBar';
 import { Zap, RefreshCw, Shield, ShieldOff, ChevronDown, ChevronUp } from 'lucide-react';
 import { useLiveOptionsWS } from '@/lib/useLiveOptionsWS';
+import { useProfitLock, ProfitLockControls } from './ProfitLock';
 
 // ─── Types ────────────────────────────────────────────────────────
 
@@ -530,6 +531,26 @@ export default function Scalper() {
     }
   }, [addToast, fetchTabData]);
 
+  // ─── Client-side profit lock (total P&L floor) ────────────────────
+
+  const exitAllForLock = useCallback(async (reason: string) => {
+    const open = positionsRef.current.filter(p => Number(p.netQty) !== 0);
+    await Promise.allSettled(open.map(pos => closePosition(pos, reason)));
+    setTimeout(fetchTabData, 1000);
+  }, [closePosition, fetchTabData]);
+
+  const hasOpenPositions = useMemo(
+    () => enrichedPositions.some(p => Number(p.netQty) !== 0),
+    [enrichedPositions]);
+
+  const profitLock = useProfitLock({
+    totalPnl,
+    hasOpenPositions,
+    exitAll: exitAllForLock,
+    notify: addToast,
+    storageKey: 'profit_lock_v1',
+  });
+
   const handleExitAll = useCallback(async () => {
     if (!confirmExitAll) {
       setConfirmExitAll(true);
@@ -978,6 +999,9 @@ export default function Scalper() {
                   {exitingAll ? <RefreshCw className="h-3 w-3 animate-spin" /> : <ShieldOff className="h-3 w-3" />}
                   {exitingAll ? 'Exiting…' : confirmExitAll ? 'Confirm EXIT ALL?' : 'EXIT ALL Positions'}
                 </button>
+
+                {/* Client-side minimum profit lock (total P&L floor) */}
+                <ProfitLockControls lock={profitLock} totalPnl={totalPnl} />
 
                 {/* Current guard values — shown whenever configured, not just when broker confirms ACTIVE */}
                 {hasConfig && (

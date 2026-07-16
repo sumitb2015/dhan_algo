@@ -9,6 +9,7 @@ import {
   type PnlGuardStatus, type PositionGuard, type SortState,
 } from './Scalper';
 import { useLiveOptionsWS } from '@/lib/useLiveOptionsWS';
+import { useProfitLock, ProfitLockControls } from './ProfitLock';
 
 // ─── Types ────────────────────────────────────────────────────────
 
@@ -501,6 +502,26 @@ export default function AdvancedScalper() {
     }
   }, [addToast, fetchTabData]);
 
+  // ─── Client-side profit lock (total P&L floor) ────────────────────
+
+  const exitAllForLock = useCallback(async (reason: string) => {
+    const open = positionsRef.current.filter(p => Number(p.netQty) !== 0);
+    await Promise.allSettled(open.map(pos => closePosition(pos, reason)));
+    setTimeout(fetchTabData, 1000);
+  }, [closePosition, fetchTabData]);
+
+  const hasOpenPositions = useMemo(
+    () => enrichedPositions.some(p => Number(p.netQty) !== 0),
+    [enrichedPositions]);
+
+  const profitLock = useProfitLock({
+    totalPnl,
+    hasOpenPositions,
+    exitAll: exitAllForLock,
+    notify: addToast,
+    storageKey: 'profit_lock_v1',
+  });
+
   const handleExitAll = useCallback(async () => {
     if (!confirmExitAll) {
       setConfirmExitAll(true);
@@ -926,6 +947,9 @@ export default function AdvancedScalper() {
                   {exitingAll ? <RefreshCw className="h-3 w-3 animate-spin" /> : <ShieldOff className="h-3 w-3" />}
                   {exitingAll ? 'Exiting…' : confirmExitAll ? 'Confirm EXIT ALL?' : 'EXIT ALL Positions'}
                 </button>
+
+                {/* Client-side minimum profit lock (total P&L floor) */}
+                <ProfitLockControls lock={profitLock} totalPnl={totalPnl} />
 
                 {hasConfig && (
                   <span className="text-[10px] text-zinc-500 font-mono">
