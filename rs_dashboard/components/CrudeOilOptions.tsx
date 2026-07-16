@@ -209,8 +209,11 @@ export default function CrudeOilOptions() {
   const [lastUpdated, setLastUpdated] = useState<string | null>(null);
   const [loading, setLoading]         = useState(true);
   const [error, setError]             = useState('');
+  const [stale, setStale]             = useState(false);   // last poll failed but we keep showing prior rows
 
   const intervalRef = useRef<NodeJS.Timeout | null>(null);
+  const chainFailsRef = useRef(0);   // consecutive fetchChain failures
+  const STALE_ERROR_AFTER = 4;       // only show a blocking error after this many consecutive failures
 
   const [lots, setLots]               = useState(1);
   // MCX order quantity is in LOTS (verified from live order book), so lot size is 1 —
@@ -374,6 +377,19 @@ export default function CrudeOilOptions() {
   // Fetch option chain
   const fetchChain = useCallback(async () => {
     if (!expiry) return;
+
+    // A transient poll failure must not blank an already-loaded chain. Keep the
+    // last-good rows, mark the view "stale", keep polling, and only surface a
+    // blocking error once we have nothing to show or fail repeatedly.
+    const onTransientFail = (msg: string) => {
+      chainFailsRef.current += 1;
+      setStale(true);
+      setRows(prev => {
+        if (prev.length === 0 || chainFailsRef.current >= STALE_ERROR_AFTER) setError(msg);
+        return prev;
+      });
+    };
+
     try {
       const res = await fetch(`/api/options/chain?underlying=${UNDERLYING}&expiry=${expiry}`);
       const json = await res.json() as {
@@ -383,20 +399,20 @@ export default function CrudeOilOptions() {
       };
 
       if (!json.success || !json.data?.chain?.oc) {
-        setError(json.error ?? 'No chain data');
+        onTransientFail(json.error ?? 'No chain data — retrying');
         return;
       }
 
       const spotPrice = json.data.spot ?? 0;
       if (spotPrice <= 0) {
-        setError('Spot price unavailable — showing last known chain');
+        onTransientFail('Spot price unavailable — retrying');
         return;
       }
       const atmStrike = Math.round(spotPrice / STRIKE_STEP) * STRIKE_STEP;
 
       const oc        = json.data.chain.oc;
       if (!oc || Object.keys(oc).length === 0) {
-        setError('Option chain data empty — showing last known chain');
+        onTransientFail('Option chain empty — retrying');
         return;
       }
 
@@ -468,9 +484,11 @@ export default function CrudeOilOptions() {
       setLastUpdated(new Date().toLocaleTimeString('en-IN', {
         hour: '2-digit', minute: '2-digit', second: '2-digit',
       }));
+      chainFailsRef.current = 0;
+      setStale(false);
       setError('');
     } catch (e) {
-      setError(String(e));
+      onTransientFail(String(e));
     } finally {
       setLoading(false);
     }
@@ -919,6 +937,12 @@ export default function CrudeOilOptions() {
 
           <div className="ml-auto flex items-center gap-2 text-xs text-zinc-500">
             {loading && <Loader2 className="h-3.5 w-3.5 animate-spin text-zinc-500" />}
+            {stale && lastUpdated && (
+              <span className="inline-flex items-center gap-1 text-amber-400 font-semibold">
+                <span className="inline-block w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse" />
+                stale — retrying
+              </span>
+            )}
             <span>Last Updated: {lastUpdated ?? '—'} (refresh 15s)</span>
           </div>
         </div>

@@ -12,6 +12,7 @@ Usage:
 import sys
 import os
 import csv
+import json
 import time
 import argparse
 import logging
@@ -81,6 +82,25 @@ def csv_path(today: date) -> str:
 
 def stop_trigger_path() -> str:
     return os.path.join(ROOT, 'debug', 'crudeoil_oi_stop.trigger')
+
+
+def status_file_path() -> str:
+    return os.path.join(ROOT, 'debug', 'crudeoil_oi_collector_status.json')
+
+
+def write_status(**fields) -> None:
+    """Write a status JSON the dashboard route reads to detect running/crashed state.
+
+    Mirrors the live-bridge pattern: always carries pid + status so the API can
+    cross-check the PID and flag a crashed collector.
+    """
+    payload = {'pid': os.getpid(), 'updated_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+    payload.update(fields)
+    try:
+        with open(status_file_path(), 'w', encoding='utf-8') as f:
+            json.dump(payload, f)
+    except OSError as exc:
+        log.warning('Could not write status file: %s', exc)
 
 
 def extract_side(side: dict) -> dict:
@@ -224,6 +244,8 @@ def main():
     log.info('Futures Spot=%.2f  ATM=%d  strikes=%d–%d  expiry=%s',
              spot, atm, strikes[0], strikes[-1], expiry)
 
+    write_status(status='RUNNING', expiry=expiry, atm=atm, rows=0, last_update=None)
+
     # ── CSV setup ─────────────────────────────────────────────────────
     today    = date.today()
     out_path = csv_path(today)
@@ -243,11 +265,13 @@ def main():
 
         if not args.ignore_market_hours and is_after_close(now):
             log.info('Market closed (23:30) — exiting')
+            write_status(status='STOPPED', expiry=expiry, atm=atm, reason='market_closed')
             break
 
         if os.path.exists(stop_trigger_path()):
             os.remove(stop_trigger_path())
             log.info('Stop trigger detected — exiting')
+            write_status(status='STOPPED', expiry=expiry, atm=atm, reason='stop_trigger')
             break
 
         ts = now.strftime('%Y-%m-%d %H:%M:%S')
@@ -272,10 +296,14 @@ def main():
                     write_rows(out_path, rows, write_header=(need_header and iteration == 0))
                     need_header = False
                 log.info('[%s] Wrote %d rows (spot=%.2f)', ts, len(rows), live_spot)
+                write_status(status='RUNNING', expiry=expiry, atm=atm,
+                             rows=len(rows), last_update=ts, spot=round(live_spot, 2))
 
         except Exception as exc:
             consecutive_failures += 1
             log.error('[%s] Error: %s', ts, exc)
+            write_status(status='RUNNING', expiry=expiry, atm=atm,
+                         last_update=ts, error=str(exc), consecutive_failures=consecutive_failures)
 
         iteration += 1
 
@@ -297,3 +325,8 @@ if __name__ == '__main__':
         main()
     except KeyboardInterrupt:
         log.info('Interrupted — exiting')
+        write_status(status='STOPPED', reason='interrupted')
+    except Exception as exc:
+        log.error('Fatal error — exiting: %s', exc)
+        write_status(status='STOPPED', reason='error', error=str(exc))
+        raise

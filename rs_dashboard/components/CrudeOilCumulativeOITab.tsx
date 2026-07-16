@@ -111,11 +111,15 @@ function MiniStat({ label, value, sub, color = 'text-zinc-100' }: { label: strin
 
 // ─── Main ─────────────────────────────────────────────────────────
 
+type CollectorStatus = 'RUNNING' | 'STOPPED' | 'UNKNOWN';
+
 export default function CrudeOilCumulativeOITab({ expiry: _expiry }: { expiry: string }) {
   const [response, setResponse]   = useState<CumulativeResponse | null>(null);
   const [loading, setLoading]     = useState(true);
   const [error, setError]         = useState('');
   const [wingCount, setWingCount] = useState(6);
+  const [collector, setCollector] = useState<CollectorStatus>('UNKNOWN');
+  const [collectorBusy, setCollectorBusy] = useState(false);
   const pollRef    = useRef<NodeJS.Timeout | null>(null);
   const wingRef    = useRef(6);
 
@@ -130,11 +134,36 @@ export default function CrudeOilCumulativeOITab({ expiry: _expiry }: { expiry: s
       .finally(() => setLoading(false));
   };
 
+  const fetchCollectorStatus = () => {
+    fetch('/api/crudeoil-oi-collector')
+      .then(r => r.json())
+      .then((j: { success: boolean; status?: { status?: string } }) => {
+        setCollector((j.status?.status === 'RUNNING' ? 'RUNNING' : 'STOPPED') as CollectorStatus);
+      })
+      .catch(() => setCollector('UNKNOWN'));
+  };
+
+  const toggleCollector = (action: 'start' | 'stop') => {
+    setCollectorBusy(true);
+    fetch('/api/crudeoil-oi-collector', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action }),
+    })
+      .then(r => r.json())
+      .catch(() => {})
+      .finally(() => {
+        // Give the process a moment to write/clear its status file before re-reading
+        setTimeout(() => { fetchCollectorStatus(); setCollectorBusy(false); }, 1500);
+      });
+  };
+
   // Initial load + 30-second refresh
   useEffect(() => {
     setLoading(true);
     fetchData();
-    pollRef.current = setInterval(() => fetchData(), 30_000);
+    fetchCollectorStatus();
+    pollRef.current = setInterval(() => { fetchData(); fetchCollectorStatus(); }, 30_000);
     return () => { if (pollRef.current) clearInterval(pollRef.current); };
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -202,8 +231,37 @@ export default function CrudeOilCumulativeOITab({ expiry: _expiry }: { expiry: s
           />
         </div>
 
+        {/* Collector control */}
+        <div className="flex items-center gap-2 ml-auto text-xs shrink-0">
+          <span className={`inline-flex items-center gap-1.5 font-bold uppercase tracking-widest ${
+            collector === 'RUNNING' ? 'text-emerald-400' : collector === 'STOPPED' ? 'text-zinc-500' : 'text-zinc-600'
+          }`}>
+            <span className={`inline-block w-2 h-2 rounded-full ${
+              collector === 'RUNNING' ? 'bg-emerald-500 animate-pulse' : collector === 'STOPPED' ? 'bg-zinc-600' : 'bg-zinc-700'
+            }`} />
+            {collector === 'RUNNING' ? 'Collector On' : collector === 'STOPPED' ? 'Collector Off' : '—'}
+          </span>
+          {collector === 'RUNNING' ? (
+            <button
+              onClick={() => toggleCollector('stop')}
+              disabled={collectorBusy}
+              className="px-2.5 py-1 rounded-lg font-semibold border border-red-900/60 bg-red-950/20 text-red-400 hover:bg-red-900/40 disabled:opacity-40 disabled:pointer-events-none transition-colors"
+            >
+              {collectorBusy ? '…' : 'Stop'}
+            </button>
+          ) : (
+            <button
+              onClick={() => toggleCollector('start')}
+              disabled={collectorBusy}
+              className="px-2.5 py-1 rounded-lg font-semibold border border-emerald-900/60 bg-emerald-950/20 text-emerald-400 hover:bg-emerald-900/40 disabled:opacity-40 disabled:pointer-events-none transition-colors"
+            >
+              {collectorBusy ? '…' : 'Start Collector'}
+            </button>
+          )}
+        </div>
+
         {/* Strike range wing selector */}
-        <div className="flex items-center gap-3 ml-auto text-xs shrink-0 pl-4 border-l border-zinc-850">
+        <div className="flex items-center gap-3 text-xs shrink-0 pl-4 border-l border-zinc-850">
           <span className="font-bold text-zinc-400 uppercase tracking-widest">Range</span>
           <div className="flex items-center gap-1 border border-zinc-800 bg-zinc-950 p-0.5 rounded-lg">
             {([1, 2, 3, 4, 5, 6] as const).map(w => (
@@ -227,8 +285,10 @@ export default function CrudeOilCumulativeOITab({ expiry: _expiry }: { expiry: s
       {error && (
         <div className="px-4 py-3 bg-red-900/15 border border-red-700/30 rounded-xl text-xs font-medium text-red-400">
           {error}
-          <div className="text-[10px] text-red-400/70 mt-1 font-normal">
-            Note: The background script `scripts/tools/crudeoil_oi_collector.py` must be running to record this data.
+          <div className="text-[10px] text-zinc-400 mt-1 font-normal">
+            {collector === 'RUNNING'
+              ? 'The collector is running — snapshots should appear within a minute of market open.'
+              : 'No snapshots recorded yet today. Click “Start Collector” above to begin recording the CRUDEOIL OI time series.'}
           </div>
         </div>
       )}

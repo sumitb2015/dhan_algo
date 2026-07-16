@@ -123,11 +123,25 @@ export default function CrudeOilOITab({ expiry }: { expiry: string }) {
   const [loading, setLoading]         = useState(false);
   const [error, setError]             = useState('');
   const [pollMs, setPollMs]           = useState<PollMs>(30_000);
+  const [stale, setStale]             = useState(false);
 
   const intervalRef = useRef<NodeJS.Timeout | null>(null);
+  const failsRef    = useRef(0);
+  const STALE_ERROR_AFTER = 4;
 
   const fetchOI = useCallback(async () => {
     if (!expiry) return;
+
+    // Keep the last-good bars on a transient failure instead of blanking the charts.
+    const onTransientFail = (msg: string) => {
+      failsRef.current += 1;
+      setStale(true);
+      setRows(prev => {
+        if (prev.length === 0 || failsRef.current >= STALE_ERROR_AFTER) setError(msg);
+        return prev;
+      });
+    };
+
     try {
       const res  = await fetch(`/api/options/chain?underlying=${UNDERLYING}&expiry=${expiry}`);
       const json = await res.json() as {
@@ -137,19 +151,19 @@ export default function CrudeOilOITab({ expiry }: { expiry: string }) {
       };
 
       if (!json.success || !json.data?.chain?.oc) {
-        setError(json.error ?? 'No chain data');
+        onTransientFail(json.error ?? 'No chain data — retrying');
         return;
       }
 
       const spotPrice = json.data.spot ?? 0;
       if (spotPrice <= 0) {
-        setError('Spot price unavailable — showing last known chain');
+        onTransientFail('Spot price unavailable — retrying');
         return;
       }
 
       const oc        = json.data.chain.oc;
       if (!oc || Object.keys(oc).length === 0) {
-        setError('Option chain data empty — showing last known chain');
+        onTransientFail('Option chain empty — retrying');
         return;
       }
 
@@ -184,9 +198,11 @@ export default function CrudeOilOITab({ expiry }: { expiry: string }) {
       setLastUpdated(new Date().toLocaleTimeString('en-IN', {
         hour: '2-digit', minute: '2-digit', second: '2-digit',
       }));
+      failsRef.current = 0;
+      setStale(false);
       setError('');
     } catch (e) {
-      setError(String(e));
+      onTransientFail(String(e));
     } finally {
       setLoading(false);
     }
@@ -198,6 +214,8 @@ export default function CrudeOilOITab({ expiry }: { expiry: string }) {
     setSpot(0);
     setAtm(0);
     setLastUpdated(null);
+    setStale(false);
+    failsRef.current = 0;
     setLoading(true);
     void fetchOI();
     intervalRef.current = setInterval(() => { void fetchOI(); }, pollMs);
@@ -270,8 +288,14 @@ export default function CrudeOilOITab({ expiry }: { expiry: string }) {
             ))}
           </div>
 
-          <div className="text-zinc-500 font-medium whitespace-nowrap pl-2 border-l border-zinc-850">
-            Last Updated: {lastUpdated ?? '—'}
+          <div className="flex items-center gap-2 whitespace-nowrap pl-2 border-l border-zinc-850">
+            {stale && lastUpdated && (
+              <span className="inline-flex items-center gap-1 text-amber-400 font-semibold">
+                <span className="inline-block w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse" />
+                stale
+              </span>
+            )}
+            <span className="text-zinc-500 font-medium">Last Updated: {lastUpdated ?? '—'}</span>
           </div>
         </div>
       </div>

@@ -76,8 +76,25 @@ def main():
         under = args.underlying.upper()
         is_crude = (under == 'CRUDEOIL')
         seg = 'MCX_COMM' if is_crude else 'IDX_I'
+
+        # Resolve the underlying the SAME way the expiries/ltp branches do so the
+        # chain never diverges from the expiry list after a contract rolls over.
+        # For crude, that means the nearest non-expired FUTCOM contract; passing
+        # its numeric security id makes get_option_chain trust it directly
+        # (bypassing the un-filtered iloc[0] symbol lookup).
+        chain_symbol = under
+        fut_sid = None
+        if is_crude:
+            from scripts.tools.premarket_data import _find_nearest_future
+            fut = _find_nearest_future(helper, "CRUDEOIL", exchange="MCX", instrument="FUTCOM")
+            if not fut:
+                print(json.dumps({'error': 'CRUDEOIL future contract not found'}))
+                sys.exit(0)
+            fut_sid = int(fut["SECURITY_ID"])
+            chain_symbol = str(fut_sid)
+
         chain = helper.get_option_chain(
-            symbol=under,
+            symbol=chain_symbol,
             expiry=args.expiry,
             exchange_segment=seg,
         )
@@ -88,29 +105,21 @@ def main():
             # spaced retry resolves the common transient case.
             time.sleep(3.5)
             chain = helper.get_option_chain(
-                symbol=under,
+                symbol=chain_symbol,
                 expiry=args.expiry,
                 exchange_segment=seg,
             )
-        # Also get spot for ATM calculation. The option-chain response already
-        # carries the underlying's last_price — prefer that over a second,
-        # un-retried get_ltp() call, which can independently 429/return 0 and
-        # leave the chain's own (valid, retried) data paired with a bogus spot.
-        # Exception: For Crude Oil, options are based on the futures contract, so we need the futures LTP.
-        if is_crude:
-            from scripts.tools.premarket_data import _find_nearest_future
-            fut = _find_nearest_future(helper, "CRUDEOIL", exchange="MCX", instrument="FUTCOM")
-            spot = 0
-            if fut:
-                sid = int(fut["SECURITY_ID"])
-                ohlc_raw = helper.get_ohlc_data({"MCX_COMM": [sid]})
-                spot = ohlc_raw.get("MCX_COMM", {}).get(str(sid), {}).get("last_price") or 0.0
+
+        # Prefer the underlying last_price the option-chain response already
+        # carries — for both index and crude — so a normal poll needs no extra
+        # quote call. Only fall back to a dedicated LTP fetch when it is missing.
+        spot = (chain or {}).get('last_price') or 0
+        if not spot:
+            if is_crude and fut_sid is not None:
+                ohlc_raw = helper.get_ohlc_data({"MCX_COMM": [fut_sid]})
+                spot = ohlc_raw.get("MCX_COMM", {}).get(str(fut_sid), {}).get("last_price") or 0.0
                 if not spot:
-                    spot = helper.get_ltp(sid, exchange="MCX", instrument="FUTCOM") or 0.0
-        else:
-            chain_spot = (chain or {}).get('last_price') or 0
-            if chain_spot:
-                spot = chain_spot
+                    spot = helper.get_ltp(fut_sid, exchange="MCX", instrument="FUTCOM") or 0.0
             else:
                 spot = helper.get_ltp(under, exchange='IDX_I', instrument='INDEX') or 0
         print(json.dumps({'chain': chain, 'spot': spot}))
