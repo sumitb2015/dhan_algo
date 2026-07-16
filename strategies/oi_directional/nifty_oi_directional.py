@@ -181,11 +181,18 @@ class NiftyOIDirectional:
 
     def _fetch_chain(self, expiry: str):
         """Latest chain snapshot from the background poller; inline fetch if missing/stale."""
-        with self._chain_lock:
-            snap = self._latest_chain
         max_age = max(120, 2 * self.poll_interval)
-        if snap is not None and time.time() - snap[1] <= max_age:
-            return snap[0]
+        # Give the poller a few seconds to produce a snapshot before fetching
+        # inline, so both threads don't race the same API call at startup.
+        deadline = time.time() + 8
+        while True:
+            with self._chain_lock:
+                snap = self._latest_chain
+            if snap is not None and time.time() - snap[1] <= max_age:
+                return snap[0]
+            if time.time() >= deadline or not (self._chain_thread and self._chain_thread.is_alive()):
+                break
+            time.sleep(0.5)
 
         # Poller hasn't produced a fresh chain yet — fetch inline (blocking).
         df = self.helper.get_option_chain_df("NIFTY", expiry)
