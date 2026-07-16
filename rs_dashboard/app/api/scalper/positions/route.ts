@@ -1,33 +1,15 @@
-﻿import { NextResponse } from 'next/server';
-import path from 'path';
-import { execFile } from 'child_process';
-import { promisify } from 'util';
+import { NextResponse } from 'next/server';
+import { dhanGet } from '@/lib/dhanToken';
 
-const execFileAsync = promisify(execFile);
-
-const PROJECT_ROOT   = path.resolve(process.cwd(), '..');
-const PYTHON_EXE     = path.join(PROJECT_ROOT, 'venv', 'Scripts', 'pythonw.exe');
-const SCALPER_SCRIPT = path.join(PROJECT_ROOT, 'scripts', 'tools', 'scalper_api.py');
-
+// Direct Dhan REST call — replaces the scalper_api.py subprocess and its
+// ~10s Python cold-start. The per-row Close button awaits this route before
+// placing its exit order, so it must be fast.
 export async function GET(): Promise<NextResponse> {
   try {
-    const { stdout } = await execFileAsync(PYTHON_EXE, [SCALPER_SCRIPT, 'positions'], {
-      cwd: PROJECT_ROOT,
-      timeout: 20_000,
-      windowsHide: true,
-    });
-    const lines = stdout.trim().split('\n').filter(Boolean);
-    const data = JSON.parse(lines[lines.length - 1]);
-    return NextResponse.json(data);
-  } catch (err: unknown) {
-    const e = err as { stdout?: string; message?: string; stderr?: string };
-    if (e.stdout) {
-      try {
-        const lines = String(e.stdout).trim().split('\n').filter(Boolean);
-        return NextResponse.json(JSON.parse(lines[lines.length - 1]));
-      } catch {}
-    }
-    console.error('[/api/scalper/positions] error:', e.message, e.stderr ?? '');
-    return NextResponse.json({ success: false, error: 'Failed to fetch positions', detail: String(e.message) }, { status: 500 });
+    const data = await dhanGet('/positions');
+    return NextResponse.json({ success: true, data: Array.isArray(data) ? data : [] });
+  } catch (err) {
+    console.error('[/api/scalper/positions] error:', err);
+    return NextResponse.json({ success: false, error: 'Failed to fetch positions', detail: String((err as Error).message) }, { status: 500 });
   }
 }
