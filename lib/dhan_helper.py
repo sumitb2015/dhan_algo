@@ -18,6 +18,33 @@ except ImportError:
 # logging.basicConfig is configured by the main strategy application
 logger = logging.getLogger(__name__)
 
+
+class RateLimiter:
+    """
+    Thread-safe minimum-interval limiter for REST calls.
+
+    acquire() blocks only for the remainder of `min_interval` since the last
+    call (instead of a fixed sleep), so back-to-back calls are paced at the
+    broker limit while an isolated call after a quiet period passes instantly.
+    """
+    def __init__(self, min_interval: float):
+        self.min_interval = min_interval
+        self._lock = threading.Lock()
+        self._last_call = 0.0
+        self.call_count = 0  # total REST calls issued through this limiter (debug/audit)
+
+    def acquire(self):
+        while True:
+            with self._lock:
+                now = time.monotonic()
+                wait = self._last_call + self.min_interval - now
+                if wait <= 0:
+                    self._last_call = now
+                    self.call_count += 1
+                    return
+            # Sleep outside the lock so other threads aren't blocked on it.
+            time.sleep(min(wait, self.min_interval))
+
 class DhanHelper:
     def __init__(self, dhan_client: dhanhq):
         """
@@ -57,6 +84,10 @@ class DhanHelper:
         self._expiry_cache = {} # Cache for expiries: {sid: (list, timestamp)}
         self._option_chain_cache = {} # Cache for option chains: {(sid, expiry): (data, timestamp)}
         self._option_chain_last_call = 0.0 # Tracks last API call time for 3s rate limit
+        # Shared pacing for all REST quote calls (ohlc_data / quote_data).
+        # 0.6s ~= 100 calls/min, safely under Dhan's 120-250/min limit, and
+        # strictly less blocking than the old fixed sleeps it replaces.
+        self._rest_quote_limiter = RateLimiter(0.6)
         
         # Pre-load master list during initialization for better performance
         self._load_master_list()
@@ -891,9 +922,89 @@ class DhanHelper:
                     if lp == 0 and 'ohlc' in ticker:
                          lp = float(ticker['ohlc'].get('close', 0))
                     results[sym_name] = lp
-                    
+
         return results
-    
+
+    def get_ltps(self, instruments: List[Tuple[str, Any]]) -> Dict[str, float]:
+        """
+        Fetch LTP for multiple pre-resolved securities with at most ONE REST call.
+
+        Args:
+            instruments: list of (api_segment, security_id) tuples,
+                         e.g. [("NSE_FNO", 49081), ("IDX_I", 13)]
+
+        Returns:
+            Dict mapping str(security_id) -> LTP (0.0 if unavailable).
+
+        Priority per SID: live_data (WebSocket) -> 1s memory cache -> single
+        batched ohlc_data call for all misses, paced by the shared rate
+        limiter. Designed for strategy hot loops: when the WebSocket is
+        healthy this makes zero REST calls; when it isn't, all legs are
+        fetched together instead of one 2s-throttled call per leg.
+        """
+        results: Dict[str, float] = {}
+        misses: Dict[str, List[int]] = {}
+
+        for api_seg, sec_id in instruments:
+            sid = int(sec_id)
+            sid_str = str(sid)
+            results[sid_str] = 0.0
+
+            live = self.live_data.get(sid_str)
+            if live:
+                price = float(live.get('last_price') or live.get('LTP') or 0.0)
+                if price > 0:
+                    results[sid_str] = price
+                    continue
+
+            if sid in self._ltp_cache:
+                cached_price, cached_time = self._ltp_cache[sid]
+                if time.time() - cached_time < 1.0:
+                    results[sid_str] = cached_price
+                    continue
+
+            misses.setdefault(api_seg, []).append(sid)
+
+        if not misses:
+            return results
+
+        self._rest_quote_limiter.acquire()
+        try:
+            res = self.dhan.ohlc_data(securities=misses)
+            if not isinstance(res, dict) or res.get('status') != 'success':
+                logger.debug(f"get_ltps ohlc_data failed for {misses}, trying quote_data...")
+                res = self.dhan.quote_data(securities=misses)
+        except Exception as e:
+            logger.error(f"Exception in get_ltps batch fetch: {e}")
+            return results
+
+        if not isinstance(res, dict) or res.get('status') != 'success':
+            logger.error(f"get_ltps API failure for {misses}: {res}")
+            return results
+
+        data = res.get('data', {})
+        if isinstance(data, dict) and 'data' in data:
+            data = data['data']
+        if not isinstance(data, dict):
+            logger.error(f"get_ltps failed parsing bulk data: {data}")
+            return results
+
+        now = time.time()
+        for segment_data in data.values():
+            if not isinstance(segment_data, dict):
+                continue
+            for sid_str, ticker in segment_data.items():
+                if not isinstance(ticker, dict) or sid_str not in results:
+                    continue
+                price = float(ticker.get('last_price', 0) or 0)
+                if price == 0 and isinstance(ticker.get('ohlc'), dict):
+                    price = float(ticker['ohlc'].get('close', 0) or 0)
+                if price > 0:
+                    results[sid_str] = price
+                    self._ltp_cache[int(sid_str)] = (price, now)
+
+        return results
+
     def ohlc(self, symbol_or_id: Any, exchange_segment: Optional[str] = None) -> Dict:
         """
         Simplified OHLC call. Alias for get_ohlc.
@@ -1450,17 +1561,43 @@ class DhanHelper:
         # Dhan statuses: TRADED, PART_TRADED, PENDING, TRANSIT, CANCELLED, REJECTED, EXPIRED
         return status == "TRADED"
 
+    def _order_update_ws_status(self, order_id: str) -> Optional[str]:
+        """Latest order status pushed by the order-update WebSocket, uppercased, or None."""
+        update = self.order_updates.get(str(order_id))
+        if not isinstance(update, dict):
+            return None
+        data = update.get('Data', {})
+        status = data.get('status') or data.get('Status')
+        return str(status).upper() if status else None
+
     def wait_for_fill(self, order_id: str, timeout: int = 30, poll_interval: float = 0.5) -> bool:
-        """Blocking: Wait until the order is filled or timeout reached."""
+        """
+        Blocking: Wait until the order is filled or timeout reached.
+
+        Checks the order-update WebSocket cache first on every tick (sub-second
+        fill reaction, zero REST cost). Falls back to REST get_order_status —
+        every poll_interval when the WS thread is not running, but only every
+        3s when it is, cutting REST polls ~6x during fills.
+        """
         start_time = time.time()
         logger.info(f"Waiting for order {order_id} to fill (Max {timeout}s)...")
 
+        ws_alive = self._ou_thread is not None and self._ou_thread.is_alive()
+        rest_interval = 3.0 if ws_alive else poll_interval
+        last_rest_poll = 0.0
+
         while time.time() - start_time < timeout:
-            status = self.get_order_status(order_id)
+            status = self._order_update_ws_status(order_id)
+
+            if status not in ("TRADED", "CANCELLED", "REJECTED", "EXPIRED"):
+                if time.time() - last_rest_poll >= rest_interval:
+                    status = self.get_order_status(order_id)
+                    last_rest_poll = time.time()
+
             if status == "TRADED":
                 logger.info(f"Order {order_id} filled.")
                 return True
-            if status in ["CANCELLED", "REJECTED", "EXPIRED"]:
+            if status in ("CANCELLED", "REJECTED", "EXPIRED"):
                 logger.warning(f"Order {order_id} terminated with status: {status}")
                 return False
 
@@ -1583,8 +1720,8 @@ class DhanHelper:
 
             # --- PHASE 2: API Call (Rate Limited Safety) ---
             # If we reach here, WebSocket is either not used for this SID or disconnected.
-            # We add a mandatory sleep to avoid hitting Dhan's 120-250 calls/min limit.
-            time.sleep(2) 
+            # Pace REST calls through the shared limiter instead of a fixed sleep.
+            self._rest_quote_limiter.acquire()
             
             # Derive API segment
             api_seg = exchange # Default to what user passed
@@ -1637,7 +1774,7 @@ class DhanHelper:
         """
         Get OHLC with explicit lookup parameters.
         """
-        time.sleep(1)
+        self._rest_quote_limiter.acquire()
         try:
             # Case 1: Direct Security ID
             if str(symbol).isdigit():
