@@ -1,33 +1,28 @@
-﻿import { NextResponse } from 'next/server';
-import path from 'path';
-import { execFile } from 'child_process';
-import { promisify } from 'util';
+import { NextResponse } from 'next/server';
+import { dhanGet } from '@/lib/dhanToken';
 
-const execFileAsync = promisify(execFile);
-
-const PROJECT_ROOT   = path.resolve(process.cwd(), '..');
-const PYTHON_EXE     = path.join(PROJECT_ROOT, 'venv', 'Scripts', 'pythonw.exe');
-const SCALPER_SCRIPT = path.join(PROJECT_ROOT, 'scripts', 'tools', 'scalper_api.py');
-
+// Direct Dhan REST calls (same pattern as scalper/poll) — replaces the
+// scalper_api.py subprocess and its ~10s Python cold-start per request.
 export async function GET(): Promise<NextResponse> {
   try {
-    const { stdout } = await execFileAsync(PYTHON_EXE, [SCALPER_SCRIPT, 'all'], {
-      cwd: PROJECT_ROOT,
-      timeout: 30_000,
-      windowsHide: true,
+    const [positions, orders, trades, funds, pnlGuard] = await Promise.all([
+      dhanGet('/positions').catch(() => []),
+      dhanGet('/orders').catch(() => []),
+      dhanGet('/trades').catch(() => []),
+      dhanGet('/fundlimit').catch(() => ({})),
+      dhanGet('/pnlExit').catch(() => null), // 4xx when no P&L guard is configured
+    ]);
+
+    return NextResponse.json({
+      success: true,
+      positions: Array.isArray(positions) ? positions : [],
+      orders: Array.isArray(orders) ? orders : [],
+      trades: Array.isArray(trades) ? trades : [],
+      funds: funds ?? {},
+      pnl_guard: pnlGuard,
     });
-    const lines = stdout.trim().split('\n').filter(Boolean);
-    const data = JSON.parse(lines[lines.length - 1]);
-    return NextResponse.json(data);
-  } catch (err: unknown) {
-    const e = err as { stdout?: string; message?: string; stderr?: string };
-    if (e.stdout) {
-      try {
-        const lines = String(e.stdout).trim().split('\n').filter(Boolean);
-        return NextResponse.json(JSON.parse(lines[lines.length - 1]));
-      } catch {}
-    }
-    console.error('[/api/scalper/all] error:', e.message, e.stderr ?? '');
-    return NextResponse.json({ success: false, error: 'Failed to fetch tab data', detail: String(e.message) }, { status: 500 });
+  } catch (err) {
+    console.error('[/api/scalper/all] error:', err);
+    return NextResponse.json({ success: false, error: 'Failed to fetch tab data', detail: String((err as Error).message) }, { status: 500 });
   }
 }

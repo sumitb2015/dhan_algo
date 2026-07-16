@@ -354,7 +354,7 @@ export default function Scalper() {
   // Python bridge, rAF-coalesced; falls back to 100ms HTTP polling if the WS
   // is unavailable). The old useEffect-3 poll loop lived here.
 
-  // ─── useEffect 4: Poll positions/orders/trades every 5s ──────────
+  // ─── useEffect 4: Poll positions/orders/trades every 2s ──────────
 
   const fetchTabData = useCallback(() => {
     setTabLoading(true);
@@ -388,7 +388,9 @@ export default function Scalper() {
 
   useEffect(() => {
     fetchTabData();
-    const id = setInterval(pollTabData, 5000);
+    // 2s poll: /api/scalper/poll is now direct Dhan REST (~0.3s round trip,
+    // 3 calls per tick = 1.5 req/s), so SL/target detection reacts within ~2s.
+    const id = setInterval(pollTabData, 2000);
     return () => clearInterval(id);
   }, [fetchTabData, pollTabData]);
 

@@ -36,3 +36,31 @@ export function getDhanCredentials(): { clientId: string; token: string } {
   tokenCache = { clientId, token: raw.accessToken, ts: Date.now() };
   return { clientId: tokenCache.clientId, token: tokenCache.token };
 }
+
+const DHAN_BASE = 'https://api.dhan.co/v2';
+
+/**
+ * Authenticated GET against the Dhan REST API. Returns the parsed JSON body
+ * (Dhan returns the payload directly — an array for /positions, /orders,
+ * /trades; an object for /fundlimit, /pnlExit). Throws on non-2xx.
+ */
+export async function dhanGet(apiPath: string, timeoutMs = 10_000): Promise<unknown> {
+  const { clientId, token } = getDhanCredentials();
+  const res = await fetch(`${DHAN_BASE}${apiPath}`, {
+    headers: {
+      'access-token': token,
+      'client-id': clientId,
+      'Accept': 'application/json',
+    },
+    signal: AbortSignal.timeout(timeoutMs),
+  });
+  if (!res.ok) {
+    let detail = `HTTP ${res.status}`;
+    try {
+      const json = await res.json() as Record<string, unknown>;
+      detail = String(json.errorMessage ?? json.remarks ?? json.message ?? JSON.stringify(json));
+    } catch {}
+    throw new Error(`Dhan GET ${apiPath} failed: ${detail}`);
+  }
+  return res.json();
+}
