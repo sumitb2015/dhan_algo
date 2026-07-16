@@ -2,7 +2,7 @@
 
 import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import NavBar from './NavBar';
-import { Zap, RefreshCw, Shield, ShieldOff, ChevronDown, ChevronUp } from 'lucide-react';
+import { Zap, RefreshCw, Shield, ShieldOff, ChevronDown, ChevronUp, Wallet } from 'lucide-react';
 import { useLiveOptionsWS } from '@/lib/useLiveOptionsWS';
 import { useProfitLock, ProfitLockControls } from './ProfitLock';
 
@@ -386,13 +386,25 @@ export default function Scalper() {
       .catch(() => {});
   }, []);
 
+  const pollFunds = useCallback(() => {
+    fetch('/api/scalper/funds')
+      .then(r => r.json())
+      .then((j: { success: boolean; data?: Record<string, any> }) => {
+        if (j.success) setFundsData(j.data ?? null);
+      })
+      .catch(() => {});
+  }, []);
+
   useEffect(() => {
     fetchTabData();
     // 2s poll: /api/scalper/poll is now direct Dhan REST (~0.3s round trip,
     // 3 calls per tick = 1.5 req/s), so SL/target detection reacts within ~2s.
     const id = setInterval(pollTabData, 2000);
-    return () => clearInterval(id);
-  }, [fetchTabData, pollTabData]);
+    // Funds change only on order fills — a 15s refresh keeps the header chip
+    // current without adding to the hot 2s poll.
+    const fundsId = setInterval(pollFunds, 15000);
+    return () => { clearInterval(id); clearInterval(fundsId); };
+  }, [fetchTabData, pollTabData, pollFunds]);
 
   // Keep refs in sync so the guard interval always reads latest values without stale closures
   useEffect(() => { positionsRef.current = enrichedPositions; }, [enrichedPositions]);
@@ -882,6 +894,15 @@ export default function Scalper() {
               </span>
               {lastUpdated && <span className="text-[10px] text-zinc-500 font-mono">{lastUpdated}</span>}
             </div>
+
+            {/* Available funds chip */}
+            {fundsData && (
+              <span className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-bold font-mono tabular-nums bg-zinc-900 border border-zinc-700 text-zinc-200"
+                title="Available balance (NSE Derivatives)">
+                <Wallet className="w-3 h-3 text-sky-400" />
+                ₹{formatFundsValue(Number(fundsData.availabelBalance) || 0)}
+              </span>
+            )}
 
             {/* Today's P&L chip */}
             {positionsData.length > 0 && (
