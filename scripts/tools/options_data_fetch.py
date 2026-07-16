@@ -110,17 +110,22 @@ def main():
                 exchange_segment=seg,
             )
 
-        # Prefer the underlying last_price the option-chain response already
-        # carries — for both index and crude — so a normal poll needs no extra
-        # quote call. Only fall back to a dedicated LTP fetch when it is missing.
-        spot = (chain or {}).get('last_price') or 0
-        if not spot:
-            if is_crude and fut_sid is not None:
-                ohlc_raw = helper.get_ohlc_data({"MCX_COMM": [fut_sid]})
-                spot = ohlc_raw.get("MCX_COMM", {}).get(str(fut_sid), {}).get("last_price") or 0.0
-                if not spot:
-                    spot = helper.get_ltp(fut_sid, exchange="MCX", instrument="FUTCOM") or 0.0
-            else:
+        # For CRUDEOIL: always fetch a dedicated live OHLC quote for the
+        # futures LTP — chain.last_price is a Dhan snapshot that can lag
+        # the actual market price by several minutes.
+        # For indices: chain.last_price is usually fresh enough; fall back
+        # to a dedicated LTP call only when it is missing.
+        spot = 0
+        if is_crude and fut_sid is not None:
+            ohlc_raw = helper.get_ohlc_data({"MCX_COMM": [fut_sid]})
+            spot = ohlc_raw.get("MCX_COMM", {}).get(str(fut_sid), {}).get("last_price") or 0.0
+            if not spot:
+                # Final fallback: dedicated LTP call
+                spot = helper.get_ltp(fut_sid, exchange="MCX", instrument="FUTCOM") or 0.0
+        else:
+            # Index: prefer chain snapshot, fall back to dedicated LTP
+            spot = (chain or {}).get('last_price') or 0
+            if not spot:
                 spot = helper.get_ltp(under, exchange='IDX_I', instrument='INDEX') or 0
         print(json.dumps({'chain': chain, 'spot': spot}))
 

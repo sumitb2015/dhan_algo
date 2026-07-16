@@ -1,4 +1,4 @@
-﻿import { NextRequest, NextResponse } from 'next/server';
+import { NextRequest, NextResponse } from 'next/server';
 import path from 'path';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
@@ -26,7 +26,9 @@ export async function GET(request: NextRequest) {
   const cacheKey = `${underlying}:${expiry}`;
   const hit = cache.get(cacheKey);
   if (hit && Date.now() - hit.ts < CACHE_TTL) {
-    return NextResponse.json({ success: true, data: hit.data });
+    return NextResponse.json({ success: true, data: hit.data }, {
+      headers: { 'Cache-Control': 'no-store' }
+    });
   }
 
   try {
@@ -62,7 +64,9 @@ export async function GET(request: NextRequest) {
 
     const data: ChainResponse = { chain: parsed.chain, spot: parsed.spot ?? 0 };
     cache.set(cacheKey, { data, ts: Date.now() });
-    return NextResponse.json({ success: true, data });
+    return NextResponse.json({ success: true, data }, {
+      headers: { 'Cache-Control': 'no-store' }
+    });
   } catch (err: unknown) {
     const e = err as { stdout?: string; stderr?: string; message?: string };
     if (e.stdout) {

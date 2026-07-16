@@ -8,7 +8,7 @@ const NIFTY_CSV    = path.join(PROJECT_ROOT, 'Historical Data', 'NIFTY_50_Daily_
 
 interface CacheEntry { spot: number; prev_close: number; change: number; change_pct: number; ts: number }
 const cacheMap = new Map<string, CacheEntry>();
-const CACHE_TTL = 9_000; // 9 s — just under the 10 s client poll so polls usually hit cache
+const CACHE_TTL = 12_000; // 12 s — client polls every 15 s, so each poll gets a fresh Python spawn
 
 function lastCsvClose(): number {
   try {
@@ -39,6 +39,8 @@ export async function GET(request: NextRequest) {
       prev_close: cached.prev_close,
       change: cached.change,
       change_pct: cached.change_pct
+    }, {
+      headers: { 'Cache-Control': 'no-store' }
     });
   }
 
@@ -71,7 +73,7 @@ export async function GET(request: NextRequest) {
   }
 
   if (spot === 0) {
-    return NextResponse.json({ success: false, error: 'Could not determine spot price' }, { status: 500 });
+    return NextResponse.json({ success: false, error: 'Could not determine spot price' }, { status: 500, headers: { 'Cache-Control': 'no-store' } });
   }
 
   cacheMap.set(underlying, { spot, prev_close, change, change_pct, ts: Date.now() });
@@ -81,5 +83,7 @@ export async function GET(request: NextRequest) {
     prev_close,
     change,
     change_pct
+  }, {
+    headers: { 'Cache-Control': 'no-store' }
   });
 }
