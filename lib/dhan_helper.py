@@ -85,9 +85,11 @@ class DhanHelper:
         self._option_chain_cache = {} # Cache for option chains: {(sid, expiry): (data, timestamp)}
         self._option_chain_last_call = 0.0 # Tracks last API call time for 3s rate limit
         # Shared pacing for all REST quote calls (ohlc_data / quote_data).
-        # 0.6s ~= 100 calls/min, safely under Dhan's 120-250/min limit, and
-        # strictly less blocking than the old fixed sleeps it replaces.
-        self._rest_quote_limiter = RateLimiter(0.6)
+        # Dhan's Quote APIs allow 1 request/second — back-to-back calls under
+        # ~1s get an API-failure response (verified via tests/test_03). 1.1s
+        # spacing respects that while still beating the old fixed 1-2s sleeps
+        # whenever calls are sparse.
+        self._rest_quote_limiter = RateLimiter(1.1)
         
         # Pre-load master list during initialization for better performance
         self._load_master_list()
@@ -883,6 +885,7 @@ class DhanHelper:
             
         # Try ohlc_data first (Proven more reliable for Equities)
         try:
+            self._rest_quote_limiter.acquire()
             res = self.dhan.ohlc_data(securities=securities_to_fetch)
         except Exception as e:
             logger.warning(f"Bulk ohlc_data raised an exception: {e}, falling back to sequential...")
