@@ -35,6 +35,7 @@ import sys
 import argparse
 import os
 import logging
+import threading
 from datetime import datetime
 from collections import deque
 
@@ -119,6 +120,14 @@ class NiftyOIDirectional:
         # Session PnL
         self.realized_pnl: float = 0.0
 
+        # Background option-chain poller state. The poller thread owns the
+        # blocking get_option_chain_df call (3s API gate inside the helper)
+        # so the in-position 1s realtime loop is never stalled by it.
+        self._chain_lock = threading.Lock()
+        self._latest_chain = None  # (DataFrame, fetch timestamp)
+        self._chain_expiry: str = ""
+        self._chain_thread = None
+
     # ── helpers ──────────────────────────────────────────────────────────────
 
     def _reset_position(self):
@@ -140,9 +149,51 @@ class NiftyOIDirectional:
         atm = self._atm(spot)
         return [atm + i * NIFTY_STRIKE_STEP for i in range(-STRIKES_EACH_SIDE, STRIKES_EACH_SIDE + 1)]
 
+    def _chain_poller_loop(self):
+        """Daemon thread: refresh the option chain every poll_interval seconds.
+
+        Only fetches during trading hours (always in dry-run so after-hours
+        testing still works). The helper's 3s option-chain gate remains the
+        authority on API pacing.
+        """
+        while True:
+            expiry = self._chain_expiry
+            if expiry and (self.dry_run or "09:15" <= datetime.now().strftime("%H:%M") <= "15:30"):
+                try:
+                    df = self.helper.get_option_chain_df("NIFTY", expiry)
+                    if df is not None and not df.empty:
+                        with self._chain_lock:
+                            self._latest_chain = (df, time.time())
+                except Exception as e:
+                    logger.error(f"Chain poller error: {e}")
+            time.sleep(self.poll_interval)
+
+    def _start_chain_poller(self, expiry: str):
+        self._chain_expiry = expiry
+        with self._chain_lock:
+            self._latest_chain = None  # drop any snapshot from a previous expiry
+        if self._chain_thread is None or not self._chain_thread.is_alive():
+            self._chain_thread = threading.Thread(
+                target=self._chain_poller_loop, daemon=True, name="oi-chain-poller"
+            )
+            self._chain_thread.start()
+            logger.info("Background option-chain poller started.")
+
     def _fetch_chain(self, expiry: str):
+        """Latest chain snapshot from the background poller; inline fetch if missing/stale."""
+        with self._chain_lock:
+            snap = self._latest_chain
+        max_age = max(120, 2 * self.poll_interval)
+        if snap is not None and time.time() - snap[1] <= max_age:
+            return snap[0]
+
+        # Poller hasn't produced a fresh chain yet — fetch inline (blocking).
         df = self.helper.get_option_chain_df("NIFTY", expiry)
-        return None if df.empty else df
+        if df is None or df.empty:
+            return None
+        with self._chain_lock:
+            self._latest_chain = (df, time.time())
+        return df
 
     def _ltp(self, security_id: str) -> float:
         return self.helper.get_ltp(security_id, exchange="NSE_FNO", instrument="OPTIDX")
@@ -449,6 +500,7 @@ class NiftyOIDirectional:
                 continue
             logger.info(f"Trading nearest expiry: {expiry}")
             self.diff_history.clear()
+            self._start_chain_poller(expiry)
 
             # ── Inner session loop ─────────────────────────────────────────
             while True:
