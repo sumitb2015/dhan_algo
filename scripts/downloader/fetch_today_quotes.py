@@ -315,14 +315,14 @@ def main():
     symbols = load_symbols(args.symbols)
     if not symbols:
         print("[ERROR] No symbols found — check STOCKS_DIR or N500_LIST.")
-        return
+        sys.exit(1)
 
     print(f"  {len(symbols)} symbols to fetch")
 
     sid_map = build_security_id_map(symbols)
     if not sid_map:
         print("[ERROR] No security IDs resolved — aborting.")
-        return
+        sys.exit(1)
 
     print(f"  {len(sid_map)}/{len(symbols)} symbols resolved to security IDs")
 
@@ -333,12 +333,14 @@ def main():
         dhan = get_dhan_client()
         if not dhan:
             print("[ERROR] Dhan auth failed — run login.py first.")
-            return
+            sys.exit(1)
         helper = DhanHelper(dhan)
         print("  Dhan client ready")
+    except SystemExit:
+        raise
     except Exception as e:
         print(f"[ERROR] Auth error: {e}")
-        return
+        sys.exit(1)
 
     # Fetch stock quotes in batches
     all_syms = list(sid_map.keys())
@@ -357,6 +359,13 @@ def main():
             time.sleep(RATE_DELAY)
 
     print(f"\n  Total quotes fetched: {len(all_quotes)}")
+
+    if not all_quotes:
+        # Wholesale quote-API failure (auth/subscription/outage). Bail out without
+        # clobbering a possibly-good previous today_quotes.json with an empty snapshot.
+        print("[ERROR] 0 stock quotes fetched — Dhan quote API failing; "
+              f"not overwriting {os.path.basename(OUTPUT_FILE)}.")
+        sys.exit(1)
 
     # Map index key in today_quotes.json to security ID in Dhan
     INDEX_MAP = {

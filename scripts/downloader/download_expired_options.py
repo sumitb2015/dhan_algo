@@ -225,6 +225,15 @@ def main():
                             to_date=to_date,
                             interval=1
                         )
+                        if df.empty and helper.is_fatal_error(helper.last_api_error):
+                            # Auth/subscription failure — every remaining call will fail
+                            # identically, so abort instead of grinding through the queue.
+                            err = helper.last_api_error
+                            msg = (f"Dhan API error {err.get('code') or '?'} "
+                                   f"({err.get('type', '')}): {err.get('message', '')}")
+                            logger.error(f"Fatal API error — aborting: {msg}")
+                            _write_status(f"Error: {msg}", done=True, error=msg)
+                            return
                         if not df.empty:
                             # Ensure we distinguish CE vs PE in the saved file
                             # The helper already adds 'option_type' column if found

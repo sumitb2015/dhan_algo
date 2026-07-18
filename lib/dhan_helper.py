@@ -52,6 +52,10 @@ class DhanHelper:
         """
         self.dhan = dhan_client
         self.live_data = {} # Shared store for latest WebSocket ticks
+        # Last data-API failure (dict with method/code/type/message) or None.
+        # Data methods return an empty DataFrame on failure; callers that need to
+        # distinguish "no rows" from "API error" (e.g. downloader scripts) check this.
+        self.last_api_error: Optional[Dict] = None
         # Constants mapping for easier access
         self.NSE = "NSE_EQ"
         self.BSE = "BSE_EQ"
@@ -2987,8 +2991,9 @@ class DhanHelper:
         Fetch historical data for expired options using the SDK's native method.
         """
         try:
+            self.last_api_error = None
             logger.info(f"Fetching Expired Options Data for ID {security_id} ({from_date} to {to_date})")
-            
+
             res = self.dhan.expired_options_data(
                 security_id=str(security_id),
                 exchange_segment=exchange_segment,
@@ -3031,17 +3036,18 @@ class DhanHelper:
                     
                     logger.warning(f"No {target_key} data found in response.")
                 else:
+                    self._record_api_error("expired_options_data", res_json if isinstance(res_json, dict) else res)
                     error_res_json = res_json.get('remarks') if isinstance(res_json, dict) else str(res_json)
                     logger.error(f"API Error: {error_res_json} | Response: {res_json}")
             else:
+                self._record_api_error("expired_options_data", res)
                 error_msg = res.get('remarks') if isinstance(res, dict) else str(res)
                 logger.error(f"SDK Error: {error_msg}")
-                
+
         except Exception as e:
+            self.last_api_error = {"method": "expired_options_data", "code": "", "type": "exception", "message": str(e)}
             logger.error(f"Exception in get_expired_options_data: {e}")
-            
-        return pd.DataFrame()
-            
+
         return pd.DataFrame()
 
     # --- FUTURES LOOKUP ---
@@ -3416,6 +3422,28 @@ class DhanHelper:
             return {}
 
     # --- INTRADAY MINUTE DATA (with interval support) ---
+    def _record_api_error(self, method: str, res) -> None:
+        """Store a structured description of a failed data-API response on self.last_api_error."""
+        remarks = res.get('remarks') if isinstance(res, dict) else None
+        if isinstance(remarks, dict):
+            self.last_api_error = {
+                "method": method,
+                "code": remarks.get("error_code", ""),
+                "type": remarks.get("error_type", ""),
+                "message": remarks.get("error_message", str(remarks)),
+            }
+        else:
+            self.last_api_error = {"method": method, "code": "", "type": "", "message": str(remarks or res)}
+
+    @staticmethod
+    def is_fatal_error(err: Optional[Dict]) -> bool:
+        """True when a recorded API error is non-transient (auth/subscription) —
+        retrying other symbols/windows will fail identically."""
+        if not err:
+            return False
+        return (err.get("code") in ("DH-901", "DH-902")
+                or err.get("type") in ("Invalid_Access", "Invalid_Authentication"))
+
     def get_intraday_minute_data(self,
                                    security_id: Union[str, int],
                                    exchange_segment: str,
@@ -3429,6 +3457,7 @@ class DhanHelper:
         interval: "1", "5", "15", "25", "60"
         """
         try:
+            self.last_api_error = None
             res = self.dhan.intraday_minute_data(
                 security_id=str(security_id),
                 exchange_segment=exchange_segment,
@@ -3440,9 +3469,11 @@ class DhanHelper:
             )
             if isinstance(res, dict) and res.get('status') == 'success':
                 return pd.DataFrame(res.get('data', []))
+            self._record_api_error("intraday_minute_data", res)
             error_msg = res.get('remarks') if isinstance(res, dict) else str(res)
             logger.error(f"Failed to fetch intraday minute data: {error_msg}")
         except Exception as e:
+            self.last_api_error = {"method": "intraday_minute_data", "code": "", "type": "exception", "message": str(e)}
             logger.error(f"Exception in get_intraday_minute_data: {e}")
         return pd.DataFrame()
 
@@ -3456,6 +3487,7 @@ class DhanHelper:
                                     oi: bool = False) -> pd.DataFrame:
         """Fetch historical daily OHLC data."""
         try:
+            self.last_api_error = None
             res = self.dhan.historical_daily_data(
                 security_id=str(security_id),
                 exchange_segment=exchange_segment,
@@ -3467,9 +3499,11 @@ class DhanHelper:
             )
             if isinstance(res, dict) and res.get('status') == 'success':
                 return pd.DataFrame(res.get('data', []))
+            self._record_api_error("historical_daily_data", res)
             error_msg = res.get('remarks') if isinstance(res, dict) else str(res)
             logger.error(f"Failed to fetch historical daily data: {error_msg}")
         except Exception as e:
+            self.last_api_error = {"method": "historical_daily_data", "code": "", "type": "exception", "message": str(e)}
             logger.error(f"Exception in get_historical_daily_data: {e}")
         return pd.DataFrame()
 

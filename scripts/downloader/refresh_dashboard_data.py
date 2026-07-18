@@ -109,6 +109,27 @@ def mark_error(msg: str):
     write_status("error", msg, done=True, error=msg)
 
 
+# ── API error surfacing ───────────────────────────────────────────────────────
+class FatalAPIError(Exception):
+    """Non-transient Dhan API failure (auth/subscription) — retrying other
+    symbols/windows will fail identically, so the whole run aborts."""
+
+
+def format_api_error(err: dict) -> str:
+    code = err.get("code") or "?"
+    msg = err.get("message", "")
+    if code == "DH-902" or "subscribed to Data APIs" in msg:
+        return f"Dhan Data API subscription inactive ({code}): {msg}".strip()
+    return f"Dhan API error {code} ({err.get('type', '')}): {msg}".strip()
+
+
+def check_fatal(helper):
+    """Raise FatalAPIError if the last data-API call failed with an auth/subscription error."""
+    err = helper.last_api_error
+    if err and helper.is_fatal_error(err):
+        raise FatalAPIError(format_api_error(err))
+
+
 # ── Trading day helpers ───────────────────────────────────────────────────────
 # NSE market holidays. Historical data is published the following day,
 # so we never treat today as the reference — always work from yesterday back.
@@ -131,6 +152,21 @@ def get_last_trading_day() -> str:
             return d.strftime("%Y-%m-%d")
         d -= timedelta(days=1)
     return d.strftime("%Y-%m-%d")
+
+
+def trading_days_between(from_date: str, to_date: str) -> int:
+    """Count NSE trading days (weekdays minus holidays) in [from_date, to_date] inclusive."""
+    try:
+        d = datetime.strptime(from_date, "%Y-%m-%d").date()
+        end = datetime.strptime(to_date, "%Y-%m-%d").date()
+    except ValueError:
+        return 0
+    count = 0
+    while d <= end:
+        if d.weekday() < 5 and d.strftime("%Y-%m-%d") not in _NSE_HOLIDAYS:
+            count += 1
+        d += timedelta(days=1)
+    return count
 
 
 # ── CSV helpers ───────────────────────────────────────────────────────────────
@@ -356,17 +392,28 @@ def refresh_nifty50(helper):
                 from_date=cur.strftime("%Y-%m-%d"),
                 to_date=chunk_end.strftime("%Y-%m-%d"),
             )
+            check_fatal(helper)
             if not df_chunk.empty:
                 chunks.append(normalize_historical_df(df_chunk))
             cur = chunk_end + timedelta(days=1)
             time.sleep(0.4)
 
         if not chunks:
+            daily_err = helper.last_api_error
             write_status("nifty50", "  ↺ Daily API returned no data — trying intraday fallback...")
             fb = _daily_from_intraday(helper, security_id, segment, instr, from_date, last_trading_day)
+            check_fatal(helper)
             if fb.empty:
-                write_status("nifty50", "  ✓ Nifty 50 up to date (no new data from daily or intraday API)")
-                return True
+                err = daily_err or helper.last_api_error
+                if err:
+                    write_status("nifty50", f"  ✗ Nifty 50 fetch failed: {format_api_error(err)}")
+                    return False
+                expected = trading_days_between(from_date, last_trading_day)
+                if expected == 0:
+                    write_status("nifty50", "  ✓ Nifty 50 up to date (no trading days in window)")
+                    return True
+                write_status("nifty50", f"  ✗ Nifty 50: API returned no data for {expected} expected trading day(s)")
+                return False
             chunks.append(fb)
 
         new_df = pd.concat(chunks)
@@ -392,6 +439,8 @@ def refresh_nifty50(helper):
         write_status("nifty50", f"  ✓ Nifty 50 updated: {len(new_df)} new rows (total {len(combined)})")
         return True
 
+    except FatalAPIError:
+        raise
     except Exception as e:
         write_status("nifty50", f"  ✗ Nifty 50 error: {e}")
         return False
@@ -449,17 +498,28 @@ def refresh_nifty500_index(helper):
                 from_date=cur.strftime("%Y-%m-%d"),
                 to_date=chunk_end.strftime("%Y-%m-%d"),
             )
+            check_fatal(helper)
             if not df_chunk.empty:
                 chunks.append(normalize_historical_df(df_chunk))
             cur = chunk_end + timedelta(days=1)
             time.sleep(0.4)
 
         if not chunks:
+            daily_err = helper.last_api_error
             write_status("nifty500_index", "  ↺ Daily API returned no data — trying intraday fallback...")
             fb = _daily_from_intraday(helper, 19, "IDX_I", "INDEX", from_date, last_trading_day)
+            check_fatal(helper)
             if fb.empty:
-                write_status("nifty500_index", "  ✓ Nifty 500 index up to date (no new data from daily or intraday API)")
-                return True
+                err = daily_err or helper.last_api_error
+                if err:
+                    write_status("nifty500_index", f"  ✗ Nifty 500 index fetch failed: {format_api_error(err)}")
+                    return False
+                expected = trading_days_between(from_date, last_trading_day)
+                if expected == 0:
+                    write_status("nifty500_index", "  ✓ Nifty 500 index up to date (no trading days in window)")
+                    return True
+                write_status("nifty500_index", f"  ✗ Nifty 500 index: API returned no data for {expected} expected trading day(s)")
+                return False
             chunks.append(fb)
 
         new_df = pd.concat(chunks)
@@ -484,6 +544,8 @@ def refresh_nifty500_index(helper):
         write_status("nifty500_index", f"  ✓ Nifty 500 index updated: {len(new_df)} new rows (total {len(combined)})")
         return True
 
+    except FatalAPIError:
+        raise
     except Exception as e:
         write_status("nifty500_index", f"  ✗ Nifty 500 index error: {e}")
         return False
@@ -517,13 +579,13 @@ def refresh_stocks(helper):
     last_trading_day = get_last_trading_day()
     # toDate is non-inclusive in the daily API; add 1 day so last_trading_day is included
     to_date_api = (datetime.strptime(last_trading_day, "%Y-%m-%d") + timedelta(days=1)).strftime("%Y-%m-%d")
-    skipped = updated = failed = 0
+    skipped = updated = failed = consecutive_failures = 0
 
     for i, symbol in enumerate(symbols, 1):
         if should_stop():
             write_status("stocks", f"⏹ Stopped by user at [{i}/{total}]",
                          current=i, total=total, done=True)
-            return
+            return True
 
         csv_path = os.path.join(STOCKS_DIR, f"{symbol}_Daily_2Y.csv")
         last_date = get_last_date(csv_path)
@@ -582,13 +644,27 @@ def refresh_stocks(helper):
                 from_date=from_date,
                 to_date=to_date_api,
             )
+            check_fatal(helper)
 
             if df_new.empty:
-                write_status("stocks", f"  [{i}/{total}] {symbol}: ✓ up to date (no new data from API)",
-                             current=i, total=total)
-                skipped += 1
+                if helper.last_api_error:
+                    write_status("stocks",
+                                 f"  [{i}/{total}] {symbol}: ✗ API error — {format_api_error(helper.last_api_error)}",
+                                 current=i, total=total)
+                    failed += 1
+                    consecutive_failures += 1
+                    if consecutive_failures >= 20:
+                        raise FatalAPIError(
+                            f"Aborting stocks refresh: {consecutive_failures} consecutive API failures "
+                            f"(last: {format_api_error(helper.last_api_error)})")
+                else:
+                    write_status("stocks", f"  [{i}/{total}] {symbol}: ✓ up to date (no new data from API)",
+                                 current=i, total=total)
+                    skipped += 1
                 time.sleep(0.2)
                 continue
+
+            consecutive_failures = 0
 
             new_df = normalize_historical_df(df_new)
             new_df = new_df[~new_df.index.duplicated(keep="last")].sort_index()
@@ -621,6 +697,8 @@ def refresh_stocks(helper):
                          current=i, total=total)
             updated += 1
 
+        except FatalAPIError:
+            raise
         except Exception as e:
             write_status("stocks", f"  [{i}/{total}] {symbol}: ERROR — {e}",
                          current=i, total=total)
@@ -628,8 +706,10 @@ def refresh_stocks(helper):
 
         time.sleep(0.35)
 
-    summary = f"✓ Stocks done: {updated} updated, {skipped} skipped, {failed} failed"
+    mark = "✓" if failed == 0 else "✗"
+    summary = f"{mark} Stocks done: {updated} updated, {skipped} skipped, {failed} failed"
     write_status("stocks", summary, current=total, total=total)
+    return failed == 0
 
 
 # ── Phase 4: Sector / broad-market indices ────────────────────────────────────
@@ -644,7 +724,7 @@ def refresh_indices(helper):
     for i, entry in enumerate(SECTOR_INDICES, 1):
         if should_stop():
             write_status("indices", f"⏹ Stopped at [{i}/{total}]", current=i, total=total, done=True)
-            return
+            return True
 
         csv_path = os.path.join(INDICES_DIR, f"{entry['name']}.csv")
         last_date = get_last_date(csv_path)
@@ -687,18 +767,33 @@ def refresh_indices(helper):
                     from_date=cur.strftime("%Y-%m-%d"),
                     to_date=chunk_end.strftime("%Y-%m-%d"),
                 )
+                check_fatal(helper)
                 if not df_chunk.empty:
                     chunks.append(normalize_historical_df(df_chunk))
                 cur = chunk_end + timedelta(days=1)
                 time.sleep(0.4)
 
             if not chunks:
+                daily_err = helper.last_api_error
                 fb = _daily_from_intraday(helper, entry["id"], "IDX_I", "INDEX", from_date, last_trading_day)
+                check_fatal(helper)
                 if fb.empty:
-                    write_status("indices",
-                                 f"  [{i}/{total}] {entry['label']}: ✓ up to date (no new data from daily or intraday API)",
-                                 current=i, total=total)
-                    skipped += 1
+                    err = daily_err or helper.last_api_error
+                    if err:
+                        write_status("indices",
+                                     f"  [{i}/{total}] {entry['label']}: ✗ fetch failed — {format_api_error(err)}",
+                                     current=i, total=total)
+                        failed += 1
+                    elif trading_days_between(from_date, last_trading_day) == 0:
+                        write_status("indices",
+                                     f"  [{i}/{total}] {entry['label']}: ✓ up to date (no trading days in window)",
+                                     current=i, total=total)
+                        skipped += 1
+                    else:
+                        write_status("indices",
+                                     f"  [{i}/{total}] {entry['label']}: ✗ API returned no data for expected trading day(s)",
+                                     current=i, total=total)
+                        failed += 1
                     continue
                 chunks.append(fb)
 
@@ -725,6 +820,8 @@ def refresh_indices(helper):
                          current=i, total=total)
             updated += 1
 
+        except FatalAPIError:
+            raise
         except Exception as e:
             write_status("indices", f"  [{i}/{total}] {entry['label']}: ERROR — {e}",
                          current=i, total=total)
@@ -732,8 +829,10 @@ def refresh_indices(helper):
 
         time.sleep(0.35)
 
-    write_status("indices", f"✓ Indices done: {updated} updated, {skipped} skipped, {failed} failed",
+    mark = "✓" if failed == 0 else "✗"
+    write_status("indices", f"{mark} Indices done: {updated} updated, {skipped} skipped, {failed} failed",
                  current=total, total=total)
+    return failed == 0
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
@@ -770,26 +869,37 @@ def main():
         write_status("stopped", "Stopped before starting.", done=True)
         return
 
-    if args.target in ("all", "nifty50"):
-        refresh_nifty50(helper)
-        if should_stop():
-            write_status("stopped", "Stopped after Nifty 50.", done=True)
-            return
+    failures = []
 
-    if args.target in ("all", "nifty500-index"):
-        refresh_nifty500_index(helper)
-        if should_stop():
-            write_status("stopped", "Stopped after Nifty 500 index.", done=True)
-            return
+    try:
+        if args.target in ("all", "nifty50"):
+            if not refresh_nifty50(helper):
+                failures.append("Nifty 50")
+            if should_stop():
+                write_status("stopped", "Stopped after Nifty 50.", done=True)
+                return
 
-    if args.target in ("all", "indices"):
-        refresh_indices(helper)
-        if should_stop():
-            write_status("stopped", "Stopped after indices.", done=True)
-            return
+        if args.target in ("all", "nifty500-index"):
+            if not refresh_nifty500_index(helper):
+                failures.append("Nifty 500 index")
+            if should_stop():
+                write_status("stopped", "Stopped after Nifty 500 index.", done=True)
+                return
 
-    if args.target in ("all", "stocks"):
-        refresh_stocks(helper)
+        if args.target in ("all", "indices"):
+            if not refresh_indices(helper):
+                failures.append("sector indices")
+            if should_stop():
+                write_status("stopped", "Stopped after indices.", done=True)
+                return
+
+        if args.target in ("all", "stocks"):
+            if not refresh_stocks(helper):
+                failures.append("stocks")
+
+    except FatalAPIError as e:
+        mark_error(str(e))
+        return
 
     if args.target in ("all", "quotes"):
         # Dhan historical API only publishes prior-day EOD data (next-morning lag).
@@ -809,16 +919,25 @@ def main():
             if result.returncode != 0:
                 err_msg = result.stderr[-300:] if result.stderr else f"exit code {result.returncode}"
                 write_status("quotes", f"  ✗ Quotes error: {err_msg}")
+                failures.append("today's quotes")
             else:
                 write_status("quotes", "  ✓ Live quotes written to debug/today_quotes.json")
         except Exception as e:
             write_status("quotes", f"  ✗ Quotes fetch failed: {e}")
+            failures.append("today's quotes")
 
         if args.target == "quotes":
-            write_status("quotes", "✅ Live quotes refresh complete.", done=True)
+            if failures:
+                mark_error("Live quotes refresh failed — see log above")
+            else:
+                write_status("quotes", "✅ Live quotes refresh complete.", done=True)
             return
 
-    write_status("done", "✅ Data refresh complete.", done=True)
+    if failures:
+        msg = f"⚠ Refresh finished with errors: {', '.join(failures)} — see log above"
+        write_status("error", msg, done=True, error=msg)
+    else:
+        write_status("done", "✅ Data refresh complete.", done=True)
 
 
 if __name__ == "__main__":

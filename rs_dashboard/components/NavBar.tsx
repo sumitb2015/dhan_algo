@@ -11,7 +11,9 @@ import {
   Briefcase,
   ChevronDown,
   DatabaseZap,
+  RefreshCw,
 } from 'lucide-react';
+import { useRefreshStatus } from '@/lib/useRefreshStatus';
 import {
   DropdownMenu,
   DropdownMenuTrigger,
@@ -96,6 +98,7 @@ export default function NavBar() {
   const pathname = usePathname();
   const router   = useRouter();
   const [syncPanelOpen, setSyncPanelOpen] = useState(false);
+  const sync = useRefreshStatus();
 
   async function handleDisconnect() {
     await fetch('/api/auth/logout', { method: 'POST' });
@@ -173,8 +176,27 @@ export default function NavBar() {
         >
           <DatabaseZap className="h-3.5 w-3.5" />
           Sync Data
+          {sync.running && (
+            <>
+              <RefreshCw className="h-3 w-3 animate-spin text-sky-400" />
+              {sync.total > 0 && (
+                <span className="text-[10px] font-mono text-sky-400">
+                  {sync.current}/{sync.total}
+                </span>
+              )}
+            </>
+          )}
+          {!sync.running && sync.error && (
+            <span className="h-1.5 w-1.5 rounded-full bg-red-500" />
+          )}
         </TooltipTrigger>
-        <TooltipContent>Sync latest market data from Dhan API</TooltipContent>
+        <TooltipContent>
+          {sync.running
+            ? `Syncing ${sync.phase || 'data'}…`
+            : sync.error
+              ? `Last sync failed: ${sync.error.slice(0, 120)}`
+              : 'Sync latest market data from Dhan API'}
+        </TooltipContent>
       </Tooltip>
       <button
         onClick={handleDisconnect}
