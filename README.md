@@ -204,7 +204,7 @@ python tests/test_dhan_helper.py
 Launch the comprehensive testing notebook:
 
 ```bash
-.\venv\Scripts\python.exe -m jupyter notebook DhanHQ_SDK_Complete_Testing.ipynb
+.\venv\Scripts\python.exe -m jupyter notebook notebooks/DhanHQ_SDK_Complete_Testing.ipynb
 ```
 
 The notebook includes 13 sections covering all API functions with examples.
