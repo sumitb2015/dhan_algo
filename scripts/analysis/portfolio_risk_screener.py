@@ -7,6 +7,7 @@ Generates a beautifully formatted Excel report.
 
 import os
 import sys
+import json
 import math
 import glob
 import time
@@ -648,7 +649,24 @@ def main():
     logger.info(f"Parametric VaR (1-Day, 95%)    : ₹{parametric_var_value:,.2f} ({parametric_var_pct*100:.2f}%)")
     logger.info(f"Historical VaR (1-Day, 95%)    : ₹{historical_var_value:,.2f} ({historical_var_pct*100:.2f}%)")
     logger.info("="*50 + "\n")
-    
+
+    # Write a lightweight JSON summary for the live portfolio dashboard's Risk Snapshot card
+    try:
+        os.makedirs("debug", exist_ok=True)
+        with open(os.path.join("debug", "portfolio_risk_summary.json"), "w", encoding="utf-8") as f:
+            json.dump({
+                "generatedAt": datetime.now().isoformat(),
+                "totalPortfolioValue": round(float(total_portfolio_value), 2),
+                "beta": round(float(portfolio_beta), 3),
+                "sharpe": round(float(portfolio_sharpe), 3),
+                "sortino": round(float(portfolio_sortino), 3),
+                "maxDrawdown": round(float(portfolio_mdd), 4),
+                "annualizedVolatility": round(float(portfolio_annualized_volatility), 4),
+                "var95Pct": round(float(parametric_var_pct), 4),
+            }, f)
+    except Exception:
+        pass
+
     # 8. Export to Excel using xlsxwriter
     os.makedirs("portfolio", exist_ok=True)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")

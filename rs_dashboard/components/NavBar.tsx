@@ -87,6 +87,8 @@ const NAV_GROUPS = [
     links: [
       { href: '/portfolio', label: 'Portfolio', desc: 'Live positions, P&L & margin monitoring' },
       { href: '/portfolio-new', label: 'Portfolio+', desc: 'Multi-account advanced tracker & assets' },
+      { href: '/portfolio/trades', label: 'Trade P&L', desc: 'FIFO realized P&L by segment (Equity/F&O/Commodity)' },
+      { href: '/portfolio/diary', label: "Trader's Diary", desc: 'Weekly & monthly P&L calendar, streaks, in-profit days' },
       { href: '/performance', label: 'Performance', desc: 'Historical backtests & drawdown statistics' },
       { href: '/reports', label: 'Reports', desc: 'Trade journals & execution logs' },
     ],

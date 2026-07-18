@@ -8,6 +8,7 @@ import {
 } from 'lucide-react';
 import {
   PieChart, Pie, Cell, Tooltip as ReTooltip, ResponsiveContainer,
+  LineChart, Line, XAxis, YAxis, CartesianGrid, Legend,
 } from 'recharts';
 import Link from 'next/link';
 import { cn } from '@/lib/utils';
@@ -110,6 +111,26 @@ interface RSInfo {
   rating: 'A' | 'B' | 'C' | 'D';
   momentum: 'rising' | 'falling' | 'neutral';
   score: number;
+}
+
+interface PerformancePoint {
+  date: string;
+  totalCurrentValue: number;
+  synthetic: boolean;
+  portfolioPct: number;
+  niftyPct: number | null;
+}
+
+interface RiskSummary {
+  available: boolean;
+  generatedAt?: string;
+  totalPortfolioValue?: number;
+  beta?: number;
+  sharpe?: number;
+  sortino?: number;
+  maxDrawdown?: number;
+  annualizedVolatility?: number;
+  var95Pct?: number;
 }
 
 interface MAInfo {
@@ -989,9 +1010,176 @@ function MutualFundsTab({ mfData }: { mfData: MutualFund[] | null }) {
   );
 }
 
+// ─── Performance vs Nifty 50 ──────────────────────────────────────────────────
+
+function PerformanceChart({ points, backfilled }: { points: PerformancePoint[]; backfilled: boolean }) {
+  if (points.length === 0) {
+    return (
+      <div className="bg-zinc-900/60 border border-zinc-800/60 rounded-xl p-6 flex flex-col items-center justify-center gap-2 min-h-[220px]">
+        <Activity className="h-5 w-5 text-zinc-600" />
+        <p className="text-xs text-zinc-500 text-center max-w-sm">
+          No performance history yet. A daily snapshot of your portfolio value is recorded automatically —
+          check back tomorrow to see the trend build up.
+        </p>
+      </div>
+    );
+  }
+
+  const last = points[points.length - 1];
+  const first = points[0];
+  const hasSynthetic = points.some(p => p.synthetic);
+
+  return (
+    <div className="bg-zinc-900/60 border border-zinc-800/60 rounded-xl p-4 flex flex-col gap-2">
+      <div className="flex items-center justify-between flex-wrap gap-2">
+        <div className="flex items-center gap-1.5">
+          <Activity className="h-3.5 w-3.5 text-indigo-400" />
+          <span className="text-[11px] font-semibold text-zinc-300 uppercase tracking-wide">Portfolio vs Nifty 50</span>
+        </div>
+        <span className="text-[10px] text-zinc-500">
+          Since {first.date} · {points.length} day{points.length !== 1 ? 's' : ''}
+        </span>
+      </div>
+      {hasSynthetic && (
+        <p className="text-[10px] text-zinc-600 leading-relaxed">
+          Dates before today are reconstructed from your actual buy/sell trade history (quantity held on each
+          date, valued at that date's closing price) — not just today's holdings applied throughout.
+        </p>
+      )}
+      {!backfilled && (
+        <p className="text-[10px] text-zinc-600 leading-relaxed">
+          Only today's snapshot is available so far. Run{' '}
+          <Link href="/reports" className="text-indigo-400 hover:text-indigo-300 underline underline-offset-2">
+            Portfolio Value History (Trade-Accurate)
+          </Link>{' '}
+          from Reports to backfill from April 1 using your real trade history.
+        </p>
+      )}
+      <div className="flex items-center gap-4">
+        <div className="flex flex-col">
+          <span className="text-[9px] text-zinc-500 uppercase tracking-wide">Portfolio</span>
+          <span className={cn('text-sm font-bold tabular-nums', last.portfolioPct >= 0 ? 'text-emerald-400' : 'text-red-400')}>
+            {fmtPct(last.portfolioPct)}
+          </span>
+        </div>
+        {last.niftyPct != null && (
+          <div className="flex flex-col">
+            <span className="text-[9px] text-zinc-500 uppercase tracking-wide">Nifty 50</span>
+            <span className={cn('text-sm font-bold tabular-nums', last.niftyPct >= 0 ? 'text-emerald-400' : 'text-red-400')}>
+              {fmtPct(last.niftyPct)}
+            </span>
+          </div>
+        )}
+      </div>
+      <div className="h-[240px] w-full">
+        <ResponsiveContainer width="100%" height="100%">
+          <LineChart data={points} margin={{ top: 4, right: 8, left: -16, bottom: 0 }}>
+            <CartesianGrid strokeDasharray="3 3" stroke="#27272a" />
+            <XAxis dataKey="date" tick={{ fontSize: 10, fill: '#71717a' }} minTickGap={40} />
+            <YAxis tick={{ fontSize: 10, fill: '#71717a' }} tickFormatter={(v: number) => `${v.toFixed(0)}%`} />
+            <ReTooltip
+              contentStyle={{ background: '#09090b', border: '1px solid #27272a', borderRadius: 8, fontSize: 11 }}
+              formatter={(v: any, name: any) => [`${Number(v).toFixed(2)}%`, name]}
+            />
+            <Legend wrapperStyle={{ fontSize: 11 }} />
+            <Line type="monotone" dataKey="portfolioPct" name="Portfolio" stroke="#818cf8" strokeWidth={2} dot={points.length < 2} isAnimationActive={points.length > 1} />
+            <Line type="monotone" dataKey="niftyPct" name="Nifty 50" stroke="#f59e0b" strokeWidth={2} dot={points.length < 2} isAnimationActive={points.length > 1} />
+          </LineChart>
+        </ResponsiveContainer>
+      </div>
+    </div>
+  );
+}
+
+// ─── Risk Snapshot ────────────────────────────────────────────────────────────
+
+function RiskSnapshotCard({ risk }: { risk: RiskSummary | null }) {
+  if (!risk || !risk.available) {
+    return (
+      <div className="bg-zinc-900/60 border border-zinc-800/60 rounded-xl p-4 flex flex-col gap-2">
+        <div className="flex items-center gap-1.5">
+          <ShieldAlert className="h-3.5 w-3.5 text-amber-400" />
+          <span className="text-[11px] font-semibold text-zinc-300 uppercase tracking-wide">Risk Snapshot</span>
+        </div>
+        <p className="text-xs text-zinc-500">
+          Not generated yet. Run the{' '}
+          <Link href="/reports" className="text-indigo-400 hover:text-indigo-300 underline underline-offset-2">
+            Portfolio Risk Report
+          </Link>{' '}
+          from Reports to see Beta, Sharpe, VaR and Max Drawdown here.
+        </p>
+      </div>
+    );
+  }
+
+  const metrics: { label: string; value: string; positive?: boolean }[] = [
+    { label: 'Beta (vs Nifty)', value: risk.beta?.toFixed(2) ?? '—' },
+    { label: 'Sharpe Ratio', value: risk.sharpe?.toFixed(2) ?? '—', positive: (risk.sharpe ?? 0) >= 0 },
+    { label: 'Sortino Ratio', value: risk.sortino?.toFixed(2) ?? '—', positive: (risk.sortino ?? 0) >= 0 },
+    { label: 'Max Drawdown', value: risk.maxDrawdown != null ? fmtPct(risk.maxDrawdown * 100) : '—', positive: false },
+    { label: 'Ann. Volatility', value: risk.annualizedVolatility != null ? `${(risk.annualizedVolatility * 100).toFixed(1)}%` : '—' },
+    { label: 'VaR (1-Day, 95%)', value: risk.var95Pct != null ? `${(risk.var95Pct * 100).toFixed(2)}%` : '—', positive: false },
+  ];
+
+  return (
+    <div className="bg-zinc-900/60 border border-zinc-800/60 rounded-xl p-4 flex flex-col gap-3">
+      <div className="flex items-center justify-between flex-wrap gap-2">
+        <div className="flex items-center gap-1.5">
+          <ShieldAlert className="h-3.5 w-3.5 text-amber-400" />
+          <span className="text-[11px] font-semibold text-zinc-300 uppercase tracking-wide">Risk Snapshot</span>
+        </div>
+        <span className="text-[10px] text-zinc-500">
+          {risk.generatedAt ? `Generated ${new Date(risk.generatedAt).toLocaleString('en-IN')}` : ''}
+          {' · '}
+          <Link href="/reports" className="text-indigo-400 hover:text-indigo-300 underline underline-offset-2">Regenerate</Link>
+        </span>
+      </div>
+      <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
+        {metrics.map(m => (
+          <div key={m.label} className="flex flex-col">
+            <span className="text-[9px] text-zinc-500 uppercase tracking-wide">{m.label}</span>
+            <span className={cn(
+              'text-sm font-bold tabular-nums',
+              m.positive === true ? 'text-emerald-400' : m.positive === false ? 'text-red-400' : 'text-white',
+            )}>
+              {m.value}
+            </span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// ─── Cross-links ──────────────────────────────────────────────────────────────
+
+function RelatedLinks({ current }: { current: 'portfolio' | 'portfolio-new' | 'portfolio-trades' }) {
+  const links = [
+    { href: '/portfolio', label: 'Portfolio', id: 'portfolio' },
+    { href: '/portfolio-new', label: 'Portfolio+ (Net Worth)', id: 'portfolio-new' },
+    { href: '/portfolio/trades', label: 'Trade P&L', id: 'portfolio-trades' },
+    { href: '/reports', label: 'Reports', id: 'reports' },
+  ].filter(l => l.id !== current);
+
+  return (
+    <div className="w-full border-b border-zinc-900 bg-zinc-950/40 px-4 py-1.5 flex items-center gap-2 flex-wrap">
+      <span className="text-[10px] text-zinc-600 uppercase tracking-wide">Related</span>
+      {links.map(l => (
+        <Link
+          key={l.id}
+          href={l.href}
+          className="text-[11px] font-medium px-2 py-0.5 rounded-full border border-zinc-800 bg-zinc-900/60 text-zinc-400 hover:text-indigo-300 hover:border-indigo-500/30 transition-all"
+        >
+          {l.label}
+        </Link>
+      ))}
+    </div>
+  );
+}
+
 // ─── Main Component ───────────────────────────────────────────────────────────
 
-type Tab = 'holdings' | 'positions' | 'orders' | 'trades' | 'allocation' | 'mf';
+type Tab = 'holdings' | 'positions' | 'orders' | 'trades' | 'allocation' | 'mf' | 'performance';
 type AssetFilter = 'ALL' | 'EQUITY' | 'ETF';
 
 export default function PortfolioDashboard() {
@@ -1005,6 +1193,9 @@ export default function PortfolioDashboard() {
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
   const [tab, setTab] = useState<Tab>('holdings');
   const [assetFilter, setAssetFilter] = useState<AssetFilter>('ALL');
+  const [performancePoints, setPerformancePoints] = useState<PerformancePoint[]>([]);
+  const [performanceBackfilled, setPerformanceBackfilled] = useState(false);
+  const [riskSummary, setRiskSummary] = useState<RiskSummary | null>(null);
 
   const fetchData = useCallback(async (showLoading = false) => {
     if (showLoading) setLoading(true);
@@ -1059,6 +1250,27 @@ export default function PortfolioDashboard() {
     fetchEnrich();
   }, []);
 
+  // Fetch risk summary once on mount (low-frequency data)
+  useEffect(() => {
+    fetch('/api/portfolio-risk-summary')
+      .then(r => r.ok ? r.json() : null)
+      .then(resp => { if (resp) setRiskSummary(resp); })
+      .catch(() => {});
+  }, []);
+
+  // Performance history: the daily-snapshot tracker accumulates going forward; the Apr 1 backfill
+  // (trade-accurate reconstruction) is generated on-demand from Reports since it's not cheap. Fetch
+  // once on mount.
+  useEffect(() => {
+    fetch('/api/portfolio-history')
+      .then(r => r.json())
+      .then(resp => {
+        if (Array.isArray(resp.points)) setPerformancePoints(resp.points);
+        setPerformanceBackfilled(!!resp.backfilled);
+      })
+      .catch(() => {});
+  }, []);
+
   useEffect(() => {
     fetchData(true);
     const interval = setInterval(() => fetchData(false), 30000);
@@ -1081,6 +1293,7 @@ export default function PortfolioDashboard() {
     { id: 'trades', label: 'Trades', count: trades.length },
     { id: 'allocation', label: 'Allocation' },
     { id: 'mf', label: 'Mutual Funds', count: mfData?.length },
+    { id: 'performance', label: 'Performance' },
   ];
 
   return (
@@ -1111,6 +1324,8 @@ export default function PortfolioDashboard() {
           <RefreshCw className={cn('h-3.5 w-3.5', refreshing && 'animate-spin')} />
         </button>
       </header>
+
+      <RelatedLinks current="portfolio" />
 
       {/* Summary bar */}
       {summary && (
@@ -1238,6 +1453,12 @@ export default function PortfolioDashboard() {
             {tab === 'trades' && <TradesTable trades={trades} />}
             {tab === 'allocation' && <AllocationChart holdings={holdings} mfData={mfData ?? []} />}
             {tab === 'mf' && <MutualFundsTab mfData={mfData} />}
+            {tab === 'performance' && (
+              <div className="flex flex-col gap-4">
+                <PerformanceChart points={performancePoints} backfilled={performanceBackfilled} />
+                <RiskSnapshotCard risk={riskSummary} />
+              </div>
+            )}
           </div>
         )}
       </main>

@@ -5,11 +5,44 @@ Called by the Next.js /api/portfolio-holdings route.
 import sys
 import os
 import json
+from datetime import datetime, timezone, timedelta
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 from login import get_dhan_client
 from lib.dhan_helper import DhanHelper
+
+IST = timezone(timedelta(hours=5, minutes=30))
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+HISTORY_FILE = os.path.join(PROJECT_ROOT, 'debug', 'portfolio_value_history.json')
+
+
+def snapshot_value_history(total_invested: float, total_current_value: float) -> None:
+    """Upsert today's (IST) total portfolio value into debug/portfolio_value_history.json."""
+    today = datetime.now(IST).strftime('%Y-%m-%d')
+    try:
+        with open(HISTORY_FILE, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        data = {"history": []}
+
+    history = data.get("history", [])
+    entry = {
+        "date": today,
+        "totalInvested": round(total_invested, 2),
+        "totalCurrentValue": round(total_current_value, 2),
+    }
+    history = [h for h in history if h.get("date") != today]
+    history.append(entry)
+    history.sort(key=lambda h: h["date"])
+    data["history"] = history
+
+    try:
+        os.makedirs(os.path.dirname(HISTORY_FILE), exist_ok=True)
+        with open(HISTORY_FILE, 'w', encoding='utf-8') as f:
+            json.dump(data, f)
+    except Exception:
+        pass
 
 ETF_SUFFIXES = ('BEES', 'ETF', 'FUND', 'IETF', 'LIQUIDCASE', 'GOLDETF', 'SILVERETF')
 ETF_CONTAINS = ('GOLDBEES', 'NIFTYBEES', 'BANKBEES', 'LIQUIDBEES', 'JUNIORBEES',
@@ -157,6 +190,9 @@ def main():
 
     total_pnl = round(total_current_value - total_invested, 2)
     total_pnl_pct = round((total_pnl / total_invested * 100) if total_invested > 0 else 0.0, 2)
+
+    if total_invested > 0:
+        snapshot_value_history(total_invested, total_current_value)
 
     print(json.dumps({
         "success": True,

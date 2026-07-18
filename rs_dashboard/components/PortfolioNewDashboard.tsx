@@ -6,7 +6,11 @@ import {
   TrendingUp, TrendingDown, Wallet, Building2, Coins,
   Landmark, Gem, Bitcoin, PiggyBank, BarChart3, HelpCircle, Settings,
 } from 'lucide-react';
-import { PieChart, Pie, Cell, Tooltip as ReTooltip, ResponsiveContainer, Legend } from 'recharts';
+import {
+  PieChart, Pie, Cell, Tooltip as ReTooltip, ResponsiveContainer, Legend,
+  LineChart, Line, XAxis, YAxis, CartesianGrid,
+} from 'recharts';
+import Link from 'next/link';
 import NavBar from './NavBar';
 import { cn } from '@/lib/utils';
 
@@ -47,6 +51,14 @@ interface MutualFund {
 }
 
 interface AllocationEntry { name: string; value: number; color: string }
+
+interface PerformancePoint {
+  date: string;
+  totalCurrentValue: number;
+  synthetic: boolean;
+  portfolioPct: number;
+  niftyPct: number | null;
+}
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -364,6 +376,8 @@ export default function PortfolioNewDashboard() {
   const [showPanel, setShowPanel] = useState(false);
   const [editing, setEditing] = useState<ManualInvestment | null>(null);
   const [now, setNow] = useState(new Date());
+  const [performancePoints, setPerformancePoints] = useState<PerformancePoint[]>([]);
+  const [performanceBackfilled, setPerformanceBackfilled] = useState(false);
 
   // Live clock
   useEffect(() => {
@@ -410,6 +424,18 @@ export default function PortfolioNewDashboard() {
   }, []);
 
   useEffect(() => { fetchAll(); }, [fetchAll]);
+
+  // Performance history: the daily-snapshot tracker accumulates going forward; the Apr 1 backfill
+  // (trade-accurate reconstruction) is generated on-demand from Reports since it's not cheap.
+  useEffect(() => {
+    fetch('/api/portfolio-history')
+      .then(r => r.json())
+      .then(resp => {
+        if (Array.isArray(resp.points)) setPerformancePoints(resp.points);
+        setPerformanceBackfilled(!!resp.backfilled);
+      })
+      .catch(() => {});
+  }, []);
 
   // ─── Persist Investments ─────────────────────────────────────────────────
 
@@ -507,6 +533,20 @@ export default function PortfolioNewDashboard() {
       {/* Top nav */}
       <div className="sticky top-0 z-40 border-b border-zinc-800 bg-zinc-950/95 backdrop-blur px-4 py-2 flex items-center gap-3">
         <NavBar />
+      </div>
+
+      {/* Cross-links */}
+      <div className="border-b border-zinc-800 bg-zinc-950/60 px-4 py-1.5 flex items-center gap-2 flex-wrap">
+        <span className="text-[9px] text-zinc-600 uppercase tracking-widest font-mono">Related</span>
+        <Link href="/portfolio" className="text-[11px] font-medium font-mono px-2 py-0.5 rounded-full border border-zinc-800 bg-zinc-900/60 text-zinc-400 hover:text-amber-300 hover:border-amber-500/30 transition-all">
+          Portfolio
+        </Link>
+        <Link href="/portfolio/trades" className="text-[11px] font-medium font-mono px-2 py-0.5 rounded-full border border-zinc-800 bg-zinc-900/60 text-zinc-400 hover:text-amber-300 hover:border-amber-500/30 transition-all">
+          Trade P&amp;L
+        </Link>
+        <Link href="/reports" className="text-[11px] font-medium font-mono px-2 py-0.5 rounded-full border border-zinc-800 bg-zinc-900/60 text-zinc-400 hover:text-amber-300 hover:border-amber-500/30 transition-all">
+          Reports
+        </Link>
       </div>
 
       {/* Terminal header */}
@@ -723,6 +763,58 @@ export default function PortfolioNewDashboard() {
               </div>
             )}
           </div>
+        </div>
+
+        {/* Performance vs Nifty 50 (equity portion) */}
+        <div className="bg-zinc-900 border border-zinc-800 rounded-lg p-4">
+          <div className="flex items-center justify-between flex-wrap gap-2 mb-2">
+            <span className="text-[10px] font-bold uppercase tracking-widest text-amber-400">Equity vs Nifty 50</span>
+            {performancePoints.length > 0 && (
+              <span className="text-[10px] font-mono text-zinc-600">
+                Since {performancePoints[0].date} · {performancePoints.length} day{performancePoints.length !== 1 ? 's' : ''}
+              </span>
+            )}
+          </div>
+          {performancePoints.length === 0 ? (
+            <div className="h-40 flex items-center justify-center text-zinc-600 text-xs text-center px-6">
+              No performance history yet — a daily snapshot of your equity value is recorded automatically.
+              Check back tomorrow to see the trend build up.
+            </div>
+          ) : (
+            <>
+            {performancePoints.some(p => p.synthetic) && (
+              <p className="text-[10px] text-zinc-600 leading-relaxed mb-1">
+                Dates before today are reconstructed from your actual buy/sell trade history (quantity held
+                on each date, valued at that date's closing price).
+              </p>
+            )}
+            {!performanceBackfilled && (
+              <p className="text-[10px] text-zinc-600 leading-relaxed mb-1">
+                Only today's snapshot is available so far. Run{' '}
+                <Link href="/reports" className="text-amber-400 hover:text-amber-300 underline underline-offset-2">
+                  Portfolio Value History (Trade-Accurate)
+                </Link>{' '}
+                from Reports to backfill from April 1.
+              </p>
+            )}
+            <div className="h-[220px] w-full">
+              <ResponsiveContainer width="100%" height="100%">
+                <LineChart data={performancePoints} margin={{ top: 4, right: 8, left: -16, bottom: 0 }}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="#27272a" />
+                  <XAxis dataKey="date" tick={{ fontSize: 10, fill: '#71717a' }} minTickGap={40} />
+                  <YAxis tick={{ fontSize: 10, fill: '#71717a' }} tickFormatter={(v: number) => `${v.toFixed(0)}%`} />
+                  <ReTooltip
+                    contentStyle={{ background: '#09090b', border: '1px solid #27272a', borderRadius: 8, fontSize: 11 }}
+                    formatter={(v: any, name: any) => [`${Number(v).toFixed(2)}%`, name]}
+                  />
+                  <Legend wrapperStyle={{ fontSize: 11 }} />
+                  <Line type="monotone" dataKey="portfolioPct" name="Equity" stroke="#f59e0b" strokeWidth={2} dot={performancePoints.length < 2} isAnimationActive={performancePoints.length > 1} />
+                  <Line type="monotone" dataKey="niftyPct" name="Nifty 50" stroke="#818cf8" strokeWidth={2} dot={performancePoints.length < 2} isAnimationActive={performancePoints.length > 1} />
+                </LineChart>
+              </ResponsiveContainer>
+            </div>
+            </>
+          )}
         </div>
 
         {/* Manual Investments Table */}
