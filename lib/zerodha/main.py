@@ -197,7 +197,7 @@ def main():
                     close_all_trades()
                     break
 
-                time.sleep(5)
+                time.sleep(1)
                 trading_strategy(config.tick_data)
                 # print(config.kite.positions()["net"])
 

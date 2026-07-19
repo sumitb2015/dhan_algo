@@ -40,7 +40,6 @@ def place_order(
         order_id = kite.place_order(**order_params)
         logging.info(f"The Order ID of trade placed for {symbol}: {order_id}")
         if order_type == "MARKET":
-            time.sleep(1)
             average_entry_price = get_average_entry_price(kite, order_id)
         else:
             average_entry_price = 0
@@ -53,31 +52,32 @@ def place_order(
         return None, None
 
 
-def get_average_entry_price(kite, order_id):
+def get_average_entry_price(kite, order_id, max_retries=5, delay_sec=0.05):
     try:
         logging.info(f"Getting average entry price for order ID: {order_id}")
-        order_history = kite.order_history(order_id)
-        if not order_history:
-            logging.warning(f"No order history found for order ID: {order_id}")
-            return None
+        for attempt in range(max_retries):
+            order_history = kite.order_history(order_id)
+            if order_history:
+                # Find the completed order entry
+                completed_order = next(
+                    (
+                        order
+                        for order in order_history
+                        if order["order_id"] == order_id and order["status"] == "COMPLETE"
+                    ),
+                    None,
+                )
 
-        # Find the completed order entry
-        completed_order = next(
-            (
-                order
-                for order in order_history
-                if order["order_id"] == order_id and order["status"] == "COMPLETE"
-            ),
-            None,
-        )
+                if completed_order:
+                    logging.info(
+                        f"Order execution completed for order ID: {order_id} with average price: {completed_order.get('average_price')} (attempt {attempt+1})"
+                    )
+                    return completed_order.get('average_price')
+            
+            if attempt < max_retries - 1:
+                time.sleep(delay_sec)
 
-        if completed_order:
-            logging.info(
-                f"Order execution completed for order ID: {order_id} with average price: {completed_order.get('average_price')}"
-            )
-            return completed_order.get('average_price')
-
-        logging.warning(f"No completed order found for order ID: {order_id}")
+        logging.warning(f"No completed order found for order ID: {order_id} after {max_retries} attempts.")
         return None
 
     except Exception as e:

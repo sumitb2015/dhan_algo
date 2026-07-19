@@ -621,7 +621,6 @@ def kite_place_trade(
             transaction_type=direction,
             quantity=quantity,
         )
-        time.sleep(0.5)  # Give some time for order execution
         if not order_id:
             logging.error("Failed to place initial order.")
             return {}
