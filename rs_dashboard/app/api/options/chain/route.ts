@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import path from 'path';
+import fs from 'fs';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
 import { PROJECT_ROOT, PYTHON_EXE, dedupe } from '@/lib/pyExec';
@@ -18,9 +19,49 @@ export async function GET(request: NextRequest) {
   const { searchParams } = new URL(request.url);
   const underlying = (searchParams.get('underlying') ?? 'NIFTY').toUpperCase();
   const expiry     = searchParams.get('expiry') ?? '';
+  const broker     = (searchParams.get('broker') ?? 'dhan').toLowerCase();
 
   if (!expiry) {
     return NextResponse.json({ success: false, error: 'expiry required' }, { status: 400 });
+  }
+
+  if (broker === 'zerodha') {
+    try {
+      const cacheFile = path.join(PROJECT_ROOT, 'debug', 'zerodha_nifty_instruments.json');
+      if (fs.existsSync(cacheFile)) {
+        const raw = fs.readFileSync(cacheFile, 'utf8');
+        const instruments = JSON.parse(raw) as { strike: number; expiry: string; instrument_type: 'CE' | 'PE' }[];
+        const filtered = instruments.filter(x => x.expiry === expiry);
+        
+        const oc: Record<string, { ce: { previous_close: number }; pe: { previous_close: number } }> = {};
+        for (const inst of filtered) {
+          const strikeKey = String(Math.round(inst.strike));
+          if (!oc[strikeKey]) {
+            oc[strikeKey] = {
+              ce: { previous_close: 0 },
+              pe: { previous_close: 0 }
+            };
+          }
+        }
+        
+        // Try to read spot from live quotes if available, otherwise default to 0
+        let spot = 0;
+        try {
+          const quotesFile = path.join(PROJECT_ROOT, 'debug', 'live_options_quotes.json');
+          if (fs.existsSync(quotesFile)) {
+            const q = JSON.parse(fs.readFileSync(quotesFile, 'utf8'));
+            if (q.expiry === expiry && q.spot) spot = q.spot;
+          }
+        } catch {}
+        
+        const data: ChainResponse = { chain: { oc }, spot: spot || 24000 };
+        return NextResponse.json({ success: true, data }, {
+          headers: { 'Cache-Control': 'no-store' }
+        });
+      }
+    } catch (err) {
+      console.error('[/api/options/chain] Failed to read Zerodha instruments for chain:', err);
+    }
   }
 
   const cacheKey = `${underlying}:${expiry}`;

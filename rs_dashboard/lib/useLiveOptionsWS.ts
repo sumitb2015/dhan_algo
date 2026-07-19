@@ -38,7 +38,7 @@ export interface LiveOptionsWSResult {
   transport: 'ws' | 'poll';
 }
 
-export function useLiveOptionsWS(expiry: string): LiveOptionsWSResult {
+export function useLiveOptionsWS(expiry: string, broker: string): LiveOptionsWSResult {
   const [liveQuotes, setLiveQuotes]     = useState<LiveQuotes | null>(null);
   const [bridgeStatus, setBridgeStatus] = useState<BridgeStatus>({ status: 'STOPPED' });
   const [lastUpdated, setLastUpdated]   = useState('');
@@ -47,7 +47,7 @@ export function useLiveOptionsWS(expiry: string): LiveOptionsWSResult {
   useEffect(() => {
     if (!expiry) return;
 
-    // Expiry changed (or first mount): drop quotes from the previous expiry
+    // Expiry or broker changed: drop quotes from the previous state
     // immediately rather than displaying them until fresh data arrives.
     setLiveQuotes(null);
     setLastUpdated('');
@@ -206,7 +206,7 @@ export function useLiveOptionsWS(expiry: string): LiveOptionsWSResult {
       try { ws?.close(); } catch { /* noop */ }
       ws = null;
     };
-  }, [expiry]);
+  }, [expiry, broker]);
 
   return { liveQuotes, bridgeStatus, lastUpdated, transport };
 }

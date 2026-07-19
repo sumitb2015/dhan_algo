@@ -1,5 +1,6 @@
-﻿import { NextRequest, NextResponse } from 'next/server';
+import { NextRequest, NextResponse } from 'next/server';
 import path from 'path';
+import fs from 'fs';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
 
@@ -22,7 +23,30 @@ function todayIST(): string {
 export async function GET(request: NextRequest) {
   const { searchParams } = new URL(request.url);
   const underlying = (searchParams.get('underlying') ?? 'NIFTY').toUpperCase();
+  const broker = (searchParams.get('broker') ?? 'dhan').toLowerCase();
   const today = todayIST();
+
+  if (broker === 'zerodha') {
+    try {
+      const cacheFile = path.join(PROJECT_ROOT, 'debug', 'zerodha_nifty_instruments.json');
+      if (!fs.existsSync(cacheFile)) {
+        const cacheScript = path.join(PROJECT_ROOT, 'scripts', 'tools', 'zerodha_instruments_cache.py');
+        await execFileAsync(PYTHON_EXE, [cacheScript], { encoding: 'utf8', timeout: 60_000, windowsHide: true });
+      }
+      if (fs.existsSync(cacheFile)) {
+        const raw = fs.readFileSync(cacheFile, 'utf8');
+        const instruments = JSON.parse(raw) as { expiry: string }[];
+        const uniqueExpiries = Array.from(new Set(instruments.map(x => x.expiry)))
+          .filter(d => d >= today)
+          .sort();
+        return NextResponse.json({ success: true, data: uniqueExpiries });
+      }
+    } catch (err) {
+      console.error('[/api/options/expiries] Failed to read/generate Zerodha cache:', err);
+      return NextResponse.json({ success: false, error: 'Failed to retrieve Zerodha expiries' }, { status: 500 });
+    }
+  }
+
   const cacheKey = `${underlying}:${today}`;
 
   const hit = cache.get(cacheKey);

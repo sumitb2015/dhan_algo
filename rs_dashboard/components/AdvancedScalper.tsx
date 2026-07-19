@@ -50,7 +50,7 @@ export default function AdvancedScalper() {
   const orderInFlightRef = useRef<Set<string>>(new Set());
 
   // Live data: direct WebSocket to the Python bridge (HTTP polling fallback)
-  const { liveQuotes, bridgeStatus, lastUpdated, transport } = useLiveOptionsWS(expiry);
+  const { liveQuotes, bridgeStatus, lastUpdated, transport } = useLiveOptionsWS(expiry, broker);
 
   // Trading controls
   const [orderMode, setOrderMode] = useState<'MARKET' | 'LIMIT'>('MARKET');
@@ -210,19 +210,23 @@ export default function AdvancedScalper() {
       : entry?.[box.side === 'CE' ? 'ceId' : 'peId'];
   }, [strikeMap, broker]);
 
-  // ─── useEffect 1: Load expiries on mount ─────────────────────────
+  // ─── useEffect 1: Load expiries based on broker ───────────────────
 
   useEffect(() => {
-    fetch('/api/options/expiries?underlying=NIFTY')
+    fetch(`/api/options/expiries?underlying=NIFTY&broker=${broker}`)
       .then(r => r.json())
       .then((j: { success: boolean; data?: string[] }) => {
         if (j.success && j.data?.length) {
           setExpiries(j.data);
-          setExpiry(j.data[0]);
+          setExpiry(prev => j.data.includes(prev) ? prev : j.data[0]);
         }
       })
       .catch(() => {});
+  }, [broker]);
 
+  // ─── useEffect 1b: Load mount data ───────────────────────────────
+
+  useEffect(() => {
     fetch('/api/scalper/nifty-prev-close')
       .then(r => r.json())
       .then((j: { success: boolean; prevClose?: number }) => {
@@ -249,7 +253,7 @@ export default function AdvancedScalper() {
     setPrevClose({});
     setStrikeMap({});   // liveQuotes reset is handled inside useLiveOptionsWS
 
-    fetch(`/api/options/chain?underlying=NIFTY&expiry=${expiry}`)
+    fetch(`/api/options/chain?underlying=NIFTY&expiry=${expiry}&broker=${broker}`)
       .then(r => r.json())
       .then((j: { success: boolean; data?: { chain: { oc?: Record<string, ChainOcEntry> }; spot: number } }) => {
         if (!j.success || !j.data?.chain?.oc) return;
@@ -283,7 +287,7 @@ export default function AdvancedScalper() {
     fetch('/api/options/live', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ action: 'start', underlying: 'NIFTY', expiry, numStrikes: 30 }),
+      body: JSON.stringify({ action: 'start', underlying: 'NIFTY', expiry, numStrikes: 30, broker }),
     }).catch(() => {});
 
     return () => {
@@ -293,7 +297,7 @@ export default function AdvancedScalper() {
         body: JSON.stringify({ action: 'stop' }),
       }).catch(() => {});
     };
-  }, [expiry]);
+  }, [expiry, broker]);
 
   // Re-resolves strikeMap (Dhan securityId / Zerodha tradingsymbol per strike)
   // whenever the expiry OR the selected broker changes. Kept separate from
