@@ -54,13 +54,13 @@ def main():
     kite = restore_session_from_json()
     if kite is None:
         print(json.dumps({'success': False, 'error': 'No Zerodha session — run zerodha_autologin.py first'}))
-        sys.exit(0)
+        sys.exit(1)
 
     try:
         instruments = kite.instruments('NFO')
     except Exception as e:
         print(json.dumps({'success': False, 'error': f'instruments() failed: {e}'}))
-        sys.exit(0)
+        sys.exit(1)
 
     rows = []
     for inst in instruments:

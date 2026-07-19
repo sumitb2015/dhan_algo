@@ -368,10 +368,17 @@ def watchdog_loop(helper, kite, stop_event: threading.Event, state: dict,
 
             nifty_symbols = get_nifty_symbols()
             positions = kite.positions()
+
+            # Load active symbols from replication log to restrict watchdog scope
+            log = read_json(LOG_FILE, {'entries': []})
+            entries = log.get('entries', []) if isinstance(log, dict) else []
+            replicated_symbols = {e.get('zerodha_symbol') for e in entries if e.get('zerodha_symbol')}
+
             open_positions = [
                 p for p in positions.get('net', [])
                 if int(p.get('quantity', 0) or 0) != 0
                 and p.get('tradingsymbol') in nifty_symbols
+                and p.get('tradingsymbol') in replicated_symbols
             ]
             open_symbols = {p.get('tradingsymbol') for p in open_positions}
             for sym in list(safety_attempts):
@@ -589,28 +596,34 @@ def main():
         try:
             state['ws_last_event_ts'] = time.time()
             data = payload.get('Data', {})
-            status = str(data.get('Status', '')).upper()
+            
+            # Robust case-insensitive key lookups
+            status = str(data.get('Status') or data.get('status') or '').upper()
             if status not in ('TRADED', 'PART_TRADED'):
                 return
 
             dump_raw_event(payload)
 
-            order_no = str(data.get('OrderNo', ''))
+            order_no = str(data.get('OrderNo') or data.get('orderNo') or '')
             if not order_no:
                 return
 
-            traded_qty = int(data.get('TradedQty', 0) or 0)
+            traded_qty = int(data.get('TradedQty') or data.get('tradedQty') or 0)
             already = int(replicated_qty.get(order_no, 0))
             delta = traded_qty - already
             if delta <= 0:
                 return
 
-            symbol = data.get('Symbol', order_no)
-            txn_type = str(data.get('TxnType', '')).upper()
-            side = 'BUY' if txn_type == 'B' else 'SELL' if txn_type == 'S' else None
-            strike = data.get('StrikePrice')
-            expiry = data.get('ExpiryDate')
-            opt_type = data.get('OptType')
+            symbol = data.get('Symbol') or data.get('symbol') or order_no
+            txn_type = str(data.get('TxnType') or data.get('txnType') or '').upper()
+            side = 'BUY' if txn_type in ('B', 'BUY') else 'SELL' if txn_type in ('S', 'SELL') else None
+            strike = data.get('StrikePrice') or data.get('strikePrice')
+            expiry = data.get('ExpiryDate') or data.get('expiryDate')
+            
+            # Normalize option types (e.g. CALL -> CE, PUT -> PE)
+            opt_type = data.get('OptType') or data.get('optType')
+            if opt_type:
+                opt_type = 'CE' if str(opt_type).upper() in ('CE', 'CALL') else 'PE'
 
             ts = datetime.now().isoformat()
 
