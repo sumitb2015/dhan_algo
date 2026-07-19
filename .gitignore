@@ -3,8 +3,12 @@ venv/
 
 # Sensitive Credentials
 .env
+.env.zerodha
 access_token.json
+access_token.txt
+last_modified.txt
 credentials.json
+credDemo.py
 *.token
 
 # Large Data & Media
@@ -40,6 +44,8 @@ scratch/rrg-lite-clone/
 # Debug Scripts
 debug_*.py
 temp_*.py
+scratch/debug_*.py
+scratch/login_*.png
 
 # Data Directories
 Stocks Daily Historical Data/
