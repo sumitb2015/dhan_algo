@@ -46,6 +46,6 @@ export async function middleware(req: NextRequest): Promise<NextResponse> {
 
 export const config = {
   matcher: [
-    '/((?!login|api/auth|api/scalper/zerodha/lookup|_next/static|_next/image|favicon.ico).*)',
+    '/((?!login|api/auth|_next/static|_next/image|favicon.ico).*)',
   ],
 };
