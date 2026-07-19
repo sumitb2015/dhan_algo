@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert';
-import { isTokenExpired } from './zerodhaToken';
+import { isTokenExpired } from './zerodhaToken.ts';
 
 test('isTokenExpired: undefined expiry is treated as expired', () => {
   assert.strictEqual(isTokenExpired(undefined), true);
