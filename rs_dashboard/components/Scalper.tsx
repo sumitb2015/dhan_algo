@@ -5,6 +5,7 @@ import NavBar from './NavBar';
 import { Zap, RefreshCw, Shield, ShieldOff, ChevronDown, ChevronUp, Wallet } from 'lucide-react';
 import { useLiveOptionsWS } from '@/lib/useLiveOptionsWS';
 import { useProfitLock, ProfitLockControls } from './ProfitLock';
+import { useBrokerSelector, brokerRoute } from '@/hooks/useBrokerSelector';
 
 // ─── Types ────────────────────────────────────────────────────────
 
@@ -87,7 +88,8 @@ export default function Scalper() {
   const [prevSpot, setPrevSpot]         = useState(0);
 
   // Security ID map per strike — enables fast-order (no Python per order)
-  const [strikeMap, setStrikeMap]   = useState<Record<string, { ceId?: string; peId?: string }>>({});
+  const [strikeMap, setStrikeMap]   = useState<Record<string, { ceId?: string; peId?: string; ceSymbol?: string; peSymbol?: string }>>({});
+  const { broker, setBroker, authenticatedBrokers } = useBrokerSelector();
   const [lotSize, setLotSize]       = useState(75);
 
   // Orders in flight, keyed by side — blocks double-fire and gates the Buy/Sell
@@ -328,14 +330,20 @@ export default function Scalper() {
       })
       .catch(() => {});
 
-    // Lookup security IDs for all strikes of this expiry — enables fast-order path.
-    // Capture the expiry this request was made for: if the user switches expiries again
-    // before this resolves, an out-of-order response must not overwrite strikeMap with
-    // stale security IDs from a different contract (Dhan rejects those as DH-905).
+    // Lookup security IDs (Dhan) / tradingsymbols (Zerodha) for all strikes of
+    // this expiry — enables the fast-order path. Capture the expiry this
+    // request was made for: if the user switches expiries again before this
+    // resolves, an out-of-order response must not overwrite strikeMap with
+    // stale data from a different contract (Dhan rejects those as DH-905).
     const requestedExpiry = expiry;
-    fetch(`/api/scalper/lookup?underlying=NIFTY&expiry=${expiry}`)
+    const lookupUrl = brokerRoute(
+      broker,
+      `/api/scalper/lookup?underlying=NIFTY&expiry=${expiry}`,
+      `/api/scalper/zerodha/lookup?expiry=${expiry}`,
+    );
+    fetch(lookupUrl)
       .then(r => r.json())
-      .then((j: { success: boolean; data?: { lotSize: number; strikes: Record<string, { ceId?: string; peId?: string }> } }) => {
+      .then((j: { success: boolean; data?: { lotSize: number; strikes: Record<string, { ceId?: string; peId?: string; ceSymbol?: string; peSymbol?: string }> } }) => {
         if (requestedExpiry !== expiryRef.current) return;
         if (j.success && j.data) {
           setStrikeMap(j.data.strikes);
@@ -369,7 +377,7 @@ export default function Scalper() {
 
   const fetchTabData = useCallback(() => {
     setTabLoading(true);
-    fetch('/api/scalper/all')
+    fetch(brokerRoute(broker, '/api/scalper/all', '/api/scalper/zerodha/all'))
       .then(r => r.json())
       .then((j: { success: boolean; positions?: Record<string, unknown>[]; orders?: Record<string, unknown>[]; trades?: Record<string, unknown>[]; funds?: Record<string, any>; pnl_guard?: any }) => {
         if (j.success) {
@@ -382,10 +390,10 @@ export default function Scalper() {
       })
       .catch(() => {})
       .finally(() => setTabLoading(false));
-  }, []);
+  }, [broker]);
 
   const pollTabData = useCallback(() => {
-    fetch('/api/scalper/poll')
+    fetch(brokerRoute(broker, '/api/scalper/poll', '/api/scalper/zerodha/poll'))
       .then(r => r.json())
       .then((j: { success: boolean; positions?: Record<string, unknown>[]; orders?: Record<string, unknown>[]; trades?: Record<string, unknown>[] }) => {
         if (j.success) {
@@ -395,16 +403,16 @@ export default function Scalper() {
         }
       })
       .catch(() => {});
-  }, []);
+  }, [broker]);
 
   const pollFunds = useCallback(() => {
-    fetch('/api/scalper/funds')
+    fetch(brokerRoute(broker, '/api/scalper/funds', '/api/scalper/zerodha/funds'))
       .then(r => r.json())
       .then((j: { success: boolean; data?: Record<string, any> }) => {
         if (j.success) setFundsData(j.data ?? null);
       })
       .catch(() => {});
-  }, []);
+  }, [broker]);
 
   useEffect(() => {
     fetchTabData();
@@ -420,6 +428,16 @@ export default function Scalper() {
   // Keep refs in sync so the guard interval always reads latest values without stale closures
   useEffect(() => { positionsRef.current = enrichedPositions; }, [enrichedPositions]);
   useEffect(() => { posGuardsRef.current = posGuards; }, [posGuards]);
+
+  // Clear stale data immediately on broker switch so a Dhan position is
+  // never displayed or acted on as if it belonged to Zerodha (or vice versa).
+  useEffect(() => {
+    setPositionsData([]);
+    setOrdersData([]);
+    setTradesData([]);
+    setFundsData(null);
+    setStrikeMap({});
+  }, [broker]);
 
   // ─── Toast helper ─────────────────────────────────────────────────
 
@@ -449,15 +467,19 @@ export default function Scalper() {
     setOrderPending(prev => new Set([...prev, option]));
 
     try {
-      // Fast path: direct Dhan REST call (no Python spawn, no CSV load)
-      const secId = strikeMap[String(strike)]?.[option === 'CE' ? 'ceId' : 'peId'];
+      const entry = strikeMap[String(strike)];
       let res: Response;
-      if (secId) {
-        res = await fetch('/api/scalper/fast-order', {
+      if (broker === 'zerodha') {
+        const symbol = entry?.[option === 'CE' ? 'ceSymbol' : 'peSymbol'];
+        if (!symbol) {
+          addToast('error', `${side} ${option} failed`, 'Zerodha strike data still loading');
+          return;
+        }
+        res = await fetch('/api/scalper/zerodha/order', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
-            securityId: secId,
+            tradingsymbol: symbol,
             quantity: lots * lotSize,
             side,
             orderType: orderMode,
@@ -465,16 +487,32 @@ export default function Scalper() {
           }),
         });
       } else {
-        // Fallback: Python path (strikeMap not yet loaded)
-        const body: Record<string, unknown> = {
-          underlying: 'NIFTY', expiry, strike, option, side, lots, type: orderMode,
-        };
-        if (orderMode === 'LIMIT') body.price = Number(limitPrice);
-        res = await fetch('/api/scalper/order', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(body),
-        });
+        // Fast path: direct Dhan REST call (no Python spawn, no CSV load)
+        const secId = entry?.[option === 'CE' ? 'ceId' : 'peId'];
+        if (secId) {
+          res = await fetch('/api/scalper/fast-order', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              securityId: secId,
+              quantity: lots * lotSize,
+              side,
+              orderType: orderMode,
+              ...(orderMode === 'LIMIT' ? { price: Number(limitPrice) } : {}),
+            }),
+          });
+        } else {
+          // Fallback: Python path (strikeMap not yet loaded)
+          const body: Record<string, unknown> = {
+            underlying: 'NIFTY', expiry, strike, option, side, lots, type: orderMode,
+          };
+          if (orderMode === 'LIMIT') body.price = Number(limitPrice);
+          res = await fetch('/api/scalper/order', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body),
+          });
+        }
       }
 
       const j = await res.json() as { success: boolean; order_id?: string; error?: string };
@@ -490,7 +528,7 @@ export default function Scalper() {
       orderInFlightRef.current.delete(option);
       setOrderPending(prev => { const s = new Set(prev); s.delete(option); return s; });
     }
-  }, [ceStrike, peStrike, ceLimitPrice, peLimitPrice, expiry, lots, lotSize, strikeMap, orderMode, addToast, fetchTabData]);
+  }, [ceStrike, peStrike, ceLimitPrice, peLimitPrice, expiry, lots, lotSize, strikeMap, orderMode, broker, addToast, fetchTabData]);
 
   // ─── Per-position close ───────────────────────────────────────────
 
@@ -514,7 +552,8 @@ export default function Scalper() {
       let liveNetQty = 0;
       let liveSecId = fallbackSecId;
       try {
-        const posRes = await fetch('/api/scalper/positions');
+        const posUrl = brokerRoute(broker, '/api/scalper/positions', '/api/scalper/zerodha/positions');
+        const posRes = await fetch(posUrl);
         const posJson = await posRes.json() as { success: boolean; data?: Record<string, unknown>[] };
         if (posJson.success && posJson.data) {
           const match = posJson.data.find(p => String(p.tradingSymbol) === sym);
@@ -538,10 +577,15 @@ export default function Scalper() {
       const side = liveNetQty > 0 ? 'SELL' : 'BUY';
       const qty = Math.abs(liveNetQty);
 
-      const res = await fetch('/api/scalper/fast-order', {
+      const orderUrl = brokerRoute(broker, '/api/scalper/fast-order', '/api/scalper/zerodha/order');
+      const res = await fetch(orderUrl, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ securityId: liveSecId, quantity: qty, side, orderType: 'MARKET' }),
+        body: JSON.stringify(
+          broker === 'zerodha'
+            ? { tradingsymbol: sym, quantity: qty, side, orderType: 'MARKET' }
+            : { securityId: liveSecId, quantity: qty, side, orderType: 'MARKET' },
+        ),
       });
       const j = await res.json() as { success: boolean; order_id?: string; error?: string };
       if (j.success) {
@@ -561,7 +605,7 @@ export default function Scalper() {
       closingInFlightRef.current.delete(sym);
       setClosingPositions(prev => { const s = new Set(prev); s.delete(sym); return s; });
     }
-  }, [addToast, fetchTabData]);
+  }, [broker, addToast, fetchTabData]);
 
   // ─── Client-side profit lock (total P&L floor) ────────────────────
 
@@ -592,16 +636,26 @@ export default function Scalper() {
     setExitingAll(true);
     setConfirmExitAll(false);
     try {
-      const res = await fetch('/api/exit-all', { method: 'POST' });
-      const data = await res.json();
-      if (data.broker_exit) {
-        const killed = data.killed?.length ?? 0;
-        const fallback = data.trigger_fallback?.length ?? 0;
-        const detail = killed > 0 ? ` ${killed} strategy process${killed === 1 ? '' : 'es'} terminated.` : '';
-        const fb = fallback > 0 ? ` ${fallback} sent graceful shutdown.` : '';
-        addToast('success', `All positions liquidated at broker.${detail}${fb}`);
+      if (broker === 'zerodha') {
+        const res = await fetch('/api/scalper/zerodha/exit-all', { method: 'POST' });
+        const data = await res.json() as { success: boolean; closed: string[]; errors: string[] };
+        if (data.success) {
+          addToast('success', `All Zerodha positions liquidated.${data.closed.length ? ` (${data.closed.join(', ')})` : ''}`);
+        } else {
+          addToast('error', 'Zerodha exit failed', data.errors.join('; ') || 'Unknown error');
+        }
       } else {
-        addToast('error', data.error || 'Broker exit failed — check Dhan account manually.');
+        const res = await fetch('/api/exit-all', { method: 'POST' });
+        const data = await res.json();
+        if (data.broker_exit) {
+          const killed = data.killed?.length ?? 0;
+          const fallback = data.trigger_fallback?.length ?? 0;
+          const detail = killed > 0 ? ` ${killed} strategy process${killed === 1 ? '' : 'es'} terminated.` : '';
+          const fb = fallback > 0 ? ` ${fallback} sent graceful shutdown.` : '';
+          addToast('success', `All positions liquidated at broker.${detail}${fb}`);
+        } else {
+          addToast('error', data.error || 'Broker exit failed — check Dhan account manually.');
+        }
       }
     } catch (e) {
       addToast('error', 'Network error calling exit-all API.', String(e));
@@ -609,7 +663,7 @@ export default function Scalper() {
       setExitingAll(false);
       setTimeout(fetchTabData, 1000);
     }
-  }, [confirmExitAll, addToast, fetchTabData]);
+  }, [confirmExitAll, broker, addToast, fetchTabData]);
 
   const handleGuardChange = useCallback((sym: string, field: 'target' | 'sl', value: string) => {
     setPosGuards(prev => {
@@ -1025,6 +1079,18 @@ export default function Scalper() {
                     }`}>
                     {clearingPnl ? 'Clearing…' : confirmClear ? 'Confirm Clear?' : 'Clear Guard'}
                   </button>
+                )}
+
+                {/* Broker selector — only shown when more than one broker is authenticated */}
+                {authenticatedBrokers.length > 1 && (
+                  <select
+                    value={broker}
+                    onChange={e => setBroker(e.target.value as 'dhan' | 'zerodha')}
+                    className="px-2 py-1.5 rounded-lg text-xs font-bold bg-zinc-900 border border-zinc-700 text-zinc-300"
+                  >
+                    {authenticatedBrokers.includes('dhan') && <option value="dhan">Dhan</option>}
+                    {authenticatedBrokers.includes('zerodha') && <option value="zerodha">Zerodha</option>}
+                  </select>
                 )}
 
                 {/* Exit ALL Positions (broker-level nuclear) */}
