@@ -44,12 +44,18 @@ export function useCopyTrade(notify: (type: 'success' | 'error', message: string
   const [confirmArm, setConfirmArm] = useState(false);
   const [arming, setArming] = useState(false);
   const confirmTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  // multiplierInput is a local edit buffer, not a live-mirrored display value
-  // — only seed it from the server once on first load (and again right after
-  // a successful arm, to reflect what was actually saved). Background polls
-  // must never overwrite it, or a user mid-edit (or just before clicking ARM)
-  // would see their typed value silently reverted every 3s.
-  const hasLoadedOnceRef = useRef(false);
+  // multiplierInput is a local edit buffer, not a live-mirrored display value.
+  // It tracks the server value until the user edits it (dirty) — otherwise a
+  // long-open tab would ARM with a stale multiplier, silently reverting a
+  // value changed elsewhere (e.g. on /strategies-plus). Once dirty, background
+  // polls must never overwrite it, or a user mid-edit (or just before clicking
+  // ARM) would see their typed value silently reverted every 3s.
+  const multiplierDirtyRef = useRef(false);
+
+  const editMultiplier = useCallback((v: string) => {
+    multiplierDirtyRef.current = true;
+    setMultiplierInput(v);
+  }, []);
 
   const poll = useCallback(async () => {
     try {
@@ -59,8 +65,7 @@ export function useCopyTrade(notify: (type: 'success' | 'error', message: string
       ]);
       if (cfgRes.success && cfgRes.config) {
         setConfig(cfgRes.config);
-        if (!hasLoadedOnceRef.current) {
-          hasLoadedOnceRef.current = true;
+        if (!multiplierDirtyRef.current) {
           const zerodha = cfgRes.config.children?.find((c: { broker: string }) => c.broker === 'zerodha');
           if (zerodha) setMultiplierInput(String(zerodha.multiplier ?? 1));
         }
@@ -108,6 +113,7 @@ export function useCopyTrade(notify: (type: 'success' | 'error', message: string
       const data = await res.json();
       if (data.success) {
         setConfig(data.config);
+        multiplierDirtyRef.current = false; // saved — resume tracking the server value
         notify('success', `Trade replication ARMED (${n}x) — Zerodha will mirror Dhan fills live.`);
       } else {
         notify('error', data.error || 'Failed to arm trade replication.');
@@ -140,7 +146,7 @@ export function useCopyTrade(notify: (type: 'success' | 'error', message: string
   }, [notify]);
 
   return {
-    multiplierInput, setMultiplierInput,
+    multiplierInput, setMultiplierInput: editMultiplier,
     armed: config.armed,
     bridgeRunning: status?.status === 'RUNNING',
     confirmArm, arming,

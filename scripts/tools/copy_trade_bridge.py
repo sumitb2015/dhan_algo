@@ -2,15 +2,36 @@
 Trade replication bridge: Dhan (parent) -> Zerodha (child accounts).
 
 Listens to Dhan's real-time order-update WebSocket (via
-DhanHelper.start_order_update_websocket) and, for every TRADED fill,
-mirrors it to each enabled child account in debug/copy_trade_config.json
-at quantity = filled_qty * multiplier, always as a MARKET order.
+DhanHelper.start_order_update_websocket) and, for every TRADED or
+PART_TRADED fill, mirrors the newly-traded delta to each enabled child
+account in debug/copy_trade_config.json at quantity = delta * multiplier,
+always as a MARKET order (sliced to the NFO freeze quantity).
 
 Two independent safety gates:
   - This process running at all: safe by itself, only listens + logs
     what it WOULD replicate to debug/copy_trade_log.json.
   - config.json's "armed" flag: only when true does a child order
     actually get placed.
+
+Safety mechanisms:
+  - Singleton: a Windows named mutex guarantees at most one bridge process,
+    acquired before the multi-second heavy imports (a second instance would
+    replicate every fill twice).
+  - Failed child orders go to a bounded retry queue (drained by the
+    watchdog thread) instead of being silently dropped; failure counts are
+    surfaced in copy_trade_status.json.
+  - Heartbeat: status file rewritten every few seconds so the dashboard can
+    tell a live bridge from a dead/hung one (the API route marks a stale
+    heartbeat as STALE).
+  - Watchdog: if the parent's NIFTY option book is flat on two consecutive
+    checks while the child still holds cached-NIFTY-option positions,
+    force-close those child positions — scoped to the replication universe
+    so unrelated Zerodha positions are never touched, with per-symbol
+    attempt caps + backoff and a market-hours gate.
+  - Startup baseline: fills that happened while the bridge was down are
+    NOT auto-replicated (placing catch-up market orders on a restart is
+    riskier than surfacing the gap) — they are marked handled and logged
+    loudly as 'baseline_skipped' for manual reconciliation.
 
 NIFTY options only (matches the rest of the scalper/live-quotes scope).
 One-directional: Dhan -> Zerodha. No reverse replication.
@@ -24,6 +45,7 @@ import sys
 import os
 import json
 import time
+import ctypes
 import threading
 from datetime import datetime
 
@@ -34,23 +56,56 @@ sys.path.insert(0, ROOT)
 # when spawned from the dashboard (see live_options_ws_zerodha.py's same fix).
 os.chdir(ROOT)
 
-from login import get_dhan_client
-from lib.dhan_helper import DhanHelper
-from scripts.tools.zerodha_instruments_cache import restore_session_from_json
-from scripts.tools.live_options_ws_zerodha import load_zerodha_instruments_cache
-
 DEBUG_DIR        = os.path.join(ROOT, 'debug')
 CONFIG_FILE      = os.path.join(DEBUG_DIR, 'copy_trade_config.json')
 STATUS_FILE      = os.path.join(DEBUG_DIR, 'copy_trade_status.json')
 LOG_FILE         = os.path.join(DEBUG_DIR, 'copy_trade_log.json')
 REPLICATED_FILE  = os.path.join(DEBUG_DIR, 'copy_trade_replicated.json')
+RAW_EVENTS_FILE  = os.path.join(DEBUG_DIR, 'copy_trade_raw_events.json')
 STOP_TRIGGER     = os.path.join(DEBUG_DIR, 'copy_trade_stop.trigger')
 
 MAX_LOG_ENTRIES  = 200
 WATCHDOG_INTERVAL_SEC = 7
+HEARTBEAT_INTERVAL_SEC = 5
+
+# Safety-exit tuning: require the parent flat on this many consecutive checks
+# (a scalper can exit and re-enter within one watchdog interval), and never
+# fire within REPLICATION_GRACE_SEC of the last replicated fill.
+FLAT_CONFIRMATIONS = 2
+REPLICATION_GRACE_SEC = 20
+SAFETY_EXIT_MAX_ATTEMPTS = 3
+SAFETY_EXIT_BACKOFF_SEC = 60
+
+RETRY_MAX_ATTEMPTS = 3
+RETRY_BACKOFF_SEC = 30
+
+FREEZE_QTY = 1800  # NFO NIFTY options freeze quantity — market orders above this are rejected
+INSTRUMENTS_REFRESH_MIN_INTERVAL_SEC = 600
+RAW_EVENTS_MAX = 20
 
 _log_lock = threading.Lock()
 _replicated_lock = threading.Lock()
+_retry_lock = threading.Lock()
+
+
+def acquire_singleton() -> bool:
+    """At most one bridge process, ever — two would replicate every fill twice.
+
+    A Windows named mutex is auto-released on process death, so there is no
+    stale-lock handling. The handle is deliberately never closed."""
+    try:
+        kernel32 = ctypes.windll.kernel32
+        kernel32.CreateMutexW(None, False, 'dhan_algo_copy_trade_bridge')
+        return kernel32.GetLastError() != 183  # ERROR_ALREADY_EXISTS
+    except Exception:
+        return True  # non-Windows / ctypes failure: fall back to the route's PID check
+
+
+def market_is_open() -> bool:
+    now = datetime.now()
+    if now.weekday() >= 5:
+        return False
+    return (9, 15) <= (now.hour, now.minute) < (15, 30)
 
 
 def atomic_write(path: str, data) -> bool:
@@ -67,14 +122,17 @@ def atomic_write(path: str, data) -> bool:
         return False
 
 
-def write_status(status: str, started_at: str = '', detail: str = ''):
-    atomic_write(STATUS_FILE, {
+def write_status(status: str, started_at: str = '', detail: str = '', extra: dict = None):
+    payload = {
         'status': status,
         'pid': os.getpid(),
         'detail': detail,
         'started_at': started_at or datetime.now().isoformat(),
         'last_update': datetime.now().isoformat(),
-    })
+    }
+    if extra:
+        payload.update(extra)
+    atomic_write(STATUS_FILE, payload)
 
 
 def read_json(path: str, default):
@@ -88,22 +146,53 @@ def read_json(path: str, default):
 
 
 def load_config() -> dict:
-    cfg = read_json(CONFIG_FILE, {'armed': False, 'children': []})
-    if not isinstance(cfg, dict):
-        return {'armed': False, 'children': []}
-    cfg.setdefault('armed', False)
-    cfg.setdefault('children', [])
-    return cfg
+    # A torn read during a dashboard config write must not silently downgrade
+    # a fill to logged_only — retry once before falling back to disarmed.
+    for attempt in (0, 1):
+        try:
+            if not os.path.exists(CONFIG_FILE):
+                break
+            with open(CONFIG_FILE) as f:
+                cfg = json.load(f)
+            if isinstance(cfg, dict):
+                cfg.setdefault('armed', False)
+                cfg.setdefault('children', [])
+                return cfg
+            break
+        except Exception:
+            if attempt == 0:
+                time.sleep(0.05)
+    return {'armed': False, 'children': []}
 
 
 def load_replicated() -> dict:
+    """Replicated-qty map for TODAY only — Dhan order numbers are per-day, so
+    carrying yesterday's entries forward just grows the file forever."""
     data = read_json(REPLICATED_FILE, {})
-    return data if isinstance(data, dict) else {}
+    if not isinstance(data, dict):
+        return {}
+    today = datetime.now().strftime('%Y-%m-%d')
+    if 'orders' in data or 'date' in data:
+        if data.get('date') != today:
+            return {}
+        orders = data.get('orders', {})
+        return orders if isinstance(orders, dict) else {}
+    # legacy flat {order_no: qty} format — trust it only if written today
+    try:
+        mtime_day = datetime.fromtimestamp(os.path.getmtime(REPLICATED_FILE)).strftime('%Y-%m-%d')
+        if mtime_day == today:
+            return data
+    except OSError:
+        pass
+    return {}
 
 
 def save_replicated(replicated: dict):
     with _replicated_lock:
-        atomic_write(REPLICATED_FILE, replicated)
+        atomic_write(REPLICATED_FILE, {
+            'date': datetime.now().strftime('%Y-%m-%d'),
+            'orders': replicated,
+        })
 
 
 def append_log(entry: dict):
@@ -114,6 +203,18 @@ def append_log(entry: dict):
         if len(entries) > MAX_LOG_ENTRIES:
             entries = entries[-MAX_LOG_ENTRIES:]
         atomic_write(LOG_FILE, {'entries': entries})
+
+
+def dump_raw_event(payload: dict):
+    """Keep the first few raw fill payloads on disk so the TradedQty-cumulative
+    and ExpiryDate-format assumptions can be verified against real data."""
+    with _log_lock:
+        raw = read_json(RAW_EVENTS_FILE, {'events': []})
+        events = raw.get('events', []) if isinstance(raw, dict) else []
+        if len(events) >= RAW_EVENTS_MAX:
+            return
+        events.append({'ts': datetime.now().isoformat(), 'payload': payload})
+        atomic_write(RAW_EVENTS_FILE, {'events': events})
 
 
 def find_zerodha_symbol(instruments: list, strike, expiry: str, opt_type: str):
@@ -129,53 +230,170 @@ def find_zerodha_symbol(instruments: list, strike, expiry: str, opt_type: str):
     return None
 
 
-def watchdog_loop(helper, kite, stop_event: threading.Event):
+def place_child_order(kite, symbol: str, side: str, qty: int):
+    """Place a MARKET order sliced to the freeze quantity.
+
+    Returns (placed_qty, order_ids, error) — never raises. On a mid-slice
+    failure, placed_qty reflects what actually went through so the caller can
+    queue exactly the remainder for retry (re-placing the full qty would
+    duplicate the successful slices)."""
+    order_ids = []
+    placed = 0
+    remaining = qty
+    while remaining > 0:
+        chunk = min(remaining, FREEZE_QTY)
+        try:
+            order_id = kite.place_order(
+                variety=kite.VARIETY_REGULAR,
+                exchange=kite.EXCHANGE_NFO,
+                tradingsymbol=symbol,
+                transaction_type=kite.TRANSACTION_TYPE_BUY if side == 'BUY' else kite.TRANSACTION_TYPE_SELL,
+                quantity=chunk,
+                product=kite.PRODUCT_MIS,
+                order_type=kite.ORDER_TYPE_MARKET,
+                validity=kite.VALIDITY_DAY,
+            )
+            order_ids.append(order_id)
+            placed += chunk
+            remaining -= chunk
+        except Exception as e:
+            return placed, order_ids, str(e)
+    return placed, order_ids, None
+
+
+def baseline_today_orders(helper, replicated_qty: dict) -> int:
+    """Mark today's already-traded qty as handled, logging any gap loudly."""
+    orders = helper.get_order_list()
+    missed = 0
+    for o in orders or []:
+        status = str(o.get('orderStatus', '') or '').upper()
+        if status not in ('TRADED', 'PART_TRADED'):
+            continue
+        order_no = str(o.get('orderId', '') or '')
+        if not order_no:
+            continue
+        qty = 0
+        for key in ('filledQty', 'filled_qty', 'tradedQuantity'):
+            if o.get(key) is not None:
+                try:
+                    qty = int(float(o[key]))
+                except (TypeError, ValueError):
+                    qty = 0
+                break
+        if qty == 0 and status == 'TRADED':
+            try:
+                qty = int(float(o.get('quantity', 0) or 0))
+            except (TypeError, ValueError):
+                qty = 0
+        gap = qty - int(replicated_qty.get(order_no, 0))
+        if gap > 0:
+            missed += 1
+            append_log({
+                'ts': datetime.now().isoformat(), 'order_no': order_no,
+                'parent_symbol': o.get('tradingSymbol', ''), 'qty': gap,
+                'result': 'baseline_skipped',
+                'error': 'Filled while bridge was down — NOT replicated, reconcile manually',
+            })
+            replicated_qty[order_no] = qty
+    if missed:
+        save_replicated(replicated_qty)
+        print(f'[copy_trade_bridge] WARNING: {missed} order(s) filled while bridge was down '
+              f'were baselined (NOT replicated) — see copy_trade_log.json', flush=True)
+    return missed
+
+
+def watchdog_loop(helper, kite, stop_event: threading.Event, state: dict,
+                  retry_queue: list, get_nifty_symbols):
     """
-    Independent safety net, separate from per-fill replication: every
-    WATCHDOG_INTERVAL_SEC, if armed, checks whether the parent (Dhan) is
-    flat while the child (Zerodha) still has open positions — regardless of
-    *why* the parent went flat (P&L Guard, EXIT ALL, a strategy's own exit,
-    or a missed order-update event) — and force-closes the child if so.
+    Independent safety net, separate from per-fill replication. Each cycle:
+
+    1. Drains the failed-replication retry queue (bounded attempts + backoff).
+    2. If armed and the parent's NIFTY option book has been flat for
+       FLAT_CONFIRMATIONS consecutive checks (and no replication landed within
+       REPLICATION_GRACE_SEC), force-close the child's cached-NIFTY-option
+       positions — and ONLY those; manual/unrelated Zerodha positions are
+       never touched.
 
     Deliberately conservative: if the Dhan positions call fails (as opposed
     to genuinely returning zero positions), helper.last_api_error will be
     set and this cycle is skipped rather than treated as "flat", to avoid
     force-closing legitimate Zerodha positions on a transient API hiccup.
     """
+    safety_attempts = {}  # tradingsymbol -> {'n': attempts, 'next': earliest retry ts}
     while not stop_event.wait(WATCHDOG_INTERVAL_SEC):
         try:
             cfg = load_config()
-            if not cfg.get('armed'):
-                continue
+            armed = bool(cfg.get('armed'))
             children = [c for c in cfg.get('children', []) if c.get('enabled')]
-            if not children:
+
+            if armed and market_is_open():
+                drain_retry_queue(kite, retry_queue, state)
+
+            if not armed or not children:
+                state['flat_streak'] = 0
                 continue
 
             df = helper.get_positions()
             if helper.last_api_error is not None:
+                state['flat_streak'] = 0
                 continue  # unknown state, not "flat" — skip this cycle
 
             dhan_open = 0
             if df is not None and not df.empty and 'netQty' in df.columns:
-                dhan_open = int((df['netQty'].astype(float) != 0).sum())
+                mask = df['netQty'].astype(float) != 0
+                # Scope to the replication universe (NIFTY NFO options) so an
+                # unrelated open Dhan position (e.g. MCX futures) can't mask an
+                # orphaned child, and vice versa. Missing columns fall back to
+                # counting everything — which only makes the watchdog LESS
+                # likely to fire, never more.
+                if 'exchangeSegment' in df.columns:
+                    mask &= df['exchangeSegment'].astype(str) == 'NSE_FNO'
+                if 'tradingSymbol' in df.columns:
+                    mask &= df['tradingSymbol'].astype(str).str.startswith('NIFTY')
+                dhan_open = int(mask.sum())
             if dhan_open > 0:
+                state['flat_streak'] = 0
                 continue  # parent still has positions, nothing to do
 
+            state['flat_streak'] += 1
+            if state['flat_streak'] < FLAT_CONFIRMATIONS:
+                continue
+            if time.time() - state['last_replication_ts'] < REPLICATION_GRACE_SEC:
+                continue  # a fill just replicated — parent may be re-entering
+            if not market_is_open():
+                continue  # market orders would just be rejected in a loop
+
+            nifty_symbols = get_nifty_symbols()
             positions = kite.positions()
-            open_positions = [p for p in positions.get('net', []) if int(p.get('quantity', 0) or 0) != 0]
+            open_positions = [
+                p for p in positions.get('net', [])
+                if int(p.get('quantity', 0) or 0) != 0
+                and p.get('tradingsymbol') in nifty_symbols
+            ]
+            open_symbols = {p.get('tradingsymbol') for p in open_positions}
+            for sym in list(safety_attempts):
+                if sym not in open_symbols:
+                    del safety_attempts[sym]  # closed (or fresh) — reset its attempt budget
             if not open_positions:
                 continue  # child already flat too
 
             ts = datetime.now().isoformat()
+            now_ts = time.time()
             closed = 0
             for pos in open_positions:
+                symbol = pos.get('tradingsymbol', '')
+                att = safety_attempts.get(symbol, {'n': 0, 'next': 0.0})
+                if att['n'] >= SAFETY_EXIT_MAX_ATTEMPTS:
+                    continue  # gave up on this symbol (already logged below)
+                if now_ts < att['next']:
+                    continue
+
                 qty = abs(int(pos.get('quantity', 0)))
                 side = 'SELL' if int(pos.get('quantity', 0)) > 0 else 'BUY'
-                symbol = pos.get('tradingsymbol', '')
                 entry = {
                     'ts': ts, 'order_no': f'watchdog-{symbol}', 'parent_symbol': '(parent flat)',
                     'zerodha_symbol': symbol, 'side': side, 'child_qty': qty,
-                    'broker': 'zerodha', 'armed': True,
+                    'broker': 'zerodha', 'armed': True, 'attempt': att['n'] + 1,
                 }
                 try:
                     order_id = kite.place_order(
@@ -199,6 +417,15 @@ def watchdog_loop(helper, kite, stop_event: threading.Event):
                     print(f'[copy_trade_bridge] ERROR in safety exit for {symbol}: {e}', flush=True)
                 append_log(entry)
 
+                # Placement != fill: if the order is rejected async the position
+                # survives to the next cycle — back off instead of spamming.
+                safety_attempts[symbol] = {'n': att['n'] + 1, 'next': now_ts + SAFETY_EXIT_BACKOFF_SEC}
+                if safety_attempts[symbol]['n'] >= SAFETY_EXIT_MAX_ATTEMPTS:
+                    append_log({'ts': ts, 'order_no': f'watchdog-{symbol}', 'zerodha_symbol': symbol,
+                                'result': 'safety_exit_gave_up',
+                                'error': f'{SAFETY_EXIT_MAX_ATTEMPTS} exit attempts failed to close — manual action needed'})
+                    state['failed_count'] += 1
+
             if closed:
                 print(f'[copy_trade_bridge] Safety watchdog: parent flat, force-closed {closed} '
                       f'Zerodha position(s).', flush=True)
@@ -207,11 +434,64 @@ def watchdog_loop(helper, kite, stop_event: threading.Event):
             print(f'[copy_trade_bridge] ERROR in watchdog_loop: {e}', flush=True)
 
 
+def drain_retry_queue(kite, retry_queue: list, state: dict):
+    now = time.time()
+    with _retry_lock:
+        due = [r for r in retry_queue if now >= r['next_ts']]
+    for item in due:
+        placed, order_ids, err = place_child_order(kite, item['zerodha_symbol'], item['side'], item['qty'])
+        entry = {
+            'ts': datetime.now().isoformat(), 'order_no': item['order_no'],
+            'zerodha_symbol': item['zerodha_symbol'], 'side': item['side'],
+            'child_qty': item['qty'], 'broker': 'zerodha', 'armed': True,
+            'attempt': item['attempts'] + 1,
+        }
+        if placed:
+            state['last_replication_ts'] = time.time()
+        if err is None:
+            entry['result'] = 'retry_success'
+            entry['child_order_id'] = ','.join(str(o) for o in order_ids)
+            with _retry_lock:
+                if item in retry_queue:
+                    retry_queue.remove(item)
+            print(f'[copy_trade_bridge] Retry succeeded for {item["order_no"]} '
+                  f'({item["side"]} {item["qty"]} {item["zerodha_symbol"]})', flush=True)
+        else:
+            item['qty'] -= placed  # never re-place slices that went through
+            item['attempts'] += 1
+            item['next_ts'] = time.time() + RETRY_BACKOFF_SEC * item['attempts']
+            entry['result'] = 'retry_error'
+            entry['error'] = err
+            if item['attempts'] >= RETRY_MAX_ATTEMPTS or item['qty'] <= 0:
+                with _retry_lock:
+                    if item in retry_queue:
+                        retry_queue.remove(item)
+                entry['result'] = 'retry_exhausted'
+                entry['error'] = f'Gave up after {item["attempts"]} attempts: {err} — parent/child DESYNCED, reconcile manually'
+                state['failed_count'] += 1
+                print(f'[copy_trade_bridge] RETRY EXHAUSTED for {item["order_no"]}: {err}', flush=True)
+        append_log(entry)
+
+
 def main():
     started_at = datetime.now().isoformat()
     os.makedirs(DEBUG_DIR, exist_ok=True)
+
+    if not acquire_singleton():
+        # Exit WITHOUT touching the status file — the live bridge owns it.
+        print('[copy_trade_bridge] Another bridge instance is already running — exiting.', flush=True)
+        sys.exit(0)
+
     write_status('STARTING', started_at=started_at)
     print('[copy_trade_bridge] Starting…', flush=True)
+
+    # Heavy imports are deferred so the singleton mutex + STARTING marker land
+    # within milliseconds of process start; pandas/DhanHelper imports take
+    # seconds, which was a wide-open double-spawn window.
+    from login import get_dhan_client
+    from lib.dhan_helper import DhanHelper
+    from scripts.tools.zerodha_instruments_cache import restore_session_from_json
+    from scripts.tools.live_options_ws_zerodha import load_zerodha_instruments_cache
 
     dhan = get_dhan_client()
     if not dhan:
@@ -233,14 +513,57 @@ def main():
         print(f'[copy_trade_bridge] ERROR: instrument cache load failed: {e}', flush=True)
         sys.exit(1)
 
+    instruments_state = {
+        'instruments': instruments,
+        'nifty_symbols': {i.get('tradingsymbol') for i in instruments},
+        'refreshed_at': time.time(),
+    }
+
+    def get_nifty_symbols():
+        return instruments_state['nifty_symbols']
+
+    def refresh_instruments():
+        """On a lookup miss (e.g. a strike NSE added intraday), regenerate the
+        cache once and reload — throttled so a genuinely-unsupported instrument
+        can't hammer the Kite API."""
+        if time.time() - instruments_state['refreshed_at'] < INSTRUMENTS_REFRESH_MIN_INTERVAL_SEC:
+            return False
+        instruments_state['refreshed_at'] = time.time()
+        try:
+            import subprocess
+            subprocess.run(
+                [sys.executable, os.path.join(ROOT, 'scripts', 'tools', 'zerodha_instruments_cache.py')],
+                check=True, timeout=120,
+            )
+            fresh = load_zerodha_instruments_cache()
+            instruments_state['instruments'] = fresh
+            instruments_state['nifty_symbols'] = {i.get('tradingsymbol') for i in fresh}
+            print(f'[copy_trade_bridge] Instrument cache refreshed ({len(fresh)} contracts)', flush=True)
+            return True
+        except Exception as e:
+            print(f'[copy_trade_bridge] Instrument cache refresh failed: {e}', flush=True)
+            return False
+
     replicated_qty = load_replicated()
+    baseline_today_orders(helper, replicated_qty)
+
+    state = {
+        'last_replication_ts': 0.0,
+        'ws_last_event_ts': 0.0,
+        'failed_count': 0,
+        'flat_streak': 0,
+    }
+    retry_queue = []
 
     def handle_update(payload: dict):
         try:
+            state['ws_last_event_ts'] = time.time()
             data = payload.get('Data', {})
             status = str(data.get('Status', '')).upper()
-            if status != 'TRADED':
+            if status not in ('TRADED', 'PART_TRADED'):
                 return
+
+            dump_raw_event(payload)
 
             order_no = str(data.get('OrderNo', ''))
             if not order_no:
@@ -274,7 +597,9 @@ def main():
 
             zerodha_symbol = None
             if strike is not None and expiry and opt_type:
-                zerodha_symbol = find_zerodha_symbol(instruments, strike, expiry, opt_type)
+                zerodha_symbol = find_zerodha_symbol(instruments_state['instruments'], strike, expiry, opt_type)
+                if zerodha_symbol is None and refresh_instruments():
+                    zerodha_symbol = find_zerodha_symbol(instruments_state['instruments'], strike, expiry, opt_type)
 
             if zerodha_symbol is None:
                 append_log({'ts': ts, 'order_no': order_no, 'symbol': symbol, 'side': side,
@@ -286,7 +611,12 @@ def main():
 
             for child in children:
                 broker = child.get('broker', 'zerodha')
-                multiplier = int(child.get('multiplier', 1) or 1)
+                try:
+                    multiplier = int(child.get('multiplier', 1))
+                except (TypeError, ValueError):
+                    multiplier = 1
+                if multiplier < 1:
+                    multiplier = 1
                 child_qty = delta * multiplier
 
                 entry = {
@@ -301,25 +631,31 @@ def main():
                     append_log(entry)
                     continue
 
-                try:
-                    order_id = kite.place_order(
-                        variety=kite.VARIETY_REGULAR,
-                        exchange=kite.EXCHANGE_NFO,
-                        tradingsymbol=zerodha_symbol,
-                        transaction_type=kite.TRANSACTION_TYPE_BUY if side == 'BUY' else kite.TRANSACTION_TYPE_SELL,
-                        quantity=child_qty,
-                        product=kite.PRODUCT_MIS,
-                        order_type=kite.ORDER_TYPE_MARKET,
-                        validity=kite.VALIDITY_DAY,
-                    )
+                placed, order_ids, err = place_child_order(kite, zerodha_symbol, side, child_qty)
+                if placed:
+                    state['last_replication_ts'] = time.time()
+                if err is None:
                     entry['result'] = 'success'
-                    entry['child_order_id'] = order_id
-                    print(f'[copy_trade_bridge] Replicated {order_no} -> {broker} order {order_id} '
+                    entry['child_order_id'] = ','.join(str(o) for o in order_ids)
+                    print(f'[copy_trade_bridge] Replicated {order_no} -> {broker} '
                           f'({side} {child_qty} {zerodha_symbol})', flush=True)
-                except Exception as e:
+                else:
+                    # Queue exactly the unplaced remainder for bounded retry —
+                    # replicated_qty still advances below so a later event for
+                    # this order can't double-place; the queue owns the gap.
+                    remaining = child_qty - placed
                     entry['result'] = 'error'
-                    entry['error'] = str(e)
-                    print(f'[copy_trade_bridge] ERROR replicating {order_no} to {broker}: {e}', flush=True)
+                    entry['error'] = err
+                    entry['queued_for_retry'] = remaining
+                    state['failed_count'] += 1
+                    with _retry_lock:
+                        retry_queue.append({
+                            'order_no': order_no, 'zerodha_symbol': zerodha_symbol,
+                            'side': side, 'qty': remaining, 'attempts': 1,
+                            'next_ts': time.time() + RETRY_BACKOFF_SEC,
+                        })
+                    print(f'[copy_trade_bridge] ERROR replicating {order_no} to {broker}: {err} '
+                          f'(queued {remaining} for retry)', flush=True)
 
                 append_log(entry)
 
@@ -333,7 +669,8 @@ def main():
 
     watchdog_stop = threading.Event()
     watchdog_thread = threading.Thread(
-        target=watchdog_loop, args=(helper, kite, watchdog_stop),
+        target=watchdog_loop,
+        args=(helper, kite, watchdog_stop, state, retry_queue, get_nifty_symbols),
         daemon=True, name='copy-trade-watchdog',
     )
     watchdog_thread.start()
@@ -341,6 +678,7 @@ def main():
     write_status('RUNNING', started_at=started_at)
     print('[copy_trade_bridge] Listening for Dhan order updates…', flush=True)
 
+    last_heartbeat = 0.0
     try:
         while True:
             if os.path.exists(STOP_TRIGGER):
@@ -350,6 +688,21 @@ def main():
                     pass
                 print('[copy_trade_bridge] Stop trigger detected — exiting.', flush=True)
                 break
+            now = time.time()
+            if now - last_heartbeat >= HEARTBEAT_INTERVAL_SEC:
+                last_heartbeat = now
+                with _retry_lock:
+                    pending_retries = len(retry_queue)
+                ws_alive = helper._ou_thread is not None and helper._ou_thread.is_alive()
+                detail = ''
+                if state['failed_count'] or pending_retries:
+                    detail = f"{state['failed_count']} failed replication(s), {pending_retries} pending retry(ies)"
+                write_status('RUNNING', started_at=started_at, detail=detail, extra={
+                    'ws_thread_alive': ws_alive,
+                    'ws_last_event': state['ws_last_event_ts'],
+                    'failed_replications': state['failed_count'],
+                    'pending_retries': pending_retries,
+                })
             time.sleep(1)
     except KeyboardInterrupt:
         print('[copy_trade_bridge] KeyboardInterrupt — shutting down.', flush=True)

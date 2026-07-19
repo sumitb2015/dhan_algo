@@ -12,6 +12,14 @@ const STATUS_FILE    = path.join(DEBUG_DIR, 'copy_trade_status.json');
 const LOG_FILE       = path.join(DEBUG_DIR, 'copy_trade_log.json');
 const STOP_TRIGGER   = path.join(DEBUG_DIR, 'copy_trade_stop.trigger');
 
+// The bridge heartbeats its status file every ~5s; a RUNNING status older
+// than this is a hung/dead bridge that must not be shown as healthy.
+const HEARTBEAT_STALE_MS = 20_000;
+
+// Guards the window between spawn and the bridge writing STARTING (the bridge
+// also holds a process-wide named mutex, so this is belt-and-braces).
+let startInFlight = false;
+
 function readJson(file: string): unknown {
   try {
     if (!fs.existsSync(file)) return null;
@@ -31,6 +39,13 @@ export async function GET(request: NextRequest) {
   if (checkPid && status && status.pid && (status.status === 'RUNNING' || status.status === 'STARTING')) {
     if (!isPidRunning(Number(status.pid))) {
       (status as Record<string, unknown>).status = 'STOPPED';
+    }
+  }
+
+  if (status && status.status === 'RUNNING' && typeof status.last_update === 'string') {
+    const age = Date.now() - new Date(status.last_update).getTime();
+    if (Number.isFinite(age) && age > HEARTBEAT_STALE_MS) {
+      status.status = 'STALE';
     }
   }
 
@@ -58,6 +73,12 @@ export async function POST(request: NextRequest) {
     if (status && status.pid && (status.status === 'RUNNING' || status.status === 'STARTING') && isPidRunning(Number(status.pid))) {
       return NextResponse.json({ success: true, message: 'Bridge already running', pid: status.pid });
     }
+
+    if (startInFlight) {
+      return NextResponse.json({ success: true, message: 'Bridge start already in progress' });
+    }
+    startInFlight = true;
+    setTimeout(() => { startInFlight = false; }, 10_000);
 
     if (fs.existsSync(STOP_TRIGGER)) fs.unlinkSync(STOP_TRIGGER);
 

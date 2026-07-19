@@ -797,6 +797,12 @@ export default function StrategiesPlusPage() {
                   <RefreshCw className="h-3 w-3 animate-spin" />
                   STARTING
                 </span>
+              ) : copyTradeStatus?.status === 'STALE' ? (
+                <span className="flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-red-500/10 border border-red-500/30 text-red-400 text-[11px] font-bold animate-pulse"
+                  title="Bridge process exists but its heartbeat stopped — it is NOT replicating. Restart it.">
+                  <AlertTriangle className="h-3 w-3" />
+                  STALE
+                </span>
               ) : copyTradeStatus?.status === 'ERROR' ? (
                 <span className="flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-red-500/10 border border-red-500/30 text-red-400 text-[11px] font-bold" title={copyTradeStatus.detail}>
                   <AlertTriangle className="h-3 w-3" />

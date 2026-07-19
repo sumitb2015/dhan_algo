@@ -35,7 +35,11 @@ function readConfig(): CopyTradeConfig {
 function writeConfig(config: CopyTradeConfig) {
   const dir = path.dirname(CONFIG_FILE);
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-  fs.writeFileSync(CONFIG_FILE, JSON.stringify(config, null, 2));
+  // Atomic write: the Python bridge re-reads this file on every fill — a torn
+  // read there would silently treat the fill as disarmed.
+  const tmp = CONFIG_FILE + '.tmp';
+  fs.writeFileSync(tmp, JSON.stringify(config, null, 2));
+  fs.renameSync(tmp, CONFIG_FILE);
 }
 
 export async function GET(): Promise<NextResponse> {
