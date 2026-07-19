@@ -129,6 +129,9 @@ def write_status(status: str, started_at: str = '', detail: str = '', extra: dic
         'detail': detail,
         'started_at': started_at or datetime.now().isoformat(),
         'last_update': datetime.now().isoformat(),
+        # Epoch twin of last_update: the dashboard's stale-heartbeat check must
+        # not depend on JS parsing a Python microsecond ISO timestamp.
+        'last_update_ts': time.time(),
     }
     if extra:
         payload.update(extra)
@@ -303,7 +306,7 @@ def baseline_today_orders(helper, replicated_qty: dict) -> int:
 
 
 def watchdog_loop(helper, kite, stop_event: threading.Event, state: dict,
-                  retry_queue: list, get_nifty_symbols):
+                  retry_queue: list, get_nifty_symbols, resolve_symbol):
     """
     Independent safety net, separate from per-fill replication. Each cycle:
 
@@ -327,7 +330,7 @@ def watchdog_loop(helper, kite, stop_event: threading.Event, state: dict,
             children = [c for c in cfg.get('children', []) if c.get('enabled')]
 
             if armed and market_is_open():
-                drain_retry_queue(kite, retry_queue, state)
+                drain_retry_queue(kite, retry_queue, state, resolve_symbol)
 
             if not armed or not children:
                 state['flat_streak'] = 0
@@ -434,11 +437,30 @@ def watchdog_loop(helper, kite, stop_event: threading.Event, state: dict,
             print(f'[copy_trade_bridge] ERROR in watchdog_loop: {e}', flush=True)
 
 
-def drain_retry_queue(kite, retry_queue: list, state: dict):
+def drain_retry_queue(kite, retry_queue: list, state: dict, resolve_symbol=None):
     now = time.time()
     with _retry_lock:
         due = [r for r in retry_queue if now >= r['next_ts']]
     for item in due:
+        # Items enqueued with an unresolved symbol (strike not in the cache at
+        # fill time — e.g. one NSE added intraday) are resolved here, where a
+        # blocking cache refresh is safe; never in the WS callback thread.
+        if not item.get('zerodha_symbol'):
+            sym = resolve_symbol(item.get('strike'), item.get('expiry'), item.get('opt_type')) if resolve_symbol else None
+            if sym is None:
+                item['attempts'] += 1
+                item['next_ts'] = time.time() + RETRY_BACKOFF_SEC * item['attempts']
+                if item['attempts'] >= RETRY_MAX_ATTEMPTS:
+                    with _retry_lock:
+                        if item in retry_queue:
+                            retry_queue.remove(item)
+                    state['failed_count'] += 1
+                    append_log({'ts': datetime.now().isoformat(), 'order_no': item['order_no'],
+                                'side': item['side'], 'qty': item['qty'], 'result': 'retry_exhausted',
+                                'error': 'Instrument never resolved to a cached NIFTY option — NOT replicated'})
+                continue
+            item['zerodha_symbol'] = sym
+
         placed, order_ids, err = place_child_order(kite, item['zerodha_symbol'], item['side'], item['qty'])
         entry = {
             'ts': datetime.now().isoformat(), 'order_no': item['order_no'],
@@ -544,6 +566,14 @@ def main():
             print(f'[copy_trade_bridge] Instrument cache refresh failed: {e}', flush=True)
             return False
 
+    def resolve_symbol(strike, expiry, opt_type):
+        """Lookup with a one-shot (throttled) cache refresh on miss. Blocking —
+        only ever called from the watchdog thread, never the WS callback."""
+        sym = find_zerodha_symbol(instruments_state['instruments'], strike, expiry, opt_type)
+        if sym is None and refresh_instruments():
+            sym = find_zerodha_symbol(instruments_state['instruments'], strike, expiry, opt_type)
+        return sym
+
     replicated_qty = load_replicated()
     baseline_today_orders(helper, replicated_qty)
 
@@ -595,16 +625,39 @@ def main():
             armed = bool(cfg.get('armed'))
             children = [c for c in cfg.get('children', []) if c.get('enabled')]
 
+            is_option = strike is not None and expiry and opt_type
             zerodha_symbol = None
-            if strike is not None and expiry and opt_type:
+            if is_option:
+                # Fast in-memory lookup only — a cache refresh is a multi-second
+                # subprocess that must never run in this WS callback (it would
+                # stall event delivery and can drop the connection). A miss on
+                # a real option goes to the retry queue, where the watchdog
+                # thread refreshes the cache and resolves it.
                 zerodha_symbol = find_zerodha_symbol(instruments_state['instruments'], strike, expiry, opt_type)
-                if zerodha_symbol is None and refresh_instruments():
-                    zerodha_symbol = find_zerodha_symbol(instruments_state['instruments'], strike, expiry, opt_type)
 
             if zerodha_symbol is None:
-                append_log({'ts': ts, 'order_no': order_no, 'symbol': symbol, 'side': side,
-                            'qty': delta, 'result': 'skipped',
-                            'error': 'Unsupported instrument (not a cached NIFTY option) — skipped'})
+                if is_option and armed and children:
+                    for child in children:
+                        try:
+                            multiplier = int(child.get('multiplier', 1))
+                        except (TypeError, ValueError):
+                            multiplier = 1
+                        if multiplier < 1:
+                            multiplier = 1
+                        with _retry_lock:
+                            retry_queue.append({
+                                'order_no': order_no, 'zerodha_symbol': None,
+                                'strike': strike, 'expiry': expiry, 'opt_type': opt_type,
+                                'side': side, 'qty': delta * multiplier, 'attempts': 0,
+                                'next_ts': 0.0,
+                            })
+                    append_log({'ts': ts, 'order_no': order_no, 'symbol': symbol, 'side': side,
+                                'qty': delta, 'result': 'queued_resolution',
+                                'error': 'Strike not in instrument cache — queued for refresh + replication'})
+                else:
+                    append_log({'ts': ts, 'order_no': order_no, 'symbol': symbol, 'side': side,
+                                'qty': delta, 'result': 'skipped',
+                                'error': 'Unsupported instrument (not a cached NIFTY option) — skipped'})
                 replicated_qty[order_no] = traded_qty
                 save_replicated(replicated_qty)
                 return
@@ -670,7 +723,7 @@ def main():
     watchdog_stop = threading.Event()
     watchdog_thread = threading.Thread(
         target=watchdog_loop,
-        args=(helper, kite, watchdog_stop, state, retry_queue, get_nifty_symbols),
+        args=(helper, kite, watchdog_stop, state, retry_queue, get_nifty_symbols, resolve_symbol),
         daemon=True, name='copy-trade-watchdog',
     )
     watchdog_thread.start()

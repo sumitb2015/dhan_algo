@@ -42,8 +42,14 @@ export async function GET(request: NextRequest) {
     }
   }
 
-  if (status && status.status === 'RUNNING' && typeof status.last_update === 'string') {
-    const age = Date.now() - new Date(status.last_update).getTime();
+  if (status && status.status === 'RUNNING') {
+    // Prefer the epoch field — parsing Python's microsecond ISO string with
+    // new Date() is best-effort only, and a NaN there would silently disable
+    // this check (a dead bridge shown as RUNNING forever).
+    const lastMs = typeof status.last_update_ts === 'number'
+      ? status.last_update_ts * 1000
+      : typeof status.last_update === 'string' ? new Date(status.last_update).getTime() : NaN;
+    const age = Date.now() - lastMs;
     if (Number.isFinite(age) && age > HEARTBEAT_STALE_MS) {
       status.status = 'STALE';
     }

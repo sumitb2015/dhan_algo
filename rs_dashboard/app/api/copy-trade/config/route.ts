@@ -36,10 +36,20 @@ function writeConfig(config: CopyTradeConfig) {
   const dir = path.dirname(CONFIG_FILE);
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
   // Atomic write: the Python bridge re-reads this file on every fill — a torn
-  // read there would silently treat the fill as disarmed.
+  // read there would silently treat the fill as disarmed. On Windows the
+  // rename can throw EPERM if the bridge has the file open at that instant
+  // (Python's open() doesn't share delete access), so retry briefly; the
+  // bridge's reads last only a few ms.
   const tmp = CONFIG_FILE + '.tmp';
   fs.writeFileSync(tmp, JSON.stringify(config, null, 2));
-  fs.renameSync(tmp, CONFIG_FILE);
+  for (let attempt = 0; ; attempt++) {
+    try {
+      fs.renameSync(tmp, CONFIG_FILE);
+      return;
+    } catch (e) {
+      if (attempt >= 4) throw e;
+    }
+  }
 }
 
 export async function GET(): Promise<NextResponse> {
