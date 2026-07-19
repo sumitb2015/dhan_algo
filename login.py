@@ -1,7 +1,8 @@
 import os
 import requests
 import json
-from dhanhq import dhanhq
+import pyotp
+from dhanhq import dhanhq, DhanLogin
 from dotenv import load_dotenv
 
 # Load environment variables
@@ -12,6 +13,8 @@ ENV_FILE = os.path.join(BASE_DIR, ".env")
 
 # Load environment variables explicitly from the known path
 load_dotenv(ENV_FILE)
+
+LAST_TOTP_ERROR = None
 
 def get_new_access_token():
     """
@@ -81,6 +84,47 @@ def get_new_access_token():
         print(f"Failed to get access token: {e}")
         return None
 
+def get_new_access_token_via_totp():
+    """
+    Fully automated login: PIN + TOTP, no browser/manual token needed.
+    Requires dhan_pin and totp_key in .env (totp_key is the base32 secret
+    from the QR code shown when enabling TOTP under Dhan Web > DhanHQ Trading APIs).
+    """
+    global LAST_TOTP_ERROR
+    LAST_TOTP_ERROR = None
+
+    client_id = os.getenv("client_id")
+    pin = os.getenv("dhan_pin")
+    totp_key = os.getenv("totp_key")
+
+    if not all([client_id, pin, totp_key]):
+        LAST_TOTP_ERROR = "client_id, dhan_pin, or totp_key missing in .env"
+        print(f"TOTP autologin skipped: {LAST_TOTP_ERROR}")
+        return None
+
+    totp_code = pyotp.TOTP(totp_key).now()
+
+    try:
+        dhan_login = DhanLogin(client_id)
+        token_res = dhan_login.generate_token(pin, totp_code)
+
+        access_token = token_res.get('accessToken')
+        if access_token:
+            token_res_to_save = {**token_res, "dhanClientId": client_id}
+            with open(TOKEN_FILE, 'w') as f:
+                json.dump(token_res_to_save, f)
+            print("Successfully obtained and saved Access Token via TOTP autologin!")
+            return access_token
+        else:
+            LAST_TOTP_ERROR = f"Access token not found in response: {token_res}"
+            print(f"TOTP autologin failed: {LAST_TOTP_ERROR}")
+            return None
+    except Exception as e:
+        LAST_TOTP_ERROR = str(e)
+        print(f"TOTP autologin failed: {e}")
+        return None
+
+
 def get_dhan_client():
     """
     Initializes the Dhan client using a cached token or a new login.
@@ -109,9 +153,12 @@ def get_dhan_client():
             access_token = None
 
     if not access_token:
+        access_token = get_new_access_token_via_totp()
+
+    if not access_token:
         import sys
         if not sys.stdin.isatty():
-            print("ERROR: Access token expired and no TTY available for interactive login. Run login.py manually first.")
+            print("ERROR: Access token expired, TOTP autologin unavailable, and no TTY for interactive login. Run login.py manually first.")
             return None
         access_token = get_new_access_token()
 
