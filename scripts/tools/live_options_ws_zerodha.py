@@ -48,8 +48,8 @@ UNDERLYING_TRADING_SYMBOLS = {
 
 UNDERLYING_TOKENS = {
     'NIFTY':     NIFTY_TOKEN,
-    'BANKNIFTY': 256265, # Placeholder or map correctly if banknifty selected
-    'FINNIFTY':  256265, # Placeholder or map correctly
+    'BANKNIFTY': 260105,
+    'FINNIFTY':  257801,
 }
 
 def _f(val, default: float = 0.0) -> float:
