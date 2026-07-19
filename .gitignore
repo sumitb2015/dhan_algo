@@ -38,6 +38,7 @@ debug/*.pid
 debug/*.json
 debug/*.db
 debug/*.trigger
+debug/*.tmp
 
 # Nested clones under scratch/
 scratch/rrg-lite-clone/
@@ -47,6 +48,9 @@ debug_*.py
 temp_*.py
 scratch/debug_*.py
 scratch/login_*.png
+scratch/_old_kite_trade.py
+scratch/test_enctoken_still_works.py
+scratch/verify_zerodha_refactor.py
 
 # Data Directories
 Stocks Daily Historical Data/
