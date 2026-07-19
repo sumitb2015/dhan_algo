@@ -15,17 +15,46 @@ import json
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, ROOT)
 
-from lib.zerodha import authentication, config
+from kiteconnect import KiteConnect
 
 OUTPUT_FILE = os.path.join(ROOT, 'debug', 'zerodha_nifty_instruments.json')
 
 
+def restore_session_from_json():
+    """Builds a KiteConnect session from zerodha_access_token.json — the file
+    scripts/tools/zerodha_autologin.py writes (the dashboard's actual login
+    path) — rather than the legacy access_token.txt used by
+    lib.zerodha.authentication.restore_kite_session()."""
+    token_file = os.path.join(ROOT, 'zerodha_access_token.json')
+    if not os.path.exists(token_file):
+        return None
+    with open(token_file) as f:
+        data = json.load(f)
+    access_token = data.get('accessToken')
+    if not access_token:
+        return None
+
+    api_key = None
+    env_file = os.path.join(ROOT, '.env.zerodha')
+    if os.path.exists(env_file):
+        with open(env_file) as f:
+            for line in f:
+                if line.strip().startswith('ZERODHA_API_KEY'):
+                    api_key = line.split('=', 1)[1].strip().strip('"')
+                    break
+    if not api_key:
+        return None
+
+    kite = KiteConnect(api_key=api_key)
+    kite.set_access_token(access_token)
+    return kite
+
+
 def main():
-    kite, access_token = authentication.restore_kite_session()
+    kite = restore_session_from_json()
     if kite is None:
         print(json.dumps({'success': False, 'error': 'No Zerodha session — run zerodha_autologin.py first'}))
         sys.exit(0)
-    config.kite = kite
 
     try:
         instruments = kite.instruments('NFO')
