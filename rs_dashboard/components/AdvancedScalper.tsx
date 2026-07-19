@@ -125,11 +125,22 @@ export default function AdvancedScalper() {
   const secIdToStrikeSide = useMemo(() => {
     const map: Record<string, { strike: number; side: 'ce' | 'pe' }> = {};
     for (const [strike, ids] of Object.entries(strikeMap)) {
-      if (ids.ceId) map[ids.ceId] = { strike: Number(strike), side: 'ce' };
-      if (ids.peId) map[ids.peId] = { strike: Number(strike), side: 'pe' };
+      if (broker === 'zerodha') {
+        if (ids.ceSymbol) map[ids.ceSymbol] = { strike: Number(strike), side: 'ce' };
+        if (ids.peSymbol) map[ids.peSymbol] = { strike: Number(strike), side: 'pe' };
+      } else {
+        if (ids.ceId) map[ids.ceId] = { strike: Number(strike), side: 'ce' };
+        if (ids.peId) map[ids.peId] = { strike: Number(strike), side: 'pe' };
+      }
     }
     return map;
-  }, [strikeMap]);
+  }, [strikeMap, broker]);
+
+  const positionJoinKey = useCallback((pos: Record<string, unknown>): string => {
+    return broker === 'zerodha'
+      ? String(pos.tradingSymbol ?? '')
+      : String(pos.securityId ?? (pos as Record<string, unknown>).security_id ?? '');
+  }, [broker]);
 
   // Same realizedProfit=0-on-flat-position fix as the base Scalper (Dhan quirk, see Scalper.tsx)
   const realizedFixedPositions = useMemo(() => {
@@ -155,7 +166,7 @@ export default function AdvancedScalper() {
       return realizedFixedPositions;
 
     return realizedFixedPositions.map(pos => {
-      const secId = String(pos.securityId ?? (pos as Record<string, unknown>).security_id ?? '');
+      const secId = positionJoinKey(pos);
       const mapping = secIdToStrikeSide[secId];
       if (!mapping) return pos;
 
@@ -176,7 +187,7 @@ export default function AdvancedScalper() {
 
       return { ...pos, lastTradedPrice: liveLtp, unrealizedProfit };
     });
-  }, [realizedFixedPositions, liveQuotes, secIdToStrikeSide]);
+  }, [realizedFixedPositions, liveQuotes, secIdToStrikeSide, positionJoinKey]);
 
   const totalPnl = enrichedPositions.reduce((sum, p) =>
     sum + (Number(p.realizedProfit) || 0) + (Number(p.unrealizedProfit) || 0), 0);
@@ -185,16 +196,19 @@ export default function AdvancedScalper() {
   const positionsBySecId = useMemo(() => {
     const map: Record<string, Record<string, unknown>> = {};
     for (const pos of enrichedPositions) {
-      const secId = String(pos.securityId ?? (pos as Record<string, unknown>).security_id ?? '');
+      const secId = positionJoinKey(pos);
       if (secId) map[secId] = pos;
     }
     return map;
-  }, [enrichedPositions]);
+  }, [enrichedPositions, positionJoinKey]);
 
   const boxSecId = useCallback((box: BoxConfig): string | undefined => {
     if (box.strike == null) return undefined;
-    return strikeMap[String(box.strike)]?.[box.side === 'CE' ? 'ceId' : 'peId'];
-  }, [strikeMap]);
+    const entry = strikeMap[String(box.strike)];
+    return broker === 'zerodha'
+      ? entry?.[box.side === 'CE' ? 'ceSymbol' : 'peSymbol']
+      : entry?.[box.side === 'CE' ? 'ceId' : 'peId'];
+  }, [strikeMap, broker]);
 
   // ─── useEffect 1: Load expiries on mount ─────────────────────────
 
