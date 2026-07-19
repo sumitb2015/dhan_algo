@@ -1,7 +1,6 @@
 import logging
 import pandas as pd
 from datetime import datetime, timedelta
-from .kite_trade import KiteApp
 import csv
 import sys
 from . import config  # Import the config file relative to package
@@ -12,9 +11,9 @@ logging.basicConfig(
 )
 
 
-def fetch_instruments(kitew):
+def fetch_instruments(kite):
     """Fetches and saves instrument data."""
-    instruments = kitew.instruments()
+    instruments = kite.instruments()
     if instruments:
         headers = instruments[0].keys() if instruments else []
         with open("instruments.csv", "w", newline="", encoding="utf-8") as csvfile:
@@ -37,11 +36,11 @@ def get_instrument_token_by_tradingsymbol(instruments, tradingsymbol):
 
 
 def get_historical_data(
-    kitew, instrument_token, from_datetime, to_datetime, interval="minute"
+    kite, instrument_token, from_datetime, to_datetime, interval="minute"
 ):
     """Fetches historical data from Kite Connect."""
     try:
-        historical_data = kitew.historical_data(
+        historical_data = kite.historical_data(
             instrument_token,
             from_datetime,
             to_datetime,
@@ -65,7 +64,7 @@ def get_historical_data(
         return pd.DataFrame()  # return empty dataframe instead of None
 
 
-def get_todays_historical_data(kitew, instrument_token, interval="minute"):
+def get_todays_historical_data(kite, instrument_token, interval="minute"):
     """Fetches historical data from Kite Connect for today only."""
     now = datetime.now()
     from_datetime = datetime(now.year, now.month, now.day, 9, 15)
@@ -76,7 +75,7 @@ def get_todays_historical_data(kitew, instrument_token, interval="minute"):
         )
         return pd.DataFrame()
     try:
-        historical_data = kitew.historical_data(
+        historical_data = kite.historical_data(
             instrument_token,
             from_datetime,
             to_datetime,
@@ -100,7 +99,7 @@ def get_todays_historical_data(kitew, instrument_token, interval="minute"):
         return pd.DataFrame()  # return empty dataframe instead of None
 
 
-def initialize_important_levels(kitew, nifty_futures_instrument_token):
+def initialize_important_levels(kite, nifty_futures_instrument_token):
     """Calculates and stores Previous Day High, Low and Pivot levels from *yesterday's data only*."""
     global_levels = {
         "pdh": None,
@@ -121,7 +120,7 @@ def initialize_important_levels(kitew, nifty_futures_instrument_token):
     from_date = to_date = datetime.now() - timedelta(days=1)
 
     try:
-        historical_data = kitew.historical_data(
+        historical_data = kite.historical_data(
             nifty_futures_instrument_token,
             from_date,
             to_date,

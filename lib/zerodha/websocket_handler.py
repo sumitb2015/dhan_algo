@@ -58,12 +58,12 @@ def on_connect(ws, response):
         logging.warning("nifty_instrument_tokens is empty. No options to subscribe to.")
 
 
-def initialize_websocket(enctoken):
-    """Initializes and connects to the Kite WebSocket."""
+def initialize_websocket(kite):
+    """Initializes and connects to the Kite WebSocket using the official KiteConnect session."""
     try:
         kws = KiteTicker(
-            api_key="AlgoTrader",
-            access_token=f"{enctoken}&user_id={cred.USER_ID}",
+            api_key=cred.API_KEY,
+            access_token=kite.access_token,
         )
         kws.on_ticks = on_ticks
         kws.on_connect = on_connect

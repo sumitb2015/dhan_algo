@@ -2,7 +2,6 @@ import logging
 import time
 import sys
 from datetime import datetime, time as dt_time
-from .kite_trade import KiteApp
 from . import authentication
 from . import data_fetcher
 from . import option_chain
@@ -57,7 +56,7 @@ def initialize_instruments(instruments):
 
 
 def login_zerodha():
-    """Logs into Zerodha using Kite Connect and Kite Web."""
+    """Logs into Zerodha using the official Kite Connect session."""
     kite, access_token = authentication.restore_kite_session()
 
     if not access_token:
@@ -70,18 +69,14 @@ def login_zerodha():
         kite = KiteConnect(api_key=cred.API_KEY)
         kite.set_access_token(access_token)
 
-    enctoken = authentication.get_enctoken(cred.USER_ID, cred.PASSWORD, cred.TOTP)
-    kitew = KiteApp(enctoken=enctoken)
-    profile = kitew.profile()
+    profile = kite.profile()
     logging.info(f"Logged in as user: {profile['user_name']}")
 
-    config.instruments = data_fetcher.fetch_instruments(kitew)
+    config.instruments = data_fetcher.fetch_instruments(kite)
     initialize_instruments(config.instruments)
 
     return (
         kite,
-        kitew,
-        enctoken,
         config.nifty_index_instrument,
         config.nifty_futures_instrument_token,
     )
@@ -126,15 +121,13 @@ def main():
         # 1. Login and Initialize
         (
             config.kite,
-            config.kitew,
-            enctoken,
             config.nifty_index_instrument,
             config.nifty_futures_instrument_token,
         ) = login_zerodha()
         # 2. Initialize Important Levels
         if config.nifty_futures_instrument_token:
             config.global_levels = data_fetcher.initialize_important_levels(
-                config.kitew, config.nifty_futures_instrument_token
+                config.kite, config.nifty_futures_instrument_token
             )
 
         # 3. Get Expiry Date
@@ -194,7 +187,7 @@ def main():
         )
 
         # 5. Initialize WebSocket
-        kws = websocket_handler.initialize_websocket(enctoken)
+        kws = websocket_handler.initialize_websocket(config.kite)
         # 6. Trading Loop
         try:
             while True:

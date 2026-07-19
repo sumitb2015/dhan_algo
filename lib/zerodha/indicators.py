@@ -47,7 +47,7 @@ def calculate_indicators(df, instrument_token):
 
         # Calculate VWAP using today's data
         todays_data = get_todays_historical_data(
-            config.kitew, instrument_token, interval=config.CANDLE_INTERVAL
+            config.kite, instrument_token, interval=config.CANDLE_INTERVAL
         )
         if todays_data is not None and not todays_data.empty:
             df["VWAP"] = calculate_vwap(todays_data)  # Add vwap column

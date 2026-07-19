@@ -111,37 +111,6 @@ def get_request_token():
 
 
 
-def get_enctoken(username, password, totp_key):
-    """Logs into Kite Web and returns the enctoken."""
-    session = requests.session()
-    res1 = session.post(
-        "https://kite.zerodha.com/api/login",
-        data={"user_id": username, "password": password, "type": "user_id"},
-    )
-    login_res = res1.json()
-    if res1.status_code != 200 or "data" not in login_res:
-        raise Exception(f"Login failed: {login_res}")
-
-    res2 = session.post(
-        "https://kite.zerodha.com/api/twofa",
-        data={
-            "request_id": login_res["data"]["request_id"],
-            "twofa_value": pyotp.TOTP(totp_key).now(),
-            "user_id": login_res["data"]["user_id"],
-            "twofa_type": "totp",
-        },
-    )
-    twofa_res = res2.json()
-    if res2.status_code != 200 or "data" not in twofa_res:
-        raise Exception(f"Two-factor authentication failed: {twofa_res}")
-
-    enctoken = session.cookies.get_dict().get("enctoken")
-    if not enctoken:
-        raise Exception("Failed to retrieve enctoken.")
-
-    return enctoken
-
-
 def initialize_kite_session(request_token):
     """Initializes the KiteConnect session with the request token."""
     config.kite = KiteConnect(api_key=cred.API_KEY)

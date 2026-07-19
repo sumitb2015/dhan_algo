@@ -1,6 +1,5 @@
 # Global Variables
 kite = None
-kitew = None
 instruments = None
 nifty_index_instrument = None
 nifty_futures_instrument_token = None
