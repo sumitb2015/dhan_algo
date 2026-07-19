@@ -993,8 +993,9 @@ export default function AdvancedScalper() {
         );
       })()}
 
-      {/* Trading panels — always one row, box width adjusts to how many are active */}
-      <div className="flex flex-row gap-3 p-4">
+      {/* Every box keeps the width it would have in a full 5-box row
+          ((100% - 4 gaps) / 5); fewer boxes are centered, not stretched. */}
+      <div className="flex flex-row justify-center gap-3 p-4 overflow-x-auto select-none">
         {boxes.map(box => {
           const ltp = box.strike != null
             ? (liveQuotes?.strikes?.[String(box.strike)]?.[box.side === 'CE' ? 'ce' : 'pe']?.ltp ?? 0)
@@ -1016,7 +1017,7 @@ export default function AdvancedScalper() {
           const hasOpenPosition = !!pos && Number(pos.netQty) !== 0;
 
           return (
-            <div key={box.id} className="flex-1 min-w-0">
+            <div key={box.id} className="flex-none w-[calc(20%-0.6rem)] min-w-[280px]">
               <OptionPanel
                 side={box.side}
                 label={box.side === 'CE' ? 'CALLS' : 'PUTS'}

@@ -1070,45 +1070,49 @@ export default function Scalper() {
       })()}
 
       {/* Trading panels */}
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-3 p-4">
-        <OptionPanel
-          side="CE"
-          label="CALLS"
-          strike={ceStrike}
-          visibleStrikes={visibleStrikes}
-          atm={atm}
-          ltp={ceLtp}
-          pct={cePct}
-          high={ceHigh}
-          low={ceLow}
-          buildup={ceBuildup}
-          oiChgPct={ceOiChgPct}
-          limitPrice={ceLimitPrice}
-          orderMode={orderMode}
-          onStrikeChange={handleCeStrikeChange}
-          onLimitPriceChange={setCeLimitPrice}
-          onBuy={handleCeBuy}
-          onSell={handleCeSell}
-        />
-        <OptionPanel
-          side="PE"
-          label="PUTS"
-          strike={peStrike}
-          visibleStrikes={visibleStrikes}
-          atm={atm}
-          ltp={peLtp}
-          pct={pePct}
-          high={peHigh}
-          low={peLow}
-          buildup={peBuildup}
-          oiChgPct={peOiChgPct}
-          limitPrice={peLimitPrice}
-          orderMode={orderMode}
-          onStrikeChange={handlePeStrikeChange}
-          onLimitPriceChange={setPeLimitPrice}
-          onBuy={handlePeBuy}
-          onSell={handlePeSell}
-        />
+      <div className="flex flex-row justify-center gap-3 p-4 overflow-x-auto select-none">
+        <div className="flex-none w-[calc(20%-0.6rem)] min-w-[280px]">
+          <OptionPanel
+            side="CE"
+            label="CALLS"
+            strike={ceStrike}
+            visibleStrikes={visibleStrikes}
+            atm={atm}
+            ltp={ceLtp}
+            pct={cePct}
+            high={ceHigh}
+            low={ceLow}
+            buildup={ceBuildup}
+            oiChgPct={ceOiChgPct}
+            limitPrice={ceLimitPrice}
+            orderMode={orderMode}
+            onStrikeChange={handleCeStrikeChange}
+            onLimitPriceChange={setCeLimitPrice}
+            onBuy={handleCeBuy}
+            onSell={handleCeSell}
+          />
+        </div>
+        <div className="flex-none w-[calc(20%-0.6rem)] min-w-[280px]">
+          <OptionPanel
+            side="PE"
+            label="PUTS"
+            strike={peStrike}
+            visibleStrikes={visibleStrikes}
+            atm={atm}
+            ltp={peLtp}
+            pct={pePct}
+            high={peHigh}
+            low={peLow}
+            buildup={peBuildup}
+            oiChgPct={peOiChgPct}
+            limitPrice={peLimitPrice}
+            orderMode={orderMode}
+            onStrikeChange={handlePeStrikeChange}
+            onLimitPriceChange={setPeLimitPrice}
+            onBuy={handlePeBuy}
+            onSell={handlePeSell}
+          />
+        </div>
       </div>
 
       {/* Bottom tabs panel */}
