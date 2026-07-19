@@ -68,3 +68,6 @@ temp_data/
 *.parquet
 *.log
 
+
+# Subagent-driven-development scratch state
+.superpowers/
