@@ -2,14 +2,16 @@
 Live options WebSocket bridge for the RS dashboard options page.
 
 Subscribes to NSE FNO option contracts via Dhan WebSocket and writes
-debug/live_options_quotes.json + debug/live_options_history.json every 2 seconds
-for the Next.js dashboard to poll.
+debug/live_options_quotes_dhan.json + debug/live_options_history_dhan.json
+for the Next.js dashboard to poll. Runs concurrently and independently of the
+Zerodha bridge (live_options_ws_zerodha.py) — broker-namespaced file paths so
+neither bridge ever needs to stop the other.
 
 Usage:
     venv\\Scripts\\python.exe scripts/tools/live_options_ws.py --underlying NIFTY --expiry 2026-06-27
 
-Stop gracefully by writing debug/live_options_stop.trigger (done automatically
-by the dashboard's /api/options/live POST {action:"stop"} endpoint).
+Stop gracefully by writing debug/live_options_stop_dhan.trigger (done
+automatically by the dashboard's /api/options/live POST {action:"stop"} endpoint).
 """
 import sys
 import os
@@ -32,10 +34,10 @@ from lib.dhan_helper import DhanHelper
 from dhanhq.marketfeed import MarketFeed
 
 DEBUG_DIR    = os.path.join(ROOT, 'debug')
-QUOTES_FILE  = os.path.join(DEBUG_DIR, 'live_options_quotes.json')
-HISTORY_FILE = os.path.join(DEBUG_DIR, 'live_options_history.json')
-STATUS_FILE  = os.path.join(DEBUG_DIR, 'live_options_status.json')
-STOP_TRIGGER = os.path.join(DEBUG_DIR, 'live_options_stop.trigger')
+QUOTES_FILE  = os.path.join(DEBUG_DIR, 'live_options_quotes_dhan.json')
+HISTORY_FILE = os.path.join(DEBUG_DIR, 'live_options_history_dhan.json')
+STATUS_FILE  = os.path.join(DEBUG_DIR, 'live_options_status_dhan.json')
+STOP_TRIGGER = os.path.join(DEBUG_DIR, 'live_options_stop_dhan.trigger')
 
 MAX_HISTORY  = 300   # ~10 min at 2s ticks
 
@@ -183,6 +185,7 @@ def write_status(status: str, underlying: str = '', expiry: str = '',
     try:
         atomic_write(STATUS_FILE, {
             'status': status,
+            'broker': 'dhan',
             'pid': os.getpid(),
             'underlying': underlying,
             'expiry': expiry,

@@ -1,11 +1,6 @@
 import pyotp
 import requests
-from selenium import webdriver
-from selenium.webdriver.common.by import By
-from selenium.webdriver.chrome.service import Service
-from webdriver_manager.chrome import ChromeDriverManager
 from urllib.parse import urlparse, parse_qs
-import time
 try:
     import credDemo as cred  # Assume this exists and contains your credentials
 except ImportError:
@@ -21,20 +16,11 @@ from kiteconnect import KiteConnect
 import os
 from datetime import datetime
 from . import config  # Import the config file relative to package
-import tempfile  # Import tempfile for temporary directory
 
 # Configure logging
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
 )
-
-
-def get_chrome_driver():
-    options = webdriver.ChromeOptions()
-    driver = webdriver.Chrome(
-        service=Service(ChromeDriverManager().install()), options=options
-    )
-    return driver
 
 
 def get_request_token():
@@ -152,8 +138,7 @@ def restore_kite_session():
         except ValueError:
             last_modified_date = None
 
-    # if os.path.exists(access_token_file) and last_modified_date == today_date:
-    if os.path.exists(access_token_file):
+    if os.path.exists(access_token_file) and last_modified_date == today_date:
         with open(access_token_file, "r") as file:
             access_token = file.read().strip()
             config.kite = KiteConnect(api_key=cred.API_KEY)

@@ -10,10 +10,23 @@ const DEBUG_DIR      = path.join(PROJECT_ROOT, 'debug');
 const PYTHON_EXE     = path.join(PROJECT_ROOT, 'venv', 'Scripts', 'pythonw.exe');
 const BRIDGE_SCRIPT  = path.join(PROJECT_ROOT, 'scripts', 'tools', 'live_options_ws.py');
 const ZERODHA_BRIDGE_SCRIPT = path.join(PROJECT_ROOT, 'scripts', 'tools', 'live_options_ws_zerodha.py');
-const QUOTES_FILE    = path.join(DEBUG_DIR, 'live_options_quotes.json');
-const HISTORY_FILE   = path.join(DEBUG_DIR, 'live_options_history.json');
-const STATUS_FILE    = path.join(DEBUG_DIR, 'live_options_status.json');
-const STOP_TRIGGER   = path.join(DEBUG_DIR, 'live_options_stop.trigger');
+
+type Broker = 'dhan' | 'zerodha';
+
+function normalizeBroker(value: unknown): Broker {
+  return String(value ?? 'dhan').toLowerCase() === 'zerodha' ? 'zerodha' : 'dhan';
+}
+
+/** Each broker's bridge is fully independent — its own quotes/status/history
+ *  files and stop trigger — so starting/stopping one never touches the other. */
+function filesFor(broker: Broker) {
+  return {
+    quotes:  path.join(DEBUG_DIR, `live_options_quotes_${broker}.json`),
+    history: path.join(DEBUG_DIR, `live_options_history_${broker}.json`),
+    status:  path.join(DEBUG_DIR, `live_options_status_${broker}.json`),
+    stop:    path.join(DEBUG_DIR, `live_options_stop_${broker}.trigger`),
+  };
+}
 
 async function findFreePort(startPort: number): Promise<number> {
   return new Promise((resolve) => {
@@ -39,18 +52,32 @@ function readJson(file: string): unknown {
   }
 }
 
-/** GET — return live quotes + bridge status (+ history when explicitly requested).
- *  live_options_history.json holds 300 full-chain snapshots (~6MB) — reading and
- *  JSON.parse-ing it synchronously on every request blocks the event loop. Scalper
- *  polls this endpoint every 100ms and never uses `history`, so only pay that cost
- *  for callers (OptionsCharts) that ask for it via ?history=1. */
+/** Writes the stop trigger and waits (bounded, polling with a fresh PID check
+ *  each time) for the process to actually exit, instead of a blind fixed sleep. */
+async function stopAndWait(broker: Broker, pid: number, maxWaitMs = 3000): Promise<void> {
+  fs.writeFileSync(filesFor(broker).stop, '');
+  const deadline = Date.now() + maxWaitMs;
+  while (Date.now() < deadline) {
+    if (!isPidRunning(pid, true)) return;
+    await new Promise(r => setTimeout(r, 300));
+  }
+}
+
+/** GET — return live quotes + bridge status (+ history when explicitly requested)
+ *  for one broker. live_options_history_*.json holds 300 full-chain snapshots
+ *  (~6MB) — reading and JSON.parse-ing it synchronously on every request blocks
+ *  the event loop. Scalper polls this endpoint every 100ms and never uses
+ *  `history`, so only pay that cost for callers (OptionsCharts) that ask via
+ *  ?history=1. */
 export async function GET(request: NextRequest) {
+  const broker         = normalizeBroker(request.nextUrl.searchParams.get('broker'));
   const includeHistory = request.nextUrl.searchParams.get('history') === '1';
   const checkPid       = request.nextUrl.searchParams.get('checkPid') === '1';
+  const files = filesFor(broker);
 
-  const quotes  = readJson(QUOTES_FILE)  as Record<string, unknown> | null;
-  const history = includeHistory ? (readJson(HISTORY_FILE) as Record<string, unknown> | null) : null;
-  const status  = readJson(STATUS_FILE)  as Record<string, unknown> | null;
+  const quotes  = readJson(files.quotes)  as Record<string, unknown> | null;
+  const history = includeHistory ? (readJson(files.history) as Record<string, unknown> | null) : null;
+  const status  = readJson(files.status)  as Record<string, unknown> | null;
 
   // If the process is dead, reset both RUNNING and ERROR to STOPPED so stale
   // error state from a previous crash doesn't persist across page loads.
@@ -71,17 +98,24 @@ export async function GET(request: NextRequest) {
   });
 }
 
-/** POST — start or stop the WebSocket bridge */
+/** POST — start or stop a broker's WebSocket bridge. Each broker's bridge is
+ *  independent: starting/stopping one never affects the other's running
+ *  process, so a broker switch in the UI never spawns/kills anything. */
 export async function POST(request: NextRequest) {
-  const body = await request.json().catch(() => ({})) as Record<string, unknown>;
+  const body   = await request.json().catch(() => ({})) as Record<string, unknown>;
   const action = String(body.action ?? '');
 
   if (!fs.existsSync(DEBUG_DIR)) fs.mkdirSync(DEBUG_DIR, { recursive: true });
 
   // ── Stop ─────────────────────────────────────────────────────────────────
   if (action === 'stop') {
-    fs.writeFileSync(STOP_TRIGGER, '');
-    return NextResponse.json({ success: true, message: 'Stop trigger written' });
+    const brokers: Broker[] = Array.isArray(body.brokers)
+      ? (body.brokers as unknown[]).map(normalizeBroker)
+      : [normalizeBroker(body.broker)];
+    for (const broker of brokers) {
+      fs.writeFileSync(filesFor(broker).stop, '');
+    }
+    return NextResponse.json({ success: true, message: 'Stop trigger written', brokers });
   }
 
   // ── Start ────────────────────────────────────────────────────────────────
@@ -89,36 +123,35 @@ export async function POST(request: NextRequest) {
     const underlying = String(body.underlying ?? 'NIFTY').toUpperCase();
     const expiry     = String(body.expiry ?? '');
     const numStrikes = Number(body.numStrikes ?? 10);
-    const broker     = String(body.broker ?? 'dhan').toLowerCase();
+    const broker     = normalizeBroker(body.broker);
+    const files      = filesFor(broker);
 
     if (!expiry) {
       return NextResponse.json({ success: false, error: 'expiry required' }, { status: 400 });
     }
 
-    // Prevent duplicate bridge
-    const status = readJson(STATUS_FILE) as Record<string, unknown> | null;
-    const runningBroker = String(status?.broker ?? 'dhan').toLowerCase();
+    // Prevent duplicate bridge for this broker
+    const status = readJson(files.status) as Record<string, unknown> | null;
     if (
       status &&
       status.pid &&
       status.status === 'RUNNING' &&
       status.underlying === underlying &&
       status.expiry === expiry &&
-      runningBroker === broker &&
       isPidRunning(Number(status.pid))
     ) {
       return NextResponse.json({ success: true, message: 'Bridge already running', pid: status.pid });
     }
 
-    // Stop any existing bridge first
+    // Stop this broker's existing bridge first (different underlying/expiry) —
+    // the OTHER broker's bridge, if any, is never touched.
     if (status && status.pid && status.status === 'RUNNING' && isPidRunning(Number(status.pid))) {
-      fs.writeFileSync(STOP_TRIGGER, '');
-      await new Promise(r => setTimeout(r, 1500));
+      await stopAndWait(broker, Number(status.pid));
     }
 
-    if (fs.existsSync(STOP_TRIGGER)) fs.unlinkSync(STOP_TRIGGER);
+    if (fs.existsSync(files.stop)) fs.unlinkSync(files.stop);
 
-    const freePort = await findFreePort(8765);
+    const freePort = await findFreePort(broker === 'zerodha' ? 8865 : 8765);
     const scriptPath = broker === 'zerodha' ? ZERODHA_BRIDGE_SCRIPT : BRIDGE_SCRIPT;
     const child = spawn(
       PYTHON_EXE,

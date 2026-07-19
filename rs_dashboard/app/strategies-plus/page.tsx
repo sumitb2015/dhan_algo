@@ -3,7 +3,8 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import {
   Layers, RefreshCw, TrendingUp, TrendingDown, AlertTriangle,
-  Power, ShieldOff, Activity, Zap, LayoutList, ChevronDown, Shield
+  Power, ShieldOff, Activity, Zap, LayoutList, ChevronDown, Shield,
+  Repeat, CheckCircle2, XCircle, Play, Square
 } from 'lucide-react';
 import StrategyRowWide from '@/components/StrategyRowWide';
 import NavBar from '@/components/NavBar';
@@ -28,6 +29,40 @@ interface PnlGuardStatus {
   productType?: string[];
   enableKillSwitch?: boolean;
 }
+
+interface CopyTradeChild {
+  broker: 'zerodha';
+  multiplier: number;
+  enabled: boolean;
+}
+interface CopyTradeConfig {
+  armed: boolean;
+  children: CopyTradeChild[];
+}
+interface CopyTradeStatus {
+  status: 'RUNNING' | 'STARTING' | 'STOPPED' | 'ERROR' | string;
+  pid?: number;
+  detail?: string;
+  started_at?: string;
+  last_update?: string;
+}
+interface CopyTradeLogEntry {
+  ts: string;
+  order_no: string;
+  parent_symbol?: string;
+  zerodha_symbol?: string;
+  side?: string;
+  parent_qty?: number;
+  broker?: string;
+  multiplier?: number;
+  child_qty?: number;
+  armed?: boolean;
+  result: 'success' | 'error' | 'skipped' | 'logged_only' | 'safety_exit' | 'safety_exit_error' | string;
+  error?: string;
+  child_order_id?: string;
+}
+
+const DEFAULT_COPY_TRADE_CHILD: CopyTradeChild = { broker: 'zerodha', multiplier: 1, enabled: false };
 
 let toastCounter = 0;
 
@@ -59,6 +94,14 @@ export default function StrategiesPlusPage() {
   const [confirmClear, setConfirmClear] = useState(false);
   const [settingPnl, setSettingPnl] = useState(false);
   const [clearingPnl, setClearingPnl] = useState(false);
+
+  const [showCopyTrade, setShowCopyTrade] = useState(false);
+  const [copyTradeConfig, setCopyTradeConfig] = useState<CopyTradeConfig>({ armed: false, children: [DEFAULT_COPY_TRADE_CHILD] });
+  const [copyTradeStatus, setCopyTradeStatus] = useState<CopyTradeStatus | null>(null);
+  const [copyTradeLog, setCopyTradeLog] = useState<CopyTradeLogEntry[]>([]);
+  const [confirmArm, setConfirmArm] = useState(false);
+  const [arming, setArming] = useState(false);
+  const [togglingBridge, setTogglingBridge] = useState(false);
 
   const addToast = (type: ToastType, message: string) => {
     const id = ++toastCounter;
@@ -250,6 +293,121 @@ export default function StrategiesPlusPage() {
     }
   };
 
+  /* ── Trade Replication (Dhan → Zerodha copy trading) ── */
+  const fetchCopyTradeConfig = useCallback(async () => {
+    try {
+      const res = await fetch('/api/copy-trade/config');
+      const data = await res.json();
+      if (data.success && data.config) {
+        setCopyTradeConfig({
+          armed: !!data.config.armed,
+          children: data.config.children?.length ? data.config.children : [DEFAULT_COPY_TRADE_CHILD],
+        });
+      }
+    } catch { /* keep last known config */ }
+  }, []);
+
+  const fetchCopyTradeStatus = useCallback(async () => {
+    try {
+      const res = await fetch('/api/copy-trade?checkPid=1');
+      const data = await res.json();
+      if (data.success) {
+        setCopyTradeStatus(data.status ?? null);
+        setCopyTradeLog(Array.isArray(data.entries) ? data.entries : []);
+      }
+    } catch { /* keep last known status */ }
+  }, []);
+
+  useEffect(() => {
+    if (!showCopyTrade) return;
+    fetchCopyTradeConfig();
+    fetchCopyTradeStatus();
+    const iv = setInterval(fetchCopyTradeStatus, 2000);
+    return () => clearInterval(iv);
+  }, [showCopyTrade, fetchCopyTradeConfig, fetchCopyTradeStatus]);
+
+  const copyTradeBridgeRunning = copyTradeStatus?.status === 'RUNNING' || copyTradeStatus?.status === 'STARTING';
+
+  const handleToggleCopyTradeBridge = async () => {
+    setTogglingBridge(true);
+    try {
+      await fetch('/api/copy-trade', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: copyTradeBridgeRunning ? 'stop' : 'start' }),
+      });
+      addToast('info', copyTradeBridgeRunning ? 'Replication bridge stopping…' : 'Replication bridge starting…');
+    } catch {
+      addToast('error', 'Failed to toggle the replication bridge.');
+    } finally {
+      setTogglingBridge(false);
+      setTimeout(fetchCopyTradeStatus, 500);
+    }
+  };
+
+  const updateCopyTradeChild = async (patch: Partial<CopyTradeChild>) => {
+    const nextChild = { ...copyTradeConfig.children[0], ...patch };
+    setCopyTradeConfig(prev => ({ ...prev, children: [nextChild] }));
+    try {
+      const res = await fetch('/api/copy-trade/config', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ children: [nextChild] }),
+      });
+      const data = await res.json();
+      if (!data.success) addToast('error', data.error || 'Failed to save child account settings.');
+    } catch {
+      addToast('error', 'Network error saving child account settings.');
+    }
+  };
+
+  const handleArmReplication = async () => {
+    if (!confirmArm) {
+      setConfirmArm(true);
+      setTimeout(() => setConfirmArm(false), 3000);
+      return;
+    }
+    setArming(true);
+    setConfirmArm(false);
+    try {
+      const res = await fetch('/api/copy-trade/config', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ armed: true }),
+      });
+      const data = await res.json();
+      if (data.success) {
+        setCopyTradeConfig(prev => ({ ...prev, armed: true }));
+        addToast('success', 'Trade replication ARMED — child orders will now be placed live.');
+      } else {
+        addToast('error', data.error || 'Failed to arm replication.');
+      }
+    } catch {
+      addToast('error', 'Network error arming replication.');
+    } finally {
+      setArming(false);
+    }
+  };
+
+  const handleDisarmReplication = async () => {
+    try {
+      const res = await fetch('/api/copy-trade/config', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ armed: false }),
+      });
+      const data = await res.json();
+      if (data.success) {
+        setCopyTradeConfig(prev => ({ ...prev, armed: false }));
+        addToast('info', 'Trade replication disarmed.');
+      } else {
+        addToast('error', data.error || 'Failed to disarm replication.');
+      }
+    } catch {
+      addToast('error', 'Network error disarming replication.');
+    }
+  };
+
   /* ── Toast colors ── */
   const toastColor: Record<ToastType, string> = {
     success: 'bg-emerald-950/90 border-emerald-500/40 text-emerald-300',
@@ -386,6 +544,24 @@ export default function StrategiesPlusPage() {
               <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 shrink-0" />
             )}
             <ChevronDown className={`h-3 w-3 transition-transform duration-200 ${showPnlGuard ? 'rotate-180' : ''}`} />
+          </button>
+
+          {/* Trade Replication toggle */}
+          <button
+            onClick={() => setShowCopyTrade(v => !v)}
+            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[11px] font-bold border transition-all active:scale-95 ${
+              showCopyTrade
+                ? 'bg-sky-900/30 border-sky-600/50 text-sky-300'
+                : 'bg-zinc-900/60 border-zinc-700/60 text-zinc-400 hover:border-zinc-600 hover:text-zinc-200'
+            }`}
+            title="Replicate Dhan trades to child accounts"
+          >
+            <Repeat className="h-3 w-3" />
+            Replication
+            {copyTradeConfig.armed && (
+              <span className="h-1.5 w-1.5 rounded-full bg-red-400 animate-pulse shrink-0" title="Armed — live" />
+            )}
+            <ChevronDown className={`h-3 w-3 transition-transform duration-200 ${showCopyTrade ? 'rotate-180' : ''}`} />
           </button>
 
           {/* View mode tabs */}
@@ -592,6 +768,169 @@ export default function StrategiesPlusPage() {
             {clearingPnl ? <RefreshCw className="h-3 w-3 animate-spin" /> : null}
             {clearingPnl ? 'Clearing…' : confirmClear ? 'Confirm Clear?' : 'Clear'}
           </button>
+        </div>
+      )}
+
+      {/* ── Trade Replication Panel ── */}
+      {showCopyTrade && (
+        <div className="w-full border-b border-zinc-900 bg-zinc-950/60 px-4 py-3 flex flex-col gap-3">
+
+          {copyTradeConfig.armed && copyTradeStatus?.status !== 'RUNNING' && (
+            <div className="flex items-center gap-2 px-3 py-2 rounded-lg bg-red-950/60 border border-red-800/60">
+              <AlertTriangle className="h-3.5 w-3.5 text-red-400 shrink-0" />
+              <span className="text-[11px] text-red-300 font-semibold">
+                Armed but the bridge is not running — the child account is NOT protected right now. Start the bridge or disarm.
+              </span>
+            </div>
+          )}
+
+          <div className="flex items-center gap-4 flex-wrap">
+            {/* Bridge status chip */}
+            <div className="flex items-center gap-2 shrink-0">
+              {copyTradeStatus?.status === 'RUNNING' ? (
+                <span className="flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-emerald-500/10 border border-emerald-500/30 text-emerald-400 text-[11px] font-bold">
+                  <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 shrink-0" />
+                  LISTENING
+                </span>
+              ) : copyTradeStatus?.status === 'STARTING' ? (
+                <span className="flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-amber-500/10 border border-amber-500/30 text-amber-400 text-[11px] font-bold">
+                  <RefreshCw className="h-3 w-3 animate-spin" />
+                  STARTING
+                </span>
+              ) : copyTradeStatus?.status === 'ERROR' ? (
+                <span className="flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-red-500/10 border border-red-500/30 text-red-400 text-[11px] font-bold" title={copyTradeStatus.detail}>
+                  <AlertTriangle className="h-3 w-3" />
+                  ERROR
+                </span>
+              ) : (
+                <span className="flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-zinc-800 border border-zinc-700 text-zinc-500 text-[11px] font-bold">
+                  STOPPED
+                </span>
+              )}
+            </div>
+
+            {/* Bridge start/stop */}
+            <button
+              onClick={handleToggleCopyTradeBridge}
+              disabled={togglingBridge}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[11px] font-bold border transition-all active:scale-95 disabled:opacity-40 bg-zinc-900/60 border-zinc-700/60 text-zinc-400 hover:border-zinc-600 hover:text-zinc-200"
+            >
+              {copyTradeBridgeRunning ? <Square className="h-3 w-3" /> : <Play className="h-3 w-3" />}
+              {copyTradeBridgeRunning ? 'Stop Bridge' : 'Start Bridge'}
+            </button>
+
+            <div className="h-6 w-px bg-zinc-800 shrink-0" />
+
+            {/* Child account row */}
+            <div className="flex items-center gap-2 shrink-0">
+              <span className="text-[10px] text-zinc-500 font-semibold uppercase tracking-wider">Child</span>
+              <span className="px-2 py-1 rounded-md bg-zinc-900 border border-zinc-700 text-[11px] text-white font-semibold">Zerodha</span>
+            </div>
+
+            <div className="flex items-center gap-1.5 shrink-0">
+              <span className="text-[10px] text-zinc-500 font-semibold uppercase tracking-wider">Multiplier</span>
+              <div className="flex items-center gap-1 bg-zinc-900 border border-zinc-700 rounded-md px-2 py-1">
+                <input
+                  type="number"
+                  min="1"
+                  step="1"
+                  value={copyTradeConfig.children[0]?.multiplier ?? 1}
+                  onChange={e => {
+                    const n = parseInt(e.target.value, 10);
+                    if (Number.isInteger(n) && n > 0) updateCopyTradeChild({ multiplier: n });
+                  }}
+                  className="bg-transparent text-[11px] text-white w-12 outline-none tabular-nums"
+                />
+                <span className="text-[11px] text-zinc-500">x</span>
+              </div>
+            </div>
+
+            <label className="flex items-center gap-2 cursor-pointer shrink-0">
+              <div
+                onClick={() => updateCopyTradeChild({ enabled: !copyTradeConfig.children[0]?.enabled })}
+                className={`relative w-8 h-4 rounded-full transition-colors cursor-pointer ${
+                  copyTradeConfig.children[0]?.enabled ? 'bg-sky-600' : 'bg-zinc-700'
+                }`}
+              >
+                <div className={`absolute top-0.5 h-3 w-3 rounded-full bg-white shadow transition-transform ${
+                  copyTradeConfig.children[0]?.enabled ? 'translate-x-4' : 'translate-x-0.5'
+                }`} />
+              </div>
+              <span className="text-[10px] text-zinc-500 font-semibold">Enabled</span>
+            </label>
+
+            <div className="h-6 w-px bg-zinc-800 shrink-0" />
+
+            {/* Arm / Disarm */}
+            {copyTradeConfig.armed ? (
+              <button
+                onClick={handleDisarmReplication}
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[11px] font-bold border transition-all active:scale-95 bg-red-950/60 border-red-900/60 text-red-400 hover:bg-red-900/40 hover:border-red-700 hover:text-red-300"
+              >
+                <ShieldOff className="h-3 w-3" />
+                STOP Replication (Armed)
+              </button>
+            ) : (
+              <button
+                onClick={handleArmReplication}
+                disabled={arming || !copyTradeConfig.children[0]?.enabled}
+                title={!copyTradeConfig.children[0]?.enabled ? 'Enable at least one child account first' : undefined}
+                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[11px] font-bold border transition-all active:scale-95 disabled:opacity-40 disabled:cursor-not-allowed ${
+                  confirmArm
+                    ? 'bg-red-600 border-red-500 text-white animate-pulse shadow-lg shadow-red-500/20'
+                    : 'bg-emerald-900/40 border-emerald-700/60 text-emerald-300 hover:bg-emerald-800/40 hover:border-emerald-600'
+                }`}
+              >
+                {arming ? <RefreshCw className="h-3 w-3 animate-spin" /> : <Repeat className="h-3 w-3" />}
+                {arming ? 'Arming…' : confirmArm ? 'Confirm ARM?' : 'ARM Replication'}
+              </button>
+            )}
+          </div>
+
+          {/* Activity feed */}
+          <div className="border border-zinc-800 rounded-lg bg-zinc-950/60 max-h-40 overflow-y-auto">
+            {copyTradeLog.length === 0 ? (
+              <div className="px-3 py-2 text-[11px] text-zinc-600">No replication activity yet.</div>
+            ) : (
+              <div className="divide-y divide-zinc-800/50">
+                {[...copyTradeLog].reverse().slice(0, 30).map((entry, i) => (
+                  <div key={`${entry.order_no}-${entry.ts}-${i}`} className="flex items-center gap-2 px-3 py-1.5 text-[11px]">
+                    {entry.result === 'success' || entry.result === 'safety_exit' ? (
+                      <CheckCircle2 className={`h-3 w-3 shrink-0 ${entry.result === 'safety_exit' ? 'text-amber-400' : 'text-emerald-400'}`} />
+                    ) : entry.result === 'error' || entry.result === 'safety_exit_error' ? (
+                      <XCircle className="h-3 w-3 text-red-400 shrink-0" />
+                    ) : (
+                      <span className="h-3 w-3 rounded-full border border-zinc-600 shrink-0" />
+                    )}
+                    <span className="text-zinc-600 shrink-0 tabular-nums">
+                      {new Date(entry.ts).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', second: '2-digit' })}
+                    </span>
+                    {(entry.result === 'safety_exit' || entry.result === 'safety_exit_error') && (
+                      <span className="flex items-center gap-1 px-1.5 py-0.5 rounded bg-amber-500/10 border border-amber-500/30 text-amber-400 text-[10px] font-bold shrink-0">
+                        <Shield className="h-2.5 w-2.5" /> SAFETY-NET
+                      </span>
+                    )}
+                    <span className="text-zinc-300 font-medium truncate">
+                      {entry.side} {entry.child_qty ?? entry.parent_qty} {entry.zerodha_symbol ?? entry.parent_symbol}
+                    </span>
+                    <span className={`shrink-0 ${
+                      entry.result === 'success' || entry.result === 'safety_exit' ? 'text-emerald-500'
+                        : entry.result === 'error' || entry.result === 'safety_exit_error' ? 'text-red-500'
+                        : 'text-zinc-500'
+                    }`}>
+                      {entry.result === 'logged_only' ? 'logged (not armed)'
+                        : entry.result === 'skipped' ? entry.error
+                        : entry.result === 'safety_exit' ? 'parent flat — force-closed'
+                        : entry.result}
+                    </span>
+                    {entry.child_order_id && (
+                      <span className="text-zinc-600 truncate">→ {entry.child_order_id}</span>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
         </div>
       )}
 

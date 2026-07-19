@@ -1347,16 +1347,26 @@ class DhanHelper:
 
     # --- PORTFOLIO ---
     def get_positions(self) -> pd.DataFrame:
-        """Fetch current day positions as a Pandas DataFrame."""
+        """Fetch current day positions as a Pandas DataFrame.
+
+        On failure, records the error on self.last_api_error (see
+        _record_api_error) so callers can distinguish "genuinely flat" from
+        "API call failed" instead of treating both as an empty DataFrame —
+        this matters for anything that reacts to "positions just went to
+        zero" (e.g. the copy-trade watchdog).
+        """
         try:
             res = self.dhan.get_positions()
             if isinstance(res, dict) and res.get('status') == 'success':
+                self.last_api_error = None
                 data = res.get('data', [])
                 return pd.DataFrame(data)
             error_msg = res.get('remarks') if isinstance(res, dict) else str(res)
             logger.error(f"Failed to fetch positions: {error_msg}")
+            self._record_api_error('get_positions', res if isinstance(res, dict) else {})
         except Exception as e:
             logger.error(f"Exception in get_positions: {e}")
+            self.last_api_error = {"method": "get_positions", "code": "", "type": "exception", "message": str(e)}
         return pd.DataFrame()
 
     def get_holdings(self) -> pd.DataFrame:

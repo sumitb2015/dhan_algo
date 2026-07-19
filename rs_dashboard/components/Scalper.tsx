@@ -5,6 +5,7 @@ import NavBar from './NavBar';
 import { Zap, RefreshCw, Shield, ShieldOff, ChevronDown, ChevronUp, Wallet } from 'lucide-react';
 import { useLiveOptionsWS } from '@/lib/useLiveOptionsWS';
 import { useProfitLock, ProfitLockControls } from './ProfitLock';
+import { useCopyTrade, CopyTradeControls } from './CopyTrade';
 import { useBrokerSelector, brokerRoute } from '@/hooks/useBrokerSelector';
 
 // ─── Types ────────────────────────────────────────────────────────
@@ -99,7 +100,7 @@ export default function Scalper() {
   const orderInFlightRef = useRef<Set<'CE' | 'PE'>>(new Set());
 
   // Live data: direct WebSocket to the Python bridge (HTTP polling fallback)
-  const { liveQuotes, bridgeStatus, lastUpdated, transport } = useLiveOptionsWS(expiry, broker);
+  const { liveQuotes, bridgeStatus, lastUpdated, transport } = useLiveOptionsWS(expiry, broker, authenticatedBrokers);
 
   // Trading controls
   const [lots, setLots]           = useState(1);
@@ -334,28 +335,31 @@ export default function Scalper() {
       })
       .catch(() => {});
 
-    // Start WS bridge
-    fetch('/api/options/live', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ action: 'start', underlying: 'NIFTY', expiry, numStrikes: 30, broker }),
-    }).catch(() => {});
+    // Start a WS bridge for every authenticated broker concurrently — each
+    // runs independently on its own port/files (see useLiveOptionsWS), so
+    // switching the broker selector never spawns or kills a process.
+    for (const b of authenticatedBrokers) {
+      fetch('/api/options/live', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'start', underlying: 'NIFTY', expiry, numStrikes: 30, broker: b }),
+      }).catch(() => {});
+    }
 
-    // Cleanup: stop bridge when expiry changes or component unmounts
+    // Cleanup: stop every started bridge when expiry changes or component unmounts
     return () => {
       fetch('/api/options/live', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action: 'stop' }),
+        body: JSON.stringify({ action: 'stop', brokers: authenticatedBrokers }),
       }).catch(() => {});
     };
-  }, [expiry, broker]);
+  }, [expiry, authenticatedBrokers]);
 
   // Re-resolves strikeMap (Dhan securityId / Zerodha tradingsymbol per strike)
-  // whenever the expiry OR the selected broker changes. Kept separate from
-  // the chain-fetch/WS-bridge effect above so a broker switch alone doesn't
-  // restart the live-quotes WebSocket bridge, which stays Dhan-sourced
-  // regardless of the selected broker.
+  // whenever the expiry OR the selected broker changes. Order routing is
+  // still broker-specific — only the live-quotes WS bridges (started above)
+  // run concurrently for both brokers regardless of selection.
   useEffect(() => {
     if (!expiry) return;
 
@@ -634,6 +638,8 @@ export default function Scalper() {
     notify: addToast,
     storageKey: 'profit_lock_v1',
   });
+
+  const copyTrade = useCopyTrade(addToast);
 
   const handleExitAll = useCallback(async () => {
     if (!confirmExitAll) {
@@ -1117,6 +1123,9 @@ export default function Scalper() {
 
                 {/* Client-side minimum profit lock (total P&L floor) */}
                 <ProfitLockControls lock={profitLock} totalPnl={totalPnl} />
+
+                {/* Dhan → Zerodha trade replication (arm/disarm + multiplier) */}
+                <CopyTradeControls copyTrade={copyTrade} />
 
                 {/* Current guard values — shown whenever configured, not just when broker confirms ACTIVE */}
                 {hasConfig && (

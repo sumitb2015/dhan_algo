@@ -8,8 +8,10 @@ import { execSync } from 'child_process';
 const PID_CHECK_TTL = 3000;
 const cache = new Map<number, { result: boolean; ts: number }>();
 
-export function isPidRunning(pid: number): boolean {
-  const hit = cache.get(pid);
+/** `force` bypasses the cache — use only for short-lived poll loops (e.g. waiting
+ *  for a process to exit) where the 3s TTL would otherwise mask the state change. */
+export function isPidRunning(pid: number, force = false): boolean {
+  const hit = force ? undefined : cache.get(pid);
   if (hit && Date.now() - hit.ts < PID_CHECK_TTL) {
     return hit.result;
   }

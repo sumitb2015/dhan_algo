@@ -2,13 +2,15 @@
 Live options WebSocket bridge for the RS dashboard options page (Zerodha Mode).
 
 Subscribes to NSE FNO option contracts via Zerodha KiteTicker WebSocket and writes
-debug/live_options_quotes.json + debug/live_options_history.json every 2 seconds
-for the Next.js dashboard to poll.
+debug/live_options_quotes_zerodha.json + debug/live_options_history_zerodha.json
+for the Next.js dashboard to poll. Runs concurrently and independently of the
+Dhan bridge (live_options_ws.py) — broker-namespaced file paths so neither
+bridge ever needs to stop the other.
 
 Usage:
     venv\\Scripts\\python.exe scripts/tools/live_options_ws_zerodha.py --underlying NIFTY --expiry 2026-06-27
 
-Stop gracefully by writing debug/live_options_stop.trigger.
+Stop gracefully by writing debug/live_options_stop_zerodha.trigger.
 """
 import sys
 import os
@@ -29,10 +31,11 @@ sys.path.insert(0, ROOT)
 from scripts.tools.zerodha_instruments_cache import restore_session_from_json
 
 DEBUG_DIR    = os.path.join(ROOT, 'debug')
-QUOTES_FILE  = os.path.join(DEBUG_DIR, 'live_options_quotes.json')
-HISTORY_FILE = os.path.join(DEBUG_DIR, 'live_options_history.json')
-STATUS_FILE  = os.path.join(DEBUG_DIR, 'live_options_status.json')
-STOP_TRIGGER = os.path.join(DEBUG_DIR, 'live_options_stop.trigger')
+QUOTES_FILE  = os.path.join(DEBUG_DIR, 'live_options_quotes_zerodha.json')
+HISTORY_FILE = os.path.join(DEBUG_DIR, 'live_options_history_zerodha.json')
+STATUS_FILE  = os.path.join(DEBUG_DIR, 'live_options_status_zerodha.json')
+STOP_TRIGGER = os.path.join(DEBUG_DIR, 'live_options_stop_zerodha.trigger')
+INSTRUMENTS_CACHE_MAX_AGE_SEC = 24 * 60 * 60
 
 MAX_HISTORY  = 300   # ~10 min at 2s ticks
 
@@ -183,8 +186,13 @@ class QuotePushServer:
 
 def load_zerodha_instruments_cache():
     cache_file = os.path.join(ROOT, 'debug', 'zerodha_nifty_instruments.json')
-    if not os.path.exists(cache_file):
-        print("[live_options_ws_zerodha] Instrument cache missing, generating...", flush=True)
+    is_stale = (
+        os.path.exists(cache_file)
+        and time.time() - os.path.getmtime(cache_file) > INSTRUMENTS_CACHE_MAX_AGE_SEC
+    )
+    if not os.path.exists(cache_file) or is_stale:
+        reason = 'stale (>24h old)' if is_stale else 'missing'
+        print(f"[live_options_ws_zerodha] Instrument cache {reason}, generating...", flush=True)
         import subprocess
         subprocess.run([sys.executable, os.path.join(ROOT, 'scripts', 'tools', 'zerodha_instruments_cache.py')], check=True)
     with open(cache_file) as f:
@@ -226,15 +234,17 @@ def main():
     spot_symbol = UNDERLYING_TRADING_SYMBOLS.get(args.underlying.upper(), 'NSE:NIFTY 50')
     print(f'[live_options_ws_zerodha] Fetching spot price for {spot_symbol}…', flush=True)
     spot = 0.0
-    for attempt in range(5):
+    backoff = 1.0
+    for attempt in range(3):
         try:
             q = kite.quote([spot_symbol])
             spot = q.get(spot_symbol, {}).get('last_price', 0.0)
             if spot > 0:
                 break
         except Exception as e:
-            print(f'[live_options_ws_zerodha] WARN: spot fetch failed (attempt {attempt + 1}/5): {e}', flush=True)
-        time.sleep(5)
+            print(f'[live_options_ws_zerodha] WARN: spot fetch failed (attempt {attempt + 1}/3): {e}', flush=True)
+        time.sleep(backoff)
+        backoff *= 2
 
     step = 50 if args.underlying in ('NIFTY', 'FINNIFTY') else 100
     atm  = round(spot / step) * step if spot > 0 else 0
@@ -306,7 +316,11 @@ def main():
     kws.on_connect = on_connect
     kws.connect(threaded=True)
 
-    time.sleep(3) # wait for connection
+    # Poll until the socket is actually up instead of always waiting a flat
+    # 3s — proceeds the instant the connection is live, capped at 5s.
+    connect_deadline = time.time() + 5.0
+    while not kws.is_connected() and time.time() < connect_deadline:
+        time.sleep(0.2)
 
     write_status('RUNNING', underlying=args.underlying, expiry=args.expiry,
                  subscribed=len(option_tokens), started_at=started_at, ws_port=ws_port)

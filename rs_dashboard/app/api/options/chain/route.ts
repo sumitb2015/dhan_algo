@@ -47,7 +47,7 @@ export async function GET(request: NextRequest) {
         // Try to read spot from live quotes if available, otherwise default to 0
         let spot = 0;
         try {
-          const quotesFile = path.join(PROJECT_ROOT, 'debug', 'live_options_quotes.json');
+          const quotesFile = path.join(PROJECT_ROOT, 'debug', 'live_options_quotes_zerodha.json');
           if (fs.existsSync(quotesFile)) {
             const q = JSON.parse(fs.readFileSync(quotesFile, 'utf8'));
             if (q.expiry === expiry && q.spot) spot = q.spot;
