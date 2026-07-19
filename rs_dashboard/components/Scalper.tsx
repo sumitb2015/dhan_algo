@@ -330,28 +330,6 @@ export default function Scalper() {
       })
       .catch(() => {});
 
-    // Lookup security IDs (Dhan) / tradingsymbols (Zerodha) for all strikes of
-    // this expiry — enables the fast-order path. Capture the expiry this
-    // request was made for: if the user switches expiries again before this
-    // resolves, an out-of-order response must not overwrite strikeMap with
-    // stale data from a different contract (Dhan rejects those as DH-905).
-    const requestedExpiry = expiry;
-    const lookupUrl = brokerRoute(
-      broker,
-      `/api/scalper/lookup?underlying=NIFTY&expiry=${expiry}`,
-      `/api/scalper/zerodha/lookup?expiry=${expiry}`,
-    );
-    fetch(lookupUrl)
-      .then(r => r.json())
-      .then((j: { success: boolean; data?: { lotSize: number; strikes: Record<string, { ceId?: string; peId?: string; ceSymbol?: string; peSymbol?: string }> } }) => {
-        if (requestedExpiry !== expiryRef.current) return;
-        if (j.success && j.data) {
-          setStrikeMap(j.data.strikes);
-          setLotSize(j.data.lotSize);
-        }
-      })
-      .catch(() => {});
-
     // Start WS bridge
     fetch('/api/options/live', {
       method: 'POST',
@@ -368,6 +346,32 @@ export default function Scalper() {
       }).catch(() => {});
     };
   }, [expiry]);
+
+  // Re-resolves strikeMap (Dhan securityId / Zerodha tradingsymbol per strike)
+  // whenever the expiry OR the selected broker changes. Kept separate from
+  // the chain-fetch/WS-bridge effect above so a broker switch alone doesn't
+  // restart the live-quotes WebSocket bridge, which stays Dhan-sourced
+  // regardless of the selected broker.
+  useEffect(() => {
+    if (!expiry) return;
+
+    const requestedExpiry = expiry;
+    const lookupUrl = brokerRoute(
+      broker,
+      `/api/scalper/lookup?underlying=NIFTY&expiry=${expiry}`,
+      `/api/scalper/zerodha/lookup?expiry=${expiry}`,
+    );
+    fetch(lookupUrl)
+      .then(r => r.json())
+      .then((j: { success: boolean; data?: { lotSize: number; strikes: Record<string, { ceId?: string; peId?: string; ceSymbol?: string; peSymbol?: string }> } }) => {
+        if (requestedExpiry !== expiryRef.current) return;
+        if (j.success && j.data) {
+          setStrikeMap(j.data.strikes);
+          setLotSize(j.data.lotSize);
+        }
+      })
+      .catch(() => {});
+  }, [expiry, broker]);
 
   // Live quotes arrive via useLiveOptionsWS (direct WebSocket push from the
   // Python bridge, rAF-coalesced; falls back to 100ms HTTP polling if the WS
