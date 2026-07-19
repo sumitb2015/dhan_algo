@@ -41,6 +41,12 @@ export default function AdvancedScalper() {
   const [strikeMap, setStrikeMap]   = useState<Record<string, { ceId?: string; peId?: string }>>({});
   const [lotSize, setLotSize]       = useState(75);
 
+  // Orders in flight, keyed by box id — blocks double-fire and gates the Buy/Sell
+  // buttons until strikeMap is loaded (avoids a silent fallback to the slow
+  // Python order path right after an expiry switch).
+  const [orderPendingBoxes, setOrderPendingBoxes] = useState<Set<string>>(new Set());
+  const orderInFlightRef = useRef<Set<string>>(new Set());
+
   // Live data: direct WebSocket to the Python bridge (HTTP polling fallback)
   const { liveQuotes, bridgeStatus, lastUpdated, transport } = useLiveOptionsWS(expiry);
 
@@ -108,6 +114,11 @@ export default function AdvancedScalper() {
       Math.abs(sk - atm) < Math.abs(allStrikes[best] - atm) ? i : best, 0);
     return allStrikes.slice(Math.max(0, idx - 10), idx + 11);
   }, [allStrikes, atm]);
+
+  // True once the lookup for the current expiry has returned security IDs —
+  // gates ordering so a click can never silently fall back to the slow
+  // Python order path (strikeMap is reset to {} on every expiry change).
+  const strikesReady = Object.keys(strikeMap).length > 0;
 
   const secIdToStrikeSide = useMemo(() => {
     const map: Record<string, { strike: number; side: 'ce' | 'pe' }> = {};
@@ -385,6 +396,7 @@ export default function AdvancedScalper() {
   const placeOrder = useCallback(async (boxId: string, side: 'BUY' | 'SELL') => {
     const box = boxes.find(b => b.id === boxId);
     if (!box || !box.strike || !expiry) return;
+    if (orderInFlightRef.current.has(boxId)) return;
 
     if (orderMode === 'LIMIT') {
       const priceNum = Number(box.limitPrice);
@@ -393,6 +405,9 @@ export default function AdvancedScalper() {
         return;
       }
     }
+
+    orderInFlightRef.current.add(boxId);
+    setOrderPendingBoxes(prev => new Set([...prev, boxId]));
 
     try {
       const secId = strikeMap[String(box.strike)]?.[box.side === 'CE' ? 'ceId' : 'peId'];
@@ -430,6 +445,9 @@ export default function AdvancedScalper() {
       }
     } catch (e) {
       addToast('error', 'Network error', String(e));
+    } finally {
+      orderInFlightRef.current.delete(boxId);
+      setOrderPendingBoxes(prev => { const s = new Set(prev); s.delete(boxId); return s; });
     }
   }, [boxes, expiry, lotSize, strikeMap, orderMode, addToast, fetchTabData]);
 
@@ -1042,6 +1060,8 @@ export default function AdvancedScalper() {
                 canRemove={boxes.length > MIN_BOXES && !hasOpenPosition}
                 pnl={boxPnl}
                 onSideChange={s => updateBox(box.id, { side: s, limitPrice: '' })}
+                pending={orderPendingBoxes.has(box.id)}
+                strikesReady={strikesReady}
               />
             </div>
           );

@@ -90,6 +90,12 @@ export default function Scalper() {
   const [strikeMap, setStrikeMap]   = useState<Record<string, { ceId?: string; peId?: string }>>({});
   const [lotSize, setLotSize]       = useState(75);
 
+  // Orders in flight, keyed by side — blocks double-fire and gates the Buy/Sell
+  // buttons until strikeMap is loaded (avoids a silent fallback to the slow
+  // Python order path right after an expiry switch).
+  const [orderPending, setOrderPending] = useState<Set<'CE' | 'PE'>>(new Set());
+  const orderInFlightRef = useRef<Set<'CE' | 'PE'>>(new Set());
+
   // Live data: direct WebSocket to the Python bridge (HTTP polling fallback)
   const { liveQuotes, bridgeStatus, lastUpdated, transport } = useLiveOptionsWS(expiry);
 
@@ -177,6 +183,11 @@ export default function Scalper() {
   const pePrevClose = peStrike != null ? (prevClose[String(peStrike)]?.pe ?? 0) : 0;
   const cePct = (ceLtp > 0 && cePrevClose > 0) ? ((ceLtp - cePrevClose) / cePrevClose) * 100 : null;
   const pePct = (peLtp > 0 && pePrevClose > 0) ? ((peLtp - pePrevClose) / pePrevClose) * 100 : null;
+
+  // True once the lookup for the current expiry has returned security IDs —
+  // gates ordering so a click can never silently fall back to the slow
+  // Python order path (strikeMap is reset to {} on every expiry change).
+  const strikesReady = Object.keys(strikeMap).length > 0;
 
   const secIdToStrikeSide = useMemo(() => {
     const map: Record<string, { strike: number; side: 'ce' | 'pe' }> = {};
@@ -424,6 +435,7 @@ export default function Scalper() {
     const strike = option === 'CE' ? ceStrike : peStrike;
     const limitPrice = option === 'CE' ? ceLimitPrice : peLimitPrice;
     if (!strike || !expiry) return;
+    if (orderInFlightRef.current.has(option)) return;
 
     if (orderMode === 'LIMIT') {
       const priceNum = Number(limitPrice);
@@ -432,6 +444,9 @@ export default function Scalper() {
         return;
       }
     }
+
+    orderInFlightRef.current.add(option);
+    setOrderPending(prev => new Set([...prev, option]));
 
     try {
       // Fast path: direct Dhan REST call (no Python spawn, no CSV load)
@@ -471,6 +486,9 @@ export default function Scalper() {
       }
     } catch (e) {
       addToast('error', 'Network error', String(e));
+    } finally {
+      orderInFlightRef.current.delete(option);
+      setOrderPending(prev => { const s = new Set(prev); s.delete(option); return s; });
     }
   }, [ceStrike, peStrike, ceLimitPrice, peLimitPrice, expiry, lots, lotSize, strikeMap, orderMode, addToast, fetchTabData]);
 
@@ -1090,6 +1108,8 @@ export default function Scalper() {
             onLimitPriceChange={setCeLimitPrice}
             onBuy={handleCeBuy}
             onSell={handleCeSell}
+            pending={orderPending.has('CE')}
+            strikesReady={strikesReady}
           />
         </div>
         <div className="flex-none w-[calc(20%-0.6rem)] min-w-[280px]">
@@ -1111,6 +1131,8 @@ export default function Scalper() {
             onLimitPriceChange={setPeLimitPrice}
             onBuy={handlePeBuy}
             onSell={handlePeSell}
+            pending={orderPending.has('PE')}
+            strikesReady={strikesReady}
           />
         </div>
       </div>
@@ -1207,6 +1229,11 @@ export interface OptionPanelProps {
   pnl?: number;
   /** Turns the CE/PE badge into a toggle when provided; used by Advanced Scalper's per-box side switch */
   onSideChange?: (side: 'CE' | 'PE') => void;
+  /** Disables Buy/Sell while an order for this box/side is already in flight (blocks double-fire) */
+  pending?: boolean;
+  /** False while the strike→securityId lookup for the current expiry hasn't loaded yet — disables
+   *  Buy/Sell so an order can never silently fall back to the slow Python order path. Omit/true = ready. */
+  strikesReady?: boolean;
 }
 
 const BUILDUP_STYLES: Record<string, { text: string; cls: string }> = {
@@ -1220,7 +1247,9 @@ export const OptionPanel = React.memo(function OptionPanel({
   side, label, strike, visibleStrikes, atm, ltp, pct, high, low, buildup, oiChgPct,
   limitPrice, orderMode, onStrikeChange, onLimitPriceChange, onBuy, onSell,
   lots, onLotsChange, onRemove, canRemove, pnl, onSideChange,
+  pending = false, strikesReady = true,
 }: OptionPanelProps) {
+  const orderDisabled = !strike || pending || !strikesReady;
   const isPos = (v: number) => v >= 0;
   const buildupStyle = buildup ? BUILDUP_STYLES[buildup] : undefined;
 
@@ -1349,23 +1378,25 @@ export const OptionPanel = React.memo(function OptionPanel({
       <div className="grid grid-cols-2 gap-3">
         <button
           onClick={onBuy}
-          disabled={!strike}
+          disabled={orderDisabled}
+          title={!strikesReady ? 'Loading strike IDs…' : undefined}
           className="py-3.5 px-4 text-sm font-bold rounded-xl transition-all active:scale-95
                      bg-emerald-600 hover:bg-emerald-500 text-white
                      disabled:opacity-40 disabled:cursor-not-allowed
                      shadow-lg shadow-emerald-900/20"
         >
-          BUY {side}
+          {pending ? '…' : `BUY ${side}`}
         </button>
         <button
           onClick={onSell}
-          disabled={!strike}
+          disabled={orderDisabled}
+          title={!strikesReady ? 'Loading strike IDs…' : undefined}
           className="py-3.5 px-4 text-sm font-bold rounded-xl transition-all active:scale-95
                      bg-rose-600 hover:bg-rose-500 text-white
                      disabled:opacity-40 disabled:cursor-not-allowed
                      shadow-lg shadow-rose-900/20"
         >
-          SELL {side}
+          {pending ? '…' : `SELL ${side}`}
         </button>
       </div>
     </div>
