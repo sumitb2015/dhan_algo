@@ -29,6 +29,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 
 from login import get_dhan_client
 from lib.dhan_helper import DhanHelper
+from scripts.tools.get_holdings_data import classify_asset
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 DATA_DIR = os.path.join(PROJECT_ROOT, 'Daily_Historical_Data_Fresh')
@@ -158,6 +159,7 @@ def main():
             'isin': str(row.get('isin', '')),
             'qty': qty,
             'currentPrice': ltp,
+            'assetType': classify_asset(symbol),
         })
 
     print(f"[build_portfolio_value_history] fetching trade history {BACKFILL_FROM}..{today}", file=sys.stderr)
@@ -190,6 +192,8 @@ def main():
     points = []
     for date in dates:
         total = 0.0
+        equity_total = 0.0
+        etf_total = 0.0
         for h in per_symbol:
             qty = qty_as_of(date, h['qty_before_window'], h['checkpoints'])
             if qty <= 0:
@@ -198,8 +202,19 @@ def main():
                 price = h['price_map'][date]
             else:
                 price = accrued_price(h['currentPrice'], date, today)
-            total += qty * price
-        points.append({'date': date, 'totalCurrentValue': round(total, 2), 'synthetic': True})
+            value = qty * price
+            total += value
+            if h['assetType'] == 'ETF':
+                etf_total += value
+            else:
+                equity_total += value
+        points.append({
+            'date': date,
+            'totalCurrentValue': round(total, 2),
+            'equityValue': round(equity_total, 2),
+            'etfValue': round(etf_total, 2),
+            'synthetic': True,
+        })
 
     output = {
         'generatedAt': datetime.now().isoformat(),

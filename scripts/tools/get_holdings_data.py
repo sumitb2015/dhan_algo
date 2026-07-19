@@ -17,7 +17,7 @@ PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(_
 HISTORY_FILE = os.path.join(PROJECT_ROOT, 'debug', 'portfolio_value_history.json')
 
 
-def snapshot_value_history(total_invested: float, total_current_value: float) -> None:
+def snapshot_value_history(total_invested: float, total_current_value: float, equity_value: float, etf_value: float) -> None:
     """Upsert today's (IST) total portfolio value into debug/portfolio_value_history.json."""
     today = datetime.now(IST).strftime('%Y-%m-%d')
     try:
@@ -31,6 +31,8 @@ def snapshot_value_history(total_invested: float, total_current_value: float) ->
         "date": today,
         "totalInvested": round(total_invested, 2),
         "totalCurrentValue": round(total_current_value, 2),
+        "equityValue": round(equity_value, 2),
+        "etfValue": round(etf_value, 2),
     }
     history = [h for h in history if h.get("date") != today]
     history.append(entry)
@@ -77,6 +79,8 @@ def main():
     holdings_list = []
     total_invested = 0.0
     total_current_value = 0.0
+    total_equity_value = 0.0
+    total_etf_value = 0.0
 
     df_holdings = helper.get_holdings()
     if not df_holdings.empty:
@@ -99,8 +103,13 @@ def main():
             pnl = round(current_val - invested, 2)
             pnl_pct = round((pnl / invested * 100) if invested > 0 else 0.0, 2)
 
+            asset_type = classify_asset(symbol)
             total_invested += invested
             total_current_value += current_val
+            if asset_type == 'ETF':
+                total_etf_value += current_val
+            else:
+                total_equity_value += current_val
 
             holdings_list.append({
                 "symbol": symbol,
@@ -115,7 +124,7 @@ def main():
                 "currentValue": current_val,
                 "pnl": pnl,
                 "pnlPct": pnl_pct,
-                "assetType": classify_asset(symbol),
+                "assetType": asset_type,
             })
 
     holdings_list.sort(key=lambda x: x['currentValue'], reverse=True)
@@ -192,7 +201,7 @@ def main():
     total_pnl_pct = round((total_pnl / total_invested * 100) if total_invested > 0 else 0.0, 2)
 
     if total_invested > 0:
-        snapshot_value_history(total_invested, total_current_value)
+        snapshot_value_history(total_invested, total_current_value, total_equity_value, total_etf_value)
 
     print(json.dumps({
         "success": True,

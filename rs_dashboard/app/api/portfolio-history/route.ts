@@ -1,7 +1,6 @@
 import { NextResponse } from 'next/server';
 import fs from 'fs';
 import path from 'path';
-import { readNifty50Index } from '@/lib/dataLoader';
 
 const DEBUG_DIR = path.join(process.cwd(), '..', 'debug');
 const TRACKED_FILE = path.join(DEBUG_DIR, 'portfolio_value_history.json');
@@ -10,12 +9,56 @@ const RECONSTRUCTED_FILE = path.join(DEBUG_DIR, 'portfolio_value_history_reconst
 interface PortfolioValueEntry {
   date: string;
   totalCurrentValue: number;
+  equityValue?: number;
+  etfValue?: number;
 }
 
 interface CombinedPoint {
   date: string;
   totalCurrentValue: number;
+  equityValue: number;
+  etfValue: number;
   synthetic: boolean;
+}
+
+interface RawPoint {
+  date: string;
+  totalCurrentValue: number;
+  equityValue: number | null;
+  etfValue: number | null;
+  synthetic: boolean;
+}
+
+// Older snapshots (before the equity/ETF split was tracked) have no equityValue/etfValue — filling
+// those with 0 would draw a false dip to zero on the chart. Instead, borrow the equity/ETF ratio from
+// the nearest point that does have a real split (preferring the next one chronologically, since the
+// split composition drifts slowly) and scale it to this point's actual totalCurrentValue.
+function fillMissingSplits(points: RawPoint[]): CombinedPoint[] {
+  const knownRatioIndices = points
+    .map((p, i) => (p.equityValue != null && p.etfValue != null && p.totalCurrentValue > 0 ? i : -1))
+    .filter((i) => i >= 0);
+
+  return points.map((p, i) => {
+    if (p.equityValue != null && p.etfValue != null) {
+      return { date: p.date, totalCurrentValue: p.totalCurrentValue, equityValue: p.equityValue, etfValue: p.etfValue, synthetic: p.synthetic };
+    }
+    if (knownRatioIndices.length === 0) {
+      return { date: p.date, totalCurrentValue: p.totalCurrentValue, equityValue: 0, etfValue: 0, synthetic: p.synthetic };
+    }
+    const nearest = knownRatioIndices.reduce((best, idx) =>
+      Math.abs(idx - i) < Math.abs(best - i) ? idx : best
+    );
+    const ref = points[nearest];
+    const equityRatio = ref.equityValue! / ref.totalCurrentValue;
+    const etfRatio = ref.etfValue! / ref.totalCurrentValue;
+    return {
+      date: p.date,
+      totalCurrentValue: p.totalCurrentValue,
+      equityValue: Math.round(p.totalCurrentValue * equityRatio * 100) / 100,
+      etfValue: Math.round(p.totalCurrentValue * etfRatio * 100) / 100,
+      synthetic: p.synthetic,
+    };
+  });
 }
 
 function readJsonSafe(file: string): any | null {
@@ -37,46 +80,39 @@ export async function GET() {
   const trackedHistory: PortfolioValueEntry[] = Array.isArray(tracked?.history) ? tracked.history : [];
   const trackedDates = new Set(trackedHistory.map((t) => t.date));
 
-  const reconstructedPoints: CombinedPoint[] = Array.isArray(reconstructed?.points)
+  const reconstructedPoints: RawPoint[] = Array.isArray(reconstructed?.points)
     ? reconstructed.points
         .filter((p: any) => !trackedDates.has(p.date))
-        .map((p: any) => ({ date: p.date, totalCurrentValue: p.totalCurrentValue, synthetic: true }))
+        .map((p: any) => ({
+          date: p.date,
+          totalCurrentValue: p.totalCurrentValue,
+          equityValue: p.equityValue ?? null,
+          etfValue: p.etfValue ?? null,
+          synthetic: true,
+        }))
     : [];
 
-  const combined: CombinedPoint[] = [
+  const rawCombined: RawPoint[] = [
     ...reconstructedPoints,
-    ...trackedHistory.map((t) => ({ date: t.date, totalCurrentValue: t.totalCurrentValue, synthetic: false })),
+    ...trackedHistory.map((t) => ({
+      date: t.date,
+      totalCurrentValue: t.totalCurrentValue,
+      equityValue: t.equityValue ?? null,
+      etfValue: t.etfValue ?? null,
+      synthetic: false,
+    })),
   ].sort((a, b) => a.date.localeCompare(b.date));
 
-  if (combined.length === 0) {
+  if (rawCombined.length === 0) {
     return NextResponse.json({ success: true, points: [], startDate: null, backfilled: false });
   }
 
-  const nifty = readNifty50Index();
-  const niftyByDate = new Map(nifty.map((row) => [row.date, row.close]));
-
+  const combined = fillMissingSplits(rawCombined);
   const startDate = combined[0].date;
-  const startPortfolioValue = combined[0].totalCurrentValue;
-  const startNiftyClose = niftyByDate.get(startDate);
-
-  const points = combined.map((entry) => {
-    const niftyClose = niftyByDate.get(entry.date);
-    return {
-      date: entry.date,
-      totalCurrentValue: entry.totalCurrentValue,
-      synthetic: entry.synthetic,
-      portfolioPct:
-        startPortfolioValue > 0 ? ((entry.totalCurrentValue - startPortfolioValue) / startPortfolioValue) * 100 : 0,
-      niftyPct:
-        niftyClose != null && startNiftyClose != null && startNiftyClose > 0
-          ? ((niftyClose - startNiftyClose) / startNiftyClose) * 100
-          : null,
-    };
-  });
 
   return NextResponse.json({
     success: true,
-    points,
+    points: combined,
     startDate,
     backfilled: reconstructedPoints.length > 0,
     reconstructedGeneratedAt: reconstructed?.generatedAt ?? null,

@@ -116,9 +116,9 @@ interface RSInfo {
 interface PerformancePoint {
   date: string;
   totalCurrentValue: number;
+  equityValue: number;
+  etfValue: number;
   synthetic: boolean;
-  portfolioPct: number;
-  niftyPct: number | null;
 }
 
 interface RiskSummary {
@@ -535,53 +535,6 @@ function HoldingsTable({
   );
 }
 
-// ─── Positions Table ──────────────────────────────────────────────────────────
-
-function PositionsTable({ positions }: { positions: Position[] }) {
-  if (positions.length === 0) {
-    return (
-      <div className="flex flex-col items-center justify-center py-16 text-zinc-600 gap-2">
-        <Activity className="h-8 w-8" />
-        <p className="text-sm">No open F&O / intraday positions today.</p>
-      </div>
-    );
-  }
-  return (
-    <div className="overflow-x-auto rounded-xl border border-zinc-800/60">
-      <table className="w-full border-collapse">
-        <thead className="bg-zinc-800">
-          <tr>
-            <TH>Symbol</TH>
-            <TH>Type</TH>
-            <TH right>Net Qty</TH>
-            <TH right className="hidden sm:table-cell">Buy Avg</TH>
-            <TH right className="hidden sm:table-cell">Sell Avg</TH>
-            <TH right className="hidden md:table-cell">LTP</TH>
-            <TH right>Realized</TH>
-            <TH right>Unrealized</TH>
-          </tr>
-        </thead>
-        <tbody>
-          {positions.map((p, i) => (
-            <tr key={i} className="border-b border-zinc-900/60 hover:bg-zinc-800/20 transition-colors">
-              <TD><span className="font-semibold text-white">{p.symbol}</span></TD>
-              <TD><span className="text-[10px] bg-zinc-800 text-zinc-400 px-1.5 py-px rounded">{p.positionType}</span></TD>
-              <TD right className={cn('font-semibold', p.netQty > 0 ? 'text-emerald-400' : p.netQty < 0 ? 'text-red-400' : 'text-zinc-500')}>
-                {p.netQty > 0 ? '+' : ''}{p.netQty}
-              </TD>
-              <TD right className="hidden sm:table-cell text-zinc-400">{p.buyAvg > 0 ? fmtINR(p.buyAvg) : '—'}</TD>
-              <TD right className="hidden sm:table-cell text-zinc-400">{p.sellAvg > 0 ? fmtINR(p.sellAvg) : '—'}</TD>
-              <TD right className="hidden md:table-cell">{p.lastPrice > 0 ? fmtINR(p.lastPrice) : '—'}</TD>
-              <TD right><PnlText v={p.realizedProfit} compact /></TD>
-              <TD right><PnlText v={p.unrealizedProfit} compact /></TD>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </div>
-  );
-}
-
 // ─── Allocation Chart (Feature 5: P&L distribution donut) ────────────────────
 
 const CHART_COLORS = [
@@ -783,149 +736,6 @@ function AllocationChart({ holdings, mfData }: { holdings: Holding[]; mfData: Mu
   );
 }
 
-// ─── Order Book Table ─────────────────────────────────────────────────────────
-
-const ORDER_STATUS_STYLES: Record<string, string> = {
-  TRADED:    'bg-emerald-500/10 text-emerald-400',
-  TRANSIT:   'bg-blue-500/10 text-blue-400',
-  PENDING:   'bg-amber-500/10 text-amber-400',
-  REJECTED:  'bg-red-500/10 text-red-400',
-  CANCELLED: 'bg-zinc-800 text-zinc-500',
-  EXPIRED:   'bg-zinc-800 text-zinc-500',
-};
-
-function OrdersTable({ orders }: { orders: Order[] }) {
-  if (orders.length === 0) {
-    return (
-      <div className="flex flex-col items-center justify-center py-16 text-zinc-600 gap-2">
-        <Activity className="h-8 w-8" />
-        <p className="text-sm">No orders placed today.</p>
-      </div>
-    );
-  }
-  return (
-    <div className="overflow-x-auto rounded-xl border border-zinc-800/60">
-      <table className="w-full border-collapse">
-        <thead className="bg-zinc-800">
-          <tr>
-            <TH>Symbol</TH>
-            <TH>Type</TH>
-            <TH>Side</TH>
-            <TH right>Qty</TH>
-            <TH right className="hidden sm:table-cell">Filled</TH>
-            <TH right className="hidden md:table-cell">Price</TH>
-            <TH right className="hidden md:table-cell">Traded</TH>
-            <TH>Status</TH>
-            <TH className="hidden lg:table-cell">Time</TH>
-          </tr>
-        </thead>
-        <tbody>
-          {orders.map(o => (
-            <tr key={o.orderId} className="border-b border-zinc-900/60 hover:bg-zinc-800/20 transition-colors">
-              <TD>
-                <div className="flex flex-col leading-none gap-0.5">
-                  <span className="font-semibold text-white">{o.symbol}</span>
-                  <span className="text-[9px] text-zinc-600">{o.productType} · {o.exchange}</span>
-                </div>
-              </TD>
-              <TD><span className="text-[10px] bg-zinc-800 text-zinc-400 px-1.5 py-px rounded">{o.orderType}</span></TD>
-              <TD>
-                <span className={cn('text-[11px] font-bold', o.transactionType === 'BUY' ? 'text-emerald-400' : 'text-red-400')}>
-                  {o.transactionType}
-                </span>
-              </TD>
-              <TD right>{o.quantity.toLocaleString()}</TD>
-              <TD right className="hidden sm:table-cell text-zinc-400">{o.filledQty.toLocaleString()}</TD>
-              <TD right className="hidden md:table-cell text-zinc-400">{o.price > 0 ? fmtINR(o.price) : 'MKT'}</TD>
-              <TD right className="hidden md:table-cell">{o.tradedPrice > 0 ? fmtINR(o.tradedPrice) : '—'}</TD>
-              <TD>
-                <span className={cn(
-                  'text-[10px] font-semibold px-1.5 py-px rounded',
-                  ORDER_STATUS_STYLES[o.status] ?? 'bg-zinc-800 text-zinc-400',
-                )}>
-                  {o.status}
-                </span>
-              </TD>
-              <TD className="hidden lg:table-cell text-zinc-500 text-[11px]">{o.createTime}</TD>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </div>
-  );
-}
-
-// ─── Trade Book Table ─────────────────────────────────────────────────────────
-
-function TradesTable({ trades }: { trades: Trade[] }) {
-  if (trades.length === 0) {
-    return (
-      <div className="flex flex-col items-center justify-center py-16 text-zinc-600 gap-2">
-        <Activity className="h-8 w-8" />
-        <p className="text-sm">No trades executed today.</p>
-      </div>
-    );
-  }
-  const totalBuyValue = trades
-    .filter(t => t.transactionType === 'BUY')
-    .reduce((s, t) => s + t.tradedPrice * t.tradedQuantity, 0);
-  const totalSellValue = trades
-    .filter(t => t.transactionType === 'SELL')
-    .reduce((s, t) => s + t.tradedPrice * t.tradedQuantity, 0);
-
-  return (
-    <div className="flex flex-col gap-3">
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-        <SummaryCard label="Trades" value={String(trades.length)} />
-        <SummaryCard label="Buy Turnover" value={fmtINR(totalBuyValue, true)} />
-        <SummaryCard label="Sell Turnover" value={fmtINR(totalSellValue, true)} />
-        <SummaryCard label="Total Turnover" value={fmtINR(totalBuyValue + totalSellValue, true)} />
-      </div>
-      <div className="overflow-x-auto rounded-xl border border-zinc-800/60">
-        <table className="w-full border-collapse">
-          <thead className="bg-zinc-800">
-            <tr>
-              <TH>Symbol</TH>
-              <TH>Side</TH>
-              <TH right>Qty</TH>
-              <TH right>Price</TH>
-              <TH right className="hidden md:table-cell">Value</TH>
-              <TH className="hidden sm:table-cell">Product</TH>
-              <TH className="hidden lg:table-cell">Trade ID</TH>
-              <TH className="hidden lg:table-cell">Time</TH>
-            </tr>
-          </thead>
-          <tbody>
-            {trades.map((t, i) => (
-              <tr key={i} className="border-b border-zinc-900/60 hover:bg-zinc-800/20 transition-colors">
-                <TD>
-                  <div className="flex flex-col leading-none gap-0.5">
-                    <span className="font-semibold text-white">{t.symbol}</span>
-                    <span className="text-[9px] text-zinc-600">{t.exchange}</span>
-                  </div>
-                </TD>
-                <TD>
-                  <span className={cn('text-[11px] font-bold', t.transactionType === 'BUY' ? 'text-emerald-400' : 'text-red-400')}>
-                    {t.transactionType}
-                  </span>
-                </TD>
-                <TD right>{t.tradedQuantity.toLocaleString()}</TD>
-                <TD right className="font-medium">{fmtINR(t.tradedPrice)}</TD>
-                <TD right className="hidden md:table-cell text-zinc-400">{fmtINR(t.tradedPrice * t.tradedQuantity, true)}</TD>
-                <TD className="hidden sm:table-cell">
-                  <span className="text-[10px] bg-zinc-800 text-zinc-400 px-1.5 py-px rounded">{t.productType}</span>
-                </TD>
-                <TD className="hidden lg:table-cell text-zinc-600 text-[11px]">{t.tradeId}</TD>
-                <TD className="hidden lg:table-cell text-zinc-500 text-[11px]">{t.exchangeTime || t.createTime}</TD>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-    </div>
-  );
-}
-
 // ─── Mutual Funds Tab ─────────────────────────────────────────────────────────
 
 function MutualFundsTab({ mfData }: { mfData: MutualFund[] | null }) {
@@ -1010,7 +820,7 @@ function MutualFundsTab({ mfData }: { mfData: MutualFund[] | null }) {
   );
 }
 
-// ─── Performance vs Nifty 50 ──────────────────────────────────────────────────
+// ─── Portfolio Value History ─────────────────────────────────────────────────
 
 function PerformanceChart({ points, backfilled }: { points: PerformancePoint[]; backfilled: boolean }) {
   if (points.length === 0) {
@@ -1028,13 +838,14 @@ function PerformanceChart({ points, backfilled }: { points: PerformancePoint[]; 
   const last = points[points.length - 1];
   const first = points[0];
   const hasSynthetic = points.some(p => p.synthetic);
+  const hasSplit = points.some(p => p.equityValue > 0 || p.etfValue > 0);
 
   return (
     <div className="bg-zinc-900/60 border border-zinc-800/60 rounded-xl p-4 flex flex-col gap-2">
       <div className="flex items-center justify-between flex-wrap gap-2">
         <div className="flex items-center gap-1.5">
           <Activity className="h-3.5 w-3.5 text-indigo-400" />
-          <span className="text-[11px] font-semibold text-zinc-300 uppercase tracking-wide">Portfolio vs Nifty 50</span>
+          <span className="text-[11px] font-semibold text-zinc-300 uppercase tracking-wide">Portfolio Value History</span>
         </div>
         <span className="text-[10px] text-zinc-500">
           Since {first.date} · {points.length} day{points.length !== 1 ? 's' : ''}
@@ -1057,18 +868,20 @@ function PerformanceChart({ points, backfilled }: { points: PerformancePoint[]; 
       )}
       <div className="flex items-center gap-4">
         <div className="flex flex-col">
-          <span className="text-[9px] text-zinc-500 uppercase tracking-wide">Portfolio</span>
-          <span className={cn('text-sm font-bold tabular-nums', last.portfolioPct >= 0 ? 'text-emerald-400' : 'text-red-400')}>
-            {fmtPct(last.portfolioPct)}
-          </span>
+          <span className="text-[9px] text-zinc-500 uppercase tracking-wide">Total Value</span>
+          <span className="text-sm font-bold tabular-nums text-white">{fmtINR(last.totalCurrentValue, true)}</span>
         </div>
-        {last.niftyPct != null && (
-          <div className="flex flex-col">
-            <span className="text-[9px] text-zinc-500 uppercase tracking-wide">Nifty 50</span>
-            <span className={cn('text-sm font-bold tabular-nums', last.niftyPct >= 0 ? 'text-emerald-400' : 'text-red-400')}>
-              {fmtPct(last.niftyPct)}
-            </span>
-          </div>
+        {hasSplit && (
+          <>
+            <div className="flex flex-col">
+              <span className="text-[9px] text-zinc-500 uppercase tracking-wide">Equity</span>
+              <span className="text-sm font-bold tabular-nums text-indigo-400">{fmtINR(last.equityValue, true)}</span>
+            </div>
+            <div className="flex flex-col">
+              <span className="text-[9px] text-zinc-500 uppercase tracking-wide">ETF</span>
+              <span className="text-sm font-bold tabular-nums text-amber-400">{fmtINR(last.etfValue, true)}</span>
+            </div>
+          </>
         )}
       </div>
       <div className="h-[240px] w-full">
@@ -1076,14 +889,19 @@ function PerformanceChart({ points, backfilled }: { points: PerformancePoint[]; 
           <LineChart data={points} margin={{ top: 4, right: 8, left: -16, bottom: 0 }}>
             <CartesianGrid strokeDasharray="3 3" stroke="#27272a" />
             <XAxis dataKey="date" tick={{ fontSize: 10, fill: '#71717a' }} minTickGap={40} />
-            <YAxis tick={{ fontSize: 10, fill: '#71717a' }} tickFormatter={(v: number) => `${v.toFixed(0)}%`} />
+            <YAxis tick={{ fontSize: 10, fill: '#71717a' }} tickFormatter={(v: number) => fmtINR(v, true)} width={64} />
             <ReTooltip
               contentStyle={{ background: '#09090b', border: '1px solid #27272a', borderRadius: 8, fontSize: 11 }}
-              formatter={(v: any, name: any) => [`${Number(v).toFixed(2)}%`, name]}
+              formatter={(v: any, name: any) => [fmtINR(Number(v)), name]}
             />
             <Legend wrapperStyle={{ fontSize: 11 }} />
-            <Line type="monotone" dataKey="portfolioPct" name="Portfolio" stroke="#818cf8" strokeWidth={2} dot={points.length < 2} isAnimationActive={points.length > 1} />
-            <Line type="monotone" dataKey="niftyPct" name="Nifty 50" stroke="#f59e0b" strokeWidth={2} dot={points.length < 2} isAnimationActive={points.length > 1} />
+            <Line type="monotone" dataKey="totalCurrentValue" name="Total Portfolio" stroke="#818cf8" strokeWidth={2} dot={points.length < 2} isAnimationActive={points.length > 1} />
+            {hasSplit && (
+              <>
+                <Line type="monotone" dataKey="equityValue" name="Equity" stroke="#10b981" strokeWidth={1.5} dot={points.length < 2} isAnimationActive={points.length > 1} />
+                <Line type="monotone" dataKey="etfValue" name="ETF" stroke="#f59e0b" strokeWidth={1.5} dot={points.length < 2} isAnimationActive={points.length > 1} />
+              </>
+            )}
           </LineChart>
         </ResponsiveContainer>
       </div>
@@ -1179,7 +997,7 @@ function RelatedLinks({ current }: { current: 'portfolio' | 'portfolio-new' | 'p
 
 // ─── Main Component ───────────────────────────────────────────────────────────
 
-type Tab = 'holdings' | 'positions' | 'orders' | 'trades' | 'allocation' | 'mf' | 'performance';
+type Tab = 'holdings' | 'allocation' | 'mf' | 'performance';
 type AssetFilter = 'ALL' | 'EQUITY' | 'ETF';
 
 export default function PortfolioDashboard() {
@@ -1279,18 +1097,12 @@ export default function PortfolioDashboard() {
 
   const summary = data?.summary;
   const holdings = data?.holdings ?? [];
-  const positions = data?.positions ?? [];
-  const orders = data?.orders ?? [];
-  const trades = data?.trades ?? [];
   const totalValue = holdings.reduce((s, h) => s + h.currentValue, 0);
   const equityCount = holdings.filter(h => h.assetType === 'EQUITY').length;
   const etfCount = holdings.filter(h => h.assetType === 'ETF').length;
 
   const NAV_TABS: { id: Tab; label: string; count?: number }[] = [
     { id: 'holdings', label: 'Holdings', count: holdings.length },
-    { id: 'positions', label: 'Positions', count: positions.length },
-    { id: 'orders', label: 'Orders', count: orders.length },
-    { id: 'trades', label: 'Trades', count: trades.length },
     { id: 'allocation', label: 'Allocation' },
     { id: 'mf', label: 'Mutual Funds', count: mfData?.length },
     { id: 'performance', label: 'Performance' },
@@ -1448,9 +1260,6 @@ export default function PortfolioDashboard() {
                 totalValue={totalValue}
               />
             )}
-            {tab === 'positions' && <PositionsTable positions={positions} />}
-            {tab === 'orders' && <OrdersTable orders={orders} />}
-            {tab === 'trades' && <TradesTable trades={trades} />}
             {tab === 'allocation' && <AllocationChart holdings={holdings} mfData={mfData ?? []} />}
             {tab === 'mf' && <MutualFundsTab mfData={mfData} />}
             {tab === 'performance' && (
