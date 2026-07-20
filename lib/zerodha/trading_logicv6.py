@@ -625,6 +625,23 @@ def kite_place_trade(
             logging.error("Failed to place initial order.")
             return {}
 
+        if executed_average_price is None:
+            # The entry HAS executed — order_history just hasn't shown COMPLETE
+            # within the polling window. Aborting here would leave a live naked
+            # position with no SL/TP and untracked in active_orders, so fall
+            # back to the current tick price for SL/TP math instead.
+            fallback_price = (tick_data.get(instrument_token) or {}).get("last_price")
+            if fallback_price:
+                logging.warning(
+                    f"Avg entry price unavailable for order {order_id}; using tick last_price {fallback_price} for SL/TP."
+                )
+                executed_average_price = fallback_price
+            else:
+                logging.critical(
+                    f"ENTRY {order_id} PLACED but no avg price and no tick fallback — NO SL/TP placed, MANUAL ACTION REQUIRED."
+                )
+                return {"order_id": order_id, "sl_order": None, "tp_order": None}
+
         # Merge with any existing active order for the same trading symbol
         existing_order = next(
             (o for o in config.active_orders if o["tradingsymbol"] == trading_symbol),

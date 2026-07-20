@@ -190,12 +190,43 @@ def load_replicated() -> dict:
     return {}
 
 
-def save_replicated(replicated: dict):
+def load_replicated_symbols() -> set:
+    """Per-day set of Zerodha symbols the bridge has actually placed (or
+    attempted) orders in — the watchdog's close scope. Persisted here rather
+    than derived from the activity log, which is capped at MAX_LOG_ENTRIES and
+    can scroll a morning's symbol out of scope on a busy day."""
+    data = read_json(REPLICATED_FILE, {})
+    if not isinstance(data, dict) or data.get('date') != datetime.now().strftime('%Y-%m-%d'):
+        return set()
+    syms = data.get('symbols', [])
+    return set(syms) if isinstance(syms, list) else set()
+
+
+def save_replicated(replicated: dict, symbols=None):
     with _replicated_lock:
+        if symbols is None:
+            symbols = load_replicated_symbols()  # preserve what's on disk
         atomic_write(REPLICATED_FILE, {
             'date': datetime.now().strftime('%Y-%m-%d'),
             'orders': replicated,
+            'symbols': sorted(symbols),
         })
+
+
+def note_replicated_symbol(sym: str, symbols_set: set):
+    """Add a symbol to the watchdog's close scope and persist immediately —
+    BEFORE the child order is placed, so a crash mid-place still leaves the
+    orphan covered after restart."""
+    if not sym or sym in symbols_set:
+        return
+    symbols_set.add(sym)
+    with _replicated_lock:
+        data = read_json(REPLICATED_FILE, {})
+        today = datetime.now().strftime('%Y-%m-%d')
+        orders = {}
+        if isinstance(data, dict) and data.get('date') == today and isinstance(data.get('orders'), dict):
+            orders = data['orders']
+        atomic_write(REPLICATED_FILE, {'date': today, 'orders': orders, 'symbols': sorted(symbols_set)})
 
 
 def append_log(entry: dict):
@@ -218,6 +249,21 @@ def dump_raw_event(payload: dict):
             return
         events.append({'ts': datetime.now().isoformat(), 'payload': payload})
         atomic_write(RAW_EVENTS_FILE, {'events': events})
+
+
+def normalize_opt_type(raw):
+    """CE/CALL/C -> 'CE', PE/PUT/P -> 'PE', anything else -> None.
+
+    Fails CLOSED: an unrecognized value must skip the fill (loudly), never
+    default to a leg — guessing wrong replicates the opposite option."""
+    if not raw:
+        return None
+    o = str(raw).strip().upper()
+    if o in ('CE', 'CALL', 'C'):
+        return 'CE'
+    if o in ('PE', 'PUT', 'P'):
+        return 'PE'
+    return None
 
 
 def find_zerodha_symbol(instruments: list, strike, expiry: str, opt_type: str):
@@ -306,7 +352,7 @@ def baseline_today_orders(helper, replicated_qty: dict) -> int:
 
 
 def watchdog_loop(helper, kite, stop_event: threading.Event, state: dict,
-                  retry_queue: list, get_nifty_symbols, resolve_symbol):
+                  retry_queue: list, get_nifty_symbols, resolve_symbol, replicated_symbols):
     """
     Independent safety net, separate from per-fill replication. Each cycle:
 
@@ -330,7 +376,7 @@ def watchdog_loop(helper, kite, stop_event: threading.Event, state: dict,
             children = [c for c in cfg.get('children', []) if c.get('enabled')]
 
             if armed and market_is_open():
-                drain_retry_queue(kite, retry_queue, state, resolve_symbol)
+                drain_retry_queue(kite, retry_queue, state, resolve_symbol, replicated_symbols)
 
             if not armed or not children:
                 state['flat_streak'] = 0
@@ -369,11 +415,9 @@ def watchdog_loop(helper, kite, stop_event: threading.Event, state: dict,
             nifty_symbols = get_nifty_symbols()
             positions = kite.positions()
 
-            # Load active symbols from replication log to restrict watchdog scope
-            log = read_json(LOG_FILE, {'entries': []})
-            entries = log.get('entries', []) if isinstance(log, dict) else []
-            replicated_symbols = {e.get('zerodha_symbol') for e in entries if e.get('zerodha_symbol')}
-
+            # Scope closes to symbols the bridge itself traded today (the
+            # persisted per-day set — durable across restarts and immune to
+            # the activity log's 200-entry cap scrolling a symbol out).
             open_positions = [
                 p for p in positions.get('net', [])
                 if int(p.get('quantity', 0) or 0) != 0
@@ -444,7 +488,7 @@ def watchdog_loop(helper, kite, stop_event: threading.Event, state: dict,
             print(f'[copy_trade_bridge] ERROR in watchdog_loop: {e}', flush=True)
 
 
-def drain_retry_queue(kite, retry_queue: list, state: dict, resolve_symbol=None):
+def drain_retry_queue(kite, retry_queue: list, state: dict, resolve_symbol=None, replicated_symbols=None):
     now = time.time()
     with _retry_lock:
         due = [r for r in retry_queue if now >= r['next_ts']]
@@ -468,6 +512,8 @@ def drain_retry_queue(kite, retry_queue: list, state: dict, resolve_symbol=None)
                 continue
             item['zerodha_symbol'] = sym
 
+        if replicated_symbols is not None:
+            note_replicated_symbol(item['zerodha_symbol'], replicated_symbols)
         placed, order_ids, err = place_child_order(kite, item['zerodha_symbol'], item['side'], item['qty'])
         entry = {
             'ts': datetime.now().isoformat(), 'order_no': item['order_no'],
@@ -582,6 +628,7 @@ def main():
         return sym
 
     replicated_qty = load_replicated()
+    replicated_symbols = load_replicated_symbols()
     baseline_today_orders(helper, replicated_qty)
 
     state = {
@@ -608,7 +655,7 @@ def main():
             if not order_no:
                 return
 
-            traded_qty = int(data.get('TradedQty') or data.get('tradedQty') or 0)
+            traded_qty = int(float(data.get('TradedQty') or data.get('tradedQty') or 0))
             already = int(replicated_qty.get(order_no, 0))
             delta = traded_qty - already
             if delta <= 0:
@@ -620,10 +667,8 @@ def main():
             strike = data.get('StrikePrice') or data.get('strikePrice')
             expiry = data.get('ExpiryDate') or data.get('expiryDate')
             
-            # Normalize option types (e.g. CALL -> CE, PUT -> PE)
-            opt_type = data.get('OptType') or data.get('optType')
-            if opt_type:
-                opt_type = 'CE' if str(opt_type).upper() in ('CE', 'CALL') else 'PE'
+            opt_type_raw = data.get('OptType') or data.get('optType')
+            opt_type = normalize_opt_type(opt_type_raw)
 
             ts = datetime.now().isoformat()
 
@@ -668,9 +713,11 @@ def main():
                                 'qty': delta, 'result': 'queued_resolution',
                                 'error': 'Strike not in instrument cache — queued for refresh + replication'})
                 else:
+                    reason = 'Unsupported instrument (not a cached NIFTY option) — skipped'
+                    if opt_type_raw and opt_type is None:
+                        reason = f'Unrecognized OptType {opt_type_raw!r} — refusing to guess the leg, skipped'
                     append_log({'ts': ts, 'order_no': order_no, 'symbol': symbol, 'side': side,
-                                'qty': delta, 'result': 'skipped',
-                                'error': 'Unsupported instrument (not a cached NIFTY option) — skipped'})
+                                'qty': delta, 'result': 'skipped', 'error': reason})
                 replicated_qty[order_no] = traded_qty
                 save_replicated(replicated_qty)
                 return
@@ -697,6 +744,7 @@ def main():
                     append_log(entry)
                     continue
 
+                note_replicated_symbol(zerodha_symbol, replicated_symbols)
                 placed, order_ids, err = place_child_order(kite, zerodha_symbol, side, child_qty)
                 if placed:
                     state['last_replication_ts'] = time.time()
@@ -736,7 +784,7 @@ def main():
     watchdog_stop = threading.Event()
     watchdog_thread = threading.Thread(
         target=watchdog_loop,
-        args=(helper, kite, watchdog_stop, state, retry_queue, get_nifty_symbols, resolve_symbol),
+        args=(helper, kite, watchdog_stop, state, retry_queue, get_nifty_symbols, resolve_symbol, replicated_symbols),
         daemon=True, name='copy-trade-watchdog',
     )
     watchdog_thread.start()

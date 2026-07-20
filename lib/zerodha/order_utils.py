@@ -52,7 +52,7 @@ def place_order(
         return None, None
 
 
-def get_average_entry_price(kite, order_id, max_retries=5, delay_sec=0.05):
+def get_average_entry_price(kite, order_id, max_retries=6, delay_sec=0.05):
     try:
         logging.info(f"Getting average entry price for order ID: {order_id}")
         for attempt in range(max_retries):
@@ -75,7 +75,10 @@ def get_average_entry_price(kite, order_id, max_retries=5, delay_sec=0.05):
                     return completed_order.get('average_price')
             
             if attempt < max_retries - 1:
-                time.sleep(delay_sec)
+                # Escalating backoff: fast first checks keep the common case at
+                # ~50-100ms, later ones give order_history time to catch up
+                # (worst case ~0.75s total before giving up).
+                time.sleep(delay_sec * (attempt + 1))
 
         logging.warning(f"No completed order found for order ID: {order_id} after {max_retries} attempts.")
         return None
