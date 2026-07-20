@@ -969,17 +969,19 @@ export default function Scalper() {
                 value={broker}
                 onChange={e => setBroker(e.target.value as 'dhan' | 'zerodha')}
                 className="bg-zinc-900 border border-zinc-700 text-zinc-200 text-xs font-semibold
-                           rounded-lg px-2.5 py-1.5 focus:outline-none focus:border-emerald-500"
+                           rounded-lg px-2.5 py-1.5 focus:outline-none focus:border-emerald-500 w-[88px]"
               >
                 {authenticatedBrokers.includes('dhan') && <option value="dhan">Dhan</option>}
                 {authenticatedBrokers.includes('zerodha') && <option value="zerodha">Zerodha</option>}
               </select>
             )}
 
-            {/* Underlying selector */}
+            {/* Underlying selector — fixed width so the row layout doesn't shift
+                when switching between underlyings of different name lengths
+                (e.g. NIFTY vs BANKNIFTY) */}
             <select value={underlying} onChange={e => setUnderlying(e.target.value as typeof UNDERLYINGS[number])}
               className="bg-zinc-900 border border-zinc-700 text-zinc-200 text-xs font-semibold
-                         rounded-lg px-2.5 py-1.5 focus:outline-none focus:border-emerald-500">
+                         rounded-lg px-2.5 py-1.5 focus:outline-none focus:border-emerald-500 w-[104px]">
               {UNDERLYINGS.map(sym => <option key={sym} value={sym}>{sym}</option>)}
             </select>
 
