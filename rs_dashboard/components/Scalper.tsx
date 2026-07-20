@@ -272,9 +272,10 @@ export default function Scalper() {
     fetch(`/api/options/expiries?underlying=${underlying}&broker=${broker}`)
       .then(r => r.json())
       .then((j: { success: boolean; data?: string[] }) => {
-        if (j.success && j.data?.length) {
-          setExpiries(j.data);
-          setExpiry(prev => j.data.includes(prev) ? prev : j.data[0]);
+        const data = j.data;
+        if (j.success && data?.length) {
+          setExpiries(data);
+          setExpiry(prev => data.includes(prev) ? prev : data[0]);
         }
       })
       .catch(() => {});
