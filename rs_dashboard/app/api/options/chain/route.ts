@@ -15,7 +15,7 @@ interface ChainResponse { chain: Record<string, unknown>; spot: number }
 const cache = new Map<string, CacheEntry>();
 const CACHE_TTL = 10_000; // 10 s
 
-const ZERODHA_SUPPORTED_UNDERLYINGS = new Set(['NIFTY', 'SENSEX']);
+const ZERODHA_SUPPORTED_UNDERLYINGS = new Set(['NIFTY', 'BANKNIFTY', 'SENSEX']);
 
 export async function GET(request: NextRequest) {
   const { searchParams } = new URL(request.url);

@@ -13,7 +13,7 @@ const FETCH_SCRIPT = path.join(PROJECT_ROOT, 'scripts', 'tools', 'options_data_f
 const cache = new Map<string, { data: string[]; ts: number }>();
 const CACHE_TTL = 60 * 60 * 1000; // 1 hour
 
-const ZERODHA_SUPPORTED_UNDERLYINGS = new Set(['NIFTY', 'SENSEX']);
+const ZERODHA_SUPPORTED_UNDERLYINGS = new Set(['NIFTY', 'BANKNIFTY', 'SENSEX']);
 
 // Today's date in IST, as YYYY-MM-DD — used to both scope the cache key
 // (so a stale entry can never survive a day rollover) and to filter out

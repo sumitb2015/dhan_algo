@@ -13,8 +13,9 @@ const DHAN_OHLC_URL = 'https://api.dhan.co/v2/marketfeed/ohlc';
 
 type UnderlyingConfig = { sid: number; dhanSeg: 'IDX_I' | 'BSE_IDX'; kiteSymbol?: string };
 const UNDERLYINGS: Record<string, UnderlyingConfig> = {
-  NIFTY:  { sid: 13, dhanSeg: 'IDX_I', kiteSymbol: 'NSE:NIFTY 50' },
-  SENSEX: { sid: 51, dhanSeg: 'BSE_IDX' },
+  NIFTY:     { sid: 13, dhanSeg: 'IDX_I', kiteSymbol: 'NSE:NIFTY 50' },
+  BANKNIFTY: { sid: 25, dhanSeg: 'IDX_I', kiteSymbol: 'NSE:NIFTY BANK' },
+  SENSEX:    { sid: 51, dhanSeg: 'BSE_IDX' },
 };
 
 // Prev close changes once per trading day — cache per IST date, per underlying.

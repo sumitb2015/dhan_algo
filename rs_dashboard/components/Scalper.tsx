@@ -77,8 +77,8 @@ function fmtOI(n: number): string {
 
 // ─── Constants ────────────────────────────────────────────────────
 
-const UNDERLYINGS = ['NIFTY', 'SENSEX'] as const;
-const STRIKE_STEP: Record<string, number> = { NIFTY: 50, SENSEX: 100 };
+const UNDERLYINGS = ['NIFTY', 'BANKNIFTY', 'SENSEX'] as const;
+const STRIKE_STEP: Record<string, number> = { NIFTY: 50, BANKNIFTY: 100, SENSEX: 100 };
 
 // ─── Main Component ───────────────────────────────────────────────
 
