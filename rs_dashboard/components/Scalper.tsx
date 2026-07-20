@@ -962,19 +962,25 @@ export default function Scalper() {
             <NavBar />
           </div>
           <div className="flex items-center gap-2 flex-wrap">
+            {/* Broker selector — only shown when more than one broker is authenticated */}
+            {authenticatedBrokers.length > 1 && (
+              <select
+                value={broker}
+                onChange={e => setBroker(e.target.value as 'dhan' | 'zerodha')}
+                className="bg-zinc-900 border border-zinc-700 text-zinc-200 text-xs font-semibold
+                           rounded-lg px-2.5 py-1.5 focus:outline-none focus:border-emerald-500"
+              >
+                {authenticatedBrokers.includes('dhan') && <option value="dhan">Dhan</option>}
+                {authenticatedBrokers.includes('zerodha') && <option value="zerodha">Zerodha</option>}
+              </select>
+            )}
+
             {/* Underlying selector */}
-            <div className="flex bg-zinc-900 border border-zinc-700 p-0.5 rounded-lg">
-              {UNDERLYINGS.map(sym => (
-                <button key={sym} onClick={() => setUnderlying(sym)}
-                  className={`px-2.5 py-1.5 text-xs font-bold rounded-md transition-all ${
-                    underlying === sym
-                      ? 'bg-emerald-500/10 text-emerald-300 border border-emerald-500/25'
-                      : 'text-zinc-400 hover:text-zinc-200 border border-transparent'
-                  }`}>
-                  {sym}
-                </button>
-              ))}
-            </div>
+            <select value={underlying} onChange={e => setUnderlying(e.target.value as typeof UNDERLYINGS[number])}
+              className="bg-zinc-900 border border-zinc-700 text-zinc-200 text-xs font-semibold
+                         rounded-lg px-2.5 py-1.5 focus:outline-none focus:border-emerald-500">
+              {UNDERLYINGS.map(sym => <option key={sym} value={sym}>{sym}</option>)}
+            </select>
 
             {/* Expiry selector */}
             <select value={expiry} onChange={e => setExpiry(e.target.value)}
@@ -1151,18 +1157,6 @@ export default function Scalper() {
                       </button>
                     )}
                   </>
-                )}
-
-                {/* Broker selector — only shown when more than one broker is authenticated */}
-                {authenticatedBrokers.length > 1 && (
-                  <select
-                    value={broker}
-                    onChange={e => setBroker(e.target.value as 'dhan' | 'zerodha')}
-                    className="px-2 py-1.5 rounded-lg text-xs font-bold bg-zinc-900 border border-zinc-700 text-zinc-300"
-                  >
-                    {authenticatedBrokers.includes('dhan') && <option value="dhan">Dhan</option>}
-                    {authenticatedBrokers.includes('zerodha') && <option value="zerodha">Zerodha</option>}
-                  </select>
                 )}
 
                 {/* Exit ALL Positions (broker-level nuclear) */}
