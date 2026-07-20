@@ -15,6 +15,8 @@ interface ChainResponse { chain: Record<string, unknown>; spot: number }
 const cache = new Map<string, CacheEntry>();
 const CACHE_TTL = 10_000; // 10 s
 
+const ZERODHA_SUPPORTED_UNDERLYINGS = new Set(['NIFTY', 'SENSEX']);
+
 export async function GET(request: NextRequest) {
   const { searchParams } = new URL(request.url);
   const underlying = (searchParams.get('underlying') ?? 'NIFTY').toUpperCase();
@@ -25,9 +27,18 @@ export async function GET(request: NextRequest) {
     return NextResponse.json({ success: false, error: 'expiry required' }, { status: 400 });
   }
 
+  if (broker === 'zerodha' && !ZERODHA_SUPPORTED_UNDERLYINGS.has(underlying)) {
+    // Fail loudly instead of silently returning another underlying's
+    // chain/spot mislabeled as the requested one.
+    return NextResponse.json(
+      { success: false, error: `Zerodha does not support ${underlying} yet` },
+      { status: 400 },
+    );
+  }
+
   if (broker === 'zerodha') {
     try {
-      const cacheFile = path.join(PROJECT_ROOT, 'debug', 'zerodha_nifty_instruments.json');
+      const cacheFile = path.join(PROJECT_ROOT, 'debug', `zerodha_${underlying.toLowerCase()}_instruments.json`);
       if (fs.existsSync(cacheFile)) {
         const raw = fs.readFileSync(cacheFile, 'utf8');
         const instruments = JSON.parse(raw) as { strike: number; expiry: string; instrument_type: 'CE' | 'PE' }[];
@@ -54,7 +65,10 @@ export async function GET(request: NextRequest) {
           }
         } catch {}
         
-        const data: ChainResponse = { chain: { oc }, spot: spot || 24000 };
+        // No NIFTY-specific magic-number fallback here — a stale spot=0 is
+        // a truthful "not yet available" for any underlying, whereas a
+        // fixed guess would be actively wrong for e.g. SENSEX (~82,000).
+        const data: ChainResponse = { chain: { oc }, spot };
         return NextResponse.json({ success: true, data }, {
           headers: { 'Cache-Control': 'no-store' }
         });

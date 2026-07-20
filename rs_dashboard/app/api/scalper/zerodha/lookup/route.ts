@@ -4,8 +4,11 @@ import fs from 'fs';
 import { PROJECT_ROOT, runPythonJson, dedupe } from '@/lib/pyExec';
 
 const CACHE_SCRIPT = path.join(PROJECT_ROOT, 'scripts', 'tools', 'zerodha_instruments_cache.py');
-const CACHE_FILE = path.join(PROJECT_ROOT, 'debug', 'zerodha_nifty_instruments.json');
 const CACHE_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+
+function cacheFileFor(underlying: string): string {
+  return path.join(PROJECT_ROOT, 'debug', `zerodha_${underlying.toLowerCase()}_instruments.json`);
+}
 
 interface CachedInstrument {
   tradingsymbol: string;
@@ -16,19 +19,21 @@ interface CachedInstrument {
   lot_size: number;
 }
 
-async function ensureCache(): Promise<CachedInstrument[]> {
-  const stale = !fs.existsSync(CACHE_FILE) ||
-    Date.now() - fs.statSync(CACHE_FILE).mtimeMs > CACHE_MAX_AGE_MS;
+async function ensureCache(underlying: string): Promise<CachedInstrument[]> {
+  const cacheFile = cacheFileFor(underlying);
+  const stale = !fs.existsSync(cacheFile) ||
+    Date.now() - fs.statSync(cacheFile).mtimeMs > CACHE_MAX_AGE_MS;
 
   if (stale) {
-    await dedupe('zerodha-instruments-cache', () =>
-      runPythonJson<{ success: boolean; error?: string }>(CACHE_SCRIPT, [], 60_000));
+    await dedupe(`zerodha-instruments-cache:${underlying}`, () =>
+      runPythonJson<{ success: boolean; error?: string }>(CACHE_SCRIPT, ['--underlying', underlying], 60_000));
   }
-  return JSON.parse(fs.readFileSync(CACHE_FILE, 'utf8')) as CachedInstrument[];
+  return JSON.parse(fs.readFileSync(cacheFile, 'utf8')) as CachedInstrument[];
 }
 
 export async function GET(req: NextRequest): Promise<NextResponse> {
   const { searchParams } = new URL(req.url);
+  const underlying = (searchParams.get('underlying') ?? 'NIFTY').toUpperCase();
   const expiry = searchParams.get('expiry') ?? '';
 
   if (!expiry) {
@@ -36,10 +41,10 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
   }
 
   try {
-    const all = await ensureCache();
+    const all = await ensureCache(underlying);
     const rows = all.filter(r => r.expiry === expiry);
     if (!rows.length) {
-      return NextResponse.json({ success: false, error: `No Zerodha options found for NIFTY ${expiry}` });
+      return NextResponse.json({ success: false, error: `No Zerodha options found for ${underlying} ${expiry}` });
     }
 
     const strikes: Record<string, { ceSymbol?: string; peSymbol?: string }> = {};

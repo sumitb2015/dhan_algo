@@ -12,9 +12,10 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     side: string;
     orderType?: string;
     price?: number;
+    exchange?: string;
   };
 
-  const { tradingsymbol, quantity, side, orderType = 'MARKET', price = 0 } = body;
+  const { tradingsymbol, quantity, side, orderType = 'MARKET', price = 0, exchange = 'NFO' } = body;
 
   if (!tradingsymbol || !quantity || !side) {
     return NextResponse.json({ success: false, error: 'Missing required fields: tradingsymbol, quantity, side' }, { status: 400 });
@@ -38,7 +39,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   try {
     const params: Record<string, string | number> = {
       tradingsymbol,
-      exchange: 'NFO',
+      exchange,
       transaction_type: sideUpper,
       order_type: isLimitOrder ? 'LIMIT' : 'MARKET',
       quantity: qtyNum,

@@ -13,6 +13,8 @@ const FETCH_SCRIPT = path.join(PROJECT_ROOT, 'scripts', 'tools', 'options_data_f
 const cache = new Map<string, { data: string[]; ts: number }>();
 const CACHE_TTL = 60 * 60 * 1000; // 1 hour
 
+const ZERODHA_SUPPORTED_UNDERLYINGS = new Set(['NIFTY', 'SENSEX']);
+
 // Today's date in IST, as YYYY-MM-DD — used to both scope the cache key
 // (so a stale entry can never survive a day rollover) and to filter out
 // any already-lapsed expiry dates the broker/cache might still hand back.
@@ -26,12 +28,21 @@ export async function GET(request: NextRequest) {
   const broker = (searchParams.get('broker') ?? 'dhan').toLowerCase();
   const today = todayIST();
 
+  if (broker === 'zerodha' && !ZERODHA_SUPPORTED_UNDERLYINGS.has(underlying)) {
+    // Fail loudly instead of silently returning another underlying's
+    // expiries mislabeled as the requested one.
+    return NextResponse.json(
+      { success: false, error: `Zerodha does not support ${underlying} yet` },
+      { status: 400 },
+    );
+  }
+
   if (broker === 'zerodha') {
     try {
-      const cacheFile = path.join(PROJECT_ROOT, 'debug', 'zerodha_nifty_instruments.json');
+      const cacheFile = path.join(PROJECT_ROOT, 'debug', `zerodha_${underlying.toLowerCase()}_instruments.json`);
       if (!fs.existsSync(cacheFile)) {
         const cacheScript = path.join(PROJECT_ROOT, 'scripts', 'tools', 'zerodha_instruments_cache.py');
-        await execFileAsync(PYTHON_EXE, [cacheScript], { encoding: 'utf8', timeout: 60_000, windowsHide: true });
+        await execFileAsync(PYTHON_EXE, [cacheScript, '--underlying', underlying], { encoding: 'utf8', timeout: 60_000, windowsHide: true });
       }
       if (fs.existsSync(cacheFile)) {
         const raw = fs.readFileSync(cacheFile, 'utf8');

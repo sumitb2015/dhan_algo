@@ -43,7 +43,8 @@ MAX_HISTORY  = 300   # ~10 min at 2s ticks
 
 # MarketFeed constants
 NSE_FNO     = 2   # NSE F&O segment
-IDX         = 0   # Index segment
+BSE_FNO     = 8   # BSE F&O segment
+IDX         = 0   # Index segment (shared across exchanges, differentiated by security ID)
 FULL        = 21  # Full packet — includes OI
 FEED_QUOTE  = 17  # Quote packet — LTP + OHLC + volume (includes prev_close)
 
@@ -55,18 +56,38 @@ UNDERLYING_SIDS = {
     'NIFTY':     '13',
     'BANKNIFTY': '25',
     'FINNIFTY':  '27',
+    'SENSEX':    '51',
+}
+
+# Cash-market exchange each underlying's options trade on — everything here
+# is NSE except SENSEX, which is a BSE index.
+UNDERLYING_EXCHANGE = {
+    'NIFTY':     'NSE',
+    'BANKNIFTY': 'NSE',
+    'FINNIFTY':  'NSE',
+    'SENSEX':    'BSE',
+}
+
+# WS market-feed option-segment code per underlying's exchange
+OPTION_FEED_SEGMENT = {
+    'NSE': NSE_FNO,
+    'BSE': BSE_FNO,
 }
 
 OHLC_URL = 'https://api.dhan.co/v2/marketfeed/ohlc'
 
 
-def _fetch_prev_closes(dhan, underlying_sid: str) -> dict:
-    """Fetch previous-session closes for both VIX and the underlying index."""
+def _fetch_prev_closes(dhan, underlying_sid: str, underlying_exchange: str = 'NSE') -> dict:
+    """Fetch previous-session closes for both VIX (always NSE) and the underlying
+    index — the underlying may be on NSE_IDX or BSE_IDX depending on exchange."""
     closes = {underlying_sid: 0.0, VIX_SID: 0.0}
+    underlying_seg = 'NSE_IDX' if underlying_exchange == 'NSE' else 'BSE_IDX'
     try:
         token     = dhan.dhan_http.access_token
         client_id = dhan.dhan_http.client_id
-        body = json.dumps({'NSE_IDX': [int(underlying_sid), int(VIX_SID)]}).encode()
+        body_map = {'NSE_IDX': [int(VIX_SID)]}
+        body_map.setdefault(underlying_seg, []).append(int(underlying_sid))
+        body = json.dumps(body_map).encode()
         req  = urllib.request.Request(
             OHLC_URL, data=body, method='POST',
             headers={
@@ -80,9 +101,8 @@ def _fetch_prev_closes(dhan, underlying_sid: str) -> dict:
             res = json.loads(resp.read())
         if res.get('status') == 'success':
             data = res.get('data', {}) or {}
-            idx_data = data.get('NSE_IDX', {}) or {}
-            for sid in (underlying_sid, VIX_SID):
-                entry = idx_data.get(sid, {}) or {}
+            for sid, seg in ((underlying_sid, underlying_seg), (VIX_SID, 'NSE_IDX')):
+                entry = (data.get(seg, {}) or {}).get(sid, {}) or {}
                 ohlc  = entry.get('ohlc') or {}
                 val   = float(ohlc.get('close') or 0)
                 if val > 0:
@@ -91,7 +111,7 @@ def _fetch_prev_closes(dhan, underlying_sid: str) -> dict:
         print(f'[live_options_ws] WARN: prev_closes fetch failed: {e}', flush=True)
     return closes
 
-def _fetch_prev_oi(helper, underlying: str, expiry: str, attempts: int = 5, delay: float = 5.0) -> dict:
+def _fetch_prev_oi(helper, underlying: str, expiry: str, exchange_segment: str = 'IDX_I', attempts: int = 5, delay: float = 5.0) -> dict:
     """Fetch previous-day OI per strike/side from the option chain (at startup).
 
     Retries on transient failures (429s, empty chain) since a single missed
@@ -102,7 +122,7 @@ def _fetch_prev_oi(helper, underlying: str, expiry: str, attempts: int = 5, dela
     for attempt in range(attempts):
         prev_oi: dict = {}
         try:
-            chain = helper.get_option_chain(underlying, expiry, exchange_segment='IDX_I')
+            chain = helper.get_option_chain(underlying, expiry, exchange_segment=exchange_segment)
             for strike_str, data in ((chain or {}).get('oc') or {}).items():
                 strike = int(float(strike_str))
                 prev_oi[strike] = {
@@ -136,7 +156,7 @@ def _classify_buildup(change_pct: float, oi_chg_pct: float) -> str:
 
 
 # Strike step per underlying
-STRIKE_STEP = {'NIFTY': 50, 'BANKNIFTY': 100, 'FINNIFTY': 50}
+STRIKE_STEP = {'NIFTY': 50, 'BANKNIFTY': 100, 'FINNIFTY': 50, 'SENSEX': 100}
 
 
 def _f(val, default: float = 0.0) -> float:
@@ -288,7 +308,7 @@ class QuotePushServer:
 def main():
     parser = argparse.ArgumentParser(description='Live options WebSocket bridge')
     parser.add_argument('--underlying', default='NIFTY',
-                        choices=['NIFTY', 'BANKNIFTY', 'FINNIFTY'])
+                        choices=['NIFTY', 'BANKNIFTY', 'FINNIFTY', 'SENSEX'])
     parser.add_argument('--expiry', required=True,
                         help='Expiry date YYYY-MM-DD')
     parser.add_argument('--num-strikes', type=int, default=10,
@@ -321,15 +341,17 @@ def main():
     helper = DhanHelper(dhan)
     step = STRIKE_STEP.get(args.underlying, 50)
     underlying_sid = UNDERLYING_SIDS.get(args.underlying.upper(), '13')
+    underlying_exchange = UNDERLYING_EXCHANGE.get(args.underlying.upper(), 'NSE')
+    underlying_seg = 'IDX_I' if underlying_exchange == 'NSE' else 'BSE_IDX'
 
     # Fetch prev_closes once at startup — used for % change throughout the session
-    closes = _fetch_prev_closes(dhan, underlying_sid)
+    closes = _fetch_prev_closes(dhan, underlying_sid, underlying_exchange)
     underlying_prev_close = closes.get(underlying_sid, 0.0)
     vix_prev_close = closes.get(VIX_SID, 0.0)
     print(f'[live_options_ws] prev_closes: underlying={underlying_prev_close}, VIX={vix_prev_close}', flush=True)
 
     # Fetch prev-day OI per strike once at startup — baseline for buildup labels
-    prev_oi_map = _fetch_prev_oi(helper, args.underlying, args.expiry)
+    prev_oi_map = _fetch_prev_oi(helper, args.underlying, args.expiry, exchange_segment=underlying_seg)
     print(f'[live_options_ws] prev_oi baseline: {len(prev_oi_map)} strikes', flush=True)
 
     # Get spot to determine ATM — retry on transient REST failures (429s):
@@ -337,7 +359,7 @@ def main():
     print('[live_options_ws] Fetching spot price…', flush=True)
     spot = 0.0
     for attempt in range(5):
-        spot = helper.get_ltp(args.underlying, exchange='IDX_I', instrument='INDEX') or 0.0
+        spot = helper.get_ltp(args.underlying, exchange=underlying_exchange, instrument='INDEX') or 0.0
         if spot > 0:
             break
         print(f'[live_options_ws] WARN: spot fetch failed (attempt {attempt + 1}/5), retrying in 5s…', flush=True)
@@ -352,15 +374,16 @@ def main():
     instruments = []
     sid_map: dict[str, dict] = {}  # sid -> {strike, type}
 
+    option_feed_segment = OPTION_FEED_SEGMENT.get(underlying_exchange, NSE_FNO)
     print(f'[live_options_ws] Resolving {len(strikes) * 2} option contracts…', flush=True)
     for strike in strikes:
         for opt_type in ('CE', 'PE'):
-            opt = helper.find_option(args.underlying, args.expiry, float(strike), opt_type)
+            opt = helper.find_option(args.underlying, args.expiry, float(strike), opt_type, exchange=underlying_exchange)
             if opt is None:
                 continue
             sid = str(int(opt['SECURITY_ID']))
             sid_map[sid] = {'strike': int(strike), 'type': opt_type}
-            instruments.append((NSE_FNO, sid, FULL))
+            instruments.append((option_feed_segment, sid, FULL))
 
     # Subscribe to underlying index (spot canary) and India VIX
     instruments.append((IDX, underlying_sid, FEED_QUOTE))

@@ -26,9 +26,16 @@ interface BoxConfig {
 const MIN_BOXES = 2;
 const MAX_BOXES = 5;
 
+const UNDERLYINGS = ['NIFTY', 'SENSEX'] as const;
+const STRIKE_STEP: Record<string, number> = { NIFTY: 50, SENSEX: 100 };
+
 // ─── Main Component ───────────────────────────────────────────────
 
 export default function AdvancedScalper() {
+  // Underlying
+  const [underlying, setUnderlying] = useState<typeof UNDERLYINGS[number]>('NIFTY');
+  const strikeStep = STRIKE_STEP[underlying] ?? 50;
+
   // Expiry
   const [expiries, setExpiries]   = useState<string[]>([]);
   const [expiry, setExpiry]       = useState('');
@@ -51,7 +58,7 @@ export default function AdvancedScalper() {
   const orderInFlightRef = useRef<Set<string>>(new Set());
 
   // Live data: direct WebSocket to the Python bridge (HTTP polling fallback)
-  const { liveQuotes, bridgeStatus, lastUpdated, transport } = useLiveOptionsWS(expiry, broker, authenticatedBrokers);
+  const { liveQuotes, bridgeStatus, lastUpdated, transport } = useLiveOptionsWS(expiry, broker, authenticatedBrokers, underlying);
 
   // Trading controls
   const [orderMode, setOrderMode] = useState<'MARKET' | 'LIMIT'>('MARKET');
@@ -108,7 +115,7 @@ export default function AdvancedScalper() {
   // ─── Derived values ──────────────────────────────────────────────
 
   const spot = liveQuotes?.spot ?? chainSpot;
-  const atm  = spot > 0 ? Math.round(spot / 50) * 50 : 0;
+  const atm  = spot > 0 ? Math.round(spot / strikeStep) * strikeStep : 0;
 
   const visibleStrikes = useMemo(() => {
     if (!allStrikes.length) return allStrikes;
@@ -211,10 +218,10 @@ export default function AdvancedScalper() {
       : entry?.[box.side === 'CE' ? 'ceId' : 'peId'];
   }, [strikeMap, broker]);
 
-  // ─── useEffect 1: Load expiries based on broker ───────────────────
+  // ─── useEffect 1: Load expiries based on broker + underlying ───────
 
   useEffect(() => {
-    fetch(`/api/options/expiries?underlying=NIFTY&broker=${broker}`)
+    fetch(`/api/options/expiries?underlying=${underlying}&broker=${broker}`)
       .then(r => r.json())
       .then((j: { success: boolean; data?: string[] }) => {
         if (j.success && j.data?.length) {
@@ -223,18 +230,22 @@ export default function AdvancedScalper() {
         }
       })
       .catch(() => {});
-  }, [broker]);
+  }, [broker, underlying]);
 
-  // ─── useEffect 1b: Load mount data ───────────────────────────────
+  // ─── useEffect 1a: Load prev-close whenever underlying changes ────
 
   useEffect(() => {
-    fetch('/api/scalper/nifty-prev-close')
+    fetch(`/api/scalper/nifty-prev-close?underlying=${underlying}`)
       .then(r => r.json())
       .then((j: { success: boolean; prevClose?: number }) => {
         if (j.success && j.prevClose) setPrevSpot(j.prevClose);
       })
       .catch(() => {});
+  }, [underlying]);
 
+  // ─── useEffect 1b: Load mount data ───────────────────────────────
+
+  useEffect(() => {
     fetch('/api/pnl-exit')
       .then(r => r.json())
       .then((j: { success: boolean; data?: PnlGuardStatus }) => {
@@ -248,13 +259,18 @@ export default function AdvancedScalper() {
   useEffect(() => {
     if (!expiry) return;
 
-    // Reset strike selections when expiry changes; lots/side presets are preserved
+    // Reset strike selections when expiry/underlying changes; lots/side presets
+    // are preserved. chainSpot must be cleared too — NIFTY and SENSEX spot
+    // values differ by ~3x magnitude, so leaving the old value in place would
+    // briefly show e.g. "SENSEX 25453" (new underlying's label, old
+    // underlying's spot) until the chain fetch below resolves.
     setBoxes(prev => prev.map(b => ({ ...b, strike: null })));
     setAllStrikes([]);
     setPrevClose({});
     setStrikeMap({});   // liveQuotes reset is handled inside useLiveOptionsWS
+    setChainSpot(0);
 
-    fetch(`/api/options/chain?underlying=NIFTY&expiry=${expiry}&broker=${broker}`)
+    fetch(`/api/options/chain?underlying=${underlying}&expiry=${expiry}&broker=${broker}`)
       .then(r => r.json())
       .then((j: { success: boolean; data?: { chain: { oc?: Record<string, ChainOcEntry> }; spot: number } }) => {
         if (!j.success || !j.data?.chain?.oc) return;
@@ -276,7 +292,7 @@ export default function AdvancedScalper() {
 
         // Default every box's strike to ATM
         if (strikes.length) {
-          const atmTarget = spotPrice > 0 ? Math.round(spotPrice / 50) * 50 : 0;
+          const atmTarget = spotPrice > 0 ? Math.round(spotPrice / strikeStep) * strikeStep : 0;
           const nearest = atmTarget > 0
             ? strikes.reduce((prev, cur) => Math.abs(cur - atmTarget) < Math.abs(prev - atmTarget) ? cur : prev)
             : strikes[Math.floor(strikes.length / 2)];
@@ -292,11 +308,11 @@ export default function AdvancedScalper() {
       fetch('/api/options/live', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action: 'start', underlying: 'NIFTY', expiry, numStrikes: 30, broker: b }),
+        body: JSON.stringify({ action: 'start', underlying, expiry, numStrikes: 30, broker: b }),
       }).catch(() => {});
     }
 
-    // Cleanup: stop every started bridge when expiry changes or component unmounts
+    // Cleanup: stop every started bridge when expiry/underlying changes or component unmounts
     return () => {
       fetch('/api/options/live', {
         method: 'POST',
@@ -304,7 +320,7 @@ export default function AdvancedScalper() {
         body: JSON.stringify({ action: 'stop', brokers: authenticatedBrokers }),
       }).catch(() => {});
     };
-  }, [expiry, authenticatedBrokers]);
+  }, [expiry, underlying, authenticatedBrokers]);
 
   // Re-resolves strikeMap (Dhan securityId / Zerodha tradingsymbol per strike)
   // whenever the expiry OR the selected broker changes. Order routing is
@@ -316,8 +332,8 @@ export default function AdvancedScalper() {
     const requestedExpiry = expiry;
     const lookupUrl = brokerRoute(
       broker,
-      `/api/scalper/lookup?underlying=NIFTY&expiry=${expiry}`,
-      `/api/scalper/zerodha/lookup?expiry=${expiry}`,
+      `/api/scalper/lookup?underlying=${underlying}&expiry=${expiry}`,
+      `/api/scalper/zerodha/lookup?underlying=${underlying}&expiry=${expiry}`,
     );
     fetch(lookupUrl)
       .then(r => r.json())
@@ -329,7 +345,7 @@ export default function AdvancedScalper() {
         }
       })
       .catch(() => {});
-  }, [expiry, broker]);
+  }, [expiry, broker, underlying]);
 
   // Live quotes arrive via useLiveOptionsWS (direct WebSocket push from the
   // Python bridge, rAF-coalesced; falls back to 100ms HTTP polling if the WS
@@ -476,6 +492,7 @@ export default function AdvancedScalper() {
             quantity: box.lots * lotSize,
             side,
             orderType: orderMode,
+            exchange: underlying === 'SENSEX' ? 'BFO' : 'NFO',
             ...(orderMode === 'LIMIT' ? { price: Number(box.limitPrice) } : {}),
           }),
         });
@@ -490,12 +507,13 @@ export default function AdvancedScalper() {
               quantity: box.lots * lotSize,
               side,
               orderType: orderMode,
+              exchangeSegment: underlying === 'SENSEX' ? 'BSE_FNO' : 'NSE_FNO',
               ...(orderMode === 'LIMIT' ? { price: Number(box.limitPrice) } : {}),
             }),
           });
         } else {
           const body: Record<string, unknown> = {
-            underlying: 'NIFTY', expiry, strike: box.strike, option: box.side, side, lots: box.lots, type: orderMode,
+            underlying, expiry, strike: box.strike, option: box.side, side, lots: box.lots, type: orderMode,
           };
           if (orderMode === 'LIMIT') body.price = Number(box.limitPrice);
           res = await fetch('/api/scalper/order', {
@@ -519,7 +537,7 @@ export default function AdvancedScalper() {
       orderInFlightRef.current.delete(boxId);
       setOrderPendingBoxes(prev => { const s = new Set(prev); s.delete(boxId); return s; });
     }
-  }, [boxes, expiry, lotSize, strikeMap, orderMode, broker, addToast, fetchTabData]);
+  }, [boxes, expiry, underlying, lotSize, strikeMap, orderMode, broker, addToast, fetchTabData]);
 
   // ─── Per-position close ───────────────────────────────────────────
 
@@ -539,8 +557,12 @@ export default function AdvancedScalper() {
     setClosingPositions(prev => new Set([...prev, sym]));
 
     try {
+      // Exchange is derived from the POSITION itself (not the currently-selected
+      // underlying) — a stale position from a different underlying than what's
+      // selected in the UI must still close on its own exchange.
       let liveNetQty = 0;
       let liveSecId = fallbackSecId;
+      let liveExchange = String(pos.exchangeSegment ?? pos.exchange ?? (broker === 'zerodha' ? 'NFO' : 'NSE_FNO'));
       try {
         const posUrl = brokerRoute(broker, '/api/scalper/positions', '/api/scalper/zerodha/positions');
         const posRes = await fetch(posUrl);
@@ -550,6 +572,7 @@ export default function AdvancedScalper() {
           if (match) {
             liveNetQty = Number(match.netQty);
             liveSecId = String(match.securityId ?? match.security_id ?? fallbackSecId);
+            liveExchange = String(match.exchangeSegment ?? match.exchange ?? liveExchange);
           }
         }
       } catch {
@@ -572,8 +595,8 @@ export default function AdvancedScalper() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(
           broker === 'zerodha'
-            ? { tradingsymbol: sym, quantity: qty, side, orderType: 'MARKET' }
-            : { securityId: liveSecId, quantity: qty, side, orderType: 'MARKET' },
+            ? { tradingsymbol: sym, quantity: qty, side, orderType: 'MARKET', exchange: liveExchange }
+            : { securityId: liveSecId, quantity: qty, side, orderType: 'MARKET', exchangeSegment: liveExchange },
         ),
       });
       const j = await res.json() as { success: boolean; order_id?: string; error?: string };
@@ -798,6 +821,10 @@ export default function AdvancedScalper() {
   }, []);
 
   const handleSetPnl = async () => {
+    // /api/pnl-exit is Dhan's native account-level guard only — no Zerodha
+    // equivalent exists. The UI already hides these controls for Zerodha;
+    // this is a defense-in-depth guard against calling it anyway.
+    if (broker !== 'dhan') { addToast('error', 'P&L Guard is Dhan-only'); return; }
     // The field collects a positive loss magnitude ("exit when loss reaches ₹X"),
     // but Dhan's API rejects lossValue > 0 ("Loss Amount Cannot Be Greater Than
     // Zero") — it wants the P&L level itself, so the magnitude is sent negated.
@@ -842,6 +869,7 @@ export default function AdvancedScalper() {
   };
 
   const handleClearPnl = async () => {
+    if (broker !== 'dhan') { addToast('error', 'P&L Guard is Dhan-only'); return; }
     if (!confirmClear) { setConfirmClear(true); setTimeout(() => setConfirmClear(false), 3000); return; }
     setClearingPnl(true);
     try {
@@ -883,17 +911,31 @@ export default function AdvancedScalper() {
             <div>
               <h1 className="text-sm font-bold text-white tracking-tight flex items-center gap-1.5">
                 <Zap className="w-3.5 h-3.5 text-yellow-400" />
-                NIFTY ADVANCED SCALPER
+                {underlying} ADVANCED SCALPER
               </h1>
               <p className="text-xs font-bold font-mono tabular-nums text-zinc-200">
                 {spot > 0
-                  ? `NIFTY ${spot.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+                  ? `${underlying} ${spot.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
                   : 'Loading…'}
               </p>
             </div>
             <NavBar />
           </div>
           <div className="flex items-center gap-2 flex-wrap">
+            {/* Underlying selector */}
+            <div className="flex bg-zinc-900 border border-zinc-700 p-0.5 rounded-lg">
+              {UNDERLYINGS.map(sym => (
+                <button key={sym} onClick={() => setUnderlying(sym)}
+                  className={`px-2.5 py-1.5 text-xs font-bold rounded-md transition-all ${
+                    underlying === sym
+                      ? 'bg-emerald-500/10 text-emerald-300 border border-emerald-500/25'
+                      : 'text-zinc-400 hover:text-zinc-200 border border-transparent'
+                  }`}>
+                  {sym}
+                </button>
+              ))}
+            </div>
+
             {/* Expiry selector */}
             <select value={expiry} onChange={e => setExpiry(e.target.value)}
               className="bg-zinc-900 border border-zinc-700 text-zinc-200 text-xs font-semibold
@@ -957,7 +999,7 @@ export default function AdvancedScalper() {
           </div>
         </div>
 
-        {/* P&L Guard bar — always visible, no toggle */}
+        {/* P&L Guard bar — always visible; controls themselves are Dhan-only (see below) */}
         <div className="mt-2 pt-2 border-t border-zinc-800">
           {pnlGuardLoading ? (
             <p className="text-xs text-zinc-500 px-1">Loading…</p>
@@ -978,66 +1020,80 @@ export default function AdvancedScalper() {
                   <Shield className="w-3 h-3" /> P&amp;L Guard
                 </span>
 
-                <span className={`px-2 py-1 rounded text-[10px] font-bold uppercase tracking-wider ${guardChipCls}`}>
-                  {guardLabel}
-                </span>
+                {broker !== 'dhan' ? (
+                  // Dhan's native /pnlExit is an account-level kill switch with no
+                  // Zerodha equivalent — showing live-looking controls here would
+                  // silently configure Dhan's guard while this tab shows Zerodha
+                  // data, so surface that plainly instead of pretending it works.
+                  <span
+                    className="px-2 py-1 rounded text-[10px] font-bold uppercase tracking-wider bg-zinc-800 text-zinc-500 border border-zinc-700"
+                    title="P&L Guard uses Dhan's native account-level pnlExit API, which has no Zerodha equivalent. Switch to Dhan to use it.">
+                    DHAN ONLY
+                  </span>
+                ) : (
+                  <>
+                    <span className={`px-2 py-1 rounded text-[10px] font-bold uppercase tracking-wider ${guardChipCls}`}>
+                      {guardLabel}
+                    </span>
 
-                <div className="flex items-center gap-1.5">
-                  <span className="text-[10px] text-zinc-500 font-semibold">TARGET ₹</span>
-                  <input type="number" min="0" placeholder="e.g. 5000" value={profitTarget}
-                    onChange={e => setProfitTarget(e.target.value.replace(/-/g, ''))}
-                    className="w-24 bg-zinc-900 border border-zinc-700 text-zinc-200 text-xs font-mono
-                               rounded px-2 py-1 focus:outline-none focus:border-emerald-500" />
-                </div>
+                    <div className="flex items-center gap-1.5">
+                      <span className="text-[10px] text-zinc-500 font-semibold">TARGET ₹</span>
+                      <input type="number" min="0" placeholder="e.g. 5000" value={profitTarget}
+                        onChange={e => setProfitTarget(e.target.value.replace(/-/g, ''))}
+                        className="w-24 bg-zinc-900 border border-zinc-700 text-zinc-200 text-xs font-mono
+                                   rounded px-2 py-1 focus:outline-none focus:border-emerald-500" />
+                    </div>
 
-                {/* Loss limit — always a positive magnitude ("exit when loss reaches ₹X"); Dhan rejects a negative value */}
-                <div className="flex items-center gap-1.5">
-                  <span className="text-[10px] text-zinc-500 font-semibold">SL ₹</span>
-                  <input type="number" min="0" placeholder="e.g. 2000" value={lossLimit}
-                    onChange={e => setLossLimit(e.target.value.replace(/-/g, ''))}
-                    className="w-24 bg-zinc-900 border border-zinc-700 text-zinc-200 text-xs font-mono
-                               rounded px-2 py-1 focus:outline-none focus:border-rose-500" />
-                </div>
+                    {/* Loss limit — always a positive magnitude ("exit when loss reaches ₹X"); Dhan rejects a negative value */}
+                    <div className="flex items-center gap-1.5">
+                      <span className="text-[10px] text-zinc-500 font-semibold">SL ₹</span>
+                      <input type="number" min="0" placeholder="e.g. 2000" value={lossLimit}
+                        onChange={e => setLossLimit(e.target.value.replace(/-/g, ''))}
+                        className="w-24 bg-zinc-900 border border-zinc-700 text-zinc-200 text-xs font-mono
+                                   rounded px-2 py-1 focus:outline-none focus:border-rose-500" />
+                    </div>
 
-                <div className="flex items-center gap-1">
-                  {['INTRADAY', 'CNC', 'MARGIN'].map(pt => (
-                    <button key={pt} onClick={() => setGuardProductTypes(prev =>
-                      prev.includes(pt) ? prev.filter(x => x !== pt) : [...prev, pt]
-                    )}
-                      className={`px-2 py-1 rounded text-[10px] font-bold border transition-all ${
-                        guardProductTypes.includes(pt)
-                          ? 'bg-violet-900/50 border-violet-500/40 text-violet-300'
+                    <div className="flex items-center gap-1">
+                      {['INTRADAY', 'CNC', 'MARGIN'].map(pt => (
+                        <button key={pt} onClick={() => setGuardProductTypes(prev =>
+                          prev.includes(pt) ? prev.filter(x => x !== pt) : [...prev, pt]
+                        )}
+                          className={`px-2 py-1 rounded text-[10px] font-bold border transition-all ${
+                            guardProductTypes.includes(pt)
+                              ? 'bg-violet-900/50 border-violet-500/40 text-violet-300'
+                              : 'bg-zinc-900 border-zinc-700 text-zinc-500 hover:text-zinc-300'
+                          }`}>
+                          {pt}
+                        </button>
+                      ))}
+                    </div>
+
+                    <button onClick={() => setEnableKillSwitch(v => !v)}
+                      className={`flex items-center gap-1.5 px-2.5 py-1 rounded text-[10px] font-bold border transition-all ${
+                        enableKillSwitch
+                          ? 'bg-rose-900/50 border-rose-500/40 text-rose-300'
                           : 'bg-zinc-900 border-zinc-700 text-zinc-500 hover:text-zinc-300'
                       }`}>
-                      {pt}
+                      🔴 Kill Switch {enableKillSwitch ? 'ON' : 'OFF'}
                     </button>
-                  ))}
-                </div>
 
-                <button onClick={() => setEnableKillSwitch(v => !v)}
-                  className={`flex items-center gap-1.5 px-2.5 py-1 rounded text-[10px] font-bold border transition-all ${
-                    enableKillSwitch
-                      ? 'bg-rose-900/50 border-rose-500/40 text-rose-300'
-                      : 'bg-zinc-900 border-zinc-700 text-zinc-500 hover:text-zinc-300'
-                  }`}>
-                  🔴 Kill Switch {enableKillSwitch ? 'ON' : 'OFF'}
-                </button>
+                    <button onClick={handleSetPnl} disabled={settingPnl}
+                      className="px-3 py-1.5 text-xs font-bold rounded-lg bg-violet-600 hover:bg-violet-500
+                                 text-white border border-violet-500/40 transition-all disabled:opacity-50">
+                      {settingPnl ? 'Setting…' : 'Set Guard'}
+                    </button>
 
-                <button onClick={handleSetPnl} disabled={settingPnl}
-                  className="px-3 py-1.5 text-xs font-bold rounded-lg bg-violet-600 hover:bg-violet-500
-                             text-white border border-violet-500/40 transition-all disabled:opacity-50">
-                  {settingPnl ? 'Setting…' : 'Set Guard'}
-                </button>
-
-                {hasConfig && (
-                  <button onClick={handleClearPnl} disabled={clearingPnl}
-                    className={`px-3 py-1.5 text-xs font-bold rounded-lg border transition-all disabled:opacity-50 ${
-                      confirmClear
-                        ? 'bg-rose-600 border-rose-500/40 text-white'
-                        : 'bg-zinc-900 border-zinc-700 text-zinc-400 hover:text-zinc-200'
-                    }`}>
-                    {clearingPnl ? 'Clearing…' : confirmClear ? 'Confirm Clear?' : 'Clear Guard'}
-                  </button>
+                    {hasConfig && (
+                      <button onClick={handleClearPnl} disabled={clearingPnl}
+                        className={`px-3 py-1.5 text-xs font-bold rounded-lg border transition-all disabled:opacity-50 ${
+                          confirmClear
+                            ? 'bg-rose-600 border-rose-500/40 text-white'
+                            : 'bg-zinc-900 border-zinc-700 text-zinc-400 hover:text-zinc-200'
+                        }`}>
+                        {clearingPnl ? 'Clearing…' : confirmClear ? 'Confirm Clear?' : 'Clear Guard'}
+                      </button>
+                    )}
+                  </>
                 )}
 
                 {/* Broker selector — only shown when more than one broker is authenticated */}
@@ -1072,7 +1128,7 @@ export default function AdvancedScalper() {
                 {/* Dhan → Zerodha trade replication (arm/disarm + multiplier) */}
                 <CopyTradeControls copyTrade={copyTrade} />
 
-                {hasConfig && (
+                {broker === 'dhan' && hasConfig && (
                   <span className="text-[10px] text-zinc-500 font-mono">
                     {Number(pnlGuardStatus?.profit) > 0 ? `🎯 ₹${pnlGuardStatus?.profit}` : ''}
                     {Number(pnlGuardStatus?.profit) > 0 && Math.abs(Number(pnlGuardStatus?.loss)) > 0 ? '  ' : ''}
@@ -1081,7 +1137,7 @@ export default function AdvancedScalper() {
                 )}
 
                 {/* Persistent error — the toast auto-dismisses, this stays until the next attempt */}
-                {guardError && (
+                {broker === 'dhan' && guardError && (
                   <span className="text-[10px] text-rose-400 font-semibold">⚠ {guardError}</span>
                 )}
               </div>
@@ -1090,7 +1146,7 @@ export default function AdvancedScalper() {
         </div>
       </div>
 
-      {/* Centered NIFTY spot price strip */}
+      {/* Centered underlying spot price strip */}
       {spot > 0 && (() => {
         const chg    = prevSpot > 0 ? spot - prevSpot : 0;
         const chgPct = prevSpot > 0 ? (chg / prevSpot) * 100 : 0;
@@ -1098,7 +1154,7 @@ export default function AdvancedScalper() {
         return (
           <div className="flex justify-center items-center px-4 pb-1 pt-0">
             <div className="flex items-baseline gap-3 bg-zinc-900/60 border border-zinc-800 rounded-2xl px-8 py-3">
-              <span className="text-xs font-bold text-zinc-500 uppercase tracking-widest">NIFTY</span>
+              <span className="text-xs font-bold text-zinc-500 uppercase tracking-widest">{underlying}</span>
               <span className="text-3xl font-bold font-mono tabular-nums text-white">
                 {spot.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
               </span>

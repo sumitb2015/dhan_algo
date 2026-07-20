@@ -1,6 +1,7 @@
 export interface ScalperPosition {
   tradingSymbol: string;
   securityId: string;
+  exchange: string;
   netQty: number;
   buyQty: number;
   sellQty: number;
@@ -46,6 +47,7 @@ export function shapeZerodhaPosition(p: Record<string, any>): ScalperPosition {
   return {
     tradingSymbol: String(p.tradingsymbol ?? ''),
     securityId: String(p.instrument_token ?? ''),
+    exchange: String(p.exchange ?? 'NFO'),
     netQty,
     buyQty: Number(p.buy_quantity) || 0,
     sellQty: Number(p.sell_quantity) || 0,

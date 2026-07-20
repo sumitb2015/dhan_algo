@@ -1,25 +1,30 @@
-import { NextResponse } from 'next/server';
+import { NextRequest, NextResponse } from 'next/server';
 import { readNifty50Index } from '@/lib/dataLoader';
 import { getDhanCredentials } from '@/lib/dhanToken';
 import { kiteGet } from '@/lib/zerodhaToken';
 
-// NIFTY's previous close is broker-independent, but it must come from a LIVE
+// Previous close for the scalper header spot ticker — must come from a LIVE
 // source: the historical CSV is only as fresh as the last dashboard-data
 // refresh, and a stale CSV made the scalper header show yesterday's move in
 // the wrong direction (spot vs a 2-day-old close). Order of preference:
-// Dhan OHLC -> Kite OHLC -> CSV (last resort).
+// Dhan OHLC -> Kite OHLC -> CSV (NIFTY only — no CSV/Kite source for SENSEX yet).
 
 const DHAN_OHLC_URL = 'https://api.dhan.co/v2/marketfeed/ohlc';
-const NIFTY_IDX_SECURITY_ID = 13; // Nifty 50 index (spot) on Dhan IDX_I
 
-// Prev close changes once per trading day — cache per IST date.
-let cache: { date: string; prevClose: number; source: string } | null = null;
+type UnderlyingConfig = { sid: number; dhanSeg: 'IDX_I' | 'BSE_IDX'; kiteSymbol?: string };
+const UNDERLYINGS: Record<string, UnderlyingConfig> = {
+  NIFTY:  { sid: 13, dhanSeg: 'IDX_I', kiteSymbol: 'NSE:NIFTY 50' },
+  SENSEX: { sid: 51, dhanSeg: 'BSE_IDX' },
+};
+
+// Prev close changes once per trading day — cache per IST date, per underlying.
+const cache = new Map<string, { prevClose: number; source: string }>();
 
 function istToday(): string {
   return new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
 }
 
-async function fromDhan(): Promise<number | null> {
+async function fromDhan(cfg: UnderlyingConfig): Promise<number | null> {
   try {
     const { clientId, token } = getDhanCredentials();
     if (!token) return null;
@@ -31,7 +36,7 @@ async function fromDhan(): Promise<number | null> {
         'Content-Type': 'application/json',
         'Accept': 'application/json',
       },
-      body: JSON.stringify({ IDX_I: [NIFTY_IDX_SECURITY_ID] }),
+      body: JSON.stringify({ [cfg.dhanSeg]: [cfg.sid] }),
       signal: AbortSignal.timeout(5000),
     });
     const json = await res.json() as {
@@ -39,18 +44,18 @@ async function fromDhan(): Promise<number | null> {
       data?: Record<string, Record<string, { ohlc?: { close?: number } }>>;
     };
     if (json.status !== 'success') return null;
-    const close = json.data?.IDX_I?.[String(NIFTY_IDX_SECURITY_ID)]?.ohlc?.close ?? 0;
+    const close = json.data?.[cfg.dhanSeg]?.[String(cfg.sid)]?.ohlc?.close ?? 0;
     return close > 0 ? close : null;
   } catch {
     return null;
   }
 }
 
-async function fromKite(): Promise<number | null> {
+async function fromKite(kiteSymbol: string): Promise<number | null> {
   try {
-    const data = await kiteGet(`/quote/ohlc?i=${encodeURIComponent('NSE:NIFTY 50')}`) as
+    const data = await kiteGet(`/quote/ohlc?i=${encodeURIComponent(kiteSymbol)}`) as
       Record<string, { ohlc?: { close?: number } }>;
-    const close = data?.['NSE:NIFTY 50']?.ohlc?.close ?? 0;
+    const close = data?.[kiteSymbol]?.ohlc?.close ?? 0;
     return close > 0 ? close : null;
   } catch {
     return null;
@@ -72,29 +77,38 @@ function fromCsv(): { prevClose: number; date: string } | null {
   }
 }
 
-export async function GET() {
+export async function GET(request: NextRequest) {
+  const underlying = (request.nextUrl.searchParams.get('underlying') ?? 'NIFTY').toUpperCase();
+  const cfg = UNDERLYINGS[underlying] ?? UNDERLYINGS.NIFTY;
   const today = istToday();
-  if (cache && cache.date === today) {
-    return NextResponse.json({ success: true, prevClose: cache.prevClose, source: cache.source });
+  const cacheKey = `${underlying}:${today}`;
+
+  const cached = cache.get(cacheKey);
+  if (cached) {
+    return NextResponse.json({ success: true, prevClose: cached.prevClose, source: cached.source });
   }
 
-  const dhan = await fromDhan();
+  const dhan = await fromDhan(cfg);
   if (dhan !== null) {
-    cache = { date: today, prevClose: dhan, source: 'dhan' };
+    cache.set(cacheKey, { prevClose: dhan, source: 'dhan' });
     return NextResponse.json({ success: true, prevClose: dhan, source: 'dhan' });
   }
 
-  const kite = await fromKite();
-  if (kite !== null) {
-    cache = { date: today, prevClose: kite, source: 'zerodha' };
-    return NextResponse.json({ success: true, prevClose: kite, source: 'zerodha' });
+  if (cfg.kiteSymbol) {
+    const kite = await fromKite(cfg.kiteSymbol);
+    if (kite !== null) {
+      cache.set(cacheKey, { prevClose: kite, source: 'zerodha' });
+      return NextResponse.json({ success: true, prevClose: kite, source: 'zerodha' });
+    }
   }
 
-  const csv = fromCsv();
-  if (csv) {
+  if (underlying === 'NIFTY') {
     // Deliberately NOT cached: the CSV may be stale, and a later poll should
     // get another shot at the live sources (e.g. after login.py is run).
-    return NextResponse.json({ success: true, prevClose: csv.prevClose, source: 'csv', date: csv.date });
+    const csv = fromCsv();
+    if (csv) {
+      return NextResponse.json({ success: true, prevClose: csv.prevClose, source: 'csv', date: csv.date });
+    }
   }
 
   return NextResponse.json({ success: false, error: 'Could not determine previous close' }, { status: 500 });

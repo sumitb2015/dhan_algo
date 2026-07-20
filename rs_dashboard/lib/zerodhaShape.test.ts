@@ -20,6 +20,7 @@ test('shapeZerodhaPosition maps Kite fields to the UI position shape', () => {
   assert.deepStrictEqual(shapeZerodhaPosition(raw), {
     tradingSymbol: 'NIFTY26JUL23900PE',
     securityId: '12345',
+    exchange: 'NFO',
     netQty: -75,
     buyQty: 0,
     sellQty: 75,

@@ -21,6 +21,14 @@ sys.path.insert(0, ROOT)
 from login import get_dhan_client
 from lib.dhan_helper import DhanHelper
 
+# Cash-market exchange each underlying's options trade on
+UNDERLYING_EXCHANGE = {
+    'NIFTY':     'NSE',
+    'BANKNIFTY': 'NSE',
+    'FINNIFTY':  'NSE',
+    'SENSEX':    'BSE',
+}
+
 
 def main():
     parser = argparse.ArgumentParser()
@@ -70,9 +78,10 @@ def main():
     helper = DhanHelper(dhan)
 
     if args.cmd == 'lookup':
+        exchange = UNDERLYING_EXCHANGE.get(args.underlying.upper(), 'NSE')
         df = helper._load_master_list()
         mask = (
-            (df['EXCH_ID'] == 'NSE') &
+            (df['EXCH_ID'] == exchange) &
             (df['INSTRUMENT'] == 'OPTIDX') &
             (df['UNDERLYING_SYMBOL'] == args.underlying.upper()) &
             (df['SM_EXPIRY_DATE'] == args.expiry)
@@ -99,8 +108,10 @@ def main():
         print(json.dumps({'success': True, 'data': {'lotSize': lot_size, 'strikes': strikes}}))
 
     elif args.cmd == 'order':
+        exchange = UNDERLYING_EXCHANGE.get(args.underlying.upper(), 'NSE')
+
         # Find the option
-        sec = helper.find_option(args.underlying, args.expiry, args.strike, args.option)
+        sec = helper.find_option(args.underlying, args.expiry, args.strike, args.option, exchange=exchange)
         if not sec:
             print(json.dumps({
                 'success': False,
@@ -114,7 +125,7 @@ def main():
         # Place the order
         order_id = helper.place_order(
             security_id=str(int(sec['SECURITY_ID'])),
-            exchange_segment='NSE_FNO',
+            exchange_segment='BSE_FNO' if exchange == 'BSE' else 'NSE_FNO',
             transaction_type=args.side.upper(),
             quantity=qty,
             order_type=args.type.upper(),

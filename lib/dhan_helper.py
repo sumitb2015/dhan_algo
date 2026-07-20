@@ -870,7 +870,8 @@ class DhanHelper:
                     elif instr == "EQUITY": api_seg = "NSE_EQ"
                     else: api_seg = "NSE_FNO"
                 elif exch_id == "BSE":
-                    if instr == "EQUITY": api_seg = "BSE_EQ"
+                    if instr == "INDEX": api_seg = "BSE_IDX"
+                    elif instr == "EQUITY": api_seg = "BSE_EQ"
                     else: api_seg = "BSE_FNO"
                 elif exch_id == "MCX": api_seg = "MCX_COMM"
                 
@@ -1747,7 +1748,8 @@ class DhanHelper:
                 elif instrument == "EQUITY": api_seg = "NSE_EQ"
                 else: api_seg = "NSE_FNO"
             elif exchange == "BSE":
-                if instrument == "EQUITY": api_seg = "BSE_EQ"
+                if instrument == "INDEX": api_seg = "BSE_IDX"
+                elif instrument == "EQUITY": api_seg = "BSE_EQ"
                 else: api_seg = "BSE_FNO"
             elif exchange == "MCX":
                 api_seg = "MCX_COMM"
@@ -1826,7 +1828,8 @@ class DhanHelper:
                 elif instrument == "EQUITY": api_seg = "NSE_EQ"
                 else: api_seg = "NSE_FNO"
             elif exchange == "BSE":
-                if instrument == "EQUITY": api_seg = "BSE_EQ"
+                if instrument == "INDEX": api_seg = "BSE_IDX"
+                elif instrument == "EQUITY": api_seg = "BSE_EQ"
                 else: api_seg = "BSE_FNO"
             elif exchange == "MCX":
                 api_seg = "MCX_COMM"
@@ -1942,12 +1945,19 @@ class DhanHelper:
             sec = None
             symbol_up = symbol.upper()
 
-            # Try index first (covers NIFTY, BANKNIFTY, etc.)
-            sec = self.find_index(symbol_up, exchange="IDX_I")
+            # Try index first (covers NIFTY, BANKNIFTY, etc. on NSE, then BSE
+            # indices like SENSEX — find_index("IDX_I") only searches NSE).
+            sec = self.find_index(symbol_up, exchange="NSE")
             if sec:
                 exchange_segment = "IDX_I"
                 instrument_type  = "INDEX"
             else:
+                sec = self.find_index(symbol_up, exchange="BSE")
+                if sec:
+                    exchange_segment = "BSE_IDX"
+                    instrument_type  = "INDEX"
+
+            if not sec:
                 # Try equity
                 sec = self.find_equity(symbol_up)
                 if sec:
@@ -3117,9 +3127,9 @@ class DhanHelper:
             return []
             
         sid = int(sec['SECURITY_ID'])
-        # Map Segment to API format
-        seg = "IDX_I" if sec['INSTRUMENT'] == "INDEX" else "NSE_EQ"
-        
+        # Map Segment to API format (exchange-aware — e.g. BSE indices need BSE_IDX, not IDX_I)
+        seg = self._auto_detect_segment(sec)
+
         return self.get_expiry_list(sid, seg)
 
 
@@ -3175,9 +3185,9 @@ class DhanHelper:
                     return {}
             else:
                 security_id = int(sec['SECURITY_ID'])
-                # If segment not provided, derive it
+                # If segment not provided, derive it (exchange-aware)
                 if not exchange_segment:
-                     exchange_segment = "IDX_I" if sec['INSTRUMENT'] == "INDEX" else "NSE_EQ"
+                     exchange_segment = self._auto_detect_segment(sec)
             
             # Check cache (5 seconds)
             cache_key = (security_id, expiry)

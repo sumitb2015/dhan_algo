@@ -37,6 +37,13 @@ STATUS_FILE  = os.path.join(DEBUG_DIR, 'live_options_status_zerodha.json')
 STOP_TRIGGER = os.path.join(DEBUG_DIR, 'live_options_stop_zerodha.trigger')
 INSTRUMENTS_CACHE_MAX_AGE_SEC = 24 * 60 * 60
 
+# Resolved index instrument_tokens for underlyings not in the static
+# UNDERLYING_TOKENS map (e.g. SENSEX) — instrument_tokens are effectively
+# permanent, so a long TTL avoids re-fetching the full exchange instrument
+# dump (kite.instruments()) on every single bridge start.
+INDEX_TOKEN_CACHE_FILE = os.path.join(DEBUG_DIR, 'zerodha_index_tokens.json')
+INDEX_TOKEN_CACHE_MAX_AGE_SEC = 7 * 24 * 60 * 60
+
 MAX_HISTORY  = 300   # ~10 min at 2s ticks
 
 # Zerodha Instrument Tokens
@@ -47,6 +54,7 @@ UNDERLYING_TRADING_SYMBOLS = {
     'NIFTY':     'NSE:NIFTY 50',
     'BANKNIFTY': 'NSE:NIFTY BANK',
     'FINNIFTY':  'NSE:NIFTY FIN SERVICE',
+    'SENSEX':    'BSE:SENSEX',
 }
 
 UNDERLYING_TOKENS = {
@@ -54,6 +62,52 @@ UNDERLYING_TOKENS = {
     'BANKNIFTY': 260105,
     'FINNIFTY':  257801,
 }
+
+# Strike step per underlying
+STRIKE_STEP = {'NIFTY': 50, 'BANKNIFTY': 100, 'FINNIFTY': 50, 'SENSEX': 100}
+
+
+def _load_index_token_cache() -> dict:
+    try:
+        if os.path.exists(INDEX_TOKEN_CACHE_FILE):
+            with open(INDEX_TOKEN_CACHE_FILE) as f:
+                return json.load(f)
+    except Exception:
+        pass
+    return {}
+
+
+def _resolve_index_token(kite, underlying: str):
+    """Return the instrument_token for an underlying's index, using the
+    static UNDERLYING_TOKENS map when available, then a file cache
+    (INDEX_TOKEN_CACHE_FILE), then falling back to a live kite.instruments()
+    lookup for anything not hardcoded there (e.g. SENSEX, whose token isn't a
+    well-known constant like NIFTY's). Returns None on failure — callers MUST
+    NOT fall back to another underlying's token (e.g. NIFTY's), since that
+    would silently subscribe to and display a different instrument's live
+    price mislabeled as this underlying's spot."""
+    token = UNDERLYING_TOKENS.get(underlying)
+    if token:
+        return token
+
+    cache = _load_index_token_cache()
+    entry = cache.get(underlying)
+    if entry and time.time() - entry.get('ts', 0) < INDEX_TOKEN_CACHE_MAX_AGE_SEC:
+        return entry['token']
+
+    exchange = 'BSE' if underlying == 'SENSEX' else 'NSE'
+    try:
+        for inst in kite.instruments(exchange):
+            if inst.get('tradingsymbol') == underlying:
+                resolved = int(inst['instrument_token'])
+                cache[underlying] = {'token': resolved, 'ts': time.time()}
+                atomic_write(INDEX_TOKEN_CACHE_FILE, cache)
+                return resolved
+    except Exception as e:
+        print(f'[live_options_ws_zerodha] WARN: failed to resolve index token for {underlying}: {e}', flush=True)
+    print(f'[live_options_ws_zerodha] WARN: could not resolve index token for {underlying} — '
+          f'live spot updates will be disabled for this session (falling back to the one-time REST spot).', flush=True)
+    return None
 
 def _f(val, default: float = 0.0) -> float:
     if val is None:
@@ -184,8 +238,8 @@ class QuotePushServer:
         if self.thread is not None:
             self.thread.join(timeout=2)
 
-def load_zerodha_instruments_cache():
-    cache_file = os.path.join(ROOT, 'debug', 'zerodha_nifty_instruments.json')
+def load_zerodha_instruments_cache(underlying: str = 'NIFTY'):
+    cache_file = os.path.join(ROOT, 'debug', f'zerodha_{underlying.lower()}_instruments.json')
     is_stale = (
         os.path.exists(cache_file)
         and time.time() - os.path.getmtime(cache_file) > INSTRUMENTS_CACHE_MAX_AGE_SEC
@@ -194,14 +248,18 @@ def load_zerodha_instruments_cache():
         reason = 'stale (>24h old)' if is_stale else 'missing'
         print(f"[live_options_ws_zerodha] Instrument cache {reason}, generating...", flush=True)
         import subprocess
-        subprocess.run([sys.executable, os.path.join(ROOT, 'scripts', 'tools', 'zerodha_instruments_cache.py')], check=True)
+        subprocess.run(
+            [sys.executable, os.path.join(ROOT, 'scripts', 'tools', 'zerodha_instruments_cache.py'),
+             '--underlying', underlying],
+            check=True,
+        )
     with open(cache_file) as f:
         return json.load(f)
 
 def main():
     parser = argparse.ArgumentParser(description='Live options WebSocket bridge (Zerodha Mode)')
     parser.add_argument('--underlying', default='NIFTY',
-                        choices=['NIFTY', 'BANKNIFTY', 'FINNIFTY'])
+                        choices=['NIFTY', 'BANKNIFTY', 'FINNIFTY', 'SENSEX'])
     parser.add_argument('--expiry', required=True,
                         help='Expiry date YYYY-MM-DD')
     parser.add_argument('--num-strikes', type=int, default=10,
@@ -246,7 +304,7 @@ def main():
         time.sleep(backoff)
         backoff *= 2
 
-    step = 50 if args.underlying in ('NIFTY', 'FINNIFTY') else 100
+    step = STRIKE_STEP.get(args.underlying.upper(), 50)
     atm  = round(spot / step) * step if spot > 0 else 0
     print(f'[live_options_ws_zerodha] Spot={spot:.2f} ATM={atm} step={step}', flush=True)
 
@@ -254,7 +312,7 @@ def main():
     strikes = [atm + i * step for i in range(-num, num + 1)] if atm > 0 else []
 
     # Load instruments cache to map strike -> tokens
-    insts_cache = load_zerodha_instruments_cache()
+    insts_cache = load_zerodha_instruments_cache(args.underlying.upper())
     
     # Resolve instrument tokens
     sid_map = {} # token_id_int -> {strike, type, tradingsymbol}
@@ -270,9 +328,13 @@ def main():
             }
             option_tokens.append(token)
 
-    # Spot and VIX tokens
-    underlying_token = UNDERLYING_TOKENS.get(args.underlying.upper(), NIFTY_TOKEN)
-    all_tokens = [underlying_token, VIX_TOKEN] + option_tokens
+    # Spot and VIX tokens. underlying_token may be None (resolution failed) —
+    # in that case we deliberately skip subscribing to any index canary
+    # rather than silently falling back to a different underlying's token,
+    # which would display that instrument's live price mislabeled as this
+    # underlying's spot (see _resolve_index_token).
+    underlying_token = _resolve_index_token(kite, args.underlying.upper())
+    all_tokens = ([underlying_token] if underlying_token else []) + [VIX_TOKEN] + option_tokens
 
     print(f'[live_options_ws_zerodha] Subscribing to {len(option_tokens)} option contracts + indices…', flush=True)
 

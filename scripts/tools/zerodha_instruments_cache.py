@@ -1,23 +1,36 @@
 """
-Fetches and caches Zerodha NFO NIFTY option instruments for the scalper's
-strike -> tradingsymbol lookup (Zerodha has no numeric securityId like Dhan).
+Fetches and caches Zerodha option instruments (NIFTY/BANKNIFTY/FINNIFTY on
+NFO, SENSEX on BFO) for the scalper's strike -> tradingsymbol lookup
+(Zerodha has no numeric securityId like Dhan).
 
 Usage:
-    venv\\Scripts\\python.exe scripts/tools/zerodha_instruments_cache.py
+    venv\\Scripts\\python.exe scripts/tools/zerodha_instruments_cache.py --underlying NIFTY
+    venv\\Scripts\\python.exe scripts/tools/zerodha_instruments_cache.py --underlying SENSEX
 
-Writes debug/zerodha_nifty_instruments.json. Prints a single JSON status
-line to stdout; logs go to stderr.
+Writes debug/zerodha_<underlying>_instruments.json. Prints a single JSON
+status line to stdout; logs go to stderr.
 """
 import sys
 import os
 import json
+import argparse
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, ROOT)
 
 from kiteconnect import KiteConnect
 
-OUTPUT_FILE = os.path.join(ROOT, 'debug', 'zerodha_nifty_instruments.json')
+# Kite exchange each underlying's options trade on
+UNDERLYING_EXCHANGE = {
+    'NIFTY':     'NFO',
+    'BANKNIFTY': 'NFO',
+    'FINNIFTY':  'NFO',
+    'SENSEX':    'BFO',
+}
+
+
+def output_file(underlying: str) -> str:
+    return os.path.join(ROOT, 'debug', f'zerodha_{underlying.lower()}_instruments.json')
 
 
 def restore_session_from_json():
@@ -51,20 +64,26 @@ def restore_session_from_json():
 
 
 def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--underlying', default='NIFTY')
+    args = parser.parse_args()
+    underlying = args.underlying.upper()
+    exchange = UNDERLYING_EXCHANGE.get(underlying, 'NFO')
+
     kite = restore_session_from_json()
     if kite is None:
         print(json.dumps({'success': False, 'error': 'No Zerodha session — run zerodha_autologin.py first'}))
         sys.exit(1)
 
     try:
-        instruments = kite.instruments('NFO')
+        instruments = kite.instruments(exchange)
     except Exception as e:
         print(json.dumps({'success': False, 'error': f'instruments() failed: {e}'}))
         sys.exit(1)
 
     rows = []
     for inst in instruments:
-        if inst.get('name') != 'NIFTY':
+        if inst.get('name') != underlying:
             continue
         if inst.get('instrument_type') not in ('CE', 'PE'):
             continue
@@ -78,8 +97,9 @@ def main():
             'lot_size': int(inst['lot_size']),
         })
 
-    os.makedirs(os.path.dirname(OUTPUT_FILE), exist_ok=True)
-    with open(OUTPUT_FILE, 'w') as f:
+    out_file = output_file(underlying)
+    os.makedirs(os.path.dirname(out_file), exist_ok=True)
+    with open(out_file, 'w') as f:
         json.dump(rows, f)
 
     print(json.dumps({'success': True, 'count': len(rows)}))

@@ -24,6 +24,22 @@ UNDERLYING_IDS = {
     'NIFTY':     13,
     'BANKNIFTY': 25,
     'FINNIFTY':  27,
+    'SENSEX':    51,
+}
+
+# Index segment / exchange per underlying — SENSEX is a BSE index, everything
+# else here trades on NSE.
+INDEX_SEGMENT = {
+    'NIFTY':     'IDX_I',
+    'BANKNIFTY': 'IDX_I',
+    'FINNIFTY':  'IDX_I',
+    'SENSEX':    'BSE_IDX',
+}
+INDEX_EXCHANGE = {
+    'NIFTY':     'NSE',
+    'BANKNIFTY': 'NSE',
+    'FINNIFTY':  'NSE',
+    'SENSEX':    'BSE',
 }
 
 
@@ -65,7 +81,7 @@ def main():
             if not uid:
                 print(json.dumps({'error': f'unknown underlying: {args.underlying}'}))
                 sys.exit(0)
-            seg = 'IDX_I'
+            seg = INDEX_SEGMENT.get(under, 'IDX_I')
         expiries = helper.get_expiry_list(
             under_security_id=uid,
             under_exchange_segment=seg,
@@ -75,7 +91,7 @@ def main():
     elif args.cmd == 'chain':
         under = args.underlying.upper()
         is_crude = (under == 'CRUDEOIL')
-        seg = 'MCX_COMM' if is_crude else 'IDX_I'
+        seg = 'MCX_COMM' if is_crude else INDEX_SEGMENT.get(under, 'IDX_I')
 
         # Resolve the underlying the SAME way the expiries/ltp branches do so the
         # chain never diverges from the expiry list after a contract rolls over.
@@ -126,7 +142,7 @@ def main():
             # Index: prefer chain snapshot, fall back to dedicated LTP
             spot = (chain or {}).get('last_price') or 0
             if not spot:
-                spot = helper.get_ltp(under, exchange='IDX_I', instrument='INDEX') or 0
+                spot = helper.get_ltp(under, exchange=INDEX_EXCHANGE.get(under, 'NSE'), instrument='INDEX') or 0
         print(json.dumps({'chain': chain, 'spot': spot}))
 
     elif args.cmd == 'ltp':
@@ -144,7 +160,7 @@ def main():
             else:
                 spot, prev_close = 0, 0.0
         else:
-            spot = helper.get_ltp(under, exchange='IDX_I', instrument='INDEX') or 0
+            spot = helper.get_ltp(under, exchange=INDEX_EXCHANGE.get(under, 'NSE'), instrument='INDEX') or 0
             levels = helper.get_prev_day_levels(under)
             prev_close = levels['close'] if levels else 0.0
         change = round(spot - prev_close, 2) if (spot > 0 and prev_close > 0) else 0.0

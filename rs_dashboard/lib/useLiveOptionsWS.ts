@@ -65,6 +65,7 @@ const EMPTY_STATE: ChannelState = {
 function runChannel(
   broker: Broker,
   expiry: string,
+  underlying: string,
   onUpdate: (patch: Partial<ChannelState>) => void,
 ): () => void {
   let disposed = false;
@@ -86,6 +87,7 @@ function runChannel(
   const acceptQuotes = (q: LiveQuotes | null): boolean => {
     if (!q) return false;
     if (q.expiry && q.expiry !== expiry) return false;
+    if (q.underlying && q.underlying !== underlying) return false;
     if (q.updated_at) {
       const ageMs = Date.now() - new Date(q.updated_at).getTime();
       if (!(ageMs <= STALE_MS)) return false;   // NaN-safe: fail stale
@@ -229,6 +231,7 @@ export function useLiveOptionsWS(
   expiry: string,
   broker: Broker,
   authenticatedBrokers: Broker[] = ['dhan', 'zerodha'],
+  underlying: string = 'NIFTY',
 ): LiveOptionsWSResult {
   const [channels, setChannels] = useState<Record<Broker, ChannelState>>({
     dhan: EMPTY_STATE,
@@ -240,20 +243,20 @@ export function useLiveOptionsWS(
   useEffect(() => {
     if (!expiry) return;
 
-    // Expiry (or the set of authenticated brokers) changed: drop quotes from
-    // both channels immediately rather than displaying stale data.
+    // Expiry, underlying, (or the set of authenticated brokers) changed: drop
+    // quotes from both channels immediately rather than displaying stale data.
     setChannels({ dhan: EMPTY_STATE, zerodha: EMPTY_STATE });
 
     const brokers = authKey.split(',').filter(Boolean) as Broker[];
     const cleanups = brokers.map(b =>
-      runChannel(b, expiry, (patch) => {
+      runChannel(b, expiry, underlying, (patch) => {
         setChannels(prev => ({ ...prev, [b]: { ...prev[b], ...patch } }));
       })
     );
 
     return () => { cleanups.forEach(fn => fn()); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [expiry, authKey]);
+  }, [expiry, authKey, underlying]);
 
   return channels[broker];
 }
