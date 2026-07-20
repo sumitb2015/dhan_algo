@@ -982,7 +982,7 @@ export default function AdvancedScalper() {
                 bridgeStatus.status === 'STARTING' ? 'bg-yellow-400 animate-pulse'  :
                 bridgeStatus.status === 'ERROR'    ? 'bg-rose-400'                  : 'bg-zinc-600'
               }`} />
-              <span className={`text-[9px] font-bold px-1 py-0.5 rounded border ${
+              <span className={`text-[9px] font-bold px-1 py-0.5 rounded border w-9 text-center ${
                 transport === 'ws'
                   ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20'
                   : 'bg-zinc-800 text-zinc-500 border-zinc-700'
@@ -992,9 +992,11 @@ export default function AdvancedScalper() {
               {lastUpdated && <span className="text-[10px] text-zinc-500 font-mono">{lastUpdated}</span>}
             </div>
 
-            {/* Combined P&L chip across all boxes/positions */}
+            {/* Combined P&L chip across all boxes/positions — min-w keeps row
+                layout stable regardless of the selected broker's actual P&L
+                digit-count */}
             {positionsData.length > 0 && (
-              <span className={`px-2.5 py-1.5 rounded-lg text-xs font-bold font-mono tabular-nums border ${
+              <span className={`px-2.5 py-1.5 rounded-lg text-xs font-bold font-mono tabular-nums border min-w-[90px] text-center inline-block ${
                 totalPnl > 0
                   ? 'bg-emerald-900/40 border-emerald-500/30 text-emerald-400'
                   : totalPnl < 0
