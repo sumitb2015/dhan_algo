@@ -103,6 +103,7 @@ def close_all_trades():
                     order_type="MARKET",
                     product=position["product"],
                     variety=config.kite.VARIETY_REGULAR,
+                    market_protection=-1,
                 )
                 logging.info(f"Closed position for {position['tradingsymbol']}")
     except Exception as e:

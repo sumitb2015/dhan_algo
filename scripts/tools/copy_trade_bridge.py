@@ -301,6 +301,9 @@ def place_child_order(kite, symbol: str, side: str, qty: int):
                 product=kite.PRODUCT_MIS,
                 order_type=kite.ORDER_TYPE_MARKET,
                 validity=kite.VALIDITY_DAY,
+                # Zerodha rejects API market orders on options without market
+                # protection; -1 = automatic system-managed protection band.
+                market_protection=-1,
             )
             order_ids.append(order_id)
             placed += chunk
@@ -459,6 +462,7 @@ def watchdog_loop(helper, kite, stop_event: threading.Event, state: dict,
                         product=pos.get('product', kite.PRODUCT_MIS),
                         order_type=kite.ORDER_TYPE_MARKET,
                         validity=kite.VALIDITY_DAY,
+                        market_protection=-1,
                     )
                     entry['result'] = 'safety_exit'
                     entry['child_order_id'] = order_id

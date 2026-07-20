@@ -12,6 +12,7 @@ test('shapeZerodhaPosition maps Kite fields to the UI position shape', () => {
     buy_price: 0,
     sell_price: 120.5,
     last_price: 110,
+    pnl: 787.5,
     realised: 0,
     unrealised: 787.5,
     product: 'MIS',
@@ -29,6 +30,29 @@ test('shapeZerodhaPosition maps Kite fields to the UI position shape', () => {
     unrealizedProfit: 787.5,
     productType: 'MIS',
   });
+});
+
+test('closed intraday position: full pnl is realized, unrealized is 0 (no double count)', () => {
+  // Regression: Kite can report realised AND unrealised both equal to the day
+  // P&L on a flat position; summing them showed exactly double in the UI.
+  const raw = {
+    tradingsymbol: 'NIFTY2672124350CE',
+    instrument_token: 999,
+    quantity: 0,
+    buy_quantity: 65,
+    sell_quantity: 65,
+    buy_price: 23.9,
+    sell_price: 29.1,
+    last_price: 27.4,
+    pnl: 338,
+    realised: 338,
+    unrealised: 338,
+    product: 'MIS',
+  };
+  const shaped = shapeZerodhaPosition(raw);
+  assert.strictEqual(shaped.realizedProfit, 338);
+  assert.strictEqual(shaped.unrealizedProfit, 0);
+  assert.strictEqual(shaped.realizedProfit + shaped.unrealizedProfit, 338);
 });
 
 test('shapeZerodhaOrder maps Kite fields to the UI order shape', () => {

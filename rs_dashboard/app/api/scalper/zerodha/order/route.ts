@@ -45,7 +45,13 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       product: 'MIS',
       validity: 'DAY',
     };
-    if (isLimitOrder) params.price = Number(price);
+    if (isLimitOrder) {
+      params.price = Number(price);
+    } else {
+      // Zerodha rejects API market orders on options without market
+      // protection; -1 = automatic system-managed protection band.
+      params.market_protection = -1;
+    }
 
     const data = await kitePost('/orders/regular', params) as { order_id: string };
     return NextResponse.json({ success: true, order_id: data.order_id });

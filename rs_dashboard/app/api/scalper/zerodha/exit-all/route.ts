@@ -21,6 +21,8 @@ export async function POST(): Promise<NextResponse> {
           quantity: qty,
           product: pos.product ?? 'MIS',
           validity: 'DAY',
+          // Required for API market orders on options (-1 = automatic band).
+          market_protection: -1,
         });
         closed.push(pos.tradingsymbol);
       } catch (err) {

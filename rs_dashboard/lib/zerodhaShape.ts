@@ -31,17 +31,29 @@ export interface ScalperTrade {
 }
 
 export function shapeZerodhaPosition(p: Record<string, any>): ScalperPosition {
+  const netQty = Number(p.quantity) || 0;
+  const lastPrice = Number(p.last_price) || 0;
+  const buyAvg = Number(p.buy_price) || 0;
+  const sellAvg = Number(p.sell_price) || 0;
+  // Do NOT map Kite's `realised`/`unrealised` fields directly: on a closed
+  // intraday position both can carry the full day P&L, and the UI (which sums
+  // realized + unrealized) then shows exactly double. Kite's authoritative
+  // number is `pnl` (= sell_value - buy_value + netQty * last_price); derive
+  // the split from it — the open quantity's mark-to-market is unrealized,
+  // everything else is realized (0/full-pnl respectively when flat).
+  const totalPnl = Number(p.pnl) || 0;
+  const unrealized = netQty === 0 ? 0 : netQty * (lastPrice - (netQty > 0 ? buyAvg : sellAvg));
   return {
     tradingSymbol: String(p.tradingsymbol ?? ''),
     securityId: String(p.instrument_token ?? ''),
-    netQty: Number(p.quantity) || 0,
+    netQty,
     buyQty: Number(p.buy_quantity) || 0,
     sellQty: Number(p.sell_quantity) || 0,
-    buyAvg: Number(p.buy_price) || 0,
-    sellAvg: Number(p.sell_price) || 0,
-    lastTradedPrice: Number(p.last_price) || 0,
-    realizedProfit: Number(p.realised) || 0,
-    unrealizedProfit: Number(p.unrealised) || 0,
+    buyAvg,
+    sellAvg,
+    lastTradedPrice: lastPrice,
+    realizedProfit: totalPnl - unrealized,
+    unrealizedProfit: unrealized,
     productType: String(p.product ?? ''),
   };
 }

@@ -36,6 +36,10 @@ def place_order(
         elif order_type == "SL" and trigger_price is not None:
             order_params["price"] = price
             order_params["trigger_price"] = trigger_price
+        elif order_type == "MARKET":
+            # Zerodha rejects API market orders on options without market
+            # protection; -1 = automatic system-managed protection band.
+            order_params["market_protection"] = -1
 
         order_id = kite.place_order(**order_params)
         logging.info(f"The Order ID of trade placed for {symbol}: {order_id}")
@@ -120,6 +124,9 @@ def modify_order(
             "trigger_price": trigger_price,
             "variety": kite.VARIETY_REGULAR,
         }
+        if order_type == "MARKET":
+            # Converting an SL/LIMIT to MARKET needs market protection too.
+            order_params["market_protection"] = -1
         kite.modify_order(**order_params)
         logging.info(f"Modified order {order_id} successfully.")
         return True
