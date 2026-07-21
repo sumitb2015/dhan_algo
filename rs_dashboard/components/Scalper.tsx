@@ -1904,7 +1904,7 @@ export interface FundsViewProps {
   realizedPnl: number;
 }
 
-function formatFundsValue(val: number): string {
+export function formatFundsValue(val: number): string {
   if (val === 0) return '0';
   if (Number.isInteger(val)) {
     return val.toLocaleString('en-IN');
