@@ -1587,31 +1587,48 @@ export default function Baskets() {
     addToast('success', isUpdate ? `Basket "${name}" updated` : `Basket "${name}" saved`);
   };
 
-  const loadBasket = (b: SavedBasket) => {
-    if (b.underlying !== underlying) {
-      setUnderlying(b.underlying as Underlying);
-      addToast('success', `Switched underlying to ${b.underlying}`, `Loading basket "${b.name}" — waiting for its chain to load`);
-      // The chain-load effect for the new underlying will reset `legs`/`strategy`;
-      // re-invoke loadBasket once atmStrike/allStrikes for the new underlying are ready.
-      // Simplest correct approach: ask the user to click Load again once the chain settles.
-      return;
-    }
-    if (atmStrike == null || !allStrikes.length) {
-      addToast('error', 'Chain not loaded yet', 'Wait for strikes to load, then load the basket');
-      return;
-    }
+  // Holds a basket whose underlying didn't match the current selection at the
+  // moment Load was clicked. The effect below finishes applying it once the
+  // newly-selected underlying's chain (atmStrike/allStrikes) is ready — the
+  // user clicks Load once, even across an underlying switch.
+  const pendingLoadRef = useRef<SavedBasket | null>(null);
+
+  const applyLoadedBasket = useCallback((b: SavedBasket, atm: number, strikes: number[]) => {
     setCategory(b.category);
     setStrategy(b.strategy);
     setMultiplier(b.multiplier);
     setLegs(b.legs.map(l => ({
       id: newLegId(),
       side: l.side, option: l.option, lots: l.lots, type: l.type,
-      strike: offsetToStrike(l.offset, atmStrike, allStrikes, step),
+      strike: offsetToStrike(l.offset, atm, strikes, step),
       price: '',
     })));
     setSaveOpen(false);
-    addToast('success', `Basket "${b.name}" loaded`, `Re-anchored to current ATM ${atmStrike}`);
+    addToast('success', `Basket "${b.name}" loaded`, `Re-anchored to current ATM ${atm}`);
+  }, [step, addToast]);
+
+  const loadBasket = (b: SavedBasket) => {
+    if (b.underlying !== underlying) {
+      pendingLoadRef.current = b;
+      setUnderlying(b.underlying as Underlying);
+      addToast('success', `Switched underlying to ${b.underlying}`, `Loading basket "${b.name}" once its chain is ready`);
+      return;
+    }
+    if (atmStrike == null || !allStrikes.length) {
+      addToast('error', 'Chain not loaded yet', 'Wait for strikes to load, then load the basket');
+      return;
+    }
+    applyLoadedBasket(b, atmStrike, allStrikes);
   };
+
+  // Completes a cross-underlying load once the new underlying's chain settles.
+  useEffect(() => {
+    const pending = pendingLoadRef.current;
+    if (!pending || pending.underlying !== underlying) return;
+    if (atmStrike == null || !allStrikes.length) return;
+    pendingLoadRef.current = null;
+    applyLoadedBasket(pending, atmStrike, allStrikes);
+  }, [underlying, atmStrike, allStrikes, applyLoadedBasket]);
 
   const totalQty = legs.reduce((s, l) => s + l.lots, 0) * multiplier;
 
@@ -1840,6 +1857,7 @@ Verify:
 - The Payoff panel updates: Net Premium shows a credit, Max Profit is bounded, Max Loss shows "Unlimited", two breakevens are listed, and the chart renders a curve with a blue spot marker and yellow breakeven dots.
 - Adding a leg via "Add Leg" appends a new ATM CE buy leg; removing a leg via the trash icon removes it; flipping B/S and CE/PE via the leg buttons works.
 - Save a basket, confirm it appears in the Load list with the correct underlying/category/leg-count/multiplier summary; reload the page and confirm the saved basket persists (localStorage).
+- Save a basket under NIFTY, switch the underlying dropdown to BANKNIFTY, then click Load on the NIFTY-saved basket: confirm the underlying dropdown snaps back to NIFTY and the legs populate automatically once that chain is ready — no second click on Load should be required.
 - If both Dhan and Zerodha are authenticated, confirm the broker dropdown appears and switching it re-resolves the strike lookup (watch the Network tab for a new `/api/scalper/lookup` or `/api/scalper/zerodha/lookup` call).
 
 - [ ] **Step 6: Commit**
