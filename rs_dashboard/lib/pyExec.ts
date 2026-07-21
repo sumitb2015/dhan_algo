@@ -34,3 +34,24 @@ export function dedupe<T>(key: string, fn: () => Promise<T>): Promise<T> {
   inflight.set(key, p);
   return p;
 }
+
+// Cross-route pacing: Dhan's option-chain/OHLC REST endpoints are rate-limited
+// per account (~1 call/3s), but DhanHelper's in-process spacing only protects
+// calls within a single spawned Python process. Two routes (chain, spot) can
+// each spawn a fresh process for the same underlying at the same moment and
+// race the same rate limit. This serializes those spawns per key.
+const paceChains = new Map<string, Promise<unknown>>();
+const MIN_GAP_MS = 3_500;
+
+export function spaced<T>(key: string, fn: () => Promise<T>): Promise<T> {
+  const prior = paceChains.get(key) ?? Promise.resolve();
+  const run = prior.then(async () => {
+    const result = await fn();
+    await new Promise(resolve => setTimeout(resolve, MIN_GAP_MS));
+    return result;
+  });
+  // Swallow errors in the shared chain so one caller's failure doesn't wedge
+  // pacing for the next caller; the real result/error still flows to `run`.
+  paceChains.set(key, run.catch(() => {}));
+  return run;
+}

@@ -81,6 +81,7 @@ interface CrudeTrade {
 const UNDERLYING  = 'CRUDEOIL';
 const STRIKE_STEP = 100;
 const POLL_MS     = 15_000;
+const SPOT_FALLBACK_POLL_MS = 60_000;
 
 const WING_OPTIONS = [5, 10, 15, 20] as const;
 type Wings = typeof WING_OPTIONS[number];
@@ -394,7 +395,13 @@ export default function CrudeOilOptions() {
       const res = await fetch(`/api/options/chain?underlying=${UNDERLYING}&expiry=${expiry}`);
       const json = await res.json() as {
         success: boolean;
-        data?: { chain: { oc?: Record<string, RawChainEntry> }; spot: number };
+        data?: {
+          chain: { oc?: Record<string, RawChainEntry> };
+          spot: number;
+          prev_close?: number;
+          change?: number;
+          change_pct?: number;
+        };
         error?: string;
       };
 
@@ -474,6 +481,9 @@ export default function CrudeOilOptions() {
 
       // Update states
       if (spotPrice > 0) setSpot(spotPrice);
+      if (json.data.prev_close !== undefined) setPrevClose(json.data.prev_close);
+      if (json.data.change !== undefined) setChange(json.data.change);
+      if (json.data.change_pct !== undefined) setChangePct(json.data.change_pct);
       setAtm(atmStrike);
       setRows(processed);
       setTotalCEOI(totCE);
@@ -494,12 +504,17 @@ export default function CrudeOilOptions() {
     }
   }, [expiry, wings]);
 
-  // Combined fetch trigger
+  // Combined fetch trigger. Spot is intentionally NOT fetched here every
+  // cycle: fetchChain's response already carries a dedicated live spot/
+  // prev_close/change (see options_data_fetch.py's `chain` command), and
+  // firing fetchSpot concurrently with fetchChain doubles the Dhan OHLC
+  // calls fired in parallel every 15s, which was tripping the shared
+  // account-level rate limit and surfacing as "stale — retrying".
   const runPoll = useCallback(async () => {
     setLoading(true);
-    await Promise.all([fetchSpot(), fetchChain()]);
+    await fetchChain();
     setLoading(false);
-  }, [fetchSpot, fetchChain]);
+  }, [fetchChain]);
 
   // Set up polling
   useEffect(() => {
@@ -508,6 +523,15 @@ export default function CrudeOilOptions() {
     intervalRef.current = setInterval(runPoll, POLL_MS);
     return () => { if (intervalRef.current) clearInterval(intervalRef.current); };
   }, [expiry, runPoll]);
+
+  // Slow fallback spot poll — only needed to seed the header change-chip
+  // before the first chain response lands, and to recover it if chain
+  // fetches keep failing for a while.
+  useEffect(() => {
+    void fetchSpot();
+    const id = setInterval(fetchSpot, SPOT_FALLBACK_POLL_MS);
+    return () => clearInterval(id);
+  }, [fetchSpot]);
 
   // Fetch crude oil positions/orders/trades (independent poll loop)
   const fetchCrudeTrades = useCallback(async () => {

@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import path from 'path';
 import fs from 'fs';
-import { PROJECT_ROOT, runPythonJson, dedupe } from '@/lib/pyExec';
+import { PROJECT_ROOT, runPythonJson, dedupe, spaced } from '@/lib/pyExec';
 
 const FETCH_SCRIPT = path.join(PROJECT_ROOT, 'scripts', 'tools', 'options_data_fetch.py');
 const NIFTY_CSV    = path.join(PROJECT_ROOT, 'Historical Data', 'NIFTY_50_Daily_5Y.csv');
@@ -51,13 +51,15 @@ export async function GET(request: NextRequest) {
   let change_pct = 0;
   try {
     const parsed = await dedupe(`spot:${underlying}`, () =>
-      runPythonJson<{
-        spot?: number;
-        prev_close?: number;
-        change?: number;
-        change_pct?: number;
-        error?: string;
-      }>(FETCH_SCRIPT, ['ltp', '--underlying', underlying], 15_000)
+      spaced(`dhan-spawn:${underlying}`, () =>
+        runPythonJson<{
+          spot?: number;
+          prev_close?: number;
+          change?: number;
+          change_pct?: number;
+          error?: string;
+        }>(FETCH_SCRIPT, ['ltp', '--underlying', underlying], 15_000)
+      ),
     );
     if (!parsed.error) {
       spot = parsed.spot ?? 0;

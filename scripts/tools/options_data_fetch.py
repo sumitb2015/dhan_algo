@@ -109,32 +109,36 @@ def main():
             fut_sid = int(fut["SECURITY_ID"])
             chain_symbol = str(fut_sid)
 
-        chain = helper.get_option_chain(
-            symbol=chain_symbol,
-            expiry=args.expiry,
-            exchange_segment=seg,
-        )
-        if not chain:
-            # Empty chain almost always means the Dhan option-chain API
-            # rate limit (~1 call/3s per token) was hit — the helper's
-            # in-process spacing can't protect across processes. One
-            # spaced retry resolves the common transient case.
-            time.sleep(3.5)
+        # Empty chain almost always means the Dhan option-chain API rate
+        # limit (~1 call/3s per token) was hit — the helper's in-process
+        # spacing can't protect across processes. Retry a few times with
+        # growing backoff before giving up and reporting empty.
+        chain = None
+        for backoff in (0, 3.5, 5.0):
+            if backoff:
+                time.sleep(backoff)
             chain = helper.get_option_chain(
                 symbol=chain_symbol,
                 expiry=args.expiry,
                 exchange_segment=seg,
             )
+            if chain:
+                break
 
         # For CRUDEOIL: always fetch a dedicated live OHLC quote for the
         # futures LTP — chain.last_price is a Dhan snapshot that can lag
-        # the actual market price by several minutes.
+        # the actual market price by several minutes. Also carries
+        # prev_close/change/change_pct so the dashboard doesn't need a
+        # second concurrent spawn (options/spot) just to show those.
         # For indices: chain.last_price is usually fresh enough; fall back
         # to a dedicated LTP call only when it is missing.
         spot = 0
+        prev_close = 0.0
         if is_crude and fut_sid is not None:
             ohlc_raw = helper.get_ohlc_data({"MCX_COMM": [fut_sid]})
-            spot = ohlc_raw.get("MCX_COMM", {}).get(str(fut_sid), {}).get("last_price") or 0.0
+            entry = ohlc_raw.get("MCX_COMM", {}).get(str(fut_sid), {})
+            spot = entry.get("last_price") or 0.0
+            prev_close = entry.get("ohlc", {}).get("close") or 0.0
             if not spot:
                 # Final fallback: dedicated LTP call
                 spot = helper.get_ltp(fut_sid, exchange="MCX", instrument="FUTCOM") or 0.0
@@ -143,7 +147,17 @@ def main():
             spot = (chain or {}).get('last_price') or 0
             if not spot:
                 spot = helper.get_ltp(under, exchange=INDEX_EXCHANGE.get(under, 'NSE'), instrument='INDEX') or 0
-        print(json.dumps({'chain': chain, 'spot': spot}))
+            levels = helper.get_prev_day_levels(under)
+            prev_close = levels['close'] if levels else 0.0
+        change = round(spot - prev_close, 2) if (spot > 0 and prev_close > 0) else 0.0
+        change_pct = round(change / prev_close * 100, 4) if prev_close > 0 else 0.0
+        print(json.dumps({
+            'chain': chain,
+            'spot': spot,
+            'prev_close': prev_close,
+            'change': change,
+            'change_pct': change_pct,
+        }))
 
     elif args.cmd == 'ltp':
         under = args.underlying.upper()

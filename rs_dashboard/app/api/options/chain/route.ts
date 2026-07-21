@@ -3,14 +3,20 @@ import path from 'path';
 import fs from 'fs';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
-import { PROJECT_ROOT, PYTHON_EXE, dedupe } from '@/lib/pyExec';
+import { PROJECT_ROOT, PYTHON_EXE, dedupe, spaced } from '@/lib/pyExec';
 
 const execFileAsync = promisify(execFile);
 
 const FETCH_SCRIPT = path.join(PROJECT_ROOT, 'scripts', 'tools', 'options_data_fetch.py');
 
 interface CacheEntry { data: ChainResponse; ts: number }
-interface ChainResponse { chain: Record<string, unknown>; spot: number }
+interface ChainResponse {
+  chain: Record<string, unknown>;
+  spot: number;
+  prev_close?: number;
+  change?: number;
+  change_pct?: number;
+}
 
 const cache = new Map<string, CacheEntry>();
 const CACHE_TTL = 10_000; // 10 s
@@ -91,15 +97,24 @@ export async function GET(request: NextRequest) {
     // (~1 call / 3s), so parallel Python spawns for the same expiry would 429
     // each other. Concurrent callers share one spawn.
     const { stdout } = await dedupe(`options-chain:${cacheKey}`, () =>
-      execFileAsync(
-        PYTHON_EXE,
-        [FETCH_SCRIPT, 'chain', '--underlying', underlying, '--expiry', expiry],
-        { encoding: 'utf8', timeout: 45_000, windowsHide: true },
+      spaced(`dhan-spawn:${underlying}`, () =>
+        execFileAsync(
+          PYTHON_EXE,
+          [FETCH_SCRIPT, 'chain', '--underlying', underlying, '--expiry', expiry],
+          { encoding: 'utf8', timeout: 45_000, windowsHide: true },
+        ),
       ),
     );
 
     const jsonLine = (stdout ?? '').trim().split('\n').pop() ?? '{}';
-    const parsed = JSON.parse(jsonLine) as { chain?: Record<string, unknown>; spot?: number; error?: string };
+    const parsed = JSON.parse(jsonLine) as {
+      chain?: Record<string, unknown>;
+      spot?: number;
+      prev_close?: number;
+      change?: number;
+      change_pct?: number;
+      error?: string;
+    };
 
     if (parsed.error) {
       console.error('[/api/options/chain] script error:', parsed.error);
@@ -117,7 +132,13 @@ export async function GET(request: NextRequest) {
       );
     }
 
-    const data: ChainResponse = { chain: parsed.chain, spot: parsed.spot ?? 0 };
+    const data: ChainResponse = {
+      chain: parsed.chain,
+      spot: parsed.spot ?? 0,
+      prev_close: parsed.prev_close,
+      change: parsed.change,
+      change_pct: parsed.change_pct,
+    };
     cache.set(cacheKey, { data, ts: Date.now() });
     return NextResponse.json({ success: true, data }, {
       headers: { 'Cache-Control': 'no-store' }
@@ -127,9 +148,22 @@ export async function GET(request: NextRequest) {
     if (e.stdout) {
       try {
         const jsonLine = String(e.stdout).trim().split('\n').pop() ?? '{}';
-        const parsed = JSON.parse(jsonLine) as { chain?: Record<string, unknown>; spot?: number; error?: string };
+        const parsed = JSON.parse(jsonLine) as {
+          chain?: Record<string, unknown>;
+          spot?: number;
+          prev_close?: number;
+          change?: number;
+          change_pct?: number;
+          error?: string;
+        };
         if (!parsed.error && parsed.chain && Object.keys(parsed.chain).length > 0) {
-          const data: ChainResponse = { chain: parsed.chain, spot: parsed.spot ?? 0 };
+          const data: ChainResponse = {
+            chain: parsed.chain,
+            spot: parsed.spot ?? 0,
+            prev_close: parsed.prev_close,
+            change: parsed.change,
+            change_pct: parsed.change_pct,
+          };
           cache.set(cacheKey, { data, ts: Date.now() });
           return NextResponse.json({ success: true, data });
         }
