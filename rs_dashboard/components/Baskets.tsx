@@ -162,6 +162,7 @@ export default function Baskets() {
       })
       .catch(() => {});
 
+    const requestedUnderlyingForLookup = underlying;
     const requestedExpiry = expiry;
     const lookupUrl = broker === 'zerodha'
       ? `/api/scalper/zerodha/lookup?underlying=${underlying}&expiry=${expiry}`
@@ -169,7 +170,7 @@ export default function Baskets() {
     fetch(lookupUrl)
       .then(r => r.json())
       .then((j: { success: boolean; data?: { lotSize: number; strikes: Record<string, StrikeIdentifier> } }) => {
-        if (requestedExpiry !== expiryRef.current) return;
+        if (requestedUnderlyingForLookup !== underlyingRef.current || requestedExpiry !== expiryRef.current) return;
         if (j.success && j.data) {
           setStrikeMap(j.data.strikes);
           setLotSize(j.data.lotSize);
@@ -304,7 +305,7 @@ export default function Baskets() {
         const qty = leg.lots * multiplier * lotSize;
         const price = leg.type === 'LIMIT' ? effectivePremium(leg) : undefined;
 
-        const req = resolveOrderRequest(broker, { side: leg.side, option: leg.option, strike: leg.strike, qty, type: leg.type, price }, strikeMap);
+        const req = resolveOrderRequest(broker, { side: leg.side, option: leg.option, strike: leg.strike, qty, type: leg.type, price, underlying }, strikeMap);
         if (!req) {
           addToast('error', `${label} — no order identifier resolved`, 'Strike lookup not ready yet — basket stopped');
           return;
@@ -496,10 +497,10 @@ export default function Baskets() {
               </span>
             )}
 
-            {fundsData && (
+            {fundsData && Number.isFinite(Number(fundsData.availabelBalance)) && (
               <span className="h-8 flex items-center gap-1.5 px-2.5 rounded-lg text-xs font-bold font-mono tabular-nums bg-zinc-900 border border-zinc-700 text-zinc-200">
                 <Wallet className="w-3 h-3 text-sky-400" />
-                Rs. {formatFundsValue(Number(fundsData.availabelBalance) || 0)}
+                Rs. {formatFundsValue(Number(fundsData.availabelBalance))}
               </span>
             )}
           </div>

@@ -8,6 +8,7 @@ export interface OrderLeg {
   qty: number;
   type: 'MARKET' | 'LIMIT';
   price?: number;
+  underlying: string;
 }
 
 /** Unified strike->identifier shape, matching what /api/scalper/lookup and
@@ -53,6 +54,7 @@ export function resolveOrderRequest(
       broker, url: '/api/scalper/fast-order',
       body: {
         securityId, quantity: leg.qty, side, orderType: leg.type,
+        exchangeSegment: leg.underlying === 'SENSEX' ? 'BSE_FNO' : 'NSE_FNO',
         ...(limitPrice != null ? { price: limitPrice } : {}),
       },
     };
@@ -64,6 +66,7 @@ export function resolveOrderRequest(
     broker, url: '/api/scalper/zerodha/order',
     body: {
       tradingsymbol, quantity: leg.qty, side, orderType: leg.type,
+      exchange: leg.underlying === 'SENSEX' ? 'BFO' : 'NFO',
       ...(limitPrice != null ? { price: limitPrice } : {}),
     },
   };
