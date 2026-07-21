@@ -79,6 +79,18 @@ SAFETY_EXIT_BACKOFF_SEC = 60
 RETRY_MAX_ATTEMPTS = 3
 RETRY_BACKOFF_SEC = 30
 
+# A fast-path failure (place_child_order raised, e.g. transient
+# RemoteDisconnected) gets ONE quick re-try via the retry queue rather than
+# waiting the full RETRY_BACKOFF_SEC — on an exit, every second here is a
+# naked Zerodha leg. Only the first queued attempt uses this; drain_retry_queue
+# escalates back to RETRY_BACKOFF_SEC * attempts if that quick retry also fails,
+# since a repeat failure is more likely a real problem than a network blip.
+FAST_RETRY_DELAY_SEC = 2
+# The retry queue is drained on this cadence — independent of, and much
+# tighter than, WATCHDOG_INTERVAL_SEC (which still governs the slower
+# flat-position safety-exit check further down in watchdog_loop).
+RETRY_DRAIN_INTERVAL_SEC = 2
+
 FREEZE_QTY = 1800  # NFO NIFTY options freeze quantity — market orders above this are rejected
 INSTRUMENTS_REFRESH_MIN_INTERVAL_SEC = 600
 RAW_EVENTS_MAX = 20
@@ -115,7 +127,8 @@ def atomic_write(path: str, data) -> bool:
             json.dump(data, f)
         os.replace(tmp, path)
         return True
-    except PermissionError:
+    except PermissionError as e:
+        print(f"[copy_trade_bridge] Warning: {path} write blocked by a file lock ({e}) — will retry next write", flush=True)
         return False
     except Exception as e:
         print(f"[copy_trade_bridge] Warning: failed to write {path} ({e})", flush=True)
@@ -313,6 +326,48 @@ def place_child_order(kite, symbol: str, side: str, qty: int):
     return placed, order_ids, None
 
 
+def find_recent_matching_order(kite, symbol: str, side: str, qty: int, since_ts):
+    """Best-effort dedup check before RE-trying a chunk whose previous
+    kite.place_order call raised (e.g. RemoteDisconnected) — the request may
+    have actually reached Zerodha even though the response was lost, and a
+    blind retry would then double the position. Kite Connect has no
+    client-supplied idempotency key, so this can only match on
+    symbol/side/qty/time, not guarantee identity — but it catches the common
+    "order placed, response dropped" case. Only called from the watchdog
+    thread (never the WS callback thread) since it's an extra blocking call.
+
+    Returns the matching order_id, or None (verify failed or no match — the
+    caller should fall through to a normal retry either way)."""
+    try:
+        orders = kite.orders()
+    except Exception:
+        return None
+    txn = kite.TRANSACTION_TYPE_BUY if side == 'BUY' else kite.TRANSACTION_TYPE_SELL
+    for o in orders or []:
+        if o.get('tradingsymbol') != symbol:
+            continue
+        if o.get('transaction_type') != txn:
+            continue
+        if int(o.get('quantity', 0) or 0) != qty:
+            continue
+        if str(o.get('status', '') or '').upper() in ('REJECTED', 'CANCELLED'):
+            continue
+        ts = o.get('order_timestamp')
+        if isinstance(ts, str):
+            try:
+                ts = datetime.fromisoformat(ts)
+            except ValueError:
+                ts = None
+        # Fail CLOSED: an unparseable/missing timestamp must NOT count as a
+        # match — misidentifying an unrelated older order as "already placed"
+        # would skip the real retry and leave the leg unreplicated, which is
+        # worse than the rare duplicate this check exists to prevent.
+        if ts is None or since_ts is None or ts < since_ts:
+            continue
+        return o.get('order_id')
+    return None
+
+
 def baseline_today_orders(helper, replicated_qty: dict) -> int:
     """Mark today's already-traded qty as handled, logging any gap loudly."""
     orders = helper.get_order_list()
@@ -357,10 +412,14 @@ def baseline_today_orders(helper, replicated_qty: dict) -> int:
 def watchdog_loop(helper, kite, stop_event: threading.Event, state: dict,
                   retry_queue: list, get_nifty_symbols, resolve_symbol, replicated_symbols):
     """
-    Independent safety net, separate from per-fill replication. Each cycle:
+    Runs two cadences on one thread — deliberately not two threads, so there is
+    never a chance of two drains racing on the same retry-queue item (which
+    could place the same order twice):
 
-    1. Drains the failed-replication retry queue (bounded attempts + backoff).
-    2. If armed and the parent's NIFTY option book has been flat for
+    1. Every RETRY_DRAIN_INTERVAL_SEC: drains the failed-replication retry
+       queue (bounded attempts + backoff).
+    2. Every WATCHDOG_INTERVAL_SEC (unchanged, gated by `last_safety_check`
+       below): if armed and the parent's NIFTY option book has been flat for
        FLAT_CONFIRMATIONS consecutive checks (and no replication landed within
        REPLICATION_GRACE_SEC), force-close the child's cached-NIFTY-option
        positions — and ONLY those; manual/unrelated Zerodha positions are
@@ -372,7 +431,8 @@ def watchdog_loop(helper, kite, stop_event: threading.Event, state: dict,
     force-closing legitimate Zerodha positions on a transient API hiccup.
     """
     safety_attempts = {}  # tradingsymbol -> {'n': attempts, 'next': earliest retry ts}
-    while not stop_event.wait(WATCHDOG_INTERVAL_SEC):
+    last_safety_check = 0.0
+    while not stop_event.wait(RETRY_DRAIN_INTERVAL_SEC):
         try:
             cfg = load_config()
             armed = bool(cfg.get('armed'))
@@ -380,6 +440,11 @@ def watchdog_loop(helper, kite, stop_event: threading.Event, state: dict,
 
             if armed and market_is_open():
                 drain_retry_queue(kite, retry_queue, state, resolve_symbol, replicated_symbols)
+
+            now_ts = time.time()
+            if now_ts - last_safety_check < WATCHDOG_INTERVAL_SEC:
+                continue
+            last_safety_check = now_ts
 
             if not armed or not children:
                 state['flat_streak'] = 0
@@ -518,27 +583,44 @@ def drain_retry_queue(kite, retry_queue: list, state: dict, resolve_symbol=None,
 
         if replicated_symbols is not None:
             note_replicated_symbol(item['zerodha_symbol'], replicated_symbols)
-        placed, order_ids, err = place_child_order(kite, item['zerodha_symbol'], item['side'], item['qty'])
+
         entry = {
             'ts': datetime.now().isoformat(), 'order_no': item['order_no'],
             'zerodha_symbol': item['zerodha_symbol'], 'side': item['side'],
             'child_qty': item['qty'], 'broker': 'zerodha', 'armed': True,
             'attempt': item['attempts'] + 1,
         }
+
+        # A previous attempt for this item raised (response lost) — verify it
+        # didn't actually land before placing what could be a duplicate.
+        dup_order_id = None
+        if item.get('queued_at') is not None:
+            dup_order_id = find_recent_matching_order(
+                kite, item['zerodha_symbol'], item['side'], item['qty'], item['queued_at'])
+
+        if dup_order_id is not None:
+            placed, order_ids, err, verified_dup = item['qty'], [dup_order_id], None, True
+        else:
+            placed, order_ids, err = place_child_order(kite, item['zerodha_symbol'], item['side'], item['qty'])
+            verified_dup = False
+
         if placed:
             state['last_replication_ts'] = time.time()
         if err is None:
-            entry['result'] = 'retry_success'
+            entry['result'] = 'retry_verified_already_placed' if verified_dup else 'retry_success'
             entry['child_order_id'] = ','.join(str(o) for o in order_ids)
+            if verified_dup:
+                entry['error'] = 'Previous attempt raised but the order was already on the book — skipped duplicate retry'
             with _retry_lock:
                 if item in retry_queue:
                     retry_queue.remove(item)
-            print(f'[copy_trade_bridge] Retry succeeded for {item["order_no"]} '
-                  f'({item["side"]} {item["qty"]} {item["zerodha_symbol"]})', flush=True)
+            print(f'[copy_trade_bridge] Retry {"verified already placed" if verified_dup else "succeeded"} for '
+                  f'{item["order_no"]} ({item["side"]} {item["qty"]} {item["zerodha_symbol"]})', flush=True)
         else:
             item['qty'] -= placed  # never re-place slices that went through
             item['attempts'] += 1
             item['next_ts'] = time.time() + RETRY_BACKOFF_SEC * item['attempts']
+            item['queued_at'] = datetime.now()  # this attempt also raised — recheck from here next time
             entry['result'] = 'retry_error'
             entry['error'] = err
             if item['attempts'] >= RETRY_MAX_ATTEMPTS or item['qty'] <= 0:
@@ -770,7 +852,12 @@ def main():
                         retry_queue.append({
                             'order_no': order_no, 'zerodha_symbol': zerodha_symbol,
                             'side': side, 'qty': remaining, 'attempts': 1,
-                            'next_ts': time.time() + RETRY_BACKOFF_SEC,
+                            'next_ts': time.time() + FAST_RETRY_DELAY_SEC,
+                            # This placement attempt just raised — before the
+                            # NEXT attempt (in drain_retry_queue), verify it
+                            # didn't actually go through (response lost, e.g.
+                            # RemoteDisconnected) before placing a duplicate.
+                            'queued_at': datetime.now(),
                         })
                     print(f'[copy_trade_bridge] ERROR replicating {order_no} to {broker}: {err} '
                           f'(queued {remaining} for retry)', flush=True)
