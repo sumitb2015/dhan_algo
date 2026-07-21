@@ -1,4 +1,4 @@
-import { nearestStrike, type LegSide, type OptionType, type StrategyCategory } from './basketStrategies';
+import { nearestStrike, type LegSide, type OptionType, type StrategyCategory } from './basketStrategies.ts';
 
 export interface SavedLeg {
   side: LegSide;
