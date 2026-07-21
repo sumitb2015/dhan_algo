@@ -1,7 +1,8 @@
 'use client';
 
 import React, { useState, useEffect, useMemo, useCallback } from 'react';
-import { BookOpen, RefreshCw, Award, PartyPopper, ChevronLeft, ChevronRight, Flame } from 'lucide-react';
+import { BookOpen, RefreshCw, Award, PartyPopper, ChevronLeft, ChevronRight, Flame, LineChart as LineChartIcon } from 'lucide-react';
+import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, ReferenceLine } from 'recharts';
 import Link from 'next/link';
 import { cn } from '@/lib/utils';
 import { useTradeSync } from '@/lib/useTradeSync';
@@ -193,7 +194,17 @@ function StatChip({ value, label, color }: { value: number | string; label: stri
 
 // ─── Main Component ───────────────────────────────────────────────────────────
 
-type Tab = 'weekly' | 'monthly' | 'daily';
+type Tab = 'weekly' | 'monthly' | 'daily' | 'chart';
+
+type ChartMetric = 'grossPnl' | 'netPnl' | 'charges' | 'brokerage' | 'totalCharges';
+
+const CHART_METRICS: { key: ChartMetric; label: string; color: string }[] = [
+  { key: 'grossPnl', label: 'Overall P&L', color: '#10b981' },
+  { key: 'netPnl', label: 'Net P&L', color: '#38bdf8' },
+  { key: 'charges', label: 'Charges', color: '#a78bfa' },
+  { key: 'brokerage', label: 'Brokerage', color: '#f472b6' },
+  { key: 'totalCharges', label: 'Total Charges', color: '#f59e0b' },
+];
 
 export default function PortfolioDiaryDashboard() {
   const [data, setData] = useState<TradeHistoryResponse | null>(null);
@@ -201,6 +212,7 @@ export default function PortfolioDiaryDashboard() {
   const [tab, setTab] = useState<Tab>('weekly');
   const [selectedMonth, setSelectedMonth] = useState<string | null>(null);
   const [segment, setSegment] = useState<'ALL' | 'EQUITY' | 'FNO' | 'COMMODITY'>('ALL');
+  const [chartMetric, setChartMetric] = useState<ChartMetric>('netPnl');
 
   const fetchData = useCallback(() => {
     fetch('/api/portfolio-trades')
@@ -281,6 +293,30 @@ export default function PortfolioDiaryDashboard() {
 
   const monthIdx = selectedMonth ? monthKeys.indexOf(selectedMonth) : -1;
 
+  // Chart tab: only traded days, sorted chronologically, with a cumulative running total per metric
+  const chartData = useMemo(() => {
+    const traded = [...dailyPnl].filter(d => d.tradeCount > 0).sort((a, b) => a.date.localeCompare(b.date));
+    let cumGross = 0, cumNet = 0, cumCharges = 0, cumStatutory = 0, cumBrokerage = 0;
+    return traded.map(d => {
+      const brokerage = d.charges - d.statutoryCharges;
+      cumGross += d.grossPnl;
+      cumNet += d.netPnl;
+      cumCharges += d.charges;
+      cumStatutory += d.statutoryCharges;
+      cumBrokerage += brokerage;
+      return {
+        date: d.date,
+        grossPnl: round2(cumGross),
+        netPnl: round2(cumNet),
+        charges: round2(cumStatutory),
+        brokerage: round2(cumBrokerage),
+        totalCharges: round2(cumCharges),
+      };
+    });
+  }, [dailyPnl]);
+
+  const activeChartMetric = CHART_METRICS.find(m => m.key === chartMetric)!;
+
   return (
     <div className="flex flex-col flex-1 w-full bg-black min-h-screen text-zinc-200">
       <header className="w-full border-b border-zinc-900 bg-zinc-950/80 backdrop-blur-md px-4 py-2.5 flex items-center gap-4 sticky top-0 z-20 flex-wrap">
@@ -352,7 +388,7 @@ export default function PortfolioDiaryDashboard() {
             <div className="flex items-center gap-3 flex-wrap">
               {/* Tabs */}
               <div className="flex items-center bg-zinc-900 border border-zinc-800 p-0.5 rounded-lg gap-0.5 w-fit">
-                {(['weekly', 'monthly', 'daily'] as Tab[]).map(t => (
+                {(['weekly', 'monthly', 'daily', 'chart'] as Tab[]).map(t => (
                   <button
                     key={t}
                     onClick={() => setTab(t)}
@@ -473,6 +509,8 @@ export default function PortfolioDiaryDashboard() {
                         <th style={{ color: '#fff' }} className="py-2 px-2 text-xs font-bold uppercase tracking-wide text-right">Overall P&amp;L</th>
                         <th style={{ color: '#fff' }} className="py-2 px-2 text-xs font-bold uppercase tracking-wide text-right">Net P&amp;L</th>
                         <th style={{ color: '#fff' }} className="py-2 px-2 text-xs font-bold uppercase tracking-wide text-right">Charges</th>
+                        <th style={{ color: '#fff' }} className="py-2 px-2 text-xs font-bold uppercase tracking-wide text-right">Brokerage</th>
+                        <th style={{ color: '#fff' }} className="py-2 px-2 text-xs font-bold uppercase tracking-wide text-right">Total Charges</th>
                       </tr>
                     </thead>
                     <tbody>
@@ -483,6 +521,8 @@ export default function PortfolioDiaryDashboard() {
                           <td className="py-[6px] px-2 text-[12px] text-right"><PnlText v={w.grossPnl} /></td>
                           <td className="py-[6px] px-2 text-[12px] text-right"><PnlText v={w.netPnl} /></td>
                           <td className="py-[6px] px-2 text-[12px] text-right text-zinc-400 tabular-nums">{fmtINR(w.statutoryCharges)}</td>
+                          <td className="py-[6px] px-2 text-[12px] text-right text-zinc-400 tabular-nums">{fmtINR(w.charges - w.statutoryCharges)}</td>
+                          <td className="py-[6px] px-2 text-[12px] text-right text-zinc-400 tabular-nums">{fmtINR(w.charges)}</td>
                         </tr>
                       ))}
                     </tbody>
@@ -555,6 +595,8 @@ export default function PortfolioDiaryDashboard() {
                         <th style={{ color: '#fff' }} className="py-2 px-2 text-xs font-bold uppercase tracking-wide text-right">Overall P&amp;L</th>
                         <th style={{ color: '#fff' }} className="py-2 px-2 text-xs font-bold uppercase tracking-wide text-right">Net P&amp;L</th>
                         <th style={{ color: '#fff' }} className="py-2 px-2 text-xs font-bold uppercase tracking-wide text-right">Charges</th>
+                        <th style={{ color: '#fff' }} className="py-2 px-2 text-xs font-bold uppercase tracking-wide text-right">Brokerage</th>
+                        <th style={{ color: '#fff' }} className="py-2 px-2 text-xs font-bold uppercase tracking-wide text-right">Total Charges</th>
                       </tr>
                     </thead>
                     <tbody>
@@ -569,13 +611,15 @@ export default function PortfolioDiaryDashboard() {
                           <td className="py-[6px] px-2 text-[12px] text-right"><PnlText v={m.grossPnl} /></td>
                           <td className="py-[6px] px-2 text-[12px] text-right"><PnlText v={m.netPnl} /></td>
                           <td className="py-[6px] px-2 text-[12px] text-right text-zinc-400 tabular-nums">{fmtINR(m.statutoryCharges)}</td>
+                          <td className="py-[6px] px-2 text-[12px] text-right text-zinc-400 tabular-nums">{fmtINR(m.charges - m.statutoryCharges)}</td>
+                          <td className="py-[6px] px-2 text-[12px] text-right text-zinc-400 tabular-nums">{fmtINR(m.charges)}</td>
                         </tr>
                       ))}
                     </tbody>
                   </table>
                 </div>
               </>
-            ) : (
+            ) : tab === 'daily' ? (
               <>
                 {/* Daily calendar map */}
                 {dailyGrid && dailyGrid.length > 0 && (
@@ -668,7 +712,8 @@ export default function PortfolioDiaryDashboard() {
                         <th style={{ color: '#fff' }} className="py-2 px-2 text-xs font-bold uppercase tracking-wide text-right">Overall P&amp;L</th>
                         <th style={{ color: '#fff' }} className="py-2 px-2 text-xs font-bold uppercase tracking-wide text-right">Net P&amp;L</th>
                         <th style={{ color: '#fff' }} className="py-2 px-2 text-xs font-bold uppercase tracking-wide text-right">Charges</th>
-                        <th style={{ color: '#fff' }} className="py-2 px-2 text-xs font-bold uppercase tracking-wide text-right">Statutory Charges</th>
+                        <th style={{ color: '#fff' }} className="py-2 px-2 text-xs font-bold uppercase tracking-wide text-right">Brokerage</th>
+                        <th style={{ color: '#fff' }} className="py-2 px-2 text-xs font-bold uppercase tracking-wide text-right">Total Charges</th>
                       </tr>
                     </thead>
                     <tbody>
@@ -678,12 +723,80 @@ export default function PortfolioDiaryDashboard() {
                           <td className="py-[6px] px-2 text-[12px] text-right text-zinc-400 tabular-nums">{d.tradeCount}</td>
                           <td className="py-[6px] px-2 text-[12px] text-right"><PnlText v={d.grossPnl} /></td>
                           <td className="py-[6px] px-2 text-[12px] text-right"><PnlText v={d.netPnl} /></td>
-                          <td className="py-[6px] px-2 text-[12px] text-right text-zinc-400 tabular-nums">{fmtINR(d.charges)}</td>
                           <td className="py-[6px] px-2 text-[12px] text-right text-zinc-400 tabular-nums">{fmtINR(d.statutoryCharges)}</td>
+                          <td className="py-[6px] px-2 text-[12px] text-right text-zinc-400 tabular-nums">{fmtINR(d.charges - d.statutoryCharges)}</td>
+                          <td className="py-[6px] px-2 text-[12px] text-right text-zinc-400 tabular-nums">{fmtINR(d.charges)}</td>
                         </tr>
                       ))}
                     </tbody>
                   </table>
+                </div>
+              </>
+            ) : (
+              <>
+                {/* Chart tab: cumulative running total for the selected metric, traded days only */}
+                <div className="flex items-center gap-2 flex-wrap">
+                  <span className="text-[10px] text-zinc-600 uppercase tracking-wide flex items-center gap-1.5">
+                    <LineChartIcon className="h-3 w-3" /> Metric
+                  </span>
+                  <div className="flex items-center bg-zinc-900 border border-zinc-800 p-0.5 rounded-lg gap-0.5 w-fit">
+                    {CHART_METRICS.map(m => (
+                      <button
+                        key={m.key}
+                        onClick={() => setChartMetric(m.key)}
+                        className={cn(
+                          'px-3 py-1.5 text-[11px] font-semibold rounded-md transition-all',
+                          chartMetric === m.key ? 'bg-amber-500/10 text-amber-400' : 'text-zinc-500 hover:text-zinc-300',
+                        )}
+                      >
+                        {m.label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                <div className="bg-zinc-900/60 border border-zinc-800/60 rounded-xl p-4">
+                  <div className="text-[11px] font-semibold text-zinc-300 mb-3">
+                    Cumulative {activeChartMetric.label} over time
+                  </div>
+                  {chartData.length === 0 ? (
+                    <div className="flex items-center justify-center h-64 text-xs text-zinc-600">No trades in range</div>
+                  ) : (
+                    <div className="h-72">
+                      <ResponsiveContainer width="100%" height="100%">
+                        <LineChart data={chartData} margin={{ top: 4, right: 12, left: 4, bottom: 0 }}>
+                          <CartesianGrid strokeDasharray="3 3" stroke="#27272a" />
+                          <XAxis
+                            dataKey="date"
+                            tick={{ fontSize: 9, fill: '#71717a' }}
+                            tickFormatter={fmtShort}
+                            interval="preserveStartEnd"
+                          />
+                          <YAxis
+                            tick={{ fontSize: 9, fill: '#71717a' }}
+                            tickFormatter={v => fmtINR(v, true)}
+                            width={56}
+                          />
+                          <Tooltip
+                            contentStyle={{ background: '#18181b', border: '1px solid #3f3f46', borderRadius: 8, fontSize: 11 }}
+                            labelStyle={{ color: '#a1a1aa' }}
+                            labelFormatter={(d: any) => fmtDateLong(String(d))}
+                            formatter={(v: unknown) => [fmtINR(v as number), activeChartMetric.label]}
+                          />
+                          <ReferenceLine y={0} stroke="#52525b" strokeDasharray="4 2" />
+                          <Line
+                            type="monotone"
+                            dataKey={chartMetric}
+                            name={activeChartMetric.label}
+                            stroke={activeChartMetric.color}
+                            dot={false}
+                            strokeWidth={1.5}
+                            isAnimationActive={false}
+                          />
+                        </LineChart>
+                      </ResponsiveContainer>
+                    </div>
+                  )}
                 </div>
               </>
             )}
