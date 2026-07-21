@@ -215,21 +215,21 @@ export function ProfitLockControls({ lock, totalPnl }: { lock: ProfitLockApi; to
 
   return (
     <>
-      <span className="w-px h-5 bg-zinc-800" />
+      <span className="w-px h-5 bg-zinc-800 shrink-0" />
 
-      <span className="flex items-center gap-1 text-[10px] font-bold text-zinc-500 uppercase tracking-wider"
+      <span className="flex items-center gap-1 text-[10px] font-bold text-zinc-500 uppercase tracking-wider shrink-0 whitespace-nowrap"
         title="Client-side: exits ALL positions at market if total P&L falls to this floor. Set above current P&L to pre-arm (dormant until crossed).">
         <Lock className="w-3 h-3" /> Profit Lock
       </span>
 
       {active && (
-        <span className={`px-2 py-1 rounded text-[10px] font-bold uppercase tracking-wider ${CHIP_CLS[lock.lockState as Exclude<ProfitLockState, 'INACTIVE'>]}`}>
+        <span className={`px-2 py-1 rounded text-[10px] font-bold uppercase tracking-wider shrink-0 whitespace-nowrap ${CHIP_CLS[lock.lockState as Exclude<ProfitLockState, 'INACTIVE'>]}`}>
           {lock.lockState}
         </span>
       )}
 
-      <div className="flex items-center gap-1.5">
-        <span className="text-[10px] text-zinc-500 font-semibold">LOCK ₹</span>
+      <div className="flex items-center gap-1.5 shrink-0">
+        <span className="text-[10px] text-zinc-500 font-semibold whitespace-nowrap">LOCK ₹</span>
         <input type="number" placeholder="e.g. 2000" value={lock.thresholdInput}
           onChange={e => lock.setThresholdInput(e.target.value)}
           disabled={active}
@@ -238,9 +238,9 @@ export function ProfitLockControls({ lock, totalPnl }: { lock: ProfitLockApi; to
       </div>
 
       {/* Hysteresis: dormant lock arms only once P&L clears LOCK + this buffer */}
-      <div className="flex items-center gap-1.5"
+      <div className="flex items-center gap-1.5 shrink-0"
         title="Arm buffer: a dormant lock arms only when P&L rises above LOCK + buffer, so a brief poke above the floor can't arm and immediately exit on the next dip.">
-        <span className="text-[10px] text-zinc-500 font-semibold">ARM +₹</span>
+        <span className="text-[10px] text-zinc-500 font-semibold whitespace-nowrap">ARM +₹</span>
         <input type="number" min="0" placeholder="500" value={lock.armBufferInput}
           onChange={e => lock.setArmBufferInput(e.target.value.replace(/-/g, ''))}
           disabled={active}
@@ -252,7 +252,7 @@ export function ProfitLockControls({ lock, totalPnl }: { lock: ProfitLockApi; to
       <button onClick={() => !active && lock.setTrailEnabled(!lock.trailEnabled)}
         disabled={active}
         title="Trail the lock: once armed, every new P&L high raises the floor rupee-for-rupee (gap captured at arming stays constant). The floor never moves down."
-        className={`px-2.5 py-1 rounded text-[10px] font-bold border transition-all disabled:opacity-50 ${
+        className={`px-2.5 py-1 rounded text-[10px] font-bold border transition-all disabled:opacity-50 shrink-0 whitespace-nowrap ${
           lock.trailEnabled
             ? 'bg-cyan-900/50 border-cyan-500/40 text-cyan-300'
             : 'bg-zinc-900 border-zinc-700 text-zinc-500 hover:text-zinc-300'
@@ -263,19 +263,19 @@ export function ProfitLockControls({ lock, totalPnl }: { lock: ProfitLockApi; to
       {!active ? (
         <button onClick={lock.setLock}
           className="px-3 py-1.5 text-xs font-bold rounded-lg bg-cyan-700 hover:bg-cyan-600
-                     text-white border border-cyan-500/40 transition-all">
+                     text-white border border-cyan-500/40 transition-all shrink-0 whitespace-nowrap">
           Set Lock
         </button>
       ) : (
         <button onClick={lock.clearLock}
           className="px-3 py-1.5 text-xs font-bold rounded-lg bg-zinc-900 border border-zinc-700
-                     text-zinc-400 hover:text-zinc-200 transition-all">
+                     text-zinc-400 hover:text-zinc-200 transition-all shrink-0 whitespace-nowrap">
           Clear Lock
         </button>
       )}
 
       {active && lock.threshold !== null && (
-        <span className="text-[10px] text-zinc-500 font-mono tabular-nums">
+        <span className="text-[10px] text-zinc-500 font-mono tabular-nums shrink-0 whitespace-nowrap">
           ₹{totalPnl.toFixed(0)} / lock ₹{lock.threshold.toFixed(0)}
           {lock.lockState === 'DORMANT' && ` · arms at ₹${(lock.threshold + lock.armBuffer).toFixed(0)}`}
           {lock.lockState === 'ARMED' && lock.trailEnabled && ' ⤴'}

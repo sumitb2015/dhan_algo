@@ -907,9 +907,9 @@ export default function AdvancedScalper() {
 
       {/* Sticky header */}
       <div className="sticky top-0 z-10 border-b border-zinc-800 bg-zinc-950/95 backdrop-blur px-4 py-2">
-        <div className="flex items-center justify-between gap-3 flex-wrap">
-          <div className="flex items-center gap-3">
-            <div>
+        <div className="flex items-center justify-between gap-3 flex-nowrap overflow-x-auto">
+          <div className="flex items-center gap-3 flex-nowrap shrink-0">
+            <div className="shrink-0 whitespace-nowrap">
               <h1 className="text-sm font-bold text-white tracking-tight flex items-center gap-1.5">
                 <Zap className="w-3.5 h-3.5 text-yellow-400" />
                 {underlying} ADVANCED SCALPER
@@ -920,16 +920,16 @@ export default function AdvancedScalper() {
                   : 'Loading…'}
               </p>
             </div>
-            <NavBar />
+            <div className="shrink-0"><NavBar /></div>
           </div>
-          <div className="flex items-center gap-2 flex-wrap">
+          <div className="flex items-center gap-2 flex-nowrap shrink-0">
             {/* Broker selector — only shown when more than one broker is authenticated */}
             {authenticatedBrokers.length > 1 && (
               <select
                 value={broker}
                 onChange={e => setBroker(e.target.value as 'dhan' | 'zerodha')}
                 className="bg-zinc-900 border border-zinc-700 text-zinc-200 text-xs font-semibold
-                           rounded-lg px-2.5 py-1.5 focus:outline-none focus:border-emerald-500 w-[88px]"
+                           rounded-lg px-2.5 py-1.5 focus:outline-none focus:border-emerald-500 w-[88px] shrink-0"
               >
                 {authenticatedBrokers.includes('dhan') && <option value="dhan">Dhan</option>}
                 {authenticatedBrokers.includes('zerodha') && <option value="zerodha">Zerodha</option>}
@@ -941,14 +941,14 @@ export default function AdvancedScalper() {
                 (e.g. NIFTY vs BANKNIFTY) */}
             <select value={underlying} onChange={e => setUnderlying(e.target.value as typeof UNDERLYINGS[number])}
               className="bg-zinc-900 border border-zinc-700 text-zinc-200 text-xs font-semibold
-                         rounded-lg px-2.5 py-1.5 focus:outline-none focus:border-emerald-500 w-[104px]">
+                         rounded-lg px-2.5 py-1.5 focus:outline-none focus:border-emerald-500 w-[104px] shrink-0">
               {UNDERLYINGS.map(sym => <option key={sym} value={sym}>{sym}</option>)}
             </select>
 
             {/* Expiry selector */}
             <select value={expiry} onChange={e => setExpiry(e.target.value)}
               className="bg-zinc-900 border border-zinc-700 text-zinc-200 text-xs font-semibold
-                         rounded-lg px-2.5 py-1.5 focus:outline-none focus:border-emerald-500">
+                         rounded-lg px-2.5 py-1.5 focus:outline-none focus:border-emerald-500 shrink-0">
               {expiries.map(ex => <option key={ex} value={ex}>{ex}</option>)}
             </select>
 
@@ -956,16 +956,16 @@ export default function AdvancedScalper() {
             <button onClick={addBox} disabled={boxes.length >= MAX_BOXES}
               className="flex items-center gap-1 px-2.5 py-1.5 text-xs font-bold rounded-lg
                          border border-emerald-600/40 bg-emerald-900/30 text-emerald-400
-                         hover:bg-emerald-800/40 transition-all disabled:opacity-40 disabled:cursor-not-allowed">
+                         hover:bg-emerald-800/40 transition-all disabled:opacity-40 disabled:cursor-not-allowed shrink-0 whitespace-nowrap">
               <Plus className="w-3.5 h-3.5" /> Add Box
             </button>
-            <span className="text-[10px] text-zinc-500 font-mono">{boxes.length}/{MAX_BOXES} boxes</span>
+            <span className="text-[10px] text-zinc-500 font-mono shrink-0 whitespace-nowrap">{boxes.length}/{MAX_BOXES} boxes</span>
 
             {/* MARKET / LIMIT toggle */}
-            <div className="flex items-center bg-zinc-900 border border-zinc-800 p-0.5 rounded-xl">
+            <div className="flex items-center bg-zinc-900 border border-zinc-800 p-0.5 rounded-xl shrink-0">
               {(['MARKET', 'LIMIT'] as const).map(m => (
                 <button key={m} onClick={() => setOrderMode(m)}
-                  className={`px-3 py-1.5 text-xs font-bold rounded-lg transition-all ${
+                  className={`px-3 py-1.5 text-xs font-bold rounded-lg transition-all whitespace-nowrap ${
                     orderMode === m
                       ? 'bg-zinc-700 text-zinc-100 border border-zinc-600'
                       : 'text-zinc-500 hover:text-zinc-300'
@@ -976,7 +976,7 @@ export default function AdvancedScalper() {
             </div>
 
             {/* Bridge status dot + transport badge + timestamp */}
-            <div className="flex items-center gap-1.5">
+            <div className="flex items-center gap-1.5 shrink-0">
               <span className={`w-2 h-2 rounded-full ${
                 bridgeStatus.status === 'RUNNING'  ? 'bg-emerald-400 animate-pulse' :
                 bridgeStatus.status === 'STARTING' ? 'bg-yellow-400 animate-pulse'  :
@@ -989,14 +989,14 @@ export default function AdvancedScalper() {
               }`} title={transport === 'ws' ? 'Realtime WebSocket push' : 'HTTP polling fallback'}>
                 {transport === 'ws' ? 'WS' : 'HTTP'}
               </span>
-              {lastUpdated && <span className="text-[10px] text-zinc-500 font-mono">{lastUpdated}</span>}
+              {lastUpdated && <span className="text-[10px] text-zinc-500 font-mono whitespace-nowrap">{lastUpdated}</span>}
             </div>
 
             {/* Combined P&L chip across all boxes/positions — min-w keeps row
                 layout stable regardless of the selected broker's actual P&L
                 digit-count */}
             {positionsData.length > 0 && (
-              <span className={`px-2.5 py-1.5 rounded-lg text-xs font-bold font-mono tabular-nums border min-w-[90px] text-center inline-block ${
+              <span className={`px-2.5 py-1.5 rounded-lg text-xs font-bold font-mono tabular-nums border min-w-[90px] text-center inline-block shrink-0 whitespace-nowrap ${
                 totalPnl > 0
                   ? 'bg-emerald-900/40 border-emerald-500/30 text-emerald-400'
                   : totalPnl < 0
@@ -1026,8 +1026,8 @@ export default function AdvancedScalper() {
               ? 'bg-amber-900/40 text-amber-400 border border-amber-500/30'
               : 'bg-zinc-800 text-zinc-500 border border-zinc-700';
             return (
-              <div className="flex items-center gap-3 flex-wrap">
-                <span className="flex items-center gap-1 text-[10px] font-bold text-zinc-500 uppercase tracking-wider">
+              <div className="flex items-center gap-3 flex-nowrap overflow-x-auto pb-1">
+                <span className="flex items-center gap-1 text-[10px] font-bold text-zinc-500 uppercase tracking-wider shrink-0 whitespace-nowrap">
                   <Shield className="w-3 h-3" /> P&amp;L Guard
                 </span>
 
@@ -1037,18 +1037,18 @@ export default function AdvancedScalper() {
                   // silently configure Dhan's guard while this tab shows Zerodha
                   // data, so surface that plainly instead of pretending it works.
                   <span
-                    className="px-2 py-1 rounded text-[10px] font-bold uppercase tracking-wider bg-zinc-800 text-zinc-500 border border-zinc-700"
+                    className="px-2 py-1 rounded text-[10px] font-bold uppercase tracking-wider bg-zinc-800 text-zinc-500 border border-zinc-700 shrink-0 whitespace-nowrap"
                     title="P&L Guard uses Dhan's native account-level pnlExit API, which has no Zerodha equivalent. Switch to Dhan to use it.">
                     DHAN ONLY
                   </span>
                 ) : (
                   <>
-                    <span className={`px-2 py-1 rounded text-[10px] font-bold uppercase tracking-wider ${guardChipCls}`}>
+                    <span className={`px-2 py-1 rounded text-[10px] font-bold uppercase tracking-wider shrink-0 whitespace-nowrap ${guardChipCls}`}>
                       {guardLabel}
                     </span>
 
-                    <div className="flex items-center gap-1.5">
-                      <span className="text-[10px] text-zinc-500 font-semibold">TARGET ₹</span>
+                    <div className="flex items-center gap-1.5 shrink-0">
+                      <span className="text-[10px] text-zinc-500 font-semibold whitespace-nowrap">TARGET ₹</span>
                       <input type="number" min="0" placeholder="e.g. 5000" value={profitTarget}
                         onChange={e => setProfitTarget(e.target.value.replace(/-/g, ''))}
                         className="w-24 bg-zinc-900 border border-zinc-700 text-zinc-200 text-xs font-mono
@@ -1056,20 +1056,20 @@ export default function AdvancedScalper() {
                     </div>
 
                     {/* Loss limit — always a positive magnitude ("exit when loss reaches ₹X"); Dhan rejects a negative value */}
-                    <div className="flex items-center gap-1.5">
-                      <span className="text-[10px] text-zinc-500 font-semibold">SL ₹</span>
+                    <div className="flex items-center gap-1.5 shrink-0">
+                      <span className="text-[10px] text-zinc-500 font-semibold whitespace-nowrap">SL ₹</span>
                       <input type="number" min="0" placeholder="e.g. 2000" value={lossLimit}
                         onChange={e => setLossLimit(e.target.value.replace(/-/g, ''))}
                         className="w-24 bg-zinc-900 border border-zinc-700 text-zinc-200 text-xs font-mono
                                    rounded px-2 py-1 focus:outline-none focus:border-rose-500" />
                     </div>
 
-                    <div className="flex items-center gap-1">
+                    <div className="flex items-center gap-1 shrink-0">
                       {['INTRADAY', 'CNC', 'MARGIN'].map(pt => (
                         <button key={pt} onClick={() => setGuardProductTypes(prev =>
                           prev.includes(pt) ? prev.filter(x => x !== pt) : [...prev, pt]
                         )}
-                          className={`px-2 py-1 rounded text-[10px] font-bold border transition-all ${
+                          className={`px-2 py-1 rounded text-[10px] font-bold border transition-all whitespace-nowrap ${
                             guardProductTypes.includes(pt)
                               ? 'bg-violet-900/50 border-violet-500/40 text-violet-300'
                               : 'bg-zinc-900 border-zinc-700 text-zinc-500 hover:text-zinc-300'
@@ -1080,7 +1080,7 @@ export default function AdvancedScalper() {
                     </div>
 
                     <button onClick={() => setEnableKillSwitch(v => !v)}
-                      className={`flex items-center gap-1.5 px-2.5 py-1 rounded text-[10px] font-bold border transition-all ${
+                      className={`flex items-center gap-1.5 px-2.5 py-1 rounded text-[10px] font-bold border transition-all shrink-0 whitespace-nowrap ${
                         enableKillSwitch
                           ? 'bg-rose-900/50 border-rose-500/40 text-rose-300'
                           : 'bg-zinc-900 border-zinc-700 text-zinc-500 hover:text-zinc-300'
@@ -1090,13 +1090,13 @@ export default function AdvancedScalper() {
 
                     <button onClick={handleSetPnl} disabled={settingPnl}
                       className="px-3 py-1.5 text-xs font-bold rounded-lg bg-violet-600 hover:bg-violet-500
-                                 text-white border border-violet-500/40 transition-all disabled:opacity-50">
+                                 text-white border border-violet-500/40 transition-all disabled:opacity-50 shrink-0 whitespace-nowrap">
                       {settingPnl ? 'Setting…' : 'Set Guard'}
                     </button>
 
                     {hasConfig && (
                       <button onClick={handleClearPnl} disabled={clearingPnl}
-                        className={`px-3 py-1.5 text-xs font-bold rounded-lg border transition-all disabled:opacity-50 ${
+                        className={`px-3 py-1.5 text-xs font-bold rounded-lg border transition-all disabled:opacity-50 shrink-0 whitespace-nowrap ${
                           confirmClear
                             ? 'bg-rose-600 border-rose-500/40 text-white'
                             : 'bg-zinc-900 border-zinc-700 text-zinc-400 hover:text-zinc-200'
@@ -1109,7 +1109,7 @@ export default function AdvancedScalper() {
 
                 {/* Exit ALL Positions (broker-level nuclear) */}
                 <button onClick={handleExitAll} disabled={exitingAll}
-                  className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[11px] font-bold border transition-all active:scale-95 disabled:opacity-40 disabled:cursor-not-allowed ${
+                  className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[11px] font-bold border transition-all active:scale-95 disabled:opacity-40 disabled:cursor-not-allowed shrink-0 whitespace-nowrap ${
                     exitingAll
                       ? 'bg-red-900/40 border-red-800 text-red-400'
                       : confirmExitAll
@@ -1128,7 +1128,7 @@ export default function AdvancedScalper() {
                 <CopyTradeControls copyTrade={copyTrade} />
 
                 {broker === 'dhan' && hasConfig && (
-                  <span className="text-[10px] text-zinc-500 font-mono">
+                  <span className="text-[10px] text-zinc-500 font-mono shrink-0 whitespace-nowrap">
                     {Number(pnlGuardStatus?.profit) > 0 ? `🎯 ₹${pnlGuardStatus?.profit}` : ''}
                     {Number(pnlGuardStatus?.profit) > 0 && Math.abs(Number(pnlGuardStatus?.loss)) > 0 ? '  ' : ''}
                     {Math.abs(Number(pnlGuardStatus?.loss)) > 0 ? `🛑 ₹${Math.abs(Number(pnlGuardStatus?.loss))}` : ''}
@@ -1137,7 +1137,7 @@ export default function AdvancedScalper() {
 
                 {/* Persistent error — the toast auto-dismisses, this stays until the next attempt */}
                 {broker === 'dhan' && guardError && (
-                  <span className="text-[10px] text-rose-400 font-semibold">⚠ {guardError}</span>
+                  <span className="text-[10px] text-rose-400 font-semibold shrink-0 whitespace-nowrap">⚠ {guardError}</span>
                 )}
               </div>
             );

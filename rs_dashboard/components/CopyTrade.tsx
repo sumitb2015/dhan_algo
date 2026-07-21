@@ -161,15 +161,15 @@ export function CopyTradeControls({ copyTrade }: { copyTrade: CopyTradeApi }) {
 
   return (
     <>
-      <span className="w-px h-5 bg-zinc-800" />
+      <span className="w-px h-5 bg-zinc-800 shrink-0" />
 
-      <span className="flex items-center gap-1 text-[10px] font-bold text-zinc-500 uppercase tracking-wider"
+      <span className="flex items-center gap-1 text-[10px] font-bold text-zinc-500 uppercase tracking-wider shrink-0 whitespace-nowrap"
         title="Mirrors every Dhan fill to the Zerodha child account at quantity = qty x multiplier.">
         <Repeat className="w-3 h-3" /> Copy → Zerodha
       </span>
 
       {armed && (
-        <span className={`px-2 py-1 rounded text-[10px] font-bold uppercase tracking-wider ${
+        <span className={`px-2 py-1 rounded text-[10px] font-bold uppercase tracking-wider shrink-0 whitespace-nowrap ${
           bridgeRunning
             ? 'bg-emerald-900/60 text-emerald-400 border border-emerald-500/30'
             : 'bg-red-900/60 text-red-400 border border-red-500/30 animate-pulse'
@@ -178,8 +178,8 @@ export function CopyTradeControls({ copyTrade }: { copyTrade: CopyTradeApi }) {
         </span>
       )}
 
-      <div className="flex items-center gap-1.5">
-        <span className="text-[10px] text-zinc-500 font-semibold">MULT</span>
+      <div className="flex items-center gap-1.5 shrink-0">
+        <span className="text-[10px] text-zinc-500 font-semibold whitespace-nowrap">MULT</span>
         <input type="number" min="1" step="1" placeholder="1" value={multiplierInput}
           onChange={e => setMultiplierInput(e.target.value)}
           disabled={armed}
@@ -190,7 +190,7 @@ export function CopyTradeControls({ copyTrade }: { copyTrade: CopyTradeApi }) {
 
       {!armed ? (
         <button onClick={arm} disabled={arming}
-          className={`px-3 py-1.5 text-xs font-bold rounded-lg border transition-all disabled:opacity-50 ${
+          className={`px-3 py-1.5 text-xs font-bold rounded-lg border transition-all disabled:opacity-50 shrink-0 whitespace-nowrap ${
             confirmArm
               ? 'bg-red-600 border-red-500 text-white animate-pulse shadow-lg shadow-red-500/20'
               : 'bg-sky-700 hover:bg-sky-600 text-white border-sky-500/40'
@@ -200,7 +200,7 @@ export function CopyTradeControls({ copyTrade }: { copyTrade: CopyTradeApi }) {
       ) : (
         <button onClick={disarm}
           className="px-3 py-1.5 text-xs font-bold rounded-lg bg-zinc-900 border border-zinc-700
-                     text-zinc-400 hover:text-red-300 hover:border-red-800 transition-all">
+                     text-zinc-400 hover:text-red-300 hover:border-red-800 transition-all shrink-0 whitespace-nowrap">
           Disarm
         </button>
       )}
