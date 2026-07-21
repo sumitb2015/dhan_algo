@@ -420,6 +420,10 @@ All three gates must pass simultaneously before a position is opened:
 | `--vwap-warmup-bars N` | `10` | Min completed 1-min bars (≈ 10 min) before VWAP is trusted for trading. |
 | `--target-profit INR` | `4000` | Session profit target — strategy pauses until next day once reached. |
 | `--stop-loss INR` | `4000` | Session stop loss (positive value) — strategy pauses until next day once total PnL < −stop_loss. |
+| `--max-loss-per-trade INR` | `1500` | Hard per-cycle stop-loss, independent of VWAP (`unrealized ≤ −max_loss_per_trade` forces exit). `0` disables. |
+| `--max-trades-per-day N` | `15` | Max entries per session; further entries blocked once reached. `0` = unlimited. |
+| `--cooldown-seconds N` | `90` | Entries paused for this many seconds after a losing cycle closes. |
+| `--max-spread-pct PCT` | `8` | Max bid-ask spread % per leg (via `get_quote_data` depth) to allow entry; skips entry on illiquid strikes. `0` disables. |
 
 ### E. Parameter Tuning Guide
 
@@ -437,6 +441,15 @@ Lower values (e.g., `10`) demand more delta-neutral entries — fewer trades, hi
 
 **`--vwap-warmup-bars`**
 Default `10` bars (≈ 10 min). Raise to `15–20` on open-of-day when premiums are noisy. The VWAP bootstraps from existing candles at strategy start, so warmup may complete quickly if the session is already underway.
+
+**`--max-loss-per-trade`**
+Caps loss on a single cycle regardless of where VWAP has drifted to (VWAP recalculates every minute from live candles, so a losing move can drag VWAP + exit_buffer along with it and delay the VWAP-based exit). Default `1500`. Tighten for stricter per-trade risk control; set `0` to rely solely on the VWAP-based exit and the session-level `--stop-loss`.
+
+**`--max-trades-per-day` / `--cooldown-seconds`**
+Guards against over-trading a choppy, range-bound session where entry/exit gates fire repeatedly. `--cooldown-seconds` (default `90`) pauses new entries after a losing cycle; `--max-trades-per-day` (default `15`) hard-caps total entries for the session.
+
+**`--max-spread-pct`**
+Skips entry if either leg's bid-ask spread (from `DhanHelper.get_quote_data` depth, checked once at the moment other entry gates pass — not every tick, to respect its 1 req/s rate limit) exceeds this percentage of mid-price. Protects against poor fills on illiquid strikes. If depth data is missing or malformed, the check fails open (allows entry) with a warning logged, rather than silently blocking all entries on a parsing gap.
 
 ### F. Execution Examples
 

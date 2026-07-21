@@ -19,9 +19,12 @@ Entry conditions (all must be true):
   2. combined_ltp <= candle_vwap + entry_band
   3. combined_ltp is declining over the last decline_ticks WebSocket ticks
   4. abs(CE_ltp - PE_ltp) / max(CE, PE) < max_premium_diff_pct
+  5. Daily trade cap not reached, and not in post-loss cooldown
+  6. Bid-ask spread on both legs is within max_spread_pct
 
-Exit condition:
+Exit conditions (either triggers):
   combined_ltp > candle_vwap + exit_buffer
+  unrealized PnL <= -max_loss_per_trade (hard per-trade stop, independent of VWAP)
 
 CLI args:
   --live                  Place real orders (default: dry run)
@@ -34,6 +37,10 @@ CLI args:
   --vwap-warmup-bars N    Min completed 1-min bars before VWAP is trusted (default: 10)
   --target-profit INR     Global profit target (default: 4000)
   --stop-loss INR         Global stop loss (default: 4000)
+  --max-loss-per-trade INR  Hard stop-loss per cycle, independent of VWAP (default: 1500, 0=disabled)
+  --max-trades-per-day N    Max entries per session (default: 15, 0=unlimited)
+  --cooldown-seconds N      Pause entries for N seconds after a losing cycle (default: 90)
+  --max-spread-pct PCT      Max bid-ask spread %% per leg to allow entry (default: 8, 0=disabled)
 """
 
 import time
@@ -58,6 +65,12 @@ log_dir = os.path.join(debug_dir, "logs", "vwap_1min")
 os.makedirs(log_dir, exist_ok=True)
 
 STRATEGY_KEY = "nifty_vwap_1min_straddle"
+
+# Consecutive candle-fetch API failures before escalating to a CRITICAL log
+API_ERROR_ALERT_STREAK = 5
+
+# Max leg buy-to-cover attempts before giving up for this tick (retried again next tick)
+EXIT_RETRY_ATTEMPTS = 3
 
 
 class FlushingFileHandler(logging.FileHandler):
@@ -95,6 +108,10 @@ class NiftyVWAP1MinStraddle:
         vwap_warmup_bars: int = 10,
         profit_target: float = 4000.0,
         stop_loss: float = 4000.0,
+        max_loss_per_trade: float = 1500.0,
+        max_trades_per_day: int = 15,
+        cooldown_seconds: int = 90,
+        max_spread_pct: float = 8.0,
     ):
         self.dry_run = dry_run
         self.lots = lots
@@ -106,6 +123,10 @@ class NiftyVWAP1MinStraddle:
         self.vwap_warmup_bars = vwap_warmup_bars
         self.profit_target = profit_target
         self.stop_loss = -abs(stop_loss)
+        self.max_loss_per_trade = max_loss_per_trade
+        self.max_trades_per_day = max_trades_per_day
+        self.cooldown_seconds = cooldown_seconds
+        self.max_spread_pct = max_spread_pct
 
         self.dhan = get_dhan_client()
         if not self.dhan:
@@ -136,6 +157,17 @@ class NiftyVWAP1MinStraddle:
         # Session-level PnL
         self.realized_pnl: float = 0.0
         self.cycle_count: int = 0
+        self.trade_count: int = 0
+
+        # Data API health tracking (consecutive candle-fetch failures)
+        self._api_error_streak: int = 0
+
+        # Cooldown after a losing cycle
+        self._cooldown_until: float = 0.0
+
+        # Per-leg exit tracking (for partial-exit retry on order failure)
+        self.ce_closed: bool = True
+        self.pe_closed: bool = True
 
     # ── helpers ──────────────────────────────────────────────────────────────
 
@@ -148,6 +180,8 @@ class NiftyVWAP1MinStraddle:
         self.ce_avg: float = 0.0
         self.pe_avg: float = 0.0
         self.entry_combined: float = 0.0
+        self.ce_closed = True
+        self.pe_closed = True
 
     def _reset_vwap(self):
         self.candle_vwap = 0.0
@@ -194,6 +228,11 @@ class NiftyVWAP1MinStraddle:
                 "adjustments": self.cycle_count,
                 "profit_target": self.profit_target,
                 "stop_loss": self.stop_loss,
+                "trade_count": self.trade_count,
+                "max_trades_per_day": self.max_trades_per_day,
+                "max_loss_per_trade": self.max_loss_per_trade,
+                "cooldown_active": time.time() < self._cooldown_until,
+                "api_error_streak": self._api_error_streak,
             },
         )
 
@@ -265,7 +304,23 @@ class NiftyVWAP1MinStraddle:
             to_date=today,
         )
         if df.empty:
+            err = self.helper.last_api_error
+            if err:
+                logger.error(
+                    f"Candle fetch API error for ID {security_id}: "
+                    f"[{err.get('code') or err.get('type')}] {err.get('message')}"
+                )
+                self._api_error_streak += 1
+                if self._api_error_streak == API_ERROR_ALERT_STREAK:
+                    logger.critical(
+                        f"Data API has failed {self._api_error_streak} consecutive candle fetches "
+                        "(check Dhan Data API subscription — DH-902 lapse or similar). "
+                        "VWAP will not refresh until this clears."
+                    )
+            else:
+                logger.warning(f"No candle data returned for ID {security_id} (empty response, no API error).")
             return df
+        self._api_error_streak = 0
 
         # Normalize column names to lowercase
         df.columns = [c.lower() for c in df.columns]
@@ -395,6 +450,49 @@ class NiftyVWAP1MinStraddle:
             return sid, ltp, name
         return None, 0.0, ""
 
+    def _spread_ok(self, ce_id: str, pe_id: str) -> bool:
+        """
+        Reject entry if either leg's bid-ask spread is too wide (illiquid strike, poor fill risk).
+        Fails open (allows entry) with a warning if depth data is missing/malformed, since the
+        quote endpoint's depth shape can vary and we don't want a parsing gap to silently disable
+        all entries.
+        """
+        if self.max_spread_pct <= 0:
+            return True
+        try:
+            sids = [int(ce_id), int(pe_id)]
+        except (TypeError, ValueError):
+            return True
+        try:
+            quotes = self.helper.get_quote_data({"NSE_FNO": sids})
+        except Exception as e:
+            logger.warning(f"Spread check: get_quote_data failed ({e}); allowing entry.")
+            return True
+
+        leg_data = (quotes or {}).get("NSE_FNO", {})
+        for sid, leg in [(ce_id, "CE"), (pe_id, "PE")]:
+            entry = leg_data.get(str(int(sid)), {}) if leg_data else {}
+            depth = entry.get("depth", {})
+            buy_levels = depth.get("buy") or []
+            sell_levels = depth.get("sell") or []
+            if not buy_levels or not sell_levels:
+                logger.warning(f"Spread check: no depth data for {leg} (ID: {sid}); allowing entry.")
+                continue
+            bid = float(buy_levels[0].get("price", 0) or 0)
+            ask = float(sell_levels[0].get("price", 0) or 0)
+            if bid <= 0 or ask <= 0:
+                logger.warning(f"Spread check: invalid bid/ask for {leg} (ID: {sid}); allowing entry.")
+                continue
+            mid = (bid + ask) / 2
+            spread_pct = (ask - bid) / mid * 100 if mid > 0 else 0.0
+            if spread_pct > self.max_spread_pct:
+                logger.info(
+                    f"Spread check: {leg} (ID: {sid}) spread {spread_pct:.1f}% "
+                    f"(bid={bid:.2f} ask={ask:.2f}) exceeds max {self.max_spread_pct:.1f}%."
+                )
+                return False
+        return True
+
     # ── entry / exit orders ──────────────────────────────────────────────────
 
     def _enter_straddle(self, ce_id: str, pe_id: str, ce_ltp: float, pe_ltp: float) -> bool:
@@ -425,6 +523,9 @@ class NiftyVWAP1MinStraddle:
         self.pe_avg = pe_fill
         self.entry_combined = ce_fill + pe_fill
         self.in_position = True
+        self.ce_closed = False
+        self.pe_closed = False
+        self.trade_count += 1
         logger.info(
             f"ENTERED straddle | CE {self.ce_strike} @ {ce_fill:.2f}"
             f" | PE {self.pe_strike} @ {pe_fill:.2f}"
@@ -433,29 +534,60 @@ class NiftyVWAP1MinStraddle:
         )
         return True
 
-    def _exit_straddle(self, reason: str):
+    def _close_leg_with_retry(self, sid: str, qty: int, leg: str, attempts: int = EXIT_RETRY_ATTEMPTS) -> bool:
+        """Attempt to buy-to-cover a leg, retrying on failed placement or unfilled order."""
+        for attempt in range(1, attempts + 1):
+            try:
+                oid = self.helper.buy(sid, qty)
+            except Exception as e:
+                logger.error(f"Exit {leg} error (attempt {attempt}/{attempts}): {e}")
+                oid = None
+            if oid and self.helper.wait_for_fill(oid, timeout=5):
+                return True
+            logger.warning(f"Exit attempt {attempt}/{attempts} failed for {leg} (ID: {sid}, order_id={oid}).")
+            if attempt < attempts:
+                time.sleep(1)
+        return False
+
+    def _exit_straddle(self, reason: str) -> bool:
+        """
+        Attempt to close both legs. Returns True only if both legs are confirmed closed.
+        On partial failure, the successfully-closed leg is marked so it isn't re-submitted;
+        in_position stays True so the caller retries the remaining leg on the next tick.
+        """
         logger.warning(f"EXITING straddle: {reason}")
         qty = self.lots * self.lot_size
         ce_ltp = self._ltp(self.ce_id) or self.ce_avg
         pe_ltp = self._ltp(self.pe_id) or self.pe_avg
 
         if not self.dry_run:
-            for sid, leg in [(self.ce_id, "CE"), (self.pe_id, "PE")]:
-                try:
-                    oid = self.helper.buy(sid, qty)
-                    if not oid:
-                        logger.critical(f"Exit order FAILED for {leg} (ID: {sid})!")
-                except Exception as e:
-                    logger.error(f"Exit {leg} error: {e}")
+            for leg, sid, attr in [("CE", self.ce_id, "ce_closed"), ("PE", self.pe_id, "pe_closed")]:
+                if getattr(self, attr):
+                    continue
+                if self._close_leg_with_retry(sid, qty, leg):
+                    setattr(self, attr, True)
+                else:
+                    logger.critical(
+                        f"Exit order FAILED for {leg} (ID: {sid}) after {EXIT_RETRY_ATTEMPTS} attempts! "
+                        "Leg remains OPEN in the market — will retry again next tick."
+                    )
         else:
+            self.ce_closed = True
+            self.pe_closed = True
             logger.info(f"[DRY RUN] BUY-TO-COVER | CE @ {ce_ltp:.2f} | PE @ {pe_ltp:.2f}")
+
+        if not (self.ce_closed and self.pe_closed):
+            return False
 
         realized = (self.ce_avg - ce_ltp) * qty + (self.pe_avg - pe_ltp) * qty
         self.realized_pnl += realized
+        if realized < 0:
+            self._cooldown_until = time.time() + self.cooldown_seconds
         logger.info(
             f"Exit PnL this cycle: {realized:.2f} | Session realized: {self.realized_pnl:.2f}"
         )
         self._reset_position()
+        return True
 
     def _get_fill_price(self, order_id: str, fallback: float) -> float:
         if not order_id:
@@ -516,6 +648,8 @@ class NiftyVWAP1MinStraddle:
             f" | exit_buffer={self.exit_buffer}pts"
             f" | max_diff={self.max_premium_diff_pct}%"
             f" | warmup={self.vwap_warmup_bars} 1-min bars"
+            f" | max_loss_per_trade={self.max_loss_per_trade} | max_trades_per_day={self.max_trades_per_day}"
+            f" | cooldown={self.cooldown_seconds}s | max_spread={self.max_spread_pct}%"
         )
 
         while True:
@@ -541,6 +675,8 @@ class NiftyVWAP1MinStraddle:
             ce_id, pe_id, ce_ltp, pe_ltp = result
             last_atm = self._atm(spot)
             last_log_time = 0.0
+            last_cap_log_time = 0.0
+            last_cooldown_log_time = 0.0
             pending_atm: int = 0
 
             # ── Inner monitoring loop ──────────────────────────────────────────
@@ -549,14 +685,20 @@ class NiftyVWAP1MinStraddle:
                     ce_p = self._ltp(ce_id) or ce_ltp
                     pe_p = self._ltp(pe_id) or pe_ltp
                     if self.in_position:
-                        self._exit_straddle("UI Shutdown Request")
+                        if not self._exit_straddle("UI Shutdown Request"):
+                            logger.critical(
+                                "Shutdown requested but exit did not fully confirm — "
+                                "a leg may remain OPEN in the market!"
+                            )
                     self._save_state(spot, ce_p, pe_p, self.realized_pnl, "STOPPED")
                     sys.exit(0)
 
                 now = datetime.now()
                 if now.strftime("%H:%M") >= "15:17":
                     if self.in_position:
-                        self._exit_straddle("Intraday Auto-Exit 15:17")
+                        if not self._exit_straddle("Intraday Auto-Exit 15:17"):
+                            time.sleep(1)
+                            continue
                     logger.info("Session ended at 15:17. Waiting for next day.")
                     self._unsubscribe(ce_id, pe_id)
                     self._reset_position()
@@ -610,7 +752,9 @@ class NiftyVWAP1MinStraddle:
                 # ── Global P&L guards ─────────────────────────────────────────
                 if total_pnl >= self.profit_target:
                     if self.in_position:
-                        self._exit_straddle(f"Global Profit Target hit: {total_pnl:.2f}")
+                        if not self._exit_straddle(f"Global Profit Target hit: {total_pnl:.2f}"):
+                            time.sleep(1)
+                            continue
                     logger.info("Profit target reached. Waiting for next session.")
                     self._unsubscribe(ce_id, pe_id)
                     if not self.helper.wait_for_next_day_market_open(self.dry_run, shutdown_check=lambda: check_shutdown_trigger(STRATEGY_KEY)):
@@ -621,7 +765,9 @@ class NiftyVWAP1MinStraddle:
 
                 if total_pnl <= self.stop_loss:
                     if self.in_position:
-                        self._exit_straddle(f"Global Stop Loss hit: {total_pnl:.2f}")
+                        if not self._exit_straddle(f"Global Stop Loss hit: {total_pnl:.2f}"):
+                            time.sleep(1)
+                            continue
                     logger.info("Stop loss hit. Waiting for next session.")
                     self._unsubscribe(ce_id, pe_id)
                     if not self.helper.wait_for_next_day_market_open(self.dry_run, shutdown_check=lambda: check_shutdown_trigger(STRATEGY_KEY)):
@@ -660,14 +806,39 @@ class NiftyVWAP1MinStraddle:
 
                 # ── State-machine logic ───────────────────────────────────────
                 if self.in_position:
+                    unrealized = self._unrealized_pnl(ce_ltp, pe_ltp)
+                    # Hard per-trade stop-loss, independent of VWAP drift
+                    if self.max_loss_per_trade > 0 and unrealized <= -self.max_loss_per_trade:
+                        self._exit_straddle(
+                            f"Per-trade stop-loss hit: unrealized {unrealized:.2f} <= "
+                            f"-{self.max_loss_per_trade:.2f}"
+                        )
                     # Exit when combined premium rises above VWAP + exit_buffer
-                    if self._vwap_ready() and combined > self.candle_vwap + self.exit_buffer:
+                    elif self._vwap_ready() and combined > self.candle_vwap + self.exit_buffer:
                         self._exit_straddle(
                             f"Combined {combined:.2f} > VWAP({self.candle_vwap:.2f})"
                             f" + buffer({self.exit_buffer})"
                         )
                 else:
                     if not self._vwap_ready():
+                        time.sleep(1)
+                        continue
+
+                    if self.max_trades_per_day > 0 and self.trade_count >= self.max_trades_per_day:
+                        if now_ts - last_cap_log_time >= 30:
+                            logger.info(
+                                f"Daily trade cap reached ({self.trade_count}/{self.max_trades_per_day}). "
+                                "No further entries today."
+                            )
+                            last_cap_log_time = now_ts
+                        time.sleep(1)
+                        continue
+
+                    if time.time() < self._cooldown_until:
+                        remaining = int(self._cooldown_until - time.time())
+                        if now_ts - last_cooldown_log_time >= 15:
+                            logger.info(f"In post-loss cooldown for {remaining}s more. Skipping entry checks.")
+                            last_cooldown_log_time = now_ts
                         time.sleep(1)
                         continue
 
@@ -683,15 +854,18 @@ class NiftyVWAP1MinStraddle:
                     diff_ok = diff_pct < self.max_premium_diff_pct
 
                     if price_ok and declining and diff_ok:
-                        logger.info(
-                            f"Entry signal: combined {combined:.2f} <= VWAP {self.candle_vwap:.2f}"
-                            f" + band {self.entry_band}"
-                            f" | declining over {self.decline_ticks} ticks"
-                            f" | diff {diff_pct:.1f}% < {self.max_premium_diff_pct}%"
-                        )
-                        success = self._enter_straddle(ce_id, pe_id, ce_ltp, pe_ltp)
-                        if not success:
-                            logger.warning("Entry failed; will retry next tick.")
+                        if not self._spread_ok(ce_id, pe_id):
+                            logger.info("Entry gates passed but bid-ask spread too wide; skipping entry.")
+                        else:
+                            logger.info(
+                                f"Entry signal: combined {combined:.2f} <= VWAP {self.candle_vwap:.2f}"
+                                f" + band {self.entry_band}"
+                                f" | declining over {self.decline_ticks} ticks"
+                                f" | diff {diff_pct:.1f}% < {self.max_premium_diff_pct}%"
+                            )
+                            success = self._enter_straddle(ce_id, pe_id, ce_ltp, pe_ltp)
+                            if not success:
+                                logger.warning("Entry failed; will retry next tick.")
                     elif price_ok and not declining:
                         logger.debug(
                             f"Price OK ({combined:.2f}) but not yet declining. Waiting."
@@ -743,6 +917,14 @@ Examples:
                         help="Global profit target in INR (default: 4000)")
     parser.add_argument("--stop-loss", type=float, default=4000.0, metavar="INR",
                         help="Global stop loss in INR, positive value (default: 4000)")
+    parser.add_argument("--max-loss-per-trade", type=float, default=1500.0, metavar="INR",
+                        help="Hard stop-loss per cycle, independent of VWAP (default: 1500, 0=disabled)")
+    parser.add_argument("--max-trades-per-day", type=int, default=15, metavar="N",
+                        help="Max entries per session (default: 15, 0=unlimited)")
+    parser.add_argument("--cooldown-seconds", type=int, default=90, metavar="N",
+                        help="Pause entries for N seconds after a losing cycle (default: 90)")
+    parser.add_argument("--max-spread-pct", type=float, default=8.0, metavar="PCT",
+                        help="Max bid-ask spread %% per leg to allow entry (default: 8, 0=disabled)")
 
     args = parser.parse_args()
 
@@ -752,6 +934,8 @@ Examples:
         f" decline_ticks={args.decline_ticks} exit_buffer={args.exit_buffer}pts"
         f" max_diff={args.max_premium_diff}% warmup={args.vwap_warmup_bars} bars"
         f" profit={args.target_profit} sl={args.stop_loss}"
+        f" max_loss_per_trade={args.max_loss_per_trade} max_trades_per_day={args.max_trades_per_day}"
+        f" cooldown={args.cooldown_seconds}s max_spread={args.max_spread_pct}%"
     )
 
     try:
@@ -766,6 +950,10 @@ Examples:
             vwap_warmup_bars=args.vwap_warmup_bars,
             profit_target=args.target_profit,
             stop_loss=args.stop_loss,
+            max_loss_per_trade=args.max_loss_per_trade,
+            max_trades_per_day=args.max_trades_per_day,
+            cooldown_seconds=args.cooldown_seconds,
+            max_spread_pct=args.max_spread_pct,
         )
     except Exception as init_err:
         logger.critical(f"Strategy initialisation failed: {init_err}", exc_info=True)
