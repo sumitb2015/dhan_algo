@@ -276,6 +276,12 @@ export default function Baskets() {
 
   const daysLeft = useMemo(() => (expiry ? daysToExpiry(expiry) : null), [expiry]);
 
+  // True once legs exist but none of them have any premium (neither live WS
+  // nor the chain's previous_close) — almost always means the market is
+  // closed, since Dhan's option-chain API can return previous_close=0 for
+  // legs outside trading hours even though the chain itself loaded fine.
+  const premiumsUnavailable = legs.length > 0 && legs.every(l => effectivePremium(l) <= 0);
+
   // ── Order placement ─────────────────────────────────────────────
   type PlacedLeg = { label: string; side: 'B' | 'S'; option: OptionType; strike: number; qty: number };
 
@@ -605,6 +611,11 @@ export default function Baskets() {
               <div className="ml-auto text-[11px] text-zinc-500 leading-snug text-right">
                 <p className="font-semibold text-zinc-400">{totalQty} lots · {totalQty * lotSize} qty total</p>
                 <p>Buys placed before sells · {lotSize} qty per lot</p>
+                {premiumsUnavailable && (
+                  <p className="text-amber-400 font-semibold mt-0.5">
+                    No live/previous-close premium from broker — market may be closed. MARKET orders will still fill at the broker&apos;s prevailing price; enter a Price manually to preview payoff.
+                  </p>
+                )}
               </div>
             </div>
           )}
@@ -640,6 +651,11 @@ export default function Baskets() {
               points={payoff?.points ?? []}
               breakevens={payoff?.breakevens ?? []}
               spot={spot}
+              emptyReason={
+                premiumsUnavailable
+                  ? 'No premium data from broker — market may be closed. Enter prices manually in the Price column to preview payoff.'
+                  : undefined
+              }
             />
             <p className="text-[10px] text-zinc-600 mt-2">
               Expiry payoff only (no T+0 curve) · margin calculation not available from broker

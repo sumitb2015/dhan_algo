@@ -6,6 +6,7 @@ interface BasketPayoffChartProps {
   points: { x: number; y: number }[];   // expiry P&L curve
   breakevens: number[];
   spot: number;
+  emptyReason?: string;
 }
 
 const W = 760;
@@ -33,7 +34,7 @@ function niceTicks(lo: number, hi: number, count: number): number[] {
   return ticks;
 }
 
-export default function BasketPayoffChart({ points, breakevens, spot }: BasketPayoffChartProps) {
+export default function BasketPayoffChart({ points, breakevens, spot, emptyReason }: BasketPayoffChartProps) {
   const svgRef = useRef<SVGSVGElement | null>(null);
   const [hover, setHover] = useState<{ x: number; y: number } | null>(null);
 
@@ -65,7 +66,7 @@ export default function BasketPayoffChart({ points, breakevens, spot }: BasketPa
     return (
       <div className="flex flex-col items-center justify-center h-80 gap-1.5 text-zinc-500">
         <p className="text-sm font-semibold text-zinc-400">No payoff to show yet</p>
-        <p className="text-xs">Pick a strategy or add legs with valid prices</p>
+        <p className="text-xs">{emptyReason ?? 'Pick a strategy or add legs with valid prices'}</p>
       </div>
     );
   }
