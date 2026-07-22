@@ -57,7 +57,8 @@ function resolveToLeg(
     qtyLots: lots,
     price: legData.last_price,
     delta: legData.greeks?.delta ?? null,
-    iv: legData.implied_volatility ?? null,
+    iv: typeof legData.implied_volatility === 'number' ? legData.implied_volatility / 100 : null,
+    vega: legData.greeks?.vega ?? null,
     securityId: legData.security_id ? String(legData.security_id) : null,
   };
 }

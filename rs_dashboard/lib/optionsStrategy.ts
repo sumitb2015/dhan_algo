@@ -166,6 +166,12 @@ export interface ChainOc {
   [strike: string]: { ce?: ChainLegData; pe?: ChainLegData };
 }
 
+/** Shared strike-key lookup (exact match, then fixed-decimal, then nearest-float fallback). */
+export function lookupChainLegData(oc: ChainOc, strike: number, type: OptType): ChainLegData | undefined {
+  const entry = oc[String(strike)] ?? oc[strike.toFixed(6)] ?? Object.entries(oc).find(([k]) => Math.abs(parseFloat(k) - strike) < 0.01)?.[1];
+  return type === 'CE' ? entry?.ce : entry?.pe;
+}
+
 export interface ResolvedLeg {
   strike: number;
   type: OptType;
@@ -174,6 +180,7 @@ export interface ResolvedLeg {
   price: number;
   delta: number | null;
   iv: number | null;
+  vega: number | null;
   securityId: string | null;
 }
 
@@ -194,8 +201,7 @@ export function resolveLegs(
 
   for (const spec of specs) {
     const strike = atm + spec.offsetStrikes * STRIKE_STEP;
-    const entry = oc[String(strike)] ?? oc[strike.toFixed(6)] ?? Object.entries(oc).find(([k]) => Math.abs(parseFloat(k) - strike) < 0.01)?.[1];
-    const legData = spec.type === 'CE' ? entry?.ce : entry?.pe;
+    const legData = lookupChainLegData(oc, strike, spec.type);
 
     if (!legData || typeof legData.last_price !== 'number') {
       missingStrikes.push(strike);
@@ -209,7 +215,51 @@ export function resolveLegs(
       qtyLots: lots * spec.qtyRatio,
       price: legData.last_price,
       delta: legData.greeks?.delta ?? null,
-      iv: legData.implied_volatility ?? null,
+      // Dhan's chain API returns implied_volatility as a raw percentage (e.g. 10.5 for
+      // 10.5%), but bsPrice() takes a fraction (0.105) — normalize at the read boundary.
+      iv: typeof legData.implied_volatility === 'number' ? legData.implied_volatility / 100 : null,
+      vega: legData.greeks?.vega ?? null,
+      securityId: legData.security_id ? String(legData.security_id) : null,
+    });
+  }
+
+  return { legs, missingStrikes };
+}
+
+// ── Freeform leg resolution (explicit strikes, not template offsets) ───────────
+
+export interface FreeformLegSpec {
+  strike: number;
+  type: OptType;
+  side: Side;
+  qtyLots: number;
+}
+
+/** Same chain-lookup contract as resolveLegs(), but strikes are given explicitly. */
+export function resolveFreeformLegs(
+  specs: FreeformLegSpec[],
+  oc: ChainOc,
+): { legs: ResolvedLeg[]; missingStrikes: number[] } {
+  const legs: ResolvedLeg[] = [];
+  const missingStrikes: number[] = [];
+
+  for (const spec of specs) {
+    const legData = lookupChainLegData(oc, spec.strike, spec.type);
+
+    if (!legData || typeof legData.last_price !== 'number') {
+      missingStrikes.push(spec.strike);
+      continue;
+    }
+
+    legs.push({
+      strike: spec.strike,
+      type: spec.type,
+      side: spec.side,
+      qtyLots: spec.qtyLots,
+      price: legData.last_price,
+      delta: legData.greeks?.delta ?? null,
+      iv: typeof legData.implied_volatility === 'number' ? legData.implied_volatility / 100 : null,
+      vega: legData.greeks?.vega ?? null,
       securityId: legData.security_id ? String(legData.security_id) : null,
     });
   }
@@ -406,4 +456,69 @@ export function buildTargetPayoffCurve(
     }, 0) * lotSize;
     return { spot: s, pnl };
   });
+}
+
+// ── Strike × date P&L heatmap (Option Strats analyzer) ──────────────────────────
+
+export interface HeatmapGrid {
+  dates: string[]; // ISO YYYY-MM-DD, ascending, today..expiryDate inclusive
+  rows: number[];  // hypothetical underlying spot levels, descending
+  cells: number[][]; // cells[rowIndex][colIndex] = net P&L (rupees)
+}
+
+/**
+ * Grid of net P&L across hypothetical underlying spot levels (rows) and calendar
+ * dates from today through expiryDate (columns). The expiry-day column prices
+ * intrinsically (t=0, matches legPayoffAtExpiry); earlier columns use bsPrice()
+ * with each leg's live IV scaled by ivMultiplier — a pure stress-test knob that
+ * never mutates the resolved legs themselves.
+ */
+/** Local calendar date as YYYY-MM-DD — toISOString() would format in UTC and shift the
+ *  date backward for any positive-offset zone (e.g. IST), mislabeling every column. */
+function toLocalIsoDate(d: Date): string {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
+}
+
+export function buildHeatmapGrid(
+  legs: ResolvedLeg[],
+  spot: number,
+  lotSize: number,
+  expiryDate: string,
+  rangePct: number,
+  ivMultiplier: number,
+): HeatmapGrid {
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const expiry = new Date(expiryDate);
+  expiry.setHours(0, 0, 0, 0);
+  const totalDays = Math.max(0, Math.round((expiry.getTime() - today.getTime()) / 86_400_000));
+
+  const dates: string[] = [];
+  for (let d = 0; d <= totalDays; d++) {
+    dates.push(toLocalIsoDate(new Date(today.getTime() + d * 86_400_000)));
+  }
+
+  const span = spot * rangePct;
+  const lo = Math.floor((spot - span) / STRIKE_STEP) * STRIKE_STEP;
+  const hi = Math.ceil((spot + span) / STRIKE_STEP) * STRIKE_STEP;
+  const rows: number[] = [];
+  for (let s = hi; s >= lo; s -= STRIKE_STEP) rows.push(s);
+
+  const cells = rows.map((rowSpot) => dates.map((_, colIdx) => {
+    const daysToExpiry = totalDays - colIdx;
+    const t = daysToExpiry / 365;
+    return legs.reduce((sum, leg) => {
+      const iv = (leg.iv ?? 0) * ivMultiplier;
+      const price = (t > 0 && iv > 0)
+        ? bsPrice(leg.type, rowSpot, leg.strike, t, iv)
+        : (leg.type === 'CE' ? Math.max(rowSpot - leg.strike, 0) : Math.max(leg.strike - rowSpot, 0));
+      const perUnit = leg.side === 'SELL' ? (leg.price - price) : (price - leg.price);
+      return sum + perUnit * leg.qtyLots;
+    }, 0) * lotSize;
+  }));
+
+  return { dates, rows, cells };
 }

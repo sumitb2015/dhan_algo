@@ -85,7 +85,8 @@ export default function SavedStrategiesTab() {
             qtyLots: leg.qty_lots,
             price: chainLeg?.last_price ?? leg.entry_price,
             delta: chainLeg?.greeks?.delta ?? leg.entry_delta,
-            iv: chainLeg?.implied_volatility ?? null,
+            iv: typeof chainLeg?.implied_volatility === 'number' ? chainLeg.implied_volatility / 100 : null,
+            vega: chainLeg?.greeks?.vega ?? null,
             securityId: chainLeg?.security_id ? String(chainLeg.security_id) : leg.security_id,
           };
         });

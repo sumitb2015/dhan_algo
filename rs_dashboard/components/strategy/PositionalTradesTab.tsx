@@ -329,7 +329,8 @@ export default function PositionalTradesTab({ lotSize }: { lotSize: number | nul
         qtyLots: trade.lots * l.qtyRatio,
         price: l.entryPrice, // Base payoff curve relative to entry cost
         delta: chainLeg?.greeks?.delta ?? null,
-        iv: chainLeg?.implied_volatility ?? null,
+        iv: typeof chainLeg?.implied_volatility === 'number' ? chainLeg.implied_volatility / 100 : null,
+        vega: chainLeg?.greeks?.vega ?? null,
         securityId: l.securityId,
       };
     });
