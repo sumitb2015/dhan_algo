@@ -1676,15 +1676,23 @@ export interface PositionsTableProps {
   onClose: (pos: Record<string, unknown>) => void;
   sort: SortState;
   onSort: (key: string) => void;
+  // Set when the last positions fetch failed (network/API error) rather than
+  // genuinely returning zero positions — lets the empty state say so instead
+  // of implying the account is flat.
+  error?: string | null;
 }
 
-export const PositionsTable = React.memo(function PositionsTable({ data, guards, closingPositions, onGuardChange, onTrailToggle, onClose, sort, onSort }: PositionsTableProps) {
+export const PositionsTable = React.memo(function PositionsTable({ data, guards, closingPositions, onGuardChange, onTrailToggle, onClose, sort, onSort, error }: PositionsTableProps) {
   const sortedData = useMemo(() => sortRows(data, sort), [data, sort]);
 
   if (!data.length) {
     return (
-      <div className="flex items-center justify-center h-32 text-zinc-600 text-sm">
-        No positions data
+      <div className="flex items-center justify-center h-32 text-sm" title={error ?? undefined}>
+        {error ? (
+          <span className="text-amber-500">Failed to load positions — retrying… ({error})</span>
+        ) : (
+          <span className="text-zinc-600">No positions data</span>
+        )}
       </div>
     );
   }

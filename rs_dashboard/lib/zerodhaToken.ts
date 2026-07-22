@@ -6,7 +6,7 @@ const TOKEN_FILE = path.join(PROJECT_ROOT, 'zerodha_access_token.json');
 const ENV_FILE = path.join(PROJECT_ROOT, '.env.zerodha');
 const KITE_BASE = 'https://api.kite.trade';
 
-interface ZerodhaTokenCache { apiKey: string; accessToken: string; ts: number }
+interface ZerodhaTokenCache { apiKey: string; accessToken: string; ts: number; fileMtimeMs: number }
 let cache: ZerodhaTokenCache | null = null;
 const TOKEN_TTL = 5 * 60 * 1000;
 
@@ -40,14 +40,22 @@ function readApiKey(): string {
 /**
  * Cached Zerodha credentials for direct REST calls from Node (no Python spawn).
  * Reads the api key from .env.zerodha and the access token from zerodha_access_token.json.
+ *
+ * Invalidated on either the TTL OR the token file's mtime changing — see the
+ * matching comment in dhanToken.ts's getDhanCredentials() for why a bare TTL
+ * alone isn't enough (a fresh login while the server is already running would
+ * otherwise keep serving a stale/revoked token for up to 5 minutes).
  */
 export function getZerodhaCredentials(): { apiKey: string; accessToken: string } {
-  if (cache && Date.now() - cache.ts < TOKEN_TTL) {
+  let fileMtimeMs = 0;
+  try { fileMtimeMs = fs.statSync(TOKEN_FILE).mtimeMs; } catch { /* fall through to full read below */ }
+
+  if (cache && cache.fileMtimeMs === fileMtimeMs && Date.now() - cache.ts < TOKEN_TTL) {
     return { apiKey: cache.apiKey, accessToken: cache.accessToken };
   }
   const raw = JSON.parse(fs.readFileSync(TOKEN_FILE, 'utf8')) as { accessToken: string };
   const apiKey = readApiKey();
-  cache = { apiKey, accessToken: raw.accessToken, ts: Date.now() };
+  cache = { apiKey, accessToken: raw.accessToken, ts: Date.now(), fileMtimeMs };
   return { apiKey: cache.apiKey, accessToken: cache.accessToken };
 }
 

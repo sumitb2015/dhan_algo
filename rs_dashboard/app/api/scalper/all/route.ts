@@ -5,8 +5,13 @@ import { dhanGet } from '@/lib/dhanToken';
 // scalper_api.py subprocess and its ~10s Python cold-start per request.
 export async function GET(): Promise<NextResponse> {
   try {
+    let positionsError: string | null = null;
     const [positions, orders, trades, funds, pnlGuard] = await Promise.all([
-      dhanGet('/positions').catch(() => []),
+      dhanGet('/positions').catch(err => {
+        positionsError = String(err?.message ?? err);
+        console.error('[/api/scalper/all] positions fetch failed:', err);
+        return null;
+      }),
       dhanGet('/orders').catch(() => []),
       dhanGet('/trades').catch(() => []),
       dhanGet('/fundlimit').catch(() => ({})),
@@ -16,6 +21,7 @@ export async function GET(): Promise<NextResponse> {
     return NextResponse.json({
       success: true,
       positions: Array.isArray(positions) ? positions : [],
+      positionsError,
       orders: Array.isArray(orders) ? orders : [],
       trades: Array.isArray(trades) ? trades : [],
       funds: funds ?? {},

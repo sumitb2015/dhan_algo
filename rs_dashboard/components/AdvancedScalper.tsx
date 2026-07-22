@@ -78,6 +78,7 @@ export default function AdvancedScalper() {
   // Bottom tabs
   const [activeTab, setActiveTab]       = useState<'positions' | 'orders' | 'trades' | 'funds'>('positions');
   const [positionsData, setPositionsData] = useState<Record<string, unknown>[]>([]);
+  const [positionsError, setPositionsError] = useState<string | null>(null);
   const [ordersData, setOrdersData]       = useState<Record<string, unknown>[]>([]);
   const [tradesData, setTradesData]       = useState<Record<string, unknown>[]>([]);
   const [fundsData, setFundsData]         = useState<Record<string, any> | null>(null);
@@ -358,9 +359,10 @@ export default function AdvancedScalper() {
     setTabLoading(true);
     fetch(brokerRoute(broker, '/api/scalper/all', '/api/scalper/zerodha/all'))
       .then(r => r.json())
-      .then((j: { success: boolean; positions?: Record<string, unknown>[]; orders?: Record<string, unknown>[]; trades?: Record<string, unknown>[]; funds?: Record<string, any>; pnl_guard?: any }) => {
+      .then((j: { success: boolean; positions?: Record<string, unknown>[]; positionsError?: string | null; orders?: Record<string, unknown>[]; trades?: Record<string, unknown>[]; funds?: Record<string, any>; pnl_guard?: any }) => {
         if (j.success) {
           setPositionsData(j.positions ?? []);
+          setPositionsError(j.positionsError ?? null);
           setOrdersData(j.orders ?? []);
           setTradesData(j.trades ?? []);
           setFundsData(j.funds ?? null);
@@ -374,9 +376,10 @@ export default function AdvancedScalper() {
   const pollTabData = useCallback(() => {
     fetch(brokerRoute(broker, '/api/scalper/poll', '/api/scalper/zerodha/poll'))
       .then(r => r.json())
-      .then((j: { success: boolean; positions?: Record<string, unknown>[]; orders?: Record<string, unknown>[]; trades?: Record<string, unknown>[] }) => {
+      .then((j: { success: boolean; positions?: Record<string, unknown>[]; positionsError?: string | null; orders?: Record<string, unknown>[]; trades?: Record<string, unknown>[] }) => {
         if (j.success) {
           setPositionsData(j.positions ?? []);
+          setPositionsError(j.positionsError ?? null);
           setOrdersData(j.orders ?? []);
           setTradesData(j.trades ?? []);
         }
@@ -1270,6 +1273,7 @@ export default function AdvancedScalper() {
               onClose={pos => closePosition(pos, 'Manual')}
               sort={tableSort}
               onSort={handleTableSort}
+              error={positionsError}
             />
           ) : (
             <TabTable

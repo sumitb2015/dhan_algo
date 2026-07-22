@@ -4,8 +4,13 @@ import { shapeZerodhaPosition, shapeZerodhaOrder, shapeZerodhaTrade } from '@/li
 
 export async function GET(): Promise<NextResponse> {
   try {
+    let positionsError: string | null = null;
     const [positions, orders, trades, margins] = await Promise.all([
-      kiteGet('/portfolio/positions').catch(() => ({ net: [] })) as Promise<{ net: any[] }>,
+      kiteGet('/portfolio/positions').catch(err => {
+        positionsError = String(err?.message ?? err);
+        console.error('[scalper/zerodha/all] positions fetch failed:', err);
+        return { net: [] };
+      }) as Promise<{ net: any[] }>,
       kiteGet('/orders').catch(() => []) as Promise<any[]>,
       kiteGet('/trades').catch(() => []) as Promise<any[]>,
       kiteGet('/user/margins').catch(() => ({})) as Promise<Record<string, any>>,
@@ -14,6 +19,7 @@ export async function GET(): Promise<NextResponse> {
     return NextResponse.json({
       success: true,
       positions: (positions.net ?? []).map(shapeZerodhaPosition),
+      positionsError,
       orders: (Array.isArray(orders) ? orders : []).map(shapeZerodhaOrder),
       trades: (Array.isArray(trades) ? trades : []).map(shapeZerodhaTrade),
       funds: { availabelBalance: margins?.equity?.net ?? 0 },

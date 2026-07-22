@@ -4,8 +4,13 @@ import { shapeZerodhaPosition, shapeZerodhaOrder, shapeZerodhaTrade } from '@/li
 
 export async function GET(): Promise<NextResponse> {
   try {
+    let positionsError: string | null = null;
     const [positions, orders, trades] = await Promise.all([
-      kiteGet('/portfolio/positions').catch(() => ({ net: [] })) as Promise<{ net: any[] }>,
+      kiteGet('/portfolio/positions').catch(err => {
+        positionsError = String(err?.message ?? err);
+        console.error('[scalper/zerodha/poll] positions fetch failed:', err);
+        return { net: [] };
+      }) as Promise<{ net: any[] }>,
       kiteGet('/orders').catch(() => []) as Promise<any[]>,
       kiteGet('/trades').catch(() => []) as Promise<any[]>,
     ]);
@@ -13,6 +18,7 @@ export async function GET(): Promise<NextResponse> {
     return NextResponse.json({
       success: true,
       positions: (positions.net ?? []).map(shapeZerodhaPosition),
+      positionsError,
       orders: (Array.isArray(orders) ? orders : []).map(shapeZerodhaOrder),
       trades: (Array.isArray(trades) ? trades : []).map(shapeZerodhaTrade),
     });

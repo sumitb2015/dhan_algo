@@ -4,16 +4,25 @@ import fs from 'fs';
 const PROJECT_ROOT = path.resolve(process.cwd(), '..');
 const TOKEN_FILE = path.join(PROJECT_ROOT, 'access_token.json');
 
-interface TokenCache { clientId: string; token: string; ts: number }
+interface TokenCache { clientId: string; token: string; ts: number; fileMtimeMs: number }
 let tokenCache: TokenCache | null = null;
-const TOKEN_TTL = 5 * 60 * 1000; // re-read file every 5 min in case of token refresh
+const TOKEN_TTL = 5 * 60 * 1000; // re-read file at least every 5 min regardless
 
 /**
  * Cached Dhan credentials for direct REST calls from Node (no Python spawn).
  * Reads client_id from the parent .env and the access token from access_token.json.
+ *
+ * Invalidated on either the TTL OR the token file's mtime changing — a bare
+ * TTL alone would keep serving a stale (and, after a fresh login.py run,
+ * actively revoked-by-Dhan) token from memory for up to 5 minutes after the
+ * file was rewritten, since the long-running Next.js process has no other
+ * way to notice a re-login happened.
  */
 export function getDhanCredentials(): { clientId: string; token: string } {
-  if (tokenCache && Date.now() - tokenCache.ts < TOKEN_TTL) {
+  let fileMtimeMs = 0;
+  try { fileMtimeMs = fs.statSync(TOKEN_FILE).mtimeMs; } catch { /* fall through to full read below */ }
+
+  if (tokenCache && tokenCache.fileMtimeMs === fileMtimeMs && Date.now() - tokenCache.ts < TOKEN_TTL) {
     return { clientId: tokenCache.clientId, token: tokenCache.token };
   }
 
@@ -33,7 +42,7 @@ export function getDhanCredentials(): { clientId: string; token: string } {
     accessToken: string;
   };
   const clientId = envClientId || process.env.client_id || raw.dhanClientId || raw.clientId || '';
-  tokenCache = { clientId, token: raw.accessToken, ts: Date.now() };
+  tokenCache = { clientId, token: raw.accessToken, ts: Date.now(), fileMtimeMs };
   return { clientId: tokenCache.clientId, token: tokenCache.token };
 }
 
