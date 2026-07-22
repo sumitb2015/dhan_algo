@@ -80,6 +80,10 @@ function monthLabel(key: string): string {
   return new Date(Date.UTC(y, m - 1, 1)).toLocaleDateString('en-IN', { month: 'long', year: 'numeric', timeZone: 'UTC' });
 }
 
+function yearKey(dateStr: string): string {
+  return dateStr.slice(0, 4);
+}
+
 // ─── Formatters ───────────────────────────────────────────────────────────────
 
 function fmtINR(n: number, compact = false): string {
@@ -148,8 +152,47 @@ function buildMonthlyBuckets(fromDate: string, toDate: string, byDate: Map<strin
   return Array.from(map.values()).map(b => ({ ...b, grossPnl: round2(b.grossPnl), netPnl: round2(b.netPnl), charges: round2(b.charges), statutoryCharges: round2(b.statutoryCharges) }));
 }
 
+function buildYearlyBuckets(fromDate: string, toDate: string, byDate: Map<string, DailyPnlPoint>): Bucket[] {
+  const map = new Map<string, Bucket>();
+  let cursor = fromDate;
+  while (cursor <= toDate) {
+    const key = yearKey(cursor);
+    if (!map.has(key)) {
+      map.set(key, { label: key, startDate: cursor, endDate: cursor, tradeCount: 0, grossPnl: 0, netPnl: 0, charges: 0, statutoryCharges: 0 });
+    }
+    const b = map.get(key)!;
+    b.endDate = cursor;
+    const pt = byDate.get(cursor);
+    if (pt) { b.tradeCount += pt.tradeCount; b.grossPnl += pt.grossPnl; b.netPnl += pt.netPnl; b.charges += pt.charges; b.statutoryCharges += pt.statutoryCharges; }
+    cursor = addDaysUTC(cursor, 1);
+  }
+  return Array.from(map.values()).map(b => ({ ...b, grossPnl: round2(b.grossPnl), netPnl: round2(b.netPnl), charges: round2(b.charges), statutoryCharges: round2(b.statutoryCharges) }));
+}
+
 function round2(n: number): number {
   return Math.round(n * 100) / 100;
+}
+
+// Merge two per-date P&L series (e.g. FNO + COMMODITY) into one, summing overlapping dates.
+function mergeDailyPnl(...series: DailyPnlPoint[][]): DailyPnlPoint[] {
+  const byDate = new Map<string, DailyPnlPoint>();
+  for (const pts of series) {
+    for (const pt of pts) {
+      const existing = byDate.get(pt.date);
+      if (existing) {
+        existing.grossPnl += pt.grossPnl;
+        existing.charges += pt.charges;
+        existing.statutoryCharges += pt.statutoryCharges;
+        existing.netPnl += pt.netPnl;
+        existing.tradeCount += pt.tradeCount;
+      } else {
+        byDate.set(pt.date, { ...pt });
+      }
+    }
+  }
+  return Array.from(byDate.values())
+    .map(pt => ({ ...pt, grossPnl: round2(pt.grossPnl), charges: round2(pt.charges), statutoryCharges: round2(pt.statutoryCharges), netPnl: round2(pt.netPnl) }))
+    .sort((a, b) => a.date.localeCompare(b.date));
 }
 
 // ─── Stats (streaks/in-profit use GROSS P&L per day — verified against Dhan's own Trader's Diary:
@@ -194,7 +237,7 @@ function StatChip({ value, label, color }: { value: number | string; label: stri
 
 // ─── Main Component ───────────────────────────────────────────────────────────
 
-type Tab = 'weekly' | 'monthly' | 'daily' | 'chart';
+type Tab = 'yearly' | 'weekly' | 'monthly' | 'daily' | 'chart';
 
 type ChartMetric = 'grossPnl' | 'netPnl' | 'charges' | 'brokerage' | 'totalCharges';
 
@@ -211,7 +254,8 @@ export default function PortfolioDiaryDashboard() {
   const [loading, setLoading] = useState(true);
   const [tab, setTab] = useState<Tab>('weekly');
   const [selectedMonth, setSelectedMonth] = useState<string | null>(null);
-  const [segment, setSegment] = useState<'ALL' | 'EQUITY' | 'FNO' | 'COMMODITY'>('ALL');
+  const [selectedYear, setSelectedYear] = useState<string | null>(null);
+  const [segment, setSegment] = useState<'ALL' | 'EQUITY' | 'FNO' | 'COMMODITY' | 'TRADING' | 'INVESTING'>('ALL');
   const [chartMetric, setChartMetric] = useState<ChartMetric>('netPnl');
 
   const fetchData = useCallback(() => {
@@ -219,7 +263,11 @@ export default function PortfolioDiaryDashboard() {
       .then(r => r.json())
       .then(resp => {
         setData(resp);
-        if (resp.dailyPnl?.length) setSelectedMonth(monthKey(resp.dailyPnl[resp.dailyPnl.length - 1].date));
+        if (resp.dailyPnl?.length) {
+          const lastDate = resp.dailyPnl[resp.dailyPnl.length - 1].date;
+          setSelectedMonth(monthKey(lastDate));
+          setSelectedYear(yearKey(lastDate));
+        }
       })
       .catch(() => setData({ success: false, available: false }))
       .finally(() => setLoading(false));
@@ -229,7 +277,15 @@ export default function PortfolioDiaryDashboard() {
 
   const { syncing, syncError, startSync } = useTradeSync(fetchData);
 
-  const dailyPnl = data?.dailyPnlBySegment?.[segment] ?? data?.dailyPnl ?? [];
+  const dailyPnl = useMemo(() => {
+    if (segment === 'TRADING') {
+      return mergeDailyPnl(data?.dailyPnlBySegment?.FNO ?? [], data?.dailyPnlBySegment?.COMMODITY ?? []);
+    }
+    if (segment === 'INVESTING') {
+      return data?.dailyPnlBySegment?.EQUITY ?? [];
+    }
+    return data?.dailyPnlBySegment?.[segment] ?? data?.dailyPnl ?? [];
+  }, [data, segment]);
   const byDate = useMemo(() => new Map(dailyPnl.map(d => [d.date, d])), [dailyPnl]);
   const stats = useMemo(() => computeStats(dailyPnl), [dailyPnl]);
 
@@ -242,6 +298,12 @@ export default function PortfolioDiaryDashboard() {
     [data, byDate],
   );
   const monthKeys = useMemo(() => monthlyBuckets.map(b => monthKey(b.startDate)), [monthlyBuckets]);
+  const yearlyBuckets = useMemo(
+    () => (data?.fromDate && data?.toDate ? buildYearlyBuckets(data.fromDate, data.toDate, byDate) : []),
+    [data, byDate],
+  );
+  const yearKeys = useMemo(() => yearlyBuckets.map(b => yearKey(b.startDate)), [yearlyBuckets]);
+  const monthlyByKey = useMemo(() => new Map(monthlyBuckets.map(b => [monthKey(b.startDate), b])), [monthlyBuckets]);
 
   // Render all weeks side-by-side in a single row
 
@@ -292,6 +354,14 @@ export default function PortfolioDiaryDashboard() {
   }, [dailyPnl, selectedMonth]);
 
   const monthIdx = selectedMonth ? monthKeys.indexOf(selectedMonth) : -1;
+
+  const selectedYearStats = useMemo(() => {
+    if (!selectedYear) return null;
+    const yearDaily = dailyPnl.filter(d => yearKey(d.date) === selectedYear);
+    return computeStats(yearDaily);
+  }, [dailyPnl, selectedYear]);
+
+  const yearIdx = selectedYear ? yearKeys.indexOf(selectedYear) : -1;
 
   // Chart tab: only traded days, sorted chronologically, with a cumulative running total per metric
   const chartData = useMemo(() => {
@@ -388,7 +458,7 @@ export default function PortfolioDiaryDashboard() {
             <div className="flex items-center gap-3 flex-wrap">
               {/* Tabs */}
               <div className="flex items-center bg-zinc-900 border border-zinc-800 p-0.5 rounded-lg gap-0.5 w-fit">
-                {(['weekly', 'monthly', 'daily', 'chart'] as Tab[]).map(t => (
+                {(['yearly', 'weekly', 'monthly', 'daily', 'chart'] as Tab[]).map(t => (
                   <button
                     key={t}
                     onClick={() => setTab(t)}
@@ -417,15 +487,41 @@ export default function PortfolioDiaryDashboard() {
                   </button>
                 ))}
               </div>
+
+              {/* Trading vs Investing quick-filter */}
+              <div className="flex items-center bg-zinc-900 border border-zinc-800 p-0.5 rounded-lg gap-0.5 w-fit">
+                {([
+                  { key: 'TRADING', label: 'Trading', title: 'F&O + Commodity' },
+                  { key: 'INVESTING', label: 'Investing', title: 'Equity' },
+                ] as const).map(o => (
+                  <button
+                    key={o.key}
+                    onClick={() => setSegment(o.key)}
+                    title={o.title}
+                    className={cn(
+                      'px-3.5 py-1.5 text-[10px] font-semibold rounded-md transition-all uppercase tracking-wider',
+                      segment === o.key ? 'bg-sky-500/15 border border-sky-500/30 text-sky-400 font-bold' : 'text-zinc-500 hover:text-zinc-300 border border-transparent',
+                    )}
+                  >
+                    {o.label}
+                  </button>
+                ))}
+              </div>
             </div>
 
-            {/* Stats header — scoped to full range on Weekly tab, selected month on Monthly tab */}
+            {/* Stats header — scoped to full range on Weekly tab, selected month/year on Monthly/Yearly tabs */}
             {(() => {
-              const s = tab === 'monthly' && selectedMonthStats ? selectedMonthStats : stats;
-              const scopeLabel = tab === 'monthly' && selectedMonth ? monthLabel(selectedMonth) : `since ${data.fromDate}`;
+              const s = tab === 'monthly' && selectedMonthStats ? selectedMonthStats
+                : tab === 'yearly' && selectedYearStats ? selectedYearStats
+                : stats;
+              const scopeLabel = tab === 'monthly' && selectedMonth ? monthLabel(selectedMonth)
+                : tab === 'yearly' && selectedYear ? selectedYear
+                : `since ${data.fromDate}`;
               const marketDates = data.marketTradingDates ?? [];
               const tradingDaysCount = tab === 'monthly' && selectedMonth
                 ? marketDates.filter(d => monthKey(d) === selectedMonth).length
+                : tab === 'yearly' && selectedYear
+                ? marketDates.filter(d => yearKey(d) === selectedYear).length
                 : marketDates.length;
               return (
                 <div className="bg-zinc-900/60 border border-zinc-800/60 rounded-xl p-4 flex flex-col gap-4">
@@ -463,7 +559,94 @@ export default function PortfolioDiaryDashboard() {
               );
             })()}
 
-            {tab === 'weekly' ? (
+            {tab === 'yearly' ? (
+              <>
+                {/* Month-of-year calendar */}
+                <div className="bg-zinc-900/60 border border-zinc-800/60 rounded-xl p-4 w-fit">
+                  <div className="flex items-center justify-between mb-3 gap-4">
+                    <button
+                      onClick={() => yearIdx > 0 && setSelectedYear(yearKeys[yearIdx - 1])}
+                      disabled={yearIdx <= 0}
+                      className="p-1 rounded border border-zinc-800 text-amber-400 disabled:opacity-30 disabled:cursor-not-allowed hover:bg-zinc-800/50"
+                    >
+                      <ChevronLeft className="h-3.5 w-3.5" />
+                    </button>
+                    <span className="text-[11px] font-semibold text-zinc-300">{selectedYear ?? ''}</span>
+                    <button
+                      onClick={() => yearIdx >= 0 && yearIdx < yearKeys.length - 1 && setSelectedYear(yearKeys[yearIdx + 1])}
+                      disabled={yearIdx < 0 || yearIdx >= yearKeys.length - 1}
+                      className="p-1 rounded border border-zinc-800 text-amber-400 disabled:opacity-30 disabled:cursor-not-allowed hover:bg-zinc-800/50"
+                    >
+                      <ChevronRight className="h-3.5 w-3.5" />
+                    </button>
+                  </div>
+                  <div className="grid gap-2 w-fit" style={{ gridTemplateColumns: 'repeat(4, 64px)' }}>
+                    {Array.from({ length: 12 }, (_, i) => {
+                      const key = selectedYear ? `${selectedYear}-${String(i + 1).padStart(2, '0')}` : null;
+                      const b = key ? monthlyByKey.get(key) : null;
+                      const monthName = new Date(Date.UTC(2000, i, 1)).toLocaleDateString('en-IN', { month: 'short', timeZone: 'UTC' });
+                      return (
+                        <button
+                          key={i}
+                          disabled={!b}
+                          onClick={() => { if (key) { setSelectedMonth(key); setTab('monthly'); } }}
+                          title={b ? `${fmtINR(b.netPnl)} net (${b.tradeCount} trades)` : undefined}
+                          className={cn(
+                            'h-12 rounded flex flex-col items-center justify-center text-[10px] font-bold border transition-all duration-150',
+                            !b || b.tradeCount === 0 ? 'bg-zinc-900 border-zinc-800 text-zinc-500' :
+                            b.grossPnl > 0.005 ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-400 hover:bg-emerald-500/20' :
+                            b.grossPnl < -0.005 ? 'bg-red-500/10 border-red-500/30 text-red-400 hover:bg-red-500/20' :
+                            'bg-zinc-800 border-zinc-700 text-zinc-300',
+                          )}
+                        >
+                          {monthName}
+                        </button>
+                      );
+                    })}
+                  </div>
+                  {selectedYearStats && (
+                    <div className="mt-3 flex items-center gap-1.5 text-[10px] text-zinc-500">
+                      <Flame className="h-3 w-3 text-amber-500" />
+                      Total days you're profitable for: <span className="text-amber-400 font-semibold">{selectedYearStats.inProfitDays}/{selectedYearStats.tradedOn} traded days</span>
+                    </div>
+                  )}
+                </div>
+
+                {/* Yearly trades table */}
+                <div className="overflow-x-auto rounded-xl border border-zinc-800/60">
+                  <table className="w-full border-collapse">
+                    <thead className="bg-zinc-800">
+                      <tr>
+                        <th style={{ color: '#fff' }} className="py-2 px-2 text-xs font-bold uppercase tracking-wide text-left">Year</th>
+                        <th style={{ color: '#fff' }} className="py-2 px-2 text-xs font-bold uppercase tracking-wide text-right">No. of Trades</th>
+                        <th style={{ color: '#fff' }} className="py-2 px-2 text-xs font-bold uppercase tracking-wide text-right">Overall P&amp;L</th>
+                        <th style={{ color: '#fff' }} className="py-2 px-2 text-xs font-bold uppercase tracking-wide text-right">Net P&amp;L</th>
+                        <th style={{ color: '#fff' }} className="py-2 px-2 text-xs font-bold uppercase tracking-wide text-right">Charges</th>
+                        <th style={{ color: '#fff' }} className="py-2 px-2 text-xs font-bold uppercase tracking-wide text-right">Brokerage</th>
+                        <th style={{ color: '#fff' }} className="py-2 px-2 text-xs font-bold uppercase tracking-wide text-right">Total Charges</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {yearlyBuckets.map(y => (
+                        <tr
+                          key={y.startDate}
+                          onClick={() => setSelectedYear(yearKey(y.startDate))}
+                          className="border-b border-zinc-900/60 hover:bg-zinc-800/20 transition-colors cursor-pointer"
+                        >
+                          <td className="py-[6px] px-2 text-[12px] text-white font-medium">{y.label}</td>
+                          <td className="py-[6px] px-2 text-[12px] text-right text-zinc-400 tabular-nums">{y.tradeCount}</td>
+                          <td className="py-[6px] px-2 text-[12px] text-right"><PnlText v={y.grossPnl} /></td>
+                          <td className="py-[6px] px-2 text-[12px] text-right"><PnlText v={y.netPnl} /></td>
+                          <td className="py-[6px] px-2 text-[12px] text-right text-zinc-400 tabular-nums">{fmtINR(y.statutoryCharges)}</td>
+                          <td className="py-[6px] px-2 text-[12px] text-right text-zinc-400 tabular-nums">{fmtINR(y.charges - y.statutoryCharges)}</td>
+                          <td className="py-[6px] px-2 text-[12px] text-right text-zinc-400 tabular-nums">{fmtINR(y.charges)}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </>
+            ) : tab === 'weekly' ? (
               <>
                 {/* Weekly calendar grid */}
                 <div className="bg-zinc-900/60 border border-zinc-800/60 rounded-xl p-4 w-full">
