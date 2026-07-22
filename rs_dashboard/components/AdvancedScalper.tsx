@@ -12,6 +12,7 @@ import { useLiveOptionsWS } from '@/lib/useLiveOptionsWS';
 import { useProfitLock, ProfitLockControls } from './ProfitLock';
 import { useCopyTrade, CopyTradeControls } from './CopyTrade';
 import { useBrokerSelector, brokerRoute } from '@/hooks/useBrokerSelector';
+import { contractMultiplier } from '@/lib/positionPnl';
 
 // ─── Types ────────────────────────────────────────────────────────
 
@@ -163,7 +164,7 @@ export default function AdvancedScalper() {
       const sellAvg = Number(pos.sellAvg);
       if (!buyQty || !sellQty) return pos;
 
-      const recomputedRealized = sellQty * sellAvg - buyQty * buyAvg;
+      const recomputedRealized = contractMultiplier(pos) * (sellQty * sellAvg - buyQty * buyAvg);
       if (Number(pos.realizedProfit) === recomputedRealized) return pos;
 
       return { ...pos, realizedProfit: recomputedRealized };
@@ -188,11 +189,12 @@ export default function AdvancedScalper() {
       const netQty = Number(pos.netQty);
       const buyAvg = Number(pos.buyAvg);
       const sellAvg = Number(pos.sellAvg);
+      const mult = contractMultiplier(pos);
       const unrealizedProfit = netQty === 0
         ? Number(pos.unrealizedProfit)
         : netQty > 0
-          ? netQty * (liveLtp - buyAvg)
-          : Math.abs(netQty) * (sellAvg - liveLtp);
+          ? mult * netQty * (liveLtp - buyAvg)
+          : mult * Math.abs(netQty) * (sellAvg - liveLtp);
 
       return { ...pos, lastTradedPrice: liveLtp, unrealizedProfit };
     });
