@@ -2,7 +2,9 @@ import pandas as pd
 import logging
 import os
 import io
+import json
 import requests
+import websockets
 from typing import Optional, Dict, List, Any, Tuple, Union, Callable
 from dhanhq import dhanhq
 from dhanhq.marketfeed import MarketFeed
@@ -3739,6 +3741,32 @@ class DhanHelper:
                         ou = OrderUpdate(context_adapter)
                         ou.on_update = _handle_order_update
 
+                        # We don't call the SDK's own ou.connect_order_update(): it does
+                        # `json.loads(message)` on every incoming WS frame with no error
+                        # handling, but Dhan also pushes non-JSON binary heartbeat frames
+                        # on this socket (observed: b'2\n\x00(\x03'). json.loads() on that
+                        # raises immediately, killing the connection on the very first
+                        # heartbeat and forcing a reconnect loop that never gets far enough
+                        # to see a real order_alert. Reimplement the same handshake here
+                        # but skip frames that aren't valid JSON instead of crashing on them.
+                        async def _connect_order_update_safe():
+                            async with websockets.connect(ou.order_feed_wss) as websocket:
+                                auth_message = {
+                                    "LoginReq": {
+                                        "MsgCode": 42,
+                                        "ClientId": str(ou.client_id),
+                                        "Token": str(ou.access_token),
+                                    },
+                                    "UserType": "SELF",
+                                }
+                                await websocket.send(json.dumps(auth_message))
+                                async for message in websocket:
+                                    try:
+                                        data = json.loads(message)
+                                    except (json.JSONDecodeError, TypeError, UnicodeDecodeError):
+                                        continue  # non-JSON heartbeat/keepalive frame
+                                    ou.handle_order_update(data)
+
                         # Call connect_order_update() via our own loop (instead of the
                         # SDK's connect_to_dhan_websocket_sync() wrapper) so we can keep
                         # a reference to the loop — stop_order_update_websocket() needs
@@ -3752,7 +3780,7 @@ class DhanHelper:
                         asyncio.set_event_loop(loop)
                         self._ou_loop = loop
                         try:
-                            loop.run_until_complete(ou.connect_order_update())
+                            loop.run_until_complete(_connect_order_update_safe())
                         finally:
                             self._ou_loop = None
                             loop.close()

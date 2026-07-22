@@ -7,6 +7,15 @@ PART_TRADED fill, mirrors the newly-traded delta to each enabled child
 account in debug/copy_trade_config.json at quantity = delta * multiplier,
 always as a MARKET order (sliced to the NFO freeze quantity).
 
+The WS is the primary, low-latency path but is NOT trusted alone: Dhan's
+order-update WS has been observed (2026-07-22) to silently die — server
+closes the socket with no exception raised, leaving the bridge "listening"
+forever with nothing arriving. A REST poll of the order book every
+ORDER_POLL_INTERVAL_SEC (poll_parent_orders()) runs alongside it as a
+backup, replicating anything the WS misses via the same handle_update()
+path. replicated_qty dedup makes the poll a no-op whenever the WS already
+handled a fill, so it only ever acts as a fallback, never a duplicate.
+
 Two independent safety gates:
   - This process running at all: safe by itself, only listens + logs
     what it WOULD replicate to debug/copy_trade_log.json.
@@ -68,14 +77,6 @@ MAX_LOG_ENTRIES  = 200
 WATCHDOG_INTERVAL_SEC = 7
 HEARTBEAT_INTERVAL_SEC = 5
 
-# The order-update WS thread can stay "alive" (blocked inside a dead socket
-# read, no exception raised) indefinitely without actually receiving events —
-# is_alive() alone can't detect that. During market hours, treat no events
-# for this long as a silently-dead connection and force a reconnect. Cooldown
-# prevents a reconnect storm if the feed is genuinely just quiet.
-WS_STALE_SEC = 180
-WS_RESTART_COOLDOWN_SEC = 120
-
 # Safety-exit tuning: require the parent flat on this many consecutive checks
 # (a scalper can exit and re-enter within one watchdog interval), and never
 # fire within REPLICATION_GRACE_SEC of the last replicated fill.
@@ -103,9 +104,17 @@ FREEZE_QTY = 1800  # NFO NIFTY options freeze quantity — market orders above t
 INSTRUMENTS_REFRESH_MIN_INTERVAL_SEC = 600
 RAW_EVENTS_MAX = 20
 
+# REST-polling backup for the order-update WS: Dhan's WS has been observed to
+# silently die (server closes with no close frame, no exception raised until
+# the next reconnect) — see debug notes from 2026-07-22. Polling this often
+# keeps the backup's replication lag low without hammering the order-list
+# endpoint (unlike the quote API, it isn't documented as ~1 req/s limited).
+ORDER_POLL_INTERVAL_SEC = 3
+
 _log_lock = threading.Lock()
 _replicated_lock = threading.Lock()
 _retry_lock = threading.Lock()
+_fill_lock = threading.Lock()  # serializes handle_update() across the WS thread and the poll fallback
 
 
 def acquire_singleton() -> bool:
@@ -727,19 +736,21 @@ def main():
 
     state = {
         'last_replication_ts': 0.0,
-        # Start the staleness clock at "now", not epoch 0 — a raw 0.0 would
-        # look infinitely stale the instant the process starts.
-        'ws_last_event_ts': time.time(),
         'failed_count': 0,
         'flat_streak': 0,
+        'last_poll_ts': 0.0,
+        'poll_count': 0,
     }
     retry_queue = []
 
     def handle_update(payload: dict):
+        # Serialize against poll_parent_orders() below — both read-check-act on
+        # replicated_qty for the same order_no, and without this lock a fill
+        # landing right as a poll cycle runs could get replicated twice.
+        _fill_lock.acquire()
         try:
-            state['ws_last_event_ts'] = time.time()
             data = payload.get('Data', {})
-            
+
             # Robust case-insensitive key lookups
             status = str(data.get('Status') or data.get('status') or '').upper()
             if status not in ('TRADED', 'PART_TRADED'):
@@ -879,6 +890,67 @@ def main():
 
         except Exception as e:
             print(f'[copy_trade_bridge] ERROR in handle_update: {e}', flush=True)
+        finally:
+            _fill_lock.release()
+
+    def poll_parent_orders():
+        """REST-polling backup for the order-update WS. The WS is the primary,
+        low-latency path; this exists because it has been observed to silently
+        die (server closes the connection with no exception raised) and leave
+        the bridge listening forever with nothing arriving. Reuses
+        handle_update()'s exact replication/resolve/retry path via a synthetic
+        payload shaped like a WS order_alert, so replicated_qty dedup makes
+        this a no-op for anything the WS already handled — it only acts on
+        fills the WS missed."""
+        try:
+            orders = helper.get_order_list()
+        except Exception as e:
+            print(f'[copy_trade_bridge] Order-list poll failed: {e}', flush=True)
+            return
+
+        state['last_poll_ts'] = time.time()
+        state['poll_count'] += 1
+
+        for o in orders or []:
+            status = str(o.get('orderStatus', '') or '').upper()
+            if status not in ('TRADED', 'PART_TRADED'):
+                continue
+            order_no = str(o.get('orderId', '') or '')
+            if not order_no:
+                continue
+
+            traded_qty = 0
+            for key in ('filledQty', 'filled_qty', 'tradedQuantity'):
+                if o.get(key) is not None:
+                    try:
+                        traded_qty = int(float(o[key]))
+                    except (TypeError, ValueError):
+                        traded_qty = 0
+                    break
+            if traded_qty == 0 and status == 'TRADED':
+                try:
+                    traded_qty = int(float(o.get('quantity', 0) or 0))
+                except (TypeError, ValueError):
+                    traded_qty = 0
+
+            # Cheap pre-check before building a payload — handle_update() does
+            # the authoritative (lock-protected) delta check again itself.
+            if traded_qty <= int(replicated_qty.get(order_no, 0)):
+                continue
+
+            handle_update({
+                'Type': 'order_alert',
+                'Data': {
+                    'Status': status,
+                    'OrderNo': order_no,
+                    'TradedQty': traded_qty,
+                    'Symbol': o.get('tradingSymbol'),
+                    'TxnType': o.get('transactionType'),
+                    'StrikePrice': o.get('drvStrikePrice'),
+                    'ExpiryDate': o.get('drvExpiryDate'),
+                    'OptType': o.get('drvOptionType'),
+                },
+            })
 
     helper.start_order_update_websocket(on_update=handle_update)
 
@@ -894,7 +966,7 @@ def main():
     print('[copy_trade_bridge] Listening for Dhan order updates…', flush=True)
 
     last_heartbeat = 0.0
-    last_ws_restart_ts = 0.0
+    last_order_poll = 0.0
     try:
         while True:
             if os.path.exists(STOP_TRIGGER):
@@ -905,33 +977,30 @@ def main():
                 print('[copy_trade_bridge] Stop trigger detected — exiting.', flush=True)
                 break
             now = time.time()
+            if market_is_open() and now - last_order_poll >= ORDER_POLL_INTERVAL_SEC:
+                last_order_poll = now
+                poll_parent_orders()
             if now - last_heartbeat >= HEARTBEAT_INTERVAL_SEC:
                 last_heartbeat = now
                 with _retry_lock:
                     pending_retries = len(retry_queue)
+                # Real connection death is already handled independently of order
+                # traffic: websockets' own ping/pong keepalive (20s interval/timeout)
+                # raises inside connect_order_update() on a truly dead socket, which
+                # run_ou()'s retry loop catches and reconnects. A separate "no order
+                # event in N seconds" staleness check was tried here previously but
+                # produced constant false positives (and needless reconnect churn)
+                # on any day the parent account was simply quiet — order silence is
+                # normal, not a sign of a dead WS.
                 ws_alive = helper._ou_thread is not None and helper._ou_thread.is_alive()
-                ws_stale = market_is_open() and (now - state['ws_last_event_ts']) > WS_STALE_SEC
-
-                if ws_stale and (now - last_ws_restart_ts) > WS_RESTART_COOLDOWN_SEC:
-                    last_ws_restart_ts = now
-                    print(f'[copy_trade_bridge] WARNING: no order-update WS event for '
-                          f'{int(now - state["ws_last_event_ts"])}s during market hours — '
-                          f'forcing reconnect.', flush=True)
-                    try:
-                        helper.stop_order_update_websocket()
-                        helper.start_order_update_websocket(on_update=handle_update)
-                    except Exception as e:
-                        print(f'[copy_trade_bridge] Forced WS reconnect failed: {e}', flush=True)
 
                 detail = ''
                 if state['failed_count'] or pending_retries:
                     detail = f"{state['failed_count']} failed replication(s), {pending_retries} pending retry(ies)"
-                if ws_stale:
-                    detail = (detail + ' — ' if detail else '') + 'order-update WS stale, reconnecting'
                 write_status('RUNNING', started_at=started_at, detail=detail, extra={
                     'ws_thread_alive': ws_alive,
-                    'ws_last_event': state['ws_last_event_ts'],
-                    'ws_stale': ws_stale,
+                    'last_poll_ts': state['last_poll_ts'],
+                    'poll_count': state['poll_count'],
                     'failed_replications': state['failed_count'],
                     'pending_retries': pending_retries,
                 })
