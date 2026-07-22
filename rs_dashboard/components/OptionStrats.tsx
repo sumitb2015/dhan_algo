@@ -34,6 +34,13 @@ interface LegDraft {
   qtyLots: number;
 }
 
+interface MarginData {
+  total_margin: number;
+  hedge_benefit: number;
+  overall_margin: number;
+  available_funds: number;
+}
+
 function fmtInr(v: number): string {
   const sign = v >= 0 ? '+' : '-';
   const abs = Math.abs(v);
@@ -304,6 +311,32 @@ export default function OptionStrats() {
     return computePayoffStats(resolvedLegs, spot, effectiveLotSize, selectedExpiry);
   }, [resolvedLegs, spot, effectiveLotSize, selectedExpiry]);
 
+  // Margin is always computed against Dhan (the /api/options/margin script is
+  // Dhan-only), independent of which broker is selected for order placement.
+  const [margin, setMargin] = useState<MarginData | null>(null);
+  const [marginLoading, setMarginLoading] = useState(false);
+
+  useEffect(() => {
+    if (resolvedLegs.length === 0 || missingStrikes.length > 0 || !selectedExpiry) {
+      setMargin(null);
+      return;
+    }
+    setMarginLoading(true);
+    fetch('/api/options/margin', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        underlying: UNDERLYING,
+        expiry: selectedExpiry,
+        legs: resolvedLegs.map((l) => ({ strike: l.strike, type: l.type, side: l.side, qtyLots: l.qtyLots, price: l.price })),
+      }),
+    })
+      .then((r) => r.json())
+      .then((json) => setMargin(json?.success ? json.data : null))
+      .catch(() => setMargin(null))
+      .finally(() => setMarginLoading(false));
+  }, [resolvedLegs, missingStrikes, selectedExpiry]);
+
   const curve = useMemo(() => {
     if (resolvedLegs.length === 0) return [];
     return buildPayoffCurve(resolvedLegs, spot, effectiveLotSize);
@@ -558,6 +591,28 @@ export default function OptionStrats() {
                 ) : '—'}
                 tone="neutral"
               />
+            </CardContent>
+          </Card>
+        )}
+
+        {stats && (marginLoading || margin) && (
+          <Card className="bg-card/80">
+            <CardHeader className="border-b [.border-b]:pb-3">
+              <CardTitle className="text-xs font-bold uppercase tracking-wider text-white">Funds &amp; Margins</CardTitle>
+            </CardHeader>
+            <CardContent className="grid grid-cols-2 gap-4 py-4 sm:grid-cols-4">
+              {marginLoading ? (
+                <div className="col-span-4 animate-pulse space-y-2">
+                  <div className="h-4 w-40 rounded bg-zinc-800" />
+                </div>
+              ) : margin && (
+                <>
+                  <Metric label="Overall Margin" value={`₹${margin.overall_margin.toLocaleString('en-IN', { maximumFractionDigits: 0 })}`} tone="neutral" />
+                  <Metric label="Final Margin" value={margin.total_margin > 0 ? `₹${margin.total_margin.toLocaleString('en-IN', { maximumFractionDigits: 0 })}` : '— (market closed)'} tone="neutral" />
+                  <Metric label="Hedge Benefit" value={`₹${margin.hedge_benefit.toLocaleString('en-IN', { maximumFractionDigits: 0 })}`} tone="pos" />
+                  <Metric label="Net Premium" value={`₹${fmtInr(stats.netPremium * effectiveLotSize)}`} tone={stats.netPremium >= 0 ? 'pos' : 'neg'} />
+                </>
+              )}
             </CardContent>
           </Card>
         )}

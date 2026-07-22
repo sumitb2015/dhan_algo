@@ -30,7 +30,7 @@ export async function POST(request: NextRequest) {
     const jsonLine = (stdout ?? '').trim().split('\n').pop() ?? '{}';
     const parsed = JSON.parse(jsonLine) as {
       total_margin?: number; span_margin?: number; exposure_margin?: number;
-      hedge_benefit?: number; available_funds?: number; error?: string;
+      hedge_benefit?: number; overall_margin?: number; available_funds?: number; error?: string;
     };
 
     if (parsed.error) {
@@ -45,6 +45,7 @@ export async function POST(request: NextRequest) {
         span_margin: parsed.span_margin ?? 0,
         exposure_margin: parsed.exposure_margin ?? 0,
         hedge_benefit: parsed.hedge_benefit ?? 0,
+        overall_margin: parsed.overall_margin ?? 0,
         available_funds: parsed.available_funds ?? 0,
       },
     });
@@ -55,7 +56,7 @@ export async function POST(request: NextRequest) {
         const jsonLine = String(e.stdout).trim().split('\n').pop() ?? '{}';
         const parsed = JSON.parse(jsonLine) as {
           total_margin?: number; span_margin?: number; exposure_margin?: number;
-          hedge_benefit?: number; available_funds?: number; error?: string;
+          hedge_benefit?: number; overall_margin?: number; available_funds?: number; error?: string;
         };
         if (!parsed.error) {
           return NextResponse.json({
@@ -65,6 +66,7 @@ export async function POST(request: NextRequest) {
               span_margin: parsed.span_margin ?? 0,
               exposure_margin: parsed.exposure_margin ?? 0,
               hedge_benefit: parsed.hedge_benefit ?? 0,
+              overall_margin: parsed.overall_margin ?? 0,
               available_funds: parsed.available_funds ?? 0,
             },
           });

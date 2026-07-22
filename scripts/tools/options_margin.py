@@ -12,6 +12,7 @@ Prints a single JSON line to stdout. Logs go to stderr.
 import sys
 import os
 import json
+import time
 import argparse
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -52,6 +53,31 @@ def build_margin_scripts(legs: list, underlying: str, expiry: str, helper: 'Dhan
     return scripts
 
 
+def sum_individual_leg_margins(scripts: list, dhan) -> float:
+    """Sum of each leg's margin computed independently (no portfolio netting)
+    via the single-order margin_calculator — matches Dhan's own Strategy
+    Builder's "Overall Margin" figure. margincalculator/multi's own
+    hedgeBenefit field is unreliable (observed 0.0 on fresh what-if combos
+    despite the portfolio total clearly reflecting a netting benefit), so
+    hedge benefit is derived as overall - final instead of trusted from the
+    API directly. One HTTP call per leg — rate-limited like the multi call.
+    """
+    total = 0.0
+    for script in scripts:
+        time.sleep(1)
+        res = dhan.margin_calculator(
+            security_id=script['securityId'],
+            exchange_segment=script['exchangeSegment'],
+            transaction_type=script['transactionType'],
+            quantity=script['quantity'],
+            product_type=script['productType'],
+            price=script['price'],
+        )
+        data = res.get('data', {}) if isinstance(res, dict) else {}
+        total += data.get('totalMargin', 0.0)
+    return total
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--underlying', default='NIFTY')
@@ -75,13 +101,21 @@ def main():
         print(json.dumps({'error': 'margin_calculator_failed'}))
         sys.exit(0)
 
+    # Dhan's raw /margincalculator/multi response uses camelCase keys
+    # (totalMargin, spanMargin, exposure) — dhan_http.post() returns the
+    # API's JSON verbatim with no snake_case conversion.
+    total_margin = margin.get('totalMargin', 0.0)
+    overall_margin = sum_individual_leg_margins(scripts, dhan)
+    hedge_benefit = max(0.0, overall_margin - total_margin)
+
     available_funds = helper.get_available_funds()
 
     print(json.dumps({
-        'total_margin': margin.get('total_margin', 0.0),
-        'span_margin': margin.get('span_margin', 0.0),
-        'exposure_margin': margin.get('exposure_margin', 0.0),
-        'hedge_benefit': margin.get('hedge_benefit', 0.0),
+        'total_margin': round(total_margin, 2),
+        'span_margin': round(margin.get('spanMargin', 0.0), 2),
+        'exposure_margin': round(margin.get('exposure', 0.0), 2),
+        'hedge_benefit': round(hedge_benefit, 2),
+        'overall_margin': round(overall_margin, 2),
         'available_funds': available_funds,
     }))
 
