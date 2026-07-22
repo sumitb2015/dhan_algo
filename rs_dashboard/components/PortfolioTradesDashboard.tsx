@@ -337,7 +337,7 @@ export default function PortfolioTradesDashboard() {
                 </thead>
                 <tbody>
                   {filteredSymbols.slice(0, 100).map(s => (
-                    <tr key={s.securityId} className="border-b border-zinc-900/60 hover:bg-zinc-800/20 transition-colors">
+                    <tr key={`${s.segment}-${s.securityId}-${s.symbol}`} className="border-b border-zinc-900/60 hover:bg-zinc-800/20 transition-colors">
                       <td className="py-[5px] px-2 text-[12px] text-white font-medium">
                         {s.symbol}
                         {s.preWindowGap && (
