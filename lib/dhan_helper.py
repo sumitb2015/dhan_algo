@@ -9,6 +9,7 @@ from dhanhq.marketfeed import MarketFeed
 from dhanhq.orderupdate import OrderUpdate
 from datetime import datetime, timedelta
 import time
+import asyncio
 import threading
 try:
     import talib
@@ -119,6 +120,7 @@ class DhanHelper:
         self._ou_thread = None
         self._ou_stop_flag = False
         self._ou_lock = threading.Lock()
+        self._ou_loop = None  # the run_ou thread's live asyncio loop, so stop() can force-unblock it
         self.user_on_order_update: Optional[Callable] = None
 
         # Validate session on init
@@ -3736,7 +3738,24 @@ class DhanHelper:
                         context_adapter = DhanContextAdapter(self.dhan)
                         ou = OrderUpdate(context_adapter)
                         ou.on_update = _handle_order_update
-                        ou.connect_to_dhan_websocket_sync()
+
+                        # Call connect_order_update() via our own loop (instead of the
+                        # SDK's connect_to_dhan_websocket_sync() wrapper) so we can keep
+                        # a reference to the loop — stop_order_update_websocket() needs
+                        # it to force-unblock a hung/dead-socket read from another
+                        # thread. A bare stop flag can't do that: the coroutine only
+                        # checks nothing, it just blocks in `async for message in
+                        # websocket`, so without an external loop.stop() the thread
+                        # stays "alive" (and un-restartable — see start()'s is_alive()
+                        # guard) forever on a silently-dead connection.
+                        loop = asyncio.new_event_loop()
+                        asyncio.set_event_loop(loop)
+                        self._ou_loop = loop
+                        try:
+                            loop.run_until_complete(ou.connect_order_update())
+                        finally:
+                            self._ou_loop = None
+                            loop.close()
 
                     except Exception as e:
                         logger.error(f"Order Update WebSocket failed: {e}. Retrying in {retry_delay}s...")
@@ -3749,8 +3768,26 @@ class DhanHelper:
             logger.info("Order Update WebSocket manager started in background thread.")
 
     def stop_order_update_websocket(self):
-        """Stop the order-update WebSocket background thread."""
+        """Stop the order-update WebSocket background thread.
+
+        Blocks briefly (up to 5s) until the thread actually exits. This
+        matters because start_order_update_websocket() no-ops if it finds
+        the old thread still is_alive() — without waiting here, a caller
+        doing stop() immediately followed by start() (e.g. a forced
+        reconnect after staleness) would very likely hit that guard and
+        silently fail to spawn a replacement, since the old thread hasn't
+        had a chance to notice the stop flag yet.
+        """
         self._ou_stop_flag = True
+        loop = self._ou_loop
+        if loop is not None:
+            try:
+                loop.call_soon_threadsafe(loop.stop)
+            except RuntimeError:
+                pass  # loop already closed/closing
+        thread = self._ou_thread
+        if thread is not None and thread.is_alive():
+            thread.join(timeout=5)
         logger.info("Order Update WebSocket stop requested.")
 
     def get_order_update(self, order_id: str) -> Optional[dict]:
