@@ -21,6 +21,7 @@ import BasketPayoffChart from './BasketPayoffChart';
 import StrategyCardGrid from './basket/StrategyCardGrid';
 import LegsTable from './basket/LegsTable';
 import SavedBasketsPanel from './basket/SavedBasketsPanel';
+import BasketActivityTabs from './basket/BasketActivityTabs';
 
 const UNDERLYINGS = ['NIFTY', 'BANKNIFTY', 'SENSEX'] as const;
 type Underlying = typeof UNDERLYINGS[number];
@@ -662,6 +663,10 @@ export default function Baskets() {
             </p>
           </div>
         </Card>
+      </div>
+
+      <div className="p-4 pt-0">
+        <BasketActivityTabs broker={broker} />
       </div>
     </div>
   );
