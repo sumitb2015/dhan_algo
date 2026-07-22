@@ -1,7 +1,8 @@
 ﻿import { NextRequest, NextResponse } from 'next/server';
 import path from 'path';
 import fs from 'fs';
-import { spawn, execSync } from 'child_process';
+import { spawn } from 'child_process';
+import { isPidRunning } from '@/lib/processCheck';
 
 const PROJECT_ROOT = path.resolve(process.cwd(), '..');
 const PYTHON_EXE = path.join(PROJECT_ROOT, 'venv', 'Scripts', 'pythonw.exe');
@@ -157,19 +158,6 @@ function findLatestPortfolioReport() {
     .sort()
     .reverse();
   return files.length > 0 ? `portfolio/${files[0]}` : '';
-}
-
-function isPidRunning(pid: number): boolean {
-  try {
-    if (process.platform === 'win32') {
-      const out = execSync(`tasklist /FI "PID eq ${pid}"`, { encoding: 'utf8', stdio: ['pipe', 'pipe', 'ignore'], windowsHide: true });
-      return out.includes(pid.toString());
-    }
-    execSync(`ps -p ${pid}`, { stdio: 'ignore' });
-    return true;
-  } catch {
-    return false;
-  }
 }
 
 const RUN_STATUS_DIR = path.join(PROJECT_ROOT, 'debug');
