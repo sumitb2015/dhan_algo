@@ -77,9 +77,12 @@ function cellClass(col: ColumnDef, value: unknown): string {
   return 'text-zinc-300';
 }
 
-function DataTable({ tab, rows }: { tab: TabKey; rows: Record<string, unknown>[] }) {
+function DataTable({ tab, rows, onAddLeg }: {
+  tab: TabKey; rows: Record<string, unknown>[]; onAddLeg?: (pos: Record<string, unknown>) => void;
+}) {
   const cols = COLUMNS[tab];
   const thCls = 'text-xs font-bold text-white bg-zinc-800 px-3 py-2 whitespace-nowrap';
+  const showActions = tab === 'positions' && !!onAddLeg;
 
   return (
     <div className="overflow-x-auto">
@@ -91,24 +94,40 @@ function DataTable({ tab, rows }: { tab: TabKey; rows: Record<string, unknown>[]
                 {col.label}
               </th>
             ))}
+            {showActions && <th className={`${thCls} text-center`}>Actions</th>}
           </tr>
         </thead>
         <tbody>
-          {rows.map((row, i) => (
-            <tr key={i} className="border-b border-zinc-800/50 hover:bg-zinc-800/30 transition-colors">
-              {cols.map(col => (
-                <td
-                  key={col.key}
-                  className={`px-3 py-2 tabular-nums ${col.numeric ? 'text-right' : 'text-left'} ${cellClass(col, row[col.key])}`}
-                >
-                  {fmtCell(col, row[col.key])}
-                </td>
-              ))}
-            </tr>
-          ))}
+          {rows.map((row, i) => {
+            const netQty = Number(row.netQty) || 0;
+            return (
+              <tr key={i} className="border-b border-zinc-800/50 hover:bg-zinc-800/30 transition-colors">
+                {cols.map(col => (
+                  <td
+                    key={col.key}
+                    className={`px-3 py-2 tabular-nums ${col.numeric ? 'text-right' : 'text-left'} ${cellClass(col, row[col.key])}`}
+                  >
+                    {fmtCell(col, row[col.key])}
+                  </td>
+                ))}
+                {showActions && (
+                  <td className="px-3 py-2 text-center">
+                    <button
+                      onClick={() => onAddLeg!(row)}
+                      disabled={netQty === 0}
+                      title="Load this strike into the basket leg table to add more or hedge"
+                      className="px-2.5 py-1 text-[11px] font-bold rounded border transition-all disabled:opacity-40 disabled:cursor-not-allowed bg-emerald-900/40 border-emerald-500/30 text-emerald-400 hover:bg-emerald-800/60 hover:text-emerald-200 active:scale-95"
+                    >
+                      Add
+                    </button>
+                  </td>
+                )}
+              </tr>
+            );
+          })}
           {rows.length === 0 && (
             <tr>
-              <td colSpan={cols.length} className="px-3 py-8 text-center text-zinc-600">
+              <td colSpan={cols.length + (showActions ? 1 : 0)} className="px-3 py-8 text-center text-zinc-600">
                 No {TAB_LABELS[tab].toLowerCase()}
               </td>
             </tr>
@@ -122,7 +141,7 @@ function DataTable({ tab, rows }: { tab: TabKey; rows: Record<string, unknown>[]
 /** Broker-aware Positions/Orders/Trades tabs — reuses the same /api/scalper
  *  (Dhan) and /api/scalper/zerodha (Zerodha) endpoints and response shape as
  *  Scalper.tsx, so a basket's fills show up here immediately after placement. */
-export default function BasketActivityTabs({ broker }: { broker: Broker }) {
+export default function BasketActivityTabs({ broker, onAddLeg }: { broker: Broker; onAddLeg?: (pos: Record<string, unknown>) => void }) {
   const [activeTab, setActiveTab] = useState<TabKey>('positions');
   const [data, setData] = useState<ActivityData>({ positions: [], orders: [], trades: [] });
   const [error, setError] = useState('');
@@ -202,7 +221,7 @@ export default function BasketActivityTabs({ broker }: { broker: Broker }) {
         </div>
       )}
 
-      <DataTable tab={activeTab} rows={rows} />
+      <DataTable tab={activeTab} rows={rows} onAddLeg={onAddLeg} />
     </div>
   );
 }

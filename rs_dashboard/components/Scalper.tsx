@@ -928,6 +928,25 @@ export default function Scalper() {
   const handleClosePosition = useCallback(
     (pos: Record<string, unknown>) => closePosition(pos, 'Manual'), [closePosition]);
 
+  // Pre-fill the CE/PE strike selector from an existing position so the user can
+  // scale in (same strike) or add a hedge (new strike) via the normal order panel.
+  const handleAddLeg = useCallback((pos: Record<string, unknown>) => {
+    const sym = String(pos.tradingSymbol ?? '');
+    for (const [strikeStr, entry] of Object.entries(strikeMap)) {
+      if (entry.ceSymbol === sym) {
+        handleCeStrikeChange(Number(strikeStr));
+        addToast('success', `CE panel set to ${strikeStr}`, 'Pick Buy/Sell and lots to add this leg');
+        return;
+      }
+      if (entry.peSymbol === sym) {
+        handlePeStrikeChange(Number(strikeStr));
+        addToast('success', `PE panel set to ${strikeStr}`, 'Pick Buy/Sell and lots to add this leg');
+        return;
+      }
+    }
+    addToast('error', 'Could not match position to a strike', sym);
+  }, [strikeMap, handleCeStrikeChange, handlePeStrikeChange, addToast]);
+
   // ─── JSX ─────────────────────────────────────────────────────────
 
   return (
@@ -1322,6 +1341,7 @@ export default function Scalper() {
               onGuardChange={handleGuardChange}
               onTrailToggle={handleTrailToggle}
               onClose={handleClosePosition}
+              onAddLeg={handleAddLeg}
               sort={tableSort}
               onSort={handleTableSort}
             />
@@ -1676,6 +1696,7 @@ export interface PositionsTableProps {
   onGuardChange: (sym: string, field: 'target' | 'sl', value: string) => void;
   onTrailToggle: (sym: string) => void;
   onClose: (pos: Record<string, unknown>) => void;
+  onAddLeg: (pos: Record<string, unknown>) => void;
   sort: SortState;
   onSort: (key: string) => void;
   // Set when the last positions fetch failed (network/API error) rather than
@@ -1684,7 +1705,7 @@ export interface PositionsTableProps {
   error?: string | null;
 }
 
-export const PositionsTable = React.memo(function PositionsTable({ data, guards, closingPositions, onGuardChange, onTrailToggle, onClose, sort, onSort, error }: PositionsTableProps) {
+export const PositionsTable = React.memo(function PositionsTable({ data, guards, closingPositions, onGuardChange, onTrailToggle, onClose, onAddLeg, sort, onSort, error }: PositionsTableProps) {
   const sortedData = useMemo(() => sortRows(data, sort), [data, sort]);
 
   if (!data.length) {
@@ -1714,7 +1735,7 @@ export const PositionsTable = React.memo(function PositionsTable({ data, guards,
           <th className="px-3 py-2.5 text-xs font-bold text-emerald-400 text-center whitespace-nowrap">Target ₹</th>
           <th className="px-3 py-2.5 text-xs font-bold text-rose-400 text-center whitespace-nowrap">SL ₹</th>
           <th className="px-3 py-2.5 text-xs font-bold text-amber-400 text-center whitespace-nowrap">Trail SL</th>
-          <th className="px-3 py-2.5 text-xs font-bold text-white text-center whitespace-nowrap">Close</th>
+          <th className="px-3 py-2.5 text-xs font-bold text-white text-center whitespace-nowrap">Actions</th>
         </tr>
       </thead>
       <tbody className="divide-y divide-zinc-800/50">
@@ -1804,16 +1825,26 @@ export const PositionsTable = React.memo(function PositionsTable({ data, guards,
                 </div>
               </td>
 
-              {/* Manual close button */}
+              {/* Manual close / add-leg buttons */}
               <td className="px-2 py-1.5 text-center">
-                <button
-                  onClick={() => onClose(row)}
-                  disabled={isClosing || netQty === 0}
-                  title={`Market close ${sym}`}
-                  className="px-2.5 py-1 text-[11px] font-bold rounded border transition-all disabled:opacity-40 disabled:cursor-not-allowed bg-rose-900/40 border-rose-500/30 text-rose-400 hover:bg-rose-800/60 hover:text-rose-200 active:scale-95"
-                >
-                  {isClosing ? '…' : 'Close'}
-                </button>
+                <div className="flex items-center justify-center gap-1.5">
+                  <button
+                    onClick={() => onAddLeg(row)}
+                    disabled={isClosing || netQty === 0}
+                    title={`Load ${sym}'s strike into the order panel to add more or hedge`}
+                    className="px-2.5 py-1 text-[11px] font-bold rounded border transition-all disabled:opacity-40 disabled:cursor-not-allowed bg-emerald-900/40 border-emerald-500/30 text-emerald-400 hover:bg-emerald-800/60 hover:text-emerald-200 active:scale-95"
+                  >
+                    Add
+                  </button>
+                  <button
+                    onClick={() => onClose(row)}
+                    disabled={isClosing || netQty === 0}
+                    title={`Market close ${sym}`}
+                    className="px-2.5 py-1 text-[11px] font-bold rounded border transition-all disabled:opacity-40 disabled:cursor-not-allowed bg-rose-900/40 border-rose-500/30 text-rose-400 hover:bg-rose-800/60 hover:text-rose-200 active:scale-95"
+                  >
+                    {isClosing ? '…' : 'Close'}
+                  </button>
+                </div>
               </td>
             </tr>
           );

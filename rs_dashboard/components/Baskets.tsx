@@ -257,6 +257,28 @@ export default function Baskets() {
     setLegs(prev => prev.filter(l => l.id !== id));
   }, []);
 
+  // Load an already-open position's strike/option into the leg table so the
+  // user can scale in (same strike) or hedge (new strike) via "Place Basket".
+  // Side defaults to match the position's current direction (short stays short).
+  const addLegFromPosition = useCallback((pos: Record<string, unknown>) => {
+    const sym = String(pos.tradingSymbol ?? '');
+    let match: { strike: number; option: OptionType } | null = null;
+    for (const [strikeStr, entry] of Object.entries(strikeMap)) {
+      if (entry.ceSymbol === sym) { match = { strike: Number(strikeStr), option: 'CE' }; break; }
+      if (entry.peSymbol === sym) { match = { strike: Number(strikeStr), option: 'PE' }; break; }
+    }
+    if (!match) {
+      addToast('error', 'Could not match position to a strike', sym);
+      return;
+    }
+    const netQty = Number(pos.netQty) || 0;
+    const side = netQty < 0 ? 'S' : 'B';
+    setLegs(prev => [...prev, {
+      id: newLegId(), side, option: match!.option, strike: match!.strike, lots: 1, type: 'MARKET', price: '',
+    }]);
+    addToast('success', `Added ${side === 'S' ? 'Sell' : 'Buy'} ${match.option} ${match.strike} leg`, 'Adjust lots, then Place Basket');
+  }, [strikeMap, addToast]);
+
   // ── Payoff + metrics ────────────────────────────────────────────
   const payoffLegs = useMemo<PayoffLeg[]>(() => legs.map(l => ({
     side: l.side, option: l.option, strike: l.strike,
@@ -672,7 +694,7 @@ export default function Baskets() {
       </div>
 
       <div className="p-4 pt-0">
-        <BasketActivityTabs broker={broker} />
+        <BasketActivityTabs broker={broker} onAddLeg={addLegFromPosition} />
       </div>
     </div>
   );

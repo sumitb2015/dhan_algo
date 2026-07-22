@@ -463,6 +463,33 @@ export default function AdvancedScalper() {
     });
   }, [boxSecId, positionsBySecId, addToast]);
 
+  // Pre-fill an existing empty box (or add a new one) from an open position so the
+  // user can scale in (same strike) or add a hedge (new strike) via the order panel.
+  const handleAddLeg = useCallback((pos: Record<string, unknown>) => {
+    const sym = String(pos.tradingSymbol ?? '');
+    let match: { strike: number; side: 'CE' | 'PE' } | null = null;
+    for (const [strikeStr, entry] of Object.entries(strikeMap)) {
+      if (entry.ceSymbol === sym) { match = { strike: Number(strikeStr), side: 'CE' }; break; }
+      if (entry.peSymbol === sym) { match = { strike: Number(strikeStr), side: 'PE' }; break; }
+    }
+    if (!match) { addToast('error', 'Could not match position to a strike', sym); return; }
+    const { strike, side } = match;
+
+    const emptyBox = boxes.find(b => b.side === side && b.strike == null);
+    if (emptyBox) {
+      updateBox(emptyBox.id, { strike });
+      addToast('success', `${side} panel set to ${strike}`, 'Pick Buy/Sell and lots to add this leg');
+      return;
+    }
+    if (boxes.length >= MAX_BOXES) {
+      addToast('error', 'Cannot add leg', `Max ${MAX_BOXES} boxes reached — remove one first`);
+      return;
+    }
+    boxCounterRef.current += 1;
+    setBoxes(prev => [...prev, { id: `box-${boxCounterRef.current}`, side, strike, lots: 1, limitPrice: '' }]);
+    addToast('success', `${side} panel set to ${strike}`, 'Pick Buy/Sell and lots to add this leg');
+  }, [strikeMap, boxes, updateBox, addToast]);
+
   // ─── placeOrder ───────────────────────────────────────────────────
 
   const placeOrder = useCallback(async (boxId: string, side: 'BUY' | 'SELL') => {
@@ -1273,6 +1300,7 @@ export default function AdvancedScalper() {
               onGuardChange={handleGuardChange}
               onTrailToggle={handleTrailToggle}
               onClose={pos => closePosition(pos, 'Manual')}
+              onAddLeg={handleAddLeg}
               sort={tableSort}
               onSort={handleTableSort}
               error={positionsError}
