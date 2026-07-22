@@ -22,7 +22,11 @@ const BACKFILL_TIMEOUT_MS = 180_000;
 
 interface Counts { adv: number; decl: number; unch: number }
 interface HistoryPoint { time: string; nifty50: Counts; banknifty: Counts }
-interface HistoryFile { date: string; updated_at: string; history: HistoryPoint[]; backfilled?: boolean }
+// backfilledThrough: last minute (HH:MM) the backfill has attempted to cover.
+// A watermark rather than a one-shot flag — lets the route catch up on gaps
+// left by a poller that stopped early (e.g. tab closed mid-session), instead
+// of locking in whatever partial coverage the first run happened to get.
+interface HistoryFile { date: string; updated_at: string; history: HistoryPoint[]; backfilledThrough?: string }
 
 interface SnapshotEntry { ltp: number; prevClose: number; direction: 'up' | 'down' | 'flat' }
 type SnapshotResult = Record<string, SnapshotEntry> & { error?: string };
@@ -30,6 +34,9 @@ type SnapshotResult = Record<string, SnapshotEntry> & { error?: string };
 type BackfillResult = Record<string, Record<string, 'up' | 'down' | 'flat'>> & { error?: string };
 
 let lastFetchTs = 0;
+let lastBackfillTs = 0;
+const BACKFILL_COOLDOWN_MS = 60_000;
+const MARKET_CLOSE_STR = '15:30';
 
 function istNow(): Date {
   return new Date(Date.now() + 5.5 * 60 * 60 * 1000);
@@ -90,10 +97,11 @@ function countDirectionsAt(symbols: string[], backfill: BackfillResult, minute: 
   return counts;
 }
 
-/** Reconstructs minutes before the live poller started, from historical
- *  candles. Runs once per day — later calls no-op via file.backfilled. */
-async function backfillHistory(file: HistoryFile): Promise<HistoryFile> {
-  if (file.backfilled) return file;
+/** Reconstructs minutes the live poller missed (before it started, or after
+ *  it stopped mid-session) from historical candles. Re-runs whenever the
+ *  history's coverage hasn't yet caught up to targetMinute — not just once
+ *  per day — so a poller that stops early doesn't leave a permanent gap. */
+async function backfillHistory(file: HistoryFile, targetMinute: string): Promise<HistoryFile> {
   try {
     // dedupe() shares one in-flight Python spawn across concurrent GETs
     // (e.g. multiple tabs opening at once) — each still does its own merge
@@ -126,7 +134,7 @@ async function backfillHistory(file: HistoryFile): Promise<HistoryFile> {
     }
 
     file.history = Array.from(byTime.values()).sort((a, b) => a.time.localeCompare(b.time));
-    file.backfilled = true;
+    file.backfilledThrough = targetMinute;
     writeHistory(file);
   } catch (err) {
     console.error('[/api/breadth-intraday] backfill error:', err);
@@ -143,8 +151,12 @@ export async function GET() {
 
   let file = readHistory(dateStr);
 
-  if (minutesOfDay >= MARKET_OPEN_MIN && !file.backfilled) {
-    file = await backfillHistory(file);
+  const targetMinute = minutesOfDay >= MARKET_CLOSE_MIN ? MARKET_CLOSE_STR : istTimeStr(now);
+  const needsBackfill = minutesOfDay >= MARKET_OPEN_MIN
+    && (!file.backfilledThrough || file.backfilledThrough < targetMinute);
+  if (needsBackfill && Date.now() - lastBackfillTs >= BACKFILL_COOLDOWN_MS) {
+    lastBackfillTs = Date.now();
+    file = await backfillHistory(file, targetMinute);
   }
 
   if (marketOpen && Date.now() - lastFetchTs >= FETCH_COOLDOWN_MS) {
