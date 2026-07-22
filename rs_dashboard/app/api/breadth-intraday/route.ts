@@ -6,6 +6,7 @@ import { NIFTY50_SYMBOLS } from '@/lib/nifty50';
 import { BANKNIFTY_SYMBOLS } from '@/lib/banknifty';
 
 const SCRIPT_PATH = path.join(PROJECT_ROOT, 'scripts', 'tools', 'breadth_intraday_snapshot.py');
+const BACKFILL_SCRIPT_PATH = path.join(PROJECT_ROOT, 'scripts', 'tools', 'breadth_intraday_backfill.py');
 const DEBUG_DIR = path.join(PROJECT_ROOT, 'debug');
 
 const ALL_SYMBOLS = Array.from(new Set([...NIFTY50_SYMBOLS, ...BANKNIFTY_SYMBOLS]));
@@ -14,12 +15,19 @@ const FETCH_COOLDOWN_MS = 50_000;
 const MARKET_OPEN_MIN = 9 * 60 + 15;
 const MARKET_CLOSE_MIN = 15 * 60 + 30;
 
+// One-off historical reconstruction of missed minutes — 60+ sequential
+// per-symbol candle fetches, much slower than the live snapshot's single
+// bulk quote call.
+const BACKFILL_TIMEOUT_MS = 180_000;
+
 interface Counts { adv: number; decl: number; unch: number }
 interface HistoryPoint { time: string; nifty50: Counts; banknifty: Counts }
-interface HistoryFile { date: string; updated_at: string; history: HistoryPoint[] }
+interface HistoryFile { date: string; updated_at: string; history: HistoryPoint[]; backfilled?: boolean }
 
 interface SnapshotEntry { ltp: number; prevClose: number; direction: 'up' | 'down' | 'flat' }
 type SnapshotResult = Record<string, SnapshotEntry> & { error?: string };
+
+type BackfillResult = Record<string, Record<string, 'up' | 'down' | 'flat'>> & { error?: string };
 
 let lastFetchTs = 0;
 
@@ -70,6 +78,62 @@ function countDirections(symbols: string[], snapshot: SnapshotResult): Counts {
   return counts;
 }
 
+function countDirectionsAt(symbols: string[], backfill: BackfillResult, minute: string): Counts {
+  const counts: Counts = { adv: 0, decl: 0, unch: 0 };
+  for (const sym of symbols) {
+    const dir = backfill[sym]?.[minute];
+    if (!dir) continue;
+    if (dir === 'up') counts.adv++;
+    else if (dir === 'down') counts.decl++;
+    else counts.unch++;
+  }
+  return counts;
+}
+
+/** Reconstructs minutes before the live poller started, from historical
+ *  candles. Runs once per day — later calls no-op via file.backfilled. */
+async function backfillHistory(file: HistoryFile): Promise<HistoryFile> {
+  if (file.backfilled) return file;
+  try {
+    // dedupe() shares one in-flight Python spawn across concurrent GETs
+    // (e.g. multiple tabs opening at once) — each still does its own merge
+    // below since another request may have written more live points meanwhile.
+    const backfill = await dedupe('breadth-intraday-backfill', () =>
+      runPythonJson<BackfillResult>(BACKFILL_SCRIPT_PATH, ALL_SYMBOLS, BACKFILL_TIMEOUT_MS),
+    );
+    if (backfill.error) {
+      console.error('[/api/breadth-intraday] backfill error:', backfill.error);
+      return file;
+    }
+
+    // Re-read from disk — the shared promise may have resolved after another
+    // request's live poll already appended a newer point.
+    file = readHistory(file.date);
+
+    const minutes = new Set<string>();
+    for (const sym of Object.keys(backfill)) {
+      for (const t of Object.keys(backfill[sym])) minutes.add(t);
+    }
+
+    const byTime = new Map(file.history.map((p) => [p.time, p]));
+    for (const t of minutes) {
+      if (byTime.has(t)) continue; // live-observed value wins, never overwritten
+      byTime.set(t, {
+        time: t,
+        nifty50: countDirectionsAt(NIFTY50_SYMBOLS, backfill, t),
+        banknifty: countDirectionsAt(BANKNIFTY_SYMBOLS, backfill, t),
+      });
+    }
+
+    file.history = Array.from(byTime.values()).sort((a, b) => a.time.localeCompare(b.time));
+    file.backfilled = true;
+    writeHistory(file);
+  } catch (err) {
+    console.error('[/api/breadth-intraday] backfill error:', err);
+  }
+  return file;
+}
+
 export async function GET() {
   const now = istNow();
   const [h, m] = istHM(now);
@@ -78,6 +142,10 @@ export async function GET() {
   const dateStr = istDateStr(now);
 
   let file = readHistory(dateStr);
+
+  if (minutesOfDay >= MARKET_OPEN_MIN && !file.backfilled) {
+    file = await backfillHistory(file);
+  }
 
   if (marketOpen && Date.now() - lastFetchTs >= FETCH_COOLDOWN_MS) {
     lastFetchTs = Date.now();

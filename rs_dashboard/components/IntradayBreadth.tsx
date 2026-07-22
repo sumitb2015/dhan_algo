@@ -205,9 +205,9 @@ export default function IntradayBreadth() {
                 name="Advances"
                 stroke="#10b981"
                 strokeWidth={1.5}
-                dot={false}
+                dot={{ r: 2, strokeWidth: 0, fill: '#10b981' }}
                 isAnimationActive={false}
-                connectNulls={false}
+                connectNulls
               />
               <Line
                 type="monotone"
@@ -215,9 +215,9 @@ export default function IntradayBreadth() {
                 name="Declines"
                 stroke="#ef4444"
                 strokeWidth={1.5}
-                dot={false}
+                dot={{ r: 2, strokeWidth: 0, fill: '#ef4444' }}
                 isAnimationActive={false}
-                connectNulls={false}
+                connectNulls
               />
             </LineChart>
           </ResponsiveContainer>
