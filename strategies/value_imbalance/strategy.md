@@ -100,6 +100,16 @@ The advanced script introduces selectable adjustment logic modes to optimize mar
 ### D. `legacy`
 *   **Action**: Original unhedged winner lot addition strategy.
 
+### E. `reentry_straddle` (Straddle-only)
+*   **Action**: Sells ATM CE + PE. Skips the value-imbalance lot-addition/strike-shift logic (Phases 3-4) entirely — each leg is instead managed independently:
+    *   Each leg gets its own SL: `leg_sl = entry_price \times (1 + \text{leg\_sl\_pct})` (default `--leg-sl-pct 0.20` → SL at 120% of entry premium).
+    *   When a leg's SL is hit, only that leg is bought back and marked flat; the other leg keeps running untouched.
+    *   The flat leg **re-enters** (fresh sell at the initial lot size) once its LTP drops back to `<=` its original entry premium.
+*   **Constraint**: Requires `--entry-type straddle` — the strategy errors out at startup if used with `--entry-type strangle`.
+*   **`--max-lots` has no effect** in this mode (always re-enters at the initial lot size; no lot scaling), and the strategy errors if a non-default value is passed.
+*   Global `--target-profit` / `--stop-loss` and the trailing SL (`--trail-start-pct` / `--trail-gap-pts`) still apply on top, computed from combined CE+PE LTP regardless of each leg's active/flat state. The straddle-shift cycle-reset (§2 Phase 5) also still applies.
+*   **Benefit**: Turns a directional move against one leg into an independent, repeatable per-leg SL/re-entry cycle instead of averaging down or rolling strikes — useful for choppy/range-bound days where a leg may get stopped and re-triggered multiple times.
+
 ---
 
 ## 4. CLI Parameters Reference
@@ -110,8 +120,11 @@ The advanced script introduces selectable adjustment logic modes to optimize mar
 | :--- | :--- | :--- |
 | **`--live`** | *Flag* | Enable real order placement (defaults to dry-run mode). |
 | **`--lots N`** | `1` | Initial lots per leg. |
-| **`--mode MODE`** | `winner_roll_atm` | Selects adjustment mode (`winner_roll_atm`, `loser_ratio_roll`, `hedged_addition`, `legacy`). |
+| **`--mode MODE`** | `winner_roll_atm` | Selects adjustment mode (`winner_roll_atm`, `loser_ratio_roll`, `hedged_addition`, `legacy`, `reentry_straddle`). |
 | **`--loser-ratio-lots N`** | `1` | Number of lots to increment during a loser ratio roll adjustment. |
+| **`--leg-sl-pct PCT`** | `0.20` | *(reentry_straddle only)* Per-leg SL as a fraction of entry premium (e.g. `0.20` = SL at 120% of entry price). Errors if set with any other mode. |
+| **`--trail-start-pct PCT`** | `5.0` | Arms the trailing stop-loss once profit reaches this % of the entry combined premium. |
+| **`--trail-gap-pts PTS`** | `15.0` | Once armed, exits if the combined premium rises this many points above its best (lowest) level since arming. |
 | **`--entry-type TYPE`** | `straddle` | Entry position type (`straddle`, `strangle`). |
 | **`--delta`** | *Flag* | Use delta-based strike selection for strangle. |
 | **`--target-delta D`** | `0.20` | Target absolute delta in delta strangle mode. |
@@ -122,7 +135,6 @@ The advanced script introduces selectable adjustment logic modes to optimize mar
 | **`--target-profit AMT`** | `4000.0` | Global daily profit target in ₹. |
 | **`--stop-loss AMT`** | `4000.0` | Global daily stop loss in ₹. |
 | **`--start-time TIME`** | `09:20` | Market start monitoring time (HH:MM IST). |
-| **`--leg-sl-pct PCT`** | `0.20` | Per-leg broker-side stop-loss as a fraction of entry premium (e.g. `0.20` = 20%). Applies when the mode uses SL orders. |
 
 ### B. Nifty Value-Imbalance Straddle Strategy (`nifty_value_imbalance_straddle.py`)
 
@@ -134,6 +146,8 @@ The advanced script introduces selectable adjustment logic modes to optimize mar
 | **`--stop-loss AMT`** | `4000.0` | Global daily stop loss in ₹. |
 | **`--start-time TIME`** | `09:20` | Market start monitoring time (HH:MM IST). |
 | **`--entry-balance-threshold PCT`** | `15.0` | Initial balance threshold percentage for entry. |
+| **`--trail-start-pct PCT`** | `5.0` | Arms the trailing stop-loss once profit reaches this % of the entry combined premium. |
+| **`--trail-gap-pts PTS`** | `15.0` | Once armed, exits if the combined premium rises this many points above its best (lowest) level since arming. |
 
 ### C. Nifty Value-Imbalance Strangle Strategy (`nifty_value_imbalance_strangle.py`)
 
@@ -344,6 +358,42 @@ Here are step-by-step examples of how trades flow under different market conditi
     *   Since the ATM strike has shifted by $\ge 100$ points (meaning the strike that was originally 100 points above the initial ATM has now become the current ATM), the shift triggers.
     *   **Action**: Immediately buys to close all active straddle positions (`24000 CE` and `24000 PE`) to protect against extreme directional moves.
     *   Pauses for **5 minutes** (cooldown) and then restarts a fresh cycle at the new ATM strike (`24,100`).
+
+---
+
+### Scenario E: Trailing Stop Loss (`--trail-start-pct` / `--trail-gap-pts`)
+
+Applies to both `nifty_value_imbalance_straddle.py` (§4.B) and `nifty_advanced_imbalance.py` (§4.A, any mode). The straddle/strangle is sold, so profit is a *drop* in the combined CE+PE premium; the trailing SL arms once that drop reaches `trail_start_pct`% of the entry combined premium, then tracks the lowest premium seen and exits if premium reverses upward by `trail_gap_pts`.
+
+$$\text{trail\_trigger} = \frac{\text{trail\_start\_pct}}{100} \times \text{entry\_combined\_pts}$$
+$$\text{profit\_pts} = \text{entry\_combined\_pts} - \text{current\_combined\_pts}$$
+$$\text{trail\_exit} = \text{best\_combined\_pts} + \text{trail\_gap\_pts} \quad \text{(only once armed)}$$
+
+1.  **Entry**: Sell `24000 CE` @ ₹105 + `24000 PE` @ ₹95 → `entry_combined_pts = 200`.
+2.  **Arming**: With defaults (`trail_start_pct=5`, `trail_gap_pts=15`), `trail_trigger = 5% × 200 = 10 pts`, so the trailing SL arms once combined premium falls to `200 − 10 = 190`. Combined premium drifts down to `160` → trail activates, `best_combined_pts = 160`.
+3.  **Trailing down**: Premium keeps decaying to `130` → `best_combined_pts` updates to `130` (it only ever moves down). Trail exit level is now `130 + 15 = 145`.
+4.  **Exit**: If combined premium reverses and rises above `145`, the strategy immediately buys back both legs — locking in most of the gain from the best point reached, rather than giving it all back.
+
+Set `--trail-start-pct 0` to arm immediately on entry; raise `--trail-gap-pts` for more room on choppy days, or tighten it to lock in profit faster.
+
+---
+
+### Scenario F: Per-Leg SL & Re-entry (`--mode reentry_straddle`)
+
+Applies to `nifty_advanced_imbalance.py --entry-type straddle --mode reentry_straddle` only (not available for strangle). Each leg is watched and traded independently — a stopped-out leg doesn't wait for the other leg or for a full cycle reset; it re-enters on its own once premium comes back down.
+
+1.  **Entry Setup**: Sell `24000 CE` @ ₹120 + `24000 PE` @ ₹115 (1 lot each). With default `--leg-sl-pct 0.20`:
+    *   `ce_sl = 120 × 1.20 = 144`
+    *   `pe_sl = 115 × 1.20 = 138`
+2.  **CE Leg Stopped Out**: Spot rallies, `24000 CE` LTP rises to `146` → `>= ce_sl (144)`.
+    *   **Action**: Buys back `24000 CE` at ~₹146. Realized loss on this leg: `(120 − 146) × lot_size`.
+    *   CE is now flat; `ce_original_entry_premium` stays recorded at `120`. PE leg is untouched and keeps running with its own SL at `138`.
+3.  **CE Re-entry**: Market cools off, `24000 CE` LTP drifts back down to `118` → `<= ce_original_entry_premium (120)`.
+    *   **Action**: Sells `24000 CE` again at ~₹118, at the *initial* lot size (1 lot — `--max-lots` has no effect here).
+    *   New `ce_sl = 118 × 1.20 = 141.6`. The cycle can repeat any number of times through the session.
+4.  **Meanwhile**: Global `--target-profit`/`--stop-loss` and the trailing SL (Scenario E) are still evaluated every tick against combined CE+PE LTP, and the straddle-shift cycle reset (Scenario D) still applies if spot moves the ATM by 100+ points — any of these can end the whole cycle regardless of individual leg state.
+
+Raise `--leg-sl-pct` (e.g. `0.30`) to give each leg more room before it's stopped out; lower it (e.g. `0.15`) for tighter per-leg risk control at the cost of more frequent stop-outs/re-entries.
 
 ---
 
