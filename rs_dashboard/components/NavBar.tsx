@@ -66,6 +66,7 @@ const NAV_GROUPS = [
     icon: Activity,
     links: [
       { href: '/breadth', label: 'Breadth', desc: 'Market index moving average breadth status' },
+      { href: '/breadth-intraday', label: 'Intraday Breadth', desc: 'Live 1-min advance/decline breadth for Nifty 50 & Bank Nifty' },
       { href: '/diffusion', label: 'Diffusion', desc: 'Diffusion index indicators & trend line charts' },
       { href: '/distribution', label: 'Distribution', desc: 'Returns frequency & statistical distribution' },
       { href: '/live', label: 'Live', desc: 'Live ticking market breadth & indexes' },
