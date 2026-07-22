@@ -17,6 +17,7 @@ import {
   type SavedBasket, loadSavedBaskets, persistSavedBaskets, legToOffset, offsetToStrike,
 } from '@/lib/basketStorage';
 import { sortLegsForPlacement, resolveOrderRequest, type StrikeIdentifier } from '@/lib/basketOrders';
+import { useCopyTrade, CopyTradeControls } from './CopyTrade';
 import BasketPayoffChart from './BasketPayoffChart';
 import StrategyCardGrid from './basket/StrategyCardGrid';
 import LegsTable from './basket/LegsTable';
@@ -100,6 +101,8 @@ export default function Baskets() {
     setToasts(prev => [...prev, { id, type, message, detail }]);
     setTimeout(() => setToasts(prev => prev.filter(t => t.id !== id)), type === 'error' ? 7000 : 3000);
   }, []);
+
+  const copyTrade = useCopyTrade(addToast);
 
   // ── Bootstrap: saved baskets ────────────────────────────────────
   useEffect(() => {
@@ -509,6 +512,9 @@ export default function Baskets() {
                 {authenticatedBrokers.map(b => <option key={b} value={b}>{b === 'dhan' ? 'Dhan' : 'Zerodha'}</option>)}
               </select>
             )}
+
+            {/* Dhan → Zerodha trade replication (arm/disarm + multiplier) */}
+            <CopyTradeControls copyTrade={copyTrade} />
 
             <select value={expiry} onChange={e => setExpiry(e.target.value)}
               className="h-8 bg-zinc-900 border border-zinc-700 text-zinc-200 text-xs font-semibold rounded-lg px-2.5 focus:outline-none focus:border-emerald-500">
