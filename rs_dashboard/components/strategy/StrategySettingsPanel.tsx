@@ -98,7 +98,7 @@ export default function StrategySettingsPanel({
               value={selectedExpiry}
               onValueChange={(v) => { if (typeof v === 'string' && v) onExpiryChange(v); }}
             >
-              <SelectTrigger size="sm" className="min-w-44 font-mono">
+              <SelectTrigger size="sm" className="min-w-56 font-mono">
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>

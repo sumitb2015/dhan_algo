@@ -127,7 +127,7 @@ export default function StrategyBuilder() {
       return;
     }
     setResolvedLegs(legs);
-    const payoffStats = computePayoffStats(legs, spot, effectiveLotSize);
+    const payoffStats = computePayoffStats(legs, spot, effectiveLotSize, selectedExpiry);
     setStats(payoffStats);
     setCurve(buildPayoffCurve(legs, spot, effectiveLotSize));
     setTargetBreakevens(null); // recomputed lazily below when breakevenMode === 'target'
@@ -380,7 +380,7 @@ export default function StrategyBuilder() {
     const newLots = Math.max(1, updated[index].qtyLots + delta);
     updated[index] = { ...updated[index], qtyLots: newLots };
     setResolvedLegs(updated);
-    const payoffStats = computePayoffStats(updated, spot, effectiveLotSize);
+    const payoffStats = computePayoffStats(updated, spot, effectiveLotSize, selectedExpiry);
     setStats(payoffStats);
     setCurve(buildPayoffCurve(updated, spot, effectiveLotSize));
     setTargetBreakevens(null);
@@ -425,7 +425,7 @@ export default function StrategyBuilder() {
 
     setResolvedLegs(updated);
 
-    const payoffStats = computePayoffStats(updated, spot, effectiveLotSize);
+    const payoffStats = computePayoffStats(updated, spot, effectiveLotSize, selectedExpiry);
     setStats(payoffStats);
     setCurve(buildPayoffCurve(updated, spot, effectiveLotSize));
     setTargetBreakevens(null);

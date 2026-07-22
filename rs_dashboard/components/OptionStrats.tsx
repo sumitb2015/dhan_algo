@@ -176,8 +176,8 @@ export default function OptionStrats() {
 
   const stats: PayoffStats | null = useMemo(() => {
     if (resolvedLegs.length === 0) return null;
-    return computePayoffStats(resolvedLegs, spot, effectiveLotSize);
-  }, [resolvedLegs, spot, effectiveLotSize]);
+    return computePayoffStats(resolvedLegs, spot, effectiveLotSize, selectedExpiry);
+  }, [resolvedLegs, spot, effectiveLotSize, selectedExpiry]);
 
   const curve = useMemo(() => {
     if (resolvedLegs.length === 0) return [];
@@ -238,7 +238,7 @@ export default function OptionStrats() {
             value={selectedExpiry}
             onValueChange={(v) => { if (typeof v === 'string' && v) setSelectedExpiry(v); }}
           >
-            <SelectTrigger size="sm" className="min-w-40 font-mono">
+            <SelectTrigger size="sm" className="min-w-56 font-mono">
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
@@ -369,7 +369,21 @@ export default function OptionStrats() {
               <Metric label="Chance of Profit" value={stats.popPct !== null ? `${stats.popPct}%` : '—'} tone="neutral" />
               <Metric
                 label="Breakeven"
-                value={stats.breakevensExpiry.length > 0 ? stats.breakevensExpiry.map((b) => b.toFixed(0)).join(', ') : '—'}
+                value={stats.breakevensExpiry.length > 0 ? (
+                  <div className="flex flex-col gap-0.5">
+                    {stats.breakevensExpiry.map((b) => {
+                      const pct = spot > 0 ? ((b - spot) / spot) * 100 : null;
+                      return (
+                        <span key={b}>
+                          {b.toFixed(2)}
+                          {pct !== null && (
+                            <span className="text-zinc-500"> ({pct >= 0 ? '+' : ''}{pct.toFixed(2)}%)</span>
+                          )}
+                        </span>
+                      );
+                    })}
+                  </div>
+                ) : '—'}
                 tone="neutral"
               />
             </CardContent>
@@ -468,7 +482,7 @@ export default function OptionStrats() {
   );
 }
 
-function Metric({ label, value, tone }: { label: string; value: string; tone: 'pos' | 'neg' | 'neutral' }) {
+function Metric({ label, value, tone }: { label: string; value: React.ReactNode; tone: 'pos' | 'neg' | 'neutral' }) {
   return (
     <div className="flex flex-col gap-1">
       <span className="text-[10px] uppercase tracking-wider text-zinc-500">{label}</span>

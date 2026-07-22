@@ -93,7 +93,7 @@ export default function SavedStrategiesTab() {
 
         setLiveSpot(currentSpot);
         setLiveLegs(resolved);
-        setLiveStats(computePayoffStats(resolved, currentSpot, d.lot_size));
+        setLiveStats(computePayoffStats(resolved, currentSpot, d.lot_size, d.expiry));
         setLiveCurve(buildPayoffCurve(resolved, currentSpot, d.lot_size));
       })
       .catch(() => {})

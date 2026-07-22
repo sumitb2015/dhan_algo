@@ -301,6 +301,15 @@ function netPnlAtExpiry(legs: ResolvedLeg[], spot: number, lotSize: number): num
   return legs.reduce((sum, leg) => sum + legPayoffAtExpiry(spot, leg), 0) * lotSize;
 }
 
+/** Whole calendar days from local midnight today to local midnight on expiryDate (YYYY-MM-DD). */
+export function daysToExpiryFrom(expiryDate: string): number {
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const expiry = new Date(expiryDate);
+  expiry.setHours(0, 0, 0, 0);
+  return Math.max(0, Math.round((expiry.getTime() - today.getTime()) / 86_400_000));
+}
+
 /** Zero-crossings of a piecewise-linear {spot, pnl} curve, via linear interpolation between adjacent samples. */
 export function findBreakevens(curve: { spot: number; pnl: number }[]): number[] {
   const breakevens: number[] = [];
@@ -362,7 +371,7 @@ export interface PayoffStats {
   popPct: number | null;
 }
 
-export function computePayoffStats(legs: ResolvedLeg[], spot: number, lotSize: number): PayoffStats {
+export function computePayoffStats(legs: ResolvedLeg[], spot: number, lotSize: number, expiryDate: string): PayoffStats {
   const curve = buildPayoffCurve(legs, spot, lotSize);
 
   // Net qty per side (signed lots): >0 means net SHORT that option type -> unbounded loss on that tail.
@@ -390,21 +399,42 @@ export function computePayoffStats(legs: ResolvedLeg[], spot: number, lotSize: n
     timeValue += sideSign * leg.qtyLots * (leg.price - intrinsicNow) * lotSize;
   }
 
-  // POP: delta-based approximation. Net effective short delta = short legs' |delta| minus
-  // hedge (long) legs' |delta| on the same side, floored at 0.
-  const hasAllDeltas = legs.every(l => l.delta !== null);
+  const breakevensExpiry = findBreakevens(curve);
+
+  // POP: probability the strategy finishes in a profit zone at expiry, computed by
+  // integrating the risk-neutral lognormal distribution (same N(d2) term used by
+  // bsPrice) over each zone bounded by the actual breakevens — not a delta-sum
+  // heuristic, which collapses to ~0% for ATM straddles (both legs' |delta| ~0.5
+  // sum to ~1.0) even though such positions plainly have a real chance of profit.
+  // Each zone's profit/loss sign is checked via the exact intrinsic payoff at a
+  // point safely inside it, not the discretely-sampled curve.
+  const ivs = legs.map((l) => l.iv).filter((iv): iv is number => iv !== null && iv > 0);
   let popPct: number | null = null;
-  if (hasAllDeltas) {
-    const shortAbsDelta = legs.filter(l => l.side === 'SELL').reduce((s, l) => s + Math.abs(l.delta as number), 0);
-    const longAbsDelta  = legs.filter(l => l.side === 'BUY').reduce((s, l) => s + Math.abs(l.delta as number), 0);
-    const effShortDelta = Math.max(0, shortAbsDelta - longAbsDelta);
-    popPct = Math.round(Math.min(1, Math.max(0, 1 - effShortDelta)) * 100);
+  if (ivs.length > 0) {
+    const avgIv = ivs.reduce((s, iv) => s + iv, 0) / ivs.length;
+    const t = daysToExpiryFrom(expiryDate) / 365;
+    const sorted = [...breakevensExpiry].sort((a, b) => a - b);
+    const offset = Math.max(STRIKE_STEP, spot * 0.05);
+    let pop = 0;
+    for (let i = 0; i <= sorted.length; i++) {
+      const lo = i === 0 ? -Infinity : sorted[i - 1];
+      const hi = i === sorted.length ? Infinity : sorted[i];
+      const testSpot = lo === -Infinity && hi === Infinity ? spot
+        : lo === -Infinity ? hi - offset
+        : hi === Infinity ? lo + offset
+        : (lo + hi) / 2;
+      if (netPnlAtExpiry(legs, testSpot, lotSize) <= 0) continue;
+      const probAboveLo = lo === -Infinity ? 1 : riskNeutralProbAbove(spot, lo, t, avgIv);
+      const probAboveHi = hi === Infinity ? 0 : riskNeutralProbAbove(spot, hi, t, avgIv);
+      pop += probAboveLo - probAboveHi;
+    }
+    popPct = Math.round(Math.min(1, Math.max(0, pop)) * 100);
   }
 
   return {
     maxProfit,
     maxLoss,
-    breakevensExpiry: findBreakevens(curve),
+    breakevensExpiry,
     rewardRisk,
     netPremium,
     intrinsicValue,
@@ -436,6 +466,13 @@ export function bsPrice(type: OptType, S: number, K: number, t: number, iv: numb
     return S * normCdf(d1) - K * Math.exp(-r * t) * normCdf(d2);
   }
   return K * Math.exp(-r * t) * normCdf(-d2) - S * normCdf(-d1);
+}
+
+/** Risk-neutral P(S_T > K) under lognormal GBM — the same N(d2) term bsPrice() uses for a call. */
+function riskNeutralProbAbove(S: number, K: number, t: number, iv: number, r = 0.065): number {
+  if (t <= 0 || iv <= 0) return S > K ? 1 : 0;
+  const d2 = (Math.log(S / K) + (r - (iv * iv) / 2) * t) / (iv * Math.sqrt(t));
+  return normCdf(d2);
 }
 
 /**
@@ -492,9 +529,7 @@ export function buildHeatmapGrid(
 ): HeatmapGrid {
   const today = new Date();
   today.setHours(0, 0, 0, 0);
-  const expiry = new Date(expiryDate);
-  expiry.setHours(0, 0, 0, 0);
-  const totalDays = Math.max(0, Math.round((expiry.getTime() - today.getTime()) / 86_400_000));
+  const totalDays = daysToExpiryFrom(expiryDate);
 
   const dates: string[] = [];
   for (let d = 0; d <= totalDays; d++) {

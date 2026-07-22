@@ -133,8 +133,8 @@ export default function PctStrangleTab({ spot, chainOc, expiries, selectedExpiry
   );
 
   const stats = useMemo(
-    () => (resolvedLegs.length === 2 ? computePayoffStats(resolvedLegs, spot, effectiveLotSize) : null),
-    [resolvedLegs, spot, effectiveLotSize],
+    () => (resolvedLegs.length === 2 ? computePayoffStats(resolvedLegs, spot, effectiveLotSize, pctExpiry) : null),
+    [resolvedLegs, spot, effectiveLotSize, pctExpiry],
   );
 
   const curve = useMemo(

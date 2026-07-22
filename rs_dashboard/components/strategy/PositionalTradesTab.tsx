@@ -337,7 +337,7 @@ export default function PositionalTradesTab({ lotSize }: { lotSize: number | nul
 
     const activeSpot = spot || trade.entrySpot;
     return {
-      stats: computePayoffStats(resolved, activeSpot, tradeLotSize(trade)),
+      stats: computePayoffStats(resolved, activeSpot, tradeLotSize(trade), trade.expiry),
       curve: buildPayoffCurve(resolved, activeSpot, tradeLotSize(trade)),
       resolvedLegs: resolved,
       liveSpot: activeSpot,
