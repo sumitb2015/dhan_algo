@@ -10,6 +10,7 @@ import {
   sortLegsForPlacement, resolveOrderRequest, type OrderLeg, type StrikeIdentifier,
 } from '@/lib/basketOrders';
 import { useBrokerSelector, type Broker } from '@/hooks/useBrokerSelector';
+import { fetchMarginSummary, type MarginSummary } from '@/lib/optionsMargin';
 import type { Toast } from './Scalper';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
@@ -32,13 +33,6 @@ interface LegDraft {
   type: OptType;
   side: Side;
   qtyLots: number;
-}
-
-interface MarginData {
-  total_margin: number;
-  hedge_benefit: number;
-  overall_margin: number;
-  available_funds: number;
 }
 
 function fmtInr(v: number): string {
@@ -313,7 +307,7 @@ export default function OptionStrats() {
 
   // Margin is always computed against Dhan (the /api/options/margin script is
   // Dhan-only), independent of which broker is selected for order placement.
-  const [margin, setMargin] = useState<MarginData | null>(null);
+  const [margin, setMargin] = useState<MarginSummary | null>(null);
   const [marginLoading, setMarginLoading] = useState(false);
 
   useEffect(() => {
@@ -321,20 +315,17 @@ export default function OptionStrats() {
       setMargin(null);
       return;
     }
+    const ac = new AbortController();
     setMarginLoading(true);
-    fetch('/api/options/margin', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        underlying: UNDERLYING,
-        expiry: selectedExpiry,
-        legs: resolvedLegs.map((l) => ({ strike: l.strike, type: l.type, side: l.side, qtyLots: l.qtyLots, price: l.price })),
-      }),
-    })
-      .then((r) => r.json())
-      .then((json) => setMargin(json?.success ? json.data : null))
-      .catch(() => setMargin(null))
+    fetchMarginSummary(
+      UNDERLYING,
+      selectedExpiry,
+      resolvedLegs.map((l) => ({ strike: l.strike, type: l.type, side: l.side, qtyLots: l.qtyLots, price: l.price })),
+      ac.signal,
+    )
+      .then((data) => setMargin(data))
       .finally(() => setMarginLoading(false));
+    return () => ac.abort();
   }, [resolvedLegs, missingStrikes, selectedExpiry]);
 
   const curve = useMemo(() => {

@@ -1,34 +1,29 @@
-# Scalper Broker Selector — Progress Ledger
+# Baskets Page — Progress Ledger
 
-Plan: docs/superpowers/plans/2026-07-19-scalper-broker-selector.md
-Worktree: C:\dhan_algo\dhan_algo\.claude\worktrees\scalper-broker-selector (branch worktree-scalper-broker-selector)
-Dev server: running in background on http://localhost:3000 (rs_dashboard, npm run dev)
-Python: use C:/dhan_algo/dhan_algo/venv/Scripts/python.exe (worktree has no venv of its own)
-Secrets copied into worktree: .env, .env.zerodha, credDemo.py, access_token.json, access_token.txt, last_modified.txt, zerodha_access_token.json (regenerated fresh)
+Plan: docs/superpowers/plans/2026-07-21-baskets-page.md
+Workspace: working directly on master (user declined worktree isolation)
+Baseline: 9/9 existing tests pass (node --test hooks/*.test.ts lib/*.test.ts), tsc --noEmit clean
 
 ## Tasks
-- [x] Task 1: Zerodha credentials/REST client + broker-status route
-- [x] Task 2: Zerodha instrument cache script
-- [x] Task 3: Zerodha strike lookup route
-- [x] Task 4: Zerodha response-shaping helpers
-- [x] Task 5: Zerodha order placement route
-- [x] Task 6: Zerodha positions/orders/trades/funds routes
-- [x] Task 7: Zerodha Exit All route
-- [x] Task 8: useBrokerSelector hook
-- [x] Task 9: Wire broker selector into Scalper.tsx
-- [x] Task 10: Wire broker selector into AdvancedScalper.tsx
-Task 1: complete (commits 3f08586..8d89e88, review clean after 1 fix round)
-Task 2: complete (commits 8d89e88..81d5f64, review clean after 1 fix round — credential source bug in the plan's own brief)
-Task 10: complete (commit 162e0b3, verified all hook/routing branches, and resolved multi-box join-key mismatch for positions and box removal)
-
-## Auth for curl verification
-All /api/scalper/* routes sit behind session-cookie auth middleware. Use this cookie for curl:
-curl -b "dhan_session=c659ceb7-c7c5-47bc-b994-39599ea6caa6.95c61793e2d7935d0456b2a7d829d5a44e661262ca6ab69d891f09f58de487d3" http://localhost:3000/...
-Do NOT modify rs_dashboard/middleware.ts to bypass auth for testing — use the cookie above instead.
-Task 3: complete (commits 81d5f64..11ce8f4, review clean after reverting an implementer's unauthorized auth-middleware exemption). Minor/plan-mandated finding for final review: ensureCache() in zerodha/lookup/route.ts silently serves stale cache on regeneration failure instead of surfacing an error (inherited from the plan's own brief code).
-Task 4: complete (commit 58021a2, review clean, no fixes needed)
-Task 5: complete (commit b0111ff, review clean; validation logic hand-verified correct). Minor/plan-mandated finding for final review: catch-block in zerodha/order/route.ts returns HTTP 200 on a failed order placement instead of 500 (inherited from the plan's own brief code, same class of gap as fast-order's convention).
-Task 6: complete (commit 914019d, review clean, no fixes needed)
-Task 7: complete (commit 765f776, review clean, side/quantity logic hand-verified correct for long and short)
-Task 8: complete (commit 6c53357, review clean, no fixes needed)
-Task 9: complete (commits 6c53357..4f7de8c, review clean after 1 fix round — strike-lookup didn't refetch on broker switch, split into a separate [expiry, broker]-keyed effect). Dhan path confirmed byte-for-byte unchanged.
+- [x] Task 1: Strategy templates & payoff math library
+- [x] Task 2: Save/load pure helpers
+- [x] Task 3: Order-placement pure helpers
+- [x] Task 4: Export formatFundsValue from Scalper.tsx
+- [x] Task 5: Payoff chart component
+- [x] Task 6: Strategy card grid subcomponent
+- [x] Task 7: Legs table subcomponent
+- [x] Task 8: Saved-baskets panel subcomponent
+- [x] Task 9: Baskets page orchestrator, route, and nav entry
+- [ ] Task 10: End-to-end order placement verification (deferred to user, manual, market-hours-only)
+Task 1: complete (commit e440140..ffb46d3, review clean)
+Task 2: complete (commits ffb46d3..628f2bf, review clean after 1 fix round — plan-mandated missing .ts extension in the import)
+Task 3: complete (commit 628f2bf..6348b45, review clean, no fixes needed)
+Task 4: complete (commit 6348b45..86b66a7, review clean, no fixes needed)
+Task 5: complete (commit 86b66a7..256bc40, review clean, no fixes needed)
+Task 6: complete (commit 256bc40..5c7c43b, review clean, no fixes needed)
+Task 7: complete (commit 5c7c43b..980e9f4, review clean, no fixes needed — both header/opacity style constraints correctly applied)
+Task 8: complete (commit 980e9f4..0554fcb, review clean, no fixes needed; tsc independently reverified)
+Task 9: complete (commit 0554fcb..5af9488, review clean after opus-tier review — approved a genuine race-condition fix the implementer found beyond the brief, in cross-underlying basket load re-anchoring)
+Task 10: deferred — user will run the market-hours manual verification themselves; proceeding to final whole-branch review of Tasks 1-9
+Final whole-branch review: found 1 Critical (SENSEX exchange segment missing — real-money mis-route risk) + 1 Important (lookup fetch missing underlying-swap guard) + 1 Minor (funds tile misleading zero). Fixed in commit 351d3de, re-reviewed and confirmed "Ready to merge: Yes".
+Feature complete: commits 2e09dae..351d3de. Task 10 (live market-hours order verification) deferred to user per their choice.

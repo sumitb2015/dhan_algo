@@ -1310,9 +1310,13 @@ class DhanHelper:
             include_orders:   Include open orders in margin calculation.
 
         Returns:
-            Dict with keys: total_margin, span_margin, exposure_margin,
-            equity_margin, fo_margin, commodity_margin, currency, hedge_benefit.
-            Empty dict on failure.
+            Dhan's raw /margincalculator/multi response `data` object, verbatim.
+            Keys are camelCase as returned by Dhan: totalMargin, spanMargin,
+            exposure, equityMargin, foMargin, commodity, currency, hedgeBenefit,
+            userFundLimit, insufficientFund. Empty dict on failure. NOTE: Dhan's
+            hedgeBenefit is unreliable for what-if combos (often 0.0 despite the
+            portfolio total clearly reflecting a netting benefit) — prefer
+            get_multi_leg_margin_summary(), which derives it as overall - final.
 
         Example::
 
@@ -1322,7 +1326,7 @@ class DhanHelper:
                  "securityId": "52175", "price": 200.0},
             ]
             margin = helper.get_margin_calculator_multi(scripts)
-            print(f"Total margin required: {margin.get('total_margin')}")
+            print(f"Total margin required: {margin.get('totalMargin')}")
         """
         try:
             dhan_http = getattr(self.dhan, 'dhan_http', None)
@@ -1349,6 +1353,119 @@ class DhanHelper:
         except Exception as e:
             logger.error(f"Exception in get_margin_calculator_multi: {e}")
         return {}
+
+    def resolve_option_legs_to_margin_scripts(
+        self,
+        legs: List[Dict],
+        underlying: str = "NIFTY",
+        expiry: str = None,
+        product_type: str = "MARGIN",
+    ) -> List[Dict]:
+        """Resolve a list of option legs into margincalculator 'scripts' entries.
+
+        Each leg is a dict with keys:
+            strike (float), type ('CE'|'PE'), side ('BUY'|'SELL'),
+            qtyLots (int), price (float, optional — 0 lets Dhan use LTP).
+
+        Uses find_option() against the master list to get each contract's
+        SECURITY_ID and LOT_SIZE, so quantity = qtyLots * lot_size.
+
+        Raises ValueError if any leg's contract can't be resolved — callers
+        should catch and surface it (e.g. as an API error response).
+        """
+        scripts = []
+        for leg in legs:
+            strike = float(leg['strike'])
+            option_type = str(leg['type']).upper()
+            side = str(leg['side']).upper()
+            qty_lots = int(leg['qtyLots'])
+            price = float(leg.get('price', 0.0) or 0.0)
+
+            contract = self.find_option(underlying, expiry, strike, option_type)
+            if not contract:
+                raise ValueError(f"strike not found: {strike} {option_type} @ {expiry}")
+
+            lot_size = int(contract['LOT_SIZE'])
+            scripts.append({
+                'exchangeSegment': 'NSE_FNO',
+                'transactionType': side,
+                'quantity': qty_lots * lot_size,
+                'productType': product_type.upper(),
+                'securityId': str(contract['SECURITY_ID']),
+                'price': price,
+            })
+        return scripts
+
+    def get_multi_leg_margin_summary(
+        self,
+        scripts: List[Dict],
+        include_position: bool = True,
+        include_orders: bool = True,
+        include_available_funds: bool = True,
+    ) -> Dict:
+        """Full margin summary for a multi-leg options position.
+
+        Combines two sources so callers get the same figures Dhan's own
+        Strategy Builder shows, without re-deriving them each time:
+
+        - **final_margin** (a.k.a. total): the portfolio-netted margin the
+          position actually blocks, from /margincalculator/multi.
+        - **overall_margin**: the sum of each leg's margin computed
+          *independently* (one single-order margin_calculator call per leg,
+          no netting) — this is Dhan's "Overall Margin".
+        - **hedge_benefit**: overall - final. Derived rather than read from
+          Dhan's own hedgeBenefit field, which is unreliable for what-if
+          combos (see get_margin_calculator_multi note).
+
+        Args:
+            scripts: margincalculator 'scripts' entries (see
+                resolve_option_legs_to_margin_scripts).
+            include_position / include_orders: passed to the multi call.
+            include_available_funds: also fetch account available funds
+                (one extra /fundlimit call).
+
+        Returns a dict with keys:
+            overall_margin, final_margin, hedge_benefit, span_margin,
+            exposure_margin, available_funds. All rupee floats rounded to 2dp.
+            Empty dict if the portfolio margin call fails.
+
+        Cost: 1 multi-margin call + N single-margin calls (one per leg)
+        [+ 1 funds call], each rate-limited by ~1s — so an M-leg strategy
+        makes ~M+2 sequential HTTP calls. Fine for on-demand UI/analysis use;
+        avoid calling it in a tight per-tick loop.
+        """
+        margin = self.get_margin_calculator_multi(
+            scripts, include_position=include_position, include_orders=include_orders)
+        if not margin:
+            return {}
+
+        final_margin = float(margin.get('totalMargin', 0.0))
+
+        overall_margin = 0.0
+        for script in scripts:
+            time.sleep(1)  # rate-limit, consistent with other calls in this file
+            res = self.dhan.margin_calculator(
+                security_id=script['securityId'],
+                exchange_segment=script['exchangeSegment'],
+                transaction_type=script['transactionType'],
+                quantity=script['quantity'],
+                product_type=script['productType'],
+                price=script['price'],
+            )
+            data = res.get('data', {}) if isinstance(res, dict) else {}
+            overall_margin += float(data.get('totalMargin', 0.0))
+
+        hedge_benefit = max(0.0, overall_margin - final_margin)
+        available_funds = self.get_available_funds() if include_available_funds else 0.0
+
+        return {
+            'overall_margin': round(overall_margin, 2),
+            'final_margin': round(final_margin, 2),
+            'hedge_benefit': round(hedge_benefit, 2),
+            'span_margin': round(float(margin.get('spanMargin', 0.0)), 2),
+            'exposure_margin': round(float(margin.get('exposure', 0.0)), 2),
+            'available_funds': round(float(available_funds), 2),
+        }
 
     # --- PORTFOLIO ---
     def get_positions(self) -> pd.DataFrame:

@@ -14,6 +14,7 @@ import {
   resolveLegs, computePayoffStats, buildPayoffCurve, buildTargetPayoffCurve, findBreakevens,
   ChainOc, ResolvedLeg, PayoffStats,
 } from '@/lib/optionsStrategy';
+import { fetchMarginSummary, type MarginSummary } from '@/lib/optionsMargin';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -27,8 +28,6 @@ import { cn } from '@/lib/utils';
 
 const UNDERLYING = 'NIFTY';
 const FALLBACK_LOT_SIZE = 75;
-
-type MarginData = { total_margin: number; hedge_benefit: number; available_funds: number };
 
 export default function StrategyBuilder() {
   const [activeTab, setActiveTab] = useState<'builder' | 'saved' | 'positions' | 'pct_strangle'>('builder');
@@ -58,7 +57,7 @@ export default function StrategyBuilder() {
   const [breakevenMode, setBreakevenMode] = useState<'target' | 'expiry'>('expiry');
   const [targetBreakevens, setTargetBreakevens] = useState<number[] | null>(null);
 
-  const [margin, setMargin] = useState<MarginData | null>(null);
+  const [margin, setMargin] = useState<MarginSummary | null>(null);
   const [marginLoading, setMarginLoading] = useState(false);
 
   const [entering, setEntering] = useState(false);
@@ -103,6 +102,17 @@ export default function StrategyBuilder() {
       .catch(() => {});
   }, [selectedExpiry]);
 
+  const refreshMargin = useCallback((marginLegs: ResolvedLeg[]) => {
+    setMarginLoading(true);
+    fetchMarginSummary(
+      UNDERLYING,
+      selectedExpiry,
+      marginLegs.map((l) => ({ strike: l.strike, type: l.type, side: l.side, qtyLots: l.qtyLots, price: l.price })),
+    )
+      .then((data) => setMargin(data))
+      .finally(() => setMarginLoading(false));
+  }, [selectedExpiry]);
+
   const handleSelectStrategy = useCallback((id: string) => {
     setSelectedId(id);
     const t = getTemplate(id);
@@ -132,21 +142,8 @@ export default function StrategyBuilder() {
     setCurve(buildPayoffCurve(legs, spot, effectiveLotSize));
     setTargetBreakevens(null); // recomputed lazily below when breakevenMode === 'target'
 
-    setMarginLoading(true);
-    fetch('/api/options/margin', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        underlying: UNDERLYING,
-        expiry: selectedExpiry,
-        legs: legs.map((l) => ({ strike: l.strike, type: l.type, side: l.side, qtyLots: l.qtyLots, price: l.price })),
-      }),
-    })
-      .then((r) => r.json())
-      .then((json) => setMargin(json?.success ? json.data : null))
-      .catch(() => setMargin(null))
-      .finally(() => setMarginLoading(false));
-  }, [selectedTemplate, params, lots, spot, chainOc, selectedExpiry, effectiveLotSize]);
+    refreshMargin(legs);
+  }, [selectedTemplate, params, lots, spot, chainOc, selectedExpiry, effectiveLotSize, refreshMargin]);
 
   // Recompute target breakevens on demand when the toggle is switched to 'target'
   useEffect(() => {
@@ -384,21 +381,8 @@ export default function StrategyBuilder() {
     setStats(payoffStats);
     setCurve(buildPayoffCurve(updated, spot, effectiveLotSize));
     setTargetBreakevens(null);
-    setMarginLoading(true);
-    fetch('/api/options/margin', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        underlying: UNDERLYING,
-        expiry: selectedExpiry,
-        legs: updated.map((l) => ({ strike: l.strike, type: l.type, side: l.side, qtyLots: l.qtyLots, price: l.price })),
-      }),
-    })
-      .then((r) => r.json())
-      .then((json) => setMargin(json?.success ? json.data : null))
-      .catch(() => setMargin(null))
-      .finally(() => setMarginLoading(false));
-  }, [resolvedLegs, spot, selectedExpiry, effectiveLotSize]);
+    refreshMargin(updated);
+  }, [resolvedLegs, spot, selectedExpiry, effectiveLotSize, refreshMargin]);
 
   const handleUpdateLegStrike = useCallback((index: number, newStrike: number) => {
     if (!resolvedLegs) return;
@@ -429,22 +413,8 @@ export default function StrategyBuilder() {
     setStats(payoffStats);
     setCurve(buildPayoffCurve(updated, spot, effectiveLotSize));
     setTargetBreakevens(null);
-    
-    setMarginLoading(true);
-    fetch('/api/options/margin', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        underlying: UNDERLYING,
-        expiry: selectedExpiry,
-        legs: updated.map((l) => ({ strike: l.strike, type: l.type, side: l.side, qtyLots: l.qtyLots, price: l.price })),
-      }),
-    })
-      .then((r) => r.json())
-      .then((json) => setMargin(json?.success ? json.data : null))
-      .catch(() => setMargin(null))
-      .finally(() => setMarginLoading(false));
-  }, [resolvedLegs, chainOc, spot, selectedExpiry, effectiveLotSize]);
+    refreshMargin(updated);
+  }, [resolvedLegs, chainOc, spot, selectedExpiry, effectiveLotSize, refreshMargin]);
 
   const displayedCurve = useMemo(() => curve, [curve]);
 
