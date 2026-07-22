@@ -24,6 +24,7 @@ interface CopyTradeConfig {
 }
 interface CopyTradeStatus {
   status: 'RUNNING' | 'STARTING' | 'STOPPED' | 'ERROR' | string;
+  ws_stale?: boolean;
 }
 
 export interface CopyTradeApi {
@@ -31,6 +32,7 @@ export interface CopyTradeApi {
   setMultiplierInput: (v: string) => void;
   armed: boolean;
   bridgeRunning: boolean;
+  wsStale: boolean;
   confirmArm: boolean;
   arming: boolean;
   arm: () => void;
@@ -149,6 +151,7 @@ export function useCopyTrade(notify: (type: 'success' | 'error', message: string
     multiplierInput, setMultiplierInput: editMultiplier,
     armed: config.armed,
     bridgeRunning: status?.status === 'RUNNING',
+    wsStale: status?.status === 'RUNNING' && !!status?.ws_stale,
     confirmArm, arming,
     arm, disarm,
   };
@@ -157,7 +160,7 @@ export function useCopyTrade(notify: (type: 'success' | 'error', message: string
 // ─── Inline controls for the P&L Guard bar ────────────────────────
 
 export function CopyTradeControls({ copyTrade }: { copyTrade: CopyTradeApi }) {
-  const { armed, bridgeRunning, multiplierInput, setMultiplierInput, confirmArm, arming, arm, disarm } = copyTrade;
+  const { armed, bridgeRunning, wsStale, multiplierInput, setMultiplierInput, confirmArm, arming, arm, disarm } = copyTrade;
 
   return (
     <>
@@ -170,11 +173,19 @@ export function CopyTradeControls({ copyTrade }: { copyTrade: CopyTradeApi }) {
 
       {armed && (
         <span className={`px-2 py-1 rounded text-[10px] font-bold uppercase tracking-wider shrink-0 whitespace-nowrap ${
-          bridgeRunning
-            ? 'bg-emerald-900/60 text-emerald-400 border border-emerald-500/30'
-            : 'bg-red-900/60 text-red-400 border border-red-500/30 animate-pulse'
-        }`} title={bridgeRunning ? undefined : 'Armed but the bridge is not running — not actually replicating right now'}>
-          {bridgeRunning ? 'ARMED' : 'ARMED (bridge down!)'}
+          !bridgeRunning
+            ? 'bg-red-900/60 text-red-400 border border-red-500/30 animate-pulse'
+            : wsStale
+              ? 'bg-amber-900/60 text-amber-400 border border-amber-500/30 animate-pulse'
+              : 'bg-emerald-900/60 text-emerald-400 border border-emerald-500/30'
+        }`} title={
+          !bridgeRunning
+            ? 'Armed but the bridge is not running — not actually replicating right now'
+            : wsStale
+              ? 'No Dhan order-update event received in a while during market hours — bridge is reconnecting, recent fills may not have replicated'
+              : undefined
+        }>
+          {!bridgeRunning ? 'ARMED (bridge down!)' : wsStale ? 'ARMED (WS stale!)' : 'ARMED'}
         </span>
       )}
 

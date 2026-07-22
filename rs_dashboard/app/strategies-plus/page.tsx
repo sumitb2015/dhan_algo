@@ -45,6 +45,8 @@ interface CopyTradeStatus {
   detail?: string;
   started_at?: string;
   last_update?: string;
+  ws_stale?: boolean;
+  ws_last_event?: number;
 }
 interface CopyTradeLogEntry {
   ts: string;
@@ -787,7 +789,13 @@ export default function StrategiesPlusPage() {
           <div className="flex items-center gap-4 flex-wrap">
             {/* Bridge status chip */}
             <div className="flex items-center gap-2 shrink-0">
-              {copyTradeStatus?.status === 'RUNNING' ? (
+              {copyTradeStatus?.status === 'RUNNING' && copyTradeStatus?.ws_stale ? (
+                <span className="flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-amber-500/10 border border-amber-500/30 text-amber-400 text-[11px] font-bold animate-pulse"
+                  title="No Dhan order-update event received in a while during market hours — the bridge is reconnecting. Fills since the last event may not have replicated.">
+                  <AlertTriangle className="h-3 w-3" />
+                  WS STALE — RECONNECTING
+                </span>
+              ) : copyTradeStatus?.status === 'RUNNING' ? (
                 <span className="flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-emerald-500/10 border border-emerald-500/30 text-emerald-400 text-[11px] font-bold">
                   <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 shrink-0" />
                   LISTENING

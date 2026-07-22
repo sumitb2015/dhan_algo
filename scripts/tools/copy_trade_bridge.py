@@ -68,6 +68,14 @@ MAX_LOG_ENTRIES  = 200
 WATCHDOG_INTERVAL_SEC = 7
 HEARTBEAT_INTERVAL_SEC = 5
 
+# The order-update WS thread can stay "alive" (blocked inside a dead socket
+# read, no exception raised) indefinitely without actually receiving events —
+# is_alive() alone can't detect that. During market hours, treat no events
+# for this long as a silently-dead connection and force a reconnect. Cooldown
+# prevents a reconnect storm if the feed is genuinely just quiet.
+WS_STALE_SEC = 180
+WS_RESTART_COOLDOWN_SEC = 120
+
 # Safety-exit tuning: require the parent flat on this many consecutive checks
 # (a scalper can exit and re-enter within one watchdog interval), and never
 # fire within REPLICATION_GRACE_SEC of the last replicated fill.
@@ -719,7 +727,9 @@ def main():
 
     state = {
         'last_replication_ts': 0.0,
-        'ws_last_event_ts': 0.0,
+        # Start the staleness clock at "now", not epoch 0 — a raw 0.0 would
+        # look infinitely stale the instant the process starts.
+        'ws_last_event_ts': time.time(),
         'failed_count': 0,
         'flat_streak': 0,
     }
@@ -884,6 +894,7 @@ def main():
     print('[copy_trade_bridge] Listening for Dhan order updates…', flush=True)
 
     last_heartbeat = 0.0
+    last_ws_restart_ts = 0.0
     try:
         while True:
             if os.path.exists(STOP_TRIGGER):
@@ -899,12 +910,28 @@ def main():
                 with _retry_lock:
                     pending_retries = len(retry_queue)
                 ws_alive = helper._ou_thread is not None and helper._ou_thread.is_alive()
+                ws_stale = market_is_open() and (now - state['ws_last_event_ts']) > WS_STALE_SEC
+
+                if ws_stale and (now - last_ws_restart_ts) > WS_RESTART_COOLDOWN_SEC:
+                    last_ws_restart_ts = now
+                    print(f'[copy_trade_bridge] WARNING: no order-update WS event for '
+                          f'{int(now - state["ws_last_event_ts"])}s during market hours — '
+                          f'forcing reconnect.', flush=True)
+                    try:
+                        helper.stop_order_update_websocket()
+                        helper.start_order_update_websocket(on_update=handle_update)
+                    except Exception as e:
+                        print(f'[copy_trade_bridge] Forced WS reconnect failed: {e}', flush=True)
+
                 detail = ''
                 if state['failed_count'] or pending_retries:
                     detail = f"{state['failed_count']} failed replication(s), {pending_retries} pending retry(ies)"
+                if ws_stale:
+                    detail = (detail + ' — ' if detail else '') + 'order-update WS stale, reconnecting'
                 write_status('RUNNING', started_at=started_at, detail=detail, extra={
                     'ws_thread_alive': ws_alive,
                     'ws_last_event': state['ws_last_event_ts'],
+                    'ws_stale': ws_stale,
                     'failed_replications': state['failed_count'],
                     'pending_retries': pending_retries,
                 })
