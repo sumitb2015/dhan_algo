@@ -42,7 +42,7 @@ function MetricTile({ label, value, tone = 'neutral' }: {
 }
 
 export default function Baskets() {
-  const { broker, setBroker, authenticatedBrokers } = useBrokerSelector();
+  const { broker, setBroker, authenticatedBrokers, hasAuthenticatedBroker, authChecked } = useBrokerSelector();
   const [underlying, setUnderlying] = useState<Underlying>('NIFTY');
 
   const [expiries, setExpiries] = useState<string[]>([]);
@@ -277,8 +277,43 @@ export default function Baskets() {
   const daysLeft = useMemo(() => (expiry ? daysToExpiry(expiry) : null), [expiry]);
 
   // ── Order placement ─────────────────────────────────────────────
+  type PlacedLeg = { label: string; side: 'B' | 'S'; option: OptionType; strike: number; qty: number };
+
+  // Flattens already-filled legs of a basket that stopped mid-way by firing
+  // opposite-side MARKET orders for each — best-effort, since a rejected or
+  // network-unconfirmed leg can't otherwise be undone from this UI.
+  const rollbackPlacedLegs = useCallback(async (placed: PlacedLeg[]) => {
+    if (!placed.length) return;
+    addToast('error', `Auto-flattening ${placed.length} placed leg(s)`, 'Reversing with market orders — verify in Orders/Positions after');
+    for (const p of [...placed].reverse()) {
+      const reverseReq = resolveOrderRequest(broker, {
+        side: p.side === 'B' ? 'S' : 'B', option: p.option, strike: p.strike, qty: p.qty, type: 'MARKET', underlying,
+      }, strikeMap);
+      if (!reverseReq) {
+        addToast('error', `Could not auto-reverse ${p.label}`, 'No order identifier — close manually from Orders/Positions');
+        continue;
+      }
+      try {
+        const res = await fetch(reverseReq.url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(reverseReq.body),
+        });
+        const j = await res.json() as { success: boolean; order_id?: string; error?: string };
+        if (j.success) addToast('success', `Reversed ${p.label}`, `ID: ${j.order_id}`);
+        else addToast('error', `Reverse failed for ${p.label}`, `${j.error ?? 'Unknown error'} — close manually from Orders/Positions`);
+      } catch (e) {
+        addToast('error', `Reverse UNCONFIRMED for ${p.label}`, `Close manually from Orders/Positions: ${String(e)}`);
+      }
+    }
+  }, [broker, strikeMap, underlying, addToast]);
+
   const placeBasket = useCallback(async () => {
     if (!legs.length || !expiry) return;
+    if (!hasAuthenticatedBroker) {
+      addToast('error', 'No broker logged in', 'Log in to Dhan or Zerodha before placing a basket');
+      return;
+    }
     if (!confirmPlace) {
       setConfirmPlace(true);
       setTimeout(() => setConfirmPlace(false), 4000);
@@ -298,7 +333,7 @@ export default function Baskets() {
     setPlacing(true);
 
     const ordered = sortLegsForPlacement(legs);
-    let placedCount = 0;
+    const placedLegs: PlacedLeg[] = [];
     try {
       for (const leg of ordered) {
         const label = `${leg.side === 'B' ? 'BUY' : 'SELL'} ${leg.strike} ${leg.option}`;
@@ -308,6 +343,7 @@ export default function Baskets() {
         const req = resolveOrderRequest(broker, { side: leg.side, option: leg.option, strike: leg.strike, qty, type: leg.type, price, underlying }, strikeMap);
         if (!req) {
           addToast('error', `${label} — no order identifier resolved`, 'Strike lookup not ready yet — basket stopped');
+          await rollbackPlacedLegs(placedLegs);
           return;
         }
 
@@ -319,23 +355,25 @@ export default function Baskets() {
           });
           const j = await res.json() as { success: boolean; order_id?: string; error?: string };
           if (j.success) {
-            placedCount += 1;
+            placedLegs.push({ label, side: leg.side, option: leg.option, strike: leg.strike, qty });
             addToast('success', `${label} placed`, `ID: ${j.order_id}`);
           } else {
             addToast('error', `${label} failed — basket stopped`, j.error ?? 'Unknown error');
+            await rollbackPlacedLegs(placedLegs);
             return;
           }
         } catch (e) {
           addToast('error', `${label} UNCONFIRMED — basket stopped`, `Check Orders before retrying: ${String(e)}`);
+          await rollbackPlacedLegs(placedLegs);
           return;
         }
       }
-      addToast('success', `Basket complete: ${placedCount}/${legs.length} legs placed`);
+      addToast('success', `Basket complete: ${placedLegs.length}/${legs.length} legs placed`);
     } finally {
       placingRef.current = false;
       setPlacing(false);
     }
-  }, [legs, expiry, confirmPlace, multiplier, lotSize, strikeMap, broker, effectivePremium, addToast]);
+  }, [legs, expiry, confirmPlace, multiplier, lotSize, strikeMap, broker, underlying, effectivePremium, addToast, hasAuthenticatedBroker, rollbackPlacedLegs]);
 
   // ── Save / load ───────────────────────────────────────────────
   const persistSaved = (next: SavedBasket[]) => {
@@ -433,6 +471,14 @@ export default function Baskets() {
           </div>
         ))}
       </div>
+
+      {authChecked && !hasAuthenticatedBroker && (
+        <div className="z-20 bg-amber-900/95 border-b border-amber-500/40 px-4 py-2 text-center">
+          <p className="text-xs font-bold text-amber-200">
+            No broker logged in — log in to Dhan or Zerodha to fetch live data and place orders.
+          </p>
+        </div>
+      )}
 
       <div className="sticky top-0 z-10 border-b border-zinc-800 bg-zinc-950/95 backdrop-blur px-4 py-2">
         <div className="flex items-center justify-between gap-3 flex-wrap">
@@ -546,10 +592,10 @@ export default function Baskets() {
 
           {legs.length > 0 && (
             <div className="flex items-center gap-3 px-4 py-3 border-t border-zinc-800 bg-zinc-950/30 flex-wrap">
-              <Button onClick={placeBasket} disabled={placing}
+              <Button onClick={placeBasket} disabled={placing || !hasAuthenticatedBroker}
                 className={`${confirmPlace ? 'animate-pulse' : ''}`}>
                 {placing ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <ShoppingBasket className="w-3.5 h-3.5" />}
-                {placing ? 'Placing…' : confirmPlace ? `Confirm ${legs.length} legs ×${multiplier}?` : 'Place Basket'}
+                {placing ? 'Placing…' : !hasAuthenticatedBroker ? 'No broker logged in' : confirmPlace ? `Confirm ${legs.length} legs ×${multiplier}?` : 'Place Basket'}
               </Button>
               <Button size="sm" variant="outline" disabled={placing}
                 onClick={() => { setLegs([]); setStrategy(null); setConfirmPlace(false); }}

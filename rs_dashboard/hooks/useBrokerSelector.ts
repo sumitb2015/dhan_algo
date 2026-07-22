@@ -17,6 +17,13 @@ export function brokerRoute(broker: Broker, dhanPath: string, zerodhaPath: strin
 export function useBrokerSelector() {
   const [broker, setBroker] = useState<Broker>('dhan');
   const [authenticatedBrokers, setAuthenticatedBrokers] = useState<Broker[]>(['dhan']);
+  // True once /api/auth/broker-status has actually confirmed at least one
+  // broker session — distinct from authenticatedBrokers, which always falls
+  // back to ['dhan'] so existing broker-select dropdowns keep working even
+  // when no session is live. Callers that gate real-money actions (order
+  // placement) should check this instead of authenticatedBrokers.length.
+  const [hasAuthenticatedBroker, setHasAuthenticatedBroker] = useState(true);
+  const [authChecked, setAuthChecked] = useState(false);
 
   useEffect(() => {
     fetch('/api/auth/broker-status')
@@ -26,9 +33,11 @@ export function useBrokerSelector() {
         if (j.dhan) brokers.push('dhan');
         if (j.zerodha) brokers.push('zerodha');
         setAuthenticatedBrokers(brokers.length ? brokers : ['dhan']);
+        setHasAuthenticatedBroker(brokers.length > 0);
+        setAuthChecked(true);
       })
       .catch(() => {});
   }, []);
 
-  return { broker, setBroker, authenticatedBrokers };
+  return { broker, setBroker, authenticatedBrokers, hasAuthenticatedBroker, authChecked };
 }
