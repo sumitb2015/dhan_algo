@@ -1,11 +1,16 @@
 'use client';
 
-import { useEffect, useMemo, useState, useCallback } from 'react';
+import { useEffect, useMemo, useState, useCallback, useRef } from 'react';
 import PayoffDiagram from '@/components/strategy/PayoffDiagram';
 import {
   classifyExpiries, computeAtm, resolveFreeformLegs, computePayoffStats, buildPayoffCurve,
   buildHeatmapGrid, lookupChainLegData, STRIKE_STEP, OptType, Side, FreeformLegSpec, ChainOc, ResolvedLeg, PayoffStats,
 } from '@/lib/optionsStrategy';
+import {
+  sortLegsForPlacement, resolveOrderRequest, type OrderLeg, type StrikeIdentifier,
+} from '@/lib/basketOrders';
+import { useBrokerSelector, type Broker } from '@/hooks/useBrokerSelector';
+import type { Toast } from './Scalper';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -15,7 +20,7 @@ import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from '@/components/ui/select';
 import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group';
-import { AlertTriangle, Plus, RotateCcw, Trash2 } from 'lucide-react';
+import { AlertTriangle, Plus, RefreshCw, RotateCcw, ShoppingBasket, Trash2 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
 const UNDERLYING = 'NIFTY';
@@ -63,6 +68,34 @@ export default function OptionStrats() {
   // A blocked add/edit leaves `legs` unchanged, so this only clears the warning
   // once some other change actually goes through — not on every render.
   useEffect(() => { setDuplicateWarning(null); }, [legs]);
+
+  // ── Order placement ──────────────────────────────────────────────
+  const { broker, setBroker, authenticatedBrokers, hasAuthenticatedBroker, authChecked } = useBrokerSelector();
+  // Strike -> broker order identifier, resolved separately from chainOc: the
+  // analysis chain above is always Dhan-sourced (it's the only branch with
+  // greeks/IV), so this is fetched independently per selected order broker.
+  const [strikeMap, setStrikeMap] = useState<Record<string, StrikeIdentifier>>({});
+  const [toasts, setToasts] = useState<Toast[]>([]);
+  const [placing, setPlacing] = useState(false);
+  const [confirmPlace, setConfirmPlace] = useState(false);
+  const placingRef = useRef(false);
+
+  const addToast = useCallback((type: 'success' | 'error', message: string, detail?: string) => {
+    const id = `${Date.now()}-${Math.random()}`;
+    setToasts((prev) => [...prev, { id, type, message, detail }]);
+    setTimeout(() => setToasts((prev) => prev.filter((t) => t.id !== id)), type === 'error' ? 7000 : 3000);
+  }, []);
+
+  useEffect(() => {
+    if (!selectedExpiry) return;
+    const lookupUrl = broker === 'zerodha'
+      ? `/api/scalper/zerodha/lookup?underlying=${UNDERLYING}&expiry=${selectedExpiry}`
+      : `/api/scalper/lookup?underlying=${UNDERLYING}&expiry=${selectedExpiry}`;
+    fetch(lookupUrl)
+      .then((r) => r.json())
+      .then((json) => setStrikeMap(json?.success ? (json.data?.strikes ?? {}) : {}))
+      .catch(() => setStrikeMap({}));
+  }, [selectedExpiry, broker]);
 
   useEffect(() => {
     fetch(`/api/lotsize?symbol=${UNDERLYING}`)
@@ -156,6 +189,98 @@ export default function OptionStrats() {
     setLegs((prev) => prev.filter((l) => l.id !== id));
   }, []);
 
+  // Flattens already-filled legs of a trade that stopped mid-way by firing
+  // opposite-side MARKET orders for each — best-effort, since a rejected or
+  // network-unconfirmed leg can't otherwise be undone from this UI.
+  const rollbackPlacedLegs = useCallback(async (placed: { side: Side; type: OptType; strike: number; qty: number }[]) => {
+    if (!placed.length) return;
+    addToast('error', `Auto-flattening ${placed.length} placed leg(s)`, 'Reversing with market orders — verify in Orders/Positions after');
+    for (const p of [...placed].reverse()) {
+      const label = `${p.side} ${p.strike} ${p.type}`;
+      const req = resolveOrderRequest(broker, {
+        side: p.side === 'BUY' ? 'S' : 'B', option: p.type, strike: p.strike, qty: p.qty, type: 'MARKET', underlying: UNDERLYING,
+      }, strikeMap);
+      if (!req) {
+        addToast('error', `Could not auto-reverse ${label}`, 'No order identifier — close manually from Orders/Positions');
+        continue;
+      }
+      try {
+        const res = await fetch(req.url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(req.body),
+        });
+        const j = await res.json() as { success: boolean; order_id?: string; error?: string };
+        if (j.success) addToast('success', `Reversed ${label}`, `ID: ${j.order_id}`);
+        else addToast('error', `Reverse failed for ${label}`, `${j.error ?? 'Unknown error'} — close manually from Orders/Positions`);
+      } catch (e) {
+        addToast('error', `Reverse UNCONFIRMED for ${label}`, `Close manually from Orders/Positions: ${String(e)}`);
+      }
+    }
+  }, [broker, strikeMap, addToast]);
+
+  const placeTrade = useCallback(async () => {
+    if (legs.length === 0 || !selectedExpiry) return;
+    if (!hasAuthenticatedBroker) {
+      addToast('error', 'No broker logged in', 'Log in to Dhan or Zerodha before placing a trade');
+      return;
+    }
+    if (!confirmPlace) {
+      setConfirmPlace(true);
+      setTimeout(() => setConfirmPlace(false), 4000);
+      return;
+    }
+    setConfirmPlace(false);
+    if (placingRef.current) return;
+
+    placingRef.current = true;
+    setPlacing(true);
+
+    type QueuedLeg = { side: Side; type: OptType; strike: number; qty: number };
+    const queued: QueuedLeg[] = legs.map((l) => ({ side: l.side, type: l.type, strike: l.strike, qty: l.qtyLots * effectiveLotSize }));
+    const ordered = sortLegsForPlacement(queued.map((l) => ({ ...l, side: (l.side === 'BUY' ? 'B' : 'S') as 'B' | 'S' })));
+    const placedLegs: QueuedLeg[] = [];
+
+    try {
+      for (const leg of ordered) {
+        const origSide: Side = leg.side === 'B' ? 'BUY' : 'SELL';
+        const label = `${origSide} ${leg.strike} ${leg.type}`;
+        const req = resolveOrderRequest(broker, {
+          side: leg.side, option: leg.type, strike: leg.strike, qty: leg.qty, type: 'MARKET', underlying: UNDERLYING,
+        }, strikeMap);
+        if (!req) {
+          addToast('error', `${label} — no order identifier resolved`, 'Strike lookup not ready yet — trade stopped');
+          await rollbackPlacedLegs(placedLegs);
+          return;
+        }
+        try {
+          const res = await fetch(req.url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(req.body),
+          });
+          const j = await res.json() as { success: boolean; order_id?: string; error?: string };
+          if (j.success) {
+            placedLegs.push({ side: origSide, type: leg.type, strike: leg.strike, qty: leg.qty });
+            addToast('success', `${label} placed`, `ID: ${j.order_id}`);
+          } else {
+            addToast('error', `${label} failed — trade stopped`, j.error ?? 'Unknown error');
+            await rollbackPlacedLegs(placedLegs);
+            return;
+          }
+        } catch (e) {
+          addToast('error', `${label} UNCONFIRMED — trade stopped`, `Check Orders before retrying: ${String(e)}`);
+          await rollbackPlacedLegs(placedLegs);
+          return;
+        }
+      }
+      addToast('success', `Trade complete: ${placedLegs.length}/${legs.length} legs placed`);
+    } finally {
+      placingRef.current = false;
+      setPlacing(false);
+    }
+  }, [legs, selectedExpiry, hasAuthenticatedBroker, confirmPlace, effectiveLotSize, broker, strikeMap, addToast, rollbackPlacedLegs]);
+
   const legMarketData = useMemo(() => {
     const map = new Map<string, { price: number; iv: number | null } | null>();
     for (const leg of legs) {
@@ -220,6 +345,27 @@ export default function OptionStrats() {
 
   return (
     <div className="min-h-screen text-zinc-300">
+      <div className="fixed top-4 right-4 z-50 flex flex-col gap-2 pointer-events-none">
+        {toasts.map((t) => (
+          <div key={t.id} className={cn(
+            'pointer-events-auto max-w-xs rounded-xl border px-4 py-3 text-sm font-semibold shadow-2xl',
+            t.type === 'success' ? 'border-emerald-500/40 bg-emerald-900/95 text-emerald-200' : 'border-rose-500/40 bg-rose-900/95 text-rose-200',
+          )}
+          >
+            <p>{t.message}</p>
+            {t.detail && <p className="mt-0.5 font-mono text-xs opacity-70">{t.detail}</p>}
+          </div>
+        ))}
+      </div>
+
+      {authChecked && !hasAuthenticatedBroker && (
+        <div className="z-20 border-b border-amber-500/40 bg-amber-900/95 px-4 py-2 text-center">
+          <p className="text-xs font-bold text-amber-200">
+            No broker logged in — log in to Dhan or Zerodha to place trades from this page.
+          </p>
+        </div>
+      )}
+
       <div className="sticky top-0 z-30 border-b border-zinc-800 bg-zinc-950/80 px-4 py-3 backdrop-blur-md">
         <div className="mx-auto flex max-w-screen-xl flex-wrap items-center gap-3">
           <h1 className="mr-2 text-sm font-bold text-white">Option Strats</h1>
@@ -250,6 +396,19 @@ export default function OptionStrats() {
             </SelectContent>
           </Select>
 
+          {authenticatedBrokers.length > 1 && (
+            <Select value={broker} onValueChange={(v) => { if (typeof v === 'string') setBroker(v as Broker); }}>
+              <SelectTrigger size="sm" className="min-w-28 font-mono">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {authenticatedBrokers.map((b) => (
+                  <SelectItem key={b} value={b} className="font-mono">{b === 'dhan' ? 'Dhan' : 'Zerodha'}</SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          )}
+
           <Tabs value={activeView} onValueChange={(v) => setActiveView(v as typeof activeView)} className="ml-auto">
             <TabsList className="bg-zinc-900">
               <TabsTrigger value="table">Table</TabsTrigger>
@@ -263,9 +422,22 @@ export default function OptionStrats() {
         <Card className="bg-card/80">
           <CardHeader className="flex flex-row items-center justify-between border-b [.border-b]:pb-3">
             <CardTitle className="text-xs font-bold uppercase tracking-wider text-white">Legs</CardTitle>
-            <Button variant="outline" size="sm" onClick={handleAddLeg} disabled={!selectedExpiry || strikeOptions.length === 0}>
-              <Plus /> Add Leg
-            </Button>
+            <div className="flex items-center gap-2">
+              <Button variant="outline" size="sm" onClick={handleAddLeg} disabled={!selectedExpiry || strikeOptions.length === 0}>
+                <Plus /> Add Leg
+              </Button>
+              {legs.length > 0 && (
+                <Button
+                  size="sm"
+                  onClick={placeTrade}
+                  disabled={placing || !hasAuthenticatedBroker}
+                  className={cn(confirmPlace && 'animate-pulse')}
+                >
+                  {placing ? <RefreshCw className="animate-spin" /> : <ShoppingBasket />}
+                  {placing ? 'Placing…' : !hasAuthenticatedBroker ? 'No broker logged in' : confirmPlace ? `Confirm ${legs.length} legs?` : 'Place Trade'}
+                </Button>
+              )}
+            </div>
           </CardHeader>
           <CardContent className="space-y-2 pt-4">
             {legs.length === 0 && (
