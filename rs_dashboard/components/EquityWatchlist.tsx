@@ -404,6 +404,15 @@ export default function EquityWatchlist() {
     return allSymbols.filter((s) => !existing.has(s));
   }, [allSymbols, rows]);
 
+  const totalFundsRequired = useMemo(() => {
+    return rows.reduce((sum, r) => {
+      const rowTotal = r.foreverOrders
+        .filter((o) => o.transactionType === 'BUY' && o.status.toUpperCase() === 'PENDING')
+        .reduce((s, o) => s + o.quantity * o.price, 0);
+      return sum + rowTotal;
+    }, 0);
+  }, [rows]);
+
   return (
     <div className="flex flex-col flex-1 w-full bg-black min-h-screen text-zinc-100">
       <header className="w-full border-b border-amber-900/25 bg-[#050505] px-4 py-2 flex flex-wrap items-center gap-2.5 z-20 sticky top-0 backdrop-blur-md">
@@ -416,6 +425,11 @@ export default function EquityWatchlist() {
         <div className="w-px h-5 bg-zinc-800 hidden sm:block" />
         <NavBar />
         <div className="flex items-center gap-2 ml-auto">
+          {totalFundsRequired > 0 && (
+            <span className="text-[10px] font-mono font-bold text-amber-400 hidden md:inline px-2 py-0.5 rounded-sm bg-zinc-900 border border-zinc-800 uppercase tracking-wide">
+              FUNDS REQ: ₹{totalFundsRequired.toLocaleString('en-IN', { maximumFractionDigits: 0 })}
+            </span>
+          )}
           {asOf && (
             <span className="text-[10px] font-mono font-bold text-zinc-400 hidden md:inline px-2 py-0.5 rounded-sm bg-zinc-900 border border-zinc-800 uppercase tracking-wide">
               DATA: {new Date(asOf).toLocaleTimeString('en-IN', { timeZone: 'Asia/Kolkata' })} IST
