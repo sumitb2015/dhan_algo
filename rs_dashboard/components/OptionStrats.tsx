@@ -63,7 +63,7 @@ export default function OptionStrats() {
 
   const [legs, setLegs] = useState<LegDraft[]>([]);
   const [duplicateWarning, setDuplicateWarning] = useState<string | null>(null);
-  const [rangePct, setRangePct] = useState(0.03); // +/- 3% of spot
+  const [rangePct, setRangePct] = useState(0.02); // +/- 2% of spot
   const [ivMultiplier, setIvMultiplier] = useState(1);
   const [heatmapUnit, setHeatmapUnit] = useState<'inr' | 'pct'>('inr');
 
