@@ -43,7 +43,13 @@ def main():
 
     scripts = helper.resolve_option_legs_to_margin_scripts(legs, args.underlying.upper(), args.expiry)
 
-    summary = helper.get_multi_leg_margin_summary(scripts, include_available_funds=True)
+    # Standalone what-if calculation (matches Dhan's own Strategy Builder) — must NOT
+    # fold in the account's actual open positions/pending orders, or totalMargin from
+    # /margincalculator/multi reflects whole-portfolio impact instead of just this
+    # combo, which can exceed the sum of independent leg margins (impossible after
+    # netting) and zero out the derived hedge_benefit.
+    summary = helper.get_multi_leg_margin_summary(
+        scripts, include_position=False, include_orders=False, include_available_funds=True)
     if not summary:
         print(json.dumps({'error': 'margin_calculator_failed'}))
         sys.exit(0)

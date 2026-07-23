@@ -65,6 +65,7 @@ export default function OptionStrats() {
   const [duplicateWarning, setDuplicateWarning] = useState<string | null>(null);
   const [rangePct, setRangePct] = useState(0.03); // +/- 3% of spot
   const [ivMultiplier, setIvMultiplier] = useState(1);
+  const [heatmapUnit, setHeatmapUnit] = useState<'inr' | 'pct'>('inr');
 
   // A blocked add/edit leaves `legs` unchanged, so this only clears the warning
   // once some other change actually goes through — not on every render.
@@ -369,6 +370,21 @@ export default function OptionStrats() {
     return { backgroundColor: `rgba(239, 68, 68, ${0.08 + intensity * 0.42})` };
   }
 
+  // Capital base for % view — the actual margin blocked for the trade (same
+  // figure shown as "Final Margin"), not net premium, so % reads as return on capital.
+  const heatmapCapitalBase = margin && margin.total_margin > 0 ? margin.total_margin : null;
+
+  useEffect(() => {
+    if (heatmapCapitalBase === null) setHeatmapUnit('inr');
+  }, [heatmapCapitalBase]);
+
+  function fmtCell(v: number): string {
+    if (heatmapUnit === 'inr') return fmtInr(v);
+    if (heatmapCapitalBase === null) return '—';
+    const pct = (v / heatmapCapitalBase) * 100;
+    return `${pct >= 0 ? '+' : ''}${pct.toFixed(1)}%`;
+  }
+
   return (
     <div className="min-h-screen text-zinc-300">
       <div className="fixed top-4 right-4 z-50 flex flex-col gap-2 pointer-events-none">
@@ -623,8 +639,28 @@ export default function OptionStrats() {
 
         {activeView === 'table' && heatmap && (
           <Card className="bg-card/80">
-            <CardHeader className="border-b [.border-b]:pb-3">
+            <CardHeader className="flex flex-row items-center justify-between border-b [.border-b]:pb-3">
               <CardTitle className="text-xs font-bold uppercase tracking-wider text-white">P&amp;L heatmap</CardTitle>
+              <ToggleGroup
+                value={[heatmapUnit]}
+                onValueChange={(v: unknown[]) => {
+                  const next = v[v.length - 1] as 'inr' | 'pct' | undefined;
+                  if (next) setHeatmapUnit(next);
+                }}
+                variant="outline"
+                size="sm"
+                spacing={0}
+              >
+                <ToggleGroupItem value="inr" className="aria-pressed:bg-sky-500/15 aria-pressed:text-sky-400">₹</ToggleGroupItem>
+                <ToggleGroupItem
+                  value="pct"
+                  disabled={heatmapCapitalBase === null}
+                  className="aria-pressed:bg-sky-500/15 aria-pressed:text-sky-400"
+                  title={heatmapCapitalBase === null ? 'Margin unavailable — cannot compute % return' : undefined}
+                >
+                  %
+                </ToggleGroupItem>
+              </ToggleGroup>
             </CardHeader>
             <CardContent className="space-y-4 pt-4">
               <div className="flex flex-wrap items-center gap-6">
@@ -686,7 +722,7 @@ export default function OptionStrats() {
                         </td>
                         {heatmap.cells[ri].map((v, ci) => (
                           <td key={ci} style={cellStyle(v)} className="whitespace-nowrap px-2 py-1.5 text-right font-mono tabular-nums text-zinc-100">
-                            {fmtInr(v)}
+                            {fmtCell(v)}
                           </td>
                         ))}
                       </tr>
