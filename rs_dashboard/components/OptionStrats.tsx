@@ -584,7 +584,7 @@ export default function OptionStrats() {
                     {`₹${fmtInr(stats.netPremium * effectiveLotSize)}`}
                     {heatmapCapitalBase !== null && stats.maxProfit !== 'Unlimited' && (
                       <span className="ml-1 text-xs font-normal text-zinc-500">
-                        (max +{((stats.maxProfit / heatmapCapitalBase) * 100).toFixed(1)}%)
+                        (+{((stats.maxProfit / heatmapCapitalBase) * 100).toFixed(1)}%)
                       </span>
                     )}
                   </>
