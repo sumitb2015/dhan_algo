@@ -203,20 +203,36 @@ def main():
             time.sleep(min(wait_mins * 60, 60))
 
     # ── Resolve expiry ────────────────────────────────────────────────
+    # Retried: the Dhan API is prone to transient hiccups in the first minute
+    # after market open, and a one-shot failure here used to kill the whole
+    # day's collection since nothing restarts this process until the next
+    # server boot.
     expiry = args.expiry
     if not expiry:
         uid = UNDERLYING_IDS.get(underlying)
-        expiries = helper.get_expiry_list(under_security_id=uid, under_exchange_segment='IDX_I')
+        expiries = []
+        for attempt in range(5):
+            expiries = helper.get_expiry_list(under_security_id=uid, under_exchange_segment='IDX_I')
+            if expiries:
+                break
+            log.warning('Expiry list fetch attempt %d/5 failed — retrying in 10s', attempt + 1)
+            time.sleep(10)
         if not expiries:
-            log.error('Could not fetch expiry list — check auth token')
+            log.error('Could not fetch expiry list after 5 attempts — check auth token')
             sys.exit(1)
         expiry = expiries[0]
         log.info('Auto-selected expiry: %s', expiry)
 
     # ── Lock ATM from market-open spot ───────────────────────────────
-    spot = helper.get_ltp(underlying, exchange='IDX_I', instrument='INDEX') or 0
+    spot = 0
+    for attempt in range(5):
+        spot = helper.get_ltp(underlying, exchange='IDX_I', instrument='INDEX') or 0
+        if spot > 0:
+            break
+        log.warning('Spot price fetch attempt %d/5 failed — retrying in 10s', attempt + 1)
+        time.sleep(10)
     if spot <= 0:
-        log.error('Could not fetch spot price for %s', underlying)
+        log.error('Could not fetch spot price for %s after 5 attempts', underlying)
         sys.exit(1)
 
     atm     = round(spot / STRIKE_STEP) * STRIKE_STEP
