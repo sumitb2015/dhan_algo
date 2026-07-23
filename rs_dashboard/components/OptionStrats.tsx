@@ -577,7 +577,20 @@ export default function OptionStrats() {
         {stats && (
           <Card className="bg-card/80">
             <CardContent className="grid grid-cols-2 gap-4 py-4 sm:grid-cols-5">
-              <Metric label="Net Premium" value={`₹${fmtInr(stats.netPremium * effectiveLotSize)}`} tone={stats.netPremium >= 0 ? 'pos' : 'neg'} />
+              <Metric
+                label="Net Premium"
+                value={(
+                  <>
+                    {`₹${fmtInr(stats.netPremium * effectiveLotSize)}`}
+                    {heatmapCapitalBase !== null && stats.maxProfit !== 'Unlimited' && (
+                      <span className="ml-1 text-xs font-normal text-zinc-500">
+                        (max +{((stats.maxProfit / heatmapCapitalBase) * 100).toFixed(1)}%)
+                      </span>
+                    )}
+                  </>
+                )}
+                tone={stats.netPremium >= 0 ? 'pos' : 'neg'}
+              />
               <Metric label="Max Profit" value={stats.maxProfit === 'Unlimited' ? 'Unlimited' : `₹${fmtInr(stats.maxProfit)}`} tone="pos" />
               <Metric label="Max Loss" value={stats.maxLoss === 'Unlimited' ? 'Unlimited' : `₹${fmtInr(stats.maxLoss)}`} tone="neg" />
               <Metric label="Chance of Profit" value={stats.popPct !== null ? `${stats.popPct}%` : '—'} tone="neutral" />
