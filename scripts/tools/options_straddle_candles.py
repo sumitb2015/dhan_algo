@@ -10,6 +10,7 @@ Prints a single JSON line to stdout. Logs go to stderr.
 import sys
 import os
 import json
+import time
 import argparse
 import pandas as pd
 from datetime import date, timedelta, datetime, timezone
@@ -23,17 +24,32 @@ from login import get_dhan_client
 from lib.dhan_helper import DhanHelper
 
 
-def _fetch_leg(helper, sid: str, from_date: str, to_date: str, interval: str):
-    """Fetch intraday candles for one leg over a date range, returning the DataFrame."""
-    return helper.get_intraday_minute_data(
-        security_id=sid,
-        exchange_segment='NSE_FNO',
-        instrument_type='OPTIDX',
-        interval=interval,
-        from_date=from_date,
-        to_date=to_date,
-        oi=True,
-    )
+def _fetch_leg(helper, sid: str, from_date: str, to_date: str, interval: str, retries: int = 2):
+    """Fetch intraday candles for one leg over a date range, returning the DataFrame.
+
+    The Multi-Strike tab fires several strikes concurrently, each spawning its
+    own process that fetches CE and PE legs — bursts of ~10 simultaneous Dhan
+    intraday calls routinely trip a transient rate-limit/error on one or two
+    of them. get_intraday_minute_data() swallows that into an empty DataFrame
+    (see helper.last_api_error), which silently renders as a flat zero-OI
+    line for whichever leg lost the race. Retry a couple of times with a
+    backoff before giving up, so a transient failure isn't mistaken for "no
+    open interest".
+    """
+    for attempt in range(retries + 1):
+        df = helper.get_intraday_minute_data(
+            security_id=sid,
+            exchange_segment='NSE_FNO',
+            instrument_type='OPTIDX',
+            interval=interval,
+            from_date=from_date,
+            to_date=to_date,
+            oi=True,
+        )
+        if not df.empty or not helper.last_api_error or attempt == retries:
+            return df
+        time.sleep(1.5 * (attempt + 1))
+    return df
 
 
 def _ts_col(df):
