@@ -11,6 +11,7 @@ const BRIDGE_SCRIPT  = path.join(PROJECT_ROOT, 'scripts', 'tools', 'copy_trade_b
 const STATUS_FILE    = path.join(DEBUG_DIR, 'copy_trade_status.json');
 const LOG_FILE       = path.join(DEBUG_DIR, 'copy_trade_log.json');
 const STOP_TRIGGER   = path.join(DEBUG_DIR, 'copy_trade_stop.trigger');
+const BRIDGE_LOG_FILE = path.join(DEBUG_DIR, 'copy_trade_bridge.log');
 
 // The bridge heartbeats its status file every ~5s; a RUNNING status older
 // than this is a hung/dead bridge that must not be shown as healthy.
@@ -88,7 +89,11 @@ export async function POST(request: NextRequest) {
 
     if (fs.existsSync(STOP_TRIGGER)) fs.unlinkSync(STOP_TRIGGER);
 
-    const child = spawn(PYTHON_EXE, [BRIDGE_SCRIPT], { detached: true, stdio: 'ignore', windowsHide: true });
+    // Capture stdout/stderr so a crash traceback is diagnosable after the
+    // fact — 'ignore' previously discarded it entirely.
+    const logFd = fs.openSync(BRIDGE_LOG_FILE, 'a');
+    const child = spawn(PYTHON_EXE, [BRIDGE_SCRIPT], { detached: true, stdio: ['ignore', logFd, logFd], windowsHide: true });
+    fs.closeSync(logFd);
     child.unref();
 
     return NextResponse.json({ success: true, message: 'Bridge started', pid: child.pid });

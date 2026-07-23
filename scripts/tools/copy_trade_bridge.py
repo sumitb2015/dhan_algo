@@ -56,6 +56,7 @@ import json
 import time
 import ctypes
 import threading
+import traceback
 from datetime import datetime
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -1007,13 +1008,19 @@ def main():
             time.sleep(1)
     except KeyboardInterrupt:
         print('[copy_trade_bridge] KeyboardInterrupt — shutting down.', flush=True)
+        stop_detail = ''
+    except Exception as e:
+        print('[copy_trade_bridge] CRASHED:\n' + traceback.format_exc(), flush=True)
+        stop_detail = f'Crashed: {e}'
+    else:
+        stop_detail = ''
     finally:
         watchdog_stop.set()
         try:
             helper.stop_order_update_websocket()
         except Exception:
             pass
-        write_status('STOPPED', started_at=started_at)
+        write_status('STOPPED', started_at=started_at, detail=stop_detail)
 
 
 if __name__ == '__main__':
