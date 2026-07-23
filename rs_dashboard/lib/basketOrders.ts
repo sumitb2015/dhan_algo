@@ -9,6 +9,7 @@ export interface OrderLeg {
   type: 'MARKET' | 'LIMIT';
   price?: number;
   underlying: string;
+  productType: 'INTRADAY' | 'MARGIN';
 }
 
 /** Unified strike->identifier shape, matching what /api/scalper/lookup and
@@ -55,6 +56,7 @@ export function resolveOrderRequest(
       body: {
         securityId, quantity: leg.qty, side, orderType: leg.type,
         exchangeSegment: leg.underlying === 'SENSEX' ? 'BSE_FNO' : 'NSE_FNO',
+        productType: leg.productType,
         ...(limitPrice != null ? { price: limitPrice } : {}),
       },
     };
@@ -67,6 +69,7 @@ export function resolveOrderRequest(
     body: {
       tradingsymbol, quantity: leg.qty, side, orderType: leg.type,
       exchange: leg.underlying === 'SENSEX' ? 'BFO' : 'NFO',
+      product: leg.productType === 'MARGIN' ? 'NRML' : 'MIS',
       ...(limitPrice != null ? { price: limitPrice } : {}),
     },
   };

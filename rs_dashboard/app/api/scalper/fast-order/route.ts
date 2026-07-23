@@ -15,9 +15,11 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     orderType?: string;
     price?: number;
     exchangeSegment?: string;
+    productType?: string;
   };
 
-  const { securityId, quantity, side, orderType = 'MARKET', price = 0, exchangeSegment = 'NSE_FNO' } = body;
+  const { securityId, quantity, side, orderType = 'MARKET', price = 0, exchangeSegment = 'NSE_FNO', productType: productTypeRaw = 'INTRADAY' } = body;
+  const productType = productTypeRaw === 'MARGIN' ? 'MARGIN' : 'INTRADAY';
 
   if (!securityId || !quantity || !side) {
     return NextResponse.json({ success: false, error: 'Missing required fields: securityId, quantity, side' }, { status: 400 });
@@ -45,7 +47,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       dhanClientId:     clientId,
       transactionType:  sideUpper,
       exchangeSegment,
-      productType:      'INTRADAY',
+      productType,
       orderType:        isLimitOrder ? 'LIMIT' : 'MARKET',
       validity:         'DAY',
       securityId:       String(securityId),

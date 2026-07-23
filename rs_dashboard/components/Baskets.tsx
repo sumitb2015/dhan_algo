@@ -366,6 +366,7 @@ export default function Baskets() {
     for (const p of [...placed].reverse()) {
       const reverseReq = resolveOrderRequest(broker, {
         side: p.side === 'B' ? 'S' : 'B', option: p.option, strike: p.strike, qty: p.qty, type: 'MARKET', underlying,
+        productType: 'MARGIN',
       }, p.expiry === farExpiry ? farStrikeMap : strikeMap);
       if (!reverseReq) {
         addToast('error', `Could not auto-reverse ${p.label}`, 'No order identifier — close manually from Orders/Positions');
@@ -419,7 +420,7 @@ export default function Baskets() {
         const price = leg.type === 'LIMIT' ? effectivePremium(leg) : undefined;
 
         const legStrikeMap = leg.expiry === farExpiry ? farStrikeMap : strikeMap;
-        const req = resolveOrderRequest(broker, { side: leg.side, option: leg.option, strike: leg.strike, qty, type: leg.type, price, underlying }, legStrikeMap);
+        const req = resolveOrderRequest(broker, { side: leg.side, option: leg.option, strike: leg.strike, qty, type: leg.type, price, underlying, productType: 'MARGIN' }, legStrikeMap);
         if (!req) {
           addToast('error', `${label} — no order identifier resolved`, 'Strike lookup not ready yet — basket stopped');
           await rollbackPlacedLegs(placedLegs);

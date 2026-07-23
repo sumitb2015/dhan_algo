@@ -200,6 +200,7 @@ export default function OptionStrats() {
       const label = `${p.side} ${p.strike} ${p.type}`;
       const req = resolveOrderRequest(broker, {
         side: p.side === 'BUY' ? 'S' : 'B', option: p.type, strike: p.strike, qty: p.qty, type: 'MARKET', underlying: UNDERLYING,
+        productType: 'MARGIN',
       }, strikeMap);
       if (!req) {
         addToast('error', `Could not auto-reverse ${label}`, 'No order identifier — close manually from Orders/Positions');
@@ -248,6 +249,7 @@ export default function OptionStrats() {
         const label = `${origSide} ${leg.strike} ${leg.type}`;
         const req = resolveOrderRequest(broker, {
           side: leg.side, option: leg.type, strike: leg.strike, qty: leg.qty, type: 'MARKET', underlying: UNDERLYING,
+          productType: 'MARGIN',
         }, strikeMap);
         if (!req) {
           addToast('error', `${label} — no order identifier resolved`, 'Strike lookup not ready yet — trade stopped');

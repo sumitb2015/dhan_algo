@@ -13,9 +13,11 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     orderType?: string;
     price?: number;
     exchange?: string;
+    product?: string;
   };
 
-  const { tradingsymbol, quantity, side, orderType = 'MARKET', price = 0, exchange = 'NFO' } = body;
+  const { tradingsymbol, quantity, side, orderType = 'MARKET', price = 0, exchange = 'NFO', product: productRaw = 'MIS' } = body;
+  const product = productRaw === 'NRML' ? 'NRML' : 'MIS';
 
   if (!tradingsymbol || !quantity || !side) {
     return NextResponse.json({ success: false, error: 'Missing required fields: tradingsymbol, quantity, side' }, { status: 400 });
@@ -43,7 +45,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       transaction_type: sideUpper,
       order_type: isLimitOrder ? 'LIMIT' : 'MARKET',
       quantity: qtyNum,
-      product: 'MIS',
+      product,
       validity: 'DAY',
     };
     if (isLimitOrder) {
