@@ -1383,6 +1383,10 @@ class DhanHelper:
 
             contract = self.find_option(underlying, expiry, strike, option_type)
             if not contract:
+                # find_option() defaults to instrument='OPTIDX' — for a stock
+                # underlying (e.g. RELIANCE) the contract is OPTSTK instead.
+                contract = self.find_option(underlying, expiry, strike, option_type, instrument="OPTSTK")
+            if not contract:
                 raise ValueError(f"strike not found: {strike} {option_type} @ {expiry}")
 
             lot_size = int(contract['LOT_SIZE'])

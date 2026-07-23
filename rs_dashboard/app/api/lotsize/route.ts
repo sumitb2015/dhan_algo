@@ -5,7 +5,7 @@ import fs from 'fs';
 const PROJECT_ROOT = path.resolve(process.cwd(), '..');
 const MASTER_CSV = path.join(PROJECT_ROOT, 'master_list.csv');
 
-const DERIVATIVE_INSTRUMENTS = new Set(['OPTIDX', 'OPTFUT', 'OPTCOM', 'FUTIDX', 'FUTCOM']);
+const DERIVATIVE_INSTRUMENTS = new Set(['OPTIDX', 'OPTSTK', 'OPTFUT', 'OPTCOM', 'FUTIDX', 'FUTSTK', 'FUTCOM']);
 const DEFAULT_LOT = 75;
 const MAP_TTL = 12 * 60 * 60 * 1000; // lot sizes are static intraday
 

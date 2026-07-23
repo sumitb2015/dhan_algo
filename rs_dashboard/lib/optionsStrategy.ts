@@ -149,8 +149,8 @@ export function defaultParams(template: StrategyTemplate): Record<string, number
   return out;
 }
 
-export function computeAtm(spot: number): number {
-  return Math.round(spot / STRIKE_STEP) * STRIKE_STEP;
+export function computeAtm(spot: number, strikeStep: number = STRIKE_STEP): number {
+  return Math.round(spot / strikeStep) * strikeStep;
 }
 
 // ── Chain data shapes (mirrors /api/options/chain's `data.chain.oc`) ───────────
@@ -195,12 +195,13 @@ export function resolveLegs(
   atm: number,
   lots: number,
   oc: ChainOc,
+  strikeStep: number = STRIKE_STEP,
 ): { legs: ResolvedLeg[]; missingStrikes: number[] } {
   const legs: ResolvedLeg[] = [];
   const missingStrikes: number[] = [];
 
   for (const spec of specs) {
-    const strike = atm + spec.offsetStrikes * STRIKE_STEP;
+    const strike = atm + spec.offsetStrikes * strikeStep;
     const legData = lookupChainLegData(oc, strike, spec.type);
 
     if (!legData || typeof legData.last_price !== 'number') {
@@ -330,13 +331,13 @@ export function findBreakevens(curve: { spot: number; pnl: number }[]): number[]
  * every leg's strike forced in as an exact sample point (piecewise-linear kinks
  * only occur at strikes, so max/min and breakevens must be evaluated exactly there).
  */
-function buildSpotSamples(legs: ResolvedLeg[], spot: number): number[] {
+function buildSpotSamples(legs: ResolvedLeg[], spot: number, strikeStep: number = STRIKE_STEP): number[] {
   const pctSpan = spot * 0.015; // +/- 1.5% of spot
   const strikes = legs.map((l) => l.strike);
   const minStrike = strikes.length > 0 ? Math.min(...strikes) : spot;
   const maxStrike = strikes.length > 0 ? Math.max(...strikes) : spot;
 
-  const pad = STRIKE_STEP * 4; // 200 points padding for wings
+  const pad = strikeStep * 4; // 200 points padding for wings
   const lo = Math.min(spot - pctSpan, minStrike - pad);
   const hi = Math.max(spot + pctSpan, maxStrike + pad);
 
@@ -355,9 +356,9 @@ function buildSpotSamples(legs: ResolvedLeg[], spot: number): number[] {
 }
 
 export function buildPayoffCurve(
-  legs: ResolvedLeg[], spot: number, lotSize: number,
+  legs: ResolvedLeg[], spot: number, lotSize: number, strikeStep: number = STRIKE_STEP,
 ): { spot: number; pnl: number }[] {
-  return buildSpotSamples(legs, spot).map((s) => ({ spot: s, pnl: netPnlAtExpiry(legs, s, lotSize) }));
+  return buildSpotSamples(legs, spot, strikeStep).map((s) => ({ spot: s, pnl: netPnlAtExpiry(legs, s, lotSize) }));
 }
 
 export interface PayoffStats {
@@ -371,8 +372,10 @@ export interface PayoffStats {
   popPct: number | null;
 }
 
-export function computePayoffStats(legs: ResolvedLeg[], spot: number, lotSize: number, expiryDate: string): PayoffStats {
-  const curve = buildPayoffCurve(legs, spot, lotSize);
+export function computePayoffStats(
+  legs: ResolvedLeg[], spot: number, lotSize: number, expiryDate: string, strikeStep: number = STRIKE_STEP,
+): PayoffStats {
+  const curve = buildPayoffCurve(legs, spot, lotSize, strikeStep);
 
   // Net qty per side (signed lots): >0 means net SHORT that option type -> unbounded loss on that tail.
   const netCallQty = legs.filter(l => l.type === 'CE').reduce((s, l) => s + (l.side === 'SELL' ? l.qtyLots : -l.qtyLots), 0);
@@ -414,7 +417,7 @@ export function computePayoffStats(legs: ResolvedLeg[], spot: number, lotSize: n
     const avgIv = ivs.reduce((s, iv) => s + iv, 0) / ivs.length;
     const t = daysToExpiryFrom(expiryDate) / 365;
     const sorted = [...breakevensExpiry].sort((a, b) => a - b);
-    const offset = Math.max(STRIKE_STEP, spot * 0.05);
+    const offset = Math.max(strikeStep, spot * 0.05);
     let pop = 0;
     for (let i = 0; i <= sorted.length; i++) {
       const lo = i === 0 ? -Infinity : sorted[i - 1];
@@ -481,10 +484,10 @@ function riskNeutralProbAbove(S: number, K: number, t: number, iv: number, r = 0
  * surfaced by the caller via an InfoButton — see Task 8).
  */
 export function buildTargetPayoffCurve(
-  legs: ResolvedLeg[], spot: number, lotSize: number, daysToExpiry: number,
+  legs: ResolvedLeg[], spot: number, lotSize: number, daysToExpiry: number, strikeStep: number = STRIKE_STEP,
 ): { spot: number; pnl: number }[] {
   const t = Math.max(daysToExpiry, 0) / 365;
-  return buildSpotSamples(legs, spot).map((s) => {
+  return buildSpotSamples(legs, spot, strikeStep).map((s) => {
     const pnl = legs.reduce((sum, leg) => {
       const iv = leg.iv ?? 0;
       const price = iv > 0 ? bsPrice(leg.type, s, leg.strike, t, iv) : (leg.type === 'CE' ? Math.max(s - leg.strike, 0) : Math.max(leg.strike - s, 0));
@@ -526,6 +529,7 @@ export function buildHeatmapGrid(
   expiryDate: string,
   rangePct: number,
   ivMultiplier: number,
+  strikeStep: number = STRIKE_STEP,
 ): HeatmapGrid {
   const today = new Date();
   today.setHours(0, 0, 0, 0);
@@ -537,10 +541,10 @@ export function buildHeatmapGrid(
   }
 
   const span = spot * rangePct;
-  const lo = Math.floor((spot - span) / STRIKE_STEP) * STRIKE_STEP;
-  const hi = Math.ceil((spot + span) / STRIKE_STEP) * STRIKE_STEP;
+  const lo = Math.floor((spot - span) / strikeStep) * strikeStep;
+  const hi = Math.ceil((spot + span) / strikeStep) * strikeStep;
   const rows: number[] = [];
-  for (let s = hi; s >= lo; s -= STRIKE_STEP) rows.push(s);
+  for (let s = hi; s >= lo; s -= strikeStep) rows.push(s);
 
   const cells = rows.map((rowSpot) => dates.map((_, colIdx) => {
     const daysToExpiry = totalDays - colIdx;

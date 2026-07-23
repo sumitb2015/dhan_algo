@@ -76,12 +76,19 @@ def main():
                 sys.exit(0)
             uid = int(fut["SECURITY_ID"])
             seg = 'MCX_COMM'
+        elif under in UNDERLYING_IDS:
+            uid = UNDERLYING_IDS[under]
+            seg = INDEX_SEGMENT.get(under, 'IDX_I')
         else:
-            uid = UNDERLYING_IDS.get(under)
-            if not uid:
+            # Not a known index — treat as an equity F&O underlying (e.g. a
+            # Nifty 50 stock). get_expiry_list needs the raw security id +
+            # segment (no auto-resolve like get_option_chain has).
+            eq = helper.find_equity(under)
+            if not eq:
                 print(json.dumps({'error': f'unknown underlying: {args.underlying}'}))
                 sys.exit(0)
-            seg = INDEX_SEGMENT.get(under, 'IDX_I')
+            uid = int(eq['SECURITY_ID'])
+            seg = 'NSE_EQ'
         expiries = helper.get_expiry_list(
             under_security_id=uid,
             under_exchange_segment=seg,
@@ -91,7 +98,10 @@ def main():
     elif args.cmd == 'chain':
         under = args.underlying.upper()
         is_crude = (under == 'CRUDEOIL')
-        seg = 'MCX_COMM' if is_crude else INDEX_SEGMENT.get(under, 'IDX_I')
+        is_index = under in UNDERLYING_IDS
+        # Leave seg=None for equity underlyings — get_option_chain() auto-resolves
+        # the symbol and its segment (NSE_EQ -> NSE_FNO) via the master list.
+        seg = 'MCX_COMM' if is_crude else (INDEX_SEGMENT.get(under) if is_index else None)
 
         # Resolve the underlying the SAME way the expiries/ltp branches do so the
         # chain never diverges from the expiry list after a contract rolls over.
@@ -143,10 +153,13 @@ def main():
                 # Final fallback: dedicated LTP call
                 spot = helper.get_ltp(fut_sid, exchange="MCX", instrument="FUTCOM") or 0.0
         else:
-            # Index: prefer chain snapshot, fall back to dedicated LTP
+            # Index/equity: prefer chain snapshot, fall back to dedicated LTP
             spot = (chain or {}).get('last_price') or 0
             if not spot:
-                spot = helper.get_ltp(under, exchange=INDEX_EXCHANGE.get(under, 'NSE'), instrument='INDEX') or 0
+                if is_index:
+                    spot = helper.get_ltp(under, exchange=INDEX_EXCHANGE.get(under, 'NSE'), instrument='INDEX') or 0
+                else:
+                    spot = helper.get_ltp(under, exchange='NSE', instrument='EQUITY') or 0
             levels = helper.get_prev_day_levels(under)
             prev_close = levels['close'] if levels else 0.0
         change = round(spot - prev_close, 2) if (spot > 0 and prev_close > 0) else 0.0
@@ -173,8 +186,12 @@ def main():
                 prev_close = entry.get("ohlc", {}).get("close") or 0.0
             else:
                 spot, prev_close = 0, 0.0
-        else:
+        elif under in UNDERLYING_IDS:
             spot = helper.get_ltp(under, exchange=INDEX_EXCHANGE.get(under, 'NSE'), instrument='INDEX') or 0
+            levels = helper.get_prev_day_levels(under)
+            prev_close = levels['close'] if levels else 0.0
+        else:
+            spot = helper.get_ltp(under, exchange='NSE', instrument='EQUITY') or 0
             levels = helper.get_prev_day_levels(under)
             prev_close = levels['close'] if levels else 0.0
         change = round(spot - prev_close, 2) if (spot > 0 and prev_close > 0) else 0.0

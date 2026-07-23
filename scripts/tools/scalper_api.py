@@ -82,7 +82,7 @@ def main():
         df = helper._load_master_list()
         mask = (
             (df['EXCH_ID'] == exchange) &
-            (df['INSTRUMENT'] == 'OPTIDX') &
+            (df['INSTRUMENT'].isin(['OPTIDX', 'OPTSTK'])) &
             (df['UNDERLYING_SYMBOL'] == args.underlying.upper()) &
             (df['SM_EXPIRY_DATE'] == args.expiry)
         )
@@ -110,8 +110,11 @@ def main():
     elif args.cmd == 'order':
         exchange = UNDERLYING_EXCHANGE.get(args.underlying.upper(), 'NSE')
 
-        # Find the option
+        # Find the option — find_option() defaults to instrument='OPTIDX';
+        # a stock underlying's contract is OPTSTK instead.
         sec = helper.find_option(args.underlying, args.expiry, args.strike, args.option, exchange=exchange)
+        if not sec:
+            sec = helper.find_option(args.underlying, args.expiry, args.strike, args.option, exchange=exchange, instrument='OPTSTK')
         if not sec:
             print(json.dumps({
                 'success': False,

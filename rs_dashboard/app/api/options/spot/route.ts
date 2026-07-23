@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import path from 'path';
 import fs from 'fs';
 import { PROJECT_ROOT, runPythonJson, dedupe, spaced } from '@/lib/pyExec';
+import { readStockCSV } from '@/lib/dataLoader';
 
 const FETCH_SCRIPT = path.join(PROJECT_ROOT, 'scripts', 'tools', 'options_data_fetch.py');
 const NIFTY_CSV    = path.join(PROJECT_ROOT, 'Historical Data', 'NIFTY_50_Daily_5Y.csv');
@@ -69,9 +70,14 @@ export async function GET(request: NextRequest) {
     }
   } catch { /* fall through to CSV fallback */ }
 
-  // Fall back to last daily close from NIFTY CSV
-  if (spot === 0 && underlying === 'NIFTY') {
-    spot = lastCsvClose();
+  // Fall back to last daily close from the underlying's historical CSV
+  if (spot === 0) {
+    if (underlying === 'NIFTY') {
+      spot = lastCsvClose();
+    } else {
+      const rows = readStockCSV(underlying);
+      if (rows.length > 0) spot = rows[rows.length - 1].close;
+    }
   }
 
   if (spot === 0) {
