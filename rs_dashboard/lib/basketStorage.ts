@@ -6,6 +6,7 @@ export interface SavedLeg {
   offset: number;   // strike minus ATM at save time, in strike-step units
   lots: number;
   type: 'MARKET' | 'LIMIT';
+  expiryRole?: 'front' | 'far';  // omitted = front; 'far' re-anchors to whatever far expiry is selected on load
 }
 
 export interface SavedBasket {

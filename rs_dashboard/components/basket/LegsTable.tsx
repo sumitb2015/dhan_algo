@@ -29,16 +29,21 @@ interface LegsTableProps {
   legs: BasketLeg[];
   atmStrike: number | null;
   allStrikes: number[];
-  autoPremium: (strike: number, option: OptionType) => number;
+  autoPremium: (strike: number, option: OptionType, legExpiry?: string) => number;
   onUpdateLeg: (id: string, patch: Partial<BasketLeg>) => void;
   onStepStrike: (id: string, dir: 1 | -1) => void;
   onAddLeg: () => void;
   onRemoveLeg: (id: string) => void;
   onClearAll: () => void;
+  /** Front (main) expiry — legs matching it show "FRONT"; anything else shows "FAR". */
+  frontExpiry: string;
+  /** Far-month expiry a leg toggles to, when it differs from frontExpiry. */
+  farExpiry: string;
 }
 
 export default function LegsTable({
   legs, atmStrike, autoPremium, onUpdateLeg, onStepStrike, onAddLeg, onRemoveLeg, onClearAll,
+  frontExpiry, farExpiry,
 }: LegsTableProps) {
   return (
     <>
@@ -65,9 +70,9 @@ export default function LegsTable({
       ) : (
         <table className="w-full table-fixed text-xs">
           <colgroup>
-            <col className="w-[9%]" /><col className="w-[20%]" /><col className="w-[10%]" />
-            <col className="w-[16%]" /><col className="w-[12%]" /><col className="w-[15%]" />
-            <col className="w-[12%]" /><col className="w-[6%]" />
+            <col className="w-[8%]" /><col className="w-[18%]" /><col className="w-[9%]" />
+            <col className="w-[10%]" /><col className="w-[11%]" /><col className="w-[13%]" />
+            <col className="w-[11%]" /><col className="w-[10%]" /><col className="w-[5%]" />
           </colgroup>
           <thead>
             <tr className="text-xs font-bold text-white border-b border-zinc-800 bg-zinc-800">
@@ -78,12 +83,15 @@ export default function LegsTable({
               <th className="px-2 py-2.5 text-center">Type</th>
               <th className="px-2 py-2.5 text-right">Price</th>
               <th className="px-3 py-2.5 text-right">LTP</th>
+              <th className="px-2 py-2.5 text-center">Expiry</th>
               <th className="px-2 py-2.5" />
             </tr>
           </thead>
           <tbody>
             {legs.map(leg => {
-              const ltp = autoPremium(leg.strike, leg.option);
+              const ltp = autoPremium(leg.strike, leg.option, leg.expiry);
+              const isFar = leg.expiry !== frontExpiry;
+              const canToggle = !!farExpiry && farExpiry !== frontExpiry;
               return (
                 <tr key={leg.id} className="border-b border-zinc-800/60 hover:bg-zinc-900/30 transition-colors">
                   <td className="px-3 py-2.5">
@@ -141,6 +149,19 @@ export default function LegsTable({
                   </td>
                   <td className="px-3 py-2.5 text-right font-mono tabular-nums text-zinc-300">
                     {ltp > 0 ? ltp.toFixed(2) : '—'}
+                  </td>
+                  <td className="px-2 py-2.5 text-center">
+                    <button
+                      disabled={!canToggle}
+                      onClick={() => onUpdateLeg(leg.id, { expiry: isFar ? frontExpiry : farExpiry, price: '' })}
+                      title={canToggle ? 'Toggle between front and far expiry' : leg.expiry}
+                      className={`px-1.5 py-1 rounded-md font-bold border text-[10px] transition-all disabled:opacity-50 disabled:cursor-default ${
+                        isFar
+                          ? 'bg-fuchsia-500/10 text-fuchsia-300 border-fuchsia-500/40'
+                          : 'bg-zinc-800/60 text-zinc-400 border-zinc-700'
+                      }`}>
+                      {isFar ? 'FAR' : 'FRONT'}
+                    </button>
                   </td>
                   <td className="px-2 py-2.5 text-center">
                     <button onClick={() => onRemoveLeg(leg.id)}

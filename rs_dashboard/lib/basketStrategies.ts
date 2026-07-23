@@ -10,6 +10,7 @@ export interface TemplateLeg {
   option: OptionType;
   offset: number;   // strike steps relative to ATM
   ratio: number;    // lots multiplier within the template
+  expiryRole?: 'front' | 'far';  // omitted = front (the page's single main expiry)
 }
 
 export interface StrategyTemplate {
@@ -18,7 +19,7 @@ export interface StrategyTemplate {
   legs: TemplateLeg[];
 }
 
-export type StrategyCategory = 'Bullish' | 'Bearish' | 'Range Bound' | 'Big Move';
+export type StrategyCategory = 'Bullish' | 'Bearish' | 'Range Bound' | 'Big Move' | 'Ratio Spreads' | 'Lizard' | 'Calendar';
 
 export interface BasketLeg {
   id: string;
@@ -28,6 +29,7 @@ export interface BasketLeg {
   lots: number;
   type: 'MARKET' | 'LIMIT';
   price: string;   // empty = follow live LTP
+  expiry: string;  // which expiry this leg trades on — 'front' (main) or 'far' (calendar/diagonal only)
 }
 
 export const STRATEGY_CATEGORIES: Record<StrategyCategory, StrategyTemplate[]> = {
@@ -35,7 +37,6 @@ export const STRATEGY_CATEGORIES: Record<StrategyCategory, StrategyTemplate[]> =
     { key: 'buy-call',          name: 'Buy Call',               legs: [{ side: 'B', option: 'CE', offset: 0, ratio: 1 }] },
     { key: 'bull-call-spread',  name: 'Bull Call Spread',       legs: [{ side: 'B', option: 'CE', offset: 0, ratio: 1 }, { side: 'S', option: 'CE', offset: 4, ratio: 1 }] },
     { key: 'bull-put-spread',   name: 'Bull Put Spread',        legs: [{ side: 'S', option: 'PE', offset: 0, ratio: 1 }, { side: 'B', option: 'PE', offset: -4, ratio: 1 }] },
-    { key: 'call-ratio-back',   name: 'Call Ratio Back Spread', legs: [{ side: 'S', option: 'CE', offset: 0, ratio: 1 }, { side: 'B', option: 'CE', offset: 4, ratio: 2 }] },
     { key: 'long-synthetic',    name: 'Long Synthetic Future',  legs: [{ side: 'B', option: 'CE', offset: 0, ratio: 1 }, { side: 'S', option: 'PE', offset: 0, ratio: 1 }] },
     { key: 'range-forward',     name: 'Range Forward',          legs: [{ side: 'B', option: 'CE', offset: 4, ratio: 1 }, { side: 'S', option: 'PE', offset: -4, ratio: 1 }] },
   ],
@@ -43,7 +44,6 @@ export const STRATEGY_CATEGORIES: Record<StrategyCategory, StrategyTemplate[]> =
     { key: 'buy-put',           name: 'Buy Put',                legs: [{ side: 'B', option: 'PE', offset: 0, ratio: 1 }] },
     { key: 'bear-put-spread',   name: 'Bear Put Spread',        legs: [{ side: 'B', option: 'PE', offset: 0, ratio: 1 }, { side: 'S', option: 'PE', offset: -4, ratio: 1 }] },
     { key: 'bear-call-spread',  name: 'Bear Call Spread',       legs: [{ side: 'S', option: 'CE', offset: 0, ratio: 1 }, { side: 'B', option: 'CE', offset: 4, ratio: 1 }] },
-    { key: 'put-ratio-back',    name: 'Put Ratio Back Spread',  legs: [{ side: 'S', option: 'PE', offset: 0, ratio: 1 }, { side: 'B', option: 'PE', offset: -4, ratio: 2 }] },
     { key: 'short-synthetic',   name: 'Short Synthetic Future', legs: [{ side: 'S', option: 'CE', offset: 0, ratio: 1 }, { side: 'B', option: 'PE', offset: 0, ratio: 1 }] },
   ],
   'Range Bound': [
@@ -64,6 +64,58 @@ export const STRATEGY_CATEGORIES: Record<StrategyCategory, StrategyTemplate[]> =
     { key: 'long-iron-condor',  name: 'Long Iron Condor',       legs: [
       { side: 'B', option: 'CE', offset: 3, ratio: 1 }, { side: 'S', option: 'CE', offset: 6, ratio: 1 },
       { side: 'B', option: 'PE', offset: -3, ratio: 1 }, { side: 'S', option: 'PE', offset: -6, ratio: 1 },
+    ] },
+  ],
+  'Ratio Spreads': [
+    { key: 'call-ratio-back',        name: 'Call Ratio Backspread',        legs: [
+      { side: 'S', option: 'CE', offset: 0, ratio: 1 }, { side: 'B', option: 'CE', offset: 4, ratio: 2 },
+    ] },
+    { key: 'put-broken-wing',        name: 'Put Broken Wing',              legs: [
+      { side: 'B', option: 'PE', offset: -10, ratio: 1 }, { side: 'S', option: 'PE', offset: -4, ratio: 2 }, { side: 'B', option: 'PE', offset: -2, ratio: 1 },
+    ] },
+    { key: 'inverse-call-broken-wing', name: 'Inverse Call Broken Wing',   legs: [
+      { side: 'S', option: 'CE', offset: 2, ratio: 1 }, { side: 'B', option: 'CE', offset: 4, ratio: 2 }, { side: 'S', option: 'CE', offset: 10, ratio: 1 },
+    ] },
+    { key: 'put-ratio-back',         name: 'Put Ratio Backspread',         legs: [
+      { side: 'S', option: 'PE', offset: 0, ratio: 1 }, { side: 'B', option: 'PE', offset: -4, ratio: 2 },
+    ] },
+    { key: 'call-broken-wing',       name: 'Call Broken Wing',             legs: [
+      { side: 'B', option: 'CE', offset: 2, ratio: 1 }, { side: 'S', option: 'CE', offset: 4, ratio: 2 }, { side: 'B', option: 'CE', offset: 10, ratio: 1 },
+    ] },
+    { key: 'inverse-put-broken-wing', name: 'Inverse Put Broken Wing',     legs: [
+      { side: 'S', option: 'PE', offset: -10, ratio: 1 }, { side: 'B', option: 'PE', offset: -4, ratio: 2 }, { side: 'S', option: 'PE', offset: -2, ratio: 1 },
+    ] },
+    { key: 'call-ratio-spread',      name: 'Call Ratio Spread',           legs: [
+      { side: 'B', option: 'CE', offset: 0, ratio: 1 }, { side: 'S', option: 'CE', offset: 4, ratio: 2 },
+    ] },
+    { key: 'put-ratio-spread',       name: 'Put Ratio Spread',            legs: [
+      { side: 'S', option: 'PE', offset: -4, ratio: 2 }, { side: 'B', option: 'PE', offset: 0, ratio: 1 },
+    ] },
+  ],
+  Lizard: [
+    { key: 'jade-lizard',         name: 'Jade Lizard',          legs: [
+      { side: 'S', option: 'PE', offset: -4, ratio: 1 }, { side: 'S', option: 'CE', offset: 4, ratio: 1 }, { side: 'B', option: 'CE', offset: 8, ratio: 1 },
+    ] },
+    { key: 'reverse-jade-lizard', name: 'Reverse Jade Lizard', legs: [
+      { side: 'B', option: 'PE', offset: -8, ratio: 1 }, { side: 'S', option: 'PE', offset: -4, ratio: 1 }, { side: 'S', option: 'CE', offset: 4, ratio: 1 },
+    ] },
+  ],
+  Calendar: [
+    { key: 'calendar-call-spread', name: 'Calendar Call Spread', legs: [
+      { side: 'S', option: 'CE', offset: 0, ratio: 1, expiryRole: 'front' },
+      { side: 'B', option: 'CE', offset: 0, ratio: 1, expiryRole: 'far' },
+    ] },
+    { key: 'calendar-put-spread',  name: 'Calendar Put Spread',  legs: [
+      { side: 'S', option: 'PE', offset: 0, ratio: 1, expiryRole: 'front' },
+      { side: 'B', option: 'PE', offset: 0, ratio: 1, expiryRole: 'far' },
+    ] },
+    { key: 'diagonal-call-spread', name: 'Diagonal Call Spread', legs: [
+      { side: 'S', option: 'CE', offset: 4, ratio: 1, expiryRole: 'front' },
+      { side: 'B', option: 'CE', offset: 0, ratio: 1, expiryRole: 'far' },
+    ] },
+    { key: 'diagonal-put-spread',  name: 'Diagonal Put Spread',  legs: [
+      { side: 'S', option: 'PE', offset: -4, ratio: 1, expiryRole: 'front' },
+      { side: 'B', option: 'PE', offset: 0, ratio: 1, expiryRole: 'far' },
     ] },
   ],
 };

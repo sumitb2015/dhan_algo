@@ -13,6 +13,9 @@ const CATEGORY_COLORS: Record<StrategyCategory, string> = {
   Bearish:       'bg-rose-500/10 text-rose-300 border-rose-500/40',
   'Range Bound': 'bg-amber-500/10 text-amber-300 border-amber-500/40',
   'Big Move':    'bg-sky-500/10 text-sky-300 border-sky-500/40',
+  'Ratio Spreads': 'bg-violet-500/10 text-violet-300 border-violet-500/40',
+  Lizard:          'bg-lime-500/10 text-lime-300 border-lime-500/40',
+  Calendar:        'bg-fuchsia-500/10 text-fuchsia-300 border-fuchsia-500/40',
 };
 
 /** Tiny payoff-shape glyph for a strategy card, using placeholder strikes/premiums

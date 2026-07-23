@@ -49,11 +49,15 @@ export default function Baskets() {
 
   const [expiries, setExpiries] = useState<string[]>([]);
   const [expiry, setExpiry]     = useState('');
+  // Far-month expiry — only relevant to Calendar/Diagonal templates, whose
+  // far leg trades a later expiry than the page's main (front) expiry.
+  const [farExpiry, setFarExpiry] = useState('');
 
   const [allStrikes, setAllStrikes] = useState<number[]>([]);
   const [prevClose, setPrevClose]   = useState<Record<string, { ce: number; pe: number }>>({});
   const [chainSpot, setChainSpot]   = useState(0);
   const [strikeMap, setStrikeMap]   = useState<Record<string, StrikeIdentifier>>({});
+  const [farStrikeMap, setFarStrikeMap] = useState<Record<string, StrikeIdentifier>>({});
   const [lotSize, setLotSize]       = useState(75);
 
   const { liveQuotes, bridgeStatus, lastUpdated, transport } = useLiveOptionsWS(expiry, broker, authenticatedBrokers, underlying);
@@ -77,6 +81,8 @@ export default function Baskets() {
   const placingRef     = useRef(false);
   const expiryRef      = useRef('');
   useEffect(() => { expiryRef.current = expiry; }, [expiry]);
+  const farExpiryRef  = useRef('');
+  useEffect(() => { farExpiryRef.current = farExpiry; }, [farExpiry]);
   const underlyingRef  = useRef<Underlying>(underlying);
   useEffect(() => { underlyingRef.current = underlying; }, [underlying]);
 
@@ -121,6 +127,31 @@ export default function Baskets() {
       })
       .catch(() => {});
   }, [broker, underlying]);
+
+  // ── Far expiry: defaults to the next available expiry after `expiry` ───
+  useEffect(() => {
+    if (!expiries.length) return;
+    setFarExpiry(prev => (prev && prev !== expiry && expiries.includes(prev))
+      ? prev
+      : (expiries.find(e => e !== expiry) ?? expiry));
+  }, [expiries, expiry]);
+
+  // ── Far expiry strike/order-identifier lookup (Calendar/Diagonal legs) ──
+  useEffect(() => {
+    if (!farExpiry || farExpiry === expiry) { setFarStrikeMap({}); return; }
+    const requestedUnderlying = underlying;
+    const requestedFarExpiry = farExpiry;
+    const lookupUrl = broker === 'zerodha'
+      ? `/api/scalper/zerodha/lookup?underlying=${underlying}&expiry=${farExpiry}`
+      : `/api/scalper/lookup?underlying=${underlying}&expiry=${farExpiry}`;
+    fetch(lookupUrl)
+      .then(r => r.json())
+      .then((j: { success: boolean; data?: { strikes: Record<string, StrikeIdentifier> } }) => {
+        if (requestedUnderlying !== underlyingRef.current || requestedFarExpiry !== farExpiryRef.current) return;
+        if (j.success && j.data) setFarStrikeMap(j.data.strikes);
+      })
+      .catch(() => {});
+  }, [farExpiry, expiry, underlying, broker]);
 
   // ── Funds tile: reload on broker change ──────────────────────────
   useEffect(() => {
@@ -200,17 +231,21 @@ export default function Baskets() {
   }, [expiry, underlying, broker, authenticatedBrokers]);
 
   // ── Pricing helpers ─────────────────────────────────────────────
-  const autoPremium = useCallback((strike: number, option: OptionType): number => {
+  // Live/prev-close quotes are only fetched for the front expiry — a far-month
+  // (Calendar/Diagonal) leg has no quote source here, so it returns 0 and must
+  // be priced manually in the Price column.
+  const autoPremium = useCallback((strike: number, option: OptionType, legExpiry?: string): number => {
+    if (legExpiry != null && legExpiry !== expiry) return 0;
     const key = String(strike);
     const live = liveQuotes?.strikes?.[key]?.[option === 'CE' ? 'ce' : 'pe']?.ltp ?? 0;
     if (live > 0) return live;
     return prevClose[key]?.[option === 'CE' ? 'ce' : 'pe'] ?? 0;
-  }, [liveQuotes, prevClose]);
+  }, [liveQuotes, prevClose, expiry]);
 
   const effectivePremium = useCallback((leg: BasketLeg): number => {
     const manual = Number(leg.price);
     if (leg.price.trim() !== '' && !isNaN(manual) && manual > 0) return manual;
-    return autoPremium(leg.strike, leg.option);
+    return autoPremium(leg.strike, leg.option, leg.expiry);
   }, [autoPremium]);
 
   // ── Leg operations ──────────────────────────────────────────────
@@ -221,13 +256,18 @@ export default function Baskets() {
       addToast('error', 'Strikes still loading', 'Wait for the option chain, then pick a strategy');
       return;
     }
+    if (tpl.legs.some(l => l.expiryRole === 'far') && (!farExpiry || farExpiry === expiry)) {
+      addToast('error', 'Need a second expiry', 'This strategy needs a far-month expiry — only one expiry is available right now');
+      return;
+    }
     setStrategy(tpl.key);
     setLegs(tpl.legs.map(l => {
       const target = atmStrike + l.offset * step;
       const strike = nearestStrike(allStrikes, target) ?? atmStrike;
-      return { id: newLegId(), side: l.side, option: l.option, strike, lots: l.ratio, type: 'MARKET' as const, price: '' };
+      const legExpiry = l.expiryRole === 'far' ? farExpiry : expiry;
+      return { id: newLegId(), side: l.side, option: l.option, strike, lots: l.ratio, type: 'MARKET' as const, price: '', expiry: legExpiry };
     }));
-  }, [atmStrike, allStrikes, step, addToast]);
+  }, [atmStrike, allStrikes, step, expiry, farExpiry, addToast]);
 
   const updateLeg = useCallback((id: string, patch: Partial<BasketLeg>) => {
     setLegs(prev => prev.map(l => (l.id === id ? { ...l, ...patch } : l)));
@@ -249,9 +289,9 @@ export default function Baskets() {
       return;
     }
     setLegs(prev => [...prev, {
-      id: newLegId(), side: 'B', option: 'CE', strike: atmStrike, lots: 1, type: 'MARKET', price: '',
+      id: newLegId(), side: 'B', option: 'CE', strike: atmStrike, lots: 1, type: 'MARKET', price: '', expiry,
     }]);
-  }, [atmStrike, addToast]);
+  }, [atmStrike, expiry, addToast]);
 
   const removeLeg = useCallback((id: string) => {
     setLegs(prev => prev.filter(l => l.id !== id));
@@ -274,10 +314,10 @@ export default function Baskets() {
     const netQty = Number(pos.netQty) || 0;
     const side = netQty < 0 ? 'S' : 'B';
     setLegs(prev => [...prev, {
-      id: newLegId(), side, option: match!.option, strike: match!.strike, lots: 1, type: 'MARKET', price: '',
+      id: newLegId(), side, option: match!.option, strike: match!.strike, lots: 1, type: 'MARKET', price: '', expiry,
     }]);
     addToast('success', `Added ${side === 'S' ? 'Sell' : 'Buy'} ${match.option} ${match.strike} leg`, 'Adjust lots, then Place Basket');
-  }, [strikeMap, addToast]);
+  }, [strikeMap, expiry, addToast]);
 
   // ── Payoff + metrics ────────────────────────────────────────────
   const payoffLegs = useMemo<PayoffLeg[]>(() => legs.map(l => ({
@@ -285,14 +325,20 @@ export default function Baskets() {
     premium: effectivePremium(l), qty: l.lots * multiplier * lotSize,
   })), [legs, multiplier, lotSize, effectivePremium]);
 
+  // Calendar/Diagonal legs expire on different dates — expiry-intrinsic payoff
+  // math (computePayoff) is meaningless for a leg that's still alive, so the
+  // chart is skipped entirely rather than shown wrong.
+  const hasMixedExpiry = useMemo(() => legs.some(l => l.expiry !== expiry), [legs, expiry]);
+
   const payoff = useMemo(() => {
+    if (hasMixedExpiry) return null;
     if (!payoffLegs.length || payoffLegs.some(l => l.premium <= 0)) return null;
     const strikes = payoffLegs.map(l => l.strike);
     const center = spot > 0 ? spot : (Math.min(...strikes) + Math.max(...strikes)) / 2;
     const lo = Math.min(Math.min(...strikes) - 6 * step, center * 0.94);
     const hi = Math.max(Math.max(...strikes) + 6 * step, center * 1.06);
     return computePayoff(payoffLegs, lo, hi);
-  }, [payoffLegs, spot, step]);
+  }, [payoffLegs, spot, step, hasMixedExpiry]);
 
   const riskReward = useMemo(() => {
     if (!payoff || payoff.maxProfitUnlimited || payoff.maxLossUnlimited) return null;
@@ -309,7 +355,7 @@ export default function Baskets() {
   const premiumsUnavailable = legs.length > 0 && legs.every(l => effectivePremium(l) <= 0);
 
   // ── Order placement ─────────────────────────────────────────────
-  type PlacedLeg = { label: string; side: 'B' | 'S'; option: OptionType; strike: number; qty: number };
+  type PlacedLeg = { label: string; side: 'B' | 'S'; option: OptionType; strike: number; qty: number; expiry: string };
 
   // Flattens already-filled legs of a basket that stopped mid-way by firing
   // opposite-side MARKET orders for each — best-effort, since a rejected or
@@ -320,7 +366,7 @@ export default function Baskets() {
     for (const p of [...placed].reverse()) {
       const reverseReq = resolveOrderRequest(broker, {
         side: p.side === 'B' ? 'S' : 'B', option: p.option, strike: p.strike, qty: p.qty, type: 'MARKET', underlying,
-      }, strikeMap);
+      }, p.expiry === farExpiry ? farStrikeMap : strikeMap);
       if (!reverseReq) {
         addToast('error', `Could not auto-reverse ${p.label}`, 'No order identifier — close manually from Orders/Positions');
         continue;
@@ -338,7 +384,7 @@ export default function Baskets() {
         addToast('error', `Reverse UNCONFIRMED for ${p.label}`, `Close manually from Orders/Positions: ${String(e)}`);
       }
     }
-  }, [broker, strikeMap, underlying, addToast]);
+  }, [broker, strikeMap, farStrikeMap, farExpiry, underlying, addToast]);
 
   const placeBasket = useCallback(async () => {
     if (!legs.length || !expiry) return;
@@ -372,7 +418,8 @@ export default function Baskets() {
         const qty = leg.lots * multiplier * lotSize;
         const price = leg.type === 'LIMIT' ? effectivePremium(leg) : undefined;
 
-        const req = resolveOrderRequest(broker, { side: leg.side, option: leg.option, strike: leg.strike, qty, type: leg.type, price, underlying }, strikeMap);
+        const legStrikeMap = leg.expiry === farExpiry ? farStrikeMap : strikeMap;
+        const req = resolveOrderRequest(broker, { side: leg.side, option: leg.option, strike: leg.strike, qty, type: leg.type, price, underlying }, legStrikeMap);
         if (!req) {
           addToast('error', `${label} — no order identifier resolved`, 'Strike lookup not ready yet — basket stopped');
           await rollbackPlacedLegs(placedLegs);
@@ -387,7 +434,7 @@ export default function Baskets() {
           });
           const j = await res.json() as { success: boolean; order_id?: string; error?: string };
           if (j.success) {
-            placedLegs.push({ label, side: leg.side, option: leg.option, strike: leg.strike, qty });
+            placedLegs.push({ label, side: leg.side, option: leg.option, strike: leg.strike, qty, expiry: leg.expiry });
             addToast('success', `${label} placed`, `ID: ${j.order_id}`);
           } else {
             addToast('error', `${label} failed — basket stopped`, j.error ?? 'Unknown error');
@@ -405,7 +452,7 @@ export default function Baskets() {
       placingRef.current = false;
       setPlacing(false);
     }
-  }, [legs, expiry, confirmPlace, multiplier, lotSize, strikeMap, broker, underlying, effectivePremium, addToast, hasAuthenticatedBroker, rollbackPlacedLegs]);
+  }, [legs, expiry, farExpiry, confirmPlace, multiplier, lotSize, strikeMap, farStrikeMap, broker, underlying, effectivePremium, addToast, hasAuthenticatedBroker, rollbackPlacedLegs]);
 
   // ── Save / load ───────────────────────────────────────────────
   const persistSaved = (next: SavedBasket[]) => {
@@ -426,8 +473,9 @@ export default function Baskets() {
     const isUpdate = saved.some(s => s.name === name);
     const entry: SavedBasket = {
       name, category, strategy, multiplier, underlying,
-      legs: legs.map(({ side, option, strike, lots, type }) => ({
+      legs: legs.map(({ side, option, strike, lots, type, expiry: legExpiry }) => ({
         side, option, lots, type, offset: legToOffset(strike, atmStrike, step),
+        ...(legExpiry === farExpiry && farExpiry !== expiry ? { expiryRole: 'far' as const } : {}),
       })),
     };
     persistSaved([...saved.filter(s => s.name !== name), entry]);
@@ -450,6 +498,7 @@ export default function Baskets() {
       side: l.side, option: l.option, lots: l.lots, type: l.type,
       strike: offsetToStrike(l.offset, atm, strikes, step),
       price: '',
+      expiry: l.expiryRole === 'far' ? (farExpiryRef.current || expiryRef.current) : expiryRef.current,
     })));
     setSaveOpen(false);
     addToast('success', `Basket "${b.name}" loaded`, `Re-anchored to current ATM ${atm}`);
@@ -543,6 +592,16 @@ export default function Baskets() {
               {expiries.map(ex => <option key={ex} value={ex}>{ex}</option>)}
             </select>
 
+            {category === 'Calendar' && (
+              <div className="flex items-center gap-1.5 h-8 bg-zinc-900 border border-fuchsia-500/40 rounded-lg pl-2 pr-1">
+                <span className="text-[10px] font-bold text-fuchsia-300 uppercase tracking-wider">Far</span>
+                <select value={farExpiry} onChange={e => setFarExpiry(e.target.value)}
+                  className="h-6 bg-transparent text-zinc-200 text-xs font-semibold rounded px-1 focus:outline-none">
+                  {expiries.filter(ex => ex !== expiry).map(ex => <option key={ex} value={ex}>{ex}</option>)}
+                </select>
+              </div>
+            )}
+
             <div className="flex items-center gap-2 h-8 bg-zinc-900 border border-zinc-700 rounded-lg px-2">
               <span className="text-[10px] font-bold text-zinc-400 uppercase tracking-wider">Multiplier</span>
               <div className="inline-flex items-center rounded-lg border border-zinc-800 bg-zinc-950/60 overflow-hidden">
@@ -605,6 +664,8 @@ export default function Baskets() {
             atmStrike={atmStrike}
             allStrikes={allStrikes}
             autoPremium={autoPremium}
+            frontExpiry={expiry}
+            farExpiry={farExpiry}
             onUpdateLeg={updateLeg}
             onStepStrike={stepStrike}
             onAddLeg={addLeg}
@@ -681,7 +742,9 @@ export default function Baskets() {
               breakevens={payoff?.breakevens ?? []}
               spot={spot}
               emptyReason={
-                premiumsUnavailable
+                hasMixedExpiry
+                  ? 'Calendar/Diagonal legs expire on different dates — no single expiry payoff to chart. Track P&L from the Positions tab instead.'
+                  : premiumsUnavailable
                   ? 'No premium data from broker — market may be closed. Enter prices manually in the Price column to preview payoff.'
                   : undefined
               }
