@@ -719,6 +719,11 @@ export default function OptionStrats() {
                       <tr key={rowSpot} className={cn(Math.abs(rowSpot - Math.round(spot / 50) * 50) < 1 && 'outline outline-1 outline-sky-500/40')}>
                         <td className="sticky left-0 z-10 whitespace-nowrap bg-zinc-900 px-3 py-1.5 font-mono font-semibold text-zinc-200">
                           {rowSpot.toFixed(0)}
+                          {spot > 0 && (
+                            <span className="ml-1.5 font-normal text-zinc-500">
+                              ({rowSpot >= spot ? '+' : ''}{(((rowSpot - spot) / spot) * 100).toFixed(1)}%)
+                            </span>
+                          )}
                         </td>
                         {heatmap.cells[ri].map((v, ci) => (
                           <td key={ci} style={cellStyle(v)} className="whitespace-nowrap px-2 py-1.5 text-right font-mono tabular-nums text-zinc-100">
