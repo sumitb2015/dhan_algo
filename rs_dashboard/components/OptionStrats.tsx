@@ -550,6 +550,10 @@ export default function OptionStrats() {
                   );
                 })()}
 
+                <span className="rounded border border-zinc-700 px-1.5 py-0.5 font-mono text-[10px] font-bold text-zinc-400">
+                  MARGIN
+                </span>
+
                 <Button variant="outline" size="icon-xs" aria-label="Remove leg" className="ml-auto" onClick={() => handleRemoveLeg(leg.id)}>
                   <Trash2 />
                 </Button>
