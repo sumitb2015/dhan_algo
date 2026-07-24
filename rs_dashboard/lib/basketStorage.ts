@@ -18,8 +18,6 @@ export interface SavedBasket {
   legs: SavedLeg[];
 }
 
-export const SAVED_BASKETS_KEY = 'baskets_saved_v1';
-
 /** ATM-relative offset (in strike-step units) for a strike at save time. */
 export function legToOffset(strike: number, atmStrike: number, step: number): number {
   return Math.round((strike - atmStrike) / (step || 50));
@@ -30,21 +28,25 @@ export function offsetToStrike(offset: number, atmStrike: number, allStrikes: nu
   return nearestStrike(allStrikes, atmStrike + offset * step) ?? atmStrike;
 }
 
-export function loadSavedBaskets(): SavedBasket[] {
-  if (typeof window === 'undefined') return [];
+// Baskets are persisted server-side (debug/saved_baskets.json via /api/baskets)
+// rather than localStorage, so the same list is shared across the Baskets page
+// and the Option Strats page, and across browsers/sessions.
+export async function loadSavedBaskets(): Promise<SavedBasket[]> {
   try {
-    const raw = window.localStorage.getItem(SAVED_BASKETS_KEY);
-    return raw ? (JSON.parse(raw) as SavedBasket[]) : [];
+    const res = await fetch('/api/baskets');
+    const json = await res.json();
+    return json?.success ? (json.data as SavedBasket[]) : [];
   } catch {
-    return []; // corrupt storage — start fresh rather than throwing
+    return [];
   }
 }
 
-export function persistSavedBaskets(baskets: SavedBasket[]): void {
-  if (typeof window === 'undefined') return;
-  try {
-    window.localStorage.setItem(SAVED_BASKETS_KEY, JSON.stringify(baskets));
-  } catch {
-    /* storage full or disabled — save silently fails, UI still works this session */
-  }
+export async function persistSavedBaskets(baskets: SavedBasket[]): Promise<void> {
+  const res = await fetch('/api/baskets', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ baskets }),
+  });
+  const json = await res.json().catch(() => null);
+  if (!json?.success) throw new Error(json?.error ?? 'Failed to save baskets');
 }

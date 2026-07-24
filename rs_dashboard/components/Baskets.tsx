@@ -112,7 +112,7 @@ export default function Baskets() {
 
   // ── Bootstrap: saved baskets ────────────────────────────────────
   useEffect(() => {
-    setSaved(loadSavedBaskets());
+    loadSavedBaskets().then(setSaved);
   }, []);
 
   // ── Expiries: reload on broker/underlying change ────────────────
@@ -458,7 +458,7 @@ export default function Baskets() {
   // ── Save / load ───────────────────────────────────────────────
   const persistSaved = (next: SavedBasket[]) => {
     setSaved(next);
-    persistSavedBaskets(next);
+    persistSavedBaskets(next).catch(() => addToast('error', 'Failed to save baskets', 'Changes may not persist — check the server'));
   };
 
   const saveBasket = () => {
@@ -480,7 +480,10 @@ export default function Baskets() {
       })),
     };
     persistSaved([...saved.filter(s => s.name !== name), entry]);
-    setSaveName('');
+    // Keep the name filled in (rather than clearing it) so pressing Save again
+    // — e.g. after tweaking a loaded basket's legs — overwrites this same
+    // basket instead of demanding the name be retyped every time.
+    setSaveName(name);
     addToast('success', isUpdate ? `Basket "${name}" updated` : `Basket "${name}" saved`);
   };
 
@@ -491,6 +494,10 @@ export default function Baskets() {
   const pendingLoadRef = useRef<SavedBasket | null>(null);
 
   const applyLoadedBasket = useCallback((b: SavedBasket, atm: number, strikes: number[]) => {
+    if (b.legs.some(l => l.expiryRole === 'far') && (!farExpiryRef.current || farExpiryRef.current === expiryRef.current)) {
+      addToast('error', 'Need a second expiry', `"${b.name}" has a far-month leg — only one expiry is available right now, so it can't be re-anchored correctly`);
+      return;
+    }
     setCategory(b.category);
     setStrategy(b.strategy);
     setMultiplier(b.multiplier);
@@ -502,6 +509,7 @@ export default function Baskets() {
       expiry: l.expiryRole === 'far' ? (farExpiryRef.current || expiryRef.current) : expiryRef.current,
     })));
     setSaveOpen(false);
+    setSaveName(b.name);
     addToast('success', `Basket "${b.name}" loaded`, `Re-anchored to current ATM ${atm}`);
   }, [step, addToast]);
 

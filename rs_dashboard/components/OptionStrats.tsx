@@ -11,6 +11,11 @@ import {
 } from '@/lib/basketOrders';
 import { useBrokerSelector, type Broker } from '@/hooks/useBrokerSelector';
 import { fetchMarginSummary, type MarginSummary } from '@/lib/optionsMargin';
+import { useLiveOptionsWS } from '@/lib/useLiveOptionsWS';
+import {
+  type SavedBasket, loadSavedBaskets, persistSavedBaskets, legToOffset, offsetToStrike,
+} from '@/lib/basketStorage';
+import SavedBasketsPanel from './basket/SavedBasketsPanel';
 import type { Toast } from './Scalper';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
@@ -56,8 +61,8 @@ export default function OptionStrats() {
   const [expiries, setExpiries] = useState<{ date: string; kind: 'weekly' | 'monthly' }[]>([]);
   const [selectedExpiry, setSelectedExpiry] = useState('');
 
-  const [spot, setSpot] = useState(0);
-  const [chainOc, setChainOc] = useState<ChainOc>({});
+  const [staticSpot, setStaticSpot] = useState(0);
+  const [staticChainOc, setStaticChainOc] = useState<ChainOc>({});
   const [lotSize, setLotSize] = useState<number | null>(null);
   const effectiveLotSize = lotSize ?? FALLBACK_LOT_SIZE;
 
@@ -87,6 +92,56 @@ export default function OptionStrats() {
     setToasts((prev) => [...prev, { id, type, message, detail }]);
     setTimeout(() => setToasts((prev) => prev.filter((t) => t.id !== id)), type === 'error' ? 7000 : 3000);
   }, []);
+
+  // ── Live mode ─────────────────────────────────────────────────────
+  // Off by default: spot/chain are a one-shot fetch (see the effect below) that
+  // only re-runs when the expiry changes. Toggling this on overlays live LTPs
+  // from the same WebSocket feed the Baskets page uses — IV/greeks stay from
+  // the last static chain fetch since the live feed only carries price.
+  const [liveMode, setLiveMode] = useState(false);
+  const { liveQuotes, bridgeStatus, lastUpdated, transport } = useLiveOptionsWS(
+    liveMode ? selectedExpiry : '', broker, authenticatedBrokers, UNDERLYING,
+  );
+
+  // Bridge is a broker-keyed singleton (see /api/options/live's POST 'start'
+  // handler) — if Baskets/Scalper already has this broker+underlying+expiry
+  // running, this is a no-op; otherwise it spins one up. Stopping on unmount
+  // matches every other consumer of this feed (Baskets, Scalper, ...), so the
+  // tradeoff (closing this tab can stop a bridge another open tab still wants)
+  // is pre-existing app-wide behavior, not something new here.
+  useEffect(() => {
+    if (!liveMode || !selectedExpiry) return;
+    for (const b of authenticatedBrokers) {
+      fetch('/api/options/live', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'start', underlying: UNDERLYING, expiry: selectedExpiry, numStrikes: 30, broker: b }),
+      }).catch(() => {});
+    }
+    return () => {
+      fetch('/api/options/live', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'stop', brokers: authenticatedBrokers }),
+      }).catch(() => {});
+    };
+  }, [liveMode, selectedExpiry, authenticatedBrokers]);
+
+  const spot = liveMode && liveQuotes?.spot ? liveQuotes.spot : staticSpot;
+  const chainOc = useMemo(() => {
+    if (!liveMode || !liveQuotes?.strikes) return staticChainOc;
+    const merged: ChainOc = {};
+    for (const [k, v] of Object.entries(staticChainOc)) {
+      // /api/options/chain keys strikes as fixed-decimal ("23650.000000");
+      // the live feed keys them as plain integers ("23650") — normalize before lookup.
+      const liveStrike = liveQuotes.strikes[String(Math.round(parseFloat(k)))];
+      merged[k] = {
+        ce: v.ce ? { ...v.ce, last_price: liveStrike?.ce?.ltp ?? v.ce.last_price } : v.ce,
+        pe: v.pe ? { ...v.pe, last_price: liveStrike?.pe?.ltp ?? v.pe.last_price } : v.pe,
+      };
+    }
+    return merged;
+  }, [liveMode, liveQuotes, staticChainOc]);
 
   useEffect(() => {
     if (!selectedExpiry) return;
@@ -123,10 +178,10 @@ export default function OptionStrats() {
 
   useEffect(() => {
     if (!selectedExpiry) return;
-    fetch(`/api/options/spot?underlying=${UNDERLYING}`).then((r) => r.json()).then((json) => setSpot(json?.spot ?? 0)).catch(() => {});
+    fetch(`/api/options/spot?underlying=${UNDERLYING}`).then((r) => r.json()).then((json) => setStaticSpot(json?.spot ?? 0)).catch(() => {});
     fetch(`/api/options/chain?underlying=${UNDERLYING}&expiry=${selectedExpiry}`)
       .then((r) => r.json())
-      .then((json) => setChainOc(json?.data?.chain?.oc ?? {}))
+      .then((json) => setStaticChainOc(json?.data?.chain?.oc ?? {}))
       .catch(() => {});
   }, [selectedExpiry]);
 
@@ -135,10 +190,78 @@ export default function OptionStrats() {
     [chainOc],
   );
 
-  const handleAddLeg = useCallback(() => {
-    const atm = strikeOptions.length > 0
+  const atmStrike = useMemo(() => (
+    strikeOptions.length > 0
       ? strikeOptions.reduce((best, s) => (Math.abs(s - spot) < Math.abs(best - spot) ? s : best), strikeOptions[0])
-      : computeAtm(spot);
+      : (spot > 0 ? computeAtm(spot) : null)
+  ), [strikeOptions, spot]);
+
+  // ── Saved baskets ──────────────────────────────────────────────
+  const [saveOpen, setSaveOpen] = useState(false);
+  const [saveName, setSaveName] = useState('');
+  const [saved, setSaved] = useState<SavedBasket[]>([]);
+
+  useEffect(() => {
+    loadSavedBaskets().then(setSaved);
+  }, []);
+
+  const persistSaved = (next: SavedBasket[]) => {
+    setSaved(next);
+    persistSavedBaskets(next).catch(() => addToast('error', 'Failed to save baskets', 'Changes may not persist — check the server'));
+  };
+
+  const saveBasket = useCallback(() => {
+    const name = saveName.trim();
+    if (!name || !legs.length) {
+      addToast('error', !legs.length ? 'Nothing to save — add legs first' : 'Enter a basket name');
+      return;
+    }
+    if (atmStrike == null) {
+      addToast('error', 'Cannot save yet', 'Wait for the option chain to load so ATM is known');
+      return;
+    }
+    const isUpdate = saved.some((s) => s.name === name);
+    const entry: SavedBasket = {
+      name, category: 'Bullish', strategy: null, multiplier: 1, underlying: UNDERLYING,
+      legs: legs.map((l) => ({
+        side: l.side === 'BUY' ? 'B' : 'S',
+        option: l.type,
+        lots: l.qtyLots,
+        type: 'MARKET',
+        offset: legToOffset(l.strike, atmStrike, STRIKE_STEP),
+      })),
+    };
+    persistSaved([...saved.filter((s) => s.name !== name), entry]);
+    // Keep the name filled in (rather than clearing it) so pressing Save again
+    // — e.g. after tweaking a loaded basket's legs — overwrites this same
+    // basket instead of demanding the name be retyped every time.
+    setSaveName(name);
+    addToast('success', isUpdate ? `Basket "${name}" updated` : `Basket "${name}" saved`);
+  }, [saveName, legs, atmStrike, saved, addToast]);
+
+  const loadBasket = useCallback((b: SavedBasket) => {
+    if (b.underlying !== UNDERLYING) {
+      addToast('error', `This basket is for ${b.underlying}`, 'Load it from the Baskets page instead');
+      return;
+    }
+    if (atmStrike == null || !strikeOptions.length) {
+      addToast('error', 'Chain not loaded yet', 'Wait for strikes to load, then load the basket');
+      return;
+    }
+    setLegs(b.legs.map((l) => ({
+      id: `${Date.now()}-${Math.random()}`,
+      strike: offsetToStrike(l.offset, atmStrike, strikeOptions, STRIKE_STEP),
+      type: l.option,
+      side: l.side === 'B' ? 'BUY' : 'SELL',
+      qtyLots: l.lots,
+    })));
+    setSaveOpen(false);
+    setSaveName(b.name);
+    addToast('success', `Basket "${b.name}" loaded`, `Re-anchored to current ATM ${atmStrike}`);
+  }, [atmStrike, strikeOptions, addToast]);
+
+  const handleAddLeg = useCallback(() => {
+    const atm = atmStrike ?? computeAtm(spot);
     const used = new Set(legs.map((l) => `${l.strike}-${l.type}`));
 
     // Search outward from ATM (0, +1, -1, +2, -2, ...) for the first strike/type
@@ -313,6 +436,16 @@ export default function OptionStrats() {
   const [margin, setMargin] = useState<MarginSummary | null>(null);
   const [marginLoading, setMarginLoading] = useState(false);
 
+  // Composition-only signature (strike/type/side/qty, no price) — resolvedLegs
+  // gets a new array identity on every live-tick chainOc merge, so keying the
+  // margin fetch on resolvedLegs itself refires it 20-40x/sec in Live mode
+  // (React eventually throws "Maximum update depth exceeded"). Margin only
+  // needs to be recomputed when the actual legs change, not on every price tick.
+  const legsSignature = useMemo(
+    () => legs.map((l) => `${l.side}-${l.type}-${l.strike}x${l.qtyLots}`).join('|'),
+    [legs],
+  );
+
   useEffect(() => {
     if (resolvedLegs.length === 0 || missingStrikes.length > 0 || !selectedExpiry) {
       setMargin(null);
@@ -329,7 +462,8 @@ export default function OptionStrats() {
       .then((data) => setMargin(data))
       .finally(() => setMarginLoading(false));
     return () => ac.abort();
-  }, [resolvedLegs, missingStrikes, selectedExpiry]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [legsSignature, missingStrikes.length, selectedExpiry]);
 
   const curve = useMemo(() => {
     if (resolvedLegs.length === 0) return [];
@@ -451,7 +585,32 @@ export default function OptionStrats() {
             </Select>
           )}
 
-          <Tabs value={activeView} onValueChange={(v) => setActiveView(v as typeof activeView)} className="ml-auto">
+          <div className="ml-auto flex items-center gap-2">
+            <Tabs value={liveMode ? 'live' : 'static'} onValueChange={(v) => setLiveMode(v === 'live')}>
+              <TabsList className="bg-zinc-900">
+                <TabsTrigger value="static">Static</TabsTrigger>
+                <TabsTrigger value="live">Live</TabsTrigger>
+              </TabsList>
+            </Tabs>
+
+            {liveMode && (
+              <div className="flex items-center gap-1.5">
+                <span className={cn('h-2 w-2 rounded-full',
+                  bridgeStatus.status === 'RUNNING' ? 'animate-pulse bg-emerald-400' :
+                  bridgeStatus.status === 'STARTING' ? 'animate-pulse bg-yellow-400' :
+                  bridgeStatus.status === 'ERROR' ? 'bg-rose-400' : 'bg-zinc-600',
+                )} />
+                <span className={cn('rounded border px-1 py-0.5 text-[9px] font-bold',
+                  transport === 'ws' ? 'border-emerald-500/20 bg-emerald-500/10 text-emerald-400' : 'border-zinc-700 bg-zinc-800 text-zinc-500',
+                )}>
+                  {transport === 'ws' ? 'WS' : 'HTTP'}
+                </span>
+                {lastUpdated && <span className="font-mono text-[10px] text-zinc-500">{lastUpdated}</span>}
+              </div>
+            )}
+          </div>
+
+          <Tabs value={activeView} onValueChange={(v) => setActiveView(v as typeof activeView)}>
             <TabsList className="bg-zinc-900">
               <TabsTrigger value="table">Table</TabsTrigger>
               <TabsTrigger value="graph">Graph</TabsTrigger>
@@ -469,6 +628,11 @@ export default function OptionStrats() {
                 <Plus /> Add Leg
               </Button>
               {legs.length > 0 && (
+                <Button variant="outline" size="sm" onClick={() => { setLegs([]); setConfirmPlace(false); }}>
+                  <Trash2 /> Clear
+                </Button>
+              )}
+              {legs.length > 0 && (
                 <Button
                   size="sm"
                   onClick={placeTrade}
@@ -481,6 +645,18 @@ export default function OptionStrats() {
               )}
             </div>
           </CardHeader>
+          <div className="flex items-center gap-2 px-4 py-2 border-t border-zinc-800 bg-zinc-900/40 flex-wrap">
+            <SavedBasketsPanel
+              saveName={saveName}
+              onSaveNameChange={setSaveName}
+              onSave={saveBasket}
+              saved={saved}
+              open={saveOpen}
+              onToggleOpen={() => setSaveOpen((o) => !o)}
+              onLoad={loadBasket}
+              onDelete={(name) => persistSaved(saved.filter((s) => s.name !== name))}
+            />
+          </div>
           <CardContent className="space-y-2 pt-4">
             {legs.length === 0 && (
               <p className="text-xs text-zinc-500">No legs yet — click &quot;Add Leg&quot; to start building a strategy.</p>
