@@ -40,6 +40,15 @@ interface StrategyState {
   // CrudeOil Mini Renko SAR
   box_size?: number; reverse_bricks?: number; brick_count?: number;
   last_brick_color?: string; consecutive_opposite?: number; qty?: number;
+  // ST+OI Bear Call Spread
+  phase?: string; index_interval?: string; option_interval?: string;
+  index_st_period?: number; index_st_multiplier?: number;
+  option_st_period?: number; option_st_multiplier?: number;
+  candidate_strike?: number | null; candidate_symbol?: string | null;
+  watching_since?: string | null; index_st_dir?: number | null; option_st_dir?: number | null;
+  ce_price_change_pct?: number | null; ce_oi_change_pct?: number | null;
+  require_short_buildup?: boolean;
+  min_price_drop_pct?: number; min_oi_rise_pct?: number;
 }
 
 interface Props { meta: StrategyMeta; state: StrategyState; onRefresh: () => void }
@@ -102,6 +111,24 @@ function StrategyRowWide({ meta, state, onRefresh }: Props) {
   const [renkoQty, setRenkoQty] = useState(10);
   const [renkoBoxSize, setRenkoBoxSize] = useState(5);
   const [renkoReverseBricks, setRenkoReverseBricks] = useState(3);
+  // ST+OI Bear Call Spread
+  const [indexInterval, setIndexInterval] = useState('3');
+  const [indexStPeriod, setIndexStPeriod] = useState(10);
+  const [indexStMultiplier, setIndexStMultiplier] = useState(2.0);
+  const [optionInterval, setOptionInterval] = useState('3');
+  const [optionStPeriod, setOptionStPeriod] = useState(10);
+  const [optionStMultiplier, setOptionStMultiplier] = useState(2.0);
+  const [stOiCeOffset, setStOiCeOffset] = useState(100);
+  const [stOiSpreadWidth, setStOiSpreadWidth] = useState(100);
+  const [requireShortBuildup, setRequireShortBuildup] = useState(false);
+  const [minPriceDropPct, setMinPriceDropPct] = useState(-0.5);
+  const [minOiRisePct, setMinOiRisePct] = useState(5.0);
+  const [stOiPollInterval, setStOiPollInterval] = useState(30);
+  const [maxWaitMinutes, setMaxWaitMinutes] = useState(45);
+  const [stOiEodTime, setStOiEodTime] = useState('15:15');
+  const [stOiCooldownMinutes, setStOiCooldownMinutes] = useState(5);
+  const [exitOnSignalFlip, setExitOnSignalFlip] = useState(true);
+  const [exitOnOptionStFlip, setExitOnOptionStFlip] = useState(true);
 
   const spreadTrendNoIndicators = meta.key === 'nifty_spread_trend' && !useEma && !useSupertrend;
 
@@ -196,6 +223,26 @@ function StrategyRowWide({ meta, state, onRefresh }: Props) {
         if (!exitOnSignalChange) args.push('--no-exit-on-signal-change');
         if (!useEma) args.push('--no-ema');
         if (!useSupertrend) args.push('--no-supertrend');
+      } else if (meta.key === 'nifty_st_oi_bearcall') {
+        args.push('--index-interval', indexInterval);
+        args.push('--index-st-period', String(indexStPeriod));
+        args.push('--index-st-multiplier', String(indexStMultiplier));
+        args.push('--option-interval', optionInterval);
+        args.push('--option-st-period', String(optionStPeriod));
+        args.push('--option-st-multiplier', String(optionStMultiplier));
+        args.push('--ce-offset', String(stOiCeOffset));
+        args.push('--spread-width', String(stOiSpreadWidth));
+        if (requireShortBuildup) {
+          args.push('--require-short-buildup');
+          args.push('--min-price-drop-pct', String(minPriceDropPct));
+          args.push('--min-oi-rise-pct', String(minOiRisePct));
+        }
+        args.push('--poll-interval', String(stOiPollInterval));
+        args.push('--max-wait-minutes', String(maxWaitMinutes));
+        args.push('--eod-time', stOiEodTime);
+        args.push('--cooldown-minutes', String(stOiCooldownMinutes));
+        if (!exitOnSignalFlip) args.push('--no-exit-on-signal-flip');
+        if (!exitOnOptionStFlip) args.push('--no-exit-on-option-st-flip');
       }
 
       const res = await fetch('/api/strategies', {
@@ -243,6 +290,7 @@ function StrategyRowWide({ meta, state, onRefresh }: Props) {
     MONITORING:   { dot: 'bg-sky-400',     text: 'text-sky-400',     badge: 'bg-sky-500/10 text-sky-400 border-sky-500/20' },
     BALANCING:    { dot: 'bg-sky-400',     text: 'text-sky-400',     badge: 'bg-sky-500/10 text-sky-400 border-sky-500/20' },
     SCANNING:     { dot: 'bg-indigo-400',  text: 'text-indigo-400',  badge: 'bg-indigo-500/10 text-indigo-400 border-indigo-500/20' },
+    WATCHING:     { dot: 'bg-violet-400',  text: 'text-violet-400',  badge: 'bg-violet-500/10 text-violet-400 border-violet-500/20' },
     INITIALIZING: { dot: 'bg-amber-400',   text: 'text-amber-400',   badge: 'bg-amber-500/10 text-amber-400 border-amber-500/20' },
   };
   const statusCfg = STATUS_MAP[state.status];
@@ -411,6 +459,59 @@ function StrategyRowWide({ meta, state, onRefresh }: Props) {
       );
     }
 
+    if (meta.key === 'nifty_st_oi_bearcall') {
+      return (
+        <div className="flex items-stretch divide-x divide-zinc-800/60">
+          <div className="px-3 flex flex-col justify-center shrink-0">
+            <div className={lbl}>Phase</div>
+            <div className={`font-mono font-bold text-xs leading-tight ${
+              state.phase === 'ENTERED' ? 'text-emerald-400' :
+              state.phase === 'WATCHING' ? 'text-violet-400' : 'text-zinc-500'
+            }`}>
+              {state.phase || 'IDLE'}
+            </div>
+            {state.spot != null && state.spot > 0 && (
+              <div className="text-[9px] text-zinc-500 font-mono">spot {state.spot.toFixed(1)}</div>
+            )}
+          </div>
+          <div className="px-3 flex flex-col justify-center min-w-[110px]">
+            {state.phase === 'ENTERED' ? (
+              <>
+                <div className={lbl}>Spread</div>
+                <div className="font-mono font-bold text-xs text-sky-400">S:{state.short_strike || '-'} · L:{state.long_strike || '-'}</div>
+                <div className="text-[9px] text-zinc-300 font-mono whitespace-nowrap">
+                  {state.short_ltp != null ? `₹${state.short_ltp.toFixed(1)}` : '—'} / {state.long_ltp != null ? `₹${state.long_ltp.toFixed(1)}` : '—'}
+                </div>
+              </>
+            ) : (
+              <>
+                <div className={lbl}>Candidate</div>
+                <div className="font-mono font-bold text-xs text-amber-400">{state.candidate_strike ? `${state.candidate_strike} CE` : '—'}</div>
+                <div className="text-[9px] text-zinc-300 font-mono whitespace-nowrap">
+                  idxST {state.index_st_dir === -1 ? 'BEAR' : state.index_st_dir === 1 ? 'BULL' : '—'} · optST {state.option_st_dir === -1 ? 'BEAR' : state.option_st_dir === 1 ? 'BULL' : '—'}
+                </div>
+              </>
+            )}
+          </div>
+          <div className="px-3 flex flex-col justify-center shrink-0">
+            <div className={lbl}>Short Buildup</div>
+            {state.require_short_buildup ? (
+              <>
+                <div className="font-mono font-bold text-xs text-zinc-200 leading-tight">
+                  {state.ce_price_change_pct != null ? `${state.ce_price_change_pct.toFixed(1)}%` : '—'} / {state.ce_oi_change_pct != null ? `+${state.ce_oi_change_pct.toFixed(1)}%` : '—'}
+                </div>
+                <div className="text-[9px] text-zinc-500 font-mono whitespace-nowrap">
+                  need ≤{state.min_price_drop_pct ?? -0.5}% / ≥{state.min_oi_rise_pct ?? 5.0}%
+                </div>
+              </>
+            ) : (
+              <div className="text-xs font-mono text-zinc-600">Disabled</div>
+            )}
+          </div>
+        </div>
+      );
+    }
+
     return (
       <div className="flex items-stretch divide-x divide-zinc-800/60">
         {state.spot != null && state.spot > 0 && (
@@ -517,7 +618,7 @@ function StrategyRowWide({ meta, state, onRefresh }: Props) {
           </div>
         )}
 
-        {meta.key !== 'nifty_spread_trend' && meta.key !== 'crudeoilm_supertrend' && meta.key !== 'crudeoilm_renko_sar' && (
+        {meta.key !== 'nifty_spread_trend' && meta.key !== 'crudeoilm_supertrend' && meta.key !== 'crudeoilm_renko_sar' && meta.key !== 'nifty_st_oi_bearcall' && (
           <div className={fieldCls}>
             <label className={lbl}>Start Time</label>
             <Input type="text" value={startTime} onChange={e => setStartTime(e.target.value)} placeholder="09:20" className={inputCls} style={{ width: 72 }} />
@@ -594,6 +695,72 @@ function StrategyRowWide({ meta, state, onRefresh }: Props) {
                 <input type="checkbox" id={`exit-sig-${meta.key}`} checked={exitOnSignalChange} onChange={e=>setExitOnSignalChange(e.target.checked)}
                   className="h-3.5 w-3.5 rounded border-zinc-800 bg-zinc-900 accent-emerald-500" />
                 <label htmlFor={`exit-sig-${meta.key}`} className="text-white font-semibold text-xs">Enabled</label>
+              </div>
+            </div>
+          </>
+        )}
+
+        {meta.key === 'nifty_st_oi_bearcall' && (
+          <>
+            <div className={fieldCls}>
+              <label className={lbl}>Index Timeframe</label>
+              <Select value={indexInterval} onValueChange={v => v && setIndexInterval(v)}>
+                <SelectTrigger className={inputCls} style={{ width: 90 }}><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="1">1 Min</SelectItem>
+                  <SelectItem value="3">3 Min</SelectItem>
+                  <SelectItem value="5">5 Min</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+            <div className={fieldCls}><label className={lbl}>Index ST Period</label><Input type="number" value={indexStPeriod} onChange={e => setIndexStPeriod(parseInt(e.target.value) || 10)} className={inputCls} style={{ width: 64 }} /></div>
+            <div className={fieldCls}><label className={lbl}>Index ST Multi</label><Input type="number" step="0.5" value={indexStMultiplier} onChange={e => setIndexStMultiplier(parseFloat(e.target.value) || 2.0)} className={inputCls} style={{ width: 64 }} /></div>
+            <div className={fieldCls}>
+              <label className={lbl}>Option Timeframe</label>
+              <Select value={optionInterval} onValueChange={v => v && setOptionInterval(v)}>
+                <SelectTrigger className={inputCls} style={{ width: 90 }}><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="1">1 Min</SelectItem>
+                  <SelectItem value="3">3 Min</SelectItem>
+                  <SelectItem value="5">5 Min</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+            <div className={fieldCls}><label className={lbl}>Option ST Period</label><Input type="number" value={optionStPeriod} onChange={e => setOptionStPeriod(parseInt(e.target.value) || 10)} className={inputCls} style={{ width: 64 }} /></div>
+            <div className={fieldCls}><label className={lbl}>Option ST Multi</label><Input type="number" step="0.5" value={optionStMultiplier} onChange={e => setOptionStMultiplier(parseFloat(e.target.value) || 2.0)} className={inputCls} style={{ width: 64 }} /></div>
+            <div className={fieldCls}><label className={lbl}>CE Offset</label><Input type="number" value={stOiCeOffset} onChange={e => setStOiCeOffset(parseInt(e.target.value) || 100)} className={inputCls} style={{ width: 72 }} /></div>
+            <div className={fieldCls}><label className={lbl}>Spread (pts)</label><Input type="number" value={stOiSpreadWidth} onChange={e => setStOiSpreadWidth(parseInt(e.target.value) || 100)} className={inputCls} style={{ width: 72 }} /></div>
+            <div className={fieldCls}>
+              <div className="flex items-center gap-2 h-5">
+                <input type="checkbox" id={`require-buildup-${meta.key}`} checked={requireShortBuildup} onChange={e => setRequireShortBuildup(e.target.checked)}
+                  className="h-3.5 w-3.5 rounded border-zinc-700 bg-zinc-900 accent-emerald-500" />
+                <label htmlFor={`require-buildup-${meta.key}`} className={lbl}>Require Buildup</label>
+              </div>
+            </div>
+            {requireShortBuildup && (
+              <>
+                <div className={fieldCls}><label className={lbl}>Min Price Drop %</label><Input type="number" step="0.1" value={minPriceDropPct} onChange={e => setMinPriceDropPct(parseFloat(e.target.value) || -0.5)} className={inputCls} style={{ width: 72 }} /></div>
+                <div className={fieldCls}><label className={lbl}>Min OI Rise %</label><Input type="number" step="0.5" value={minOiRisePct} onChange={e => setMinOiRisePct(parseFloat(e.target.value) || 5.0)} className={inputCls} style={{ width: 72 }} /></div>
+              </>
+            )}
+            <div className={fieldCls}><label className={lbl}>Poll Interval (s)</label><Input type="number" value={stOiPollInterval} onChange={e => setStOiPollInterval(parseInt(e.target.value) || 30)} className={inputCls} style={{ width: 64 }} /></div>
+            <div className={fieldCls}><label className={lbl}>Max Wait (min)</label><Input type="number" value={maxWaitMinutes} onChange={e => setMaxWaitMinutes(parseInt(e.target.value) || 45)} className={inputCls} style={{ width: 64 }} /></div>
+            <div className={fieldCls}><label className={lbl}>EOD Time</label><Input type="text" value={stOiEodTime} onChange={e => setStOiEodTime(e.target.value)} placeholder="15:15" className={inputCls} style={{ width: 72 }} /></div>
+            <div className={fieldCls}><label className={lbl}>Cooldown (min)</label><Input type="number" value={stOiCooldownMinutes} onChange={e => setStOiCooldownMinutes(parseInt(e.target.value) || 5)} className={inputCls} style={{ width: 64 }} /></div>
+            <div className={fieldCls}>
+              <label className={lbl}>Exit on Index ST</label>
+              <div className="flex items-center gap-2 h-7">
+                <input type="checkbox" id={`exit-idx-st-${meta.key}`} checked={exitOnSignalFlip} onChange={e => setExitOnSignalFlip(e.target.checked)}
+                  className="h-3.5 w-3.5 rounded border-zinc-800 bg-zinc-900 accent-emerald-500" />
+                <label htmlFor={`exit-idx-st-${meta.key}`} className="text-white font-semibold text-xs">Enabled</label>
+              </div>
+            </div>
+            <div className={fieldCls}>
+              <label className={lbl}>Exit on Option ST</label>
+              <div className="flex items-center gap-2 h-7">
+                <input type="checkbox" id={`exit-opt-st-${meta.key}`} checked={exitOnOptionStFlip} onChange={e => setExitOnOptionStFlip(e.target.checked)}
+                  className="h-3.5 w-3.5 rounded border-zinc-800 bg-zinc-900 accent-emerald-500" />
+                <label htmlFor={`exit-opt-st-${meta.key}`} className="text-white font-semibold text-xs">Enabled</label>
               </div>
             </div>
           </>

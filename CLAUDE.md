@@ -105,6 +105,7 @@ strategies/
   value_imbalance/          # Straddle, Strangle, Advanced Imbalance, and VWAP straddle strategies
   expiry/                   # 0DTE expiry-day straddle/strangle with leg SL and adjustment modes
   spread_trend/             # Trend-following Bear Call / Bull Put spread strategy (EMA20 + Supertrend)
+  st_oi_bearcall/           # Dual Supertrend (index + option) + OI short-buildup bear call spread only
   oi_directional/           # OI imbalance + PCR-driven naked PE/CE sell strategy
   crudeoil/                 # MCX CRUDEOILM Supertrend-following futures strategy
   Archives/                 # Retired/superseded strategies (kept for reference)
@@ -209,7 +210,7 @@ These are not obvious and have caused runtime errors in the past (see [GEMINI.md
 - Intraday auto-exit is hardcoded at **15:17 IST** across all strategies.
 - Straddle/strangle inversion guard: `CE strike > PE strike` is enforced at entry and after each adjustment; violation triggers an emergency exit + 5-minute pause + fresh cycle.
 - New strategies must use `templates/strategy_template.py` as the starting point and must call `save_strategy_state()` and `check_shutdown_trigger()` in the main loop to integrate with the dashboard.
-- Per-strategy trading logic lives in each group's `strategy.md` (`strategies/<group>/strategy.md`) — read it before modifying that strategy. One-line map: `value_imbalance/` premium mean-reversion straddles/strangles (VWAP variant); `expiry/` 0DTE straddle/strangle with per-leg SL + adjustment modes; `spread_trend/` EMA20+Supertrend credit spreads; `oi_directional/` OI-diff/PCR naked option sell; `crudeoil/` MCX futures (Supertrend trailing, and always-in Renko SAR).
+- Per-strategy trading logic lives in each group's `strategy.md` (`strategies/<group>/strategy.md`) — read it before modifying that strategy. One-line map: `value_imbalance/` premium mean-reversion straddles/strangles (VWAP variant); `expiry/` 0DTE straddle/strangle with per-leg SL + adjustment modes; `spread_trend/` EMA20+Supertrend credit spreads; `st_oi_bearcall/` bear-call-only entry gated by dual Supertrend (index 3-min + candidate option's own 3-min) plus OI short-buildup confirmation; `oi_directional/` OI-diff/PCR naked option sell; `crudeoil/` MCX futures (Supertrend trailing, and always-in Renko SAR).
 
 ## Environment
 
