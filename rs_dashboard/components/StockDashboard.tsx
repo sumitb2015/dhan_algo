@@ -17,6 +17,7 @@ import {
   DropdownMenu, DropdownMenuContent, DropdownMenuItem,
   DropdownMenuTrigger, DropdownMenuSeparator, DropdownMenuLabel
 } from '@/components/ui/dropdown-menu';
+import { useRefreshStatus } from '@/lib/useRefreshStatus';
 
 const AUTO_REFRESH_OPTIONS = [5, 15, 30] as const;
 type AutoRefreshInterval = typeof AUTO_REFRESH_OPTIONS[number] | null;
@@ -42,6 +43,10 @@ export default function StockDashboard() {
 
   const [istTime, setISTTime] = useState('');
   const [marketOpen, setMarketOpen] = useState(false);
+
+  const refreshStatus = useRefreshStatus();
+  const [syncing, setSyncing] = useState(false);
+  const wasRunningRef = useRef(false);
 
   useEffect(() => {
     const updateClock = () => {
@@ -114,7 +119,21 @@ export default function StockDashboard() {
     finally { setLoadingSummary(false); }
   }, []);
 
-  const handleRefresh = useCallback(() => {
+  const handleRefresh = useCallback(async () => {
+    // Trigger a real data sync (fetches today's quotes from Dhan), then refetch once it lands.
+    // If a sync is already running elsewhere, just fall through to a plain re-fetch of cached data.
+    try {
+      setSyncing(true);
+      const res = await fetch('/api/refresh', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ target: 'all' }),
+      });
+      if (res.status === 409) {
+        // Already running — the refreshStatus poll below will pick up completion.
+      }
+    } catch { /* network error — fall back to re-fetching cached data */ }
+
     fetchStocks();
     fetchSummary();
     if (autoRefresh && countdownRef.current) {
@@ -128,6 +147,19 @@ export default function StockDashboard() {
       }, 1000);
     }
   }, [fetchStocks, fetchSummary, autoRefresh]);
+
+  // When the background sync (triggered by the button above, or auto-sync-on-mount below)
+  // transitions from running -> done, refetch so the page picks up the freshly synced data.
+  useEffect(() => {
+    if (refreshStatus.running) {
+      wasRunningRef.current = true;
+    } else if (wasRunningRef.current) {
+      wasRunningRef.current = false;
+      setSyncing(false);
+      fetchStocks();
+      fetchSummary();
+    }
+  }, [refreshStatus.running, fetchStocks, fetchSummary]);
 
   // Auto-sync on mount: if CSV data is behind the last trading day, start refresh in background
   useEffect(() => {
@@ -272,7 +304,7 @@ export default function StockDashboard() {
                 onClick={handleRefresh}
                 render={<button className={cn(buttonVariants({ variant: 'outline', size: 'icon' }), 'border-zinc-800 bg-zinc-900/40 text-zinc-400 hover:text-white hover:border-zinc-700 rounded-xl h-8 w-8')} />}
               >
-                <RefreshCw className={`h-3.5 w-3.5 ${loadingStocks ? 'animate-spin text-emerald-400' : ''}`} />
+                <RefreshCw className={`h-3.5 w-3.5 ${(syncing || refreshStatus.running || loadingStocks) ? 'animate-spin text-emerald-400' : ''}`} />
               </TooltipTrigger>
               <TooltipContent>Refresh dashboard data</TooltipContent>
             </Tooltip>
