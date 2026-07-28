@@ -72,7 +72,6 @@ function StrategyRowWide({ meta, state, onRefresh }: Props) {
   const [declineTicks, setDeclineTicks] = useState(5);
   const [exitBuffer, setExitBuffer] = useState(10.0);
   const [maxPremiumDiff, setMaxPremiumDiff] = useState(15.0);
-  const [vwapWarmup, setVwapWarmup] = useState(60);
   const [vwapWarmupBars, setVwapWarmupBars] = useState(10);
   const [pcrThreshold, setPcrThreshold] = useState(1.5);
   const [exitPcrChange, setExitPcrChange] = useState(30);
@@ -151,13 +150,6 @@ function StrategyRowWide({ meta, state, onRefresh }: Props) {
         args.push('--entry-balance-threshold', String(entryBalanceThreshold));
         args.push('--trail-start-pct', String(trailStartPct));
         args.push('--trail-gap-pts', String(trailGapPts));
-      } else if (meta.key === 'nifty_tick_mean_straddle') {
-        args.push('--start-time', startTime);
-        args.push('--entry-band', String(entryBand));
-        args.push('--decline-ticks', String(declineTicks));
-        args.push('--exit-buffer', String(exitBuffer));
-        args.push('--max-premium-diff', String(maxPremiumDiff));
-        args.push('--vwap-warmup', String(vwapWarmup));
       } else if (meta.key === 'nifty_vwap_1min_straddle') {
         args.push('--start-time', startTime);
         args.push('--entry-band', String(entryBand));
@@ -670,18 +662,13 @@ function StrategyRowWide({ meta, state, onRefresh }: Props) {
           <div className={fieldCls}><label className={lbl}>Bal Threshold%</label><Input type="number" step="0.5" value={entryBalanceThreshold} onChange={e=>setEntryBalanceThreshold(parseFloat(e.target.value)||15.0)} className={inputCls} style={{width:80}}/></div>
         )}
 
-        {(meta.key === 'nifty_tick_mean_straddle' || meta.key === 'nifty_vwap_1min_straddle') && (
+        {meta.key === 'nifty_vwap_1min_straddle' && (
           <>
             <div className={fieldCls}><label className={lbl}>Entry Band</label><Input type="number" step="0.5" value={entryBand} onChange={e=>setEntryBand(parseFloat(e.target.value)||5.0)} className={inputCls} style={{width:72}}/></div>
             <div className={fieldCls}><label className={lbl}>Decline Ticks</label><Input type="number" value={declineTicks} onChange={e=>setDeclineTicks(parseInt(e.target.value)||5)} className={inputCls} style={{width:64}}/></div>
             <div className={fieldCls}><label className={lbl}>Exit Buffer</label><Input type="number" step="0.5" value={exitBuffer} onChange={e=>setExitBuffer(parseFloat(e.target.value)||10.0)} className={inputCls} style={{width:72}}/></div>
             <div className={fieldCls}><label className={lbl}>Max Prem Diff%</label><Input type="number" step="0.5" value={maxPremiumDiff} onChange={e=>setMaxPremiumDiff(parseFloat(e.target.value)||15.0)} className={inputCls} style={{width:80}}/></div>
-            {meta.key === 'nifty_tick_mean_straddle' && (
-              <div className={fieldCls}><label className={lbl}>Warmup (ticks)</label><Input type="number" value={vwapWarmup} onChange={e=>setVwapWarmup(parseInt(e.target.value)||60)} className={inputCls} style={{width:80}}/></div>
-            )}
-            {meta.key === 'nifty_vwap_1min_straddle' && (
-              <div className={fieldCls}><label className={lbl}>Warmup (bars)</label><Input type="number" value={vwapWarmupBars} onChange={e=>setVwapWarmupBars(parseInt(e.target.value)||10)} className={inputCls} style={{width:80}}/></div>
-            )}
+            <div className={fieldCls}><label className={lbl}>Warmup (bars)</label><Input type="number" value={vwapWarmupBars} onChange={e=>setVwapWarmupBars(parseInt(e.target.value)||10)} className={inputCls} style={{width:80}}/></div>
           </>
         )}
 

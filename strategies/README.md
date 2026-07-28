@@ -5,12 +5,11 @@ This folder contains all live trading strategies. Each sub-folder has a `strateg
 ```
 strategies/
 ├── value_imbalance/          # Short straddle / strangle strategies
-│   ├── strategy.md           # Covers all five strategies below
+│   ├── strategy.md           # Covers all four strategies below
 │   ├── nifty_advanced_imbalance.py        # 4-mode advanced strategy (winner roll, ratio roll, hedged, legacy)
 │   ├── nifty_value_imbalance_straddle.py  # Legacy ATM straddle with lot additions
 │   ├── nifty_value_imbalance_strangle.py  # Legacy OTM strangle with strike adjustments
-│   ├── nifty_vwap_1min_straddle.py        # 1-min VWAP mean-reversion short straddle (candle-based)
-│   └── nifty_tick_mean_straddle.py        # Tick running-mean mean-reversion short straddle (TWAP-by-tick)
+│   └── nifty_vwap_1min_straddle.py        # 1-min VWAP mean-reversion short straddle (candle-based)
 │
 ├── expiry/                   # 0DTE expiry-day strategies
 │   ├── strategy.md           # Full guide to the expiry strategy

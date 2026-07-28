@@ -139,7 +139,6 @@ function StrategyCard({ meta, state, onRefresh }: StrategyCardProps) {
   const [declineTicks, setDeclineTicks] = useState<number>(5);
   const [exitBuffer, setExitBuffer] = useState<number>(10.0);
   const [maxPremiumDiff, setMaxPremiumDiff] = useState<number>(15.0);
-  const [vwapWarmup, setVwapWarmup] = useState<number>(60);       // tick-based
   const [vwapWarmupBars, setVwapWarmupBars] = useState<number>(10); // candle-based
 
   // OI Directional
@@ -235,13 +234,6 @@ function StrategyCard({ meta, state, onRefresh }: StrategyCardProps) {
         args.push('--entry-balance-threshold', String(entryBalanceThreshold));
         args.push('--trail-start-pct', String(trailStartPct));
         args.push('--trail-gap-pts', String(trailGapPts));
-      } else if (meta.key === 'nifty_tick_mean_straddle') {
-        args.push('--start-time', startTime);
-        args.push('--entry-band', String(entryBand));
-        args.push('--decline-ticks', String(declineTicks));
-        args.push('--exit-buffer', String(exitBuffer));
-        args.push('--max-premium-diff', String(maxPremiumDiff));
-        args.push('--vwap-warmup', String(vwapWarmup));
       } else if (meta.key === 'nifty_vwap_1min_straddle') {
         args.push('--start-time', startTime);
         args.push('--entry-band', String(entryBand));
@@ -748,8 +740,8 @@ function StrategyCard({ meta, state, onRefresh }: StrategyCardProps) {
           </>
         )}
 
-        {/* VWAP shared params (both tick and candle variants) */}
-        {(meta.key === 'nifty_tick_mean_straddle' || meta.key === 'nifty_vwap_1min_straddle') && (
+        {/* VWAP shared params */}
+        {meta.key === 'nifty_vwap_1min_straddle' && (
           <>
             <div className={fieldCls}>
               <label className={lbl}>Entry Band (pts)</label>
@@ -767,18 +759,10 @@ function StrategyCard({ meta, state, onRefresh }: StrategyCardProps) {
               <label className={lbl}>Max Premium Diff (%)</label>
               <Input type="number" step="0.5" value={maxPremiumDiff} onChange={(e) => setMaxPremiumDiff(parseFloat(e.target.value) || 15.0)} className={inputCls} />
             </div>
-            {meta.key === 'nifty_tick_mean_straddle' && (
-              <div className={fieldCls}>
-                <label className={lbl}>Warmup (ticks)</label>
-                <Input type="number" value={vwapWarmup} onChange={(e) => setVwapWarmup(parseInt(e.target.value) || 60)} className={inputCls} />
-              </div>
-            )}
-            {meta.key === 'nifty_vwap_1min_straddle' && (
-              <div className={fieldCls}>
-                <label className={lbl}>VWAP Warmup (bars)</label>
-                <Input type="number" value={vwapWarmupBars} onChange={(e) => setVwapWarmupBars(parseInt(e.target.value) || 10)} className={inputCls} />
-              </div>
-            )}
+            <div className={fieldCls}>
+              <label className={lbl}>VWAP Warmup (bars)</label>
+              <Input type="number" value={vwapWarmupBars} onChange={(e) => setVwapWarmupBars(parseInt(e.target.value) || 10)} className={inputCls} />
+            </div>
           </>
         )}
 

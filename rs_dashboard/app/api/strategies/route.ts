@@ -22,10 +22,6 @@ const STRATEGIES_METADATA: Record<string, { name: string; path: string }> = {
     name: 'Nifty Value Imbalance Strangle',
     path: path.join(PROJECT_ROOT, 'strategies', 'value_imbalance', 'nifty_value_imbalance_strangle.py')
   },
-  nifty_tick_mean_straddle: {
-    name: 'Nifty Tick Mean Straddle',
-    path: path.join(PROJECT_ROOT, 'strategies', 'value_imbalance', 'nifty_tick_mean_straddle.py')
-  },
   nifty_vwap_1min_straddle: {
     name: 'Nifty VWAP 1-Min Straddle',
     path: path.join(PROJECT_ROOT, 'strategies', 'value_imbalance', 'nifty_vwap_1min_straddle.py')

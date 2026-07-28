@@ -13,7 +13,6 @@ const STRATEGY_KEYS = [
   'nifty_advanced_imbalance',
   'nifty_value_imbalance_straddle',
   'nifty_value_imbalance_strangle',
-  'nifty_tick_mean_straddle',
   'nifty_vwap_1min_straddle',
   'nifty_spread_trend',
   'nifty_oi_directional',
