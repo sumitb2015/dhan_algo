@@ -231,6 +231,37 @@ def find_earliest_bad_date(csv_path: str, window_days: int = 10) -> Optional[str
         return None
 
 
+def find_data_gap_start(csv_path: str, max_gap_days: int = 30) -> Optional[str]:
+    """Return the date immediately after the last row preceding the first
+    large (> max_gap_days) hole in an otherwise-current file, or None if no
+    such hole exists.
+
+    The normal incremental logic only ever looks at the file's *last* date —
+    if a wide historical repair fetch once silently returned empty (e.g. a
+    multi-year range exceeding the API's per-request limit, with no error
+    surfaced) the tail date can still look current while years of rows are
+    missing in the middle. That hole is invisible to last_date >= today
+    checks, so it never self-heals. Callers use this to force a repair
+    fetch starting right after the gap.
+    """
+    if not os.path.exists(csv_path):
+        return None
+    try:
+        df = pd.read_csv(csv_path, on_bad_lines='skip')
+        date_col = 'Datetime' if 'Datetime' in df.columns else df.columns[0]
+        dates = pd.to_datetime(df[date_col], errors='coerce').dropna().sort_values().reset_index(drop=True)
+        if len(dates) < 2:
+            return None
+        diffs = dates.diff()
+        gap_positions = diffs[diffs > pd.Timedelta(days=max_gap_days)].index
+        if len(gap_positions) == 0:
+            return None
+        last_good_date = dates.iloc[gap_positions[0] - 1]
+        return (last_good_date + pd.Timedelta(days=1)).strftime("%Y-%m-%d")
+    except Exception:
+        return None
+
+
 def strip_weekend_rows(df: pd.DataFrame) -> pd.DataFrame:
     """NSE never trades on weekends — drop any row that landed on one (e.g.
     from fetch_today_quotes.py running on a non-trading day)."""
@@ -590,6 +621,7 @@ def refresh_stocks(helper):
         csv_path = os.path.join(STOCKS_DIR, f"{symbol}_Daily_2Y.csv")
         last_date = get_last_date(csv_path)
         bad_date = find_earliest_bad_date(csv_path)
+        gap_date = find_data_gap_start(csv_path)
 
         # Already up to date?
         if last_date and last_date >= last_trading_day:
@@ -600,6 +632,10 @@ def refresh_stocks(helper):
             elif bad_date:
                 from_date = bad_date
                 write_status("stocks", f"  [{i}/{total}] {symbol}: degenerate row(s) from {bad_date} — repairing",
+                             current=i, total=total)
+            elif gap_date:
+                from_date = gap_date
+                write_status("stocks", f"  [{i}/{total}] {symbol}: multi-year gap from {gap_date} — repairing",
                              current=i, total=total)
             else:
                 skipped += 1
@@ -637,26 +673,42 @@ def refresh_stocks(helper):
             else:
                 segment = "NSE_EQ"
 
-            df_new = helper.get_historical_daily_data(
-                security_id=security_id,
-                exchange_segment=segment,
-                instrument_type=instr,
-                from_date=from_date,
-                to_date=to_date_api,
-            )
-            check_fatal(helper)
+            # Chunk by year (API limit) — a symbol that's fallen far behind (e.g. after a
+            # long outage) needs a multi-year span, and the daily API silently returns
+            # empty for ranges that exceed its per-request limit instead of erroring.
+            chunks = []
+            last_err = None
+            cur = datetime.strptime(from_date, "%Y-%m-%d")
+            end = datetime.strptime(to_date_api, "%Y-%m-%d")
+            while cur <= end:
+                chunk_end = min(cur + timedelta(days=365), end)
+                df_chunk = helper.get_historical_daily_data(
+                    security_id=security_id,
+                    exchange_segment=segment,
+                    instrument_type=instr,
+                    from_date=cur.strftime("%Y-%m-%d"),
+                    to_date=chunk_end.strftime("%Y-%m-%d"),
+                )
+                check_fatal(helper)
+                if not df_chunk.empty:
+                    chunks.append(normalize_historical_df(df_chunk))
+                elif helper.last_api_error:
+                    last_err = helper.last_api_error
+                cur = chunk_end + timedelta(days=1)
+                if cur <= end:
+                    time.sleep(0.35)
 
-            if df_new.empty:
-                if helper.last_api_error:
+            if not chunks:
+                if last_err:
                     write_status("stocks",
-                                 f"  [{i}/{total}] {symbol}: ✗ API error — {format_api_error(helper.last_api_error)}",
+                                 f"  [{i}/{total}] {symbol}: ✗ API error — {format_api_error(last_err)}",
                                  current=i, total=total)
                     failed += 1
                     consecutive_failures += 1
                     if consecutive_failures >= 20:
                         raise FatalAPIError(
                             f"Aborting stocks refresh: {consecutive_failures} consecutive API failures "
-                            f"(last: {format_api_error(helper.last_api_error)})")
+                            f"(last: {format_api_error(last_err)})")
                 else:
                     write_status("stocks", f"  [{i}/{total}] {symbol}: ✓ up to date (no new data from API)",
                                  current=i, total=total)
@@ -666,7 +718,7 @@ def refresh_stocks(helper):
 
             consecutive_failures = 0
 
-            new_df = normalize_historical_df(df_new)
+            new_df = pd.concat(chunks)
             new_df = new_df[~new_df.index.duplicated(keep="last")].sort_index()
             # Clip to last_trading_day to guard against partial today data if API is inclusive
             new_df = new_df[new_df.index <= pd.Timestamp(last_trading_day)]
