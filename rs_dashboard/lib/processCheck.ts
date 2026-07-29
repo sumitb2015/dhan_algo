@@ -35,3 +35,42 @@ export function isPidRunning(pid: number, force = false): boolean {
   cache.set(pid, { result, ts: Date.now() });
   return result;
 }
+
+/** Returns the process's start time (.NET ticks, as a string) or null if it can't be determined. */
+export function getPidStartTime(pid: number): string | null {
+  if (process.platform !== 'win32') return null;
+  try {
+    const out = execSync(
+      `powershell -NoProfile -Command "(Get-Process -Id ${pid} -ErrorAction Stop).StartTime.Ticks"`,
+      { encoding: 'utf8', stdio: ['pipe', 'pipe', 'ignore'], windowsHide: true }
+    );
+    const ticks = out.trim();
+    return ticks || null;
+  } catch {
+    return null;
+  }
+}
+
+const startTimeCache = new Map<string, { result: boolean; ts: number }>();
+
+/**
+ * Like isPidRunning, but also verifies the live process's start time matches
+ * expectedStartTime (from getPidStartTime() captured when the process was spawned).
+ * Windows recycles PIDs — without this check, a crashed/killed process whose PID gets
+ * reassigned to an unrelated python(w).exe would look "still running" forever, leaving
+ * a dashboard Stop button that writes a shutdown trigger nobody reads. If expectedStartTime
+ * is null/undefined (not recorded), falls back to plain PID+image-name matching.
+ */
+export function isPidRunningAt(pid: number, expectedStartTime?: string | null, force = false): boolean {
+  if (!expectedStartTime) return isPidRunning(pid, force);
+
+  const key = `${pid}:${expectedStartTime}`;
+  const hit = force ? undefined : startTimeCache.get(key);
+  if (hit && Date.now() - hit.ts < PID_CHECK_TTL) {
+    return hit.result;
+  }
+
+  const result = isPidRunning(pid, force) && getPidStartTime(pid) === expectedStartTime;
+  startTimeCache.set(key, { result, ts: Date.now() });
+  return result;
+}

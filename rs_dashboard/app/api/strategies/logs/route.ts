@@ -16,6 +16,7 @@ const STRATEGY_LOG_DIRS: Record<string, string> = {
   nifty_intraday_vwap_straddle:  'intraday_vwap',
   nifty_vwap_1min_straddle:      'vwap_1min',
   nifty_oi_directional:          'oi_directional',
+  nifty_vix_straddle:            'vix_straddle',
   crudeoilm_supertrend:          'crudeoil',
   crudeoilm_renko_sar:           'crudeoil_renko',
 };

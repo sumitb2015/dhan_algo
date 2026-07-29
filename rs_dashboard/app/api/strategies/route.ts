@@ -2,11 +2,32 @@ import { NextRequest, NextResponse } from 'next/server';
 import path from 'path';
 import fs from 'fs';
 import { execSync, spawn } from 'child_process';
-import { isPidRunning } from '@/lib/processCheck';
+import { isPidRunning, isPidRunningAt, getPidStartTime } from '@/lib/processCheck';
 
 const PROJECT_ROOT = path.resolve(process.cwd(), '..');
 const DEBUG_DIR = path.join(PROJECT_ROOT, 'debug');
 const PYTHON_EXE = path.join(PROJECT_ROOT, 'venv', 'Scripts', 'pythonw.exe');
+
+// Python's save_strategy_state() rewrites the whole <key>_state.json every cycle with only
+// the fields the strategy itself tracks — it has no notion of pid_start_time, so that field
+// can't live in the state file (it would be clobbered within a second of the process starting).
+// Kept in a side-channel file instead, written once at spawn time.
+function pidMetaPath(key: string): string {
+  return path.join(DEBUG_DIR, `${key}_pid.json`);
+}
+
+function readExpectedStartTime(key: string): string | null {
+  try {
+    const meta = JSON.parse(fs.readFileSync(pidMetaPath(key), 'utf8'));
+    return meta.startTime ?? null;
+  } catch {
+    return null;
+  }
+}
+
+function isStrategyRunning(pid: number, key: string): boolean {
+  return isPidRunningAt(pid, readExpectedStartTime(key));
+}
 
 // Metadata mapping strategy key to display names and absolute paths
 const STRATEGIES_METADATA: Record<string, { name: string; path: string }> = {
@@ -84,7 +105,7 @@ export async function GET() {
           const content = fs.readFileSync(stateFile, 'utf8');
           const data = JSON.parse(content);
           
-          if (data && data.pid && isPidRunning(data.pid)) {
+          if (data && data.pid && isStrategyRunning(data.pid, key)) {
             // Process is running, trust the file state
             state = data;
           } else {
@@ -136,7 +157,7 @@ export async function POST(request: NextRequest) {
         if (fs.existsSync(stateFile)) {
           try {
             const data = JSON.parse(fs.readFileSync(stateFile, 'utf8'));
-            isRunning = !!(data.pid && isPidRunning(data.pid));
+            isRunning = !!(data.pid && isStrategyRunning(data.pid, key));
           } catch {}
         }
         if (isRunning) {
@@ -161,7 +182,7 @@ export async function POST(request: NextRequest) {
       if (fs.existsSync(stateFile)) {
         try {
           const data = JSON.parse(fs.readFileSync(stateFile, 'utf8'));
-          if (data.pid && isPidRunning(data.pid)) {
+          if (data.pid && isStrategyRunning(data.pid, strategy)) {
             return NextResponse.json({ success: false, error: 'Strategy is already running' }, { status: 400 });
           }
         } catch (e) {}
@@ -185,6 +206,19 @@ export async function POST(request: NextRequest) {
       });
 
       child.unref();
+
+      // Record start time so isStrategyRunning() can detect Windows recycling this PID
+      // to an unrelated process after this one exits/crashes (see readExpectedStartTime).
+      if (child.pid) {
+        const startTime = getPidStartTime(child.pid);
+        if (startTime) {
+          try {
+            fs.writeFileSync(pidMetaPath(strategy), JSON.stringify({ pid: child.pid, startTime }));
+          } catch (writeErr) {
+            console.error('Failed to write pid meta file:', writeErr);
+          }
+        }
+      }
 
       // Write initial state to prevent UI flicker
       const initialState = {
@@ -226,7 +260,7 @@ export async function POST(request: NextRequest) {
       } catch {
         return NextResponse.json({ success: false, error: 'Could not read PID from state file' }, { status: 500 });
       }
-      if (!pid || !isPidRunning(pid)) {
+      if (!pid || !isStrategyRunning(pid, strategy)) {
         return NextResponse.json({ success: true, message: 'Process is not running' });
       }
       // /T kills the process tree (child processes too); /F forces termination
