@@ -94,6 +94,7 @@ function StrategyRowWide({ meta, state, onRefresh }: Props) {
   const [vixStPeriod, setVixStPeriod] = useState(10);
   const [vixStMultiplier, setVixStMultiplier] = useState(2.0);
   const [vixStInterval, setVixStInterval] = useState('3');
+  const [atmShiftBuffer, setAtmShiftBuffer] = useState(5.0);
   const [pcrThreshold, setPcrThreshold] = useState(1.5);
   const [exitPcrChange, setExitPcrChange] = useState(30);
   const [pollInterval, setPollInterval] = useState(60);
@@ -214,6 +215,7 @@ function StrategyRowWide({ meta, state, onRefresh }: Props) {
         args.push('--exit-buffer', String(vixExitBuffer));
         args.push('--max-premium-diff', String(maxPremiumDiff));
         args.push('--vwap-warmup-bars', String(vwapWarmupBars));
+        args.push('--atm-shift-buffer', String(atmShiftBuffer));
       } else if (meta.key === 'nifty_value_imbalance_strangle') {
         args.push('--max-lots', String(maxLots));
         args.push('--start-time', startTime);
@@ -950,6 +952,7 @@ function StrategyRowWide({ meta, state, onRefresh }: Props) {
             <div className={fieldCls}><FieldLabel text="Exit Buffer" tip="Points above VWAP that trigger exit (buy back both legs), in addition to the VIX Supertrend flip exit." /><Input type="number" step="0.5" value={vixExitBuffer} onChange={e=>setVixExitBuffer(parseFloat(e.target.value)||5.0)} className={inputCls} style={{width:72}}/></div>
             <div className={fieldCls}><FieldLabel text="Max Prem Diff%" tip="Max allowed % difference between CE and PE premiums for entry to be considered balanced." /><Input type="number" step="0.5" value={maxPremiumDiff} onChange={e=>setMaxPremiumDiff(parseFloat(e.target.value)||15.0)} className={inputCls} style={{width:80}}/></div>
             <div className={fieldCls}><FieldLabel text="Warmup (bars)" tip="Minimum completed 1-min bars required before VWAP is trusted for trade decisions." /><Input type="number" value={vwapWarmupBars} onChange={e=>setVwapWarmupBars(parseInt(e.target.value)||10)} className={inputCls} style={{width:80}}/></div>
+            <div className={fieldCls}><FieldLabel text="ATM Shift Buffer" tip="Points spot must move past a strike midpoint before re-centering ATM. Prevents rapid flip-flopping between two strikes when spot hovers near the midpoint." /><Input type="number" step="0.5" value={atmShiftBuffer} onChange={e=>setAtmShiftBuffer(parseFloat(e.target.value)||5.0)} className={inputCls} style={{width:72}}/></div>
           </>
         )}
 

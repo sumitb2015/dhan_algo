@@ -36,6 +36,8 @@ CLI args:
   --exit-buffer POINTS       Points above VWAP that trigger exit (default: 5)
   --max-premium-diff PCT     Max CE/PE premium difference % (default: 15)
   --vwap-warmup-bars N       Min completed 1-min bars before VWAP is trusted (default: 10)
+  --atm-shift-buffer PTS     Points spot must cross past a strike midpoint before re-centering
+                             ATM, to prevent flip-flopping when spot hovers near a midpoint (default: 5)
   --target-profit INR        Global profit target (default: 4000)
   --stop-loss INR            Global stop loss (default: 4000)
   --max-loss-per-trade INR   Hard stop-loss per cycle, independent of VWAP (default: 1500, 0=disabled)
@@ -121,6 +123,7 @@ class NiftyVixStraddle:
         max_trades_per_day: int = 15,
         cooldown_seconds: int = 90,
         max_spread_pct: float = 8.0,
+        atm_shift_buffer: float = 5.0,
     ):
         self.dry_run = dry_run
         self.lots = lots
@@ -146,6 +149,7 @@ class NiftyVixStraddle:
         self.max_trades_per_day = max_trades_per_day
         self.cooldown_seconds = cooldown_seconds
         self.max_spread_pct = max_spread_pct
+        self.atm_shift_buffer = atm_shift_buffer
 
         self.dhan = get_dhan_client()
         if not self.dhan:
@@ -295,6 +299,26 @@ class NiftyVixStraddle:
 
     def _atm(self, spot: float) -> int:
         return int(round(spot / 50) * 50)
+
+    def _atm_with_hysteresis(self, spot: float, current_atm: int) -> int:
+        """
+        Like _atm(), but sticky: once centered on a strike, only moves to a new one
+        once spot has crossed the strike midpoint by atm_shift_buffer points, not just
+        barely across it. Plain round(spot/50)*50 flips on every tick when spot sits
+        near a midpoint (e.g. 24225 between 24200/24250), causing rapid re-centering
+        that keeps wiping straddle_st_dir via _reset_indicators() before the Supertrend
+        ever accumulates enough candles to settle -- so entries never fire and API calls
+        (subscribe/unsubscribe, quotes) get spammed for no benefit.
+        """
+        candidate = self._atm(spot)
+        if candidate == current_atm:
+            return current_atm
+        midpoint = (current_atm + candidate) / 2
+        if candidate > current_atm and spot >= midpoint + self.atm_shift_buffer:
+            return candidate
+        if candidate < current_atm and spot <= midpoint - self.atm_shift_buffer:
+            return candidate
+        return current_atm
 
     def _unrealized_pnl(self, ce_ltp: float, pe_ltp: float) -> float:
         if not self.in_position:
@@ -790,6 +814,7 @@ class NiftyVixStraddle:
             f" | warmup={self.vwap_warmup_bars} 1-min bars"
             f" | max_loss_per_trade={self.max_loss_per_trade} | max_trades_per_day={self.max_trades_per_day}"
             f" | cooldown={self.cooldown_seconds}s | max_spread={self.max_spread_pct}%"
+            f" | atm_shift_buffer={self.atm_shift_buffer}pts"
         )
 
         while True:
@@ -864,7 +889,7 @@ class NiftyVixStraddle:
                 )
 
                 # ── ATM shift detection ───────────────────────────────────────
-                current_atm = self._atm(spot)
+                current_atm = self._atm_with_hysteresis(spot, last_atm)
                 if current_atm != last_atm:
                     if self.in_position:
                         if current_atm != pending_atm:
@@ -1073,6 +1098,10 @@ Examples:
                         help="Max CE/PE premium difference %% for entry (default: 15)")
     parser.add_argument("--vwap-warmup-bars", type=int, default=10, metavar="N",
                         help="Min completed 1-min bars before VWAP is trusted (default: 10 ~= 10 min)")
+    parser.add_argument("--atm-shift-buffer", type=float, default=5.0, metavar="PTS",
+                        help="Points spot must cross past a strike midpoint before re-centering "
+                             "ATM, to prevent rapid flip-flopping when spot hovers near a midpoint "
+                             "(default: 5)")
     parser.add_argument("--target-profit", type=str, default="4000", metavar="INR",
                         help="Global profit target in INR, or a percentage of entry premium collected "
                              "e.g. '20%%' (default: 4000)")
@@ -1107,6 +1136,7 @@ Examples:
         f" profit={target_val}{'%' if target_is_pct else ''} sl={stop_val}{'%' if stop_is_pct else ''}"
         f" max_loss_per_trade={args.max_loss_per_trade} max_trades_per_day={args.max_trades_per_day}"
         f" cooldown={args.cooldown_seconds}s max_spread={args.max_spread_pct}%"
+        f" atm_shift_buffer={args.atm_shift_buffer}pts"
     )
 
     try:
@@ -1131,6 +1161,7 @@ Examples:
             max_trades_per_day=args.max_trades_per_day,
             cooldown_seconds=args.cooldown_seconds,
             max_spread_pct=args.max_spread_pct,
+            atm_shift_buffer=args.atm_shift_buffer,
         )
     except Exception as init_err:
         logger.critical(f"Strategy initialisation failed: {init_err}", exc_info=True)
