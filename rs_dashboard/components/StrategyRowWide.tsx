@@ -78,6 +78,8 @@ function StrategyRowWide({ meta, state, onRefresh }: Props) {
   const [peOffset, setPeOffset] = useState(200);
   const [targetDelta, setTargetDelta] = useState(0.20);
   const [targetPremium, setTargetPremium] = useState(50.0);
+  const [dnTargetDelta, setDnTargetDelta] = useState(0.5);
+  const [dnThresholdLot, setDnThresholdLot] = useState(50.0);
   const [entryBalanceThreshold, setEntryBalanceThreshold] = useState(15.0);
   const [entryBand, setEntryBand] = useState(5.0);
   const [declineTicks, setDeclineTicks] = useState(5);
@@ -172,6 +174,12 @@ function StrategyRowWide({ meta, state, onRefresh }: Props) {
           else if (strikeSelection === 'premium') args.push('--premium', '--target-premium', String(targetPremium));
           else args.push('--ce-offset', String(ceOffset), '--pe-offset', String(peOffset));
         }
+        args.push('--trail-start-pct', String(trailStartPct));
+        args.push('--trail-gap-pts', String(trailGapPts));
+      } else if (meta.key === 'nifty_delta_neutral') {
+        args.push('--start-time', startTime);
+        args.push('--target-delta', String(dnTargetDelta));
+        args.push('--threshold-lot', String(dnThresholdLot));
         args.push('--trail-start-pct', String(trailStartPct));
         args.push('--trail-gap-pts', String(trailGapPts));
       } else if (meta.key === 'nifty_value_imbalance_straddle') {
@@ -572,7 +580,7 @@ function StrategyRowWide({ meta, state, onRefresh }: Props) {
           <div className={lbl}>Adj</div>
           <div className={val}>{state.adjustments ?? 0}</div>
           {state.max_lots != null && state.mode !== 'reentry_straddle' && <div className="text-[9px] text-zinc-300 font-mono">max {state.max_lots}L</div>}
-          {state.threshold_lot != null && state.mode === 'winner_roll_atm' && <div className="text-[9px] text-zinc-300 font-mono">thresh {state.threshold_lot}%</div>}
+          {state.threshold_lot != null && (state.mode === 'winner_roll_atm' || state.mode === 'delta_neutral_winner_roll') && <div className="text-[9px] text-zinc-300 font-mono">thresh {state.threshold_lot}%</div>}
         </div>
         {state.entry_combined_pts != null && state.entry_combined_pts > 0 && (
           <div className="px-3 flex flex-col justify-center shrink-0">
@@ -642,6 +650,19 @@ function StrategyRowWide({ meta, state, onRefresh }: Props) {
             <FieldLabel text="Threshold Lot %" tip="Base premium imbalance % (added to the post-entry/post-roll baseline offset) that triggers a winner-roll adjustment." />
             <Input type="number" value={thresholdLot} onChange={e => setThresholdLot(parseFloat(e.target.value) || 25.0)} min={1} step={0.5} className={inputCls} style={{ width: 64 }} />
           </div>
+        )}
+
+        {meta.key === 'nifty_delta_neutral' && (
+          <>
+            <div className={fieldCls}>
+              <FieldLabel text="Target Delta" tip="Target absolute delta used to pick CE and PE strikes independently; can produce a straddle, strangle, or inverted strangle depending on skew." />
+              <Input type="number" step="0.1" min={0.1} max={0.9} value={dnTargetDelta} onChange={e => setDnTargetDelta(Math.round((parseFloat(e.target.value) || 0.5) * 10) / 10)} className={inputCls} style={{ width: 72 }} />
+            </div>
+            <div className={fieldCls}>
+              <FieldLabel text="Threshold Lot %" tip="Premium imbalance % (added to the post-entry/post-roll baseline offset) that triggers closing the winning leg and matching its strike to the losing leg's premium." />
+              <Input type="number" value={dnThresholdLot} onChange={e => setDnThresholdLot(parseFloat(e.target.value) || 50.0)} min={1} step={0.5} className={inputCls} style={{ width: 64 }} />
+            </div>
+          </>
         )}
 
         {meta.key !== 'nifty_spread_trend' && meta.key !== 'crudeoilm_supertrend' && meta.key !== 'crudeoilm_renko_sar' && meta.key !== 'nifty_st_oi_bearcall' && (
@@ -947,7 +968,8 @@ function StrategyRowWide({ meta, state, onRefresh }: Props) {
         {/* Combined-premium trailing SL */}
         {(meta.key === 'nifty_advanced_imbalance' ||
           meta.key === 'nifty_value_imbalance_straddle' ||
-          meta.key === 'nifty_value_imbalance_strangle') && (
+          meta.key === 'nifty_value_imbalance_strangle' ||
+          meta.key === 'nifty_delta_neutral') && (
           <>
             <div className={fieldCls}>
               <FieldLabel text="Trail Start (%)" tip="Arms the trailing stop once profit reaches this % of entry combined premium." />

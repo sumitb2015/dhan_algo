@@ -8,6 +8,7 @@ const LOGS_ROOT = path.join(PROJECT_ROOT, 'debug', 'logs');
 // Maps strategy key → log subfolder name
 const STRATEGY_LOG_DIRS: Record<string, string> = {
   nifty_advanced_imbalance:      'advanced_imbalance',
+  nifty_delta_neutral:           'delta_neutral',
   nifty_spread_trend:            'spread_trend',
   nifty_value_imbalance_straddle:'straddle',
   nifty_value_imbalance_strangle:'strangle',

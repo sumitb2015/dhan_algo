@@ -11,6 +11,7 @@ const DHAN_POSITIONS = 'https://api.dhan.co/v2/positions';
 
 const STRATEGY_KEYS = [
   'nifty_advanced_imbalance',
+  'nifty_delta_neutral',
   'nifty_value_imbalance_straddle',
   'nifty_value_imbalance_strangle',
   'nifty_vwap_1min_straddle',

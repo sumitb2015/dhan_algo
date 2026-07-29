@@ -14,6 +14,10 @@ const STRATEGIES_METADATA: Record<string, { name: string; path: string }> = {
     name: 'Nifty Advanced Imbalance',
     path: path.join(PROJECT_ROOT, 'strategies', 'value_imbalance', 'nifty_advanced_imbalance.py')
   },
+  nifty_delta_neutral: {
+    name: 'Nifty Delta Neutral (0.5 Delta)',
+    path: path.join(PROJECT_ROOT, 'strategies', 'value_imbalance', 'nifty_delta_neutral.py')
+  },
   nifty_value_imbalance_straddle: {
     name: 'Nifty Value Imbalance Straddle',
     path: path.join(PROJECT_ROOT, 'strategies', 'value_imbalance', 'nifty_value_imbalance_straddle.py')

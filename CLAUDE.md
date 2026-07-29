@@ -102,7 +102,7 @@ lib/
   dhan_helper.py            # Core DhanHelper class — all strategies use this
   strategy_state_helper.py  # save_strategy_state() / check_shutdown_trigger()
 strategies/
-  value_imbalance/          # Straddle, Strangle, Advanced Imbalance, and VWAP straddle strategies
+  value_imbalance/          # Straddle, Strangle, Advanced Imbalance, VWAP straddle, and Delta Neutral strategies
   expiry/                   # 0DTE expiry-day straddle/strangle with leg SL and adjustment modes
   spread_trend/             # Trend-following Bear Call / Bull Put spread strategy (EMA20 + Supertrend)
   st_oi_bearcall/           # Dual Supertrend (index + option) + OI short-buildup bear call spread only
@@ -208,9 +208,9 @@ These are not obvious and have caused runtime errors in the past (see [GEMINI.md
 - All strategies start with `--live` disabled (dry run) by default — no real orders are placed without the flag.
 - After-hours development: symbol lookups and expiry resolution work via the cached master list; live quotes and order placement are unavailable.
 - Intraday auto-exit is hardcoded at **15:17 IST** across all strategies.
-- Straddle/strangle inversion guard: `CE strike > PE strike` is enforced at entry and after each adjustment; violation triggers an emergency exit + 5-minute pause + fresh cycle.
+- Straddle/strangle inversion guard: `CE strike > PE strike` is enforced at entry and after each adjustment; violation triggers an emergency exit + 5-minute pause + fresh cycle. **Exception**: `nifty_delta_neutral.py` deliberately does not enforce this — strikes are chosen purely by delta-proximity, so an inverted strangle (CE strike < PE strike) is a valid, expected outcome, not an error.
 - New strategies must use `templates/strategy_template.py` as the starting point and must call `save_strategy_state()` and `check_shutdown_trigger()` in the main loop to integrate with the dashboard.
-- Per-strategy trading logic lives in each group's `strategy.md` (`strategies/<group>/strategy.md`) — read it before modifying that strategy. One-line map: `value_imbalance/` premium mean-reversion straddles/strangles (VWAP variant); `expiry/` 0DTE straddle/strangle with per-leg SL + adjustment modes; `spread_trend/` EMA20+Supertrend credit spreads; `st_oi_bearcall/` bear-call-only entry gated by dual Supertrend (index 3-min + candidate option's own 3-min) plus OI short-buildup confirmation; `oi_directional/` OI-diff/PCR naked option sell; `crudeoil/` MCX futures (Supertrend trailing, and always-in Renko SAR).
+- Per-strategy trading logic lives in each group's `strategy.md` (`strategies/<group>/strategy.md`) — read it before modifying that strategy. One-line map: `value_imbalance/` premium mean-reversion straddles/strangles (VWAP variant, plus a delta-neutral 0.5-delta variant with no inversion guard and no entry-balance gate); `expiry/` 0DTE straddle/strangle with per-leg SL + adjustment modes; `spread_trend/` EMA20+Supertrend credit spreads; `st_oi_bearcall/` bear-call-only entry gated by dual Supertrend (index 3-min + candidate option's own 3-min) plus OI short-buildup confirmation; `oi_directional/` OI-diff/PCR naked option sell; `crudeoil/` MCX futures (Supertrend trailing, and always-in Renko SAR).
 
 ## Environment
 

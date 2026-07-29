@@ -5,6 +5,7 @@ This document covers all option selling strategies in `strategies/value_imbalanc
 2.  **Nifty Value-Imbalance Straddle** (`nifty_value_imbalance_straddle.py`)
 3.  **Nifty Value-Imbalance Strangle** (`nifty_value_imbalance_strangle.py`)
 4.  **Nifty 1-Min VWAP Straddle** (`nifty_vwap_1min_straddle.py`)
+5.  **Nifty Delta Neutral (0.5 Delta)** (`nifty_delta_neutral.py`)
 
 ---
 
@@ -526,4 +527,121 @@ venv\Scripts\python.exe strategies/value_imbalance/nifty_vwap_1min_straddle.py -
 # Custom risk targets, later start time
 venv\Scripts\python.exe strategies/value_imbalance/nifty_vwap_1min_straddle.py --live --lots 2 --target-profit 6000 --stop-loss 3000 --start-time 09:25
 ```
+
+---
+
+## 8. Nifty Delta Neutral (0.5 Delta) (`nifty_delta_neutral.py`)
+
+Sells whichever CE strike and whichever PE strike are individually closest to a target absolute delta (default **0.5**) — the two legs are chosen **independently**, purely by delta, with no requirement that they land on the same strike or that their premiums be balanced. When one leg decays far enough relative to the other, the cheaper (winning) leg is closed and rolled to a new strike whose premium matches the more expensive (losing) leg's value.
+
+This is a variant of `nifty_advanced_imbalance.py`'s `winner_roll_atm` adjustment mode, stripped down to a single always-on behavior with delta-only entry. Everything not specific to strike selection or the adjustment trigger (lots, global target/stop-loss, start time, trailing SL, dry-run/live, 15:17 auto-exit, dashboard state bridge) follows the same conventions as `nifty_advanced_imbalance.py`.
+
+### A. How This Differs From `winner_roll_atm` in `nifty_advanced_imbalance.py`
+
+| Aspect | `nifty_advanced_imbalance.py` (`winner_roll_atm`) | `nifty_delta_neutral.py` |
+| :--- | :--- | :--- |
+| **Strike selection** | ATM (straddle) or distance/premium/delta-based OTM (strangle), selected as a matched pair | CE and PE each independently closest to `--target-delta` |
+| **Resulting shape** | Straddle or (non-inverted) strangle only | Straddle, strangle, **or inverted strangle** (CE strike < PE strike) — shape is whatever the deltas produce |
+| **Inversion guard** | Strictly enforced: `CE strike > PE strike`, both at entry and after every roll; a violation triggers an emergency exit | **Not applied.** Because strike choice depends solely on delta, an inverted strangle is a valid, expected outcome, not an error |
+| **Entry gate** | Waits for CE/PE premiums to balance (`< 10%` straddle / `< 25%` strangle) before entering | **No balance gate.** Enters as soon as both legs report a valid LTP — CE/PE at the same delta routinely have very different premiums due to Nifty's put-call skew, so gating on balance could block entry indefinitely |
+| **Adjustment trigger** | `threshold_lot + entry_diff_pct` (a baseline offset captured at the balanced entry, recalculated after each roll) | **Flat `threshold_lot`** (default `50.0`, i.e. fires once `min(CE,PE)/max(CE,PE) < 50%`) — there's no balanced-entry baseline to offset against |
+| **Cycle-reset trigger** | Straddle: ATM shifts ≥100pts from initial. Strangle: spot breaches either strike's OTM boundary (near-zero buffer, since strikes are placed a real distance from spot) | **Spot drift ≥100pts from the entry spot.** A zero-buffer per-strike boundary doesn't work here — delta-selected strikes sit at/near ATM, so spot naturally oscillates right at the boundary from tick one |
+| **Max lots / lot scaling** | `--max-lots`, `--loser-ratio-lots`, `--leg-sl-pct`, `--mode` selector | None of these — lots are always the initial `--lots` value; there is exactly one adjustment behavior |
+
+### B. Trade Flow
+
+```mermaid
+flowchart TD
+    Init([Start Strategy]) --> DeltaSelect["Select CE & PE Strikes\n(independently closest to target delta)"]
+    DeltaSelect --> QuoteWait{Both legs have\na valid LTP?}
+    QuoteWait -- No --> QuoteWait
+    QuoteWait -- Yes --> PlaceEntry[Place Short CE & PE Orders]
+    PlaceEntry --> Monitoring[Monitor Active Position & P&L]
+
+    Monitoring --> DriftCheck{Spot drifted >= 100pts\nfrom entry spot?}
+    DriftCheck -- Yes --> CycleReset[Exit All + Wait 5m] --> DeltaSelect
+
+    DriftCheck -- No --> TrailCheck{Trailing SL armed\nand breached?}
+    TrailCheck -- Yes --> CycleReset
+
+    TrailCheck -- No --> TargetCheck{Profit Target or\nGlobal Stop Loss hit?}
+    TargetCheck -- Yes --> SquareOff[Square Off, Pause to Next Day]
+
+    TargetCheck -- No --> RatioCheck{"min(CE,PE) / max(CE,PE)\n< (100 - threshold_lot)%?"}
+    RatioCheck -- No --> Monitoring
+    RatioCheck -- Yes --> CloseWinner[Buy back the winning\n(cheaper) leg]
+    CloseWinner --> MatchStrike["Select new OTM strike on that side\nwhose premium ≈ losing leg's value"]
+    MatchStrike --> SellNew[Sell new leg at matched strike] --> Monitoring
+```
+
+### C. Mathematical Definitions
+
+*   **Delta Selection** (per side, independently):
+    $$\text{Strike}_{\text{CE}} = \underset{K}{\arg\min}\ \left| \left|\Delta_{\text{CE}}(K)\right| - \text{target\_delta} \right| \qquad \text{Strike}_{\text{PE}} = \underset{K}{\arg\min}\ \left| \left|\Delta_{\text{PE}}(K)\right| - \text{target\_delta} \right|$$
+*   **Imbalance Percentage (`diff_pct`)** — same formula as the other strategies in this file:
+    $$\text{diff\_pct} = \frac{|\text{CE\_val} - \text{PE\_val}|}{\max(\text{CE\_val}, \text{PE\_val})} \times 100$$
+*   **Adjustment Trigger** (flat, no baseline offset):
+    $$\text{diff\_pct} > \text{threshold\_lot} \iff \frac{\min(\text{CE\_val}, \text{PE\_val})}{\max(\text{CE\_val}, \text{PE\_val})} < \left(1 - \frac{\text{threshold\_lot}}{100}\right)$$
+    With the default `--threshold-lot 50.0`, this is exactly `min(CE,PE)/max(CE,PE) < 50%`.
+*   **New Strike Selection on Roll** — same value-matching search as `winner_roll_atm`'s `find_rebalance_strike`:
+    $$\text{New Strike} = \underset{K \text{ OTM}}{\arg\min}\ \left| \text{Price}(K) - \frac{\text{Loser\_Value}}{\text{Winner\_Lots}} \right|$$
+*   **Spot Drift Cycle-Reset**:
+    $$|\text{Spot}_{\text{current}} - \text{Spot}_{\text{entry}}| \geq 100 \text{ points}$$
+
+### D. CLI Parameter Reference
+
+| CLI Flag | Default | Description |
+| :--- | :--- | :--- |
+| **`--live`** | *Flag* | Enable real order placement (defaults to dry-run mode). |
+| **`--lots N`** | `1` | Lots per leg. Fixed for the whole session — this strategy never scales lots up. |
+| **`--target-delta D`** | `0.5` | Target absolute delta for both CE and PE strike selection, applied independently. Must be strictly between `0` and `1`. |
+| **`--threshold-lot PCT`** | `50.0` | Premium imbalance % that triggers a winner-roll adjustment — fires when `diff_pct > threshold_lot`, equivalently `min(CE,PE)/max(CE,PE) < (100 - threshold_lot)%`. |
+| **`--target-profit AMT`** | `4000` | Global daily profit target in ₹, or a percentage of entry premium (e.g. `20%`). |
+| **`--stop-loss AMT`** | `4000` | Global daily stop loss in ₹, or a percentage of entry premium (e.g. `20%`). |
+| **`--start-time TIME`** | `09:20` | Market start monitoring time (HH:MM IST). |
+| **`--trail-start-pct PCT`** | `5.0` | Arms the trailing stop-loss once profit reaches this % of the entry combined premium. |
+| **`--trail-gap-pts PTS`** | `15.0` | Once armed, exits if the combined premium rises this many points above its best (lowest) level since arming. |
+
+### E. Execution Examples
+
+```powershell
+# Dry run, default 0.5 delta on both legs, 1 lot
+venv\Scripts\python.exe strategies/value_imbalance/nifty_delta_neutral.py
+
+# Dry run, tighter adjustment trigger (fires at min/max < 60% instead of 50%)
+venv\Scripts\python.exe strategies/value_imbalance/nifty_delta_neutral.py --threshold-lot 40
+
+# Dry run, wider deltas (further OTM, cheaper premiums, less gamma risk)
+venv\Scripts\python.exe strategies/value_imbalance/nifty_delta_neutral.py --target-delta 0.35
+
+# Live, 2 lots, defaults
+venv\Scripts\python.exe strategies/value_imbalance/nifty_delta_neutral.py --live --lots 2
+
+# Live, custom delta, custom risk targets, later start time
+venv\Scripts\python.exe strategies/value_imbalance/nifty_delta_neutral.py --live --lots 1 --target-delta 0.4 --target-profit 5000 --stop-loss 3000 --start-time 09:25
+```
+
+### F. Worked Scenarios
+
+#### Scenario A: Skewed Entry (No Balance Gate)
+
+1.  Nifty spot is `24,188`. The option chain shows `24250 CE` at delta `0.48` and `24250 PE` at delta `-0.52` — both closest to the `0.5` target on the *same* strike, so the position is a straddle: `24250 CE` / `24250 PE`.
+2.  `24250 CE` quotes at ₹115, `24250 PE` quotes at ₹158 — a `27%` gap driven by put-call skew, not noise.
+3.  Unlike `nifty_advanced_imbalance.py`, there is no balance-wait gate here: as soon as both legs report a valid LTP, the strategy sells 1 lot `24250 CE` @ ₹115 and 1 lot `24250 PE` @ ₹158. `entry_combined_pts = 273`.
+
+#### Scenario B: Winner-Roll Adjustment (Flat 50% Trigger)
+
+1.  Entry: `24250 CE` @ ₹115, `24250 PE` @ ₹158 (1 lot each, `--threshold-lot 50` default).
+2.  Spot drifts down. `24250 CE` decays to ₹40 (Value: ₹40); `24250 PE` rises to ₹210 (Value: ₹210).
+3.  Ratio check: `min(40, 210) / max(40, 210) = 19% < 50%` — equivalently `diff_pct = (210-40)/210 × 100 = 81% > 50%` — triggers.
+4.  The strategy buys to close `24250 CE` @ ₹40 (Realized: `115 − 40 = +75` pts), then searches OTM CE strikes for one priced closest to `₹210` (the PE leg's current value) — e.g. `24100 CE` @ ₹205.
+5.  Sells 1 lot `24100 CE` @ ₹205. New position: `24100 CE` (1 lot @ ₹205) & `24250 PE` (1 lot @ ₹158, untouched). Note the position is now an **inverted strangle** (CE strike `24100` < PE strike `24250`) — this is accepted, not blocked.
+
+#### Scenario C: Spot Drift Cycle-Reset
+
+1.  Entry spot was `24,188` when `24250 CE` / `24250 PE` were sold.
+2.  A sharp move pushes Nifty to `24,300` — a `112`-point drift from the entry spot, past the `100`-point threshold.
+3.  The strategy squares off both legs (`"Spot Shift!"`), pauses 5 minutes, and restarts: fetches a fresh option chain, re-selects CE/PE strikes closest to `0.5` delta at the new spot, and re-enters.
+
+---
 

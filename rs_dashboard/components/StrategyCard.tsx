@@ -152,6 +152,10 @@ function StrategyCard({ meta, state, onRefresh }: StrategyCardProps) {
   const [targetDelta, setTargetDelta] = useState<number>(0.20);
   const [targetPremium, setTargetPremium] = useState<number>(50.0);
 
+  // Delta Neutral
+  const [dnTargetDelta, setDnTargetDelta] = useState<number>(0.5);
+  const [dnThresholdLot, setDnThresholdLot] = useState<number>(50.0);
+
   // Straddle
   const [entryBalanceThreshold, setEntryBalanceThreshold] = useState<number>(15.0);
 
@@ -267,6 +271,12 @@ function StrategyCard({ meta, state, onRefresh }: StrategyCardProps) {
           else if (strikeSelection === 'premium') args.push('--premium', '--target-premium', String(targetPremium));
           else args.push('--ce-offset', String(ceOffset), '--pe-offset', String(peOffset));
         }
+        args.push('--trail-start-pct', String(trailStartPct));
+        args.push('--trail-gap-pts', String(trailGapPts));
+      } else if (meta.key === 'nifty_delta_neutral') {
+        args.push('--start-time', startTime);
+        args.push('--target-delta', String(dnTargetDelta));
+        args.push('--threshold-lot', String(dnThresholdLot));
         args.push('--trail-start-pct', String(trailStartPct));
         args.push('--trail-gap-pts', String(trailGapPts));
       } else if (meta.key === 'nifty_value_imbalance_straddle') {
@@ -943,10 +953,11 @@ function StrategyCard({ meta, state, onRefresh }: StrategyCardProps) {
           </div>
         )}
 
-        {/* Combined-premium trailing SL — straddle, strangle, and advanced imbalance */}
+        {/* Combined-premium trailing SL — straddle, strangle, advanced imbalance, and delta neutral */}
         {(meta.key === 'nifty_advanced_imbalance' ||
           meta.key === 'nifty_value_imbalance_straddle' ||
-          meta.key === 'nifty_value_imbalance_strangle') && (
+          meta.key === 'nifty_value_imbalance_strangle' ||
+          meta.key === 'nifty_delta_neutral') && (
           <>
             <div className={fieldCls}>
               <FieldLabel text="Trail Start (%)" tip="Arms the trailing stop once profit reaches this % of entry combined premium." />
@@ -1030,6 +1041,19 @@ function StrategyCard({ meta, state, onRefresh }: StrategyCardProps) {
                 </Select>
               </div>
             )}
+          </>
+        )}
+
+        {meta.key === 'nifty_delta_neutral' && (
+          <>
+            <div className={fieldCls}>
+              <FieldLabel text="Target Delta" tip="Target absolute delta used to pick CE and PE strikes independently; can produce a straddle, strangle, or inverted strangle depending on skew." />
+              <Input type="number" step="0.1" min={0.1} max={0.9} value={dnTargetDelta} onChange={(e) => setDnTargetDelta(Math.round((parseFloat(e.target.value) || 0.5) * 10) / 10)} className={inputCls} />
+            </div>
+            <div className={fieldCls}>
+              <FieldLabel text="Threshold Lot %" tip="Premium imbalance % (added to the post-entry/post-roll baseline offset) that triggers closing the winning leg and matching its strike to the losing leg's premium." />
+              <Input type="number" value={dnThresholdLot} onChange={(e) => setDnThresholdLot(parseFloat(e.target.value) || 50.0)} min={1} step={0.5} className={inputCls} />
+            </div>
           </>
         )}
 
@@ -1437,7 +1461,7 @@ function StrategyCard({ meta, state, onRefresh }: StrategyCardProps) {
                     {state.max_lots != null && (
                       <span className="text-[10px] text-zinc-300 font-mono whitespace-nowrap">max {state.max_lots}L</span>
                     )}
-                    {state.threshold_lot != null && state.mode === 'winner_roll_atm' && (
+                    {state.threshold_lot != null && (state.mode === 'winner_roll_atm' || state.mode === 'delta_neutral_winner_roll') && (
                       <span className="text-[10px] text-zinc-300 font-mono whitespace-nowrap">thresh {state.threshold_lot}%</span>
                     )}
                   </div>
