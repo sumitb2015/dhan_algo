@@ -536,10 +536,21 @@ class NiftyVixStraddle:
             logger.warning("CE/PE candles could not be aligned on timestamp; indicators not updated.")
             return False
 
-        merged["combo_o"] = merged["o_ce"] + merged["o_pe"]
-        merged["combo_h"] = merged["h_ce"] + merged["h_pe"]
-        merged["combo_l"] = merged["l_ce"] + merged["l_pe"]
+        # Built from close prices only, not per-leg High/Low: CE and PE move in opposite
+        # directions within a bar (CE's high coincides with PE's low, and vice versa), so
+        # h_ce + h_pe sums two values that never coexisted as an actual combined premium --
+        # it's a synthetic maximum, always inflated well above the real straddle price, and
+        # symmetrically combo_l is deflated. That inflated range fed the ATR/Supertrend a
+        # bar-range many times wider than the straddle's real volatility, producing a band so
+        # wide it (almost) never got crossed -- straddle_st_dir was observed stuck at 1.0 for
+        # an entire session despite the close trending down for hours. Using close-only bars
+        # (Open=High=Low=Close) means the resampled High/Low become the actual max/min of real
+        # observed combined closes in that window -- the standard fix for synthetic combo/spread
+        # instruments without true synchronized tick data.
         merged["combo_c"] = merged["c_ce"] + merged["c_pe"]
+        merged["combo_o"] = merged["combo_c"]
+        merged["combo_h"] = merged["combo_c"]
+        merged["combo_l"] = merged["combo_c"]
 
         # Typical price of combined straddle premium per bar
         merged["tp"] = (merged["combo_h"] + merged["combo_l"] + merged["combo_c"]) / 3
