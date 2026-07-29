@@ -179,6 +179,8 @@ export default function PortfolioTradesDashboard() {
 
   const { syncing, syncError, startSync } = useTradeSync(fetchData);
 
+  useEffect(() => { startSync(); }, [startSync]);
+
   const filteredTrades = useMemo(() => {
     let trades = data?.trades ?? [];
     if (segmentFilter !== 'ALL') trades = trades.filter(t => t.segment === segmentFilter);

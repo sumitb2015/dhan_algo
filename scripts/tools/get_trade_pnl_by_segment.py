@@ -91,6 +91,41 @@ def fetch_all_trades(dhan, from_date: str, to_date: str) -> list:
     return rows
 
 
+def fetch_today_trade_book(dhan) -> list:
+    """get_trade_history (used by fetch_all_trades) reflects settled/contract-note trades and lags
+    same-day fills — Dhan typically doesn't surface today's trades there until EOD processing. get_trade_book
+    (no date range) has no such lag: it returns today's executed trades live. Overlaying it is what makes
+    today's trades show up in the dashboard immediately instead of only after next day's sync."""
+    try:
+        res = dhan.get_trade_book()
+        data = res.get('data', []) if isinstance(res, dict) else []
+        if not isinstance(data, list):
+            return []
+        # customSymbol is null on trade-book rows (only populated once contract notes settle) —
+        # fall back to tradingSymbol so today's trades don't show a blank symbol in the log.
+        for t in data:
+            if not t.get('customSymbol'):
+                t['customSymbol'] = t.get('tradingSymbol', '')
+        return data
+    except Exception as e:
+        print(f"[get_trade_pnl_by_segment] trade book fetch failed: {e}", file=sys.stderr)
+        return []
+
+
+def merge_live_trades(existing: list, live: list) -> list:
+    """Append live trade-book rows not already present in existing (deduped by exchangeTradeId)."""
+    seen = {t.get('exchangeTradeId') for t in existing if t.get('exchangeTradeId')}
+    merged = list(existing)
+    for t in live:
+        tid = t.get('exchangeTradeId')
+        if tid and tid in seen:
+            continue
+        merged.append(t)
+        if tid:
+            seen.add(tid)
+    return merged
+
+
 def trade_charges(t: dict) -> float:
     return sum(float(t.get(f) or 0) for f in CHARGE_FIELDS)
 
@@ -387,6 +422,14 @@ def main():
         all_trades = fetch_all_trades(dhan, equity_from_date, today)
         print(f"[get_trade_pnl_by_segment] {len(all_trades)} trades fetched", file=sys.stderr)
         annotate_trades(all_trades)
+
+    live_today = fetch_today_trade_book(dhan)
+    if live_today:
+        annotate_trades(live_today)
+        before = len(all_trades)
+        all_trades = merge_live_trades(all_trades, live_today)
+        print(f"[get_trade_pnl_by_segment] {len(live_today)} live trade-book rows fetched, "
+              f"{len(all_trades) - before} new today-trades merged in", file=sys.stderr)
 
     all_trades.sort(key=lambda t: t.get('exchangeTime') or '')
     windowed_trades = [t for t in all_trades if (t.get('exchangeTime') or '')[:10] >= from_date]
