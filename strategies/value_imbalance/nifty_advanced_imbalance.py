@@ -148,6 +148,7 @@ class NiftyAdvancedImbalance:
             "entry_type": self.entry_type,
             "lots": self.initial_lots,
             "max_lots": self.max_lots,
+            "threshold_lot": self.threshold_lot,
             "loser_ratio_lots": self.loser_ratio_lots,
             "ce_strike": self.ce_strike,
             "pe_strike": self.pe_strike,
@@ -1345,6 +1346,9 @@ Examples:
                         help="Initial lots per leg (default: 1)")
     parser.add_argument("--max-lots", type=int, default=4, metavar="N",
                         help="Maximum lots per leg before triggering a strike shift (default: 4)")
+    parser.add_argument("--threshold-lot", type=float, default=25.0, metavar="PCT",
+                        help="Base premium imbalance %% (added to entry_diff_pct) that triggers an "
+                             "adjustment while below --max-lots (default: 25.0)")
 
     parser.add_argument("--target-profit", type=str, default="4000", metavar="AMT",
                         help="Global profit target in INR, or a percentage of entry premium collected "
@@ -1453,6 +1457,8 @@ Examples:
         _errors.append(f"--lots must be >= 1, got {args.lots}.")
     if args.max_lots < 1:
         _errors.append(f"--max-lots must be >= 1, got {args.max_lots}.")
+    if args.threshold_lot <= 0:
+        _errors.append(f"--threshold-lot must be > 0, got {args.threshold_lot}.")
     if args.lots > args.max_lots:
         _errors.append(
             f"--lots {args.lots} exceeds --max-lots ({args.max_lots}).\n"
@@ -1508,7 +1514,7 @@ Examples:
     stop_label = f"-{stop_loss_val:.0f}%" if stop_is_pct else f"-INR {stop_loss_val:.0f}"
     logger.info(
         f"Config -> Mode: {mode_label} | Sizing: {args.lots}L | Start Time: {args.start_time} | Entry Type: {args.entry_type} ({selection_label}) | "
-        f"Adjustment Mode: {args.mode} (Loser Ratio Lots: {args.loser_ratio_lots}) | Profit Target: {target_label} | Stop Loss: {stop_label}"
+        f"Adjustment Mode: {args.mode} (Loser Ratio Lots: {args.loser_ratio_lots}, Threshold Lot: {args.threshold_lot}%) | Profit Target: {target_label} | Stop Loss: {stop_label}"
     )
 
     strat = NiftyAdvancedImbalance(
@@ -1516,6 +1522,7 @@ Examples:
         dry_run=not args.live,
         initial_lots=args.lots,
         max_lots=args.max_lots,
+        threshold_lot=args.threshold_lot,
         profit_target=target_val,
         profit_target_is_pct=target_is_pct,
         stop_loss=stop_loss_val,

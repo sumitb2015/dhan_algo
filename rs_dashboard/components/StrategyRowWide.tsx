@@ -15,7 +15,7 @@ interface StrategyMeta { key: string; name: string }
 
 interface StrategyState {
   strategy: string; status: string; pid?: number; dry_run?: boolean;
-  lots?: number; max_lots?: number; loser_ratio_lots?: number;
+  lots?: number; max_lots?: number; threshold_lot?: number; loser_ratio_lots?: number;
   ce_strike?: number | null; pe_strike?: number | null;
   ce_lots?: number; pe_lots?: number; ce_ltp?: number; pe_ltp?: number;
   ce_avg_price?: number; pe_avg_price?: number;
@@ -71,6 +71,7 @@ function StrategyRowWide({ meta, state, onRefresh }: Props) {
   const [maxLots, setMaxLots] = useState(4);
   const [mode, setMode] = useState('winner_roll_atm');
   const [loserRatioLots, setLoserRatioLots] = useState(1);
+  const [thresholdLot, setThresholdLot] = useState(25.0);
   const [entryType, setEntryType] = useState('strangle');
   const [strikeSelection, setStrikeSelection] = useState('distance');
   const [ceOffset, setCeOffset] = useState(200);
@@ -162,6 +163,7 @@ function StrategyRowWide({ meta, state, onRefresh }: Props) {
         const effectiveEntryType = mode === 'reentry_straddle' ? 'straddle' : entryType;
         args.push('--mode', mode, '--entry-type', effectiveEntryType, '--start-time', startTime);
         if (mode === 'loser_ratio_roll') args.push('--loser-ratio-lots', String(loserRatioLots));
+        if (mode === 'winner_roll_atm') args.push('--threshold-lot', String(thresholdLot));
         if (mode === 'reentry_straddle') {
           args.push('--leg-sl-pct', String(legSlPct));
         }
@@ -570,6 +572,7 @@ function StrategyRowWide({ meta, state, onRefresh }: Props) {
           <div className={lbl}>Adj</div>
           <div className={val}>{state.adjustments ?? 0}</div>
           {state.max_lots != null && state.mode !== 'reentry_straddle' && <div className="text-[9px] text-zinc-300 font-mono">max {state.max_lots}L</div>}
+          {state.threshold_lot != null && state.mode === 'winner_roll_atm' && <div className="text-[9px] text-zinc-300 font-mono">thresh {state.threshold_lot}%</div>}
         </div>
         {state.entry_combined_pts != null && state.entry_combined_pts > 0 && (
           <div className="px-3 flex flex-col justify-center shrink-0">
@@ -631,6 +634,13 @@ function StrategyRowWide({ meta, state, onRefresh }: Props) {
           <div className={fieldCls}>
             <FieldLabel text="Max Lots" tip="Maximum lots per leg reached via lot averaging/rolling before a strike shift is triggered." />
             <Input type="number" value={maxLots} onChange={e => setMaxLots(parseInt(e.target.value) || 4)} min={1} max={20} className={inputCls} style={{ width: 64 }} />
+          </div>
+        )}
+
+        {meta.key === 'nifty_advanced_imbalance' && mode === 'winner_roll_atm' && (
+          <div className={fieldCls}>
+            <FieldLabel text="Threshold Lot %" tip="Base premium imbalance % (added to the post-entry/post-roll baseline offset) that triggers a winner-roll adjustment." />
+            <Input type="number" value={thresholdLot} onChange={e => setThresholdLot(parseFloat(e.target.value) || 25.0)} min={1} step={0.5} className={inputCls} style={{ width: 64 }} />
           </div>
         )}
 

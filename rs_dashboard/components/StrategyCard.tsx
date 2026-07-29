@@ -23,6 +23,7 @@ interface StrategyState {
   dry_run?: boolean;
   lots?: number;
   max_lots?: number;
+  threshold_lot?: number;
   loser_ratio_lots?: number;
   ce_strike?: number | null;
   pe_strike?: number | null;
@@ -143,6 +144,7 @@ function StrategyCard({ meta, state, onRefresh }: StrategyCardProps) {
   const [maxLots, setMaxLots] = useState<number>(4);
   const [mode, setMode] = useState<string>('winner_roll_atm');
   const [loserRatioLots, setLoserRatioLots] = useState<number>(1);
+  const [thresholdLot, setThresholdLot] = useState<number>(25.0);
   const [entryType, setEntryType] = useState<string>('strangle');
   const [strikeSelection, setStrikeSelection] = useState<string>('distance');
   const [ceOffset, setCeOffset] = useState<number>(200);
@@ -255,6 +257,7 @@ function StrategyCard({ meta, state, onRefresh }: StrategyCardProps) {
         const effectiveEntryType = mode === 'reentry_straddle' ? 'straddle' : entryType;
         args.push('--mode', mode, '--entry-type', effectiveEntryType, '--start-time', startTime);
         if (mode === 'loser_ratio_roll') args.push('--loser-ratio-lots', String(loserRatioLots));
+        if (mode === 'winner_roll_atm') args.push('--threshold-lot', String(thresholdLot));
         if (mode === 'reentry_straddle') {
           args.push('--trail-combined-buffer', String(trailCombinedBuffer));
           args.push('--leg-sl-pct', String(legSlPct));
@@ -495,6 +498,13 @@ function StrategyCard({ meta, state, onRefresh }: StrategyCardProps) {
           <div className={fieldCls}>
             <FieldLabel text="Max Lots" tip="Maximum lots per leg reached via lot averaging/rolling before a strike shift is triggered." />
             <Input type="number" value={maxLots} onChange={(e) => setMaxLots(parseInt(e.target.value) || 4)} min={1} max={20} className={inputCls} />
+          </div>
+        )}
+
+        {meta.key === 'nifty_advanced_imbalance' && mode === 'winner_roll_atm' && (
+          <div className={fieldCls}>
+            <FieldLabel text="Threshold Lot %" tip="Base premium imbalance % (added to the post-entry/post-roll baseline offset) that triggers a winner-roll adjustment." />
+            <Input type="number" value={thresholdLot} onChange={(e) => setThresholdLot(parseFloat(e.target.value) || 25.0)} min={1} step={0.5} className={inputCls} />
           </div>
         )}
 
@@ -1426,6 +1436,9 @@ function StrategyCard({ meta, state, onRefresh }: StrategyCardProps) {
                     <span className="font-mono font-bold text-zinc-300">{state.adjustments ?? 0}</span>
                     {state.max_lots != null && (
                       <span className="text-[10px] text-zinc-300 font-mono whitespace-nowrap">max {state.max_lots}L</span>
+                    )}
+                    {state.threshold_lot != null && state.mode === 'winner_roll_atm' && (
+                      <span className="text-[10px] text-zinc-300 font-mono whitespace-nowrap">thresh {state.threshold_lot}%</span>
                     )}
                   </div>
                   {state.entry_combined_pts != null && state.entry_combined_pts > 0 && (

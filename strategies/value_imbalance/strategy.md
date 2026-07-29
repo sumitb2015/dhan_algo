@@ -84,6 +84,7 @@ The advanced script introduces selectable adjustment logic modes to optimize mar
 
 ### A. `winner_roll_atm` (Default)
 *   **Action**: Checks the value of the losing leg and chooses the appropriate strike to balance the winner leg's premium against that value, maintaining a flat 1:1 lot ratio.
+*   **Trigger threshold**: Configurable via `--threshold-lot` (default `25.0`, i.e. 25%). The roll fires when the current premium imbalance exceeds `threshold_lot + entry_diff_pct`, where `entry_diff_pct` is the baseline skew captured at entry and recalculated after each adjustment.
 *   **Benefit**: Eliminates margin inflation by keeping lot counts static.
 *   **Inversion Prevention**: Strictly enforces `CE strike > PE strike`. If a roll would cross strikes, it triggers an emergency cycle exit.
 
@@ -120,6 +121,7 @@ The advanced script introduces selectable adjustment logic modes to optimize mar
 | **`--live`** | *Flag* | Enable real order placement (defaults to dry-run mode). |
 | **`--lots N`** | `1` | Initial lots per leg. |
 | **`--mode MODE`** | `winner_roll_atm` | Selects adjustment mode (`winner_roll_atm`, `loser_ratio_roll`, `hedged_addition`, `legacy`, `reentry_straddle`). |
+| **`--threshold-lot PCT`** | `25.0` | *(winner_roll_atm only, applies while below `--max-lots`)* Base premium imbalance % — added to the post-entry/post-roll `entry_diff_pct` baseline — that triggers a winner-roll adjustment. |
 | **`--loser-ratio-lots N`** | `1` | Number of lots to increment during a loser ratio roll adjustment. |
 | **`--leg-sl-pct PCT`** | `0.20` | *(reentry_straddle only)* Per-leg SL as a fraction of entry premium (e.g. `0.20` = SL at 120% of entry price). Errors if set with any other mode. |
 | **`--trail-start-pct PCT`** | `5.0` | Arms the trailing stop-loss once profit reaches this % of the entry combined premium. |
