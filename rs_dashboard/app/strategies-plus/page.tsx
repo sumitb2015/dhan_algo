@@ -9,6 +9,9 @@ import {
 import StrategyRowWide from '@/components/StrategyRowWide';
 import NavBar from '@/components/NavBar';
 
+interface IndexQuote { ltp: number; prevClose: number }
+interface IndexTicker { nifty: IndexQuote | null; vix: IndexQuote | null }
+
 interface PortfolioData {
   success: boolean;
   available_funds: number;
@@ -73,6 +76,8 @@ export default function StrategiesPlusPage() {
 
   const [portfolio, setPortfolio] = useState<PortfolioData | null>(null);
   const [portfolioLoading, setPortfolioLoading] = useState(false);
+
+  const [indexTicker, setIndexTicker] = useState<IndexTicker | null>(null);
 
   const [confirmStopAll, setConfirmStopAll] = useState(false);
   const [stoppingAll, setStoppingAll] = useState(false);
@@ -148,6 +153,20 @@ export default function StrategiesPlusPage() {
     const iv = setInterval(fetchPortfolio, 20000);
     return () => clearInterval(iv);
   }, [fetchPortfolio]);
+
+  const fetchIndexTicker = useCallback(async () => {
+    try {
+      const res = await fetch('/api/index-ticker');
+      const data = await res.json();
+      if (data.success) setIndexTicker({ nifty: data.nifty ?? null, vix: data.vix ?? null });
+    } catch { /* keep last known values */ }
+  }, []);
+
+  useEffect(() => {
+    fetchIndexTicker();
+    const iv = setInterval(fetchIndexTicker, 5000);
+    return () => clearInterval(iv);
+  }, [fetchIndexTicker]);
 
   useEffect(() => {
     if (showPnlGuard) fetchPnlGuardStatus();
@@ -447,8 +466,36 @@ export default function StrategiesPlusPage() {
 
         <NavBar />
 
+        {/* Live NIFTY + India VIX ticker */}
+        <div className="flex items-center gap-3 ml-auto shrink-0">
+          {([
+            { key: 'NIFTY', q: indexTicker?.nifty, decimals: 2 },
+            { key: 'VIX', q: indexTicker?.vix, decimals: 2 },
+          ] as const).map(({ key, q, decimals }) => {
+            if (!q) return null;
+            const chg = q.prevClose > 0 ? q.ltp - q.prevClose : 0;
+            const chgPct = q.prevClose > 0 ? (chg / q.prevClose) * 100 : 0;
+            const isUp = chg >= 0;
+            return (
+              <div key={key} className="flex items-baseline gap-2 bg-zinc-900/60 border border-zinc-800 rounded-lg px-3 py-1">
+                <span className="text-[10px] font-bold text-zinc-500 uppercase tracking-widest">{key}</span>
+                <span className="text-sm font-bold font-mono tabular-nums text-white">
+                  {q.ltp.toLocaleString('en-IN', { minimumFractionDigits: decimals, maximumFractionDigits: decimals })}
+                </span>
+                {q.prevClose > 0 && (
+                  <span className={`flex items-baseline gap-1 text-[11px] font-semibold font-mono tabular-nums ${isUp ? 'text-emerald-400' : 'text-rose-400'}`}>
+                    <span>{isUp ? '▲' : '▼'}</span>
+                    <span>{Math.abs(chg).toFixed(2)}</span>
+                    <span className="opacity-80">({isUp ? '+' : ''}{chgPct.toFixed(2)}%)</span>
+                  </span>
+                )}
+              </div>
+            );
+          })}
+        </div>
+
         <button onClick={() => fetchStrategies(true)}
-          className="p-1.5 border border-zinc-800 rounded-lg bg-zinc-900/40 text-zinc-500 hover:text-white hover:border-zinc-700 transition-all active:scale-95 ml-auto"
+          className="p-1.5 border border-zinc-800 rounded-lg bg-zinc-900/40 text-zinc-500 hover:text-white hover:border-zinc-700 transition-all active:scale-95"
           title="Refresh">
           <RefreshCw className="h-3.5 w-3.5" />
         </button>
