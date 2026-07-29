@@ -6,6 +6,7 @@ This document covers all option selling strategies in `strategies/value_imbalanc
 3.  **Nifty Value-Imbalance Strangle** (`nifty_value_imbalance_strangle.py`)
 4.  **Nifty 1-Min VWAP Straddle** (`nifty_vwap_1min_straddle.py`)
 5.  **Nifty Delta Neutral (0.5 Delta)** (`nifty_delta_neutral.py`)
+6.  **Nifty VIX-Filtered Straddle** (`nifty_vix_straddle.py`)
 
 ---
 
@@ -642,6 +643,82 @@ venv\Scripts\python.exe strategies/value_imbalance/nifty_delta_neutral.py --live
 1.  Entry spot was `24,188` when `24250 CE` / `24250 PE` were sold.
 2.  A sharp move pushes Nifty to `24,300` — a `112`-point drift from the entry spot, past the `100`-point threshold.
 3.  The strategy squares off both legs (`"Spot Shift!"`), pauses 5 minutes, and restarts: fetches a fresh option chain, re-selects CE/PE strikes closest to `0.5` delta at the new spot, and re-enters.
+
+---
+
+## 9. Nifty VIX-Filtered Straddle (`nifty_vix_straddle.py`)
+
+A mean-reversion short straddle (same VWAP mechanics as §7's `nifty_vwap_1min_straddle.py`) that adds a **volatility-trend filter**: it only sells the straddle while both the straddle's own premium *and* India VIX are each below their own Supertrend — i.e. only while implied vol itself is trending down, not just while premium happens to look cheap relative to VWAP.
+
+### A. Concept
+
+Straddle-selling profits when IV contracts or stays flat. A straddle premium that looks "cheap" relative to VWAP can still be a bad sell if India VIX is trending up (IV expansion is about to blow out the premium). This strategy gates entry — and forces exit — on VIX's own short-term trend direction, using Supertrend on VIX itself as the read of "is volatility rising or falling right now."
+
+Every completed 1-minute bar, the strategy:
+1. Re-fetches CE and PE 1-min candles, merges them, and rebuilds the combined straddle OHLCV + cumulative session VWAP (identical method to §7.A).
+2. Resamples the combined straddle bars to `--st-interval`-minute bars (default 3m) and computes `Supertrend(--st-period, --st-multiplier)` (default `10, 2.0`) on the straddle premium itself.
+3. Fetches India VIX 1-min candles (security ID `21`, `NSE_IDX` segment), resamples to `--vix-st-interval`-minute bars (default 3m), and computes `Supertrend(--vix-st-period, --vix-st-multiplier)` (default `10, 2.0`) on VIX.
+
+`SUPERTd_*` from `pandas_ta` is `-1` when price is below the Supertrend line (downtrend) and `+1` when above (uptrend) — read from the **last fully completed bar**, not the still-forming one.
+
+### B. Entry Conditions
+
+All four gates must pass simultaneously before a position is opened:
+
+1. **VWAP ready** — `vwap_bars >= vwap_warmup_bars`.
+2. **Price gate** — `combined_ltp <= candle_vwap` (straddle at or below its own session VWAP).
+3. **Straddle Supertrend gate** — `straddle_st_dir == -1` (combined premium below its own Supertrend — premium itself is trending down).
+4. **VIX Supertrend gate** — `vix_st_dir == -1` (India VIX below its own Supertrend — volatility is trending down).
+5. **Balance gate** — `|CE_LTP - PE_LTP| / max(CE_LTP, PE_LTP) * 100 < max_premium_diff_pct`.
+
+### C. Exit Conditions
+
+Either triggers a full exit (in addition to the standard per-trade/global P&L guards and 15:17 auto-exit):
+
+1. **VIX Supertrend flip** — `vix_st_dir == 1` (India VIX crosses back above its own Supertrend — volatility turning up, exit regardless of where premium sits relative to VWAP).
+2. **VWAP exit buffer** — `combined_ltp > candle_vwap + exit_buffer` (default 5 points).
+
+### D. CLI Parameter Reference
+
+| Flag | Default | Description |
+|---|---|---|
+| `--live` | off (dry run) | Enable real order placement |
+| `--lots N` | `1` | Lots per leg (CE and PE symmetric) |
+| `--start-time HH:MM` | `09:20` | Session start monitoring time (IST) |
+| `--st-period N` | `10` | Straddle premium Supertrend period |
+| `--st-multiplier F` | `2.0` | Straddle premium Supertrend multiplier |
+| `--st-interval MIN` | `3` | Straddle Supertrend candle interval (minutes), resampled from 1-min bars |
+| `--vix-st-period N` | `10` | India VIX Supertrend period |
+| `--vix-st-multiplier F` | `2.0` | India VIX Supertrend multiplier |
+| `--vix-st-interval MIN` | `3` | India VIX Supertrend candle interval (minutes), resampled from 1-min bars |
+| `--exit-buffer PTS` | `5` | Points **above** VWAP that trigger exit (`combined > VWAP + exit_buffer`) |
+| `--max-premium-diff PCT` | `15` | Max allowed % difference between CE and PE premiums at entry |
+| `--vwap-warmup-bars N` | `10` | Min completed 1-min bars (≈ 10 min) before VWAP is trusted for trading |
+| `--target-profit INR` | `4000` | Session profit target — strategy pauses until next day once reached |
+| `--stop-loss INR` | `4000` | Session stop loss (positive value) |
+| `--max-loss-per-trade INR` | `1500` | Hard per-cycle stop-loss, independent of VWAP/Supertrend. `0` disables |
+| `--max-trades-per-day N` | `15` | Max entries per session. `0` = unlimited |
+| `--cooldown-seconds N` | `90` | Entries paused for this many seconds after a losing cycle closes |
+| `--max-spread-pct PCT` | `8` | Max bid-ask spread % per leg to allow entry. `0` disables |
+
+### E. Execution Examples
+
+```powershell
+# Dry run — 1 lot, all defaults (Supertrend 10,2 on both straddle and VIX, 5pt exit buffer)
+venv\Scripts\python.exe strategies/value_imbalance/nifty_vix_straddle.py
+
+# Live, 2 lots, defaults
+venv\Scripts\python.exe strategies/value_imbalance/nifty_vix_straddle.py --live --lots 2
+
+# Tighter exit buffer (3 pts above VWAP)
+venv\Scripts\python.exe strategies/value_imbalance/nifty_vix_straddle.py --live --exit-buffer 3
+
+# Faster-reacting VIX filter: shorter period, tighter multiplier, 1-min bars
+venv\Scripts\python.exe strategies/value_imbalance/nifty_vix_straddle.py --vix-st-period 7 --vix-st-multiplier 1.5 --vix-st-interval 1
+
+# Custom risk targets, later start time
+venv\Scripts\python.exe strategies/value_imbalance/nifty_vix_straddle.py --live --lots 1 --target-profit 5000 --stop-loss 3000 --start-time 09:25
+```
 
 ---
 

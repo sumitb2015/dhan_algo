@@ -86,6 +86,14 @@ function StrategyRowWide({ meta, state, onRefresh }: Props) {
   const [exitBuffer, setExitBuffer] = useState(10.0);
   const [maxPremiumDiff, setMaxPremiumDiff] = useState(15.0);
   const [vwapWarmupBars, setVwapWarmupBars] = useState(10);
+  // VIX-Filtered Straddle
+  const [vixExitBuffer, setVixExitBuffer] = useState(5.0);
+  const [stPeriod, setStPeriod] = useState(10);
+  const [stMultiplier, setStMultiplier] = useState(2.0);
+  const [stInterval, setStInterval] = useState('3');
+  const [vixStPeriod, setVixStPeriod] = useState(10);
+  const [vixStMultiplier, setVixStMultiplier] = useState(2.0);
+  const [vixStInterval, setVixStInterval] = useState('3');
   const [pcrThreshold, setPcrThreshold] = useState(1.5);
   const [exitPcrChange, setExitPcrChange] = useState(30);
   const [pollInterval, setPollInterval] = useState(60);
@@ -193,6 +201,17 @@ function StrategyRowWide({ meta, state, onRefresh }: Props) {
         args.push('--entry-band', String(entryBand));
         args.push('--decline-ticks', String(declineTicks));
         args.push('--exit-buffer', String(exitBuffer));
+        args.push('--max-premium-diff', String(maxPremiumDiff));
+        args.push('--vwap-warmup-bars', String(vwapWarmupBars));
+      } else if (meta.key === 'nifty_vix_straddle') {
+        args.push('--start-time', startTime);
+        args.push('--st-period', String(stPeriod));
+        args.push('--st-multiplier', String(stMultiplier));
+        args.push('--st-interval', stInterval);
+        args.push('--vix-st-period', String(vixStPeriod));
+        args.push('--vix-st-multiplier', String(vixStMultiplier));
+        args.push('--vix-st-interval', vixStInterval);
+        args.push('--exit-buffer', String(vixExitBuffer));
         args.push('--max-premium-diff', String(maxPremiumDiff));
         args.push('--vwap-warmup-bars', String(vwapWarmupBars));
       } else if (meta.key === 'nifty_value_imbalance_strangle') {
@@ -895,6 +914,40 @@ function StrategyRowWide({ meta, state, onRefresh }: Props) {
             <div className={fieldCls}><FieldLabel text="Entry Band" tip="Max points above the straddle's VWAP at which entry is still allowed." /><Input type="number" step="0.5" value={entryBand} onChange={e=>setEntryBand(parseFloat(e.target.value)||5.0)} className={inputCls} style={{width:72}}/></div>
             <div className={fieldCls}><FieldLabel text="Decline Ticks" tip="Number of recent WebSocket ticks over which combined premium must be falling before entry." /><Input type="number" value={declineTicks} onChange={e=>setDeclineTicks(parseInt(e.target.value)||5)} className={inputCls} style={{width:64}}/></div>
             <div className={fieldCls}><FieldLabel text="Exit Buffer" tip="Points above VWAP that trigger exit (buy back both legs); should stay ≥ Entry Band." /><Input type="number" step="0.5" value={exitBuffer} onChange={e=>setExitBuffer(parseFloat(e.target.value)||10.0)} className={inputCls} style={{width:72}}/></div>
+            <div className={fieldCls}><FieldLabel text="Max Prem Diff%" tip="Max allowed % difference between CE and PE premiums for entry to be considered balanced." /><Input type="number" step="0.5" value={maxPremiumDiff} onChange={e=>setMaxPremiumDiff(parseFloat(e.target.value)||15.0)} className={inputCls} style={{width:80}}/></div>
+            <div className={fieldCls}><FieldLabel text="Warmup (bars)" tip="Minimum completed 1-min bars required before VWAP is trusted for trade decisions." /><Input type="number" value={vwapWarmupBars} onChange={e=>setVwapWarmupBars(parseInt(e.target.value)||10)} className={inputCls} style={{width:80}}/></div>
+          </>
+        )}
+
+        {meta.key === 'nifty_vix_straddle' && (
+          <>
+            <div className={fieldCls}>
+              <FieldLabel text="Straddle ST TF" tip="Candle interval (minutes) for the straddle premium's own Supertrend, resampled from 1-min bars." />
+              <Select value={stInterval} onValueChange={v => v && setStInterval(v)}>
+                <SelectTrigger className={inputCls} style={{ width: 90 }}><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="1">1 Min</SelectItem>
+                  <SelectItem value="3">3 Min</SelectItem>
+                  <SelectItem value="5">5 Min</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+            <div className={fieldCls}><FieldLabel text="Straddle ST Period" tip="ATR lookback length for the straddle premium's own Supertrend." /><Input type="number" value={stPeriod} onChange={e=>setStPeriod(parseInt(e.target.value)||10)} className={inputCls} style={{width:64}}/></div>
+            <div className={fieldCls}><FieldLabel text="Straddle ST Multi" tip="ATR multiplier controlling the straddle premium's Supertrend band width." /><Input type="number" step="0.5" value={stMultiplier} onChange={e=>setStMultiplier(parseFloat(e.target.value)||2.0)} className={inputCls} style={{width:64}}/></div>
+            <div className={fieldCls}>
+              <FieldLabel text="VIX ST TF" tip="Candle interval (minutes) for India VIX's own Supertrend, resampled from 1-min bars." />
+              <Select value={vixStInterval} onValueChange={v => v && setVixStInterval(v)}>
+                <SelectTrigger className={inputCls} style={{ width: 90 }}><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="1">1 Min</SelectItem>
+                  <SelectItem value="3">3 Min</SelectItem>
+                  <SelectItem value="5">5 Min</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+            <div className={fieldCls}><FieldLabel text="VIX ST Period" tip="ATR lookback length for India VIX's own Supertrend." /><Input type="number" value={vixStPeriod} onChange={e=>setVixStPeriod(parseInt(e.target.value)||10)} className={inputCls} style={{width:64}}/></div>
+            <div className={fieldCls}><FieldLabel text="VIX ST Multi" tip="ATR multiplier controlling India VIX's Supertrend band width." /><Input type="number" step="0.5" value={vixStMultiplier} onChange={e=>setVixStMultiplier(parseFloat(e.target.value)||2.0)} className={inputCls} style={{width:64}}/></div>
+            <div className={fieldCls}><FieldLabel text="Exit Buffer" tip="Points above VWAP that trigger exit (buy back both legs), in addition to the VIX Supertrend flip exit." /><Input type="number" step="0.5" value={vixExitBuffer} onChange={e=>setVixExitBuffer(parseFloat(e.target.value)||5.0)} className={inputCls} style={{width:72}}/></div>
             <div className={fieldCls}><FieldLabel text="Max Prem Diff%" tip="Max allowed % difference between CE and PE premiums for entry to be considered balanced." /><Input type="number" step="0.5" value={maxPremiumDiff} onChange={e=>setMaxPremiumDiff(parseFloat(e.target.value)||15.0)} className={inputCls} style={{width:80}}/></div>
             <div className={fieldCls}><FieldLabel text="Warmup (bars)" tip="Minimum completed 1-min bars required before VWAP is trusted for trade decisions." /><Input type="number" value={vwapWarmupBars} onChange={e=>setVwapWarmupBars(parseInt(e.target.value)||10)} className={inputCls} style={{width:80}}/></div>
           </>

@@ -30,6 +30,10 @@ const STRATEGIES_METADATA: Record<string, { name: string; path: string }> = {
     name: 'Nifty VWAP 1-Min Straddle',
     path: path.join(PROJECT_ROOT, 'strategies', 'value_imbalance', 'nifty_vwap_1min_straddle.py')
   },
+  nifty_vix_straddle: {
+    name: 'Nifty VIX-Filtered Straddle',
+    path: path.join(PROJECT_ROOT, 'strategies', 'value_imbalance', 'nifty_vix_straddle.py')
+  },
   nifty_spread_trend: {
     name: 'Nifty Spread Trend-Following',
     path: path.join(PROJECT_ROOT, 'strategies', 'spread_trend', 'nifty_spread_trend.py')
