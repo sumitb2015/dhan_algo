@@ -12,7 +12,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 
 from login import get_dhan_client
 from lib.dhan_helper import DhanHelper
-from lib.strategy_state_helper import save_strategy_state, check_shutdown_trigger, exit_if_market_closed
+from lib.strategy_state_helper import save_strategy_state, check_shutdown_trigger, exit_if_market_closed, parse_target_spec
 
 # Configure Logging
 project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -40,7 +40,8 @@ class NiftySpreadTrendStrategy:
     def __init__(self, dry_run=True, symbol="NIFTY", interval="5",
                  ema_period=20, supertrend_period=7, supertrend_multiplier=3.0,
                  ce_offset=100, pe_offset=100, spread_width=100, lots=1,
-                 target_profit=2000.0, stop_loss=2000.0, exit_on_signal_change=True,
+                 target_profit=2000.0, target_profit_is_pct=False,
+                 stop_loss=2000.0, stop_loss_is_pct=False, exit_on_signal_change=True,
                  eod_time="15:15", cooldown_minutes=5,
                  use_ema=True, use_supertrend=True, min_hold_minutes=5):
         self.dry_run = dry_run
@@ -53,8 +54,14 @@ class NiftySpreadTrendStrategy:
         self.pe_offset = pe_offset
         self.spread_width = spread_width
         self.lots = lots
-        self.target_profit = target_profit
-        self.stop_loss = -abs(stop_loss) # Ensure SL is a negative number
+        # Target/SL may be an absolute INR amount or a percentage of entry net
+        # credit (resolved once the position is actually entered, see below).
+        self.target_is_pct = target_profit_is_pct
+        self.stop_is_pct = stop_loss_is_pct
+        self.target_pct = target_profit if target_profit_is_pct else None
+        self.stop_pct = stop_loss if stop_loss_is_pct else None
+        self.target_profit = None if target_profit_is_pct else target_profit
+        self.stop_loss = None if stop_loss_is_pct else -abs(stop_loss)  # Ensure SL is a negative number
         self.exit_on_signal_change = exit_on_signal_change
         self.eod_time = eod_time
         self.cooldown_minutes = cooldown_minutes
@@ -501,6 +508,15 @@ class NiftySpreadTrendStrategy:
         else:
             logger.info("[DRY RUN] Simulating Position Entry.")
 
+        if self.target_is_pct or self.stop_is_pct:
+            entry_value = (self.short_entry_price - self.long_entry_price) * total_qty
+            if self.target_is_pct:
+                self.target_profit = entry_value * self.target_pct / 100.0
+                logger.info(f"Resolved profit target: {self.target_pct}% of entry credit INR{entry_value:.0f} = INR{self.target_profit:.0f}")
+            if self.stop_is_pct:
+                self.stop_loss = -abs(entry_value * self.stop_pct / 100.0)
+                logger.info(f"Resolved stop loss: {self.stop_pct}% of entry credit INR{entry_value:.0f} = -INR{abs(self.stop_loss):.0f}")
+
     def monitor_position(self):
         """
         Monitors active positions, updates P&L, checks exit conditions, and handles order closing.
@@ -814,10 +830,12 @@ Examples:
                         help="Number of lots to trade per spread leg (default: 1)")
 
     # Risk Management Target & Stop Loss
-    parser.add_argument("--target-profit", "--total-profit", type=float, default=2000.0,
-                        help="Global daily profit target in INR (default: 2000.0)")
-    parser.add_argument("--stop-loss", "--total-loss", type=float, default=2000.0,
-                        help="Global daily stop loss in INR (default: 2000.0). Can be passed as positive or negative.")
+    parser.add_argument("--target-profit", "--total-profit", type=str, default="2000",
+                        help="Global daily profit target in INR, or a percentage of entry net credit "
+                             "e.g. '20%%' (default: 2000)")
+    parser.add_argument("--stop-loss", "--total-loss", type=str, default="2000",
+                        help="Global daily stop loss in INR, or a percentage of entry net credit "
+                             "e.g. '20%%' (default: 2000)")
 
     # Signals & Cooldown
     parser.add_argument("--no-exit-on-signal-change", action="store_false", dest="exit_on_signal_change",
@@ -831,18 +849,27 @@ Examples:
 
     args = parser.parse_args()
 
+    try:
+        target_val, target_is_pct = parse_target_spec(args.target_profit)
+        stop_val, stop_is_pct = parse_target_spec(args.stop_loss)
+    except ValueError as e:
+        logger.error(f"[CONFIG ERROR] {e}")
+        sys.exit(1)
+
     mode_label = "LIVE" if args.live else "DRY"
     active_indicators = []
     if args.use_ema:
         active_indicators.append(f"EMA({args.ema_period})")
     if args.use_supertrend:
         active_indicators.append(f"Supertrend({args.supertrend_period}, {args.supertrend_multiplier})")
+    target_label = f"{target_val:.0f}%" if target_is_pct else f"₹{target_val:.0f}"
+    stop_label = f"-{abs(stop_val):.0f}%" if stop_is_pct else f"-₹{abs(stop_val):.0f}"
     logger.info("=" * 60)
     logger.info(f"LAUNCHING NIFTY SPREAD TREND STRATEGY IN {mode_label} MODE")
     logger.info(f"Underlying: {args.symbol} | Interval: {args.interval}m")
     logger.info(f"Indicators: {' + '.join(active_indicators) if active_indicators else 'NONE (will not trade)'}")
     logger.info(f"Spread Config: CE Offset +{args.ce_offset} | PE Offset -{args.pe_offset} | Width: {args.spread_width}")
-    logger.info(f"Lots: {args.lots} | Target Profit: ₹{args.target_profit:.0f} | Stop Loss: -₹{abs(args.stop_loss):.0f}")
+    logger.info(f"Lots: {args.lots} | Target Profit: {target_label} | Stop Loss: {stop_label}")
     logger.info(f"Exit on Trend Reversal: {args.exit_on_signal_change} | Cooldown: {args.cooldown_minutes}m | Min Hold: {args.min_hold_minutes}m")
     logger.info("=" * 60)
 
@@ -857,8 +884,10 @@ Examples:
         pe_offset=args.pe_offset,
         spread_width=args.spread_width,
         lots=args.lots,
-        target_profit=args.target_profit,
-        stop_loss=args.stop_loss,
+        target_profit=target_val,
+        target_profit_is_pct=target_is_pct,
+        stop_loss=stop_val,
+        stop_loss_is_pct=stop_is_pct,
         exit_on_signal_change=args.exit_on_signal_change,
         eod_time=args.eod_time,
         cooldown_minutes=args.cooldown_minutes,

@@ -11,7 +11,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 
 from login import get_dhan_client
 from lib.dhan_helper import DhanHelper
-from lib.strategy_state_helper import save_strategy_state, check_shutdown_trigger, exit_if_market_closed
+from lib.strategy_state_helper import save_strategy_state, check_shutdown_trigger, exit_if_market_closed, parse_target_spec
 
 # Setup Logging
 project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -38,7 +38,8 @@ logger = logging.getLogger(__name__)
 class NiftyAdvancedImbalance:
     def __init__(self, mode="winner_roll_atm", dry_run=True, initial_lots=1, max_lots=4,
                  threshold_lot=25.0, threshold_strike=40.0,
-                 profit_target=4000.0, stop_loss=4000.0,
+                 profit_target=4000.0, profit_target_is_pct=False,
+                 stop_loss=4000.0, stop_loss_is_pct=False,
                  entry_type="straddle", use_delta=False, target_delta=0.20,
                  ce_offset=200, pe_offset=200,
                  use_premium=False, target_premium=50.0,
@@ -51,8 +52,14 @@ class NiftyAdvancedImbalance:
         self.max_lots = max_lots
         self.threshold_lot = threshold_lot
         self.threshold_strike = threshold_strike
-        self.profit_target = profit_target
-        self.stop_loss = -abs(stop_loss) # Ensure it's negative
+        # Target/SL may be an absolute INR amount or a percentage of entry premium
+        # collected (resolved once the position is actually entered, see below).
+        self.target_is_pct = profit_target_is_pct
+        self.stop_is_pct = stop_loss_is_pct
+        self.target_pct = profit_target if profit_target_is_pct else None
+        self.stop_pct = stop_loss if stop_loss_is_pct else None
+        self.profit_target = None if profit_target_is_pct else profit_target
+        self.stop_loss = None if stop_loss_is_pct else -abs(stop_loss)  # Ensure it's negative
         self.entry_type = entry_type.lower()
         self.use_delta = use_delta
         self.target_delta = target_delta
@@ -800,6 +807,15 @@ class NiftyAdvancedImbalance:
             self.entry_combined_pts = self.ce_avg_price + self.pe_avg_price
             logger.info(f"Trail SL reference: entry_combined={self.entry_combined_pts:.2f} pts (CE={self.ce_avg_price:.2f} + PE={self.pe_avg_price:.2f})")
 
+            if self.target_is_pct or self.stop_is_pct:
+                entry_value = (self.ce_avg_price * self.ce_lots + self.pe_avg_price * self.pe_lots) * self.nifty_lot_size
+                if self.target_is_pct:
+                    self.profit_target = entry_value * self.target_pct / 100.0
+                    logger.info(f"Resolved profit target: {self.target_pct}% of entry premium INR{entry_value:.0f} = INR{self.profit_target:.0f}")
+                if self.stop_is_pct:
+                    self.stop_loss = -abs(entry_value * self.stop_pct / 100.0)
+                    logger.info(f"Resolved stop loss: {self.stop_pct}% of entry premium INR{entry_value:.0f} = -INR{abs(self.stop_loss):.0f}")
+
             if self.mode == "reentry_straddle":
                 self.ce_active = True
                 self.pe_active = True
@@ -1330,11 +1346,13 @@ Examples:
     parser.add_argument("--max-lots", type=int, default=4, metavar="N",
                         help="Maximum lots per leg before triggering a strike shift (default: 4)")
 
-    parser.add_argument("--target-profit", type=float, default=4000.0, metavar="AMT",
-                        help="Global profit target in INR (default: 4000.0)")
-                        
-    parser.add_argument("--stop-loss", type=float, default=4000.0, metavar="AMT",
-                        help="Global stop loss in INR (default: 4000.0)")
+    parser.add_argument("--target-profit", type=str, default="4000", metavar="AMT",
+                        help="Global profit target in INR, or a percentage of entry premium collected "
+                             "e.g. '20%%' (default: 4000)")
+
+    parser.add_argument("--stop-loss", type=str, default="4000", metavar="AMT",
+                        help="Global stop loss in INR, or a percentage of entry premium collected "
+                             "e.g. '20%%' (default: 4000)")
 
     parser.add_argument("--entry-type", type=str, default="straddle",
                         choices=["straddle", "strangle"],
@@ -1375,6 +1393,13 @@ Examples:
                         help="Exit if combined premium rises this many pts above its best level (default: 15.0)")
 
     args = parser.parse_args()
+
+    try:
+        target_val, target_is_pct = parse_target_spec(args.target_profit)
+        stop_val, stop_is_pct = parse_target_spec(args.stop_loss)
+    except ValueError as e:
+        logger.error(f"[CONFIG ERROR] {e}")
+        sys.exit(1)
 
     # --- Configuration Validation ---
     _errors = []
@@ -1468,7 +1493,7 @@ Examples:
     # --- End Validation ---
 
     mode_label = "LIVE" if args.live else "DRY"
-    stop_loss_val = abs(args.stop_loss)
+    stop_loss_val = abs(stop_val)
 
     selection_label = "distance"
     if args.entry_type == "strangle":
@@ -1479,9 +1504,11 @@ Examples:
         else:
             selection_label = f"distance (CE +{args.ce_offset} | PE -{args.pe_offset})"
 
+    target_label = f"{target_val:.0f}%" if target_is_pct else f"INR {target_val:.0f}"
+    stop_label = f"-{stop_loss_val:.0f}%" if stop_is_pct else f"-INR {stop_loss_val:.0f}"
     logger.info(
         f"Config -> Mode: {mode_label} | Sizing: {args.lots}L | Start Time: {args.start_time} | Entry Type: {args.entry_type} ({selection_label}) | "
-        f"Adjustment Mode: {args.mode} (Loser Ratio Lots: {args.loser_ratio_lots}) | Profit Target: INR {args.target_profit:.0f} | Stop Loss: -INR {stop_loss_val:.0f}"
+        f"Adjustment Mode: {args.mode} (Loser Ratio Lots: {args.loser_ratio_lots}) | Profit Target: {target_label} | Stop Loss: {stop_label}"
     )
 
     strat = NiftyAdvancedImbalance(
@@ -1489,8 +1516,10 @@ Examples:
         dry_run=not args.live,
         initial_lots=args.lots,
         max_lots=args.max_lots,
-        profit_target=args.target_profit,
+        profit_target=target_val,
+        profit_target_is_pct=target_is_pct,
         stop_loss=stop_loss_val,
+        stop_loss_is_pct=stop_is_pct,
         entry_type=args.entry_type,
         use_delta=args.delta,
         target_delta=args.target_delta,

@@ -11,7 +11,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 
 from login import get_dhan_client
 from lib.dhan_helper import DhanHelper
-from lib.strategy_state_helper import save_strategy_state, check_shutdown_trigger, exit_if_market_closed
+from lib.strategy_state_helper import save_strategy_state, check_shutdown_trigger, exit_if_market_closed, parse_target_spec
 
 # Setup Logging
 project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -38,7 +38,8 @@ logger = logging.getLogger(__name__)
 class ValueImbalanceStrangle:
     def __init__(self, dry_run=True, initial_lots=1, max_lots=4,
                  threshold_lot=25.0, threshold_strike=40.0,
-                 profit_target=4000.0, stop_loss=4000.0,
+                 profit_target=4000.0, profit_target_is_pct=False,
+                 stop_loss=4000.0, stop_loss_is_pct=False,
                  strike_selection="distance", # "distance", "delta", or "premium"
                  ce_offset=200, pe_offset=200,
                  target_delta=0.20, target_premium=50.0,
@@ -49,8 +50,14 @@ class ValueImbalanceStrangle:
         self.max_lots = max_lots
         self.threshold_lot = threshold_lot
         self.threshold_strike = threshold_strike
-        self.profit_target = profit_target
-        self.stop_loss = -abs(stop_loss) # Ensure it's negative
+        # Target/SL may be an absolute INR amount or a percentage of entry premium
+        # collected (resolved once the position is actually entered, see below).
+        self.target_is_pct = profit_target_is_pct
+        self.stop_is_pct = stop_loss_is_pct
+        self.target_pct = profit_target if profit_target_is_pct else None
+        self.stop_pct = stop_loss if stop_loss_is_pct else None
+        self.profit_target = None if profit_target_is_pct else profit_target
+        self.stop_loss = None if stop_loss_is_pct else -abs(stop_loss)  # Ensure it's negative
         self.start_time = start_time
         self.trail_start_pct = trail_start_pct
         self.trail_gap_pts = trail_gap_pts
@@ -585,6 +592,15 @@ class ValueImbalanceStrangle:
             self.entry_combined_pts = self.ce_avg_price + self.pe_avg_price
             logger.info(f"Trail SL reference: entry_combined={self.entry_combined_pts:.2f} pts (CE={self.ce_avg_price:.2f} + PE={self.pe_avg_price:.2f})")
 
+            if self.target_is_pct or self.stop_is_pct:
+                entry_value = (self.ce_avg_price * self.ce_lots + self.pe_avg_price * self.pe_lots) * self.nifty_lot_size
+                if self.target_is_pct:
+                    self.profit_target = entry_value * self.target_pct / 100.0
+                    logger.info(f"Resolved profit target: {self.target_pct}% of entry premium INR{entry_value:.0f} = INR{self.profit_target:.0f}")
+                if self.stop_is_pct:
+                    self.stop_loss = -abs(entry_value * self.stop_pct / 100.0)
+                    logger.info(f"Resolved stop loss: {self.stop_pct}% of entry premium INR{entry_value:.0f} = -INR{abs(self.stop_loss):.0f}")
+
             last_log_time = time.time()
             cycle_active = True
 
@@ -876,10 +892,12 @@ Examples:
                              "Falls back to distance mode if broker Greeks are unavailable.")
 
     # Risk targets
-    parser.add_argument("--target-profit", type=float, default=4000.0, metavar="AMT",
-                        help="Global profit target in INR (default: 4000.0)")
-    parser.add_argument("--stop-loss", type=float, default=4000.0, metavar="AMT",
-                        help="Global stop loss in INR (default: 4000.0). Can be passed as positive or negative.")
+    parser.add_argument("--target-profit", type=str, default="4000", metavar="AMT",
+                        help="Global profit target in INR, or a percentage of entry premium collected "
+                             "e.g. '20%%' (default: 4000)")
+    parser.add_argument("--stop-loss", type=str, default="4000", metavar="AMT",
+                        help="Global stop loss in INR, or a percentage of entry premium collected "
+                             "e.g. '20%%' (default: 4000)")
 
     # Customizable Start Time
     parser.add_argument("--start-time", type=str, default="09:20", metavar="TIME",
@@ -891,6 +909,13 @@ Examples:
 
     args = parser.parse_args()
 
+    try:
+        target_val, target_is_pct = parse_target_spec(args.target_profit)
+        stop_val, stop_is_pct = parse_target_spec(args.stop_loss)
+    except ValueError as e:
+        logger.error(f"[CONFIG ERROR] {e}")
+        sys.exit(1)
+
     if args.premium:
         selection = "premium"
     elif args.use_delta:
@@ -899,16 +924,18 @@ Examples:
         selection = "distance"
 
     mode_label   = "LIVE" if args.live else "DRY"
-    
-    # Ensure stop loss is internally passed as positive or handled correctly by the strat
-    stop_loss_val = abs(args.stop_loss)
 
+    # Ensure stop loss is internally passed as positive or handled correctly by the strat
+    stop_loss_val = abs(stop_val)
+
+    target_label = f"{target_val:.0f}%" if target_is_pct else f"INR {target_val:.0f}"
+    stop_label = f"-{stop_loss_val:.0f}%" if stop_is_pct else f"-INR {stop_loss_val:.0f}"
     if selection == "delta":
-        logger.info(f"Config -> Mode: {mode_label} | Lots: {args.lots} | Start Time: {args.start_time} | Selection: delta | Target Delta: ±{args.target_delta:.2f} | Profit Target: INR {args.target_profit:.0f} | Stop Loss: -INR {stop_loss_val:.0f}")
+        logger.info(f"Config -> Mode: {mode_label} | Lots: {args.lots} | Start Time: {args.start_time} | Selection: delta | Target Delta: ±{args.target_delta:.2f} | Profit Target: {target_label} | Stop Loss: {stop_label}")
     elif selection == "premium":
-        logger.info(f"Config -> Mode: {mode_label} | Lots: {args.lots} | Start Time: {args.start_time} | Selection: premium | Target Premium: <= {args.target_premium:.2f} | Profit Target: INR {args.target_profit:.0f} | Stop Loss: -INR {stop_loss_val:.0f}")
+        logger.info(f"Config -> Mode: {mode_label} | Lots: {args.lots} | Start Time: {args.start_time} | Selection: premium | Target Premium: <= {args.target_premium:.2f} | Profit Target: {target_label} | Stop Loss: {stop_label}")
     else:
-        logger.info(f"Config -> Mode: {mode_label} | Lots: {args.lots} | Start Time: {args.start_time} | Selection: distance | CE Offset: +{args.ce_offset} | PE Offset: -{args.pe_offset} | Profit Target: INR {args.target_profit:.0f} | Stop Loss: -INR {stop_loss_val:.0f}")
+        logger.info(f"Config -> Mode: {mode_label} | Lots: {args.lots} | Start Time: {args.start_time} | Selection: distance | CE Offset: +{args.ce_offset} | PE Offset: -{args.pe_offset} | Profit Target: {target_label} | Stop Loss: {stop_label}")
 
     strat = ValueImbalanceStrangle(
         dry_run=not args.live,
@@ -919,8 +946,10 @@ Examples:
         pe_offset=args.pe_offset,
         target_delta=args.target_delta,
         target_premium=args.target_premium,
-        profit_target=args.target_profit,
+        profit_target=target_val,
+        profit_target_is_pct=target_is_pct,
         stop_loss=stop_loss_val,
+        stop_loss_is_pct=stop_is_pct,
         start_time=args.start_time,
         trail_start_pct=args.trail_start_pct,
         trail_gap_pts=args.trail_gap_pts,

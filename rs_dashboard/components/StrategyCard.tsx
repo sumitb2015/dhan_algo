@@ -9,6 +9,7 @@ import { Input } from '@/components/ui/input';
 import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue
 } from '@/components/ui/select';
+import { Tooltip, TooltipTrigger, TooltipContent } from '@/components/ui/tooltip';
 
 interface StrategyMeta {
   key: string;
@@ -135,8 +136,8 @@ function StrategyCard({ meta, state, onRefresh }: StrategyCardProps) {
 
   const [isLive, setIsLive] = useState<boolean>(false);
   const [lots, setLots] = useState<number>(1);
-  const [profitTarget, setProfitTarget] = useState<number>(4000);
-  const [stopLoss, setStopLoss] = useState<number>(4000);
+  const [profitTarget, setProfitTarget] = useState<string>('4000');
+  const [stopLoss, setStopLoss] = useState<string>('4000');
   const [startTime, setStartTime] = useState<string>('09:20');
 
   const [maxLots, setMaxLots] = useState<number>(4);
@@ -245,8 +246,8 @@ function StrategyCard({ meta, state, onRefresh }: StrategyCardProps) {
         // and is a pure stop-and-reverse system with no daily P&L caps
       } else {
         args.push('--lots', String(lots));
-        args.push('--target-profit', String(profitTarget));
-        args.push('--stop-loss', String(stopLoss));
+        args.push('--target-profit', profitTarget.trim());
+        args.push('--stop-loss', stopLoss.trim());
       }
 
       if (meta.key === 'nifty_advanced_imbalance') {
@@ -438,6 +439,17 @@ function StrategyCard({ meta, state, onRefresh }: StrategyCardProps) {
   const fieldCls = 'flex flex-col gap-1';
   const inputCls = 'bg-zinc-900/80 border-zinc-800 text-white font-mono h-7 text-xs';
 
+  const FieldLabel = ({ text, tip, className }: { text: string; tip: string; className?: string }) => (
+    <Tooltip>
+      <TooltipTrigger
+        className={`${className ?? lbl} cursor-help underline decoration-dotted decoration-zinc-600 underline-offset-2 text-left w-fit`}
+      >
+        {text}
+      </TooltipTrigger>
+      <TooltipContent>{tip}</TooltipContent>
+    </Tooltip>
+  );
+
   /* ── CONFIG PANEL (shared between stopped-expanded and nothing else) ── */
   const configPanel = (
     <div className="flex flex-col gap-2.5 border border-zinc-800/60 px-3 py-2.5 rounded-lg bg-zinc-950/30">
@@ -445,7 +457,7 @@ function StrategyCard({ meta, state, onRefresh }: StrategyCardProps) {
       <div className="grid grid-cols-2 sm:grid-cols-3 gap-2.5 text-xs">
 
         <div className={fieldCls}>
-          <label className={lbl}>Execution</label>
+          <FieldLabel text="Execution" tip="Dry run (default) only simulates/logs orders. LIVE places real broker orders." />
           <div className="flex items-center gap-2 h-7">
             <input
               type="checkbox"
@@ -454,7 +466,11 @@ function StrategyCard({ meta, state, onRefresh }: StrategyCardProps) {
               onChange={(e) => setIsLive(e.target.checked)}
               className="h-3.5 w-3.5 rounded border-zinc-800 bg-zinc-900 accent-emerald-500"
             />
-            <label htmlFor={`live-${meta.key}`} className="text-white font-semibold flex items-center gap-1 text-xs">
+            <label
+              htmlFor={`live-${meta.key}`}
+              title="When checked, places real broker orders instead of simulating them"
+              className="text-white font-semibold flex items-center gap-1 text-xs"
+            >
               LIVE {isLive && <span className="h-1.5 w-1.5 rounded-full bg-emerald-500 animate-ping" />}
             </label>
           </div>
@@ -462,13 +478,13 @@ function StrategyCard({ meta, state, onRefresh }: StrategyCardProps) {
 
         {meta.key === 'crudeoilm_renko_sar' ? (
           <div className={fieldCls}>
-            <label className={lbl}>Quantity</label>
+            <FieldLabel text="Quantity" tip="Order size in barrels (MCX lot size = 10); not multiplied like other strategies' Lots field." />
             <Input type="number" value={renkoQty} onChange={(e) => setRenkoQty(parseInt(e.target.value) || 10)} min={1} step={1} className={inputCls} />
             <span className="text-[9px] text-zinc-600">MCX lot size = 10 barrels</span>
           </div>
         ) : (
           <div className={fieldCls}>
-            <label className={lbl}>Lots</label>
+            <FieldLabel text="Lots" tip="Number of lot-sized units traded per leg at entry (multiplied by the instrument's live lot size)." />
             <Input type="number" value={lots} onChange={(e) => setLots(parseInt(e.target.value) || 1)} min={1} max={20} className={inputCls} />
           </div>
         )}
@@ -477,28 +493,42 @@ function StrategyCard({ meta, state, onRefresh }: StrategyCardProps) {
           meta.key === 'nifty_value_imbalance_straddle' ||
           meta.key === 'nifty_value_imbalance_strangle') && (
           <div className={fieldCls}>
-            <label className={lbl}>Max Lots</label>
+            <FieldLabel text="Max Lots" tip="Maximum lots per leg reached via lot averaging/rolling before a strike shift is triggered." />
             <Input type="number" value={maxLots} onChange={(e) => setMaxLots(parseInt(e.target.value) || 4)} min={1} max={20} className={inputCls} />
           </div>
         )}
 
         {meta.key !== 'nifty_spread_trend' && meta.key !== 'crudeoilm_supertrend' && meta.key !== 'crudeoilm_renko_sar' && meta.key !== 'nifty_st_oi_bearcall' && (
           <div className={fieldCls}>
-            <label className={lbl}>Start Time</label>
+            <FieldLabel text="Start Time" tip="Time (HH:MM IST) the strategy begins monitoring for entries." />
             <Input type="text" value={startTime} onChange={(e) => setStartTime(e.target.value)} placeholder="09:20" className={inputCls} />
           </div>
         )}
 
-        {meta.key !== 'crudeoilm_renko_sar' && (
+        {meta.key !== 'crudeoilm_renko_sar' && meta.key === 'crudeoilm_supertrend' && (
           <>
             <div className={fieldCls}>
-              <label className={lbl}>Target ₹</label>
-              <Input type="number" value={profitTarget} onChange={(e) => setProfitTarget(parseInt(e.target.value) || 1000)} className={inputCls} />
+              <FieldLabel text="Target ₹" tip="Daily cumulative profit target in INR; strategy squares off and stops once reached." />
+              <Input type="number" value={profitTarget} onChange={(e) => setProfitTarget(e.target.value || '1000')} className={inputCls} />
             </div>
 
             <div className={fieldCls}>
-              <label className={lbl}>Stop Loss ₹</label>
-              <Input type="number" value={stopLoss} onChange={(e) => setStopLoss(parseInt(e.target.value) || 1000)} className={inputCls} />
+              <FieldLabel text="Stop Loss ₹" tip="Daily cumulative stop loss in INR; strategy squares off and stops once breached." />
+              <Input type="number" value={stopLoss} onChange={(e) => setStopLoss(e.target.value || '1000')} className={inputCls} />
+            </div>
+          </>
+        )}
+
+        {meta.key !== 'crudeoilm_renko_sar' && meta.key !== 'crudeoilm_supertrend' && (
+          <>
+            <div className={fieldCls}>
+              <FieldLabel text="Target ₹" tip="Daily cumulative profit target in INR, or a percentage of entry premium collected e.g. '20%'; strategy squares off and stops once reached." />
+              <Input type="text" inputMode="decimal" value={profitTarget} onChange={(e) => setProfitTarget(e.target.value)} placeholder="4000 or 20%" className={inputCls} />
+            </div>
+
+            <div className={fieldCls}>
+              <FieldLabel text="Stop Loss ₹" tip="Daily cumulative stop loss in INR, or a percentage of entry premium collected e.g. '20%'; strategy squares off and stops once breached." />
+              <Input type="text" inputMode="decimal" value={stopLoss} onChange={(e) => setStopLoss(e.target.value)} placeholder="4000 or 20%" className={inputCls} />
             </div>
           </>
         )}
@@ -506,7 +536,7 @@ function StrategyCard({ meta, state, onRefresh }: StrategyCardProps) {
         {meta.key === 'nifty_spread_trend' && (
           <>
             <div className={fieldCls}>
-              <label className={lbl}>Symbol</label>
+              <FieldLabel text="Symbol" tip="Underlying index traded (NIFTY or BANKNIFTY)." />
               <Select value={symbol} onValueChange={(v) => v && setSymbol(v)}>
                 <SelectTrigger className={inputCls}><SelectValue /></SelectTrigger>
                 <SelectContent>
@@ -516,7 +546,7 @@ function StrategyCard({ meta, state, onRefresh }: StrategyCardProps) {
               </Select>
             </div>
             <div className={fieldCls}>
-              <label className={lbl}>Timeframe</label>
+              <FieldLabel text="Timeframe" tip="Candle interval in minutes used for the EMA/Supertrend trend signal." />
               <Select value={interval} onValueChange={(v) => v && setIntervalVal(v)}>
                 <SelectTrigger className={inputCls}><SelectValue /></SelectTrigger>
                 <SelectContent>
@@ -527,15 +557,15 @@ function StrategyCard({ meta, state, onRefresh }: StrategyCardProps) {
               </Select>
             </div>
             <div className={fieldCls}>
-              <label className={lbl}>Spread Width (pts)</label>
+              <FieldLabel text="Spread Width (pts)" tip="Point gap between the short strike and the long hedge strike." />
               <Input type="number" value={spreadWidth} onChange={(e) => setSpreadWidth(parseInt(e.target.value) || 100)} className={inputCls} />
             </div>
             <div className={fieldCls}>
-              <label className={lbl}>CE Offset (pts)</label>
+              <FieldLabel text="CE Offset (pts)" tip="Points above spot for the short Call strike." />
               <Input type="number" value={ceOffset} onChange={(e) => setCeOffset(parseInt(e.target.value) || 100)} className={inputCls} />
             </div>
             <div className={fieldCls}>
-              <label className={lbl}>PE Offset (pts)</label>
+              <FieldLabel text="PE Offset (pts)" tip="Points below spot for the short Put strike." />
               <Input type="number" value={peOffset} onChange={(e) => setPeOffset(parseInt(e.target.value) || 100)} className={inputCls} />
             </div>
             <div className={fieldCls}>
@@ -547,7 +577,7 @@ function StrategyCard({ meta, state, onRefresh }: StrategyCardProps) {
                   onChange={(e) => setUseEma(e.target.checked)}
                   className="h-3.5 w-3.5 rounded border-zinc-700 bg-zinc-900 accent-emerald-500"
                 />
-                <label htmlFor={`use-ema-${meta.key}`} className={lbl}>EMA</label>
+                <label htmlFor={`use-ema-${meta.key}`} title="Enables the EMA trend filter; EMA and Supertrend must both agree to trade unless disabled" className={lbl}>EMA</label>
               </div>
               {useEma && (
                 <Input
@@ -556,6 +586,7 @@ function StrategyCard({ meta, state, onRefresh }: StrategyCardProps) {
                   onChange={(e) => setEmaPeriod(parseInt(e.target.value) || 20)}
                   className={inputCls}
                   placeholder="Period"
+                  title="EMA lookback period (bars)"
                 />
               )}
             </div>
@@ -568,7 +599,7 @@ function StrategyCard({ meta, state, onRefresh }: StrategyCardProps) {
                   onChange={(e) => setUseSupertrend(e.target.checked)}
                   className="h-3.5 w-3.5 rounded border-zinc-700 bg-zinc-900 accent-emerald-500"
                 />
-                <label htmlFor={`use-st-${meta.key}`} className={lbl}>Supertrend</label>
+                <label htmlFor={`use-st-${meta.key}`} title="Enables the Supertrend trend filter; EMA and Supertrend must both agree to trade unless disabled" className={lbl}>Supertrend</label>
               </div>
               {useSupertrend && (
                 <>
@@ -578,6 +609,7 @@ function StrategyCard({ meta, state, onRefresh }: StrategyCardProps) {
                     onChange={(e) => setSupertrendPeriod(parseInt(e.target.value) || 7)}
                     className={inputCls}
                     placeholder="Period"
+                    title="ATR lookback length for the Supertrend"
                   />
                   <Input
                     type="number"
@@ -586,6 +618,7 @@ function StrategyCard({ meta, state, onRefresh }: StrategyCardProps) {
                     onChange={(e) => setSupertrendMultiplier(parseFloat(e.target.value) || 3.0)}
                     className={inputCls}
                     placeholder="Multiplier"
+                    title="ATR multiplier controlling the Supertrend band width"
                   />
                 </>
               )}
@@ -596,15 +629,15 @@ function StrategyCard({ meta, state, onRefresh }: StrategyCardProps) {
               </div>
             )}
             <div className={fieldCls}>
-              <label className={lbl}>EOD Time</label>
+              <FieldLabel text="EOD Time" tip="Time (HH:MM IST) positions are auto-squared-off for the day." />
               <Input type="text" value={eodTime} onChange={(e) => setEodTime(e.target.value)} placeholder="15:15" className={inputCls} />
             </div>
             <div className={fieldCls}>
-              <label className={lbl}>Cooldown (min)</label>
+              <FieldLabel text="Cooldown (min)" tip="Minutes to wait after a standard exit before a new entry is allowed." />
               <Input type="number" value={cooldownMinutes} onChange={(e) => setCooldownMinutes(parseInt(e.target.value) || 5)} className={inputCls} />
             </div>
             <div className={fieldCls}>
-              <label className={lbl}>Exit on Signal Change</label>
+              <FieldLabel text="Exit on Signal Change" tip="If enabled, exits early when the EMA/Supertrend trend reverses instead of holding to SL/target/EOD." />
               <div className="flex items-center gap-2 h-7">
                 <input
                   type="checkbox"
@@ -623,7 +656,7 @@ function StrategyCard({ meta, state, onRefresh }: StrategyCardProps) {
         {meta.key === 'nifty_st_oi_bearcall' && (
           <>
             <div className={fieldCls}>
-              <label className={lbl}>Index Timeframe</label>
+              <FieldLabel text="Index Timeframe" tip="Candle interval (minutes) for the index's own Supertrend, resampled from 1-min data." />
               <Select value={indexInterval} onValueChange={(v) => v && setIndexInterval(v)}>
                 <SelectTrigger className={inputCls}><SelectValue /></SelectTrigger>
                 <SelectContent>
@@ -634,15 +667,15 @@ function StrategyCard({ meta, state, onRefresh }: StrategyCardProps) {
               </Select>
             </div>
             <div className={fieldCls}>
-              <label className={lbl}>Index ST Period</label>
+              <FieldLabel text="Index ST Period" tip="ATR lookback length for the index Supertrend." />
               <Input type="number" value={indexStPeriod} onChange={(e) => setIndexStPeriod(parseInt(e.target.value) || 10)} className={inputCls} />
             </div>
             <div className={fieldCls}>
-              <label className={lbl}>Index ST Multiplier</label>
+              <FieldLabel text="Index ST Multiplier" tip="ATR multiplier for the index Supertrend band width." />
               <Input type="number" step="0.5" value={indexStMultiplier} onChange={(e) => setIndexStMultiplier(parseFloat(e.target.value) || 2.0)} className={inputCls} />
             </div>
             <div className={fieldCls}>
-              <label className={lbl}>Option Timeframe</label>
+              <FieldLabel text="Option Timeframe" tip="Candle interval (minutes) for the candidate option's own Supertrend." />
               <Select value={optionInterval} onValueChange={(v) => v && setOptionInterval(v)}>
                 <SelectTrigger className={inputCls}><SelectValue /></SelectTrigger>
                 <SelectContent>
@@ -653,19 +686,19 @@ function StrategyCard({ meta, state, onRefresh }: StrategyCardProps) {
               </Select>
             </div>
             <div className={fieldCls}>
-              <label className={lbl}>Option ST Period</label>
+              <FieldLabel text="Option ST Period" tip="ATR lookback length for the candidate option's own Supertrend." />
               <Input type="number" value={optionStPeriod} onChange={(e) => setOptionStPeriod(parseInt(e.target.value) || 10)} className={inputCls} />
             </div>
             <div className={fieldCls}>
-              <label className={lbl}>Option ST Multiplier</label>
+              <FieldLabel text="Option ST Multiplier" tip="ATR multiplier for the option's own Supertrend band width." />
               <Input type="number" step="0.5" value={optionStMultiplier} onChange={(e) => setOptionStMultiplier(parseFloat(e.target.value) || 2.0)} className={inputCls} />
             </div>
             <div className={fieldCls}>
-              <label className={lbl}>CE Offset (pts OTM)</label>
+              <FieldLabel text="CE Offset (pts OTM)" tip="Fixed points above ATM used to lock the candidate short CE strike." />
               <Input type="number" value={stOiCeOffset} onChange={(e) => setStOiCeOffset(parseInt(e.target.value) || 100)} className={inputCls} />
             </div>
             <div className={fieldCls}>
-              <label className={lbl}>Spread Width (pts)</label>
+              <FieldLabel text="Spread Width (pts)" tip="Point gap between the short CE and the long hedge CE strike." />
               <Input type="number" value={stOiSpreadWidth} onChange={(e) => setStOiSpreadWidth(parseInt(e.target.value) || 100)} className={inputCls} />
             </div>
             <div className={fieldCls}>
@@ -677,39 +710,39 @@ function StrategyCard({ meta, state, onRefresh }: StrategyCardProps) {
                   onChange={(e) => setRequireShortBuildup(e.target.checked)}
                   className="h-3.5 w-3.5 rounded border-zinc-700 bg-zinc-900 accent-emerald-500"
                 />
-                <label htmlFor={`require-buildup-${meta.key}`} className={lbl}>Require Short Buildup</label>
+                <label htmlFor={`require-buildup-${meta.key}`} title="Also requires price-down + OI-up confirmation on the candidate strike before entry" className={lbl}>Require Short Buildup</label>
               </div>
             </div>
             {requireShortBuildup && (
               <>
                 <div className={fieldCls}>
-                  <label className={lbl}>Min Price Drop %</label>
+                  <FieldLabel text="Min Price Drop %" tip="Max allowed CE price change vs previous close for short-buildup confirmation." />
                   <Input type="number" step="0.1" value={minPriceDropPct} onChange={(e) => setMinPriceDropPct(parseFloat(e.target.value) || -0.5)} className={inputCls} />
                 </div>
                 <div className={fieldCls}>
-                  <label className={lbl}>Min OI Rise %</label>
+                  <FieldLabel text="Min OI Rise %" tip="Min required CE OI change vs previous OI for short-buildup confirmation." />
                   <Input type="number" step="0.5" value={minOiRisePct} onChange={(e) => setMinOiRisePct(parseFloat(e.target.value) || 5.0)} className={inputCls} />
                 </div>
               </>
             )}
             <div className={fieldCls}>
-              <label className={lbl}>Poll Interval (s)</label>
+              <FieldLabel text="Poll Interval (s)" tip="Seconds between checks while watching for the option's own Supertrend to turn bearish." />
               <Input type="number" value={stOiPollInterval} onChange={(e) => setStOiPollInterval(parseInt(e.target.value) || 30)} className={inputCls} />
             </div>
             <div className={fieldCls}>
-              <label className={lbl}>Max Wait (min)</label>
+              <FieldLabel text="Max Wait (min)" tip="Abandons a watch cycle and resets if no entry occurs within this many minutes of locking a candidate strike." />
               <Input type="number" value={maxWaitMinutes} onChange={(e) => setMaxWaitMinutes(parseInt(e.target.value) || 45)} className={inputCls} />
             </div>
             <div className={fieldCls}>
-              <label className={lbl}>EOD Time</label>
+              <FieldLabel text="EOD Time" tip="Time (HH:MM IST) positions are auto-squared-off for the day." />
               <Input type="text" value={stOiEodTime} onChange={(e) => setStOiEodTime(e.target.value)} placeholder="15:15" className={inputCls} />
             </div>
             <div className={fieldCls}>
-              <label className={lbl}>Cooldown (min)</label>
+              <FieldLabel text="Cooldown (min)" tip="Minutes to wait after an exit or abandoned watch cycle before scanning again." />
               <Input type="number" value={stOiCooldownMinutes} onChange={(e) => setStOiCooldownMinutes(parseInt(e.target.value) || 5)} className={inputCls} />
             </div>
             <div className={fieldCls}>
-              <label className={lbl}>Exit on Index ST Flip</label>
+              <FieldLabel text="Exit on Index ST Flip" tip="If enabled, exits early if the index Supertrend flips back bullish." />
               <div className="flex items-center gap-2 h-7">
                 <input
                   type="checkbox"
@@ -722,7 +755,7 @@ function StrategyCard({ meta, state, onRefresh }: StrategyCardProps) {
               </div>
             </div>
             <div className={fieldCls}>
-              <label className={lbl}>Exit on Option ST Flip</label>
+              <FieldLabel text="Exit on Option ST Flip" tip="If enabled, exits early if the short option's own Supertrend flips back bullish." />
               <div className="flex items-center gap-2 h-7">
                 <input
                   type="checkbox"
@@ -741,19 +774,19 @@ function StrategyCard({ meta, state, onRefresh }: StrategyCardProps) {
         {meta.key === 'nifty_oi_directional' && (
           <>
             <div className={fieldCls}>
-              <label className={lbl}>PCR Threshold</label>
+              <FieldLabel text="PCR Threshold" tip="PCR level above which a PE is sold (bullish); CE entry threshold is the reciprocal (1/X)." />
               <Input type="number" step="0.1" value={pcrThreshold} onChange={(e) => setPcrThreshold(parseFloat(e.target.value) || 1.5)} className={inputCls} />
             </div>
             <div className={fieldCls}>
-              <label className={lbl}>Exit PCR Change (%)</label>
+              <FieldLabel text="Exit PCR Change (%)" tip="% change in the held strike's PCR from its entry level that triggers an exit." />
               <Input type="number" value={exitPcrChange} onChange={(e) => setExitPcrChange(parseInt(e.target.value) || 30)} className={inputCls} />
             </div>
             <div className={fieldCls}>
-              <label className={lbl}>Poll Interval (s)</label>
+              <FieldLabel text="Poll Interval (s)" tip="Seconds between option-chain/OI snapshot fetches." />
               <Input type="number" value={pollInterval} onChange={(e) => setPollInterval(parseInt(e.target.value) || 60)} className={inputCls} />
             </div>
             <div className={fieldCls}>
-              <label className={lbl}>Expansion Window</label>
+              <FieldLabel text="Expansion Window" tip="Number of OI snapshots required before a direction is trusted and entries are allowed." />
               <Input type="number" value={expansionWindow} onChange={(e) => setExpansionWindow(parseInt(e.target.value) || 3)} className={inputCls} />
             </div>
           </>
@@ -763,7 +796,7 @@ function StrategyCard({ meta, state, onRefresh }: StrategyCardProps) {
         {meta.key === 'crudeoilm_supertrend' && (
           <>
             <div className={fieldCls}>
-              <label className={lbl}>Timeframe</label>
+              <FieldLabel text="Timeframe" tip="Candle interval in minutes used for the Supertrend signal." />
               <Select value={crudeoilInterval} onValueChange={(v) => v && setCrudeoilInterval(v)}>
                 <SelectTrigger className={inputCls}><SelectValue /></SelectTrigger>
                 <SelectContent>
@@ -775,7 +808,7 @@ function StrategyCard({ meta, state, onRefresh }: StrategyCardProps) {
               </Select>
             </div>
             <div className={fieldCls}>
-              <label className={lbl}>ST Period</label>
+              <FieldLabel text="ST Period" tip="ATR lookback length for the Supertrend." />
               <Input
                 type="number"
                 value={crudeoilStPeriod}
@@ -785,7 +818,7 @@ function StrategyCard({ meta, state, onRefresh }: StrategyCardProps) {
               />
             </div>
             <div className={fieldCls}>
-              <label className={lbl}>ST Multiplier</label>
+              <FieldLabel text="ST Multiplier" tip="ATR multiplier for the Supertrend band width; becomes the trailing stop level." />
               <Input
                 type="number"
                 step="0.5"
@@ -796,7 +829,7 @@ function StrategyCard({ meta, state, onRefresh }: StrategyCardProps) {
               />
             </div>
             <div className={fieldCls}>
-              <label className={lbl}>Start Time</label>
+              <FieldLabel text="Start Time" tip="Time (HH:MM IST) the strategy begins monitoring for entries." />
               <Input
                 type="text"
                 value={crudeoilStartTime}
@@ -806,7 +839,7 @@ function StrategyCard({ meta, state, onRefresh }: StrategyCardProps) {
               />
             </div>
             <div className={fieldCls}>
-              <label className={lbl}>EOD Time</label>
+              <FieldLabel text="EOD Time" tip="Time (HH:MM IST) the position is flattened for the day." />
               <Input
                 type="text"
                 value={crudeoilEodTime}
@@ -816,7 +849,7 @@ function StrategyCard({ meta, state, onRefresh }: StrategyCardProps) {
               />
             </div>
             <div className={fieldCls}>
-              <label className={lbl}>VWAP Filter</label>
+              <FieldLabel text="VWAP Filter" tip="Uses session VWAP as an additional exit signal alongside the Supertrend trail." />
               <div className="flex items-center gap-2 h-7">
                 <input
                   type="checkbox"
@@ -837,7 +870,7 @@ function StrategyCard({ meta, state, onRefresh }: StrategyCardProps) {
         {meta.key === 'crudeoilm_renko_sar' && (
           <>
             <div className={fieldCls}>
-              <label className={lbl}>Timeframe</label>
+              <FieldLabel text="Timeframe" tip="Source candle interval (minutes) used to build the Renko brick series." />
               <Select value={crudeoilInterval} onValueChange={(v) => v && setCrudeoilInterval(v)}>
                 <SelectTrigger className={inputCls}><SelectValue /></SelectTrigger>
                 <SelectContent>
@@ -849,7 +882,7 @@ function StrategyCard({ meta, state, onRefresh }: StrategyCardProps) {
               </Select>
             </div>
             <div className={fieldCls}>
-              <label className={lbl}>Brick Size (pts)</label>
+              <FieldLabel text="Brick Size (pts)" tip="Point size of each Renko brick." />
               <Input
                 type="number"
                 step="0.5"
@@ -860,7 +893,7 @@ function StrategyCard({ meta, state, onRefresh }: StrategyCardProps) {
               />
             </div>
             <div className={fieldCls}>
-              <label className={lbl}>Reverse Bricks</label>
+              <FieldLabel text="Reverse Bricks" tip="Consecutive opposite-colored bricks required to flip the held position." />
               <Input
                 type="number"
                 value={renkoReverseBricks}
@@ -870,7 +903,7 @@ function StrategyCard({ meta, state, onRefresh }: StrategyCardProps) {
               />
             </div>
             <div className={fieldCls}>
-              <label className={lbl}>Start Time</label>
+              <FieldLabel text="Start Time" tip="Time (HH:MM IST) the strategy begins trading." />
               <Input
                 type="text"
                 value={crudeoilStartTime}
@@ -880,7 +913,7 @@ function StrategyCard({ meta, state, onRefresh }: StrategyCardProps) {
               />
             </div>
             <div className={fieldCls}>
-              <label className={lbl}>EOD Time</label>
+              <FieldLabel text="EOD Time" tip="Time (HH:MM IST) the position is flattened for the day (otherwise always-in)." />
               <Input
                 type="text"
                 value={crudeoilEodTime}
@@ -895,7 +928,7 @@ function StrategyCard({ meta, state, onRefresh }: StrategyCardProps) {
         {/* Straddle-specific */}
         {meta.key === 'nifty_value_imbalance_straddle' && (
           <div className={fieldCls}>
-            <label className={lbl}>Balance Threshold (%)</label>
+            <FieldLabel text="Balance Threshold (%)" tip="Max CE/PE premium difference allowed at entry; trade only enters when imbalance is below this." />
             <Input type="number" step="0.5" value={entryBalanceThreshold} onChange={(e) => setEntryBalanceThreshold(parseFloat(e.target.value) || 15.0)} className={inputCls} />
           </div>
         )}
@@ -906,11 +939,11 @@ function StrategyCard({ meta, state, onRefresh }: StrategyCardProps) {
           meta.key === 'nifty_value_imbalance_strangle') && (
           <>
             <div className={fieldCls}>
-              <label className={lbl}>Trail Start (%)</label>
+              <FieldLabel text="Trail Start (%)" tip="Arms the trailing stop once profit reaches this % of entry combined premium." />
               <Input type="number" step="0.5" value={trailStartPct} onChange={(e) => setTrailStartPct(parseFloat(e.target.value) || 5.0)} min={0.5} className={inputCls} />
             </div>
             <div className={fieldCls}>
-              <label className={lbl}>Trail Gap (pts)</label>
+              <FieldLabel text="Trail Gap (pts)" tip="Once armed, exits if combined premium rises this many points above its lowest point since arming." />
               <Input type="number" step="0.5" value={trailGapPts} onChange={(e) => setTrailGapPts(parseFloat(e.target.value) || 15.0)} min={0.5} className={inputCls} />
             </div>
           </>
@@ -920,23 +953,23 @@ function StrategyCard({ meta, state, onRefresh }: StrategyCardProps) {
         {meta.key === 'nifty_vwap_1min_straddle' && (
           <>
             <div className={fieldCls}>
-              <label className={lbl}>Entry Band (pts)</label>
+              <FieldLabel text="Entry Band (pts)" tip="Max points above the straddle's VWAP at which entry is still allowed." />
               <Input type="number" step="0.5" value={entryBand} onChange={(e) => setEntryBand(parseFloat(e.target.value) || 5.0)} className={inputCls} />
             </div>
             <div className={fieldCls}>
-              <label className={lbl}>Decline Ticks</label>
+              <FieldLabel text="Decline Ticks" tip="Number of recent WebSocket ticks over which combined premium must be falling before entry." />
               <Input type="number" value={declineTicks} onChange={(e) => setDeclineTicks(parseInt(e.target.value) || 5)} className={inputCls} />
             </div>
             <div className={fieldCls}>
-              <label className={lbl}>Exit Buffer (pts)</label>
+              <FieldLabel text="Exit Buffer (pts)" tip="Points above VWAP that trigger exit (buy back both legs); should stay ≥ Entry Band." />
               <Input type="number" step="0.5" value={exitBuffer} onChange={(e) => setExitBuffer(parseFloat(e.target.value) || 10.0)} className={inputCls} />
             </div>
             <div className={fieldCls}>
-              <label className={lbl}>Max Premium Diff (%)</label>
+              <FieldLabel text="Max Premium Diff (%)" tip="Max allowed % difference between CE and PE premiums for entry to be considered balanced." />
               <Input type="number" step="0.5" value={maxPremiumDiff} onChange={(e) => setMaxPremiumDiff(parseFloat(e.target.value) || 15.0)} className={inputCls} />
             </div>
             <div className={fieldCls}>
-              <label className={lbl}>VWAP Warmup (bars)</label>
+              <FieldLabel text="VWAP Warmup (bars)" tip="Minimum completed 1-min bars required before VWAP is trusted for trade decisions." />
               <Input type="number" value={vwapWarmupBars} onChange={(e) => setVwapWarmupBars(parseInt(e.target.value) || 10)} className={inputCls} />
             </div>
           </>
@@ -945,7 +978,7 @@ function StrategyCard({ meta, state, onRefresh }: StrategyCardProps) {
         {meta.key === 'nifty_advanced_imbalance' && (
           <>
             <div className={fieldCls}>
-              <label className={lbl}>Mode</label>
+              <FieldLabel text="Mode" tip="Adjustment logic on imbalance: rolls/hedges/adds lots to the winning or losing leg, or runs independent per-leg re-entry." />
               <Select value={mode} onValueChange={(v) => v && setMode(v)}>
                 <SelectTrigger className={inputCls}><SelectValue /></SelectTrigger>
                 <SelectContent>
@@ -959,25 +992,25 @@ function StrategyCard({ meta, state, onRefresh }: StrategyCardProps) {
             </div>
             {mode === 'loser_ratio_roll' && (
               <div className={fieldCls}>
-                <label className={lbl}>Ratio Lots</label>
+                <FieldLabel text="Ratio Lots" tip="Lots added to the rolled losing leg on each adjustment." />
                 <Input type="number" value={loserRatioLots} onChange={(e) => setLoserRatioLots(parseInt(e.target.value) || 1)} min={1} max={20} className={inputCls} />
               </div>
             )}
             {mode === 'reentry_straddle' && (
               <>
                 <div className={fieldCls}>
-                  <label className={lbl}>Trail Buffer (pts)</label>
+                  <FieldLabel text="Trail Buffer (pts)" tip="Points of pullback from the best combined premium allowed before the combined trailing exit triggers." />
                   <Input type="number" step="0.5" value={trailCombinedBuffer} onChange={(e) => setTrailCombinedBuffer(parseFloat(e.target.value) || 1.0)} min={0.1} className={inputCls} />
                 </div>
                 <div className={fieldCls}>
-                  <label className={lbl}>Leg SL (%)</label>
+                  <FieldLabel text="Leg SL (%)" tip="Per-leg stop loss as a % of entry premium; only that leg exits and re-enters, the other keeps running." />
                   <Input type="number" step="1" value={Math.round(legSlPct * 100)} onChange={(e) => setLegSlPct((parseInt(e.target.value) || 20) / 100)} min={1} max={100} className={inputCls} />
                 </div>
               </>
             )}
             {mode !== 'reentry_straddle' && (
               <div className={fieldCls}>
-                <label className={lbl}>Entry Type</label>
+                <FieldLabel text="Entry Type" tip="Sell an ATM straddle (CE+PE at spot) or an OTM strangle (offset CE/PE strikes)." />
                 <Select value={entryType} onValueChange={(v) => v && setEntryType(v)}>
                   <SelectTrigger className={inputCls}><SelectValue /></SelectTrigger>
                   <SelectContent>
@@ -994,7 +1027,7 @@ function StrategyCard({ meta, state, onRefresh }: StrategyCardProps) {
           (meta.key === 'nifty_advanced_imbalance' && entryType === 'strangle' && mode !== 'reentry_straddle')) && (
           <>
             <div className={fieldCls}>
-              <label className={lbl}>Strike Selection</label>
+              <FieldLabel text="Strike Selection" tip="How strangle strikes are chosen: fixed point distance, target option delta, or target premium value." />
               <Select value={strikeSelection} onValueChange={(v) => v && setStrikeSelection(v)}>
                 <SelectTrigger className={inputCls}><SelectValue /></SelectTrigger>
                 <SelectContent>
@@ -1007,24 +1040,24 @@ function StrategyCard({ meta, state, onRefresh }: StrategyCardProps) {
             {strikeSelection === 'distance' && (
               <>
                 <div className={fieldCls}>
-                  <label className={lbl}>CE Offset (pts)</label>
+                  <FieldLabel text="CE Offset (pts)" tip="Points above spot for the Call strike." />
                   <Input type="number" value={ceOffset} onChange={(e) => setCeOffset(parseInt(e.target.value) || 200)} className={inputCls} />
                 </div>
                 <div className={fieldCls}>
-                  <label className={lbl}>PE Offset (pts)</label>
+                  <FieldLabel text="PE Offset (pts)" tip="Points below spot for the Put strike." />
                   <Input type="number" value={peOffset} onChange={(e) => setPeOffset(parseInt(e.target.value) || 200)} className={inputCls} />
                 </div>
               </>
             )}
             {strikeSelection === 'delta' && (
               <div className={fieldCls}>
-                <label className={lbl}>Target Delta</label>
+                <FieldLabel text="Target Delta" tip="Target absolute option delta used to pick the CE/PE strikes." />
                 <Input type="number" step="0.01" value={targetDelta} onChange={(e) => setTargetDelta(parseFloat(e.target.value) || 0.20)} className={inputCls} />
               </div>
             )}
             {strikeSelection === 'premium' && (
               <div className={fieldCls}>
-                <label className={lbl}>Target Premium ₹</label>
+                <FieldLabel text="Target Premium ₹" tip="Target premium value used to pick the CE/PE strikes." />
                 <Input type="number" value={targetPremium} onChange={(e) => setTargetPremium(parseFloat(e.target.value) || 50.0)} className={inputCls} />
               </div>
             )}

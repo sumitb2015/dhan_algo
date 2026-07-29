@@ -12,7 +12,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 
 from login import get_dhan_client
 from lib.dhan_helper import DhanHelper
-from lib.strategy_state_helper import save_strategy_state, check_shutdown_trigger, exit_if_market_closed
+from lib.strategy_state_helper import save_strategy_state, check_shutdown_trigger, exit_if_market_closed, parse_target_spec
 
 STRATEGY_KEY = "nifty_st_oi_bearcall"
 
@@ -65,7 +65,8 @@ class NiftySTOIBearCallStrategy:
                  ce_offset=100, spread_width=100,
                  require_short_buildup=False, min_price_drop_pct=-0.5, min_oi_rise_pct=5.0,
                  poll_interval=30, max_wait_minutes=45,
-                 lots=1, target_profit=2000.0, stop_loss=2000.0,
+                 lots=1, target_profit=2000.0, target_profit_is_pct=False,
+                 stop_loss=2000.0, stop_loss_is_pct=False,
                  exit_on_signal_flip=True, exit_on_option_st_flip=True,
                  eod_time="15:15", cooldown_minutes=5, min_hold_minutes=5,
                  product_type="INTRADAY"):
@@ -85,8 +86,14 @@ class NiftySTOIBearCallStrategy:
         self.poll_interval = poll_interval
         self.max_wait_minutes = max_wait_minutes
         self.lots = lots
-        self.target_profit = target_profit
-        self.stop_loss = -abs(stop_loss)  # Ensure SL is a negative number
+        # Target/SL may be an absolute INR amount or a percentage of entry net
+        # credit (resolved once the position is actually entered, see below).
+        self.target_is_pct = target_profit_is_pct
+        self.stop_is_pct = stop_loss_is_pct
+        self.target_pct = target_profit if target_profit_is_pct else None
+        self.stop_pct = stop_loss if stop_loss_is_pct else None
+        self.target_profit = None if target_profit_is_pct else target_profit
+        self.stop_loss = None if stop_loss_is_pct else -abs(stop_loss)  # Ensure SL is a negative number
         self.exit_on_signal_flip = exit_on_signal_flip
         self.exit_on_option_st_flip = exit_on_option_st_flip
         self.eod_time = eod_time
@@ -587,6 +594,15 @@ class NiftySTOIBearCallStrategy:
         else:
             logger.info("[DRY RUN] Simulating Position Entry.")
 
+        if self.target_is_pct or self.stop_is_pct:
+            entry_value = (self.short_entry_price - self.long_entry_price) * total_qty
+            if self.target_is_pct:
+                self.target_profit = entry_value * self.target_pct / 100.0
+                logger.info(f"Resolved profit target: {self.target_pct}% of entry credit INR{entry_value:.0f} = INR{self.target_profit:.0f}")
+            if self.stop_is_pct:
+                self.stop_loss = -abs(entry_value * self.stop_pct / 100.0)
+                logger.info(f"Resolved stop loss: {self.stop_pct}% of entry credit INR{entry_value:.0f} = -INR{abs(self.stop_loss):.0f}")
+
         self.phase = "ENTERED"
         self.entry_time = datetime.now()
         self.candidate_strike = None
@@ -875,10 +891,12 @@ Examples:
     parser.add_argument("--lots", type=int, default=1,
                         help="Number of lots to trade per spread leg (default: 1)")
 
-    parser.add_argument("--target-profit", "--total-profit", type=float, default=2000.0,
-                        help="Global daily profit target in INR (default: 2000.0)")
-    parser.add_argument("--stop-loss", "--total-loss", type=float, default=2000.0,
-                        help="Global daily stop loss in INR (default: 2000.0). Can be passed as positive or negative.")
+    parser.add_argument("--target-profit", "--total-profit", type=str, default="2000",
+                        help="Global daily profit target in INR, or a percentage of entry net credit "
+                             "e.g. '20%%' (default: 2000)")
+    parser.add_argument("--stop-loss", "--total-loss", type=str, default="2000",
+                        help="Global daily stop loss in INR, or a percentage of entry net credit "
+                             "e.g. '20%%' (default: 2000)")
 
     parser.add_argument("--no-exit-on-signal-flip", action="store_false", dest="exit_on_signal_flip",
                         default=True, help="Do not exit position early if the index Supertrend flips bullish (hold until SL/Target/EOD)")
@@ -896,13 +914,22 @@ Examples:
 
     args = parser.parse_args()
 
+    try:
+        target_val, target_is_pct = parse_target_spec(args.target_profit)
+        stop_val, stop_is_pct = parse_target_spec(args.stop_loss)
+    except ValueError as e:
+        logger.error(f"[CONFIG ERROR] {e}")
+        sys.exit(1)
+
     mode_label = "LIVE" if args.live else "DRY"
+    target_label = f"{target_val:.0f}%" if target_is_pct else f"₹{target_val:.0f}"
+    stop_label = f"-{abs(stop_val):.0f}%" if stop_is_pct else f"-₹{abs(stop_val):.0f}"
     logger.info("=" * 60)
     logger.info(f"LAUNCHING NIFTY ST+OI BEAR CALL SPREAD STRATEGY IN {mode_label} MODE")
     logger.info(f"Underlying: {args.symbol} | Index ST({args.index_st_period},{args.index_st_multiplier}) @{args.index_interval}m | Option ST({args.option_st_period},{args.option_st_multiplier}) @{args.option_interval}m")
     buildup_label = f"price<={args.min_price_drop_pct}% & OI>={args.min_oi_rise_pct}%" if args.require_short_buildup else "DISABLED"
     logger.info(f"CE Offset: +{args.ce_offset} | Spread Width: {args.spread_width} | Short-Buildup Filter: {buildup_label}")
-    logger.info(f"Lots: {args.lots} | Target Profit: ₹{args.target_profit:.0f} | Stop Loss: -₹{abs(args.stop_loss):.0f}")
+    logger.info(f"Lots: {args.lots} | Target Profit: {target_label} | Stop Loss: {stop_label}")
     logger.info(f"Poll Interval: {args.poll_interval}s | Max Wait: {args.max_wait_minutes}m | Cooldown: {args.cooldown_minutes}m | Min Hold: {args.min_hold_minutes}m")
     logger.info(f"Exit on Index ST Flip: {args.exit_on_signal_flip} | Exit on Option ST Flip: {args.exit_on_option_st_flip} | EOD: {args.eod_time}")
     logger.info("=" * 60)
@@ -924,8 +951,10 @@ Examples:
         poll_interval=args.poll_interval,
         max_wait_minutes=args.max_wait_minutes,
         lots=args.lots,
-        target_profit=args.target_profit,
-        stop_loss=args.stop_loss,
+        target_profit=target_val,
+        target_profit_is_pct=target_is_pct,
+        stop_loss=stop_val,
+        stop_loss_is_pct=stop_is_pct,
         exit_on_signal_flip=args.exit_on_signal_flip,
         exit_on_option_st_flip=args.exit_on_option_st_flip,
         eod_time=args.eod_time,

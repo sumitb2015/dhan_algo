@@ -43,7 +43,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 
 from login import get_dhan_client
 from lib.dhan_helper import DhanHelper
-from lib.strategy_state_helper import save_strategy_state, check_shutdown_trigger, exit_if_market_closed
+from lib.strategy_state_helper import save_strategy_state, check_shutdown_trigger, exit_if_market_closed, parse_target_spec
 
 # ── Logging setup ────────────────────────────────────────────────────────────
 project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -87,7 +87,9 @@ class NiftyOIDirectional:
         poll_interval: int = 60,
         expansion_window: int = 3,
         profit_target: float = 5000.0,
+        profit_target_is_pct: bool = False,
         stop_loss: float = 5000.0,
+        stop_loss_is_pct: bool = False,
     ):
         self.dry_run = dry_run
         self.lots = lots
@@ -96,8 +98,14 @@ class NiftyOIDirectional:
         self.exit_pcr_change_pct = exit_pcr_change_pct
         self.poll_interval = poll_interval
         self.expansion_window = expansion_window
-        self.profit_target = profit_target
-        self.stop_loss = -abs(stop_loss)
+        # Target/SL may be an absolute INR amount or a percentage of entry premium
+        # collected (resolved once the position is actually entered, see below).
+        self.target_is_pct = profit_target_is_pct
+        self.stop_is_pct = stop_loss_is_pct
+        self.target_pct = profit_target if profit_target_is_pct else None
+        self.stop_pct = stop_loss if stop_loss_is_pct else None
+        self.profit_target = None if profit_target_is_pct else profit_target
+        self.stop_loss = None if stop_loss_is_pct else -abs(stop_loss)
 
         self.dhan = get_dhan_client()
         if not self.dhan:
@@ -296,6 +304,8 @@ class NiftyOIDirectional:
                 "total_pnl": round(self._total_pnl(current_ltp), 2),
                 "spot": round(spot, 2),
                 "pcr_threshold": self.pcr_threshold,
+                "profit_target": self.profit_target,
+                "stop_loss": self.stop_loss,
             },
         )
 
@@ -432,6 +442,15 @@ class NiftyOIDirectional:
         self.sold_security_id = security_id
         self.avg_price = fill_price
         self.entry_pcr = pcr
+
+        if self.target_is_pct or self.stop_is_pct:
+            entry_value = self.avg_price * qty
+            if self.target_is_pct:
+                self.profit_target = entry_value * self.target_pct / 100.0
+                logger.info(f"Resolved profit target: {self.target_pct}% of entry premium INR{entry_value:.0f} = INR{self.profit_target:.0f}")
+            if self.stop_is_pct:
+                self.stop_loss = -abs(entry_value * self.stop_pct / 100.0)
+                logger.info(f"Resolved stop loss: {self.stop_pct}% of entry premium INR{entry_value:.0f} = -INR{abs(self.stop_loss):.0f}")
 
         if option_type == "PE":
             # Exit when PCR drops by exit_pcr_change_pct%
@@ -679,12 +698,21 @@ Examples:
     parser.add_argument("--expansion-window", type=int, default=3, metavar="N",
                         help="Min OI snapshots before direction is trusted and entries are allowed (default: 3). "
                              "Time to first entry = expansion_window × poll_interval seconds.")
-    parser.add_argument("--target-profit", type=float, default=5000.0, metavar="INR",
-                        help="Global profit target in INR (default: 5000)")
-    parser.add_argument("--stop-loss", type=float, default=5000.0, metavar="INR",
-                        help="Global stop loss in INR, positive value (default: 5000)")
+    parser.add_argument("--target-profit", type=str, default="5000", metavar="INR",
+                        help="Global profit target in INR, or a percentage of entry premium collected "
+                             "e.g. '20%%' (default: 5000)")
+    parser.add_argument("--stop-loss", type=str, default="5000", metavar="INR",
+                        help="Global stop loss in INR, or a percentage of entry premium collected "
+                             "e.g. '20%%' (default: 5000)")
 
     args = parser.parse_args()
+
+    try:
+        target_val, target_is_pct = parse_target_spec(args.target_profit)
+        stop_val, stop_is_pct = parse_target_spec(args.stop_loss)
+    except ValueError as e:
+        logger.error(f"[CONFIG ERROR] {e}")
+        sys.exit(1)
 
     logger.info(
         f"Config | mode={'LIVE' if args.live else 'DRY'} lots={args.lots}"
@@ -693,7 +721,7 @@ Examples:
         f" exit_pcr_change={args.exit_pcr_change}%"
         f" poll={args.poll_interval}s"
         f" expansion_window={args.expansion_window}"
-        f" target={args.target_profit} sl={args.stop_loss}"
+        f" target={target_val}{'%' if target_is_pct else ''} sl={stop_val}{'%' if stop_is_pct else ''}"
     )
 
     strategy = NiftyOIDirectional(
@@ -704,8 +732,10 @@ Examples:
         exit_pcr_change_pct=args.exit_pcr_change,
         poll_interval=args.poll_interval,
         expansion_window=args.expansion_window,
-        profit_target=args.target_profit,
-        stop_loss=args.stop_loss,
+        profit_target=target_val,
+        profit_target_is_pct=target_is_pct,
+        stop_loss=stop_val,
+        stop_loss_is_pct=stop_is_pct,
     )
 
     try:

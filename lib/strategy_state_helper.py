@@ -102,6 +102,29 @@ def save_strategy_state(strategy_name, state_dict):
     except Exception as e:
         logger.error(f"Failed to queue strategy state for {strategy_name}: {e}")
 
+def parse_target_spec(raw):
+    """
+    Parses a --target-profit / --stop-loss CLI value that may be an absolute
+    rupee amount ("4000") or a percentage of entry value ("20%").
+
+    Returns (value, is_percent): if is_percent is True, value is the percent
+    (0-100) to resolve against the strategy's entry value once known; otherwise
+    value is the absolute rupee amount, exactly as before this feature existed.
+
+    Raises ValueError with a clear message on unparseable input.
+    """
+    s = str(raw).strip()
+    if s.endswith('%'):
+        try:
+            return float(s[:-1].strip()), True
+        except ValueError:
+            raise ValueError(f"Invalid percentage value {raw!r} — expected e.g. '20%'")
+    try:
+        return float(s), False
+    except ValueError:
+        raise ValueError(f"Invalid target/stop-loss value {raw!r} — expected a number or a percentage like '20%'")
+
+
 def exit_if_market_closed(helper, dry_run=False):
     """Exit immediately if the NSE market is not currently open. No-op in dry_run mode."""
     if dry_run:

@@ -11,7 +11,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 
 from login import get_dhan_client
 from lib.dhan_helper import DhanHelper
-from lib.strategy_state_helper import save_strategy_state, check_shutdown_trigger, exit_if_market_closed
+from lib.strategy_state_helper import save_strategy_state, check_shutdown_trigger, exit_if_market_closed, parse_target_spec
 
 # Setup Logging
 project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -40,7 +40,8 @@ class NiftyExpiry:
                  use_delta=False, target_delta=0.20,
                  use_premium=False, target_premium=50.0,
                  leg_sl_pct=40.0, adjustment_mode="c2c", max_adjustments=3,
-                 profit_target=4000.0, stop_loss=4000.0,
+                 profit_target=4000.0, profit_target_is_pct=False,
+                 stop_loss=4000.0, stop_loss_is_pct=False,
                  start_time="09:20", eod_time="15:15",
                  imbalance_threshold=50.0, max_lots=4, min_adjust_price=10.0,
                  post_sl_balance=False, product_type="INTRADAY"):
@@ -56,8 +57,14 @@ class NiftyExpiry:
         self.leg_sl_pct = leg_sl_pct
         self.adjustment_mode = adjustment_mode.lower()
         self.max_adjustments = max_adjustments
-        self.profit_target = profit_target
-        self.stop_loss = -abs(stop_loss)  # Ensure it is negative
+        # Target/SL may be an absolute INR amount or a percentage of entry premium
+        # collected (resolved once the position is actually entered, see below).
+        self.target_is_pct = profit_target_is_pct
+        self.stop_is_pct = stop_loss_is_pct
+        self.target_pct = profit_target if profit_target_is_pct else None
+        self.stop_pct = stop_loss if stop_loss_is_pct else None
+        self.profit_target = None if profit_target_is_pct else profit_target
+        self.stop_loss = None if stop_loss_is_pct else -abs(stop_loss)  # Ensure it is negative
         self.start_time = start_time
         self.eod_time = eod_time
         self.imbalance_threshold = imbalance_threshold
@@ -489,6 +496,15 @@ class NiftyExpiry:
             max_val = max(ce_val, pe_val)
             self.entry_diff_pct = abs(ce_val - pe_val) / max_val * 100 if max_val > 0 else 0.0
             logger.info(f"Initial entry imbalance: {self.entry_diff_pct:.2f}%")
+
+            if self.target_is_pct or self.stop_is_pct:
+                entry_value = self.ce_avg_price * self.ce_qty + self.pe_avg_price * self.pe_qty
+                if self.target_is_pct:
+                    self.profit_target = entry_value * self.target_pct / 100.0
+                    logger.info(f"Resolved profit target: {self.target_pct}% of entry premium INR{entry_value:.0f} = INR{self.profit_target:.0f}")
+                if self.stop_is_pct:
+                    self.stop_loss = -abs(entry_value * self.stop_pct / 100.0)
+                    logger.info(f"Resolved stop loss: {self.stop_pct}% of entry premium INR{entry_value:.0f} = -INR{abs(self.stop_loss):.0f}")
 
             # Calculate and round Stop Losses (round to nearest 0.05 tick)
             self.ce_sl_price = round(self.ce_avg_price * (1 + self.leg_sl_pct / 100) * 20) / 20
@@ -1271,10 +1287,12 @@ if __name__ == "__main__":
                         help="Adjustment mode (default: c2c)")
     parser.add_argument("--max-adjustments", type=int, default=3,
                         help="Maximum adjustments/rolls permitted per session (default: 3)")
-    parser.add_argument("--target-profit", type=float, default=4000.0,
-                        help="Global target profit in INR (default: 4000.0)")
-    parser.add_argument("--stop-loss", type=float, default=4000.0,
-                        help="Global stop loss in INR (default: 4000.0)")
+    parser.add_argument("--target-profit", type=str, default="4000",
+                        help="Global target profit in INR, or a percentage of entry premium collected "
+                             "e.g. '20%%' (default: 4000)")
+    parser.add_argument("--stop-loss", type=str, default="4000",
+                        help="Global stop loss in INR, or a percentage of entry premium collected "
+                             "e.g. '20%%' (default: 4000)")
     parser.add_argument("--start-time", type=str, default="09:20",
                         help="Market entry time in HH:MM IST (default: 09:20)")
     parser.add_argument("--eod-time", type=str, default="15:15",
@@ -1292,6 +1310,13 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
 
+    try:
+        target_val, target_is_pct = parse_target_spec(args.target_profit)
+        stop_val, stop_is_pct = parse_target_spec(args.stop_loss)
+    except ValueError as e:
+        logger.error(f"[CONFIG ERROR] {e}")
+        sys.exit(1)
+
     strategy = NiftyExpiry(
         dry_run=not args.live,
         lots=args.lots,
@@ -1305,8 +1330,10 @@ if __name__ == "__main__":
         leg_sl_pct=args.leg_sl_pct,
         adjustment_mode=args.adjustment,
         max_adjustments=args.max_adjustments,
-        profit_target=args.target_profit,
-        stop_loss=args.stop_loss,
+        profit_target=target_val,
+        profit_target_is_pct=target_is_pct,
+        stop_loss=stop_val,
+        stop_loss_is_pct=stop_is_pct,
         start_time=args.start_time,
         eod_time=args.eod_time,
         imbalance_threshold=args.imbalance_threshold,

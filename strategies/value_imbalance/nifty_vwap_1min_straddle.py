@@ -56,7 +56,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 
 from login import get_dhan_client
 from lib.dhan_helper import DhanHelper
-from lib.strategy_state_helper import save_strategy_state, check_shutdown_trigger, exit_if_market_closed
+from lib.strategy_state_helper import save_strategy_state, check_shutdown_trigger, exit_if_market_closed, parse_target_spec
 
 # ── Logging setup ────────────────────────────────────────────────────────────
 project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -107,7 +107,9 @@ class NiftyVWAP1MinStraddle:
         max_premium_diff_pct: float = 15.0,
         vwap_warmup_bars: int = 10,
         profit_target: float = 4000.0,
+        profit_target_is_pct: bool = False,
         stop_loss: float = 4000.0,
+        stop_loss_is_pct: bool = False,
         max_loss_per_trade: float = 1500.0,
         max_trades_per_day: int = 15,
         cooldown_seconds: int = 90,
@@ -121,8 +123,14 @@ class NiftyVWAP1MinStraddle:
         self.exit_buffer = exit_buffer
         self.max_premium_diff_pct = max_premium_diff_pct
         self.vwap_warmup_bars = vwap_warmup_bars
-        self.profit_target = profit_target
-        self.stop_loss = -abs(stop_loss)
+        # Target/SL may be an absolute INR amount or a percentage of entry premium
+        # collected (resolved once the position is actually entered, see below).
+        self.target_is_pct = profit_target_is_pct
+        self.stop_is_pct = stop_loss_is_pct
+        self.target_pct = profit_target if profit_target_is_pct else None
+        self.stop_pct = stop_loss if stop_loss_is_pct else None
+        self.profit_target = None if profit_target_is_pct else profit_target
+        self.stop_loss = None if stop_loss_is_pct else -abs(stop_loss)
         self.max_loss_per_trade = max_loss_per_trade
         self.max_trades_per_day = max_trades_per_day
         self.cooldown_seconds = cooldown_seconds
@@ -522,6 +530,16 @@ class NiftyVWAP1MinStraddle:
         self.ce_avg = ce_fill
         self.pe_avg = pe_fill
         self.entry_combined = ce_fill + pe_fill
+
+        if self.target_is_pct or self.stop_is_pct:
+            entry_value = self.entry_combined * qty
+            if self.target_is_pct:
+                self.profit_target = entry_value * self.target_pct / 100.0
+                logger.info(f"Resolved profit target: {self.target_pct}% of entry premium INR{entry_value:.0f} = INR{self.profit_target:.0f}")
+            if self.stop_is_pct:
+                self.stop_loss = -abs(entry_value * self.stop_pct / 100.0)
+                logger.info(f"Resolved stop loss: {self.stop_pct}% of entry premium INR{entry_value:.0f} = -INR{abs(self.stop_loss):.0f}")
+
         self.in_position = True
         self.ce_closed = False
         self.pe_closed = False
@@ -913,10 +931,12 @@ Examples:
                         help="Max CE/PE premium difference %% for entry (default: 15)")
     parser.add_argument("--vwap-warmup-bars", type=int, default=10, metavar="N",
                         help="Min completed 1-min bars before VWAP is trusted (default: 10 ≈ 10 min)")
-    parser.add_argument("--target-profit", type=float, default=4000.0, metavar="INR",
-                        help="Global profit target in INR (default: 4000)")
-    parser.add_argument("--stop-loss", type=float, default=4000.0, metavar="INR",
-                        help="Global stop loss in INR, positive value (default: 4000)")
+    parser.add_argument("--target-profit", type=str, default="4000", metavar="INR",
+                        help="Global profit target in INR, or a percentage of entry premium collected "
+                             "e.g. '20%%' (default: 4000)")
+    parser.add_argument("--stop-loss", type=str, default="4000", metavar="INR",
+                        help="Global stop loss in INR, or a percentage of entry premium collected "
+                             "e.g. '20%%' (default: 4000)")
     parser.add_argument("--max-loss-per-trade", type=float, default=1500.0, metavar="INR",
                         help="Hard stop-loss per cycle, independent of VWAP (default: 1500, 0=disabled)")
     parser.add_argument("--max-trades-per-day", type=int, default=15, metavar="N",
@@ -928,12 +948,19 @@ Examples:
 
     args = parser.parse_args()
 
+    try:
+        target_val, target_is_pct = parse_target_spec(args.target_profit)
+        stop_val, stop_is_pct = parse_target_spec(args.stop_loss)
+    except ValueError as e:
+        logger.error(f"[CONFIG ERROR] {e}")
+        sys.exit(1)
+
     logger.info(
         f"Config | mode={'LIVE' if args.live else 'DRY'} lots={args.lots}"
         f" start={args.start_time} entry_band={args.entry_band}pts"
         f" decline_ticks={args.decline_ticks} exit_buffer={args.exit_buffer}pts"
         f" max_diff={args.max_premium_diff}% warmup={args.vwap_warmup_bars} bars"
-        f" profit={args.target_profit} sl={args.stop_loss}"
+        f" profit={target_val}{'%' if target_is_pct else ''} sl={stop_val}{'%' if stop_is_pct else ''}"
         f" max_loss_per_trade={args.max_loss_per_trade} max_trades_per_day={args.max_trades_per_day}"
         f" cooldown={args.cooldown_seconds}s max_spread={args.max_spread_pct}%"
     )
@@ -948,8 +975,10 @@ Examples:
             exit_buffer=args.exit_buffer,
             max_premium_diff_pct=args.max_premium_diff,
             vwap_warmup_bars=args.vwap_warmup_bars,
-            profit_target=args.target_profit,
-            stop_loss=args.stop_loss,
+            profit_target=target_val,
+            profit_target_is_pct=target_is_pct,
+            stop_loss=stop_val,
+            stop_loss_is_pct=stop_is_pct,
             max_loss_per_trade=args.max_loss_per_trade,
             max_trades_per_day=args.max_trades_per_day,
             cooldown_seconds=args.cooldown_seconds,
