@@ -10,6 +10,22 @@ function todayIST(): string {
   return now.toISOString().slice(0, 10);
 }
 
+/** Snapshot dates present on disk, newest first. */
+function listDates(isCrude: boolean): string[] {
+  const prefix = isCrude ? 'crudeoil_oi_snapshots_' : 'iv_snapshots_';
+  if (!fs.existsSync(DEBUG_DIR)) return [];
+  return fs.readdirSync(DEBUG_DIR)
+    .filter(f => f.startsWith(prefix) && f.endsWith('.csv'))
+    .map(f => f.slice(prefix.length, -4))
+    .filter(d => /^\d{4}-\d{2}-\d{2}$/.test(d))
+    .sort((a, b) => b.localeCompare(a));
+}
+
+/** Treat 0 / NaN as "not reported" so charts break the line instead of dropping to zero. */
+function orNull(n: number): number | null {
+  return Number.isFinite(n) && n !== 0 ? n : null;
+}
+
 function parseNumber(s: string): number {
   const n = parseFloat(s);
   return isNaN(n) ? 0 : n;
@@ -24,20 +40,44 @@ function istStringToEpoch(ts: string): number {
 
 export async function GET(request: NextRequest) {
   const { searchParams } = new URL(request.url);
-  const date       = searchParams.get('date') ?? todayIST();
-  const mode       = searchParams.get('mode') ?? 'iv';                           // 'iv' | 'cumulative'
+  const mode       = searchParams.get('mode') ?? 'iv';           // 'iv' | 'cumulative' | 'all' | 'dates'
   const underlying = (searchParams.get('underlying') ?? 'NIFTY').toUpperCase();
   const isCrude    = underlying === 'CRUDEOIL';
   const strike     = searchParams.get('strike') ? parseInt(searchParams.get('strike')!, 10) : null;
   const defaultWings = isCrude ? 6 : 10;
   const wings      = searchParams.get('wings')  ? parseInt(searchParams.get('wings')!,  10) : defaultWings;
 
+  const availableDates = listDates(isCrude);
+
+  if (mode === 'dates') {
+    return NextResponse.json({ success: true, dates: availableDates, today: todayIST() });
+  }
+
+  // Fall back to the most recent day on disk when the requested date (default: today)
+  // has no file — the collector may not have run, and an empty page is worse than
+  // the last session's data clearly labelled as such.
+  // Opt-in (`fallback=1`) so the existing cumulative-OI tabs keep their strict
+  // "no data today" behaviour and only the IV Charts page shows last-session data.
+  const allowFallback = searchParams.get('fallback') === '1';
+  const requested = searchParams.get('date') ?? todayIST();
+  const date      = availableDates.includes(requested) || !allowFallback
+    ? requested
+    : availableDates[0];
+  const isFallback = date !== requested;
+
+  if (!date) {
+    return NextResponse.json(
+      { success: false, error: `No IV snapshot data for ${requested}`, availableDates },
+      { status: 404 },
+    );
+  }
+
   const csvFile = isCrude ? `crudeoil_oi_snapshots_${date}.csv` : `iv_snapshots_${date}.csv`;
   const csvPath = path.join(DEBUG_DIR, csvFile);
 
   if (!fs.existsSync(csvPath)) {
     return NextResponse.json(
-      { success: false, error: `No IV snapshot data for ${date}` },
+      { success: false, error: `No IV snapshot data for ${date}`, availableDates },
       { status: 404 },
     );
   }
@@ -140,6 +180,113 @@ export async function GET(request: NextRequest) {
 
   // ── IV mode (default) ─────────────────────────────────────────────
   const strikeSet = [...new Set(allRows.map(r => r.strike))].sort((a, b) => a - b);
+
+  // ── Full-page mode: per-strike series + skew + surface in one round trip ──
+  if (mode === 'all') {
+    const targetStrike = strike ?? atm;
+    const nearest = strikeSet.reduce((best, sk) =>
+      Math.abs(sk - targetStrike) < Math.abs(best - targetStrike) ? sk : best,
+      strikeSet[0],
+    );
+
+    const series = allRows
+      .filter(r => r.strike === nearest)
+      .sort((a, b) => a.timestamp.localeCompare(b.timestamp))
+      .map(r => ({
+        time:     r.time.slice(0, 5),
+        ts:       istStringToEpoch(r.timestamp),
+        spot:     r.spot,
+        ceIV:     orNull(r.CE_IV),
+        peIV:     orNull(r.PE_IV),
+        ivAvg:    orNull((r.CE_IV + r.PE_IV) / 2),
+        ivSpread: r.CE_IV && r.PE_IV ? r.CE_IV - r.PE_IV : null,
+        ceLTP:    r.CE_LTP,
+        peLTP:    r.PE_LTP,
+        straddle: r.CE_LTP + r.PE_LTP,
+        ceOI:     r.CE_OI,
+        peOI:     r.PE_OI,
+        ceDelta:  r.CE_delta,
+        peDelta:  r.PE_delta,
+        ceVega:   r.CE_vega,
+        ceTheta:  r.CE_theta,
+        peTheta:  r.PE_theta,
+      }));
+
+    // Timeline shared by the skew (open vs latest) and the surface grid
+    const timestamps = [...new Set(allRows.map(r => r.timestamp))].sort();
+    const firstTs = timestamps[0];
+    const lastTs  = timestamps[timestamps.length - 1];
+
+    const rowsAt = (ts: string) => new Map(
+      allRows.filter(r => r.timestamp === ts).map(r => [r.strike, r]),
+    );
+    const openRows = rowsAt(firstTs);
+    const lastRows = rowsAt(lastTs);
+
+    const skew = strikeSet.map(sk => {
+      const o = openRows.get(sk);
+      const l = lastRows.get(sk);
+      return {
+        strike:    sk,
+        ceIVOpen:  o ? orNull(o.CE_IV) : null,
+        peIVOpen:  o ? orNull(o.PE_IV) : null,
+        ceIV:      l ? orNull(l.CE_IV) : null,
+        peIV:      l ? orNull(l.PE_IV) : null,
+        ceOI:      l?.CE_OI ?? 0,
+        peOI:      l?.PE_OI ?? 0,
+        straddle:  l ? l.CE_LTP + l.PE_LTP : null,
+      };
+    });
+
+    // Surface: strike × time grid of the OTM leg's IV — puts below ATM, calls above.
+    // Deep-ITM legs quote off a wide spread and their implied vol is mostly noise;
+    // including them washes out the colour scale. Columns are downsampled so a full
+    // session (~750 snapshots) stays a readable — and small — payload.
+    const MAX_COLS = 96;
+    const step = Math.max(1, Math.ceil(timestamps.length / MAX_COLS));
+    const cols = timestamps.filter((_, i) => i % step === 0 || i === timestamps.length - 1);
+    const byTsStrike = new Map<string, number | null>();
+    for (const r of allRows) {
+      const otm = r.strike > atm ? r.CE_IV
+                : r.strike < atm ? r.PE_IV
+                : (r.CE_IV + r.PE_IV) / 2;
+      byTsStrike.set(`${r.timestamp}|${r.strike}`, orNull(otm));
+    }
+    const surface = {
+      times:   cols.map(t => t.slice(11, 16)),
+      // highest strike first — the heatmap reads like a price ladder
+      strikes: [...strikeSet].reverse(),
+      // grid[strikeIdx][timeIdx], aligned to `strikes`
+      grid: [...strikeSet].reverse().map(sk => cols.map(t => byTsStrike.get(`${t}|${sk}`) ?? null)),
+    };
+
+    const withIV = series.filter(p => p.ivAvg !== null);
+    const first  = withIV[0];
+    const last   = withIV[withIV.length - 1];
+    const ivVals = withIV.map(p => p.ivAvg as number);
+    const summary = {
+      ivOpen:       first?.ivAvg ?? null,
+      ivLast:       last?.ivAvg ?? null,
+      ivMin:        ivVals.length ? Math.min(...ivVals) : null,
+      ivMax:        ivVals.length ? Math.max(...ivVals) : null,
+      ceIVLast:     last?.ceIV ?? null,
+      peIVLast:     last?.peIV ?? null,
+      spotOpen:     series[0]?.spot ?? null,
+      spotLast:     series[series.length - 1]?.spot ?? null,
+      straddleOpen: series[0]?.straddle ?? null,
+      straddleLast: series[series.length - 1]?.straddle ?? null,
+      lastTime:     lastTs.slice(11, 19),
+      points:       series.length,
+    };
+
+    const response = NextResponse.json({
+      success: true, date, requestedDate: requested, isFallback, availableDates, today: todayIST(),
+      atm, expiry, strikes: strikeSet, selectedStrike: nearest,
+      series, skew, surface, summary,
+    });
+    response.headers.set('Cache-Control', 'public, s-maxage=30, stale-while-revalidate=60');
+    return response;
+  }
 
   const targetStrike = strike ?? atm;
   const nearest = strikeSet.reduce((best, sk) =>

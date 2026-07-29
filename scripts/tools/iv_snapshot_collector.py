@@ -168,6 +168,63 @@ def build_rows(ts: str, spot: float, expiry: str, strikes: list, oc: dict,
     return rows
 
 
+def rebuild_helper(reason: str):
+    """Re-read access_token.json and rebuild the client.
+
+    The usual cause of a hard failure at 09:15 is a token that expired overnight.
+    It normally gets refreshed shortly after (login.py, or the dashboard's
+    autologin) — re-reading the file lets a running collector pick that up instead
+    of losing the whole session.
+    """
+    log.warning('Re-authenticating after %s', reason)
+    try:
+        dhan = get_dhan_client()
+        if not dhan:
+            log.error('Re-authentication failed — token still unusable')
+            return None
+        return DhanHelper(dhan)
+    except Exception as exc:
+        log.error('Re-authentication raised: %s', exc)
+        return None
+
+
+def fetch_with_recovery(fetch, helper, label: str, ignore_market_hours: bool,
+                        max_attempts: int = 400):
+    """Retry `fetch(helper)` until it returns a truthy value or the market closes.
+
+    Returns (result_or_None, helper) — `helper` may be a fresh instance if a
+    re-auth happened. Backoff is 10s for the first three attempts (transient
+    hiccups around the open), 60s after that, with a token refresh every fifth
+    attempt. The previous fixed 5-attempt / 50-second budget discarded entire
+    sessions whenever the token was renewed a few minutes late.
+    """
+    attempt = 0
+    while attempt < max_attempts:
+        result = fetch(helper)
+        if result:
+            if attempt:
+                log.info('%s succeeded on attempt %d', label, attempt + 1)
+            return result, helper
+
+        attempt += 1
+        if not ignore_market_hours and is_after_close(ist_now()):
+            log.error('%s still failing at market close — giving up after %d attempts', label, attempt)
+            return None, helper
+
+        err = getattr(helper, 'last_api_error', None)
+        log.warning('%s attempt %d failed%s', label, attempt, f' — {err}' if err else '')
+
+        if attempt % 5 == 0:
+            fresh = rebuild_helper(f'{label} failed {attempt}x')
+            if fresh:
+                helper = fresh
+
+        time.sleep(10 if attempt <= 3 else 60)
+
+    log.error('%s exhausted %d attempts — giving up', label, max_attempts)
+    return None, helper
+
+
 def write_rows(path: str, rows: list, write_header: bool) -> None:
     mode = 'a' if os.path.exists(path) and not write_header else 'w'
     with open(path, mode, newline='', encoding='utf-8') as f:
@@ -203,36 +260,29 @@ def main():
             time.sleep(min(wait_mins * 60, 60))
 
     # ── Resolve expiry ────────────────────────────────────────────────
-    # Retried: the Dhan API is prone to transient hiccups in the first minute
-    # after market open, and a one-shot failure here used to kill the whole
-    # day's collection since nothing restarts this process until the next
-    # server boot.
+    # Retried until market close: the Dhan API is prone to transient hiccups in
+    # the first minute after the open, and an expired token here used to kill the
+    # whole day's collection since nothing restarts this process.
     expiry = args.expiry
     if not expiry:
         uid = UNDERLYING_IDS.get(underlying)
-        expiries = []
-        for attempt in range(5):
-            expiries = helper.get_expiry_list(under_security_id=uid, under_exchange_segment='IDX_I')
-            if expiries:
-                break
-            log.warning('Expiry list fetch attempt %d/5 failed — retrying in 10s', attempt + 1)
-            time.sleep(10)
+        expiries, helper = fetch_with_recovery(
+            lambda h: h.get_expiry_list(under_security_id=uid, under_exchange_segment='IDX_I'),
+            helper, 'Expiry list fetch', args.ignore_market_hours,
+        )
         if not expiries:
-            log.error('Could not fetch expiry list after 5 attempts — check auth token')
+            log.error('Could not fetch expiry list — check auth token (run login.py)')
             sys.exit(1)
         expiry = expiries[0]
         log.info('Auto-selected expiry: %s', expiry)
 
     # ── Lock ATM from market-open spot ───────────────────────────────
-    spot = 0
-    for attempt in range(5):
-        spot = helper.get_ltp(underlying, exchange='IDX_I', instrument='INDEX') or 0
-        if spot > 0:
-            break
-        log.warning('Spot price fetch attempt %d/5 failed — retrying in 10s', attempt + 1)
-        time.sleep(10)
-    if spot <= 0:
-        log.error('Could not fetch spot price for %s after 5 attempts', underlying)
+    spot, helper = fetch_with_recovery(
+        lambda h: h.get_ltp(underlying, exchange='IDX_I', instrument='INDEX') or 0,
+        helper, f'Spot price fetch ({underlying})', args.ignore_market_hours,
+    )
+    if not spot or spot <= 0:
+        log.error('Could not fetch spot price for %s — check auth token (run login.py)', underlying)
         sys.exit(1)
 
     atm     = round(spot / STRIKE_STEP) * STRIKE_STEP
@@ -277,8 +327,9 @@ def main():
 
             if not oc:
                 consecutive_failures += 1
-                log.warning('[%s] Empty option chain response — skipping (failure #%d)',
-                            ts, consecutive_failures)
+                err = getattr(helper, 'last_api_error', None)
+                log.warning('[%s] Empty option chain response — skipping (failure #%d)%s',
+                            ts, consecutive_failures, f' — {err}' if err else '')
             else:
                 consecutive_failures = 0
                 rows = build_rows(ts, live_spot, expiry, strikes, oc,
@@ -297,6 +348,13 @@ def main():
 
         iteration += 1
 
+        # A sustained run of failures mid-session is usually the token going bad
+        # rather than the market — re-auth every 10 consecutive failures.
+        if consecutive_failures and consecutive_failures % 10 == 0:
+            fresh = rebuild_helper(f'{consecutive_failures} consecutive poll failures')
+            if fresh:
+                helper = fresh
+
         # Exponential backoff on consecutive failures: 30s → 60s → 120s → 300s (cap)
         if consecutive_failures > 0:
             backoff = min(30 * (2 ** (consecutive_failures - 1)), 300)
@@ -305,7 +363,6 @@ def main():
             time.sleep(backoff)
         else:
             time.sleep(POLL_SEC)
-        time.sleep(POLL_SEC)
 
 
 if __name__ == '__main__':

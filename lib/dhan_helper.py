@@ -2402,10 +2402,13 @@ class DhanHelper:
                 
                 if expiries:
                     self._expiry_cache[under_security_id] = (expiries, time.time())
+                    self.last_api_error = None
                 return expiries
             else:
+                self._record_api_error("expiry_list", res)
                 logger.error(f"Failed to fetch expiry list: {res.get('remarks')}")
         except Exception as e:
+            self.last_api_error = {"method": "expiry_list", "code": "", "type": "exception", "message": str(e)}
             logger.error(f"Exception in get_expiry_list: {e}")
         return []
     # --- FOREVER ORDERS (GTT) ---
