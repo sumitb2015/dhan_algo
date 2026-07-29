@@ -17,21 +17,40 @@ const STRATEGY_LOG_DIRS: Record<string, string> = {
   nifty_vwap_1min_straddle:      'vwap_1min',
   nifty_oi_directional:          'oi_directional',
   nifty_vix_straddle:            'vix_straddle',
+  nifty_st_oi_bearcall:          'st_oi_bearcall',
   crudeoilm_supertrend:          'crudeoil',
   crudeoilm_renko_sar:           'crudeoil_renko',
 };
 
-/** Returns the path to the most-recently-modified .log file in the strategy's folder. */
-function getLatestLogFile(strategyKey: string): string | null {
+// Duplicated instances write `<YYYYMMDD>_<instanceId>.log` alongside the primary's
+// `<YYYYMMDD>.log` (see instance_log_suffix() in lib/strategy_state_helper.py).
+const INSTANCE_ID_RE = /^[a-zA-Z0-9_-]{1,20}$/;
+const ANY_INSTANCE_LOG_RE = /^\d{8}_[a-zA-Z0-9_-]{1,20}\.log$/;
+
+/**
+ * Returns the most-recently-modified .log file belonging to this specific instance.
+ *
+ * The primary instance deliberately matches "anything that is NOT an instance log"
+ * rather than a strict `<YYYYMMDD>.log` pattern, so pre-existing/oddly-named files
+ * (e.g. crudeoil/renko_20260713.log) keep showing exactly as they did before.
+ */
+function getLatestLogFile(strategyKey: string, instanceId: string): string | null {
   const folder = STRATEGY_LOG_DIRS[strategyKey];
   if (!folder) return null;
 
   const dir = path.join(LOGS_ROOT, folder);
   if (!fs.existsSync(dir)) return null;
 
+  // instanceId is validated against INSTANCE_ID_RE by the caller, so it is safe to
+  // interpolate into a regex here (no metacharacters can survive that check).
+  const thisInstanceRe = instanceId ? new RegExp(`^\\d{8}_${instanceId}\\.log$`) : null;
+  const matches = thisInstanceRe
+    ? (f: string) => thisInstanceRe.test(f)
+    : (f: string) => !ANY_INSTANCE_LOG_RE.test(f);
+
   try {
     const files = fs.readdirSync(dir)
-      .filter(f => f.endsWith('.log'))
+      .filter(f => f.endsWith('.log') && matches(f))
       .map(f => ({ f, mtime: fs.statSync(path.join(dir, f)).mtimeMs }))
       .sort((a, b) => b.mtime - a.mtime);
 
@@ -66,7 +85,12 @@ export async function GET(request: NextRequest) {
       return NextResponse.json({ success: false, error: 'Invalid or missing strategy key' }, { status: 400 });
     }
 
-    const logFile = getLatestLogFile(strategy);
+    const rawInstanceId = searchParams.get('instanceId') ?? '';
+    if (rawInstanceId && !INSTANCE_ID_RE.test(rawInstanceId)) {
+      return NextResponse.json({ success: false, error: 'Invalid instanceId' }, { status: 400 });
+    }
+
+    const logFile = getLatestLogFile(strategy, rawInstanceId);
     if (!logFile) {
       return NextResponse.json({ success: true, logs: 'No logs available yet for this strategy. Start it to begin logging.' });
     }

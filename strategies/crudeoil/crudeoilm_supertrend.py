@@ -13,7 +13,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 
 from login import get_dhan_client
 from lib.dhan_helper import DhanHelper
-from lib.strategy_state_helper import save_strategy_state, check_shutdown_trigger
+from lib.strategy_state_helper import save_strategy_state, check_shutdown_trigger, instance_log_suffix
 
 # --- Constants ---
 STRATEGY_KEY = "crudeoilm_supertrend"
@@ -40,7 +40,7 @@ logging.basicConfig(
     format="%(asctime)s - %(levelname)s - %(message)s",
     handlers=[
         logging.StreamHandler(),
-        FlushingFileHandler(os.path.join(log_dir, f"{datetime.now().strftime('%Y%m%d')}.log")),
+        FlushingFileHandler(os.path.join(log_dir, f"{datetime.now().strftime('%Y%m%d')}{instance_log_suffix()}.log")),
     ],
     force=True,
 )
@@ -232,7 +232,9 @@ class CrudeOilMSupertrendStrategy:
             filled = self.helper.wait_for_fill(order_id, timeout=10)
             if not filled:
                 logger.warning("Order %s did not fill in time. Cancelling.", order_id)
-                self.helper.cancel_all_orders()
+                # Cancel only this order — cancel_all_orders() is account-wide and would
+                # kill pending orders belonging to other strategies / duplicated instances.
+                self.helper.cancel_order(order_id)
                 return False
 
             order_data = self.helper.get_order_by_id(order_id) or {}
@@ -677,7 +679,11 @@ Examples:
                         help="Candles to skip after exit before re-entry (default: 1)")
     parser.add_argument("--use-vwap", action="store_true", default=False,
                         help="Require price above VWAP for LONG, below VWAP for SHORT (default: off)")
+    parser.add_argument("--instance-id", type=str, default="", metavar="ID",
+                        help="Suffix for debug/state files to run a second concurrent copy of this strategy")
     args = parser.parse_args()
+    if args.instance_id:
+        STRATEGY_KEY = f"{STRATEGY_KEY}_{args.instance_id}"
 
     strat = CrudeOilMSupertrendStrategy(
         dry_run=not args.live,

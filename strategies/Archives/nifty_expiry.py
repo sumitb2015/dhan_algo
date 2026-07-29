@@ -11,7 +11,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 
 from login import get_dhan_client
 from lib.dhan_helper import DhanHelper
-from lib.strategy_state_helper import save_strategy_state, check_shutdown_trigger, exit_if_market_closed, parse_target_spec
+from lib.strategy_state_helper import save_strategy_state, check_shutdown_trigger, exit_if_market_closed, parse_target_spec, instance_log_suffix
 
 # Setup Logging
 project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -28,7 +28,7 @@ logging.basicConfig(
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
         logging.StreamHandler(),
-        FlushingFileHandler(os.path.join(debug_dir, f"expiry_{datetime.now().strftime('%Y%m%d')}.log"))
+        FlushingFileHandler(os.path.join(debug_dir, f"expiry_{datetime.now().strftime('%Y%m%d')}{instance_log_suffix()}.log"))
     ],
     force=True
 )
@@ -44,7 +44,9 @@ class NiftyExpiry:
                  stop_loss=4000.0, stop_loss_is_pct=False,
                  start_time="09:20", eod_time="15:15",
                  imbalance_threshold=50.0, max_lots=4, min_adjust_price=10.0,
-                 post_sl_balance=False, product_type="INTRADAY"):
+                 post_sl_balance=False, product_type="INTRADAY",
+                 state_key="nifty_expiry"):
+        self.state_key = state_key
         self.dry_run = dry_run
         self.lots = lots
         self.entry_type = entry_type.lower()
@@ -166,7 +168,7 @@ class NiftyExpiry:
             "profit_target": self.profit_target,
             "stop_loss": self.stop_loss
         }
-        save_strategy_state("nifty_expiry", state_dict)
+        save_strategy_state(self.state_key, state_dict)
 
     def get_execution_price(self, order_id: str, fallback_price: float) -> float:
         """Wait for fill and get the average execution price, or return fallback."""
@@ -381,7 +383,7 @@ class NiftyExpiry:
         
         while True:
             # Check shutdown trigger
-            if check_shutdown_trigger("nifty_expiry"):
+            if check_shutdown_trigger(self.state_key):
                 logger.info("UI Shutdown Request in outer loop.")
                 self.save_state(0, 0, 0, 0, status="STOPPED")
                 sys.exit(0)
@@ -530,7 +532,7 @@ class NiftyExpiry:
                 time.sleep(1)
 
                 # Check UI Shutdown
-                if check_shutdown_trigger("nifty_expiry"):
+                if check_shutdown_trigger(self.state_key):
                     self.exit_all_positions("UI Shutdown Request")
                     self.save_state(0, 0, 0, 0, status="STOPPED")
                     sys.exit(0)
@@ -1307,8 +1309,11 @@ if __name__ == "__main__":
                         help="Rebalance stopped-out leg to match surviving leg's current premium and lots (default: False)")
     parser.add_argument("--product-type", type=str, default="INTRADAY", choices=["INTRADAY", "MARGIN", "CNC"],
                         help="Product type for orders (default: INTRADAY)")
+    parser.add_argument("--instance-id", type=str, default="", metavar="ID",
+                        help="Suffix for debug/state files to run a second concurrent copy of this strategy")
 
     args = parser.parse_args()
+    STATE_KEY = f"nifty_expiry_{args.instance_id}" if args.instance_id else "nifty_expiry"
 
     try:
         target_val, target_is_pct = parse_target_spec(args.target_profit)
@@ -1340,7 +1345,8 @@ if __name__ == "__main__":
         max_lots=args.max_lots,
         min_adjust_price=args.min_adjust_price,
         post_sl_balance=args.post_sl_balance,
-        product_type=args.product_type
+        product_type=args.product_type,
+        state_key=STATE_KEY,
     )
 
     try:

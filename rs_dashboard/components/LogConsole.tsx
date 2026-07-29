@@ -6,9 +6,11 @@ import { Terminal, RefreshCw, ArrowDown, Clipboard } from 'lucide-react';
 interface LogConsoleProps {
   strategyKey: string;
   isActive: boolean;
+  /** Duplicated instances log to their own file; omit for the primary instance. */
+  instanceId?: string;
 }
 
-export default function LogConsole({ strategyKey, isActive }: LogConsoleProps) {
+export default function LogConsole({ strategyKey, isActive, instanceId }: LogConsoleProps) {
   const [logs, setLogs] = useState<string>('Loading logs...');
   const [loading, setLoading] = useState<boolean>(false);
   const [autoScroll, setAutoScroll] = useState<boolean>(true);
@@ -17,7 +19,8 @@ export default function LogConsole({ strategyKey, isActive }: LogConsoleProps) {
   const fetchLogs = async (showLoading = false) => {
     if (showLoading) setLoading(true);
     try {
-      const res = await fetch(`/api/strategies/logs?strategy=${strategyKey}`);
+      const qs = instanceId ? `&instanceId=${encodeURIComponent(instanceId)}` : '';
+      const res = await fetch(`/api/strategies/logs?strategy=${strategyKey}${qs}`);
       const data = await res.json();
       if (data.success) {
         setLogs(data.logs || 'No logs available.');
@@ -42,7 +45,7 @@ export default function LogConsole({ strategyKey, isActive }: LogConsoleProps) {
     }, intervalTime);
 
     return () => clearInterval(interval);
-  }, [strategyKey, isActive]);
+  }, [strategyKey, isActive, instanceId]);
 
   // Handle autoscrolling to the bottom
   useEffect(() => {

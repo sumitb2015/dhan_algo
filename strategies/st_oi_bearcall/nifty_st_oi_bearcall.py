@@ -12,7 +12,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 
 from login import get_dhan_client
 from lib.dhan_helper import DhanHelper
-from lib.strategy_state_helper import save_strategy_state, check_shutdown_trigger, exit_if_market_closed, parse_target_spec
+from lib.strategy_state_helper import save_strategy_state, check_shutdown_trigger, exit_if_market_closed, parse_target_spec, instance_log_suffix
 
 STRATEGY_KEY = "nifty_st_oi_bearcall"
 
@@ -34,7 +34,7 @@ logging.basicConfig(
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
         logging.StreamHandler(),
-        FlushingFileHandler(os.path.join(log_dir, f"{datetime.now().strftime('%Y%m%d')}.log"))
+        FlushingFileHandler(os.path.join(log_dir, f"{datetime.now().strftime('%Y%m%d')}{instance_log_suffix()}.log"))
     ],
     force=True
 )
@@ -911,8 +911,12 @@ Examples:
                         help="Minimum hold time in minutes before the ST-flip exits can trigger (default: 5)")
     parser.add_argument("--product-type", type=str, default="INTRADAY", choices=["INTRADAY", "MARGIN", "CNC"],
                         help="Order product type (default: INTRADAY)")
+    parser.add_argument("--instance-id", type=str, default="", metavar="ID",
+                        help="Suffix for debug/state files to run a second concurrent copy of this strategy")
 
     args = parser.parse_args()
+    if args.instance_id:
+        STRATEGY_KEY = f"{STRATEGY_KEY}_{args.instance_id}"
 
     try:
         target_val, target_is_pct = parse_target_spec(args.target_profit)

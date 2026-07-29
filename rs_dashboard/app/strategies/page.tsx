@@ -71,9 +71,15 @@ export default function StrategiesPage() {
     return () => clearInterval(interval);
   }, [fetchPortfolio]);
 
-  const runningCount = Object.values(strategies).filter(
-    (s: any) => s.state?.status !== 'STOPPED'
-  ).length;
+  // Counts EVERY running process, including duplicate ("+ Add run") instances launched from
+  // Strategies+. This page only renders primary instances, so a duplicate has no card here —
+  // but it is still live, and Global Exit (stop_all) does stop it. Counting only primaries
+  // would both under-report and disable the Global Exit button while duplicates trade.
+  const runningInstances = Object.values(strategies).flatMap((s: any) =>
+    Object.entries(s.instances || {}).filter(([, st]: [string, any]) => st?.status !== 'STOPPED')
+  );
+  const runningCount = runningInstances.length;
+  const runningDuplicateCount = runningInstances.filter(([instanceId]) => instanceId !== '').length;
 
   const handleGlobalExit = async () => {
     if (!confirmGlobalExit) {
@@ -207,7 +213,12 @@ export default function StrategiesPage() {
         {/* Global Exit */}
         <div className="flex items-center gap-2">
           {runningCount > 0 && (
-            <span className="text-[10px] text-zinc-500">{runningCount} running</span>
+            <span className="text-[10px] text-zinc-500">
+              {runningCount} running
+              {runningDuplicateCount > 0 && (
+                <span className="text-amber-400"> (incl. {runningDuplicateCount} duplicate — see Strategies+)</span>
+              )}
+            </span>
           )}
           <button
             onClick={handleGlobalExit}

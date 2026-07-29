@@ -2,22 +2,10 @@ import { NextResponse } from 'next/server';
 import path from 'path';
 import fs from 'fs';
 import { execSync } from 'child_process';
-import { isPidRunning } from '@/lib/processCheck';
 import { getDhanCredentials } from '@/lib/dhanToken';
+import { DEBUG_DIR, allStateKeys, isStrategyRunning } from '@/lib/strategyRegistry';
 
-const PROJECT_ROOT = path.resolve(process.cwd(), '..');
-const DEBUG_DIR = path.join(PROJECT_ROOT, 'debug');
 const DHAN_POSITIONS = 'https://api.dhan.co/v2/positions';
-
-const STRATEGY_KEYS = [
-  'nifty_advanced_imbalance',
-  'nifty_delta_neutral',
-  'nifty_value_imbalance_straddle',
-  'nifty_value_imbalance_strangle',
-  'nifty_vwap_1min_straddle',
-  'nifty_spread_trend',
-  'nifty_oi_directional',
-];
 
 function forceKillPid(pid: number): boolean {
   try {
@@ -130,7 +118,11 @@ export async function POST() {
     const killed: string[] = [];
     const triggerFallback: string[] = [];
 
-    for (const key of STRATEGY_KEYS) {
+    // allStateKeys() covers every strategy AND every duplicated ("+ Add run") instance.
+    // Missing an instance here would be dangerous: step 1 already liquidated its positions
+    // account-wide, so an instance left alive would keep managing — and could re-enter —
+    // a position that no longer exists.
+    for (const { stateKey: key } of allStateKeys()) {
       const stateFile = path.join(DEBUG_DIR, `${key}_state.json`);
       if (!fs.existsSync(stateFile)) continue;
 
@@ -142,7 +134,7 @@ export async function POST() {
       }
 
       const pid: number | undefined = existingState.pid;
-      if (!pid || !isPidRunning(pid)) {
+      if (!pid || !isStrategyRunning(pid, key)) {
         // Process already dead â€” just clear state and remove any stale trigger
         cleanTriggerFile(key);
         if (existingState.status !== 'STOPPED') clearStrategyState(key, existingState);

@@ -52,9 +52,15 @@ interface StrategyState {
   min_price_drop_pct?: number; min_oi_rise_pct?: number;
 }
 
-interface Props { meta: StrategyMeta; state: StrategyState; onRefresh: () => void }
+interface Props {
+  meta: StrategyMeta; state: StrategyState; onRefresh: () => void; instanceId?: string;
+  /** Only passed for the primary (no-instanceId) row — reveals a second, blank config row for a new concurrent run. */
+  onAddInstance?: (strategyKey: string) => void;
+  /** Only passed for duplicate rows — discards the stopped instance and its debug files. */
+  onRemoveInstance?: (strategyKey: string, instanceId: string) => void;
+}
 
-function StrategyRowWide({ meta, state, onRefresh }: Props) {
+function StrategyRowWide({ meta, state, onRefresh, instanceId, onAddInstance, onRemoveInstance }: Props) {
   const [showConfig, setShowConfig] = useState(false);
   const [showLogs, setShowLogs] = useState(false);
   const [submitting, setSubmitting] = useState(false);
@@ -280,7 +286,7 @@ function StrategyRowWide({ meta, state, onRefresh }: Props) {
       const res = await fetch('/api/strategies', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action: 'start', strategy: meta.key, args }),
+        body: JSON.stringify({ action: 'start', strategy: meta.key, args, instanceId }),
       });
       const data = await res.json();
       if (data.success) { onRefresh(); setShowLogs(true); setShowConfig(false); }
@@ -306,7 +312,7 @@ function StrategyRowWide({ meta, state, onRefresh }: Props) {
       const res = await fetch('/api/strategies', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action: 'stop', strategy: meta.key }),
+        body: JSON.stringify({ action: 'stop', strategy: meta.key, instanceId }),
       });
       const data = await res.json();
       if (data.success) { setTimeout(onRefresh, 1500); }
@@ -1080,7 +1086,7 @@ function StrategyRowWide({ meta, state, onRefresh }: Props) {
         {/* Name + mode/type tags */}
         <div className="w-[240px] shrink-0 flex flex-col gap-0.5">
           <div className="flex items-center gap-1.5 min-w-0">
-            <span className="text-sm font-bold text-white truncate">{meta.name}</span>
+            <span className="text-sm font-bold text-white truncate">{meta.name}{instanceId ? ` #${instanceId}` : ''}</span>
           </div>
           {isRunning && (
             <div className="flex items-center gap-1 flex-wrap">
@@ -1154,9 +1160,27 @@ function StrategyRowWide({ meta, state, onRefresh }: Props) {
                 <Terminal className="h-3 w-3" />
                 {showLogs ? 'Hide' : 'Logs'}
               </button>
+              {onAddInstance && (
+                <button onClick={() => onAddInstance(meta.key)} title="Run another concurrent copy of this strategy with its own lot size"
+                  className="h-7 px-2.5 rounded-md text-[11px] font-semibold border border-zinc-800/60 bg-transparent text-zinc-400 hover:text-white hover:border-zinc-700 transition-colors flex items-center gap-1">
+                  + Add run
+                </button>
+              )}
             </>
           ) : (
             <>
+              {onAddInstance && (
+                <button onClick={() => onAddInstance(meta.key)} title="Run another concurrent copy of this strategy with its own lot size"
+                  className="h-7 px-2.5 rounded-md text-[11px] font-semibold border border-zinc-800/60 bg-transparent text-zinc-400 hover:text-white hover:border-zinc-700 transition-colors flex items-center gap-1">
+                  + Add run
+                </button>
+              )}
+              {onRemoveInstance && instanceId && (
+                <button onClick={() => onRemoveInstance(meta.key, instanceId)} title="Discard this duplicate run and remove its row"
+                  className="h-7 px-2.5 rounded-md text-[11px] font-semibold border border-zinc-800/60 bg-transparent text-zinc-500 hover:text-rose-300 hover:border-rose-500/40 transition-colors flex items-center gap-1">
+                  Remove
+                </button>
+              )}
               <button onClick={() => setShowConfig(!showConfig)}
                 className={`h-7 px-2.5 rounded-md text-[11px] font-semibold border transition-colors flex items-center gap-1 ${
                   showConfig ? 'bg-zinc-800 text-white border-zinc-700' : 'bg-transparent border-zinc-800/60 text-zinc-400 hover:text-white hover:border-zinc-700'
@@ -1179,7 +1203,7 @@ function StrategyRowWide({ meta, state, onRefresh }: Props) {
 
       {isRunning && showLogs && (
         <div className="border-t border-zinc-800/60 px-4 py-3">
-          <LogConsole strategyKey={meta.key} isActive={isRunning} />
+          <LogConsole strategyKey={meta.key} isActive={isRunning} instanceId={instanceId} />
         </div>
       )}
 
@@ -1198,6 +1222,9 @@ function StrategyRowWide({ meta, state, onRefresh }: Props) {
 // tick. Compare by content instead (small objects; N is a handful of rows).
 export default React.memo(StrategyRowWide, (prev, next) =>
   prev.onRefresh === next.onRefresh &&
+  prev.instanceId === next.instanceId &&
+  prev.onAddInstance === next.onAddInstance &&
+  prev.onRemoveInstance === next.onRemoveInstance &&
   JSON.stringify(prev.meta) === JSON.stringify(next.meta) &&
   JSON.stringify(prev.state) === JSON.stringify(next.state)
 );

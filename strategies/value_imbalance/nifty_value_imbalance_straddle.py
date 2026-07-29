@@ -11,7 +11,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 
 from login import get_dhan_client
 from lib.dhan_helper import DhanHelper
-from lib.strategy_state_helper import save_strategy_state, check_shutdown_trigger, exit_if_market_closed, parse_target_spec
+from lib.strategy_state_helper import save_strategy_state, check_shutdown_trigger, exit_if_market_closed, parse_target_spec, instance_log_suffix
 
 # Setup Logging
 project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -29,7 +29,7 @@ logging.basicConfig(
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
         logging.StreamHandler(),
-        FlushingFileHandler(os.path.join(log_dir, f"{datetime.now().strftime('%Y%m%d')}.log"))
+        FlushingFileHandler(os.path.join(log_dir, f"{datetime.now().strftime('%Y%m%d')}{instance_log_suffix()}.log"))
     ],
     force=True
 )
@@ -41,7 +41,9 @@ class ValueImbalanceStrategy:
                  entry_balance_threshold=15.0,
                  profit_target=4000.0, profit_target_is_pct=False,
                  stop_loss=4000.0, stop_loss_is_pct=False, start_time="09:20",
-                 trail_start_pct=5.0, trail_gap_pts=15.0):
+                 trail_start_pct=5.0, trail_gap_pts=15.0,
+                 state_key="nifty_value_imbalance_straddle"):
+        self.state_key = state_key
         self.dry_run = dry_run
         self.initial_lots = initial_lots
         self.max_lots = max_lots
@@ -110,7 +112,7 @@ class ValueImbalanceStrategy:
     def sleep_cooldown(self, seconds):
         """Shutdown-aware sleep for cooldowns and delays."""
         for _ in range(seconds):
-            if check_shutdown_trigger("nifty_value_imbalance_straddle"):
+            if check_shutdown_trigger(self.state_key):
                 logger.info("UI Shutdown Request during cooldown sleep. Exiting.")
                 self.save_state(0, 0, 0, 0, status="STOPPED")
                 sys.exit(0)
@@ -157,7 +159,7 @@ class ValueImbalanceStrategy:
             "best_combined_pts": self.best_combined_pts,
             "trail_exit_combined": round(self.best_combined_pts + self.trail_gap_pts, 2) if self.trail_active else None,
         }
-        save_strategy_state("nifty_value_imbalance_straddle", state_dict)
+        save_strategy_state(self.state_key, state_dict)
 
     def get_execution_price(self, order_id: str, fallback_price: float) -> float:
         """Wait for fill and get the average execution price, or return fallback."""
@@ -344,14 +346,14 @@ class ValueImbalanceStrategy:
         
         while True:
             # Check shutdown trigger
-            if check_shutdown_trigger("nifty_value_imbalance_straddle"):
+            if check_shutdown_trigger(self.state_key):
                 logger.info("UI Shutdown Request in outer loop.")
                 self.save_state(0, 0, 0, 0, status="STOPPED")
                 sys.exit(0)
             self.save_state(0, 0, 0, 0, status="INITIALIZING")
 
             # Wait for market open if closed (EOD is 15:17)
-            self.helper.wait_for_market_open(self.dry_run, start_time=self.start_time, eod_time="15:17", shutdown_check=lambda: check_shutdown_trigger("nifty_value_imbalance_straddle"))
+            self.helper.wait_for_market_open(self.dry_run, start_time=self.start_time, eod_time="15:17", shutdown_check=lambda: check_shutdown_trigger(self.state_key))
             
             # 1. Initialization / Re-initialization
             self.reset_session()
@@ -378,7 +380,7 @@ class ValueImbalanceStrategy:
             self.initial_ce_strike = self.ce_strike
             
             # Check shutdown trigger before option quote fetches
-            if check_shutdown_trigger("nifty_value_imbalance_straddle"):
+            if check_shutdown_trigger(self.state_key):
                 logger.info("UI Shutdown Request before option quote fetches.")
                 self.save_state(nifty_spot, 0, 0, 0.0, status="STOPPED")
                 sys.exit(0)
@@ -412,7 +414,7 @@ class ValueImbalanceStrategy:
             logger.info(f"New Cycle: {self.ce_strike} CE/PE | Lot Size: {self.nifty_lot_size} | Expiry: {self.expiry}")
             
             # Check shutdown trigger before websocket subscription
-            if check_shutdown_trigger("nifty_value_imbalance_straddle"):
+            if check_shutdown_trigger(self.state_key):
                 logger.info("UI Shutdown Request before websocket subscription.")
                 self.save_state(nifty_spot, self.ce_avg_price, self.pe_avg_price, 0.0, status="STOPPED")
                 sys.exit(0)
@@ -436,7 +438,7 @@ class ValueImbalanceStrategy:
                 ce_price, pe_price, spot = self.fetch_ltps()
 
                 # Check shutdown trigger
-                if check_shutdown_trigger("nifty_value_imbalance_straddle"):
+                if check_shutdown_trigger(self.state_key):
                     logger.info("UI Shutdown Request during balanced entry wait.")
                     self.save_state(nifty_spot, ce_price, pe_price, 0.0, status="STOPPED")
                     self.reset_session()
@@ -514,7 +516,7 @@ class ValueImbalanceStrategy:
                 time.sleep(1)
                 
                 # Check shutdown trigger first
-                if check_shutdown_trigger("nifty_value_imbalance_straddle"):
+                if check_shutdown_trigger(self.state_key):
                     c_ltp, p_ltp, curr_nifty = self.fetch_ltps()
                     ce_ltp_val = c_ltp if c_ltp > 0 else self.ce_avg_price
                     pe_ltp_val = p_ltp if p_ltp > 0 else self.pe_avg_price
@@ -590,14 +592,14 @@ class ValueImbalanceStrategy:
                 # --- Hard Targets ---
                 if total_pnl >= self.profit_target:
                     self.exit_all_positions(f"Profit Target Reached: {total_pnl:.2f}")
-                    if not self.helper.wait_for_next_day_market_open(self.dry_run, shutdown_check=lambda: check_shutdown_trigger("nifty_value_imbalance_straddle")):
+                    if not self.helper.wait_for_next_day_market_open(self.dry_run, shutdown_check=lambda: check_shutdown_trigger(self.state_key)):
                         self.save_state(0, 0, 0, 0, status="STOPPED")
                         sys.exit(0)
                     cycle_active = False
                     break
                 if total_pnl <= self.stop_loss:
                     self.exit_all_positions(f"Global Stop Loss Hit: {total_pnl:.2f}")
-                    if not self.helper.wait_for_next_day_market_open(self.dry_run, shutdown_check=lambda: check_shutdown_trigger("nifty_value_imbalance_straddle")):
+                    if not self.helper.wait_for_next_day_market_open(self.dry_run, shutdown_check=lambda: check_shutdown_trigger(self.state_key)):
                         self.save_state(0, 0, 0, 0, status="STOPPED")
                         sys.exit(0)
                     cycle_active = False
@@ -809,7 +811,11 @@ Examples:
     parser.add_argument("--trail-gap-pts", type=float, default=15.0,
                         help="Exit if combined premium rises this many pts above its best level (default: 15.0)")
 
+    parser.add_argument("--instance-id", type=str, default="", metavar="ID",
+                        help="Suffix for debug/state files to run a second concurrent copy of this strategy")
+
     args = parser.parse_args()
+    STATE_KEY = f"nifty_value_imbalance_straddle_{args.instance_id}" if args.instance_id else "nifty_value_imbalance_straddle"
 
     try:
         target_val, target_is_pct = parse_target_spec(args.target_profit)
@@ -839,6 +845,7 @@ Examples:
         stop_loss_is_pct=stop_is_pct,
         trail_start_pct=args.trail_start_pct,
         trail_gap_pts=args.trail_gap_pts,
+        state_key=STATE_KEY,
     )
     try:
         strat.run()

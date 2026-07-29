@@ -11,10 +11,6 @@ strategies/
 │   ├── nifty_value_imbalance_strangle.py  # Legacy OTM strangle with strike adjustments
 │   └── nifty_vwap_1min_straddle.py        # 1-min VWAP mean-reversion short straddle (candle-based)
 │
-├── expiry/                   # 0DTE expiry-day strategies
-│   ├── strategy.md           # Full guide to the expiry strategy
-│   └── nifty_expiry.py
-│
 ├── spread_trend/             # Trend-following vertical spread strategy
 │   ├── strategy.md           # Full guide to the spread trend strategy
 │   └── nifty_spread_trend.py
@@ -27,8 +23,10 @@ strategies/
 │   ├── strategy.md           # Full guide to the CrudeOil Supertrend strategy
 │   └── crudeoilm_supertrend.py
 │
-└── Archives/
-    └── nifty_short_straddle.py   # Archived basic straddle
+└── Archives/                 # Retired — not runnable from the dashboard
+    ├── nifty_short_straddle.py       # Archived basic straddle
+    ├── nifty_expiry.py              # Retired 0DTE expiry-day straddle/strangle
+    └── nifty_expiry_strategy.md     # Its full strategy guide
 ```
 
 ## Global Rules (all strategies)

@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import {
   Layers, RefreshCw, TrendingUp, TrendingDown, AlertTriangle,
   Power, ShieldOff, Activity, Zap, LayoutList, ChevronDown, Shield,
@@ -87,6 +87,46 @@ export default function StrategiesPlusPage() {
 
   const [viewMode, setViewMode] = useState<'active' | 'all'>('active');
 
+  // Client-side-only until the user actually launches them: instance ids the user has
+  // asked to add via "+ Add run" but that have no debug/<key>_<id>_state.json yet.
+  const [pendingInstances, setPendingInstances] = useState<Record<string, string[]>>({});
+
+  // Once a pending instance shows up in a poll (it has a real state file), drop it from
+  // the pending list — the real data takes over rendering that row from here on.
+  useEffect(() => {
+    setPendingInstances(prev => {
+      let changed = false;
+      const next: Record<string, string[]> = {};
+      for (const [key, ids] of Object.entries(prev)) {
+        const known = new Set(Object.keys(strategies[key]?.instances || {}));
+        const remaining = ids.filter(id => !known.has(id));
+        if (remaining.length !== ids.length) changed = true;
+        if (remaining.length) next[key] = remaining;
+      }
+      return changed ? next : prev;
+    });
+  }, [strategies]);
+
+  // The 2s poll replaces `strategies` with a fresh object every tick. Reading it through a
+  // ref keeps addInstance referentially stable, so the memoized rows (which compare props by
+  // content) don't all re-render on every poll just because this callback was rebuilt.
+  const strategiesRef = useRef(strategies);
+  strategiesRef.current = strategies;
+
+  const addInstance = useCallback((key: string) => {
+    setPendingInstances(prev => {
+      const existingIds = new Set([
+        ...Object.keys(strategiesRef.current[key]?.instances || {}),
+        ...(prev[key] || []),
+      ]);
+      let n = 2;
+      while (existingIds.has(String(n))) n++;
+      return { ...prev, [key]: [...(prev[key] || []), String(n)] };
+    });
+    // The new blank config row is only visible in "all" view since it starts STOPPED.
+    setViewMode('all');
+  }, []);
+
   const [toasts, setToasts] = useState<Toast[]>([]);
 
   const [showPnlGuard, setShowPnlGuard] = useState(false);
@@ -128,6 +168,33 @@ export default function StrategiesPlusPage() {
       if (showLoading) setLoading(false);
     }
   }, []);
+
+  const removeInstance = useCallback(async (key: string, instanceId: string) => {
+    // Drop the client-side pending entry first so a never-launched row disappears
+    // immediately (it has no server-side files to delete).
+    setPendingInstances(prev => {
+      const remaining = (prev[key] || []).filter(id => id !== instanceId);
+      const next = { ...prev };
+      if (remaining.length) next[key] = remaining; else delete next[key];
+      return next;
+    });
+    try {
+      const res = await fetch('/api/strategies', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'remove_instance', strategy: key, instanceId }),
+      });
+      const data = await res.json();
+      if (!data.success && data.error) addToast('error', data.error);
+    } catch {
+      addToast('error', 'Network error removing instance.');
+    } finally {
+      fetchStrategies(false);
+    }
+    // addToast only touches state setters, so it is safe to omit from deps; keeping the
+    // dep list stable is what preserves row memoization across the 2s poll.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [fetchStrategies]);
 
   const fetchPortfolio = useCallback(async () => {
     setPortfolioLoading(true);
@@ -173,7 +240,8 @@ export default function StrategiesPlusPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [showPnlGuard]);
 
-  const runningCount = Object.values(strategies).filter((s: any) => s.state?.status !== 'STOPPED').length;
+  const runningCount = Object.values(strategies).reduce((n: number, s: any) =>
+    n + Object.values(s.instances || {}).filter((st: any) => st?.status !== 'STOPPED').length, 0);
   const pnl = portfolio?.total_pnl ?? 0;
   const pnlPositive = pnl >= 0;
 
@@ -435,8 +503,32 @@ export default function StrategiesPlusPage() {
   };
 
   const strategyList = Object.entries(strategies);
-  const activeList = strategyList.filter(([, item]) => item.state?.status !== 'STOPPED');
-  const displayList = viewMode === 'active' ? activeList : strategyList;
+
+  type InstanceRow = { key: string; instanceId: string; meta: any; state: any };
+  // Primary row first, then duplicates in natural order. Object key order can't be relied
+  // on here: JS lists integer-like keys ("2", "10") before string keys, so the raw order
+  // would put duplicate rows ABOVE the original they were cloned from.
+  const byInstanceId = (a: InstanceRow, b: InstanceRow) =>
+    a.instanceId === '' ? -1
+    : b.instanceId === '' ? 1
+    : a.instanceId.localeCompare(b.instanceId, undefined, { numeric: true });
+
+  const instanceRows: InstanceRow[] = strategyList.flatMap(([key, item]: [string, any]) => {
+    const known = item.instances || {};
+    const rows: InstanceRow[] = Object.entries(known).map(([instanceId, state]) => ({
+      key, instanceId, meta: item.meta, state,
+    }));
+    const knownIds = new Set(Object.keys(known));
+    const pendingRows: InstanceRow[] = (pendingInstances[key] || [])
+      .filter(id => !knownIds.has(id))
+      .map(instanceId => ({
+        key, instanceId, meta: item.meta,
+        state: { strategy: `${key}_${instanceId}`, status: 'STOPPED', total_pnl: 0, realized_pnl: 0, spot: 0, adjustments: 0 },
+      }));
+    return [...rows, ...pendingRows].sort(byInstanceId);
+  });
+  const activeList = instanceRows.filter(row => row.state?.status !== 'STOPPED');
+  const displayList = viewMode === 'active' ? activeList : instanceRows;
 
   return (
     <div className="flex flex-col flex-1 w-full bg-black min-h-screen text-zinc-300">
@@ -641,14 +733,14 @@ export default function StrategiesPlusPage() {
               All
               <span className={`px-1.5 py-0.5 rounded-full text-[9px] font-bold leading-none ${
                 viewMode === 'all' ? 'bg-zinc-700 text-zinc-200' : 'bg-zinc-800 text-zinc-500'
-              }`}>{strategyList.length}</span>
+              }`}>{instanceRows.length}</span>
             </button>
           </div>
 
           <div className="flex items-center gap-1.5 mr-1">
             <Activity className={`h-3.5 w-3.5 ${runningCount > 0 ? 'text-emerald-500' : 'text-zinc-700'}`} />
             <span className="text-xs font-semibold text-zinc-300">
-              {runningCount} / {strategyList.length} running
+              {runningCount} / {instanceRows.length} running
             </span>
           </div>
 
@@ -1029,12 +1121,15 @@ export default function StrategiesPlusPage() {
 
             {/* Strategy rows */}
             <div className="divide-y divide-zinc-800/30">
-              {displayList.map(([key, item]) => (
+              {displayList.map(({ key, instanceId, meta, state }) => (
                 <StrategyRowWide
-                  key={key}
-                  meta={item.meta}
-                  state={item.state}
+                  key={`${key}:${instanceId}`}
+                  meta={meta}
+                  state={state}
                   onRefresh={fetchStrategies}
+                  instanceId={instanceId || undefined}
+                  onAddInstance={instanceId === '' ? addInstance : undefined}
+                  onRemoveInstance={instanceId === '' ? undefined : removeInstance}
                 />
               ))}
             </div>

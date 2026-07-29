@@ -12,7 +12,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 
 from login import get_dhan_client
 from lib.dhan_helper import DhanHelper
-from lib.strategy_state_helper import save_strategy_state, check_shutdown_trigger, exit_if_market_closed, parse_target_spec
+from lib.strategy_state_helper import save_strategy_state, check_shutdown_trigger, exit_if_market_closed, parse_target_spec, instance_log_suffix
 
 # Configure Logging
 project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -30,7 +30,7 @@ logging.basicConfig(
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
         logging.StreamHandler(),
-        FlushingFileHandler(os.path.join(log_dir, f"{datetime.now().strftime('%Y%m%d')}.log"))
+        FlushingFileHandler(os.path.join(log_dir, f"{datetime.now().strftime('%Y%m%d')}{instance_log_suffix()}.log"))
     ],
     force=True
 )
@@ -43,7 +43,9 @@ class NiftySpreadTrendStrategy:
                  target_profit=2000.0, target_profit_is_pct=False,
                  stop_loss=2000.0, stop_loss_is_pct=False, exit_on_signal_change=True,
                  eod_time="15:15", cooldown_minutes=5,
-                 use_ema=True, use_supertrend=True, min_hold_minutes=5):
+                 use_ema=True, use_supertrend=True, min_hold_minutes=5,
+                 state_key="nifty_spread_trend"):
+        self.state_key = state_key
         self.dry_run = dry_run
         self.symbol = symbol.upper()
         self.interval = interval
@@ -248,7 +250,7 @@ class NiftySpreadTrendStrategy:
             "option_vwap": round(self.option_vwap, 2),
             "option_st_level": round(self.option_st_level, 2),
         }
-        save_strategy_state("nifty_spread_trend", state_dict)
+        save_strategy_state(self.state_key, state_dict)
 
     def get_signal(self) -> Tuple[str, float]:
         """
@@ -372,7 +374,7 @@ class NiftySpreadTrendStrategy:
         Determines strikes, retrieves quotes, and places orders (Buy hedge first, Sell short second).
         """
         # Check shutdown trigger first
-        if check_shutdown_trigger("nifty_spread_trend"):
+        if check_shutdown_trigger(self.state_key):
             logger.info("UI Shutdown Request during enter_spread startup.")
             self.save_state(spot, 0, 0, 0, status="STOPPED")
             sys.exit(0)
@@ -401,7 +403,7 @@ class NiftySpreadTrendStrategy:
             return
             
         # Check shutdown trigger before short quote fetch
-        if check_shutdown_trigger("nifty_spread_trend"):
+        if check_shutdown_trigger(self.state_key):
             logger.info("UI Shutdown Request before short option quote fetch.")
             self.save_state(spot, 0, 0, 0, status="STOPPED")
             sys.exit(0)
@@ -410,7 +412,7 @@ class NiftySpreadTrendStrategy:
         short_quote = self.helper.option(self.symbol, short_strike, option_type)
 
         # Check shutdown trigger before long quote fetch
-        if check_shutdown_trigger("nifty_spread_trend"):
+        if check_shutdown_trigger(self.state_key):
             logger.info("UI Shutdown Request before long option quote fetch.")
             self.save_state(spot, 0, 0, 0, status="STOPPED")
             sys.exit(0)
@@ -419,7 +421,7 @@ class NiftySpreadTrendStrategy:
         long_quote = self.helper.option(self.symbol, long_strike, option_type)
 
         # Check shutdown trigger after quote fetches
-        if check_shutdown_trigger("nifty_spread_trend"):
+        if check_shutdown_trigger(self.state_key):
             logger.info("UI Shutdown Request after option quote fetches.")
             self.save_state(spot, 0, 0, 0, status="STOPPED")
             sys.exit(0)
@@ -535,7 +537,7 @@ class NiftySpreadTrendStrategy:
                 last_indicator_minute = current_minute
             
             # Check shutdown trigger first
-            if check_shutdown_trigger("nifty_spread_trend"):
+            if check_shutdown_trigger(self.state_key):
                 s_ltp, l_ltp, spot_price = self.fetch_ltps()
                 short_ltp_val = s_ltp if s_ltp > 0 else self.short_entry_price
                 long_ltp_val = l_ltp if l_ltp > 0 else self.long_entry_price
@@ -712,7 +714,7 @@ class NiftySpreadTrendStrategy:
         
         while True:
             # Check shutdown trigger
-            if check_shutdown_trigger("nifty_spread_trend"):
+            if check_shutdown_trigger(self.state_key):
                 logger.info("UI Shutdown Request in outer loop.")
                 self.save_state(0, 0, 0, 0, status="STOPPED")
                 sys.exit(0)
@@ -727,7 +729,7 @@ class NiftySpreadTrendStrategy:
                     break
 
                 # Wait for market open if closed
-                self.helper.wait_for_market_open(self.dry_run, eod_time=self.eod_time, shutdown_check=lambda: check_shutdown_trigger("nifty_spread_trend"))
+                self.helper.wait_for_market_open(self.dry_run, eod_time=self.eod_time, shutdown_check=lambda: check_shutdown_trigger(self.state_key))
                 
                 # Check signal and spot
                 signal, spot = self.get_signal()
@@ -847,7 +849,11 @@ Examples:
     parser.add_argument("--min-hold-minutes", type=int, default=5,
                         help="Minimum hold time in minutes before the VWAP/ST exit can trigger (default: 5)")
 
+    parser.add_argument("--instance-id", type=str, default="", metavar="ID",
+                        help="Suffix for debug/state files to run a second concurrent copy of this strategy")
+
     args = parser.parse_args()
+    STATE_KEY = f"nifty_spread_trend_{args.instance_id}" if args.instance_id else "nifty_spread_trend"
 
     try:
         target_val, target_is_pct = parse_target_spec(args.target_profit)
@@ -894,6 +900,7 @@ Examples:
         use_ema=args.use_ema,
         use_supertrend=args.use_supertrend,
         min_hold_minutes=args.min_hold_minutes,
+        state_key=STATE_KEY,
     )
     try:
         strat.run()

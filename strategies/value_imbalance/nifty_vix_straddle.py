@@ -59,7 +59,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 
 from login import get_dhan_client
 from lib.dhan_helper import DhanHelper
-from lib.strategy_state_helper import save_strategy_state, check_shutdown_trigger, exit_if_market_closed, parse_target_spec
+from lib.strategy_state_helper import save_strategy_state, check_shutdown_trigger, exit_if_market_closed, parse_target_spec, instance_log_suffix
 
 # ── Logging setup ────────────────────────────────────────────────────────────
 project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -90,7 +90,7 @@ logging.basicConfig(
     handlers=[
         logging.StreamHandler(),
         FlushingFileHandler(
-            os.path.join(log_dir, f"{datetime.now().strftime('%Y%m%d')}.log")
+            os.path.join(log_dir, f"{datetime.now().strftime('%Y%m%d')}{instance_log_suffix()}.log")
         ),
     ],
     force=True,
@@ -1182,8 +1182,12 @@ Examples:
                         help="Pause entries for N seconds after a losing cycle (default: 90)")
     parser.add_argument("--max-spread-pct", type=float, default=8.0, metavar="PCT",
                         help="Max bid-ask spread %% per leg to allow entry (default: 8, 0=disabled)")
+    parser.add_argument("--instance-id", type=str, default="", metavar="ID",
+                        help="Suffix for debug/state files to run a second concurrent copy of this strategy")
 
     args = parser.parse_args()
+    if args.instance_id:
+        STRATEGY_KEY = f"{STRATEGY_KEY}_{args.instance_id}"
 
     try:
         target_val, target_is_pct = parse_target_spec(args.target_profit)

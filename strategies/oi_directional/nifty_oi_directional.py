@@ -43,7 +43,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 
 from login import get_dhan_client
 from lib.dhan_helper import DhanHelper
-from lib.strategy_state_helper import save_strategy_state, check_shutdown_trigger, exit_if_market_closed, parse_target_spec
+from lib.strategy_state_helper import save_strategy_state, check_shutdown_trigger, exit_if_market_closed, parse_target_spec, instance_log_suffix
 
 # ── Logging setup ────────────────────────────────────────────────────────────
 project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -68,7 +68,7 @@ logging.basicConfig(
     handlers=[
         logging.StreamHandler(),
         FlushingFileHandler(
-            os.path.join(log_dir, f"{datetime.now().strftime('%Y%m%d')}.log")
+            os.path.join(log_dir, f"{datetime.now().strftime('%Y%m%d')}{instance_log_suffix()}.log")
         ),
     ],
     force=True,
@@ -704,8 +704,12 @@ Examples:
     parser.add_argument("--stop-loss", type=str, default="5000", metavar="INR",
                         help="Global stop loss in INR, or a percentage of entry premium collected "
                              "e.g. '20%%' (default: 5000)")
+    parser.add_argument("--instance-id", type=str, default="", metavar="ID",
+                        help="Suffix for debug/state files to run a second concurrent copy of this strategy")
 
     args = parser.parse_args()
+    if args.instance_id:
+        STRATEGY_KEY = f"{STRATEGY_KEY}_{args.instance_id}"
 
     try:
         target_val, target_is_pct = parse_target_spec(args.target_profit)

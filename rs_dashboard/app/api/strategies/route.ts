@@ -3,83 +3,51 @@ import path from 'path';
 import fs from 'fs';
 import { execSync, spawn } from 'child_process';
 import { isPidRunning, isPidRunningAt, resolveWorkerPid } from '@/lib/processCheck';
+import {
+  PROJECT_ROOT, DEBUG_DIR, STRATEGIES_METADATA, pidMetaPath, isStrategyRunning,
+  isValidInstanceId, stateKeyFor, discoverInstanceIds,
+} from '@/lib/strategyRegistry';
 
-const PROJECT_ROOT = path.resolve(process.cwd(), '..');
-const DEBUG_DIR = path.join(PROJECT_ROOT, 'debug');
 const PYTHON_EXE = path.join(PROJECT_ROOT, 'venv', 'Scripts', 'pythonw.exe');
 
-// Python's save_strategy_state() rewrites the whole <key>_state.json every cycle with only
-// the fields the strategy itself tracks — it has no notion of pid_start_time, so that field
-// can't live in the state file (it would be clobbered within a second of the process starting).
-// Kept in a side-channel file instead, written once at spawn time.
-function pidMetaPath(key: string): string {
-  return path.join(DEBUG_DIR, `${key}_pid.json`);
-}
-
-function readExpectedStartTime(key: string): string | null {
-  try {
-    const meta = JSON.parse(fs.readFileSync(pidMetaPath(key), 'utf8'));
-    return meta.startTime ?? null;
-  } catch {
-    return null;
-  }
-}
-
-function isStrategyRunning(pid: number, key: string): boolean {
-  return isPidRunningAt(pid, readExpectedStartTime(key));
-}
-
-// Metadata mapping strategy key to display names and absolute paths
-const STRATEGIES_METADATA: Record<string, { name: string; path: string }> = {
-  nifty_advanced_imbalance: {
-    name: 'Nifty Advanced Imbalance',
-    path: path.join(PROJECT_ROOT, 'strategies', 'value_imbalance', 'nifty_advanced_imbalance.py')
-  },
-  nifty_delta_neutral: {
-    name: 'Nifty Delta Neutral (0.5 Delta)',
-    path: path.join(PROJECT_ROOT, 'strategies', 'value_imbalance', 'nifty_delta_neutral.py')
-  },
-  nifty_value_imbalance_straddle: {
-    name: 'Nifty Value Imbalance Straddle',
-    path: path.join(PROJECT_ROOT, 'strategies', 'value_imbalance', 'nifty_value_imbalance_straddle.py')
-  },
-  nifty_value_imbalance_strangle: {
-    name: 'Nifty Value Imbalance Strangle',
-    path: path.join(PROJECT_ROOT, 'strategies', 'value_imbalance', 'nifty_value_imbalance_strangle.py')
-  },
-  nifty_vwap_1min_straddle: {
-    name: 'Nifty VWAP 1-Min Straddle',
-    path: path.join(PROJECT_ROOT, 'strategies', 'value_imbalance', 'nifty_vwap_1min_straddle.py')
-  },
-  nifty_vix_straddle: {
-    name: 'Nifty VIX-Filtered Straddle',
-    path: path.join(PROJECT_ROOT, 'strategies', 'value_imbalance', 'nifty_vix_straddle.py')
-  },
-  nifty_spread_trend: {
-    name: 'Nifty Spread Trend-Following',
-    path: path.join(PROJECT_ROOT, 'strategies', 'spread_trend', 'nifty_spread_trend.py')
-  },
-  nifty_oi_directional: {
-    name: 'Nifty OI Directional',
-    path: path.join(PROJECT_ROOT, 'strategies', 'oi_directional', 'nifty_oi_directional.py')
-  },
-  crudeoilm_supertrend: {
-    name: 'CrudeOil Mini Supertrend',
-    path: path.join(PROJECT_ROOT, 'strategies', 'crudeoil', 'crudeoilm_supertrend.py')
-  },
-  crudeoilm_renko_sar: {
-    name: 'CrudeOil Mini Renko SAR',
-    path: path.join(PROJECT_ROOT, 'strategies', 'crudeoil', 'crudeoilm_renko_sar.py')
-  },
-  nifty_st_oi_bearcall: {
-    name: 'Nifty ST+OI Bear Call Spread',
-    path: path.join(PROJECT_ROOT, 'strategies', 'st_oi_bearcall', 'nifty_st_oi_bearcall.py')
-  },
-};
 
 /**
  * GET handler: Returns the active status, parameters, and live states of all strategy processes.
  */
+function readInstanceState(stateKey: string): any {
+  const stateFile = path.join(DEBUG_DIR, `${stateKey}_state.json`);
+  let state: any = {
+    strategy: stateKey,
+    status: 'STOPPED',
+    total_pnl: 0,
+    realized_pnl: 0,
+    spot: 0,
+    adjustments: 0
+  };
+
+  if (fs.existsSync(stateFile)) {
+    try {
+      const content = fs.readFileSync(stateFile, 'utf8');
+      const data = JSON.parse(content);
+
+      if (data && data.pid && isStrategyRunning(data.pid, stateKey)) {
+        // Process is running, trust the file state
+        state = data;
+      } else {
+        // Process is not running anymore
+        state = {
+          ...data,
+          status: 'STOPPED'
+        };
+      }
+    } catch (err) {
+      console.error(`Error reading/parsing state file for ${stateKey}:`, err);
+    }
+  }
+
+  return state;
+}
+
 export async function GET() {
   try {
     const results: Record<string, any> = {};
@@ -90,34 +58,12 @@ export async function GET() {
     }
 
     for (const [key, meta] of Object.entries(STRATEGIES_METADATA)) {
-      const stateFile = path.join(DEBUG_DIR, `${key}_state.json`);
-      let state: any = {
-        strategy: key,
-        status: 'STOPPED',
-        total_pnl: 0,
-        realized_pnl: 0,
-        spot: 0,
-        adjustments: 0
-      };
-
-      if (fs.existsSync(stateFile)) {
-        try {
-          const content = fs.readFileSync(stateFile, 'utf8');
-          const data = JSON.parse(content);
-          
-          if (data && data.pid && isStrategyRunning(data.pid, key)) {
-            // Process is running, trust the file state
-            state = data;
-          } else {
-            // Process is not running anymore
-            state = {
-              ...data,
-              status: 'STOPPED'
-            };
-          }
-        } catch (err) {
-          console.error(`Error reading/parsing state file for ${key}:`, err);
-        }
+      // Primary (no instance id) instance is always present, even if stopped, so the
+      // existing "start primary" row keeps working unmodified. Named instances only
+      // show up once a debug/<key>_<id>_state.json file exists for them.
+      const instances: Record<string, any> = { '': readInstanceState(key) };
+      for (const instanceId of discoverInstanceIds(key)) {
+        instances[instanceId] = readInstanceState(stateKeyFor(key, instanceId));
       }
 
       results[key] = {
@@ -125,7 +71,11 @@ export async function GET() {
           key,
           name: meta.name
         },
-        state
+        // `state` is the primary instance, kept for backward compatibility: /strategies
+        // (StrategyCard) predates multi-instance and reads this field directly — dropping
+        // it crashes that page on `state.status`. Only /strategies-plus reads `instances`.
+        state: instances[''],
+        instances
       };
     }
 
@@ -142,29 +92,32 @@ export async function GET() {
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
-    const { action, strategy, args = [] } = body;
+    const { action, strategy, args = [], instanceId: rawInstanceId } = body;
 
     if (!fs.existsSync(DEBUG_DIR)) {
       fs.mkdirSync(DEBUG_DIR, { recursive: true });
     }
 
-    // Global action: stop all running strategies
+    // Global action: stop all running strategies (primary + any named instances)
     if (action === 'stop_all') {
       const triggered: string[] = [];
       for (const key of Object.keys(STRATEGIES_METADATA)) {
-        const stateFile = path.join(DEBUG_DIR, `${key}_state.json`);
-        let isRunning = false;
-        if (fs.existsSync(stateFile)) {
-          try {
-            const data = JSON.parse(fs.readFileSync(stateFile, 'utf8'));
-            isRunning = !!(data.pid && isStrategyRunning(data.pid, key));
-          } catch {}
-        }
-        if (isRunning) {
-          const triggerFile = path.join(DEBUG_DIR, `${key}_shutdown.trigger`);
-          fs.writeFileSync(triggerFile, '');
-          triggered.push(key);
-          console.log(`Global exit: shutdown trigger written for ${key}`);
+        const stateKeys = [key, ...discoverInstanceIds(key).map(id => stateKeyFor(key, id))];
+        for (const stateKey of stateKeys) {
+          const stateFile = path.join(DEBUG_DIR, `${stateKey}_state.json`);
+          let isRunning = false;
+          if (fs.existsSync(stateFile)) {
+            try {
+              const data = JSON.parse(fs.readFileSync(stateFile, 'utf8'));
+              isRunning = !!(data.pid && isStrategyRunning(data.pid, stateKey));
+            } catch {}
+          }
+          if (isRunning) {
+            const triggerFile = path.join(DEBUG_DIR, `${stateKey}_shutdown.trigger`);
+            fs.writeFileSync(triggerFile, '');
+            triggered.push(stateKey);
+            console.log(`Global exit: shutdown trigger written for ${stateKey}`);
+          }
         }
       }
       return NextResponse.json({ success: true, triggered });
@@ -174,28 +127,44 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ success: false, error: 'Invalid or missing strategy key' }, { status: 400 });
     }
 
+    if (rawInstanceId !== undefined && rawInstanceId !== '' && !isValidInstanceId(rawInstanceId)) {
+      return NextResponse.json({ success: false, error: 'Invalid instanceId — use 1-20 letters/digits/underscores/hyphens' }, { status: 400 });
+    }
+    const instanceId: string | undefined = rawInstanceId || undefined;
+    const stateKey = stateKeyFor(strategy, instanceId);
+
     const meta = STRATEGIES_METADATA[strategy];
 
     if (action === 'start') {
-      // Check if it's already running
-      const stateFile = path.join(DEBUG_DIR, `${strategy}_state.json`);
+      // Check if this specific instance is already running
+      const stateFile = path.join(DEBUG_DIR, `${stateKey}_state.json`);
       if (fs.existsSync(stateFile)) {
         try {
           const data = JSON.parse(fs.readFileSync(stateFile, 'utf8'));
-          if (data.pid && isStrategyRunning(data.pid, strategy)) {
+          if (data.pid && isStrategyRunning(data.pid, stateKey)) {
             return NextResponse.json({ success: false, error: 'Strategy is already running' }, { status: 400 });
           }
         } catch (e) {}
       }
 
       // Ensure any old shutdown trigger file is removed
-      const triggerFile = path.join(DEBUG_DIR, `${strategy}_shutdown.trigger`);
+      const triggerFile = path.join(DEBUG_DIR, `${stateKey}_shutdown.trigger`);
       if (fs.existsSync(triggerFile)) {
         fs.unlinkSync(triggerFile);
       }
 
+      // Strip any client-supplied --instance-id: this route decides the instance, and the
+      // spawned process MUST write to the same stateKey the initial state/pid files below
+      // are keyed by. A stray flag in args would desync those and orphan the process.
+      const cleanArgs: string[] = [];
+      for (let i = 0; i < args.length; i++) {
+        if (args[i] === '--instance-id') { i++; continue; }
+        if (typeof args[i] === 'string' && args[i].startsWith('--instance-id=')) continue;
+        cleanArgs.push(args[i]);
+      }
+
       // Spawn process in background
-      const processArgs = [meta.path, ...args];
+      const processArgs = [meta.path, ...cleanArgs, ...(instanceId ? ['--instance-id', instanceId] : [])];
       console.log(`Spawning background strategy: ${PYTHON_EXE} ${processArgs.join(' ')}`);
 
       const child = spawn(PYTHON_EXE, processArgs, {
@@ -216,7 +185,7 @@ export async function POST(request: NextRequest) {
         if (worker) {
           workerPid = worker.pid;
           try {
-            fs.writeFileSync(pidMetaPath(strategy), JSON.stringify(worker));
+            fs.writeFileSync(pidMetaPath(stateKey), JSON.stringify(worker));
           } catch (writeErr) {
             console.error('Failed to write pid meta file:', writeErr);
           }
@@ -225,7 +194,7 @@ export async function POST(request: NextRequest) {
 
       // Write initial state to prevent UI flicker
       const initialState = {
-        strategy,
+        strategy: stateKey,
         status: 'INITIALIZING',
         pid: workerPid,
         total_pnl: 0,
@@ -234,7 +203,7 @@ export async function POST(request: NextRequest) {
         adjustments: 0,
         last_update: new Date().toISOString()
       };
-      
+
       try {
         fs.writeFileSync(stateFile, JSON.stringify(initialState, null, 2));
       } catch (writeErr) {
@@ -245,14 +214,43 @@ export async function POST(request: NextRequest) {
 
     } else if (action === 'stop') {
       // Write trigger file for graceful shutdown
-      const triggerFile = path.join(DEBUG_DIR, `${strategy}_shutdown.trigger`);
-      console.log(`Writing shutdown trigger for strategy: ${strategy} at ${triggerFile}`);
+      const triggerFile = path.join(DEBUG_DIR, `${stateKey}_shutdown.trigger`);
+      console.log(`Writing shutdown trigger for strategy: ${stateKey} at ${triggerFile}`);
       fs.writeFileSync(triggerFile, '');
       return NextResponse.json({ success: true, message: 'Graceful shutdown trigger written successfully' });
 
+    } else if (action === 'remove_instance') {
+      // Delete a stopped duplicate's files so its row disappears from the dashboard.
+      // Hard-guarded: never the primary instance (that row must always exist), and never
+      // a live process — removing a running instance's state file would orphan it, leaving
+      // a strategy trading with no dashboard row and no way to stop it.
+      if (!instanceId) {
+        return NextResponse.json({ success: false, error: 'Cannot remove the primary instance' }, { status: 400 });
+      }
+      const stateFile = path.join(DEBUG_DIR, `${stateKey}_state.json`);
+      if (fs.existsSync(stateFile)) {
+        try {
+          const data = JSON.parse(fs.readFileSync(stateFile, 'utf8'));
+          if (data.pid && isStrategyRunning(data.pid, stateKey)) {
+            return NextResponse.json({ success: false, error: 'Instance is still running — stop it first' }, { status: 400 });
+          }
+        } catch {
+          // Unparseable state file — treat as stopped and let the removal proceed.
+        }
+      }
+      for (const f of [stateFile, pidMetaPath(stateKey), path.join(DEBUG_DIR, `${stateKey}_shutdown.trigger`)]) {
+        try {
+          if (fs.existsSync(f)) fs.unlinkSync(f);
+        } catch (rmErr) {
+          console.error(`Failed to remove ${f}:`, rmErr);
+        }
+      }
+      console.log(`Removed instance files for ${stateKey}`);
+      return NextResponse.json({ success: true, message: `Instance ${instanceId} removed` });
+
     } else if (action === 'force_stop') {
       // Force-kill the process by PID (used when graceful stop hangs)
-      const stateFile = path.join(DEBUG_DIR, `${strategy}_state.json`);
+      const stateFile = path.join(DEBUG_DIR, `${stateKey}_state.json`);
       if (!fs.existsSync(stateFile)) {
         return NextResponse.json({ success: false, error: 'No state file found — strategy may already be stopped' }, { status: 404 });
       }
@@ -263,7 +261,7 @@ export async function POST(request: NextRequest) {
       } catch {
         return NextResponse.json({ success: false, error: 'Could not read PID from state file' }, { status: 500 });
       }
-      if (!pid || !isStrategyRunning(pid, strategy)) {
+      if (!pid || !isStrategyRunning(pid, stateKey)) {
         return NextResponse.json({ success: true, message: 'Process is not running' });
       }
       // /T kills the process tree (child processes too); /F forces termination
@@ -277,7 +275,7 @@ export async function POST(request: NextRequest) {
       if (isPidRunning(pid)) {
         return NextResponse.json({ success: false, error: `Process ${pid} could not be killed — try running as administrator` }, { status: 500 });
       }
-      console.log(`Force-killed PID ${pid} for strategy ${strategy}`);
+      console.log(`Force-killed PID ${pid} for strategy ${stateKey}`);
       try {
         const data = JSON.parse(fs.readFileSync(stateFile, 'utf8'));
         fs.writeFileSync(stateFile, JSON.stringify({ ...data, status: 'STOPPED' }, null, 2));
@@ -285,7 +283,7 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ success: true, message: `Process ${pid} force-killed` });
 
     } else {
-      return NextResponse.json({ success: false, error: 'Invalid action, must be start, stop, or force_stop' }, { status: 400 });
+      return NextResponse.json({ success: false, error: 'Invalid action, must be start, stop, force_stop, or remove_instance' }, { status: 400 });
     }
 
   } catch (err) {

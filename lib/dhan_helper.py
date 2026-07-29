@@ -2160,7 +2160,12 @@ class DhanHelper:
 
     # --- BULK OPERATIONS ---
     def cancel_all_orders(self) -> int:
-        """Cancel all pending orders. Returns count of successfully cancelled orders."""
+        """Cancel all pending orders. Returns count of successfully cancelled orders.
+
+        WARNING — account-wide. This cancels EVERY pending order on the account, including
+        resting SL orders placed by other strategies and by other --instance-id copies of
+        this one. To cancel a single order you placed, use cancel_order(order_id).
+        """
         cancelled_count = 0
         try:
             res = self.dhan.get_order_list()
@@ -4104,6 +4109,16 @@ class DhanHelper:
         """
         Close any open position for the symbol immediately.
         Safely handles multiple product types (e.g. closing both INTRA and MARGIN if they exist).
+
+        WARNING — account-wide, not strategy-scoped. This closes the whole NETTED broker
+        position for the symbol (abs(netQty)), which is not necessarily "your" position.
+        Two strategies (or two --instance-id copies of one strategy) short the same strike
+        net into a single broker position, so calling this from one of them flattens the
+        other's leg too, leaving it trading against phantom state.
+
+        No strategy uses this today — they all exit with explicit quantities via
+        helper.buy()/sell(<lots * lot_size>), which nets correctly. Prefer that. Only use
+        close_position() for genuine "flatten everything in this symbol" semantics.
         """
         try:
             sec = self._resolve_symbol(symbol)

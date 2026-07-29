@@ -1,4 +1,5 @@
 import os
+import re
 import sys
 import json
 import copy
@@ -21,6 +22,41 @@ _pending_lock = threading.Lock()
 _dirty = threading.Event()
 _writer_thread = None
 _writer_lock = threading.Lock()
+
+
+_INSTANCE_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,20}$")
+
+
+def get_instance_id():
+    """
+    Reads --instance-id straight from sys.argv.
+
+    Logging is configured at import time, before argparse runs, so a second concurrent
+    copy of a strategy needs to know its instance id earlier than parse_args() can tell
+    it. Returns "" when the flag is absent (the normal single-instance case), so callers
+    fall back to exactly the filenames they used before multi-instance support existed.
+    """
+    argv = sys.argv[1:]
+    raw = None
+    for i, arg in enumerate(argv):
+        if arg == "--instance-id":
+            raw = argv[i + 1] if i + 1 < len(argv) else None
+            break
+        if arg.startswith("--instance-id="):
+            raw = arg.split("=", 1)[1]
+            break
+    if not raw or not _INSTANCE_ID_RE.match(raw):
+        return ""
+    return raw
+
+
+def instance_log_suffix():
+    """
+    Filename suffix isolating this instance's log file: "" for the primary instance
+    (unchanged filenames for every existing strategy), "_<id>" for a duplicated run.
+    """
+    instance_id = get_instance_id()
+    return f"_{instance_id}" if instance_id else ""
 
 
 def _write_state_file(strategy_name, state_dict):

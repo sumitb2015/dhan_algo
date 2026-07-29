@@ -32,8 +32,8 @@ venv\Scripts\python.exe login.py
 
 ```powershell
 # Dry run by default — add --live to place real orders
-venv\Scripts\python.exe strategies/value_imbalance/nifty_advanced_imbalance.py --entry-type straddle --mode winner_roll_atm
-venv\Scripts\python.exe strategies/expiry/nifty_expiry.py --live --lots 1 --entry-type straddle --adjustment c2c
+venv\Scripts\python.exe strategies/value_imbalance/nifty_advanced_imbalance.py --entry-type strangle --mode winner_roll_atm
+venv\Scripts\python.exe strategies/spread_trend/nifty_spread_trend.py --live --lots 1
 ```
 
 All strategies follow this pattern (`strategies/<group>/<name>.py` + flags). Full CLI references for every strategy are in [GEMINI.md](GEMINI.md); each strategy's logic is in its `strategy.md`.
@@ -103,7 +103,6 @@ lib/
   strategy_state_helper.py  # save_strategy_state() / check_shutdown_trigger()
 strategies/
   value_imbalance/          # Straddle, Strangle, Advanced Imbalance, VWAP straddle, and Delta Neutral strategies
-  expiry/                   # 0DTE expiry-day straddle/strangle with leg SL and adjustment modes
   spread_trend/             # Trend-following Bear Call / Bull Put spread strategy (EMA20 + Supertrend)
   st_oi_bearcall/           # Dual Supertrend (index + option) + OI short-buildup bear call spread only
   oi_directional/           # OI imbalance + PCR-driven naked PE/CE sell strategy
@@ -210,7 +209,7 @@ These are not obvious and have caused runtime errors in the past (see [GEMINI.md
 - Intraday auto-exit is hardcoded at **15:17 IST** across all strategies.
 - Straddle/strangle inversion guard: `CE strike > PE strike` is enforced at entry and after each adjustment; violation triggers an emergency exit + 5-minute pause + fresh cycle. **Exception**: `nifty_delta_neutral.py` deliberately does not enforce this — strikes are chosen purely by delta-proximity, so an inverted strangle (CE strike < PE strike) is a valid, expected outcome, not an error.
 - New strategies must use `templates/strategy_template.py` as the starting point and must call `save_strategy_state()` and `check_shutdown_trigger()` in the main loop to integrate with the dashboard.
-- Per-strategy trading logic lives in each group's `strategy.md` (`strategies/<group>/strategy.md`) — read it before modifying that strategy. One-line map: `value_imbalance/` premium mean-reversion straddles/strangles (VWAP variant, plus a delta-neutral 0.5-delta variant with no inversion guard and no entry-balance gate); `expiry/` 0DTE straddle/strangle with per-leg SL + adjustment modes; `spread_trend/` EMA20+Supertrend credit spreads; `st_oi_bearcall/` bear-call-only entry gated by dual Supertrend (index 3-min + candidate option's own 3-min) plus OI short-buildup confirmation; `oi_directional/` OI-diff/PCR naked option sell; `crudeoil/` MCX futures (Supertrend trailing, and always-in Renko SAR).
+- Per-strategy trading logic lives in each group's `strategy.md` (`strategies/<group>/strategy.md`) — read it before modifying that strategy. One-line map: `value_imbalance/` premium mean-reversion straddles/strangles (VWAP variant, plus a delta-neutral 0.5-delta variant with no inversion guard and no entry-balance gate); `spread_trend/` EMA20+Supertrend credit spreads; `st_oi_bearcall/` bear-call-only entry gated by dual Supertrend (index 3-min + candidate option's own 3-min) plus OI short-buildup confirmation; `oi_directional/` OI-diff/PCR naked option sell; `crudeoil/` MCX futures (Supertrend trailing, and always-in Renko SAR).
 
 ## Environment
 
