@@ -176,7 +176,9 @@ class NiftyVixStraddle:
 
         # Supertrend state
         self.straddle_st_dir: Optional[float] = None
+        self.straddle_st_level: Optional[float] = None
         self.vix_st_dir: Optional[float] = None
+        self.vix_st_level: Optional[float] = None
         self.vix_ltp: float = 0.0
         self._vix_data_date: str = ""  # "YYYY-MM-DD" of the last successful VIX candle fetch
 
@@ -214,6 +216,7 @@ class NiftyVixStraddle:
         self.vwap_bars = 0
         self._last_candle_minute = ""
         self.straddle_st_dir = None
+        self.straddle_st_level = None
 
     def _vwap_ready(self) -> bool:
         if self.vwap_bars <= 0 or self.candle_vwap <= 0:
@@ -306,9 +309,11 @@ class NiftyVixStraddle:
         once spot has crossed the strike midpoint by atm_shift_buffer points, not just
         barely across it. Plain round(spot/50)*50 flips on every tick when spot sits
         near a midpoint (e.g. 24225 between 24200/24250), causing rapid re-centering
-        that keeps wiping straddle_st_dir via _reset_indicators() before the Supertrend
-        ever accumulates enough candles to settle -- so entries never fire and API calls
-        (subscribe/unsubscribe, quotes) get spammed for no benefit.
+        that keeps wiping straddle_st_dir via _reset_indicators(). This used to also cost
+        the Supertrend ~30-40 min to re-accumulate enough same-day candles to settle again;
+        _fetch_option_candles now carries the previous trading day's session into the new
+        strike's candle fetch, so it re-warms immediately -- but hysteresis is still kept
+        to avoid spamming subscribe/unsubscribe and quote API calls on every tick.
         """
         candidate = self._atm(spot)
         if candidate == current_atm:
@@ -319,6 +324,10 @@ class NiftyVixStraddle:
         if candidate < current_atm and spot <= midpoint - self.atm_shift_buffer:
             return candidate
         return current_atm
+
+    @staticmethod
+    def _fmt_indicator(v: Optional[float]) -> str:
+        return f"{v:.2f}" if v is not None else "n/a"
 
     def _unrealized_pnl(self, ce_ltp: float, pe_ltp: float) -> float:
         if not self.in_position:
@@ -351,16 +360,23 @@ class NiftyVixStraddle:
     # ── candle fetch helpers ─────────────────────────────────────────────────
 
     def _fetch_option_candles(self, security_id: str) -> pd.DataFrame:
-        """Fetch today's 1-min OHLCV candles for an option security ID."""
+        """
+        Fetch 1-min OHLCV candles for an option security ID, covering the previous
+        trading day's full session plus today's session so far. Carrying the prior
+        session lets Supertrend (computed on the combined premium in
+        _refresh_indicators) start warm from the open instead of needing ~30-40 min
+        of same-day bars to accumulate -- see combo_df in _refresh_indicators.
+        """
         today = datetime.now().strftime("%Y-%m-%d")
-        # Use a 2-day window (yesterday -> today) to avoid DH-905 on same-day-only requests
-        yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+        # 5-day lookback (not just yesterday) to reliably land on the prior trading
+        # day across weekends/holidays -- same safety margin DhanHelper.get_latest_candles uses.
+        from_date = (datetime.now() - timedelta(days=5)).strftime("%Y-%m-%d")
         df = self.helper.get_intraday_minute_data(
             security_id=security_id,
             exchange_segment="NSE_FNO",
             instrument_type="OPTIDX",
             interval="1",
-            from_date=yesterday,
+            from_date=from_date,
             to_date=today,
         )
         if df.empty:
@@ -402,22 +418,31 @@ class NiftyVixStraddle:
         else:
             df["ts"] = pd.to_datetime(df[ts_col])
 
-        session_start = datetime.now().replace(hour=9, minute=15, second=0, microsecond=0)
-        df = df[df["ts"] >= session_start].copy()
+        today_date = datetime.now().date()
+        dates_present = sorted(d for d in df["ts"].dt.date.unique() if d < today_date)
+        prev_trading_day = dates_present[-1] if dates_present else None
+
+        keep_dates = {today_date} if prev_trading_day is None else {prev_trading_day, today_date}
+        df = df[df["ts"].dt.date.isin(keep_dates) & (df["ts"].dt.strftime("%H:%M") >= "09:15")].copy()
         df = df.sort_values("ts").reset_index(drop=True)
         return df
 
     def _fetch_vix_candles(self) -> pd.DataFrame:
-        """Fetch today's 1-min OHLC candles for India VIX (security ID 21, NSE_IDX)."""
+        """
+        Fetch 1-min OHLC candles for India VIX (security ID 21, NSE_IDX), covering the
+        previous trading day's full session plus today's session so far -- same warm-up
+        rationale as _fetch_option_candles.
+        """
         today = datetime.now().strftime("%Y-%m-%d")
-        yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+        # 5-day lookback to reliably land on the prior trading day across weekends/holidays.
+        from_date = (datetime.now() - timedelta(days=5)).strftime("%Y-%m-%d")
         try:
             raw = self.helper.get_intraday_minute_data(
                 security_id=VIX_SECURITY_ID,
                 exchange_segment="IDX_I",
                 instrument_type="INDEX",
                 interval="1",
-                from_date=yesterday,
+                from_date=from_date,
                 to_date=today,
             )
         except Exception as e:
@@ -453,19 +478,23 @@ class NiftyVixStraddle:
         df = df.set_index("Datetime").sort_index()
 
         today_date = datetime.now().date()
-        today_mask = df.index.date == today_date
+        dates_present = sorted(d for d in df.index.date if d < today_date)
+        prev_trading_day = dates_present[-1] if dates_present else None
+
+        keep_dates = {today_date} if prev_trading_day is None else {prev_trading_day, today_date}
+        date_mask = pd.Series(df.index.date, index=df.index).isin(keep_dates)
         session_mask = df.index.strftime("%H:%M") >= "09:15"
-        return df[today_mask & session_mask]
+        return df[date_mask & session_mask]
 
     def _resample_and_supertrend(self, candles_1m: pd.DataFrame, st_period: int, st_multiplier: float,
-                                  interval_minutes: str) -> Tuple[Optional[float], Optional[float]]:
+                                  interval_minutes: str) -> Tuple[Optional[float], Optional[float], Optional[float]]:
         """
         Resample 1-min OHLC candles (Datetime-indexed, Title-case columns) to
         `interval_minutes`-min bars and compute Supertrend on the resampled series.
-        Returns (direction, close) from the last COMPLETED bar, or (None, None).
+        Returns (direction, level, close) from the last COMPLETED bar, or (None, None, None).
         """
         if candles_1m.empty:
-            return None, None
+            return None, None, None
         try:
             resample_rule = f"{interval_minutes}min"
             agg = {"Open": "first", "High": "max", "Low": "min", "Close": "last"}
@@ -473,24 +502,29 @@ class NiftyVixStraddle:
                 agg["Volume"] = "sum"
             df = candles_1m.resample(resample_rule).agg(agg).dropna(subset=["Close"])
             if len(df) < st_period + 2:
-                return None, None
+                return None, None, None
 
             st_ind = [{"kind": "supertrend", "length": st_period, "multiplier": st_multiplier}]
             df_ta = self.helper.calculate_ta_indicators(df.copy(), st_ind)
 
             dir_cols = [c for c in df_ta.columns if c.startswith("SUPERTd_")]
-            if not dir_cols:
-                return None, None
+            level_cols = [
+                c for c in df_ta.columns
+                if c.startswith("SUPERT_") and not any(c.startswith(p) for p in ("SUPERTd_", "SUPERTl_", "SUPERTs_"))
+            ]
+            if not dir_cols or not level_cols:
+                return None, None, None
 
             row = df_ta.iloc[-2]  # last completed bar (last row may still be forming)
             direction = float(row[dir_cols[0]])
+            level = float(row[level_cols[0]])
             close = float(row["Close"])
-            if pd.isna(direction):
-                return None, None
-            return direction, close
+            if pd.isna(direction) or pd.isna(level):
+                return None, None, None
+            return direction, level, close
         except Exception as e:
             logger.error(f"Supertrend resample error: {e}")
-            return None, None
+            return None, None, None
 
     def _refresh_indicators(self) -> bool:
         """
@@ -552,34 +586,52 @@ class NiftyVixStraddle:
         merged["combo_h"] = merged["combo_c"]
         merged["combo_l"] = merged["combo_c"]
 
+        # `merged` now spans the previous trading day plus today (see _fetch_option_candles),
+        # which the straddle Supertrend below needs to warm up without a same-day wait.
+        # VWAP, however, must reset every session -- restrict its cumulative sum to today's
+        # bars only, or it would blend in yesterday's premium/volume.
+        today_date = datetime.now().date()
+        merged_today = merged[merged["minute"].dt.date == today_date]
+        if merged_today.empty:
+            logger.warning("No today's-session bars in merged CE/PE candles; VWAP not updated.")
+            return False
+
         # Typical price of combined straddle premium per bar
-        merged["tp"] = (merged["combo_h"] + merged["combo_l"] + merged["combo_c"]) / 3
+        merged_today = merged_today.copy()
+        merged_today["tp"] = (merged_today["combo_h"] + merged_today["combo_l"] + merged_today["combo_c"]) / 3
 
         # Volume: average of both legs; NaN or zero -> 1 so quiet bars still count (TWAP-like)
-        merged["vol"] = (merged["v_ce"].fillna(0) + merged["v_pe"].fillna(0)) / 2
-        merged["vol"] = merged["vol"].replace(0, 1)
+        merged_today["vol"] = (merged_today["v_ce"].fillna(0) + merged_today["v_pe"].fillna(0)) / 2
+        merged_today["vol"] = merged_today["vol"].replace(0, 1)
 
         # Cumulative VWAP from session open
-        cum_tpv = (merged["tp"] * merged["vol"]).cumsum()
-        cum_vol = merged["vol"].cumsum()
-        merged["vwap"] = cum_tpv / cum_vol
+        cum_tpv = (merged_today["tp"] * merged_today["vol"]).cumsum()
+        cum_vol = merged_today["vol"].cumsum()
+        merged_today["vwap"] = cum_tpv / cum_vol
 
-        self.candle_vwap = float(merged["vwap"].iloc[-1])
-        self.vwap_bars = len(merged)
+        self.candle_vwap = float(merged_today["vwap"].iloc[-1])
+        self.vwap_bars = len(merged_today)
 
-        # Straddle's own Supertrend on resampled combined bars
+        # Straddle's own Supertrend on resampled combined bars (previous day + today,
+        # for warm-up -- see _fetch_option_candles)
         combo_df = merged[["minute", "combo_o", "combo_h", "combo_l", "combo_c"]].rename(
             columns={"combo_o": "Open", "combo_h": "High", "combo_l": "Low", "combo_c": "Close"}
         ).set_index("minute")
-        st_dir, st_close = self._resample_and_supertrend(combo_df, self.st_period, self.st_multiplier, self.st_interval)
+        st_dir, st_level, st_close = self._resample_and_supertrend(
+            combo_df, self.st_period, self.st_multiplier, self.st_interval
+        )
         self.straddle_st_dir = st_dir
+        self.straddle_st_level = st_level
 
         # India VIX's own Supertrend
         vix_df = self._fetch_vix_candles()
         if not vix_df.empty:
             self.vix_ltp = float(vix_df["Close"].iloc[-1])
-            vix_dir, _ = self._resample_and_supertrend(vix_df, self.vix_st_period, self.vix_st_multiplier, self.vix_st_interval)
+            vix_dir, vix_level, _ = self._resample_and_supertrend(
+                vix_df, self.vix_st_period, self.vix_st_multiplier, self.vix_st_interval
+            )
             self.vix_st_dir = vix_dir
+            self.vix_st_level = vix_level
             self._vix_data_date = datetime.now().strftime("%Y-%m-%d")
         else:
             logger.warning("Could not fetch India VIX candles; vix_st_dir left stale.")
@@ -587,8 +639,9 @@ class NiftyVixStraddle:
         logger.info(
             f"[Indicators] VWAP={self.candle_vwap:.2f} ({self.vwap_bars} bars) | "
             f"Straddle ST({self.st_period},{self.st_multiplier})@{self.st_interval}m dir={self.straddle_st_dir} "
-            f"(close={st_close if st_close is not None else 'n/a'}) | "
-            f"VIX={self.vix_ltp:.2f} ST({self.vix_st_period},{self.vix_st_multiplier})@{self.vix_st_interval}m dir={self.vix_st_dir}"
+            f"level={self._fmt_indicator(self.straddle_st_level)} (close={self._fmt_indicator(st_close)}) | "
+            f"VIX={self.vix_ltp:.2f} ST({self.vix_st_period},{self.vix_st_multiplier})@{self.vix_st_interval}m "
+            f"dir={self.vix_st_dir} level={self._fmt_indicator(self.vix_st_level)}"
         )
         return True
 
@@ -705,7 +758,8 @@ class NiftyVixStraddle:
             f" | PE {self.pe_strike} @ {pe_fill:.2f}"
             f" | Combined: {self.entry_combined:.2f}"
             f" | VWAP: {self.candle_vwap:.2f} ({self.vwap_bars} bars)"
-            f" | Straddle ST dir={self.straddle_st_dir} | VIX ST dir={self.vix_st_dir} (VIX={self.vix_ltp:.2f})"
+            f" | Straddle ST dir={self.straddle_st_dir} level={self._fmt_indicator(self.straddle_st_level)}"
+            f" | VIX ST dir={self.vix_st_dir} level={self._fmt_indicator(self.vix_st_level)} (VIX={self.vix_ltp:.2f})"
         )
         return True
 
@@ -976,7 +1030,8 @@ class NiftyVixStraddle:
                         f" | CE:{ce_ltp:.2f} PE:{pe_ltp:.2f}"
                         f" | Combined:{combined:.2f}{entry_info}"
                         f" | VWAP:{vwap_status} gap={vwap_gap:+.2f}"
-                        f" | Straddle ST dir={self.straddle_st_dir} | VIX:{self.vix_ltp:.2f} ST dir={self.vix_st_dir}"
+                        f" | Straddle ST dir={self.straddle_st_dir} level={self._fmt_indicator(self.straddle_st_level)}"
+                        f" | VIX:{self.vix_ltp:.2f} ST dir={self.vix_st_dir} level={self._fmt_indicator(self.vix_st_level)}"
                         f" | Diff:{diff_pct:.1f}%"
                         f" | PnL real={self.realized_pnl:+.0f}"
                         f" unreal={unrealized:+.0f}"
