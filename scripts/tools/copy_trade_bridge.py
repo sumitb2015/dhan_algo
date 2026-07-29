@@ -310,13 +310,28 @@ def find_zerodha_symbol(instruments: list, strike, expiry: str, opt_type: str):
     return None
 
 
-def place_child_order(kite, symbol: str, side: str, qty: int):
+def map_product_to_zerodha(kite, dhan_product_type):
+    """Map a Dhan order's productType (e.g. 'MARGIN', 'INTRADAY') to the
+    equivalent Zerodha product. Unrecognized/missing values default to MIS,
+    matching the bridge's previous (hardcoded) behavior."""
+    if str(dhan_product_type or '').upper() in ('MARGIN', 'NRML'):
+        return kite.PRODUCT_NRML
+    return kite.PRODUCT_MIS
+
+
+def place_child_order(kite, symbol: str, side: str, qty: int, product=None):
     """Place a MARKET order sliced to the freeze quantity.
+
+    `product` is the Zerodha product constant (e.g. kite.PRODUCT_MIS /
+    kite.PRODUCT_NRML) to mirror the parent order's actual product type;
+    defaults to MIS if not supplied.
 
     Returns (placed_qty, order_ids, error) — never raises. On a mid-slice
     failure, placed_qty reflects what actually went through so the caller can
     queue exactly the remainder for retry (re-placing the full qty would
     duplicate the successful slices)."""
+    if product is None:
+        product = kite.PRODUCT_MIS
     order_ids = []
     placed = 0
     remaining = qty
@@ -329,7 +344,7 @@ def place_child_order(kite, symbol: str, side: str, qty: int):
                 tradingsymbol=symbol,
                 transaction_type=kite.TRANSACTION_TYPE_BUY if side == 'BUY' else kite.TRANSACTION_TYPE_SELL,
                 quantity=chunk,
-                product=kite.PRODUCT_MIS,
+                product=product,
                 order_type=kite.ORDER_TYPE_MARKET,
                 validity=kite.VALIDITY_DAY,
                 # Zerodha rejects API market orders on options without market
@@ -619,7 +634,10 @@ def drain_retry_queue(kite, retry_queue: list, state: dict, resolve_symbol=None,
         if dup_order_id is not None:
             placed, order_ids, err, verified_dup = item['qty'], [dup_order_id], None, True
         else:
-            placed, order_ids, err = place_child_order(kite, item['zerodha_symbol'], item['side'], item['qty'])
+            placed, order_ids, err = place_child_order(
+                kite, item['zerodha_symbol'], item['side'], item['qty'],
+                product=item.get('product', kite.PRODUCT_MIS),
+            )
             verified_dup = False
 
         if placed:
@@ -774,9 +792,12 @@ def main():
             side = 'BUY' if txn_type in ('B', 'BUY') else 'SELL' if txn_type in ('S', 'SELL') else None
             strike = data.get('StrikePrice') or data.get('strikePrice')
             expiry = data.get('ExpiryDate') or data.get('expiryDate')
-            
+
             opt_type_raw = data.get('OptType') or data.get('optType')
             opt_type = normalize_opt_type(opt_type_raw)
+
+            product_type_raw = data.get('ProductType') or data.get('productType')
+            product = map_product_to_zerodha(kite, product_type_raw)
 
             ts = datetime.now().isoformat()
 
@@ -815,7 +836,7 @@ def main():
                                 'order_no': order_no, 'zerodha_symbol': None,
                                 'strike': strike, 'expiry': expiry, 'opt_type': opt_type,
                                 'side': side, 'qty': delta * multiplier, 'attempts': 0,
-                                'next_ts': 0.0,
+                                'next_ts': 0.0, 'product': product,
                             })
                     append_log({'ts': ts, 'order_no': order_no, 'symbol': symbol, 'side': side,
                                 'qty': delta, 'result': 'queued_resolution',
@@ -853,7 +874,7 @@ def main():
                     continue
 
                 note_replicated_symbol(zerodha_symbol, replicated_symbols)
-                placed, order_ids, err = place_child_order(kite, zerodha_symbol, side, child_qty)
+                placed, order_ids, err = place_child_order(kite, zerodha_symbol, side, child_qty, product=product)
                 if placed:
                     state['last_replication_ts'] = time.time()
                 if err is None:
@@ -880,6 +901,7 @@ def main():
                             # didn't actually go through (response lost, e.g.
                             # RemoteDisconnected) before placing a duplicate.
                             'queued_at': datetime.now(),
+                            'product': product,
                         })
                     print(f'[copy_trade_bridge] ERROR replicating {order_no} to {broker}: {err} '
                           f'(queued {remaining} for retry)', flush=True)
@@ -950,6 +972,7 @@ def main():
                     'StrikePrice': o.get('drvStrikePrice'),
                     'ExpiryDate': o.get('drvExpiryDate'),
                     'OptType': o.get('drvOptionType'),
+                    'ProductType': o.get('productType'),
                 },
             })
 

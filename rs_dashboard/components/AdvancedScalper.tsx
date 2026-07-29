@@ -63,6 +63,7 @@ export default function AdvancedScalper() {
 
   // Trading controls
   const [orderMode, setOrderMode] = useState<'MARKET' | 'LIMIT'>('MARKET');
+  const [productType, setProductType] = useState<'INTRADAY' | 'MARGIN'>('INTRADAY');
   const boxCounterRef = useRef(2);
   const [boxes, setBoxes] = useState<BoxConfig[]>([
     { id: 'box-1', side: 'CE', strike: null, lots: 1, limitPrice: '' },
@@ -526,6 +527,7 @@ export default function AdvancedScalper() {
             side,
             orderType: orderMode,
             exchange: underlying === 'SENSEX' ? 'BFO' : 'NFO',
+            product: productType === 'MARGIN' ? 'NRML' : 'MIS',
             ...(orderMode === 'LIMIT' ? { price: Number(box.limitPrice) } : {}),
           }),
         });
@@ -541,6 +543,7 @@ export default function AdvancedScalper() {
               side,
               orderType: orderMode,
               exchangeSegment: underlying === 'SENSEX' ? 'BSE_FNO' : 'NSE_FNO',
+              productType,
               ...(orderMode === 'LIMIT' ? { price: Number(box.limitPrice) } : {}),
             }),
           });
@@ -570,7 +573,7 @@ export default function AdvancedScalper() {
       orderInFlightRef.current.delete(boxId);
       setOrderPendingBoxes(prev => { const s = new Set(prev); s.delete(boxId); return s; });
     }
-  }, [boxes, expiry, underlying, lotSize, strikeMap, orderMode, broker, addToast, fetchTabData]);
+  }, [boxes, expiry, underlying, lotSize, strikeMap, orderMode, productType, broker, addToast, fetchTabData]);
 
   // ─── Per-position close ───────────────────────────────────────────
 
@@ -1003,6 +1006,20 @@ export default function AdvancedScalper() {
                       : 'text-zinc-500 hover:text-zinc-300'
                   }`}>
                   {m}
+                </button>
+              ))}
+            </div>
+
+            {/* INTRADAY / MARGIN toggle */}
+            <div className="flex items-center bg-zinc-900 border border-zinc-800 p-0.5 rounded-xl shrink-0">
+              {(['INTRADAY', 'MARGIN'] as const).map(pt => (
+                <button key={pt} onClick={() => setProductType(pt)}
+                  className={`px-3 py-1.5 text-xs font-bold rounded-lg transition-all whitespace-nowrap ${
+                    productType === pt
+                      ? 'bg-zinc-700 text-zinc-100 border border-zinc-600'
+                      : 'text-zinc-500 hover:text-zinc-300'
+                  }`}>
+                  {pt}
                 </button>
               ))}
             </div>
