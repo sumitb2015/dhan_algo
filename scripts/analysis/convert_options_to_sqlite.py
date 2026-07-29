@@ -103,8 +103,8 @@ def main():
         csv_files = [f for f in os.listdir(folder_path) if f.endswith(".csv") and len(f) == 14]
         for fname in csv_files:
             tasks.append((sf, fname))
-    total_files = len(tasks)
-    print(f"Found {total_files} CSV files to process across {len(all_offset_folders)} offset folders.")
+    found_files = len(tasks)
+    print(f"Found {found_files} CSV files to process across {len(all_offset_folders)} offset folders.")
     sys.stdout.flush()
     
     # Optimize: Skip files that are already loaded in SQLite
@@ -129,22 +129,23 @@ def main():
     conn.execute("PRAGMA journal_mode = OFF;")
     conn.execute("PRAGMA synchronous = OFF;")
     cursor = conn.cursor()
-    
+
     batch_records = []
     processed_count = 0
     total_rows = 0
-    
+    total_files = len(tasks)
+
     for sf, fname in tasks:
         records = process_file(sf, fname)
         if records:
             batch_records.extend(records)
             total_rows += len(records)
-            
+
         processed_count += 1
         if processed_count % 100 == 0 or processed_count == total_files:
             if batch_records:
                 cursor.executemany("""
-                INSERT OR IGNORE INTO option_prices 
+                INSERT OR IGNORE INTO option_prices
                 (expiry, datetime, option_type, strike, strike_relative, open, high, low, close, spot, volume, oi, iv)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, batch_records)
@@ -152,7 +153,23 @@ def main():
                 batch_records.clear()
             print(f"Processed {processed_count}/{total_files} files... Loaded {total_rows} rows.")
             sys.stdout.flush()
-            
+
+    # Safety-net flush: guarantees any remaining batch is persisted even if the
+    # loop above never hit a flush point (e.g. total_files == 0, or a future
+    # change to the flush condition) - previously, an incremental sync with
+    # fewer than 100 new files never flushed at all (total_files was still the
+    # pre-filter count of ALL files, not the remaining ones, so the
+    # processed_count == total_files check never matched), silently dropping
+    # every newly-read row without ever writing them to disk.
+    if batch_records:
+        cursor.executemany("""
+        INSERT OR IGNORE INTO option_prices
+        (expiry, datetime, option_type, strike, strike_relative, open, high, low, close, spot, volume, oi, iv)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, batch_records)
+        conn.commit()
+        batch_records.clear()
+
     # 4. Build Index
     print("Building index for optimal lookup query speeds...")
     sys.stdout.flush()
