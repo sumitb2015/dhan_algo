@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import path from 'path';
 import fs from 'fs';
 import { execSync, spawn } from 'child_process';
-import { isPidRunning, isPidRunningAt, getPidStartTime } from '@/lib/processCheck';
+import { isPidRunning, isPidRunningAt, resolveWorkerPid } from '@/lib/processCheck';
 
 const PROJECT_ROOT = path.resolve(process.cwd(), '..');
 const DEBUG_DIR = path.join(PROJECT_ROOT, 'debug');
@@ -207,13 +207,16 @@ export async function POST(request: NextRequest) {
 
       child.unref();
 
-      // Record start time so isStrategyRunning() can detect Windows recycling this PID
-      // to an unrelated process after this one exits/crashes (see readExpectedStartTime).
+      // Resolve the real worker PID (see resolveWorkerPid docs — child.pid is often just
+      // the venv launcher stub) and record its start time, so isStrategyRunning() can later
+      // detect Windows recycling that PID to an unrelated process after this one exits/crashes.
+      let workerPid = child.pid;
       if (child.pid) {
-        const startTime = getPidStartTime(child.pid);
-        if (startTime) {
+        const worker = await resolveWorkerPid(child.pid);
+        if (worker) {
+          workerPid = worker.pid;
           try {
-            fs.writeFileSync(pidMetaPath(strategy), JSON.stringify({ pid: child.pid, startTime }));
+            fs.writeFileSync(pidMetaPath(strategy), JSON.stringify(worker));
           } catch (writeErr) {
             console.error('Failed to write pid meta file:', writeErr);
           }
@@ -224,7 +227,7 @@ export async function POST(request: NextRequest) {
       const initialState = {
         strategy,
         status: 'INITIALIZING',
-        pid: child.pid,
+        pid: workerPid,
         total_pnl: 0,
         realized_pnl: 0,
         spot: 0,
@@ -238,7 +241,7 @@ export async function POST(request: NextRequest) {
         console.error('Failed to write initial state file:', writeErr);
       }
 
-      return NextResponse.json({ success: true, pid: child.pid });
+      return NextResponse.json({ success: true, pid: workerPid });
 
     } else if (action === 'stop') {
       // Write trigger file for graceful shutdown

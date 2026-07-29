@@ -74,3 +74,41 @@ export function isPidRunningAt(pid: number, expectedStartTime?: string | null, f
   startTimeCache.set(key, { result, ts: Date.now() });
   return result;
 }
+
+function firstChildPid(parentPid: number): number | null {
+  try {
+    const out = execSync(
+      `powershell -NoProfile -Command "(Get-CimInstance Win32_Process -Filter 'ParentProcessId=${parentPid}' | Select-Object -First 1 -ExpandProperty ProcessId)"`,
+      { encoding: 'utf8', stdio: ['pipe', 'pipe', 'ignore'], windowsHide: true }
+    ).trim();
+    return out ? parseInt(out, 10) : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Resolves the PID that actually corresponds to a just-spawned strategy process, plus its
+ * start time. On Windows, venv's Scripts\pythonw.exe (venvlauncher.exe) is a launcher stub
+ * that spawns a SEPARATE real interpreter process and just waits on it — so the PID returned
+ * by child_process.spawn() is the launcher, not the one that calls os.getpid() and shows up
+ * in the strategy's own state file. Without resolving the real child, PID-identity checks
+ * compare the launcher's start time against the worker's PID and never match, making every
+ * freshly-launched strategy look immediately "stopped" even though it's running fine.
+ * Retries briefly since the child may not be visible to WMI for a few hundred ms after spawn.
+ */
+export async function resolveWorkerPid(launcherPid: number, timeoutMs = 3000): Promise<{ pid: number; startTime: string } | null> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const childPid = firstChildPid(launcherPid);
+    if (childPid) {
+      const startTime = getPidStartTime(childPid);
+      if (startTime) return { pid: childPid, startTime };
+    }
+    await new Promise(r => setTimeout(r, 200));
+  }
+  // No child found within the window (e.g. a venv without the launcher stub) — the
+  // launcher process itself is the real worker.
+  const startTime = getPidStartTime(launcherPid);
+  return startTime ? { pid: launcherPid, startTime } : null;
+}
