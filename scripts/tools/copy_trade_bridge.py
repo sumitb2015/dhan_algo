@@ -820,7 +820,7 @@ def maybe_place_deferred_hedge(kite, helper, cfg: dict, hedge_ctx: dict, hedge_q
 
 def watchdog_loop(helper, kite, stop_event: threading.Event, state: dict,
                   retry_queue: list, get_nifty_symbols, resolve_symbol, replicated_symbols,
-                  hedge_qty=None, margin_probe_symbol=None, cfg_product='NRML', hedge_ctx=None):
+                  hedge_qty=None, margin_probe_symbol=None, cfg_product='MIS', hedge_ctx=None):
     """
     The bridge's single background thread. Everything that needs to make a
     blocking broker call on a timer lives here, deliberately on ONE thread: the
@@ -1293,7 +1293,12 @@ def main():
 
     # ---- margin gate + startup hedge bootstrap -------------------------
     startup_cfg = load_config()
-    hedge_product = str(startup_cfg.get('hedge_product', 'NRML')).upper()
+    # MIS by default — matches the parent's actual product on the NIFTY option
+    # fills that get replicated (real captured payloads are 'INTRADAY', never
+    # 'MARGIN'; see copy_trade_hedge.build_plan for the measurement). A hedge
+    # only offsets a short of the SAME product (warn_product_mismatch below),
+    # so this must track whatever product the parent is really trading in.
+    hedge_product = str(startup_cfg.get('hedge_product', 'MIS')).upper()
     hedge_qty = {}      # {symbol: long qty} — the watchdog nets this out; the
                         # single source of truth for what counts as a hedge.
                         # Mutated in place everywhere, never reassigned once

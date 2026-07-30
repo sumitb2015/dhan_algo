@@ -413,7 +413,15 @@ def build_plan(kite, helper, cfg: dict, expiry: str, underlying: str = 'NIFTY',
         'ts': datetime.now().isoformat(), 'expiry': expiry, 'underlying': underlying,
         'plan': [], 'errors': [], 'adopted': [],
     }
-    product        = str(cfg.get('hedge_product', 'NRML')).upper()
+    # MIS by default: the order-update WS's real captured payloads (2026-07-21)
+    # show the parent's NIFTY option fills are placed 'INTRADAY' (-> MIS on
+    # Zerodha) — zero were 'MARGIN'/'NRML'. Matching that means the hedge
+    # actually offsets the trades that get replicated, per the product-match
+    # constraint above. Caveat: Zerodha auto-squares MIS positions around
+    # 15:20, so an MIS hedge stops providing relief before the child's own
+    # MIS shorts do if the parent runs unusually late — acceptable since this
+    # bridge's strategies exit by 15:17 (see CLAUDE.md's hardcoded auto-exit).
+    product        = str(cfg.get('hedge_product', 'MIS')).upper()
     premium_cap    = float(cfg.get('hedge_premium_cap', 5.0))
     premium_budget = float(cfg.get('hedge_premium_budget', 3000))
     max_lots       = int(cfg.get('hedge_max_lots', 20))
@@ -654,7 +662,9 @@ def close_hedges(kite, armed: bool = True):
             oid = kite.place_order(
                 variety=kite.VARIETY_REGULAR, exchange=kite.EXCHANGE_NFO,
                 tradingsymbol=sym, transaction_type=kite.TRANSACTION_TYPE_SELL,
-                quantity=qty, product=h.get('product', 'NRML'),
+                quantity=qty, product=h.get('product', 'MIS'),  # place_hedges always records
+                                                                 # 'product'; this only guards a
+                                                                 # malformed/pre-upgrade state file
                 order_type=kite.ORDER_TYPE_MARKET, validity=kite.VALIDITY_DAY,
                 market_protection=-1,
             )
