@@ -4128,6 +4128,15 @@ class DhanHelper:
         """
         Get net quantity for a symbol. Positive = Long, Negative = Short.
         Handles symbol resolution automatically.
+
+        WARNING — account-wide, not strategy-scoped. This is the NETTED broker position
+        across every strategy, instance and manual trade touching this security. Do NOT
+        size an exit from it: on 2026-07-30 an instance holding 130 qty read a net of
+        -260 and bought back all of it, flattening a sibling strategy's leg, which then
+        traded against phantom state for the rest of the session.
+
+        To close your own leg, use lib.strategy_risk.resolve_exit_qty(), which passes
+        your tracked quantity and clamps it by what the broker still shows.
         """
         try:
             # Resolve symbol to get security ID
@@ -4171,9 +4180,10 @@ class DhanHelper:
         net into a single broker position, so calling this from one of them flattens the
         other's leg too, leaving it trading against phantom state.
 
-        No strategy uses this today — they all exit with explicit quantities via
-        helper.buy()/sell(<lots * lot_size>), which nets correctly. Prefer that. Only use
-        close_position() for genuine "flatten everything in this symbol" semantics.
+        No strategy should use this to close its own leg. Use
+        lib.strategy_risk.resolve_exit_qty() + helper.buy()/sell() with your own tracked
+        quantity instead. Only use close_position() for genuine "flatten everything in
+        this symbol" semantics, e.g. an operator-triggered square-off.
         """
         try:
             sec = self._resolve_symbol(symbol)

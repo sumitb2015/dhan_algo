@@ -12,6 +12,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 from login import get_dhan_client
 from lib.dhan_helper import DhanHelper
 from lib.strategy_state_helper import save_strategy_state, check_shutdown_trigger, exit_if_market_closed, parse_target_spec, instance_log_suffix
+from lib.strategy_risk import resolve_exit_qty
 
 # Setup Logging
 project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -45,7 +46,7 @@ class NiftyAdvancedImbalance:
                  use_premium=False, target_premium=50.0,
                  start_time="09:20", loser_ratio_lots=1,
                  leg_sl_pct=0.20,
-                 trail_start_pct=5.0, trail_gap_pts=15.0,
+                 trail_start_rs=500.0, trail_gap_rs=300.0,
                  state_key="nifty_advanced_imbalance"):
         self.state_key = state_key
         self.mode = mode.lower()
@@ -72,8 +73,8 @@ class NiftyAdvancedImbalance:
         self.start_time = start_time
         self.loser_ratio_lots = loser_ratio_lots
         self.leg_sl_pct = leg_sl_pct
-        self.trail_start_pct = trail_start_pct
-        self.trail_gap_pts = trail_gap_pts
+        self.trail_start_rs = trail_start_rs
+        self.trail_gap_rs = trail_gap_rs
 
         self.dhan = get_dhan_client()
         if not self.dhan:
@@ -115,10 +116,9 @@ class NiftyAdvancedImbalance:
         self.ce_wings = []
         self.pe_wings = []
         
-        # Trailing Stop Loss State
+        # Trailing Stop Loss State (rupee MTM basis)
         self.trail_active = False
-        self.entry_combined_pts = 0.0
-        self.best_combined_pts = 0.0
+        self.best_pnl = 0.0
 
         # Session Control
         self.last_adjustment_time = None
@@ -174,11 +174,10 @@ class NiftyAdvancedImbalance:
             "pe_original_entry_premium": self.pe_original_entry_premium,
             "leg_sl_pct": self.leg_sl_pct,
             "trail_active": self.trail_active,
-            "trail_start_pct": self.trail_start_pct,
-            "trail_gap_pts": self.trail_gap_pts,
-            "entry_combined_pts": self.entry_combined_pts,
-            "best_combined_pts": self.best_combined_pts,
-            "trail_exit_combined": round(self.best_combined_pts + self.trail_gap_pts, 2) if self.trail_active else None,
+            "trail_start_rs": self.trail_start_rs,
+            "trail_gap_rs": self.trail_gap_rs,
+            "best_pnl": round(self.best_pnl, 2),
+            "trail_exit_pnl": round(self.best_pnl - self.trail_gap_rs, 2) if self.trail_active else None,
         }
         save_strategy_state(self.state_key, state_dict)
 
@@ -318,12 +317,16 @@ class NiftyAdvancedImbalance:
             )
             actual_exit = ce_ltp
             do_state_update = False
+            closed_qty = self.ce_lots * self.nifty_lot_size
             if not self.dry_run:
-                net_qty = self.helper.get_net_quantity(str(self.ce_id))
-                if net_qty < 0:
-                    buy_oid = self.helper.buy(str(self.ce_id), abs(net_qty))
+                own_qty = closed_qty
+                qty_to_buy, net_qty = resolve_exit_qty(self.helper, self.ce_id, own_qty, "BUY", logger)
+                closed_qty = qty_to_buy
+                if qty_to_buy > 0:
+                    buy_oid = self.helper.buy(str(self.ce_id), qty_to_buy)
                     if buy_oid:
                         actual_exit = self.get_execution_price(buy_oid, ce_ltp)
+                        logger.info(f"CE SL exit for {qty_to_buy} qty (own {own_qty}, broker net {net_qty}): {buy_oid}")
                     else:
                         logger.critical(
                             f"CE SL exit order FAILED (buy returned None). "
@@ -332,13 +335,13 @@ class NiftyAdvancedImbalance:
                         )
                     do_state_update = True
                 else:
-                    logger.warning(f"CE net qty {net_qty} — already flat, marking inactive.")
+                    logger.warning(f"CE net qty {net_qty} — nothing to close, marking inactive.")
                     do_state_update = True
             else:
                 logger.info(f"[DRY RUN] CE SL exit at {actual_exit:.2f}")
                 do_state_update = True
             if do_state_update:
-                realized = (self.ce_avg_price - actual_exit) * (self.ce_lots * self.nifty_lot_size)
+                realized = (self.ce_avg_price - actual_exit) * closed_qty
                 self.realized_pnl += realized
                 logger.info(
                     f"CE leg closed at {actual_exit:.2f}. Leg realized: {realized:+.2f}. "
@@ -356,12 +359,16 @@ class NiftyAdvancedImbalance:
             )
             actual_exit = pe_ltp
             do_state_update = False
+            closed_qty = self.pe_lots * self.nifty_lot_size
             if not self.dry_run:
-                net_qty = self.helper.get_net_quantity(str(self.pe_id))
-                if net_qty < 0:
-                    buy_oid = self.helper.buy(str(self.pe_id), abs(net_qty))
+                own_qty = closed_qty
+                qty_to_buy, net_qty = resolve_exit_qty(self.helper, self.pe_id, own_qty, "BUY", logger)
+                closed_qty = qty_to_buy
+                if qty_to_buy > 0:
+                    buy_oid = self.helper.buy(str(self.pe_id), qty_to_buy)
                     if buy_oid:
                         actual_exit = self.get_execution_price(buy_oid, pe_ltp)
+                        logger.info(f"PE SL exit for {qty_to_buy} qty (own {own_qty}, broker net {net_qty}): {buy_oid}")
                     else:
                         logger.critical(
                             f"PE SL exit order FAILED (buy returned None). "
@@ -370,13 +377,13 @@ class NiftyAdvancedImbalance:
                         )
                     do_state_update = True
                 else:
-                    logger.warning(f"PE net qty {net_qty} — already flat, marking inactive.")
+                    logger.warning(f"PE net qty {net_qty} — nothing to close, marking inactive.")
                     do_state_update = True
             else:
                 logger.info(f"[DRY RUN] PE SL exit at {actual_exit:.2f}")
                 do_state_update = True
             if do_state_update:
-                realized = (self.pe_avg_price - actual_exit) * (self.pe_lots * self.nifty_lot_size)
+                realized = (self.pe_avg_price - actual_exit) * closed_qty
                 self.realized_pnl += realized
                 logger.info(
                     f"PE leg closed at {actual_exit:.2f}. Leg realized: {realized:+.2f}. "
@@ -435,51 +442,43 @@ class NiftyAdvancedImbalance:
     def exit_all_positions(self, reason):
         logger.warning(f"!!! EXITING ALL POSITIONS: {reason} !!!")
         if not self.dry_run:
-            # 1. Buy back short options
+            # 1. Buy back short options (only this strategy's own quantity)
             if self.ce_id:
                 try:
-                    net_qty = self.helper.get_net_quantity(str(self.ce_id))
-                    if net_qty < 0:
-                        qty_to_buy = abs(net_qty)
+                    own_qty = self.ce_lots * self.nifty_lot_size
+                    qty_to_buy, net_qty = resolve_exit_qty(self.helper, self.ce_id, own_qty, "BUY", logger)
+                    if qty_to_buy > 0:
                         ce_exit_id = self.helper.buy(str(self.ce_id), qty_to_buy)
-                        logger.info(f"CE short exit order placed for {qty_to_buy} qty: {ce_exit_id}")
-                    else:
-                        logger.info(f"CE position already flat or long (Net Qty: {net_qty}). Skipping buy-to-close.")
+                        logger.info(f"CE short exit order placed for {qty_to_buy} qty (own {own_qty}, broker net {net_qty}): {ce_exit_id}")
                 except Exception as e:
                     logger.error(f"Exit CE Error: {e}")
             if self.pe_id:
                 try:
-                    net_qty = self.helper.get_net_quantity(str(self.pe_id))
-                    if net_qty < 0:
-                        qty_to_buy = abs(net_qty)
+                    own_qty = self.pe_lots * self.nifty_lot_size
+                    qty_to_buy, net_qty = resolve_exit_qty(self.helper, self.pe_id, own_qty, "BUY", logger)
+                    if qty_to_buy > 0:
                         pe_exit_id = self.helper.buy(str(self.pe_id), qty_to_buy)
-                        logger.info(f"PE short exit order placed for {qty_to_buy} qty: {pe_exit_id}")
-                    else:
-                        logger.info(f"PE position already flat or long (Net Qty: {net_qty}). Skipping buy-to-close.")
+                        logger.info(f"PE short exit order placed for {qty_to_buy} qty (own {own_qty}, broker net {net_qty}): {pe_exit_id}")
                 except Exception as e:
                     logger.error(f"Exit PE Error: {e}")
-            
-            # 2. Sell back long wings
+
+            # 2. Sell back long wings (only this strategy's own quantity)
             for wing in self.ce_wings:
                 try:
-                    net_qty = self.helper.get_net_quantity(str(wing['id']))
-                    if net_qty > 0:
-                        qty_to_sell = net_qty
+                    own_qty = wing['lots'] * self.nifty_lot_size
+                    qty_to_sell, net_qty = resolve_exit_qty(self.helper, wing['id'], own_qty, "SELL", logger)
+                    if qty_to_sell > 0:
                         wing_exit_id = self.helper.sell(str(wing['id']), qty_to_sell)
-                        logger.info(f"CE long wing {wing['strike']} exit order placed for {qty_to_sell} qty: {wing_exit_id}")
-                    else:
-                        logger.info(f"CE long wing {wing['strike']} already flat or short (Net Qty: {net_qty}). Skipping sell-to-close.")
+                        logger.info(f"CE long wing {wing['strike']} exit order placed for {qty_to_sell} qty (own {own_qty}, broker net {net_qty}): {wing_exit_id}")
                 except Exception as e:
                     logger.error(f"Exit CE Wing strike {wing['strike']} Error: {e}")
             for wing in self.pe_wings:
                 try:
-                    net_qty = self.helper.get_net_quantity(str(wing['id']))
-                    if net_qty > 0:
-                        qty_to_sell = net_qty
+                    own_qty = wing['lots'] * self.nifty_lot_size
+                    qty_to_sell, net_qty = resolve_exit_qty(self.helper, wing['id'], own_qty, "SELL", logger)
+                    if qty_to_sell > 0:
                         wing_exit_id = self.helper.sell(str(wing['id']), qty_to_sell)
-                        logger.info(f"PE long wing {wing['strike']} exit order placed for {qty_to_sell} qty: {wing_exit_id}")
-                    else:
-                        logger.info(f"PE long wing {wing['strike']} already flat or short (Net Qty: {net_qty}). Skipping sell-to-close.")
+                        logger.info(f"PE long wing {wing['strike']} exit order placed for {qty_to_sell} qty (own {own_qty}, broker net {net_qty}): {wing_exit_id}")
                 except Exception as e:
                     logger.error(f"Exit PE Wing strike {wing['strike']} Error: {e}")
         else:
@@ -520,8 +519,7 @@ class NiftyAdvancedImbalance:
         self.adjustment_count = 0
         self.consecutive_chain_failures = 0
         self.trail_active = False
-        self.entry_combined_pts = 0.0
-        self.best_combined_pts = 0.0
+        self.best_pnl = 0.0
         self.last_adjustment_time = None
         self.ce_wings = []
         self.pe_wings = []
@@ -807,8 +805,7 @@ class NiftyAdvancedImbalance:
             else:
                 logger.info(f"[DRY RUN] Simulating Entry: {self.ce_strike} CE/PE")
 
-            self.entry_combined_pts = self.ce_avg_price + self.pe_avg_price
-            logger.info(f"Trail SL reference: entry_combined={self.entry_combined_pts:.2f} pts (CE={self.ce_avg_price:.2f} + PE={self.pe_avg_price:.2f})")
+            logger.info(f"Trail SL: arms at +INR {self.trail_start_rs:.0f} MTM, gives back INR {self.trail_gap_rs:.0f}")
 
             if self.target_is_pct or self.stop_is_pct:
                 entry_value = (self.ce_avg_price * self.ce_lots + self.pe_avg_price * self.pe_lots) * self.nifty_lot_size
@@ -913,28 +910,26 @@ class NiftyAdvancedImbalance:
                         cycle_active = False
                         break
                 
-                # --- Trailing Stop Loss Logic (combined-premium points) ---
-                if self.entry_combined_pts > 0:
-                    current_combined_pts = ce_ltp + pe_ltp
-                    profit_pts = self.entry_combined_pts - current_combined_pts
-                    trail_trigger = self.trail_start_pct / 100.0 * self.entry_combined_pts
-
-                    if not self.trail_active and profit_pts >= trail_trigger:
+                # --- Trailing Stop Loss (rupee MTM basis; continuous across rolls) ---
+                # total_pnl already folds in realized_pnl, so every roll / lot-add is
+                # absorbed automatically — no baseline to go stale.
+                if self.ce_lots > 0 or self.pe_lots > 0:
+                    if not self.trail_active and total_pnl >= self.trail_start_rs:
                         self.trail_active = True
-                        self.best_combined_pts = current_combined_pts
+                        self.best_pnl = total_pnl
                         logger.info(
-                            f"Trail SL activated: combined={current_combined_pts:.2f}, "
-                            f"entry={self.entry_combined_pts:.2f}, trigger={trail_trigger:.2f}pts"
+                            f"Trail SL activated at {total_pnl:+.0f} "
+                            f"(arm {self.trail_start_rs:.0f}, gap {self.trail_gap_rs:.0f})"
                         )
 
                     if self.trail_active:
-                        if current_combined_pts < self.best_combined_pts:
-                            self.best_combined_pts = current_combined_pts
-                        trail_exit = self.best_combined_pts + self.trail_gap_pts
-                        if current_combined_pts > trail_exit:
+                        if total_pnl > self.best_pnl:
+                            self.best_pnl = total_pnl
+                        trail_exit = self.best_pnl - self.trail_gap_rs
+                        if total_pnl < trail_exit:
                             self.exit_all_positions(
-                                f"Trailing SL Hit! Combined: {current_combined_pts:.2f} > exit: {trail_exit:.2f} "
-                                f"(best: {self.best_combined_pts:.2f})"
+                                f"Trailing SL Hit! PnL {total_pnl:+.0f} < exit {trail_exit:+.0f} "
+                                f"(best {self.best_pnl:+.0f})"
                             )
                             logger.info("Waiting 5 minutes before next re-entry cycle...")
                             self.sleep_cooldown(300)
@@ -1393,10 +1388,10 @@ Examples:
     parser.add_argument("--leg-sl-pct", type=float, default=0.20, metavar="PCT",
                         help="Per-leg stop loss as a fraction of entry premium in reentry_straddle mode "
                              "(default: 0.20 = 20%%). E.g. 0.30 triggers SL at 130%% of entry price.")
-    parser.add_argument("--trail-start-pct", type=float, default=5.0,
-                        help="Activate trailing SL when profit reaches this %% of entry combined premium (default: 5.0)")
-    parser.add_argument("--trail-gap-pts", type=float, default=15.0,
-                        help="Exit if combined premium rises this many pts above its best level (default: 15.0)")
+    parser.add_argument("--trail-start-rs", type=float, default=500.0, metavar="INR",
+                        help="Activate trailing SL once MTM profit reaches this many rupees (default: 500)")
+    parser.add_argument("--trail-gap-rs", type=float, default=300.0, metavar="INR",
+                        help="Exit if MTM gives back this many rupees from its best level (default: 300)")
     parser.add_argument("--instance-id", type=str, default="", metavar="ID",
                         help="Suffix for debug/state files to run a second concurrent copy of this strategy")
 
@@ -1542,8 +1537,8 @@ Examples:
         start_time=args.start_time,
         loser_ratio_lots=args.loser_ratio_lots,
         leg_sl_pct=args.leg_sl_pct,
-        trail_start_pct=args.trail_start_pct,
-        trail_gap_pts=args.trail_gap_pts,
+        trail_start_rs=args.trail_start_rs,
+        trail_gap_rs=args.trail_gap_rs,
         state_key=STATE_KEY,
     )
     try:

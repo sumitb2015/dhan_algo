@@ -12,6 +12,7 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from login import get_dhan_client
 from lib.dhan_helper import DhanHelper
+from lib.strategy_risk import resolve_exit_qty
 
 # Configure Logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -24,7 +25,10 @@ def run_strategy():
     
     SYMBOL = "TCS"
     QUANTITY = 10
-    
+
+    # This strategy's OWN position (+ long / - short). Never infer it from the broker net.
+    position_qty = 0
+
     logger.info(f"Starting Strategy for {SYMBOL}")
     
     while True:
@@ -52,26 +56,39 @@ def run_strategy():
             logger.info(f"Signal: {signal} | Close: {close} | Open: {open_price}")
             
             # 5. Position Management
-            net_qty = helper.get_net_quantity(SYMBOL)
-            
-            if signal == "BUY" and net_qty <= 0:
+            #
+            # IMPORTANT: track your OWN position (position_qty below) and exit only that.
+            # helper.get_net_quantity() / helper.close_position() report the ACCOUNT-WIDE
+            # netted broker position — if another strategy (or another --instance-id of
+            # this one) holds the same security, sizing an exit from the broker net will
+            # flatten their leg too. resolve_exit_qty() exits your quantity, clamped by
+            # what the broker still shows, and warns when the two disagree.
+            if signal == "BUY" and position_qty <= 0:
                 # Close Short if any
-                if net_qty < 0:
-                    helper.close_position(SYMBOL)
-                    
+                if position_qty < 0:
+                    qty, net = resolve_exit_qty(helper, SYMBOL, abs(position_qty), "BUY", logger)
+                    if qty > 0:
+                        helper.buy(SYMBOL, qty)
+                        position_qty += qty
+
                 # Enter Long
                 helper.place_entry(SYMBOL, QUANTITY, "BUY")
+                position_qty += QUANTITY
                 # Place Stop Loss
                 sl_price = close * 0.99
                 helper.place_sl_market(SYMBOL, QUANTITY, sl_price, "SELL")
-                
-            elif signal == "SELL" and net_qty >= 0:
+
+            elif signal == "SELL" and position_qty >= 0:
                 # Close Long if any
-                if net_qty > 0:
-                    helper.close_position(SYMBOL)
-                    
+                if position_qty > 0:
+                    qty, net = resolve_exit_qty(helper, SYMBOL, position_qty, "SELL", logger)
+                    if qty > 0:
+                        helper.sell(SYMBOL, qty)
+                        position_qty -= qty
+
                 # Enter Short
                 helper.place_entry(SYMBOL, QUANTITY, "SELL")
+                position_qty -= QUANTITY
                 # Place Stop Loss
                 sl_price = close * 1.01
                 helper.place_sl_market(SYMBOL, QUANTITY, sl_price, "BUY")

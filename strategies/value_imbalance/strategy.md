@@ -364,20 +364,22 @@ Here are step-by-step examples of how trades flow under different market conditi
 
 ---
 
-### Scenario E: Trailing Stop Loss (`--trail-start-pct` / `--trail-gap-pts`)
+### Scenario E: Trailing Stop Loss (`--trail-start-rs` / `--trail-gap-rs`)
 
-Applies to both `nifty_value_imbalance_straddle.py` (§4.B) and `nifty_advanced_imbalance.py` (§4.A, any mode). The straddle/strangle is sold, so profit is a *drop* in the combined CE+PE premium; the trailing SL arms once that drop reaches `trail_start_pct`% of the entry combined premium, then tracks the lowest premium seen and exits if premium reverses upward by `trail_gap_pts`.
+Applies to `nifty_value_imbalance_straddle.py` (§4.B), `nifty_value_imbalance_strangle.py`, `nifty_delta_neutral.py`, and `nifty_advanced_imbalance.py` (§4.A, any mode). The trail runs on **rupee MTM** — the same `total_pnl` figure the profit target and global SL use, which already folds in `realized_pnl`. That matters: every roll, lot addition and leg close is absorbed automatically, so there is no baseline to go stale after an adjustment.
 
-$$\text{trail\_trigger} = \frac{\text{trail\_start\_pct}}{100} \times \text{entry\_combined\_pts}$$
-$$\text{profit\_pts} = \text{entry\_combined\_pts} - \text{current\_combined\_pts}$$
-$$\text{trail\_exit} = \text{best\_combined\_pts} + \text{trail\_gap\_pts} \quad \text{(only once armed)}$$
+$$\text{armed when} \quad \text{total\_pnl} \ge \text{trail\_start\_rs}$$
+$$\text{trail\_exit} = \text{best\_pnl} - \text{trail\_gap\_rs} \quad \text{(only once armed)}$$
 
-1.  **Entry**: Sell `24000 CE` @ ₹105 + `24000 PE` @ ₹95 → `entry_combined_pts = 200`.
-2.  **Arming**: With defaults (`trail_start_pct=5`, `trail_gap_pts=15`), `trail_trigger = 5% × 200 = 10 pts`, so the trailing SL arms once combined premium falls to `200 − 10 = 190`. Combined premium drifts down to `160` → trail activates, `best_combined_pts = 160`.
-3.  **Trailing down**: Premium keeps decaying to `130` → `best_combined_pts` updates to `130` (it only ever moves down). Trail exit level is now `130 + 15 = 145`.
-4.  **Exit**: If combined premium reverses and rises above `145`, the strategy immediately buys back both legs — locking in most of the gain from the best point reached, rather than giving it all back.
+1.  **Entry**: Sell `24000 CE` + `24000 PE`, 2 lots each. MTM starts near zero.
+2.  **Arming**: With defaults (`trail_start_rs=500`, `trail_gap_rs=300`), MTM decays up to `+₹620` → trail activates, `best_pnl = 620`, exit level `620 − 300 = ₹320`.
+3.  **Trailing up**: MTM keeps improving to `+₹1,150` → `best_pnl` updates to `1150` (it only ever moves up). Exit level rises to `₹850`.
+4.  **Exit**: If MTM falls back below `₹850`, the strategy immediately buys back both legs — locking in most of the gain from the best point reached, rather than giving it all back.
+5.  **Across a roll**: a winner roll books its leg into `realized_pnl` and re-shorts at a new strike. `total_pnl` is continuous through that, so `best_pnl` carries forward and the trail keeps working — unlike the old points-based version, which compared new strikes against the original entry premium and went permanently dormant after the first adjustment.
 
-Set `--trail-start-pct 0` to arm immediately on entry; raise `--trail-gap-pts` for more room on choppy days, or tighten it to lock in profit faster.
+The trail is skipped while both legs are flat (`ce_lots == 0 and pe_lots == 0`), which matters in `reentry_straddle` mode where `total_pnl` is pure realized P&L between re-entries.
+
+Set `--trail-start-rs 0` to arm immediately on entry; raise `--trail-gap-rs` for more room on choppy days, or tighten it to lock in profit faster. Size both against your lot count — the defaults suit 2 lots of NIFTY.
 
 ---
 
@@ -628,7 +630,7 @@ venv\Scripts\python.exe strategies/value_imbalance/nifty_delta_neutral.py --live
 
 1.  Nifty spot is `24,188`. The option chain shows `24250 CE` at delta `0.48` and `24250 PE` at delta `-0.52` — both closest to the `0.5` target on the *same* strike, so the position is a straddle: `24250 CE` / `24250 PE`.
 2.  `24250 CE` quotes at ₹115, `24250 PE` quotes at ₹158 — a `27%` gap driven by put-call skew, not noise.
-3.  Unlike `nifty_advanced_imbalance.py`, there is no balance-wait gate here: as soon as both legs report a valid LTP, the strategy sells 1 lot `24250 CE` @ ₹115 and 1 lot `24250 PE` @ ₹158. `entry_combined_pts = 273`.
+3.  Unlike `nifty_advanced_imbalance.py`, there is no balance-wait gate here: as soon as both legs report a valid LTP, the strategy sells 1 lot `24250 CE` @ ₹115 and 1 lot `24250 PE` @ ₹158 (combined credit `273` pts).
 
 #### Scenario B: Winner-Roll Adjustment (Flat 50% Trigger)
 

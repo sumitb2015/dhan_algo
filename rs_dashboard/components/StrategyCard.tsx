@@ -66,16 +66,13 @@ interface StrategyState {
   pe_active?: boolean;
   ce_sl?: number;
   pe_sl?: number;
-  combined_best_premium?: number | null;
-  trail_combined_buffer?: number;
   leg_sl_pct?: number;
-  // Combined-premium trailing SL
+  // Rupee-MTM trailing SL
   trail_active?: boolean;
-  trail_start_pct?: number;
-  trail_gap_pts?: number;
-  entry_combined_pts?: number;
-  best_combined_pts?: number;
-  trail_exit_combined?: number | null;
+  trail_start_rs?: number;
+  trail_gap_rs?: number;
+  best_pnl?: number;
+  trail_exit_pnl?: number | null;
   // Spread Trend
   use_ema?: boolean;
   use_supertrend?: boolean;
@@ -183,12 +180,11 @@ function StrategyCard({ meta, state, onRefresh }: StrategyCardProps) {
   const [expansionWindow, setExpansionWindow] = useState<number>(3);
 
   // Reentry Straddle
-  const [trailCombinedBuffer, setTrailCombinedBuffer] = useState<number>(1.0);
   const [legSlPct, setLegSlPct] = useState<number>(0.20);
 
   // Combined-premium trailing SL (straddle / strangle / advanced)
-  const [trailStartPct, setTrailStartPct] = useState<number>(5.0);
-  const [trailGapPts, setTrailGapPts] = useState<number>(15.0);
+  const [trailStartRs, setTrailStartRs] = useState<number>(500);
+  const [trailGapRs, setTrailGapRs] = useState<number>(300);
 
   // Spread Trend
   const [symbol, setSymbol] = useState<string>('NIFTY');
@@ -273,7 +269,6 @@ function StrategyCard({ meta, state, onRefresh }: StrategyCardProps) {
         if (mode === 'loser_ratio_roll') args.push('--loser-ratio-lots', String(loserRatioLots));
         if (mode === 'winner_roll_atm') args.push('--threshold-lot', String(thresholdLot));
         if (mode === 'reentry_straddle') {
-          args.push('--trail-combined-buffer', String(trailCombinedBuffer));
           args.push('--leg-sl-pct', String(legSlPct));
         }
         if (effectiveEntryType === 'strangle') {
@@ -281,20 +276,20 @@ function StrategyCard({ meta, state, onRefresh }: StrategyCardProps) {
           else if (strikeSelection === 'premium') args.push('--premium', '--target-premium', String(targetPremium));
           else args.push('--ce-offset', String(ceOffset), '--pe-offset', String(peOffset));
         }
-        args.push('--trail-start-pct', String(trailStartPct));
-        args.push('--trail-gap-pts', String(trailGapPts));
+        args.push('--trail-start-rs', String(trailStartRs));
+        args.push('--trail-gap-rs', String(trailGapRs));
       } else if (meta.key === 'nifty_delta_neutral') {
         args.push('--start-time', startTime);
         args.push('--target-delta', String(dnTargetDelta));
         args.push('--threshold-lot', String(dnThresholdLot));
-        args.push('--trail-start-pct', String(trailStartPct));
-        args.push('--trail-gap-pts', String(trailGapPts));
+        args.push('--trail-start-rs', String(trailStartRs));
+        args.push('--trail-gap-rs', String(trailGapRs));
       } else if (meta.key === 'nifty_value_imbalance_straddle') {
         args.push('--max-lots', String(maxLots));
         args.push('--start-time', startTime);
         args.push('--entry-balance-threshold', String(entryBalanceThreshold));
-        args.push('--trail-start-pct', String(trailStartPct));
-        args.push('--trail-gap-pts', String(trailGapPts));
+        args.push('--trail-start-rs', String(trailStartRs));
+        args.push('--trail-gap-rs', String(trailGapRs));
       } else if (meta.key === 'nifty_vwap_1min_straddle') {
         args.push('--start-time', startTime);
         args.push('--entry-band', String(entryBand));
@@ -320,8 +315,8 @@ function StrategyCard({ meta, state, onRefresh }: StrategyCardProps) {
         if (strikeSelection === 'delta') args.push('--delta', '--target-delta', String(targetDelta));
         else if (strikeSelection === 'premium') args.push('--premium', '--target-premium', String(targetPremium));
         else args.push('--ce-offset', String(ceOffset), '--pe-offset', String(peOffset));
-        args.push('--trail-start-pct', String(trailStartPct));
-        args.push('--trail-gap-pts', String(trailGapPts));
+        args.push('--trail-start-rs', String(trailStartRs));
+        args.push('--trail-gap-rs', String(trailGapRs));
       } else if (meta.key === 'nifty_oi_directional') {
         args.push('--start-time', startTime);
         args.push('--pcr-threshold', String(pcrThreshold));
@@ -982,12 +977,12 @@ function StrategyCard({ meta, state, onRefresh }: StrategyCardProps) {
           meta.key === 'nifty_delta_neutral') && (
           <>
             <div className={fieldCls}>
-              <FieldLabel text="Trail Start (%)" tip="Arms the trailing stop once profit reaches this % of entry combined premium." />
-              <Input type="number" step="0.5" value={trailStartPct} onChange={(e) => setTrailStartPct(parseFloat(e.target.value) || 5.0)} min={0.5} className={inputCls} />
+              <FieldLabel text="Trail Arm (₹)" tip="Arms the trailing stop once MTM profit reaches this many rupees. Size it against your lot count." />
+              <Input type="number" step="50" value={trailStartRs} onChange={(e) => setTrailStartRs(parseFloat(e.target.value) || 500)} min={0} className={inputCls} />
             </div>
             <div className={fieldCls}>
-              <FieldLabel text="Trail Gap (pts)" tip="Once armed, exits if combined premium rises this many points above its lowest point since arming." />
-              <Input type="number" step="0.5" value={trailGapPts} onChange={(e) => setTrailGapPts(parseFloat(e.target.value) || 15.0)} min={0.5} className={inputCls} />
+              <FieldLabel text="Trail Gap (₹)" tip="Once armed, exits if MTM gives back this many rupees from its best level. Survives rolls — the trail runs on realized + unrealized P&L." />
+              <Input type="number" step="50" value={trailGapRs} onChange={(e) => setTrailGapRs(parseFloat(e.target.value) || 300)} min={50} className={inputCls} />
             </div>
           </>
         )}
@@ -1101,10 +1096,6 @@ function StrategyCard({ meta, state, onRefresh }: StrategyCardProps) {
             )}
             {mode === 'reentry_straddle' && (
               <>
-                <div className={fieldCls}>
-                  <FieldLabel text="Trail Buffer (pts)" tip="Points of pullback from the best combined premium allowed before the combined trailing exit triggers." />
-                  <Input type="number" step="0.5" value={trailCombinedBuffer} onChange={(e) => setTrailCombinedBuffer(parseFloat(e.target.value) || 1.0)} min={0.1} className={inputCls} />
-                </div>
                 <div className={fieldCls}>
                   <FieldLabel text="Leg SL (%)" tip="Per-leg stop loss as a % of entry premium; only that leg exits and re-enters, the other keeps running." />
                   <Input type="number" step="1" value={Math.round(legSlPct * 100)} onChange={(e) => setLegSlPct((parseInt(e.target.value) || 20) / 100)} min={1} max={100} className={inputCls} />
@@ -1547,21 +1538,21 @@ function StrategyCard({ meta, state, onRefresh }: StrategyCardProps) {
                       <span className="text-[10px] text-zinc-300 font-mono whitespace-nowrap">thresh {state.threshold_lot}%</span>
                     )}
                   </div>
-                  {state.entry_combined_pts != null && state.entry_combined_pts > 0 && (
+                  {state.trail_start_rs != null && (
                     <div className="px-3 py-2 flex flex-col gap-1 shrink-0">
                       <span className={lbl}>Trail SL</span>
                       {state.trail_active ? (
                         <>
                           <span className="font-mono font-bold text-amber-400 text-xs">ACTIVE</span>
                           <span className="text-[10px] text-zinc-300 font-mono whitespace-nowrap">
-                            best {state.best_combined_pts?.toFixed(1)} · exit@{state.trail_exit_combined?.toFixed(1) ?? '—'}
+                            best ₹{Math.round(state.best_pnl ?? 0)} · exit@₹{state.trail_exit_pnl != null ? Math.round(state.trail_exit_pnl) : '—'}
                           </span>
                         </>
                       ) : (
                         <>
                           <span className="font-mono text-zinc-500 text-xs">inactive</span>
                           <span className="text-[10px] text-zinc-600 font-mono whitespace-nowrap">
-                            entry {state.entry_combined_pts.toFixed(1)}
+                            arms ₹{Math.round(state.trail_start_rs)}
                           </span>
                         </>
                       )}
