@@ -13,6 +13,8 @@ import { useProfitLock, ProfitLockControls } from './ProfitLock';
 import { useCopyTrade, CopyTradeControls } from './CopyTrade';
 import { useBrokerSelector, brokerRoute } from '@/hooks/useBrokerSelector';
 import { contractMultiplier } from '@/lib/positionPnl';
+import TopWeightStocks from './TopWeightStocks';
+import TopIndices from './TopIndices';
 
 // ─── Types ────────────────────────────────────────────────────────
 
@@ -64,6 +66,10 @@ export default function AdvancedScalper() {
   // Trading controls
   const [orderMode, setOrderMode] = useState<'MARKET' | 'LIMIT'>('MARKET');
   const [productType, setProductType] = useState<'INTRADAY' | 'MARGIN'>('INTRADAY');
+
+  // Top-10-by-weight stocks panel. Off by default so no equity bridge is
+  // spawned unless it's actually wanted.
+  const [showTop10, setShowTop10] = useState(false);
   const boxCounterRef = useRef(2);
   const [boxes, setBoxes] = useState<BoxConfig[]>([
     { id: 'box-1', side: 'CE', strike: null, lots: 1, limitPrice: '' },
@@ -326,6 +332,23 @@ export default function AdvancedScalper() {
       }).catch(() => {});
     };
   }, [expiry, underlying, authenticatedBrokers]);
+
+  // Start the shared Nifty-50 equity bridge when the Top 10 panel is switched
+  // on. The route is idempotent — it returns "Bridge already running" without
+  // spawning when a live PID exists — so this is safe to fire on every enable.
+  //
+  // Deliberately NO stop on toggle-off or unmount, unlike the options bridges
+  // above: this same process feeds the Live Dashboard page via the same route,
+  // so killing it here would silently break that page. Hiding the panel stops
+  // its polling; the bridge stays up and remains stoppable from Live Dashboard.
+  useEffect(() => {
+    if (!showTop10) return;
+    fetch('/api/live-equity', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'start' }),
+    }).catch(() => {});
+  }, [showTop10]);
 
   // Re-resolves strikeMap (Dhan securityId / Zerodha tradingsymbol per strike)
   // whenever the expiry OR the selected broker changes. Order routing is
@@ -1024,6 +1047,18 @@ export default function AdvancedScalper() {
               ))}
             </div>
 
+            {/* Top 10 NIFTY heavyweights panel — display preference, so it sits
+                with the other view toggles rather than the order controls. */}
+            <button onClick={() => setShowTop10(v => !v)}
+              title="Show the 10 heaviest NIFTY constituents with live % change"
+              className={`px-3 py-1.5 text-xs font-bold rounded-lg border transition-all shrink-0 whitespace-nowrap ${
+                showTop10
+                  ? 'bg-sky-900/50 border-sky-500/40 text-sky-300'
+                  : 'bg-zinc-900 border-zinc-700 text-zinc-500 hover:text-zinc-300'
+              }`}>
+              TOP 10 {showTop10 ? 'ON' : 'OFF'}
+            </button>
+
             {/* Bridge status dot + transport badge + timestamp */}
             <div className="flex items-center gap-1.5 shrink-0">
               <span className={`w-2 h-2 rounded-full ${
@@ -1273,6 +1308,22 @@ export default function AdvancedScalper() {
             </div>
           );
         })}
+
+        {/* Both panels sit to the right of the last option box (the PE box in
+            the default 2-box layout). Narrower than an option box — they only
+            carry 3-4 numeric columns, so giving them a full box's 20% would
+            waste width that the option boxes need for their price/OI blocks.
+            Mounting is what starts each panel's polling; hidden costs nothing. */}
+        {showTop10 && (
+          <>
+            <div className="flex-none w-[calc(15%-0.6rem)] min-w-[240px]">
+              <TopWeightStocks />
+            </div>
+            <div className="flex-none w-[calc(13%-0.6rem)] min-w-[210px]">
+              <TopIndices />
+            </div>
+          </>
+        )}
       </div>
 
       {/* Bottom tabs panel */}
