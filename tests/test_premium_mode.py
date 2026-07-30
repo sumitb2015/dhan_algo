@@ -141,24 +141,65 @@ class TestPremiumStrikeSelection(unittest.TestCase):
         strat.ce_id = 12345
         strat.pe_id = 67890
         strat.dry_run = False # Make it run live orders code path
-        
+        strat.nifty_lot_size = 75
+        strat.ce_lots = 1
+        strat.pe_lots = 1
+
         # Scenario 1: Both legs are open short (net_qty is negative)
         strat.helper.get_net_quantity.side_effect = lambda sid: -75 if sid in ["12345", "67890"] else 0
         strat.helper.buy.reset_mock()
         strat.exit_all_positions("Normal exit")
-        
+
         # Verify it attempts to buy back exactly 75 qty for both
         strat.helper.buy.assert_any_call("12345", 75)
         strat.helper.buy.assert_any_call("67890", 75)
         self.assertEqual(strat.helper.buy.call_count, 2)
-        
+
         # Scenario 2: PE is already flat (net_qty is 0)
         strat.helper.get_net_quantity.side_effect = lambda sid: -75 if sid == "12345" else 0
         strat.helper.buy.reset_mock()
         strat.exit_all_positions("PE flat exit")
-        
+
         # Verify it only buys CE
         strat.helper.buy.assert_called_once_with("12345", 75)
+
+    def test_exit_never_exceeds_own_quantity(self):
+        """Regression for 2026-07-30: a sibling instance short of the same strike
+        inflates the broker net, and the first strategy to exit flattened both legs."""
+        strat = ValueImbalanceStrangle(strike_selection="distance")
+        strat.ce_id = 12345
+        strat.pe_id = 67890
+        strat.dry_run = False
+        strat.nifty_lot_size = 65
+        strat.ce_lots = 2   # this strategy owns 130 qty per leg
+        strat.pe_lots = 2
+
+        # Broker shows -260 on CE (another instance is short 2 more lots) and -195 on PE.
+        strat.helper.get_net_quantity.side_effect = lambda sid: -260 if sid == "12345" else -195
+        strat.helper.buy.reset_mock()
+        strat.exit_all_positions("Contaminated net")
+
+        # Must close only its own 130, leaving the sibling's position untouched.
+        strat.helper.buy.assert_any_call("12345", 130)
+        strat.helper.buy.assert_any_call("67890", 130)
+        self.assertEqual(strat.helper.buy.call_count, 2)
+
+    def test_exit_clamps_to_broker_when_partially_closed(self):
+        """If someone else already closed part of the leg, never over-buy into a long."""
+        strat = ValueImbalanceStrangle(strike_selection="distance")
+        strat.ce_id = 12345
+        strat.pe_id = 67890
+        strat.dry_run = False
+        strat.nifty_lot_size = 65
+        strat.ce_lots = 2   # thinks it owns 130
+        strat.pe_lots = 2
+
+        # Broker only shows -65 left on CE; PE is fully flat already.
+        strat.helper.get_net_quantity.side_effect = lambda sid: -65 if sid == "12345" else 0
+        strat.helper.buy.reset_mock()
+        strat.exit_all_positions("Partially closed elsewhere")
+
+        strat.helper.buy.assert_called_once_with("12345", 65)
 
     def test_advanced_exit_all_positions_with_sync(self):
         # Advanced strategy exit_all_positions with wings
@@ -170,21 +211,44 @@ class TestPremiumStrikeSelection(unittest.TestCase):
         strat.ce_wings = [{'id': 333, 'strike': 24200, 'lots': 1}]
         strat.pe_wings = [{'id': 444, 'strike': 23800, 'lots': 1}]
         strat.dry_run = False
-        
+        strat.nifty_lot_size = 75
+        strat.ce_lots = 1
+        strat.pe_lots = 1
+
         # Scenario: Shorts are open (-75), Wing 333 is open (+75), Wing 444 is already flat (0)
         strat.helper.get_net_quantity.side_effect = lambda sid: -75 if sid in ["111", "222"] else (75 if sid == "333" else 0)
         strat.helper.buy.reset_mock()
         strat.helper.sell.reset_mock()
-        
+
         strat.exit_all_positions("Advanced exit check")
-        
+
         # Shorts should be bought back
         strat.helper.buy.assert_any_call("111", 75)
         strat.helper.buy.assert_any_call("222", 75)
         self.assertEqual(strat.helper.buy.call_count, 2)
-        
+
         # Wing 333 (long) should be sold back
         strat.helper.sell.assert_called_once_with("333", 75)
+
+    def test_advanced_wing_exit_uses_own_lots(self):
+        """Wings were the worst case — they sold the entire account long quantity."""
+        strat = NiftyAdvancedImbalance(entry_type="strangle")
+        strat.ce_id = 111
+        strat.pe_id = 222
+        strat.ce_wings = [{'id': 333, 'strike': 24200, 'lots': 1}]
+        strat.pe_wings = []
+        strat.dry_run = False
+        strat.nifty_lot_size = 65
+        strat.ce_lots = 1
+        strat.pe_lots = 1
+
+        # Account is long 260 of the wing strike (other strategies hold it too).
+        strat.helper.get_net_quantity.side_effect = lambda sid: 260 if sid == "333" else -65
+        strat.helper.sell.reset_mock()
+
+        strat.exit_all_positions("Wing exit check")
+
+        strat.helper.sell.assert_called_once_with("333", 65)
 
     @patch('strategies.Archives.nifty_short_straddle.get_dhan_client')
     @patch('strategies.Archives.nifty_short_straddle.DhanHelper')
@@ -260,7 +324,10 @@ class TestPremiumStrikeSelection(unittest.TestCase):
         strat = ValueImbalanceStrategy(dry_run=False, initial_lots=1)
         strat.ce_id = 999
         strat.pe_id = 888
-        
+        strat.nifty_lot_size = 25
+        strat.ce_lots = 1
+        strat.pe_lots = 1
+
         # Scenario 1: Both legs are open short (-25)
         strat.helper.get_net_quantity.side_effect = lambda sid: -25 if sid in ["999", "888"] else 0
         strat.helper.buy.reset_mock()
@@ -278,6 +345,74 @@ class TestPremiumStrikeSelection(unittest.TestCase):
         strat.exit_all_positions("CE flat exit")
         
         strat.helper.buy.assert_called_once_with("888", 25)
+
+    def test_trail_arms_and_exits_on_rupee_mtm(self):
+        """The trail runs on total_pnl, so it arms at an absolute rupee profit and
+        exits on a rupee giveback — no combined-premium baseline involved."""
+        strat = NiftyAdvancedImbalance(entry_type="strangle", trail_start_rs=500.0, trail_gap_rs=300.0)
+        strat.nifty_lot_size = 65
+        strat.ce_lots = 2
+        strat.pe_lots = 2
+        strat.ce_wings = []
+        strat.pe_wings = []
+
+        self.assertFalse(strat.trail_active)
+
+        # Simulate the loop's trail evaluation over an MTM path.
+        def step(total_pnl):
+            if strat.ce_lots > 0 or strat.pe_lots > 0:
+                if not strat.trail_active and total_pnl >= strat.trail_start_rs:
+                    strat.trail_active = True
+                    strat.best_pnl = total_pnl
+                if strat.trail_active:
+                    if total_pnl > strat.best_pnl:
+                        strat.best_pnl = total_pnl
+                    return total_pnl < strat.best_pnl - strat.trail_gap_rs
+            return False
+
+        self.assertFalse(step(420.0))          # below arm threshold
+        self.assertFalse(strat.trail_active)
+
+        self.assertFalse(step(620.0))          # arms here
+        self.assertTrue(strat.trail_active)
+        self.assertEqual(strat.best_pnl, 620.0)
+
+        self.assertFalse(step(1150.0))         # best ratchets up
+        self.assertEqual(strat.best_pnl, 1150.0)
+
+        self.assertFalse(step(900.0))          # giveback 250 < gap 300, hold
+        self.assertTrue(step(840.0))           # giveback 310 > gap 300, exit
+
+    def test_trail_survives_a_roll(self):
+        """The old points-based trail went permanently dormant after the first roll.
+        total_pnl folds in realized_pnl, so best_pnl carries straight through."""
+        strat = NiftyAdvancedImbalance(entry_type="strangle", trail_start_rs=500.0, trail_gap_rs=300.0)
+        strat.nifty_lot_size = 65
+        strat.ce_lots = 2
+        strat.pe_lots = 2
+        strat.ce_wings = []
+        strat.pe_wings = []
+        strat.helper.get_ltp.return_value = 0.0
+
+        # Pre-roll: sold CE @ 80 / PE @ 70, both now at 60 -> (80-60 + 70-60) * 130
+        strat.ce_avg_price, strat.pe_avg_price = 80.0, 70.0
+        strat.realized_pnl = 0.0
+        pnl_before = strat._calculate_pnl(60.0, 60.0)
+        self.assertAlmostEqual(pnl_before, (20.0 + 10.0) * 130)
+
+        # Arm the trail on that MTM.
+        strat.trail_active = True
+        strat.best_pnl = pnl_before
+
+        # Winner roll: close CE @ 60 (books 20 pts * 130 realized), re-short a nearer
+        # strike @ 95. Combined premium jumps 60+60 -> 95+60, which is exactly what
+        # used to fake a "Trailing SL Hit". Rupee MTM is unchanged at the moment of roll.
+        strat.realized_pnl += (80.0 - 60.0) * (2 * 65)
+        strat.ce_avg_price = 95.0
+        pnl_after = strat._calculate_pnl(95.0, 60.0)
+
+        self.assertAlmostEqual(pnl_after, pnl_before)
+        self.assertFalse(pnl_after < strat.best_pnl - strat.trail_gap_rs)
 
     def test_advanced_loser_ratio_lots_config(self):
         # Verify default value of loser_ratio_lots is 1

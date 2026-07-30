@@ -12,6 +12,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 from login import get_dhan_client
 from lib.dhan_helper import DhanHelper
 from lib.strategy_state_helper import save_strategy_state, check_shutdown_trigger, exit_if_market_closed, parse_target_spec, instance_log_suffix
+from lib.strategy_risk import resolve_exit_qty
 
 # Setup Logging
 project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -41,7 +42,7 @@ class ValueImbalanceStrategy:
                  entry_balance_threshold=15.0,
                  profit_target=4000.0, profit_target_is_pct=False,
                  stop_loss=4000.0, stop_loss_is_pct=False, start_time="09:20",
-                 trail_start_pct=5.0, trail_gap_pts=15.0,
+                 trail_start_rs=500.0, trail_gap_rs=300.0,
                  state_key="nifty_value_imbalance_straddle"):
         self.state_key = state_key
         self.dry_run = dry_run
@@ -60,8 +61,8 @@ class ValueImbalanceStrategy:
         self.profit_target = None if profit_target_is_pct else profit_target
         self.stop_loss = None if stop_loss_is_pct else -abs(stop_loss)  # Ensure it's negative
         self.start_time = start_time
-        self.trail_start_pct = trail_start_pct
-        self.trail_gap_pts = trail_gap_pts
+        self.trail_start_rs = trail_start_rs
+        self.trail_gap_rs = trail_gap_rs
 
         self.dhan = get_dhan_client()
         if not self.dhan:
@@ -100,8 +101,7 @@ class ValueImbalanceStrategy:
         
         # Trailing Stop Loss State
         self.trail_active = False
-        self.entry_combined_pts = 0.0
-        self.best_combined_pts = 0.0
+        self.best_pnl = 0.0
 
         # Session Control
         self.last_adjustment_time = None
@@ -153,11 +153,10 @@ class ValueImbalanceStrategy:
             "profit_target": self.profit_target,
             "stop_loss": self.stop_loss,
             "trail_active": self.trail_active,
-            "trail_start_pct": self.trail_start_pct,
-            "trail_gap_pts": self.trail_gap_pts,
-            "entry_combined_pts": self.entry_combined_pts,
-            "best_combined_pts": self.best_combined_pts,
-            "trail_exit_combined": round(self.best_combined_pts + self.trail_gap_pts, 2) if self.trail_active else None,
+            "trail_start_rs": self.trail_start_rs,
+            "trail_gap_rs": self.trail_gap_rs,
+            "best_pnl": round(self.best_pnl, 2),
+            "trail_exit_pnl": round(self.best_pnl - self.trail_gap_rs, 2) if self.trail_active else None,
         }
         save_strategy_state(self.state_key, state_dict)
 
@@ -280,30 +279,26 @@ class ValueImbalanceStrategy:
         if not self.dry_run:
             if self.ce_id:
                 try:
-                    net_qty = self.helper.get_net_quantity(str(self.ce_id))
-                    if net_qty < 0:
-                        qty_to_buy = abs(net_qty)
+                    own_qty = self.ce_lots * self.nifty_lot_size
+                    qty_to_buy, net_qty = resolve_exit_qty(self.helper, self.ce_id, own_qty, "BUY", logger)
+                    if qty_to_buy > 0:
                         ce_exit_id = self.helper.buy(str(self.ce_id), qty_to_buy)
                         if not ce_exit_id:
                             logger.critical(f"CRITICAL ERROR: Emergency exit order failed for CE (ID: {self.ce_id})!")
                         else:
-                            logger.info(f"CE Emergency exit order placed for {qty_to_buy} qty: {ce_exit_id}")
-                    else:
-                        logger.info(f"CE position already flat or long (Net Qty: {net_qty}). Skipping exit order.")
+                            logger.info(f"CE Emergency exit order placed for {qty_to_buy} qty (own {own_qty}, broker net {net_qty}): {ce_exit_id}")
                 except Exception as e:
                     logger.error(f"Exit CE Error: {e}")
             if self.pe_id:
                 try:
-                    net_qty = self.helper.get_net_quantity(str(self.pe_id))
-                    if net_qty < 0:
-                        qty_to_buy = abs(net_qty)
+                    own_qty = self.pe_lots * self.nifty_lot_size
+                    qty_to_buy, net_qty = resolve_exit_qty(self.helper, self.pe_id, own_qty, "BUY", logger)
+                    if qty_to_buy > 0:
                         pe_exit_id = self.helper.buy(str(self.pe_id), qty_to_buy)
                         if not pe_exit_id:
                             logger.critical(f"CRITICAL ERROR: Emergency exit order failed for PE (ID: {self.pe_id})!")
                         else:
-                            logger.info(f"PE Emergency exit order placed for {qty_to_buy} qty: {pe_exit_id}")
-                    else:
-                        logger.info(f"PE position already flat or long (Net Qty: {net_qty}). Skipping exit order.")
+                            logger.info(f"PE Emergency exit order placed for {qty_to_buy} qty (own {own_qty}, broker net {net_qty}): {pe_exit_id}")
                 except Exception as e:
                     logger.error(f"Exit PE Error: {e}")
         else:
@@ -335,8 +330,7 @@ class ValueImbalanceStrategy:
         self.adjustment_count = 0
         self.consecutive_chain_failures = 0
         self.trail_active = False
-        self.entry_combined_pts = 0.0
-        self.best_combined_pts = 0.0
+        self.best_pnl = 0.0
         self.last_adjustment_time = None
         logger.info("Session state reset for new cycle.")
 
@@ -496,8 +490,7 @@ class ValueImbalanceStrategy:
             else:
                 logger.info(f"[DRY RUN] Simulating Entry: {self.ce_strike} CE/PE")
 
-            self.entry_combined_pts = self.ce_avg_price + self.pe_avg_price
-            logger.info(f"Trail SL reference: entry_combined={self.entry_combined_pts:.2f} pts (CE={self.ce_avg_price:.2f} + PE={self.pe_avg_price:.2f})")
+            logger.info(f"Trail SL: arms at +INR {self.trail_start_rs:.0f} MTM, gives back INR {self.trail_gap_rs:.0f}")
 
             if self.target_is_pct or self.stop_is_pct:
                 entry_value = (self.ce_avg_price * self.ce_lots + self.pe_avg_price * self.pe_lots) * self.nifty_lot_size
@@ -561,28 +554,26 @@ class ValueImbalanceStrategy:
                     cycle_active = False
                     break
                 
-                # --- Trailing Stop Loss Logic (combined-premium points) ---
-                if self.entry_combined_pts > 0:
-                    current_combined_pts = ce_ltp + pe_ltp
-                    profit_pts = self.entry_combined_pts - current_combined_pts
-                    trail_trigger = self.trail_start_pct / 100.0 * self.entry_combined_pts
-
-                    if not self.trail_active and profit_pts >= trail_trigger:
+                # --- Trailing Stop Loss (rupee MTM basis; continuous across rolls) ---
+                # total_pnl already folds in realized_pnl, so every roll / lot-add is
+                # absorbed automatically - no stale baseline to go wrong.
+                if self.ce_lots > 0 or self.pe_lots > 0:
+                    if not self.trail_active and total_pnl >= self.trail_start_rs:
                         self.trail_active = True
-                        self.best_combined_pts = current_combined_pts
+                        self.best_pnl = total_pnl
                         logger.info(
-                            f"Trail SL activated: combined={current_combined_pts:.2f}, "
-                            f"entry={self.entry_combined_pts:.2f}, trigger={trail_trigger:.2f}pts"
+                            f"Trail SL activated at {total_pnl:+.0f} "
+                            f"(arm {self.trail_start_rs:.0f}, gap {self.trail_gap_rs:.0f})"
                         )
 
                     if self.trail_active:
-                        if current_combined_pts < self.best_combined_pts:
-                            self.best_combined_pts = current_combined_pts
-                        trail_exit = self.best_combined_pts + self.trail_gap_pts
-                        if current_combined_pts > trail_exit:
+                        if total_pnl > self.best_pnl:
+                            self.best_pnl = total_pnl
+                        trail_exit = self.best_pnl - self.trail_gap_rs
+                        if total_pnl < trail_exit:
                             self.exit_all_positions(
-                                f"Trailing SL Hit! Combined: {current_combined_pts:.2f} > exit: {trail_exit:.2f} "
-                                f"(best: {self.best_combined_pts:.2f})"
+                                f"Trailing SL Hit! PnL {total_pnl:+.0f} < exit {trail_exit:+.0f} "
+                                f"(best {self.best_pnl:+.0f})"
                             )
                             logger.info("Waiting 5 minutes before next re-entry cycle...")
                             self.sleep_cooldown(300)
@@ -806,10 +797,10 @@ Examples:
     # Entry criteria
     parser.add_argument("--entry-balance-threshold", type=float, default=15.0, metavar="PCT",
                         help="Initial balance threshold percentage for entry (default: 15.0)")
-    parser.add_argument("--trail-start-pct", type=float, default=5.0,
-                        help="Activate trailing SL when profit reaches this %% of entry combined premium (default: 5.0)")
-    parser.add_argument("--trail-gap-pts", type=float, default=15.0,
-                        help="Exit if combined premium rises this many pts above its best level (default: 15.0)")
+    parser.add_argument("--trail-start-rs", type=float, default=500.0, metavar="INR",
+                        help="Activate trailing SL once MTM profit reaches this many rupees (default: 500)")
+    parser.add_argument("--trail-gap-rs", type=float, default=300.0, metavar="INR",
+                        help="Exit if MTM gives back this many rupees from its best level (default: 300)")
 
     parser.add_argument("--instance-id", type=str, default="", metavar="ID",
                         help="Suffix for debug/state files to run a second concurrent copy of this strategy")
@@ -843,8 +834,8 @@ Examples:
         profit_target_is_pct=target_is_pct,
         stop_loss=stop_loss_val,
         stop_loss_is_pct=stop_is_pct,
-        trail_start_pct=args.trail_start_pct,
-        trail_gap_pts=args.trail_gap_pts,
+        trail_start_rs=args.trail_start_rs,
+        trail_gap_rs=args.trail_gap_rs,
         state_key=STATE_KEY,
     )
     try:
