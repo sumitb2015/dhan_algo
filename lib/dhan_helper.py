@@ -124,6 +124,15 @@ class DhanHelper:
         self._ou_lock = threading.Lock()
         self._ou_loop = None  # the run_ou thread's live asyncio loop, so stop() can force-unblock it
         self.user_on_order_update: Optional[Callable] = None
+        # Real connection health, as opposed to "is the retry thread alive".
+        # run_ou() reconnects forever, so _ou_thread.is_alive() stays True even
+        # while the socket has been failing to connect for hours — monitors that
+        # trust it cannot tell a healthy quiet market from a dead feed.
+        self._ou_connected = False
+        self._ou_connected_since: Optional[float] = None
+        self._ou_last_event_ts: Optional[float] = None
+        self._ou_connect_failures = 0
+        self._ou_last_error: Optional[str] = None
 
         # Validate session on init
         self.validate_session()
@@ -3844,6 +3853,7 @@ class DhanHelper:
 
             def _handle_order_update(payload: dict):
                 data = payload.get('Data', {})
+                self._ou_last_event_ts = time.time()
                 order_id = data.get('orderNo') or data.get('OrderNo')
                 if order_id:
                     self.order_updates[str(order_id)] = payload
@@ -3889,6 +3899,12 @@ class DhanHelper:
                                     "UserType": "SELF",
                                 }
                                 await websocket.send(json.dumps(auth_message))
+                                # Handshake accepted — the feed is genuinely live
+                                # from here until this coroutine unwinds.
+                                self._ou_connected = True
+                                self._ou_connected_since = time.time()
+                                self._ou_connect_failures = 0
+                                self._ou_last_error = None
                                 async for message in websocket:
                                     try:
                                         data = json.loads(message)
@@ -3912,9 +3928,13 @@ class DhanHelper:
                             loop.run_until_complete(_connect_order_update_safe())
                         finally:
                             self._ou_loop = None
+                            self._ou_connected = False
                             loop.close()
 
                     except Exception as e:
+                        self._ou_connected = False
+                        self._ou_connect_failures += 1
+                        self._ou_last_error = str(e)
                         logger.error(f"Order Update WebSocket failed: {e}. Retrying in {retry_delay}s...")
 
                     if not self._ou_stop_flag:
@@ -3923,6 +3943,38 @@ class DhanHelper:
             self._ou_thread = threading.Thread(target=run_ou, daemon=True, name="order-update-ws")
             self._ou_thread.start()
             logger.info("Order Update WebSocket manager started in background thread.")
+
+    def get_order_update_ws_health(self) -> dict:
+        """Health of the order-update WebSocket, for monitors and dashboards.
+
+        Prefer `connected` over `thread_alive`. run_ou() reconnects forever, so
+        `thread_alive` is True even when the socket has been failing to connect
+        for hours — it only tells you the supervisor is running, not that the
+        feed works.
+
+        `last_event_age_sec` is NOT a health signal on its own: order silence is
+        normal on a quiet account, and treating it as a fault produced constant
+        false positives when it was tried. Read it together with `connected`.
+
+        Returns:
+            dict: connected (bool), thread_alive (bool), connected_since (float|None),
+                connected_for_sec (float|None), last_event_ts (float|None),
+                last_event_age_sec (float|None), connect_failures (int),
+                last_error (str|None)
+        """
+        now = time.time()
+        since = self._ou_connected_since
+        last = self._ou_last_event_ts
+        return {
+            'connected': bool(self._ou_connected),
+            'thread_alive': self._ou_thread is not None and self._ou_thread.is_alive(),
+            'connected_since': since,
+            'connected_for_sec': round(now - since, 1) if (since and self._ou_connected) else None,
+            'last_event_ts': last,
+            'last_event_age_sec': round(now - last, 1) if last else None,
+            'connect_failures': self._ou_connect_failures,
+            'last_error': self._ou_last_error,
+        }
 
     def stop_order_update_websocket(self):
         """Stop the order-update WebSocket background thread.

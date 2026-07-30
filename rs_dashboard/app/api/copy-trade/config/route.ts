@@ -16,19 +16,34 @@ interface ChildConfig {
 interface CopyTradeConfig {
   armed: boolean;
   children: ChildConfig[];
+  // The file also holds keys this UI does not manage — margin_check,
+  // hedge_on_startup, hedge_product, hedge_premium_cap, hedge_premium_budget,
+  // hedge_max_lots, hedge_respect_cash. They are read only by the Python bridge.
+  [key: string]: unknown;
 }
 
 const DEFAULT_CONFIG: CopyTradeConfig = { armed: false, children: [] };
 
+/**
+ * Read the WHOLE config, not a projection of it.
+ *
+ * This used to return only { armed, children }, and POST wrote that projection
+ * straight back — so every arm/disarm or multiplier change silently deleted the
+ * bridge's hedge and margin-gate settings. The bridge then fell back to its
+ * defaults (hedging OFF), which is a real behaviour change from a UI action that
+ * never mentioned hedging. Unknown keys must survive a round-trip.
+ */
 function readConfig(): CopyTradeConfig {
   try {
     const raw = JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8'));
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return { ...DEFAULT_CONFIG };
     return {
+      ...raw,
       armed: !!raw.armed,
       children: Array.isArray(raw.children) ? raw.children : [],
     };
   } catch {
-    return DEFAULT_CONFIG;
+    return { ...DEFAULT_CONFIG };
   }
 }
 
