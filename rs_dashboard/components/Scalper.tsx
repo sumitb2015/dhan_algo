@@ -1625,8 +1625,8 @@ export const OptionPanel = React.memo(function OptionPanel({
               onClick={onShiftUp}
               disabled={!strike || pending || !strikesReady}
               title="Shift strike up (auto-close active position if any)"
-              className="w-6 h-7 flex items-center justify-center rounded-lg border border-zinc-700
-                         bg-zinc-800 text-zinc-300 hover:text-white hover:bg-zinc-700 hover:border-zinc-600
+              className="w-6 h-7 flex items-center justify-center rounded-lg border border-emerald-700/60
+                         bg-emerald-950/60 text-emerald-300 hover:bg-emerald-600 hover:text-white hover:border-emerald-500
                          disabled:opacity-30 disabled:cursor-not-allowed transition-all text-[10px] font-bold active:scale-95"
             >
               ▲
@@ -1647,8 +1647,8 @@ export const OptionPanel = React.memo(function OptionPanel({
               onClick={onShiftDown}
               disabled={!strike || pending || !strikesReady}
               title="Shift strike down (auto-close active position if any)"
-              className="w-6 h-7 flex items-center justify-center rounded-lg border border-zinc-700
-                         bg-zinc-800 text-zinc-300 hover:text-white hover:bg-zinc-700 hover:border-zinc-600
+              className="w-6 h-7 flex items-center justify-center rounded-lg border border-rose-700/60
+                         bg-rose-950/60 text-rose-300 hover:bg-rose-600 hover:text-white hover:border-rose-500
                          disabled:opacity-30 disabled:cursor-not-allowed transition-all text-[10px] font-bold active:scale-95"
             >
               ▼
