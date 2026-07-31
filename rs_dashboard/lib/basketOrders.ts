@@ -12,8 +12,8 @@ export interface OrderLeg {
   productType: 'INTRADAY' | 'MARGIN';
 }
 
-/** Unified strike->identifier shape, matching what /api/scalper/lookup and
- *  /api/scalper/zerodha/lookup both populate into the same strikeMap state
+/** Unified strike->identifier shape, matching what every broker's
+ *  /api/scalper[/<broker>]/lookup populates into the same strikeMap state
  *  (see components/Scalper.tsx's strikeMap type for precedent). */
 export interface StrikeIdentifier {
   ceId?: string;
@@ -62,13 +62,18 @@ export function resolveOrderRequest(
     };
   }
 
+  // Every non-Dhan broker orders by trading symbol and shares this request
+  // shape; only the exchange spelling differs (Kotak uses lowercase segments).
   const tradingsymbol = leg.option === 'CE' ? ident.ceSymbol : ident.peSymbol;
   if (!tradingsymbol) return null;
+  const exchange = broker === 'kotak'
+    ? (leg.underlying === 'SENSEX' ? 'bse_fo' : 'nse_fo')
+    : (leg.underlying === 'SENSEX' ? 'BFO' : 'NFO');
   return {
-    broker, url: '/api/scalper/zerodha/order',
+    broker, url: `/api/scalper/${broker}/order`,
     body: {
       tradingsymbol, quantity: leg.qty, side, orderType: leg.type,
-      exchange: leg.underlying === 'SENSEX' ? 'BFO' : 'NFO',
+      exchange,
       product: leg.productType === 'MARGIN' ? 'NRML' : 'MIS',
       ...(limitPrice != null ? { price: limitPrice } : {}),
     },

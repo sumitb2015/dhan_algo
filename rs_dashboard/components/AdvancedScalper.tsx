@@ -11,7 +11,7 @@ import {
 import { useLiveOptionsWS } from '@/lib/useLiveOptionsWS';
 import { useProfitLock, ProfitLockControls } from './ProfitLock';
 import { useCopyTrade, CopyTradeControls } from './CopyTrade';
-import { useBrokerSelector, brokerRoute } from '@/hooks/useBrokerSelector';
+import { useBrokerSelector, scalperRoute, BROKER_LABELS, type Broker } from '@/hooks/useBrokerSelector';
 import { contractMultiplier } from '@/lib/positionPnl';
 import TopWeightStocks from './TopWeightStocks';
 import TopIndices from './TopIndices';
@@ -142,7 +142,9 @@ export default function AdvancedScalper() {
   const secIdToStrikeSide = useMemo(() => {
     const map: Record<string, { strike: number; side: 'ce' | 'pe' }> = {};
     for (const [strike, ids] of Object.entries(strikeMap)) {
-      if (broker === 'zerodha') {
+      // Dhan is the only broker with a numeric securityId; everything else
+      // joins on the trading symbol.
+      if (broker !== 'dhan') {
         if (ids.ceSymbol) map[ids.ceSymbol] = { strike: Number(strike), side: 'ce' };
         if (ids.peSymbol) map[ids.peSymbol] = { strike: Number(strike), side: 'pe' };
       } else {
@@ -154,7 +156,7 @@ export default function AdvancedScalper() {
   }, [strikeMap, broker]);
 
   const positionJoinKey = useCallback((pos: Record<string, unknown>): string => {
-    return broker === 'zerodha'
+    return broker !== 'dhan'
       ? String(pos.tradingSymbol ?? '')
       : String(pos.securityId ?? (pos as Record<string, unknown>).security_id ?? '');
   }, [broker]);
@@ -223,7 +225,7 @@ export default function AdvancedScalper() {
   const boxSecId = useCallback((box: BoxConfig): string | undefined => {
     if (box.strike == null) return undefined;
     const entry = strikeMap[String(box.strike)];
-    return broker === 'zerodha'
+    return broker !== 'dhan'
       ? entry?.[box.side === 'CE' ? 'ceSymbol' : 'peSymbol']
       : entry?.[box.side === 'CE' ? 'ceId' : 'peId'];
   }, [strikeMap, broker]);
@@ -358,11 +360,7 @@ export default function AdvancedScalper() {
     if (!expiry) return;
 
     const requestedExpiry = expiry;
-    const lookupUrl = brokerRoute(
-      broker,
-      `/api/scalper/lookup?underlying=${underlying}&expiry=${expiry}`,
-      `/api/scalper/zerodha/lookup?underlying=${underlying}&expiry=${expiry}`,
-    );
+    const lookupUrl = `${scalperRoute(broker, 'lookup')}?underlying=${underlying}&expiry=${expiry}`;
     fetch(lookupUrl)
       .then(r => r.json())
       .then((j: { success: boolean; data?: { lotSize: number; strikes: Record<string, { ceId?: string; peId?: string; ceSymbol?: string; peSymbol?: string }> } }) => {
@@ -383,7 +381,7 @@ export default function AdvancedScalper() {
 
   const fetchTabData = useCallback(() => {
     setTabLoading(true);
-    fetch(brokerRoute(broker, '/api/scalper/all', '/api/scalper/zerodha/all'))
+    fetch(scalperRoute(broker, 'all'))
       .then(r => r.json())
       .then((j: { success: boolean; positions?: Record<string, unknown>[]; positionsError?: string | null; orders?: Record<string, unknown>[]; trades?: Record<string, unknown>[]; funds?: Record<string, any>; pnl_guard?: any }) => {
         if (j.success) {
@@ -400,7 +398,7 @@ export default function AdvancedScalper() {
   }, [broker]);
 
   const pollTabData = useCallback(() => {
-    fetch(brokerRoute(broker, '/api/scalper/poll', '/api/scalper/zerodha/poll'))
+    fetch(scalperRoute(broker, 'poll'))
       .then(r => r.json())
       .then((j: { success: boolean; positions?: Record<string, unknown>[]; positionsError?: string | null; orders?: Record<string, unknown>[]; trades?: Record<string, unknown>[] }) => {
         if (j.success) {
@@ -535,13 +533,19 @@ export default function AdvancedScalper() {
     try {
       const entry = strikeMap[String(box.strike)];
       let res: Response;
-      if (broker === 'zerodha') {
+      if (broker !== 'dhan') {
+        // Every non-Dhan broker orders by trading symbol (Dhan is the only one
+        // with a numeric securityId), so they share one request shape and only
+        // the exchange spelling differs.
         const symbol = entry?.[box.side === 'CE' ? 'ceSymbol' : 'peSymbol'];
         if (!symbol) {
-          addToast('error', `${side} ${box.side} failed`, 'Zerodha strike data still loading');
+          addToast('error', `${side} ${box.side} failed`, `${BROKER_LABELS[broker]} strike data still loading`);
           return;
         }
-        res = await fetch('/api/scalper/zerodha/order', {
+        const exchange = broker === 'kotak'
+          ? (underlying === 'SENSEX' ? 'bse_fo' : 'nse_fo')
+          : (underlying === 'SENSEX' ? 'BFO' : 'NFO');
+        res = await fetch(scalperRoute(broker, 'order'), {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
@@ -549,7 +553,7 @@ export default function AdvancedScalper() {
             quantity: box.lots * lotSize,
             side,
             orderType: orderMode,
-            exchange: underlying === 'SENSEX' ? 'BFO' : 'NFO',
+            exchange,
             product: productType === 'MARGIN' ? 'NRML' : 'MIS',
             ...(orderMode === 'LIMIT' ? { price: Number(box.limitPrice) } : {}),
           }),
@@ -621,9 +625,10 @@ export default function AdvancedScalper() {
       // selected in the UI must still close on its own exchange.
       let liveNetQty = 0;
       let liveSecId = fallbackSecId;
-      let liveExchange = String(pos.exchangeSegment ?? pos.exchange ?? (broker === 'zerodha' ? 'NFO' : 'NSE_FNO'));
+      let liveExchange = String(pos.exchangeSegment ?? pos.exchange ??
+        (broker === 'kotak' ? 'nse_fo' : broker === 'zerodha' ? 'NFO' : 'NSE_FNO'));
       try {
-        const posUrl = brokerRoute(broker, '/api/scalper/positions', '/api/scalper/zerodha/positions');
+        const posUrl = scalperRoute(broker, 'positions');
         const posRes = await fetch(posUrl);
         const posJson = await posRes.json() as { success: boolean; data?: Record<string, unknown>[] };
         if (posJson.success && posJson.data) {
@@ -648,12 +653,14 @@ export default function AdvancedScalper() {
       const side = liveNetQty > 0 ? 'SELL' : 'BUY';
       const qty = Math.abs(liveNetQty);
 
-      const orderUrl = brokerRoute(broker, '/api/scalper/fast-order', '/api/scalper/zerodha/order');
+      const orderUrl = broker === 'dhan' ? '/api/scalper/fast-order' : scalperRoute(broker, 'order');
       const res = await fetch(orderUrl, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(
-          broker === 'zerodha'
+          // Dhan is the only broker that closes by numeric securityId; the rest
+          // close by trading symbol.
+          broker !== 'dhan'
             ? { tradingsymbol: sym, quantity: qty, side, orderType: 'MARKET', exchange: liveExchange }
             : { securityId: liveSecId, quantity: qty, side, orderType: 'MARKET', exchangeSegment: liveExchange },
         ),
@@ -709,13 +716,14 @@ export default function AdvancedScalper() {
     setExitingAll(true);
     setConfirmExitAll(false);
     try {
-      if (broker === 'zerodha') {
-        const res = await fetch('/api/scalper/zerodha/exit-all', { method: 'POST' });
+      if (broker !== 'dhan') {
+        const label = BROKER_LABELS[broker];
+        const res = await fetch(scalperRoute(broker, 'exit-all'), { method: 'POST' });
         const data = await res.json() as { success: boolean; closed: string[]; errors: string[] };
         if (data.success) {
-          addToast('success', `All Zerodha positions liquidated.${data.closed.length ? ` (${data.closed.join(', ')})` : ''}`);
+          addToast('success', `All ${label} positions liquidated.${data.closed.length ? ` (${data.closed.join(', ')})` : ''}`);
         } else {
-          addToast('error', 'Zerodha exit failed', data.errors.join('; ') || 'Unknown error');
+          addToast('error', `${label} exit failed`, data.errors.join('; ') || 'Unknown error');
         }
       } else {
         const res = await fetch('/api/exit-all', { method: 'POST' });
@@ -985,12 +993,13 @@ export default function AdvancedScalper() {
             {authenticatedBrokers.length > 1 && (
               <select
                 value={broker}
-                onChange={e => setBroker(e.target.value as 'dhan' | 'zerodha')}
+                onChange={e => setBroker(e.target.value as Broker)}
                 className="bg-zinc-900 border border-zinc-700 text-zinc-200 text-xs font-semibold
                            rounded-lg px-2.5 py-1.5 focus:outline-none focus:border-emerald-500 w-[88px] shrink-0"
               >
-                {authenticatedBrokers.includes('dhan') && <option value="dhan">Dhan</option>}
-                {authenticatedBrokers.includes('zerodha') && <option value="zerodha">Zerodha</option>}
+                {authenticatedBrokers.map(b => (
+                  <option key={b} value={b}>{BROKER_LABELS[b]}</option>
+                ))}
               </select>
             )}
 

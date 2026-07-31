@@ -35,7 +35,22 @@ const WS_RETRY_MAX_MS  = 5000;
 const WS_FAILS_TO_POLL = 3;      // consecutive WS failures before HTTP fallback
 const STALE_MS         = 10_000; // reject quotes older than this
 
-export type Broker = 'dhan' | 'zerodha';
+export type Broker = 'dhan' | 'zerodha' | 'kotak';
+
+/**
+ * Which broker's tick bridge feeds each broker's quote display.
+ *
+ * Kotak has no bridge of its own and does not need one: an option's LTP is set
+ * by the exchange, not by the broker you view it through, so Dhan's feed is the
+ * same data. Only order routing is genuinely broker-specific. Mapping it here
+ * (rather than spawning a second identical NIFTY feed) also avoids burning a
+ * duplicate WebSocket subscription.
+ */
+const QUOTE_CHANNEL: Record<Broker, Exclude<Broker, 'kotak'>> = {
+  dhan: 'dhan',
+  zerodha: 'zerodha',
+  kotak: 'dhan',
+};
 
 interface StatusWithPort extends BridgeStatus {
   ws_port?: number | null;
@@ -233,12 +248,16 @@ export function useLiveOptionsWS(
   authenticatedBrokers: Broker[] = ['dhan', 'zerodha'],
   underlying: string = 'NIFTY',
 ): LiveOptionsWSResult {
-  const [channels, setChannels] = useState<Record<Broker, ChannelState>>({
+  const [channels, setChannels] = useState<Record<string, ChannelState>>({
     dhan: EMPTY_STATE,
     zerodha: EMPTY_STATE,
   });
 
-  const authKey = authenticatedBrokers.slice().sort().join(',');
+  // Dedupe through QUOTE_CHANNEL so an authenticated Kotak session does not
+  // start a second copy of the Dhan feed it shares.
+  const authKey = Array.from(
+    new Set(authenticatedBrokers.map(b => QUOTE_CHANNEL[b] ?? 'dhan')),
+  ).sort().join(',');
 
   useEffect(() => {
     if (!expiry) return;
@@ -258,5 +277,5 @@ export function useLiveOptionsWS(
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [expiry, authKey, underlying]);
 
-  return channels[broker];
+  return channels[QUOTE_CHANNEL[broker] ?? 'dhan'] ?? EMPTY_STATE;
 }

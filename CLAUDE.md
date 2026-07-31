@@ -101,6 +101,8 @@ login.py                    # OAuth flow + token caching (access_token.json)
 lib/
   dhan_helper.py            # Core DhanHelper class — all strategies use this
   strategy_state_helper.py  # save_strategy_state() / check_shutdown_trigger()
+  zerodha/                  # Kite session + margin/basket-margin helpers
+  kotak/                    # Kotak Neo session (TOTP+MPIN), response unwrapping, margin/positions
 strategies/
   value_imbalance/          # Straddle, Strangle, Advanced Imbalance, VWAP straddle, and Delta Neutral strategies
   spread_trend/             # Trend-following Bear Call / Bull Put spread strategy (EMA20 + Supertrend)
@@ -221,3 +223,41 @@ api_secret=...
 ```
 
 Token is cached to `access_token.json` and reused until `expiryTime`. Run `login.py` to refresh it.
+
+Zerodha credentials live in `.env.zerodha` (token cached to `zerodha_access_token.json`);
+Kotak Neo credentials in `.env.kotak` (see `.env.kotak.example`; session cached to
+`kotak_access_token.json`). Refresh either from the dashboard's Autologin, or:
+
+```powershell
+venv\Scripts\python.exe scripts/tools/zerodha_autologin.py
+venv\Scripts\python.exe scripts/tools/kotak_autologin.py   # --force to re-login
+```
+
+**Kotak SDK install** — `neo-api-client` MUST be installed with `--no-deps` (it hard-pins
+pandas 2.2.3 / numpy 2.1.0 / urllib3 1.26.14 against this venv's much newer versions and
+would break the dashboard data stack). See the comment block in `requirements.txt`.
+
+## Multi-broker
+
+Dhan is the primary account. Zerodha and Kotak are supported both as selectable brokers in
+the scalper terminals and as copy-trade children that mirror Dhan fills.
+
+- **Dashboard**: `hooks/useBrokerSelector.ts` owns the `Broker` union; use `scalperRoute(broker,
+  endpoint)` rather than hand-building `/api/scalper/...` paths, and `brokerRoute(broker, {…})`
+  for irregular ones — it takes a **map**, because a positional pair silently routed a third
+  broker to Dhan's endpoint (i.e. traded the wrong account). Dhan is the only broker with a
+  numeric `securityId`; every other broker joins positions and places orders by trading symbol,
+  so branch on `broker !== 'dhan'`, not on a specific broker name.
+- **Bridge**: `scripts/tools/child_brokers.py` defines `ChildBroker` plus `ZerodhaChild` /
+  `KotakChild`; `copy_trade_bridge.py` is broker-agnostic and drives them through that interface.
+  Each broker owns its own instrument cache, margin state, position snapshot and replication
+  scope. The safety invariants live in `ChildBroker` so the two cannot drift: a reducing order is
+  never margin-blocked, unknown margin fails OPEN, a stale position snapshot fails OPEN, and the
+  fast path (WS callback thread) never makes an HTTP call.
+- **Kotak quirks** (all handled in `lib/kotak/`): auth failures and "no data" arrive as 200-OK
+  bodies (`stCode 5203` = empty book, not an error); positions report no net quantity (compute it
+  from the four `cf*`/`fl*` legs); expiry timestamps use a **1980-based epoch** and strikes are
+  ×100 scaled in the scrip master; the REST base URL is per-user and comes from the login
+  response; the SDK issues every HTTP call with **no timeout**, so
+  `lib.kotak.authentication.install_timeouts()` must run before any API use.
+- The startup OTM hedge (`copy_trade_hedge.py`) is **Zerodha-only** by design.

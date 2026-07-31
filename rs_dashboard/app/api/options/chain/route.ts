@@ -21,7 +21,18 @@ interface ChainResponse {
 const cache = new Map<string, CacheEntry>();
 const CACHE_TTL = 10_000; // 10 s
 
-const ZERODHA_SUPPORTED_UNDERLYINGS = new Set(['NIFTY', 'BANKNIFTY', 'SENSEX']);
+// Brokers whose strike list comes from a locally cached instrument master.
+// Both caches share a row shape, so one branch serves them. Prices are always
+// filled in by the live-quote feed, never by this route.
+const CACHE_BROKERS: Record<string, Set<string>> = {
+  zerodha: new Set(['NIFTY', 'BANKNIFTY', 'SENSEX']),
+  kotak: new Set(['NIFTY', 'BANKNIFTY', 'FINNIFTY', 'SENSEX']),
+};
+
+// Kotak has no live-quote bridge of its own, and it does not need one: an
+// option's LTP is set by the exchange, not the broker, so Dhan's feed is the
+// same data. Only order routing is broker-specific.
+const QUOTE_SOURCE: Record<string, string> = { zerodha: 'zerodha', kotak: 'dhan' };
 
 export async function GET(request: NextRequest) {
   const { searchParams } = new URL(request.url);
@@ -33,18 +44,20 @@ export async function GET(request: NextRequest) {
     return NextResponse.json({ success: false, error: 'expiry required' }, { status: 400 });
   }
 
-  if (broker === 'zerodha' && !ZERODHA_SUPPORTED_UNDERLYINGS.has(underlying)) {
+  const supported = CACHE_BROKERS[broker];
+
+  if (supported && !supported.has(underlying)) {
     // Fail loudly instead of silently returning another underlying's
     // chain/spot mislabeled as the requested one.
     return NextResponse.json(
-      { success: false, error: `Zerodha does not support ${underlying} yet` },
+      { success: false, error: `${broker} does not support ${underlying} yet` },
       { status: 400 },
     );
   }
 
-  if (broker === 'zerodha') {
+  if (supported) {
     try {
-      const cacheFile = path.join(PROJECT_ROOT, 'debug', `zerodha_${underlying.toLowerCase()}_instruments.json`);
+      const cacheFile = path.join(PROJECT_ROOT, 'debug', `${broker}_${underlying.toLowerCase()}_instruments.json`);
       if (fs.existsSync(cacheFile)) {
         const raw = fs.readFileSync(cacheFile, 'utf8');
         const instruments = JSON.parse(raw) as { strike: number; expiry: string; instrument_type: 'CE' | 'PE' }[];
@@ -64,7 +77,7 @@ export async function GET(request: NextRequest) {
         // Try to read spot from live quotes if available, otherwise default to 0
         let spot = 0;
         try {
-          const quotesFile = path.join(PROJECT_ROOT, 'debug', 'live_options_quotes_zerodha.json');
+          const quotesFile = path.join(PROJECT_ROOT, 'debug', `live_options_quotes_${QUOTE_SOURCE[broker] ?? broker}.json`);
           if (fs.existsSync(quotesFile)) {
             const q = JSON.parse(fs.readFileSync(quotesFile, 'utf8'));
             if (q.expiry === expiry && q.spot) spot = q.spot;

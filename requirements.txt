@@ -121,3 +121,20 @@ xlsxwriter
 kiteconnect
 selenium
 webdriver-manager
+PyJWT==2.13.0
+
+# Kotak Neo SDK (copy-trade child + selectable scalper broker).
+#
+# MUST be installed with --no-deps. The SDK hard-pins pandas==2.2.3,
+# numpy==2.1.0, urllib3==1.26.14, certifi==2022.12.7, idna==2.10 and
+# websockets==8.1 -- installing it normally downgrades pandas/numpy and breaks
+# the entire dashboard data stack. Its real runtime needs are requests, six,
+# websocket-client and jwt (all above); pandas is touched only in
+# api/scrip_search.py, which we never call (the master CSV is downloaded
+# directly). The websockets pin is spurious -- HSWebSocketLib uses
+# websocket-client's WebSocketApp, not the asyncio websockets package.
+#
+#   venv\Scripts\python.exe -m pip install --no-deps \
+#     "git+https://github.com/Kotak-Neo/Kotak-neo-api-v2.git@539b6022c2c5fe138d6d0a893bbe554cacca10b6"
+#
+# neo-api-client @ git+https://github.com/Kotak-Neo/Kotak-neo-api-v2.git@539b6022c2c5fe138d6d0a893bbe554cacca10b6

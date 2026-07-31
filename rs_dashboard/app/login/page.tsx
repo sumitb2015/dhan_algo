@@ -15,11 +15,29 @@ import { FloatingPaths } from "@/components/ui/background-paths";
 // ─── Types ──────────────────────────────────────────────────────────────────
 
 type AccountTarget = "dhan" | "both";
-type BrokerResult = { success: boolean; error?: string };
-type AutologinResponse = { enterDashboard: boolean; dhan?: BrokerResult; zerodha?: BrokerResult };
 
-type FieldStatus = { set: boolean; masked?: string };
-type AuthConfig = { dhan: Record<string, FieldStatus>; zerodha: Record<string, FieldStatus> };
+// Dhan is the primary account and is ALWAYS logged in — it is the only broker
+// that grants the dashboard session (see the autologin route's enterDashboard),
+// so it is deliberately not toggleable. These are the optional extras.
+const EXTRA_BROKERS = ["zerodha", "kotak"] as const;
+type ExtraBroker = typeof EXTRA_BROKERS[number];
+const EXTRA_BROKER_LABELS: Record<ExtraBroker, string> = {
+  zerodha: "Zerodha",
+  kotak: "Kotak",
+};
+type BrokerResult = { success: boolean; error?: string };
+type AutologinResponse = { enterDashboard: boolean; dhan?: BrokerResult; zerodha?: BrokerResult; kotak?: BrokerResult };
+
+type FieldStatus = { set: boolean; masked?: string; value?: string };
+type AuthConfig = {
+  dhan: Record<string, FieldStatus>;
+  zerodha: Record<string, FieldStatus>;
+  kotak?: Record<string, FieldStatus>;
+  /** True when the response actually carries plaintext values. */
+  revealed?: boolean;
+  /** False when there is no dashboard session, so reveal was refused. */
+  canReveal?: boolean;
+};
 
 const DHAN_FIELD_LABELS: Record<string, string> = {
   client_id: "Client ID",
@@ -37,16 +55,47 @@ const ZERODHA_FIELD_LABELS: Record<string, string> = {
   ZERODHA_TOTP_KEY: "TOTP Key",
 };
 
+const KOTAK_FIELD_LABELS: Record<string, string> = {
+  KOTAK_UCC: "UCC",
+  KOTAK_MOBILE_NUMBER: "Mobile",
+  KOTAK_CONSUMER_KEY: "Consumer Key",
+  KOTAK_MPIN: "MPIN",
+  KOTAK_TOTP_SECRET: "TOTP Secret",
+};
+
 // ─── Settings panel ─────────────────────────────────────────────────────────
 
 function ConfigRow({ label, status }: { label: string; status: FieldStatus }) {
+  const [copied, setCopied] = useState(false);
+
+  async function copy() {
+    if (!status.value) return;
+    try {
+      await navigator.clipboard.writeText(status.value);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1200);
+    } catch {
+      /* clipboard blocked (non-HTTPS origin, or denied) — the value is on
+         screen anyway, so this is not worth surfacing as an error */
+    }
+  }
+
   return (
-    <div className="flex items-center justify-between py-1.5 border-b border-zinc-800/60 last:border-0">
-      <span className="text-sm text-zinc-400">{label}</span>
-      {status.set ? (
-        <span className="font-mono text-xs text-zinc-300">{status.masked ?? "●●●●●● (set)"}</span>
-      ) : (
+    <div className="flex items-center justify-between gap-3 py-1.5 border-b border-zinc-800/60 last:border-0">
+      <span className="text-sm text-zinc-400 shrink-0">{label}</span>
+      {!status.set ? (
         <span className="text-xs text-zinc-600">Not configured</span>
+      ) : status.value !== undefined ? (
+        <button
+          type="button"
+          onClick={copy}
+          title="Click to copy"
+          className="font-mono text-xs text-zinc-200 break-all text-right hover:text-sky-300 transition-colors cursor-pointer"
+        >
+          {copied ? "copied!" : status.value}
+        </button>
+      ) : (
+        <span className="font-mono text-xs text-zinc-300">{status.masked ?? "●●●●●● (set)"}</span>
       )}
     </div>
   );
@@ -56,12 +105,15 @@ function SettingsSheet({ open, onClose }: { open: boolean; onClose: () => void }
   const [config, setConfig] = useState<AuthConfig | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Always starts hidden, even across re-opens of the sheet: secrets should not
+  // reappear on screen just because they were shown once.
+  const [reveal, setReveal] = useState(false);
 
-  async function load() {
+  async function load(withValues: boolean) {
     setLoading(true);
     setError(null);
     try {
-      const res = await fetch("/api/auth/config");
+      const res = await fetch(`/api/auth/config${withValues ? "?reveal=1" : ""}`);
       const data = await res.json();
       if (!res.ok) throw new Error(data.error ?? "Failed to load configuration");
       setConfig(data);
@@ -73,9 +125,10 @@ function SettingsSheet({ open, onClose }: { open: boolean; onClose: () => void }
   }
 
   useEffect(() => {
-    if (open && !config && !loading) load();
+    if (open) load(reveal);
+    else setReveal(false);   // re-hide when the sheet closes
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open]);
+  }, [open, reveal]);
 
   return (
     <Sheet
@@ -87,8 +140,32 @@ function SettingsSheet({ open, onClose }: { open: boolean; onClose: () => void }
       <SheetContent side="right" className="w-[380px] max-w-[100vw] bg-zinc-950 border-l border-zinc-800">
         <SheetHeader>
           <SheetTitle className="text-white">Broker configuration</SheetTitle>
-          <SheetDescription>Read-only view of the values loaded from .env / .env.zerodha</SheetDescription>
+          <SheetDescription>Read-only view of the values loaded from .env / .env.zerodha / .env.kotak</SheetDescription>
         </SheetHeader>
+
+        <div className="px-4 pb-2">
+          <label className="flex cursor-pointer items-center gap-2 text-sm text-zinc-300">
+            <Checkbox
+              id="reveal-secrets"
+              checked={reveal}
+              onCheckedChange={(checked) => setReveal(Boolean(checked))}
+            />
+            Show values
+          </label>
+          {reveal && config?.canReveal === false && (
+            <p className="mt-1.5 text-xs text-amber-400">
+              Sign in first — values are only returned to an authenticated session.
+              This endpoint is reachable without a login, and the server listens on
+              your whole network, so it will not hand out passwords or TOTP seeds
+              to an unauthenticated request.
+            </p>
+          )}
+          {reveal && config?.revealed && (
+            <p className="mt-1.5 text-xs text-zinc-500">
+              Showing plaintext secrets — click any value to copy it.
+            </p>
+          )}
+        </div>
 
         <div className="px-4 pb-4 space-y-6 overflow-y-auto">
           {loading && (
@@ -112,6 +189,14 @@ function SettingsSheet({ open, onClose }: { open: boolean; onClose: () => void }
                   <ConfigRow key={key} label={ZERODHA_FIELD_LABELS[key] ?? key} status={status} />
                 ))}
               </div>
+              {config.kotak && (
+                <div>
+                  <p className="mb-1.5 text-xs font-semibold uppercase tracking-wide text-sky-400">Kotak</p>
+                  {Object.entries(config.kotak).map(([key, status]) => (
+                    <ConfigRow key={key} label={KOTAK_FIELD_LABELS[key] ?? key} status={status} />
+                  ))}
+                </div>
+              )}
             </>
           )}
         </div>
@@ -145,6 +230,11 @@ export default function LoginPage() {
 
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [target, setTarget] = useState<AccountTarget>("dhan");
+  // Which optional brokers "All Brokers" will actually log in. Both start on so
+  // the button keeps its previous one-click behaviour, but either can be
+  // dropped — useful when a broker's credentials are stale, or when you simply
+  // do not want to open a session on that account right now.
+  const [extras, setExtras] = useState<Record<ExtraBroker, boolean>>({ zerodha: true, kotak: true });
 
   const [autologinLoading, setAutologinLoading] = useState(false);
   const [autologinResult, setAutologinResult] = useState<AutologinResponse | null>(null);
@@ -164,7 +254,10 @@ export default function LoginPage() {
     setAutologinError(null);
     setAutologinResult(null);
     try {
-      const targets = target === "both" ? ["dhan", "zerodha"] : [target];
+      // Dhan is always included; "both" adds only the ticked extras.
+      const targets = target === "both"
+        ? ["dhan", ...EXTRA_BROKERS.filter(b => extras[b])]
+        : ["dhan"];
       const res = await fetch("/api/auth/autologin", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -181,8 +274,12 @@ export default function LoginPage() {
         router.refresh();
         return;
       }
-      if (data.zerodha?.success && !data.dhan) {
-        setAutologinError("Zerodha connected — Dhan login is still required to enter the dashboard.");
+      const connected = [
+        data.zerodha?.success ? "Zerodha" : null,
+        data.kotak?.success ? "Kotak" : null,
+      ].filter(Boolean);
+      if (connected.length && !data.dhan) {
+        setAutologinError(`${connected.join(" and ")} connected — Dhan login is still required to enter the dashboard.`);
       } else if (data.dhan && !data.dhan.success) {
         setAutologinError(data.dhan.error ?? "Dhan autologin failed.");
       } else {
@@ -301,13 +398,50 @@ export default function LoginPage() {
               className="w-full"
             >
               <ToggleGroupItem value="dhan" className="flex-1 aria-pressed:bg-emerald-500/15 aria-pressed:text-emerald-400">
-                Dhan
+                Dhan only
               </ToggleGroupItem>
               <ToggleGroupItem value="both" className="flex-1 aria-pressed:bg-sky-500/15 aria-pressed:text-sky-400">
                 All Brokers
               </ToggleGroupItem>
             </ToggleGroup>
           </div>
+
+          {/* Which extra brokers "All Brokers" actually signs in. Dhan is shown
+              as a fixed chip rather than a checkbox because it is not optional —
+              it is the account that grants the dashboard session. */}
+          {target === "both" && (
+            <div className="space-y-1.5">
+              <Label>Sign in to</Label>
+              <div className="flex flex-wrap items-center gap-x-4 gap-y-2 rounded-md border border-zinc-800 bg-zinc-900/40 px-3 py-2.5">
+                <span
+                  className="flex items-center gap-1.5 text-sm text-emerald-400"
+                  title="Dhan is the primary account and always signs in — it is what grants the dashboard session."
+                >
+                  <CheckCircle2 className="size-3.5" />
+                  Dhan
+                  <span className="text-xs text-zinc-500">(always)</span>
+                </span>
+
+                {EXTRA_BROKERS.map((b) => (
+                  <label key={b} className="flex cursor-pointer items-center gap-2 text-sm text-zinc-300">
+                    <Checkbox
+                      id={`extra-${b}`}
+                      checked={extras[b]}
+                      onCheckedChange={(checked) =>
+                        setExtras((prev) => ({ ...prev, [b]: Boolean(checked) }))
+                      }
+                    />
+                    {EXTRA_BROKER_LABELS[b]}
+                  </label>
+                ))}
+              </div>
+              {!EXTRA_BROKERS.some((b) => extras[b]) && (
+                <p className="text-xs text-zinc-500">
+                  No extra brokers selected — this will sign in to Dhan only.
+                </p>
+              )}
+            </div>
+          )}
 
           <Button
             type="button"
@@ -330,6 +464,7 @@ export default function LoginPage() {
             <div className="flex flex-col gap-1 pt-1">
               <BrokerChip name="Dhan" result={autologinResult.dhan} />
               <BrokerChip name="Zerodha" result={autologinResult.zerodha} />
+              <BrokerChip name="Kotak" result={autologinResult.kotak} />
             </div>
           )}
 

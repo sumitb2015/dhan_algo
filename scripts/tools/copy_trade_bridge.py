@@ -1,11 +1,16 @@
 """
-Trade replication bridge: Dhan (parent) -> Zerodha (child accounts).
+Trade replication bridge: Dhan (parent) -> Zerodha and/or Kotak (child accounts).
 
 Listens to Dhan's real-time order-update WebSocket (via
 DhanHelper.start_order_update_websocket) and, for every TRADED or
 PART_TRADED fill, mirrors the newly-traded delta to each enabled child
 account in debug/copy_trade_config.json at quantity = delta * multiplier,
-always as a MARKET order (sliced to the NFO freeze quantity).
+always as a MARKET order (sliced to that broker's freeze quantity).
+
+Each child broker is a ChildBroker from scripts/tools/child_brokers.py, which
+owns that broker's client, instrument cache, margin state and position
+snapshot. Everything below is broker-agnostic: this module decides WHAT to
+replicate and WHEN to give up, the broker decides HOW to talk to its API.
 
 The WS is the primary, low-latency path but is NOT trusted alone: Dhan's
 order-update WS has been observed (2026-07-22) to silently die — server
@@ -33,17 +38,20 @@ Safety mechanisms:
     tell a live bridge from a dead/hung one (the API route marks a stale
     heartbeat as STALE).
   - Watchdog: if the parent's NIFTY option book is flat on two consecutive
-    checks while the child still holds cached-NIFTY-option positions,
-    force-close those child positions — scoped to the replication universe
-    so unrelated Zerodha positions are never touched, with per-symbol
-    attempt caps + backoff and a market-hours gate.
+    checks while a child still holds cached-NIFTY-option positions,
+    force-close those child positions — scoped per broker to that broker's
+    own replication universe so unrelated positions are never touched, with
+    per-symbol attempt caps + backoff and a market-hours gate.
   - Startup baseline: fills that happened while the bridge was down are
     NOT auto-replicated (placing catch-up market orders on a restart is
     riskier than surfacing the gap) — they are marked handled and logged
     loudly as 'baseline_skipped' for manual reconciliation.
 
 NIFTY options only (matches the rest of the scalper/live-quotes scope).
-One-directional: Dhan -> Zerodha. No reverse replication.
+One-directional: Dhan -> children. No reverse replication.
+
+The startup OTM hedge (copy_trade_hedge.py) is Zerodha-only by design and is
+skipped entirely when Zerodha is not among the configured children.
 
 Usage:
     venv\\Scripts\\python.exe scripts/tools/copy_trade_bridge.py
@@ -68,11 +76,16 @@ sys.path.insert(0, ROOT)
 os.chdir(ROOT)
 
 # Safe to import eagerly despite the deferred-import discipline below: this
-# module imports nothing but `typing` (no pandas/DhanHelper), so it does not
-# widen the double-spawn window the singleton mutex exists to close.
-from lib.zerodha.margin import (  # noqa: E402
-    get_margin_snapshot, get_required_margin, build_order_param,
+# module imports only stdlib at module scope (no pandas/DhanHelper/broker SDKs —
+# those are all deferred inside the ChildBroker methods), so it does not widen
+# the double-spawn window the singleton mutex exists to close.
+from scripts.tools.child_brokers import (  # noqa: E402
+    MARGIN_BLOCKED, create_broker, find_option_symbol,
 )
+
+# copy_trade_reconcile.py imports this name from here — keep it exported so the
+# reconcile tool and the bridge can never diverge on how a symbol is resolved.
+find_zerodha_symbol = find_option_symbol
 
 DEBUG_DIR        = os.path.join(ROOT, 'debug')
 CONFIG_FILE      = os.path.join(DEBUG_DIR, 'copy_trade_config.json')
@@ -125,8 +138,10 @@ RETRY_DRAIN_INTERVAL_SEC = 2
 # backstop and this stops the situation arising in the first place.
 KEEPALIVE_INTERVAL_SEC = 30
 
-FREEZE_QTY = 1800  # NFO NIFTY options freeze quantity — market orders above this are rejected
-INSTRUMENTS_REFRESH_MIN_INTERVAL_SEC = 600
+# NFO NIFTY options freeze quantity, used by the Zerodha-only startup hedge.
+# Per-order slicing itself is the broker's own freeze_qty (Kotak publishes 1801
+# in its master), so this constant is no longer the replication path's authority.
+FREEZE_QTY = 1800
 RAW_EVENTS_MAX = 20
 
 # REST-polling backup for the order-update WS: Dhan's WS has been observed to
@@ -140,54 +155,21 @@ _log_lock = threading.Lock()
 _replicated_lock = threading.Lock()
 _retry_lock = threading.Lock()
 _fill_lock = threading.Lock()  # serializes handle_update() across the WS thread and the poll fallback
-_positions_lock = threading.Lock()  # guards _margin_state['positions'] RMW vs wholesale rebind
 
-# Margin gate state, refreshed on the watchdog thread and read by the WS callback
-# thread. The SCALAR fields need no lock: each is replaced by a single
-# assignment, so a reader sees either the old or the new value, never a torn one.
-#
-# 'positions' is the exception and needs `_positions_lock`, because it is
-# read-modify-written by note_position_delta (WS thread) while the watchdog
-# rebinds it wholesale. Unsynchronised, a delta applied between the watchdog's
-# read and its assignment lands on the discarded dict and is lost — and a lost
-# delta means a just-opened position looks flat, so the exit that follows is
-# classified as an entry and can be margin-blocked. Small window, but it is the
-# dangerous direction, and it is the same failure the reducing-order rule exists
-# to prevent.
-#
-# `available` is None until the first successful kite.margins() call, and goes
-# back to None whenever one fails. The gate treats None as "unknown" and FAILS
-# OPEN — a blocked entry is itself a desync, so refusing to replicate on the
-# basis of a margin figure we could not fetch would trade one failure mode for
-# a worse one.
-_margin_state = {
-    'available': None,      # kite.margins()['net']
-    'cash': None,           # available.live_balance — what hedge premium can use
-    'per_lot': None,        # measured margin for a 1-lot short, for the fast path
-    'lot_size': 65,
-    'updated_ts': 0.0,
-    'error': None,
-    'blocked_count': 0,
-    # Cached child positions {tradingsymbol: signed qty} + when they were read.
-    # Exists so the WS callback thread can tell an EXIT from an ENTRY without an
-    # HTTP call. Without it the fast path cannot apply the never-gate-an-exit
-    # rule at all, and a parent exit arriving while the account is near full
-    # utilisation gets refused — stranding a naked child position, which is
-    # strictly worse than the margin rejection the gate exists to avoid.
-    'positions': None,
-    'positions_ts': 0.0,
-}
+# Margin-gate state now lives per broker, on the ChildBroker instance
+# (scripts/tools/child_brokers.py), along with the position snapshot and its
+# lock. All the safety rules moved with it: reducing orders are never gated,
+# unknown margin fails OPEN, and a stale position snapshot fails OPEN.
 
 # How often the watchdog re-measures the representative per-lot margin. Much
 # slower than the funds refresh because it costs a basket_order_margins call and
 # the figure only moves with volatility, not with each fill.
 PER_LOT_REFRESH_INTERVAL_SEC = 300
 
-# Child position snapshot cadence, and the age past which the fast path stops
-# trusting it. Beyond POSITIONS_MAX_AGE_SEC the gate fails OPEN rather than risk
-# mistaking an exit for an entry.
+# Child position snapshot cadence. The age past which the fast path stops
+# trusting the snapshot (and fails OPEN) is the broker's own
+# child_brokers.POSITIONS_MAX_AGE_SEC.
 POSITIONS_REFRESH_INTERVAL_SEC = 5
-POSITIONS_MAX_AGE_SEC = 20
 
 # If hedge_on_startup + armed are both set but the bridge starts before the
 # exchange opens, a live BUY attempt right away would be rejected outright —
@@ -199,33 +181,6 @@ POSITIONS_MAX_AGE_SEC = 20
 # forever — it gives up loudly instead.
 HEDGE_RETRY_BACKOFF_SEC = 60
 HEDGE_RETRY_MAX_ATTEMPTS = 5
-
-
-def note_position_delta(symbol: str, side: str, qty: int):
-    """Optimistically fold a just-placed order into the cached position map.
-
-    Only ever makes the bridge MORE aware of exposure it holds, so its only
-    possible effect on check_margin is to classify a follow-up order as reducing
-    and skip the gate. It can never manufacture a false block — which is why it
-    is safe to apply before the fill is confirmed, and why an order that is later
-    rejected leaves the cache merely pessimistic rather than dangerous.
-
-    The next snapshot refresh replaces this with broker truth.
-    """
-    signed = int(qty) if str(side).upper() == 'BUY' else -int(qty)
-    with _positions_lock:
-        pos = _margin_state.get('positions')
-        if pos is None:
-            return
-        pos[symbol] = pos.get(symbol, 0) + signed
-
-
-def set_position_snapshot(positions: dict):
-    """Replace the cached position map with broker truth, under the lock so a
-    concurrent note_position_delta cannot be silently dropped."""
-    with _positions_lock:
-        _margin_state['positions'] = positions
-        _margin_state['positions_ts'] = time.time()
 
 
 _singleton_handle = None  # kept referenced for the process lifetime; see below
@@ -353,43 +308,70 @@ def load_replicated() -> dict:
     return {}
 
 
-def load_replicated_symbols() -> set:
-    """Per-day set of Zerodha symbols the bridge has actually placed (or
-    attempted) orders in — the watchdog's close scope. Persisted here rather
-    than derived from the activity log, which is capped at MAX_LOG_ENTRIES and
-    can scroll a morning's symbol out of scope on a busy day."""
+def _load_symbols_by_broker() -> dict:
+    """{broker: set(symbols)} for today, from disk. Empty on a new day."""
     data = read_json(REPLICATED_FILE, {})
     if not isinstance(data, dict) or data.get('date') != datetime.now().strftime('%Y-%m-%d'):
-        return set()
+        return {}
+    by_broker = data.get('symbols_by_broker')
+    if isinstance(by_broker, dict):
+        return {k: set(v) for k, v in by_broker.items() if isinstance(v, list)}
+    # Pre-multi-broker file: the flat 'symbols' list was Zerodha's scope.
     syms = data.get('symbols', [])
-    return set(syms) if isinstance(syms, list) else set()
+    return {'zerodha': set(syms)} if isinstance(syms, list) and syms else {}
 
 
-def save_replicated(replicated: dict, symbols=None):
+def load_replicated_symbols(broker: str = 'zerodha') -> set:
+    """Per-day set of symbols the bridge has actually placed (or attempted)
+    orders in for one broker — that broker's watchdog close scope. Persisted
+    here rather than derived from the activity log, which is capped at
+    MAX_LOG_ENTRIES and can scroll a morning's symbol out of scope on a busy day.
+
+    Defaults to Zerodha so copy_trade_reconcile.py (Zerodha-only) keeps working
+    against the same scope the bridge uses.
+    """
+    return _load_symbols_by_broker().get(broker, set())
+
+
+def _write_replicated(orders: dict, by_broker: dict):
+    """Persist both halves together. The flat 'symbols' key is still written
+    with Zerodha's scope so an older reader (or a rolled-back build) sees the
+    same thing it always did."""
+    atomic_write(REPLICATED_FILE, {
+        'date': datetime.now().strftime('%Y-%m-%d'),
+        'orders': orders,
+        'symbols': sorted(by_broker.get('zerodha', set())),
+        'symbols_by_broker': {k: sorted(v) for k, v in by_broker.items()},
+    })
+
+
+def save_replicated(replicated: dict, symbols_by_broker=None):
     with _replicated_lock:
-        if symbols is None:
-            symbols = load_replicated_symbols()  # preserve what's on disk
-        atomic_write(REPLICATED_FILE, {
-            'date': datetime.now().strftime('%Y-%m-%d'),
-            'orders': replicated,
-            'symbols': sorted(symbols),
-        })
+        if symbols_by_broker is None:
+            symbols_by_broker = _load_symbols_by_broker()  # preserve what's on disk
+        _write_replicated(replicated, symbols_by_broker)
 
 
-def note_replicated_symbol(sym: str, symbols_set: set):
-    """Add a symbol to the watchdog's close scope and persist immediately —
-    BEFORE the child order is placed, so a crash mid-place still leaves the
-    orphan covered after restart."""
-    if not sym or sym in symbols_set:
+def note_replicated_symbol(broker: str, sym: str, scopes: dict):
+    """Add a symbol to that broker's watchdog close scope and persist
+    immediately — BEFORE the child order is placed, so a crash mid-place still
+    leaves the orphan covered after restart.
+
+    `scopes` is the in-memory {broker: set} map, mutated in place.
+    """
+    if not sym:
         return
-    symbols_set.add(sym)
+    scope = scopes.setdefault(broker, set())
+    if sym in scope:
+        return
+    scope.add(sym)
     with _replicated_lock:
         data = read_json(REPLICATED_FILE, {})
         today = datetime.now().strftime('%Y-%m-%d')
         orders = {}
         if isinstance(data, dict) and data.get('date') == today and isinstance(data.get('orders'), dict):
             orders = data['orders']
-        atomic_write(REPLICATED_FILE, {'date': today, 'orders': orders, 'symbols': sorted(symbols_set)})
+        _write_replicated(orders, scopes)
 
 
 def append_log(entry: dict):
@@ -463,252 +445,6 @@ def normalize_opt_type(raw):
         return 'CE'
     if o in ('PE', 'PUT', 'P'):
         return 'PE'
-    return None
-
-
-def find_zerodha_symbol(instruments: list, strike, expiry: str, opt_type: str):
-    try:
-        strike_f = float(strike)
-    except (TypeError, ValueError):
-        return None
-    for inst in instruments:
-        if (inst.get('expiry') == expiry
-                and inst.get('instrument_type') == opt_type
-                and float(inst.get('strike', -1)) == strike_f):
-            return inst.get('tradingsymbol')
-    return None
-
-
-def map_product_to_zerodha(kite, *hints):
-    """Map a Dhan order's product to the equivalent Zerodha product, trying
-    each hint in order and using the first one that is recognized.
-
-    Multiple hints are required because the two fill sources disagree on field
-    names. Verified against the real WS payloads captured in
-    debug/copy_trade_raw_events.json (2026-07-21): the order-update WS carries
-    NO 'productType' key at all — it sends 'productName' ('INTRADAY' / 'MARGIN'
-    / 'CNC') plus a single-letter 'product' ('I' / 'M' / 'C'). Only the REST
-    order list (the poll fallback) sends 'productType'. Reading just
-    'productType' therefore silently mapped EVERY WS-delivered fill to MIS.
-
-    That is not cosmetic. Replicating a MARGIN/NRML parent as MIS means Zerodha
-    auto-squares the child off at ~15:20 while the parent still holds, and MIS
-    orders are rejected outright after 15:26 — which is precisely how the
-    2026-07-23 'retry_exhausted' entries left two open Zerodha legs behind
-    ("Intraday orders (MIS) are allowed only till 3.26 PM").
-
-    CNC maps to NRML rather than kite.PRODUCT_CNC: this bridge only ever places
-    NFO option orders, where CNC is not a valid product. Unrecognized/missing
-    values fall back to MIS, matching the previous behavior.
-    """
-    for hint in hints:
-        h = str(hint or '').strip().upper()
-        if h in ('MARGIN', 'NRML', 'M'):
-            return kite.PRODUCT_NRML
-        if h in ('CNC', 'C'):
-            return kite.PRODUCT_NRML
-        if h in ('INTRADAY', 'MIS', 'I'):
-            return kite.PRODUCT_MIS
-    return kite.PRODUCT_MIS
-
-
-MARGIN_BLOCKED = 'MARGIN_BLOCKED'
-
-
-def check_margin(kite, symbol: str, side: str, qty: int, product, exact: bool = False):
-    """Can the child afford this order? Returns (ok, detail_dict).
-
-    Two safety rules are baked in, and both matter more than the check itself:
-
-    1. **Exposure-reducing orders are never blocked.** Refusing an exit strands a
-       naked position, which is far worse than any margin rejection, and closing
-       a position releases margin rather than consuming it. Side alone cannot
-       tell an exit from an entry (a SELL opens a short when flat but closes a
-       long when long), so the child's current holding decides.
-    2. **Unknown margin state fails OPEN.** A blocked entry is itself a
-       parent/child desync, so we never block on a figure we could not fetch.
-
-    `exact=False` (the WS callback thread) uses only cached scalars — no HTTP, so
-    event delivery is never stalled. `exact=True` (the watchdog thread, where
-    find_recent_matching_order already blocks) prices the real basket.
-    """
-    from lib.zerodha.margin import (
-        get_required_margin, build_order_param, is_reducing, held_qty_for,
-    )
-    detail = {'mode': 'exact' if exact else 'cached'}
-
-    # Rule 1 — reducing orders bypass the gate entirely, on BOTH paths.
-    #
-    # The exact path (watchdog thread) can afford to ask the broker. The fast path
-    # (WS callback thread) must not block, so it uses the cached snapshot the
-    # watchdog maintains — and if that snapshot is missing or too old to trust, it
-    # FAILS OPEN rather than risk mistaking a parent's exit for a new entry.
-    # Getting this wrong strands a naked child position, so every uncertain branch
-    # here deliberately allows the order through.
-    if exact:
-        try:
-            held = held_qty_for(kite.positions().get('net', []), symbol)
-        except Exception as e:
-            detail['error'] = f'position fetch failed: {e}'
-            detail['failed_open'] = True
-            return True, detail
-    else:
-        positions = _margin_state.get('positions')
-        age = time.time() - (_margin_state.get('positions_ts') or 0.0)
-        if positions is None or age > POSITIONS_MAX_AGE_SEC:
-            detail['error'] = (f'position snapshot {"missing" if positions is None else f"stale ({age:.0f}s)"}'
-                              ' — cannot prove this is not an exit')
-            detail['failed_open'] = True
-            return True, detail
-        held = int(positions.get(symbol, 0))
-        detail['positions_age_sec'] = round(age, 1)
-    detail['held_qty'] = held
-    if is_reducing(held, side, qty):
-        detail['skipped'] = 'reducing existing exposure — not gated'
-        return True, detail
-
-    available = _margin_state['available']
-    if available is None:
-        detail['error'] = _margin_state.get('error') or 'margin state not yet populated'
-        detail['failed_open'] = True
-        return True, detail
-    detail['available'] = round(available, 2)
-
-    if exact:
-        required, err = get_required_margin(
-            kite, [build_order_param(symbol, side, qty, product)], consider_positions=True)
-        if err:
-            detail['error'] = f'basket margin failed: {err}'
-            detail['failed_open'] = True
-            return True, detail
-    else:
-        per_lot = _margin_state['per_lot']
-        if per_lot is None:
-            detail['error'] = 'per-lot margin not yet measured'
-            detail['failed_open'] = True
-            return True, detail
-        lot_size = _margin_state.get('lot_size') or 65
-        # Deliberately a ceiling: a part-lot quantity still reserves a whole
-        # lot's worth of risk, and rounding down here would wave through the
-        # order that tips the account over.
-        lots = max(1, math.ceil(qty / lot_size))
-        required = per_lot * lots
-        detail['per_lot'] = round(per_lot, 2)
-        detail['lots'] = lots
-
-    detail['required'] = round(required, 2)
-    if required <= available:
-        return True, detail
-    detail['shortfall'] = round(required - available, 2)
-    return False, detail
-
-
-def place_child_order(kite, symbol: str, side: str, qty: int, product=None,
-                      margin_check: bool = False, exact_margin: bool = False,
-                      detail_out: dict = None):
-    """Place a MARKET order sliced to the freeze quantity.
-
-    `product` is the Zerodha product constant (e.g. kite.PRODUCT_MIS /
-    kite.PRODUCT_NRML) to mirror the parent order's actual product type;
-    defaults to MIS if not supplied.
-
-    With `margin_check=True`, an unaffordable order is refused before anything is
-    placed and the error is the MARGIN_BLOCKED sentinel. Callers must NOT queue
-    that for retry: re-attempting an order the account cannot fund just burns the
-    retry budget and floods the log, which is exactly what happened on
-    2026-07-27/28 when three attempts each failed on "Insufficient funds".
-
-    Returns (placed_qty, order_ids, error) — never raises. On a mid-slice
-    failure, placed_qty reflects what actually went through so the caller can
-    queue exactly the remainder for retry (re-placing the full qty would
-    duplicate the successful slices)."""
-    if product is None:
-        product = kite.PRODUCT_MIS
-    if margin_check:
-        ok, detail = check_margin(kite, symbol, side, qty, product, exact=exact_margin)
-        # Report via a caller-supplied dict, not shared state: the WS thread and
-        # the watchdog thread can both be in here at once, and a shared
-        # "last block" slot lets one thread's numbers end up in the other's log
-        # entry.
-        if detail_out is not None:
-            detail_out.clear()
-            detail_out.update(detail)
-        if not ok:
-            _margin_state['blocked_count'] += 1
-            print(f'[copy_trade_bridge] MARGIN BLOCKED ({detail.get("mode")}) {side} {qty} {symbol}: '
-                  f'needs Rs {detail.get("required", 0):,.2f}, have Rs {detail.get("available", 0):,.2f} '
-                  f'(short Rs {detail.get("shortfall", 0):,.2f})', flush=True)
-            return 0, [], MARGIN_BLOCKED
-    order_ids = []
-    placed = 0
-    remaining = qty
-    while remaining > 0:
-        chunk = min(remaining, FREEZE_QTY)
-        try:
-            order_id = kite.place_order(
-                variety=kite.VARIETY_REGULAR,
-                exchange=kite.EXCHANGE_NFO,
-                tradingsymbol=symbol,
-                transaction_type=kite.TRANSACTION_TYPE_BUY if side == 'BUY' else kite.TRANSACTION_TYPE_SELL,
-                quantity=chunk,
-                product=product,
-                order_type=kite.ORDER_TYPE_MARKET,
-                validity=kite.VALIDITY_DAY,
-                # Zerodha rejects API market orders on options without market
-                # protection; -1 = automatic system-managed protection band.
-                market_protection=-1,
-            )
-            order_ids.append(order_id)
-            placed += chunk
-            remaining -= chunk
-            # Keep the cached position map current between snapshot refreshes so
-            # an exit arriving seconds after its entry is still recognised as
-            # reducing (and therefore never gated).
-            note_position_delta(symbol, side, chunk)
-        except Exception as e:
-            return placed, order_ids, str(e)
-    return placed, order_ids, None
-
-
-def find_recent_matching_order(kite, symbol: str, side: str, qty: int, since_ts):
-    """Best-effort dedup check before RE-trying a chunk whose previous
-    kite.place_order call raised (e.g. RemoteDisconnected) — the request may
-    have actually reached Zerodha even though the response was lost, and a
-    blind retry would then double the position. Kite Connect has no
-    client-supplied idempotency key, so this can only match on
-    symbol/side/qty/time, not guarantee identity — but it catches the common
-    "order placed, response dropped" case. Only called from the watchdog
-    thread (never the WS callback thread) since it's an extra blocking call.
-
-    Returns the matching order_id, or None (verify failed or no match — the
-    caller should fall through to a normal retry either way)."""
-    try:
-        orders = kite.orders()
-    except Exception:
-        return None
-    txn = kite.TRANSACTION_TYPE_BUY if side == 'BUY' else kite.TRANSACTION_TYPE_SELL
-    for o in orders or []:
-        if o.get('tradingsymbol') != symbol:
-            continue
-        if o.get('transaction_type') != txn:
-            continue
-        if int(o.get('quantity', 0) or 0) != qty:
-            continue
-        if str(o.get('status', '') or '').upper() in ('REJECTED', 'CANCELLED'):
-            continue
-        ts = o.get('order_timestamp')
-        if isinstance(ts, str):
-            try:
-                ts = datetime.fromisoformat(ts)
-            except ValueError:
-                ts = None
-        # Fail CLOSED: an unparseable/missing timestamp must NOT count as a
-        # match — misidentifying an unrelated older order as "already placed"
-        # would skip the real retry and leave the leg unreplicated, which is
-        # worse than the rare duplicate this check exists to prevent.
-        if ts is None or since_ts is None or ts < since_ts:
-            continue
-        return o.get('order_id')
     return None
 
 
@@ -818,40 +554,43 @@ def maybe_place_deferred_hedge(kite, helper, cfg: dict, hedge_ctx: dict, hedge_q
               f'manually: scripts/tools/copy_trade_hedge.py --live', flush=True)
 
 
-def watchdog_loop(helper, kite, stop_event: threading.Event, state: dict,
-                  retry_queue: list, get_nifty_symbols, resolve_symbol, replicated_symbols,
-                  hedge_qty=None, margin_probe_symbol=None, cfg_product='MIS', hedge_ctx=None):
+def watchdog_loop(helper, brokers: dict, stop_event: threading.Event, state: dict,
+                  retry_queue: list, replication_scopes: dict,
+                  hedge_qty=None, cfg_product='MIS', hedge_ctx=None, ensure_broker=None):
     """
     The bridge's single background thread. Everything that needs to make a
     blocking broker call on a timer lives here, deliberately on ONE thread: the
     retry drain must never run concurrently with itself (two drains could place
     the same queued order twice), and the WS callback thread must never block.
 
-    Five cadences, each gated by its own `last_*` timestamp, loosest last:
+    Five cadences, each gated by its own `last_*` timestamp, loosest last. Each
+    runs for EVERY live child broker:
 
     1. RETRY_DRAIN_INTERVAL_SEC (2s)  — drain the failed-replication retry queue
        (bounded attempts + backoff), including the exact margin re-check; also
        retries a startup hedge that was deferred until market open
-       (maybe_place_deferred_hedge).
-    2. POSITIONS_REFRESH_INTERVAL_SEC (5s) — refresh the child position snapshot
-       the fast-path margin gate uses to recognise exits.
+       (maybe_place_deferred_hedge), and lazily initialises a broker that was
+       enabled in the config after the bridge started.
+    2. POSITIONS_REFRESH_INTERVAL_SEC (5s) — refresh each child's position
+       snapshot, which the fast-path margin gate uses to recognise exits.
     3. WATCHDOG_INTERVAL_SEC (7s) — the safety exit: if armed and the parent's
        NIFTY option book has been flat for FLAT_CONFIRMATIONS consecutive checks
-       (and no replication landed within REPLICATION_GRACE_SEC), force-close the
-       child's replicated NIFTY-option positions — and ONLY those, with hedge
-       quantities netted out; manual/unrelated Zerodha positions are never
-       touched.
-    4. KEEPALIVE_INTERVAL_SEC (30s) — keep Kite's pooled socket warm, and capture
-       the funds figure the margin gate compares against.
+       (and no replication landed within REPLICATION_GRACE_SEC), force-close each
+       child's replicated NIFTY-option positions — and ONLY those, scoped per
+       broker, with hedge quantities netted out; manual/unrelated positions are
+       never touched.
+    4. KEEPALIVE_INTERVAL_SEC (30s) — keep the broker's pooled socket warm, and
+       capture the funds figure the margin gate compares against.
     5. PER_LOT_REFRESH_INTERVAL_SEC (300s) — re-measure the representative
        per-lot margin used by the fast-path gate.
 
     Deliberately conservative: if the Dhan positions call fails (as opposed
     to genuinely returning zero positions), helper.last_api_error will be
     set and this cycle is skipped rather than treated as "flat", to avoid
-    force-closing legitimate Zerodha positions on a transient API hiccup.
+    force-closing legitimate child positions on a transient API hiccup.
     """
-    safety_attempts = {}  # tradingsymbol -> {'n': attempts, 'next': earliest retry ts}
+    # {broker: {symbol: {'n': attempts, 'next': earliest retry ts}}}
+    safety_attempts = {}
     last_safety_check = 0.0
     last_keepalive = 0.0
     last_per_lot = 0.0
@@ -860,82 +599,54 @@ def watchdog_loop(helper, kite, stop_event: threading.Event, state: dict,
     hedge_ctx = hedge_ctx if hedge_ctx is not None else {'pending': False, 'report': {}}
     while not stop_event.wait(RETRY_DRAIN_INTERVAL_SEC):
         try:
-            # Keep Kite's pooled HTTPS socket warm so the next place_order does
-            # not inherit a connection Zerodha already closed — see
+            # Keep each broker's pooled HTTPS socket warm so the next place_order
+            # does not inherit a connection the broker already closed — see
             # KEEPALIVE_INTERVAL_SEC. Runs on this thread (never the WS callback
             # thread, which must not block) and independently of `armed`, so the
             # socket is already fresh for the day's first fill.
             #
             # The call doubles as the margin gate's funds refresh: it was already
-            # hitting /user/margins every 30s and discarding the response, so
+            # hitting the funds endpoint every 30s and discarding the response, so
             # capturing it costs nothing and keeps the WS-path gate free of HTTP.
             if time.time() - last_keepalive >= KEEPALIVE_INTERVAL_SEC:
                 last_keepalive = time.time()
-                snap, merr = get_margin_snapshot(kite)
-                if merr:
-                    # Drop to "unknown" rather than keeping a stale figure: the
-                    # gate fails open on None, which is the right call when we
-                    # cannot see the account. Stale numbers could block real
-                    # trades (or wave through unaffordable ones) for hours.
-                    _margin_state['available'] = None
-                    _margin_state['cash'] = None
-                    _margin_state['error'] = merr
-                else:
-                    _margin_state['available'] = snap['net']
-                    _margin_state['cash'] = snap['cash']
-                    _margin_state['error'] = None
-                    _margin_state['updated_ts'] = time.time()
+                for broker in brokers.values():
+                    broker.refresh_margin()
 
-            # Refresh the child position snapshot the fast-path gate relies on to
+            # Refresh the child position snapshots the fast-path gate relies on to
             # recognise exits. Cheap, and far more frequent than the per-lot probe
             # because a stale snapshot degrades the gate to fail-open.
             if time.time() - last_positions >= POSITIONS_REFRESH_INTERVAL_SEC:
                 last_positions = time.time()
-                try:
-                    snap_pos = {}
-                    for p in kite.positions().get('net', []):
-                        sym = p.get('tradingsymbol')
-                        if sym:
-                            snap_pos[sym] = int(p.get('quantity', 0) or 0)
-                    # Broker truth replaces the optimistic in-memory deltas.
-                    set_position_snapshot(snap_pos)
-                except Exception:
-                    # Leave the previous snapshot in place; check_margin ages it
-                    # out on its own and fails open once it is too old to trust.
-                    pass
+                for broker in brokers.values():
+                    broker.refresh_positions()
 
             # Re-measure the representative per-lot margin far less often — it
-            # costs a basket call and only drifts with volatility.
-            if (margin_probe_symbol
-                    and time.time() - last_per_lot >= PER_LOT_REFRESH_INTERVAL_SEC):
+            # costs a margin API call and only drifts with volatility.
+            if time.time() - last_per_lot >= PER_LOT_REFRESH_INTERVAL_SEC:
                 last_per_lot = time.time()
-                per_lot, perr = get_required_margin(
-                    kite,
-                    [build_order_param(margin_probe_symbol, 'SELL',
-                                       _margin_state.get('lot_size') or 65,
-                                       str(cfg_product))],
-                    # consider_positions=True on purpose: this must be the
-                    # MARGINAL cost of one more lot given what the account
-                    # already holds, which is exactly what Zerodha itself checks
-                    # at order time. The standalone rate ignores offsets from
-                    # existing hedges and would over-state the requirement,
-                    # false-blocking affordable orders — and a false block is
-                    # itself a parent/child desync.
-                    consider_positions=True,
-                )
-                if perr:
-                    _margin_state['error'] = f'per-lot probe failed: {perr}'
-                elif per_lot and per_lot > 0:
-                    _margin_state['per_lot'] = per_lot
+                for broker in brokers.values():
+                    broker.refresh_per_lot(cfg_product)
 
             cfg = load_config()
             armed = bool(cfg.get('armed'))
             children = [c for c in cfg.get('children', []) if c.get('enabled')]
 
+            # A broker enabled in the dashboard AFTER the bridge started would
+            # otherwise log broker_unavailable on every fill until a restart.
+            # Initialising it here (blocking is fine on this thread) closes that
+            # gap; ensure_broker caps its own retries.
+            if ensure_broker:
+                for child in children:
+                    ensure_broker(child.get('broker'))
+
             if armed and market_is_open():
-                drain_retry_queue(kite, retry_queue, state, resolve_symbol, replicated_symbols,
+                drain_retry_queue(brokers, retry_queue, state, replication_scopes,
                                   margin_check=bool(cfg.get('margin_check', True)))
-                maybe_place_deferred_hedge(kite, helper, cfg, hedge_ctx, hedge_qty, FREEZE_QTY)
+                zerodha = brokers.get('zerodha')
+                if zerodha is not None:
+                    maybe_place_deferred_hedge(zerodha.kite, helper, cfg, hedge_ctx,
+                                               hedge_qty, FREEZE_QTY)
 
             now_ts = time.time()
             if now_ts - last_safety_check < WATCHDOG_INTERVAL_SEC:
@@ -976,118 +687,149 @@ def watchdog_loop(helper, kite, stop_event: threading.Event, state: dict,
             if not market_is_open():
                 continue  # market orders would just be rejected in a loop
 
-            nifty_symbols = get_nifty_symbols()
-            positions = kite.positions()
-
-            # Scope closes to symbols the bridge itself traded today (the
-            # persisted per-day set — durable across restarts and immune to
-            # the activity log's 200-entry cap scrolling a symbol out).
-            #
-            # Hedges are long OTM options the bridge bought for margin headroom.
-            # They have no parent counterpart by design, so "parent is flat" is
-            # never evidence a hedge is orphaned, and force-closing one would
-            # destroy the margin relief mid-session just as the parent may be
-            # re-entering.
-            #
-            # They are NETTED OUT rather than skipped by symbol. The hedge sits
-            # only ~600 points OTM, so the parent rolling into that exact strike
-            # is realistic — and a symbol-level exclusion would then hide a
-            # genuinely orphaned short behind the hedge, defeating the watchdog on
-            # the one case it exists for. Subtracting the known hedge quantity
-            # leaves the residual: zero for a pure hedge (skip), still-short for a
-            # hedge sharing a strike with an orphan (close the residual, keeping
-            # the hedge intact).
-            open_positions = []
-            for p in positions.get('net', []):
-                sym = p.get('tradingsymbol')
-                if sym not in nifty_symbols or sym not in replicated_symbols:
-                    continue
-                try:
-                    net_qty = int(p.get('quantity', 0) or 0)
-                except (TypeError, ValueError):
-                    continue
-                residual = net_qty - int(hedge_qty.get(sym, 0))
-                if residual == 0:
-                    continue
-                open_positions.append({'pos': p, 'symbol': sym, 'residual': residual})
-            open_symbols = {e['symbol'] for e in open_positions}
-            for sym in list(safety_attempts):
-                if sym not in open_symbols:
-                    del safety_attempts[sym]  # closed (or fresh) — reset its attempt budget
-            if not open_positions:
-                continue  # child already flat too
-
+            # Each enabled child is checked against ITS OWN replication scope and
+            # instrument universe. A symbol is only ever closed on the broker
+            # that actually traded it — the two brokers use different trading
+            # symbols for the same contract, so a shared scope would both miss
+            # orphans and reach for positions it never opened.
             ts = datetime.now().isoformat()
             now_ts = time.time()
-            closed = 0
-            for item in open_positions:
-                pos, symbol, residual = item['pos'], item['symbol'], item['residual']
-                att = safety_attempts.get(symbol, {'n': 0, 'next': 0.0})
-                if att['n'] >= SAFETY_EXIT_MAX_ATTEMPTS:
-                    continue  # gave up on this symbol (already logged below)
-                if now_ts < att['next']:
+            for child in children:
+                bname = child.get('broker', 'zerodha')
+                broker = brokers.get(bname)
+                if broker is None:
+                    continue  # not initialised — handle_update already logs this loudly
+                attempts = safety_attempts.setdefault(bname, {})
+                scope = replication_scopes.get(bname, set())
+                universe = broker.symbols()
+
+                try:
+                    rows = broker.positions_rows()
+                except Exception as e:
+                    # Unknown, not flat. Closing on a failed read would be the
+                    # same mistake the Dhan-side last_api_error guard prevents.
+                    print(f'[copy_trade_bridge] Safety check skipped for {bname}: '
+                          f'positions unavailable ({e})', flush=True)
                     continue
 
-                # Close the residual, not the raw net — so a hedge sharing this
-                # strike survives while the orphaned leg is flattened.
-                qty = abs(residual)
-                side = 'SELL' if residual > 0 else 'BUY'
-                entry = {
-                    'ts': ts, 'order_no': f'watchdog-{symbol}', 'parent_symbol': '(parent flat)',
-                    'zerodha_symbol': symbol, 'side': side, 'child_qty': qty,
-                    'broker': 'zerodha', 'armed': True, 'attempt': att['n'] + 1,
-                }
-                try:
-                    order_id = kite.place_order(
-                        variety=kite.VARIETY_REGULAR,
-                        exchange=pos.get('exchange', 'NFO'),
-                        tradingsymbol=symbol,
-                        transaction_type=side,
-                        quantity=qty,
-                        product=pos.get('product', kite.PRODUCT_MIS),
-                        order_type=kite.ORDER_TYPE_MARKET,
-                        validity=kite.VALIDITY_DAY,
-                        market_protection=-1,
-                    )
-                    entry['result'] = 'safety_exit'
-                    entry['child_order_id'] = order_id
-                    closed += 1
-                    print(f'[copy_trade_bridge] SAFETY EXIT: parent flat, force-closed {symbol} '
-                          f'({side} {qty}) -> order {order_id}', flush=True)
-                except Exception as e:
-                    entry['result'] = 'safety_exit_error'
-                    entry['error'] = str(e)
-                    print(f'[copy_trade_bridge] ERROR in safety exit for {symbol}: {e}', flush=True)
-                append_log(entry)
+                # Scope closes to symbols the bridge itself traded today (the
+                # persisted per-day set — durable across restarts and immune to
+                # the activity log's 200-entry cap scrolling a symbol out).
+                #
+                # Hedges are long OTM options the bridge bought for margin
+                # headroom. They have no parent counterpart by design, so "parent
+                # is flat" is never evidence a hedge is orphaned, and
+                # force-closing one would destroy the margin relief mid-session
+                # just as the parent may be re-entering.
+                #
+                # They are NETTED OUT rather than skipped by symbol. The hedge
+                # sits only ~600 points OTM, so the parent rolling into that exact
+                # strike is realistic — and a symbol-level exclusion would then
+                # hide a genuinely orphaned short behind the hedge, defeating the
+                # watchdog on the one case it exists for. Subtracting the known
+                # hedge quantity leaves the residual: zero for a pure hedge
+                # (skip), still-short for a hedge sharing a strike with an orphan
+                # (close the residual, keeping the hedge intact).
+                #
+                # hedge_qty is Zerodha-only, so it nets out only there; on any
+                # other broker there are no hedges to confuse with orphans.
+                hedges = hedge_qty if bname == 'zerodha' else {}
+                open_positions = []
+                for row in rows:
+                    sym = row['symbol']
+                    if sym not in universe or sym not in scope:
+                        continue
+                    residual = row['qty'] - int(hedges.get(sym, 0))
+                    if residual == 0:
+                        continue
+                    open_positions.append({'row': row, 'symbol': sym, 'residual': residual})
 
-                # Placement != fill: if the order is rejected async the position
-                # survives to the next cycle — back off instead of spamming.
-                safety_attempts[symbol] = {'n': att['n'] + 1, 'next': now_ts + SAFETY_EXIT_BACKOFF_SEC}
-                if safety_attempts[symbol]['n'] >= SAFETY_EXIT_MAX_ATTEMPTS:
-                    append_log({'ts': ts, 'order_no': f'watchdog-{symbol}', 'zerodha_symbol': symbol,
-                                'result': 'safety_exit_gave_up',
-                                'error': f'{SAFETY_EXIT_MAX_ATTEMPTS} exit attempts failed to close — manual action needed'})
-                    state['failed_count'] += 1
+                open_symbols = {e['symbol'] for e in open_positions}
+                for sym in list(attempts):
+                    if sym not in open_symbols:
+                        del attempts[sym]  # closed (or fresh) — reset its attempt budget
+                if not open_positions:
+                    continue  # this child is already flat too
 
-            if closed:
-                print(f'[copy_trade_bridge] Safety watchdog: parent flat, force-closed {closed} '
-                      f'Zerodha position(s).', flush=True)
+                closed = 0
+                for item in open_positions:
+                    row, symbol, residual = item['row'], item['symbol'], item['residual']
+                    att = attempts.get(symbol, {'n': 0, 'next': 0.0})
+                    if att['n'] >= SAFETY_EXIT_MAX_ATTEMPTS:
+                        continue  # gave up on this symbol (already logged below)
+                    if now_ts < att['next']:
+                        continue
+
+                    # Close the residual, not the raw net — so a hedge sharing this
+                    # strike survives while the orphaned leg is flattened.
+                    qty = abs(residual)
+                    side = 'SELL' if residual > 0 else 'BUY'
+                    entry = {
+                        'ts': ts, 'order_no': f'watchdog-{bname}-{symbol}',
+                        'parent_symbol': '(parent flat)',
+                        'child_symbol': symbol, 'zerodha_symbol': symbol,
+                        'side': side, 'child_qty': qty,
+                        'broker': bname, 'armed': True, 'attempt': att['n'] + 1,
+                    }
+                    try:
+                        order_id = broker.close_position(row, qty, side)
+                        entry['result'] = 'safety_exit'
+                        entry['child_order_id'] = order_id
+                        closed += 1
+                        print(f'[copy_trade_bridge] SAFETY EXIT ({bname}): parent flat, force-closed '
+                              f'{symbol} ({side} {qty}) -> order {order_id}', flush=True)
+                    except Exception as e:
+                        entry['result'] = 'safety_exit_error'
+                        entry['error'] = str(e)
+                        print(f'[copy_trade_bridge] ERROR in {bname} safety exit for {symbol}: {e}', flush=True)
+                    append_log(entry)
+
+                    # Placement != fill: if the order is rejected async the position
+                    # survives to the next cycle — back off instead of spamming.
+                    attempts[symbol] = {'n': att['n'] + 1, 'next': now_ts + SAFETY_EXIT_BACKOFF_SEC}
+                    if attempts[symbol]['n'] >= SAFETY_EXIT_MAX_ATTEMPTS:
+                        append_log({'ts': ts, 'order_no': f'watchdog-{bname}-{symbol}',
+                                    'child_symbol': symbol, 'zerodha_symbol': symbol, 'broker': bname,
+                                    'result': 'safety_exit_gave_up',
+                                    'error': f'{SAFETY_EXIT_MAX_ATTEMPTS} exit attempts failed to close — manual action needed'})
+                        state['failed_count'] += 1
+
+                if closed:
+                    print(f'[copy_trade_bridge] Safety watchdog: parent flat, force-closed {closed} '
+                          f'{bname} position(s).', flush=True)
 
         except Exception as e:
             print(f'[copy_trade_bridge] ERROR in watchdog_loop: {e}', flush=True)
 
 
-def drain_retry_queue(kite, retry_queue: list, state: dict, resolve_symbol=None,
-                      replicated_symbols=None, margin_check: bool = False):
+def drain_retry_queue(brokers: dict, retry_queue: list, state: dict,
+                      replication_scopes: dict = None, margin_check: bool = False):
     now = time.time()
     with _retry_lock:
         due = [r for r in retry_queue if now >= r['next_ts']]
     for item in due:
+        bname = item.get('broker', 'zerodha')
+        broker = brokers.get(bname)
+        if broker is None:
+            # The broker died (or was never initialised) after this item was
+            # queued. Drop it loudly rather than spinning: nothing here can place
+            # the order, and a silent queue entry would look like it was handled.
+            with _retry_lock:
+                if item in retry_queue:
+                    retry_queue.remove(item)
+            state['failed_count'] += 1
+            append_log({'ts': datetime.now().isoformat(), 'order_no': item['order_no'],
+                        'broker': bname, 'side': item['side'], 'qty': item['qty'],
+                        'result': 'retry_exhausted',
+                        'error': f'{bname} child is not available — NOT replicated, '
+                                 f'parent/child DESYNCED, reconcile manually'})
+            continue
+
         # Items enqueued with an unresolved symbol (strike not in the cache at
-        # fill time — e.g. one NSE added intraday) are resolved here, where a
-        # blocking cache refresh is safe; never in the WS callback thread.
-        if not item.get('zerodha_symbol'):
-            sym = resolve_symbol(item.get('strike'), item.get('expiry'), item.get('opt_type')) if resolve_symbol else None
+        # fill time — e.g. one the exchange added intraday) are resolved here,
+        # where a blocking cache refresh is safe; never in the WS callback thread.
+        if not item.get('child_symbol'):
+            sym = broker.resolve_symbol(item.get('strike'), item.get('expiry'), item.get('opt_type'))
             if sym is None:
                 item['attempts'] += 1
                 item['next_ts'] = time.time() + RETRY_BACKOFF_SEC * item['attempts']
@@ -1097,18 +839,26 @@ def drain_retry_queue(kite, retry_queue: list, state: dict, resolve_symbol=None,
                             retry_queue.remove(item)
                     state['failed_count'] += 1
                     append_log({'ts': datetime.now().isoformat(), 'order_no': item['order_no'],
-                                'side': item['side'], 'qty': item['qty'], 'result': 'retry_exhausted',
+                                'broker': bname, 'side': item['side'], 'qty': item['qty'],
+                                'result': 'retry_exhausted',
                                 'error': 'Instrument never resolved to a cached NIFTY option — NOT replicated'})
                 continue
-            item['zerodha_symbol'] = sym
+            item['child_symbol'] = sym
+            # The product was mapped for whichever broker the fill was first
+            # routed to; re-map it here now that the real target is known.
+            item['product'] = broker.map_product(*item.get('product_hints', ()))
 
-        if replicated_symbols is not None:
-            note_replicated_symbol(item['zerodha_symbol'], replicated_symbols)
+        if replication_scopes is not None:
+            note_replicated_symbol(bname, item['child_symbol'], replication_scopes)
 
         entry = {
             'ts': datetime.now().isoformat(), 'order_no': item['order_no'],
-            'zerodha_symbol': item['zerodha_symbol'], 'side': item['side'],
-            'child_qty': item['qty'], 'broker': 'zerodha', 'armed': True,
+            'child_symbol': item['child_symbol'],
+            # Kept for the dashboard's existing log rendering and
+            # copy_trade_reconcile.py, which both read `zerodha_symbol`.
+            'zerodha_symbol': item['child_symbol'],
+            'side': item['side'],
+            'child_qty': item['qty'], 'broker': bname, 'armed': True,
             'attempt': item['attempts'] + 1,
         }
 
@@ -1117,23 +867,51 @@ def drain_retry_queue(kite, retry_queue: list, state: dict, resolve_symbol=None,
         # didn't actually land before placing what could be a duplicate.
         dup_order_id = None
         if item.get('queued_at') is not None:
-            dup_order_id = find_recent_matching_order(
-                kite, item['zerodha_symbol'], item['side'], item['qty'], item['queued_at'])
+            dup_order_id = broker.find_recent_matching_order(
+                item['child_symbol'], item['side'], item['qty'], item['queued_at'])
 
         if dup_order_id is not None:
             placed, order_ids, err, verified_dup = item['qty'], [dup_order_id], None, True
         else:
-            # This thread already makes blocking Kite calls (find_recent_matching_order
-            # above), so the exact basket-priced check is affordable here.
-            placed, order_ids, err = place_child_order(
-                kite, item['zerodha_symbol'], item['side'], item['qty'],
-                product=item.get('product', kite.PRODUCT_MIS),
+            # This thread already makes blocking broker calls
+            # (find_recent_matching_order above), so the exact priced check is
+            # affordable here — on the brokers that can actually price a basket.
+            placed, order_ids, err = broker.place_child_order(
+                item['child_symbol'], item['side'], item['qty'],
+                product=item.get('product') or broker.default_product,
                 margin_check=margin_check, exact_margin=True,
                 detail_out=blk,
             )
             verified_dup = False
 
         if err == MARGIN_BLOCKED:
+            if not broker.supports_exact_margin:
+                # This broker cannot price a real basket, so the "exact" recheck
+                # was the same estimate the fast path used — and that estimate
+                # over-states a far-OTM leg. Treating it as final would desync
+                # the child over an arithmetic approximation, so keep retrying
+                # within the normal attempt budget instead.
+                item['attempts'] += 1
+                item['next_ts'] = time.time() + RETRY_BACKOFF_SEC * item['attempts']
+                entry['result'] = 'margin_blocked_estimate'
+                entry['required'] = blk.get('required')
+                entry['available'] = blk.get('available')
+                entry['shortfall'] = blk.get('shortfall')
+                entry['error'] = (f'{bname} margin estimate says short by {blk.get("shortfall")} '
+                                  f'(needs {blk.get("required")}, has {blk.get("available")}); '
+                                  f'{bname} has no basket-margin API so this is an estimate — retrying')
+                if item['attempts'] >= RETRY_MAX_ATTEMPTS:
+                    with _retry_lock:
+                        if item in retry_queue:
+                            retry_queue.remove(item)
+                    state['failed_count'] += 1
+                    entry['result'] = 'margin_blocked'
+                    entry['error'] = (f'Insufficient {bname} margin after {item["attempts"]} attempts: '
+                                      f'needs {blk.get("required")}, has {blk.get("available")} '
+                                      f'(short {blk.get("shortfall")}) — NOT replicated, '
+                                      f'parent/child DESYNCED, reconcile manually')
+                append_log(entry)
+                continue
             # Terminal: this was the EXACT basket price, not the cached estimate,
             # so there is nothing left to re-check. Drop rather than retry —
             # re-attempting an order the account cannot fund only burns the
@@ -1147,7 +925,7 @@ def drain_retry_queue(kite, retry_queue: list, state: dict, resolve_symbol=None,
             entry['required'] = blk.get('required')
             entry['available'] = blk.get('available')
             entry['shortfall'] = blk.get('shortfall')
-            entry['error'] = (f'Insufficient Zerodha margin: needs {blk.get("required")}, '
+            entry['error'] = (f'Insufficient {bname} margin: needs {blk.get("required")}, '
                               f'has {blk.get("available")} (short {blk.get("shortfall")}) — '
                               f'NOT replicated, parent/child DESYNCED, reconcile manually')
             append_log(entry)
@@ -1164,7 +942,8 @@ def drain_retry_queue(kite, retry_queue: list, state: dict, resolve_symbol=None,
                 if item in retry_queue:
                     retry_queue.remove(item)
             print(f'[copy_trade_bridge] Retry {"verified already placed" if verified_dup else "succeeded"} for '
-                  f'{item["order_no"]} ({item["side"]} {item["qty"]} {item["zerodha_symbol"]})', flush=True)
+                  f'{item["order_no"]} -> {bname} ({item["side"]} {item["qty"]} {item["child_symbol"]})',
+                  flush=True)
         else:
             item['qty'] -= placed  # never re-place slices that went through
             item['attempts'] += 1
@@ -1179,7 +958,7 @@ def drain_retry_queue(kite, retry_queue: list, state: dict, resolve_symbol=None,
                 entry['result'] = 'retry_exhausted'
                 entry['error'] = f'Gave up after {item["attempts"]} attempts: {err} — parent/child DESYNCED, reconcile manually'
                 state['failed_count'] += 1
-                print(f'[copy_trade_bridge] RETRY EXHAUSTED for {item["order_no"]}: {err}', flush=True)
+                print(f'[copy_trade_bridge] RETRY EXHAUSTED for {item["order_no"]} ({bname}): {err}', flush=True)
         append_log(entry)
 
 
@@ -1200,8 +979,6 @@ def main():
     # seconds, which was a wide-open double-spawn window.
     from login import get_dhan_client
     from lib.dhan_helper import DhanHelper
-    from scripts.tools.zerodha_instruments_cache import restore_session_from_json
-    from scripts.tools.live_options_ws_zerodha import load_zerodha_instruments_cache
 
     dhan = get_dhan_client()
     if not dhan:
@@ -1210,76 +987,73 @@ def main():
         sys.exit(1)
     helper = DhanHelper(dhan)
 
-    kite = restore_session_from_json()
-    if kite is None:
-        write_status('ERROR', started_at=started_at, detail='Zerodha auth failed — run zerodha_autologin.py')
-        print('[copy_trade_bridge] ERROR: Zerodha auth failed', flush=True)
-        sys.exit(1)
+    # ---- child brokers -------------------------------------------------
+    #
+    # Only ENABLED children are initialised. The scalper's ARM control writes a
+    # row for every known broker (disabled ones included, so their multiplier
+    # survives), so keying off "configured" would make the bridge attempt a
+    # Kotak login for users who never enable it — and then report a permanent
+    # "kotak child UNAVAILABLE" in the dashboard for a broker nobody asked for.
+    #
+    # Enabling one later does NOT need a restart: the watchdog's ensure_broker
+    # picks it up within a couple of seconds.
+    #
+    # With nothing enabled there is nothing to replicate, but the bridge still
+    # runs as a logger — fall back to whatever is configured so a disarmed dry
+    # run still shows what each child would have received.
+    startup_cfg = load_config()
+    _children = startup_cfg.get('children', [])
+    enabled = [str(c.get('broker', '')).lower() for c in _children
+               if c.get('broker') and c.get('enabled')]
+    configured = [str(c.get('broker', '')).lower() for c in _children if c.get('broker')]
+    wanted = list(dict.fromkeys(enabled or configured)) or ['zerodha']
 
-    # restore_session_from_json() only builds a KiteConnect object from the
-    # token file — it never calls Zerodha, so a token that expired overnight
-    # (Zerodha access tokens die daily around 06:00 IST, and this bridge is
-    # started every morning) yields a perfectly healthy-looking client. Without
-    # this probe the bridge reaches 'RUNNING', then fails EVERY replication with
-    # TokenException, burns all 3 retries per fill, and desyncs the whole
-    # session while the dashboard still shows a green heartbeat.
-    try:
-        profile = kite.profile()
-        print(f"[copy_trade_bridge] Zerodha session OK ({profile.get('user_id', '?')})", flush=True)
-    except Exception as e:
-        write_status('ERROR', started_at=started_at,
-                     detail=f'Zerodha token rejected ({e}) — run zerodha_autologin.py')
-        print(f'[copy_trade_bridge] ERROR: Zerodha token rejected: {e}', flush=True)
-        sys.exit(1)
+    brokers = {}
+    broker_failures = {}
 
-    try:
-        instruments = load_zerodha_instruments_cache()
-    except Exception as e:
-        write_status('ERROR', started_at=started_at, detail=f'Failed to load Zerodha instrument cache: {e}')
-        print(f'[copy_trade_bridge] ERROR: instrument cache load failed: {e}', flush=True)
-        sys.exit(1)
+    def ensure_broker(name) -> bool:
+        """Initialise a child broker on demand. Returns True if it is live.
 
-    instruments_state = {
-        'instruments': instruments,
-        'nifty_symbols': {i.get('tradingsymbol') for i in instruments},
-        'refreshed_at': time.time(),
-    }
-
-    def get_nifty_symbols():
-        return instruments_state['nifty_symbols']
-
-    def refresh_instruments():
-        """On a lookup miss (e.g. a strike NSE added intraday), regenerate the
-        cache once and reload — throttled so a genuinely-unsupported instrument
-        can't hammer the Kite API."""
-        if time.time() - instruments_state['refreshed_at'] < INSTRUMENTS_REFRESH_MIN_INTERVAL_SEC:
+        Called at startup and again from the watchdog thread whenever the config
+        names a broker we do not have. A broker that has already failed is not
+        retried — a second TOTP/token failure means operator action is needed,
+        and retrying on a timer would just bury the reason.
+        """
+        name = str(name or '').lower()
+        if not name:
             return False
-        instruments_state['refreshed_at'] = time.time()
+        if name in brokers:
+            return True
+        if name in broker_failures:
+            return False
         try:
-            import subprocess
-            subprocess.run(
-                [sys.executable, os.path.join(ROOT, 'scripts', 'tools', 'zerodha_instruments_cache.py')],
-                check=True, timeout=120,
-            )
-            fresh = load_zerodha_instruments_cache()
-            instruments_state['instruments'] = fresh
-            instruments_state['nifty_symbols'] = {i.get('tradingsymbol') for i in fresh}
-            print(f'[copy_trade_bridge] Instrument cache refreshed ({len(fresh)} contracts)', flush=True)
+            broker = create_broker(
+                name, log=lambda m: print(f'[copy_trade_bridge] {m}', flush=True))
+            ok, detail = broker.verify_session()
+            if not ok:
+                raise RuntimeError(detail)
+            print(f'[copy_trade_bridge] {detail}', flush=True)
+            broker.init_instruments()
+            brokers[name] = broker
+            print(f'[copy_trade_bridge] {name} child ready '
+                  f'({len(broker.instruments)} contracts, freeze qty {broker.freeze_qty})', flush=True)
             return True
         except Exception as e:
-            print(f'[copy_trade_bridge] Instrument cache refresh failed: {e}', flush=True)
+            broker_failures[name] = str(e)
+            print(f'[copy_trade_bridge] ERROR: {name} child unavailable: {e}', flush=True)
             return False
 
-    def resolve_symbol(strike, expiry, opt_type):
-        """Lookup with a one-shot (throttled) cache refresh on miss. Blocking —
-        only ever called from the watchdog thread, never the WS callback."""
-        sym = find_zerodha_symbol(instruments_state['instruments'], strike, expiry, opt_type)
-        if sym is None and refresh_instruments():
-            sym = find_zerodha_symbol(instruments_state['instruments'], strike, expiry, opt_type)
-        return sym
+    for name in wanted:
+        ensure_broker(name)
+
+    if not brokers:
+        detail = '; '.join(f'{k}: {v}' for k, v in broker_failures.items()) or 'no children configured'
+        write_status('ERROR', started_at=started_at, detail=f'No child broker available — {detail}')
+        print(f'[copy_trade_bridge] ERROR: no child broker available — {detail}', flush=True)
+        sys.exit(1)
 
     replicated_qty = load_replicated()
-    replicated_symbols = load_replicated_symbols()
+    replication_scopes = _load_symbols_by_broker()
     baseline_today_orders(helper, replicated_qty)
 
     state = {
@@ -1292,7 +1066,6 @@ def main():
     retry_queue = []
 
     # ---- margin gate + startup hedge bootstrap -------------------------
-    startup_cfg = load_config()
     # MIS by default — matches the parent's actual product on the NIFTY option
     # fills that get replicated (real captured payloads are 'INTRADAY', never
     # 'MARGIN'; see copy_trade_hedge.build_plan for the measurement). A hedge
@@ -1305,69 +1078,74 @@ def main():
                         # the watchdog thread starts (see maybe_place_deferred_hedge).
     hedge_ctx = {'pending': False, 'expiry': None, 'attempts': 0, 'next_ts': 0.0, 'report': {}}
 
-    # Nearest future expiry drives both the per-lot margin probe and the hedge.
+    # Nearest future expiry drives the hedge, which is Zerodha-only — so it is
+    # read from Zerodha when present, else from whichever child we do have.
     _today = datetime.now().strftime('%Y-%m-%d')
-    _expiries = sorted({i.get('expiry') for i in instruments if (i.get('expiry') or '') >= _today})
+    _expiry_source = brokers.get('zerodha') or next(iter(brokers.values()))
+    _expiries = _expiry_source.expiries(on_or_after=_today)
     near_expiry = _expiries[0] if _expiries else None
 
-    margin_probe_symbol = None
-    if near_expiry:
-        try:
-            spot_now = helper.get_ltp('NIFTY', instrument='INDEX')
-            atm_now = round(float(spot_now) / 50) * 50
-            margin_probe_symbol = find_zerodha_symbol(instruments, atm_now, near_expiry, 'CE')
-            _ls = next((int(i.get('lot_size') or 65) for i in instruments
-                        if i.get('tradingsymbol') == margin_probe_symbol), 65)
-            _margin_state['lot_size'] = _ls
-        except Exception as e:
-            print(f'[copy_trade_bridge] Could not pick a margin probe contract: {e}', flush=True)
-
-    # Seed the gate before any fill can arrive — otherwise the first fills of the
-    # day sail through on the fail-open path while waiting for the first
-    # keep-alive tick.
-    _snap, _serr = get_margin_snapshot(kite)
-    if _serr:
-        _margin_state['error'] = _serr
-        print(f'[copy_trade_bridge] WARNING: Zerodha margins unavailable at startup ({_serr}) — '
-              f'margin gate will fail OPEN until a refresh succeeds', flush=True)
-    else:
-        _margin_state['available'] = _snap['net']
-        _margin_state['cash'] = _snap['cash']
-        _margin_state['updated_ts'] = time.time()
-        print(f"[copy_trade_bridge] Zerodha margin: net Rs {_snap['net']:,.2f}, "
-              f"cash Rs {_snap['cash']:,.2f}", flush=True)
-    # Seed the position snapshot too — without it the fast-path gate fails open
-    # (correctly, but uselessly) until the watchdog's first refresh.
+    # Seed each child's gate before any fill can arrive — otherwise the first
+    # fills of the day sail through on the fail-open path while waiting for the
+    # first keep-alive tick.
+    atm_now = None
     try:
-        set_position_snapshot({
-            p['tradingsymbol']: int(p.get('quantity', 0) or 0)
-            for p in kite.positions().get('net', []) if p.get('tradingsymbol')
-        })
+        atm_now = round(float(helper.get_ltp('NIFTY', instrument='INDEX')) / 50) * 50
     except Exception as e:
-        print(f'[copy_trade_bridge] WARNING: could not read child positions at startup ({e}) — '
-              f'margin gate will fail OPEN until the first refresh', flush=True)
+        print(f'[copy_trade_bridge] Could not read NIFTY spot for the margin probe: {e}', flush=True)
 
-    if margin_probe_symbol:
-        # consider_positions=True — see the watchdog's refresh: the gate needs the
-        # marginal cost given the current book, not a standalone rate.
-        _pl, _perr = get_required_margin(
-            kite, [build_order_param(margin_probe_symbol, 'SELL',
-                                     _margin_state['lot_size'], hedge_product)],
-            consider_positions=True)
-        if _perr:
-            print(f'[copy_trade_bridge] WARNING: per-lot margin probe failed ({_perr})', flush=True)
-        elif _pl and _pl > 0:
-            _margin_state['per_lot'] = _pl
-            print(f'[copy_trade_bridge] Margin per lot ({margin_probe_symbol}, '
-                  f'{hedge_product}): Rs {_pl:,.2f}', flush=True)
-    else:
-        # Silent failure here would leave the gate permanently fail-open while the
-        # status file still reported margin_check_enabled: true.
-        print(f'[copy_trade_bridge] WARNING: no margin probe contract resolved '
-              f'(expiry={near_expiry}) — the fast-path margin gate is DISABLED '
-              f'(fails open); the exact check on retries still applies', flush=True)
+    for _bname, _broker in brokers.items():
+        if atm_now is not None:
+            # Each broker picks the probe from ITS OWN nearest expiry. Borrowing
+            # another broker's would silently fail to resolve whenever the two
+            # caches disagree (one refreshed across an expiry roll, the other
+            # not), leaving that broker's gate permanently fail-open.
+            _b_expiries = _broker.expiries(on_or_after=_today)
+            if _b_expiries:
+                _broker.set_margin_probe(_broker.find_symbol(atm_now, _b_expiries[0], 'CE'))
+        if _broker.refresh_margin():
+            _net = _broker.margin['available'] or 0.0
+            _cash = _broker.margin['cash']
+            print(f"[copy_trade_bridge] {_bname} margin: net Rs {_net:,.2f}, "
+                  f"cash Rs {(_cash or 0.0):,.2f}", flush=True)
+            # A collateral-only account can WRITE options (margin is backed by
+            # pledged holdings) but has no money for a premium debit — and
+            # buying back a short to EXIT it is a premium debit. Surfacing this
+            # at startup beats discovering it on a rejected exit.
+            if _net > 0 and (_cash or 0.0) < 0.01:
+                print(f'[copy_trade_bridge] WARNING: {_bname} has Rs {_net:,.2f} of margin but '
+                      f'ZERO cash — the balance is collateral (pledged holdings), not money. '
+                      f'Option WRITES should go through, but any premium debit (a BUY, '
+                      f'including buying back a short to close it) may be rejected. '
+                      f'Add funds before arming replication to this child.', flush=True)
+        else:
+            print(f"[copy_trade_bridge] WARNING: {_bname} margins unavailable at startup "
+                  f"({_broker.margin['error']}) — margin gate will fail OPEN until a refresh "
+                  f"succeeds", flush=True)
+        # Seed the position snapshot too — without it the fast-path gate fails
+        # open (correctly, but uselessly) until the watchdog's first refresh.
+        if not _broker.refresh_positions():
+            print(f'[copy_trade_bridge] WARNING: could not read {_bname} positions at startup — '
+                  f'margin gate will fail OPEN until the first refresh', flush=True)
+        if _broker.margin_probe_symbol:
+            if _broker.refresh_per_lot(hedge_product):
+                print(f"[copy_trade_bridge] {_bname} margin per lot "
+                      f"({_broker.margin_probe_symbol}, {hedge_product}): "
+                      f"Rs {_broker.margin['per_lot']:,.2f}", flush=True)
+            else:
+                print(f"[copy_trade_bridge] WARNING: {_bname} per-lot margin probe failed "
+                      f"({_broker.margin['error']})", flush=True)
+        else:
+            # Silent failure here would leave the gate permanently fail-open while
+            # the status file still reported margin_check_enabled: true.
+            print(f'[copy_trade_bridge] WARNING: no {_bname} margin probe contract resolved '
+                  f'(expiry={near_expiry}) — its fast-path margin gate is DISABLED '
+                  f'(fails open); the exact check on retries still applies', flush=True)
 
-    if startup_cfg.get('hedge_on_startup') and near_expiry:
+    # The startup OTM hedge is Zerodha-only by design (see the module docstring).
+    kite = brokers['zerodha'].kite if 'zerodha' in brokers else None
+
+    if kite is not None and startup_cfg.get('hedge_on_startup') and near_expiry:
         startup_armed = bool(startup_cfg.get('armed'))
         market_open_now = market_is_open()
         # Only a LIVE placement needs the exchange open — a disarmed dry run
@@ -1427,18 +1205,10 @@ def main():
                           f'{hedge_qty}', flush=True)
                 # Hedges change the margin picture — re-read it before trading, and
                 # re-read positions so the fast-path gate does not mistake the new
-                # hedge longs for something else.
-                _snap2, _e2 = get_margin_snapshot(kite)
-                if not _e2:
-                    _margin_state['available'] = _snap2['net']
-                    _margin_state['cash'] = _snap2['cash']
-                try:
-                    set_position_snapshot({
-                        p['tradingsymbol']: int(p.get('quantity', 0) or 0)
-                        for p in kite.positions().get('net', []) if p.get('tradingsymbol')
-                    })
-                except Exception:
-                    pass
+                # hedge longs for something else. Zerodha only: the hedge legs are
+                # bought there and nowhere else.
+                brokers['zerodha'].refresh_margin()
+                brokers['zerodha'].refresh_positions()
             except Exception as e:
                 print(f'[copy_trade_bridge] Hedge bootstrap failed: {e}', flush=True)
     else:
@@ -1507,9 +1277,10 @@ def main():
             opt_type = normalize_opt_type(opt_type_raw)
 
             # Order matters: the unambiguous long-form names first, the
-            # single-letter WS 'product' code last. See map_product_to_zerodha.
-            product = map_product_to_zerodha(
-                kite,
+            # single-letter WS 'product' code last. See ChildBroker.map_product.
+            # Kept as raw hints because each broker maps them to its own product
+            # constants.
+            product_hints = (
                 data.get('ProductType') or data.get('productType'),
                 data.get('ProductName') or data.get('productName'),
                 data.get('Product') or data.get('product'),
@@ -1529,65 +1300,38 @@ def main():
             children = [c for c in cfg.get('children', []) if c.get('enabled')]
 
             is_option = strike is not None and expiry and opt_type
-            zerodha_symbol = None
-            if is_option:
-                # Fast in-memory lookup only — a cache refresh is a multi-second
-                # subprocess that must never run in this WS callback (it would
-                # stall event delivery and can drop the connection). A miss on
-                # a real option goes to the retry queue, where the watchdog
-                # thread refreshes the cache and resolves it.
-                zerodha_symbol = find_zerodha_symbol(instruments_state['instruments'], strike, expiry, opt_type)
 
-            if zerodha_symbol is None:
-                if is_option and armed and children:
-                    for child in children:
-                        try:
-                            multiplier = int(child.get('multiplier', 1))
-                        except (TypeError, ValueError):
-                            multiplier = 1
-                        if multiplier < 1:
-                            multiplier = 1
-                        with _retry_lock:
-                            retry_queue.append({
-                                'order_no': order_no, 'zerodha_symbol': None,
-                                'strike': strike, 'expiry': expiry, 'opt_type': opt_type,
-                                'side': side, 'qty': delta * multiplier, 'attempts': 0,
-                                'next_ts': 0.0, 'product': product,
-                            })
-                    append_log({'ts': ts, 'order_no': order_no, 'symbol': symbol, 'side': side,
-                                'qty': delta, 'result': 'queued_resolution',
-                                'error': 'Strike not in instrument cache — queued for refresh + replication'})
+            if not is_option:
+                # Distinguish "never in scope" from "should have matched but
+                # didn't". Dhan stamps optType 'XX' on every non-derivative
+                # order, so equity/ETF/MCX fills (GOLDBEES, BEL, CRUDEOIL…)
+                # used to be logged as "Unrecognized OptType 'XX' — refusing
+                # to guess the leg", which reads like a replication failure
+                # on a NIFTY option. They are simply out of scope, and
+                # mislabelling them also spends the capped log budget that
+                # genuine desync records need.
+                # The WS reports scope via `instrument` ('OPTIDX'/'EQUITY'/…);
+                # the REST order list has no such field, so the poll path
+                # supplies `exchangeSegment` ('NSE_FNO'/'NSE_EQ'/'MCX_COMM')
+                # instead. Either is enough to prove a fill was never in
+                # scope; both absent falls through to the checks below.
+                instrument = str(data.get('Instrument') or data.get('instrument') or '').upper()
+                segment = str(data.get('ExchangeSegment') or data.get('exchangeSegment') or '').upper()
+                scope_label = instrument or segment
+                if (instrument and not instrument.startswith('OPT')) or (segment and segment != 'NSE_FNO'):
+                    reason = f'Out of scope: {scope_label} (bridge replicates NIFTY options only) — skipped'
+                elif opt_type_raw and opt_type is None:
+                    reason = f'Unrecognized OptType {opt_type_raw!r} — refusing to guess the leg, skipped'
                 else:
-                    # Distinguish "never in scope" from "should have matched but
-                    # didn't". Dhan stamps optType 'XX' on every non-derivative
-                    # order, so equity/ETF/MCX fills (GOLDBEES, BEL, CRUDEOIL…)
-                    # used to be logged as "Unrecognized OptType 'XX' — refusing
-                    # to guess the leg", which reads like a replication failure
-                    # on a NIFTY option. They are simply out of scope, and
-                    # mislabelling them also spends the capped log budget that
-                    # genuine desync records need.
-                    # The WS reports scope via `instrument` ('OPTIDX'/'EQUITY'/…);
-                    # the REST order list has no such field, so the poll path
-                    # supplies `exchangeSegment` ('NSE_FNO'/'NSE_EQ'/'MCX_COMM')
-                    # instead. Either is enough to prove a fill was never in
-                    # scope; both absent falls through to the checks below.
-                    instrument = str(data.get('Instrument') or data.get('instrument') or '').upper()
-                    segment = str(data.get('ExchangeSegment') or data.get('exchangeSegment') or '').upper()
-                    scope_label = instrument or segment
-                    if (instrument and not instrument.startswith('OPT')) or (segment and segment != 'NSE_FNO'):
-                        reason = f'Out of scope: {scope_label} (bridge replicates NIFTY options only) — skipped'
-                    elif opt_type_raw and opt_type is None:
-                        reason = f'Unrecognized OptType {opt_type_raw!r} — refusing to guess the leg, skipped'
-                    else:
-                        reason = 'Unsupported instrument (not a cached NIFTY option) — skipped'
-                    append_log({'ts': ts, 'order_no': order_no, 'symbol': symbol, 'side': side,
-                                'qty': delta, 'result': 'skipped', 'error': reason})
+                    reason = 'Unsupported instrument (not a NIFTY option) — skipped'
+                append_log({'ts': ts, 'order_no': order_no, 'symbol': symbol, 'side': side,
+                            'qty': delta, 'result': 'skipped', 'error': reason})
                 replicated_qty[order_no] = traded_qty
                 save_replicated(replicated_qty)
                 return
 
             for child in children:
-                broker = child.get('broker', 'zerodha')
+                bname = str(child.get('broker', 'zerodha')).lower()
                 try:
                     multiplier = int(child.get('multiplier', 1))
                 except (TypeError, ValueError):
@@ -1598,32 +1342,79 @@ def main():
 
                 entry = {
                     'ts': ts, 'order_no': order_no, 'parent_symbol': symbol,
-                    'zerodha_symbol': zerodha_symbol, 'side': side,
-                    'parent_qty': delta, 'broker': broker, 'multiplier': multiplier,
-                    'child_qty': child_qty, 'armed': armed,
+                    'side': side, 'parent_qty': delta, 'broker': bname,
+                    'multiplier': multiplier, 'child_qty': child_qty, 'armed': armed,
                 }
+
+                broker = brokers.get(bname)
+                if broker is None:
+                    # Never silently dropped: a child enabled in the dashboard but
+                    # not initialised here (auth failed, or enabled seconds ago and
+                    # the watchdog has not picked it up yet) would otherwise look
+                    # replicated. The watchdog's ensure_broker retries it once.
+                    entry['result'] = 'broker_unavailable'
+                    entry['error'] = (f'{bname} child is not initialised '
+                                      f'({broker_failures.get(bname, "not yet started")}) — '
+                                      f'fill NOT replicated to it')
+                    append_log(entry)
+                    print(f'[copy_trade_bridge] {bname} child unavailable — {order_no} '
+                          f'NOT replicated to it', flush=True)
+                    continue
+
+                # Fast in-memory lookup only — a cache refresh is a multi-second
+                # call that must never run in this WS callback (it would stall
+                # event delivery and can drop the connection). A miss on a real
+                # option goes to the retry queue, where the watchdog thread
+                # refreshes the cache and resolves it.
+                child_symbol = broker.find_symbol(strike, expiry, opt_type)
+                product = broker.map_product(*product_hints)
+
+                if child_symbol is None:
+                    if armed:
+                        with _retry_lock:
+                            retry_queue.append({
+                                'order_no': order_no, 'broker': bname, 'child_symbol': None,
+                                'strike': strike, 'expiry': expiry, 'opt_type': opt_type,
+                                'side': side, 'qty': child_qty, 'attempts': 0,
+                                'next_ts': 0.0, 'product': product,
+                                'product_hints': product_hints,
+                            })
+                        entry['result'] = 'queued_resolution'
+                        entry['error'] = ('Strike not in instrument cache — queued for '
+                                          'refresh + replication')
+                    else:
+                        entry['result'] = 'skipped'
+                        entry['error'] = f'Strike not in the {bname} instrument cache — skipped'
+                    append_log(entry)
+                    continue
+
+                entry['child_symbol'] = child_symbol
+                # Kept for the dashboard's existing log rendering and
+                # copy_trade_reconcile.py, which both read `zerodha_symbol`.
+                entry['zerodha_symbol'] = child_symbol
 
                 if not armed:
                     # Record what the margin gate WOULD have decided, so a
                     # disarmed session still proves the gate works before real
                     # money depends on it.
                     if cfg.get('margin_check', True):
-                        ok, mdetail = check_margin(kite, zerodha_symbol, side, child_qty,
-                                                   product, exact=False)
+                        ok, mdetail = broker.check_margin(child_symbol, side, child_qty,
+                                                          product, exact=False)
                         entry['margin'] = mdetail
                         entry['would_block'] = not ok
                     entry['result'] = 'logged_only'
                     append_log(entry)
                     continue
 
-                warn_product_mismatch(product)
-                note_replicated_symbol(zerodha_symbol, replicated_symbols)
+                if bname == 'zerodha':
+                    warn_product_mismatch(product)
+                note_replicated_symbol(bname, child_symbol, replication_scopes)
                 # Cached (non-blocking) check only: this runs on the order-update
                 # WS callback thread, where an HTTP round-trip would stall event
                 # delivery and can drop the connection.
                 blk = {}
-                placed, order_ids, err = place_child_order(
-                    kite, zerodha_symbol, side, child_qty, product=product,
+                placed, order_ids, err = broker.place_child_order(
+                    child_symbol, side, child_qty, product=product,
                     margin_check=bool(cfg.get('margin_check', True)), exact_margin=False,
                     detail_out=blk,
                 )
@@ -1632,18 +1423,19 @@ def main():
                     # The fast path prices this against a cached ATM per-lot
                     # figure, which over-states a far-OTM leg — so a block here is
                     # a suspicion, not a verdict. Hand it to the retry queue,
-                    # where the watchdog thread can afford the exact basket call
-                    # and either places it or blocks it terminally. Dropping it on
+                    # where the watchdog thread can afford the exact call and
+                    # either places it or blocks it terminally. Dropping it on
                     # an estimate would desync the child over an arithmetic
                     # approximation.
                     with _retry_lock:
                         retry_queue.append({
-                            'order_no': order_no, 'zerodha_symbol': zerodha_symbol,
+                            'order_no': order_no, 'broker': bname,
+                            'child_symbol': child_symbol,
                             'side': side, 'qty': child_qty, 'attempts': 0,
                             'next_ts': time.time() + FAST_RETRY_DELAY_SEC,
-                            'product': product,
-                            # No 'queued_at': nothing was sent to Zerodha, so there
-                            # is no lost-response duplicate to guard against.
+                            'product': product, 'product_hints': product_hints,
+                            # No 'queued_at': nothing was sent to the broker, so
+                            # there is no lost-response duplicate to guard against.
                         })
                     entry['result'] = 'margin_recheck_queued'
                     entry['required'] = blk.get('required')
@@ -1651,7 +1443,7 @@ def main():
                     entry['shortfall'] = blk.get('shortfall')
                     entry['error'] = (f'Cached margin estimate says short by {blk.get("shortfall")} '
                                       f'(needs {blk.get("required")}, has {blk.get("available")}) — '
-                                      f'queued for an exact re-check before giving up')
+                                      f'queued for a re-check before giving up')
                     append_log(entry)
                     continue
                 if placed:
@@ -1659,8 +1451,8 @@ def main():
                 if err is None:
                     entry['result'] = 'success'
                     entry['child_order_id'] = ','.join(str(o) for o in order_ids)
-                    print(f'[copy_trade_bridge] Replicated {order_no} -> {broker} '
-                          f'({side} {child_qty} {zerodha_symbol})', flush=True)
+                    print(f'[copy_trade_bridge] Replicated {order_no} -> {bname} '
+                          f'({side} {child_qty} {child_symbol})', flush=True)
                 else:
                     # Queue exactly the unplaced remainder for bounded retry —
                     # replicated_qty still advances below so a later event for
@@ -1672,17 +1464,19 @@ def main():
                     state['failed_count'] += 1
                     with _retry_lock:
                         retry_queue.append({
-                            'order_no': order_no, 'zerodha_symbol': zerodha_symbol,
+                            'order_no': order_no, 'broker': bname,
+                            'child_symbol': child_symbol,
                             'side': side, 'qty': remaining, 'attempts': 1,
                             'next_ts': time.time() + FAST_RETRY_DELAY_SEC,
                             # This placement attempt just raised — before the
                             # NEXT attempt (in drain_retry_queue), verify it
                             # didn't actually go through (response lost, e.g.
-                            # RemoteDisconnected) before placing a duplicate.
+                            # RemoteDisconnected or a read timeout on Kotak)
+                            # before placing a duplicate.
                             'queued_at': datetime.now(),
-                            'product': product,
+                            'product': product, 'product_hints': product_hints,
                         })
-                    print(f'[copy_trade_bridge] ERROR replicating {order_no} to {broker}: {err} '
+                    print(f'[copy_trade_bridge] ERROR replicating {order_no} to {bname}: {err} '
                           f'(queued {remaining} for retry)', flush=True)
 
                 append_log(entry)
@@ -1764,8 +1558,8 @@ def main():
     watchdog_stop = threading.Event()
     watchdog_thread = threading.Thread(
         target=watchdog_loop,
-        args=(helper, kite, watchdog_stop, state, retry_queue, get_nifty_symbols, resolve_symbol,
-              replicated_symbols, hedge_qty, margin_probe_symbol, hedge_product, hedge_ctx),
+        args=(helper, brokers, watchdog_stop, state, retry_queue, replication_scopes,
+              hedge_qty, hedge_product, hedge_ctx, ensure_broker),
         daemon=True, name='copy-trade-watchdog',
     )
     watchdog_thread.start()
@@ -1807,19 +1601,28 @@ def main():
                 ws_health = helper.get_order_update_ws_health()
                 ws_alive = ws_health['thread_alive']
 
-                detail = ''
+                notes = []
                 if state['failed_count'] or pending_retries:
-                    detail = f"{state['failed_count']} failed replication(s), {pending_retries} pending retry(ies)"
+                    notes.append(f"{state['failed_count']} failed replication(s), "
+                                 f"{pending_retries} pending retry(ies)")
                 if not ws_health['connected']:
-                    ws_note = 'order-update WS DISCONNECTED (REST poll is covering replication)'
-                    detail = f'{detail}; {ws_note}' if detail else ws_note
-                if _margin_state['blocked_count']:
-                    detail = (f"{detail}; {_margin_state['blocked_count']} order(s) margin-blocked"
-                              if detail else
-                              f"{_margin_state['blocked_count']} order(s) margin-blocked")
-                if _margin_state['available'] is None:
-                    mnote = 'margin state UNKNOWN — gate failing open'
-                    detail = f'{detail}; {mnote}' if detail else mnote
+                    notes.append('order-update WS DISCONNECTED (REST poll is covering replication)')
+                for _bn, _b in brokers.items():
+                    if _b.margin['blocked_count']:
+                        notes.append(f"{_b.margin['blocked_count']} {_bn} order(s) margin-blocked")
+                    if _b.margin['available'] is None:
+                        notes.append(f'{_bn} margin state UNKNOWN — gate failing open')
+                # A configured child that could not be initialised is the one
+                # failure the dashboard must not miss: fills are silently not
+                # reaching that account.
+                for _bn, _reason in broker_failures.items():
+                    notes.append(f'{_bn} child UNAVAILABLE ({_reason})')
+                detail = '; '.join(notes)
+
+                # Zerodha's figures stay at the top level so the existing
+                # dashboard panels keep working unchanged; every broker (Zerodha
+                # included) also appears under 'brokers'.
+                _primary = brokers.get('zerodha') or next(iter(brokers.values()))
                 write_status('RUNNING', started_at=started_at, detail=detail, extra={
                     'ws_thread_alive': ws_alive,
                     'ws_connected': ws_health['connected'],
@@ -1831,14 +1634,16 @@ def main():
                     'poll_count': state['poll_count'],
                     'failed_replications': state['failed_count'],
                     'pending_retries': pending_retries,
-                    'margin_available': _margin_state['available'],
-                    'margin_cash': _margin_state['cash'],
-                    'margin_per_lot': (round(_margin_state['per_lot'], 2)
-                                       if _margin_state['per_lot'] else None),
-                    'margin_updated_ts': _margin_state['updated_ts'],
-                    'margin_error': _margin_state['error'],
-                    'margin_blocked_count': _margin_state['blocked_count'],
+                    'margin_available': _primary.margin['available'],
+                    'margin_cash': _primary.margin['cash'],
+                    'margin_per_lot': (round(_primary.margin['per_lot'], 2)
+                                       if _primary.margin['per_lot'] else None),
+                    'margin_updated_ts': _primary.margin['updated_ts'],
+                    'margin_error': _primary.margin['error'],
+                    'margin_blocked_count': _primary.margin['blocked_count'],
                     'margin_check_enabled': bool(load_config().get('margin_check', True)),
+                    'brokers': {n: b.status() for n, b in brokers.items()},
+                    'broker_failures': dict(broker_failures),
                     # hedge_qty/hedge_ctx are read directly (never snapshotted
                     # into a separate variable) so a deferred hedge that lands
                     # later — see maybe_place_deferred_hedge — shows up here on
@@ -1870,12 +1675,13 @@ def main():
         # by nature: a kill -9 never reaches this block, which is exactly why
         # copy_trade_hedges.json is authoritative and the next startup adopts
         # whatever it finds still open rather than buying a second set.
-        if hedge_qty and load_config().get('armed'):
+        if kite is not None and hedge_qty and load_config().get('armed'):
             try:
                 from scripts.tools.copy_trade_hedge import close_hedges
                 for r in close_hedges(kite, armed=True):
                     append_log({
                         'ts': datetime.now().isoformat(), 'order_no': f"hedge-{r['symbol']}",
+                        'broker': 'zerodha', 'child_symbol': r['symbol'],
                         'zerodha_symbol': r['symbol'], 'side': 'SELL', 'child_qty': r.get('qty'),
                         'result': f"hedge_{r['result']}", 'error': r.get('error'),
                     })

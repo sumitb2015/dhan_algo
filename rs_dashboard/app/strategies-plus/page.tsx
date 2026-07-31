@@ -33,8 +33,14 @@ interface PnlGuardStatus {
   enableKillSwitch?: boolean;
 }
 
+// Keep in sync with CHILD_BROKERS in components/CopyTrade.tsx and
+// BROKER_CLASSES in scripts/tools/child_brokers.py.
+const CHILD_BROKERS = ['zerodha', 'kotak'] as const;
+type ChildBroker = typeof CHILD_BROKERS[number];
+const CHILD_BROKER_LABELS: Record<ChildBroker, string> = { zerodha: 'Zerodha', kotak: 'Kotak' };
+
 interface CopyTradeChild {
-  broker: 'zerodha';
+  broker: ChildBroker;
   multiplier: number;
   enabled: boolean;
 }
@@ -48,11 +54,16 @@ interface CopyTradeStatus {
   detail?: string;
   started_at?: string;
   last_update?: string;
+  /** Per-broker init failures from the bridge — a child listed here receives
+   *  no fills, however healthy the rest of the panel looks. */
+  broker_failures?: Record<string, string>;
 }
 interface CopyTradeLogEntry {
   ts: string;
   order_no: string;
   parent_symbol?: string;
+  child_symbol?: string;
+  /** Legacy alias for child_symbol, still written by the bridge. */
   zerodha_symbol?: string;
   side?: string;
   parent_qty?: number;
@@ -65,7 +76,14 @@ interface CopyTradeLogEntry {
   child_order_id?: string;
 }
 
-const DEFAULT_COPY_TRADE_CHILD: CopyTradeChild = { broker: 'zerodha', multiplier: 1, enabled: false };
+const DEFAULT_COPY_TRADE_CHILDREN: CopyTradeChild[] =
+  CHILD_BROKERS.map(broker => ({ broker, multiplier: 1, enabled: false }));
+
+/** The stored children, back-filled so every known broker has a row to render. */
+function withAllBrokers(children: CopyTradeChild[]): CopyTradeChild[] {
+  return CHILD_BROKERS.map(broker =>
+    children.find(c => c.broker === broker) ?? { broker, multiplier: 1, enabled: false });
+}
 
 let toastCounter = 0;
 
@@ -141,7 +159,7 @@ export default function StrategiesPlusPage() {
   const [clearingPnl, setClearingPnl] = useState(false);
 
   const [showCopyTrade, setShowCopyTrade] = useState(false);
-  const [copyTradeConfig, setCopyTradeConfig] = useState<CopyTradeConfig>({ armed: false, children: [DEFAULT_COPY_TRADE_CHILD] });
+  const [copyTradeConfig, setCopyTradeConfig] = useState<CopyTradeConfig>({ armed: false, children: DEFAULT_COPY_TRADE_CHILDREN });
   const [copyTradeStatus, setCopyTradeStatus] = useState<CopyTradeStatus | null>(null);
   const [copyTradeLog, setCopyTradeLog] = useState<CopyTradeLogEntry[]>([]);
   const [confirmArm, setConfirmArm] = useState(false);
@@ -388,7 +406,7 @@ export default function StrategiesPlusPage() {
       if (data.success && data.config) {
         setCopyTradeConfig({
           armed: !!data.config.armed,
-          children: data.config.children?.length ? data.config.children : [DEFAULT_COPY_TRADE_CHILD],
+          children: withAllBrokers(data.config.children ?? []),
         });
       }
     } catch { /* keep last known config */ }
@@ -432,14 +450,17 @@ export default function StrategiesPlusPage() {
     }
   };
 
-  const updateCopyTradeChild = async (patch: Partial<CopyTradeChild>) => {
-    const nextChild = { ...copyTradeConfig.children[0], ...patch };
-    setCopyTradeConfig(prev => ({ ...prev, children: [nextChild] }));
+  const updateCopyTradeChild = async (broker: ChildBroker, patch: Partial<CopyTradeChild>) => {
+    // Always POST the FULL children list: the route replaces the array wholesale,
+    // so sending only the edited child would silently disable the others.
+    const nextChildren = withAllBrokers(copyTradeConfig.children)
+      .map(c => (c.broker === broker ? { ...c, ...patch } : c));
+    setCopyTradeConfig(prev => ({ ...prev, children: nextChildren }));
     try {
       const res = await fetch('/api/copy-trade/config', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ children: [nextChild] }),
+        body: JSON.stringify({ children: nextChildren }),
       });
       const data = await res.json();
       if (!data.success) addToast('error', data.error || 'Failed to save child account settings.');
@@ -966,43 +987,53 @@ export default function StrategiesPlusPage() {
 
             <div className="h-6 w-px bg-zinc-800 shrink-0" />
 
-            {/* Child account row */}
-            <div className="flex items-center gap-2 shrink-0">
-              <span className="text-[10px] text-zinc-500 font-semibold uppercase tracking-wider">Child</span>
-              <span className="px-2 py-1 rounded-md bg-zinc-900 border border-zinc-700 text-[11px] text-white font-semibold">Zerodha</span>
-            </div>
+            {/* One row per child account */}
+            <span className="text-[10px] text-zinc-500 font-semibold uppercase tracking-wider shrink-0">Children</span>
+            {withAllBrokers(copyTradeConfig.children).map(child => {
+              const failure = copyTradeStatus?.broker_failures?.[child.broker];
+              return (
+                <div key={child.broker} className="flex items-center gap-1.5 shrink-0">
+                  <span
+                    className={`px-2 py-1 rounded-md border text-[11px] font-semibold ${
+                      failure
+                        ? 'bg-red-950/60 border-red-800 text-red-300'
+                        : 'bg-zinc-900 border-zinc-700 text-white'
+                    }`}
+                    title={failure ? `Bridge could not start this child: ${failure}` : undefined}
+                  >
+                    {CHILD_BROKER_LABELS[child.broker]}{failure ? ' — DOWN' : ''}
+                  </span>
 
-            <div className="flex items-center gap-1.5 shrink-0">
-              <span className="text-[10px] text-zinc-500 font-semibold uppercase tracking-wider">Multiplier</span>
-              <div className="flex items-center gap-1 bg-zinc-900 border border-zinc-700 rounded-md px-2 py-1">
-                <input
-                  type="number"
-                  min="1"
-                  step="1"
-                  value={copyTradeConfig.children[0]?.multiplier ?? 1}
-                  onChange={e => {
-                    const n = parseInt(e.target.value, 10);
-                    if (Number.isInteger(n) && n > 0) updateCopyTradeChild({ multiplier: n });
-                  }}
-                  className="bg-transparent text-[11px] text-white w-12 outline-none tabular-nums"
-                />
-                <span className="text-[11px] text-zinc-500">x</span>
-              </div>
-            </div>
+                  <div className="flex items-center gap-1 bg-zinc-900 border border-zinc-700 rounded-md px-2 py-1">
+                    <input
+                      type="number"
+                      min="1"
+                      step="1"
+                      value={child.multiplier}
+                      onChange={e => {
+                        const n = parseInt(e.target.value, 10);
+                        if (Number.isInteger(n) && n > 0) updateCopyTradeChild(child.broker, { multiplier: n });
+                      }}
+                      title={`${CHILD_BROKER_LABELS[child.broker]} quantity multiplier`}
+                      className="bg-transparent text-[11px] text-white w-10 outline-none tabular-nums"
+                    />
+                    <span className="text-[11px] text-zinc-500">x</span>
+                  </div>
 
-            <label className="flex items-center gap-2 cursor-pointer shrink-0">
-              <div
-                onClick={() => updateCopyTradeChild({ enabled: !copyTradeConfig.children[0]?.enabled })}
-                className={`relative w-8 h-4 rounded-full transition-colors cursor-pointer ${
-                  copyTradeConfig.children[0]?.enabled ? 'bg-sky-600' : 'bg-zinc-700'
-                }`}
-              >
-                <div className={`absolute top-0.5 h-3 w-3 rounded-full bg-white shadow transition-transform ${
-                  copyTradeConfig.children[0]?.enabled ? 'translate-x-4' : 'translate-x-0.5'
-                }`} />
-              </div>
-              <span className="text-[10px] text-zinc-500 font-semibold">Enabled</span>
-            </label>
+                  <div
+                    onClick={() => updateCopyTradeChild(child.broker, { enabled: !child.enabled })}
+                    title={child.enabled ? 'Enabled — receives replicated fills' : 'Disabled'}
+                    className={`relative w-8 h-4 rounded-full transition-colors cursor-pointer ${
+                      child.enabled ? 'bg-sky-600' : 'bg-zinc-700'
+                    }`}
+                  >
+                    <div className={`absolute top-0.5 h-3 w-3 rounded-full bg-white shadow transition-transform ${
+                      child.enabled ? 'translate-x-4' : 'translate-x-0.5'
+                    }`} />
+                  </div>
+                </div>
+              );
+            })}
 
             <div className="h-6 w-px bg-zinc-800 shrink-0" />
 
@@ -1018,8 +1049,8 @@ export default function StrategiesPlusPage() {
             ) : (
               <button
                 onClick={handleArmReplication}
-                disabled={arming || !copyTradeConfig.children[0]?.enabled}
-                title={!copyTradeConfig.children[0]?.enabled ? 'Enable at least one child account first' : undefined}
+                disabled={arming || !copyTradeConfig.children.some(c => c.enabled)}
+                title={!copyTradeConfig.children.some(c => c.enabled) ? 'Enable at least one child account first' : undefined}
                 className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[11px] font-bold border transition-all active:scale-95 disabled:opacity-40 disabled:cursor-not-allowed ${
                   confirmArm
                     ? 'bg-red-600 border-red-500 text-white animate-pulse shadow-lg shadow-red-500/20'
@@ -1055,8 +1086,15 @@ export default function StrategiesPlusPage() {
                         <Shield className="h-2.5 w-2.5" /> SAFETY-NET
                       </span>
                     )}
+                    {/* With more than one child, which broker a line refers to
+                        is no longer implicit — show it. */}
+                    {entry.broker && (
+                      <span className="shrink-0 px-1.5 py-0.5 rounded bg-zinc-800 text-zinc-400 text-[10px] font-bold uppercase">
+                        {entry.broker}
+                      </span>
+                    )}
                     <span className="text-zinc-300 font-medium truncate">
-                      {entry.side} {entry.child_qty ?? entry.parent_qty} {entry.zerodha_symbol ?? entry.parent_symbol}
+                      {entry.side} {entry.child_qty ?? entry.parent_qty} {entry.child_symbol ?? entry.zerodha_symbol ?? entry.parent_symbol}
                     </span>
                     <span className={`shrink-0 ${
                       entry.result === 'success' || entry.result === 'safety_exit' ? 'text-emerald-500'

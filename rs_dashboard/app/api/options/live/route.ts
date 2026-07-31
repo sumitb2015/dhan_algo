@@ -11,6 +11,11 @@ const PYTHON_EXE     = path.join(PROJECT_ROOT, 'venv', 'Scripts', 'pythonw.exe')
 const BRIDGE_SCRIPT  = path.join(PROJECT_ROOT, 'scripts', 'tools', 'live_options_ws.py');
 const ZERODHA_BRIDGE_SCRIPT = path.join(PROJECT_ROOT, 'scripts', 'tools', 'live_options_ws_zerodha.py');
 
+// Only brokers that actually run a tick bridge appear here. Kotak deliberately
+// does not: an option's LTP comes from the exchange, not the broker, so it
+// shares Dhan's feed (see QUOTE_CHANNEL in lib/useLiveOptionsWS.ts) and
+// normalizes to 'dhan' below. Starting a second identical NIFTY feed for it
+// would only duplicate the subscription.
 type Broker = 'dhan' | 'zerodha';
 
 function normalizeBroker(value: unknown): Broker {

@@ -1,7 +1,7 @@
 'use client';
 
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { brokerRoute, type Broker } from '@/hooks/useBrokerSelector';
+import { scalperRoute, type Broker } from '@/hooks/useBrokerSelector';
 
 type TabKey = 'positions' | 'orders' | 'trades';
 
@@ -153,7 +153,7 @@ export default function BasketActivityTabs({ broker, onAddLeg }: { broker: Broke
   const fetchAll = useCallback(() => {
     if (inFlightRef.current) return;
     inFlightRef.current = true;
-    fetch(brokerRoute(broker, '/api/scalper/all', '/api/scalper/zerodha/all'))
+    fetch(scalperRoute(broker, 'all'))
       .then(r => r.json())
       .then((j: { success: boolean; positions?: Record<string, unknown>[]; orders?: Record<string, unknown>[]; trades?: Record<string, unknown>[]; error?: string }) => {
         if (j.success) {
@@ -173,7 +173,7 @@ export default function BasketActivityTabs({ broker, onAddLeg }: { broker: Broke
   const pollLight = useCallback(() => {
     if (inFlightRef.current) return;
     inFlightRef.current = true;
-    fetch(brokerRoute(broker, '/api/scalper/poll', '/api/scalper/zerodha/poll'))
+    fetch(scalperRoute(broker, 'poll'))
       .then(r => r.json())
       .then((j: { success: boolean; positions?: Record<string, unknown>[]; orders?: Record<string, unknown>[]; trades?: Record<string, unknown>[] }) => {
         if (j.success) {

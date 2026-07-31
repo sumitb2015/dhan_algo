@@ -6,7 +6,7 @@ import { Zap, RefreshCw, Shield, ShieldOff, ChevronDown, ChevronUp, Wallet } fro
 import { useLiveOptionsWS } from '@/lib/useLiveOptionsWS';
 import { useProfitLock, ProfitLockControls } from './ProfitLock';
 import { useCopyTrade, CopyTradeControls } from './CopyTrade';
-import { useBrokerSelector, brokerRoute } from '@/hooks/useBrokerSelector';
+import { useBrokerSelector, scalperRoute, BROKER_LABELS, type Broker } from '@/hooks/useBrokerSelector';
 import { contractMultiplier } from '@/lib/positionPnl';
 
 // ─── Types ────────────────────────────────────────────────────────
@@ -385,11 +385,7 @@ export default function Scalper() {
     if (!expiry) return;
 
     const requestedExpiry = expiry;
-    const lookupUrl = brokerRoute(
-      broker,
-      `/api/scalper/lookup?underlying=${underlying}&expiry=${expiry}`,
-      `/api/scalper/zerodha/lookup?underlying=${underlying}&expiry=${expiry}`,
-    );
+    const lookupUrl = `${scalperRoute(broker, 'lookup')}?underlying=${underlying}&expiry=${expiry}`;
     fetch(lookupUrl)
       .then(r => r.json())
       .then((j: { success: boolean; data?: { lotSize: number; strikes: Record<string, { ceId?: string; peId?: string; ceSymbol?: string; peSymbol?: string }> } }) => {
@@ -410,7 +406,7 @@ export default function Scalper() {
 
   const fetchTabData = useCallback(() => {
     setTabLoading(true);
-    fetch(brokerRoute(broker, '/api/scalper/all', '/api/scalper/zerodha/all'))
+    fetch(scalperRoute(broker, 'all'))
       .then(r => r.json())
       .then((j: { success: boolean; positions?: Record<string, unknown>[]; orders?: Record<string, unknown>[]; trades?: Record<string, unknown>[]; funds?: Record<string, any>; pnl_guard?: any }) => {
         if (j.success) {
@@ -426,7 +422,7 @@ export default function Scalper() {
   }, [broker]);
 
   const pollTabData = useCallback(() => {
-    fetch(brokerRoute(broker, '/api/scalper/poll', '/api/scalper/zerodha/poll'))
+    fetch(scalperRoute(broker, 'poll'))
       .then(r => r.json())
       .then((j: { success: boolean; positions?: Record<string, unknown>[]; orders?: Record<string, unknown>[]; trades?: Record<string, unknown>[] }) => {
         if (j.success) {
@@ -439,7 +435,7 @@ export default function Scalper() {
   }, [broker]);
 
   const pollFunds = useCallback(() => {
-    fetch(brokerRoute(broker, '/api/scalper/funds', '/api/scalper/zerodha/funds'))
+    fetch(scalperRoute(broker, 'funds'))
       .then(r => r.json())
       .then((j: { success: boolean; data?: Record<string, any> }) => {
         if (j.success) setFundsData(j.data ?? null);
@@ -502,13 +498,15 @@ export default function Scalper() {
     try {
       const entry = strikeMap[String(strike)];
       let res: Response;
-      if (broker === 'zerodha') {
+      if (broker !== 'dhan') {
+        // Every non-Dhan broker orders by trading symbol and shares this
+        // request shape; only the exchange spelling differs.
         const symbol = entry?.[option === 'CE' ? 'ceSymbol' : 'peSymbol'];
         if (!symbol) {
-          addToast('error', `${side} ${option} failed`, 'Zerodha strike data still loading');
+          addToast('error', `${side} ${option} failed`, `${BROKER_LABELS[broker]} strike data still loading`);
           return;
         }
-        res = await fetch('/api/scalper/zerodha/order', {
+        res = await fetch(scalperRoute(broker, 'order'), {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
@@ -516,7 +514,9 @@ export default function Scalper() {
             quantity: lots * lotSize,
             side,
             orderType: orderMode,
-            exchange: underlying === 'SENSEX' ? 'BFO' : 'NFO',
+            exchange: broker === 'kotak'
+              ? (underlying === 'SENSEX' ? 'bse_fo' : 'nse_fo')
+              : (underlying === 'SENSEX' ? 'BFO' : 'NFO'),
             ...(orderMode === 'LIMIT' ? { price: Number(limitPrice) } : {}),
           }),
         });
@@ -589,9 +589,10 @@ export default function Scalper() {
       // selected in the UI must still close on its own exchange.
       let liveNetQty = 0;
       let liveSecId = fallbackSecId;
-      let liveExchange = String(pos.exchangeSegment ?? pos.exchange ?? (broker === 'zerodha' ? 'NFO' : 'NSE_FNO'));
+      let liveExchange = String(pos.exchangeSegment ?? pos.exchange ??
+        (broker === 'kotak' ? 'nse_fo' : broker === 'zerodha' ? 'NFO' : 'NSE_FNO'));
       try {
-        const posUrl = brokerRoute(broker, '/api/scalper/positions', '/api/scalper/zerodha/positions');
+        const posUrl = scalperRoute(broker, 'positions');
         const posRes = await fetch(posUrl);
         const posJson = await posRes.json() as { success: boolean; data?: Record<string, unknown>[] };
         if (posJson.success && posJson.data) {
@@ -617,12 +618,14 @@ export default function Scalper() {
       const side = liveNetQty > 0 ? 'SELL' : 'BUY';
       const qty = Math.abs(liveNetQty);
 
-      const orderUrl = brokerRoute(broker, '/api/scalper/fast-order', '/api/scalper/zerodha/order');
+      const orderUrl = broker === 'dhan' ? '/api/scalper/fast-order' : scalperRoute(broker, 'order');
       const res = await fetch(orderUrl, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(
-          broker === 'zerodha'
+          // Dhan is the only broker that closes by numeric securityId; the rest
+          // close by trading symbol.
+          broker !== 'dhan'
             ? { tradingsymbol: sym, quantity: qty, side, orderType: 'MARKET', exchange: liveExchange }
             : { securityId: liveSecId, quantity: qty, side, orderType: 'MARKET', exchangeSegment: liveExchange },
         ),
@@ -678,13 +681,14 @@ export default function Scalper() {
     setExitingAll(true);
     setConfirmExitAll(false);
     try {
-      if (broker === 'zerodha') {
-        const res = await fetch('/api/scalper/zerodha/exit-all', { method: 'POST' });
+      if (broker !== 'dhan') {
+        const label = BROKER_LABELS[broker];
+        const res = await fetch(scalperRoute(broker, 'exit-all'), { method: 'POST' });
         const data = await res.json() as { success: boolean; closed: string[]; errors: string[] };
         if (data.success) {
-          addToast('success', `All Zerodha positions liquidated.${data.closed.length ? ` (${data.closed.join(', ')})` : ''}`);
+          addToast('success', `All ${label} positions liquidated.${data.closed.length ? ` (${data.closed.join(', ')})` : ''}`);
         } else {
-          addToast('error', 'Zerodha exit failed', data.errors.join('; ') || 'Unknown error');
+          addToast('error', `${label} exit failed`, data.errors.join('; ') || 'Unknown error');
         }
       } else {
         const res = await fetch('/api/exit-all', { method: 'POST' });
@@ -988,12 +992,13 @@ export default function Scalper() {
             {authenticatedBrokers.length > 1 && (
               <select
                 value={broker}
-                onChange={e => setBroker(e.target.value as 'dhan' | 'zerodha')}
+                onChange={e => setBroker(e.target.value as Broker)}
                 className="bg-zinc-900 border border-zinc-700 text-zinc-200 text-xs font-semibold
                            rounded-lg px-2.5 py-1.5 focus:outline-none focus:border-emerald-500 w-[88px] shrink-0"
               >
-                {authenticatedBrokers.includes('dhan') && <option value="dhan">Dhan</option>}
-                {authenticatedBrokers.includes('zerodha') && <option value="zerodha">Zerodha</option>}
+                {authenticatedBrokers.map(b => (
+                  <option key={b} value={b}>{BROKER_LABELS[b]}</option>
+                ))}
               </select>
             )}
 
@@ -1966,11 +1971,22 @@ export function FundsView({ data, realizedPnl }: FundsViewProps) {
   const used = Number(data.utilizedAmount) || 0;
   const total = available + used;
 
+  // Collateral-aware brokers (Kotak) report how much of the balance is pledged
+  // holdings rather than money. Showing only the headline invites sizing a
+  // trade against Rs 9L that cannot pay a single rupee of option premium, so
+  // the split is surfaced whenever the broker gives it.
+  const collateral = Number(data.collateralAmount);
+  const cash = Number(data.cashBalance);
+  const hasCollateralSplit = Number.isFinite(collateral) && Number.isFinite(cash) && collateral > 0;
+
   const rows = [
     { label: 'Total Balance', value: total },
     { label: 'Used Margin', value: used },
     { label: 'Realized P&L', value: realizedPnl },
     { label: 'Available', value: available },
+    ...(hasCollateralSplit
+      ? [{ label: 'Collateral', value: collateral }, { label: 'Cash', value: cash }]
+      : []),
   ];
 
   const renderSection = (title: string) => (
@@ -1990,8 +2006,13 @@ export function FundsView({ data, realizedPnl }: FundsViewProps) {
               <td className={`py-3 text-right font-semibold ${
                 row.label === 'Realized P&L' && row.value !== 0
                   ? row.value > 0 ? 'text-emerald-400' : 'text-rose-400'
-                  : 'text-zinc-100'
-              }`}>
+                  : row.label === 'Cash' && row.value <= 0
+                    ? 'text-amber-400'
+                    : 'text-zinc-100'
+              }`}
+              title={row.label === 'Cash' && row.value <= 0
+                ? 'No cash: the balance is collateral from pledged holdings. Option writes are backed by it, but any premium debit (a BUY, including buying back a short to close) may be rejected.'
+                : undefined}>
                 {formatFundsValue(row.value)}
               </td>
             </tr>

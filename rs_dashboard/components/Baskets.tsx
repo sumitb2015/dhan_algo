@@ -7,7 +7,7 @@ import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
 import { formatFundsValue, type ChainOcEntry, type Toast } from './Scalper';
 import { useLiveOptionsWS } from '@/lib/useLiveOptionsWS';
-import { useBrokerSelector } from '@/hooks/useBrokerSelector';
+import { useBrokerSelector, scalperRoute, BROKER_LABELS, type Broker } from '@/hooks/useBrokerSelector';
 import {
   STRATEGY_CATEGORIES, type StrategyCategory, type StrategyTemplate,
   type BasketLeg, type OptionType, type PayoffLeg,
@@ -141,9 +141,7 @@ export default function Baskets() {
     if (!farExpiry || farExpiry === expiry) { setFarStrikeMap({}); return; }
     const requestedUnderlying = underlying;
     const requestedFarExpiry = farExpiry;
-    const lookupUrl = broker === 'zerodha'
-      ? `/api/scalper/zerodha/lookup?underlying=${underlying}&expiry=${farExpiry}`
-      : `/api/scalper/lookup?underlying=${underlying}&expiry=${farExpiry}`;
+    const lookupUrl = `${scalperRoute(broker, 'lookup')}?underlying=${underlying}&expiry=${farExpiry}`;
     fetch(lookupUrl)
       .then(r => r.json())
       .then((j: { success: boolean; data?: { strikes: Record<string, StrikeIdentifier> } }) => {
@@ -155,7 +153,7 @@ export default function Baskets() {
 
   // ── Funds tile: reload on broker change ──────────────────────────
   useEffect(() => {
-    const url = broker === 'zerodha' ? '/api/scalper/zerodha/funds' : '/api/scalper/funds';
+    const url = scalperRoute(broker, 'funds');
     fetch(url)
       .then(r => r.json())
       .then((j: { success: boolean; data?: Record<string, number> }) => {
@@ -199,9 +197,7 @@ export default function Baskets() {
 
     const requestedUnderlyingForLookup = underlying;
     const requestedExpiry = expiry;
-    const lookupUrl = broker === 'zerodha'
-      ? `/api/scalper/zerodha/lookup?underlying=${underlying}&expiry=${expiry}`
-      : `/api/scalper/lookup?underlying=${underlying}&expiry=${expiry}`;
+    const lookupUrl = `${scalperRoute(broker, 'lookup')}?underlying=${underlying}&expiry=${expiry}`;
     fetch(lookupUrl)
       .then(r => r.json())
       .then((j: { success: boolean; data?: { lotSize: number; strikes: Record<string, StrikeIdentifier> } }) => {
@@ -587,9 +583,9 @@ export default function Baskets() {
             </select>
 
             {authenticatedBrokers.length > 1 && (
-              <select value={broker} onChange={e => setBroker(e.target.value as 'dhan' | 'zerodha')}
+              <select value={broker} onChange={e => setBroker(e.target.value as Broker)}
                 className="h-8 bg-zinc-900 border border-zinc-700 text-zinc-200 text-xs font-semibold rounded-lg px-2.5 focus:outline-none focus:border-emerald-500">
-                {authenticatedBrokers.map(b => <option key={b} value={b}>{b === 'dhan' ? 'Dhan' : 'Zerodha'}</option>)}
+                {authenticatedBrokers.map(b => <option key={b} value={b}>{BROKER_LABELS[b]}</option>)}
               </select>
             )}
 

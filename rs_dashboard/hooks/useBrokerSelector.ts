@@ -2,11 +2,31 @@
 
 import { useState, useEffect } from 'react';
 
-export type Broker = 'dhan' | 'zerodha';
+export const BROKERS = ['dhan', 'zerodha', 'kotak'] as const;
+export type Broker = typeof BROKERS[number];
 
-/** Picks the Dhan or Zerodha URL for the currently selected broker. */
-export function brokerRoute(broker: Broker, dhanPath: string, zerodhaPath: string): string {
-  return broker === 'zerodha' ? zerodhaPath : dhanPath;
+/** Display names for the broker selector. */
+export const BROKER_LABELS: Record<Broker, string> = {
+  dhan: 'Dhan',
+  zerodha: 'Zerodha',
+  kotak: 'Kotak',
+};
+
+/**
+ * Picks the API path for the currently selected broker.
+ *
+ * Takes a map rather than positional arguments: with three brokers a positional
+ * pair silently routes the third one to Dhan's endpoint, which on an order
+ * placement means trading the wrong account. A missing entry falls back to
+ * `dhan`, which is always present.
+ */
+export function brokerRoute(broker: Broker, paths: Partial<Record<Broker, string>>): string {
+  return paths[broker] ?? paths.dhan ?? '';
+}
+
+/** The conventional `/api/scalper/<x>` layout: Dhan at the root, others nested. */
+export function scalperRoute(broker: Broker, endpoint: string): string {
+  return broker === 'dhan' ? `/api/scalper/${endpoint}` : `/api/scalper/${broker}/${endpoint}`;
 }
 
 /**
@@ -28,10 +48,8 @@ export function useBrokerSelector() {
   useEffect(() => {
     fetch('/api/auth/broker-status')
       .then(r => r.json())
-      .then((j: { dhan: boolean; zerodha: boolean }) => {
-        const brokers: Broker[] = [];
-        if (j.dhan) brokers.push('dhan');
-        if (j.zerodha) brokers.push('zerodha');
+      .then((j: Partial<Record<Broker, boolean>>) => {
+        const brokers = BROKERS.filter(b => j[b]);
         setAuthenticatedBrokers(brokers.length ? brokers : ['dhan']);
         setHasAuthenticatedBroker(brokers.length > 0);
         setAuthChecked(true);

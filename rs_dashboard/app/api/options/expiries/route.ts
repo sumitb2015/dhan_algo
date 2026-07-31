@@ -13,7 +13,19 @@ const FETCH_SCRIPT = path.join(PROJECT_ROOT, 'scripts', 'tools', 'options_data_f
 const cache = new Map<string, { data: string[]; ts: number }>();
 const CACHE_TTL = 60 * 60 * 1000; // 1 hour
 
-const ZERODHA_SUPPORTED_UNDERLYINGS = new Set(['NIFTY', 'BANKNIFTY', 'SENSEX']);
+// Brokers whose expiries come from a locally cached instrument master rather
+// than a live API call. Both caches are written in the same row shape, so one
+// code path serves them; only the file name and the builder script differ.
+const CACHE_BROKERS: Record<string, { supported: Set<string>; script: string }> = {
+  zerodha: {
+    supported: new Set(['NIFTY', 'BANKNIFTY', 'SENSEX']),
+    script: 'zerodha_instruments_cache.py',
+  },
+  kotak: {
+    supported: new Set(['NIFTY', 'BANKNIFTY', 'FINNIFTY', 'SENSEX']),
+    script: 'kotak_instruments_cache.py',
+  },
+};
 
 // Today's date in IST, as YYYY-MM-DD — used to both scope the cache key
 // (so a stale entry can never survive a day rollover) and to filter out
@@ -28,21 +40,23 @@ export async function GET(request: NextRequest) {
   const broker = (searchParams.get('broker') ?? 'dhan').toLowerCase();
   const today = todayIST();
 
-  if (broker === 'zerodha' && !ZERODHA_SUPPORTED_UNDERLYINGS.has(underlying)) {
+  const cacheBroker = CACHE_BROKERS[broker];
+
+  if (cacheBroker && !cacheBroker.supported.has(underlying)) {
     // Fail loudly instead of silently returning another underlying's
     // expiries mislabeled as the requested one.
     return NextResponse.json(
-      { success: false, error: `Zerodha does not support ${underlying} yet` },
+      { success: false, error: `${broker} does not support ${underlying} yet` },
       { status: 400 },
     );
   }
 
-  if (broker === 'zerodha') {
+  if (cacheBroker) {
     try {
-      const cacheFile = path.join(PROJECT_ROOT, 'debug', `zerodha_${underlying.toLowerCase()}_instruments.json`);
+      const cacheFile = path.join(PROJECT_ROOT, 'debug', `${broker}_${underlying.toLowerCase()}_instruments.json`);
       if (!fs.existsSync(cacheFile)) {
-        const cacheScript = path.join(PROJECT_ROOT, 'scripts', 'tools', 'zerodha_instruments_cache.py');
-        await execFileAsync(PYTHON_EXE, [cacheScript, '--underlying', underlying], { encoding: 'utf8', timeout: 60_000, windowsHide: true });
+        const cacheScript = path.join(PROJECT_ROOT, 'scripts', 'tools', cacheBroker.script);
+        await execFileAsync(PYTHON_EXE, [cacheScript, '--underlying', underlying], { encoding: 'utf8', timeout: 120_000, windowsHide: true });
       }
       if (fs.existsSync(cacheFile)) {
         const raw = fs.readFileSync(cacheFile, 'utf8');
@@ -53,8 +67,8 @@ export async function GET(request: NextRequest) {
         return NextResponse.json({ success: true, data: uniqueExpiries });
       }
     } catch (err) {
-      console.error('[/api/options/expiries] Failed to read/generate Zerodha cache:', err);
-      return NextResponse.json({ success: false, error: 'Failed to retrieve Zerodha expiries' }, { status: 500 });
+      console.error(`[/api/options/expiries] Failed to read/generate ${broker} cache:`, err);
+      return NextResponse.json({ success: false, error: `Failed to retrieve ${broker} expiries` }, { status: 500 });
     }
   }
 

@@ -4,8 +4,10 @@ venv/
 # Sensitive Credentials
 .env
 .env.zerodha
+.env.kotak
 access_token.json
 zerodha_access_token.json
+kotak_access_token.json
 access_token.txt
 last_modified.txt
 credentials.json

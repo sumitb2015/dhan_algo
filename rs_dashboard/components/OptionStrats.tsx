@@ -9,7 +9,7 @@ import {
 import {
   sortLegsForPlacement, resolveOrderRequest, type OrderLeg, type StrikeIdentifier,
 } from '@/lib/basketOrders';
-import { useBrokerSelector, type Broker } from '@/hooks/useBrokerSelector';
+import { useBrokerSelector, scalperRoute, type Broker } from '@/hooks/useBrokerSelector';
 import { fetchMarginSummary, type MarginSummary } from '@/lib/optionsMargin';
 import { useLiveOptionsWS } from '@/lib/useLiveOptionsWS';
 import {
@@ -145,9 +145,7 @@ export default function OptionStrats() {
 
   useEffect(() => {
     if (!selectedExpiry) return;
-    const lookupUrl = broker === 'zerodha'
-      ? `/api/scalper/zerodha/lookup?underlying=${UNDERLYING}&expiry=${selectedExpiry}`
-      : `/api/scalper/lookup?underlying=${UNDERLYING}&expiry=${selectedExpiry}`;
+    const lookupUrl = `${scalperRoute(broker, 'lookup')}?underlying=${UNDERLYING}&expiry=${selectedExpiry}`;
     fetch(lookupUrl)
       .then((r) => r.json())
       .then((json) => setStrikeMap(json?.success ? (json.data?.strikes ?? {}) : {}))
