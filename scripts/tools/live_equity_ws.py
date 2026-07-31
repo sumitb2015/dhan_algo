@@ -16,6 +16,9 @@ import json
 import time
 import argparse
 from datetime import datetime
+from zoneinfo import ZoneInfo
+
+IST = ZoneInfo('Asia/Kolkata')
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, ROOT)
@@ -118,6 +121,19 @@ def main():
     write_status('RUNNING', subscribed=n, index=args.index, started_at=started_at)
     print('[live_equity_ws] WebSocket connected. Writing quotes every 2 s…', flush=True)
 
+    # Yesterday's close, keyed "<IST date>:<symbol>", populated by the first
+    # genuine (non-flipped) tick seen each day and reused after that.
+    #
+    # Dhan's Quote packet 'close' field flips to equal the live LTP the moment
+    # the 15:30 bell rings (same behaviour documented for the OHLC REST
+    # endpoint in rs_dashboard/app/api/scalper/top-indices/route.ts) — without
+    # this cache, every symbol would silently collapse to a confident 0.00%
+    # change once the market closes.
+    prev_close_cache: dict[str, float] = {}
+
+    def ist_today() -> str:
+        return datetime.now(IST).strftime('%Y-%m-%d')
+
     # ── Main loop ────────────────────────────────────────────────────────────
     try:
         while True:
@@ -131,13 +147,28 @@ def main():
                 break
 
             quotes: dict[str, dict] = {}
+            day = ist_today()
+            for key in [k for k in prev_close_cache if not k.startswith(f'{day}:')]:
+                del prev_close_cache[key]
             for sid, sym in sid_to_symbol.items():
                 tick = helper.live_data.get(sid)
                 if not tick:
                     continue
 
-                ltp        = float(tick.get('LTP') or tick.get('last_price') or 0)
-                prev_close = float(tick.get('prev_close') or tick.get('close') or 0)
+                ltp = float(tick.get('LTP') or tick.get('last_price') or 0)
+
+                cache_key = f'{day}:{sym}'
+                cached = prev_close_cache.get(cache_key)
+                if cached is not None:
+                    prev_close = cached
+                else:
+                    raw_close = float(tick.get('prev_close') or tick.get('close') or 0)
+                    # A raw close equal to LTP is Dhan's post-close flip, not a
+                    # genuine 0% day — treat it as unknown rather than cache it.
+                    prev_close = raw_close if raw_close > 0 and raw_close != ltp else 0.0
+                    if prev_close:
+                        prev_close_cache[cache_key] = prev_close
+
                 open_      = float(tick.get('open') or 0)
                 high       = float(tick.get('high') or 0)
                 low        = float(tick.get('low') or 0)
