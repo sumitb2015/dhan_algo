@@ -1620,16 +1620,16 @@ export const OptionPanel = React.memo(function OptionPanel({
         )}
 
         <div className="flex items-center gap-1">
-          {onShiftDown && (
+          {onShiftUp && (
             <button
-              onClick={onShiftDown}
+              onClick={onShiftUp}
               disabled={!strike || pending || !strikesReady}
-              title="Shift strike down (auto-close active position if any)"
+              title="Shift strike up (auto-close active position if any)"
               className="w-6 h-7 flex items-center justify-center rounded-lg border border-zinc-700
                          bg-zinc-800 text-zinc-300 hover:text-white hover:bg-zinc-700 hover:border-zinc-600
                          disabled:opacity-30 disabled:cursor-not-allowed transition-all text-[10px] font-bold active:scale-95"
             >
-              ▼
+              ▲
             </button>
           )}
           <select value={strike ?? ''} onChange={e => onStrikeChange(Number(e.target.value))}
@@ -1642,16 +1642,16 @@ export const OptionPanel = React.memo(function OptionPanel({
               </option>
             ))}
           </select>
-          {onShiftUp && (
+          {onShiftDown && (
             <button
-              onClick={onShiftUp}
+              onClick={onShiftDown}
               disabled={!strike || pending || !strikesReady}
-              title="Shift strike up (auto-close active position if any)"
+              title="Shift strike down (auto-close active position if any)"
               className="w-6 h-7 flex items-center justify-center rounded-lg border border-zinc-700
                          bg-zinc-800 text-zinc-300 hover:text-white hover:bg-zinc-700 hover:border-zinc-600
                          disabled:opacity-30 disabled:cursor-not-allowed transition-all text-[10px] font-bold active:scale-95"
             >
-              ▲
+              ▼
             </button>
           )}
           {onRemove && (
