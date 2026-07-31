@@ -10,10 +10,14 @@
 // See that route for why the live_indices_ws.py bridge is deliberately not used
 // here — it has no prev_close, so it cannot express "% vs yesterday's close".
 
-import React, { useMemo } from 'react';
+import React, { useMemo, useState } from 'react';
 import { cn } from '@/lib/utils';
 import { useLiveTickerPoll, isStale, ageOf, ageLabel } from '@/lib/useLiveTickerPoll';
-import { TickerPanel, TH, TD, PctPill, fmtPrice, DASH } from './LiveTickerPanel';
+import { TickerPanel, TH, TD, PctPill, fmtPrice, DASH, type SortDir } from './LiveTickerPanel';
+
+type SortKey = 'label' | 'ltp' | 'change_pct';
+/** Column default direction on first click — text ascending, numbers descending. */
+const DEFAULT_DIR: Record<SortKey, SortDir> = { label: 'asc', ltp: 'desc', change_pct: 'desc' };
 
 interface IndexQuote {
   ltp: number;
@@ -53,23 +57,38 @@ export default function TopIndices({ className }: { className?: string }) {
   const stale = isStale(tickMs, now);
   const ageMs = ageOf(tickMs, now);
 
+  // Defaults to % change, descending — the panel's original behavior — until
+  // the user clicks a header.
+  const [sort, setSort] = useState<{ key: SortKey; dir: SortDir }>({ key: 'change_pct', dir: 'desc' });
+  const toggleSort = (key: SortKey) =>
+    setSort(s => (s.key === key ? { key, dir: s.dir === 'asc' ? 'desc' : 'asc' } : { key, dir: DEFAULT_DIR[key] }));
+
   const rows = useMemo<Row[]>(() => {
     // The route returns its definition order, so labels and membership live in
     // one place (the route) rather than being duplicated here.
     const order = data?.order ?? [];
     const quotes = data?.quotes ?? {};
     const joined: Row[] = order.map(o => ({ ...o, quote: quotes[o.key] ?? null }));
-    // Sorted by % change descending, matching the stocks panel. Rows with no
-    // quote sort last rather than counting as 0% — "unknown" is not "flat".
+    const dirMul = sort.dir === 'asc' ? 1 : -1;
+    const value = (r: Row): number | string | null => {
+      switch (sort.key) {
+        case 'label': return r.label;
+        case 'ltp': return r.quote && r.quote.ltp > 0 ? r.quote.ltp : null;
+        case 'change_pct': return r.quote?.change_pct ?? null;
+      }
+    };
+    // Rows with no value for the sorted column sort last regardless of
+    // direction — "unknown" is not "flat".
     return joined.sort((a, b) => {
-      const av = a.quote?.change_pct ?? null;
-      const bv = b.quote?.change_pct ?? null;
+      const av = value(a);
+      const bv = value(b);
       if (av === null && bv === null) return 0;
       if (av === null) return 1;
       if (bv === null) return -1;
-      return bv - av;
+      if (typeof av === 'string' && typeof bv === 'string') return dirMul * av.localeCompare(bv);
+      return dirMul * ((av as number) - (bv as number));
     });
-  }, [data]);
+  }, [data, sort]);
 
   // This panel talks to a REST route rather than a background bridge, so there
   // is no process status to report.
@@ -104,7 +123,13 @@ export default function TopIndices({ className }: { className?: string }) {
       statusTitle={statusTitle}
       dimBody={stale}
       className={className}
-      head={<tr><TH>Index</TH><TH right>LTP</TH><TH right>Chg%</TH></tr>}
+      head={
+        <tr>
+          <TH sortDir={sort.key === 'label' ? sort.dir : null} onClick={() => toggleSort('label')}>Index</TH>
+          <TH right sortDir={sort.key === 'ltp' ? sort.dir : null} onClick={() => toggleSort('ltp')}>LTP</TH>
+          <TH right sortDir={sort.key === 'change_pct' ? sort.dir : null} onClick={() => toggleSort('change_pct')}>Chg%</TH>
+        </tr>
+      }
     >
       {rows.map(r => {
         const f = flash[r.key];

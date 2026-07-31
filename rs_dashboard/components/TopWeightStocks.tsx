@@ -13,11 +13,15 @@
 // separate prev-close fetch and no recomputation here — we display the feed's
 // own change_pct.
 
-import React, { useMemo } from 'react';
+import React, { useMemo, useState } from 'react';
 import { cn } from '@/lib/utils';
 import { NIFTY_TOP10_BY_WEIGHT } from '@/lib/nifty50';
 import { useLiveTickerPoll, isStale, ageOf, ageLabel } from '@/lib/useLiveTickerPoll';
-import { TickerPanel, TH, TD, PctPill, fmtPrice, DASH } from './LiveTickerPanel';
+import { TickerPanel, TH, TD, PctPill, fmtPrice, DASH, type SortDir } from './LiveTickerPanel';
+
+type SortKey = 'name' | 'ltp' | 'change_pct' | 'weight';
+/** Column default direction on first click — text ascending, numbers descending (biggest/most-changed first). */
+const DEFAULT_DIR: Record<SortKey, SortDir> = { name: 'asc', ltp: 'desc', change_pct: 'desc', weight: 'desc' };
 
 interface LiveQuote {
   ltp: number;
@@ -64,21 +68,36 @@ export default function TopWeightStocks({ className }: { className?: string }) {
   const stale = isStale(tickMs, now);
   const ageMs = ageOf(tickMs, now);
 
+  // Defaults to % change, descending — the panel's original behavior — until
+  // the user clicks a header.
+  const [sort, setSort] = useState<{ key: SortKey; dir: SortDir }>({ key: 'change_pct', dir: 'desc' });
+  const toggleSort = (key: SortKey) =>
+    setSort(s => (s.key === key ? { key, dir: s.dir === 'asc' ? 'desc' : 'asc' } : { key, dir: DEFAULT_DIR[key] }));
+
   const rows = useMemo<Row[]>(() => {
     const q = data?.quotes?.quotes ?? {};
     const joined: Row[] = NIFTY_TOP10_BY_WEIGHT.map(w => ({ ...w, quote: q[w.symbol] ?? null }));
-    // Live-sorted by % change, descending. Symbols without a quote sort last
-    // rather than being treated as 0%, which would park them mid-table and
-    // read as "flat" when the truth is "unknown".
+    const dirMul = sort.dir === 'asc' ? 1 : -1;
+    const value = (r: Row): number | string | null => {
+      switch (sort.key) {
+        case 'name': return r.name;
+        case 'weight': return r.weight;
+        case 'ltp': return r.quote && r.quote.ltp > 0 ? r.quote.ltp : null;
+        case 'change_pct': return r.quote && r.quote.prev_close > 0 ? r.quote.change_pct : null;
+      }
+    };
+    // Rows with no value for the sorted column sort last regardless of
+    // direction, rather than being treated as 0 — "unknown" is not "flat".
     return joined.sort((a, b) => {
-      const av = a.quote ? a.quote.change_pct : null;
-      const bv = b.quote ? b.quote.change_pct : null;
+      const av = value(a);
+      const bv = value(b);
       if (av === null && bv === null) return b.weight - a.weight;
       if (av === null) return 1;
       if (bv === null) return -1;
-      return bv - av;
+      if (typeof av === 'string' && typeof bv === 'string') return dirMul * av.localeCompare(bv);
+      return dirMul * ((av as number) - (bv as number));
     });
-  }, [data]);
+  }, [data, sort]);
 
   const rawStatus = data?.status?.status ?? 'STOPPED';
   // How many of our ten rows the feed can actually price. A bridge that is
@@ -111,7 +130,14 @@ export default function TopWeightStocks({ className }: { className?: string }) {
       }
       dimBody={stale}
       className={className}
-      head={<tr><TH>Stock</TH><TH right>LTP</TH><TH right>Chg%</TH><TH right>Wt%</TH></tr>}
+      head={
+        <tr>
+          <TH sortDir={sort.key === 'name' ? sort.dir : null} onClick={() => toggleSort('name')}>Stock</TH>
+          <TH right sortDir={sort.key === 'ltp' ? sort.dir : null} onClick={() => toggleSort('ltp')}>LTP</TH>
+          <TH right sortDir={sort.key === 'change_pct' ? sort.dir : null} onClick={() => toggleSort('change_pct')}>Chg%</TH>
+          <TH right sortDir={sort.key === 'weight' ? sort.dir : null} onClick={() => toggleSort('weight')}>Wt%</TH>
+        </tr>
+      }
     >
       {rows.map(r => {
         const f = flash[r.symbol];

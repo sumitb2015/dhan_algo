@@ -19,11 +19,32 @@ export function fmtPrice(n: number) {
   return n.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 }
 
-export function TH({ children, right, className }: { children?: React.ReactNode; right?: boolean; className?: string }) {
+export type SortDir = 'asc' | 'desc';
+
+export function TH({ children, right, className, sortDir, onClick }: {
+  children?: React.ReactNode;
+  right?: boolean;
+  className?: string;
+  /** Present (even if the column isn't the active sort) marks the header clickable. */
+  sortDir?: SortDir | null;
+  onClick?: () => void;
+}) {
+  const sortable = onClick !== undefined;
   return (
-    <th className={cn('py-1.5 px-2 text-xs font-bold text-white bg-zinc-800 uppercase tracking-wide whitespace-nowrap',
-      right ? 'text-right' : 'text-left', className)}>
-      {children}
+    <th
+      onClick={onClick}
+      aria-sort={sortDir === 'asc' ? 'ascending' : sortDir === 'desc' ? 'descending' : undefined}
+      className={cn('py-1.5 px-2 text-xs font-bold text-white bg-zinc-800 uppercase tracking-wide whitespace-nowrap',
+        right ? 'text-right' : 'text-left',
+        sortable && 'cursor-pointer select-none hover:bg-zinc-700', className)}>
+      <span className={cn('inline-flex items-center gap-0.5', right && 'flex-row-reverse')}>
+        {children}
+        {sortable && (
+          <span className={cn('text-[9px] leading-none', sortDir ? 'text-zinc-300' : 'text-zinc-600')}>
+            {sortDir === 'asc' ? '▲' : sortDir === 'desc' ? '▼' : '↕'}
+          </span>
+        )}
+      </span>
     </th>
   );
 }
