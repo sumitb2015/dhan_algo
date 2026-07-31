@@ -974,6 +974,147 @@ export default function Scalper() {
     addToast('error', 'Could not match position to a strike', sym);
   }, [strikeMap, handleCeStrikeChange, handlePeStrikeChange, addToast]);
 
+  // ─── Shift Strike Up/Down (Auto-close active position & shift to new strike) ───
+  const handleShiftStrike = useCallback(async (option: 'CE' | 'PE', direction: 'UP' | 'DOWN') => {
+    const currentStrike = option === 'CE' ? ceStrike : peStrike;
+    if (!currentStrike || !visibleStrikes.length) return;
+    if (orderInFlightRef.current.has(option)) return;
+
+    const strikesToSearch = allStrikes.length ? allStrikes : visibleStrikes;
+    const sorted = [...strikesToSearch].sort((a, b) => a - b);
+    const currIdx = sorted.indexOf(currentStrike);
+    let targetIdx = -1;
+
+    if (direction === 'UP') {
+      if (currIdx !== -1 && currIdx < sorted.length - 1) {
+        targetIdx = currIdx + 1;
+      } else {
+        const next = currentStrike + strikeStep;
+        if (sorted.includes(next)) targetIdx = sorted.indexOf(next);
+      }
+    } else {
+      if (currIdx > 0) {
+        targetIdx = currIdx - 1;
+      } else {
+        const prev = currentStrike - strikeStep;
+        if (sorted.includes(prev)) targetIdx = sorted.indexOf(prev);
+      }
+    }
+
+    if (targetIdx === -1) {
+      addToast('error', `Cannot shift ${direction.toLowerCase()}`, `No ${direction.toLowerCase()} strike available`);
+      return;
+    }
+
+    const newStrike = sorted[targetIdx];
+
+    // Check if there is an active open position for currentStrike & option side
+    const curSecEntry = strikeMap[String(currentStrike)];
+    const curSym = curSecEntry?.[option === 'CE' ? 'ceSymbol' : 'peSymbol'];
+    const curSecId = curSecEntry?.[option === 'CE' ? 'ceId' : 'peId'];
+
+    const activePos = enrichedPositions.find(p => {
+      const netQty = Number(p.netQty);
+      if (!netQty) return false;
+      const pSym = String(p.tradingSymbol ?? '');
+      const pSecId = String(p.securityId ?? p.security_id ?? '');
+      if (curSym && pSym === curSym) return true;
+      if (curSecId && pSecId === curSecId) return true;
+      return false;
+    });
+
+    if (activePos && Number(activePos.netQty) !== 0) {
+      const netQty = Number(activePos.netQty);
+      const sideToOpen: 'BUY' | 'SELL' = netQty < 0 ? 'SELL' : 'BUY';
+      const openLots = Math.max(1, Math.round(Math.abs(netQty) / lotSize));
+
+      orderInFlightRef.current.add(option);
+      setOrderPending(prev => new Set([...prev, option]));
+
+      try {
+        addToast('success', `Shifting ${currentStrike} ${option} → ${newStrike} ${option}`, `Closing ${currentStrike} position first...`);
+        
+        // 1. Close active position on current strike
+        await closePosition(activePos, 'Strike Shift');
+
+        // 2. Update selected strike to new strike
+        if (option === 'CE') {
+          handleCeStrikeChange(newStrike);
+        } else {
+          handlePeStrikeChange(newStrike);
+        }
+
+        // 3. Open matching position on the new strike
+        const newSecEntry = strikeMap[String(newStrike)];
+        let res: Response;
+        if (broker !== 'dhan') {
+          const symbol = newSecEntry?.[option === 'CE' ? 'ceSymbol' : 'peSymbol'];
+          if (!symbol) {
+            addToast('error', `Shift to ${newStrike} failed`, `Strike symbol data loading`);
+            return;
+          }
+          res = await fetch(scalperRoute(broker, 'order'), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              tradingsymbol: symbol,
+              quantity: openLots * lotSize,
+              side: sideToOpen,
+              orderType: 'MARKET',
+              exchange: broker === 'kotak'
+                ? (underlying === 'SENSEX' ? 'bse_fo' : 'nse_fo')
+                : (underlying === 'SENSEX' ? 'BFO' : 'NFO'),
+            }),
+          });
+        } else {
+          const secId = newSecEntry?.[option === 'CE' ? 'ceId' : 'peId'];
+          if (secId) {
+            res = await fetch('/api/scalper/fast-order', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                securityId: secId,
+                quantity: openLots * lotSize,
+                side: sideToOpen,
+                orderType: 'MARKET',
+                exchangeSegment: underlying === 'SENSEX' ? 'BSE_FNO' : 'NSE_FNO',
+              }),
+            });
+          } else {
+            res = await fetch('/api/scalper/order', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                underlying, expiry, strike: newStrike, option, side: sideToOpen, lots: openLots, type: 'MARKET',
+              }),
+            });
+          }
+        }
+
+        const j = await res.json() as { success: boolean; order_id?: string; error?: string };
+        if (j.success) {
+          addToast('success', `Shift complete: ${newStrike} ${option}`, `${sideToOpen} ${openLots} lot(s) placed (ID: ${j.order_id})`);
+          setTimeout(fetchTabData, 1000);
+        } else {
+          addToast('error', `New strike order failed`, j.error ?? 'Unknown error');
+        }
+      } catch (e) {
+        addToast('error', 'Shift failed', String(e));
+      } finally {
+        orderInFlightRef.current.delete(option);
+        setOrderPending(prev => { const next = new Set(prev); next.delete(option); return next; });
+      }
+    } else {
+      // No active position: simply update strike selector
+      if (option === 'CE') {
+        handleCeStrikeChange(newStrike);
+      } else {
+        handlePeStrikeChange(newStrike);
+      }
+      addToast('success', `Strike shifted to ${newStrike} ${option}`);
+    }
+  }, [ceStrike, peStrike, visibleStrikes, allStrikes, strikeStep, strikeMap, enrichedPositions, lotSize, closePosition, handleCeStrikeChange, handlePeStrikeChange, broker, underlying, expiry, addToast, fetchTabData]);
+
   // ─── JSX ─────────────────────────────────────────────────────────
 
   return (
@@ -1295,6 +1436,8 @@ export default function Scalper() {
             limitPrice={ceLimitPrice}
             orderMode={orderMode}
             onStrikeChange={handleCeStrikeChange}
+            onShiftUp={() => handleShiftStrike('CE', 'UP')}
+            onShiftDown={() => handleShiftStrike('CE', 'DOWN')}
             onLimitPriceChange={setCeLimitPrice}
             onBuy={handleCeBuy}
             onSell={handleCeSell}
@@ -1318,6 +1461,8 @@ export default function Scalper() {
             limitPrice={peLimitPrice}
             orderMode={orderMode}
             onStrikeChange={handlePeStrikeChange}
+            onShiftUp={() => handleShiftStrike('PE', 'UP')}
+            onShiftDown={() => handleShiftStrike('PE', 'DOWN')}
             onLimitPriceChange={setPeLimitPrice}
             onBuy={handlePeBuy}
             onSell={handlePeSell}
@@ -1407,6 +1552,9 @@ export interface OptionPanelProps {
   limitPrice: string;
   orderMode: 'MARKET' | 'LIMIT';
   onStrikeChange: (s: number) => void;
+  /** Callbacks for shifting the strike up or down (auto-closing active position if any) */
+  onShiftUp?: () => void;
+  onShiftDown?: () => void;
   onLimitPriceChange: (p: string) => void;
   onBuy: () => void;
   onSell: () => void;
@@ -1436,7 +1584,7 @@ const BUILDUP_STYLES: Record<string, { text: string; cls: string }> = {
 
 export const OptionPanel = React.memo(function OptionPanel({
   side, label, strike, visibleStrikes, atm, ltp, pct, high, low, buildup, oiChgPct,
-  limitPrice, orderMode, onStrikeChange, onLimitPriceChange, onBuy, onSell,
+  limitPrice, orderMode, onStrikeChange, onShiftUp, onShiftDown, onLimitPriceChange, onBuy, onSell,
   lots, onLotsChange, onRemove, canRemove, pnl, onSideChange,
   pending = false, strikesReady = true,
 }: OptionPanelProps) {
@@ -1446,7 +1594,7 @@ export const OptionPanel = React.memo(function OptionPanel({
 
   return (
     <div className="bg-zinc-900/60 border border-zinc-800 rounded-2xl p-5 flex flex-col gap-4 min-w-0">
-      {/* Header: badge + strike selector + remove */}
+      {/* Header: badge + strike selector + shift buttons + remove */}
       <div className="flex items-center justify-between gap-3">
         {onSideChange ? (
           <div className="flex items-center bg-zinc-900 border border-zinc-800 p-0.5 rounded-lg">
@@ -1471,10 +1619,22 @@ export const OptionPanel = React.memo(function OptionPanel({
           }`}>{label} ({side})</span>
         )}
 
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-1">
+          {onShiftDown && (
+            <button
+              onClick={onShiftDown}
+              disabled={!strike || pending || !strikesReady}
+              title="Shift strike down (auto-close active position if any)"
+              className="w-6 h-7 flex items-center justify-center rounded-lg border border-zinc-700
+                         bg-zinc-800 text-zinc-300 hover:text-white hover:bg-zinc-700 hover:border-zinc-600
+                         disabled:opacity-30 disabled:cursor-not-allowed transition-all text-[10px] font-bold active:scale-95"
+            >
+              ▼
+            </button>
+          )}
           <select value={strike ?? ''} onChange={e => onStrikeChange(Number(e.target.value))}
             className="bg-zinc-800 border border-zinc-700 text-zinc-200 text-xs font-mono font-semibold
-                       rounded-lg px-2.5 py-1.5 focus:outline-none focus:border-emerald-500 tabular-nums">
+                       rounded-lg px-2 py-1.5 focus:outline-none focus:border-emerald-500 tabular-nums">
             {!strike && <option value="">— select —</option>}
             {visibleStrikes.map(sk => (
               <option key={sk} value={sk}>
@@ -1482,6 +1642,18 @@ export const OptionPanel = React.memo(function OptionPanel({
               </option>
             ))}
           </select>
+          {onShiftUp && (
+            <button
+              onClick={onShiftUp}
+              disabled={!strike || pending || !strikesReady}
+              title="Shift strike up (auto-close active position if any)"
+              className="w-6 h-7 flex items-center justify-center rounded-lg border border-zinc-700
+                         bg-zinc-800 text-zinc-300 hover:text-white hover:bg-zinc-700 hover:border-zinc-600
+                         disabled:opacity-30 disabled:cursor-not-allowed transition-all text-[10px] font-bold active:scale-95"
+            >
+              ▲
+            </button>
+          )}
           {onRemove && (
             <button
               onClick={onRemove}

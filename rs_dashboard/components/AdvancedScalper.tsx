@@ -709,6 +709,130 @@ export default function AdvancedScalper() {
     }
   }, [broker, addToast, fetchTabData]);
 
+  // ─── Shift Strike Up/Down (Auto-close active position & shift to new strike) ───
+  const handleShiftStrike = useCallback(async (boxId: string, direction: 'UP' | 'DOWN') => {
+    const box = boxes.find(b => b.id === boxId);
+    if (!box || !box.strike || !visibleStrikes.length) return;
+    if (orderInFlightRef.current.has(boxId)) return;
+
+    const strikesToSearch = allStrikes.length ? allStrikes : visibleStrikes;
+    const sorted = [...strikesToSearch].sort((a, b) => a - b);
+    const currIdx = sorted.indexOf(box.strike);
+    let targetIdx = -1;
+
+    if (direction === 'UP') {
+      if (currIdx !== -1 && currIdx < sorted.length - 1) {
+        targetIdx = currIdx + 1;
+      } else {
+        const next = box.strike + strikeStep;
+        if (sorted.includes(next)) targetIdx = sorted.indexOf(next);
+      }
+    } else {
+      if (currIdx > 0) {
+        targetIdx = currIdx - 1;
+      } else {
+        const prev = box.strike - strikeStep;
+        if (sorted.includes(prev)) targetIdx = sorted.indexOf(prev);
+      }
+    }
+
+    if (targetIdx === -1) {
+      addToast('error', `Cannot shift ${direction.toLowerCase()}`, `No ${direction.toLowerCase()} strike available`);
+      return;
+    }
+
+    const newStrike = sorted[targetIdx];
+
+    // Check open position for this box
+    const secId = boxSecId(box);
+    const pos = secId ? positionsBySecId[secId] : undefined;
+
+    if (pos && Number(pos.netQty) !== 0) {
+      const netQty = Number(pos.netQty);
+      const sideToOpen: 'BUY' | 'SELL' = netQty < 0 ? 'SELL' : 'BUY';
+      const openLots = Math.max(1, Math.round(Math.abs(netQty) / lotSize));
+
+      orderInFlightRef.current.add(boxId);
+      setOrderPendingBoxes(prev => new Set([...prev, boxId]));
+
+      try {
+        addToast('success', `Shifting ${box.strike} ${box.side} → ${newStrike} ${box.side}`, `Closing active position first...`);
+        // 1. Close current position
+        await closePosition(pos, 'Strike Shift');
+
+        // 2. Update box strike
+        updateBox(boxId, { strike: newStrike, limitPrice: '' });
+
+        // 3. Place order on new strike
+        const newSecEntry = strikeMap[String(newStrike)];
+        let res: Response;
+        if (broker !== 'dhan') {
+          const symbol = newSecEntry?.[box.side === 'CE' ? 'ceSymbol' : 'peSymbol'];
+          if (!symbol) {
+            addToast('error', `Shift to ${newStrike} failed`, `Strike symbol data loading`);
+            return;
+          }
+          const exchange = broker === 'kotak'
+            ? (underlying === 'SENSEX' ? 'bse_fo' : 'nse_fo')
+            : (underlying === 'SENSEX' ? 'BFO' : 'NFO');
+          res = await fetch(scalperRoute(broker, 'order'), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              tradingsymbol: symbol,
+              quantity: openLots * lotSize,
+              side: sideToOpen,
+              orderType: 'MARKET',
+              exchange,
+              product: productType === 'MARGIN' ? 'NRML' : 'MIS',
+            }),
+          });
+        } else {
+          const secId = newSecEntry?.[box.side === 'CE' ? 'ceId' : 'peId'];
+          if (secId) {
+            res = await fetch('/api/scalper/fast-order', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                securityId: secId,
+                quantity: openLots * lotSize,
+                side: sideToOpen,
+                orderType: 'MARKET',
+                exchangeSegment: underlying === 'SENSEX' ? 'BSE_FNO' : 'NSE_FNO',
+                productType,
+              }),
+            });
+          } else {
+            res = await fetch('/api/scalper/order', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                underlying, expiry, strike: newStrike, option: box.side, side: sideToOpen, lots: openLots, type: 'MARKET',
+              }),
+            });
+          }
+        }
+
+        const j = await res.json() as { success: boolean; order_id?: string; error?: string };
+        if (j.success) {
+          addToast('success', `Shift complete: ${newStrike} ${box.side}`, `${sideToOpen} ${openLots} lot(s) placed (ID: ${j.order_id})`);
+          setTimeout(fetchTabData, 1000);
+        } else {
+          addToast('error', `New strike order failed`, j.error ?? 'Unknown error');
+        }
+      } catch (e) {
+        addToast('error', 'Shift failed', String(e));
+      } finally {
+        orderInFlightRef.current.delete(boxId);
+        setOrderPendingBoxes(prev => { const s = new Set(prev); s.delete(boxId); return s; });
+      }
+    } else {
+      // No active position: simply update strike
+      updateBox(boxId, { strike: newStrike, limitPrice: '' });
+      addToast('success', `Strike shifted to ${newStrike} ${box.side}`);
+    }
+  }, [boxes, visibleStrikes, allStrikes, strikeStep, boxSecId, positionsBySecId, lotSize, updateBox, strikeMap, broker, underlying, productType, expiry, closePosition, addToast, fetchTabData]);
+
   // ─── Client-side profit lock (total P&L floor) ────────────────────
 
   const exitAllForLock = useCallback(async (reason: string) => {
@@ -1326,6 +1450,8 @@ export default function AdvancedScalper() {
                 limitPrice={box.limitPrice}
                 orderMode={orderMode}
                 onStrikeChange={v => updateBox(box.id, { strike: v, limitPrice: '' })}
+                onShiftUp={() => handleShiftStrike(box.id, 'UP')}
+                onShiftDown={() => handleShiftStrike(box.id, 'DOWN')}
                 onLimitPriceChange={v => updateBox(box.id, { limitPrice: v })}
                 onBuy={() => placeOrder(box.id, 'BUY')}
                 onSell={() => placeOrder(box.id, 'SELL')}
