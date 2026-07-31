@@ -165,18 +165,42 @@ export default function AdvancedScalper() {
   const realizedFixedPositions = useMemo(() => {
     return positionsData.map(pos => {
       const netQty = Number(pos.netQty);
-      if (netQty !== 0) return pos;
+      const mult  = contractMultiplier(pos);
 
-      const buyQty = Number(pos.buyQty);
+      // ── LTP fallback: Dhan's /positions v2 API omits lastTradedPrice.
+      // Back-calculate from unrealizedProfit so the table shows a value
+      // even before the live WS bridge enriches the row, and for positions
+      // on expiries / segments the bridge isn't watching (monthly options,
+      // equities, Kotak positions with ltp=0 from their API).
+      const brokerLtp = Number(pos.lastTradedPrice);
+      let withLtp: typeof pos = pos;
+      if ((!brokerLtp || !Number.isFinite(brokerLtp)) && netQty !== 0) {
+        const unrealized = Number(pos.unrealizedProfit);
+        const buyAvg     = Number(pos.buyAvg);
+        const sellAvg    = Number(pos.sellAvg);
+        if (Number.isFinite(unrealized) && mult > 0) {
+          const derivedLtp = netQty > 0
+            ? buyAvg  + unrealized / (netQty  * mult)
+            : sellAvg - unrealized / (Math.abs(netQty) * mult);
+          if (Number.isFinite(derivedLtp) && derivedLtp > 0) {
+            withLtp = { ...pos, lastTradedPrice: derivedLtp };
+          }
+        }
+      }
+
+      // ── realizedProfit=0-on-flat-position fix
+      if (netQty !== 0) return withLtp;
+
+      const buyQty  = Number(pos.buyQty);
       const sellQty = Number(pos.sellQty);
-      const buyAvg = Number(pos.buyAvg);
-      const sellAvg = Number(pos.sellAvg);
-      if (!buyQty || !sellQty) return pos;
+      const buyAvgF = Number(pos.buyAvg);
+      const sellAvgF = Number(pos.sellAvg);
+      if (!buyQty || !sellQty) return withLtp;
 
-      const recomputedRealized = contractMultiplier(pos) * (sellQty * sellAvg - buyQty * buyAvg);
-      if (Number(pos.realizedProfit) === recomputedRealized) return pos;
+      const recomputedRealized = mult * (sellQty * sellAvgF - buyQty * buyAvgF);
+      if (Number(pos.realizedProfit) === recomputedRealized) return withLtp;
 
-      return { ...pos, realizedProfit: recomputedRealized };
+      return { ...withLtp, realizedProfit: recomputedRealized };
     });
   }, [positionsData]);
 
