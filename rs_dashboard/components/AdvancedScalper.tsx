@@ -4,7 +4,7 @@ import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react'
 import NavBar from './NavBar';
 import { Zap, RefreshCw, Shield, ShieldOff, Plus } from 'lucide-react';
 import {
-  OptionPanel, PositionsTable, TabTable, FundsView,
+  OptionPanel, PositionsTable, TabTable, FundsView, pollPositionFlat,
   type LiveQuotes, type BridgeStatus, type ChainOcEntry, type Toast,
   type PnlGuardStatus, type PositionGuard, type SortState,
 } from './Scalper';
@@ -628,17 +628,22 @@ export default function AdvancedScalper() {
 
   // ─── Per-position close ───────────────────────────────────────────
 
-  const closePosition = useCallback(async (pos: Record<string, unknown>, reason: string) => {
+  // ok=false means the close could not be confirmed (order failed / errored) —
+  // callers that chain further actions (e.g. strike shift) MUST NOT proceed as
+  // if the position were closed. qty is the signed live netQty seen right
+  // before closing (0 if already flat), for sizing a follow-up order off the
+  // real prior exposure rather than a possibly-stale value passed in.
+  const closePosition = useCallback(async (pos: Record<string, unknown>, reason: string, opts?: { verifyFlat?: boolean }): Promise<{ ok: boolean; qty: number }> => {
     const sym = String(pos.tradingSymbol ?? '');
     const fallbackSecId = String(pos.securityId ?? pos.security_id ?? '');
 
     if (!sym || !fallbackSecId) {
       addToast('error', `Cannot close ${sym || 'position'}`, 'Missing security ID');
-      return;
+      return { ok: false, qty: 0 };
     }
 
     // Prevent double-fire while order is in flight
-    if (closingInFlightRef.current.has(sym)) return;
+    if (closingInFlightRef.current.has(sym)) return { ok: false, qty: 0 };
     closingInFlightRef.current.add(sym);
     setPosGuards(prev => prev[sym] ? { ...prev, [sym]: { ...prev[sym], triggered: true } } : prev);
     setClosingPositions(prev => new Set([...prev, sym]));
@@ -671,7 +676,7 @@ export default function AdvancedScalper() {
         addToast('success', `${sym} already flat`, `(${reason})`);
         setPosGuards(prev => { const next = { ...prev }; delete next[sym]; return next; });
         fetchTabData();
-        return;
+        return { ok: true, qty: 0 };
       }
 
       const side = liveNetQty > 0 ? 'SELL' : 'BUY';
@@ -691,18 +696,35 @@ export default function AdvancedScalper() {
       });
       const j = await res.json() as { success: boolean; order_id?: string; error?: string };
       if (j.success) {
+        // A MARKET order accepted by the broker isn't necessarily filled — for
+        // callers that chain a follow-up open (strike shift), poll live
+        // positions briefly to confirm it actually went flat before reporting
+        // success, so a post-acceptance rejection can't lead to a doubled
+        // position. Skipped by default: the SL/target/manual-close paths that
+        // use closePosition constantly during scalping need the fast return.
+        if (opts?.verifyFlat) {
+          const confirmedFlat = await pollPositionFlat(broker, sym);
+          if (!confirmedFlat) {
+            addToast('error', `Could not confirm ${sym} closed`, 'Order accepted but position still shows open — check manually');
+            setPosGuards(prev => prev[sym] ? { ...prev, [sym]: { ...prev[sym], triggered: false } } : prev);
+            return { ok: false, qty: liveNetQty };
+          }
+        }
         addToast('success', `Closed ${sym} (${reason})`, `${qty} qty · ID: ${j.order_id}`);
         // Drop the guard entirely — leaving it would carry stale bestPrice /
         // trailEnabled into a future re-entry on the same symbol.
         setPosGuards(prev => { const next = { ...prev }; delete next[sym]; return next; });
         setTimeout(fetchTabData, 800);
+        return { ok: true, qty: liveNetQty };
       } else {
         addToast('error', `Close failed: ${sym}`, j.error ?? 'Unknown error');
         setPosGuards(prev => prev[sym] ? { ...prev, [sym]: { ...prev[sym], triggered: false } } : prev);
+        return { ok: false, qty: liveNetQty };
       }
     } catch (e) {
       addToast('error', 'Network error closing position', String(e));
       setPosGuards(prev => prev[sym] ? { ...prev, [sym]: { ...prev[sym], triggered: false } } : prev);
+      return { ok: false, qty: 0 };
     } finally {
       closingInFlightRef.current.delete(sym);
       setClosingPositions(prev => { const s = new Set(prev); s.delete(sym); return s; });
@@ -720,20 +742,15 @@ export default function AdvancedScalper() {
     const currIdx = sorted.indexOf(box.strike);
     let targetIdx = -1;
 
-    if (direction === 'UP') {
-      if (currIdx !== -1 && currIdx < sorted.length - 1) {
-        targetIdx = currIdx + 1;
-      } else {
-        const next = box.strike + strikeStep;
-        if (sorted.includes(next)) targetIdx = sorted.indexOf(next);
-      }
+    if (currIdx === -1) {
+      // box.strike isn't in the list (stale/out-of-range) — fall back to a
+      // direct step lookup instead of a neighbor index.
+      const target = direction === 'UP' ? box.strike + strikeStep : box.strike - strikeStep;
+      if (sorted.includes(target)) targetIdx = sorted.indexOf(target);
+    } else if (direction === 'UP') {
+      if (currIdx < sorted.length - 1) targetIdx = currIdx + 1;
     } else {
-      if (currIdx > 0) {
-        targetIdx = currIdx - 1;
-      } else {
-        const prev = box.strike - strikeStep;
-        if (sorted.includes(prev)) targetIdx = sorted.indexOf(prev);
-      }
+      if (currIdx > 0) targetIdx = currIdx - 1;
     }
 
     if (targetIdx === -1) {
@@ -743,22 +760,44 @@ export default function AdvancedScalper() {
 
     const newStrike = sorted[targetIdx];
 
-    // Check open position for this box
+    // Check open position for this box. If strikeMap has no entry for the
+    // CURRENT strike, we cannot reliably tell whether a live position exists
+    // there (chain still loading, strike outside the fetched range, etc.) —
+    // abort rather than silently treating it as flat, which would leave a
+    // real position unmanaged while the box moves on to the new strike.
+    if (!strikeMap[String(box.strike)]) {
+      addToast('error', 'Cannot shift strike', `Position data for ${box.strike} ${box.side} not loaded yet — try again shortly`);
+      return;
+    }
     const secId = boxSecId(box);
     const pos = secId ? positionsBySecId[secId] : undefined;
 
     if (pos && Number(pos.netQty) !== 0) {
-      const netQty = Number(pos.netQty);
-      const sideToOpen: 'BUY' | 'SELL' = netQty < 0 ? 'SELL' : 'BUY';
-      const openLots = Math.max(1, Math.round(Math.abs(netQty) / lotSize));
-
       orderInFlightRef.current.add(boxId);
       setOrderPendingBoxes(prev => new Set([...prev, boxId]));
 
       try {
         addToast('success', `Shifting ${box.strike} ${box.side} → ${newStrike} ${box.side}`, `Closing active position first...`);
-        // 1. Close current position
-        await closePosition(pos, 'Strike Shift');
+        // 1. Close current position. closePosition re-fetches live positions
+        // itself, so closeResult.qty is the real quantity that was open — not
+        // the possibly-stale pos.netQty snapshot.
+        const closeResult = await closePosition(pos, 'Strike Shift', { verifyFlat: true });
+        if (!closeResult.ok) {
+          // Close could not be confirmed — do NOT touch the box's strike or
+          // open a new leg, or we'd risk both the old and new position open at
+          // once. closePosition already toasted the error.
+          addToast('error', 'Shift aborted', `${box.strike} ${box.side} close was not confirmed — position left untouched`);
+          return;
+        }
+        if (closeResult.qty === 0) {
+          // Already flat by the time we got here — nothing to roll, just move the box.
+          updateBox(boxId, { strike: newStrike, limitPrice: '' });
+          addToast('success', `${box.strike} ${box.side} was already flat`, `Strike moved to ${newStrike} ${box.side} — no order placed`);
+          return;
+        }
+
+        const sideToOpen: 'BUY' | 'SELL' = closeResult.qty < 0 ? 'SELL' : 'BUY';
+        const openLots = Math.max(1, Math.round(Math.abs(closeResult.qty) / lotSize));
 
         // 2. Update box strike
         updateBox(boxId, { strike: newStrike, limitPrice: '' });

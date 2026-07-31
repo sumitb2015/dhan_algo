@@ -9,6 +9,29 @@ import { useCopyTrade, CopyTradeControls } from './CopyTrade';
 import { useBrokerSelector, scalperRoute, BROKER_LABELS, type Broker } from '@/hooks/useBrokerSelector';
 import { contractMultiplier } from '@/lib/positionPnl';
 
+// A MARKET close order being accepted by the broker doesn't guarantee it filled.
+// Polls the live positions book a few times so callers that chain a follow-up
+// action (e.g. strike shift opening the new leg) can confirm the symbol is
+// actually flat before proceeding — instead of assuming success from order
+// acceptance alone. Not used on the hot SL/target/manual-close paths, where
+// the extra round trips would add latency scalping can't afford.
+export async function pollPositionFlat(broker: Broker, tradingSymbol: string, attempts = 4, delayMs = 500): Promise<boolean> {
+  for (let i = 0; i < attempts; i++) {
+    await new Promise(r => setTimeout(r, delayMs));
+    try {
+      const res = await fetch(scalperRoute(broker, 'positions'));
+      const j = await res.json() as { success: boolean; data?: Record<string, unknown>[] };
+      if (j.success && j.data) {
+        const match = j.data.find(p => String(p.tradingSymbol) === tradingSymbol);
+        if (!match || Number(match.netQty) === 0) return true;
+      }
+    } catch {
+      // treat as inconclusive, retry
+    }
+  }
+  return false;
+}
+
 // ─── Types ────────────────────────────────────────────────────────
 
 export interface OptionSide {
@@ -590,17 +613,23 @@ export default function Scalper() {
 
   // ─── Per-position close ───────────────────────────────────────────
 
-  const closePosition = useCallback(async (pos: Record<string, unknown>, reason: string) => {
+  // ok=false means the close could not be confirmed (order failed / errored) —
+  // callers that chain further actions (e.g. strike shift) MUST NOT proceed as
+  // if the position were closed. qty is the signed live netQty seen right
+  // before closing (0 if the position was already flat), for callers that
+  // need to size a follow-up order off the real prior exposure rather than
+  // a possibly-stale value passed in.
+  const closePosition = useCallback(async (pos: Record<string, unknown>, reason: string, opts?: { verifyFlat?: boolean }): Promise<{ ok: boolean; qty: number }> => {
     const sym = String(pos.tradingSymbol ?? '');
     const fallbackSecId = String(pos.securityId ?? pos.security_id ?? '');
 
     if (!sym || !fallbackSecId) {
       addToast('error', `Cannot close ${sym || 'position'}`, 'Missing security ID');
-      return;
+      return { ok: false, qty: 0 };
     }
 
     // Prevent double-fire while order is in flight
-    if (closingInFlightRef.current.has(sym)) return;
+    if (closingInFlightRef.current.has(sym)) return { ok: false, qty: 0 };
     closingInFlightRef.current.add(sym);
     setPosGuards(prev => prev[sym] ? { ...prev, [sym]: { ...prev[sym], triggered: true } } : prev);
     setClosingPositions(prev => new Set([...prev, sym]));
@@ -635,7 +664,7 @@ export default function Scalper() {
         addToast('success', `${sym} already flat`, `(${reason})`);
         setPosGuards(prev => { const next = { ...prev }; delete next[sym]; return next; });
         fetchTabData();
-        return;
+        return { ok: true, qty: 0 };
       }
 
       const side = liveNetQty > 0 ? 'SELL' : 'BUY';
@@ -655,18 +684,35 @@ export default function Scalper() {
       });
       const j = await res.json() as { success: boolean; order_id?: string; error?: string };
       if (j.success) {
+        // A MARKET order accepted by the broker isn't necessarily filled — for
+        // callers that chain a follow-up open (strike shift), poll live
+        // positions briefly to confirm it actually went flat before reporting
+        // success, so a post-acceptance rejection can't lead to a doubled
+        // position. Skipped by default: the SL/target/manual-close paths that
+        // use closePosition constantly during scalping need the fast return.
+        if (opts?.verifyFlat) {
+          const confirmedFlat = await pollPositionFlat(broker, sym);
+          if (!confirmedFlat) {
+            addToast('error', `Could not confirm ${sym} closed`, 'Order accepted but position still shows open — check manually');
+            setPosGuards(prev => prev[sym] ? { ...prev, [sym]: { ...prev[sym], triggered: false } } : prev);
+            return { ok: false, qty: liveNetQty };
+          }
+        }
         addToast('success', `Closed ${sym} (${reason})`, `${qty} qty · ID: ${j.order_id}`);
         // Drop the guard entirely — leaving it would carry stale bestPrice /
         // trailEnabled into a future re-entry on the same symbol.
         setPosGuards(prev => { const next = { ...prev }; delete next[sym]; return next; });
         setTimeout(fetchTabData, 800);
+        return { ok: true, qty: liveNetQty };
       } else {
         addToast('error', `Close failed: ${sym}`, j.error ?? 'Unknown error');
         setPosGuards(prev => prev[sym] ? { ...prev, [sym]: { ...prev[sym], triggered: false } } : prev);
+        return { ok: false, qty: liveNetQty };
       }
     } catch (e) {
       addToast('error', 'Network error closing position', String(e));
       setPosGuards(prev => prev[sym] ? { ...prev, [sym]: { ...prev[sym], triggered: false } } : prev);
+      return { ok: false, qty: 0 };
     } finally {
       closingInFlightRef.current.delete(sym);
       setClosingPositions(prev => { const s = new Set(prev); s.delete(sym); return s; });
@@ -985,20 +1031,15 @@ export default function Scalper() {
     const currIdx = sorted.indexOf(currentStrike);
     let targetIdx = -1;
 
-    if (direction === 'UP') {
-      if (currIdx !== -1 && currIdx < sorted.length - 1) {
-        targetIdx = currIdx + 1;
-      } else {
-        const next = currentStrike + strikeStep;
-        if (sorted.includes(next)) targetIdx = sorted.indexOf(next);
-      }
+    if (currIdx === -1) {
+      // currentStrike isn't in the list (stale/out-of-range) — fall back to a
+      // direct step lookup instead of a neighbor index.
+      const target = direction === 'UP' ? currentStrike + strikeStep : currentStrike - strikeStep;
+      if (sorted.includes(target)) targetIdx = sorted.indexOf(target);
+    } else if (direction === 'UP') {
+      if (currIdx < sorted.length - 1) targetIdx = currIdx + 1;
     } else {
-      if (currIdx > 0) {
-        targetIdx = currIdx - 1;
-      } else {
-        const prev = currentStrike - strikeStep;
-        if (sorted.includes(prev)) targetIdx = sorted.indexOf(prev);
-      }
+      if (currIdx > 0) targetIdx = currIdx - 1;
     }
 
     if (targetIdx === -1) {
@@ -1008,10 +1049,18 @@ export default function Scalper() {
 
     const newStrike = sorted[targetIdx];
 
-    // Check if there is an active open position for currentStrike & option side
+    // Check if there is an active open position for currentStrike & option side.
+    // If strikeMap has no entry for the CURRENT strike, we cannot reliably tell
+    // whether a live position exists there (chain still loading, strike outside
+    // the fetched range, etc.) — abort rather than silently treating it as flat,
+    // which would leave a real position unmanaged while the UI moves on.
     const curSecEntry = strikeMap[String(currentStrike)];
-    const curSym = curSecEntry?.[option === 'CE' ? 'ceSymbol' : 'peSymbol'];
-    const curSecId = curSecEntry?.[option === 'CE' ? 'ceId' : 'peId'];
+    if (!curSecEntry) {
+      addToast('error', 'Cannot shift strike', `Position data for ${currentStrike} ${option} not loaded yet — try again shortly`);
+      return;
+    }
+    const curSym = curSecEntry[option === 'CE' ? 'ceSymbol' : 'peSymbol'];
+    const curSecId = curSecEntry[option === 'CE' ? 'ceId' : 'peId'];
 
     const activePos = enrichedPositions.find(p => {
       const netQty = Number(p.netQty);
@@ -1024,18 +1073,33 @@ export default function Scalper() {
     });
 
     if (activePos && Number(activePos.netQty) !== 0) {
-      const netQty = Number(activePos.netQty);
-      const sideToOpen: 'BUY' | 'SELL' = netQty < 0 ? 'SELL' : 'BUY';
-      const openLots = Math.max(1, Math.round(Math.abs(netQty) / lotSize));
-
       orderInFlightRef.current.add(option);
       setOrderPending(prev => new Set([...prev, option]));
 
       try {
         addToast('success', `Shifting ${currentStrike} ${option} → ${newStrike} ${option}`, `Closing ${currentStrike} position first...`);
-        
-        // 1. Close active position on current strike
-        await closePosition(activePos, 'Strike Shift');
+
+        // 1. Close active position on current strike. closePosition re-fetches
+        // live positions itself, so closeResult.qty is the real quantity that
+        // was open — not the possibly-stale activePos.netQty snapshot.
+        const closeResult = await closePosition(activePos, 'Strike Shift', { verifyFlat: true });
+        if (!closeResult.ok) {
+          // Close could not be confirmed — do NOT touch the strike selector or
+          // open a new leg, or we'd risk ending up with both the old and the
+          // new position open at once. closePosition already toasted the error.
+          addToast('error', `Shift aborted`, `${currentStrike} ${option} close was not confirmed — position left untouched`);
+          return;
+        }
+        if (closeResult.qty === 0) {
+          // Position was already flat by the time we got here (closed elsewhere
+          // between poll and click) — nothing to roll, just move the selector.
+          if (option === 'CE') handleCeStrikeChange(newStrike); else handlePeStrikeChange(newStrike);
+          addToast('success', `${currentStrike} ${option} was already flat`, `Strike moved to ${newStrike} ${option} — no order placed`);
+          return;
+        }
+
+        const sideToOpen: 'BUY' | 'SELL' = closeResult.qty < 0 ? 'SELL' : 'BUY';
+        const openLots = Math.max(1, Math.round(Math.abs(closeResult.qty) / lotSize));
 
         // 2. Update selected strike to new strike
         if (option === 'CE') {
@@ -1623,13 +1687,13 @@ export const OptionPanel = React.memo(function OptionPanel({
           {onShiftUp && (
             <button
               onClick={onShiftUp}
-              disabled={!strike || pending || !strikesReady}
+              disabled={orderDisabled}
               title="Shift strike up (auto-close active position if any)"
-              className="w-6 h-7 flex items-center justify-center rounded-lg border border-emerald-700/60
-                         bg-emerald-950/60 text-emerald-300 hover:bg-emerald-600 hover:text-white hover:border-emerald-500
-                         disabled:opacity-30 disabled:cursor-not-allowed transition-all text-[10px] font-bold active:scale-95"
+              className="w-7 h-7 flex items-center justify-center rounded-lg border border-emerald-500/20
+                         bg-emerald-500/10 text-emerald-400 hover:bg-emerald-500 hover:text-white hover:border-emerald-500
+                         disabled:opacity-30 disabled:cursor-not-allowed transition-all active:scale-95"
             >
-              ▲
+              <ChevronUp size={15} strokeWidth={2.5} />
             </button>
           )}
           <select value={strike ?? ''} onChange={e => onStrikeChange(Number(e.target.value))}
@@ -1645,13 +1709,13 @@ export const OptionPanel = React.memo(function OptionPanel({
           {onShiftDown && (
             <button
               onClick={onShiftDown}
-              disabled={!strike || pending || !strikesReady}
+              disabled={orderDisabled}
               title="Shift strike down (auto-close active position if any)"
-              className="w-6 h-7 flex items-center justify-center rounded-lg border border-rose-700/60
-                         bg-rose-950/60 text-rose-300 hover:bg-rose-600 hover:text-white hover:border-rose-500
-                         disabled:opacity-30 disabled:cursor-not-allowed transition-all text-[10px] font-bold active:scale-95"
+              className="w-7 h-7 flex items-center justify-center rounded-lg border border-rose-500/20
+                         bg-rose-500/10 text-rose-400 hover:bg-rose-500 hover:text-white hover:border-rose-500
+                         disabled:opacity-30 disabled:cursor-not-allowed transition-all active:scale-95"
             >
-              ▼
+              <ChevronDown size={15} strokeWidth={2.5} />
             </button>
           )}
           {onRemove && (
