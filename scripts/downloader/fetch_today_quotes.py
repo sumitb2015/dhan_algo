@@ -17,7 +17,7 @@ sys.path.insert(0, PROJECT_ROOT)
 STOCKS_DIR     = os.path.join(PROJECT_ROOT, "Daily_Historical_Data_Fresh")
 HIST_DIR       = os.path.join(PROJECT_ROOT, "Historical Data")
 DEBUG_DIR      = os.path.join(PROJECT_ROOT, "debug")
-N500_LIST      = os.path.join(PROJECT_ROOT, "MW-NIFTY-500-25-Jan-2026.csv")
+N500_LIST      = os.path.join(PROJECT_ROOT, "ind_nifty500list.csv")
 OUTPUT_FILE    = os.path.join(DEBUG_DIR, "today_quotes.json")
 MASTER_LIST    = os.path.join(PROJECT_ROOT, "master_list.csv")
 NIFTY50_CSV    = os.path.join(HIST_DIR, "NIFTY_50_Daily_5Y.csv")
@@ -33,12 +33,14 @@ def load_symbols(cli_symbols: list[str] | None) -> list[str]:
     if cli_symbols:
         return [s.upper().strip() for s in cli_symbols if s.strip()]
 
-    # From Nifty 500 watchlist CSV
+    # From the NSE Nifty 500 constituent CSV (ind_nifty500list.csv) — also
+    # tolerates the older MW-NIFTY-500 watchlist format (symbol in column 0).
     if os.path.exists(N500_LIST):
         try:
             import pandas as pd
             df = pd.read_csv(N500_LIST)
-            syms = df.iloc[:, 0].astype(str).str.strip().tolist()
+            symbol_col = next((c for c in df.columns if str(c).strip().upper() == "SYMBOL"), df.columns[0])
+            syms = df[symbol_col].astype(str).str.strip().tolist()
             syms = [s for s in syms if s and s != "NIFTY 500" and not s.startswith("Note") and s != "nan"]
             if syms:
                 return syms

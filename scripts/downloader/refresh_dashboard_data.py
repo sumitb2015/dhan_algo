@@ -35,7 +35,16 @@ STATUS_FILE  = os.path.join(DEBUG_DIR, "refresh_status.json")
 STOP_FILE    = os.path.join(DEBUG_DIR, "refresh_stop.trigger")
 NIFTY50_CSV  = os.path.join(HIST_DIR, "NIFTY_50_Daily_5Y.csv")
 N500IDX_CSV  = os.path.join(HIST_DIR, "NIFTY_500_Daily.csv")
-N500_LIST    = os.path.join(PROJECT_ROOT, "MW-NIFTY-500-25-Jan-2026.csv")
+N500_LIST    = os.path.join(PROJECT_ROOT, "ind_nifty500list.csv")
+# Multi-year holes that a repair fetch confirms have zero data (e.g. a stock
+# delisted-then-relisted, like Hexaware's 2020-10-31 to 2025-02-19 trading
+# suspension) can never self-heal — the API has nothing to return for that
+# window. Without this cache, find_data_gap_start() would flag the exact same
+# hole every single run forever, wasting minutes retrying a fetch that's
+# doomed to come back empty. Confirmed-empty gaps are skipped for
+# GAP_RECHECK_DAYS, then re-verified in case the API backfills later.
+GAP_CACHE_FILE = os.path.join(DEBUG_DIR, "confirmed_data_gaps.json")
+GAP_RECHECK_DAYS = 30
 
 os.makedirs(DEBUG_DIR, exist_ok=True)
 os.makedirs(HIST_DIR, exist_ok=True)
@@ -128,6 +137,33 @@ def check_fatal(helper):
     err = helper.last_api_error
     if err and helper.is_fatal_error(err):
         raise FatalAPIError(format_api_error(err))
+
+
+# DH-904 is Dhan's explicit rate-limit code. DH-905 (Input_Exception) is included
+# too: observed interleaved with DH-904 for requests shaped identically to ones
+# that just succeeded moments earlier in the same sweep — almost certainly Dhan's
+# API returning a misleading error code while the account is already being
+# throttled, not an actually malformed request. Retrying with backoff resolves
+# both; a genuinely bad parameter would fail identically on every retry, which
+# just costs a few extra seconds before falling through to the normal failure path.
+_RETRYABLE_ERROR_CODES = {"DH-904", "DH-905"}
+
+
+def get_historical_daily_data_retrying(helper, max_retries: int = 3, base_delay: float = 3.0, **kwargs):
+    """Wraps helper.get_historical_daily_data with exponential backoff on
+    rate-limit-shaped errors, so a burst of throttling partway through a
+    hundreds-of-symbols sweep doesn't fail every symbol for the rest of the run."""
+    df = None
+    for attempt in range(max_retries + 1):
+        df = helper.get_historical_daily_data(**kwargs)
+        if not df.empty:
+            return df
+        err = helper.last_api_error
+        if not err or err.get("code") not in _RETRYABLE_ERROR_CODES or attempt == max_retries:
+            return df
+        delay = base_delay * (2 ** attempt)
+        time.sleep(delay)
+    return df
 
 
 # ── Trading day helpers ───────────────────────────────────────────────────────
@@ -260,6 +296,34 @@ def find_data_gap_start(csv_path: str, max_gap_days: int = 30) -> Optional[str]:
         return (last_good_date + pd.Timedelta(days=1)).strftime("%Y-%m-%d")
     except Exception:
         return None
+
+
+def load_gap_cache() -> dict:
+    try:
+        with open(GAP_CACHE_FILE, "r") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def save_gap_cache(cache: dict):
+    try:
+        with open(GAP_CACHE_FILE, "w") as f:
+            json.dump(cache, f, indent=2)
+    except Exception:
+        pass
+
+
+def gap_confirmed_empty(cache: dict, symbol: str, gap_date: str) -> bool:
+    """True if this exact gap was already confirmed empty within GAP_RECHECK_DAYS."""
+    entry = cache.get(symbol)
+    if not entry or entry.get("gap_start") != gap_date:
+        return False
+    try:
+        checked = datetime.strptime(entry["checked"], "%Y-%m-%d")
+    except (KeyError, ValueError):
+        return False
+    return (datetime.now() - checked).days < GAP_RECHECK_DAYS
 
 
 def strip_weekend_rows(df: pd.DataFrame) -> pd.DataFrame:
@@ -416,7 +480,8 @@ def refresh_nifty50(helper):
         end = datetime.strptime(to_date_api, "%Y-%m-%d")
         while cur <= end:
             chunk_end = min(cur + timedelta(days=365), end)
-            df_chunk = helper.get_historical_daily_data(
+            df_chunk = get_historical_daily_data_retrying(
+                helper,
                 security_id=security_id,
                 exchange_segment=segment,
                 instrument_type=instr,
@@ -522,7 +587,8 @@ def refresh_nifty500_index(helper):
         end = datetime.strptime(to_date_api, "%Y-%m-%d")
         while cur <= end:
             chunk_end = min(cur + timedelta(days=365), end)
-            df_chunk = helper.get_historical_daily_data(
+            df_chunk = get_historical_daily_data_retrying(
+                helper,
                 security_id=19,
                 exchange_segment="IDX_I",
                 instrument_type="INDEX",
@@ -584,17 +650,25 @@ def refresh_nifty500_index(helper):
 
 # ── Phase 3: Individual stocks ────────────────────────────────────────────────
 def parse_nifty500_symbols() -> list[str]:
-    """Parse symbol list from MW-NIFTY-500 CSV."""
+    """Parse symbol list from the NSE Nifty 500 constituent CSV (ind_nifty500list.csv).
+
+    Also tolerates the older MW-NIFTY-500 watchlist export format (symbol in
+    column 0, either headerless or with 16 junk header rows) for anyone still
+    pointing N500_LIST at one of those files.
+    """
     if not os.path.exists(N500_LIST):
         # Fall back to all files in STOCKS_DIR
         files = [f for f in os.listdir(STOCKS_DIR) if f.endswith("_Daily_2Y.csv")]
         return [f.replace("_Daily_2Y.csv", "") for f in sorted(files)]
     try:
         df = pd.read_csv(N500_LIST)
-        first_col = str(df.columns[0]).upper().strip()
-        if "SYMBOL" not in first_col:
-            df = pd.read_csv(N500_LIST, skiprows=16)
-        symbols = df.iloc[:, 0].astype(str).str.strip().tolist()
+        symbol_col = next((c for c in df.columns if str(c).strip().upper() == "SYMBOL"), None)
+        if symbol_col is None:
+            first_col = str(df.columns[0]).upper().strip()
+            if "SYMBOL" not in first_col:
+                df = pd.read_csv(N500_LIST, skiprows=16)
+            symbol_col = df.columns[0]
+        symbols = df[symbol_col].astype(str).str.strip().tolist()
         return [s for s in symbols if s and s != "NIFTY 500" and not s.startswith("Note")
                 and len(s) > 0 and s != "nan"]
     except Exception:
@@ -611,6 +685,7 @@ def refresh_stocks(helper):
     # toDate is non-inclusive in the daily API; add 1 day so last_trading_day is included
     to_date_api = (datetime.strptime(last_trading_day, "%Y-%m-%d") + timedelta(days=1)).strftime("%Y-%m-%d")
     skipped = updated = failed = consecutive_failures = 0
+    gap_cache = load_gap_cache()
 
     for i, symbol in enumerate(symbols, 1):
         if should_stop():
@@ -633,6 +708,13 @@ def refresh_stocks(helper):
                 from_date = bad_date
                 write_status("stocks", f"  [{i}/{total}] {symbol}: degenerate row(s) from {bad_date} — repairing",
                              current=i, total=total)
+            elif gap_date and gap_confirmed_empty(gap_cache, symbol, gap_date):
+                skipped += 1
+                write_status("stocks",
+                             f"  [{i}/{total}] {symbol}: gap from {gap_date} confirmed no-data "
+                             f"(delisted/suspended? rechecking in {GAP_RECHECK_DAYS - (datetime.now() - datetime.strptime(gap_cache[symbol]['checked'], '%Y-%m-%d')).days}d)",
+                             current=i, total=total)
+                continue
             elif gap_date:
                 from_date = gap_date
                 write_status("stocks", f"  [{i}/{total}] {symbol}: multi-year gap from {gap_date} — repairing",
@@ -651,6 +733,7 @@ def refresh_stocks(helper):
             if bad_date and bad_date < from_date:
                 from_date = bad_date
 
+        is_gap_repair = bool(gap_date) and from_date == gap_date
         write_status("stocks", f"  [{i}/{total}] {symbol}: fetching from {from_date}...",
                      current=i, total=total)
 
@@ -682,7 +765,8 @@ def refresh_stocks(helper):
             end = datetime.strptime(to_date_api, "%Y-%m-%d")
             while cur <= end:
                 chunk_end = min(cur + timedelta(days=365), end)
-                df_chunk = helper.get_historical_daily_data(
+                df_chunk = get_historical_daily_data_retrying(
+                    helper,
                     security_id=security_id,
                     exchange_segment=segment,
                     instrument_type=instr,
@@ -699,7 +783,18 @@ def refresh_stocks(helper):
                     time.sleep(0.35)
 
             if not chunks:
-                if last_err:
+                if is_gap_repair:
+                    # The repair fetch found nothing at all for this window — most
+                    # likely a delisting/relisting-style trading suspension with no
+                    # data to ever recover. Stop re-attempting it every run.
+                    gap_cache[symbol] = {"gap_start": gap_date, "checked": datetime.now().strftime("%Y-%m-%d")}
+                    save_gap_cache(gap_cache)
+                    write_status("stocks",
+                                 f"  [{i}/{total}] {symbol}: gap from {gap_date} confirmed no-data — "
+                                 f"will not retry for {GAP_RECHECK_DAYS}d",
+                                 current=i, total=total)
+                    skipped += 1
+                elif last_err:
                     write_status("stocks",
                                  f"  [{i}/{total}] {symbol}: ✗ API error — {format_api_error(last_err)}",
                                  current=i, total=total)
@@ -744,6 +839,20 @@ def refresh_stocks(helper):
             combined = strip_weekend_rows(combined)
 
             df_to_stock_csv(combined, csv_path)
+
+            if is_gap_repair:
+                # Some yearly chunks in the repair span may have succeeded while the
+                # chunk right at the gap's leading edge still came back empty (e.g.
+                # trading resumed partway through the requested range) — re-check
+                # rather than assume the write above closed the hole.
+                still_gapped = find_data_gap_start(csv_path)
+                if still_gapped == gap_date:
+                    gap_cache[symbol] = {"gap_start": gap_date, "checked": datetime.now().strftime("%Y-%m-%d")}
+                    save_gap_cache(gap_cache)
+                elif symbol in gap_cache:
+                    del gap_cache[symbol]
+                    save_gap_cache(gap_cache)
+
             write_status("stocks",
                          f"  [{i}/{total}] {symbol}: +{len(new_df)} rows → {len(combined)} total",
                          current=i, total=total)
@@ -812,7 +921,8 @@ def refresh_indices(helper):
             end = datetime.strptime(to_date_api, "%Y-%m-%d")
             while cur <= end:
                 chunk_end = min(cur + timedelta(days=365), end)
-                df_chunk = helper.get_historical_daily_data(
+                df_chunk = get_historical_daily_data_retrying(
+                    helper,
                     security_id=entry["id"],
                     exchange_segment="IDX_I",
                     instrument_type="INDEX",

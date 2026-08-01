@@ -1484,7 +1484,7 @@ export default function Scalper() {
 
       {/* Trading panels */}
       <div className="flex flex-row justify-center gap-3 p-4 overflow-x-auto select-none">
-        <div className="flex-none w-[calc(20%-0.6rem)] min-w-[280px]">
+        <div className="flex-none w-[calc(20%-0.6rem)] min-w-[300px]">
           <OptionPanel
             side="CE"
             label="CALLS"
@@ -1509,7 +1509,7 @@ export default function Scalper() {
             strikesReady={strikesReady}
           />
         </div>
-        <div className="flex-none w-[calc(20%-0.6rem)] min-w-[280px]">
+        <div className="flex-none w-[calc(20%-0.6rem)] min-w-[300px]">
           <OptionPanel
             side="PE"
             label="PUTS"
@@ -1656,12 +1656,32 @@ export const OptionPanel = React.memo(function OptionPanel({
   const isPos = (v: number) => v >= 0;
   const buildupStyle = buildup ? BUILDUP_STYLES[buildup] : undefined;
 
+  // The "← ATM" hint only fits when the panel itself has room for it — a fixed
+  // select width would either clip the hint on a narrow panel or sit mostly
+  // empty on a wide one. Track the panel's actual rendered width and switch
+  // between a compact (number only) and full (number + hint) layout.
+  const rootRef = useRef<HTMLDivElement>(null);
+  // Default to compact so an unmeasured first paint can't overflow the card;
+  // ResizeObserver corrects it to the real state on the next frame.
+  const [compact, setCompact] = useState(true);
+  useEffect(() => {
+    const el = rootRef.current;
+    if (!el) return;
+    const COMPACT_BELOW_PX = 315;
+    const ro = new ResizeObserver(entries => {
+      const width = entries[0]?.contentRect.width ?? 0;
+      if (width > 0) setCompact(width < COMPACT_BELOW_PX);
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+
   return (
-    <div className="bg-zinc-900/60 border border-zinc-800 rounded-2xl p-5 flex flex-col gap-4 min-w-0">
+    <div ref={rootRef} className="bg-zinc-900/60 border border-zinc-800 rounded-2xl p-5 flex flex-col gap-4 min-w-0">
       {/* Header: badge + strike selector + shift buttons + remove */}
-      <div className="flex items-center justify-between gap-3">
+      <div className="flex items-center justify-between gap-2 min-w-0">
         {onSideChange ? (
-          <div className="flex items-center bg-zinc-900 border border-zinc-800 p-0.5 rounded-lg">
+          <div className="flex items-center bg-zinc-900 border border-zinc-800 p-0.5 rounded-lg shrink-0">
             {(['CE', 'PE'] as const).map(s => (
               <button key={s} onClick={() => onSideChange(s)}
                 className={`px-2.5 py-1 text-xs font-bold uppercase tracking-widest rounded-md transition-all ${
@@ -1676,33 +1696,33 @@ export const OptionPanel = React.memo(function OptionPanel({
             ))}
           </div>
         ) : (
-          <span className={`text-xs font-bold uppercase tracking-widest px-2.5 py-1 rounded-lg border ${
+          <span className={`shrink-0 text-xs font-bold uppercase tracking-widest px-2.5 py-1 rounded-lg border ${
             side === 'CE'
               ? 'bg-sky-500/10 text-sky-400 border-sky-500/20'
               : 'bg-rose-500/10 text-rose-400 border-rose-500/20'
           }`}>{label} ({side})</span>
         )}
 
-        <div className="flex items-center gap-1">
+        <div className="flex items-center gap-0.5 justify-end shrink-0">
           {onShiftUp && (
             <button
               onClick={onShiftUp}
               disabled={orderDisabled}
               title="Shift strike up (auto-close active position if any)"
-              className="w-7 h-7 flex items-center justify-center rounded-lg border border-emerald-500/20
+              className="shrink-0 w-6 h-6 flex items-center justify-center rounded-lg border border-emerald-500/20
                          bg-emerald-500/10 text-emerald-400 hover:bg-emerald-500 hover:text-white hover:border-emerald-500
                          disabled:opacity-30 disabled:cursor-not-allowed transition-all active:scale-95"
             >
-              <ChevronUp size={15} strokeWidth={2.5} />
+              <ChevronUp size={14} strokeWidth={2.5} />
             </button>
           )}
           <select value={strike ?? ''} onChange={e => onStrikeChange(Number(e.target.value))}
-            className="bg-zinc-800 border border-zinc-700 text-zinc-200 text-xs font-mono font-semibold
-                       rounded-lg px-2 py-1.5 focus:outline-none focus:border-emerald-500 tabular-nums">
+            className={`shrink-0 ${compact ? 'w-[88px]' : 'w-[136px]'} bg-zinc-800 border border-zinc-700 text-zinc-200 text-xs font-mono font-semibold
+                       rounded-lg px-1.5 py-1.5 focus:outline-none focus:border-emerald-500 tabular-nums transition-[width]`}>
             {!strike && <option value="">— select —</option>}
             {visibleStrikes.map(sk => (
               <option key={sk} value={sk}>
-                {sk.toLocaleString('en-IN')}{sk === atm ? ' ← ATM' : ''}
+                {sk.toLocaleString('en-IN')}{sk === atm && !compact ? ' ← ATM' : ''}
               </option>
             ))}
           </select>
@@ -1711,11 +1731,11 @@ export const OptionPanel = React.memo(function OptionPanel({
               onClick={onShiftDown}
               disabled={orderDisabled}
               title="Shift strike down (auto-close active position if any)"
-              className="w-7 h-7 flex items-center justify-center rounded-lg border border-rose-500/20
+              className="shrink-0 w-6 h-6 flex items-center justify-center rounded-lg border border-rose-500/20
                          bg-rose-500/10 text-rose-400 hover:bg-rose-500 hover:text-white hover:border-rose-500
                          disabled:opacity-30 disabled:cursor-not-allowed transition-all active:scale-95"
             >
-              <ChevronDown size={15} strokeWidth={2.5} />
+              <ChevronDown size={14} strokeWidth={2.5} />
             </button>
           )}
           {onRemove && (
@@ -1723,7 +1743,7 @@ export const OptionPanel = React.memo(function OptionPanel({
               onClick={onRemove}
               disabled={!canRemove}
               title={canRemove ? 'Remove box' : 'Square off position before removing'}
-              className="w-6 h-6 flex items-center justify-center rounded-lg border border-zinc-700
+              className="shrink-0 w-6 h-6 flex items-center justify-center rounded-lg border border-zinc-700
                          bg-zinc-800 text-zinc-400 hover:text-rose-300 hover:border-rose-500/40
                          disabled:opacity-30 disabled:cursor-not-allowed transition-all text-sm font-bold"
             >×</button>

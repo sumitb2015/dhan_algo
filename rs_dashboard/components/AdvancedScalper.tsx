@@ -1473,7 +1473,7 @@ export default function AdvancedScalper() {
           const hasOpenPosition = !!pos && Number(pos.netQty) !== 0;
 
           return (
-            <div key={box.id} className="flex-none w-[calc(20%-0.6rem)] min-w-[280px]">
+            <div key={box.id} className="flex-none w-[calc(20%-0.6rem)] min-w-[300px]">
               <OptionPanel
                 side={box.side}
                 label={box.side === 'CE' ? 'CALLS' : 'PUTS'}
