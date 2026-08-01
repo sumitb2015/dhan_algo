@@ -311,6 +311,48 @@ export async function readNifty500Index(symbols: string[]): Promise<OHLCVRow[]> 
   return nifty500Promise;
 }
 
+export function readNifty500IndexSync(): OHLCVRow[] {
+  const cacheKey = 'index:nifty500:sync';
+  const hit = cacheGet<OHLCVRow[]>(cacheKey);
+  if (hit) return hit;
+
+  if (fs.existsSync(NIFTY500_INDEX_CSV)) {
+    try {
+      const content = fs.readFileSync(NIFTY500_INDEX_CSV, 'utf-8');
+      const rows = parseCSV(content);
+      const parsed: OHLCVRow[] = rows
+        .filter((r) => pickDate(r) && r.Close && !isNaN(parseFloat(r.Close)))
+        .map((r) => ({
+          date: pickDate(r),
+          open: parseFloat(r.Open) || 0,
+          high: parseFloat(r.High) || 0,
+          low: parseFloat(r.Low) || 0,
+          close: parseFloat(r.Close),
+          volume: parseFloat(r.Volume) || 0,
+        }))
+        .sort((a, b) => a.date.localeCompare(b.date));
+      if (parsed.length > 0) {
+        const todayIST = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
+        const last500 = parsed[parsed.length - 1];
+        if (last500 && last500.date < todayIST) {
+          const todayDay = new Date(todayIST + 'T00:00:00').getDay();
+          if (todayDay >= 1 && todayDay <= 5) {
+            const liveIdx = getTodayQuoteRow('_NIFTY500_INDEX');
+            if (liveIdx) {
+              parsed.push({ ...liveIdx, date: todayIST });
+            } else {
+              parsed.push({ ...last500, date: todayIST });
+            }
+          }
+        }
+        cacheSet(cacheKey, parsed);
+        return parsed;
+      }
+    } catch { /* ignore fallback */ }
+  }
+  return readNifty50Index(); // Fallback to Nifty 50 if 500 CSV absent
+}
+
 // ─── Today's live quote patch ─────────────────────────────────────────────────
 interface TodayQuote { open: number; high: number; low: number; close: number; volume: number; }
 interface TodayQuotesFile { date: string; updated_at: string; count?: number; quotes: Record<string, TodayQuote>; }
