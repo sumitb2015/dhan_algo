@@ -2036,6 +2036,7 @@ export const PositionsTable = React.memo(function PositionsTable({ data, guards,
           const sellAvg = Number(row.sellAvg);
 
           // Compute current effective trailing SL price to show below the checkbox
+          const targetNum = parseFloat(guard?.target ?? '');
           const slNum = parseFloat(guard?.sl ?? '');
           const entryPrice = isLong ? buyAvg : sellAvg;
           const initialRisk = (entryPrice > 0 && !isNaN(slNum) && slNum > 0) ? Math.abs(slNum - entryPrice) : 0;
@@ -2044,6 +2045,7 @@ export const PositionsTable = React.memo(function PositionsTable({ data, guards,
             ? (isLong ? trailBest - initialRisk : trailBest + initialRisk)
             : null;
 
+          const mult = contractMultiplier(row);
           const hasGuard = guard && (guard.target || guard.sl || guard.trailEnabled);
 
           return (
@@ -2068,26 +2070,104 @@ export const PositionsTable = React.memo(function PositionsTable({ data, guards,
               </td>
               <td className="px-3 py-2 whitespace-nowrap font-mono text-zinc-300">{String(row.productType ?? '—')}</td>
 
-              {/* Target input — commits on Enter/blur only */}
+              {/* Target input & quick presets */}
               <td className="px-2 py-1.5">
-                <GuardInput
-                  value={guard?.target ?? ''}
-                  onCommit={v => onGuardChange(sym, 'target', v)}
-                  colorCls="text-emerald-300"
-                  focusBorderCls="focus:border-emerald-500"
-                  disabled={isClosing}
-                />
+                <div className="flex flex-col items-center gap-1">
+                  <GuardInput
+                    value={guard?.target ?? ''}
+                    onCommit={v => onGuardChange(sym, 'target', v)}
+                    colorCls="text-emerald-300"
+                    focusBorderCls="focus:border-emerald-500"
+                    disabled={isClosing}
+                  />
+                  {/* Preset Chips */}
+                  <div className="flex items-center gap-0.5 text-[9px] font-mono">
+                    {['+5%', '+10%', '+15%', '+5p', '+10p'].map(preset => (
+                      <button
+                        key={preset}
+                        disabled={isClosing || entryPrice <= 0}
+                        onClick={() => {
+                          if (entryPrice <= 0) return;
+                          let calculated = 0;
+                          if (preset.endsWith('%')) {
+                            const pct = parseFloat(preset) / 100;
+                            calculated = isLong ? entryPrice * (1 + pct) : entryPrice * (1 - pct);
+                          } else if (preset.endsWith('p')) {
+                            const pts = parseFloat(preset);
+                            calculated = isLong ? entryPrice + pts : entryPrice - pts;
+                          }
+                          if (calculated > 0) onGuardChange(sym, 'target', calculated.toFixed(2));
+                        }}
+                        className="px-1 py-0.5 rounded bg-emerald-950/80 border border-emerald-800/60 text-emerald-400 hover:bg-emerald-800 hover:text-white transition-all disabled:opacity-30"
+                        title={`Set Target to ${preset}`}
+                      >
+                        {preset}
+                      </button>
+                    ))}
+                  </div>
+                  {/* Target P&L Subtext */}
+                  {!isNaN(targetNum) && targetNum > 0 && entryPrice > 0 && mult > 0 && (() => {
+                    const diff = isLong ? targetNum - entryPrice : entryPrice - targetNum;
+                    const pctVal = (diff / entryPrice) * 100;
+                    const rupeeVal = diff * Math.abs(netQty) * mult;
+                    const isProfit = diff >= 0;
+                    return (
+                      <span className={`text-[9px] font-mono tabular-nums whitespace-nowrap ${isProfit ? 'text-emerald-400/90' : 'text-rose-400/90'}`}>
+                        {isProfit ? '+' : ''}{pctVal.toFixed(1)}% ({isProfit ? '+' : ''}₹{rupeeVal.toFixed(0)})
+                      </span>
+                    );
+                  })()}
+                </div>
               </td>
 
-              {/* SL input — commits on Enter/blur only */}
+              {/* SL input & quick presets */}
               <td className="px-2 py-1.5">
-                <GuardInput
-                  value={guard?.sl ?? ''}
-                  onCommit={v => onGuardChange(sym, 'sl', v)}
-                  colorCls="text-rose-300"
-                  focusBorderCls="focus:border-rose-500"
-                  disabled={isClosing}
-                />
+                <div className="flex flex-col items-center gap-1">
+                  <GuardInput
+                    value={guard?.sl ?? ''}
+                    onCommit={v => onGuardChange(sym, 'sl', v)}
+                    colorCls="text-rose-300"
+                    focusBorderCls="focus:border-rose-500"
+                    disabled={isClosing}
+                  />
+                  {/* Preset Chips */}
+                  <div className="flex items-center gap-0.5 text-[9px] font-mono">
+                    {['-5%', '-10%', '-15%', '-5p', '-10p'].map(preset => (
+                      <button
+                        key={preset}
+                        disabled={isClosing || entryPrice <= 0}
+                        onClick={() => {
+                          if (entryPrice <= 0) return;
+                          let calculated = 0;
+                          if (preset.endsWith('%')) {
+                            const pct = Math.abs(parseFloat(preset)) / 100;
+                            calculated = isLong ? entryPrice * (1 - pct) : entryPrice * (1 + pct);
+                          } else if (preset.endsWith('p')) {
+                            const pts = Math.abs(parseFloat(preset));
+                            calculated = isLong ? entryPrice - pts : entryPrice + pts;
+                          }
+                          if (calculated > 0) onGuardChange(sym, 'sl', calculated.toFixed(2));
+                        }}
+                        className="px-1 py-0.5 rounded bg-rose-950/80 border border-rose-800/60 text-rose-400 hover:bg-rose-800 hover:text-white transition-all disabled:opacity-30"
+                        title={`Set SL to ${preset}`}
+                      >
+                        {preset}
+                      </button>
+                    ))}
+                  </div>
+                  {/* SL Loss Subtext */}
+                  {!isNaN(slNum) && slNum > 0 && entryPrice > 0 && mult > 0 && (() => {
+                    const diff = isLong ? entryPrice - slNum : slNum - entryPrice;
+                    const pctVal = (diff / entryPrice) * 100;
+                    const rupeeVal = diff * Math.abs(netQty) * mult;
+                    const isLoss = diff >= 0;
+                    return (
+                      <span className={`text-[9px] font-mono tabular-nums whitespace-nowrap ${isLoss ? 'text-rose-400/90' : 'text-emerald-400/90'}`}>
+                        {isLoss ? '-' : '+'}{pctVal.toFixed(1)}% ({isLoss ? '-' : '+'}₹{Math.abs(rupeeVal).toFixed(0)})
+                      </span>
+                    );
+                  })()}
+                </div>
               </td>
 
               {/* Trail SL checkbox + effective SL price when active */}

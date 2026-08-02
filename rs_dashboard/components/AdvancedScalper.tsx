@@ -119,7 +119,44 @@ export default function AdvancedScalper() {
   // sees the other's `triggered`/`closingPositions` update.
   const closingInFlightRef = useRef<Set<string>>(new Set());
   const expiryRef = useRef('');
+  const appliedPositionsRef = useRef<Set<string>>(new Set());
+  const lastProcessedEntryCapitalRef = useRef<number>(0);
   useEffect(() => { expiryRef.current = expiry; }, [expiry]);
+
+  // Predefined Target & SL preset settings (% / Pts / ₹)
+  const [presetMode, setPresetMode] = useState<'PERCENT' | 'POINTS' | 'PRICE'>('PERCENT');
+  const [defaultTargetVal, setDefaultTargetVal] = useState('10');
+  const [defaultSlVal, setDefaultSlVal] = useState('5');
+  const [autoApplyGuards, setAutoApplyGuards] = useState(false);
+
+  // Combined Multi-Leg % Presets state (remembers selection even when flat)
+  const [combinedTargetPct, setCombinedTargetPct] = useState<number | null>(null);
+  const [combinedSlPct, setCombinedSlPct] = useState<number | null>(null);
+
+  // Load preset preferences from localStorage on mount
+  useEffect(() => {
+    try {
+      const saved = localStorage.getItem('advanced_scalper_presets');
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (parsed.presetMode) setPresetMode(parsed.presetMode);
+        if (parsed.defaultTargetVal !== undefined) setDefaultTargetVal(parsed.defaultTargetVal);
+        if (parsed.defaultSlVal !== undefined) setDefaultSlVal(parsed.defaultSlVal);
+        if (parsed.autoApplyGuards !== undefined) setAutoApplyGuards(parsed.autoApplyGuards);
+        if (parsed.combinedTargetPct !== undefined) setCombinedTargetPct(parsed.combinedTargetPct);
+        if (parsed.combinedSlPct !== undefined) setCombinedSlPct(parsed.combinedSlPct);
+      }
+    } catch {}
+  }, []);
+
+  // Save preset preferences to localStorage
+  useEffect(() => {
+    try {
+      localStorage.setItem('advanced_scalper_presets', JSON.stringify({
+        presetMode, defaultTargetVal, defaultSlVal, autoApplyGuards, combinedTargetPct, combinedSlPct,
+      }));
+    } catch {}
+  }, [presetMode, defaultTargetVal, defaultSlVal, autoApplyGuards, combinedTargetPct, combinedSlPct]);
 
   // ─── Derived values ──────────────────────────────────────────────
 
@@ -236,6 +273,68 @@ export default function AdvancedScalper() {
   const totalPnl = enrichedPositions.reduce((sum, p) =>
     sum + (Number(p.realizedProfit) || 0) + (Number(p.unrealizedProfit) || 0), 0);
 
+  // Combined Multi-Leg Premium Tracking & Strategy Stats
+  const combinedStrategyStats = useMemo(() => {
+    let entryCapitalSum = 0;
+    let liveCapitalSum = 0;
+    let openLegsCount = 0;
+    let netQtySum = 0;
+
+    for (const pos of enrichedPositions) {
+      const netQty = Number(pos.netQty);
+      if (netQty === 0) continue;
+
+      netQtySum += netQty;
+      const mult = contractMultiplier(pos);
+      const isLong = netQty > 0;
+      const entryPrice = isLong ? Number(pos.buyAvg) : Number(pos.sellAvg);
+      const liveLtp = Number(pos.lastTradedPrice) || entryPrice;
+      const absQty = Math.abs(netQty);
+
+      if (entryPrice > 0 && mult > 0) {
+        entryCapitalSum += entryPrice * absQty * mult;
+        liveCapitalSum += liveLtp * absQty * mult;
+        openLegsCount += 1;
+      }
+    }
+
+    if (openLegsCount === 0 || entryCapitalSum === 0) {
+      return { entryCapitalSum: 0, liveCapitalSum: 0, decayPct: 0, openLegsCount: 0, isNetSeller: true };
+    }
+
+    const isNetSeller = netQtySum <= 0;
+    const decayPct = isNetSeller
+      ? ((entryCapitalSum - liveCapitalSum) / entryCapitalSum) * 100
+      : ((liveCapitalSum - entryCapitalSum) / entryCapitalSum) * 100;
+
+    return { entryCapitalSum, liveCapitalSum, decayPct, openLegsCount, isNetSeller };
+  }, [enrichedPositions]);
+
+  // Auto-calculate P&L Guard Target & SL ₹ when combinedTargetPct or combinedSlPct are selected
+  useEffect(() => {
+    if (combinedStrategyStats.entryCapitalSum <= 0) {
+      lastProcessedEntryCapitalRef.current = 0;
+      return;
+    }
+
+    const isNewTrade = lastProcessedEntryCapitalRef.current === 0 && combinedStrategyStats.entryCapitalSum > 0;
+    lastProcessedEntryCapitalRef.current = combinedStrategyStats.entryCapitalSum;
+
+    if (isNewTrade || combinedTargetPct !== null) {
+      if (combinedTargetPct !== null && combinedTargetPct > 0) {
+        const calcTarget = Math.round((combinedStrategyStats.entryCapitalSum * combinedTargetPct) / 100);
+        if (calcTarget > 0) setProfitTarget(String(calcTarget));
+      }
+    }
+
+    if (isNewTrade || combinedSlPct !== null) {
+      if (combinedSlPct !== null && combinedSlPct > 0) {
+        const calcLoss = Math.round((combinedStrategyStats.entryCapitalSum * combinedSlPct) / 100);
+        if (calcLoss > 0) setLossLimit(String(calcLoss));
+      }
+    }
+  }, [combinedStrategyStats.entryCapitalSum, combinedTargetPct, combinedSlPct]);
+
   // Position row keyed by security ID — lets each box look up its own open position/P&L
   const positionsBySecId = useMemo(() => {
     const map: Record<string, Record<string, unknown>> = {};
@@ -245,6 +344,81 @@ export default function AdvancedScalper() {
     }
     return map;
   }, [enrichedPositions, positionJoinKey]);
+
+  // Auto-apply default target & SL to newly opened positions (runs once per position lifecycle)
+  useEffect(() => {
+    // Clear appliedPositionsRef for positions that have gone flat
+    const openSyms = new Set(enrichedPositions.filter(p => Number(p.netQty) !== 0).map(p => String(p.tradingSymbol ?? '')));
+    for (const sym of appliedPositionsRef.current) {
+      if (!openSyms.has(sym)) appliedPositionsRef.current.delete(sym);
+    }
+
+    if (!autoApplyGuards) return;
+    const targetVal = parseFloat(defaultTargetVal);
+    const slVal = parseFloat(defaultSlVal);
+    if ((isNaN(targetVal) || targetVal <= 0) && (isNaN(slVal) || slVal <= 0)) return;
+
+    setPosGuards(prev => {
+      let changed = false;
+      const next = { ...prev };
+
+      for (const pos of enrichedPositions) {
+        const sym = String(pos.tradingSymbol ?? '');
+        const netQty = Number(pos.netQty);
+        if (!sym || netQty === 0) continue;
+
+        // Skip if already auto-applied once for this position lifecycle
+        if (appliedPositionsRef.current.has(sym)) continue;
+
+        const existing = next[sym];
+        if (!existing || (!existing.target && !existing.sl)) {
+          const buyAvg = Number(pos.buyAvg);
+          const sellAvg = Number(pos.sellAvg);
+          const isLong = netQty > 0;
+          const entryPrice = isLong ? buyAvg : sellAvg;
+          if (entryPrice <= 0) continue;
+
+          let calcTarget = existing?.target ?? '';
+          let calcSl = existing?.sl ?? '';
+
+          if (!calcTarget && !isNaN(targetVal) && targetVal > 0) {
+            if (presetMode === 'PERCENT') {
+              const pct = targetVal / 100;
+              calcTarget = (isLong ? entryPrice * (1 + pct) : entryPrice * (1 - pct)).toFixed(2);
+            } else if (presetMode === 'POINTS') {
+              calcTarget = (isLong ? entryPrice + targetVal : entryPrice - targetVal).toFixed(2);
+            } else {
+              calcTarget = targetVal.toFixed(2);
+            }
+          }
+
+          if (!calcSl && !isNaN(slVal) && slVal > 0) {
+            if (presetMode === 'PERCENT') {
+              const pct = slVal / 100;
+              calcSl = (isLong ? entryPrice * (1 - pct) : entryPrice * (1 + pct)).toFixed(2);
+            } else if (presetMode === 'POINTS') {
+              calcSl = (isLong ? entryPrice - slVal : entryPrice + slVal).toFixed(2);
+            } else {
+              calcSl = slVal.toFixed(2);
+            }
+          }
+
+          if (calcTarget || calcSl) {
+            next[sym] = {
+              target: calcTarget,
+              sl: calcSl,
+              trailEnabled: existing?.trailEnabled ?? false,
+              bestPrice: existing?.bestPrice ?? 0,
+              triggered: false,
+            };
+            changed = true;
+            appliedPositionsRef.current.add(sym);
+          }
+        }
+      }
+      return changed ? next : prev;
+    });
+  }, [enrichedPositions, autoApplyGuards, defaultTargetVal, defaultSlVal, presetMode]);
 
   const boxSecId = useCallback((box: BoxConfig): string | undefined => {
     if (box.strike == null) return undefined;
@@ -1243,6 +1417,64 @@ export default function AdvancedScalper() {
               ))}
             </div>
 
+            {/* Predefined Target & SL Presets Control Bar */}
+            <div className="flex items-center gap-2 bg-zinc-900 border border-zinc-800 px-2.5 py-1 rounded-xl shrink-0">
+              <span className="text-[10px] font-bold text-zinc-400 uppercase tracking-wider whitespace-nowrap">PRESETS:</span>
+              
+              {/* Mode Selector */}
+              <div className="flex items-center bg-zinc-950 p-0.5 rounded-lg border border-zinc-800">
+                {(['PERCENT', 'POINTS', 'PRICE'] as const).map(m => (
+                  <button key={m} onClick={() => setPresetMode(m)}
+                    className={`px-2 py-0.5 text-[10px] font-bold rounded transition-all whitespace-nowrap ${
+                      presetMode === m
+                        ? 'bg-emerald-900/70 text-emerald-300 border border-emerald-500/40 shadow-sm'
+                        : 'text-zinc-500 hover:text-zinc-300'
+                    }`}>
+                    {m === 'PERCENT' ? '%' : m === 'POINTS' ? 'Pts' : '₹'}
+                  </button>
+                ))}
+              </div>
+
+              {/* Default Target */}
+              <div className="flex items-center gap-1">
+                <span className="text-[10px] font-bold text-emerald-400">TGT</span>
+                <input
+                  type="number" step="0.5" min="0"
+                  value={defaultTargetVal}
+                  onChange={e => setDefaultTargetVal(e.target.value)}
+                  placeholder="10"
+                  className="w-14 bg-zinc-950 border border-zinc-700 text-emerald-300 text-xs font-mono rounded px-1.5 py-0.5 focus:outline-none focus:border-emerald-500 text-center tabular-nums"
+                  title={`Default Target value (${presetMode === 'PERCENT' ? '%' : presetMode === 'POINTS' ? 'Points' : '₹ Price'})`}
+                />
+              </div>
+
+              {/* Default SL */}
+              <div className="flex items-center gap-1">
+                <span className="text-[10px] font-bold text-rose-400">SL</span>
+                <input
+                  type="number" step="0.5" min="0"
+                  value={defaultSlVal}
+                  onChange={e => setDefaultSlVal(e.target.value)}
+                  placeholder="5"
+                  className="w-14 bg-zinc-950 border border-zinc-700 text-rose-300 text-xs font-mono rounded px-1.5 py-0.5 focus:outline-none focus:border-rose-500 text-center tabular-nums"
+                  title={`Default SL value (${presetMode === 'PERCENT' ? '%' : presetMode === 'POINTS' ? 'Points' : '₹ Price'})`}
+                />
+              </div>
+
+              {/* Auto-Apply Toggle */}
+              <button
+                onClick={() => setAutoApplyGuards(v => !v)}
+                title="Automatically apply Target & SL presets to new trades upon execution"
+                className={`px-2 py-0.5 text-[10px] font-bold rounded border transition-all whitespace-nowrap ${
+                  autoApplyGuards
+                    ? 'bg-amber-900/60 border-amber-500/50 text-amber-300 shadow-sm'
+                    : 'bg-zinc-950 border-zinc-800 text-zinc-500 hover:text-zinc-300'
+                }`}
+              >
+                ⚡ Auto-Apply {autoApplyGuards ? 'ON' : 'OFF'}
+              </button>
+            </div>
+
             {/* Top 10 NIFTY heavyweights panel — display preference, so it sits
                 with the other view toggles rather than the order controls. */}
             <button onClick={() => setShowTop10(v => !v)}
@@ -1342,6 +1574,67 @@ export default function AdvancedScalper() {
                         onChange={e => setLossLimit(e.target.value.replace(/-/g, ''))}
                         className="w-24 bg-zinc-900 border border-zinc-700 text-zinc-200 text-xs font-mono
                                    rounded px-2 py-1 focus:outline-none focus:border-rose-500" />
+                    </div>
+
+                    {/* Combined Strategy % Presets (Always visible; calculates Total P&L Guard Target & SL ₹) */}
+                    <div className="flex items-center gap-1 bg-zinc-900 border border-zinc-800 px-2 py-1 rounded-lg shrink-0">
+                      <span className="text-[10px] text-zinc-400 font-bold whitespace-nowrap" title="Target & SL % for combined multi-leg portfolio">COMBINED %:</span>
+                      <span className="text-[10px] text-emerald-400 font-bold">TGT</span>
+                      {[10, 15, 20, 25, 30].map(pct => {
+                        const isSelected = combinedTargetPct === pct;
+                        return (
+                          <button
+                            key={pct}
+                            type="button"
+                            onClick={() => {
+                              setCombinedTargetPct(prev => prev === pct ? null : pct);
+                              if (combinedStrategyStats.entryCapitalSum > 0) {
+                                const calcTarget = Math.round((combinedStrategyStats.entryCapitalSum * pct) / 100);
+                                if (calcTarget > 0) setProfitTarget(String(calcTarget));
+                              }
+                            }}
+                            className={`px-1.5 py-0.5 rounded font-mono text-[10px] font-bold transition-all ${
+                              isSelected
+                                ? 'bg-emerald-600 text-white border border-emerald-400 shadow-sm'
+                                : 'bg-emerald-950/80 border border-emerald-800/80 text-emerald-400 hover:bg-emerald-800 hover:text-white'
+                            }`}
+                            title={combinedStrategyStats.entryCapitalSum > 0
+                              ? `Set total P&L Guard Target to +${pct}% (+₹${Math.round((combinedStrategyStats.entryCapitalSum * pct) / 100)})`
+                              : `Set combined Target to +${pct}% (will apply when trade opens)`
+                            }
+                          >
+                            +{pct}%
+                          </button>
+                        );
+                      })}
+                      <span className="text-[10px] text-rose-400 font-bold ml-1">SL</span>
+                      {[5, 10, 15, 20].map(pct => {
+                        const isSelected = combinedSlPct === pct;
+                        return (
+                          <button
+                            key={pct}
+                            type="button"
+                            onClick={() => {
+                              setCombinedSlPct(prev => prev === pct ? null : pct);
+                              if (combinedStrategyStats.entryCapitalSum > 0) {
+                                const calcLoss = Math.round((combinedStrategyStats.entryCapitalSum * pct) / 100);
+                                if (calcLoss > 0) setLossLimit(String(calcLoss));
+                              }
+                            }}
+                            className={`px-1.5 py-0.5 rounded font-mono text-[10px] font-bold transition-all ${
+                              isSelected
+                                ? 'bg-rose-600 text-white border border-rose-400 shadow-sm'
+                                : 'bg-rose-950/80 border border-rose-800/80 text-rose-400 hover:bg-rose-800 hover:text-white'
+                            }`}
+                            title={combinedStrategyStats.entryCapitalSum > 0
+                              ? `Set total P&L Guard SL limit to -${pct}% (-₹${Math.round((combinedStrategyStats.entryCapitalSum * pct) / 100)})`
+                              : `Set combined SL limit to -${pct}% (will apply when trade opens)`
+                            }
+                          >
+                            -{pct}%
+                          </button>
+                        );
+                      })}
                     </div>
 
                     <div className="flex items-center gap-1 shrink-0">
@@ -1523,6 +1816,35 @@ export default function AdvancedScalper() {
           </>
         )}
       </div>
+
+      {/* Live Combined Multi-Leg Strategy Banner */}
+      {combinedStrategyStats.openLegsCount > 1 && combinedStrategyStats.entryCapitalSum > 0 && (
+        <div className="mx-4 mb-3 flex items-center justify-between gap-3 bg-violet-950/70 border border-violet-700/60 rounded-xl px-4 py-2.5 shadow-lg">
+          <div className="flex items-center gap-3 flex-wrap">
+            <span className="flex items-center gap-1.5 text-xs font-bold text-violet-300 uppercase tracking-wider">
+              <Zap className="w-4 h-4 text-yellow-400" /> MULTI-LEG STRATEGY ({combinedStrategyStats.openLegsCount} LEGS ACTIVE)
+            </span>
+            <span className="text-xs font-mono text-zinc-300">
+              Entry Capital Value: <strong className="text-white">₹{combinedStrategyStats.entryCapitalSum.toFixed(0)}</strong>
+              {' '}&rarr; Current Value: <strong className="text-white">₹{combinedStrategyStats.liveCapitalSum.toFixed(0)}</strong>
+            </span>
+          </div>
+
+          <div className="flex items-center gap-3">
+            <span className={`text-xs font-bold font-mono tabular-nums px-2.5 py-1 rounded-lg border ${
+              combinedStrategyStats.decayPct >= 0
+                ? 'bg-emerald-900/60 border-emerald-500/40 text-emerald-300'
+                : 'bg-rose-900/60 border-rose-500/40 text-rose-300'
+            }`}>
+              {combinedStrategyStats.decayPct >= 0 ? '+' : ''}{combinedStrategyStats.decayPct.toFixed(1)}% {
+                combinedStrategyStats.decayPct >= 0
+                  ? (combinedStrategyStats.isNetSeller ? 'Decay Captured' : 'Premium Growth')
+                  : 'Loss'
+              }
+            </span>
+          </div>
+        </div>
+      )}
 
       {/* Bottom tabs panel */}
       <div className="flex-1 flex flex-col mx-4 mb-4 bg-zinc-900/60 border border-zinc-800 rounded-2xl overflow-hidden">
