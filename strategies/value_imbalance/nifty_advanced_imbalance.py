@@ -149,10 +149,24 @@ class NiftyAdvancedImbalance:
                 self.save_state(0, 0, 0, 0, status="STOPPED")
                 sys.exit(0)
             if remaining % 5 == 0 or remaining <= 5:
-                self.save_state(0, 0, 0, self.daily_pnl, status=f"COOLDOWN ({remaining}s)")
+                # No cycle is open during a cooldown — the day's P&L is already banked.
+                self.save_state(0, 0, 0, self.daily_pnl, status=f"COOLDOWN ({remaining}s)", cycle_pnl=0.0)
             time.sleep(1)
 
-    def save_state(self, nifty_spot, ce_ltp, pe_ltp, total_pnl, status="RUNNING"):
+    def save_state(self, nifty_spot, ce_ltp, pe_ltp, total_pnl, status="RUNNING", cycle_pnl=None):
+        """Publish state for the dashboard.
+
+        Two different numbers, deliberately decoupled:
+          * `total_pnl`  -> the card's headline figure. While a cycle is open this is
+            the cycle's P&L; once the day has ended it should be the day's total.
+          * `cycle_pnl`  -> the OPEN cycle's contribution, used to derive "daily_pnl"
+            as self.daily_pnl + cycle_pnl. Pass 0.0 once the cycle has been banked
+            into self.daily_pnl, or the same cycle is counted twice.
+
+        Defaults to cycle_pnl = total_pnl, which is correct for the common running
+        case where the headline IS the open cycle.
+        """
+        cycle_pnl = total_pnl if cycle_pnl is None else cycle_pnl
         state_dict = {
             "strategy": "nifty_advanced_imbalance",
             "status": status,
@@ -193,7 +207,7 @@ class NiftyAdvancedImbalance:
             "multi_cycle": self.multi_cycle,
             "cycle_cooldown": self.cycle_cooldown,
             "initial_combined_premium": round(self.initial_ce_entry_price + self.initial_pe_entry_price, 2) if (self.initial_ce_entry_price > 0 and self.initial_pe_entry_price > 0) else None,
-            "daily_pnl": round(self.daily_pnl + total_pnl, 2),
+            "daily_pnl": round(self.daily_pnl + cycle_pnl, 2),
         }
         save_strategy_state(self.state_key, state_dict)
 
@@ -540,6 +554,11 @@ class NiftyAdvancedImbalance:
         self.ce_avg_price = 0.0
         self.pe_avg_price = 0.0
         self.entry_diff_pct = 0.0
+        # realized_pnl is per-CYCLE, not per-day. Every cycle's total_pnl is banked
+        # into self.daily_pnl when the cycle closes, so carrying realized_pnl into
+        # the next cycle would count it twice in cumulative_pnl and make the global
+        # daily target / stop-loss fire against a fabricated number.
+        self.realized_pnl = 0.0
         self.adjustment_count = 0
         self.consecutive_chain_failures = 0
         self.trail_active = False
@@ -553,6 +572,8 @@ class NiftyAdvancedImbalance:
         self.pe_sl = 0.0
         self.ce_original_entry_premium = 0.0
         self.pe_original_entry_premium = 0.0
+        self.initial_ce_entry_price = 0.0
+        self.initial_pe_entry_price = 0.0
         logger.info("Session state reset.")
 
     def find_rebalance_strike(self, option_type, target_value, lots, chain_df, spot):
@@ -883,7 +904,7 @@ class NiftyAdvancedImbalance:
                         logger.warning(f"LTP fetch exception during shutdown: {shutdown_fetch_err}")
                         ce_ltp_val, pe_ltp_val, curr_nifty, total_pnl = self.ce_avg_price, self.pe_avg_price, nifty_spot, 0.0
                     self.exit_all_positions("UI Shutdown Request")
-                    self.save_state(curr_nifty, ce_ltp_val, pe_ltp_val, self.daily_pnl + total_pnl, status="STOPPED")
+                    self.save_state(curr_nifty, ce_ltp_val, pe_ltp_val, self.daily_pnl + total_pnl, status="STOPPED", cycle_pnl=total_pnl)
                     sys.exit(0)
 
                 now = datetime.now()
@@ -980,8 +1001,13 @@ class NiftyAdvancedImbalance:
 
                 # 1. Per-Cycle Scalp Lock (Premium Floor Exit)
                 if self.scalp_floor_pct > 0 and (self.ce_lots > 0 or self.pe_lots > 0):
-                    initial_combined = self.initial_ce_entry_price + self.initial_pe_entry_price
-                    initial_value = initial_combined * self.initial_lots * self.nifty_lot_size
+                    # Denominator must track the lots actually held: total_pnl reflects
+                    # post-adjustment sizing, so pricing the basis at initial_lots would
+                    # inflate decay_pct and fire the lock early after every lot addition.
+                    initial_value = (
+                        self.initial_ce_entry_price * self.ce_lots
+                        + self.initial_pe_entry_price * self.pe_lots
+                    ) * self.nifty_lot_size
                     if initial_value > 0:
                         decay_pct = (total_pnl / initial_value) * 100.0
                         if decay_pct >= self.scalp_floor_pct:
@@ -995,7 +1021,7 @@ class NiftyAdvancedImbalance:
                             if self.profit_target is not None and self.daily_pnl >= self.profit_target:
                                 logger.info(f"Scalp Lock hit & Global Daily Profit Target Reached (+INR {self.daily_pnl:.0f})! Stopping strategy for the day.")
                                 if not self.helper.wait_for_next_day_market_open(self.dry_run, start_time=self.start_time, shutdown_check=lambda: check_shutdown_trigger(self.state_key)):
-                                    self.save_state(0, 0, 0, self.daily_pnl, status="STOPPED")
+                                    self.save_state(0, 0, 0, self.daily_pnl, status="STOPPED", cycle_pnl=0.0)
                                     sys.exit(0)
                                 cycle_active = False
                                 break
@@ -1007,7 +1033,7 @@ class NiftyAdvancedImbalance:
                                 break
                             else:
                                 if not self.helper.wait_for_next_day_market_open(self.dry_run, start_time=self.start_time, shutdown_check=lambda: check_shutdown_trigger(self.state_key)):
-                                    self.save_state(0, 0, 0, self.daily_pnl, status="STOPPED")
+                                    self.save_state(0, 0, 0, self.daily_pnl, status="STOPPED", cycle_pnl=0.0)
                                     sys.exit(0)
                                 cycle_active = False
                                 break
@@ -1017,7 +1043,7 @@ class NiftyAdvancedImbalance:
                     self.exit_all_positions(f"Global Daily Profit Target Reached: {cumulative_pnl:.2f}")
                     self.daily_pnl = cumulative_pnl
                     if not self.helper.wait_for_next_day_market_open(self.dry_run, start_time=self.start_time, shutdown_check=lambda: check_shutdown_trigger(self.state_key)):
-                        self.save_state(0, 0, 0, self.daily_pnl, status="STOPPED")
+                        self.save_state(0, 0, 0, self.daily_pnl, status="STOPPED", cycle_pnl=0.0)
                         sys.exit(0)
                     cycle_active = False
                     break
@@ -1027,7 +1053,7 @@ class NiftyAdvancedImbalance:
                     self.exit_all_positions(f"Global Daily Stop Loss Hit: {cumulative_pnl:.2f}")
                     self.daily_pnl = cumulative_pnl
                     if not self.helper.wait_for_next_day_market_open(self.dry_run, start_time=self.start_time, shutdown_check=lambda: check_shutdown_trigger(self.state_key)):
-                        self.save_state(0, 0, 0, self.daily_pnl, status="STOPPED")
+                        self.save_state(0, 0, 0, self.daily_pnl, status="STOPPED", cycle_pnl=0.0)
                         sys.exit(0)
                     cycle_active = False
                     break
