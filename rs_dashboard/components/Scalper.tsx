@@ -1458,14 +1458,58 @@ export default function Scalper() {
         </div>
       </div>
 
-      {/* Centered underlying spot price strip */}
+      {/* Centered underlying spot price strip with CE/PE Value Summary on Left */}
       {spot > 0 && (() => {
         const chg    = prevSpot > 0 ? spot - prevSpot : 0;
         const chgPct = prevSpot > 0 ? (chg / prevSpot) * 100 : 0;
         const isUp   = chg >= 0;
+        const totalCEVal = (lots || 0) * (ceLtp || 0);
+        const totalPEVal = (lots || 0) * (peLtp || 0);
+        const cePeDiff   = totalCEVal - totalPEVal;
+
         return (
-          <div className="flex justify-center items-center px-4 pb-1 pt-0">
-            <div className="flex items-baseline gap-3 bg-zinc-900/60 border border-zinc-800 rounded-2xl px-8 py-3">
+          <div className="flex flex-wrap justify-center items-center gap-3 px-4 pb-1 pt-0 select-none">
+            {/* Total CE & PE Value Summary Pill (Left Side of Index Price) */}
+            <div className="flex items-center gap-2.5 bg-zinc-900/80 border border-zinc-800 rounded-2xl px-4 py-2.5 shadow-lg font-mono text-xs">
+              {/* Total CE Value */}
+              <div className="flex items-center gap-1.5" title="Total Call Value = Sum(CE Lots × CE Price)">
+                <span className="text-[10px] font-extrabold uppercase text-emerald-400 bg-emerald-950/80 border border-emerald-800/60 px-1.5 py-0.5 rounded">
+                  CE Val
+                </span>
+                <span className="font-bold text-emerald-300 tabular-nums">
+                  ₹{totalCEVal.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                </span>
+              </div>
+
+              <span className="text-zinc-700 font-sans">|</span>
+
+              {/* Total PE Value */}
+              <div className="flex items-center gap-1.5" title="Total Put Value = Sum(PE Lots × PE Price)">
+                <span className="text-[10px] font-extrabold uppercase text-rose-400 bg-rose-950/80 border border-rose-800/60 px-1.5 py-0.5 rounded">
+                  PE Val
+                </span>
+                <span className="font-bold text-rose-300 tabular-nums">
+                  ₹{totalPEVal.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                </span>
+              </div>
+
+              <span className="text-zinc-700 font-sans">|</span>
+
+              {/* Difference (CE - PE) */}
+              <div className="flex items-center gap-1.5" title="Difference = Total CE Value - Total PE Value">
+                <span className="text-[10px] font-extrabold uppercase text-zinc-400 bg-zinc-950 border border-zinc-800 px-1.5 py-0.5 rounded">
+                  Diff (CE-PE)
+                </span>
+                <span className={`font-bold tabular-nums ${
+                  cePeDiff > 0 ? 'text-emerald-400' : cePeDiff < 0 ? 'text-rose-400' : 'text-zinc-400'
+                }`}>
+                  {cePeDiff >= 0 ? '+' : ''}₹{cePeDiff.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                </span>
+              </div>
+            </div>
+
+            {/* Index Spot Price Pill */}
+            <div className="flex items-baseline gap-3 bg-zinc-900/60 border border-zinc-800 rounded-2xl px-6 py-2">
               <span className="text-xs font-bold text-zinc-500 uppercase tracking-widest">{underlying}</span>
               <span className="text-3xl font-bold font-mono tabular-nums text-white">
                 {spot.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
