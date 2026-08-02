@@ -35,7 +35,7 @@ export async function pollPositionFlat(broker: Broker, tradingSymbol: string, at
 // ─── Types ────────────────────────────────────────────────────────
 
 export interface OptionSide {
-  ltp: number; oi: number; volume: number; high?: number; low?: number;
+  ltp: number; oi: number; volume: number; high?: number; low?: number; open?: number; prev_close?: number; change?: number; change_pct?: number;
   /** Prev-day OI change % and 4-way buildup label ('LB'|'SB'|'SC'|'LU'|'') from the WS bridge */
   oi_chg_pct?: number; buildup?: string;
 }
@@ -215,10 +215,10 @@ export default function Scalper() {
   const ceOiChgPct = ceStrike != null ? (liveQuotes?.strikes?.[String(ceStrike)]?.ce?.oi_chg_pct ?? 0) : 0;
   const peOiChgPct = peStrike != null ? (liveQuotes?.strikes?.[String(peStrike)]?.pe?.oi_chg_pct ?? 0) : 0;
 
-  const cePrevClose = ceStrike != null ? (prevClose[String(ceStrike)]?.ce ?? 0) : 0;
-  const pePrevClose = peStrike != null ? (prevClose[String(peStrike)]?.pe ?? 0) : 0;
-  const cePct = (ceLtp > 0 && cePrevClose > 0) ? ((ceLtp - cePrevClose) / cePrevClose) * 100 : null;
-  const pePct = (peLtp > 0 && pePrevClose > 0) ? ((peLtp - pePrevClose) / pePrevClose) * 100 : null;
+  const cePrevClose = ceStrike != null ? (prevClose[String(ceStrike)]?.ce ?? liveQuotes?.strikes?.[String(ceStrike)]?.ce?.prev_close ?? 0) : 0;
+  const pePrevClose = peStrike != null ? (prevClose[String(peStrike)]?.pe ?? liveQuotes?.strikes?.[String(peStrike)]?.pe?.prev_close ?? 0) : 0;
+  const cePct = (ceLtp > 0 && cePrevClose > 0) ? ((ceLtp - cePrevClose) / cePrevClose) * 100 : (liveQuotes?.strikes?.[String(ceStrike!)]?.ce?.change_pct ?? null);
+  const pePct = (peLtp > 0 && pePrevClose > 0) ? ((peLtp - pePrevClose) / pePrevClose) * 100 : (liveQuotes?.strikes?.[String(peStrike!)]?.pe?.change_pct ?? null);
 
   // True once the lookup for the current expiry has returned security IDs —
   // gates ordering so a click can never silently fall back to the slow
@@ -1740,7 +1740,12 @@ export const OptionPanel = React.memo(function OptionPanel({
 }: OptionPanelProps) {
   const orderDisabled = !strike || pending || !strikesReady;
   const isPos = (v: number) => v >= 0;
-  const buildupStyle = buildup ? BUILDUP_STYLES[buildup] : undefined;
+  const activeBuildup = buildup || (() => {
+    if (pct == null || !oiChgPct || Math.abs(oiChgPct) < 0.5) return '';
+    if (oiChgPct > 0) return pct >= 0 ? 'LB' : 'SB';
+    return pct >= 0 ? 'SC' : 'LU';
+  })();
+  const buildupStyle = activeBuildup ? BUILDUP_STYLES[activeBuildup] : undefined;
 
   // The "← ATM" hint only fits when the panel itself has room for it — a fixed
   // select width would either clip the hint on a narrow panel or sit mostly

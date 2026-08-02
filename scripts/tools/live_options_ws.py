@@ -111,38 +111,41 @@ def _fetch_prev_closes(dhan, underlying_sid: str, underlying_exchange: str = 'NS
         print(f'[live_options_ws] WARN: prev_closes fetch failed: {e}', flush=True)
     return closes
 
-def _fetch_prev_oi(helper, underlying: str, expiry: str, exchange_segment: str = 'IDX_I', attempts: int = 5, delay: float = 5.0) -> dict:
-    """Fetch previous-day OI per strike/side from the option chain (at startup).
+def _fetch_prev_meta(helper, underlying: str, expiry: str, exchange_segment: str = 'IDX_I', attempts: int = 5, delay: float = 5.0) -> dict:
+    """Fetch previous-day OI and previous-day Close per strike/side from option chain (at startup).
 
     Retries on transient failures (429s, empty chain) since a single missed
     fetch would otherwise disable buildup labels for the whole session.
-    Returns {strike_int: {'ce': prev_oi, 'pe': prev_oi}}. Empty dict if every
-    attempt fails — buildup labels are simply omitted for the session.
+    Returns {strike_int: {'ce_oi': int, 'pe_oi': int, 'ce_close': float, 'pe_close': float}}.
     """
     for attempt in range(attempts):
-        prev_oi: dict = {}
+        prev_meta: dict = {}
         try:
             chain = helper.get_option_chain(underlying, expiry, exchange_segment=exchange_segment)
             for strike_str, data in ((chain or {}).get('oc') or {}).items():
                 strike = int(float(strike_str))
-                prev_oi[strike] = {
-                    'ce': int(_f((data.get('ce') or {}).get('previous_oi'))),
-                    'pe': int(_f((data.get('pe') or {}).get('previous_oi'))),
+                ce_data = data.get('ce') or {}
+                pe_data = data.get('pe') or {}
+                prev_meta[strike] = {
+                    'ce_oi':    int(_f(ce_data.get('previous_oi') or ce_data.get('oi'))),
+                    'pe_oi':    int(_f(pe_data.get('previous_oi') or pe_data.get('oi'))),
+                    'ce_close': _f(ce_data.get('previous_close') or ce_data.get('close') or ce_data.get('last_price')),
+                    'pe_close': _f(pe_data.get('previous_close') or pe_data.get('close') or pe_data.get('last_price')),
                 }
         except Exception as e:
-            print(f'[live_options_ws] WARN: prev_oi fetch failed (attempt {attempt + 1}/{attempts}): {e}', flush=True)
-            prev_oi = {}
+            print(f'[live_options_ws] WARN: prev_meta fetch failed (attempt {attempt + 1}/{attempts}): {e}', flush=True)
+            prev_meta = {}
 
-        if prev_oi:
-            return prev_oi
+        if prev_meta:
+            return prev_meta
         if attempt < attempts - 1:
-            print(f'[live_options_ws] WARN: prev_oi fetch returned no strikes (attempt {attempt + 1}/{attempts}), retrying in {delay:.0f}s…', flush=True)
+            print(f'[live_options_ws] WARN: prev_meta fetch returned no strikes (attempt {attempt + 1}/{attempts}), retrying in {delay:.0f}s…', flush=True)
             time.sleep(delay)
     return {}
 
 
-# Buildup dead-bands — below these the label is suppressed to avoid flicker
-BUILDUP_MIN_PRICE_PCT = 2.0
+# Buildup dead-bands — lower price threshold to 0.01 so any directional price move classifies buildup
+BUILDUP_MIN_PRICE_PCT = 0.01
 BUILDUP_MIN_OI_PCT    = 0.5
 
 
@@ -350,9 +353,9 @@ def main():
     vix_prev_close = closes.get(VIX_SID, 0.0)
     print(f'[live_options_ws] prev_closes: underlying={underlying_prev_close}, VIX={vix_prev_close}', flush=True)
 
-    # Fetch prev-day OI per strike once at startup — baseline for buildup labels
-    prev_oi_map = _fetch_prev_oi(helper, args.underlying, args.expiry, exchange_segment=underlying_seg)
-    print(f'[live_options_ws] prev_oi baseline: {len(prev_oi_map)} strikes', flush=True)
+    # Fetch prev-day OI & Close per strike once at startup — baseline for buildup labels
+    prev_meta_map = _fetch_prev_meta(helper, args.underlying, args.expiry, exchange_segment=underlying_seg)
+    print(f'[live_options_ws] prev_meta baseline: {len(prev_meta_map)} strikes', flush=True)
 
     # Get spot to determine ATM — retry on transient REST failures (429s):
     # spot=0 here means zero strikes resolved and a crippled session.
@@ -500,15 +503,20 @@ def main():
                     oi  = int(tick.get('OI', 0) or tick.get('oi', 0) or 0)
                     vol = int(tick.get('volume', 0) or 0)
                     
+                    side_key = meta['type'].lower()
+                    strike_meta = prev_meta_map.get(meta['strike']) or {}
+                    side_prev_oi = _f(strike_meta.get(f'{side_key}_oi'))
+                    fallback_prev_close = _f(strike_meta.get(f'{side_key}_close'))
+
                     prev_close = _f(tick.get('prev_close') or tick.get('close'))
                     if prev_close == 0.0:
                         ohlc = tick.get('ohlc') or {}
                         prev_close = _f(ohlc.get('close'))
+                    if prev_close == 0.0:
+                        prev_close = fallback_prev_close
                     
                     change = ltp - prev_close if prev_close > 0 else 0.0
                     change_pct = (change / prev_close * 100) if prev_close > 0 else 0.0
-
-                    side_prev_oi = (prev_oi_map.get(meta['strike']) or {}).get(meta['type'].lower(), 0)
                     oi_chg_pct = ((oi - side_prev_oi) / side_prev_oi * 100) if side_prev_oi > 0 and oi > 0 else 0.0
 
                     strikes_data[sk_key][meta['type'].lower()] = {

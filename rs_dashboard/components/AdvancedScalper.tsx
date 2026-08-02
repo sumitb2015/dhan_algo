@@ -1834,14 +1834,13 @@ export default function AdvancedScalper() {
           const ltp = box.strike != null
             ? (liveQuotes?.strikes?.[String(box.strike)]?.[box.side === 'CE' ? 'ce' : 'pe']?.ltp ?? 0)
             : 0;
-          const pc = box.strike != null
-            ? (prevClose[String(box.strike)]?.[box.side === 'CE' ? 'ce' : 'pe'] ?? 0)
-            : 0;
-          const pct = (ltp > 0 && pc > 0) ? ((ltp - pc) / pc) * 100 : null;
-
           const sideData = box.strike != null
             ? liveQuotes?.strikes?.[String(box.strike)]?.[box.side === 'CE' ? 'ce' : 'pe']
             : undefined;
+          const pc = box.strike != null
+            ? (prevClose[String(box.strike)]?.[box.side === 'CE' ? 'ce' : 'pe'] ?? sideData?.prev_close ?? 0)
+            : 0;
+          const pct = (ltp > 0 && pc > 0) ? ((ltp - pc) / pc) * 100 : (sideData?.change_pct ?? null);
           const high = sideData?.high ?? 0;
           const low  = sideData?.low ?? 0;
 
