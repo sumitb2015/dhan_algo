@@ -1,9 +1,15 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { COOKIE_SECRET, SESSION_COOKIE } from '@/lib/auth';
 
-// Edge Runtime — cannot use Node.js fs. Session validity is encoded in the
-// HMAC-signed cookie value: "<uuid>.<hmac-sha256(uuid, SECRET)>".
-// The session.json lookup (deeper validation) happens in the status route.
+// Session validity is encoded in the HMAC-signed cookie value:
+// "<uuid>.<hmac-sha256(uuid, SECRET)>". The session.json lookup (deeper validation)
+// happens in the status route.
+//
+// This runs on the Node.js runtime — `proxy` does not support `edge` and the runtime
+// cannot be configured (it did run on Edge as `middleware.ts`). Node.js fs is
+// therefore available here now, but the split above is left as-is deliberately: this
+// gate is on the hot path for every request, and a per-request file read to check
+// what the signature already proves would be a real cost for no security gain.
 
 async function verifySessionCookie(cookieValue: string): Promise<boolean> {
   const dotIdx = cookieValue.lastIndexOf('.');
@@ -12,7 +18,8 @@ async function verifySessionCookie(cookieValue: string): Promise<boolean> {
   const sig   = cookieValue.slice(dotIdx + 1);
   if (!uuid || !sig) return false;
 
-  // Web Crypto API — available in Edge Runtime
+  // Web Crypto API — a global on Node 18+, and byte-identical to node:crypto's
+  // HMAC, so cookies signed before this migration stay valid.
   const enc     = new TextEncoder();
   const keyMat  = await crypto.subtle.importKey('raw', enc.encode(COOKIE_SECRET), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
   const sigBuf  = await crypto.subtle.sign('HMAC', keyMat, enc.encode(uuid));
@@ -20,11 +27,11 @@ async function verifySessionCookie(cookieValue: string): Promise<boolean> {
   return expected === sig;
 }
 
-export async function middleware(req: NextRequest): Promise<NextResponse> {
+export async function proxy(req: NextRequest): Promise<NextResponse> {
   const { pathname } = req.nextUrl;
   const cookieValue = req.cookies.get(SESSION_COOKIE)?.value;
 
-  console.log(`[middleware] path: ${pathname}, hasCookie: ${!!cookieValue}`);
+  console.log(`[proxy] path: ${pathname}, hasCookie: ${!!cookieValue}`);
 
   if (cookieValue && await verifySessionCookie(cookieValue)) {
     return NextResponse.next();
@@ -32,14 +39,14 @@ export async function middleware(req: NextRequest): Promise<NextResponse> {
 
   // Do not redirect API requests to the login HTML page; return a 401 JSON response instead!
   if (pathname.startsWith('/api/')) {
-    console.log(`[middleware] unauthorized API request: ${pathname} - returning 401`);
+    console.log(`[proxy] unauthorized API request: ${pathname} - returning 401`);
     return new NextResponse(JSON.stringify({ success: false, error: 'Unauthorized' }), {
       status: 401,
       headers: { 'Content-Type': 'application/json' },
     });
   }
 
-  console.log(`[middleware] redirecting to /login from: ${pathname}`);
+  console.log(`[proxy] redirecting to /login from: ${pathname}`);
   const loginUrl = new URL('/login', req.url);
   return NextResponse.redirect(loginUrl);
 }

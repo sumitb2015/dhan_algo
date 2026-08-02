@@ -93,8 +93,8 @@ export function useLiveTickerPoll<T>(
     try {
       const res = await fetch(url);
       const raw = await res.json();
-      // The auth middleware answers unauthenticated API calls with
-      // {success:false} and a 401 (middleware.ts), so an expired session leaves
+      // The auth proxy answers unauthenticated API calls with
+      // {success:false} and a 401 (proxy.ts), so an expired session leaves
       // the last good data on screen and lets it age into STALE — which is the
       // honest outcome — rather than blanking the panel.
       if ((raw as { success?: boolean })?.success === false) return;

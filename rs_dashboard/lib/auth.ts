@@ -1,4 +1,4 @@
-// Shared auth constants for login/status/logout routes and middleware.
+// Shared auth constants for login/status/logout routes and the proxy.
 // COOKIE_SECRET keeps cookie signatures consistent across restarts.
 // For a local dev tool on localhost, a baked-in constant is acceptable.
 export const COOKIE_SECRET  = 'dhan-dashboard-local-secret-v1';

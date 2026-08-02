@@ -13,8 +13,8 @@ type AuthConfig = Record<string, Record<string, FieldStatus>>;
  * GET /api/auth/config          -> masked (which fields are configured)
  * GET /api/auth/config?reveal=1 -> plaintext values, SESSION REQUIRED
  *
- * The session check is done here rather than left to the middleware: this route
- * sits under /api/auth, which middleware.ts deliberately excludes from auth so
+ * The session check is done here rather than left to the proxy: this route
+ * sits under /api/auth, which proxy.ts deliberately excludes from auth so
  * the login page can reach it before you have a session. That exemption is fine
  * for "is this field set", but the server binds 0.0.0.0 — so without this gate a
  * single unauthenticated request from anywhere on the network would return every
