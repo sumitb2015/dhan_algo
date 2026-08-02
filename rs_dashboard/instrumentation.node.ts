@@ -22,6 +22,12 @@ function istHourMinute(): [number, number] {
 }
 
 function isPidRunning(pid: number): boolean {
+  if (!pid || isNaN(pid)) return false;
+  try {
+    process.kill(pid, 0);
+  } catch {
+    return false;
+  }
   try {
     if (process.platform === 'win32') {
       const out = execSync(`tasklist /FI "PID eq ${pid}" /FO CSV /NH`, {

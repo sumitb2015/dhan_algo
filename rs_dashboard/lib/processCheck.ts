@@ -3,14 +3,26 @@ import { execSync } from 'child_process';
 // tasklist/ps is a blocking child-process spawn (~50-200ms on Windows). Several routes
 // poll this every 2-3s to check whether a background Python process is still alive;
 // calling it unconditionally on every poll can saturate the single-threaded Node event
-// loop and starve concurrent requests (e.g. order placement) on unrelated pages. Cache
-// the result per PID for a few seconds instead of re-checking on every poll.
+// loop and starve concurrent requests. Cache the result per PID.
 const PID_CHECK_TTL = 3000;
 const cache = new Map<number, { result: boolean; ts: number }>();
+const pidStartTimeMap = new Map<number, string>();
 
 /** `force` bypasses the cache — use only for short-lived poll loops (e.g. waiting
  *  for a process to exit) where the 3s TTL would otherwise mask the state change. */
 export function isPidRunning(pid: number, force = false): boolean {
+  if (!pid || isNaN(pid)) return false;
+
+  // Ultra-fast zero-cost native check (0.001ms). If process.kill(pid, 0) fails,
+  // the OS guarantees no process exists with this PID.
+  try {
+    process.kill(pid, 0);
+  } catch {
+    cache.delete(pid);
+    pidStartTimeMap.delete(pid);
+    return false;
+  }
+
   const hit = force ? undefined : cache.get(pid);
   if (hit && Date.now() - hit.ts < PID_CHECK_TTL) {
     return hit.result;
@@ -36,16 +48,26 @@ export function isPidRunning(pid: number, force = false): boolean {
   return result;
 }
 
-/** Returns the process's start time (.NET ticks, as a string) or null if it can't be determined. */
+/** Returns the process's start time (.NET ticks, as a string) or null if it can't be determined.
+ *  Caches the start time permanently for running PIDs, since a process's start time never changes. */
 export function getPidStartTime(pid: number): string | null {
-  if (process.platform !== 'win32') return null;
+  if (process.platform !== 'win32' || !pid) return null;
+
+  if (pidStartTimeMap.has(pid)) {
+    return pidStartTimeMap.get(pid)!;
+  }
+
   try {
     const out = execSync(
       `powershell -NoProfile -Command "(Get-Process -Id ${pid} -ErrorAction Stop).StartTime.Ticks"`,
       { encoding: 'utf8', stdio: ['pipe', 'pipe', 'ignore'], windowsHide: true }
     );
     const ticks = out.trim();
-    return ticks || null;
+    if (ticks) {
+      pidStartTimeMap.set(pid, ticks);
+      return ticks;
+    }
+    return null;
   } catch {
     return null;
   }
@@ -56,10 +78,6 @@ const startTimeCache = new Map<string, { result: boolean; ts: number }>();
 /**
  * Like isPidRunning, but also verifies the live process's start time matches
  * expectedStartTime (from getPidStartTime() captured when the process was spawned).
- * Windows recycles PIDs — without this check, a crashed/killed process whose PID gets
- * reassigned to an unrelated python(w).exe would look "still running" forever, leaving
- * a dashboard Stop button that writes a shutdown trigger nobody reads. If expectedStartTime
- * is null/undefined (not recorded), falls back to plain PID+image-name matching.
  */
 export function isPidRunningAt(pid: number, expectedStartTime?: string | null, force = false): boolean {
   if (!expectedStartTime) return isPidRunning(pid, force);
@@ -70,12 +88,27 @@ export function isPidRunningAt(pid: number, expectedStartTime?: string | null, f
     return hit.result;
   }
 
-  const result = isPidRunning(pid, force) && getPidStartTime(pid) === expectedStartTime;
+  const running = isPidRunning(pid, force);
+  const result = running && getPidStartTime(pid) === expectedStartTime;
   startTimeCache.set(key, { result, ts: Date.now() });
   return result;
 }
 
 function firstChildPid(parentPid: number): number | null {
+  try {
+    const out = execSync(
+      `wmic process where "ParentProcessId=${parentPid}" get ProcessId /format:csv`,
+      { encoding: 'utf8', stdio: ['pipe', 'pipe', 'ignore'], windowsHide: true }
+    );
+    const lines = out.trim().split(/\r?\n/).filter(line => line.trim() && !line.includes('Node,ProcessId'));
+    if (lines.length > 0) {
+      const parts = lines[lines.length - 1].split(',');
+      const pidVal = parseInt(parts[parts.length - 1].trim(), 10);
+      if (!isNaN(pidVal) && pidVal > 0) return pidVal;
+    }
+  } catch {}
+
+  // Fallback to PowerShell if WMIC is unavailable
   try {
     const out = execSync(
       `powershell -NoProfile -Command "(Get-CimInstance Win32_Process -Filter 'ParentProcessId=${parentPid}' | Select-Object -First 1 -ExpandProperty ProcessId)"`,
@@ -88,14 +121,7 @@ function firstChildPid(parentPid: number): number | null {
 }
 
 /**
- * Resolves the PID that actually corresponds to a just-spawned strategy process, plus its
- * start time. On Windows, venv's Scripts\pythonw.exe (venvlauncher.exe) is a launcher stub
- * that spawns a SEPARATE real interpreter process and just waits on it — so the PID returned
- * by child_process.spawn() is the launcher, not the one that calls os.getpid() and shows up
- * in the strategy's own state file. Without resolving the real child, PID-identity checks
- * compare the launcher's start time against the worker's PID and never match, making every
- * freshly-launched strategy look immediately "stopped" even though it's running fine.
- * Retries briefly since the child may not be visible to WMI for a few hundred ms after spawn.
+ * Resolves the PID that actually corresponds to a just-spawned strategy process, plus its start time.
  */
 export async function resolveWorkerPid(launcherPid: number, timeoutMs = 3000): Promise<{ pid: number; startTime: string } | null> {
   const deadline = Date.now() + timeoutMs;
@@ -107,8 +133,6 @@ export async function resolveWorkerPid(launcherPid: number, timeoutMs = 3000): P
     }
     await new Promise(r => setTimeout(r, 200));
   }
-  // No child found within the window (e.g. a venv without the launcher stub) — the
-  // launcher process itself is the real worker.
   const startTime = getPidStartTime(launcherPid);
   return startTime ? { pid: launcherPid, startTime } : null;
 }

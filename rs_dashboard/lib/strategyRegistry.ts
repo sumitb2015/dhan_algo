@@ -69,11 +69,22 @@ export function pidMetaPath(key: string): string {
   return path.join(DEBUG_DIR, `${key}_pid.json`);
 }
 
+const pidMetaCache = new Map<string, { startTime: string | null; mtime: number }>();
+
 function readExpectedStartTime(key: string): string | null {
+  const filePath = pidMetaPath(key);
   try {
-    const meta = JSON.parse(fs.readFileSync(pidMetaPath(key), 'utf8'));
-    return meta.startTime ?? null;
+    const stat = fs.statSync(filePath);
+    const hit = pidMetaCache.get(key);
+    if (hit && hit.mtime === stat.mtimeMs) {
+      return hit.startTime;
+    }
+    const meta = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+    const startTime = meta.startTime ?? null;
+    pidMetaCache.set(key, { startTime, mtime: stat.mtimeMs });
+    return startTime;
   } catch {
+    pidMetaCache.delete(key);
     return null;
   }
 }
