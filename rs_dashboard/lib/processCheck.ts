@@ -33,13 +33,14 @@ function pruneExpired(map: Map<unknown, { ts: number }>): void {
   }
 }
 
-/** `force` bypasses the cache — use only for short-lived poll loops (e.g. waiting
- *  for a process to exit) where the 3s TTL would otherwise mask the state change. */
-export function isPidRunning(pid: number, force = false): boolean {
-  if (!pid || isNaN(pid)) return false;
-
-  // Ultra-fast zero-cost native check (0.001ms). If process.kill(pid, 0) fails,
-  // the OS guarantees no process exists with this PID.
+/** Free liveness probe plus the observation bookkeeping that getPidStartTime's cache
+ *  depends on. Returns false only when the OS guarantees no process holds this PID.
+ *
+ *  A `true` here does NOT mean "our python process" — any process could hold a recycled
+ *  PID. Callers must add either the image-name check (isPidRunning) or a start-time
+ *  match (isPidRunningAt) on top. */
+function isPidAlive(pid: number): boolean {
+  // Ultra-fast zero-cost native check (0.001ms).
   try {
     process.kill(pid, 0);
   } catch {
@@ -56,6 +57,15 @@ export function isPidRunning(pid: number, force = false): boolean {
     if (Date.now() - seen.lastSeen > PID_OBSERVATION_GAP) pidStartTimeMap.delete(pid);
     else seen.lastSeen = Date.now();
   }
+  return true;
+}
+
+/** `force` bypasses the cache — use only for short-lived poll loops (e.g. waiting
+ *  for a process to exit) where the 3s TTL would otherwise mask the state change. */
+export function isPidRunning(pid: number, force = false): boolean {
+  if (!pid || isNaN(pid)) return false;
+
+  if (!isPidAlive(pid)) return false;
 
   const hit = force ? undefined : cache.get(pid);
   if (hit && Date.now() - hit.ts < PID_CHECK_TTL) {
@@ -128,11 +138,15 @@ const startTimeCache = new Map<string, { result: boolean; ts: number }>();
  * a dashboard Stop button that writes a shutdown trigger nobody reads. If expectedStartTime
  * is null/undefined (not recorded), falls back to plain PID+image-name matching.
  *
- * The 3s result cache below means the PowerShell start-time query runs at most once per
- * 3s per PID, which is what keeps this cheap enough to poll.
+ * Deliberately uses isPidAlive rather than isPidRunning: the ~300ms `tasklist` spawn only
+ * establishes that the PID belongs to *a* python process, which a start-time match already
+ * implies and more strictly — a recycled PID has a different start time whether or not the
+ * new occupant is python. Skipping it removes the last per-poll blocking spawn from this
+ * path. isPidRunning keeps the image-name check for callers that have no start time.
  */
 export function isPidRunningAt(pid: number, expectedStartTime?: string | null, force = false): boolean {
   if (!expectedStartTime) return isPidRunning(pid, force);
+  if (!pid || isNaN(pid)) return false;
 
   const key = `${pid}:${expectedStartTime}`;
   const hit = force ? undefined : startTimeCache.get(key);
@@ -140,7 +154,7 @@ export function isPidRunningAt(pid: number, expectedStartTime?: string | null, f
     return hit.result;
   }
 
-  const running = isPidRunning(pid, force);
+  const running = isPidAlive(pid);
   const result = running && getPidStartTime(pid) === expectedStartTime;
   startTimeCache.set(key, { result, ts: Date.now() });
   pruneExpired(startTimeCache);
