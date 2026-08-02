@@ -41,6 +41,12 @@ debug/*.json
 debug/*.db
 debug/*.trigger
 debug/*.tmp
+# Per-strategy run logs. The patterns above are single-level, so they never
+# reached this subtree — it had quietly grown to 7.5 MB across 55 files. These are
+# machine-local run output (fills, P&L, spot prints), regenerated on every run.
+debug/logs/
+debug/**/*.log
+debug/**/*.log.bak
 
 # Nested clones under scratch/
 scratch/rrg-lite-clone/
