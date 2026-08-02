@@ -1891,10 +1891,10 @@ export default function AdvancedScalper() {
             Mounting is what starts each panel's polling; hidden costs nothing. */}
         {showTop10 && (
           <>
-            <div className="flex-none w-[calc(15%-0.6rem)] min-w-[240px]">
+            <div className="flex-none w-[calc(15%-0.6rem)] min-w-[260px]">
               <TopWeightStocks />
             </div>
-            <div className="flex-none w-[calc(13%-0.6rem)] min-w-[210px]">
+            <div className="flex-none w-[calc(15%-0.6rem)] min-w-[260px]">
               <TopIndices />
             </div>
           </>
