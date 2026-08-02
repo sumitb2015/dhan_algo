@@ -344,9 +344,10 @@ export default function Scalper() {
       if (!side) continue;
 
       const ltp = Number(pos.lastTradedPrice) || Number(pos.buyAvg) || Number(pos.sellAvg) || 0;
-      const absQty = Math.abs(netQty);
-      const posLots = lotSize > 0 ? absQty / lotSize : absQty;
-      const val = posLots * ltp;
+      // netQty is already a total unit count, so qty * price is rupees directly.
+      // Dividing by the selected underlying's `lotSize` would misprice any position
+      // on a different underlying (e.g. an open SENSEX leg while NIFTY is selected).
+      const val = Math.abs(netQty) * ltp * contractMultiplier(pos);
 
       if (side === 'CE') ceSum += val;
       else if (side === 'PE') peSum += val;
@@ -357,7 +358,7 @@ export default function Scalper() {
       totalPEVal: peSum,
       cePeDiff: ceSum - peSum,
     };
-  }, [enrichedPositions, secIdToStrikeSide, broker, lotSize]);
+  }, [enrichedPositions, secIdToStrikeSide, broker]);
 
   // ─── useEffect 1: Load expiries based on broker + underlying ───────
 
@@ -1518,7 +1519,7 @@ export default function Scalper() {
             {/* Total CE & PE Value Summary Pill */}
             <div className="flex items-center gap-2.5 bg-zinc-900/80 border border-zinc-800 rounded-2xl px-4 py-2.5 shadow-lg font-mono text-xs">
               {/* Total CE Value */}
-              <div className="flex items-center gap-1.5" title="Total Call Value = Sum(CE Lots × CE Price)">
+              <div className="flex items-center gap-1.5" title="Total Call Value = Sum(CE Qty × CE Price)">
                 <span className="text-[10px] font-extrabold uppercase text-emerald-400 bg-emerald-950/80 border border-emerald-800/60 px-1.5 py-0.5 rounded">
                   CE Val
                 </span>
@@ -1530,7 +1531,7 @@ export default function Scalper() {
               <span className="text-zinc-700 font-sans">|</span>
 
               {/* Total PE Value */}
-              <div className="flex items-center gap-1.5" title="Total Put Value = Sum(PE Lots × PE Price)">
+              <div className="flex items-center gap-1.5" title="Total Put Value = Sum(PE Qty × PE Price)">
                 <span className="text-[10px] font-extrabold uppercase text-rose-400 bg-rose-950/80 border border-rose-800/60 px-1.5 py-0.5 rounded">
                   PE Val
                 </span>
@@ -1744,12 +1745,11 @@ export const OptionPanel = React.memo(function OptionPanel({
 }: OptionPanelProps) {
   const orderDisabled = !strike || pending || !strikesReady;
   const isPos = (v: number) => v >= 0;
-  const activeBuildup = buildup || (() => {
-    if (pct == null || !oiChgPct || Math.abs(oiChgPct) < 0.5) return '';
-    if (oiChgPct > 0) return pct >= 0 ? 'LB' : 'SB';
-    return pct >= 0 ? 'SC' : 'LU';
-  })();
-  const buildupStyle = activeBuildup ? BUILDUP_STYLES[activeBuildup] : undefined;
+  // The WS bridge (live_options_ws.py) is the single source of buildup labels.
+  // Re-deriving them here with a second set of dead-bands made the same strike
+  // show different labels in different panels, and an empty label from the bridge
+  // means "not classifiable" (missing prev-day baseline), not "compute it yourself".
+  const buildupStyle = buildup ? BUILDUP_STYLES[buildup] : undefined;
 
   // The "← ATM" hint only fits when the panel itself has room for it — a fixed
   // select width would either clip the hint on a narrow panel or sit mostly

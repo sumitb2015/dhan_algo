@@ -120,11 +120,11 @@ export default function AdvancedScalper() {
   const closingInFlightRef = useRef<Set<string>>(new Set());
   const expiryRef = useRef('');
   const appliedPositionsRef = useRef<Set<string>>(new Set());
-  const lastProcessedEntryCapitalRef = useRef<number>(0);
   useEffect(() => { expiryRef.current = expiry; }, [expiry]);
 
   // Predefined Target & SL preset settings (% / Pts / ₹)
-  const [presetMode, setPresetMode] = useState<'PERCENT' | 'POINTS' | 'PRICE'>('PERCENT');
+  // Entry-relative only — see the auto-apply effect for why absolute price is excluded.
+  const [presetMode, setPresetMode] = useState<'PERCENT' | 'POINTS'>('PERCENT');
   const [defaultTargetVal, setDefaultTargetVal] = useState('10');
   const [defaultSlVal, setDefaultSlVal] = useState('5');
   const [autoApplyGuards, setAutoApplyGuards] = useState(false);
@@ -139,7 +139,12 @@ export default function AdvancedScalper() {
       const saved = localStorage.getItem('advanced_scalper_presets');
       if (saved) {
         const parsed = JSON.parse(saved);
-        if (parsed.presetMode) setPresetMode(parsed.presetMode);
+        // Whitelist rather than trust: a browser that stored the retired 'PRICE'
+        // mode would otherwise restore it and have its saved "₹ 10" silently
+        // reinterpreted as 10 points. Fall back to the default instead.
+        if (parsed.presetMode === 'PERCENT' || parsed.presetMode === 'POINTS') {
+          setPresetMode(parsed.presetMode);
+        }
         if (parsed.defaultTargetVal !== undefined) setDefaultTargetVal(parsed.defaultTargetVal);
         if (parsed.defaultSlVal !== undefined) setDefaultSlVal(parsed.defaultSlVal);
         if (parsed.autoApplyGuards !== undefined) setAutoApplyGuards(parsed.autoApplyGuards);
@@ -275,16 +280,19 @@ export default function AdvancedScalper() {
 
   // Combined Multi-Leg Premium Tracking & Strategy Stats
   const combinedStrategyStats = useMemo(() => {
-    let entryCapitalSum = 0;
-    let liveCapitalSum = 0;
     let openLegsCount = 0;
-    let netQtySum = 0;
+
+    // Signed, so a hedge nets off: short legs count +credit, long legs -debit.
+    // Summing both sides gross would make a long hedge appreciating LOOK like lost
+    // decay even though it is profit, and would size the combined % target off
+    // (credit + debit) instead of the net credit actually at risk.
+    let signedEntry = 0;
+    let signedLive = 0;
 
     for (const pos of enrichedPositions) {
       const netQty = Number(pos.netQty);
       if (netQty === 0) continue;
 
-      netQtySum += netQty;
       const mult = contractMultiplier(pos);
       const isLong = netQty > 0;
       const entryPrice = isLong ? Number(pos.buyAvg) : Number(pos.sellAvg);
@@ -292,20 +300,30 @@ export default function AdvancedScalper() {
       const absQty = Math.abs(netQty);
 
       if (entryPrice > 0 && mult > 0) {
-        entryCapitalSum += entryPrice * absQty * mult;
-        liveCapitalSum += liveLtp * absQty * mult;
+        const sign = isLong ? -1 : 1;
+        signedEntry += sign * entryPrice * absQty * mult;
+        signedLive += sign * liveLtp * absQty * mult;
         openLegsCount += 1;
       }
     }
 
-    if (openLegsCount === 0 || entryCapitalSum === 0) {
-      return { entryCapitalSum: 0, liveCapitalSum: 0, decayPct: 0, openLegsCount: 0, isNetSeller: true };
+    // Basis = the net credit received (seller) or net debit paid (buyer).
+    const entryCapitalSum = Math.abs(signedEntry);
+    const liveCapitalSum = Math.abs(signedLive);
+
+    // MIN_BASIS, not > 0: a near-perfectly-hedged book (short and long legs almost
+    // cancelling) leaves a basis of a few paise, which would divide into a decayPct
+    // in the thousands of percent and a combined % target of ~₹0. Below a rupee the
+    // ratio is meaningless, so report it as unmeasurable rather than as a huge number.
+    const MIN_BASIS = 1;
+    if (openLegsCount === 0 || entryCapitalSum < MIN_BASIS) {
+      return { entryCapitalSum: 0, liveCapitalSum: 0, decayPct: 0, openLegsCount, isNetSeller: true };
     }
 
-    const isNetSeller = netQtySum <= 0;
-    const decayPct = isNetSeller
-      ? ((entryCapitalSum - liveCapitalSum) / entryCapitalSum) * 100
-      : ((liveCapitalSum - entryCapitalSum) / entryCapitalSum) * 100;
+    // signedEntry - signedLive is profit for BOTH directions: a short decaying
+    // 100 -> 60 gives +40, a long appreciating 100 -> 140 also gives +40.
+    const decayPct = ((signedEntry - signedLive) / entryCapitalSum) * 100;
+    const isNetSeller = signedEntry > 0;
 
     return { entryCapitalSum, liveCapitalSum, decayPct, openLegsCount, isNetSeller };
   }, [enrichedPositions]);
@@ -340,9 +358,10 @@ export default function AdvancedScalper() {
       if (!side) continue;
 
       const ltp = Number(pos.lastTradedPrice) || Number(pos.buyAvg) || Number(pos.sellAvg) || 0;
-      const absQty = Math.abs(netQty);
-      const posLots = lotSize > 0 ? absQty / lotSize : absQty;
-      const val = posLots * ltp;
+      // netQty is already a total unit count, so qty * price is rupees directly.
+      // Dividing by the selected underlying's `lotSize` would misprice any position
+      // on a different underlying (e.g. an open SENSEX leg while NIFTY is selected).
+      const val = Math.abs(netQty) * ltp * contractMultiplier(pos);
 
       if (side === 'CE') ceSum += val;
       else if (side === 'PE') peSum += val;
@@ -353,30 +372,23 @@ export default function AdvancedScalper() {
       totalPEVal: peSum,
       cePeDiff: ceSum - peSum,
     };
-  }, [enrichedPositions, secIdToStrikeSide, broker, lotSize]);
+  }, [enrichedPositions, secIdToStrikeSide, broker]);
 
   // Auto-calculate P&L Guard Target & SL ₹ when combinedTargetPct or combinedSlPct are selected
   useEffect(() => {
-    if (combinedStrategyStats.entryCapitalSum <= 0) {
-      lastProcessedEntryCapitalRef.current = 0;
-      return;
+    if (combinedStrategyStats.entryCapitalSum <= 0) return;
+
+    // Only writes while a % chip is actively selected — deselecting a chip (click it
+    // again) hands the field back to manual entry. Values are compared before being
+    // set so an unchanged basis never clobbers what the user is currently typing.
+    if (combinedTargetPct !== null && combinedTargetPct > 0) {
+      const calcTarget = Math.round((combinedStrategyStats.entryCapitalSum * combinedTargetPct) / 100);
+      if (calcTarget > 0) setProfitTarget(prev => (prev === String(calcTarget) ? prev : String(calcTarget)));
     }
 
-    const isNewTrade = lastProcessedEntryCapitalRef.current === 0 && combinedStrategyStats.entryCapitalSum > 0;
-    lastProcessedEntryCapitalRef.current = combinedStrategyStats.entryCapitalSum;
-
-    if (isNewTrade || combinedTargetPct !== null) {
-      if (combinedTargetPct !== null && combinedTargetPct > 0) {
-        const calcTarget = Math.round((combinedStrategyStats.entryCapitalSum * combinedTargetPct) / 100);
-        if (calcTarget > 0) setProfitTarget(String(calcTarget));
-      }
-    }
-
-    if (isNewTrade || combinedSlPct !== null) {
-      if (combinedSlPct !== null && combinedSlPct > 0) {
-        const calcLoss = Math.round((combinedStrategyStats.entryCapitalSum * combinedSlPct) / 100);
-        if (calcLoss > 0) setLossLimit(String(calcLoss));
-      }
+    if (combinedSlPct !== null && combinedSlPct > 0) {
+      const calcLoss = Math.round((combinedStrategyStats.entryCapitalSum * combinedSlPct) / 100);
+      if (calcLoss > 0) setLossLimit(prev => (prev === String(calcLoss) ? prev : String(calcLoss)));
     }
   }, [combinedStrategyStats.entryCapitalSum, combinedTargetPct, combinedSlPct]);
 
@@ -403,6 +415,15 @@ export default function AdvancedScalper() {
     const slVal = parseFloat(defaultSlVal);
     if ((isNaN(targetVal) || targetVal <= 0) && (isNaN(slVal) || slVal <= 0)) return;
 
+    // Symbols applied by THIS pass, committed to appliedPositionsRef after the
+    // updater runs. The updater must return the same value for the same `prev`:
+    // React invokes it twice under StrictMode, and marking appliedPositionsRef
+    // inside it made the second invocation see every symbol as "already applied",
+    // return `prev` unchanged, and silently drop the guards it had just computed.
+    // Appending here is safe precisely because nothing below ever READS this array
+    // — a double invocation just appends the same symbol twice, and the Set dedups.
+    const newlyApplied: string[] = [];
+
     setPosGuards(prev => {
       let changed = false;
       const next = { ...prev };
@@ -426,14 +447,16 @@ export default function AdvancedScalper() {
           let calcTarget = existing?.target ?? '';
           let calcSl = existing?.sl ?? '';
 
+          // Both modes are entry-relative and branch on direction. An absolute-price
+          // mode is deliberately NOT offered here: one price cannot be correct for a
+          // long and a short at once, so auto-applying it across mixed legs would arm
+          // an instant "target hit" close on the wrong side.
           if (!calcTarget && !isNaN(targetVal) && targetVal > 0) {
             if (presetMode === 'PERCENT') {
               const pct = targetVal / 100;
               calcTarget = (isLong ? entryPrice * (1 + pct) : entryPrice * (1 - pct)).toFixed(2);
-            } else if (presetMode === 'POINTS') {
-              calcTarget = (isLong ? entryPrice + targetVal : entryPrice - targetVal).toFixed(2);
             } else {
-              calcTarget = targetVal.toFixed(2);
+              calcTarget = (isLong ? entryPrice + targetVal : entryPrice - targetVal).toFixed(2);
             }
           }
 
@@ -441,10 +464,8 @@ export default function AdvancedScalper() {
             if (presetMode === 'PERCENT') {
               const pct = slVal / 100;
               calcSl = (isLong ? entryPrice * (1 - pct) : entryPrice * (1 + pct)).toFixed(2);
-            } else if (presetMode === 'POINTS') {
-              calcSl = (isLong ? entryPrice - slVal : entryPrice + slVal).toFixed(2);
             } else {
-              calcSl = slVal.toFixed(2);
+              calcSl = (isLong ? entryPrice - slVal : entryPrice + slVal).toFixed(2);
             }
           }
 
@@ -457,12 +478,14 @@ export default function AdvancedScalper() {
               triggered: false,
             };
             changed = true;
-            appliedPositionsRef.current.add(sym);
+            newlyApplied.push(sym);
           }
         }
       }
       return changed ? next : prev;
     });
+
+    for (const sym of newlyApplied) appliedPositionsRef.current.add(sym);
   }, [enrichedPositions, autoApplyGuards, defaultTargetVal, defaultSlVal, presetMode]);
 
   const boxSecId = useCallback((box: BoxConfig): string | undefined => {
@@ -1468,14 +1491,14 @@ export default function AdvancedScalper() {
               
               {/* Mode Selector */}
               <div className="flex items-center bg-zinc-950 p-0.5 rounded-lg border border-zinc-800">
-                {(['PERCENT', 'POINTS', 'PRICE'] as const).map(m => (
+                {(['PERCENT', 'POINTS'] as const).map(m => (
                   <button key={m} onClick={() => setPresetMode(m)}
                     className={`px-2 py-0.5 text-[10px] font-bold rounded transition-all whitespace-nowrap ${
                       presetMode === m
                         ? 'bg-emerald-900/70 text-emerald-300 border border-emerald-500/40 shadow-sm'
                         : 'text-zinc-500 hover:text-zinc-300'
                     }`}>
-                    {m === 'PERCENT' ? '%' : m === 'POINTS' ? 'Pts' : '₹'}
+                    {m === 'PERCENT' ? '%' : 'Pts'}
                   </button>
                 ))}
               </div>
@@ -1489,7 +1512,7 @@ export default function AdvancedScalper() {
                   onChange={e => setDefaultTargetVal(e.target.value)}
                   placeholder="10"
                   className="w-14 bg-zinc-950 border border-zinc-700 text-emerald-300 text-xs font-mono rounded px-1.5 py-0.5 focus:outline-none focus:border-emerald-500 text-center tabular-nums"
-                  title={`Default Target value (${presetMode === 'PERCENT' ? '%' : presetMode === 'POINTS' ? 'Points' : '₹ Price'})`}
+                  title={`Default Target value (${presetMode === 'PERCENT' ? '%' : 'Points'} from entry price)`}
                 />
               </div>
 
@@ -1502,7 +1525,7 @@ export default function AdvancedScalper() {
                   onChange={e => setDefaultSlVal(e.target.value)}
                   placeholder="5"
                   className="w-14 bg-zinc-950 border border-zinc-700 text-rose-300 text-xs font-mono rounded px-1.5 py-0.5 focus:outline-none focus:border-rose-500 text-center tabular-nums"
-                  title={`Default SL value (${presetMode === 'PERCENT' ? '%' : presetMode === 'POINTS' ? 'Points' : '₹ Price'})`}
+                  title={`Default SL value (${presetMode === 'PERCENT' ? '%' : 'Points'} from entry price)`}
                 />
               </div>
 
@@ -1776,7 +1799,7 @@ export default function AdvancedScalper() {
             {/* Total CE & PE Value Summary Pill */}
             <div className="flex items-center gap-2.5 bg-zinc-900/80 border border-zinc-800 rounded-2xl px-4 py-2.5 shadow-lg font-mono text-xs">
               {/* Total CE Value */}
-              <div className="flex items-center gap-1.5" title="Total Call Value = Sum(CE Lots × CE Price)">
+              <div className="flex items-center gap-1.5" title="Total Call Value = Sum(CE Qty × CE Price)">
                 <span className="text-[10px] font-extrabold uppercase text-emerald-400 bg-emerald-950/80 border border-emerald-800/60 px-1.5 py-0.5 rounded">
                   CE Val
                 </span>
@@ -1788,7 +1811,7 @@ export default function AdvancedScalper() {
               <span className="text-zinc-700 font-sans">|</span>
 
               {/* Total PE Value */}
-              <div className="flex items-center gap-1.5" title="Total Put Value = Sum(PE Lots × PE Price)">
+              <div className="flex items-center gap-1.5" title="Total Put Value = Sum(PE Qty × PE Price)">
                 <span className="text-[10px] font-extrabold uppercase text-rose-400 bg-rose-950/80 border border-rose-800/60 px-1.5 py-0.5 rounded">
                   PE Val
                 </span>
