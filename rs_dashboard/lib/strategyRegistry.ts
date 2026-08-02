@@ -55,6 +55,10 @@ export const STRATEGIES_METADATA: Record<string, { name: string; path: string }>
     name: 'Nifty ST+OI Bear Call Spread',
     path: path.join(PROJECT_ROOT, 'strategies', 'st_oi_bearcall', 'nifty_st_oi_bearcall.py')
   },
+  nifty_rolling_straddle: {
+    name: 'Nifty Rolling Short Straddle',
+    path: path.join(PROJECT_ROOT, 'strategies', 'value_imbalance', 'nifty_rolling_straddle.py')
+  },
 };
 
 // Python's save_strategy_state() rewrites the whole <key>_state.json every cycle with only

@@ -119,6 +119,13 @@ interface StrategyState {
   require_short_buildup?: boolean;
   min_price_drop_pct?: number;
   min_oi_rise_pct?: number;
+  // Rolling Short Straddle
+  roll_buffer?: number;
+  max_rolls?: number;
+  roll_count?: number;
+  current_atm?: number | null;
+  upper_bound?: number | null;
+  lower_bound?: number | null;
 }
 
 interface StrategyCardProps {
@@ -181,6 +188,11 @@ function StrategyCard({ meta, state, onRefresh }: StrategyCardProps) {
   const [vixStMultiplier, setVixStMultiplier] = useState<number>(2.0);
   const [vixStInterval, setVixStInterval] = useState<string>('3');
   const [atmShiftBuffer, setAtmShiftBuffer] = useState<number>(5.0);
+
+  // Rolling Short Straddle
+  const [rollBuffer, setRollBuffer] = useState<number>(35.0);
+  const [maxRolls, setMaxRolls] = useState<number>(5);
+  const [rollCooldown, setRollCooldown] = useState<number>(60);
 
   // OI Directional
   const [pcrThreshold, setPcrThreshold] = useState<number>(1.5);
@@ -381,6 +393,13 @@ function StrategyCard({ meta, state, onRefresh }: StrategyCardProps) {
         args.push('--cooldown-minutes', String(stOiCooldownMinutes));
         if (!exitOnSignalFlip) args.push('--no-exit-on-signal-flip');
         if (!exitOnOptionStFlip) args.push('--no-exit-on-option-st-flip');
+      } else if (meta.key === 'nifty_rolling_straddle') {
+        args.push('--roll-buffer', String(rollBuffer));
+        args.push('--max-rolls', String(maxRolls));
+        args.push('--roll-cooldown', String(rollCooldown));
+        args.push('--start-time', startTime);
+        args.push('--trail-start-rs', String(trailStartRs));
+        args.push('--trail-gap-rs', String(trailGapRs));
       }
 
       const res = await fetch('/api/strategies', {
@@ -1226,6 +1245,23 @@ function StrategyCard({ meta, state, onRefresh }: StrategyCardProps) {
             )}
           </>
         )}
+
+        {meta.key === 'nifty_rolling_straddle' && (
+          <>
+            <div className={fieldCls}>
+              <FieldLabel text="Roll Buffer (pts)" tip="Custom ATM shift buffer in points (e.g. 35.0 pts triggers ATM roll at ±35 pts from active ATM)." />
+              <Input type="number" step="1" value={rollBuffer} onChange={(e) => setRollBuffer(parseFloat(e.target.value) || 35.0)} className={inputCls} />
+            </div>
+            <div className={fieldCls}>
+              <FieldLabel text="Max Rolls / Day" tip="Maximum number of straddle rolls allowed per trading session." />
+              <Input type="number" value={maxRolls} onChange={(e) => setMaxRolls(parseInt(e.target.value) || 5)} min={1} max={20} className={inputCls} />
+            </div>
+            <div className={fieldCls}>
+              <FieldLabel text="Roll Cooldown (s)" tip="Minimum delay in seconds between consecutive straddle rolls to prevent whipsaws." />
+              <Input type="number" value={rollCooldown} onChange={(e) => setRollCooldown(parseInt(e.target.value) || 60)} min={0} step={10} className={inputCls} />
+            </div>
+          </>
+        )}
       </div>
     </div>
   );
@@ -1298,7 +1334,39 @@ function StrategyCard({ meta, state, onRefresh }: StrategyCardProps) {
           {isRunning ? (
             /* Running: compact stats strip */
             <div className="flex items-stretch divide-x divide-zinc-800/70 border border-zinc-800/60 rounded-lg bg-zinc-900/30 overflow-x-auto text-xs">
-              {meta.key === 'nifty_oi_directional' ? (
+              {meta.key === 'nifty_rolling_straddle' ? (
+                <>
+                  {state.spot != null && state.spot > 0 && (
+                    <div className="px-3 py-2 flex flex-col gap-1 shrink-0">
+                      <span className={lbl}>Spot</span>
+                      <span className="font-mono font-bold text-zinc-200">{state.spot.toFixed(1)}</span>
+                    </div>
+                  )}
+                  <div className="px-3 py-2 flex flex-col gap-1 flex-1 min-w-[110px]">
+                    <span className={lbl}>ATM Straddle</span>
+                    <span className="font-mono font-bold text-emerald-400">{state.current_atm || state.ce_strike || '—'}</span>
+                    <span className="text-[10px] text-zinc-400 font-mono whitespace-nowrap">
+                      CE ₹{state.ce_ltp?.toFixed(1) ?? '—'} · PE ₹{state.pe_ltp?.toFixed(1) ?? '—'}
+                    </span>
+                  </div>
+                  <div className="px-3 py-2 flex flex-col gap-1 shrink-0">
+                    <span className={lbl}>Roll Bounds (±{state.roll_buffer ?? 35}pt)</span>
+                    <span className="font-mono font-bold text-xs text-amber-400">
+                      {state.lower_bound != null ? state.lower_bound.toFixed(0) : '—'} - {state.upper_bound != null ? state.upper_bound.toFixed(0) : '—'}
+                    </span>
+                    <span className="text-[10px] text-zinc-500 font-mono">Rolls {state.roll_count ?? 0}/{state.max_rolls ?? 5}</span>
+                  </div>
+                  <div className="px-3 py-2 flex flex-col gap-1 shrink-0">
+                    <span className={lbl}>P&amp;L</span>
+                    <span className={`font-mono font-bold text-sm ${isPnlPositive ? 'text-emerald-400' : 'text-rose-400'}`}>
+                      {isPnlPositive ? '+' : ''}₹{pnl.toFixed(0)}
+                    </span>
+                    <span className="text-[10px] text-zinc-500 font-mono whitespace-nowrap">
+                      real ₹{state.realized_pnl?.toFixed(0) ?? '0'}
+                    </span>
+                  </div>
+                </>
+              ) : meta.key === 'nifty_oi_directional' ? (
                 <>
                   {state.spot != null && (
                     <div className="px-3 py-2 flex flex-col gap-1 shrink-0">

@@ -50,6 +50,9 @@ interface StrategyState {
   ce_price_change_pct?: number | null; ce_oi_change_pct?: number | null;
   require_short_buildup?: boolean;
   min_price_drop_pct?: number; min_oi_rise_pct?: number;
+  // Rolling Short Straddle
+  roll_buffer?: number; max_rolls?: number; roll_count?: number;
+  current_atm?: number | null; upper_bound?: number | null; lower_bound?: number | null;
 }
 
 interface Props {
@@ -105,6 +108,10 @@ function StrategyRowWide({ meta, state, onRefresh, instanceId, onAddInstance, on
   const [vixStMultiplier, setVixStMultiplier] = useState(2.0);
   const [vixStInterval, setVixStInterval] = useState('3');
   const [atmShiftBuffer, setAtmShiftBuffer] = useState(5.0);
+  // Rolling Short Straddle
+  const [rollBuffer, setRollBuffer] = useState(35.0);
+  const [maxRolls, setMaxRolls] = useState(5);
+  const [rollCooldown, setRollCooldown] = useState(60);
   const [pcrThreshold, setPcrThreshold] = useState(1.5);
   const [exitPcrChange, setExitPcrChange] = useState(30);
   const [pollInterval, setPollInterval] = useState(60);
@@ -289,6 +296,13 @@ function StrategyRowWide({ meta, state, onRefresh, instanceId, onAddInstance, on
         args.push('--cooldown-minutes', String(stOiCooldownMinutes));
         if (!exitOnSignalFlip) args.push('--no-exit-on-signal-flip');
         if (!exitOnOptionStFlip) args.push('--no-exit-on-option-st-flip');
+      } else if (meta.key === 'nifty_rolling_straddle') {
+        args.push('--roll-buffer', String(rollBuffer));
+        args.push('--max-rolls', String(maxRolls));
+        args.push('--roll-cooldown', String(rollCooldown));
+        args.push('--start-time', startTime);
+        args.push('--trail-start-rs', String(trailStartRs));
+        args.push('--trail-gap-rs', String(trailGapRs));
       }
 
       const res = await fetch('/api/strategies', {
@@ -361,6 +375,33 @@ function StrategyRowWide({ meta, state, onRefresh, instanceId, onAddInstance, on
 
   /* ── LIVE STATS CELLS ─────────────────────────────────────── */
   const liveStats = () => {
+    if (meta.key === 'nifty_rolling_straddle') {
+      return (
+        <div className="flex items-stretch divide-x divide-zinc-800/60">
+          {state.spot != null && state.spot > 0 && (
+            <div className="px-3 flex flex-col justify-center shrink-0">
+              <div className={lbl}>Spot</div>
+              <div className={val}>{state.spot.toFixed(1)}</div>
+            </div>
+          )}
+          <div className="px-3 flex flex-col justify-center min-w-[120px]">
+            <div className={lbl}>ATM Straddle</div>
+            <div className="font-mono font-bold text-xs text-emerald-400">{state.current_atm || state.ce_strike || '—'}</div>
+            <div className="text-[9px] text-zinc-400 font-mono whitespace-nowrap">
+              CE ₹{state.ce_ltp?.toFixed(1) ?? '—'} · PE ₹{state.pe_ltp?.toFixed(1) ?? '—'}
+            </div>
+          </div>
+          <div className="px-3 flex flex-col justify-center shrink-0">
+            <div className={lbl}>Roll Bounds (±{state.roll_buffer ?? 35}pt)</div>
+            <div className="font-mono font-bold text-xs text-amber-400">
+              {state.lower_bound != null ? state.lower_bound.toFixed(0) : '—'} - {state.upper_bound != null ? state.upper_bound.toFixed(0) : '—'}
+            </div>
+            <div className="text-[9px] text-zinc-500 font-mono">Rolls {state.roll_count ?? 0}/{state.max_rolls ?? 5}</div>
+          </div>
+        </div>
+      );
+    }
+
     if (meta.key === 'nifty_oi_directional') {
       return (
         <div className="flex items-stretch divide-x divide-zinc-800/60">
@@ -897,6 +938,23 @@ function StrategyRowWide({ meta, state, onRefresh, instanceId, onAddInstance, on
                   className="h-3.5 w-3.5 rounded border-zinc-800 bg-zinc-900 accent-emerald-500" />
                 <label htmlFor={`exit-opt-st-${meta.key}`} className="text-white font-semibold text-xs">Enabled</label>
               </div>
+            </div>
+          </>
+        )}
+
+        {meta.key === 'nifty_rolling_straddle' && (
+          <>
+            <div className={fieldCls}>
+              <FieldLabel text="Roll Buffer (pts)" tip="Custom ATM shift buffer in points (e.g. 35.0 pts triggers ATM roll at ±35 pts from active ATM)." />
+              <Input type="number" step="1" value={rollBuffer} onChange={(e) => setRollBuffer(parseFloat(e.target.value) || 35.0)} className={inputCls} style={{ width: 72 }} />
+            </div>
+            <div className={fieldCls}>
+              <FieldLabel text="Max Rolls / Day" tip="Maximum number of straddle rolls allowed per trading session." />
+              <Input type="number" value={maxRolls} onChange={(e) => setMaxRolls(parseInt(e.target.value) || 5)} min={1} max={20} className={inputCls} style={{ width: 64 }} />
+            </div>
+            <div className={fieldCls}>
+              <FieldLabel text="Roll Cooldown (s)" tip="Minimum delay in seconds between consecutive straddle rolls to prevent whipsaws." />
+              <Input type="number" value={rollCooldown} onChange={(e) => setRollCooldown(parseInt(e.target.value) || 60)} min={0} step={10} className={inputCls} style={{ width: 64 }} />
             </div>
           </>
         )}
