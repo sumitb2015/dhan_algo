@@ -6,7 +6,19 @@ import { execSync } from 'child_process';
 // loop and starve concurrent requests. Cache the result per PID.
 const PID_CHECK_TTL = 3000;
 const cache = new Map<number, { result: boolean; ts: number }>();
-const pidStartTimeMap = new Map<number, { ticks: string; ts: number }>();
+
+// Start times are cached by OBSERVATION CONTINUITY, not by age. Re-querying one on a
+// timer is not affordable: `powershell Get-Process` measures ~4.5s on this machine
+// (tasklist ~300ms) and runs through execSync, which blocks the whole event loop — a
+// short TTL would leave the dashboard blocked more or less permanently while any
+// strategy is polled. But a start time never needs re-reading while we have watched
+// the PID continuously: process.kill(pid,0) is free, runs on every poll, and drops the
+// entry the moment the process dies. So the cached value stays valid for as long as
+// the watch is unbroken, and is discarded whenever the chain of observations has a gap
+// longer than PID_OBSERVATION_GAP — which is the only window in which a PID could have
+// died and been recycled without us noticing.
+const PID_OBSERVATION_GAP = 30_000;
+const pidStartTimeMap = new Map<number, { ticks: string; ts: number; lastSeen: number }>();
 
 // Every entry here is keyed by a PID, and PIDs are never reused by this process once
 // their strategy dies — so without pruning these maps grow for as long as the dashboard
@@ -34,6 +46,15 @@ export function isPidRunning(pid: number, force = false): boolean {
     cache.delete(pid);
     pidStartTimeMap.delete(pid);
     return false;
+  }
+
+  // Alive. Extend the observation chain that lets getPidStartTime trust its cache —
+  // or break it, if nobody has looked at this PID recently enough to rule out that it
+  // died and the OS handed the number to a different process in the meantime.
+  const seen = pidStartTimeMap.get(pid);
+  if (seen) {
+    if (Date.now() - seen.lastSeen > PID_OBSERVATION_GAP) pidStartTimeMap.delete(pid);
+    else seen.lastSeen = Date.now();
   }
 
   const hit = force ? undefined : cache.get(pid);
@@ -64,19 +85,18 @@ export function isPidRunning(pid: number, force = false): boolean {
 
 /** Returns the process's start time (.NET ticks, as a string) or null if it can't be determined.
  *
- *  Cached for PID_CHECK_TTL only — NOT permanently. A given process's start time never
- *  changes, but a PID's does: the whole purpose of this value is to detect that the PID
- *  was recycled onto a different process. Caching it indefinitely would make a recycled
- *  PID keep reporting the dead process's start time forever, so isPidRunningAt() would
- *  match it and report a dead strategy as running with no way to recover. The TTL bounds
- *  that window to the same 3s every other cache here uses. */
+ *  A given process's start time never changes, but a PID's does — this value exists to
+ *  detect that the PID was recycled onto a different process, so caching it
+ *  unconditionally forever would let a dead strategy report "running" indefinitely.
+ *  The cache is therefore held only while isPidRunning() keeps confirming the PID is
+ *  alive without a gap; see PID_OBSERVATION_GAP. That keeps the steady state free of
+ *  the ~4.5s blocking PowerShell spawn while still forcing a fresh read after any
+ *  window in which a recycle could have gone unseen. */
 export function getPidStartTime(pid: number): string | null {
   if (process.platform !== 'win32' || !pid) return null;
 
   const cached = pidStartTimeMap.get(pid);
-  if (cached && Date.now() - cached.ts < PID_CHECK_TTL) {
-    return cached.ticks;
-  }
+  if (cached) return cached.ticks;
 
   try {
     const out = execSync(
@@ -85,7 +105,8 @@ export function getPidStartTime(pid: number): string | null {
     );
     const ticks = out.trim();
     if (ticks) {
-      pidStartTimeMap.set(pid, { ticks, ts: Date.now() });
+      const now = Date.now();
+      pidStartTimeMap.set(pid, { ticks, ts: now, lastSeen: now });
       pruneExpired(pidStartTimeMap);
       return ticks;
     }
