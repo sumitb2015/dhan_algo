@@ -310,23 +310,50 @@ export default function AdvancedScalper() {
     return { entryCapitalSum, liveCapitalSum, decayPct, openLegsCount, isNetSeller };
   }, [enrichedPositions]);
 
-  // Total CE / PE Values & Difference across active boxes (lots * price for each strike)
+  // Total CE / PE Values & Difference computed strictly from OPEN POSITIONS (lots * price for each open position)
   const { totalCEVal, totalPEVal, cePeDiff } = useMemo(() => {
     let ceSum = 0;
     let peSum = 0;
-    for (const box of boxes) {
-      if (box.strike == null) continue;
-      const ltp = liveQuotes?.strikes?.[String(box.strike)]?.[box.side === 'CE' ? 'ce' : 'pe']?.ltp ?? 0;
-      const val = (box.lots || 0) * (ltp || 0);
-      if (box.side === 'CE') ceSum += val;
-      else peSum += val;
+
+    for (const pos of enrichedPositions) {
+      const netQty = Number(pos.netQty);
+      if (!netQty || netQty === 0) continue; // Only open positions
+
+      const secId = broker !== 'dhan'
+        ? String(pos.tradingSymbol ?? '')
+        : String(pos.securityId ?? (pos as Record<string, unknown>).security_id ?? '');
+      const mapping = secIdToStrikeSide[secId];
+
+      let side: 'CE' | 'PE' | null = mapping ? (mapping.side.toUpperCase() as 'CE' | 'PE') : null;
+
+      if (!side) {
+        const optType = String(pos.optionType ?? pos.option_type ?? pos.drvOptionType ?? '').toUpperCase();
+        if (optType.includes('CALL') || optType === 'CE') side = 'CE';
+        else if (optType.includes('PUT') || optType === 'PE') side = 'PE';
+        else {
+          const sym = String(pos.tradingSymbol ?? pos.tradingsymbol ?? pos.symbol ?? '').toUpperCase();
+          if (/\bCE\b|CE$/.test(sym)) side = 'CE';
+          else if (/\bPE\b|PE$/.test(sym)) side = 'PE';
+        }
+      }
+
+      if (!side) continue;
+
+      const ltp = Number(pos.lastTradedPrice) || Number(pos.buyAvg) || Number(pos.sellAvg) || 0;
+      const absQty = Math.abs(netQty);
+      const posLots = lotSize > 0 ? absQty / lotSize : absQty;
+      const val = posLots * ltp;
+
+      if (side === 'CE') ceSum += val;
+      else if (side === 'PE') peSum += val;
     }
+
     return {
       totalCEVal: ceSum,
       totalPEVal: peSum,
       cePeDiff: ceSum - peSum,
     };
-  }, [boxes, liveQuotes]);
+  }, [enrichedPositions, secIdToStrikeSide, broker, lotSize]);
 
   // Auto-calculate P&L Guard Target & SL ₹ when combinedTargetPct or combinedSlPct are selected
   useEffect(() => {

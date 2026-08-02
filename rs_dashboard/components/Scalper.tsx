@@ -314,6 +314,51 @@ export default function Scalper() {
     sum + (Number(p.realizedProfit) || 0) + (Number(p.unrealizedProfit) || 0), 0),
     [enrichedPositions]);
 
+  // Total CE / PE Values & Difference computed strictly from OPEN POSITIONS (lots * price for each open position)
+  const { totalCEVal, totalPEVal, cePeDiff } = useMemo(() => {
+    let ceSum = 0;
+    let peSum = 0;
+
+    for (const pos of enrichedPositions) {
+      const netQty = Number(pos.netQty);
+      if (!netQty || netQty === 0) continue; // Only open positions
+
+      const secId = broker !== 'dhan'
+        ? String(pos.tradingSymbol ?? '')
+        : String(pos.securityId ?? (pos as Record<string, unknown>).security_id ?? '');
+      const mapping = secIdToStrikeSide[secId];
+
+      let side: 'CE' | 'PE' | null = mapping ? (mapping.side.toUpperCase() as 'CE' | 'PE') : null;
+
+      if (!side) {
+        const optType = String(pos.optionType ?? pos.option_type ?? pos.drvOptionType ?? '').toUpperCase();
+        if (optType.includes('CALL') || optType === 'CE') side = 'CE';
+        else if (optType.includes('PUT') || optType === 'PE') side = 'PE';
+        else {
+          const sym = String(pos.tradingSymbol ?? pos.tradingsymbol ?? pos.symbol ?? '').toUpperCase();
+          if (/\bCE\b|CE$/.test(sym)) side = 'CE';
+          else if (/\bPE\b|PE$/.test(sym)) side = 'PE';
+        }
+      }
+
+      if (!side) continue;
+
+      const ltp = Number(pos.lastTradedPrice) || Number(pos.buyAvg) || Number(pos.sellAvg) || 0;
+      const absQty = Math.abs(netQty);
+      const posLots = lotSize > 0 ? absQty / lotSize : absQty;
+      const val = posLots * ltp;
+
+      if (side === 'CE') ceSum += val;
+      else if (side === 'PE') peSum += val;
+    }
+
+    return {
+      totalCEVal: ceSum,
+      totalPEVal: peSum,
+      cePeDiff: ceSum - peSum,
+    };
+  }, [enrichedPositions, secIdToStrikeSide, broker, lotSize]);
+
   // ─── useEffect 1: Load expiries based on broker + underlying ───────
 
   useEffect(() => {
@@ -1463,9 +1508,6 @@ export default function Scalper() {
         const chg    = prevSpot > 0 ? spot - prevSpot : 0;
         const chgPct = prevSpot > 0 ? (chg / prevSpot) * 100 : 0;
         const isUp   = chg >= 0;
-        const totalCEVal = (lots || 0) * (ceLtp || 0);
-        const totalPEVal = (lots || 0) * (peLtp || 0);
-        const cePeDiff   = totalCEVal - totalPEVal;
 
         return (
           <div className="flex flex-wrap justify-center items-center gap-3 px-4 pb-1 pt-0 select-none">
