@@ -48,6 +48,40 @@ async function findFreePort(startPort: number): Promise<number> {
   });
 }
 
+/** Atomic cross-request start lock.
+ *
+ *  `wx` is O_EXCL: the OS guarantees exactly one caller creates the file, so this
+ *  holds no matter how route modules are instantiated. An in-process guard is not
+ *  enough here — dedupe()'s inflight Map is module-scoped, and a burst of concurrent
+ *  starts was measured still spawning one bridge each, because the route module does
+ *  not reliably share that state across invocations.
+ *
+ *  A lock older than LOCK_STALE_MS is assumed to be from a start that crashed before
+ *  releasing, and is stolen — otherwise one failed start would block the bridge until
+ *  someone deleted the file by hand. */
+const LOCK_STALE_MS = 30_000;
+
+function acquireStartLock(lockPath: string): boolean {
+  try {
+    fs.writeFileSync(lockPath, String(Date.now()), { flag: 'wx' });
+    return true;
+  } catch {
+    try {
+      const age = Date.now() - fs.statSync(lockPath).mtimeMs;
+      if (age > LOCK_STALE_MS) {
+        fs.unlinkSync(lockPath);
+        fs.writeFileSync(lockPath, String(Date.now()), { flag: 'wx' });
+        return true;
+      }
+    } catch { /* lost the steal race to another caller — treat as not acquired */ }
+    return false;
+  }
+}
+
+function releaseStartLock(lockPath: string): void {
+  try { fs.unlinkSync(lockPath); } catch { /* already gone */ }
+}
+
 function readJson(file: string): unknown {
   try {
     if (!fs.existsSync(file)) return null;
@@ -135,38 +169,72 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ success: false, error: 'expiry required' }, { status: 400 });
     }
 
-    // Prevent duplicate bridge for this broker
-    const status = readJson(files.status) as Record<string, unknown> | null;
-    if (
-      status &&
-      status.pid &&
-      status.status === 'RUNNING' &&
-      status.underlying === underlying &&
-      status.expiry === expiry &&
-      isPidRunning(Number(status.pid))
-    ) {
-      return NextResponse.json({ success: true, message: 'Bridge already running', pid: status.pid });
+    // Everything below is a check-then-act on the status file, and a freshly
+    // spawned bridge needs a second or two before it writes one. Concurrent starts
+    // (page mount under StrictMode, a second tab, a fast broker/expiry toggle) each
+    // saw "not running" and each spawned — that stranded 30 processes across one
+    // afternoon, all subscribed to the feed and all writing the same files.
+    // findFreePort compounded it: it binds, closes, then returns, so racing callers
+    // are handed the SAME port. The lock serializes the whole sequence.
+    const lockPath = path.join(DEBUG_DIR, `live_options_start_${broker}.lock`);
+    if (!acquireStartLock(lockPath)) {
+      return NextResponse.json({ success: true, message: 'Bridge start already in progress' });
     }
 
-    // Stop this broker's existing bridge first (different underlying/expiry) —
-    // the OTHER broker's bridge, if any, is never touched.
-    if (status && status.pid && status.status === 'RUNNING' && isPidRunning(Number(status.pid))) {
-      await stopAndWait(broker, Number(status.pid));
+    try {
+      // Prevent duplicate bridge for this broker. STARTING counts as live: it is
+      // the provisional record written below, before Python reports RUNNING.
+      const status = readJson(files.status) as Record<string, unknown> | null;
+      const active = status && status.pid &&
+        (status.status === 'RUNNING' || status.status === 'STARTING') &&
+        isPidRunning(Number(status.pid));
+
+      if (active && status.underlying === underlying && status.expiry === expiry) {
+        return NextResponse.json({ success: true, message: 'Bridge already running', pid: status.pid });
+      }
+
+      // Stop this broker's existing bridge first (different underlying/expiry) —
+      // the OTHER broker's bridge, if any, is never touched.
+      if (active) {
+        await stopAndWait(broker, Number(status!.pid));
+      }
+
+      if (fs.existsSync(files.stop)) fs.unlinkSync(files.stop);
+
+      const freePort = await findFreePort(broker === 'zerodha' ? 8865 : 8765);
+      const scriptPath = broker === 'zerodha' ? ZERODHA_BRIDGE_SCRIPT : BRIDGE_SCRIPT;
+      const child = spawn(
+        PYTHON_EXE,
+        [scriptPath, '--underlying', underlying, '--expiry', expiry,
+         '--num-strikes', String(numStrikes), '--ws-port', String(freePort)],
+        { detached: true, stdio: 'ignore', windowsHide: true },
+      );
+      child.unref();
+
+      // Claim the slot before releasing the lock. The lock only covers callers that
+      // overlap; a request arriving a second later would otherwise still find no
+      // status file and spawn a second bridge. Python overwrites this with RUNNING
+      // and its own pid once up. child.pid is the venv launcher stub rather than the
+      // worker, but the launcher waits on the worker for its whole life, so
+      // isPidRunning on it answers the only question this record has to answer.
+      try {
+        fs.writeFileSync(files.status, JSON.stringify({
+          status: 'STARTING',
+          broker,
+          pid: child.pid,
+          underlying,
+          expiry,
+          subscribed: 0,
+          ws_port: freePort,
+          started_at: new Date().toISOString(),
+          last_update: new Date().toISOString(),
+        }));
+      } catch { /* Python writes the real record moments later */ }
+
+      return NextResponse.json({ success: true, message: 'Bridge started', pid: child.pid });
+    } finally {
+      releaseStartLock(lockPath);
     }
-
-    if (fs.existsSync(files.stop)) fs.unlinkSync(files.stop);
-
-    const freePort = await findFreePort(broker === 'zerodha' ? 8865 : 8765);
-    const scriptPath = broker === 'zerodha' ? ZERODHA_BRIDGE_SCRIPT : BRIDGE_SCRIPT;
-    const child = spawn(
-      PYTHON_EXE,
-      [scriptPath, '--underlying', underlying, '--expiry', expiry,
-       '--num-strikes', String(numStrikes), '--ws-port', String(freePort)],
-      { detached: true, stdio: 'ignore', windowsHide: true },
-    );
-    child.unref();
-
-    return NextResponse.json({ success: true, message: 'Bridge started', pid: child.pid });
   }
 
   return NextResponse.json({ success: false, error: 'Unknown action' }, { status: 400 });
