@@ -41,6 +41,43 @@ function computeEMA(data: { time: UTCTimestamp; close: number }[], period: numbe
   return out;
 }
 
+/** Computes Intraday Anchored Volume Weighted Average Price (VWAP) */
+function computeIntradayVWAP(
+  data: { time: UTCTimestamp; open: number; high: number; low: number; close: number; volume: number }[]
+): LineData[] {
+  if (data.length === 0) return [];
+  const out: LineData[] = [];
+
+  let currentDay = '';
+  let cumTPV = 0;
+  let cumVol = 0;
+
+  for (const bar of data) {
+    const dt = new Date((bar.time as number) * 1000);
+    // Convert to IST (UTC+5:30) date string YYYY-MM-DD
+    const istTime = new Date(dt.getTime() + 5.5 * 3600 * 1000);
+    const dayStr = istTime.toISOString().split('T')[0];
+
+    // Reset cumulative sums on new session day
+    if (dayStr !== currentDay) {
+      currentDay = dayStr;
+      cumTPV = 0;
+      cumVol = 0;
+    }
+
+    const typicalPrice = (bar.high + bar.low + bar.close) / 3;
+    const vol = bar.volume > 0 ? bar.volume : 1;
+
+    cumTPV += typicalPrice * vol;
+    cumVol += vol;
+
+    const vwap = cumVol > 0 ? cumTPV / cumVol : bar.close;
+    out.push({ time: bar.time, value: vwap });
+  }
+
+  return out;
+}
+
 export default function FuturesCandleChart({ candles, symbolName = 'NIFTY FUT' }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
@@ -48,6 +85,7 @@ export default function FuturesCandleChart({ candles, symbolName = 'NIFTY FUT' }
   const volumeSeriesRef = useRef<ISeriesApi<'Histogram'> | null>(null);
   const ema9SeriesRef = useRef<ISeriesApi<'Line'> | null>(null);
   const ema20SeriesRef = useRef<ISeriesApi<'Line'> | null>(null);
+  const vwapSeriesRef = useRef<ISeriesApi<'Line'> | null>(null);
 
   const [hoverData, setHoverData] = useState<{
     time: string;
@@ -60,11 +98,13 @@ export default function FuturesCandleChart({ candles, symbolName = 'NIFTY FUT' }
     changePct: number;
     ema9?: number;
     ema20?: number;
+    vwap?: number;
   } | null>(null);
 
   const [latestIndicators, setLatestIndicators] = useState<{
     ema9?: number;
     ema20?: number;
+    vwap?: number;
   }>({});
 
   useEffect(() => {
@@ -126,11 +166,21 @@ export default function FuturesCandleChart({ candles, symbolName = 'NIFTY FUT' }
       crosshairMarkerVisible: false,
     });
 
+    // VWAP Series (Vibrant Pink/Magenta)
+    const vwapSeries = chart.addSeries(LineSeries, {
+      color: '#ec4899',
+      lineWidth: 1,
+      priceLineVisible: false,
+      lastValueVisible: true,
+      crosshairMarkerVisible: false,
+    });
+
     chartRef.current = chart;
     seriesRef.current = candlestickSeries;
     volumeSeriesRef.current = volumeSeries;
     ema9SeriesRef.current = ema9Series;
     ema20SeriesRef.current = ema20Series;
+    vwapSeriesRef.current = vwapSeries;
 
     // Crosshair move handler
     chart.subscribeCrosshairMove((param) => {
@@ -147,6 +197,7 @@ export default function FuturesCandleChart({ candles, symbolName = 'NIFTY FUT' }
       const volData = param.seriesData.get(volumeSeries) as { value: number } | undefined;
       const e9Data = param.seriesData.get(ema9Series) as { value: number } | undefined;
       const e20Data = param.seriesData.get(ema20Series) as { value: number } | undefined;
+      const vwapData = param.seriesData.get(vwapSeries) as { value: number } | undefined;
 
       if (data) {
         const change = data.close - data.open;
@@ -177,6 +228,7 @@ export default function FuturesCandleChart({ candles, symbolName = 'NIFTY FUT' }
           changePct,
           ema9: e9Data?.value,
           ema20: e20Data?.value,
+          vwap: vwapData?.value,
         });
       }
     });
@@ -188,11 +240,12 @@ export default function FuturesCandleChart({ candles, symbolName = 'NIFTY FUT' }
       volumeSeriesRef.current = null;
       ema9SeriesRef.current = null;
       ema20SeriesRef.current = null;
+      vwapSeriesRef.current = null;
     };
   }, []);
 
   useEffect(() => {
-    if (!seriesRef.current || !volumeSeriesRef.current || !ema9SeriesRef.current || !ema20SeriesRef.current || candles.length === 0) return;
+    if (!seriesRef.current || !volumeSeriesRef.current || !ema9SeriesRef.current || !ema20SeriesRef.current || !vwapSeriesRef.current || candles.length === 0) return;
 
     // Transform candle data into sorted Lightweight Charts items
     const parsedData = candles
@@ -244,17 +297,20 @@ export default function FuturesCandleChart({ candles, symbolName = 'NIFTY FUT' }
       }))
     );
 
-    // Compute & set EMA 9 & EMA 20
+    // Compute & set EMA 9, EMA 20 & Intraday VWAP
     const ema9Data = computeEMA(deduped, 9);
     const ema20Data = computeEMA(deduped, 20);
+    const vwapData = computeIntradayVWAP(deduped);
 
     ema9SeriesRef.current.setData(ema9Data);
     ema20SeriesRef.current.setData(ema20Data);
+    vwapSeriesRef.current.setData(vwapData);
 
     // Store latest indicator values for default legend
     const latestE9 = ema9Data.length > 0 ? ema9Data[ema9Data.length - 1].value : undefined;
     const latestE20 = ema20Data.length > 0 ? ema20Data[ema20Data.length - 1].value : undefined;
-    setLatestIndicators({ ema9: latestE9, ema20: latestE20 });
+    const latestVWAP = vwapData.length > 0 ? vwapData[vwapData.length - 1].value : undefined;
+    setLatestIndicators({ ema9: latestE9, ema20: latestE20, vwap: latestVWAP });
 
     chartRef.current?.timeScale().fitContent();
   }, [candles]);
@@ -273,7 +329,7 @@ export default function FuturesCandleChart({ candles, symbolName = 'NIFTY FUT' }
             </span>
           </div>
 
-          {/* EMA Legend Badges */}
+          {/* Indicators Legend Badges */}
           <div className="flex items-center gap-2.5 text-[11px] font-mono border-l border-zinc-800 pl-3">
             <span className="flex items-center gap-1 text-sky-400 font-semibold">
               <span className="w-2.5 h-0.5 bg-sky-400 inline-block rounded" />
@@ -282,6 +338,10 @@ export default function FuturesCandleChart({ candles, symbolName = 'NIFTY FUT' }
             <span className="flex items-center gap-1 text-amber-400 font-semibold">
               <span className="w-2.5 h-0.5 bg-amber-400 inline-block rounded" />
               EMA 20: {hoverData?.ema20 !== undefined ? hoverData.ema20.toFixed(2) : latestIndicators.ema20?.toFixed(2) ?? '—'}
+            </span>
+            <span className="flex items-center gap-1 text-pink-400 font-semibold">
+              <span className="w-2.5 h-0.5 bg-pink-400 inline-block rounded" />
+              VWAP: {hoverData?.vwap !== undefined ? hoverData.vwap.toFixed(2) : latestIndicators.vwap?.toFixed(2) ?? '—'}
             </span>
           </div>
         </div>
