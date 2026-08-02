@@ -102,9 +102,10 @@ def main():
     else:
         chosen_expiry = args.expiry
 
-    # 2. Get Spot / Future LTP
-    spot_price = helper.get_ltp("NIFTY", exchange="NSE", instrument="INDEX") or 0.0
-    
+    # 2. Get Spot / Future LTP. NIFTY spot is on IDX_I (mapped to NSE internally for
+    # the master-list lookup) — passing "NSE" here skips that mapping and can return 0.
+    spot_price = helper.get_ltp("NIFTY", exchange="IDX_I", instrument="INDEX") or 0.0
+
     fut = helper.find_future("NIFTY", exchange="NSE", instrument="FUTIDX")
     fut_price = 0.0
     fut_symbol = "NIFTY FUT"
@@ -116,11 +117,16 @@ def main():
         fut_expiry = str(fut.get("SM_EXPIRY_DATE", ""))
         fut_price = helper.get_ltp(fut_security_id, exchange="NSE_FNO", instrument="FUTIDX") or 0.0
 
-    # If fut_price wasn't retrieved, fall back to spot_price
+    # If fut_price wasn't retrieved, fall back to spot_price. With neither, every
+    # strike in the ladder would be centred on a guess — fail loudly instead of
+    # returning a plausible-looking profile built around an invented ATM.
     ref_price = fut_price if fut_price > 0 else spot_price
     if ref_price <= 0:
-        # Fallback query if price is 0
-        ref_price = spot_price or 24000.0
+        print(json.dumps({
+            "error": "Could not resolve NIFTY spot or futures price — cannot determine ATM. "
+                     "Check the Dhan Data API subscription / access token."
+        }))
+        sys.exit(0)
 
     # 3. Fetch 5-Minute Futures Intraday Candles (Last N Days)
     end_date = datetime.now().strftime("%Y-%m-%d")
@@ -218,34 +224,33 @@ def main():
         
         ce_oi = clean_val(row_data.get("ce_oi"))
         pe_oi = clean_val(row_data.get("pe_oi"))
-        
-        if "ce_previous_oi" in row_data:
-            ce_oi_change = ce_oi - clean_val(row_data.get("ce_previous_oi"))
-        else:
-            ce_oi_change = clean_val(row_data.get("ce_oi_change"))
 
-        if "pe_previous_oi" in row_data:
-            pe_oi_change = pe_oi - clean_val(row_data.get("pe_previous_oi"))
-        else:
-            pe_oi_change = clean_val(row_data.get("pe_oi_change"))
+        # Presence of the column is not enough — a NaN previous_oi cleans to 0 and would
+        # report the whole of today's OI as the day's change. Require a positive baseline.
+        ce_prev_oi = clean_val(row_data.get("ce_previous_oi"))
+        pe_prev_oi = clean_val(row_data.get("pe_previous_oi"))
+        ce_oi_change = (ce_oi - ce_prev_oi) if ce_prev_oi > 0 else clean_val(row_data.get("ce_oi_change"))
+        pe_oi_change = (pe_oi - pe_prev_oi) if pe_prev_oi > 0 else clean_val(row_data.get("pe_oi_change"))
 
         ce_ltp = clean_val(row_data.get("ce_last_price"))
         pe_ltp = clean_val(row_data.get("pe_last_price"))
         ce_vol = clean_val(row_data.get("ce_volume"))
         pe_vol = clean_val(row_data.get("pe_volume"))
         ce_iv = clean_val(row_data.get("ce_implied_volatility"))
-        pe_iv = clean_val(row_data.get("pe_iv_implied_volatility", row_data.get("pe_implied_volatility")))
+        pe_iv = clean_val(row_data.get("pe_implied_volatility"))
 
         total_call_oi += ce_oi
         total_put_oi += pe_oi
         total_call_oi_change += ce_oi_change
         total_put_oi_change += pe_oi_change
 
-        if ce_oi > max_call_oi:
+        # Seeded at -1 with a strict >, an all-zero chain would silently nominate the
+        # lowest strike as "resistance". Only a strike with real OI can win.
+        if ce_oi > 0 and ce_oi > max_call_oi:
             max_call_oi = ce_oi
             max_call_oi_strike = s
 
-        if pe_oi > max_put_oi:
+        if pe_oi > 0 and pe_oi > max_put_oi:
             max_put_oi = pe_oi
             max_put_oi_strike = s
 
@@ -265,7 +270,10 @@ def main():
         })
 
     pcr = round(total_put_oi / total_call_oi, 2) if total_call_oi > 0 else 0.0
-    pcr_change = round(total_put_oi_change / total_call_oi_change, 2) if (total_call_oi_change > 0 and total_put_oi_change > 0) else 0.0
+    # Guard the denominator only. Requiring BOTH changes to be positive reported 0.0 on
+    # any unwinding day, which reads as "no change" rather than "puts and calls moved
+    # opposite ways" — a negative ratio here means exactly that.
+    pcr_change = round(total_put_oi_change / total_call_oi_change, 2) if total_call_oi_change != 0 else 0.0
 
     result = {
         "symbol": "NIFTY",

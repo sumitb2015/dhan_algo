@@ -41,11 +41,17 @@ function computeEMA(data: { time: UTCTimestamp; close: number }[], period: numbe
   return out;
 }
 
-/** Computes Intraday Anchored Volume Weighted Average Price (VWAP) */
+/** Computes Intraday Anchored Volume Weighted Average Price (VWAP).
+ *
+ *  Returns [] when the series carries no volume at all. The API falls back to NIFTY
+ *  INDEX candles when futures candles are unavailable, and index candles have no
+ *  volume — substituting 1 for every bar there would silently draw an unweighted
+ *  typical-price average and label it VWAP. Better to draw no line than a fake one. */
 function computeIntradayVWAP(
   data: { time: UTCTimestamp; open: number; high: number; low: number; close: number; volume: number }[]
 ): LineData[] {
   if (data.length === 0) return [];
+  if (!data.some(bar => bar.volume > 0)) return [];
   const out: LineData[] = [];
 
   let currentDay = '';
@@ -66,7 +72,9 @@ function computeIntradayVWAP(
     }
 
     const typicalPrice = (bar.high + bar.low + bar.close) / 3;
-    const vol = bar.volume > 0 ? bar.volume : 1;
+    // Individual zero-volume bars contribute nothing rather than being forced to
+    // weight 1; the series-level guard above already handles a wholly volume-less feed.
+    const vol = bar.volume > 0 ? bar.volume : 0;
 
     cumTPV += typicalPrice * vol;
     cumVol += vol;

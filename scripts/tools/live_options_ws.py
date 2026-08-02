@@ -117,6 +117,13 @@ def _fetch_prev_meta(helper, underlying: str, expiry: str, exchange_segment: str
     Retries on transient failures (429s, empty chain) since a single missed
     fetch would otherwise disable buildup labels for the whole session.
     Returns {strike_int: {'ce_oi': int, 'pe_oi': int, 'ce_close': float, 'pe_close': float}}.
+
+    Only genuine previous-day fields are accepted. Falling back to the CURRENT
+    'oi'/'close'/'last_price' would fabricate a baseline: OI change would read ~0%
+    all session and change% would be measured from startup rather than yesterday's
+    close, both indistinguishable from real values on screen. Dhan additionally
+    flips 'close' to the LTP after the 15:30 bell, so it is not a safe stand-in.
+    A missing baseline is left at 0 and the dependent label is suppressed.
     """
     for attempt in range(attempts):
         prev_meta: dict = {}
@@ -127,10 +134,10 @@ def _fetch_prev_meta(helper, underlying: str, expiry: str, exchange_segment: str
                 ce_data = data.get('ce') or {}
                 pe_data = data.get('pe') or {}
                 prev_meta[strike] = {
-                    'ce_oi':    int(_f(ce_data.get('previous_oi') or ce_data.get('oi'))),
-                    'pe_oi':    int(_f(pe_data.get('previous_oi') or pe_data.get('oi'))),
-                    'ce_close': _f(ce_data.get('previous_close') or ce_data.get('close') or ce_data.get('last_price')),
-                    'pe_close': _f(pe_data.get('previous_close') or pe_data.get('close') or pe_data.get('last_price')),
+                    'ce_oi':    int(_f(ce_data.get('previous_oi'))),
+                    'pe_oi':    int(_f(pe_data.get('previous_oi'))),
+                    'ce_close': _f(ce_data.get('previous_close')),
+                    'pe_close': _f(pe_data.get('previous_close')),
                 }
         except Exception as e:
             print(f'[live_options_ws] WARN: prev_meta fetch failed (attempt {attempt + 1}/{attempts}): {e}', flush=True)
@@ -144,7 +151,10 @@ def _fetch_prev_meta(helper, underlying: str, expiry: str, exchange_segment: str
     return {}
 
 
-# Buildup dead-bands — lower price threshold to 0.01 so any directional price move classifies buildup
+# Buildup dead-bands. The price band is deliberately near-zero so any directional
+# move classifies; OI carries the dead-band instead. This bridge is the SINGLE source
+# of buildup labels — do not re-derive them in the dashboard, or the two thresholds
+# drift and the same strike gets different labels in different panels.
 BUILDUP_MIN_PRICE_PCT = 0.01
 BUILDUP_MIN_OI_PCT    = 0.5
 
