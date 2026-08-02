@@ -13,6 +13,29 @@ import {
   Table as TableIcon,
 } from 'lucide-react';
 
+/** Placeholder for a KPI value that has not arrived yet. Sized in `ch` so it
+ *  occupies roughly the width of the number it replaces and the cards do not
+ *  reflow when real data lands. */
+function Skeleton({ w = '5ch' }: { w?: string }) {
+  return (
+    <span
+      className="inline-block h-4 rounded bg-zinc-800 animate-pulse align-middle"
+      style={{ width: w }}
+      aria-hidden="true"
+    />
+  );
+}
+
+/** Full-panel loading state for the chart / table region. */
+function LoadingPanel({ label }: { label: string }) {
+  return (
+    <div className="flex flex-col items-center justify-center gap-3 py-16 text-zinc-500">
+      <RefreshCw className="w-6 h-6 animate-spin text-emerald-400" />
+      <span className="text-xs font-medium">{label}</span>
+    </div>
+  );
+}
+
 function fmtNum(val: number): string {
   if (Math.abs(val) >= 1_00_00_000) {
     return `${(val / 1_00_00_000).toFixed(2)} Cr`;
@@ -37,6 +60,13 @@ export default function NiftyOIProfilePage() {
   const [days, setDays] = useState<number>(3);
   const [autoRefresh, setAutoRefresh] = useState<boolean>(true);
   const [viewTable, setViewTable] = useState<boolean>(false);
+
+  // First paint has nothing to show, so it gets skeletons and a spinner. A refresh
+  // that already has data keeps the old values on screen — blanking a populated
+  // dashboard every 10s would be worse than showing figures a few seconds stale —
+  // and is signalled by the header pill instead.
+  const initialLoading = loading && !data;
+  const refreshing = loading && !!data;
 
   const fetchData = useCallback(async () => {
     try {
@@ -244,10 +274,10 @@ export default function NiftyOIProfilePage() {
             <span className="text-[11px] text-zinc-400 font-medium">NIFTY Futures LTP</span>
             <div className="flex items-baseline justify-between mt-1">
               <span className="text-lg font-extrabold text-zinc-100 font-mono">
-                {data?.futures_price ? data.futures_price.toFixed(2) : '—'}
+                {initialLoading ? <Skeleton w="8ch" /> : (data?.futures_price ? data.futures_price.toFixed(2) : '—')}
               </span>
               <span className="text-[10px] text-zinc-400 font-mono">
-                Spot: {data?.spot_price ? data.spot_price.toFixed(2) : '—'}
+                Spot: {initialLoading ? <Skeleton w="7ch" /> : (data?.spot_price ? data.spot_price.toFixed(2) : '—')}
               </span>
             </div>
           </div>
@@ -257,7 +287,7 @@ export default function NiftyOIProfilePage() {
             <span className="text-[11px] text-zinc-400 font-medium">ATM Strike</span>
             <div className="flex items-baseline justify-between mt-1">
               <span className="text-lg font-extrabold text-amber-400 font-mono">
-                {data?.atm_strike ?? '—'}
+                {initialLoading ? <Skeleton w="6ch" /> : (data?.atm_strike ?? '—')}
               </span>
               <span className="text-[10px] text-zinc-400">Step: {step}</span>
             </div>
@@ -267,10 +297,14 @@ export default function NiftyOIProfilePage() {
           <div className="bg-zinc-900/60 border border-zinc-800/80 p-3 rounded-xl flex flex-col justify-between">
             <span className="text-[11px] text-zinc-400 font-medium">PCR (Put-Call Ratio)</span>
             <div className="flex items-center justify-between mt-1">
-              <span className="text-lg font-extrabold text-zinc-100 font-mono">{pcr}</span>
-              <span className={`text-[10px] px-1.5 py-0.5 rounded border font-semibold ${pcrSentiment.color}`}>
-                {pcrSentiment.label}
+              <span className="text-lg font-extrabold text-zinc-100 font-mono">
+                {initialLoading ? <Skeleton w="4ch" /> : pcr}
               </span>
+              {!initialLoading && (
+                <span className={`text-[10px] px-1.5 py-0.5 rounded border font-semibold ${pcrSentiment.color}`}>
+                  {pcrSentiment.label}
+                </span>
+              )}
             </div>
           </div>
 
@@ -278,8 +312,8 @@ export default function NiftyOIProfilePage() {
           <div className="bg-zinc-900/60 border border-zinc-800/80 p-3 rounded-xl flex flex-col justify-between">
             <span className="text-[11px] text-zinc-400 font-medium">Total Open Interest</span>
             <div className="flex items-center justify-between mt-1 text-xs font-mono">
-              <span className="text-emerald-400 font-semibold">CE: {fmtNum(data?.summary?.total_call_oi ?? 0)}</span>
-              <span className="text-rose-400 font-semibold">PE: {fmtNum(data?.summary?.total_put_oi ?? 0)}</span>
+              <span className="text-emerald-400 font-semibold">CE: {initialLoading ? <Skeleton w="6ch" /> : fmtNum(data?.summary?.total_call_oi ?? 0)}</span>
+              <span className="text-rose-400 font-semibold">PE: {initialLoading ? <Skeleton w="6ch" /> : fmtNum(data?.summary?.total_put_oi ?? 0)}</span>
             </div>
           </div>
 
@@ -287,8 +321,8 @@ export default function NiftyOIProfilePage() {
           <div className="bg-zinc-900/60 border border-zinc-800/80 p-3 rounded-xl flex flex-col justify-between">
             <span className="text-[11px] text-zinc-400 font-medium">Daily OI Change</span>
             <div className="flex items-center justify-between mt-1 text-xs font-mono">
-              <span className="text-emerald-400 font-semibold">CE: {fmtNum(data?.summary?.total_call_oi_change ?? 0)}</span>
-              <span className="text-rose-400 font-semibold">PE: {fmtNum(data?.summary?.total_put_oi_change ?? 0)}</span>
+              <span className="text-emerald-400 font-semibold">CE: {initialLoading ? <Skeleton w="6ch" /> : fmtNum(data?.summary?.total_call_oi_change ?? 0)}</span>
+              <span className="text-rose-400 font-semibold">PE: {initialLoading ? <Skeleton w="6ch" /> : fmtNum(data?.summary?.total_put_oi_change ?? 0)}</span>
             </div>
           </div>
 
@@ -297,10 +331,10 @@ export default function NiftyOIProfilePage() {
             <span className="text-[11px] text-zinc-400 font-medium">Key Levels (Max OI)</span>
             <div className="flex items-center justify-between mt-1 text-xs font-mono">
               <span className="text-emerald-400 font-bold" title="Resistance Level (Max Call OI)">
-                RES: {data?.summary?.resistance_level ?? '—'}
+                RES: {initialLoading ? <Skeleton w="6ch" /> : (data?.summary?.resistance_level ?? '—')}
               </span>
               <span className="text-rose-400 font-bold" title="Support Level (Max Put OI)">
-                SUP: {data?.summary?.support_level ?? '—'}
+                SUP: {initialLoading ? <Skeleton w="6ch" /> : (data?.summary?.support_level ?? '—')}
               </span>
             </div>
           </div>
@@ -314,6 +348,9 @@ export default function NiftyOIProfilePage() {
               <TableIcon className="w-4 h-4 text-emerald-400" />
               Granular Strike Breakdown — Expiry: {data?.chosen_expiry}
             </h2>
+            {initialLoading ? (
+              <LoadingPanel label="Loading strike breakdown…" />
+            ) : (
             <table className="w-full text-xs text-left font-mono">
               <thead className="bg-zinc-950 text-zinc-400 uppercase text-[10px] border-b border-zinc-800">
                 <tr>
@@ -355,38 +392,64 @@ export default function NiftyOIProfilePage() {
                 ))}
               </tbody>
             </table>
+            )}
           </div>
         ) : (
           /* THREE-COLUMN DASHBOARD GRID (50% / 25% / 25%) */
           <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 flex-1 min-h-[580px]">
             {/* COLUMN 1 (50% width / lg:col-span-6): Futures 5-Min Chart */}
             <div className="lg:col-span-6 flex flex-col">
-              <FuturesCandleChart candles={data?.candles ?? []} symbolName="NIFTY Futures" />
+              {initialLoading ? (
+                <div className="flex-1 bg-zinc-900/60 border border-zinc-800 rounded-xl flex items-center justify-center">
+                  <LoadingPanel label="Loading 5-min futures candles…" />
+                </div>
+              ) : (
+                <FuturesCandleChart candles={data?.candles ?? []} symbolName="NIFTY Futures" />
+              )}
             </div>
 
             {/* COLUMN 2 (25% width / lg:col-span-3): Open Interest Profile */}
             <div className="lg:col-span-3 flex flex-col">
-              <OIProfileChart
-                strikes={data?.strike_profiles ?? []}
-                atmStrike={data?.atm_strike ?? 0}
-                maxCallOiStrike={data?.summary?.max_call_oi_strike}
-                maxPutOiStrike={data?.summary?.max_put_oi_strike}
-              />
+              {initialLoading ? (
+                <div className="flex-1 bg-zinc-900/60 border border-zinc-800 rounded-xl flex items-center justify-center">
+                  <LoadingPanel label="Loading OI profile…" />
+                </div>
+              ) : (
+                <OIProfileChart
+                  strikes={data?.strike_profiles ?? []}
+                  atmStrike={data?.atm_strike ?? 0}
+                  maxCallOiStrike={data?.summary?.max_call_oi_strike}
+                  maxPutOiStrike={data?.summary?.max_put_oi_strike}
+                />
+              )}
             </div>
 
             {/* COLUMN 3 (25% width / lg:col-span-3): Daily OI Change Profile */}
             <div className="lg:col-span-3 flex flex-col">
-              <OIChangeProfileChart
-                strikes={data?.strike_profiles ?? []}
-                atmStrike={data?.atm_strike ?? 0}
-              />
+              {initialLoading ? (
+                <div className="flex-1 bg-zinc-900/60 border border-zinc-800 rounded-xl flex items-center justify-center">
+                  <LoadingPanel label="Loading OI change ladder…" />
+                </div>
+              ) : (
+                <OIChangeProfileChart
+                  strikes={data?.strike_profiles ?? []}
+                  atmStrike={data?.atm_strike ?? 0}
+                />
+              )}
             </div>
           </div>
         )}
 
         {/* FOOTER */}
         <div className="flex flex-wrap items-center justify-between text-[11px] text-zinc-500 border-t border-zinc-800/80 pt-3">
-          <span>Data updated: <strong className="text-zinc-400 font-mono">{data?.last_updated ?? '—'}</strong></span>
+          <span className="flex items-center gap-2">
+            Data updated: <strong className="text-zinc-400 font-mono">{data?.last_updated ?? '—'}</strong>
+            {refreshing && (
+              <span className="flex items-center gap-1 text-emerald-400">
+                <RefreshCw className="w-3 h-3 animate-spin" /> updating…
+              </span>
+            )}
+          </span>
           <span>Dhan API Options & Futures Stream</span>
         </div>
       </main>
