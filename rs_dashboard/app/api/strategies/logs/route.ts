@@ -5,7 +5,14 @@ import fs from 'fs';
 const PROJECT_ROOT = path.resolve(process.cwd(), '..');
 const LOGS_ROOT = path.join(PROJECT_ROOT, 'debug', 'logs');
 
-// Maps strategy key → log subfolder name
+// Maps strategy key → log subfolder name.
+//
+// This is a SECOND registry: a strategy also has to be in STRATEGIES_METADATA
+// (lib/strategyRegistry.ts) to be startable, and the keys are not derivable from
+// each other — the key is `nifty_rolling_straddle` while the folder the script
+// writes to is `rolling_straddle`. Adding a strategy in only one place makes it
+// launch fine and then fail with "Invalid or missing strategy key" the moment
+// anyone opens its logs, so add it here whenever you add it there.
 const STRATEGY_LOG_DIRS: Record<string, string> = {
   nifty_advanced_imbalance:      'advanced_imbalance',
   nifty_delta_neutral:           'delta_neutral',
@@ -15,6 +22,7 @@ const STRATEGY_LOG_DIRS: Record<string, string> = {
   nifty_vwap_straddle:           'vwap_straddle',
   nifty_intraday_vwap_straddle:  'intraday_vwap',
   nifty_vwap_1min_straddle:      'vwap_1min',
+  nifty_rolling_straddle:        'rolling_straddle',
   nifty_oi_directional:          'oi_directional',
   nifty_vix_straddle:            'vix_straddle',
   nifty_st_oi_bearcall:          'st_oi_bearcall',
