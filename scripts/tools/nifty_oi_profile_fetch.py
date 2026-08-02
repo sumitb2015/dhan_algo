@@ -13,6 +13,7 @@ import os
 import json
 import argparse
 import time
+import math
 from datetime import datetime, timedelta
 import pandas as pd
 
@@ -22,6 +23,17 @@ sys.path.insert(0, ROOT)
 
 from login import get_dhan_client
 from lib.dhan_helper import DhanHelper
+
+
+def clean_val(v, default=0.0):
+    """Sanitize floats against NaN/Inf so json.dumps produces 100% valid JSON."""
+    try:
+        val = float(v)
+        if math.isnan(val) or math.isinf(val):
+            return default
+        return val
+    except Exception:
+        return default
 
 
 def get_monthly_expiries(expiries):
@@ -156,12 +168,12 @@ def main():
         for _, row in df_candles.iterrows():
             candles.append({
                 "time": str(row.get("time", "")),
-                "open": round(float(row.get("open", 0)), 2),
-                "high": round(float(row.get("high", 0)), 2),
-                "low": round(float(row.get("low", 0)), 2),
-                "close": round(float(row.get("close", 0)), 2),
-                "volume": float(row.get("volume", 0)),
-                "oi": float(row.get("oi", 0)) if "oi" in row else 0.0
+                "open": round(clean_val(row.get("open")), 2),
+                "high": round(clean_val(row.get("high")), 2),
+                "low": round(clean_val(row.get("low")), 2),
+                "close": round(clean_val(row.get("close")), 2),
+                "volume": clean_val(row.get("volume")),
+                "oi": clean_val(row.get("oi")) if "oi" in row else 0.0
             })
 
     # 4. Fetch Option Chain Data for chosen_expiry
@@ -177,7 +189,7 @@ def main():
             pass
 
     # Calculate ATM strike based on reference price and step
-    step = args.step if args.step in (50, 100, 200) else 100
+    step = args.step if args.step in (50, 100, 200) else 50
     atm_strike = float(round(ref_price / step) * step)
 
     # Build list of strikes centered around ATM
@@ -199,26 +211,30 @@ def main():
     chain_lookup = {}
     if not chain_df.empty:
         for strike_val, row in chain_df.iterrows():
-            chain_lookup[float(strike_val)] = row.to_dict()
+            chain_lookup[clean_val(strike_val)] = row.to_dict()
 
     for s in target_strikes:
         row_data = chain_lookup.get(s, {})
         
-        ce_oi = float(row_data.get("ce_oi", 0.0))
-        pe_oi = float(row_data.get("pe_oi", 0.0))
+        ce_oi = clean_val(row_data.get("ce_oi"))
+        pe_oi = clean_val(row_data.get("pe_oi"))
         
-        ce_prev_oi = float(row_data.get("ce_previous_oi", 0.0))
-        pe_prev_oi = float(row_data.get("pe_previous_oi", 0.0))
-        
-        ce_oi_change = ce_oi - ce_prev_oi if ce_prev_oi > 0 else float(row_data.get("ce_oi_change", 0.0))
-        pe_oi_change = pe_oi - pe_prev_oi if pe_prev_oi > 0 else float(row_data.get("pe_oi_change", 0.0))
+        if "ce_previous_oi" in row_data:
+            ce_oi_change = ce_oi - clean_val(row_data.get("ce_previous_oi"))
+        else:
+            ce_oi_change = clean_val(row_data.get("ce_oi_change"))
 
-        ce_ltp = float(row_data.get("ce_last_price", 0.0))
-        pe_ltp = float(row_data.get("pe_last_price", 0.0))
-        ce_vol = float(row_data.get("ce_volume", 0.0))
-        pe_vol = float(row_data.get("pe_volume", 0.0))
-        ce_iv = float(row_data.get("ce_implied_volatility", 0.0))
-        pe_iv = float(row_data.get("pe_implied_volatility", 0.0))
+        if "pe_previous_oi" in row_data:
+            pe_oi_change = pe_oi - clean_val(row_data.get("pe_previous_oi"))
+        else:
+            pe_oi_change = clean_val(row_data.get("pe_oi_change"))
+
+        ce_ltp = clean_val(row_data.get("ce_last_price"))
+        pe_ltp = clean_val(row_data.get("pe_last_price"))
+        ce_vol = clean_val(row_data.get("ce_volume"))
+        pe_vol = clean_val(row_data.get("pe_volume"))
+        ce_iv = clean_val(row_data.get("ce_implied_volatility"))
+        pe_iv = clean_val(row_data.get("pe_iv_implied_volatility", row_data.get("pe_implied_volatility")))
 
         total_call_oi += ce_oi
         total_put_oi += pe_oi
