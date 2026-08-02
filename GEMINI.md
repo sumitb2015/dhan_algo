@@ -115,7 +115,9 @@ The `ValueImbalanceStrategy` relies on several key thresholds to manage risk and
 - **Max Lots**: Default **4 lots per leg**. Prevents excessive margin usage and over-exposure.
 - **Initial Lots**: Typically **1 or 2 lots** per leg.
 
-### Global Exit Rules
+### Global Exit Rules & Scalp Locks
+- **Scalp Lock / Premium Floor Exit (`--scalp-floor-pct`)**: Default **0.0%** (disabled). Exits all legs immediately when combined option premium decays by the target % (e.g. 30.0% decay captured).
+- **Multi-Cycle Mode (`--multi-cycle`)**: Auto-restarts a fresh ATM cycle after a Scalp Lock or profit target exit, with a configurable `--cycle-cooldown` (default: 300s / 5m). Re-entry is strictly disabled on Stop Loss hits.
 - **Profit Target**: Default **+₹4,000**. Hard exit once reached.
 - **Stop Loss**: Default **-₹4,000**. Hard exit once reached.
 - **Intraday Auto-Exit**: Fixed at **15:17 (3:17 PM)**. Ensures all positions are squared off before broker-level auto-square-off.

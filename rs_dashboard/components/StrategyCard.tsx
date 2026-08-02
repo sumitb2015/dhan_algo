@@ -24,6 +24,11 @@ interface StrategyState {
   lots?: number;
   max_lots?: number;
   threshold_lot?: number;
+  threshold_strike?: number;
+  scalp_floor_pct?: number;
+  multi_cycle?: boolean;
+  cycle_cooldown?: number;
+  initial_combined_premium?: number;
   loser_ratio_lots?: number;
   ce_strike?: number | null;
   pe_strike?: number | null;
@@ -142,6 +147,10 @@ function StrategyCard({ meta, state, onRefresh }: StrategyCardProps) {
   const [mode, setMode] = useState<string>('winner_roll_atm');
   const [loserRatioLots, setLoserRatioLots] = useState<number>(1);
   const [thresholdLot, setThresholdLot] = useState<number>(25.0);
+  const [thresholdStrike, setThresholdStrike] = useState<number>(40.0);
+  const [scalpFloorPct, setScalpFloorPct] = useState<number>(0.0);
+  const [multiCycle, setMultiCycle] = useState<boolean>(false);
+  const [cycleCooldown, setCycleCooldown] = useState<number>(300);
   const [entryType, setEntryType] = useState<string>('strangle');
   const [strikeSelection, setStrikeSelection] = useState<string>('distance');
   const [ceOffset, setCeOffset] = useState<number>(200);
@@ -268,6 +277,7 @@ function StrategyCard({ meta, state, onRefresh }: StrategyCardProps) {
         args.push('--mode', mode, '--entry-type', effectiveEntryType, '--start-time', startTime);
         if (mode === 'loser_ratio_roll') args.push('--loser-ratio-lots', String(loserRatioLots));
         if (mode === 'winner_roll_atm') args.push('--threshold-lot', String(thresholdLot));
+        if (mode !== 'reentry_straddle') args.push('--threshold-strike', String(thresholdStrike));
         if (mode === 'reentry_straddle') {
           args.push('--leg-sl-pct', String(legSlPct));
         }
@@ -278,6 +288,9 @@ function StrategyCard({ meta, state, onRefresh }: StrategyCardProps) {
         }
         args.push('--trail-start-rs', String(trailStartRs));
         args.push('--trail-gap-rs', String(trailGapRs));
+        if (scalpFloorPct > 0) args.push('--scalp-floor-pct', String(scalpFloorPct));
+        if (multiCycle) args.push('--multi-cycle');
+        if (cycleCooldown !== 300) args.push('--cycle-cooldown', String(cycleCooldown));
       } else if (meta.key === 'nifty_delta_neutral') {
         args.push('--start-time', startTime);
         args.push('--target-delta', String(dnTargetDelta));
@@ -440,6 +453,14 @@ function StrategyCard({ meta, state, onRefresh }: StrategyCardProps) {
   };
 
   const statusBadge = () => {
+    if (state.status?.startsWith('COOLDOWN')) {
+      return (
+        <Badge className="gap-1 font-bold uppercase text-[9px] tracking-wide h-4 px-1.5 bg-amber-500/10 text-amber-400 border-amber-500/20">
+          <span className="h-1.5 w-1.5 rounded-full bg-amber-400 animate-pulse" />
+          {state.status}
+        </Badge>
+      );
+    }
     const map: Record<string, { color: string; label: string }> = {
       RUNNING:      { color: 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20', label: 'Running' },
       MONITORING:   { color: 'bg-sky-500/10 text-sky-400 border-sky-500/20', label: 'Monitoring' },
@@ -533,6 +554,41 @@ function StrategyCard({ meta, state, onRefresh }: StrategyCardProps) {
             <FieldLabel text="Threshold Lot %" tip="Base premium imbalance % (added to the post-entry/post-roll baseline offset) that triggers a winner-roll adjustment." />
             <Input type="number" value={thresholdLot} onChange={(e) => setThresholdLot(parseFloat(e.target.value) || 25.0)} min={1} step={0.5} className={inputCls} />
           </div>
+        )}
+
+        {meta.key === 'nifty_advanced_imbalance' && mode !== 'reentry_straddle' && (
+          <div className={fieldCls}>
+            <FieldLabel text="Threshold Strike %" tip="Premium imbalance % that triggers a strike shift once max-lots is reached. Must be greater than Threshold Lot %." />
+            <Input type="number" value={thresholdStrike} onChange={(e) => setThresholdStrike(parseFloat(e.target.value) || 40.0)} min={1} step={0.5} className={inputCls} />
+          </div>
+        )}
+
+        {meta.key === 'nifty_advanced_imbalance' && (
+          <>
+            <div className={fieldCls}>
+              <FieldLabel text="Scalp Lock %" tip="Combined premium decay % that triggers an immediate profit exit & lock (e.g. 30.0 for 30% decay)." />
+              <Input type="number" value={scalpFloorPct} onChange={(e) => setScalpFloorPct(parseFloat(e.target.value) || 0.0)} min={0} max={100} step={5} className={inputCls} />
+            </div>
+            <div className={fieldCls}>
+              <FieldLabel text="Multi-Cycle" tip="Auto-restarts a fresh ATM cycle on the same day after scalp floor or profit target exits." />
+              <div className="flex items-center gap-2 h-7">
+                <input
+                  type="checkbox"
+                  id={`multi-cycle-${meta.key}`}
+                  checked={multiCycle}
+                  onChange={(e) => setMultiCycle(e.target.checked)}
+                  className="h-3.5 w-3.5 rounded border-zinc-800 bg-zinc-900 accent-emerald-500"
+                />
+                <label htmlFor={`multi-cycle-${meta.key}`} className="text-white font-semibold text-xs">Enabled</label>
+              </div>
+            </div>
+            {multiCycle && (
+              <div className={fieldCls}>
+                <FieldLabel text="Cooldown (s)" tip="Seconds to wait between scalp cycles before placing the next entry." />
+                <Input type="number" value={cycleCooldown} onChange={(e) => setCycleCooldown(parseInt(e.target.value) || 300)} min={0} step={30} className={inputCls} />
+              </div>
+            )}
+          </>
         )}
 
         {meta.key !== 'nifty_spread_trend' && meta.key !== 'crudeoilm_supertrend' && meta.key !== 'crudeoilm_renko_sar' && meta.key !== 'nifty_st_oi_bearcall' && (

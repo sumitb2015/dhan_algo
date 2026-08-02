@@ -35,10 +35,11 @@ def _write_status(message: str, done: bool = False, error: str | None = None) ->
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-# NSE Holidays (2021-2026) - needed for correct expiry calculation
-# Wednesday exceptions in 2021: 10-Mar, 12-May, 18-Aug, 3-Nov → Thursday holidays on 11-Mar, 13-May, 19-Aug, 4-Nov
-# Wednesday exception in 2022: 13-Apr → Thursday holiday on 14-Apr
-# Wednesday exceptions in 2023: 25-Jan, 29-Mar → Thursday holidays on 26-Jan, 30-Mar
+# ---------------------------------------------------------------------------
+# NSE Holidays (2021-2026) — only needed for the hybrid historical generator.
+# Dhan's master list covers all future expiries accurately, so this table
+# only needs to be maintained through the current year.
+# ---------------------------------------------------------------------------
 NSE_HOLIDAYS = {
     # 2021
     "2021-01-26", "2021-03-11", "2021-03-29", "2021-04-02", "2021-04-14", "2021-04-21",
@@ -65,101 +66,125 @@ NSE_HOLIDAYS = {
     "2026-11-10", "2026-11-24", "2026-12-25"
 }
 
-def get_valid_expiry_date(expiry_date_str):
-    """
-    Adjusts the expiry date if it falls on a holiday.
-    Checks previous day recursively.
-    """
-    date_obj = datetime.strptime(expiry_date_str, "%Y-%m-%d")
-    while expiry_date_str in NSE_HOLIDAYS:
-        # Move back one day
-        date_obj -= timedelta(days=1)
-        expiry_date_str = date_obj.strftime("%Y-%m-%d")
-    return expiry_date_str
 
-def get_target_weekday_for_index(helper, security_id, segment="NSE_FNO"):
-    """
-    Fetches the first future expiry from the API to determine the trading weekday.
-    Returns: int (0=Mon, 1=Tue, ..., 6=Sun) or None if fails.
-    """
-    try:
-        expiries = helper.get_expiry_list(security_id, segment)
-        if expiries:
-            # Parse the first date
-            first_expiry = expiries[0]
-            dt = datetime.strptime(first_expiry, "%Y-%m-%d")
-            return dt.weekday()
-    except Exception as e:
-        logger.error(f"Failed to determine weekday for ID {security_id}: {e}")
-    return 3 # Default to Thursday if fail
+def _valid_expiry(date_str: str) -> str:
+    """Shift back past any NSE holiday."""
+    dt = datetime.strptime(date_str, "%Y-%m-%d")
+    while date_str in NSE_HOLIDAYS:
+        dt -= timedelta(days=1)
+        date_str = dt.strftime("%Y-%m-%d")
+    return date_str
 
-def generate_hybrid_expiries(start_date, end_date, symbol_name):
+
+def generate_historical_expiries(symbol: str, start_date: datetime, end_date: datetime) -> list[str]:
     """
-    Generates expiries handling rule changes (e.g. NIFTY shift from Thu to Tue).
+    Generates weekly expiry dates using NSE weekday rules for the historical
+    period (before expiries appear in the Dhan master list).
+
+    NIFTY: Thursday until 31-Aug-2025, Tuesday from 01-Sep-2025 onwards.
+    BANKNIFTY: Wednesday.
     """
     expiries = []
-    current_date = start_date
-    
-    # Define rules
-    # NIFTY: Thu (3) until Aug 31 2025, then Tue (1)
-    # BANKNIFTY: Wed (2) (Changed in 2024, so constant for 2025)
-    
-    target_weekday = 3 # Default Thu
-    if "NIFTY" in symbol_name and "BANK" not in symbol_name:
-        # NIFTY 50
-        pass # Logic handled inside loop
-    elif "BANK" in symbol_name:
-         target_weekday = 2 # Wed
-    
-    # Iterate day by day or week by week? 
-    # Better: Iterate week chunks but check rule each time.
-    # Actually, simpler loop: Jump to next occurrence of target.
-    
-    # Let's iterate by 1 day to be safe around transitions, or use a customized seeker.
-    # Optimization: Just loop every day? No, inefficient.
-    # Be aware: Transition week might have SHORT expiry (e.g. Thu then Tue next week).
-    
-    temp_date = start_date
-    while temp_date <= end_date:
-        # Determine target for THIS week/period
-        day_target = 3 # Default Thu
-        
-        if "NIFTY" in symbol_name and "BANK" not in symbol_name:
-            # Rule: Effective Sep 1 2025 = Tue
-            # Cutoff: 2025-09-01
-            if temp_date.date() >= datetime(2025, 9, 1).date():
-                day_target = 1 # Tue
-            else:
-                day_target = 3 # Thu
-        elif "BANK" in symbol_name:
-            day_target = 2 # Wed
-            
-        # Check if today matches target
-        if temp_date.weekday() == day_target:
-            # It's a candidate
-             # Check validity (holiday)
-            date_str = temp_date.strftime("%Y-%m-%d")
-            valid_expiry = get_valid_expiry_date(date_str)
-            
-            # Avoid duplicates if holiday shift pushed it to same day as previous (rare but possible)
-            if not expiries or expiries[-1] != valid_expiry:
-                 expiries.append(valid_expiry)
-            
-            # Advance 6 days to skip close ones, then loop day by day to find next
-            temp_date += timedelta(days=6)
+    temp = start_date
+
+    while temp <= end_date:
+        if "NIFTY" in symbol and "BANK" not in symbol:
+            target = 1 if temp.date() >= datetime(2025, 9, 1).date() else 3  # Tue / Thu
+        elif "BANK" in symbol:
+            target = 2  # Wed
         else:
-            temp_date += timedelta(days=1)
-            
-    # Filter to ensure we don't include future dates if end_date is strictly enforced (loop does <=)
-    # And sort descending
+            target = 3  # Thu default
+
+        if temp.weekday() == target:
+            d_str = temp.strftime("%Y-%m-%d")
+            valid = _valid_expiry(d_str)
+            if not expiries or expiries[-1] != valid:
+                expiries.append(valid)
+            temp += timedelta(days=6)
+        else:
+            temp += timedelta(days=1)
+
     expiries.sort(reverse=True)
     return expiries
+
+
+def get_expiries_from_master_list(helper: DhanHelper, symbol: str) -> list[str]:
+    """
+    Reads upcoming option expiry dates for `symbol` from the Dhan master list.
+    The master list only contains currently-listed (future) contracts, so this
+    supplements the historical generator for any expiries not yet expired.
+    Returns a list of 'YYYY-MM-DD' strings, all >= today.
+    """
+    df = helper._load_master_list()
+    if df.empty:
+        logger.warning("Master list is empty — skipping master list expiry lookup.")
+        return []
+
+    mask = (
+        (df["UNDERLYING_SYMBOL"] == symbol.upper()) &
+        (df["INSTRUMENT"] == "OPTIDX") &
+        (df["SM_EXPIRY_DATE"].notna()) &
+        (df["SM_EXPIRY_DATE"] != "nan")
+    )
+    raw = df[mask]["SM_EXPIRY_DATE"].dropna().unique().tolist()
+
+    parsed = []
+    for d in raw:
+        try:
+            parsed.append(datetime.strptime(str(d).strip(), "%Y-%m-%d"))
+        except ValueError:
+            pass
+
+    today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+    result = sorted(set(dt for dt in parsed), reverse=True)
+    return [dt.strftime("%Y-%m-%d") for dt in result]
+
+
+def build_expiry_list(helper: DhanHelper, symbol: str) -> list[str]:
+    """
+    Combines:
+      1. Historical expiries from the rule-based generator (2021-01-01 to yesterday).
+      2. Future/current expiries from the Dhan master list (authoritative, no hardcoding).
+
+    Returns a deduplicated, descending-sorted list of all 'YYYY-MM-DD' expiry dates
+    up to today.
+    """
+    today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+    yesterday = today - timedelta(days=1)
+
+    # Historical: rule-based generator for all dates that have already expired
+    historical = generate_historical_expiries(symbol, datetime(2021, 1, 1), yesterday)
+
+    # Future/current: authoritative from broker master list
+    from_master = get_expiries_from_master_list(helper, symbol)
+
+    # Merge, deduplicate, filter to <= today, sort descending
+    all_expiries = set(historical) | set(from_master)
+    all_dt = []
+    for d in all_expiries:
+        try:
+            dt = datetime.strptime(d, "%Y-%m-%d")
+            if dt <= today:
+                all_dt.append(dt)
+        except ValueError:
+            pass
+
+    all_dt.sort(reverse=True)
+    result = [dt.strftime("%Y-%m-%d") for dt in all_dt]
+    logger.info(
+        f"[{symbol}] Total expiries: {len(result)} "
+        f"({result[-1] if result else '—'} … {result[0] if result else '—'})"
+    )
+    return result
+
+
+
 
 def main():
     _write_status("Initialising…")
     try:
         dhan = get_dhan_client()
-        if not dhan: 
+        if not dhan:
             logger.error("Dhan login failed.")
             _write_status("Failed: login failed", done=True, error="Dhan login failed")
             return
@@ -168,48 +193,48 @@ def main():
         watchlist = {
             "NIFTY": {"id": 13, "segment": "NSE_FNO", "instrument": "OPTIDX"}
         }
-        
-        # Generate relative strikes: ATM, ATM+1 to ATM+10, ATM-1 to ATM-10
+
+        # Relative strikes: ATM, ATM±1 … ATM±10
         strikes = ["ATM"]
         for i in range(1, 11):
             strikes.append(f"ATM+{i}")
             strikes.append(f"ATM-{i}")
-        
+
         required_data = ["open", "high", "low", "close", "volume", "oi", "strike", "iv", "spot"]
-        
+
         for name, info in watchlist.items():
             logger.info(f"Processing {name}...")
-            
-            # 2. Calculate expiries between Jan 1, 2021 and Today using Hybrid Rules
-            start_date = datetime(2021, 1, 1)
-            end_date = datetime.now()
-            
-            expiries = generate_hybrid_expiries(start_date, end_date, name)
-            logger.info(f"Target Weekly Expiries ({start_date.date()} to {end_date.date()}): {expiries}")
-            
+
+            # Build the full expiry list: history (rule-based) + future (master list)
+            expiries = build_expiry_list(helper, name)
+            if not expiries:
+                logger.error(f"No expiries found for {name}. Skipping.")
+                continue
+
             total_exp = len(expiries)
             for idx, expiry in enumerate(expiries, 1):
                 expiry_dt = datetime.strptime(expiry, "%Y-%m-%d")
+                # Each file covers exactly its own contract week: from_date → expiry.
+                # Post-expiry days belong to the next week's contract.
                 to_date = expiry
-                # We fetch data for the week leading up to expiry
                 from_date = (expiry_dt - timedelta(days=7)).strftime("%Y-%m-%d")
-                
-                logger.info(f"--- Processing Expiry: {expiry} (Data from {from_date}) ---")
+
+                logger.info(f"--- Processing Expiry: {expiry} (Data {from_date} → {to_date}) ---")
                 _write_status(f"Expiry {expiry} ({idx}/{total_exp})")
 
                 for strike_rel in strikes:
-                    # Folder structure example: Options Data/NIFTY/ATM/2025-01-23.csv
+                    # e.g.  Options Data/NIFTY/ATM/2026-07-28.csv
                     save_dir = os.path.join("Options Data", name, strike_rel)
                     os.makedirs(save_dir, exist_ok=True)
                     file_path = os.path.join(save_dir, f"{expiry}.csv")
-                    
+
                     if os.path.exists(file_path):
                         logger.info(f"Skipping {name} {strike_rel} {expiry} - File exists.")
                         continue
-                    
+
                     logger.info(f"Downloading: {name} | {strike_rel} | Expiry: {expiry}...")
                     _write_status(f"Downloading {name} {strike_rel} {expiry} ({idx}/{total_exp})")
-                    
+
                     all_data = []
                     for o_type in ["CALL", "PUT"]:
                         df = helper.get_expired_options_data(
@@ -217,7 +242,7 @@ def main():
                             exchange_segment=info["segment"],
                             instrument_type=info["instrument"],
                             expiry_flag="WEEK",
-                            expiry_code=1, # 1 = Near Week (Current Week relative to date range)
+                            expiry_code=1,  # Near Week relative to date range
                             strike=strike_rel,
                             drv_option_type=o_type,
                             required_data=required_data,
@@ -226,8 +251,6 @@ def main():
                             interval=1
                         )
                         if df.empty and helper.is_fatal_error(helper.last_api_error):
-                            # Auth/subscription failure — every remaining call will fail
-                            # identically, so abort instead of grinding through the queue.
                             err = helper.last_api_error
                             msg = (f"Dhan API error {err.get('code') or '?'} "
                                    f"({err.get('type', '')}): {err.get('message', '')}")
@@ -235,26 +258,24 @@ def main():
                             _write_status(f"Error: {msg}", done=True, error=msg)
                             return
                         if not df.empty:
-                            # Ensure we distinguish CE vs PE in the saved file
-                            # The helper already adds 'option_type' column if found
-                            # But let's enforce a clean column name if not present or standardize it
                             if 'option_type' not in df.columns:
                                 df['option_type'] = "CE" if o_type == "CALL" else "PE"
                             else:
-                                df['option_type'] = df['option_type'].apply(lambda x: "CE" if x == "CALL" else "PE")
-                                
+                                df['option_type'] = df['option_type'].apply(
+                                    lambda x: "CE" if x == "CALL" else "PE"
+                                )
                             all_data.append(df)
-                        time.sleep(0.2) # Small delay to respect rate limits
-                    
+                        time.sleep(0.2)  # Respect rate limits
+
                     if all_data:
                         final_df = pd.concat(all_data, ignore_index=True)
-                        # Add simple column for easy filtering by user
                         final_df['strike_relative'] = strike_rel
-                        
-                        # Reorder columns slightly for better readability if possible, but not strictly required
-                        cols = ['datetime', 'option_type', 'strike_relative'] + [c for c in final_df.columns if c not in ['datetime', 'option_type', 'strike_relative']]
+                        cols = (
+                            ['datetime', 'option_type', 'strike_relative'] +
+                            [c for c in final_df.columns
+                             if c not in ['datetime', 'option_type', 'strike_relative']]
+                        )
                         final_df = final_df[cols]
-                        
                         final_df.to_csv(file_path, index=False)
                         logger.info(f"Saved: {file_path} ({len(final_df)} rows)")
                     else:

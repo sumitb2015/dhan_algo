@@ -47,6 +47,7 @@ class NiftyAdvancedImbalance:
                  start_time="09:20", loser_ratio_lots=1,
                  leg_sl_pct=0.20,
                  trail_start_rs=500.0, trail_gap_rs=300.0,
+                 scalp_floor_pct=0.0, multi_cycle=False, cycle_cooldown=300,
                  state_key="nifty_advanced_imbalance"):
         self.state_key = state_key
         self.mode = mode.lower()
@@ -75,6 +76,12 @@ class NiftyAdvancedImbalance:
         self.leg_sl_pct = leg_sl_pct
         self.trail_start_rs = trail_start_rs
         self.trail_gap_rs = trail_gap_rs
+        self.scalp_floor_pct = float(scalp_floor_pct)
+        self.multi_cycle = bool(multi_cycle)
+        self.cycle_cooldown = int(cycle_cooldown)
+        self.initial_ce_entry_price = 0.0
+        self.initial_pe_entry_price = 0.0
+        self.daily_pnl = 0.0
 
         self.dhan = get_dhan_client()
         if not self.dhan:
@@ -131,14 +138,18 @@ class NiftyAdvancedImbalance:
         self.pe_sl = 0.0
         self.ce_original_entry_premium = 0.0
         self.pe_original_entry_premium = 0.0
+        self.initial_ce_entry_price = 0.0
+        self.initial_pe_entry_price = 0.0
 
-    def sleep_cooldown(self, seconds):
-        """Shutdown-aware sleep for cooldowns and delays."""
-        for _ in range(seconds):
+    def sleep_cooldown(self, seconds, reason="Cooldown"):
+        """Shutdown-aware sleep for cooldowns and delays with UI status updates."""
+        for remaining in range(seconds, 0, -1):
             if check_shutdown_trigger(self.state_key):
                 logger.info("UI Shutdown Request during cooldown sleep. Exiting.")
                 self.save_state(0, 0, 0, 0, status="STOPPED")
                 sys.exit(0)
+            if remaining % 5 == 0 or remaining <= 5:
+                self.save_state(0, 0, 0, self.daily_pnl, status=f"COOLDOWN ({remaining}s)")
             time.sleep(1)
 
     def save_state(self, nifty_spot, ce_ltp, pe_ltp, total_pnl, status="RUNNING"):
@@ -178,6 +189,11 @@ class NiftyAdvancedImbalance:
             "trail_gap_rs": self.trail_gap_rs,
             "best_pnl": round(self.best_pnl, 2),
             "trail_exit_pnl": round(self.best_pnl - self.trail_gap_rs, 2) if self.trail_active else None,
+            "scalp_floor_pct": self.scalp_floor_pct,
+            "multi_cycle": self.multi_cycle,
+            "cycle_cooldown": self.cycle_cooldown,
+            "initial_combined_premium": round(self.initial_ce_entry_price + self.initial_pe_entry_price, 2) if (self.initial_ce_entry_price > 0 and self.initial_pe_entry_price > 0) else None,
+            "daily_pnl": round(self.daily_pnl + total_pnl, 2),
         }
         save_strategy_state(self.state_key, state_dict)
 
@@ -450,6 +466,8 @@ class NiftyAdvancedImbalance:
                     if qty_to_buy > 0:
                         ce_exit_id = self.helper.buy(str(self.ce_id), qty_to_buy)
                         logger.info(f"CE short exit order placed for {qty_to_buy} qty (own {own_qty}, broker net {net_qty}): {ce_exit_id}")
+                        if ce_exit_id and not self.dry_run:
+                            self.helper.wait_for_fill(ce_exit_id, timeout=5)
                 except Exception as e:
                     logger.error(f"Exit CE Error: {e}")
             if self.pe_id:
@@ -459,6 +477,8 @@ class NiftyAdvancedImbalance:
                     if qty_to_buy > 0:
                         pe_exit_id = self.helper.buy(str(self.pe_id), qty_to_buy)
                         logger.info(f"PE short exit order placed for {qty_to_buy} qty (own {own_qty}, broker net {net_qty}): {pe_exit_id}")
+                        if pe_exit_id and not self.dry_run:
+                            self.helper.wait_for_fill(pe_exit_id, timeout=5)
                 except Exception as e:
                     logger.error(f"Exit PE Error: {e}")
 
@@ -470,6 +490,8 @@ class NiftyAdvancedImbalance:
                     if qty_to_sell > 0:
                         wing_exit_id = self.helper.sell(str(wing['id']), qty_to_sell)
                         logger.info(f"CE long wing {wing['strike']} exit order placed for {qty_to_sell} qty (own {own_qty}, broker net {net_qty}): {wing_exit_id}")
+                        if wing_exit_id and not self.dry_run:
+                            self.helper.wait_for_fill(wing_exit_id, timeout=5)
                 except Exception as e:
                     logger.error(f"Exit CE Wing strike {wing['strike']} Error: {e}")
             for wing in self.pe_wings:
@@ -479,6 +501,8 @@ class NiftyAdvancedImbalance:
                     if qty_to_sell > 0:
                         wing_exit_id = self.helper.sell(str(wing['id']), qty_to_sell)
                         logger.info(f"PE long wing {wing['strike']} exit order placed for {qty_to_sell} qty (own {own_qty}, broker net {net_qty}): {wing_exit_id}")
+                        if wing_exit_id and not self.dry_run:
+                            self.helper.wait_for_fill(wing_exit_id, timeout=5)
                 except Exception as e:
                     logger.error(f"Exit PE Wing strike {wing['strike']} Error: {e}")
         else:
@@ -805,7 +829,18 @@ class NiftyAdvancedImbalance:
             else:
                 logger.info(f"[DRY RUN] Simulating Entry: {self.ce_strike} CE/PE")
 
+            self.initial_ce_entry_price = self.ce_avg_price
+            self.initial_pe_entry_price = self.pe_avg_price
+
             logger.info(f"Trail SL: arms at +INR {self.trail_start_rs:.0f} MTM, gives back INR {self.trail_gap_rs:.0f}")
+            if self.scalp_floor_pct > 0:
+                combined_prem = self.initial_ce_entry_price + self.initial_pe_entry_price
+                initial_val = combined_prem * self.initial_lots * self.nifty_lot_size
+                target_profit_inr = initial_val * (self.scalp_floor_pct / 100.0)
+                logger.info(
+                    f"Scalp Lock Active: target exit when premium decays {self.scalp_floor_pct:.1f}% "
+                    f"(Initial Premium: {combined_prem:.2f} | Initial Value: INR {initial_val:.0f} | Scalp Lock Target: +INR {target_profit_inr:.0f})"
+                )
 
             if self.target_is_pct or self.stop_is_pct:
                 entry_value = (self.ce_avg_price * self.ce_lots + self.pe_avg_price * self.pe_lots) * self.nifty_lot_size
@@ -838,13 +873,17 @@ class NiftyAdvancedImbalance:
                 
                 # Check shutdown trigger first
                 if check_shutdown_trigger(self.state_key):
-                    c_ltp, p_ltp, curr_nifty = self.fetch_ltps()
-                    ce_ltp_val = c_ltp if c_ltp > 0 else self.ce_avg_price
-                    pe_ltp_val = p_ltp if p_ltp > 0 else self.pe_avg_price
-                    total_pnl = self._calculate_pnl(ce_ltp_val, pe_ltp_val)
-                    if curr_nifty <= 0: curr_nifty = nifty_spot
+                    try:
+                        c_ltp, p_ltp, curr_nifty = self.fetch_ltps()
+                        ce_ltp_val = c_ltp if c_ltp > 0 else self.ce_avg_price
+                        pe_ltp_val = p_ltp if p_ltp > 0 else self.pe_avg_price
+                        total_pnl = self._calculate_pnl(ce_ltp_val, pe_ltp_val)
+                        if curr_nifty <= 0: curr_nifty = nifty_spot
+                    except Exception as shutdown_fetch_err:
+                        logger.warning(f"LTP fetch exception during shutdown: {shutdown_fetch_err}")
+                        ce_ltp_val, pe_ltp_val, curr_nifty, total_pnl = self.ce_avg_price, self.pe_avg_price, nifty_spot, 0.0
                     self.exit_all_positions("UI Shutdown Request")
-                    self.save_state(curr_nifty, ce_ltp_val, pe_ltp_val, total_pnl, status="STOPPED")
+                    self.save_state(curr_nifty, ce_ltp_val, pe_ltp_val, self.daily_pnl + total_pnl, status="STOPPED")
                     sys.exit(0)
 
                 now = datetime.now()
@@ -936,18 +975,59 @@ class NiftyAdvancedImbalance:
                             cycle_active = False
                             break
                 
-                # --- Hard Targets ---
-                if total_pnl >= self.profit_target:
-                    self.exit_all_positions(f"Profit Target Reached: {total_pnl:.2f}")
+                # --- Scalp Lock & Global Targets Evaluation ---
+                cumulative_pnl = self.daily_pnl + total_pnl
+
+                # 1. Per-Cycle Scalp Lock (Premium Floor Exit)
+                if self.scalp_floor_pct > 0 and (self.ce_lots > 0 or self.pe_lots > 0):
+                    initial_combined = self.initial_ce_entry_price + self.initial_pe_entry_price
+                    initial_value = initial_combined * self.initial_lots * self.nifty_lot_size
+                    if initial_value > 0:
+                        decay_pct = (total_pnl / initial_value) * 100.0
+                        if decay_pct >= self.scalp_floor_pct:
+                            self.exit_all_positions(
+                                f"Scalp Lock Triggered! Premium decay achieved: {decay_pct:.1f}% "
+                                f"(Target: >={self.scalp_floor_pct:.1f}% | Initial Value: INR {initial_value:.0f} | Cycle PnL: +INR {total_pnl:.0f})"
+                            )
+                            self.daily_pnl += total_pnl
+                            
+                            # Check if cumulative daily profit cap is reached
+                            if self.profit_target is not None and self.daily_pnl >= self.profit_target:
+                                logger.info(f"Scalp Lock hit & Global Daily Profit Target Reached (+INR {self.daily_pnl:.0f})! Stopping strategy for the day.")
+                                if not self.helper.wait_for_next_day_market_open(self.dry_run, start_time=self.start_time, shutdown_check=lambda: check_shutdown_trigger(self.state_key)):
+                                    self.save_state(0, 0, 0, self.daily_pnl, status="STOPPED")
+                                    sys.exit(0)
+                                cycle_active = False
+                                break
+
+                            if self.multi_cycle:
+                                logger.info(f"Scalp Lock Hit! Cumulative Daily P&L: INR {self.daily_pnl:+.0f}. Pausing {self.cycle_cooldown}s before next cycle...")
+                                self.sleep_cooldown(self.cycle_cooldown, reason="Scalp Lock Cooldown")
+                                cycle_active = False
+                                break
+                            else:
+                                if not self.helper.wait_for_next_day_market_open(self.dry_run, start_time=self.start_time, shutdown_check=lambda: check_shutdown_trigger(self.state_key)):
+                                    self.save_state(0, 0, 0, self.daily_pnl, status="STOPPED")
+                                    sys.exit(0)
+                                cycle_active = False
+                                break
+
+                # 2. Global Daily Profit Target (Cumulative Daily Cap)
+                if self.profit_target is not None and cumulative_pnl >= self.profit_target:
+                    self.exit_all_positions(f"Global Daily Profit Target Reached: {cumulative_pnl:.2f}")
+                    self.daily_pnl = cumulative_pnl
                     if not self.helper.wait_for_next_day_market_open(self.dry_run, start_time=self.start_time, shutdown_check=lambda: check_shutdown_trigger(self.state_key)):
-                        self.save_state(0, 0, 0, 0, status="STOPPED")
+                        self.save_state(0, 0, 0, self.daily_pnl, status="STOPPED")
                         sys.exit(0)
                     cycle_active = False
                     break
-                if total_pnl <= self.stop_loss:
-                    self.exit_all_positions(f"Global Stop Loss Hit: {total_pnl:.2f}")
+
+                # 3. Global Daily Stop Loss (Cumulative Daily Cap)
+                if self.stop_loss is not None and cumulative_pnl <= self.stop_loss:
+                    self.exit_all_positions(f"Global Daily Stop Loss Hit: {cumulative_pnl:.2f}")
+                    self.daily_pnl = cumulative_pnl
                     if not self.helper.wait_for_next_day_market_open(self.dry_run, start_time=self.start_time, shutdown_check=lambda: check_shutdown_trigger(self.state_key)):
-                        self.save_state(0, 0, 0, 0, status="STOPPED")
+                        self.save_state(0, 0, 0, self.daily_pnl, status="STOPPED")
                         sys.exit(0)
                     cycle_active = False
                     break
@@ -1346,6 +1426,9 @@ Examples:
     parser.add_argument("--threshold-lot", type=float, default=25.0, metavar="PCT",
                         help="Base premium imbalance %% (added to entry_diff_pct) that triggers an "
                              "adjustment while below --max-lots (default: 25.0)")
+    parser.add_argument("--threshold-strike", type=float, default=40.0, metavar="PCT",
+                        help="Premium imbalance %% (added to entry_diff_pct) that triggers a strike "
+                             "shift once max-lots is reached (default: 40.0)")
 
     parser.add_argument("--target-profit", type=str, default="4000", metavar="AMT",
                         help="Global profit target in INR, or a percentage of entry premium collected "
@@ -1392,6 +1475,15 @@ Examples:
                         help="Activate trailing SL once MTM profit reaches this many rupees (default: 500)")
     parser.add_argument("--trail-gap-rs", type=float, default=300.0, metavar="INR",
                         help="Exit if MTM gives back this many rupees from its best level (default: 300)")
+
+    # Scalp Lock / Multi-cycle
+    parser.add_argument("--scalp-floor-pct", type=float, default=0.0, metavar="PCT",
+                        help="Combined premium decay %% that triggers a scalp profit exit e.g. 30.0 (default: 0.0, disabled)")
+    parser.add_argument("--multi-cycle", action="store_true", default=False,
+                        help="Auto-restart with fresh ATM after scalp floor or profit target exits (default: False)")
+    parser.add_argument("--cycle-cooldown", type=int, default=300, metavar="SEC",
+                        help="Cooldown in seconds between scalp cycles (default: 300)")
+
     parser.add_argument("--instance-id", type=str, default="", metavar="ID",
                         help="Suffix for debug/state files to run a second concurrent copy of this strategy")
 
@@ -1459,6 +1551,18 @@ Examples:
         _errors.append(f"--max-lots must be >= 1, got {args.max_lots}.")
     if args.threshold_lot <= 0:
         _errors.append(f"--threshold-lot must be > 0, got {args.threshold_lot}.")
+    if args.threshold_strike <= 0:
+        _errors.append(f"--threshold-strike must be > 0, got {args.threshold_strike}.")
+    if args.threshold_strike <= args.threshold_lot:
+        _errors.append(
+            f"--threshold-strike ({args.threshold_strike}%) must be greater than "
+            f"--threshold-lot ({args.threshold_lot}%). "
+            "Strike shift should only trigger after lot addition is exhausted."
+        )
+    if args.scalp_floor_pct < 0 or args.scalp_floor_pct > 100:
+        _errors.append(f"--scalp-floor-pct must be between 0 and 100, got {args.scalp_floor_pct}.")
+    if args.cycle_cooldown < 0:
+        _errors.append(f"--cycle-cooldown must be >= 0, got {args.cycle_cooldown}.")
     if args.lots > args.max_lots:
         _errors.append(
             f"--lots {args.lots} exceeds --max-lots ({args.max_lots}).\n"
@@ -1514,7 +1618,9 @@ Examples:
     stop_label = f"-{stop_loss_val:.0f}%" if stop_is_pct else f"-INR {stop_loss_val:.0f}"
     logger.info(
         f"Config -> Mode: {mode_label} | Sizing: {args.lots}L | Start Time: {args.start_time} | Entry Type: {args.entry_type} ({selection_label}) | "
-        f"Adjustment Mode: {args.mode} (Loser Ratio Lots: {args.loser_ratio_lots}, Threshold Lot: {args.threshold_lot}%) | Profit Target: {target_label} | Stop Loss: {stop_label}"
+        f"Adjustment Mode: {args.mode} (Loser Ratio Lots: {args.loser_ratio_lots}, Threshold Lot: {args.threshold_lot}%, Threshold Strike: {args.threshold_strike}%) | "
+        f"Scalp Lock: {args.scalp_floor_pct}% | Multi-Cycle: {args.multi_cycle} (Cooldown: {args.cycle_cooldown}s) | "
+        f"Profit Target: {target_label} | Stop Loss: {stop_label}"
     )
 
     strat = NiftyAdvancedImbalance(
@@ -1523,6 +1629,7 @@ Examples:
         initial_lots=args.lots,
         max_lots=args.max_lots,
         threshold_lot=args.threshold_lot,
+        threshold_strike=args.threshold_strike,
         profit_target=target_val,
         profit_target_is_pct=target_is_pct,
         stop_loss=stop_loss_val,
@@ -1539,6 +1646,9 @@ Examples:
         leg_sl_pct=args.leg_sl_pct,
         trail_start_rs=args.trail_start_rs,
         trail_gap_rs=args.trail_gap_rs,
+        scalp_floor_pct=args.scalp_floor_pct,
+        multi_cycle=args.multi_cycle,
+        cycle_cooldown=args.cycle_cooldown,
         state_key=STATE_KEY,
     )
     try:

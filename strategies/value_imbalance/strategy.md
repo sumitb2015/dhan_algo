@@ -124,8 +124,12 @@ The advanced script introduces selectable adjustment logic modes to optimize mar
 | **`--lots N`** | `1` | Initial lots per leg. |
 | **`--mode MODE`** | `winner_roll_atm` | Selects adjustment mode (`winner_roll_atm`, `loser_ratio_roll`, `hedged_addition`, `legacy`, `reentry_straddle`). |
 | **`--threshold-lot PCT`** | `25.0` | *(winner_roll_atm only, applies while below `--max-lots`)* Base premium imbalance % — added to the post-entry/post-roll `entry_diff_pct` baseline — that triggers a winner-roll adjustment. |
+| **`--threshold-strike PCT`** | `40.0` | *(applies once `--max-lots` is reached)* Premium imbalance % that triggers a strike shift. Must be > `--threshold-lot`. |
+| **`--scalp-floor-pct PCT`** | `0.0` | Combined premium decay % that triggers an immediate Scalp Lock profit exit (e.g. `30.0` = 30% decay captured). Default `0.0` (disabled). |
+| **`--multi-cycle`** | *Flag* | Auto-restarts a fresh ATM cycle after a Scalp Lock or profit target exit (enabling continuous intraday scalping). |
+| **`--cycle-cooldown SEC`** | `300` | Cooldown period in seconds between scalp cycles before placing the next entry. |
 | **`--loser-ratio-lots N`** | `1` | Number of lots to increment during a loser ratio roll adjustment. |
-| **`--leg-sl-pct PCT`** | `0.20` | *(reentry_straddle only)* Per-leg SL as a fraction of entry premium (e.g. `0.20` = SL at 120% of entry price). Errors if set with any other mode. |
+| **`--leg-sl-pct PCT`** | `0.20` | *(reentry_straddle only)* Per-leg SL as a fraction of entry premium (e.g. `0.20` = SL at 120% of entry price). |
 | **`--trail-start-pct PCT`** | `5.0` | Arms the trailing stop-loss once profit reaches this % of the entry combined premium. |
 | **`--trail-gap-pts PTS`** | `15.0` | Once armed, exits if the combined premium rises this many points above its best (lowest) level since arming. |
 | **`--entry-type TYPE`** | `straddle` | Entry position type (`straddle`, `strangle`). |
