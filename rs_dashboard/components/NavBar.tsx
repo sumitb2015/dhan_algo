@@ -44,6 +44,7 @@ const NAV_GROUPS = [
     label: 'Derivatives',
     icon: Layers,
     links: [
+      { href: '/nifty-oi-profile', label: 'Nifty OI Profile', desc: 'Futures 5-min chart with 7-day 3-column OI & OI Change profile' },
       { href: '/futures', label: 'Futures', desc: 'OI buildup & short/long coverage analysis' },
       { href: '/options', label: 'Options', desc: 'Max pain, PCR & live options chain' },
       { href: '/options/quiktrade', label: 'QuikTrade', desc: 'OI buildup quadrants, live positions & P&L' },
