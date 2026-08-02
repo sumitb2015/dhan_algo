@@ -146,7 +146,7 @@ export default function TopWeightStocks({ className }: { className?: string }) {
         const pct = r.quote && r.quote.prev_close > 0 ? r.quote.change_pct : null;
         return (
           <tr key={r.symbol} className="border-b border-zinc-800/60 last:border-0 hover:bg-zinc-800/30">
-            <TD><span className="text-zinc-200 font-semibold">{r.name}</span></TD>
+            <TD><span className="text-zinc-200 font-semibold whitespace-nowrap">{r.name}</span></TD>
             <TD right className={cn('tabular-nums transition-colors',
               f === 'up' ? 'text-emerald-300' : f === 'down' ? 'text-red-300' : 'text-zinc-300')}>
               {r.quote && r.quote.ltp > 0 ? fmtPrice(r.quote.ltp) : DASH}

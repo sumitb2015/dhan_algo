@@ -135,7 +135,7 @@ export default function TopIndices({ className }: { className?: string }) {
         const f = flash[r.key];
         return (
           <tr key={r.key} className="border-b border-zinc-800/60 last:border-0 hover:bg-zinc-800/30">
-            <TD><span className="text-zinc-200 font-semibold">{r.label}</span></TD>
+            <TD><span className="text-zinc-200 font-semibold whitespace-nowrap">{r.label}</span></TD>
             <TD right className={cn('tabular-nums transition-colors',
               f === 'up' ? 'text-emerald-300' : f === 'down' ? 'text-red-300' : 'text-zinc-300')}>
               {r.quote && r.quote.ltp > 0 ? fmtPrice(r.quote.ltp) : DASH}

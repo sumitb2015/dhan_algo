@@ -94,8 +94,8 @@ export function TickerPanel({
   const warn = status === 'WARN';
   const bad = status === 'STALE' || status === 'ERROR';
   return (
-    <div className={cn('bg-zinc-900/60 border border-zinc-800 rounded-2xl overflow-hidden', className)}>
-      <div className="flex items-center justify-between gap-2 px-3 py-2 border-b border-zinc-800 bg-zinc-900/40">
+    <div className={cn('bg-zinc-900/60 border border-zinc-800 rounded-2xl overflow-hidden flex flex-col h-full', className)}>
+      <div className="flex items-center justify-between gap-2 px-3 py-2 border-b border-zinc-800 bg-zinc-900/40 shrink-0">
         <span className="text-xs font-bold text-zinc-300 uppercase tracking-wider whitespace-nowrap">{title}</span>
         <div className="flex items-center gap-1.5 shrink-0" title={statusTitle}>
           <span className={cn('w-2 h-2 rounded-full',
@@ -109,10 +109,12 @@ export function TickerPanel({
           </span>
         </div>
       </div>
-      <table className={cn('w-full border-collapse', dimBody && 'opacity-40')}>
-        <thead>{head}</thead>
-        <tbody>{children}</tbody>
-      </table>
+      <div className="flex-1 overflow-x-auto">
+        <table className={cn('w-full border-collapse', dimBody && 'opacity-40')}>
+          <thead>{head}</thead>
+          <tbody>{children}</tbody>
+        </table>
+      </div>
     </div>
   );
 }
