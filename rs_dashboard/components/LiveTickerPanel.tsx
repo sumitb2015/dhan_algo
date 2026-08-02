@@ -34,7 +34,7 @@ export function TH({ children, right, className, sortDir, onClick }: {
     <th
       onClick={onClick}
       aria-sort={sortDir === 'asc' ? 'ascending' : sortDir === 'desc' ? 'descending' : undefined}
-      className={cn('py-1.5 px-2 text-xs font-bold text-white bg-zinc-800 uppercase tracking-wide whitespace-nowrap',
+      className={cn('py-1.5 px-1.5 text-xs font-bold text-white bg-zinc-800 uppercase tracking-wide whitespace-nowrap',
         right ? 'text-right' : 'text-left',
         sortable && 'cursor-pointer select-none hover:bg-zinc-700', className)}>
       <span className={cn('inline-flex items-center gap-0.5', right && 'flex-row-reverse')}>
@@ -50,7 +50,7 @@ export function TH({ children, right, className, sortDir, onClick }: {
 }
 
 export function TD({ children, right, className }: { children?: React.ReactNode; right?: boolean; className?: string }) {
-  return <td className={cn('py-1 px-2 text-[12px] font-mono', right ? 'text-right' : 'text-left', className)}>{children}</td>;
+  return <td className={cn('py-1 px-1.5 text-[12px] font-mono whitespace-nowrap', right ? 'text-right' : 'text-left', className)}>{children}</td>;
 }
 
 export function PctPill({ v }: { v: number | null }) {
