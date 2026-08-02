@@ -35,8 +35,8 @@ CLI args:
   --exit-buffer POINTS    Points above VWAP that trigger exit (default: 10)
   --max-premium-diff PCT  Max CE/PE premium difference % (default: 15)
   --vwap-warmup-bars N    Min completed 1-min bars before VWAP is trusted (default: 10)
-  --target-profit INR     Global profit target (default: 4000)
-  --stop-loss INR         Global stop loss (default: 4000)
+  --target-profit INR     Global profit target (default: 25%)
+  --stop-loss INR         Global stop loss (default: 25%)
   --max-loss-per-trade INR  Hard stop-loss per cycle, independent of VWAP (default: 1500, 0=disabled)
   --max-trades-per-day N    Max entries per session (default: 15, 0=unlimited)
   --cooldown-seconds N      Pause entries for N seconds after a losing cycle (default: 90)
@@ -931,12 +931,12 @@ Examples:
                         help="Max CE/PE premium difference %% for entry (default: 15)")
     parser.add_argument("--vwap-warmup-bars", type=int, default=10, metavar="N",
                         help="Min completed 1-min bars before VWAP is trusted (default: 10 ≈ 10 min)")
-    parser.add_argument("--target-profit", type=str, default="4000", metavar="INR",
+    parser.add_argument("--target-profit", type=str, default="25%", metavar="INR",
                         help="Global profit target in INR, or a percentage of entry premium collected "
-                             "e.g. '20%%' (default: 4000)")
-    parser.add_argument("--stop-loss", type=str, default="4000", metavar="INR",
+                             "e.g. '25%%' (default: 25%%)")
+    parser.add_argument("--stop-loss", type=str, default="25%", metavar="INR",
                         help="Global stop loss in INR, or a percentage of entry premium collected "
-                             "e.g. '20%%' (default: 4000)")
+                             "e.g. '25%%' (default: 25%%)")
     parser.add_argument("--max-loss-per-trade", type=float, default=1500.0, metavar="INR",
                         help="Hard stop-loss per cycle, independent of VWAP (default: 1500, 0=disabled)")
     parser.add_argument("--max-trades-per-day", type=int, default=15, metavar="N",

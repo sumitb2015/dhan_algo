@@ -787,12 +787,12 @@ Examples:
                         help="Market start monitoring time (HH:MM IST, default: 09:20)")
 
     # Risk targets
-    parser.add_argument("--target-profit", type=str, default="4000", metavar="AMT",
+    parser.add_argument("--target-profit", type=str, default="25%", metavar="AMT",
                         help="Global profit target in INR, or a percentage of entry premium collected "
-                             "e.g. '20%%' (default: 4000)")
-    parser.add_argument("--stop-loss", type=str, default="4000", metavar="AMT",
+                             "e.g. '25%%' (default: 25%%)")
+    parser.add_argument("--stop-loss", type=str, default="25%", metavar="AMT",
                         help="Global stop loss in INR, or a percentage of entry premium collected "
-                             "e.g. '20%%' (default: 4000)")
+                             "e.g. '25%%' (default: 25%%)")
 
     # Entry criteria
     parser.add_argument("--entry-balance-threshold", type=float, default=15.0, metavar="PCT",

@@ -24,7 +24,8 @@ def floor_to_50(val):
 def ceil_to_50(val):
     return math.ceil(float(val) / 50.0) * 50.0
 
-def run_backtest(start_date="2023-01-01", end_date="2026-06-30", roll_buffer=35.0,
+def run_backtest(start_date="2023-01-01", end_date="2026-06-30", roll_type="points",
+                 roll_buffer=35.0, roll_trigger_pct=0.4,
                  max_rolls=5, profit_target=4000.0, stop_loss=4000.0, lot_size=65,
                  entry_time="09:20", eod_time="15:15", slippage_pct=0.001):
     
@@ -93,8 +94,13 @@ def run_backtest(start_date="2023-01-01", end_date="2026-06-30", roll_buffer=35.
         pe_entry_price *= (1.0 - slippage_pct)
 
         current_atm = initial_atm
-        upper_bound = current_atm + roll_buffer
-        lower_bound = current_atm - roll_buffer
+        ref_spot = spot_at_entry
+        if roll_type == "percentage":
+            upper_bound = ref_spot * (1.0 + roll_trigger_pct / 100.0)
+            lower_bound = ref_spot * (1.0 - roll_trigger_pct / 100.0)
+        else:
+            upper_bound = current_atm + roll_buffer
+            lower_bound = current_atm - roll_buffer
 
         active_ce_entry = ce_entry_price
         active_pe_entry = pe_entry_price
@@ -118,16 +124,14 @@ def run_backtest(start_date="2023-01-01", end_date="2026-06-30", roll_buffer=35.
             unrealized_pnl = ((active_ce_entry - ce_curr_price) + (active_pe_entry - pe_curr_price)) * lot_size
             total_pnl = realized_pnl + unrealized_pnl
 
-            # Target Check
-            if profit_target > 0 and total_pnl >= profit_target:
-                final_pnl = profit_target
-                exit_reason = "Profit Target"
+            # Target / Stop Loss Checks
+            if profit_target and total_pnl >= profit_target:
+                final_pnl = total_pnl
+                exit_reason = "Target Hit"
                 break
-
-            # Stop Loss Check
-            if stop_loss > 0 and total_pnl <= -stop_loss:
-                final_pnl = -stop_loss
-                exit_reason = "Stop Loss"
+            if stop_loss and total_pnl <= -abs(stop_loss):
+                final_pnl = -abs(stop_loss)
+                exit_reason = "Stop Loss Hit"
                 break
 
             # EOD Check
@@ -154,8 +158,13 @@ def run_backtest(start_date="2023-01-01", end_date="2026-06-30", roll_buffer=35.
                         active_pe_entry = new_pe_price * (1.0 - slippage_pct)
 
                         current_atm = new_atm
-                        upper_bound = current_atm + roll_buffer
-                        lower_bound = current_atm - roll_buffer
+                        ref_spot = current_spot
+                        if roll_type == "percentage":
+                            upper_bound = ref_spot * (1.0 + roll_trigger_pct / 100.0)
+                            lower_bound = ref_spot * (1.0 - roll_trigger_pct / 100.0)
+                        else:
+                            upper_bound = current_atm + roll_buffer
+                            lower_bound = current_atm - roll_buffer
                         rolls_today += 1
                     else:
                         # Couldn't get quote for new ATM, abort rolls
@@ -214,7 +223,9 @@ def main():
     parser = argparse.ArgumentParser(description="Backtest NIFTY Rolling Short Straddle Strategy")
     parser.add_argument("--start-date", type=str, default="2023-01-01")
     parser.add_argument("--end-date", type=str, default="2026-06-30")
+    parser.add_argument("--roll-type", type=str, choices=["points", "percentage"], default="points", help="Rolling trigger variant: 'points' or 'percentage'")
     parser.add_argument("--buffer", type=float, default=35.0, help="Roll buffer in points")
+    parser.add_argument("--roll-trigger-pct", type=float, default=0.4, help="Percentage movement trigger for rolling ATM straddle (e.g. 0.4)")
     parser.add_argument("--max-rolls", type=int, default=5)
     parser.add_argument("--profit-target", type=float, default=4000.0)
     parser.add_argument("--stop-loss", type=float, default=4000.0)
@@ -235,6 +246,7 @@ def main():
             summary, _ = run_backtest(
                 start_date=args.start_date,
                 end_date=args.end_date,
+                roll_type="points",
                 roll_buffer=buf,
                 max_rolls=0 if buf == 999.0 else args.max_rolls,
                 profit_target=args.profit_target,
@@ -256,7 +268,9 @@ def main():
         summary, df_res = run_backtest(
             start_date=args.start_date,
             end_date=args.end_date,
+            roll_type=args.roll_type,
             roll_buffer=args.buffer,
+            roll_trigger_pct=args.roll_trigger_pct,
             max_rolls=args.max_rolls,
             profit_target=args.profit_target,
             stop_loss=args.stop_loss

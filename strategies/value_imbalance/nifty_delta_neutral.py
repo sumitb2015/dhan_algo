@@ -738,13 +738,13 @@ Examples:
                              "to min(CE,PE)/max(CE,PE) dropping below (100 - threshold)%% "
                              "(default: 50.0, i.e. min/max < 50%%)")
 
-    parser.add_argument("--target-profit", type=str, default="4000", metavar="AMT",
+    parser.add_argument("--target-profit", type=str, default="25%", metavar="AMT",
                         help="Global profit target in INR, or a percentage of entry premium collected "
-                             "e.g. '20%%' (default: 4000)")
+                             "e.g. '25%%' (default: 25%%)")
 
-    parser.add_argument("--stop-loss", type=str, default="4000", metavar="AMT",
+    parser.add_argument("--stop-loss", type=str, default="25%", metavar="AMT",
                         help="Global stop loss in INR, or a percentage of entry premium collected "
-                             "e.g. '20%%' (default: 4000)")
+                             "e.g. '25%%' (default: 25%%)")
 
     parser.add_argument("--target-delta", type=float, default=0.5, metavar="D",
                         help="Target absolute delta for both CE and PE strike selection (default: 0.5)")

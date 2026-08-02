@@ -886,12 +886,12 @@ Examples:
                              "Falls back to distance mode if broker Greeks are unavailable.")
 
     # Risk targets
-    parser.add_argument("--target-profit", type=str, default="4000", metavar="AMT",
+    parser.add_argument("--target-profit", type=str, default="25%", metavar="AMT",
                         help="Global profit target in INR, or a percentage of entry premium collected "
-                             "e.g. '20%%' (default: 4000)")
-    parser.add_argument("--stop-loss", type=str, default="4000", metavar="AMT",
+                             "e.g. '25%%' (default: 25%%)")
+    parser.add_argument("--stop-loss", type=str, default="25%", metavar="AMT",
                         help="Global stop loss in INR, or a percentage of entry premium collected "
-                             "e.g. '20%%' (default: 4000)")
+                             "e.g. '25%%' (default: 25%%)")
 
     # Customizable Start Time
     parser.add_argument("--start-time", type=str, default="09:20", metavar="TIME",

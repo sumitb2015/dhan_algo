@@ -51,7 +51,7 @@ interface StrategyState {
   require_short_buildup?: boolean;
   min_price_drop_pct?: number; min_oi_rise_pct?: number;
   // Rolling Short Straddle
-  roll_buffer?: number; max_rolls?: number; roll_count?: number;
+  roll_type?: 'points' | 'percentage'; roll_buffer?: number; roll_trigger_pct?: number; ref_spot?: number; max_rolls?: number; roll_count?: number;
   current_atm?: number | null; upper_bound?: number | null; lower_bound?: number | null;
 }
 
@@ -74,8 +74,8 @@ function StrategyRowWide({ meta, state, onRefresh, instanceId, onAddInstance, on
   // --- Config state (mirrors StrategyCard) ---
   const [isLive, setIsLive] = useState(false);
   const [lots, setLots] = useState(1);
-  const [profitTarget, setProfitTarget] = useState('4000');
-  const [stopLoss, setStopLoss] = useState('4000');
+  const [profitTarget, setProfitTarget] = useState('25%');
+  const [stopLoss, setStopLoss] = useState('25%');
   const [startTime, setStartTime] = useState('09:20');
   const [maxLots, setMaxLots] = useState(4);
   const [mode, setMode] = useState('winner_roll_atm');
@@ -109,9 +109,12 @@ function StrategyRowWide({ meta, state, onRefresh, instanceId, onAddInstance, on
   const [vixStInterval, setVixStInterval] = useState('3');
   const [atmShiftBuffer, setAtmShiftBuffer] = useState(5.0);
   // Rolling Short Straddle
+  const [rollType, setRollType] = useState<'points' | 'percentage'>('points');
   const [rollBuffer, setRollBuffer] = useState(35.0);
+  const [rollTriggerPct, setRollTriggerPct] = useState(0.4);
   const [maxRolls, setMaxRolls] = useState(5);
   const [rollCooldown, setRollCooldown] = useState(60);
+  const [entryBalanceThresholdRS, setEntryBalanceThresholdRS] = useState(15.0);
   const [pcrThreshold, setPcrThreshold] = useState(1.5);
   const [exitPcrChange, setExitPcrChange] = useState(30);
   const [pollInterval, setPollInterval] = useState(60);
@@ -137,6 +140,8 @@ function StrategyRowWide({ meta, state, onRefresh, instanceId, onAddInstance, on
   const [crudeoilStartTime, setCrudeoilStartTime] = useState('09:00');
   const [crudeoilEodTime, setCrudeoilEodTime] = useState('23:30');
   const [crudeoilUseVwap, setCrudeoilUseVwap] = useState(false);
+  const [crudeoilTargetInr, setCrudeoilTargetInr] = useState(3000);
+  const [crudeoilStopInr, setCrudeoilStopInr] = useState(3000);
   // CrudeOil Mini Renko SAR (shares crudeoilInterval/StartTime/EodTime above)
   const [renkoQty, setRenkoQty] = useState(10);
   const [renkoBoxSize, setRenkoBoxSize] = useState(5);
@@ -180,6 +185,11 @@ function StrategyRowWide({ meta, state, onRefresh, instanceId, onAddInstance, on
         // Renko SAR takes order quantity directly (barrels), not lots
         args.push('--qty', String(renkoQty));
         // and is a pure stop-and-reverse system with no daily P&L caps
+      } else if (meta.key === 'crudeoilm_supertrend') {
+        // Crude oil supertrend expects --target-profit / --stop-loss as plain floats (INR), not percentages
+        args.push('--lots', String(lots));
+        args.push('--target-profit', String(crudeoilTargetInr));
+        args.push('--stop-loss', String(crudeoilStopInr));
       } else {
         args.push('--lots', String(lots));
         args.push('--target-profit', profitTarget.trim());
@@ -297,9 +307,15 @@ function StrategyRowWide({ meta, state, onRefresh, instanceId, onAddInstance, on
         if (!exitOnSignalFlip) args.push('--no-exit-on-signal-flip');
         if (!exitOnOptionStFlip) args.push('--no-exit-on-option-st-flip');
       } else if (meta.key === 'nifty_rolling_straddle') {
-        args.push('--roll-buffer', String(rollBuffer));
+        args.push('--roll-type', rollType);
+        if (rollType === 'percentage') {
+          args.push('--roll-trigger-pct', String(rollTriggerPct));
+        } else {
+          args.push('--roll-buffer', String(rollBuffer));
+        }
         args.push('--max-rolls', String(maxRolls));
         args.push('--roll-cooldown', String(rollCooldown));
+        args.push('--entry-balance-threshold', String(entryBalanceThresholdRS));
         args.push('--start-time', startTime);
         args.push('--trail-start-rs', String(trailStartRs));
         args.push('--trail-gap-rs', String(trailGapRs));
@@ -392,7 +408,9 @@ function StrategyRowWide({ meta, state, onRefresh, instanceId, onAddInstance, on
             </div>
           </div>
           <div className="px-3 flex flex-col justify-center shrink-0">
-            <div className={lbl}>Roll Bounds (±{state.roll_buffer ?? 35}pt)</div>
+            <div className={lbl}>
+              Roll Bounds ({state.roll_type === 'percentage' ? `±${state.roll_trigger_pct ?? 0.4}%` : `±${state.roll_buffer ?? 35}pt`})
+            </div>
             <div className="font-mono font-bold text-xs text-amber-400">
               {state.lower_bound != null ? state.lower_bound.toFixed(0) : '—'} - {state.upper_bound != null ? state.upper_bound.toFixed(0) : '—'}
             </div>
@@ -791,12 +809,12 @@ function StrategyRowWide({ meta, state, onRefresh, instanceId, onAddInstance, on
           <>
             <div className={fieldCls}>
               <FieldLabel text="Target ₹" tip="Daily cumulative profit target in INR; strategy squares off and stops once reached." />
-              <Input type="number" value={profitTarget} onChange={e => setProfitTarget(e.target.value || '1000')} className={inputCls} style={{ width: 80 }} />
+              <Input type="number" value={crudeoilTargetInr} onChange={e => setCrudeoilTargetInr(parseInt(e.target.value) || 3000)} className={inputCls} style={{ width: 80 }} />
             </div>
 
             <div className={fieldCls}>
               <FieldLabel text="Stop Loss ₹" tip="Daily cumulative stop loss in INR; strategy squares off and stops once breached." />
-              <Input type="number" value={stopLoss} onChange={e => setStopLoss(e.target.value || '1000')} className={inputCls} style={{ width: 80 }} />
+              <Input type="number" value={crudeoilStopInr} onChange={e => setCrudeoilStopInr(parseInt(e.target.value) || 3000)} className={inputCls} style={{ width: 80 }} />
             </div>
           </>
         )}
@@ -804,13 +822,13 @@ function StrategyRowWide({ meta, state, onRefresh, instanceId, onAddInstance, on
         {meta.key !== 'crudeoilm_renko_sar' && meta.key !== 'crudeoilm_supertrend' && (
           <>
             <div className={fieldCls}>
-              <FieldLabel text="Target ₹" tip="Daily cumulative profit target in INR, or a percentage of entry premium collected e.g. '20%'; strategy squares off and stops once reached." />
-              <Input type="text" inputMode="decimal" value={profitTarget} onChange={e => setProfitTarget(e.target.value)} placeholder="4000 or 20%" className={inputCls} style={{ width: 80 }} />
+              <FieldLabel text="Target ₹" tip="Daily cumulative profit target in INR, or a percentage of entry premium collected e.g. '25%'; strategy squares off and stops once reached." />
+              <Input type="text" inputMode="decimal" value={profitTarget} onChange={e => setProfitTarget(e.target.value)} placeholder="25% or 4000" className={inputCls} style={{ width: 80 }} />
             </div>
 
             <div className={fieldCls}>
-              <FieldLabel text="Stop Loss ₹" tip="Daily cumulative stop loss in INR, or a percentage of entry premium collected e.g. '20%'; strategy squares off and stops once breached." />
-              <Input type="text" inputMode="decimal" value={stopLoss} onChange={e => setStopLoss(e.target.value)} placeholder="4000 or 20%" className={inputCls} style={{ width: 80 }} />
+              <FieldLabel text="Stop Loss ₹" tip="Daily cumulative stop loss in INR, or a percentage of entry premium collected e.g. '25%'; strategy squares off and stops once breached." />
+              <Input type="text" inputMode="decimal" value={stopLoss} onChange={e => setStopLoss(e.target.value)} placeholder="25% or 4000" className={inputCls} style={{ width: 80 }} />
             </div>
           </>
         )}
@@ -945,9 +963,26 @@ function StrategyRowWide({ meta, state, onRefresh, instanceId, onAddInstance, on
         {meta.key === 'nifty_rolling_straddle' && (
           <>
             <div className={fieldCls}>
-              <FieldLabel text="Roll Buffer (pts)" tip="Custom ATM shift buffer in points (e.g. 35.0 pts triggers ATM roll at ±35 pts from active ATM)." />
-              <Input type="number" step="1" value={rollBuffer} onChange={(e) => setRollBuffer(parseFloat(e.target.value) || 35.0)} className={inputCls} style={{ width: 72 }} />
+              <FieldLabel text="Roll Variant" tip="Select rolling trigger variant: Fixed Points Buffer (pts) or Rolling Trigger % (monitors spot move from reference spot)." />
+              <Select value={rollType} onValueChange={(v) => v && setRollType(v as 'points' | 'percentage')}>
+                <SelectTrigger className={inputCls} style={{ width: 150 }}><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="points">Fixed Points Buffer (pts)</SelectItem>
+                  <SelectItem value="percentage">Rolling Trigger (%)</SelectItem>
+                </SelectContent>
+              </Select>
             </div>
+            {rollType === 'percentage' ? (
+              <div className={fieldCls}>
+                <FieldLabel text="Roll Trigger (%)" tip="Percentage move from reference spot price to trigger an ATM roll (e.g. 0.4%)." />
+                <Input type="number" step="0.05" min={0.05} max={5.0} value={rollTriggerPct} onChange={(e) => setRollTriggerPct(parseFloat(e.target.value) || 0.4)} className={inputCls} style={{ width: 72 }} />
+              </div>
+            ) : (
+              <div className={fieldCls}>
+                <FieldLabel text="Roll Buffer (pts)" tip="Custom ATM shift buffer in points (e.g. 35.0 pts triggers ATM roll at ±35 pts from active ATM)." />
+                <Input type="number" step="1" value={rollBuffer} onChange={(e) => setRollBuffer(parseFloat(e.target.value) || 35.0)} className={inputCls} style={{ width: 72 }} />
+              </div>
+            )}
             <div className={fieldCls}>
               <FieldLabel text="Max Rolls / Day" tip="Maximum number of straddle rolls allowed per trading session." />
               <Input type="number" value={maxRolls} onChange={(e) => setMaxRolls(parseInt(e.target.value) || 5)} min={1} max={20} className={inputCls} style={{ width: 64 }} />
@@ -955,6 +990,10 @@ function StrategyRowWide({ meta, state, onRefresh, instanceId, onAddInstance, on
             <div className={fieldCls}>
               <FieldLabel text="Roll Cooldown (s)" tip="Minimum delay in seconds between consecutive straddle rolls to prevent whipsaws." />
               <Input type="number" value={rollCooldown} onChange={(e) => setRollCooldown(parseInt(e.target.value) || 60)} min={0} step={10} className={inputCls} style={{ width: 64 }} />
+            </div>
+            <div className={fieldCls}>
+              <FieldLabel text="Entry Balance (%)" tip="Maximum CE/PE premium difference % to allow entry. Strategy waits until premiums are within this threshold. Set 0 to disable." />
+              <Input type="number" step="0.5" min={0} max={50} value={entryBalanceThresholdRS} onChange={(e) => setEntryBalanceThresholdRS(parseFloat(e.target.value) || 0)} className={inputCls} style={{ width: 64 }} />
             </div>
           </>
         )}

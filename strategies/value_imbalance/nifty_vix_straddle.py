@@ -38,8 +38,8 @@ CLI args:
   --vwap-warmup-bars N       Min completed 1-min bars before VWAP is trusted (default: 10)
   --atm-shift-buffer PTS     Points spot must cross past a strike midpoint before re-centering
                              ATM, to prevent flip-flopping when spot hovers near a midpoint (default: 5)
-  --target-profit INR        Global profit target (default: 4000)
-  --stop-loss INR            Global stop loss (default: 4000)
+  --target-profit INR        Global profit target (default: 25%)
+  --stop-loss INR            Global stop loss (default: 25%)
   --max-loss-per-trade INR   Hard stop-loss per cycle, independent of VWAP (default: 1500, 0=disabled)
   --max-trades-per-day N     Max entries per session (default: 15, 0=unlimited)
   --cooldown-seconds N       Pause entries for N seconds after a losing cycle (default: 90)
@@ -1168,12 +1168,12 @@ Examples:
                         help="Points spot must cross past a strike midpoint before re-centering "
                              "ATM, to prevent rapid flip-flopping when spot hovers near a midpoint "
                              "(default: 5)")
-    parser.add_argument("--target-profit", type=str, default="4000", metavar="INR",
+    parser.add_argument("--target-profit", type=str, default="25%", metavar="INR",
                         help="Global profit target in INR, or a percentage of entry premium collected "
-                             "e.g. '20%%' (default: 4000)")
-    parser.add_argument("--stop-loss", type=str, default="4000", metavar="INR",
+                             "e.g. '25%%' (default: 25%%)")
+    parser.add_argument("--stop-loss", type=str, default="25%", metavar="INR",
                         help="Global stop loss in INR, or a percentage of entry premium collected "
-                             "e.g. '20%%' (default: 4000)")
+                             "e.g. '25%%' (default: 25%%)")
     parser.add_argument("--max-loss-per-trade", type=float, default=1500.0, metavar="INR",
                         help="Hard stop-loss per cycle, independent of VWAP/Supertrend (default: 1500, 0=disabled)")
     parser.add_argument("--max-trades-per-day", type=int, default=15, metavar="N",

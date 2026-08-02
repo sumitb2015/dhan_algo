@@ -728,3 +728,47 @@ venv\Scripts\python.exe strategies/value_imbalance/nifty_vix_straddle.py --live 
 
 ---
 
+## 10. Nifty Rolling Short Straddle (`nifty_rolling_straddle.py`)
+
+An intraday short ATM straddle strategy that continuously monitors NIFTY spot price movements and rolls the entire straddle to the new ATM strike whenever spot breaches the roll trigger boundary.
+
+### A. Rolling Trigger Variants
+
+The strategy supports two rolling trigger variants selectable via CLI or the dashboard dropdown (`rs_dashboard`):
+
+1. **Fixed Points Buffer (`--roll-type points`)** *(Default)*:
+   - Rolls when NIFTY spot price moves by `±roll_buffer` points (default: `35.0` pts) from the active ATM strike.
+   - Bounds: `upper_bound = atm_strike + roll_buffer`, `lower_bound = atm_strike - roll_buffer`.
+
+2. **Rolling Trigger % (`--roll-type percentage`)** *(OpenAlgo Intraday Rolling Straddle Standard)*:
+   - Monitors NIFTY spot price and rolls to a new ATM straddle on every `roll_trigger_pct`% move (default: `0.4`%, configurable) from the reference spot price at entry or last roll.
+   - Bounds: `upper_bound = ref_spot × (1 + roll_trigger_pct / 100)`, `lower_bound = ref_spot × (1 - roll_trigger_pct / 100)`.
+
+### B. CLI Parameter Reference
+
+| Flag | Default | Description |
+|---|---|---|
+| `--live` | off (dry run) | Enable real order placement |
+| `--lots N` | `1` | Initial lot size per leg |
+| `--roll-type TYPE` | `points` | Rolling trigger variant: `points` (fixed buffer pts) or `percentage` (rolling trigger %) |
+| `--roll-buffer PTS` | `35.0` | Custom ATM shift buffer in points for `points` variant |
+| `--roll-trigger-pct PCT` | `0.4` | Percentage movement trigger for `percentage` variant (e.g. `0.4` for 0.4%) |
+| `--max-rolls N` | `5` | Maximum number of straddle rolls allowed per session |
+| `--roll-cooldown SEC` | `60` | Minimum cooldown delay in seconds between consecutive rolls |
+| `--profit-target VAL` | `4000` | Target profit in INR or % (e.g. `4000` or `50%`) |
+| `--stop-loss VAL` | `4000` | Stop loss in INR or % (e.g. `4000` or `50%`) |
+| `--trail-start-rs INR` | `500` | MTM profit level to activate trailing stop loss |
+| `--trail-gap-rs INR` | `300` | Trailing stop loss gap in INR |
+
+### C. Execution Examples
+
+```powershell
+# Dry run — Rolling Trigger % variant (0.4% move trigger)
+venv\Scripts\python.exe strategies/value_imbalance/nifty_rolling_straddle.py --roll-type percentage --roll-trigger-pct 0.4
+
+# Dry run — Fixed Points Buffer variant (35 pt trigger)
+venv\Scripts\python.exe strategies/value_imbalance/nifty_rolling_straddle.py --roll-type points --roll-buffer 35
+
+# Live trading — Rolling Trigger % variant with 2 lots and custom trailing SL
+venv\Scripts\python.exe strategies/value_imbalance/nifty_rolling_straddle.py --live --lots 2 --roll-type percentage --roll-trigger-pct 0.4 --trail-start-rs 1000 --trail-gap-rs 500
+```

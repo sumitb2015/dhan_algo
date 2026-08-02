@@ -40,12 +40,15 @@ class RollingStraddleStrategy:
     def __init__(self, dry_run=True, initial_lots=1, roll_buffer=35.0, max_rolls=5,
                  roll_cooldown=60, profit_target=4000.0, profit_target_is_pct=False,
                  stop_loss=4000.0, stop_loss_is_pct=False, start_time="09:20", eod_time="15:15",
-                 trail_start_rs=500.0, trail_gap_rs=300.0,
+                 trail_start_rs=500.0, trail_gap_rs=300.0, roll_type="points",
+                 roll_trigger_pct=0.4, entry_balance_threshold=15.0,
                  state_key="nifty_rolling_straddle"):
         self.state_key = state_key
         self.dry_run = dry_run
         self.initial_lots = initial_lots
         self.roll_buffer = float(roll_buffer)
+        self.roll_type = roll_type.lower() if isinstance(roll_type, str) else "points"
+        self.roll_trigger_pct = float(roll_trigger_pct)
         self.max_rolls = int(max_rolls)
         self.roll_cooldown = int(roll_cooldown)
 
@@ -60,6 +63,7 @@ class RollingStraddleStrategy:
         self.eod_time = eod_time
         self.trail_start_rs = float(trail_start_rs)
         self.trail_gap_rs = float(trail_gap_rs)
+        self.entry_balance_threshold = float(entry_balance_threshold)
 
         self.dhan = get_dhan_client()
         if not self.dhan:
@@ -79,7 +83,8 @@ class RollingStraddleStrategy:
 
         self.nifty_lot_size = self.helper.get_lot_size("NIFTY")
 
-        # Rolling Straddle State
+        # Rolling Straddle State (roll_type / roll_trigger_pct already set above)
+        self.ref_spot = 0.0
         self.current_atm_strike = None
         self.upper_bound = None
         self.lower_bound = None
@@ -136,7 +141,11 @@ class RollingStraddleStrategy:
             "status": status,
             "dry_run": self.dry_run,
             "lots": self.initial_lots,
+            "roll_type": self.roll_type,
             "roll_buffer": self.roll_buffer,
+            "roll_trigger_pct": self.roll_trigger_pct,
+            "entry_balance_threshold": self.entry_balance_threshold,
+            "ref_spot": self.ref_spot,
             "max_rolls": self.max_rolls,
             "roll_count": self.roll_count,
             "current_atm": self.current_atm_strike,
@@ -211,7 +220,7 @@ class RollingStraddleStrategy:
             final_pnl = self._calculate_pnl(ce_ltp, pe_ltp)
             self.realized_pnl = final_pnl
 
-    def enter_straddle(self, atm_strike):
+    def enter_straddle(self, atm_strike, spot=0.0):
         """Finds and sells ATM CE and PE options at the specified strike."""
         logger.info(f"--- ENTERING SHORT STRADDLE AT ATM STRIKE {atm_strike} ---")
         
@@ -228,8 +237,14 @@ class RollingStraddleStrategy:
             return False
 
         self.current_atm_strike = atm_strike
-        self.upper_bound = atm_strike + self.roll_buffer
-        self.lower_bound = atm_strike - self.roll_buffer
+        self.ref_spot = float(spot) if spot > 0 else float(atm_strike)
+        if self.roll_type == "percentage":
+            self.upper_bound = round(self.ref_spot * (1.0 + self.roll_trigger_pct / 100.0), 2)
+            self.lower_bound = round(self.ref_spot * (1.0 - self.roll_trigger_pct / 100.0), 2)
+        else:
+            self.upper_bound = atm_strike + self.roll_buffer
+            self.lower_bound = atm_strike - self.roll_buffer
+
         self.ce_strike = atm_strike
         self.pe_strike = atm_strike
         self.ce_id = ce_id
@@ -242,6 +257,46 @@ class RollingStraddleStrategy:
         self.pe_lots = self.initial_lots
 
         qty = self.initial_lots * self.nifty_lot_size
+
+        # Subscribe to WebSocket before balance wait so live ticks arrive
+        self.helper.start_websocket([
+            ("NSE_FNO", str(self.ce_id), 15),
+            ("NSE_FNO", str(self.pe_id), 15)
+        ])
+
+        # --- Entry Balance Wait ---
+        if self.entry_balance_threshold > 0:
+            logger.info(f"Waiting for CE/PE premium to balance (diff < {self.entry_balance_threshold:.1f}%)...")
+            while True:
+                ce_ltp_w, pe_ltp_w, spot_w = self.fetch_ltps()
+
+                if check_shutdown_trigger(self.state_key):
+                    logger.info("UI Shutdown Request during balance wait. Exiting.")
+                    self.save_state(spot_w or spot, ce_ltp_w, pe_ltp_w, self.realized_pnl, status="STOPPED")
+                    return False
+
+                if datetime.now().strftime("%H:%M") >= self.eod_time:
+                    logger.info(f"EOD time reached during balance wait. Skipping entry.")
+                    return False
+
+                # ATM drift: if spot has moved to a different 50-pt ATM, abort and let caller re-trigger
+                if spot_w > 0:
+                    new_atm = round(spot_w / 50.0) * 50
+                    if new_atm != atm_strike:
+                        logger.info(f"ATM drifted from {atm_strike} to {new_atm} during balance wait. Aborting entry.")
+                        return False
+
+                if ce_ltp_w > 0 and pe_ltp_w > 0:
+                    max_prem = max(ce_ltp_w, pe_ltp_w)
+                    diff_pct = abs(ce_ltp_w - pe_ltp_w) / max_prem * 100.0
+                    logger.info(f"Balance Wait | CE: {ce_ltp_w:.2f} | PE: {pe_ltp_w:.2f} | Diff: {diff_pct:.1f}% (Target: <{self.entry_balance_threshold:.1f}%)")
+                    if diff_pct < self.entry_balance_threshold:
+                        logger.info(f"Balanced! Diff {diff_pct:.1f}% < {self.entry_balance_threshold:.1f}%. Proceeding with entry.")
+                        # Use live balanced prices as the anchor
+                        ce_price = ce_ltp_w
+                        pe_price = pe_ltp_w
+                        break
+                time.sleep(2)
 
         if self.dry_run:
             self.ce_avg_price = ce_price
@@ -257,26 +312,23 @@ class RollingStraddleStrategy:
             pe_order_id = self.helper.sell(str(pe_id), qty)
             self.pe_avg_price = self.helper.wait_for_fill(pe_order_id, timeout=5) or pe_price
 
-        # Register positions with WebSocket live feed
-        self.helper.start_websocket([
-            ("NSE_FNO", str(self.ce_id), 15),
-            ("NSE_FNO", str(self.pe_id), 15)
-        ])
-
         combined_premium = self.ce_avg_price + self.pe_avg_price
-        logger.info(f"Straddle Entered! ATM: {atm_strike} | Upper Bound: {self.upper_bound:.1f} | Lower Bound: {self.lower_bound:.1f}")
+        if self.roll_type == "percentage":
+            logger.info(f"Straddle Entered! ATM: {atm_strike} | Ref Spot: {self.ref_spot:.2f} | Upper Bound: {self.upper_bound:.2f} (+{self.roll_trigger_pct}%) | Lower Bound: {self.lower_bound:.2f} (-{self.roll_trigger_pct}%)")
+        else:
+            logger.info(f"Straddle Entered! ATM: {atm_strike} | Upper Bound: {self.upper_bound:.1f} | Lower Bound: {self.lower_bound:.1f}")
         logger.info(f"CE Avg: {self.ce_avg_price:.2f} | PE Avg: {self.pe_avg_price:.2f} | Total Premium: {combined_premium:.2f} pts")
 
         # Resolve percentage targets if configured as percentage
         if self.target_is_pct and self.target_pct:
             total_premium_inr = combined_premium * qty
             self.profit_target = total_premium_inr * (self.target_pct / 100.0)
-            logger.info(f"Resolved % Profit Target ({self.target_pct}% of ₹{total_premium_inr:.0f}) = +₹{self.profit_target:.0f}")
+            logger.info(f"Resolved % Profit Target ({self.target_pct}% of Rs.{total_premium_inr:.0f}) = +Rs.{self.profit_target:.0f}")
 
         if self.stop_is_pct and self.stop_pct:
             total_premium_inr = combined_premium * qty
             self.stop_loss = -abs(total_premium_inr * (self.stop_pct / 100.0))
-            logger.info(f"Resolved % Stop Loss ({self.stop_pct}% of ₹{total_premium_inr:.0f}) = -₹{abs(self.stop_loss):.0f}")
+            logger.info(f"Resolved % Stop Loss ({self.stop_pct}% of Rs.{total_premium_inr:.0f}) = -Rs.{abs(self.stop_loss):.0f}")
 
         return True
 
@@ -308,10 +360,10 @@ class RollingStraddleStrategy:
                 if qty_to_buy > 0:
                     self.helper.buy(str(self.pe_id), qty_to_buy)
 
-        logger.info(f"Closed prev legs @ CE: {ce_ltp:.2f}, PE: {pe_ltp:.2f} | Realized PnL so far: ₹{self.realized_pnl:+.0f}")
+        logger.info(f"Closed prev legs @ CE: {ce_ltp:.2f}, PE: {pe_ltp:.2f} | Realized PnL so far: Rs.{self.realized_pnl:+.0f}")
 
         # Enter new ATM straddle
-        success = self.enter_straddle(new_atm)
+        success = self.enter_straddle(new_atm, spot=nifty_spot)
         if success:
             self.roll_count += 1
             self.last_roll_time = time.time()
@@ -319,13 +371,14 @@ class RollingStraddleStrategy:
         return success
 
     def run(self):
+        variant_info = f"Rolling Trigger ({self.roll_trigger_pct}%)" if self.roll_type == "percentage" else f"Fixed Buffer ({self.roll_buffer} pts)"
         logger.info("=== STARTING ROLLING SHORT STRADDLE STRATEGY ===")
-        logger.info(f"Config: Mode={'DRY-RUN' if self.dry_run else 'LIVE'} | Lots={self.initial_lots} | Roll Buffer={self.roll_buffer} pts | Max Rolls={self.max_rolls} | Cooldown={self.roll_cooldown}s")
-        logger.info(f"Risk: Target={self.profit_target} | StopLoss={self.stop_loss} | TrailStart=₹{self.trail_start_rs} | TrailGap=₹{self.trail_gap_rs}")
+        logger.info(f"Config: Mode={'DRY-RUN' if self.dry_run else 'LIVE'} | Lots={self.initial_lots} | Variant={variant_info} | Max Rolls={self.max_rolls} | Cooldown={self.roll_cooldown}s")
+        logger.info(f"Risk: Target={self.profit_target} | StopLoss={self.stop_loss} | TrailStart=Rs.{self.trail_start_rs} | TrailGap=Rs.{self.trail_gap_rs}")
 
         # Wait for start time
         while True:
-            exit_if_market_closed()
+            exit_if_market_closed(self.helper)
             if check_shutdown_trigger(self.state_key):
                 logger.info("UI Shutdown Request before entry. Exiting.")
                 self.save_state(0, 0, 0, 0, status="STOPPED")
@@ -349,14 +402,14 @@ class RollingStraddleStrategy:
                 return
 
         initial_atm = round(spot / 50.0) * 50
-        if not self.enter_straddle(initial_atm):
+        if not self.enter_straddle(initial_atm, spot=spot):
             logger.critical("Initial straddle entry failed. Exiting.")
             self.save_state(spot, 0, 0, 0, status="STOPPED")
             return
 
         # Main Monitoring Loop
         while True:
-            exit_if_market_closed()
+            exit_if_market_closed(self.helper)
             if check_shutdown_trigger(self.state_key):
                 logger.info("UI Shutdown Request received during strategy run. Liquidation initiated.")
                 self.exit_all_positions("UI Graceful Stop")
@@ -372,7 +425,7 @@ class RollingStraddleStrategy:
             self.save_state(spot, ce_ltp, pe_ltp, total_pnl, status="RUNNING")
 
             now_str = datetime.now().strftime("%H:%M")
-            logger.info(f"NIFTY: {spot:.2f} | Straddle {self.current_atm_strike} [Bounds: {self.lower_bound:.1f} - {self.upper_bound:.1f}] | CE: {ce_ltp:.2f} | PE: {pe_ltp:.2f} | Rolls: {self.roll_count}/{self.max_rolls} | PnL: ₹{total_pnl:+.0f}")
+            logger.info(f"NIFTY: {spot:.2f} | Straddle {self.current_atm_strike} [Bounds: {self.lower_bound:.1f} - {self.upper_bound:.1f}] | CE: {ce_ltp:.2f} | PE: {pe_ltp:.2f} | Rolls: {self.roll_count}/{self.max_rolls} | PnL: Rs.{total_pnl:+.0f}")
 
             # 1. EOD Exit Check
             if now_str >= self.eod_time:
@@ -383,13 +436,13 @@ class RollingStraddleStrategy:
 
             # 2. Profit Target Check
             if self.profit_target and total_pnl >= self.profit_target:
-                self.exit_all_positions(f"Target Hit (+₹{total_pnl:.0f} >= ₹{self.profit_target:.0f})")
+                self.exit_all_positions(f"Target Hit (+Rs.{total_pnl:.0f} >= Rs.{self.profit_target:.0f})")
                 self.save_state(spot, ce_ltp, pe_ltp, total_pnl, status="STOPPED")
                 return
 
             # 3. Stop Loss Check
             if self.stop_loss and total_pnl <= self.stop_loss:
-                self.exit_all_positions(f"Stop Loss Hit (₹{total_pnl:.0f} <= ₹{self.stop_loss:.0f})")
+                self.exit_all_positions(f"Stop Loss Hit (Rs.{total_pnl:.0f} <= Rs.{self.stop_loss:.0f})")
                 self.save_state(spot, ce_ltp, pe_ltp, total_pnl, status="STOPPED")
                 return
 
@@ -399,11 +452,11 @@ class RollingStraddleStrategy:
             if self.trail_start_rs > 0 and self.best_pnl >= self.trail_start_rs:
                 if not self.trail_active:
                     self.trail_active = True
-                    logger.info(f"Trailing SL Activated at Profit ₹{total_pnl:.0f}! Trail gap: ₹{self.trail_gap_rs:.0f}")
+                    logger.info(f"Trailing SL Activated at Profit Rs.{total_pnl:.0f}! Trail gap: Rs.{self.trail_gap_rs:.0f}")
 
                 trail_exit_threshold = self.best_pnl - self.trail_gap_rs
                 if total_pnl <= trail_exit_threshold:
-                    self.exit_all_positions(f"Trailing Stop Loss Hit (PnL ₹{total_pnl:.0f} <= Trail Exit ₹{trail_exit_threshold:.0f})")
+                    self.exit_all_positions(f"Trailing Stop Loss Hit (PnL Rs.{total_pnl:.0f} <= Trail Exit Rs.{trail_exit_threshold:.0f})")
                     self.save_state(spot, ce_ltp, pe_ltp, total_pnl, status="STOPPED")
                     return
 
@@ -424,21 +477,25 @@ def main():
     parser.add_argument("--dry-run", action="store_true", default=True, help="Run in dry-run mode without real order execution")
     parser.add_argument("--live", action="store_true", help="Run in live trading mode with real orders")
     parser.add_argument("--lots", type=int, default=1, help="Initial lot size per leg")
+    parser.add_argument("--roll-type", type=str, choices=["points", "percentage"], default="points", help="Rolling trigger variant: 'points' (fixed buffer pts) or 'percentage' (rolling trigger %%)")
     parser.add_argument("--roll-buffer", type=float, default=35.0, help="Custom ATM shift buffer in points (e.g., 35.0)")
+    parser.add_argument("--roll-trigger-pct", type=float, default=0.4, help="Percentage movement trigger for rolling ATM straddle (e.g., 0.4)")
     parser.add_argument("--max-rolls", type=int, default=5, help="Maximum number of rolls allowed per day")
     parser.add_argument("--roll-cooldown", type=int, default=60, help="Minimum cooldown between rolls in seconds")
-    parser.add_argument("--profit-target", type=str, default="4000", help="Profit target in INR or percentage (e.g. 4000 or 50%%)")
-    parser.add_argument("--stop-loss", type=str, default="4000", help="Stop loss in INR or percentage (e.g. 4000 or 50%%)")
+    parser.add_argument("--target-profit", type=str, default="25%", help="Profit target in INR or percentage (e.g. 25%% or 4000)")
+    parser.add_argument("--stop-loss", type=str, default="25%", help="Stop loss in INR or percentage (e.g. 25%% or 4000)")
     parser.add_argument("--start-time", type=str, default="09:20", help="Strategy start time (HH:MM)")
     parser.add_argument("--eod-time", type=str, default="15:15", help="Intraday auto-exit time (HH:MM)")
     parser.add_argument("--trail-start-rs", type=float, default=500.0, help="MTM profit level to activate trailing SL")
     parser.add_argument("--trail-gap-rs", type=float, default=300.0, help="Trailing SL gap in INR")
+    parser.add_argument("--entry-balance-threshold", type=float, default=15.0, metavar="PCT",
+                        help="Max CE/PE premium difference %% allowed at entry (default: 15.0, set 0 to disable)")
     parser.add_argument("--instance-id", type=str, default=None, help="Optional instance identifier for multi-running")
 
     args = parser.parse_args()
 
     is_dry_run = not args.live
-    pt_val, pt_is_pct = parse_target_spec(args.profit_target)
+    pt_val, pt_is_pct = parse_target_spec(args.target_profit)
     sl_val, sl_is_pct = parse_target_spec(args.stop_loss)
 
     state_key = "nifty_rolling_straddle"
@@ -448,7 +505,9 @@ def main():
     strategy = RollingStraddleStrategy(
         dry_run=is_dry_run,
         initial_lots=args.lots,
+        roll_type=args.roll_type,
         roll_buffer=args.roll_buffer,
+        roll_trigger_pct=args.roll_trigger_pct,
         max_rolls=args.max_rolls,
         roll_cooldown=args.roll_cooldown,
         profit_target=pt_val,
@@ -459,6 +518,7 @@ def main():
         eod_time=args.eod_time,
         trail_start_rs=args.trail_start_rs,
         trail_gap_rs=args.trail_gap_rs,
+        entry_balance_threshold=args.entry_balance_threshold,
         state_key=state_key
     )
 
