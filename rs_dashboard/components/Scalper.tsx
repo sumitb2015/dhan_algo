@@ -1344,19 +1344,7 @@ export default function Scalper() {
               </span>
             )}
 
-            {/* Today's P&L chip — min-w keeps row layout stable regardless of
-                the selected broker's actual P&L digit-count */}
-            {positionsData.length > 0 && (
-              <span className={`px-2.5 py-1.5 rounded-lg text-xs font-bold font-mono tabular-nums border min-w-[90px] text-center inline-block shrink-0 whitespace-nowrap ${
-                totalPnl > 0
-                  ? 'bg-emerald-900/40 border-emerald-500/30 text-emerald-400'
-                  : totalPnl < 0
-                  ? 'bg-rose-900/40 border-rose-500/30 text-rose-400'
-                  : 'bg-zinc-900 border-zinc-700 text-zinc-400'
-              }`}>
-                {totalPnl >= 0 ? '+' : ''}₹{totalPnl.toFixed(0)}
-              </span>
-            )}
+
 
           </div>
         </div>
@@ -1511,7 +1499,23 @@ export default function Scalper() {
 
         return (
           <div className="flex flex-wrap justify-center items-center gap-3 px-4 pb-1 pt-0 select-none">
-            {/* Total CE & PE Value Summary Pill (Left Side of Index Price) */}
+            {/* Real-time Total P&L Pill (Left Side of CE Value) */}
+            <div className={`flex items-center gap-2 bg-zinc-900/80 border rounded-2xl px-4 py-2.5 shadow-lg font-mono text-xs ${
+              totalPnl > 0
+                ? 'border-emerald-500/40 bg-emerald-950/40 text-emerald-300'
+                : totalPnl < 0
+                ? 'border-rose-500/40 bg-rose-950/40 text-rose-300'
+                : 'border-zinc-800 text-zinc-400'
+            }`} title="Combined Realized + Unrealized P&L across open positions">
+              <span className="text-[10px] font-extrabold uppercase bg-zinc-950 border border-zinc-800 px-1.5 py-0.5 rounded text-zinc-400">
+                P&amp;L
+              </span>
+              <span className="font-bold text-sm tabular-nums">
+                {totalPnl >= 0 ? '+' : ''}₹{totalPnl.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+              </span>
+            </div>
+
+            {/* Total CE & PE Value Summary Pill */}
             <div className="flex items-center gap-2.5 bg-zinc-900/80 border border-zinc-800 rounded-2xl px-4 py-2.5 shadow-lg font-mono text-xs">
               {/* Total CE Value */}
               <div className="flex items-center gap-1.5" title="Total Call Value = Sum(CE Lots × CE Price)">
