@@ -52,6 +52,7 @@ const NAV_GROUPS = [
       { href: '/options/crudeoil', label: 'Crude Oil Options', desc: 'Max pain, PCR & live option chain for MCX Crude Oil' },
       { href: '/options/analyzer', label: 'Option Analyzer', desc: 'Rank strikes based on technical indicators & OI change' },
       { href: '/options/premium-bar', label: 'Premium Bar Chart', desc: 'CE vs PE premium bar charts & straddle curve across strikes' },
+      { href: '/options/live-charts', label: 'Live Options Charts', desc: 'Live straddle, rolling straddle, strangle & custom strategy premium charts' },
       { href: '/iv-charts', label: 'IV Charts', desc: 'Implied Volatility history & skew' },
       { href: '/baskets', label: 'Baskets', desc: 'Predefined option strategies with payoff diagram & quick basket order entry' },
       { href: '/scalper', label: 'Scalper', desc: 'Multi-window active trading & scalping order ticket' },
