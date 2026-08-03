@@ -89,6 +89,7 @@ function runChannel(
   let wsRetryMs = WS_RETRY_BASE_MS;
   let wsPort: number | null = null;
   let lastWsMsgAt = 0;
+  let wsConnectingAt = 0;
 
   let rafId: number | null = null;
   const latestRef = { quotes: null as LiveQuotes | null };
@@ -160,12 +161,14 @@ function runChannel(
       onWsDown();
       return;
     }
+    wsConnectingAt = Date.now();
 
     ws.onopen = () => {
       if (disposed) return;
       wsFails = 0;
       wsRetryMs = WS_RETRY_BASE_MS;
       lastWsMsgAt = Date.now();
+      wsConnectingAt = 0;
       stopFallbackPolling();
       onUpdate({ transport: 'ws' });
     };
@@ -182,7 +185,7 @@ function runChannel(
       } catch { /* malformed frame — ignore */ }
     };
 
-    ws.onclose = () => { ws = null; if (!disposed) onWsDown(); };
+    ws.onclose = () => { ws = null; wsConnectingAt = 0; if (!disposed) onWsDown(); };
     ws.onerror = () => { try { ws?.close(); } catch { /* noop */ } };
   };
 
@@ -195,11 +198,23 @@ function runChannel(
   };
 
   // Liveness watchdog: a half-open socket (e.g. bridge killed hard) emits
-  // no close event — force-reconnect after 10s of silence.
+  // no close event — force-reconnect after 10s of silence. Also covers a
+  // handshake that never resolves (e.g. interrupted by an in-app page
+  // transition): connectWS()'s `|| ws` guard only checks truthiness, so a
+  // socket wedged in CONNECTING with no open/close/error ever firing would
+  // otherwise block reconnection forever, until a full page reload
+  // recreated the JS context.
   watchdogInterval = setInterval(() => {
-    if (ws && ws.readyState === WebSocket.OPEN && lastWsMsgAt > 0
+    if (!ws) return;
+    if (ws.readyState === WebSocket.OPEN && lastWsMsgAt > 0
         && Date.now() - lastWsMsgAt > STALE_MS) {
       try { ws.close(); } catch { /* noop */ }
+    } else if (ws.readyState === WebSocket.CONNECTING && wsConnectingAt > 0
+        && Date.now() - wsConnectingAt > STALE_MS) {
+      try { ws.close(); } catch { /* noop */ }
+      ws = null;
+      wsConnectingAt = 0;
+      onWsDown();
     }
   }, STALE_MS / 2);
 
