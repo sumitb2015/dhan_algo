@@ -749,7 +749,11 @@ def main():
     dhan = get_dhan_client()
     if not dhan:
         _err("auth_failed — run login.py to refresh the access token")
-    helper = DhanHelper(dhan)
+    # This process is spawned fresh per chart request (polled every ~10s) - skip DhanHelper's
+    # constructor-time get_holdings() health check (~0.5s network round trip, irrelevant to
+    # chart data); a genuinely dead token still surfaces as a clear error on the first real
+    # data call below.
+    helper = DhanHelper(dhan, skip_session_validation=True)
 
     indicators = json.loads(args.indicators) if getattr(args, "indicators", None) else None
 

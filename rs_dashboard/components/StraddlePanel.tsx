@@ -6,6 +6,7 @@ import { StraddleChart, type StraddleChartType } from '@/components/StraddleChar
 import { ChartIndicatorPicker } from '@/components/ChartIndicatorPicker';
 import { isNseLive } from '@/lib/marketHours';
 import { Spinner } from '@/components/Spinner';
+import { DayChangeChip } from '@/components/DayChangeChip';
 import { DEFAULT_INDICATORS, VALID_INTERVALS, type ChartIndicatorRequest, type StraddleChartResponse, type StraddleStrikesResponse } from '@/lib/optionsChartTypes';
 
 const CHART_TYPES: { id: StraddleChartType; label: string }[] = [
@@ -105,9 +106,6 @@ export function StraddlePanel() {
     const lastDate = all[all.length - 1].time.slice(0, 10);
     return all.filter((c) => c.time.slice(0, 10) === lastDate);
   }, [chart]);
-  const dayOpen = todaysCandles[0]?.open;
-  const dayClose = todaysCandles[todaysCandles.length - 1]?.close;
-  const dayChangePct = dayOpen ? (((dayClose ?? dayOpen) - dayOpen) / dayOpen) * 100 : null;
 
   return (
     <div className="flex flex-col gap-2 h-full min-h-0">
@@ -162,13 +160,8 @@ export function StraddlePanel() {
             Spot
           </button>
 
-          <div className="flex items-center gap-2 ml-auto text-xs text-zinc-400">
-            {dayChangePct !== null && (
-              <span className={dayChangePct >= 0 ? 'text-emerald-400' : 'text-red-400'}>
-                {dayChangePct >= 0 ? '+' : ''}
-                {dayChangePct.toFixed(2)}%
-              </span>
-            )}
+          <div className="flex items-center gap-3 ml-auto text-xs text-zinc-400">
+            {todaysCandles.length > 0 && <DayChangeChip candles={todaysCandles} />}
             <span className="tabular-nums">Spot {(chart?.spot ?? strikesData?.spot ?? 0).toFixed(2)}</span>
             {loading && <Spinner size={12} />}
             <span className="inline-flex items-center gap-1.5">

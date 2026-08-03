@@ -49,9 +49,16 @@ class RateLimiter:
             time.sleep(min(wait, self.min_interval))
 
 class DhanHelper:
-    def __init__(self, dhan_client: dhanhq):
+    def __init__(self, dhan_client: dhanhq, skip_session_validation: bool = False):
         """
         Initialize the Helper with an active Dhan SDK client.
+
+        skip_session_validation: skips the get_holdings() health-check call this constructor
+        normally makes (see validate_session() below). Defaults to False so every existing
+        caller's behavior is unchanged; short-lived scripts that spawn a fresh DhanHelper per
+        invocation (e.g. scripts/tools/options_chart_fetch.py, polled every ~10s) can opt out
+        of that extra network round trip since a genuinely dead token still surfaces as a clear
+        error on the first real data call either way.
         """
         self.dhan = dhan_client
         self.live_data = {} # Shared store for latest WebSocket ticks
@@ -135,7 +142,8 @@ class DhanHelper:
         self._ou_last_error: Optional[str] = None
 
         # Validate session on init
-        self.validate_session()
+        if not skip_session_validation:
+            self.validate_session()
 
     def validate_session(self) -> bool:
         """

@@ -6,6 +6,7 @@ import { StrangleChart, type StrangleChartType } from '@/components/StrangleChar
 import { ChartIndicatorPicker } from '@/components/ChartIndicatorPicker';
 import { isNseLive } from '@/lib/marketHours';
 import { Spinner } from '@/components/Spinner';
+import { DayChangeChip } from '@/components/DayChangeChip';
 import { DEFAULT_INDICATORS, VALID_INTERVALS, type ChartIndicatorRequest, type StrangleChartResponse, type StraddleStrikesResponse } from '@/lib/optionsChartTypes';
 
 const CHART_TYPES: { id: StrangleChartType; label: string }[] = [
@@ -113,6 +114,13 @@ export function StranglePanel() {
     };
   }, [effectiveExpiry, effectiveCeStrike, effectivePeStrike, ceLots, peLots, interval_, indicators, marketLive, showSpot]);
 
+  const todaysCandles = useMemo(() => {
+    const all = chart?.candles ?? [];
+    if (all.length === 0) return [];
+    const lastDate = all[all.length - 1].time.slice(0, 10);
+    return all.filter((c) => c.time.slice(0, 10) === lastDate);
+  }, [chart]);
+
   return (
     <div className="flex flex-col gap-2 h-full min-h-0">
       <div className="bg-zinc-800 rounded-lg flex-shrink-0">
@@ -181,7 +189,9 @@ export function StranglePanel() {
             Spot
           </button>
 
-          <span className="ml-auto inline-flex items-center gap-2 text-xs text-zinc-400">
+          <span className="ml-auto flex items-center gap-3 text-xs text-zinc-400">
+            {todaysCandles.length > 0 && <DayChangeChip candles={todaysCandles} />}
+            <span className="tabular-nums">Spot {(chart?.spot ?? strikesData?.spot ?? 0).toFixed(2)}</span>
             {loading && <Spinner size={12} />}
             <span className="inline-flex items-center gap-1.5">
               <span className={`inline-block w-1.5 h-1.5 rounded-full ${marketLive ? 'bg-emerald-400' : 'bg-zinc-600'}`} />
