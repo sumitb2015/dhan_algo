@@ -43,7 +43,9 @@ export default function LiveOptionsChartsPage() {
   }, []);
 
   const { cols, rows } = layoutCount === 2 ? { cols: 2, rows: 1 } : { cols: 1, rows: 1 };
-  const today = new Date().toISOString().slice(0, 10);
+  // en-CA gives YYYY-MM-DD; IST rather than toISOString()'s UTC, which reads as yesterday
+  // for anyone loading the page before 05:30 IST.
+  const today = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
 
   return (
     <div className="flex flex-col gap-3 p-3">

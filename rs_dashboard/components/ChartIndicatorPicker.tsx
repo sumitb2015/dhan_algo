@@ -1,6 +1,50 @@
 'use client';
 
+import { useEffect, useState } from 'react';
 import { CHART_INDICATOR_CATALOG, type ChartIndicatorRequest } from '@/lib/optionsChartTypes';
+
+/** Committed on blur/Enter, not per keystroke: the owning panel has `indicators` in its
+ * fetch-effect deps, so a raw onChange made typing "200" issue three chart requests (2, 20,
+ * 200) - each one a fresh Python spawn - and an emptied box posted period 0, which pandas
+ * rejects outright. Local draft state keeps typing responsive without any of that. */
+function ParamInput({
+  label,
+  value,
+  onCommit,
+}: {
+  label: string;
+  value: number;
+  onCommit: (value: number) => void;
+}) {
+  const [draft, setDraft] = useState(String(value));
+
+  // Re-sync when the value changes from outside (preset applied, indicator re-added).
+  useEffect(() => setDraft(String(value)), [value]);
+
+  function commit() {
+    const parsed = Number(draft);
+    if (!Number.isFinite(parsed) || parsed <= 0) {
+      setDraft(String(value)); // reject empty/zero/negative, restore the last good value
+      return;
+    }
+    if (parsed !== value) onCommit(parsed);
+  }
+
+  return (
+    <input
+      type="number"
+      value={draft}
+      onChange={(e) => setDraft(e.target.value)}
+      onBlur={commit}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter') e.currentTarget.blur();
+        else if (e.key === 'Escape') setDraft(String(value));
+      }}
+      title={`${label} — press Enter or click away to apply`}
+      className="w-11 px-1 py-0.5 rounded tabular-nums text-xs bg-zinc-950 border border-zinc-700 text-zinc-200"
+    />
+  );
+}
 
 function ParamInputs({
   paramLabels,
@@ -16,13 +60,11 @@ function ParamInputs({
   return (
     <>
       {keys.map((key) => (
-        <input
+        <ParamInput
           key={key}
-          type="number"
+          label={paramLabels[key]}
           value={params[key]}
-          onChange={(e) => onChange({ ...params, [key]: Number(e.target.value) })}
-          title={paramLabels[key]}
-          className="w-11 px-1 py-0.5 rounded tabular-nums text-xs bg-zinc-950 border border-zinc-700 text-zinc-200"
+          onCommit={(value) => onChange({ ...params, [key]: value })}
         />
       ))}
     </>

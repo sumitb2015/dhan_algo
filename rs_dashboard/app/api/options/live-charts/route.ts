@@ -12,6 +12,9 @@ type Kind = (typeof KINDS)[number];
 // options_chart_fetch.py's _fetch_intraday gate).
 const TIMEOUT_MS = 60_000;
 
+// Mirrors MAX_DAYS in options_chart_fetch.py.
+const MAX_DAYS = 10;
+
 export async function GET(request: NextRequest) {
   const { searchParams } = new URL(request.url);
   const kind = searchParams.get('kind') as Kind | null;
@@ -53,10 +56,14 @@ export async function GET(request: NextRequest) {
 
   if (kind === 'straddle' || kind === 'rolling-straddle' || kind === 'strangle' || kind === 'strategy') {
     args.push('--interval', searchParams.get('interval') ?? '1');
-    args.push('--days', searchParams.get('days') ?? '2');
+    const days = Number(searchParams.get('days') ?? '2');
+    args.push('--days', String(Number.isFinite(days) ? Math.min(MAX_DAYS, Math.max(1, Math.round(days))) : 2));
     const indicators = searchParams.get('indicators');
     if (indicators) args.push('--indicators', indicators);
-    if (searchParams.get('include_spot') === '1') args.push('--include-spot');
+    // rolling-straddle has no --include-spot: it always carries a per-candle `spot` field
+    // (the strike-selection series it already fetches), which the panel's Spot toggle reads
+    // client-side. Passing the flag anyway would be an argparse "unrecognized arguments" exit.
+    if (kind !== 'rolling-straddle' && searchParams.get('include_spot') === '1') args.push('--include-spot');
   }
 
   try {

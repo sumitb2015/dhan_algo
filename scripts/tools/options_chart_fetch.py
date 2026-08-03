@@ -46,6 +46,7 @@ OPTION_SEGMENT = {"NIFTY": "NSE_FNO", "BANKNIFTY": "NSE_FNO", "FINNIFTY": "NSE_F
 MIN_LOTS = 1
 MAX_LOTS = 10
 MAX_LEGS = 6
+MAX_DAYS = 10
 VALID_INTERVALS = ("1", "2", "3", "5")
 
 DEFAULT_INDICATORS = [
@@ -55,6 +56,13 @@ DEFAULT_INDICATORS = [
 
 _option_chain_cache: dict[str, dict] = {}
 _CHAIN_CACHE_TTL_SECONDS = 5.0
+
+
+def _print_json(payload: dict) -> None:
+    """allow_nan=False so a NaN/Inf that slipped through a resample-merge fails loudly here
+    rather than printing a bare `NaN` token — that is invalid JSON, and the dashboard's
+    runPythonJson() would blow up on JSON.parse with no clue where it came from."""
+    print(json.dumps(payload, allow_nan=False))
 
 
 def _err(message: str):
@@ -113,6 +121,17 @@ def get_chain_df(helper: DhanHelper, underlying: str, expiry: str) -> tuple[pd.D
     return df, spot
 
 
+def _has_leg_ids(row) -> bool:
+    """Both leg security ids present and usable. NOT `if row.get(...)` — a missing id arrives
+    from pandas as float NaN, which is *truthy*, so a bare truth test lets it through and the
+    downstream int(NaN) raises a cryptic 'cannot convert float NaN to integer' at the user."""
+    for col in ("ce_security_id", "pe_security_id"):
+        value = row.get(col)
+        if value is None or pd.isna(value) or not value:
+            return False
+    return True
+
+
 def list_strikes(helper: DhanHelper, underlying: str, expiry: str) -> dict:
     df, spot = get_chain_df(helper, underlying, expiry)
     if df.empty or "ce_security_id" not in df.columns or "pe_security_id" not in df.columns:
@@ -131,7 +150,7 @@ def list_strikes(helper: DhanHelper, underlying: str, expiry: str) -> dict:
             "is_atm": atm_strike is not None and float(strike) == atm_strike,
         }
         for strike, row in df.iterrows()
-        if row.get("ce_security_id") and row.get("pe_security_id")
+        if _has_leg_ids(row)
     ]
     return {"spot": spot, "strikes": strikes}
 
@@ -295,17 +314,25 @@ def _compute_indicators(df: pd.DataFrame, requests: list[dict]) -> list[dict]:
     close, high, low = df["close"], df["high"], df["low"]
     out: list[dict] = []
 
+    # A cleared period box in the frontend picker posts 0; pandas' ewm(span=0)/rolling(0) raise,
+    # which surfaced as a bare "span must satisfy: span >= 1" error banner. Clamp instead.
+    def _period(params: dict, default: int) -> int:
+        try:
+            return max(1, int(params.get("period", default)))
+        except (TypeError, ValueError):
+            return default
+
     for req in requests:
         itype = req.get("type")
         params = req.get("params") or {}
 
         if itype == "ema":
-            period = int(params.get("period", 20))
+            period = _period(params, 20)
             series = close.ewm(span=period, adjust=False).mean()
             out.append({"id": f"ema_{period}", "group": f"ema_{period}", "type": "ema", "label": f"EMA {period}", "series": series})
 
         elif itype == "sma":
-            period = int(params.get("period", 20))
+            period = _period(params, 20)
             series = close.rolling(period).mean()
             out.append({"id": f"sma_{period}", "group": f"sma_{period}", "type": "sma", "label": f"SMA {period}", "series": series})
 
@@ -314,8 +341,8 @@ def _compute_indicators(df: pd.DataFrame, requests: list[dict]) -> list[dict]:
             out.append({"id": "vwap", "group": "vwap", "type": "vwap", "label": "VWAP", "series": series})
 
         elif itype == "bbands":
-            period = int(params.get("period", 20))
-            std_dev = float(params.get("std_dev", 2.0))
+            period = _period(params, 20)
+            std_dev = float(params.get("std_dev", 2.0) or 2.0)
             mid = close.rolling(period).mean()
             std = close.rolling(period).std(ddof=0)
             upper, lower = mid + std_dev * std, mid - std_dev * std
@@ -325,8 +352,8 @@ def _compute_indicators(df: pd.DataFrame, requests: list[dict]) -> list[dict]:
             out.append({"id": f"{group}_lower", "group": group, "type": "bbands", "label": f"BB Lower ({period},{std_dev:g})", "series": lower})
 
         elif itype == "supertrend":
-            period = int(params.get("period", 10))
-            multiplier = float(params.get("multiplier", 3.0))
+            period = _period(params, 10)
+            multiplier = float(params.get("multiplier", 3.0) or 3.0)
             series = _supertrend(high, low, close, period, multiplier)
             group = f"supertrend_{period}_{multiplier}"
             out.append({"id": group, "group": group, "type": "supertrend", "label": f"Supertrend ({period},{multiplier:g})", "series": series})
@@ -416,12 +443,6 @@ def get_straddle_chart(helper: DhanHelper, underlying: str, expiry: str, strike:
 # --- Rolling straddle (re-anchors to whichever strike is ATM at each point in the session) ---
 
 
-def _strike_step(strikes: list[float]) -> float:
-    ordered = sorted(set(strikes))
-    diffs = [b - a for a, b in zip(ordered, ordered[1:]) if b - a > 0]
-    return min(diffs) if diffs else 50.0
-
-
 def _nearest_strike(spot: float, strikes: list[float]) -> float:
     return min(strikes, key=lambda s: abs(s - spot))
 
@@ -454,7 +475,7 @@ def get_rolling_straddle_chart(helper: DhanHelper, underlying: str, expiry: str,
     strike_by_value = {
         float(strike): (str(int(row["ce_security_id"])), str(int(row["pe_security_id"])))
         for strike, row in chain_df.iterrows()
-        if row.get("ce_security_id") and row.get("pe_security_id")
+        if _has_leg_ids(row)
     }
     strikes = list(strike_by_value.keys())
     if not strikes:
@@ -524,20 +545,27 @@ def get_rolling_straddle_chart(helper: DhanHelper, underlying: str, expiry: str,
     df["spot"] = df["spot"].ffill().bfill()
 
     if interval != "1":
-        first_bar_time = df["time"].min()
         step = timedelta(minutes=int(interval))
-        for s in switches:
-            offset = (s["time"] - first_bar_time) // step
-            s["time"] = first_bar_time + offset * step
-
+        # Both the candles and the switch markers must land on the SAME bucket grid that
+        # _resample_ohlcv produces - and that anchors origin="start" *per trading day*. A single
+        # global anchor (the whole frame's first bar) only coincides with it when every day
+        # starts at the same clock time; one day whose first candle is 09:16 instead of 09:15
+        # shifts the whole grid by a minute, and the left-merge below then leaves NaN in every
+        # extras column for that day (which used to reach json.dumps as a bare NaN token).
+        extra_cols = ["strike", "close_ce", "close_pe", "synthetic_fut", "spot"]
         base = _resample_ohlcv(df[["time", "open", "high", "low", "close", "volume"]], int(interval))
-        extras = (
-            df.set_index("time")[["strike", "close_ce", "close_pe", "synthetic_fut", "spot"]]
-            .resample(f"{interval}min", origin="start", label="left", closed="left")
-            .last()
-            .reset_index()
-        )
+        extras = _resample_last(df, int(interval), extra_cols)
+
+        first_bar_by_day = df.groupby(df["time"].dt.date)["time"].min().to_dict()
+        for s in switches:
+            anchor = first_bar_by_day.get(s["time"].date())
+            if anchor is not None:
+                s["time"] = anchor + ((s["time"] - anchor) // step) * step
+
         df = base.merge(extras, on="time", how="left")
+        # Belt-and-braces: these are all last-value series, so a bucket the merge couldn't fill
+        # carries forward rather than emitting a non-finite value.
+        df[extra_cols] = df[extra_cols].ffill().bfill()
 
     computed = _compute_indicators(df, indicators or DEFAULT_INDICATORS)
 
@@ -749,38 +777,46 @@ def main():
     dhan = get_dhan_client()
     if not dhan:
         _err("auth_failed — run login.py to refresh the access token")
-    # This process is spawned fresh per chart request (polled every ~10s) - skip DhanHelper's
-    # constructor-time get_holdings() health check (~0.5s network round trip, irrelevant to
-    # chart data); a genuinely dead token still surfaces as a clear error on the first real
-    # data call below.
-    helper = DhanHelper(dhan, skip_session_validation=True)
+    # This process is spawned fresh per chart request (polled every ~10s), so it pays
+    # DhanHelper's constructor costs on every poll rather than once at startup like a strategy:
+    #  - skip_session_validation: drops the get_holdings() health check (~0.5s network round
+    #    trip, irrelevant to chart data); a dead token still surfaces as a clear error on the
+    #    first real data call below.
+    #  - master_list_cache: reads master_list.csv via a parquet sidecar (~0.75s -> ~0.05s). The
+    #    list itself is still needed - get_expiries()/get_option_chain() resolve their symbol
+    #    through it - so this makes the load cheap rather than skipping it.
+    # Both are opt-in and default off, so no strategy or other script is affected.
+    helper = DhanHelper(dhan, skip_session_validation=True, master_list_cache=True)
 
     indicators = json.loads(args.indicators) if getattr(args, "indicators", None) else None
+    # `days` drives the intraday lookback window (see _calendar_days_for) - clamp so a stray
+    # ?days=9999 can't ask Dhan for a 20000-day range.
+    days = min(MAX_DAYS, max(1, getattr(args, "days", 2) or 2))
 
     try:
         if args.cmd == "expiries":
             expiries = helper.get_expiries(args.underlying)
-            print(json.dumps({"expiries": expiries}))
+            _print_json({"expiries": expiries})
 
         elif args.cmd == "strikes":
             result = list_strikes(helper, args.underlying, args.expiry)
-            print(json.dumps({
+            _print_json({
                 "spot": result["spot"],
                 "strikes": [{"strike": s["strike"], "is_atm": s["is_atm"]} for s in result["strikes"]],
-            }))
+            })
 
         elif args.cmd == "straddle":
-            print(json.dumps(get_straddle_chart(helper, args.underlying, args.expiry, args.strike, args.interval, indicators, args.days, args.include_spot)))
+            _print_json(get_straddle_chart(helper, args.underlying, args.expiry, args.strike, args.interval, indicators, days, args.include_spot))
 
         elif args.cmd == "rolling-straddle":
-            print(json.dumps(get_rolling_straddle_chart(helper, args.underlying, args.expiry, args.interval, indicators, args.days)))
+            _print_json(get_rolling_straddle_chart(helper, args.underlying, args.expiry, args.interval, indicators, days))
 
         elif args.cmd == "strangle":
-            print(json.dumps(get_strangle_chart(helper, args.underlying, args.expiry, args.ce_strike, args.pe_strike, args.ce_lots, args.pe_lots, args.interval, indicators, args.days, args.include_spot)))
+            _print_json(get_strangle_chart(helper, args.underlying, args.expiry, args.ce_strike, args.pe_strike, args.ce_lots, args.pe_lots, args.interval, indicators, days, args.include_spot))
 
         elif args.cmd == "strategy":
             legs = json.loads(args.legs)
-            print(json.dumps(get_strategy_chart(helper, args.underlying, args.expiry, legs, args.interval, indicators, args.days, args.include_spot)))
+            _print_json(get_strategy_chart(helper, args.underlying, args.expiry, legs, args.interval, indicators, days, args.include_spot))
 
         else:
             _err("unknown command")

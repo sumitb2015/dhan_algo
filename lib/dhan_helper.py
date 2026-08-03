@@ -49,7 +49,8 @@ class RateLimiter:
             time.sleep(min(wait, self.min_interval))
 
 class DhanHelper:
-    def __init__(self, dhan_client: dhanhq, skip_session_validation: bool = False):
+    def __init__(self, dhan_client: dhanhq, skip_session_validation: bool = False,
+                 master_list_cache: bool = False):
         """
         Initialize the Helper with an active Dhan SDK client.
 
@@ -59,6 +60,15 @@ class DhanHelper:
         invocation (e.g. scripts/tools/options_chart_fetch.py, polled every ~10s) can opt out
         of that extra network round trip since a genuinely dead token still surfaces as a clear
         error on the first real data call either way.
+
+        master_list_cache: reads master_list.csv through a parquet sidecar (~0.65s -> ~0.1s on
+        a 151k-row list). The master list CANNOT be skipped outright — _resolve_symbol(), and
+        therefore get_expiries()/get_option_chain()/find_*(), all query it. Defaults to False
+        so long-running strategies keep the plain read_csv path they have today: they pay the
+        load once at startup, where 0.5s is irrelevant, and gain nothing from a cache that
+        could only add a staleness mode to a live trading process. Opt in from short-lived
+        scripts that respawn on a poll loop. The cache self-invalidates on the CSV's
+        (mtime, size) and silently falls back to read_csv on any cache error.
         """
         self.dhan = dhan_client
         self.live_data = {} # Shared store for latest WebSocket ticks
@@ -93,6 +103,7 @@ class DhanHelper:
         logger.info(f"Resolved Master List Path: {self._master_list_path}")
         
         self._symbol_map = {} # SYMBOL_NAME -> Records for O(1) lookup
+        self._master_list_cache_enabled = master_list_cache # Opt-in parquet sidecar (see docstring)
         self._resolution_cache = {} # Cache for _resolve_symbol
         self._ltp_cache = {} # Cache for LTP: {sid: (price, timestamp)}
         self._expiry_cache = {} # Cache for expiries: {sid: (list, timestamp)}
@@ -169,12 +180,66 @@ class DhanHelper:
             return False
 
     # --- SECURITY ID LOOKUP ---
+    def _master_list_cache_paths(self) -> Tuple[str, str]:
+        """(parquet, stamp) paths for the opt-in master-list cache. Lives under debug/ with the
+        other generated runtime files, not next to the CSV."""
+        cache_dir = os.path.join(os.path.dirname(self._master_list_path), "debug")
+        return (os.path.join(cache_dir, "master_list_cache.parquet"),
+                os.path.join(cache_dir, "master_list_cache.json"))
+
+    def _read_master_list_cache(self) -> Optional[pd.DataFrame]:
+        """Cached frame if it matches the CSV's current (mtime, size), else None. Any failure
+        (missing file, no pyarrow, corrupt parquet) is a cache miss, never an error."""
+        parquet_path, stamp_path = self._master_list_cache_paths()
+        try:
+            src = os.stat(self._master_list_path)
+            with open(stamp_path, 'r') as fh:
+                stamp = json.load(fh)
+            if stamp.get('mtime_ns') != src.st_mtime_ns or stamp.get('size') != src.st_size:
+                logger.info("Master list cache stale (CSV changed) - rebuilding from CSV.")
+                return None
+            return pd.read_parquet(parquet_path)
+        except FileNotFoundError:
+            return None
+        except Exception as e:
+            logger.debug(f"Master list cache read skipped: {e}")
+            return None
+
+    def _write_master_list_cache(self, df: pd.DataFrame) -> None:
+        """Write the cleaned frame + its source stamp. Parquet first, stamp second, each via
+        os.replace: a torn or half-written cache can only ever read back as a miss, and
+        concurrently spawned processes can't corrupt each other's file."""
+        parquet_path, stamp_path = self._master_list_cache_paths()
+        try:
+            os.makedirs(os.path.dirname(parquet_path), exist_ok=True)
+            src = os.stat(self._master_list_path)
+            tmp_parquet = f"{parquet_path}.{os.getpid()}.tmp"
+            df.to_parquet(tmp_parquet, index=False)
+            os.replace(tmp_parquet, parquet_path)
+            tmp_stamp = f"{stamp_path}.{os.getpid()}.tmp"
+            with open(tmp_stamp, 'w') as fh:
+                json.dump({'mtime_ns': src.st_mtime_ns, 'size': src.st_size}, fh)
+            os.replace(tmp_stamp, stamp_path)
+            logger.info(f"Master list cache written: {parquet_path}")
+        except Exception as e:
+            # Cache is pure optimization - a failure here must never break the caller.
+            logger.debug(f"Master list cache write skipped: {e}")
+
     def _load_master_list(self, reload: bool = False) -> pd.DataFrame:
         """
         Load master security list from CSV with caching and specialized indexing.
         First load takes a few seconds, subsequent calls are instant.
         """
         if self._master_list is None or reload:
+            # Opt-in fast path (master_list_cache=True). `reload` means the caller explicitly
+            # wants a fresh read - e.g. right after fetch_security_list() rewrote the CSV - so
+            # it always goes to the CSV below.
+            if self._master_list_cache_enabled and not reload:
+                cached = self._read_master_list_cache()
+                if cached is not None and not cached.empty:
+                    self._master_list = cached
+                    logger.info(f"Master list loaded from parquet cache: {len(cached)} records")
+                    return self._master_list
             try:
                 logger.info(f"Loading master list from {self._master_list_path}...")
                 self._master_list = pd.read_csv(
@@ -203,6 +268,11 @@ class DhanHelper:
                     #     self._symbol_map[str(symbol)] = group
                     
                     logger.info("Master list loaded (Indexing skipped for performance)")
+
+                    # Written from the CLEANED frame, so a cache hit reproduces exactly what
+                    # this branch would have produced (dtypes included) - never the raw CSV.
+                    if self._master_list_cache_enabled:
+                        self._write_master_list_cache(self._master_list)
                 else:
                     logger.warning(f"Master list loaded but is EMPTY. Check file content: {self._master_list_path}")
                 
