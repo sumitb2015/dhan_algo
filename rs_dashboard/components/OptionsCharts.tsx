@@ -287,7 +287,8 @@ export default function OptionsCharts() {
     setExpiriesLoading(true);
 
     cachedFetch<{ success: boolean; data?: string[]; error?: string }>(
-      `/api/options/expiries?underlying=${UNDERLYING}`, 10 * 60_000)
+      `/api/options/expiries?underlying=${UNDERLYING}`, 10 * 60_000,
+      (j) => j.success === true && !!j.data?.length)
       .then(j => {
         if (j.success && j.data?.length) {
           setExpiries(j.data);
