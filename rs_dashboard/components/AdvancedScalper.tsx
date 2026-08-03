@@ -1155,14 +1155,18 @@ export default function AdvancedScalper() {
           addToast('error', `${label} exit failed`, data.errors.join('; ') || 'Unknown error');
         }
       } else {
-        const res = await fetch('/api/exit-all', { method: 'POST' });
+        const res = await fetch('/api/exit-all', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ scope: 'fno' }),
+        });
         const data = await res.json();
         if (data.broker_exit) {
           const killed = data.killed?.length ?? 0;
           const fallback = data.trigger_fallback?.length ?? 0;
           const detail = killed > 0 ? ` ${killed} strategy process${killed === 1 ? '' : 'es'} terminated.` : '';
           const fb = fallback > 0 ? ` ${fallback} sent graceful shutdown.` : '';
-          addToast('success', `All positions liquidated at broker.${detail}${fb}`);
+          addToast('success', `All F&O positions liquidated at broker.${detail}${fb}`);
         } else {
           addToast('error', data.error || 'Broker exit failed — check Dhan account manually.');
         }

@@ -1,4 +1,4 @@
-import { NextResponse } from 'next/server';
+import { NextRequest, NextResponse } from 'next/server';
 import path from 'path';
 import fs from 'fs';
 import { execSync } from 'child_process';
@@ -6,6 +6,98 @@ import { getDhanCredentials } from '@/lib/dhanToken';
 import { DEBUG_DIR, allStateKeys, isStrategyRunning } from '@/lib/strategyRegistry';
 
 const DHAN_POSITIONS = 'https://api.dhan.co/v2/positions';
+const DHAN_ORDERS = 'https://api.dhan.co/v2/orders';
+const PENDING_ORDER_STATUSES = new Set(['PENDING', 'TRANSIT', 'OPEN', 'PART_TRADED']);
+
+function isFnoSegment(segment: unknown): boolean {
+  return typeof segment === 'string' && segment.toUpperCase().includes('FNO');
+}
+
+/** Dhan's raw REST error body is `{errorCode, errorType, errorMessage}` — never an array
+ *  and never `{data: [...]}` — so it's distinguishable from a genuine empty list/array response. */
+function dhanErrorDetail(json: unknown): string | null {
+  if (json && typeof json === 'object' && !Array.isArray(json) && ('errorCode' in json || 'errorType' in json || 'errorMessage' in json)) {
+    const j = json as Record<string, unknown>;
+    return String(j.errorMessage ?? j.errorType ?? j.errorCode ?? JSON.stringify(json));
+  }
+  return null;
+}
+
+/** Fetch open F&O positions, flatten each with an opposite-side market order, then
+ *  cancel any pending F&O orders. Equity (NSE_EQ/BSE_EQ) positions/orders are left untouched. */
+async function exitFnoOnly(clientId: string, token: string): Promise<{ ok: boolean; error: string | null }> {
+  const headers = {
+    'access-token': token,
+    'client-id': clientId,
+    'Content-Type': 'application/json',
+    'Accept': 'application/json',
+  };
+  const errors: string[] = [];
+
+  try {
+    const posRes = await fetch(DHAN_POSITIONS, { method: 'GET', headers, signal: AbortSignal.timeout(15_000) });
+    const posJson = await posRes.json().catch(() => null);
+    const posErr = dhanErrorDetail(posJson);
+    if (posErr || !posRes.ok) {
+      errors.push(`positions fetch: HTTP ${posRes.status}${posErr ? ` - ${posErr}` : ''}`);
+    } else {
+      const positions: Record<string, unknown>[] = Array.isArray(posJson) ? posJson : (Array.isArray((posJson as any)?.data) ? (posJson as any).data : []);
+      const openFno = positions.filter(p => Number(p.netQty ?? 0) !== 0 && isFnoSegment(p.exchangeSegment));
+
+      for (const pos of openFno) {
+        const netQty = Number(pos.netQty ?? 0);
+        const payload = {
+          dhanClientId: clientId,
+          transactionType: netQty > 0 ? 'SELL' : 'BUY',
+          exchangeSegment: pos.exchangeSegment,
+          productType: pos.productType,
+          orderType: 'MARKET',
+          validity: 'DAY',
+          securityId: String(pos.securityId),
+          quantity: Math.abs(netQty),
+          disclosedQuantity: 0,
+          price: 0,
+          afterMarketOrder: false,
+          boProfitValue: 0,
+          boStopLossValue: 0,
+          triggerPrice: 0,
+        };
+        const res = await fetch(DHAN_ORDERS, { method: 'POST', headers, body: JSON.stringify(payload), signal: AbortSignal.timeout(15_000) });
+        const json = await res.json().catch(() => ({} as Record<string, unknown>));
+        const orderId = String((json as any).orderId ?? (json as any).data?.orderId ?? '');
+        if (!orderId) {
+          errors.push(`close ${pos.tradingSymbol ?? pos.securityId}: ${String((json as any).remarks ?? (json as any).message ?? JSON.stringify(json))}`);
+        }
+      }
+    }
+  } catch (err) {
+    errors.push(`positions fetch: ${String((err as Error).message ?? err)}`);
+  }
+
+  try {
+    const ordRes = await fetch(DHAN_ORDERS, { method: 'GET', headers, signal: AbortSignal.timeout(15_000) });
+    const ordJson = await ordRes.json().catch(() => null);
+    const ordErr = dhanErrorDetail(ordJson);
+    if (ordErr || !ordRes.ok) {
+      errors.push(`orders fetch: HTTP ${ordRes.status}${ordErr ? ` - ${ordErr}` : ''}`);
+    } else {
+      const orders: Record<string, unknown>[] = Array.isArray(ordJson) ? ordJson : (Array.isArray((ordJson as any)?.data) ? (ordJson as any).data : []);
+      const pendingFno = orders.filter(o => PENDING_ORDER_STATUSES.has(String(o.orderStatus ?? '').toUpperCase()) && isFnoSegment(o.exchangeSegment));
+
+      for (const ord of pendingFno) {
+        const res = await fetch(`${DHAN_ORDERS}/${ord.orderId}`, { method: 'DELETE', headers, signal: AbortSignal.timeout(15_000) });
+        if (!res.ok) {
+          const json = await res.json().catch(() => ({} as Record<string, unknown>));
+          errors.push(`cancel order ${ord.orderId}: ${String((json as any).remarks ?? (json as any).message ?? `HTTP ${res.status}`)}`);
+        }
+      }
+    }
+  } catch (err) {
+    errors.push(`orders fetch: ${String((err as Error).message ?? err)}`);
+  }
+
+  return { ok: errors.length === 0, error: errors.length ? errors.join('; ') : null };
+}
 
 function forceKillPid(pid: number): boolean {
   try {
@@ -70,51 +162,68 @@ function cleanTriggerFile(key: string) {
   } catch {}
 }
 
-export async function POST() {
+export async function POST(req: NextRequest) {
   try {
     if (!fs.existsSync(DEBUG_DIR)) {
       fs.mkdirSync(DEBUG_DIR, { recursive: true });
     }
 
-    // â”€â”€ Step 1: Broker-level nuclear exit (DELETE /positions) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    const reqBody = await req.json().catch(() => ({} as Record<string, unknown>));
+    const fnoOnly = (reqBody as Record<string, unknown>)?.scope === 'fno';
+
+    // â”€â”€ Step 1: Broker-level exit â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     // Do this FIRST â€” strategies must not race to close positions themselves.
     // Called directly against the Dhan REST API (same pattern as
     // scalper/fast-order): the old exit_all_positions.py subprocess spent
     // ~10s on interpreter + DhanHelper startup before sending this one call.
+    //
+    // scope: 'fno' (scalper terminals) â€” close only F&O positions/orders,
+    // leaving equity untouched, since Dhan's DELETE /positions is all-or-nothing.
+    // default (strategies-plus portfolio page) â€” full account nuclear exit.
     let brokerExit = false;
     let brokerError: string | null = null;
     try {
       const { clientId, token } = getDhanCredentials();
-      const res = await fetch(DHAN_POSITIONS, {
-        method: 'DELETE',
-        headers: {
-          'access-token': token,
-          'client-id': clientId,
-          'Accept': 'application/json',
-        },
-        signal: AbortSignal.timeout(15_000),
-      });
 
-      if (res.ok) {
-        brokerExit = true;
+      if (fnoOnly) {
+        const result = await exitFnoOnly(clientId, token);
+        brokerExit = result.ok;
+        brokerError = result.error;
+        if (!result.ok) console.error('[exit-all] FNO-scoped exit had errors:', result.error);
       } else {
-        let detail = `HTTP ${res.status}`;
-        try {
-          const json = await res.json() as Record<string, unknown>;
-          detail = String(json.remarks ?? json.message ?? (json.errorMessage as string) ?? JSON.stringify(json));
-        } catch {}
-        brokerError = detail;
-        console.error('[exit-all] Dhan DELETE /positions failed:', detail);
+        const res = await fetch(DHAN_POSITIONS, {
+          method: 'DELETE',
+          headers: {
+            'access-token': token,
+            'client-id': clientId,
+            'Accept': 'application/json',
+          },
+          signal: AbortSignal.timeout(15_000),
+        });
+
+        if (res.ok) {
+          brokerExit = true;
+        } else {
+          let detail = `HTTP ${res.status}`;
+          try {
+            const json = await res.json() as Record<string, unknown>;
+            detail = String(json.remarks ?? json.message ?? (json.errorMessage as string) ?? JSON.stringify(json));
+          } catch {}
+          brokerError = detail;
+          console.error('[exit-all] Dhan DELETE /positions failed:', detail);
+        }
       }
     } catch (err) {
       brokerError = String((err as Error).message ?? err);
-      console.error('[exit-all] Dhan DELETE /positions error:', brokerError);
+      console.error('[exit-all] Dhan broker exit error:', brokerError);
     }
 
     // â”€â”€ Step 2: Sync all strategy processes â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-    // Positions are already closed at the broker. Force-kill each running
-    // strategy so it cannot attempt its own position-close or re-enter.
-    // Then immediately clear its state file so the dashboard shows STOPPED.
+    // Broker-side exit orders/cancellations from Step 1 are already in flight
+    // (atomic under the default path; async MARKET orders under scope:'fno').
+    // Force-kill each running strategy so it cannot attempt its own
+    // position-close or re-enter. Then immediately clear its state file so
+    // the dashboard shows STOPPED.
     const killed: string[] = [];
     const triggerFallback: string[] = [];
 
