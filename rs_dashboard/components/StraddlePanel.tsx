@@ -183,7 +183,11 @@ export function StraddlePanel() {
 
       {chart ? (
         <div className="bg-zinc-800 rounded-lg p-2 flex-1 min-h-0 flex flex-col">
-          <StraddleChart chart={chart} chartType={chartType} showSpot={showSpot} />
+          {/* Keyed by the selection identity (not chartType/showSpot) so CombinedPremiumChart's
+              fit-once-per-mount guard re-fits the price scale when you pick a genuinely
+              different expiry/strike, while an ordinary 10s poll (same key) keeps the same
+              mounted instance and preserves your zoom/pan. */}
+          <StraddleChart key={`${effectiveExpiry}-${effectiveStrike}-${interval_}`} chart={chart} chartType={chartType} showSpot={showSpot} />
         </div>
       ) : (
         loading &&

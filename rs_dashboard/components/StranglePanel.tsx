@@ -195,7 +195,13 @@ export function StranglePanel() {
 
       {chart ? (
         <div className="bg-zinc-800 rounded-lg p-2 flex-1 min-h-0 flex flex-col">
-          <StrangleChart chart={chart} chartType={chartType} showSpot={showSpot} />
+          {/* Keyed by selection identity - see StraddlePanel's StraddleChart for why. */}
+          <StrangleChart
+            key={`${effectiveExpiry}-${effectiveCeStrike}-${effectivePeStrike}-${ceLots}-${peLots}-${interval_}`}
+            chart={chart}
+            chartType={chartType}
+            showSpot={showSpot}
+          />
         </div>
       ) : (
         loading &&

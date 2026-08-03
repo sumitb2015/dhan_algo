@@ -128,7 +128,8 @@ export function RollingStraddlePanel() {
 
       {chart ? (
         <div className="bg-zinc-800 rounded-lg p-2 flex-1 min-h-0 flex flex-col">
-          <RollingStraddleChart chart={chart} chartType={chartType} showSpot={showSpot} />
+          {/* Keyed by selection identity - see StraddlePanel's StraddleChart for why. */}
+          <RollingStraddleChart key={`${effectiveExpiry}-${interval_}`} chart={chart} chartType={chartType} showSpot={showSpot} />
         </div>
       ) : (
         loading &&

@@ -282,7 +282,12 @@ export function StrategyPanel() {
 
       {chart ? (
         <div className="bg-zinc-800 rounded-lg p-2 flex-1 min-h-0 flex flex-col">
-          <StrategyChart chart={chart} chartType={chartType} showSpot={showSpot} />
+          {/* Keyed by selection identity - see StraddlePanel's StraddleChart for why. Without
+              this, switching presets (e.g. Straddle -> Iron Condor -> Butterfly) reused the
+              same mounted chart instance, so CombinedPremiumChart's fit-once-per-mount guard
+              never re-fit the price scale to the new combo's very different value range - the
+              chart looked "stuck" showing the previous strategy's scale. */}
+          <StrategyChart key={`${effectiveExpiry}-${JSON.stringify(legs)}-${interval_}`} chart={chart} chartType={chartType} showSpot={showSpot} />
         </div>
       ) : (
         loading &&
