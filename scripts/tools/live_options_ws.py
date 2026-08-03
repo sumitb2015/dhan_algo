@@ -49,8 +49,7 @@ FULL        = 21  # Full packet — includes OI
 FEED_QUOTE  = 17  # Quote packet — LTP + OHLC + volume (includes prev_close)
 
 # Security IDs
-NIFTY_IDX_SID = '13'   # NIFTY 50 index (spot canary)
-VIX_SID       = '21'   # India VIX index
+VIX_SID = '21'   # India VIX index
 
 UNDERLYING_SIDS = {
     'NIFTY':     '13',

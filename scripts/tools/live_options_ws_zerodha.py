@@ -1,16 +1,23 @@
 """
-Live options WebSocket bridge for the RS dashboard options page (Zerodha Mode).
+Live options WebSocket bridge for the RS dashboard's Zerodha-broker scalper panel.
 
-Subscribes to NSE FNO option contracts via Zerodha KiteTicker WebSocket and writes
+Zerodha's own market-data quote API (kite.quote/kite.ohlc/KiteTicker) requires
+a separately-billed Kite Connect data-pack subscription. Rather than depend on
+that, this bridge sources all market data (spot, OI, OHLC, LTP) from Dhan —
+same as live_options_ws.py — since a Dhan data subscription is already in use
+elsewhere in this project. It still writes broker-namespaced
 debug/live_options_quotes_zerodha.json + debug/live_options_history_zerodha.json
-for the Next.js dashboard to poll. Runs concurrently and independently of the
-Dhan bridge (live_options_ws.py) — broker-namespaced file paths so neither
-bridge ever needs to stop the other.
++ debug/live_options_status_zerodha.json so the dashboard's per-broker bridge
+wiring (start/stop, ws port, file paths) is unaffected. Zerodha itself is only
+used for order execution (see rs_dashboard/app/api/scalper/zerodha/{lookup,order}),
+which resolves tradingsymbols independently via zerodha_instruments_cache.py —
+not from this bridge.
 
 Usage:
     venv\\Scripts\\python.exe scripts/tools/live_options_ws_zerodha.py --underlying NIFTY --expiry 2026-06-27
 
-Stop gracefully by writing debug/live_options_stop_zerodha.trigger.
+Stop gracefully by writing debug/live_options_stop_zerodha.trigger (done
+automatically by the dashboard's /api/options/live POST {action:"stop"} endpoint).
 """
 import sys
 import os
@@ -20,94 +27,167 @@ import queue
 import asyncio
 import argparse
 import threading
+import urllib.request
 from datetime import datetime, timezone
 
 from websockets.asyncio.server import serve as ws_serve, broadcast as ws_broadcast
-from kiteconnect import KiteConnect, KiteTicker
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, ROOT)
 
-from scripts.tools.zerodha_instruments_cache import restore_session_from_json
+from login import get_dhan_client
+from lib.dhan_helper import DhanHelper
 
 DEBUG_DIR    = os.path.join(ROOT, 'debug')
 QUOTES_FILE  = os.path.join(DEBUG_DIR, 'live_options_quotes_zerodha.json')
 HISTORY_FILE = os.path.join(DEBUG_DIR, 'live_options_history_zerodha.json')
 STATUS_FILE  = os.path.join(DEBUG_DIR, 'live_options_status_zerodha.json')
 STOP_TRIGGER = os.path.join(DEBUG_DIR, 'live_options_stop_zerodha.trigger')
-INSTRUMENTS_CACHE_MAX_AGE_SEC = 24 * 60 * 60
-
-# Resolved index instrument_tokens for underlyings not in the static
-# UNDERLYING_TOKENS map (e.g. SENSEX) — instrument_tokens are effectively
-# permanent, so a long TTL avoids re-fetching the full exchange instrument
-# dump (kite.instruments()) on every single bridge start.
-INDEX_TOKEN_CACHE_FILE = os.path.join(DEBUG_DIR, 'zerodha_index_tokens.json')
-INDEX_TOKEN_CACHE_MAX_AGE_SEC = 7 * 24 * 60 * 60
 
 MAX_HISTORY  = 300   # ~10 min at 2s ticks
 
-# Zerodha Instrument Tokens
-NIFTY_TOKEN  = 256265   # NSE:NIFTY 50
-VIX_TOKEN    = 264969   # NSE:INDIA VIX
+# MarketFeed constants
+NSE_FNO     = 2   # NSE F&O segment
+BSE_FNO     = 8   # BSE F&O segment
+IDX         = 0   # Index segment (shared across exchanges, differentiated by security ID)
+FULL        = 21  # Full packet — includes OI
+FEED_QUOTE  = 17  # Quote packet — LTP + OHLC + volume (includes prev_close)
 
-UNDERLYING_TRADING_SYMBOLS = {
-    'NIFTY':     'NSE:NIFTY 50',
-    'BANKNIFTY': 'NSE:NIFTY BANK',
-    'FINNIFTY':  'NSE:NIFTY FIN SERVICE',
-    'SENSEX':    'BSE:SENSEX',
+# Security IDs
+VIX_SID = '21'   # India VIX index
+
+UNDERLYING_SIDS = {
+    'NIFTY':     '13',
+    'BANKNIFTY': '25',
+    'FINNIFTY':  '27',
+    'SENSEX':    '51',
 }
 
-UNDERLYING_TOKENS = {
-    'NIFTY':     NIFTY_TOKEN,
-    'BANKNIFTY': 260105,
-    'FINNIFTY':  257801,
+# Cash-market exchange each underlying's options trade on — everything here
+# is NSE except SENSEX, which is a BSE index.
+UNDERLYING_EXCHANGE = {
+    'NIFTY':     'NSE',
+    'BANKNIFTY': 'NSE',
+    'FINNIFTY':  'NSE',
+    'SENSEX':    'BSE',
 }
+
+# WS market-feed option-segment code per underlying's exchange
+OPTION_FEED_SEGMENT = {
+    'NSE': NSE_FNO,
+    'BSE': BSE_FNO,
+}
+
+OHLC_URL = 'https://api.dhan.co/v2/marketfeed/ohlc'
 
 # Strike step per underlying
 STRIKE_STEP = {'NIFTY': 50, 'BANKNIFTY': 100, 'FINNIFTY': 50, 'SENSEX': 100}
 
+# Buildup dead-bands. The price band is deliberately near-zero so any directional
+# move classifies; OI carries the dead-band instead. This bridge is the SINGLE source
+# of buildup labels for the Zerodha panel — do not re-derive them in the dashboard,
+# or the two thresholds drift and the same strike gets different labels in different panels.
+BUILDUP_MIN_PRICE_PCT = 0.01
+BUILDUP_MIN_OI_PCT    = 0.5
 
-def _load_index_token_cache() -> dict:
-    try:
-        if os.path.exists(INDEX_TOKEN_CACHE_FILE):
-            with open(INDEX_TOKEN_CACHE_FILE) as f:
-                return json.load(f)
-    except Exception:
-        pass
+
+def _classify_buildup(change_pct: float, oi_chg_pct: float) -> str:
+    """4-way OI buildup label: LB/SB (OI up), SC/LU (OI down); '' inside dead-band."""
+    if abs(change_pct) < BUILDUP_MIN_PRICE_PCT or abs(oi_chg_pct) < BUILDUP_MIN_OI_PCT:
+        return ''
+    if oi_chg_pct > 0:
+        return 'LB' if change_pct > 0 else 'SB'
+    return 'SC' if change_pct > 0 else 'LU'
+
+
+def _fetch_prev_closes(dhan, underlying_sid: str, underlying_exchange: str = 'NSE',
+                        attempts: int = 5, delay: float = 5.0) -> dict:
+    """Fetch previous-session closes for both VIX (always NSE) and the underlying
+    index — the underlying may be on NSE_IDX or BSE_IDX depending on exchange.
+
+    Retries on transient failures (e.g. 429s — more likely here since this bridge
+    and the Dhan-panel bridge can both hit Dhan's REST API around the same time on
+    startup). A single missed fetch would otherwise leave spot/VIX % change pinned
+    at 0.00 for the bridge's entire lifetime, since this value is only fetched once
+    at startup with no retry during the main loop."""
+    underlying_seg = 'NSE_IDX' if underlying_exchange == 'NSE' else 'BSE_IDX'
+    for attempt in range(attempts):
+        closes = {underlying_sid: 0.0, VIX_SID: 0.0}
+        try:
+            token     = dhan.dhan_http.access_token
+            client_id = dhan.dhan_http.client_id
+            body_map = {'NSE_IDX': [int(VIX_SID)]}
+            body_map.setdefault(underlying_seg, []).append(int(underlying_sid))
+            body = json.dumps(body_map).encode()
+            req  = urllib.request.Request(
+                OHLC_URL, data=body, method='POST',
+                headers={
+                    'access-token':  token,
+                    'client-id':     client_id,
+                    'Content-Type':  'application/json',
+                    'Accept':        'application/json',
+                },
+            )
+            with urllib.request.urlopen(req, timeout=6) as resp:
+                res = json.loads(resp.read())
+            if res.get('status') == 'success':
+                data = res.get('data', {}) or {}
+                for sid, seg in ((underlying_sid, underlying_seg), (VIX_SID, 'NSE_IDX')):
+                    entry = (data.get(seg, {}) or {}).get(sid, {}) or {}
+                    ohlc  = entry.get('ohlc') or {}
+                    val   = float(ohlc.get('close') or 0)
+                    if val > 0:
+                        closes[sid] = round(val, 2)
+        except Exception as e:
+            print(f'[live_options_ws_zerodha] WARN: prev_closes fetch failed (attempt {attempt + 1}/{attempts}): {e}', flush=True)
+
+        if closes[underlying_sid] > 0 or closes[VIX_SID] > 0:
+            return closes
+        if attempt < attempts - 1:
+            print(f'[live_options_ws_zerodha] WARN: prev_closes fetch returned no data (attempt {attempt + 1}/{attempts}), retrying in {delay:.0f}s…', flush=True)
+            time.sleep(delay)
+    return closes
+
+
+def _fetch_prev_meta(helper, underlying: str, expiry: str, exchange_segment: str = 'IDX_I', attempts: int = 5, delay: float = 5.0) -> dict:
+    """Fetch previous-day OI and previous-day Close per strike/side from option chain (at startup).
+
+    Retries on transient failures (429s, empty chain) since a single missed
+    fetch would otherwise disable buildup labels for the whole session.
+    Returns {strike_int: {'ce_oi': int, 'pe_oi': int, 'ce_close': float, 'pe_close': float}}.
+
+    Only genuine previous-day fields are accepted. Falling back to the CURRENT
+    'oi'/'close'/'last_price' would fabricate a baseline: OI change would read ~0%
+    all session and change% would be measured from startup rather than yesterday's
+    close, both indistinguishable from real values on screen. Dhan additionally
+    flips 'close' to the LTP after the 15:30 bell, so it is not a safe stand-in.
+    A missing baseline is left at 0 and the dependent label is suppressed.
+    """
+    for attempt in range(attempts):
+        prev_meta: dict = {}
+        try:
+            chain = helper.get_option_chain(underlying, expiry, exchange_segment=exchange_segment)
+            for strike_str, data in ((chain or {}).get('oc') or {}).items():
+                strike = int(float(strike_str))
+                ce_data = data.get('ce') or {}
+                pe_data = data.get('pe') or {}
+                prev_meta[strike] = {
+                    'ce_oi':    int(_f(ce_data.get('previous_oi'))),
+                    'pe_oi':    int(_f(pe_data.get('previous_oi'))),
+                    'ce_close': _f(ce_data.get('previous_close')),
+                    'pe_close': _f(pe_data.get('previous_close')),
+                }
+        except Exception as e:
+            print(f'[live_options_ws_zerodha] WARN: prev_meta fetch failed (attempt {attempt + 1}/{attempts}): {e}', flush=True)
+            prev_meta = {}
+
+        if prev_meta:
+            return prev_meta
+        if attempt < attempts - 1:
+            print(f'[live_options_ws_zerodha] WARN: prev_meta fetch returned no strikes (attempt {attempt + 1}/{attempts}), retrying in {delay:.0f}s…', flush=True)
+            time.sleep(delay)
     return {}
 
-
-def _resolve_index_token(kite, underlying: str):
-    """Return the instrument_token for an underlying's index, using the
-    static UNDERLYING_TOKENS map when available, then a file cache
-    (INDEX_TOKEN_CACHE_FILE), then falling back to a live kite.instruments()
-    lookup for anything not hardcoded there (e.g. SENSEX, whose token isn't a
-    well-known constant like NIFTY's). Returns None on failure — callers MUST
-    NOT fall back to another underlying's token (e.g. NIFTY's), since that
-    would silently subscribe to and display a different instrument's live
-    price mislabeled as this underlying's spot."""
-    token = UNDERLYING_TOKENS.get(underlying)
-    if token:
-        return token
-
-    cache = _load_index_token_cache()
-    entry = cache.get(underlying)
-    if entry and time.time() - entry.get('ts', 0) < INDEX_TOKEN_CACHE_MAX_AGE_SEC:
-        return entry['token']
-
-    exchange = 'BSE' if underlying == 'SENSEX' else 'NSE'
-    try:
-        for inst in kite.instruments(exchange):
-            if inst.get('tradingsymbol') == underlying:
-                resolved = int(inst['instrument_token'])
-                cache[underlying] = {'token': resolved, 'ts': time.time()}
-                atomic_write(INDEX_TOKEN_CACHE_FILE, cache)
-                return resolved
-    except Exception as e:
-        print(f'[live_options_ws_zerodha] WARN: failed to resolve index token for {underlying}: {e}', flush=True)
-    print(f'[live_options_ws_zerodha] WARN: could not resolve index token for {underlying} — '
-          f'live spot updates will be disabled for this session (falling back to the one-time REST spot).', flush=True)
-    return None
 
 def _f(val, default: float = 0.0) -> float:
     if val is None:
@@ -116,6 +196,7 @@ def _f(val, default: float = 0.0) -> float:
         return float(val)
     except (ValueError, TypeError):
         return default
+
 
 def atomic_write_text(path: str, text: str) -> bool:
     tmp = path + '.tmp'
@@ -130,6 +211,7 @@ def atomic_write_text(path: str, text: str) -> bool:
         print(f"[live_options_ws_zerodha] Warning: failed to write {path} ({e})", flush=True)
         return False
 
+
 def atomic_write(path: str, data: dict) -> bool:
     tmp = path + '.tmp'
     try:
@@ -138,10 +220,14 @@ def atomic_write(path: str, data: dict) -> bool:
         os.replace(tmp, path)
         return True
     except PermissionError:
+        # File is locked by a concurrent reader (e.g. the Next.js API route) — skip
+        # this cycle. Caller must NOT advance its "last written" bookkeeping on
+        # failure, or the dropped write is never retried and the file goes stale.
         return False
     except Exception as e:
         print(f"[live_options_ws_zerodha] Warning: failed to write {path} ({e})", flush=True)
         return False
+
 
 def write_status(status: str, underlying: str = '', expiry: str = '',
                  subscribed: int = 0, started_at: str = '', ws_port=None):
@@ -160,7 +246,12 @@ def write_status(status: str, underlying: str = '', expiry: str = '',
     except Exception as e:
         print(f"[live_options_ws_zerodha] Warning: failed to write status ({e})", flush=True)
 
+
 class QuotePushServer:
+    """Localhost WebSocket push server. Runs in its own thread with its own
+    asyncio loop; the bridge main loop hands it pre-serialized JSON payloads
+    via broadcast(), which is thread-safe. Bound to 127.0.0.1 only."""
+
     def __init__(self, port: int):
         self.port = port
         self.clients: set = set()
@@ -176,7 +267,7 @@ class QuotePushServer:
         try:
             if self._latest_payload:
                 await ws.send(self._latest_payload)
-            async for _ in ws:
+            async for _ in ws:   # drain and ignore anything the client sends
                 pass
         except Exception:
             pass
@@ -194,7 +285,8 @@ class QuotePushServer:
         try:
             self.loop.run_until_complete(_bind())
         except OSError as e:
-            print(f'[live_options_ws_zerodha] WARN: WS push server failed to bind port {self.port}: {e} — continuing file-only', flush=True)
+            print(f'[live_options_ws_zerodha] WARN: WS push server failed to bind port {self.port}: {e} '
+                  f'— continuing file-only', flush=True)
         finally:
             self._started.set()
 
@@ -221,13 +313,14 @@ class QuotePushServer:
             ws_broadcast(self.clients, payload)
 
     def broadcast(self, payload: str):
+        """Thread-safe: called from the bridge main loop."""
         if not self.bound or self.loop is None:
             self._latest_payload = payload
             return
         try:
             self.loop.call_soon_threadsafe(self._do_broadcast, payload)
         except RuntimeError:
-            pass
+            pass  # loop already closed during shutdown
 
     def stop(self):
         if self.bound and self.loop is not None:
@@ -238,26 +331,9 @@ class QuotePushServer:
         if self.thread is not None:
             self.thread.join(timeout=2)
 
-def load_zerodha_instruments_cache(underlying: str = 'NIFTY'):
-    cache_file = os.path.join(ROOT, 'debug', f'zerodha_{underlying.lower()}_instruments.json')
-    is_stale = (
-        os.path.exists(cache_file)
-        and time.time() - os.path.getmtime(cache_file) > INSTRUMENTS_CACHE_MAX_AGE_SEC
-    )
-    if not os.path.exists(cache_file) or is_stale:
-        reason = 'stale (>24h old)' if is_stale else 'missing'
-        print(f"[live_options_ws_zerodha] Instrument cache {reason}, generating...", flush=True)
-        import subprocess
-        subprocess.run(
-            [sys.executable, os.path.join(ROOT, 'scripts', 'tools', 'zerodha_instruments_cache.py'),
-             '--underlying', underlying],
-            check=True,
-        )
-    with open(cache_file) as f:
-        return json.load(f)
 
 def main():
-    parser = argparse.ArgumentParser(description='Live options WebSocket bridge (Zerodha Mode)')
+    parser = argparse.ArgumentParser(description='Live options WebSocket bridge (Zerodha broker panel, Dhan-sourced data)')
     parser.add_argument('--underlying', default='NIFTY',
                         choices=['NIFTY', 'BANKNIFTY', 'FINNIFTY', 'SENSEX'])
     parser.add_argument('--expiry', required=True,
@@ -279,122 +355,103 @@ def main():
     write_status('STARTING', underlying=args.underlying, expiry=args.expiry,
                  started_at=started_at, ws_port=ws_port)
 
-    print(f'[live_options_ws_zerodha] Starting — underlying={args.underlying} expiry={args.expiry}', flush=True)
+    print(f'[live_options_ws_zerodha] Starting — underlying={args.underlying} expiry={args.expiry} (data source: Dhan)',
+          flush=True)
 
-    kite = restore_session_from_json()
-    if not kite:
-        print('[live_options_ws_zerodha] ERROR: authentication failed', flush=True)
+    dhan = get_dhan_client()
+    if not dhan:
+        print('[live_options_ws_zerodha] ERROR: Dhan authentication failed', flush=True)
         write_status('ERROR', underlying=args.underlying, expiry=args.expiry,
                      started_at=started_at)
         sys.exit(1)
 
-    # Fetch spot to determine ATM
-    spot_symbol = UNDERLYING_TRADING_SYMBOLS.get(args.underlying.upper(), 'NSE:NIFTY 50')
-    print(f'[live_options_ws_zerodha] Fetching spot price for {spot_symbol}…', flush=True)
-    spot = 0.0
-    backoff = 1.0
-    for attempt in range(3):
-        try:
-            q = kite.quote([spot_symbol])
-            spot = q.get(spot_symbol, {}).get('last_price', 0.0)
-            if spot > 0:
-                break
-        except Exception as e:
-            print(f'[live_options_ws_zerodha] WARN: spot fetch failed (attempt {attempt + 1}/3): {e}', flush=True)
-        time.sleep(backoff)
-        backoff *= 2
+    helper = DhanHelper(dhan)
+    step = STRIKE_STEP.get(args.underlying, 50)
+    underlying_sid = UNDERLYING_SIDS.get(args.underlying.upper(), '13')
+    underlying_exchange = UNDERLYING_EXCHANGE.get(args.underlying.upper(), 'NSE')
+    underlying_seg = 'IDX_I' if underlying_exchange == 'NSE' else 'BSE_IDX'
 
-    step = STRIKE_STEP.get(args.underlying.upper(), 50)
+    # Fetch prev_closes once at startup — used for % change throughout the session
+    closes = _fetch_prev_closes(dhan, underlying_sid, underlying_exchange)
+    underlying_prev_close = closes.get(underlying_sid, 0.0)
+    vix_prev_close = closes.get(VIX_SID, 0.0)
+    print(f'[live_options_ws_zerodha] prev_closes: underlying={underlying_prev_close}, VIX={vix_prev_close}', flush=True)
+
+    # Fetch prev-day OI & Close per strike once at startup — baseline for buildup labels
+    prev_meta_map = _fetch_prev_meta(helper, args.underlying, args.expiry, exchange_segment=underlying_seg)
+    print(f'[live_options_ws_zerodha] prev_meta baseline: {len(prev_meta_map)} strikes', flush=True)
+
+    # Get spot to determine ATM — retry on transient REST failures (429s):
+    # spot=0 here means zero strikes resolved and a crippled session.
+    print('[live_options_ws_zerodha] Fetching spot price…', flush=True)
+    spot = 0.0
+    for attempt in range(5):
+        spot = helper.get_ltp(args.underlying, exchange=underlying_exchange, instrument='INDEX') or 0.0
+        if spot > 0:
+            break
+        print(f'[live_options_ws_zerodha] WARN: spot fetch failed (attempt {attempt + 1}/5), retrying in 5s…', flush=True)
+        time.sleep(5)
     atm  = round(spot / step) * step if spot > 0 else 0
     print(f'[live_options_ws_zerodha] Spot={spot:.2f} ATM={atm} step={step}', flush=True)
 
     num = args.num_strikes
     strikes = [atm + i * step for i in range(-num, num + 1)] if atm > 0 else []
 
-    # Load instruments cache to map strike -> tokens
-    insts_cache = load_zerodha_instruments_cache(args.underlying.upper())
-    
-    # Resolve instrument tokens
-    sid_map = {} # token_id_int -> {strike, type, tradingsymbol}
-    option_tokens = []
-    
-    for inst in insts_cache:
-        if inst['expiry'] == args.expiry and float(inst['strike']) in strikes:
-            token = int(inst['instrument_token'])
-            sid_map[token] = {
-                'strike': int(inst['strike']),
-                'type': inst['instrument_type'],
-                'tradingsymbol': inst['tradingsymbol']
-            }
-            option_tokens.append(token)
+    # Resolve security IDs from master list
+    sid_map: dict[str, dict] = {}  # sid -> {strike, type}
 
-    # Spot and VIX tokens. underlying_token may be None (resolution failed) —
-    # in that case we deliberately skip subscribing to any index canary
-    # rather than silently falling back to a different underlying's token,
-    # which would display that instrument's live price mislabeled as this
-    # underlying's spot (see _resolve_index_token).
-    underlying_token = _resolve_index_token(kite, args.underlying.upper())
-    all_tokens = ([underlying_token] if underlying_token else []) + [VIX_TOKEN] + option_tokens
+    option_feed_segment = OPTION_FEED_SEGMENT.get(underlying_exchange, NSE_FNO)
+    print(f'[live_options_ws_zerodha] Resolving {len(strikes) * 2} option contracts…', flush=True)
+    instruments = []
+    for strike in strikes:
+        for opt_type in ('CE', 'PE'):
+            opt = helper.find_option(args.underlying, args.expiry, float(strike), opt_type, exchange=underlying_exchange)
+            if opt is None:
+                continue
+            sid = str(int(opt['SECURITY_ID']))
+            sid_map[sid] = {'strike': int(strike), 'type': opt_type}
+            instruments.append((option_feed_segment, sid, FULL))
 
-    print(f'[live_options_ws_zerodha] Subscribing to {len(option_tokens)} option contracts + indices…', flush=True)
+    # Subscribe to underlying index (spot canary) and India VIX
+    instruments.append((IDX, underlying_sid, FEED_QUOTE))
+    instruments.append((IDX, VIX_SID, FEED_QUOTE))
 
-    if len(option_tokens) == 0:
+    n = len(sid_map)  # actual option contracts (excludes index canary + VIX)
+    print(f'[live_options_ws_zerodha] Subscribing to {n} option contracts + index canary…', flush=True)
+
+    if n == 0:
         print('[live_options_ws_zerodha] ERROR: no contracts resolved — aborting', flush=True)
         write_status('ERROR', underlying=args.underlying, expiry=args.expiry,
                      started_at=started_at, ws_port=ws_port)
         sys.exit(1)
 
-    # Fetch prev closes
-    print('[live_options_ws_zerodha] Fetching baseline prev_closes…', flush=True)
-    underlying_prev_close = 0.0
-    vix_prev_close = 0.0
-    try:
-        ohlc_data = kite.ohlc([spot_symbol, "NSE:INDIA VIX"])
-        underlying_prev_close = ohlc_data.get(spot_symbol, {}).get('ohlc', {}).get('close', 0.0)
-        vix_prev_close = ohlc_data.get("NSE:INDIA VIX", {}).get('ohlc', {}).get('close', 0.0)
-    except Exception as e:
-        print(f'[live_options_ws_zerodha] WARN: baseline ohlc fetch failed: {e}', flush=True)
-
-    print(f'[live_options_ws_zerodha] prev_closes: underlying={underlying_prev_close}, VIX={vix_prev_close}', flush=True)
-
-    live_data = {}
+    # Dirty flag set by the feed thread on every incoming packet. DhanHelper
+    # merges the packet into live_data BEFORE invoking this callback, so the
+    # data is already readable when the main loop wakes.
     dirty = threading.Event()
+    helper.start_websocket(instruments, on_message=lambda inst, msg: dirty.set())
+    time.sleep(3)  # wait for connection + first tick batch
 
-    def on_ticks(ws, ticks):
-        for tick in ticks:
-            tok = tick.get('instrument_token')
-            if tok:
-                live_data[tok] = tick
-        dirty.set()
-
-    def on_connect(ws, response):
-        ws.subscribe(all_tokens)
-        ws.set_mode(ws.MODE_FULL, all_tokens)
-        print("[live_options_ws_zerodha] WebSocket connected & subscribed successfully.", flush=True)
-
-    # Initialize KiteTicker
-    kws = KiteTicker(api_key=kite.api_key, access_token=kite.access_token)
-    kws.on_ticks = on_ticks
-    kws.on_connect = on_connect
-    kws.connect(threaded=True)
-
-    # Poll until the socket is actually up instead of always waiting a flat
-    # 3s — proceeds the instant the connection is live, capped at 5s.
-    connect_deadline = time.time() + 5.0
-    while not kws.is_connected() and time.time() < connect_deadline:
-        time.sleep(0.2)
+    # Diagnostic: check if index canary received a tick
+    idx_initial = helper.live_data.get(underlying_sid)
+    if idx_initial:
+        initial_ltp = _f(idx_initial.get('LTP') or idx_initial.get('last_price'))
+        print(f'[live_options_ws_zerodha] Index tick received — LTP={initial_ltp:.2f}', flush=True)
+    else:
+        print('[live_options_ws_zerodha] WARNING: No index tick received after 3s; will use REST spot as fallback', flush=True)
 
     write_status('RUNNING', underlying=args.underlying, expiry=args.expiry,
-                 subscribed=len(option_tokens), started_at=started_at, ws_port=ws_port)
+                 subscribed=n, started_at=started_at, ws_port=ws_port)
+    print('[live_options_ws_zerodha] WebSocket connected. Pushing on tick; file every 0.5s…', flush=True)
 
     last_print = 0.0
     last_quotes = None
     last_pushed = None
-    last_pushed_time = 0.0
     last_file_write = 0.0
     last_history_write = 0.0
-    hist_json_parts = []
-    hist_q = queue.Queue(maxsize=1)
+    hist_json_parts: list = []
+
+    hist_q: queue.Queue = queue.Queue(maxsize=1)
 
     def _history_writer():
         while True:
@@ -403,11 +460,16 @@ def main():
                 return
             atomic_write_text(HISTORY_FILE, '{"history":[' + ','.join(parts) + ']}')
 
-    hist_thread = threading.Thread(target=_history_writer, daemon=True, name='history-writer')
+    hist_thread = threading.Thread(target=_history_writer, daemon=True, name='history-writer-zerodha')
     hist_thread.start()
 
     try:
         while True:
+            # Event-driven pacing: wake instantly on a market tick (dirty flag
+            # set by the feed thread), or every 250ms as a heartbeat for the
+            # stop-trigger check. After a wake, sleep 20ms so the multi-packet
+            # burst per tick (Full + OI + PrevClose) coalesces into ONE
+            # snapshot build + push (~40 pushes/sec max).
             if dirty.wait(timeout=0.25):
                 dirty.clear()
                 time.sleep(0.02)
@@ -420,21 +482,21 @@ def main():
                 print('[live_options_ws_zerodha] Stop trigger detected — exiting.', flush=True)
                 break
 
-            # Update spot
-            idx_tick = live_data.get(underlying_token)
+            # Update spot from index canary
+            idx_tick = helper.live_data.get(underlying_sid)
             if idx_tick:
-                live_spot = _f(idx_tick.get('last_price'))
+                live_spot = _f(idx_tick.get('LTP') or idx_tick.get('last_price'))
                 if live_spot > 0:
                     spot = live_spot
                     atm  = round(spot / step) * step
 
-            # VIX data
-            vix_data = None
-            vix_tick = live_data.get(VIX_TOKEN)
+            # Read India VIX from WebSocket; prev_close is the value fetched at startup
+            vix_data: dict | None = None
+            vix_tick = helper.live_data.get(VIX_SID)
             if vix_tick:
-                vix_ltp = _f(vix_tick.get('last_price'))
+                vix_ltp = _f(vix_tick.get('LTP') or vix_tick.get('last_price'))
                 if vix_ltp > 0:
-                    vix_chg = round(vix_ltp - vix_prev_close, 2) if vix_prev_close else 0.0
+                    vix_chg     = round(vix_ltp - vix_prev_close, 2) if vix_prev_close else 0.0
                     vix_chg_pct = round(vix_chg / vix_prev_close * 100, 4) if vix_prev_close else 0.0
                     vix_data = {
                         'ltp':        round(vix_ltp, 2),
@@ -443,9 +505,9 @@ def main():
                         'change_pct': vix_chg_pct,
                     }
 
-            # Build strikes quotes
-            strikes_data = {}
-            for token, meta in sid_map.items():
+            # Build per-strike quotes
+            strikes_data: dict[str, dict] = {}
+            for sid, meta in sid_map.items():
                 sk_key = str(meta['strike'])
                 if sk_key not in strikes_data:
                     strikes_data[sk_key] = {
@@ -454,34 +516,40 @@ def main():
                         'pe': {'ltp': 0, 'oi': 0, 'volume': 0, 'prev_close': 0.0, 'change': 0.0, 'change_pct': 0.0, 'oi_chg_pct': 0.0, 'buildup': ''},
                     }
 
-                tick = live_data.get(token)
+                tick = helper.live_data.get(sid)
                 if tick:
-                    ltp = _f(tick.get('last_price'))
-                    oi  = int(tick.get('oi', 0) or 0)
-                    vol = int(tick.get('volume', 0) or tick.get('volume_traded', 0) or 0)
-                    
-                    ohlc = tick.get('ohlc') or {}
-                    prev_close = _f(ohlc.get('close'))
-                    
+                    ltp = _f(tick.get('LTP') or tick.get('last_price'))
+                    oi  = int(tick.get('OI', 0) or tick.get('oi', 0) or 0)
+                    vol = int(tick.get('volume', 0) or 0)
+
+                    side_key = meta['type'].lower()
+                    strike_meta = prev_meta_map.get(meta['strike']) or {}
+                    side_prev_oi = _f(strike_meta.get(f'{side_key}_oi'))
+                    fallback_prev_close = _f(strike_meta.get(f'{side_key}_close'))
+
+                    prev_close = _f(tick.get('prev_close') or tick.get('close'))
+                    if prev_close == 0.0:
+                        ohlc = tick.get('ohlc') or {}
+                        prev_close = _f(ohlc.get('close'))
+                    if prev_close == 0.0:
+                        prev_close = fallback_prev_close
+
                     change = ltp - prev_close if prev_close > 0 else 0.0
                     change_pct = (change / prev_close * 100) if prev_close > 0 else 0.0
-
-                    # Standard fallback for baseline OI since we don't have direct previous_oi from ticks
-                    oi_chg_pct = 0.0
-                    buildup = ''
+                    oi_chg_pct = ((oi - side_prev_oi) / side_prev_oi * 100) if side_prev_oi > 0 and oi > 0 else 0.0
 
                     strikes_data[sk_key][meta['type'].lower()] = {
-                        'ltp':        round(ltp, 2),
-                        'oi':         oi,
-                        'volume':     vol,
-                        'open':       round(_f(ohlc.get('open')), 2),
-                        'high':       round(_f(ohlc.get('high')), 2),
-                        'low':        round(_f(ohlc.get('low')), 2),
-                        'prev_close':  round(prev_close, 2),
-                        'change':      round(change, 2),
-                        'change_pct':  round(change_pct, 4),
-                        'oi_chg_pct':  round(oi_chg_pct, 2),
-                        'buildup':     buildup,
+                        'ltp':    round(ltp, 2),
+                        'oi':     oi,
+                        'volume': vol,
+                        'open':   round(_f(tick.get('open')), 2),
+                        'high':   round(_f(tick.get('high')), 2),
+                        'low':    round(_f(tick.get('low')), 2),
+                        'prev_close': round(prev_close, 2),
+                        'change':     round(change, 2),
+                        'change_pct': round(change_pct, 4),
+                        'oi_chg_pct': round(oi_chg_pct, 2),
+                        'buildup':    _classify_buildup(change_pct, oi_chg_pct),
                     }
 
             # ATM straddle premium
@@ -514,63 +582,57 @@ def main():
 
             now_ts = time.time()
 
-            force_push = (now_ts - last_pushed_time >= 5.0)
-
-            if current_quotes != last_pushed or force_push:
+            # WS push (hot path): push immediately whenever the snapshot changed.
+            if current_quotes != last_pushed:
                 payload = dict(current_quotes)
                 payload['type']       = 'quotes'
                 payload['updated_at'] = now_iso
                 payload['pushed_at']  = now_ts
                 push_server.broadcast(json.dumps(payload))
                 last_pushed = current_quotes
-                last_pushed_time = now_ts
 
-            if (current_quotes != last_quotes or force_push) and now_ts - last_file_write >= 0.5:
+            # Quotes file (fallback + other consumers): relaxed 500ms cadence.
+            if current_quotes != last_quotes and now_ts - last_file_write >= 0.5:
                 file_payload = dict(current_quotes)
                 file_payload['updated_at'] = now_iso
                 if atomic_write(QUOTES_FILE, file_payload):
                     last_quotes = current_quotes
                     last_file_write = now_ts
 
+            # Queue history snapshot every 2 seconds.
             if now_ts - last_history_write >= 2.0:
-                tick_snap = {
+                tick = {
                     'timestamp': now_iso,
                     'spot':              round(spot, 2),
                     'atm':               atm,
                     'straddle_premium':  straddle,
                     'strikes':           strikes_data,
                 }
-                hist_json_parts.append(json.dumps(tick_snap))
+                hist_json_parts.append(json.dumps(tick))
                 if len(hist_json_parts) > MAX_HISTORY:
                     hist_json_parts = hist_json_parts[-MAX_HISTORY:]
                 try:
                     hist_q.put_nowait(list(hist_json_parts))
                 except queue.Full:
-                    pass
+                    pass  # writer busy — next 2s tick retries
                 last_history_write = now_ts
 
             if now_ts - last_print > 10:
-                print(f'[live_options_ws_zerodha] Spot={spot:.2f} | ATM={atm} | Straddle={straddle:.2f} | Subscribed={len(option_tokens)} | WS clients={len(push_server.clients)}', flush=True)
+                print(f'[live_options_ws_zerodha] Spot={spot:.2f} | ATM={atm} | Straddle={straddle:.2f} | Subscribed={n} | WS clients={len(push_server.clients)}', flush=True)
                 last_print = now_ts
 
     except KeyboardInterrupt:
         print('[live_options_ws_zerodha] KeyboardInterrupt — shutting down.', flush=True)
     finally:
         try:
-            hist_q.put_nowait(None)
+            hist_q.put_nowait(None)   # stop the history writer
         except queue.Full:
             pass
-        
-        # Stop KiteTicker
-        try:
-            kws.close()
-        except Exception:
-            pass
-            
         push_server.stop()
         write_status('STOPPED', underlying=args.underlying, expiry=args.expiry,
                      subscribed=0, started_at=started_at, ws_port=None)
         print('[live_options_ws_zerodha] Stopped.', flush=True)
+
 
 if __name__ == '__main__':
     main()
