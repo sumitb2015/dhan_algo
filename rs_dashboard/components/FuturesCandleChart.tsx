@@ -59,10 +59,10 @@ function computeIntradayVWAP(
   let cumVol = 0;
 
   for (const bar of data) {
+    // bar.time is parsed (upstream) as if the naive IST wall-clock string were UTC, so
+    // its UTC date component already IS the IST calendar date — no offset needed here.
     const dt = new Date((bar.time as number) * 1000);
-    // Convert to IST (UTC+5:30) date string YYYY-MM-DD
-    const istTime = new Date(dt.getTime() + 5.5 * 3600 * 1000);
-    const dayStr = istTime.toISOString().split('T')[0];
+    const dayStr = dt.toISOString().split('T')[0];
 
     // Reset cumulative sums on new session day
     if (dayStr !== currentDay) {
@@ -215,6 +215,7 @@ export default function FuturesCandleChart({ candles, symbolName = 'NIFTY FUT' }
         if (typeof param.time === 'number') {
           const dt = new Date(param.time * 1000);
           dateStr = dt.toLocaleString('en-IN', {
+            timeZone: 'UTC',
             month: 'short',
             day: 'numeric',
             hour: '2-digit',
@@ -258,12 +259,18 @@ export default function FuturesCandleChart({ candles, symbolName = 'NIFTY FUT' }
     // Transform candle data into sorted Lightweight Charts items
     const parsedData = candles
       .map((c) => {
+        // c.time is a genuine UTC epoch (raw from the Dhan API, or a real UTC-parseable
+        // string). lightweight-charts always renders UTCTimestamp using UTC getters
+        // (confirmed in its source — getUTCHours/getUTCMinutes), so a true UTC instant
+        // would display as UTC wall-clock, not IST. Shift by the IST offset so the
+        // UTC-rendered labels show the correct IST wall-clock time.
+        const IST_OFFSET_SECONDS = 5.5 * 3600;
         let ts = 0;
         const val = parseFloat(c.time);
         if (!isNaN(val) && val > 1000000000) {
-          ts = Math.floor(val);
+          ts = Math.floor(val) + IST_OFFSET_SECONDS;
         } else {
-          ts = Math.floor(Date.parse(c.time) / 1000);
+          ts = Math.floor(Date.parse(c.time) / 1000) + IST_OFFSET_SECONDS;
         }
         return {
           time: ts as UTCTimestamp,
