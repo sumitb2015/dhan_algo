@@ -30,6 +30,7 @@ function filesFor(broker: Broker) {
     history: path.join(DEBUG_DIR, `live_options_history_${broker}.json`),
     status:  path.join(DEBUG_DIR, `live_options_status_${broker}.json`),
     stop:    path.join(DEBUG_DIR, `live_options_stop_${broker}.trigger`),
+    log:     path.join(DEBUG_DIR, `live_options_log_${broker}.log`),
   };
 }
 
@@ -203,12 +204,20 @@ export async function POST(request: NextRequest) {
 
       const freePort = await findFreePort(broker === 'zerodha' ? 8865 : 8765);
       const scriptPath = broker === 'zerodha' ? ZERODHA_BRIDGE_SCRIPT : BRIDGE_SCRIPT;
+
+      // Truncate per run: pythonw.exe has no console, so an unhandled crash
+      // (e.g. before the script's own try/except-wrapped write_status calls
+      // run) previously left zero trace under stdio:'ignore'. A stale error
+      // from a prior run would otherwise be indistinguishable from a fresh
+      // one's — always start from an empty file.
+      const logFd = fs.openSync(files.log, 'w');
       const child = spawn(
         PYTHON_EXE,
         [scriptPath, '--underlying', underlying, '--expiry', expiry,
          '--num-strikes', String(numStrikes), '--ws-port', String(freePort)],
-        { detached: true, stdio: 'ignore', windowsHide: true },
+        { detached: true, stdio: ['ignore', logFd, logFd], windowsHide: true },
       );
+      fs.closeSync(logFd);
       child.unref();
 
       // Claim the slot before releasing the lock. The lock only covers callers that
