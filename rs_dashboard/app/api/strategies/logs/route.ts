@@ -28,6 +28,7 @@ const STRATEGY_LOG_DIRS: Record<string, string> = {
   nifty_st_oi_bearcall:          'st_oi_bearcall',
   crudeoilm_supertrend:          'crudeoil',
   crudeoilm_renko_sar:           'crudeoil_renko',
+  nifty500_momentum:             'momentum_investing',
 };
 
 // Duplicated instances write `<YYYYMMDD>_<instanceId>.log` alongside the primary's

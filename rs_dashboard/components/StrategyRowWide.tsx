@@ -144,6 +144,11 @@ function StrategyRowWide({ meta, state, onRefresh, instanceId, onAddInstance, on
   const [crudeoilStopInr, setCrudeoilStopInr] = useState(3000);
   // CrudeOil Mini Renko SAR (shares crudeoilInterval/StartTime/EodTime above)
   const [renkoQty, setRenkoQty] = useState(10);
+  const [momentumCapital, setMomentumCapital] = useState(175000);
+  const [momentumSlots, setMomentumSlots] = useState(10);
+  // Defaults ON — see StrategyCard: turning the market filter off deepens the backtested
+  // drawdown from -13.1% to -18.1% for no meaningful gain in return.
+  const [momentumRegime, setMomentumRegime] = useState(true);
   const [renkoBoxSize, setRenkoBoxSize] = useState(5);
   const [renkoReverseBricks, setRenkoReverseBricks] = useState(3);
   // ST+OI Bear Call Spread
@@ -181,7 +186,13 @@ function StrategyRowWide({ meta, state, onRefresh, instanceId, onAddInstance, on
     try {
       const args: string[] = [];
       if (isLive) args.push('--live');
-      if (meta.key === 'crudeoilm_renko_sar') {
+      if (meta.key === 'nifty500_momentum') {
+        // Positional equity portfolio: sized in rupees and slots, not lots, and it has no
+        // daily target/stop-loss caps — exits are per-position, not per-session.
+        args.push('--capital', String(momentumCapital));
+        args.push('--slots', String(momentumSlots));
+        if (!momentumRegime) args.push('--no-regime');
+      } else if (meta.key === 'crudeoilm_renko_sar') {
         // Renko SAR takes order quantity directly (barrels), not lots
         args.push('--qty', String(renkoQty));
         // and is a pure stop-and-reverse system with no daily P&L caps
@@ -723,7 +734,35 @@ function StrategyRowWide({ meta, state, onRefresh, instanceId, onAddInstance, on
           </div>
         </div>
 
-        {meta.key === 'crudeoilm_renko_sar' ? (
+        {meta.key === 'nifty500_momentum' ? (
+          // Positional equity portfolio: rupees and slots, not lots. It also has no session
+          // start-time or daily target/stop, so those generic fields are suppressed below.
+          <>
+            <div className={fieldCls}>
+              <FieldLabel text="Capital ₹" tip="Total rupees allocated to the portfolio. Ranks 1-5 get a 4:3 larger slot than ranks 6-10." />
+              <Input type="number" value={momentumCapital} onChange={e => setMomentumCapital(parseInt(e.target.value) || 175000)} className={inputCls} style={{ width: 92 }} />
+            </div>
+            <div className={fieldCls}>
+              <FieldLabel text="Slots" tip="Maximum stocks held at once. Freed slots are refilled at the next weekly review." />
+              <Input type="number" value={momentumSlots} onChange={e => setMomentumSlots(parseInt(e.target.value) || 10)} min={1} max={30} className={inputCls} style={{ width: 64 }} />
+            </div>
+            <div className={fieldCls}>
+              <FieldLabel text="Market Filter" tip="ON: only buys while last week's Nifty closed above its 200-day average, and moves to cash when it does not. OFF: always eligible to be invested. Backtested 2019-2026, turning it off leaves return almost unchanged (13.35% vs 13.63% CAGR) but deepens the worst drawdown from -13.1% to -18.1%." />
+              <div className="flex items-center gap-2 h-7">
+                <input
+                  type="checkbox"
+                  id={`momentum-regime-wide-${meta.key}`}
+                  checked={momentumRegime}
+                  onChange={e => setMomentumRegime(e.target.checked)}
+                  className="h-3.5 w-3.5 rounded border-zinc-800 bg-zinc-900 accent-emerald-500"
+                />
+                <label htmlFor={`momentum-regime-wide-${meta.key}`} className="text-xs text-zinc-400">
+                  {momentumRegime ? 'On' : 'Off'}
+                </label>
+              </div>
+            </div>
+          </>
+        ) : meta.key === 'crudeoilm_renko_sar' ? (
           <div className={fieldCls}>
             <FieldLabel text="Quantity" tip="Order size in barrels (MCX lot size = 10); not multiplied like other strategies' Lots field." />
             <Input type="number" value={renkoQty} onChange={e => setRenkoQty(parseInt(e.target.value) || 10)} min={1} step={1} className={inputCls} style={{ width: 72 }} />
@@ -798,7 +837,7 @@ function StrategyRowWide({ meta, state, onRefresh, instanceId, onAddInstance, on
           </>
         )}
 
-        {meta.key !== 'nifty_spread_trend' && meta.key !== 'crudeoilm_supertrend' && meta.key !== 'crudeoilm_renko_sar' && meta.key !== 'nifty_st_oi_bearcall' && (
+        {meta.key !== 'nifty_spread_trend' && meta.key !== 'crudeoilm_supertrend' && meta.key !== 'crudeoilm_renko_sar' && meta.key !== 'nifty_st_oi_bearcall' && meta.key !== 'nifty500_momentum' && (
           <div className={fieldCls}>
             <FieldLabel text="Start Time" tip="Time (HH:MM IST) the strategy begins monitoring for entries." />
             <Input type="text" value={startTime} onChange={e => setStartTime(e.target.value)} placeholder="09:20" className={inputCls} style={{ width: 72 }} />
@@ -819,7 +858,7 @@ function StrategyRowWide({ meta, state, onRefresh, instanceId, onAddInstance, on
           </>
         )}
 
-        {meta.key !== 'crudeoilm_renko_sar' && meta.key !== 'crudeoilm_supertrend' && (
+        {meta.key !== 'crudeoilm_renko_sar' && meta.key !== 'crudeoilm_supertrend' && meta.key !== 'nifty500_momentum' && (
           <>
             <div className={fieldCls}>
               <FieldLabel text="Target ₹" tip="Daily cumulative profit target in INR, or a percentage of entry premium collected e.g. '25%'; strategy squares off and stops once reached." />

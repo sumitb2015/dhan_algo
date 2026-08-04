@@ -259,6 +259,11 @@ function StrategyCard({ meta, state, onRefresh }: StrategyCardProps) {
   const [stOiCooldownMinutes, setStOiCooldownMinutes] = useState<number>(5);
   const [exitOnSignalFlip, setExitOnSignalFlip] = useState<boolean>(true);
   const [exitOnOptionStFlip, setExitOnOptionStFlip] = useState<boolean>(true);
+  const [momentumCapital, setMomentumCapital] = useState<number>(175000);
+  const [momentumSlots, setMomentumSlots] = useState<number>(10);
+  // Defaults ON: disabling the market filter barely changes backtested return but deepens
+  // the worst drawdown from -13.1% to -18.1%, so it must be an opt-out, never a default.
+  const [momentumRegime, setMomentumRegime] = useState<boolean>(true);
 
   const spreadTrendNoIndicators =
     meta.key === 'nifty_spread_trend' && !useEma && !useSupertrend;
@@ -281,7 +286,13 @@ function StrategyCard({ meta, state, onRefresh }: StrategyCardProps) {
     try {
       const args: string[] = [];
       if (isLive) args.push('--live');
-      if (meta.key === 'crudeoilm_renko_sar') {
+      if (meta.key === 'nifty500_momentum') {
+        // Positional equity portfolio: sized in rupees and slots, not lots, and it has no
+        // daily target/stop-loss caps at all — exits are per-position, not per-session.
+        args.push('--capital', String(momentumCapital));
+        args.push('--slots', String(momentumSlots));
+        if (!momentumRegime) args.push('--no-regime');
+      } else if (meta.key === 'crudeoilm_renko_sar') {
         // Renko SAR takes order quantity directly (barrels), not lots
         args.push('--qty', String(renkoQty));
         // and is a pure stop-and-reverse system with no daily P&L caps
@@ -565,7 +576,7 @@ function StrategyCard({ meta, state, onRefresh }: StrategyCardProps) {
           </div>
         </div>
 
-        {meta.key === 'crudeoilm_renko_sar' ? (
+        {meta.key === 'nifty500_momentum' ? null /* sized in rupees + slots below, not lots */ : meta.key === 'crudeoilm_renko_sar' ? (
           <div className={fieldCls}>
             <FieldLabel text="Quantity" tip="Order size in barrels (MCX lot size = 10); not multiplied like other strategies' Lots field." />
             <Input type="number" value={renkoQty} onChange={(e) => setRenkoQty(parseInt(e.target.value) || 10)} min={1} step={1} className={inputCls} />
@@ -629,7 +640,7 @@ function StrategyCard({ meta, state, onRefresh }: StrategyCardProps) {
           </>
         )}
 
-        {meta.key !== 'nifty_spread_trend' && meta.key !== 'crudeoilm_supertrend' && meta.key !== 'crudeoilm_renko_sar' && meta.key !== 'nifty_st_oi_bearcall' && (
+        {meta.key !== 'nifty_spread_trend' && meta.key !== 'crudeoilm_supertrend' && meta.key !== 'crudeoilm_renko_sar' && meta.key !== 'nifty_st_oi_bearcall' && meta.key !== 'nifty500_momentum' && (
           <div className={fieldCls}>
             <FieldLabel text="Start Time" tip="Time (HH:MM IST) the strategy begins monitoring for entries." />
             <Input type="text" value={startTime} onChange={(e) => setStartTime(e.target.value)} placeholder="09:20" className={inputCls} />
@@ -650,7 +661,7 @@ function StrategyCard({ meta, state, onRefresh }: StrategyCardProps) {
           </>
         )}
 
-        {meta.key !== 'crudeoilm_renko_sar' && meta.key !== 'crudeoilm_supertrend' && (
+        {meta.key !== 'crudeoilm_renko_sar' && meta.key !== 'crudeoilm_supertrend' && meta.key !== 'nifty500_momentum' && (
           <>
             <div className={fieldCls}>
               <FieldLabel text="Target ₹" tip="Daily cumulative profit target in INR, or a percentage of entry premium collected e.g. '25%'; strategy squares off and stops once reached." />
@@ -660,6 +671,37 @@ function StrategyCard({ meta, state, onRefresh }: StrategyCardProps) {
             <div className={fieldCls}>
               <FieldLabel text="Stop Loss ₹" tip="Daily cumulative stop loss in INR, or a percentage of entry premium collected e.g. '25%'; strategy squares off and stops once breached." />
               <Input type="text" inputMode="decimal" value={stopLoss} onChange={(e) => setStopLoss(e.target.value)} placeholder="25% or 4000" className={inputCls} />
+            </div>
+          </>
+        )}
+
+        {meta.key === 'nifty500_momentum' && (
+          <>
+            <div className={fieldCls}>
+              <FieldLabel text="Capital ₹" tip="Total rupees allocated to the portfolio. Ranks 1-5 get ~11.4% each, ranks 6-10 ~8.6% each." />
+              <Input type="number" value={momentumCapital} onChange={(e) => setMomentumCapital(parseInt(e.target.value) || 175000)} className={inputCls} />
+            </div>
+            <div className={fieldCls}>
+              <FieldLabel text="Slots" tip="Maximum number of stocks held at once. Freed slots are refilled at the next weekly review." />
+              <Input type="number" value={momentumSlots} onChange={(e) => setMomentumSlots(parseInt(e.target.value) || 10)} className={inputCls} />
+            </div>
+            <div className={fieldCls}>
+              <FieldLabel
+                text="Market Filter"
+                tip="ON: only buys while last week's Nifty closed above its 200-day average, and moves to cash when it does not. OFF: always eligible to be invested. Backtested 2019-2026, turning it off leaves return almost unchanged (13.35% vs 13.63% CAGR) but deepens the worst drawdown from -13.1% to -18.1%."
+              />
+              <div className="flex items-center gap-2 h-7">
+                <input
+                  type="checkbox"
+                  id={`momentum-regime-${meta.key}`}
+                  checked={momentumRegime}
+                  onChange={(e) => setMomentumRegime(e.target.checked)}
+                  className="h-3.5 w-3.5 rounded border-zinc-700 bg-zinc-900 accent-emerald-500"
+                />
+                <label htmlFor={`momentum-regime-${meta.key}`} className={lbl}>
+                  {momentumRegime ? 'On (200-SMA)' : 'Off — always invested'}
+                </label>
+              </div>
             </div>
           </>
         )}

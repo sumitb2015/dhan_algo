@@ -138,3 +138,25 @@ PyJWT==2.13.0
 #     "git+https://github.com/Kotak-Neo/Kotak-neo-api-v2.git@539b6022c2c5fe138d6d0a893bbe554cacca10b6"
 #
 # neo-api-client @ git+https://github.com/Kotak-Neo/Kotak-neo-api-v2.git@539b6022c2c5fe138d6d0a893bbe554cacca10b6
+
+# ── Backtest reporting (scripts/analysis/backtest_momentum_portfolio.py) ──────
+plotly==6.9.0
+yfinance==1.5.2
+seaborn==0.13.2
+
+# openstatz — interactive offline tearsheet for the momentum portfolio backtest.
+#
+# MUST be installed with --no-deps. It declares "pandas<3", and installing it
+# normally DOWNGRADES this venv's pandas 3.0.0 to 2.3.3, which breaks the
+# dashboard data stack (same failure mode as neo-api-client above). The pin is
+# conservative -- openstatz 0.4.1 was verified working on pandas 3.0.0:
+# ostz.dashboard() and ostz.stats.montecarlo() both run clean.
+#
+# Its real runtime imports are numpy, pandas, matplotlib, seaborn, plotly and
+# yfinance (hard-imported at module load in openstatz/_compat.py even though the
+# backtest never fetches remote data). All are listed above or already present,
+# and yfinance itself has no upper pandas bound, so it installs normally.
+#
+#   venv\Scripts\python.exe -m pip install --no-deps openstatz==0.4.1
+#
+# openstatz==0.4.1

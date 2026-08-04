@@ -59,6 +59,13 @@ export const STRATEGIES_METADATA: Record<string, { name: string; path: string }>
     name: 'Nifty Rolling Short Straddle',
     path: path.join(PROJECT_ROOT, 'strategies', 'value_imbalance', 'nifty_rolling_straddle.py')
   },
+  // The only positional / multi-day / CNC-delivery strategy here. Unlike every entry above,
+  // stopping it does NOT flatten the book: it exits cleanly and leaves holdings in place,
+  // persisted in debug/nifty500_momentum_portfolio.json for the next start to reload.
+  nifty500_momentum: {
+    name: 'Nifty 500 Momentum Portfolio',
+    path: path.join(PROJECT_ROOT, 'strategies', 'momentum_investing', 'nifty500_momentum.py')
+  },
 };
 
 // Python's save_strategy_state() rewrites the whole <key>_state.json every cycle with only
