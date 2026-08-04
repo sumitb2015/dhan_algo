@@ -245,7 +245,7 @@ export default function StrategiesPage() {
       </div>
 
       {/* Main */}
-      <main className="flex-1 w-full max-w-[1400px] mx-auto px-4 py-4">
+      <main className="flex-1 w-full mx-auto px-4 py-4">
         {loading && Object.keys(strategies).length === 0 ? (
           <div className="flex flex-col items-center justify-center p-16 rounded-xl border border-zinc-900 bg-zinc-950/60 min-h-[260px]">
             <RefreshCw className="h-6 w-6 text-emerald-500 animate-spin" />

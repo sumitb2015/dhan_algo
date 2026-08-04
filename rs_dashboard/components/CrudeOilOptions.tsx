@@ -806,7 +806,7 @@ export default function CrudeOilOptions() {
       </header>
 
       {/* Main Content */}
-      <main className="max-w-7xl mx-auto px-4 py-6 space-y-6">
+      <main className="mx-auto px-4 py-6 space-y-6">
         
         {/* Error Notification */}
         {error && (

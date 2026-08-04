@@ -385,7 +385,7 @@ export default function StrangleAnalysis() {
         
         {/* Sticky header */}
         <div className="sticky top-0 z-30 bg-zinc-900 border-b border-zinc-800 px-4 py-3">
-          <div className="max-w-screen-xl mx-auto flex flex-wrap items-center gap-3">
+          <div className="mx-auto flex flex-wrap items-center gap-3">
             <h1 className="text-base font-bold text-white">
               ATM+{selectedOffset} / ATM-{selectedOffset} Strangle Premium Analysis
             </h1>
@@ -498,7 +498,7 @@ export default function StrangleAnalysis() {
         </div>
 
         {/* Main content body showing friendly alert */}
-        <div className="max-w-screen-xl mx-auto px-4 py-12">
+        <div className="mx-auto px-4 py-12">
           <div className="bg-zinc-800 border border-zinc-750 rounded-xl p-12 text-center max-w-lg mx-auto shadow-xl">
             <div className="text-5xl mb-4">📊</div>
             <h3 className="text-white text-lg font-bold mb-2">No Historical Data Available</h3>
@@ -575,7 +575,7 @@ export default function StrangleAnalysis() {
 
       {/* ── Sticky header ──────────────────────────────────────────────────── */}
       <div className="sticky top-0 z-30 bg-zinc-900 border-b border-zinc-800 px-4 py-3">
-        <div className="max-w-screen-xl mx-auto flex flex-wrap items-center gap-3">
+        <div className="mx-auto flex flex-wrap items-center gap-3">
           <h1 className="text-base font-bold text-white">
             ATM+{selectedOffset} / ATM-{selectedOffset} Strangle Premium Analysis
           </h1>
@@ -687,7 +687,7 @@ export default function StrangleAnalysis() {
         </div>
       </div>
 
-      <div className="max-w-screen-xl mx-auto px-4 py-6 space-y-6">
+      <div className="mx-auto px-4 py-6 space-y-6">
 
         {/* ── Regime banner ─────────────────────────────────────────────────── */}
         {regime !== 'all' && (

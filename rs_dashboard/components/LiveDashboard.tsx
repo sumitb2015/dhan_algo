@@ -420,7 +420,7 @@ export default function LiveDashboard() {
       </header>
 
       {/* ── Content ── */}
-      <main className="flex-1 w-full max-w-[1800px] mx-auto px-4 py-3 flex flex-col gap-3">
+      <main className="flex-1 w-full mx-auto px-4 py-3 flex flex-col gap-3">
 
         {activeTab === 'normalized' ? (
           <LiveNormalizedTab />

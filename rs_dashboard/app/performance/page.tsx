@@ -779,7 +779,7 @@ export default function PerformancePage() {
       </header>
 
       {/* ── Body ───────────────────────────────────────────────────────────── */}
-      <main className="flex-1 px-5 py-6 max-w-screen-2xl mx-auto w-full">
+      <main className="flex-1 px-5 py-6 mx-auto w-full">
 
         {/* Controls row */}
         <div className="flex items-center justify-between gap-4 mb-5 flex-wrap">

@@ -424,7 +424,7 @@ export default function OptionStratsStock() {
       </div>
 
       <div className="sticky top-0 z-30 border-b border-zinc-800 bg-zinc-950/80 px-4 py-3 backdrop-blur-md">
-        <div className="mx-auto flex max-w-screen-xl flex-wrap items-center gap-3">
+        <div className="mx-auto flex flex-wrap items-center gap-3">
           <h1 className="mr-2 text-sm font-bold text-white">Option Strats · Stocks</h1>
 
           <Combobox items={NIFTY50_SYMBOLS} value={underlying} onValueChange={(v) => v && handleUnderlyingChange(v)}>
@@ -474,7 +474,7 @@ export default function OptionStratsStock() {
         </div>
       </div>
 
-      <div className="mx-auto max-w-screen-xl space-y-6 px-4 py-6">
+      <div className="mx-auto space-y-6 px-4 py-6">
         <Card className="bg-card/80">
           <CardHeader className="flex flex-row items-center justify-between border-b [.border-b]:pb-3">
             <CardTitle className="text-xs font-bold uppercase tracking-wider text-white">Legs</CardTitle>

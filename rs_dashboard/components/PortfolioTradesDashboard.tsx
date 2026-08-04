@@ -250,7 +250,7 @@ export default function PortfolioTradesDashboard() {
         </Link>
       </div>
 
-      <main className="flex-1 w-full max-w-[1400px] mx-auto px-4 py-4">
+      <main className="flex-1 w-full mx-auto px-4 py-4">
         {loading ? (
           <div className="flex flex-col items-center justify-center p-16 rounded-xl border border-zinc-900 bg-zinc-950/60 min-h-[300px] gap-3">
             <RefreshCw className="h-6 w-6 text-indigo-500 animate-spin" />

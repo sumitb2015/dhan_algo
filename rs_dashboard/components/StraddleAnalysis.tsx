@@ -421,7 +421,7 @@ export default function StraddleAnalysis() {
 
       {/* ── Sticky header ──────────────────────────────────────────────────── */}
       <div className="sticky top-0 z-30 bg-zinc-900 border-b border-zinc-800 px-4 py-3">
-        <div className="max-w-screen-xl mx-auto flex flex-wrap items-center gap-3">
+        <div className="mx-auto flex flex-wrap items-center gap-3">
           <h1 className="text-sm font-bold text-white mr-2">Straddle Premium Analysis</h1>
           <span className="text-xs font-mono bg-zinc-800 text-zinc-400 px-2 py-0.5 rounded">
             NIFTY · ATM
@@ -511,7 +511,7 @@ export default function StraddleAnalysis() {
         </div>
       </div>
 
-      <div className="max-w-screen-xl mx-auto px-4 py-6 space-y-6">
+      <div className="mx-auto px-4 py-6 space-y-6">
 
         {/* ── Regime banner ─────────────────────────────────────────────────── */}
         {regime !== 'all' && (

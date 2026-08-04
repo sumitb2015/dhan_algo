@@ -475,7 +475,7 @@ export default function ReportsPage() {
       </header>
 
       {/* ── Body ──────────────────────────────────────────────────────────── */}
-      <main className="flex-1 px-5 py-6 max-w-7xl mx-auto w-full">
+      <main className="flex-1 px-5 py-6 mx-auto w-full">
 
         {/* Summary bar */}
         <div className="flex items-center gap-4 mb-6">

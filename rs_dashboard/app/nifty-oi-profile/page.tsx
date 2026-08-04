@@ -113,7 +113,7 @@ export default function NiftyOIProfilePage() {
     <div className="min-h-screen bg-zinc-950 text-zinc-100 flex flex-col font-sans">
       <NavBar />
 
-      <main className="flex-1 p-4 max-w-[1800px] mx-auto w-full flex flex-col gap-4">
+      <main className="flex-1 p-4 mx-auto w-full flex flex-col gap-4">
         {/* TOP CONTROL BAR & TITLE */}
         <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3 bg-zinc-900/70 border border-zinc-800 p-3.5 rounded-xl shadow-md">
           <div className="flex items-center gap-3">

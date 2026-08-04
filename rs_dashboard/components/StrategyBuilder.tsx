@@ -423,7 +423,7 @@ export default function StrategyBuilder() {
       <NavBar />
 
       <div className="sticky top-0 z-30 border-b border-zinc-800 bg-zinc-950/80 px-4 py-3 backdrop-blur-md">
-        <div className="max-w-screen-xl mx-auto flex flex-wrap items-center gap-3">
+        <div className="mx-auto flex flex-wrap items-center gap-3">
           <h1 className="mr-2 text-sm font-bold text-white">Strategy Builder</h1>
           <Badge variant="outline" className="border-zinc-700 bg-zinc-900 font-mono text-zinc-300">NIFTY</Badge>
           <Badge variant="outline" className="border-emerald-500/30 bg-emerald-500/10 font-mono tabular-nums text-emerald-400">
@@ -448,7 +448,7 @@ export default function StrategyBuilder() {
         </div>
       </div>
 
-      <div className="max-w-screen-xl mx-auto px-4 py-6 space-y-6">
+      <div className="mx-auto px-4 py-6 space-y-6">
         {activeTab === 'positions' ? (
           <PositionalTradesTab lotSize={lotSize} />
         ) : activeTab === 'saved' ? (

@@ -136,7 +136,7 @@ export default function MoversPlusDashboard() {
         )}
       </header>
 
-      <main className="flex-1 px-3 py-2 flex flex-col gap-2 max-w-[1800px] mx-auto w-full">
+      <main className="flex-1 px-3 py-2 flex flex-col gap-2 mx-auto w-full">
         {/* Description */}
         <p className="text-[10px] text-zinc-600 font-mono uppercase tracking-wider">
           Persistence tracker — profitable / loss sessions over a configurable window

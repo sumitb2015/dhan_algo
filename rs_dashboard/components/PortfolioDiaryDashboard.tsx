@@ -426,7 +426,7 @@ export default function PortfolioDiaryDashboard() {
         <Link href="/reports" className="text-[11px] font-medium px-2 py-0.5 rounded-full border border-zinc-800 bg-zinc-900/60 text-zinc-400 hover:text-amber-300 hover:border-amber-500/30 transition-all">Reports</Link>
       </div>
 
-      <main className="flex-1 w-full max-w-[1400px] mx-auto px-4 py-4">
+      <main className="flex-1 w-full mx-auto px-4 py-4">
         {loading ? (
           <div className="flex flex-col items-center justify-center p-16 rounded-xl border border-zinc-900 bg-zinc-950/60 min-h-[300px] gap-3">
             <RefreshCw className="h-6 w-6 text-amber-500 animate-spin" />

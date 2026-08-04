@@ -142,7 +142,7 @@ export default function PremarketDashboard() {
 
       {/* ── Content ── */}
       {!loading && !marketOpen && !error && data && (
-        <main className="max-w-7xl mx-auto px-4 py-6 space-y-6">
+        <main className="mx-auto px-4 py-6 space-y-6">
 
           {/* Section 1 — Market Bias */}
           {(() => {

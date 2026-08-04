@@ -845,7 +845,7 @@ export default function MarketMovers() {
         </div>
       </header>
 
-      <main className="flex-1 w-full max-w-[1800px] mx-auto px-3 py-2 flex flex-col gap-2">
+      <main className="flex-1 w-full mx-auto px-3 py-2 flex flex-col gap-2">
         {data && (() => {
           const todayIST = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
           const isStale = data.dataDate < todayIST;

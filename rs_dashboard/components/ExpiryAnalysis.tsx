@@ -631,7 +631,7 @@ export default function ExpiryAnalysis() {
         )}
       </header>
 
-      <main className="p-4 space-y-4 max-w-[1600px] mx-auto">
+      <main className="p-4 space-y-4 mx-auto">
         {/* ── Controls ── */}
         <div className="bg-zinc-900 border border-zinc-800 rounded-xl p-4">
           <div className="flex flex-wrap items-center gap-x-6 gap-y-3">

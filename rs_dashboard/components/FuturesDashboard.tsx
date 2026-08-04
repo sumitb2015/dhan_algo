@@ -498,7 +498,7 @@ export default function FuturesDashboard() {
       </header>
 
       {/* Body */}
-      <main className="flex-1 px-5 py-6 max-w-screen-2xl mx-auto w-full">
+      <main className="flex-1 px-5 py-6 mx-auto w-full">
         {loading ? (
           <div className="flex items-center justify-center py-32 gap-2 text-zinc-400">
             <Loader2 className="h-5 w-5 animate-spin" />
