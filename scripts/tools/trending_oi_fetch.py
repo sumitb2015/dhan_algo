@@ -95,12 +95,24 @@ def pick_band_around_spot(strikes, spot):
 
 
 def select_band(all_strikes, spot, custom_strikes):
+    """Returns (band, note). The note is non-empty whenever the band the caller gets back is
+    not the band they asked for — silently substituting the ATM band would leave the dashboard's
+    strike chips claiming a selection the numbers below them were never computed from."""
     if custom_strikes:
         wanted = set(custom_strikes)
         band = [s for s in all_strikes if s in wanted]
         if band:
-            return band
-    return pick_band_around_spot(all_strikes, spot)
+            missing = [s for s in custom_strikes if s not in set(all_strikes)]
+            if missing:
+                shown = ", ".join(f"{s:g}" for s in missing[:5])
+                more = f" (+{len(missing) - 5} more)" if len(missing) > 5 else ""
+                return band, f" {len(missing)} requested strike(s) are not in this expiry's chain and were dropped: {shown}{more}."
+            return band, ""
+        return (
+            pick_band_around_spot(all_strikes, spot),
+            " None of the requested strikes exist in this expiry's chain — showing the ATM band instead.",
+        )
+    return pick_band_around_spot(all_strikes, spot), ""
 
 
 def cap_to_nearest(strikes, spot, limit):
@@ -149,13 +161,25 @@ def fetch_leg_series(helper, security_id, from_dt, to_dt):
     return df
 
 
+def describe_api_error(err):
+    """Render a recorded DhanHelper.last_api_error as a short human sentence, or '' if there is none.
+    Data-API methods return empty frames on failure and stash the cause here — without this the
+    dashboard reports an auth/subscription outage as 'no data / market may have been closed'."""
+    if not err:
+        return ""
+    code = (err.get("code") or "").strip()
+    message = (err.get("message") or "").strip() or "unknown error"
+    prefix = f"{code}: " if code else ""
+    return f" Dhan data API error — {prefix}{message}."
+
+
 def fetch_spot_series(helper, day, open_dt, end_dt):
     """
-    The index's own per-minute close for the session, as {minute -> spot}.
+    The index's own per-minute close for the session, as ({minute -> spot}, api_error).
     Serves double duty: the day-high/low break column, and the ATM reference for a past
     session (where today's live LTP would centre the band on the wrong strikes entirely).
     """
-    df = normalize_intraday_df(helper.get_intraday_minute_data(
+    raw = helper.get_intraday_minute_data(
         security_id=13,
         exchange_segment="IDX_I",
         instrument_type="INDEX",
@@ -163,21 +187,25 @@ def fetch_spot_series(helper, day, open_dt, end_dt):
         from_date=open_dt.strftime("%Y-%m-%d %H:%M:%S"),
         to_date=end_dt.strftime("%Y-%m-%d %H:%M:%S"),
         oi=False,
-    ))
+    )
+    api_error = helper.last_api_error
+    df = normalize_intraday_df(raw)
     if df.empty or "close" not in df.columns:
-        return {}
+        return {}, api_error
     df = df[df["time"].dt.date == day]
     return {
         r["time"].replace(second=0, microsecond=0): clean_val(r.get("close"))
         for _, r in df.iterrows()
-    }
+    }, api_error
 
 
 def fetch_band_minute_series(helper, band_legs, day, open_dt, end_dt):
     """
     band_legs: list of (ce_security_id, pe_security_id) tuples for the selected strikes.
-    Returns {range, ce_oi, pe_oi, ce_ltp, pe_ltp, legs_ok, legs_failed} where the series are
-    per-minute totals across the range, or None if no leg returned usable OI data.
+    Returns {range, ce_oi, pe_oi, ce_ltp, pe_ltp, legs_ok, legs_failed, api_error} where the
+    series are per-minute totals across the range, or None if no leg returned usable OI data.
+    `api_error` carries the last recorded DhanHelper data-API failure so the caller can tell an
+    outage apart from a genuinely empty session.
     """
     full_range = pd.date_range(open_dt, end_dt, freq="1min")
     ce_oi = pd.Series(0.0, index=full_range)
@@ -188,6 +216,7 @@ def fetch_band_minute_series(helper, band_legs, day, open_dt, end_dt):
     legs_ok = 0
     legs_failed = 0
     max_leg_time = None
+    api_error = None
 
     for ce_id, pe_id in band_legs:
         for side, sec_id in (("ce", ce_id), ("pe", pe_id)):
@@ -195,9 +224,20 @@ def fetch_band_minute_series(helper, band_legs, day, open_dt, end_dt):
                 legs_failed += 1
                 continue
             leg_df = fetch_leg_series(helper, sec_id, open_dt, end_dt)
+            leg_error = helper.last_api_error
             time.sleep(LEG_CALL_PACING_SECONDS)
             if leg_df is None or leg_df.empty:
                 legs_failed += 1
+                if leg_error:
+                    api_error = leg_error
+                    # Auth/subscription failures hit every leg identically — grinding through the
+                    # remaining ~40 paced calls just delays the same answer past the route timeout.
+                    if DhanHelper.is_fatal_error(leg_error):
+                        return {
+                            "range": pd.date_range(open_dt, open_dt, freq="1min"),
+                            "ce_oi": ce_oi, "pe_oi": pe_oi, "ce_ltp": ce_ltp, "pe_ltp": pe_ltp,
+                            "legs_ok": 0, "legs_failed": legs_failed, "api_error": api_error,
+                        }
                 continue
             leg_df = leg_df[leg_df["time"].dt.date == day]
             if leg_df.empty:
@@ -225,16 +265,13 @@ def fetch_band_minute_series(helper, band_legs, day, open_dt, end_dt):
                 pe_oi = pe_oi.add(s_oi, fill_value=0)
                 pe_ltp = pe_ltp.add(s_ltp, fill_value=0)
 
-    if not legs_ok:
-        return None
-
     effective_end = min(end_dt, max_leg_time.to_pydatetime()) if max_leg_time is not None else end_dt
     effective_range = pd.date_range(open_dt, effective_end, freq="1min")
 
     return {
         "range": effective_range,
         "ce_oi": ce_oi, "pe_oi": pe_oi, "ce_ltp": ce_ltp, "pe_ltp": pe_ltp,
-        "legs_ok": legs_ok, "legs_failed": legs_failed,
+        "legs_ok": legs_ok, "legs_failed": legs_failed, "api_error": api_error,
     }
 
 
@@ -415,16 +452,19 @@ def main():
     else:
         day = today
 
+    is_live = day >= today
+    custom_strikes = parse_strikes_param(args.strikes)
+
     def bail(note, spot=0.0, strikes=None, selected=None):
         print(json.dumps({
             "expiry": expiry, "interval": str(interval_minutes), "spot": spot,
             "selected_strikes": selected or [], "available_strikes": strikes or [],
-            "expiries": expiries, "rows": [], "backtrace_status": "unavailable",
+            "requested_strikes": custom_strikes, "expiries": expiries, "rows": [],
+            "is_live": is_live, "backtrace_status": "unavailable",
             "coverage_note": note,
         }))
         sys.exit(0)
 
-    is_live = day >= today
     if is_live:
         day = today
         open_dt = session_open(day)
@@ -436,8 +476,13 @@ def main():
         end_dt = session_close(day)
 
     # The index's own minute series doubles as the ATM reference for a past session.
-    spot_by_minute = fetch_spot_series(helper, day, open_dt, end_dt)
+    spot_by_minute, spot_api_error = fetch_spot_series(helper, day, open_dt, end_dt)
     ordered_minutes = sorted(spot_by_minute)
+
+    # An auth/subscription failure fails every downstream call identically — report the real
+    # cause now instead of spending ~25s of paced option calls to arrive at "no data".
+    if DhanHelper.is_fatal_error(spot_api_error):
+        bail("Could not read NIFTY intraday data." + describe_api_error(spot_api_error))
 
     # Strike ladder
     chain_df = pd.DataFrame()
@@ -467,12 +512,12 @@ def main():
 
     if spot <= 0:
         bail(
-            "Could not resolve a NIFTY spot price for this session — cannot determine the ATM band.",
+            "Could not resolve a NIFTY spot price for this session — cannot determine the ATM band."
+            + describe_api_error(spot_api_error),
             strikes=all_strikes,
         )
 
-    custom_strikes = parse_strikes_param(args.strikes)
-    band = select_band(all_strikes, spot, custom_strikes)
+    band, band_note = select_band(all_strikes, spot, custom_strikes)
 
     if not band:
         bail("No strikes available for this expiry.", spot=spot, strikes=all_strikes)
@@ -502,10 +547,17 @@ def main():
 
     band_data = fetch_band_minute_series(helper, band_legs, day, open_dt, end_dt)
 
-    if band_data is None:
+    if not band_data["legs_ok"]:
+        # Distinguish a real API outage from a genuinely empty session — the two look identical
+        # from here (both yield empty frames), but only one is the user's fault to wait out.
+        api_error = band_data.get("api_error")
+        if api_error:
+            reason = describe_api_error(api_error)
+        else:
+            reason = " — the market may have been closed that day." if not is_live else "."
         bail(
             "Dhan returned no intraday open-interest data (oi=True) for these contracts on "
-            f"{day.isoformat()}" + (" — the market may have been closed that day." if not is_live else "."),
+            f"{day.isoformat()}" + reason,
             spot=spot, strikes=all_strikes, selected=band,
         )
 
@@ -526,7 +578,10 @@ def main():
     # A leg that silently failed (rate limit, missing contract) contributes nothing to the
     # totals, which quietly understates them — say so rather than presenting a clean number.
     dropped = band_data["legs_failed"]
-    dropped_note = f" {dropped} of {dropped + band_data['legs_ok']} legs returned no data." if dropped else ""
+    dropped_note = ""
+    if dropped:
+        dropped_note = f" {dropped} of {dropped + band_data['legs_ok']} legs returned no data."
+        dropped_note += describe_api_error(band_data.get("api_error"))
 
     result = {
         "expiry": expiry,
@@ -534,13 +589,15 @@ def main():
         "spot": spot,
         "selected_strikes": band,
         "available_strikes": all_strikes,
+        "requested_strikes": custom_strikes,
         "expiries": expiries,
         "rows": rows,
+        "is_live": is_live,
         "backtrace_status": "ok",
         "coverage_note": (
             f"{'Live' if is_live else 'Historical'} session for {day.isoformat()}, "
             f"{len(band)} strike{'' if len(band) == 1 else 's'} "
-            f"({band[0]:g}..{band[-1]:g})." + capped_note + dropped_note
+            f"({band[0]:g}..{band[-1]:g})." + band_note + capped_note + dropped_note
         ),
     }
     print(json.dumps(result))

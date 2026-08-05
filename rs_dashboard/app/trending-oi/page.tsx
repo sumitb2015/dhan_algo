@@ -45,6 +45,11 @@ export default function TrendingOiPage() {
   const [strikeSearch, setStrikeSearch] = useState('');
   const pickerRef = useRef<HTMLDivElement>(null);
 
+  // Monotonic request id. A backend run takes ~25s and varies with the strike count, so two
+  // in-flight fetches can land out of order — without this an abandoned selection's response
+  // can overwrite the one the user is actually looking at.
+  const requestSeq = useRef(0);
+
   const initialLoading = loading && !data;
   const refreshing = loading && !!data;
 
@@ -69,6 +74,8 @@ export default function TrendingOiPage() {
   const strikesParam = selectedStrikes?.length ? selectedStrikes.join(',') : '';
 
   const fetchData = useCallback(async () => {
+    const seq = ++requestSeq.current;
+    const isStale = () => seq !== requestSeq.current;
     try {
       setError(null);
       const params = new URLSearchParams({ expiry, interval: interval_ });
@@ -76,15 +83,17 @@ export default function TrendingOiPage() {
       if (strikesParam) params.set('strikes', strikesParam);
       const res = await fetch(`/api/trending-oi?${params.toString()}`);
       const json = await res.json();
+      if (isStale()) return;
       if (json.success && json.data) {
         setData(json.data);
       } else {
         setError(json.error ?? 'Failed to load Trending OI');
       }
     } catch (err: unknown) {
+      if (isStale()) return;
       setError(err instanceof Error ? err.message : String(err));
     } finally {
-      setLoading(false);
+      if (!isStale()) setLoading(false);
     }
   }, [expiry, interval_, requestDate, strikesParam]);
 
@@ -117,6 +126,19 @@ export default function TrendingOiPage() {
   // and picker stay truthful whether the selection came from the user or the default.
   const activeSelectedStrikes = selectedStrikes ?? data?.selected_strikes ?? [];
   const availableStrikes = data?.available_strikes ?? activeSelectedStrikes;
+
+  // The backend falls back to the ATM band when the requested strikes aren't in the chain, and
+  // drops any individual strike it can't find. Either way the chips above would keep advertising
+  // a selection the numbers below were never computed from — so say so explicitly.
+  const servedStrikes = data?.selected_strikes ?? [];
+  const requestedStrikes = data?.requested_strikes ?? [];
+  const strikeSubstitution = useMemo(() => {
+    if (requestedStrikes.length === 0 || servedStrikes.length === 0) return null;
+    const served = new Set(servedStrikes);
+    const missing = requestedStrikes.filter((s) => !served.has(s));
+    if (missing.length === 0) return null;
+    return `Showing ${servedStrikes.length} strike${servedStrikes.length === 1 ? '' : 's'} (${servedStrikes[0]}–${servedStrikes[servedStrikes.length - 1]}) — ${missing.length} requested strike${missing.length === 1 ? '' : 's'} not in this expiry's chain: ${missing.slice(0, 6).join(', ')}${missing.length > 6 ? '…' : ''}`;
+  }, [requestedStrikes, servedStrikes]);
 
   const atmStrike = useMemo(() => {
     if (!spot || availableStrikes.length === 0) return null;
@@ -361,6 +383,13 @@ export default function TrendingOiPage() {
             );
           })}
         </div>
+
+        {strikeSubstitution && (
+          <div className="flex items-start gap-2 bg-amber-500/10 border border-amber-500/30 rounded-lg px-3 py-2 text-xs text-amber-300">
+            <span className="font-bold">⚠</span>
+            <span>{strikeSubstitution}</span>
+          </div>
+        )}
 
         {coverageNote && (
           <div className="text-xs text-zinc-500 px-1">

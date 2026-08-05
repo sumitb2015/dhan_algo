@@ -33,8 +33,12 @@ export interface TrendingOiResponse {
   spot: number;
   selected_strikes: number[];
   available_strikes: number[];
+  /** Echo of the `strikes` param the caller asked for, so the UI can detect a server substitution. */
+  requested_strikes: number[];
   expiries: string[];
   rows: TrendingOiRow[];
+  /** The script's own live/historical verdict — authoritative, unlike the presence of `?date=`. */
+  is_live: boolean;
   backtrace_status: 'ok' | 'unavailable';
   coverage_note: string;
   error?: string;
@@ -43,6 +47,7 @@ export interface TrendingOiResponse {
 interface CacheEntry {
   data: TrendingOiResponse;
   ts: number;
+  ttl: number;
 }
 
 const serverCache = new Map<string, CacheEntry>();
@@ -57,10 +62,9 @@ export async function GET(request: NextRequest) {
   const strikes = searchParams.get('strikes') ?? '';
 
   const cacheKey = `trending-oi:${expiry}:${interval}:${date}:${strikes}`;
-  const ttl = date ? HISTORICAL_CACHE_TTL_MS : LIVE_CACHE_TTL_MS;
 
   const hit = serverCache.get(cacheKey);
-  if (hit && Date.now() - hit.ts < ttl) {
+  if (hit && Date.now() - hit.ts < hit.ttl) {
     return NextResponse.json({ success: true, data: hit.data }, {
       headers: { 'Cache-Control': 'no-store' }
     });
@@ -83,7 +87,11 @@ export async function GET(request: NextRequest) {
       return NextResponse.json({ success: false, error: data.error }, { status: 500 });
     }
 
-    serverCache.set(cacheKey, { data, ts: Date.now() });
+    // Key the TTL off the script's own verdict, not off `?date=` being present: a `date` of
+    // today is still a live, changing session, and freezing it for 24h would serve stale rows
+    // for the rest of the day.
+    const ttl = data.is_live === false ? HISTORICAL_CACHE_TTL_MS : LIVE_CACHE_TTL_MS;
+    serverCache.set(cacheKey, { data, ts: Date.now(), ttl });
 
     return NextResponse.json({ success: true, data }, {
       headers: { 'Cache-Control': 'no-store' }
