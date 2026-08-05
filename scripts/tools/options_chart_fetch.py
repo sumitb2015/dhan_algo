@@ -15,6 +15,10 @@ Usage:
     python options_chart_fetch.py strangle          --underlying NIFTY --expiry 2026-06-25 --ce-strike 25200 --pe-strike 24800 --ce-lots 1 --pe-lots 1
     python options_chart_fetch.py strategy          --underlying NIFTY --expiry 2026-06-25 --legs '[{"option_type":"CE","action":"SELL","strike":25200,"lots":1},{"option_type":"PE","action":"SELL","strike":24800,"lots":1}]'
 
+--underlying also takes BANKNIFTY, FINNIFTY, SENSEX and CRUDEOIL (see UNDERLYINGS below):
+    python options_chart_fetch.py expiries          --underlying SENSEX
+    python options_chart_fetch.py straddle          --underlying CRUDEOIL --expiry 2026-08-17 --strike 7250 --interval 5 --days 1 --include-spot
+
 Prints a single JSON line to stdout. Logs go to stderr.
 """
 from __future__ import annotations
@@ -37,11 +41,33 @@ from lib.dhan_helper import DhanHelper
 
 IST = ZoneInfo("Asia/Kolkata")
 
-# Same underlyings options_data_fetch.py already supports for the options-chain views.
-UNDERLYING_IDS = {"NIFTY": 13, "BANKNIFTY": 25, "FINNIFTY": 27, "SENSEX": 51}
-INDEX_SEGMENT = {"NIFTY": "IDX_I", "BANKNIFTY": "IDX_I", "FINNIFTY": "IDX_I", "SENSEX": "BSE_IDX"}
-INDEX_EXCHANGE = {"NIFTY": "NSE", "BANKNIFTY": "NSE", "FINNIFTY": "NSE", "SENSEX": "BSE"}
-OPTION_SEGMENT = {"NIFTY": "NSE_FNO", "BANKNIFTY": "NSE_FNO", "FINNIFTY": "NSE_FNO", "SENSEX": "BSE_FNO"}
+# Per-underlying instrument resolution. Three things vary and they are NOT interchangeable:
+#   chain_id / chain_seg  - what the option-chain and expiry-list APIs key on
+#   leg_seg  / leg_inst   - the CE/PE contracts' own segment + instrument type
+#   spot_*                - the underlying's own intraday series, drawn as the Spot overlay
+#
+# Two of these were wrong before and are probe-verified against the live API:
+#   - SENSEX's option chain keys on security id 1, NOT the index's 51 (the same split NIFTY has
+#     between 26000 and 13). Id 51 returns an empty expiry list and an empty chain, and passing
+#     the bare symbol "SENSEX" resolves to 51 through the master list, so the id must be passed
+#     explicitly. SENSEX index intraday is also served under IDX_I - BSE_IDX returns DH-905.
+#   - CRUDEOIL legs are MCX_COMM/OPTFUT. The old NSE_FNO/OPTSTK fallback returned zero bars, so
+#     every crude chart failed with "No intraday data available yet".
+#
+# CRUDEOIL has no spot index at all: both its chain id and its spot series come from the nearest
+# non-expired FUTCOM contract, resolved at runtime (see _mcx_future).
+UNDERLYINGS: dict[str, dict] = {
+    "NIFTY":     {"chain_id": 13, "chain_seg": "IDX_I",   "leg_seg": "NSE_FNO", "leg_inst": "OPTIDX",
+                  "spot_id": 13,  "spot_seg": "IDX_I",    "spot_inst": "INDEX",  "spot_label": "Spot"},
+    "BANKNIFTY": {"chain_id": 25, "chain_seg": "IDX_I",   "leg_seg": "NSE_FNO", "leg_inst": "OPTIDX",
+                  "spot_id": 25,  "spot_seg": "IDX_I",    "spot_inst": "INDEX",  "spot_label": "Spot"},
+    "FINNIFTY":  {"chain_id": 27, "chain_seg": "IDX_I",   "leg_seg": "NSE_FNO", "leg_inst": "OPTIDX",
+                  "spot_id": 27,  "spot_seg": "IDX_I",    "spot_inst": "INDEX",  "spot_label": "Spot"},
+    "SENSEX":    {"chain_id": 1,  "chain_seg": "BSE_FNO", "leg_seg": "BSE_FNO", "leg_inst": "OPTIDX",
+                  "spot_id": 51,  "spot_seg": "IDX_I",    "spot_inst": "INDEX",  "spot_label": "Spot"},
+    "CRUDEOIL":  {"mcx": True,    "chain_seg": "MCX_COMM", "leg_seg": "MCX_COMM", "leg_inst": "OPTFUT",
+                  "spot_seg": "MCX_COMM", "spot_inst": "FUTCOM", "spot_label": "Futures"},
+}
 
 MIN_LOTS = 1
 MAX_LOTS = 10
@@ -70,15 +96,53 @@ def _err(message: str):
     sys.exit(0)
 
 
+_mcx_future_cache: dict[str, dict] = {}
+
+
+def _mcx_future(helper: DhanHelper, underlying: str) -> dict:
+    """Nearest non-expired MCX futures contract for an MCX underlying — it stands in for both the
+    chain id and the spot series, since commodities have no spot index.
+
+    Same resolution options_data_fetch.py uses for the crude chain, so the charts and the
+    options-chain page can never diverge after a contract rolls over. Cached per process only,
+    and this process is spawned fresh per request, so a rollover is picked up on the next poll."""
+    under = underlying.upper()
+    cached = _mcx_future_cache.get(under)
+    if cached is not None:
+        return cached
+    from scripts.tools.premarket_data import _find_nearest_future
+
+    fut = _find_nearest_future(helper, under, exchange="MCX", instrument="FUTCOM")
+    if not fut:
+        raise ValueError(f"{under} futures contract not found")
+    _mcx_future_cache[under] = fut
+    return fut
+
+
+def _chain_target(helper: DhanHelper, underlying: str) -> tuple[str, str | None]:
+    """Returns (symbol, exchange_segment) to pass to get_option_chain_df(). Indices and MCX pass a
+    numeric security id plus an explicit segment (their chain id differs from what the master-list
+    symbol lookup would resolve); equities pass the bare symbol and let the helper auto-resolve."""
+    under = underlying.upper()
+    meta = UNDERLYINGS.get(under)
+    if meta is None:
+        return under, None
+    if meta.get("mcx"):
+        return str(int(_mcx_future(helper, under)["SECURITY_ID"])), meta["chain_seg"]
+    return str(meta["chain_id"]), meta["chain_seg"]
+
+
 def _resolve_underlying(helper: DhanHelper, underlying: str) -> dict:
     """Returns {security_id, exchange_segment, instrument_type} for the underlying's OWN
     intraday spot series (not the option legs)."""
     under = underlying.upper()
-    if under in UNDERLYING_IDS:
+    meta = UNDERLYINGS.get(under)
+    if meta is not None:
+        security_id = int(_mcx_future(helper, under)["SECURITY_ID"]) if meta.get("mcx") else meta["spot_id"]
         return {
-            "security_id": UNDERLYING_IDS[under],
-            "exchange_segment": INDEX_SEGMENT[under],
-            "instrument_type": "INDEX",
+            "security_id": security_id,
+            "exchange_segment": meta["spot_seg"],
+            "instrument_type": meta["spot_inst"],
         }
     eq = helper.find_equity(under)
     if not eq:
@@ -88,10 +152,14 @@ def _resolve_underlying(helper: DhanHelper, underlying: str) -> dict:
 
 def _option_leg_segment(underlying: str) -> tuple[str, str]:
     """Returns (exchange_segment, instrument_type) for CE/PE legs of `underlying`."""
-    under = underlying.upper()
-    if under in OPTION_SEGMENT:
-        return OPTION_SEGMENT[under], "OPTIDX"
+    meta = UNDERLYINGS.get(underlying.upper())
+    if meta is not None:
+        return meta["leg_seg"], meta["leg_inst"]
     return "NSE_FNO", "OPTSTK"
+
+
+def _is_mcx(underlying: str) -> bool:
+    return bool(UNDERLYINGS.get(underlying.upper(), {}).get("mcx"))
 
 
 # --- Option chain (cached per underlying+expiry, mirrors straddle_data.get_chain_df) ---
@@ -103,11 +171,13 @@ def get_chain_df(helper: DhanHelper, underlying: str, expiry: str) -> tuple[pd.D
     if cached is not None and (time.time() - cached["fetched_at"]) < _CHAIN_CACHE_TTL_SECONDS:
         return cached["df"], cached["spot"]
 
+    chain_symbol, chain_seg = _chain_target(helper, underlying)
+
     df = None
     for backoff in (0, 3.5, 5.0):
         if backoff:
             time.sleep(backoff)
-        df = helper.get_option_chain_df(underlying, expiry)
+        df = helper.get_option_chain_df(chain_symbol, expiry, exchange_segment=chain_seg)
         if not df.empty:
             break
 
@@ -792,10 +862,28 @@ def main():
     # `days` drives the intraday lookback window (see _calendar_days_for) - clamp so a stray
     # ?days=9999 can't ask Dhan for a 20000-day range.
     days = min(MAX_DAYS, max(1, getattr(args, "days", 2) or 2))
+    # MCX runs 09:00-23:30 (~870 one-minute bars a day vs NSE's 375), and a rolling straddle
+    # fetches one leg pair per strike the underlying touches across the window. A multi-day crude
+    # window means more sequential 0.35s-paced leg fetches than the API route's 60s timeout
+    # allows, so cap it at a single session.
+    if args.cmd == "rolling-straddle" and _is_mcx(args.underlying):
+        days = 1
 
     try:
         if args.cmd == "expiries":
-            expiries = helper.get_expiries(args.underlying)
+            # Explicit id + segment rather than helper.get_expiries(symbol): that resolves the
+            # symbol through the master list, which lands on SENSEX's index id 51 (empty list) and
+            # on an arbitrary CRUDEOIL futures row rather than the nearest non-expired one.
+            under = args.underlying.upper()
+            meta = UNDERLYINGS.get(under)
+            if meta is None:
+                expiries = helper.get_expiries(args.underlying)
+            else:
+                chain_symbol, chain_seg = _chain_target(helper, under)
+                expiries = helper.get_expiry_list(
+                    under_security_id=int(chain_symbol),
+                    under_exchange_segment=chain_seg,
+                )
             _print_json({"expiries": expiries})
 
         elif args.cmd == "strikes":

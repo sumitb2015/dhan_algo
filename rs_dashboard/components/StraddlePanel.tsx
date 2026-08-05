@@ -4,7 +4,8 @@ import { useEffect, useMemo, useState } from 'react';
 import { optionsChartApi } from '@/lib/optionsChartApi';
 import { StraddleChart, type StraddleChartType } from '@/components/StraddleChart';
 import { ChartIndicatorPicker } from '@/components/ChartIndicatorPicker';
-import { isNseLive } from '@/lib/marketHours';
+import { isUnderlyingLive } from '@/lib/marketHours';
+import { CHART_UNDERLYINGS, spotLabel, type ChartUnderlying } from '@/lib/underlyings';
 import { Spinner } from '@/components/Spinner';
 import { DayChangeChip } from '@/components/DayChangeChip';
 import { DEFAULT_INDICATORS, VALID_INTERVALS, type ChartIndicatorRequest, type StraddleChartResponse, type StraddleStrikesResponse } from '@/lib/optionsChartTypes';
@@ -18,14 +19,14 @@ const OFF_HOURS_POLL_INTERVAL_MS = 60_000;
 
 const selectClass = 'px-1.5 py-1 text-xs rounded border border-zinc-700 bg-zinc-900 text-zinc-200';
 
-export function StraddlePanel() {
+export function StraddlePanel({ underlying, onUnderlyingChange }: { underlying: ChartUnderlying; onUnderlyingChange: (u: ChartUnderlying) => void }) {
   const [interval_, setInterval_] = useState('1');
   const [expiry, setExpiry] = useState('');
   const [expiries, setExpiries] = useState<string[]>([]);
   const [strikesData, setStrikesData] = useState<StraddleStrikesResponse | null>(null);
   const [strike, setStrike] = useState<number | null>(null);
   const [indicators, setIndicators] = useState<ChartIndicatorRequest[]>(DEFAULT_INDICATORS);
-  const [chartType, setChartType] = useState<StraddleChartType>('line');
+  const [chartType, setChartType] = useState<StraddleChartType>('candlestick');
   const [showSpot, setShowSpot] = useState(false);
   const [marketLive, setMarketLive] = useState(false);
   const [chart, setChart] = useState<StraddleChartResponse | null>(null);
@@ -33,15 +34,15 @@ export function StraddlePanel() {
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    const update = () => setMarketLive(isNseLive(new Date()));
+    const update = () => setMarketLive(isUnderlyingLive(underlying, new Date()));
     update();
     const id = setInterval(update, 30_000);
     return () => clearInterval(id);
-  }, []);
+  }, [underlying]);
 
   useEffect(() => {
-    optionsChartApi.expiries().then((r) => setExpiries(r.expiries)).catch(() => {});
-  }, []);
+    optionsChartApi.expiries(underlying).then((r) => setExpiries(r.expiries)).catch(() => {});
+  }, [underlying]);
 
   // Derived, not synced via setState-in-effect: falls back to the first fetched expiry until
   // the user picks one explicitly.
@@ -51,7 +52,7 @@ export function StraddlePanel() {
     if (!effectiveExpiry) return;
     let cancelled = false;
     function load() {
-      optionsChartApi.strikes('NIFTY', effectiveExpiry).then((r) => {
+      optionsChartApi.strikes(underlying, effectiveExpiry).then((r) => {
         if (!cancelled) setStrikesData(r);
       }).catch(() => {});
     }
@@ -61,7 +62,7 @@ export function StraddlePanel() {
       cancelled = true;
       clearInterval(id);
     };
-  }, [effectiveExpiry]);
+  }, [underlying, effectiveExpiry]);
 
   const atmStrike = useMemo(() => strikesData?.strikes.find((s) => s.is_atm)?.strike ?? null, [strikesData]);
 
@@ -78,7 +79,7 @@ export function StraddlePanel() {
     function load() {
       setLoading(true);
       optionsChartApi
-        .straddle({ expiry: effectiveExpiry, strike: effectiveStrike as number, interval: interval_, indicators, includeSpot: showSpot })
+        .straddle({ underlying, expiry: effectiveExpiry, strike: effectiveStrike as number, interval: interval_, indicators, includeSpot: showSpot })
         .then((r) => {
           if (!cancelled) {
             setChart(r);
@@ -98,7 +99,7 @@ export function StraddlePanel() {
       cancelled = true;
       clearInterval(id);
     };
-  }, [effectiveExpiry, effectiveStrike, interval_, indicators, marketLive, showSpot]);
+  }, [underlying, effectiveExpiry, effectiveStrike, interval_, indicators, marketLive, showSpot]);
 
   const todaysCandles = useMemo(() => {
     const all = chart?.candles ?? [];
@@ -111,6 +112,14 @@ export function StraddlePanel() {
     <div className="flex flex-col gap-2 h-full min-h-0">
       <div className="bg-zinc-800 rounded-lg flex-shrink-0">
         <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5 p-2">
+          <select value={underlying} onChange={(e) => onUnderlyingChange(e.target.value as ChartUnderlying)} className={`${selectClass} font-semibold`}>
+            {CHART_UNDERLYINGS.map((u) => (
+              <option key={u} value={u}>
+                {u}
+              </option>
+            ))}
+          </select>
+
           <select value={effectiveExpiry} onChange={(e) => setExpiry(e.target.value)} className={selectClass}>
             {expiries.map((e) => (
               <option key={e} value={e}>
@@ -154,15 +163,15 @@ export function StraddlePanel() {
           <button
             type="button"
             onClick={() => setShowSpot((v) => !v)}
-            title="Overlay NIFTY spot as a dashed line on its own left-hand axis"
+            title={`Overlay ${underlying} ${spotLabel(underlying).toLowerCase()} as a dashed line on its own left-hand axis`}
             className={`px-2.5 py-1 text-xs font-semibold rounded ${showSpot ? 'bg-sky-600 text-white' : 'border border-zinc-700 bg-zinc-900 text-zinc-300'}`}
           >
-            Spot
+            {spotLabel(underlying)}
           </button>
 
           <div className="flex items-center gap-3 ml-auto text-xs text-zinc-400">
             {todaysCandles.length > 0 && <DayChangeChip candles={todaysCandles} />}
-            <span className="tabular-nums">Spot {(chart?.spot ?? strikesData?.spot ?? 0).toFixed(2)}</span>
+            <span className="tabular-nums">{spotLabel(underlying)} {(chart?.spot ?? strikesData?.spot ?? 0).toFixed(2)}</span>
             {loading && <Spinner size={12} />}
             <span className="inline-flex items-center gap-1.5">
               <span className={`inline-block w-1.5 h-1.5 rounded-full ${marketLive ? 'bg-emerald-400' : 'bg-zinc-600'}`} />
@@ -180,7 +189,7 @@ export function StraddlePanel() {
               fit-once-per-mount guard re-fits the price scale when you pick a genuinely
               different expiry/strike, while an ordinary 10s poll (same key) keeps the same
               mounted instance and preserves your zoom/pan. */}
-          <StraddleChart key={`${effectiveExpiry}-${effectiveStrike}-${interval_}`} chart={chart} chartType={chartType} showSpot={showSpot} />
+          <StraddleChart key={`${underlying}-${effectiveExpiry}-${effectiveStrike}-${interval_}`} underlying={underlying} chart={chart} chartType={chartType} showSpot={showSpot} />
         </div>
       ) : (
         loading &&

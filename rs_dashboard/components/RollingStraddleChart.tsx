@@ -3,6 +3,7 @@
 import { useMemo } from 'react';
 import { CombinedPremiumChart, type CombinedChartType } from '@/components/CombinedPremiumChart';
 import type { RollingStraddleChartResponse } from '@/lib/optionsChartTypes';
+import { spotLabel } from '@/lib/underlyings';
 
 export type RollingStraddleChartType = CombinedChartType;
 
@@ -36,15 +37,17 @@ export function RollingStraddleChart({
   chartType,
   initialHeight,
   showSpot = false,
+  underlying = 'NIFTY',
 }: {
   chart: RollingStraddleChartResponse;
   chartType: RollingStraddleChartType;
   initialHeight?: number;
   showSpot?: boolean;
+  underlying?: string;
 }) {
   const leftAxisLine = useMemo(
-    () => (showSpot ? { label: 'Spot', color: '#9aa5a0', values: chart.candles.map((c) => ({ time: c.time, value: c.spot })) } : undefined),
-    [showSpot, chart.candles]
+    () => (showSpot ? { label: spotLabel(underlying), color: '#9aa5a0', values: chart.candles.map((c) => ({ time: c.time, value: c.spot })) } : undefined),
+    [showSpot, underlying, chart.candles]
   );
 
   const markers = useMemo(
@@ -91,7 +94,7 @@ export function RollingStraddleChart({
         <CombinedPremiumChart
           candles={chart.candles}
           indicators={chart.indicators}
-          legendLabel="NIFTY Rolling ATM Straddle"
+          legendLabel={`${underlying} Rolling ATM Straddle`}
           seriesTitle="Straddle"
           chartType={chartType}
           initialHeight={initialHeight}

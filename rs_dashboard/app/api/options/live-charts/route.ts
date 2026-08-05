@@ -15,6 +15,10 @@ const TIMEOUT_MS = 60_000;
 // Mirrors MAX_DAYS in options_chart_fetch.py.
 const MAX_DAYS = 10;
 
+// Mirrors the UNDERLYINGS table in options_chart_fetch.py. Allowlisted rather than passed through
+// so an arbitrary query string never reaches the spawned python's argv.
+const UNDERLYINGS = ['NIFTY', 'BANKNIFTY', 'FINNIFTY', 'SENSEX', 'CRUDEOIL'];
+
 export async function GET(request: NextRequest) {
   const { searchParams } = new URL(request.url);
   const kind = searchParams.get('kind') as Kind | null;
@@ -23,6 +27,9 @@ export async function GET(request: NextRequest) {
   }
 
   const underlying = (searchParams.get('underlying') ?? 'NIFTY').toUpperCase();
+  if (!UNDERLYINGS.includes(underlying)) {
+    return NextResponse.json({ success: false, error: `underlying must be one of ${UNDERLYINGS.join(', ')}` }, { status: 400 });
+  }
   const args: string[] = [kind, '--underlying', underlying];
 
   if (kind !== 'expiries') {

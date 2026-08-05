@@ -4,7 +4,8 @@ import { useEffect, useState } from 'react';
 import { optionsChartApi } from '@/lib/optionsChartApi';
 import { RollingStraddleChart, type RollingStraddleChartType } from '@/components/RollingStraddleChart';
 import { ChartIndicatorPicker } from '@/components/ChartIndicatorPicker';
-import { isNseLive } from '@/lib/marketHours';
+import { isUnderlyingLive } from '@/lib/marketHours';
+import { CHART_UNDERLYINGS, spotLabel, type ChartUnderlying } from '@/lib/underlyings';
 import { Spinner } from '@/components/Spinner';
 import { DEFAULT_INDICATORS, VALID_INTERVALS, type ChartIndicatorRequest, type RollingStraddleChartResponse } from '@/lib/optionsChartTypes';
 
@@ -17,12 +18,12 @@ const OFF_HOURS_POLL_INTERVAL_MS = 60_000;
 
 const selectClass = 'px-1.5 py-1 text-xs rounded border border-zinc-700 bg-zinc-900 text-zinc-200';
 
-export function RollingStraddlePanel() {
+export function RollingStraddlePanel({ underlying, onUnderlyingChange }: { underlying: ChartUnderlying; onUnderlyingChange: (u: ChartUnderlying) => void }) {
   const [interval_, setInterval_] = useState('1');
   const [expiry, setExpiry] = useState('');
   const [expiries, setExpiries] = useState<string[]>([]);
   const [indicators, setIndicators] = useState<ChartIndicatorRequest[]>(DEFAULT_INDICATORS);
-  const [chartType, setChartType] = useState<RollingStraddleChartType>('line');
+  const [chartType, setChartType] = useState<RollingStraddleChartType>('candlestick');
   const [showSpot, setShowSpot] = useState(true);
   const [marketLive, setMarketLive] = useState(false);
   const [chart, setChart] = useState<RollingStraddleChartResponse | null>(null);
@@ -30,15 +31,15 @@ export function RollingStraddlePanel() {
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    const update = () => setMarketLive(isNseLive(new Date()));
+    const update = () => setMarketLive(isUnderlyingLive(underlying, new Date()));
     update();
     const id = setInterval(update, 30_000);
     return () => clearInterval(id);
-  }, []);
+  }, [underlying]);
 
   useEffect(() => {
-    optionsChartApi.expiries().then((r) => setExpiries(r.expiries)).catch(() => {});
-  }, []);
+    optionsChartApi.expiries(underlying).then((r) => setExpiries(r.expiries)).catch(() => {});
+  }, [underlying]);
 
   const effectiveExpiry = expiry || expiries[0] || '';
 
@@ -48,7 +49,7 @@ export function RollingStraddlePanel() {
     function load() {
       setLoading(true);
       optionsChartApi
-        .rollingStraddle({ expiry: effectiveExpiry, interval: interval_, indicators })
+        .rollingStraddle({ underlying, expiry: effectiveExpiry, interval: interval_, indicators })
         .then((r) => {
           if (!cancelled) {
             setChart(r);
@@ -68,12 +69,20 @@ export function RollingStraddlePanel() {
       cancelled = true;
       clearInterval(id);
     };
-  }, [effectiveExpiry, interval_, indicators, marketLive]);
+  }, [underlying, effectiveExpiry, interval_, indicators, marketLive]);
 
   return (
     <div className="flex flex-col gap-2 h-full min-h-0">
       <div className="bg-zinc-800 rounded-lg flex-shrink-0">
         <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5 p-2">
+          <select value={underlying} onChange={(e) => onUnderlyingChange(e.target.value as ChartUnderlying)} className={`${selectClass} font-semibold`}>
+            {CHART_UNDERLYINGS.map((u) => (
+              <option key={u} value={u}>
+                {u}
+              </option>
+            ))}
+          </select>
+
           <select value={effectiveExpiry} onChange={(e) => setExpiry(e.target.value)} className={selectClass}>
             {expiries.map((e) => (
               <option key={e} value={e}>
@@ -108,10 +117,10 @@ export function RollingStraddlePanel() {
           <button
             type="button"
             onClick={() => setShowSpot((v) => !v)}
-            title="Overlay NIFTY spot as a dashed line on its own left-hand axis"
+            title={`Overlay ${underlying} ${spotLabel(underlying).toLowerCase()} as a dashed line on its own left-hand axis`}
             className={`px-2.5 py-1 text-xs font-semibold rounded ${showSpot ? 'bg-sky-600 text-white' : 'border border-zinc-700 bg-zinc-900 text-zinc-300'}`}
           >
-            Spot
+            {spotLabel(underlying)}
           </button>
 
           <span className="ml-auto inline-flex items-center gap-2 text-xs text-zinc-400">
@@ -129,7 +138,7 @@ export function RollingStraddlePanel() {
       {chart ? (
         <div className="bg-zinc-800 rounded-lg p-2 flex-1 min-h-0 flex flex-col">
           {/* Keyed by selection identity - see StraddlePanel's StraddleChart for why. */}
-          <RollingStraddleChart key={`${effectiveExpiry}-${interval_}`} chart={chart} chartType={chartType} showSpot={showSpot} />
+          <RollingStraddleChart key={`${underlying}-${effectiveExpiry}-${interval_}`} underlying={underlying} chart={chart} chartType={chartType} showSpot={showSpot} />
         </div>
       ) : (
         loading &&

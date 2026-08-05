@@ -4,6 +4,7 @@ import { useMemo } from 'react';
 import { CombinedPremiumChart, type CombinedChartType } from '@/components/CombinedPremiumChart';
 import { GROWW_COLORS } from '@/components/RollingStraddleChart';
 import type { StraddleChartResponse } from '@/lib/optionsChartTypes';
+import { spotLabel } from '@/lib/underlyings';
 
 export type StraddleChartType = CombinedChartType;
 
@@ -12,15 +13,17 @@ export function StraddleChart({
   chartType,
   initialHeight,
   showSpot = false,
+  underlying = 'NIFTY',
 }: {
   chart: StraddleChartResponse;
   chartType: StraddleChartType;
   initialHeight?: number;
   showSpot?: boolean;
+  underlying?: string;
 }) {
   const leftAxisLine = useMemo(
-    () => (showSpot ? { label: 'Spot', color: '#9aa5a0', values: chart.spot_series.map((p) => ({ time: p.time, value: p.value })) } : undefined),
-    [showSpot, chart.spot_series]
+    () => (showSpot ? { label: spotLabel(underlying), color: '#9aa5a0', values: chart.spot_series.map((p) => ({ time: p.time, value: p.value })) } : undefined),
+    [showSpot, underlying, chart.spot_series]
   );
 
   const candleByTime = useMemo(() => new Map(chart.candles.map((c) => [c.time, c])), [chart.candles]);
@@ -41,7 +44,7 @@ export function StraddleChart({
     <CombinedPremiumChart
       candles={chart.candles}
       indicators={chart.indicators}
-      legendLabel={`NIFTY ${chart.strike} Straddle`}
+      legendLabel={`${underlying} ${chart.strike} Straddle`}
       seriesTitle="Straddle"
       chartType={chartType}
       initialHeight={initialHeight}

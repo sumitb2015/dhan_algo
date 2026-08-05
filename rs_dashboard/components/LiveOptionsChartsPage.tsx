@@ -5,6 +5,7 @@ import { StraddlePanel } from '@/components/StraddlePanel';
 import { RollingStraddlePanel } from '@/components/RollingStraddlePanel';
 import { StranglePanel } from '@/components/StranglePanel';
 import { StrategyPanel } from '@/components/StrategyPanel';
+import { type ChartUnderlying } from '@/lib/underlyings';
 
 const LAYOUTS = [1, 2] as const;
 type LayoutCount = (typeof LAYOUTS)[number];
@@ -27,6 +28,13 @@ const SPREAD_LABELS: Record<SpreadType, string> = {
 export default function LiveOptionsChartsPage() {
   const [spreadType, setSpreadType] = useState<SpreadType>('straddle');
   const [layoutCount, setLayoutCount] = useState<LayoutCount>(1);
+  // Per-panel underlying, owned here rather than inside the panels so the selection survives a
+  // spread-type switch (which unmounts and remounts every panel).
+  const [underlyings, setUnderlyings] = useState<ChartUnderlying[]>(['NIFTY', 'BANKNIFTY']);
+
+  function setUnderlyingAt(index: number, next: ChartUnderlying) {
+    setUnderlyings((prev) => prev.map((u, i) => (i === index ? next : u)));
+  }
 
   const gridRef = useRef<HTMLDivElement>(null);
   const [gridHeight, setGridHeight] = useState(560);
@@ -86,19 +94,29 @@ export default function LiveOptionsChartsPage() {
         className="grid gap-3"
         style={{ height: gridHeight, gridTemplateColumns: `repeat(${cols}, minmax(0, 1fr))`, gridTemplateRows: `repeat(${rows}, minmax(0, 1fr))` }}
       >
-        {Array.from({ length: layoutCount }, (_, i) => (
-          <div key={i} className="min-h-0 min-w-0">
-            {spreadType === 'straddle' ? (
-              <StraddlePanel />
-            ) : spreadType === 'rolling_straddle' ? (
-              <RollingStraddlePanel />
-            ) : spreadType === 'strangle' ? (
-              <StranglePanel />
-            ) : (
-              <StrategyPanel />
-            )}
-          </div>
-        ))}
+        {Array.from({ length: layoutCount }, (_, i) => {
+          // Keying the panel on its underlying remounts it on a switch. That IS the reset: expiry,
+          // strike and legs are all meaningless once the underlying changes (25,000 is not a
+          // SENSEX or a crude strike), and one remount beats four bespoke reset effects.
+          const panelProps = {
+            key: `${i}-${underlyings[i]}`,
+            underlying: underlyings[i],
+            onUnderlyingChange: (u: ChartUnderlying) => setUnderlyingAt(i, u),
+          };
+          return (
+            <div key={i} className="min-h-0 min-w-0">
+              {spreadType === 'straddle' ? (
+                <StraddlePanel {...panelProps} />
+              ) : spreadType === 'rolling_straddle' ? (
+                <RollingStraddlePanel {...panelProps} />
+              ) : spreadType === 'strangle' ? (
+                <StranglePanel {...panelProps} />
+              ) : (
+                <StrategyPanel {...panelProps} />
+              )}
+            </div>
+          );
+        })}
       </div>
     </div>
   );

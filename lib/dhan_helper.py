@@ -3444,13 +3444,19 @@ class DhanHelper:
         
         return {}
 
-    def get_option_chain_df(self, symbol: str, expiry: str) -> pd.DataFrame:
+    def get_option_chain_df(self, symbol: str, expiry: str, exchange_segment: str = None) -> pd.DataFrame:
         """
         Fetch Option Chain and return as a flattened DataFrame.
         Columns: Strike, ce_last_price, ce_oi, ce_delta, ..., pe_last_price, ...
+
+        `exchange_segment` is passed straight through to get_option_chain(). Leave it None to
+        auto-resolve from the master list (the default for every existing caller). Pass it
+        explicitly — together with a numeric-string `symbol` — for underlyings whose chain id
+        differs from their index id: SENSEX options key on security id 1, not the index's 51,
+        and MCX chains key on the nearest FUTCOM contract id.
         """
         try:
-            chain_data = self.get_option_chain(symbol, expiry)
+            chain_data = self.get_option_chain(symbol, expiry, exchange_segment=exchange_segment)
             if not chain_data:
                 return pd.DataFrame()
 

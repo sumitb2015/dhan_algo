@@ -4,7 +4,8 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { optionsChartApi } from '@/lib/optionsChartApi';
 import { StrategyChart, type StrategyChartType } from '@/components/StrategyChart';
 import { ChartIndicatorPicker } from '@/components/ChartIndicatorPicker';
-import { isNseLive } from '@/lib/marketHours';
+import { isUnderlyingLive } from '@/lib/marketHours';
+import { CHART_UNDERLYINGS, spotLabel, type ChartUnderlying } from '@/lib/underlyings';
 import { Spinner } from '@/components/Spinner';
 import { DayChangeChip } from '@/components/DayChangeChip';
 import { STRATEGY_CATEGORIES, STRATEGY_PRESETS, resolvePresetLegs, type StrategyCategory } from '@/lib/strategyPresets';
@@ -31,7 +32,7 @@ function nearestStrike(strike: number, available: number[]): number {
   return available.reduce((best, s) => (Math.abs(s - strike) < Math.abs(best - strike) ? s : best), available[0]);
 }
 
-export function StrategyPanel() {
+export function StrategyPanel({ underlying, onUnderlyingChange }: { underlying: ChartUnderlying; onUnderlyingChange: (u: ChartUnderlying) => void }) {
   const [interval_, setInterval_] = useState('1');
   const [expiry, setExpiry] = useState('');
   const [expiries, setExpiries] = useState<string[]>([]);
@@ -40,7 +41,7 @@ export function StrategyPanel() {
   const [presetId, setPresetId] = useState('straddle');
   const [legs, setLegs] = useState<StrategyLeg[]>([]);
   const [indicators, setIndicators] = useState<ChartIndicatorRequest[]>(DEFAULT_INDICATORS);
-  const [chartType, setChartType] = useState<StrategyChartType>('line');
+  const [chartType, setChartType] = useState<StrategyChartType>('candlestick');
   const [showSpot, setShowSpot] = useState(false);
   const [marketLive, setMarketLive] = useState(false);
   const [chart, setChart] = useState<CustomStrategyChartResponse | null>(null);
@@ -48,15 +49,15 @@ export function StrategyPanel() {
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    const update = () => setMarketLive(isNseLive(new Date()));
+    const update = () => setMarketLive(isUnderlyingLive(underlying, new Date()));
     update();
     const id = setInterval(update, 30_000);
     return () => clearInterval(id);
-  }, []);
+  }, [underlying]);
 
   useEffect(() => {
-    optionsChartApi.expiries().then((r) => setExpiries(r.expiries)).catch(() => {});
-  }, []);
+    optionsChartApi.expiries(underlying).then((r) => setExpiries(r.expiries)).catch(() => {});
+  }, [underlying]);
 
   const effectiveExpiry = expiry || expiries[0] || '';
 
@@ -64,7 +65,7 @@ export function StrategyPanel() {
     if (!effectiveExpiry) return;
     let cancelled = false;
     function load() {
-      optionsChartApi.strikes('NIFTY', effectiveExpiry).then((r) => {
+      optionsChartApi.strikes(underlying, effectiveExpiry).then((r) => {
         if (!cancelled) setStrikesData(r);
       }).catch(() => {});
     }
@@ -74,7 +75,7 @@ export function StrategyPanel() {
       cancelled = true;
       clearInterval(id);
     };
-  }, [effectiveExpiry]);
+  }, [underlying, effectiveExpiry]);
 
   const sortedStrikes = useMemo(() => (strikesData ? [...strikesData.strikes].sort((a, b) => a.strike - b.strike) : []), [strikesData]);
   const sortedStrikePrices = useMemo(() => sortedStrikes.map((s) => s.strike), [sortedStrikes]);
@@ -144,7 +145,7 @@ export function StrategyPanel() {
     function load() {
       setLoading(true);
       optionsChartApi
-        .strategy({ expiry: effectiveExpiry, legs, interval: interval_, indicators, includeSpot: showSpot })
+        .strategy({ underlying, expiry: effectiveExpiry, legs, interval: interval_, indicators, includeSpot: showSpot })
         .then((r) => {
           if (!cancelled) {
             setChart(r);
@@ -164,7 +165,7 @@ export function StrategyPanel() {
       cancelled = true;
       clearInterval(id);
     };
-  }, [effectiveExpiry, legs, interval_, indicators, marketLive, showSpot]);
+  }, [underlying, effectiveExpiry, legs, interval_, indicators, marketLive, showSpot]);
 
   const todaysCandles = useMemo(() => {
     const all = chart?.candles ?? [];
@@ -179,6 +180,14 @@ export function StrategyPanel() {
     <div className="flex flex-col gap-2 h-full min-h-0">
       <div className="bg-zinc-800 rounded-lg flex-shrink-0">
         <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5 p-2">
+          <select value={underlying} onChange={(e) => onUnderlyingChange(e.target.value as ChartUnderlying)} className={`${selectClass} font-semibold`}>
+            {CHART_UNDERLYINGS.map((u) => (
+              <option key={u} value={u}>
+                {u}
+              </option>
+            ))}
+          </select>
+
           <select value={effectiveExpiry} onChange={(e) => setExpiry(e.target.value)} className={selectClass}>
             {expiries.map((e) => (
               <option key={e} value={e}>
@@ -229,15 +238,15 @@ export function StrategyPanel() {
           <button
             type="button"
             onClick={() => setShowSpot((v) => !v)}
-            title="Overlay NIFTY spot as a dashed line on its own left-hand axis"
+            title={`Overlay ${underlying} ${spotLabel(underlying).toLowerCase()} as a dashed line on its own left-hand axis`}
             className={`px-2.5 py-1 text-xs font-semibold rounded ${showSpot ? 'bg-sky-600 text-white' : 'border border-zinc-700 bg-zinc-900 text-zinc-300'}`}
           >
-            Spot
+            {spotLabel(underlying)}
           </button>
 
           <span className="ml-auto flex items-center gap-3 text-xs text-zinc-400">
             {todaysCandles.length > 0 && <DayChangeChip candles={todaysCandles} sellerConvention={chart?.net_credit ?? true} />}
-            <span className="tabular-nums">Spot {(chart?.spot ?? strikesData?.spot ?? 0).toFixed(2)}</span>
+            <span className="tabular-nums">{spotLabel(underlying)} {(chart?.spot ?? strikesData?.spot ?? 0).toFixed(2)}</span>
             {loading && <Spinner size={12} />}
             <span className="inline-flex items-center gap-1.5">
               <span className={`inline-block w-1.5 h-1.5 rounded-full ${marketLive ? 'bg-emerald-400' : 'bg-zinc-600'}`} />
@@ -297,7 +306,7 @@ export function StrategyPanel() {
               same mounted chart instance, so CombinedPremiumChart's fit-once-per-mount guard
               never re-fit the price scale to the new combo's very different value range - the
               chart looked "stuck" showing the previous strategy's scale. */}
-          <StrategyChart key={`${effectiveExpiry}-${JSON.stringify(legs)}-${interval_}`} chart={chart} chartType={chartType} showSpot={showSpot} />
+          <StrategyChart key={`${underlying}-${effectiveExpiry}-${JSON.stringify(legs)}-${interval_}`} underlying={underlying} chart={chart} chartType={chartType} showSpot={showSpot} />
         </div>
       ) : (
         loading &&
