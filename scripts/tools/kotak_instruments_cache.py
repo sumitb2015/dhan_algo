@@ -1,7 +1,8 @@
 """
 Fetches and caches Kotak Neo option instruments (NIFTY/BANKNIFTY/FINNIFTY on
-nse_fo, SENSEX on bse_fo) for the strike -> trading_symbol lookup used by the
-copy-trade bridge and the scalper's Kotak broker routes.
+nse_fo, SENSEX on bse_fo, CRUDEOIL/CRUDEOILM on mcx_fo) for the strike ->
+trading_symbol lookup used by the copy-trade bridge, the scalper's Kotak broker
+routes and the Crude Oil options page.
 
 Deliberately emits the SAME row shape as
 scripts/tools/zerodha_instruments_cache.py, so the bridge's symbol resolver
@@ -10,6 +11,7 @@ works against either broker's cache unchanged.
 Usage:
     venv\\Scripts\\python.exe scripts/tools/kotak_instruments_cache.py --underlying NIFTY
     venv\\Scripts\\python.exe scripts/tools/kotak_instruments_cache.py --underlying SENSEX
+    venv\\Scripts\\python.exe scripts/tools/kotak_instruments_cache.py --underlying CRUDEOIL
 
 Writes debug/kotak_<underlying>_instruments.json and caches the raw master CSV
 under debug/kotak_master/. Prints a single JSON status line to stdout.
@@ -19,7 +21,7 @@ import os
 import csv
 import json
 import argparse
-from datetime import datetime
+from datetime import datetime, timezone
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, ROOT)
@@ -31,7 +33,19 @@ UNDERLYING_SEGMENT = {
     'BANKNIFTY': 'nse_fo',
     'FINNIFTY':  'nse_fo',
     'SENSEX':    'bse_fo',
+    # MCX commodity options. Kotak calls the segment `mcx_fo` — `com_fo` (the
+    # name used elsewhere for commodities) is rejected by scrip_master with
+    # "Exchange Segment is not available".
+    'CRUDEOIL':  'mcx_fo',
+    'CRUDEOILM': 'mcx_fo',
 }
+
+# Option instrument types worth caching, per segment. MCX lists options ON THE
+# FUTURE (OPTFUT), so the equity-derivative filter drops every crude contract.
+SEGMENT_OPTION_TYPES = {
+    'mcx_fo': ('OPTFUT', 'OPTCOM'),
+}
+DEFAULT_OPTION_TYPES = ('OPTIDX', 'OPTSTK')
 
 MASTER_DIR = os.path.join(ROOT, 'debug', 'kotak_master')
 
@@ -44,8 +58,31 @@ def master_file(segment: str) -> str:
     return os.path.join(MASTER_DIR, f'{segment}.csv')
 
 
+def map_mcx_expiry_date(raw) -> str:
+    """Expiry date for an mcx_fo contract: the UTC date of a genuine epoch.
+
+    The mcx_fo master does NOT share nse_fo's decade shift — verified against the
+    live master, where raw 1787011199 belongs to symbols tagged `17AUG26`.
+    Applying map_expiry_date()'s +10 years here would return 2036.
+
+    It must be read in UTC, not local time. Kotak stamps 23:59:59 UTC, so
+    parsing in IST rolls every expiry forward one day (2026-08-17 -> 2026-08-18)
+    and no strike would ever match the expiry the chain asked for.
+    """
+    text = str(raw).strip()
+    try:
+        if text.isdigit():
+            return datetime.fromtimestamp(int(text), tz=timezone.utc).strftime('%Y-%m-%d')
+        return datetime.fromisoformat(text[:10]).strftime('%Y-%m-%d')
+    except (ValueError, OverflowError, OSError):
+        return text
+
+
 def map_expiry_date(raw) -> str:
     """Correct Kotak's 1980-based expiry epoch by adding 10 calendar years.
+
+    NSE/BSE segments only — see map_mcx_expiry_date() for mcx_fo, which uses a
+    real epoch and must not be shifted.
 
     Parsing their timestamp with a 1970 epoch lands exactly a decade early
     (2016 -> actually 2026).
@@ -147,12 +184,16 @@ def _num(value, default=0.0) -> float:
         return default
 
 
-def build_rows(master_rows, underlying: str):
+def build_rows(master_rows, underlying: str, segment: str = 'nse_fo'):
+    is_mcx = segment == 'mcx_fo'
+    option_types = SEGMENT_OPTION_TYPES.get(segment, DEFAULT_OPTION_TYPES)
+    expiry_mapper = map_mcx_expiry_date if is_mcx else map_expiry_date
+
     rows = []
     for row in master_rows:
         if str(_column(row, 'pSymbolName') or '').strip().upper() != underlying:
             continue
-        if str(_column(row, 'pInstType') or '').strip().upper() not in ('OPTIDX', 'OPTSTK'):
+        if str(_column(row, 'pInstType') or '').strip().upper() not in option_types:
             continue
         opt_type = str(_column(row, 'pOptionType') or '').strip().upper()
         if opt_type not in ('CE', 'PE'):
@@ -168,7 +209,7 @@ def build_rows(master_rows, underlying: str):
             'instrument_token': str(_column(row, 'pSymbol') or '').strip(),
             # Strikes and base prices are scaled x100 in the master.
             'strike': _num(_column(row, 'dStrikePrice;', 'dStrikePrice')) / 100.0,
-            'expiry': map_expiry_date(_column(row, 'pExpiryDate')),
+            'expiry': expiry_mapper(_column(row, 'pExpiryDate')),
             'instrument_type': opt_type,
             'lot_size': int(_num(_column(row, 'iLotSize', 'lLotSize'), 0)),
             'exchange_segment': str(_column(row, 'pExchSeg') or '').strip(),
@@ -192,7 +233,7 @@ def refresh(underlying: str = 'NIFTY', client=None, log=None):
         client = get_kotak_client()
 
     segment = UNDERLYING_SEGMENT.get(underlying, 'nse_fo')
-    rows = build_rows(load_master(client, segment, log), underlying)
+    rows = build_rows(load_master(client, segment, log), underlying, segment)
 
     out_file = output_file(underlying)
     os.makedirs(os.path.dirname(out_file), exist_ok=True)
