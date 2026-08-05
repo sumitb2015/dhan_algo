@@ -98,21 +98,23 @@ export default function LiveOptionsChartsPage() {
           // Keying the panel on its underlying remounts it on a switch. That IS the reset: expiry,
           // strike and legs are all meaningless once the underlying changes (25,000 is not a
           // SENSEX or a crude strike), and one remount beats four bespoke reset effects.
+          // `key` is passed separately, not through the spread — React rejects a spread that
+          // carries one.
+          const key = `${i}-${underlyings[i]}`;
           const panelProps = {
-            key: `${i}-${underlyings[i]}`,
             underlying: underlyings[i],
             onUnderlyingChange: (u: ChartUnderlying) => setUnderlyingAt(i, u),
           };
           return (
             <div key={i} className="min-h-0 min-w-0">
               {spreadType === 'straddle' ? (
-                <StraddlePanel {...panelProps} />
+                <StraddlePanel key={key} {...panelProps} />
               ) : spreadType === 'rolling_straddle' ? (
-                <RollingStraddlePanel {...panelProps} />
+                <RollingStraddlePanel key={key} {...panelProps} />
               ) : spreadType === 'strangle' ? (
-                <StranglePanel {...panelProps} />
+                <StranglePanel key={key} {...panelProps} />
               ) : (
-                <StrategyPanel {...panelProps} />
+                <StrategyPanel key={key} {...panelProps} />
               )}
             </div>
           );
