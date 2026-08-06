@@ -1281,7 +1281,7 @@ export default function OptionsCharts() {
                   <ReferenceLine y={0} stroke="#52525b" strokeWidth={1} strokeDasharray="4 4" />
                   <Bar dataKey="OI Diff" name="PE OI − CE OI" radius={[2, 2, 0, 0]}>
                     {chartData.map((entry, i) => (
-                      <Cell key={i} fill={(entry['OI Diff'] ?? 0) > 0 ? '#f87171' : '#4ade80'} fillOpacity={0.85} />
+                      <Cell key={i} fill={(entry['OI Diff'] ?? 0) >= 0 ? '#4ade80' : '#f87171'} fillOpacity={0.85} />
                     ))}
                   </Bar>
                 </BarChart>

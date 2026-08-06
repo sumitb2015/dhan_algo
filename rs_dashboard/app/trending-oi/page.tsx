@@ -33,7 +33,7 @@ export default function TrendingOiPage() {
   const [error, setError] = useState<string | null>(null);
 
   const [expiry, setExpiry] = useState<string>('nearest');
-  const [interval_, setInterval_] = useState<string>('5');
+  const [interval_, setInterval_] = useState<string>('3');
   const [mode, setMode] = useState<Mode>('live');
   const [historicalDate, setHistoricalDate] = useState<string>(yesterdayIso);
   const [marketLive, setMarketLive] = useState(false);
