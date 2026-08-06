@@ -76,7 +76,12 @@ export async function GET(request: NextRequest) {
 
   try {
     const data = await dedupe(cacheKey, () =>
-      spaced('dhan-spawn:NIFTY', () =>
+      // Paced on its own key, not the shared `dhan-spawn:NIFTY` chain key: this script no longer
+      // touches the option-chain endpoint (it reads the strike ladder from the security master),
+      // so queuing a ~25s run behind — or in front of — the chain/spot routes only added latency
+      // for no rate-limit benefit. Runs still serialize against each other, which is what keeps
+      // several open windows from stacking 40+ concurrent intraday calls.
+      spaced('dhan-intraday:NIFTY-trending-oi', () =>
         // A full band is ~42 paced Dhan calls; the script caps strikes to keep it under this.
         runPythonJson<TrendingOiResponse>(SCRIPT_PATH, args, 90_000)
       )

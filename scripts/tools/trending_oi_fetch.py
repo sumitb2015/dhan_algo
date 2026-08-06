@@ -85,6 +85,72 @@ def parse_strikes_param(strikes_param):
     return sorted(set(res))
 
 
+def master_option_frame(helper, expiry):
+    """NIFTY OPTIDX rows for one expiry, straight from the cached master list.
+
+    The strike ladder and the CE/PE security ids are both static for a given expiry, so reading
+    them offline keeps this script off Dhan's option-chain endpoint entirely. That endpoint is
+    capped at ~1 call/3s *per account*: with several dashboard windows open, the chain call lost
+    the race often enough that the page reported "cannot determine strikes" for a chain that was
+    perfectly fine.
+    """
+    df = helper._load_master_list()
+    if df is None or df.empty:
+        return pd.DataFrame()
+    mask = (
+        (df["EXCH_ID"] == "NSE")
+        & (df["INSTRUMENT"] == "OPTIDX")
+        & (df["UNDERLYING_SYMBOL"] == "NIFTY")
+        & (df["SM_EXPIRY_DATE"].astype(str) == expiry)
+    )
+    return df[mask]
+
+
+def strikes_from_master(frame):
+    """Strikes in `frame` that carry both a CE and a PE leg, ascending."""
+    if frame.empty or "STRIKE_PRICE" not in frame.columns:
+        return []
+    by_type = frame.groupby("STRIKE_PRICE")["OPTION_TYPE"].agg(set)
+    return sorted(
+        clean_val(strike)
+        for strike, types in by_type.items()
+        if {"CE", "PE"}.issubset(types)
+    )
+
+
+def legs_from_master(frame, band):
+    """(ce_id, pe_id) per strike in `band`, resolved in one pass over the expiry's rows.
+
+    find_option() masks the whole 288K-row master list per call, so the old per-strike lookups
+    cost 2 full scans each (~42 for a full band) — pure CPU burn that made concurrent windows
+    contend for the box as well as for the API.
+    """
+    lookup = {}
+    for _, row in frame.iterrows():
+        try:
+            key = (clean_val(row["STRIKE_PRICE"]), str(row["OPTION_TYPE"]).upper())
+            lookup[key] = int(row["SECURITY_ID"])
+        except (TypeError, ValueError):
+            continue
+    return [(lookup.get((s, "CE")), lookup.get((s, "PE"))) for s in band]
+
+
+def expiries_from_master(helper, today_str):
+    """Fallback expiry ladder from the master list, for when Dhan's expiry_list call is
+    rate-limited or down. Shares the option-chain rate bucket, so it fails under the same
+    contention that used to break the strike ladder."""
+    df = helper._load_master_list()
+    if df is None or df.empty:
+        return []
+    mask = (
+        (df["EXCH_ID"] == "NSE")
+        & (df["INSTRUMENT"] == "OPTIDX")
+        & (df["UNDERLYING_SYMBOL"] == "NIFTY")
+    )
+    all_expiries = sorted({str(e) for e in df[mask]["SM_EXPIRY_DATE"].dropna().unique()})
+    return [e for e in all_expiries if e >= today_str] or all_expiries
+
+
 def pick_band_around_spot(strikes, spot):
     if not strikes:
         return []
@@ -427,14 +493,19 @@ def main():
 
     helper = DhanHelper(dhan)
 
-    expiries = helper.get_expiry_list(under_security_id=13, under_exchange_segment="IDX_I")
-    if not expiries:
-        print(json.dumps({"error": "Failed to fetch NIFTY expiry list from Dhan"}))
-        sys.exit(0)
-
     now_dt = now_ist().replace(second=0, microsecond=0)
     today = now_dt.date()
     today_str = today.isoformat()
+
+    expiries = helper.get_expiry_list(under_security_id=13, under_exchange_segment="IDX_I")
+    if not expiries:
+        # The expiry endpoint shares the option chain's ~1 call/3s account-wide budget, so it is
+        # the first thing to fail when several dashboard windows spawn at once. The master list
+        # carries the same ladder offline.
+        expiries = expiries_from_master(helper, today_str)
+    if not expiries:
+        print(json.dumps({"error": "Failed to fetch NIFTY expiry list from Dhan"}))
+        sys.exit(0)
     future_expiries = [e for e in expiries if e >= today_str]
     nearest_expiry = future_expiries[0] if future_expiries else expiries[0]
 
@@ -484,22 +555,29 @@ def main():
     if DhanHelper.is_fatal_error(spot_api_error):
         bail("Could not read NIFTY intraday data." + describe_api_error(spot_api_error))
 
-    # Strike ladder
-    chain_df = pd.DataFrame()
-    for backoff in (0, 3.5):
-        if backoff:
-            time.sleep(backoff)
-        try:
-            chain_df = helper.get_option_chain_df("NIFTY", expiry)
-            if not chain_df.empty:
-                break
-        except Exception:
-            pass
+    # Strike ladder — offline from the master list; see master_option_frame().
+    expiry_frame = master_option_frame(helper, expiry)
+    all_strikes = strikes_from_master(expiry_frame)
 
-    if chain_df.empty:
-        bail("Failed to fetch the NIFTY option chain — cannot determine strikes.")
-
-    all_strikes = sorted(clean_val(s) for s in chain_df.index.tolist())
+    if not all_strikes:
+        # Only if this expiry is missing from the master list (a freshly listed contract, or a
+        # stale cache) do we spend a rate-limited chain call, with a backoff for the busy case.
+        chain_df = pd.DataFrame()
+        for backoff in (0, 3.5):
+            if backoff:
+                time.sleep(backoff)
+            try:
+                chain_df = helper.get_option_chain_df("NIFTY", expiry)
+                if not chain_df.empty:
+                    break
+            except Exception:
+                pass
+        if chain_df.empty:
+            bail(
+                f"No {expiry} NIFTY contracts in the security master, and the option chain "
+                "fallback returned nothing — cannot determine strikes."
+            )
+        all_strikes = sorted(clean_val(s) for s in chain_df.index.tolist())
 
     # Reference spot for centring the ATM band. A past session must use *that day's* opening
     # print — today's LTP would centre the band on strikes that weren't near the money then.
@@ -530,14 +608,17 @@ def main():
         capped_note = f" Capped from {requested} to the {len(band)} strikes nearest ATM."
 
     # Resolve CE/PE security IDs for the band
-    band_legs = []
-    for strike in band:
-        ce = helper.find_option("NIFTY", expiry, strike, "CE")
-        pe = helper.find_option("NIFTY", expiry, strike, "PE")
-        band_legs.append((
-            int(ce["SECURITY_ID"]) if ce else None,
-            int(pe["SECURITY_ID"]) if pe else None,
-        ))
+    if not expiry_frame.empty:
+        band_legs = legs_from_master(expiry_frame, band)
+    else:
+        band_legs = []
+        for strike in band:
+            ce = helper.find_option("NIFTY", expiry, strike, "CE")
+            pe = helper.find_option("NIFTY", expiry, strike, "PE")
+            band_legs.append((
+                int(ce["SECURITY_ID"]) if ce else None,
+                int(pe["SECURITY_ID"]) if pe else None,
+            ))
 
     if not any(ce or pe for ce, pe in band_legs):
         bail(
