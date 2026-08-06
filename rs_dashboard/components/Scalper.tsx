@@ -1897,18 +1897,18 @@ export const OptionPanel = React.memo(function OptionPanel({
           ResizeObserver), so the toggle lives down here beside the stepper. */}
       {(showStepper || showMoveToggle) && (
         <div className="flex items-center justify-center gap-2 self-center">
-          {showStepper && (
+          {lots !== undefined && onLotsChange && (
             <div className="flex items-center bg-zinc-900 border border-zinc-700 rounded-lg overflow-hidden">
-              <button onClick={() => onLotsChange!(Math.max(1, lots! - 1))}
+              <button onClick={() => onLotsChange(Math.max(1, lots - 1))}
                 className="px-2.5 py-1 text-zinc-400 hover:text-white hover:bg-zinc-800 transition-colors font-bold text-sm">−</button>
               <span className="px-2 text-xs font-mono tabular-nums text-zinc-200 min-w-[3.5rem] text-center border-x border-zinc-700">
                 {lots} lot{lots !== 1 ? 's' : ''}
               </span>
-              <button onClick={() => onLotsChange!(lots! + 1)}
+              <button onClick={() => onLotsChange(lots + 1)}
                 className="px-2.5 py-1 text-zinc-400 hover:text-white hover:bg-zinc-800 transition-colors font-bold text-sm">+</button>
             </div>
           )}
-          {showMoveToggle && (
+          {moveFraction && onMoveFractionChange && (
             <div className="flex items-center gap-1 bg-zinc-900 border border-zinc-700 rounded-lg px-1.5 py-1">
               <span className="text-[9px] font-bold uppercase tracking-wider text-zinc-400">Move</span>
               {(['HALF', 'FULL'] as const).map(f => {
@@ -1919,7 +1919,7 @@ export const OptionPanel = React.memo(function OptionPanel({
                     key={f}
                     type="button"
                     disabled={dis}
-                    onClick={() => onMoveFractionChange!(f)}
+                    onClick={() => onMoveFractionChange(f)}
                     title={dis
                       ? (halfMoveDisabledReason ?? 'Needs ≥2 open lots to move half')
                       : isHalf

@@ -87,16 +87,18 @@ export function partialCloseChips(
     } else if (!usable) {
       enabled = false;
       title = 'Lot size unknown for this position';
+    } else if (total < 1) {
+      enabled = false;
+      title = `Position is under one lot (${abs} qty) — use Close`;
     } else if (lots < 1) {
       enabled = false;
       title = `Needs ≥${Math.ceil(100 / pct)} lots — position is ${total} lot${total === 1 ? '' : 's'}`;
     } else if (lots <= prevEnabledLots) {
       enabled = false;
       title = `Same as ${prevEnabledPct}% (${lots} lot${lots === 1 ? '' : 's'}) at ${total} lots`;
-    } else if (units >= abs) {
-      enabled = false;
-      title = `Same as 100% at ${total} lots`;
     } else {
+      // lots < total always holds below 100%, so `units` can never reach `abs` —
+      // a fraction chip is never a disguised full close.
       title = `Close ${lots} lot${lots === 1 ? '' : 's'} (${units} qty) — ${pct}% of ${total} lots`;
     }
 

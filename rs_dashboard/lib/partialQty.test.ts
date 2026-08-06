@@ -89,6 +89,15 @@ test('unusable lot size disables the partials but keeps 100%', () => {
   }
 });
 
+test('a sub-lot stub disables every fraction but stays closable at 100%', () => {
+  // 40 units at lotSize 75 — a leftover an earlier partial couldn't have made,
+  // but a lot-size change or an odd broker fill can.
+  const chips = partialCloseChips(40, LS);
+  assert.deepStrictEqual(chips.filter(c => c.enabled).map(c => c.pct), [100]);
+  assert.strictEqual(chips[3].units, 40);
+  for (const c of chips.slice(0, 3)) assert.match(c.title, /under one lot \(40 qty\)/);
+});
+
 test('a flat position disables every chip', () => {
   const chips = partialCloseChips(0, LS);
   assert.ok(chips.every(c => !c.enabled));
