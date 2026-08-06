@@ -3,8 +3,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import NavBar from '@/components/NavBar';
 import { TrendingOiTable } from '@/components/TrendingOiTable';
+import { TrendingOiChartModal } from '@/components/TrendingOiChartModal';
 import type { TrendingOiResponse } from '@/app/api/trending-oi/route';
-import { RefreshCw, TrendingUp, Search, ChevronDown } from 'lucide-react';
+import { RefreshCw, TrendingUp, Search, ChevronDown, BarChart3 } from 'lucide-react';
 
 const INTERVALS = ['1', '3', '5', '10', '15'] as const;
 type Mode = 'live' | 'historical';
@@ -42,6 +43,7 @@ export default function TrendingOiPage() {
   // would change the query key on first response and re-spawn the whole ~25s backend run.
   const [selectedStrikes, setSelectedStrikes] = useState<number[] | null>(null);
   const [isStrikePickerOpen, setIsStrikePickerOpen] = useState(false);
+  const [isChartOpen, setIsChartOpen] = useState(false);
   const [strikeSearch, setStrikeSearch] = useState('');
   const pickerRef = useRef<HTMLDivElement>(null);
 
@@ -329,6 +331,18 @@ export default function TrendingOiPage() {
               ))}
             </div>
 
+            {/* Chart */}
+            <button
+              type="button"
+              onClick={() => setIsChartOpen(true)}
+              disabled={rows.length === 0}
+              title={rows.length === 0 ? 'No buckets to chart yet' : 'Overlay the OI change series'}
+              className="flex items-center gap-1.5 bg-zinc-950 border border-zinc-800 px-2.5 py-1.5 rounded-lg font-semibold text-zinc-200 transition hover:border-zinc-600 disabled:cursor-not-allowed disabled:text-zinc-600 disabled:hover:border-zinc-800"
+            >
+              <BarChart3 className="w-3.5 h-3.5 text-emerald-400" />
+              Chart
+            </button>
+
             {/* Live / Historical */}
             <div className="flex items-center gap-1.5 bg-zinc-950 border border-zinc-800 px-2.5 py-1.5 rounded-lg">
               {(['live', 'historical'] as Mode[]).map((m) => (
@@ -420,6 +434,21 @@ export default function TrendingOiPage() {
         )}
 
         {!initialLoading && !noData && <TrendingOiTable rows={rows} />}
+
+        {/* The poll replaces `rows` wholesale, so an open chart live-updates for free.
+            Label the chart from the *response*, not the controls: a backend run takes
+            ~25s, so `interval_` / the requested strikes describe a fetch that hasn't
+            landed yet and would caption the old rows with the new selection. */}
+        {isChartOpen && rows.length > 0 && (
+          <TrendingOiChartModal
+            rows={rows}
+            interval={data?.interval ?? interval_}
+            expiry={data?.expiry ?? ''}
+            spot={spot}
+            strikeCount={servedStrikes.length || activeSelectedStrikes.length}
+            onClose={() => setIsChartOpen(false)}
+          />
+        )}
       </main>
     </div>
   );
