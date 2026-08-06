@@ -6,11 +6,12 @@ import { AlertCircle, ArrowLeft, Fuel, Loader2 } from 'lucide-react';
 
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { Badge } from '@/components/ui/badge';
-import { Button } from '@/components/ui/button';
+import { buttonVariants } from '@/components/ui/button';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group';
 import { TooltipProvider } from '@/components/ui/tooltip';
+import { cn } from '@/lib/utils';
 
 import CrudeOilOITab from './CrudeOilOITab';
 import CrudeOilCumulativeOITab from './CrudeOilCumulativeOITab';
@@ -908,10 +909,14 @@ export default function CrudeOilOptions() {
               </Select>
             )}
 
-            <Button variant="outline" size="sm" render={<Link href="/options" />}>
+            {/* Styled as a button but it navigates, so it stays a real link. Feeding it
+                through Base UI's Button (render={<Link/>}) would need nativeButton={false},
+                which stamps role="button" on the anchor and hides it from screen readers'
+                link semantics. buttonVariants gives identical styling with none of that. */}
+            <Link href="/options" className={cn(buttonVariants({ variant: 'outline', size: 'sm' }))}>
               <ArrowLeft />
               Nifty Options
-            </Button>
+            </Link>
           </div>
         </header>
 
