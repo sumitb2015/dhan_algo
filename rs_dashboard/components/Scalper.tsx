@@ -8,6 +8,7 @@ import { useProfitLock, ProfitLockControls } from './ProfitLock';
 import { useCopyTrade, CopyTradeControls } from './CopyTrade';
 import { useBrokerSelector, scalperRoute, BROKER_LABELS, type Broker } from '@/hooks/useBrokerSelector';
 import { contractMultiplier } from '@/lib/positionPnl';
+import { partialCloseChips } from '@/lib/partialQty';
 
 // A MARKET close order being accepted by the broker doesn't guarantee it filled.
 // Polls the live positions book a few times so callers that chain a follow-up
@@ -15,7 +16,15 @@ import { contractMultiplier } from '@/lib/positionPnl';
 // actually flat before proceeding — instead of assuming success from order
 // acceptance alone. Not used on the hot SL/target/manual-close paths, where
 // the extra round trips would add latency scalping can't afford.
-export async function pollPositionFlat(broker: Broker, tradingSymbol: string, attempts = 4, delayMs = 500): Promise<boolean> {
+// Polls the live book until `accept(absNetQty)` holds, resolving the observed
+// absolute netQty — or null on timeout. A missing row counts as flat (0).
+async function pollPositionQty(
+  broker: Broker,
+  tradingSymbol: string,
+  accept: (absNetQty: number) => boolean,
+  attempts = 4,
+  delayMs = 500,
+): Promise<number | null> {
   for (let i = 0; i < attempts; i++) {
     await new Promise(r => setTimeout(r, delayMs));
     try {
@@ -23,13 +32,35 @@ export async function pollPositionFlat(broker: Broker, tradingSymbol: string, at
       const j = await res.json() as { success: boolean; data?: Record<string, unknown>[] };
       if (j.success && j.data) {
         const match = j.data.find(p => String(p.tradingSymbol) === tradingSymbol);
-        if (!match || Number(match.netQty) === 0) return true;
+        const abs = match ? Math.abs(Number(match.netQty) || 0) : 0;
+        if (accept(abs)) return abs;
       }
     } catch {
       // treat as inconclusive, retry
     }
   }
-  return false;
+  return null;
+}
+
+export async function pollPositionFlat(broker: Broker, tradingSymbol: string, attempts = 4, delayMs = 500): Promise<boolean> {
+  return (await pollPositionQty(broker, tradingSymbol, abs => abs === 0, attempts, delayMs)) !== null;
+}
+
+// Partial-close counterpart: succeeds as soon as the book shows the leg has
+// shrunk by at least `minReduction` units, and resolves how much actually left
+// (which can exceed the request if something else closed concurrently). null
+// means the reduction was never observed — callers that chain a follow-up open
+// must treat that as a failure rather than sizing off a guess.
+export async function pollPositionReduced(
+  broker: Broker,
+  tradingSymbol: string,
+  prevAbs: number,
+  minReduction: number,
+  attempts = 4,
+  delayMs = 500,
+): Promise<number | null> {
+  const observed = await pollPositionQty(broker, tradingSymbol, abs => prevAbs - abs >= minReduction, attempts, delayMs);
+  return observed === null ? null : prevAbs - observed;
 }
 
 // ─── Types ────────────────────────────────────────────────────────
@@ -1714,6 +1745,13 @@ export interface OptionPanelProps {
   /** Callbacks for shifting the strike up or down (auto-closing active position if any) */
   onShiftUp?: () => void;
   onShiftDown?: () => void;
+  /** Fraction of the open position the shift chevrons roll. A compact ½/Full toggle renders
+   *  only when this and onMoveFractionChange are both supplied; omit for the legacy full roll. */
+  moveFraction?: 'HALF' | 'FULL';
+  onMoveFractionChange?: (f: 'HALF' | 'FULL') => void;
+  /** Greys out the ½ segment (e.g. the leg has fewer than 2 open lots) with an explanatory tooltip. */
+  halfMoveDisabled?: boolean;
+  halfMoveDisabledReason?: string;
   onLimitPriceChange: (p: string) => void;
   onBuy: () => void;
   onSell: () => void;
@@ -1745,9 +1783,13 @@ export const OptionPanel = React.memo(function OptionPanel({
   side, label, strike, visibleStrikes, atm, ltp, pct, high, low, buildup, oiChgPct,
   limitPrice, orderMode, onStrikeChange, onShiftUp, onShiftDown, onLimitPriceChange, onBuy, onSell,
   lots, onLotsChange, onRemove, canRemove, pnl, onSideChange,
+  moveFraction, onMoveFractionChange, halfMoveDisabled, halfMoveDisabledReason,
   pending = false, strikesReady = true,
 }: OptionPanelProps) {
   const orderDisabled = !strike || pending || !strikesReady;
+  const showStepper = lots !== undefined && !!onLotsChange;
+  const showMoveToggle = !!moveFraction && !!onMoveFractionChange;
+  const rollsHalf = moveFraction === 'HALF';
   const isPos = (v: number) => v >= 0;
   // The WS bridge (live_options_ws.py) is the single source of buildup labels.
   // Re-deriving them here with a second set of dead-bands made the same strike
@@ -1807,7 +1849,7 @@ export const OptionPanel = React.memo(function OptionPanel({
             <button
               onClick={onShiftUp}
               disabled={orderDisabled}
-              title="Shift strike up (auto-close active position if any)"
+              title={`Shift strike up — rolls ${rollsHalf ? 'HALF of' : 'the entire'} the open position`}
               className="shrink-0 w-6 h-6 flex items-center justify-center rounded-lg border border-emerald-500/20
                          bg-emerald-500/10 text-emerald-400 hover:bg-emerald-500 hover:text-white hover:border-emerald-500
                          disabled:opacity-30 disabled:cursor-not-allowed transition-all active:scale-95"
@@ -1829,7 +1871,7 @@ export const OptionPanel = React.memo(function OptionPanel({
             <button
               onClick={onShiftDown}
               disabled={orderDisabled}
-              title="Shift strike down (auto-close active position if any)"
+              title={`Shift strike down — rolls ${rollsHalf ? 'HALF of' : 'the entire'} the open position`}
               className="shrink-0 w-6 h-6 flex items-center justify-center rounded-lg border border-rose-500/20
                          bg-rose-500/10 text-rose-400 hover:bg-rose-500 hover:text-white hover:border-rose-500
                          disabled:opacity-30 disabled:cursor-not-allowed transition-all active:scale-95"
@@ -1850,16 +1892,51 @@ export const OptionPanel = React.memo(function OptionPanel({
         </div>
       </div>
 
-      {/* Per-box lot stepper (only rendered when caller passes lots/onLotsChange) */}
-      {lots !== undefined && onLotsChange && (
-        <div className="flex items-center justify-center bg-zinc-900 border border-zinc-700 rounded-lg overflow-hidden self-center">
-          <button onClick={() => onLotsChange(Math.max(1, lots - 1))}
-            className="px-2.5 py-1 text-zinc-400 hover:text-white hover:bg-zinc-800 transition-colors font-bold text-sm">−</button>
-          <span className="px-2 text-xs font-mono tabular-nums text-zinc-200 min-w-[3.5rem] text-center border-x border-zinc-700">
-            {lots} lot{lots !== 1 ? 's' : ''}
-          </span>
-          <button onClick={() => onLotsChange(lots + 1)}
-            className="px-2.5 py-1 text-zinc-400 hover:text-white hover:bg-zinc-800 transition-colors font-bold text-sm">+</button>
+      {/* Per-box lot stepper + strike-move fraction toggle. The header row above
+          is already tight (chevrons + strike select + remove, hence the compact
+          ResizeObserver), so the toggle lives down here beside the stepper. */}
+      {(showStepper || showMoveToggle) && (
+        <div className="flex items-center justify-center gap-2 self-center">
+          {lots !== undefined && onLotsChange && (
+            <div className="flex items-center bg-zinc-900 border border-zinc-700 rounded-lg overflow-hidden">
+              <button onClick={() => onLotsChange(Math.max(1, lots - 1))}
+                className="px-2.5 py-1 text-zinc-400 hover:text-white hover:bg-zinc-800 transition-colors font-bold text-sm">−</button>
+              <span className="px-2 text-xs font-mono tabular-nums text-zinc-200 min-w-[3.5rem] text-center border-x border-zinc-700">
+                {lots} lot{lots !== 1 ? 's' : ''}
+              </span>
+              <button onClick={() => onLotsChange(lots + 1)}
+                className="px-2.5 py-1 text-zinc-400 hover:text-white hover:bg-zinc-800 transition-colors font-bold text-sm">+</button>
+            </div>
+          )}
+          {moveFraction && onMoveFractionChange && (
+            <div className="flex items-center gap-1 bg-zinc-900 border border-zinc-700 rounded-lg px-1.5 py-1">
+              <span className="text-[9px] font-bold uppercase tracking-wider text-zinc-400">Move</span>
+              {(['HALF', 'FULL'] as const).map(f => {
+                const isHalf = f === 'HALF';
+                const dis = isHalf && !!halfMoveDisabled;
+                return (
+                  <button
+                    key={f}
+                    type="button"
+                    disabled={dis}
+                    onClick={() => onMoveFractionChange(f)}
+                    title={dis
+                      ? (halfMoveDisabledReason ?? 'Needs ≥2 open lots to move half')
+                      : isHalf
+                        ? 'Chevrons roll HALF the open quantity (rounded down to whole lots)'
+                        : 'Chevrons roll the ENTIRE open position'}
+                    className={`px-1.5 py-0.5 rounded font-bold text-[9px] transition-all disabled:opacity-30 disabled:cursor-not-allowed ${
+                      moveFraction === f
+                        ? 'bg-amber-600 border border-amber-400 text-white'
+                        : 'bg-zinc-800 border border-zinc-700 text-zinc-400 hover:text-zinc-200'
+                    }`}
+                  >
+                    {isHalf ? '½' : 'Full'}
+                  </button>
+                );
+              })}
+            </div>
+          )}
         </div>
       )}
 
@@ -2080,6 +2157,13 @@ export interface PositionsTableProps {
   onTrailToggle: (sym: string) => void;
   onClose: (pos: Record<string, unknown>) => void;
   onAddLeg: (pos: Record<string, unknown>) => void;
+  /** Per-row lot size for the partial square-off chips. Return null when it can't be
+   *  resolved for that row (e.g. a leg from a different underlying than the terminal has
+   *  loaded) — the chips then hide and only the full Close button is offered.
+   *  Rows themselves carry no lot size: no broker's position shape reports one. */
+  lotSizeFor?: (row: Record<string, unknown>) => number | null;
+  /** Partial square-off. `units` is ABSOLUTE quantity, already rounded to whole lots. */
+  onClosePartial?: (pos: Record<string, unknown>, units: number, pct: number) => void;
   sort: SortState;
   onSort: (key: string) => void;
   // Set when the last positions fetch failed (network/API error) rather than
@@ -2088,7 +2172,7 @@ export interface PositionsTableProps {
   error?: string | null;
 }
 
-export const PositionsTable = React.memo(function PositionsTable({ data, guards, closingPositions, onGuardChange, onTrailToggle, onClose, onAddLeg, sort, onSort, error }: PositionsTableProps) {
+export const PositionsTable = React.memo(function PositionsTable({ data, guards, closingPositions, onGuardChange, onTrailToggle, onClose, onAddLeg, lotSizeFor, onClosePartial, sort, onSort, error }: PositionsTableProps) {
   const sortedData = useMemo(() => sortRows(data, sort), [data, sort]);
 
   if (!data.length) {
@@ -2288,25 +2372,50 @@ export const PositionsTable = React.memo(function PositionsTable({ data, guards,
                 </div>
               </td>
 
-              {/* Manual close / add-leg buttons */}
+              {/* Manual close / add-leg buttons + partial square-off chips */}
               <td className="px-2 py-1.5 text-center">
-                <div className="flex items-center justify-center gap-1.5">
-                  <button
-                    onClick={() => onAddLeg(row)}
-                    disabled={isClosing || netQty === 0}
-                    title={`Load ${sym}'s strike into the order panel to add more or hedge`}
-                    className="px-2.5 py-1 text-[11px] font-bold rounded border transition-all disabled:opacity-40 disabled:cursor-not-allowed bg-emerald-900/40 border-emerald-500/30 text-emerald-400 hover:bg-emerald-800/60 hover:text-emerald-200 active:scale-95"
-                  >
-                    Add
-                  </button>
-                  <button
-                    onClick={() => onClose(row)}
-                    disabled={isClosing || netQty === 0}
-                    title={`Market close ${sym}`}
-                    className="px-2.5 py-1 text-[11px] font-bold rounded border transition-all disabled:opacity-40 disabled:cursor-not-allowed bg-rose-900/40 border-rose-500/30 text-rose-400 hover:bg-rose-800/60 hover:text-rose-200 active:scale-95"
-                  >
-                    {isClosing ? '…' : 'Close'}
-                  </button>
+                <div className="flex flex-col items-center gap-1">
+                  <div className="flex items-center justify-center gap-1.5">
+                    <button
+                      onClick={() => onAddLeg(row)}
+                      disabled={isClosing || netQty === 0}
+                      title={`Load ${sym}'s strike into the order panel to add more or hedge`}
+                      className="px-2.5 py-1 text-[11px] font-bold rounded border transition-all disabled:opacity-40 disabled:cursor-not-allowed bg-emerald-900/40 border-emerald-500/30 text-emerald-400 hover:bg-emerald-800/60 hover:text-emerald-200 active:scale-95"
+                    >
+                      Add
+                    </button>
+                    <button
+                      onClick={() => onClose(row)}
+                      disabled={isClosing || netQty === 0}
+                      title={`Market close ${sym} — 100% (${Math.abs(netQty)} qty)`}
+                      className="px-2.5 py-1 text-[11px] font-bold rounded border transition-all disabled:opacity-40 disabled:cursor-not-allowed bg-rose-900/40 border-rose-500/30 text-rose-400 hover:bg-rose-800/60 hover:text-rose-200 active:scale-95"
+                    >
+                      {isClosing ? '…' : 'Close'}
+                    </button>
+                  </div>
+                  {/* Partial square-off. 100% is the Close button above, so only the
+                      fractions appear here. A chip is disabled when it maps to under a
+                      lot, or to the same lot count as a smaller one — see lib/partialQty. */}
+                  {onClosePartial && lotSizeFor && netQty !== 0 && (() => {
+                    const ls = lotSizeFor(row);
+                    if (!ls || ls <= 0) return null;
+                    return (
+                      <div className="flex items-center gap-0.5 text-[9px] font-mono">
+                        {partialCloseChips(netQty, ls, [25, 50, 75]).map(c => (
+                          <button
+                            key={c.pct}
+                            type="button"
+                            disabled={isClosing || !c.enabled}
+                            onClick={() => onClosePartial(row, c.units, c.pct)}
+                            title={c.title}
+                            className="px-1 py-0.5 rounded bg-rose-950/80 border border-rose-800/60 text-rose-400 hover:bg-rose-800 hover:text-white transition-all disabled:opacity-30 disabled:cursor-not-allowed"
+                          >
+                            {c.pct}%
+                          </button>
+                        ))}
+                      </div>
+                    );
+                  })()}
                 </div>
               </td>
             </tr>
