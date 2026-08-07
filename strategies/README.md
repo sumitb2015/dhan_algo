@@ -19,9 +19,11 @@ strategies/
 │   ├── strategy.md           # Full guide to the OI directional strategy
 │   └── nifty_oi_directional.py
 │
-├── crudeoil/                 # MCX CrudeOil Mini futures trend strategy
-│   ├── strategy.md           # Full guide to the CrudeOil Supertrend strategy
-│   └── crudeoilm_supertrend.py
+├── crudeoil/                 # MCX CrudeOil Mini futures trend strategies
+│   ├── strategy.md           # Full guide to all three CrudeOil strategies
+│   ├── crudeoilm_supertrend.py       # Supertrend entries, flat between trades
+│   ├── crudeoilm_renko_sar.py        # Renko stop-and-reverse, no daily caps
+│   └── crudeoilm_vwap_supertrend.py  # Always-on: long above both ST+VWAP, short below both
 │
 └── Archives/                 # Retired — not runnable from the dashboard
     ├── nifty_short_straddle.py       # Archived basic straddle

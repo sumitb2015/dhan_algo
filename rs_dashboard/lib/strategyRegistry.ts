@@ -51,6 +51,10 @@ export const STRATEGIES_METADATA: Record<string, { name: string; path: string }>
     name: 'CrudeOil Mini Renko SAR',
     path: path.join(PROJECT_ROOT, 'strategies', 'crudeoil', 'crudeoilm_renko_sar.py')
   },
+  crudeoilm_vwap_supertrend: {
+    name: 'CrudeOil Mini VWAP + Supertrend',
+    path: path.join(PROJECT_ROOT, 'strategies', 'crudeoil', 'crudeoilm_vwap_supertrend.py')
+  },
   nifty_st_oi_bearcall: {
     name: 'Nifty ST+OI Bear Call Spread',
     path: path.join(PROJECT_ROOT, 'strategies', 'st_oi_bearcall', 'nifty_st_oi_bearcall.py')

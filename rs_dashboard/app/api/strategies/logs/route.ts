@@ -28,6 +28,7 @@ const STRATEGY_LOG_DIRS: Record<string, string> = {
   nifty_st_oi_bearcall:          'st_oi_bearcall',
   crudeoilm_supertrend:          'crudeoil',
   crudeoilm_renko_sar:           'crudeoil_renko',
+  crudeoilm_vwap_supertrend:     'crudeoil_vwap',
   nifty500_momentum:             'momentum_investing',
 };
 

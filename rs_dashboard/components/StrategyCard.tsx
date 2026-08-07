@@ -1,7 +1,7 @@
 'use client';
 
 import React, { useState, useEffect } from 'react';
-import { Play, Square, Settings, Activity, ShieldAlert, Loader2, ChevronDown, ChevronUp } from 'lucide-react';
+import { Play, Square, Settings, Activity, ShieldAlert, Loader2, ChevronDown, ChevronUp, RotateCcw } from 'lucide-react';
 import LogConsole from './LogConsole';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
@@ -100,6 +100,12 @@ interface StrategyState {
   last_brick_close?: number;
   consecutive_opposite?: number;
   qty?: number;
+  // CrudeOil Mini VWAP + Supertrend (also reuses entry_price/st_level/vwap/ltp/daily_pnl above)
+  signal_close?: number;
+  contract_size?: number;
+  exposure_units?: number;
+  allow_reverse?: boolean;
+  exit_on_close?: boolean;
   position_pnl?: number;
   // ST+OI Bear Call Spread
   phase?: string;
@@ -142,6 +148,8 @@ function StrategyCard({ meta, state, onRefresh }: StrategyCardProps) {
   const [showLogs, setShowLogs] = useState<boolean>(false);
   const [submitting, setSubmitting] = useState<boolean>(false);
   const [confirmStop, setConfirmStop] = useState<boolean>(false);
+  const [confirmReset, setConfirmReset] = useState<boolean>(false);
+  const [resetTimeoutId, setResetTimeoutId] = useState<NodeJS.Timeout | null>(null);
   const [confirmTimeoutId, setConfirmTimeoutId] = useState<NodeJS.Timeout | null>(null);
   const [gracefulStopSent, setGracefulStopSent] = useState<boolean>(false);
   const [forceKilling, setForceKilling] = useState<boolean>(false);
@@ -241,6 +249,18 @@ function StrategyCard({ meta, state, onRefresh }: StrategyCardProps) {
   const [renkoBoxSize, setRenkoBoxSize] = useState<number>(5);
   const [renkoReverseBricks, setRenkoReverseBricks] = useState<number>(3);
 
+  // CrudeOil Mini VWAP + Supertrend (shares crudeoilInterval/StartTime/EodTime above)
+  const [cvsLots, setCvsLots] = useState<number>(5);
+  const [cvsContractSize, setCvsContractSize] = useState<number>(10);
+  const [cvsStPeriod, setCvsStPeriod] = useState<number>(7);
+  const [cvsStMultiplier, setCvsStMultiplier] = useState<number>(2.0);
+  const [cvsTargetInr, setCvsTargetInr] = useState<number>(5000);
+  const [cvsStopInr, setCvsStopInr] = useState<number>(5000);
+  const [cvsPollSeconds, setCvsPollSeconds] = useState<number>(15);
+  const [cvsFlipCooldown, setCvsFlipCooldown] = useState<number>(30);
+  const [cvsAllowReverse, setCvsAllowReverse] = useState<boolean>(true);
+  const [cvsExitOnClose, setCvsExitOnClose] = useState<boolean>(false);
+
   // ST+OI Bear Call Spread
   const [indexInterval, setIndexInterval] = useState<string>('3');
   const [indexStPeriod, setIndexStPeriod] = useState<number>(10);
@@ -269,6 +289,13 @@ function StrategyCard({ meta, state, onRefresh }: StrategyCardProps) {
     meta.key === 'nifty_spread_trend' && !useEma && !useSupertrend;
 
   const isRunning = state.status !== 'STOPPED';
+  // Does the state file still claim an open position? Drives the Reset button, which
+  // exists for exactly one case: the book was squared off manually at the broker and
+  // the strategy has not noticed.
+  const hasTrackedPosition = Boolean(
+    (state.direction && state.direction !== 'NONE') ||
+    state.in_position || state.ce_strike || state.pe_strike || state.active_spread || state.sold_strike
+  );
   const pnl = state.total_pnl ?? 0;
 
   // Reset stop state when the strategy finishes stopping so the Launch button re-enables.
@@ -301,6 +328,13 @@ function StrategyCard({ meta, state, onRefresh }: StrategyCardProps) {
         args.push('--lots', String(lots));
         args.push('--target-profit', String(crudeoilTargetInr));
         args.push('--stop-loss', String(crudeoilStopInr));
+      } else if (meta.key === 'crudeoilm_vwap_supertrend') {
+        // --lots is the broker order quantity verbatim (Dhan takes MCX qty in lots);
+        // --contract-size is barrels per lot and only scales the P&L, hence the daily caps.
+        args.push('--lots', String(cvsLots));
+        args.push('--contract-size', String(cvsContractSize));
+        args.push('--target-profit', String(cvsTargetInr));
+        args.push('--stop-loss', String(cvsStopInr));
       } else {
         args.push('--lots', String(lots));
         args.push('--target-profit', profitTarget.trim());
@@ -397,6 +431,16 @@ function StrategyCard({ meta, state, onRefresh }: StrategyCardProps) {
         args.push('--reverse-bricks', String(renkoReverseBricks));
         args.push('--start-time', crudeoilStartTime);
         args.push('--eod-time', crudeoilEodTime);
+      } else if (meta.key === 'crudeoilm_vwap_supertrend') {
+        args.push('--interval', crudeoilInterval);
+        args.push('--supertrend-period', String(cvsStPeriod));
+        args.push('--supertrend-multiplier', String(cvsStMultiplier));
+        args.push('--start-time', crudeoilStartTime);
+        args.push('--eod-time', crudeoilEodTime);
+        args.push('--poll-seconds', String(cvsPollSeconds));
+        args.push('--flip-cooldown', String(cvsFlipCooldown));
+        if (!cvsAllowReverse) args.push('--no-reverse');
+        if (cvsExitOnClose) args.push('--exit-on-close');
       } else if (meta.key === 'nifty_st_oi_bearcall') {
         args.push('--index-interval', indexInterval);
         args.push('--index-st-period', String(indexStPeriod));
@@ -474,6 +518,39 @@ function StrategyCard({ meta, state, onRefresh }: StrategyCardProps) {
       }
     } catch (e) {
       setStartError(`Network error: ${e}`);
+      setSubmitting(false);
+    }
+  };
+
+  // "I squared this off myself." Stops the process WITHOUT the graceful shutdown
+  // that would place a real exit order, then clears the phantom position. Two-click
+  // confirm like Stop, because it kills a live process.
+  const handleReset = async () => {
+    if (!confirmReset) {
+      setConfirmReset(true);
+      const timer = setTimeout(() => setConfirmReset(false), 4000);
+      setResetTimeoutId(timer);
+      return;
+    }
+    if (resetTimeoutId) { clearTimeout(resetTimeoutId); setResetTimeoutId(null); }
+    setConfirmReset(false);
+    setSubmitting(true);
+    try {
+      const res = await fetch('/api/strategies', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'reset', strategy: meta.key }),
+      });
+      const data = await res.json();
+      if (data.success) {
+        setGracefulStopSent(false);
+        setTimeout(onRefresh, 1000);
+      } else {
+        setStartError(data.error || 'Failed to reset');
+      }
+    } catch (e) {
+      setStartError(`Network error: ${e}`);
+    } finally {
       setSubmitting(false);
     }
   };
@@ -582,6 +659,18 @@ function StrategyCard({ meta, state, onRefresh }: StrategyCardProps) {
             <Input type="number" value={renkoQty} onChange={(e) => setRenkoQty(parseInt(e.target.value) || 10)} min={1} step={1} className={inputCls} />
             <span className="text-[9px] text-zinc-600">MCX lot size = 10 barrels</span>
           </div>
+        ) : meta.key === 'crudeoilm_vwap_supertrend' ? (
+          <>
+            <div className={fieldCls}>
+              <FieldLabel text="Lots" tip="Order quantity sent to the broker as-is — Dhan takes MCX quantity in lots, so 5 here is 5 lots." />
+              <Input type="number" value={cvsLots} onChange={(e) => setCvsLots(parseInt(e.target.value) || 1)} min={1} max={50} className={inputCls} />
+            </div>
+            <div className={fieldCls}>
+              <FieldLabel text="Barrels/Lot" tip="Contract size used for P&L only (CRUDEOILM = 10, CRUDEOIL = 100). It does not change the order quantity, but it does scale the Target/Stop below." />
+              <Input type="number" value={cvsContractSize} onChange={(e) => setCvsContractSize(parseInt(e.target.value) || 10)} min={1} className={inputCls} />
+              <span className="text-[9px] text-zinc-600">exposure: {cvsLots * cvsContractSize} barrels</span>
+            </div>
+          </>
         ) : (
           <div className={fieldCls}>
             <FieldLabel text="Lots" tip="Number of lot-sized units traded per leg at entry (multiplied by the instrument's live lot size)." />
@@ -640,14 +729,14 @@ function StrategyCard({ meta, state, onRefresh }: StrategyCardProps) {
           </>
         )}
 
-        {meta.key !== 'nifty_spread_trend' && meta.key !== 'crudeoilm_supertrend' && meta.key !== 'crudeoilm_renko_sar' && meta.key !== 'nifty_st_oi_bearcall' && meta.key !== 'nifty500_momentum' && (
+        {meta.key !== 'nifty_spread_trend' && meta.key !== 'crudeoilm_supertrend' && meta.key !== 'crudeoilm_renko_sar' && meta.key !== 'crudeoilm_vwap_supertrend' && meta.key !== 'nifty_st_oi_bearcall' && meta.key !== 'nifty500_momentum' && (
           <div className={fieldCls}>
             <FieldLabel text="Start Time" tip="Time (HH:MM IST) the strategy begins monitoring for entries." />
             <Input type="text" value={startTime} onChange={(e) => setStartTime(e.target.value)} placeholder="09:20" className={inputCls} />
           </div>
         )}
 
-        {meta.key !== 'crudeoilm_renko_sar' && meta.key === 'crudeoilm_supertrend' && (
+        {meta.key === 'crudeoilm_supertrend' && (
           <>
             <div className={fieldCls}>
               <FieldLabel text="Target ₹" tip="Daily cumulative profit target in INR; strategy squares off and stops once reached." />
@@ -661,7 +750,21 @@ function StrategyCard({ meta, state, onRefresh }: StrategyCardProps) {
           </>
         )}
 
-        {meta.key !== 'crudeoilm_renko_sar' && meta.key !== 'crudeoilm_supertrend' && meta.key !== 'nifty500_momentum' && (
+        {meta.key === 'crudeoilm_vwap_supertrend' && (
+          <>
+            <div className={fieldCls}>
+              <FieldLabel text="Target ₹" tip="Daily cumulative profit target in INR. This is the only thing besides EOD that stops the always-on cycle — the position is flattened and the strategy exits." />
+              <Input type="number" value={cvsTargetInr} onChange={(e) => setCvsTargetInr(parseInt(e.target.value) || 5000)} className={inputCls} />
+            </div>
+
+            <div className={fieldCls}>
+              <FieldLabel text="Stop Loss ₹" tip="Daily cumulative stop loss in INR (positive number). Flattens the position and stops the strategy for the day." />
+              <Input type="number" value={cvsStopInr} onChange={(e) => setCvsStopInr(parseInt(e.target.value) || 5000)} className={inputCls} />
+            </div>
+          </>
+        )}
+
+        {meta.key !== 'crudeoilm_renko_sar' && meta.key !== 'crudeoilm_supertrend' && meta.key !== 'crudeoilm_vwap_supertrend' && meta.key !== 'nifty500_momentum' && (
           <>
             <div className={fieldCls}>
               <FieldLabel text="Target ₹" tip="Daily cumulative profit target in INR, or a percentage of entry premium collected e.g. '25%'; strategy squares off and stops once reached." />
@@ -1094,6 +1197,78 @@ function StrategyCard({ meta, state, onRefresh }: StrategyCardProps) {
                 placeholder="23:30"
                 className={inputCls}
               />
+            </div>
+          </>
+        )}
+
+        {/* CrudeOil Mini VWAP + Supertrend-specific */}
+        {meta.key === 'crudeoilm_vwap_supertrend' && (
+          <>
+            <div className={fieldCls}>
+              <FieldLabel text="Timeframe" tip="Candle interval in minutes used for both the Supertrend and the VWAP." />
+              <Select value={crudeoilInterval} onValueChange={(v) => v && setCrudeoilInterval(v)}>
+                <SelectTrigger className={inputCls}><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="1">1 Min</SelectItem>
+                  <SelectItem value="3">3 Min</SelectItem>
+                  <SelectItem value="5">5 Min</SelectItem>
+                  <SelectItem value="15">15 Min</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+            <div className={fieldCls}>
+              <FieldLabel text="ST Period" tip="ATR lookback length for the Supertrend (7 by default)." />
+              <Input type="number" value={cvsStPeriod} onChange={(e) => setCvsStPeriod(parseInt(e.target.value) || 7)} min={2} className={inputCls} />
+            </div>
+            <div className={fieldCls}>
+              <FieldLabel text="ST Multiplier" tip="ATR multiplier for the Supertrend band width (2 by default)." />
+              <Input type="number" step="0.5" value={cvsStMultiplier} onChange={(e) => setCvsStMultiplier(parseFloat(e.target.value) || 2.0)} min={0.5} className={inputCls} />
+            </div>
+            <div className={fieldCls}>
+              <FieldLabel text="Start Time" tip="Time (HH:MM IST) the strategy begins trading." />
+              <Input type="text" value={crudeoilStartTime} onChange={(e) => setCrudeoilStartTime(e.target.value)} placeholder="09:00" className={inputCls} />
+            </div>
+            <div className={fieldCls}>
+              <FieldLabel text="EOD Time" tip="Time (HH:MM IST) the position is flattened for the day (otherwise always-in)." />
+              <Input type="text" value={crudeoilEodTime} onChange={(e) => setCrudeoilEodTime(e.target.value)} placeholder="23:30" className={inputCls} />
+            </div>
+            <div className={fieldCls}>
+              <FieldLabel text="Poll (s)" tip="Seconds between Supertrend/VWAP refreshes. Exits still react to live ticks every second." />
+              <Input type="number" value={cvsPollSeconds} onChange={(e) => setCvsPollSeconds(parseInt(e.target.value) || 15)} min={5} className={inputCls} />
+            </div>
+            <div className={fieldCls}>
+              <FieldLabel text="Flip Cooldown (s)" tip="Minimum seconds between position flips. The Supertrend and VWAP cross each other regularly, and when they nearly coincide the hold-zone collapses to a point — without this a price ticking across it would flip the position every second." />
+              <Input type="number" value={cvsFlipCooldown} onChange={(e) => setCvsFlipCooldown(parseInt(e.target.value) || 0)} min={0} className={inputCls} />
+            </div>
+            <div className={fieldCls}>
+              <FieldLabel text="Always-On" tip="ON: a signal flip exits and immediately opens the opposite position (stop-and-reverse), so the strategy is always in the market. OFF: it exits to flat and waits for the next candle before re-entering." />
+              <div className="flex items-center gap-2 h-7">
+                <input
+                  type="checkbox"
+                  id={`cvs-reverse-${meta.key}`}
+                  checked={cvsAllowReverse}
+                  onChange={(e) => setCvsAllowReverse(e.target.checked)}
+                  className="h-3.5 w-3.5 rounded border-zinc-800 bg-zinc-900 accent-emerald-500"
+                />
+                <label htmlFor={`cvs-reverse-${meta.key}`} className="text-zinc-300 text-xs">
+                  Reverse straight into the opposite side
+                </label>
+              </div>
+            </div>
+            <div className={fieldCls}>
+              <FieldLabel text="Exit Trigger" tip="Unchecked (default): exits fire on the live LTP as soon as it clears both bands. Checked: exits wait for a confirmed candle close, which is slower but ignores intra-candle spikes." />
+              <div className="flex items-center gap-2 h-7">
+                <input
+                  type="checkbox"
+                  id={`cvs-close-${meta.key}`}
+                  checked={cvsExitOnClose}
+                  onChange={(e) => setCvsExitOnClose(e.target.checked)}
+                  className="h-3.5 w-3.5 rounded border-zinc-800 bg-zinc-900 accent-emerald-500"
+                />
+                <label htmlFor={`cvs-close-${meta.key}`} className="text-zinc-300 text-xs">
+                  Exit on confirmed candle close
+                </label>
+              </div>
             </div>
           </>
         )}
@@ -1552,6 +1727,78 @@ function StrategyCard({ meta, state, onRefresh }: StrategyCardProps) {
                     </span>
                   </div>
                 </>
+              ) : meta.key === 'crudeoilm_vwap_supertrend' ? (
+                <>
+                  <div className="px-3 py-2 flex flex-col gap-1 shrink-0">
+                    <span className={lbl}>Direction</span>
+                    <span className={`font-mono font-bold ${
+                      state.direction === 'LONG' ? 'text-emerald-400' :
+                      state.direction === 'SHORT' ? 'text-rose-400' : 'text-zinc-500'
+                    }`}>
+                      {state.direction || 'FLAT'}
+                    </span>
+                    <span className="text-[10px] font-mono whitespace-nowrap">
+                      <span className="text-zinc-500">{state.allow_reverse === false ? 'no-reverse' : 'always-on'} · </span>
+                      {/* Exit trigger decides whether a live dip below both bands acts now or
+                          waits for the candle to close — make it visible, not a hidden setting. */}
+                      <span className={state.exit_on_close ? 'text-amber-400' : 'text-zinc-500'}>
+                        {state.exit_on_close ? 'close-exit' : 'ltp-exit'}
+                      </span>
+                      <span className="text-zinc-500">{state.expiry ? ` · ${state.expiry}` : ''}</span>
+                    </span>
+                  </div>
+                  <div className="px-3 py-2 flex flex-col gap-1 flex-1 min-w-[110px]">
+                    <span className={lbl}>Entry / LTP</span>
+                    {state.direction && state.direction !== 'NONE' ? (
+                      <>
+                        <span className="font-mono font-bold text-zinc-200">
+                          {state.ltp != null ? state.ltp.toFixed(2) : '—'}
+                        </span>
+                        <span className="text-[10px] text-zinc-400 font-mono whitespace-nowrap">
+                          avg ₹{state.entry_price?.toFixed(2) ?? '—'} · {state.lots ?? '—'} lot · {state.exposure_units ?? '—'} bbl
+                        </span>
+                      </>
+                    ) : (
+                      <>
+                        <span className="font-mono text-zinc-600">—</span>
+                        <span className="text-[10px] text-zinc-500 font-mono whitespace-nowrap">
+                          {state.lots ?? '—'} lot · {state.exposure_units ?? '—'} bbl
+                        </span>
+                      </>
+                    )}
+                  </div>
+                  <div className="px-3 py-2 flex flex-col gap-1 shrink-0">
+                    <span className={lbl}>ST / VWAP</span>
+                    <span className="font-mono font-bold whitespace-nowrap">
+                      {/* green when the reference price is above the band, red when below */}
+                      <span className={
+                        (state.ltp || state.signal_close || 0) > (state.st_level ?? 0) && (state.st_level ?? 0) > 0
+                          ? 'text-emerald-400' : 'text-rose-400'
+                      }>
+                        {state.st_level != null && state.st_level > 0 ? state.st_level.toFixed(2) : '—'}
+                      </span>
+                      <span className="text-zinc-500"> / </span>
+                      <span className={
+                        (state.ltp || state.signal_close || 0) > (state.vwap ?? 0) && (state.vwap ?? 0) > 0
+                          ? 'text-emerald-400' : 'text-rose-400'
+                      }>
+                        {state.vwap != null && state.vwap > 0 ? state.vwap.toFixed(2) : '—'}
+                      </span>
+                    </span>
+                    <span className="text-[10px] text-zinc-500 font-mono whitespace-nowrap">
+                      {state.interval ?? 5}m ST({state.supertrend_period ?? 7},{state.supertrend_multiplier ?? 2}) + VWAP
+                    </span>
+                  </div>
+                  <div className="px-3 py-2 flex flex-col gap-1 shrink-0">
+                    <span className={lbl}>Day P&amp;L</span>
+                    <span className={`font-mono font-bold text-sm ${(state.daily_pnl ?? 0) >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
+                      {(state.daily_pnl ?? 0) >= 0 ? '+' : ''}₹{(state.daily_pnl ?? 0).toFixed(0)}
+                    </span>
+                    <span className="text-[10px] text-zinc-500 font-mono whitespace-nowrap">
+                      tgt ₹{state.target_profit?.toFixed(0) ?? '—'} · sl ₹{state.stop_loss?.toFixed(0) ?? '—'}
+                    </span>
+                  </div>
+                </>
               ) : meta.key === 'crudeoilm_renko_sar' ? (
                 <>
                   <div className="px-3 py-2 flex flex-col gap-1 shrink-0">
@@ -1817,6 +2064,19 @@ function StrategyCard({ meta, state, onRefresh }: StrategyCardProps) {
                   </Button>
                 )}
                 <Button
+                  onClick={handleReset}
+                  disabled={submitting}
+                  title="Already squared off manually? Stops the strategy WITHOUT sending an exit order and clears the position it thinks it holds. Use Square Off & Stop if the position is still open."
+                  className={`h-8 px-2.5 gap-1 rounded-lg font-semibold text-xs border transition-all active:scale-95 ${
+                    confirmReset
+                      ? 'border-amber-500 bg-amber-500/20 text-amber-300 animate-pulse'
+                      : 'border-amber-500/25 bg-amber-950/20 text-amber-400 hover:bg-amber-950/30 hover:border-amber-500/40'
+                  } disabled:opacity-50`}
+                >
+                  <RotateCcw className="h-3 w-3" />
+                  {confirmReset ? 'No exit order — sure?' : 'Reset'}
+                </Button>
+                <Button
                   onClick={() => setShowLogs(!showLogs)}
                   className={`h-8 px-3 rounded-lg font-semibold text-xs border transition-colors ${
                     showLogs ? 'bg-zinc-800 text-white border-zinc-700' : 'bg-transparent border-zinc-800 text-zinc-400 hover:text-zinc-200 hover:border-zinc-700'
@@ -1826,7 +2086,24 @@ function StrategyCard({ meta, state, onRefresh }: StrategyCardProps) {
                 </Button>
               </>
             ) : (
-              /* Config open → full-width launch */
+              /* Config open → full-width launch, plus Reset when the stopped card still
+                 shows a position (e.g. the process was killed while holding one). */
+              <>
+              {hasTrackedPosition && (
+                <Button
+                  onClick={handleReset}
+                  disabled={submitting}
+                  title="Clear the stale position this stopped card still shows. Sends no broker order."
+                  className={`h-8 px-2.5 gap-1 rounded-lg font-semibold text-xs border transition-all active:scale-95 ${
+                    confirmReset
+                      ? 'border-amber-500 bg-amber-500/20 text-amber-300 animate-pulse'
+                      : 'border-amber-500/25 bg-amber-950/20 text-amber-400 hover:bg-amber-950/30 hover:border-amber-500/40'
+                  } disabled:opacity-50`}
+                >
+                  <RotateCcw className="h-3 w-3" />
+                  {confirmReset ? 'No exit order — sure?' : 'Reset'}
+                </Button>
+              )}
               <Button
                 onClick={handleStart}
                 disabled={submitting || spreadTrendNoIndicators}
@@ -1835,6 +2112,7 @@ function StrategyCard({ meta, state, onRefresh }: StrategyCardProps) {
                 {submitting ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Play className="h-3.5 w-3.5 fill-white" />}
                 {submitting ? 'Launching…' : 'Launch Algorithm'}
               </Button>
+              </>
             )}
           </div>
 

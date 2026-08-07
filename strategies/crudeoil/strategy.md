@@ -34,7 +34,8 @@ After any exit, waits for one full new candle before re-evaluating signal.
 --start-time STR              Session start HH:MM (default: 09:00)
 --eod-time STR                EOD HH:MM (default: 23:30)
 --cooldown-candles INT        Candles to wait after exit before re-entry scan (default: 1)
---use-vwap                    Use VWAP as an additional exit signal (flag, default: off)
+--use-vwap                    Require close above/below VWAP to allow an entry —
+                              an ENTRY FILTER only, never an exit (flag, default: off)
 ```
 
 ---
@@ -106,4 +107,117 @@ python strategies/crudeoil/crudeoilm_renko_sar.py --live --qty 20
 
 # Wider bricks, faster flips
 python strategies/crudeoil/crudeoilm_renko_sar.py --box-size 10 --reverse-bricks 2
+```
+
+---
+
+# CrudeOil Mini VWAP + Supertrend Always-On Strategy
+
+## Overview
+Always-on MCX CRUDEOILM futures strategy requiring **dual confirmation**: it is long
+only while price is above both the Supertrend and the session VWAP, short only while
+below both, and flips straight from one side to the other. Unlike the Supertrend
+strategy above, it does not sit flat between trades; unlike Renko SAR, it does have
+daily profit/loss caps that end the day.
+
+## Signal Rule
+
+| State | Price vs bands | Action |
+|---|---|---|
+| Flat | above **both** | enter LONG |
+| Flat | below **both** | enter SHORT |
+| Flat | in between | stay flat |
+| LONG | below **both** | exit and immediately enter SHORT |
+| LONG | anything else | HOLD |
+| SHORT | above **both** | exit and immediately enter LONG |
+| SHORT | anything else | HOLD |
+
+The "in between" zone (price above one band but below the other) is deliberate
+hysteresis: losing a single indicator is not a signal. That is what keeps the strategy
+from churning while the two bands are crossed over each other.
+
+`--no-reverse` turns the flip into a plain exit-to-flat. A one-candle re-entry cooldown
+then applies, otherwise the very next tick would re-enter the opposite side and the flag
+would do nothing.
+
+**Flip cooldown.** The Supertrend and the VWAP cross each other regularly. When they nearly
+coincide the hold-zone collapses to a point, and a price ticking across it would flip a live
+position every second. `--flip-cooldown` (default 30s) is the minimum gap between flips —
+the initial entry starts the clock too. Set it to 0 only if you want every crossing acted on.
+
+## Hybrid Signal Price
+- **Entries** use the last CONFIRMED closed candle (`df.iloc[-2]`) — no intra-candle churn.
+- **Exits/flips** use the live 1-second LTP against the latest bands, so a breach is acted
+  on immediately rather than waiting out the candle. `--exit-on-close` switches exits back
+  to the confirmed close.
+
+Both bands come from a background poller thread (`--poll-seconds`, default 15) so the
+1-second main loop never blocks on the candle fetch.
+
+## Quantity vs Exposure — read before going live
+Two different numbers, easy to conflate:
+- `--lots` is the **order quantity sent to the broker verbatim**. Dhan takes MCX quantity
+  in lots (its master list reports `LOT_SIZE=1` for MCX), so `--lots 5` places an order for 5.
+- `--contract-size` (default 10) is **barrels per lot** and is used for **P&L only**:
+  `pnl = (exit - entry) * lots * contract_size`.
+
+This differs from `crudeoilm_supertrend.py`, which multiplies `--lots` by 10 before sending
+it to the broker. Before the first `--live` run, place one manual 1-lot CRUDEOILM order and
+confirm the broker's reported `netQty` matches `--lots 1`.
+
+## Exit Conditions (priority order)
+1. UI shutdown trigger file
+2. EOD time reached (flatten and stop)
+3. Daily profit target hit (cumulative, INR) — flatten and stop for the day
+4. Daily stop loss hit (cumulative, INR) — flatten and stop for the day
+5. Signal flip → stop-and-reverse (this does not end the day)
+
+Only 1–4 end the always-on cycle. There is no per-trade stop: the Supertrend/VWAP flip *is*
+the stop, and it puts you on the other side rather than flat.
+
+## Restart Behavior
+Only the day's realized P&L is restored from the state file. Positions are NOT recovered —
+on a live restart while holding a position, flatten manually first.
+
+## Key CLI Flags
+```
+--live                         Real orders (default: dry run)
+--lots INT                     Broker order quantity, in lots (default: 5)
+--contract-size INT            Barrels per lot, P&L only (default: 10; CRUDEOIL = 100)
+--interval STR                 1/3/5/15 minutes (default: 5)
+--supertrend-period INT        ATR period (default: 7)
+--supertrend-multiplier FLOAT  Multiplier (default: 2.0)
+--vwap-anchor STR              pandas_ta VWAP anchor (default: D)
+--target-profit FLOAT          Daily profit cap INR (default: 5000)
+--stop-loss FLOAT              Daily loss cap INR, positive number (default: 5000)
+--start-time STR               Session start HH:MM (default: 09:00)
+--eod-time STR                 EOD flatten HH:MM (default: 23:30)
+--poll-seconds INT             Indicator refresh cadence (default: 15)
+--days INT                     Candle lookback for the indicator fetch (default: 3)
+--flip-cooldown INT            Minimum seconds between flips (default: 30)
+--no-reverse                   Exit to flat on a flip instead of reversing
+--exit-on-close                Exit on confirmed close instead of live LTP
+```
+
+Arguments are validated at startup and the run is refused on values that would silently
+brick it: a `0` target/stop (trips on the first tick, since `0 >= 0`), `--lots 0`, and an
+unpadded time like `9:00` (`"18:00" >= "9:00"` is False as a string, so the EOD flatten
+would never fire).
+
+## Quote-outage safety
+`get_ltp()` returns `0.0` on any failure. While a position is open and no usable quote has
+arrived, P&L is reported as 0 and **the daily target/stop checks are paused** rather than
+marking the position against a price of zero — which would read as a total loss and end the
+day on a transient glitch. The condition is logged every 30s.
+
+## Examples
+```
+# Dry run (default), 5 lots, Supertrend(7,2) on 5-min candles
+python strategies/crudeoil/crudeoilm_vwap_supertrend.py
+
+# Live, 5 lots, +/- 10000 INR daily caps
+python strategies/crudeoil/crudeoilm_vwap_supertrend.py --live --lots 5 --target-profit 10000 --stop-loss 10000
+
+# Faster signal, exit only on confirmed closes
+python strategies/crudeoil/crudeoilm_vwap_supertrend.py --interval 3 --exit-on-close
 ```
