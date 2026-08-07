@@ -5,7 +5,7 @@ import NavBar from './NavBar';
 import { Zap, RefreshCw, Shield, ShieldOff, Plus } from 'lucide-react';
 import {
   OptionPanel, PositionsTable, TabTable, FundsView, pollPositionFlat, pollPositionReduced,
-  type LiveQuotes, type BridgeStatus, type ChainOcEntry, type Toast,
+  type ChainOcEntry, type Toast,
   type PnlGuardStatus, type PositionGuard, type SortState,
 } from './Scalper';
 import { useLiveOptionsWS } from '@/lib/useLiveOptionsWS';
@@ -101,7 +101,6 @@ export default function AdvancedScalper() {
 
   // P&L Guard
   const [pnlGuardStatus, setPnlGuardStatus]   = useState<PnlGuardStatus | null>(null);
-  const [pnlGuardLoading, setPnlGuardLoading] = useState(false);
   const [profitTarget, setProfitTarget]       = useState('');
   const [lossLimit, setLossLimit]             = useState('');
   const [guardProductTypes, setGuardProductTypes] = useState<string[]>(['INTRADAY']);
@@ -536,8 +535,11 @@ export default function AdvancedScalper() {
       .catch(() => {});
   }, []);
 
-  // ─── useEffect 2: On expiry change — reset, fetch chain, start WS ─
+  // ─── useEffect 2a: On expiry/underlying change — reset selections ──
 
+  // Keyed on the CONTRACT SET only, deliberately not on `broker`: the same
+  // contracts exist at every broker, so switching the selector must never move
+  // a box that has an open leg sitting on its strike.
   useEffect(() => {
     if (!expiry) return;
 
@@ -551,6 +553,17 @@ export default function AdvancedScalper() {
     setPrevClose({});
     setStrikeMap({});   // liveQuotes reset is handled inside useLiveOptionsWS
     setChainSpot(0);
+  }, [expiry, underlying]);
+
+  // ─── useEffect 2b: Fetch the chain (strike ladder + prev close) ────
+
+  // Broker-scoped, so it must re-run on a broker switch: /api/options/chain
+  // serves Dhan from the live option-chain API and the others from their own
+  // instrument cache (and 400s on unsupported broker/underlying pairs). Leaving
+  // `broker` out left the ladder and prev-close on the previous broker's data
+  // while the strikeMap effect below had already re-resolved for the new one.
+  useEffect(() => {
+    if (!expiry) return;
 
     fetch(`/api/options/chain?underlying=${underlying}&expiry=${expiry}&broker=${broker}`)
       .then(r => r.json())
@@ -572,20 +585,32 @@ export default function AdvancedScalper() {
         const spotPrice = j.data.spot ?? 0;
         if (spotPrice > 0) setChainSpot(spotPrice);
 
-        // Default every box's strike to ATM
+        // Default only the boxes that have no strike yet (i.e. right after the
+        // reset above) to ATM. A plain re-fetch — which a broker switch now
+        // triggers — must leave existing selections alone, or a box holding an
+        // open leg would silently jump to ATM and stop showing that position.
         if (strikes.length) {
           const atmTarget = spotPrice > 0 ? Math.round(spotPrice / strikeStep) * strikeStep : 0;
           const nearest = atmTarget > 0
             ? strikes.reduce((prev, cur) => Math.abs(cur - atmTarget) < Math.abs(prev - atmTarget) ? cur : prev)
             : strikes[Math.floor(strikes.length / 2)];
-          setBoxes(prev => prev.map(b => ({ ...b, strike: nearest })));
+          setBoxes(prev => prev.some(b => b.strike == null)
+            ? prev.map(b => (b.strike == null ? { ...b, strike: nearest } : b))
+            : prev);
         }
       })
       .catch(() => {});
+  }, [expiry, underlying, broker, strikeStep]);
+
+  // ─── useEffect 2c: WS bridge lifecycle ────────────────────────────
+
+  useEffect(() => {
+    if (!expiry) return;
 
     // Start a WS bridge for every authenticated broker concurrently — each
     // runs independently on its own port/files (see useLiveOptionsWS), so
-    // switching the broker selector never spawns or kills a process.
+    // switching the broker selector never spawns or kills a process. That is
+    // also why `broker` is not a dependency here.
     for (const b of authenticatedBrokers) {
       fetch('/api/options/live', {
         method: 'POST',
@@ -731,40 +756,43 @@ export default function AdvancedScalper() {
   }, [atm]);
 
   const removeBox = useCallback((id: string) => {
-    setBoxes(prev => {
-      if (prev.length <= MIN_BOXES) return prev;
-      const box = prev.find(b => b.id === id);
-      if (!box) return prev;
+    // Validated outside the setBoxes updater: an updater must stay pure, and
+    // toasting from inside one fires twice under StrictMode's double
+    // invocation — the same hazard the auto-apply effect documents above.
+    if (boxes.length <= MIN_BOXES) return;
+    const box = boxes.find(b => b.id === id);
+    if (!box) return;
 
-      const secId = boxSecId(box);
-      // Fail safe: if the box has a strike but the strike→securityId map hasn't
-      // loaded yet (e.g. right after an expiry change), we can't verify whether
-      // an open position backs this box — block removal instead of assuming flat.
-      if (box.strike != null && !secId) {
-        addToast('error', 'Cannot remove box', 'Strike data still loading — try again in a moment');
-        return prev;
-      }
-      const pos = secId ? positionsBySecId[secId] : undefined;
-      if (pos && Number(pos.netQty) !== 0) {
-        addToast('error', 'Cannot remove box', 'Square off the open position first');
-        return prev;
-      }
+    const secId = boxSecId(box);
+    // Fail safe: if the box has a strike but the strike→securityId map hasn't
+    // loaded yet (e.g. right after an expiry change), we can't verify whether
+    // an open position backs this box — block removal instead of assuming flat.
+    if (box.strike != null && !secId) {
+      addToast('error', 'Cannot remove box', 'Strike data still loading — try again in a moment');
+      return;
+    }
+    const pos = secId ? positionsBySecId[secId] : undefined;
+    if (pos && Number(pos.netQty) !== 0) {
+      addToast('error', 'Cannot remove box', 'Square off the open position first');
+      return;
+    }
 
-      return prev.filter(b => b.id !== id);
-    });
-  }, [boxSecId, positionsBySecId, addToast]);
+    // Re-check the floor inside the updater — `boxes` is a render-time snapshot.
+    setBoxes(prev => (prev.length > MIN_BOXES ? prev.filter(b => b.id !== id) : prev));
+  }, [boxes, boxSecId, positionsBySecId, addToast]);
 
   // Pre-fill an existing empty box (or add a new one) from an open position so the
   // user can scale in (same strike) or add a hedge (new strike) via the order panel.
   const handleAddLeg = useCallback((pos: Record<string, unknown>) => {
     const sym = String(pos.tradingSymbol ?? '');
-    let match: { strike: number; side: 'CE' | 'PE' } | null = null;
-    for (const [strikeStr, entry] of Object.entries(strikeMap)) {
-      if (entry.ceSymbol === sym) { match = { strike: Number(strikeStr), side: 'CE' }; break; }
-      if (entry.peSymbol === sym) { match = { strike: Number(strikeStr), side: 'PE' }; break; }
-    }
-    if (!match) { addToast('error', 'Could not match position to a strike', sym); return; }
-    const { strike, side } = match;
+    // Resolve through the same broker-aware join the positions table uses.
+    // Scanning strikeMap for ceSymbol/peSymbol matched nothing on Dhan — its
+    // lookup returns securityIds only (scalper_api.py emits ceId/peId, no
+    // symbols), so every Add click on the primary broker failed here.
+    const mapping = secIdToStrikeSide[positionJoinKey(pos)];
+    if (!mapping) { addToast('error', 'Could not match position to a strike', sym); return; }
+    const strike = mapping.strike;
+    const side: 'CE' | 'PE' = mapping.side === 'ce' ? 'CE' : 'PE';
 
     const emptyBox = boxes.find(b => b.side === side && b.strike == null);
     if (emptyBox) {
@@ -779,7 +807,7 @@ export default function AdvancedScalper() {
     boxCounterRef.current += 1;
     setBoxes(prev => [...prev, { id: `box-${boxCounterRef.current}`, side, strike, lots: 1, limitPrice: '' }]);
     addToast('success', `${side} panel set to ${strike}`, 'Pick Buy/Sell and lots to add this leg');
-  }, [strikeMap, boxes, updateBox, addToast]);
+  }, [secIdToStrikeSide, positionJoinKey, boxes, updateBox, addToast]);
 
   // ─── placeOrder ───────────────────────────────────────────────────
 
@@ -1387,40 +1415,32 @@ export default function AdvancedScalper() {
 
   // ─── P&L Guard ────────────────────────────────────────────────────
 
-  const fetchPnlGuardStatus = useCallback(async () => {
-    setPnlGuardLoading(true);
-    try {
-      const res = await fetch('/api/pnl-exit');
-      const j = await res.json();
-      // A failed/empty GET is usually transient — don't wipe a known-good state
-      // to null just because this one poll came back empty.
-      if (j.success) setPnlGuardStatus(j.data ?? null);
-    } catch {
-      // ignore — keep showing the last known state
-    } finally {
-      setPnlGuardLoading(false);
-    }
-  }, []);
-
   // After a successful Set, Dhan's own GET can take several seconds to reflect
   // the change. Poll a few times before trusting a "not configured yet"
   // response — otherwise the optimistic ACTIVE badge flips back to NOT SET
   // a couple seconds later even though the guard really was applied.
-  const reconcilePnlGuardAfterSet = useCallback((attempt = 1) => {
-    setTimeout(async () => {
-      try {
-        const res = await fetch('/api/pnl-exit');
-        const j = await res.json();
-        const hasConfig = j.success && j.data && (Number(j.data.profit) > 0 || Math.abs(Number(j.data.loss)) > 0);
-        if (hasConfig || attempt >= 4) {
-          if (j.success) setPnlGuardStatus(j.data ?? null);
-          return;
+  //
+  // The retry recurses through a local helper rather than through the
+  // useCallback binding itself, which would be a read of a component-scope
+  // `const` from inside its own initialiser.
+  const reconcilePnlGuardAfterSet = useCallback(() => {
+    const poll = (attempt: number) => {
+      setTimeout(async () => {
+        try {
+          const res = await fetch('/api/pnl-exit');
+          const j = await res.json();
+          const hasConfig = j.success && j.data && (Number(j.data.profit) > 0 || Math.abs(Number(j.data.loss)) > 0);
+          if (hasConfig || attempt >= 4) {
+            if (j.success) setPnlGuardStatus(j.data ?? null);
+            return;
+          }
+          poll(attempt + 1);
+        } catch {
+          if (attempt < 4) poll(attempt + 1);
         }
-        reconcilePnlGuardAfterSet(attempt + 1);
-      } catch {
-        if (attempt < 4) reconcilePnlGuardAfterSet(attempt + 1);
-      }
-    }, 1500);
+      }, 1500);
+    };
+    poll(1);
   }, []);
 
   const handleSetPnl = async () => {
@@ -1686,9 +1706,7 @@ export default function AdvancedScalper() {
 
         {/* P&L Guard bar — always visible; controls themselves are Dhan-only (see below) */}
         <div className="mt-2 pt-2 border-t border-zinc-800">
-          {pnlGuardLoading ? (
-            <p className="text-xs text-zinc-500 px-1">Loading…</p>
-          ) : (() => {
+          {(() => {
             const isActive = pnlGuardStatus?.pnlExitStatus === 'ACTIVE';
             // Dhan may echo loss back as the negative level it was stored at rather
             // than the positive magnitude we sent — compare by magnitude either way.

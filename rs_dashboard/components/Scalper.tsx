@@ -195,7 +195,6 @@ export default function Scalper() {
 
   // P&L Guard
   const [pnlGuardStatus, setPnlGuardStatus]   = useState<PnlGuardStatus | null>(null);
-  const [pnlGuardLoading, setPnlGuardLoading] = useState(false);
   const [profitTarget, setProfitTarget]       = useState('');
   const [lossLimit, setLossLimit]             = useState('');
   const [guardProductTypes, setGuardProductTypes] = useState<string[]>(['INTRADAY']);
@@ -428,8 +427,11 @@ export default function Scalper() {
       .catch(() => {});
   }, []);
 
-  // ─── useEffect 2: On expiry change — reset, fetch chain, start WS ─
+  // ─── useEffect 2a: On expiry/underlying change — reset selections ──
 
+  // Keyed on the CONTRACT SET only, deliberately not on `broker`: the same
+  // contracts exist at every broker, so switching the selector must never move
+  // a panel that has an open leg sitting on its strike.
   useEffect(() => {
     if (!expiry) return;
 
@@ -444,8 +446,18 @@ export default function Scalper() {
     setPrevClose({});
     setStrikeMap({});   // liveQuotes reset is handled inside useLiveOptionsWS
     setChainSpot(0);
+  }, [expiry, underlying]);
 
-    // One-time chain fetch for prev close prices + strike list
+  // ─── useEffect 2b: Fetch the chain (strike ladder + prev close) ────
+
+  // Broker-scoped, so it must re-run on a broker switch: /api/options/chain
+  // serves Dhan from the live option-chain API and the others from their own
+  // instrument cache (and 400s on unsupported broker/underlying pairs). Leaving
+  // `broker` out left the ladder and prev-close on the previous broker's data
+  // while the strikeMap effect below had already re-resolved for the new one.
+  useEffect(() => {
+    if (!expiry) return;
+
     fetch(`/api/options/chain?underlying=${underlying}&expiry=${expiry}&broker=${broker}`)
       .then(r => r.json())
       .then((j: { success: boolean; data?: { chain: { oc?: Record<string, ChainOcEntry> }; spot: number } }) => {
@@ -467,21 +479,31 @@ export default function Scalper() {
         const spotPrice = j.data.spot ?? 0;
         if (spotPrice > 0) setChainSpot(spotPrice);
 
-        // Default both strikes to ATM
+        // Default only the strikes that aren't set yet (i.e. right after the
+        // reset above) to ATM. A plain re-fetch — which a broker switch now
+        // triggers — must leave an existing selection alone, or a panel holding
+        // an open leg would silently jump to ATM and stop showing that position.
         if (strikes.length) {
           const atmTarget = spotPrice > 0 ? Math.round(spotPrice / strikeStep) * strikeStep : 0;
           const nearest = atmTarget > 0
             ? strikes.reduce((prev, cur) => Math.abs(cur - atmTarget) < Math.abs(prev - atmTarget) ? cur : prev)
             : strikes[Math.floor(strikes.length / 2)];
-          setCeStrike(nearest);
-          setPeStrike(nearest);
+          setCeStrike(prev => prev ?? nearest);
+          setPeStrike(prev => prev ?? nearest);
         }
       })
       .catch(() => {});
+  }, [expiry, underlying, broker, strikeStep]);
+
+  // ─── useEffect 2c: WS bridge lifecycle ────────────────────────────
+
+  useEffect(() => {
+    if (!expiry) return;
 
     // Start a WS bridge for every authenticated broker concurrently — each
     // runs independently on its own port/files (see useLiveOptionsWS), so
-    // switching the broker selector never spawns or kills a process.
+    // switching the broker selector never spawns or kills a process. That is
+    // also why `broker` is not a dependency here.
     for (const b of authenticatedBrokers) {
       fetch('/api/options/live', {
         method: 'POST',
@@ -969,40 +991,32 @@ export default function Scalper() {
 
   // ─── P&L Guard ────────────────────────────────────────────────────
 
-  const fetchPnlGuardStatus = useCallback(async () => {
-    setPnlGuardLoading(true);
-    try {
-      const res = await fetch('/api/pnl-exit');
-      const j = await res.json();
-      // A failed/empty GET is usually transient — don't wipe a known-good state
-      // to null just because this one poll came back empty.
-      if (j.success) setPnlGuardStatus(j.data ?? null);
-    } catch {
-      // ignore — keep showing the last known state
-    } finally {
-      setPnlGuardLoading(false);
-    }
-  }, []);
-
   // After a successful Set, Dhan's own GET can take several seconds to reflect
   // the change. Poll a few times before trusting a "not configured yet"
   // response — otherwise the optimistic ACTIVE badge flips back to NOT SET
   // a couple seconds later even though the guard really was applied.
-  const reconcilePnlGuardAfterSet = useCallback((attempt = 1) => {
-    setTimeout(async () => {
-      try {
-        const res = await fetch('/api/pnl-exit');
-        const j = await res.json();
-        const hasConfig = j.success && j.data && (Number(j.data.profit) > 0 || Math.abs(Number(j.data.loss)) > 0);
-        if (hasConfig || attempt >= 4) {
-          if (j.success) setPnlGuardStatus(j.data ?? null);
-          return;
+  //
+  // The retry recurses through a local helper rather than through the
+  // useCallback binding itself, which would be a read of a component-scope
+  // `const` from inside its own initialiser.
+  const reconcilePnlGuardAfterSet = useCallback(() => {
+    const poll = (attempt: number) => {
+      setTimeout(async () => {
+        try {
+          const res = await fetch('/api/pnl-exit');
+          const j = await res.json();
+          const hasConfig = j.success && j.data && (Number(j.data.profit) > 0 || Math.abs(Number(j.data.loss)) > 0);
+          if (hasConfig || attempt >= 4) {
+            if (j.success) setPnlGuardStatus(j.data ?? null);
+            return;
+          }
+          poll(attempt + 1);
+        } catch {
+          if (attempt < 4) poll(attempt + 1);
         }
-        reconcilePnlGuardAfterSet(attempt + 1);
-      } catch {
-        if (attempt < 4) reconcilePnlGuardAfterSet(attempt + 1);
-      }
-    }, 1500);
+      }, 1500);
+    };
+    poll(1);
   }, []);
 
 
@@ -1086,13 +1100,18 @@ export default function Scalper() {
   // scale in (same strike) or add a hedge (new strike) via the normal order panel.
   const handleAddLeg = useCallback((pos: Record<string, unknown>) => {
     const sym = String(pos.tradingSymbol ?? '');
+    // Match on whichever identifier this broker's lookup actually supplies:
+    // Dhan returns securityIds only (scalper_api.py emits ceId/peId, no
+    // symbols) while every other broker returns symbols only. Keying on the
+    // symbol alone meant Add Leg never matched anything on Dhan.
+    const secId = String(pos.securityId ?? (pos as Record<string, unknown>).security_id ?? '');
     for (const [strikeStr, entry] of Object.entries(strikeMap)) {
-      if (entry.ceSymbol === sym) {
+      if ((secId && entry.ceId === secId) || (sym && entry.ceSymbol === sym)) {
         handleCeStrikeChange(Number(strikeStr));
         addToast('success', `CE panel set to ${strikeStr}`, 'Pick Buy/Sell and lots to add this leg');
         return;
       }
-      if (entry.peSymbol === sym) {
+      if ((secId && entry.peId === secId) || (sym && entry.peSymbol === sym)) {
         handlePeStrikeChange(Number(strikeStr));
         addToast('success', `PE panel set to ${strikeStr}`, 'Pick Buy/Sell and lots to add this leg');
         return;
@@ -1387,9 +1406,7 @@ export default function Scalper() {
 
         {/* P&L Guard bar — always visible; controls themselves are Dhan-only (see below) */}
         <div className="mt-2 pt-2 border-t border-zinc-800">
-          {pnlGuardLoading ? (
-            <p className="text-xs text-zinc-500 px-1">Loading…</p>
-          ) : (() => {
+          {(() => {
             const isActive = pnlGuardStatus?.pnlExitStatus === 'ACTIVE';
             // Dhan may echo loss back as the negative level it was stored at rather
             // than the positive magnitude we sent — compare by magnitude either way.
