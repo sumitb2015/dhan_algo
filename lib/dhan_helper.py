@@ -13,6 +13,7 @@ from datetime import datetime, timedelta
 import time
 import asyncio
 import threading
+import random
 try:
     import talib
     HAS_TALIB = True
@@ -3853,16 +3854,20 @@ class DhanHelper:
                 self.subscribe_instruments(instruments)
                 return
 
-            self.ws_instruments = instruments 
+            self.ws_instruments = instruments
             self.user_on_message = on_message
             self._ws_stop_flag = False
+            self._ws_failures = 0
+            self._ws_rate_limited = False
+            self._ws_err_suppressed = 0
+            self._ws_err_last_log = 0.0
 
             def run_ws():
-                retry_delay = 10
                 while not self._ws_stop_flag:
+                    self._ws_rate_limited = False
                     try:
                         logger.info("Starting WebSocket connection...")
-                        
+
                         class DhanContextAdapter:
                             def __init__(self, dhan_client):
                                 self.client = dhan_client
@@ -3882,37 +3887,93 @@ class DhanHelper:
                             on_error=self._on_ws_error
                         )
                         
-                        # Reset delay on successful start attempt (actual connection check is in on_connect)
+                        # Blocks until the feed's internal loop exits. Returning
+                        # is itself a failure signal — the SDK only leaves that
+                        # loop when the socket is gone or _on_ws_error tripped
+                        # the kill switch below.
                         self.feed.run()
+                        if not self._ws_stop_flag:
+                            logger.warning("WebSocket feed loop exited. Reconnecting with backoff...")
 
                     except Exception as e:
-                        err_str = str(e)
-                        if "429" in err_str:
-                            retry_delay = 30 # Aggressive backoff for rate limits
-                            logger.error(f"WebSocket Rate Limited (429). Waiting {retry_delay}s before retry...")
-                        else:
-                            retry_delay = 10
-                            logger.error(f"WebSocket execution failed: {e}. Retrying in {retry_delay}s...")
-                        
-                        if hasattr(self, 'feed') and self.feed:
-                            try: self.feed.close_connection()
-                            except: pass
+                        logger.error(f"WebSocket execution failed: {e}")
 
-                    if not self._ws_stop_flag:
-                        time.sleep(retry_delay)
+                    finally:
+                        if getattr(self, 'feed', None):
+                            try: self.feed.close_connection()
+                            except Exception: pass
+
+                    if self._ws_stop_flag:
+                        break
+
+                    # Exponential backoff with jitter. The SDK's own retry loop
+                    # sleeps a flat 1s forever (marketfeed._run_async), so a
+                    # rate-limited client used to re-hit Dhan ~60x/min and hold
+                    # itself in the 429 indefinitely — the reason this backoff
+                    # has to live out here and the kill switch has to exist.
+                    # _on_ws_connect resets the counter, so a stable session
+                    # that later drops still retries fast.
+                    self._ws_failures += 1
+                    base = 30 if self._ws_rate_limited else 5
+                    delay = min(300.0, base * (2 ** (self._ws_failures - 1)))
+                    delay += random.uniform(0, delay * 0.25)
+                    logger.warning(
+                        f"WebSocket reconnect attempt {self._ws_failures} "
+                        f"in {delay:.1f}s{' (rate limited)' if self._ws_rate_limited else ''}"
+                    )
+                    # Sleep in slices so stop_websocket() stays responsive.
+                    waited = 0.0
+                    while waited < delay and not self._ws_stop_flag:
+                        time.sleep(min(0.5, delay - waited))
+                        waited += 0.5
 
             self.ws_thread = threading.Thread(target=run_ws, daemon=True)
             self.ws_thread.start()
             logger.info("WebSocket manager started in background thread.")
 
     def _on_ws_connect(self, instance):
+        # A real connection clears the backoff ladder, so an hours-long healthy
+        # session that drops once reconnects in ~5s rather than inheriting the
+        # delay from whatever failed before it.
+        self._ws_failures = 0
+        self._ws_rate_limited = False
         logger.info("WebSocket Connected Successfully")
 
     def _on_ws_close(self, instance):
         logger.warning("WebSocket closed by server (disconnect packet received). Outer loop will reconnect.")
 
     def _on_ws_error(self, instance, error):
-        logger.error(f"WebSocket Error Observed: {error}")
+        """
+        Runs on the feed's event-loop thread.
+
+        The SDK retries connect() internally with a flat 1s sleep and never
+        surfaces the failure to run()'s caller, so on a fatal condition (HTTP
+        429, revoked token) it spins forever and start_websocket's backoff is
+        unreachable. Setting instance._running = False ends that inner loop,
+        run() returns, and the outer loop gets to back off properly.
+        """
+        msg = str(error)
+        fatal = any(t in msg for t in ('429', '401', '403')) or 'rate' in msg.lower()
+
+        if fatal:
+            if '429' in msg or 'rate' in msg.lower():
+                self._ws_rate_limited = True
+            try:
+                instance._running = False
+            except Exception:
+                pass
+
+        # Without throttling a rate-limited feed writes ~1 identical line per
+        # second — the live_options bridge log grew past 100 KB of them.
+        now = time.time()
+        if fatal or now - getattr(self, '_ws_err_last_log', 0.0) >= 30:
+            suppressed = getattr(self, '_ws_err_suppressed', 0)
+            extra = f" ({suppressed} similar suppressed)" if suppressed else ""
+            logger.error(f"WebSocket Error Observed: {error}{extra}")
+            self._ws_err_last_log = now
+            self._ws_err_suppressed = 0
+        else:
+            self._ws_err_suppressed = getattr(self, '_ws_err_suppressed', 0) + 1
 
     # --- ORDER UPDATE WEBSOCKET ---
 
