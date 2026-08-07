@@ -9,6 +9,9 @@ access_token.json
 zerodha_access_token.json
 kotak_access_token.json
 access_token.txt
+# Backups made when force re-minting a token (login.py has no --force, so the
+# fresh-token path is run by hand and copies the old file aside first)
+*access_token.json.bak
 last_modified.txt
 credentials.json
 credDemo.py
