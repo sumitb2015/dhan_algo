@@ -2189,6 +2189,10 @@ export interface PositionsTableProps {
   error?: string | null;
 }
 
+/** Quick Target / SL chips in the positions table. Percent-only by design —
+ *  a mix of % and point chips read ambiguously on options priced ₹5–₹400. */
+const GUARD_PRESET_PCTS = [10, 15, 20, 25, 30];
+
 export const PositionsTable = React.memo(function PositionsTable({ data, guards, closingPositions, onGuardChange, onTrailToggle, onClose, onAddLeg, lotSizeFor, onClosePartial, sort, onSort, error }: PositionsTableProps) {
   const sortedData = useMemo(() => sortRows(data, sort), [data, sort]);
 
@@ -2241,12 +2245,17 @@ export const PositionsTable = React.memo(function PositionsTable({ data, guards,
           const entryPrice = isLong ? buyAvg : sellAvg;
           const initialRisk = (entryPrice > 0 && !isNaN(slNum) && slNum > 0) ? Math.abs(slNum - entryPrice) : 0;
           const trailBest = guard?.bestPrice ?? 0;
-          const effectiveTrailSL = (guard?.trailEnabled && trailBest > 0 && initialRisk > 0)
+          const effectiveTrailSL = (netQty !== 0 && guard?.trailEnabled && trailBest > 0 && initialRisk > 0)
             ? (isLong ? trailBest - initialRisk : trailBest + initialRisk)
             : null;
 
           const mult = contractMultiplier(row);
-          const hasGuard = guard && (guard.target || guard.sl || guard.trailEnabled);
+          // A flat row (netQty 0) is a closed-out leg the broker still reports for
+          // the day. There is nothing left to protect, so every guard control is
+          // inert — the monitoring loop skips netQty === 0 rows anyway.
+          const isFlat = netQty === 0;
+          const guardsDisabled = isClosing || isFlat;
+          const hasGuard = !isFlat && guard && (guard.target || guard.sl || guard.trailEnabled);
 
           return (
             <tr key={i} className={`hover:bg-zinc-800/40 transition-colors ${isClosing ? 'opacity-40' : ''} ${guard?.triggered ? 'bg-zinc-800/20' : ''}`}>
@@ -2278,35 +2287,32 @@ export const PositionsTable = React.memo(function PositionsTable({ data, guards,
                     onCommit={v => onGuardChange(sym, 'target', v)}
                     colorCls="text-emerald-300"
                     focusBorderCls="focus:border-emerald-500"
-                    disabled={isClosing}
+                    disabled={guardsDisabled}
                   />
                   {/* Preset Chips */}
                   <div className="flex items-center gap-0.5 text-[9px] font-mono">
-                    {['+5%', '+10%', '+15%', '+5p', '+10p'].map(preset => (
+                    {GUARD_PRESET_PCTS.map(pct => (
                       <button
-                        key={preset}
-                        disabled={isClosing || entryPrice <= 0}
+                        key={pct}
+                        disabled={guardsDisabled || entryPrice <= 0}
                         onClick={() => {
                           if (entryPrice <= 0) return;
-                          let calculated = 0;
-                          if (preset.endsWith('%')) {
-                            const pct = parseFloat(preset) / 100;
-                            calculated = isLong ? entryPrice * (1 + pct) : entryPrice * (1 - pct);
-                          } else if (preset.endsWith('p')) {
-                            const pts = parseFloat(preset);
-                            calculated = isLong ? entryPrice + pts : entryPrice - pts;
-                          }
+                          // Target is always a move IN FAVOUR of the position:
+                          // longs profit as price rises, shorts as it falls.
+                          const calculated = isLong
+                            ? entryPrice * (1 + pct / 100)
+                            : entryPrice * (1 - pct / 100);
                           if (calculated > 0) onGuardChange(sym, 'target', calculated.toFixed(2));
                         }}
                         className="px-1 py-0.5 rounded bg-emerald-950/80 border border-emerald-800/60 text-emerald-400 hover:bg-emerald-800 hover:text-white transition-all disabled:opacity-30"
-                        title={`Set Target to ${preset}`}
+                        title={`Set Target ${pct}% in profit from entry ₹${entryPrice.toFixed(2)}`}
                       >
-                        {preset}
+                        +{pct}%
                       </button>
                     ))}
                   </div>
                   {/* Target P&L Subtext */}
-                  {!isNaN(targetNum) && targetNum > 0 && entryPrice > 0 && mult > 0 && (() => {
+                  {!isFlat && !isNaN(targetNum) && targetNum > 0 && entryPrice > 0 && mult > 0 && (() => {
                     const diff = isLong ? targetNum - entryPrice : entryPrice - targetNum;
                     const pctVal = (diff / entryPrice) * 100;
                     const rupeeVal = diff * Math.abs(netQty) * mult;
@@ -2328,35 +2334,31 @@ export const PositionsTable = React.memo(function PositionsTable({ data, guards,
                     onCommit={v => onGuardChange(sym, 'sl', v)}
                     colorCls="text-rose-300"
                     focusBorderCls="focus:border-rose-500"
-                    disabled={isClosing}
+                    disabled={guardsDisabled}
                   />
                   {/* Preset Chips */}
                   <div className="flex items-center gap-0.5 text-[9px] font-mono">
-                    {['-5%', '-10%', '-15%', '-5p', '-10p'].map(preset => (
+                    {GUARD_PRESET_PCTS.map(pct => (
                       <button
-                        key={preset}
-                        disabled={isClosing || entryPrice <= 0}
+                        key={pct}
+                        disabled={guardsDisabled || entryPrice <= 0}
                         onClick={() => {
                           if (entryPrice <= 0) return;
-                          let calculated = 0;
-                          if (preset.endsWith('%')) {
-                            const pct = Math.abs(parseFloat(preset)) / 100;
-                            calculated = isLong ? entryPrice * (1 - pct) : entryPrice * (1 + pct);
-                          } else if (preset.endsWith('p')) {
-                            const pts = Math.abs(parseFloat(preset));
-                            calculated = isLong ? entryPrice - pts : entryPrice + pts;
-                          }
+                          // SL is always a move AGAINST the position.
+                          const calculated = isLong
+                            ? entryPrice * (1 - pct / 100)
+                            : entryPrice * (1 + pct / 100);
                           if (calculated > 0) onGuardChange(sym, 'sl', calculated.toFixed(2));
                         }}
                         className="px-1 py-0.5 rounded bg-rose-950/80 border border-rose-800/60 text-rose-400 hover:bg-rose-800 hover:text-white transition-all disabled:opacity-30"
-                        title={`Set SL to ${preset}`}
+                        title={`Set SL ${pct}% in loss from entry ₹${entryPrice.toFixed(2)}`}
                       >
-                        {preset}
+                        -{pct}%
                       </button>
                     ))}
                   </div>
                   {/* SL Loss Subtext */}
-                  {!isNaN(slNum) && slNum > 0 && entryPrice > 0 && mult > 0 && (() => {
+                  {!isFlat && !isNaN(slNum) && slNum > 0 && entryPrice > 0 && mult > 0 && (() => {
                     const diff = isLong ? entryPrice - slNum : slNum - entryPrice;
                     const pctVal = (diff / entryPrice) * 100;
                     const rupeeVal = diff * Math.abs(netQty) * mult;
@@ -2377,8 +2379,8 @@ export const PositionsTable = React.memo(function PositionsTable({ data, guards,
                     type="checkbox"
                     checked={guard?.trailEnabled ?? false}
                     onChange={() => onTrailToggle(sym)}
-                    disabled={isClosing || !guard?.sl}
-                    title={guard?.sl ? 'Trail SL 1:1 with profit' : 'Set SL first'}
+                    disabled={guardsDisabled || !guard?.sl}
+                    title={isFlat ? 'Position is flat' : guard?.sl ? 'Trail SL 1:1 with profit' : 'Set SL first'}
                     className="w-4 h-4 accent-amber-400 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
                   />
                   {effectiveTrailSL !== null && (
