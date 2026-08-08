@@ -551,6 +551,25 @@ export default function StrategiesPlusPage() {
   const activeList = instanceRows.filter(row => row.state?.status !== 'STOPPED');
   const displayList = viewMode === 'active' ? activeList : instanceRows;
 
+  // Group rows by underlying. Insertion order into the Map follows displayList, which
+  // follows the registry's key order — so group order is controlled by where a strategy
+  // sits in STRATEGIES_METADATA, with no second ordering list to keep in sync.
+  // Falls back to 'OTHER' so a registry entry missing `underlying` still renders.
+  const groupedList = (() => {
+    const groups = new Map<string, InstanceRow[]>();
+    for (const row of displayList) {
+      const underlying = row.meta?.underlying || 'OTHER';
+      const bucket = groups.get(underlying);
+      if (bucket) bucket.push(row);
+      else groups.set(underlying, [row]);
+    }
+    return [...groups.entries()].map(([underlying, rows]) => ({
+      underlying,
+      rows,
+      runningCount: rows.filter(r => r.state?.status !== 'STOPPED').length,
+    }));
+  })();
+
   return (
     <div className="flex flex-col flex-1 w-full bg-black min-h-screen text-zinc-300">
 
@@ -1157,20 +1176,36 @@ export default function StrategiesPlusPage() {
               <div className="shrink-0 w-[160px] text-xs font-bold text-white">Actions</div>
             </div>
 
-            {/* Strategy rows */}
-            <div className="divide-y divide-zinc-800/30">
-              {displayList.map(({ key, instanceId, meta, state }) => (
-                <StrategyRowWide
-                  key={`${key}:${instanceId}`}
-                  meta={meta}
-                  state={state}
-                  onRefresh={fetchStrategies}
-                  instanceId={instanceId || undefined}
-                  onAddInstance={instanceId === '' ? addInstance : undefined}
-                  onRemoveInstance={instanceId === '' ? undefined : removeInstance}
-                />
-              ))}
-            </div>
+            {/* Strategy rows, grouped by underlying */}
+            {groupedList.map(({ underlying, rows, runningCount: groupRunning }) => (
+              <div key={underlying}>
+                <div className="flex items-center gap-2 px-4 py-1.5 bg-zinc-900 border-y border-zinc-800">
+                  <span className="text-xs font-bold text-white tracking-wide">{underlying}</span>
+                  <span className="text-[10px] font-semibold text-zinc-500">
+                    {rows.length} strateg{rows.length === 1 ? 'y' : 'ies'}
+                  </span>
+                  {groupRunning > 0 && (
+                    <span className="flex items-center gap-1 text-[10px] font-semibold text-emerald-400">
+                      <span className="h-1.5 w-1.5 rounded-full bg-emerald-500 animate-pulse" />
+                      {groupRunning} running
+                    </span>
+                  )}
+                </div>
+                <div className="divide-y divide-zinc-800/30">
+                  {rows.map(({ key, instanceId, meta, state }) => (
+                    <StrategyRowWide
+                      key={`${key}:${instanceId}`}
+                      meta={meta}
+                      state={state}
+                      onRefresh={fetchStrategies}
+                      instanceId={instanceId || undefined}
+                      onAddInstance={instanceId === '' ? addInstance : undefined}
+                      onRemoveInstance={instanceId === '' ? undefined : removeInstance}
+                    />
+                  ))}
+                </div>
+              </div>
+            ))}
 
             {/* "All" mode: hint to switch to active when strategies are running */}
             {viewMode === 'all' && runningCount > 0 && (

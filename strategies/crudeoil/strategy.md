@@ -221,3 +221,108 @@ python strategies/crudeoil/crudeoilm_vwap_supertrend.py --live --lots 5 --target
 # Faster signal, exit only on confirmed closes
 python strategies/crudeoil/crudeoilm_vwap_supertrend.py --interval 3 --exit-on-close
 ```
+
+---
+
+# CrudeOil Mini Opening Range Breakout + Pivot Structure Stop
+
+`crudeoilm_orb.py` — the first consumer of [lib/pivots.py](../../lib/pivots.py).
+See [docs/PIVOT_DETECTION.md](../../docs/PIVOT_DETECTION.md) for the pivot module itself.
+
+## Overview
+The opening range supplies the entry level; **pivots supply the exit**. Pivots deliberately do
+not drive entry — the opening range is a time-based level and needs no swing detection. What
+pivots add is a stop that follows market structure, plus a filter that rejects weak breakouts.
+
+## Session
+| Phase | Behaviour |
+|---|---|
+| Before `--session-start` (09:00) | Idle. |
+| Range window (`--or-minutes`, default 15) | Record ORH/ORL. **No trading.** |
+| After the window | Watch for a breakout; enter once per side. |
+| `--eod-time` (23:30) | Hard flat. |
+
+The range is frozen only once the clock passes the window end — acting earlier would trade a
+partially-formed range. A new calendar day resets the range and the once-per-side caps.
+
+## Signal
+Evaluated on the **last closed candle** (`iloc[-2]`; `iloc[-1]` is still forming):
+
+- **LONG** — close > ORH, and (if the filter is on) close > the last confirmed pivot high.
+- **SHORT** — close < ORL, and (if the filter is on) close < the last confirmed pivot low.
+
+Two deliberate choices:
+
+- **Close, not touch.** A wick through the range that closes back inside is the single most
+  common ORB false trigger, and `--or-minutes` does nothing to protect against it.
+- **No pivot yet ⇒ filter skipped, not blocked.** Early in the session no pivot has confirmed.
+  Treating that as "filter failed" would prevent the strategy from ever trading. The log line
+  says which branch fired.
+
+## The two-stage stop — read this before going live
+A pivot needs `n` candles either side plus the forming-candle discard, so **the first pivot of
+the session confirms after the ORB entry has already fired.** With the defaults (`n=5` on 1-min
+candles) that is ~6 minutes; on 5-min candles with `n=3` it would be ~20 minutes, which is why
+the pivot series defaults to a faster interval than the trading series.
+
+1. **Stage 1 — range edge.** On entry the stop is the *opposite* edge of the opening range
+   (long → ORL). This holds the position until structure exists.
+2. **Stage 2 — pivot.** The moment `latest_low()` returns a pivot, the stop moves there.
+3. **Ratchet.** `new_stop = max(old_stop, pivot_low)` for a long, `min(...)` for a short. Stops
+   only ever tighten; a pullback pivot on the wrong side is ignored. Without this a mid-trend
+   dip would hand back profit already locked in.
+
+`stop_source` in the state file reports `RANGE` or `PIVOT` so the dashboard shows which stage is
+active.
+
+## Exit Conditions (priority order)
+1. Dashboard shutdown trigger
+2. EOD (`--eod-time`)
+3. Daily profit target
+4. Daily stop loss
+5. Stop hit — range edge or trailed pivot, whichever stage is active
+
+## Restart Behavior
+`_restore_daily_state()` reloads today's P&L **and** the `taken_long` / `taken_short` caps from
+the state file, so a restart cannot re-take a side already traded. `PivotTracker.prime()` absorbs
+the session's existing pivots silently — a mid-session restart gets the levels without firing
+entry signals for swings that formed hours earlier.
+
+## Key CLI Flags
+| Flag | Default | Meaning |
+|---|---|---|
+| `--live` | off | Real orders. Dry run otherwise. |
+| `--lots` | 1 | Lots (10 barrels each). |
+| `--interval` | `5` | Trading candle interval. |
+| `--or-minutes` | 15 | Opening range width. |
+| `--session-start` | `09:00` | Range start, HH:MM IST. |
+| `--pivot-n` | 5 | Candles required each side of a pivot. |
+| `--pivot-interval` | `1` | Candle interval for the pivot series. |
+| `--no-pivot-filter` | off | Enter on the range break alone; pivots only trail. |
+| `--allow-reentry` | off | Lift the one-trade-per-side-per-day cap. |
+| `--target-profit` / `--stop-loss` | 3000 | Daily INR caps. |
+
+`--interval` and `--pivot-interval` accept only `1, 5, 15, 25, 60` — Dhan's intraday endpoint
+rejects anything else, and a rejected interval returns an *empty* frame rather than an error, so
+the strategy would silently never see a candle. `argparse` enforces the set.
+
+## Known limitation
+ORB bleeds on gap-and-chop sessions where price pokes both sides of the range and reverses. The
+pivot filter rejects the weakest of those, but it is not a cure. The real protection is the
+one-trade-per-side cap (on by default) plus `--stop-loss`. Do not lift `--allow-reentry` on a
+rangebound day.
+
+## Examples
+```
+# Dry run (default), 1 lot, 15-min opening range
+python strategies/crudeoil/crudeoilm_orb.py
+
+# Live, 2 lots, 30-min opening range
+python strategies/crudeoil/crudeoilm_orb.py --live --lots 2 --or-minutes 30
+
+# Wider structure stop — slower to trail, fewer whipsaw exits
+python strategies/crudeoil/crudeoilm_orb.py --pivot-interval 5 --pivot-n 3
+
+# Pure ORB — pivots trail the stop but do not gate entry
+python strategies/crudeoil/crudeoilm_orb.py --no-pivot-filter
+```

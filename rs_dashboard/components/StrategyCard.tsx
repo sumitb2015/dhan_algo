@@ -16,6 +16,19 @@ interface StrategyMeta {
   name: string;
 }
 
+// Dhan's intraday candle endpoint accepts only these. Anything else comes back as an API
+// error → empty DataFrame, so a strategy would silently never see a candle. Offering them
+// as a dropdown rather than a free-text field keeps that failure mode unreachable.
+const ORB_INTERVALS = ['1', '5', '15', '25', '60'] as const;
+
+/** "09:00" + 15 -> "09:15". Clamped within the day; returns the input unchanged if unparseable. */
+function addMinutesHHMM(hhmm: string, minutes: number): string {
+  const m = /^(\d{1,2}):(\d{2})$/.exec(hhmm.trim());
+  if (!m) return hhmm;
+  const total = Math.min(Number(m[1]) * 60 + Number(m[2]) + (minutes || 0), 24 * 60 - 1);
+  return `${String(Math.floor(total / 60)).padStart(2, '0')}:${String(total % 60).padStart(2, '0')}`;
+}
+
 interface StrategyState {
   strategy: string;
   status: string;
@@ -243,6 +256,18 @@ function StrategyCard({ meta, state, onRefresh }: StrategyCardProps) {
   const [crudeoilUseVwap, setCrudeoilUseVwap] = useState<boolean>(false);
   const [crudeoilTargetInr, setCrudeoilTargetInr] = useState<number>(3000);
   const [crudeoilStopInr, setCrudeoilStopInr] = useState<number>(3000);
+  // CrudeOil Mini ORB + Pivot Stop. Defaults mirror the script's argparse defaults, so
+  // launching without touching anything reproduces a bare CLI run.
+  const [orbInterval, setOrbInterval] = useState<string>('5');
+  const [orbMinutes, setOrbMinutes] = useState<number>(15);
+  const [orbSessionStart, setOrbSessionStart] = useState<string>('09:00');
+  const [orbEodTime, setOrbEodTime] = useState<string>('23:30');
+  const [orbPivotN, setOrbPivotN] = useState<number>(5);
+  const [orbPivotInterval, setOrbPivotInterval] = useState<string>('1');
+  const [orbPivotFilter, setOrbPivotFilter] = useState<boolean>(true);
+  const [orbAllowReentry, setOrbAllowReentry] = useState<boolean>(false);
+  const [orbTargetInr, setOrbTargetInr] = useState<number>(3000);
+  const [orbStopInr, setOrbStopInr] = useState<number>(3000);
 
   // CrudeOil Mini Renko SAR (shares crudeoilInterval/StartTime/EodTime above)
   const [renkoQty, setRenkoQty] = useState<number>(10);
@@ -328,6 +353,21 @@ function StrategyCard({ meta, state, onRefresh }: StrategyCardProps) {
         args.push('--lots', String(lots));
         args.push('--target-profit', String(crudeoilTargetInr));
         args.push('--stop-loss', String(crudeoilStopInr));
+      } else if (meta.key === 'crudeoilm_orb') {
+        // Like the other MCX entries, --target-profit/--stop-loss are argparse floats (INR).
+        // The generic branch below sends the "25%" string, which argparse rejects outright
+        // ("invalid float value: '25%'") and the process dies at startup with exit code 2.
+        args.push('--lots', String(lots));
+        args.push('--target-profit', String(orbTargetInr));
+        args.push('--stop-loss', String(orbStopInr));
+        args.push('--interval', orbInterval);
+        args.push('--or-minutes', String(orbMinutes));
+        args.push('--session-start', orbSessionStart);
+        args.push('--eod-time', orbEodTime);
+        args.push('--pivot-n', String(orbPivotN));
+        args.push('--pivot-interval', orbPivotInterval);
+        if (!orbPivotFilter) args.push('--no-pivot-filter');
+        if (orbAllowReentry) args.push('--allow-reentry');
       } else if (meta.key === 'crudeoilm_vwap_supertrend') {
         // --lots is the broker order quantity verbatim (Dhan takes MCX qty in lots);
         // --contract-size is barrels per lot and only scales the P&L, hence the daily caps.
@@ -729,7 +769,7 @@ function StrategyCard({ meta, state, onRefresh }: StrategyCardProps) {
           </>
         )}
 
-        {meta.key !== 'nifty_spread_trend' && meta.key !== 'crudeoilm_supertrend' && meta.key !== 'crudeoilm_renko_sar' && meta.key !== 'crudeoilm_vwap_supertrend' && meta.key !== 'nifty_st_oi_bearcall' && meta.key !== 'nifty500_momentum' && (
+        {meta.key !== 'nifty_spread_trend' && meta.key !== 'crudeoilm_supertrend' && meta.key !== 'crudeoilm_renko_sar' && meta.key !== 'crudeoilm_vwap_supertrend' && meta.key !== 'crudeoilm_orb' && meta.key !== 'nifty_st_oi_bearcall' && meta.key !== 'nifty500_momentum' && (
           <div className={fieldCls}>
             <FieldLabel text="Start Time" tip="Time (HH:MM IST) the strategy begins monitoring for entries." />
             <Input type="text" value={startTime} onChange={(e) => setStartTime(e.target.value)} placeholder="09:20" className={inputCls} />
@@ -764,7 +804,83 @@ function StrategyCard({ meta, state, onRefresh }: StrategyCardProps) {
           </>
         )}
 
-        {meta.key !== 'crudeoilm_renko_sar' && meta.key !== 'crudeoilm_supertrend' && meta.key !== 'crudeoilm_vwap_supertrend' && meta.key !== 'nifty500_momentum' && (
+        {meta.key === 'crudeoilm_orb' && (
+          <>
+            <div className={fieldCls}>
+              <FieldLabel text="Opening Range (min)" tip="Width of the opening-range window measured from Session Start. ORH/ORL are the highest high and lowest low inside it; no trading happens until the window closes." />
+              <Input type="number" value={orbMinutes} onChange={(e) => setOrbMinutes(parseInt(e.target.value) || 15)} min={1} step={5} className={inputCls} />
+              <span className="text-[9px] text-zinc-600">range {orbSessionStart}–{addMinutesHHMM(orbSessionStart, orbMinutes)}</span>
+            </div>
+
+            <div className={fieldCls}>
+              <FieldLabel text="Session Start" tip="Time (HH:MM IST) the opening range starts building. MCX crude opens at 09:00 — this is not the NSE 09:15/09:20 open." />
+              <Input type="text" value={orbSessionStart} onChange={(e) => setOrbSessionStart(e.target.value)} placeholder="09:00" className={inputCls} />
+            </div>
+
+            <div className={fieldCls}>
+              <FieldLabel text="EOD Flat" tip="Time (HH:MM IST) any open position is squared off and the strategy stops for the day." />
+              <Input type="text" value={orbEodTime} onChange={(e) => setOrbEodTime(e.target.value)} placeholder="23:30" className={inputCls} />
+            </div>
+
+            <div className={fieldCls}>
+              <FieldLabel text="Trade Candles" tip="Candle interval used to evaluate the breakout. The decision is taken on the last CLOSED candle, so a wick through the range that closes back inside does not trigger." />
+              <Select value={orbInterval} onValueChange={(v) => v && setOrbInterval(v)}>
+                <SelectTrigger className={inputCls}><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  {ORB_INTERVALS.map(v => <SelectItem key={v} value={v}>{v} Min</SelectItem>)}
+                </SelectContent>
+              </Select>
+            </div>
+
+            <div className={fieldCls}>
+              <FieldLabel text="Pivot Candles" tip="Candle interval the pivot detector runs on — usually FASTER than the trade candles so the structure stop appears sooner. Only 1/5/15/25/60 are valid; other values make Dhan return an empty frame and no pivot would ever confirm." />
+              <Select value={orbPivotInterval} onValueChange={(v) => v && setOrbPivotInterval(v)}>
+                <SelectTrigger className={inputCls}><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  {ORB_INTERVALS.map(v => <SelectItem key={v} value={v}>{v} Min</SelectItem>)}
+                </SelectContent>
+              </Select>
+            </div>
+
+            <div className={fieldCls}>
+              <FieldLabel text="Pivot N" tip="Candles required on EACH side of a swing point. Higher = fewer, more significant pivots but a slower stop. A pivot cannot be confirmed until N candles close after it." />
+              <Input type="number" value={orbPivotN} onChange={(e) => setOrbPivotN(parseInt(e.target.value) || 5)} min={1} max={20} className={inputCls} />
+              <span className="text-[9px] text-zinc-600">
+                ~{(orbPivotN + 1) * (parseInt(orbPivotInterval) || 1)} min confirmation lag
+              </span>
+            </div>
+
+            <div className={fieldCls}>
+              <FieldLabel text="Target ₹" tip="Daily cumulative profit target in INR; the position is flattened and the strategy stops once reached." />
+              <Input type="number" value={orbTargetInr} onChange={(e) => setOrbTargetInr(parseInt(e.target.value) || 3000)} className={inputCls} />
+            </div>
+
+            <div className={fieldCls}>
+              <FieldLabel text="Stop Loss ₹" tip="Daily cumulative stop loss in INR (positive number); flattens and stops for the day." />
+              <Input type="number" value={orbStopInr} onChange={(e) => setOrbStopInr(parseInt(e.target.value) || 3000)} className={inputCls} />
+            </div>
+
+            <div className={fieldCls}>
+              <FieldLabel text="Pivot Entry Filter" tip="ON: a breakout must also clear the most recent pivot high (long) / low (short), rejecting weak pokes through the range. Early in the session no pivot exists yet, and the filter is skipped rather than blocking every trade. OFF: enter on the range break alone — pivots still trail the stop." />
+              <div className="flex items-center gap-2 h-7">
+                <input type="checkbox" id={`orb-filter-${meta.key}`} checked={orbPivotFilter} onChange={(e) => setOrbPivotFilter(e.target.checked)}
+                  className="h-3.5 w-3.5 rounded border-zinc-800 bg-zinc-900 accent-emerald-500" />
+                <label htmlFor={`orb-filter-${meta.key}`} className="text-zinc-300 text-xs">Require pivot break</label>
+              </div>
+            </div>
+
+            <div className={fieldCls}>
+              <FieldLabel text="Re-entry" tip="Default OFF: at most one long and one short per session — the opening range is a once-a-day edge and repeated re-entry into the same level is where ORB bleeds. ON lifts the cap; avoid it on rangebound days." />
+              <div className="flex items-center gap-2 h-7">
+                <input type="checkbox" id={`orb-reentry-${meta.key}`} checked={orbAllowReentry} onChange={(e) => setOrbAllowReentry(e.target.checked)}
+                  className="h-3.5 w-3.5 rounded border-zinc-800 bg-zinc-900 accent-emerald-500" />
+                <label htmlFor={`orb-reentry-${meta.key}`} className="text-zinc-300 text-xs">Allow re-entry</label>
+              </div>
+            </div>
+          </>
+        )}
+
+        {meta.key !== 'crudeoilm_renko_sar' && meta.key !== 'crudeoilm_supertrend' && meta.key !== 'crudeoilm_vwap_supertrend' && meta.key !== 'crudeoilm_orb' && meta.key !== 'nifty500_momentum' && (
           <>
             <div className={fieldCls}>
               <FieldLabel text="Target ₹" tip="Daily cumulative profit target in INR, or a percentage of entry premium collected e.g. '25%'; strategy squares off and stops once reached." />

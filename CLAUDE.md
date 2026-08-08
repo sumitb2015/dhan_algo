@@ -115,6 +115,7 @@ docs/
   AGENT_FUNCTION_REFERENCE.md  # Full DhanHelper method reference
   STRATEGY_GUIDELINES.md       # How to structure a new strategy
   OPTION_CHAIN_QUICK_REF.md    # Option chain response shape cheat sheet
+  PIVOT_DETECTION.md           # lib/pivots.py — swing high/low detection + confirmation lag
 scripts/
   downloader/               # Historical data downloaders + refresh_dashboard_data.py / fetch_today_quotes.py
   analysis/                 # Backtests (backtest_nifty50_rs*.py suite, backtest_short_straddle.py),

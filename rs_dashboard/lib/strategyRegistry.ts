@@ -10,64 +10,90 @@ import { isPidRunningAt } from '@/lib/processCheck';
 export const PROJECT_ROOT = path.resolve(process.cwd(), '..');
 export const DEBUG_DIR = path.join(PROJECT_ROOT, 'debug');
 
-export const STRATEGIES_METADATA: Record<string, { name: string; path: string }> = {
+/**
+ * `underlying` is the instrument a strategy is built around, used by /strategies-plus to
+ * group its rows. It is the strategy's DEFAULT/primary underlying, not a hard constraint —
+ * nifty_spread_trend for instance accepts a Bank Nifty flag at launch. Group order on the
+ * page follows this object's key order, so place a new entry next to its siblings rather
+ * than maintaining a separate ordering list.
+ */
+export const STRATEGIES_METADATA: Record<string, { name: string; path: string; underlying: string }> = {
   nifty_advanced_imbalance: {
     name: 'Nifty Advanced Imbalance',
+    underlying: 'NIFTY',
     path: path.join(PROJECT_ROOT, 'strategies', 'value_imbalance', 'nifty_advanced_imbalance.py')
   },
   nifty_delta_neutral: {
     name: 'Nifty Delta Neutral (0.5 Delta)',
+    underlying: 'NIFTY',
     path: path.join(PROJECT_ROOT, 'strategies', 'value_imbalance', 'nifty_delta_neutral.py')
   },
   nifty_value_imbalance_straddle: {
     name: 'Nifty Value Imbalance Straddle',
+    underlying: 'NIFTY',
     path: path.join(PROJECT_ROOT, 'strategies', 'value_imbalance', 'nifty_value_imbalance_straddle.py')
   },
   nifty_value_imbalance_strangle: {
     name: 'Nifty Value Imbalance Strangle',
+    underlying: 'NIFTY',
     path: path.join(PROJECT_ROOT, 'strategies', 'value_imbalance', 'nifty_value_imbalance_strangle.py')
   },
   nifty_vwap_1min_straddle: {
     name: 'Nifty VWAP 1-Min Straddle',
+    underlying: 'NIFTY',
     path: path.join(PROJECT_ROOT, 'strategies', 'value_imbalance', 'nifty_vwap_1min_straddle.py')
   },
   nifty_vix_straddle: {
     name: 'Nifty VIX-Filtered Straddle',
+    underlying: 'NIFTY',
     path: path.join(PROJECT_ROOT, 'strategies', 'value_imbalance', 'nifty_vix_straddle.py')
   },
   nifty_spread_trend: {
     name: 'Nifty Spread Trend-Following',
+    underlying: 'NIFTY',
     path: path.join(PROJECT_ROOT, 'strategies', 'spread_trend', 'nifty_spread_trend.py')
   },
   nifty_oi_directional: {
     name: 'Nifty OI Directional',
+    underlying: 'NIFTY',
     path: path.join(PROJECT_ROOT, 'strategies', 'oi_directional', 'nifty_oi_directional.py')
-  },
-  crudeoilm_supertrend: {
-    name: 'CrudeOil Mini Supertrend',
-    path: path.join(PROJECT_ROOT, 'strategies', 'crudeoil', 'crudeoilm_supertrend.py')
-  },
-  crudeoilm_renko_sar: {
-    name: 'CrudeOil Mini Renko SAR',
-    path: path.join(PROJECT_ROOT, 'strategies', 'crudeoil', 'crudeoilm_renko_sar.py')
-  },
-  crudeoilm_vwap_supertrend: {
-    name: 'CrudeOil Mini VWAP + Supertrend',
-    path: path.join(PROJECT_ROOT, 'strategies', 'crudeoil', 'crudeoilm_vwap_supertrend.py')
   },
   nifty_st_oi_bearcall: {
     name: 'Nifty ST+OI Bear Call Spread',
+    underlying: 'NIFTY',
     path: path.join(PROJECT_ROOT, 'strategies', 'st_oi_bearcall', 'nifty_st_oi_bearcall.py')
   },
   nifty_rolling_straddle: {
     name: 'Nifty Rolling Short Straddle',
+    underlying: 'NIFTY',
     path: path.join(PROJECT_ROOT, 'strategies', 'value_imbalance', 'nifty_rolling_straddle.py')
+  },
+  crudeoilm_supertrend: {
+    name: 'CrudeOil Mini Supertrend',
+    underlying: 'CRUDEOILM',
+    path: path.join(PROJECT_ROOT, 'strategies', 'crudeoil', 'crudeoilm_supertrend.py')
+  },
+  crudeoilm_renko_sar: {
+    name: 'CrudeOil Mini Renko SAR',
+    underlying: 'CRUDEOILM',
+    path: path.join(PROJECT_ROOT, 'strategies', 'crudeoil', 'crudeoilm_renko_sar.py')
+  },
+  crudeoilm_vwap_supertrend: {
+    name: 'CrudeOil Mini VWAP + Supertrend',
+    underlying: 'CRUDEOILM',
+    path: path.join(PROJECT_ROOT, 'strategies', 'crudeoil', 'crudeoilm_vwap_supertrend.py')
+  },
+  crudeoilm_orb: {
+    name: 'CrudeOil Mini ORB + Pivot Stop',
+    underlying: 'CRUDEOILM',
+    path: path.join(PROJECT_ROOT, 'strategies', 'crudeoil', 'crudeoilm_orb.py')
   },
   // The only positional / multi-day / CNC-delivery strategy here. Unlike every entry above,
   // stopping it does NOT flatten the book: it exits cleanly and leaves holdings in place,
   // persisted in debug/nifty500_momentum_portfolio.json for the next start to reload.
   nifty500_momentum: {
     name: 'Nifty 500 Momentum Portfolio',
+    underlying: 'NIFTY 500',
     path: path.join(PROJECT_ROOT, 'strategies', 'momentum_investing', 'nifty500_momentum.py')
   },
 };

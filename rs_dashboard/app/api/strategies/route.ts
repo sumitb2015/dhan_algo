@@ -113,7 +113,10 @@ export async function GET() {
       results[key] = {
         meta: {
           key,
-          name: meta.name
+          name: meta.name,
+          // /strategies-plus groups rows by this. Object.entries above preserves the
+          // registry's key order, so group order follows the registry too.
+          underlying: meta.underlying
         },
         // `state` is the primary instance, kept for backward compatibility: /strategies
         // (StrategyCard) predates multi-instance and reads this field directly — dropping
