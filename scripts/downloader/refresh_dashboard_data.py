@@ -148,11 +148,22 @@ def check_fatal(helper):
 # just costs a few extra seconds before falling through to the normal failure path.
 _RETRYABLE_ERROR_CODES = {"DH-904", "DH-905"}
 
+# Once this many symbols in a row fail with a throttle-shaped error, the whole
+# sweep pauses. Per-symbol backoff only buys ~60s; a longer Dhan-side window
+# would otherwise chew through the rest of the 500 symbols failing every one.
+_COOLOFF_AFTER_FAILURES = 5
+_COOLOFF_SECONDS = 90
 
-def get_historical_daily_data_retrying(helper, max_retries: int = 3, base_delay: float = 3.0, **kwargs):
+
+def get_historical_daily_data_retrying(helper, max_retries: int = 4, base_delay: float = 4.0, **kwargs):
     """Wraps helper.get_historical_daily_data with exponential backoff on
     rate-limit-shaped errors, so a burst of throttling partway through a
-    hundreds-of-symbols sweep doesn't fail every symbol for the rest of the run."""
+    hundreds-of-symbols sweep doesn't fail every symbol for the rest of the run.
+
+    Defaults cover ~60s of continuous failure (4+8+16+32). Observed DH-905
+    windows have run past a minute, so the per-symbol retry alone is not
+    enough — refresh_stocks() layers a longer cool-off on top once several
+    symbols in a row fail."""
     df = None
     for attempt in range(max_retries + 1):
         df = helper.get_historical_daily_data(**kwargs)
@@ -164,6 +175,21 @@ def get_historical_daily_data_retrying(helper, max_retries: int = 3, base_delay:
         delay = base_delay * (2 ** attempt)
         time.sleep(delay)
     return df
+
+
+def cool_off(i: int, total: int, consecutive_failures: int) -> bool:
+    """Pause the sweep after a run of throttle-shaped failures. Sleeps in 1s
+    slices so a stop trigger still lands promptly. Returns True if the user
+    asked to stop during the pause."""
+    for remaining in range(_COOLOFF_SECONDS, 0, -1):
+        if should_stop():
+            return True
+        write_status("stocks",
+                     f"  [{i}/{total}] {consecutive_failures} failures in a row — "
+                     f"cooling off {remaining}s before continuing",
+                     current=i, total=total)
+        time.sleep(1)
+    return False
 
 
 # ── Trading day helpers ───────────────────────────────────────────────────────
@@ -804,6 +830,12 @@ def refresh_stocks(helper):
                         raise FatalAPIError(
                             f"Aborting stocks refresh: {consecutive_failures} consecutive API failures "
                             f"(last: {format_api_error(last_err)})")
+                    if (last_err.get("code") in _RETRYABLE_ERROR_CODES
+                            and consecutive_failures % _COOLOFF_AFTER_FAILURES == 0):
+                        if cool_off(i, total, consecutive_failures):
+                            write_status("stocks", f"⏹ Stopped by user at [{i}/{total}]",
+                                         current=i, total=total, done=True)
+                            return True
                 else:
                     write_status("stocks", f"  [{i}/{total}] {symbol}: ✓ up to date (no new data from API)",
                                  current=i, total=total)
