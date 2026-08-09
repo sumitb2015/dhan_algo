@@ -3,24 +3,16 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import {
   Layers, RefreshCw, TrendingUp, TrendingDown, AlertTriangle,
-  Power, ShieldOff, Activity, Zap, LayoutList, ChevronDown, Shield,
-  Repeat, CheckCircle2, XCircle, Play, Square
+  Power, ShieldOff, Activity, Zap, LayoutList, ChevronDown, ChevronRight, Shield,
+  Repeat, CheckCircle2, XCircle, Play, Square, ChevronsDownUp, ChevronsUpDown
 } from 'lucide-react';
 import StrategyRowWide from '@/components/StrategyRowWide';
 import NavBar from '@/components/NavBar';
+import { usePortfolio } from '@/lib/usePortfolio';
+import { useGroupCollapse, groupByUnderlying } from '@/lib/useStrategyGroups';
 
 interface IndexQuote { ltp: number; prevClose: number }
 interface IndexTicker { nifty: IndexQuote | null; vix: IndexQuote | null }
-
-interface PortfolioData {
-  success: boolean;
-  available_funds: number;
-  total_realized_pnl: number;
-  total_unrealized_pnl: number;
-  total_pnl: number;
-  positions: any[];
-  error?: string;
-}
 
 type ToastType = 'success' | 'error' | 'info';
 interface Toast { id: number; type: ToastType; message: string }
@@ -92,8 +84,7 @@ export default function StrategiesPlusPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
-  const [portfolio, setPortfolio] = useState<PortfolioData | null>(null);
-  const [portfolioLoading, setPortfolioLoading] = useState(false);
+  const { portfolio, loading: portfolioLoading, refresh: fetchPortfolio } = usePortfolio();
 
   const [indexTicker, setIndexTicker] = useState<IndexTicker | null>(null);
 
@@ -104,6 +95,10 @@ export default function StrategiesPlusPage() {
   const [exitingAll, setExitingAll] = useState(false);
 
   const [viewMode, setViewMode] = useState<'active' | 'all'>('active');
+
+  // Groups default to open only when something inside is running, so the page opens on
+  // live strategies and folds everything else away behind its index header.
+  const groups = useGroupCollapse();
 
   // Client-side-only until the user actually launches them: instance ids the user has
   // asked to add via "+ Add run" but that have no debug/<key>_<id>_state.json yet.
@@ -214,30 +209,11 @@ export default function StrategiesPlusPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [fetchStrategies]);
 
-  const fetchPortfolio = useCallback(async () => {
-    setPortfolioLoading(true);
-    try {
-      const res = await fetch('/api/portfolio');
-      const data = await res.json();
-      setPortfolio(data);
-    } catch {
-      setPortfolio(null);
-    } finally {
-      setPortfolioLoading(false);
-    }
-  }, []);
-
   useEffect(() => {
     fetchStrategies(true);
     const iv = setInterval(() => fetchStrategies(false), 2000);
     return () => clearInterval(iv);
   }, []);
-
-  useEffect(() => {
-    fetchPortfolio();
-    const iv = setInterval(fetchPortfolio, 20000);
-    return () => clearInterval(iv);
-  }, [fetchPortfolio]);
 
   const fetchIndexTicker = useCallback(async () => {
     try {
@@ -551,24 +527,21 @@ export default function StrategiesPlusPage() {
   const activeList = instanceRows.filter(row => row.state?.status !== 'STOPPED');
   const displayList = viewMode === 'active' ? activeList : instanceRows;
 
-  // Group rows by underlying. Insertion order into the Map follows displayList, which
-  // follows the registry's key order — so group order is controlled by where a strategy
-  // sits in STRATEGIES_METADATA, with no second ordering list to keep in sync.
-  // Falls back to 'OTHER' so a registry entry missing `underlying` still renders.
-  const groupedList = (() => {
-    const groups = new Map<string, InstanceRow[]>();
-    for (const row of displayList) {
-      const underlying = row.meta?.underlying || 'OTHER';
-      const bucket = groups.get(underlying);
-      if (bucket) bucket.push(row);
-      else groups.set(underlying, [row]);
-    }
-    return [...groups.entries()].map(([underlying, rows]) => ({
-      underlying,
-      rows,
-      runningCount: rows.filter(r => r.state?.status !== 'STOPPED').length,
-    }));
-  })();
+  // Group rows by underlying. Order follows displayList, which follows the registry's key
+  // order — so group order is controlled by where a strategy sits in STRATEGIES_METADATA.
+  // Each row is already one instance, so a running row contributes exactly its own state.
+  const groupedList = groupByUnderlying<InstanceRow>(
+    displayList,
+    row => row.meta?.underlying,
+    row => (row.state?.status !== 'STOPPED' ? [row.state] : []),
+  );
+
+  // Pin auto-opened groups so a group does not fold up the moment its last run stops.
+  useEffect(() => {
+    groups.ensureOpen(groupedList.filter(g => g.runningCount > 0).map(g => g.underlying));
+    // groupedList is rebuilt every poll; ensureOpen no-ops once the groups are decided.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [groupedList.map(g => `${g.underlying}:${g.runningCount > 0}`).join(','), groups]);
 
   return (
     <div className="flex flex-col flex-1 w-full bg-black min-h-screen text-zinc-300">
@@ -774,6 +747,28 @@ export default function StrategiesPlusPage() {
               <span className={`px-1.5 py-0.5 rounded-full text-[9px] font-bold leading-none ${
                 viewMode === 'all' ? 'bg-zinc-700 text-zinc-200' : 'bg-zinc-800 text-zinc-500'
               }`}>{instanceRows.length}</span>
+            </button>
+          </div>
+
+          {/* Expand / collapse every index group. Without these the "All" view — the only
+              place a strategy is launched or duplicated — can be nothing but collapsed bars
+              whenever no strategy is running. */}
+          <div className="flex items-center rounded-lg border border-zinc-800 bg-zinc-900/60 p-0.5 gap-0.5">
+            <button
+              onClick={() => groups.setAll(groupedList.map(g => g.underlying), true)}
+              title="Expand every index group"
+              className="flex items-center gap-1 px-2 py-1 rounded-md text-[11px] font-semibold text-zinc-500 hover:text-zinc-200 transition-colors"
+            >
+              <ChevronsUpDown className="h-3 w-3" />
+              Expand
+            </button>
+            <button
+              onClick={() => groups.setAll(groupedList.map(g => g.underlying), false)}
+              title="Collapse every index group"
+              className="flex items-center gap-1 px-2 py-1 rounded-md text-[11px] font-semibold text-zinc-500 hover:text-zinc-200 transition-colors"
+            >
+              <ChevronsDownUp className="h-3 w-3" />
+              Collapse
             </button>
           </div>
 
@@ -1177,35 +1172,48 @@ export default function StrategiesPlusPage() {
             </div>
 
             {/* Strategy rows, grouped by underlying */}
-            {groupedList.map(({ underlying, rows, runningCount: groupRunning }) => (
-              <div key={underlying}>
-                <div className="flex items-center gap-2 px-4 py-1.5 bg-zinc-900 border-y border-zinc-800">
-                  <span className="text-xs font-bold text-white tracking-wide">{underlying}</span>
-                  <span className="text-[10px] font-semibold text-zinc-500">
-                    {rows.length} strateg{rows.length === 1 ? 'y' : 'ies'}
-                  </span>
-                  {groupRunning > 0 && (
-                    <span className="flex items-center gap-1 text-[10px] font-semibold text-emerald-400">
-                      <span className="h-1.5 w-1.5 rounded-full bg-emerald-500 animate-pulse" />
-                      {groupRunning} running
+            {groupedList.map(({ underlying, items: rows, runningCount: groupRunning }) => {
+              const open = groups.isOpen(underlying, groupRunning > 0);
+              return (
+                <div key={underlying}>
+                  <button
+                    type="button"
+                    onClick={() => groups.toggle(underlying, open)}
+                    aria-expanded={open}
+                    className="w-full flex items-center gap-2 px-4 py-1.5 bg-zinc-900 border-y border-zinc-800 text-left hover:bg-zinc-800/70 transition-colors"
+                  >
+                    {open
+                      ? <ChevronDown className="h-3.5 w-3.5 text-zinc-400 shrink-0" />
+                      : <ChevronRight className="h-3.5 w-3.5 text-zinc-400 shrink-0" />}
+                    <span className="text-xs font-bold text-white tracking-wide">{underlying}</span>
+                    <span className="text-[10px] font-semibold text-zinc-500">
+                      {rows.length} strateg{rows.length === 1 ? 'y' : 'ies'}
                     </span>
+                    {groupRunning > 0 && (
+                      <span className="flex items-center gap-1 text-[10px] font-semibold text-emerald-400">
+                        <span className="h-1.5 w-1.5 rounded-full bg-emerald-500 animate-pulse" />
+                        {groupRunning} running
+                      </span>
+                    )}
+                  </button>
+                  {open && (
+                    <div className="divide-y divide-zinc-800/30">
+                      {rows.map(({ key, instanceId, meta, state }) => (
+                        <StrategyRowWide
+                          key={`${key}:${instanceId}`}
+                          meta={meta}
+                          state={state}
+                          onRefresh={fetchStrategies}
+                          instanceId={instanceId || undefined}
+                          onAddInstance={instanceId === '' ? addInstance : undefined}
+                          onRemoveInstance={instanceId === '' ? undefined : removeInstance}
+                        />
+                      ))}
+                    </div>
                   )}
                 </div>
-                <div className="divide-y divide-zinc-800/30">
-                  {rows.map(({ key, instanceId, meta, state }) => (
-                    <StrategyRowWide
-                      key={`${key}:${instanceId}`}
-                      meta={meta}
-                      state={state}
-                      onRefresh={fetchStrategies}
-                      instanceId={instanceId || undefined}
-                      onAddInstance={instanceId === '' ? addInstance : undefined}
-                      onRemoveInstance={instanceId === '' ? undefined : removeInstance}
-                    />
-                  ))}
-                </div>
-              </div>
-            ))}
+              );
+            })}
 
             {/* "All" mode: hint to switch to active when strategies are running */}
             {viewMode === 'all' && runningCount > 0 && (

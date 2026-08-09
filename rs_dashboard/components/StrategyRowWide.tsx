@@ -18,6 +18,9 @@ interface StrategyMeta { key: string; name: string }
 // a free-text field keeps that failure mode unreachable.
 const ORB_INTERVALS = ['1', '5', '15', '25', '60'] as const;
 
+/** nifty_advanced_imbalance's argparse default for --max-lots, which reentry_straddle pins. */
+const REENTRY_MAX_LOTS = 4;
+
 interface StrategyState {
   strategy: string; status: string; pid?: number; dry_run?: boolean;
   lots?: number; max_lots?: number; threshold_lot?: number; threshold_strike?: number; scalp_floor_pct?: number; multi_cycle?: boolean; cycle_cooldown?: number; initial_combined_premium?: number; loser_ratio_lots?: number;
@@ -209,6 +212,12 @@ function StrategyRowWide({ meta, state, onRefresh, instanceId, onAddInstance, on
 
   const spreadTrendNoIndicators = meta.key === 'nifty_spread_trend' && !useEma && !useSupertrend;
 
+  // reentry_straddle rejects a non-default --max-lots (it never scales lots), so the flag is
+  // omitted below and the script's own default of 4 applies — which its `--lots > --max-lots`
+  // check then enforces against Lots. Mirrors StrategyCard.
+  const reentryLotsTooHigh =
+    meta.key === 'nifty_advanced_imbalance' && mode === 'reentry_straddle' && lots > REENTRY_MAX_LOTS;
+
   const isRunning = state.status !== 'STOPPED';
   const pnl = state.total_pnl ?? 0;
   const isPnlPositive = pnl >= 0;
@@ -227,6 +236,16 @@ function StrategyRowWide({ meta, state, onRefresh, instanceId, onAddInstance, on
 
   const handleStart = async () => {
     setStartError(null);
+    // Refuse locally what the script would refuse at startup: argparse exits 2 while
+    // /api/strategies has already returned success, so the row would just stay STOPPED
+    // with nothing explaining why.
+    if (reentryLotsTooHigh) {
+      setStartError(
+        `Re-entry Straddle caps Lots at ${REENTRY_MAX_LOTS} (the mode always re-enters at the ` +
+        `initial lot size). Lower Lots or pick another mode.`
+      );
+      return;
+    }
     setSubmitting(true);
     try {
       const args: string[] = [];
@@ -1018,7 +1037,9 @@ function StrategyRowWide({ meta, state, onRefresh, instanceId, onAddInstance, on
         ) : (
           <div className={fieldCls}>
             <FieldLabel text="Lots" tip="Number of lot-sized units traded per leg at entry (multiplied by the instrument's live lot size)." />
-            <Input type="number" value={lots} onChange={e => setLots(parseInt(e.target.value) || 1)} min={1} max={20} className={inputCls} style={{ width: 64 }} />
+            <Input type="number" value={lots} onChange={e => setLots(parseInt(e.target.value) || 1)} min={1}
+              max={meta.key === 'nifty_advanced_imbalance' && mode === 'reentry_straddle' ? REENTRY_MAX_LOTS : 20}
+              className={`${inputCls}${reentryLotsTooHigh ? ' border-red-600 text-red-300' : ''}`} style={{ width: 64 }} />
           </div>
         )}
 
@@ -1582,7 +1603,7 @@ function StrategyRowWide({ meta, state, onRefresh, instanceId, onAddInstance, on
 
         {/* Launch button inline in config */}
         <div className="flex items-end">
-          <Button onClick={handleStart} disabled={submitting || spreadTrendNoIndicators}
+          <Button onClick={handleStart} disabled={submitting || spreadTrendNoIndicators || reentryLotsTooHigh}
             className="h-7 px-4 gap-1.5 bg-gradient-to-tr from-emerald-600 to-teal-500 text-white font-bold rounded-lg shadow-md shadow-emerald-500/10 hover:from-emerald-500 hover:to-teal-400 active:scale-[0.98] transition-all text-xs border-0 disabled:opacity-50 disabled:cursor-not-allowed">
             {submitting ? <Loader2 className="h-3 w-3 animate-spin" /> : <Play className="h-3 w-3 fill-white" />}
             {submitting ? 'Launching…' : 'Launch'}
@@ -1748,7 +1769,7 @@ function StrategyRowWide({ meta, state, onRefresh, instanceId, onAddInstance, on
                 {showConfig ? <ChevronUp className="h-3 w-3" /> : <Settings className="h-3 w-3" />}
                 Configure
               </button>
-              <Button onClick={handleStart} disabled={submitting || spreadTrendNoIndicators}
+              <Button onClick={handleStart} disabled={submitting || spreadTrendNoIndicators || reentryLotsTooHigh}
                 className="h-7 px-3 gap-1 bg-emerald-600/80 hover:bg-emerald-500/80 text-white font-bold rounded-md text-[11px] border-0 shadow-none active:scale-95 transition-all disabled:opacity-50 disabled:cursor-not-allowed">
                 <Play className="h-2.5 w-2.5 fill-white" />
                 Launch

@@ -21,6 +21,9 @@ interface StrategyMeta {
 // as a dropdown rather than a free-text field keeps that failure mode unreachable.
 const ORB_INTERVALS = ['1', '5', '15', '25', '60'] as const;
 
+/** nifty_advanced_imbalance's argparse default for --max-lots, which reentry_straddle pins. */
+const REENTRY_MAX_LOTS = 4;
+
 /** "09:00" + 15 -> "09:15". Clamped within the day; returns the input unchanged if unparseable. */
 function addMinutesHHMM(hhmm: string, minutes: number): string {
   const m = /^(\d{1,2}):(\d{2})$/.exec(hhmm.trim());
@@ -313,6 +316,12 @@ function StrategyCard({ meta, state, onRefresh }: StrategyCardProps) {
   const spreadTrendNoIndicators =
     meta.key === 'nifty_spread_trend' && !useEma && !useSupertrend;
 
+  // reentry_straddle rejects a non-default --max-lots (it never scales lots), so the flag is
+  // omitted and the script's own default of 4 applies — which its `--lots > --max-lots` check
+  // then enforces against Lots. Keep both sides of that in one constant.
+  const reentryLotsTooHigh =
+    meta.key === 'nifty_advanced_imbalance' && mode === 'reentry_straddle' && lots > REENTRY_MAX_LOTS;
+
   const isRunning = state.status !== 'STOPPED';
   // Does the state file still claim an open position? Drives the Reset button, which
   // exists for exactly one case: the book was squared off manually at the broker and
@@ -334,6 +343,17 @@ function StrategyCard({ meta, state, onRefresh }: StrategyCardProps) {
 
   const handleStart = async () => {
     setStartError(null);
+    // Refuse locally what the script would refuse at startup. A spawn that dies in argparse
+    // exits 2 while /api/strategies has already returned success, so the only symptom is a
+    // card that stays STOPPED — nothing tells the user why.
+    if (reentryLotsTooHigh) {
+      setStartError(
+        `Re-entry Straddle caps Lots at ${REENTRY_MAX_LOTS}: the mode always re-enters at the ` +
+        `initial lot size, so it pins --max-lots to ${REENTRY_MAX_LOTS} and then rejects ` +
+        `--lots above it. Lower Lots to ${REENTRY_MAX_LOTS} or fewer, or pick another mode.`
+      );
+      return;
+    }
     setSubmitting(true);
     try {
       const args: string[] = [];
@@ -382,7 +402,9 @@ function StrategyCard({ meta, state, onRefresh }: StrategyCardProps) {
       }
 
       if (meta.key === 'nifty_advanced_imbalance') {
-        args.push('--max-lots', String(maxLots));
+        // reentry_straddle always re-enters at the initial lot size, and the script REJECTS
+        // a non-default --max-lots in that mode (exit 2 at startup) rather than ignoring it.
+        if (mode !== 'reentry_straddle') args.push('--max-lots', String(maxLots));
         const effectiveEntryType = mode === 'reentry_straddle' ? 'straddle' : entryType;
         args.push('--mode', mode, '--entry-type', effectiveEntryType, '--start-time', startTime);
         if (mode === 'loser_ratio_roll') args.push('--loser-ratio-lots', String(loserRatioLots));
@@ -714,13 +736,25 @@ function StrategyCard({ meta, state, onRefresh }: StrategyCardProps) {
         ) : (
           <div className={fieldCls}>
             <FieldLabel text="Lots" tip="Number of lot-sized units traded per leg at entry (multiplied by the instrument's live lot size)." />
-            <Input type="number" value={lots} onChange={(e) => setLots(parseInt(e.target.value) || 1)} min={1} max={20} className={inputCls} />
+            <Input
+              type="number"
+              value={lots}
+              onChange={(e) => setLots(parseInt(e.target.value) || 1)}
+              min={1}
+              max={meta.key === 'nifty_advanced_imbalance' && mode === 'reentry_straddle' ? REENTRY_MAX_LOTS : 20}
+              className={`${inputCls} ${reentryLotsTooHigh ? 'border-red-600 text-red-300' : ''}`}
+            />
+            {reentryLotsTooHigh && (
+              <span className="text-[9px] text-red-400">
+                Re-entry Straddle allows at most {REENTRY_MAX_LOTS} lots
+              </span>
+            )}
           </div>
         )}
 
-        {(meta.key === 'nifty_advanced_imbalance' ||
-          meta.key === 'nifty_value_imbalance_straddle' ||
-          meta.key === 'nifty_value_imbalance_strangle') && (
+        {(meta.key === 'nifty_value_imbalance_straddle' ||
+          meta.key === 'nifty_value_imbalance_strangle' ||
+          (meta.key === 'nifty_advanced_imbalance' && mode !== 'reentry_straddle')) && (
           <div className={fieldCls}>
             <FieldLabel text="Max Lots" tip="Maximum lots per leg reached via lot averaging/rolling before a strike shift is triggered." />
             <Input type="number" value={maxLots} onChange={(e) => setMaxLots(parseInt(e.target.value) || 4)} min={1} max={20} className={inputCls} />
@@ -1688,7 +1722,7 @@ function StrategyCard({ meta, state, onRefresh }: StrategyCardProps) {
               {!showConfig && (
                 <Button
                   onClick={handleStart}
-                  disabled={submitting || spreadTrendNoIndicators}
+                  disabled={submitting || spreadTrendNoIndicators || reentryLotsTooHigh}
                   className="h-6 px-2.5 gap-1 bg-emerald-600/80 hover:bg-emerald-500/80 text-white font-bold rounded-md text-[10px] border-0 shadow-none active:scale-95 transition-all duration-150 disabled:opacity-50 disabled:cursor-not-allowed"
                 >
                   <Play className="h-2.5 w-2.5 fill-white" />
@@ -2222,7 +2256,7 @@ function StrategyCard({ meta, state, onRefresh }: StrategyCardProps) {
               )}
               <Button
                 onClick={handleStart}
-                disabled={submitting || spreadTrendNoIndicators}
+                disabled={submitting || spreadTrendNoIndicators || reentryLotsTooHigh}
                 className="flex-1 h-8 gap-1.5 bg-gradient-to-tr from-emerald-600 to-teal-500 text-white font-bold rounded-lg shadow-md shadow-emerald-500/10 hover:from-emerald-500 hover:to-teal-400 active:scale-[0.98] transition-all duration-150 text-xs border-0 disabled:opacity-50 disabled:cursor-not-allowed"
               >
                 {submitting ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Play className="h-3.5 w-3.5 fill-white" />}
