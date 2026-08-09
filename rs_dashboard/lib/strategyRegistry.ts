@@ -88,6 +88,16 @@ export const STRATEGIES_METADATA: Record<string, { name: string; path: string; u
     underlying: 'CRUDEOILM',
     path: path.join(PROJECT_ROOT, 'strategies', 'crudeoil', 'crudeoilm_orb.py')
   },
+  // The only MULTI-SYMBOL strategy here: it tracks all 50 Nifty names and may hold several
+  // at once, so its state file carries `positions` and `candidates` arrays rather than the
+  // single-instrument fields every entry above uses.
+  // NOTE: its rule set is not backtest-validated (-0.28R over 81 sessions), so the script
+  // refuses --live without an explicit acknowledgement flag. Dry run is the intended mode.
+  nifty50_vwap_rs: {
+    name: 'Nifty 50 Intraday VWAP + RS',
+    underlying: 'NIFTY 50',
+    path: path.join(PROJECT_ROOT, 'strategies', 'intraday_equity', 'nifty50_vwap_rs.py')
+  },
   // The only positional / multi-day / CNC-delivery strategy here. Unlike every entry above,
   // stopping it does NOT flatten the book: it exits cleanly and leaves holdings in place,
   // persisted in debug/nifty500_momentum_portfolio.json for the next start to reload.

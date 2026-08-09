@@ -83,6 +83,7 @@ const NAV_GROUPS = [
     label: 'Algo',
     icon: Cpu,
     links: [
+      { href: '/terminal', label: 'Intraday Terminal', desc: 'Nifty 50 intraday VWAP + RS signal blotter, positions & auto-trader control' },
       { href: '/strategies', label: 'Strategies', desc: 'Automated execution control panel' },
       { href: '/strategies-plus', label: 'Strategies+', desc: 'Advanced multi-leg algorithm inputs' },
       { href: '/backtest', label: 'Backtest', desc: 'Short straddle historical simulation' },
