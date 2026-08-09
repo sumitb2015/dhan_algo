@@ -57,6 +57,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 from login import get_dhan_client
 from lib.dhan_helper import DhanHelper
 from lib.strategy_state_helper import save_strategy_state, check_shutdown_trigger, exit_if_market_closed, parse_target_spec, instance_log_suffix
+from lib.strategy_risk import resolve_exit_qty
 
 # ── Logging setup ────────────────────────────────────────────────────────────
 project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -72,6 +73,9 @@ API_ERROR_ALERT_STREAK = 5
 # Max leg buy-to-cover attempts before giving up for this tick (retried again next tick)
 EXIT_RETRY_ATTEMPTS = 3
 
+# Min seconds between option-chain spot fallback fetches when the WebSocket feed is down
+CHAIN_SPOT_FALLBACK_SECS = 30
+
 
 class FlushingFileHandler(logging.FileHandler):
     def emit(self, record):
@@ -85,7 +89,8 @@ logging.basicConfig(
     handlers=[
         logging.StreamHandler(),
         FlushingFileHandler(
-            os.path.join(log_dir, f"{datetime.now().strftime('%Y%m%d')}{instance_log_suffix()}.log")
+            os.path.join(log_dir, f"{datetime.now().strftime('%Y%m%d')}{instance_log_suffix()}.log"),
+            encoding='utf-8',
         ),
     ],
     force=True,
@@ -177,6 +182,11 @@ class NiftyVWAP1MinStraddle:
         self.ce_closed: bool = True
         self.pe_closed: bool = True
 
+        # Spot fallback state (see _nifty_spot) — keeps the 1s main loop from hitting
+        # the option-chain endpoint on every tick when the WebSocket feed drops out.
+        self._last_good_spot: float = self.prev_day_close if self.prev_day_close > 0 else 0.0
+        self._last_chain_spot_fetch: float = 0.0
+
     # ── helpers ──────────────────────────────────────────────────────────────
 
     def _reset_position(self):
@@ -250,16 +260,30 @@ class NiftyVWAP1MinStraddle:
     def _nifty_spot(self) -> float:
         spot = self.helper.get_ltp("NIFTY", exchange="IDX_I", instrument="INDEX")
         if spot > 0:
+            self._last_good_spot = spot
             return spot
-        # Fallback 1: option chain underlying LTP
-        expiry = self.helper.get_nearest_expiry("NIFTY")
-        if expiry:
-            chain_df = self.helper.get_option_chain_df("NIFTY", expiry)
-            spot = float(chain_df.attrs.get("underlying_ltp", 0)) if not chain_df.empty else 0.0
-        if spot > 0:
-            logger.warning(f"NIFTY spot via option chain underlying_ltp: {spot:.2f}")
-            return spot
-        # Fallback 2: previous day close
+
+        # Fallback 1: last spot this strategy saw. Free, and during a brief WebSocket
+        # gap it is far closer to the truth than anything below.
+        if self._last_good_spot > 0:
+            return self._last_good_spot
+
+        # Fallback 2: option chain underlying LTP. This is an expensive REST call and
+        # _nifty_spot() runs once per second in the main loop, so it is throttled —
+        # without this it would hammer the chain endpoint for as long as the feed is down.
+        now = time.time()
+        if now - self._last_chain_spot_fetch >= CHAIN_SPOT_FALLBACK_SECS:
+            self._last_chain_spot_fetch = now
+            expiry = self.helper.get_nearest_expiry("NIFTY")
+            if expiry:
+                chain_df = self.helper.get_option_chain_df("NIFTY", expiry)
+                spot = float(chain_df.attrs.get("underlying_ltp", 0)) if not chain_df.empty else 0.0
+            if spot > 0:
+                logger.warning(f"NIFTY spot via option chain underlying_ltp: {spot:.2f}")
+                self._last_good_spot = spot
+                return spot
+
+        # Fallback 3: previous day close
         if self.prev_day_close > 0:
             logger.warning(f"NIFTY spot fallback to prev day close: {self.prev_day_close:.2f}")
             return self.prev_day_close
@@ -437,11 +461,17 @@ class NiftyVWAP1MinStraddle:
         return True
 
     def _maybe_refresh_vwap(self):
-        """Refresh VWAP at most once per completed 1-min bar."""
+        """Refresh VWAP at most once per completed 1-min bar.
+
+        The minute is stamped whether or not the refresh succeeds. Stamping only on
+        success meant a Data API outage (DH-902 and friends) retried two REST candle
+        fetches every second for the whole minute instead of one attempt per minute —
+        the exact behaviour most likely to keep the account rate-limited.
+        """
         current_minute = datetime.now().strftime("%H:%M")
         if current_minute != self._last_candle_minute:
-            if self._refresh_candle_vwap():
-                self._last_candle_minute = current_minute
+            self._last_candle_minute = current_minute
+            self._refresh_candle_vwap()
 
     # ── option info ───────────────────────────────────────────────────────────
 
@@ -531,14 +561,19 @@ class NiftyVWAP1MinStraddle:
         self.pe_avg = pe_fill
         self.entry_combined = ce_fill + pe_fill
 
-        if self.target_is_pct or self.stop_is_pct:
+        # Resolve percentage targets ONCE, against the premium collected on the day's
+        # first entry. These are session-level guards compared against total_pnl, which
+        # is cumulative (realized + open) — re-anchoring them to each new trade's
+        # premium would move the goalposts, so after a few losing scalps a % target
+        # could become unreachable, or a % stop unreachably deep.
+        if self.target_is_pct and self.profit_target is None:
             entry_value = self.entry_combined * qty
-            if self.target_is_pct:
-                self.profit_target = entry_value * self.target_pct / 100.0
-                logger.info(f"Resolved profit target: {self.target_pct}% of entry premium INR{entry_value:.0f} = INR{self.profit_target:.0f}")
-            if self.stop_is_pct:
-                self.stop_loss = -abs(entry_value * self.stop_pct / 100.0)
-                logger.info(f"Resolved stop loss: {self.stop_pct}% of entry premium INR{entry_value:.0f} = -INR{abs(self.stop_loss):.0f}")
+            self.profit_target = entry_value * self.target_pct / 100.0
+            logger.info(f"Resolved profit target: {self.target_pct}% of entry premium INR{entry_value:.0f} = INR{self.profit_target:.0f}")
+        if self.stop_is_pct and self.stop_loss is None:
+            entry_value = self.entry_combined * qty
+            self.stop_loss = -abs(entry_value * self.stop_pct / 100.0)
+            logger.info(f"Resolved stop loss: {self.stop_pct}% of entry premium INR{entry_value:.0f} = -INR{abs(self.stop_loss):.0f}")
 
         self.in_position = True
         self.ce_closed = False
@@ -552,20 +587,42 @@ class NiftyVWAP1MinStraddle:
         )
         return True
 
-    def _close_leg_with_retry(self, sid: str, qty: int, leg: str, attempts: int = EXIT_RETRY_ATTEMPTS) -> bool:
-        """Attempt to buy-to-cover a leg, retrying on failed placement or unfilled order."""
+    def _close_leg_with_retry(self, sid: str, qty: int, leg: str, attempts: int = EXIT_RETRY_ATTEMPTS):
+        """Attempt to buy-to-cover a leg, retrying on failed placement or unfilled order.
+
+        Returns (closed, fill_price). fill_price is 0.0 when the fill price could not be
+        read, in which case the caller falls back to the last mark.
+        """
         for attempt in range(1, attempts + 1):
             try:
-                oid = self.helper.buy(sid, qty)
+                # Never buy back more than the broker actually shows short for this
+                # contract — a raw qty would flip the leg long if a partial exit or a
+                # manual square-off already reduced it.
+                qty_to_buy, net_qty = resolve_exit_qty(self.helper, sid, qty, "BUY", logger)
+                if qty_to_buy <= 0:
+                    logger.warning(
+                        f"Broker reports no short position for {leg} (ID: {sid}, net {net_qty}); "
+                        "treating as already closed."
+                    )
+                    return True, 0.0
+                oid = self.helper.buy(sid, qty_to_buy)
             except Exception as e:
                 logger.error(f"Exit {leg} error (attempt {attempt}/{attempts}): {e}")
                 oid = None
             if oid and self.helper.wait_for_fill(oid, timeout=5):
-                return True
+                fill_price = 0.0
+                detail = self.helper.get_order_by_id(oid)
+                if detail:
+                    fill_price = float(
+                        detail.get("averageTradedPrice", 0)
+                        or detail.get("avgFilledPrice", 0)
+                        or 0
+                    )
+                return True, fill_price
             logger.warning(f"Exit attempt {attempt}/{attempts} failed for {leg} (ID: {sid}, order_id={oid}).")
             if attempt < attempts:
                 time.sleep(1)
-        return False
+        return False, 0.0
 
     def _exit_straddle(self, reason: str) -> bool:
         """
@@ -582,8 +639,16 @@ class NiftyVWAP1MinStraddle:
             for leg, sid, attr in [("CE", self.ce_id, "ce_closed"), ("PE", self.pe_id, "pe_closed")]:
                 if getattr(self, attr):
                     continue
-                if self._close_leg_with_retry(sid, qty, leg):
+                closed, fill_price = self._close_leg_with_retry(sid, qty, leg)
+                if closed:
                     setattr(self, attr, True)
+                    # Prefer the actual fill over the pre-order mark captured above —
+                    # otherwise every exit understates the spread it crossed.
+                    if fill_price > 0:
+                        if leg == "CE":
+                            ce_ltp = fill_price
+                        else:
+                            pe_ltp = fill_price
                 else:
                     logger.critical(
                         f"Exit order FAILED for {leg} (ID: {sid}) after {EXIT_RETRY_ATTEMPTS} attempts! "
@@ -768,7 +833,10 @@ class NiftyVWAP1MinStraddle:
                         continue
 
                 # ── Global P&L guards ─────────────────────────────────────────
-                if total_pnl >= self.profit_target:
+                # profit_target / stop_loss stay None until the first entry resolves a
+                # percentage spec against the premium collected, so both guards must
+                # tolerate None — this block runs while flat, before any entry.
+                if self.profit_target is not None and total_pnl >= self.profit_target:
                     if self.in_position:
                         if not self._exit_straddle(f"Global Profit Target hit: {total_pnl:.2f}"):
                             time.sleep(1)
@@ -781,7 +849,7 @@ class NiftyVWAP1MinStraddle:
                     self._reset_position()
                     break
 
-                if total_pnl <= self.stop_loss:
+                if self.stop_loss is not None and total_pnl <= self.stop_loss:
                     if self.in_position:
                         if not self._exit_straddle(f"Global Stop Loss hit: {total_pnl:.2f}"):
                             time.sleep(1)

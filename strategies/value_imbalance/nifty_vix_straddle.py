@@ -90,7 +90,8 @@ logging.basicConfig(
     handlers=[
         logging.StreamHandler(),
         FlushingFileHandler(
-            os.path.join(log_dir, f"{datetime.now().strftime('%Y%m%d')}{instance_log_suffix()}.log")
+            os.path.join(log_dir, f"{datetime.now().strftime('%Y%m%d')}{instance_log_suffix()}.log"),
+            encoding='utf-8',
         ),
     ],
     force=True,

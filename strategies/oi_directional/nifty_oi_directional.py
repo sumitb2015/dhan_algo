@@ -4,9 +4,11 @@ Nifty OI Directional Strategy
 Tracks open interest across ±5 NIFTY strikes from ATM (11 strikes total).
 Computes diff = sum(CE_OI) - sum(PE_OI) across those strikes.
 
-Direction signal:
-  diff > 0 and expanding → BULLISH  → sell PE strike with PCR > pcr_threshold
-  diff < 0 and expanding → BEARISH  → sell CE strike with PCR < 1/pcr_threshold
+Direction signal (diff = sum(CE_OI) - sum(PE_OI); "expanding" = moving further from zero):
+  diff < 0 and expanding → BULLISH  → sell PE strike with PCR > pcr_threshold
+      PE OI dominates and is growing: put writers are defending support.
+  diff > 0 and expanding → BEARISH  → sell CE strike with PCR < 1/pcr_threshold
+      CE OI dominates and is growing: call writers are defending resistance.
 
 PCR per strike = PE_OI / CE_OI at that specific strike.
 
@@ -44,6 +46,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 from login import get_dhan_client
 from lib.dhan_helper import DhanHelper
 from lib.strategy_state_helper import save_strategy_state, check_shutdown_trigger, exit_if_market_closed, parse_target_spec, instance_log_suffix
+from lib.strategy_risk import resolve_exit_qty
 
 # ── Logging setup ────────────────────────────────────────────────────────────
 project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -68,7 +71,8 @@ logging.basicConfig(
     handlers=[
         logging.StreamHandler(),
         FlushingFileHandler(
-            os.path.join(log_dir, f"{datetime.now().strftime('%Y%m%d')}{instance_log_suffix()}.log")
+            os.path.join(log_dir, f"{datetime.now().strftime('%Y%m%d')}{instance_log_suffix()}.log"),
+            encoding='utf-8',
         ),
     ],
     force=True,
@@ -443,14 +447,19 @@ class NiftyOIDirectional:
         self.avg_price = fill_price
         self.entry_pcr = pcr
 
-        if self.target_is_pct or self.stop_is_pct:
+        # Resolve percentage targets ONCE, against the premium collected on the day's
+        # first entry. These are session-level guards compared against total_pnl, which
+        # is cumulative (realized + open) — re-anchoring them to each new trade's
+        # premium would move the goalposts, so after a few losing trades a % target
+        # could become unreachable, or a % stop unreachably deep.
+        if self.target_is_pct and self.profit_target is None:
             entry_value = self.avg_price * qty
-            if self.target_is_pct:
-                self.profit_target = entry_value * self.target_pct / 100.0
-                logger.info(f"Resolved profit target: {self.target_pct}% of entry premium INR{entry_value:.0f} = INR{self.profit_target:.0f}")
-            if self.stop_is_pct:
-                self.stop_loss = -abs(entry_value * self.stop_pct / 100.0)
-                logger.info(f"Resolved stop loss: {self.stop_pct}% of entry premium INR{entry_value:.0f} = -INR{abs(self.stop_loss):.0f}")
+            self.profit_target = entry_value * self.target_pct / 100.0
+            logger.info(f"Resolved profit target: {self.target_pct}% of entry premium INR{entry_value:.0f} = INR{self.profit_target:.0f}")
+        if self.stop_is_pct and self.stop_loss is None:
+            entry_value = self.avg_price * qty
+            self.stop_loss = -abs(entry_value * self.stop_pct / 100.0)
+            logger.info(f"Resolved stop loss: {self.stop_pct}% of entry premium INR{entry_value:.0f} = -INR{abs(self.stop_loss):.0f}")
 
         if option_type == "PE":
             # Exit when PCR drops by exit_pcr_change_pct%
@@ -473,10 +482,38 @@ class NiftyOIDirectional:
 
         if not self.dry_run:
             try:
-                oid = self.helper.buy(self.sold_security_id, qty)
-                if not oid:
+                # Never buy back more than the broker actually shows short for this
+                # contract — a raw qty would flip the leg long if a partial exit or a
+                # manual square-off already reduced it.
+                qty_to_buy, net_qty = resolve_exit_qty(self.helper, self.sold_security_id, qty, "BUY", logger)
+                if qty_to_buy <= 0:
+                    logger.warning(
+                        f"Broker reports no short position for {self.sold_security_id} "
+                        f"(net {net_qty}); skipping exit order."
+                    )
+                    oid = None
+                else:
+                    oid = self.helper.buy(self.sold_security_id, qty_to_buy)
+                if qty_to_buy > 0 and not oid:
                     logger.critical(
                         f"Exit buy order FAILED for {self.sold_strike} {self.position_type}!"
+                    )
+                elif self.helper.wait_for_fill(oid, timeout=10):
+                    # Book the actual fill, not the pre-order mark — otherwise every
+                    # exit understates slippage by the width of the spread it crossed.
+                    detail = self.helper.get_order_by_id(oid)
+                    if detail:
+                        filled = float(
+                            detail.get("averageTradedPrice", 0)
+                            or detail.get("avgFilledPrice", 0)
+                            or 0
+                        )
+                        if filled > 0:
+                            ltp = filled
+                else:
+                    logger.warning(
+                        f"Exit order {oid} did not confirm within timeout; booking P&L at "
+                        f"last mark {ltp:.2f}."
                     )
             except Exception as e:
                 logger.error(f"Exit order error: {e}")

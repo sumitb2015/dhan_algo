@@ -34,7 +34,15 @@ logging.basicConfig(
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
         logging.StreamHandler(),
-        FlushingFileHandler(os.path.join(log_dir, f"{datetime.now().strftime('%Y%m%d')}{instance_log_suffix()}.log"))
+        # encoding is REQUIRED: this file logs P&L with the ₹ glyph, and FileHandler
+        # otherwise opens with the system ANSI codepage (cp1252 on Windows). Every line
+        # containing ₹ then fails to encode and is silently dropped from the log while
+        # the ASCII lines around it are written — so the log looks intact but the P&L
+        # lines are missing exactly when you need them.
+        FlushingFileHandler(
+            os.path.join(log_dir, f"{datetime.now().strftime('%Y%m%d')}{instance_log_suffix()}.log"),
+            encoding="utf-8",
+        )
     ],
     force=True
 )
@@ -175,6 +183,12 @@ class NiftySTOIBearCallStrategy:
         self.entry_time: Optional[datetime] = None
 
         self.last_close_time: Optional[datetime] = None  # cooldown tracker
+
+        # Session-cumulative realized P&L across all closed spreads. --target-profit /
+        # --stop-loss are documented as DAILY caps, so they must be evaluated against
+        # realized + open, not against the current spread alone — otherwise the same
+        # "daily" stop can be hit an unlimited number of times in one session.
+        self.realized_pnl = 0.0
 
     # --- Candle fetch helpers ------------------------------------------------
 
@@ -373,6 +387,7 @@ class NiftySTOIBearCallStrategy:
             "long_entry_price": self.long_entry_price,
             "short_ltp": short_ltp,
             "long_ltp": long_ltp,
+            "realized_pnl": round(self.realized_pnl, 2),
             "total_pnl": total_pnl,
             "spot": spot,
             "profit_target": self.target_profit,
@@ -625,6 +640,15 @@ class NiftySTOIBearCallStrategy:
         last_log_time = 0
         total_qty = self.lot_size * self.lots
         last_indicator_minute = ""
+        last_index_check = 0.0
+        # _check_index_bearish() pulls 5 days of 1-min index candles and resamples them.
+        # The Supertrend direction only changes on a completed --index-interval bar, so
+        # polling it every second is pure API burn and drives the data endpoint into 429
+        # backoff. Re-check at most once per index bar (floored at 60s).
+        try:
+            index_check_period = max(60, int(self.index_interval) * 60)
+        except (TypeError, ValueError):
+            index_check_period = 60
 
         while self.phase == "ENTERED":
             time.sleep(1)
@@ -638,7 +662,9 @@ class NiftySTOIBearCallStrategy:
                 s_ltp, l_ltp, spot_price = self.fetch_ltps()
                 short_ltp_val = s_ltp if s_ltp > 0 else self.short_entry_price
                 long_ltp_val = l_ltp if l_ltp > 0 else self.long_entry_price
-                total_pnl = (self.short_entry_price - short_ltp_val + long_ltp_val - self.long_entry_price) * total_qty
+                total_pnl = self.realized_pnl + (
+                    self.short_entry_price - short_ltp_val + long_ltp_val - self.long_entry_price
+                ) * total_qty
                 self.exit_positions("UI Shutdown Request")
                 self.save_state(status="STOPPED", spot=spot_price, short_ltp=short_ltp_val, long_ltp=long_ltp_val, total_pnl=total_pnl)
                 sys.exit(0)
@@ -649,7 +675,9 @@ class NiftySTOIBearCallStrategy:
 
             short_pnl = (self.short_entry_price - short_ltp) * total_qty
             long_pnl = (long_ltp - self.long_entry_price) * total_qty
-            total_pnl = short_pnl + long_pnl
+            position_pnl = short_pnl + long_pnl
+            # Daily caps are evaluated against the session total, not this spread alone.
+            total_pnl = self.realized_pnl + position_pnl
 
             self.save_state(status="RUNNING", spot=spot_price, short_ltp=short_ltp, long_ltp=long_ltp, total_pnl=total_pnl)
 
@@ -659,7 +687,9 @@ class NiftySTOIBearCallStrategy:
             if time.time() - last_log_time >= 30:
                 logger.info(
                     f"[MONITOR] Bear Call | Short: {short_ltp:.2f} (Entry: {self.short_entry_price:.2f}) | "
-                    f"Long: {long_ltp:.2f} (Entry: {self.long_entry_price:.2f}) | PnL: ₹{total_pnl:.2f} | Option ST dir: {self.option_st_dir}"
+                    f"Long: {long_ltp:.2f} (Entry: {self.long_entry_price:.2f}) | "
+                    f"PnL: ₹{position_pnl:.2f} (session ₹{total_pnl:.2f}, realized ₹{self.realized_pnl:.2f}) | "
+                    f"Option ST dir: {self.option_st_dir}"
                 )
                 last_log_time = time.time()
 
@@ -691,15 +721,41 @@ class NiftySTOIBearCallStrategy:
                     break
 
                 # 6. Index Supertrend flips back bullish (early exit on trend reversal)
-                if self.exit_on_signal_flip:
+                if self.exit_on_signal_flip and (time.time() - last_index_check) >= index_check_period:
+                    last_index_check = time.time()
                     index_bearish, _, _ = self._check_index_bearish()
                     if not index_bearish:
                         self.exit_positions("Index Supertrend flipped bullish (trend reversal)", bypass_cooldown=True)
                         break
 
+    def _halt(self, detail: str):
+        """Publish a final HALTED state, then stop the process.
+
+        These halts happen with a hedge leg still open on purpose (closing it while
+        the short is stuck would leave a naked short). Exiting silently left the
+        dashboard showing the last RUNNING snapshot, so an operator had no signal
+        that manual intervention was needed on a live position.
+        """
+        logger.critical(f"HALTING STRATEGY: {detail}")
+        try:
+            self.save_state(status="HALTED", total_pnl=self.realized_pnl)
+        except Exception as save_err:
+            logger.error(f"Could not publish HALTED state: {save_err}")
+        sys.exit(1)
+
     def exit_positions(self, reason: str, bypass_cooldown: bool = False):
         logger.warning(f"!!! EXITING ALL POSITIONS: {reason} !!!")
         total_qty = self.lot_size * self.lots
+
+        # Snapshot the closing marks BEFORE the state reset below, so this spread's
+        # result can be banked into the session total. Without this the closed spread's
+        # P&L was silently dropped and the "daily" target/stop restarted from zero.
+        was_entered = self.phase == "ENTERED"
+        exit_short_ltp, exit_long_ltp, _ = self.fetch_ltps()
+        if exit_short_ltp <= 0:
+            exit_short_ltp = self.short_entry_price
+        if exit_long_ltp <= 0:
+            exit_long_ltp = self.long_entry_price
 
         short_closed = False
         if not self.dry_run:
@@ -707,8 +763,7 @@ class NiftySTOIBearCallStrategy:
                 try:
                     short_exit_oid = self.helper.buy(str(self.short_id), total_qty, product=self.product_type)
                     if not short_exit_oid:
-                        logger.critical(f"CRITICAL ERROR: Failed to place buy-to-close order for Short Leg {self.short_symbol} (ID: {self.short_id})! Retaining hedge leg to prevent naked risk. HALTING STRATEGY.")
-                        sys.exit(1)
+                        self._halt(f"Failed to place buy-to-close order for Short Leg {self.short_symbol} (ID: {self.short_id}). Hedge leg retained to prevent naked risk.")
                     else:
                         logger.info(f"Short Leg buy-to-close order placed: {short_exit_oid}")
                         if self.helper.wait_for_fill(short_exit_oid, timeout=10):
@@ -718,11 +773,9 @@ class NiftySTOIBearCallStrategy:
                             if ord_details and ord_details.get('orderStatus') == 'TRADED':
                                 short_closed = True
                             else:
-                                logger.critical("CRITICAL ERROR: Short Leg close order did not fill. Retaining hedge leg to prevent naked risk. HALTING STRATEGY.")
-                                sys.exit(1)
+                                self._halt("Short Leg close order did not fill. Hedge leg retained to prevent naked risk.")
                 except Exception as e:
-                    logger.error(f"Error closing Short Leg: {e}")
-                    sys.exit(1)
+                    self._halt(f"Error closing Short Leg: {e}")
             else:
                 short_closed = True
 
@@ -730,14 +783,12 @@ class NiftySTOIBearCallStrategy:
                 try:
                     long_exit_oid = self.helper.sell(str(self.long_id), total_qty, product=self.product_type)
                     if not long_exit_oid:
-                        logger.critical(f"CRITICAL ERROR: Failed to place sell-to-close order for Long Leg {self.long_symbol} (ID: {self.long_id})! HALTING STRATEGY.")
-                        sys.exit(1)
+                        self._halt(f"Failed to place sell-to-close order for Long Leg {self.long_symbol} (ID: {self.long_id}).")
                     else:
                         logger.info(f"Long Leg sell-to-close order placed: {long_exit_oid}")
                         self.helper.wait_for_fill(long_exit_oid, timeout=5)
                 except Exception as e:
-                    logger.error(f"Error closing Long Leg: {e}")
-                    sys.exit(1)
+                    self._halt(f"Error closing Long Leg: {e}")
         else:
             logger.info("[DRY RUN] Simulating Position Exit.")
 
@@ -750,6 +801,17 @@ class NiftySTOIBearCallStrategy:
                 ])
             except Exception as e:
                 logger.error(f"Failed to unsubscribe options: {e}")
+
+        # Bank this spread's result into the session total before clearing the legs.
+        if was_entered:
+            closed_pnl = (
+                (self.short_entry_price - exit_short_ltp) + (exit_long_ltp - self.long_entry_price)
+            ) * total_qty
+            self.realized_pnl += closed_pnl
+            logger.info(
+                f"Spread closed at short {exit_short_ltp:.2f} / long {exit_long_ltp:.2f} | "
+                f"Cycle P&L: ₹{closed_pnl:+.0f} | Session realized: ₹{self.realized_pnl:+.0f}"
+            )
 
         self.phase = "IDLE"
         self.short_id = None

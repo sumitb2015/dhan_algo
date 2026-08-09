@@ -30,7 +30,14 @@ logging.basicConfig(
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
         logging.StreamHandler(),
-        FlushingFileHandler(os.path.join(log_dir, f"{datetime.now().strftime('%Y%m%d')}{instance_log_suffix()}.log"))
+        # encoding: FileHandler otherwise opens with the system ANSI codepage
+        # (cp1252 on Windows) and silently DROPS any log line containing a
+        # non-ANSI glyph (INR sign, arrows, dashes) while still writing the
+        # ASCII lines around it -- the log looks intact but loses those lines.
+        FlushingFileHandler(
+            os.path.join(log_dir, f"{datetime.now().strftime('%Y%m%d')}{instance_log_suffix()}.log"),
+            encoding="utf-8",
+        )
     ],
     force=True
 )
@@ -202,7 +209,7 @@ class ValueImbalanceStrangle:
                 sec = self.helper.get_security_id(symbol=str(int(sid)))
                 if sec:
                     lot_size = int(sec.get('LOT_SIZE', self.nifty_lot_size))
-            except:
+            except Exception:
                 pass
             return (
                 int(sid),
@@ -259,8 +266,32 @@ class ValueImbalanceStrangle:
             self.entry_diff_pct = 0.0
         logger.info(f"Post-Adjustment baseline imbalance updated to: {self.entry_diff_pct:.2f}%")
 
+    def _book_exit_pnl(self, ce_exit_price, pe_exit_price):
+        """Fold the closed legs into session realized P&L, then zero the legs.
+
+        Without this the closing P&L was silently dropped: realized_pnl only ever
+        accumulated from mid-cycle strike adjustments, so every completed cycle's
+        result vanished from the dashboard and from the cumulative target/stop checks.
+
+        Zeroing the lots is what makes this safe to call more than once (e.g. an EOD
+        exit followed by a shutdown exit) — the second call books (avg - exit) * 0.
+        """
+        if ce_exit_price <= 0:
+            ce_exit_price = self.ce_avg_price
+        if pe_exit_price <= 0:
+            pe_exit_price = self.pe_avg_price
+        # _calculate_pnl already includes realized_pnl, so this is the new session total.
+        self.realized_pnl = self._calculate_pnl(ce_exit_price, pe_exit_price)
+        self.ce_lots = 0
+        self.pe_lots = 0
+        logger.info(
+            f"Cycle closed at CE {ce_exit_price:.2f} / PE {pe_exit_price:.2f} | "
+            f"Session realized: INR {self.realized_pnl:+.0f}"
+        )
+
     def exit_all_positions(self, reason):
         logger.warning(f"!!! EXITING ALL POSITIONS: {reason} !!!")
+        ce_exit_price, pe_exit_price = 0.0, 0.0
         if not self.dry_run:
             if self.ce_id:
                 try:
@@ -272,6 +303,7 @@ class ValueImbalanceStrangle:
                             logger.critical(f"CRITICAL ERROR: Emergency exit order failed for CE (ID: {self.ce_id})!")
                         else:
                             logger.info(f"CE Emergency exit order placed for {qty_to_buy} qty (own {own_qty}, broker net {net_qty}): {ce_exit_id}")
+                            ce_exit_price = self.get_execution_price(ce_exit_id, 0.0)
                 except Exception as e:
                     logger.error(f"Exit CE Error: {e}")
             if self.pe_id:
@@ -284,10 +316,21 @@ class ValueImbalanceStrangle:
                             logger.critical(f"CRITICAL ERROR: Emergency exit order failed for PE (ID: {self.pe_id})!")
                         else:
                             logger.info(f"PE Emergency exit order placed for {qty_to_buy} qty (own {own_qty}, broker net {net_qty}): {pe_exit_id}")
+                            pe_exit_price = self.get_execution_price(pe_exit_id, 0.0)
                 except Exception as e:
                     logger.error(f"Exit PE Error: {e}")
         else:
             logger.info(f"[DRY RUN] Simulating Exit of all positions.")
+
+        # Fall back to live marks for anything the fills did not give us (dry run,
+        # unfilled order, or an exception above). Only when both ids are still set —
+        # a leg zeroed by the adjustment error paths has id None, and fetch_ltps would
+        # raise on int(None). _book_exit_pnl falls back to the entry avg in that case.
+        if (ce_exit_price <= 0 or pe_exit_price <= 0) and self.ce_id and self.pe_id:
+            ce_ltp, pe_ltp, _ = self.fetch_ltps()
+            ce_exit_price = ce_exit_price or ce_ltp
+            pe_exit_price = pe_exit_price or pe_ltp
+        self._book_exit_pnl(ce_exit_price, pe_exit_price)
 
     def reset_session(self):
         if self.ce_id and self.pe_id:
@@ -297,7 +340,7 @@ class ValueImbalanceStrangle:
                     ("NSE_FNO", str(self.ce_id), 15),
                     ("NSE_FNO", str(self.pe_id), 15)
                 ])
-            except: pass
+            except Exception: pass
             
         self.ce_strike = None
         self.pe_strike = None
@@ -742,7 +785,7 @@ class ValueImbalanceStrangle:
                         old_loser_lots = self.pe_lots if loser == "PE" else self.ce_lots
                         new_loser_lots = max(2, self.initial_lots)
                         
-                        new_strike, new_price = self.find_rebalance_strike(loser, winner_val, new_loser_lots, chain_df)
+                        new_strike, new_price = self.find_rebalance_strike(loser, winner_val, new_loser_lots, chain_df, curr_nifty)
                         if new_strike:
                             # Prevent strike inversion during rebalance - exit cycle
                             if (loser == "CE" and new_strike <= self.pe_strike) or (loser == "PE" and new_strike >= self.ce_strike):
@@ -813,16 +856,36 @@ class ValueImbalanceStrangle:
                                 self.update_baseline_imbalance()
                         continue
 
-    def find_rebalance_strike(self, option_type, target_value, lots, chain_df):
-        if lots <= 0 or chain_df.empty: return None, 0.0
+    def find_rebalance_strike(self, option_type, target_value, lots, chain_df, spot=0.0):
+        """Find the strike whose lots * price is closest to target_value.
+
+        Candidates are restricted to OTM strikes when a spot price is available.
+        Without that filter the whole chain is searched on price alone, and a deep
+        ITM strike on the wrong side of spot can match the target premium just as
+        well as the intended OTM one — with completely different risk.
+        """
+        if lots <= 0 or chain_df.empty:
+            return None, 0.0
         price_col = f"{option_type.lower()}_last_price"
+        if price_col not in chain_df.columns:
+            logger.error(f"Price column {price_col} not found in option chain.")
+            return None, 0.0
         target_price = target_value / lots
         valid_df = chain_df[chain_df[price_col] > 0].copy()
-        if valid_df.empty: return None, 0.0
+        if spot > 0:
+            otm_df = valid_df[valid_df.index > spot] if option_type == "CE" else valid_df[valid_df.index < spot]
+            if otm_df.empty:
+                logger.warning(f"No valid OTM strikes for {option_type} at spot {spot:.2f}; falling back to full chain.")
+            else:
+                valid_df = otm_df
+        if valid_df.empty:
+            return None, 0.0
         valid_df['diff'] = abs(valid_df[price_col] - target_price)
         best_row = valid_df.sort_values('diff').iloc[0]
-        try: return int(float(best_row.name)), float(best_row[price_col])
-        except: return None, 0.0
+        try:
+            return int(float(best_row.name)), float(best_row[price_col])
+        except (TypeError, ValueError):
+            return None, 0.0
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(

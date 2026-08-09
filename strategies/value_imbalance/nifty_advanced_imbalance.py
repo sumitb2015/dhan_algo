@@ -30,7 +30,14 @@ logging.basicConfig(
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
         logging.StreamHandler(),
-        FlushingFileHandler(os.path.join(log_dir, f"{datetime.now().strftime('%Y%m%d')}{instance_log_suffix()}.log"))
+        # encoding: FileHandler otherwise opens with the system ANSI codepage
+        # (cp1252 on Windows) and silently DROPS any log line containing a
+        # non-ANSI glyph (INR sign, arrows, dashes) while still writing the
+        # ASCII lines around it -- the log looks intact but loses those lines.
+        FlushingFileHandler(
+            os.path.join(log_dir, f"{datetime.now().strftime('%Y%m%d')}{instance_log_suffix()}.log"),
+            encoding="utf-8",
+        )
     ],
     force=True
 )
@@ -257,7 +264,7 @@ class NiftyAdvancedImbalance:
                 sec = self.helper.get_security_id(symbol=str(int(sid)))
                 if sec:
                     lot_size = int(sec.get('LOT_SIZE', self.nifty_lot_size))
-            except:
+            except Exception:
                 pass
             return (
                 int(sid),
@@ -531,15 +538,15 @@ class NiftyAdvancedImbalance:
                     ("NSE_FNO", str(self.ce_id), 15),
                     ("NSE_FNO", str(self.pe_id), 15)
                 ])
-            except: pass
+            except Exception: pass
 
         # Unsubscribe from wings
         for wing in self.ce_wings:
             try: self.helper.unsubscribe_instruments([("NSE_FNO", str(wing['id']), 15)])
-            except: pass
+            except Exception: pass
         for wing in self.pe_wings:
             try: self.helper.unsubscribe_instruments([("NSE_FNO", str(wing['id']), 15)])
-            except: pass
+            except Exception: pass
 
         self.ce_strike = None
         self.pe_strike = None
@@ -610,7 +617,7 @@ class NiftyAdvancedImbalance:
         
         try:
             return int(float(best_row.name)), float(best_row[price_col])
-        except:
+        except Exception:
             return None, 0.0
 
     def select_strikes(self, nifty_spot, chain_df):

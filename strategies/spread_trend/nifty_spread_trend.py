@@ -30,7 +30,15 @@ logging.basicConfig(
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
         logging.StreamHandler(),
-        FlushingFileHandler(os.path.join(log_dir, f"{datetime.now().strftime('%Y%m%d')}{instance_log_suffix()}.log"))
+        # encoding is REQUIRED: this file logs P&L with the ₹ glyph, and FileHandler
+        # otherwise opens with the system ANSI codepage (cp1252 on Windows). Every line
+        # containing ₹ then fails to encode and is silently dropped from the log while
+        # the ASCII lines around it are written — so the log looks intact but the P&L
+        # lines are missing exactly when you need them.
+        FlushingFileHandler(
+            os.path.join(log_dir, f"{datetime.now().strftime('%Y%m%d')}{instance_log_suffix()}.log"),
+            encoding="utf-8",
+        )
     ],
     force=True
 )
@@ -115,6 +123,12 @@ class NiftySpreadTrendStrategy:
         self.expiry = None
         self.last_close_time = None # to prevent instant re-entry after cooldown
         self.last_processed_candle_time = None
+
+        # Session-cumulative realized P&L across all closed spreads. --target-profit /
+        # --stop-loss are documented as DAILY caps, so they must be evaluated against
+        # realized + open, not against the current spread alone — otherwise the same
+        # "daily" stop can be hit an unlimited number of times in one session.
+        self.realized_pnl = 0.0
 
         # Short-option VWAP + Supertrend exit tracking
         self.option_vwap: float = 0.0
@@ -243,6 +257,7 @@ class NiftySpreadTrendStrategy:
             "long_entry_price": self.long_entry_price,
             "short_ltp": short_ltp,
             "long_ltp": long_ltp,
+            "realized_pnl": round(self.realized_pnl, 2),
             "total_pnl": total_pnl,
             "spot": nifty_spot,
             "profit_target": self.target_profit,
@@ -434,10 +449,16 @@ class NiftySpreadTrendStrategy:
         # Extract contract details
         self.short_id, self.short_entry_price, _, _, self.short_symbol = \
             self._extract_quote_fields(short_quote, short_strike, option_type)
-            
+
         self.long_id, self.long_entry_price, _, _, self.long_symbol = \
             self._extract_quote_fields(long_quote, long_strike, option_type)
-            
+
+        # Publish the resolved strikes — save_state reports these to the dashboard and
+        # they were previously left at None for the life of the position.
+        self.short_strike = short_strike
+        self.long_strike = long_strike
+
+
         if not self.short_id or not self.long_id:
             logger.error("Failed to extract security IDs from quotes.")
             self.active_spread = None
@@ -526,6 +547,15 @@ class NiftySpreadTrendStrategy:
         last_log_time = 0
         total_qty = self.lot_size * self.lots
         last_indicator_minute = ""  # refresh once per 1-min candle boundary
+        last_signal_check = 0.0     # throttle the signal-reversal check (see below)
+        # get_signal() pulls 5 days of intraday candles. The signal only changes on a
+        # completed --interval candle, so polling it every second is pure API burn and
+        # reliably drives the data endpoint into 429 backoff. Re-check at most once per
+        # candle interval (floored at 60s).
+        try:
+            signal_check_period = max(60, int(self.interval) * 60)
+        except (TypeError, ValueError):
+            signal_check_period = 60
 
         while self.active_spread is not None:
             time.sleep(1)
@@ -541,7 +571,9 @@ class NiftySpreadTrendStrategy:
                 s_ltp, l_ltp, spot_price = self.fetch_ltps()
                 short_ltp_val = s_ltp if s_ltp > 0 else self.short_entry_price
                 long_ltp_val = l_ltp if l_ltp > 0 else self.long_entry_price
-                total_pnl = (self.short_entry_price - short_ltp_val + long_ltp_val - self.long_entry_price) * total_qty
+                total_pnl = self.realized_pnl + (
+                    self.short_entry_price - short_ltp_val + long_ltp_val - self.long_entry_price
+                ) * total_qty
                 self.exit_positions("UI Shutdown Request")
                 self.save_state(spot_price, short_ltp_val, long_ltp_val, total_pnl, status="STOPPED")
                 sys.exit(0)
@@ -553,15 +585,21 @@ class NiftySpreadTrendStrategy:
                 continue
 
             # Save state
-            self.save_state(spot_price, short_ltp, long_ltp, (self.short_entry_price - short_ltp + long_ltp - self.long_entry_price) * total_qty, status="RUNNING")
+            self.save_state(
+                spot_price, short_ltp, long_ltp,
+                self.realized_pnl + (self.short_entry_price - short_ltp + long_ltp - self.long_entry_price) * total_qty,
+                status="RUNNING",
+            )
                 
             # Spread PnL calculation:
             # Short Leg: (Entry - Current) * Qty (since we are short)
             # Long Leg: (Current - Entry) * Qty (since we are long)
             short_pnl = (self.short_entry_price - short_ltp) * total_qty
             long_pnl = (long_ltp - self.long_entry_price) * total_qty
-            total_pnl = short_pnl + long_pnl
-            
+            position_pnl = short_pnl + long_pnl
+            # Daily caps are evaluated against the session total, not this spread alone.
+            total_pnl = self.realized_pnl + position_pnl
+
             now = datetime.now()
             current_time_str = now.strftime("%H:%M")
             
@@ -570,7 +608,8 @@ class NiftySpreadTrendStrategy:
                 vwap_info = f"VWAP={self.option_vwap:.2f} ST={self.option_st_level:.2f}" if self.option_vwap > 0 else "VWAP=—"
                 logger.info(
                     f"[MONITOR] {self.active_spread} | Short: {short_ltp:.2f} (Entry: {self.short_entry_price:.2f}) | "
-                    f"Long: {long_ltp:.2f} (Entry: {self.long_entry_price:.2f}) | PnL: ₹{total_pnl:.2f} | {vwap_info}"
+                    f"Long: {long_ltp:.2f} (Entry: {self.long_entry_price:.2f}) | "
+                    f"PnL: ₹{position_pnl:.2f} (session ₹{total_pnl:.2f}, realized ₹{self.realized_pnl:.2f}) | {vwap_info}"
                 )
                 last_log_time = time.time()
                 
@@ -612,7 +651,8 @@ class NiftySpreadTrendStrategy:
                 break
 
             # 6. Signal Reversal (Early exit on trend flip)
-            if self.exit_on_signal_change:
+            if self.exit_on_signal_change and (time.time() - last_signal_check) >= signal_check_period:
+                last_signal_check = time.time()
                 signal, spot = self.get_signal()
                 if spot > 0:
                     should_exit = False
@@ -625,13 +665,37 @@ class NiftySpreadTrendStrategy:
                         self.exit_positions(f"Signal Reversal / Trend Flip (New Signal: {signal}, Spot: {spot:.2f})", bypass_cooldown=True)
                         break
 
+    def _halt(self, detail: str):
+        """Publish a final HALTED state, then stop the process.
+
+        These halts happen with a hedge leg still open on purpose (closing it while
+        the short is stuck would leave a naked short). Exiting silently left the
+        dashboard showing the last RUNNING snapshot, so an operator had no signal
+        that manual intervention was needed on a live position.
+        """
+        logger.critical(f"HALTING STRATEGY: {detail}")
+        try:
+            self.save_state(0, 0, 0, self.realized_pnl, status="HALTED")
+        except Exception as save_err:
+            logger.error(f"Could not publish HALTED state: {save_err}")
+        sys.exit(1)
+
     def exit_positions(self, reason: str, bypass_cooldown: bool = False):
         """
         Exits both positions: Short leg first (buy back), Long hedge leg second (sell).
         """
         logger.warning(f"!!! EXITING ALL POSITIONS: {reason} !!!")
         total_qty = self.lot_size * self.lots
-        
+
+        # Snapshot the closing marks BEFORE the state reset below, so this spread's
+        # result can be banked into the session total. Without this the closed spread's
+        # P&L was silently dropped and the "daily" target/stop restarted from zero.
+        exit_short_ltp, exit_long_ltp, _ = self.fetch_ltps()
+        if exit_short_ltp <= 0:
+            exit_short_ltp = self.short_entry_price
+        if exit_long_ltp <= 0:
+            exit_long_ltp = self.long_entry_price
+
         short_closed = False
         if not self.dry_run:
             # 1. Buy back Short Leg first (closes short, prevents naked short risk)
@@ -639,8 +703,7 @@ class NiftySpreadTrendStrategy:
                 try:
                     short_exit_oid = self.helper.buy(str(self.short_id), total_qty)
                     if not short_exit_oid:
-                        logger.critical(f"CRITICAL ERROR: Failed to place buy-to-close order for Short Leg {self.short_symbol} (ID: {self.short_id})! Retaining hedge leg to prevent naked risk. HALTING STRATEGY.")
-                        sys.exit(1)
+                        self._halt(f"Failed to place buy-to-close order for Short Leg {self.short_symbol} (ID: {self.short_id}). Hedge leg retained to prevent naked risk.")
                     else:
                         logger.info(f"Short Leg buy-to-close order placed: {short_exit_oid}")
                         if self.helper.wait_for_fill(short_exit_oid, timeout=10):
@@ -653,11 +716,9 @@ class NiftySpreadTrendStrategy:
                                 short_closed = True
                                 logger.info("Short Leg close order confirmed filled via order status check.")
                             else:
-                                logger.critical("CRITICAL ERROR: Short Leg close order did not fill. Retaining hedge leg to prevent naked risk. HALTING STRATEGY.")
-                                sys.exit(1)
+                                self._halt("Short Leg close order did not fill. Hedge leg retained to prevent naked risk.")
                 except Exception as e:
-                    logger.error(f"Error closing Short Leg: {e}")
-                    sys.exit(1)
+                    self._halt(f"Error closing Short Leg: {e}")
             else:
                 short_closed = True
                 
@@ -666,14 +727,12 @@ class NiftySpreadTrendStrategy:
                 try:
                     long_exit_oid = self.helper.sell(str(self.long_id), total_qty)
                     if not long_exit_oid:
-                        logger.critical(f"CRITICAL ERROR: Failed to place sell-to-close order for Long Leg {self.long_symbol} (ID: {self.long_id})! HALTING STRATEGY.")
-                        sys.exit(1)
+                        self._halt(f"Failed to place sell-to-close order for Long Leg {self.long_symbol} (ID: {self.long_id}).")
                     else:
                         logger.info(f"Long Leg sell-to-close order placed: {long_exit_oid}")
                         self.helper.wait_for_fill(long_exit_oid, timeout=5)
                 except Exception as e:
-                    logger.error(f"Error closing Long Leg: {e}")
-                    sys.exit(1)
+                    self._halt(f"Error closing Long Leg: {e}")
         else:
             logger.info("[DRY RUN] Simulating Position Exit.")
             
@@ -688,6 +747,17 @@ class NiftySpreadTrendStrategy:
             except Exception as e:
                 logger.error(f"Failed to unsubscribe options: {e}")
                 
+        # Bank this spread's result into the session total before clearing the legs.
+        if self.active_spread is not None:
+            closed_pnl = (
+                (self.short_entry_price - exit_short_ltp) + (exit_long_ltp - self.long_entry_price)
+            ) * total_qty
+            self.realized_pnl += closed_pnl
+            logger.info(
+                f"Spread closed at short {exit_short_ltp:.2f} / long {exit_long_ltp:.2f} | "
+                f"Cycle P&L: ₹{closed_pnl:+.0f} | Session realized: ₹{self.realized_pnl:+.0f}"
+            )
+
         # Reset State and start cooldown
         self.active_spread = None
         self.short_id = None
@@ -700,7 +770,8 @@ class NiftySpreadTrendStrategy:
         self.long_entry_price = 0.0
         self.option_vwap = 0.0
         self.option_st_level = 0.0
-        
+
+
         if bypass_cooldown:
             self.last_close_time = None
             logger.info("Position exit complete. Reversal detected: Bypassing cool-down for immediate entry.")

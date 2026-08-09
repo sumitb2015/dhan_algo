@@ -30,7 +30,14 @@ logging.basicConfig(
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
         logging.StreamHandler(),
-        FlushingFileHandler(os.path.join(log_dir, f"{datetime.now().strftime('%Y%m%d')}{instance_log_suffix()}.log"))
+        # encoding: FileHandler otherwise opens with the system ANSI codepage
+        # (cp1252 on Windows) and silently DROPS any log line containing a
+        # non-ANSI glyph (INR sign, arrows, dashes) while still writing the
+        # ASCII lines around it -- the log looks intact but loses those lines.
+        FlushingFileHandler(
+            os.path.join(log_dir, f"{datetime.now().strftime('%Y%m%d')}{instance_log_suffix()}.log"),
+            encoding="utf-8",
+        )
     ],
     force=True
 )
@@ -212,6 +219,27 @@ class RollingStraddleStrategy:
         pe_unrealized = (self.pe_avg_price - pe_ltp) * (self.pe_lots * self.nifty_lot_size)
         return self.realized_pnl + ce_unrealized + pe_unrealized
 
+    def get_execution_price(self, order_id: str, fallback_price: float) -> float:
+        """Wait for fill and return the average execution price, or the fallback.
+
+        NOTE: helper.wait_for_fill() returns a BOOL, not a price — it must never be
+        used as the fill price directly.
+        """
+        if not order_id:
+            return fallback_price
+        if self.helper.wait_for_fill(order_id, timeout=5):
+            order_details = self.helper.get_order_by_id(order_id)
+            if order_details:
+                fill_price = float(
+                    order_details.get('averageTradedPrice', 0.0)
+                    or order_details.get('avgFilledPrice', 0.0)
+                    or order_details.get('price', 0.0)
+                )
+                if fill_price > 0:
+                    logger.info(f"Order {order_id} execution price confirmed: {fill_price:.2f}")
+                    return fill_price
+        return fallback_price
+
     def _extract_quote_fields(self, quote, strike, option_type):
         if not quote:
             return None, None, None, None, None
@@ -335,11 +363,23 @@ class RollingStraddleStrategy:
         else:
             logger.info(f"Placing live SELL order for {self.initial_lots} lot {ce_symbol}...")
             ce_order_id = self.helper.sell(str(ce_id), qty)
-            ce_avg_price = self.helper.wait_for_fill(ce_order_id, timeout=5) or ce_price
+            if not ce_order_id:
+                logger.error("CE sell order failed; aborting entry.")
+                self.unsubscribe_legs(ce_id, pe_id)
+                return False
+            ce_avg_price = self.get_execution_price(ce_order_id, ce_price)
 
             logger.info(f"Placing live SELL order for {self.initial_lots} lot {pe_symbol}...")
             pe_order_id = self.helper.sell(str(pe_id), qty)
-            pe_avg_price = self.helper.wait_for_fill(pe_order_id, timeout=5) or pe_price
+            if not pe_order_id:
+                logger.error("PE sell order failed; rolling back CE leg to avoid a naked short.")
+                try:
+                    self.helper.buy(str(ce_id), qty)
+                except Exception as rb:
+                    logger.critical(f"CE rollback failed — CE leg may remain OPEN: {rb}")
+                self.unsubscribe_legs(ce_id, pe_id)
+                return False
+            pe_avg_price = self.get_execution_price(pe_order_id, pe_price)
 
         # --- Commit: from here the position is live and `self` is authoritative ---
         self.current_atm_strike = atm_strike
@@ -401,37 +441,61 @@ class RollingStraddleStrategy:
 
         old_ce_id, old_pe_id = self.ce_id, self.pe_id
 
-        # Close existing CE & PE legs
+        # roll_count increments HERE, not on entry success: the roll is committed the
+        # moment we start closing the old legs. Counting it at entry success instead
+        # would let a failed entry followed by the main loop's flat re-entry move the
+        # position to a new strike without ever charging it against --max-rolls.
+        self.roll_count += 1
+        self.last_roll_time = time.time()
+
+        # Close existing CE & PE legs. The close must be CONFIRMED before we go flat:
+        # go_flat() makes is_flat() true, and the main loop enters a fresh straddle on
+        # a flat strategy — so going flat on an unconfirmed close would leave the old
+        # shorts live in the market, untracked, while a second straddle is opened on
+        # top of them.
+        closed_ok = True
+        if not self.dry_run:
+            for label, leg_id, lots in (
+                ("CE", old_ce_id, self.ce_lots),
+                ("PE", old_pe_id, self.pe_lots),
+            ):
+                if not leg_id:
+                    continue
+                try:
+                    own_qty = lots * self.nifty_lot_size
+                    qty_to_buy, _ = resolve_exit_qty(self.helper, leg_id, own_qty, "BUY", logger)
+                    if qty_to_buy <= 0:
+                        continue  # broker already flat on this leg
+                    oid = self.helper.buy(str(leg_id), qty_to_buy)
+                    if not oid or not self.helper.wait_for_fill(oid, timeout=10):
+                        closed_ok = False
+                        logger.critical(
+                            f"Roll #{self.roll_count}: buy-to-close for {label} leg (ID: {leg_id}) "
+                            f"did not confirm (order_id={oid}). Leg may still be OPEN."
+                        )
+                except Exception as e:
+                    closed_ok = False
+                    logger.critical(f"Roll #{self.roll_count}: error closing {label} leg {leg_id}: {e}")
+
+        if not closed_ok:
+            logger.critical(
+                f"Roll #{self.roll_count} ABORTED: at least one leg did not close. Keeping the "
+                "existing position tracked (NOT going flat) so the next tick retries rather than "
+                "opening a second straddle on top of live shorts."
+            )
+            return False
+
+        # Book the close exactly once, only now that both legs are confirmed closed.
         close_ce_pnl = (self.ce_avg_price - ce_ltp) * (self.ce_lots * self.nifty_lot_size)
         close_pe_pnl = (self.pe_avg_price - pe_ltp) * (self.pe_lots * self.nifty_lot_size)
         self.realized_pnl += (close_ce_pnl + close_pe_pnl)
 
-        if not self.dry_run:
-            if old_ce_id:
-                own_qty = self.ce_lots * self.nifty_lot_size
-                qty_to_buy, _ = resolve_exit_qty(self.helper, old_ce_id, own_qty, "BUY", logger)
-                if qty_to_buy > 0:
-                    self.helper.buy(str(old_ce_id), qty_to_buy)
-            if old_pe_id:
-                own_qty = self.pe_lots * self.nifty_lot_size
-                qty_to_buy, _ = resolve_exit_qty(self.helper, old_pe_id, own_qty, "BUY", logger)
-                if qty_to_buy > 0:
-                    self.helper.buy(str(old_pe_id), qty_to_buy)
-
         logger.info(f"Closed prev legs @ CE: {ce_ltp:.2f}, PE: {pe_ltp:.2f} | Realized PnL so far: Rs.{self.realized_pnl:+.0f}")
 
-        # Go flat and charge the roll BEFORE attempting re-entry. The close above is
-        # now booked exactly once: if the entry below fails, the main loop sees a flat
+        # Now safe to go flat: if the entry below fails, the main loop sees a flat
         # strategy and re-enters, rather than re-running this same close against legs
         # that no longer exist on every 1s tick.
-        #
-        # roll_count increments HERE, not on entry success: the roll is committed the
-        # moment the old legs are closed. Counting it at entry success instead would
-        # let a failed entry followed by the main loop's flat re-entry move the
-        # position to a new strike without ever charging it against --max-rolls.
         self.go_flat()
-        self.roll_count += 1
-        self.last_roll_time = time.time()
         self.unsubscribe_legs(old_ce_id, old_pe_id)
 
         # Enter new ATM straddle
@@ -484,6 +548,7 @@ class RollingStraddleStrategy:
             logger.warning("Initial straddle entry did not complete. Main loop will retry.")
 
         # Main Monitoring Loop
+        last_status_log = 0.0
         while True:
             exit_if_market_closed(self.helper, self.dry_run)
             if check_shutdown_trigger(self.state_key):
@@ -524,7 +589,11 @@ class RollingStraddleStrategy:
             self.save_state(spot, ce_ltp, pe_ltp, total_pnl, status="RUNNING")
 
             now_str = datetime.now().strftime("%H:%M")
-            logger.info(f"NIFTY: {spot:.2f} | Straddle {self.current_atm_strike} [Bounds: {self.lower_bound:.1f} - {self.upper_bound:.1f}] | CE: {ce_ltp:.2f} | PE: {pe_ltp:.2f} | Rolls: {self.roll_count}/{self.max_rolls} | PnL: Rs.{total_pnl:+.0f}")
+            # Throttled to 5s: this loop ticks every second, and logging unconditionally
+            # produced ~22k lines per session. Every other strategy throttles to 5-30s.
+            if time.time() - last_status_log >= 5:
+                logger.info(f"NIFTY: {spot:.2f} | Straddle {self.current_atm_strike} [Bounds: {self.lower_bound:.1f} - {self.upper_bound:.1f}] | CE: {ce_ltp:.2f} | PE: {pe_ltp:.2f} | Rolls: {self.roll_count}/{self.max_rolls} | PnL: Rs.{total_pnl:+.0f}")
+                last_status_log = time.time()
 
             # 1. EOD Exit Check
             if now_str >= self.eod_time:

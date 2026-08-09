@@ -3854,7 +3854,9 @@ class DhanHelper:
                 self.subscribe_instruments(instruments)
                 return
 
-            self.ws_instruments = instruments
+            # Copy, don't alias: subscribe/unsubscribe mutate this list, and sharing it
+            # with the caller's list would let either side silently rewrite the other's.
+            self.ws_instruments = list(instruments)
             self.user_on_message = on_message
             self._ws_stop_flag = False
             self._ws_failures = 0
@@ -4193,17 +4195,33 @@ class DhanHelper:
         Unsubscribe from instruments on an active WebSocket connection.
         instruments: List of tuples (Exchange, SecurityID, RequestCode)
         """
+        # Drop these from the master list FIRST, and regardless of whether the feed
+        # call below succeeds. ws_instruments is replayed verbatim when the socket
+        # reconnects (see start_websocket), so an entry left behind here resurrects a
+        # strike the strategy has already rolled off. Strategies that re-centre or
+        # roll all day would otherwise accumulate every strike they ever touched.
+        #
+        # Match on (segment, security_id) and ignore the request code: callers pass
+        # the same code on subscribe and unsubscribe today, but keying on the full
+        # tuple would silently no-op if that ever diverges.
+        drop = {(str(seg), str(sid)) for seg, sid, *_ in instruments}
+        if drop:
+            self.ws_instruments = [
+                inst for inst in self.ws_instruments
+                if (str(inst[0]), str(inst[1])) not in drop
+            ]
+
         if hasattr(self, 'feed') and self.feed:
             try:
                 logger.info(f"Unsubscribing from {len(instruments)} instruments...")
                 self.feed.unsubscribe_symbols(instruments)
-                
+
                 # Optional: Cleanup local cache (live_data)
-                # Note: We might want to keep last known price, or remove it. 
+                # Note: We might want to keep last known price, or remove it.
                 # For now, we keep it to avoid KeyErrors in other threads, but one could remove it:
                 # for _, sid, _ in instruments:
                 #     self.live_data.pop(str(sid), None)
-                
+
                 return True
             except Exception as e:
                 logger.error(f"Error unsubscribing: {e}")

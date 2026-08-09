@@ -42,7 +42,14 @@ logging.basicConfig(
     format="%(asctime)s - %(levelname)s - %(message)s",
     handlers=[
         logging.StreamHandler(),
-        FlushingFileHandler(os.path.join(log_dir, f"{datetime.now().strftime('%Y%m%d')}{instance_log_suffix()}.log")),
+        # encoding: FileHandler otherwise opens with the system ANSI codepage
+        # (cp1252 on Windows) and silently DROPS any log line containing a
+        # non-ANSI glyph (INR sign, arrows, dashes) while still writing the
+        # ASCII lines around it -- the log looks intact but loses those lines.
+        FlushingFileHandler(
+            os.path.join(log_dir, f"{datetime.now().strftime('%Y%m%d')}{instance_log_suffix()}.log"),
+            encoding="utf-8",
+        ),
     ],
     force=True,
 )
