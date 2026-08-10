@@ -85,12 +85,22 @@ class SwingConfig:
     # 751 exits were trail-stops, average win +10.5% vs average loss -7.1%), a 6-ATR
     # trail +12.54%, and letting Supertrend do the work +18.95%. Tightening the trail
     # cuts winners while losers still run the full stop distance.
+    # ── Entry confirmation & RS ──────────────────────────────────────────────
+    use_composite_rs: bool = True   # Composite 21d/63d/126d RS percentile vs Nifty
+    rs_percentile_min: float = 80.0  # Top 20th percentile minimum RS rank
+    use_risk_parity: bool = True     # Risk parity position sizing based on ATR
+    risk_pct_per_trade: float = 1.5  # Risk 1.5% of total portfolio equity per position
+    risk_atr_mult: float = 2.5       # Stop distance multiplier for risk calc
+
+    # ── Trailing Stop & Scale-Out ────────────────────────────────────────────
     atr_period: int = 14
-    atr_stop_mult: float = 6.0      # wide disaster stop only; never the primary exit
-    atr_trail_enabled: bool = False  # True restores the (harmful) chandelier trail
-    trail_atr_mult: float = 6.0     # only used when atr_trail_enabled
-    exit_on_st_flip: bool = True    # the real exit
-    max_hold_days: int = 0          # 0 = no time stop
+    atr_stop_mult: float = 2.5       # Initial stop = entry - 2.5 * ATR
+    atr_trail_enabled: bool = True   # 2-stage Chandelier trail
+    trail_atr_mult: float = 3.5      # Trail 3.5 * ATR after 2R profit
+    scale_out_enabled: bool = True   # Scale out 50% position at target R
+    scale_out_r: float = 3.0         # Take 50% profit at +3R gain
+    exit_on_st_flip: bool = True     # Supertrend flip exit
+    max_hold_days: int = 0           # 0 = no time stop
     min_hold_days: int = 0
 
     # ── Costs ────────────────────────────────────────────────────────────────
@@ -296,6 +306,18 @@ def position_size(entry: float, equity: float, cfg: SwingConfig) -> int:
     if entry <= 0 or equity <= 0:
         return 0
     return int((equity / cfg.slots) // entry)
+
+
+def position_size_risk_parity(entry: float, atr_v: float, equity: float, cfg: SwingConfig) -> int:
+    """Risk-parity by ATR. Risk fixed % of equity per trade, capped at slot size."""
+    if entry <= 0 or equity <= 0 or atr_v <= 0:
+        return 0
+    risk_amount = equity * (cfg.risk_pct_per_trade / 100.0)
+    stop_dist = cfg.risk_atr_mult * atr_v
+    qty_risk = int(risk_amount // stop_dist)
+    max_qty_slot = int((equity / cfg.slots) // entry)
+    return min(qty_risk, max_qty_slot) if max_qty_slot > 0 else qty_risk
+
 
 
 # ── Robustness reporting (deliberately not optional) ──────────────────────────
