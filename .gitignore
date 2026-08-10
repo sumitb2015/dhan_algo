@@ -50,6 +50,10 @@ debug/*.tmp
 debug/logs/
 debug/**/*.log
 debug/**/*.log.bak
+# Intraday bar snapshots published by the strategy poller for the terminal's
+# chart. Same single-level blind spot as above: debug/*.json never matched this
+# subtree, so they were committed and then churned on every poll.
+debug/intraday_bars/
 
 # Nested clones under scratch/
 scratch/rrg-lite-clone/
