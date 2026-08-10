@@ -330,7 +330,9 @@ export default function AdvancedScalper() {
     return { entryCapitalSum, liveCapitalSum, decayPct, openLegsCount, isNetSeller };
   }, [enrichedPositions]);
 
-  // Total CE / PE Values & Difference computed strictly from OPEN POSITIONS (lots * price for each open position)
+  // Net CE / PE Values & Difference computed strictly from OPEN POSITIONS: short legs add,
+  // long legs (hedges) subtract, per side — so a long hedge offsets the shorts on its side
+  // instead of inflating the gross total the same way a short would.
   const { totalCEVal, totalPEVal, cePeDiff } = useMemo(() => {
     let ceSum = 0;
     let peSum = 0;
@@ -346,14 +348,19 @@ export default function AdvancedScalper() {
 
       let side: 'CE' | 'PE' | null = mapping ? (mapping.side.toUpperCase() as 'CE' | 'PE') : null;
 
-      if (!side) {
+      // Equity trading symbols can coincidentally end in "CE"/"PE" (e.g. "RELIANCE"),
+      // so the symbol-suffix fallback below is only safe to run on F&O positions.
+      const segment = String(pos.exchangeSegment ?? pos.exchange ?? '').toUpperCase();
+      const isFno = segment.includes('FNO') || segment.includes('FO');
+
+      if (!side && isFno) {
         const optType = String(pos.optionType ?? pos.option_type ?? pos.drvOptionType ?? '').toUpperCase();
         if (optType.includes('CALL') || optType === 'CE') side = 'CE';
         else if (optType.includes('PUT') || optType === 'PE') side = 'PE';
         else {
           const sym = String(pos.tradingSymbol ?? pos.tradingsymbol ?? pos.symbol ?? '').toUpperCase();
-          if (/\bCE\b|CE$/.test(sym)) side = 'CE';
-          else if (/\bPE\b|PE$/.test(sym)) side = 'PE';
+          if (/\bCE\b|-CE$/.test(sym)) side = 'CE';
+          else if (/\bPE\b|-PE$/.test(sym)) side = 'PE';
         }
       }
 
@@ -363,10 +370,14 @@ export default function AdvancedScalper() {
       // netQty is already a total unit count, so qty * price is rupees directly.
       // Dividing by the selected underlying's `lotSize` would misprice any position
       // on a different underlying (e.g. an open SENSEX leg while NIFTY is selected).
+      // Net a long leg against the shorts on the same side (e.g. a far-OTM long
+      // hedge sitting alongside short strikes) rather than adding both as gross —
+      // otherwise a hedge leg inflates CE/PE Val the same way a short does.
       const val = Math.abs(netQty) * ltp * contractMultiplier(pos);
+      const signedVal = netQty > 0 ? -val : val;
 
-      if (side === 'CE') ceSum += val;
-      else if (side === 'PE') peSum += val;
+      if (side === 'CE') ceSum += signedVal;
+      else if (side === 'PE') peSum += signedVal;
     }
 
     return {
@@ -1924,7 +1935,7 @@ export default function AdvancedScalper() {
             {/* Total CE & PE Value Summary Pill */}
             <div className="flex items-center gap-2.5 bg-zinc-900/80 border border-zinc-800 rounded-2xl px-4 py-2.5 shadow-lg font-mono text-xs">
               {/* Total CE Value */}
-              <div className="flex items-center gap-1.5" title="Total Call Value = Sum(CE Qty × CE Price)">
+              <div className="flex items-center gap-1.5" title="Net Call Value = Sum(short CE Qty × Price) − Sum(long CE Qty × Price)">
                 <span className="text-[10px] font-extrabold uppercase text-emerald-400 bg-emerald-950/80 border border-emerald-800/60 px-1.5 py-0.5 rounded">
                   CE Val
                 </span>
@@ -1936,7 +1947,7 @@ export default function AdvancedScalper() {
               <span className="text-zinc-700 font-sans">|</span>
 
               {/* Total PE Value */}
-              <div className="flex items-center gap-1.5" title="Total Put Value = Sum(PE Qty × PE Price)">
+              <div className="flex items-center gap-1.5" title="Net Put Value = Sum(short PE Qty × Price) − Sum(long PE Qty × Price)">
                 <span className="text-[10px] font-extrabold uppercase text-rose-400 bg-rose-950/80 border border-rose-800/60 px-1.5 py-0.5 rounded">
                   PE Val
                 </span>
