@@ -1,6 +1,12 @@
 import { NextResponse } from 'next/server';
 import { getDhanCredentials } from '@/lib/dhanToken';
 import { kiteGet } from '@/lib/zerodhaToken';
+import path from 'path';
+import { dedupe, runPythonJson, PROJECT_ROOT } from '@/lib/pyExec';
+
+// Absolute: runPythonJson execs without a cwd, so a relative path would resolve
+// against rs_dashboard/ rather than the project root and silently never run.
+const OPTIONS_FETCH = path.join(PROJECT_ROOT, 'scripts', 'tools', 'options_data_fetch.py');
 
 // Live LTP + % change vs yesterday's close for the headline indices, for the
 // Advanced Scalper's Top Indices panel.
@@ -40,25 +46,38 @@ interface IndexDef {
   /** Stable key used by the UI. */
   key: string;
   label: string;
-  /** Dhan security id in the IDX_I segment; null when Dhan cannot serve it. */
+  /** Dhan security id; null when it must be resolved at runtime (rolling futures). */
   dhanSid: number | null;
-  /** Kite instrument string, used for SENSEX and as the Dhan fallback. */
+  /** Kite instrument string. Empty when Kite cannot serve this row. */
   kiteSymbol: string;
+  /** Dhan segment. MCX_COMM rows are commodity futures, not indices. */
+  segment?: 'IDX_I' | 'MCX_COMM';
+  /** Underlying to resolve a nearest-future security id for, via `futsid`. */
+  futUnderlying?: string;
 }
 
-// Ten headline indices. Order here is the display order when % change is equal;
+// Ten headline rows. Order here is the display order when % change is equal;
 // the panel itself sorts by % change. Edit this list to change what's shown.
+//
+// SENSEX was removed in favour of MCX crude oil. Note the panel is therefore no
+// longer purely indices — CRUDEOIL is the nearest MCX futures contract.
 const INDICES: IndexDef[] = [
-  { key: 'NIFTY',     label: 'Nifty 50',     dhanSid: 13,   kiteSymbol: 'NSE:NIFTY 50' },
-  { key: 'BANKNIFTY', label: 'Bank Nifty',   dhanSid: 25,   kiteSymbol: 'NSE:NIFTY BANK' },
-  { key: 'SENSEX',    label: 'Sensex',       dhanSid: null, kiteSymbol: 'BSE:SENSEX' },
-  { key: 'FINNIFTY',  label: 'Fin Services', dhanSid: 27,   kiteSymbol: 'NSE:NIFTY FIN SERVICE' },
-  { key: 'IT',        label: 'IT',           dhanSid: 29,   kiteSymbol: 'NSE:NIFTY IT' },
-  { key: 'AUTO',      label: 'Auto',         dhanSid: 14,   kiteSymbol: 'NSE:NIFTY AUTO' },
-  { key: 'PHARMA',    label: 'Pharma',       dhanSid: 32,   kiteSymbol: 'NSE:NIFTY PHARMA' },
-  { key: 'METAL',     label: 'Metal',        dhanSid: 31,   kiteSymbol: 'NSE:NIFTY METAL' },
-  { key: 'REALTY',    label: 'Realty',       dhanSid: 34,   kiteSymbol: 'NSE:NIFTY REALTY' },
-  { key: 'VIX',       label: 'India VIX',    dhanSid: 21,   kiteSymbol: 'NSE:INDIA VIX' },
+  { key: 'NIFTY',     label: 'Nifty 50',     dhanSid: 13, kiteSymbol: 'NSE:NIFTY 50' },
+  { key: 'BANKNIFTY', label: 'Bank Nifty',   dhanSid: 25, kiteSymbol: 'NSE:NIFTY BANK' },
+  { key: 'FINNIFTY',  label: 'Fin Services', dhanSid: 27, kiteSymbol: 'NSE:NIFTY FIN SERVICE' },
+  { key: 'IT',        label: 'IT',           dhanSid: 29, kiteSymbol: 'NSE:NIFTY IT' },
+  { key: 'AUTO',      label: 'Auto',         dhanSid: 14, kiteSymbol: 'NSE:NIFTY AUTO' },
+  { key: 'PHARMA',    label: 'Pharma',       dhanSid: 32, kiteSymbol: 'NSE:NIFTY PHARMA' },
+  { key: 'METAL',     label: 'Metal',        dhanSid: 31, kiteSymbol: 'NSE:NIFTY METAL' },
+  { key: 'REALTY',    label: 'Realty',       dhanSid: 34, kiteSymbol: 'NSE:NIFTY REALTY' },
+  { key: 'VIX',       label: 'India VIX',    dhanSid: 21, kiteSymbol: 'NSE:INDIA VIX' },
+  // Crude has no spot index and its contract ROLLS MONTHLY, so the security id
+  // cannot be hardcoded — it is resolved once per IST day (see crudeSid below).
+  // Kite is skipped for this row: its MCX tradingsymbol embeds the expiry
+  // (MCX:CRUDEOIL25AUGFUT), which would need an instruments dump to build, so
+  // Dhan serves it directly from the MCX_COMM segment instead.
+  { key: 'CRUDEOIL',  label: 'Crude Oil',    dhanSid: null, kiteSymbol: '',
+    segment: 'MCX_COMM', futUnderlying: 'CRUDEOIL' },
 ];
 
 interface Quote { ltp: number; prev_close: number; change_pct: number | null; source: string }
@@ -75,6 +94,60 @@ const prevCloseCache = new Map<string, number>();
 
 function istToday(): string {
   return new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
+}
+
+// ── Rolling-futures security ids, resolved once per IST day ──────────────────
+// A futures security id is only valid until the contract expires, so it cannot be
+// hardcoded like an index id. Resolving it costs a Python spawn (~1.5s, mostly
+// master-list load), which is far too slow for a panel the scalper polls every
+// few seconds — so it is resolved once per day and reused. `dedupe` collapses
+// the concurrent first-hit from several open tabs onto one spawn.
+const futSidCache = new Map<string, number>();
+let futResolveFailedFor = '';
+
+/**
+ * Cached security id for a rolling futures contract, or null if not resolved yet.
+ *
+ * NON-BLOCKING by design. Resolution costs a ~2.5s Python spawn, and awaiting it
+ * inside the request would hold up the nine index rows too — measured: the first
+ * request after a restart returned zero rows instead of nine. Instead the miss
+ * kicks off resolution in the background and returns null, so this poll serves
+ * the indices immediately and crude appears on the next one (~2s later).
+ */
+function getFutSid(def: IndexDef): number | null {
+  const under = def.futUnderlying;
+  if (!under) return null;
+  const day = istToday();
+  const key = `${day}:${under}`;
+
+  const hit = futSidCache.get(key);
+  if (hit) return hit;
+  // One failed resolution per day is enough; without this a permanently
+  // unresolvable contract would spawn Python on every single poll.
+  if (futResolveFailedFor === key) return null;
+
+  // Fire and forget. `dedupe` collapses concurrent pollers onto one spawn, and
+  // the .catch keeps a rejected promise from surfacing as an unhandled rejection.
+  void dedupe(`futsid:${key}`, () =>
+    runPythonJson<{ security_id?: number; error?: string }>(
+      OPTIONS_FETCH,
+      ['futsid', '--underlying', under],
+      20_000,
+    ))
+    .then(out => {
+      const sid = Number(out?.security_id ?? 0);
+      if (sid > 0) {
+        for (const k of futSidCache.keys()) {
+          if (!k.startsWith(`${day}:`)) futSidCache.delete(k);
+        }
+        futSidCache.set(key, sid);
+      } else {
+        futResolveFailedFor = key;
+      }
+    })
+    .catch(() => { futResolveFailedFor = key; });
+
+  return null;
 }
 
 /**
@@ -150,13 +223,24 @@ async function fromKite(defs: IndexDef[]): Promise<Record<string, Quote>> {
  * `close` but only after flip-detection, so a post-close value is dropped rather
  * than reported as yesterday's.
  */
-async function fromDhan(): Promise<Record<string, Quote>> {
+async function fromDhan(wanted: IndexDef[]): Promise<Record<string, Quote>> {
   const out: Record<string, Quote> = {};
-  const defs = INDICES.filter(i => i.dhanSid !== null);
-  if (defs.length === 0) return out;
+  if (wanted.length === 0) return out;
 
   const { clientId, token } = getDhanCredentials();
   if (!token) return out;
+
+  // Resolve any rolling-futures ids first, then group by segment: Dhan's OHLC
+  // endpoint takes several segments in ONE request, so crude costs no extra call.
+  const resolved: { def: IndexDef; sid: number; segment: string }[] = [];
+  for (const def of wanted) {
+    const sid = def.dhanSid ?? getFutSid(def);
+    if (sid) resolved.push({ def, sid, segment: def.segment ?? 'IDX_I' });
+  }
+  if (resolved.length === 0) return out;
+
+  const body: Record<string, number[]> = {};
+  for (const r of resolved) (body[r.segment] ??= []).push(r.sid);
 
   const res = await fetch(DHAN_OHLC_URL, {
     method: 'POST',
@@ -166,23 +250,33 @@ async function fromDhan(): Promise<Record<string, Quote>> {
       'Content-Type': 'application/json',
       Accept: 'application/json',
     },
-    body: JSON.stringify({ IDX_I: defs.map(d => d.dhanSid as number) }),
+    body: JSON.stringify(body),
     signal: AbortSignal.timeout(6000),
   });
   const json = (await res.json()) as {
     status?: string;
+    Data?: unknown;
     data?: Record<string, Record<string, { last_price?: number; ohlc?: { close?: number } }>>;
   };
-  if (json.status !== 'success') return out;
+  // Throw rather than return {}: GET records the reason in `errors`, which the
+  // panel surfaces as a tooltip. Returning empty silently made an occasional
+  // blank panel unexplainable — and with Dhan's ~1 req/s OHLC limit and several
+  // pollers sharing this route, a rejected call is exactly what tends to happen.
+  if (json.status !== 'success') {
+    throw new Error(`ohlc ${res.status}: ${JSON.stringify(json.Data ?? json.status).slice(0, 120)}`);
+  }
 
-  const seg = json.data?.IDX_I ?? {};
   const day = istToday();
-  for (const def of defs) {
-    const row = seg[String(def.dhanSid)];
+  for (const { def, sid, segment } of resolved) {
+    const row = json.data?.[segment]?.[String(sid)];
     if (!row) continue;
     const ltp = Number(row.last_price ?? 0);
     const cached = prevCloseCache.get(`${day}:${def.key}`);
-    const prev = cached ?? rejectFlippedClose(ltp, Number(row.ohlc?.close ?? 0));
+    const fresh = rejectFlippedClose(ltp, Number(row.ohlc?.close ?? 0));
+    // Cache a genuine close so a later flip (or an MCX session that runs past
+    // the NSE bell) still yields a correct percentage rather than a blank one.
+    if (!cached && fresh > 0) prevCloseCache.set(`${day}:${def.key}`, fresh);
+    const prev = cached ?? fresh;
     const q = mkQuote(ltp, prev, cached ? 'dhan+cache' : 'dhan');
     if (q) out[def.key] = q;
   }
@@ -198,17 +292,19 @@ export async function GET() {
   let quotes: Record<string, Quote> = {};
 
   try {
-    quotes = await fromKite(INDICES);
+    // Rows with no Kite symbol (crude) are excluded — asking Kite for an empty
+    // instrument string makes it reject the whole batch, blanking all ten rows.
+    quotes = await fromKite(INDICES.filter(d => d.kiteSymbol));
   } catch (e) {
     errors.push(`kite: ${String(e).slice(0, 120)}`);
   }
 
-  // Only reach for Dhan if Kite left rows unserved — normally it serves all ten,
-  // so this costs nothing in the happy path.
+  // Dhan serves whatever Kite could not — normally just crude, so this is one
+  // extra call rather than a fallback for the whole panel.
   const missing = INDICES.filter(d => !quotes[d.key]);
   if (missing.length > 0) {
     try {
-      const dhan = await fromDhan();
+      const dhan = await fromDhan(missing);
       for (const def of missing) {
         if (dhan[def.key]) quotes[def.key] = dhan[def.key];
       }

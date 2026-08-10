@@ -57,6 +57,13 @@ def main():
     p_ltp = sub.add_parser('ltp')
     p_ltp.add_argument('--underlying', default='NIFTY')
 
+    # Resolve the nearest MCX futures contract to a security id, so a Node caller
+    # can then quote it directly over Dhan's batch OHLC endpoint instead of paying
+    # a Python spawn (~1.5s of master-list load) on every poll. The contract rolls
+    # monthly, so callers should cache the answer per trading day, not forever.
+    p_fut = sub.add_parser('futsid')
+    p_fut.add_argument('--underlying', default='CRUDEOIL')
+
     args = parser.parse_args()
 
     dhan = get_dhan_client()
@@ -201,6 +208,20 @@ def main():
             'prev_close': prev_close,
             'change': change,
             'change_pct': change_pct
+        }))
+
+    elif args.cmd == 'futsid':
+        from scripts.tools.premarket_data import _find_nearest_future
+        under = args.underlying.upper()
+        fut = _find_nearest_future(helper, under, exchange="MCX", instrument="FUTCOM")
+        if not fut:
+            print(json.dumps({'error': f'{under} future contract not found'}))
+            sys.exit(0)
+        print(json.dumps({
+            'security_id': int(fut["SECURITY_ID"]),
+            'symbol': str(fut.get("SEM_TRADING_SYMBOL") or fut.get("SYMBOL_NAME") or under),
+            'expiry': str(fut.get("SM_EXPIRY_DATE") or fut.get("EXPIRY_DATE") or ''),
+            'segment': 'MCX_COMM',
         }))
 
     else:

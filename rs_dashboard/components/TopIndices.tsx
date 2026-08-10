@@ -115,9 +115,11 @@ export default function TopIndices({ className }: { className?: string }) {
   // than leaving the user to guess why rows are blank.
   const statusTitle = data?.errors?.length ? data.errors.join(' | ') : undefined;
 
+  // "Markets", not "Indices": the panel now carries MCX crude oil, which is a
+  // futures contract rather than an index.
   return (
     <TickerPanel
-      title="Top 10 Indices"
+      title="Top 10 Markets"
       status={status}
       statusLabel={statusLabel}
       statusTitle={statusTitle}
@@ -125,7 +127,7 @@ export default function TopIndices({ className }: { className?: string }) {
       className={className}
       head={
         <tr>
-          <TH sortDir={sort.key === 'label' ? sort.dir : null} onClick={() => toggleSort('label')}>Index</TH>
+          <TH sortDir={sort.key === 'label' ? sort.dir : null} onClick={() => toggleSort('label')}>Market</TH>
           <TH right sortDir={sort.key === 'ltp' ? sort.dir : null} onClick={() => toggleSort('ltp')}>LTP</TH>
           <TH right sortDir={sort.key === 'change_pct' ? sort.dir : null} onClick={() => toggleSort('change_pct')}>Chg%</TH>
         </tr>
