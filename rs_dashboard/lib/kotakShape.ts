@@ -36,13 +36,21 @@ export function shapeKotakPosition(p: Record<string, any>): ScalperPosition {
   const sellAmt = num(p, 'cfSellAmt', 'sellAmt');
   const buyAvg = buyQty ? buyAmt / buyQty : 0;
   const sellAvg = sellQty ? sellAmt / sellQty : 0;
-  const lastPrice = first(p, 'ltp', 'stkPrc', 'lastPrice');
 
-  // Same split rule as the Zerodha shaper: the open quantity's mark-to-market is
-  // unrealized, everything else is realized. Summing broker-reported realized
-  // and unrealized instead would double-count a closed intraday position.
-  const totalPnl = sellAmt - buyAmt + netQty * lastPrice;
-  const unrealized = netQty === 0 ? 0 : netQty * (lastPrice - (netQty > 0 ? buyAvg : sellAvg));
+  // Kotak's positions payload carries NO last-traded price at all. `stkPrc` is
+  // the option's STRIKE — reading it as an LTP marks a 4.40 option at 24300 and
+  // reports lakhs of phantom P&L, which the target/SL guards would then act on.
+  // 0 means "unknown": the UI joins live quotes onto the row by trading symbol.
+  const lastPrice = first(p, 'ltp', 'lastPrice');
+
+  // Realized is the matched (round-tripped) quantity only; the open quantity's
+  // mark-to-market is unrealized. Deriving realized as total-minus-unrealized
+  // instead would fold the whole open leg into realized whenever LTP is unknown.
+  const matchedQty = Math.min(buyQty, sellQty);
+  const realized = matchedQty * (sellAvg - buyAvg);
+  const unrealized = netQty === 0 || lastPrice <= 0
+    ? 0
+    : netQty * (lastPrice - (netQty > 0 ? buyAvg : sellAvg));
 
   return {
     tradingSymbol: String(p.trdSym ?? p.sym ?? ''),
@@ -54,7 +62,7 @@ export function shapeKotakPosition(p: Record<string, any>): ScalperPosition {
     buyAvg,
     sellAvg,
     lastTradedPrice: lastPrice,
-    realizedProfit: totalPnl - unrealized,
+    realizedProfit: realized,
     unrealizedProfit: unrealized,
     productType: String(p.prod ?? p.prd ?? ''),
   };
