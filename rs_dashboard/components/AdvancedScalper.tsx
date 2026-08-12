@@ -35,6 +35,20 @@ const MAX_BOXES = 5;
 const UNDERLYINGS = ['NIFTY', 'BANKNIFTY', 'SENSEX'] as const;
 const STRIKE_STEP: Record<string, number> = { NIFTY: 50, BANKNIFTY: 100, SENSEX: 100 };
 
+/**
+ * True for index/stock F&O segments across all three brokers (Dhan NSE_FNO /
+ * BSE_FNO, Zerodha NFO / BFO, Kotak nse_fo / bse_fo).
+ *
+ * MCX is excluded explicitly: Kotak spells its commodity segment `mcx_fo`, which
+ * a bare "contains FO" test accepts, and a CRUDEOIL leg has no business being
+ * summed into an index terminal's CE/PE values or its premium-decay basis.
+ */
+function isFnoSegment(pos: Record<string, unknown>): boolean {
+  const seg = String(pos.exchangeSegment ?? pos.exchange ?? '').toUpperCase();
+  if (seg.startsWith('MCX')) return false;
+  return seg.includes('FNO') || seg.includes('FO');
+}
+
 // ─── Main Component ───────────────────────────────────────────────
 
 export default function AdvancedScalper() {
@@ -121,17 +135,27 @@ export default function AdvancedScalper() {
   // sees the other's `triggered`/`closingPositions` update.
   const closingInFlightRef = useRef<Set<string>>(new Set());
   const expiryRef = useRef('');
-  const appliedPositionsRef = useRef<Set<string>>(new Set());
   useEffect(() => { expiryRef.current = expiry; }, [expiry]);
 
-  // Predefined Target & SL preset settings (% / Pts / ₹)
-  // Entry-relative only — see the auto-apply effect for why absolute price is excluded.
-  const [presetMode, setPresetMode] = useState<'PERCENT' | 'POINTS'>('PERCENT');
-  const [defaultTargetVal, setDefaultTargetVal] = useState('10');
-  const [defaultSlVal, setDefaultSlVal] = useState('5');
-  const [autoApplyGuards, setAutoApplyGuards] = useState(false);
+  // NOTE: a position never gets a target or SL on its own. Every level in
+  // `posGuards` is one the user typed or clicked onto that specific row.
+  //
+  // There used to be an "⚡ Auto-Apply" mode here that stamped a default target
+  // (+10%) and SL (-5%) onto every newly opened leg, configured by a PRESETS bar
+  // in the header. Both are gone. The flag was persisted in localStorage, so
+  // enabling it once silently armed auto-exits on every position in every later
+  // session — including on positions opened by something other than this page —
+  // with nothing on screen to explain where the levels came from. Per-row levels
+  // are still available on demand from the Target/SL inputs and the ±% chips in
+  // the Positions table; they just have to be asked for.
+  //
+  // Any `autoApplyGuards` / `defaultTargetVal` / `defaultSlVal` / `presetMode`
+  // keys left in a browser's stored blob are simply ignored and dropped on the
+  // next write below.
 
-  // Combined Multi-Leg % Presets state (remembers selection even when flat)
+  // Combined Multi-Leg % Presets state (remembers selection even when flat).
+  // Unrelated to the removed per-position defaults: these size the ACCOUNT-level
+  // Dhan P&L Guard and never write to a position's own target/SL.
   const [combinedTargetPct, setCombinedTargetPct] = useState<number | null>(null);
   const [combinedSlPct, setCombinedSlPct] = useState<number | null>(null);
 
@@ -141,15 +165,6 @@ export default function AdvancedScalper() {
       const saved = localStorage.getItem('advanced_scalper_presets');
       if (saved) {
         const parsed = JSON.parse(saved);
-        // Whitelist rather than trust: a browser that stored the retired 'PRICE'
-        // mode would otherwise restore it and have its saved "₹ 10" silently
-        // reinterpreted as 10 points. Fall back to the default instead.
-        if (parsed.presetMode === 'PERCENT' || parsed.presetMode === 'POINTS') {
-          setPresetMode(parsed.presetMode);
-        }
-        if (parsed.defaultTargetVal !== undefined) setDefaultTargetVal(parsed.defaultTargetVal);
-        if (parsed.defaultSlVal !== undefined) setDefaultSlVal(parsed.defaultSlVal);
-        if (parsed.autoApplyGuards !== undefined) setAutoApplyGuards(parsed.autoApplyGuards);
         if (parsed.combinedTargetPct !== undefined) setCombinedTargetPct(parsed.combinedTargetPct);
         if (parsed.combinedSlPct !== undefined) setCombinedSlPct(parsed.combinedSlPct);
       }
@@ -160,10 +175,10 @@ export default function AdvancedScalper() {
   useEffect(() => {
     try {
       localStorage.setItem('advanced_scalper_presets', JSON.stringify({
-        presetMode, defaultTargetVal, defaultSlVal, autoApplyGuards, combinedTargetPct, combinedSlPct,
+        combinedTargetPct, combinedSlPct,
       }));
     } catch {}
-  }, [presetMode, defaultTargetVal, defaultSlVal, autoApplyGuards, combinedTargetPct, combinedSlPct]);
+  }, [combinedTargetPct, combinedSlPct]);
 
   // ─── Derived values ──────────────────────────────────────────────
 
@@ -204,6 +219,43 @@ export default function AdvancedScalper() {
       ? String(pos.tradingSymbol ?? '')
       : String(pos.securityId ?? (pos as Record<string, unknown>).security_id ?? '');
   }, [broker]);
+
+  /**
+   * CE / PE for an option leg, or null if the row is not an option this terminal
+   * should be aggregating. Single source of truth for every per-side sum below,
+   * so the CE/PE pill and the multi-leg banner can never disagree about what
+   * counts as a leg.
+   *
+   * The F&O segment test runs FIRST, before the strike map: security IDs are only
+   * unique within a segment, so an equity ID could in principle collide with an
+   * option ID and mark a stock holding as a call.
+   *
+   * Resolution order after that, most to least authoritative:
+   *   1. strikeMap  — exact, but only covers the currently selected expiry.
+   *   2. optionType — present on Dhan rows (`drvOptionType`), absent on the
+   *                   Zerodha/Kotak shapes, which drop it entirely.
+   *   3. symbol suffix — the fallback that actually carries legs on OTHER
+   *      expiries. It matches a bare trailing CE/PE (`NIFTY25AUG24500CE`) as
+   *      well as a delimited one (`NIFTY-Aug2026-24500-CE`); the previous
+   *      `/\bCE\b|-CE$/` required a word boundary before the C, which a digit
+   *      never provides, so every Zerodha and Kotak leg outside the selected
+   *      expiry was silently dropped from the CE/PE totals.
+   */
+  const optionSideOf = useCallback((pos: Record<string, unknown>): 'CE' | 'PE' | null => {
+    if (!isFnoSegment(pos)) return null;
+
+    const mapping = secIdToStrikeSide[positionJoinKey(pos)];
+    if (mapping) return mapping.side.toUpperCase() as 'CE' | 'PE';
+
+    const optType = String(pos.optionType ?? pos.option_type ?? pos.drvOptionType ?? '').toUpperCase();
+    if (optType.includes('CALL') || optType === 'CE') return 'CE';
+    if (optType.includes('PUT') || optType === 'PE') return 'PE';
+
+    const sym = String(pos.tradingSymbol ?? pos.tradingsymbol ?? pos.symbol ?? '').toUpperCase();
+    if (/CE$/.test(sym)) return 'CE';
+    if (/PE$/.test(sym)) return 'PE';
+    return null;
+  }, [secIdToStrikeSide, positionJoinKey]);
 
   // Same realizedProfit=0-on-flat-position fix as the base Scalper (Dhan quirk, see Scalper.tsx)
   const realizedFixedPositions = useMemo(() => {
@@ -277,8 +329,9 @@ export default function AdvancedScalper() {
     });
   }, [realizedFixedPositions, liveQuotes, secIdToStrikeSide, positionJoinKey]);
 
-  const totalPnl = enrichedPositions.reduce((sum, p) =>
-    sum + (Number(p.realizedProfit) || 0) + (Number(p.unrealizedProfit) || 0), 0);
+  const totalPnl = useMemo(() => enrichedPositions.reduce((sum, p) =>
+    sum + (Number(p.realizedProfit) || 0) + (Number(p.unrealizedProfit) || 0), 0),
+    [enrichedPositions]);
 
   // Combined Multi-Leg Premium Tracking & Strategy Stats
   const combinedStrategyStats = useMemo(() => {
@@ -294,6 +347,14 @@ export default function AdvancedScalper() {
     for (const pos of enrichedPositions) {
       const netQty = Number(pos.netQty);
       if (netQty === 0) continue;
+
+      // Option legs only. Without this the basis picked up equity holdings, MCX
+      // futures and anything else open in the account — which not only inflated
+      // the banner's leg count and entry capital, but sized the ₹ figure the
+      // Combined % chips push into the P&L Guard off positions this terminal is
+      // not trading. "Premium decay" is an options statement; keep the basis to
+      // instruments the statement is true of.
+      if (!optionSideOf(pos)) continue;
 
       const mult = contractMultiplier(pos);
       const isLong = netQty > 0;
@@ -311,7 +372,10 @@ export default function AdvancedScalper() {
 
     // Basis = the net credit received (seller) or net debit paid (buyer).
     const entryCapitalSum = Math.abs(signedEntry);
-    const liveCapitalSum = Math.abs(signedLive);
+    // Measured in the SAME direction as the entry basis rather than as a bare
+    // magnitude, so a credit book that flips to a net debit reads as a negative
+    // current value instead of an unsigned number that looks unchanged.
+    const liveCapitalSum = signedEntry < 0 ? -signedLive : signedLive;
 
     // MIN_BASIS, not > 0: a near-perfectly-hedged book (short and long legs almost
     // cancelling) leaves a basis of a few paise, which would divide into a decayPct
@@ -328,7 +392,7 @@ export default function AdvancedScalper() {
     const isNetSeller = signedEntry > 0;
 
     return { entryCapitalSum, liveCapitalSum, decayPct, openLegsCount, isNetSeller };
-  }, [enrichedPositions]);
+  }, [enrichedPositions, optionSideOf]);
 
   // Net CE / PE Values & Difference computed strictly from OPEN POSITIONS: short legs add,
   // long legs (hedges) subtract, per side — so a long hedge offsets the shorts on its side
@@ -341,32 +405,19 @@ export default function AdvancedScalper() {
       const netQty = Number(pos.netQty);
       if (!netQty || netQty === 0) continue; // Only open positions
 
-      const secId = broker !== 'dhan'
-        ? String(pos.tradingSymbol ?? '')
-        : String(pos.securityId ?? (pos as Record<string, unknown>).security_id ?? '');
-      const mapping = secIdToStrikeSide[secId];
-
-      let side: 'CE' | 'PE' | null = mapping ? (mapping.side.toUpperCase() as 'CE' | 'PE') : null;
-
       // Equity trading symbols can coincidentally end in "CE"/"PE" (e.g. "RELIANCE"),
-      // so the symbol-suffix fallback below is only safe to run on F&O positions.
-      const segment = String(pos.exchangeSegment ?? pos.exchange ?? '').toUpperCase();
-      const isFno = segment.includes('FNO') || segment.includes('FO');
-
-      if (!side && isFno) {
-        const optType = String(pos.optionType ?? pos.option_type ?? pos.drvOptionType ?? '').toUpperCase();
-        if (optType.includes('CALL') || optType === 'CE') side = 'CE';
-        else if (optType.includes('PUT') || optType === 'PE') side = 'PE';
-        else {
-          const sym = String(pos.tradingSymbol ?? pos.tradingsymbol ?? pos.symbol ?? '').toUpperCase();
-          if (/\bCE\b|-CE$/.test(sym)) side = 'CE';
-          else if (/\bPE\b|-PE$/.test(sym)) side = 'PE';
-        }
-      }
-
+      // which is why optionSideOf gates on the F&O segment before it ever looks
+      // at a symbol suffix.
+      const side = optionSideOf(pos);
       if (!side) continue;
 
-      const ltp = Number(pos.lastTradedPrice) || Number(pos.buyAvg) || Number(pos.sellAvg) || 0;
+      // Mark against the price on the leg's OWN side when there is no live LTP.
+      // Falling through buyAvg first marked a partially-covered short at its
+      // COVER price — the one price on the row that says nothing about what the
+      // remaining open quantity is worth.
+      const ltp = Number(pos.lastTradedPrice)
+        || (netQty > 0 ? Number(pos.buyAvg) : Number(pos.sellAvg))
+        || Number(pos.buyAvg) || Number(pos.sellAvg) || 0;
       // netQty is already a total unit count, so qty * price is rupees directly.
       // Dividing by the selected underlying's `lotSize` would misprice any position
       // on a different underlying (e.g. an open SENSEX leg while NIFTY is selected).
@@ -385,25 +436,69 @@ export default function AdvancedScalper() {
       totalPEVal: peSum,
       cePeDiff: ceSum - peSum,
     };
-  }, [enrichedPositions, secIdToStrikeSide, broker]);
+  }, [enrichedPositions, optionSideOf]);
 
   // Auto-calculate P&L Guard Target & SL ₹ when combinedTargetPct or combinedSlPct are selected
+  // Only writes while a % chip is actively selected — deselecting a chip (click it
+  // again) hands the field back to manual entry. Values are compared before being
+  // set so an unchanged basis never clobbers what the user is currently typing.
+  //
+  // A zero basis BLANKS the field rather than leaving it alone. Returning early on
+  // `entryCapitalSum <= 0` (the old behaviour) meant that squaring off left the
+  // rupee amount from the position you just closed sitting in the box, with its %
+  // chip still lit: open a smaller position, hit Set Guard, and you armed the
+  // broker at the previous trade's size. There is nothing to size against when
+  // flat, so the honest value is empty.
   useEffect(() => {
-    if (combinedStrategyStats.entryCapitalSum <= 0) return;
+    const basis = combinedStrategyStats.entryCapitalSum;
+    const rupeesFor = (pct: number): string => {
+      if (basis <= 0) return '';
+      const v = Math.round((basis * pct) / 100);
+      return v > 0 ? String(v) : '';
+    };
 
-    // Only writes while a % chip is actively selected — deselecting a chip (click it
-    // again) hands the field back to manual entry. Values are compared before being
-    // set so an unchanged basis never clobbers what the user is currently typing.
     if (combinedTargetPct !== null && combinedTargetPct > 0) {
-      const calcTarget = Math.round((combinedStrategyStats.entryCapitalSum * combinedTargetPct) / 100);
-      if (calcTarget > 0) setProfitTarget(prev => (prev === String(calcTarget) ? prev : String(calcTarget)));
+      const next = rupeesFor(combinedTargetPct);
+      setProfitTarget(prev => (prev === next ? prev : next));
     }
 
     if (combinedSlPct !== null && combinedSlPct > 0) {
-      const calcLoss = Math.round((combinedStrategyStats.entryCapitalSum * combinedSlPct) / 100);
-      if (calcLoss > 0) setLossLimit(prev => (prev === String(calcLoss) ? prev : String(calcLoss)));
+      const next = rupeesFor(combinedSlPct);
+      setLossLimit(prev => (prev === next ? prev : next));
     }
   }, [combinedStrategyStats.entryCapitalSum, combinedTargetPct, combinedSlPct]);
+
+  // Dhan's pnlExit guard only squares off the product types it was configured
+  // with, and the INTRADAY/MARGIN toggle that decides how orders are placed was
+  // entirely separate state from the guard's product chips. Trading MARGIN while
+  // the guard defaulted to INTRADAY armed a guard that would not touch a single
+  // one of your positions — silently, with an ACTIVE badge showing.
+  //
+  // Additive only: switching the toggle puts the product you are about to trade
+  // in scope and never removes a chip you selected deliberately. Done here in the
+  // handler rather than in an effect on `productType` so there is no intermediate
+  // render where the two disagree.
+  const handleProductTypeChange = useCallback((pt: 'INTRADAY' | 'MARGIN') => {
+    setProductType(pt);
+    setGuardProductTypes(prev => (prev.includes(pt) ? prev : [...prev, pt]));
+  }, []);
+
+  // Products that are open at the broker RIGHT NOW but outside the guard's scope.
+  // The handler above covers what you are about to trade; this covers what you
+  // already hold — including legs opened before the guard chips were changed, and
+  // anything carried in from another terminal or a strategy process.
+  // Dhan-only, matching where the guard controls render: the other brokers report
+  // Kite/Neo product names (MIS/NRML) that this vocabulary does not describe.
+  const uncoveredGuardProducts = useMemo(() => {
+    if (broker !== 'dhan') return [];
+    const out = new Set<string>();
+    for (const pos of enrichedPositions) {
+      if (Number(pos.netQty) === 0) continue;
+      const pt = String(pos.productType ?? '').toUpperCase();
+      if (pt && !guardProductTypes.includes(pt)) out.add(pt);
+    }
+    return [...out];
+  }, [enrichedPositions, guardProductTypes, broker]);
 
   // Position row keyed by security ID — lets each box look up its own open position/P&L
   const positionsBySecId = useMemo(() => {
@@ -415,91 +510,6 @@ export default function AdvancedScalper() {
     return map;
   }, [enrichedPositions, positionJoinKey]);
 
-  // Auto-apply default target & SL to newly opened positions (runs once per position lifecycle)
-  useEffect(() => {
-    // Clear appliedPositionsRef for positions that have gone flat
-    const openSyms = new Set(enrichedPositions.filter(p => Number(p.netQty) !== 0).map(p => String(p.tradingSymbol ?? '')));
-    for (const sym of appliedPositionsRef.current) {
-      if (!openSyms.has(sym)) appliedPositionsRef.current.delete(sym);
-    }
-
-    if (!autoApplyGuards) return;
-    const targetVal = parseFloat(defaultTargetVal);
-    const slVal = parseFloat(defaultSlVal);
-    if ((isNaN(targetVal) || targetVal <= 0) && (isNaN(slVal) || slVal <= 0)) return;
-
-    // Symbols applied by THIS pass, committed to appliedPositionsRef after the
-    // updater runs. The updater must return the same value for the same `prev`:
-    // React invokes it twice under StrictMode, and marking appliedPositionsRef
-    // inside it made the second invocation see every symbol as "already applied",
-    // return `prev` unchanged, and silently drop the guards it had just computed.
-    // Appending here is safe precisely because nothing below ever READS this array
-    // — a double invocation just appends the same symbol twice, and the Set dedups.
-    const newlyApplied: string[] = [];
-
-    setPosGuards(prev => {
-      let changed = false;
-      const next = { ...prev };
-
-      for (const pos of enrichedPositions) {
-        const sym = String(pos.tradingSymbol ?? '');
-        const netQty = Number(pos.netQty);
-        if (!sym || netQty === 0) continue;
-
-        // Skip if already auto-applied once for this position lifecycle
-        if (appliedPositionsRef.current.has(sym)) continue;
-
-        const existing = next[sym];
-        if (!existing || (!existing.target && !existing.sl)) {
-          const buyAvg = Number(pos.buyAvg);
-          const sellAvg = Number(pos.sellAvg);
-          const isLong = netQty > 0;
-          const entryPrice = isLong ? buyAvg : sellAvg;
-          if (entryPrice <= 0) continue;
-
-          let calcTarget = existing?.target ?? '';
-          let calcSl = existing?.sl ?? '';
-
-          // Both modes are entry-relative and branch on direction. An absolute-price
-          // mode is deliberately NOT offered here: one price cannot be correct for a
-          // long and a short at once, so auto-applying it across mixed legs would arm
-          // an instant "target hit" close on the wrong side.
-          if (!calcTarget && !isNaN(targetVal) && targetVal > 0) {
-            if (presetMode === 'PERCENT') {
-              const pct = targetVal / 100;
-              calcTarget = (isLong ? entryPrice * (1 + pct) : entryPrice * (1 - pct)).toFixed(2);
-            } else {
-              calcTarget = (isLong ? entryPrice + targetVal : entryPrice - targetVal).toFixed(2);
-            }
-          }
-
-          if (!calcSl && !isNaN(slVal) && slVal > 0) {
-            if (presetMode === 'PERCENT') {
-              const pct = slVal / 100;
-              calcSl = (isLong ? entryPrice * (1 - pct) : entryPrice * (1 + pct)).toFixed(2);
-            } else {
-              calcSl = (isLong ? entryPrice - slVal : entryPrice + slVal).toFixed(2);
-            }
-          }
-
-          if (calcTarget || calcSl) {
-            next[sym] = {
-              target: calcTarget,
-              sl: calcSl,
-              trailEnabled: existing?.trailEnabled ?? false,
-              bestPrice: existing?.bestPrice ?? 0,
-              triggered: false,
-            };
-            changed = true;
-            newlyApplied.push(sym);
-          }
-        }
-      }
-      return changed ? next : prev;
-    });
-
-    for (const sym of newlyApplied) appliedPositionsRef.current.add(sym);
-  }, [enrichedPositions, autoApplyGuards, defaultTargetVal, defaultSlVal, presetMode]);
 
   const boxSecId = useCallback((box: BoxConfig): string | undefined => {
     if (box.strike == null) return undefined;
@@ -1612,7 +1622,7 @@ export default function AdvancedScalper() {
             {/* INTRADAY / MARGIN toggle */}
             <div className="flex items-center bg-zinc-900 border border-zinc-800 p-0.5 rounded-xl shrink-0">
               {(['INTRADAY', 'MARGIN'] as const).map(pt => (
-                <button key={pt} onClick={() => setProductType(pt)}
+                <button key={pt} onClick={() => handleProductTypeChange(pt)}
                   className={`px-3 py-1.5 text-xs font-bold rounded-lg transition-all whitespace-nowrap ${
                     productType === pt
                       ? 'bg-zinc-700 text-zinc-100 border border-zinc-600'
@@ -1621,64 +1631,6 @@ export default function AdvancedScalper() {
                   {pt}
                 </button>
               ))}
-            </div>
-
-            {/* Predefined Target & SL Presets Control Bar */}
-            <div className="flex items-center gap-2 bg-zinc-900 border border-zinc-800 px-2.5 py-1 rounded-xl shrink-0">
-              <span className="text-[10px] font-bold text-zinc-400 uppercase tracking-wider whitespace-nowrap">PRESETS:</span>
-              
-              {/* Mode Selector */}
-              <div className="flex items-center bg-zinc-950 p-0.5 rounded-lg border border-zinc-800">
-                {(['PERCENT', 'POINTS'] as const).map(m => (
-                  <button key={m} onClick={() => setPresetMode(m)}
-                    className={`px-2 py-0.5 text-[10px] font-bold rounded transition-all whitespace-nowrap ${
-                      presetMode === m
-                        ? 'bg-emerald-900/70 text-emerald-300 border border-emerald-500/40 shadow-sm'
-                        : 'text-zinc-500 hover:text-zinc-300'
-                    }`}>
-                    {m === 'PERCENT' ? '%' : 'Pts'}
-                  </button>
-                ))}
-              </div>
-
-              {/* Default Target */}
-              <div className="flex items-center gap-1">
-                <span className="text-[10px] font-bold text-emerald-400">TGT</span>
-                <input
-                  type="number" step="0.5" min="0"
-                  value={defaultTargetVal}
-                  onChange={e => setDefaultTargetVal(e.target.value)}
-                  placeholder="10"
-                  className="w-14 bg-zinc-950 border border-zinc-700 text-emerald-300 text-xs font-mono rounded px-1.5 py-0.5 focus:outline-none focus:border-emerald-500 text-center tabular-nums"
-                  title={`Default Target value (${presetMode === 'PERCENT' ? '%' : 'Points'} from entry price)`}
-                />
-              </div>
-
-              {/* Default SL */}
-              <div className="flex items-center gap-1">
-                <span className="text-[10px] font-bold text-rose-400">SL</span>
-                <input
-                  type="number" step="0.5" min="0"
-                  value={defaultSlVal}
-                  onChange={e => setDefaultSlVal(e.target.value)}
-                  placeholder="5"
-                  className="w-14 bg-zinc-950 border border-zinc-700 text-rose-300 text-xs font-mono rounded px-1.5 py-0.5 focus:outline-none focus:border-rose-500 text-center tabular-nums"
-                  title={`Default SL value (${presetMode === 'PERCENT' ? '%' : 'Points'} from entry price)`}
-                />
-              </div>
-
-              {/* Auto-Apply Toggle */}
-              <button
-                onClick={() => setAutoApplyGuards(v => !v)}
-                title="Automatically apply Target & SL presets to new trades upon execution"
-                className={`px-2 py-0.5 text-[10px] font-bold rounded border transition-all whitespace-nowrap ${
-                  autoApplyGuards
-                    ? 'bg-amber-900/60 border-amber-500/50 text-amber-300 shadow-sm'
-                    : 'bg-zinc-950 border-zinc-800 text-zinc-500 hover:text-zinc-300'
-                }`}
-              >
-                ⚡ Auto-Apply {autoApplyGuards ? 'ON' : 'OFF'}
-              </button>
             </div>
 
             {/* Top 10 NIFTY heavyweights panel — display preference, so it sits
@@ -1857,6 +1809,18 @@ export default function AdvancedScalper() {
                                  text-white border border-violet-500/40 transition-all disabled:opacity-50 shrink-0 whitespace-nowrap">
                       {settingPnl ? 'Setting…' : 'Set Guard'}
                     </button>
+
+                    {/* Open positions the guard's product scope does not cover.
+                        An ACTIVE guard that skips your actual position is the
+                        worst failure mode this bar has — say so loudly. */}
+                    {uncoveredGuardProducts.length > 0 && (
+                      <span
+                        className="px-2 py-1 rounded text-[10px] font-bold border bg-amber-900/50 border-amber-500/50
+                                   text-amber-300 shrink-0 whitespace-nowrap"
+                        title={`You hold open ${uncoveredGuardProducts.join(' / ')} position(s), but the guard is scoped to ${guardProductTypes.join(' / ') || 'nothing'}. Dhan will not square those off. Select the missing product above and press Set Guard again.`}>
+                        ⚠ {uncoveredGuardProducts.join('/')} NOT COVERED
+                      </span>
+                    )}
 
                     {hasConfig && (
                       <button onClick={handleClearPnl} disabled={clearingPnl}
@@ -2079,7 +2043,9 @@ export default function AdvancedScalper() {
             </span>
             <span className="text-xs font-mono text-zinc-300">
               Entry Capital Value: <strong className="text-white">₹{combinedStrategyStats.entryCapitalSum.toFixed(0)}</strong>
-              {' '}&rarr; Current Value: <strong className="text-white">₹{combinedStrategyStats.liveCapitalSum.toFixed(0)}</strong>
+              {' '}&rarr; Current Value: <strong className="text-white">
+                {combinedStrategyStats.liveCapitalSum < 0 ? '−' : ''}₹{Math.abs(combinedStrategyStats.liveCapitalSum).toFixed(0)}
+              </strong>
             </span>
           </div>
 

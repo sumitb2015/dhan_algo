@@ -25,7 +25,38 @@ function istToday(): string {
   return new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
 }
 
-async function fromDhan(cfg: UnderlyingConfig): Promise<number | null> {
+/** Minutes since IST midnight. */
+function istMinutesOfDay(): number {
+  const hhmm = new Date().toLocaleTimeString('en-GB', {
+    timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit', hour12: false,
+  });
+  const [h, m] = hhmm.split(':').map(Number);
+  return h * 60 + m;
+}
+
+const MARKET_CLOSE_IST_MIN = 15 * 60 + 30;
+
+/**
+ * Both brokers' OHLC `close` field means "previous day's close" while the session
+ * is live, then flips to TODAY's close once the 15:30 bell rings. Taken at face
+ * value after the bell it makes prevClose === spot, and the header renders a
+ * ▲0.00 (0.00%) move for the rest of the day — and because the result is cached
+ * per IST date, one evening fetch poisons it until the date rolls over.
+ *
+ * Before the bell the field is genuine and this returns true unconditionally, so
+ * nothing about intraday behaviour changes. After it, the only tell available in
+ * this payload is that `close` and the last traded price have converged onto the
+ * same number; treat that as suspect and let the caller fall through to another
+ * source. Reporting no previous close at all is correct here: the UI hides the
+ * change indicator when prevClose is absent, which beats showing a false 0.00%.
+ */
+function isGenuinePrevClose(close: number, lastPrice: number): boolean {
+  if (!(close > 0)) return false;
+  if (istMinutesOfDay() < MARKET_CLOSE_IST_MIN) return true;
+  return !(lastPrice > 0 && Math.abs(close - lastPrice) < 0.01);
+}
+
+async function fromDhan(cfg: UnderlyingConfig): Promise<{ close: number; lastPrice: number } | null> {
   try {
     const { clientId, token } = getDhanCredentials();
     if (!token) return null;
@@ -42,22 +73,24 @@ async function fromDhan(cfg: UnderlyingConfig): Promise<number | null> {
     });
     const json = await res.json() as {
       status?: string;
-      data?: Record<string, Record<string, { ohlc?: { close?: number } }>>;
+      data?: Record<string, Record<string, { last_price?: number; ohlc?: { close?: number } }>>;
     };
     if (json.status !== 'success') return null;
-    const close = json.data?.[cfg.dhanSeg]?.[String(cfg.sid)]?.ohlc?.close ?? 0;
-    return close > 0 ? close : null;
+    const quote = json.data?.[cfg.dhanSeg]?.[String(cfg.sid)];
+    const close = quote?.ohlc?.close ?? 0;
+    return close > 0 ? { close, lastPrice: quote?.last_price ?? 0 } : null;
   } catch {
     return null;
   }
 }
 
-async function fromKite(kiteSymbol: string): Promise<number | null> {
+async function fromKite(kiteSymbol: string): Promise<{ close: number; lastPrice: number } | null> {
   try {
     const data = await kiteGet(`/quote/ohlc?i=${encodeURIComponent(kiteSymbol)}`) as
-      Record<string, { ohlc?: { close?: number } }>;
-    const close = data?.[kiteSymbol]?.ohlc?.close ?? 0;
-    return close > 0 ? close : null;
+      Record<string, { last_price?: number; ohlc?: { close?: number } }>;
+    const quote = data?.[kiteSymbol];
+    const close = quote?.ohlc?.close ?? 0;
+    return close > 0 ? { close, lastPrice: quote?.last_price ?? 0 } : null;
   } catch {
     return null;
   }
@@ -90,16 +123,16 @@ export async function GET(request: NextRequest) {
   }
 
   const dhan = await fromDhan(cfg);
-  if (dhan !== null) {
-    cache.set(cacheKey, { prevClose: dhan, source: 'dhan' });
-    return NextResponse.json({ success: true, prevClose: dhan, source: 'dhan' });
+  if (dhan !== null && isGenuinePrevClose(dhan.close, dhan.lastPrice)) {
+    cache.set(cacheKey, { prevClose: dhan.close, source: 'dhan' });
+    return NextResponse.json({ success: true, prevClose: dhan.close, source: 'dhan' });
   }
 
   if (cfg.kiteSymbol) {
     const kite = await fromKite(cfg.kiteSymbol);
-    if (kite !== null) {
-      cache.set(cacheKey, { prevClose: kite, source: 'zerodha' });
-      return NextResponse.json({ success: true, prevClose: kite, source: 'zerodha' });
+    if (kite !== null && isGenuinePrevClose(kite.close, kite.lastPrice)) {
+      cache.set(cacheKey, { prevClose: kite.close, source: 'zerodha' });
+      return NextResponse.json({ success: true, prevClose: kite.close, source: 'zerodha' });
     }
   }
 
@@ -112,5 +145,7 @@ export async function GET(request: NextRequest) {
     }
   }
 
+  // No trustworthy source. The caller leaves prevClose unset and hides the change
+  // indicator entirely, which is the honest outcome — see isGenuinePrevClose.
   return NextResponse.json({ success: false, error: 'Could not determine previous close' }, { status: 500 });
 }
