@@ -423,7 +423,7 @@ export default function AdvancedScalper() {
   // Net CE / PE Values & Difference computed strictly from OPEN POSITIONS: short legs add,
   // long legs (hedges) subtract, per side — so a long hedge offsets the shorts on its side
   // instead of inflating the gross total the same way a short would.
-  const { totalCEVal, totalPEVal, cePeDiff } = useMemo(() => {
+  const { totalCEVal, totalPEVal, cePeDiff, peCeRatio } = useMemo(() => {
     let ceSum = 0;
     let peSum = 0;
 
@@ -461,6 +461,12 @@ export default function AdvancedScalper() {
       totalCEVal: ceSum,
       totalPEVal: peSum,
       cePeDiff: ceSum - peSum,
+      // Scale-free version of the same skew: the rupee Diff says how far apart the
+      // sides are, the ratio says how lopsided they are relative to book size.
+      // Both sums are SIGNED (a net-long side goes negative), so the ratio is only
+      // meaningful when the denominator is a real CE exposure — null renders a dash
+      // instead of Infinity/NaN when the CE side is flat or fully hedged out.
+      peCeRatio: Math.abs(ceSum) > 0.01 ? peSum / ceSum : null,
     };
   }, [enrichedPositions, optionSideOf]);
 
@@ -2114,6 +2120,18 @@ export default function AdvancedScalper() {
                 </span>
                 <span className="font-bold text-rose-300 tabular-nums">
                   ₹{totalPEVal.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                </span>
+              </div>
+
+              <span className="text-zinc-700 font-sans">|</span>
+
+              {/* PE / CE value ratio — scale-free skew between the two sides */}
+              <div className="flex items-center gap-1.5" title="Ratio = Total PE Value ÷ Total CE Value. 1.00 = balanced, above 1 = PE-heavy, below 1 = CE-heavy. Shows — when the CE side is flat.">
+                <span className="text-[10px] font-extrabold uppercase text-amber-400 bg-amber-950/80 border border-amber-800/60 px-1.5 py-0.5 rounded">
+                  PE/CE
+                </span>
+                <span className="font-bold text-zinc-200 tabular-nums">
+                  {peCeRatio == null ? '—' : `${peCeRatio.toFixed(2)}x`}
                 </span>
               </div>
 
