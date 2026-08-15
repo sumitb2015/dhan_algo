@@ -4,6 +4,7 @@ import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react'
 import { Plus, X, RefreshCw, Terminal, AlertTriangle } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import NavBar from './NavBar';
+import { TH, TD, PnlBadge, fmt, fmtCountdown, fetchWithTimeout } from './cspShared';
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 interface CspOrderRow {
@@ -63,46 +64,6 @@ interface StrikeRow {
   ltp: number;
   oi: number;
   iv: number;
-}
-
-// Wraps fetch with a hard client-side timeout so a hung Python child process
-// on the server (e.g. a stalled Dhan API call) can't leave the UI spinning
-// forever — it always resolves to a visible error instead.
-async function fetchWithTimeout(input: string, timeoutMs: number): Promise<Response> {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
-  try {
-    return await fetch(input, { signal: controller.signal });
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
-// ─── Formatters ─────────────────────────────────────────────────────────────
-function fmt(n: number, digits = 2) { return (n ?? 0).toFixed(digits); }
-function fmtCountdown(s: number) { return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`; }
-
-function PnlBadge({ v }: { v: number }) {
-  return (
-    <span className={cn('inline-flex items-center px-1.5 py-px rounded-sm text-[11px] font-bold tabular-nums font-mono',
-      v > 0 ? 'bg-emerald-500/10 text-emerald-400' : v < 0 ? 'bg-red-500/10 text-red-400' : 'bg-zinc-800 text-zinc-500')}>
-      {v > 0 ? '+' : ''}₹{fmt(v)}
-    </span>
-  );
-}
-
-// ─── Table primitives (mirrors EquityWatchlist.tsx conventions) ───────────
-function TH({ children, right, className }: { children?: React.ReactNode; right?: boolean; className?: string }) {
-  return (
-    <th className={cn('py-1.5 px-2 text-xs font-bold text-white bg-zinc-800 uppercase tracking-wide whitespace-nowrap sticky top-0 z-10',
-      right ? 'text-right' : 'text-left', className)}>
-      {children}
-    </th>
-  );
-}
-
-function TD({ children, right, className }: { children?: React.ReactNode; right?: boolean; className?: string }) {
-  return <td className={cn('py-1.5 px-2 text-[12px] font-mono align-top', right ? 'text-right' : 'text-left', className)}>{children}</td>;
 }
 
 // ─── Sell Put order form ────────────────────────────────────────────────────

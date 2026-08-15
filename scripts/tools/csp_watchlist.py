@@ -15,9 +15,10 @@ Prints a single JSON line to stdout. Logs go to stderr.
 import sys
 import os
 import json
+import math
 import logging
 import argparse
-from datetime import datetime, timezone
+from datetime import datetime, timezone, date
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
@@ -44,8 +45,10 @@ _helper_errors = _ErrorCapture()
 logging.getLogger('lib.dhan_helper').addHandler(_helper_errors)
 
 
-def _fail(base_message: str) -> dict:
+def _fail(base_message: str, helper: DhanHelper = None) -> dict:
     detail = _helper_errors.messages[-1] if _helper_errors.messages else ''
+    if not detail and helper is not None and getattr(helper, 'last_api_error', None):
+        detail = str(helper.last_api_error)
     return {"success": False, "error": f"{base_message}: {detail}" if detail else base_message}
 
 
@@ -54,6 +57,16 @@ def _get_helper() -> DhanHelper:
     if not dhan:
         raise RuntimeError("Failed to authenticate with Dhan")
     return DhanHelper(dhan)
+
+
+def prob_above(spot: float, strike: float, years: float, iv: float, r: float = 0.065) -> float:
+    """Risk-neutral probability spot finishes above strike — the sold PUT expiring
+    worthless. Same formula as riskNeutralProbAbove() in lib/optionsStrategy.ts
+    and prob_above() in csp_scanner.py."""
+    if years <= 0 or iv <= 0 or spot <= 0 or strike <= 0:
+        return 1.0 if spot > strike else 0.0
+    d2 = (math.log(spot / strike) + (r - (iv * iv) / 2) * years) / (iv * math.sqrt(years))
+    return 0.5 * (1.0 + math.erf(d2 / math.sqrt(2.0)))
 
 
 def _underlying_of(trading_symbol: str) -> str:
@@ -166,17 +179,132 @@ def cmd_expiries(helper: DhanHelper, args) -> dict:
 def cmd_chain(helper: DhanHelper, args) -> dict:
     df = helper.get_option_chain_df(args.symbol, args.expiry)
     if df.empty:
-        return {"success": True, "strikes": []}
+        # An empty chain is almost always a throttled/failed API call, not a
+        # genuinely strikeless expiry. Reporting it as success would let the
+        # caller silently replace a good chain with nothing.
+        return _fail(f"No option chain returned for {args.symbol} {args.expiry}", helper)
+
+    try:
+        spot = float(helper.get_ltp(
+            args.symbol, instrument="INDEX" if helper.find_index(args.symbol) else "EQUITY") or 0)
+    except Exception:
+        spot = 0.0
+    dte = max((datetime.strptime(args.expiry[:10], "%Y-%m-%d").date() - date.today()).days, 0)
+    years = max(dte, 1) / 365.0
 
     strikes = []
     for strike, row in df.iterrows():
+        strike = float(strike)
+        iv = float(row.get('pe_implied_volatility', 0) or 0)
         strikes.append({
-            "strike": float(strike),
+            "strike": strike,
             "ltp": float(row.get('pe_last_price', 0) or 0),
             "oi": int(row.get('pe_oi', 0) or 0),
-            "iv": float(row.get('pe_implied_volatility', 0) or 0),
+            "iv": iv,
+            "noHitProb": round(prob_above(spot, strike, years, iv / 100.0) * 100, 1),
         })
-    return {"success": True, "strikes": strikes}
+    return {"success": True, "strikes": strikes, "spot": round(spot, 2), "dte": dte}
+
+
+def cmd_sync(helper: DhanHelper, args) -> dict:
+    """Live spot + PE mark for tracked rows. `--positions` is a JSON array of
+    {id, symbol, expiry, strike} — one entry per open tracked put."""
+    try:
+        positions = json.loads(args.positions)
+    except (ValueError, TypeError) as exc:
+        return {"success": False, "error": f"Invalid --positions payload: {exc}"}
+
+    chain_cache: dict = {}
+    out = []
+    for p in positions:
+        # One malformed row must not take down the marks for every other
+        # position, so each is resolved independently and reports its own error.
+        try:
+            symbol = str(p.get('symbol', '') or '').upper()
+            expiry = str(p.get('expiry', '') or '')[:10]
+            strike = float(p.get('strike', 0) or 0)
+            if not symbol or not expiry:
+                raise ValueError("symbol and expiry are required")
+            expiry_date = datetime.strptime(expiry, "%Y-%m-%d").date()
+        except (ValueError, TypeError) as exc:
+            out.append({"id": p.get('id'), "error": f"Invalid tracked row: {exc}"})
+            continue
+
+        # The chain call self-throttles to one request every 3s, so cache per
+        # symbol+expiry — several tracked rows usually share one chain. The
+        # chain response already carries the underlying LTP, so no extra
+        # rate-limited get_ltp call is needed.
+        key = (symbol, expiry)
+        if key not in chain_cache:
+            try:
+                chain_cache[key] = helper.get_option_chain_df(symbol, expiry)
+            except Exception:
+                chain_cache[key] = None
+
+        df = chain_cache[key]
+        if df is None or df.empty:
+            out.append({"id": p.get('id'),
+                        "error": f"No option chain for {symbol} {expiry} — marks unavailable"})
+            continue
+
+        spot = float(df.attrs.get('underlying_ltp', 0) or 0)
+        if spot <= 0:
+            try:
+                spot = float(helper.get_ltp(
+                    symbol, instrument="INDEX" if helper.find_index(symbol) else "EQUITY") or 0)
+            except Exception:
+                spot = 0.0
+
+        pe_ltp, iv = 0.0, 0.0
+        if strike in df.index:
+            row = df.loc[strike]
+            pe_ltp = float(row.get('pe_last_price', 0) or 0)
+            iv = float(row.get('pe_implied_volatility', 0) or 0)
+
+        dte = max((expiry_date - date.today()).days, 0)
+        entry = {
+            "id": p.get('id'),
+            "spot": round(spot, 2),
+            "peLtp": round(pe_ltp, 2),
+            "iv": round(iv, 2),
+            "dte": dte,
+        }
+        # With no IV or no spot the model degenerates to a certainty (1.0). That
+        # would render as "100% no-hit" exactly when the mark is unknown, so the
+        # probability is omitted instead of being fabricated.
+        if iv > 0 and spot > 0:
+            entry["noHitProb"] = round(prob_above(spot, strike, max(dte, 1) / 365.0, iv / 100.0) * 100, 1)
+        out.append(entry)
+
+    return {"success": True, "asOf": datetime.now(timezone.utc).isoformat(), "rows": out}
+
+
+def _finalize_order(helper: DhanHelper, order_id: str, wait: bool) -> dict:
+    """Resolve an order to its real outcome. Callers that book P&L must not
+    infer a fill price from a UI mark — a MARKET order's actual traded price is
+    the only honest basis, and a post-acceptance rejection must be visible."""
+    out = {"success": True, "orderId": order_id, "status": "PENDING", "tradedPrice": None}
+    if not wait:
+        return out
+    try:
+        filled = helper.wait_for_fill(order_id, timeout=25)
+    except Exception:
+        filled = False
+    detail = helper.get_order_by_id(order_id) or {}
+    status = str(detail.get('orderStatus', '') or ('TRADED' if filled else 'PENDING'))
+    out["status"] = status
+    for key in ('averageTradedPrice', 'tradedPrice', 'price'):
+        val = detail.get(key)
+        if val not in (None, '', 0, '0'):
+            try:
+                out["tradedPrice"] = float(val)
+                break
+            except (TypeError, ValueError):
+                continue
+    if status in ("REJECTED", "CANCELLED", "EXPIRED"):
+        out["success"] = False
+        out["error"] = f"Order {order_id} ended {status}"
+    return out
 
 
 def cmd_place(helper: DhanHelper, args) -> dict:
@@ -204,8 +332,14 @@ def cmd_place(helper: DhanHelper, args) -> dict:
         amo_time=args.amo_time,
     )
     if order_id:
-        return {"success": True, "orderId": order_id}
-    return _fail("Failed to place Cash Secured Put order")
+        result = _finalize_order(helper, order_id, getattr(args, 'wait_fill', False))
+        # The caller needs these to later square the position off; resolving the
+        # contract again from the UI would risk picking a different one.
+        result["securityId"] = str(int(sec['SECURITY_ID']))
+        result["exchangeSegment"] = helper._auto_detect_segment(sec)
+        result["lotSize"] = _fo_lot_size(helper, args.symbol)
+        return result
+    return _fail("Failed to place Cash Secured Put order", helper)
 
 
 def cmd_cancel(helper: DhanHelper, args) -> dict:
@@ -225,8 +359,8 @@ def cmd_exit(helper: DhanHelper, args) -> dict:
         product_type=args.product_type,
     )
     if order_id:
-        return {"success": True, "orderId": order_id}
-    return _fail("Failed to place exit order")
+        return _finalize_order(helper, order_id, getattr(args, 'wait_fill', False))
+    return _fail("Failed to place exit order", helper)
 
 
 def main():
@@ -255,15 +389,23 @@ def main():
     p_place.add_argument('--after-market-order', action='store_true', dest='after_market_order')
     p_place.add_argument('--amo-time', default='OPEN', choices=['OPEN', 'OPEN_30', 'OPEN_60'], dest='amo_time')
     p_place.add_argument('--product-type', default='MARGIN', choices=['MARGIN', 'CNC'], dest='product_type')
+    p_place.add_argument('--wait-fill', action='store_true', dest='wait_fill',
+                          help="Block until the order fills and report its traded price")
 
     p_cancel = sub.add_parser('cancel')
     p_cancel.add_argument('--order-id', required=True, dest='order_id')
+
+    p_sync = sub.add_parser('sync')
+    p_sync.add_argument('--positions', required=True,
+                        help="JSON array of {id, symbol, expiry, strike}")
 
     p_exit = sub.add_parser('exit')
     p_exit.add_argument('--security-id', required=True, dest='security_id')
     p_exit.add_argument('--exchange-segment', required=True, dest='exchange_segment')
     p_exit.add_argument('--quantity', required=True, type=int)
     p_exit.add_argument('--product-type', default='MARGIN', dest='product_type')
+    p_exit.add_argument('--wait-fill', action='store_true', dest='wait_fill',
+                         help="Block until the order fills and report its traded price")
 
     args = parser.parse_args()
 
@@ -280,6 +422,8 @@ def main():
         result = cmd_place(helper, args)
     elif args.cmd == 'cancel':
         result = cmd_cancel(helper, args)
+    elif args.cmd == 'sync':
+        result = cmd_sync(helper, args)
     elif args.cmd == 'exit':
         result = cmd_exit(helper, args)
     else:

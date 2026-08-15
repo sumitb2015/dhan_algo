@@ -12,6 +12,8 @@ import {
   ChevronDown,
   DatabaseZap,
   RefreshCw,
+  LineChart,
+  Zap,
 } from 'lucide-react';
 import { useRefreshStatus } from '@/lib/useRefreshStatus';
 import {
@@ -40,30 +42,46 @@ const NAV_GROUPS = [
       { href: '/equity-watchlist', label: 'Forever Watchlist', desc: 'Manage Forever/GTT orders for your equity watchlist' },
     ],
   },
+  // Derivatives used to hold all 21 F&O pages in one dropdown, which overflowed
+  // the viewport and made the tail unreachable. Split by what you're doing:
+  // reading market structure, researching a trade, or placing one.
   {
     label: 'Derivatives',
     icon: Layers,
     links: [
+      { href: '/options', label: 'Options', desc: 'Max pain, PCR & live options chain' },
       { href: '/nifty-oi-profile', label: 'Nifty OI Profile', desc: 'Futures 5-min chart with 7-day 3-column OI & OI Change profile' },
       { href: '/trending-oi', label: 'Trending OI', desc: 'Chain-wide OI/LTP interval table with call/put diff, direction & sentiment' },
       { href: '/futures', label: 'Futures', desc: 'OI buildup & short/long coverage analysis' },
-      { href: '/options', label: 'Options', desc: 'Max pain, PCR & live options chain' },
-      { href: '/options/quiktrade', label: 'QuikTrade', desc: 'OI buildup quadrants, live positions & P&L' },
-      { href: '/options/delta', label: 'Net Delta', desc: 'Track live delta risk and net delta exposure of active positions' },
+      { href: '/iv-charts', label: 'IV Charts', desc: 'Implied Volatility history & skew' },
       { href: '/options/crudeoil', label: 'Crude Oil Options', desc: 'Max pain, PCR & live option chain for MCX Crude Oil' },
+    ],
+  },
+  {
+    label: 'Options Analysis',
+    icon: LineChart,
+    links: [
       { href: '/options/analyzer', label: 'Option Analyzer', desc: 'Rank strikes based on technical indicators & OI change' },
       { href: '/options/premium-bar', label: 'Premium Bar Chart', desc: 'CE vs PE premium bar charts & straddle curve across strikes' },
       { href: '/options/live-charts', label: 'Live Options Charts', desc: 'Live straddle, rolling straddle, strangle & custom strategy premium charts' },
-      { href: '/iv-charts', label: 'IV Charts', desc: 'Implied Volatility history & skew' },
-      { href: '/baskets', label: 'Baskets', desc: 'Predefined option strategies with payoff diagram & quick basket order entry' },
-      { href: '/scalper', label: 'Scalper', desc: 'Multi-window active trading & scalping order ticket' },
-      { href: '/advanced-scalper', label: 'Advanced Scalper', desc: 'Configurable 2-5 box scalper with per-box CE/PE, strike & lot presets' },
       { href: '/straddle-analysis', label: 'Straddle Analysis', desc: 'ATM straddle premium patterns by weekday, DTE & regime' },
       { href: '/strangle-analysis', label: 'Strangle Analysis', desc: 'OTM strangle premium patterns by offset, weekday, DTE & regime' },
-      { href: '/strategy-builder', label: 'Strategy Builder', desc: 'Build & track multi-leg NIFTY options strategies' },
       { href: '/option-strats', label: 'Option Strats', desc: 'Multi-leg P&L heatmap analyzer — strike × date, IV-adjustable' },
       { href: '/option-strats-stocks', label: 'Option Strats (Stocks)', desc: 'Same P&L heatmap analyzer for Nifty 50 F&O stocks' },
+    ],
+  },
+  {
+    label: 'Trading',
+    icon: Zap,
+    links: [
+      { href: '/scalper', label: 'Scalper', desc: 'Multi-window active trading & scalping order ticket' },
+      { href: '/advanced-scalper', label: 'Advanced Scalper', desc: 'Configurable 2-5 box scalper with per-box CE/PE, strike & lot presets' },
+      { href: '/options/quiktrade', label: 'QuikTrade', desc: 'OI buildup quadrants, live positions & P&L' },
+      { href: '/baskets', label: 'Baskets', desc: 'Predefined option strategies with payoff diagram & quick basket order entry' },
+      { href: '/strategy-builder', label: 'Strategy Builder', desc: 'Build & track multi-leg NIFTY options strategies' },
+      { href: '/csp-screener', label: 'CSP Screener', desc: 'Scan Nifty 500 F&O stocks for cash-secured-put candidates, track & roll positions' },
       { href: '/cash-secured-puts', label: 'Cash Secured Puts', desc: 'Track underlyings, sell PUTs, monitor active orders & trades' },
+      { href: '/options/delta', label: 'Net Delta', desc: 'Track live delta risk and net delta exposure of active positions' },
     ],
   },
   {
@@ -144,7 +162,9 @@ export default function NavBar() {
               <span>{group.label}</span>
               <ChevronDown className="h-3 w-3 opacity-55 transition-transform duration-200 group-hover:translate-y-0.5" />
             </DropdownMenuTrigger>
-            <DropdownMenuContent align="start" className="min-w-[240px] max-w-[280px] bg-zinc-950/95 backdrop-blur-xl border border-zinc-800/80 rounded-xl shadow-2xl p-1.5 gap-1 flex flex-col z-50">
+            {/* Derivatives has grown past 20 entries — without a scroll cap the
+                tail renders below the fold and is unreachable entirely. */}
+            <DropdownMenuContent align="start" className="min-w-[240px] max-w-[280px] max-h-[calc(100vh-4rem)] overflow-y-auto overscroll-contain bg-zinc-950/95 backdrop-blur-xl border border-zinc-800/80 rounded-xl shadow-2xl p-1.5 gap-1 flex flex-col z-50">
               {group.links.map((link) => {
                 const isLinkActive = pathname === link.href;
                 return (
