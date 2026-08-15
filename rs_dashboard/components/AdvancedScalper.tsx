@@ -2,7 +2,7 @@
 
 import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import NavBar from './NavBar';
-import { Zap, RefreshCw, Shield, ShieldOff, Plus } from 'lucide-react';
+import { Zap, RefreshCw, Shield, ShieldOff, Plus, Scissors } from 'lucide-react';
 import {
   OptionPanel, PositionsTable, TabTable, FundsView, pollPositionFlat, pollPositionReduced,
   type ChainOcEntry, type Toast,
@@ -14,6 +14,7 @@ import { useCopyTrade, CopyTradeControls } from './CopyTrade';
 import { useBrokerSelector, scalperRoute, BROKER_LABELS, type Broker } from '@/hooks/useBrokerSelector';
 import { contractMultiplier } from '@/lib/positionPnl';
 import { openLots, fractionUnits } from '@/lib/partialQty';
+import { positionKey, positionProduct, findLivePosition, closeOrderProduct } from '@/lib/positionProduct';
 import TopWeightStocks from './TopWeightStocks';
 import TopIndices from './TopIndices';
 
@@ -31,6 +32,15 @@ interface BoxConfig {
 
 const MIN_BOXES = 2;
 const MAX_BOXES = 5;
+
+/** One leg of the "close 50% of everything" plan. */
+interface HalfLeg {
+  pos: Record<string, unknown>;
+  sym: string;
+  /** Absolute units to close — already rounded down to whole lots. */
+  units: number;
+  lots: number;
+}
 
 const UNDERLYINGS = ['NIFTY', 'BANKNIFTY', 'SENSEX'] as const;
 const STRIKE_STEP: Record<string, number> = { NIFTY: 50, BANKNIFTY: 100, SENSEX: 100 };
@@ -69,7 +79,12 @@ export default function AdvancedScalper() {
   // Security ID map per strike — enables fast-order (no Python per order)
   const [strikeMap, setStrikeMap]   = useState<Record<string, { ceId?: string; peId?: string; ceSymbol?: string; peSymbol?: string }>>({});
   const { broker, setBroker, authenticatedBrokers } = useBrokerSelector();
-  const [lotSize, setLotSize]       = useState(75);
+  // null until the lookup resolves it from DhanHelper.get_lot_size(). Never seed
+  // this with a literal: exchange lot sizes get revised (NIFTY has been 75 and is
+  // 65 today), and a seeded value is indistinguishable from a resolved one — it
+  // would size real orders and partial-close chips against a stale number, and
+  // would carry the previous underlying's lot across a NIFTY→SENSEX switch.
+  const [lotSize, setLotSize]       = useState<number | null>(null);
 
   // Orders in flight, keyed by box id — blocks double-fire and gates the Buy/Sell
   // buttons until strikeMap is loaded (avoids a silent fallback to the slow
@@ -100,6 +115,14 @@ export default function AdvancedScalper() {
   const [confirmExitAll, setConfirmExitAll] = useState(false);
   const [exitingAll, setExitingAll] = useState(false);
 
+  // Halve-all confirm-arm (close 50% of every open leg)
+  const [confirmHalfAll, setConfirmHalfAll] = useState(false);
+  const [halvingAll, setHalvingAll] = useState(false);
+  // The exact plan the user armed. The live plan is recomputed on every
+  // positions poll, so without this the second click would fire a different
+  // set of orders than the first click previewed.
+  const armedHalfPlanRef = useRef<{ legs: HalfLeg[]; skipped: string[] } | null>(null);
+
   // Bottom tabs
   const [activeTab, setActiveTab]       = useState<'positions' | 'orders' | 'trades' | 'funds'>('positions');
   const [positionsData, setPositionsData] = useState<Record<string, unknown>[]>([]);
@@ -124,7 +147,10 @@ export default function AdvancedScalper() {
   const [confirmClear, setConfirmClear] = useState(false);
   const [guardError, setGuardError]     = useState('');
 
-  // Per-position guards (target / SL / trailing SL)
+  // Per-position guards (target / SL / trailing SL).
+  // Keyed by lib/positionProduct's `positionKey` — (symbol, product), not symbol
+  // alone: the same strike can be open under both INTRADAY and MARGIN, and those
+  // are two positions that must be guarded and closed independently.
   const [posGuards, setPosGuards] = useState<Record<string, PositionGuard>>({});
   const [closingPositions, setClosingPositions] = useState<Set<string>>(new Set());
 
@@ -574,6 +600,9 @@ export default function AdvancedScalper() {
     setPrevClose({});
     setStrikeMap({});   // liveQuotes reset is handled inside useLiveOptionsWS
     setChainSpot(0);
+    // Lot size belongs to the OUTGOING underlying (NIFTY 65 vs SENSEX 20). Keeping
+    // it would size the first order after a switch against the wrong contract.
+    setLotSize(null);
   }, [expiry, underlying]);
 
   // ─── useEffect 2b: Fetch the chain (strike ladder + prev close) ────
@@ -682,7 +711,9 @@ export default function AdvancedScalper() {
         if (requestedExpiry !== expiryRef.current) return;
         if (j.success && j.data) {
           setStrikeMap(j.data.strikes);
-          setLotSize(j.data.lotSize);
+          // Only accept a usable lot size. Leaving it null keeps every
+          // sizing-dependent control disabled rather than trading on a bad value.
+          setLotSize(Number(j.data.lotSize) > 0 ? Number(j.data.lotSize) : null);
         }
       })
       .catch(() => {});
@@ -845,6 +876,13 @@ export default function AdvancedScalper() {
       }
     }
 
+    // Quantity is lots × lot size, so an unresolved lot size means the order size
+    // is unknown. Refuse rather than fall back to a literal.
+    if (!lotSize || lotSize <= 0) {
+      addToast('error', `${side} ${box.side} failed`, `Lot size for ${underlying} not resolved yet — retry in a moment`);
+      return;
+    }
+
     orderInFlightRef.current.add(boxId);
     setOrderPendingBoxes(prev => new Set([...prev, boxId]));
 
@@ -945,17 +983,30 @@ export default function AdvancedScalper() {
   ): Promise<{ ok: boolean; qty: number; closedUnits: number; partial: boolean }> => {
     const sym = String(pos.tradingSymbol ?? '');
     const fallbackSecId = String(pos.securityId ?? pos.security_id ?? '');
+    // Guards and in-flight tracking key off (symbol, product): the same symbol
+    // can be open under two products, and they must be closed independently.
+    const key = positionKey(pos);
+    const product = positionProduct(pos);
 
     if (!sym || !fallbackSecId) {
       addToast('error', `Cannot close ${sym || 'position'}`, 'Missing security ID');
       return { ok: false, qty: 0, closedUnits: 0, partial: false };
     }
 
+    // A product this broker cannot book (CO/BO, or a foreign vocabulary) must
+    // not be sent — the order route would default it to intraday, which opens a
+    // new position instead of reducing this one.
+    const productPayload = closeOrderProduct(broker, product);
+    if (!productPayload) {
+      addToast('error', `Cannot close ${sym}`, `Unsupported product "${product}" — square this leg off at the broker`);
+      return { ok: false, qty: 0, closedUnits: 0, partial: false };
+    }
+
     // Prevent double-fire while order is in flight
-    if (closingInFlightRef.current.has(sym)) return { ok: false, qty: 0, closedUnits: 0, partial: false };
-    closingInFlightRef.current.add(sym);
-    setPosGuards(prev => prev[sym] ? { ...prev, [sym]: { ...prev[sym], triggered: true } } : prev);
-    setClosingPositions(prev => new Set([...prev, sym]));
+    if (closingInFlightRef.current.has(key)) return { ok: false, qty: 0, closedUnits: 0, partial: false };
+    closingInFlightRef.current.add(key);
+    setPosGuards(prev => prev[key] ? { ...prev, [key]: { ...prev[key], triggered: true } } : prev);
+    setClosingPositions(prev => new Set([...prev, key]));
 
     try {
       // Exchange is derived from the POSITION itself (not the currently-selected
@@ -970,11 +1021,19 @@ export default function AdvancedScalper() {
         const posRes = await fetch(posUrl);
         const posJson = await posRes.json() as { success: boolean; data?: Record<string, unknown>[] };
         if (posJson.success && posJson.data) {
-          const match = posJson.data.find(p => String(p.tradingSymbol) === sym);
-          if (match) {
-            liveNetQty = Number(match.netQty);
-            liveSecId = String(match.securityId ?? match.security_id ?? fallbackSecId);
-            liveExchange = String(match.exchangeSegment ?? match.exchange ?? liveExchange);
+          const found = findLivePosition(posJson.data, pos);
+          if (found.kind === 'ambiguous') {
+            // `triggered` is deliberately left set: a guard that cannot identify
+            // its own row cannot close it either, and re-entering here every
+            // second would bury every other toast under a storm of this one.
+            addToast('error', `Cannot close ${sym}`,
+              `${found.count} rows share this symbol and the position reports no product — close it from the broker terminal`);
+            return { ok: false, qty: 0, closedUnits: 0, partial: false };
+          }
+          if (found.kind === 'match') {
+            liveNetQty = Number(found.row.netQty);
+            liveSecId = String(found.row.securityId ?? found.row.security_id ?? fallbackSecId);
+            liveExchange = String(found.row.exchangeSegment ?? found.row.exchange ?? liveExchange);
           }
         }
       } catch {
@@ -983,7 +1042,7 @@ export default function AdvancedScalper() {
 
       if (liveNetQty === 0) {
         addToast('success', `${sym} already flat`, `(${reason})`);
-        setPosGuards(prev => { const next = { ...prev }; delete next[sym]; return next; });
+        setPosGuards(prev => { const next = { ...prev }; delete next[key]; return next; });
         fetchTabData();
         return { ok: true, qty: 0, closedUnits: 0, partial: false };
       }
@@ -1000,10 +1059,11 @@ export default function AdvancedScalper() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(
           // Dhan is the only broker that closes by numeric securityId; the rest
-          // close by trading symbol.
+          // close by trading symbol. productPayload books the close under the
+          // position's own product so it reduces rather than opens.
           broker !== 'dhan'
-            ? { tradingsymbol: sym, quantity: qty, side, orderType: 'MARKET', exchange: liveExchange }
-            : { securityId: liveSecId, quantity: qty, side, orderType: 'MARKET', exchangeSegment: liveExchange },
+            ? { tradingsymbol: sym, quantity: qty, side, orderType: 'MARKET', exchange: liveExchange, ...productPayload.fields }
+            : { securityId: liveSecId, quantity: qty, side, orderType: 'MARKET', exchangeSegment: liveExchange, ...productPayload.fields },
         ),
       });
       const j = await res.json() as { success: boolean; order_id?: string; error?: string };
@@ -1021,25 +1081,25 @@ export default function AdvancedScalper() {
             // A partial can't be verified by "is it flat" — require the book to
             // shrink by at least what we asked for, and report what actually
             // left so the caller sizes its follow-up off reality.
-            const removed = await pollPositionReduced(broker, sym, liveAbs, qty);
+            const removed = await pollPositionReduced(broker, pos, liveAbs, qty);
             if (removed === null) {
               addToast('error', `Could not confirm ${sym} partial close`, `Requested ${qty} of ${liveAbs} qty — book still shows more open, check manually`);
-              setPosGuards(prev => prev[sym] ? { ...prev, [sym]: { ...prev[sym], triggered: false } } : prev);
+              setPosGuards(prev => prev[key] ? { ...prev, [key]: { ...prev[key], triggered: false } } : prev);
               return { ok: false, qty: liveNetQty, closedUnits: 0, partial: true };
             }
             confirmedUnits = removed;
           } else {
-            const confirmedFlat = await pollPositionFlat(broker, sym);
+            const confirmedFlat = await pollPositionFlat(broker, pos);
             if (!confirmedFlat) {
               addToast('error', `Could not confirm ${sym} closed`, 'Order accepted but position still shows open — check manually');
-              setPosGuards(prev => prev[sym] ? { ...prev, [sym]: { ...prev[sym], triggered: false } } : prev);
+              setPosGuards(prev => prev[key] ? { ...prev, [key]: { ...prev[key], triggered: false } } : prev);
               return { ok: false, qty: liveNetQty, closedUnits: 0, partial: false };
             }
             confirmedUnits = liveAbs;
           }
         }
         addToast('success', `${isPartial ? 'Partially closed' : 'Closed'} ${sym} (${reason})`,
-          `${qty}${isPartial ? ` of ${liveAbs}` : ''} qty · ID: ${j.order_id}`);
+          `${qty}${isPartial ? ` of ${liveAbs}` : ''} qty${productPayload.assumed ? '' : ` · ${product}`} · ID: ${j.order_id}`);
         if (isPartial) {
           // Quantity survives, so the user's target/SL/trail must survive with
           // it. bestPrice stays valid (same entry, same direction) — only
@@ -1047,26 +1107,26 @@ export default function AdvancedScalper() {
           // Note: if the guard level was already breached when the partial was
           // clicked, the loop will close the remainder within ~1s. That's the
           // guard doing its job; leaving the remainder unprotected is worse.
-          setPosGuards(prev => prev[sym] ? { ...prev, [sym]: { ...prev[sym], triggered: false } } : prev);
+          setPosGuards(prev => prev[key] ? { ...prev, [key]: { ...prev[key], triggered: false } } : prev);
         } else {
           // Drop the guard entirely — leaving it would carry stale bestPrice /
           // trailEnabled into a future re-entry on the same symbol.
-          setPosGuards(prev => { const next = { ...prev }; delete next[sym]; return next; });
+          setPosGuards(prev => { const next = { ...prev }; delete next[key]; return next; });
         }
         setTimeout(fetchTabData, 800);
         return { ok: true, qty: liveNetQty, closedUnits: confirmedUnits, partial: isPartial };
       } else {
         addToast('error', `Close failed: ${sym}`, j.error ?? 'Unknown error');
-        setPosGuards(prev => prev[sym] ? { ...prev, [sym]: { ...prev[sym], triggered: false } } : prev);
+        setPosGuards(prev => prev[key] ? { ...prev, [key]: { ...prev[key], triggered: false } } : prev);
         return { ok: false, qty: liveNetQty, closedUnits: 0, partial: isPartial };
       }
     } catch (e) {
       addToast('error', 'Network error closing position', String(e));
-      setPosGuards(prev => prev[sym] ? { ...prev, [sym]: { ...prev[sym], triggered: false } } : prev);
+      setPosGuards(prev => prev[key] ? { ...prev, [key]: { ...prev[key], triggered: false } } : prev);
       return { ok: false, qty: 0, closedUnits: 0, partial: false };
     } finally {
-      closingInFlightRef.current.delete(sym);
-      setClosingPositions(prev => { const s = new Set(prev); s.delete(sym); return s; });
+      closingInFlightRef.current.delete(key);
+      setClosingPositions(prev => { const s = new Set(prev); s.delete(key); return s; });
     }
   }, [broker, addToast, fetchTabData]);
 
@@ -1077,7 +1137,15 @@ export default function AdvancedScalper() {
   // three supported underlyings (a BANKNIFTY symbol never matches NIFTY).
   const lotSizeForRow = useCallback((row: Record<string, unknown>): number | null => {
     const sym = String(row.tradingSymbol ?? '').toUpperCase();
-    return sym.startsWith(underlying) ? lotSize : null;
+    if (!sym.startsWith(underlying)) return null;
+    // A bare prefix test also swallows longer underlyings that start with this
+    // one — NIFTYNXT50 (lot 25) would inherit NIFTY's lot size (75) and size its
+    // partials against the wrong granularity. Every broker's symbol continues
+    // into the expiry right after the underlying, so the next character is a
+    // digit or separator; a letter means this is a different instrument.
+    const next = sym.charAt(underlying.length);
+    if (next && next >= 'A' && next <= 'Z') return null;
+    return lotSize;
   }, [underlying, lotSize]);
 
   // Partial square-off from the positions table. No verifyFlat: manual closes
@@ -1134,6 +1202,12 @@ export default function AdvancedScalper() {
       // netQty can only under-move, never over-move.
       const wantHalf = (box.moveFraction ?? 'FULL') === 'HALF';
       const posAbs = Math.abs(Number(pos.netQty) || 0);
+      // A half-move needs whole-lot granularity, and re-opening at the new strike
+      // needs it too. Without a resolved lot size neither can be sized.
+      if (!lotSize || lotSize <= 0) {
+        addToast('error', 'Cannot shift strike', `Lot size for ${underlying} not resolved yet — retry in a moment`);
+        return;
+      }
       const moveUnits = wantHalf ? fractionUnits(posAbs, lotSize, 0.5) : posAbs;
       if (wantHalf && moveUnits <= 0) {
         addToast('error', 'Cannot move half', `${box.strike} ${box.side} is ${openLots(posAbs, lotSize)} lot — need ≥2 lots to split`);
@@ -1331,22 +1405,117 @@ export default function AdvancedScalper() {
     }
   }, [confirmExitAll, broker, addToast, fetchTabData]);
 
-  const handleGuardChange = useCallback((sym: string, field: 'target' | 'sl', value: string) => {
+  // ─── Close 50% of every open leg ──────────────────────────────────
+
+  // The plan is derived up front so the button can show what it will do and
+  // stay disabled when it would do nothing. Legs are skipped — never
+  // approximated — when the lot granularity is unknown or half floors to zero
+  // lots: leaving a leg untouched is recoverable, sending a wrong-sized market
+  // order is not.
+  const halfAllPlan = useMemo(() => {
+    const legs: HalfLeg[] = [];
+    const skipped: string[] = [];
+    for (const pos of enrichedPositions) {
+      const netQty = Number(pos.netQty);
+      if (!netQty) continue;
+      const sym = String(pos.tradingSymbol ?? '');
+      const ls = lotSizeForRow(pos);
+      // lotSizeForRow returns null for anything outside the selected underlying
+      // (see its note) — that also keeps equity/MCX legs out of this action.
+      if (!ls || ls <= 0) { skipped.push(`${sym} (not ${underlying})`); continue; }
+      // A product this broker cannot book would be refused by closePosition
+      // anyway; leaving it out of the plan keeps the count honest.
+      if (!closeOrderProduct(broker, positionProduct(pos))) {
+        skipped.push(`${sym} (${positionProduct(pos)} not closable here)`);
+        continue;
+      }
+      const units = fractionUnits(netQty, ls, 0.5);
+      if (units <= 0) { skipped.push(`${sym} (${openLots(netQty, ls)} lot — needs ≥2)`); continue; }
+      legs.push({ pos, sym, units, lots: units / ls });
+    }
+    return { legs, skipped };
+  }, [enrichedPositions, lotSizeForRow, underlying, broker]);
+
+  // Sequential, not parallel: closePosition re-reads the live book per leg, and
+  // firing every leg's market order at once risks the broker's rate limit on
+  // exactly the requests that must not be dropped.
+  const handleHalfAll = useCallback(async () => {
+    if (!halfAllPlan.legs.length || halvingAll) return;
+    if (!confirmHalfAll) {
+      // Freeze what is being confirmed. Every way the book can move between the
+      // two clicks then fails safe: a leg that shrank or closed is clamped down
+      // (or no-ops) by closePosition against the live quantity, and a leg opened
+      // after arming is simply not in the plan the user agreed to.
+      armedHalfPlanRef.current = halfAllPlan;
+      setConfirmHalfAll(true);
+      setTimeout(() => {
+        armedHalfPlanRef.current = null;
+        setConfirmHalfAll(false);
+      }, 3000);
+      return;
+    }
+    setConfirmHalfAll(false);
+    setHalvingAll(true);
+    // The armed plan, not the live one. Also a genuine snapshot for the loop
+    // below: enrichedPositions is rebuilt by the poll, and iterating a list that
+    // changed mid-loop would skip or re-close legs.
+    const plan = armedHalfPlanRef.current ?? halfAllPlan;
+    armedHalfPlanRef.current = null;
+    const legs = plan.legs;
+    const skipped = plan.skipped;
+    let closed = 0;
+    let alreadyFlat = 0;
+    const failed: string[] = [];
+    try {
+      for (const leg of legs) {
+        // closePosition clamps `units` against the freshly re-fetched live
+        // quantity, so a leg that shrank since the snapshot under-closes rather
+        // than over-closing or flipping. No verifyFlat — same fast path as the
+        // per-row chips; the refresh below shows the result.
+        const r = await closePosition(leg.pos, 'Bulk 50%', { closeUnits: leg.units });
+        if (!r.ok) failed.push(leg.sym);
+        else if (r.closedUnits > 0) closed++;
+        else alreadyFlat++;
+      }
+      // closePosition toasts each leg; this is the roll-up, and the only place
+      // the user learns a leg was never attempted.
+      const detail = [
+        alreadyFlat > 0 ? `${alreadyFlat} already flat` : '',
+        skipped.length ? `skipped: ${skipped.join(', ')}` : '',
+      ].filter(Boolean).join(' · ');
+      if (failed.length) {
+        addToast('error', `Halved ${closed} of ${legs.length} legs`,
+          `Failed: ${failed.join(', ')} — check manually${detail ? ` · ${detail}` : ''}`);
+      } else {
+        addToast('success', `Closed 50% on ${closed} leg${closed === 1 ? '' : 's'}`,
+          detail || undefined);
+      }
+    } catch (e) {
+      addToast('error', 'Bulk 50% close aborted', String(e));
+    } finally {
+      setHalvingAll(false);
+      setTimeout(fetchTabData, 1000);
+    }
+  }, [halfAllPlan, halvingAll, confirmHalfAll, closePosition, addToast, fetchTabData]);
+
+  // `posKey` is the composite (symbol, product) key from lib/positionProduct,
+  // NOT a trading symbol — see the posGuards declaration.
+  const handleGuardChange = useCallback((posKey: string, field: 'target' | 'sl', value: string) => {
     setPosGuards(prev => {
-      const existing: PositionGuard = prev[sym] ?? { target: '', sl: '', trailEnabled: false, bestPrice: 0, triggered: false };
+      const existing: PositionGuard = prev[posKey] ?? { target: '', sl: '', trailEnabled: false, bestPrice: 0, triggered: false };
       return {
         ...prev,
-        [sym]: { ...existing, [field]: value, triggered: false },
+        [posKey]: { ...existing, [field]: value, triggered: false },
       };
     });
   }, []);
 
-  const handleTrailToggle = useCallback((sym: string) => {
+  const handleTrailToggle = useCallback((posKey: string) => {
     setPosGuards(prev => {
-      const existing: PositionGuard = prev[sym] ?? { target: '', sl: '', trailEnabled: false, bestPrice: 0, triggered: false };
+      const existing: PositionGuard = prev[posKey] ?? { target: '', sl: '', trailEnabled: false, bestPrice: 0, triggered: false };
       return {
         ...prev,
-        [sym]: { ...existing, trailEnabled: !existing.trailEnabled, bestPrice: 0, triggered: false },
+        [posKey]: { ...existing, trailEnabled: !existing.trailEnabled, bestPrice: 0, triggered: false },
       };
     });
   }, []);
@@ -1359,8 +1528,10 @@ export default function AdvancedScalper() {
       const peakUpdates: Record<string, number> = {};
 
       for (const pos of positions) {
-        const sym = String(pos.tradingSymbol ?? '');
-        const guard = guards[sym];
+        // Keyed per (symbol, product) — the same symbol open under two products
+        // is two independently guarded rows, not one shared guard.
+        const posKey = positionKey(pos);
+        const guard = guards[posKey];
         if (!guard || guard.triggered) continue;
 
         const ltp = Number(pos.lastTradedPrice);
@@ -1387,9 +1558,9 @@ export default function AdvancedScalper() {
               const newBest = currentBest === 0
                 ? ltp
                 : (isLong ? Math.max(currentBest, ltp) : Math.min(currentBest, ltp));
-              if (newBest !== currentBest) peakUpdates[sym] = newBest;
+              if (newBest !== currentBest) peakUpdates[posKey] = newBest;
 
-              const effectiveBest = peakUpdates[sym] ?? currentBest;
+              const effectiveBest = peakUpdates[posKey] ?? currentBest;
               if (effectiveBest > 0) {
                 const trailSLPrice = isLong
                   ? effectiveBest - initialRisk
@@ -1835,6 +2006,32 @@ export default function AdvancedScalper() {
                   </>
                 )}
 
+                {/* Close 50% of every open leg (lot-rounded, per-leg orders) */}
+                <button onClick={handleHalfAll} disabled={halvingAll || halfAllPlan.legs.length === 0}
+                  className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[11px] font-bold border transition-all active:scale-95 disabled:opacity-40 disabled:cursor-not-allowed shrink-0 whitespace-nowrap ${
+                    halvingAll
+                      ? 'bg-amber-900/40 border-amber-800 text-amber-400'
+                      : confirmHalfAll
+                      ? 'bg-amber-500 border-amber-400 text-black animate-pulse shadow-lg shadow-amber-500/20'
+                      : 'bg-amber-950/60 border-amber-900/60 text-amber-400 hover:bg-amber-900/40 hover:border-amber-700 hover:text-amber-300'
+                  }`}
+                  title={
+                    halfAllPlan.legs.length === 0
+                      ? halfAllPlan.skipped.length
+                        ? `No leg can be halved — ${halfAllPlan.skipped.join(', ')}`
+                        : 'No open positions to halve'
+                      : `Market-close half of each leg, rounded down to whole lots: ${
+                          halfAllPlan.legs.map(l => `${l.sym} ${l.units} qty (${l.lots} lot)`).join(', ')
+                        }${halfAllPlan.skipped.length ? ` · skipped: ${halfAllPlan.skipped.join(', ')}` : ''}`
+                  }>
+                  {halvingAll ? <RefreshCw className="h-3 w-3 animate-spin" /> : <Scissors className="h-3 w-3" />}
+                  {halvingAll
+                    ? 'Closing…'
+                    : confirmHalfAll
+                    ? `Confirm 50% on ${halfAllPlan.legs.length} leg${halfAllPlan.legs.length === 1 ? '' : 's'}?`
+                    : `Close 50% All${halfAllPlan.legs.length ? ` (${halfAllPlan.legs.length})` : ''}`}
+                </button>
+
                 {/* Exit ALL Positions (broker-level nuclear) */}
                 <button onClick={handleExitAll} disabled={exitingAll}
                   className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[11px] font-bold border transition-all active:scale-95 disabled:opacity-40 disabled:cursor-not-allowed shrink-0 whitespace-nowrap ${
@@ -1974,7 +2171,9 @@ export default function AdvancedScalper() {
           const pos = secId ? positionsBySecId[secId] : undefined;
           const boxPnl = pos ? (Number(pos.realizedProfit) || 0) + (Number(pos.unrealizedProfit) || 0) : undefined;
           const hasOpenPosition = !!pos && Number(pos.netQty) !== 0;
-          const boxOpenLots = pos ? openLots(Number(pos.netQty), lotSize) : 0;
+          // 0 while the lot size is unresolved — openLots treats an unusable lot
+          // size the same way, and the ½-move control stays disabled below.
+          const boxOpenLots = pos && lotSize ? openLots(Number(pos.netQty), lotSize) : 0;
 
           return (
             <div key={box.id} className="flex-none w-[calc(20%-0.6rem)] min-w-[300px]">

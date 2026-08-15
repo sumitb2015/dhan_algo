@@ -30,6 +30,11 @@ import { AlertTriangle, Plus, RefreshCw, RotateCcw, ShoppingBasket, Trash2 } fro
 import { cn } from '@/lib/utils';
 
 const UNDERLYING = 'NIFTY';
+// PREVIEW ONLY — scales the payoff curve/heatmap for the moment before
+// /api/lotsize (DhanHelper.get_lot_size) resolves. It is deliberately NOT a
+// trading fallback: placing a trade refuses outright while `lotSize` is null,
+// because this literal goes stale on every exchange lot revision (NIFTY has
+// been 75 and is 65 today).
 const FALLBACK_LOT_SIZE = 75;
 
 interface LegDraft {
@@ -349,6 +354,12 @@ export default function OptionStrats() {
       addToast('error', 'No broker logged in', 'Log in to Dhan or Zerodha before placing a trade');
       return;
     }
+    // Never size a live order off the display fallback — it is a placeholder for
+    // the payoff preview, not a tradable lot size.
+    if (lotSize === null) {
+      addToast('error', 'Cannot place trade', `Lot size for ${UNDERLYING} not loaded yet — wait a moment and retry`);
+      return;
+    }
     if (!confirmPlace) {
       setConfirmPlace(true);
       setTimeout(() => setConfirmPlace(false), 4000);
@@ -361,7 +372,7 @@ export default function OptionStrats() {
     setPlacing(true);
 
     type QueuedLeg = { side: Side; type: OptType; strike: number; qty: number };
-    const queued: QueuedLeg[] = legs.map((l) => ({ side: l.side, type: l.type, strike: l.strike, qty: l.qtyLots * effectiveLotSize }));
+    const queued: QueuedLeg[] = legs.map((l) => ({ side: l.side, type: l.type, strike: l.strike, qty: l.qtyLots * lotSize }));
     const ordered = sortLegsForPlacement(queued.map((l) => ({ ...l, side: (l.side === 'BUY' ? 'B' : 'S') as 'B' | 'S' })));
     const placedLegs: QueuedLeg[] = [];
 
@@ -404,7 +415,7 @@ export default function OptionStrats() {
       placingRef.current = false;
       setPlacing(false);
     }
-  }, [legs, selectedExpiry, hasAuthenticatedBroker, confirmPlace, effectiveLotSize, broker, strikeMap, addToast, rollbackPlacedLegs]);
+  }, [legs, selectedExpiry, hasAuthenticatedBroker, confirmPlace, lotSize, broker, strikeMap, addToast, rollbackPlacedLegs]);
 
   const legMarketData = useMemo(() => {
     const map = new Map<string, { price: number; iv: number | null } | null>();

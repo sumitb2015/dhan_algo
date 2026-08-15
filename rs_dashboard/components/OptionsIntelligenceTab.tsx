@@ -9,7 +9,6 @@ import {
 // ─── Constants ────────────────────────────────────────────────────
 
 const UNDERLYING  = 'NIFTY';
-const LOT_SIZE    = 75;
 const STRIKE_STEP = 50;
 const CHAIN_POLL  = 30_000;  // 30 s
 const INTEL_POLL  = 60_000;  // 60 s
@@ -49,9 +48,12 @@ function fmtStrike(n: number): string {
   return n.toLocaleString('en-IN');
 }
 
-// Compute GEX profile from chain API data when no snapshot history
+// Compute GEX profile from chain API data when no snapshot history.
+// `lotSize` is passed in from /api/lotsize (DhanHelper.get_lot_size) rather than
+// held as a constant here — GEX scales linearly with it, so a stale literal
+// silently skews every strike's number and the flip point derived from them.
 function computeGexFromChain(
-  oc: Record<string, ChainEntry>, atm: number, spot: number, wings: number,
+  oc: Record<string, ChainEntry>, atm: number, spot: number, wings: number, lotSize: number,
 ): GexProfileEntry[] {
   const wingRange = wings * STRIKE_STEP;
   return Object.entries(oc)
@@ -63,8 +65,8 @@ function computeGexFromChain(
       const peOI    = entry.pe?.oi ?? 0;
       const ceGamma = entry.ce?.greeks?.gamma ?? 0;
       const peGamma = entry.pe?.greeks?.gamma ?? 0;
-      const ce_gex  = Math.round(ceOI * ceGamma * LOT_SIZE);
-      const pe_gex  = Math.round(peOI * peGamma * LOT_SIZE);
+      const ce_gex  = Math.round(ceOI * ceGamma * lotSize);
+      const pe_gex  = Math.round(peOI * peGamma * lotSize);
       const net_gex = Math.round((ce_gex - pe_gex) * spot / 100);
       return { strike, net_gex, ce_gex, pe_gex };
     });
@@ -176,6 +178,19 @@ export default function OptionsIntelligenceTab({ expiry }: { expiry: string }) {
   const chainTimerRef = useRef<NodeJS.Timeout | null>(null);
   const intelTimerRef = useRef<NodeJS.Timeout | null>(null);
   const intelRef      = useRef<IntelResponse | null>(null);
+  // Read in fetchChain, which is a stable useCallback — a ref keeps the chain
+  // poll from being torn down and restarted when the lot size arrives.
+  const lotSizeRef    = useRef<number | null>(null);
+
+  useEffect(() => {
+    fetch(`/api/lotsize?symbol=${UNDERLYING}`)
+      .then(r => r.json())
+      .then((json: { lot_size?: number | null }) => {
+        const lot = Number(json?.lot_size);
+        if (Number.isFinite(lot) && lot > 0) lotSizeRef.current = lot;
+      })
+      .catch(() => {});
+  }, []);
 
   const fetchIntel = useCallback(async () => {
     try {
@@ -243,10 +258,15 @@ export default function OptionsIntelligenceTab({ expiry }: { expiry: string }) {
       if (intelRef.current?.hasData && (intelRef.current.gex_profile.length ?? 0) > 0) {
         setGexProfile(intelRef.current.gex_profile);
         setGexFlipStrike(intelRef.current.gex_flip_strike);
-      } else {
-        const profile = computeGexFromChain(oc, atmStrike, spotPrice, 10);
+      } else if (lotSizeRef.current) {
+        const profile = computeGexFromChain(oc, atmStrike, spotPrice, 10, lotSizeRef.current);
         setGexProfile(profile);
         setGexFlipStrike(computeGexFlipStrike(profile));
+      } else {
+        // No lot size yet — leave GEX empty rather than plotting a profile scaled
+        // by a guess. The next poll (30 s) picks it up.
+        setGexProfile([]);
+        setGexFlipStrike(null);
       }
     } catch (err) {
       setError(`Fetch error: ${String(err)}`);

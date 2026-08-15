@@ -58,7 +58,10 @@ export default function Baskets() {
   const [chainSpot, setChainSpot]   = useState(0);
   const [strikeMap, setStrikeMap]   = useState<Record<string, StrikeIdentifier>>({});
   const [farStrikeMap, setFarStrikeMap] = useState<Record<string, StrikeIdentifier>>({});
-  const [lotSize, setLotSize]       = useState(75);
+  // null until the lookup resolves it from DhanHelper.get_lot_size(). Not seeded
+  // with a literal: NIFTY has been 75 and is 65 today, and this multiplies into
+  // every leg's order quantity below.
+  const [lotSize, setLotSize]       = useState<number | null>(null);
 
   const { liveQuotes, bridgeStatus, lastUpdated, transport } = useLiveOptionsWS(expiry, broker, authenticatedBrokers, underlying);
 
@@ -204,7 +207,8 @@ export default function Baskets() {
         if (requestedUnderlyingForLookup !== underlyingRef.current || requestedExpiry !== expiryRef.current) return;
         if (j.success && j.data) {
           setStrikeMap(j.data.strikes);
-          setLotSize(j.data.lotSize);
+          // Only accept a usable lot size; null keeps placement blocked below.
+          setLotSize(Number(j.data.lotSize) > 0 ? Number(j.data.lotSize) : null);
         }
       })
       .catch(() => {});
@@ -316,10 +320,12 @@ export default function Baskets() {
   }, [strikeMap, expiry, addToast]);
 
   // ── Payoff + metrics ────────────────────────────────────────────
-  const payoffLegs = useMemo<PayoffLeg[]>(() => legs.map(l => ({
+  // Empty until the lot size resolves — a payoff curve scaled by a guessed lot
+  // size reads as real numbers and would misstate every rupee figure on screen.
+  const payoffLegs = useMemo<PayoffLeg[]>(() => (lotSize ? legs.map(l => ({
     side: l.side, option: l.option, strike: l.strike,
     premium: effectivePremium(l), qty: l.lots * multiplier * lotSize,
-  })), [legs, multiplier, lotSize, effectivePremium]);
+  })) : []), [legs, multiplier, lotSize, effectivePremium]);
 
   // Calendar/Diagonal legs expire on different dates — expiry-intrinsic payoff
   // math (computePayoff) is meaningless for a leg that's still alive, so the
@@ -387,6 +393,12 @@ export default function Baskets() {
     if (!legs.length || !expiry) return;
     if (!hasAuthenticatedBroker) {
       addToast('error', 'No broker logged in', 'Log in to Dhan or Zerodha before placing a basket');
+      return;
+    }
+    // Every leg's quantity is lots × multiplier × lot size, so an unresolved lot
+    // size means the whole basket's size is unknown. Refuse rather than guess.
+    if (!lotSize || lotSize <= 0) {
+      addToast('error', 'Cannot place basket', `Lot size for ${underlying} not resolved yet — retry in a moment`);
       return;
     }
     if (!confirmPlace) {
@@ -704,8 +716,8 @@ export default function Baskets() {
                 Clear All
               </Button>
               <div className="ml-auto text-[11px] text-zinc-500 leading-snug text-right">
-                <p className="font-semibold text-zinc-400">{totalQty} lots · {totalQty * lotSize} qty total</p>
-                <p>Buys placed before sells · {lotSize} qty per lot</p>
+                <p className="font-semibold text-zinc-400">{totalQty} lots{lotSize ? ` · ${totalQty * lotSize} qty total` : ''}</p>
+                <p>Buys placed before sells · {lotSize ? `${lotSize} qty per lot` : 'lot size loading…'}</p>
                 {premiumsUnavailable && (
                   <p className="text-amber-400 font-semibold mt-0.5">
                     No live/previous-close premium from broker — market may be closed. MARKET orders will still fill at the broker&apos;s prevailing price; enter a Price manually to preview payoff.

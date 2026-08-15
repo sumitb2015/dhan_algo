@@ -162,7 +162,10 @@ export default function OptionsSmartChainTab({ expiry }: { expiry: string }) {
   const intervalRef = useRef<NodeJS.Timeout | null>(null);
 
   const [lots, setLots]               = useState(1);
-  const [lotSize, setLotSize]         = useState(75);
+  // null until /api/lotsize resolves it from DhanHelper.get_lot_size(). Not seeded
+  // with a literal: NIFTY has been 75 and is 65 today, and this value multiplies
+  // into a real order quantity below.
+  const [lotSize, setLotSize]         = useState<number | null>(null);
   const [orderMessage, setOrderMessage] = useState<{ text: string; isError: boolean } | null>(null);
   const [ordering, setOrdering]       = useState(false);
 
@@ -184,6 +187,10 @@ export default function OptionsSmartChainTab({ expiry }: { expiry: string }) {
 
   const handlePlaceOrder = useCallback(async (securityId: string | number, side: 'BUY' | 'SELL') => {
     if (ordering) return;
+    if (!lotSize || lotSize <= 0) {
+      setOrderMessage({ text: `Lot size for ${UNDERLYING} not resolved yet — retry in a moment`, isError: true });
+      return;
+    }
     setOrdering(true);
     setOrderMessage(null);
     try {
@@ -419,7 +426,7 @@ export default function OptionsSmartChainTab({ expiry }: { expiry: string }) {
               +
             </button>
           </div>
-          <span className="text-[10px] text-zinc-500 font-mono">({lots * lotSize} Qty)</span>
+          <span className="text-[10px] text-zinc-500 font-mono">({lotSize ? `${lots * lotSize} Qty` : 'lot size…'})</span>
         </div>
 
         <span className="ml-auto text-[10px] text-zinc-600">Auto-refresh: 15s</span>

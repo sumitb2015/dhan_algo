@@ -1,6 +1,10 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { kotakPost, KOTAK_PATHS } from '@/lib/kotakToken';
 
+/** Products this route will book. CO/BO are excluded — Neo holds its own exit
+ *  order against them, which a plain market order would leave dangling. */
+const NEO_PRODUCTS = new Set(['MIS', 'NRML', 'CNC']);
+
 export async function GET(): Promise<NextResponse> {
   return NextResponse.json({ ready: true });
 }
@@ -19,9 +23,20 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   const {
     tradingsymbol, quantity, side,
     orderType = 'MARKET', price = 0,
-    exchange = 'nse_fo', product: productRaw = 'MIS',
+    exchange = 'nse_fo', product: productRaw,
   } = body;
-  const product = String(productRaw).toUpperCase() === 'NRML' ? 'NRML' : 'MIS';
+
+  // Reject an unrecognised product rather than coercing it to MIS. A close order
+  // booked under the wrong product does not reduce the position — Neo opens a
+  // fresh intraday one on the other side instead. Absent still defaults to MIS
+  // so callers that never sent the field are unaffected.
+  const product = productRaw === undefined ? 'MIS' : String(productRaw).toUpperCase();
+  if (!NEO_PRODUCTS.has(product)) {
+    return NextResponse.json(
+      { success: false, error: `Unsupported product: ${productRaw} (expected ${[...NEO_PRODUCTS].join(' / ')})` },
+      { status: 400 },
+    );
+  }
 
   if (!tradingsymbol || !quantity || !side) {
     return NextResponse.json({ success: false, error: 'Missing required fields: tradingsymbol, quantity, side' }, { status: 400 });

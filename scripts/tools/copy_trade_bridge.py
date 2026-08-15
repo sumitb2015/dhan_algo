@@ -80,7 +80,7 @@ os.chdir(ROOT)
 # those are all deferred inside the ChildBroker methods), so it does not widen
 # the double-spawn window the singleton mutex exists to close.
 from scripts.tools.child_brokers import (  # noqa: E402
-    MARGIN_BLOCKED, create_broker, find_option_symbol,
+    MARGIN_BLOCKED, create_broker, find_option_symbol, set_default_lot_size,
 )
 
 # copy_trade_reconcile.py imports this name from here — keep it exported so the
@@ -986,6 +986,19 @@ def main():
         print('[copy_trade_bridge] ERROR: Dhan auth failed', flush=True)
         sys.exit(1)
     helper = DhanHelper(dhan)
+
+    # Point child_brokers' last-resort lot size at the library's answer before any
+    # child is constructed (each one snapshots it into its margin state). Its
+    # module-level literal goes stale on every exchange revision; this is the only
+    # place with a DhanHelper to ask.
+    try:
+        _nifty_lot = helper.get_lot_size('NIFTY')
+        if set_default_lot_size(_nifty_lot):
+            print(f'[copy_trade_bridge] default lot size = {_nifty_lot} (get_lot_size)', flush=True)
+        else:
+            print(f'[copy_trade_bridge] WARN: get_lot_size(NIFTY) returned {_nifty_lot!r} — keeping built-in default', flush=True)
+    except Exception as exc:  # noqa: BLE001 - never block startup on this
+        print(f'[copy_trade_bridge] WARN: get_lot_size(NIFTY) failed ({exc}) — keeping built-in default', flush=True)
 
     # ---- child brokers -------------------------------------------------
     #

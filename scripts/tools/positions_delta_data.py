@@ -116,14 +116,17 @@ def main():
             expiry = datetime.now().strftime("%Y-%m-%d")
             strike = 24000.0
             opt_type = "CE"
-            lot_size = 50
+            # Ask the library rather than carry a literal: delta exposure scales
+            # linearly with the lot size, and this file's old default of 50 has
+            # been wrong since the contract was revised (75, now 65).
+            lot_size = helper.get_lot_size(underlying) or 0
             display_name = sym
         else:
             underlying = sec_info.get('UNDERLYING_SYMBOL', 'NIFTY')
             expiry = sec_info.get('SM_EXPIRY_DATE')
             strike = float(sec_info.get('STRIKE_PRICE') or 0.0)
             opt_type = sec_info.get('OPTION_TYPE', 'CE')
-            lot_size = int(sec_info.get('LOT_SIZE') or 50)
+            lot_size = int(sec_info.get('LOT_SIZE') or 0) or (helper.get_lot_size(underlying) or 0)
             display_name = sec_info.get('DISPLAY_NAME', sym)
 
         legs_data.append({

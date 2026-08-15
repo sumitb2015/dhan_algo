@@ -45,7 +45,27 @@ POSITIONS_MAX_AGE_SEC = 20
 # Kotak overrides this from its own master (lFreezeQty), which is 1801.
 DEFAULT_FREEZE_QTY = 1800
 
+# Last-resort lot size, used only when a symbol is absent from the child's own
+# instrument cache. Exchange lot sizes get revised (NIFTY has been 50, then 75,
+# and is 65 today), so this is NOT a literal anyone should rely on: the bridge
+# calls set_default_lot_size() at startup with DhanHelper.get_lot_size('NIFTY').
+# This module stays free of pandas/DhanHelper imports on purpose — the fast path
+# runs on the order-update WS callback thread — hence injection rather than a
+# direct call. The value below only survives if that injection never happens.
 DEFAULT_LOT_SIZE = 65
+
+
+def set_default_lot_size(size) -> bool:
+    """Point the fallback at the library-resolved lot size. Returns True if set."""
+    global DEFAULT_LOT_SIZE
+    try:
+        value = int(size)
+    except (TypeError, ValueError):
+        return False
+    if value <= 0:
+        return False
+    DEFAULT_LOT_SIZE = value
+    return True
 
 INSTRUMENTS_REFRESH_MIN_INTERVAL_SEC = 600
 

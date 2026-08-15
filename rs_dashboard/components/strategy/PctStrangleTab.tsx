@@ -24,6 +24,11 @@ import {
 import { AlertTriangle, CheckIcon, LogIn, LogOut, Minus, Plus, Save, Zap } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
+// PREVIEW ONLY — scales on-screen payoff/stat figures for the moment before
+// the lot size resolves from /api/lotsize (DhanHelper.get_lot_size). It is
+// deliberately NOT a trading fallback: the order paths below refuse while
+// `lotSize` is null, because this literal goes stale on every exchange lot
+// revision (NIFTY has been 75 and is 65 today).
 const FALLBACK_LOT_SIZE = 75;
 const UNDERLYING = 'NIFTY';
 

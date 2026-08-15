@@ -9,6 +9,7 @@ import { useCopyTrade, CopyTradeControls } from './CopyTrade';
 import { useBrokerSelector, scalperRoute, BROKER_LABELS, type Broker } from '@/hooks/useBrokerSelector';
 import { contractMultiplier } from '@/lib/positionPnl';
 import { partialCloseChips } from '@/lib/partialQty';
+import { positionKey, positionProduct, findLivePosition, closeOrderProduct } from '@/lib/positionProduct';
 
 // A MARKET close order being accepted by the broker doesn't guarantee it filled.
 // Polls the live positions book a few times so callers that chain a follow-up
@@ -18,9 +19,12 @@ import { partialCloseChips } from '@/lib/partialQty';
 // the extra round trips would add latency scalping can't afford.
 // Polls the live book until `accept(absNetQty)` holds, resolving the observed
 // absolute netQty — or null on timeout. A missing row counts as flat (0).
+// `ref` identifies WHICH book to watch — it must carry the same product as the
+// position being closed, or the poll reads the other product's row and can
+// report a leg flat while it is still fully open.
 async function pollPositionQty(
   broker: Broker,
-  tradingSymbol: string,
+  ref: Record<string, unknown>,
   accept: (absNetQty: number) => boolean,
   attempts = 4,
   delayMs = 500,
@@ -31,8 +35,11 @@ async function pollPositionQty(
       const res = await fetch(scalperRoute(broker, 'positions'));
       const j = await res.json() as { success: boolean; data?: Record<string, unknown>[] };
       if (j.success && j.data) {
-        const match = j.data.find(p => String(p.tradingSymbol) === tradingSymbol);
-        const abs = match ? Math.abs(Number(match.netQty) || 0) : 0;
+        const found = findLivePosition(j.data, ref);
+        // An ambiguous book is inconclusive, not flat — retry rather than
+        // reporting a close that may not have happened.
+        if (found.kind === 'ambiguous') continue;
+        const abs = found.kind === 'match' ? Math.abs(Number(found.row.netQty) || 0) : 0;
         if (accept(abs)) return abs;
       }
     } catch {
@@ -42,8 +49,8 @@ async function pollPositionQty(
   return null;
 }
 
-export async function pollPositionFlat(broker: Broker, tradingSymbol: string, attempts = 4, delayMs = 500): Promise<boolean> {
-  return (await pollPositionQty(broker, tradingSymbol, abs => abs === 0, attempts, delayMs)) !== null;
+export async function pollPositionFlat(broker: Broker, ref: Record<string, unknown>, attempts = 4, delayMs = 500): Promise<boolean> {
+  return (await pollPositionQty(broker, ref, abs => abs === 0, attempts, delayMs)) !== null;
 }
 
 // Partial-close counterpart: succeeds as soon as the book shows the leg has
@@ -53,13 +60,13 @@ export async function pollPositionFlat(broker: Broker, tradingSymbol: string, at
 // must treat that as a failure rather than sizing off a guess.
 export async function pollPositionReduced(
   broker: Broker,
-  tradingSymbol: string,
+  ref: Record<string, unknown>,
   prevAbs: number,
   minReduction: number,
   attempts = 4,
   delayMs = 500,
 ): Promise<number | null> {
-  const observed = await pollPositionQty(broker, tradingSymbol, abs => prevAbs - abs >= minReduction, attempts, delayMs);
+  const observed = await pollPositionQty(broker, ref, abs => prevAbs - abs >= minReduction, attempts, delayMs);
   return observed === null ? null : prevAbs - observed;
 }
 
@@ -155,7 +162,12 @@ export default function Scalper() {
   // Security ID map per strike — enables fast-order (no Python per order)
   const [strikeMap, setStrikeMap]   = useState<Record<string, { ceId?: string; peId?: string; ceSymbol?: string; peSymbol?: string }>>({});
   const { broker, setBroker, authenticatedBrokers } = useBrokerSelector();
-  const [lotSize, setLotSize]       = useState(75);
+  // null until the lookup resolves it from DhanHelper.get_lot_size(). Never seed
+  // this with a literal: exchange lot sizes get revised (NIFTY has been 75 and is
+  // 65 today), and a seeded value is indistinguishable from a resolved one — it
+  // would size real orders against a stale number, and would carry the previous
+  // underlying's lot across a NIFTY→SENSEX switch.
+  const [lotSize, setLotSize]       = useState<number | null>(null);
 
   // Orders in flight, keyed by side — blocks double-fire and gates the Buy/Sell
   // buttons until strikeMap is loaded (avoids a silent fallback to the slow
@@ -205,6 +217,9 @@ export default function Scalper() {
   const [guardError, setGuardError]     = useState('');
 
   // Per-position guards (target / SL / trailing SL)
+  // Keyed by lib/positionProduct's `positionKey` — (symbol, product), not symbol
+  // alone: the same strike can be open under both INTRADAY and MARGIN, and those
+  // are two positions that must be guarded and closed independently.
   const [posGuards, setPosGuards] = useState<Record<string, PositionGuard>>({});
   const [closingPositions, setClosingPositions] = useState<Set<string>>(new Set());
 
@@ -457,6 +472,9 @@ export default function Scalper() {
     setPrevClose({});
     setStrikeMap({});   // liveQuotes reset is handled inside useLiveOptionsWS
     setChainSpot(0);
+    // Lot size belongs to the OUTGOING underlying (NIFTY 65 vs SENSEX 20). Keeping
+    // it would size the first order after a switch against the wrong contract.
+    setLotSize(null);
   }, [expiry, underlying]);
 
   // ─── useEffect 2b: Fetch the chain (strike ladder + prev close) ────
@@ -548,7 +566,9 @@ export default function Scalper() {
         if (requestedExpiry !== expiryRef.current) return;
         if (j.success && j.data) {
           setStrikeMap(j.data.strikes);
-          setLotSize(j.data.lotSize);
+          // Only accept a usable lot size. Leaving it null keeps every
+          // sizing-dependent control disabled rather than trading on a bad value.
+          setLotSize(Number(j.data.lotSize) > 0 ? Number(j.data.lotSize) : null);
         }
       })
       .catch(() => {});
@@ -648,6 +668,13 @@ export default function Scalper() {
       }
     }
 
+    // Quantity is lots × lot size, so an unresolved lot size means the order size
+    // is unknown. Refuse rather than fall back to a literal.
+    if (!lotSize || lotSize <= 0) {
+      addToast('error', `${side} ${option} failed`, `Lot size for ${underlying} not resolved yet — retry in a moment`);
+      return;
+    }
+
     orderInFlightRef.current.add(option);
     setOrderPending(prev => new Set([...prev, option]));
 
@@ -732,17 +759,30 @@ export default function Scalper() {
   const closePosition = useCallback(async (pos: Record<string, unknown>, reason: string, opts?: { verifyFlat?: boolean }): Promise<{ ok: boolean; qty: number }> => {
     const sym = String(pos.tradingSymbol ?? '');
     const fallbackSecId = String(pos.securityId ?? pos.security_id ?? '');
+    // Guards and in-flight tracking key off (symbol, product): the same symbol
+    // can be open under two products, and they must be closed independently.
+    const key = positionKey(pos);
+    const product = positionProduct(pos);
 
     if (!sym || !fallbackSecId) {
       addToast('error', `Cannot close ${sym || 'position'}`, 'Missing security ID');
       return { ok: false, qty: 0 };
     }
 
+    // A product this broker cannot book (CO/BO, or a foreign vocabulary) must
+    // not be sent — the order route would default it to intraday, which opens a
+    // new position instead of reducing this one.
+    const productPayload = closeOrderProduct(broker, product);
+    if (!productPayload) {
+      addToast('error', `Cannot close ${sym}`, `Unsupported product "${product}" — square this leg off at the broker`);
+      return { ok: false, qty: 0 };
+    }
+
     // Prevent double-fire while order is in flight
-    if (closingInFlightRef.current.has(sym)) return { ok: false, qty: 0 };
-    closingInFlightRef.current.add(sym);
-    setPosGuards(prev => prev[sym] ? { ...prev, [sym]: { ...prev[sym], triggered: true } } : prev);
-    setClosingPositions(prev => new Set([...prev, sym]));
+    if (closingInFlightRef.current.has(key)) return { ok: false, qty: 0 };
+    closingInFlightRef.current.add(key);
+    setPosGuards(prev => prev[key] ? { ...prev, [key]: { ...prev[key], triggered: true } } : prev);
+    setClosingPositions(prev => new Set([...prev, key]));
 
     try {
       // Fetch live positions to get the current open quantity (avoids acting on stale data).
@@ -758,11 +798,19 @@ export default function Scalper() {
         const posRes = await fetch(posUrl);
         const posJson = await posRes.json() as { success: boolean; data?: Record<string, unknown>[] };
         if (posJson.success && posJson.data) {
-          const match = posJson.data.find(p => String(p.tradingSymbol) === sym);
-          if (match) {
-            liveNetQty = Number(match.netQty);
-            liveSecId = String(match.securityId ?? match.security_id ?? fallbackSecId);
-            liveExchange = String(match.exchangeSegment ?? match.exchange ?? liveExchange);
+          const found = findLivePosition(posJson.data, pos);
+          if (found.kind === 'ambiguous') {
+            // `triggered` is deliberately left set: a guard that cannot identify
+            // its own row cannot close it either, and re-entering here every
+            // second would bury every other toast under a storm of this one.
+            addToast('error', `Cannot close ${sym}`,
+              `${found.count} rows share this symbol and the position reports no product — close it from the broker terminal`);
+            return { ok: false, qty: 0 };
+          }
+          if (found.kind === 'match') {
+            liveNetQty = Number(found.row.netQty);
+            liveSecId = String(found.row.securityId ?? found.row.security_id ?? fallbackSecId);
+            liveExchange = String(found.row.exchangeSegment ?? found.row.exchange ?? liveExchange);
           }
         }
       } catch {
@@ -772,7 +820,7 @@ export default function Scalper() {
 
       if (liveNetQty === 0) {
         addToast('success', `${sym} already flat`, `(${reason})`);
-        setPosGuards(prev => { const next = { ...prev }; delete next[sym]; return next; });
+        setPosGuards(prev => { const next = { ...prev }; delete next[key]; return next; });
         fetchTabData();
         return { ok: true, qty: 0 };
       }
@@ -786,10 +834,11 @@ export default function Scalper() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(
           // Dhan is the only broker that closes by numeric securityId; the rest
-          // close by trading symbol.
+          // close by trading symbol. productPayload books the close under the
+          // position's own product so it reduces rather than opens.
           broker !== 'dhan'
-            ? { tradingsymbol: sym, quantity: qty, side, orderType: 'MARKET', exchange: liveExchange }
-            : { securityId: liveSecId, quantity: qty, side, orderType: 'MARKET', exchangeSegment: liveExchange },
+            ? { tradingsymbol: sym, quantity: qty, side, orderType: 'MARKET', exchange: liveExchange, ...productPayload.fields }
+            : { securityId: liveSecId, quantity: qty, side, orderType: 'MARKET', exchangeSegment: liveExchange, ...productPayload.fields },
         ),
       });
       const j = await res.json() as { success: boolean; order_id?: string; error?: string };
@@ -801,31 +850,32 @@ export default function Scalper() {
         // position. Skipped by default: the SL/target/manual-close paths that
         // use closePosition constantly during scalping need the fast return.
         if (opts?.verifyFlat) {
-          const confirmedFlat = await pollPositionFlat(broker, sym);
+          const confirmedFlat = await pollPositionFlat(broker, pos);
           if (!confirmedFlat) {
             addToast('error', `Could not confirm ${sym} closed`, 'Order accepted but position still shows open — check manually');
-            setPosGuards(prev => prev[sym] ? { ...prev, [sym]: { ...prev[sym], triggered: false } } : prev);
+            setPosGuards(prev => prev[key] ? { ...prev, [key]: { ...prev[key], triggered: false } } : prev);
             return { ok: false, qty: liveNetQty };
           }
         }
-        addToast('success', `Closed ${sym} (${reason})`, `${qty} qty · ID: ${j.order_id}`);
+        addToast('success', `Closed ${sym} (${reason})`,
+          `${qty} qty${productPayload.assumed ? '' : ` · ${product}`} · ID: ${j.order_id}`);
         // Drop the guard entirely — leaving it would carry stale bestPrice /
         // trailEnabled into a future re-entry on the same symbol.
-        setPosGuards(prev => { const next = { ...prev }; delete next[sym]; return next; });
+        setPosGuards(prev => { const next = { ...prev }; delete next[key]; return next; });
         setTimeout(fetchTabData, 800);
         return { ok: true, qty: liveNetQty };
       } else {
         addToast('error', `Close failed: ${sym}`, j.error ?? 'Unknown error');
-        setPosGuards(prev => prev[sym] ? { ...prev, [sym]: { ...prev[sym], triggered: false } } : prev);
+        setPosGuards(prev => prev[key] ? { ...prev, [key]: { ...prev[key], triggered: false } } : prev);
         return { ok: false, qty: liveNetQty };
       }
     } catch (e) {
       addToast('error', 'Network error closing position', String(e));
-      setPosGuards(prev => prev[sym] ? { ...prev, [sym]: { ...prev[sym], triggered: false } } : prev);
+      setPosGuards(prev => prev[key] ? { ...prev, [key]: { ...prev[key], triggered: false } } : prev);
       return { ok: false, qty: 0 };
     } finally {
-      closingInFlightRef.current.delete(sym);
-      setClosingPositions(prev => { const s = new Set(prev); s.delete(sym); return s; });
+      closingInFlightRef.current.delete(key);
+      setClosingPositions(prev => { const s = new Set(prev); s.delete(key); return s; });
     }
   }, [broker, addToast, fetchTabData]);
 
@@ -894,22 +944,24 @@ export default function Scalper() {
     }
   }, [confirmExitAll, broker, addToast, fetchTabData]);
 
-  const handleGuardChange = useCallback((sym: string, field: 'target' | 'sl', value: string) => {
+  // `posKey` is the composite (symbol, product) key from lib/positionProduct,
+  // NOT a trading symbol — see the posGuards declaration.
+  const handleGuardChange = useCallback((posKey: string, field: 'target' | 'sl', value: string) => {
     setPosGuards(prev => {
-      const existing: PositionGuard = prev[sym] ?? { target: '', sl: '', trailEnabled: false, bestPrice: 0, triggered: false };
+      const existing: PositionGuard = prev[posKey] ?? { target: '', sl: '', trailEnabled: false, bestPrice: 0, triggered: false };
       return {
         ...prev,
-        [sym]: { ...existing, [field]: value, triggered: false },
+        [posKey]: { ...existing, [field]: value, triggered: false },
       };
     });
   }, []);
 
-  const handleTrailToggle = useCallback((sym: string) => {
+  const handleTrailToggle = useCallback((posKey: string) => {
     setPosGuards(prev => {
-      const existing: PositionGuard = prev[sym] ?? { target: '', sl: '', trailEnabled: false, bestPrice: 0, triggered: false };
+      const existing: PositionGuard = prev[posKey] ?? { target: '', sl: '', trailEnabled: false, bestPrice: 0, triggered: false };
       return {
         ...prev,
-        [sym]: { ...existing, trailEnabled: !existing.trailEnabled, bestPrice: 0, triggered: false },
+        [posKey]: { ...existing, trailEnabled: !existing.trailEnabled, bestPrice: 0, triggered: false },
       };
     });
   }, []);
@@ -922,8 +974,10 @@ export default function Scalper() {
       const peakUpdates: Record<string, number> = {};
 
       for (const pos of positions) {
-        const sym = String(pos.tradingSymbol ?? '');
-        const guard = guards[sym];
+        // Keyed per (symbol, product) — the same symbol open under two products
+        // is two independently guarded rows, not one shared guard.
+        const posKey = positionKey(pos);
+        const guard = guards[posKey];
         if (!guard || guard.triggered) continue;
 
         const ltp = Number(pos.lastTradedPrice);
@@ -952,9 +1006,9 @@ export default function Scalper() {
               const newBest = currentBest === 0
                 ? ltp
                 : (isLong ? Math.max(currentBest, ltp) : Math.min(currentBest, ltp));
-              if (newBest !== currentBest) peakUpdates[sym] = newBest;
+              if (newBest !== currentBest) peakUpdates[posKey] = newBest;
 
-              const effectiveBest = peakUpdates[sym] ?? currentBest;
+              const effectiveBest = peakUpdates[posKey] ?? currentBest;
               if (effectiveBest > 0) {
                 const trailSLPrice = isLong
                   ? effectiveBest - initialRisk
@@ -1184,6 +1238,13 @@ export default function Scalper() {
     });
 
     if (activePos && Number(activePos.netQty) !== 0) {
+      // Re-opening at the new strike is sized in lots, so an unresolved lot size
+      // would close the leg and then be unable to size the replacement — abort
+      // before anything is closed.
+      if (!lotSize || lotSize <= 0) {
+        addToast('error', 'Cannot shift strike', `Lot size for ${underlying} not resolved yet — retry in a moment`);
+        return;
+      }
       orderInFlightRef.current.add(option);
       setOrderPending(prev => new Set([...prev, option]));
 
@@ -2179,10 +2240,14 @@ export function GuardInput({ value, onCommit, colorCls, focusBorderCls, disabled
 
 export interface PositionsTableProps {
   data: Record<string, unknown>[];
+  /** Keyed by lib/positionProduct's `positionKey` — (symbol, product), NOT symbol
+   *  alone. The same symbol can be open under two products, and they are separate
+   *  positions with separate guards. */
   guards: Record<string, PositionGuard>;
+  /** Same composite key as `guards`. */
   closingPositions: Set<string>;
-  onGuardChange: (sym: string, field: 'target' | 'sl', value: string) => void;
-  onTrailToggle: (sym: string) => void;
+  onGuardChange: (positionKey: string, field: 'target' | 'sl', value: string) => void;
+  onTrailToggle: (positionKey: string) => void;
   onClose: (pos: Record<string, unknown>) => void;
   onAddLeg: (pos: Record<string, unknown>) => void;
   /** Per-row lot size for the partial square-off chips. Return null when it can't be
@@ -2240,8 +2305,11 @@ export const PositionsTable = React.memo(function PositionsTable({ data, guards,
       <tbody className="divide-y divide-zinc-800/50">
         {sortedData.map((row, i) => {
           const sym = String(row.tradingSymbol ?? '');
-          const guard = guards[sym];
-          const isClosing = closingPositions.has(sym);
+          // Guards and the closing spinner are keyed per (symbol, product): two
+          // rows can share a symbol, and they are separate positions.
+          const rowKey = positionKey(row);
+          const guard = guards[rowKey];
+          const isClosing = closingPositions.has(rowKey);
           const netQty = Number(row.netQty);
           const ltp = Number(row.lastTradedPrice);
           const isLong = netQty > 0;
@@ -2295,7 +2363,7 @@ export const PositionsTable = React.memo(function PositionsTable({ data, guards,
                 <div className="flex flex-col items-center gap-1">
                   <GuardInput
                     value={guard?.target ?? ''}
-                    onCommit={v => onGuardChange(sym, 'target', v)}
+                    onCommit={v => onGuardChange(rowKey, 'target', v)}
                     colorCls="text-emerald-300"
                     focusBorderCls="focus:border-emerald-500"
                     disabled={guardsDisabled}
@@ -2313,7 +2381,7 @@ export const PositionsTable = React.memo(function PositionsTable({ data, guards,
                           const calculated = isLong
                             ? entryPrice * (1 + pct / 100)
                             : entryPrice * (1 - pct / 100);
-                          if (calculated > 0) onGuardChange(sym, 'target', calculated.toFixed(2));
+                          if (calculated > 0) onGuardChange(rowKey, 'target', calculated.toFixed(2));
                         }}
                         className="px-1 py-0.5 rounded bg-emerald-950/80 border border-emerald-800/60 text-emerald-400 hover:bg-emerald-800 hover:text-white transition-all disabled:opacity-30"
                         title={`Set Target ${pct}% in profit from entry ₹${entryPrice.toFixed(2)}`}
@@ -2342,7 +2410,7 @@ export const PositionsTable = React.memo(function PositionsTable({ data, guards,
                 <div className="flex flex-col items-center gap-1">
                   <GuardInput
                     value={guard?.sl ?? ''}
-                    onCommit={v => onGuardChange(sym, 'sl', v)}
+                    onCommit={v => onGuardChange(rowKey, 'sl', v)}
                     colorCls="text-rose-300"
                     focusBorderCls="focus:border-rose-500"
                     disabled={guardsDisabled}
@@ -2359,7 +2427,7 @@ export const PositionsTable = React.memo(function PositionsTable({ data, guards,
                           const calculated = isLong
                             ? entryPrice * (1 - pct / 100)
                             : entryPrice * (1 + pct / 100);
-                          if (calculated > 0) onGuardChange(sym, 'sl', calculated.toFixed(2));
+                          if (calculated > 0) onGuardChange(rowKey, 'sl', calculated.toFixed(2));
                         }}
                         className="px-1 py-0.5 rounded bg-rose-950/80 border border-rose-800/60 text-rose-400 hover:bg-rose-800 hover:text-white transition-all disabled:opacity-30"
                         title={`Set SL ${pct}% in loss from entry ₹${entryPrice.toFixed(2)}`}
@@ -2389,7 +2457,7 @@ export const PositionsTable = React.memo(function PositionsTable({ data, guards,
                   <input
                     type="checkbox"
                     checked={guard?.trailEnabled ?? false}
-                    onChange={() => onTrailToggle(sym)}
+                    onChange={() => onTrailToggle(rowKey)}
                     disabled={guardsDisabled || !guard?.sl}
                     title={isFlat ? 'Position is flat' : guard?.sl ? 'Trail SL 1:1 with profit' : 'Set SL first'}
                     className="w-4 h-4 accent-amber-400 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"

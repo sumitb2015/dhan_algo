@@ -3,6 +3,11 @@ import { getDhanCredentials } from '@/lib/dhanToken';
 
 const DHAN_ORDERS = 'https://api.dhan.co/v2/orders';
 
+/** Products this route will book. CNC is included so a delivery position can be
+ *  closed under its own product; CO/BO are excluded because the broker holds its
+ *  own exit order against them. */
+const DHAN_PRODUCTS = new Set(['INTRADAY', 'MARGIN', 'CNC']);
+
 export async function GET(): Promise<NextResponse> {
   return NextResponse.json({ ready: true });
 }
@@ -18,8 +23,21 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     productType?: string;
   };
 
-  const { securityId, quantity, side, orderType = 'MARKET', price = 0, exchangeSegment = 'NSE_FNO', productType: productTypeRaw = 'INTRADAY' } = body;
-  const productType = productTypeRaw === 'MARGIN' ? 'MARGIN' : 'INTRADAY';
+  const { securityId, quantity, side, orderType = 'MARKET', price = 0, exchangeSegment = 'NSE_FNO', productType: productTypeRaw } = body;
+
+  // Reject an unrecognised product rather than coercing it to INTRADAY. A close
+  // order booked under the wrong product does not reduce the position — the
+  // broker opens a fresh intraday one on the other side instead. Absent still
+  // defaults to INTRADAY so callers that never sent the field are unaffected.
+  const productType = productTypeRaw === undefined
+    ? 'INTRADAY'
+    : String(productTypeRaw).toUpperCase();
+  if (!DHAN_PRODUCTS.has(productType)) {
+    return NextResponse.json(
+      { success: false, error: `Unsupported productType: ${productTypeRaw} (expected ${[...DHAN_PRODUCTS].join(' / ')})` },
+      { status: 400 },
+    );
+  }
 
   if (!securityId || !quantity || !side) {
     return NextResponse.json({ success: false, error: 'Missing required fields: securityId, quantity, side' }, { status: 400 });

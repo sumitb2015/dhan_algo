@@ -50,6 +50,10 @@ def main():
     p_lkp.add_argument('--underlying', default='NIFTY')
     p_lkp.add_argument('--expiry', required=True)
 
+    # lotsize subcommand — helper-resolved lot sizes for one or more underlyings
+    p_lot = sub.add_parser('lotsize')
+    p_lot.add_argument('--symbols', required=True, help='Comma-separated underlyings, e.g. NIFTY,BANKNIFTY')
+
     # positions subcommand
     p_pos = sub.add_parser('positions')
 
@@ -86,18 +90,29 @@ def main():
             (df['UNDERLYING_SYMBOL'] == args.underlying.upper()) &
             (df['SM_EXPIRY_DATE'] == args.expiry)
         )
-        rows = df[mask][['STRIKE_PRICE', 'OPTION_TYPE', 'SECURITY_ID', 'LOT_SIZE']].copy()
+        rows = df[mask][['STRIKE_PRICE', 'OPTION_TYPE', 'SECURITY_ID']].copy()
         if rows.empty:
             print(json.dumps({'success': False, 'error': f'No options found for {args.underlying} {args.expiry}'}))
             sys.exit(0)
 
+        # Lot size comes from the helper, never from a literal. Exchange lot sizes
+        # get revised (NIFTY has been 75 and is 65 today), so a hardcoded fallback
+        # does not degrade gracefully — it silently mis-sizes every order placed
+        # from the terminal. If it cannot be resolved, say so and let the UI
+        # refuse to size rather than guess.
+        lot_size = helper.get_lot_size(args.underlying.upper())
+        if not lot_size or lot_size <= 1:
+            print(json.dumps({
+                'success': False,
+                'error': f'Could not resolve lot size for {args.underlying} (got {lot_size!r})',
+            }))
+            sys.exit(0)
+
         strikes: dict = {}
-        lot_size = 75
         for _, row in rows.iterrows():
             strike = int(float(row['STRIKE_PRICE']))
             opt = str(row['OPTION_TYPE']).upper()
             sec_id = str(int(float(row['SECURITY_ID'])))
-            lot_size = int(float(row['LOT_SIZE']) or 75)
             if strike not in strikes:
                 strikes[strike] = {}
             if opt == 'CE':
@@ -105,7 +120,55 @@ def main():
             elif opt == 'PE':
                 strikes[strike]['peId'] = sec_id
 
-        print(json.dumps({'success': True, 'data': {'lotSize': lot_size, 'strikes': strikes}}))
+        print(json.dumps({'success': True, 'data': {'lotSize': int(lot_size), 'strikes': strikes}}))
+
+    elif args.cmd == 'lotsize':
+        # Single authority for lot sizes across the dashboard. Exchange lot sizes
+        # are revised periodically (NIFTY has been 75, is 65 today), so callers
+        # get null for anything unresolved rather than a literal that would be
+        # wrong the moment a revision lands.
+        # get_lot_size() returns 1 both for "no derivative contract found" and,
+        # legitimately, for Dhan's MCX contracts (its master reports LOT_SIZE=1
+        # because MCX order quantity is expressed in lots). The return value
+        # alone cannot tell those apart, so confirm the underlying actually has
+        # derivative contracts before trusting any size it reports.
+        DERIVATIVES = ['OPTIDX', 'FUTIDX', 'OPTSTK', 'FUTSTK', 'OPTFUT', 'OPTCOM', 'FUTCOM']
+        master = helper._load_master_list()
+
+        out: dict = {}
+        for raw in args.symbols.split(','):
+            sym = raw.strip().upper()
+            if not sym:
+                continue
+            contracts = master[
+                (master['UNDERLYING_SYMBOL'] == sym) & (master['INSTRUMENT'].isin(DERIVATIVES))
+            ]
+            if contracts.empty:
+                out[sym] = None
+                continue
+
+            try:
+                size = helper.get_lot_size(sym)
+            except Exception as exc:  # noqa: BLE001 - report, never guess
+                print(f'get_lot_size({sym}) failed: {exc}', file=sys.stderr)
+                size = None
+
+            # get_lot_size resolves an INDEX to its derivative lot, but a STOCK
+            # underlying resolves to the EQUITY row, whose LOT_SIZE is the
+            # documented placeholder of 1 (RELIANCE: 1, while its F&O lot is
+            # 500). Callers of this subcommand always want the derivative lot,
+            # so consult the same contract table get_lot_size uses for indices.
+            # MCX is unaffected: its contracts genuinely report 1.
+            if not size or size <= 1:
+                try:
+                    contract_lot = int(contracts.iloc[0]['LOT_SIZE'])
+                    if contract_lot > 0:
+                        size = contract_lot
+                except (TypeError, ValueError, KeyError):
+                    pass
+
+            out[sym] = int(size) if size and size > 0 else None
+        print(json.dumps({'success': True, 'data': out}))
 
     elif args.cmd == 'order':
         exchange = UNDERLYING_EXCHANGE.get(args.underlying.upper(), 'NSE')
@@ -122,8 +185,24 @@ def main():
             }))
             sys.exit(0)
 
-        # Calculate quantity
-        qty = args.lots * int(sec.get('LOT_SIZE', 75))
+        # Calculate quantity. The contract's own LOT_SIZE is the most specific
+        # source; fall back to the helper for the underlying rather than to a
+        # literal, and refuse the order outright if neither resolves — sizing an
+        # order off a guessed lot size spends real money at the wrong size.
+        lot_size = 0
+        try:
+            lot_size = int(float(sec.get('LOT_SIZE') or 0))
+        except (TypeError, ValueError):
+            lot_size = 0
+        if lot_size <= 0:
+            lot_size = helper.get_lot_size(args.underlying.upper()) or 0
+        if lot_size <= 0:
+            print(json.dumps({
+                'success': False,
+                'error': f'Could not resolve lot size for {args.underlying} {args.strike} {args.option}',
+            }))
+            sys.exit(0)
+        qty = args.lots * lot_size
 
         # Place the order
         order_id = helper.place_order(

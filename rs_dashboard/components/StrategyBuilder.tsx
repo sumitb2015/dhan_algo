@@ -27,6 +27,11 @@ import { AlertTriangle, CheckIcon, Minus, Plus } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
 const UNDERLYING = 'NIFTY';
+// PREVIEW ONLY — scales the payoff curve/stats for the moment before
+// /api/lotsize (DhanHelper.get_lot_size) resolves. It is deliberately NOT a
+// trading fallback: entering a trade refuses outright while `lotSize` is null,
+// because this literal goes stale on every exchange lot revision (NIFTY has
+// been 75 and is 65 today).
 const FALLBACK_LOT_SIZE = 75;
 
 export default function StrategyBuilder() {

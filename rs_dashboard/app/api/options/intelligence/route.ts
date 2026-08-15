@@ -1,10 +1,11 @@
 import { NextRequest, NextResponse } from 'next/server';
 import path from 'path';
 import fs from 'fs';
+import { resolveLotSize } from '@/lib/lotSize';
 
 const PROJECT_ROOT = path.resolve(process.cwd(), '..');
 const DEBUG_DIR    = path.join(PROJECT_ROOT, 'debug');
-const LOT_SIZE     = 75;
+const UNDERLYING   = 'NIFTY';
 const STRIKE_STEP  = 50;
 
 function todayIST(): string {
@@ -45,6 +46,20 @@ export async function GET(request: NextRequest) {
   const raw   = fs.readFileSync(csvPath, 'utf8');
   const lines = raw.split(/\r?\n/).filter(l => l.trim());
   if (lines.length < 2) {
+    return NextResponse.json(EMPTY_RESPONSE(date));
+  }
+
+  // GEX scales linearly with the lot size, so it comes from
+  // DhanHelper.get_lot_size() rather than a literal that goes stale on every
+  // exchange revision. Without it there is no honest number to report — return
+  // the empty shape instead of a profile scaled by a guess.
+  let LOT_SIZE: number | null = null;
+  try {
+    LOT_SIZE = await resolveLotSize(UNDERLYING);
+  } catch (err) {
+    console.error('[/api/options/intelligence] lot size lookup failed:', err);
+  }
+  if (!LOT_SIZE || LOT_SIZE <= 0) {
     return NextResponse.json(EMPTY_RESPONSE(date));
   }
 
