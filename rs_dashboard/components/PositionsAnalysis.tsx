@@ -43,11 +43,15 @@ const BROKERS: Broker[] = ['dhan', 'kotak'];
 const SPAN_STEPS = [0.01, 0.02, 0.04, 0.06, 0.10] as const;
 const DEFAULT_SPAN_INDEX = 2;
 
-const POSITIONS_POLL_MS = 2_000;
+const POSITIONS_POLL_MS = 15_000;
 const FUNDS_POLL_MS = 15_000;
 /** Dhan's option-chain API is rate limited (~1 call / 3.5 s per underlying). */
 const CHAIN_SPACING_MS = 3_800;
 const MAX_CHAIN_EXPIRIES = 4;
+// The route serializes spawns per underlying to >=3.5s apart and caches each
+// (underlying, expiry) response for 10s server-side, so this stays well clear
+// of the rate limit even with MAX_CHAIN_EXPIRIES loaded.
+const CHAIN_POLL_MS = 15_000;
 
 type Tab = 'payoff' | 'greeks' | 'pnl';
 
@@ -260,7 +264,7 @@ export default function PositionsAnalysis({ underlying }: { underlying: Analytic
     if (!bookExpiries.length) return;
     let cancelled = false;
 
-    (async () => {
+    const fetchChains = async () => {
       setChainLoading(true);
       const wanted = bookExpiries.slice(0, MAX_CHAIN_EXPIRIES);
       for (let i = 0; i < wanted.length; i++) {
@@ -288,9 +292,13 @@ export default function PositionsAnalysis({ underlying }: { underlying: Analytic
         setChainError(`Greeks loaded for the nearest ${MAX_CHAIN_EXPIRIES} expiries only; ${bookExpiries.length - MAX_CHAIN_EXPIRIES} further expiry/expiries will price without IV.`);
       }
       if (!cancelled) setChainLoading(false);
-    })();
+    };
 
-    return () => { cancelled = true; };
+    fetchChains();
+    // Re-poll so spot/greeks/IV/OI keep tracking the live market rather than
+    // freezing at the values captured when the book's expiry set last changed.
+    const id = setInterval(fetchChains, CHAIN_POLL_MS);
+    return () => { cancelled = true; clearInterval(id); };
     // Deliberately keyed on the JOINED expiry list, not the array: `bookExpiries`
     // is a fresh array on every 2 s positions poll, so depending on the reference
     // would refetch a rate-limited chain API continuously.

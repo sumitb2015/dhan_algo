@@ -40,7 +40,7 @@ interface Props {
   emptyReason?: string;
 }
 
-const H = 420;
+const H = 280;
 const PAD = { top: 30, right: 64, bottom: 38, left: 74 };
 
 function fmtInrCompact(n: number): string {
@@ -320,17 +320,18 @@ export default function PositionsPayoffChart({
             {targetPnl !== null && (
               <circle cx={sx(readoutSpot)} cy={sy(targetPnl)} r={4} fill="#38bdf8" stroke="#18181b" strokeWidth={2} />
             )}
-            <g transform={`translate(${tooltipLeft ? sx(readoutSpot) - 172 : sx(readoutSpot) + 10}, ${PAD.top + 4})`}>
-              <rect width={162} height={targetPnl !== null ? 62 : 46} rx={8} fill="#18181b" stroke="#3f3f46" />
-              <text x={10} y={17} fontSize={10} fill="#a1a1aa" className="font-mono">
+            <g transform={`translate(${tooltipLeft ? sx(readoutSpot) - 108 : sx(readoutSpot) + 8}, ${PAD.top + 4})`}>
+              <rect width={100} height={targetPnl !== null ? 40 : 29} rx={5}
+                fill="#18181b" fillOpacity={0.68} stroke="#3f3f46" strokeOpacity={0.7} />
+              <text x={7} y={11} fontSize={7} fill="#a1a1aa" className="font-mono">
                 At {readoutSpot.toLocaleString('en-IN', { maximumFractionDigits: 0 })}
               </text>
-              <text x={10} y={33} fontSize={11.5} fontWeight={700} className="font-mono"
+              <text x={7} y={21.5} fontSize={8} fontWeight={700} className="font-mono"
                 fill={expiryPnl >= 0 ? '#10b981' : '#ef4444'}>
                 Expiry {fmtInrCompact(expiryPnl)}
               </text>
               {targetPnl !== null && (
-                <text x={10} y={50} fontSize={11.5} fontWeight={700} className="font-mono" fill="#38bdf8">
+                <text x={7} y={32} fontSize={8} fontWeight={700} className="font-mono" fill="#38bdf8">
                   {targetLabel} {fmtInrCompact(targetPnl)}
                 </text>
               )}

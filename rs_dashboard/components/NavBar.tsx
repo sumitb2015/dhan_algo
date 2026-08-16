@@ -76,6 +76,7 @@ const NAV_GROUPS = [
     label: 'Trading',
     icon: Zap,
     links: [
+      { href: '/options-analytics/live', label: 'Live Payoff', desc: 'Live combined payoff diagram for every underlying with open option positions' },
       { href: '/scalper', label: 'Scalper', desc: 'Multi-window active trading & scalping order ticket' },
       { href: '/advanced-scalper', label: 'Advanced Scalper', desc: 'Configurable 2-5 box scalper with per-box CE/PE, strike & lot presets' },
       { href: '/options/quiktrade', label: 'QuikTrade', desc: 'OI buildup quadrants, live positions & P&L' },
