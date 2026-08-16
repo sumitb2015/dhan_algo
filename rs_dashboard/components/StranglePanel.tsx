@@ -8,7 +8,14 @@ import { isUnderlyingLive } from '@/lib/marketHours';
 import { CHART_UNDERLYINGS, spotLabel, type ChartUnderlying } from '@/lib/underlyings';
 import { Spinner } from '@/components/Spinner';
 import { DayChangeChip } from '@/components/DayChangeChip';
-import { DEFAULT_INDICATORS, VALID_INTERVALS, type ChartIndicatorRequest, type StrangleChartResponse, type StraddleStrikesResponse } from '@/lib/optionsChartTypes';
+import { PanelStyles } from '@/components/PanelStyles';
+import {
+  DEFAULT_INDICATORS,
+  VALID_INTERVALS,
+  type ChartIndicatorRequest,
+  type StrangleChartResponse,
+  type StraddleStrikesResponse,
+} from '@/lib/optionsChartTypes';
 
 const CHART_TYPES: { id: StrangleChartType; label: string }[] = [
   { id: 'candlestick', label: 'Candles' },
@@ -17,10 +24,13 @@ const CHART_TYPES: { id: StrangleChartType; label: string }[] = [
 const POLL_INTERVAL_MS = 10_000;
 const OFF_HOURS_POLL_INTERVAL_MS = 60_000;
 
-const selectClass = 'px-1.5 py-1 text-xs rounded border border-zinc-700 bg-zinc-900 text-zinc-200';
-const numberClass = 'w-14 px-1.5 py-1 text-xs rounded tabular-nums border border-zinc-700 bg-zinc-900 text-zinc-200';
-
-export function StranglePanel({ underlying, onUnderlyingChange }: { underlying: ChartUnderlying; onUnderlyingChange: (u: ChartUnderlying) => void }) {
+export function StranglePanel({
+  underlying,
+  onUnderlyingChange,
+}: {
+  underlying: ChartUnderlying;
+  onUnderlyingChange: (u: ChartUnderlying) => void;
+}) {
   const [interval_, setInterval_] = useState('1');
   const [expiry, setExpiry] = useState('');
   const [expiries, setExpiries] = useState<string[]>([]);
@@ -66,7 +76,10 @@ export function StranglePanel({ underlying, onUnderlyingChange }: { underlying: 
     };
   }, [underlying, effectiveExpiry]);
 
-  const atmStrike = useMemo(() => strikesData?.strikes.find((s) => s.is_atm)?.strike ?? null, [strikesData]);
+  const atmStrike = useMemo(
+    () => strikesData?.strikes.find((s) => s.is_atm)?.strike ?? null,
+    [strikesData],
+  );
   const step = useMemo(() => {
     const values = (strikesData?.strikes ?? []).map((s) => s.strike).sort((a, b) => a - b);
     const diffs = values.slice(1).map((v, i) => v - values[i]).filter((d) => d > 0);
@@ -123,98 +136,174 @@ export function StranglePanel({ underlying, onUnderlyingChange }: { underlying: 
     return all.filter((c) => c.time.slice(0, 10) === lastDate);
   }, [chart]);
 
+  const spotVal = (chart?.spot ?? strikesData?.spot ?? 0).toFixed(2);
+
   return (
-    <div className="flex flex-col gap-2 h-full min-h-0">
-      <div className="bg-zinc-800 rounded-lg flex-shrink-0">
-        <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5 p-2">
-          <select value={underlying} onChange={(e) => onUnderlyingChange(e.target.value as ChartUnderlying)} className={`${selectClass} font-semibold`}>
-            {CHART_UNDERLYINGS.map((u) => (
-              <option key={u} value={u}>
-                {u}
-              </option>
-            ))}
-          </select>
-
-          <select value={effectiveExpiry} onChange={(e) => setExpiry(e.target.value)} className={selectClass}>
-            {expiries.map((e) => (
-              <option key={e} value={e}>
-                {e}
-              </option>
-            ))}
-          </select>
-
-          <label className="flex items-center gap-1 text-xs text-zinc-400">
-            CE
-            <select value={effectiveCeStrike ?? ''} onChange={(e) => setCeStrike(Number(e.target.value))} className={`${selectClass} tabular-nums`}>
-              {(strikesData?.strikes ?? []).map((s) => (
-                <option key={s.strike} value={s.strike}>
-                  {s.strike}
+    <div className="lc-panel">
+      {/* ── Controls toolbar ────────────────────────────────────────── */}
+      <div className="lc-toolbar">
+        {/* Group 1: Symbol */}
+        <div className="lc-toolbar-group">
+          <span className="lc-group-label">SYMBOL</span>
+          <div className="lc-group-row">
+            <select
+              value={underlying}
+              onChange={(e) => onUnderlyingChange(e.target.value as ChartUnderlying)}
+              className="lc-select lc-select--accent"
+            >
+              {CHART_UNDERLYINGS.map((u) => (
+                <option key={u} value={u}>
+                  {u}
                 </option>
               ))}
             </select>
-            <input type="number" min={1} max={10} value={ceLots} onChange={(e) => setCeLots(Number(e.target.value))} className={numberClass} title="CE lots" />
-          </label>
-
-          <label className="flex items-center gap-1 text-xs text-zinc-400">
-            PE
-            <select value={effectivePeStrike ?? ''} onChange={(e) => setPeStrike(Number(e.target.value))} className={`${selectClass} tabular-nums`}>
-              {(strikesData?.strikes ?? []).map((s) => (
-                <option key={s.strike} value={s.strike}>
-                  {s.strike}
+            <select
+              value={effectiveExpiry}
+              onChange={(e) => setExpiry(e.target.value)}
+              className="lc-select"
+            >
+              {expiries.map((e) => (
+                <option key={e} value={e}>
+                  {e}
                 </option>
               ))}
             </select>
-            <input type="number" min={1} max={10} value={peLots} onChange={(e) => setPeLots(Number(e.target.value))} className={numberClass} title="PE lots" />
-          </label>
+            <select
+              value={interval_}
+              onChange={(e) => setInterval_(e.target.value)}
+              className="lc-select lc-select--narrow"
+            >
+              {VALID_INTERVALS.map((i) => (
+                <option key={i} value={i}>
+                  {i}m
+                </option>
+              ))}
+            </select>
+          </div>
+        </div>
 
-          <select value={interval_} onChange={(e) => setInterval_(e.target.value)} className={selectClass}>
-            {VALID_INTERVALS.map((i) => (
-              <option key={i} value={i}>
-                {i}m
-              </option>
-            ))}
-          </select>
+        <div className="lc-toolbar-sep" />
 
-          <ChartIndicatorPicker indicators={indicators} onChange={setIndicators} />
+        {/* Group 2: Strikes */}
+        <div className="lc-toolbar-group">
+          <span className="lc-group-label">STRIKES</span>
+          <div className="lc-group-row">
+            <label className="lc-strike-label">
+              <span className="lc-strike-tag lc-strike-tag--ce">CE</span>
+              <select
+                value={effectiveCeStrike ?? ''}
+                onChange={(e) => setCeStrike(Number(e.target.value))}
+                className="lc-select lc-select--mono"
+              >
+                {(strikesData?.strikes ?? []).map((s) => (
+                  <option key={s.strike} value={s.strike}>
+                    {s.strike}
+                  </option>
+                ))}
+              </select>
+              <input
+                type="number"
+                min={1}
+                max={10}
+                value={ceLots}
+                onChange={(e) => setCeLots(Number(e.target.value))}
+                className="lc-input"
+                title="CE lots"
+              />
+            </label>
+            <label className="lc-strike-label">
+              <span className="lc-strike-tag lc-strike-tag--pe">PE</span>
+              <select
+                value={effectivePeStrike ?? ''}
+                onChange={(e) => setPeStrike(Number(e.target.value))}
+                className="lc-select lc-select--mono"
+              >
+                {(strikesData?.strikes ?? []).map((s) => (
+                  <option key={s.strike} value={s.strike}>
+                    {s.strike}
+                  </option>
+                ))}
+              </select>
+              <input
+                type="number"
+                min={1}
+                max={10}
+                value={peLots}
+                onChange={(e) => setPeLots(Number(e.target.value))}
+                className="lc-input"
+                title="PE lots"
+              />
+            </label>
+          </div>
+        </div>
 
-          <div className="flex gap-1">
+        <div className="lc-toolbar-sep" />
+
+        {/* Group 3: Indicators */}
+        <div className="lc-toolbar-group">
+          <span className="lc-group-label">INDICATORS</span>
+          <div className="lc-group-row">
+            <ChartIndicatorPicker indicators={indicators} onChange={setIndicators} />
+          </div>
+        </div>
+
+        <div className="lc-toolbar-sep" />
+
+        {/* Group 4: View */}
+        <div className="lc-toolbar-group">
+          <span className="lc-group-label">VIEW</span>
+          <div className="lc-group-row">
             {CHART_TYPES.map((t) => (
               <button
                 key={t.id}
                 type="button"
                 onClick={() => setChartType(t.id)}
-                className={`px-2.5 py-1 text-xs font-semibold rounded ${chartType === t.id ? 'bg-sky-600 text-white' : 'border border-zinc-700 bg-zinc-900 text-zinc-300'}`}
+                className={`lc-view-btn${chartType === t.id ? ' lc-view-btn--active' : ''}`}
               >
                 {t.label}
               </button>
             ))}
+            <button
+              type="button"
+              onClick={() => setShowSpot((v) => !v)}
+              title={`Overlay ${underlying} ${spotLabel(underlying).toLowerCase()} as a dashed line on its own left-hand axis`}
+              className={`lc-view-btn${showSpot ? ' lc-view-btn--active' : ''}`}
+            >
+              {spotLabel(underlying)}
+            </button>
           </div>
+        </div>
 
-          <button
-            type="button"
-            onClick={() => setShowSpot((v) => !v)}
-            title={`Overlay ${underlying} ${spotLabel(underlying).toLowerCase()} as a dashed line on its own left-hand axis`}
-            className={`px-2.5 py-1 text-xs font-semibold rounded ${showSpot ? 'bg-sky-600 text-white' : 'border border-zinc-700 bg-zinc-900 text-zinc-300'}`}
-          >
-            {spotLabel(underlying)}
-          </button>
-
-          <span className="ml-auto flex items-center gap-3 text-xs text-zinc-400">
-            {todaysCandles.length > 0 && <DayChangeChip candles={todaysCandles} />}
-            <span className="tabular-nums">{spotLabel(underlying)} {(chart?.spot ?? strikesData?.spot ?? 0).toFixed(2)}</span>
-            {loading && <Spinner size={12} />}
-            <span className="inline-flex items-center gap-1.5">
-              <span className={`inline-block w-1.5 h-1.5 rounded-full ${marketLive ? 'bg-emerald-400' : 'bg-zinc-600'}`} />
-              {marketLive ? 'live' : 'closed'}
+        {/* Stats pushed right */}
+        <div className="lc-toolbar-stats">
+          {todaysCandles.length > 0 && <DayChangeChip candles={todaysCandles} />}
+          <div className="lc-spot-card">
+            <span className="lc-stat-label">SPOT</span>
+            <span className="lc-spot-value">{spotVal}</span>
+          </div>
+          <div className="lc-status-pill">
+            {loading ? (
+              <Spinner size={10} />
+            ) : (
+              <span
+                className={`lc-status-dot ${marketLive ? 'lc-status-dot--live' : 'lc-status-dot--closed'}`}
+              />
+            )}
+            <span className={marketLive ? 'lc-status-live' : 'lc-status-closed'}>
+              {marketLive ? 'LIVE' : 'CLOSED'}
             </span>
-          </span>
+          </div>
         </div>
       </div>
 
-      {error && <div className="bg-zinc-800 rounded-lg p-3 text-sm text-red-400 flex-shrink-0">{error}</div>}
+      {error && (
+        <div className="lc-error">
+          <span>⚠</span> {error}
+        </div>
+      )}
 
       {chart ? (
-        <div className="bg-zinc-800 rounded-lg p-2 flex-1 min-h-0 flex flex-col">
+        <div className="lc-chart-wrap">
           {/* Keyed by selection identity - see StraddlePanel's StraddleChart for why. */}
           <StrangleChart
             key={`${underlying}-${effectiveExpiry}-${effectiveCeStrike}-${effectivePeStrike}-${ceLots}-${peLots}-${interval_}`}
@@ -227,12 +316,38 @@ export function StranglePanel({ underlying, onUnderlyingChange }: { underlying: 
       ) : (
         loading &&
         !error && (
-          <div className="bg-zinc-800 rounded-lg p-2 flex-1 min-h-0 flex items-center justify-center gap-2 text-zinc-500 text-sm">
-            <Spinner size={18} />
-            Loading strangle chart…
+          <div className="lc-chart-loading">
+            <Spinner size={20} />
+            <span>Loading strangle chart…</span>
           </div>
         )
       )}
+
+      <PanelStyles />
+      <style>{`
+        .lc-strike-label {
+          display: flex;
+          align-items: center;
+          gap: 4px;
+        }
+        .lc-strike-tag {
+          font-size: 9px;
+          font-weight: 800;
+          letter-spacing: 0.06em;
+          padding: 2px 5px;
+          border-radius: 4px;
+        }
+        .lc-strike-tag--ce {
+          background: rgba(52, 211, 153, 0.12);
+          color: #34d399;
+          border: 1px solid rgba(52, 211, 153, 0.2);
+        }
+        .lc-strike-tag--pe {
+          background: rgba(248, 113, 113, 0.12);
+          color: #f87171;
+          border: 1px solid rgba(248, 113, 113, 0.2);
+        }
+      `}</style>
     </div>
   );
 }

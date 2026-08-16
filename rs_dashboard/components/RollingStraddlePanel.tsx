@@ -7,7 +7,13 @@ import { ChartIndicatorPicker } from '@/components/ChartIndicatorPicker';
 import { isUnderlyingLive } from '@/lib/marketHours';
 import { CHART_UNDERLYINGS, spotLabel, type ChartUnderlying } from '@/lib/underlyings';
 import { Spinner } from '@/components/Spinner';
-import { DEFAULT_INDICATORS, VALID_INTERVALS, type ChartIndicatorRequest, type RollingStraddleChartResponse } from '@/lib/optionsChartTypes';
+import { PanelStyles } from '@/components/PanelStyles';
+import {
+  DEFAULT_INDICATORS,
+  VALID_INTERVALS,
+  type ChartIndicatorRequest,
+  type RollingStraddleChartResponse,
+} from '@/lib/optionsChartTypes';
 
 const CHART_TYPES: { id: RollingStraddleChartType; label: string }[] = [
   { id: 'candlestick', label: 'Candles' },
@@ -16,9 +22,13 @@ const CHART_TYPES: { id: RollingStraddleChartType; label: string }[] = [
 const POLL_INTERVAL_MS = 10_000;
 const OFF_HOURS_POLL_INTERVAL_MS = 60_000;
 
-const selectClass = 'px-1.5 py-1 text-xs rounded border border-zinc-700 bg-zinc-900 text-zinc-200';
-
-export function RollingStraddlePanel({ underlying, onUnderlyingChange }: { underlying: ChartUnderlying; onUnderlyingChange: (u: ChartUnderlying) => void }) {
+export function RollingStraddlePanel({
+  underlying,
+  onUnderlyingChange,
+}: {
+  underlying: ChartUnderlying;
+  onUnderlyingChange: (u: ChartUnderlying) => void;
+}) {
   const [interval_, setInterval_] = useState('1');
   const [expiry, setExpiry] = useState('');
   const [expiries, setExpiries] = useState<string[]>([]);
@@ -57,7 +67,8 @@ export function RollingStraddlePanel({ underlying, onUnderlyingChange }: { under
           }
         })
         .catch((e) => {
-          if (!cancelled) setError(e instanceof Error ? e.message : 'Failed to load rolling straddle chart.');
+          if (!cancelled)
+            setError(e instanceof Error ? e.message : 'Failed to load rolling straddle chart.');
         })
         .finally(() => {
           if (!cancelled) setLoading(false);
@@ -72,83 +83,130 @@ export function RollingStraddlePanel({ underlying, onUnderlyingChange }: { under
   }, [underlying, effectiveExpiry, interval_, indicators, marketLive]);
 
   return (
-    <div className="flex flex-col gap-2 h-full min-h-0">
-      <div className="bg-zinc-800 rounded-lg flex-shrink-0">
-        <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5 p-2">
-          <select value={underlying} onChange={(e) => onUnderlyingChange(e.target.value as ChartUnderlying)} className={`${selectClass} font-semibold`}>
-            {CHART_UNDERLYINGS.map((u) => (
-              <option key={u} value={u}>
-                {u}
-              </option>
-            ))}
-          </select>
+    <div className="lc-panel">
+      {/* ── Controls toolbar ────────────────────────────────────────── */}
+      <div className="lc-toolbar">
+        {/* Group 1: Symbol */}
+        <div className="lc-toolbar-group">
+          <span className="lc-group-label">SYMBOL</span>
+          <div className="lc-group-row">
+            <select
+              value={underlying}
+              onChange={(e) => onUnderlyingChange(e.target.value as ChartUnderlying)}
+              className="lc-select lc-select--accent"
+            >
+              {CHART_UNDERLYINGS.map((u) => (
+                <option key={u} value={u}>
+                  {u}
+                </option>
+              ))}
+            </select>
+            <select
+              value={effectiveExpiry}
+              onChange={(e) => setExpiry(e.target.value)}
+              className="lc-select"
+            >
+              {expiries.map((e) => (
+                <option key={e} value={e}>
+                  {e}
+                </option>
+              ))}
+            </select>
+            <select
+              value={interval_}
+              onChange={(e) => setInterval_(e.target.value)}
+              className="lc-select lc-select--narrow"
+            >
+              {VALID_INTERVALS.map((i) => (
+                <option key={i} value={i}>
+                  {i}m
+                </option>
+              ))}
+            </select>
+          </div>
+        </div>
 
-          <select value={effectiveExpiry} onChange={(e) => setExpiry(e.target.value)} className={selectClass}>
-            {expiries.map((e) => (
-              <option key={e} value={e}>
-                {e}
-              </option>
-            ))}
-          </select>
+        <div className="lc-toolbar-sep" />
 
-          <select value={interval_} onChange={(e) => setInterval_(e.target.value)} className={selectClass}>
-            {VALID_INTERVALS.map((i) => (
-              <option key={i} value={i}>
-                {i}m
-              </option>
-            ))}
-          </select>
+        {/* Group 2: Indicators */}
+        <div className="lc-toolbar-group">
+          <span className="lc-group-label">INDICATORS</span>
+          <div className="lc-group-row">
+            <ChartIndicatorPicker indicators={indicators} onChange={setIndicators} />
+          </div>
+        </div>
 
-          <ChartIndicatorPicker indicators={indicators} onChange={setIndicators} />
+        <div className="lc-toolbar-sep" />
 
-          <div className="flex gap-1">
+        {/* Group 3: Chart type */}
+        <div className="lc-toolbar-group">
+          <span className="lc-group-label">VIEW</span>
+          <div className="lc-group-row">
             {CHART_TYPES.map((t) => (
               <button
                 key={t.id}
                 type="button"
                 onClick={() => setChartType(t.id)}
-                className={`px-2.5 py-1 text-xs font-semibold rounded ${chartType === t.id ? 'bg-sky-600 text-white' : 'border border-zinc-700 bg-zinc-900 text-zinc-300'}`}
+                className={`lc-view-btn${chartType === t.id ? ' lc-view-btn--active' : ''}`}
               >
                 {t.label}
               </button>
             ))}
+            <button
+              type="button"
+              onClick={() => setShowSpot((v) => !v)}
+              title={`Overlay ${underlying} ${spotLabel(underlying).toLowerCase()} as a dashed line on its own left-hand axis`}
+              className={`lc-view-btn${showSpot ? ' lc-view-btn--active' : ''}`}
+            >
+              {spotLabel(underlying)}
+            </button>
           </div>
+        </div>
 
-          <button
-            type="button"
-            onClick={() => setShowSpot((v) => !v)}
-            title={`Overlay ${underlying} ${spotLabel(underlying).toLowerCase()} as a dashed line on its own left-hand axis`}
-            className={`px-2.5 py-1 text-xs font-semibold rounded ${showSpot ? 'bg-sky-600 text-white' : 'border border-zinc-700 bg-zinc-900 text-zinc-300'}`}
-          >
-            {spotLabel(underlying)}
-          </button>
-
-          <span className="ml-auto inline-flex items-center gap-2 text-xs text-zinc-400">
-            {loading && <Spinner size={12} />}
-            <span className="inline-flex items-center gap-1.5">
-              <span className={`inline-block w-1.5 h-1.5 rounded-full ${marketLive ? 'bg-emerald-400' : 'bg-zinc-600'}`} />
-              {marketLive ? 'live' : 'closed'}
+        {/* Status pushed right */}
+        <div className="lc-toolbar-stats">
+          <div className="lc-status-pill">
+            {loading ? (
+              <Spinner size={10} />
+            ) : (
+              <span
+                className={`lc-status-dot ${marketLive ? 'lc-status-dot--live' : 'lc-status-dot--closed'}`}
+              />
+            )}
+            <span className={marketLive ? 'lc-status-live' : 'lc-status-closed'}>
+              {marketLive ? 'LIVE' : 'CLOSED'}
             </span>
-          </span>
+          </div>
         </div>
       </div>
 
-      {error && <div className="bg-zinc-800 rounded-lg p-3 text-sm text-red-400 flex-shrink-0">{error}</div>}
+      {error && (
+        <div className="lc-error">
+          <span>⚠</span> {error}
+        </div>
+      )}
 
       {chart ? (
-        <div className="bg-zinc-800 rounded-lg p-2 flex-1 min-h-0 flex flex-col">
+        <div className="lc-chart-wrap">
           {/* Keyed by selection identity - see StraddlePanel's StraddleChart for why. */}
-          <RollingStraddleChart key={`${underlying}-${effectiveExpiry}-${interval_}`} underlying={underlying} chart={chart} chartType={chartType} showSpot={showSpot} />
+          <RollingStraddleChart
+            key={`${underlying}-${effectiveExpiry}-${interval_}`}
+            underlying={underlying}
+            chart={chart}
+            chartType={chartType}
+            showSpot={showSpot}
+          />
         </div>
       ) : (
         loading &&
         !error && (
-          <div className="bg-zinc-800 rounded-lg p-2 flex-1 min-h-0 flex items-center justify-center gap-2 text-zinc-500 text-sm">
-            <Spinner size={18} />
-            Loading rolling straddle chart…
+          <div className="lc-chart-loading">
+            <Spinner size={20} />
+            <span>Loading rolling straddle chart…</span>
           </div>
         )
       )}
+      <PanelStyles />
     </div>
   );
 }
