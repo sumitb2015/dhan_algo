@@ -3678,11 +3678,14 @@ class DhanHelper:
         """Store a structured description of a failed data-API response on self.last_api_error."""
         remarks = res.get('remarks') if isinstance(res, dict) else None
         if isinstance(remarks, dict):
+            # `or ""` rather than a get() default: Dhan sends the keys present
+            # with null values on an unexplained failure, so a default never
+            # fires and the error reads {'code': None, 'message': None}.
             self.last_api_error = {
                 "method": method,
-                "code": remarks.get("error_code", ""),
-                "type": remarks.get("error_type", ""),
-                "message": remarks.get("error_message", str(remarks)),
+                "code": remarks.get("error_code") or "",
+                "type": remarks.get("error_type") or "",
+                "message": remarks.get("error_message") or "",
             }
         else:
             self.last_api_error = {"method": method, "code": "", "type": "", "message": str(remarks or res)}

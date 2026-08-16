@@ -46,15 +46,24 @@ _log_lines: list = []
 def _api_reason(helper: DhanHelper, fallback: str) -> str:
     """Data API calls return empty on error rather than raising, so an empty
     result means nothing on its own — helper.last_api_error is what separates a
-    throttled or lapsed-subscription call from a genuinely empty response."""
+    throttled or lapsed-subscription call from a genuinely empty response.
+
+    Dhan frequently fails with every remark field null, so "no reason given" is
+    a real and common outcome; it still marks the symbol as an API failure
+    rather than a symbol with nothing to sell, which is the distinction that
+    matters."""
     err = getattr(helper, 'last_api_error', None)
     if not err:
         return fallback
     if isinstance(err, dict):
-        detail = err.get('message') or err.get('code') or str(err)
+        detail = err.get('message') or err.get('code') or err.get('type') or 'no reason given'
     else:
         detail = str(err)
     return f"{fallback} (API error: {detail})"
+
+
+def _is_api_failure(reason: str) -> bool:
+    return 'API error' in reason or reason.startswith('exception:')
 
 
 def write_status(message: str, current: int = 0, total: int = 0,
@@ -430,29 +439,57 @@ def main():
 
     results = []
     skipped = {}
-    stopped = False
-    for i, symbol in enumerate(symbols, 1):
-        if should_stop():
-            stopped = True
-            write_status(f"Stopped after {i - 1}/{total}", i - 1, total, done=True)
+
+    def sweep(batch: list, label: str, offset: int, denom: int) -> bool:
+        """Scan `batch`, recording rows and skip reasons. Returns False if the
+        stop trigger fired."""
+        for n, symbol in enumerate(batch, 1):
+            if should_stop():
+                write_status(f"Stopped after {offset + n - 1}/{denom}", offset + n - 1, denom, done=True)
+                return False
+            done = offset + n
+            try:
+                rows, reason = scan_symbol(helper, symbol, universe[symbol], args.target_prob,
+                                           args.min_oi_lots, args.max_iv, lot_by_expiry,
+                                           args.min_no_hit)
+            except Exception as e:
+                skipped[symbol] = f"exception: {e}"
+                write_status(f"[{done}/{denom}]{label} {symbol} failed: {e}", done, denom)
+                continue
+            if reason:
+                # Recorded per symbol rather than just dropped: "188 of 208
+                # symbols" with no reasons cannot tell a name with no liquid
+                # puts apart from one whose chain call was throttled.
+                skipped[symbol] = reason
+                write_status(f"[{done}/{denom}]{label} {symbol} skipped — {reason}", done, denom)
+            else:
+                skipped.pop(symbol, None)
+                results.extend(rows)
+                write_status(f"[{done}/{denom}]{label} {symbol} — {len(results)} candidates", done, denom)
+        return True
+
+    stopped = not sweep(symbols, '', 0, total)
+
+    # Dhan drops roughly one call in ten under a full sweep, with every remark
+    # field null. Those are transient — the same symbol returns a full chain
+    # moments later — so without a retry the scan silently loses ~10% of the
+    # universe, major names included. Retried at the end rather than inline so
+    # a run of failures doesn't stall the sweep.
+    for attempt in (1, 2):
+        if stopped:
             break
-        try:
-            rows, reason = scan_symbol(helper, symbol, universe[symbol], args.target_prob,
-                                       args.min_oi_lots, args.max_iv, lot_by_expiry,
-                                       args.min_no_hit)
-            results.extend(rows)
-        except Exception as e:
-            skipped[symbol] = f"exception: {e}"
-            write_status(f"[{i}/{total}] {symbol} failed: {e}", i, total)
-            continue
-        if reason:
-            # Recorded per symbol rather than just dropped: "188 of 208 symbols"
-            # with no reasons cannot tell a name with no liquid puts apart from
-            # one whose chain call was throttled.
-            skipped[symbol] = reason
-            write_status(f"[{i}/{total}] {symbol} skipped — {reason}", i, total)
-        else:
-            write_status(f"[{i}/{total}] {symbol} — {len(results)} candidates", i, total)
+        retryable = sorted(s for s, r in skipped.items() if _is_api_failure(r))
+        if not retryable:
+            break
+        if DhanHelper.is_fatal_error(getattr(helper, 'last_api_error', None)):
+            # Auth lapsed or the Data API subscription expired: every retry
+            # fails identically, so stop rather than burn ten minutes on it.
+            write_status(f"Not retrying {len(retryable)} symbols — API error is fatal, not transient",
+                         total, total)
+            break
+        write_status(f"Retry {attempt}/2 — {len(retryable)} symbols that failed with API errors",
+                     total, total)
+        stopped = not sweep(retryable, f' retry{attempt}', 0, len(retryable))
 
     # An aborted scan must not replace a previous complete result set with a
     # partial one — the page has no way to tell the two apart.
@@ -462,7 +499,7 @@ def main():
         return 0
 
     results.sort(key=lambda r: r["score"], reverse=True)
-    api_failures = sum(1 for r in skipped.values() if 'API error' in r or 'exception' in r)
+    api_failures = sum(1 for r in skipped.values() if _is_api_failure(r))
     tmp = RESULTS_FILE + ".tmp"
     with open(tmp, "w", encoding='utf-8') as f:
         json.dump({
