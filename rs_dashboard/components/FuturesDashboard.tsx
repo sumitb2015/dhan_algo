@@ -3,6 +3,10 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import NavBar from '@/components/NavBar';
 import { Activity, RefreshCw, AlertCircle, Loader2, Download } from 'lucide-react';
+import {
+  ComposedChart, Area, Line, XAxis, YAxis, CartesianGrid,
+  Tooltip, Legend, ResponsiveContainer,
+} from 'recharts';
 import type { ContractStats, ChartPoint, FuturesResponse } from '@/app/api/futures/route';
 import type { FuturesRefreshStatus } from '@/app/api/futures-refresh/route';
 import OIBuildupDashboard from '@/components/OIBuildupDashboard';
@@ -61,14 +65,43 @@ function dteChipClass(days: number): string {
   return 'bg-zinc-800 text-zinc-400 border-zinc-700';
 }
 
-// ─── SummaryCard ──────────────────────────────────────────────────────────────
+// ─── Shared quant-terminal primitives ──────────────────────────────────────────
 
-function SummaryCard({ name, contracts }: { name: string; contracts: ContractStats[] }) {
-  const near = contracts[0];
+function PulseStat({
+  label, value, sub, color = 'text-white', size = 'text-lg',
+}: { label: string; value: string; sub?: React.ReactNode; color?: string; size?: string }) {
+  return (
+    <div className="flex flex-col min-w-0">
+      <span className="text-[9px] font-bold text-zinc-500 uppercase tracking-[0.14em] mb-0.5">{label}</span>
+      <span className={`${size} font-mono font-bold tabular-nums leading-none ${color}`}>{value}</span>
+      {sub && <span className="text-[10px] text-zinc-500 mt-1 font-medium">{sub}</span>}
+    </div>
+  );
+}
+
+function ChartHeader({
+  eyebrow, title, sub, legend,
+}: { eyebrow: string; title: string; sub: string; legend?: React.ReactNode }) {
+  return (
+    <div className="flex items-center justify-between mb-4 flex-wrap gap-3">
+      <div>
+        <p className="text-[9px] font-bold text-zinc-500 uppercase tracking-[0.16em] mb-1">{eyebrow}</p>
+        <p className="text-sm font-bold text-white tracking-tight">{title}</p>
+        <p className="text-[10px] text-zinc-500 mt-0.5">{sub}</p>
+      </div>
+      {legend && <div className="flex items-center gap-3 text-[10px] font-semibold">{legend}</div>}
+    </div>
+  );
+}
+
+// ─── Market pulse ribbon ────────────────────────────────────────────────────────
+
+function InstrumentPulseBlock({ name, near }: { name: string; near: ContractStats | undefined }) {
   if (!near) {
     return (
-      <div className="flex-1 min-w-[260px] rounded-2xl border border-zinc-800 bg-zinc-900/40 p-4 flex items-center justify-center text-zinc-600 text-sm">
-        No {name} data
+      <div className="flex flex-col min-w-0">
+        <span className="text-[9px] font-bold text-zinc-500 uppercase tracking-[0.14em] mb-0.5">{name}</span>
+        <span className="text-lg font-mono font-bold text-zinc-600">No data</span>
       </div>
     );
   }
@@ -88,27 +121,87 @@ function SummaryCard({ name, contracts }: { name: string; contracts: ContractSta
   const badge = oiBadge[oiDir];
 
   return (
-    <div className="flex-1 min-w-[260px] rounded-2xl border border-zinc-800 bg-zinc-900/40 p-4 flex flex-col gap-2">
-      <div className="flex items-center justify-between">
-        <span className="text-sm font-bold text-zinc-100">{name}</span>
-        <span className={`text-[10px] font-semibold px-2 py-0.5 rounded-full border ${dteChipClass(near.daysToExpiry)}`}>
-          {near.daysToExpiry}d to expiry
-        </span>
-      </div>
-      <div className="text-2xl font-bold tabular-nums text-white">{fmtPrice(near.price)}</div>
-      <div className="flex items-center gap-2 flex-wrap">
-        {near.basis !== null && (
-          <span className={`text-[11px] font-semibold px-2 py-0.5 rounded-full border ${
-            near.basis > 0 ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20'
-            : near.basis < 0 ? 'bg-red-500/10 text-red-400 border-red-500/20'
-            : 'bg-zinc-800 text-zinc-400 border-zinc-700'
-          }`}>
-            Basis {fmtBasis(near.basis)}
-          </span>
-        )}
-        <span className={`text-[11px] font-semibold px-2 py-0.5 rounded-full border ${badge.cls}`}>
+    <div className="flex items-center gap-5 flex-wrap">
+      <PulseStat label={`${name} Near`} value={fmtPrice(near.price)} size="text-2xl" />
+      <PulseStat
+        label="Basis"
+        value={fmtBasis(near.basis)}
+        color={basisColor(near.basis)}
+        size="text-sm"
+      />
+      <PulseStat
+        label="OI Δ"
+        value={near.oiHasData ? fmtChange(near.oiChange) : '—'}
+        color={near.oiHasData ? oiChangeColor(near.oiChange) : 'text-zinc-600'}
+        size="text-sm"
+      />
+      <div className="flex flex-col min-w-0">
+        <span className="text-[9px] font-bold text-zinc-500 uppercase tracking-[0.14em] mb-1">Flow</span>
+        <span className={`inline-flex w-fit items-center text-[10px] font-bold px-2 py-0.5 rounded-full border ${badge.cls}`}>
           {badge.label}
         </span>
+      </div>
+      <span className={`text-[10px] font-semibold px-2 py-0.5 rounded-full border ${dteChipClass(near.daysToExpiry)}`}>
+        {near.daysToExpiry}d to expiry
+      </span>
+    </div>
+  );
+}
+
+function MarketPulseRibbon({
+  data, dlStatus, loading, onDownload, onReload,
+}: {
+  data: FuturesResponse;
+  dlStatus: FuturesRefreshStatus | null;
+  loading: boolean;
+  onDownload: () => void;
+  onReload: () => void;
+}) {
+  return (
+    <div className="relative overflow-hidden rounded-2xl border border-zinc-800 bg-zinc-900/60">
+      <div className="pointer-events-none absolute inset-0 bg-gradient-to-r from-sky-500/[0.06] via-transparent to-emerald-500/[0.04]" />
+
+      <div className="relative flex items-stretch gap-6 px-5 py-4 flex-wrap">
+        <InstrumentPulseBlock name="NIFTY" near={data.instruments.NIFTY[0]} />
+        <div className="w-px bg-zinc-800 self-stretch" />
+        <InstrumentPulseBlock name="BANKNIFTY" near={data.instruments.BANKNIFTY[0]} />
+      </div>
+
+      {/* Control strip */}
+      <div className="relative flex items-center justify-between gap-3 px-5 py-2 border-t border-zinc-800/80 bg-zinc-950/40 flex-wrap">
+        <div className="flex items-center gap-2">
+          <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[10px] font-bold bg-sky-500/15 text-sky-400 border border-sky-500/30">
+            <span className="w-1.5 h-1.5 rounded-full bg-sky-400 animate-pulse" />
+            DATA
+          </span>
+          <span className="text-[10px] text-zinc-500 font-mono tabular-nums">{data.dataDate}</span>
+        </div>
+
+        <div className="flex items-center gap-2">
+          {dlStatus?.running ? (
+            <div className="flex items-center gap-1.5 text-[11px] text-sky-400">
+              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              <span>{dlStatus.message || 'Downloading…'}</span>
+            </div>
+          ) : (
+            <button
+              onClick={onDownload}
+              className="flex items-center gap-1.5 px-3 py-1.5 text-[11px] font-semibold rounded-lg border border-sky-500/25 bg-sky-500/10 text-sky-400 hover:bg-sky-500/15 hover:border-sky-500/35 transition-all"
+              title="Download fresh futures data (runs download_futures_manual.py)"
+            >
+              <Download className="h-3 w-3" />
+              Download Data
+            </button>
+          )}
+          <button
+            onClick={onReload}
+            disabled={loading}
+            className="p-1.5 border border-zinc-800 rounded-lg bg-zinc-900/40 text-zinc-400 hover:text-white transition-all hover:border-zinc-700 disabled:opacity-40"
+            title="Reload from disk"
+          >
+            <RefreshCw className={`h-3.5 w-3.5 ${loading ? 'animate-spin' : ''}`} />
+          </button>
+        </div>
       </div>
     </div>
   );
@@ -124,10 +217,10 @@ function ContractTable({ name, contracts }: { name: string; contracts: ContractS
 
   return (
     <div className="overflow-x-auto rounded-xl border border-zinc-800">
-      <table className="w-full text-[12px] border-collapse">
+      <table className="w-full text-[12px] border-collapse font-mono">
         <thead>
           <tr className="bg-zinc-800">
-            <th className={thCls}>Contract</th>
+            <th className={thCls + ' font-sans'}>Contract</th>
             <th className={thRCls}>Price</th>
             <th className={thRCls}>Open</th>
             <th className={thRCls}>High</th>
@@ -143,7 +236,7 @@ function ContractTable({ name, contracts }: { name: string; contracts: ContractS
         <tbody>
           {contracts.slice(0, 3).map((c, i) => (
             <tr key={c.expiry} className="border-t border-zinc-800/50 hover:bg-zinc-800/30 transition-colors">
-              <td className="px-3 py-2.5">
+              <td className="px-3 py-2.5 font-sans">
                 <span className="font-semibold text-zinc-100">{c.label}</span>
                 <span className="ml-2 text-[10px] text-zinc-500">{labels[i] ?? ''}</span>
               </td>
@@ -190,7 +283,7 @@ function ContractTable({ name, contracts }: { name: string; contracts: ContractS
           {contracts.length === 0 && (
             <tr>
               <td colSpan={showBasisCoc ? 11 : 9}
-                className="px-3 py-8 text-center text-zinc-600 text-[11px]">
+                className="px-3 py-8 text-center text-zinc-600 text-[11px] font-sans">
                 No contract data
               </td>
             </tr>
@@ -200,7 +293,6 @@ function ContractTable({ name, contracts }: { name: string; contracts: ContractS
     </div>
   );
 }
-
 
 // ─── CoC Callout ──────────────────────────────────────────────────────────────
 
@@ -217,7 +309,7 @@ function CoCCallout({ contracts }: { contracts: ContractStats[] }) {
       {items.map(item => (
         <span key={item.label} className="flex items-center gap-1">
           <span className="text-zinc-500">{item.label}-month CoC:</span>
-          <span className={`font-semibold ${cocColor(item.coc)}`}>
+          <span className={`font-mono font-semibold ${cocColor(item.coc)}`}>
             {(item.coc >= 0 ? '+' : '') + item.coc.toFixed(2)}% p.a.
           </span>
           <span className="text-zinc-600">
@@ -229,138 +321,122 @@ function CoCCallout({ contracts }: { contracts: ContractStats[] }) {
   );
 }
 
-// ─── Spot × Futures Chart ─────────────────────────────────────────────────────
+// ─── Spot × Futures Chart (recharts, quant-terminal style) ─────────────────────
+
+const SpotFutureTooltip = ({ active, payload, label }: Record<string, unknown>) => {
+  if (!active || !Array.isArray(payload) || !payload.length) return null;
+  const row = (payload as Array<{ payload: ChartPoint }>)[0]?.payload;
+  const basis = row && row.spotClose ? row.futureClose - row.spotClose : null;
+  return (
+    <div className="bg-zinc-950/98 border border-zinc-700/70 rounded-xl px-4 py-3 text-xs shadow-2xl backdrop-blur min-w-[180px] font-mono">
+      <p className="text-zinc-300 font-bold mb-2 tabular-nums font-sans">{String(label)}</p>
+      <div className="flex justify-between gap-8 mb-1">
+        <span className="text-sky-400 font-semibold font-sans">Futures</span>
+        <span className="text-white font-bold tabular-nums">
+          {row?.futureClose ? fmtPrice(row.futureClose) : '—'}
+        </span>
+      </div>
+      {row?.spotClose !== null && (
+        <div className="flex justify-between gap-8 mb-2">
+          <span className="text-emerald-400 font-semibold font-sans">Spot</span>
+          <span className="text-white font-bold tabular-nums">{fmtPrice(row?.spotClose ?? 0)}</span>
+        </div>
+      )}
+      {basis !== null && (
+        <div className="pt-2 border-t border-zinc-800 flex justify-between gap-8">
+          <span className="text-zinc-400 font-sans">Basis</span>
+          <span className={`font-bold tabular-nums ${basisColor(basis)}`}>{fmtBasis(basis)}</span>
+        </div>
+      )}
+    </div>
+  );
+};
 
 function SpotFutureChart({ points, name }: { points: ChartPoint[]; name: string }) {
   if (!points.length) return null;
 
-  const W = 800, H = 180, padL = 64, padR = 20, padT = 28, padB = 28;
-  const innerW = W - padL - padR;
-  const innerH = H - padT - padB;
-
-  const futureVals = points.map(p => p.futureClose).filter(v => v > 0);
-  const spotVals   = points.filter(p => p.spotClose !== null).map(p => p.spotClose as number);
-  const allVals    = [...futureVals, ...spotVals];
-  if (!allVals.length) return null;
-
-  // Tight range — futures and spot are very close in value
-  const minV  = Math.min(...allVals) * 0.9997;
-  const maxV  = Math.max(...allVals) * 1.0003;
-  const range = maxV - minV || 1;
-
-  const xOf  = (i: number) => padL + (i / Math.max(points.length - 1, 1)) * innerW;
-  const yOf  = (v: number) => padT + innerH - ((v - minV) / range) * innerH;
-  const yTicks = Array.from({ length: 5 }, (_, i) => minV + (range * i / 4));
-
-  const fmtTick = (v: number) => v.toLocaleString('en-IN', { maximumFractionDigits: 0 });
   const fmtDate = (d: string) => {
     const dt = new Date(d + 'T00:00:00');
-    return dt.toLocaleDateString('en', { weekday: 'short', day: 'numeric', month: 'short' });
+    return dt.toLocaleDateString('en', { day: 'numeric', month: 'short' });
   };
+  const chartData = points.map(p => ({ ...p, dateLabel: fmtDate(p.date) }));
+  const hasSpot = points.some(p => p.spotClose !== null && (p.spotClose as number) > 0);
 
-  const futurePts = points
-    .filter(p => p.futureClose > 0)
-    .map((p, i) => `${xOf(i).toFixed(1)},${yOf(p.futureClose).toFixed(1)}`)
-    .join(' ');
-
-  const spotPts = points
-    .map((p, i) => ({ p, i }))
-    .filter(({ p }) => p.spotClose !== null && (p.spotClose as number) > 0)
-    .map(({ p, i }) => `${xOf(i).toFixed(1)},${yOf(p.spotClose as number).toFixed(1)}`)
-    .join(' ');
-
-  const hasSpot   = spotVals.length > 0;
-  const firstXF   = xOf(0).toFixed(1);
-  const lastXF    = xOf(points.filter(p => p.futureClose > 0).length - 1).toFixed(1);
-  const bottomY   = (padT + innerH).toFixed(1);
-  const fillFuture = `${firstXF},${bottomY} ${futurePts} ${lastXF},${bottomY}`;
-
-  const spotFiltered = points.map((p, i) => ({ p, i })).filter(({ p }) => p.spotClose !== null && (p.spotClose as number) > 0);
-  const firstXS = spotFiltered.length ? xOf(spotFiltered[0].i).toFixed(1) : '0';
-  const lastXS  = spotFiltered.length ? xOf(spotFiltered[spotFiltered.length - 1].i).toFixed(1) : '0';
-  const fillSpot = `${firstXS},${bottomY} ${spotPts} ${lastXS},${bottomY}`;
+  const gridProps = { strokeDasharray: '3 6', stroke: '#20202399', vertical: false as const };
+  const tickStyle = { fontSize: 10, fill: '#a1a1aa', fontWeight: 500 as const, fontFamily: 'var(--font-mono)' };
 
   return (
-    <div className="rounded-xl border border-zinc-800 overflow-hidden bg-zinc-950/30">
-      <div className="px-3 pt-2.5 pb-1 flex items-center gap-2">
-        <span className="text-[10px] font-semibold text-zinc-500 uppercase tracking-wider">Daily Close — Last {points.length} sessions</span>
-        <div className="flex items-center gap-3 ml-auto">
-          <span className="flex items-center gap-1.5 text-[10px] text-zinc-400">
-            <span className="inline-block w-6 h-0.5 bg-sky-400 rounded" />
-            Near Futures
+    <div className="relative bg-zinc-900/60 border border-zinc-800 rounded-2xl p-5 overflow-hidden">
+      <div className="pointer-events-none absolute -top-24 left-1/2 -translate-x-1/2 w-[520px] h-[280px] bg-sky-500/[0.05] blur-3xl rounded-full" />
+
+      <ChartHeader
+        eyebrow="Spread"
+        title={`${name} Spot vs. Near Futures`}
+        sub={`Daily close — last ${points.length} sessions`}
+        legend={<>
+          <span className="flex items-center gap-1.5">
+            <span className="w-3 h-0.5 bg-sky-400" />
+            <span className="text-zinc-400">Near Futures</span>
           </span>
           {hasSpot && (
-            <span className="flex items-center gap-1.5 text-[10px] text-zinc-400">
-              <span className="inline-block w-6 border-t border-dashed border-emerald-400" />
-              {name} Spot
+            <span className="flex items-center gap-1.5">
+              <span className="w-3 h-0.5 border-t border-dashed border-emerald-400" />
+              <span className="text-zinc-400">{name} Spot</span>
             </span>
           )}
-        </div>
-      </div>
-      <svg viewBox={`0 0 ${W} ${H}`} className="w-full" style={{ height: H }} preserveAspectRatio="none">
-        <defs>
-          <linearGradient id={`fill-future-${name}`} x1="0" y1="0" x2="0" y2="1">
-            <stop offset="0%" stopColor="#38bdf8" stopOpacity="0.10" />
-            <stop offset="100%" stopColor="#38bdf8" stopOpacity="0" />
-          </linearGradient>
-          {hasSpot && (
-            <linearGradient id={`fill-spot-${name}`} x1="0" y1="0" x2="0" y2="1">
-              <stop offset="0%" stopColor="#34d399" stopOpacity="0.08" />
-              <stop offset="100%" stopColor="#34d399" stopOpacity="0" />
+        </>}
+      />
+
+      <ResponsiveContainer width="100%" height={280}>
+        <ComposedChart data={chartData} margin={{ top: 8, right: 16, left: 0, bottom: 0 }}>
+          <defs>
+            <linearGradient id={`fill-future-${name}`} x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0%" stopColor="#38bdf8" stopOpacity={0.35} />
+              <stop offset="100%" stopColor="#38bdf8" stopOpacity={0.02} />
             </linearGradient>
+          </defs>
+          <CartesianGrid {...gridProps} />
+          <XAxis dataKey="dateLabel" tick={tickStyle} tickLine={false} axisLine={{ stroke: '#27272a' }}
+            interval="preserveStartEnd" minTickGap={18} />
+          <YAxis
+            domain={['dataMin - 20', 'dataMax + 20']}
+            tick={tickStyle}
+            tickLine={false}
+            axisLine={false}
+            width={60}
+            tickFormatter={(v: number) => v.toLocaleString('en-IN', { maximumFractionDigits: 0 })}
+          />
+          <Tooltip content={<SpotFutureTooltip />} cursor={{ stroke: '#3f3f46', strokeWidth: 1, strokeDasharray: '4 4' }} />
+          <Legend
+            wrapperStyle={{ fontSize: 11, paddingTop: 8 }}
+            formatter={(v: string) => <span style={{ color: '#d4d4d8', fontWeight: 600 }}>{v}</span>}
+          />
+          <Area
+            type="monotone"
+            dataKey="futureClose"
+            name="Near Futures"
+            stroke="#38bdf8"
+            strokeWidth={2.5}
+            fill={`url(#fill-future-${name})`}
+            dot={false}
+            activeDot={{ r: 5, fill: '#38bdf8', stroke: '#082f49', strokeWidth: 2 }}
+            connectNulls
+          />
+          {hasSpot && (
+            <Line
+              type="monotone"
+              dataKey="spotClose"
+              name={`${name} Spot`}
+              stroke="#34d399"
+              strokeWidth={1.5}
+              strokeDasharray="5 3"
+              dot={false}
+              activeDot={{ r: 4 }}
+              connectNulls
+            />
           )}
-        </defs>
-
-        {/* Y grid + price labels */}
-        {yTicks.map((v, i) => (
-          <g key={i}>
-            <line x1={padL} y1={yOf(v)} x2={W - padR} y2={yOf(v)} stroke="#27272a" strokeWidth="1" />
-            <text x={padL - 4} y={yOf(v) + 3.5} textAnchor="end" fontSize="9" fill="#71717a">
-              {fmtTick(v)}
-            </text>
-          </g>
-        ))}
-
-        {/* X axis date labels */}
-        {points.map((p, i) => (
-          <text key={p.date} x={xOf(i)} y={H - 6} textAnchor="middle" fontSize="8.5" fill="#71717a">
-            {fmtDate(p.date)}
-          </text>
-        ))}
-
-        {/* Spot fill + line (dashed, behind futures) */}
-        {hasSpot && spotPts && (
-          <g>
-            <polygon points={fillSpot} fill={`url(#fill-spot-${name})`} />
-            <polyline points={spotPts} fill="none" stroke="#34d399" strokeWidth="1.5"
-              strokeLinejoin="round" strokeLinecap="round" strokeDasharray="5 3" />
-          </g>
-        )}
-
-        {/* Futures fill + line (solid, on top) */}
-        {futurePts && (
-          <g>
-            <polygon points={fillFuture} fill={`url(#fill-future-${name})`} />
-            <polyline points={futurePts} fill="none" stroke="#38bdf8" strokeWidth="2"
-              strokeLinejoin="round" strokeLinecap="round" />
-          </g>
-        )}
-
-        {/* Dot at latest future close */}
-        {points.length > 0 && points[points.length - 1].futureClose > 0 && (
-          <circle
-            cx={xOf(points.length - 1)}
-            cy={yOf(points[points.length - 1].futureClose)}
-            r="3" fill="#38bdf8" />
-        )}
-        {/* Dot at latest spot close */}
-        {hasSpot && spotFiltered.length > 0 && (
-          <circle
-            cx={xOf(spotFiltered[spotFiltered.length - 1].i)}
-            cy={yOf(spotFiltered[spotFiltered.length - 1].p.spotClose as number)}
-            r="3" fill="#34d399" />
-        )}
-      </svg>
+        </ComposedChart>
+      </ResponsiveContainer>
     </div>
   );
 }
@@ -469,37 +545,11 @@ export default function FuturesDashboard() {
         </div>
 
         <NavBar />
-
-        <div className="ml-auto flex items-center gap-2">
-          {dlStatus?.running ? (
-            <div className="flex items-center gap-1.5 text-[11px] text-sky-400">
-              <Loader2 className="h-3.5 w-3.5 animate-spin" />
-              <span>{dlStatus.message || 'Downloading…'}</span>
-            </div>
-          ) : (
-            <button
-              onClick={startDownload}
-              className="flex items-center gap-1.5 px-3 py-1.5 text-[11px] font-semibold rounded-lg border border-sky-500/25 bg-sky-500/10 text-sky-400 hover:bg-sky-500/15 hover:border-sky-500/35 transition-all"
-              title="Download fresh futures data (runs download_futures_manual.py)"
-            >
-              <Download className="h-3 w-3" />
-              Download Data
-            </button>
-          )}
-          <button
-            onClick={fetchData}
-            disabled={loading}
-            className="p-1.5 border border-zinc-800 rounded-lg bg-zinc-900/40 text-zinc-400 hover:text-white transition-all hover:border-zinc-700 disabled:opacity-40"
-            title="Reload from disk"
-          >
-            <RefreshCw className={`h-3.5 w-3.5 ${loading ? 'animate-spin' : ''}`} />
-          </button>
-        </div>
       </header>
 
       {/* Body */}
       <main className="flex-1 px-5 py-6 mx-auto w-full">
-        {loading ? (
+        {loading && !data ? (
           <div className="flex items-center justify-center py-32 gap-2 text-zinc-400">
             <Loader2 className="h-5 w-5 animate-spin" />
             <span className="text-sm">Loading futures data…</span>
@@ -510,13 +560,16 @@ export default function FuturesDashboard() {
             <span className="text-sm text-center max-w-md">{error}</span>
           </div>
         ) : data ? (
-          <div className="space-y-0">
+          <div className="space-y-6">
 
-            {/* Summary strip */}
-            <div className="flex gap-4 flex-wrap pb-6">
-              <SummaryCard name="NIFTY"     contracts={data.instruments.NIFTY} />
-              <SummaryCard name="BANKNIFTY" contracts={data.instruments.BANKNIFTY} />
-            </div>
+            {/* Market pulse ribbon */}
+            <MarketPulseRibbon
+              data={data}
+              dlStatus={dlStatus}
+              loading={loading}
+              onDownload={startDownload}
+              onReload={fetchData}
+            />
 
             {/* NIFTY instrument section */}
             <InstrumentSection

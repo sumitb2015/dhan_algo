@@ -25,6 +25,13 @@ function fmtPct(v: number): string {
 
 type SortKey = keyof OIRow;
 
+const QUADRANT_META: Record<string, { eyebrow: string; accent: string; dot: string }> = {
+  'Long Buildup':    { eyebrow: 'Price ▲ · OI ▲', accent: 'border-emerald-500/20', dot: 'bg-emerald-400' },
+  'Short Buildup':   { eyebrow: 'Price ▼ · OI ▲', accent: 'border-red-500/20',     dot: 'bg-red-400' },
+  'Short Covering':  { eyebrow: 'Price ▲ · OI ▼', accent: 'border-sky-500/20',     dot: 'bg-sky-400' },
+  'Long Unwinding':  { eyebrow: 'Price ▼ · OI ▼', accent: 'border-amber-500/20',   dot: 'bg-amber-400' },
+};
+
 function QuadrantTable({
   title,
   rows,
@@ -46,6 +53,8 @@ function QuadrantTable({
   });
 
   const arrow = (k: SortKey) => sortKey === k ? (sortDir === 'asc' ? ' ↑' : ' ↓') : '';
+  const baseName = title.replace(/\s*\(\d+\)$/, '');
+  const meta = QUADRANT_META[baseName] ?? { eyebrow: '', accent: 'border-zinc-800', dot: 'bg-zinc-400' };
 
   const thCls =
     'px-3 py-2 text-left text-xs font-bold text-white cursor-pointer select-none ' +
@@ -53,15 +62,21 @@ function QuadrantTable({
   const thRCls = thCls + ' text-right';
 
   return (
-    <div className="rounded-2xl border border-zinc-800 bg-zinc-900/40 overflow-hidden flex flex-col">
-      <div className="px-4 py-3 border-b border-zinc-800">
-        <span className="text-sm font-bold text-zinc-100">{title}</span>
+    <div className={`rounded-2xl border bg-zinc-900/60 overflow-hidden flex flex-col ${meta.accent}`}>
+      <div className="px-4 py-3 border-b border-zinc-800 flex items-center justify-between">
+        <div>
+          <p className="text-[9px] font-bold text-zinc-500 uppercase tracking-[0.16em] mb-0.5 flex items-center gap-1.5">
+            <span className={`w-1.5 h-1.5 rounded-full ${meta.dot}`} />
+            {meta.eyebrow}
+          </p>
+          <span className="text-sm font-bold text-zinc-100">{title}</span>
+        </div>
       </div>
       <div className="overflow-y-auto" style={{ maxHeight: 280 }}>
-        <table className="w-full text-[12px] border-collapse">
+        <table className="w-full text-[12px] border-collapse font-mono">
           <thead className="sticky top-0 bg-zinc-800">
             <tr>
-              <th className={thCls}    onClick={() => onSort('symbol')}>SYMBOL{arrow('symbol')}</th>
+              <th className={thCls + ' font-sans'} onClick={() => onSort('symbol')}>SYMBOL{arrow('symbol')}</th>
               <th className={thRCls}   onClick={() => onSort('price')}>PRICE{arrow('price')}</th>
               <th className={thRCls}   onClick={() => onSort('priceChgPct')}>CHANGE%{arrow('priceChgPct')}</th>
               <th className={thRCls}   onClick={() => onSort('oi')}>OI (contracts){arrow('oi')}</th>
@@ -71,7 +86,7 @@ function QuadrantTable({
           <tbody>
             {sorted.length === 0 ? (
               <tr>
-                <td colSpan={5} className="px-3 py-8 text-center text-zinc-600 text-[11px]">
+                <td colSpan={5} className="px-3 py-8 text-center text-zinc-600 text-[11px] font-sans">
                   No data
                 </td>
               </tr>
@@ -80,7 +95,7 @@ function QuadrantTable({
                 key={r.symbol}
                 className="border-t border-zinc-800/50 hover:bg-zinc-800/30 transition-colors"
               >
-                <td className="px-3 py-2 font-semibold text-zinc-100">{r.symbol}</td>
+                <td className="px-3 py-2 font-sans font-semibold text-zinc-100">{r.symbol}</td>
                 <td className="px-3 py-2 text-right tabular-nums text-zinc-200">
                   {fmtPrice(r.price)}
                 </td>
