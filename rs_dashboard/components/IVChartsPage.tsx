@@ -97,45 +97,77 @@ function quantile(sorted: number[], q: number): number {
   return sorted[i];
 }
 
-// ─── Small shared pieces ──────────────────────────────────────────
+// ─── Quant-terminal primitives ─────────────────────────────────────
 
-function StatTile({
-  label, value, sub, tone = 'neutral', accent,
-}: {
-  label: string; value: string; sub?: string;
-  tone?: 'neutral' | 'up' | 'down'; accent?: string;
-}) {
-  const toneCls =
-    tone === 'up'   ? 'text-emerald-400' :
-    tone === 'down' ? 'text-rose-400'    : 'text-white';
+function PulseStat({
+  label, value, sub, color = 'text-white', size = 'text-lg',
+}: { label: string; value: string; sub?: string; color?: string; size?: string }) {
+  const isHex = color.startsWith('#');
   return (
-    <div className="bg-zinc-900 border border-zinc-800 rounded-xl px-3.5 py-2.5 min-w-0">
-      <div className="flex items-center gap-1.5">
-        {accent && <span className="w-2 h-2 rounded-sm shrink-0" style={{ background: accent }} />}
-        <p className="text-[10px] font-bold text-zinc-400 uppercase tracking-wider truncate">{label}</p>
-      </div>
-      <p className={`text-lg font-bold tabular-nums leading-tight mt-1 ${toneCls}`}>{value}</p>
-      {sub && <p className="text-[10px] text-zinc-500 font-medium tabular-nums truncate">{sub}</p>}
+    <div className="flex flex-col min-w-0">
+      <span className="text-[9px] font-bold text-zinc-500 uppercase tracking-[0.14em] mb-0.5">{label}</span>
+      <span
+        className={`${size} font-mono font-bold tabular-nums leading-none ${isHex ? '' : color}`}
+        style={isHex ? { color } : undefined}
+      >
+        {value}
+      </span>
+      {sub && <span className="text-[10px] text-zinc-500 mt-1 font-medium">{sub}</span>}
     </div>
   );
 }
 
-function Panel({
-  title, hint, right, children,
-}: {
-  title: string; hint?: string; right?: React.ReactNode; children: React.ReactNode;
-}) {
+function ChartHeader({
+  eyebrow, title, sub, legend,
+}: { eyebrow: string; title: string; sub: string; legend?: React.ReactNode }) {
   return (
-    <div className="bg-zinc-900 border border-zinc-800 rounded-2xl p-5">
-      <div className="flex items-start justify-between gap-3 mb-3">
-        <div className="min-w-0">
-          <p className="text-sm font-bold text-white tracking-tight">{title}</p>
-          {hint && <p className="text-[10px] text-zinc-400 mt-0.5">{hint}</p>}
-        </div>
-        {right}
+    <div className="flex items-center justify-between mb-4 flex-wrap gap-3">
+      <div>
+        <p className="text-[9px] font-bold text-zinc-500 uppercase tracking-[0.16em] mb-1">{eyebrow}</p>
+        <p className="text-sm font-bold text-white tracking-tight">{title}</p>
+        <p className="text-[10px] text-zinc-500 mt-0.5 max-w-xl">{sub}</p>
       </div>
-      {children}
+      {legend && <div className="flex items-center gap-3 text-[10px] font-semibold flex-wrap">{legend}</div>}
     </div>
+  );
+}
+
+function Section({
+  eyebrow, title, sub, legend, glow, children,
+}: {
+  eyebrow: string; title: string; sub: string; legend?: React.ReactNode;
+  glow?: 'blue' | 'emerald' | 'amber'; children: React.ReactNode;
+}) {
+  const glowColor = glow === 'emerald' ? 'bg-emerald-500/[0.05]'
+    : glow === 'amber' ? 'bg-amber-500/[0.05]'
+    : glow === 'blue'  ? 'bg-blue-500/[0.05]'
+    : '';
+  return (
+    <div className="relative bg-zinc-900/60 border border-zinc-800 rounded-2xl p-5 overflow-hidden">
+      {glow && (
+        <div className={`pointer-events-none absolute -top-24 left-1/2 -translate-x-1/2 w-[520px] h-[280px] ${glowColor} blur-3xl rounded-full`} />
+      )}
+      <div className="relative">
+        <ChartHeader eyebrow={eyebrow} title={title} sub={sub} legend={legend} />
+        {children}
+      </div>
+    </div>
+  );
+}
+
+function ToggleChip({
+  label, on, color, onClick,
+}: { label: string; on: boolean; color: string; onClick: () => void }) {
+  return (
+    <button
+      onClick={onClick}
+      className={`flex items-center gap-1.5 px-2 py-1 text-[10px] font-bold rounded-lg border transition-all ${
+        on ? 'border-zinc-600 bg-zinc-800 text-white' : 'border-zinc-800 text-zinc-500'
+      }`}
+    >
+      <span className="w-2 h-2 rounded-sm" style={{ background: on ? color : '#52525b' }} />
+      {label}
+    </button>
   );
 }
 
@@ -167,16 +199,16 @@ const chartTooltip = (
     if (!active || !Array.isArray(payload) || !payload.length) return null;
     const point = (payload[0] as { payload: Record<string, number> }).payload;
     return (
-      <div className="bg-zinc-950 border border-zinc-700 rounded-xl px-3.5 py-2.5 text-xs shadow-2xl min-w-[170px]">
-        <p className="text-zinc-400 mb-2 font-bold tracking-wide">
+      <div className="bg-zinc-950/98 border border-zinc-700/70 rounded-xl px-4 py-3 text-xs shadow-2xl backdrop-blur min-w-[180px] font-mono">
+        <p className="text-zinc-300 mb-2 font-bold tracking-wide font-sans">
           {labelFmt ? labelFmt(label) : String(label)}
         </p>
         {rows.map(r => {
           const v = point[r.key];
           if (v == null || !Number.isFinite(v)) return null;
           return (
-            <div key={r.key} className="flex items-center justify-between gap-6 mb-0.5">
-              <span className="flex items-center gap-1.5 text-zinc-300 font-semibold">
+            <div key={r.key} className="flex items-center justify-between gap-6 mb-1 last:mb-0">
+              <span className="flex items-center gap-1.5 text-zinc-400 font-sans font-semibold">
                 <span className="w-2 h-2 rounded-sm" style={{ background: r.color }} />
                 {r.label}
               </span>
@@ -199,8 +231,6 @@ export default function IVChartsPage() {
   const [date, setDate]     = useState<string>('');
   const [strike, setStrike] = useState<number | null>(null);
   const [view, setView]     = useState<View>('overview');
-  const [showCE, setShowCE] = useState(true);
-  const [showPE, setShowPE] = useState(true);
   const [otmOnly, setOtmOnly] = useState(true);
   const [loading, setLoading] = useState(true);
   const [error, setError]     = useState('');
@@ -275,10 +305,14 @@ export default function IVChartsPage() {
     }));
   }, [rawSkew, otmOnly, atm]);
 
-  const ivDomain = useMemo(() => paddedDomain(
-    series.flatMap(p => [p.ceIV, p.peIV].filter((v): v is number => v != null)),
+  const ceIvDomain = useMemo(() => paddedDomain(
+    series.map(p => p.ceIV).filter((v): v is number => v != null),
   ), [series]);
-  const spotDomain     = useMemo(() => paddedDomain(series.map(p => p.spot)), [series]);
+  const peIvDomain = useMemo(() => paddedDomain(
+    series.map(p => p.peIV).filter((v): v is number => v != null),
+  ), [series]);
+  const cePremiumDomain = useMemo(() => paddedDomain(series.map(p => p.ceLTP)), [series]);
+  const pePremiumDomain = useMemo(() => paddedDomain(series.map(p => p.peLTP)), [series]);
   const straddleDomain = useMemo(() => paddedDomain(series.map(p => p.straddle)), [series]);
   const skewDomain     = useMemo(() => paddedDomain(
     skew.flatMap(p => [p.ceIV, p.peIV, p.ceIVOpen, p.peIVOpen].filter((v): v is number => v != null)),
@@ -306,19 +340,19 @@ export default function IVChartsPage() {
 
   const xAxis = {
     dataKey: 'time' as const,
-    tick: { fontSize: 10, fill: AXIS, fontWeight: 500 as const },
+    tick: { fontSize: 10, fill: AXIS, fontWeight: 500 as const, fontFamily: 'var(--font-mono)' },
     tickLine: false,
     axisLine: { stroke: GRID },
     ticks: xTicks,
     interval: 0 as const,
   };
   const yAxis = {
-    tick: { fontSize: 10, fill: AXIS, fontWeight: 500 as const },
+    tick: { fontSize: 10, fill: AXIS, fontWeight: 500 as const, fontFamily: 'var(--font-mono)' },
     tickLine: false,
     axisLine: false,
     width: 48,
   };
-  const grid = { strokeDasharray: '4 4', stroke: GRID, vertical: false };
+  const grid = { strokeDasharray: '3 6', stroke: GRID, vertical: false };
 
   const ivChange       = sum?.ivLast != null && sum?.ivOpen != null ? sum.ivLast - sum.ivOpen : null;
   const spotChange     = sum?.spotLast != null && sum?.spotOpen != null ? sum.spotLast - sum.spotOpen : null;
@@ -348,70 +382,31 @@ export default function IVChartsPage() {
     <div className="flex flex-col min-h-screen bg-zinc-950 text-white">
 
       {/* ── Header ─────────────────────────────────────────────── */}
-      <div className="sticky top-0 z-20 border-b border-zinc-800 bg-zinc-950 px-6 py-3">
+      <div className="sticky top-0 z-20 border-b border-zinc-800 bg-zinc-950/95 backdrop-blur px-6 py-3">
         <div className="flex items-center justify-between gap-3 flex-wrap">
-          <div>
-            <h1 className="text-sm font-bold text-white tracking-tight">IV Charts</h1>
-            <p className="text-[10px] text-zinc-400 font-medium">
-              NIFTY implied volatility · expiry {res?.expiry || '—'}
-              {sum?.points ? ` · ${sum.points} snapshots · last ${sum.lastTime}` : ''}
-            </p>
-          </div>
-
-          <div className="flex items-center gap-2.5 flex-wrap">
-            <span className="text-[10px] font-bold text-zinc-400 bg-zinc-800 border border-zinc-700 px-2.5 py-1 rounded-full tracking-widest uppercase">
-              DATA: {date || '—'}
-            </span>
-
-            {dates.length > 0 && (
-              <label className="flex items-center gap-1.5">
-                <span className="text-xs text-zinc-300 font-medium">Date</span>
-                <select
-                  value={date}
-                  onChange={e => onDate(e.target.value)}
-                  className="bg-zinc-900 border border-zinc-700 text-zinc-200 text-xs font-semibold rounded-lg px-2.5 py-1.5 focus:outline-none focus:border-blue-500"
-                >
-                  {dates.map(d => <option key={d} value={d}>{d}</option>)}
-                </select>
-              </label>
-            )}
-
-            {(res?.strikes.length ?? 0) > 0 && (
-              <label className="flex items-center gap-1.5">
-                <span className="text-xs text-zinc-300 font-medium">Strike</span>
-                <select
-                  value={strike ?? ''}
-                  onChange={e => onStrike(Number(e.target.value))}
-                  className="bg-zinc-900 border border-zinc-700 text-zinc-200 text-xs font-semibold rounded-lg px-2.5 py-1.5 focus:outline-none focus:border-blue-500 w-36"
-                >
-                  {res!.strikes.map(sk => (
-                    <option key={sk} value={sk}>{fmt(sk)}{sk === atm ? '  · ATM' : ''}</option>
-                  ))}
-                </select>
-              </label>
-            )}
-
-            <div className="flex items-center bg-zinc-900 border border-zinc-800 p-0.5 rounded-xl">
-              {(['overview', 'skew', 'surface', 'table'] as View[]).map(v => (
-                <button
-                  key={v}
-                  onClick={() => setView(v)}
-                  className={`px-2.5 py-1.5 text-xs font-semibold rounded-lg capitalize transition-all ${
-                    view === v ? 'bg-zinc-700 text-white border border-zinc-600' : 'text-zinc-400 hover:text-zinc-200'
-                  }`}
-                >
-                  {v}
-                </button>
-              ))}
+          <div className="flex items-center gap-3">
+            <div className="flex items-center justify-center w-8 h-8 rounded-lg bg-blue-500/10 border border-blue-500/25 shrink-0">
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" className="text-blue-400">
+                <path d="M2 14c2.5 0 2.5-6 5-6s2.5 9 5 9 2.5-11 5-11 2.5 8 5 8" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+              </svg>
             </div>
-
-            {updatedAt && (
-              <span className="flex items-center gap-1.5 text-[10px] font-semibold text-zinc-500">
-                <span className="w-1.5 h-1.5 rounded-full bg-emerald-500" />
-                {updatedAt}
-              </span>
-            )}
+            <div>
+              <p className="text-[9px] font-bold text-blue-500 uppercase tracking-[0.18em] mb-0.5">
+                Options · NIFTY
+              </p>
+              <h1 className="text-sm font-bold text-white tracking-tight leading-none">Implied Volatility Terminal</h1>
+              <p className="text-[10px] text-zinc-500 font-medium mt-1">
+                Intraday IV, term structure, smile and surface across the strike chain
+              </p>
+            </div>
           </div>
+
+          {updatedAt && (
+            <span className="flex items-center gap-1.5 text-[10px] font-semibold text-zinc-500">
+              <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
+              Updated {updatedAt}
+            </span>
+          )}
         </div>
 
         {/* Stays up for any past session, not just the first fallback response —
@@ -430,7 +425,7 @@ export default function IVChartsPage() {
 
         {loading && (
           <div className="flex items-center justify-center h-64 gap-3">
-            <div className="w-6 h-6 border-2 border-zinc-700 border-t-zinc-400 rounded-full animate-spin" />
+            <div className="w-6 h-6 border-2 border-zinc-700 border-t-blue-400 rounded-full animate-spin" />
             <p className="text-sm text-zinc-300 font-medium">Loading IV data…</p>
           </div>
         )}
@@ -446,101 +441,195 @@ export default function IVChartsPage() {
 
         {hasData && (
           <>
-            {/* ── Stat tiles ────────────────────────────────────── */}
-            <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2.5">
-              <StatTile
-                label="ATM avg IV"
-                value={pct(sum?.ivLast)}
-                sub={`open ${pct(sum?.ivOpen)}`}
-              />
-              <StatTile
-                label="IV change"
-                value={signed(ivChange, 2, ' pts')}
-                sub={`range ${pct(sum?.ivMin)} – ${pct(sum?.ivMax)}`}
-                tone={ivChange == null ? 'neutral' : ivChange >= 0 ? 'up' : 'down'}
-              />
-              <StatTile label="CE IV" value={pct(sum?.ceIVLast)} accent={CE_COLOR}
-                sub={`strike ${fmt(strike ?? 0)}`} />
-              <StatTile label="PE IV" value={pct(sum?.peIVLast)} accent={PE_COLOR}
-                sub={`CE−PE ${signed(ceSkew)}`} />
-              <StatTile
-                label="Straddle"
-                value={`₹${fmt(sum?.straddleLast, 1)}`}
-                sub={`${signed(straddleChange, 1)} from open`}
-                tone={straddleChange == null ? 'neutral' : straddleChange >= 0 ? 'up' : 'down'}
-              />
-              <StatTile
-                label="Spot"
-                value={fmt(sum?.spotLast, 1)}
-                sub={`${signed(spotChange, 1)} from open`}
-                tone={spotChange == null ? 'neutral' : spotChange >= 0 ? 'up' : 'down'}
-              />
+            {/* ── Market pulse ribbon ───────────────────────────── */}
+            <div className="relative overflow-hidden rounded-2xl border border-zinc-800 bg-zinc-900/60">
+              <div className="pointer-events-none absolute inset-0 bg-gradient-to-r from-blue-500/[0.06] via-transparent to-emerald-500/[0.04]" />
+
+              <div className="relative flex items-stretch gap-6 px-5 py-4 flex-wrap">
+                <PulseStat
+                  label="ATM avg IV"
+                  value={pct(sum?.ivLast)}
+                  sub={`open ${pct(sum?.ivOpen)}`}
+                  size="text-2xl"
+                />
+                <div className="w-px bg-zinc-800 self-stretch" />
+                <PulseStat
+                  label="IV change"
+                  value={signed(ivChange, 2, ' pts')}
+                  sub={`range ${pct(sum?.ivMin)} – ${pct(sum?.ivMax)}`}
+                  color={ivChange == null ? 'text-zinc-400' : ivChange >= 0 ? 'text-emerald-400' : 'text-rose-400'}
+                  size="text-2xl"
+                />
+                <div className="w-px bg-zinc-800 self-stretch" />
+                <PulseStat label="CE IV" value={pct(sum?.ceIVLast)} color={CE_COLOR}
+                  sub={`strike ${fmt(strike ?? 0)}`} size="text-2xl" />
+                <PulseStat label="PE IV" value={pct(sum?.peIVLast)} color={PE_COLOR}
+                  sub={`CE−PE ${signed(ceSkew)}`} size="text-2xl" />
+
+                <div className="ml-auto flex items-center gap-5 flex-wrap">
+                  <PulseStat
+                    label="Straddle"
+                    value={`₹${fmt(sum?.straddleLast, 1)}`}
+                    sub={`${signed(straddleChange, 1)} from open`}
+                    color={straddleChange == null ? 'text-zinc-400' : straddleChange >= 0 ? 'text-emerald-400' : 'text-rose-400'}
+                    size="text-sm"
+                  />
+                  <PulseStat
+                    label="Spot"
+                    value={fmt(sum?.spotLast, 1)}
+                    sub={`${signed(spotChange, 1)} from open`}
+                    color={spotChange == null ? 'text-zinc-400' : spotChange >= 0 ? 'text-emerald-400' : 'text-rose-400'}
+                    size="text-sm"
+                  />
+                  <PulseStat label="Expiry" value={res?.expiry || '—'} size="text-sm" color="text-zinc-300" />
+                </div>
+              </div>
+
+              {/* Control strip */}
+              <div className="relative flex items-center justify-between gap-3 px-5 py-2 border-t border-zinc-800/80 bg-zinc-950/40 flex-wrap">
+                <div className="flex items-center gap-3 flex-wrap">
+                  <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[10px] font-bold bg-blue-500/15 text-blue-400 border border-blue-500/30">
+                    DATA
+                  </span>
+                  <span className="text-[10px] text-zinc-500 font-mono tabular-nums">
+                    {date || '—'}{sum?.points ? ` · ${sum.points} snapshots · last ${sum.lastTime}` : ''}
+                  </span>
+
+                  {dates.length > 0 && (
+                    <label className="flex items-center gap-1.5">
+                      <span className="text-[10px] text-zinc-500 font-bold uppercase tracking-widest">Date</span>
+                      <select
+                        value={date}
+                        onChange={e => onDate(e.target.value)}
+                        className="bg-zinc-900 border border-zinc-700 text-zinc-200 text-xs font-mono font-semibold rounded-lg px-2.5 py-1.5 focus:outline-none focus:border-blue-500"
+                      >
+                        {dates.map(d => <option key={d} value={d}>{d}</option>)}
+                      </select>
+                    </label>
+                  )}
+
+                  {(res?.strikes.length ?? 0) > 0 && (
+                    <label className="flex items-center gap-1.5">
+                      <span className="text-[10px] text-zinc-500 font-bold uppercase tracking-widest">Strike</span>
+                      <select
+                        value={strike ?? ''}
+                        onChange={e => onStrike(Number(e.target.value))}
+                        className="bg-zinc-900 border border-zinc-700 text-zinc-200 text-xs font-mono font-semibold rounded-lg px-2.5 py-1.5 focus:outline-none focus:border-blue-500 w-36 tabular-nums"
+                      >
+                        {res!.strikes.map(sk => (
+                          <option key={sk} value={sk}>{fmt(sk)}{sk === atm ? '  · ATM' : ''}</option>
+                        ))}
+                      </select>
+                    </label>
+                  )}
+                </div>
+
+                <div className="flex items-center bg-zinc-900 border border-zinc-800 p-0.5 rounded-lg">
+                  {(['overview', 'skew', 'surface', 'table'] as View[]).map(v => (
+                    <button
+                      key={v}
+                      onClick={() => setView(v)}
+                      className={`px-2.5 py-1 text-[10px] font-mono font-bold rounded-md capitalize transition-colors ${
+                        view === v
+                          ? 'bg-blue-500/15 text-blue-400 border border-blue-500/25'
+                          : 'text-zinc-500 hover:text-zinc-300 border border-transparent'
+                      }`}
+                    >
+                      {v}
+                    </button>
+                  ))}
+                </div>
+              </div>
             </div>
 
             {/* ── Overview ──────────────────────────────────────── */}
             {view === 'overview' && (
               <>
-                <Panel
-                  title={`Implied volatility · ${fmt(strike ?? 0)}${strike === atm ? ' ATM' : ''}`}
-                  hint={`${sampleSec ?? 30}s snapshots · drag the handles below the axis to zoom a window`}
-                  right={
-                    <div className="flex items-center gap-1.5">
-                      {[
-                        { label: 'CE IV', color: CE_COLOR, on: showCE, set: setShowCE },
-                        { label: 'PE IV', color: PE_COLOR, on: showPE, set: setShowPE },
-                      ].map(b => (
-                        <button
-                          key={b.label}
-                          onClick={() => b.set(v => !v)}
-                          className={`flex items-center gap-1.5 px-2 py-1 text-[10px] font-bold rounded-lg border transition-all ${
-                            b.on ? 'border-zinc-600 bg-zinc-800 text-white' : 'border-zinc-800 text-zinc-500'
-                          }`}
-                        >
-                          <span className="w-2 h-2 rounded-sm" style={{ background: b.on ? b.color : '#52525b' }} />
-                          {b.label}
-                        </button>
-                      ))}
-                    </div>
-                  }
-                >
-                  <ResponsiveContainer width="100%" height={320}>
-                    <LineChart data={series} margin={{ top: 8, right: 20, left: 0, bottom: 0 }} syncId="ivsync">
-                      <CartesianGrid {...grid} />
-                      <XAxis {...xAxis} />
-                      <YAxis {...yAxis} domain={ivDomain ?? ['auto', 'auto']}
-                        tickFormatter={(v: number) => `${v.toFixed(1)}%`} />
-                      <Tooltip
-                        content={chartTooltip([
-                          { key: 'ceIV', label: 'CE IV', color: CE_COLOR, fmt: v => `${v.toFixed(2)}%` },
-                          { key: 'peIV', label: 'PE IV', color: PE_COLOR, fmt: v => `${v.toFixed(2)}%` },
-                          { key: 'ivSpread', label: 'CE−PE', color: '#71717a', fmt: v => `${v >= 0 ? '+' : ''}${v.toFixed(2)}` },
-                          { key: 'spot', label: 'Spot', color: NEUTRAL, fmt: v => v.toFixed(1) },
-                        ])}
-                        cursor={{ stroke: '#52525b', strokeWidth: 1 }}
-                      />
-                      {showCE && (
-                        <Line type="monotone" dataKey="ceIV" name="CE IV" stroke={CE_COLOR}
+                {/* Call and put IV as separate panels — each on its own scale, so a
+                    tight one-sided move isn't flattened by the other leg's range. */}
+                <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+                  <Section
+                    eyebrow="Term Structure"
+                    title={`Call IV · ${fmt(strike ?? 0)}${strike === atm ? ' ATM' : ''}`}
+                    sub={`${sampleSec ?? 30}s snapshots · IV (left) vs CE premium (right) · drag the handles below the axis to zoom`}
+                    glow="blue"
+                    legend={<Legend items={[
+                      { label: 'CE IV', color: CE_COLOR }, { label: 'CE Premium', color: NEUTRAL, dashed: true },
+                    ]} />}
+                  >
+                    <ResponsiveContainer width="100%" height={320}>
+                      <LineChart data={series} margin={{ top: 8, right: 20, left: 0, bottom: 0 }} syncId="ivsync">
+                        <CartesianGrid {...grid} />
+                        <XAxis {...xAxis} />
+                        <YAxis {...yAxis} yAxisId="iv" domain={ceIvDomain ?? ['auto', 'auto']}
+                          tickFormatter={(v: number) => `${v.toFixed(1)}%`} />
+                        <YAxis {...yAxis} yAxisId="premium" orientation="right"
+                          domain={cePremiumDomain ?? ['auto', 'auto']}
+                          tickFormatter={(v: number) => `₹${v.toFixed(0)}`} />
+                        <Tooltip
+                          content={chartTooltip([
+                            { key: 'ceIV', label: 'CE IV', color: CE_COLOR, fmt: v => `${v.toFixed(2)}%` },
+                            { key: 'ceLTP', label: 'CE Premium', color: NEUTRAL, fmt: v => `₹${v.toFixed(1)}` },
+                            { key: 'spot', label: 'Spot', color: AXIS, fmt: v => v.toFixed(1) },
+                          ])}
+                          cursor={{ stroke: '#3f3f46', strokeWidth: 1, strokeDasharray: '4 4' }}
+                        />
+                        <Line yAxisId="iv" type="monotone" dataKey="ceIV" name="CE IV" stroke={CE_COLOR}
                           strokeWidth={2} dot={false} connectNulls
                           activeDot={{ r: 4, fill: CE_COLOR, stroke: '#18181b', strokeWidth: 2 }} />
-                      )}
-                      {showPE && (
-                        <Line type="monotone" dataKey="peIV" name="PE IV" stroke={PE_COLOR}
+                        <Line yAxisId="premium" type="monotone" dataKey="ceLTP" name="CE Premium" stroke={NEUTRAL}
+                          strokeWidth={1.5} strokeDasharray="4 3" dot={false} connectNulls
+                          activeDot={{ r: 3, fill: NEUTRAL, stroke: '#18181b', strokeWidth: 2 }} />
+                        <Brush dataKey="time" height={22} travellerWidth={8}
+                          stroke="#52525b" fill="#09090b"
+                          tickFormatter={(t: string) => t} />
+                      </LineChart>
+                    </ResponsiveContainer>
+                  </Section>
+
+                  <Section
+                    eyebrow="Term Structure"
+                    title={`Put IV · ${fmt(strike ?? 0)}${strike === atm ? ' ATM' : ''}`}
+                    sub={`${sampleSec ?? 30}s snapshots · IV (left) vs PE premium (right) · drag the handles below the axis to zoom`}
+                    glow="amber"
+                    legend={<Legend items={[
+                      { label: 'PE IV', color: PE_COLOR }, { label: 'PE Premium', color: NEUTRAL, dashed: true },
+                    ]} />}
+                  >
+                    <ResponsiveContainer width="100%" height={320}>
+                      <LineChart data={series} margin={{ top: 8, right: 20, left: 0, bottom: 0 }} syncId="ivsync">
+                        <CartesianGrid {...grid} />
+                        <XAxis {...xAxis} />
+                        <YAxis {...yAxis} yAxisId="iv" domain={peIvDomain ?? ['auto', 'auto']}
+                          tickFormatter={(v: number) => `${v.toFixed(1)}%`} />
+                        <YAxis {...yAxis} yAxisId="premium" orientation="right"
+                          domain={pePremiumDomain ?? ['auto', 'auto']}
+                          tickFormatter={(v: number) => `₹${v.toFixed(0)}`} />
+                        <Tooltip
+                          content={chartTooltip([
+                            { key: 'peIV', label: 'PE IV', color: PE_COLOR, fmt: v => `${v.toFixed(2)}%` },
+                            { key: 'peLTP', label: 'PE Premium', color: NEUTRAL, fmt: v => `₹${v.toFixed(1)}` },
+                            { key: 'spot', label: 'Spot', color: AXIS, fmt: v => v.toFixed(1) },
+                          ])}
+                          cursor={{ stroke: '#3f3f46', strokeWidth: 1, strokeDasharray: '4 4' }}
+                        />
+                        <Line yAxisId="iv" type="monotone" dataKey="peIV" name="PE IV" stroke={PE_COLOR}
                           strokeWidth={2} dot={false} connectNulls
                           activeDot={{ r: 4, fill: PE_COLOR, stroke: '#18181b', strokeWidth: 2 }} />
-                      )}
-                      <Brush dataKey="time" height={22} travellerWidth={8}
-                        stroke="#52525b" fill="#09090b"
-                        tickFormatter={(t: string) => t} />
-                    </LineChart>
-                  </ResponsiveContainer>
-                  <div className="mt-2"><Legend items={[
-                    { label: 'CE IV', color: CE_COLOR }, { label: 'PE IV', color: PE_COLOR },
-                  ]} /></div>
-                </Panel>
+                        <Line yAxisId="premium" type="monotone" dataKey="peLTP" name="PE Premium" stroke={NEUTRAL}
+                          strokeWidth={1.5} strokeDasharray="4 3" dot={false} connectNulls
+                          activeDot={{ r: 3, fill: NEUTRAL, stroke: '#18181b', strokeWidth: 2 }} />
+                        <Brush dataKey="time" height={22} travellerWidth={8}
+                          stroke="#52525b" fill="#09090b"
+                          tickFormatter={(t: string) => t} />
+                      </LineChart>
+                    </ResponsiveContainer>
+                  </Section>
+                </div>
 
                 {/* Small multiples share the x-axis instead of stacking a second y-scale */}
                 <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-                  <Panel title="IV spread · CE − PE" hint="positive = calls carry richer volatility than puts">
+                  <Section eyebrow="Skew" title="IV spread · CE − PE" sub="positive = calls carry richer volatility than puts" glow="blue">
                     <ResponsiveContainer width="100%" height={200}>
                       <AreaChart data={series} margin={{ top: 8, right: 20, left: 0, bottom: 0 }} syncId="ivsync">
                         <defs>
@@ -558,15 +647,15 @@ export default function IVChartsPage() {
                           content={chartTooltip([
                             { key: 'ivSpread', label: 'CE−PE', color: CE_COLOR, fmt: v => `${v >= 0 ? '+' : ''}${v.toFixed(2)} pts` },
                           ])}
-                          cursor={{ stroke: '#52525b', strokeWidth: 1 }}
+                          cursor={{ stroke: '#3f3f46', strokeWidth: 1, strokeDasharray: '4 4' }}
                         />
                         <Area type="monotone" dataKey="ivSpread" stroke={CE_COLOR} strokeWidth={2}
                           fill="url(#skewFill)" dot={false} connectNulls />
                       </AreaChart>
                     </ResponsiveContainer>
-                  </Panel>
+                  </Section>
 
-                  <Panel title="Straddle premium" hint={`CE + PE last price at ${fmt(strike ?? 0)}`}>
+                  <Section eyebrow="Premium" title="Straddle premium" sub={`CE + PE last price at ${fmt(strike ?? 0)}`} glow="emerald">
                     <ResponsiveContainer width="100%" height={200}>
                       <LineChart data={series} margin={{ top: 8, right: 20, left: 0, bottom: 0 }} syncId="ivsync">
                         <CartesianGrid {...grid} />
@@ -579,74 +668,39 @@ export default function IVChartsPage() {
                             { key: 'ceLTP', label: 'CE', color: CE_COLOR, fmt: v => `₹${v.toFixed(1)}` },
                             { key: 'peLTP', label: 'PE', color: PE_COLOR, fmt: v => `₹${v.toFixed(1)}` },
                           ])}
-                          cursor={{ stroke: '#52525b', strokeWidth: 1 }}
+                          cursor={{ stroke: '#3f3f46', strokeWidth: 1, strokeDasharray: '4 4' }}
                         />
                         <Line type="monotone" dataKey="straddle" stroke={NEUTRAL} strokeWidth={2} dot={false} />
                       </LineChart>
                     </ResponsiveContainer>
-                  </Panel>
+                  </Section>
                 </div>
-
-                <Panel title="Spot" hint="same time axis — hover any chart to cross-highlight all four">
-                  <ResponsiveContainer width="100%" height={170}>
-                    <AreaChart data={series} margin={{ top: 8, right: 20, left: 0, bottom: 0 }} syncId="ivsync">
-                      <defs>
-                        <linearGradient id="spotFill" x1="0" y1="0" x2="0" y2="1">
-                          <stop offset="0%" stopColor={NEUTRAL} stopOpacity={0.3} />
-                          <stop offset="100%" stopColor={NEUTRAL} stopOpacity={0.02} />
-                        </linearGradient>
-                      </defs>
-                      <CartesianGrid {...grid} />
-                      <XAxis {...xAxis} />
-                      <YAxis {...yAxis} domain={spotDomain ?? ['auto', 'auto']}
-                        tickFormatter={(v: number) => v.toFixed(0)} />
-                      {atm > 0 && (
-                        <ReferenceLine y={atm} stroke="#52525b" strokeDasharray="3 3"
-                          label={{ value: `ATM ${fmt(atm)}`, fill: AXIS, fontSize: 10, position: 'insideTopLeft' }} />
-                      )}
-                      <Tooltip
-                        content={chartTooltip([
-                          { key: 'spot', label: 'Spot', color: NEUTRAL, fmt: v => v.toFixed(2) },
-                        ])}
-                        cursor={{ stroke: '#52525b', strokeWidth: 1 }}
-                      />
-                      <Area type="monotone" dataKey="spot" stroke={NEUTRAL} strokeWidth={2} fill="url(#spotFill)" dot={false} />
-                    </AreaChart>
-                  </ResponsiveContainer>
-                </Panel>
               </>
             )}
 
             {/* ── Skew (smile) ──────────────────────────────────── */}
             {view === 'skew' && (
-              <Panel
+              <Section
+                eyebrow="Curvature"
                 title="Volatility smile across strikes"
-                hint={`solid = latest (${sum?.lastTime ?? ''}) · dashed = first snapshot of the day`}
-                right={
-                  <div className="flex items-center gap-3 flex-wrap justify-end">
-                    <button
-                      onClick={() => setOtmOnly(v => !v)}
-                      className={`px-2 py-1 text-[10px] font-bold rounded-lg border transition-all ${
-                        otmOnly ? 'border-zinc-600 bg-zinc-800 text-white' : 'border-zinc-800 text-zinc-500'
-                      }`}
-                    >
-                      OTM only
-                    </button>
-                    <Legend items={[
-                      { label: 'CE now', color: CE_COLOR },
-                      { label: 'CE open', color: CE_COLOR, dashed: true },
-                      { label: 'PE now', color: PE_COLOR },
-                      { label: 'PE open', color: PE_COLOR, dashed: true },
-                    ]} />
-                  </div>
-                }
+                sub={`solid = latest (${sum?.lastTime ?? ''}) · dashed = first snapshot of the day`}
+                glow="blue"
+                legend={<>
+                  <ToggleChip label="OTM only" on={otmOnly} color={CE_COLOR} onClick={() => setOtmOnly(v => !v)} />
+                  <Legend items={[
+                    { label: 'CE now', color: CE_COLOR },
+                    { label: 'CE open', color: CE_COLOR, dashed: true },
+                    { label: 'PE now', color: PE_COLOR },
+                    { label: 'PE open', color: PE_COLOR, dashed: true },
+                  ]} />
+                </>}
               >
                 <ResponsiveContainer width="100%" height={420}>
                   <LineChart data={skew} margin={{ top: 20, right: 24, left: 0, bottom: 4 }}>
                     <CartesianGrid {...grid} />
                     <XAxis
                       dataKey="strike" type="number" domain={['dataMin', 'dataMax']}
-                      tick={{ fontSize: 10, fill: AXIS, fontWeight: 500 }}
+                      tick={{ fontSize: 10, fill: AXIS, fontWeight: 500, fontFamily: 'var(--font-mono)' }}
                       tickLine={false} axisLine={{ stroke: GRID }}
                       ticks={skew.map(s => s.strike)}
                       tickFormatter={(v: number) => fmt(v)}
@@ -666,7 +720,7 @@ export default function IVChartsPage() {
                         { key: 'peIVOpen', label: 'PE open', color: PE_COLOR, fmt: v => `${v.toFixed(2)}%` },
                         { key: 'straddle', label: 'Straddle', color: NEUTRAL, fmt: v => `₹${v.toFixed(1)}` },
                       ], v => `Strike ${fmt(Number(v))}`)}
-                      cursor={{ stroke: '#52525b', strokeWidth: 1 }}
+                      cursor={{ stroke: '#3f3f46', strokeWidth: 1, strokeDasharray: '4 4' }}
                     />
                     <Line type="monotone" dataKey="ceIVOpen" stroke={CE_COLOR} strokeWidth={1.5}
                       strokeDasharray="4 3" dot={false} connectNulls opacity={0.55} />
@@ -684,17 +738,19 @@ export default function IVChartsPage() {
                   {otmOnly
                     ? 'Showing the out-of-the-money leg on each side of ATM — toggle off to include ITM quotes.'
                     : 'Including ITM legs — their wide spreads produce inflated, noisy implied vol.'}
-                  {' '}Pick a strike in the header to load its intraday series.
+                  {' '}Pick a strike in the control strip above to load its intraday series.
                 </p>
-              </Panel>
+              </Section>
             )}
 
             {/* ── Surface heatmap ───────────────────────────────── */}
             {view === 'surface' && surface && heat && (
-              <Panel
+              <Section
+                eyebrow="Surface"
                 title="IV surface · strike × time"
-                hint="cell = out-of-the-money leg's implied volatility at that strike and minute · scale clipped to the 3rd–97th percentile"
-                right={
+                sub="cell = out-of-the-money leg's implied volatility at that strike and minute · scale clipped to the 3rd–97th percentile"
+                glow="amber"
+                legend={
                   <div className="flex items-center gap-2">
                     <span className="text-[10px] font-semibold text-zinc-400 tabular-nums">{heat.lo.toFixed(1)}%</span>
                     <span className="flex h-3 w-28 rounded-sm overflow-hidden border border-zinc-700">
@@ -735,19 +791,19 @@ export default function IVChartsPage() {
                     </div>
                   </div>
                 </div>
-              </Panel>
+              </Section>
             )}
 
             {/* ── Table view (accessibility + exact values) ──────── */}
             {view === 'table' && (
-              <Panel title={`Snapshots · ${fmt(strike ?? 0)}`} hint={`${series.length} rows · newest first`}>
+              <Section eyebrow="Raw Data" title={`Snapshots · ${fmt(strike ?? 0)}`} sub={`${series.length} rows · newest first`}>
                 <div className="overflow-auto max-h-[70vh] rounded-lg border border-zinc-800">
-                  <table className="w-full text-xs tabular-nums">
+                  <table className="w-full text-xs tabular-nums font-mono">
                     <thead className="sticky top-0">
                       <tr className="bg-zinc-800">
                         {['Time', 'Spot', 'CE IV', 'PE IV', 'CE−PE', 'CE LTP', 'PE LTP', 'Straddle', 'CE OI', 'PE OI']
                           .map(h => (
-                            <th key={h} className="text-xs font-bold text-white px-3 py-2 text-right first:text-left whitespace-nowrap">
+                            <th key={h} className="text-xs font-bold text-white px-3 py-2 text-right first:text-left whitespace-nowrap font-sans">
                               {h}
                             </th>
                           ))}
@@ -756,7 +812,7 @@ export default function IVChartsPage() {
                     <tbody>
                       {[...series].reverse().map((p, i) => (
                         <tr key={p.ts} className={i % 2 ? 'bg-zinc-900' : 'bg-zinc-950'}>
-                          <td className="px-3 py-1.5 text-zinc-300 font-semibold">{p.time}</td>
+                          <td className="px-3 py-1.5 text-zinc-300 font-semibold font-sans">{p.time}</td>
                           <td className="px-3 py-1.5 text-right text-zinc-300">{fmt(p.spot, 2)}</td>
                           <td className="px-3 py-1.5 text-right text-zinc-100">{pct(p.ceIV)}</td>
                           <td className="px-3 py-1.5 text-right text-zinc-100">{pct(p.peIV)}</td>
@@ -773,7 +829,7 @@ export default function IVChartsPage() {
                     </tbody>
                   </table>
                 </div>
-              </Panel>
+              </Section>
             )}
           </>
         )}
