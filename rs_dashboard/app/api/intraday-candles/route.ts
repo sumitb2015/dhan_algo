@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import path from 'path';
 import fs from 'fs';
 import type { CandleBar, CandlePayload } from '@/lib/terminalTypes';
+import { resampleBars } from '@/lib/volumeProfile';
 
 const PROJECT_ROOT = path.resolve(process.cwd(), '..');
 const BARS_DIR = path.join(PROJECT_ROOT, 'debug', 'intraday_bars');
@@ -12,42 +13,13 @@ const SYMBOL_RE = /^[A-Z0-9&\-]{1,20}$/;
 /**
  * Aggregate 1-minute bars to 5-minute on the NSE grid.
  *
- * Buckets must align to 09:15/09:20/... exactly as
- * lib/intraday_signals.resample_5m does, or the chart shows a different candle
- * than the one the strategy made its decision on. 09:15 is 555 minutes past
- * midnight and 555 is divisible by 5, so flooring minutes-since-midnight to a
- * multiple of 5 lands on the same grid.
+ * Buckets must align to 09:15/09:20/... exactly as lib/intraday_signals.resample_5m does,
+ * or the chart shows a different candle than the one the strategy made its decision on.
+ * resampleBars anchors its buckets to the 09:15 session open, which for a 5-minute
+ * timeframe is the same grid.
  */
 function to5m(bars: CandleBar[]): CandleBar[] {
-  const pad = (n: number) => String(n).padStart(2, '0');
-  const buckets = new Map<string, CandleBar>();
-
-  for (const b of bars) {
-    // Parse "YYYY-MM-DD HH:MM:SS" literally rather than via `new Date`.
-    // These stamps are IST-naive (the whole store is), so constructing a Date
-    // reinterprets them in the server's timezone and toISOString() shifts them
-    // again — that rendered the 09:15 session open as 06:25. String math has no
-    // timezone to get wrong and matches resample_5m exactly.
-    const m = /^(\d{4}-\d{2}-\d{2})[ T](\d{2}):(\d{2})/.exec(b.t);
-    if (!m) continue;
-    const [, day, hh, mm] = m;
-
-    const mins = Number(hh) * 60 + Number(mm);
-    const floored = Math.floor(mins / 5) * 5;
-    const key = `${day} ${pad(Math.floor(floored / 60))}:${pad(floored % 60)}:00`;
-
-    const cur = buckets.get(key);
-    if (!cur) {
-      buckets.set(key, { ...b, t: key });
-    } else {
-      cur.h = Math.max(cur.h, b.h);
-      cur.l = Math.min(cur.l, b.l);
-      cur.c = b.c;
-      cur.v += b.v;
-    }
-  }
-  // Keys are fixed-width and chronological, so lexical order is time order.
-  return [...buckets.keys()].sort().map((k) => buckets.get(k)!);
+  return resampleBars(bars, 5);
 }
 
 export async function GET(request: NextRequest) {

@@ -38,6 +38,7 @@ const NAV_GROUPS = [
       { href: '/rrg', label: 'RRG', desc: 'Relative Rotation Graphs & sector trends' },
       { href: '/normalized', label: 'Charts', desc: 'Multi-asset normalized charts comparisons' },
       { href: '/candlestick', label: 'Candlestick', desc: 'Plotly candlestick charts for Nifty 50 stocks' },
+      { href: '/volume-footprint', label: 'Volume Footprint', desc: 'Buy/sell volume profile, POC/VAH/VAL & footprint table for indices and F&O stocks' },
       { href: '/seasonality', label: 'Seasonality', desc: 'Monthly % gain heatmap by year' },
       { href: '/equity-watchlist', label: 'Forever Watchlist', desc: 'Manage Forever/GTT orders for your equity watchlist' },
     ],
