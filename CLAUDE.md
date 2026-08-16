@@ -90,6 +90,19 @@ npm run dev   # http://localhost:3000
 
 **Important**: The `rs_dashboard/` AGENTS.md warns that this Next.js version has breaking API changes. Read `node_modules/next/dist/docs/` before writing any code in that directory.
 
+**Auth gate is `rs_dashboard/proxy.ts`** (Next 16 renamed `middleware.ts` → `proxy.ts`; it runs on the Node runtime, and the runtime is not configurable). It verifies the HMAC-signed `dhan_session` cookie, 401s unauthenticated `/api/*` requests and redirects unauthenticated page requests to `/login`. Without a session cookie, `curl` sees **307 on pages and 401 on API routes** — neither is a bug, so mint a cookie before concluding a route is broken.
+
+**Stale Turbopack dev cache → phantom 404s.** `next dev` can serve 404 for routes that plainly exist on disk, because the running server's route tree lost them — anything from one nested API subtree up to *every* route except `/login`. Recognise it by: 404 rather than 500 (a 500 means the route compiled and threw), a whole directory level affected uniformly, and a clean `git status`. Fix, cheapest first:
+
+```powershell
+# 1. Touch any file in the affected directory — the watcher rescans that subtree.
+# 2. Restart `npm run dev`.
+# 3. Whole-app 404s: stop the server, then clear only the dev cache and restart.
+Remove-Item -Recurse -Force rs_dashboard\.next\dev
+```
+
+Delete `.next\dev`, **not** all of `.next` — the latter also holds the production build that `next start` serves.
+
 ---
 
 ## Architecture

@@ -61,17 +61,62 @@ toast overlay (`fixed top-4 right-4 z-50`, 3s auto-dismiss) showing the returned
 `order_id` on success or `error` on failure — copy the `addToast`/toast-render
 pattern from `Scalper.tsx` rather than inventing a new one.
 
-## Table & Text Styling (enforced repo-wide, not optional)
+## Visual Language (enforced repo-wide, not optional)
+
+The dashboard is **dark-only**. `app/globals.css` defines a light `:root` block
+because shadcn ships one, but `<html>` is hardcoded `class="dark"` in
+`app/layout.tsx` and no theme toggle exists — do not spend effort on light-mode
+variants, and do not assume a token's `:root` value is the one in play.
+
+**Fonts** — `Geist` (`--font-geist-sans`) for UI, `Geist_Mono`
+(`--font-geist-mono`) for numerics, both loaded in `app/layout.tsx`. Any column
+of numbers that updates live gets `tabular-nums` so digits stop jittering
+(~70 components already do this).
+
+**Zinc is redefined — this is the trap.** `globals.css` shifts the mid-range
+steps up for legibility on near-black, so the scale does *not* match stock
+Tailwind:
+
+| Class | Tailwind default | Here | Use for |
+|---|---|---|---|
+| `text-zinc-400` | `#a1a1aa` | unchanged | active labels |
+| `text-zinc-500` | `#71717a` | **`#a1a1aa`** | muted text |
+| `text-zinc-600` | `#52525b` | **`#71717a`** | subtle muted |
+| `border-zinc-700` | `#3f3f46` | **`#52525b`** | borders/dividers |
+
+Consequence: picking a dimmer step than you'd reach for in a normal Tailwind app
+lands *lighter* than expected. Judge these in the browser, not from memory.
+
+**Palette in practice** (counts = current usage, follow the majority):
+- Surfaces: `bg-zinc-900` cards on the `#030303` body, `bg-zinc-950` for
+  inset/nested panels. Slash-opacity on backgrounds is fine and common
+  (`bg-zinc-900/60`).
+- Borders: `border-zinc-800` (default), `border-zinc-700` (emphasis).
+- Direction: **`text-emerald-400` up / `text-red-400` down.** `rose-400` also
+  appears (~98×) but emerald/red is the dominant pair — match the file you're
+  editing rather than mixing both in one table.
+- Accent/primary is emerald (`--primary: oklch(0.696 0.17 162)`), which is also
+  `--ring` and `--chart-1`. Amber is the "attention/metadata" hue (the `DATA:`
+  chip); it is not a warning color.
+- Body backdrop (radial gradients + 32px grid) is set once on `body` — never
+  re-declare a page background, it will cover the grid.
+
+**Text rules**
 - Table headers: `<thead>`/`TH` get `text-xs font-bold text-white` on a solid
   `bg-zinc-800` — at 10px (`text-[10px]`) white anti-aliases to gray, so 12px
   (`text-xs`) + `font-bold` is the floor for headers to read as truly white.
 - **Never** use slash-opacity on text color (`text-white/70`, `text-zinc-400/50`).
   Use solid steps instead: `text-zinc-100` (near-white) → `text-zinc-600` (very
-  dim). Opacity modifiers are fine on *backgrounds* (`bg-emerald-500/10`), just
-  not on text.
+  dim). Opacity modifiers are fine on *backgrounds*, just not on text.
 - Any page showing stock/market data needs a `DATA: YYYY-MM-DD` chip in the
   sticky header (grep `DATA:` in `components/*.tsx` for ~10 examples — pattern
   is usually `<span className="text-amber-300 font-bold uppercase tracking-wide">DATA: {data.dataDate || '—'}</span>`).
+
+**Reuse before restyling** — `components/ui/` holds the shadcn primitives and
+`components/` has the domain pieces already themed to the above (`NavBar`,
+`DayChangeChip`, `LogConsole`, `DataRefreshPanel`, the `*Chart` wrappers around
+`lightweight-charts`). Copy the nearest existing component's shell classes
+instead of composing a new card/table look.
 
 ## Quick Reference
 
@@ -93,6 +138,10 @@ pattern from `Scalper.tsx` rather than inventing a new one.
   the Python process has no other way to know to exit.
 - Using `text-zinc-400/60` etc. for readability tweaks instead of the solid
   zinc scale — inconsistent rendering across light/dark and flagged in review.
+- Inventing an off-scale Tailwind step. `border-zinc-850` appears ~49× across
+  `components/*.tsx` and is a **no-op** — 850 is not a Tailwind step and is not
+  defined in `globals.css`, so those elements silently fall back to the
+  inherited border. Use 800 or 700. (Existing uses are harmless; don't add more.)
 - Hardcoding a relative path like `../../debug/foo.json` instead of building it
   from `PROJECT_ROOT` — breaks as soon as the route file moves.
 - `find rs_dashboard/app -maxdepth 1 -type d` for the current page list rather
