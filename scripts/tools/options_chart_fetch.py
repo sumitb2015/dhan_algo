@@ -279,7 +279,11 @@ def _fetch_intraday(helper: DhanHelper, security_id, exchange_segment: str, inst
             # df["timestamp"] is a Series (not a plain list), so to_datetime(...) returns a
             # Series whose own .tz_convert() would act on ITS index, not its values - use the
             # .dt accessor to convert the datetime *values* to IST instead.
-            "time": pd.to_datetime(df["timestamp"], unit="s", utc=True).dt.tz_convert(IST),
+            # Floor to the minute: Dhan sometimes returns timestamps with a non-zero second
+            # component (e.g. 13:31:30 vs 13:31:00) for the same 1-min bar depending on which
+            # leg is fetched. Without flooring, the inner merge in combine_legs_ohlc drops any
+            # bar where CE and PE have different second offsets, creating visible chart gaps.
+            "time": pd.to_datetime(df["timestamp"], unit="s", utc=True).dt.tz_convert(IST).dt.floor("min"),
             "open": df["open"],
             "high": df["high"],
             "low": df["low"],
@@ -525,13 +529,20 @@ def _strike_segments(spot_df: pd.DataFrame, keep_dates: set, strikes: list[float
     segments: list[dict] = []
     current_strike = None
     current_start = None
+    current_last: pd.Timestamp | None = None
     for _, row in day_df.iterrows():
         strike = _nearest_strike(float(row["close"]), strikes)
         if strike != current_strike:
             if current_strike is not None:
-                segments.append({"strike": current_strike, "start": current_start, "end": row["time"]})
+                # Store the LAST timestamp of the previous segment (inclusive end) rather
+                # than the first timestamp of the new segment (exclusive end).  The old
+                # "end = row['time']" approach combined with a strict `< end` slice left
+                # the transition bar in neither segment, creating a 1-candle gap on every
+                # ATM strike roll.
+                segments.append({"strike": current_strike, "start": current_start, "end": current_last})
             current_strike = strike
             current_start = row["time"]
+        current_last = row["time"]
     if current_strike is not None:
         segments.append({"strike": current_strike, "start": current_start, "end": None})
     return segments
@@ -587,7 +598,10 @@ def get_rolling_straddle_chart(helper: DhanHelper, underlying: str, expiry: str,
             continue
         mask = combined["time"] >= seg["start"]
         if seg["end"] is not None:
-            mask &= combined["time"] < seg["end"]
+            # Inclusive end: the last bar of this segment IS included.  `end` is now the
+            # last timestamp owned by this segment (not the first of the next), so <= is
+            # correct and won't double-count — the next segment's start > this end.
+            mask &= combined["time"] <= seg["end"]
         slice_df = combined[mask].copy()
         if slice_df.empty:
             continue
