@@ -256,7 +256,7 @@ export default function LiveOptionsChartsPage() {
           background: transparent;
           cursor: pointer;
           transition: all 0.2s ease;
-          color: rgba(255,255,255,0.40);
+          color: rgba(255,255,255,0.65);
         }
         .lc-nav-item:hover {
           background: rgba(99, 102, 241, 0.08);
