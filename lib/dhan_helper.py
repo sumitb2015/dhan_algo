@@ -3433,16 +3433,21 @@ class DhanHelper:
                 data = res.get('data', {})
                 if isinstance(data, dict) and 'data' in data and isinstance(data['data'], dict):
                      data = data.get('data', {})
-                
+
                 if data:
                     self._option_chain_cache[cache_key] = (data, time.time())
+                self.last_api_error = None
                 return data
             error_msg = res.get('remarks') if isinstance(res, dict) else str(res)
             logger.error(f"Failed to fetch option chain: {error_msg}")
-            
+            # An empty chain is indistinguishable from a throttled or rejected
+            # call at the call site, so record why before returning {}.
+            self._record_api_error("option_chain", res if isinstance(res, dict) else {})
+
         except Exception as e:
             logger.error(f"Error fetching option chain: {e}")
-        
+            self.last_api_error = {"method": "option_chain", "code": "", "type": "exception", "message": str(e)}
+
         return {}
 
     def get_option_chain_df(self, symbol: str, expiry: str, exchange_segment: str = None) -> pd.DataFrame:

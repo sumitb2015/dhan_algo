@@ -49,7 +49,11 @@ export async function POST(req: NextRequest) {
         '--product-type', productType,
         '--wait-fill',
       ],
-      45_000,
+      // Must exceed the Python side's own budget (auth + master list ~5s, then
+      // a 25s wait_for_fill). If this fires first the child is killed with the
+      // order already at the exchange, which is precisely the untracked-position
+      // case this route exists to prevent.
+      90_000,
     );
 
     if (!result.success) {
@@ -75,6 +79,10 @@ export async function POST(req: NextRequest) {
     if (result.orderId) row.orderId = result.orderId;
     if (result.securityId) row.securityId = result.securityId;
     if (result.exchangeSegment) row.exchangeSegment = result.exchangeSegment;
+    // Unconfirmed fill: avgPrice is 0 and qty is what was asked for, not what
+    // filled. Flagged rather than silently stored, so the UI can prompt for a
+    // reconcile instead of reporting the whole premium as a loss forever.
+    if (result.status !== 'TRADED') row.needsReconcile = true;
 
     const rows = readTracked();
     rows.push(row);
@@ -87,7 +95,8 @@ export async function POST(req: NextRequest) {
       tradedPrice: result.tradedPrice ?? null,
       row,
       warning: result.status !== 'TRADED'
-        ? `Order ${result.orderId} is ${result.status ?? 'unconfirmed'} — the tracked average price will be wrong until it fills.`
+        ? `Order ${result.orderId} is ${result.status ?? 'unconfirmed'} — the tracked average price and `
+          + 'quantity are the requested ones. Run Reconcile once it settles.'
         : undefined,
     });
   } catch (err: unknown) {

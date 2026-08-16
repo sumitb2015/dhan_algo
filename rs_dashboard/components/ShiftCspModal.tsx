@@ -3,7 +3,7 @@
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import { X, Sparkles, AlertTriangle } from 'lucide-react';
 import { cn } from '@/lib/utils';
-import { fmt, fetchWithTimeout, PctText } from './cspShared';
+import { fmt, fmtInr, fetchWithTimeout, PctText } from './cspShared';
 
 export interface ShiftTarget {
   id: string;
@@ -11,6 +11,7 @@ export interface ShiftTarget {
   strike: number;
   expiry: string;
   qty: number;
+  lotSize: number;
   spot: number;
   peLtp: number;
   move1d: number | null;
@@ -28,15 +29,22 @@ interface ChainStrike {
   noHitProb: number;
 }
 
-// Same liquidity floor the scanner applies (scripts/tools/csp_scanner.py): a
-// strike with no open interest can't actually be sold at its quoted price, and
-// that stale quote back-solves to a nonsense IV that makes the strike look far
-// safer than it is. Recommending one would be actively harmful.
-const MIN_OI = 100;
+// Same liquidity floor the scanner applies (scripts/tools/csp_scanner.py's
+// --min-oi-lots): a strike with no open interest can't actually be sold at its
+// quoted price, and that stale quote back-solves to a nonsense IV that makes
+// the strike look far safer than it is. Recommending one would be actively
+// harmful.
+//
+// The floor is in LOTS. Open interest is quoted in shares while a lot ranges
+// from 20 to 2075 shares, so a flat share count is a different filter on every
+// symbol — 100 shares is 5 lots of PAGEIND and a twentieth of a lot of
+// DELHIVERY.
+const MIN_OI_LOTS = 25;
 const MAX_IV = 100;
 
-function isTradeable(s: ChainStrike): boolean {
-  return s.ltp > 0 && s.oi >= MIN_OI && s.iv > 0 && s.iv <= MAX_IV;
+function isTradeable(s: ChainStrike, lotSize: number): boolean {
+  const minOi = MIN_OI_LOTS * Math.max(lotSize, 1);
+  return s.ltp > 0 && s.oi >= minOi && s.iv > 0 && s.iv <= MAX_IV;
 }
 
 type LegState = 'idle' | 'pending' | 'done' | 'failed';
@@ -106,7 +114,10 @@ export default function ShiftCspModal({ target, onClose, onComplete }: {
 
   useEffect(() => {
     let cancelled = false;
-    fetch(`/api/csp-tracked/moves?symbol=${encodeURIComponent(target.symbol)}`)
+    // Expiry included so the cycle move is anchored to the option cycle being
+    // rolled, matching the scanner's Cycle column rather than a bare 21 sessions.
+    fetch(`/api/csp-tracked/moves?symbol=${encodeURIComponent(target.symbol)}`
+      + `&expiry=${encodeURIComponent(target.expiry)}`)
       .then((r) => r.json())
       .then((j) => {
         if (cancelled || !j.success) return;
@@ -114,7 +125,7 @@ export default function ShiftCspModal({ target, onClose, onComplete }: {
       })
       .catch(() => { /* the move boxes just stay blank */ });
     return () => { cancelled = true; };
-  }, [target.symbol]);
+  }, [target.symbol, target.expiry]);
 
   useEffect(() => {
     let cancelled = false;
@@ -140,8 +151,8 @@ export default function ShiftCspModal({ target, onClose, onComplete }: {
   // A roll is only defensive if it moves further from the money, so only
   // strikes below the current one are candidates — and only liquid ones.
   const candidates = useMemo(
-    () => strikes.filter((s) => s.strike < target.strike && isTradeable(s)),
-    [strikes, target.strike],
+    () => strikes.filter((s) => s.strike < target.strike && isTradeable(s, target.lotSize)),
+    [strikes, target.strike, target.lotSize],
   );
 
   const recommended = useMemo(() => {
@@ -157,6 +168,23 @@ export default function ShiftCspModal({ target, onClose, onComplete }: {
     [strikes, newStrike],
   );
 
+  // Buy the current strike back, sell a lower one: within a single expiry that
+  // is always a net debit, and its size is the whole trade-off being made —
+  // paying it down is what buys the extra headroom. Needs a live mark for the
+  // current leg, which only exists after a Sync.
+  const roll = useMemo(() => {
+    if (!selected || target.peLtp <= 0) return null;
+    // Cash flow = premium received on the new strike − premium paid to buy the
+    // old one back. Negative is a debit, which rolling down within one expiry
+    // always is: the lower strike is worth less than the one being closed.
+    const creditPerShare = selected.ltp - target.peLtp;
+    return {
+      creditPerShare,
+      total: creditPerShare * target.qty,
+      headroom: target.strike > 0 ? ((target.strike - selected.strike) / target.strike) * 100 : 0,
+    };
+  }, [selected, target.peLtp, target.qty, target.strike]);
+
   const runShift = useCallback(async () => {
     // Never retry a roll in-place: once leg 1 is away the old put may already be
     // bought back, and re-running would fire a second BUY and open a real long
@@ -166,7 +194,10 @@ export default function ShiftCspModal({ target, onClose, onComplete }: {
     setSteps({ exit: 'pending', entry: 'idle' });
 
     try {
-      const exitRes = await fetch('/api/csp-tracked/shift/exit-leg', {
+      // Comfortably past the route's own 90s budget: aborting the client while
+      // the order is still in flight would report a failure for a leg that may
+      // well have filled.
+      const exitRes = await fetchWithTimeout('/api/csp-tracked/shift/exit-leg', 120_000, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ id: target.id }),
@@ -181,9 +212,12 @@ export default function ShiftCspModal({ target, onClose, onComplete }: {
         onComplete();
         return;
       }
-      setSteps({ exit: 'done', entry: 'pending', exitOrderId: exitJson.orderId });
+      setSteps({
+        exit: 'done', entry: 'pending', exitOrderId: exitJson.orderId,
+        error: exitJson.warning,
+      });
 
-      const entryRes = await fetch('/api/csp-tracked/shift/entry-leg', {
+      const entryRes = await fetchWithTimeout('/api/csp-tracked/shift/entry-leg', 120_000, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -300,7 +334,7 @@ export default function ShiftCspModal({ target, onClose, onComplete }: {
             </select>
             {!loadingChain && strikes.length > 0 && (
               <span className="text-[10px] text-zinc-600">
-                Showing {candidates.length} of {strikes.filter((s) => s.strike < target.strike).length} strikes below {target.strike} — illiquid strikes (OI &lt; {MIN_OI}) are hidden.
+                Showing {candidates.length} of {strikes.filter((s) => s.strike < target.strike).length} strikes below {target.strike} — illiquid strikes (OI &lt; {MIN_OI_LOTS} lots) are hidden.
               </span>
             )}
             {chainError && (
@@ -350,6 +384,28 @@ export default function ShiftCspModal({ target, onClose, onComplete }: {
                 <span className="font-mono text-[11px] text-zinc-300">
                   Leg 2 (Entry): SELL {contractName(target.symbol, target.expiry, selected.strike)} ({target.qty} Qty) @ Market
                 </span>
+              </div>
+
+              <div className="mt-0.5 flex flex-wrap items-baseline gap-x-3 gap-y-1 border-t border-zinc-800 pt-2 font-mono text-[11px]">
+                {roll === null ? (
+                  <span className="text-zinc-500">
+                    Net cost unavailable — Sync entry spots first to price the leg being closed.
+                  </span>
+                ) : (
+                  <>
+                    <span className="text-zinc-500">Net</span>
+                    <span className={cn('font-bold', roll.total < 0 ? 'text-red-400' : 'text-emerald-400')}>
+                      {roll.total < 0 ? 'DEBIT' : 'CREDIT'} ₹{fmtInr(Math.abs(roll.total))}
+                    </span>
+                    <span className="text-zinc-500">
+                      (₹{Math.abs(roll.creditPerShare).toFixed(2)}/sh × {target.qty})
+                    </span>
+                    <span className="text-zinc-600">·</span>
+                    <span className="text-zinc-400">
+                      buys {roll.headroom.toFixed(1)}% more headroom
+                    </span>
+                  </>
+                )}
               </div>
 
               {started && (

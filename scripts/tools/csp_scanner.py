@@ -36,10 +36,25 @@ N500_LIST    = os.path.join(PROJECT_ROOT, "ind_nifty500list.csv")
 STOCKS_DIR   = os.path.join(PROJECT_ROOT, "Daily_Historical_Data_Fresh")
 
 RISK_FREE_RATE = 0.065
+MIN_DTE = 5
 
 os.makedirs(DEBUG_DIR, exist_ok=True)
 
 _log_lines: list = []
+
+
+def _api_reason(helper: DhanHelper, fallback: str) -> str:
+    """Data API calls return empty on error rather than raising, so an empty
+    result means nothing on its own — helper.last_api_error is what separates a
+    throttled or lapsed-subscription call from a genuinely empty response."""
+    err = getattr(helper, 'last_api_error', None)
+    if not err:
+        return fallback
+    if isinstance(err, dict):
+        detail = err.get('message') or err.get('code') or str(err)
+    else:
+        detail = str(err)
+    return f"{fallback} (API error: {detail})"
 
 
 def write_status(message: str, current: int = 0, total: int = 0,
@@ -203,7 +218,7 @@ def prob_touch(spot: float, strike: float, years: float, iv: float,
 
 
 # ── Expiry selection ─────────────────────────────────────────────────────────
-def pick_expiry(expiries: list, min_dte: int = 5) -> str:
+def pick_expiry(expiries: list, min_dte: int = MIN_DTE) -> str:
     """Nearest expiry at least min_dte away — a 1-day-out contract has almost no
     premium left and would dominate the yield ranking for the wrong reason."""
     today = date.today()
@@ -221,18 +236,21 @@ def pick_expiry(expiries: list, min_dte: int = 5) -> str:
 
 # ── Per-symbol scan ──────────────────────────────────────────────────────────
 def scan_symbol(helper: DhanHelper, symbol: str, lot_size: int,
-                target_prob: float, min_oi: int, max_iv: float,
-                lot_by_expiry: dict = None, min_no_hit: float = 40.0) -> list:
+                target_prob: float, min_oi_lots: float, max_iv: float,
+                lot_by_expiry: dict = None, min_no_hit: float = 40.0) -> tuple:
     """All sellable OTM put strikes for the symbol's nearest usable expiry,
-    one row each. Returns [] when the symbol has nothing tradeable."""
-    spot = float(helper.get_ltp(symbol, instrument="EQUITY") or 0)
-    if spot <= 0:
-        return []
+    one row each.
 
+    Returns (rows, skip_reason). A symbol that yields nothing is not
+    self-explanatory — an expiry list or chain that came back empty because the
+    call was throttled looks exactly like a name with no options — so the reason
+    is returned rather than swallowed, and main() counts it."""
     expiries = helper.get_expiries(symbol) or []
+    if not expiries:
+        return [], _api_reason(helper, "no expiries returned")
     expiry = pick_expiry(expiries)
     if not expiry:
-        return []
+        return [], f"no expiry at least {MIN_DTE}d out"
 
     # The contract actually being quoted decides the lot, not the symbol.
     if lot_by_expiry:
@@ -240,10 +258,24 @@ def scan_symbol(helper: DhanHelper, symbol: str, lot_size: int,
 
     df = helper.get_option_chain_df(symbol, expiry)
     if df.empty:
-        return []
+        return [], _api_reason(helper, "empty option chain")
+
+    # The chain response already carries the underlying LTP, so taking it from
+    # there avoids a second rate-limited call per symbol (~200 over a sweep).
+    spot = float(df.attrs.get('underlying_ltp', 0) or 0)
+    if spot <= 0:
+        spot = float(helper.get_ltp(symbol, instrument="EQUITY") or 0)
+    if spot <= 0:
+        return [], _api_reason(helper, "no spot price")
 
     dte = (datetime.strptime(expiry, "%Y-%m-%d").date() - date.today()).days
     years = max(dte, 1) / 365.0
+
+    # Open interest is quoted in shares, but tradeability is a question of lots:
+    # 100 shares of OI is 5 lots of PAGEIND and a twentieth of a lot of
+    # DELHIVERY. Comparing the raw number against a flat floor let strikes with
+    # a single lot outstanding through on every large-lot name.
+    min_oi_shares = min_oi_lots * max(lot_size, 1)
 
     candidates = []
     for strike, row in df.iterrows():
@@ -258,7 +290,7 @@ def scan_symbol(helper: DhanHelper, symbol: str, lot_size: int,
         # large-cap) that makes a deep-OTM strike look far safer than it is.
         # Both filters are needed — without them the scan recommends untradeable
         # strikes with fabricated probabilities.
-        if premium <= 0 or iv <= 0 or oi < min_oi or iv * 100 > max_iv:
+        if premium <= 0 or iv <= 0 or oi < min_oi_shares or iv * 100 > max_iv:
             continue
         candidates.append({
             "strike": strike,
@@ -269,14 +301,14 @@ def scan_symbol(helper: DhanHelper, symbol: str, lot_size: int,
         })
 
     if not candidates:
-        return []
+        return [], f"no liquid OTM put (OI >= {min_oi_lots:g} lots, IV <= {max_iv:g}%)"
 
     # Every strike at or above the floor is a real, sellable choice — emitting
     # only the one nearest the target hid the whole risk/premium curve, so a
     # 55%-safe strike paying 4x the premium was never visible.
     candidates = [c for c in candidates if c["noHitProb"] * 100 >= min_no_hit]
     if not candidates:
-        return []
+        return [], f"no strike at or above {min_no_hit:g}% no-hit"
 
     # Marks the strike closest to the target so the UI can collapse to one row
     # per symbol without re-deriving the preference.
@@ -349,7 +381,7 @@ def scan_symbol(helper: DhanHelper, symbol: str, lot_size: int,
             ),
         })
 
-    return rows
+    return rows, None
 
 
 def main():
@@ -358,8 +390,11 @@ def main():
                         help="Target probability the sold PUT expires worthless (default 0.80)")
     parser.add_argument('--limit', type=int, default=0,
                         help="Scan only the first N symbols (0 = all)")
-    parser.add_argument('--min-oi', type=int, default=100, dest='min_oi',
-                        help="Skip strikes with less open interest than this (default 100)")
+    parser.add_argument('--min-oi-lots', type=float, default=25.0, dest='min_oi_lots',
+                        help="Skip strikes with less open interest than this many LOTS "
+                             "(default 25). Expressed in lots, not shares: one lot ranges "
+                             "from 20 to 2075 shares across the F&O universe, so a flat "
+                             "share count is a different filter on every symbol.")
     parser.add_argument('--max-iv', type=float, default=100.0, dest='max_iv',
                         help="Skip strikes whose implied volatility exceeds this %% (default 100)")
     parser.add_argument('--min-no-hit', type=float, default=40.0, dest='min_no_hit',
@@ -394,6 +429,7 @@ def main():
     write_status(f"Scanning {total} F&O symbols…", 0, total)
 
     results = []
+    skipped = {}
     stopped = False
     for i, symbol in enumerate(symbols, 1):
         if should_stop():
@@ -401,13 +437,22 @@ def main():
             write_status(f"Stopped after {i - 1}/{total}", i - 1, total, done=True)
             break
         try:
-            rows = scan_symbol(helper, symbol, universe[symbol], args.target_prob,
-                               args.min_oi, args.max_iv, lot_by_expiry, args.min_no_hit)
+            rows, reason = scan_symbol(helper, symbol, universe[symbol], args.target_prob,
+                                       args.min_oi_lots, args.max_iv, lot_by_expiry,
+                                       args.min_no_hit)
             results.extend(rows)
         except Exception as e:
+            skipped[symbol] = f"exception: {e}"
             write_status(f"[{i}/{total}] {symbol} failed: {e}", i, total)
             continue
-        write_status(f"[{i}/{total}] {symbol} — {len(results)} candidates", i, total)
+        if reason:
+            # Recorded per symbol rather than just dropped: "188 of 208 symbols"
+            # with no reasons cannot tell a name with no liquid puts apart from
+            # one whose chain call was throttled.
+            skipped[symbol] = reason
+            write_status(f"[{i}/{total}] {symbol} skipped — {reason}", i, total)
+        else:
+            write_status(f"[{i}/{total}] {symbol} — {len(results)} candidates", i, total)
 
     # An aborted scan must not replace a previous complete result set with a
     # partial one — the page has no way to tell the two apart.
@@ -417,18 +462,23 @@ def main():
         return 0
 
     results.sort(key=lambda r: r["score"], reverse=True)
+    api_failures = sum(1 for r in skipped.values() if 'API error' in r or 'exception' in r)
     tmp = RESULTS_FILE + ".tmp"
     with open(tmp, "w", encoding='utf-8') as f:
         json.dump({
             "scannedAt": datetime.now(timezone.utc).isoformat(),
             "targetProb": args.target_prob,
             "minNoHit": args.min_no_hit,
+            "minOiLots": args.min_oi_lots,
             "symbolsScanned": total,
+            "symbolsSkipped": skipped,
+            "apiFailures": api_failures,
             "rows": results,
         }, f, indent=2)
     os.replace(tmp, RESULTS_FILE)
 
-    write_status(f"Done — {len(results)} candidates from {total} symbols",
+    suffix = f" ({api_failures} API failures)" if api_failures else ""
+    write_status(f"Done — {len(results)} candidates from {total - len(skipped)}/{total} symbols{suffix}",
                  total, total, done=True)
     return 0
 

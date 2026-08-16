@@ -9,6 +9,7 @@ Usage:
     python csp_watchlist.py cancel --order-id 1100...
     python csp_watchlist.py exit   --security-id 49081 --exchange-segment NSE_FNO \
                                     --quantity 500 --product-type MARGIN
+    python csp_watchlist.py reconcile --positions '[{"id":"csp_1","securityId":"49081"}]'
 
 Prints a single JSON line to stdout. Logs go to stderr.
 """
@@ -78,13 +79,21 @@ def _option_instrument(helper: DhanHelper, symbol: str) -> str:
     return "OPTIDX" if helper.find_index(symbol) else "OPTSTK"
 
 
-def _fo_lot_size(helper: DhanHelper, symbol: str) -> int:
+def _fo_lot_size(helper: DhanHelper, symbol: str, expiry: str = '') -> int:
     """Option-contract lot size. get_lot_size() returns the equity placeholder
-    of 1 for stock underlyings, so read it off the derivative contracts."""
+    of 1 for stock underlyings, so read it off the derivative contracts.
+
+    Resolved per (symbol, expiry) when an expiry is given: NSE revises lot sizes
+    on a forward expiry while the near month keeps the old one, so any single
+    row's LOT_SIZE would be the wrong quantity for half the chain."""
     try:
         df = helper._load_master_list()
         fo = df[(df['UNDERLYING_SYMBOL'] == symbol) &
                 (df['INSTRUMENT'].isin(['OPTSTK', 'OPTIDX', 'FUTSTK', 'FUTIDX']))]
+        if expiry:
+            exact = fo[fo['SM_EXPIRY_DATE'].astype(str).str[:10] == expiry[:10]]
+            if not exact.empty:
+                fo = exact
         if not fo.empty:
             return int(float(fo.iloc[0]['LOT_SIZE']))
     except Exception:
@@ -93,6 +102,41 @@ def _fo_lot_size(helper: DhanHelper, symbol: str) -> int:
         return int(helper.get_lot_size(symbol))
     except Exception:
         return 0
+
+
+def _positions_by_security(helper: DhanHelper) -> tuple:
+    """Every open position keyed by securityId, plus an api_failed flag:
+    ({securityId: position_dict}, api_failed).
+
+    `api_failed` distinguishes "the account is genuinely flat" from "the
+    positions call errored" — the two are the same empty DataFrame, and an exit
+    must not be refused on the strength of a failed lookup."""
+    df = helper.get_positions()
+    if df.empty:
+        return {}, bool(getattr(helper, 'last_api_error', None))
+
+    by_security = {}
+    for _, row in df.iterrows():
+        net_qty = int(row.get('netQty', 0) or 0)
+        if net_qty == 0:
+            continue
+        # A short's entry price is its sell average; a carried position reports
+        # sellAvg 0 and keeps the carry cost in costPrice instead.
+        sell_avg = float(row.get('sellAvg', 0) or 0)
+        cost_price = float(row.get('costPrice', 0) or 0)
+        by_security[str(row.get('securityId', '') or '')] = {
+            "securityId": str(row.get('securityId', '') or ''),
+            "tradingSymbol": str(row.get('tradingSymbol', '') or ''),
+            "symbol": _underlying_of(str(row.get('tradingSymbol', '') or '')),
+            "netQty": net_qty,
+            "avgPrice": round(sell_avg if sell_avg > 0 else cost_price, 2),
+            "strike": float(row.get('drvStrikePrice', 0) or 0),
+            "expiry": str(row.get('drvExpiryDate', '') or '')[:10],
+            "optionType": str(row.get('drvOptionType', '') or ''),
+            "productType": str(row.get('productType', '') or ''),
+            "exchangeSegment": str(row.get('exchangeSegment', '') or ''),
+        }
+    return by_security, False
 
 
 def cmd_list(helper: DhanHelper, symbols: list) -> dict:
@@ -337,7 +381,7 @@ def cmd_place(helper: DhanHelper, args) -> dict:
         # contract again from the UI would risk picking a different one.
         result["securityId"] = str(int(sec['SECURITY_ID']))
         result["exchangeSegment"] = helper._auto_detect_segment(sec)
-        result["lotSize"] = _fo_lot_size(helper, args.symbol)
+        result["lotSize"] = _fo_lot_size(helper, args.symbol, args.expiry)
         return result
     return _fail("Failed to place Cash Secured Put order", helper)
 
@@ -350,17 +394,98 @@ def cmd_cancel(helper: DhanHelper, args) -> dict:
 
 
 def cmd_exit(helper: DhanHelper, args) -> dict:
+    """Buy back a sold option. The quantity is taken from the broker's own
+    position, never from the caller's record of it.
+
+    Two ways the caller's number goes wrong, both of which turn a square-off
+    into a fresh long: the entry only part-filled, or the exit already went
+    through and the tracked row was never updated. So a positions lookup that
+    *succeeds* is authoritative — flat or long means refuse. A lookup that
+    *fails* falls back to the requested quantity, because refusing to close a
+    real position on a transient API error is the worse failure."""
+    quantity = int(args.quantity)
+    verified = False
+    positions, api_failed = _positions_by_security(helper)
+
+    if not api_failed:
+        pos = positions.get(str(args.security_id))
+        net_qty = int(pos.get('netQty', 0)) if pos else 0
+        if net_qty >= 0:
+            return {
+                "success": False,
+                "error": (f"Broker shows no open short for security {args.security_id} "
+                          f"(net qty {net_qty}) — nothing to exit. The tracked row is stale; "
+                          f"reconcile before retrying."),
+                "netQty": net_qty,
+            }
+        verified = True
+        if abs(net_qty) < quantity:
+            # Part-filled entry, or a partial manual exit. Buying the requested
+            # quantity would leave a long.
+            quantity = abs(net_qty)
+
     order_id = helper.place_order(
         security_id=args.security_id,
         exchange_segment=args.exchange_segment,
         transaction_type=helper.BUY,
-        quantity=args.quantity,
+        quantity=quantity,
         order_type=helper.MARKET,
         product_type=args.product_type,
     )
     if order_id:
-        return _finalize_order(helper, order_id, getattr(args, 'wait_fill', False))
+        result = _finalize_order(helper, order_id, getattr(args, 'wait_fill', False))
+        result["quantity"] = quantity
+        result["quantityVerified"] = verified
+        return result
     return _fail("Failed to place exit order", helper)
+
+
+def cmd_reconcile(helper: DhanHelper, args) -> dict:
+    """Broker truth for tracked rows. `--positions` is a JSON array of
+    {id, securityId}.
+
+    Returns the live net quantity and entry average for each tracked row, plus
+    any short option position the dashboard is not tracking at all — an order
+    that filled after its route timed out leaves exactly that footprint."""
+    try:
+        tracked = json.loads(args.positions)
+    except (ValueError, TypeError) as exc:
+        return {"success": False, "error": f"Invalid --positions payload: {exc}"}
+
+    positions, api_failed = _positions_by_security(helper)
+    if api_failed:
+        return _fail("Could not read positions from the broker", helper)
+
+    rows = []
+    claimed = set()
+    for t in tracked:
+        security_id = str(t.get('securityId', '') or '')
+        pos = positions.get(security_id) if security_id else None
+        if pos:
+            claimed.add(security_id)
+        rows.append({
+            "id": t.get('id'),
+            "found": bool(pos),
+            "netQty": int(pos['netQty']) if pos else 0,
+            "avgPrice": pos['avgPrice'] if pos else 0.0,
+            "productType": pos['productType'] if pos else '',
+        })
+
+    # Only shorts are adoptable: a long option was never a cash-secured put.
+    untracked = []
+    for security_id, pos in positions.items():
+        if security_id in claimed or pos['netQty'] >= 0 or pos['optionType'] != 'PUT':
+            continue
+        entry = dict(pos)
+        entry["lotSize"] = _fo_lot_size(helper, pos['symbol'], pos['expiry'])
+        untracked.append(entry)
+
+    return {
+        "success": True,
+        "asOf": datetime.now(timezone.utc).isoformat(),
+        "rows": rows,
+        "untracked": untracked,
+    }
 
 
 def main():
@@ -399,6 +524,10 @@ def main():
     p_sync.add_argument('--positions', required=True,
                         help="JSON array of {id, symbol, expiry, strike}")
 
+    p_reconcile = sub.add_parser('reconcile')
+    p_reconcile.add_argument('--positions', required=True,
+                             help="JSON array of {id, securityId}")
+
     p_exit = sub.add_parser('exit')
     p_exit.add_argument('--security-id', required=True, dest='security_id')
     p_exit.add_argument('--exchange-segment', required=True, dest='exchange_segment')
@@ -424,6 +553,8 @@ def main():
         result = cmd_cancel(helper, args)
     elif args.cmd == 'sync':
         result = cmd_sync(helper, args)
+    elif args.cmd == 'reconcile':
+        result = cmd_reconcile(helper, args)
     elif args.cmd == 'exit':
         result = cmd_exit(helper, args)
     else:

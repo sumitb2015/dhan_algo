@@ -2,87 +2,13 @@
 
 import React, { useEffect } from 'react';
 import { X, BookOpen } from 'lucide-react';
+import { SCANNER_COLUMNS, TRACKED_COLUMNS, type ColumnDoc } from './cspColumns';
 
-/** Column definitions for the CSP screener.
- *
- *  Formulas here are transcribed from scripts/tools/csp_scanner.py — if the
- *  scoring weights or probability model change there, change them here too, or
- *  the page will confidently document something it no longer does. */
+/** Glossary modal for the CSP screener. The column entries live in
+ *  cspColumns.ts because the table headers use the same text for their hover
+ *  tooltips — two copies would drift. */
 
-interface Entry {
-  term: string;
-  formula?: string;
-  desc: React.ReactNode;
-}
-
-const COLUMNS: Entry[] = [
-  {
-    term: 'Score',
-    formula: 'no-hit×45 + min(ann÷30, 1)×40 + min(OI÷5000, 1)×15',
-    desc: 'Heuristic 0–100 blend of safety, return and liquidity. Caps stop one very rich or very liquid strike from swamping the rest. It ranks attractiveness *within* whatever no-hit band you filter to — it is not a risk measure on its own.',
-  },
-  {
-    term: 'LTP',
-    desc: 'Live spot price of the underlying at scan time.',
-  },
-  {
-    term: 'DTE',
-    desc: 'Calendar days to expiry. The scanner picks the nearest expiry at least 5 days out — a 1-day contract has almost no premium left and would distort the yield ranking.',
-  },
-  {
-    term: 'Cycle Start',
-    formula: 'first session after the previous monthly expiry',
-    desc: 'When the current option cycle opened, with the underlying’s close on that day beneath it. Indian stock options are monthly, so this is the natural window for the contract being sold.',
-  },
-  {
-    term: '1D / 5D',
-    desc: 'Underlying’s percentage move over the last 1 and 5 trading sessions.',
-  },
-  {
-    term: 'Cycle',
-    formula: '(LTP − cycle-open price) ÷ cycle-open price',
-    desc: 'Move since the cycle opened — i.e. how the stock has travelled over the life of this contract.',
-  },
-  {
-    term: 'Suggested Strike',
-    desc: 'The OTM put strike for this row, with its no-hit probability and lot size. Every liquid strike above the scan floor gets its own row, so one symbol usually appears several times at different risk levels.',
-  },
-  {
-    term: 'To Strike',
-    formula: '(cycle-open price − strike) ÷ cycle-open price',
-    desc: 'Headroom between the cycle-open price and the strike, anchored the same way the move columns are. The smaller "now" figure underneath is the same gap measured from today’s LTP. Negative means the strike now sits above where the cycle opened.',
-  },
-  {
-    term: 'Yield',
-    formula: 'premium ÷ strike',
-    desc: 'Premium collected as a percentage of the strike — your return on the cash securing the put, for this contract’s duration only.',
-  },
-  {
-    term: 'Ann.',
-    formula: 'yield × (365 ÷ DTE)',
-    desc: 'Yield scaled to a year so strikes on different expiries compare honestly. Treat it as a run-rate, not a forecast: it extrapolates a ~10-day contract and assumes you keep redeploying at the same rate.',
-  },
-  {
-    term: 'Premium',
-    formula: 'premium/share × lot size',
-    desc: 'Total rupees collected for one lot, with the per-share figure beneath.',
-  },
-  {
-    term: 'No-hit',
-    formula: 'N(d₂),  d₂ = [ln(S/K) + (r − σ²/2)T] ÷ σ√T',
-    desc: 'Black–Scholes probability the underlying finishes ABOVE the strike at expiry — i.e. the put expires worthless and you keep the whole premium. Uses the chain’s implied volatility and a 6.5% risk-free rate.',
-  },
-  {
-    term: 'Touch',
-    formula: 'GBM first-passage probability',
-    desc: 'Chance the underlying trades at or below the strike at ANY point before expiry. Always higher than (100 − No-hit), because a stock can dip through the strike and recover. This is the number that reflects how uncomfortable the position is likely to get, even when it ends up expiring worthless.',
-  },
-  {
-    term: 'Capital Req.',
-    formula: 'strike × lot size',
-    desc: 'Cash to fully secure the put — what you pay if assigned. Your broker will block margin rather than this full amount, so actual margin is lower.',
-  },
-];
+type Entry = ColumnDoc;
 
 const FILTERS: Entry[] = [
   {
@@ -101,7 +27,8 @@ const FILTERS: Entry[] = [
 
 const NOTES: string[] = [
   'Universe: Nifty 500 members that actually have stock option (OPTSTK) contracts — about 208 names.',
-  'Strikes with open interest under 100, or implied volatility above 100%, are dropped. Those quotes are stale and back-solve to a fabricated IV that makes a deep-OTM strike look far safer than it is.',
+  'Strikes with open interest under 25 lots, or implied volatility above 100%, are dropped. Those quotes are stale and back-solve to a fabricated IV that makes a deep-OTM strike look far safer than it is. The floor is in lots, not shares, because a lot ranges from 20 to 2075 shares across the universe.',
+  'Symbols the scan produced nothing for are counted in the "N skipped" chip above the table, with the reason on hover — a throttled chain call and a name with no liquid puts are otherwise the same empty result.',
   'All probabilities are model estimates from implied volatility, not guarantees. They assume lognormal returns and no dividends or earnings gaps.',
   'A scan sweeps the whole universe and takes ~10 minutes — the Dhan option-chain endpoint allows one call every 3 seconds. Results replace the table only when the scan completes.',
 ];
@@ -138,8 +65,9 @@ export default function CspGlossary({ onClose }: { onClose: () => void }) {
         </div>
 
         <div className="flex flex-col gap-5 px-4 py-4">
-          <Section title="Columns" entries={COLUMNS} />
+          <Section title="Scanner columns" entries={SCANNER_COLUMNS} />
           <Section title="Filters" entries={FILTERS} />
+          <Section title="Tracked position columns" entries={TRACKED_COLUMNS} />
 
           <div className="flex flex-col gap-2">
             <h3 className="text-[10px] font-bold uppercase tracking-wider text-amber-400">

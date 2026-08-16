@@ -10,6 +10,11 @@ interface OrderOutcome {
   orderId?: string;
   status?: string;
   tradedPrice?: number | null;
+  /** The contract that was actually sold. Must come from the order, never from
+   *  the row being rolled out of — that is a different strike. */
+  securityId?: string;
+  exchangeSegment?: string;
+  lotSize?: number;
   error?: string;
 }
 
@@ -53,7 +58,7 @@ export async function POST(req: NextRequest) {
         '--product-type', prior.productType ?? 'MARGIN',
         '--wait-fill',
       ],
-      45_000,
+      90_000,
     );
 
     if (!result.success) {
@@ -75,7 +80,7 @@ export async function POST(req: NextRequest) {
       strike: newStrike,
       expiry: newExpiry,
       qty: prior.qty,
-      lotSize: prior.lotSize,
+      lotSize: Number(result.lotSize) || prior.lotSize,
       entrySpot: Number(body?.entrySpot) || 0,
       entryDate: now.slice(0, 10),
       // The real fill, never the UI's chain mark. A traded price is only
@@ -88,7 +93,13 @@ export async function POST(req: NextRequest) {
       updatedAt: now,
     };
     if (result.orderId) newRow.orderId = result.orderId;
-    if (prior.securityId) newRow.exchangeSegment = prior.exchangeSegment;
+    // Both fields come from the newly placed order. Carrying the prior row's
+    // securityId would point at the strike just closed, and omitting it (as
+    // this did) left every rolled row looking like an untradeable paper entry
+    // that could no longer be exited or rolled again.
+    if (result.securityId) newRow.securityId = result.securityId;
+    if (result.exchangeSegment) newRow.exchangeSegment = result.exchangeSegment;
+    if (result.status !== 'TRADED') newRow.needsReconcile = true;
 
     if (old) {
       old.status = 'ROLLED';
@@ -104,10 +115,9 @@ export async function POST(req: NextRequest) {
       status: result.status,
       tradedPrice: result.tradedPrice ?? null,
       row: newRow,
-      // The new row has no securityId until it is reconciled against positions,
-      // so it cannot itself be Shifted yet — say so instead of failing later.
       warning: result.status !== 'TRADED'
-        ? `Entry order ${result.orderId} is ${result.status ?? 'unconfirmed'} — average price will be wrong until it fills.`
+        ? `Entry order ${result.orderId} is ${result.status ?? 'unconfirmed'} — the tracked average `
+          + 'price and quantity are the requested ones. Run Reconcile once it settles.'
         : undefined,
     });
   } catch (err: unknown) {

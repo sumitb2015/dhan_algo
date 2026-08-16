@@ -10,6 +10,13 @@ interface OrderOutcome {
   orderId?: string;
   status?: string;
   tradedPrice?: number | null;
+  /** Quantity actually sent — clamped by csp_watchlist.py to the broker's own
+   *  net short, which can be smaller than ours if the entry only part-filled. */
+  quantity?: number;
+  /** False when the positions lookup failed and the requested quantity was
+   *  used unchecked. */
+  quantityVerified?: boolean;
+  netQty?: number;
   error?: string;
 }
 
@@ -18,7 +25,13 @@ interface OrderOutcome {
  *  On a confirmed fill this immediately books the row CLOSED using the real
  *  traded price. That ordering matters: if the row stayed OPEN until leg 2
  *  succeeded, a failed leg 2 would leave a phantom open short put that a retry
- *  would "exit" a second time, opening a real long position. */
+ *  would "exit" a second time, opening a real long position.
+ *
+ *  That ordering alone is not enough, because a route timeout or a crashed tab
+ *  can also leave a filled exit against an OPEN row. The quantity is therefore
+ *  re-derived from the broker's live position inside the same Python call
+ *  (cmd_exit): a position that reads flat refuses the order outright, and a
+ *  smaller-than-expected short clamps it. */
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
@@ -47,7 +60,7 @@ export async function POST(req: NextRequest) {
         '--product-type', row.productType ?? 'MARGIN',
         '--wait-fill',
       ],
-      45_000,
+      90_000,
     );
 
     if (!result.success) {
@@ -79,12 +92,17 @@ export async function POST(req: NextRequest) {
 
     const now = new Date().toISOString();
     const exitPrice = typeof result.tradedPrice === 'number' ? result.tradedPrice : undefined;
+    // A clamped quantity means the row overstated the position and the broker's
+    // figure is the true one — so it becomes the row's quantity, and leg 2
+    // (which re-reads this row) opens the new strike in the same real size.
+    const filledQty = Number(result.quantity) > 0 ? Number(result.quantity) : fresh.qty;
+    fresh.qty = filledQty;
     fresh.status = 'CLOSED';
     fresh.exitDate = now.slice(0, 10);
     fresh.updatedAt = now;
     if (exitPrice !== undefined) {
       fresh.exitPrice = exitPrice;
-      fresh.realizedPnl = (fresh.avgPrice - exitPrice) * fresh.qty;
+      fresh.realizedPnl = (fresh.avgPrice - exitPrice) * filledQty;
     }
     writeTracked(rows);
 
@@ -93,6 +111,12 @@ export async function POST(req: NextRequest) {
       orderId: result.orderId,
       status: result.status,
       tradedPrice: result.tradedPrice ?? null,
+      quantity: filledQty,
+      warning: result.quantityVerified === false
+        ? 'The positions lookup failed, so the exit used the tracked quantity unverified — check Positions.'
+        : filledQty !== row.qty
+          ? `Exited ${filledQty} (broker's net short), not the tracked ${row.qty}.`
+          : undefined,
     });
   } catch (err: unknown) {
     return NextResponse.json({ success: false, error: err instanceof Error ? err.message : String(err) }, { status: 500 });

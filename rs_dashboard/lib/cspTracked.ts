@@ -22,6 +22,14 @@ export interface TrackedCsp {
   exchangeSegment?: string;
   productType?: string;
   status: TrackedStatus;
+  /** The order was accepted but not confirmed TRADED within the wait window, so
+   *  `avgPrice` and `qty` are what was *requested*, not what actually filled.
+   *  Cleared by /api/csp-tracked/reconcile once the broker is asked. */
+  needsReconcile?: boolean;
+  /** Set by reconcile when the broker reports no matching short — the row is
+   *  believed open but the position is gone. */
+  reconcileNote?: string;
+  reconciledAt?: string;
   exitPrice?: number;
   exitDate?: string;
   realizedPnl?: number;

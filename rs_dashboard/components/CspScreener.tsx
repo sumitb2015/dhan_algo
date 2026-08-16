@@ -9,6 +9,7 @@ import CspGlossary from './CspGlossary';
 import {
   TH, TD, PctText, fmt, fmtInr, fmtCompactInr, fetchWithTimeout,
 } from './cspShared';
+import { SCANNER_COLUMNS, TRACKED_COLUMNS, columnTip, type ColumnDoc } from './cspColumns';
 
 // Stock F&O order placement is Dhan-only — /api/options/chain and the
 // csp_watchlist.py CLI both go through the Dhan client, so no broker selector.
@@ -62,6 +63,23 @@ interface TrackedRow {
   status: 'OPEN' | 'CLOSED' | 'ROLLED';
   exitPrice?: number;
   realizedPnl?: number;
+  needsReconcile?: boolean;
+  reconcileNote?: string;
+}
+
+/** A short put held at the broker with no tracked row — what an order that
+ *  filled after its route timed out leaves behind. */
+interface UntrackedPosition {
+  securityId: string;
+  tradingSymbol: string;
+  symbol: string;
+  netQty: number;
+  avgPrice: number;
+  strike: number;
+  expiry: string;
+  productType: string;
+  exchangeSegment: string;
+  lotSize: number;
 }
 
 import type { SyncRow } from '@/lib/cspTracked';
@@ -73,6 +91,25 @@ interface ScanStatus {
   done: boolean;
   error: string | null;
 }
+
+/** A header whose hover tooltip is looked up from the shared column docs by its
+ *  own text, so the glossary modal and the tooltip can never disagree. Pass
+ *  `label` when the rendered text contains an entity (&amp;) and so differs
+ *  from the plain-text key. */
+function docTH(columns: ColumnDoc[]) {
+  return function DocTH({ children, right, label }: {
+    children: React.ReactNode; right?: boolean; label?: string;
+  }) {
+    const term = label ?? (typeof children === 'string' ? children : '');
+    const tip = columnTip(columns, term);
+    // help cursor only when there is something to read, so hovering a header
+    // that promises an explanation always gives one.
+    return <TH right={right} title={tip} className={tip ? 'cursor-help' : undefined}>{children}</TH>;
+  };
+}
+
+const ScanTH = docTH(SCANNER_COLUMNS);
+const TrackTH = docTH(TRACKED_COLUMNS);
 
 function ScoreBadge({ v }: { v: number }) {
   const tone = v >= 70 ? 'bg-emerald-500/15 text-emerald-400 border-emerald-500/30'
@@ -106,10 +143,18 @@ const blankManual = {
   symbol: '', strike: '', expiry: '', qty: '', lotSize: '', entrySpot: '', avgPrice: '',
 };
 
+// Both exceed their route's own budget, so the client never abandons a call
+// that is still running server-side. The sell route waits up to 90s on a fill;
+// the sync route caps itself at 240s (SYNC_MAX_MS).
+const SELL_CLIENT_TIMEOUT_MS = 120_000;
+const SYNC_CLIENT_TIMEOUT_MS = 300_000;
+
 export default function CspScreener() {
   const [scanRows, setScanRows] = useState<ScanRow[]>([]);
   const [scannedAt, setScannedAt] = useState<string | null>(null);
   const [symbolsScanned, setSymbolsScanned] = useState<number | null>(null);
+  const [scanSkipped, setScanSkipped] = useState<Record<string, string>>({});
+  const [apiFailures, setApiFailures] = useState(0);
   const [minNoHit, setMinNoHit] = useState(40);
   const [maxNoHit, setMaxNoHit] = useState(100);
   // A deep-OTM strike paying 0.02% is not worth the brokerage, so the default
@@ -127,6 +172,8 @@ export default function CspScreener() {
   const [syncMap, setSyncMap] = useState<Record<string, SyncRow>>({});
   const [syncedAt, setSyncedAt] = useState<string | null>(null);
   const [syncing, setSyncing] = useState(false);
+  const [reconciling, setReconciling] = useState(false);
+  const [untracked, setUntracked] = useState<UntrackedPosition[]>([]);
   const [error, setError] = useState<string | null>(null);
 
   const [showManual, setShowManual] = useState(false);
@@ -148,6 +195,8 @@ export default function CspScreener() {
         setScanRows(j.rows ?? []);
         setScannedAt(j.scannedAt ?? null);
         setSymbolsScanned(j.symbolsScanned ?? null);
+        setScanSkipped(j.symbolsSkipped ?? {});
+        setApiFailures(Number(j.apiFailures) || 0);
         setScanRunning(Boolean(j.running));
         setScanStatus(j.status ?? null);
       }
@@ -230,7 +279,7 @@ export default function CspScreener() {
     setSyncing(true);
     setError(null);
     try {
-      const res = await fetchWithTimeout('/api/csp-tracked/sync', 180_000, { method: 'POST' });
+      const res = await fetchWithTimeout('/api/csp-tracked/sync', SYNC_CLIENT_TIMEOUT_MS, { method: 'POST' });
       const j = await res.json();
       if (!j.success) throw new Error(j.error ?? 'Sync failed');
       const map: Record<string, SyncRow> = {};
@@ -275,7 +324,7 @@ export default function CspScreener() {
     setError(null);
     setNotice(null);
     try {
-      const res = await fetchWithTimeout('/api/csp-tracked/sell', 60_000, {
+      const res = await fetchWithTimeout('/api/csp-tracked/sell', SELL_CLIENT_TIMEOUT_MS, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -298,9 +347,67 @@ export default function CspScreener() {
     }
   }, [sell, loadTracked]);
 
-  const removeTracked = useCallback(async (id: string) => {
+  const reconcile = useCallback(async () => {
+    setReconciling(true);
+    setError(null);
+    setNotice(null);
+    try {
+      const res = await fetchWithTimeout('/api/csp-tracked/reconcile', 90_000, { method: 'POST' });
+      const j = await res.json();
+      if (!j.success) throw new Error(j.error ?? 'Reconcile failed');
+      setUntracked(j.untracked ?? []);
+      const changes: string[] = j.changes ?? [];
+      setNotice(changes.length > 0
+        ? `Reconciled — ${changes.join('; ')}`
+        : 'Reconciled — tracked rows already match the broker.');
+      loadTracked();
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setReconciling(false);
+    }
+  }, [loadTracked]);
+
+  /** Start tracking a short put that exists at the broker but has no row —
+   *  the footprint of an order that filled after its route timed out. */
+  const adopt = useCallback(async (p: UntrackedPosition) => {
+    const res = await fetch('/api/csp-tracked', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        symbol: p.symbol,
+        strike: p.strike,
+        expiry: p.expiry,
+        qty: Math.abs(p.netQty),
+        lotSize: p.lotSize,
+        avgPrice: p.avgPrice,
+        securityId: p.securityId,
+        exchangeSegment: p.exchangeSegment,
+        productType: p.productType,
+      }),
+    });
+    const j = await res.json();
+    if (j.success) {
+      setUntracked((rows) => rows.filter((r) => r.securityId !== p.securityId));
+      loadTracked();
+    } else {
+      setError(j.error ?? 'Failed to adopt position');
+    }
+  }, [loadTracked]);
+
+  const removeTracked = useCallback(async (row: TrackedRow) => {
+    // Deleting an order-backed OPEN row drops the dashboard's only record of a
+    // real short put — the position keeps running, untracked. Worth a prompt.
+    if (row.status === 'OPEN' && row.securityId) {
+      const ok = window.confirm(
+        `${row.symbol} ${row.strike} PE is an OPEN position at the broker.\n\n`
+        + 'Removing it only deletes the tracking row — the short put stays live and '
+        + 'will no longer appear here. Use Shift to actually close it.\n\nRemove anyway?',
+      );
+      if (!ok) return;
+    }
     await fetch('/api/csp-tracked', {
-      method: 'DELETE', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id }),
+      method: 'DELETE', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: row.id }),
     });
     loadTracked();
   }, [loadTracked]);
@@ -309,6 +416,10 @@ export default function CspScreener() {
   const openRows = useMemo(() => tracked.filter((r) => r.status === 'OPEN'), [tracked]);
   const closedRows = useMemo(() => tracked.filter((r) => r.status !== 'OPEN'), [tracked]);
   const visibleRows = showClosed ? tracked : openRows;
+  const needsReconcileCount = useMemo(
+    () => openRows.filter((r) => r.needsReconcile || r.reconcileNote).length,
+    [openRows],
+  );
 
   const stats = useMemo(() => {
     // A short put wins when it was bought back for less than it was sold for.
@@ -320,9 +431,10 @@ export default function CspScreener() {
     const expiryPotential = openRows.reduce((s, r) => s + r.avgPrice * r.qty, 0);
 
     // A failed mark comes back as peLtp 0, which would otherwise book the full
-    // premium as profit. Only a positive mark is a real one — same guard the
-    // per-row cells use.
-    const marked = openRows.filter((r) => (syncMap[r.id]?.peLtp ?? 0) > 0);
+    // premium as profit. An unconfirmed fill leaves avgPrice 0, which would book
+    // the entire current mark as a loss. Neither is a real number, so both are
+    // counted as unmarked instead — same guard the per-row cells use.
+    const marked = openRows.filter((r) => (syncMap[r.id]?.peLtp ?? 0) > 0 && r.avgPrice > 0);
     const openPnl = marked.reduce((s, r) => s + (r.avgPrice - (syncMap[r.id].peLtp ?? 0)) * r.qty, 0);
     const unmarked = openRows.length - marked.length;
 
@@ -368,6 +480,7 @@ export default function CspScreener() {
     () => new Set(visibleScanRows.map((r) => r.symbol)).size,
     [visibleScanRows],
   );
+  const skippedCount = useMemo(() => Object.keys(scanSkipped).length, [scanSkipped]);
 
   return (
     <div className="flex min-h-screen w-full flex-1 flex-col bg-black text-zinc-100">
@@ -427,6 +540,22 @@ export default function CspScreener() {
             <span className="ml-2 text-[11px] text-zinc-500">
               {`${distinctSymbols} symbols${symbolsScanned ? ` of ${symbolsScanned} scanned` : ''} · Nifty 500 F&O`}
             </span>
+            {skippedCount > 0 && (
+              // Without this a symbol dropped by a throttled chain call is
+              // indistinguishable from one with no sellable puts, and the scan
+              // silently under-reports the universe.
+              <span
+                title={Object.entries(scanSkipped).map(([s, why]) => `${s}: ${why}`).join('\n')}
+                className={cn('cursor-help rounded-sm border px-1.5 py-px font-mono text-[10px] font-bold',
+                  apiFailures > 0
+                    ? 'border-red-500/30 bg-red-500/10 text-red-400'
+                    : 'border-zinc-800 bg-zinc-900 text-zinc-400')}
+              >
+                {apiFailures > 0
+                  ? `${skippedCount} skipped · ${apiFailures} API failures`
+                  : `${skippedCount} skipped`}
+              </span>
+            )}
 
             <div className="ml-auto flex items-center gap-2">
               {scanRunning && (
@@ -593,26 +722,28 @@ export default function CspScreener() {
           <div className="max-h-[46vh] overflow-auto">
             <table className="w-full border-collapse">
               <thead>
+                {/* Header text doubles as the tooltip key, so a renamed column
+                    loses its tooltip rather than showing the wrong one. */}
                 <tr>
-                  <TH>Symbol</TH>
-                  <TH right>Score</TH>
-                  <TH right>LTP</TH>
-                  <TH>Expiry</TH>
-                  <TH right>DTE</TH>
-                  <TH>Cycle Start</TH>
-                  <TH right>1D</TH>
-                  <TH right>5D</TH>
-                  <TH right>Cycle</TH>
-                  <TH>Suggested Strike</TH>
-                  <TH right>To Strike</TH>
-                  <TH right>Yield</TH>
-                  <TH right>Ann.</TH>
-                  <TH right>Premium</TH>
-                  <TH right>No-hit</TH>
-                  <TH right>Touch</TH>
-                  <TH right>Capital Req.</TH>
-                  <TH>Rationale</TH>
-                  <TH>Trade</TH>
+                  <ScanTH>Symbol</ScanTH>
+                  <ScanTH right>Score</ScanTH>
+                  <ScanTH right>LTP</ScanTH>
+                  <ScanTH>Expiry</ScanTH>
+                  <ScanTH right>DTE</ScanTH>
+                  <ScanTH>Cycle Start</ScanTH>
+                  <ScanTH right>1D</ScanTH>
+                  <ScanTH right>5D</ScanTH>
+                  <ScanTH right>Cycle</ScanTH>
+                  <ScanTH>Suggested Strike</ScanTH>
+                  <ScanTH right>To Strike</ScanTH>
+                  <ScanTH right>Yield</ScanTH>
+                  <ScanTH right>Ann.</ScanTH>
+                  <ScanTH right>Premium</ScanTH>
+                  <ScanTH right>No-hit</ScanTH>
+                  <ScanTH right>Touch</ScanTH>
+                  <ScanTH right>Capital Req.</ScanTH>
+                  <ScanTH>Rationale</ScanTH>
+                  <ScanTH>Trade</ScanTH>
                 </tr>
               </thead>
               <tbody>
@@ -735,6 +866,13 @@ export default function CspScreener() {
                 title={syncedAt ? `Last synced ${new Date(syncedAt).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })}` : 'Never synced'}>
                 {syncing ? 'Syncing…' : 'Sync entry spots'}
               </button>
+              <button onClick={reconcile} disabled={reconciling}
+                className={cn('text-[11px] font-bold hover:text-amber-300 disabled:opacity-40',
+                  needsReconcileCount > 0 ? 'text-amber-400' : 'text-sky-400')}
+                title="Replace tracked quantity and entry price with the broker's own figures, and find short puts that aren't tracked">
+                {reconciling ? 'Reconciling…'
+                  : needsReconcileCount > 0 ? `Reconcile (${needsReconcileCount})` : 'Reconcile'}
+              </button>
               {syncedAt && (
                 <span className="font-mono text-[10px] text-zinc-600">
                   marks @ {new Date(syncedAt).toLocaleTimeString('en-IN', { timeZone: 'Asia/Kolkata' })}
@@ -750,6 +888,34 @@ export default function CspScreener() {
               </button>
             </div>
           </div>
+
+          {untracked.length > 0 && (
+            <div className="flex flex-col gap-2 border-b border-amber-900/30 bg-amber-500/5 px-3 py-2.5">
+              <div className="flex items-center gap-2 text-[11px]">
+                <span className="font-bold uppercase tracking-wide text-amber-400">
+                  {untracked.length} short put{untracked.length > 1 ? 's' : ''} at the broker with no tracked row
+                </span>
+                <span className="text-zinc-400">
+                  — typically an order that filled after the page gave up waiting on it.
+                </span>
+                <button onClick={() => setUntracked([])} className="ml-auto text-zinc-500 hover:text-zinc-300">
+                  <X className="h-3 w-3" />
+                </button>
+              </div>
+              {untracked.map((p) => (
+                <div key={p.securityId} className="flex flex-wrap items-center gap-3 font-mono text-[11px]">
+                  <span className="font-bold text-zinc-100">{p.tradingSymbol || `${p.symbol} ${p.strike} PE`}</span>
+                  <span className="text-zinc-400">qty {Math.abs(p.netQty)}</span>
+                  <span className="text-zinc-400">avg {fmt(p.avgPrice)}</span>
+                  <span className="text-zinc-500">{p.expiry}</span>
+                  <button onClick={() => adopt(p)}
+                    className="rounded-sm border border-emerald-500/30 bg-emerald-500/10 px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide text-emerald-400 hover:bg-emerald-500/20">
+                    Track it
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
 
           {showManual && (
             <div className="flex flex-wrap items-end gap-2 border-b border-zinc-900 bg-zinc-950 px-3 py-2.5">
@@ -783,22 +949,22 @@ export default function CspScreener() {
             <table className="w-full border-collapse">
               <thead>
                 <tr>
-                  <TH>Symbol</TH>
-                  <TH right>Strike</TH>
-                  <TH>Expiry</TH>
-                  <TH>Date</TH>
-                  <TH right>LTP</TH>
-                  <TH right>Entry Spot</TH>
-                  <TH right>To Strike</TH>
-                  <TH right>No-hit</TH>
-                  <TH right>Qty</TH>
-                  <TH right>Avg</TH>
-                  <TH right>PE LTP</TH>
-                  <TH>Visual Status</TH>
-                  <TH right>Current P&amp;L</TH>
-                  <TH>Status</TH>
-                  <TH>Order ID</TH>
-                  <TH>Actions</TH>
+                  <TrackTH>Symbol</TrackTH>
+                  <TrackTH right>Strike</TrackTH>
+                  <TrackTH>Expiry</TrackTH>
+                  <TrackTH>Date</TrackTH>
+                  <TrackTH right>LTP</TrackTH>
+                  <TrackTH right>Entry Spot</TrackTH>
+                  <TrackTH right>To Strike</TrackTH>
+                  <TrackTH right>No-hit</TrackTH>
+                  <TrackTH right>Qty</TrackTH>
+                  <TrackTH right>Avg</TrackTH>
+                  <TrackTH right>PE LTP</TrackTH>
+                  <TrackTH>Visual Status</TrackTH>
+                  <TrackTH right label="Current P&L">Current P&amp;L</TrackTH>
+                  <TrackTH>Status</TrackTH>
+                  <TrackTH>Order ID</TrackTH>
+                  <TrackTH>Actions</TrackTH>
                 </tr>
               </thead>
               <tbody>
@@ -811,7 +977,9 @@ export default function CspScreener() {
                   const s = syncMap[r.id];
                   const spot = s?.spot ?? 0;
                   const peLtp = s?.peLtp ?? 0;
-                  const pnl = peLtp > 0 ? (r.avgPrice - peLtp) * r.qty : (r.realizedPnl ?? null);
+                  const pnl = peLtp > 0 && r.avgPrice > 0
+                    ? (r.avgPrice - peLtp) * r.qty
+                    : (r.realizedPnl ?? null);
                   const spotDrift = spot > 0 && r.entrySpot > 0 ? ((spot - r.entrySpot) / r.entrySpot) * 100 : null;
                   const toStrike = spot > 0 ? ((spot - r.strike) / spot) * 100 : null;
 
@@ -824,6 +992,16 @@ export default function CspScreener() {
                               as a flat position rather than an unknown one. */}
                           {s?.error && (
                             <span title={s.error} className="cursor-help text-[10px] font-normal text-amber-400">⚠</span>
+                          )}
+                          {/* An unconfirmed fill or a broker/row mismatch: the
+                              numbers on this line are requests, not facts. */}
+                          {(r.needsReconcile || r.reconcileNote) && (
+                            <span
+                              title={r.reconcileNote
+                                ?? 'Fill was never confirmed — quantity and average price are the requested ones. Click Reconcile.'}
+                              className="cursor-help rounded-sm bg-amber-500/15 px-1 text-[9px] font-bold uppercase text-amber-400">
+                              unconfirmed
+                            </span>
                           )}
                         </div>
                       </TD>
@@ -867,7 +1045,7 @@ export default function CspScreener() {
                             <button
                               onClick={() => setShiftTarget({
                                 id: r.id, symbol: r.symbol, strike: r.strike, expiry: r.expiry,
-                                qty: r.qty, spot, peLtp,
+                                qty: r.qty, lotSize: r.lotSize, spot, peLtp,
                                 move1d: null, move5d: null, moveCycle: null,
                                 securityId: r.securityId,
                               })}
@@ -876,7 +1054,7 @@ export default function CspScreener() {
                               Shift
                             </button>
                           )}
-                          <button onClick={() => removeTracked(r.id)} className="text-zinc-600 hover:text-red-400" aria-label="Remove">
+                          <button onClick={() => removeTracked(r)} className="text-zinc-600 hover:text-red-400" aria-label="Remove">
                             <X className="h-3.5 w-3.5" />
                           </button>
                         </div>

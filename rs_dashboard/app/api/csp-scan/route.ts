@@ -36,8 +36,9 @@ interface ScanStatus {
 export async function GET() {
   const status = readJson<ScanStatus>(STATUS_FILE);
   const results = readJson<{
-    scannedAt: string; targetProb: number; minNoHit?: number;
-    symbolsScanned?: number; rows: unknown[];
+    scannedAt: string; targetProb: number; minNoHit?: number; minOiLots?: number;
+    symbolsScanned?: number; symbolsSkipped?: Record<string, string>;
+    apiFailures?: number; rows: unknown[];
   }>(RESULTS_FILE);
   const running = Boolean(status && !status.done && status.pid && isPidRunning(status.pid));
 
@@ -48,7 +49,12 @@ export async function GET() {
     scannedAt: results?.scannedAt ?? null,
     targetProb: results?.targetProb ?? null,
     minNoHit: results?.minNoHit ?? null,
+    minOiLots: results?.minOiLots ?? null,
     symbolsScanned: results?.symbolsScanned ?? null,
+    // Symbols the scan produced nothing for, with the reason. A throttled chain
+    // call and a name with no liquid puts are the same empty result otherwise.
+    symbolsSkipped: results?.symbolsSkipped ?? {},
+    apiFailures: results?.apiFailures ?? 0,
     rows: results?.rows ?? [],
   });
 }
