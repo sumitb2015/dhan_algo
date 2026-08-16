@@ -1475,11 +1475,19 @@ class DhanHelper:
                 # underlying (e.g. RELIANCE) the contract is OPTSTK instead.
                 contract = self.find_option(underlying, expiry, strike, option_type, instrument="OPTSTK")
             if not contract:
+                # find_option() also defaults to exchange='NSE', so a BSE index
+                # option (SENSEX, BANKEX) matches nothing above.
+                contract = self.find_option(underlying, expiry, strike, option_type, exchange="BSE")
+            if not contract:
                 raise ValueError(f"strike not found: {strike} {option_type} @ {expiry}")
 
             lot_size = int(contract['LOT_SIZE'])
+            # Derive the segment from the contract actually found rather than
+            # assuming NSE_FNO — sending a BSE security id under NSE_FNO makes the
+            # margin calculator price a different instrument (or reject the leg).
+            exchange_segment = 'BSE_FNO' if str(contract.get('EXCH_ID', '')).upper() == 'BSE' else 'NSE_FNO'
             scripts.append({
-                'exchangeSegment': 'NSE_FNO',
+                'exchangeSegment': exchange_segment,
                 'transactionType': side,
                 'quantity': qty_lots * lot_size,
                 'productType': product_type.upper(),
@@ -2167,7 +2175,12 @@ class DhanHelper:
             else:
                 sec = self.find_index(symbol_up, exchange="BSE")
                 if sec:
-                    exchange_segment = "BSE_IDX"
+                    # BSE indices resolve through the BSE master list, but their
+                    # candles are still served under IDX_I — asking for BSE_IDX
+                    # returns DH-905 (Input_Exception) and no rows at all.
+                    # Verified 2026-08-16: (51, IDX_I, DAILY) returns SENSEX
+                    # daily bars; (51, BSE_IDX, DAILY) returns nothing.
+                    exchange_segment = "IDX_I"
                     instrument_type  = "INDEX"
 
             if not sec:

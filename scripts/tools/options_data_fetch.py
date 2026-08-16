@@ -20,27 +20,40 @@ sys.path.insert(0, ROOT)
 from login import get_dhan_client
 from lib.dhan_helper import DhanHelper
 
-UNDERLYING_IDS = {
-    'NIFTY':     13,
-    'BANKNIFTY': 25,
-    'FINNIFTY':  27,
-    'SENSEX':    51,
+# Per-underlying instrument resolution, mirroring UNDERLYINGS in
+# options_chart_fetch.py. Two things vary independently and are NOT
+# interchangeable:
+#   chain_id / chain_seg  - what the option-chain and expiry-list APIs key on
+#   spot_id  / spot_seg   - the index's own security id, for LTP / prev close
+#
+# For the NSE indices the two happen to coincide. SENSEX is the exception, and
+# getting it wrong fails silently: the chain keys on security id 1 / BSE_FNO,
+# NOT the index's 51. Probe-verified against the live API on 2026-08-16 —
+# (1, BSE_FNO) and (51, IDX_I) both return 170 strikes, while the previous
+# mapping here (bare symbol "SENSEX", which resolves to 51 through the master
+# list, + BSE_IDX) returns an EMPTY chain and an EMPTY expiry list. Beware when
+# re-probing: DhanHelper.get_option_chain caches 5 s on (security_id, expiry),
+# so a bad combination can appear to work off a prior call's cache entry.
+UNDERLYINGS = {
+    'NIFTY':     {'chain_id': 13, 'chain_seg': 'IDX_I',   'spot_id': 13, 'spot_seg': 'IDX_I'},
+    'BANKNIFTY': {'chain_id': 25, 'chain_seg': 'IDX_I',   'spot_id': 25, 'spot_seg': 'IDX_I'},
+    'FINNIFTY':  {'chain_id': 27, 'chain_seg': 'IDX_I',   'spot_id': 27, 'spot_seg': 'IDX_I'},
+    # SENSEX index intraday is served under IDX_I — BSE_IDX returns DH-905.
+    'SENSEX':    {'chain_id': 1,  'chain_seg': 'BSE_FNO', 'spot_id': 51, 'spot_seg': 'IDX_I'},
 }
 
-# Index segment / exchange per underlying — SENSEX is a BSE index, everything
-# else here trades on NSE.
-INDEX_SEGMENT = {
-    'NIFTY':     'IDX_I',
-    'BANKNIFTY': 'IDX_I',
-    'FINNIFTY':  'IDX_I',
-    'SENSEX':    'BSE_IDX',
-}
-INDEX_EXCHANGE = {
-    'NIFTY':     'NSE',
-    'BANKNIFTY': 'NSE',
-    'FINNIFTY':  'NSE',
-    'SENSEX':    'BSE',
-}
+
+def _index_spot(helper, under: str) -> float:
+    """LTP for one of the UNDERLYINGS indices.
+
+    SENSEX needs the numeric security id: the bare symbol resolves through the
+    BSE master list to exchange BSE_IDX, which the quote API answers with an
+    empty payload (get_ltp then returns 0.0). Passing the id with exchange
+    "NSE" routes it to IDX_I, where BSE index quotes actually live. The NSE
+    indices are unaffected either way, so one path serves all of them.
+    """
+    meta = UNDERLYINGS[under]
+    return helper.get_ltp(meta['spot_id'], exchange='NSE', instrument='INDEX') or 0
 
 
 def main():
@@ -83,9 +96,9 @@ def main():
                 sys.exit(0)
             uid = int(fut["SECURITY_ID"])
             seg = 'MCX_COMM'
-        elif under in UNDERLYING_IDS:
-            uid = UNDERLYING_IDS[under]
-            seg = INDEX_SEGMENT.get(under, 'IDX_I')
+        elif under in UNDERLYINGS:
+            uid = UNDERLYINGS[under]['chain_id']
+            seg = UNDERLYINGS[under]['chain_seg']
         else:
             # Not a known index — treat as an equity F&O underlying (e.g. a
             # Nifty 50 stock). get_expiry_list needs the raw security id +
@@ -105,17 +118,20 @@ def main():
     elif args.cmd == 'chain':
         under = args.underlying.upper()
         is_crude = (under == 'CRUDEOIL')
-        is_index = under in UNDERLYING_IDS
+        is_index = under in UNDERLYINGS
         # Leave seg=None for equity underlyings — get_option_chain() auto-resolves
         # the symbol and its segment (NSE_EQ -> NSE_FNO) via the master list.
-        seg = 'MCX_COMM' if is_crude else (INDEX_SEGMENT.get(under) if is_index else None)
+        seg = 'MCX_COMM' if is_crude else (UNDERLYINGS[under]['chain_seg'] if is_index else None)
 
         # Resolve the underlying the SAME way the expiries/ltp branches do so the
         # chain never diverges from the expiry list after a contract rolls over.
         # For crude, that means the nearest non-expired FUTCOM contract; passing
         # its numeric security id makes get_option_chain trust it directly
         # (bypassing the un-filtered iloc[0] symbol lookup).
-        chain_symbol = under
+        # For indices, pass the numeric chain id rather than the bare symbol so
+        # get_option_chain trusts it directly instead of resolving through the
+        # master list — "SENSEX" resolves to the index id 51, whose chain is empty.
+        chain_symbol = str(UNDERLYINGS[under]['chain_id']) if is_index else under
         fut_sid = None
         if is_crude:
             from scripts.tools.premarket_data import _find_nearest_future
@@ -164,7 +180,7 @@ def main():
             spot = (chain or {}).get('last_price') or 0
             if not spot:
                 if is_index:
-                    spot = helper.get_ltp(under, exchange=INDEX_EXCHANGE.get(under, 'NSE'), instrument='INDEX') or 0
+                    spot = _index_spot(helper, under)
                 else:
                     spot = helper.get_ltp(under, exchange='NSE', instrument='EQUITY') or 0
             levels = helper.get_prev_day_levels(under)
@@ -193,8 +209,8 @@ def main():
                 prev_close = entry.get("ohlc", {}).get("close") or 0.0
             else:
                 spot, prev_close = 0, 0.0
-        elif under in UNDERLYING_IDS:
-            spot = helper.get_ltp(under, exchange=INDEX_EXCHANGE.get(under, 'NSE'), instrument='INDEX') or 0
+        elif under in UNDERLYINGS:
+            spot = _index_spot(helper, under)
             levels = helper.get_prev_day_levels(under)
             prev_close = levels['close'] if levels else 0.0
         else:

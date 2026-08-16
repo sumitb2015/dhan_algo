@@ -182,6 +182,14 @@ export interface ResolvedLeg {
   iv: number | null;
   vega: number | null;
   securityId: string | null;
+  // Optional, added for the positions-analytics page. Older callers (strategy
+  // builder, baskets) never set these and are unaffected: gamma/theta are only
+  // read by the Greeks tab, and `expiry` only by buildMultiExpiryCurve(), which
+  // treats a missing value as "expires on the target date" — i.e. intrinsic,
+  // exactly what the single-expiry engine already does.
+  gamma?: number | null;
+  theta?: number | null;
+  expiry?: string | null;   // ISO YYYY-MM-DD
 }
 
 /**
@@ -220,6 +228,8 @@ export function resolveLegs(
       // 10.5%), but bsPrice() takes a fraction (0.105) — normalize at the read boundary.
       iv: typeof legData.implied_volatility === 'number' ? legData.implied_volatility / 100 : null,
       vega: legData.greeks?.vega ?? null,
+      gamma: legData.greeks?.gamma ?? null,
+      theta: legData.greeks?.theta ?? null,
       securityId: legData.security_id ? String(legData.security_id) : null,
     });
   }
@@ -261,6 +271,8 @@ export function resolveFreeformLegs(
       delta: legData.greeks?.delta ?? null,
       iv: typeof legData.implied_volatility === 'number' ? legData.implied_volatility / 100 : null,
       vega: legData.greeks?.vega ?? null,
+      gamma: legData.greeks?.gamma ?? null,
+      theta: legData.greeks?.theta ?? null,
       securityId: legData.security_id ? String(legData.security_id) : null,
     });
   }
@@ -327,12 +339,22 @@ export function findBreakevens(curve: { spot: number; pnl: number }[]): number[]
 }
 
 /**
+ * Half-width of the sampled spot range, as a fraction of spot. The strategy
+ * builder and baskets have always used 1.5%; the positions-analytics payoff
+ * chart passes a larger value when zoomed out. Kept as the default so existing
+ * callers are byte-identical.
+ */
+export const DEFAULT_SPAN_PCT = 0.015;
+
+/**
  * Sample spot range covering all wings for a NIFTY strategy: +/-15% of spot, with
  * every leg's strike forced in as an exact sample point (piecewise-linear kinks
  * only occur at strikes, so max/min and breakevens must be evaluated exactly there).
  */
-function buildSpotSamples(legs: ResolvedLeg[], spot: number, strikeStep: number = STRIKE_STEP): number[] {
-  const pctSpan = spot * 0.015; // +/- 1.5% of spot
+function buildSpotSamples(
+  legs: ResolvedLeg[], spot: number, strikeStep: number = STRIKE_STEP, spanPct: number = DEFAULT_SPAN_PCT,
+): number[] {
+  const pctSpan = spot * spanPct;
   const strikes = legs.map((l) => l.strike);
   const minStrike = strikes.length > 0 ? Math.min(...strikes) : spot;
   const maxStrike = strikes.length > 0 ? Math.max(...strikes) : spot;
@@ -357,8 +379,9 @@ function buildSpotSamples(legs: ResolvedLeg[], spot: number, strikeStep: number 
 
 export function buildPayoffCurve(
   legs: ResolvedLeg[], spot: number, lotSize: number, strikeStep: number = STRIKE_STEP,
+  spanPct: number = DEFAULT_SPAN_PCT,
 ): { spot: number; pnl: number }[] {
-  return buildSpotSamples(legs, spot, strikeStep).map((s) => ({ spot: s, pnl: netPnlAtExpiry(legs, s, lotSize) }));
+  return buildSpotSamples(legs, spot, strikeStep, spanPct).map((s) => ({ spot: s, pnl: netPnlAtExpiry(legs, s, lotSize) }));
 }
 
 export interface PayoffStats {
@@ -370,12 +393,24 @@ export interface PayoffStats {
   intrinsicValue: number;  // rupees, at current spot
   timeValue: number;       // rupees, at current spot
   popPct: number | null;
+  /**
+   * Worst P&L actually reached inside the sampled spot range, and the spot it
+   * occurs at. When `maxLoss` is 'Unlimited' this is the only number there is —
+   * but it is a property of the sampled window, NOT a floor, so any UI showing
+   * it MUST annotate the range alongside. Displaying it bare reads as a real
+   * max loss and understates a naked short by an unbounded amount.
+   */
+  maxLossInRange: number;
+  maxLossAtSpot: number;
+  rangeLo: number;
+  rangeHi: number;
 }
 
 export function computePayoffStats(
   legs: ResolvedLeg[], spot: number, lotSize: number, expiryDate: string, strikeStep: number = STRIKE_STEP,
+  spanPct: number = DEFAULT_SPAN_PCT,
 ): PayoffStats {
-  const curve = buildPayoffCurve(legs, spot, lotSize, strikeStep);
+  const curve = buildPayoffCurve(legs, spot, lotSize, strikeStep, spanPct);
 
   // Net qty per side (signed lots): >0 means net SHORT that option type -> unbounded loss on that tail.
   const netCallQty = legs.filter(l => l.type === 'CE').reduce((s, l) => s + (l.side === 'SELL' ? l.qtyLots : -l.qtyLots), 0);
@@ -434,6 +469,8 @@ export function computePayoffStats(
     popPct = Math.round(Math.min(1, Math.max(0, pop)) * 100);
   }
 
+  const worstIdx = pnls.reduce((best, p, i) => (p < pnls[best] ? i : best), 0);
+
   return {
     maxProfit,
     maxLoss,
@@ -443,6 +480,10 @@ export function computePayoffStats(
     intrinsicValue,
     timeValue,
     popPct,
+    maxLossInRange: boundedMinLoss,
+    maxLossAtSpot: curve[worstIdx]?.spot ?? spot,
+    rangeLo: curve[0]?.spot ?? spot,
+    rangeHi: curve[curve.length - 1]?.spot ?? spot,
   };
 }
 
@@ -485,9 +526,10 @@ function riskNeutralProbAbove(S: number, K: number, t: number, iv: number, r = 0
  */
 export function buildTargetPayoffCurve(
   legs: ResolvedLeg[], spot: number, lotSize: number, daysToExpiry: number, strikeStep: number = STRIKE_STEP,
+  spanPct: number = DEFAULT_SPAN_PCT,
 ): { spot: number; pnl: number }[] {
   const t = Math.max(daysToExpiry, 0) / 365;
-  return buildSpotSamples(legs, spot, strikeStep).map((s) => {
+  return buildSpotSamples(legs, spot, strikeStep, spanPct).map((s) => {
     const pnl = legs.reduce((sum, leg) => {
       const iv = leg.iv ?? 0;
       const price = iv > 0 ? bsPrice(leg.type, s, leg.strike, t, iv) : (leg.type === 'CE' ? Math.max(s - leg.strike, 0) : Math.max(leg.strike - s, 0));
@@ -495,6 +537,98 @@ export function buildTargetPayoffCurve(
       return sum + perUnit * leg.qtyLots;
     }, 0) * lotSize;
     return { spot: s, pnl };
+  });
+}
+
+// ── Implied volatility from a traded price ────────────────────────────────────
+
+/**
+ * Invert bsPrice() for sigma by bisection.
+ *
+ * Needed because Dhan's option chain frequently returns all-zero `greeks` and a
+ * one-sided `implied_volatility` (populated for the CE but not the PE of the same
+ * strike, or neither on deep OTM). Without this, a leg with no IV silently falls
+ * back to intrinsic pricing in the target-date curve — which looks like a valid
+ * blue line but is simply wrong.
+ *
+ * Returns null when no solution exists rather than a clamped bound: a price at or
+ * below intrinsic has no positive-vol solution, and a price above the theoretical
+ * ceiling is bad data. Callers must treat null as "IV unavailable" and say so.
+ */
+export function impliedVolFromPrice(
+  type: OptType, S: number, K: number, t: number, price: number, r = 0.065,
+): number | null {
+  if (!(t > 0) || !(price > 0) || !(S > 0) || !(K > 0)) return null;
+
+  const intrinsic = type === 'CE' ? Math.max(S - K, 0) : Math.max(K - S, 0);
+  // A price at or under intrinsic carries no time value, so no sigma > 0 produces it.
+  if (price <= intrinsic + 1e-8) return null;
+
+  let lo = 1e-4, hi = 5;
+  if (bsPrice(type, S, K, t, hi, r) < price) return null; // beyond a 500% vol — bad mark
+
+  for (let i = 0; i < 100; i++) {
+    const mid = (lo + hi) / 2;
+    if (bsPrice(type, S, K, t, mid, r) < price) lo = mid; else hi = mid;
+    if (hi - lo < 1e-7) break;
+  }
+  return (lo + hi) / 2;
+}
+
+// ── Multi-expiry payoff (a positions book spanning several expiries) ──────────
+
+/** Whole calendar days between two local ISO dates, floored at 0. */
+export function daysBetweenDates(fromIso: string, toIso: string): number {
+  const a = new Date(fromIso); a.setHours(0, 0, 0, 0);
+  const b = new Date(toIso);   b.setHours(0, 0, 0, 0);
+  return Math.max(0, Math.round((b.getTime() - a.getTime()) / 86_400_000));
+}
+
+/**
+ * P&L curve for a book whose legs may expire on different dates, evaluated at
+ * `targetDate`. A leg expiring on or before the target date prices intrinsically
+ * (it is settled by then); a later leg still carries time value and prices with
+ * bsPrice() at its own *residual* days-to-expiry.
+ *
+ * A leg with no `expiry` is treated as expiring on the target date — so a
+ * single-expiry book evaluated at its own expiry reproduces buildPayoffCurve()
+ * exactly (asserted in the tests).
+ *
+ * Legs with no usable IV fall back to intrinsic. Callers should surface that:
+ * see `legsMissingIv()`.
+ */
+export function buildMultiExpiryCurve(
+  legs: ResolvedLeg[], spot: number, lotSize: number, targetDate: string,
+  strikeStep: number = STRIKE_STEP, spanPct: number = DEFAULT_SPAN_PCT,
+): { spot: number; pnl: number }[] {
+  const residualYears = legs.map((leg) =>
+    leg.expiry ? daysBetweenDates(targetDate, leg.expiry) / 365 : 0,
+  );
+
+  return buildSpotSamples(legs, spot, strikeStep, spanPct).map((s) => {
+    const pnl = legs.reduce((sum, leg, i) => {
+      const t = residualYears[i];
+      const iv = leg.iv ?? 0;
+      const price = (t > 0 && iv > 0)
+        ? bsPrice(leg.type, s, leg.strike, t, iv)
+        : (leg.type === 'CE' ? Math.max(s - leg.strike, 0) : Math.max(leg.strike - s, 0));
+      const perUnit = leg.side === 'SELL' ? (leg.price - price) : (price - leg.price);
+      return sum + perUnit * leg.qtyLots;
+    }, 0) * lotSize;
+    return { spot: s, pnl };
+  });
+}
+
+/**
+ * Legs that would price intrinsically in buildMultiExpiryCurve() at `targetDate`
+ * purely because their IV is unknown — i.e. they still have time to run but no
+ * volatility to price it with. The chart must disclose these rather than draw a
+ * confidently wrong curve.
+ */
+export function legsMissingIv(legs: ResolvedLeg[], targetDate: string): ResolvedLeg[] {
+  return legs.filter((leg) => {
+    const residual = leg.expiry ? daysBetweenDates(targetDate, leg.expiry) : 0;
+    return residual > 0 && !(leg.iv && leg.iv > 0);
   });
 }
 
