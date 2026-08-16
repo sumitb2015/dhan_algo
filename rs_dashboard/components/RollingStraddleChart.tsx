@@ -54,7 +54,17 @@ export function RollingStraddleChart({
     () =>
       chart.switches
         .filter((s) => s.from_strike !== null && s.from_strike !== s.to_strike)
-        .map((s) => ({ time: s.time, color: s.to_strike > s.from_strike! ? UPSHIFT_MARKER_COLOR : DOWNSHIFT_MARKER_COLOR, size: 2 })),
+        .map((s) => {
+          const isUpshift = s.to_strike > s.from_strike!;
+          return {
+            time: s.time,
+            color: isUpshift ? UPSHIFT_MARKER_COLOR : DOWNSHIFT_MARKER_COLOR,
+            position: isUpshift ? ('belowBar' as const) : ('aboveBar' as const),
+            shape: isUpshift ? ('arrowUp' as const) : ('arrowDown' as const),
+            size: 1,
+            text: `${s.to_strike}`,
+          };
+        }),
     [chart.switches]
   );
 

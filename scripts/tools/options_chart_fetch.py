@@ -526,23 +526,44 @@ def _strike_segments(spot_df: pd.DataFrame, keep_dates: set, strikes: list[float
     if day_df.empty or not strikes:
         return []
 
+    sorted_strikes = sorted(strikes)
+    diffs = [b - a for a, b in zip(sorted_strikes, sorted_strikes[1:]) if b > a]
+    strike_step = min(diffs) if diffs else 50.0
+    buffer = 0.25 * strike_step  # 25% hysteresis buffer beyond midpoint
+
     segments: list[dict] = []
     current_strike = None
     current_start = None
     current_last: pd.Timestamp | None = None
+    current_date = None
+
     for _, row in day_df.iterrows():
-        strike = _nearest_strike(float(row["close"]), strikes)
-        if strike != current_strike:
+        row_time = row["time"]
+        row_date = row_time.date()
+        spot_val = float(row["close"])
+
+        # Re-anchor ATM at the start of each new trading session
+        if current_strike is None or row_date != current_date:
             if current_strike is not None:
-                # Store the LAST timestamp of the previous segment (inclusive end) rather
-                # than the first timestamp of the new segment (exclusive end).  The old
-                # "end = row['time']" approach combined with a strict `< end` slice left
-                # the transition bar in neither segment, creating a 1-candle gap on every
-                # ATM strike roll.
                 segments.append({"strike": current_strike, "start": current_start, "end": current_last})
-            current_strike = strike
-            current_start = row["time"]
-        current_last = row["time"]
+            current_strike = _nearest_strike(spot_val, sorted_strikes)
+            current_start = row_time
+            current_date = row_date
+        else:
+            # Only switch strike when spot decisively crosses beyond the midpoint + hysteresis buffer.
+            # Without this buffer, whenever spot oscillates around the midpoint (e.g. 24325), the
+            # strike flips back and forth every 1-2 minutes, creating chopped floating fragments.
+            upper_trigger = current_strike + (strike_step / 2.0) + buffer
+            lower_trigger = current_strike - (strike_step / 2.0) - buffer
+            if spot_val >= upper_trigger or spot_val <= lower_trigger:
+                new_strike = _nearest_strike(spot_val, sorted_strikes)
+                if new_strike != current_strike:
+                    segments.append({"strike": current_strike, "start": current_start, "end": current_last})
+                    current_strike = new_strike
+                    current_start = row_time
+
+        current_last = row_time
+
     if current_strike is not None:
         segments.append({"strike": current_strike, "start": current_start, "end": None})
     return segments

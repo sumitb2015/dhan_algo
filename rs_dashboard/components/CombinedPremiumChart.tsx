@@ -76,7 +76,14 @@ export function CombinedPremiumChart({
   seriesTitle?: string;
   chartType: CombinedChartType;
   initialHeight?: number;
-  markers?: { time: string; color: string; size?: number }[];
+  markers?: {
+    time: string;
+    color: string;
+    size?: number;
+    position?: 'aboveBar' | 'belowBar' | 'inBar';
+    shape?: 'circle' | 'square' | 'arrowUp' | 'arrowDown';
+    text?: string;
+  }[];
   extraTooltipRows?: (time: string) => { label: string; value: string }[];
   valueLabel?: string;
   colorScheme?: {
@@ -281,10 +288,11 @@ export function CombinedPremiumChart({
     markersApiRef.current.setMarkers(
       (markersRef.current ?? []).map((m) => ({
         time: toUnixSeconds(m.time),
-        position: 'inBar' as const,
-        shape: 'circle' as const,
+        position: m.position ?? ('inBar' as const),
+        shape: m.shape ?? ('circle' as const),
         color: m.color,
         size: m.size ?? 1,
+        text: m.text,
       }))
     );
 
