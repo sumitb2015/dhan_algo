@@ -39,7 +39,7 @@ export function PanelStyles() {
         font-size: 8px;
         font-weight: 700;
         letter-spacing: 0.14em;
-        color: #374151;
+        color: rgba(255,255,255,0.60);
         padding-left: 2px;
       }
       .lc-group-row {
@@ -69,7 +69,7 @@ export function PanelStyles() {
         border-radius: 6px;
         border: 1px solid rgba(99, 102, 241, 0.18);
         background: rgba(10, 14, 26, 0.9);
-        color: #94a3b8;
+        color: rgba(255,255,255,0.85);
         cursor: pointer;
         outline: none;
         transition: border-color 0.15s, box-shadow 0.15s;
@@ -121,7 +121,7 @@ export function PanelStyles() {
         border-radius: 6px;
         border: 1px solid rgba(99, 102, 241, 0.18);
         background: rgba(10, 14, 26, 0.9);
-        color: #4b5563;
+        color: rgba(255,255,255,0.60);
         cursor: pointer;
         transition: all 0.15s ease;
       }
@@ -153,13 +153,13 @@ export function PanelStyles() {
         font-weight: 700;
         letter-spacing: 0.1em;
         text-transform: uppercase;
-        color: #374151;
+        color: rgba(255,255,255,0.60);
       }
       .lc-spot-value {
         font-size: 11px;
         font-weight: 700;
         font-family: 'JetBrains Mono', 'Fira Code', monospace;
-        color: #94a3b8;
+        color: rgba(255,255,255,0.85);
       }
 
       /* ── Status pill ─────────────────────────────────────────────── */
@@ -186,9 +186,9 @@ export function PanelStyles() {
         box-shadow: 0 0 6px rgba(52, 211, 153, 0.7);
         animation: lc-pulse 2s ease-in-out infinite;
       }
-      .lc-status-dot--closed { background: #374151; }
+      .lc-status-dot--closed { background: rgba(255,255,255,0.20); }
       .lc-status-live  { color: #34d399; }
-      .lc-status-closed { color: #4b5563; }
+      .lc-status-closed { color: rgba(255,255,255,0.40); }
       @keyframes lc-pulse {
         0%, 100% { opacity: 1; }
         50%       { opacity: 0.5; }
@@ -200,7 +200,7 @@ export function PanelStyles() {
         font-weight: 700;
         letter-spacing: 0.12em;
         text-transform: uppercase;
-        color: #4b5563;
+        color: rgba(255,255,255,0.60);
         padding-right: 4px;
       }
 
@@ -241,7 +241,7 @@ export function PanelStyles() {
         border: 1px solid rgba(99, 102, 241, 0.1);
         border-radius: 10px;
         font-size: 12px;
-        color: #4b5563;
+        color: rgba(255,255,255,0.40);
       }
 
       /* ── Legs row ────────────────────────────────────────────────── */

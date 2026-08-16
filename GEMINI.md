@@ -208,3 +208,23 @@ Run this first if the access token has expired (usually after 24 hours):
 ```powershell
 venv\Scripts\python.exe login.py
 ```
+
+---
+
+## Dashboard UI Conventions
+
+### Dark-Mode Font Color Opacity (`rs_dashboard`)
+
+All text in the `rs_dashboard` Next.js app must use the following opacity tiers so that text is always readable against the dark (`#080b14` / `#0a0e1a`) background:
+
+| Role | Value | Usage |
+|---|---|---|
+| **Primary text** | `rgba(255,255,255,0.85)` | Headings, active labels, key values |
+| **Secondary text** | `rgba(255,255,255,0.60)` | Sub-labels, group headers (SYMBOL / INDICATORS / VIEW), sidebar section titles |
+| **Tertiary / muted text** | `rgba(255,255,255,0.40)` | Placeholders, timestamps, disabled states |
+| **Disabled / decorative** | `rgba(255,255,255,0.20)` | Dividers, empty-state hints |
+
+**Rules:**
+- **Never use raw Tailwind/CSS gray shades** (e.g. `#374151`, `#4b5563`) for visible text — they are too dark on the project's near-black backgrounds and will fail contrast checks.
+- Use `rgba(255,255,255,N)` (white with opacity) rather than a fixed hex gray, so the contrast automatically adapts if the background changes.
+- Accent-coloured text (`#a5b4fc`, `#34d399`, `#f87171`, etc.) is exempt — those colours already encode sufficient luminance.

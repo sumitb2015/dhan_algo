@@ -216,7 +216,7 @@ export default function LiveOptionsChartsPage() {
         .lc-date-badge {
           font-size: 9px;
           font-family: 'JetBrains Mono', 'Fira Code', monospace;
-          color: #4b5563;
+          color: rgba(255,255,255,0.40);
           background: rgba(99, 102, 241, 0.06);
           border: 1px solid rgba(99, 102, 241, 0.1);
           border-radius: 4px;
@@ -240,7 +240,7 @@ export default function LiveOptionsChartsPage() {
           font-size: 8px;
           font-weight: 700;
           letter-spacing: 0.15em;
-          color: #374151;
+          color: rgba(255,255,255,0.40);
           margin-bottom: 4px;
         }
         .lc-nav-item {
@@ -256,11 +256,11 @@ export default function LiveOptionsChartsPage() {
           background: transparent;
           cursor: pointer;
           transition: all 0.2s ease;
-          color: #4b5563;
+          color: rgba(255,255,255,0.40);
         }
         .lc-nav-item:hover {
           background: rgba(99, 102, 241, 0.08);
-          color: #94a3b8;
+          color: rgba(255,255,255,0.75);
           border-color: rgba(99, 102, 241, 0.15);
         }
         .lc-nav-item--active {
@@ -314,7 +314,7 @@ export default function LiveOptionsChartsPage() {
           border-radius: 7px;
           border: 1px solid rgba(99, 102, 241, 0.15);
           background: rgba(99, 102, 241, 0.04);
-          color: #4b5563;
+          color: rgba(255,255,255,0.40);
           cursor: pointer;
           transition: all 0.15s ease;
         }

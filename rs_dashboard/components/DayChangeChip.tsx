@@ -65,7 +65,7 @@ export function DayChangeChip({
           font-weight: 700;
           letter-spacing: 0.1em;
           text-transform: uppercase;
-          color: #4b5563;
+          color: rgba(255,255,255,0.60);
           white-space: nowrap;
         }
         .lc-stat-value {
@@ -75,7 +75,7 @@ export function DayChangeChip({
           tabular-nums: true;
           white-space: nowrap;
         }
-        .lc-stat-neutral { color: #94a3b8; }
+        .lc-stat-neutral { color: rgba(255,255,255,0.85); }
         .lc-stat-profit  { color: #34d399; text-shadow: 0 0 6px rgba(52, 211, 153, 0.4); }
         .lc-stat-loss    { color: #f87171; text-shadow: 0 0 6px rgba(248, 113, 113, 0.4); }
       `}</style>
