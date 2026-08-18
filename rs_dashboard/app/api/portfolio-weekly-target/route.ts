@@ -39,6 +39,17 @@ function writeConfig(config: TargetConfig) {
   fs.writeFileSync(TARGET_FILE, JSON.stringify(config, null, 2), 'utf-8');
 }
 
+// Serializes read-modify-write cycles across concurrent POSTs (e.g. two open tabs saving
+// around the same time) — without this, both requests can read the same pre-write snapshot
+// and the later writeConfig() silently clobbers the other tab's change.
+let writeQueue: Promise<unknown> = Promise.resolve();
+
+function withWriteLock<T>(fn: () => T): Promise<T> {
+  const result = writeQueue.then(fn, fn);
+  writeQueue = result.then(() => undefined, () => undefined);
+  return result;
+}
+
 export async function GET() {
   return NextResponse.json({ success: true, ...readConfig() });
 }
@@ -50,23 +61,25 @@ export async function GET() {
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
-    const config = readConfig();
 
     if (body?.weekStart !== undefined) {
       const { weekStart, target } = body;
       if (typeof weekStart !== 'string' || !WEEK_START_RE.test(weekStart)) {
         return NextResponse.json({ success: false, error: 'weekStart must be a YYYY-MM-DD string' }, { status: 400 });
       }
-      if (target === null) {
-        delete config.overrides[weekStart];
-      } else {
+      if (target !== null) {
         const n = Number(target);
         if (!Number.isFinite(n) || n < 0) {
           return NextResponse.json({ success: false, error: 'target must be a finite number >= 0, or null to clear' }, { status: 400 });
         }
-        config.overrides[weekStart] = n;
       }
-      writeConfig(config);
+      const config = await withWriteLock(() => {
+        const c = readConfig();
+        if (target === null) delete c.overrides[weekStart];
+        else c.overrides[weekStart] = Number(target);
+        writeConfig(c);
+        return c;
+      });
       return NextResponse.json({ success: true, ...config });
     }
 
@@ -74,8 +87,12 @@ export async function POST(req: NextRequest) {
     if (!Number.isFinite(defaultTarget) || defaultTarget < 0) {
       return NextResponse.json({ success: false, error: 'defaultTarget must be a finite number >= 0' }, { status: 400 });
     }
-    config.defaultTarget = defaultTarget;
-    writeConfig(config);
+    const config = await withWriteLock(() => {
+      const c = readConfig();
+      c.defaultTarget = defaultTarget;
+      writeConfig(c);
+      return c;
+    });
     return NextResponse.json({ success: true, ...config });
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
