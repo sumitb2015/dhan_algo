@@ -18,6 +18,7 @@ const TabLoading = () => (
 const OptionsSkewTab         = dynamic(() => import('./OptionsSkewTab'), { ssr: false, loading: TabLoading });
 const OptionsOITab           = dynamic(() => import('./OptionsOITab'), { ssr: false, loading: TabLoading });
 const OptionsCumulativeOITab = dynamic(() => import('./OptionsCumulativeOITab'), { ssr: false, loading: TabLoading });
+const OptionsPCRSpotTab      = dynamic(() => import('./OptionsPCRSpotTab'), { ssr: false, loading: TabLoading });
 const OptionsSmartChainTab   = dynamic(() => import('./OptionsSmartChainTab'), { ssr: false, loading: TabLoading });
 const OptionsIntelligenceTab = dynamic(() => import('./OptionsIntelligenceTab'), { ssr: false, loading: TabLoading });
 const OptionsVixTab          = dynamic(() => import('./OptionsVixTab'), { ssr: false, loading: TabLoading });
@@ -236,7 +237,7 @@ export default function OptionsCharts() {
   const [showVWAP,   setShowVWAP]   = useState(true);
   const [showCELine, setShowCELine] = useState(true);
   const [showPELine, setShowPELine] = useState(true);
-  const [activeTab, setActiveTab] = useState<'premium' | 'premium-bar' | 'skew' | 'oi' | 'cumulative' | 'chain' | 'intelligence' | 'vix' | 'buildup' | 'multistrike' | 'pcdiff' | 'positions'>('premium');
+  const [activeTab, setActiveTab] = useState<'premium' | 'premium-bar' | 'skew' | 'oi' | 'cumulative' | 'pcrspot' | 'chain' | 'intelligence' | 'vix' | 'buildup' | 'multistrike' | 'pcdiff' | 'positions'>('premium');
 
   // Poll vix-candles for spot, prev_close, and candles (60s)
   useEffect(() => {
@@ -867,6 +868,7 @@ export default function OptionsCharts() {
               { key: 'skew',         label: 'Skew'          },
               { key: 'oi',           label: 'Open Interest' },
               { key: 'cumulative',   label: 'Cumulative OI' },
+              { key: 'pcrspot',      label: 'PCR vs Spot'   },
               { key: 'chain',        label: 'Smart Chain'   },
               { key: 'intelligence', label: 'Intelligence'  },
               { key: 'vix',          label: 'India VIX'    },
@@ -893,6 +895,7 @@ export default function OptionsCharts() {
           {activeTab === 'skew'       && <OptionsSkewTab         expiry={expiry} />}
           {activeTab === 'oi'         && <OptionsOITab           expiry={expiry} />}
           {activeTab === 'cumulative' && <OptionsCumulativeOITab expiry={expiry} />}
+          {activeTab === 'pcrspot'    && <OptionsPCRSpotTab      expiry={expiry} />}
           {activeTab === 'chain'      && <OptionsSmartChainTab   expiry={expiry} />}
           {activeTab === 'intelligence' && <OptionsIntelligenceTab expiry={expiry} />}
           {activeTab === 'vix'          && <OptionsVixTab />}

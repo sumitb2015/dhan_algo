@@ -2235,8 +2235,26 @@ class DhanHelper:
                 )
                 return None
 
-            # The last row is today's partial/ongoing candle; second-to-last is previous day
-            prev_row = hist_df.iloc[-2]
+            # Whether the last row is today's partial/ongoing candle (in which case
+            # the previous day is the row before it) depends on whether the DAILY
+            # endpoint has published one yet — it does not while the market is
+            # still open, so the last row is already the most recent *completed*
+            # day. Assuming iloc[-2] unconditionally silently picked the wrong
+            # (stale) previous day whenever markets were open. `timestamp` is
+            # epoch seconds at 18:30 UTC (= midnight IST) of the session date.
+            if "timestamp" in hist_df.columns:
+                last_date = pd.to_datetime(hist_df.iloc[-1]["timestamp"], unit="s") + pd.Timedelta(hours=5, minutes=30)
+                is_partial_today = last_date.date() == today
+            else:
+                is_partial_today = True  # no timestamp to check — fall back to the old assumption
+
+            if is_partial_today:
+                if len(hist_df) < 2:
+                    logger.warning(f"get_prev_day_levels: Only today's row returned for '{symbol}'.")
+                    return None
+                prev_row = hist_df.iloc[-2]
+            else:
+                prev_row = hist_df.iloc[-1]
             levels = {
                 "high":  float(prev_row["high"]),
                 "low":   float(prev_row["low"]),
