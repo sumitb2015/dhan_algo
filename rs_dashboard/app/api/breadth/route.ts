@@ -2,6 +2,8 @@ import { NextResponse } from 'next/server';
 import { readNifty50Index, readStockCSVAsync, readNifty500List } from '@/lib/dataLoader';
 import { OHLCVRow } from '@/lib/rs';
 import { NIFTY50_SYMBOLS } from '@/lib/nifty50';
+import { SENSEX_SYMBOLS } from '@/lib/sensex';
+import { BANKNIFTY_SYMBOLS } from '@/lib/banknifty';
 import fs from 'fs';
 import path from 'path';
 
@@ -85,11 +87,16 @@ export interface BreadthStats {
   rsiBelow40: number;
   rsiBelow40Pct: number;
   netAdvanceDecline: number;    // advancing1W - declining1W
+  advancingToday: number;       // close > prev close (latest session)
+  decliningToday: number;
+  unchangedToday: number;
 }
 
 export interface BreadthResponse {
   nifty50: IndexStats;
   nifty50Breadth: BreadthStats;   // ← N50 constituent breadth suite
+  sensexBreadth: BreadthStats;
+  bankniftyBreadth: BreadthStats;
   nifty500Breadth: BreadthStats;
   regimeLabel: string;
   regimeColor: 'green' | 'lime' | 'yellow' | 'orange' | 'red';
@@ -296,6 +303,7 @@ async function computeBreadthStats(symbols: string[]): Promise<BreadthStats> {
   let rsiOverbought = 0, rsiNeutral = 0, rsiOversold = 0;
   let bullPower = 0, bearPower = 0;
   let rsiAbove60 = 0, rsiBelow40 = 0;
+  let advancingToday = 0, decliningToday = 0, unchangedToday = 0;
   let total = 0;
 
   await Promise.all(symbols.map(async (symbol) => {
@@ -305,6 +313,13 @@ async function computeBreadthStats(symbols: string[]): Promise<BreadthStats> {
     total++;
     const closes = rows.map((r) => r.close);
     const latest = rows[rows.length - 1];
+    const prev = rows[rows.length - 2];
+
+    if (prev) {
+      if (latest.close > prev.close) advancingToday++;
+      else if (latest.close < prev.close) decliningToday++;
+      else unchangedToday++;
+    }
 
     const ma20 = simpleMA(closes, 20);
     const ma50 = simpleMA(closes, 50);
@@ -384,6 +399,9 @@ async function computeBreadthStats(symbols: string[]): Promise<BreadthStats> {
     rsiBelow40,
     rsiBelow40Pct: pct(rsiBelow40),
     netAdvanceDecline,
+    advancingToday,
+    decliningToday,
+    unchangedToday,
   };
 }
 
@@ -415,9 +433,11 @@ export async function GET() {
     const nifty50Rows = readNifty50Index();
     const nifty500Symbols = readNifty500List();
 
-    const [nifty50, nifty50Breadth, nifty500Breadth] = await Promise.all([
+    const [nifty50, nifty50Breadth, sensexBreadth, bankniftyBreadth, nifty500Breadth] = await Promise.all([
       Promise.resolve(computeIndexStats(nifty50Rows)),
       computeBreadthStats(NIFTY50_SYMBOLS),
+      computeBreadthStats(SENSEX_SYMBOLS),
+      computeBreadthStats(BANKNIFTY_SYMBOLS),
       computeBreadthStats(nifty500Symbols),
     ]);
 
@@ -426,6 +446,8 @@ export async function GET() {
     const data: BreadthResponse = {
       nifty50,
       nifty50Breadth,
+      sensexBreadth,
+      bankniftyBreadth,
       nifty500Breadth,
       regimeLabel,
       regimeColor,

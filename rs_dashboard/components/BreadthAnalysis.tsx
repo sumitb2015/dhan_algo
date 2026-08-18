@@ -500,6 +500,59 @@ function Extremes52WChart({ n50, n500 }: { n50: BreadthStats; n500: BreadthStats
   );
 }
 
+// ─── Advance / Decline / Unchanged snapshot (today) ────────────────────────────
+
+function AdvanceDeclineSnapshot({ data }: { data: BreadthResponse }) {
+  const universes: Array<{ label: string; color: string; stats: BreadthStats }> = [
+    { label: 'Nifty 50', color: N50_COLOR, stats: data.nifty50Breadth },
+    { label: 'Sensex', color: '#c084fc', stats: data.sensexBreadth },
+    { label: 'Bank Nifty', color: '#38bdf8', stats: data.bankniftyBreadth },
+    { label: 'Nifty 500', color: N500_COLOR, stats: data.nifty500Breadth },
+  ];
+
+  return (
+    <ChartCard>
+      <ChartHeader
+        eyebrow="Today"
+        title="Advance / Decline / Unchanged"
+        sub="Stocks closing above vs below the previous session's close, by universe"
+        legend={<>
+          <LegendDot color={UP_COLOR} label="Advancing" />
+          <LegendDot color="#71717a" label="Unchanged" />
+          <LegendDot color={DOWN_COLOR} label="Declining" />
+        </>}
+      />
+      <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-4">
+        {universes.map((u) => {
+          const { advancingToday: adv, decliningToday: dec, unchangedToday: unch, totalScanned } = u.stats;
+          const total = Math.max(1, adv + dec + unch);
+          const advPct = (adv / total) * 100;
+          const decPct = (dec / total) * 100;
+          const unchPct = (unch / total) * 100;
+          return (
+            <div key={u.label} className="flex flex-col gap-2">
+              <div className="flex items-center justify-between">
+                <span className="text-[10px] font-bold uppercase tracking-widest" style={{ color: u.color }}>{u.label}</span>
+                <span className="text-[9px] text-zinc-500 font-mono">{totalScanned} scanned</span>
+              </div>
+              <div className="flex h-3 w-full rounded-full overflow-hidden bg-zinc-800">
+                <div style={{ width: `${advPct}%`, backgroundColor: UP_COLOR }} title={`Advancing: ${adv}`} />
+                <div style={{ width: `${unchPct}%`, backgroundColor: '#52525b' }} title={`Unchanged: ${unch}`} />
+                <div style={{ width: `${decPct}%`, backgroundColor: DOWN_COLOR }} title={`Declining: ${dec}`} />
+              </div>
+              <div className="flex justify-between text-[11px] font-mono font-bold tabular-nums">
+                <span className="text-emerald-400">{adv} ▲</span>
+                <span className="text-zinc-500">{unch} ●</span>
+                <span className="text-red-400">{dec} ▼</span>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </ChartCard>
+  );
+}
+
 // ─── Bull/Bear power + A/D comparison ──────────────────────────────────────────
 
 function PowerAndADChart({ n50, n500 }: { n50: BreadthStats; n500: BreadthStats }) {
@@ -639,6 +692,8 @@ export default function BreadthAnalysis() {
         ) : data ? (
           <div className="space-y-4">
             <MarketPulseRibbon data={data} />
+
+            <AdvanceDeclineSnapshot data={data} />
 
             <div className="grid grid-cols-1 xl:grid-cols-3 gap-4">
               <IndexTrendCard stats={data.nifty50} />
