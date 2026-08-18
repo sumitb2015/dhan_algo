@@ -304,6 +304,7 @@ def main():
     iteration = 0
     consecutive_failures = 0
     _key_format_logged = []  # sentinel: log oc key format exactly once
+    last_good_spot = spot    # updated on every successful LTP fetch — see below
 
     while True:
         now = ist_now()
@@ -320,8 +321,15 @@ def main():
         ts = now.strftime('%Y-%m-%d %H:%M:%S')
 
         try:
-            # Refresh spot each iteration (but keep ATM locked)
-            live_spot = helper.get_ltp(underlying, exchange='IDX_I', instrument='INDEX') or spot
+            # Refresh spot each iteration (but keep ATM locked). A transient
+            # get_ltp() hiccup used to fall back to the market-open `spot` —
+            # producing a one-tick spike back to the 09:15 price every time
+            # the LTP call blipped, hours into the session. Fall back to the
+            # last successfully-fetched live price instead.
+            fetched_spot = helper.get_ltp(underlying, exchange='IDX_I', instrument='INDEX')
+            if fetched_spot:
+                last_good_spot = fetched_spot
+            live_spot = last_good_spot
             chain_data = helper.get_option_chain(underlying, expiry, exchange_segment='IDX_I')
             oc = chain_data.get('oc', {}) if chain_data else {}
 

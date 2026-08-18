@@ -160,16 +160,34 @@ export async function GET(request: NextRequest) {
       }
     }
 
-    const data = [...byTs.entries()]
-      .sort(([a], [b]) => a.localeCompare(b))
-      .map(([timestamp, { spot, ceOI, peOI }]) => ({
-        time: timestamp.slice(11, 19),
-        ts:   istStringToEpoch(timestamp),
-        spot,
-        ceOI,
-        peOI,
-        diff: peOI - ceOI,
-      }));
+    const sorted = [...byTs.entries()].sort(([a], [b]) => a.localeCompare(b));
+
+    // Despike single-snapshot bad reads: the collector occasionally falls back
+    // to a stale price for exactly one poll (e.g. the market-open price on a
+    // transient LTP hiccup — see iv_snapshot_collector.py), which reads as a
+    // sharp one-tick spike that fully reverts on the very next poll. A real
+    // move never reverts within one snapshot, so any point that jumps away
+    // from both neighbours while its neighbours stay close to each other is
+    // swapped for their average rather than plotted as-is.
+    const spikeJump = 12;     // points — bigger than a normal 30s NIFTY move
+    const neighborClose = 10; // points — how close the two flanking reads must be
+    const spots = sorted.map(([, v]) => v.spot);
+    for (let i = 1; i < spots.length - 1; i++) {
+      const prev = spots[i - 1], cur = spots[i], next = spots[i + 1];
+      if (Math.abs(cur - prev) > spikeJump && Math.abs(cur - next) > spikeJump
+          && Math.abs(prev - next) < neighborClose) {
+        sorted[i][1].spot = (prev + next) / 2;
+      }
+    }
+
+    const data = sorted.map(([timestamp, { spot, ceOI, peOI }]) => ({
+      time: timestamp.slice(11, 19),
+      ts:   istStringToEpoch(timestamp),
+      spot,
+      ceOI,
+      peOI,
+      diff: peOI - ceOI,
+    }));
 
     const response = NextResponse.json({
       success: true, date, atm, expiry, wings: clampedWings, data,

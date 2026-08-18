@@ -159,7 +159,7 @@ export default function OptionsPCRSpotTab({ expiry: _expiry }: { expiry: string 
   useEffect(() => {
     setLoading(true);
     fetchData();
-    pollRef.current = setInterval(fetchData, 30_000);
+    pollRef.current = setInterval(fetchData, 60_000);
     return () => { if (pollRef.current) clearInterval(pollRef.current); };
   }, []);
 
@@ -292,7 +292,7 @@ export default function OptionsPCRSpotTab({ expiry: _expiry }: { expiry: string 
           )}
           {chartData.length > 0 && (
             <span className="text-[10px] text-zinc-400 tabular-nums">
-              {chartData.length} pt{chartData.length !== 1 ? 's' : ''} · refreshes every 30s
+              {chartData.length} pt{chartData.length !== 1 ? 's' : ''} · refreshes every 60s
             </span>
           )}
           <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold bg-emerald-500/15 text-emerald-400 border border-emerald-500/30">
