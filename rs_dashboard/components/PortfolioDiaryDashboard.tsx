@@ -2,7 +2,7 @@
 
 import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import { BookOpen, RefreshCw, Award, PartyPopper, ChevronLeft, ChevronRight, Flame, LineChart as LineChartIcon } from 'lucide-react';
-import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, ReferenceLine } from 'recharts';
+import { LineChart, Line, BarChart, Bar, Cell, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, ReferenceLine } from 'recharts';
 import Link from 'next/link';
 import { cn } from '@/lib/utils';
 import { useTradeSync } from '@/lib/useTradeSync';
@@ -222,6 +222,44 @@ function computeStats(dailyPnl: DailyPnlPoint[]) {
   return { netTotal, mostProfitable, tradedOn: traded.length, inProfitDays, winningStreak, currentStreak };
 }
 
+interface WeekdayStat {
+  dow: number;
+  label: string;
+  totalGross: number;
+  totalNet: number;
+  avgGross: number;
+  totalTrades: number;
+  tradedDays: number;
+  winDays: number;
+  winRate: number;
+}
+
+// Aggregate P&L by day-of-week (Mon-Fri) to surface which weekday trades best overall.
+function computeWeekdayStats(dailyPnl: DailyPnlPoint[]): WeekdayStat[] {
+  const labels = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+  const buckets = Array.from({ length: 7 }, (_, i) => ({
+    dow: i, label: labels[i], totalGross: 0, totalNet: 0, totalTrades: 0, tradedDays: 0, winDays: 0,
+  }));
+  for (const d of dailyPnl) {
+    if (d.tradeCount === 0) continue;
+    const b = buckets[dayOfWeekUTC(d.date)];
+    b.totalGross += d.grossPnl;
+    b.totalNet += d.netPnl;
+    b.totalTrades += d.tradeCount;
+    b.tradedDays += 1;
+    if (d.grossPnl > 0) b.winDays += 1;
+  }
+  return buckets
+    .filter(b => b.dow >= 1 && b.dow <= 5)
+    .map(b => ({
+      ...b,
+      totalGross: round2(b.totalGross),
+      totalNet: round2(b.totalNet),
+      avgGross: b.tradedDays ? round2(b.totalGross / b.tradedDays) : 0,
+      winRate: b.tradedDays ? Math.round((b.winDays / b.tradedDays) * 100) : 0,
+    }));
+}
+
 // ─── Stat chip ────────────────────────────────────────────────────────────────
 
 function StatChip({ value, label, color }: { value: number | string; label: string; color: string }) {
@@ -257,6 +295,7 @@ export default function PortfolioDiaryDashboard() {
   const [selectedYear, setSelectedYear] = useState<string | null>(null);
   const [segment, setSegment] = useState<'ALL' | 'EQUITY' | 'FNO' | 'COMMODITY' | 'TRADING' | 'INVESTING'>('ALL');
   const [chartMetric, setChartMetric] = useState<ChartMetric>('netPnl');
+  const [weekdayMetric, setWeekdayMetric] = useState<'totalGross' | 'totalNet' | 'totalTrades'>('totalNet');
 
   const fetchData = useCallback(() => {
     fetch('/api/portfolio-trades')
@@ -288,6 +327,11 @@ export default function PortfolioDiaryDashboard() {
   }, [data, segment]);
   const byDate = useMemo(() => new Map(dailyPnl.map(d => [d.date, d])), [dailyPnl]);
   const stats = useMemo(() => computeStats(dailyPnl), [dailyPnl]);
+  const weekdayStats = useMemo(() => computeWeekdayStats(dailyPnl), [dailyPnl]);
+  const bestWeekday = useMemo(
+    () => weekdayStats.reduce<WeekdayStat | null>((best, w) => (w.tradedDays > 0 && (!best || w[weekdayMetric] > best[weekdayMetric]) ? w : best), null),
+    [weekdayStats, weekdayMetric],
+  );
 
   const weeklyBuckets = useMemo(
     () => (data?.fromDate && data?.toDate ? buildWeeklyBuckets(data.fromDate, data.toDate, byDate) : []),
@@ -383,6 +427,19 @@ export default function PortfolioDiaryDashboard() {
         totalCharges: round2(cumCharges),
       };
     });
+  }, [dailyPnl]);
+
+  // Day-wise (non-cumulative) values per metric, for the bar chart under the cumulative line chart
+  const dayWiseChartData = useMemo(() => {
+    const traded = [...dailyPnl].filter(d => d.tradeCount > 0).sort((a, b) => a.date.localeCompare(b.date));
+    return traded.map(d => ({
+      date: d.date,
+      grossPnl: round2(d.grossPnl),
+      netPnl: round2(d.netPnl),
+      charges: round2(d.statutoryCharges),
+      brokerage: round2(d.charges - d.statutoryCharges),
+      totalCharges: round2(d.charges),
+    }));
   }, [dailyPnl]);
 
   const activeChartMetric = CHART_METRICS.find(m => m.key === chartMetric)!;
@@ -559,6 +616,98 @@ export default function PortfolioDiaryDashboard() {
                 </div>
               );
             })()}
+
+            {/* Day-of-week breakdown — which weekday is most profitable overall */}
+            {weekdayStats.some(w => w.tradedDays > 0) && (
+              <div className="bg-zinc-900/60 border border-zinc-800/60 rounded-xl p-4 flex flex-col gap-3">
+                <div className="flex items-center justify-between flex-wrap gap-2">
+                  <div className="flex items-center gap-3 flex-wrap">
+                    <span className="text-[11px] font-semibold text-zinc-300">Day-of-Week Performance</span>
+                    <div className="flex items-center bg-zinc-900 border border-zinc-800 p-0.5 rounded-lg gap-0.5 w-fit">
+                      {([
+                        { key: 'totalGross', label: 'Overall P&L' },
+                        { key: 'totalNet', label: 'Net P&L' },
+                        { key: 'totalTrades', label: 'Total Trades' },
+                      ] as const).map(o => (
+                        <button
+                          key={o.key}
+                          onClick={() => setWeekdayMetric(o.key)}
+                          className={cn(
+                            'px-2.5 py-1 text-[10px] font-semibold rounded-md transition-all',
+                            weekdayMetric === o.key ? 'bg-amber-500/10 text-amber-400' : 'text-zinc-500 hover:text-zinc-300',
+                          )}
+                        >
+                          {o.label}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                  {bestWeekday && (
+                    <div className="flex items-center gap-1.5">
+                      <Award className="h-3.5 w-3.5 text-amber-400" />
+                      <span className="text-[11px] text-zinc-500">{weekdayMetric === 'totalTrades' ? 'Most Active:' : 'Best Day:'}</span>
+                      <span className="text-[11px] font-bold text-emerald-400">{bestWeekday.label}</span>
+                      <span className="text-[10px] text-zinc-600">
+                        ({weekdayMetric === 'totalTrades' ? `${bestWeekday.totalTrades} trades` : `${fmtINR(bestWeekday[weekdayMetric], true)} total`}, {bestWeekday.winRate}% win rate)
+                      </span>
+                    </div>
+                  )}
+                </div>
+                <div className="h-40">
+                  <ResponsiveContainer width="100%" height="100%">
+                    <BarChart data={weekdayStats} margin={{ top: 4, right: 12, left: 4, bottom: 0 }}>
+                      <CartesianGrid strokeDasharray="3 3" stroke="#27272a" vertical={false} />
+                      <XAxis dataKey="label" tick={{ fontSize: 10, fill: '#a1a1aa' }} />
+                      <YAxis
+                        tick={{ fontSize: 9, fill: '#71717a' }}
+                        tickFormatter={v => (weekdayMetric === 'totalTrades' ? String(v) : fmtINR(v, true))}
+                        width={56}
+                      />
+                      <ReferenceLine y={0} stroke="#52525b" />
+                      <Tooltip
+                        cursor={{ fill: '#3f3f46', opacity: 0.35 }}
+                        contentStyle={{ background: '#18181b', border: '1px solid #3f3f46', borderRadius: 8, fontSize: 11 }}
+                        labelStyle={{ color: '#a1a1aa' }}
+                        itemStyle={{ color: '#e4e4e7' }}
+                        formatter={(v: unknown, name: unknown, props: any) => {
+                          const w = props.payload as WeekdayStat;
+                          if (weekdayMetric === 'totalTrades') {
+                            return [`${v} trades  (${w.tradedDays} days, ${w.winRate}% win rate)`, 'Total Trades'] as [string, string];
+                          }
+                          const label = weekdayMetric === 'totalGross' ? 'Overall P&L' : 'Net P&L';
+                          return [`${fmtINR(v as number)}  (${w.tradedDays} days, ${w.winRate}% win rate)`, label] as [string, string];
+                        }}
+                      />
+                      <Bar dataKey={weekdayMetric} radius={[4, 4, 0, 0]}>
+                        {weekdayStats.map(w => (
+                          <Cell
+                            key={w.dow}
+                            fill={
+                              w.tradedDays === 0 ? '#3f3f46' :
+                              weekdayMetric === 'totalTrades' ? '#38bdf8' :
+                              w[weekdayMetric] >= 0 ? '#10b981' : '#ef4444'
+                            }
+                          />
+                        ))}
+                      </Bar>
+                    </BarChart>
+                  </ResponsiveContainer>
+                </div>
+                <div className="grid grid-cols-5 gap-2">
+                  {weekdayStats.map(w => (
+                    <div key={w.dow} className="flex flex-col items-center gap-0.5 py-1.5 rounded-lg border border-zinc-800/60 bg-zinc-950/40">
+                      <span className="text-[10px] text-zinc-500 font-medium">{w.label}</span>
+                      {weekdayMetric === 'totalTrades' ? (
+                        <span className="tabular-nums font-bold text-sky-400">{w.totalTrades}</span>
+                      ) : (
+                        <PnlText v={w[weekdayMetric]} compact />
+                      )}
+                      <span className="text-[9px] text-zinc-600">{w.tradedDays} days · {w.winRate}% win</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
 
             {tab === 'yearly' ? (
               <>
@@ -964,6 +1113,7 @@ export default function PortfolioDiaryDashboard() {
                           <Tooltip
                             contentStyle={{ background: '#18181b', border: '1px solid #3f3f46', borderRadius: 8, fontSize: 11 }}
                             labelStyle={{ color: '#a1a1aa' }}
+                        itemStyle={{ color: '#e4e4e7' }}
                             labelFormatter={(d: any) => fmtDateLong(String(d))}
                             formatter={(v: unknown) => [fmtINR(v as number), activeChartMetric.label]}
                           />
@@ -978,6 +1128,55 @@ export default function PortfolioDiaryDashboard() {
                             isAnimationActive={false}
                           />
                         </LineChart>
+                      </ResponsiveContainer>
+                    </div>
+                  )}
+                </div>
+
+                <div className="bg-zinc-900/60 border border-zinc-800/60 rounded-xl p-4">
+                  <div className="text-[11px] font-semibold text-zinc-300 mb-3">
+                    Day-wise {activeChartMetric.label}
+                  </div>
+                  {dayWiseChartData.length === 0 ? (
+                    <div className="flex items-center justify-center h-64 text-xs text-zinc-600">No trades in range</div>
+                  ) : (
+                    <div className="h-72">
+                      <ResponsiveContainer width="100%" height="100%">
+                        <BarChart data={dayWiseChartData} margin={{ top: 4, right: 12, left: 4, bottom: 0 }}>
+                          <CartesianGrid strokeDasharray="3 3" stroke="#27272a" />
+                          <XAxis
+                            dataKey="date"
+                            tick={{ fontSize: 9, fill: '#71717a' }}
+                            tickFormatter={fmtShort}
+                            interval="preserveStartEnd"
+                          />
+                          <YAxis
+                            tick={{ fontSize: 9, fill: '#71717a' }}
+                            tickFormatter={v => fmtINR(v, true)}
+                            width={56}
+                          />
+                          <Tooltip
+                            cursor={{ fill: '#3f3f46', opacity: 0.35 }}
+                            contentStyle={{ background: '#18181b', border: '1px solid #3f3f46', borderRadius: 8, fontSize: 11 }}
+                            labelStyle={{ color: '#a1a1aa' }}
+                        itemStyle={{ color: '#e4e4e7' }}
+                            labelFormatter={(d: any) => fmtDateLong(String(d))}
+                            formatter={(v: unknown) => [fmtINR(v as number), activeChartMetric.label]}
+                          />
+                          <ReferenceLine y={0} stroke="#52525b" strokeDasharray="4 2" />
+                          <Bar dataKey={chartMetric} name={activeChartMetric.label} radius={[2, 2, 0, 0]} isAnimationActive={false}>
+                            {dayWiseChartData.map((d: any) => (
+                              <Cell
+                                key={d.date}
+                                fill={
+                                  chartMetric === 'grossPnl' || chartMetric === 'netPnl'
+                                    ? d[chartMetric] >= 0 ? '#10b981' : '#ef4444'
+                                    : activeChartMetric.color
+                                }
+                              />
+                            ))}
+                          </Bar>
+                        </BarChart>
                       </ResponsiveContainer>
                     </div>
                   )}
