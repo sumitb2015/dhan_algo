@@ -17,6 +17,7 @@ import { openLots, fractionUnits } from '@/lib/partialQty';
 import { positionKey, positionProduct, findLivePosition, closeOrderProduct } from '@/lib/positionProduct';
 import TopWeightStocks from './TopWeightStocks';
 import TopIndices from './TopIndices';
+import MtmChart, { useMtmHistory } from './MtmChart';
 
 // ─── Types ────────────────────────────────────────────────────────
 
@@ -124,7 +125,7 @@ export default function AdvancedScalper() {
   const armedHalfPlanRef = useRef<{ legs: HalfLeg[]; skipped: string[] } | null>(null);
 
   // Bottom tabs
-  const [activeTab, setActiveTab]       = useState<'positions' | 'orders' | 'trades' | 'funds'>('positions');
+  const [activeTab, setActiveTab]       = useState<'positions' | 'orders' | 'trades' | 'funds' | 'mtm'>('positions');
   const [positionsData, setPositionsData] = useState<Record<string, unknown>[]>([]);
   const [positionsError, setPositionsError] = useState<string | null>(null);
   const [ordersData, setOrdersData]       = useState<Record<string, unknown>[]>([]);
@@ -358,6 +359,13 @@ export default function AdvancedScalper() {
   const totalPnl = useMemo(() => enrichedPositions.reduce((sum, p) =>
     sum + (Number(p.realizedProfit) || 0) + (Number(p.unrealizedProfit) || 0), 0),
     [enrichedPositions]);
+
+  const totalUnrealizedPnl = useMemo(() => enrichedPositions.reduce((sum, p) =>
+    sum + (Number(p.unrealizedProfit) || 0), 0),
+    [enrichedPositions]);
+
+  // Anchored on the trade book's own realized total, not totalPnl — see useMtmHistory for why.
+  const { data: mtmHistory, stats: mtmStats } = useMtmHistory(broker, tradesData, totalUnrealizedPnl);
 
   // Combined Multi-Leg Premium Tracking & Strategy Stats
   const combinedStrategyStats = useMemo(() => {
@@ -2290,6 +2298,7 @@ export default function AdvancedScalper() {
             ['orders',    ordersData]    as const,
             ['trades',    tradesData]    as const,
             ['funds',     []]            as const,
+            ['mtm',       []]            as const,
           ]).map(([tab, data]) => (
             <button key={tab} onClick={() => { setActiveTab(tab as typeof activeTab); setTableSort({ key: 'none', dir: 'asc' }); }}
               className={`px-3 py-1.5 text-xs font-semibold rounded-lg transition-all capitalize ${
@@ -2311,7 +2320,9 @@ export default function AdvancedScalper() {
 
         {/* Table content */}
         <div className="flex-1 overflow-auto">
-          {activeTab === 'funds' ? (
+          {activeTab === 'mtm' ? (
+            <MtmChart data={mtmHistory} stats={mtmStats} />
+          ) : activeTab === 'funds' ? (
             <FundsView
               data={fundsData}
               realizedPnl={enrichedPositions.reduce((sum, p) => sum + (Number(p.realizedProfit) || 0), 0)}
