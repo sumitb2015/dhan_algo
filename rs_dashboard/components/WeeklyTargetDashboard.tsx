@@ -236,9 +236,17 @@ export default function WeeklyTargetDashboard() {
 
   const [targetInput, setTargetInput] = useState('');
   const [editingTarget, setEditingTarget] = useState(false);
-  const [weeklyTarget, setWeeklyTarget] = useState(0);
   const [savingTarget, setSavingTarget] = useState(false);
   const [targetSaveError, setTargetSaveError] = useState<string | null>(null);
+
+  const [defaultTargetInput, setDefaultTargetInput] = useState('');
+  const [editingDefaultTarget, setEditingDefaultTarget] = useState(false);
+  const [savingDefaultTarget, setSavingDefaultTarget] = useState(false);
+
+  // The recurring default plus any one-off overrides for specific weeks (keyed by that
+  // week's Monday date) — the tracker shows overrides[weekStart] ?? defaultTarget.
+  const [defaultTarget, setDefaultTarget] = useState(0);
+  const [overrides, setOverrides] = useState<Record<string, number>>({});
 
   const fetchData = useCallback(() => {
     fetch('/api/portfolio-trades')
@@ -250,39 +258,19 @@ export default function WeeklyTargetDashboard() {
 
   useEffect(() => { fetchData(); }, [fetchData]);
 
-  useEffect(() => {
+  const fetchTargetConfig = useCallback(() => {
     fetch('/api/portfolio-weekly-target')
       .then(r => r.json())
-      .then(d => setWeeklyTarget(Number.isFinite(d?.weeklyTarget) ? d.weeklyTarget : 0))
-      .catch(() => setWeeklyTarget(0));
+      .then(d => {
+        setDefaultTarget(Number.isFinite(d?.defaultTarget) ? d.defaultTarget : 0);
+        setOverrides(d?.overrides && typeof d.overrides === 'object' ? d.overrides : {});
+      })
+      .catch(() => { setDefaultTarget(0); setOverrides({}); });
   }, []);
 
-  const { syncing, syncError, startSync } = useTradeSync(fetchData);
+  useEffect(() => { fetchTargetConfig(); }, [fetchTargetConfig]);
 
-  const saveTarget = useCallback(async () => {
-    const v = Number(targetInput);
-    if (!Number.isFinite(v) || v < 0) return;
-    setSavingTarget(true);
-    setTargetSaveError(null);
-    try {
-      const res = await fetch('/api/portfolio-weekly-target', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ weeklyTarget: v }),
-      });
-      const resp = await res.json();
-      if (resp.success) {
-        setWeeklyTarget(v);
-        setEditingTarget(false);
-      } else {
-        setTargetSaveError(resp.error ?? 'Failed to save target');
-      }
-    } catch {
-      setTargetSaveError('Network error — target not saved');
-    } finally {
-      setSavingTarget(false);
-    }
-  }, [targetInput]);
+  const { syncing, syncError, startSync } = useTradeSync(fetchData);
 
   const todayStr = useMemo(() => todayIstDateString(), []);
 
@@ -337,6 +325,83 @@ export default function WeeklyTargetDashboard() {
     const year = weekEnd.slice(0, 4);
     return `${fmtShort(weekStart)} – ${endLabel}, ${year}`;
   }, [weekStart, weekEnd]);
+
+  // Effective target for the selected week — a one-off override if this specific week has
+  // one, otherwise the recurring default.
+  const hasOverride = Object.prototype.hasOwnProperty.call(overrides, weekStart);
+  const weeklyTarget = hasOverride ? overrides[weekStart] : defaultTarget;
+
+  const saveWeekTarget = useCallback(async () => {
+    const v = Number(targetInput);
+    if (!Number.isFinite(v) || v < 0) return;
+    setSavingTarget(true);
+    setTargetSaveError(null);
+    try {
+      const res = await fetch('/api/portfolio-weekly-target', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ weekStart, target: v }),
+      });
+      const resp = await res.json();
+      if (resp.success) {
+        setOverrides(resp.overrides ?? {});
+        setEditingTarget(false);
+      } else {
+        setTargetSaveError(resp.error ?? 'Failed to save target');
+      }
+    } catch {
+      setTargetSaveError('Network error — target not saved');
+    } finally {
+      setSavingTarget(false);
+    }
+  }, [targetInput, weekStart]);
+
+  const resetWeekTarget = useCallback(async () => {
+    setSavingTarget(true);
+    setTargetSaveError(null);
+    try {
+      const res = await fetch('/api/portfolio-weekly-target', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ weekStart, target: null }),
+      });
+      const resp = await res.json();
+      if (resp.success) {
+        setOverrides(resp.overrides ?? {});
+      } else {
+        setTargetSaveError(resp.error ?? 'Failed to reset target');
+      }
+    } catch {
+      setTargetSaveError('Network error — target not reset');
+    } finally {
+      setSavingTarget(false);
+    }
+  }, [weekStart]);
+
+  const saveDefaultTarget = useCallback(async () => {
+    const v = Number(defaultTargetInput);
+    if (!Number.isFinite(v) || v < 0) return;
+    setSavingDefaultTarget(true);
+    setTargetSaveError(null);
+    try {
+      const res = await fetch('/api/portfolio-weekly-target', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ defaultTarget: v }),
+      });
+      const resp = await res.json();
+      if (resp.success) {
+        setDefaultTarget(resp.defaultTarget ?? v);
+        setEditingDefaultTarget(false);
+      } else {
+        setTargetSaveError(resp.error ?? 'Failed to save default target');
+      }
+    } catch {
+      setTargetSaveError('Network error — default target not saved');
+    } finally {
+      setSavingDefaultTarget(false);
+    }
+  }, [defaultTargetInput]);
 
   // ─── Weekly rows (zero-filled for days with no synced data) ───────────────
 
@@ -421,20 +486,24 @@ export default function WeeklyTargetDashboard() {
 
   const completedWeeks = useMemo(() => {
     if (!fromDate) return [];
-    const weeks: { start: string; end: string; netPnl: number }[] = [];
+    const weeks: { start: string; end: string; netPnl: number; target: number }[] = [];
     let cursor = mondayOfWeek(fromDate);
     while (cursor < currentMonday) {
       let netPnl = 0;
       for (let i = 0; i < 5; i++) netPnl += byDate.get(addDaysUTC(cursor, i))?.netPnl ?? 0;
-      weeks.push({ start: cursor, end: addDaysUTC(cursor, 4), netPnl: round2(netPnl) });
+      const target = Object.prototype.hasOwnProperty.call(overrides, cursor) ? overrides[cursor] : defaultTarget;
+      weeks.push({ start: cursor, end: addDaysUTC(cursor, 4), netPnl: round2(netPnl), target });
       cursor = addDaysUTC(cursor, 7);
     }
     return weeks;
-  }, [fromDate, currentMonday, byDate]);
+  }, [fromDate, currentMonday, byDate, overrides, defaultTarget]);
 
   const targetStreak = useMemo(() => {
-    if (weeklyTarget <= 0 || completedWeeks.length === 0) return null;
-    const withHit = completedWeeks.map(w => ({ ...w, hit: w.netPnl >= weeklyTarget }));
+    // Weeks with no target set (default was 0 and no override) don't count toward the streak —
+    // "hit" against a target of 0 would be trivially true for any breakeven-or-better week.
+    const applicable = completedWeeks.filter(w => w.target > 0);
+    if (applicable.length === 0) return null;
+    const withHit = applicable.map(w => ({ ...w, hit: w.netPnl >= w.target }));
     const hitCount = withHit.filter(w => w.hit).length;
     let currentStreak = 0;
     for (let i = withHit.length - 1; i >= 0; i--) {
@@ -443,7 +512,7 @@ export default function WeeklyTargetDashboard() {
     let bestStreak = 0, run = 0;
     for (const w of withHit) { if (w.hit) { run++; bestStreak = Math.max(bestStreak, run); } else run = 0; }
     return { totalWeeks: withHit.length, hitCount, currentStreak, bestStreak, recent: withHit.slice(-10) };
-  }, [completedWeeks, weeklyTarget]);
+  }, [completedWeeks]);
 
   const chartData = useMemo<ChartPoint[]>(
     () => weekRows.map(r => ({ date: r.date, day: r.day, netPnl: r.netPnl, cumulative: r.cumulative })),
@@ -573,11 +642,11 @@ export default function WeeklyTargetDashboard() {
                         min={0}
                         value={targetInput}
                         onChange={e => setTargetInput(e.target.value)}
-                        onKeyDown={e => { if (e.key === 'Enter') saveTarget(); if (e.key === 'Escape') setEditingTarget(false); }}
-                        aria-label="Weekly target amount in rupees"
+                        onKeyDown={e => { if (e.key === 'Enter') saveWeekTarget(); if (e.key === 'Escape') setEditingTarget(false); }}
+                        aria-label="Target amount for this week, in rupees"
                         className="w-32 bg-zinc-950 border border-zinc-700 rounded-md px-2 py-1 text-xs font-mono text-white outline-none focus:border-amber-500/60"
                       />
-                      <button onClick={saveTarget} disabled={savingTarget} aria-label="Save target" title="Save target" className="p-1 rounded-md bg-emerald-500/15 text-emerald-400 hover:bg-emerald-500/25">
+                      <button onClick={saveWeekTarget} disabled={savingTarget} aria-label="Save target for this week" title="Save target for this week" className="p-1 rounded-md bg-emerald-500/15 text-emerald-400 hover:bg-emerald-500/25">
                         <Check className="w-3.5 h-3.5" />
                       </button>
                       <button onClick={() => setEditingTarget(false)} aria-label="Cancel editing target" title="Cancel" className="p-1 rounded-md bg-zinc-800 text-zinc-400 hover:text-white">
@@ -587,13 +656,27 @@ export default function WeeklyTargetDashboard() {
                   ) : (
                     <button
                       onClick={() => { setTargetInput(String(weeklyTarget)); setEditingTarget(true); }}
-                      aria-label={`Edit weekly target, currently ${fmtINR(weeklyTarget)}`}
-                      title="Edit weekly target"
+                      aria-label={`Edit target for this week, currently ${fmtINR(weeklyTarget)}`}
+                      title="Edit target for this week"
                       className="flex items-center gap-1.5 ml-2 text-xs font-mono font-bold text-amber-300 hover:text-amber-200"
                     >
                       {fmtINR(weeklyTarget)}
                       <Pencil className="w-3 h-3 text-zinc-500" />
                     </button>
+                  )}
+                  {hasOverride ? (
+                    <>
+                      <span className="text-[9px] font-bold text-amber-500/80 uppercase tracking-wide border border-amber-500/25 bg-amber-500/10 rounded px-1.5 py-0.5">Custom this week</span>
+                      <button
+                        onClick={resetWeekTarget}
+                        disabled={savingTarget}
+                        className="text-[10px] text-zinc-500 hover:text-white underline decoration-dotted"
+                      >
+                        Reset to default
+                      </button>
+                    </>
+                  ) : (
+                    <span className="text-[9px] font-bold text-zinc-500 uppercase tracking-wide border border-zinc-700 rounded px-1.5 py-0.5">Default</span>
                   )}
                 </div>
                 <span className={cn('text-xs font-mono font-bold', targetHit ? 'text-emerald-400' : netWeekTotal < 0 ? 'text-red-400' : 'text-zinc-300')}>
@@ -609,6 +692,39 @@ export default function WeeklyTargetDashboard() {
               <div className="flex items-center justify-between mt-2 text-[10px] text-zinc-500 font-mono">
                 <span>Net so far: <PnlText v={netWeekTotal} compact /></span>
                 <span>{remaining > 0 ? `Remaining: ${fmtINR(remaining, true)}` : `Surplus: +${fmtINR(-remaining, true)}`}</span>
+              </div>
+              <div className="flex items-center gap-1.5 mt-3 pt-3 border-t border-zinc-800/80">
+                {editingDefaultTarget ? (
+                  <>
+                    <span className="text-[10px] text-zinc-500">Recurring default:</span>
+                    <input
+                      autoFocus
+                      type="number"
+                      min={0}
+                      value={defaultTargetInput}
+                      onChange={e => setDefaultTargetInput(e.target.value)}
+                      onKeyDown={e => { if (e.key === 'Enter') saveDefaultTarget(); if (e.key === 'Escape') setEditingDefaultTarget(false); }}
+                      aria-label="Recurring default weekly target, in rupees"
+                      className="w-28 bg-zinc-950 border border-zinc-700 rounded-md px-2 py-0.5 text-[10px] font-mono text-white outline-none focus:border-amber-500/60"
+                    />
+                    <button onClick={saveDefaultTarget} disabled={savingDefaultTarget} aria-label="Save default target" title="Save default target" className="p-1 rounded-md bg-emerald-500/15 text-emerald-400 hover:bg-emerald-500/25">
+                      <Check className="w-3 h-3" />
+                    </button>
+                    <button onClick={() => setEditingDefaultTarget(false)} aria-label="Cancel editing default target" title="Cancel" className="p-1 rounded-md bg-zinc-800 text-zinc-400 hover:text-white">
+                      <X className="w-3 h-3" />
+                    </button>
+                  </>
+                ) : (
+                  <button
+                    onClick={() => { setDefaultTargetInput(String(defaultTarget)); setEditingDefaultTarget(true); }}
+                    aria-label={`Edit recurring default weekly target, currently ${fmtINR(defaultTarget)}`}
+                    title="Edit the recurring default applied to every week without its own override"
+                    className="flex items-center gap-1.5 text-[10px] text-zinc-500 hover:text-zinc-300"
+                  >
+                    Recurring default: <span className="font-mono font-semibold text-zinc-400">{fmtINR(defaultTarget)}</span>
+                    <Pencil className="w-2.5 h-2.5" />
+                  </button>
+                )}
               </div>
             </div>
 
