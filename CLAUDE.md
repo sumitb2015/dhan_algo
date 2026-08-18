@@ -121,7 +121,9 @@ strategies/
   spread_trend/             # Trend-following Bear Call / Bull Put spread strategy (EMA20 + Supertrend)
   st_oi_bearcall/           # Dual Supertrend (index + option) + OI short-buildup bear call spread only
   oi_directional/           # OI imbalance + PCR-driven naked PE/CE sell strategy
-  crudeoil/                 # MCX CRUDEOILM Supertrend-following futures strategy
+  crudeoil/                 # MCX CRUDEOILM: Supertrend, Renko SAR, VWAP+Supertrend, and ORB futures strategies
+  intraday_equity/          # Nifty-50 cash-equity VWAP+RS auto-trader — NOT VALIDATED, dry-run only
+  momentum_investing/       # Nifty-500 positional (CNC, multi-day) relative-strength momentum portfolio
   Archives/                 # Retired/superseded strategies (kept for reference)
 templates/strategy_template.py  # Starting point for new strategies
 docs/
@@ -183,8 +185,10 @@ App Router layout under `app/`. ~30 pages, ~48 API routes, still growing — **r
 Non-obvious route behaviors:
 - `live-equity/`, `live-indices/`, `live-normalized-1min*/` — manage the Python WebSocket bridges; POST `{action:"stop"}` writes the matching `debug/*_stop.trigger`.
 - `strategies/` / `saved-strategies/` — start/stop strategy processes via `spawn`; read state files and cross-check PIDs.
-- `refresh/`, `futures-refresh/`, `options-refresh/`, `backfill/` — spawn the matching Python script, poll its `debug/*_status.json`.
-- `exit-all/`, `pnl-exit/`, `quiktrade/` — square off positions / place quick trades: real-money endpoints.
+- `refresh/`, `futures-refresh/`, `options-refresh/`, `backfill/`, `crudeoil-oi-collector/` — spawn the matching Python script, poll its `debug/*_status.json`, stop via `debug/*_stop.trigger`.
+- `copy-trade/` — start/stop/status UI for `scripts/tools/copy_trade_bridge.py` (the Multi-broker copy-trade bridge below): POST `{action:"start"}` spawns it detached, POST `{action:"stop"}` writes `debug/copy_trade_stop.trigger`, GET reports RUNNING/STARTING/STALE/STOPPED off a 20s heartbeat staleness check against `debug/copy_trade_status.json`.
+- `exit-all/`, `pnl-exit/`, `quiktrade/`, `crudeoil/kotak-order/` — square off positions / place quick trades: real-money endpoints.
+- `csp-scan/` — spawns `scripts/tools/csp_scanner.py` (screening only, no orders); `csp-tracked/sell` and `csp-watchlist/exit` place and exit **real** cash-secured-put orders via `scripts/tools/csp_watchlist.py`, then track fills/strike-rolls in `lib/cspTracked.ts`'s JSON store — reconciled against broker truth by `csp-tracked/reconcile` and `csp-tracked/sync`.
 
 **lib/ files** (`rs_dashboard/lib/`) — the ones with non-obvious behavior:
 - `pyExec.ts` — `runPythonJson()` (async venv-Python spawn, parses last stdout line as JSON) + `dedupe()` in-flight dedup + `PROJECT_ROOT`/`PYTHON_EXE`. Use this from API routes; don't hand-roll `spawnSync` (blocks the Node event loop)
@@ -202,6 +206,8 @@ Non-obvious route behaviors:
 
 **Data date in page headers**: pages that display stock/market data must show a `DATA: YYYY-MM-DD` chip in the sticky header so users always know the currency of the data on screen.
 
+**"Quant-terminal" chart pages**: several pages (Options Premium Bar, Futures, IV Charts, Straddle/Strangle Analysis, Breadth, Live Charts) share a chart-driven dark-glass redesign built around `recharts`. Use the `dhan-quant-terminal-page` skill when building or redesigning a page into this style — it documents the sticky-header shell, chart-panel/tooltip conventions, and the reference implementation to copy from.
+
 ---
 
 ## Critical API Conventions
@@ -216,7 +222,7 @@ These are not obvious and have caused runtime errors in the past (see [GEMINI.md
 - **SENSEX splits three ways and every wrong combination fails silently.** Option chain + expiry list key on security id **`1` / `BSE_FNO`**; the index's own id `51` is only for spot/candles, and those are served under **`IDX_I`** — `BSE_IDX` returns `DH-905` for history and an empty payload for quotes, so `get_ltp("SENSEX", exchange="BSE")` returns `0.0`. Pass the numeric id, never the bare symbol (which resolves to `51` and yields an empty chain). The tables in `scripts/tools/options_data_fetch.py` and `options_chart_fetch.py` encode this. When re-probing, note `get_option_chain` caches 5 s on `(security_id, expiry)` — a bad combination can appear to work off a prior call's cache entry.
 - **Market feed WebSocket**: use `feed.run()` inside the background thread. `feed.run_forever()` returns immediately in the current SDK, causing a reconnection loop.
 - **Lot sizes are dynamic** — fetch with `helper.get_lot_size("NIFTY")`. For index symbols, this automatically queries derivative contracts to return the option lot size, not the index placeholder of `1`.
-- **Previous day levels**: use `helper.get_prev_day_levels("NIFTY")` — do not inline `get_historical_data()` calls for PDH/PDL/PDC.
+- **Previous day levels**: use `helper.get_prev_day_levels("NIFTY")` — do not inline `get_historical_data()` calls for PDH/PDL/PDC. (It reads the returned row's actual date rather than assuming row-count offsets — Dhan's DAILY endpoint doesn't publish today's row until the session closes, so a fixed "step back N rows" offset returns the wrong day intraday.)
 - **Data API failures are silent by default** — historical/intraday data methods return empty results on API errors (e.g. `DH-902` when the Data API subscription lapses). Check `helper.last_api_error` after an empty response before concluding "no data" / "up to date"; scripts that report freshness must surface it.
 
 ## Strategy Conventions
@@ -226,7 +232,8 @@ These are not obvious and have caused runtime errors in the past (see [GEMINI.md
 - Intraday auto-exit is hardcoded at **15:17 IST** across all strategies.
 - Straddle/strangle inversion guard: `CE strike > PE strike` is enforced at entry and after each adjustment; violation triggers an emergency exit + 5-minute pause + fresh cycle. **Exception**: `nifty_delta_neutral.py` deliberately does not enforce this — strikes are chosen purely by delta-proximity, so an inverted strangle (CE strike < PE strike) is a valid, expected outcome, not an error.
 - New strategies must use `templates/strategy_template.py` as the starting point and must call `save_strategy_state()` and `check_shutdown_trigger()` in the main loop to integrate with the dashboard.
-- Per-strategy trading logic lives in each group's `strategy.md` (`strategies/<group>/strategy.md`) — read it before modifying that strategy. One-line map: `value_imbalance/` premium mean-reversion straddles/strangles (VWAP variant, plus a delta-neutral 0.5-delta variant with no inversion guard and no entry-balance gate); `spread_trend/` EMA20+Supertrend credit spreads; `st_oi_bearcall/` bear-call-only entry gated by dual Supertrend (index 3-min + candidate option's own 3-min) plus OI short-buildup confirmation; `oi_directional/` OI-diff/PCR naked option sell; `crudeoil/` MCX futures (Supertrend trailing, and always-in Renko SAR).
+- **Exit sizing must never trust the raw broker net quantity.** Dhan nets every position by security ID, so two strategy instances short of the same strike share ONE broker position — sizing an exit off `helper.get_net_quantity()` lets whichever instance exits first flatten a sibling instance's leg too (this happened for real on 2026-07-30). Use `lib/strategy_risk.py`'s `resolve_exit_qty(helper, security_id, own_qty, side)` instead: it exits what *this* strategy opened, clamped by what the broker still shows in that direction. Already adopted across `value_imbalance/`, `oi_directional/`, and `intraday_equity/` — use it in any new strategy that can share a security ID with another running instance.
+- Per-strategy trading logic lives in each group's `strategy.md` (`strategies/<group>/strategy.md`) — read it before modifying that strategy. One-line map: `value_imbalance/` premium mean-reversion straddles/strangles (VWAP variant, plus a delta-neutral 0.5-delta variant with no inversion guard and no entry-balance gate); `spread_trend/` EMA20+Supertrend credit spreads; `st_oi_bearcall/` bear-call-only entry gated by dual Supertrend (index 3-min + candidate option's own 3-min) plus OI short-buildup confirmation; `oi_directional/` OI-diff/PCR naked option sell; `crudeoil/` MCX futures (Supertrend trailing, always-in Renko SAR, VWAP+Supertrend, and pivot-gated ORB); `intraday_equity/` Nifty-50 cash VWAP+RS auto-trader, rule set NOT validated by backtest — dry-run only, `--live` requires `--i-understand-the-backtest-failed`; `momentum_investing/` the repo's only multi-day/CNC-delivery strategy — Nifty-500 composite-RS ranking, trailing-stop ladder + weekly rank rotation, portfolio persisted to `debug/nifty500_momentum_portfolio.json` across restarts.
 
 ## Environment
 

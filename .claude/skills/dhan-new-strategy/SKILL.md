@@ -80,3 +80,8 @@ filenames — a mismatch silently breaks the bridge with no error.
   shows the strategy as permanently stopped even though the process is running.
 - Using `ltp()` / bare `exchange_segment=` instead of `get_ltp(..., exchange=...)` —
   see project CLAUDE.md "Critical API Conventions" for the full DhanHelper pitfall list.
+- Sizing an exit off `helper.get_net_quantity()` directly. Dhan nets positions by
+  security ID, so if this strategy can ever share a strike/security ID with another
+  running instance, the first one to exit will flatten the other's leg too. Use
+  `lib/strategy_risk.py`'s `resolve_exit_qty(helper, security_id, own_qty, side)`,
+  which clamps to what *this* strategy opened.
