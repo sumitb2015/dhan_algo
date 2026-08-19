@@ -8,6 +8,7 @@ import {
 } from 'recharts';
 import type { BreadthResponse, IndexStats, BreadthStats } from '@/app/api/breadth/route';
 import NavBar from './NavBar';
+import { Tooltip as HelpTooltip, TooltipContent as HelpTooltipContent, TooltipTrigger as HelpTooltipTrigger } from './ui/tooltip';
 
 // ─── Series colours (house convention: cyan = N50, amber = N500) ──────────────
 
@@ -66,11 +67,19 @@ function getTrendStrengthScore(stats: IndexStats): number {
 // ─── Shared quant-terminal primitives ──────────────────────────────────────────
 
 function PulseStat({
-  label, value, sub, color = 'text-white', size = 'text-lg',
-}: { label: string; value: React.ReactNode; sub?: React.ReactNode; color?: string; size?: string }) {
+  label, value, sub, color = 'text-white', size = 'text-lg', tip,
+}: { label: string; value: React.ReactNode; sub?: React.ReactNode; color?: string; size?: string; tip?: string }) {
+  const labelEl = (
+    <span className={`text-[9px] font-bold text-zinc-500 uppercase tracking-[0.14em] mb-0.5 ${tip ? 'cursor-help' : ''}`}>{label}</span>
+  );
   return (
     <div className="flex flex-col min-w-0">
-      <span className="text-[9px] font-bold text-zinc-500 uppercase tracking-[0.14em] mb-0.5">{label}</span>
+      {tip ? (
+        <HelpTooltip>
+          <HelpTooltipTrigger render={labelEl} />
+          <HelpTooltipContent>{tip}</HelpTooltipContent>
+        </HelpTooltip>
+      ) : labelEl}
       <span className={`${size} font-mono font-bold tabular-nums leading-none ${color}`}>{value}</span>
       {sub && <span className="text-[10px] text-zinc-500 mt-1 font-medium">{sub}</span>}
     </div>
@@ -78,13 +87,21 @@ function PulseStat({
 }
 
 function ChartHeader({
-  eyebrow, title, sub, legend,
-}: { eyebrow: string; title: string; sub: string; legend?: React.ReactNode }) {
+  eyebrow, title, sub, legend, tip,
+}: { eyebrow: string; title: string; sub: string; legend?: React.ReactNode; tip?: string }) {
+  const titleEl = (
+    <p className={`text-sm font-bold text-white tracking-tight ${tip ? 'cursor-help' : ''}`}>{title}</p>
+  );
   return (
     <div className="flex items-center justify-between mb-4 flex-wrap gap-3">
       <div>
         <p className="text-[9px] font-bold text-zinc-500 uppercase tracking-[0.16em] mb-1">{eyebrow}</p>
-        <p className="text-sm font-bold text-white tracking-tight">{title}</p>
+        {tip ? (
+          <HelpTooltip>
+            <HelpTooltipTrigger render={titleEl} />
+            <HelpTooltipContent>{tip}</HelpTooltipContent>
+          </HelpTooltip>
+        ) : titleEl}
         <p className="text-[10px] text-zinc-500 mt-0.5">{sub}</p>
       </div>
       {legend && <div className="flex items-center gap-3 text-[10px] font-semibold">{legend}</div>}
@@ -184,7 +201,10 @@ function MarketPulseRibbon({ data }: { data: BreadthResponse }) {
 
       <div className="relative flex items-stretch gap-6 px-5 py-4 flex-wrap">
         <div className="flex flex-col justify-center min-w-[220px]">
-          <span className="text-[9px] font-bold text-zinc-500 uppercase tracking-[0.16em] mb-1">Market Regime · Nifty 500</span>
+          <HelpTooltip>
+            <HelpTooltipTrigger render={<span className="text-[9px] font-bold text-zinc-500 uppercase tracking-[0.16em] mb-1 cursor-help">Market Regime · Nifty 500</span>} />
+            <HelpTooltipContent>Regime is based on the % of Nifty 500 stocks trading above their 200-day SMA.</HelpTooltipContent>
+          </HelpTooltip>
           <span className={`inline-flex items-center gap-2 text-xl font-black tracking-wide ${meta.text}`}>
             <span className="w-2 h-2 rounded-full" style={{ backgroundColor: meta.hex }} />
             {meta.label}
@@ -199,6 +219,7 @@ function MarketPulseRibbon({ data }: { data: BreadthResponse }) {
           value={<>{b.participationScore}<span className="text-sm text-zinc-500">/100</span></>}
           color={scoreTextClass(b.participationScore)}
           size="text-2xl"
+          tip="Weighted blend of SMA200/50/20 breadth and A/D ratio — 0-100, higher = broader rally."
         />
         <div className="w-px bg-zinc-800 self-stretch" />
         <PulseStat
@@ -206,6 +227,7 @@ function MarketPulseRibbon({ data }: { data: BreadthResponse }) {
           value={<>{b.advDecRatio.toFixed(2)}<span className="text-sm text-zinc-500">x</span></>}
           color={b.advDecRatio >= 1 ? 'text-emerald-400' : 'text-red-400'}
           size="text-2xl"
+          tip="Advancing vs declining stocks over the last week; above 1x favors bulls."
         />
         <div className="w-px bg-zinc-800 self-stretch" />
         <PulseStat
@@ -214,6 +236,7 @@ function MarketPulseRibbon({ data }: { data: BreadthResponse }) {
           color={netClass}
           sub={`${b.advancing1W} adv · ${b.declining1W} dec`}
           size="text-2xl"
+          tip="Advancing minus declining stocks today."
         />
 
         <div className="ml-auto flex flex-col justify-center min-w-[260px] max-w-xs">
@@ -269,7 +292,7 @@ function IndexTrendCard({ stats }: { stats: IndexStats }) {
 
   return (
     <ChartCard>
-      <ChartHeader eyebrow="NIFTY 50 Index" title="Trend Ladder" sub="Close vs EMA — distance in %, EMA-based" />
+      <ChartHeader eyebrow="NIFTY 50 Index" title="Trend Ladder" sub="Close vs EMA — distance in %, EMA-based" tip="Nifty 50's close plotted against its EMA 20/50/200 — shows trend distance at a glance." />
 
       <div className="flex items-end gap-4 mb-4">
         <PulseStat label="Close" value={fmt(stats.close)} size="text-2xl" />
@@ -302,9 +325,9 @@ function IndexTrendCard({ stats }: { stats: IndexStats }) {
       </div>
 
       <div className="grid grid-cols-3 gap-3 pt-3 border-t border-zinc-800">
-        <PulseStat label="ADX (14)" value={stats.adx14?.toFixed(1) ?? 'N/A'} color={adx.cls} sub={adx.label} size="text-base" />
-        <PulseStat label="Chop Idx" value={stats.chopIndex?.toFixed(1) ?? 'N/A'} color={chop.cls} sub={chop.label} size="text-base" />
-        <PulseStat label="Trend Score" value={<>{score}<span className="text-xs text-zinc-500">/100</span></>} color={scoreTextClass(score)} size="text-base" />
+        <PulseStat label="ADX (14)" value={stats.adx14?.toFixed(1) ?? 'N/A'} color={adx.cls} sub={adx.label} size="text-base" tip="Trend strength (not direction) — above 25 signals a trending market." />
+        <PulseStat label="Chop Idx" value={stats.chopIndex?.toFixed(1) ?? 'N/A'} color={chop.cls} sub={chop.label} size="text-base" tip="Choppiness Index — below 38 = trending, above 62 = range-bound/choppy." />
+        <PulseStat label="Trend Score" value={<>{score}<span className="text-xs text-zinc-500">/100</span></>} color={scoreTextClass(score)} size="text-base" tip="Composite 0-100 score from trend state + ADX." />
       </div>
     </ChartCard>
   );
@@ -343,7 +366,7 @@ function ParticipationGauges({ n50, n500 }: { n50: BreadthStats; n500: BreadthSt
 
   return (
     <ChartCard>
-      <ChartHeader eyebrow="Composite" title="Participation Score" sub="SMA200×0.40 + SMA50×0.30 + SMA20×0.20 + A/D×0.10" />
+      <ChartHeader eyebrow="Composite" title="Participation Score" sub="SMA200×0.40 + SMA50×0.30 + SMA20×0.20 + A/D×0.10" tip="Share of each universe's stocks aligned bullishly across SMA20/50/200 + A/D." />
       <div className="grid grid-cols-2 gap-2">
         <Gauge label="Nifty 50" score={n50.participationScore} color={N50_COLOR} />
         <Gauge label="Nifty 500" score={n500.participationScore} color={N500_COLOR} />
@@ -367,6 +390,7 @@ function MAPenetrationChart({ n50, n500 }: { n50: BreadthStats; n500: BreadthSta
         eyebrow="Breadth"
         title="Moving Average Penetration"
         sub="% of universe trading above each SMA — reference lines mark regime thresholds"
+        tip="% of each universe trading above its SMA20/50/200 — reference lines mark regime thresholds."
         legend={<>
           <LegendDot color={N50_COLOR} label="Nifty 50" />
           <LegendDot color={N500_COLOR} label="Nifty 500" />
@@ -417,6 +441,7 @@ function RSIDistributionChart({ n50, n500 }: { n50: BreadthStats; n500: BreadthS
         eyebrow="Momentum"
         title="RSI Distribution (14-Period)"
         sub="Wilder RSI over trailing 60 closes — share of universe per zone"
+        tip="Where each universe's 14-period RSI sits — overbought (>70) vs oversold (<40) share."
         legend={<>
           <LegendDot color="#f87171" label=">70 OB" />
           <LegendDot color="#fb923c" label="60–70" />
@@ -461,6 +486,7 @@ function Extremes52WChart({ n50, n500 }: { n50: BreadthStats; n500: BreadthStats
         eyebrow="Extremes"
         title="52-Week Highs vs Lows"
         sub="Within 0.5% of 52-week extreme — % of universe, highs up / lows down"
+        tip="Share of stocks within 0.5% of a new 52-week high (up) or low (down)."
         legend={<>
           <LegendDot color={UP_COLOR} label="New Highs" />
           <LegendDot color={DOWN_COLOR} label="New Lows" />
@@ -516,6 +542,7 @@ function AdvanceDeclineSnapshot({ data }: { data: BreadthResponse }) {
         eyebrow="Today"
         title="Advance / Decline / Unchanged"
         sub="Stocks closing above vs below the previous session's close, by universe"
+        tip="Today's close vs prior close, by universe — advancing/unchanged/declining stock counts."
         legend={<>
           <LegendDot color={UP_COLOR} label="Advancing" />
           <LegendDot color="#71717a" label="Unchanged" />
@@ -571,6 +598,7 @@ function PowerAndADChart({ n50, n500 }: { n50: BreadthStats; n500: BreadthStats 
         eyebrow="Structure"
         title="Bull / Bear Power &amp; A-D Ratio"
         sub="Fully MA-aligned stocks (bull/bear power) and 1-week advance/decline ratio"
+        tip="% of stocks fully aligned bullish/bearish across MAs, plus the 1-week A/D ratio."
         legend={<>
           <LegendDot color={N50_COLOR} label="Nifty 50" />
           <LegendDot color={N500_COLOR} label="Nifty 500" />
@@ -647,9 +675,14 @@ export default function BreadthAnalysis() {
             <Activity className="h-4 w-4 text-white" />
           </div>
           <div>
-            <h1 className="text-base font-bold tracking-tight bg-gradient-to-r from-white via-zinc-200 to-zinc-500 bg-clip-text text-transparent leading-none">
-              Market Breadth
-            </h1>
+            <HelpTooltip>
+              <HelpTooltipTrigger render={
+                <h1 className="text-base font-bold tracking-tight bg-gradient-to-r from-white via-zinc-200 to-zinc-500 bg-clip-text text-transparent leading-none cursor-help">
+                  Market Breadth
+                </h1>
+              } />
+              <HelpTooltipContent>Advance/decline health and trend strength across Nifty 50, Sensex, Bank Nifty &amp; Nifty 500.</HelpTooltipContent>
+            </HelpTooltip>
             <p className="text-[10px] text-zinc-400 font-medium mt-0.5">Nifty 50 · Nifty 500 Universe</p>
           </div>
         </div>
