@@ -15,6 +15,7 @@ import type { ResolvedLeg, OptType, ChainOc } from './optionsStrategy';
 // Value import needs the explicit extension so `node --test` can resolve it
 // under type-stripping (same convention as basketStorage.ts).
 import { lookupChainLegData } from './optionsStrategy.ts';
+import { contractMultiplier } from './positionPnl.ts';
 
 /** A position row that could not be turned into a leg, and why. */
 export interface UnparseableLeg {
@@ -164,6 +165,17 @@ export function buildInstrumentIndex(rows: InstrumentRow[]): Map<string, Instrum
 }
 
 /**
+ * Extra trading-symbol root(s) for underlyings whose contracts also appear
+ * under a different name for some broker. CRUDEOIL is the only one: Kotak's
+ * compact symbol form is for the Mini contract, prefixed `CRUDEOILM`
+ * (`CRUDEOILM17AUG264150CE`), not `CRUDEOIL`. Dhan positions carry the bare
+ * `CRUDEOIL` root directly. Mirrors SYMBOL_ROOTS in lib/analyticsUnderlyings.ts.
+ */
+const EXTRA_SYMBOL_ROOTS: Record<string, string[]> = {
+  CRUDEOIL: ['CRUDEOILM'],
+};
+
+/**
  * Whether a trading symbol belongs to `underlying`, guarding against a prefix
  * collision — a plain `startsWith('NIFTY')` also matches `NIFTYNXT50…`, which
  * would file a completely different instrument's leg into the NIFTY book with
@@ -175,9 +187,13 @@ export function buildInstrumentIndex(rows: InstrumentRow[]): Map<string, Instrum
 export function symbolMatchesUnderlying(tradingSymbol: string, underlying: string): boolean {
   const s = tradingSymbol.trim().toUpperCase();
   const u = underlying.trim().toUpperCase();
-  if (!s.startsWith(u)) return false;
-  const rest = s.slice(u.length);
-  return rest === '' || /^[-0-9]/.test(rest);
+  const roots = [...(EXTRA_SYMBOL_ROOTS[u] ?? []), u].sort((a, b) => b.length - a.length);
+  for (const root of roots) {
+    if (!s.startsWith(root)) continue;
+    const rest = s.slice(root.length);
+    if (rest === '' || /^[-0-9]/.test(rest)) return true;
+  }
+  return false;
 }
 
 // ── Main resolution ───────────────────────────────────────────────────────────
@@ -232,6 +248,9 @@ function resolveContract(
  *    Dividing netQty by the lot size would round any partially-closed leg (e.g. 15
  *    contracts of a 20-lot SENSEX option) and corrupt the curve. Working in units
  *    keeps the arithmetic exact; `lotSize` is still needed for display and margin.
+ *    Dhan's `netQty` is already the absolute unit count for NSE_FNO/BSE_FNO — but
+ *    for MCX_COMM (CRUDEOIL) it is a LOT count instead (see contractMultiplier's
+ *    header comment in positionPnl.ts), so it is scaled up here to match.
  *
  *  - **`price` is the entry average, not the LTP** — `buyAvg` for a long leg and
  *    `sellAvg` for a short one. The payoff curve is P&L measured from entry, which
@@ -272,12 +291,15 @@ export function buildPositionLegs(
     }
 
     const chainLeg = opts.oc ? lookupChainLegData(opts.oc, contract.strike, contract.type) : undefined;
+    // Only Dhan's raw row carries exchangeSegment, so this is a no-op (mult=1) for
+    // Kotak, whose netQty is already the absolute unit count.
+    const mult = rawByIndex[i] ? contractMultiplier(rawByIndex[i]) : 1;
 
     legs.push({
       strike: contract.strike,
       type: contract.type,
       side,
-      qtyLots: Math.abs(pos.netQty),
+      qtyLots: Math.abs(pos.netQty) * mult,
       price: entryAvg,
       delta: chainLeg?.greeks?.delta ?? null,
       // Dhan reports implied_volatility as a percent; bsPrice() takes a fraction.
@@ -291,7 +313,10 @@ export function buildPositionLegs(
       display: {
         tradingSymbol: pos.tradingSymbol,
         productType: pos.productType,
-        netQty: pos.netQty,
+        // Signed, scaled by the same MCX multiplier as qtyLots — legPnl()'s
+        // client-side unbooked P&L is netQty * (ltp - entryAvg), which needs
+        // real units to price a CRUDEOIL leg correctly.
+        netQty: pos.netQty * mult,
         entryAvg,
         // 0 means "unknown", not "worthless" — both for Kotak's omitted field and
         // for a chain entry with no trade yet today (a deep ITM/OTM contract can

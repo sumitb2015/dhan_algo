@@ -8,7 +8,7 @@
 // Dhan's positions API also returns a "multiplier" field, but per their docs it's scoped to
 // currency F&O only — it does not carry the MCX barrels-per-lot figure, so there is no way to
 // derive this from the API response and it must be hardcoded per underlying.
-const MCX_LOT_MULTIPLIER: Record<string, number> = {
+export const MCX_LOT_MULTIPLIER: Record<string, number> = {
   CRUDEOIL: 100,
   CRUDEOILM: 10,
 };

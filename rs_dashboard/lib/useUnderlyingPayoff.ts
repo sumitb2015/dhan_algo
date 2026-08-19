@@ -19,7 +19,7 @@ import {
   buildMultiExpiryCurve, computePayoffStats, daysBetweenDates,
   impliedVolFromPrice, lookupChainLegData, type ChainOc, type PayoffStats,
 } from '@/lib/optionsStrategy';
-import { STRIKE_STEP, type AnalyticsUnderlying } from '@/lib/analyticsUnderlyings';
+import { STRIKE_STEP, lotSizeOverride, type AnalyticsUnderlying } from '@/lib/analyticsUnderlyings';
 import { todayIso } from '@/components/crudeoil/format';
 import type { ScalperPosition } from '@/lib/zerodhaShape';
 import type { OiBar } from '@/components/analytics/PositionsPayoffChart';
@@ -66,16 +66,21 @@ export function useUnderlyingPayoff(
   const [spotChangePct, setSpotChangePct] = useState(0);
   const [chainError, setChainError] = useState<string | null>(null);
   const [chainLoading, setChainLoading] = useState(false);
-  const [lotSize, setLotSize] = useState<number | null>(null);
+  const [fetchedLotSize, setFetchedLotSize] = useState<number | null>(null);
+  // Derived synchronously, not via setState-in-effect, so a CRUDEOIL mount never
+  // renders once with the wrong (fetched) lot size before the override lands.
+  const lotOverride = useMemo(() => lotSizeOverride(underlying), [underlying]);
+  const lotSize = lotOverride ?? fetchedLotSize;
 
   useEffect(() => {
+    if (lotOverride !== null) return; // no fetch needed — see lotSizeOverride
     let cancelled = false;
     fetch(`/api/lotsize?symbol=${underlying}`)
       .then((r) => r.json())
-      .then((j) => { if (!cancelled) setLotSize(typeof j?.lot_size === 'number' && j.lot_size > 0 ? j.lot_size : null); })
-      .catch(() => { if (!cancelled) setLotSize(null); });
+      .then((j) => { if (!cancelled) setFetchedLotSize(typeof j?.lot_size === 'number' && j.lot_size > 0 ? j.lot_size : null); })
+      .catch(() => { if (!cancelled) setFetchedLotSize(null); });
     return () => { cancelled = true; };
-  }, [underlying]);
+  }, [underlying, lotOverride]);
 
   const { legs: allLegs, unparseable } = useMemo(() => {
     if (!positions.length) return { legs: [] as PositionLeg[], unparseable: [] as UnparseableLeg[] };

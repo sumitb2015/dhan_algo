@@ -25,7 +25,7 @@ import {
   impliedVolFromPrice, lookupChainLegData, type ChainOc, type PayoffStats,
 } from '@/lib/optionsStrategy';
 import { fetchMarginSummary } from '@/lib/optionsMargin';
-import { STRIKE_STEP, type AnalyticsUnderlying } from '@/lib/analyticsUnderlyings';
+import { STRIKE_STEP, lotSizeOverride, type AnalyticsUnderlying } from '@/lib/analyticsUnderlyings';
 import { todayIso, fmtExpiryShort } from '@/components/crudeoil/format';
 import type { ScalperPosition } from '@/lib/zerodhaShape';
 import type { KellyStats } from '@/app/api/options/kelly-stats/route';
@@ -90,8 +90,8 @@ export default function PositionsAnalysis({ underlying }: { underlying: Analytic
   const [chainError, setChainError] = useState<string | null>(null);
   const [chainLoading, setChainLoading] = useState(false);
 
-  const [lotSize, setLotSize] = useState<number | null>(null);
-  const [lotError, setLotError] = useState<string | null>(null);
+  const [fetchedLotSize, setFetchedLotSize] = useState<number | null>(null);
+  const [fetchedLotError, setFetchedLotError] = useState<string | null>(null);
   const [funds, setFunds] = useState<number | null>(null);
   const [standaloneMargin, setStandaloneMargin] = useState<number | null>(null);
   const [kelly, setKelly] = useState<KellyStats | null>(null);
@@ -121,18 +121,25 @@ export default function PositionsAnalysis({ underlying }: { underlying: Analytic
   }, [authChecked, broker, setBroker]);
 
   // ── lot size (once per underlying) ─────────────────────────────────────────
+  // Derived synchronously, not via setState-in-effect, so a CRUDEOIL mount never
+  // renders once with the wrong (fetched) lot size before the override lands.
+  const lotOverride = useMemo(() => lotSizeOverride(underlying), [underlying]);
+  const lotSize = lotOverride ?? fetchedLotSize;
+  const lotError = lotOverride !== null ? null : fetchedLotError;
+
   useEffect(() => {
+    if (lotOverride !== null) return; // no fetch needed — see lotSizeOverride
     let cancelled = false;
     fetch(`/api/lotsize?symbol=${underlying}`)
       .then((r) => r.json())
       .then((j) => {
         if (cancelled) return;
-        if (typeof j?.lot_size === 'number' && j.lot_size > 0) { setLotSize(j.lot_size); setLotError(null); }
-        else { setLotSize(null); setLotError(j?.error ?? 'lot size unavailable'); }
+        if (typeof j?.lot_size === 'number' && j.lot_size > 0) { setFetchedLotSize(j.lot_size); setFetchedLotError(null); }
+        else { setFetchedLotSize(null); setFetchedLotError(j?.error ?? 'lot size unavailable'); }
       })
-      .catch((e) => { if (!cancelled) setLotError(String(e)); });
+      .catch((e) => { if (!cancelled) setFetchedLotError(String(e)); });
     return () => { cancelled = true; };
-  }, [underlying]);
+  }, [underlying, lotOverride]);
 
   // ── Kelly history (once) ───────────────────────────────────────────────────
   useEffect(() => {
