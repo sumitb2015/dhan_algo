@@ -10,6 +10,7 @@ import {
 import type { ContractStats, ChartPoint, FuturesResponse } from '@/app/api/futures/route';
 import type { FuturesRefreshStatus } from '@/app/api/futures-refresh/route';
 import OIBuildupDashboard from '@/components/OIBuildupDashboard';
+import FuturesBasketCards from '@/components/FuturesBasketCards';
 
 // ─── Formatters ───────────────────────────────────────────────────────────────
 
@@ -561,6 +562,9 @@ export default function FuturesDashboard() {
           </div>
         ) : data ? (
           <div className="space-y-6">
+
+            {/* Index basket turnover / OI header */}
+            <FuturesBasketCards refreshKey={refreshKey} />
 
             {/* Market pulse ribbon */}
             <MarketPulseRibbon

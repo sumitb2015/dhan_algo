@@ -330,6 +330,8 @@ def download_futstk_oi_snapshot(helper: DhanHelper, daily_url: str, headers: dic
         oi_today    = float(df_daily["OI"].iloc[-1])
         close_prev  = float(df_daily["Close"].iloc[-2])
         oi_prev     = float(df_daily["OI"].iloc[-2])
+        vol_today   = float(df_daily["Volume"].iloc[-1])
+        vol_prev    = float(df_daily["Volume"].iloc[-2])
 
         if close_prev == 0 or oi_prev == 0 or close_today == 0 or oi_today == 0:
             skipped += 1
@@ -347,16 +349,27 @@ def download_futstk_oi_snapshot(helper: DhanHelper, daily_url: str, headers: dic
         else:
             category = "LONG_UNWINDING"
 
+        # Turnover = traded value (price x volume), used for index-basket rollups.
+        # A zero-volume day (no trades) makes turnover meaningless, not zero — leave
+        # it blank so downstream rollups exclude the stock instead of treating it as
+        # "no turnover".
+        vol_valid = vol_today > 0 and vol_prev > 0
+        turnover_today = close_today * vol_today if vol_valid else None
+        turnover_prev  = close_prev * vol_prev if vol_valid else None
+
         data_date = df_daily.index[-1]  # actual date of the latest row used
         rows.append({
-            "Symbol":      symbol,
-            "Expiry":      expiry,
-            "Price":       round(close_today, 2),
-            "PriceChgPct": round(price_chg_pct, 2),
-            "OI":          int(oi_today),
-            "OIChgPct":    round(oi_chg_pct, 2),
-            "Category":    category,
-            "DataDate":    str(data_date),
+            "Symbol":          symbol,
+            "Expiry":          expiry,
+            "Price":           round(close_today, 2),
+            "PriceChgPct":     round(price_chg_pct, 2),
+            "OI":              int(oi_today),
+            "OIChgPct":        round(oi_chg_pct, 2),
+            "Category":        category,
+            "DataDate":        str(data_date),
+            "Volume":          int(vol_today) if vol_valid else "",
+            "Turnover":        round(turnover_today, 2) if turnover_today is not None else "",
+            "TurnoverPrev":    round(turnover_prev, 2) if turnover_prev is not None else "",
         })
         time.sleep(0.08)
 
@@ -366,7 +379,9 @@ def download_futstk_oi_snapshot(helper: DhanHelper, daily_url: str, headers: dic
 
     df_out = pd.DataFrame(rows)
     out = os.path.join(save_dir, "FUTSTK_OI_Snapshot.csv")
-    df_out.to_csv(out, index=False)
+    out_tmp = out + ".tmp"
+    df_out.to_csv(out_tmp, index=False)
+    os.replace(out_tmp, out)  # atomic swap — readers never see a partially-written file
 
     counts = df_out["Category"].value_counts()
     print(f"  [SUCCESS] {out} ({len(df_out)} stocks, {skipped} skipped)")
