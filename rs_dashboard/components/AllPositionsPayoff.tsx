@@ -55,16 +55,19 @@ function UnderlyingCard({
   const projected = expiryCurve.length ? pnlAt(expiryCurve, spot) : null;
 
   return (
-    <section className="space-y-3 rounded-xl border border-zinc-800 bg-zinc-950 p-3">
+    <section className="rounded-2xl border border-zinc-800 bg-zinc-900/60 p-5 space-y-3">
       <div className="flex flex-wrap items-center gap-2">
-        <h2 className="text-sm font-bold text-white">{underlying}</h2>
+        <span className="flex items-center justify-center w-6 h-6 rounded-md bg-emerald-500/10 border border-emerald-500/25 shrink-0">
+          <span className="text-[10px] font-bold text-emerald-400">{underlying[0]}</span>
+        </span>
+        <h2 className="text-sm font-bold text-white tracking-tight">{underlying}</h2>
         {chainLoading && <Loader2 className="h-3 w-3 animate-spin text-zinc-500" />}
         {spot > 0 && (
           <span className={cn(
-            'rounded border px-2 py-0.5 font-mono text-[11px] font-bold tabular-nums',
+            'rounded-md border px-2 py-0.5 font-mono text-[11px] font-bold tabular-nums',
             spotChangePct >= 0
-              ? 'border-emerald-500 bg-emerald-500/10 text-emerald-400'
-              : 'border-red-500 bg-red-500/10 text-red-400',
+              ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-400'
+              : 'border-red-500/40 bg-red-500/10 text-red-400',
           )}>
             {spot.toLocaleString('en-IN', { maximumFractionDigits: 2 })} ({spotChangePct >= 0 ? '+' : ''}{spotChangePct.toFixed(2)}%)
           </span>
@@ -72,20 +75,20 @@ function UnderlyingCard({
         <span className="font-mono text-[11px] text-zinc-500">{legs.length} leg(s)</span>
         <Link
           href={`/options-analytics/${underlying}`}
-          className="ml-auto flex items-center gap-1 text-[11px] text-zinc-400 hover:text-white"
+          className="ml-auto flex items-center gap-1 text-[11px] font-semibold text-zinc-400 hover:text-white"
         >
           Full analysis <ArrowRight className="h-3 w-3" />
         </Link>
       </div>
 
       {chainError && (
-        <div className="flex items-center gap-2 rounded border border-amber-800 bg-amber-950 px-2.5 py-1.5 text-[11px] text-amber-300">
+        <div className="flex items-center gap-2 rounded-lg border border-amber-800/50 bg-amber-950/40 px-2.5 py-1.5 text-[11px] text-amber-300">
           <AlertTriangle className="h-3.5 w-3.5" /> {chainError}
         </div>
       )}
 
       {stats && (
-        <div className="flex flex-wrap items-center gap-y-2 rounded-lg border border-zinc-800 bg-zinc-900 px-2 py-2">
+        <div className="flex flex-wrap items-center gap-y-2 rounded-xl border border-zinc-800 bg-zinc-950/60 px-2 py-2">
           <StatChip
             label="Max Profit"
             value={stats.maxProfit === 'Unlimited' ? 'Unlimited' : fmtInr(stats.maxProfit)}
@@ -242,15 +245,39 @@ export default function AllPositionsPayoff() {
   );
 
   return (
-    <div className="min-h-screen text-zinc-300">
-      <div className="sticky top-0 z-30 border-b border-zinc-800 bg-zinc-950/80 px-4 py-3 backdrop-blur-md">
-        <div className="mx-auto flex flex-wrap items-center gap-3">
-          <h1 className="text-sm font-bold text-white">Live Payoff — All Open Positions</h1>
-          <span className="rounded bg-zinc-800 px-2 py-0.5 font-mono text-xs text-zinc-400">
+    <div className="flex flex-col min-h-screen bg-zinc-950 text-white">
+      {/* Header */}
+      <div className="sticky top-0 z-30 flex items-center justify-between gap-3 flex-wrap
+                      px-6 py-3 border-b border-zinc-800 bg-zinc-950/95 backdrop-blur">
+        <div className="flex items-center gap-3">
+          <div className="flex items-center justify-center w-8 h-8 rounded-lg bg-emerald-500/10 border border-emerald-500/25 shrink-0">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" className="text-emerald-400">
+              <path d="M3 15c3-6 5-9 7-9s3 9 5 9 3-4 6-4" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" />
+              <path d="M3 21h18" stroke="currentColor" strokeWidth="2" strokeLinecap="round" opacity="0.4" />
+            </svg>
+          </div>
+          <div>
+            <p className="text-[9px] font-bold text-emerald-500 uppercase tracking-[0.18em] mb-0.5">
+              Options · Live Book
+            </p>
+            <h1 className="text-sm font-bold text-white tracking-tight leading-none">Live Payoff — All Open Positions</h1>
+            <p className="text-[10px] text-zinc-500 font-medium mt-1">
+              Combined payoff per underlying, priced independently off the live chain
+            </p>
+          </div>
+        </div>
+
+        <div className="flex items-center gap-2 flex-wrap">
+          <span className="rounded-md bg-zinc-900 border border-zinc-800 px-2 py-1 font-mono text-[10px] font-bold text-zinc-400 tabular-nums">
             DATA: {todayIso()}
           </span>
           {loaded && (
-            <span className={cn('font-mono text-xs font-bold tabular-nums', pnlColor(totalPnl))}>
+            <span className={cn(
+              'rounded-md border px-2 py-1 font-mono text-[11px] font-bold tabular-nums',
+              totalPnl > 0 ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-400'
+                : totalPnl < 0 ? 'border-red-500/40 bg-red-500/10 text-red-400'
+                : 'border-zinc-700 bg-zinc-900 text-zinc-400',
+            )}>
               Total P&amp;L {fmtInr(totalPnl)}
             </span>
           )}
@@ -262,14 +289,15 @@ export default function AllPositionsPayoff() {
             <select
               value={broker}
               onChange={(e) => setBroker(e.target.value as Broker)}
-              className="rounded border border-zinc-700 bg-zinc-900 px-2 py-1 text-xs text-zinc-200"
+              className="bg-zinc-900 border border-zinc-700 text-zinc-200 text-xs font-mono font-semibold
+                         rounded-lg px-2.5 py-1.5 focus:outline-none focus:border-emerald-500"
             >
               {availableBrokers.map((b) => <option key={b} value={b}>{BROKER_LABELS[b]}</option>)}
             </select>
           )}
 
           <button type="button" onClick={load}
-            className="flex items-center gap-1 rounded border border-zinc-700 bg-zinc-900 px-2 py-1 text-xs text-zinc-300 hover:text-white">
+            className="flex items-center gap-1 rounded-lg border border-zinc-700 bg-zinc-900 px-2.5 py-1.5 text-xs font-semibold text-zinc-300 hover:text-white hover:border-zinc-600">
             <RefreshCw className="h-3 w-3" /> Refresh
           </button>
           {refreshedAt && (
@@ -279,36 +307,35 @@ export default function AllPositionsPayoff() {
           )}
 
           <Link href="/options-analytics"
-            className="ml-auto text-xs text-zinc-400 hover:text-white">
-            Positions Analytics →
+            className="flex items-center gap-1 text-xs font-semibold text-zinc-400 hover:text-white">
+            Positions Analytics <ArrowRight className="h-3 w-3" />
           </Link>
         </div>
       </div>
 
-      <div className="mx-auto space-y-4 px-4 py-5">
-        <p className="text-xs text-zinc-500">
-          Live combined payoff for every underlying with an open option book. Positions come from{' '}
-          {BROKER_LABELS[broker]}; chain, greeks, IV and OI always come from Dhan. Each underlying is
-          priced independently — spot, strikes and expiries do not mix across underlyings.
+      {error && (
+        <div className="mx-6 mt-3 px-3 py-2 bg-red-900/20 border border-red-700/40 rounded-lg text-xs text-red-400 flex items-center gap-2">
+          <AlertTriangle className="h-4 w-4 shrink-0" /> {error}
+        </div>
+      )}
+
+      <div className="flex-1 flex flex-col gap-4 px-6 py-5 max-w-[1800px] w-full mx-auto">
+        <p className="text-[11px] text-zinc-500">
+          Positions come from {BROKER_LABELS[broker]}; chain, greeks, IV and OI always come from Dhan.
+          Each underlying is priced independently — spot, strikes and expiries do not mix across underlyings.
         </p>
 
-        {error && (
-          <div className="flex items-center gap-2 rounded border border-rose-800 bg-rose-950 px-3 py-2 text-xs text-rose-300">
-            <AlertTriangle className="h-4 w-4" /> {error}
-          </div>
-        )}
-
         {!loaded ? (
-          <p className="px-3 py-10 text-center text-xs text-zinc-500">Loading positions…</p>
+          <p className="px-3 py-24 text-center text-xs text-zinc-500">Loading positions…</p>
         ) : activeUnderlyings.length === 0 ? (
-          <div className="rounded-xl border border-zinc-800 bg-zinc-950 px-4 py-10 text-center">
+          <div className="rounded-2xl border border-zinc-800 bg-zinc-900/60 px-4 py-16 text-center">
             <p className="text-sm text-zinc-400">No open option positions on {BROKER_LABELS[broker]}.</p>
-            <Link href="/options-analytics" className="mt-2 inline-flex items-center gap-1 text-xs text-sky-400 hover:text-sky-300">
+            <Link href="/options-analytics" className="mt-2 inline-flex items-center gap-1 text-xs font-semibold text-sky-400 hover:text-sky-300">
               Browse positions analytics <ArrowRight className="h-3 w-3" />
             </Link>
           </div>
         ) : (
-          <div className={cn('grid grid-cols-1 gap-4', activeUnderlyings.length > 1 && 'xl:grid-cols-2')}>
+          <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
             {activeUnderlyings.map((u) => (
               <UnderlyingCard
                 key={u}
