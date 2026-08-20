@@ -1,14 +1,14 @@
 'use client';
 
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { optionsChartApi } from '@/lib/optionsChartApi';
+import { isAbortError, optionsChartApi } from '@/lib/optionsChartApi';
 import { StrategyChart, type StrategyChartType } from '@/components/StrategyChart';
 import { ChartIndicatorPicker } from '@/components/ChartIndicatorPicker';
 import { isUnderlyingLive } from '@/lib/marketHours';
 import { CHART_UNDERLYINGS, spotLabel, type ChartUnderlying } from '@/lib/underlyings';
 import { Spinner } from '@/components/Spinner';
 import { DayChangeChip } from '@/components/DayChangeChip';
-import { PanelStyles } from '@/components/PanelStyles';
+import { sameStrikeChain } from '@/lib/optionsChartTypes';
 import {
   STRATEGY_CATEGORIES,
   STRATEGY_PRESETS,
@@ -17,6 +17,8 @@ import {
 } from '@/lib/strategyPresets';
 import {
   DEFAULT_INDICATORS,
+  OFF_HOURS_POLL_INTERVAL_MS,
+  POLL_INTERVAL_MS,
   VALID_INTERVALS,
   type ChartIndicatorRequest,
   type CustomStrategyChartResponse,
@@ -31,8 +33,6 @@ const CHART_TYPES: { id: StrategyChartType; label: string }[] = [
 const MIN_LOTS = 1;
 const MAX_LOTS = 10;
 const MAX_LEGS = 6;
-const POLL_INTERVAL_MS = 10_000;
-const OFF_HOURS_POLL_INTERVAL_MS = 60_000;
 
 function clampLots(value: number): number {
   if (Number.isNaN(value)) return 1;
@@ -57,6 +57,7 @@ export function StrategyPanel({
   const [expiry, setExpiry] = useState('');
   const [expiries, setExpiries] = useState<string[]>([]);
   const [strikesData, setStrikesData] = useState<StraddleStrikesResponse | null>(null);
+  const [chainSpot, setChainSpot] = useState<number | null>(null);
   const [category, setCategory] = useState<StrategyCategory>('neutral');
   const [presetId, setPresetId] = useState('straddle');
   const [legs, setLegs] = useState<StrategyLeg[]>([]);
@@ -66,7 +67,7 @@ export function StrategyPanel({
   const [marketLive, setMarketLive] = useState(false);
   const [chart, setChart] = useState<CustomStrategyChartResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [loading, setLoading] = useState(true);
+  const [loadedKey, setLoadedKey] = useState('');
 
   useEffect(() => {
     const update = () => setMarketLive(isUnderlyingLive(underlying, new Date()));
@@ -86,7 +87,11 @@ export function StrategyPanel({
     let cancelled = false;
     function load() {
       optionsChartApi.strikes(underlying, effectiveExpiry).then((r) => {
-        if (!cancelled) setStrikesData(r);
+        if (cancelled) return;
+        setChainSpot(r.spot);
+        // Holding the previous object when the chain is unchanged also keeps the leg-normalisation
+        // effect below from re-running its setTimeout on every 30s refresh.
+        setStrikesData((prev) => (sameStrikeChain(prev, r) ? prev : r));
       }).catch(() => {});
     }
     load();
@@ -166,42 +171,61 @@ export function StrategyPanel({
     );
   }
 
+  // Identity of the contract on screen. `loading` is derived from it rather than toggled in
+  // the poll loop, so the status pill only spins until the first response for a NEW selection
+  // lands - a background refresh of the same selection never touches it. marketLive is
+  // deliberately absent: it changes the poll cadence, not the payload.
+  const selectionKey = `${underlying}|${effectiveExpiry}|${JSON.stringify(legs)}|${interval_}|${showSpot}|${JSON.stringify(indicators)}`;
+  const loading = loadedKey !== selectionKey;
+
+  // See StraddlePanel: monotonic request id + abort, so a slow spawn can never land on top of a
+  // fresher response.
+  const seqRef = useRef(0);
+  const inFlightRef = useRef<AbortController | null>(null);
+
   useEffect(() => {
     if (!effectiveExpiry || legs.length === 0 || !legs.every((l) => Number.isFinite(l.strike)))
       return;
     let cancelled = false;
     function load() {
-      setLoading(true);
+      inFlightRef.current?.abort();
+      const controller = new AbortController();
+      inFlightRef.current = controller;
+      const seq = ++seqRef.current;
+
       optionsChartApi
-        .strategy({
-          underlying,
-          expiry: effectiveExpiry,
-          legs,
-          interval: interval_,
-          indicators,
-          includeSpot: showSpot,
-        })
+        .strategy(
+          {
+            underlying,
+            expiry: effectiveExpiry,
+            legs,
+            interval: interval_,
+            indicators,
+            includeSpot: showSpot,
+          },
+          controller.signal,
+        )
         .then((r) => {
-          if (!cancelled) {
-            setChart(r);
-            setError(null);
-          }
+          if (cancelled || seq !== seqRef.current) return;
+          setChart(r);
+          setError(null);
+          setLoadedKey(selectionKey);
         })
         .catch((e) => {
-          if (!cancelled)
-            setError(e instanceof Error ? e.message : 'Failed to load strategy chart.');
-        })
-        .finally(() => {
-          if (!cancelled) setLoading(false);
+          if (cancelled || isAbortError(e) || seq !== seqRef.current) return;
+          setError(e instanceof Error ? e.message : 'Failed to load strategy chart.');
+          // Resolved (badly) - stop the pill spinning; the error block explains what happened.
+          setLoadedKey(selectionKey);
         });
     }
     load();
     const id = setInterval(load, marketLive ? POLL_INTERVAL_MS : OFF_HOURS_POLL_INTERVAL_MS);
     return () => {
       cancelled = true;
+      inFlightRef.current?.abort();
       clearInterval(id);
     };
-  }, [underlying, effectiveExpiry, legs, interval_, indicators, marketLive, showSpot]);
+  }, [underlying, effectiveExpiry, legs, interval_, indicators, marketLive, showSpot, selectionKey]);
 
   const todaysCandles = useMemo(() => {
     const all = chart?.candles ?? [];
@@ -211,7 +235,15 @@ export function StrategyPanel({
   }, [chart]);
 
   const categoryPresets = STRATEGY_PRESETS.filter((p) => p.category === category);
-  const spotVal = (chart?.spot ?? strikesData?.spot ?? 0).toFixed(2);
+  const spotVal = (chart?.spot ?? chainSpot ?? 0).toFixed(2);
+
+  // Structural identity of the combo - deliberately excludes `lots`, which scales the premium but
+  // doesn't change which contracts are in play, so a lots tweak updates the chart in place instead
+  // of remounting it and throwing away the user's zoom.
+  const legsShape = useMemo(
+    () => legs.map((l) => `${l.action}${l.option_type}${l.strike}`).join(','),
+    [legs],
+  );
 
   return (
     <div className="lc-panel">
@@ -428,7 +460,7 @@ export function StrategyPanel({
               never re-fit the price scale to the new combo's very different value range - the
               chart looked "stuck" showing the previous strategy's scale. */}
           <StrategyChart
-            key={`${underlying}-${effectiveExpiry}-${JSON.stringify(legs)}-${interval_}`}
+            key={`${underlying}-${effectiveExpiry}-${legsShape}-${interval_}`}
             underlying={underlying}
             chart={chart}
             chartType={chartType}
@@ -444,7 +476,6 @@ export function StrategyPanel({
           </div>
         )
       )}
-      <PanelStyles />
     </div>
   );
 }

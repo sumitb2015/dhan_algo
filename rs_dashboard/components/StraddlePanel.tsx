@@ -1,16 +1,18 @@
 'use client';
 
-import { useEffect, useMemo, useState } from 'react';
-import { optionsChartApi } from '@/lib/optionsChartApi';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { isAbortError, optionsChartApi } from '@/lib/optionsChartApi';
 import { StraddleChart, type StraddleChartType } from '@/components/StraddleChart';
 import { ChartIndicatorPicker } from '@/components/ChartIndicatorPicker';
 import { isUnderlyingLive } from '@/lib/marketHours';
 import { CHART_UNDERLYINGS, spotLabel, type ChartUnderlying } from '@/lib/underlyings';
 import { Spinner } from '@/components/Spinner';
 import { DayChangeChip } from '@/components/DayChangeChip';
-import { PanelStyles } from '@/components/PanelStyles';
+import { sameStrikeChain } from '@/lib/optionsChartTypes';
 import {
   DEFAULT_INDICATORS,
+  OFF_HOURS_POLL_INTERVAL_MS,
+  POLL_INTERVAL_MS,
   VALID_INTERVALS,
   type ChartIndicatorRequest,
   type StraddleChartResponse,
@@ -21,8 +23,6 @@ const CHART_TYPES: { id: StraddleChartType; label: string }[] = [
   { id: 'candlestick', label: 'Candles' },
   { id: 'line', label: 'Line' },
 ];
-const POLL_INTERVAL_MS = 10_000;
-const OFF_HOURS_POLL_INTERVAL_MS = 60_000;
 
 export function StraddlePanel({
   underlying,
@@ -35,6 +35,7 @@ export function StraddlePanel({
   const [expiry, setExpiry] = useState('');
   const [expiries, setExpiries] = useState<string[]>([]);
   const [strikesData, setStrikesData] = useState<StraddleStrikesResponse | null>(null);
+  const [chainSpot, setChainSpot] = useState<number | null>(null);
   const [strike, setStrike] = useState<number | null>(null);
   const [indicators, setIndicators] = useState<ChartIndicatorRequest[]>(DEFAULT_INDICATORS);
   const [chartType, setChartType] = useState<StraddleChartType>('candlestick');
@@ -42,7 +43,7 @@ export function StraddlePanel({
   const [marketLive, setMarketLive] = useState(false);
   const [chart, setChart] = useState<StraddleChartResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [loading, setLoading] = useState(true);
+  const [loadedKey, setLoadedKey] = useState('');
 
   useEffect(() => {
     const update = () => setMarketLive(isUnderlyingLive(underlying, new Date()));
@@ -64,7 +65,11 @@ export function StraddlePanel({
     let cancelled = false;
     function load() {
       optionsChartApi.strikes(underlying, effectiveExpiry).then((r) => {
-        if (!cancelled) setStrikesData(r);
+        if (cancelled) return;
+        setChainSpot(r.spot);
+        // Hold the previous object when the chain itself hasn't moved - only `spot` changes on
+        // most refreshes, and swapping it would rebuild every <option> in the strike select.
+        setStrikesData((prev) => (sameStrikeChain(prev, r) ? prev : r));
       }).catch(() => {});
     }
     load();
@@ -91,41 +96,60 @@ export function StraddlePanel({
     return atmStrike;
   }, [strike, strikesData, atmStrike]);
 
+  // Identity of the contract on screen. `loading` is derived from it rather than toggled in
+  // the poll loop, so the status pill only spins until the first response for a NEW selection
+  // lands - a background refresh of the same selection never touches it. marketLive is
+  // deliberately absent: it changes the poll cadence, not the payload.
+  const selectionKey = `${underlying}|${effectiveExpiry}|${effectiveStrike}|${interval_}|${showSpot}|${JSON.stringify(indicators)}`;
+  const loading = loadedKey !== selectionKey;
+
+  // Monotonic request id: the route allows 60s per spawn while we re-fire every 10s, so a slow
+  // response must never be allowed to land on top of a fresher one.
+  const seqRef = useRef(0);
+  const inFlightRef = useRef<AbortController | null>(null);
+
   useEffect(() => {
     if (!effectiveExpiry || effectiveStrike === null) return;
     let cancelled = false;
     function load() {
-      setLoading(true);
+      inFlightRef.current?.abort();
+      const controller = new AbortController();
+      inFlightRef.current = controller;
+      const seq = ++seqRef.current;
+
       optionsChartApi
-        .straddle({
-          underlying,
-          expiry: effectiveExpiry,
-          strike: effectiveStrike as number,
-          interval: interval_,
-          indicators,
-          includeSpot: showSpot,
-        })
+        .straddle(
+          {
+            underlying,
+            expiry: effectiveExpiry,
+            strike: effectiveStrike as number,
+            interval: interval_,
+            indicators,
+            includeSpot: showSpot,
+          },
+          controller.signal,
+        )
         .then((r) => {
-          if (!cancelled) {
-            setChart(r);
-            setError(null);
-          }
+          if (cancelled || seq !== seqRef.current) return;
+          setChart(r);
+          setError(null);
+          setLoadedKey(selectionKey);
         })
         .catch((e) => {
-          if (!cancelled)
-            setError(e instanceof Error ? e.message : 'Failed to load straddle chart.');
-        })
-        .finally(() => {
-          if (!cancelled) setLoading(false);
+          if (cancelled || isAbortError(e) || seq !== seqRef.current) return;
+          setError(e instanceof Error ? e.message : 'Failed to load straddle chart.');
+          // Resolved (badly) - stop the pill spinning; the error block explains what happened.
+          setLoadedKey(selectionKey);
         });
     }
     load();
     const id = setInterval(load, marketLive ? POLL_INTERVAL_MS : OFF_HOURS_POLL_INTERVAL_MS);
     return () => {
       cancelled = true;
+      inFlightRef.current?.abort();
       clearInterval(id);
     };
-  }, [underlying, effectiveExpiry, effectiveStrike, interval_, indicators, marketLive, showSpot]);
+  }, [underlying, effectiveExpiry, effectiveStrike, interval_, indicators, marketLive, showSpot, selectionKey]);
 
   const todaysCandles = useMemo(() => {
     const all = chart?.candles ?? [];
@@ -134,7 +158,7 @@ export function StraddlePanel({
     return all.filter((c) => c.time.slice(0, 10) === lastDate);
   }, [chart]);
 
-  const spotVal = (chart?.spot ?? strikesData?.spot ?? 0).toFixed(2);
+  const spotVal = (chart?.spot ?? chainSpot ?? 0).toFixed(2);
 
   return (
     <div className="lc-panel">
@@ -280,8 +304,6 @@ export function StraddlePanel({
           </div>
         )
       )}
-
-      <PanelStyles />
     </div>
   );
 }

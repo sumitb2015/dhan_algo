@@ -11,13 +11,11 @@ export type StrangleChartType = CombinedChartType;
 export function StrangleChart({
   chart,
   chartType,
-  initialHeight,
   showSpot = false,
   underlying = 'NIFTY',
 }: {
   chart: StrangleChartResponse;
   chartType: StrangleChartType;
-  initialHeight?: number;
   showSpot?: boolean;
   underlying?: string;
 }) {
@@ -33,7 +31,6 @@ export function StrangleChart({
       legendLabel={`${underlying} ${chart.ce_strike}CE×${chart.ce_lots} / ${chart.pe_strike}PE×${chart.pe_lots} Strangle`}
       seriesTitle="Strangle"
       chartType={chartType}
-      initialHeight={initialHeight}
       colorScheme={GROWW_COLORS}
       leftAxisLine={leftAxisLine}
     />

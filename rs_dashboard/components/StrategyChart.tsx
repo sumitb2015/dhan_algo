@@ -16,13 +16,11 @@ function legToken(leg: CustomStrategyChartResponse['legs'][number]): string {
 export function StrategyChart({
   chart,
   chartType,
-  initialHeight,
   showSpot = false,
   underlying = 'NIFTY',
 }: {
   chart: CustomStrategyChartResponse;
   chartType: StrategyChartType;
-  initialHeight?: number;
   showSpot?: boolean;
   underlying?: string;
 }) {
@@ -38,7 +36,6 @@ export function StrategyChart({
       legendLabel={`${underlying} ${chart.legs.map(legToken).join(' / ')} Strategy${chart.net_credit ? ' (Credit)' : ' (Debit)'}`}
       seriesTitle="Strategy"
       chartType={chartType}
-      initialHeight={initialHeight}
       colorScheme={GROWW_COLORS}
       valueLabel={chart.net_credit ? 'Credit Received' : 'Debit Paid'}
       leftAxisLine={leftAxisLine}

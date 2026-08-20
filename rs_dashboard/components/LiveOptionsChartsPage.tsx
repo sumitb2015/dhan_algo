@@ -5,6 +5,7 @@ import { StraddlePanel } from '@/components/StraddlePanel';
 import { RollingStraddlePanel } from '@/components/RollingStraddlePanel';
 import { StranglePanel } from '@/components/StranglePanel';
 import { StrategyPanel } from '@/components/StrategyPanel';
+import { PanelStyles } from '@/components/PanelStyles';
 import { type ChartUnderlying } from '@/lib/underlyings';
 
 const LAYOUTS = [1, 2] as const;
@@ -333,7 +334,7 @@ export default function LiveOptionsChartsPage() {
         /* ── Main content ───────────────────────────────────────────── */
         .lc-main {
           flex: 1;
-          min-w-0;
+          min-width: 0;
           display: flex;
           flex-direction: column;
           overflow: hidden;
@@ -378,6 +379,8 @@ export default function LiveOptionsChartsPage() {
           overflow: hidden;
         }
       `}</style>
+      {/* Panel CSS injected once here rather than per panel - the lc-* rules are global. */}
+      <PanelStyles />
     </div>
   );
 }

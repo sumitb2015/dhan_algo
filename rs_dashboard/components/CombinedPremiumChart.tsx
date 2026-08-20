@@ -20,6 +20,9 @@ import type { ChartCandle, ChartIndicatorSeries } from '@/lib/optionsChartTypes'
 
 const IST_TIME_ZONE = 'Asia/Kolkata';
 
+// The chart is sized by a ResizeObserver on the first frame; this is only the pre-measure height.
+const INITIAL_HEIGHT = 400;
+
 // Fixed dark-theme palette (rs_dashboard has no light/dark theme toggle for chart chrome -
 // matches LightweightCandlestickChart.tsx's constants).
 const CHROME = { gridline: '#27272a', baseline: '#3f3f46', textSecondary: '#a1a1aa', textMuted: '#71717a' };
@@ -28,8 +31,45 @@ const CATEGORICAL = ['#38bdf8', '#fbbf24', '#a78bfa', '#f472b6', '#4ade80', '#fb
 
 export type CombinedChartType = 'candlestick' | 'line';
 
+const MAIN_KEY = '__main';
+const LEFT_AXIS_KEY = '__left';
+
+type CrosshairState = {
+  x: number; y: number; time: string; isLine: boolean; open: number; high: number; low: number; close: number;
+  indicators: { label: string; color: string; value: number }[];
+  extraRows: { label: string; value: string }[];
+};
+
+/** ISO -> epoch-seconds, memoised. The same ~750 timestamps recur on every 10s poll and across
+ * every series in the payload, so parsing them once per distinct string turns thousands of
+ * `new Date()` calls per poll into a handful. Bounded so a long session can't grow it without
+ * limit (a full trading day at 1m across a few symbols is well under the cap). */
+const UNIX_CACHE_LIMIT = 20_000;
+const unixByIso = new Map<string, UTCTimestamp>();
+
 function toUnixSeconds(iso: string): UTCTimestamp {
-  return Math.floor(new Date(iso).getTime() / 1000) as UTCTimestamp;
+  const cached = unixByIso.get(iso);
+  if (cached !== undefined) return cached;
+  const value = Math.floor(new Date(iso).getTime() / 1000) as UTCTimestamp;
+  if (unixByIso.size >= UNIX_CACHE_LIMIT) unixByIso.clear();
+  unixByIso.set(iso, value);
+  return value;
+}
+
+type TimedPoint = { time: UTCTimestamp };
+
+/** True when `next` is `prev` with only its trailing bars changed/appended - the steady-state
+ * shape of an intraday poll, where all that moved is the still-forming last candle. Probes the
+ * first bar and the second-to-last bar rather than the whole array; any mismatch just falls back
+ * to a full setData(), so correctness never rests on the heuristic. */
+function isTailUpdate(prev: TimedPoint[] | undefined, next: TimedPoint[]): prev is TimedPoint[] {
+  return (
+    !!prev &&
+    prev.length > 1 &&
+    next.length >= prev.length &&
+    prev[0].time === next[0].time &&
+    prev[prev.length - 2].time === next[prev.length - 2].time
+  );
 }
 
 function formatIstTick(time: Time, tickMarkType: TickMarkType): string {
@@ -63,7 +103,6 @@ export function CombinedPremiumChart({
   legendLabel,
   seriesTitle = legendLabel,
   chartType,
-  initialHeight = 400,
   markers,
   extraTooltipRows,
   valueLabel = 'Value',
@@ -75,7 +114,6 @@ export function CombinedPremiumChart({
   legendLabel: string;
   seriesTitle?: string;
   chartType: CombinedChartType;
-  initialHeight?: number;
   markers?: { time: string; color: string; size?: number }[];
   extraTooltipRows?: (time: string) => { label: string; value: string }[];
   valueLabel?: string;
@@ -110,12 +148,14 @@ export function CombinedPremiumChart({
   const colorSchemeRef = useRef(colorScheme);
   colorSchemeRef.current = colorScheme;
   const isoTimeByUnixRef = useRef<Map<number, string>>(new Map());
+  // Last array pushed into each series, keyed MAIN_KEY / LEFT_AXIS_KEY / indicator id - lets a
+  // poll that only extended the tail skip a whole-series setData().
+  const drawnRef = useRef<Map<string, TimedPoint[]>>(new Map());
+  const legendKeyRef = useRef('');
+  const crosshairFrameRef = useRef<number | null>(null);
+  const pendingCrosshairRef = useRef<CrosshairState | null>(null);
 
-  const [crosshair, setCrosshair] = useState<{
-    x: number; y: number; time: string; isLine: boolean; open: number; high: number; low: number; close: number;
-    indicators: { label: string; color: string; value: number }[];
-    extraRows: { label: string; value: string }[];
-  } | null>(null);
+  const [crosshair, setCrosshair] = useState<CrosshairState | null>(null);
   const [legend, setLegend] = useState<{ id: string; label: string; color: string; lastValue: number | null }[]>([]);
   const [lastPrice, setLastPrice] = useState<number | null>(null);
 
@@ -126,6 +166,8 @@ export function CombinedPremiumChart({
       if (mainSeriesTypeRef.current === type && mainSeriesRef.current) return;
       if (mainSeriesRef.current) chartApi.removeSeries(mainSeriesRef.current);
       markersApiRef.current = null;
+      // The old series (and its cached data) is gone - the replacement must take a full setData().
+      drawnRef.current.delete(MAIN_KEY);
       mainSeriesRef.current =
         type === 'candlestick'
           ? chartApi.addSeries(CandlestickSeries, {
@@ -153,7 +195,7 @@ export function CombinedPremiumChart({
     if (!container) return;
 
     const chartInstance = createChart(container, {
-      height: initialHeight,
+      height: INITIAL_HEIGHT,
       layout: {
         background: { type: ColorType.Solid, color: 'transparent' },
         textColor: CHROME.textSecondary,
@@ -184,10 +226,24 @@ export function CombinedPremiumChart({
     mainSeriesTypeRef.current = null;
     createMainSeries(chartTypeRef.current);
 
+    // Pointer moves fire far faster than the browser paints, so the computed payload is parked in
+    // a ref and flushed once per animation frame - one React commit per frame instead of one per
+    // mouse event (which, with two panels mounted, was the main source of tooltip stutter).
+    const flushCrosshair = (next: CrosshairState | null) => {
+      pendingCrosshairRef.current = next;
+      if (crosshairFrameRef.current !== null) return;
+      crosshairFrameRef.current = requestAnimationFrame(() => {
+        crosshairFrameRef.current = null;
+        const value = pendingCrosshairRef.current;
+        // Off-chart moves repeat `null` endlessly; only write when it's a real transition.
+        setCrosshair((prev) => (prev === null && value === null ? prev : value));
+      });
+    };
+
     chartInstance.subscribeCrosshairMove((param) => {
       const mainSeries = mainSeriesRef.current;
       if (!param.time || !param.point || !mainSeries) {
-        setCrosshair(null);
+        flushCrosshair(null);
         return;
       }
       const isLine = chartTypeRef.current === 'line';
@@ -196,7 +252,7 @@ export function CombinedPremiumChart({
         | { value: number }
         | undefined;
       if (!point) {
-        setCrosshair(null);
+        flushCrosshair(null);
         return;
       }
       const ohlc = isLine
@@ -212,7 +268,7 @@ export function CombinedPremiumChart({
       const isoTime = isoTimeByUnixRef.current.get(param.time as number);
       const extraRows = isoTime ? (extraTooltipRowsRef.current?.(isoTime) ?? []) : [];
 
-      setCrosshair({
+      flushCrosshair({
         x: param.point.x,
         y: param.point.y,
         time: new Date((param.time as number) * 1000).toLocaleString('en-IN', {
@@ -227,6 +283,8 @@ export function CombinedPremiumChart({
 
     hasFitRef.current = false;
     groupOrderRef.current = [];
+    drawnRef.current = new Map();
+    legendKeyRef.current = '';
 
     const resizeObserver = new ResizeObserver((entries) => {
       const { width, height } = entries[0].contentRect;
@@ -235,6 +293,9 @@ export function CombinedPremiumChart({
     resizeObserver.observe(container);
 
     return () => {
+      if (crosshairFrameRef.current !== null) cancelAnimationFrame(crosshairFrameRef.current);
+      crosshairFrameRef.current = null;
+      pendingCrosshairRef.current = null;
       resizeObserver.disconnect();
       chartInstance.remove();
       chartApiRef.current = null;
@@ -243,6 +304,8 @@ export function CombinedPremiumChart({
       lineSeriesRef.current = new Map();
       leftAxisSeriesRef.current = null;
       markersApiRef.current = null;
+      drawnRef.current = new Map();
+      isoTimeByUnixRef.current = new Map();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -260,20 +323,40 @@ export function CombinedPremiumChart({
     chartApi.applyOptions({ leftPriceScale: { visible: !!leftAxisLine, borderColor: CHROME.baseline } });
   }, [leftAxisLine]);
 
+  /** Pushes `next` into `series`, using per-bar update() when the array only grew at the tail
+   * (the ordinary 10s poll) and a full setData() otherwise (interval/strike/expiry switch, or a
+   * gap). Keeps the drawn copy so the next call can make the same comparison. */
+  function applySeriesData<T extends TimedPoint>(series: ISeriesApi<never>, key: string, next: T[]) {
+    const prev = drawnRef.current.get(key);
+    const target = series as unknown as { setData: (d: T[]) => void; update: (d: T) => void };
+    if (isTailUpdate(prev, next)) {
+      // Everything before the last drawn bar is already on the chart and cannot have changed.
+      for (let i = prev.length - 1; i < next.length; i++) target.update(next[i]);
+    } else {
+      target.setData(next);
+    }
+    drawnRef.current.set(key, next);
+  }
+
   function drawChart() {
     const chartApi = chartApiRef.current;
     const mainSeries = mainSeriesRef.current;
     if (!chartApi || !mainSeries) return;
 
-    if (chartTypeRef.current === 'candlestick') {
-      (mainSeries as ISeriesApi<'Candlestick'>).setData(
-        candles.map((c) => ({ time: toUnixSeconds(c.time), open: c.open, high: c.high, low: c.low, close: c.close }))
-      );
-    } else {
-      (mainSeries as ISeriesApi<'Line'>).setData(candles.map((c) => ({ time: toUnixSeconds(c.time), value: c.close })));
-    }
+    const mainData: TimedPoint[] =
+      chartTypeRef.current === 'candlestick'
+        ? candles.map((c) => ({ time: toUnixSeconds(c.time), open: c.open, high: c.high, low: c.low, close: c.close }))
+        : candles.map((c) => ({ time: toUnixSeconds(c.time), value: c.close }));
+    const prevMain = drawnRef.current.get(MAIN_KEY);
+    const mainWasTailUpdate = isTailUpdate(prevMain, mainData);
+    const firstNewBar = mainWasTailUpdate ? prevMain!.length - 1 : 0;
+    applySeriesData(mainSeries as ISeriesApi<never>, MAIN_KEY, mainData);
 
-    isoTimeByUnixRef.current = new Map(candles.map((c) => [toUnixSeconds(c.time), c.time]));
+    // On a tail update the prefix is unchanged, so only the redrawn bars need a lookup entry.
+    if (!mainWasTailUpdate) isoTimeByUnixRef.current = new Map();
+    for (let i = firstNewBar; i < candles.length; i++) {
+      isoTimeByUnixRef.current.set(toUnixSeconds(candles[i].time), candles[i].time);
+    }
 
     if (!markersApiRef.current) {
       markersApiRef.current = createSeriesMarkers(mainSeries, []);
@@ -302,10 +385,15 @@ export function CombinedPremiumChart({
       } else {
         leftAxisSeriesRef.current.applyOptions({ color: leftAxisLine.color, title: leftAxisLine.label });
       }
-      leftAxisSeriesRef.current.setData(leftAxisLine.values.map((p) => ({ time: toUnixSeconds(p.time), value: p.value })));
+      applySeriesData(
+        leftAxisSeriesRef.current as ISeriesApi<never>,
+        LEFT_AXIS_KEY,
+        leftAxisLine.values.map((p) => ({ time: toUnixSeconds(p.time), value: p.value }))
+      );
     } else if (leftAxisSeriesRef.current) {
       chartApi.removeSeries(leftAxisSeriesRef.current);
       leftAxisSeriesRef.current = null;
+      drawnRef.current.delete(LEFT_AXIS_KEY);
     }
 
     const colorFor = (group: string) => {
@@ -320,6 +408,7 @@ export function CombinedPremiumChart({
       if (!seenIds.has(id)) {
         chartApi.removeSeries(series);
         lineSeriesRef.current.delete(id);
+        drawnRef.current.delete(id);
       }
     }
     for (const ind of indicators) {
@@ -334,11 +423,23 @@ export function CombinedPremiumChart({
           priceLineVisible: false,
         });
         lineSeriesRef.current.set(ind.id, series);
+        drawnRef.current.delete(ind.id);
       }
-      series.setData(ind.series.map((p) => ({ time: toUnixSeconds(p.time), value: p.value })));
+      applySeriesData(
+        series as ISeriesApi<never>,
+        ind.id,
+        ind.series.map((p) => ({ time: toUnixSeconds(p.time), value: p.value }))
+      );
     }
 
-    setLegend(indicators.map((ind) => ({ id: ind.id, label: ind.label, color: colorFor(ind.group), lastValue: ind.last_value })));
+    // The legend re-renders the whole component, so only publish it when it actually differs -
+    // otherwise every poll committed an identical array.
+    const nextLegend = indicators.map((ind) => ({ id: ind.id, label: ind.label, color: colorFor(ind.group), lastValue: ind.last_value }));
+    const nextLegendKey = nextLegend.map((l) => `${l.id}|${l.label}|${l.color}|${l.lastValue}`).join(';');
+    if (nextLegendKey !== legendKeyRef.current) {
+      legendKeyRef.current = nextLegendKey;
+      setLegend(nextLegend);
+    }
     const last = candles[candles.length - 1];
     setLastPrice(last ? last.close : null);
 

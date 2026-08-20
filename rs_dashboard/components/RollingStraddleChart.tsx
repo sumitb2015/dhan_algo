@@ -35,13 +35,11 @@ function daysToExpiry(expiry: string): number | null {
 export function RollingStraddleChart({
   chart,
   chartType,
-  initialHeight,
   showSpot = false,
   underlying = 'NIFTY',
 }: {
   chart: RollingStraddleChartResponse;
   chartType: RollingStraddleChartType;
-  initialHeight?: number;
   showSpot?: boolean;
   underlying?: string;
 }) {
@@ -97,7 +95,6 @@ export function RollingStraddleChart({
           legendLabel={`${underlying} Rolling ATM Straddle`}
           seriesTitle="Straddle"
           chartType={chartType}
-          initialHeight={initialHeight}
           markers={markers}
           extraTooltipRows={extraTooltipRows}
           valueLabel="Straddle Price"

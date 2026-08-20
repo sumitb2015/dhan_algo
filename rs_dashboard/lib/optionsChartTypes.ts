@@ -129,6 +129,27 @@ export interface CustomStrategyChartResponse {
 
 export const VALID_INTERVALS = ['1', '2', '3', '5'] as const;
 
+// Chart poll cadence, shared by all four live-charts panels. Each poll spawns a python process
+// (see /api/options/live-charts), so the off-hours cadence backs right off once the session that
+// feeds the underlying has closed - see lib/marketHours.ts's isUnderlyingLive().
+export const POLL_INTERVAL_MS = 10_000;
+export const OFF_HOURS_POLL_INTERVAL_MS = 60_000;
+
+/** True when two strikes responses describe the same chain (same strikes, same ATM). The panels
+ * refresh strikes every 30s purely to track the ATM marker, and the response's `spot` moves on
+ * every one of those - holding the previous object when the chain itself is unchanged stops the
+ * 50-100 <option> nodes (and everything memoised off them) from being rebuilt each refresh. */
+export function sameStrikeChain(
+  prev: StraddleStrikesResponse | null,
+  next: StraddleStrikesResponse,
+): boolean {
+  return (
+    !!prev &&
+    prev.strikes.length === next.strikes.length &&
+    prev.strikes.every((s, i) => s.strike === next.strikes[i].strike && s.is_atm === next.strikes[i].is_atm)
+  );
+}
+
 export const DEFAULT_INDICATORS: ChartIndicatorRequest[] = [
   { type: 'ema', params: { period: 20 } },
   { type: 'vwap', params: {} },

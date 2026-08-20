@@ -11,13 +11,11 @@ export type StraddleChartType = CombinedChartType;
 export function StraddleChart({
   chart,
   chartType,
-  initialHeight,
   showSpot = false,
   underlying = 'NIFTY',
 }: {
   chart: StraddleChartResponse;
   chartType: StraddleChartType;
-  initialHeight?: number;
   showSpot?: boolean;
   underlying?: string;
 }) {
@@ -47,7 +45,6 @@ export function StraddleChart({
       legendLabel={`${underlying} ${chart.strike} Straddle`}
       seriesTitle="Straddle"
       chartType={chartType}
-      initialHeight={initialHeight}
       colorScheme={GROWW_COLORS}
       leftAxisLine={leftAxisLine}
       extraTooltipRows={extraTooltipRows}

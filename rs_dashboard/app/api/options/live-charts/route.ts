@@ -17,6 +17,8 @@ const MAX_DAYS = 10;
 
 // Mirrors the UNDERLYINGS table in options_chart_fetch.py. Allowlisted rather than passed through
 // so an arbitrary query string never reaches the spawned python's argv.
+// FINNIFTY is in the python table but deliberately not in the UI's CHART_UNDERLYINGS, so the
+// route accepts a superset of what the panels can ask for.
 const UNDERLYINGS = ['NIFTY', 'BANKNIFTY', 'FINNIFTY', 'SENSEX', 'CRUDEOIL'];
 
 export async function GET(request: NextRequest) {

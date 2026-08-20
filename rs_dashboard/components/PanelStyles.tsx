@@ -2,8 +2,8 @@
  * PanelStyles – injects the shared lc-* design system CSS used by all chart panels
  * (StraddlePanel, RollingStraddlePanel, StranglePanel, StrategyPanel).
  *
- * Each panel renders this component so the styles are guaranteed to be present regardless
- * of which panel is mounted in a given layout slot.
+ * Rendered once by LiveOptionsChartsPage (the only mount site for those panels) rather than by
+ * each panel - the rules are global, so per-panel rendering only duplicated the <style> tag.
  */
 export function PanelStyles() {
   return (
