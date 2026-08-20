@@ -7,7 +7,7 @@ import { useLiveOptionsWS } from '@/lib/useLiveOptionsWS';
 import { useProfitLock, ProfitLockControls } from './ProfitLock';
 import { useCopyTrade, CopyTradeControls } from './CopyTrade';
 import { useBrokerSelector, scalperRoute, BROKER_LABELS, type Broker } from '@/hooks/useBrokerSelector';
-import { contractMultiplier } from '@/lib/positionPnl';
+import { contractMultiplier, scaleBrokerPnl } from '@/lib/positionPnl';
 import { partialCloseChips } from '@/lib/partialQty';
 import { positionKey, positionProduct, findLivePosition, closeOrderProduct } from '@/lib/positionProduct';
 
@@ -290,22 +290,27 @@ export default function Scalper() {
       const netQty = Number(pos.netQty);
       const mult   = contractMultiplier(pos);
 
+      // Dhan reports MCX P&L unscaled by barrels-per-lot (see scaleBrokerPnl). Rescale before
+      // anything below reads it - the LTP back-calculation divides by that same multiplier, so
+      // an unscaled figure derives an LTP a hundredth of the way back from the entry price.
+      const row = scaleBrokerPnl(pos, mult);
+
       // ── LTP fallback: Dhan's /positions v2 API omits lastTradedPrice.
       // Back-calculate from unrealizedProfit so the table shows a value
       // even before the live WS bridge enriches the row, and for positions
       // on expiries / segments the bridge isn't watching.
-      const brokerLtp = Number(pos.lastTradedPrice);
-      let withLtp: typeof pos = pos;
+      const brokerLtp = Number(row.lastTradedPrice);
+      let withLtp: typeof pos = row;
       if ((!brokerLtp || !Number.isFinite(brokerLtp)) && netQty !== 0) {
-        const unrealized = Number(pos.unrealizedProfit);
-        const buyAvg     = Number(pos.buyAvg);
-        const sellAvg    = Number(pos.sellAvg);
+        const unrealized = Number(row.unrealizedProfit);
+        const buyAvg     = Number(row.buyAvg);
+        const sellAvg    = Number(row.sellAvg);
         if (Number.isFinite(unrealized) && mult > 0) {
           const derivedLtp = netQty > 0
             ? buyAvg  + unrealized / (netQty  * mult)
             : sellAvg - unrealized / (Math.abs(netQty) * mult);
           if (Number.isFinite(derivedLtp) && derivedLtp > 0) {
-            withLtp = { ...pos, lastTradedPrice: derivedLtp };
+            withLtp = { ...row, lastTradedPrice: derivedLtp };
           }
         }
       }
@@ -320,7 +325,7 @@ export default function Scalper() {
       if (!buyQty || !sellQty) return withLtp;
 
       const recomputedRealized = mult * (sellQty * sellAvgF - buyQty * buyAvgF);
-      if (Number(pos.realizedProfit) === recomputedRealized) return withLtp;
+      if (Number(row.realizedProfit) === recomputedRealized) return withLtp;
 
       return { ...withLtp, realizedProfit: recomputedRealized };
     });

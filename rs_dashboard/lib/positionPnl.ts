@@ -24,3 +24,24 @@ export function contractMultiplier(pos: Record<string, unknown>): number {
   const underlying = tradingSymbol.split('-')[0]?.toUpperCase() ?? '';
   return MCX_LOT_MULTIPLIER[underlying] ?? 1;
 }
+
+/** Dhan reports MCX position P&L the same way it reports MCX quantity: in lots, with the
+ *  barrels-per-lot multiplier left off. A single short CRUDEOIL option at 175.55 marked at
+ *  173.50 comes back as `unrealizedProfit: 2.05`, not 205 (and `realizedProfit` behaves the
+ *  same — see the flat-position recompute in Scalper/AdvancedScalper, which already multiplies).
+ *  Rescale both fields before anything downstream reads them.
+ *
+ *  A no-op for every non-MCX position (mult === 1), so callers can apply it unconditionally. */
+export function scaleBrokerPnl<T extends Record<string, unknown>>(
+  pos: T,
+  mult: number = contractMultiplier(pos),
+): T {
+  if (mult === 1) return pos;
+  const realized = Number(pos.realizedProfit);
+  const unrealized = Number(pos.unrealizedProfit);
+  return {
+    ...pos,
+    realizedProfit: Number.isFinite(realized) ? realized * mult : pos.realizedProfit,
+    unrealizedProfit: Number.isFinite(unrealized) ? unrealized * mult : pos.unrealizedProfit,
+  };
+}
