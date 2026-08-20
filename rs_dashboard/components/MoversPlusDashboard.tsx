@@ -67,7 +67,7 @@ function SidePanel({ title, count, results, type, isIndexMode }: {
   const color = type === 'winner' ? 'text-emerald-400' : 'text-red-400';
   const Icon = type === 'winner' ? TrendingUp : TrendingDown;
   return (
-    <div className="flex-1 min-w-0 border border-amber-900/20 bg-[#050505] rounded-sm overflow-hidden flex flex-col">
+    <div className="flex-1 min-w-0 border border-amber-900/20 bg-zinc-950 rounded-sm overflow-hidden flex flex-col">
       <div className="flex items-center gap-2 px-3 py-1.5 bg-zinc-900 border-b border-amber-900/20 shrink-0">
         <Icon className={cn('h-3 w-3', color)} />
         <span className={cn('text-[10px] font-bold uppercase tracking-widest', color)}>{title}</span>
@@ -120,10 +120,10 @@ export default function MoversPlusDashboard() {
   return (
     <div className="flex flex-col min-h-screen bg-black text-zinc-100">
       {/* Header */}
-      <header className="w-full border-b border-amber-900/25 bg-[#050505] px-4 py-2 flex flex-wrap items-center gap-2.5 z-20 sticky top-0 backdrop-blur-md">
+      <header className="w-full border-b border-amber-900/25 bg-zinc-950 px-4 py-2 flex flex-wrap items-center gap-2.5 z-20 sticky top-0 backdrop-blur-md">
         <div className="flex items-center gap-2 mr-1">
           <div className="h-6 w-6 rounded-sm bg-emerald-500 flex items-center justify-center shrink-0">
-            <span className="text-black text-[11px] font-bold font-mono">M+</span>
+            <span className="text-oncolor-dark text-[11px] font-bold font-mono">M+</span>
           </div>
           <span className="text-[13px] font-bold tracking-widest text-emerald-400 uppercase font-mono">MOVERS+</span>
         </div>
@@ -143,7 +143,7 @@ export default function MoversPlusDashboard() {
         </p>
 
         {/* Settings bar */}
-        <div className="border border-amber-900/20 bg-[#050505] rounded-sm overflow-hidden">
+        <div className="border border-amber-900/20 bg-zinc-950 rounded-sm overflow-hidden">
           <div className="flex items-center gap-2 px-3 py-1.5 bg-zinc-900 border-b border-amber-900/20">
             <span className="text-[10px] font-bold uppercase tracking-widest text-amber-400">Settings</span>
           </div>
@@ -210,7 +210,7 @@ export default function MoversPlusDashboard() {
 
         {/* Loading */}
         {loading && (
-          <div className="flex items-center justify-center py-16 border border-amber-900/20 bg-[#050505] rounded-sm">
+          <div className="flex items-center justify-center py-16 border border-amber-900/20 bg-zinc-950 rounded-sm">
             <RefreshCw className="h-4 w-4 text-amber-500 animate-spin mr-2" />
             <span className="text-zinc-500 text-[11px] font-mono uppercase tracking-widest">Computing persistence…</span>
           </div>

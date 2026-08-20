@@ -293,7 +293,7 @@ export default function StrategiesPage() {
             disabled={globalExiting || runningCount === 0}
             className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[11px] font-bold border transition-all active:scale-95 disabled:opacity-40 disabled:cursor-not-allowed ${
               confirmGlobalExit
-                ? 'bg-red-600 border-red-500 text-white animate-pulse'
+                ? 'bg-red-600 border-red-500 text-oncolor animate-pulse'
                 : globalExiting
                 ? 'bg-red-900/40 border-red-800 text-red-400'
                 : 'bg-red-950/60 border-red-900/60 text-red-400 hover:bg-red-900/40 hover:border-red-700 hover:text-red-300'

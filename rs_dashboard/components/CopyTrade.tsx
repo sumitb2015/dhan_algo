@@ -291,8 +291,8 @@ export function CopyTradeControls({ copyTrade }: { copyTrade: CopyTradeApi }) {
         <button onClick={arm} disabled={arming}
           className={`px-3 py-1.5 text-xs font-bold rounded-lg border transition-all disabled:opacity-50 shrink-0 whitespace-nowrap ${
             confirmArm
-              ? 'bg-red-600 border-red-500 text-white animate-pulse shadow-lg shadow-red-500/20'
-              : 'bg-sky-700 hover:bg-sky-600 text-white border-sky-500/40'
+              ? 'bg-red-600 border-red-500 text-oncolor animate-pulse shadow-lg shadow-red-500/20'
+              : 'bg-sky-700 hover:bg-sky-600 text-oncolor border-sky-500/40'
           }`}>
           {arming ? 'Arming…' : confirmArm ? 'Confirm ARM?' : 'ARM'}
         </button>

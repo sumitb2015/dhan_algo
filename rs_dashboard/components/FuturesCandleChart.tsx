@@ -1,6 +1,7 @@
 'use client';
 
 import React, { useEffect, useRef, useState } from 'react';
+import { useChartChrome } from '@/lib/chartTheme';
 import {
   createChart,
   CandlestickSeries,
@@ -115,6 +116,8 @@ export default function FuturesCandleChart({ candles, symbolName = 'NIFTY FUT' }
     vwap?: number;
   }>({});
 
+  const chrome = useChartChrome();
+
   useEffect(() => {
     const container = containerRef.current;
     if (!container) return;
@@ -122,17 +125,17 @@ export default function FuturesCandleChart({ candles, symbolName = 'NIFTY FUT' }
     const chart = createChart(container, {
       layout: {
         background: { type: ColorType.Solid, color: 'transparent' },
-        textColor: '#a1a1aa',
+        textColor: chrome.textSecondary,
         fontSize: 11,
       },
       grid: {
-        vertLines: { color: '#27272a' },
-        horzLines: { color: '#27272a' },
+        vertLines: { color: chrome.gridline },
+        horzLines: { color: chrome.gridline },
       },
       crosshair: { mode: CrosshairMode.Normal },
-      rightPriceScale: { borderColor: '#3f3f46', scaleMargins: { top: 0.08, bottom: 0.25 } },
+      rightPriceScale: { borderColor: chrome.baseline, scaleMargins: { top: 0.08, bottom: 0.25 } },
       timeScale: {
-        borderColor: '#3f3f46',
+        borderColor: chrome.baseline,
         timeVisible: true,
         secondsVisible: false,
         rightOffset: 5,
@@ -251,7 +254,20 @@ export default function FuturesCandleChart({ candles, symbolName = 'NIFTY FUT' }
       ema20SeriesRef.current = null;
       vwapSeriesRef.current = null;
     };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // Re-apply chrome whenever the theme flips (canvas can't resolve CSS variables).
+  useEffect(() => {
+    const chart = chartRef.current;
+    if (!chart) return;
+    chart.applyOptions({
+      layout: { textColor: chrome.textSecondary },
+      grid: { vertLines: { color: chrome.gridline }, horzLines: { color: chrome.gridline } },
+      rightPriceScale: { borderColor: chrome.baseline },
+      timeScale: { borderColor: chrome.baseline },
+    });
+  }, [chrome]);
 
   useEffect(() => {
     if (!seriesRef.current || !volumeSeriesRef.current || !ema9SeriesRef.current || !ema20SeriesRef.current || !vwapSeriesRef.current || candles.length === 0) return;

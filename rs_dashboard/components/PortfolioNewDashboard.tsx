@@ -316,7 +316,7 @@ function InvestmentPanel({
           <button
             onClick={handleSave}
             disabled={!form.name.trim()}
-            className="flex-1 px-3 py-2 text-xs font-bold rounded bg-amber-500 text-black hover:bg-amber-400 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+            className="flex-1 px-3 py-2 text-xs font-bold rounded bg-amber-500 text-oncolor-dark hover:bg-amber-400 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
           >
             {editing ? 'Update' : 'Add'}
           </button>

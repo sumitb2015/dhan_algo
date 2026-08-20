@@ -254,7 +254,7 @@ export default function IntradayTerminal() {
               <button
                 onClick={() => control('start')}
                 disabled={busy || running}
-                className="inline-flex items-center gap-1 px-2 py-1 rounded-md bg-emerald-600 hover:bg-emerald-500 disabled:bg-zinc-800 disabled:text-zinc-600 text-white text-[11px] font-semibold"
+                className="inline-flex items-center gap-1 px-2 py-1 rounded-md bg-emerald-600 hover:bg-emerald-500 disabled:bg-zinc-800 disabled:text-zinc-600 text-oncolor text-[11px] font-semibold"
               >
                 <Play className="h-3 w-3" /> Start
               </button>

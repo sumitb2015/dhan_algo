@@ -176,7 +176,7 @@ function RegimeSpectrum({ pct, activeColor }: { pct: number; activeColor: Breadt
           />
         ))}
         <div
-          className="absolute top-1/2 -translate-y-1/2 -translate-x-1/2 w-3 h-3 rounded-full bg-white shadow-[0_0_0_3px_rgba(0,0,0,0.6)] border border-zinc-900"
+          className="absolute top-1/2 -translate-y-1/2 -translate-x-1/2 w-3 h-3 rounded-full bg-zinc-100 shadow-[0_0_0_3px_rgba(0,0,0,0.6)] border border-zinc-900"
           style={{ left: markerPos }}
           title={`${pct}% of Nifty 500 above 200d SMA`}
         />

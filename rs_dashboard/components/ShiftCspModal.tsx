@@ -280,7 +280,7 @@ export default function ShiftCspModal({ target, onClose, onComplete }: {
 
   return (
     <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/70 p-4 backdrop-blur-sm">
-      <div className="mt-8 w-full max-w-lg rounded-md border border-zinc-800 bg-[#0a0a0a] shadow-2xl">
+      <div className="mt-8 w-full max-w-lg rounded-md border border-zinc-800 bg-zinc-950 shadow-2xl">
         <div className="flex items-start justify-between border-b border-zinc-800 px-4 py-3">
           <div>
             <h2 className="text-[15px] font-bold text-zinc-100">Shift Cash Secured Put</h2>
@@ -469,7 +469,7 @@ export default function ShiftCspModal({ target, onClose, onComplete }: {
             // `started` (not just `finished`): a roll that failed mid-way must be
             // reopened from a freshly loaded row, never retried against stale state.
             disabled={!selected || executing || isPaper || started}
-            className="rounded-sm bg-sky-600 px-3 py-1.5 text-[12px] font-bold text-white disabled:opacity-40"
+            className="rounded-sm bg-sky-600 px-3 py-1.5 text-[12px] font-bold text-oncolor disabled:opacity-40"
           >
             {executing ? 'Executing Shift…'
               : finished ? 'Shift Complete'

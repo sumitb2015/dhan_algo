@@ -799,7 +799,7 @@ export default function StrategiesPlusPage() {
               exitingAll
                 ? 'bg-red-900/40 border-red-800 text-red-400'
                 : confirmExitAll
-                ? 'bg-red-600 border-red-500 text-white animate-pulse shadow-lg shadow-red-500/20'
+                ? 'bg-red-600 border-red-500 text-oncolor animate-pulse shadow-lg shadow-red-500/20'
                 : 'bg-red-950/60 border-red-900/60 text-red-400 hover:bg-red-900/40 hover:border-red-700 hover:text-red-300'
             }`}
             title="Immediately liquidate ALL positions at broker level (DELETE /positions)">
@@ -910,7 +910,7 @@ export default function StrategiesPlusPage() {
                 enableKillSwitch ? 'bg-red-600' : 'bg-zinc-700'
               }`}
             >
-              <div className={`absolute top-0.5 h-3 w-3 rounded-full bg-white shadow transition-transform ${
+              <div className={`absolute top-0.5 h-3 w-3 rounded-full bg-oncolor shadow transition-transform ${
                 enableKillSwitch ? 'translate-x-4' : 'translate-x-0.5'
               }`} />
             </div>
@@ -935,7 +935,7 @@ export default function StrategiesPlusPage() {
             disabled={clearingPnl}
             className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[11px] font-bold border transition-all active:scale-95 disabled:opacity-40 disabled:cursor-not-allowed ${
               confirmClear
-                ? 'bg-red-600 border-red-500 text-white animate-pulse'
+                ? 'bg-red-600 border-red-500 text-oncolor animate-pulse'
                 : 'bg-zinc-900/60 border-zinc-700/60 text-zinc-500 hover:border-red-800 hover:text-red-400'
             }`}
           >
@@ -1041,7 +1041,7 @@ export default function StrategiesPlusPage() {
                       child.enabled ? 'bg-sky-600' : 'bg-zinc-700'
                     }`}
                   >
-                    <div className={`absolute top-0.5 h-3 w-3 rounded-full bg-white shadow transition-transform ${
+                    <div className={`absolute top-0.5 h-3 w-3 rounded-full bg-oncolor shadow transition-transform ${
                       child.enabled ? 'translate-x-4' : 'translate-x-0.5'
                     }`} />
                   </div>
@@ -1067,7 +1067,7 @@ export default function StrategiesPlusPage() {
                 title={!copyTradeConfig.children.some(c => c.enabled) ? 'Enable at least one child account first' : undefined}
                 className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[11px] font-bold border transition-all active:scale-95 disabled:opacity-40 disabled:cursor-not-allowed ${
                   confirmArm
-                    ? 'bg-red-600 border-red-500 text-white animate-pulse shadow-lg shadow-red-500/20'
+                    ? 'bg-red-600 border-red-500 text-oncolor animate-pulse shadow-lg shadow-red-500/20'
                     : 'bg-emerald-900/40 border-emerald-700/60 text-emerald-300 hover:bg-emerald-800/40 hover:border-emerald-600'
                 }`}
               >

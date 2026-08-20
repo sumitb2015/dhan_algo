@@ -425,7 +425,7 @@ export default function OptionsPremiumBarTab({ expiry }: { expiry: string }) {
                     }`}
                   >
                     <span
-                      className={`inline-block h-3 w-3 transform rounded-full bg-white transition-transform ${
+                      className={`inline-block h-3 w-3 transform rounded-full bg-oncolor transition-transform ${
                         showOi ? 'translate-x-3.5' : 'translate-x-0.5'
                       }`}
                     />

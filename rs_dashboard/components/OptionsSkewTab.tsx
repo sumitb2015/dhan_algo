@@ -53,21 +53,21 @@ const SkewTooltip = ({ active, payload, label, atm }: Record<string, unknown> & 
   const iv = (payload as Array<{ value: number }>)[0]?.value ?? 0;
   const row = (payload as Array<{ payload: SkewRow }>)[0]?.payload;
   return (
-    <div className="bg-white border border-zinc-200 rounded-lg px-3 py-2.5 text-xs shadow-lg">
-      <p className="text-zinc-500 mb-1.5 font-semibold">
+    <div className="chart-light-surface bg-oncolor border border-[#e5e7eb] rounded-lg px-3 py-2.5 text-xs shadow-lg">
+      <p className="text-[#6b7280] mb-1.5 font-semibold">
         Strike {strike.toLocaleString('en-IN')}{strike === atm ? ' (ATM)' : ''}
       </p>
       <div className="flex justify-between gap-6 mb-0.5">
         <span style={{ color: '#f97316' }} className="font-semibold">Skew IV</span>
-        <span className="tabular-nums font-bold text-zinc-900">{iv.toFixed(2)}%</span>
+        <span className="tabular-nums font-bold text-[#111827]">{iv.toFixed(2)}%</span>
       </div>
       {row && (
         <>
-          <div className="flex justify-between gap-6 text-zinc-400 mt-1">
+          <div className="flex justify-between gap-6 text-[#6b7280] mt-1">
             <span>CE IV</span>
             <span className="tabular-nums">{row.ceIV.toFixed(2)}%</span>
           </div>
-          <div className="flex justify-between gap-6 text-zinc-400">
+          <div className="flex justify-between gap-6 text-[#6b7280]">
             <span>PE IV</span>
             <span className="tabular-nums">{row.peIV.toFixed(2)}%</span>
           </div>
@@ -207,7 +207,7 @@ export default function OptionsSkewTab({ expiry }: { expiry: string }) {
       )}
 
       {/* Volatility Skew — Dhan-style single orange curve */}
-      <div className="bg-white rounded-xl border border-zinc-200 p-4">
+      <div className="chart-light-surface bg-oncolor rounded-xl border border-[#e5e7eb] p-4">
         <ResponsiveContainer width="100%" height={780}>
           <LineChart data={skewData} margin={{ top: 16, right: 32, left: 8, bottom: 20 }}>
             <CartesianGrid strokeDasharray="0" stroke="#f0f0f0" vertical={false} />

@@ -529,7 +529,7 @@ export default function PositionalTradesTab({ lotSize }: { lotSize: number | nul
                       {editingId === t.id ? (
                         <button
                           onClick={() => saveEdit(t.id)}
-                          className="px-2 py-0.5 text-[11px] font-medium bg-emerald-600 hover:bg-emerald-500 text-white rounded flex inline-flex items-center gap-0.5 transition-all"
+                          className="px-2 py-0.5 text-[11px] font-medium bg-emerald-600 hover:bg-emerald-500 text-oncolor rounded flex inline-flex items-center gap-0.5 transition-all"
                         >
                           <Check className="w-3 h-3" /> Save
                         </button>
@@ -677,7 +677,7 @@ export default function PositionalTradesTab({ lotSize }: { lotSize: number | nul
                 <button
                   onClick={() => handleExitTrade(trade)}
                   disabled={exitingIds.has(trade.id)}
-                  className="px-4 py-1.5 bg-orange-600 hover:bg-orange-500 disabled:bg-zinc-700 text-white text-xs font-semibold rounded-lg transition-colors"
+                  className="px-4 py-1.5 bg-orange-600 hover:bg-orange-500 disabled:bg-zinc-700 text-oncolor text-xs font-semibold rounded-lg transition-colors"
                 >
                   {exitingIds.has(trade.id) ? 'Exiting...' : 'Exit Position'}
                 </button>

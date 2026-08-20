@@ -1,6 +1,7 @@
 'use client';
 
 import React, { useEffect, useRef } from 'react';
+import { useChartChrome } from '@/lib/chartTheme';
 import {
   createChart,
   CandlestickSeries,
@@ -48,6 +49,8 @@ export default function FootprintChart({ bars, rows, chart, window: win, windowB
   // in sync when only the price scale moves (pan/zoom) and no prop changed.
   const drawRef = useRef<() => void>(() => {});
 
+  const chrome = useChartChrome();
+
   useEffect(() => {
     const container = containerRef.current;
     if (!container) return;
@@ -55,13 +58,13 @@ export default function FootprintChart({ bars, rows, chart, window: win, windowB
     const c = createChart(container, {
       layout: {
         background: { type: ColorType.Solid, color: 'transparent' },
-        textColor: '#a1a1aa',
+        textColor: chrome.textSecondary,
         fontSize: 11,
       },
-      grid: { vertLines: { color: '#27272a' }, horzLines: { color: '#27272a' } },
+      grid: { vertLines: { color: chrome.gridline }, horzLines: { color: chrome.gridline } },
       crosshair: { mode: CrosshairMode.Normal },
-      rightPriceScale: { borderColor: '#3f3f46', scaleMargins: { top: 0.08, bottom: 0.26 } },
-      timeScale: { borderColor: '#3f3f46', timeVisible: true, secondsVisible: false, rightOffset: 12 },
+      rightPriceScale: { borderColor: chrome.baseline, scaleMargins: { top: 0.08, bottom: 0.26 } },
+      timeScale: { borderColor: chrome.baseline, timeVisible: true, secondsVisible: false, rightOffset: 12 },
       autoSize: true,
     });
 
@@ -102,7 +105,20 @@ export default function FootprintChart({ bars, rows, chart, window: win, windowB
       volumeRef.current = null;
       priceLinesRef.current = [];
     };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // Re-apply chrome when the theme flips (canvas can't read CSS vars).
+  useEffect(() => {
+    const c = chartRef.current;
+    if (!c) return;
+    c.applyOptions({
+      layout: { textColor: chrome.textSecondary },
+      grid: { vertLines: { color: chrome.gridline }, horzLines: { color: chrome.gridline } },
+      rightPriceScale: { borderColor: chrome.baseline },
+      timeScale: { borderColor: chrome.baseline },
+    });
+  }, [chrome]);
 
   // Candles + volume.
   useEffect(() => {

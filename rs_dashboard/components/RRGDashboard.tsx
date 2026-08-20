@@ -265,9 +265,9 @@ export default function RRGDashboard() {
 
   // ── Render ────────────────────────────────────────────────────────────────────
   return (
-    <div className="h-screen bg-[#090a0f] text-zinc-100 flex flex-col font-sans antialiased select-none overflow-hidden">
+    <div className="h-screen bg-zinc-950 text-zinc-100 flex flex-col font-sans antialiased select-none overflow-hidden">
       {/* Sleek Dark Header */}
-      <header className="bg-[#12141c]/90 border-b border-zinc-800/80 px-4 py-2 flex items-center gap-4 sticky top-0 z-30 flex-wrap backdrop-blur-md flex-shrink-0">
+      <header className="bg-zinc-900/90 border-b border-zinc-800/80 px-4 py-2 flex items-center gap-4 sticky top-0 z-30 flex-wrap backdrop-blur-md flex-shrink-0">
         <div>
           <div className="text-sm font-black text-zinc-100 tracking-wider uppercase flex items-center gap-2">
             <span className="w-2 h-2 rounded-full bg-purple-500 animate-pulse" />
@@ -298,7 +298,7 @@ export default function RRGDashboard() {
       </header>
 
       {/* Control bar */}
-      <div className="px-4 py-2 flex flex-wrap items-center gap-4 border-b border-zinc-800/80 bg-[#0d0e14]">
+      <div className="px-4 py-2 flex flex-wrap items-center gap-4 border-b border-zinc-800/80 bg-zinc-900">
         {/* Benchmark dropdown */}
         <div className="flex items-center gap-2">
           <span className="text-[11px] text-zinc-400 font-bold uppercase tracking-wider">Benchmark</span>
@@ -306,7 +306,7 @@ export default function RRGDashboard() {
             <select
               value={benchmark}
               onChange={e => setBenchmark(e.target.value as 'nifty500' | 'nifty50')}
-              className="appearance-none pl-3 pr-8 py-1 text-xs font-bold text-purple-400 border border-zinc-700/80 rounded bg-[#1a1d29] cursor-pointer focus:outline-none focus:ring-1 focus:ring-purple-500"
+              className="appearance-none pl-3 pr-8 py-1 text-xs font-bold text-purple-400 border border-zinc-700/80 rounded bg-zinc-850 cursor-pointer focus:outline-none focus:ring-1 focus:ring-purple-500"
             >
               <option value="nifty500">Nifty 500 (Dhan Standard)</option>
               <option value="nifty50">Nifty 50 Index</option>
@@ -345,7 +345,7 @@ export default function RRGDashboard() {
             <select
               value={timeframe}
               onChange={e => setTimeframe(e.target.value as 'daily' | 'weekly')}
-              className="appearance-none pl-3 pr-8 py-1 text-xs font-bold text-zinc-200 border border-zinc-700/80 rounded bg-[#1a1d29] cursor-pointer focus:outline-none focus:ring-1 focus:ring-purple-500"
+              className="appearance-none pl-3 pr-8 py-1 text-xs font-bold text-zinc-200 border border-zinc-700/80 rounded bg-zinc-850 cursor-pointer focus:outline-none focus:ring-1 focus:ring-purple-500"
             >
               <option value="daily">Daily</option>
               <option value="weekly">Weekly</option>
@@ -363,7 +363,7 @@ export default function RRGDashboard() {
             <select
               value={method}
               onChange={e => setMethod(e.target.value as 'RATIO' | 'EMA' | 'SMA')}
-              className="appearance-none pl-3 pr-8 py-1 text-xs font-bold text-zinc-200 border border-zinc-700/80 rounded bg-[#1a1d29] cursor-pointer focus:outline-none focus:ring-1 focus:ring-purple-500"
+              className="appearance-none pl-3 pr-8 py-1 text-xs font-bold text-zinc-200 border border-zinc-700/80 rounded bg-zinc-850 cursor-pointer focus:outline-none focus:ring-1 focus:ring-purple-500"
             >
               <option value="RATIO">Dhan / Optuma Ratio (Standard)</option>
               <option value="EMA">EMA (Z-Score)</option>
@@ -382,7 +382,7 @@ export default function RRGDashboard() {
             <select
               value={lookbackLimit}
               onChange={e => setLookbackLimit(parseInt(e.target.value, 10))}
-              className="appearance-none pl-3 pr-8 py-1 text-xs font-bold text-zinc-200 border border-zinc-700/80 rounded bg-[#1a1d29] cursor-pointer focus:outline-none focus:ring-1 focus:ring-purple-500"
+              className="appearance-none pl-3 pr-8 py-1 text-xs font-bold text-zinc-200 border border-zinc-700/80 rounded bg-zinc-850 cursor-pointer focus:outline-none focus:ring-1 focus:ring-purple-500"
             >
               <option value={20}>1 Month (20 bars)</option>
               <option value={60}>3 Months (60 bars)</option>
@@ -398,7 +398,7 @@ export default function RRGDashboard() {
         {/* Tail counts selector */}
         <div className="flex items-center gap-2 ml-auto">
           <span className="text-[11px] text-zinc-400 uppercase tracking-wider font-bold">Tail:</span>
-          <div className="flex items-center rounded border border-zinc-700/80 overflow-hidden bg-[#1a1d29]">
+          <div className="flex items-center rounded border border-zinc-700/80 overflow-hidden bg-zinc-850">
             <button
               onClick={() => setTailCount(c => Math.max(1, c - 1))}
               className="px-2.5 py-0.5 text-xs font-bold text-zinc-300 hover:bg-zinc-800 border-r border-zinc-700/80"
@@ -421,9 +421,9 @@ export default function RRGDashboard() {
       <div className="flex flex-1 min-h-0">
         
         {/* Symbol panel */}
-        <div className="w-[420px] flex-shrink-0 border-r border-zinc-800/80 flex flex-col bg-[#12141c]">
+        <div className="w-[420px] flex-shrink-0 border-r border-zinc-800/80 flex flex-col bg-zinc-900">
           {/* Header, Search & Quadrant Quick Filters */}
-          <div className="p-3 border-b border-zinc-800/80 bg-[#12141c]">
+          <div className="p-3 border-b border-zinc-800/80 bg-zinc-900">
             <div className="flex items-center justify-between gap-2 mb-2">
               <span className="text-sm font-black text-zinc-100 tracking-wide">Symbols</span>
               <div className="relative flex-1 max-w-[170px]">
@@ -437,7 +437,7 @@ export default function RRGDashboard() {
                   placeholder="Search symbol..."
                   value={search}
                   onChange={e => setSearch(e.target.value)}
-                  className="w-full pl-7 pr-2 py-1 text-xs border border-zinc-700/80 rounded bg-[#1a1d29] text-zinc-100 placeholder-zinc-500 focus:outline-none focus:ring-1 focus:ring-purple-500 font-medium"
+                  className="w-full pl-7 pr-2 py-1 text-xs border border-zinc-700/80 rounded bg-zinc-850 text-zinc-100 placeholder-zinc-500 focus:outline-none focus:ring-1 focus:ring-purple-500 font-medium"
                 />
               </div>
             </div>
@@ -502,7 +502,7 @@ export default function RRGDashboard() {
           </div>
 
           {/* Table headers */}
-          <div className="flex items-center px-3 py-1.5 border-b border-zinc-800/80 bg-[#0d0e14] select-none text-[10px] font-black text-zinc-400 tracking-wider">
+          <div className="flex items-center px-3 py-1.5 border-b border-zinc-800/80 bg-zinc-900 select-none text-[10px] font-black text-zinc-400 tracking-wider">
             <div className="w-6 flex items-center">
               <input
                 type="checkbox"
@@ -603,10 +603,10 @@ export default function RRGDashboard() {
         </div>
 
         {/* Chart area */}
-        <div className="flex-1 flex flex-col bg-[#090a0f] overflow-hidden">
+        <div className="flex-1 flex flex-col bg-zinc-950 overflow-hidden">
           
           {/* Subheader controls */}
-          <div className="flex items-center justify-between px-4 py-2 border-b border-zinc-800/80 bg-[#12141c] flex-wrap gap-2">
+          <div className="flex items-center justify-between px-4 py-2 border-b border-zinc-800/80 bg-zinc-900 flex-wrap gap-2">
             <div className="flex items-center gap-3">
               <span className="text-xs font-black text-purple-300 tracking-wide">{currentDateRangeText}</span>
               <span className="text-[10px] text-zinc-400 font-semibold bg-zinc-900 px-2 py-0.5 rounded border border-zinc-800">
@@ -616,12 +616,12 @@ export default function RRGDashboard() {
             
             <div className="flex items-center gap-4">
               {/* View mode toggle */}
-              <div className="flex items-center gap-1 bg-[#1a1d29] p-0.5 rounded border border-zinc-700/80">
+              <div className="flex items-center gap-1 bg-zinc-850 p-0.5 rounded border border-zinc-700/80">
                 <span className="text-[10px] text-zinc-400 font-bold uppercase px-1">VIEW:</span>
                 <button
                   onClick={() => setViewMode('fit')}
                   className={`px-2.5 py-0.5 text-xs font-bold rounded transition-all ${
-                    viewMode === 'fit' ? 'bg-purple-600 text-white shadow font-black' : 'text-zinc-400 hover:text-zinc-100'
+                    viewMode === 'fit' ? 'bg-purple-600 text-oncolor shadow font-black' : 'text-zinc-400 hover:text-zinc-100'
                   }`}
                   title="Fit bounds to visible tails"
                 >
@@ -630,7 +630,7 @@ export default function RRGDashboard() {
                 <button
                   onClick={() => setViewMode('center')}
                   className={`px-2.5 py-0.5 text-xs font-bold rounded transition-all ${
-                    viewMode === 'center' ? 'bg-purple-600 text-white shadow font-black' : 'text-zinc-400 hover:text-zinc-100'
+                    viewMode === 'center' ? 'bg-purple-600 text-oncolor shadow font-black' : 'text-zinc-400 hover:text-zinc-100'
                   }`}
                   title="Center bounds symmetrically at (100, 100)"
                 >
@@ -639,7 +639,7 @@ export default function RRGDashboard() {
                 <button
                   onClick={() => setViewMode('max')}
                   className={`px-2.5 py-0.5 text-xs font-bold rounded transition-all ${
-                    viewMode === 'max' ? 'bg-purple-600 text-white shadow font-black' : 'text-zinc-400 hover:text-zinc-100'
+                    viewMode === 'max' ? 'bg-purple-600 text-oncolor shadow font-black' : 'text-zinc-400 hover:text-zinc-100'
                   }`}
                   title="Scale bounds to full lookback history"
                 >
@@ -652,19 +652,19 @@ export default function RRGDashboard() {
                 <span className="text-[10px] text-zinc-400 font-bold uppercase">Speed:</span>
                 <button
                   onClick={() => setSpeed('slow')}
-                  className={`px-2 py-0.5 text-[10px] font-bold rounded ${speed === 'slow' ? 'bg-purple-600 text-white' : 'bg-[#1a1d29] text-zinc-400 hover:text-zinc-100 border border-zinc-700/80'}`}
+                  className={`px-2 py-0.5 text-[10px] font-bold rounded ${speed === 'slow' ? 'bg-purple-600 text-oncolor' : 'bg-zinc-850 text-zinc-400 hover:text-zinc-100 border border-zinc-700/80'}`}
                 >
                   Slow
                 </button>
                 <button
                   onClick={() => setSpeed('normal')}
-                  className={`px-2 py-0.5 text-[10px] font-bold rounded ${speed === 'normal' ? 'bg-purple-600 text-white' : 'bg-[#1a1d29] text-zinc-400 hover:text-zinc-100 border border-zinc-700/80'}`}
+                  className={`px-2 py-0.5 text-[10px] font-bold rounded ${speed === 'normal' ? 'bg-purple-600 text-oncolor' : 'bg-zinc-850 text-zinc-400 hover:text-zinc-100 border border-zinc-700/80'}`}
                 >
                   1x
                 </button>
                 <button
                   onClick={() => setSpeed('fast')}
-                  className={`px-2 py-0.5 text-[10px] font-bold rounded ${speed === 'fast' ? 'bg-purple-600 text-white' : 'bg-[#1a1d29] text-zinc-400 hover:text-zinc-100 border border-zinc-700/80'}`}
+                  className={`px-2 py-0.5 text-[10px] font-bold rounded ${speed === 'fast' ? 'bg-purple-600 text-oncolor' : 'bg-zinc-850 text-zinc-400 hover:text-zinc-100 border border-zinc-700/80'}`}
                 >
                   Fast
                 </button>
@@ -684,7 +684,7 @@ export default function RRGDashboard() {
           </div>
 
           {/* Canvas SVG Container */}
-          <div className="flex-1 p-0 flex items-center justify-center bg-[#07080c] overflow-hidden relative">
+          <div className="flex-1 p-0 flex items-center justify-center bg-zinc-950 overflow-hidden relative">
             {loading && (
               <div className="text-purple-400 text-sm font-semibold animate-pulse">Calculating RRG Rotations...</div>
             )}
@@ -1046,13 +1046,13 @@ export default function RRGDashboard() {
           </div>
 
           {/* ── Interactive Historical Timeline Scrubber ── */}
-          <div className="px-4 py-2.5 bg-[#12141c] border-t border-zinc-800/80 flex items-center gap-3 select-none">
+          <div className="px-4 py-2.5 bg-zinc-900 border-t border-zinc-800/80 flex items-center gap-3 select-none">
             <button
               onClick={() => {
                 if (playhead >= maxPlayhead) setPlayhead(0);
                 setIsPlaying(p => !p);
               }}
-              className="flex items-center justify-center w-8 h-8 rounded-full bg-purple-600 hover:bg-purple-500 text-white shadow-[0_0_12px_rgba(168,85,247,0.4)] font-bold text-xs transition-all"
+              className="flex items-center justify-center w-8 h-8 rounded-full bg-purple-600 hover:bg-purple-500 text-oncolor shadow-[0_0_12px_rgba(168,85,247,0.4)] font-bold text-xs transition-all"
               title={isPlaying ? 'Pause animation' : 'Play animation'}
             >
               {isPlaying ? '⏸' : '▶'}
@@ -1060,7 +1060,7 @@ export default function RRGDashboard() {
 
             <button
               onClick={() => { setIsPlaying(false); setPlayhead(0); }}
-              className="px-2 py-1 text-xs border border-zinc-700/80 rounded bg-[#1a1d29] text-zinc-300 hover:bg-zinc-800 font-bold"
+              className="px-2 py-1 text-xs border border-zinc-700/80 rounded bg-zinc-850 text-zinc-300 hover:bg-zinc-800 font-bold"
               title="Reset to beginning"
             >
               ⏮
@@ -1068,7 +1068,7 @@ export default function RRGDashboard() {
 
             <button
               onClick={() => { setIsPlaying(false); setPlayhead(p => Math.max(0, p - 1)); }}
-              className="px-2 py-1 text-xs border border-zinc-700/80 rounded bg-[#1a1d29] text-zinc-300 hover:bg-zinc-800 font-bold"
+              className="px-2 py-1 text-xs border border-zinc-700/80 rounded bg-zinc-850 text-zinc-300 hover:bg-zinc-800 font-bold"
               title="Step 1 bar backward"
             >
               ◀
@@ -1076,7 +1076,7 @@ export default function RRGDashboard() {
 
             <button
               onClick={() => { setIsPlaying(false); setPlayhead(p => Math.min(maxPlayhead, p + 1)); }}
-              className="px-2 py-1 text-xs border border-zinc-700/80 rounded bg-[#1a1d29] text-zinc-300 hover:bg-zinc-800 font-bold"
+              className="px-2 py-1 text-xs border border-zinc-700/80 rounded bg-zinc-850 text-zinc-300 hover:bg-zinc-800 font-bold"
               title="Step 1 bar forward"
             >
               ▶
@@ -1084,7 +1084,7 @@ export default function RRGDashboard() {
 
             <button
               onClick={() => { setIsPlaying(false); setPlayhead(maxPlayhead); }}
-              className="px-2 py-1 text-xs border border-zinc-700/80 rounded bg-[#1a1d29] text-zinc-300 hover:bg-zinc-800 font-bold"
+              className="px-2 py-1 text-xs border border-zinc-700/80 rounded bg-zinc-850 text-zinc-300 hover:bg-zinc-800 font-bold"
               title="Jump to latest date"
             >
               ⏭

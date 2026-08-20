@@ -312,7 +312,7 @@ export default function SavedStrategiesTab() {
                     <button
                       onClick={() => handleExitTrade(detail.id)}
                       disabled={exitingId === detail.id}
-                      className="w-full py-2 bg-orange-600 hover:bg-orange-500 disabled:bg-zinc-700 disabled:text-zinc-500 text-white font-semibold text-xs rounded-lg transition-colors"
+                      className="w-full py-2 bg-orange-600 hover:bg-orange-500 disabled:bg-zinc-700 disabled:text-zinc-500 text-oncolor font-semibold text-xs rounded-lg transition-colors"
                     >
                       {exitingId === detail.id ? 'Exiting Trade...' : 'Exit Trade'}
                     </button>

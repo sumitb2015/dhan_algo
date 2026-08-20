@@ -60,7 +60,7 @@ export default function ConfirmDialog({
           <div className="flex gap-2">
             <Button
               size="sm"
-              className="flex-1 bg-red-600 text-white hover:bg-red-500"
+              className="flex-1 bg-red-600 text-oncolor hover:bg-red-500"
               onClick={payload.onConfirm}
             >
               {payload.confirmLabel}

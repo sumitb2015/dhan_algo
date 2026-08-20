@@ -130,7 +130,7 @@ export default function FootprintTable({ columns, priceRows, tickSize, window: w
               <tr key={price} className={inValue ? 'bg-zinc-900/60' : ''}>
                 <td
                   className={`px-2 py-1 text-right sticky left-0 z-10 font-semibold ${
-                    isLast ? 'bg-blue-600 text-white' : 'bg-zinc-950 text-zinc-300'
+                    isLast ? 'bg-blue-600 text-oncolor' : 'bg-zinc-950 text-zinc-300'
                   }`}
                 >
                   {price.toFixed(2)}

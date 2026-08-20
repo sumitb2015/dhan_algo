@@ -596,7 +596,7 @@ export default function PctStrangleTab({ spot, chainOc, expiries, selectedExpiry
           <Button
             onClick={handleEnterTrade}
             disabled={!canEnter}
-            className="bg-emerald-600 text-white hover:bg-emerald-500"
+            className="bg-emerald-600 text-oncolor hover:bg-emerald-500"
           >
             <LogIn data-icon="inline-start" /> {entering ? 'Entering…' : 'Enter trade'}
           </Button>

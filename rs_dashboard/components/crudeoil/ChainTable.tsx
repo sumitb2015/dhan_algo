@@ -78,8 +78,8 @@ function TradeButtons({
             onClick={() => order(strike, optType, side)}
             className={
               side === 'SELL'
-                ? 'border-red-500/40 bg-red-500/10 text-[10px] font-bold text-red-400 hover:bg-red-500 hover:text-white'
-                : 'border-emerald-500/40 bg-emerald-500/10 text-[10px] font-bold text-emerald-400 hover:bg-emerald-500 hover:text-white'
+                ? 'border-red-500/40 bg-red-500/10 text-[10px] font-bold text-red-400 hover:bg-red-500 hover:text-oncolor'
+                : 'border-emerald-500/40 bg-emerald-500/10 text-[10px] font-bold text-emerald-400 hover:bg-emerald-500 hover:text-oncolor'
             }
             aria-label={`Market ${side.toLowerCase()} ${strike} ${optType}`}
           >

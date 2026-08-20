@@ -1573,7 +1573,7 @@ export default function Scalper() {
                       <button onClick={handleClearPnl} disabled={clearingPnl}
                         className={`px-3 py-1.5 text-xs font-bold rounded-lg border transition-all disabled:opacity-50 shrink-0 whitespace-nowrap ${
                           confirmClear
-                            ? 'bg-rose-600 border-rose-500/40 text-white'
+                            ? 'bg-rose-600 border-rose-500/40 text-oncolor'
                             : 'bg-zinc-900 border-zinc-700 text-zinc-400 hover:text-zinc-200'
                         }`}>
                         {clearingPnl ? 'Clearing…' : confirmClear ? 'Confirm Clear?' : 'Clear Guard'}
@@ -1588,7 +1588,7 @@ export default function Scalper() {
                     exitingAll
                       ? 'bg-red-900/40 border-red-800 text-red-400'
                       : confirmExitAll
-                      ? 'bg-red-600 border-red-500 text-white animate-pulse shadow-lg shadow-red-500/20'
+                      ? 'bg-red-600 border-red-500 text-oncolor animate-pulse shadow-lg shadow-red-500/20'
                       : 'bg-red-950/60 border-red-900/60 text-red-400 hover:bg-red-900/40 hover:border-red-700 hover:text-red-300'
                   }`}
                   title="Immediately liquidate ALL positions at broker level (DELETE /positions)">
@@ -1945,7 +1945,7 @@ export const OptionPanel = React.memo(function OptionPanel({
               disabled={orderDisabled}
               title={`Shift strike up — rolls ${rollsHalf ? 'HALF of' : 'the entire'} the open position`}
               className="shrink-0 w-6 h-6 flex items-center justify-center rounded-lg border border-emerald-500/20
-                         bg-emerald-500/10 text-emerald-400 hover:bg-emerald-500 hover:text-white hover:border-emerald-500
+                         bg-emerald-500/10 text-emerald-400 hover:bg-emerald-500 hover:text-oncolor hover:border-emerald-500
                          disabled:opacity-30 disabled:cursor-not-allowed transition-all active:scale-95"
             >
               <ChevronUp size={14} strokeWidth={2.5} />
@@ -1967,7 +1967,7 @@ export const OptionPanel = React.memo(function OptionPanel({
               disabled={orderDisabled}
               title={`Shift strike down — rolls ${rollsHalf ? 'HALF of' : 'the entire'} the open position`}
               className="shrink-0 w-6 h-6 flex items-center justify-center rounded-lg border border-rose-500/20
-                         bg-rose-500/10 text-rose-400 hover:bg-rose-500 hover:text-white hover:border-rose-500
+                         bg-rose-500/10 text-rose-400 hover:bg-rose-500 hover:text-oncolor hover:border-rose-500
                          disabled:opacity-30 disabled:cursor-not-allowed transition-all active:scale-95"
             >
               <ChevronDown size={14} strokeWidth={2.5} />
@@ -2021,7 +2021,7 @@ export const OptionPanel = React.memo(function OptionPanel({
                         : 'Chevrons roll the ENTIRE open position'}
                     className={`px-1.5 py-0.5 rounded font-bold text-[9px] transition-all disabled:opacity-30 disabled:cursor-not-allowed ${
                       moveFraction === f
-                        ? 'bg-amber-600 border border-amber-400 text-white'
+                        ? 'bg-amber-600 border border-amber-400 text-oncolor'
                         : 'bg-zinc-800 border border-zinc-700 text-zinc-400 hover:text-zinc-200'
                     }`}
                   >
@@ -2098,7 +2098,7 @@ export const OptionPanel = React.memo(function OptionPanel({
           disabled={orderDisabled}
           title={!strikesReady ? 'Loading strike IDs…' : undefined}
           className="py-3.5 px-4 text-sm font-bold rounded-xl transition-all active:scale-95
-                     bg-emerald-600 hover:bg-emerald-500 text-white
+                     bg-emerald-600 hover:bg-emerald-500 text-oncolor
                      disabled:opacity-40 disabled:cursor-not-allowed
                      shadow-lg shadow-emerald-900/20"
         >
@@ -2109,7 +2109,7 @@ export const OptionPanel = React.memo(function OptionPanel({
           disabled={orderDisabled}
           title={!strikesReady ? 'Loading strike IDs…' : undefined}
           className="py-3.5 px-4 text-sm font-bold rounded-xl transition-all active:scale-95
-                     bg-rose-600 hover:bg-rose-500 text-white
+                     bg-rose-600 hover:bg-rose-500 text-oncolor
                      disabled:opacity-40 disabled:cursor-not-allowed
                      shadow-lg shadow-rose-900/20"
         >
@@ -2388,7 +2388,7 @@ export const PositionsTable = React.memo(function PositionsTable({ data, guards,
                             : entryPrice * (1 - pct / 100);
                           if (calculated > 0) onGuardChange(rowKey, 'target', calculated.toFixed(2));
                         }}
-                        className="px-1 py-0.5 rounded bg-emerald-950/80 border border-emerald-800/60 text-emerald-400 hover:bg-emerald-800 hover:text-white transition-all disabled:opacity-30"
+                        className="px-1 py-0.5 rounded bg-emerald-950/80 border border-emerald-800/60 text-emerald-400 hover:bg-emerald-800 hover:text-oncolor transition-all disabled:opacity-30"
                         title={`Set Target ${pct}% in profit from entry ₹${entryPrice.toFixed(2)}`}
                       >
                         +{pct}%
@@ -2434,7 +2434,7 @@ export const PositionsTable = React.memo(function PositionsTable({ data, guards,
                             : entryPrice * (1 + pct / 100);
                           if (calculated > 0) onGuardChange(rowKey, 'sl', calculated.toFixed(2));
                         }}
-                        className="px-1 py-0.5 rounded bg-rose-950/80 border border-rose-800/60 text-rose-400 hover:bg-rose-800 hover:text-white transition-all disabled:opacity-30"
+                        className="px-1 py-0.5 rounded bg-rose-950/80 border border-rose-800/60 text-rose-400 hover:bg-rose-800 hover:text-oncolor transition-all disabled:opacity-30"
                         title={`Set SL ${pct}% in loss from entry ₹${entryPrice.toFixed(2)}`}
                       >
                         -{pct}%
@@ -2511,7 +2511,7 @@ export const PositionsTable = React.memo(function PositionsTable({ data, guards,
                             disabled={isClosing || !c.enabled}
                             onClick={() => onClosePartial(row, c.units, c.pct)}
                             title={c.title}
-                            className="px-1 py-0.5 rounded bg-rose-950/80 border border-rose-800/60 text-rose-400 hover:bg-rose-800 hover:text-white transition-all disabled:opacity-30 disabled:cursor-not-allowed"
+                            className="px-1 py-0.5 rounded bg-rose-950/80 border border-rose-800/60 text-rose-400 hover:bg-rose-800 hover:text-oncolor transition-all disabled:opacity-30 disabled:cursor-not-allowed"
                           >
                             {c.pct}%
                           </button>

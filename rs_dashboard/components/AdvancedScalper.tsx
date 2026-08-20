@@ -1928,8 +1928,8 @@ export default function AdvancedScalper() {
                             }}
                             className={`px-1.5 py-0.5 rounded font-mono text-[10px] font-bold transition-all ${
                               isSelected
-                                ? 'bg-emerald-600 text-white border border-emerald-400 shadow-sm'
-                                : 'bg-emerald-950/80 border border-emerald-800/80 text-emerald-400 hover:bg-emerald-800 hover:text-white'
+                                ? 'bg-emerald-600 text-oncolor border border-emerald-400 shadow-sm'
+                                : 'bg-emerald-950/80 border border-emerald-800/80 text-emerald-400 hover:bg-emerald-800 hover:text-oncolor'
                             }`}
                             title={combinedStrategyStats.entryCapitalSum > 0
                               ? `Set total P&L Guard Target to +${pct}% (+₹${Math.round((combinedStrategyStats.entryCapitalSum * pct) / 100)})`
@@ -1956,8 +1956,8 @@ export default function AdvancedScalper() {
                             }}
                             className={`px-1.5 py-0.5 rounded font-mono text-[10px] font-bold transition-all ${
                               isSelected
-                                ? 'bg-rose-600 text-white border border-rose-400 shadow-sm'
-                                : 'bg-rose-950/80 border border-rose-800/80 text-rose-400 hover:bg-rose-800 hover:text-white'
+                                ? 'bg-rose-600 text-oncolor border border-rose-400 shadow-sm'
+                                : 'bg-rose-950/80 border border-rose-800/80 text-rose-400 hover:bg-rose-800 hover:text-oncolor'
                             }`}
                             title={combinedStrategyStats.entryCapitalSum > 0
                               ? `Set total P&L Guard SL limit to -${pct}% (-₹${Math.round((combinedStrategyStats.entryCapitalSum * pct) / 100)})`
@@ -2016,7 +2016,7 @@ export default function AdvancedScalper() {
                       <button onClick={handleClearPnl} disabled={clearingPnl}
                         className={`px-3 py-1.5 text-xs font-bold rounded-lg border transition-all disabled:opacity-50 shrink-0 whitespace-nowrap ${
                           confirmClear
-                            ? 'bg-rose-600 border-rose-500/40 text-white'
+                            ? 'bg-rose-600 border-rose-500/40 text-oncolor'
                             : 'bg-zinc-900 border-zinc-700 text-zinc-400 hover:text-zinc-200'
                         }`}>
                         {clearingPnl ? 'Clearing…' : confirmClear ? 'Confirm Clear?' : 'Clear Guard'}
@@ -2031,7 +2031,7 @@ export default function AdvancedScalper() {
                     halvingAll
                       ? 'bg-amber-900/40 border-amber-800 text-amber-400'
                       : confirmHalfAll
-                      ? 'bg-amber-500 border-amber-400 text-black animate-pulse shadow-lg shadow-amber-500/20'
+                      ? 'bg-amber-500 border-amber-400 text-oncolor-dark animate-pulse shadow-lg shadow-amber-500/20'
                       : 'bg-amber-950/60 border-amber-900/60 text-amber-400 hover:bg-amber-900/40 hover:border-amber-700 hover:text-amber-300'
                   }`}
                   title={
@@ -2057,7 +2057,7 @@ export default function AdvancedScalper() {
                     exitingAll
                       ? 'bg-red-900/40 border-red-800 text-red-400'
                       : confirmExitAll
-                      ? 'bg-red-600 border-red-500 text-white animate-pulse shadow-lg shadow-red-500/20'
+                      ? 'bg-red-600 border-red-500 text-oncolor animate-pulse shadow-lg shadow-red-500/20'
                       : 'bg-red-950/60 border-red-900/60 text-red-400 hover:bg-red-900/40 hover:border-red-700 hover:text-red-300'
                   }`}
                   title="Immediately liquidate ALL positions at broker level (DELETE /positions)">

@@ -2257,7 +2257,7 @@ function StrategyCard({ meta, state, onRefresh }: StrategyCardProps) {
               <Button
                 onClick={handleStart}
                 disabled={submitting || spreadTrendNoIndicators || reentryLotsTooHigh}
-                className="flex-1 h-8 gap-1.5 bg-gradient-to-tr from-emerald-600 to-teal-500 text-white font-bold rounded-lg shadow-md shadow-emerald-500/10 hover:from-emerald-500 hover:to-teal-400 active:scale-[0.98] transition-all duration-150 text-xs border-0 disabled:opacity-50 disabled:cursor-not-allowed"
+                className="flex-1 h-8 gap-1.5 bg-gradient-to-tr from-emerald-600 to-teal-500 text-oncolor font-bold rounded-lg shadow-md shadow-emerald-500/10 hover:from-emerald-500 hover:to-teal-400 active:scale-[0.98] transition-all duration-150 text-xs border-0 disabled:opacity-50 disabled:cursor-not-allowed"
               >
                 {submitting ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Play className="h-3.5 w-3.5 fill-white" />}
                 {submitting ? 'Launching…' : 'Launch Algorithm'}

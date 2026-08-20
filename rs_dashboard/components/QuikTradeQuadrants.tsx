@@ -130,7 +130,7 @@ function QuadrantTile({
           size="icon-xs"
           disabled={pending}
           onClick={() => onTrade(tile, 'BUY')}
-          className="flex-1 h-5 bg-emerald-600 hover:bg-emerald-500 text-white font-extrabold text-[10px] disabled:opacity-40"
+          className="flex-1 h-5 bg-emerald-600 hover:bg-emerald-500 text-oncolor font-extrabold text-[10px] disabled:opacity-40"
           title={`Buy ${tile.strike} ${tile.type}`}
         >
           B
@@ -139,7 +139,7 @@ function QuadrantTile({
           size="icon-xs"
           disabled={pending}
           onClick={() => onTrade(tile, 'SELL')}
-          className="flex-1 h-5 bg-rose-600 hover:bg-rose-500 text-white font-extrabold text-[10px] disabled:opacity-40"
+          className="flex-1 h-5 bg-rose-600 hover:bg-rose-500 text-oncolor font-extrabold text-[10px] disabled:opacity-40"
           title={`Sell ${tile.strike} ${tile.type}`}
         >
           S

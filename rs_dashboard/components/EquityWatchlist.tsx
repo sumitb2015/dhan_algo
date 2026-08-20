@@ -154,7 +154,7 @@ function OrderPanel({ form, onChange, onCancel, onSubmit }: {
           <button
             disabled={form.submitting}
             onClick={onSubmit}
-            className="px-2 py-1 rounded-sm bg-amber-500 text-black font-bold uppercase tracking-wide disabled:opacity-50"
+            className="px-2 py-1 rounded-sm bg-amber-500 text-oncolor-dark font-bold uppercase tracking-wide disabled:opacity-50"
           >
             {form.submitting ? 'Submitting…' : 'Confirm'}
           </button>
@@ -415,10 +415,10 @@ export default function EquityWatchlist() {
 
   return (
     <div className="flex flex-col flex-1 w-full bg-black min-h-screen text-zinc-100">
-      <header className="w-full border-b border-amber-900/25 bg-[#050505] px-4 py-2 flex flex-wrap items-center gap-2.5 z-20 sticky top-0 backdrop-blur-md">
+      <header className="w-full border-b border-amber-900/25 bg-zinc-950 px-4 py-2 flex flex-wrap items-center gap-2.5 z-20 sticky top-0 backdrop-blur-md">
         <div className="flex items-center gap-2 mr-1">
           <div className="h-6 w-6 rounded-sm bg-amber-500 flex items-center justify-center shrink-0">
-            <Terminal className="h-3.5 w-3.5 text-black" />
+            <Terminal className="h-3.5 w-3.5 text-oncolor-dark" />
           </div>
           <span className="text-[13px] font-bold tracking-widest text-amber-400 uppercase font-mono">FOREVER WATCHLIST</span>
         </div>
@@ -462,7 +462,7 @@ export default function EquityWatchlist() {
           </datalist>
           <button
             onClick={() => handleAddSymbol()}
-            className="flex items-center gap-1 px-2 py-1 rounded-sm bg-amber-500 text-black text-[11px] font-bold uppercase tracking-wide"
+            className="flex items-center gap-1 px-2 py-1 rounded-sm bg-amber-500 text-oncolor-dark text-[11px] font-bold uppercase tracking-wide"
           >
             <Plus className="h-3 w-3" /> Add
           </button>
@@ -474,7 +474,7 @@ export default function EquityWatchlist() {
           </div>
         )}
 
-        <div className="border border-amber-900/20 bg-[#050505] rounded-sm overflow-hidden flex flex-col">
+        <div className="border border-amber-900/20 bg-zinc-950 rounded-sm overflow-hidden flex flex-col">
           <div className="overflow-x-auto">
             <table className="w-full border-collapse">
               <thead>
@@ -615,7 +615,7 @@ export default function EquityWatchlist() {
                               <button
                                 disabled={cancelSubmitting}
                                 onClick={submitCancel}
-                                className="px-2 py-1 rounded-sm bg-red-500 text-black font-bold uppercase tracking-wide disabled:opacity-50"
+                                className="px-2 py-1 rounded-sm bg-red-500 text-oncolor-dark font-bold uppercase tracking-wide disabled:opacity-50"
                               >
                                 {cancelSubmitting ? 'Cancelling…' : 'Confirm Cancel'}
                               </button>

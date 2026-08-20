@@ -484,10 +484,10 @@ export default function CspScreener() {
 
   return (
     <div className="flex min-h-screen w-full flex-1 flex-col bg-black text-zinc-100">
-      <header className="sticky top-0 z-20 flex w-full flex-wrap items-center gap-2.5 border-b border-amber-900/25 bg-[#050505] px-4 py-2 backdrop-blur-md">
+      <header className="sticky top-0 z-20 flex w-full flex-wrap items-center gap-2.5 border-b border-amber-900/25 bg-zinc-950 px-4 py-2 backdrop-blur-md">
         <div className="mr-1 flex items-center gap-2">
           <div className="flex h-6 w-6 shrink-0 items-center justify-center rounded-sm bg-amber-500">
-            <Terminal className="h-3.5 w-3.5 text-black" />
+            <Terminal className="h-3.5 w-3.5 text-oncolor-dark" />
           </div>
           <span className="font-mono text-[13px] font-bold uppercase tracking-widest text-amber-400">CSP Screener</span>
         </div>
@@ -523,7 +523,7 @@ export default function CspScreener() {
         )}
 
         {/* ── Scanner ─────────────────────────────────────────────── */}
-        <section className="flex flex-col overflow-hidden rounded-sm border border-amber-900/20 bg-[#050505]">
+        <section className="flex flex-col overflow-hidden rounded-sm border border-amber-900/20 bg-zinc-950">
           <div className="flex flex-wrap items-center gap-2 border-b border-zinc-900 px-3 py-2">
             <h2 className="text-[13px] font-bold text-zinc-100">CSP Candidates</h2>
             <button
@@ -578,7 +578,7 @@ export default function CspScreener() {
                 </button>
               ) : (
                 <button onClick={startScan}
-                  className="flex items-center gap-1 rounded-sm bg-amber-500 px-2 py-1 text-[11px] font-bold uppercase tracking-wide text-black">
+                  className="flex items-center gap-1 rounded-sm bg-amber-500 px-2 py-1 text-[11px] font-bold uppercase tracking-wide text-oncolor-dark">
                   <Play className="h-3 w-3" /> Rescan
                 </button>
               )}
@@ -843,7 +843,7 @@ export default function CspScreener() {
         </section>
 
         {/* ── Tracked ─────────────────────────────────────────────── */}
-        <section className="flex flex-col overflow-hidden rounded-sm border border-amber-900/20 bg-[#050505]">
+        <section className="flex flex-col overflow-hidden rounded-sm border border-amber-900/20 bg-zinc-950">
           <div className="flex flex-wrap items-center gap-3 border-b border-zinc-900 px-3 py-2">
             <h2 className="text-[13px] font-bold text-zinc-100">
               Tracked Cash Secured Puts <span className="font-mono text-zinc-500">({visibleRows.length})</span>
@@ -935,7 +935,7 @@ export default function CspScreener() {
                 </label>
               ))}
               <button onClick={addManual}
-                className="rounded-sm bg-amber-500 px-2 py-1.5 text-[11px] font-bold uppercase tracking-wide text-black">
+                className="rounded-sm bg-amber-500 px-2 py-1.5 text-[11px] font-bold uppercase tracking-wide text-oncolor-dark">
                 Add
               </button>
               <button onClick={() => { setShowManual(false); setManual(blankManual); }}
@@ -1072,7 +1072,7 @@ export default function CspScreener() {
 
       {sell && (
         <div className="fixed inset-0 z-50 flex items-start justify-center bg-black/70 p-4 backdrop-blur-sm">
-          <div className="mt-24 w-full max-w-md rounded-md border border-rose-500/30 bg-[#0a0a0a] shadow-2xl">
+          <div className="mt-24 w-full max-w-md rounded-md border border-rose-500/30 bg-zinc-950 shadow-2xl">
             <div className="border-b border-zinc-800 px-4 py-3">
               <h2 className="text-[15px] font-bold text-zinc-100">Sell Cash Secured Put</h2>
               <p className="mt-0.5 font-mono text-[11px] text-zinc-500">
@@ -1109,7 +1109,7 @@ export default function CspScreener() {
                 Cancel
               </button>
               <button onClick={submitSell} disabled={sell.submitting || !(Number(sell.lots) > 0)}
-                className="rounded-sm bg-rose-600 px-3 py-1.5 text-[12px] font-bold text-white disabled:opacity-40">
+                className="rounded-sm bg-rose-600 px-3 py-1.5 text-[12px] font-bold text-oncolor disabled:opacity-40">
                 {sell.submitting ? 'Placing…' : 'Confirm Sell'}
               </button>
             </div>

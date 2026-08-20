@@ -25,6 +25,7 @@ import {
 import { Tooltip, TooltipContent, TooltipTrigger } from './ui/tooltip';
 import { buttonVariants } from './ui/button';
 import DataRefreshPanel from './DataRefreshPanel';
+import ThemeToggle from './ThemeToggle';
 
 const NAV_GROUPS = [
   {
@@ -156,19 +157,19 @@ export default function NavBar() {
                   className={cn(
                     "flex items-center gap-1.5 px-3 py-1.8 text-xs font-bold rounded-lg transition-all duration-200 outline-none border cursor-pointer select-none",
                     active
-                      ? "bg-emerald-500/10 text-emerald-300 border-emerald-500/30 shadow-[0_0_12px_rgba(16,185,129,0.04)]"
-                      : "border-transparent text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800/40 hover:border-zinc-800/30"
+                      ? "bg-emerald-500/20 text-black dark:text-emerald-300 border-emerald-500/50 shadow-[0_0_12px_rgba(16,185,129,0.06)] font-extrabold"
+                      : "border-transparent text-zinc-100 dark:text-zinc-400 hover:text-black dark:hover:text-zinc-100 hover:bg-zinc-800/20 dark:hover:bg-zinc-800/40 hover:border-zinc-700/40"
                   )}
                 />
               }
             >
-              <Icon className={cn("h-3.5 w-3.5 transition-colors duration-200", active ? "text-emerald-400" : "text-zinc-400")} />
-              <span>{group.label}</span>
-              <ChevronDown className="h-3 w-3 opacity-55 transition-transform duration-200 group-hover:translate-y-0.5" />
+              <Icon className={cn("h-3.5 w-3.5 transition-colors duration-200", active ? "text-emerald-800 dark:text-emerald-400" : "text-zinc-200 dark:text-zinc-400")} />
+              <span className={cn(active ? "text-black dark:text-emerald-300 font-extrabold" : "text-zinc-100 dark:text-zinc-200 font-bold")}>{group.label}</span>
+              <ChevronDown className={cn("h-3 w-3 opacity-80 transition-transform duration-200 group-hover:translate-y-0.5", active ? "text-emerald-800 dark:text-emerald-400" : "text-zinc-300 dark:text-zinc-400")} />
             </DropdownMenuTrigger>
             {/* Derivatives has grown past 20 entries — without a scroll cap the
                 tail renders below the fold and is unreachable entirely. */}
-            <DropdownMenuContent align="start" className="min-w-[240px] max-w-[280px] max-h-[calc(100vh-4rem)] overflow-y-auto overscroll-contain bg-zinc-950/95 backdrop-blur-xl border border-zinc-800/80 rounded-xl shadow-2xl p-1.5 gap-1 flex flex-col z-50">
+            <DropdownMenuContent align="start" className="min-w-[240px] max-w-[280px] max-h-[calc(100vh-4rem)] overflow-y-auto overscroll-contain bg-zinc-900 border border-zinc-700/60 rounded-xl shadow-2xl p-1.5 gap-1 flex flex-col z-50">
               {group.links.map((link) => {
                 const isLinkActive = pathname === link.href;
                 return (
@@ -181,18 +182,18 @@ export default function NavBar() {
                       />
                     }
                     className={cn(
-                      "cursor-pointer text-zinc-300 hover:text-zinc-100 hover:bg-zinc-900",
-                      isLinkActive && "bg-emerald-500/10 text-emerald-300 hover:text-emerald-300 hover:bg-emerald-500/12 focus:bg-emerald-500/12 focus:text-emerald-300"
+                      "cursor-pointer text-zinc-100 dark:text-zinc-300 hover:text-black dark:hover:text-zinc-100 hover:bg-zinc-100 dark:hover:bg-zinc-800",
+                      isLinkActive && "bg-emerald-500/15 text-emerald-950 dark:text-emerald-300 hover:text-black dark:hover:text-emerald-200 hover:bg-emerald-500/20 focus:bg-emerald-500/20"
                     )}
                   >
                     <div className="flex items-center justify-between w-full">
-                      <span className={cn("text-xs font-bold transition-colors", isLinkActive ? "text-emerald-300" : "text-zinc-200")}>
+                      <span className={cn("text-xs font-bold transition-colors", isLinkActive ? "text-emerald-950 dark:text-emerald-300 font-extrabold" : "text-zinc-100 dark:text-zinc-200")}>
                         {link.label}
                       </span>
-                      {isLinkActive && <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 animate-pulse" />}
+                      {isLinkActive && <span className="h-1.5 w-1.5 rounded-full bg-emerald-600 dark:bg-emerald-500 animate-pulse" />}
                     </div>
                     {link.desc && (
-                      <span className={cn("text-[10px] font-normal leading-tight mt-0.5 block transition-colors", isLinkActive ? "text-emerald-400/70" : "text-zinc-400")}>
+                      <span className={cn("text-[10px] font-normal leading-tight mt-0.5 block transition-colors", isLinkActive ? "text-emerald-900 dark:text-emerald-400/70" : "text-zinc-400")}>
                         {link.desc}
                       </span>
                     )}
@@ -203,19 +204,20 @@ export default function NavBar() {
           </DropdownMenu>
         );
       })}
-      <span className="w-px h-5 bg-zinc-850 mx-1 shrink-0" />
+      <span className="w-px h-5 bg-zinc-750 mx-1 shrink-0" />
+      <ThemeToggle />
       <Tooltip>
         <TooltipTrigger
           onClick={() => setSyncPanelOpen(true)}
-          render={<button className={cn(buttonVariants({ variant: 'outline', size: 'sm' }), 'gap-1.5 border-zinc-800 bg-zinc-900/60 text-zinc-400 hover:text-emerald-400 hover:border-emerald-500/30 hover:bg-emerald-500/5 rounded-xl text-xs h-7 cursor-pointer')} />}
+          render={<button className="flex items-center gap-1.5 px-2.5 border border-zinc-700/60 dark:border-zinc-800 bg-zinc-900 text-zinc-100 dark:text-zinc-300 hover:text-black dark:hover:text-emerald-400 hover:border-emerald-500/40 rounded-xl text-xs h-7 cursor-pointer font-medium transition-all" />}
         >
           <DatabaseZap className="h-3.5 w-3.5" />
           Sync Data
           {sync.running && (
             <>
-              <RefreshCw className="h-3 w-3 animate-spin text-sky-400" />
+              <RefreshCw className="h-3 w-3 animate-spin text-sky-500" />
               {sync.total > 0 && (
-                <span className="text-[10px] font-mono text-sky-400">
+                <span className="text-[10px] font-mono text-sky-500">
                   {sync.current}/{sync.total}
                 </span>
               )}
@@ -235,7 +237,7 @@ export default function NavBar() {
       </Tooltip>
       <button
         onClick={handleDisconnect}
-        className="px-3 py-1.8 text-xs font-semibold rounded-lg text-zinc-400 hover:text-red-400 hover:bg-red-500/10 border border-transparent hover:border-red-500/20 active:scale-[0.98] transition-all duration-200 whitespace-nowrap cursor-pointer"
+        className="px-3 py-1.8 text-xs font-semibold rounded-lg text-zinc-100 dark:text-zinc-400 hover:text-red-700 dark:hover:text-red-400 hover:bg-red-500/10 border border-transparent hover:border-red-500/20 active:scale-[0.98] transition-all duration-200 whitespace-nowrap cursor-pointer"
       >
         Disconnect
       </button>

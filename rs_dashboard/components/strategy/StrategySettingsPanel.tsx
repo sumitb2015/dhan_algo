@@ -250,7 +250,7 @@ export default function StrategySettingsPanel({
             <Button
               onClick={onEnterTrade}
               disabled={!canEnter || entering || exiting}
-              className="bg-emerald-600 text-white hover:bg-emerald-500"
+              className="bg-emerald-600 text-oncolor hover:bg-emerald-500"
             >
               <LogIn data-icon="inline-start" /> {entering ? 'Entering…' : 'Enter trade'}
             </Button>

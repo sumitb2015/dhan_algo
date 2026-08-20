@@ -1,6 +1,7 @@
 'use client';
 
 import { Fragment, useCallback, useEffect, useRef, useState } from 'react';
+import { useChartChrome } from '@/lib/chartTheme';
 import {
   createChart,
   createSeriesMarkers,
@@ -25,7 +26,8 @@ const INITIAL_HEIGHT = 400;
 
 // Fixed dark-theme palette (rs_dashboard has no light/dark theme toggle for chart chrome -
 // matches LightweightCandlestickChart.tsx's constants).
-const CHROME = { gridline: '#27272a', baseline: '#3f3f46', textSecondary: '#a1a1aa', textMuted: '#71717a' };
+// REMOVED: moved to lib/chartTheme.ts — the CHROME const below is kept for the module-level
+// STATUS / CATEGORICAL arrays which are not themed.
 const STATUS = { good: '#34d399', critical: '#f87171' };
 const CATEGORICAL = ['#38bdf8', '#fbbf24', '#a78bfa', '#f472b6', '#4ade80', '#fb923c'];
 
@@ -191,6 +193,8 @@ export function CombinedPremiumChart({
   const [legend, setLegend] = useState<{ id: string; label: string; color: string; lastValue: number | null }[]>([]);
   const [lastPrice, setLastPrice] = useState<number | null>(null);
 
+  const chrome = useChartChrome();
+
   const createMainSeries = useCallback(
     (type: CombinedChartType) => {
       const chartApi = chartApiRef.current;
@@ -230,18 +234,18 @@ export function CombinedPremiumChart({
       height: INITIAL_HEIGHT,
       layout: {
         background: { type: ColorType.Solid, color: 'transparent' },
-        textColor: CHROME.textSecondary,
+        textColor: chrome.textSecondary,
         fontFamily: "ui-monospace, monospace",
         fontSize: 11,
       },
       grid: {
-        vertLines: { color: CHROME.gridline, style: LineStyle.Dotted },
-        horzLines: { color: CHROME.gridline, style: LineStyle.Dotted },
+        vertLines: { color: chrome.gridline, style: LineStyle.Dotted },
+        horzLines: { color: chrome.gridline, style: LineStyle.Dotted },
       },
-      rightPriceScale: { borderColor: CHROME.baseline },
-      leftPriceScale: { visible: !!leftAxisLine, borderColor: CHROME.baseline },
+      rightPriceScale: { borderColor: chrome.baseline },
+      leftPriceScale: { visible: !!leftAxisLine, borderColor: chrome.baseline },
       timeScale: {
-        borderColor: CHROME.baseline,
+        borderColor: chrome.baseline,
         timeVisible: true,
         secondsVisible: false,
         tickMarkFormatter: formatIstTick,
@@ -249,8 +253,8 @@ export function CombinedPremiumChart({
       },
       crosshair: {
         mode: CrosshairMode.Normal,
-        vertLine: { color: CHROME.baseline, labelBackgroundColor: CHROME.textMuted },
-        horzLine: { color: CHROME.baseline, labelBackgroundColor: CHROME.textMuted },
+        vertLine: { color: chrome.baseline, labelBackgroundColor: chrome.textMuted },
+        horzLine: { color: chrome.baseline, labelBackgroundColor: chrome.textMuted },
       },
       localization: { timeFormatter: (time: Time) => formatIstTick(time, TickMarkType.Time) },
     });
@@ -352,8 +356,24 @@ export function CombinedPremiumChart({
   useEffect(() => {
     const chartApi = chartApiRef.current;
     if (!chartApi) return;
-    chartApi.applyOptions({ leftPriceScale: { visible: !!leftAxisLine, borderColor: CHROME.baseline } });
-  }, [leftAxisLine]);
+    chartApi.applyOptions({ leftPriceScale: { visible: !!leftAxisLine, borderColor: chrome.baseline } });
+  }, [leftAxisLine, chrome]);
+
+  // Re-apply canvas chrome whenever the theme flips.
+  useEffect(() => {
+    const chartApi = chartApiRef.current;
+    if (!chartApi) return;
+    chartApi.applyOptions({
+      layout: { textColor: chrome.textSecondary },
+      grid: { vertLines: { color: chrome.gridline, style: LineStyle.Dotted }, horzLines: { color: chrome.gridline, style: LineStyle.Dotted } },
+      rightPriceScale: { borderColor: chrome.baseline },
+      timeScale: { borderColor: chrome.baseline },
+      crosshair: {
+        vertLine: { color: chrome.baseline, labelBackgroundColor: chrome.textMuted },
+        horzLine: { color: chrome.baseline, labelBackgroundColor: chrome.textMuted },
+      },
+    });
+  }, [chrome]);
 
   /** Pushes `next` into `series`, using per-bar update() when the array only grew at the tail
    * (the ordinary 10s poll) and a full setData() otherwise (interval/strike/expiry switch, or a

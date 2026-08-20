@@ -139,7 +139,7 @@ function Panel({ label, count, color, accent, children, className, maxHeight }: 
   children: React.ReactNode; className?: string; maxHeight?: string;
 }) {
   return (
-    <div className={cn('border border-amber-900/20 bg-[#050505] rounded-sm overflow-hidden flex flex-col', className)}>
+    <div className={cn('border border-amber-900/20 bg-zinc-950 rounded-sm overflow-hidden flex flex-col', className)}>
       <div className="flex items-center gap-2 px-3 py-1.5 bg-zinc-900 border-b border-amber-900/20 shrink-0">
         <span className={cn('text-[10px] font-bold uppercase tracking-widest', color ?? 'text-amber-400')}>{label}</span>
         {count !== undefined && (
@@ -614,7 +614,7 @@ function BreadthStrip({ breadth, data }: { breadth: BreadthData; data: MoversRes
     ]},
   ];
   return (
-    <div className="border border-amber-900/20 bg-[#050505] rounded-sm overflow-hidden">
+    <div className="border border-amber-900/20 bg-zinc-950 rounded-sm overflow-hidden">
       <div className="flex items-center gap-2 px-3 py-1 bg-zinc-900 border-b border-amber-900/20">
         <Activity className="h-3 w-3 text-amber-400" />
         <span className="text-[10px] font-bold uppercase tracking-widest text-amber-400">Market Breadth</span>
@@ -656,7 +656,7 @@ function CustomFilterPanel({ allMovers }: { allMovers: MoverResult[] }) {
     .sort((a, b) => { const va = a[field] as number, vb = b[field] as number; return direction === 'rise' ? vb - va : va - vb; }),
     [allMovers, field, direction, pct]);
   return (
-    <div className="border border-amber-900/20 bg-[#050505] rounded-sm overflow-hidden">
+    <div className="border border-amber-900/20 bg-zinc-950 rounded-sm overflow-hidden">
       <div className="flex flex-wrap items-center gap-2 px-3 py-1.5 bg-zinc-900 border-b border-amber-900/20">
         <Filter className="h-3 w-3 text-amber-400" />
         <span className="text-[10px] font-bold uppercase tracking-widest text-amber-400">Custom Filter</span>
@@ -804,10 +804,10 @@ export default function MarketMovers() {
 
   return (
     <div className="flex flex-col flex-1 w-full bg-black min-h-screen text-zinc-100">
-      <header className="w-full border-b border-amber-900/25 bg-[#050505] px-4 py-2 flex flex-wrap items-center gap-2.5 z-20 sticky top-0 backdrop-blur-md">
+      <header className="w-full border-b border-amber-900/25 bg-zinc-950 px-4 py-2 flex flex-wrap items-center gap-2.5 z-20 sticky top-0 backdrop-blur-md">
         <div className="flex items-center gap-2 mr-1">
           <div className="h-6 w-6 rounded-sm bg-amber-500 flex items-center justify-center shrink-0">
-            <Terminal className="h-3.5 w-3.5 text-black" />
+            <Terminal className="h-3.5 w-3.5 text-oncolor-dark" />
           </div>
           <span className="text-[13px] font-bold tracking-widest text-amber-400 uppercase font-mono">MARKET MOVERS</span>
         </div>
@@ -879,7 +879,7 @@ export default function MarketMovers() {
         {error && <div className="rounded-sm border border-red-500/20 bg-red-950/10 p-4 text-center text-red-400 text-[12px] font-mono">ERR: {error}</div>}
 
         {loading && (
-          <div className="flex flex-col items-center justify-center p-16 border border-amber-900/20 bg-[#050505]">
+          <div className="flex flex-col items-center justify-center p-16 border border-amber-900/20 bg-zinc-950">
             <RefreshCw className="h-5 w-5 text-amber-500 animate-spin" />
             <span className="text-zinc-500 text-[11px] mt-3 font-mono uppercase tracking-widest">Computing market movers…</span>
           </div>

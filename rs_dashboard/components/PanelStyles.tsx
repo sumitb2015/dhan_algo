@@ -25,8 +25,8 @@ export function PanelStyles() {
         align-items: flex-end;
         gap: 8px 12px;
         padding: 8px 10px;
-        background: rgba(12, 16, 30, 0.85);
-        border: 1px solid rgba(99, 102, 241, 0.12);
+        background: var(--lc-surface);
+        border: 1px solid var(--lc-hairline-soft);
         border-radius: 10px;
         backdrop-filter: blur(10px);
       }
@@ -39,7 +39,7 @@ export function PanelStyles() {
         font-size: 8px;
         font-weight: 700;
         letter-spacing: 0.14em;
-        color: rgba(255,255,255,0.60);
+        color: var(--lc-text-muted);
         padding-left: 2px;
       }
       .lc-group-row {
@@ -67,9 +67,9 @@ export function PanelStyles() {
         padding: 5px 7px;
         font-size: 11px;
         border-radius: 6px;
-        border: 1px solid rgba(99, 102, 241, 0.18);
-        background: rgba(10, 14, 26, 0.9);
-        color: rgba(255,255,255,0.85);
+        border: 1px solid var(--lc-hairline);
+        background: var(--lc-surface-2);
+        color: var(--lc-text);
         cursor: pointer;
         outline: none;
         transition: border-color 0.15s, box-shadow 0.15s;
@@ -77,15 +77,15 @@ export function PanelStyles() {
       }
       .lc-select:hover {
         border-color: rgba(99, 102, 241, 0.35);
-        color: #c7d2fe;
+        color: var(--lc-accent-strong);
       }
       .lc-select:focus {
-        border-color: #6366f1;
-        box-shadow: 0 0 0 2px rgba(99, 102, 241, 0.15);
-        color: #c7d2fe;
+        border-color: var(--lc-accent);
+        box-shadow: 0 0 0 2px var(--lc-hairline);
+        color: var(--lc-accent-strong);
       }
       .lc-select--accent {
-        color: #a5b4fc;
+        color: var(--lc-accent-strong);
         font-weight: 700;
         border-color: rgba(129, 140, 248, 0.25);
       }
@@ -100,17 +100,17 @@ export function PanelStyles() {
         padding: 5px 7px;
         font-size: 11px;
         border-radius: 6px;
-        border: 1px solid rgba(99, 102, 241, 0.18);
-        background: rgba(10, 14, 26, 0.9);
-        color: #94a3b8;
+        border: 1px solid var(--lc-hairline);
+        background: var(--lc-surface-2);
+        color: var(--lc-text);
         outline: none;
         width: 52px;
         font-family: 'JetBrains Mono', 'Fira Code', monospace;
         transition: border-color 0.15s;
       }
       .lc-input:focus {
-        border-color: #6366f1;
-        box-shadow: 0 0 0 2px rgba(99, 102, 241, 0.15);
+        border-color: var(--lc-accent);
+        box-shadow: 0 0 0 2px var(--lc-hairline);
       }
 
       /* ── View buttons ────────────────────────────────────────────── */
@@ -119,20 +119,20 @@ export function PanelStyles() {
         font-size: 11px;
         font-weight: 600;
         border-radius: 6px;
-        border: 1px solid rgba(99, 102, 241, 0.18);
-        background: rgba(10, 14, 26, 0.9);
-        color: rgba(255,255,255,0.60);
+        border: 1px solid var(--lc-hairline);
+        background: var(--lc-surface-2);
+        color: var(--lc-text-muted);
         cursor: pointer;
         transition: all 0.15s ease;
       }
       .lc-view-btn:hover {
-        background: rgba(99, 102, 241, 0.1);
-        color: #818cf8;
+        background: var(--lc-hairline-soft);
+        color: var(--lc-accent-hover);
         border-color: rgba(99, 102, 241, 0.3);
       }
       .lc-view-btn--active {
         background: linear-gradient(135deg, rgba(99, 102, 241, 0.3), rgba(168, 85, 247, 0.2));
-        color: #a5b4fc;
+        color: var(--lc-accent-strong);
         border-color: rgba(129, 140, 248, 0.4);
         box-shadow: 0 0 8px rgba(99, 102, 241, 0.2);
       }
@@ -144,8 +144,8 @@ export function PanelStyles() {
         align-items: center;
         gap: 1px;
         padding: 3px 8px;
-        background: rgba(10, 14, 26, 0.8);
-        border: 1px solid rgba(99, 102, 241, 0.15);
+        background: var(--lc-surface-2);
+        border: 1px solid var(--lc-hairline);
         border-radius: 6px;
       }
       .lc-stat-label {
@@ -153,13 +153,13 @@ export function PanelStyles() {
         font-weight: 700;
         letter-spacing: 0.1em;
         text-transform: uppercase;
-        color: rgba(255,255,255,0.60);
+        color: var(--lc-text-muted);
       }
       .lc-spot-value {
         font-size: 11px;
         font-weight: 700;
         font-family: 'JetBrains Mono', 'Fira Code', monospace;
-        color: rgba(255,255,255,0.85);
+        color: var(--lc-text);
       }
 
       /* ── Status pill ─────────────────────────────────────────────── */
@@ -169,8 +169,8 @@ export function PanelStyles() {
         gap: 5px;
         padding: 4px 8px;
         border-radius: 20px;
-        border: 1px solid rgba(99, 102, 241, 0.12);
-        background: rgba(10, 14, 26, 0.7);
+        border: 1px solid var(--lc-hairline-soft);
+        background: var(--lc-surface-2);
         font-size: 9px;
         font-weight: 700;
         letter-spacing: 0.08em;
@@ -182,13 +182,13 @@ export function PanelStyles() {
         flex-shrink: 0;
       }
       .lc-status-dot--live {
-        background: #34d399;
+        background: var(--lc-live);
         box-shadow: 0 0 6px rgba(52, 211, 153, 0.7);
         animation: lc-pulse 2s ease-in-out infinite;
       }
-      .lc-status-dot--closed { background: rgba(255,255,255,0.20); }
-      .lc-status-live  { color: #34d399; }
-      .lc-status-closed { color: rgba(255,255,255,0.40); }
+      .lc-status-dot--closed { background: var(--lc-text-faint); }
+      .lc-status-live  { color: var(--lc-live); }
+      .lc-status-closed { color: var(--lc-text-dim); }
       @keyframes lc-pulse {
         0%, 100% { opacity: 1; }
         50%       { opacity: 0.5; }
@@ -200,7 +200,7 @@ export function PanelStyles() {
         font-weight: 700;
         letter-spacing: 0.12em;
         text-transform: uppercase;
-        color: rgba(255,255,255,0.60);
+        color: var(--lc-text-muted);
         padding-right: 4px;
       }
 
@@ -215,7 +215,7 @@ export function PanelStyles() {
         border: 1px solid rgba(239, 68, 68, 0.2);
         border-radius: 8px;
         font-size: 12px;
-        color: #f87171;
+        color: var(--lc-danger);
       }
 
       /* ── Chart wrapper ───────────────────────────────────────────── */
@@ -224,8 +224,8 @@ export function PanelStyles() {
         min-height: 0;
         display: flex;
         flex-direction: column;
-        background: rgba(8, 11, 20, 0.6);
-        border: 1px solid rgba(99, 102, 241, 0.1);
+        background: var(--lc-surface-3);
+        border: 1px solid var(--lc-hairline-soft);
         border-radius: 10px;
         padding: 6px;
         overflow: hidden;
@@ -237,11 +237,11 @@ export function PanelStyles() {
         align-items: center;
         justify-content: center;
         gap: 10px;
-        background: rgba(8, 11, 20, 0.6);
-        border: 1px solid rgba(99, 102, 241, 0.1);
+        background: var(--lc-surface-3);
+        border: 1px solid var(--lc-hairline-soft);
         border-radius: 10px;
         font-size: 12px;
-        color: rgba(255,255,255,0.40);
+        color: var(--lc-text-dim);
       }
 
       /* ── Legs row ────────────────────────────────────────────────── */
@@ -252,8 +252,8 @@ export function PanelStyles() {
         align-items: center;
         gap: 6px;
         padding: 8px 10px;
-        background: rgba(12, 16, 30, 0.85);
-        border: 1px solid rgba(99, 102, 241, 0.12);
+        background: var(--lc-surface);
+        border: 1px solid var(--lc-hairline-soft);
         border-radius: 10px;
         backdrop-filter: blur(10px);
       }
@@ -264,12 +264,12 @@ export function PanelStyles() {
         border-radius: 6px;
         border: 1px dashed rgba(99, 102, 241, 0.3);
         background: transparent;
-        color: #6366f1;
+        color: var(--lc-accent);
         cursor: pointer;
         transition: all 0.15s;
       }
       .lc-add-leg-btn:hover:not(:disabled) {
-        background: rgba(99, 102, 241, 0.1);
+        background: var(--lc-hairline-soft);
         border-color: rgba(99, 102, 241, 0.5);
       }
       .lc-add-leg-btn:disabled { opacity: 0.3; cursor: not-allowed; }

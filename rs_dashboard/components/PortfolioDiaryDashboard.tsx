@@ -449,7 +449,7 @@ export default function PortfolioDiaryDashboard() {
       <header className="w-full border-b border-zinc-900 bg-zinc-950/80 backdrop-blur-md px-4 py-2.5 flex items-center gap-4 sticky top-0 z-20 flex-wrap">
         <div className="flex items-center gap-2.5 shrink-0">
           <div className="h-8 w-8 rounded-lg bg-gradient-to-tr from-amber-500 to-yellow-300 flex items-center justify-center shadow-md shadow-amber-500/10 shrink-0">
-            <BookOpen className="h-4 w-4 text-black" />
+            <BookOpen className="h-4 w-4 text-oncolor-dark" />
           </div>
           <div>
             <h1 className="text-sm font-bold tracking-tight text-white leading-none">Trader's Diary</h1>

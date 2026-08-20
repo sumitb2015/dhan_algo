@@ -1604,7 +1604,7 @@ function StrategyRowWide({ meta, state, onRefresh, instanceId, onAddInstance, on
         {/* Launch button inline in config */}
         <div className="flex items-end">
           <Button onClick={handleStart} disabled={submitting || spreadTrendNoIndicators || reentryLotsTooHigh}
-            className="h-7 px-4 gap-1.5 bg-gradient-to-tr from-emerald-600 to-teal-500 text-white font-bold rounded-lg shadow-md shadow-emerald-500/10 hover:from-emerald-500 hover:to-teal-400 active:scale-[0.98] transition-all text-xs border-0 disabled:opacity-50 disabled:cursor-not-allowed">
+            className="h-7 px-4 gap-1.5 bg-gradient-to-tr from-emerald-600 to-teal-500 text-oncolor font-bold rounded-lg shadow-md shadow-emerald-500/10 hover:from-emerald-500 hover:to-teal-400 active:scale-[0.98] transition-all text-xs border-0 disabled:opacity-50 disabled:cursor-not-allowed">
             {submitting ? <Loader2 className="h-3 w-3 animate-spin" /> : <Play className="h-3 w-3 fill-white" />}
             {submitting ? 'Launching…' : 'Launch'}
           </Button>

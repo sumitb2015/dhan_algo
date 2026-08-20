@@ -46,10 +46,10 @@ export default function CspGlossary({ onClose }: { onClose: () => void }) {
       onClick={onClose}
     >
       <div
-        className="my-8 w-full max-w-3xl rounded-md border border-zinc-800 bg-[#0a0a0a] shadow-2xl"
+        className="my-8 w-full max-w-3xl rounded-md border border-zinc-800 bg-zinc-950 shadow-2xl"
         onClick={(e) => e.stopPropagation()}
       >
-        <div className="sticky top-0 flex items-start justify-between border-b border-zinc-800 bg-[#0a0a0a] px-4 py-3">
+        <div className="sticky top-0 flex items-start justify-between border-b border-zinc-800 bg-zinc-950 px-4 py-3">
           <div className="flex items-center gap-2">
             <BookOpen className="h-4 w-4 text-amber-400" />
             <div>

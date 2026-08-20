@@ -1,6 +1,7 @@
 'use client';
 
 import React, { useEffect, useRef } from 'react';
+import { useChartChrome } from '@/lib/chartTheme';
 import {
   createChart,
   CandlestickSeries,
@@ -49,6 +50,8 @@ export default function LightweightCandlestickChart({ candles, initialBars, view
   const sma20SeriesRef = useRef<ISeriesApi<'Line'> | null>(null);
   const sma200SeriesRef = useRef<ISeriesApi<'Line'> | null>(null);
 
+  const chrome = useChartChrome();
+
   // Create the chart once on mount.
   useEffect(() => {
     const container = containerRef.current;
@@ -57,17 +60,17 @@ export default function LightweightCandlestickChart({ candles, initialBars, view
     const chart = createChart(container, {
       layout: {
         background: { type: ColorType.Solid, color: 'transparent' },
-        textColor: '#a1a1aa',
+        textColor: chrome.textSecondary,
         fontSize: 11,
       },
       grid: {
-        vertLines: { color: '#27272a' },
-        horzLines: { color: '#27272a' },
+        vertLines: { color: chrome.gridline },
+        horzLines: { color: chrome.gridline },
       },
       crosshair: { mode: CrosshairMode.Normal },
-      rightPriceScale: { borderColor: '#3f3f46' },
+      rightPriceScale: { borderColor: chrome.baseline },
       timeScale: {
-        borderColor: '#3f3f46',
+        borderColor: chrome.baseline,
         timeVisible: false,
         rightOffset: 4,
       },
@@ -120,7 +123,20 @@ export default function LightweightCandlestickChart({ candles, initialBars, view
       sma20SeriesRef.current = null;
       sma200SeriesRef.current = null;
     };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // Re-apply chrome whenever the theme flips (chart is a canvas, can't use CSS vars).
+  useEffect(() => {
+    const chart = chartRef.current;
+    if (!chart) return;
+    chart.applyOptions({
+      layout: { textColor: chrome.textSecondary },
+      grid: { vertLines: { color: chrome.gridline }, horzLines: { color: chrome.gridline } },
+      rightPriceScale: { borderColor: chrome.baseline },
+      timeScale: { borderColor: chrome.baseline },
+    });
+  }, [chrome]);
 
   // Push data whenever candles change.
   useEffect(() => {

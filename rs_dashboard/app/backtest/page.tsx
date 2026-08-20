@@ -231,16 +231,16 @@ function LegCard({
           value={leg.option_type}
           onChange={v => onChange({ ...leg, option_type: v as 'CE' | 'PE' })}
           options={[
-            { label: 'CE', value: 'CE', activeClass: 'bg-sky-600 text-white' },
-            { label: 'PE', value: 'PE', activeClass: 'bg-amber-600 text-white' },
+            { label: 'CE', value: 'CE', activeClass: 'bg-sky-600 text-oncolor' },
+            { label: 'PE', value: 'PE', activeClass: 'bg-amber-600 text-oncolor' },
           ]}
         />
         <Toggle
           value={leg.position}
           onChange={v => onChange({ ...leg, position: v as 'sell' | 'buy' })}
           options={[
-            { label: 'Sell', value: 'sell', activeClass: 'bg-red-700 text-white' },
-            { label: 'Buy',  value: 'buy',  activeClass: 'bg-emerald-700 text-white' },
+            { label: 'Sell', value: 'sell', activeClass: 'bg-red-700 text-oncolor' },
+            { label: 'Buy',  value: 'buy',  activeClass: 'bg-emerald-700 text-oncolor' },
           ]}
         />
       </div>
@@ -753,9 +753,9 @@ export default function BacktestPage() {
                   value={strategyType}
                   onChange={v => setStrategyType(v as typeof strategyType)}
                   options={[
-                    { label: 'Intraday', value: 'intraday',    activeClass: 'bg-emerald-600 text-white' },
-                    { label: 'Expiry Day', value: 'expiry_day', activeClass: 'bg-sky-600 text-white' },
-                    { label: 'First Day', value: 'first_day',   activeClass: 'bg-amber-600 text-white' },
+                    { label: 'Intraday', value: 'intraday',    activeClass: 'bg-emerald-600 text-oncolor' },
+                    { label: 'Expiry Day', value: 'expiry_day', activeClass: 'bg-sky-600 text-oncolor' },
+                    { label: 'First Day', value: 'first_day',   activeClass: 'bg-amber-600 text-oncolor' },
                   ]}
                 />
               </FormField>
@@ -818,7 +818,7 @@ export default function BacktestPage() {
             <button
               onClick={runBacktest}
               disabled={loading || legs.length === 0}
-              className="mt-1 w-full py-2.5 rounded-lg text-xs font-bold bg-emerald-600 hover:bg-emerald-500 disabled:opacity-40 disabled:cursor-not-allowed text-white transition-colors"
+              className="mt-1 w-full py-2.5 rounded-lg text-xs font-bold bg-emerald-600 hover:bg-emerald-500 disabled:opacity-40 disabled:cursor-not-allowed text-oncolor transition-colors"
             >
               {loading ? 'Running...' : 'Run Backtest'}
             </button>
