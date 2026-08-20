@@ -85,8 +85,23 @@ function isTailUpdate(prev: TimedPoint[] | undefined, next: TimedPoint[]): prev 
     prev[0].time === next[0].time &&
     prev[prev.length - 2].time === next[prev.length - 2].time &&
     sameBar(prev[0], next[0]) &&
-    sameBar(prev[prev.length - 2], next[prev.length - 2])
+    sameBar(prev[prev.length - 2], next[prev.length - 2]) &&
+    advancesFrom(prev[prev.length - 1].time, next, prev.length - 1)
   );
+}
+
+/** Every bar from `start` onward is at or after the bar before it, starting from `lastDrawn`.
+ * update() rejects a bar older than the series' last one ("Cannot update oldest data") and
+ * throws rather than returning false, so the tail has to be proven monotonic before it is
+ * walked - two probe points can't do that on their own. Only the tail is scanned, which is a
+ * single bar on an ordinary poll. */
+function advancesFrom(lastDrawn: UTCTimestamp, next: TimedPoint[], start: number): boolean {
+  let previous = lastDrawn;
+  for (let i = start; i < next.length; i++) {
+    if (next[i].time < previous) return false;
+    previous = next[i].time;
+  }
+  return true;
 }
 
 function formatIstTick(time: Time, tickMarkType: TickMarkType): string {
@@ -348,7 +363,13 @@ export function CombinedPremiumChart({
     const target = series as unknown as { setData: (d: T[]) => void; update: (d: T) => void };
     if (isTailUpdate(prev, next)) {
       // Everything before the last drawn bar is already on the chart and cannot have changed.
-      for (let i = prev.length - 1; i < next.length; i++) target.update(next[i]);
+      try {
+        for (let i = prev.length - 1; i < next.length; i++) target.update(next[i]);
+      } catch {
+        // Belt-and-braces: update() throws on anything it won't accept, which would surface as
+        // a runtime error overlay and take the whole page down. A full redraw always works.
+        target.setData(next);
+      }
     } else {
       target.setData(next);
     }
