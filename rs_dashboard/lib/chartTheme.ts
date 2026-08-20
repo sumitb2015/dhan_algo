@@ -30,10 +30,10 @@ const CHROME: Record<ResolvedTheme, ChartChrome> = {
     textMuted: '#71717a',
   },
   light: {
-    gridline: '#b8c5d8',   /* --chart-grid  */
-    baseline: '#9aaac0',   /* --chart-axis  */
-    textSecondary: '#374252', /* --chart-tick  */
-    textMuted: '#546070',
+    gridline: '#e2e8f0',
+    baseline: '#cbd5e1',
+    textSecondary: '#475569',
+    textMuted: '#64748b',
   },
 };
 

@@ -285,11 +285,67 @@ export function PanelStyles() {
         transition: all 0.15s;
         line-height: 1;
       }
-      .lc-remove-btn:hover:not(:disabled) {
-        background: rgba(239, 68, 68, 0.15);
-        border-color: rgba(239, 68, 68, 0.4);
+      /* ── White mode overrides (:root:not(.dark)) ───────────────── */
+      :root:not(.dark) .lc-chart-wrap {
+        background: #ffffff !important;
+        border: 1px solid #e2e8f0;
+        box-shadow: 0 1px 3px rgba(15, 23, 42, 0.05);
       }
-      .lc-remove-btn:disabled { opacity: 0.3; cursor: not-allowed; }
+      :root:not(.dark) .lc-chart-loading {
+        background: #ffffff !important;
+        border: 1px solid #e2e8f0;
+        color: #64748b;
+      }
+      :root:not(.dark) .lc-toolbar {
+        background: #ffffff;
+        border: 1px solid #e2e8f0;
+        box-shadow: 0 1px 3px rgba(15, 23, 42, 0.04);
+      }
+      :root:not(.dark) .lc-legs-row {
+        background: #ffffff;
+        border: 1px solid #e2e8f0;
+        box-shadow: 0 1px 3px rgba(15, 23, 42, 0.04);
+      }
+      :root:not(.dark) .lc-select,
+      :root:not(.dark) .lc-input {
+        background: #f8fafc;
+        border: 1px solid #cbd5e1;
+        color: #0f172a;
+      }
+      :root:not(.dark) .lc-select:hover,
+      :root:not(.dark) .lc-input:hover {
+        border-color: #6366f1;
+      }
+      :root:not(.dark) .lc-view-btn {
+        background: #f8fafc;
+        border: 1px solid #cbd5e1;
+        color: #475569;
+      }
+      :root:not(.dark) .lc-view-btn:hover {
+        background: #eef2ff;
+        color: #4f46e5;
+        border-color: #a5b4fc;
+      }
+      :root:not(.dark) .lc-view-btn--active {
+        background: #e0e7ff;
+        border-color: #a5b4fc;
+        color: #3730a3;
+        box-shadow: 0 1px 3px rgba(99, 102, 241, 0.15);
+      }
+      :root:not(.dark) .lc-spot-card {
+        background: #f8fafc;
+        border: 1px solid #cbd5e1;
+      }
+      :root:not(.dark) .lc-stat-label {
+        color: #64748b;
+      }
+      :root:not(.dark) .lc-spot-value {
+        color: #0f172a;
+      }
+      :root:not(.dark) .lc-status-pill {
+        background: #f8fafc;
+        border: 1px solid #cbd5e1;
+      }
     `}</style>
   );
 }

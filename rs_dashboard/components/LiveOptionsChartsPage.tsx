@@ -180,6 +180,11 @@ export default function LiveOptionsChartsPage() {
           overflow: hidden;
         }
 
+        :root:not(.dark) .lc-page {
+          background: var(--body-bg, #f1f5f9);
+          color: #0f172a;
+        }
+
         /* ── Sidebar ────────────────────────────────────────────────── */
         .lc-sidebar {
           width: 88px;
@@ -193,6 +198,13 @@ export default function LiveOptionsChartsPage() {
           border-right: 1px solid rgba(99, 102, 241, 0.12);
           backdrop-filter: blur(12px);
         }
+
+        :root:not(.dark) .lc-sidebar {
+          background: #ffffff;
+          border-right: 1px solid #e2e8f0;
+          box-shadow: 1px 0 4px rgba(15, 23, 42, 0.04);
+        }
+
         .lc-sidebar-brand {
           display: flex;
           flex-direction: column;
@@ -224,12 +236,24 @@ export default function LiveOptionsChartsPage() {
           padding: 2px 5px;
           letter-spacing: 0.04em;
         }
+
+        :root:not(.dark) .lc-date-badge {
+          color: #3730a3;
+          background: #e0e7ff;
+          border-color: #c7d2fe;
+        }
+
         .lc-sidebar-divider {
           width: 40px;
           height: 1px;
           background: linear-gradient(90deg, transparent, rgba(99, 102, 241, 0.2), transparent);
           margin: 6px 0;
         }
+
+        :root:not(.dark) .lc-sidebar-divider {
+          background: #e2e8f0;
+        }
+
         .lc-nav {
           display: flex;
           flex-direction: column;
@@ -244,6 +268,11 @@ export default function LiveOptionsChartsPage() {
           color: rgba(255,255,255,0.40);
           margin-bottom: 4px;
         }
+
+        :root:not(.dark) .lc-nav-label {
+          color: #64748b;
+        }
+
         .lc-nav-item {
           position: relative;
           display: flex;
@@ -259,17 +288,37 @@ export default function LiveOptionsChartsPage() {
           transition: all 0.2s ease;
           color: rgba(255,255,255,0.65);
         }
+
+        :root:not(.dark) .lc-nav-item {
+          color: #475569;
+        }
+
         .lc-nav-item:hover {
           background: rgba(99, 102, 241, 0.08);
           color: rgba(255,255,255,0.75);
           border-color: rgba(99, 102, 241, 0.15);
         }
+
+        :root:not(.dark) .lc-nav-item:hover {
+          background: #f1f5f9;
+          color: #3730a3;
+          border-color: #cbd5e1;
+        }
+
         .lc-nav-item--active {
           background: linear-gradient(135deg, rgba(99, 102, 241, 0.18), rgba(168, 85, 247, 0.12));
           color: #a5b4fc;
           border-color: rgba(99, 102, 241, 0.3);
           box-shadow: 0 0 12px rgba(99, 102, 241, 0.15), inset 0 1px 0 rgba(255,255,255,0.05);
         }
+
+        :root:not(.dark) .lc-nav-item--active {
+          background: #e0e7ff;
+          color: #3730a3;
+          border-color: #a5b4fc;
+          box-shadow: 0 1px 3px rgba(99, 102, 241, 0.15);
+        }
+
         .lc-nav-icon {
           font-size: 16px;
           line-height: 1;
@@ -319,16 +368,37 @@ export default function LiveOptionsChartsPage() {
           cursor: pointer;
           transition: all 0.15s ease;
         }
+
+        :root:not(.dark) .lc-layout-btn {
+          background: #f8fafc;
+          border-color: #cbd5e1;
+          color: #475569;
+        }
+
         .lc-layout-btn:hover {
           background: rgba(99, 102, 241, 0.1);
           color: #818cf8;
           border-color: rgba(99, 102, 241, 0.3);
         }
+
+        :root:not(.dark) .lc-layout-btn:hover {
+          background: #e2e8f0;
+          color: #3730a3;
+          border-color: #94a3b8;
+        }
+
         .lc-layout-btn--active {
           background: linear-gradient(135deg, rgba(99, 102, 241, 0.25), rgba(168, 85, 247, 0.18));
           color: #a5b4fc;
           border-color: rgba(129, 140, 248, 0.4);
           box-shadow: 0 0 10px rgba(99, 102, 241, 0.2);
+        }
+
+        :root:not(.dark) .lc-layout-btn--active {
+          background: #e0e7ff;
+          color: #3730a3;
+          border-color: #a5b4fc;
+          box-shadow: 0 1px 3px rgba(99, 102, 241, 0.15);
         }
 
         /* ── Main content ───────────────────────────────────────────── */
@@ -347,6 +417,13 @@ export default function LiveOptionsChartsPage() {
           border-bottom: 1px solid rgba(99, 102, 241, 0.15);
           overflow: hidden;
         }
+
+        :root:not(.dark) .lc-header {
+          background: #ffffff;
+          border-bottom: 1px solid #e2e8f0;
+          box-shadow: 0 1px 3px rgba(15, 23, 42, 0.04);
+        }
+
         .lc-header-title {
           font-size: 15px;
           font-weight: 700;
@@ -355,12 +432,25 @@ export default function LiveOptionsChartsPage() {
           position: relative;
           z-index: 1;
         }
+
+        :root:not(.dark) .lc-header-title {
+          color: #0f172a;
+        }
+
         .lc-header-accent {
           background: linear-gradient(135deg, #818cf8, #c084fc);
           -webkit-background-clip: text;
           -webkit-text-fill-color: transparent;
           background-clip: text;
         }
+
+        :root:not(.dark) .lc-header-accent {
+          background: linear-gradient(135deg, #4f46e5, #9333ea);
+          -webkit-background-clip: text;
+          -webkit-text-fill-color: transparent;
+          background-clip: text;
+        }
+
         .lc-header-glow {
           position: absolute;
           top: -20px;
