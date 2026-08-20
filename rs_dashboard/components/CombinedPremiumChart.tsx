@@ -58,17 +58,34 @@ function toUnixSeconds(iso: string): UTCTimestamp {
 
 type TimedPoint = { time: UTCTimestamp };
 
+/** Every numeric field of two bars matches. Bars carry only `time` plus numbers (OHLC, or
+ * `value`), so comparing the numeric keys compares the whole bar. */
+function sameBar(a: TimedPoint, b: TimedPoint): boolean {
+  const av = a as unknown as Record<string, number>;
+  const bv = b as unknown as Record<string, number>;
+  for (const key of Object.keys(av)) {
+    if (typeof av[key] === 'number' && av[key] !== bv[key]) return false;
+  }
+  return true;
+}
+
 /** True when `next` is `prev` with only its trailing bars changed/appended - the steady-state
  * shape of an intraday poll, where all that moved is the still-forming last candle. Probes the
  * first bar and the second-to-last bar rather than the whole array; any mismatch just falls back
- * to a full setData(), so correctness never rests on the heuristic. */
+ * to a full setData(), so correctness never rests on the heuristic.
+ *
+ * The probes compare values, not just timestamps: a lots change (Strategy panel, which
+ * deliberately doesn't remount on it) rescales every bar in place while the times stay
+ * identical, and a time-only probe would leave the whole prefix drawn at the old scale. */
 function isTailUpdate(prev: TimedPoint[] | undefined, next: TimedPoint[]): prev is TimedPoint[] {
   return (
     !!prev &&
     prev.length > 1 &&
     next.length >= prev.length &&
     prev[0].time === next[0].time &&
-    prev[prev.length - 2].time === next[prev.length - 2].time
+    prev[prev.length - 2].time === next[prev.length - 2].time &&
+    sameBar(prev[0], next[0]) &&
+    sameBar(prev[prev.length - 2], next[prev.length - 2])
   );
 }
 
