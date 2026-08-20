@@ -328,19 +328,19 @@ export default function PortfolioTradesDashboard() {
               <table className="w-full border-collapse">
                 <thead className="bg-zinc-800">
                   <tr>
-                    <th style={{ color: '#fff' }} className="py-2 px-2 text-xs font-bold uppercase tracking-wide text-left">Symbol</th>
-                    <th style={{ color: '#fff' }} className="py-2 px-2 text-xs font-bold uppercase tracking-wide text-left">Segment</th>
-                    <th style={{ color: '#fff' }} className="py-2 px-2 text-xs font-bold uppercase tracking-wide text-right">Trades</th>
-                    <th style={{ color: '#fff' }} className="py-2 px-2 text-xs font-bold uppercase tracking-wide text-right">Realized</th>
-                    <th style={{ color: '#fff' }} className="py-2 px-2 text-xs font-bold uppercase tracking-wide text-right">Charges</th>
-                    <th style={{ color: '#fff' }} className="py-2 px-2 text-xs font-bold uppercase tracking-wide text-right">Net P&amp;L</th>
-                    <th style={{ color: '#fff' }} className="py-2 px-2 text-xs font-bold uppercase tracking-wide text-right">Open Qty</th>
+                    <th className="py-2 px-2 text-xs font-bold uppercase tracking-wide text-zinc-100 dark:text-zinc-200 text-left">Symbol</th>
+                    <th className="py-2 px-2 text-xs font-bold uppercase tracking-wide text-zinc-100 dark:text-zinc-200 text-left">Segment</th>
+                    <th className="py-2 px-2 text-xs font-bold uppercase tracking-wide text-zinc-100 dark:text-zinc-200 text-right">Trades</th>
+                    <th className="py-2 px-2 text-xs font-bold uppercase tracking-wide text-zinc-100 dark:text-zinc-200 text-right">Realized</th>
+                    <th className="py-2 px-2 text-xs font-bold uppercase tracking-wide text-zinc-100 dark:text-zinc-200 text-right">Charges</th>
+                    <th className="py-2 px-2 text-xs font-bold uppercase tracking-wide text-zinc-100 dark:text-zinc-200 text-right">Net P&amp;L</th>
+                    <th className="py-2 px-2 text-xs font-bold uppercase tracking-wide text-zinc-100 dark:text-zinc-200 text-right">Open Qty</th>
                   </tr>
                 </thead>
                 <tbody>
                   {filteredSymbols.slice(0, 100).map(s => (
                     <tr key={`${s.segment}-${s.securityId}-${s.symbol}`} className="border-b border-zinc-900/60 hover:bg-zinc-800/20 transition-colors">
-                      <td className="py-[5px] px-2 text-[12px] text-white font-medium">
+                      <td className="py-[5px] px-2 text-[12px] text-zinc-100 dark:text-white font-medium">
                         {s.symbol}
                         {s.preWindowGap && (
                           <span title="Had inventory before this window sold during it — realized P&L here is understated">
@@ -383,14 +383,14 @@ export default function PortfolioTradesDashboard() {
               <table className="w-full border-collapse">
                 <thead className="bg-zinc-800 sticky top-0">
                   <tr>
-                    <th style={{ color: '#fff' }} className="py-2 px-2 text-xs font-bold uppercase tracking-wide text-left">Time</th>
-                    <th style={{ color: '#fff' }} className="py-2 px-2 text-xs font-bold uppercase tracking-wide text-left">Segment</th>
-                    <th style={{ color: '#fff' }} className="py-2 px-2 text-xs font-bold uppercase tracking-wide text-left">Symbol</th>
-                    <th style={{ color: '#fff' }} className="py-2 px-2 text-xs font-bold uppercase tracking-wide text-left">Type</th>
-                    <th style={{ color: '#fff' }} className="py-2 px-2 text-xs font-bold uppercase tracking-wide text-right">Qty</th>
-                    <th style={{ color: '#fff' }} className="py-2 px-2 text-xs font-bold uppercase tracking-wide text-right">Price</th>
-                    <th style={{ color: '#fff' }} className="py-2 px-2 text-xs font-bold uppercase tracking-wide text-right">Charges</th>
-                    <th style={{ color: '#fff' }} className="py-2 px-2 text-xs font-bold uppercase tracking-wide text-left">Product</th>
+                    <th className="py-2 px-2 text-xs font-bold uppercase tracking-wide text-zinc-100 dark:text-zinc-200 text-left">Time</th>
+                    <th className="py-2 px-2 text-xs font-bold uppercase tracking-wide text-zinc-100 dark:text-zinc-200 text-left">Segment</th>
+                    <th className="py-2 px-2 text-xs font-bold uppercase tracking-wide text-zinc-100 dark:text-zinc-200 text-left">Symbol</th>
+                    <th className="py-2 px-2 text-xs font-bold uppercase tracking-wide text-zinc-100 dark:text-zinc-200 text-left">Type</th>
+                    <th className="py-2 px-2 text-xs font-bold uppercase tracking-wide text-zinc-100 dark:text-zinc-200 text-right">Qty</th>
+                    <th className="py-2 px-2 text-xs font-bold uppercase tracking-wide text-zinc-100 dark:text-zinc-200 text-right">Price</th>
+                    <th className="py-2 px-2 text-xs font-bold uppercase tracking-wide text-zinc-100 dark:text-zinc-200 text-right">Charges</th>
+                    <th className="py-2 px-2 text-xs font-bold uppercase tracking-wide text-zinc-100 dark:text-zinc-200 text-left">Product</th>
                   </tr>
                 </thead>
                 <tbody>

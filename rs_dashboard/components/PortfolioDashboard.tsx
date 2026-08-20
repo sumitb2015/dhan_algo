@@ -232,9 +232,8 @@ function TH({
   const active = sortKey === sortBy;
   return (
     <th
-      style={{ color: '#ffffff' }}
       className={cn(
-        'py-2 px-2 text-xs font-bold uppercase tracking-wide whitespace-nowrap',
+        'py-2 px-2 text-xs font-bold uppercase tracking-wide whitespace-nowrap text-zinc-100 dark:text-zinc-200',
         right ? 'text-right' : 'text-left',
         sortKey ? 'cursor-pointer select-none' : '',
         className,

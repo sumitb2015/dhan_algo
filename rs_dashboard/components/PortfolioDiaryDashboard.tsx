@@ -767,13 +767,13 @@ export default function PortfolioDiaryDashboard() {
                   <table className="w-full border-collapse">
                     <thead className="bg-zinc-800">
                       <tr>
-                        <th style={{ color: '#fff' }} className="py-2 px-2 text-xs font-bold uppercase tracking-wide text-left">Year</th>
-                        <th style={{ color: '#fff' }} className="py-2 px-2 text-xs font-bold uppercase tracking-wide text-right">No. of Trades</th>
-                        <th style={{ color: '#fff' }} className="py-2 px-2 text-xs font-bold uppercase tracking-wide text-right">Overall P&amp;L</th>
-                        <th style={{ color: '#fff' }} className="py-2 px-2 text-xs font-bold uppercase tracking-wide text-right">Net P&amp;L</th>
-                        <th style={{ color: '#fff' }} className="py-2 px-2 text-xs font-bold uppercase tracking-wide text-right">Charges</th>
-                        <th style={{ color: '#fff' }} className="py-2 px-2 text-xs font-bold uppercase tracking-wide text-right">Brokerage</th>
-                        <th style={{ color: '#fff' }} className="py-2 px-2 text-xs font-bold uppercase tracking-wide text-right">Total Charges</th>
+                        <th className="py-2 px-2 text-xs font-bold uppercase tracking-wide text-zinc-100 dark:text-zinc-200 text-left">Year</th>
+                        <th className="py-2 px-2 text-xs font-bold uppercase tracking-wide text-zinc-100 dark:text-zinc-200 text-right">No. of Trades</th>
+                        <th className="py-2 px-2 text-xs font-bold uppercase tracking-wide text-zinc-100 dark:text-zinc-200 text-right">Overall P&amp;L</th>
+                        <th className="py-2 px-2 text-xs font-bold uppercase tracking-wide text-zinc-100 dark:text-zinc-200 text-right">Net P&amp;L</th>
+                        <th className="py-2 px-2 text-xs font-bold uppercase tracking-wide text-zinc-100 dark:text-zinc-200 text-right">Charges</th>
+                        <th className="py-2 px-2 text-xs font-bold uppercase tracking-wide text-zinc-100 dark:text-zinc-200 text-right">Brokerage</th>
+                        <th className="py-2 px-2 text-xs font-bold uppercase tracking-wide text-zinc-100 dark:text-zinc-200 text-right">Total Charges</th>
                       </tr>
                     </thead>
                     <tbody>
@@ -837,19 +837,19 @@ export default function PortfolioDiaryDashboard() {
                   <table className="w-full border-collapse">
                     <thead className="bg-zinc-800">
                       <tr>
-                        <th style={{ color: '#fff' }} className="py-2 px-2 text-xs font-bold uppercase tracking-wide text-left">Week</th>
-                        <th style={{ color: '#fff' }} className="py-2 px-2 text-xs font-bold uppercase tracking-wide text-right">No. of Trades</th>
-                        <th style={{ color: '#fff' }} className="py-2 px-2 text-xs font-bold uppercase tracking-wide text-right">Overall P&amp;L</th>
-                        <th style={{ color: '#fff' }} className="py-2 px-2 text-xs font-bold uppercase tracking-wide text-right">Net P&amp;L</th>
-                        <th style={{ color: '#fff' }} className="py-2 px-2 text-xs font-bold uppercase tracking-wide text-right">Charges</th>
-                        <th style={{ color: '#fff' }} className="py-2 px-2 text-xs font-bold uppercase tracking-wide text-right">Brokerage</th>
-                        <th style={{ color: '#fff' }} className="py-2 px-2 text-xs font-bold uppercase tracking-wide text-right">Total Charges</th>
+                        <th className="py-2 px-2 text-xs font-bold uppercase tracking-wide text-zinc-100 dark:text-zinc-200 text-left">Week</th>
+                        <th className="py-2 px-2 text-xs font-bold uppercase tracking-wide text-zinc-100 dark:text-zinc-200 text-right">No. of Trades</th>
+                        <th className="py-2 px-2 text-xs font-bold uppercase tracking-wide text-zinc-100 dark:text-zinc-200 text-right">Overall P&amp;L</th>
+                        <th className="py-2 px-2 text-xs font-bold uppercase tracking-wide text-zinc-100 dark:text-zinc-200 text-right">Net P&amp;L</th>
+                        <th className="py-2 px-2 text-xs font-bold uppercase tracking-wide text-zinc-100 dark:text-zinc-200 text-right">Charges</th>
+                        <th className="py-2 px-2 text-xs font-bold uppercase tracking-wide text-zinc-100 dark:text-zinc-200 text-right">Brokerage</th>
+                        <th className="py-2 px-2 text-xs font-bold uppercase tracking-wide text-zinc-100 dark:text-zinc-200 text-right">Total Charges</th>
                       </tr>
                     </thead>
                     <tbody>
                       {weeklyBuckets.map(w => (
                         <tr key={w.startDate} className="border-b border-zinc-900/60 hover:bg-zinc-800/20 transition-colors">
-                          <td className="py-[6px] px-2 text-[12px] text-white font-medium">{w.label}</td>
+                          <td className="py-[6px] px-2 text-[12px] text-zinc-100 dark:text-white font-medium">{w.label}</td>
                           <td className="py-[6px] px-2 text-[12px] text-right text-zinc-400 tabular-nums">{w.tradeCount}</td>
                           <td className="py-[6px] px-2 text-[12px] text-right"><PnlText v={w.grossPnl} /></td>
                           <td className="py-[6px] px-2 text-[12px] text-right"><PnlText v={w.netPnl} /></td>
@@ -923,13 +923,13 @@ export default function PortfolioDiaryDashboard() {
                   <table className="w-full border-collapse">
                     <thead className="bg-zinc-800">
                       <tr>
-                        <th style={{ color: '#fff' }} className="py-2 px-2 text-xs font-bold uppercase tracking-wide text-left">Month</th>
-                        <th style={{ color: '#fff' }} className="py-2 px-2 text-xs font-bold uppercase tracking-wide text-right">No. of Trades</th>
-                        <th style={{ color: '#fff' }} className="py-2 px-2 text-xs font-bold uppercase tracking-wide text-right">Overall P&amp;L</th>
-                        <th style={{ color: '#fff' }} className="py-2 px-2 text-xs font-bold uppercase tracking-wide text-right">Net P&amp;L</th>
-                        <th style={{ color: '#fff' }} className="py-2 px-2 text-xs font-bold uppercase tracking-wide text-right">Charges</th>
-                        <th style={{ color: '#fff' }} className="py-2 px-2 text-xs font-bold uppercase tracking-wide text-right">Brokerage</th>
-                        <th style={{ color: '#fff' }} className="py-2 px-2 text-xs font-bold uppercase tracking-wide text-right">Total Charges</th>
+                        <th className="py-2 px-2 text-xs font-bold uppercase tracking-wide text-zinc-100 dark:text-zinc-200 text-left">Month</th>
+                        <th className="py-2 px-2 text-xs font-bold uppercase tracking-wide text-zinc-100 dark:text-zinc-200 text-right">No. of Trades</th>
+                        <th className="py-2 px-2 text-xs font-bold uppercase tracking-wide text-zinc-100 dark:text-zinc-200 text-right">Overall P&amp;L</th>
+                        <th className="py-2 px-2 text-xs font-bold uppercase tracking-wide text-zinc-100 dark:text-zinc-200 text-right">Net P&amp;L</th>
+                        <th className="py-2 px-2 text-xs font-bold uppercase tracking-wide text-zinc-100 dark:text-zinc-200 text-right">Charges</th>
+                        <th className="py-2 px-2 text-xs font-bold uppercase tracking-wide text-zinc-100 dark:text-zinc-200 text-right">Brokerage</th>
+                        <th className="py-2 px-2 text-xs font-bold uppercase tracking-wide text-zinc-100 dark:text-zinc-200 text-right">Total Charges</th>
                       </tr>
                     </thead>
                     <tbody>
@@ -939,7 +939,7 @@ export default function PortfolioDiaryDashboard() {
                           onClick={() => setSelectedMonth(monthKey(m.startDate))}
                           className="border-b border-zinc-900/60 hover:bg-zinc-800/20 transition-colors cursor-pointer"
                         >
-                          <td className="py-[6px] px-2 text-[12px] text-white font-medium">{m.label}</td>
+                          <td className="py-[6px] px-2 text-[12px] text-zinc-100 dark:text-white font-medium">{m.label}</td>
                           <td className="py-[6px] px-2 text-[12px] text-right text-zinc-400 tabular-nums">{m.tradeCount}</td>
                           <td className="py-[6px] px-2 text-[12px] text-right"><PnlText v={m.grossPnl} /></td>
                           <td className="py-[6px] px-2 text-[12px] text-right"><PnlText v={m.netPnl} /></td>
@@ -1040,19 +1040,19 @@ export default function PortfolioDiaryDashboard() {
                   <table className="w-full border-collapse">
                     <thead className="bg-zinc-800">
                       <tr>
-                        <th style={{ color: '#fff' }} className="py-2 px-2 text-xs font-bold uppercase tracking-wide text-left">Date</th>
-                        <th style={{ color: '#fff' }} className="py-2 px-2 text-xs font-bold uppercase tracking-wide text-right">No. of Trades</th>
-                        <th style={{ color: '#fff' }} className="py-2 px-2 text-xs font-bold uppercase tracking-wide text-right">Overall P&amp;L</th>
-                        <th style={{ color: '#fff' }} className="py-2 px-2 text-xs font-bold uppercase tracking-wide text-right">Net P&amp;L</th>
-                        <th style={{ color: '#fff' }} className="py-2 px-2 text-xs font-bold uppercase tracking-wide text-right">Charges</th>
-                        <th style={{ color: '#fff' }} className="py-2 px-2 text-xs font-bold uppercase tracking-wide text-right">Brokerage</th>
-                        <th style={{ color: '#fff' }} className="py-2 px-2 text-xs font-bold uppercase tracking-wide text-right">Total Charges</th>
+                        <th className="py-2 px-2 text-xs font-bold uppercase tracking-wide text-zinc-100 dark:text-zinc-200 text-left">Date</th>
+                        <th className="py-2 px-2 text-xs font-bold uppercase tracking-wide text-zinc-100 dark:text-zinc-200 text-right">No. of Trades</th>
+                        <th className="py-2 px-2 text-xs font-bold uppercase tracking-wide text-zinc-100 dark:text-zinc-200 text-right">Overall P&amp;L</th>
+                        <th className="py-2 px-2 text-xs font-bold uppercase tracking-wide text-zinc-100 dark:text-zinc-200 text-right">Net P&amp;L</th>
+                        <th className="py-2 px-2 text-xs font-bold uppercase tracking-wide text-zinc-100 dark:text-zinc-200 text-right">Charges</th>
+                        <th className="py-2 px-2 text-xs font-bold uppercase tracking-wide text-zinc-100 dark:text-zinc-200 text-right">Brokerage</th>
+                        <th className="py-2 px-2 text-xs font-bold uppercase tracking-wide text-zinc-100 dark:text-zinc-200 text-right">Total Charges</th>
                       </tr>
                     </thead>
                     <tbody>
                       {[...dailyPnl].reverse().map(d => (
                         <tr key={d.date} className="border-b border-zinc-900/60 hover:bg-zinc-800/20 transition-colors">
-                          <td className="py-[6px] px-2 text-[12px] text-white font-medium">{fmtDateLong(d.date)}</td>
+                          <td className="py-[6px] px-2 text-[12px] text-zinc-100 dark:text-white font-medium">{fmtDateLong(d.date)}</td>
                           <td className="py-[6px] px-2 text-[12px] text-right text-zinc-400 tabular-nums">{d.tradeCount}</td>
                           <td className="py-[6px] px-2 text-[12px] text-right"><PnlText v={d.grossPnl} /></td>
                           <td className="py-[6px] px-2 text-[12px] text-right"><PnlText v={d.netPnl} /></td>
