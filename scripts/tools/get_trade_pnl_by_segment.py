@@ -39,6 +39,7 @@ from lib.dhan_helper import DhanHelper
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 DEBUG_DIR = os.path.join(PROJECT_ROOT, 'debug')
 OUTPUT_FILE = os.path.join(DEBUG_DIR, 'portfolio_trade_history.json')
+SYNC_STATUS_FILE = os.path.join(DEBUG_DIR, 'portfolio_trades_sync_status.json')
 
 IST = timezone(timedelta(hours=5, minutes=30))
 DEFAULT_FROM_DATE = '2026-04-01'   # F&O / Commodity window — these square off same-day, so this is complete
@@ -72,11 +73,41 @@ CHARGE_FIELDS = ['sebiTax', 'stt', 'brokerageCharges', 'serviceTax', 'exchangeTr
 STATUTORY_CHARGE_FIELDS = ['sebiTax', 'stt', 'serviceTax', 'exchangeTransactionCharges', 'stampDuty']
 
 
+def write_sync_status(error: str = None) -> None:
+    """Stamp the sync-status file the dashboard polls. `error` is surfaced verbatim in the UI so a
+    broker-side outage reads as "sync failed" instead of silently stale data."""
+    try:
+        os.makedirs(DEBUG_DIR, exist_ok=True)
+        status = {}
+        if os.path.exists(SYNC_STATUS_FILE):
+            try:
+                status = json.load(open(SYNC_STATUS_FILE, encoding='utf-8')) or {}
+            except Exception:
+                status = {}
+        status.update({'done': True, 'finished': datetime.now().isoformat(), 'error': error})
+        with open(SYNC_STATUS_FILE, 'w', encoding='utf-8') as f:
+            json.dump(status, f)
+    except Exception as e:
+        print(f"[get_trade_pnl_by_segment] could not write sync status: {e}", file=sys.stderr)
+
+
+class TradeFetchError(RuntimeError):
+    """Dhan's /trades endpoint returned an error rather than an empty page."""
+
+
 def fetch_all_trades(dhan, from_date: str, to_date: str) -> list:
     rows = []
     page = 0
     while True:
         res = dhan.get_trade_history(from_date, to_date, page)
+        # An API failure and a genuinely empty page both arrive as an empty `data` list. Treating the
+        # former as "no more pages" is what silently froze the dashboard at the last good sync (and, on
+        # an incremental run, dropped the refetched boundary day's trades outright) — so fail loudly.
+        if isinstance(res, dict) and res.get('status') == 'failure':
+            remarks = res.get('remarks')
+            detail = remarks if isinstance(remarks, str) else json.dumps(remarks or {})
+            raise TradeFetchError(
+                f"Dhan /trades {from_date}..{to_date} page {page} failed: {detail}")
         data = res.get('data', []) if isinstance(res, dict) else []
         if not data:
             break
@@ -98,6 +129,9 @@ def fetch_today_trade_book(dhan) -> list:
     today's trades show up in the dashboard immediately instead of only after next day's sync."""
     try:
         res = dhan.get_trade_book()
+        if isinstance(res, dict) and res.get('status') == 'failure':
+            print(f"[get_trade_pnl_by_segment] trade book returned failure: {res.get('remarks')}", file=sys.stderr)
+            return []
         data = res.get('data', []) if isinstance(res, dict) else []
         if not isinstance(data, list):
             return []
@@ -409,7 +443,15 @@ def main():
 
         print(f"[get_trade_pnl_by_segment] incremental sync: refetching {resync_from}..{today} "
               f"({len(stored_trades)} stored trades kept before {resync_from})", file=sys.stderr)
-        fetched = fetch_all_trades(dhan, resync_from, today)
+        try:
+            fetched = fetch_all_trades(dhan, resync_from, today)
+        except TradeFetchError as e:
+            # Abort WITHOUT rewriting OUTPUT_FILE — the merge below would otherwise drop the stored
+            # boundary day's trades and present the truncated result as a successful sync.
+            print(f"[get_trade_pnl_by_segment] {e}", file=sys.stderr)
+            write_sync_status(str(e))
+            print(json.dumps({'success': False, 'error': str(e)}))
+            sys.exit(1)
         annotate_trades(fetched)
         # Drop the refetched boundary date from stored (it may have been partial) and merge
         all_trades = [t for t in stored_trades if t['exchangeTime'][:10] < resync_from] + \
@@ -419,7 +461,13 @@ def main():
         equity_from_date = (today_dt - timedelta(days=EQUITY_LOOKBACK_DAYS)).strftime('%Y-%m-%d')
         print(f"[get_trade_pnl_by_segment] fetching trade history {equity_from_date}..{today} "
               f"(equity lookback; F&O/commodity scoped to {from_date}..{today})", file=sys.stderr)
-        all_trades = fetch_all_trades(dhan, equity_from_date, today)
+        try:
+            all_trades = fetch_all_trades(dhan, equity_from_date, today)
+        except TradeFetchError as e:
+            print(f"[get_trade_pnl_by_segment] {e}", file=sys.stderr)
+            write_sync_status(str(e))
+            print(json.dumps({'success': False, 'error': str(e)}))
+            sys.exit(1)
         print(f"[get_trade_pnl_by_segment] {len(all_trades)} trades fetched", file=sys.stderr)
         annotate_trades(all_trades)
 
@@ -567,6 +615,7 @@ def main():
     with open(OUTPUT_FILE, 'w', encoding='utf-8') as f:
         json.dump(output, f)
 
+    write_sync_status(None)
     print(json.dumps({'success': True, 'totalTrades': len(log_source), 'segments': list(segments_output.keys())}))
 
 

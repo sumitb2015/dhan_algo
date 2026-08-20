@@ -16,6 +16,10 @@ interface SyncStatus {
   pid: number;
   started: string;
   done: boolean;
+  finished?: string;
+  // Set by get_trade_pnl_by_segment.py when Dhan's /trades endpoint errors. Without it a broker-side
+  // outage looks identical to "nothing new to sync" and the page just shows stale days.
+  error?: string | null;
 }
 
 function readSyncStatus(): SyncStatus | null {
@@ -40,8 +44,9 @@ function isSyncRunning(): boolean {
 export async function GET() {
   try {
     const syncRunning = isSyncRunning();
+    const syncError = syncRunning ? null : (readSyncStatus()?.error ?? null);
     if (!fs.existsSync(TRADE_HISTORY_FILE)) {
-      return NextResponse.json({ success: true, available: false, syncRunning });
+      return NextResponse.json({ success: true, available: false, syncRunning, syncError });
     }
     const data = JSON.parse(fs.readFileSync(TRADE_HISTORY_FILE, 'utf-8'));
 
@@ -55,7 +60,7 @@ export async function GET() {
       marketTradingDates = nifty.filter((r) => r.date >= data.fromDate && r.date <= data.toDate).map((r) => r.date);
     }
 
-    return NextResponse.json({ success: true, available: true, syncRunning, marketTradingDates, ...data });
+    return NextResponse.json({ success: true, available: true, syncRunning, syncError, marketTradingDates, ...data });
   } catch {
     return NextResponse.json({ success: true, available: false, syncRunning: false });
   }
@@ -88,7 +93,7 @@ export async function POST(req: NextRequest) {
   child.unref();
 
   try {
-    fs.writeFileSync(SYNC_STATUS_FILE, JSON.stringify({ pid: child.pid, started: new Date().toISOString(), done: false }));
+    fs.writeFileSync(SYNC_STATUS_FILE, JSON.stringify({ pid: child.pid, started: new Date().toISOString(), done: false, error: null }));
   } catch { /* ignore */ }
 
   return NextResponse.json({ started: true, pid: child.pid });

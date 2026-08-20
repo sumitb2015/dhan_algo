@@ -56,6 +56,8 @@ interface TradeHistoryResponse {
   success: boolean;
   available: boolean;
   syncRunning?: boolean;
+  syncError?: string | null;
+  generatedAt?: string;
   fromDate?: string;
   toDate?: string;
   marketTradingDates?: string[];
@@ -271,6 +273,16 @@ export default function WeeklyTargetDashboard() {
   useEffect(() => { fetchTargetConfig(); }, [fetchTargetConfig]);
 
   const { syncing, syncError, startSync } = useTradeSync(fetchData);
+  // A failed sync leaves the stored file untouched, so the page would otherwise just look stale.
+  // Prefer the client-side error (this session's sync); fall back to the last run's server-side one.
+  const bannerError = syncError ?? data?.syncError ?? null;
+
+  // Latest date the stored trade history actually covers. Shown in the header because a broker-side
+  // gap and a genuinely flat day render identically in the week table otherwise.
+  const syncedThrough = useMemo(() => {
+    const dates = (data?.trades ?? []).map(t => t.date);
+    return dates.length ? dates.reduce((a, b) => (b > a ? b : a)) : null;
+  }, [data]);
 
   const todayStr = useMemo(() => todayIstDateString(), []);
 
@@ -588,6 +600,19 @@ export default function WeeklyTargetDashboard() {
               <ChevronRight className="w-3.5 h-3.5" />
             </button>
           </div>
+          {syncedThrough && (
+            <span
+              title={data?.generatedAt ? `Last sync run: ${new Date(data.generatedAt).toLocaleString('en-IN')}` : undefined}
+              className={cn(
+                'text-[10px] font-bold uppercase tracking-wide px-2 py-1 rounded-md border',
+                syncedThrough < todayStr
+                  ? 'border-amber-500/30 bg-amber-500/10 text-amber-300'
+                  : 'border-zinc-800 bg-zinc-900 text-zinc-400',
+              )}
+            >
+              Trades thru {syncedThrough}
+            </span>
+          )}
           <button
             onClick={startSync}
             disabled={syncing || !data?.available}
@@ -607,8 +632,10 @@ export default function WeeklyTargetDashboard() {
         <Link href="/portfolio/trades" className="text-[11px] font-medium px-2 py-0.5 rounded-full border border-zinc-800 bg-zinc-900/60 text-zinc-400 hover:text-amber-300 hover:border-amber-500/30 transition-all">Trade P&amp;L</Link>
       </div>
 
-      {syncError && (
-        <div className="mx-6 mt-3 px-3 py-2 bg-red-900/20 border border-red-700/40 rounded-lg text-xs text-red-400">{syncError}</div>
+      {bannerError && (
+        <div className="mx-6 mt-3 px-3 py-2 bg-red-900/20 border border-red-700/40 rounded-lg text-xs text-red-400">
+          Last trade sync failed — days after the date below are missing, not empty. {bannerError}
+        </div>
       )}
       {targetSaveError && (
         <div className="mx-6 mt-3 px-3 py-2 bg-red-900/20 border border-red-700/40 rounded-lg text-xs text-red-400">{targetSaveError}</div>

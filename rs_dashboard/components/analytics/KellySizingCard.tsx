@@ -17,7 +17,7 @@ function Tile({
   label: string; value: string; sub?: React.ReactNode; color?: string; title?: string;
 }) {
   return (
-    <div className="flex-1 rounded-lg border border-zinc-800 bg-zinc-900 px-4 py-3" title={title}>
+    <div className="min-w-[180px] flex-1 rounded-lg border border-zinc-800 bg-zinc-900 px-4 py-3" title={title}>
       <div className="text-[10px] font-bold uppercase tracking-widest text-zinc-400">{label}</div>
       <div className={cn('mt-1 font-mono text-xl font-bold tabular-nums', color ?? 'text-zinc-100')}>{value}</div>
       {sub && <div className="mt-0.5 text-[11px] text-zinc-500">{sub}</div>}

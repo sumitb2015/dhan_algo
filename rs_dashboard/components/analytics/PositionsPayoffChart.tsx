@@ -11,7 +11,7 @@
  * components/BasketPayoffChart.tsx so the two read as one family.
  */
 
-import React, { useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ZoomIn, ZoomOut, Maximize2, Minimize2, AlertTriangle } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
@@ -35,12 +35,20 @@ interface Props {
   onZoomOut: () => void;
   canZoomIn: boolean;
   canZoomOut: boolean;
+  /** Plot height in px. Fixed, not derived from width — see the note on H below. */
+  height?: number;
   /** Rendered as a warning strip: legs priced intrinsically for want of IV. */
   ivWarning?: string | null;
   emptyReason?: string;
 }
 
+// The SVG is drawn at the container's true pixel size rather than scaled up from a fixed
+// viewBox — at `w-full` on a wide monitor a 900x280 viewBox scaled to ~1500px wide, dragging
+// the height to ~470px and pushing the chart past the fold. Drawing 1:1 keeps the height put
+// no matter how wide the screen is; only the x-axis gets more room.
 const H = 280;
+const H_FULL = 560;
+const W_MIN = 560;
 const PAD = { top: 30, right: 64, bottom: 38, left: 74 };
 
 function fmtInrCompact(n: number): string {
@@ -91,13 +99,31 @@ export function pnlAt(curve: CurvePoint[], spot: number): number | null {
 export default function PositionsPayoffChart({
   expiryCurve, targetCurve, breakevens, spot, targetSpot,
   expiryLabel, targetLabel, oiBars, showOi, onToggleOi,
-  onZoomIn, onZoomOut, canZoomIn, canZoomOut, ivWarning, emptyReason,
+  onZoomIn, onZoomOut, canZoomIn, canZoomOut, height, ivWarning, emptyReason,
 }: Props) {
   const svgRef = useRef<SVGSVGElement | null>(null);
   const [hoverSpot, setHoverSpot] = useState<number | null>(null);
   const [full, setFull] = useState(false);
+  const [boxW, setBoxW] = useState(900);
+  const roRef = useRef<ResizeObserver | null>(null);
 
-  const W = full ? 1400 : 900;
+  // Callback ref, not useRef + useEffect: the component early-returns a placeholder while the
+  // curve is still loading, so an effect keyed on [] would run before this div ever mounts and
+  // never attach the observer — leaving the chart pinned at its 900px default width.
+  const boxRef = useCallback((el: HTMLDivElement | null) => {
+    roRef.current?.disconnect();
+    roRef.current = null;
+    if (!el || typeof ResizeObserver === 'undefined') return;
+    const ro = new ResizeObserver(([entry]) => setBoxW(entry.contentRect.width));
+    ro.observe(el);
+    roRef.current = ro;
+    setBoxW(el.clientWidth);
+  }, []);
+
+  useEffect(() => () => roRef.current?.disconnect(), []);
+
+  const W = Math.max(W_MIN, Math.round(boxW));
+  const H_ = full ? H_FULL : (height ?? H);
 
   const model = useMemo(() => {
     if (expiryCurve.length < 2) return null;
@@ -117,7 +143,7 @@ export default function PositionsPayoffChart({
     yLo -= yPad; yHi += yPad;
 
     const sx = (x: number) => PAD.left + ((x - xLo) / (xHi - xLo)) * (W - PAD.left - PAD.right);
-    const sy = (y: number) => PAD.top + ((yHi - y) / (yHi - yLo)) * (H - PAD.top - PAD.bottom);
+    const sy = (y: number) => PAD.top + ((yHi - y) / (yHi - yLo)) * (H_ - PAD.top - PAD.bottom);
 
     const path = (c: CurvePoint[]) =>
       c.map((p, i) => `${i ? 'L' : 'M'}${sx(p.spot).toFixed(1)},${sy(p.pnl).toFixed(1)}`).join('');
@@ -129,7 +155,7 @@ export default function PositionsPayoffChart({
     // OI never dictates the rupee axis the P&L curve is read against.
     const visibleOi = (oiBars ?? []).filter((b) => b.strike >= xLo && b.strike <= xHi);
     const maxOi = visibleOi.length ? Math.max(...visibleOi.flatMap((b) => [b.callOi, b.putOi])) : 0;
-    const oiH = (H - PAD.top - PAD.bottom) * 0.42;
+    const oiH = (H_ - PAD.top - PAD.bottom) * 0.42;
     const syOi = (v: number) => (maxOi > 0 ? (v / maxOi) * oiH : 0);
 
     return {
@@ -144,7 +170,7 @@ export default function PositionsPayoffChart({
         ? Math.max(2, ((W - PAD.left - PAD.right) / visibleOi.length) * 0.34)
         : 4,
     };
-  }, [expiryCurve, targetCurve, oiBars, W]);
+  }, [expiryCurve, targetCurve, oiBars, W, H_]);
 
   if (!model) {
     return (
@@ -173,7 +199,7 @@ export default function PositionsPayoffChart({
   const tooltipLeft = sx(readoutSpot) > W * 0.6;
 
   return (
-    <div className={cn(full && 'fixed inset-0 z-50 overflow-auto bg-zinc-950 p-6')}>
+    <div ref={boxRef} className={cn('w-full', full && 'fixed inset-0 z-50 overflow-auto bg-zinc-950 p-6')}>
       {/* Legend + controls */}
       <div className="mb-2 flex flex-wrap items-center gap-3">
         {model.maxOi > 0 && (
@@ -226,8 +252,10 @@ export default function PositionsPayoffChart({
 
       <svg
         ref={svgRef}
-        viewBox={`0 0 ${W} ${H}`}
-        className="h-auto w-full select-none"
+        viewBox={`0 0 ${W} ${H_}`}
+        width={W}
+        height={H_}
+        className="block max-w-full select-none"
         role="img"
         aria-label="Combined payoff for open positions"
         onMouseMove={onMove}
@@ -235,7 +263,7 @@ export default function PositionsPayoffChart({
       >
         <defs>
           <clipPath id="pa-clip-profit"><rect x={0} y={0} width={W} height={zeroY} /></clipPath>
-          <clipPath id="pa-clip-loss"><rect x={0} y={zeroY} width={W} height={H - zeroY} /></clipPath>
+          <clipPath id="pa-clip-loss"><rect x={0} y={zeroY} width={W} height={H_ - zeroY} /></clipPath>
         </defs>
 
         {/* Y grid + rupee axis */}
@@ -255,13 +283,13 @@ export default function PositionsPayoffChart({
             {model.visibleOi.map((b) => (
               <g key={`oi${b.strike}`}>
                 <rect x={sx(b.strike) - model.barW - 0.5} width={model.barW}
-                  y={H - PAD.bottom - model.syOi(b.callOi)} height={model.syOi(b.callOi)} fill="#f43f5e" />
+                  y={H_ - PAD.bottom - model.syOi(b.callOi)} height={model.syOi(b.callOi)} fill="#f43f5e" />
                 <rect x={sx(b.strike) + 0.5} width={model.barW}
-                  y={H - PAD.bottom - model.syOi(b.putOi)} height={model.syOi(b.putOi)} fill="#10b981" />
+                  y={H_ - PAD.bottom - model.syOi(b.putOi)} height={model.syOi(b.putOi)} fill="#10b981" />
               </g>
             ))}
             {model.oiTicks.map((t) => (
-              <text key={`oit${t}`} x={W - PAD.right + 8} y={H - PAD.bottom - model.syOi(t) + 3.5}
+              <text key={`oit${t}`} x={W - PAD.right + 8} y={H_ - PAD.bottom - model.syOi(t) + 3.5}
                 fontSize={9.5} fill="#71717a" className="font-mono">
                 {fmtOiCompact(t)}
               </text>
@@ -271,7 +299,7 @@ export default function PositionsPayoffChart({
 
         {/* X axis */}
         {model.xTicks.map((t) => (
-          <text key={`x${t}`} x={sx(t)} y={H - PAD.bottom + 17} textAnchor="middle" fontSize={10.5}
+          <text key={`x${t}`} x={sx(t)} y={H_ - PAD.bottom + 17} textAnchor="middle" fontSize={10.5}
             fill="#a1a1aa" className="font-mono">
             {t.toLocaleString('en-IN', { maximumFractionDigits: 0 })}
           </text>
@@ -303,7 +331,7 @@ export default function PositionsPayoffChart({
         {/* Current price */}
         {spot >= xLo && spot <= xHi && (
           <g>
-            <line x1={sx(spot)} x2={sx(spot)} y1={PAD.top} y2={H - PAD.bottom} stroke="#ef4444" strokeWidth={1.25} />
+            <line x1={sx(spot)} x2={sx(spot)} y1={PAD.top} y2={H_ - PAD.bottom} stroke="#ef4444" strokeWidth={1.25} />
             <text x={sx(spot)} y={PAD.top - 9} textAnchor="middle" fontSize={10} fill="#ef4444" className="font-mono font-bold">
               {spot.toLocaleString('en-IN', { maximumFractionDigits: 2 })}
             </text>
@@ -313,7 +341,7 @@ export default function PositionsPayoffChart({
         {/* Readout crosshair — follows the cursor, parks on the target price otherwise */}
         {readoutSpot >= xLo && readoutSpot <= xHi && expiryPnl !== null && (
           <g pointerEvents="none">
-            <line x1={sx(readoutSpot)} x2={sx(readoutSpot)} y1={PAD.top} y2={H - PAD.bottom}
+            <line x1={sx(readoutSpot)} x2={sx(readoutSpot)} y1={PAD.top} y2={H_ - PAD.bottom}
               stroke="#a1a1aa" strokeWidth={1} strokeDasharray="2 3" />
             <circle cx={sx(readoutSpot)} cy={sy(expiryPnl)} r={4.5}
               fill={expiryPnl >= 0 ? '#10b981' : '#ef4444'} stroke="#18181b" strokeWidth={2} />

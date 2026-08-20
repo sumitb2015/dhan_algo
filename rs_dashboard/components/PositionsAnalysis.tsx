@@ -537,7 +537,8 @@ export default function PositionsAnalysis({ underlying }: { underlying: Analytic
         )}
 
         <div className="grid grid-cols-1 gap-4 xl:grid-cols-[minmax(0,640px)_minmax(0,1fr)]">
-          {/* ── Left: positions ─────────────────────────────────────────── */}
+          {/* ── Left: positions + sizing ────────────────────────────────── */}
+          <div className="flex flex-col gap-4">
           <section className="space-y-3 rounded-xl border border-zinc-800 bg-zinc-950 p-3">
             <div className="flex items-center gap-2">
               <h2 className="text-xs font-bold uppercase tracking-wider text-white">{underlying} Positions</h2>
@@ -598,6 +599,10 @@ export default function PositionsAnalysis({ underlying }: { underlying: Analytic
               : <PositionsLegTable legs={visibleLegs} unparseable={unparseable} lotSize={lotSize ?? 0} />}
           </section>
 
+          <KellySizingCard
+            exposure={exposure} stats={kelly} capital={funds} nav={funds} stopMultiple={2} />
+          </div>
+
           {/* ── Right: analytics ────────────────────────────────────────── */}
           <section className="space-y-4">
             <div className="flex items-center gap-1 border-b border-zinc-800">
@@ -617,12 +622,10 @@ export default function PositionsAnalysis({ underlying }: { underlying: Analytic
               standaloneMargin={standaloneMargin} standaloneMarginReason={standaloneMarginReason}
               marginAvailable={funds} />}
 
-            <KellySizingCard
-              exposure={exposure} stats={kelly} capital={funds} nav={funds} stopMultiple={2} />
-
             {tab === 'payoff' && (
               <div className="rounded-xl border border-zinc-800 bg-zinc-950 p-3">
                 <PositionsPayoffChart
+                  height={440}
                   expiryCurve={expiryCurve}
                   targetCurve={targetCurve}
                   breakevens={stats?.breakevensExpiry ?? []}
