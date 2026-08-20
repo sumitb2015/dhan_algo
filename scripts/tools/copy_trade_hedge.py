@@ -109,8 +109,19 @@ def save_hedge_state(state: dict) -> bool:
     return atomic_write(HEDGE_FILE, state)
 
 
-def hedge_qty_today() -> dict:
-    """{symbol: long qty} the bridge holds as hedges today.
+def entry_broker(h: dict) -> str:
+    """Which child account a hedge entry belongs to.
+
+    Entries written before the reactive child hedge existed carry no `broker`
+    key and are all Zerodha, so that is the default. Every caller must go
+    through this rather than reading the key directly, or legacy entries would
+    silently belong to nobody.
+    """
+    return str(h.get('broker') or 'zerodha').lower()
+
+
+def hedge_qty_today(broker: str = 'zerodha') -> dict:
+    """{symbol: long qty} the bridge holds as hedges today for `broker`.
 
     Quantities, not just symbols, because the safety watchdog must be able to
     NET the hedge out of a position rather than skip the symbol wholesale. The
@@ -119,13 +130,22 @@ def hedge_qty_today() -> dict:
     genuinely orphaned short from the watchdog, which is the one thing it exists
     to catch.
 
+    Scoped per broker because the same strike can be hedged in more than one
+    child account: netting Kotak's hedge out of a Zerodha position would hide a
+    real orphan there.
+
     Uses placed_qty where known (what actually went through) and falls back to
     the intended qty for entries recorded just before a crash.
     """
     out = {}
     for h in load_hedge_state().get('hedges', []):
         sym = h.get('symbol')
-        if not sym:
+        if not sym or entry_broker(h) != str(broker).lower():
+            continue
+        # Squared off earlier today: counting it would net a phantom long out of
+        # the safety exit, which then over-closes a real short at that strike
+        # (residual = -130 - 130 -> BUY 260) and flips it into a naked long.
+        if h.get('closed_at'):
             continue
         q = h.get('placed_qty')
         if q is None:
@@ -137,15 +157,37 @@ def hedge_qty_today() -> dict:
     return out
 
 
-def hedge_symbols_today() -> set:
+def hedge_symbols_today(broker: str = None) -> set:
     """Symbols the bridge holds (or intended to hold) as hedges today.
 
     The bridge uses this to keep hedges OUT of its watchdog close scope, and
     copy_trade_reconcile uses it to avoid reporting them as zombies. Includes
     intended-but-unconfirmed hedges on purpose: a crash between 'about to buy'
     and 'bought' must not leave a position nothing knows about.
+
+    `broker=None` returns every child's hedge symbols, which is what the
+    zombie check wants — a symbol hedged anywhere is never a zombie.
     """
-    return {h.get('symbol') for h in load_hedge_state().get('hedges', []) if h.get('symbol')}
+    return {h.get('symbol') for h in load_hedge_state().get('hedges', [])
+            if h.get('symbol') and (broker is None or entry_broker(h) == str(broker).lower())}
+
+
+def child_hedge_lots_today(broker: str) -> int:
+    """Hedge lots bought for `broker` today — the daily cap's running total.
+
+    Read from the state file rather than a counter in memory so the cap
+    survives a bridge restart; load_hedge_state is day-scoped, so it resets
+    itself at the date rollover without any explicit cleanup.
+    """
+    total = 0
+    for h in load_hedge_state().get('hedges', []):
+        if entry_broker(h) != str(broker).lower():
+            continue
+        try:
+            total += int(h.get('lots') or 0)
+        except (TypeError, ValueError):
+            continue
+    return total
 
 
 def get_spot(kite) -> float:
@@ -402,6 +444,202 @@ def place_hedges(kite, plan, product: str, freeze_qty: int, armed: bool, state: 
     return results
 
 
+# ── reactive child hedge (broker-agnostic, via the ChildBroker interface) ────
+#
+# The solver above is Zerodha-only because it prices every candidate size with
+# kite.basket_order_margins. Kotak has no basket endpoint, so nothing there can
+# answer "how many lots do I need" up front. What follows takes the opposite
+# approach and needs no such API: buy a small fixed step, retry the blocked
+# order, and let the RETRY be the measurement. Repeat until it clears or the
+# daily lot cap stops it.
+#
+# Prices come from Dhan's option chain, not the child's: Kotak exposes no quote
+# API in this repo at all (its instrument cache has no price field, and an
+# illiquid strike is only discovered when a MARKET order comes back with
+# stCode 1041). Dhan gives every strike for an expiry in one call, and both
+# sides key strikes as plain rupee floats and expiries as YYYY-MM-DD, so they
+# line up with no conversion.
+
+
+def pick_child_hedge(helper, broker, short_strike, expiry: str, opt_type: str,
+                     premium_cap: float = 5.0, underlying: str = 'NIFTY'):
+    """Nearest affordable OTM strike that hedges a blocked short leg.
+
+    Returns (pick, error). `pick` mirrors pick_hedge_candidates' shape so both
+    paths log identically.
+
+    NEAREST to the short, not cheapest: margin relief scales with how narrow
+    the spread is, so the closest strike we can still buy under the cap frees
+    the most. Blocking (an HTTP call to Dhan) — watchdog thread only.
+    """
+    opt_type = str(opt_type or '').upper()
+    if opt_type not in ('CE', 'PE'):
+        return None, f'unhedgeable opt_type {opt_type!r}'
+    try:
+        short_strike = float(short_strike)
+    except (TypeError, ValueError):
+        return None, f'unusable short strike {short_strike!r}'
+
+    try:
+        df = helper.get_option_chain_df(underlying, expiry)
+    except Exception as e:
+        return None, f'option chain fetch failed: {e}'
+    if df is None or df.empty:
+        # Data-API errors are silent by default — surface the real reason
+        # rather than reporting "no strikes" for an expired subscription.
+        return None, (f'option chain empty for {expiry}'
+                      + (f' ({helper.last_api_error})' if helper.last_api_error else ''))
+
+    col = 'ce_last_price' if opt_type == 'CE' else 'pe_last_price'
+    if col not in df.columns:
+        return None, f'option chain has no {col} column'
+
+    candidates = []
+    for strike, row in df.iterrows():
+        try:
+            strike = float(strike)
+        except (TypeError, ValueError):
+            continue
+        # A hedge must sit FURTHER OTM than the short or it is not the spread
+        # we are trying to build.
+        if opt_type == 'CE' and strike <= short_strike:
+            continue
+        if opt_type == 'PE' and strike >= short_strike:
+            continue
+        try:
+            ltp = float(row.get(col) or 0.0)
+        except (TypeError, ValueError):
+            continue
+        # ltp > 0 filters untraded strikes that quote 0 and look free while
+        # being unfillable — the same guard pick_hedge_candidates relies on.
+        if not (0 < ltp <= premium_cap):
+            continue
+        candidates.append((abs(strike - short_strike), strike, ltp))
+
+    if not candidates:
+        return None, (f'no {opt_type} strike beyond {short_strike:g} priced at or under '
+                      f'Rs {premium_cap:g} in the {expiry} chain')
+
+    candidates.sort(key=lambda t: t[0])
+    for _, strike, ltp in candidates:
+        # The child may not carry every strike Dhan quotes; fall through to the
+        # next-nearest rather than abandoning the hedge.
+        symbol = broker.find_symbol(strike, expiry, opt_type)
+        if not symbol:
+            continue
+        lot_size = int(broker.lot_size_for(symbol) or 0) or 65
+        return {
+            'symbol': symbol, 'strike': strike, 'opt_type': opt_type,
+            'lot_size': lot_size, 'ltp': ltp,
+            'premium_per_lot': round(ltp * lot_size, 2),
+        }, None
+    return None, (f'{len(candidates)} affordable {opt_type} strike(s) found but none resolve '
+                  f'in the {broker.name} instrument cache')
+
+
+def place_child_hedge(broker, pick: dict, lots: int, product: str, armed: bool, state: dict):
+    """Buy `lots` of the picked hedge on `broker`. Returns the state entry.
+
+    Never raises — place_child_order reports failure by return value, and a
+    hedge that could not be bought must degrade to "no extra capacity", not
+    take down the retry drain.
+    """
+    lot_size = int(pick.get('lot_size') or 65)
+    qty = int(lots) * lot_size
+    entry = {
+        'broker': broker.name, 'symbol': pick['symbol'], 'qty': qty, 'lots': int(lots),
+        'product': product, 'opt_type': pick.get('opt_type'), 'strike': pick.get('strike'),
+        'premium_estimate': round(float(pick.get('ltp') or 0.0) * qty, 2),
+        'placed_at': datetime.now().isoformat(), 'order_ids': [], 'armed': armed,
+        'reason': 'margin_topup',
+    }
+    if not armed:
+        entry['result'] = 'dry_run'
+        return entry
+
+    # Persist intent first: if we die mid-placement the bridge and the reconcile
+    # tool still know this symbol is a hedge and not a zombie. This is also what
+    # makes the daily lot cap crash-safe — the lots are counted from here.
+    state.setdefault('hedges', []).append(entry)
+    save_hedge_state(state)
+
+    # margin_check=False deliberately: this order IS the cure for the shortfall,
+    # so gating it on that shortfall would deadlock the ladder. It is a small
+    # premium debit (2 lots at <=Rs 5 is ~Rs 650), not a margin consumer.
+    placed, order_ids, err = broker.place_child_order(
+        pick['symbol'], 'BUY', qty, product=product,
+        margin_check=False, price=pick.get('ltp'),
+    )
+    entry['placed_qty'] = placed
+    entry['order_ids'] = [str(o) for o in order_ids]
+    entry['lots'] = int(placed // lot_size) if lot_size else 0
+    if err is None and placed:
+        entry['result'] = 'placed'
+        print(f'[copy_trade_hedge] Bought {broker.name} top-up hedge {pick["symbol"]} '
+              f'x{placed} ({product}) -> {entry["order_ids"]}', flush=True)
+    else:
+        entry['result'] = 'error'
+        entry['error'] = err or 'nothing placed'
+        print(f'[copy_trade_hedge] ERROR buying {broker.name} top-up hedge '
+              f'{pick["symbol"]}: {entry["error"]}', flush=True)
+    state['premium_paid'] = round(
+        float(state.get('premium_paid') or 0.0)
+        + float(pick.get('ltp') or 0.0) * placed, 2)
+    save_hedge_state(state)
+    return entry
+
+
+def close_child_hedges(broker, armed: bool = True):
+    """Square off `broker`'s top-up hedges. Returns per-symbol result dicts.
+
+    Sells only what the broker still shows, so a hedge already closed by hand
+    (or never actually filled) is reported rather than turned into a new short.
+    """
+    state = load_hedge_state()
+    mine = [h for h in state.get('hedges', [])
+            if entry_broker(h) == broker.name and not h.get('closed_at')]
+    if not mine:
+        return []
+
+    try:
+        rows = {r['symbol']: r for r in broker.positions_rows()}
+    except Exception as e:
+        return [{'symbol': h.get('symbol'), 'result': 'error',
+                 'error': f'position fetch failed: {e}'} for h in mine]
+
+    results = []
+    for h in mine:
+        symbol = h.get('symbol')
+        intended = int(h.get('placed_qty') or h.get('qty') or 0)
+        row = rows.get(symbol)
+        live = int(row['qty']) if row else 0
+        # Clamp to what is actually held and long: never flip a hedge into a
+        # short by selling more than the broker still shows.
+        qty = min(intended, live) if live > 0 else 0
+        res = {'symbol': symbol, 'qty': qty, 'broker': broker.name}
+        if qty <= 0:
+            res['result'] = 'already_flat'
+        elif not armed:
+            res['result'] = 'dry_run'
+        else:
+            try:
+                res['order_id'] = broker.close_position(row, qty, 'SELL')
+                res['result'] = 'closed'
+                print(f'[copy_trade_hedge] Closed {broker.name} hedge {symbol} x{qty} '
+                      f'-> {res["order_id"]}', flush=True)
+            except Exception as e:
+                res['result'] = 'error'
+                res['error'] = str(e)
+                print(f'[copy_trade_hedge] ERROR closing {broker.name} hedge '
+                      f'{symbol}: {e}', flush=True)
+        if res['result'] in ('closed', 'already_flat'):
+            h['closed_at'] = datetime.now().isoformat()
+        h.setdefault('close_results', []).append(res)
+        results.append(res)
+    save_hedge_state(state)
+    return results
+
+
 def build_plan(kite, helper, cfg: dict, expiry: str, underlying: str = 'NIFTY',
                freeze_qty: int = 1800):
     """Work out what to hedge. Pure analysis — places nothing.
@@ -629,7 +867,14 @@ def close_hedges(kite, armed: bool = True):
       - A partially-filled or manually-closed hedge must not be over-sold.
     """
     state = load_hedge_state()
-    hedges = [h for h in state.get('hedges', []) if h.get('symbol')]
+    # Zerodha's entries only. The file is shared with the reactive per-child
+    # hedge now, and a Kotak symbol here would be looked up in a Zerodha
+    # position map that cannot contain it (the two brokers use different
+    # tradingsymbol formats — NIFTY2680424750CE vs NIFTY26AUG24750CE), so it
+    # would report a misleading 'not_open' for a hedge that is very much open.
+    # close_child_hedges() owns those.
+    hedges = [h for h in state.get('hedges', [])
+              if h.get('symbol') and entry_broker(h) == 'zerodha' and not h.get('closed_at')]
     if not hedges:
         return []
     try:
@@ -673,6 +918,13 @@ def close_hedges(kite, armed: bool = True):
         except Exception as e:
             results.append({'symbol': sym, 'result': 'error', 'error': str(e)})
             print(f'[copy_trade_hedge] ERROR closing hedge {sym}: {e}', flush=True)
+    # Per-entry, not just file-level: hedge_qty_today() reads these to decide
+    # what is still held, and a same-day restart must not re-adopt a hedge that
+    # was already squared off.
+    closed_syms = {r['symbol'] for r in results if r.get('result') in ('closed', 'not_open')}
+    for h in hedges:
+        if h.get('symbol') in closed_syms:
+            h['closed_at'] = datetime.now().isoformat()
     state['closed_at'] = datetime.now().isoformat()
     state['close_results'] = results
     save_hedge_state(state)

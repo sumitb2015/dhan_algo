@@ -110,6 +110,33 @@ SAFETY_EXIT_BACKOFF_SEC = 60
 RETRY_MAX_ATTEMPTS = 3
 RETRY_BACKOFF_SEC = 30
 
+# A child broker that fails to initialise is retried on a linear backoff, then
+# left down. Small on purpose: this covers a transient blip, not bad credentials.
+BROKER_INIT_MAX_ATTEMPTS = 5
+BROKER_INIT_BACKOFF_SEC = 30
+
+# Reactive margin top-up hedge. When a child cannot fund a SELL, buy a far-OTM
+# long in the same expiry and option type: that turns the naked short into a
+# spread and collapses SPAN (the startup hedge measured ~Rs 169 of premium
+# freeing ~Rs 97,634 of margin). Then retry, and if it is STILL short buy
+# another step. The retry is the measurement, which is why this works on Kotak
+# where the basket-margin solver in copy_trade_hedge.py cannot.
+#
+# Defaults are overridden per key from copy_trade_config.json.
+CHILD_HEDGE_DEFAULTS = {
+    'child_hedge_enabled': True,
+    'child_hedge_brokers': ['kotak'],   # Zerodha already gets a solved startup hedge
+    'child_hedge_lot_step': 2,          # lots per round
+    'child_hedge_max_lots': 10,         # per broker per day — the only spend control
+    'child_hedge_premium_cap': 5.0,     # max Rs per contract when picking a strike
+}
+
+
+def child_hedge_cfg(cfg: dict, key: str):
+    """One child-hedge setting, falling back to the built-in default."""
+    value = (cfg or {}).get(key)
+    return CHILD_HEDGE_DEFAULTS[key] if value is None else value
+
 # A fast-path failure (place_child_order raised, e.g. transient
 # RemoteDisconnected) gets ONE quick re-try via the retry queue rather than
 # waiting the full RETRY_BACKOFF_SEC — on an exit, every second here is a
@@ -556,7 +583,8 @@ def maybe_place_deferred_hedge(kite, helper, cfg: dict, hedge_ctx: dict, hedge_q
 
 def watchdog_loop(helper, brokers: dict, stop_event: threading.Event, state: dict,
                   retry_queue: list, replication_scopes: dict,
-                  hedge_qty=None, cfg_product='MIS', hedge_ctx=None, ensure_broker=None):
+                  hedge_qty=None, cfg_product='MIS', hedge_ctx=None, ensure_broker=None,
+                  child_hedge_qty=None):
     """
     The bridge's single background thread. Everything that needs to make a
     blocking broker call on a timer lives here, deliberately on ONE thread: the
@@ -640,9 +668,17 @@ def watchdog_loop(helper, brokers: dict, stop_event: threading.Event, state: dic
                 for child in children:
                     ensure_broker(child.get('broker'))
 
-            if armed and market_is_open():
-                drain_retry_queue(brokers, retry_queue, state, replication_scopes,
-                                  margin_check=bool(cfg.get('margin_check', True)))
+            market_open = market_is_open()
+            if state.get('market_was_open') and not market_open:
+                # Nothing will drain the queue again today; record the gaps now
+                # rather than let them disappear with the process.
+                flush_retry_queue(retry_queue, state, 'Market closed')
+            state['market_was_open'] = market_open
+
+            if armed and market_open:
+                drain_retry_queue(helper, brokers, retry_queue, state, replication_scopes,
+                                  margin_check=bool(cfg.get('margin_check', True)),
+                                  cfg=cfg, child_hedge_qty=child_hedge_qty)
                 zerodha = brokers.get('zerodha')
                 if zerodha is not None:
                     maybe_place_deferred_hedge(zerodha.kite, helper, cfg, hedge_ctx,
@@ -731,18 +767,12 @@ def watchdog_loop(helper, brokers: dict, stop_event: threading.Event, state: dic
                 # (skip), still-short for a hedge sharing a strike with an orphan
                 # (close the residual, keeping the hedge intact).
                 #
-                # hedge_qty is Zerodha-only, so it nets out only there; on any
-                # other broker there are no hedges to confuse with orphans.
-                hedges = hedge_qty if bname == 'zerodha' else {}
-                open_positions = []
-                for row in rows:
-                    sym = row['symbol']
-                    if sym not in universe or sym not in scope:
-                        continue
-                    residual = row['qty'] - int(hedges.get(sym, 0))
-                    if residual == 0:
-                        continue
-                    open_positions.append({'row': row, 'symbol': sym, 'residual': residual})
+                # hedge_qty holds the Zerodha startup hedge; child_hedge_qty
+                # holds the reactive margin top-up hedges, keyed per broker.
+                # Both must net out here or the safety exit force-closes the
+                # very longs that are funding the child's short book.
+                hedges = broker_hedges(bname, hedge_qty, child_hedge_qty)
+                open_positions = positions_to_close(rows, universe, scope, hedges)
 
                 open_symbols = {e['symbol'] for e in open_positions}
                 for sym in list(attempts):
@@ -802,8 +832,137 @@ def watchdog_loop(helper, brokers: dict, stop_event: threading.Event, state: dic
             print(f'[copy_trade_bridge] ERROR in watchdog_loop: {e}', flush=True)
 
 
-def drain_retry_queue(brokers: dict, retry_queue: list, state: dict,
-                      replication_scopes: dict = None, margin_check: bool = False):
+# Substrings that mark a broker rejection as "could not fund it", as opposed to
+# an illiquid strike, a dead session, or a bad symbol. Only these are worth
+# answering with another hedge step; anything else must take the normal retry
+# path, or a malformed order would buy hedges until the daily cap ran out.
+MARGIN_REJECTION_HINTS = ('margin', 'insufficient', 'fund', 'rms', 'shortfall')
+
+
+def is_reducing(held_qty: int, side: str, qty: int) -> bool:
+    """Shared with ChildBroker.check_margin — one definition, no drift."""
+    from lib.zerodha.margin import is_reducing as _impl
+    return _impl(held_qty, side, qty)
+
+
+def is_margin_rejection(err) -> bool:
+    text = str(err or '').lower()
+    return any(h in text for h in MARGIN_REJECTION_HINTS)
+
+
+def ensure_hedge_capacity(helper, broker, item: dict, cfg: dict, child_hedge_qty: dict,
+                          underlying: str = 'NIFTY'):
+    """Buy one step of margin top-up hedge for a blocked leg. Returns (lots, detail).
+
+    `lots == 0` means no hedge was bought and the caller should fall through to
+    its normal margin-blocked handling; the reason is in detail['error'].
+
+    Only ever called from the watchdog thread — it fetches an option chain over
+    HTTP, which must never happen on the WS callback thread.
+    """
+    detail = {'broker': broker.name}
+    bname = broker.name
+
+    # SELL only. A blocked BUY is a premium debit short of CASH, and a hedge is
+    # itself a debit — hedging one would spend cash to fix a cash shortage.
+    if str(item.get('side', '')).upper() == 'BUY':
+        detail['error'] = 'blocked order is a BUY (cash debit) — a hedge would make it worse'
+        return 0, detail
+
+    if not child_hedge_cfg(cfg, 'child_hedge_enabled'):
+        detail['error'] = 'child hedge disabled in config'
+        return 0, detail
+    allowed = [str(b).lower() for b in child_hedge_cfg(cfg, 'child_hedge_brokers') or []]
+    if bname not in allowed:
+        detail['error'] = f'{bname} is not in child_hedge_brokers'
+        return 0, detail
+
+    strike, expiry, opt_type = item.get('strike'), item.get('expiry'), item.get('opt_type')
+    if strike is None or not expiry or not opt_type:
+        # Pre-existing queue entries (or a fill whose leg we could not identify)
+        # have nothing to hedge against.
+        detail['error'] = 'queued item carries no strike/expiry/opt_type — cannot pick a hedge'
+        return 0, detail
+
+    step = max(1, int(child_hedge_cfg(cfg, 'child_hedge_lot_step')))
+    cap = max(0, int(child_hedge_cfg(cfg, 'child_hedge_max_lots')))
+    try:
+        from scripts.tools.copy_trade_hedge import (
+            child_hedge_lots_today, load_hedge_state, pick_child_hedge, place_child_hedge,
+        )
+    except Exception as e:
+        detail['error'] = f'hedge module unavailable: {e}'
+        return 0, detail
+
+    used = child_hedge_lots_today(bname)
+    detail['lots_used'] = used
+    detail['lots_cap'] = cap
+    if used + step > cap:
+        detail['error'] = (f'daily hedge cap reached ({used}/{cap} lots) — '
+                           f'not buying another {step}')
+        return 0, detail
+
+    # NEW POSITIONS ONLY. A SELL that CLOSES a long is reducing: it releases
+    # margin rather than consuming it, so a hedge there is pure cost.
+    #
+    # The estimate path can never reach this — check_margin exempts reducing
+    # orders outright (invariant 1), so a MARGIN_BLOCKED always means "opening".
+    # The broker-rejection path can: a mirrored exit can come back rejected for
+    # a reason whose text mentions funds, and answering that with a hedge would
+    # spend premium and eat the daily cap a genuine new short needs.
+    #
+    # Checked here, after the cheap guards and before the option-chain fetch, so
+    # the extra round-trip is only spent on candidates that got this far.
+    fresh = broker.refresh_positions()
+    positions = broker.margin.get('positions')
+    if not fresh or positions is None:
+        # Fail CLOSED, the opposite of the margin gate: an unprovable position
+        # there means "let the trade through", but here it would mean spending
+        # real premium on a position that may not need it. Skipping costs
+        # nothing beyond the pre-existing desync, and the next drain retries.
+        detail['error'] = 'could not confirm this opens a position — refusing to hedge blind'
+        return 0, detail
+    held = int(positions.get(item.get('child_symbol'), 0))
+    detail['held_qty'] = held
+    if is_reducing(held, 'SELL', int(item.get('qty') or 0)):
+        detail['error'] = (f'blocked order reduces an existing long ({held}) — '
+                           f'it frees margin rather than needing it, no hedge')
+        return 0, detail
+
+    premium_cap = float(child_hedge_cfg(cfg, 'child_hedge_premium_cap'))
+    pick, err = pick_child_hedge(helper, broker, strike, expiry, opt_type,
+                                 premium_cap=premium_cap, underlying=underlying)
+    if pick is None:
+        detail['error'] = f'no hedge strike available: {err}'
+        return 0, detail
+    detail['hedge'] = {'symbol': pick['symbol'], 'strike': pick['strike'],
+                       'ltp': pick['ltp'], 'lots': step}
+
+    product = item.get('product') or broker.default_product
+    entry = place_child_hedge(broker, pick, step, product, armed=True,
+                              state=load_hedge_state())
+    detail['result'] = entry.get('result')
+    if entry.get('result') != 'placed':
+        detail['error'] = f'hedge order failed: {entry.get("error")}'
+        return 0, detail
+
+    # Net the new hedge into the watchdog's view IMMEDIATELY. Until this lands,
+    # the safety exit would see it as an orphaned long and force-close the very
+    # position we just bought to free margin. Mutated in place — never rebound.
+    holdings = child_hedge_qty.setdefault(bname, {})
+    holdings[pick['symbol']] = holdings.get(pick['symbol'], 0) + int(entry.get('placed_qty') or 0)
+
+    # The whole point: make the next margin check see the freed margin.
+    broker.refresh_margin()
+    broker.refresh_positions()
+    detail['lots_bought'] = entry.get('lots') or step
+    detail['margin_after'] = broker.margin.get('available')
+    return int(detail['lots_bought']), detail
+
+
+def drain_retry_queue(helper, brokers: dict, retry_queue: list, state: dict,
+                      replication_scopes: dict = None, margin_check: bool = False,
+                      cfg: dict = None, child_hedge_qty: dict = None):
     now = time.time()
     with _retry_lock:
         due = [r for r in retry_queue if now >= r['next_ts']]
@@ -860,6 +1019,9 @@ def drain_retry_queue(brokers: dict, retry_queue: list, state: dict,
             'side': item['side'],
             'child_qty': item['qty'], 'broker': bname, 'armed': True,
             'attempt': item['attempts'] + 1,
+            # A hedge round deliberately does not spend an attempt, so without
+            # this the log shows several entries all at the same attempt number.
+            'hedge_rounds': int(item.get('hedge_rounds', 0)),
         }
 
         blk = {}
@@ -870,6 +1032,20 @@ def drain_retry_queue(brokers: dict, retry_queue: list, state: dict,
             dup_order_id = broker.find_recent_matching_order(
                 item['child_symbol'], item['side'], item['qty'], item['queued_at'])
 
+        # The cached estimate has already had its say on the fast path, where
+        # it belongs: a cheap non-blocking guard that keeps the WS callback
+        # thread from firing an order it can see will fail. Here on the watchdog
+        # thread we can afford the real thing, and for a broker with no basket
+        # API the estimate is the WRONG authority — it prices a STANDALONE naked
+        # lot, so it over-states on a book that already holds hedges and is
+        # structurally blind to any hedge bought since. Trusting it here would
+        # buy a top-up hedge for an order the broker would have accepted.
+        #
+        # So: send the order and let the broker answer. A rejection costs a log
+        # line, and it is the only trustworthy signal that the account really is
+        # short — which is exactly what should trigger a hedge.
+        use_margin_check = margin_check and broker.supports_exact_margin
+
         if dup_order_id is not None:
             placed, order_ids, err, verified_dup = item['qty'], [dup_order_id], None, True
         else:
@@ -879,39 +1055,52 @@ def drain_retry_queue(brokers: dict, retry_queue: list, state: dict,
             placed, order_ids, err = broker.place_child_order(
                 item['child_symbol'], item['side'], item['qty'],
                 product=item.get('product') or broker.default_product,
-                margin_check=margin_check, exact_margin=True,
-                detail_out=blk,
+                margin_check=use_margin_check, exact_margin=True,
+                detail_out=blk, price=item.get('price'),
             )
             verified_dup = False
+            if margin_check and not use_margin_check:
+                entry['margin_check'] = ('skipped — no basket-margin API, so the broker '
+                                         'decides rather than a standalone estimate')
 
         if err == MARGIN_BLOCKED:
-            if not broker.supports_exact_margin:
-                # This broker cannot price a real basket, so the "exact" recheck
-                # was the same estimate the fast path used — and that estimate
-                # over-states a far-OTM leg. Treating it as final would desync
-                # the child over an arithmetic approximation, so keep retrying
-                # within the normal attempt budget instead.
+            # A cash block is NOT basket truth. Rule 5 short-circuits before the
+            # basket call using margin['cash'], a cached scalar refreshed every
+            # ~30s — so it is arithmetic on a possibly stale figure, exactly the
+            # thing the terminal branch below must not act on. Dropping a
+            # protective long wing over it would leave the paired short naked.
+            # Retry it on the normal bounded budget instead; cash moves as the
+            # session goes on.
+            if blk.get('blocked_on') == 'cash':
                 item['attempts'] += 1
                 item['next_ts'] = time.time() + RETRY_BACKOFF_SEC * item['attempts']
-                entry['result'] = 'margin_blocked_estimate'
-                entry['required'] = blk.get('required')
-                entry['available'] = blk.get('available')
+                entry['result'] = 'cash_blocked'
+                entry['premium'] = blk.get('premium')
+                entry['cash'] = blk.get('cash')
                 entry['shortfall'] = blk.get('shortfall')
-                entry['error'] = (f'{bname} margin estimate says short by {blk.get("shortfall")} '
-                                  f'(needs {blk.get("required")}, has {blk.get("available")}); '
-                                  f'{bname} has no basket-margin API so this is an estimate — retrying')
+                entry['error'] = (f'{bname} premium {blk.get("premium")} exceeds cash '
+                                  f'{blk.get("cash")} (short {blk.get("shortfall")}) — cached '
+                                  f'figure, retrying')
                 if item['attempts'] >= RETRY_MAX_ATTEMPTS:
                     with _retry_lock:
                         if item in retry_queue:
                             retry_queue.remove(item)
                     state['failed_count'] += 1
-                    entry['result'] = 'margin_blocked'
-                    entry['error'] = (f'Insufficient {bname} margin after {item["attempts"]} attempts: '
-                                      f'needs {blk.get("required")}, has {blk.get("available")} '
-                                      f'(short {blk.get("shortfall")}) — NOT replicated, '
-                                      f'parent/child DESYNCED, reconcile manually')
+                    entry['result'] = 'cash_blocked_exhausted'
+                    entry['error'] = (f'Insufficient {bname} CASH for the premium after '
+                                      f'{item["attempts"]} attempts: needs {blk.get("premium")}, '
+                                      f'has {blk.get("cash")} — NOT replicated, parent/child '
+                                      f'DESYNCED, reconcile manually')
+                    print(f'[copy_trade_bridge] CASH BLOCKED for {item["order_no"]} '
+                          f'({bname}): premium {blk.get("premium")} > cash {blk.get("cash")}',
+                          flush=True)
                 append_log(entry)
                 continue
+
+            # Only reachable for a broker that CAN price a real basket: for the
+            # others the estimate is deliberately not consulted here (see
+            # use_margin_check above), so reaching this point means the block is
+            # broker truth rather than arithmetic.
             # Terminal: this was the EXACT basket price, not the cached estimate,
             # so there is nothing left to re-check. Drop rather than retry —
             # re-attempting an order the account cannot fund only burns the
@@ -946,9 +1135,35 @@ def drain_retry_queue(brokers: dict, retry_queue: list, state: dict,
                   flush=True)
         else:
             item['qty'] -= placed  # never re-place slices that went through
+            item['queued_at'] = datetime.now()  # this attempt also raised — recheck from here next time
+
+            # The BROKER said it could not fund this — the authoritative signal,
+            # unlike the standalone estimate above, because its RMS does see the
+            # hedge book. Answer it with another step and retry, without
+            # spending an attempt. Bounded by the daily lot cap inside
+            # ensure_hedge_capacity; only margin-shaped rejections qualify, so a
+            # bad symbol or a dead session still takes the normal path.
+            if (item['qty'] > 0 and child_hedge_qty is not None
+                    and not broker.supports_exact_margin and is_margin_rejection(err)):
+                lots, hdetail = ensure_hedge_capacity(
+                    helper, broker, item, cfg or {}, child_hedge_qty)
+                if lots:
+                    item['next_ts'] = time.time() + FAST_RETRY_DELAY_SEC
+                    item['hedge_rounds'] = int(item.get('hedge_rounds', 0)) + 1
+                    entry['result'] = 'margin_hedge_bought'
+                    entry['hedge'] = hdetail
+                    entry['error'] = (
+                        f'{bname} rejected for margin ({err}) — bought {lots} lot(s) of '
+                        f'{hdetail.get("hedge", {}).get("symbol")} to free margin, retrying')
+                    print(f'[copy_trade_bridge] Margin top-up after broker rejection: '
+                          f'{lots} lot(s) of {hdetail.get("hedge", {}).get("symbol")} on '
+                          f'{bname} for {item["order_no"]} — retrying', flush=True)
+                    append_log(entry)
+                    continue
+                entry['hedge'] = hdetail
+
             item['attempts'] += 1
             item['next_ts'] = time.time() + RETRY_BACKOFF_SEC * item['attempts']
-            item['queued_at'] = datetime.now()  # this attempt also raised — recheck from here next time
             entry['result'] = 'retry_error'
             entry['error'] = err
             if item['attempts'] >= RETRY_MAX_ATTEMPTS or item['qty'] <= 0:
@@ -960,6 +1175,58 @@ def drain_retry_queue(brokers: dict, retry_queue: list, state: dict,
                 state['failed_count'] += 1
                 print(f'[copy_trade_bridge] RETRY EXHAUSTED for {item["order_no"]} ({bname}): {err}', flush=True)
         append_log(entry)
+
+
+def broker_hedges(bname: str, hedge_qty: dict, child_hedge_qty: dict) -> dict:
+    """{symbol: long qty} this broker holds as hedges — startup and top-up."""
+    if bname == 'zerodha':
+        return hedge_qty or {}
+    return (child_hedge_qty or {}).get(bname, {})
+
+
+def positions_to_close(rows, universe, scope, hedges: dict) -> list:
+    """In-scope child positions with their hedge quantity netted out.
+
+    Split out of watchdog_loop so it can be tested directly: force-closing a
+    hedge would destroy the margin relief the child is trading on, and getting
+    this wrong is silent until it costs money.
+    """
+    out = []
+    for row in rows:
+        sym = row['symbol']
+        if sym not in universe or sym not in scope:
+            continue
+        residual = row['qty'] - int((hedges or {}).get(sym, 0))
+        if residual == 0:
+            continue
+        out.append({'row': row, 'symbol': sym, 'residual': residual})
+    return out
+
+
+def flush_retry_queue(retry_queue: list, state: dict, reason: str):
+    """Record every still-queued item as an unreplicated desync and clear it.
+
+    drain_retry_queue only runs while armed AND the market is open, so anything
+    queued near the close was never drained, never logged as exhausted, and
+    vanished with the process — a desync with no record anywhere. Called on the
+    open->closed transition and again on shutdown.
+    """
+    with _retry_lock:
+        stranded, retry_queue[:] = list(retry_queue), []
+    for item in stranded:
+        state['failed_count'] += 1
+        append_log({'ts': datetime.now().isoformat(), 'order_no': item.get('order_no'),
+                    'broker': item.get('broker'), 'side': item.get('side'),
+                    'child_symbol': item.get('child_symbol'),
+                    'zerodha_symbol': item.get('child_symbol'),
+                    'child_qty': item.get('qty'), 'qty': item.get('qty'),
+                    'result': 'retry_exhausted',
+                    'error': f'{reason} with this retry still pending — NOT replicated, '
+                             f'parent/child DESYNCED, reconcile manually'})
+    if stranded:
+        print(f'[copy_trade_bridge] {reason}: {len(stranded)} pending retry item(s) '
+              f'abandoned and logged as DESYNCED.', flush=True)
+    return len(stranded)
 
 
 def main():
@@ -1023,22 +1290,32 @@ def main():
 
     brokers = {}
     broker_failures = {}
+    broker_attempts = {}   # {name: {'n': int, 'next_ts': float}}
 
     def ensure_broker(name) -> bool:
         """Initialise a child broker on demand. Returns True if it is live.
 
         Called at startup and again from the watchdog thread whenever the config
-        names a broker we do not have. A broker that has already failed is not
-        retried — a second TOTP/token failure means operator action is needed,
-        and retrying on a timer would just bury the reason.
+        names a broker we do not have.
+
+        A failure is retried on a backoff, but only BROKER_INIT_MAX_ATTEMPTS
+        times: the failure that matters is the transient one (a network blip or
+        a TOTP window missed at 09:15) which used to leave the child dead for
+        the whole session with every fill logging broker_unavailable. A genuine
+        credential problem still needs operator action, and retrying it forever
+        would only bury the reason — so the budget stays small and the last
+        error stays visible in the status file.
         """
         name = str(name or '').lower()
         if not name:
             return False
         if name in brokers:
             return True
-        if name in broker_failures:
+        att = broker_attempts.setdefault(name, {'n': 0, 'next_ts': 0.0})
+        if att['n'] >= BROKER_INIT_MAX_ATTEMPTS or time.time() < att['next_ts']:
             return False
+        att['n'] += 1
+        att['next_ts'] = time.time() + BROKER_INIT_BACKOFF_SEC * att['n']
         try:
             broker = create_broker(
                 name, log=lambda m: print(f'[copy_trade_bridge] {m}', flush=True))
@@ -1050,10 +1327,17 @@ def main():
             brokers[name] = broker
             print(f'[copy_trade_bridge] {name} child ready '
                   f'({len(broker.instruments)} contracts, freeze qty {broker.freeze_qty})', flush=True)
+            # Clears the '<broker> DOWN' pill in the scalper panel, which reads
+            # broker_failures straight out of the status file.
+            broker_failures.pop(name, None)
             return True
         except Exception as e:
-            broker_failures[name] = str(e)
-            print(f'[copy_trade_bridge] ERROR: {name} child unavailable: {e}', flush=True)
+            retries_left = BROKER_INIT_MAX_ATTEMPTS - att['n']
+            broker_failures[name] = (f'{e} (attempt {att["n"]}/{BROKER_INIT_MAX_ATTEMPTS}'
+                                     + (f', retrying in {int(BROKER_INIT_BACKOFF_SEC * att["n"])}s)'
+                                        if retries_left > 0 else ', gave up)'))
+            print(f'[copy_trade_bridge] ERROR: {name} child unavailable '
+                  f'(attempt {att["n"]}/{BROKER_INIT_MAX_ATTEMPTS}): {e}', flush=True)
             return False
 
     for name in wanted:
@@ -1090,6 +1374,52 @@ def main():
                         # Mutated in place everywhere, never reassigned once
                         # the watchdog thread starts (see maybe_place_deferred_hedge).
     hedge_ctx = {'pending': False, 'expiry': None, 'attempts': 0, 'next_ts': 0.0, 'report': {}}
+
+    # Reactive margin top-up hedges, {broker: {symbol: long qty}}. Same
+    # threading discipline as hedge_qty above: shared lock-free across the
+    # watchdog and heartbeat threads, so it is MUTATED IN PLACE and never
+    # rebound. Seeded from disk so hedges bought before a restart keep netting
+    # out of the safety exit instead of looking like orphans.
+    child_hedge_qty = {}
+    try:
+        from scripts.tools.copy_trade_hedge import hedge_qty_today as _hqt
+        # From CONFIG, not the built-in defaults: a broker enabled via
+        # child_hedge_brokers would otherwise have its hedges left unadopted and
+        # then force-closed as orphans by the safety exit.
+        for _name in child_hedge_cfg(startup_cfg, 'child_hedge_brokers') or []:
+            _name = str(_name).lower()
+            _recorded = _hqt(_name)
+            if not _recorded:
+                continue
+            # Clamp to what the broker ACTUALLY holds, the same discipline
+            # build_plan uses for the Zerodha hedges. The state file records
+            # intent and can outlive the position (closed by hand, or a kill -9
+            # that never wrote closed_at); adopting a phantom long would make
+            # the safety exit over-close a real short at that strike.
+            _broker = brokers.get(_name)
+            if _broker is None:
+                continue
+            try:
+                _live = {r['symbol']: int(r['qty']) for r in _broker.positions_rows()}
+            except Exception as _pe:
+                print(f'[copy_trade_bridge] WARN: cannot verify {_name} hedge positions '
+                      f'({_pe}) — adopting the state file as-is.', flush=True)
+                _live = None
+            _held = {}
+            for _sym, _q in _recorded.items():
+                _actual = _q if _live is None else max(0, min(int(_q), _live.get(_sym, 0)))
+                if _actual > 0:
+                    _held[_sym] = _actual
+                elif _live is not None:
+                    print(f'[copy_trade_bridge] {_name} hedge {_sym} recorded but not held — '
+                          f'not adopted.', flush=True)
+            if _held:
+                child_hedge_qty[_name] = _held
+                print(f'[copy_trade_bridge] Adopted {len(_held)} {_name} top-up hedge '
+                      f'symbol(s) from the state file for today.', flush=True)
+    except Exception as _e:
+        print(f'[copy_trade_bridge] WARN: could not read child hedge state ({_e}) — '
+              f'the safety watchdog may treat existing top-up hedges as orphans.', flush=True)
 
     # Nearest future expiry drives the hedge, which is Zerodha-only — so it is
     # read from Zerodha when present, else from whichever child we do have.
@@ -1275,6 +1605,19 @@ def main():
                 return
 
             traded_qty = int(float(data.get('TradedQty') or data.get('tradedQty') or 0))
+            # The child's cash gate prices a premium debit off this. Same
+            # multi-spelling treatment as the qty above: the WS and the REST
+            # poll path name it differently, and neither guarantees it.
+            price = None
+            for _pkey in ('TradedPrice', 'tradedPrice', 'AvgTradedPrice',
+                          'avgTradedPrice', 'Price', 'price'):
+                if data.get(_pkey):
+                    try:
+                        price = float(data[_pkey])
+                    except (TypeError, ValueError):
+                        price = None
+                    if price:
+                        break
             already = int(replicated_qty.get(order_no, 0))
             delta = traded_qty - already
             if delta <= 0:
@@ -1299,7 +1642,8 @@ def main():
                 data.get('Product') or data.get('product'),
             )
 
-            ts = datetime.now().isoformat()
+            fill_dt = datetime.now()
+            ts = fill_dt.isoformat()
 
             if side is None:
                 append_log({'ts': ts, 'order_no': order_no, 'symbol': symbol,
@@ -1343,6 +1687,17 @@ def main():
                 save_replicated(replicated_qty)
                 return
 
+            # Commit the dedupe counter BEFORE placing anything. This fill is
+            # now "consumed". If a child placement raises mid-loop the retry
+            # queue owns the gap (every branch below queues its remainder) —
+            # whereas committing only after the loop, as this used to, left the
+            # counter behind and let poll_parent_orders() replay the whole fill
+            # 3s later and re-place it to a child that had already received it.
+            # Under-replication is logged and retried; a double-place is real
+            # money nothing can undo.
+            replicated_qty[order_no] = traded_qty
+            save_replicated(replicated_qty)
+
             for child in children:
                 bname = str(child.get('broker', 'zerodha')).lower()
                 try:
@@ -1359,143 +1714,194 @@ def main():
                     'multiplier': multiplier, 'child_qty': child_qty, 'armed': armed,
                 }
 
-                broker = brokers.get(bname)
-                if broker is None:
-                    # Never silently dropped: a child enabled in the dashboard but
-                    # not initialised here (auth failed, or enabled seconds ago and
-                    # the watchdog has not picked it up yet) would otherwise look
-                    # replicated. The watchdog's ensure_broker retries it once.
-                    entry['result'] = 'broker_unavailable'
-                    entry['error'] = (f'{bname} child is not initialised '
-                                      f'({broker_failures.get(bname, "not yet started")}) — '
-                                      f'fill NOT replicated to it')
-                    append_log(entry)
-                    print(f'[copy_trade_bridge] {bname} child unavailable — {order_no} '
-                          f'NOT replicated to it', flush=True)
-                    continue
+                # How much of this leg actually reached the broker. The guard
+                # below must never re-queue what was already sent.
+                placed_so_far = 0
+                try:
+                    broker = brokers.get(bname)
+                    if broker is None:
+                        # Never silently dropped: a child enabled in the dashboard but
+                        # not initialised here (auth failed, or enabled seconds ago and
+                        # the watchdog has not picked it up yet) would otherwise look
+                        # replicated. The watchdog's ensure_broker retries a failed
+                        # child on a backoff, so this can clear without a restart.
+                        entry['result'] = 'broker_unavailable'
+                        entry['error'] = (f'{bname} child is not initialised '
+                                          f'({broker_failures.get(bname, "not yet started")}) — '
+                                          f'fill NOT replicated to it')
+                        append_log(entry)
+                        print(f'[copy_trade_bridge] {bname} child unavailable — {order_no} '
+                              f'NOT replicated to it', flush=True)
+                        continue
 
-                # Fast in-memory lookup only — a cache refresh is a multi-second
-                # call that must never run in this WS callback (it would stall
-                # event delivery and can drop the connection). A miss on a real
-                # option goes to the retry queue, where the watchdog thread
-                # refreshes the cache and resolves it.
-                child_symbol = broker.find_symbol(strike, expiry, opt_type)
-                product = broker.map_product(*product_hints)
+                    # Fast in-memory lookup only — a cache refresh is a multi-second
+                    # call that must never run in this WS callback (it would stall
+                    # event delivery and can drop the connection). A miss on a real
+                    # option goes to the retry queue, where the watchdog thread
+                    # refreshes the cache and resolves it.
+                    child_symbol = broker.find_symbol(strike, expiry, opt_type)
+                    product = broker.map_product(*product_hints)
 
-                if child_symbol is None:
-                    if armed:
+                    if child_symbol is None:
+                        if armed:
+                            with _retry_lock:
+                                retry_queue.append({
+                                    'order_no': order_no, 'broker': bname, 'child_symbol': None,
+                                    'strike': strike, 'expiry': expiry, 'opt_type': opt_type,
+                                    'side': side, 'qty': child_qty, 'attempts': 0,
+                                    'next_ts': 0.0, 'product': product, 'price': price,
+                                    'product_hints': product_hints,
+                                })
+                            entry['result'] = 'queued_resolution'
+                            entry['error'] = ('Strike not in instrument cache — queued for '
+                                              'refresh + replication')
+                        else:
+                            entry['result'] = 'skipped'
+                            entry['error'] = f'Strike not in the {bname} instrument cache — skipped'
+                        append_log(entry)
+                        continue
+
+                    entry['child_symbol'] = child_symbol
+                    # Kept for the dashboard's existing log rendering and
+                    # copy_trade_reconcile.py, which both read `zerodha_symbol`.
+                    entry['zerodha_symbol'] = child_symbol
+
+                    if not armed:
+                        # Record what the margin gate WOULD have decided, so a
+                        # disarmed session still proves the gate works before real
+                        # money depends on it.
+                        if cfg.get('margin_check', True):
+                            ok, mdetail = broker.check_margin(child_symbol, side, child_qty,
+                                                              product, exact=False,
+                                                              price=price)
+                            entry['margin'] = mdetail
+                            entry['would_block'] = not ok
+                        entry['result'] = 'logged_only'
+                        append_log(entry)
+                        continue
+
+                    if bname == 'zerodha':
+                        warn_product_mismatch(product)
+                    note_replicated_symbol(bname, child_symbol, replication_scopes)
+                    # Cached (non-blocking) check only: this runs on the order-update
+                    # WS callback thread, where an HTTP round-trip would stall event
+                    # delivery and can drop the connection.
+                    blk = {}
+                    placed, order_ids, err = broker.place_child_order(
+                        child_symbol, side, child_qty, product=product,
+                        margin_check=bool(cfg.get('margin_check', True)), exact_margin=False,
+                        detail_out=blk, price=price,
+                    )
+                    placed_so_far = placed
+
+                    if err == MARGIN_BLOCKED:
+                        # The fast path prices this against a cached ATM per-lot
+                        # figure, which over-states a far-OTM leg — so a block here is
+                        # a suspicion, not a verdict. Hand it to the retry queue,
+                        # where the watchdog thread can afford the exact call and
+                        # either places it or blocks it terminally. Dropping it on
+                        # an estimate would desync the child over an arithmetic
+                        # approximation.
                         with _retry_lock:
                             retry_queue.append({
-                                'order_no': order_no, 'broker': bname, 'child_symbol': None,
+                                'order_no': order_no, 'broker': bname,
+                                'child_symbol': child_symbol,
+                                # Carried so the margin top-up hedge can find a
+                                # strike to hedge this leg with.
                                 'strike': strike, 'expiry': expiry, 'opt_type': opt_type,
                                 'side': side, 'qty': child_qty, 'attempts': 0,
-                                'next_ts': 0.0, 'product': product,
+                                'next_ts': time.time() + FAST_RETRY_DELAY_SEC,
+                                'product': product, 'price': price,
+                                'product_hints': product_hints,
+                                # No 'queued_at': nothing was sent to the broker, so
+                                # there is no lost-response duplicate to guard against.
+                            })
+                        entry['result'] = 'margin_recheck_queued'
+                        entry['required'] = blk.get('required')
+                        entry['available'] = blk.get('available')
+                        entry['shortfall'] = blk.get('shortfall')
+                        entry['error'] = (f'Cached margin estimate says short by {blk.get("shortfall")} '
+                                          f'(needs {blk.get("required")}, has {blk.get("available")}) — '
+                                          f'queued for a re-check before giving up')
+                        append_log(entry)
+                        continue
+                    if placed:
+                        state['last_replication_ts'] = time.time()
+                    if err is None:
+                        entry['result'] = 'success'
+                        entry['child_order_id'] = ','.join(str(o) for o in order_ids)
+                        print(f'[copy_trade_bridge] Replicated {order_no} -> {bname} '
+                              f'({side} {child_qty} {child_symbol})', flush=True)
+                    else:
+                        # Queue exactly the unplaced remainder for bounded retry —
+                        # replicated_qty was already advanced above so a later event
+                        # for this order can't double-place; the queue owns the gap.
+                        remaining = child_qty - placed
+                        entry['result'] = 'error'
+                        entry['error'] = err
+                        entry['queued_for_retry'] = remaining
+                        state['failed_count'] += 1
+                        with _retry_lock:
+                            retry_queue.append({
+                                'order_no': order_no, 'broker': bname,
+                                'child_symbol': child_symbol,
+                                'strike': strike, 'expiry': expiry, 'opt_type': opt_type,
+                                'side': side, 'qty': remaining, 'attempts': 1,
+                                'next_ts': time.time() + FAST_RETRY_DELAY_SEC,
+                                # This placement attempt just raised — before the
+                                # NEXT attempt (in drain_retry_queue), verify it
+                                # didn't actually go through (response lost, e.g.
+                                # RemoteDisconnected or a read timeout on Kotak)
+                                # before placing a duplicate.
+                                'queued_at': datetime.now(),
+                                'product': product, 'price': price,
                                 'product_hints': product_hints,
                             })
-                        entry['result'] = 'queued_resolution'
-                        entry['error'] = ('Strike not in instrument cache — queued for '
-                                          'refresh + replication')
-                    else:
-                        entry['result'] = 'skipped'
-                        entry['error'] = f'Strike not in the {bname} instrument cache — skipped'
+                        print(f'[copy_trade_bridge] ERROR replicating {order_no} to {bname}: {err} '
+                              f'(queued {remaining} for retry)', flush=True)
+
                     append_log(entry)
-                    continue
-
-                entry['child_symbol'] = child_symbol
-                # Kept for the dashboard's existing log rendering and
-                # copy_trade_reconcile.py, which both read `zerodha_symbol`.
-                entry['zerodha_symbol'] = child_symbol
-
-                if not armed:
-                    # Record what the margin gate WOULD have decided, so a
-                    # disarmed session still proves the gate works before real
-                    # money depends on it.
-                    if cfg.get('margin_check', True):
-                        ok, mdetail = broker.check_margin(child_symbol, side, child_qty,
-                                                          product, exact=False)
-                        entry['margin'] = mdetail
-                        entry['would_block'] = not ok
-                    entry['result'] = 'logged_only'
-                    append_log(entry)
-                    continue
-
-                if bname == 'zerodha':
-                    warn_product_mismatch(product)
-                note_replicated_symbol(bname, child_symbol, replication_scopes)
-                # Cached (non-blocking) check only: this runs on the order-update
-                # WS callback thread, where an HTTP round-trip would stall event
-                # delivery and can drop the connection.
-                blk = {}
-                placed, order_ids, err = broker.place_child_order(
-                    child_symbol, side, child_qty, product=product,
-                    margin_check=bool(cfg.get('margin_check', True)), exact_margin=False,
-                    detail_out=blk,
-                )
-
-                if err == MARGIN_BLOCKED:
-                    # The fast path prices this against a cached ATM per-lot
-                    # figure, which over-states a far-OTM leg — so a block here is
-                    # a suspicion, not a verdict. Hand it to the retry queue,
-                    # where the watchdog thread can afford the exact call and
-                    # either places it or blocks it terminally. Dropping it on
-                    # an estimate would desync the child over an arithmetic
-                    # approximation.
-                    with _retry_lock:
-                        retry_queue.append({
-                            'order_no': order_no, 'broker': bname,
-                            'child_symbol': child_symbol,
-                            'side': side, 'qty': child_qty, 'attempts': 0,
-                            'next_ts': time.time() + FAST_RETRY_DELAY_SEC,
-                            'product': product, 'product_hints': product_hints,
-                            # No 'queued_at': nothing was sent to the broker, so
-                            # there is no lost-response duplicate to guard against.
-                        })
-                    entry['result'] = 'margin_recheck_queued'
-                    entry['required'] = blk.get('required')
-                    entry['available'] = blk.get('available')
-                    entry['shortfall'] = blk.get('shortfall')
-                    entry['error'] = (f'Cached margin estimate says short by {blk.get("shortfall")} '
-                                      f'(needs {blk.get("required")}, has {blk.get("available")}) — '
-                                      f'queued for a re-check before giving up')
-                    append_log(entry)
-                    continue
-                if placed:
-                    state['last_replication_ts'] = time.time()
-                if err is None:
-                    entry['result'] = 'success'
-                    entry['child_order_id'] = ','.join(str(o) for o in order_ids)
-                    print(f'[copy_trade_bridge] Replicated {order_no} -> {bname} '
-                          f'({side} {child_qty} {child_symbol})', flush=True)
-                else:
-                    # Queue exactly the unplaced remainder for bounded retry —
-                    # replicated_qty still advances below so a later event for
-                    # this order can't double-place; the queue owns the gap.
-                    remaining = child_qty - placed
+                except Exception as e:
+                    # Anything unexpected in here — an atomic_write
+                    # PermissionError out of append_log/note_replicated_symbol,
+                    # a broker attribute error — used to escape to the outer
+                    # handler with the dedupe counter uncommitted. It is now
+                    # committed above, so this gap MUST be queued or it is lost
+                    # silently. `queued_at` predates any placement attempt, so
+                    # drain_retry_queue verifies against the book before
+                    # re-placing something that may already have landed.
                     entry['result'] = 'error'
-                    entry['error'] = err
-                    entry['queued_for_retry'] = remaining
                     state['failed_count'] += 1
-                    with _retry_lock:
-                        retry_queue.append({
-                            'order_no': order_no, 'broker': bname,
-                            'child_symbol': child_symbol,
-                            'side': side, 'qty': remaining, 'attempts': 1,
-                            'next_ts': time.time() + FAST_RETRY_DELAY_SEC,
-                            # This placement attempt just raised — before the
-                            # NEXT attempt (in drain_retry_queue), verify it
-                            # didn't actually go through (response lost, e.g.
-                            # RemoteDisconnected or a read timeout on Kotak)
-                            # before placing a duplicate.
-                            'queued_at': datetime.now(),
-                            'product': product, 'product_hints': product_hints,
-                        })
-                    print(f'[copy_trade_bridge] ERROR replicating {order_no} to {bname}: {err} '
-                          f'(queued {remaining} for retry)', flush=True)
-
-                append_log(entry)
-
-            replicated_qty[order_no] = traded_qty
-            save_replicated(replicated_qty)
+                    if placed_so_far:
+                        # The order reached the broker and only the bookkeeping
+                        # after it failed — any remainder was already queued by
+                        # the branch that raised. Re-queuing here would duplicate
+                        # a live position, so record it and leave it alone.
+                        entry['error'] = (f'Placed {placed_so_far} on {bname}, then post-placement '
+                                          f'bookkeeping failed: {e} — NOT re-queued (would duplicate)')
+                    else:
+                        entry['error'] = f'Unexpected error replicating to {bname}: {e}'
+                        entry['queued_for_retry'] = child_qty
+                    if armed and not placed_so_far:
+                        with _retry_lock:
+                            retry_queue.append({
+                                'order_no': order_no, 'broker': bname,
+                                # Re-resolved on the watchdog thread: we cannot
+                                # know how far the failed pass got.
+                                'child_symbol': None,
+                                'strike': strike, 'expiry': expiry, 'opt_type': opt_type,
+                                'side': side, 'qty': child_qty, 'attempts': 1,
+                                'next_ts': time.time() + FAST_RETRY_DELAY_SEC,
+                                'queued_at': fill_dt, 'price': price,
+                                'product': None, 'product_hints': product_hints,
+                            })
+                    try:
+                        append_log(entry)
+                    except Exception:
+                        pass
+                    print(f'[copy_trade_bridge] ERROR replicating {order_no} to {bname}: {e} '
+                          + (f'(placed {placed_so_far}, NOT re-queued)' if placed_so_far
+                             else f'(queued {child_qty} for retry)'), flush=True)
 
         except Exception as e:
             print(f'[copy_trade_bridge] ERROR in handle_update: {e}', flush=True)
@@ -1553,6 +1959,7 @@ def main():
                     'Status': status,
                     'OrderNo': order_no,
                     'TradedQty': traded_qty,
+                    'TradedPrice': o.get('averageTradedPrice') or o.get('price'),
                     'Symbol': o.get('tradingSymbol'),
                     'TxnType': o.get('transactionType'),
                     'StrikePrice': o.get('drvStrikePrice'),
@@ -1572,16 +1979,38 @@ def main():
     watchdog_thread = threading.Thread(
         target=watchdog_loop,
         args=(helper, brokers, watchdog_stop, state, retry_queue, replication_scopes,
-              hedge_qty, hedge_product, hedge_ctx, ensure_broker),
+              hedge_qty, hedge_product, hedge_ctx, ensure_broker, child_hedge_qty),
         daemon=True, name='copy-trade-watchdog',
     )
     watchdog_thread.start()
+
+    # The order poll used to run inline in the main loop, immediately ahead of
+    # the heartbeat. It enters handle_update, which blocks on _fill_lock while
+    # the WS thread is inside a broker HTTP call — so one slow child could
+    # starve the 5s heartbeat past the dashboard's 20s staleness threshold and
+    # flip the scalper panel to a red 'ARMED (bridge down!)' while replication
+    # was in fact working. On its own thread the heartbeat cannot be starved;
+    # _fill_lock still serialises this thread against the WS thread exactly as
+    # before, so this adds a thread, not a race.
+    poll_stop = threading.Event()
+
+    def order_poll_loop():
+        while not poll_stop.wait(ORDER_POLL_INTERVAL_SEC):
+            if not market_is_open():
+                continue
+            try:
+                poll_parent_orders()
+            except Exception as e:
+                print(f'[copy_trade_bridge] ERROR in order poll loop: {e}', flush=True)
+
+    poll_thread = threading.Thread(target=order_poll_loop, daemon=True,
+                                   name='copy-trade-order-poll')
+    poll_thread.start()
 
     write_status('RUNNING', started_at=started_at)
     print('[copy_trade_bridge] Listening for Dhan order updates…', flush=True)
 
     last_heartbeat = 0.0
-    last_order_poll = 0.0
     try:
         while True:
             if os.path.exists(STOP_TRIGGER):
@@ -1592,9 +2021,6 @@ def main():
                 print('[copy_trade_bridge] Stop trigger detected — exiting.', flush=True)
                 break
             now = time.time()
-            if market_is_open() and now - last_order_poll >= ORDER_POLL_INTERVAL_SEC:
-                last_order_poll = now
-                poll_parent_orders()
             if now - last_heartbeat >= HEARTBEAT_INTERVAL_SEC:
                 last_heartbeat = now
                 with _retry_lock:
@@ -1636,6 +2062,14 @@ def main():
                 # dashboard panels keep working unchanged; every broker (Zerodha
                 # included) also appears under 'brokers'.
                 _primary = brokers.get('zerodha') or next(iter(brokers.values()))
+                # Snapshot every map the watchdog thread mutates BEFORE building
+                # the payload. ensure_broker inserts into `brokers` and
+                # ensure_hedge_capacity into `child_hedge_qty` (and its inner
+                # dicts), and a 'dictionary changed size during iteration'
+                # RuntimeError raised here escapes to main()'s handler and stops
+                # a live bridge.
+                _brokers_snap = list(brokers.items())
+                _chq_snap = {b: dict(h) for b, h in list(child_hedge_qty.items()) if h}
                 write_status('RUNNING', started_at=started_at, detail=detail, extra={
                     'ws_thread_alive': ws_alive,
                     'ws_connected': ws_health['connected'],
@@ -1655,7 +2089,7 @@ def main():
                     'margin_error': _primary.margin['error'],
                     'margin_blocked_count': _primary.margin['blocked_count'],
                     'margin_check_enabled': bool(load_config().get('margin_check', True)),
-                    'brokers': {n: b.status() for n, b in brokers.items()},
+                    'brokers': {n: b.status() for n, b in _brokers_snap},
                     'broker_failures': dict(broker_failures),
                     # hedge_qty/hedge_ctx are read directly (never snapshotted
                     # into a separate variable) so a deferred hedge that lands
@@ -1668,6 +2102,11 @@ def main():
                     'hedge_premium_estimate': hedge_ctx['report'].get('premium_estimate'),
                     'capacity_lots_dhan': hedge_ctx['report'].get('dhan_capacity_lots'),
                     'capacity_lots_target_met': hedge_ctx['report'].get('target_met'),
+                    # Reactive margin top-up ladder, read live (never snapshotted)
+                    # for the same reason as hedge_qty above.
+                    'child_hedge_symbols': {b: sorted(h) for b, h in _chq_snap.items()},
+                    'child_hedge_qty': {b: sum(h.values()) for b, h in _chq_snap.items()},
+                    'child_hedge_max_lots': child_hedge_cfg(load_config(), 'child_hedge_max_lots'),
                 })
             time.sleep(1)
     except KeyboardInterrupt:
@@ -1680,6 +2119,7 @@ def main():
         stop_detail = ''
     finally:
         watchdog_stop.set()
+        poll_stop.set()
         try:
             helper.stop_order_update_websocket()
         except Exception:
@@ -1688,7 +2128,13 @@ def main():
         # by nature: a kill -9 never reaches this block, which is exactly why
         # copy_trade_hedges.json is authoritative and the next startup adopts
         # whatever it finds still open rather than buying a second set.
-        if kite is not None and hedge_qty and load_config().get('armed'):
+        # NOT gated on `armed`. Disarming only writes armed:false and leaves the
+        # bridge running, so an arm -> buy hedges -> disarm -> stop sequence used
+        # to leave real longs open with nothing tracking them. The gate also
+        # protected nothing: hedge_qty is only populated from placements that
+        # actually went through, so a non-empty map IS the proof we bought them,
+        # and close_hedges clamps every sell to what the broker still holds.
+        if kite is not None and hedge_qty:
             try:
                 from scripts.tools.copy_trade_hedge import close_hedges
                 for r in close_hedges(kite, armed=True):
@@ -1701,6 +2147,38 @@ def main():
             except Exception as e:
                 print(f'[copy_trade_bridge] Hedge close on shutdown failed: {e} — '
                       f'hedges may still be open, see copy_trade_hedges.json', flush=True)
+        # Square off the reactive top-up hedges too. Same best-effort contract
+        # as the Zerodha close above: a kill -9 never reaches here, which is why
+        # copy_trade_hedges.json stays authoritative and the next start adopts
+        # whatever it finds rather than buying a second set.
+        # Same reasoning as the Zerodha close above — see the comment there.
+        # ensure_hedge_capacity only ever runs under `armed and market_is_open()`
+        # and only records on result == 'placed', so anything in this map is a
+        # real long that must be squared off however the session ended.
+        if child_hedge_qty:
+            try:
+                from scripts.tools.copy_trade_hedge import close_child_hedges
+                for _bname in list(child_hedge_qty):
+                    _broker = brokers.get(_bname)
+                    if _broker is None:
+                        continue
+                    for r in close_child_hedges(_broker, armed=True):
+                        append_log({
+                            'ts': datetime.now().isoformat(),
+                            'order_no': f"hedge-{r.get('symbol')}",
+                            'broker': _bname, 'child_symbol': r.get('symbol'),
+                            'zerodha_symbol': r.get('symbol'), 'side': 'SELL',
+                            'child_qty': r.get('qty'),
+                            'result': f"hedge_{r.get('result')}", 'error': r.get('error'),
+                        })
+            except Exception as e:
+                print(f'[copy_trade_bridge] Child hedge close on shutdown failed: {e} — '
+                      f'top-up hedges may still be open, see copy_trade_hedges.json', flush=True)
+
+        try:
+            flush_retry_queue(retry_queue, state, 'Bridge stopped')
+        except Exception as e:
+            print(f'[copy_trade_bridge] Could not log pending retries on shutdown: {e}', flush=True)
         write_status('STOPPED', started_at=started_at, detail=stop_detail)
 
 

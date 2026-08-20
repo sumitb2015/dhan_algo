@@ -24,6 +24,10 @@ The invariants, which apply to BOTH brokers:
   4. **The fast path never makes an HTTP call.** It runs on the order-update WS
      callback thread, where a round-trip stalls event delivery and can drop the
      connection.
+  5. **Premium is paid from cash, not collateral.** A BUY that opens exposure is
+     a debit; `margin['available']` is the NET figure and includes pledged
+     collateral, so it can cover an order the broker then rejects for want of
+     cash. Checked separately, and only for orders that increase exposure.
 
 The one deliberate asymmetry is `supports_exact_margin`. Zerodha prices a real
 basket (`basket_order_margins`) so a block on the retry path is broker truth and
@@ -325,16 +329,21 @@ class ChildBroker:
             return True
         return False
 
-    def check_margin(self, symbol: str, side: str, qty: int, product, exact: bool = False):
+    def check_margin(self, symbol: str, side: str, qty: int, product, exact: bool = False,
+                     price=None):
         """Can the child afford this order? Returns (ok, detail_dict).
 
-        See the module docstring — rules 1 through 4 are all enforced here, and
+        See the module docstring — rules 1 through 5 are all enforced here, and
         every uncertain branch deliberately allows the order through.
 
         `exact=False` (the WS callback thread) uses only cached scalars — no
         HTTP, so event delivery is never stalled. `exact=True` (the watchdog
         thread, where find_recent_matching_order already blocks) may hit the API,
         but only does so where the broker can genuinely price a basket.
+
+        `price` is the parent fill's traded price, carried down from the order
+        update so rule 5 costs no extra call. Absent, the cash check is skipped
+        rather than guessed.
         """
         detail = {'mode': 'exact' if exact and self.supports_exact_margin else 'cached',
                   'broker': self.name}
@@ -361,6 +370,28 @@ class ChildBroker:
         if _is_reducing(held, side, qty):
             detail['skipped'] = 'reducing existing exposure — not gated'
             return True, detail
+
+        # Rule 5 — a BUY that OPENS exposure is a premium debit, payable only
+        # from cash. Deliberately placed AFTER the reducing bypass so buying
+        # back a short is still never gated, and it fails OPEN on an unknown
+        # price or unknown cash (rule 2). No HTTP: `price` rode in on the fill.
+        if str(side).upper() == 'BUY':
+            cash = self.margin.get('cash')
+            if not price:
+                detail['cash_check'] = 'no fill price on the parent order — not gated'
+            elif cash is None:
+                detail['cash_check'] = 'cash balance unknown — not gated'
+                detail['failed_open'] = True
+            else:
+                premium = float(price) * qty
+                detail['premium'] = round(premium, 2)
+                detail['cash'] = round(cash, 2)
+                if premium > cash:
+                    detail['blocked_on'] = 'cash'
+                    detail['required'] = round(premium, 2)
+                    detail['available'] = round(cash, 2)
+                    detail['shortfall'] = round(premium - cash, 2)
+                    return False, detail
 
         available = self.margin['available']
         if available is None:
@@ -414,7 +445,7 @@ class ChildBroker:
 
     def place_child_order(self, symbol: str, side: str, qty: int, product=None,
                           margin_check: bool = False, exact_margin: bool = False,
-                          detail_out: dict = None):
+                          detail_out: dict = None, price=None):
         """Place a MARKET order sliced to the freeze quantity.
 
         With `margin_check=True`, an unaffordable order is refused before
@@ -428,7 +459,8 @@ class ChildBroker:
         if product is None:
             product = self.default_product
         if margin_check:
-            ok, detail = self.check_margin(symbol, side, qty, product, exact=exact_margin)
+            ok, detail = self.check_margin(symbol, side, qty, product, exact=exact_margin,
+                                           price=price)
             # Report via a caller-supplied dict, not shared state: the WS thread
             # and the watchdog thread can both be in here at once, and a shared
             # "last block" slot lets one thread's numbers end up in the other's
@@ -438,7 +470,9 @@ class ChildBroker:
                 detail_out.update(detail)
             if not ok:
                 self.margin['blocked_count'] += 1
-                self.log(f'[{self.name}] MARGIN BLOCKED ({detail.get("mode")}) {side} {qty} {symbol}: '
+                self.log(f'[{self.name}] MARGIN BLOCKED '
+                         f'({detail.get("blocked_on", "margin")}, {detail.get("mode")}) '
+                         f'{side} {qty} {symbol}: '
                          f'needs Rs {detail.get("required", 0):,.2f}, have Rs {detail.get("available", 0):,.2f} '
                          f'(short Rs {detail.get("shortfall", 0):,.2f})')
                 return 0, [], MARGIN_BLOCKED
