@@ -78,6 +78,27 @@ export function DayChangeChip({
         .lc-stat-neutral { color: rgba(255,255,255,0.85); }
         .lc-stat-profit  { color: #34d399; text-shadow: 0 0 6px rgba(52, 211, 153, 0.4); }
         .lc-stat-loss    { color: #f87171; text-shadow: 0 0 6px rgba(248, 113, 113, 0.4); }
+
+        /* ── White mode overrides ───────────────────────────────────── */
+        :root:not(.dark) .lc-stat-card {
+          background: #ffffff;
+          border: 1px solid #cbd5e1;
+          box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
+        }
+        :root:not(.dark) .lc-stat-label {
+          color: #64748b;
+        }
+        :root:not(.dark) .lc-stat-neutral {
+          color: #0f172a;
+        }
+        :root:not(.dark) .lc-stat-profit {
+          color: #059669;
+          text-shadow: none;
+        }
+        :root:not(.dark) .lc-stat-loss {
+          color: #dc2626;
+          text-shadow: none;
+        }
       `}</style>
       <span
         className="flex items-center gap-1.5"
