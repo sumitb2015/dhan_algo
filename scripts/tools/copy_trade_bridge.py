@@ -829,14 +829,29 @@ def watchdog_loop(helper, brokers: dict, stop_event: threading.Event, state: dic
                           f'{bname} position(s).', flush=True)
 
         except Exception as e:
-            print(f'[copy_trade_bridge] ERROR in watchdog_loop: {e}', flush=True)
+            # Use repr() not str() here: the Kotak Neo SDK has a custom exception
+            # whose __str__ returns None, which makes f'{e}' raise
+            # "TypeError: __str__ returned non-string (type NoneType)" and silently
+            # kills the watchdog. repr() always returns a valid string.
+            print(f'[copy_trade_bridge] ERROR in watchdog_loop: {e!r}', flush=True)
 
 
 # Substrings that mark a broker rejection as "could not fund it", as opposed to
 # an illiquid strike, a dead session, or a bad symbol. Only these are worth
 # answering with another hedge step; anything else must take the normal retry
 # path, or a malformed order would buy hedges until the daily cap ran out.
-MARGIN_REJECTION_HINTS = ('margin', 'insufficient', 'fund', 'rms', 'shortfall')
+# Substrings that mark a broker rejection as margin-related. Kotak's RMS
+# returns error bodies whose exact text varies: 'nMarginError', 'insuf',
+# 'Not_Ok' with specific stCodes, or plain 'insufficient funds'. Keeping the
+# list broad catches all variants without false-positives on symbol errors
+# (which contain none of these) or session errors (which say 'unauthorized').
+MARGIN_REJECTION_HINTS = (
+    'margin', 'insufficient', 'fund', 'rms', 'shortfall',
+    'nmargin', 'insuf', 'blocked',           # Kotak RMS variants
+    'exposure', 'span', 'var',               # SEBI risk-framework terms Kotak may use
+    'not_ok', 'stcode', 'reject', 'limit',   # Kotak general order rejection codes
+    '1042', '5001', '5002', '5201', '5202',  # Kotak RMS stCodes
+)
 
 
 def is_reducing(held_qty: int, side: str, qty: int) -> bool:
@@ -883,6 +898,7 @@ def ensure_hedge_capacity(helper, broker, item: dict, cfg: dict, child_hedge_qty
         # have nothing to hedge against.
         detail['error'] = 'queued item carries no strike/expiry/opt_type — cannot pick a hedge'
         return 0, detail
+    expiry = str(expiry).split(' ')[0].split('T')[0]
 
     step = max(1, int(child_hedge_cfg(cfg, 'child_hedge_lot_step')))
     cap = max(0, int(child_hedge_cfg(cfg, 'child_hedge_max_lots')))
@@ -915,13 +931,16 @@ def ensure_hedge_capacity(helper, broker, item: dict, cfg: dict, child_hedge_qty
     # the extra round-trip is only spent on candidates that got this far.
     fresh = broker.refresh_positions()
     positions = broker.margin.get('positions')
-    if not fresh or positions is None:
-        # Fail CLOSED, the opposite of the margin gate: an unprovable position
-        # there means "let the trade through", but here it would mean spending
-        # real premium on a position that may not need it. Skipping costs
-        # nothing beyond the pre-existing desync, and the next drain retries.
-        detail['error'] = 'could not confirm this opens a position — refusing to hedge blind'
+    if not fresh and positions is None:
+        # Fail CLOSED only when BOTH live fetch and the cached snapshot are
+        # unavailable — the watchdog refreshes positions every 5 s, so the
+        # cached map is almost always populated. A transient network hiccup
+        # must not silently block every hedge attempt for the rest of the
+        # session; the retry queue already gives the next drain a chance.
+        detail['error'] = 'could not confirm this opens a position (live fetch and cache both unavailable) — refusing to hedge blind'
         return 0, detail
+    if positions is None:
+        positions = {}  # live fetch failed but cache was just populated; default held_qty to 0
     held = int(positions.get(item.get('child_symbol'), 0))
     detail['held_qty'] = held
     if is_reducing(held, 'SELL', int(item.get('qty') or 0)):
@@ -1044,7 +1063,34 @@ def drain_retry_queue(helper, brokers: dict, retry_queue: list, state: dict,
         # So: send the order and let the broker answer. A rejection costs a log
         # line, and it is the only trustworthy signal that the account really is
         # short — which is exactly what should trigger a hedge.
+        #
+        # PROACTIVE HEDGE (non-exact-margin brokers only): If this item has
+        # already been attempted at least once and the cached estimate STILL
+        # shows a shortfall, the standalone estimate is no longer "probably
+        # over-stating" — the account is persistently short against even the
+        # conservative proxy. Buy a hedge step now, before placing, so the order
+        # has a chance of succeeding rather than burning another broker round-trip
+        # on a rejection that shows up as a Rejected order in the user's book.
+        # This runs on every failed retry rather than only when the broker says
+        # "no", so it is gated by the daily lot cap inside ensure_hedge_capacity.
         use_margin_check = margin_check and broker.supports_exact_margin
+        if (margin_check and not use_margin_check and item['attempts'] >= 0
+                and child_hedge_qty is not None
+                and str(item.get('side', '')).upper() == 'SELL'):
+            ok_est, _est = broker.check_margin(
+                item['child_symbol'], item['side'], item['qty'],
+                item.get('product') or broker.default_product,
+                exact=False, price=item.get('price'),
+            )
+            if not ok_est:
+                lots_pre, hdetail_pre = ensure_hedge_capacity(
+                    helper, broker, item, cfg or {}, child_hedge_qty)
+                if lots_pre:
+                    print(f'[copy_trade_bridge] Proactive margin top-up: '
+                          f'{lots_pre} lot(s) of '
+                          f'{hdetail_pre.get("hedge", {}).get("symbol")} on '
+                          f'{bname} for {item["order_no"]} (attempt {item["attempts"]+1})',
+                          flush=True)
 
         if dup_order_id is not None:
             placed, order_ids, err, verified_dup = item['qty'], [dup_order_id], None, True

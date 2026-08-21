@@ -2593,8 +2593,8 @@ export function TabTable({ tab, data, sort, onSort }: TabTableProps) {
         {sortedData.map((row, i) => (
           <tr key={i} className="hover:bg-zinc-800/40 transition-colors">
             {cols.map(c => {
-              const val = row[c.key];
-              const str = val == null ? '—' : String(val);
+              const val = row[c.key] ?? (c.key === 'createTime' ? (row.updateTime || row.exchangeTime || row.ordEntTm || row.ordDtTm || row.order_timestamp) : null);
+              const str = (val == null || String(val).trim() === '') ? '—' : String(val);
               let cls = `px-3 py-2 whitespace-nowrap font-mono ${c.numeric ? 'text-right tabular-nums' : ''}`;
               if (c.highlight === 'side') {
                 cls += str === 'BUY' ? ' text-emerald-400 font-bold' : str === 'SELL' ? ' text-rose-400 font-bold' : ' text-zinc-300';

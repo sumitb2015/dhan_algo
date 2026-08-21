@@ -79,23 +79,23 @@ function txnType(raw: any): string {
 export function shapeKotakOrder(o: Record<string, any>): ScalperOrder {
   const priceType = String(o.prcTp ?? '').toUpperCase();
   return {
-    tradingSymbol: String(o.trdSym ?? ''),
-    orderStatus: String(o.ordSt ?? '').toUpperCase(),
+    tradingSymbol: String(o.trdSym ?? o.sym ?? ''),
+    orderStatus: String(o.ordSt ?? o.st ?? '').toUpperCase(),
     transactionType: txnType(o.trnsTp),
-    quantity: Number(o.qty) || 0,
-    price: Number(o.prc) || 0,
+    quantity: Number(o.qty ?? o.ordQty) || 0,
+    price: Number(o.prc ?? o.ordPrc) || 0,
     orderType: priceType === 'MKT' ? 'MARKET' : priceType === 'L' ? 'LIMIT' : priceType,
-    createTime: String(o.ordTm ?? ''),
+    createTime: String(o.ordEntTm ?? o.ordDtTm ?? o.ordTm ?? o.exCfmTm ?? o.orderDateTime ?? o.orderTimestamp ?? o.createTime ?? ''),
   };
 }
 
 export function shapeKotakTrade(t: Record<string, any>): ScalperTrade {
   return {
-    tradingSymbol: String(t.trdSym ?? ''),
+    tradingSymbol: String(t.trdSym ?? t.sym ?? ''),
     transactionType: txnType(t.trnsTp),
     tradedQuantity: Number(t.fldQty ?? t.qty) || 0,
     tradedPrice: Number(t.avgPrc ?? t.prc) || 0,
-    createTime: String(t.flTm ?? ''),
+    createTime: String(t.flTm ?? t.exTm ?? t.trdTm ?? t.ordEntTm ?? t.ordDtTm ?? t.createTime ?? ''),
   };
 }
 

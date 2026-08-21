@@ -480,6 +480,8 @@ def pick_child_hedge(helper, broker, short_strike, expiry: str, opt_type: str,
     except (TypeError, ValueError):
         return None, f'unusable short strike {short_strike!r}'
 
+    if expiry:
+        expiry = str(expiry).split(' ')[0].split('T')[0]
     try:
         df = helper.get_option_chain_df(underlying, expiry)
     except Exception as e:

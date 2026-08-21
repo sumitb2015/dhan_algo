@@ -1005,7 +1005,7 @@ class KotakChild(ChildBroker):
                 continue
             if str(o.get('ordSt', '') or '').lower() in ('rejected', 'cancelled'):
                 continue
-            ts = _parse_kotak_time(o.get('ordTm'))
+            ts = _parse_kotak_time(o.get('ordEntTm') or o.get('ordDtTm') or o.get('ordTm') or o.get('exCfmTm'))
             # Fail CLOSED, exactly as on the Zerodha path — an unparseable
             # timestamp must not count as a match.
             if ts is None or since_ts is None or ts < since_ts:
