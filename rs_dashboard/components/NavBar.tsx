@@ -121,6 +121,7 @@ const NAV_GROUPS = [
       { href: '/portfolio/trades', label: 'Trade P&L', desc: 'FIFO realized P&L by segment (Equity/F&O/Commodity)' },
       { href: '/portfolio/diary', label: "Trader's Diary", desc: 'Weekly & monthly P&L calendar, streaks, in-profit days' },
       { href: '/portfolio/weekly-target', label: 'Weekly Target', desc: 'Track progress against a recurring weekly profit goal' },
+      { href: '/portfolio/stats', label: 'P&L Stats', desc: 'FY performance vs starting capital — month grid, win rate, equity curve' },
       { href: '/performance', label: 'Performance', desc: 'Historical backtests & drawdown statistics' },
       { href: '/reports', label: 'Reports', desc: 'Trade journals & execution logs' },
     ],

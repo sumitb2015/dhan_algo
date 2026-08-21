@@ -970,11 +970,12 @@ function RiskSnapshotCard({ risk }: { risk: RiskSummary | null }) {
 
 // ─── Cross-links ──────────────────────────────────────────────────────────────
 
-function RelatedLinks({ current }: { current: 'portfolio' | 'portfolio-new' | 'portfolio-trades' }) {
+function RelatedLinks({ current }: { current: 'portfolio' | 'portfolio-new' | 'portfolio-trades' | 'portfolio-stats' }) {
   const links = [
     { href: '/portfolio', label: 'Portfolio', id: 'portfolio' },
     { href: '/portfolio-new', label: 'Portfolio+ (Net Worth)', id: 'portfolio-new' },
     { href: '/portfolio/trades', label: 'Trade P&L', id: 'portfolio-trades' },
+    { href: '/portfolio/stats', label: 'P&L Stats', id: 'portfolio-stats' },
     { href: '/reports', label: 'Reports', id: 'reports' },
   ].filter(l => l.id !== current);
 
