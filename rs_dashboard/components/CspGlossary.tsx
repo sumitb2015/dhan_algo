@@ -42,7 +42,7 @@ export default function CspGlossary({ onClose }: { onClose: () => void }) {
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/70 p-4 backdrop-blur-sm"
+      className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-oncolor-dark/70 p-4 backdrop-blur-sm"
       onClick={onClose}
     >
       <div

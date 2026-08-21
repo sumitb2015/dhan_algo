@@ -406,7 +406,7 @@ export function TrendingOiChartModal({
       role="dialog"
       aria-modal="true"
       aria-label="Trending OI chart"
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4 backdrop-blur-sm"
+      className="fixed inset-0 z-50 flex items-center justify-center bg-oncolor-dark/70 p-4 backdrop-blur-sm"
       onMouseDown={(e) => { pressedBackdrop.current = e.target === e.currentTarget; }}
       onClick={(e) => {
         if (e.target === e.currentTarget && pressedBackdrop.current) onClose();

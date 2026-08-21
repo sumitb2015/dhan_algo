@@ -221,7 +221,7 @@ function InvestmentPanel({
 
   return (
     <div className="fixed inset-0 z-50 flex">
-      <div className="flex-1 bg-black/60 backdrop-blur-sm" onClick={onClose} />
+      <div className="flex-1 bg-oncolor-dark/60 backdrop-blur-sm" onClick={onClose} />
       <div className="w-80 bg-zinc-950 border-l border-zinc-800 flex flex-col h-full overflow-y-auto">
         {/* Panel header */}
         <div className="flex items-center justify-between px-4 py-3 border-b border-zinc-800 bg-zinc-900">

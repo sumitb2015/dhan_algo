@@ -34,7 +34,7 @@ export default function ConfirmDialog({
       role="dialog"
       aria-modal="true"
       aria-label={payload.title}
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4 backdrop-blur-sm"
+      className="fixed inset-0 z-50 flex items-center justify-center bg-oncolor-dark/70 p-4 backdrop-blur-sm"
       onClick={(e) => { if (e.target === e.currentTarget) onCancel(); }}
     >
       <Card className="w-full max-w-sm border border-zinc-700 bg-zinc-900 shadow-2xl">

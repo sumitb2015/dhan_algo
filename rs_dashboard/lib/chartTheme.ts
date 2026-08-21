@@ -37,10 +37,6 @@ const CHROME: Record<ResolvedTheme, ChartChrome> = {
   },
 };
 
-export function chartChrome(theme: ResolvedTheme): ChartChrome {
-  return CHROME[theme];
-}
-
 /** Re-renders the caller whenever the theme changes. */
 export function useChartChrome(): ChartChrome {
   return CHROME[useResolvedTheme()];

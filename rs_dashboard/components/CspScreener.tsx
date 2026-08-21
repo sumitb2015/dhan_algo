@@ -1071,7 +1071,7 @@ export default function CspScreener() {
       {showGlossary && <CspGlossary onClose={() => setShowGlossary(false)} />}
 
       {sell && (
-        <div className="fixed inset-0 z-50 flex items-start justify-center bg-black/70 p-4 backdrop-blur-sm">
+        <div className="fixed inset-0 z-50 flex items-start justify-center bg-oncolor-dark/70 p-4 backdrop-blur-sm">
           <div className="mt-24 w-full max-w-md rounded-md border border-rose-500/30 bg-zinc-950 shadow-2xl">
             <div className="border-b border-zinc-800 px-4 py-3">
               <h2 className="text-[15px] font-bold text-zinc-100">Sell Cash Secured Put</h2>

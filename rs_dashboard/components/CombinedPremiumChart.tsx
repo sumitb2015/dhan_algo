@@ -24,10 +24,9 @@ const IST_TIME_ZONE = 'Asia/Kolkata';
 // The chart is sized by a ResizeObserver on the first frame; this is only the pre-measure height.
 const INITIAL_HEIGHT = 400;
 
-// Fixed dark-theme palette (rs_dashboard has no light/dark theme toggle for chart chrome -
-// matches LightweightCandlestickChart.tsx's constants).
-// REMOVED: moved to lib/chartTheme.ts — the CHROME const below is kept for the module-level
-// STATUS / CATEGORICAL arrays which are not themed.
+// Gridline / axis / tick colours live in lib/chartTheme.ts because they flip with the
+// theme. STATUS and CATEGORICAL stay here: they're saturated data colours that read on
+// either ground, so they aren't themed.
 const STATUS = { good: '#34d399', critical: '#f87171' };
 const CATEGORICAL = ['#38bdf8', '#fbbf24', '#a78bfa', '#f472b6', '#4ade80', '#fb923c'];
 

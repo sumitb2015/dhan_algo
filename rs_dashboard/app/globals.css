@@ -163,13 +163,23 @@
   --chart-tooltip-bg: #ffffff;
   --chart-tooltip-border: #cbd5e1;
   --chart-tooltip-text: #0f172a;
+  --chart-pos: #047857;
+  --chart-neg: #b91c1c;
 
-  /* lc-* panel design system */
+  /* lc-* panel design system (components/PanelStyles.tsx).
+     Surfaces stay distinct so the toolbar > control > chart-wrap depth cue
+     survives in white mode; on a dark ground that separation comes from the
+     surface colours themselves, on a white one it comes from --lc-shadow. */
   --lc-surface:       #ffffff;
-  --lc-surface-2:     #ffffff;
+  --lc-surface-2:     #f8fafc;
   --lc-surface-3:     #ffffff;
-  --lc-hairline:      rgba(99, 102, 241, 0.25);
-  --lc-hairline-soft: rgba(99, 102, 241, 0.15);
+  --lc-hairline:      #cbd5e1;
+  --lc-hairline-soft: #e2e8f0;
+  --lc-shadow:        0 1px 3px rgba(15, 23, 42, 0.06);
+  --lc-hover-bg:      #eef2ff;
+  --lc-active-bg:     #e0e7ff;
+  --lc-active-border: #a5b4fc;
+  --lc-active-shadow: 0 1px 3px rgba(99, 102, 241, 0.15);
   --lc-text:          rgba(15, 23, 42, 0.95);
   --lc-text-muted:    rgba(15, 23, 42, 0.65);
   --lc-text-dim:      rgba(15, 23, 42, 0.45);
@@ -279,6 +289,8 @@
   --chart-tooltip-bg: #18181b;
   --chart-tooltip-border: #3f3f46;
   --chart-tooltip-text: #f4f4f5;
+  --chart-pos: #10b981;
+  --chart-neg: #ef4444;
 
   /* lc-* panel design system */
   --lc-surface:       rgba(18, 20, 29, 0.85);
@@ -286,6 +298,11 @@
   --lc-surface-3:     rgba(30, 34, 52, 0.70);
   --lc-hairline:      rgba(99, 102, 241, 0.18);
   --lc-hairline-soft: rgba(99, 102, 241, 0.10);
+  --lc-shadow:        none;
+  --lc-hover-bg:      rgba(99, 102, 241, 0.1);
+  --lc-active-bg:     linear-gradient(135deg, rgba(99, 102, 241, 0.3), rgba(168, 85, 247, 0.2));
+  --lc-active-border: rgba(129, 140, 248, 0.4);
+  --lc-active-shadow: 0 0 8px rgba(99, 102, 241, 0.2);
   --lc-text:          rgba(255, 255, 255, 0.92);
   --lc-text-muted:    rgba(255, 255, 255, 0.65);
   --lc-text-dim:      rgba(255, 255, 255, 0.45);
@@ -396,6 +413,16 @@ body {
 .recharts-default-tooltip {
   background: var(--chart-tooltip-bg) !important;
   border-color: var(--chart-tooltip-border) !important;
+  color: var(--chart-tooltip-text) !important;
+}
+/* The container rule above can't reach the label row: ~12 charts pass
+   labelStyle={{color:'#a1a1aa'}}, which lands as an inline style on that child
+   and beats any inherited colour — 2:1 on the now-white tooltip.
+   Deliberately NOT extended to .recharts-tooltip-item: recharts colours each
+   item row with its own series colour, which is information, not chrome. The
+   three charts that override an item row to a flat grey pass
+   var(--chart-tooltip-text) directly instead. */
+.recharts-tooltip-label {
   color: var(--chart-tooltip-text) !important;
 }
 

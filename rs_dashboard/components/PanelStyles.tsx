@@ -29,6 +29,7 @@ export function PanelStyles() {
         border: 1px solid var(--lc-hairline-soft);
         border-radius: 10px;
         backdrop-filter: blur(10px);
+        box-shadow: var(--lc-shadow);
       }
       .lc-toolbar-group {
         display: flex;
@@ -50,7 +51,7 @@ export function PanelStyles() {
       .lc-toolbar-sep {
         width: 1px;
         height: 36px;
-        background: linear-gradient(180deg, transparent, rgba(99,102,241,0.2), transparent);
+        background: linear-gradient(180deg, transparent, var(--lc-hairline), transparent);
         align-self: flex-end;
         margin-bottom: 2px;
       }
@@ -76,7 +77,7 @@ export function PanelStyles() {
         appearance: auto;
       }
       .lc-select:hover {
-        border-color: rgba(99, 102, 241, 0.35);
+        border-color: var(--lc-accent);
         color: var(--lc-accent-strong);
       }
       .lc-select:focus {
@@ -87,7 +88,7 @@ export function PanelStyles() {
       .lc-select--accent {
         color: var(--lc-accent-strong);
         font-weight: 700;
-        border-color: rgba(129, 140, 248, 0.25);
+        border-color: var(--lc-hairline);
       }
       .lc-select--mono {
         font-family: 'JetBrains Mono', 'Fira Code', monospace;
@@ -126,15 +127,15 @@ export function PanelStyles() {
         transition: all 0.15s ease;
       }
       .lc-view-btn:hover {
-        background: var(--lc-hairline-soft);
+        background: var(--lc-hover-bg);
         color: var(--lc-accent-hover);
-        border-color: rgba(99, 102, 241, 0.3);
+        border-color: var(--lc-accent);
       }
       .lc-view-btn--active {
-        background: linear-gradient(135deg, rgba(99, 102, 241, 0.3), rgba(168, 85, 247, 0.2));
+        background: var(--lc-active-bg);
         color: var(--lc-accent-strong);
-        border-color: rgba(129, 140, 248, 0.4);
-        box-shadow: 0 0 8px rgba(99, 102, 241, 0.2);
+        border-color: var(--lc-active-border);
+        box-shadow: var(--lc-active-shadow);
       }
 
       /* ── Spot card ───────────────────────────────────────────────── */
@@ -229,6 +230,7 @@ export function PanelStyles() {
         border-radius: 10px;
         padding: 6px;
         overflow: hidden;
+        box-shadow: var(--lc-shadow);
       }
       .lc-chart-loading {
         flex: 1;
@@ -242,6 +244,7 @@ export function PanelStyles() {
         border-radius: 10px;
         font-size: 12px;
         color: var(--lc-text-dim);
+        box-shadow: var(--lc-shadow);
       }
 
       /* ── Legs row ────────────────────────────────────────────────── */
@@ -256,21 +259,22 @@ export function PanelStyles() {
         border: 1px solid var(--lc-hairline-soft);
         border-radius: 10px;
         backdrop-filter: blur(10px);
+        box-shadow: var(--lc-shadow);
       }
       .lc-add-leg-btn {
         padding: 5px 10px;
         font-size: 11px;
         font-weight: 600;
         border-radius: 6px;
-        border: 1px dashed rgba(99, 102, 241, 0.3);
+        border: 1px dashed var(--lc-accent);
         background: transparent;
         color: var(--lc-accent);
         cursor: pointer;
         transition: all 0.15s;
       }
       .lc-add-leg-btn:hover:not(:disabled) {
-        background: var(--lc-hairline-soft);
-        border-color: rgba(99, 102, 241, 0.5);
+        background: var(--lc-hover-bg);
+        border-color: var(--lc-accent);
       }
       .lc-add-leg-btn:disabled { opacity: 0.3; cursor: not-allowed; }
       .lc-remove-btn {
@@ -285,67 +289,12 @@ export function PanelStyles() {
         transition: all 0.15s;
         line-height: 1;
       }
-      /* ── White mode overrides (:root:not(.dark)) ───────────────── */
-      :root:not(.dark) .lc-chart-wrap {
-        background: #ffffff !important;
-        border: 1px solid #e2e8f0;
-        box-shadow: 0 1px 3px rgba(15, 23, 42, 0.05);
+      .lc-remove-btn:hover:not(:disabled) {
+        background: rgba(239, 68, 68, 0.15);
+        border-color: rgba(239, 68, 68, 0.4);
       }
-      :root:not(.dark) .lc-chart-loading {
-        background: #ffffff !important;
-        border: 1px solid #e2e8f0;
-        color: #64748b;
-      }
-      :root:not(.dark) .lc-toolbar {
-        background: #ffffff;
-        border: 1px solid #e2e8f0;
-        box-shadow: 0 1px 3px rgba(15, 23, 42, 0.04);
-      }
-      :root:not(.dark) .lc-legs-row {
-        background: #ffffff;
-        border: 1px solid #e2e8f0;
-        box-shadow: 0 1px 3px rgba(15, 23, 42, 0.04);
-      }
-      :root:not(.dark) .lc-select,
-      :root:not(.dark) .lc-input {
-        background: #f8fafc;
-        border: 1px solid #cbd5e1;
-        color: #0f172a;
-      }
-      :root:not(.dark) .lc-select:hover,
-      :root:not(.dark) .lc-input:hover {
-        border-color: #6366f1;
-      }
-      :root:not(.dark) .lc-view-btn {
-        background: #f8fafc;
-        border: 1px solid #cbd5e1;
-        color: #475569;
-      }
-      :root:not(.dark) .lc-view-btn:hover {
-        background: #eef2ff;
-        color: #4f46e5;
-        border-color: #a5b4fc;
-      }
-      :root:not(.dark) .lc-view-btn--active {
-        background: #e0e7ff;
-        border-color: #a5b4fc;
-        color: #3730a3;
-        box-shadow: 0 1px 3px rgba(99, 102, 241, 0.15);
-      }
-      :root:not(.dark) .lc-spot-card {
-        background: #f8fafc;
-        border: 1px solid #cbd5e1;
-      }
-      :root:not(.dark) .lc-stat-label {
-        color: #64748b;
-      }
-      :root:not(.dark) .lc-spot-value {
-        color: #0f172a;
-      }
-      :root:not(.dark) .lc-status-pill {
-        background: #f8fafc;
-        border: 1px solid #cbd5e1;
-      }
+      .lc-remove-btn:disabled { opacity: 0.3; cursor: not-allowed; }
+
     `}</style>
   );
 }

@@ -669,7 +669,7 @@ export default function PortfolioDiaryDashboard() {
                         cursor={{ fill: '#3f3f46', opacity: 0.35 }}
                         contentStyle={{ background: '#18181b', border: '1px solid #3f3f46', borderRadius: 8, fontSize: 11 }}
                         labelStyle={{ color: '#a1a1aa' }}
-                        itemStyle={{ color: '#e4e4e7' }}
+                        itemStyle={{ color: 'var(--chart-tooltip-text)' }}
                         formatter={(v: unknown, name: unknown, props: any) => {
                           const w = props.payload as WeekdayStat;
                           if (weekdayMetric === 'totalTrades') {
@@ -1114,7 +1114,7 @@ export default function PortfolioDiaryDashboard() {
                           <Tooltip
                             contentStyle={{ background: '#18181b', border: '1px solid #3f3f46', borderRadius: 8, fontSize: 11 }}
                             labelStyle={{ color: '#a1a1aa' }}
-                        itemStyle={{ color: '#e4e4e7' }}
+                        itemStyle={{ color: 'var(--chart-tooltip-text)' }}
                             labelFormatter={(d: any) => fmtDateLong(String(d))}
                             formatter={(v: unknown) => [fmtINR(v as number), activeChartMetric.label]}
                           />
@@ -1160,7 +1160,7 @@ export default function PortfolioDiaryDashboard() {
                             cursor={{ fill: '#3f3f46', opacity: 0.35 }}
                             contentStyle={{ background: '#18181b', border: '1px solid #3f3f46', borderRadius: 8, fontSize: 11 }}
                             labelStyle={{ color: '#a1a1aa' }}
-                        itemStyle={{ color: '#e4e4e7' }}
+                        itemStyle={{ color: 'var(--chart-tooltip-text)' }}
                             labelFormatter={(d: any) => fmtDateLong(String(d))}
                             formatter={(v: unknown) => [fmtINR(v as number), activeChartMetric.label]}
                           />

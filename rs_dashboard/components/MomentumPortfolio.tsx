@@ -186,7 +186,7 @@ function ReadmeModal({ onClose }: { onClose: () => void }) {
 
   return (
     <div
-      className="fixed inset-0 z-50 bg-black/70 flex items-start justify-center overflow-y-auto p-6"
+      className="fixed inset-0 z-50 bg-oncolor-dark/70 flex items-start justify-center overflow-y-auto p-6"
       onClick={onClose}
       role="dialog"
       aria-modal="true"

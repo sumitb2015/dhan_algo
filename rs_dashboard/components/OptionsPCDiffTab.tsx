@@ -40,9 +40,9 @@ const DiffTooltip = ({ active, payload, label }: any) => {
   if (!active || !payload?.length) return null;
   const d: number = payload[0]?.payload?.diff ?? 0;
   return (
-    <div style={{ background: '#09090b', border: '1px solid #3f3f46', borderRadius: 8, padding: '6px 10px', fontSize: 11 }}>
-      <p style={{ color: '#a1a1aa', marginBottom: 4 }}>{label}</p>
-      <p style={{ color: d >= 0 ? '#10b981' : '#ef4444', fontWeight: 700, fontVariantNumeric: 'tabular-nums' }}>
+    <div style={{ background: 'var(--chart-tooltip-bg)', border: '1px solid var(--chart-tooltip-border)', color: 'var(--chart-tooltip-text)', borderRadius: 8, padding: '6px 10px', fontSize: 11 }}>
+      <p style={{ color: 'var(--chart-tick)', marginBottom: 4 }}>{label}</p>
+      <p style={{ color: d >= 0 ? 'var(--chart-pos)' : 'var(--chart-neg)', fontWeight: 700, fontVariantNumeric: 'tabular-nums' }}>
         {(d >= 0 ? '+' : '') + fmtOI(d)}
       </p>
     </div>
@@ -54,9 +54,9 @@ const PremiumDiffTooltip = ({ active, payload, label }: any) => {
   if (!active || !payload?.length) return null;
   const d: number = payload[0]?.payload?.diff ?? 0;
   return (
-    <div style={{ background: '#09090b', border: '1px solid #3f3f46', borderRadius: 8, padding: '6px 10px', fontSize: 11 }}>
-      <p style={{ color: '#a1a1aa', marginBottom: 4 }}>{label}</p>
-      <p style={{ color: d >= 0 ? '#10b981' : '#ef4444', fontWeight: 700, fontVariantNumeric: 'tabular-nums' }}>
+    <div style={{ background: 'var(--chart-tooltip-bg)', border: '1px solid var(--chart-tooltip-border)', color: 'var(--chart-tooltip-text)', borderRadius: 8, padding: '6px 10px', fontSize: 11 }}>
+      <p style={{ color: 'var(--chart-tick)', marginBottom: 4 }}>{label}</p>
+      <p style={{ color: d >= 0 ? 'var(--chart-pos)' : 'var(--chart-neg)', fontWeight: 700, fontVariantNumeric: 'tabular-nums' }}>
         {(d >= 0 ? '+' : '') + d.toFixed(2)}
       </p>
     </div>
@@ -68,13 +68,13 @@ const VixTabTooltip = ({ active, payload, label }: any) => {
   if (!active || !payload?.length) return null;
   const row = payload[0]?.payload;
   return (
-    <div style={{ background: '#09090b', border: '1px solid #3f3f46', borderRadius: 8, padding: '6px 10px', fontSize: 11 }}>
-      <p style={{ color: '#a1a1aa', marginBottom: 4 }}>{label}</p>
-      <p style={{ color: '#818cf8', fontWeight: 700, fontVariantNumeric: 'tabular-nums' }}>
+    <div style={{ background: 'var(--chart-tooltip-bg)', border: '1px solid var(--chart-tooltip-border)', color: 'var(--chart-tooltip-text)', borderRadius: 8, padding: '6px 10px', fontSize: 11 }}>
+      <p style={{ color: 'var(--chart-tick)', marginBottom: 4 }}>{label}</p>
+      <p style={{ color: 'var(--a-indigo-400)', fontWeight: 700, fontVariantNumeric: 'tabular-nums' }}>
         VIX: {Number(row?.close ?? 0).toFixed(2)}
       </p>
       {row?.ma20 != null && (
-        <p style={{ color: '#f59e0b', fontWeight: 700, fontVariantNumeric: 'tabular-nums', marginTop: 2 }}>
+        <p style={{ color: 'var(--a-amber-400)', fontWeight: 700, fontVariantNumeric: 'tabular-nums', marginTop: 2 }}>
           MA (20): {Number(row.ma20).toFixed(2)}
         </p>
       )}

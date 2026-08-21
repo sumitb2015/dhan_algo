@@ -240,7 +240,7 @@ function SettingsPanel({
     <>
       {/* Backdrop */}
       <div
-        className="fixed inset-0 bg-black/50 z-40 backdrop-blur-sm"
+        className="fixed inset-0 bg-oncolor-dark/50 z-40 backdrop-blur-sm"
         onClick={onClose}
       />
 

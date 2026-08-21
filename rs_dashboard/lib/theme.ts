@@ -61,8 +61,6 @@ export function setThemeMode(next: ThemeMode) {
   apply();
 }
 
-export const THEME_CYCLE: ThemeMode[] = ['dark', 'light'];
-
 export function nextThemeMode(current: ThemeMode): ThemeMode {
   return current === 'dark' ? 'light' : 'dark';
 }

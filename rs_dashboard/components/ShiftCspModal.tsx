@@ -279,7 +279,7 @@ export default function ShiftCspModal({ target, onClose, onComplete }: {
   const finished = steps.entry === 'done';
 
   return (
-    <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/70 p-4 backdrop-blur-sm">
+    <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-oncolor-dark/70 p-4 backdrop-blur-sm">
       <div className="mt-8 w-full max-w-lg rounded-md border border-zinc-800 bg-zinc-950 shadow-2xl">
         <div className="flex items-start justify-between border-b border-zinc-800 px-4 py-3">
           <div>
