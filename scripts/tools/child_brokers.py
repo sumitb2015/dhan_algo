@@ -57,6 +57,7 @@ DEFAULT_FREEZE_QTY = 1800
 # runs on the order-update WS callback thread — hence injection rather than a
 # direct call. The value below only survives if that injection never happens.
 DEFAULT_LOT_SIZE = 65
+DEFAULT_PER_LOT_MARGIN = 165000.0
 
 
 def set_default_lot_size(size) -> bool:
@@ -407,11 +408,7 @@ class ChildBroker:
                 detail['failed_open'] = True
                 return True, detail
         else:
-            per_lot = self.margin['per_lot']
-            if per_lot is None:
-                detail['error'] = 'per-lot margin not yet measured'
-                detail['failed_open'] = True
-                return True, detail
+            per_lot = self.margin['per_lot'] or DEFAULT_PER_LOT_MARGIN
             lot_size = self.margin.get('lot_size') or DEFAULT_LOT_SIZE
             # Deliberately a ceiling: a part-lot quantity still reserves a whole
             # lot's worth of risk, and rounding down here would wave through the
@@ -972,6 +969,24 @@ class KotakChild(ChildBroker):
 
         order_id = order_id_of(res)
         if isinstance(res, dict) and res.get('stat') == 'Ok' and order_id:
+            # Kotak Neo API accepts orders with stat: Ok synchronously, but RMS can
+            # reject them in the order book a moment later due to margin shortfall.
+            # Brief pause to verify the status in the order book.
+            time.sleep(0.4)
+            from lib.kotak.responses import unwrap_list
+            try:
+                rows, _ = unwrap_list(self.client.order_report())
+                for o in rows or []:
+                    if str(o.get('nOrdNo') or '').strip() == str(order_id).strip():
+                        st = str(o.get('ordSt', '') or '').upper()
+                        if st in ('REJECTED', 'CANCELLED'):
+                            reason = str(o.get('rejRsn') or o.get('ordRejRsn') or o.get('errMsg') or o.get('emsg') or f'order status {st}')
+                            raise RuntimeError(f'Kotak RMS rejected order {order_id} ({st}): {reason}')
+                        break
+            except RuntimeError:
+                raise
+            except Exception:
+                pass  # network error reading report — return order_id and let watchdog handle it
             return order_id
 
         err = error_message(res) or str(res)
