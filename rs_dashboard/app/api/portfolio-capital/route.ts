@@ -16,7 +16,7 @@ function isRealDate(s: unknown): s is string {
   return dt.getUTCFullYear() === y && dt.getUTCMonth() === m - 1 && dt.getUTCDate() === d;
 }
 
-const DEFAULT_CAPITAL = 8000000;
+const DEFAULT_CAPITAL = 2500000; // 25 lakh
 const DEFAULT_FY_START = '2026-04-01';
 
 interface CapitalConfig {

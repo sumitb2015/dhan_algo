@@ -31,7 +31,7 @@ interface TradeHistoryResponse {
 
 // Mirrors the defaults in app/api/portfolio-capital/route.ts so a failed config fetch degrades
 // to the same numbers the route would have served.
-const DEFAULT_CAPITAL = 8000000;
+const DEFAULT_CAPITAL = 2500000; // 25 lakh — keep in sync with the route
 const DEFAULT_FY_START = '2026-04-01';
 
 interface CapitalConfig {
