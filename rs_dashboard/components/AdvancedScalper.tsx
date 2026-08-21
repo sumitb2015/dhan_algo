@@ -370,7 +370,7 @@ export default function AdvancedScalper() {
     [enrichedPositions]);
 
   // Anchored on the trade book's own realized total, not totalPnl — see useMtmHistory for why.
-  const { data: mtmHistory, stats: mtmStats } = useMtmHistory(broker, tradesData, totalUnrealizedPnl);
+  const { data: mtmHistory, stats: mtmStats, source: mtmSource } = useMtmHistory(broker, tradesData, totalUnrealizedPnl);
 
   // Combined Multi-Leg Premium Tracking & Strategy Stats
   const combinedStrategyStats = useMemo(() => {
@@ -2326,7 +2326,7 @@ export default function AdvancedScalper() {
         {/* Table content */}
         <div className="flex-1 overflow-auto">
           {activeTab === 'mtm' ? (
-            <MtmChart data={mtmHistory} stats={mtmStats} />
+            <MtmChart data={mtmHistory} stats={mtmStats} source={mtmSource} />
           ) : activeTab === 'funds' ? (
             <FundsView
               data={fundsData}

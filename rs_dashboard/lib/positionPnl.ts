@@ -45,3 +45,19 @@ export function scaleBrokerPnl<T extends Record<string, unknown>>(
     unrealizedProfit: Number.isFinite(unrealized) ? unrealized * mult : pos.unrealizedProfit,
   };
 }
+
+/** True when a position/trade row belongs to an MCX commodity contract.
+ *
+ *  Segment first, then the trading-symbol root: only Dhan rows carry a segment at all
+ *  (`MCX_COMM`), and Kotak/Zerodha *trade* rows are normalized down to five fields with no
+ *  exchange on them (see lib/kotakShape.ts) — so a Kotak crude fill is identifiable only by
+ *  its symbol. Reuses MCX_LOT_MULTIPLIER's keys so the commodity list stays in one place.
+ *  `startsWith` rather than an exact match: Dhan writes CRUDEOILM-Sep2026-4150-CE while
+ *  Kotak writes CRUDEOILM17SEP264150CE, and for a yes/no segment test the CRUDEOIL prefix
+ *  of CRUDEOILM is harmless — both are MCX. */
+export function isMcxRow(row: Record<string, unknown>): boolean {
+  const segment = String(row.exchangeSegment ?? row.exchange ?? '').toUpperCase();
+  if (segment.startsWith('MCX')) return true;
+  const symbol = String(row.tradingSymbol ?? row.customSymbol ?? '').toUpperCase();
+  return Object.keys(MCX_LOT_MULTIPLIER).some(root => symbol.startsWith(root));
+}

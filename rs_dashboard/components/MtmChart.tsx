@@ -5,11 +5,20 @@ import {
   AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, ReferenceLine,
 } from 'recharts';
 import type { Broker } from '@/hooks/useBrokerSelector';
-import { contractMultiplier } from '@/lib/positionPnl';
+import { contractMultiplier, isMcxRow } from '@/lib/positionPnl';
 
 // ─── Types ────────────────────────────────────────────────────────
 
-export interface MtmPoint { time: string; pnl: number }
+export interface MtmPoint { time: string; pnl: number; realized?: number; unrealized?: number }
+
+/** Where the historical part of the curve came from, so the UI can say so rather than
+ *  presenting a realized-only approximation as if it were the real thing. */
+export interface MtmSource {
+  status: 'idle' | 'loading' | 'ready' | 'error';
+  unresolved: string[];  // contracts marked at last traded price instead of a candle close
+  truncated: number;
+  error: string | null;
+}
 
 export interface MtmStats {
   current: number;
@@ -23,7 +32,8 @@ export interface MtmStats {
 const MAX_TAIL_POINTS = 2000;
 const SAMPLE_MS        = 2000; // cadence of the live tail sampled after the last trade fill
 
-const FNO_CLOSE_MINUTES = 15 * 60 + 40; // 15:40 IST — chart stops here, matching FNO session end
+const FNO_CLOSE_MINUTES = 15 * 60 + 40; // 15:40 IST — matches NSE/BSE F&O session end
+const MCX_CLOSE_MINUTES = 23 * 60 + 30; // 23:30 IST — MCX runs an evening session
 
 function istMinutesSinceMidnight(d: Date): number | null {
   if (Number.isNaN(d.getTime())) return null;
@@ -35,9 +45,17 @@ function istMinutesSinceMidnight(d: Date): number | null {
   return Number.isFinite(h) && Number.isFinite(m) ? h * 60 + m : null;
 }
 
-function withinFnoSession(iso: string): boolean {
+function withinSession(iso: string, closeMinutes: number): boolean {
   const mins = istMinutesSinceMidnight(new Date(iso));
-  return mins !== null && mins <= FNO_CLOSE_MINUTES;
+  return mins !== null && mins <= closeMinutes;
+}
+
+/** When does today's book stop trading? An MCX leg runs to 23:30, so clipping the whole
+ *  chart at the 15:40 equity close silently discards every evening commodity fill — on a
+ *  Kotak crude book that dropped 18 of 88 fills and left the live tail's realized anchor
+ *  ₹990 short (observed 2026-08-21). */
+function sessionCloseMinutes(trades: Record<string, unknown>[]): number {
+  return trades.some(isMcxRow) ? MCX_CLOSE_MINUTES : FNO_CLOSE_MINUTES;
 }
 
 function todayIstDateString(): string {
@@ -56,16 +74,25 @@ function normalizeTradeTime(raw: string): string {
   return BARE_TIME.test(raw) ? `${todayIstDateString()}T${raw}+05:30` : raw;
 }
 
-// ─── Reconstruct cumulative realized P&L from the trade book ───────
+// ─── Fallback: cumulative REALIZED P&L from the trade book ─────────
 //
 // Walks today's fills in order, tracking a weighted-average cost per symbol (same
 // method Dhan/Zerodha/Kotak positions already use), and books realized P&L each time
-// a fill reduces, closes, or reverses an open quantity. This is the only source that
-// can reconstruct *historical* MTM — the dashboard has no stored tick history to
-// replay unrealized P&L against — so it also works immediately after a reload or
-// after market hours, unlike a client-side sample buffer that only grows from the
-// moment the page was opened.
+// a fill reduces, closes, or reverses an open quantity.
+//
+// This is *not* MTM and must never be presented as such on its own: it is blind to what
+// an open position is doing. On a two-legged book, closing the losing leg prints the whole
+// loss as a cliff while the winning leg's offsetting gain stays invisible until it too is
+// closed — so the curve plunges and then teleports back up, and Day Low / Max Drawdown are
+// read off an event that never happened (observed 2026-08-21: a -₹6,725 trough on a day
+// whose true floor was -₹1,872). The real curve comes from `useMarkedMtmSeries` below,
+// which marks the open book against 1-minute candles server-side.
+//
+// It survives here because it needs no round-trip: it renders instantly on mount and
+// covers the case where the marking request fails, unlike a client-side sample buffer that
+// only grows from the moment the page was opened.
 function buildTradeMtmSeries(trades: Record<string, unknown>[]): MtmPoint[] {
+  const closeMinutes = sessionCloseMinutes(trades);
   const fills = trades
     .map(t => ({
       symbol: String(t.tradingSymbol ?? t.customSymbol ?? ''),
@@ -75,7 +102,7 @@ function buildTradeMtmSeries(trades: Record<string, unknown>[]): MtmPoint[] {
       time: normalizeTradeTime(String(t.createTime ?? t.exchangeTime ?? '')),
       mult: contractMultiplier(t),
     }))
-    .filter(t => t.symbol && t.qty > 0 && t.price > 0 && t.time && withinFnoSession(t.time) && (t.side === 'BUY' || t.side === 'SELL'))
+    .filter(t => t.symbol && t.qty > 0 && t.price > 0 && t.time && withinSession(t.time, closeMinutes) && (t.side === 'BUY' || t.side === 'SELL'))
     .sort((a, b) => new Date(a.time).getTime() - new Date(b.time).getTime());
 
   const running = new Map<string, { qty: number; avgPrice: number }>();
@@ -122,15 +149,116 @@ function buildTradeMtmSeries(trades: Record<string, unknown>[]): MtmPoint[] {
   return deduped;
 }
 
-// ─── Hook: trade-book-derived MTM curve + a short live tail ────────
+// ─── Hook: server-marked MTM curve ─────────────────────────────────
+
+const IDLE_SOURCE: MtmSource = { status: 'idle', unresolved: [], truncated: 0, error: null };
+
+// Stable identity, so downstream memos don't rerun while the book is stale.
+const NO_TRADES: Record<string, unknown>[] = [];
+
+/** The trade book, but empty while it still belongs to the PREVIOUS broker.
+ *
+ *  On the render where `broker` flips, `trades` has not changed yet: the parent clears it
+ *  from an effect declared *after* this component's hooks, so every effect here sees the old
+ *  account's book paired with the new broker's name. That mismatch is not cosmetic — it made
+ *  the server resolve Dhan symbols against Kotak's instrument cache (every contract missed),
+ *  and let a live-tail sample anchor Dhan's curve on Kotak's realized total (observed
+ *  2026-08-21: Dhan's tab reading +₹3,115.50, which was Kotak's number).
+ *
+ *  Resolved at render time rather than in an effect, so there is no window where a consumer
+ *  can act on the mismatch: an array reference is tagged with whichever broker was current
+ *  when it arrived, and anything older than the current broker reads as empty. */
+function useBrokerTrades(broker: Broker, trades: Record<string, unknown>[]): Record<string, unknown>[] {
+  const seenTrades = useRef(trades);
+  const brokerOfTrades = useRef(broker);
+  if (seenTrades.current !== trades) {
+    seenTrades.current = trades;
+    brokerOfTrades.current = broker;
+  }
+  return brokerOfTrades.current === broker ? trades : NO_TRADES;
+}
+
+// Rebuilding the curve costs one rate-limited Dhan intraday call per contract traded today,
+// so it is only worth doing when a new fill has actually landed — and never more than once
+// a minute, however fast the fills arrive.
+const MARK_REFRESH_MS = 60_000;
+
+/** Asks the server to re-mark today's book against 1-minute candles. Refetches when the fill
+ *  count changes (throttled), never on the 5s position poll alone. */
+function useMarkedMtmSeries(broker: Broker, trades: Record<string, unknown>[]) {
+  const [points, setPoints] = useState<MtmPoint[]>([]);
+  const [source, setSource] = useState<MtmSource>(IDLE_SOURCE);
+  const lastCount = useRef(-1);
+  const lastFetchAt = useRef(0);
+  const reqId = useRef(0);
+
+  useEffect(() => {
+    // Broker switch ⇒ a different account's book; drop the curve rather than re-marking onto it.
+    lastCount.current = -1;
+    lastFetchAt.current = 0;
+    reqId.current += 1;
+    setPoints([]);
+    setSource(IDLE_SOURCE);
+  }, [broker]);
+
+  useEffect(() => {
+    const count = trades.length;
+    if (count === 0 || count === lastCount.current) return;
+    // Still cooling down. `trades` gets a fresh reference on every 5s poll, so this effect
+    // re-runs and picks the fetch up again once the window lapses — no timer needed.
+    if (Date.now() - lastFetchAt.current < MARK_REFRESH_MS) return;
+
+    lastCount.current = count;
+    lastFetchAt.current = Date.now();
+    const id = ++reqId.current;
+    setSource(prev => ({ ...prev, status: 'loading' }));
+
+    fetch('/api/scalper/mtm-history', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ broker, trades }),
+    })
+      .then(r => r.json())
+      .then((json: { success?: boolean; points?: MtmPoint[]; unresolved?: string[]; truncated?: number; error?: string }) => {
+        // A slower earlier request must not overwrite a newer one's answer.
+        if (id !== reqId.current) return;
+        if (!json?.success) throw new Error(json?.error || 'marking failed');
+        setPoints(Array.isArray(json.points) ? json.points : []);
+        setSource({
+          status: 'ready',
+          unresolved: json.unresolved ?? [],
+          truncated: json.truncated ?? 0,
+          error: null,
+        });
+      })
+      .catch((err: Error) => {
+        if (id !== reqId.current) return;
+        // Let the next poll retry once the cooldown lapses rather than wedging on one failure.
+        lastCount.current = -1;
+        setSource({ status: 'error', unresolved: [], truncated: 0, error: err.message });
+      });
+  }, [broker, trades]);
+
+  return { points, source };
+}
+
+// ─── Hook: marked MTM curve + a short live tail ────────────────────
 
 export function useMtmHistory(
   broker: Broker,
-  trades: Record<string, unknown>[],
+  rawTrades: Record<string, unknown>[],
   unrealizedPnl: number,
-): { data: MtmPoint[]; stats: MtmStats } {
-  const tradeSeries = useMemo(() => buildTradeMtmSeries(trades), [trades]);
-  const lastRealized = tradeSeries.length ? tradeSeries[tradeSeries.length - 1].pnl : 0;
+): { data: MtmPoint[]; stats: MtmStats; source: MtmSource } {
+  const trades = useBrokerTrades(broker, rawTrades);
+  const fallbackSeries = useMemo(() => buildTradeMtmSeries(trades), [trades]);
+  const { points: markedSeries, source } = useMarkedMtmSeries(broker, trades);
+
+  // Prefer the marked curve; the realized-only replay just fills the gap until it arrives.
+  const history = markedSeries.length ? markedSeries : fallbackSeries;
+
+  // The tail anchor is always the realized-only total — that IS cumulative realized P&L for
+  // every fill today, regardless of which series is being drawn.
+  const lastRealized = fallbackSeries.length ? fallbackSeries[fallbackSeries.length - 1].pnl : 0;
 
   const [liveTail, setLiveTail] = useState<MtmPoint[]>([]);
   const brokerRef = useRef(broker);
@@ -152,11 +280,20 @@ export function useMtmHistory(
   // totalPnl bakes in brokerage/charges the naive trade replay above doesn't model, and splicing
   // it in directly would show a fake jump at the exact moment the series crosses from trade-
   // derived points to live samples. Sampling (and therefore the chart) stops at session close.
+  const closeMinutes = useMemo(() => sessionCloseMinutes(trades), [trades]);
+  const closeMinutesRef = useRef(closeMinutes);
+  closeMinutesRef.current = closeMinutes;
+  // No book for this broker yet ⇒ `lastRealized` is 0 while the parent's positions may still
+  // be the previous account's, so a sample now would plot a number belonging to neither.
+  const hasTradesRef = useRef(trades.length > 0);
+  hasTradesRef.current = trades.length > 0;
+
   useEffect(() => {
     const sample = () => {
       const unrealized = unrealizedRef.current;
       const now = new Date();
-      if (!Number.isFinite(unrealized) || !withinFnoSession(now.toISOString())) return;
+      if (!hasTradesRef.current) return;
+      if (!Number.isFinite(unrealized) || !withinSession(now.toISOString(), closeMinutesRef.current)) return;
       const pnl = lastRealizedRef.current + unrealized;
       setLiveTail(prev => [...prev, { time: now.toISOString(), pnl }].slice(-MAX_TAIL_POINTS));
     };
@@ -166,10 +303,10 @@ export function useMtmHistory(
   }, [broker]);
 
   const data = useMemo<MtmPoint[]>(() => {
-    const lastTradeMs = tradeSeries.length ? new Date(tradeSeries[tradeSeries.length - 1].time).getTime() : null;
-    const tail = lastTradeMs !== null ? liveTail.filter(p => new Date(p.time).getTime() > lastTradeMs) : liveTail;
-    return [...tradeSeries, ...tail];
-  }, [tradeSeries, liveTail]);
+    const lastHistoryMs = history.length ? new Date(history[history.length - 1].time).getTime() : null;
+    const tail = lastHistoryMs !== null ? liveTail.filter(p => new Date(p.time).getTime() > lastHistoryMs) : liveTail;
+    return [...history, ...tail];
+  }, [history, liveTail]);
 
   const stats = useMemo<MtmStats>(() => {
     if (data.length === 0) return { current: 0, dayHigh: 0, dayHighIndex: -1, dayLow: 0, dayLowIndex: -1, maxDrawdown: 0 };
@@ -177,7 +314,10 @@ export function useMtmHistory(
     let dayHighIndex = 0;
     let dayLow = data[0].pnl;
     let dayLowIndex = 0;
-    let peak = data[0].pnl;
+    // Drawdown is measured from flat, not from the first plotted point: the account starts
+    // the session at 0, so an opening dip is a real drawdown. Seeding `peak` from data[0]
+    // (which may already be deep in the red) understated it.
+    let peak = 0;
     let maxDrawdown = 0;
     data.forEach((p, i) => {
       if (p.pnl > dayHigh) { dayHigh = p.pnl; dayHighIndex = i; }
@@ -189,7 +329,7 @@ export function useMtmHistory(
     return { current: data[data.length - 1].pnl, dayHigh, dayHighIndex, dayLow, dayLowIndex, maxDrawdown };
   }, [data]);
 
-  return { data, stats };
+  return { data, stats, source };
 }
 
 // ─── Presentation helpers ───────────────────────────────────────────
@@ -263,9 +403,31 @@ function useZeroSplit(data: MtmPoint[]) {
   }, [data]);
 }
 
+/** Says how trustworthy the curve currently is. The realized-only fallback is a genuinely
+ *  different (and misleading) quantity, so it is never drawn without saying so. */
+function SourceBadge({ source }: { source: MtmSource }) {
+  let text: string;
+  if (source.status === 'ready' && source.unresolved.length === 0 && source.truncated === 0) {
+    text = 'Marked to 1-min closes · pre-charges';
+  } else if (source.status === 'ready') {
+    const unpriced = source.unresolved.length + source.truncated;
+    text = `Partial · ${unpriced} contract${unpriced === 1 ? '' : 's'} marked at last traded price`;
+  } else if (source.status === 'error') {
+    text = `Realized P&L only — open legs unmarked (${source.error})`;
+  } else {
+    text = 'Realized P&L only — marking open legs to market…';
+  }
+
+  return (
+    <div className="flex items-center bg-zinc-900 border border-zinc-800 rounded-xl px-4 py-3">
+      <p className="text-[11px] text-zinc-400">{text}</p>
+    </div>
+  );
+}
+
 // ─── Main component ──────────────────────────────────────────────────
 
-export default function MtmChart({ data, stats }: { data: MtmPoint[]; stats: MtmStats }) {
+export default function MtmChart({ data, stats, source }: { data: MtmPoint[]; stats: MtmStats; source: MtmSource }) {
   const { domainMin, domainMax, zeroOffsetPct } = useZeroSplit(data);
   const fadeAbove = Math.max(0, zeroOffsetPct - 15);
   const fadeBelow = Math.min(100, zeroOffsetPct + 15);
@@ -281,6 +443,7 @@ export default function MtmChart({ data, stats }: { data: MtmPoint[]; stats: Mtm
           value={stats.maxDrawdown > 0 ? `-${fmtPnl(stats.maxDrawdown, false)}` : fmtPnl(0, false)}
           valueClass={stats.maxDrawdown > 0 ? 'text-rose-400' : 'text-zinc-300'}
         />
+        <SourceBadge source={source} />
       </div>
 
       {data.length < 2 ? (
