@@ -88,20 +88,25 @@ let isShuttingDown = false;
 function cleanupAllProcesses() {
   if (isShuttingDown) return;
   isShuttingDown = true;
-  console.log('\n[shutdown] Ctrl+C / Server termination detected — cleaning up background server PIDs...');
+  console.log('\n[shutdown] Ctrl+C / Server termination detected — cleaning up all background server PIDs...');
 
   try {
     if (fs.existsSync(DEBUG_DIR)) {
       const files = fs.readdirSync(DEBUG_DIR);
       for (const file of files) {
-        if (file.endsWith('.pid') || file.endsWith('_pid.json')) {
+        if (file.endsWith('.pid') || file.endsWith('.json')) {
           const filePath = path.join(DEBUG_DIR, file);
           try {
             const raw = fs.readFileSync(filePath, 'utf8').trim();
+            if (!raw) continue;
             let pid = 0;
             if (file.endsWith('.json')) {
-              const data = JSON.parse(raw);
-              pid = Number(data.pid || data.workerPid || 0);
+              try {
+                const data = JSON.parse(raw);
+                pid = Number(data.pid || data.workerPid || 0);
+              } catch {
+                continue;
+              }
             } else {
               pid = parseInt(raw, 10);
             }
@@ -113,7 +118,7 @@ function cleanupAllProcesses() {
                 process.kill(pid, 'SIGKILL');
               }
             }
-            if (fs.existsSync(filePath)) {
+            if (file.endsWith('.pid') || file.endsWith('_pid.json')) {
               fs.unlinkSync(filePath);
             }
           } catch {
@@ -125,10 +130,15 @@ function cleanupAllProcesses() {
 
     // Kill any orphaned python/pythonw processes running scripts under dhan_algo
     if (process.platform === 'win32') {
-      execSync(
-        `powershell -NoProfile -Command "Get-CimInstance Win32_Process -Filter \\"Name = 'python.exe' OR Name = 'pythonw.exe'\\" | Where-Object { \\$_.CommandLine -like '*dhan_algo*' } | ForEach-Object { Stop-Process -Id \\$_.ProcessId -Force -ErrorAction SilentlyContinue }"`,
-        { stdio: 'ignore', windowsHide: true }
-      );
+      try {
+        const psCmd = `Get-CimInstance Win32_Process -Filter "Name = 'python.exe' OR Name = 'pythonw.exe'" | Where-Object { $_.CommandLine -like '*dhan_algo*' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }`;
+        execSync(`powershell -NoProfile -ExecutionPolicy Bypass -Command "${psCmd}"`, {
+          stdio: 'ignore',
+          windowsHide: true,
+        });
+      } catch {
+        // ignore fallback kill errors
+      }
     }
   } catch (err) {
     console.error('[shutdown] Error during process cleanup:', err);
@@ -145,4 +155,5 @@ function cleanupAllProcesses() {
 process.on('exit', () => {
   cleanupAllProcesses();
 });
+
 
