@@ -200,11 +200,49 @@ Non-obvious route behaviors:
 
 **`PROJECT_ROOT`** in API routes is `path.resolve(process.cwd(), '..')` (one level up from `rs_dashboard/`).
 
-**Table header style**: use `text-xs font-bold text-white` and solid `bg-zinc-800` for `<thead>` / `TH` components in all dashboard tables. At 10px, white text anti-aliases to gray — 12px (`text-xs`) with `font-bold` is the minimum for headers to appear truly white on dark backgrounds.
+### Theming (dark + white mode) — applies to every UI edit
 
-**No text color opacity modifiers**: never use Tailwind's slash-opacity notation on text colors (e.g. `text-white/70`, `text-zinc-400/50`). Use solid zinc colors instead: `text-zinc-100` (near-white), `text-zinc-200`, `text-zinc-300` (body), `text-zinc-400` (secondary), `text-zinc-500` (muted), `text-zinc-600` (very dim). Opacity modifiers are fine on backgrounds (`bg-emerald-500/10`) but not on text.
+The dashboard ships a 2-way dark/white theme. It works by re-pointing the palette
+itself: `--color-zinc-N` resolves to a `--z-N` variable that flips per theme, so the
+~4,600 existing `zinc-*` utilities theme themselves. That only holds if new code stays
+inside the token system.
+
+- **Never hardcode a colour in a component** — no `#rrggbb`, no `rgb()/rgba()`, no
+  `bg-[#0a0a0a]`. Use the zinc ramp or a token. Saturated *data* colours (emerald/red
+  P&L, series colours) are the exception; chrome is not.
+- **`text-white` and `bg-black` are tokens, and they flip.** They mean "brightest
+  text" and "page ground", not literal white and black. When you genuinely need a
+  fixed colour — a label on a saturated `bg-emerald-600` fill, or a modal scrim — use
+  `text-oncolor` / `bg-oncolor` (always white) or `text-oncolor-dark` /
+  `bg-oncolor-dark/NN` (always near-black). **Every modal and drawer backdrop must be
+  `bg-oncolor-dark/NN`**; `bg-black/70` becomes a near-white wash in light mode and
+  stops dimming anything.
+- **Recharts chrome is themed globally** in `app/globals.css` by class name. Don't
+  pass `stroke`/`fill`/`contentStyle` hexes for grid, axis, legend or tooltip — they
+  are overridden anyway. Series colours you do pass.
+- **Table header style**: `text-xs font-bold text-white` on solid `bg-zinc-800` for
+  `<thead>` / `TH` in all dashboard tables. At 10px the text anti-aliases to gray;
+  12px (`text-xs`) with `font-bold` is the minimum for a header to read as a header.
+- **No text-colour opacity modifiers**: never use slash-opacity on text
+  (`text-white/70`, `text-zinc-400/50`). Use solid steps: `text-zinc-100` (near-white),
+  `text-zinc-200`, `text-zinc-300` (body), `text-zinc-400` (secondary), `text-zinc-500`
+  (muted), `text-zinc-600` (very dim). Opacity is fine on backgrounds
+  (`bg-emerald-500/10`).
+- Changing the palette, adding a themed surface or an injected `<style>` block, or
+  chasing a component that won't flip? Use the **`dhan-theme-tokens`** skill — it
+  covers why `@theme inline` must reference a var, the `--lc-*` panel tokens, and the
+  canvas-vs-SVG split.
+
 
 **Data date in page headers**: pages that display stock/market data must show a `DATA: YYYY-MM-DD` chip in the sticky header so users always know the currency of the data on screen.
+
+**Skills for recurring work** — read the matching skill before starting, each is
+distilled from 7-10 repeat bug-fix commits:
+`dhan-broker-positions` (scalper terminals, broker payloads, P&L, close/exit orders),
+`dhan-live-chart` (lightweight-charts canvas charts and polled series),
+`dhan-polling-guards` (poll loops, caches, JSON read-modify-write, process spawns),
+`dhan-theme-tokens` (the theme system), plus `dhan-dashboard-page`,
+`dhan-new-strategy` and `dhan-quant-terminal-page`.
 
 **"Quant-terminal" chart pages**: several pages (Options Premium Bar, Futures, IV Charts, Straddle/Strangle Analysis, Breadth, Live Charts) share a chart-driven dark-glass redesign built around `recharts`. Use the `dhan-quant-terminal-page` skill when building or redesigning a page into this style — it documents the sticky-header shell, chart-panel/tooltip conventions, and the reference implementation to copy from.
 
