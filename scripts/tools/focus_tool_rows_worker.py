@@ -367,6 +367,27 @@ def evaluate_exit(row, group, fill, now_minutes, spot, premium, vwap, pnl):
     return False, ''
 
 
+def evaluate_leg_exit(row, leg, fill, ltp):
+    """(exit, reason) for one leg's OWN SL x — independent of the pair-level
+    slMultiplier/slRupees in evaluate_exit, and independent of row['side']: a
+    leftover position on a leg the row no longer trades still deserves its own
+    stop. Only fires while that leg is actually held; a closed leg has no
+    entry price left to compare against.
+    """
+    held = (fill or {}).get(leg)
+    if not held:
+        return False, ''
+    mult = num(row.get('ceSlMultiplier' if leg == 'CE' else 'peSlMultiplier'))
+    if mult is None or mult <= 1 or not (ltp > 0):
+        return False, ''
+    entry = float(held.get('entryPrice') or 0.0)
+    # Short: hurt by this leg's own premium expanding through a multiple of
+    # what it was sold for.
+    if entry > 0 and ltp >= entry * mult:
+        return True, f'{leg} SL x{mult}: premium {ltp:.2f} vs entry {entry:.2f}'
+    return False, ''
+
+
 def evaluate_global_risk(cfg, total_pnl, peak_pnl, lock_floor):
     """(exit_all, reason, lock_floor, trail_state) for the account-level budget.
 
@@ -722,6 +743,32 @@ class FocusRowsWorker:
             self.fills.pop(row['id'], None)
         self.save_state()
 
+    def exit_leg(self, row, leg, reason):
+        """Close just ONE leg on its own SL x breach, leaving the other leg —
+        and the row itself — exactly as it was. Mirrors exit_row's
+        retry-on-failure shape but only ever touches this one leg's ledger
+        entry; the other leg (and its own rules) is untouched."""
+        fill = self.fills.get(row['id'])
+        held = (fill or {}).get(leg)
+        if not held:
+            return
+        u = row['underlying']
+        expiry = fill.get('expiry') or ''
+        product = fill.get('product') or 'INTRADAY'
+        self.log('info', f"{u} {row['id'][-4:]}: leg-exit {leg} — {reason}")
+
+        ok, detail = self.router.close(u, expiry, held['strike'], leg, 'BUY', int(held['qty']), product)
+        if ok:
+            self.log('info', f"{u} {row['id'][-4:]} {held['strike']}{leg}: closed ({detail})")
+            del fill[leg]
+            if not any(k in fill for k in ('CE', 'PE')):
+                self.fills.pop(row['id'], None)
+            self.save_state()
+        else:
+            self.log('error', f"{u} {row['id'][-4:]} {held['strike']}{leg}: leg-exit FAILED — {detail}")
+            # Left in the ledger untouched — evaluate_leg_exit re-fires next
+            # tick and retries, same as exit_row's partial-failure path.
+
     # -- the tick ----------------------------------------------------
 
     def tick(self):
@@ -788,7 +835,15 @@ class FocusRowsWorker:
                 row, atm, step, chains.get((u, expiry)))
 
             fill = self.fills.get(row['id'])
-            legs = legs_of(row)
+            # Once a row is open, only quote legs the ledger actually still
+            # holds — NOT legs_of(row) blindly. A leg closed by exit_leg (the
+            # per-leg SL x below) is gone from `fill`, and legs_of(row) still
+            # names it (it only reflects the Side toggle), so summing it back
+            # into `premium` would compare the pair-level VW/SL x rules
+            # against a phantom leg that no longer has any position behind it.
+            # Pre-entry (no fill yet), legs_of(row) is the right preview.
+            legs = list(fill) if fill else legs_of(row)
+            legs = [l for l in legs if l in ('CE', 'PE')]
 
             # Live premium and P&L for just the legs this row trades, marked
             # against this worker's own fills (see the module docstring).
@@ -799,6 +854,7 @@ class FocusRowsWorker:
             # ~1 req/s budget that the open rows' exit rules depend on.
             premium = 0.0
             pnl = 0.0
+            leg_ltp = {}
             needs_quotes = bool(fill) or str(row.get('status')) == 'armed'
             if needs_quotes:
                 for leg in legs:
@@ -807,6 +863,7 @@ class FocusRowsWorker:
                     if strike is None:
                         continue
                     ltp = self.market.ltp(u, self.market.leg(u, expiry, strike, leg))
+                    leg_ltp[leg] = ltp
                     premium += ltp
                     held = (fill or {}).get(leg)
                     if held and ltp > 0:
@@ -834,6 +891,20 @@ class FocusRowsWorker:
                 continue
 
             if fill:
+                # Leg-wise SL x first — it can fire independently of, and more
+                # often than, the pair-level rules. Skip the whole-row check
+                # this tick once a leg exit has been sent: the fill dict it
+                # would be evaluated against is about to change underneath it.
+                leg_exit_sent = False
+                for leg in ('CE', 'PE'):
+                    do_leg_exit, leg_reason = evaluate_leg_exit(row, leg, fill, leg_ltp.get(leg, 0.0))
+                    if do_leg_exit:
+                        self.exit_leg(row, leg, leg_reason)
+                        leg_exit_sent = True
+                        break
+                if leg_exit_sent:
+                    continue
+
                 do_exit, reason = evaluate_exit(
                     row, group, fill, now_minutes, spot, premium, vwap, pnl)
                 if do_exit:

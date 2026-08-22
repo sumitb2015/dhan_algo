@@ -51,6 +51,13 @@ export interface FocusRow {
   levelVw: boolean;
   slRupees: string;
   slMultiplier: string;
+  // Leg-wise stop, independent of the pair-level slMultiplier above: exits
+  // JUST that leg when its own premium expands to this multiple of its own
+  // entry price, regardless of what the other leg (or the combined pair) is
+  // doing. The row stays open on whichever leg didn't breach. '1' or blank
+  // means off, same convention as slMultiplier.
+  ceSlMultiplier: string;
+  peSlMultiplier: string;
   // Audit
   createdAt: string;
   updatedAt: string;

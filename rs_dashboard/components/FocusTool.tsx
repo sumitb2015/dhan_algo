@@ -167,13 +167,45 @@ function legsOf(row: FocusRow): ('CE' | 'PE')[] {
   return row.side === 'BOTH' ? ['CE', 'PE'] : [row.side as 'CE' | 'PE'];
 }
 
-/** Current premium across only the legs this row's Side trades. */
+/**
+ * Current premium across only the legs this row's Side trades AND that are
+ * still actually open. A leg the row's Side names but that has already been
+ * closed (by a leg-wise stop, a manual Exit, or anything else) must not keep
+ * contributing its market LTP here — evaluateRowExit only ever runs while the
+ * row holds a position (see the auto-exit watcher), so this can never starve
+ * the pre-entry preview, only avoid comparing against a phantom leg.
+ */
 function sidePremium(row: FocusRow, live: RowLive): number {
   let sum = 0;
   for (const leg of legsOf(row)) {
+    const pos = leg === 'CE' ? live.cePosition : live.pePosition;
+    if (!pos || Number(pos.netQty) === 0) continue;
     sum += (leg === 'CE' ? live.ltpCe : live.ltpPe) ?? 0;
   }
   return sum;
+}
+
+/**
+ * (leg's own SL x reason, or null). Independent of the pair's combined
+ * slMultiplier/slRupees, and independent of `row.side` — a leftover position
+ * on a leg the row no longer trades still deserves its own stop. Only fires
+ * while that leg actually holds a position; a flat leg has no premium to
+ * measure a multiple against.
+ */
+function legStopReason(row: FocusRow, leg: 'CE' | 'PE', live: RowLive): string | null {
+  const pos = leg === 'CE' ? live.cePosition : live.pePosition;
+  const qty = Number(pos?.netQty ?? 0);
+  if (qty === 0) return null;
+  const mult = Number(leg === 'CE' ? row.ceSlMultiplier : row.peSlMultiplier);
+  if (!(mult > 1)) return null;
+  // Short: hurt by the leg's own premium expanding through a multiple of what
+  // it was sold for (this tool only ever opens with a SELL — see placeLeg).
+  const entry = qty < 0 ? Number(pos?.sellAvg) || 0 : Number(pos?.buyAvg) || 0;
+  const now = (leg === 'CE' ? live.ltpCe : live.ltpPe) ?? 0;
+  if (entry > 0 && now > 0 && now >= entry * mult) {
+    return `${leg} SL ×${mult} hit (premium ${now.toFixed(2)} vs entry ${entry.toFixed(2)})`;
+  }
+  return null;
 }
 
 /** True once neither leg carries a broker quantity — safe to delete the row. */
@@ -295,6 +327,8 @@ const makeRow = (underlying: FocusUnderlying): FocusRow => ({
   levelVw: false,
   slRupees: '',
   slMultiplier: '1',
+  ceSlMultiplier: '1',
+  peSlMultiplier: '1',
   createdAt: new Date().toISOString(),
   updatedAt: new Date().toISOString(),
 });
@@ -518,28 +552,28 @@ function StrikeLegSelector({
         {resolvedStrike ?? '—'}
       </span>
       {onShift && (
-        <div className="flex flex-col gap-px">
+        <div className="flex flex-col gap-0.5">
           <button
             type="button"
             onClick={() => onShift('UP')}
             disabled={shiftDisabled || resolvedStrike == null}
             title={`Shift ${leg} strike up one step — closes and reopens any live position at the new strike`}
-            className="h-3 w-4 flex items-center justify-center rounded-t border border-emerald-500/20 bg-emerald-500/10 text-emerald-400
+            className="h-5 w-6 flex items-center justify-center rounded-t border border-emerald-500/20 bg-emerald-500/10 text-emerald-400
                        hover:bg-emerald-500 hover:text-oncolor hover:border-emerald-500 disabled:opacity-30 disabled:cursor-not-allowed
                        transition-all active:scale-95"
           >
-            <ChevronUp size={9} strokeWidth={3} />
+            <ChevronUp size={13} strokeWidth={3} />
           </button>
           <button
             type="button"
             onClick={() => onShift('DOWN')}
             disabled={shiftDisabled || resolvedStrike == null}
             title={`Shift ${leg} strike down one step — closes and reopens any live position at the new strike`}
-            className="h-3 w-4 flex items-center justify-center rounded-b border border-rose-500/20 bg-rose-500/10 text-rose-400
+            className="h-5 w-6 flex items-center justify-center rounded-b border border-rose-500/20 bg-rose-500/10 text-rose-400
                        hover:bg-rose-500 hover:text-oncolor hover:border-rose-500 disabled:opacity-30 disabled:cursor-not-allowed
                        transition-all active:scale-95"
           >
-            <ChevronDown size={9} strokeWidth={3} />
+            <ChevronDown size={13} strokeWidth={3} />
           </button>
         </div>
       )}
@@ -613,7 +647,7 @@ function StrikeEditor({ row, live, step, onUpdate, onShift, shiftDisabled, onBlo
   const mode = row.strikeMode ?? 'ATM';
 
   return (
-    <div className="flex flex-col gap-1 w-[182px]">
+    <div className="flex flex-col gap-1 w-[200px]">
       <SegPill options={['ATM±', '₹'] as const}
         value={mode === 'ATM' ? 'ATM±' : '₹'}
         onChange={v => {
@@ -1297,6 +1331,18 @@ function FocusTableRow({
                   title="Exit when premium moves this multiple against you (must be above 1) — independent of SL &#8377;" />
               </div>
             </div>
+            <div className="flex items-center gap-2">
+              <div className="flex items-center gap-1">
+                <span className="text-[9px] font-black text-emerald-400">CE &times;</span>
+                <NumInput value={row.ceSlMultiplier ?? '1'} onChange={v => onUpdate({ ceSlMultiplier: v })} className="w-9"
+                  title="Exit CE alone when its own premium moves this multiple against its own entry — independent of PE and of the pair SL &times; above" />
+              </div>
+              <div className="flex items-center gap-1">
+                <span className="text-[9px] font-black text-rose-400">PE &times;</span>
+                <NumInput value={row.peSlMultiplier ?? '1'} onChange={v => onUpdate({ peSlMultiplier: v })} className="w-9"
+                  title="Exit PE alone when its own premium moves this multiple against its own entry — independent of CE and of the pair SL &times; above" />
+              </div>
+            </div>
           </div>
           <div className="flex items-center gap-2 mt-1">
             <button
@@ -1307,7 +1353,7 @@ function FocusTableRow({
               <Check className="h-3 w-3" /> Save
             </button>
             <button
-              onClick={() => onUpdate({ levelHigh: '', levelLow: '', levelVw: false, slRupees: '', slMultiplier: '1' }, true)}
+              onClick={() => onUpdate({ levelHigh: '', levelLow: '', levelVw: false, slRupees: '', slMultiplier: '1', ceSlMultiplier: '1', peSlMultiplier: '1' }, true)}
               title="Clear every level exit on this row"
               className="text-[10px] font-bold text-zinc-600 hover:text-zinc-400 cursor-pointer transition-colors"
             >
@@ -1471,6 +1517,14 @@ function FocusRowCard({
           <NumInput value={row.slMultiplier} onChange={v => onUpdate({ slMultiplier: v })} className="w-20 h-6" />
         </div>
         <div className="flex justify-between items-center mt-1">
+          <span className="text-emerald-400 text-[9px] font-black" title="Exit CE alone on its own premium multiple, independent of PE and of SL × above">CE &times;</span>
+          <NumInput value={row.ceSlMultiplier ?? '1'} onChange={v => onUpdate({ ceSlMultiplier: v })} className="w-20 h-6" />
+        </div>
+        <div className="flex justify-between items-center mt-1">
+          <span className="text-rose-400 text-[9px] font-black" title="Exit PE alone on its own premium multiple, independent of CE and of SL × above">PE &times;</span>
+          <NumInput value={row.peSlMultiplier ?? '1'} onChange={v => onUpdate({ peSlMultiplier: v })} className="w-20 h-6" />
+        </div>
+        <div className="flex justify-between items-center mt-1">
           <SwitchToggle checked={row.levelVw} onChange={v => onUpdate({ levelVw: v })} label="VW"
             title="Exit when the combined premium crosses its session-open VWAP against you" />
           {row.levelVw && (
@@ -1486,7 +1540,7 @@ function FocusRowCard({
               Save Exits
             </button>
             <button
-              onClick={() => onUpdate({ levelHigh: '', levelLow: '', levelVw: false, slRupees: '', slMultiplier: '1' }, true)}
+              onClick={() => onUpdate({ levelHigh: '', levelLow: '', levelVw: false, slRupees: '', slMultiplier: '1', ceSlMultiplier: '1', peSlMultiplier: '1' }, true)}
               className="text-[9px] text-zinc-500 hover:text-zinc-400"
             >
               Clear
@@ -1613,6 +1667,10 @@ export default function FocusTool() {
   // watcher effect below must read the latest value synchronously on every
   // tick without itself being a dependency that re-triggers the effect.
   const autoExitingRef = useRef<Set<string>>(new Set());
+  // Same as autoExitingRef, but keyed `${rowId}:${leg}` for the leg-wise SL x
+  // — a leg exit must not be deduped by row id alone, or a CE breach on a row
+  // could suppress an independent PE breach on the same row.
+  const autoExitingLegRef = useRef<Set<string>>(new Set());
   // Rows the scheduler has already auto-entered. Same reasoning, plus: the
   // entry window stays open for the rest of the session, so without this a
   // row would re-enter on every 5s tick.
@@ -2659,6 +2717,21 @@ export default function FocusTool() {
       .finally(() => autoExitingRef.current.delete(row.id));
   }
 
+  /**
+   * Close just one leg on its own SL x breach, leaving the other leg (and the
+   * row itself) exactly as it was. Unlike autoExitRow this never touches
+   * `status` — a partial exit does not mean the row is done, and the other
+   * leg's own rules keep being evaluated on later ticks.
+   */
+  function autoExitLeg(row: FocusRow, leg: 'CE' | 'PE', reason: string) {
+    const key = `${row.id}:${leg}`;
+    if (autoExitingLegRef.current.has(key)) return;
+    autoExitingLegRef.current.add(key);
+    addToast('error', `Auto-exit ${leg}: ${row.underlying} ${row.id.slice(-4)}`, reason);
+    placeLeg(row, leg, { reduce: true, all: true })
+      .finally(() => autoExitingLegRef.current.delete(key));
+  }
+
   useEffect(() => {
     // Same hand-off as the scheduler below: the worker evaluates these very
     // rules server-side, so the tab must not race it.
@@ -2666,6 +2739,16 @@ export default function FocusTool() {
     for (const row of config.rows) {
       const live = rowLive[row.id];
       if (!live || legsFlat(live)) continue;
+
+      // Leg-wise SL x first: it can fire independently of, and more often
+      // than, the pair-level rules below. Skip the whole-row check this tick
+      // once a leg exit has been sent — the position book it would be
+      // evaluated against is about to change.
+      const ceReason = legStopReason(row, 'CE', live);
+      if (ceReason) { autoExitLeg(row, 'CE', ceReason); continue; }
+      const peReason = legStopReason(row, 'PE', live);
+      if (peReason) { autoExitLeg(row, 'PE', peReason); continue; }
+
       const reason = evaluateRowExit(row, live, spots[row.underlying] ?? 0);
       if (reason) autoExitRow(row, reason);
     }
