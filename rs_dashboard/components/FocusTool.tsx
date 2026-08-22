@@ -1146,7 +1146,7 @@ function FocusTableRow({
   const step = STRIKE_STEP[row.underlying];
 
   return (
-    <tr className="border-b border-zinc-800/60 hover:bg-zinc-800/20 transition-colors">
+    <tr className="border-b border-zinc-700/70 hover:bg-zinc-800/20 transition-colors">
 
       {/* TIMING */}
       <td className="p-3 align-top">
