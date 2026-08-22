@@ -1349,15 +1349,17 @@ function FocusTableRow({
       {/* LEVEL EXITS */}
       <td className="p-3 align-middle">
         <div className="flex flex-col gap-1.5">
-          <div className="flex items-center gap-1.5">
-            <span className="text-[9px] font-black text-rose-400 w-5">H&uarr;</span>
-            <NumInput value={row.levelHigh} onChange={v => onUpdate({ levelHigh: v })} className="w-20"
-              title="Exit this row when spot trades at or above this level" />
-          </div>
-          <div className="flex items-center gap-1.5">
-            <span className="text-[9px] font-black text-emerald-400 w-5">L&darr;</span>
-            <NumInput value={row.levelLow} onChange={v => onUpdate({ levelLow: v })} className="w-20"
-              title="Exit this row when spot trades at or below this level" />
+          <div className="flex items-center gap-2">
+            <div className="flex items-center gap-1">
+              <span className="text-[9px] font-black text-rose-400">H&uarr;</span>
+              <NumInput value={row.levelHigh} onChange={v => onUpdate({ levelHigh: v })} className="w-20"
+                title="Exit this row when spot trades at or above this level" />
+            </div>
+            <div className="flex items-center gap-1">
+              <span className="text-[9px] font-black text-emerald-400">L&darr;</span>
+              <NumInput value={row.levelLow} onChange={v => onUpdate({ levelLow: v })} className="w-20"
+                title="Exit this row when spot trades at or below this level" />
+            </div>
           </div>
           <div className="flex items-center gap-2 mt-0.5">
             <SwitchToggle checked={row.levelVw} onChange={v => onUpdate({ levelVw: v })} label="VW"
