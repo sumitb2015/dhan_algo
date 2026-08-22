@@ -96,8 +96,8 @@ export interface BridgeStatus {
 }
 
 export interface ChainOcEntry {
-  ce?: { last_price?: number; previous_close?: number };
-  pe?: { last_price?: number; previous_close?: number };
+  ce?: { last_price?: number; previous_close?: number; previous_close_price?: number };
+  pe?: { last_price?: number; previous_close?: number; previous_close_price?: number };
 }
 
 export interface Toast {
@@ -503,9 +503,12 @@ export default function Scalper() {
         // Extract prev close for each strike
         const pc: Record<string, { ce: number; pe: number }> = {};
         for (const [sk, entry] of Object.entries(oc)) {
-          pc[sk] = {
-            ce: entry.ce?.previous_close ?? 0,
-            pe: entry.pe?.previous_close ?? 0,
+          // Dhan keys the chain by a 6-decimal float string ("23950.000000")
+          // but every read below keys by the plain integer strike, so normalise
+          // or the prev-close fallback silently never hits.
+          pc[String(Number(sk))] = {
+            ce: entry.ce?.previous_close_price ?? entry.ce?.previous_close ?? 0,
+            pe: entry.pe?.previous_close_price ?? entry.pe?.previous_close ?? 0,
           };
         }
         setPrevClose(pc);

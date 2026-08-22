@@ -190,7 +190,13 @@ export default function Baskets() {
 
         const pc: Record<string, { ce: number; pe: number }> = {};
         for (const [sk, entry] of Object.entries(oc)) {
-          pc[sk] = { ce: entry.ce?.previous_close ?? 0, pe: entry.pe?.previous_close ?? 0 };
+          // Dhan keys the chain by a 6-decimal float string ("23950.000000") but
+          // every lookup here (and the live-quote map) keys by the plain integer
+          // strike, so normalise or the prev-close fallback silently never hits.
+          pc[String(Number(sk))] = {
+            ce: entry.ce?.previous_close_price ?? entry.ce?.previous_close ?? 0,
+            pe: entry.pe?.previous_close_price ?? entry.pe?.previous_close ?? 0,
+          };
         }
         setPrevClose(pc);
         if ((j.data.spot ?? 0) > 0) setChainSpot(j.data.spot);
