@@ -835,6 +835,7 @@ function ControlStrip({
   copyTrade,
   onOpenRisk, onOpenOrders, onToggleViewMode, viewMode,
   workerStatus, onToggleWorker,
+  onExitAll, confirmExitAll, exitingAll,
 }: {
   liveRealMoney: boolean; onToggleLive: () => void; broker: Broker;
   riskEnabled: boolean; onToggleRisk: () => void;
@@ -851,6 +852,9 @@ function ControlStrip({
   viewMode: 'table' | 'cards';
   workerStatus: WorkerStatus;
   onToggleWorker: () => void;
+  onExitAll: () => void;
+  confirmExitAll: boolean;
+  exitingAll: boolean;
 }) {
   return (
     <div className="bg-zinc-900 border-b border-zinc-800 px-6 py-2.5 flex items-center gap-5 flex-nowrap overflow-x-auto">
@@ -899,6 +903,20 @@ function ControlStrip({
           className="flex items-center gap-1 text-xs font-bold px-3 py-1 rounded-lg bg-violet-600 text-oncolor hover:bg-violet-500 transition-colors cursor-pointer disabled:opacity-50"
         >
           <Save className="h-3 w-3" /> {saving ? 'Saving…' : 'Save Preferences'}
+        </button>
+        <button
+          onClick={onExitAll}
+          disabled={exitingAll}
+          title="Immediately liquidate ALL open F&O positions at broker level for the active broker — not scoped to Focus Tool's own rows. On Dhan this also stops every running strategy process account-wide."
+          className={cn(
+            'flex items-center gap-1.5 text-xs font-bold px-3 py-1.5 rounded-lg border cursor-pointer transition-colors disabled:opacity-50',
+            confirmExitAll
+              ? 'border-rose-500 bg-rose-600 text-oncolor animate-pulse shadow-lg shadow-rose-500/20'
+              : 'border-rose-500/40 bg-rose-500/10 text-rose-300 hover:bg-rose-500/20',
+          )}
+        >
+          {exitingAll ? <RefreshCw className="h-3.5 w-3.5 animate-spin" /> : <ShieldOff className="h-3.5 w-3.5" />}
+          {exitingAll ? 'Exiting…' : confirmExitAll ? 'Confirm EXIT ALL?' : 'EXIT ALL Positions'}
         </button>
         <GhostBtn onClick={onOpenRisk} title="Account-level P&L, target, stop and trail state">
           <Shield className="h-3.5 w-3.5 text-violet-400" />
@@ -1664,6 +1682,10 @@ export default function FocusTool() {
   // Rows with an order in flight — their leg buttons are disabled so a
   // double-click cannot send the same market order twice.
   const [busyRows, setBusyRows] = useState<Set<string>>(new Set());
+  // Global Exit All — click-to-arm/click-to-confirm, same pattern as
+  // AdvancedScalper/Scalper's own Exit All button.
+  const [confirmExitAll, setConfirmExitAll] = useState(false);
+  const [exitingAll, setExitingAll] = useState(false);
   // Rows an auto-exit is currently closing — a ref, not state, because the
   // watcher effect below must read the latest value synchronously on every
   // tick without itself being a dependency that re-triggers the effect.
@@ -2239,8 +2261,8 @@ export default function FocusTool() {
 
   async function saveConfig(patch?: Partial<FocusToolConfig>) {
     // Queued rather than fired directly — see saveQueueRef's doc comment.
-    // Each save waits for every save already queued ahead of it, so its
-    // baseUpdatedAt is always read after the previous one actually landed.
+    // Each save waits for every save already queued ahead of it to land
+    // first, so two saves fired close together apply in order.
     const run = saveQueueRef.current.then(() => doSaveConfig(patch));
     // Swallow here so one failed save doesn't wedge the queue for whatever
     // saves come after it — doSaveConfig already reports the failure itself.
@@ -2270,6 +2292,59 @@ export default function FocusTool() {
       addToast('error', 'Network error saving config', String(e));
     } finally {
       setSaving(false);
+    }
+  }
+
+  /**
+   * Global Exit All — every open F&O position for the active broker, at
+   * once. Ported from AdvancedScalper/Scalper's own `handleExitAll` (same
+   * click-to-arm/click-again-to-confirm flow, same routes, same behavior)
+   * rather than reimplemented, per explicit choice: on Dhan this also force-
+   * kills or gracefully shuts down every running Python strategy process
+   * account-wide, so a flattened strategy can't silently re-enter. Not
+   * scoped to Focus Tool's own rows — it is the same broker-level nuclear
+   * exit the scalper terminals use, reused as-is rather than rebuilt.
+   */
+  async function handleExitAll() {
+    if (!confirmExitAll) {
+      setConfirmExitAll(true);
+      setTimeout(() => setConfirmExitAll(false), 3000);
+      return;
+    }
+    setExitingAll(true);
+    setConfirmExitAll(false);
+    try {
+      if (broker !== 'dhan') {
+        const label = BROKER_LABELS[broker];
+        const res = await fetch(scalperRoute(broker, 'exit-all'), { method: 'POST' });
+        const data = await res.json() as { success: boolean; closed: string[]; errors: string[] };
+        if (data.success) {
+          addToast('success', `All ${label} positions liquidated.${data.closed.length ? ` (${data.closed.join(', ')})` : ''}`);
+        } else {
+          addToast('error', `${label} exit failed`, data.errors.join('; ') || 'Unknown error');
+        }
+      } else {
+        const res = await fetch('/api/exit-all', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ scope: 'fno' }),
+        });
+        const data = await res.json();
+        if (data.broker_exit) {
+          const killed = data.killed?.length ?? 0;
+          const fallback = data.trigger_fallback?.length ?? 0;
+          const detail = killed > 0 ? ` ${killed} strategy process${killed === 1 ? '' : 'es'} terminated.` : '';
+          const fb = fallback > 0 ? ` ${fallback} sent graceful shutdown.` : '';
+          addToast('success', `All F&O positions liquidated at broker.${detail}${fb}`);
+        } else {
+          addToast('error', data.error || 'Broker exit failed — check Dhan account manually.');
+        }
+      }
+    } catch (e) {
+      addToast('error', 'Network error calling exit-all API.', String(e));
+    } finally {
+      setExitingAll(false);
+      setTimeout(pollPositions, 1000);
     }
   }
 
@@ -3010,6 +3085,7 @@ export default function FocusTool() {
         onToggleViewMode={() => setViewMode(v => v === 'cards' ? 'table' : 'cards')}
         viewMode={viewMode}
         workerStatus={workerStatus} onToggleWorker={toggleWorker}
+        onExitAll={handleExitAll} confirmExitAll={confirmExitAll} exitingAll={exitingAll}
       />
 
       {/* Main */}
