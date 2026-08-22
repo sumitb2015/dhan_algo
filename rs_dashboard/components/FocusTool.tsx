@@ -7,7 +7,7 @@ import NavBar from './NavBar';
 import {
   TrendingUp, Zap, ShieldOff, Shield, Activity,
   Clock, Plus, Check, Save, Layers, Target, Lock, RefreshCw, X,
-  ChevronUp, ChevronDown,
+  ChevronUp, ChevronDown, Server,
 } from 'lucide-react';
 import { TabTable, type SortState } from './Scalper';
 import { useBrokerSelector, scalperRoute, BROKER_LABELS, type Broker } from '@/hooks/useBrokerSelector';
@@ -94,6 +94,29 @@ function fmtPrice(n: number | null | undefined): string {
   return n.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 }
 
+/**
+ * Repo-wide intraday square-off time (see CLAUDE.md — every strategy hardcodes
+ * 15:17 IST). Applied here as a backstop for MIS rows so a row whose own exit
+ * time is later than the broker's own auto-square-off never rides into it.
+ */
+const INTRADAY_BACKSTOP_HM = '15:17';
+
+/** Wall-clock 'HH:MM' in IST, regardless of the browser's own timezone. */
+function istHm(): string {
+  return new Date().toLocaleTimeString('en-GB', {
+    timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit', hour12: false,
+  });
+}
+
+/** Whether a row's DTE filter admits an expiry that is `dte` days out. */
+function dteMatches(filter: FocusDte, dte: number | null): boolean {
+  if (filter === 'Any') return true;
+  if (dte == null) return false;
+  if (filter === '0') return dte === 0;
+  if (filter === '1') return dte === 1;
+  return dte === 0 || dte === 1;   // '0+1'
+}
+
 /** Whole days from today (IST) to `expiry`. Both sides are read as calendar
  *  dates, so this never drifts by an hour-of-day. */
 function dteFor(expiry: string): number | null {
@@ -116,6 +139,41 @@ function newId(): string {
 function pnlClass(n: number | null | undefined): string {
   if (n == null || n === 0) return 'text-zinc-400';
   return n > 0 ? 'text-emerald-400' : 'text-rose-400';
+}
+
+/**
+ * Which of this page's underlyings a broker trading symbol belongs to, or null.
+ *
+ * A bare `startsWith` is wrong: NIFTYNXT50 and BANKNIFTY both start with
+ * "NIFTY", so a prefix test alone files their P&L under NIFTY. Every broker's
+ * option symbol continues into the expiry immediately after the underlying, so
+ * the next character is a digit or separator — a letter there means this is a
+ * different instrument. Longest name first, so BANKNIFTY is tested before the
+ * NIFTY prefix it contains.
+ */
+function underlyingOfSymbol(tradingSymbol: string | undefined): FocusUnderlying | null {
+  const sym = String(tradingSymbol ?? '').toUpperCase();
+  for (const u of ['BANKNIFTY', 'SENSEX', 'NIFTY'] as FocusUnderlying[]) {
+    if (!sym.startsWith(u)) continue;
+    const next = sym.charAt(u.length);
+    if (next && next >= 'A' && next <= 'Z') return null;
+    return u;
+  }
+  return null;
+}
+
+/** Legs this row trades — `side` selects which, it is not a direction. */
+function legsOf(row: FocusRow): ('CE' | 'PE')[] {
+  return row.side === 'BOTH' ? ['CE', 'PE'] : [row.side as 'CE' | 'PE'];
+}
+
+/** Current premium across only the legs this row's Side trades. */
+function sidePremium(row: FocusRow, live: RowLive): number {
+  let sum = 0;
+  for (const leg of legsOf(row)) {
+    sum += (leg === 'CE' ? live.ltpCe : live.ltpPe) ?? 0;
+  }
+  return sum;
 }
 
 /** True once neither leg carries a broker quantity — safe to delete the row. */
@@ -181,10 +239,30 @@ const EMPTY_ROW_LIVE: RowLive = {
 };
 
 /** Cache/lookup key for a strike pair's VWAP — shared across every row that
- *  happens to trade the same underlying/expiry/CE-strike/PE-strike, so two
- *  rows on the same strangle share one fetch instead of doubling it. */
-function vwapKey(underlying: FocusUnderlying, expiry: string, ceStrike: number, peStrike: number): string {
-  return `${underlying}:${expiry}:${ceStrike}:${peStrike}`;
+ *  happens to trade the same underlying/expiry/CE-strike/PE-strike/side, so two
+ *  rows on the same strangle share one fetch instead of doubling it. Side is
+ *  part of the key because a CE-only row needs a CE-only VWAP: comparing it
+ *  against a combined CE+PE VWAP would exit at the wrong premium. */
+function vwapKey(
+  underlying: FocusUnderlying, expiry: string, ceStrike: number, peStrike: number, side: FocusSide,
+): string {
+  return `${underlying}:${expiry}:${ceStrike}:${peStrike}:${side}`;
+}
+
+/** Heartbeat record from scripts/tools/focus_tool_rows_worker.py, corrected by
+ *  the API route against the PID and the heartbeat age. */
+interface WorkerStatus {
+  status: 'RUNNING' | 'STOPPED' | 'STALE' | 'ERROR';
+  pid?: number;
+  broker?: string;
+  dryRun?: boolean;
+  liveRealMoney?: boolean;
+  openRows?: number;
+  totalPnl?: number;
+  trailState?: string;
+  lastUpdate?: string;
+  note?: string;
+  error?: string;
 }
 
 interface Toast {
@@ -285,14 +363,16 @@ function SwitchToggle({
   );
 }
 
-function NumInput({ value, onChange, placeholder, className, title }: {
+function NumInput({ value, onChange, placeholder, className, title, disabled }: {
   value: string; onChange: (v: string) => void; placeholder?: string; className?: string; title?: string;
+  disabled?: boolean;
 }) {
   return (
     <input
       type="text"
       inputMode="decimal"
       title={title}
+      disabled={disabled}
       value={value}
       onChange={e => onChange(e.target.value)}
       placeholder={placeholder}
@@ -300,6 +380,7 @@ function NumInput({ value, onChange, placeholder, className, title }: {
         'h-7 text-[11px] font-mono font-bold px-2 border border-zinc-700 rounded-md',
         'bg-zinc-900 text-zinc-100 placeholder-zinc-600',
         'focus:outline-none focus:border-violet-500 focus:ring-1 focus:ring-violet-500/40',
+        'disabled:opacity-50 disabled:cursor-not-allowed',
         className,
       )}
     />
@@ -397,7 +478,7 @@ function SegPill<T extends string>({
 /** One leg's strike selector: an ATM-offset dropdown or a target-premium
  *  input, with the currently resolved strike shown alongside. */
 function StrikeLegSelector({
-  leg, mode, offset, premium, resolvedStrike, step, onOffsetChange, onPremiumChange, onShift, shiftDisabled,
+  leg, mode, offset, premium, resolvedStrike, step, onOffsetChange, onPremiumChange, onShift, shiftDisabled, locked,
 }: {
   leg: 'CE' | 'PE';
   mode: FocusStrikeMode;
@@ -409,24 +490,29 @@ function StrikeLegSelector({
   onPremiumChange: (v: string) => void;
   onShift?: (direction: 'UP' | 'DOWN') => void;
   shiftDisabled?: boolean;
+  /** This leg holds an open position — its strike config is frozen so the
+   *  position cannot be orphaned. See StrikeEditor's doc comment. */
+  locked?: boolean;
 }) {
+  const lockedTitle = `${leg} holds an open position — use the chevrons to roll it, or exit the leg first`;
   return (
     <div className="flex items-center gap-1.5">
       <span className={cn('text-[9px] font-black w-5', leg === 'CE' ? 'text-emerald-400' : 'text-rose-400')}>{leg}</span>
       {mode === 'ATM' ? (
         <select
           value={offset}
-          title={`${leg} strike as a step offset from ATM`}
+          disabled={locked}
+          title={locked ? lockedTitle : `${leg} strike as a step offset from ATM`}
           onChange={e => onOffsetChange(Number(e.target.value))}
-          className="text-[10px] font-bold h-6 px-1 border border-zinc-700 rounded bg-zinc-900 text-zinc-200 focus:outline-none focus:border-violet-500 w-24"
+          className="text-[10px] font-bold h-6 px-1 border border-zinc-700 rounded bg-zinc-900 text-zinc-200 focus:outline-none focus:border-violet-500 w-24 disabled:opacity-50 disabled:cursor-not-allowed"
         >
           {OFFSET_OPTIONS.map(n => (
             <option key={n} value={n}>{offsetLabel(n, step)}</option>
           ))}
         </select>
       ) : (
-        <NumInput value={premium} onChange={onPremiumChange} className="w-16 h-6"
-          placeholder="₹" title={`Target premium for the ${leg} leg — resolves to the closest listed strike`} />
+        <NumInput value={premium} onChange={onPremiumChange} className="w-16 h-6" disabled={locked}
+          placeholder="₹" title={locked ? lockedTitle : `Target premium for the ${leg} leg — resolves to the closest listed strike`} />
       )}
       <span className="text-[11px] font-mono font-bold text-zinc-300 min-w-[42px] text-right">
         {resolvedStrike ?? '—'}
@@ -463,14 +549,36 @@ function StrikeLegSelector({
 
 /** The full CE/PE strike editor for one row: ATM±/₹ mode toggle, independent
  *  CE and PE selectors, a link checkbox to keep them mirrored, and Save/clear. */
-function StrikeEditor({ row, live, step, onUpdate, onShift, shiftDisabled }: {
+function StrikeEditor({ row, live, step, onUpdate, onShift, shiftDisabled, onBlocked }: {
   row: FocusRow;
   live: RowLive;
   step: number;
   onUpdate: (patch: Partial<FocusRow>, saveToDisk?: boolean) => void;
   onShift?: (leg: 'CE' | 'PE', direction: 'UP' | 'DOWN') => void;
   shiftDisabled?: boolean;
+  onBlocked?: (message: string) => void;
 }) {
+  /**
+   * A leg holding an open broker position is LOCKED against strike-config
+   * edits.
+   *
+   * This row finds its positions by looking up whatever strike its config
+   * currently resolves to (see rowLive's findPos). Move the config off an open
+   * position and that position stops being found: its badge vanishes, the row
+   * reports itself flat, Exit All disappears and Delete Row unlocks — while
+   * the position is still very much open at the broker, now with nothing on
+   * this page tracking it. So editing an open leg's strike is refused, and the
+   * shift chevrons — which close and reopen the position at the new strike —
+   * are the sanctioned way to move it.
+   */
+  const legOpen = {
+    CE: Number(live.cePosition?.netQty ?? 0) !== 0,
+    PE: Number(live.pePosition?.netQty ?? 0) !== 0,
+  };
+  const anyOpen = legOpen.CE || legOpen.PE;
+  const blockedNote = (leg: 'CE' | 'PE') =>
+    `${leg} holds an open position at ${leg === 'CE' ? live.ceStrike : live.peStrike} — use the shift chevrons to roll it, or exit the leg first`;
+
   /**
    * Editing one leg mirrors onto the other leg when linked.
    *
@@ -483,8 +591,12 @@ function StrikeEditor({ row, live, step, onUpdate, onShift, shiftDisabled }: {
    * side" shape.
    */
   function setLeg(leg: 'CE' | 'PE', patch: Partial<FocusRow>) {
+    if (legOpen[leg]) { onBlocked?.(blockedNote(leg)); return; }
     const merged = { ...patch };
-    if (row.linked ?? true) {
+    const other = leg === 'CE' ? 'PE' : 'CE';
+    // The mirror is suppressed when the OTHER leg is open — mirroring would
+    // move a leg that has a live position, orphaning it exactly as above.
+    if ((row.linked ?? true) && !legOpen[other]) {
       if (leg === 'CE') {
         if (patch.ceOffset !== undefined) merged.peOffset = -patch.ceOffset;
         if ('cePremium' in patch) merged.pePremium = patch.cePremium;
@@ -492,6 +604,8 @@ function StrikeEditor({ row, live, step, onUpdate, onShift, shiftDisabled }: {
         if (patch.peOffset !== undefined) merged.ceOffset = -patch.peOffset;
         if ('pePremium' in patch) merged.cePremium = patch.pePremium;
       }
+    } else if (row.linked ?? true) {
+      onBlocked?.(`${other} is open, so it kept its strike — only ${leg} moved`);
     }
     onUpdate(merged);
   }
@@ -502,16 +616,23 @@ function StrikeEditor({ row, live, step, onUpdate, onShift, shiftDisabled }: {
     <div className="flex flex-col gap-1 w-[182px]">
       <SegPill options={['ATM±', '₹'] as const}
         value={mode === 'ATM' ? 'ATM±' : '₹'}
-        onChange={v => onUpdate({ strikeMode: v === 'ATM±' ? 'ATM' : 'PREMIUM' })}
-        title="ATM± picks a strike by steps from ATM; ₹ picks the strike closest to a target premium"
+        onChange={v => {
+          // Switching mode re-resolves BOTH legs from a different rule, so an
+          // open leg would move — same orphaning as a direct edit.
+          if (anyOpen) { onBlocked?.(blockedNote(legOpen.CE ? 'CE' : 'PE')); return; }
+          onUpdate({ strikeMode: v === 'ATM±' ? 'ATM' : 'PREMIUM' });
+        }}
+        title={anyOpen
+          ? 'Locked while a leg is open — exit it first'
+          : 'ATM± picks a strike by steps from ATM; ₹ picks the strike closest to a target premium'}
         className="self-start" />
       <StrikeLegSelector leg="CE" mode={mode} offset={row.ceOffset ?? 0} premium={row.cePremium ?? ''}
-        resolvedStrike={live.ceStrike} step={step}
+        resolvedStrike={live.ceStrike} step={step} locked={legOpen.CE}
         onOffsetChange={n => setLeg('CE', { ceOffset: n })}
         onPremiumChange={v => setLeg('CE', { cePremium: v })}
         onShift={onShift ? dir => onShift('CE', dir) : undefined} shiftDisabled={shiftDisabled} />
       <StrikeLegSelector leg="PE" mode={mode} offset={row.peOffset ?? 0} premium={row.pePremium ?? ''}
-        resolvedStrike={live.peStrike} step={step}
+        resolvedStrike={live.peStrike} step={step} locked={legOpen.PE}
         onOffsetChange={n => setLeg('PE', { peOffset: n })}
         onPremiumChange={v => setLeg('PE', { pePremium: v })}
         onShift={onShift ? dir => onShift('PE', dir) : undefined} shiftDisabled={shiftDisabled} />
@@ -528,10 +649,13 @@ function StrikeEditor({ row, live, step, onUpdate, onShift, shiftDisabled }: {
             <Check className="h-2.5 w-2.5 inline -mt-0.5" /> Save
           </button>
           <button
-            onClick={() => onUpdate({
-              strikeMode: 'ATM', linked: true, ceOffset: 0, peOffset: 0, cePremium: '', pePremium: '',
-            }, true)}
-            title="Reset this row's strike settings to ATM"
+            onClick={() => {
+              if (anyOpen) { onBlocked?.(blockedNote(legOpen.CE ? 'CE' : 'PE')); return; }
+              onUpdate({
+                strikeMode: 'ATM', linked: true, ceOffset: 0, peOffset: 0, cePremium: '', pePremium: '',
+              }, true);
+            }}
+            title={anyOpen ? 'Locked while a leg is open — exit it first' : "Reset this row's strike settings to ATM"}
             className="text-[9px] text-zinc-500 hover:text-zinc-400 cursor-pointer"
           >
             &times; clear
@@ -676,6 +800,7 @@ function ControlStrip({
   onSave, saving, peakMtm, lockMtm,
   copyTrade,
   onOpenRisk, onOpenOrders, onToggleViewMode, viewMode,
+  workerStatus, onToggleWorker,
 }: {
   liveRealMoney: boolean; onToggleLive: () => void; broker: Broker;
   riskEnabled: boolean; onToggleRisk: () => void;
@@ -690,6 +815,8 @@ function ControlStrip({
   onOpenOrders: () => void;
   onToggleViewMode: () => void;
   viewMode: 'table' | 'cards';
+  workerStatus: WorkerStatus;
+  onToggleWorker: () => void;
 }) {
   return (
     <div className="bg-zinc-900 border-b border-zinc-800 px-6 py-2.5 flex items-center gap-5 flex-wrap">
@@ -708,6 +835,28 @@ function ControlStrip({
         >
           <span className="h-1.5 w-1.5 rounded-full bg-oncolor animate-pulse" />
           LIVE &middot; REAL MONEY
+        </button>
+        <button
+          onClick={onToggleWorker}
+          title={workerStatus.status === 'RUNNING'
+            ? `Rules are running server-side (PID ${workerStatus.pid ?? '?'}) — entries and exits fire even with this tab closed. Click to stop; open positions are left as they are.`
+            : workerStatus.status === 'STALE'
+              ? 'The worker process stopped heartbeating — nothing is watching. Click to restart.'
+              : 'Rules currently run only while this tab is open. Start the worker to keep them running server-side.'}
+          className={cn(
+            'flex items-center gap-1.5 text-xs font-bold px-3 py-1.5 rounded-lg border cursor-pointer transition-colors',
+            workerStatus.status === 'RUNNING'
+              ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-300 hover:bg-emerald-500/20'
+              : workerStatus.status === 'STALE' || workerStatus.status === 'ERROR'
+                ? 'border-amber-500/40 bg-amber-500/10 text-amber-300 hover:bg-amber-500/20'
+                : 'border-zinc-700 bg-zinc-900 text-zinc-400 hover:bg-zinc-800 hover:border-zinc-600',
+          )}
+        >
+          <Server className="h-3.5 w-3.5" />
+          {workerStatus.status === 'RUNNING'
+            ? `Worker on${workerStatus.openRows ? ` · ${workerStatus.openRows}` : ''}`
+            : workerStatus.status === 'STALE' ? 'Worker stale'
+              : workerStatus.status === 'ERROR' ? 'Worker error' : 'Worker off'}
         </button>
         <GhostBtn onClick={onOpenRisk} title="Account-level P&L, target, stop and trail state">
           <Shield className="h-3.5 w-3.5 text-violet-400" />
@@ -927,7 +1076,7 @@ const STATUS_PILL: Record<FocusRowStatus, string> = {
 
 function FocusTableRow({
   row, live, lotSize, spot, liveRealMoney, broker, busy,
-  onUpdate, onDelete, onArm, onDisarm, onExit, onAddLot, onReduceLot, onShift,
+  onUpdate, onDelete, onArm, onDisarm, onExit, onAddLot, onReduceLot, onShift, onBlocked,
 }: {
   row: FocusRow;
   live: RowLive;
@@ -939,6 +1088,7 @@ function FocusTableRow({
   onAddLot: (leg: 'CE' | 'PE') => void;
   onReduceLot: (leg: 'CE' | 'PE') => void;
   onShift: (leg: 'CE' | 'PE', direction: 'UP' | 'DOWN') => void;
+  onBlocked: (message: string) => void;
 }) {
   const combinedLtp = (live.ltpCe ?? 0) + (live.ltpPe ?? 0);
   // Orders are only sendable once at least one leg's contract and the lot size
@@ -994,7 +1144,7 @@ function FocusTableRow({
 
       {/* CE / PE STRIKES */}
       <td className="p-3 align-top">
-        <StrikeEditor row={row} live={live} step={step} onUpdate={onUpdate} onShift={onShift} shiftDisabled={busy} />
+        <StrikeEditor row={row} live={live} step={step} onUpdate={onUpdate} onShift={onShift} shiftDisabled={busy} onBlocked={onBlocked} />
       </td>
 
       {/* LTP */}
@@ -1178,7 +1328,7 @@ function FocusTableRow({
 
 function FocusRowCard({
   row, live, lotSize, spot, liveRealMoney, broker, busy,
-  onUpdate, onDelete, onArm, onDisarm, onExit, onAddLot, onReduceLot, onShift,
+  onUpdate, onDelete, onArm, onDisarm, onExit, onAddLot, onReduceLot, onShift, onBlocked,
 }: {
   row: FocusRow;
   live: RowLive;
@@ -1190,6 +1340,7 @@ function FocusRowCard({
   onAddLot: (leg: 'CE' | 'PE') => void;
   onReduceLot: (leg: 'CE' | 'PE') => void;
   onShift: (leg: 'CE' | 'PE', direction: 'UP' | 'DOWN') => void;
+  onBlocked: (message: string) => void;
 }) {
   const combinedLtp = (live.ltpCe ?? 0) + (live.ltpPe ?? 0);
   const canTrade = liveRealMoney && !busy && (live.ceStrike != null || live.peStrike != null) && (lotSize ?? 0) > 0;
@@ -1274,7 +1425,7 @@ function FocusRowCard({
 
       {/* Strike editor */}
       <div className="bg-zinc-950/20 border border-zinc-800/40 rounded-xl p-3">
-        <StrikeEditor row={row} live={live} step={step} onUpdate={onUpdate} onShift={onShift} shiftDisabled={busy} />
+        <StrikeEditor row={row} live={live} step={step} onUpdate={onUpdate} onShift={onShift} shiftDisabled={busy} onBlocked={onBlocked} />
       </div>
 
       {/* CE and PE Legs */}
@@ -1421,6 +1572,11 @@ export default function FocusTool() {
 
   const [config, setConfig] = useState<FocusToolConfig>(DEFAULT_CONFIG);
   const [saving, setSaving] = useState(false);
+  // `updatedAt` of the config version this tab last read from the server —
+  // sent with every save so a concurrent write elsewhere is rejected rather
+  // than silently overwritten. A ref, not state: it must be readable inside
+  // saveConfig without adding a render dependency.
+  const configVersionRef = useRef('');
 
   const [positions, setPositions] = useState<PosRow[]>([]);
   // availabelBalance is a genuine Dhan API misspelling, kept verbatim here (and
@@ -1461,6 +1617,10 @@ export default function FocusTool() {
   // watcher effect below must read the latest value synchronously on every
   // tick without itself being a dependency that re-triggers the effect.
   const autoExitingRef = useRef<Set<string>>(new Set());
+  // Rows the scheduler has already auto-entered. Same reasoning, plus: the
+  // entry window stays open for the rest of the session, so without this a
+  // row would re-enter on every 5s tick.
+  const autoEnteringRef = useRef<Set<string>>(new Set());
   const [peakMtm, setPeakMtm] = useState(0);
   const [lockMtm, setLockMtm] = useState<number | null>(null);
 
@@ -1478,6 +1638,51 @@ export default function FocusTool() {
   const [triggerRupees, setTriggerRupees] = useState(config.triggerRupees);
   const [lockRupees, setLockRupees] = useState(config.lockRupees);
   const [liveRealMoney, setLiveRealMoney] = useState(config.liveRealMoney);
+
+  // ── Server-side rule engine ──────────────────────────────────────
+  // scripts/tools/focus_tool_rows_worker.py runs the same entry/exit rules
+  // outside the browser, so a scheduled entry or a level exit still fires with
+  // this tab closed. While it is RUNNING the in-tab scheduler stands down —
+  // see the scheduler effect — so only one of the two ever places orders.
+  const [workerStatus, setWorkerStatus] = useState<WorkerStatus>({ status: 'STOPPED' });
+  const workerRunning = workerStatus.status === 'RUNNING';
+
+  const pollWorker = useCallback(() => {
+    fetch('/api/focus-tool/worker')
+      .then(r => r.json())
+      .then((j: { success?: boolean; status?: WorkerStatus }) => {
+        if (j.success && j.status) setWorkerStatus(j.status);
+      })
+      .catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    pollWorker();
+    const t = setInterval(pollWorker, 3000);
+    return () => clearInterval(t);
+  }, [pollWorker]);
+
+  const toggleWorker = useCallback(async () => {
+    const starting = !workerRunning;
+    try {
+      const res = await fetch('/api/focus-tool/worker', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(starting ? { action: 'start', broker } : { action: 'stop' }),
+      });
+      const j = await res.json() as { success?: boolean; message?: string; error?: string };
+      if (j.success) {
+        addToast('success', starting ? 'Worker starting' : 'Worker stopping',
+          starting
+            ? 'Rules now run server-side — safe to close this tab'
+            : 'Open positions are left exactly as they are');
+      } else {
+        addToast('error', starting ? 'Could not start worker' : 'Could not stop worker', j.error);
+      }
+    } catch (e) {
+      addToast('error', 'Worker request failed', String(e));
+    }
+    setTimeout(pollWorker, 800);
+  }, [workerRunning, broker, addToast, pollWorker]);
 
   // Standalone bridge (scripts/tools/focus_tool_ws.py) — all three underlyings
   // over one WebSocket connection, independent of AdvancedScalper's
@@ -1504,24 +1709,28 @@ export default function FocusTool() {
     }).catch(() => {});
   }, [niftyExpiry, bankniftyExpiry, sensexExpiry]);
 
+  /** Adopt a server-authoritative config: state, the risk-bar mirrors, and the
+   *  version stamp the next save is checked against. */
+  const applyServerConfig = useCallback((d: FocusToolConfig) => {
+    configVersionRef.current = d.updatedAt ?? '';
+    setConfig(d);
+    setRiskEnabled(d.riskEnabled);
+    setTargetRupees(d.targetRupees);
+    setStopRupees(d.stopRupees);
+    setTrailEnabled(d.trailEnabled);
+    setTriggerRupees(d.triggerRupees);
+    setLockRupees(d.lockRupees);
+    setLiveRealMoney(d.liveRealMoney);
+  }, []);
+
   useEffect(() => {
     fetch('/api/focus-tool/rows')
       .then(r => r.json())
       .then((j: { success: boolean; data?: FocusToolConfig }) => {
-        if (j.success && j.data) {
-          const d = j.data;
-          setConfig(d);
-          setRiskEnabled(d.riskEnabled);
-          setTargetRupees(d.targetRupees);
-          setStopRupees(d.stopRupees);
-          setTrailEnabled(d.trailEnabled);
-          setTriggerRupees(d.triggerRupees);
-          setLockRupees(d.lockRupees);
-          setLiveRealMoney(d.liveRealMoney);
-        }
+        if (j.success && j.data) applyServerConfig(j.data);
       })
       .catch(() => {});
-  }, []);
+  }, [applyServerConfig]);
 
   useEffect(() => {
     UNDERLYINGS.forEach(u => {
@@ -1673,23 +1882,30 @@ export default function FocusTool() {
     return () => clearInterval(t);
   }, [broker, expiryKey, activeKey]);
 
-  const pollPositions = useCallback(() => {
-    fetch(scalperRoute(broker, 'poll'))
-      .then(r => r.json())
-      .then((j: { success: boolean; positions?: PosRow[] }) => {
-        if (j.success && j.positions) {
-          setPositions(j.positions
-            .filter(p => {
-              const seg = String(p.exchangeSegment ?? '').toUpperCase();
-              return seg.includes('FNO') || seg.includes('FO');
-            })
-            // A no-op for NSE/BSE F&O, but applied at the pipeline entrance so
-            // it cannot be forgotten if a commodity row ever reaches here.
-            .map(p => scaleBrokerPnl(p as any) as PosRow));
-        }
-      })
-      .catch(() => {});
+  /** Fetch the broker's position book once and return it, also refreshing
+   *  state. Returns null if the call failed — callers that gate a real-money
+   *  decision on this must treat null as "unknown", never as "flat". */
+  const fetchPositionsNow = useCallback(async (): Promise<PosRow[] | null> => {
+    try {
+      const res = await fetch(scalperRoute(broker, 'poll'));
+      const j = await res.json() as { success: boolean; positions?: PosRow[] };
+      if (!j.success || !j.positions) return null;
+      const rows = j.positions
+        .filter(p => {
+          const seg = String(p.exchangeSegment ?? '').toUpperCase();
+          return seg.includes('FNO') || seg.includes('FO');
+        })
+        // A no-op for NSE/BSE F&O, but applied at the pipeline entrance so
+        // it cannot be forgotten if a commodity row ever reaches here.
+        .map(p => scaleBrokerPnl(p as any) as PosRow);
+      setPositions(rows);
+      return rows;
+    } catch {
+      return null;
+    }
   }, [broker]);
+
+  const pollPositions = useCallback(() => { void fetchPositionsNow(); }, [fetchPositionsNow]);
 
   // Margin available/utilized for the header tiles. Zerodha's funds route
   // only returns availabelBalance (no utilized/collateral breakdown), so
@@ -1751,15 +1967,13 @@ export default function FocusTool() {
   }, [trailEnabled, triggerRupees, lockRupees, peakMtm]);
 
   const underlyingPnl = useMemo(() => {
-    let nifty = 0, banknifty = 0, sensex = 0;
+    const out: Record<FocusUnderlying, number> = { NIFTY: 0, BANKNIFTY: 0, SENSEX: 0 };
     for (const pos of positions) {
       const pnl = (Number(pos.realizedProfit) || 0) + (Number(pos.unrealizedProfit) || 0);
-      const sym = String(pos.tradingSymbol || '').toUpperCase();
-      if (sym.startsWith('NIFTY')) nifty += pnl;
-      else if (sym.startsWith('BANKNIFTY')) banknifty += pnl;
-      else if (sym.startsWith('SENSEX')) sensex += pnl;
+      const u = underlyingOfSymbol(pos.tradingSymbol);
+      if (u) out[u] += pnl;
     }
-    return { NIFTY: nifty, BANKNIFTY: banknifty, SENSEX: sensex };
+    return out;
   }, [positions]);
 
   useEffect(() => {
@@ -1883,7 +2097,7 @@ export default function FocusTool() {
 
       const rowExpiry = row.expiry || expiries[u]?.[0] || '';
       const vwap = row.levelVw && ceStrike != null && peStrike != null && rowExpiry
-        ? (rowVwap[vwapKey(u, rowExpiry, ceStrike, peStrike)] ?? null)
+        ? (rowVwap[vwapKey(u, rowExpiry, ceStrike, peStrike, row.side)] ?? null)
         : null;
 
       out[row.id] = {
@@ -1910,7 +2124,7 @@ export default function FocusTool() {
       if (!live || live.ceStrike == null || live.peStrike == null) continue;
       const expiry = row.expiry || expiries[row.underlying]?.[0] || '';
       if (!expiry) continue;
-      keys.add(vwapKey(row.underlying, expiry, live.ceStrike, live.peStrike));
+      keys.add(vwapKey(row.underlying, expiry, live.ceStrike, live.peStrike, row.side));
     }
     return Array.from(keys).sort().join('|');
   }, [config.rows, rowLive, expiries]);
@@ -1921,14 +2135,14 @@ export default function FocusTool() {
   useEffect(() => {
     if (!vwapWantedKey) return;
     const wanted = vwapWantedKey.split('|').map(key => {
-      const [underlying, expiry, ceStrike, peStrike] = key.split(':');
-      return { key, underlying, expiry, ceStrike, peStrike };
+      const [underlying, expiry, ceStrike, peStrike, side] = key.split(':');
+      return { key, underlying, expiry, ceStrike, peStrike, side };
     });
 
     let cancelled = false;
     const fetchAll = () => {
-      wanted.forEach(({ key, underlying, expiry, ceStrike, peStrike }) => {
-        const url = `/api/focus-tool/vwap?underlying=${underlying}&expiry=${expiry}&ceStrike=${ceStrike}&peStrike=${peStrike}`;
+      wanted.forEach(({ key, underlying, expiry, ceStrike, peStrike, side }) => {
+        const url = `/api/focus-tool/vwap?underlying=${underlying}&expiry=${expiry}&ceStrike=${ceStrike}&peStrike=${peStrike}&side=${side}`;
         fetch(url)
           .then(r => r.json())
           .then((j: { success?: boolean; vwap?: number | null }) => {
@@ -1947,18 +2161,30 @@ export default function FocusTool() {
   async function saveConfig(patch?: Partial<FocusToolConfig>) {
     setSaving(true);
     try {
-      const body = patch ? { ...patch } : {
-        riskEnabled, targetRupees, stopRupees, trailEnabled, triggerRupees, lockRupees, liveRealMoney,
-        groups: config.groups,
-        rows: config.rows,
+      const body = {
+        ...(patch ?? {
+          riskEnabled, targetRupees, stopRupees, trailEnabled, triggerRupees, lockRupees, liveRealMoney,
+          groups: config.groups,
+          rows: config.rows,
+        }),
+        // Optimistic concurrency: this write replaces the whole rows/groups
+        // array, so the server rejects it if another tab saved in between
+        // rather than letting this one silently discard those edits.
+        baseUpdatedAt: configVersionRef.current,
       };
       const res = await fetch('/api/focus-tool/rows', {
         method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
       });
       const j = await res.json();
       if (j.success && j.data) {
-        setConfig(j.data);
+        applyServerConfig(j.data);
         addToast('success', 'Focus Tool configuration saved');
+      } else if (res.status === 409 && j.data) {
+        // Adopt the server's version rather than leaving two diverging views —
+        // the user's unsaved edits are gone either way, and silently keeping
+        // them on screen would invite a second clobbering save.
+        applyServerConfig(j.data);
+        addToast('error', 'Not saved — changed elsewhere', j.error ?? 'Reloaded the current configuration');
       } else if (j.error) {
         addToast('error', 'Failed to save config', j.error);
       }
@@ -2004,7 +2230,17 @@ export default function FocusTool() {
     });
   }
 
+  /** Arm a row for the scheduler. Clears the one-entry-per-row latch so a row
+   *  that already entered and exited can be deliberately re-armed to trade
+   *  again — otherwise re-arming would look accepted but never fire. */
+  function armRow(id: string) {
+    autoEnteringRef.current.delete(id);
+    updateRow(id, { status: 'armed' }, true);
+  }
+
   function deleteRow(id: string) {
+    autoEnteringRef.current.delete(id);
+    autoExitingRef.current.delete(id);
     if (!legsFlat(rowLive[id] ?? EMPTY_ROW_LIVE)) {
       addToast('error', 'Cannot delete row', 'Exit the CE/PE legs first — this row still holds a position');
       return;
@@ -2141,6 +2377,43 @@ export default function FocusTool() {
   }
 
   /**
+   * Poll the broker's position book until one leg at `strike` reads flat, and
+   * return how many units actually left the book.
+   *
+   * Returns null if the leg is still not flat when the deadline passes, or if
+   * every position fetch failed — the caller must treat that as "unknown", not
+   * as "flat". A market close normally settles well inside this window; the
+   * retries exist so a slow fill isn't mistaken for a failed one.
+   */
+  async function verifyLegClosed(
+    u: FocusUnderlying, leg: 'CE' | 'PE', strike: number, qtyBefore: number,
+    maxWaitMs = 4000,
+  ): Promise<number | null> {
+    const ref = lookups[u]?.strikes?.[strikeKey(strike)];
+    const id = leg === 'CE' ? ref?.ceId : ref?.peId;
+    const sym = leg === 'CE' ? ref?.ceSymbol : ref?.peSymbol;
+    if (broker === 'dhan' ? !id : !sym) return null;
+
+    const deadline = Date.now() + maxWaitMs;
+    for (;;) {
+      await new Promise(r => setTimeout(r, 400));
+      const rows = await fetchPositionsNow();
+      if (rows) {
+        const pos = broker === 'dhan'
+          ? rows.find(p => String(p.securityId) === String(id))
+          : rows.find(p => String(p.tradingSymbol) === sym);
+        const remaining = Math.abs(Number(pos?.netQty ?? 0));
+        if (remaining === 0) return qtyBefore;
+        // Partially filled and no longer shrinking is still reported once the
+        // deadline passes; until then keep waiting for the rest.
+        if (Date.now() >= deadline) return remaining < qtyBefore ? qtyBefore - remaining : null;
+      } else if (Date.now() >= deadline) {
+        return null;
+      }
+    }
+  }
+
+  /**
    * Shift one leg's strike up or down by one listed step — same behavior as
    * AdvancedScalper's chevrons: an open position is closed at the current
    * strike and reopened at the new one for the same quantity, then the row's
@@ -2179,13 +2452,36 @@ export default function FocusTool() {
           addToast('error', 'Cannot shift', `Lot size for ${u} not resolved yet`);
           return;
         }
-        const closed = await placeLeg(row, leg, { reduce: true, all: true });
-        if (!closed) {
+        const accepted = await placeLeg(row, leg, { reduce: true, all: true });
+        if (!accepted) {
           addToast('error', 'Shift aborted', `${currStrike} ${leg} close was not confirmed — position left untouched`);
           return;
         }
-        const lots = Math.round(Math.abs(netQty) / lotSize);
-        if (lots > 0) {
+
+        // An accepted order is not a filled order. Reopening at the new strike
+        // on the strength of the broker's ACK alone would double this leg's
+        // exposure whenever the close doesn't fill (or only partly fills), so
+        // confirm against the position book before opening anything.
+        const closedUnits = await verifyLegClosed(u, leg, currStrike, Math.abs(netQty));
+        if (closedUnits == null) {
+          addToast('error', 'Shift halted', `Could not confirm ${currStrike} ${leg} is flat — no new leg opened. Check the position book.`);
+          return;
+        }
+        if (closedUnits === 0) {
+          addToast('error', 'Shift aborted', `Nothing left ${currStrike} ${leg} — no new leg opened`);
+          return;
+        }
+
+        // Size the new leg off what ACTUALLY left the book, never off the
+        // pre-close snapshot — a partial fill re-opened at full size would
+        // leave the account net long/short after the roll.
+        const lots = Math.floor(closedUnits / lotSize);
+        if (lots < 1) {
+          addToast('error', 'Shift incomplete', `${closedUnits} qty closed at ${currStrike} ${leg} is under one lot — reopen manually at ${newStrike}`);
+        } else {
+          if (closedUnits % lotSize !== 0) {
+            addToast('error', 'Partial re-entry', `Reopening ${lots} lot(s) of the ${closedUnits} qty closed — the remainder stays flat`);
+          }
           const opened = await placeLeg(row, leg, { reduce: false, lots, strikeOverride: newStrike });
           if (!opened) {
             addToast('error', 'Shift incomplete', `Closed ${currStrike} ${leg} but the new ${newStrike} ${leg} order failed — reopen manually`);
@@ -2195,8 +2491,19 @@ export default function FocusTool() {
 
       // Move the row's own config so it keeps resolving to the new strike —
       // mirrors StrikeEditor's linked-offset-negation logic (setLeg) so a
-      // shift on a linked row keeps CE/PE as a symmetric strangle.
-      const linked = row.linked ?? true;
+      // shift on a linked row keeps CE/PE as a symmetric strangle. The mirror
+      // is suppressed when the OTHER leg holds a position: only the shifted
+      // leg's position is rolled here, so moving the other leg's config would
+      // leave its live position at a strike this row no longer looks up —
+      // untracked and unexitable from this page (see StrikeEditor's note).
+      const otherLeg = leg === 'CE' ? 'PE' : 'CE';
+      const otherOpen = Number(
+        (otherLeg === 'CE' ? live.cePosition : live.pePosition)?.netQty ?? 0,
+      ) !== 0;
+      const linked = (row.linked ?? true) && !otherOpen;
+      if ((row.linked ?? true) && otherOpen) {
+        addToast('error', 'Linked leg kept its strike', `${otherLeg} holds an open position — only ${leg} was rolled`);
+      }
       if (row.strikeMode === 'PREMIUM') {
         const oc = chains[u]?.oc;
         const newLtp = oc?.[strikeKey(newStrike)]?.[leg === 'CE' ? 'ce' : 'pe'];
@@ -2228,11 +2535,6 @@ export default function FocusTool() {
     }
   }
 
-  /** Legs this row trades — `side` selects which, it is not a direction. */
-  function legsOf(row: FocusRow): ('CE' | 'PE')[] {
-    return row.side === 'BOTH' ? ['CE', 'PE'] : [row.side as 'CE' | 'PE'];
-  }
-
   /**
    * First level-exit rule this row breaches, or null if none has. Checked in
    * this order: H↑, L↓, VW, SL ₹, SL × — matching the exit ladder in the
@@ -2254,12 +2556,16 @@ export default function FocusTool() {
     if (row.levelLow && Number.isFinite(lo) && spot > 0 && spot <= lo) {
       return `L↓ breached: spot ${spot.toFixed(2)} ≤ ${lo}`;
     }
+    // Premium of only the legs this row's Side trades. `entryPremium` is
+    // already restricted the same way (see rowLive), so a CE-only row must not
+    // compare a CE entry price against a CE+PE current price — that mismatch
+    // would fire, or fail to fire, a real-money exit at the wrong threshold.
+    const nowPremium = sidePremium(row, live);
     if (row.levelVw && live.vwap != null && live.vwap > 0) {
-      const combined = (live.ltpCe ?? 0) + (live.ltpPe ?? 0);
       // This tool only ever opens with a SELL (see placeLeg) — hurt by the
       // premium expanding past VWAP, same as slMult below.
-      if (combined > 0 && combined >= live.vwap) {
-        return `VW breached: premium ${combined.toFixed(2)} ≥ VWAP ${live.vwap.toFixed(2)}`;
+      if (nowPremium > 0 && nowPremium >= live.vwap) {
+        return `VW breached: premium ${nowPremium.toFixed(2)} ≥ VWAP ${live.vwap.toFixed(2)}`;
       }
     }
     const slRs = Number(row.slRupees);
@@ -2269,11 +2575,10 @@ export default function FocusTool() {
     const slMult = Number(row.slMultiplier);
     if (row.slMultiplier && Number.isFinite(slMult) && slMult > 1) {
       const entry = live.entryPremium;
-      const now = (live.ltpCe ?? 0) + (live.ltpPe ?? 0);
       // This tool only ever opens with a SELL (see placeLeg) — the position is
       // hurt by the premium expanding past a multiple of what it was sold for.
-      if (entry > 0 && now > 0 && now >= entry * slMult) {
-        return `SL ×${slMult} hit (premium ${now.toFixed(2)} vs entry ${entry.toFixed(2)})`;
+      if (entry > 0 && nowPremium > 0 && nowPremium >= entry * slMult) {
+        return `SL ×${slMult} hit (premium ${nowPremium.toFixed(2)} vs entry ${entry.toFixed(2)})`;
       }
     }
     return null;
@@ -2291,25 +2596,199 @@ export default function FocusTool() {
    * this page, so closing the tab (or losing the connection) pauses watching
    * exactly like it pauses everything else here.
    */
+  // Latest values for the scheduler's interval callback. Kept in a ref so the
+  // interval reads current data without the effect re-subscribing (and
+  // resetting its own timer) on every tick of live market data.
+  // The risk fields come from the control strip's own state, not from
+  // `config` — those are the values currently on screen, and a user who
+  // toggles Risk on expects it to be watching straight away rather than only
+  // after a separate Save.
+  const schedulerRef = useRef({
+    config, rowLive, spots, total, lockMtm, riskEnabled, targetRupees, stopRupees, trailEnabled,
+  });
+  schedulerRef.current = {
+    config, rowLive, spots, total, lockMtm, riskEnabled, targetRupees, stopRupees, trailEnabled,
+  };
+  const expiriesRef = useRef(expiries);
+  expiriesRef.current = expiries;
+
+  /**
+   * Square off every leg of one row at market and mark it exited. Deduped by
+   * `autoExitingRef` so a rule that stays breached across ticks (they all do)
+   * cannot fire a second time while the first exit is still in flight.
+   */
+  function autoExitRow(row: FocusRow, reason: string) {
+    if (autoExitingRef.current.has(row.id)) return;
+    autoExitingRef.current.add(row.id);
+    addToast('error', `Auto-exit: ${row.underlying} ${row.id.slice(-4)}`, reason);
+    Promise.all(legsOf(row).map(leg => placeLeg(row, leg, { reduce: true, all: true })))
+      .then(async accepted => {
+        // Only call the row exited once the broker's own book agrees every
+        // leg is flat. Marking it exited off the order ACKs alone would
+        // silently retire a row that still holds a position — and because
+        // this ref is then cleared, nothing would try again either.
+        if (!accepted.every(Boolean)) {
+          addToast('error', 'Auto-exit incomplete', `${row.underlying}: a leg was rejected — still open, check the position book`);
+          return;
+        }
+        const rows = await fetchPositionsNow();
+        if (rows) updateRow(row.id, { status: 'exited' }, true);
+      })
+      .finally(() => autoExitingRef.current.delete(row.id));
+  }
+
   useEffect(() => {
-    if (!liveRealMoney) return;
+    // Same hand-off as the scheduler below: the worker evaluates these very
+    // rules server-side, so the tab must not race it.
+    if (!liveRealMoney || workerRunning) return;
     for (const row of config.rows) {
       const live = rowLive[row.id];
       if (!live || legsFlat(live)) continue;
-      if (autoExitingRef.current.has(row.id)) continue;
-
-      const spot = spots[row.underlying] ?? 0;
-      const reason = evaluateRowExit(row, live, spot);
-      if (!reason) continue;
-
-      autoExitingRef.current.add(row.id);
-      addToast('error', `Auto-exit: ${row.underlying} ${row.id.slice(-4)}`, reason);
-      Promise.all(legsOf(row).map(leg => placeLeg(row, leg, { reduce: true, all: true })))
-        .then(() => updateRow(row.id, { status: 'exited' }, true))
-        .finally(() => autoExitingRef.current.delete(row.id));
+      const reason = evaluateRowExit(row, live, spots[row.underlying] ?? 0);
+      if (reason) autoExitRow(row, reason);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [rowLive, spots, liveRealMoney]);
+  }, [rowLive, spots, liveRealMoney, workerRunning]);
+
+  /**
+   * Open every leg this row trades, at its configured lot size.
+   *
+   * Deduped through `autoEnteringRef` — the scheduler re-checks every few
+   * seconds and the entry window stays open for the rest of the session, so
+   * without this a row would re-enter on every tick.
+   */
+  function autoEnterRow(row: FocusRow, reason: string) {
+    if (autoEnteringRef.current.has(row.id) || autoExitingRef.current.has(row.id)) return;
+    autoEnteringRef.current.add(row.id);
+    addToast('success', `Auto-entry: ${row.underlying} ${row.id.slice(-4)}`, reason);
+    (async () => {
+      let anyFilled = false;
+      // Sequential, so one leg's rejection is reported against that leg and a
+      // failure part-way through doesn't leave two orders racing.
+      for (const leg of legsOf(row)) {
+        if (await placeLeg(row, leg, { reduce: false, lots: row.lots })) anyFilled = true;
+      }
+      if (anyFilled) {
+        updateRow(row.id, { status: 'entered' }, true);
+      } else {
+        addToast('error', 'Auto-entry failed', `${row.underlying}: no leg was accepted — row left armed`);
+        autoEnteringRef.current.delete(row.id);   // let it retry on a later tick
+      }
+      await fetchPositionsNow();
+    })().catch(() => autoEnteringRef.current.delete(row.id));
+  }
+
+  // The scheduler's interval closure is created once per liveRealMoney flip,
+  // so calling autoEnterRow/autoExitRow directly would pin that render's
+  // versions — and with them a stale `lookups`/`lotSizes`/`rowLive` inside
+  // placeLeg, which resolves the contract an order is actually sent for.
+  // Going through a ref that every render refreshes keeps orders on current data.
+  const actionsRef = useRef({ autoEnterRow, autoExitRow });
+  actionsRef.current = { autoEnterRow, autoExitRow };
+
+  /**
+   * The scheduler: everything time- or account-level driven, on a 5s tick.
+   *
+   * Split from the per-row level-exit watcher above because those rules are
+   * data-driven (they fire the moment a price crosses), while these are clock-
+   * and aggregate-driven and must keep firing even when no tick arrives.
+   * Ordered exits-before-entries, and account-wide rules before per-row ones,
+   * so a stop-out is never immediately followed by a fresh entry on the same
+   * tick.
+   *
+   * Entirely gated on LIVE · REAL MONEY, and — like everything else on this
+   * page — only runs while the tab is open. There is no server-side worker
+   * behind any of this.
+   */
+  useEffect(() => {
+    // The Python worker is the authority whenever it is up: it runs the same
+    // rules against the same config, so both acting would double every entry
+    // and race every exit.
+    if (!liveRealMoney || workerRunning) return;
+
+    const tick = () => {
+      const {
+        config: cfg, rowLive: live, spots: sp, total: tot, lockMtm: lock,
+        riskEnabled: riskOn, targetRupees: target$, stopRupees: stop$, trailEnabled: trailOn,
+      } = schedulerRef.current;
+      const nowHm = istHm();
+      const openRows = cfg.rows.filter(r => {
+        const l = live[r.id];
+        return l && !legsFlat(l);
+      });
+
+      // ── 1. Account-wide risk: closes every open row at once ──
+      if (riskOn && openRows.length) {
+        const target = Number(target$);
+        const stop = Number(stop$);
+        let reason: string | null = null;
+        if (target$ && target > 0 && tot >= target) {
+          reason = `Account target hit: ${fmtInr(tot, true)} ≥ ${fmtInr(target)}`;
+        } else if (stop$ && stop > 0 && tot <= -stop) {
+          reason = `Account stop hit: ${fmtInr(tot, true)} ≤ ${fmtInr(-stop, true)}`;
+        } else if (trailOn && lock != null && tot <= lock) {
+          reason = `Trailing lock hit: ${fmtInr(tot, true)} ≤ ${fmtInr(lock, true)}`;
+        }
+        if (reason) {
+          for (const row of openRows) actionsRef.current.autoExitRow(row, reason);
+          return;   // nothing else should run on a tick that just flattened the book
+        }
+      }
+
+      // ── 2. Per-index Book Exit on spot levels ──
+      for (const g of cfg.groups) {
+        if (!g.bookExit) continue;
+        const spot = sp[g.underlying] ?? 0;
+        if (!(spot > 0)) continue;
+        const hi = Number(g.spotHigh);
+        const lo = Number(g.spotLow);
+        let reason: string | null = null;
+        if (g.spotHigh && Number.isFinite(hi) && hi > 0 && spot >= hi) {
+          reason = `${g.underlying} book exit: spot ${spot.toFixed(2)} ≥ ${hi}`;
+        } else if (g.spotLow && Number.isFinite(lo) && lo > 0 && spot <= lo) {
+          reason = `${g.underlying} book exit: spot ${spot.toFixed(2)} ≤ ${lo}`;
+        }
+        if (reason) {
+          for (const row of openRows.filter(r => r.underlying === g.underlying)) actionsRef.current.autoExitRow(row, reason);
+        }
+      }
+
+      // ── 3. Per-row time exit, plus the repo-wide 15:17 intraday backstop ──
+      for (const row of openRows) {
+        if (row.exitTime && nowHm >= row.exitTime) {
+          actionsRef.current.autoExitRow(row, `Exit time ${row.exitTime} reached`);
+          continue;
+        }
+        const product = cfg.groups.find(g => g.underlying === row.underlying)?.product ?? 'INTRADAY';
+        if (product === 'INTRADAY' && nowHm >= INTRADAY_BACKSTOP_HM) {
+          actionsRef.current.autoExitRow(row, `Intraday backstop ${INTRADAY_BACKSTOP_HM} reached`);
+        }
+      }
+
+      // ── 4. Auto-entry for armed rows ──
+      for (const row of cfg.rows) {
+        if (row.status !== 'armed') continue;
+        const l = live[row.id];
+        if (!l || !legsFlat(l)) continue;                       // already holds a position
+        const group = cfg.groups.find(g => g.underlying === row.underlying);
+        if (!group?.enabled) continue;                          // index not started
+        if (!row.entryTime || nowHm < row.entryTime) continue;  // not yet
+        // Never enter into a window that has already closed — arming a row
+        // after its own exit time (or after the intraday backstop) must not
+        // open a position that the next tick immediately squares off.
+        if (row.exitTime && nowHm >= row.exitTime) continue;
+        if (group.product === 'INTRADAY' && nowHm >= INTRADAY_BACKSTOP_HM) continue;
+        if (!dteMatches(row.dte, dteFor(row.expiry || expiriesRef.current[row.underlying]?.[0] || ''))) continue;
+        if (!(l.ceStrike != null || l.peStrike != null)) continue;
+        actionsRef.current.autoEnterRow(row, `Entry time ${row.entryTime} reached`);
+      }
+    };
+
+    tick();
+    const t = setInterval(tick, 5000);
+    return () => clearInterval(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [liveRealMoney, workerRunning]);
 
   function updateGroup(underlying: FocusUnderlying, patch: Partial<FocusIndexGroup>) {
     setConfig(prev => {
@@ -2372,6 +2851,7 @@ export default function FocusTool() {
         onOpenOrders={() => setActiveModal('orderbook')}
         onToggleViewMode={() => setViewMode(v => v === 'cards' ? 'table' : 'cards')}
         viewMode={viewMode}
+        workerStatus={workerStatus} onToggleWorker={toggleWorker}
       />
 
       {/* Main */}
@@ -2410,7 +2890,7 @@ export default function FocusTool() {
                           busy={busyRows.has(row.id)}
                           onUpdate={(patch, save) => updateRow(row.id, patch, save)}
                           onDelete={() => deleteRow(row.id)}
-                          onArm={() => updateRow(row.id, { status: 'armed' }, true)}
+                          onArm={() => armRow(row.id)}
                           onDisarm={() => updateRow(row.id, { status: 'draft' }, true)}
                           onExit={leg => runRowAction(row.id, async () => {
                             const legs = leg === 'ALL' ? legsOf(row) : [leg];
@@ -2419,6 +2899,7 @@ export default function FocusTool() {
                           onAddLot={leg => runRowAction(row.id, () => placeLeg(row, leg, { reduce: false, lots: 1 }))}
                           onReduceLot={leg => runRowAction(row.id, () => placeLeg(row, leg, { reduce: true, lots: 1 }))}
                           onShift={(leg, dir) => handleShiftStrike(row, leg, dir)}
+                          onBlocked={msg => addToast('error', 'Strike locked', msg)}
                         />
                       ))}
                     </div>
@@ -2461,7 +2942,7 @@ export default function FocusTool() {
                           busy={busyRows.has(row.id)}
                           onUpdate={(patch, save) => updateRow(row.id, patch, save)}
                           onDelete={() => deleteRow(row.id)}
-                          onArm={() => updateRow(row.id, { status: 'armed' }, true)}
+                          onArm={() => armRow(row.id)}
                           onDisarm={() => updateRow(row.id, { status: 'draft' }, true)}
                           onExit={leg => runRowAction(row.id, async () => {
                             // 'ALL' is the row's Exit All button: close every leg
@@ -2473,6 +2954,7 @@ export default function FocusTool() {
                           onAddLot={leg => runRowAction(row.id, () => placeLeg(row, leg, { reduce: false, lots: 1 }))}
                           onReduceLot={leg => runRowAction(row.id, () => placeLeg(row, leg, { reduce: true, lots: 1 }))}
                           onShift={(leg, dir) => handleShiftStrike(row, leg, dir)}
+                          onBlocked={msg => addToast('error', 'Strike locked', msg)}
                         />
                       ))}
                       {rows.length === 0 && (

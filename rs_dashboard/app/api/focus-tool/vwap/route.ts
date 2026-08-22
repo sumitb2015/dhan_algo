@@ -25,6 +25,7 @@ function minuteKey(): string {
 }
 
 const VALID_INTERVALS = new Set(['1', '5', '15', '25', '60']);
+const VALID_SIDES = new Set(['CE', 'PE', 'BOTH']);
 
 export async function GET(request: NextRequest) {
   const { searchParams } = new URL(request.url);
@@ -33,6 +34,7 @@ export async function GET(request: NextRequest) {
   const ceStrike = searchParams.get('ceStrike') ?? '';
   const peStrike = searchParams.get('peStrike') ?? '';
   const interval = searchParams.get('interval') ?? '1';
+  const side = (searchParams.get('side') ?? 'BOTH').toUpperCase();
 
   if (!['NIFTY', 'BANKNIFTY', 'SENSEX'].includes(underlying) || !expiry || !ceStrike || !peStrike) {
     return NextResponse.json(
@@ -43,8 +45,11 @@ export async function GET(request: NextRequest) {
   if (!VALID_INTERVALS.has(interval)) {
     return NextResponse.json({ success: false, error: 'interval must be one of 1/5/15/25/60' }, { status: 400 });
   }
+  if (!VALID_SIDES.has(side)) {
+    return NextResponse.json({ success: false, error: 'side must be CE, PE or BOTH' }, { status: 400 });
+  }
 
-  const cacheKey = `${underlying}:${expiry}:${ceStrike}:${peStrike}:${interval}`;
+  const cacheKey = `${underlying}:${expiry}:${ceStrike}:${peStrike}:${interval}:${side}`;
   const nowMinute = minuteKey();
   const cached = cache.get(cacheKey);
   if (cached && cached.minuteKey === nowMinute) {
@@ -60,6 +65,7 @@ export async function GET(request: NextRequest) {
           '--ce-strike', ceStrike,
           '--pe-strike', peStrike,
           '--interval', interval,
+          '--side', side,
         ], 45_000),
       ),
     );

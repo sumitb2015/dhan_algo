@@ -10,9 +10,13 @@ happened to start watching).
 
 Same construction as scripts/tools/focus_tool_worker.py's premium_vwap() (an
 unwired rewrite of this page kept elsewhere in the repo) and
-nifty_vwap_1min_straddle: typical price of the combined CE+PE bar
-((high+low+close)/3 per leg, summed), weighted by the average of the two
+nifty_vwap_1min_straddle: typical price of the combined bar
+((high+low+close)/3 per leg, summed), weighted by the average of the traded
 legs' per-bar volumes, accumulated over every CLOSED bar so far today.
+
+--side selects which legs are included, and must match the Side of the row
+the result is compared against: a CE-only row measured against a combined
+CE+PE VWAP would cross its exit threshold at the wrong premium.
 
 Only fully closed bars are used (the currently-forming bar is dropped) —
 this is what makes the number match TradingView/broker-platform VWAP
@@ -109,8 +113,13 @@ def main():
     parser.add_argument('--pe-strike', required=True, type=float)
     parser.add_argument('--interval', default='1', choices=['1', '5', '15', '25', '60'],
                         help='Candle interval in minutes (default 1, the finest Dhan supports)')
+    parser.add_argument('--side', default='BOTH', choices=['CE', 'PE', 'BOTH'],
+                        help='Which legs the VWAP covers. Must match the row Side it is '
+                             'compared against: a CE-only row measured against a combined '
+                             'CE+PE VWAP would exit at the wrong threshold (default BOTH)')
     args = parser.parse_args()
     interval_minutes = int(args.interval)
+    legs = ['CE', 'PE'] if args.side == 'BOTH' else [args.side]
 
     dhan = get_dhan_client()
     if not dhan:
@@ -121,17 +130,18 @@ def main():
     exchange = UNDERLYING_EXCHANGE[args.underlying]
     segment = SEGMENT_FOR_EXCHANGE[exchange]
 
-    ce_opt = helper.find_option(args.underlying, args.expiry, args.ce_strike, 'CE', exchange=exchange)
-    pe_opt = helper.find_option(args.underlying, args.expiry, args.pe_strike, 'PE', exchange=exchange)
-    if ce_opt is None or pe_opt is None:
-        print(json.dumps({'vwap': None, 'error': 'contract not resolved'}))
-        return
-
+    strike_for = {'CE': args.ce_strike, 'PE': args.pe_strike}
     today = date.today().strftime('%Y-%m-%d')
     tomorrow = (date.today() + timedelta(days=1)).strftime('%Y-%m-%d')
 
-    frames = {}
-    for leg, opt in (('ce', ce_opt), ('pe', pe_opt)):
+    # leg -> {minute: row}, plus that leg's resolved column names.
+    per_leg: dict[str, tuple[dict, dict]] = {}
+    for leg in legs:
+        opt = helper.find_option(args.underlying, args.expiry, strike_for[leg], leg, exchange=exchange)
+        if opt is None:
+            print(json.dumps({'vwap': None, 'error': f'{leg} contract not resolved'}))
+            return
+
         df = helper.get_intraday_minute_data(
             security_id=str(int(opt['SECURITY_ID'])), exchange_segment=segment,
             instrument_type='OPTIDX', interval=args.interval, from_date=today, to_date=tomorrow)
@@ -142,33 +152,44 @@ def main():
         if closed.empty:
             print(json.dumps({'vwap': None, 'error': 'no closed bars yet this session'}))
             return
-        frames[leg] = (closed, ts_col)
 
-    (ce, ce_ts), (pe, pe_ts) = frames['ce'], frames['pe']
+        cols = {
+            'hi': _col(closed, 'high', 'High'), 'lo': _col(closed, 'low', 'Low'),
+            'cl': _col(closed, 'close', 'Close'), 'vol': _col(closed, 'volume', 'Volume'),
+        }
+        if any(v is None for v in cols.values()):
+            print(json.dumps({'vwap': None, 'error': 'missing OHLCV columns'}))
+            return
 
-    hi, lo, cl = _col(ce, 'high', 'High'), _col(ce, 'low', 'Low'), _col(ce, 'close', 'Close')
-    hi2, lo2, cl2 = _col(pe, 'high', 'High'), _col(pe, 'low', 'Low'), _col(pe, 'close', 'Close')
-    vol_c, vol_p = _col(ce, 'volume', 'Volume'), _col(pe, 'volume', 'Volume')
-    if any(x is None for x in (hi, lo, cl, hi2, lo2, cl2, vol_c, vol_p)):
-        print(json.dumps({'vwap': None, 'error': 'missing OHLCV columns'}))
-        return
+        # Key bars by their actual minute label rather than trusting row
+        # count/order — a bar with zero trades on one leg but not the other
+        # would otherwise silently misalign the two legs.
+        by_minute = {}
+        for _, r in closed.iterrows():
+            dt = _to_dt(r[ts_col])
+            if dt is not None:
+                by_minute[dt.replace(second=0, microsecond=0)] = r
+        per_leg[leg] = (by_minute, cols)
 
-    # Align CE and PE bars by their actual minute label — not by trusting the
-    # two legs to have the same row count/order, which a bar with zero trades
-    # on one leg (but not the other) would otherwise silently break.
-    ce_map = {_to_dt(row[ce_ts]).replace(second=0, microsecond=0): row for _, row in ce.iterrows() if _to_dt(row[ce_ts])}
-    pe_map = {_to_dt(row[pe_ts]).replace(second=0, microsecond=0): row for _, row in pe.iterrows() if _to_dt(row[pe_ts])}
-    common = sorted(set(ce_map) & set(pe_map))
+    common = sorted(set.intersection(*(set(m) for m, _ in per_leg.values())))
     if not common:
-        print(json.dumps({'vwap': None, 'error': 'CE/PE bars did not align'}))
+        print(json.dumps({'vwap': None, 'error': 'no aligned bars'}))
         return
 
     num = 0.0
     den = 0.0
     for minute in common:
-        c, p = ce_map[minute], pe_map[minute]
-        typical = ((float(c[hi]) + float(p[hi2])) + (float(c[lo]) + float(p[lo2])) + (float(c[cl]) + float(p[cl2]))) / 3.0
-        vol = (float(c[vol_c]) + float(p[vol_p])) / 2.0
+        # Typical price of the combined position for this bar: each traded
+        # leg's (H+L+C)/3, summed across legs. Volume weight is the mean of the
+        # legs' volumes, so a one-leg row weights by its own volume unchanged.
+        typical = 0.0
+        vol = 0.0
+        for leg in legs:
+            by_minute, cols = per_leg[leg]
+            r = by_minute[minute]
+            typical += (float(r[cols['hi']]) + float(r[cols['lo']]) + float(r[cols['cl']])) / 3.0
+            vol += float(r[cols['vol']])
+        vol /= len(legs)
         num += typical * vol
         den += vol
 
