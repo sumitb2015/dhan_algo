@@ -168,6 +168,18 @@ function legsOf(row: FocusRow): ('CE' | 'PE')[] {
 }
 
 /**
+ * Per-leg value (lots × premium) and the PE/CE ratio between them, for the
+ * row's LTP display. PCR is PE value ÷ CE value — mathematically identical to
+ * PE LTP ÷ CE LTP since `lots` is the same for both legs and cancels out, but
+ * computed off the values for clarity at the call site.
+ */
+function legValues(row: FocusRow, live: RowLive): { ceValue: number; peValue: number; pcr: number | null } {
+  const ceValue = (live.ltpCe ?? 0) * row.lots;
+  const peValue = (live.ltpPe ?? 0) * row.lots;
+  return { ceValue, peValue, pcr: ceValue > 0 ? peValue / ceValue : null };
+}
+
+/**
  * Current premium across only the legs this row's Side trades AND that are
  * still actually open. A leg the row's Side names but that has already been
  * closed (by a leg-wise stop, a manual Exit, or anything else) must not keep
@@ -1139,6 +1151,7 @@ function FocusTableRow({
   onBlocked: (message: string) => void;
 }) {
   const combinedLtp = (live.ltpCe ?? 0) + (live.ltpPe ?? 0);
+  const { ceValue, peValue, pcr } = legValues(row, live);
   // Orders are only sendable once at least one leg's contract and the lot size
   // are known — placeLeg re-checks the specific leg it is about to trade.
   const canTrade = liveRealMoney && !busy && (live.ceStrike != null || live.peStrike != null) && (lotSize ?? 0) > 0;
@@ -1205,6 +1218,16 @@ function FocusTableRow({
           <span className="text-emerald-400">CE {live.ltpCe != null ? live.ltpCe.toFixed(2) : '\u2014'}</span>
           <span className="text-zinc-700">/</span>
           <span className="text-rose-400">PE {live.ltpPe != null ? live.ltpPe.toFixed(2) : '\u2014'}</span>
+        </div>
+        <div className="text-[10px] font-mono font-semibold mt-1 flex items-center gap-1 whitespace-nowrap"
+          title="Value = lots &times; premium per leg">
+          <span className="text-emerald-500">CE&nbsp;&#8377;{ceValue.toFixed(2)}</span>
+          <span className="text-zinc-700">/</span>
+          <span className="text-rose-500">PE&nbsp;&#8377;{peValue.toFixed(2)}</span>
+        </div>
+        <div className="text-[10px] font-mono font-bold mt-0.5 text-amber-400"
+          title="PCR = PE value &#247; CE value">
+          PCR {pcr != null ? pcr.toFixed(2) : '\u2014'}
         </div>
       </td>
 
@@ -1401,6 +1424,7 @@ function FocusRowCard({
   onBlocked: (message: string) => void;
 }) {
   const combinedLtp = (live.ltpCe ?? 0) + (live.ltpPe ?? 0);
+  const { ceValue, peValue, pcr } = legValues(row, live);
   const canTrade = liveRealMoney && !busy && (live.ceStrike != null || live.peStrike != null) && (lotSize ?? 0) > 0;
   const flat = legsFlat(live);
   const step = STRIKE_STEP[row.underlying];
@@ -1479,6 +1503,18 @@ function FocusRowCard({
           <span className="text-[8px] font-black text-zinc-500 uppercase tracking-wider">Premium</span>
           <span className="text-sm font-mono font-black text-zinc-100 mt-0.5">{combinedLtp > 0 ? combinedLtp.toFixed(2) : '—'}</span>
         </div>
+      </div>
+
+      {/* CE/PE value + PCR */}
+      <div className="flex items-center justify-between bg-zinc-950/20 rounded-xl px-3 py-2 border border-zinc-800/40 text-[10px] font-mono font-semibold">
+        <span title="Value = lots × premium per leg">
+          <span className="text-emerald-500">CE&nbsp;₹{ceValue.toFixed(2)}</span>
+          <span className="text-zinc-700 mx-1">/</span>
+          <span className="text-rose-500">PE&nbsp;₹{peValue.toFixed(2)}</span>
+        </span>
+        <span className="text-amber-400 font-bold" title="PCR = PE value ÷ CE value">
+          PCR {pcr != null ? pcr.toFixed(2) : '—'}
+        </span>
       </div>
 
       {/* Strike editor */}
