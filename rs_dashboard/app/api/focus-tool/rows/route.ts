@@ -13,27 +13,17 @@ export async function GET(): Promise<NextResponse> {
 
 export async function POST(req: NextRequest): Promise<NextResponse> {
   try {
-    const body = await req.json() as Partial<FocusToolConfig> & {
-      row?: Partial<FocusRow>;
-      /** The `updatedAt` the client last read. A full-config write carries the
-       *  client's whole rows/groups array, so without this check a second tab
-       *  (or a stale one) silently overwrites everything the first one saved. */
-      baseUpdatedAt?: string;
-    };
+    const body = await req.json() as Partial<FocusToolConfig> & { row?: Partial<FocusRow> };
     const config = readFocusConfig();
 
-    // Only guards whole-config writes. A single-row upsert merges into the
-    // stored row rather than replacing the array, so it cannot clobber edits
-    // to other rows and doesn't need the check.
-    if (!body.row && body.baseUpdatedAt && config.updatedAt && body.baseUpdatedAt !== config.updatedAt) {
-      return NextResponse.json({
-        success: false,
-        conflict: true,
-        error: 'This configuration was changed elsewhere since you loaded it. Reload to see the current version before saving again.',
-        data: config,
-      }, { status: 409 });
-    }
-
+    // Plain last-write-wins — this is a single-user local tool, and an
+    // optimistic-concurrency reject here caused more harm than it prevented:
+    // this page saves from many independent places (Arm/Disarm, leg Exit
+    // buttons, the scheduler, strike shifts), and even with those calls
+    // serialized client-side, rejecting a save just discards a real user
+    // action (e.g. Arm) in favour of a stale server snapshot. The actual risk
+    // this guarded against — two browser tabs open at once, both saving — is
+    // rare enough here that last-write-wins is the better trade.
     if (body.row) {
       // Upsert a single row
       const incoming = body.row;
@@ -51,7 +41,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       }
     } else {
       // Full config update (groups, risk bar, liveRealMoney)
-      const { row: _row, baseUpdatedAt: _base, ...rest } = body;
+      const { row: _row, ...rest } = body;
       Object.assign(config, rest);
     }
 

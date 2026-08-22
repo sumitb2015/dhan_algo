@@ -1622,11 +1622,12 @@ export default function FocusTool() {
 
   const [config, setConfig] = useState<FocusToolConfig>(DEFAULT_CONFIG);
   const [saving, setSaving] = useState(false);
-  // `updatedAt` of the config version this tab last read from the server —
-  // sent with every save so a concurrent write elsewhere is rejected rather
-  // than silently overwritten. A ref, not state: it must be readable inside
-  // saveConfig without adding a render dependency.
-  const configVersionRef = useRef('');
+  // Saves fire from many independent places — Arm/Disarm, leg Exit buttons,
+  // the auto-entry/auto-exit scheduler, strike shifts, Save Preferences — with
+  // no coordination between them. Chaining every save onto this promise makes
+  // each one wait for the previous one to actually land before it fires, so
+  // two saves close together apply in order instead of racing each other.
+  const saveQueueRef = useRef<Promise<unknown>>(Promise.resolve());
 
   const [positions, setPositions] = useState<PosRow[]>([]);
   // availabelBalance is a genuine Dhan API misspelling, kept verbatim here (and
@@ -1782,10 +1783,8 @@ export default function FocusTool() {
     }).catch(() => {});
   }, [niftyExpiry, bankniftyExpiry, sensexExpiry]);
 
-  /** Adopt a server-authoritative config: state, the risk-bar mirrors, and the
-   *  version stamp the next save is checked against. */
+  /** Adopt a server-authoritative config: state plus the risk-bar mirrors. */
   const applyServerConfig = useCallback((d: FocusToolConfig) => {
-    configVersionRef.current = d.updatedAt ?? '';
     setConfig(d);
     setRiskEnabled(d.riskEnabled);
     setTargetRupees(d.targetRupees);
@@ -2239,18 +2238,23 @@ export default function FocusTool() {
   }, [vwapWantedKey]);
 
   async function saveConfig(patch?: Partial<FocusToolConfig>) {
+    // Queued rather than fired directly — see saveQueueRef's doc comment.
+    // Each save waits for every save already queued ahead of it, so its
+    // baseUpdatedAt is always read after the previous one actually landed.
+    const run = saveQueueRef.current.then(() => doSaveConfig(patch));
+    // Swallow here so one failed save doesn't wedge the queue for whatever
+    // saves come after it — doSaveConfig already reports the failure itself.
+    saveQueueRef.current = run.catch(() => {});
+    return run;
+  }
+
+  async function doSaveConfig(patch?: Partial<FocusToolConfig>) {
     setSaving(true);
     try {
-      const body = {
-        ...(patch ?? {
-          riskEnabled, targetRupees, stopRupees, trailEnabled, triggerRupees, lockRupees, liveRealMoney,
-          groups: config.groups,
-          rows: config.rows,
-        }),
-        // Optimistic concurrency: this write replaces the whole rows/groups
-        // array, so the server rejects it if another tab saved in between
-        // rather than letting this one silently discard those edits.
-        baseUpdatedAt: configVersionRef.current,
+      const body = patch ?? {
+        riskEnabled, targetRupees, stopRupees, trailEnabled, triggerRupees, lockRupees, liveRealMoney,
+        groups: config.groups,
+        rows: config.rows,
       };
       const res = await fetch('/api/focus-tool/rows', {
         method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
@@ -2259,12 +2263,6 @@ export default function FocusTool() {
       if (j.success && j.data) {
         applyServerConfig(j.data);
         addToast('success', 'Focus Tool configuration saved');
-      } else if (res.status === 409 && j.data) {
-        // Adopt the server's version rather than leaving two diverging views —
-        // the user's unsaved edits are gone either way, and silently keeping
-        // them on screen would invite a second clobbering save.
-        applyServerConfig(j.data);
-        addToast('error', 'Not saved — changed elsewhere', j.error ?? 'Reloaded the current configuration');
       } else if (j.error) {
         addToast('error', 'Failed to save config', j.error);
       }
