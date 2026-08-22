@@ -1252,8 +1252,8 @@ function FocusTableRow({
       </td>
 
       {/* STATUS / ACTIONS */}
-      <td className="p-3 align-middle border-l border-r border-zinc-800">
-        <div className="flex flex-col items-start gap-2">
+      <td className="p-3 align-middle text-center border-l border-r border-zinc-800">
+        <div className="flex flex-col items-center gap-2">
           <span title="Draft/Armed are this row's own watch state (set by Arm/Disarm below) — they track whether a position is actually open only loosely, since nothing here auto-enters yet. Whether legs are OPEN is shown by the CE/PE badges and Exit All below, straight off the broker."
             className={cn('text-[10px] font-bold px-2 py-0.5 rounded-full border capitalize', STATUS_PILL[row.status])}>
             {row.status}
@@ -3225,7 +3225,7 @@ export default function FocusTool() {
                         <th className="p-3 border-r border-zinc-800" title="Where the row stands, and its arm / exit control">Status / Actions</th>
                         <th className="p-3 text-center" title="Call leg: live premium and lot controls">CE</th>
                         <th className="p-3 text-center border-r border-zinc-800" title="Put leg: live premium and lot controls">PE</th>
-                        <th className="p-3" title="Spot, VWAP and stop-loss rules that close this row">Level Exits</th>
+                        <th className="p-3 text-center" title="Spot, VWAP and stop-loss rules that close this row">Level Exits</th>
                       </tr>
                     </thead>
                     <tbody>
