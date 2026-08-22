@@ -580,6 +580,29 @@ export default function PortfolioDiaryDashboard() {
 
   const activeChartMetric = CHART_METRICS.find(m => m.key === chartMetric)!;
 
+  // Only the P&L metrics can go negative; the charge metrics are cumulative sums of non-negative
+  // values, so they keep their own single colour (same rule the day-wise bars use below).
+  const splitBySign = chartMetric === 'grossPnl' || chartMetric === 'netPnl';
+
+  // Recharts cannot stroke one <Line> in two colours, so the line is painted with a gradient whose
+  // two stops sit at the SAME offset — the zero crossing — giving a hard switch there.
+  //
+  // The offset is a fraction of the PATH's own bounding box (SVG objectBoundingBox units), not of
+  // the plot area. That box spans exactly max..min of the plotted series, so zero sits
+  // max / (max - min) of the way down from the top. Using the axis domain here instead would put
+  // the colour break in the wrong place whenever the axis is padded beyond the data.
+  const zeroOffset = useMemo(() => {
+    if (!chartData.length) return 1;
+    let max = -Infinity, min = Infinity;
+    for (const d of chartData) {
+      const v = d[chartMetric] as number;
+      if (v > max) max = v;
+      if (v < min) min = v;
+    }
+    if (max <= 0) return 0;   // series never rises above zero — all negative colour
+    if (min >= 0) return 1;   // series never dips below zero — all positive colour
+    return max / (max - min);
+  }, [chartData, chartMetric]);
 
   return (
     <div className="flex flex-col flex-1 w-full bg-black min-h-screen text-zinc-200">
@@ -1360,6 +1383,12 @@ export default function PortfolioDiaryDashboard() {
                     <div className="h-72">
                       <ResponsiveContainer width="100%" height="100%">
                         <LineChart data={chartData} margin={{ top: 4, right: 12, left: 4, bottom: 0 }}>
+                          <defs>
+                            <linearGradient id="diaryCumulativeStroke" x1="0" y1="0" x2="0" y2="1">
+                              <stop offset={zeroOffset} stopColor={activeChartMetric.color} />
+                              <stop offset={zeroOffset} stopColor="#ef4444" />
+                            </linearGradient>
+                          </defs>
                           <CartesianGrid strokeDasharray="3 3" stroke="#27272a" />
                           <XAxis
                             dataKey="date"
@@ -1384,7 +1413,7 @@ export default function PortfolioDiaryDashboard() {
                             type="monotone"
                             dataKey={chartMetric}
                             name={activeChartMetric.label}
-                            stroke={activeChartMetric.color}
+                            stroke={splitBySign ? 'url(#diaryCumulativeStroke)' : activeChartMetric.color}
                             dot={false}
                             strokeWidth={1.5}
                             isAnimationActive={false}
