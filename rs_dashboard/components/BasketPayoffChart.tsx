@@ -1,11 +1,13 @@
 'use client';
 
 import React, { useMemo, useRef, useState } from 'react';
+import { useChartChrome } from '@/lib/chartTheme';
 
 interface BasketPayoffChartProps {
   points: { x: number; y: number }[];   // expiry P&L curve
   breakevens: number[];
   spot: number;
+  rightWing?: 'profit' | 'loss' | null;
   emptyReason?: string;
 }
 
@@ -34,9 +36,10 @@ function niceTicks(lo: number, hi: number, count: number): number[] {
   return ticks;
 }
 
-export default function BasketPayoffChart({ points, breakevens, spot, emptyReason }: BasketPayoffChartProps) {
+export default function BasketPayoffChart({ points, breakevens, spot, rightWing = null, emptyReason }: BasketPayoffChartProps) {
   const svgRef = useRef<SVGSVGElement | null>(null);
   const [hover, setHover] = useState<{ x: number; y: number } | null>(null);
+  const chrome = useChartChrome();
 
   const model = useMemo(() => {
     if (points.length < 2) return null;
@@ -91,6 +94,9 @@ export default function BasketPayoffChart({ points, breakevens, spot, emptyReaso
   };
 
   const hoverLeft = hover ? sx(hover.x) > W * 0.62 : false;
+  const rightEdgePoint = points[points.length - 1];
+  const continuationColor = rightWing === 'profit' ? '#34d399' : '#fb7185';
+  const continuationY = Math.max(PAD.top + 12, Math.min(H - PAD.bottom - 8, sy(rightEdgePoint.y)));
 
   return (
     <svg
@@ -109,14 +115,14 @@ export default function BasketPayoffChart({ points, breakevens, spot, emptyReaso
 
       {model.yTicks.map(t => (
         <g key={`y${t}`}>
-          <line x1={PAD.left} x2={W - PAD.right} y1={sy(t)} y2={sy(t)} stroke="#27272a" strokeWidth={1} />
-          <text x={PAD.left - 8} y={sy(t) + 3.5} textAnchor="end" fontSize={11} fill="#71717a" className="font-mono">
+          <line x1={PAD.left} x2={W - PAD.right} y1={sy(t)} y2={sy(t)} stroke={chrome.gridline} strokeWidth={1} />
+          <text x={PAD.left - 8} y={sy(t) + 3.5} textAnchor="end" fontSize={11} fill={chrome.textMuted} className="font-mono">
             {Math.abs(t) >= 1000 ? `${(t / 1000).toFixed(t % 1000 === 0 ? 0 : 1)}k` : t.toFixed(0)}
           </text>
         </g>
       ))}
       {model.xTicks.map(t => (
-        <text key={`x${t}`} x={sx(t)} y={H - PAD.bottom + 18} textAnchor="middle" fontSize={11} fill="#71717a" className="font-mono">
+        <text key={`x${t}`} x={sx(t)} y={H - PAD.bottom + 18} textAnchor="middle" fontSize={11} fill={chrome.textMuted} className="font-mono">
           {t.toLocaleString('en-IN')}
         </text>
       ))}
@@ -134,7 +140,17 @@ export default function BasketPayoffChart({ points, breakevens, spot, emptyReaso
         <path d={model.line} fill="none" stroke="#fb7185" strokeWidth={2} />
       </g>
 
-      <line x1={PAD.left} x2={W - PAD.right} y1={zeroY} y2={zeroY} stroke="#52525b" strokeWidth={1.25} />
+      <line x1={PAD.left} x2={W - PAD.right} y1={zeroY} y2={zeroY} stroke={chrome.baseline} strokeWidth={1.25} />
+
+      {rightWing && (
+        <g aria-label={`Right-side ${rightWing} continues beyond the displayed range`}>
+          <path d={`M${W - PAD.right - 18},${continuationY} L${W - PAD.right - 3},${continuationY} M${W - PAD.right - 8},${continuationY - 5} L${W - PAD.right - 3},${continuationY} L${W - PAD.right - 8},${continuationY + 5}`}
+            fill="none" stroke={continuationColor} strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" />
+          <text x={W - PAD.right - 5} y={Math.max(PAD.top + 9, continuationY - 8)} textAnchor="end" fontSize={9.5} fill={continuationColor} className="font-mono font-bold">
+            unlimited {rightWing}
+          </text>
+        </g>
+      )}
 
       {spot >= xLo && spot <= xHi && (
         <g>
@@ -147,7 +163,7 @@ export default function BasketPayoffChart({ points, breakevens, spot, emptyReaso
 
       {breakevens.map(be => (
         <g key={be}>
-          <circle cx={sx(be)} cy={zeroY} r={4} fill="#fbbf24" stroke="#18181b" strokeWidth={2} />
+          <circle cx={sx(be)} cy={zeroY} r={4} fill="#fbbf24" stroke={chrome.surface} strokeWidth={2} />
           <text x={sx(be)} y={zeroY - 8} textAnchor="middle" fontSize={9.5} fill="#fbbf24" className="font-mono">
             {be.toLocaleString('en-IN', { maximumFractionDigits: 0 })}
           </text>
@@ -156,12 +172,12 @@ export default function BasketPayoffChart({ points, breakevens, spot, emptyReaso
 
       {hover && (
         <g pointerEvents="none">
-          <line x1={sx(hover.x)} x2={sx(hover.x)} y1={PAD.top} y2={H - PAD.bottom} stroke="#a1a1aa" strokeWidth={1} strokeDasharray="2 3" />
+          <line x1={sx(hover.x)} x2={sx(hover.x)} y1={PAD.top} y2={H - PAD.bottom} stroke={chrome.textSecondary} strokeWidth={1} strokeDasharray="2 3" />
           <circle cx={sx(hover.x)} cy={sy(hover.y)} r={4.5}
-            fill={hover.y >= 0 ? '#34d399' : '#fb7185'} stroke="#18181b" strokeWidth={2} />
+            fill={hover.y >= 0 ? '#34d399' : '#fb7185'} stroke={chrome.surface} strokeWidth={2} />
           <g transform={`translate(${hoverLeft ? sx(hover.x) - 148 : sx(hover.x) + 10}, ${PAD.top + 4})`}>
-            <rect width={138} height={44} rx={8} fill="#18181b" stroke="#3f3f46" />
-            <text x={10} y={17} fontSize={10} fill="#a1a1aa" className="font-mono">
+            <rect width={138} height={44} rx={8} fill={chrome.surface} stroke={chrome.baseline} />
+            <text x={10} y={17} fontSize={10} fill={chrome.textSecondary} className="font-mono">
               At {hover.x.toLocaleString('en-IN', { maximumFractionDigits: 0 })}
             </text>
             <text x={10} y={33} fontSize={12} fontWeight={700} className="font-mono"

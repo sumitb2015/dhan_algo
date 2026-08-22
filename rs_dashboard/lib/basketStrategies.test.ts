@@ -14,7 +14,7 @@ test('legPnlAtExpiry: long put OTM loses only the premium paid', () => {
   assert.strictEqual(legPnlAtExpiry(leg, 120), -10); // (0 - 5) * qty(2)
 });
 
-test('computePayoff: short straddle has bounded profit, unlimited loss both wings', () => {
+test('computePayoff: short straddle has bounded profit and unlimited right-side loss', () => {
   const legs = [
     { side: 'S' as const, option: 'CE' as const, strike: 100, premium: 5, qty: 1 },
     { side: 'S' as const, option: 'PE' as const, strike: 100, premium: 5, qty: 1 },
@@ -23,6 +23,7 @@ test('computePayoff: short straddle has bounded profit, unlimited loss both wing
   assert.strictEqual(result.netPremium, 10);
   assert.strictEqual(result.maxProfitUnlimited, false);
   assert.strictEqual(result.maxLossUnlimited, true);
+  assert.strictEqual(result.rightWing, 'loss');
   assert.ok(Math.abs(result.maxProfit - 10) < 1e-6);
   assert.strictEqual(result.breakevens.length, 2);
   assert.ok(Math.abs(result.breakevens[0] - 90) < 1);
@@ -39,6 +40,36 @@ test('computePayoff: bull call spread has bounded profit AND bounded loss', () =
   assert.strictEqual(result.maxLossUnlimited, false);
   assert.ok(Math.abs(result.maxLoss - -5) < 1e-6);   // net debit paid
   assert.ok(Math.abs(result.maxProfit - 15) < 1e-6); // (120-100) - 5 net debit
+});
+
+test('computePayoff: long put profit is bounded by the zero underlying floor', () => {
+  const result = computePayoff([
+    { side: 'B' as const, option: 'PE' as const, strike: 100, premium: 5, qty: 1 },
+  ], 50, 150, 101);
+  assert.strictEqual(result.maxProfitUnlimited, false);
+  assert.strictEqual(result.maxLossUnlimited, false);
+  assert.strictEqual(result.maxProfit, 95);
+  assert.strictEqual(result.maxLoss, -5);
+  assert.strictEqual(result.rightWing, null);
+});
+
+test('computePayoff: short put loss is bounded by the zero underlying floor', () => {
+  const result = computePayoff([
+    { side: 'S' as const, option: 'PE' as const, strike: 100, premium: 5, qty: 1 },
+  ], 50, 150, 101);
+  assert.strictEqual(result.maxProfitUnlimited, false);
+  assert.strictEqual(result.maxLossUnlimited, false);
+  assert.strictEqual(result.maxProfit, 5);
+  assert.strictEqual(result.maxLoss, -95);
+  assert.strictEqual(result.rightWing, null);
+});
+
+test('computePayoff: short call keeps unlimited right-side loss', () => {
+  const result = computePayoff([
+    { side: 'S' as const, option: 'CE' as const, strike: 100, premium: 5, qty: 1 },
+  ], 50, 150, 101);
+  assert.strictEqual(result.maxLossUnlimited, true);
+  assert.strictEqual(result.rightWing, 'loss');
 });
 
 test('nearestStrike picks the closest listed strike', () => {

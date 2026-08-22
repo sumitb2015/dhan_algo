@@ -5,6 +5,7 @@ import {
   STRATEGY_CATEGORIES, type StrategyCategory, type StrategyTemplate,
   type PayoffLeg, computePayoff,
 } from '@/lib/basketStrategies';
+import { useChartChrome } from '@/lib/chartTheme';
 
 const CATEGORIES = Object.keys(STRATEGY_CATEGORIES) as StrategyCategory[];
 
@@ -22,6 +23,7 @@ const CATEGORY_COLORS: Record<StrategyCategory, string> = {
  *  purely to visualize the SHAPE of the payoff (bullish/bearish/wings/etc.) — not
  *  a real quote. */
 function StrategyGlyph({ template }: { template: StrategyTemplate }) {
+  const chrome = useChartChrome();
   const path = useMemo(() => {
     const legs: PayoffLeg[] = template.legs.map(l => ({
       side: l.side, option: l.option, strike: 100 + l.offset * 5, premium: 3 * l.ratio, qty: l.ratio,
@@ -37,11 +39,20 @@ function StrategyGlyph({ template }: { template: StrategyTemplate }) {
     }).join('');
   }, [template]);
   return (
-    <svg viewBox="0 0 80 36" className="w-full h-12">
-      <line x1={4} x2={76} y1={18} y2={18} stroke="#3f3f46" strokeWidth={1} strokeDasharray="2 2" />
+    <svg viewBox="0 0 80 36" className="w-full h-12" aria-label="Schematic expiry payoff shape" role="img">
+      <title>Schematic expiry payoff shape, not live pricing</title>
+      <line x1={4} x2={76} y1={18} y2={18} stroke={chrome.baseline} strokeWidth={1} strokeDasharray="2 2" />
       <path d={path} fill="none" stroke="#34d399" strokeWidth={1.75} />
     </svg>
   );
+}
+
+function legSummary(template: StrategyTemplate): string {
+  return template.legs.map(leg => {
+    const relativeStrike = leg.offset === 0 ? 'ATM' : `${leg.offset > 0 ? '+' : ''}${leg.offset}`;
+    const expiry = leg.expiryRole === 'far' ? ' far' : '';
+    return `${leg.side === 'B' ? 'Buy' : 'Sell'} ${leg.ratio} ${relativeStrike} ${leg.option}${expiry}`;
+  }).join(' · ');
 }
 
 interface StrategyCardGridProps {
@@ -69,18 +80,23 @@ export default function StrategyCardGrid({
       </div>
 
       <div className="flex-1 flex gap-2.5 overflow-x-auto pb-1 min-w-0">
-        {STRATEGY_CATEGORIES[category].map(tpl => (
-          <button key={tpl.key} onClick={() => onSelectTemplate(tpl)}
+        {STRATEGY_CATEGORIES[category].map(tpl => {
+          const composition = legSummary(tpl);
+          return (
+          <button key={tpl.key} onClick={() => onSelectTemplate(tpl)} aria-label={`${tpl.name}: ${composition}`}
+            title={composition}
             disabled={disabled}
-            className={`flex-none w-40 p-3 rounded-xl border transition-all text-left disabled:opacity-40 ${
+            className={`flex-none w-48 p-3 rounded-xl border transition-all text-left disabled:opacity-40 ${
               selectedKey === tpl.key
                 ? 'border-emerald-500/50 bg-emerald-500/5'
                 : 'border-zinc-800 bg-zinc-900/40 hover:border-zinc-600'
             }`}>
             <StrategyGlyph template={tpl} />
             <p className="text-xs font-bold text-zinc-300 mt-1.5 leading-tight">{tpl.name}</p>
+            <p className="text-[10px] leading-snug text-zinc-500 mt-1.5 line-clamp-2">{composition}</p>
           </button>
-        ))}
+          );
+        })}
       </div>
     </div>
   );

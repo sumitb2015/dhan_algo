@@ -20,6 +20,8 @@ export interface ChartChrome {
   textSecondary: string;
   /** Crosshair label chips. */
   textMuted: string;
+  /** Neutral chart-tooltip surface. */
+  surface: string;
 }
 
 const CHROME: Record<ResolvedTheme, ChartChrome> = {
@@ -28,12 +30,14 @@ const CHROME: Record<ResolvedTheme, ChartChrome> = {
     baseline: '#3f3f46',
     textSecondary: '#a1a1aa',
     textMuted: '#71717a',
+    surface: '#18181b',
   },
   light: {
     gridline: '#e2e8f0',
     baseline: '#cbd5e1',
     textSecondary: '#475569',
     textMuted: '#64748b',
+    surface: '#ffffff',
   },
 };
 

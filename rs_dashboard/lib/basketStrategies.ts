@@ -146,6 +146,8 @@ export interface PayoffResult {
   maxLoss: number;          // negative number; ignored when maxLossUnlimited
   maxProfitUnlimited: boolean;
   maxLossUnlimited: boolean;
+  /** Direction in which the displayed curve continues beyond the right edge. */
+  rightWing: 'profit' | 'loss' | null;
   netPremium: number;       // >0 net credit received, <0 net debit paid (total ₹)
 }
 
@@ -169,30 +171,30 @@ export function computePayoff(legs: PayoffLeg[], lo: number, hi: number, samples
     }
   }
 
-  // Beyond the outermost strike the curve is linear; its slope tells us
-  // whether profit/loss is unbounded on either wing.
+  // Beyond the outermost strike the curve is linear. The underlying cannot
+  // trade below zero, so the left wing is always bounded at x=0; only the
+  // right wing can be genuinely unlimited.
   const pnlAt = (x: number) => legs.reduce((sum, l) => sum + legPnlAtExpiry(l, x), 0);
   const strikes = legs.map(l => l.strike);
   const far = Math.max(hi, ...strikes) * 2 + 1000;
   const slopeUpWing = pnlAt(far + 1) - pnlAt(far);
-  const nearZero = Math.max(0, Math.min(lo, ...strikes) / 2);
-  const slopeDownWing = pnlAt(nearZero) - pnlAt(nearZero + 1); // pnl gain per point of fall
   const upWingPnl = pnlAt(far);
-  const downWingPnl = pnlAt(Math.max(0, nearZero));
+  // Do not infer the downside endpoint from the plotted range: the actual
+  // lower bound of an index/equity underlying is zero.
+  const downWingPnl = pnlAt(0);
 
   let maxProfit = Math.max(...points.map(p => p.y), upWingPnl, downWingPnl);
   let maxLoss   = Math.min(...points.map(p => p.y), upWingPnl, downWingPnl);
-  // Convention: a wing that keeps gaining/losing as the underlying moves is
-  // shown as "Unlimited" even though the downside is technically floored at 0.
-  const maxProfitUnlimited = slopeUpWing > 1e-9 || slopeDownWing > 1e-9;
-  const maxLossUnlimited   = slopeUpWing < -1e-9 || slopeDownWing < -1e-9;
+  const maxProfitUnlimited = slopeUpWing > 1e-9;
+  const maxLossUnlimited   = slopeUpWing < -1e-9;
+  const rightWing = slopeUpWing > 1e-9 ? 'profit' : slopeUpWing < -1e-9 ? 'loss' : null;
   if (maxProfitUnlimited) maxProfit = Infinity;
   if (maxLossUnlimited) maxLoss = -Infinity;
 
   const netPremium = legs.reduce((sum, l) =>
     sum + (l.side === 'S' ? l.premium : -l.premium) * l.qty, 0);
 
-  return { points, breakevens, maxProfit, maxLoss, maxProfitUnlimited, maxLossUnlimited, netPremium };
+  return { points, breakevens, maxProfit, maxLoss, maxProfitUnlimited, maxLossUnlimited, rightWing, netPremium };
 }
 
 /** Nearest listed strike to a target price. */
