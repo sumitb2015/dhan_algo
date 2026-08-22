@@ -1684,6 +1684,25 @@ export default function FocusTool() {
     setTimeout(pollWorker, 800);
   }, [workerRunning, broker, addToast, pollWorker]);
 
+  // Auto-start the worker on mount, and again whenever the order-routing
+  // broker changes — same convention as the live-quote bridge below: a
+  // long-lived background process that comes up on its own rather than
+  // waiting on a button, and restarts itself onto new routing rather than
+  // silently keeping stale broker credentials. Idempotent (the route reports
+  // "already running" when the broker hasn't changed) and silent — this isn't
+  // a user action, so it doesn't toast the way the manual button does. The
+  // worker only PLACES an order once the config's own LIVE - REAL MONEY switch
+  // is on, so starting it here is not itself a live-trading decision.
+  useEffect(() => {
+    fetch('/api/focus-tool/worker', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'start', broker }),
+    })
+      .then(() => setTimeout(pollWorker, 800))
+      .catch(() => {});
+  }, [broker, pollWorker]);
+
   // Standalone bridge (scripts/tools/focus_tool_ws.py) — all three underlyings
   // over one WebSocket connection, independent of AdvancedScalper's
   // one-broker-one-underlying bridge. See useFocusToolWS's own doc comment.

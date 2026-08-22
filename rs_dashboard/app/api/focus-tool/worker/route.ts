@@ -60,6 +60,15 @@ function releaseStartLock(): void {
   try { fs.unlinkSync(LOCK_FILE); } catch { /* already gone */ }
 }
 
+async function stopAndWait(pid: number, maxWaitMs = 5000): Promise<void> {
+  fs.writeFileSync(STOP_TRIGGER, '');
+  const deadline = Date.now() + maxWaitMs;
+  while (Date.now() < deadline) {
+    if (!isPidRunning(pid, true)) return;
+    await new Promise(r => setTimeout(r, 300));
+  }
+}
+
 /**
  * The worker's status, corrected against reality. A status file saying RUNNING
  * proves nothing on its own — the process may have been killed without ever
@@ -118,7 +127,13 @@ export async function POST(request: NextRequest) {
     try {
       const st = currentStatus();
       if (st.status === 'RUNNING') {
-        return NextResponse.json({ success: true, message: 'Worker already running', pid: st.pid });
+        if (st.broker === broker) {
+          return NextResponse.json({ success: true, message: 'Worker already running', pid: st.pid });
+        }
+        // Order routing changed under a running worker — restart onto the new
+        // broker rather than silently keeping the old one, matching how the
+        // live-quote bridge restarts when its expiries change.
+        await stopAndWait(Number(st.pid));
       }
 
       // Clear a stale trigger, or the fresh process would read it and exit at once.
