@@ -858,6 +858,14 @@ function ControlStrip({
             : workerStatus.status === 'STALE' ? 'Worker stale'
               : workerStatus.status === 'ERROR' ? 'Worker error' : 'Worker off'}
         </button>
+        <button
+          onClick={onSave}
+          disabled={saving}
+          title="Save every group's settings, the risk/trail budget and liveRealMoney to disk — this is what the Python worker reads. In-tab actions (Arm, Exit, lot changes) already save themselves; this is for the fields above and each index's group bar."
+          className="flex items-center gap-1 text-xs font-bold px-3 py-1 rounded-lg bg-violet-600 text-oncolor hover:bg-violet-500 transition-colors cursor-pointer disabled:opacity-50"
+        >
+          <Save className="h-3 w-3" /> {saving ? 'Saving…' : 'Save Preferences'}
+        </button>
         <GhostBtn onClick={onOpenRisk} title="Account-level P&L, target, stop and trail state">
           <Shield className="h-3.5 w-3.5 text-violet-400" />
           Risk / MTM
@@ -912,15 +920,6 @@ function ControlStrip({
             title="Profit (₹) kept back from each new peak — the floor that never falls" />
         </div>
 
-        <button
-          onClick={onSave}
-          disabled={saving}
-          title="Save the risk and trail settings"
-          className="flex items-center gap-1 text-xs font-bold px-3 py-1 rounded-lg bg-violet-600 text-oncolor hover:bg-violet-500 transition-colors cursor-pointer disabled:opacity-50"
-        >
-          <Save className="h-3 w-3" /> Save
-        </button>
-
         <span className="text-[10px] font-mono text-zinc-500"
           title="Peak: best total P&L so far today. Lock: the floor the trail is currently holding.">
           Peak <strong className="text-zinc-300">{peakMtm}</strong>
@@ -938,11 +937,10 @@ function ControlStrip({
 // â”€â”€ Index Group Bar â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 function IndexGroupBar({
-  group, onChange, onSave, spot, liveAtm, lot, dte, wsLive,
+  group, onChange, spot, liveAtm, lot, dte, wsLive,
 }: {
   group: FocusIndexGroup;
   onChange: (patch: Partial<FocusIndexGroup>) => void;
-  onSave: () => void;
   spot: number; liveAtm: number; lot: number | null; dte: number | null; wsLive: boolean;
 }) {
   return (
@@ -1032,14 +1030,6 @@ function IndexGroupBar({
             </div>
           </div>
         )}
-
-        <button
-          onClick={onSave}
-          title="Save this index's settings"
-          className="flex items-center gap-1 text-[10px] font-bold px-2.5 py-1 rounded-lg border border-emerald-500/40 text-emerald-400 hover:bg-emerald-500/10 cursor-pointer transition-colors"
-        >
-          <Check className="h-3 w-3" /> Save
-        </button>
       </div>
 
       {/* Right stats */}
@@ -2891,7 +2881,6 @@ export default function FocusTool() {
               <IndexGroupBar
                 group={group}
                 onChange={patch => updateGroup(u, patch)}
-                onSave={() => saveConfig()}
                 spot={spots[u] ?? 0}
                 liveAtm={(() => {
                   const base = group.atmBy === 'Fut' && (futQuotes[u]?.ltp ?? 0) > 0
