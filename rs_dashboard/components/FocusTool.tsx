@@ -737,7 +737,7 @@ function FocusHeader({
           <p className="text-[9px] font-bold text-violet-400 uppercase tracking-[0.18em] mb-0.5">
             Options &middot; Straddles &amp; Strangles
           </p>
-          <h1 className="text-sm font-bold text-white tracking-tight leading-none">Focus Tool Terminal</h1>
+          <h1 className="text-sm font-bold text-white tracking-tight leading-none">Ultimate Scalper Terminal</h1>
           <p className="text-[10px] text-zinc-500 font-medium mt-0.5">
             Multi-index straddle / strangle scheduler with level exits
           </p>
@@ -907,7 +907,7 @@ function ControlStrip({
         <button
           onClick={onExitAll}
           disabled={exitingAll}
-          title="Immediately liquidate ALL open F&O positions at broker level for the active broker — not scoped to Focus Tool's own rows. On Dhan this also stops every running strategy process account-wide."
+          title="Immediately liquidate ALL open F&O positions at broker level for the active broker — not scoped to this terminal's own rows. On Dhan this also stops every running strategy process account-wide."
           className={cn(
             'flex items-center gap-1.5 text-xs font-bold px-3 py-1.5 rounded-lg border cursor-pointer transition-colors disabled:opacity-50',
             confirmExitAll
@@ -2286,7 +2286,7 @@ export default function FocusTool() {
       const j = await res.json();
       if (j.success && j.data) {
         applyServerConfig(j.data);
-        addToast('success', 'Focus Tool configuration saved');
+        addToast('success', 'Ultimate Scalper Terminal configuration saved');
       } else if (j.error) {
         addToast('error', 'Failed to save config', j.error);
       }
