@@ -1872,20 +1872,22 @@ export default function FocusTool() {
   // ── Futures strip ───────────────────────────────────────────────
   // /api/focus-tool/futures exists precisely for this header: futures contract
   // ids expire, so it resolves them once per IST day and then quotes them off
-  // Dhan's batched OHLC endpoint. It serves LTP only, deliberately — Dhan's
-  // `close` flips to today's at the 15:30 bell, so any % built on it reads
-  // 0.00% after hours. The header hides the % when it is null.
+  // Dhan's batched OHLC endpoint. % change comes from the same response —
+  // the route caches the first genuine (pre-15:30-flip) close each day and
+  // guards against a later flipped value, so this never needs to reason about
+  // the flip itself. The header hides the % when it's still null (no genuine
+  // close cached yet today).
   useEffect(() => {
     const fetchFuts = () => {
       fetch('/api/focus-tool/futures')
         .then(r => r.json())
-        .then((j: { quotes?: Record<string, number> }) => {
+        .then((j: { quotes?: Record<string, { ltp: number; change_pct: number | null }> }) => {
           if (!j.quotes) return;
           setFutQuotes(prev => {
             const next = { ...prev };
             for (const u of UNDERLYINGS) {
-              const ltp = Number(j.quotes?.[u] ?? 0);
-              if (ltp > 0) next[u] = { ltp, change_pct: null };
+              const q = j.quotes?.[u];
+              if (q && q.ltp > 0) next[u] = { ltp: q.ltp, change_pct: q.change_pct ?? null };
             }
             return next;
           });

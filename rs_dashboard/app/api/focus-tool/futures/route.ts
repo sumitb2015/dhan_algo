@@ -4,7 +4,8 @@ import { getDhanCredentials } from '@/lib/dhanToken';
 import { PROJECT_ROOT, runPythonJson, dedupe } from '@/lib/pyExec';
 import { UNDERLYINGS } from '@/lib/focusTool';
 
-// Live NIFTY / BANKNIFTY / SENSEX futures LTPs for the Focus Tool header strip.
+// Live NIFTY / BANKNIFTY / SENSEX futures LTPs + % change for the Focus Tool
+// header strip.
 //
 // Nothing else in the dashboard served these: /api/scalper/top-indices is index
 // SPOT, and /api/futures is CSV-historical with no live price at all.
@@ -16,10 +17,15 @@ import { UNDERLYINGS } from '@/lib/focusTool';
 // via focus_tool_futs.py and then quoted directly over Dhan's batched OHLC
 // endpoint from Node. Same split /api/scalper/top-indices uses for CRUDEOIL.
 //
-// LTP only, deliberately: Dhan's `ohlc.close` flips from yesterday's close to
-// today's at the 15:30 bell, so any percentage derived from it reads 0.00% after
-// hours. The screenshot's header shows a price and nothing else, so there is no
-// reason to take on that failure mode.
+// % change needs the same flip guard /api/scalper/top-indices already uses:
+// Dhan's `ohlc.close` flips from yesterday's close to today's the moment the
+// 15:30 bell rings, so naively recomputing the percentage from it every poll
+// collapses to a confident (wrong) 0.00% after hours. Fixed the same way: cache
+// the first genuine (pre-flip) close seen each IST day per underlying and reuse
+// it for the rest of the session — see prevCloseCache/rejectFlippedClose below.
+// Costs no extra API call: Dhan's OHLC endpoint already returns `ohlc.close`
+// alongside `last_price` in the same batched response fetchQuotes() already
+// makes for LTP.
 
 const FUTS_SCRIPT   = path.join(PROJECT_ROOT, 'scripts', 'tools', 'focus_tool_futs.py');
 const DHAN_OHLC_URL = 'https://api.dhan.co/v2/marketfeed/ohlc';
@@ -37,6 +43,30 @@ type ContractMap = Record<string, Contract>;
 
 function istToday(): string {
   return new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
+}
+
+// Yesterday's close per underlying, keyed "<IST date>:<underlying>" — same
+// pattern as top-indices/route.ts's prevCloseCache. Populated once a genuine
+// (non-flipped) value is seen and reused for the rest of the day.
+const prevCloseCache = new Map<string, number>();
+
+/** Drop entries from previous days so the map doesn't grow forever across a
+ *  long-lived `next start` process. */
+function prunePrevCloseCache(day: string): void {
+  for (const key of prevCloseCache.keys()) {
+    if (!key.startsWith(`${day}:`)) prevCloseCache.delete(key);
+  }
+}
+
+/**
+ * Reject a `close` that is really today's close masquerading as yesterday's —
+ * Dhan flips this field at the closing bell, at which point it equals the
+ * last price. See top-indices/route.ts's identical helper for the full
+ * rationale (including the accepted false positive when a symbol genuinely
+ * sits at exactly its previous close).
+ */
+function rejectFlippedClose(ltp: number, close: number): number {
+  return close > 0 && close !== ltp ? close : 0;
 }
 
 // ── Contract ids, resolved once per IST day ──────────────────────────────────
@@ -77,10 +107,12 @@ function getContracts(): ContractMap | null {
 
 // ── Quotes ───────────────────────────────────────────────────────────────────
 
-let quoteCache: { ts: number; quotes: Record<string, number> } | null = null;
+interface FutQuote { ltp: number; change_pct: number | null }
+
+let quoteCache: { ts: number; quotes: Record<string, FutQuote> } | null = null;
 
 /** Batch every resolved contract into one OHLC call, grouped by segment. */
-async function fetchQuotes(contracts: ContractMap): Promise<Record<string, number>> {
+async function fetchQuotes(contracts: ContractMap): Promise<Record<string, FutQuote>> {
   const { clientId, token } = getDhanCredentials();
   if (!clientId || !token) throw new Error('Dhan credentials unavailable — run login.py');
 
@@ -104,7 +136,7 @@ async function fetchQuotes(contracts: ContractMap): Promise<Record<string, numbe
   const json = (await res.json()) as {
     status?: string;
     Data?: unknown;
-    data?: Record<string, Record<string, { last_price?: number }>>;
+    data?: Record<string, Record<string, { last_price?: number; ohlc?: { close?: number } }>>;
   };
   // Throw rather than return {}: GET reports the reason, and with Dhan's ~1 req/s
   // OHLC limit shared across pollers a rejected call is exactly what tends to
@@ -113,10 +145,25 @@ async function fetchQuotes(contracts: ContractMap): Promise<Record<string, numbe
     throw new Error(`ohlc ${res.status}: ${JSON.stringify(json.Data ?? json.status).slice(0, 120)}`);
   }
 
-  const quotes: Record<string, number> = {};
+  const day = istToday();
+  prunePrevCloseCache(day);
+
+  const quotes: Record<string, FutQuote> = {};
   for (const [underlying, c] of Object.entries(contracts)) {
-    const ltp = Number(json.data?.[c.segment]?.[String(c.security_id)]?.last_price ?? 0);
-    if (ltp > 0) quotes[underlying] = ltp;
+    const row = json.data?.[c.segment]?.[String(c.security_id)];
+    const ltp = Number(row?.last_price ?? 0);
+    if (!(ltp > 0)) continue;
+
+    const key = `${day}:${underlying}`;
+    const cached = prevCloseCache.get(key);
+    const fresh = rejectFlippedClose(ltp, Number(row?.ohlc?.close ?? 0));
+    if (!cached && fresh > 0) prevCloseCache.set(key, fresh);
+    const prevClose = cached ?? fresh;
+
+    quotes[underlying] = {
+      ltp,
+      change_pct: prevClose > 0 ? ((ltp - prevClose) / prevClose) * 100 : null,
+    };
   }
   return quotes;
 }
