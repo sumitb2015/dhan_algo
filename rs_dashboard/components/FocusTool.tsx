@@ -1255,16 +1255,14 @@ function FocusTableRow({
               Disarm
             </button>
           )}
-          {!flat && (
-            <button
-              onClick={() => onExit('ALL')}
-              disabled={!canTrade}
-              title="Close every open leg of this row at market — shown whenever a leg is actually open, independent of the Draft/Armed state above"
-              className="text-xs font-extrabold px-3 py-1 rounded-lg bg-rose-600 text-oncolor hover:bg-rose-500 cursor-pointer transition-colors disabled:opacity-40"
-            >
-              Exit All
-            </button>
-          )}
+          <button
+            onClick={() => onExit('ALL')}
+            disabled={flat || !canTrade}
+            title={flat ? 'Nothing open on this row' : 'Close every open leg of this row at market'}
+            className="text-xs font-extrabold px-3 py-1 rounded-lg bg-rose-600 text-oncolor hover:bg-rose-500 cursor-pointer transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+          >
+            Exit All
+          </button>
           {flat ? (
             <button
               onClick={onDelete}
@@ -1579,13 +1577,11 @@ function FocusRowCard({
             Disarm
           </button>
         )}
-        {!flat && (
-          <button onClick={() => onExit('ALL')} disabled={!canTrade}
-            title="Close every open leg of this row at market"
-            className="text-xs font-extrabold px-3 py-1.5 rounded-lg bg-rose-600 text-oncolor hover:bg-rose-500 disabled:opacity-40">
-            Exit All
-          </button>
-        )}
+        <button onClick={() => onExit('ALL')} disabled={flat || !canTrade}
+          title={flat ? 'Nothing open on this row' : 'Close every open leg of this row at market'}
+          className="text-xs font-extrabold px-3 py-1.5 rounded-lg bg-rose-600 text-oncolor hover:bg-rose-500 disabled:opacity-40 disabled:cursor-not-allowed">
+          Exit All
+        </button>
       </div>
     </div>
   );
