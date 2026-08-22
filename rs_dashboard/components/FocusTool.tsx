@@ -546,7 +546,7 @@ function StrikeLegSelector({
         </select>
       ) : (
         <NumInput value={premium} onChange={onPremiumChange} className="w-16 h-6" disabled={locked}
-          placeholder="₹" title={locked ? lockedTitle : `Target premium for the ${leg} leg — resolves to the closest listed strike`} />
+          placeholder="₹" title={locked ? lockedTitle : `Target premium for the ${leg} leg — resolves to the closest listed strike priced at or below this value`} />
       )}
       <span className="text-[11px] font-mono font-bold text-zinc-300 min-w-[42px] text-right">
         {resolvedStrike ?? '—'}
@@ -658,7 +658,7 @@ function StrikeEditor({ row, live, step, onUpdate, onShift, shiftDisabled, onBlo
         }}
         title={anyOpen
           ? 'Locked while a leg is open — exit it first'
-          : 'ATM± picks a strike by steps from ATM; ₹ picks the strike closest to a target premium'}
+          : 'ATM± picks a strike by steps from ATM; ₹ picks the closest strike priced at or below a target premium'}
         className="self-start" />
       <StrikeLegSelector leg="CE" mode={mode} offset={row.ceOffset ?? 0} premium={row.cePremium ?? ''}
         resolvedStrike={live.ceStrike} step={step} locked={legOpen.CE}
@@ -2097,6 +2097,13 @@ export default function FocusTool() {
    * underlying's fetched chain. Only PREMIUM-mode legs use this; ATM-mode legs
    * resolve arithmetically from `atm`/`step` instead.
    */
+  /**
+   * The listed strike whose premium is the closest one AT OR BELOW `target` —
+   * not simply the closest by absolute difference. A strike priced above the
+   * target is never picked, even if it happens to sit nearer than the best
+   * strike under it: for a premium seller, the target is a ceiling on what
+   * you're willing to sell for, not a midpoint to snap to.
+   */
   function nearestStrikeByPremium(
     oc: Record<string, { ce: number; pe: number }> | undefined,
     leg: 'CE' | 'PE',
@@ -2104,12 +2111,11 @@ export default function FocusTool() {
   ): number | null {
     if (!oc || !(target > 0)) return null;
     let best: number | null = null;
-    let bestDiff = Infinity;
+    let bestPx = -Infinity;
     for (const [k, v] of Object.entries(oc)) {
       const px = leg === 'CE' ? v.ce : v.pe;
-      if (!(px > 0)) continue;
-      const diff = Math.abs(px - target);
-      if (diff < bestDiff) { bestDiff = diff; best = Number(k); }
+      if (!(px > 0) || px > target) continue;
+      if (px > bestPx) { bestPx = px; best = Number(k); }
     }
     return best;
   }

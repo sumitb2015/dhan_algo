@@ -240,18 +240,21 @@ def dte_matches(filt, dte):
 
 
 def nearest_strike_by_premium(chain, opt_type, target):
-    """The listed strike whose LTP sits closest to `target`. `chain` is
-    {strike: {'CE': ltp, 'PE': ltp}}. Mirrors nearestStrikeByPremium()."""
+    """The listed strike whose premium is the closest one AT OR BELOW
+    `target` — not simply the closest by absolute difference. `chain` is
+    {strike: {'CE': ltp, 'PE': ltp}}. Mirrors FocusTool.tsx's
+    nearestStrikeByPremium(): the target is a ceiling on what you're willing
+    to sell the leg for, not a midpoint to snap to, so a strike priced above
+    it is never picked even if it sits closer than the best one under it."""
     if not chain or not target or target <= 0:
         return None
-    best, best_diff = None, float('inf')
+    best, best_px = None, float('-inf')
     for strike, legs in chain.items():
         px = legs.get(opt_type) or 0.0
-        if not (px > 0):
+        if not (px > 0) or px > target:
             continue
-        diff = abs(px - target)
-        if diff < best_diff:
-            best_diff, best = diff, int(strike)
+        if px > best_px:
+            best_px, best = px, int(strike)
     return best
 
 
@@ -261,7 +264,8 @@ def resolve_row_strikes(row, atm, step, chain):
     ATM mode resolves each leg arithmetically and independently — there is no
     guard keeping CE >= PE, because an inverted strangle is a valid user-chosen
     shape here (see FocusTool.tsx's rowLive). PREMIUM mode picks whichever
-    listed strike's LTP is closest to that leg's rupee target.
+    listed strike's LTP is the closest one at or below that leg's rupee
+    target — see nearest_strike_by_premium.
     """
     if str(row.get('strikeMode') or 'ATM') == 'PREMIUM':
         return (nearest_strike_by_premium(chain, 'CE', num(row.get('cePremium'))),
