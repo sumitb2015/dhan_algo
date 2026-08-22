@@ -13,17 +13,26 @@ import { useBrokerSelector, scalperRoute, BROKER_LABELS, type Broker } from '@/h
 import { closeOrderProduct, positionProduct } from '@/lib/positionProduct';
 import { scaleBrokerPnl } from '@/lib/positionPnl';
 import { useCopyTrade, CopyTradeControls, type CopyTradeApi } from './CopyTrade';
-import { useLiveOptionsWS } from '@/lib/useLiveOptionsWS';
+import { useFocusToolWS } from '@/lib/useFocusToolWS';
 import { cn } from '@/lib/utils';
 import type {
   FocusToolConfig, FocusRow, FocusIndexGroup,
-  FocusUnderlying, FocusDte, FocusSide, FocusRowStatus,
+  FocusUnderlying, FocusDte, FocusSide, FocusRowStatus, FocusStrikeMode,
 } from '@/lib/focusToolRows';
 
 // â”€â”€ Constants â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 const UNDERLYINGS: FocusUnderlying[] = ['NIFTY', 'BANKNIFTY', 'SENSEX'];
 const STRIKE_STEP: Record<FocusUnderlying, number> = { NIFTY: 50, BANKNIFTY: 100, SENSEX: 100 };
+
+// ATM-offset dropdown range for the strike editor: +-10 steps either side.
+const OFFSET_OPTIONS: number[] = Array.from({ length: 21 }, (_, i) => i - 10);
+
+function offsetLabel(n: number, step: number): string {
+  if (n === 0) return 'ATM';
+  const rupees = n * step;
+  return `ATM${n > 0 ? '+' : ''}${n} (${rupees > 0 ? '+' : ''}${rupees})`;
+}
 
 const FUT_LABELS: Record<FocusUnderlying, string> = {
   NIFTY: 'NIFTY FUT',
@@ -148,16 +157,34 @@ interface ChainData {
 
 /** Everything the table needs to draw one row live. */
 interface RowLive {
-  strike: number | null;
+  ceStrike: number | null;
+  peStrike: number | null;
   ltpCe: number | null;
   ltpPe: number | null;
   cePosition: PosRow | null;
   pePosition: PosRow | null;
+  /** Realised + unrealised P&L across the legs this row's Side actually trades,
+   *  read straight off the broker's own position(s) — see rowLive's doc comment. */
+  pnl: number;
+  /** Combined entry premium for those same legs, off the position's own avg price. */
+  entryPremium: number;
+  /** Session-open VWAP of the combined CE+PE premium at this row's strikes —
+   *  null until fetched (rows with VW off never fetch it) or if the intraday
+   *  data isn't available yet. See useEffect below / focus_tool_vwap.py. */
+  vwap: number | null;
 }
 
 const EMPTY_ROW_LIVE: RowLive = {
-  strike: null, ltpCe: null, ltpPe: null, cePosition: null, pePosition: null,
+  ceStrike: null, peStrike: null, ltpCe: null, ltpPe: null, cePosition: null, pePosition: null,
+  pnl: 0, entryPremium: 0, vwap: null,
 };
+
+/** Cache/lookup key for a strike pair's VWAP — shared across every row that
+ *  happens to trade the same underlying/expiry/CE-strike/PE-strike, so two
+ *  rows on the same strangle share one fetch instead of doubling it. */
+function vwapKey(underlying: FocusUnderlying, expiry: string, ceStrike: number, peStrike: number): string {
+  return `${underlying}:${expiry}:${ceStrike}:${peStrike}`;
+}
 
 interface Toast {
   id: string;
@@ -175,7 +202,12 @@ const makeRow = (underlying: FocusUnderlying): FocusRow => ({
   exitTime: '15:15',
   dte: 'Any',
   expiry: '',
-  strike: null,
+  strikeMode: 'ATM',
+  linked: true,
+  ceOffset: 0,
+  peOffset: 0,
+  cePremium: '',
+  pePremium: '',
   lots: 1,
   side: 'BOTH',
   status: 'draft',
@@ -273,6 +305,60 @@ function NumInput({ value, onChange, placeholder, className, title }: {
   );
 }
 
+/** Lots-per-leg config field: a number box flanked by -/+ steppers, clamped at 1. */
+function LotStepper({ value, onChange }: { value: number; onChange: (v: number) => void }) {
+  return (
+    <div className="inline-flex items-center gap-1">
+      <button
+        type="button"
+        onClick={() => onChange(Math.max(1, value - 1))}
+        title="Reduce lots by one"
+        className="h-6 w-6 rounded-md bg-zinc-800 border border-zinc-700 text-zinc-300 font-bold flex items-center justify-center hover:bg-zinc-700 cursor-pointer transition-colors"
+      >
+        -
+      </button>
+      <NumInput
+        value={String(value)}
+        onChange={v => onChange(Math.max(1, Number(v) || 1))}
+        className="w-10 text-center px-1"
+        title="Lots to trade per leg"
+      />
+      <button
+        type="button"
+        onClick={() => onChange(value + 1)}
+        title="Add one lot"
+        className="h-6 w-6 rounded-md bg-zinc-800 border border-zinc-700 text-zinc-300 font-bold flex items-center justify-center hover:bg-violet-600 hover:border-violet-600 hover:text-oncolor cursor-pointer transition-colors"
+      >
+        +
+      </button>
+    </div>
+  );
+}
+
+/** Whether-this-leg-is-actually-open badge, read straight off the broker
+ *  position (never the row's own Draft/Armed/Entered status, which nothing
+ *  here sets automatically). Shows the broker's own average price (sellAvg
+ *  for a short, buyAvg for a long — the only place this tool's entry price
+ *  comes from, it never stamps its own). Renders nothing when flat. */
+function LegOpenBadge({ pos }: { pos: PosRow | null }) {
+  const qty = Number(pos?.netQty ?? 0);
+  if (!qty) return null;
+  const avg = qty < 0 ? Number(pos?.sellAvg) || 0 : Number(pos?.buyAvg) || 0;
+  return (
+    <span
+      title={`Broker position: ${qty > 0 ? 'long' : 'short'} ${Math.abs(qty)} @ avg ${avg.toFixed(2)}`}
+      className={cn(
+        'text-[9px] font-black px-1 py-0.5 rounded border uppercase tracking-wide whitespace-nowrap',
+        qty < 0
+          ? 'bg-rose-500/15 text-rose-400 border-rose-500/30'
+          : 'bg-emerald-500/15 text-emerald-400 border-emerald-500/30',
+      )}
+    >
+      {qty < 0 ? 'S' : 'L'} {Math.abs(qty)} @ {avg.toFixed(2)}
+    </span>
+  );
+}
+
 function TimeInput({ value, onChange, title }: { value: string; onChange: (v: string) => void; title?: string }) {
   return (
     <div className="relative flex items-center">
@@ -281,7 +367,7 @@ function TimeInput({ value, onChange, title }: { value: string; onChange: (v: st
         title={title}
         value={value}
         onChange={e => onChange(e.target.value)}
-        className="h-6 text-[10px] font-mono font-bold pl-1.5 pr-5 border border-zinc-700 rounded bg-zinc-900 text-zinc-100 focus:outline-none focus:border-violet-500 w-[72px]"
+        className="h-6 text-[10px] font-mono font-bold pl-1.5 pr-7 border border-zinc-700 rounded bg-zinc-900 text-zinc-100 focus:outline-none focus:border-violet-500 w-[104px]"
       />
       <Clock className="h-3 w-3 text-zinc-600 absolute right-1.5 pointer-events-none" />
     </div>
@@ -307,6 +393,119 @@ function SegPill<T extends string>({
   );
 }
 
+/** One leg's strike selector: an ATM-offset dropdown or a target-premium
+ *  input, with the currently resolved strike shown alongside. */
+function StrikeLegSelector({ leg, mode, offset, premium, resolvedStrike, step, onOffsetChange, onPremiumChange }: {
+  leg: 'CE' | 'PE';
+  mode: FocusStrikeMode;
+  offset: number;
+  premium: string;
+  resolvedStrike: number | null;
+  step: number;
+  onOffsetChange: (n: number) => void;
+  onPremiumChange: (v: string) => void;
+}) {
+  return (
+    <div className="flex items-center gap-1.5">
+      <span className={cn('text-[9px] font-black w-5', leg === 'CE' ? 'text-emerald-400' : 'text-rose-400')}>{leg}</span>
+      {mode === 'ATM' ? (
+        <select
+          value={offset}
+          title={`${leg} strike as a step offset from ATM`}
+          onChange={e => onOffsetChange(Number(e.target.value))}
+          className="text-[10px] font-bold h-6 px-1 border border-zinc-700 rounded bg-zinc-900 text-zinc-200 focus:outline-none focus:border-violet-500 w-24"
+        >
+          {OFFSET_OPTIONS.map(n => (
+            <option key={n} value={n}>{offsetLabel(n, step)}</option>
+          ))}
+        </select>
+      ) : (
+        <NumInput value={premium} onChange={onPremiumChange} className="w-16 h-6"
+          placeholder="₹" title={`Target premium for the ${leg} leg — resolves to the closest listed strike`} />
+      )}
+      <span className="text-[11px] font-mono font-bold text-zinc-300 min-w-[42px] text-right">
+        {resolvedStrike ?? '—'}
+      </span>
+    </div>
+  );
+}
+
+/** The full CE/PE strike editor for one row: ATM±/₹ mode toggle, independent
+ *  CE and PE selectors, a link checkbox to keep them mirrored, and Save/clear. */
+function StrikeEditor({ row, live, step, onUpdate }: {
+  row: FocusRow;
+  live: RowLive;
+  step: number;
+  onUpdate: (patch: Partial<FocusRow>, saveToDisk?: boolean) => void;
+}) {
+  /**
+   * Editing one leg mirrors onto the other leg when linked.
+   *
+   * Offsets mirror as the negation, not the same value: CE+7/PE+7 both land on
+   * the strike 7 steps *above* ATM, which is a synthetic future, not a
+   * strangle. A symmetric strangle is CE `n` steps above ATM and PE `n` steps
+   * below it, so linked offset edits keep CE and PE opposite in sign.
+   * Premium targets mirror as-is — a rupee target is not signed relative to
+   * ATM, so the same value on both legs is the intended "same premium either
+   * side" shape.
+   */
+  function setLeg(leg: 'CE' | 'PE', patch: Partial<FocusRow>) {
+    const merged = { ...patch };
+    if (row.linked ?? true) {
+      if (leg === 'CE') {
+        if (patch.ceOffset !== undefined) merged.peOffset = -patch.ceOffset;
+        if ('cePremium' in patch) merged.pePremium = patch.cePremium;
+      } else {
+        if (patch.peOffset !== undefined) merged.ceOffset = -patch.peOffset;
+        if ('pePremium' in patch) merged.cePremium = patch.pePremium;
+      }
+    }
+    onUpdate(merged);
+  }
+
+  const mode = row.strikeMode ?? 'ATM';
+
+  return (
+    <div className="flex flex-col gap-1 w-[168px]">
+      <SegPill options={['ATM±', '₹'] as const}
+        value={mode === 'ATM' ? 'ATM±' : '₹'}
+        onChange={v => onUpdate({ strikeMode: v === 'ATM±' ? 'ATM' : 'PREMIUM' })}
+        title="ATM± picks a strike by steps from ATM; ₹ picks the strike closest to a target premium" />
+      <StrikeLegSelector leg="CE" mode={mode} offset={row.ceOffset ?? 0} premium={row.cePremium ?? ''}
+        resolvedStrike={live.ceStrike} step={step}
+        onOffsetChange={n => setLeg('CE', { ceOffset: n })}
+        onPremiumChange={v => setLeg('CE', { cePremium: v })} />
+      <StrikeLegSelector leg="PE" mode={mode} offset={row.peOffset ?? 0} premium={row.pePremium ?? ''}
+        resolvedStrike={live.peStrike} step={step}
+        onOffsetChange={n => setLeg('PE', { peOffset: n })}
+        onPremiumChange={v => setLeg('PE', { pePremium: v })} />
+      <div className="flex items-center justify-between mt-0.5">
+        <label title="Keep CE and PE moving together" className="inline-flex items-center gap-1 text-[9px] font-bold text-zinc-500 cursor-pointer select-none">
+          <input type="checkbox" checked={row.linked ?? true}
+            onChange={e => onUpdate({ linked: e.target.checked })}
+            className="h-3 w-3 rounded-sm border-zinc-700 bg-zinc-900 accent-violet-500" />
+          link
+        </label>
+        <div className="flex items-center gap-1.5">
+          <button onClick={() => onUpdate(row, true)} title="Save this row's strike settings"
+            className="text-[9px] font-bold text-emerald-400 hover:text-emerald-300 cursor-pointer">
+            <Check className="h-2.5 w-2.5 inline -mt-0.5" /> Save
+          </button>
+          <button
+            onClick={() => onUpdate({
+              strikeMode: 'ATM', linked: true, ceOffset: 0, peOffset: 0, cePremium: '', pePremium: '',
+            }, true)}
+            title="Reset this row's strike settings to ATM"
+            className="text-[9px] text-zinc-500 hover:text-zinc-400 cursor-pointer"
+          >
+            &times; clear
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function GhostBtn({ onClick, children, title }: { onClick?: () => void; children: React.ReactNode; title?: string }) {
   return (
     <button
@@ -322,10 +521,12 @@ function GhostBtn({ onClick, children, title }: { onClick?: () => void; children
 // â”€â”€ Sticky Header â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 function FocusHeader({
-  futQuotes, realised, unrealised, total, wsLive, broker, setBroker, authenticatedBrokers,
+  futQuotes, realised, unrealised, total, marginAvailable, marginUtilized,
+  wsLive, broker, setBroker, authenticatedBrokers,
 }: {
   futQuotes: Record<FocusUnderlying, FutQuote | null>;
   realised: number; unrealised: number; total: number;
+  marginAvailable: number | null; marginUtilized: number | null;
   wsLive: boolean;
   broker: Broker;
   setBroker: (b: Broker) => void;
@@ -386,6 +587,23 @@ function FocusHeader({
             ))}
           </select>
         )}
+
+        <div className="flex items-center gap-1 bg-zinc-900/80 border border-zinc-800 rounded-xl px-3 py-2">
+          {([
+            { label: 'MARGIN AVAIL', value: marginAvailable, hint: 'Withdrawable/available balance for this broker' },
+            { label: 'MARGIN USED', value: marginUtilized, hint: 'Margin blocked against open positions and pending orders' },
+          ] as const).map(({ label, value, hint }, i) => (
+            <React.Fragment key={label}>
+              {i > 0 && <div className="h-6 w-px bg-zinc-800 mx-2" />}
+              <div className="flex flex-col items-end min-w-[72px]" title={hint}>
+                <span className="text-[8px] font-bold text-zinc-500 uppercase tracking-wider">{label}</span>
+                <span className="text-xs font-mono font-bold tabular-nums text-zinc-200">
+                  {value != null ? fmtInr(value) : '—'}
+                </span>
+              </div>
+            </React.Fragment>
+          ))}
+        </div>
 
         <div className="flex items-center gap-1 bg-zinc-900/80 border border-zinc-800 rounded-xl px-3 py-2">
           {([
@@ -691,9 +909,11 @@ function FocusTableRow({
   onReduceLot: (leg: 'CE' | 'PE') => void;
 }) {
   const combinedLtp = (live.ltpCe ?? 0) + (live.ltpPe ?? 0);
-  // Orders are only sendable once the contract and its lot size are known.
-  const canTrade = liveRealMoney && !busy && live.strike != null && (lotSize ?? 0) > 0;
+  // Orders are only sendable once at least one leg's contract and the lot size
+  // are known — placeLeg re-checks the specific leg it is about to trade.
+  const canTrade = liveRealMoney && !busy && (live.ceStrike != null || live.peStrike != null) && (lotSize ?? 0) > 0;
   const flat = legsFlat(live);
+  const step = STRIKE_STEP[row.underlying];
 
   return (
     <tr className="border-b border-zinc-800/60 hover:bg-zinc-800/20 transition-colors">
@@ -740,12 +960,9 @@ function FocusTableRow({
         </div>
       </td>
 
-      {/* STRIKE */}
-      <td className="p-3 align-middle">
-        <div title="Strike this row will trade, picked at entry"
-          className="h-10 w-16 rounded-xl bg-violet-500/10 border border-violet-500/20 flex items-center justify-center font-mono font-black text-violet-300 text-sm">
-          {live.strike ?? row.strike ?? '\u2014'}
-        </div>
+      {/* CE / PE STRIKES */}
+      <td className="p-3 align-top">
+        <StrikeEditor row={row} live={live} step={step} onUpdate={onUpdate} />
       </td>
 
       {/* LTP */}
@@ -763,12 +980,7 @@ function FocusTableRow({
 
       {/* LOTS */}
       <td className="p-3 align-middle">
-        <NumInput
-          value={String(row.lots)}
-          onChange={v => onUpdate({ lots: Number(v) || 1 })}
-          className="w-12 text-center"
-          title="Lots to trade per leg"
-        />
+        <LotStepper value={row.lots} onChange={v => onUpdate({ lots: v })} />
       </td>
 
       {/* SIDE */}
@@ -784,10 +996,17 @@ function FocusTableRow({
       {/* STATUS / ACTIONS */}
       <td className="p-3 align-middle border-l border-r border-zinc-800">
         <div className="flex flex-col items-start gap-2">
-          <span title="Draft: not watched. Armed: waiting to enter. Entered: position open. Exited: done."
+          <span title="Draft/Armed are this row's own watch state (set by Arm/Disarm below) — they track whether a position is actually open only loosely, since nothing here auto-enters yet. Whether legs are OPEN is shown by the CE/PE badges and Exit All below, straight off the broker."
             className={cn('text-[10px] font-bold px-2 py-0.5 rounded-full border capitalize', STATUS_PILL[row.status])}>
             {row.status}
           </span>
+          {!flat && (
+            <span title="Realised + unrealised P&L across the legs this row's Side trades, off the broker's own position"
+              className={cn('text-xs font-mono font-bold tabular-nums',
+                live.pnl > 0 ? 'text-emerald-400' : live.pnl < 0 ? 'text-rose-400' : 'text-zinc-400')}>
+              {live.pnl >= 0 ? '+' : ''}₹{live.pnl.toFixed(0)}
+            </span>
+          )}
           {row.status === 'draft' && (
             <button
               onClick={onArm}
@@ -806,12 +1025,12 @@ function FocusTableRow({
               Disarm
             </button>
           )}
-          {row.status === 'entered' && (
+          {!flat && (
             <button
               onClick={() => onExit('ALL')}
               disabled={!canTrade}
-              title="Close every leg of this row at market"
-              className="text-xs font-extrabold px-3 py-1 rounded-lg bg-rose-600 text-oncolor hover:bg-rose-500 cursor-pointer transition-colors"
+              title="Close every open leg of this row at market — shown whenever a leg is actually open, independent of the Draft/Armed state above"
+              className="text-xs font-extrabold px-3 py-1 rounded-lg bg-rose-600 text-oncolor hover:bg-rose-500 cursor-pointer transition-colors disabled:opacity-40"
             >
               Exit All
             </button>
@@ -842,6 +1061,7 @@ function FocusTableRow({
             className="text-sm font-mono font-bold text-emerald-400 tabular-nums min-w-[44px]">
             {live.ltpCe != null ? live.ltpCe.toFixed(2) : '\u2014'}
           </span>
+          <LegOpenBadge pos={live.cePosition} />
           <div className="flex items-center gap-1">
             <button onClick={() => onAddLot('CE')} title="Add one lot to the CE leg" className="h-6 w-6 rounded-md bg-zinc-800 border border-zinc-700 text-zinc-300 font-bold flex items-center justify-center hover:bg-violet-600 hover:border-violet-600 hover:text-oncolor cursor-pointer transition-colors">+</button>
             <button onClick={() => onReduceLot('CE')} title="Reduce the CE leg by one lot" className="h-6 w-6 rounded-md bg-zinc-800 border border-zinc-700 text-zinc-300 font-bold flex items-center justify-center hover:bg-zinc-700 cursor-pointer transition-colors">-</button>
@@ -857,6 +1077,7 @@ function FocusTableRow({
             className="text-sm font-mono font-bold text-rose-400 tabular-nums min-w-[44px]">
             {live.ltpPe != null ? live.ltpPe.toFixed(2) : '\u2014'}
           </span>
+          <LegOpenBadge pos={live.pePosition} />
           <div className="flex items-center gap-1">
             <button onClick={() => onAddLot('PE')} title="Add one lot to the PE leg" className="h-6 w-6 rounded-md bg-zinc-800 border border-zinc-700 text-zinc-300 font-bold flex items-center justify-center hover:bg-violet-600 hover:border-violet-600 hover:text-oncolor cursor-pointer transition-colors">+</button>
             <button onClick={() => onReduceLot('PE')} title="Reduce the PE leg by one lot" className="h-6 w-6 rounded-md bg-zinc-800 border border-zinc-700 text-zinc-300 font-bold flex items-center justify-center hover:bg-zinc-700 cursor-pointer transition-colors">-</button>
@@ -880,7 +1101,12 @@ function FocusTableRow({
           </div>
           <div className="flex items-center gap-2 mt-0.5">
             <SwitchToggle checked={row.levelVw} onChange={v => onUpdate({ levelVw: v })} label="VW"
-              title="Exit when the combined premium crosses its session VWAP against you" />
+              title="Exit when the combined premium crosses its session-open VWAP against you" />
+            {row.levelVw && (
+              <span className="text-[9px] font-mono font-bold text-zinc-500" title="Session-open VWAP of the combined premium, refreshed once a minute">
+                {live.vwap != null ? `VWAP ${live.vwap.toFixed(2)}` : 'VWAP —'}
+              </span>
+            )}
             <div className="flex items-center gap-1">
               <span className="text-[9px] font-black text-amber-400">SL</span>
               <NumInput value={row.slRupees} onChange={v => onUpdate({ slRupees: v })} className="w-14"
@@ -929,13 +1155,14 @@ function FocusRowCard({
   onReduceLot: (leg: 'CE' | 'PE') => void;
 }) {
   const combinedLtp = (live.ltpCe ?? 0) + (live.ltpPe ?? 0);
-  const canTrade = liveRealMoney && !busy && live.strike != null && (lotSize ?? 0) > 0;
+  const canTrade = liveRealMoney && !busy && (live.ceStrike != null || live.peStrike != null) && (lotSize ?? 0) > 0;
   const flat = legsFlat(live);
+  const step = STRIKE_STEP[row.underlying];
 
   return (
     <div className={cn(
       'rounded-xl border bg-zinc-900/60 p-4 flex flex-col gap-3',
-      row.status === 'entered' ? 'border-emerald-500/30' : 'border-zinc-800 hover:border-zinc-700/60'
+      !flat ? 'border-emerald-500/30' : 'border-zinc-800 hover:border-zinc-700/60'
     )}>
       {/* Header Info */}
       <div className="flex items-center justify-between border-b border-zinc-800/80 pb-2">
@@ -946,6 +1173,13 @@ function FocusRowCard({
           </span>
         </div>
         <div className="flex items-center gap-1.5">
+          {!flat && (
+            <span title="Realised + unrealised P&L across the legs this row's Side trades"
+              className={cn('text-xs font-mono font-bold tabular-nums',
+                live.pnl > 0 ? 'text-emerald-400' : live.pnl < 0 ? 'text-rose-400' : 'text-zinc-400')}>
+              {live.pnl >= 0 ? '+' : ''}₹{live.pnl.toFixed(0)}
+            </span>
+          )}
           <span className={cn('text-[9px] font-bold px-1.5 py-0.5 rounded-full border capitalize', STATUS_PILL[row.status])}>
             {row.status}
           </span>
@@ -990,13 +1224,20 @@ function FocusRowCard({
       {/* Strike and LTP details */}
       <div className="flex items-center justify-between bg-zinc-950/20 rounded-xl p-3 border border-zinc-800/40">
         <div className="flex flex-col">
-          <span className="text-[8px] font-black text-zinc-500 uppercase tracking-wider">Strike</span>
-          <span className="font-mono font-bold text-zinc-200 text-sm mt-0.5">{live.strike ?? row.strike ?? '—'}</span>
+          <span className="text-[8px] font-black text-zinc-500 uppercase tracking-wider">CE / PE Strike</span>
+          <span className="font-mono font-bold text-zinc-200 text-sm mt-0.5">
+            {live.ceStrike ?? '—'} / {live.peStrike ?? '—'}
+          </span>
         </div>
         <div className="flex flex-col items-end">
           <span className="text-[8px] font-black text-zinc-500 uppercase tracking-wider">Premium</span>
           <span className="text-sm font-mono font-black text-zinc-100 mt-0.5">{combinedLtp > 0 ? combinedLtp.toFixed(2) : '—'}</span>
         </div>
+      </div>
+
+      {/* Strike editor */}
+      <div className="bg-zinc-950/20 border border-zinc-800/40 rounded-xl p-3">
+        <StrikeEditor row={row} live={live} step={step} onUpdate={onUpdate} />
       </div>
 
       {/* CE and PE Legs */}
@@ -1005,6 +1246,7 @@ function FocusRowCard({
           <div className="flex items-center gap-2">
             <span className="text-[9px] font-black text-emerald-400">CE</span>
             <span className="text-xs font-mono font-bold text-zinc-300">{live.ltpCe != null ? live.ltpCe.toFixed(2) : '—'}</span>
+            <LegOpenBadge pos={live.cePosition} />
           </div>
           <div className="flex items-center gap-1">
             <button onClick={() => onAddLot('CE')} title="Add CE lot" className="h-5 w-5 rounded bg-zinc-800 text-zinc-300 font-bold flex items-center justify-center hover:bg-violet-600 cursor-pointer">+</button>
@@ -1016,6 +1258,7 @@ function FocusRowCard({
           <div className="flex items-center gap-2">
             <span className="text-[9px] font-black text-rose-400">PE</span>
             <span className="text-xs font-mono font-bold text-zinc-300">{live.ltpPe != null ? live.ltpPe.toFixed(2) : '—'}</span>
+            <LegOpenBadge pos={live.pePosition} />
           </div>
           <div className="flex items-center gap-1">
             <button onClick={() => onAddLot('PE')} title="Add PE lot" className="h-5 w-5 rounded bg-zinc-800 text-zinc-300 font-bold flex items-center justify-center hover:bg-violet-600 cursor-pointer">+</button>
@@ -1044,7 +1287,13 @@ function FocusRowCard({
           <NumInput value={row.slMultiplier} onChange={v => onUpdate({ slMultiplier: v })} className="w-20 h-6" />
         </div>
         <div className="flex justify-between items-center mt-1">
-          <SwitchToggle checked={row.levelVw} onChange={v => onUpdate({ levelVw: v })} label="VW" />
+          <SwitchToggle checked={row.levelVw} onChange={v => onUpdate({ levelVw: v })} label="VW"
+            title="Exit when the combined premium crosses its session-open VWAP against you" />
+          {row.levelVw && (
+            <span className="text-[9px] font-mono font-bold text-zinc-500">
+              {live.vwap != null ? `VWAP ${live.vwap.toFixed(2)}` : 'VWAP —'}
+            </span>
+          )}
           <div className="flex gap-2">
             <button
               onClick={() => onUpdate(row, true)}
@@ -1074,8 +1323,10 @@ function FocusRowCard({
             Disarm
           </button>
         )}
-        {row.status === 'entered' && (
-          <button onClick={() => onExit('ALL')} disabled={!canTrade} className="text-xs font-extrabold px-3 py-1.5 rounded-lg bg-rose-600 text-oncolor hover:bg-rose-500 disabled:opacity-40">
+        {!flat && (
+          <button onClick={() => onExit('ALL')} disabled={!canTrade}
+            title="Close every open leg of this row at market"
+            className="text-xs font-extrabold px-3 py-1.5 rounded-lg bg-rose-600 text-oncolor hover:bg-rose-500 disabled:opacity-40">
             Exit All
           </button>
         )}
@@ -1135,6 +1386,14 @@ export default function FocusTool() {
   const [saving, setSaving] = useState(false);
 
   const [positions, setPositions] = useState<PosRow[]>([]);
+  // availabelBalance is a genuine Dhan API misspelling, kept verbatim here (and
+  // by the Zerodha/Kotak funds routes reshaping onto the same key) rather than
+  // renamed, so this stays a drop-in match for /api/scalper[/<broker>]/funds's
+  // actual response shape — see Scalper.tsx's FundsView for the shared origin.
+  const [fundsData, setFundsData] = useState<{ availabelBalance?: number; utilizedAmount?: number } | null>(null);
+  // Session-open VWAP per strike pair (see vwapKey) — only fetched for rows
+  // that actually enabled VW, refreshed once a minute via /api/focus-tool/vwap.
+  const [rowVwap, setRowVwap] = useState<Record<string, number | null>>({});
   const { realised, unrealised, total } = useMemo(() => {
     let r = 0, u = 0;
     for (const p of positions) { r += Number(p.realizedProfit) || 0; u += Number(p.unrealizedProfit) || 0; }
@@ -1161,6 +1420,10 @@ export default function FocusTool() {
   // Rows with an order in flight — their leg buttons are disabled so a
   // double-click cannot send the same market order twice.
   const [busyRows, setBusyRows] = useState<Set<string>>(new Set());
+  // Rows an auto-exit is currently closing — a ref, not state, because the
+  // watcher effect below must read the latest value synchronously on every
+  // tick without itself being a dependency that re-triggers the effect.
+  const autoExitingRef = useRef<Set<string>>(new Set());
   const [peakMtm, setPeakMtm] = useState(0);
   const [lockMtm, setLockMtm] = useState<number | null>(null);
 
@@ -1179,13 +1442,30 @@ export default function FocusTool() {
   const [lockRupees, setLockRupees] = useState(config.lockRupees);
   const [liveRealMoney, setLiveRealMoney] = useState(config.liveRealMoney);
 
-  const wsExpiry = useMemo(() => {
-    const niftyRow = config.rows.find(r => r.underlying === 'NIFTY' && r.expiry);
-    return niftyRow?.expiry ?? expiries.NIFTY?.[0] ?? '';
-  }, [config.rows, expiries.NIFTY]);
+  // Standalone bridge (scripts/tools/focus_tool_ws.py) — all three underlyings
+  // over one WebSocket connection, independent of AdvancedScalper's
+  // one-broker-one-underlying bridge. See useFocusToolWS's own doc comment.
+  const { quotes: focusWsQuotes, bridgeStatus: focusWsStatus } = useFocusToolWS();
+  const wsLive = focusWsStatus.status === 'RUNNING';
 
-  const { liveQuotes, bridgeStatus } = useLiveOptionsWS(wsExpiry, broker, authenticatedBrokers, 'NIFTY');
-  const wsLive = bridgeStatus.status === 'RUNNING';
+  // Start (or restart onto new expiries) the bridge once all three
+  // underlyings' nearest expiry is known. Never stopped on unmount — same
+  // long-lived-background-process convention the AdvancedScalper bridge
+  // follows, so returning to this page reconnects instantly.
+  const niftyExpiry = expiries.NIFTY?.[0];
+  const bankniftyExpiry = expiries.BANKNIFTY?.[0];
+  const sensexExpiry = expiries.SENSEX?.[0];
+  useEffect(() => {
+    if (!niftyExpiry || !bankniftyExpiry || !sensexExpiry) return;
+    fetch('/api/focus-tool/live-ws', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        action: 'start',
+        expiries: { NIFTY: niftyExpiry, BANKNIFTY: bankniftyExpiry, SENSEX: sensexExpiry },
+      }),
+    }).catch(() => {});
+  }, [niftyExpiry, bankniftyExpiry, sensexExpiry]);
 
   useEffect(() => {
     fetch('/api/focus-tool/rows')
@@ -1239,7 +1519,6 @@ export default function FocusTool() {
                 next[u] = val.ltp;
               }
             }
-            if (liveQuotes?.spot) next.NIFTY = liveQuotes.spot;
             return next;
           });
         })
@@ -1248,7 +1527,7 @@ export default function FocusTool() {
     fetchTopIndices();
     const t = setInterval(fetchTopIndices, 2000);
     return () => clearInterval(t);
-  }, [broker, liveQuotes?.spot]);
+  }, [broker]);
 
   // ── Futures strip ───────────────────────────────────────────────
   // /api/focus-tool/futures exists precisely for this header: futures contract
@@ -1310,11 +1589,12 @@ export default function FocusTool() {
   }, [broker, expiryKey]);
 
   // ── Option premiums ─────────────────────────────────────────────
-  // The chain is the LTP source for every underlying, and the spot source for
-  // SENSEX. NIFTY additionally has the tick bridge (useLiveOptionsWS), which is
-  // preferred per-strike below because it is realtime; the chain route caches
-  // 10s and is paced ~1 call/3s per underlying account-wide, so it is polled at
-  // that cadence and only for underlyings that actually have rows.
+  // The chain is the fallback LTP source for every underlying, and the spot
+  // source for SENSEX. The standalone tick bridge (useFocusToolWS, all three
+  // underlyings) is preferred per-strike in rowLive below because it's
+  // realtime; the chain route caches 10s and is paced ~1 call/3s per
+  // underlying account-wide, so it is polled at that cadence and only for
+  // underlyings that actually have rows.
   const activeUnderlyings = UNDERLYINGS.filter(u => config.rows.some(r => r.underlying === u));
   const activeKey = activeUnderlyings.join('|');
   const chainSeq = React.useRef(0);
@@ -1374,6 +1654,25 @@ export default function FocusTool() {
       .catch(() => {});
   }, [broker]);
 
+  // Margin available/utilized for the header tiles. Zerodha's funds route
+  // only returns availabelBalance (no utilized/collateral breakdown), so
+  // utilizedAmount stays undefined there and the tile shows — rather than a
+  // fabricated number.
+  const pollFunds = useCallback(() => {
+    fetch(scalperRoute(broker, 'funds'))
+      .then(r => r.json())
+      .then((j: { success?: boolean; data?: { availabelBalance?: number; utilizedAmount?: number } }) => {
+        if (j.success && j.data) setFundsData(j.data);
+      })
+      .catch(() => {});
+  }, [broker]);
+
+  useEffect(() => {
+    pollFunds();
+    const t = setInterval(pollFunds, 15000);
+    return () => clearInterval(t);
+  }, [pollFunds]);
+
   const fetchOrders = useCallback(async () => {
     setOrdersLoading(true);
     setOrdersError(null);
@@ -1432,22 +1731,51 @@ export default function FocusTool() {
     return () => clearInterval(t);
   }, [pollPositions]);
 
-  // Spot per underlying: the top-indices poll covers NIFTY and BANKNIFTY; the
-  // chain's own last_price covers SENSEX, which that endpoint no longer serves.
+  // Spot per underlying: the WS bridge first (push-driven, all three
+  // underlyings), then the top-indices poll (NIFTY/BANKNIFTY), then the
+  // chain's own last_price (SENSEX, which the top-indices endpoint doesn't
+  // serve) as the last-resort fallback.
   const spots = useMemo<Record<FocusUnderlying, number>>(() => {
     const out = { ...spotPrices };
     for (const u of UNDERLYINGS) {
+      const wsSpot = focusWsQuotes?.[u]?.spot;
+      if (wsSpot && wsSpot > 0) { out[u] = wsSpot; continue; }
       if (!(out[u] > 0)) out[u] = Number(chains[u]?.spot ?? 0);
     }
     return out;
-  }, [spotPrices, chains]);
+  }, [spotPrices, chains, focusWsQuotes]);
 
   /**
-   * Per-row strike, premiums and live broker positions, keyed by row id.
+   * The listed strike whose LTP sits closest to `target`, scanning this
+   * underlying's fetched chain. Only PREMIUM-mode legs use this; ATM-mode legs
+   * resolve arithmetically from `atm`/`step` instead.
+   */
+  function nearestStrikeByPremium(
+    oc: Record<string, { ce: number; pe: number }> | undefined,
+    leg: 'CE' | 'PE',
+    target: number,
+  ): number | null {
+    if (!oc || !(target > 0)) return null;
+    let best: number | null = null;
+    let bestDiff = Infinity;
+    for (const [k, v] of Object.entries(oc)) {
+      const px = leg === 'CE' ? v.ce : v.pe;
+      if (!(px > 0)) continue;
+      const diff = Math.abs(px - target);
+      if (diff < bestDiff) { bestDiff = diff; best = Number(k); }
+    }
+    return best;
+  }
+
+  /**
+   * Per-row CE/PE strikes, premiums and live broker positions, keyed by row id.
    *
-   * Strike: a row that has entered keeps the strike it was stamped with at
-   * entry (addRow already bakes the group's ± offset into it); a draft row
-   * tracks the live ATM so the table shows what it *would* trade right now.
+   * CE and PE resolve independently: ATM mode is `atm + offset * step` per leg
+   * (no guard keeping CE >= PE — an inverted strangle is a valid, user-chosen
+   * shape once the legs are independent); PREMIUM mode is the chain strike
+   * closest to the leg's target rupee value. Recomputed continuously (not
+   * stamped once at row creation) so the table always shows what a draft or
+   * armed row would trade right now.
    *
    * Premium: the NIFTY tick bridge first when it is on this row's expiry —
    * it is realtime, where the chain route caches 10s — then the chain.
@@ -1456,17 +1784,28 @@ export default function FocusTool() {
     const out: Record<string, RowLive> = {};
     for (const row of config.rows) {
       const u = row.underlying;
-      const group = config.groups.find(g => g.underlying === u);
       const step = STRIKE_STEP[u];
       const spot = spots[u] ?? 0;
       const atm = spot > 0 ? Math.round(spot / step) * step : null;
-      const strike = row.strike ?? (atm != null ? atm + (group?.strikesOffset ?? 0) * step : null);
-      if (strike == null) { out[row.id] = EMPTY_ROW_LIVE; continue; }
+      const oc = chains[u]?.oc;
 
-      const key = strikeKey(strike);
-      const wsOnThisRow = u === 'NIFTY' && (!row.expiry || liveQuotes?.expiry === row.expiry);
-      const ws = wsOnThisRow ? liveQuotes?.strikes?.[key] : undefined;
-      const ch = chains[u]?.oc?.[key];
+      const ceStrike = row.strikeMode === 'PREMIUM'
+        ? nearestStrikeByPremium(oc, 'CE', Number(row.cePremium))
+        : (atm != null ? atm + (row.ceOffset ?? 0) * step : null);
+      const peStrike = row.strikeMode === 'PREMIUM'
+        ? nearestStrikeByPremium(oc, 'PE', Number(row.pePremium))
+        : (atm != null ? atm + (row.peOffset ?? 0) * step : null);
+
+      if (ceStrike == null && peStrike == null) { out[row.id] = EMPTY_ROW_LIVE; continue; }
+
+      const uWs = focusWsQuotes?.[u];
+      const wsOnThisRow = !!uWs && (!row.expiry || uWs.expiry === row.expiry);
+      const ceKey = ceStrike != null ? strikeKey(ceStrike) : null;
+      const peKey = peStrike != null ? strikeKey(peStrike) : null;
+      const ceWs = ceKey && wsOnThisRow ? uWs!.strikes?.[ceKey] : undefined;
+      const peWs = peKey && wsOnThisRow ? uWs!.strikes?.[peKey] : undefined;
+      const ceCh = ceKey ? oc?.[ceKey] : undefined;
+      const peCh = peKey ? oc?.[peKey] : undefined;
 
       const pick = (fromWs?: number, fromChain?: number): number | null => {
         if (Number(fromWs) > 0) return Number(fromWs);
@@ -1474,8 +1813,10 @@ export default function FocusTool() {
         return null;
       };
 
-      const ref = lookups[u]?.strikes?.[key];
+      const ceRef = ceKey ? lookups[u]?.strikes?.[ceKey] : undefined;
+      const peRef = peKey ? lookups[u]?.strikes?.[peKey] : undefined;
       const findPos = (leg: 'CE' | 'PE'): PosRow | null => {
+        const ref = leg === 'CE' ? ceRef : peRef;
         // Dhan is the only broker with a numeric security id; the rest join by
         // trading symbol.
         if (broker === 'dhan') {
@@ -1488,18 +1829,83 @@ export default function FocusTool() {
         return positions.find(p => String(p.tradingSymbol) === sym) ?? null;
       };
 
+      const cePosition = findPos('CE');
+      const pePosition = findPos('PE');
+
+      // P&L and entry premium across only the legs this row's Side trades —
+      // read off the broker's own position, never a client-side guess (this
+      // tool doesn't stamp its own entry price anywhere).
+      let pnl = 0;
+      let entryPremium = 0;
+      for (const leg of legsOf(row)) {
+        const pos = leg === 'CE' ? cePosition : pePosition;
+        if (!pos) continue;
+        pnl += (Number(pos.realizedProfit) || 0) + (Number(pos.unrealizedProfit) || 0);
+        entryPremium += pos.netQty < 0 ? (Number(pos.sellAvg) || 0) : (Number(pos.buyAvg) || 0);
+      }
+
+      const rowExpiry = row.expiry || expiries[u]?.[0] || '';
+      const vwap = row.levelVw && ceStrike != null && peStrike != null && rowExpiry
+        ? (rowVwap[vwapKey(u, rowExpiry, ceStrike, peStrike)] ?? null)
+        : null;
+
       out[row.id] = {
-        strike,
-        ltpCe: pick(ws?.ce?.ltp, ch?.ce),
-        ltpPe: pick(ws?.pe?.ltp, ch?.pe),
-        cePosition: findPos('CE'),
-        pePosition: findPos('PE'),
+        ceStrike, peStrike,
+        ltpCe: pick(ceWs?.ce?.ltp, ceCh?.ce),
+        ltpPe: pick(peWs?.pe?.ltp, peCh?.pe),
+        cePosition, pePosition,
+        pnl, entryPremium, vwap,
       };
     }
     return out;
-  }, [config.rows, config.groups, spots, chains, liveQuotes, lookups, positions, broker]);
+  }, [config.rows, spots, chains, focusWsQuotes, lookups, positions, broker, expiries, rowVwap]);
 
+  // Distinct strike pairs that need a VWAP, among rows with VW enabled. A
+  // plain string, not the wanted objects themselves, so the fetch effect
+  // below only re-runs when the SET of strike pairs actually changes — not
+  // on every live tick, which changes rowLive's identity constantly but
+  // essentially never changes which strikes a row is sitting at.
+  const vwapWantedKey = useMemo(() => {
+    const keys = new Set<string>();
+    for (const row of config.rows) {
+      if (!row.levelVw) continue;
+      const live = rowLive[row.id];
+      if (!live || live.ceStrike == null || live.peStrike == null) continue;
+      const expiry = row.expiry || expiries[row.underlying]?.[0] || '';
+      if (!expiry) continue;
+      keys.add(vwapKey(row.underlying, expiry, live.ceStrike, live.peStrike));
+    }
+    return Array.from(keys).sort().join('|');
+  }, [config.rows, rowLive, expiries]);
 
+  // Session-open VWAP fetch: one call per distinct strike pair among rows
+  // that actually enabled VW, refreshed once a minute (the underlying data
+  // only moves in whole-minute bars anyway — see focus_tool_vwap.py).
+  useEffect(() => {
+    if (!vwapWantedKey) return;
+    const wanted = vwapWantedKey.split('|').map(key => {
+      const [underlying, expiry, ceStrike, peStrike] = key.split(':');
+      return { key, underlying, expiry, ceStrike, peStrike };
+    });
+
+    let cancelled = false;
+    const fetchAll = () => {
+      wanted.forEach(({ key, underlying, expiry, ceStrike, peStrike }) => {
+        const url = `/api/focus-tool/vwap?underlying=${underlying}&expiry=${expiry}&ceStrike=${ceStrike}&peStrike=${peStrike}`;
+        fetch(url)
+          .then(r => r.json())
+          .then((j: { success?: boolean; vwap?: number | null }) => {
+            if (cancelled || !j.success) return;
+            setRowVwap(prev => (prev[key] === (j.vwap ?? null) ? prev : { ...prev, [key]: j.vwap ?? null }));
+          })
+          .catch(() => {});
+      });
+    };
+
+    fetchAll();
+    const t = setInterval(fetchAll, 60_000);
+    return () => { cancelled = true; clearInterval(t); };
+  }, [vwapWantedKey]);
 
   async function saveConfig(patch?: Partial<FocusToolConfig>) {
     setSaving(true);
@@ -1526,11 +1932,37 @@ export default function FocusTool() {
     }
   }
 
+  /**
+   * H↑ is a breakout level above where spot might travel to, and L↓ the mirror
+   * below — not a level already behind you. Saving one on the wrong side of the
+   * current spot means the row's auto-exit fires the instant it starts being
+   * watched, so this is rejected at Save rather than silently accepted.
+   */
+  function validateLevelExits(row: FocusRow, spot: number): string | null {
+    const hi = Number(row.levelHigh);
+    const lo = Number(row.levelLow);
+    if (row.levelHigh && Number.isFinite(hi) && spot > 0 && hi <= spot) {
+      return `H↑ (${hi}) must be above the current spot (${spot.toFixed(2)})`;
+    }
+    if (row.levelLow && Number.isFinite(lo) && spot > 0 && lo >= spot) {
+      return `L↓ (${lo}) must be below the current spot (${spot.toFixed(2)})`;
+    }
+    return null;
+  }
+
   function updateRow(id: string, patch: Partial<FocusRow>, saveToDisk = false) {
     setConfig(prev => {
       const nextRows = prev.rows.map(r => r.id === id ? { ...r, ...patch, updatedAt: new Date().toISOString() } : r);
       const nextConfig = { ...prev, rows: nextRows };
-      if (saveToDisk) saveConfig(nextConfig);
+      if (saveToDisk) {
+        const row = nextRows.find(r => r.id === id);
+        const err = row ? validateLevelExits(row, spots[row.underlying] ?? 0) : null;
+        if (err) {
+          addToast('error', 'Level exit not saved', err);
+        } else {
+          saveConfig(nextConfig);
+        }
+      }
       return nextConfig;
     });
   }
@@ -1551,13 +1983,13 @@ export default function FocusTool() {
 
   function addRow(underlying: FocusUnderlying) {
     const group = config.groups.find(g => g.underlying === underlying);
-    const spot = spotPrices[underlying] ?? 0;
-    const step = STRIKE_STEP[underlying];
-    const atm = spot > 0 ? Math.round(spot / step) * step : null;
-    const offset = (group?.strikesOffset ?? 0) * step;
     const row = makeRow(underlying);
     row.expiry = expiries[underlying]?.[0] ?? '';
-    row.strike = atm != null ? atm + offset : null;
+    // A new row starts linked: CE `n` steps above ATM, PE `n` steps below —
+    // the group's ± offset as a symmetric strangle (0 is a straddle).
+    const offset = group?.strikesOffset ?? 0;
+    row.ceOffset = offset;
+    row.peOffset = -offset;
 
     setConfig(prev => {
       const nextRows = [...prev.rows, row];
@@ -1597,7 +2029,7 @@ export default function FocusTool() {
     }
 
     const live = rowLive[row.id];
-    const strike = live?.strike;
+    const strike = leg === 'CE' ? live?.ceStrike : live?.peStrike;
     const lotSize = lotSizes[u];
     if (!strike || !lotSize) {
       addToast('error', `${what} order not sent`, 'Strike or lot size not resolved yet');
@@ -1683,6 +2115,84 @@ export default function FocusTool() {
     return row.side === 'BOTH' ? ['CE', 'PE'] : [row.side as 'CE' | 'PE'];
   }
 
+  /**
+   * First level-exit rule this row breaches, or null if none has. Checked in
+   * this order: H↑, L↓, VW, SL ₹, SL × — matching the exit ladder in the
+   * sibling implementation (focus_tool_worker.py's evaluate_exit).
+   *
+   * H↑/L↓ compare against spot. VW compares against a genuine session-open
+   * VWAP (fetched once a minute per strike pair — see vwapWantedKey's effect
+   * and scripts/tools/focus_tool_vwap.py; live.vwap is null until fetched or
+   * if VW is off, so the rule is silently inert until real data exists —
+   * never fires on a guess). SL ₹/SL × against the broker's own P&L and
+   * entry price.
+   */
+  function evaluateRowExit(row: FocusRow, live: RowLive, spot: number): string | null {
+    const hi = Number(row.levelHigh);
+    if (row.levelHigh && Number.isFinite(hi) && spot > 0 && spot >= hi) {
+      return `H↑ breached: spot ${spot.toFixed(2)} ≥ ${hi}`;
+    }
+    const lo = Number(row.levelLow);
+    if (row.levelLow && Number.isFinite(lo) && spot > 0 && spot <= lo) {
+      return `L↓ breached: spot ${spot.toFixed(2)} ≤ ${lo}`;
+    }
+    if (row.levelVw && live.vwap != null && live.vwap > 0) {
+      const combined = (live.ltpCe ?? 0) + (live.ltpPe ?? 0);
+      // This tool only ever opens with a SELL (see placeLeg) — hurt by the
+      // premium expanding past VWAP, same as slMult below.
+      if (combined > 0 && combined >= live.vwap) {
+        return `VW breached: premium ${combined.toFixed(2)} ≥ VWAP ${live.vwap.toFixed(2)}`;
+      }
+    }
+    const slRs = Number(row.slRupees);
+    if (row.slRupees && Number.isFinite(slRs) && slRs > 0) {
+      if (live.pnl <= -slRs) return `SL ₹${slRs} hit (P&L ₹${live.pnl.toFixed(0)})`;
+    }
+    const slMult = Number(row.slMultiplier);
+    if (row.slMultiplier && Number.isFinite(slMult) && slMult > 1) {
+      const entry = live.entryPremium;
+      const now = (live.ltpCe ?? 0) + (live.ltpPe ?? 0);
+      // This tool only ever opens with a SELL (see placeLeg) — the position is
+      // hurt by the premium expanding past a multiple of what it was sold for.
+      if (entry > 0 && now > 0 && now >= entry * slMult) {
+        return `SL ×${slMult} hit (premium ${now.toFixed(2)} vs entry ${entry.toFixed(2)})`;
+      }
+    }
+    return null;
+  }
+
+  /**
+   * The live tracking loop: whenever a row's resolved data changes (spot,
+   * premiums or broker positions all flow through `rowLive`), check every row
+   * that actually holds a position for a level-exit breach and square it off
+   * at market.
+   *
+   * Gated on LIVE · REAL MONEY the same way placeLeg is — a dry run must not
+   * spam auto-exit toasts for breaches it can never act on. This only runs
+   * while the Focus Tool tab stays open; there is no background worker behind
+   * this page, so closing the tab (or losing the connection) pauses watching
+   * exactly like it pauses everything else here.
+   */
+  useEffect(() => {
+    if (!liveRealMoney) return;
+    for (const row of config.rows) {
+      const live = rowLive[row.id];
+      if (!live || legsFlat(live)) continue;
+      if (autoExitingRef.current.has(row.id)) continue;
+
+      const spot = spots[row.underlying] ?? 0;
+      const reason = evaluateRowExit(row, live, spot);
+      if (!reason) continue;
+
+      autoExitingRef.current.add(row.id);
+      addToast('error', `Auto-exit: ${row.underlying} ${row.id.slice(-4)}`, reason);
+      Promise.all(legsOf(row).map(leg => placeLeg(row, leg, { reduce: true, all: true })))
+        .then(() => updateRow(row.id, { status: 'exited' }, true))
+        .finally(() => autoExitingRef.current.delete(row.id));
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [rowLive, spots, liveRealMoney]);
+
   function updateGroup(underlying: FocusUnderlying, patch: Partial<FocusIndexGroup>) {
     setConfig(prev => {
       const nextGroups = prev.groups.map(g => g.underlying === underlying ? { ...g, ...patch } : g);
@@ -1722,6 +2232,8 @@ export default function FocusTool() {
         realised={realised}
         unrealised={unrealised}
         total={total}
+        marginAvailable={fundsData?.availabelBalance != null ? Number(fundsData.availabelBalance) : null}
+        marginUtilized={fundsData?.utilizedAmount != null ? Number(fundsData.utilizedAmount) : null}
         wsLive={wsLive}
         broker={broker}
         setBroker={setBroker}
@@ -1811,7 +2323,7 @@ export default function FocusTool() {
                       {/* Column headers */}
                       <tr className="bg-zinc-800/50 border-b border-zinc-800 text-[10px] font-bold text-zinc-400 uppercase tracking-wider">
                         <th className="p-3" title="Entry time, exit time and the expiry-days filter">Timing</th>
-                        <th className="p-3" title="Strike this row trades, chosen at entry">Strike</th>
+                        <th className="p-3" title="CE and PE strikes, picked by ATM offset or by target premium">CE / PE Strikes</th>
                         <th className="p-3" title="Combined premium, with the CE and PE breakdown">LTP</th>
                         <th className="p-3" title="Lots per leg">Lots</th>
                         <th className="p-3 border-r border-zinc-800" title="Trade the call, the put, or both">Side</th>
@@ -1903,7 +2415,10 @@ export default function FocusTool() {
                     <div className="flex items-center gap-2">
                       <span className="text-xs font-bold text-white">{row.underlying}</span>
                       <span className="text-[10px] text-zinc-500 font-mono">
-                        {row.side} &middot; {row.lots} Lot{row.lots > 1 ? 's' : ''} &middot; Strike {row.strike ?? 'ATM'}
+                        {row.side} &middot; {row.lots} Lot{row.lots > 1 ? 's' : ''} &middot; {row.strikeMode === 'PREMIUM'
+                          ? `CE ₹${row.cePremium || '—'} / PE ₹${row.pePremium || '—'}`
+                          : row.ceOffset === 0 && row.peOffset === 0 ? 'ATM straddle'
+                            : `CE ${row.ceOffset >= 0 ? '+' : ''}${row.ceOffset} / PE ${row.peOffset >= 0 ? '+' : ''}${row.peOffset}`}
                       </span>
                     </div>
                     <span className={cn(

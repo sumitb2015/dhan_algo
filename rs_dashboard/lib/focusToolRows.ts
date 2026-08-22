@@ -22,6 +22,8 @@ export interface FocusIndexGroup {
   spotLow: string;           // level-exit: exit when spot breaks below
 }
 
+export type FocusStrikeMode = 'ATM' | 'PREMIUM';
+
 export interface FocusRow {
   id: string;
   underlying: FocusUnderlying;
@@ -29,7 +31,17 @@ export interface FocusRow {
   exitTime: string;          // 'HH:MM'
   dte: FocusDte;
   expiry: string;            // resolved expiry date string YYYY-MM-DD
-  strike: number | null;
+  // Strike resolution: ATM mode picks a strike a signed number of steps away
+  // from ATM per leg; PREMIUM mode picks whichever listed strike's LTP sits
+  // closest to the given rupee target. `linked` mirrors CE's setting onto PE
+  // (and vice versa) when the two are edited together; unlinked, each leg is
+  // independent and an inverted strangle is a valid, user-chosen shape.
+  strikeMode: FocusStrikeMode;
+  linked: boolean;
+  ceOffset: number;
+  peOffset: number;
+  cePremium: string;
+  pePremium: string;
   lots: number;
   side: FocusSide;
   status: FocusRowStatus;
