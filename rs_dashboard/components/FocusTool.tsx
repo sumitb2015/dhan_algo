@@ -1046,7 +1046,7 @@ function IndexGroupBar({
       <div className="flex items-center gap-4">
         {([
           { label: 'SPOT', hint: 'Current index level', val: spot > 0 ? spot.toFixed(2) : '\u2014' },
-          { label: 'ATM', hint: 'Nearest strike to spot right now', val: liveAtm > 0 ? liveAtm : '\u2014' },
+          { label: 'ATM', hint: `Nearest strike to ${group.atmBy === 'Fut' ? 'the futures LTP' : 'spot'} right now, per ATM BY`, val: liveAtm > 0 ? liveAtm : '\u2014' },
           { label: 'LOT', hint: 'Contracts in one lot of this index', val: lot ?? '\u2014' },
           { label: 'DTE', hint: 'Days to the nearest expiry', val: dte ?? '\u2014' },
         ] as const).map(({ label, val, hint }) => (
@@ -2056,7 +2056,14 @@ export default function FocusTool() {
       const u = row.underlying;
       const step = STRIKE_STEP[u];
       const spot = spots[u] ?? 0;
-      const atm = spot > 0 ? Math.round(spot / step) * step : null;
+      // ATM base per the index group's own "ATM BY" pick — Spot (the index
+      // level) or Fut (the nearest futures contract's LTP, which can sit at a
+      // premium/discount to spot). Falls back to spot if the futures strip
+      // hasn't resolved yet, so a row is never left unresolved by a slow feed.
+      const group = config.groups.find(g => g.underlying === u);
+      const futLtp = futQuotes[u]?.ltp ?? 0;
+      const atmBase = group?.atmBy === 'Fut' && futLtp > 0 ? futLtp : spot;
+      const atm = atmBase > 0 ? Math.round(atmBase / step) * step : null;
       const oc = chains[u]?.oc;
 
       const ceStrike = row.strikeMode === 'PREMIUM'
@@ -2128,7 +2135,7 @@ export default function FocusTool() {
       };
     }
     return out;
-  }, [config.rows, spots, chains, focusWsQuotes, lookups, positions, broker, expiries, rowVwap]);
+  }, [config.rows, config.groups, spots, futQuotes, chains, focusWsQuotes, lookups, positions, broker, expiries, rowVwap]);
 
   // Distinct strike pairs that need a VWAP, among rows with VW enabled. A
   // plain string, not the wanted objects themselves, so the fetch effect
@@ -2886,7 +2893,11 @@ export default function FocusTool() {
                 onChange={patch => updateGroup(u, patch)}
                 onSave={() => saveConfig()}
                 spot={spots[u] ?? 0}
-                liveAtm={spots[u] > 0 ? Math.round(spots[u] / STRIKE_STEP[u]) * STRIKE_STEP[u] : 0}
+                liveAtm={(() => {
+                  const base = group.atmBy === 'Fut' && (futQuotes[u]?.ltp ?? 0) > 0
+                    ? futQuotes[u]!.ltp : (spots[u] ?? 0);
+                  return base > 0 ? Math.round(base / STRIKE_STEP[u]) * STRIKE_STEP[u] : 0;
+                })()}
                 lot={lotSizes[u]} dte={dteFor(expiries[u]?.[0] ?? '')} wsLive={wsLive}
               />
 

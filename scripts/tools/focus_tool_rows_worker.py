@@ -743,6 +743,27 @@ class FocusRowsWorker:
         for u in {r.get('underlying') for r in rows if r.get('underlying') in UNDERLYINGS}:
             spots[u] = self.market.spot(u)
 
+        # ATM base per each index group's own "ATM BY" pick (mirrors
+        # FocusTool.tsx's rowLive). Futures LTP is only fetched for an
+        # underlying that both wants it AND actually needs resolving right
+        # now (armed or open) — same rate-limit reasoning as the chain fetch
+        # below, and get_ltp caches nothing, so an unconditional fetch here
+        # would cost one more REST call per tick per underlying.
+        atm_base = dict(spots)
+        for u in {r.get('underlying') for r in rows if r.get('underlying') in UNDERLYINGS}:
+            group = self.group_for(u)
+            if not group or group.get('atmBy') != 'Fut':
+                continue
+            wants_it = any(
+                r.get('underlying') == u and (r['id'] in self.fills or str(r.get('status')) == 'armed')
+                for r in rows
+            )
+            if not wants_it:
+                continue
+            fut = self.market.future_ltp(u)
+            if fut > 0:
+                atm_base[u] = fut
+
         # Same budget reasoning as the leg quotes below: only PREMIUM-mode rows
         # that are actually armed or open need a chain to resolve against.
         needs_chain = {
@@ -762,7 +783,7 @@ class FocusRowsWorker:
             step = STRIKE_STEP[u]
             spot = spots.get(u, 0.0)
             expiry = row.get('expiry') or self.market.nearest_expiry(u)
-            atm = atm_strike(spot, step)
+            atm = atm_strike(atm_base.get(u, spot), step)
             ce_strike, pe_strike = resolve_row_strikes(
                 row, atm, step, chains.get((u, expiry)))
 
