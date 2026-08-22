@@ -819,10 +819,10 @@ function ControlStrip({
   onToggleWorker: () => void;
 }) {
   return (
-    <div className="bg-zinc-900 border-b border-zinc-800 px-6 py-2.5 flex items-center gap-5 flex-wrap">
+    <div className="bg-zinc-900 border-b border-zinc-800 px-6 py-2.5 flex items-center gap-5 flex-nowrap overflow-x-auto">
       {/* Positions section */}
-      <div className="flex items-center gap-2">
-        <span className="text-[9px] font-black text-zinc-600 uppercase tracking-widest">Positions</span>
+      <div className="flex items-center gap-2 flex-nowrap shrink-0">
+        <span className="text-[9px] font-black text-zinc-600 uppercase tracking-widest whitespace-nowrap">Positions</span>
         <button
           onClick={onToggleLive}
           title={liveRealMoney
@@ -880,11 +880,11 @@ function ControlStrip({
         </GhostBtn>
       </div>
 
-      <div className="h-5 w-px bg-zinc-800" />
+      <div className="h-5 w-px bg-zinc-800 shrink-0" />
 
       {/* Risk section */}
-      <div className="flex items-center gap-3 flex-wrap">
-        <span className="text-[9px] font-black text-zinc-600 uppercase tracking-widest">Risk</span>
+      <div className="flex items-center gap-3 flex-nowrap shrink-0">
+        <span className="text-[9px] font-black text-zinc-600 uppercase tracking-widest whitespace-nowrap">Risk</span>
         <SwitchToggle checked={riskEnabled} onChange={onToggleRisk}
           title="Enable the account-wide target and stop below" />
 
@@ -928,8 +928,14 @@ function ControlStrip({
         </span>
       </div>
 
-      {/* Copy Trade Controls */}
-      <CopyTradeControls copyTrade={copyTrade} />
+      {/* Copy Trade Controls — wrapped so its fragment's items (label, per-
+          broker checkboxes, the ARM button) form one flex group that can't be
+          split across a wrap point; the strip itself no longer wraps at all
+          (flex-nowrap + overflow-x-auto above), but this keeps the group
+          intact if that ever changes. */}
+      <div className="flex items-center gap-2 flex-nowrap shrink-0">
+        <CopyTradeControls copyTrade={copyTrade} />
+      </div>
     </div>
   );
 }
