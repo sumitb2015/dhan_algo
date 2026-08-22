@@ -7,6 +7,7 @@ import NavBar from './NavBar';
 import {
   TrendingUp, Zap, ShieldOff, Shield, Activity,
   Clock, Plus, Check, Save, Layers, Target, Lock, RefreshCw, X,
+  ChevronUp, ChevronDown,
 } from 'lucide-react';
 import { TabTable, type SortState } from './Scalper';
 import { useBrokerSelector, scalperRoute, BROKER_LABELS, type Broker } from '@/hooks/useBrokerSelector';
@@ -375,10 +376,10 @@ function TimeInput({ value, onChange, title }: { value: string; onChange: (v: st
 }
 
 function SegPill<T extends string>({
-  options, value, onChange, title,
-}: { options: readonly T[]; value: T; onChange: (v: T) => void; title?: string }) {
+  options, value, onChange, title, className,
+}: { options: readonly T[]; value: T; onChange: (v: T) => void; title?: string; className?: string }) {
   return (
-    <div title={title} className="inline-flex items-center gap-0.5 bg-zinc-900 border border-zinc-800 p-0.5 rounded-lg">
+    <div title={title} className={cn('inline-flex items-center gap-0.5 bg-zinc-900 border border-zinc-800 p-0.5 rounded-lg', className)}>
       {options.map(o => (
         <button
           key={o}
@@ -395,7 +396,9 @@ function SegPill<T extends string>({
 
 /** One leg's strike selector: an ATM-offset dropdown or a target-premium
  *  input, with the currently resolved strike shown alongside. */
-function StrikeLegSelector({ leg, mode, offset, premium, resolvedStrike, step, onOffsetChange, onPremiumChange }: {
+function StrikeLegSelector({
+  leg, mode, offset, premium, resolvedStrike, step, onOffsetChange, onPremiumChange, onShift, shiftDisabled,
+}: {
   leg: 'CE' | 'PE';
   mode: FocusStrikeMode;
   offset: number;
@@ -404,6 +407,8 @@ function StrikeLegSelector({ leg, mode, offset, premium, resolvedStrike, step, o
   step: number;
   onOffsetChange: (n: number) => void;
   onPremiumChange: (v: string) => void;
+  onShift?: (direction: 'UP' | 'DOWN') => void;
+  shiftDisabled?: boolean;
 }) {
   return (
     <div className="flex items-center gap-1.5">
@@ -426,17 +431,45 @@ function StrikeLegSelector({ leg, mode, offset, premium, resolvedStrike, step, o
       <span className="text-[11px] font-mono font-bold text-zinc-300 min-w-[42px] text-right">
         {resolvedStrike ?? '—'}
       </span>
+      {onShift && (
+        <div className="flex flex-col gap-px">
+          <button
+            type="button"
+            onClick={() => onShift('UP')}
+            disabled={shiftDisabled || resolvedStrike == null}
+            title={`Shift ${leg} strike up one step — closes and reopens any live position at the new strike`}
+            className="h-3 w-4 flex items-center justify-center rounded-t border border-emerald-500/20 bg-emerald-500/10 text-emerald-400
+                       hover:bg-emerald-500 hover:text-oncolor hover:border-emerald-500 disabled:opacity-30 disabled:cursor-not-allowed
+                       transition-all active:scale-95"
+          >
+            <ChevronUp size={9} strokeWidth={3} />
+          </button>
+          <button
+            type="button"
+            onClick={() => onShift('DOWN')}
+            disabled={shiftDisabled || resolvedStrike == null}
+            title={`Shift ${leg} strike down one step — closes and reopens any live position at the new strike`}
+            className="h-3 w-4 flex items-center justify-center rounded-b border border-rose-500/20 bg-rose-500/10 text-rose-400
+                       hover:bg-rose-500 hover:text-oncolor hover:border-rose-500 disabled:opacity-30 disabled:cursor-not-allowed
+                       transition-all active:scale-95"
+          >
+            <ChevronDown size={9} strokeWidth={3} />
+          </button>
+        </div>
+      )}
     </div>
   );
 }
 
 /** The full CE/PE strike editor for one row: ATM±/₹ mode toggle, independent
  *  CE and PE selectors, a link checkbox to keep them mirrored, and Save/clear. */
-function StrikeEditor({ row, live, step, onUpdate }: {
+function StrikeEditor({ row, live, step, onUpdate, onShift, shiftDisabled }: {
   row: FocusRow;
   live: RowLive;
   step: number;
   onUpdate: (patch: Partial<FocusRow>, saveToDisk?: boolean) => void;
+  onShift?: (leg: 'CE' | 'PE', direction: 'UP' | 'DOWN') => void;
+  shiftDisabled?: boolean;
 }) {
   /**
    * Editing one leg mirrors onto the other leg when linked.
@@ -466,19 +499,22 @@ function StrikeEditor({ row, live, step, onUpdate }: {
   const mode = row.strikeMode ?? 'ATM';
 
   return (
-    <div className="flex flex-col gap-1 w-[168px]">
+    <div className="flex flex-col gap-1 w-[182px]">
       <SegPill options={['ATM±', '₹'] as const}
         value={mode === 'ATM' ? 'ATM±' : '₹'}
         onChange={v => onUpdate({ strikeMode: v === 'ATM±' ? 'ATM' : 'PREMIUM' })}
-        title="ATM± picks a strike by steps from ATM; ₹ picks the strike closest to a target premium" />
+        title="ATM± picks a strike by steps from ATM; ₹ picks the strike closest to a target premium"
+        className="self-start" />
       <StrikeLegSelector leg="CE" mode={mode} offset={row.ceOffset ?? 0} premium={row.cePremium ?? ''}
         resolvedStrike={live.ceStrike} step={step}
         onOffsetChange={n => setLeg('CE', { ceOffset: n })}
-        onPremiumChange={v => setLeg('CE', { cePremium: v })} />
+        onPremiumChange={v => setLeg('CE', { cePremium: v })}
+        onShift={onShift ? dir => onShift('CE', dir) : undefined} shiftDisabled={shiftDisabled} />
       <StrikeLegSelector leg="PE" mode={mode} offset={row.peOffset ?? 0} premium={row.pePremium ?? ''}
         resolvedStrike={live.peStrike} step={step}
         onOffsetChange={n => setLeg('PE', { peOffset: n })}
-        onPremiumChange={v => setLeg('PE', { pePremium: v })} />
+        onPremiumChange={v => setLeg('PE', { pePremium: v })}
+        onShift={onShift ? dir => onShift('PE', dir) : undefined} shiftDisabled={shiftDisabled} />
       <div className="flex items-center justify-between mt-0.5">
         <label title="Keep CE and PE moving together" className="inline-flex items-center gap-1 text-[9px] font-bold text-zinc-500 cursor-pointer select-none">
           <input type="checkbox" checked={row.linked ?? true}
@@ -639,7 +675,7 @@ function ControlStrip({
   lockRupees, setLockRupees,
   onSave, saving, peakMtm, lockMtm,
   copyTrade,
-  onOpenExitRules, onOpenRisk, onOpenOrders, onToggleViewMode, viewMode,
+  onOpenRisk, onOpenOrders, onToggleViewMode, viewMode,
 }: {
   liveRealMoney: boolean; onToggleLive: () => void; broker: Broker;
   riskEnabled: boolean; onToggleRisk: () => void;
@@ -650,7 +686,6 @@ function ControlStrip({
   lockRupees: string; setLockRupees: (v: string) => void;
   onSave: () => void; saving: boolean; peakMtm: number; lockMtm: number | null;
   copyTrade: CopyTradeApi;
-  onOpenExitRules: () => void;
   onOpenRisk: () => void;
   onOpenOrders: () => void;
   onToggleViewMode: () => void;
@@ -674,10 +709,6 @@ function ControlStrip({
           <span className="h-1.5 w-1.5 rounded-full bg-oncolor animate-pulse" />
           LIVE &middot; REAL MONEY
         </button>
-        <GhostBtn onClick={onOpenExitRules} title="Show every exit rule that could close a row, in firing order">
-          <ShieldOff className="h-3.5 w-3.5 text-rose-400" />
-          Exit Rules
-        </GhostBtn>
         <GhostBtn onClick={onOpenRisk} title="Account-level P&L, target, stop and trail state">
           <Shield className="h-3.5 w-3.5 text-violet-400" />
           Risk / MTM
@@ -896,7 +927,7 @@ const STATUS_PILL: Record<FocusRowStatus, string> = {
 
 function FocusTableRow({
   row, live, lotSize, spot, liveRealMoney, broker, busy,
-  onUpdate, onDelete, onArm, onDisarm, onExit, onAddLot, onReduceLot,
+  onUpdate, onDelete, onArm, onDisarm, onExit, onAddLot, onReduceLot, onShift,
 }: {
   row: FocusRow;
   live: RowLive;
@@ -907,6 +938,7 @@ function FocusTableRow({
   onExit: (leg: 'CE' | 'PE' | 'ALL') => void;
   onAddLot: (leg: 'CE' | 'PE') => void;
   onReduceLot: (leg: 'CE' | 'PE') => void;
+  onShift: (leg: 'CE' | 'PE', direction: 'UP' | 'DOWN') => void;
 }) {
   const combinedLtp = (live.ltpCe ?? 0) + (live.ltpPe ?? 0);
   // Orders are only sendable once at least one leg's contract and the lot size
@@ -962,7 +994,7 @@ function FocusTableRow({
 
       {/* CE / PE STRIKES */}
       <td className="p-3 align-top">
-        <StrikeEditor row={row} live={live} step={step} onUpdate={onUpdate} />
+        <StrikeEditor row={row} live={live} step={step} onUpdate={onUpdate} onShift={onShift} shiftDisabled={busy} />
       </td>
 
       {/* LTP */}
@@ -1107,13 +1139,17 @@ function FocusTableRow({
                 {live.vwap != null ? `VWAP ${live.vwap.toFixed(2)}` : 'VWAP —'}
               </span>
             )}
-            <div className="flex items-center gap-1">
-              <span className="text-[9px] font-black text-amber-400">SL</span>
-              <NumInput value={row.slRupees} onChange={v => onUpdate({ slRupees: v })} className="w-14"
-                title="Exit at this rupee loss on the pair" />
-              <span className="text-xs font-bold text-zinc-600">&times;</span>
-              <NumInput value={row.slMultiplier} onChange={v => onUpdate({ slMultiplier: v })} className="w-9"
-                title="Exit when premium moves this multiple against you (must be above 1)" />
+            <div className="flex items-center gap-2">
+              <div className="flex items-center gap-1">
+                <span className="text-[9px] font-black text-amber-400">SL &#8377;</span>
+                <NumInput value={row.slRupees} onChange={v => onUpdate({ slRupees: v })} className="w-14"
+                  title="Exit at this rupee loss on the pair — independent of SL &times;" />
+              </div>
+              <div className="flex items-center gap-1">
+                <span className="text-[9px] font-black text-amber-500">SL &times;</span>
+                <NumInput value={row.slMultiplier} onChange={v => onUpdate({ slMultiplier: v })} className="w-9"
+                  title="Exit when premium moves this multiple against you (must be above 1) — independent of SL &#8377;" />
+              </div>
             </div>
           </div>
           <div className="flex items-center gap-2 mt-1">
@@ -1142,7 +1178,7 @@ function FocusTableRow({
 
 function FocusRowCard({
   row, live, lotSize, spot, liveRealMoney, broker, busy,
-  onUpdate, onDelete, onArm, onDisarm, onExit, onAddLot, onReduceLot,
+  onUpdate, onDelete, onArm, onDisarm, onExit, onAddLot, onReduceLot, onShift,
 }: {
   row: FocusRow;
   live: RowLive;
@@ -1153,6 +1189,7 @@ function FocusRowCard({
   onExit: (leg: 'CE' | 'PE' | 'ALL') => void;
   onAddLot: (leg: 'CE' | 'PE') => void;
   onReduceLot: (leg: 'CE' | 'PE') => void;
+  onShift: (leg: 'CE' | 'PE', direction: 'UP' | 'DOWN') => void;
 }) {
   const combinedLtp = (live.ltpCe ?? 0) + (live.ltpPe ?? 0);
   const canTrade = liveRealMoney && !busy && (live.ceStrike != null || live.peStrike != null) && (lotSize ?? 0) > 0;
@@ -1237,7 +1274,7 @@ function FocusRowCard({
 
       {/* Strike editor */}
       <div className="bg-zinc-950/20 border border-zinc-800/40 rounded-xl p-3">
-        <StrikeEditor row={row} live={live} step={step} onUpdate={onUpdate} />
+        <StrikeEditor row={row} live={live} step={step} onUpdate={onUpdate} onShift={onShift} shiftDisabled={busy} />
       </div>
 
       {/* CE and PE Legs */}
@@ -1427,7 +1464,7 @@ export default function FocusTool() {
   const [peakMtm, setPeakMtm] = useState(0);
   const [lockMtm, setLockMtm] = useState<number | null>(null);
 
-  const [activeModal, setActiveModal] = useState<'exit-rules' | 'risk' | 'orderbook' | null>(null);
+  const [activeModal, setActiveModal] = useState<'risk' | 'orderbook' | null>(null);
   const [viewMode, setViewMode] = useState<'table' | 'cards'>('table');
   const [orders, setOrders] = useState<Record<string, unknown>[]>([]);
   const [ordersLoading, setOrdersLoading] = useState(false);
@@ -2018,7 +2055,7 @@ export default function FocusTool() {
   async function placeLeg(
     row: FocusRow,
     leg: 'CE' | 'PE',
-    opts: { reduce: boolean; lots?: number; all?: boolean },
+    opts: { reduce: boolean; lots?: number; all?: boolean; strikeOverride?: number },
   ): Promise<boolean> {
     const u = row.underlying;
     const what = `${u} ${leg}`;
@@ -2029,7 +2066,10 @@ export default function FocusTool() {
     }
 
     const live = rowLive[row.id];
-    const strike = leg === 'CE' ? live?.ceStrike : live?.peStrike;
+    // strikeOverride lets a strike-shift open the new strike immediately —
+    // rowLive still reflects the OLD strike at this point because it derives
+    // from config state, which the shift only updates after this call.
+    const strike = opts.strikeOverride ?? (leg === 'CE' ? live?.ceStrike : live?.peStrike);
     const lotSize = lotSizes[u];
     if (!strike || !lotSize) {
       addToast('error', `${what} order not sent`, 'Strike or lot size not resolved yet');
@@ -2098,6 +2138,84 @@ export default function FocusTool() {
       addToast('error', `${what} order failed`, String(e));
       return false;
     }
+  }
+
+  /**
+   * Shift one leg's strike up or down by one listed step — same behavior as
+   * AdvancedScalper's chevrons: an open position is closed at the current
+   * strike and reopened at the new one for the same quantity, then the row's
+   * own strike-resolution config is moved so it keeps pointing at the new
+   * strike (ATM mode: the leg's offset ±1 step, mirrored to the other leg
+   * when linked; PREMIUM mode: the leg's target premium reset to the new
+   * strike's own LTP so it keeps resolving there). A flat leg just moves the
+   * config — no orders.
+   */
+  async function handleShiftStrike(row: FocusRow, leg: 'CE' | 'PE', direction: 'UP' | 'DOWN') {
+    if (busyRows.has(row.id)) return;
+    const u = row.underlying;
+    const step = STRIKE_STEP[u];
+    const live = rowLive[row.id] ?? EMPTY_ROW_LIVE;
+    const currStrike = leg === 'CE' ? live.ceStrike : live.peStrike;
+    if (currStrike == null) {
+      addToast('error', 'Cannot shift', `${leg} strike not resolved yet`);
+      return;
+    }
+    const newStrike = direction === 'UP' ? currStrike + step : currStrike - step;
+    const newRef = lookups[u]?.strikes?.[strikeKey(newStrike)];
+    const hasContract = broker === 'dhan' ? !!(leg === 'CE' ? newRef?.ceId : newRef?.peId)
+                                           : !!(leg === 'CE' ? newRef?.ceSymbol : newRef?.peSymbol);
+    if (!hasContract) {
+      addToast('error', 'Cannot shift', `No ${broker} contract for ${newStrike} ${leg}`);
+      return;
+    }
+
+    await runRowAction(row.id, async () => {
+      const pos = leg === 'CE' ? live.cePosition : live.pePosition;
+      const netQty = Number(pos?.netQty ?? 0);
+
+      if (netQty !== 0) {
+        const lotSize = lotSizes[u];
+        if (!lotSize) {
+          addToast('error', 'Cannot shift', `Lot size for ${u} not resolved yet`);
+          return;
+        }
+        const closed = await placeLeg(row, leg, { reduce: true, all: true });
+        if (!closed) {
+          addToast('error', 'Shift aborted', `${currStrike} ${leg} close was not confirmed — position left untouched`);
+          return;
+        }
+        const lots = Math.round(Math.abs(netQty) / lotSize);
+        if (lots > 0) {
+          const opened = await placeLeg(row, leg, { reduce: false, lots, strikeOverride: newStrike });
+          if (!opened) {
+            addToast('error', 'Shift incomplete', `Closed ${currStrike} ${leg} but the new ${newStrike} ${leg} order failed — reopen manually`);
+          }
+        }
+      }
+
+      // Move the row's own config so it keeps resolving to the new strike —
+      // mirrors StrikeEditor's linked-offset-negation logic (setLeg) so a
+      // shift on a linked row keeps CE/PE as a symmetric strangle.
+      const linked = row.linked ?? true;
+      if (row.strikeMode === 'PREMIUM') {
+        const oc = chains[u]?.oc;
+        const newLtp = oc?.[strikeKey(newStrike)]?.[leg === 'CE' ? 'ce' : 'pe'];
+        if (!(Number(newLtp) > 0)) {
+          addToast('error', 'Strike shifted, target not updated', `No live premium for ${newStrike} ${leg} yet — set the ₹ target manually`);
+          return;
+        }
+        const val = String(newLtp);
+        const patch: Partial<FocusRow> = leg === 'CE' ? { cePremium: val } : { pePremium: val };
+        if (linked) { if (leg === 'CE') patch.pePremium = val; else patch.cePremium = val; }
+        updateRow(row.id, patch, true);
+      } else {
+        const curOffset = leg === 'CE' ? (row.ceOffset ?? 0) : (row.peOffset ?? 0);
+        const newOffset = curOffset + (direction === 'UP' ? 1 : -1);
+        const patch: Partial<FocusRow> = leg === 'CE' ? { ceOffset: newOffset } : { peOffset: newOffset };
+        if (linked) { if (leg === 'CE') patch.peOffset = -newOffset; else patch.ceOffset = -newOffset; }
+        updateRow(row.id, patch, true);
+      }
+    });
   }
 
   /** Serialise a row's orders and disable its buttons while one is in flight. */
@@ -2250,7 +2368,6 @@ export default function FocusTool() {
         lockRupees={lockRupees} setLockRupees={setLockRupees}
         onSave={() => saveConfig()} saving={saving} peakMtm={peakMtm} lockMtm={lockMtm}
         copyTrade={copyTrade}
-        onOpenExitRules={() => setActiveModal('exit-rules')}
         onOpenRisk={() => setActiveModal('risk')}
         onOpenOrders={() => setActiveModal('orderbook')}
         onToggleViewMode={() => setViewMode(v => v === 'cards' ? 'table' : 'cards')}
@@ -2301,6 +2418,7 @@ export default function FocusTool() {
                           })}
                           onAddLot={leg => runRowAction(row.id, () => placeLeg(row, leg, { reduce: false, lots: 1 }))}
                           onReduceLot={leg => runRowAction(row.id, () => placeLeg(row, leg, { reduce: true, lots: 1 }))}
+                          onShift={(leg, dir) => handleShiftStrike(row, leg, dir)}
                         />
                       ))}
                     </div>
@@ -2354,6 +2472,7 @@ export default function FocusTool() {
                           })}
                           onAddLot={leg => runRowAction(row.id, () => placeLeg(row, leg, { reduce: false, lots: 1 }))}
                           onReduceLot={leg => runRowAction(row.id, () => placeLeg(row, leg, { reduce: true, lots: 1 }))}
+                          onShift={(leg, dir) => handleShiftStrike(row, leg, dir)}
                         />
                       ))}
                       {rows.length === 0 && (
@@ -2386,62 +2505,6 @@ export default function FocusTool() {
         })}
       </div>
 
-      <FocusModal
-        isOpen={activeModal === 'exit-rules'}
-        onClose={() => setActiveModal(null)}
-        title="Active Exit Rules"
-      >
-        <div className="flex flex-col gap-3">
-          {config.rows.filter(r => r.status === 'armed' || r.status === 'entered').length === 0 ? (
-            <div className="text-center py-12 text-zinc-500 text-xs font-semibold">
-              No armed or open rows configured.
-            </div>
-          ) : (
-            config.rows.filter(r => r.status === 'armed' || r.status === 'entered').map(row => {
-              const rules: string[] = [];
-              rules.push("Intraday auto-exit at 15:17");
-              if (row.exitTime) rules.push(`Time of day exit at ${row.exitTime}`);
-              if (row.levelHigh) rules.push(`H↑ Spot Level: exit if Spot ≥ ${row.levelHigh}`);
-              if (row.levelLow) rules.push(`L↓ Spot Level: exit if Spot ≤ ${row.levelLow}`);
-              if (row.levelVw) rules.push("VWAP adverse cross: exit if premium breaches session VWAP");
-              if (row.slRupees) rules.push(`Rupee Stop Loss: exit if loss ≥ ₹${Number(row.slRupees).toLocaleString('en-IN')}`);
-              if (row.slMultiplier && Number(row.slMultiplier) > 1) {
-                rules.push(`Multiplier Stop Loss: exit if premium moves ${row.slMultiplier}x against you`);
-              }
-
-              return (
-                <div key={row.id} className="bg-zinc-950/40 border border-zinc-800 rounded-xl p-4 flex flex-col gap-2">
-                  <div className="flex items-center justify-between border-b border-zinc-800 pb-2">
-                    <div className="flex items-center gap-2">
-                      <span className="text-xs font-bold text-white">{row.underlying}</span>
-                      <span className="text-[10px] text-zinc-500 font-mono">
-                        {row.side} &middot; {row.lots} Lot{row.lots > 1 ? 's' : ''} &middot; {row.strikeMode === 'PREMIUM'
-                          ? `CE ₹${row.cePremium || '—'} / PE ₹${row.pePremium || '—'}`
-                          : row.ceOffset === 0 && row.peOffset === 0 ? 'ATM straddle'
-                            : `CE ${row.ceOffset >= 0 ? '+' : ''}${row.ceOffset} / PE ${row.peOffset >= 0 ? '+' : ''}${row.peOffset}`}
-                      </span>
-                    </div>
-                    <span className={cn(
-                      'text-[9px] font-black uppercase tracking-wider px-1.5 py-0.5 rounded border',
-                      row.status === 'entered' ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30' : 'bg-amber-500/10 text-amber-400 border-amber-500/30'
-                    )}>
-                      {row.status}
-                    </span>
-                  </div>
-                  <div className="flex flex-col gap-1.5 text-xs text-zinc-300">
-                    {rules.map((r, i) => (
-                      <div key={i} className="flex items-start gap-2">
-                        <span className="text-zinc-600 font-bold font-mono">{i + 1}.</span>
-                        <span className="font-mono leading-tight">{r}</span>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              );
-            })
-          )}
-        </div>
-      </FocusModal>
 
       <FocusModal
         isOpen={activeModal === 'risk'}
