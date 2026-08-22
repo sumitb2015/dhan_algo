@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { RefreshCw, TrendingUp, TrendingDown } from 'lucide-react';
 import NavBar from './NavBar';
 import { cn } from '@/lib/utils';
@@ -50,7 +50,12 @@ function StockRow({ result, type, isIndexMode }: { result: PersistenceResult; ty
           {count}/{total}
         </span>
       </div>
-      <div className="flex-shrink-0 w-16 text-right">
+      <div className="flex-shrink-0 w-20 text-right">
+        <span className="text-[12px] font-bold font-mono tabular-nums text-zinc-200">
+          ₹{result.latestClose.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+        </span>
+      </div>
+      <div className="flex-shrink-0 w-20 text-right">
         <span className={cn('text-[12px] font-bold font-mono tabular-nums', isPos ? 'text-emerald-400' : 'text-red-400')}>
           {isPos ? '+' : ''}{cum.toFixed(1)}%
         </span>
@@ -80,7 +85,8 @@ function SidePanel({ title, count, results, type, isIndexMode }: {
         </div>
         <div className="flex-1 text-[10px] font-bold text-white uppercase tracking-wide">Sessions</div>
         <div className="w-12 text-right text-[10px] font-bold text-white uppercase tracking-wide">Count</div>
-        <div className="w-16 text-right text-[10px] font-bold text-white uppercase tracking-wide">Σ%</div>
+        <div className="w-20 text-right text-[10px] font-bold text-white uppercase tracking-wide">LTP</div>
+        <div title="Compounded return across the selected session window" className="w-20 text-right text-[10px] font-bold text-white uppercase tracking-wide">Return %</div>
       </div>
       <div className="overflow-y-auto flex-1" style={{ maxHeight: 'calc(100vh - 220px)' }}>
         {results.length === 0
@@ -99,22 +105,32 @@ export default function MoversPlusDashboard() {
   const [error, setError] = useState<string | null>(null);
   const [pendingSessions, setPendingSessions] = useState(DEFAULT.sessions);
   const [pendingMin, setPendingMin] = useState(DEFAULT.minAppearances);
+  const requestId = useRef(0);
 
   const fetchData = useCallback(async (s: Settings, bust = false) => {
+    const id = ++requestId.current;
     setLoading(true); setError(null);
     try {
       const bust_param = bust ? '&bust' : '';
       const res = await fetch(`/api/movers-plus?index=${s.index}&sessions=${s.sessions}&min=${s.minAppearances}${bust_param}`);
       if (!res.ok) throw new Error(await res.text());
-      setData(await res.json());
-    } catch (e) { setError(e instanceof Error ? e.message : 'Unknown error'); }
-    finally { setLoading(false); }
+      const nextData = await res.json();
+      if (id === requestId.current) setData(nextData);
+    } catch (e) {
+      if (id === requestId.current) setError(e instanceof Error ? e.message : 'Unknown error');
+    } finally {
+      if (id === requestId.current) setLoading(false);
+    }
   }, []);
 
   useEffect(() => { fetchData(settings); }, [settings, fetchData]);
 
   function applySettings() {
-    setSettings({ ...settings, sessions: pendingSessions, minAppearances: pendingMin });
+    const sessions = Math.min(60, Math.max(3, pendingSessions));
+    const minAppearances = Math.min(sessions, Math.max(1, pendingMin));
+    setPendingSessions(sessions);
+    setPendingMin(minAppearances);
+    setSettings({ ...settings, sessions, minAppearances });
   }
 
   return (
@@ -129,17 +145,15 @@ export default function MoversPlusDashboard() {
         </div>
         <div className="w-px h-5 bg-zinc-800 hidden sm:block" />
         <NavBar />
-        {data && (
-          <span className="ml-auto text-[10px] font-mono font-bold text-zinc-400 px-2 py-0.5 rounded-sm bg-zinc-900 border border-zinc-800 uppercase tracking-wide">
-            DATA: {data.dataDate}
-          </span>
-        )}
+        <span className="ml-auto text-[10px] font-mono font-bold text-zinc-400 px-2 py-0.5 rounded-sm bg-zinc-900 border border-zinc-800 uppercase tracking-wide">
+          DATA: {data?.dataDate ?? '—'}
+        </span>
       </header>
 
       <main className="flex-1 px-3 py-2 flex flex-col gap-2 mx-auto w-full">
         {/* Description */}
         <p className="text-[10px] text-zinc-600 font-mono uppercase tracking-wider">
-          Persistence tracker — profitable / loss sessions over a configurable window
+          Persistence tracker — positive / negative price-return sessions over a configurable window
         </p>
 
         {/* Settings bar */}
@@ -169,7 +183,11 @@ export default function MoversPlusDashboard() {
               </span>
               <div className="flex items-center gap-2">
                 <input type="range" min={3} max={60} value={pendingSessions}
-                  onChange={e => setPendingSessions(Number(e.target.value))}
+                  onChange={e => {
+                    const sessions = Number(e.target.value);
+                    setPendingSessions(sessions);
+                    setPendingMin(min => Math.min(min, sessions));
+                  }}
                   className="w-28 accent-amber-500 h-1" />
                 <span className="text-[11px] font-bold font-mono text-zinc-300 w-5">{pendingSessions}</span>
               </div>
@@ -181,7 +199,7 @@ export default function MoversPlusDashboard() {
                 Min appearances — <span className="text-amber-400 font-mono">{pendingMin}</span>
               </span>
               <div className="flex items-center gap-2">
-                <input type="range" min={1} max={Math.max(1, pendingSessions - 2)} value={pendingMin}
+                <input type="range" min={1} max={pendingSessions} value={pendingMin}
                   onChange={e => setPendingMin(Number(e.target.value))}
                   className="w-28 accent-amber-500 h-1" />
                 <span className="text-[11px] font-bold font-mono text-zinc-300 w-4">{pendingMin}</span>
@@ -224,7 +242,7 @@ export default function MoversPlusDashboard() {
                 {data.staleCount} {settings.index === 'indices' ? 'index(es)' : 'stock(s)'} excluded — data behind consensus date ({data.dataDate}). Run a refresh to include them.
               </div>
             )}
-            <div className="flex gap-2 flex-1">
+            <div className="flex flex-col lg:flex-row gap-2 flex-1">
               <SidePanel title="Persistent Winners" count={data.winners.length} results={data.winners} type="winner" isIndexMode={settings.index === 'indices'} />
               <SidePanel title="Persistent Losers" count={data.losers.length} results={data.losers} type="loser" isIndexMode={settings.index === 'indices'} />
             </div>

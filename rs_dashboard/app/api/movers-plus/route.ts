@@ -45,6 +45,7 @@ function buildPersistence(
   if (rows.length < sessions + 1) return null;
 
   const slice = rows.slice(-(sessions + 1));
+  if (slice[0].close <= 0) return null;
   const days: DayEntry[] = [];
   for (let i = 1; i < slice.length; i++) {
     const prev = slice[i - 1].close;
@@ -58,8 +59,11 @@ function buildPersistence(
   if (days.length === 0) return null;
 
   const upCount = days.filter((d) => d.isUp).length;
-  const downCount = days.filter((d) => !d.isUp).length;
-  const cumulative = days.reduce((s, d) => s + d.pctChange, 0);
+  // Flat sessions are neutral; they must not make a stock appear in losers.
+  const downCount = days.filter((d) => d.pctChange < 0).length;
+  // End-to-end return is compounded through the window. Summing daily
+  // percentages is only an approximation and can be materially misleading.
+  const cumulative = ((slice[slice.length - 1].close / slice[0].close) - 1) * 100;
   const last = slice[slice.length - 1];
 
   return {
@@ -146,9 +150,18 @@ async function getMoversPlus(
 
 export async function GET(req: NextRequest) {
   const { searchParams } = req.nextUrl;
-  const indexType = searchParams.get('index') ?? 'nifty50';
-  const sessions = Math.min(60, Math.max(3, parseInt(searchParams.get('sessions') ?? '10', 10)));
-  const minAppearances = Math.max(1, parseInt(searchParams.get('min') ?? '2', 10));
+  const requestedIndex = searchParams.get('index');
+  const indexType = requestedIndex === 'nifty50' || requestedIndex === 'nifty500' || requestedIndex === 'indices'
+    ? requestedIndex
+    : 'nifty50';
+  const parsedSessions = Number.parseInt(searchParams.get('sessions') ?? '', 10);
+  const sessions = Number.isFinite(parsedSessions)
+    ? Math.min(60, Math.max(3, parsedSessions))
+    : 10;
+  const parsedMin = Number.parseInt(searchParams.get('min') ?? '', 10);
+  const minAppearances = Number.isFinite(parsedMin)
+    ? Math.min(sessions, Math.max(1, parsedMin))
+    : 2;
   const bust = searchParams.has('bust');
 
   if (bust) {
