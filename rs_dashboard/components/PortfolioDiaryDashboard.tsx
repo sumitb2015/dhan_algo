@@ -17,6 +17,12 @@ interface DailyPnlPoint {
   statutoryCharges: number;
   netPnl: number;
   tradeCount: number;
+  // Kotak-only. Its Gain/Loss export aggregates per scrip over a DATE RANGE and carries no per-trade
+  // date, so a multi-day export cannot be split into daily points — it becomes one point stamped at
+  // the range's end date with approx=true. Exact when the export covers a single day.
+  approx?: boolean;
+  spanDays?: number;
+  fromDate?: string;
 }
 
 interface TradeHistoryResponse {
@@ -28,6 +34,46 @@ interface TradeHistoryResponse {
   dailyPnl?: DailyPnlPoint[];
   dailyPnlBySegment?: Record<string, DailyPnlPoint[]>;
 }
+
+interface KotakPeriod {
+  sourceFile: string;
+  fromDate: string;
+  toDate: string;
+  spanDays: number;
+  daily: boolean;
+  grossPnl: number;
+  charges: number;
+  netPnl: number;
+  tradeCount: number;
+  reconciled: boolean;
+}
+
+interface KotakResponse {
+  success: boolean;
+  available: boolean;
+  fromDate?: string;
+  toDate?: string;
+  clientCode?: string | null;
+  periodCount?: number;
+  exactPeriodCount?: number;
+  approxPeriodCount?: number;
+  tradedDayCount?: number;
+  segments?: string[];
+  openAtEnd?: Record<string, number>;
+  totalGrossPnl?: number;
+  totalCharges?: number;
+  totalNetPnl?: number;
+  periods?: KotakPeriod[];
+  dailyPnl?: DailyPnlPoint[];
+  dailyPnlBySegment?: Record<string, DailyPnlPoint[]>;
+  marketTradingDates?: string[];
+  pendingFiles?: string[];
+  reportDir?: string;
+  skipped?: { sourceFile: string; reason: string }[];
+  failures?: { sourceFile: string; error: string }[];
+}
+
+type BrokerView = 'DHAN' | 'KOTAK' | 'COMBINED';
 
 interface Bucket {
   label: string;
@@ -289,6 +335,10 @@ const CHART_METRICS: { key: ChartMetric; label: string; color: string }[] = [
 
 export default function PortfolioDiaryDashboard() {
   const [data, setData] = useState<TradeHistoryResponse | null>(null);
+  const [kotak, setKotak] = useState<KotakResponse | null>(null);
+  const [broker, setBroker] = useState<BrokerView>('DHAN');
+  const [importing, setImporting] = useState(false);
+  const [importMsg, setImportMsg] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [tab, setTab] = useState<Tab>('weekly');
   const [selectedMonth, setSelectedMonth] = useState<string | null>(null);
@@ -312,11 +362,42 @@ export default function PortfolioDiaryDashboard() {
       .finally(() => setLoading(false));
   }, []);
 
-  useEffect(() => { fetchData(); }, [fetchData]);
+  const fetchKotak = useCallback(() => {
+    fetch('/api/kotak-pnl')
+      .then(r => r.json())
+      .then(setKotak)
+      .catch(() => setKotak({ success: false, available: false }));
+  }, []);
+
+  useEffect(() => { fetchData(); fetchKotak(); }, [fetchData, fetchKotak]);
 
   const { syncing, syncError, startSync } = useTradeSync(fetchData);
 
-  const dailyPnl = useMemo(() => {
+  // Re-parses every export in debug/kotak_pnl_reports/. Local file parse, no broker call.
+  const runKotakImport = useCallback(async () => {
+    setImporting(true);
+    setImportMsg(null);
+    try {
+      const res = await fetch('/api/kotak-pnl', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'import' }),
+      });
+      const j = await res.json();
+      if (!res.ok || j.ok === false) {
+        setImportMsg(j.error ?? 'Kotak import failed');
+      } else {
+        setImportMsg(`Imported ${j.periods} period(s) from ${j.files} file(s)${j.skipped ? `, ${j.skipped} skipped` : ''}${j.failures ? `, ${j.failures} failed` : ''}`);
+        fetchKotak();
+      }
+    } catch (e) {
+      setImportMsg(e instanceof Error ? e.message : 'Kotak import failed');
+    } finally {
+      setImporting(false);
+    }
+  }, [fetchKotak]);
+
+  const dhanDaily = useMemo(() => {
     if (segment === 'TRADING') {
       return mergeDailyPnl(data?.dailyPnlBySegment?.FNO ?? [], data?.dailyPnlBySegment?.COMMODITY ?? []);
     }
@@ -325,6 +406,48 @@ export default function PortfolioDiaryDashboard() {
     }
     return data?.dailyPnlBySegment?.[segment] ?? data?.dailyPnl ?? [];
   }, [data, segment]);
+
+  // Mirrors the Dhan mapping above. A transaction-statement import carries a real segment per fill
+  // (F&O vs MCX commodity), so these filters are meaningful rather than all-or-nothing; segments the
+  // Kotak account never traded simply resolve to an empty series.
+  const kotakDaily = useMemo(() => {
+    const bySeg = kotak?.dailyPnlBySegment;
+    if (segment === 'TRADING') return mergeDailyPnl(bySeg?.FNO ?? [], bySeg?.COMMODITY ?? []);
+    if (segment === 'INVESTING') return bySeg?.EQUITY ?? [];
+    if (segment === 'ALL') return kotak?.dailyPnl ?? [];
+    return bySeg?.[segment] ?? [];
+  }, [kotak, segment]);
+
+  const dailyPnl = useMemo(() => {
+    if (broker === 'DHAN') return dhanDaily;
+    if (broker === 'KOTAK') return kotakDaily;
+    return mergeDailyPnl(dhanDaily, kotakDaily);
+  }, [broker, dhanDaily, kotakDaily]);
+
+  const kotakAvailable = !!kotak?.available && (kotak.periodCount ?? 0) > 0;
+
+  // Any Kotak point that came from a multi-day export is stamped at its range end. It is exact in
+  // cumulative and total terms but not attributable to that one calendar day, so the day-level views
+  // (daily grid, month calendar, day-of-week) carry a caveat whenever one is in scope.
+  const hasApproxKotak = useMemo(
+    () => broker !== 'DHAN' && kotakDaily.some(d => d.approx),
+    [broker, kotakDaily],
+  );
+  // Bucket/grid extents must follow the selected broker — Kotak's history starts wherever its first
+  // export does, which is unrelated to Dhan's reporting window.
+  const [rangeFrom, rangeTo] = useMemo(() => {
+    const dhanRange: [string?, string?] = [data?.fromDate, data?.toDate];
+    const kotakRange: [string?, string?] = [kotak?.fromDate, kotak?.toDate];
+    const pick: [string?, string?][] =
+      broker === 'DHAN' ? [dhanRange] : broker === 'KOTAK' ? [kotakRange] : [dhanRange, kotakRange];
+    const froms = pick.map(r => r[0]).filter(Boolean) as string[];
+    const tos = pick.map(r => r[1]).filter(Boolean) as string[];
+    return [
+      froms.length ? froms.reduce((a, b) => (a < b ? a : b)) : undefined,
+      tos.length ? tos.reduce((a, b) => (a > b ? a : b)) : undefined,
+    ];
+  }, [broker, data, kotak]);
+
   const byDate = useMemo(() => new Map(dailyPnl.map(d => [d.date, d])), [dailyPnl]);
   const stats = useMemo(() => computeStats(dailyPnl), [dailyPnl]);
   const weekdayStats = useMemo(() => computeWeekdayStats(dailyPnl), [dailyPnl]);
@@ -334,24 +457,37 @@ export default function PortfolioDiaryDashboard() {
   );
 
   const weeklyBuckets = useMemo(
-    () => (data?.fromDate && data?.toDate ? buildWeeklyBuckets(data.fromDate, data.toDate, byDate) : []),
-    [data, byDate],
+    () => (rangeFrom && rangeTo ? buildWeeklyBuckets(rangeFrom, rangeTo, byDate) : []),
+    [rangeFrom, rangeTo, byDate],
   );
   const monthlyBuckets = useMemo(
-    () => (data?.fromDate && data?.toDate ? buildMonthlyBuckets(data.fromDate, data.toDate, byDate) : []),
-    [data, byDate],
+    () => (rangeFrom && rangeTo ? buildMonthlyBuckets(rangeFrom, rangeTo, byDate) : []),
+    [rangeFrom, rangeTo, byDate],
   );
   const monthKeys = useMemo(() => monthlyBuckets.map(b => monthKey(b.startDate)), [monthlyBuckets]);
   const yearlyBuckets = useMemo(
-    () => (data?.fromDate && data?.toDate ? buildYearlyBuckets(data.fromDate, data.toDate, byDate) : []),
-    [data, byDate],
+    () => (rangeFrom && rangeTo ? buildYearlyBuckets(rangeFrom, rangeTo, byDate) : []),
+    [rangeFrom, rangeTo, byDate],
   );
   const yearKeys = useMemo(() => yearlyBuckets.map(b => yearKey(b.startDate)), [yearlyBuckets]);
   const monthlyByKey = useMemo(() => new Map(monthlyBuckets.map(b => [monthKey(b.startDate), b])), [monthlyBuckets]);
 
+  // Switching broker changes which months/years exist. Without this the Monthly/Yearly tabs keep a
+  // selection outside the new range and render an empty scope with dead prev/next arrows.
+  useEffect(() => {
+    if (monthKeys.length && (!selectedMonth || !monthKeys.includes(selectedMonth))) {
+      setSelectedMonth(monthKeys[monthKeys.length - 1]);
+    }
+  }, [monthKeys, selectedMonth]);
+  useEffect(() => {
+    if (yearKeys.length && (!selectedYear || !yearKeys.includes(selectedYear))) {
+      setSelectedYear(yearKeys[yearKeys.length - 1]);
+    }
+  }, [yearKeys, selectedYear]);
+
   // Render all weeks side-by-side in a single row
 
-  const fyLabel = data?.fromDate ? `${data.fromDate.slice(0, 4)}-${(parseInt(data.fromDate.slice(0, 4)) + 1).toString().slice(2)}` : '';
+  const fyLabel = rangeFrom ? `${rangeFrom.slice(0, 4)}-${(parseInt(rangeFrom.slice(0, 4)) + 1).toString().slice(2)}` : '';
 
   // Day-of-month calendar grid for the Monthly tab
   const monthGrid = useMemo(() => {
@@ -371,13 +507,13 @@ export default function PortfolioDiaryDashboard() {
 
   // Day-by-day calendar grid for the Daily tab (horizontal scrollable grid)
   const dailyGrid = useMemo(() => {
-    if (!data?.fromDate || !data?.toDate) return null;
-    const start = toUTCDate(data.fromDate);
+    if (!rangeFrom || !rangeTo) return null;
+    const start = toUTCDate(rangeFrom);
     const startDow = start.getUTCDay();
     const startOffset = startDow === 0 ? 6 : startDow - 1; // Mon-start
     const gridStart = new Date(start.getTime() - startOffset * 24 * 60 * 60 * 1000);
 
-    const end = toUTCDate(data.toDate);
+    const end = toUTCDate(rangeTo);
     const endDow = end.getUTCDay();
     const endOffset = endDow === 0 ? 0 : 7 - endDow;
     const gridEnd = new Date(end.getTime() + endOffset * 24 * 60 * 60 * 1000);
@@ -389,7 +525,7 @@ export default function PortfolioDiaryDashboard() {
       curr.setUTCDate(curr.getUTCDate() + 1);
     }
     return cells;
-  }, [data]);
+  }, [rangeFrom, rangeTo]);
 
   const selectedMonthStats = useMemo(() => {
     if (!selectedMonth) return null;
@@ -444,6 +580,7 @@ export default function PortfolioDiaryDashboard() {
 
   const activeChartMetric = CHART_METRICS.find(m => m.key === chartMetric)!;
 
+
   return (
     <div className="flex flex-col flex-1 w-full bg-black min-h-screen text-zinc-200">
       <header className="w-full border-b border-zinc-900 bg-zinc-950/80 backdrop-blur-md px-4 py-2.5 flex items-center gap-4 sticky top-0 z-20 flex-wrap">
@@ -454,25 +591,60 @@ export default function PortfolioDiaryDashboard() {
           <div>
             <h1 className="text-sm font-bold tracking-tight text-white leading-none">Trader's Diary</h1>
             <p className="text-[10px] text-zinc-500 mt-0.5">
-              {data?.fromDate ? `${data.fromDate} → ${data.toDate}` : 'Loading…'}
+              {rangeFrom ? `${rangeFrom} → ${rangeTo}` : 'Loading…'}
+              {broker !== 'DHAN' && kotak?.clientCode ? ` · Kotak ${kotak.clientCode}` : ''}
             </p>
           </div>
         </div>
         <NavBar />
-        <button
-          onClick={startSync}
-          disabled={syncing || !data?.available}
-          title="Fetch new days' trades and update totals (incremental — a few seconds)"
-          className="ml-auto flex items-center gap-1.5 px-3 py-1.5 text-[11px] font-semibold rounded-lg border border-amber-500/30 bg-amber-500/10 text-amber-300 hover:bg-amber-500/20 transition-all disabled:opacity-40 disabled:cursor-not-allowed"
-        >
-          <RefreshCw className={cn('h-3.5 w-3.5', syncing && 'animate-spin')} />
-          {syncing ? 'Syncing…' : 'Sync'}
-        </button>
+        <div className="ml-auto flex items-center gap-2">
+          {broker !== 'DHAN' && (
+            <button
+              onClick={runKotakImport}
+              disabled={importing}
+              title="Re-parse every Gain/Loss export in debug/kotak_pnl_reports/"
+              className="flex items-center gap-1.5 px-3 py-1.5 text-[11px] font-semibold rounded-lg border border-violet-500/30 bg-violet-500/10 text-violet-300 hover:bg-violet-500/20 transition-all disabled:opacity-40 disabled:cursor-not-allowed"
+            >
+              <RefreshCw className={cn('h-3.5 w-3.5', importing && 'animate-spin')} />
+              {importing ? 'Importing…' : 'Import Kotak'}
+            </button>
+          )}
+          {broker !== 'KOTAK' && (
+            <button
+              onClick={startSync}
+              disabled={syncing || !data?.available}
+              title="Fetch new days' trades and update totals (incremental — a few seconds)"
+              className="flex items-center gap-1.5 px-3 py-1.5 text-[11px] font-semibold rounded-lg border border-amber-500/30 bg-amber-500/10 text-amber-300 hover:bg-amber-500/20 transition-all disabled:opacity-40 disabled:cursor-not-allowed"
+            >
+              <RefreshCw className={cn('h-3.5 w-3.5', syncing && 'animate-spin')} />
+              {syncing ? 'Syncing…' : 'Sync'}
+            </button>
+          )}
+        </div>
       </header>
 
       {syncError && (
         <div className="w-full border-b border-red-900/40 bg-red-950/20 px-4 py-1.5 text-[11px] text-red-400">
           {syncError}
+        </div>
+      )}
+
+      {importMsg && (
+        <div className="w-full border-b border-violet-900/40 bg-violet-950/20 px-4 py-1.5 text-[11px] text-violet-300">
+          {importMsg}
+        </div>
+      )}
+
+      {/* A dropped-but-unparsed export reads to the user as "loaded" — say so explicitly. */}
+      {!!kotak?.pendingFiles?.length && (
+        <div className="w-full border-b border-amber-900/40 bg-amber-950/20 px-4 py-1.5 text-[11px] text-amber-300">
+          {kotak.pendingFiles.length} Kotak export(s) not yet imported: {kotak.pendingFiles.join(', ')} — click "Import Kotak".
+        </div>
+      )}
+
+      {!!kotak?.failures?.length && (
+        <div className="w-full border-b border-red-900/40 bg-red-950/20 px-4 py-1.5 text-[11px] text-red-400">
+          Kotak import failed for: {kotak.failures.map(f => `${f.sourceFile} (${f.error})`).join('; ')}
         </div>
       )}
 
@@ -486,88 +658,174 @@ export default function PortfolioDiaryDashboard() {
       </div>
 
       <main className="flex-1 w-full mx-auto px-4 py-4">
+        {/* Banners and controls live OUTSIDE the loading/empty branches below: a broker or
+            segment with no data must not hide the controls needed to switch away from it. */}
+        {!loading && (
+          <div className="flex flex-col gap-4 mb-4">
+            {broker !== 'DHAN' && (
+            <div className="text-[10px] leading-relaxed rounded-lg border border-violet-900/40 bg-violet-950/20 px-3 py-2 text-violet-300 flex flex-col gap-1">
+              <span>
+                <span className="font-bold">Kotak data comes from statement exports, not the broker API.</span>{' '}
+                Kotak Neo has no historical trade endpoint — its trade report returns only the current day —
+                so history cannot be synced, only imported from files in debug/kotak_pnl_reports/.
+                {kotak?.exactPeriodCount ? (
+                  <> A <span className="font-semibold">Transaction Statement</span> export is per-fill, so
+                  P&amp;L is FIFO-matched per security and attributed to the actual closing-trade date —
+                  the same method the Dhan side uses — across {kotak.tradedDayCount} traded day(s) and
+                  segment(s) {(kotak.segments ?? []).join(' + ')}.</>
+                ) : null}
+              </span>
+              {hasApproxKotak && (
+                <span className="text-amber-300">
+                  {kotak?.approxPeriodCount} Gain/Loss export(s) span multiple days. That format aggregates
+                  per scrip over a date range with no per-trade date, so each is plotted as a single point at
+                  its range end: totals and cumulative P&amp;L are exact, but the daily grid, month calendar,
+                  day-of-week split and streaks are not day-accurate for those spans. Export a Transaction
+                  Statement over the same range for exact daily attribution.
+                </span>
+              )}
+              {!!kotak?.openAtEnd && Object.keys(kotak.openAtEnd).length > 0 && (
+                <span className="text-amber-300">
+                  {Object.keys(kotak.openAtEnd).length} security(ies) still hold open quantity at the end of
+                  the imported window, meaning a position was opened before it and FIFO had no cost basis —
+                  some P&amp;L is misattributed. Re-export starting earlier to clear this.
+                </span>
+              )}
+            </div>
+          )}
+          {broker !== 'KOTAK' && (
+          <p className="text-[10px] text-zinc-600 leading-relaxed">
+            F&amp;O/Commodity P&amp;L is FIFO-matched (same-day round trips, no cost-basis ambiguity). Equity
+            uses day-priority matching (same-day buys against same-day sells first, remainder against the
+            carried position at weighted-average cost) — the convention that reproduces Dhan's own
+            "Trader's Diary" most closely: July 2026 matched to within ₹1; trade counts and charges match
+            every month to the paisa. A small residual (±~₹1K) can appear on months where a position sold
+            across two months was lot-allocated differently by Dhan — the totals agree, only the monthly
+            split shifts.
+          </p>
+          )}
+          {/* Controls */}
+          <div className="flex items-center gap-3 flex-wrap">
+            {/* Broker Selector — scopes every tab, stat and chart below */}
+            <div className="flex items-center bg-zinc-900 border border-zinc-800 p-0.5 rounded-lg gap-0.5 w-fit">
+              {([
+                { key: 'DHAN', label: 'Dhan', title: 'Dhan account — synced from the broker trade API' },
+                { key: 'KOTAK', label: 'Kotak', title: 'Kotak account — imported from Gain/Loss statement exports' },
+                { key: 'COMBINED', label: 'Combined', title: 'Dhan + Kotak, summed per date' },
+              ] as const).map(o => (
+                <button
+                  key={o.key}
+                  onClick={() => setBroker(o.key)}
+                  title={o.title}
+                  disabled={o.key !== 'DHAN' && !kotakAvailable}
+                  className={cn(
+                    'px-3.5 py-1.5 text-[10px] font-semibold rounded-md transition-all uppercase tracking-wider',
+                    broker === o.key
+                      ? 'bg-violet-500/15 border border-violet-500/30 text-violet-300 font-bold'
+                      : 'text-zinc-500 hover:text-zinc-300 border border-transparent',
+                    o.key !== 'DHAN' && !kotakAvailable && 'opacity-40 cursor-not-allowed hover:text-zinc-500',
+                  )}
+                >
+                  {o.label}
+                </button>
+              ))}
+            </div>
+
+            {/* Tabs */}
+            <div className="flex items-center bg-zinc-900 border border-zinc-800 p-0.5 rounded-lg gap-0.5 w-fit">
+              {(['yearly', 'weekly', 'monthly', 'daily', 'chart'] as Tab[]).map(t => (
+                <button
+                  key={t}
+                  onClick={() => setTab(t)}
+                  className={cn(
+                    'px-3 py-1.5 text-[11px] font-semibold rounded-md transition-all capitalize',
+                    tab === t ? 'bg-amber-500/10 text-amber-400' : 'text-zinc-500 hover:text-zinc-300',
+                  )}
+                >
+                  {t}
+                </button>
+              ))}
+            </div>
+
+            {/* Segment Selector Slider-Box */}
+            <div className="flex items-center bg-zinc-900 border border-zinc-800 p-0.5 rounded-lg gap-0.5 w-fit">
+              {(['ALL', 'EQUITY', 'FNO', 'COMMODITY'] as const).map(s => (
+                <button
+                  key={s}
+                  onClick={() => setSegment(s)}
+                  className={cn(
+                    'px-3.5 py-1.5 text-[10px] font-semibold rounded-md transition-all uppercase tracking-wider',
+                    segment === s ? 'bg-amber-500/15 border border-amber-500/30 text-amber-400 font-bold' : 'text-zinc-500 hover:text-zinc-300 border border-transparent',
+                  )}
+                >
+                  {s === 'FNO' ? 'F&O' : s}
+                </button>
+              ))}
+            </div>
+
+            {/* Trading vs Investing quick-filter */}
+            <div className="flex items-center bg-zinc-900 border border-zinc-800 p-0.5 rounded-lg gap-0.5 w-fit">
+              {([
+                { key: 'TRADING', label: 'Trading', title: 'F&O + Commodity' },
+                { key: 'INVESTING', label: 'Investing', title: 'Equity' },
+              ] as const).map(o => (
+                <button
+                  key={o.key}
+                  onClick={() => setSegment(o.key)}
+                  title={o.title}
+                  className={cn(
+                    'px-3.5 py-1.5 text-[10px] font-semibold rounded-md transition-all uppercase tracking-wider',
+                    segment === o.key ? 'bg-sky-500/15 border border-sky-500/30 text-sky-400 font-bold' : 'text-zinc-500 hover:text-zinc-300 border border-transparent',
+                  )}
+                >
+                  {o.label}
+                </button>
+              ))}
+            </div>
+          </div>
+          </div>
+        )}
         {loading ? (
           <div className="flex flex-col items-center justify-center p-16 rounded-xl border border-zinc-900 bg-zinc-950/60 min-h-[300px] gap-3">
             <RefreshCw className="h-6 w-6 text-amber-500 animate-spin" />
             <span className="text-zinc-600 text-xs">Loading trade diary…</span>
           </div>
-        ) : !data?.available || dailyPnl.length === 0 ? (
+        ) : dailyPnl.length === 0 ? (
           <div className="flex flex-col items-center justify-center p-12 rounded-xl border border-zinc-900 bg-zinc-950/60 min-h-[260px] gap-3">
             <BookOpen className="h-8 w-8 text-zinc-700" />
-            <p className="text-sm font-semibold text-zinc-300">No diary data yet</p>
-            <p className="text-xs text-zinc-600 max-w-md text-center">
-              Run "Trade P&amp;L by Segment" from Reports to generate the trade history this diary is built from.
+            <p className="text-sm font-semibold text-zinc-300">
+              {kotakAvailable && broker !== 'DHAN' && segment !== 'ALL'
+                ? `No ${segment === 'FNO' ? 'F&O' : segment.toLowerCase()} data for this selection`
+                : 'No diary data yet'}
             </p>
-            <Link href="/reports" className="mt-1 px-4 py-1.5 text-xs font-semibold bg-amber-950/40 border border-amber-800 text-amber-400 rounded-lg hover:bg-amber-900/40 transition-all">
-              Go to Reports
-            </Link>
+            {broker === 'KOTAK' ? (
+              <>
+                <p className="text-xs text-zinc-600 max-w-md text-center">
+                  {kotakAvailable
+                    ? `This Kotak import covers ${(kotak?.segments ?? []).join(' and ') || 'no'} segment(s) — pick one of those, or ALL.`
+                    : 'Kotak has no historical trade API, so this view is built from statement exports. Drop the .xlsx files (a Transaction Statement gives exact daily P&L; a Gain/Loss export is a coarser fallback) into debug/kotak_pnl_reports/ and hit Import.'}
+                </p>
+                <button
+                  onClick={runKotakImport}
+                  disabled={importing}
+                  className="mt-1 px-4 py-1.5 text-xs font-semibold bg-amber-950/40 border border-amber-800 text-amber-400 rounded-lg hover:bg-amber-900/40 transition-all disabled:opacity-40"
+                >
+                  {importing ? 'Importing…' : 'Import Kotak exports'}
+                </button>
+              </>
+            ) : (
+              <>
+                <p className="text-xs text-zinc-600 max-w-md text-center">
+                  Run "Trade P&amp;L by Segment" from Reports to generate the trade history this diary is built from.
+                </p>
+                <Link href="/reports" className="mt-1 px-4 py-1.5 text-xs font-semibold bg-amber-950/40 border border-amber-800 text-amber-400 rounded-lg hover:bg-amber-900/40 transition-all">
+                  Go to Reports
+                </Link>
+              </>
+            )}
           </div>
         ) : (
           <div className="flex flex-col gap-4">
-            <p className="text-[10px] text-zinc-600 leading-relaxed">
-              F&amp;O/Commodity P&amp;L is FIFO-matched (same-day round trips, no cost-basis ambiguity). Equity
-              uses day-priority matching (same-day buys against same-day sells first, remainder against the
-              carried position at weighted-average cost) — the convention that reproduces Dhan's own
-              "Trader's Diary" most closely: July 2026 matched to within ₹1; trade counts and charges match
-              every month to the paisa. A small residual (±~₹1K) can appear on months where a position sold
-              across two months was lot-allocated differently by Dhan — the totals agree, only the monthly
-              split shifts.
-            </p>
-            {/* Controls */}
-            <div className="flex items-center gap-3 flex-wrap">
-              {/* Tabs */}
-              <div className="flex items-center bg-zinc-900 border border-zinc-800 p-0.5 rounded-lg gap-0.5 w-fit">
-                {(['yearly', 'weekly', 'monthly', 'daily', 'chart'] as Tab[]).map(t => (
-                  <button
-                    key={t}
-                    onClick={() => setTab(t)}
-                    className={cn(
-                      'px-3 py-1.5 text-[11px] font-semibold rounded-md transition-all capitalize',
-                      tab === t ? 'bg-amber-500/10 text-amber-400' : 'text-zinc-500 hover:text-zinc-300',
-                    )}
-                  >
-                    {t}
-                  </button>
-                ))}
-              </div>
-
-              {/* Segment Selector Slider-Box */}
-              <div className="flex items-center bg-zinc-900 border border-zinc-800 p-0.5 rounded-lg gap-0.5 w-fit">
-                {(['ALL', 'EQUITY', 'FNO', 'COMMODITY'] as const).map(s => (
-                  <button
-                    key={s}
-                    onClick={() => setSegment(s)}
-                    className={cn(
-                      'px-3.5 py-1.5 text-[10px] font-semibold rounded-md transition-all uppercase tracking-wider',
-                      segment === s ? 'bg-amber-500/15 border border-amber-500/30 text-amber-400 font-bold' : 'text-zinc-500 hover:text-zinc-300 border border-transparent',
-                    )}
-                  >
-                    {s === 'FNO' ? 'F&O' : s}
-                  </button>
-                ))}
-              </div>
-
-              {/* Trading vs Investing quick-filter */}
-              <div className="flex items-center bg-zinc-900 border border-zinc-800 p-0.5 rounded-lg gap-0.5 w-fit">
-                {([
-                  { key: 'TRADING', label: 'Trading', title: 'F&O + Commodity' },
-                  { key: 'INVESTING', label: 'Investing', title: 'Equity' },
-                ] as const).map(o => (
-                  <button
-                    key={o.key}
-                    onClick={() => setSegment(o.key)}
-                    title={o.title}
-                    className={cn(
-                      'px-3.5 py-1.5 text-[10px] font-semibold rounded-md transition-all uppercase tracking-wider',
-                      segment === o.key ? 'bg-sky-500/15 border border-sky-500/30 text-sky-400 font-bold' : 'text-zinc-500 hover:text-zinc-300 border border-transparent',
-                    )}
-                  >
-                    {o.label}
-                  </button>
-                ))}
-              </div>
-            </div>
-
             {/* Stats header — scoped to full range on Weekly tab, selected month/year on Monthly/Yearly tabs */}
             {(() => {
               const s = tab === 'monthly' && selectedMonthStats ? selectedMonthStats
@@ -575,8 +833,11 @@ export default function PortfolioDiaryDashboard() {
                 : stats;
               const scopeLabel = tab === 'monthly' && selectedMonth ? monthLabel(selectedMonth)
                 : tab === 'yearly' && selectedYear ? selectedYear
-                : `since ${data.fromDate}`;
-              const marketDates = data.marketTradingDates ?? [];
+                : `since ${rangeFrom}`;
+              const marketDates = Array.from(new Set([
+                ...(broker !== 'KOTAK' ? data?.marketTradingDates ?? [] : []),
+                ...(broker !== 'DHAN' ? kotak?.marketTradingDates ?? [] : []),
+              ])).filter(d => (!rangeFrom || d >= rangeFrom) && (!rangeTo || d <= rangeTo));
               const tradingDaysCount = tab === 'monthly' && selectedMonth
                 ? marketDates.filter(d => monthKey(d) === selectedMonth).length
                 : tab === 'yearly' && selectedYear
