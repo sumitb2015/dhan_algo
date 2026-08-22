@@ -895,7 +895,7 @@ function ControlStrip({
         <button
           onClick={onSave}
           disabled={saving}
-          title="Save every group's settings, the risk/trail budget and liveRealMoney to disk — this is what the Python worker reads. In-tab actions (Arm, Exit, lot changes) already save themselves; this is for the fields above and each index's group bar."
+          title="Save the free-typed number fields — Target / Stop / Trigger / Lock and each group's Spot H↑/L↓ — to disk, where the Python worker reads them. Everything else (Arm/Exit, Start/Stop, ATM BY, Product, Strikes±, Risk/Trail on-off, LIVE · REAL MONEY) already saves itself the instant you click it."
           className="flex items-center gap-1 text-xs font-bold px-3 py-1 rounded-lg bg-violet-600 text-oncolor hover:bg-violet-500 transition-colors cursor-pointer disabled:opacity-50"
         >
           <Save className="h-3 w-3" /> {saving ? 'Saving…' : 'Save Preferences'}
@@ -2893,11 +2893,66 @@ export default function FocusTool() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [liveRealMoney, workerRunning]);
 
+  /**
+   * Start/Stop, ATM BY, Product, Strikes±, and the Book Exit on/off toggle are
+   * each a single, complete choice the instant they're clicked — safe to save
+   * immediately, same as Arm. Since the Worker only ever sees the FILE (not
+   * this tab's memory), an unsaved "Start" that only lives in local state is
+   * invisible to it: the tab would honor it, the worker wouldn't, and that gap
+   * is exactly what caused the earlier "why didn't it enter" confusion.
+   *
+   * Spot H↑/L↓ are free-typed NumInputs, not a discrete choice, so they're the
+   * one exception — those stay behind the explicit Save Preferences button.
+   * Auto-saving on every keystroke would let a half-typed level (e.g. "2" on
+   * the way to typing "25000") briefly reach disk, and a worker tick landing
+   * in that instant would read spot >= 2 as breached and fire a real exit.
+   */
   function updateGroup(underlying: FocusUnderlying, patch: Partial<FocusIndexGroup>) {
+    const freeTextFields = new Set(['spotHigh', 'spotLow']);
+    const isFreeTextEdit = Object.keys(patch).every(k => freeTextFields.has(k));
+
     setConfig(prev => {
       const nextGroups = prev.groups.map(g => g.underlying === underlying ? { ...g, ...patch } : g);
-      return { ...prev, groups: nextGroups };
+      const nextConfig = { ...prev, groups: nextGroups };
+      if (!isFreeTextEdit) saveConfig(nextConfig);
+      return nextConfig;
     });
+  }
+
+  /**
+   * The risk-bar toggles (Risk enabled, Trail) and the LIVE · REAL MONEY
+   * master switch are each a single, complete flip — same reasoning as
+   * updateGroup above, and the same stakes: liveRealMoney in particular is
+   * the switch that gates every real order, so a toggle that only lives in
+   * this tab's memory until some later Save Preferences click means the
+   * Worker could keep trading (or stay dry) on the OLD value for however long
+   * that gap lasts. Reads the *new* value explicitly rather than the
+   * about-to-be-stale `riskEnabled`/etc. closures, since setState is async.
+   */
+  function saveRiskPatch(partial: Partial<Pick<FocusToolConfig,
+    'riskEnabled' | 'trailEnabled' | 'liveRealMoney'
+  >>) {
+    saveConfig({
+      riskEnabled, targetRupees, stopRupees, trailEnabled, triggerRupees, lockRupees, liveRealMoney,
+      ...partial,
+      groups: config.groups,
+      rows: config.rows,
+    });
+  }
+  function toggleRiskEnabled() {
+    const next = !riskEnabled;
+    setRiskEnabled(next);
+    saveRiskPatch({ riskEnabled: next });
+  }
+  function toggleTrailEnabled() {
+    const next = !trailEnabled;
+    setTrailEnabled(next);
+    saveRiskPatch({ trailEnabled: next });
+  }
+  function toggleLiveRealMoney() {
+    const next = !liveRealMoney;
+    setLiveRealMoney(next);
+    saveRiskPatch({ liveRealMoney: next });
   }
 
   const rowsByUnderlying = useMemo<Record<FocusUnderlying, FocusRow[]>>(() => {
@@ -2941,11 +2996,11 @@ export default function FocusTool() {
       />
 
       <ControlStrip
-        liveRealMoney={liveRealMoney} onToggleLive={() => setLiveRealMoney(v => !v)} broker={broker}
-        riskEnabled={riskEnabled} onToggleRisk={() => setRiskEnabled(v => !v)}
+        liveRealMoney={liveRealMoney} onToggleLive={toggleLiveRealMoney} broker={broker}
+        riskEnabled={riskEnabled} onToggleRisk={toggleRiskEnabled}
         targetRupees={targetRupees} setTargetRupees={setTargetRupees}
         stopRupees={stopRupees} setStopRupees={setStopRupees}
-        trailEnabled={trailEnabled} onToggleTrail={() => setTrailEnabled(v => !v)}
+        trailEnabled={trailEnabled} onToggleTrail={toggleTrailEnabled}
         triggerRupees={triggerRupees} setTriggerRupees={setTriggerRupees}
         lockRupees={lockRupees} setLockRupees={setLockRupees}
         onSave={() => saveConfig()} saving={saving} peakMtm={peakMtm} lockMtm={lockMtm}
