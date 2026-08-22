@@ -1311,10 +1311,10 @@ function FocusTableRow({
       </td>
 
       {/* CE */}
-      <td className="p-3 align-middle">
-        <div className="flex items-center gap-2">
+      <td className="p-3 align-middle text-center">
+        <div className="flex flex-col items-center gap-1.5">
           <span title="Live premium of the call leg"
-            className="text-sm font-mono font-bold text-emerald-400 tabular-nums min-w-[44px]">
+            className="text-sm font-mono font-bold text-emerald-400 tabular-nums">
             {live.ltpCe != null ? live.ltpCe.toFixed(2) : '\u2014'}
           </span>
           <LegOpenBadge pos={live.cePosition} />
@@ -1329,10 +1329,10 @@ function FocusTableRow({
       </td>
 
       {/* PE */}
-      <td className="p-3 align-middle border-r border-zinc-800">
-        <div className="flex items-center gap-2">
+      <td className="p-3 align-middle text-center border-r border-zinc-800">
+        <div className="flex flex-col items-center gap-1.5">
           <span title="Live premium of the put leg"
-            className="text-sm font-mono font-bold text-rose-400 tabular-nums min-w-[44px]">
+            className="text-sm font-mono font-bold text-rose-400 tabular-nums">
             {live.ltpPe != null ? live.ltpPe.toFixed(2) : '\u2014'}
           </span>
           <LegOpenBadge pos={live.pePosition} />
@@ -3221,8 +3221,8 @@ export default function FocusTool() {
                         <th className="p-3" title="Lots per leg">Lots</th>
                         <th className="p-3 border-r border-zinc-800" title="Trade the call, the put, or both">Side</th>
                         <th className="p-3 border-r border-zinc-800" title="Where the row stands, and its arm / exit control">Status / Actions</th>
-                        <th className="p-3" title="Call leg: live premium and lot controls">CE</th>
-                        <th className="p-3 border-r border-zinc-800" title="Put leg: live premium and lot controls">PE</th>
+                        <th className="p-3 text-center" title="Call leg: live premium and lot controls">CE</th>
+                        <th className="p-3 text-center border-r border-zinc-800" title="Put leg: live premium and lot controls">PE</th>
                         <th className="p-3" title="Spot, VWAP and stop-loss rules that close this row">Level Exits</th>
                       </tr>
                     </thead>
