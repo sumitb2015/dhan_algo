@@ -445,6 +445,9 @@ export default function WeeklyTargetDashboard() {
 
   const remaining = round2(weeklyTarget - netWeekTotal);
   const progressPct = weeklyTarget > 0 ? Math.max(0, (netWeekTotal / weeklyTarget) * 100) : 0;
+  // progressPct is floored at 0 because it drives the bar fill; the headline and the table
+  // footer show the true signed figure so they agree with the per-row % in a losing week.
+  const targetPctSigned = weeklyTarget > 0 ? (netWeekTotal / weeklyTarget) * 100 : 0;
   const targetHit = weeklyTarget > 0 && netWeekTotal >= weeklyTarget;
 
   const tradingDaysLeft = useMemo(() => {
@@ -707,7 +710,7 @@ export default function WeeklyTargetDashboard() {
                   )}
                 </div>
                 <span className={cn('text-xs font-mono font-bold', targetHit ? 'text-emerald-400' : netWeekTotal < 0 ? 'text-red-400' : 'text-zinc-300')}>
-                  {progressPct.toFixed(0)}% of target
+                  {targetPctSigned.toFixed(0)}% of target
                 </span>
               </div>
               <div className="h-3 w-full rounded-full bg-zinc-800 overflow-hidden">
@@ -926,7 +929,7 @@ export default function WeeklyTargetDashboard() {
                       <th className="text-xs font-bold text-white px-3 py-2 text-right">Gross P&amp;L</th>
                       <th className="text-xs font-bold text-white px-3 py-2 text-right">Charges</th>
                       <th className="text-xs font-bold text-white px-3 py-2 text-right">Net P&amp;L</th>
-                      <th className="text-xs font-bold text-white px-3 py-2 text-right">Cumulative</th>
+                      <th className="text-xs font-bold text-white px-3 py-2 text-right" title="Running week-to-date total of Net P&amp;L, Monday through this day">Cumulative (WTD)</th>
                       <th className="text-xs font-bold text-white px-3 py-2 text-right">% of Target</th>
                     </tr>
                   </thead>
@@ -936,6 +939,9 @@ export default function WeeklyTargetDashboard() {
                       const isExpanded = expandedDate === row.date;
                       const isToday = row.date === todayStr;
                       const pctOfTarget = weeklyTarget > 0 ? (row.cumulative / weeklyTarget) * 100 : 0;
+                      // Nothing has accrued on a holiday or a day that hasn't happened yet, so a
+                      // running total there reads as data when there is none.
+                      const isPending = row.isHoliday || row.date > todayStr;
                       return (
                         <React.Fragment key={row.date}>
                           <tr
@@ -968,8 +974,8 @@ export default function WeeklyTargetDashboard() {
                                 <td className="px-3 py-2 text-[12px] text-right">{row.tradeCount ? <PnlText v={row.netPnl} compact /> : <span className="text-zinc-600">—</span>}</td>
                               </>
                             )}
-                            <td className="px-3 py-2 text-[12px] text-right"><PnlText v={row.cumulative} compact /></td>
-                            <td className="px-3 py-2 text-[12px] text-right text-zinc-400 tabular-nums">{weeklyTarget > 0 ? `${pctOfTarget.toFixed(0)}%` : '—'}</td>
+                            <td className="px-3 py-2 text-[12px] text-right">{isPending ? <span className="text-zinc-600">—</span> : <PnlText v={row.cumulative} compact />}</td>
+                            <td className="px-3 py-2 text-[12px] text-right text-zinc-400 tabular-nums">{isPending || weeklyTarget <= 0 ? <span className="text-zinc-600">—</span> : `${pctOfTarget.toFixed(0)}%`}</td>
                           </tr>
                           {isExpanded && fills.length > 0 && (
                             <tr className="bg-zinc-950/60 border-t border-zinc-800/60">
@@ -1015,8 +1021,8 @@ export default function WeeklyTargetDashboard() {
                       <td className="px-3 py-2 text-[12px] text-right"><PnlText v={grossWeekTotal} compact /></td>
                       <td className="px-3 py-2 text-[12px] text-right font-bold text-zinc-300 tabular-nums">{fmtINR(chargesWeekTotal, true)}</td>
                       <td className="px-3 py-2 text-[12px] text-right"><PnlText v={netWeekTotal} compact /></td>
-                      <td className="px-3 py-2 text-[12px] text-right"><PnlText v={netWeekTotal} compact /></td>
-                      <td className="px-3 py-2 text-[12px] text-right font-bold text-zinc-300 tabular-nums">{weeklyTarget > 0 ? `${progressPct.toFixed(0)}%` : '—'}</td>
+                      <td className="px-3 py-2 text-[12px] text-right text-zinc-600">—</td>
+                      <td className="px-3 py-2 text-[12px] text-right font-bold text-zinc-300 tabular-nums">{weeklyTarget > 0 ? `${targetPctSigned.toFixed(0)}%` : '—'}</td>
                     </tr>
                   </tfoot>
                 </table>
