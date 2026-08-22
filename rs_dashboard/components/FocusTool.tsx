@@ -1347,8 +1347,8 @@ function FocusTableRow({
       </td>
 
       {/* LEVEL EXITS */}
-      <td className="p-3 align-middle">
-        <div className="flex flex-col gap-1.5">
+      <td className="p-3 align-middle text-center">
+        <div className="flex flex-col items-center gap-1.5">
           <div className="flex items-center gap-2">
             <div className="flex items-center gap-1">
               <span className="text-[9px] font-black text-rose-400">H&uarr;</span>
