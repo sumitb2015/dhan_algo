@@ -1145,8 +1145,8 @@ function FocusTableRow({
   onUpdate: (patch: Partial<FocusRow>, saveToDisk?: boolean) => void;
   onDelete: () => void; onArm: () => void; onDisarm: () => void;
   onExit: (leg: 'CE' | 'PE' | 'ALL') => void;
-  onAddLot: (leg: 'CE' | 'PE') => void;
-  onReduceLot: (leg: 'CE' | 'PE') => void;
+  onAddLot: (leg: 'CE' | 'PE', lots: number) => void;
+  onReduceLot: (leg: 'CE' | 'PE', lots: number) => void;
   onShift: (leg: 'CE' | 'PE', direction: 'UP' | 'DOWN') => void;
   onBlocked: (message: string) => void;
 }) {
@@ -1157,6 +1157,11 @@ function FocusTableRow({
   const canTrade = liveRealMoney && !busy && (live.ceStrike != null || live.peStrike != null) && (lotSize ?? 0) > 0;
   const flat = legsFlat(live);
   const step = STRIKE_STEP[row.underlying];
+  // How many lots the +/- buttons act on, independently per leg — e.g. add 2
+  // lots of CE and 1 of PE in one click each, rather than clicking + twice on
+  // one side. UI-only convenience, not persisted with the row.
+  const [ceQty, setCeQty] = useState(1);
+  const [peQty, setPeQty] = useState(1);
 
   return (
     <tr className="border-b border-zinc-700/70 hover:bg-zinc-800/20 transition-colors">
@@ -1314,8 +1319,10 @@ function FocusTableRow({
           </span>
           <LegOpenBadge pos={live.cePosition} />
           <div className="flex items-center gap-1">
-            <button onClick={() => onAddLot('CE')} title="Add one lot to the CE leg" className="h-6 w-6 rounded-md bg-zinc-800 border border-zinc-700 text-zinc-300 font-bold flex items-center justify-center hover:bg-violet-600 hover:border-violet-600 hover:text-oncolor cursor-pointer transition-colors">+</button>
-            <button onClick={() => onReduceLot('CE')} title="Reduce the CE leg by one lot" className="h-6 w-6 rounded-md bg-zinc-800 border border-zinc-700 text-zinc-300 font-bold flex items-center justify-center hover:bg-zinc-700 cursor-pointer transition-colors">-</button>
+            <NumInput value={String(ceQty)} onChange={v => setCeQty(Math.max(1, Number(v) || 1))}
+              className="w-9 h-6 text-center px-1" title="Lots the CE +/- buttons act on" />
+            <button onClick={() => onAddLot('CE', ceQty)} title={`Add ${ceQty} lot(s) to the CE leg`} className="h-6 w-6 rounded-md bg-zinc-800 border border-zinc-700 text-zinc-300 font-bold flex items-center justify-center hover:bg-violet-600 hover:border-violet-600 hover:text-oncolor cursor-pointer transition-colors">+</button>
+            <button onClick={() => onReduceLot('CE', ceQty)} title={`Reduce the CE leg by ${ceQty} lot(s)`} className="h-6 w-6 rounded-md bg-zinc-800 border border-zinc-700 text-zinc-300 font-bold flex items-center justify-center hover:bg-zinc-700 cursor-pointer transition-colors">-</button>
             <button onClick={() => onExit('CE')} title="Close the CE leg at market" className="text-xs font-bold px-2 py-1 rounded-md bg-rose-600 text-oncolor hover:bg-rose-500 cursor-pointer transition-colors">Exit</button>
           </div>
         </div>
@@ -1330,8 +1337,10 @@ function FocusTableRow({
           </span>
           <LegOpenBadge pos={live.pePosition} />
           <div className="flex items-center gap-1">
-            <button onClick={() => onAddLot('PE')} title="Add one lot to the PE leg" className="h-6 w-6 rounded-md bg-zinc-800 border border-zinc-700 text-zinc-300 font-bold flex items-center justify-center hover:bg-violet-600 hover:border-violet-600 hover:text-oncolor cursor-pointer transition-colors">+</button>
-            <button onClick={() => onReduceLot('PE')} title="Reduce the PE leg by one lot" className="h-6 w-6 rounded-md bg-zinc-800 border border-zinc-700 text-zinc-300 font-bold flex items-center justify-center hover:bg-zinc-700 cursor-pointer transition-colors">-</button>
+            <NumInput value={String(peQty)} onChange={v => setPeQty(Math.max(1, Number(v) || 1))}
+              className="w-9 h-6 text-center px-1" title="Lots the PE +/- buttons act on" />
+            <button onClick={() => onAddLot('PE', peQty)} title={`Add ${peQty} lot(s) to the PE leg`} className="h-6 w-6 rounded-md bg-zinc-800 border border-zinc-700 text-zinc-300 font-bold flex items-center justify-center hover:bg-violet-600 hover:border-violet-600 hover:text-oncolor cursor-pointer transition-colors">+</button>
+            <button onClick={() => onReduceLot('PE', peQty)} title={`Reduce the PE leg by ${peQty} lot(s)`} className="h-6 w-6 rounded-md bg-zinc-800 border border-zinc-700 text-zinc-300 font-bold flex items-center justify-center hover:bg-zinc-700 cursor-pointer transition-colors">-</button>
             <button onClick={() => onExit('PE')} title="Close the PE leg at market" className="text-xs font-bold px-2 py-1 rounded-md bg-rose-600 text-oncolor hover:bg-rose-500 cursor-pointer transition-colors">Exit</button>
           </div>
         </div>
@@ -1418,8 +1427,8 @@ function FocusRowCard({
   onUpdate: (patch: Partial<FocusRow>, saveToDisk?: boolean) => void;
   onDelete: () => void; onArm: () => void; onDisarm: () => void;
   onExit: (leg: 'CE' | 'PE' | 'ALL') => void;
-  onAddLot: (leg: 'CE' | 'PE') => void;
-  onReduceLot: (leg: 'CE' | 'PE') => void;
+  onAddLot: (leg: 'CE' | 'PE', lots: number) => void;
+  onReduceLot: (leg: 'CE' | 'PE', lots: number) => void;
   onShift: (leg: 'CE' | 'PE', direction: 'UP' | 'DOWN') => void;
   onBlocked: (message: string) => void;
 }) {
@@ -1428,6 +1437,10 @@ function FocusRowCard({
   const canTrade = liveRealMoney && !busy && (live.ceStrike != null || live.peStrike != null) && (lotSize ?? 0) > 0;
   const flat = legsFlat(live);
   const step = STRIKE_STEP[row.underlying];
+  // How many lots the +/- buttons act on, independently per leg — see the
+  // matching note in FocusTableRow. UI-only, not persisted.
+  const [ceQty, setCeQty] = useState(1);
+  const [peQty, setPeQty] = useState(1);
 
   return (
     <div className={cn(
@@ -1531,8 +1544,10 @@ function FocusRowCard({
             <LegOpenBadge pos={live.cePosition} />
           </div>
           <div className="flex items-center gap-1">
-            <button onClick={() => onAddLot('CE')} title="Add CE lot" className="h-5 w-5 rounded bg-zinc-800 text-zinc-300 font-bold flex items-center justify-center hover:bg-violet-600 cursor-pointer">+</button>
-            <button onClick={() => onReduceLot('CE')} title="Reduce CE lot" className="h-5 w-5 rounded bg-zinc-800 text-zinc-300 font-bold flex items-center justify-center hover:bg-zinc-700 cursor-pointer">-</button>
+            <NumInput value={String(ceQty)} onChange={v => setCeQty(Math.max(1, Number(v) || 1))}
+              className="w-8 h-5 text-center px-0.5" title="Lots the CE +/- buttons act on" />
+            <button onClick={() => onAddLot('CE', ceQty)} title={`Add ${ceQty} CE lot(s)`} className="h-5 w-5 rounded bg-zinc-800 text-zinc-300 font-bold flex items-center justify-center hover:bg-violet-600 cursor-pointer">+</button>
+            <button onClick={() => onReduceLot('CE', ceQty)} title={`Reduce CE by ${ceQty} lot(s)`} className="h-5 w-5 rounded bg-zinc-800 text-zinc-300 font-bold flex items-center justify-center hover:bg-zinc-700 cursor-pointer">-</button>
             <button onClick={() => onExit('CE')} title="Exit CE leg" className="text-[10px] font-bold px-1.5 py-0.5 rounded bg-rose-600 text-oncolor hover:bg-rose-500 cursor-pointer">Exit</button>
           </div>
         </div>
@@ -1543,8 +1558,10 @@ function FocusRowCard({
             <LegOpenBadge pos={live.pePosition} />
           </div>
           <div className="flex items-center gap-1">
-            <button onClick={() => onAddLot('PE')} title="Add PE lot" className="h-5 w-5 rounded bg-zinc-800 text-zinc-300 font-bold flex items-center justify-center hover:bg-violet-600 cursor-pointer">+</button>
-            <button onClick={() => onReduceLot('PE')} title="Reduce PE lot" className="h-5 w-5 rounded bg-zinc-800 text-zinc-300 font-bold flex items-center justify-center hover:bg-zinc-700 cursor-pointer">-</button>
+            <NumInput value={String(peQty)} onChange={v => setPeQty(Math.max(1, Number(v) || 1))}
+              className="w-8 h-5 text-center px-0.5" title="Lots the PE +/- buttons act on" />
+            <button onClick={() => onAddLot('PE', peQty)} title={`Add ${peQty} PE lot(s)`} className="h-5 w-5 rounded bg-zinc-800 text-zinc-300 font-bold flex items-center justify-center hover:bg-violet-600 cursor-pointer">+</button>
+            <button onClick={() => onReduceLot('PE', peQty)} title={`Reduce PE by ${peQty} lot(s)`} className="h-5 w-5 rounded bg-zinc-800 text-zinc-300 font-bold flex items-center justify-center hover:bg-zinc-700 cursor-pointer">-</button>
             <button onClick={() => onExit('PE')} title="Exit PE leg" className="text-[10px] font-bold px-1.5 py-0.5 rounded bg-rose-600 text-oncolor hover:bg-rose-500 cursor-pointer">Exit</button>
           </div>
         </div>
@@ -3173,8 +3190,8 @@ export default function FocusTool() {
                             const legs = leg === 'ALL' ? legsOf(row) : [leg];
                             for (const l of legs) await placeLeg(row, l, { reduce: true, all: true });
                           })}
-                          onAddLot={leg => runRowAction(row.id, () => placeLeg(row, leg, { reduce: false, lots: 1 }))}
-                          onReduceLot={leg => runRowAction(row.id, () => placeLeg(row, leg, { reduce: true, lots: 1 }))}
+                          onAddLot={(leg, lots) => runRowAction(row.id, () => placeLeg(row, leg, { reduce: false, lots }))}
+                          onReduceLot={(leg, lots) => runRowAction(row.id, () => placeLeg(row, leg, { reduce: true, lots }))}
                           onShift={(leg, dir) => handleShiftStrike(row, leg, dir)}
                           onBlocked={msg => addToast('error', 'Strike locked', msg)}
                         />
@@ -3228,8 +3245,8 @@ export default function FocusTool() {
                             const legs = leg === 'ALL' ? legsOf(row) : [leg];
                             for (const l of legs) await placeLeg(row, l, { reduce: true, all: true });
                           })}
-                          onAddLot={leg => runRowAction(row.id, () => placeLeg(row, leg, { reduce: false, lots: 1 }))}
-                          onReduceLot={leg => runRowAction(row.id, () => placeLeg(row, leg, { reduce: true, lots: 1 }))}
+                          onAddLot={(leg, lots) => runRowAction(row.id, () => placeLeg(row, leg, { reduce: false, lots }))}
+                          onReduceLot={(leg, lots) => runRowAction(row.id, () => placeLeg(row, leg, { reduce: true, lots }))}
                           onShift={(leg, dir) => handleShiftStrike(row, leg, dir)}
                           onBlocked={msg => addToast('error', 'Strike locked', msg)}
                         />
