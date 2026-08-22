@@ -6,7 +6,7 @@ import React, {
 import NavBar from './NavBar';
 import {
   TrendingUp, Zap, ShieldOff, Shield, Activity,
-  Clock, Plus, Check, Save, Layers, Target, Lock, RefreshCw,
+  Clock, Plus, Check, Save, Layers, Target, Lock, RefreshCw, X,
 } from 'lucide-react';
 import { TabTable, type SortState } from './Scalper';
 import { useBrokerSelector, scalperRoute, BROKER_LABELS, type Broker } from '@/hooks/useBrokerSelector';
@@ -106,6 +106,13 @@ function newId(): string {
 function pnlClass(n: number | null | undefined): string {
   if (n == null || n === 0) return 'text-zinc-400';
   return n > 0 ? 'text-emerald-400' : 'text-rose-400';
+}
+
+/** True once neither leg carries a broker quantity — safe to delete the row. */
+function legsFlat(live: RowLive): boolean {
+  const ceQty = Number(live.cePosition?.netQty ?? 0);
+  const peQty = Number(live.pePosition?.netQty ?? 0);
+  return ceQty === 0 && peQty === 0;
 }
 
 // â”€â”€ Types â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
@@ -285,7 +292,7 @@ function SegPill<T extends string>({
   options, value, onChange, title,
 }: { options: readonly T[]; value: T; onChange: (v: T) => void; title?: string }) {
   return (
-    <div title={title} className="flex items-center gap-0.5 bg-zinc-900 border border-zinc-800 p-0.5 rounded-lg">
+    <div title={title} className="inline-flex items-center gap-0.5 bg-zinc-900 border border-zinc-800 p-0.5 rounded-lg">
       {options.map(o => (
         <button
           key={o}
@@ -406,7 +413,6 @@ function FocusHeader({
 
 function ControlStrip({
   liveRealMoney, onToggleLive, broker,
-  onExitAll, exitingAll,
   riskEnabled, onToggleRisk,
   targetRupees, setTargetRupees,
   stopRupees, setStopRupees,
@@ -418,7 +424,6 @@ function ControlStrip({
   onOpenExitRules, onOpenRisk, onOpenOrders, onToggleViewMode, viewMode,
 }: {
   liveRealMoney: boolean; onToggleLive: () => void; broker: Broker;
-  onExitAll: () => void; exitingAll: boolean;
   riskEnabled: boolean; onToggleRisk: () => void;
   targetRupees: string; setTargetRupees: (v: string) => void;
   stopRupees: string; setStopRupees: (v: string) => void;
@@ -688,6 +693,7 @@ function FocusTableRow({
   const combinedLtp = (live.ltpCe ?? 0) + (live.ltpPe ?? 0);
   // Orders are only sendable once the contract and its lot size are known.
   const canTrade = liveRealMoney && !busy && live.strike != null && (lotSize ?? 0) > 0;
+  const flat = legsFlat(live);
 
   return (
     <tr className="border-b border-zinc-800/60 hover:bg-zinc-800/20 transition-colors">
@@ -729,13 +735,6 @@ function FocusTableRow({
               className="flex items-center gap-1 text-[10px] font-bold text-emerald-400 border border-emerald-500/40 px-2 py-0.5 rounded hover:bg-emerald-500/10 cursor-pointer transition-colors"
             >
               <Check className="h-3 w-3" /> Save
-            </button>
-            <button
-              onClick={onDelete}
-              title="Remove this row"
-              className="text-[10px] font-bold text-zinc-600 hover:text-zinc-400 cursor-pointer transition-colors"
-            >
-              &times; clear
             </button>
           </div>
         </div>
@@ -816,6 +815,22 @@ function FocusTableRow({
             >
               Exit All
             </button>
+          )}
+          {flat ? (
+            <button
+              onClick={onDelete}
+              title="Delete this row"
+              className="flex items-center gap-1 text-[10px] font-bold text-zinc-500 hover:text-rose-400 cursor-pointer transition-colors"
+            >
+              <X className="h-3 w-3" /> Delete
+            </button>
+          ) : (
+            <span
+              title="Exit the CE/PE legs before this row can be deleted"
+              className="flex items-center gap-1 text-[10px] font-bold text-zinc-700 cursor-not-allowed"
+            >
+              <X className="h-3 w-3" /> Delete
+            </span>
           )}
         </div>
       </td>
@@ -915,6 +930,7 @@ function FocusRowCard({
 }) {
   const combinedLtp = (live.ltpCe ?? 0) + (live.ltpPe ?? 0);
   const canTrade = liveRealMoney && !busy && live.strike != null && (lotSize ?? 0) > 0;
+  const flat = legsFlat(live);
 
   return (
     <div className={cn(
@@ -935,10 +951,11 @@ function FocusRowCard({
           </span>
           <button
             onClick={onDelete}
-            title="Remove this row"
-            className="text-zinc-650 hover:text-zinc-400 font-bold text-xs p-1"
+            disabled={!flat}
+            title={flat ? 'Delete this row' : 'Exit the CE/PE legs before this row can be deleted'}
+            className="text-zinc-600 hover:text-rose-400 disabled:hover:text-zinc-700 disabled:cursor-not-allowed disabled:opacity-40 font-bold text-xs p-1"
           >
-            &times;
+            <X className="h-3.5 w-3.5" />
           </button>
         </div>
       </div>
@@ -1053,7 +1070,7 @@ function FocusRowCard({
           </button>
         )}
         {row.status === 'armed' && (
-          <button onClick={onDisarm} className="text-xs font-bold px-3 py-1.5 rounded-lg bg-zinc-700 text-zinc-200 hover:bg-zinc-650">
+          <button onClick={onDisarm} className="text-xs font-bold px-3 py-1.5 rounded-lg bg-zinc-700 text-zinc-200 hover:bg-zinc-600">
             Disarm
           </button>
         )}
@@ -1082,7 +1099,7 @@ function FocusModal({
 }) {
   if (!isOpen) return null;
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-end bg-black/70 backdrop-blur-sm transition-opacity">
+    <div className="fixed inset-0 z-50 flex items-center justify-end bg-oncolor-dark/70 backdrop-blur-sm transition-opacity">
       <div className="h-full w-full max-w-xl bg-zinc-900 border-l border-zinc-800 p-6 flex flex-col gap-4 shadow-2xl text-white overflow-y-auto">
         <div className="flex items-center justify-between border-b border-zinc-800 pb-3">
           <h2 className="text-sm font-bold uppercase tracking-wider text-zinc-100">{title}</h2>
@@ -1144,7 +1161,6 @@ export default function FocusTool() {
   // Rows with an order in flight — their leg buttons are disabled so a
   // double-click cannot send the same market order twice.
   const [busyRows, setBusyRows] = useState<Set<string>>(new Set());
-  const [exitingAll, setExitingAll] = useState(false);
   const [peakMtm, setPeakMtm] = useState(0);
   const [lockMtm, setLockMtm] = useState<number | null>(null);
 
@@ -1520,6 +1536,10 @@ export default function FocusTool() {
   }
 
   function deleteRow(id: string) {
+    if (!legsFlat(rowLive[id] ?? EMPTY_ROW_LIVE)) {
+      addToast('error', 'Cannot delete row', 'Exit the CE/PE legs first — this row still holds a position');
+      return;
+    }
     setConfig(prev => {
       const nextRows = prev.rows.filter(r => r.id !== id);
       const nextConfig = { ...prev, rows: nextRows };
@@ -1710,7 +1730,6 @@ export default function FocusTool() {
 
       <ControlStrip
         liveRealMoney={liveRealMoney} onToggleLive={() => setLiveRealMoney(v => !v)} broker={broker}
-        onExitAll={() => {}} exitingAll={exitingAll}
         riskEnabled={riskEnabled} onToggleRisk={() => setRiskEnabled(v => !v)}
         targetRupees={targetRupees} setTargetRupees={setTargetRupees}
         stopRupees={stopRupees} setStopRupees={setStopRupees}
