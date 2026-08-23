@@ -10,6 +10,127 @@ import { useBrokerSelector, scalperRoute, BROKER_LABELS, type Broker } from '@/h
 import { contractMultiplier, scaleBrokerPnl } from '@/lib/positionPnl';
 import { partialCloseChips } from '@/lib/partialQty';
 import { positionKey, positionProduct, findLivePosition, closeOrderProduct } from '@/lib/positionProduct';
+import { cn } from '@/lib/utils';
+
+// Visible keyboard-only focus ring for every clickable control on this page and
+// on AdvancedScalper.tsx (which imports this rather than redefining it, since
+// both pages share OptionPanel/PositionsTable/TabTable/FundsView already).
+// `focus-visible` (not `focus`) keeps mouse clicks silent. Mirrors FocusTool.tsx's
+// own FOCUS_RING, which stays file-local there since nothing else imports it.
+export const FOCUS_RING = 'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500/60 focus-visible:ring-offset-1 focus-visible:ring-offset-zinc-950';
+
+// Micro-type scale for this page's dense control/label text — the three sizes
+// already in use here, named once. No text-[8px] tier exists in this file
+// (unlike FocusTool's TXT_MICRO), so only three are defined.
+export const TXT_LABEL   = 'text-[9px]';  // field labels, badges — default micro size
+export const TXT_VALUE   = 'text-[10px]'; // secondary readouts, most of this file's micro text
+export const TXT_CAPTION = 'text-[11px]'; // switch labels, nuclear-action buttons
+
+/**
+ * Turns a Target/SL pair — two numbers with no visual relationship today —
+ * into one bar: rose from -SL to 0, emerald from 0 to +Target, and a marker
+ * at the current total. Mirrors FocusTool.tsx's RiskRail, minus the trail
+ * lock floor tick (this page's P&L Guard has no trail concept). Exported so
+ * AdvancedScalper.tsx's own Guard bar can reuse it rather than redefining it.
+ * The exact numbers stay as text next to the bar — on a real-money page the
+ * figure matters more than the visual, so the bar is supplementary.
+ */
+export function RiskRail({ totalPnl, target, stop }: {
+  totalPnl: number; target: number | null; stop: number | null;
+}) {
+  const hasTarget = target != null && target > 0;
+  const hasStop = stop != null && stop > 0;
+  const fmt = (v: number) => `${v >= 0 ? '+' : '−'}₹${Math.abs(v).toLocaleString('en-IN', { maximumFractionDigits: 0 })}`;
+
+  if (!hasTarget && !hasStop) {
+    return <div className="h-1.5 w-24 rounded-full bg-zinc-800 shrink-0" title="Set a Target or SL to see it plotted here" />;
+  }
+  const lo = hasStop ? -(stop as number) : Math.min(totalPnl, 0) * 1.2 || -1;
+  const hi = hasTarget ? (target as number) : Math.max(totalPnl, 0) * 1.2 || 1;
+  if (!(hi > lo)) {
+    return <div className="h-1.5 w-24 rounded-full bg-zinc-800 shrink-0" />;
+  }
+  const pct = (v: number) => ((Math.min(Math.max(v, lo), hi) - lo) / (hi - lo)) * 100;
+  const zero = pct(0);
+  return (
+    <div className="flex items-center gap-2 shrink-0">
+      <div
+        className="relative h-1.5 w-24 rounded-full bg-zinc-800 overflow-hidden"
+        title={`SL ${hasStop ? fmt(-(stop as number)) : '—'} · Target ${hasTarget ? fmt(target as number) : '—'} · Total ${fmt(totalPnl)}`}
+      >
+        <div className="absolute inset-y-0 bg-rose-500/25" style={{ left: 0, width: `${zero}%` }} />
+        <div className="absolute inset-y-0 bg-emerald-500/25" style={{ left: `${zero}%`, width: `${100 - zero}%` }} />
+        <div className="absolute inset-y-0 w-px bg-zinc-600" style={{ left: `${zero}%` }} />
+        <div
+          className={cn('absolute -top-0.5 h-2.5 w-0.5 rounded-full', totalPnl >= 0 ? 'bg-emerald-400' : 'bg-rose-400')}
+          style={{ left: `${pct(totalPnl)}%` }}
+        />
+      </div>
+      <span className={cn(TXT_VALUE, 'font-mono text-zinc-500 whitespace-nowrap')}>{fmt(totalPnl)}</span>
+    </div>
+  );
+}
+
+/**
+ * A live premium's trend over the last ~60-90s — a scalper reads momentum,
+ * not just level. Unlike FocusTool.tsx's Sparkline (which reads history
+ * sampled externally into a ref by its one parent), this one owns its own
+ * sampling: OptionPanel is rendered by both Scalper.tsx and
+ * AdvancedScalper.tsx, so a self-contained component that only needs the
+ * current `value`/`trendValue` as plain number props — and samples them into
+ * its own ref on its own interval — avoids making every parent implement the
+ * same sampling ref independently. Colored by the sign of `trendValue`'s own
+ * trend (the row's P&L, when available) rather than the plotted value's
+ * direction, since a rising premium can mean the position is winning (long)
+ * or losing (short) depending on side. Renders nothing until 2+ samples.
+ */
+function Sparkline({ value, trendValue }: { value: number; trendValue?: number }) {
+  // Write-only "keep fresh for the interval closure" refs, synced from an
+  // effect rather than assigned during render (unsafe under React's rules).
+  // The sampled series themselves live in state, not refs — reading a ref's
+  // .current during render is unsafe.
+  const valueRef = useRef(value);
+  useEffect(() => { valueRef.current = value; }, [value]);
+  const trendValueRef = useRef(trendValue);
+  useEffect(() => { trendValueRef.current = trendValue; }, [trendValue]);
+  const [history, setHistory] = useState<number[]>([]);
+  const [trend, setTrend] = useState<number[]>([]);
+  useEffect(() => {
+    const id = setInterval(() => {
+      if (valueRef.current > 0) {
+        setHistory(h => (h.length >= 50 ? [...h.slice(1), valueRef.current] : [...h, valueRef.current]));
+      }
+      if (trendValueRef.current != null) {
+        const tv = trendValueRef.current;
+        setTrend(t => (t.length >= 50 ? [...t.slice(1), tv] : [...t, tv]));
+      }
+    }, 1500);
+    return () => clearInterval(id);
+  }, []);
+  // OptionPanel (this component's only parent, in both Scalper.tsx and
+  // AdvancedScalper.tsx) re-renders on every WS tick since it needs the live
+  // `value`/`trendValue` — but `history`/`trend` only actually change every
+  // 1.5s via the sampling interval above, so the min/max/points work is
+  // memoized to run once per real data change, not once per tick.
+  const pts = useMemo(() => {
+    if (history.length < 2) return null;
+    const w = 64, h = 18;
+    const min = Math.min(...history), max = Math.max(...history);
+    const span = max - min || 1;
+    return history.map((v, i) =>
+      `${(i / (history.length - 1)) * w},${h - ((v - min) / span) * h}`).join(' ');
+  }, [history]);
+  if (!pts) return null;
+  const w = 64, h = 18;
+  const trendGood = trend.length >= 2 ? trend[trend.length - 1] >= trend[0] : null;
+  const colorClass = trendGood == null ? 'text-zinc-500' : trendGood ? 'text-emerald-400' : 'text-rose-400';
+  return (
+    <svg viewBox={`0 0 ${w} ${h}`} width={w} height={h} className={cn(colorClass, 'inline-block')} aria-hidden="true">
+      <polyline points={pts} fill="none" stroke="currentColor" strokeWidth="1.5"
+        strokeLinecap="round" strokeLinejoin="round" opacity="0.85" />
+    </svg>
+  );
+}
 
 // A MARKET close order being accepted by the broker doesn't guarantee it filled.
 // Polls the live positions book a few times so callers that chain a follow-up
@@ -1428,24 +1549,26 @@ export default function Scalper() {
 
             {/* Lots +/- */}
             <div className="flex items-center bg-zinc-900 border border-zinc-700 rounded-lg overflow-hidden shrink-0">
-              <button onClick={() => setLots(l => Math.max(1, l - 1))}
-                className="px-2.5 py-1.5 text-zinc-400 hover:text-white hover:bg-zinc-800 transition-colors font-bold text-sm">−</button>
+              <button onClick={() => setLots(l => Math.max(1, l - 1))} title="Reduce lots by one" aria-label="Reduce lots by one"
+                className={cn('px-2.5 py-1.5 text-zinc-400 hover:text-white hover:bg-zinc-800 transition-colors font-bold text-sm', FOCUS_RING)}>−</button>
               <span className="px-2 text-xs font-mono tabular-nums text-zinc-200 min-w-[3.5rem] text-center border-x border-zinc-700 whitespace-nowrap">
                 {lots} lot{lots !== 1 ? 's' : ''}
               </span>
-              <button onClick={() => setLots(l => l + 1)}
-                className="px-2.5 py-1.5 text-zinc-400 hover:text-white hover:bg-zinc-800 transition-colors font-bold text-sm">+</button>
+              <button onClick={() => setLots(l => l + 1)} title="Add one lot" aria-label="Add one lot"
+                className={cn('px-2.5 py-1.5 text-zinc-400 hover:text-white hover:bg-zinc-800 transition-colors font-bold text-sm', FOCUS_RING)}>+</button>
             </div>
 
             {/* MARKET / LIMIT toggle */}
             <div className="flex items-center bg-zinc-900 border border-zinc-800 p-0.5 rounded-xl shrink-0">
               {(['MARKET', 'LIMIT'] as const).map(m => (
                 <button key={m} onClick={() => setOrderMode(m)}
-                  className={`px-3 py-1.5 text-xs font-bold rounded-lg transition-all whitespace-nowrap ${
+                  className={cn(
+                    'px-3 py-1.5 text-xs font-bold rounded-lg transition-all whitespace-nowrap',
                     orderMode === m
                       ? 'bg-zinc-700 text-zinc-100 border border-zinc-600'
-                      : 'text-zinc-500 hover:text-zinc-300'
-                  }`}>
+                      : 'text-zinc-500 hover:text-zinc-300',
+                    FOCUS_RING,
+                  )}>
                   {m}
                 </button>
               ))}
@@ -1458,14 +1581,15 @@ export default function Scalper() {
                 bridgeStatus.status === 'STARTING' ? 'bg-yellow-400 animate-pulse'  :
                 bridgeStatus.status === 'ERROR'    ? 'bg-rose-400'                  : 'bg-zinc-600'
               }`} />
-              <span className={`text-[9px] font-bold px-1 py-0.5 rounded border w-9 text-center ${
+              <span className={cn(
+                TXT_LABEL, 'font-bold px-1 py-0.5 rounded border w-9 text-center',
                 transport === 'ws'
                   ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20'
-                  : 'bg-zinc-800 text-zinc-500 border-zinc-700'
-              }`} title={transport === 'ws' ? 'Realtime WebSocket push' : 'HTTP polling fallback'}>
+                  : 'bg-zinc-800 text-zinc-500 border-zinc-700',
+              )} title={transport === 'ws' ? 'Realtime WebSocket push' : 'HTTP polling fallback'}>
                 {transport === 'ws' ? 'WS' : 'HTTP'}
               </span>
-              {lastUpdated && <span className="text-[10px] text-zinc-500 font-mono whitespace-nowrap">{lastUpdated}</span>}
+              {lastUpdated && <span className={cn(TXT_VALUE, 'text-zinc-500 font-mono whitespace-nowrap')}>{lastUpdated}</span>}
             </div>
 
             {/* Available funds chip — min-w keeps row layout stable regardless of
@@ -1499,125 +1623,143 @@ export default function Scalper() {
               : 'bg-zinc-800 text-zinc-500 border border-zinc-700';
             return (
               <div className="flex items-center gap-3 flex-nowrap overflow-x-auto pb-1">
-                <span className="flex items-center gap-1 text-[10px] font-bold text-zinc-500 uppercase tracking-wider shrink-0 whitespace-nowrap">
-                  <Shield className="w-3 h-3" /> P&amp;L Guard
-                </span>
-
-                {broker !== 'dhan' ? (
-                  // Dhan's native /pnlExit is an account-level kill switch with no
-                  // Zerodha equivalent — showing live-looking controls here would
-                  // silently configure Dhan's guard while this tab shows Zerodha
-                  // data, so surface that plainly instead of pretending it works.
-                  <span
-                    className="px-2 py-1 rounded text-[10px] font-bold uppercase tracking-wider bg-zinc-800 text-zinc-500 border border-zinc-700 shrink-0 whitespace-nowrap"
-                    title="P&L Guard uses Dhan's native account-level pnlExit API, which has no Zerodha equivalent. Switch to Dhan to use it.">
-                    DHAN ONLY
+                <div className="flex items-center gap-3 flex-nowrap shrink-0 bg-zinc-950/40 border border-zinc-800/60 rounded-xl px-3 py-1.5">
+                  <span className={cn('flex items-center gap-1', TXT_VALUE, 'font-bold text-zinc-500 uppercase tracking-wider shrink-0 whitespace-nowrap')}>
+                    <Shield className="w-3 h-3" /> P&amp;L Guard
                   </span>
-                ) : (
-                  <>
-                    {/* Status chip */}
-                    <span className={`px-2 py-1 rounded text-[10px] font-bold uppercase tracking-wider shrink-0 whitespace-nowrap ${guardChipCls}`}>
-                      {guardLabel}
+
+                  {broker !== 'dhan' ? (
+                    // Dhan's native /pnlExit is an account-level kill switch with no
+                    // Zerodha equivalent — showing live-looking controls here would
+                    // silently configure Dhan's guard while this tab shows Zerodha
+                    // data, so surface that plainly instead of pretending it works.
+                    <span
+                      className={cn(TXT_VALUE, 'px-2 py-1 rounded font-bold uppercase tracking-wider bg-zinc-800 text-zinc-500 border border-zinc-700 shrink-0 whitespace-nowrap')}
+                      title="P&L Guard uses Dhan's native account-level pnlExit API, which has no Zerodha equivalent. Switch to Dhan to use it.">
+                      DHAN ONLY
                     </span>
+                  ) : (
+                    <>
+                      {/* Status chip */}
+                      <span className={cn(TXT_VALUE, 'px-2 py-1 rounded font-bold uppercase tracking-wider shrink-0 whitespace-nowrap', guardChipCls)}>
+                        {guardLabel}
+                      </span>
 
-                    {/* Profit target — always a positive magnitude */}
-                    <div className="flex items-center gap-1.5 shrink-0">
-                      <span className="text-[10px] text-zinc-500 font-semibold whitespace-nowrap">TARGET ₹</span>
-                      <input type="number" min="0" placeholder="e.g. 5000" value={profitTarget}
-                        onChange={e => setProfitTarget(e.target.value.replace(/-/g, ''))}
-                        className="w-24 bg-zinc-900 border border-zinc-700 text-zinc-200 text-xs font-mono
-                                   rounded px-2 py-1 focus:outline-none focus:border-emerald-500" />
-                    </div>
+                      {/* Profit target — always a positive magnitude */}
+                      <div className="flex items-center gap-1.5 shrink-0">
+                        <span className={cn(TXT_VALUE, 'text-zinc-500 font-semibold whitespace-nowrap')}>TARGET ₹</span>
+                        <input type="number" min="0" placeholder="e.g. 5000" value={profitTarget}
+                          onChange={e => setProfitTarget(e.target.value.replace(/-/g, ''))}
+                          className={cn('w-24 bg-zinc-900 border border-zinc-700 text-zinc-200 text-xs font-mono rounded px-2 py-1 focus:outline-none focus:border-emerald-500', FOCUS_RING)} />
+                      </div>
 
-                    {/* Loss limit — always a positive magnitude ("exit when loss reaches ₹X"); Dhan rejects a negative value */}
-                    <div className="flex items-center gap-1.5 shrink-0">
-                      <span className="text-[10px] text-zinc-500 font-semibold whitespace-nowrap">SL ₹</span>
-                      <input type="number" min="0" placeholder="e.g. 2000" value={lossLimit}
-                        onChange={e => setLossLimit(e.target.value.replace(/-/g, ''))}
-                        className="w-24 bg-zinc-900 border border-zinc-700 text-zinc-200 text-xs font-mono
-                                   rounded px-2 py-1 focus:outline-none focus:border-rose-500" />
-                    </div>
+                      {/* Loss limit — always a positive magnitude ("exit when loss reaches ₹X"); Dhan rejects a negative value */}
+                      <div className="flex items-center gap-1.5 shrink-0">
+                        <span className={cn(TXT_VALUE, 'text-zinc-500 font-semibold whitespace-nowrap')}>SL ₹</span>
+                        <input type="number" min="0" placeholder="e.g. 2000" value={lossLimit}
+                          onChange={e => setLossLimit(e.target.value.replace(/-/g, ''))}
+                          className={cn('w-24 bg-zinc-900 border border-zinc-700 text-zinc-200 text-xs font-mono rounded px-2 py-1 focus:outline-none focus:border-rose-500', FOCUS_RING)} />
+                      </div>
 
-                    {/* Product types */}
-                    <div className="flex items-center gap-1 shrink-0">
-                      {['INTRADAY', 'CNC', 'MARGIN'].map(pt => (
-                        <button key={pt} onClick={() => setGuardProductTypes(prev =>
-                          prev.includes(pt) ? prev.filter(x => x !== pt) : [...prev, pt]
-                        )}
-                          className={`px-2 py-1 rounded text-[10px] font-bold border transition-all whitespace-nowrap ${
-                            guardProductTypes.includes(pt)
-                              ? 'bg-violet-900/50 border-violet-500/40 text-violet-300'
-                              : 'bg-zinc-900 border-zinc-700 text-zinc-500 hover:text-zinc-300'
-                          }`}>
-                          {pt}
-                        </button>
-                      ))}
-                    </div>
+                      <RiskRail totalPnl={totalPnl} target={Number(profitTarget) || null} stop={Number(lossLimit) || null} />
 
-                    {/* Kill switch */}
-                    <button onClick={() => setEnableKillSwitch(v => !v)}
-                      className={`flex items-center gap-1.5 px-2.5 py-1 rounded text-[10px] font-bold border transition-all shrink-0 whitespace-nowrap ${
-                        enableKillSwitch
-                          ? 'bg-rose-900/50 border-rose-500/40 text-rose-300'
-                          : 'bg-zinc-900 border-zinc-700 text-zinc-500 hover:text-zinc-300'
-                      }`}>
-                      🔴 Kill Switch {enableKillSwitch ? 'ON' : 'OFF'}
-                    </button>
+                      {/* Product types */}
+                      <div className="flex items-center gap-1 shrink-0">
+                        {['INTRADAY', 'CNC', 'MARGIN'].map(pt => (
+                          <button key={pt} onClick={() => setGuardProductTypes(prev =>
+                            prev.includes(pt) ? prev.filter(x => x !== pt) : [...prev, pt]
+                          )}
+                            className={cn(
+                              TXT_VALUE, 'px-2 py-1 rounded font-bold border transition-all whitespace-nowrap',
+                              guardProductTypes.includes(pt)
+                                ? 'bg-violet-900/50 border-violet-500/40 text-violet-300'
+                                : 'bg-zinc-900 border-zinc-700 text-zinc-500 hover:text-zinc-300',
+                              FOCUS_RING,
+                            )}>
+                            {pt}
+                          </button>
+                        ))}
+                      </div>
 
-                    {/* Set button */}
-                    <button onClick={handleSetPnl} disabled={settingPnl}
-                      className="px-3 py-1.5 text-xs font-bold rounded-lg bg-violet-600 hover:bg-violet-500
-                                 text-white border border-violet-500/40 transition-all disabled:opacity-50 shrink-0 whitespace-nowrap">
-                      {settingPnl ? 'Setting…' : 'Set Guard'}
-                    </button>
-
-                    {/* Clear button */}
-                    {hasConfig && (
-                      <button onClick={handleClearPnl} disabled={clearingPnl}
-                        className={`px-3 py-1.5 text-xs font-bold rounded-lg border transition-all disabled:opacity-50 shrink-0 whitespace-nowrap ${
-                          confirmClear
-                            ? 'bg-rose-600 border-rose-500/40 text-oncolor'
-                            : 'bg-zinc-900 border-zinc-700 text-zinc-400 hover:text-zinc-200'
-                        }`}>
-                        {clearingPnl ? 'Clearing…' : confirmClear ? 'Confirm Clear?' : 'Clear Guard'}
+                      {/* Kill switch */}
+                      <button onClick={() => setEnableKillSwitch(v => !v)}
+                        aria-pressed={enableKillSwitch}
+                        className={cn(
+                          'flex items-center gap-1.5 px-2.5 py-1 rounded', TXT_VALUE, 'font-bold border transition-all shrink-0 whitespace-nowrap',
+                          enableKillSwitch
+                            ? 'bg-rose-900/50 border-rose-500/40 text-rose-300'
+                            : 'bg-zinc-900 border-zinc-700 text-zinc-500 hover:text-zinc-300',
+                          FOCUS_RING,
+                        )}>
+                        🔴 Kill Switch {enableKillSwitch ? 'ON' : 'OFF'}
                       </button>
-                    )}
-                  </>
-                )}
 
-                {/* Exit ALL Positions (broker-level nuclear) */}
+                      {/* Set button */}
+                      <button onClick={handleSetPnl} disabled={settingPnl}
+                        className={cn('px-3 py-1.5 text-xs font-bold rounded-lg bg-violet-600 hover:bg-violet-500 text-white border border-violet-500/40 transition-all disabled:opacity-50 shrink-0 whitespace-nowrap', FOCUS_RING)}>
+                        {settingPnl ? 'Setting…' : 'Set Guard'}
+                      </button>
+
+                      {/* Clear button */}
+                      {hasConfig && (
+                        <button onClick={handleClearPnl} disabled={clearingPnl}
+                          className={cn(
+                            'px-3 py-1.5 text-xs font-bold rounded-lg border transition-all disabled:opacity-50 shrink-0 whitespace-nowrap',
+                            confirmClear
+                              ? 'bg-rose-600 border-rose-500/40 text-oncolor'
+                              : 'bg-zinc-900 border-zinc-700 text-zinc-400 hover:text-zinc-200',
+                            FOCUS_RING,
+                          )}>
+                          {clearingPnl ? 'Clearing…' : confirmClear ? 'Confirm Clear?' : 'Clear Guard'}
+                        </button>
+                      )}
+                    </>
+                  )}
+
+                  {/* Current guard values — shown whenever configured, not just when broker confirms ACTIVE */}
+                  {broker === 'dhan' && hasConfig && (
+                    <span className={cn(TXT_VALUE, 'text-zinc-500 font-mono shrink-0 whitespace-nowrap')}>
+                      {Number(pnlGuardStatus?.profit) > 0 ? `🎯 ₹${pnlGuardStatus?.profit}` : ''}
+                      {Number(pnlGuardStatus?.profit) > 0 && Math.abs(Number(pnlGuardStatus?.loss)) > 0 ? '  ' : ''}
+                      {Math.abs(Number(pnlGuardStatus?.loss)) > 0 ? `🛑 ₹${Math.abs(Number(pnlGuardStatus?.loss))}` : ''}
+                    </span>
+                  )}
+
+                  {/* Persistent error — the toast auto-dismisses, this stays until the next attempt */}
+                  {broker === 'dhan' && guardError && (
+                    <span className={cn(TXT_VALUE, 'text-rose-400 font-semibold shrink-0 whitespace-nowrap')}>⚠ {guardError}</span>
+                  )}
+                </div>
+
+                {/* Exit ALL Positions (broker-level nuclear) — left outside any card
+                    so its danger styling stays the loudest thing in the strip. */}
                 <button onClick={handleExitAll} disabled={exitingAll}
-                  className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[11px] font-bold border transition-all active:scale-95 disabled:opacity-40 disabled:cursor-not-allowed shrink-0 whitespace-nowrap ${
+                  className={cn(
+                    'flex items-center gap-1.5 px-3 py-1.5 rounded-lg', TXT_CAPTION, 'font-bold border transition-all active:scale-95 disabled:opacity-40 disabled:cursor-not-allowed shrink-0 whitespace-nowrap',
                     exitingAll
                       ? 'bg-red-900/40 border-red-800 text-red-400'
                       : confirmExitAll
                       ? 'bg-red-600 border-red-500 text-oncolor animate-pulse shadow-lg shadow-red-500/20'
-                      : 'bg-red-950/60 border-red-900/60 text-red-400 hover:bg-red-900/40 hover:border-red-700 hover:text-red-300'
-                  }`}
+                      : 'bg-red-950/60 border-red-900/60 text-red-400 hover:bg-red-900/40 hover:border-red-700 hover:text-red-300',
+                    FOCUS_RING,
+                  )}
                   title="Immediately liquidate ALL positions at broker level (DELETE /positions)">
                   {exitingAll ? <RefreshCw className="h-3 w-3 animate-spin" /> : <ShieldOff className="h-3 w-3" />}
                   {exitingAll ? 'Exiting…' : confirmExitAll ? 'Confirm EXIT ALL?' : 'EXIT ALL Positions'}
                 </button>
 
-                {/* Client-side minimum profit lock (total P&L floor) */}
-                <ProfitLockControls lock={profitLock} totalPnl={totalPnl} />
+                {/* Client-side minimum profit lock (total P&L floor) — its own leading
+                    divider is redundant now that this cluster is a card; hidden rather
+                    than touched, since ProfitLockControls is shared elsewhere. */}
+                <div className="flex items-center gap-2 flex-nowrap shrink-0 bg-zinc-950/40 border border-zinc-800/60 rounded-xl px-3 py-1.5 [&>span:first-child]:hidden">
+                  <ProfitLockControls lock={profitLock} totalPnl={totalPnl} />
+                </div>
 
-                {/* Dhan → Zerodha trade replication (arm/disarm + multiplier) */}
-                <CopyTradeControls copyTrade={copyTrade} />
-
-                {/* Current guard values — shown whenever configured, not just when broker confirms ACTIVE */}
-                {broker === 'dhan' && hasConfig && (
-                  <span className="text-[10px] text-zinc-500 font-mono shrink-0 whitespace-nowrap">
-                    {Number(pnlGuardStatus?.profit) > 0 ? `🎯 ₹${pnlGuardStatus?.profit}` : ''}
-                    {Number(pnlGuardStatus?.profit) > 0 && Math.abs(Number(pnlGuardStatus?.loss)) > 0 ? '  ' : ''}
-                    {Math.abs(Number(pnlGuardStatus?.loss)) > 0 ? `🛑 ₹${Math.abs(Number(pnlGuardStatus?.loss))}` : ''}
-                  </span>
-                )}
-
-                {/* Persistent error — the toast auto-dismisses, this stays until the next attempt */}
-                {broker === 'dhan' && guardError && (
-                  <span className="text-[10px] text-rose-400 font-semibold shrink-0 whitespace-nowrap">⚠ {guardError}</span>
-                )}
+                {/* Dhan → Zerodha trade replication (arm/disarm + multiplier) — same
+                    leading-divider note as ProfitLockControls above. */}
+                <div className="flex items-center gap-2 flex-nowrap shrink-0 bg-zinc-950/40 border border-zinc-800/60 rounded-xl px-3 py-1.5 [&>span:first-child]:hidden">
+                  <CopyTradeControls copyTrade={copyTrade} />
+                </div>
               </div>
             );
           })()}
@@ -1769,18 +1911,22 @@ export default function Scalper() {
             ['funds',     []]            as const,
           ]).map(([tab, data]) => (
             <button key={tab} onClick={() => { setActiveTab(tab as typeof activeTab); setTableSort({ key: 'none', dir: 'asc' }); }}
-              className={`px-3 py-1.5 text-xs font-semibold rounded-lg transition-all capitalize ${
+              className={cn(
+                'px-3 py-1.5 text-xs font-semibold rounded-lg transition-all capitalize',
                 activeTab === tab
                   ? 'bg-zinc-700 text-zinc-100 border border-zinc-600'
-                  : 'text-zinc-500 hover:text-zinc-300'
-              }`}>
+                  : 'text-zinc-500 hover:text-zinc-300',
+                FOCUS_RING,
+              )}>
               {tab}{data.length > 0 ? ` (${data.length})` : ''}
             </button>
           ))}
           <button onClick={fetchTabData} disabled={tabLoading}
-            className="ml-auto flex items-center gap-1 px-2.5 py-1.5 text-xs font-semibold rounded-lg
-                       border border-zinc-700 bg-zinc-900 text-zinc-400 hover:text-zinc-200
-                       transition-all disabled:opacity-50">
+            className={cn(
+              'ml-auto flex items-center gap-1 px-2.5 py-1.5 text-xs font-semibold rounded-lg',
+              'border border-zinc-700 bg-zinc-900 text-zinc-400 hover:text-zinc-200',
+              'transition-all disabled:opacity-50', FOCUS_RING,
+            )}>
             <RefreshCw className={`w-3 h-3 ${tabLoading ? 'animate-spin' : ''}`} />
             Refresh
           </button>
@@ -1922,13 +2068,15 @@ export const OptionPanel = React.memo(function OptionPanel({
           <div className="flex items-center bg-zinc-900 border border-zinc-800 p-0.5 rounded-lg shrink-0">
             {(['CE', 'PE'] as const).map(s => (
               <button key={s} onClick={() => onSideChange(s)}
-                className={`px-2.5 py-1 text-xs font-bold uppercase tracking-widest rounded-md transition-all ${
+                className={cn(
+                  'px-2.5 py-1 text-xs font-bold uppercase tracking-widest rounded-md transition-all',
                   side === s
                     ? (s === 'CE'
                         ? 'bg-sky-500/10 text-sky-400 border border-sky-500/20'
                         : 'bg-rose-500/10 text-rose-400 border border-rose-500/20')
-                    : 'text-zinc-500 hover:text-zinc-300 border border-transparent'
-                }`}>
+                    : 'text-zinc-500 hover:text-zinc-300 border border-transparent',
+                  FOCUS_RING,
+                )}>
                 {s}
               </button>
             ))}
@@ -1947,9 +2095,12 @@ export const OptionPanel = React.memo(function OptionPanel({
               onClick={onShiftUp}
               disabled={orderDisabled}
               title={`Shift strike up — rolls ${rollsHalf ? 'HALF of' : 'the entire'} the open position`}
-              className="shrink-0 w-6 h-6 flex items-center justify-center rounded-lg border border-emerald-500/20
-                         bg-emerald-500/10 text-emerald-400 hover:bg-emerald-500 hover:text-oncolor hover:border-emerald-500
-                         disabled:opacity-30 disabled:cursor-not-allowed transition-all active:scale-95"
+              aria-label={`Shift ${side} strike up`}
+              className={cn(
+                'shrink-0 w-6 h-6 flex items-center justify-center rounded-lg border border-emerald-500/20',
+                'bg-emerald-500/10 text-emerald-400 hover:bg-emerald-500 hover:text-oncolor hover:border-emerald-500',
+                'disabled:opacity-30 disabled:cursor-not-allowed transition-all active:scale-95', FOCUS_RING,
+              )}
             >
               <ChevronUp size={14} strokeWidth={2.5} />
             </button>
@@ -1969,9 +2120,12 @@ export const OptionPanel = React.memo(function OptionPanel({
               onClick={onShiftDown}
               disabled={orderDisabled}
               title={`Shift strike down — rolls ${rollsHalf ? 'HALF of' : 'the entire'} the open position`}
-              className="shrink-0 w-6 h-6 flex items-center justify-center rounded-lg border border-rose-500/20
-                         bg-rose-500/10 text-rose-400 hover:bg-rose-500 hover:text-oncolor hover:border-rose-500
-                         disabled:opacity-30 disabled:cursor-not-allowed transition-all active:scale-95"
+              aria-label={`Shift ${side} strike down`}
+              className={cn(
+                'shrink-0 w-6 h-6 flex items-center justify-center rounded-lg border border-rose-500/20',
+                'bg-rose-500/10 text-rose-400 hover:bg-rose-500 hover:text-oncolor hover:border-rose-500',
+                'disabled:opacity-30 disabled:cursor-not-allowed transition-all active:scale-95', FOCUS_RING,
+              )}
             >
               <ChevronDown size={14} strokeWidth={2.5} />
             </button>
@@ -1981,9 +2135,12 @@ export const OptionPanel = React.memo(function OptionPanel({
               onClick={onRemove}
               disabled={!canRemove}
               title={canRemove ? 'Remove box' : 'Square off position before removing'}
-              className="shrink-0 w-6 h-6 flex items-center justify-center rounded-lg border border-zinc-700
-                         bg-zinc-800 text-zinc-400 hover:text-rose-300 hover:border-rose-500/40
-                         disabled:opacity-30 disabled:cursor-not-allowed transition-all text-sm font-bold"
+              aria-label="Remove box"
+              className={cn(
+                'shrink-0 w-6 h-6 flex items-center justify-center rounded-lg border border-zinc-700',
+                'bg-zinc-800 text-zinc-400 hover:text-rose-300 hover:border-rose-500/40',
+                'disabled:opacity-30 disabled:cursor-not-allowed transition-all text-sm font-bold', FOCUS_RING,
+              )}
             >×</button>
           )}
         </div>
@@ -1996,18 +2153,18 @@ export const OptionPanel = React.memo(function OptionPanel({
         <div className="flex items-center justify-center gap-2 self-center">
           {lots !== undefined && onLotsChange && (
             <div className="flex items-center bg-zinc-900 border border-zinc-700 rounded-lg overflow-hidden">
-              <button onClick={() => onLotsChange(Math.max(1, lots - 1))}
-                className="px-2.5 py-1 text-zinc-400 hover:text-white hover:bg-zinc-800 transition-colors font-bold text-sm">−</button>
+              <button onClick={() => onLotsChange(Math.max(1, lots - 1))} title="Reduce lots by one" aria-label="Reduce lots by one"
+                className={cn('px-2.5 py-1 text-zinc-400 hover:text-white hover:bg-zinc-800 transition-colors font-bold text-sm', FOCUS_RING)}>−</button>
               <span className="px-2 text-xs font-mono tabular-nums text-zinc-200 min-w-[3.5rem] text-center border-x border-zinc-700">
                 {lots} lot{lots !== 1 ? 's' : ''}
               </span>
-              <button onClick={() => onLotsChange(lots + 1)}
-                className="px-2.5 py-1 text-zinc-400 hover:text-white hover:bg-zinc-800 transition-colors font-bold text-sm">+</button>
+              <button onClick={() => onLotsChange(lots + 1)} title="Add one lot" aria-label="Add one lot"
+                className={cn('px-2.5 py-1 text-zinc-400 hover:text-white hover:bg-zinc-800 transition-colors font-bold text-sm', FOCUS_RING)}>+</button>
             </div>
           )}
           {moveFraction && onMoveFractionChange && (
             <div className="flex items-center gap-1 bg-zinc-900 border border-zinc-700 rounded-lg px-1.5 py-1">
-              <span className="text-[9px] font-bold uppercase tracking-wider text-zinc-400">Move</span>
+              <span className={cn(TXT_LABEL, 'font-bold uppercase tracking-wider text-zinc-400')}>Move</span>
               {(['HALF', 'FULL'] as const).map(f => {
                 const isHalf = f === 'HALF';
                 const dis = isHalf && !!halfMoveDisabled;
@@ -2022,11 +2179,13 @@ export const OptionPanel = React.memo(function OptionPanel({
                       : isHalf
                         ? 'Chevrons roll HALF the open quantity (rounded down to whole lots)'
                         : 'Chevrons roll the ENTIRE open position'}
-                    className={`px-1.5 py-0.5 rounded font-bold text-[9px] transition-all disabled:opacity-30 disabled:cursor-not-allowed ${
+                    className={cn(
+                      'px-1.5 py-0.5 rounded font-bold', TXT_LABEL, 'transition-all disabled:opacity-30 disabled:cursor-not-allowed',
                       moveFraction === f
                         ? 'bg-amber-600 border border-amber-400 text-oncolor'
-                        : 'bg-zinc-800 border border-zinc-700 text-zinc-400 hover:text-zinc-200'
-                    }`}
+                        : 'bg-zinc-800 border border-zinc-700 text-zinc-400 hover:text-zinc-200',
+                      FOCUS_RING,
+                    )}
                   >
                     {isHalf ? '½' : 'Full'}
                   </button>
@@ -2039,10 +2198,13 @@ export const OptionPanel = React.memo(function OptionPanel({
 
       {/* LTP + % change */}
       <div className="bg-zinc-800/50 rounded-xl p-4 text-center">
-        <p className="text-[10px] font-bold text-white uppercase tracking-widest mb-1">LTP</p>
-        <p className="text-3xl font-bold font-mono tabular-nums text-white leading-none">
-          {fmtLTP(ltp)}
-        </p>
+        <p className={cn(TXT_VALUE, 'font-bold text-white uppercase tracking-widest mb-1')}>LTP</p>
+        <div className="flex items-center justify-center gap-2">
+          <p className="text-3xl font-bold font-mono tabular-nums text-white leading-none">
+            {fmtLTP(ltp)}
+          </p>
+          <Sparkline value={ltp} trendValue={pnl} />
+        </div>
         {pct !== null ? (
           <p className={`text-sm font-semibold font-mono mt-1.5 ${isPos(pct) ? 'text-emerald-400' : 'text-rose-400'}`}>
             {isPos(pct) ? '▲' : '▼'} {Math.abs(pct).toFixed(2)}%
@@ -2061,7 +2223,7 @@ export const OptionPanel = React.memo(function OptionPanel({
         )}
         {buildupStyle && (
           <p className="mt-2">
-            <span className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded-md border text-[11px] font-bold ${buildupStyle.cls}`}>
+            <span className={cn('inline-flex items-center gap-1.5 px-2 py-0.5 rounded-md border font-bold', TXT_CAPTION, buildupStyle.cls)}>
               {buildupStyle.text}
               {(oiChgPct ?? 0) !== 0 && (
                 <span className="font-mono tabular-nums font-semibold">
@@ -2087,9 +2249,11 @@ export const OptionPanel = React.memo(function OptionPanel({
             value={limitPrice}
             onChange={e => onLimitPriceChange(e.target.value)}
             placeholder="0.00"
-            className="flex-1 bg-zinc-800 border border-zinc-700 text-zinc-200 text-sm font-mono
-                       rounded-lg px-3 py-2 focus:outline-none focus:border-emerald-500 tabular-nums
-                       placeholder:text-zinc-600"
+            className={cn(
+              'flex-1 bg-zinc-800 border border-zinc-700 text-zinc-200 text-sm font-mono',
+              'rounded-lg px-3 py-2 focus:outline-none focus:border-emerald-500 tabular-nums',
+              'placeholder:text-zinc-600', FOCUS_RING,
+            )}
           />
         </div>
       )}
@@ -2100,10 +2264,12 @@ export const OptionPanel = React.memo(function OptionPanel({
           onClick={onBuy}
           disabled={orderDisabled}
           title={!strikesReady ? 'Loading strike IDs…' : undefined}
-          className="py-3.5 px-4 text-sm font-bold rounded-xl transition-all active:scale-95
-                     bg-emerald-600 hover:bg-emerald-500 text-oncolor
-                     disabled:opacity-40 disabled:cursor-not-allowed
-                     shadow-lg shadow-emerald-900/20"
+          className={cn(
+            'py-3.5 px-4 text-sm font-bold rounded-xl transition-all active:scale-95',
+            'bg-emerald-600 hover:bg-emerald-500 text-oncolor',
+            'disabled:opacity-40 disabled:cursor-not-allowed',
+            'shadow-lg shadow-emerald-900/20', FOCUS_RING,
+          )}
         >
           {pending ? '…' : `BUY ${side}`}
         </button>
@@ -2111,10 +2277,12 @@ export const OptionPanel = React.memo(function OptionPanel({
           onClick={onSell}
           disabled={orderDisabled}
           title={!strikesReady ? 'Loading strike IDs…' : undefined}
-          className="py-3.5 px-4 text-sm font-bold rounded-xl transition-all active:scale-95
-                     bg-rose-600 hover:bg-rose-500 text-oncolor
-                     disabled:opacity-40 disabled:cursor-not-allowed
-                     shadow-lg shadow-rose-900/20"
+          className={cn(
+            'py-3.5 px-4 text-sm font-bold rounded-xl transition-all active:scale-95',
+            'bg-rose-600 hover:bg-rose-500 text-oncolor',
+            'disabled:opacity-40 disabled:cursor-not-allowed',
+            'shadow-lg shadow-rose-900/20', FOCUS_RING,
+          )}
         >
           {pending ? '…' : `SELL ${side}`}
         </button>
@@ -2176,10 +2344,10 @@ export function GuardStepper({ value, onChange, colorCls, disabled }: {
   };
   return (
     <div className="flex flex-col">
-      <button type="button" onClick={() => step(1)} tabIndex={-1} disabled={disabled}
-        className={`leading-none text-[9px] px-1 rounded-t border border-b-0 border-zinc-700 bg-zinc-800 hover:bg-zinc-700 disabled:opacity-40 disabled:cursor-not-allowed ${colorCls}`}>▲</button>
-      <button type="button" onClick={() => step(-1)} tabIndex={-1} disabled={disabled}
-        className={`leading-none text-[9px] px-1 rounded-b border border-zinc-700 bg-zinc-800 hover:bg-zinc-700 disabled:opacity-40 disabled:cursor-not-allowed ${colorCls}`}>▼</button>
+      <button type="button" onClick={() => step(1)} tabIndex={-1} disabled={disabled} aria-label="Increase by 1"
+        className={cn('leading-none', TXT_LABEL, 'px-1 rounded-t border border-b-0 border-zinc-700 bg-zinc-800 hover:bg-zinc-700 disabled:opacity-40 disabled:cursor-not-allowed', colorCls, FOCUS_RING)}>▲</button>
+      <button type="button" onClick={() => step(-1)} tabIndex={-1} disabled={disabled} aria-label="Decrease by 1"
+        className={cn('leading-none', TXT_LABEL, 'px-1 rounded-b border border-zinc-700 bg-zinc-800 hover:bg-zinc-700 disabled:opacity-40 disabled:cursor-not-allowed', colorCls, FOCUS_RING)}>▼</button>
     </div>
   );
 }
@@ -2230,9 +2398,12 @@ export function GuardInput({ value, onCommit, colorCls, focusBorderCls, disabled
         placeholder="—"
         disabled={disabled}
         title="Press Enter or click away to apply"
-        className={`w-20 bg-zinc-900 border text-xs font-mono rounded px-2 py-1 focus:outline-none tabular-nums text-right placeholder:text-zinc-600 disabled:opacity-40 ${colorCls} ${
-          dirty ? 'border-amber-400' : `border-zinc-700 ${focusBorderCls}`
-        }`}
+        className={cn(
+          'w-20 bg-zinc-900 border text-xs font-mono rounded px-2 py-1 focus:outline-none tabular-nums text-right placeholder:text-zinc-600 disabled:opacity-40',
+          colorCls,
+          dirty ? 'border-amber-400' : cn('border-zinc-700', focusBorderCls),
+          FOCUS_RING,
+        )}
       />
       <GuardStepper
         value={shown}
@@ -2343,6 +2514,13 @@ export const PositionsTable = React.memo(function PositionsTable({ data, guards,
           const isFlat = netQty === 0;
           const guardsDisabled = isClosing || isFlat;
           const hasGuard = !isFlat && guard && (guard.target || guard.sl || guard.trailEnabled);
+          // Rupee magnitude of the Target/SL price levels, for the RiskRail —
+          // same diff*qty*mult math the Target/SL subtexts below compute inline,
+          // pulled up so the rail can share it without duplicating the formula.
+          const targetRupeeMag = (!isFlat && !isNaN(targetNum) && targetNum > 0 && entryPrice > 0 && mult > 0)
+            ? Math.abs((isLong ? targetNum - entryPrice : entryPrice - targetNum) * Math.abs(netQty) * mult) : null;
+          const slRupeeMag = (!isFlat && !isNaN(slNum) && slNum > 0 && entryPrice > 0 && mult > 0)
+            ? Math.abs((isLong ? entryPrice - slNum : slNum - entryPrice) * Math.abs(netQty) * mult) : null;
 
           return (
             <tr key={i} className={`hover:bg-zinc-800/40 transition-colors ${isClosing ? 'opacity-40' : ''} ${guard?.triggered ? 'bg-zinc-800/20' : ''}`}>
@@ -2377,7 +2555,7 @@ export const PositionsTable = React.memo(function PositionsTable({ data, guards,
                     disabled={guardsDisabled}
                   />
                   {/* Preset Chips */}
-                  <div className="flex items-center gap-0.5 text-[9px] font-mono">
+                  <div className={cn('flex items-center gap-0.5', TXT_LABEL, 'font-mono')}>
                     {GUARD_PRESET_PCTS.map(pct => (
                       <button
                         key={pct}
@@ -2391,7 +2569,7 @@ export const PositionsTable = React.memo(function PositionsTable({ data, guards,
                             : entryPrice * (1 - pct / 100);
                           if (calculated > 0) onGuardChange(rowKey, 'target', calculated.toFixed(2));
                         }}
-                        className="px-1 py-0.5 rounded bg-emerald-950/80 border border-emerald-800/60 text-emerald-400 hover:bg-emerald-800 hover:text-oncolor transition-all disabled:opacity-30"
+                        className={cn('px-1 py-0.5 rounded bg-emerald-950/80 border border-emerald-800/60 text-emerald-400 hover:bg-emerald-800 hover:text-oncolor transition-all disabled:opacity-30', FOCUS_RING)}
                         title={`Set Target ${pct}% in profit from entry ₹${entryPrice.toFixed(2)}`}
                       >
                         +{pct}%
@@ -2405,7 +2583,7 @@ export const PositionsTable = React.memo(function PositionsTable({ data, guards,
                     const rupeeVal = diff * Math.abs(netQty) * mult;
                     const isProfit = diff >= 0;
                     return (
-                      <span className={`text-[9px] font-mono tabular-nums whitespace-nowrap ${isProfit ? 'text-emerald-400/90' : 'text-rose-400/90'}`}>
+                      <span className={cn(TXT_LABEL, 'font-mono tabular-nums whitespace-nowrap', isProfit ? 'text-emerald-400/90' : 'text-rose-400/90')}>
                         {isProfit ? '+' : ''}{pctVal.toFixed(1)}% ({isProfit ? '+' : ''}₹{rupeeVal.toFixed(0)})
                       </span>
                     );
@@ -2424,7 +2602,7 @@ export const PositionsTable = React.memo(function PositionsTable({ data, guards,
                     disabled={guardsDisabled}
                   />
                   {/* Preset Chips */}
-                  <div className="flex items-center gap-0.5 text-[9px] font-mono">
+                  <div className={cn('flex items-center gap-0.5', TXT_LABEL, 'font-mono')}>
                     {GUARD_PRESET_PCTS.map(pct => (
                       <button
                         key={pct}
@@ -2437,7 +2615,7 @@ export const PositionsTable = React.memo(function PositionsTable({ data, guards,
                             : entryPrice * (1 + pct / 100);
                           if (calculated > 0) onGuardChange(rowKey, 'sl', calculated.toFixed(2));
                         }}
-                        className="px-1 py-0.5 rounded bg-rose-950/80 border border-rose-800/60 text-rose-400 hover:bg-rose-800 hover:text-oncolor transition-all disabled:opacity-30"
+                        className={cn('px-1 py-0.5 rounded bg-rose-950/80 border border-rose-800/60 text-rose-400 hover:bg-rose-800 hover:text-oncolor transition-all disabled:opacity-30', FOCUS_RING)}
                         title={`Set SL ${pct}% in loss from entry ₹${entryPrice.toFixed(2)}`}
                       >
                         -{pct}%
@@ -2451,11 +2629,17 @@ export const PositionsTable = React.memo(function PositionsTable({ data, guards,
                     const rupeeVal = diff * Math.abs(netQty) * mult;
                     const isLoss = diff >= 0;
                     return (
-                      <span className={`text-[9px] font-mono tabular-nums whitespace-nowrap ${isLoss ? 'text-rose-400/90' : 'text-emerald-400/90'}`}>
+                      <span className={cn(TXT_LABEL, 'font-mono tabular-nums whitespace-nowrap', isLoss ? 'text-rose-400/90' : 'text-emerald-400/90')}>
                         {isLoss ? '-' : '+'}{pctVal.toFixed(1)}% ({isLoss ? '-' : '+'}₹{Math.abs(rupeeVal).toFixed(0)})
                       </span>
                     );
                   })()}
+                  {/* Risk rail — where this leg's unrealized P&L sits between its
+                      SL and Target rupee levels, at a glance rather than reading
+                      three disconnected numbers across two columns. */}
+                  {(targetRupeeMag != null || slRupeeMag != null) && (
+                    <RiskRail totalPnl={unrealPnl} target={targetRupeeMag} stop={slRupeeMag} />
+                  )}
                 </div>
               </td>
 
@@ -2471,7 +2655,7 @@ export const PositionsTable = React.memo(function PositionsTable({ data, guards,
                     className="w-4 h-4 accent-amber-400 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
                   />
                   {effectiveTrailSL !== null && (
-                    <span className="text-[10px] font-mono text-amber-400 tabular-nums">
+                    <span className={cn(TXT_VALUE, 'font-mono text-amber-400 tabular-nums')}>
                       @{effectiveTrailSL.toFixed(1)}
                     </span>
                   )}
@@ -2486,7 +2670,7 @@ export const PositionsTable = React.memo(function PositionsTable({ data, guards,
                       onClick={() => onAddLeg(row)}
                       disabled={isClosing || netQty === 0}
                       title={`Load ${sym}'s strike into the order panel to add more or hedge`}
-                      className="px-2.5 py-1 text-[11px] font-bold rounded border transition-all disabled:opacity-40 disabled:cursor-not-allowed bg-emerald-900/40 border-emerald-500/30 text-emerald-400 hover:bg-emerald-800/60 hover:text-emerald-200 active:scale-95"
+                      className={cn('px-2.5 py-1', TXT_CAPTION, 'font-bold rounded border transition-all disabled:opacity-40 disabled:cursor-not-allowed bg-emerald-900/40 border-emerald-500/30 text-emerald-400 hover:bg-emerald-800/60 hover:text-emerald-200 active:scale-95', FOCUS_RING)}
                     >
                       Add
                     </button>
@@ -2494,7 +2678,7 @@ export const PositionsTable = React.memo(function PositionsTable({ data, guards,
                       onClick={() => onClose(row)}
                       disabled={isClosing || netQty === 0}
                       title={`Market close ${sym} — 100% (${Math.abs(netQty)} qty)`}
-                      className="px-2.5 py-1 text-[11px] font-bold rounded border transition-all disabled:opacity-40 disabled:cursor-not-allowed bg-rose-900/40 border-rose-500/30 text-rose-400 hover:bg-rose-800/60 hover:text-rose-200 active:scale-95"
+                      className={cn('px-2.5 py-1', TXT_CAPTION, 'font-bold rounded border transition-all disabled:opacity-40 disabled:cursor-not-allowed bg-rose-900/40 border-rose-500/30 text-rose-400 hover:bg-rose-800/60 hover:text-rose-200 active:scale-95', FOCUS_RING)}
                     >
                       {isClosing ? '…' : 'Close'}
                     </button>
@@ -2506,7 +2690,7 @@ export const PositionsTable = React.memo(function PositionsTable({ data, guards,
                     const ls = lotSizeFor(row);
                     if (!ls || ls <= 0) return null;
                     return (
-                      <div className="flex items-center gap-0.5 text-[9px] font-mono">
+                      <div className={cn('flex items-center gap-0.5', TXT_LABEL, 'font-mono')}>
                         {partialCloseChips(netQty, ls, [25, 50, 75]).map(c => (
                           <button
                             key={c.pct}
@@ -2514,7 +2698,7 @@ export const PositionsTable = React.memo(function PositionsTable({ data, guards,
                             disabled={isClosing || !c.enabled}
                             onClick={() => onClosePartial(row, c.units, c.pct)}
                             title={c.title}
-                            className="px-1 py-0.5 rounded bg-rose-950/80 border border-rose-800/60 text-rose-400 hover:bg-rose-800 hover:text-oncolor transition-all disabled:opacity-30 disabled:cursor-not-allowed"
+                            className={cn('px-1 py-0.5 rounded bg-rose-950/80 border border-rose-800/60 text-rose-400 hover:bg-rose-800 hover:text-oncolor transition-all disabled:opacity-30 disabled:cursor-not-allowed', FOCUS_RING)}
                           >
                             {c.pct}%
                           </button>

@@ -7,6 +7,7 @@ import {
   OptionPanel, PositionsTable, TabTable, FundsView, pollPositionFlat, pollPositionReduced,
   type ChainOcEntry, type Toast,
   type PnlGuardStatus, type PositionGuard, type SortState,
+  FOCUS_RING, TXT_LABEL, TXT_VALUE, TXT_CAPTION, RiskRail,
 } from './Scalper';
 import { useLiveOptionsWS } from '@/lib/useLiveOptionsWS';
 import { useProfitLock, ProfitLockControls } from './ProfitLock';
@@ -15,6 +16,7 @@ import { useBrokerSelector, scalperRoute, BROKER_LABELS, type Broker } from '@/h
 import { contractMultiplier, scaleBrokerPnl } from '@/lib/positionPnl';
 import { openLots, fractionUnits } from '@/lib/partialQty';
 import { positionKey, positionProduct, findLivePosition, closeOrderProduct } from '@/lib/positionProduct';
+import { cn } from '@/lib/utils';
 import TopWeightStocks from './TopWeightStocks';
 import TopIndices from './TopIndices';
 import MtmChart, { useMtmHistory } from './MtmChart';
@@ -1758,7 +1760,8 @@ export default function AdvancedScalper() {
             </div>
             <div className="shrink-0"><NavBar /></div>
           </div>
-          <div className="flex items-center gap-2 flex-nowrap shrink-0">
+          <div className="flex items-center gap-3 flex-nowrap shrink-0">
+          <div className="flex items-center gap-2 flex-nowrap shrink-0 bg-zinc-950/40 border border-zinc-800/60 rounded-xl px-2.5 py-1">
             {/* Broker selector — only shown when more than one broker is authenticated */}
             {authenticatedBrokers.length > 1 && (
               <select
@@ -1788,25 +1791,32 @@ export default function AdvancedScalper() {
                          rounded-lg px-2.5 py-1.5 focus:outline-none focus:border-emerald-500 shrink-0">
               {expiries.map(ex => <option key={ex} value={ex}>{ex}</option>)}
             </select>
+          </div>
 
+          <div className="flex items-center gap-2 flex-nowrap shrink-0 bg-zinc-950/40 border border-zinc-800/60 rounded-xl px-2.5 py-1">
             {/* Add Box */}
             <button onClick={addBox} disabled={boxes.length >= MAX_BOXES}
-              className="flex items-center gap-1 px-2.5 py-1.5 text-xs font-bold rounded-lg
-                         border border-emerald-600/40 bg-emerald-900/30 text-emerald-400
-                         hover:bg-emerald-800/40 transition-all disabled:opacity-40 disabled:cursor-not-allowed shrink-0 whitespace-nowrap">
+              className={cn(
+                'flex items-center gap-1 px-2.5 py-1.5 text-xs font-bold rounded-lg',
+                'border border-emerald-600/40 bg-emerald-900/30 text-emerald-400',
+                'hover:bg-emerald-800/40 transition-all disabled:opacity-40 disabled:cursor-not-allowed shrink-0 whitespace-nowrap',
+                FOCUS_RING,
+              )}>
               <Plus className="w-3.5 h-3.5" /> Add Box
             </button>
-            <span className="text-[10px] text-zinc-500 font-mono shrink-0 whitespace-nowrap">{boxes.length}/{MAX_BOXES} boxes</span>
+            <span className={cn(TXT_VALUE, 'text-zinc-500 font-mono shrink-0 whitespace-nowrap')}>{boxes.length}/{MAX_BOXES} boxes</span>
 
             {/* MARKET / LIMIT toggle */}
             <div className="flex items-center bg-zinc-900 border border-zinc-800 p-0.5 rounded-xl shrink-0">
               {(['MARKET', 'LIMIT'] as const).map(m => (
                 <button key={m} onClick={() => setOrderMode(m)}
-                  className={`px-3 py-1.5 text-xs font-bold rounded-lg transition-all whitespace-nowrap ${
+                  className={cn(
+                    'px-3 py-1.5 text-xs font-bold rounded-lg transition-all whitespace-nowrap',
                     orderMode === m
                       ? 'bg-zinc-700 text-zinc-100 border border-zinc-600'
-                      : 'text-zinc-500 hover:text-zinc-300'
-                  }`}>
+                      : 'text-zinc-500 hover:text-zinc-300',
+                    FOCUS_RING,
+                  )}>
                   {m}
                 </button>
               ))}
@@ -1816,11 +1826,13 @@ export default function AdvancedScalper() {
             <div className="flex items-center bg-zinc-900 border border-zinc-800 p-0.5 rounded-xl shrink-0">
               {(['INTRADAY', 'MARGIN'] as const).map(pt => (
                 <button key={pt} onClick={() => handleProductTypeChange(pt)}
-                  className={`px-3 py-1.5 text-xs font-bold rounded-lg transition-all whitespace-nowrap ${
+                  className={cn(
+                    'px-3 py-1.5 text-xs font-bold rounded-lg transition-all whitespace-nowrap',
                     productType === pt
                       ? 'bg-zinc-700 text-zinc-100 border border-zinc-600'
-                      : 'text-zinc-500 hover:text-zinc-300'
-                  }`}>
+                      : 'text-zinc-500 hover:text-zinc-300',
+                    FOCUS_RING,
+                  )}>
                   {pt}
                 </button>
               ))}
@@ -1830,13 +1842,16 @@ export default function AdvancedScalper() {
                 with the other view toggles rather than the order controls. */}
             <button onClick={() => setShowTop10(v => !v)}
               title="Show the 10 heaviest NIFTY constituents with live % change"
-              className={`px-3 py-1.5 text-xs font-bold rounded-lg border transition-all shrink-0 whitespace-nowrap ${
+              className={cn(
+                'px-3 py-1.5 text-xs font-bold rounded-lg border transition-all shrink-0 whitespace-nowrap',
                 showTop10
                   ? 'bg-sky-900/50 border-sky-500/40 text-sky-300'
-                  : 'bg-zinc-900 border-zinc-700 text-zinc-500 hover:text-zinc-300'
-              }`}>
+                  : 'bg-zinc-900 border-zinc-700 text-zinc-500 hover:text-zinc-300',
+                FOCUS_RING,
+              )}>
               TOP 10 {showTop10 ? 'ON' : 'OFF'}
             </button>
+          </div>
 
             {/* Bridge status dot + transport badge + timestamp */}
             <div className="flex items-center gap-1.5 shrink-0">
@@ -1845,17 +1860,16 @@ export default function AdvancedScalper() {
                 bridgeStatus.status === 'STARTING' ? 'bg-yellow-400 animate-pulse'  :
                 bridgeStatus.status === 'ERROR'    ? 'bg-rose-400'                  : 'bg-zinc-600'
               }`} />
-              <span className={`text-[9px] font-bold px-1 py-0.5 rounded border w-9 text-center ${
+              <span className={cn(
+                TXT_LABEL, 'font-bold px-1 py-0.5 rounded border w-9 text-center',
                 transport === 'ws'
                   ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20'
-                  : 'bg-zinc-800 text-zinc-500 border-zinc-700'
-              }`} title={transport === 'ws' ? 'Realtime WebSocket push' : 'HTTP polling fallback'}>
+                  : 'bg-zinc-800 text-zinc-500 border-zinc-700',
+              )} title={transport === 'ws' ? 'Realtime WebSocket push' : 'HTTP polling fallback'}>
                 {transport === 'ws' ? 'WS' : 'HTTP'}
               </span>
-              {lastUpdated && <span className="text-[10px] text-zinc-500 font-mono whitespace-nowrap">{lastUpdated}</span>}
+              {lastUpdated && <span className={cn(TXT_VALUE, 'text-zinc-500 font-mono whitespace-nowrap')}>{lastUpdated}</span>}
             </div>
-
-
 
           </div>
         </div>
@@ -1875,7 +1889,8 @@ export default function AdvancedScalper() {
               : 'bg-zinc-800 text-zinc-500 border border-zinc-700';
             return (
               <div className="flex items-center gap-3 flex-nowrap overflow-x-auto pb-1">
-                <span className="flex items-center gap-1 text-[10px] font-bold text-zinc-500 uppercase tracking-wider shrink-0 whitespace-nowrap">
+                <div className="flex items-center gap-3 flex-nowrap shrink-0 bg-zinc-950/40 border border-zinc-800/60 rounded-xl px-3 py-1.5">
+                <span className={cn('flex items-center gap-1', TXT_VALUE, 'font-bold text-zinc-500 uppercase tracking-wider shrink-0 whitespace-nowrap')}>
                   <Shield className="w-3 h-3" /> P&amp;L Guard
                 </span>
 
@@ -1885,37 +1900,37 @@ export default function AdvancedScalper() {
                   // silently configure Dhan's guard while this tab shows Zerodha
                   // data, so surface that plainly instead of pretending it works.
                   <span
-                    className="px-2 py-1 rounded text-[10px] font-bold uppercase tracking-wider bg-zinc-800 text-zinc-500 border border-zinc-700 shrink-0 whitespace-nowrap"
+                    className={cn(TXT_VALUE, 'px-2 py-1 rounded font-bold uppercase tracking-wider bg-zinc-800 text-zinc-500 border border-zinc-700 shrink-0 whitespace-nowrap')}
                     title="P&L Guard uses Dhan's native account-level pnlExit API, which has no Zerodha equivalent. Switch to Dhan to use it.">
                     DHAN ONLY
                   </span>
                 ) : (
                   <>
-                    <span className={`px-2 py-1 rounded text-[10px] font-bold uppercase tracking-wider shrink-0 whitespace-nowrap ${guardChipCls}`}>
+                    <span className={cn(TXT_VALUE, 'px-2 py-1 rounded font-bold uppercase tracking-wider shrink-0 whitespace-nowrap', guardChipCls)}>
                       {guardLabel}
                     </span>
 
                     <div className="flex items-center gap-1.5 shrink-0">
-                      <span className="text-[10px] text-zinc-500 font-semibold whitespace-nowrap">TARGET ₹</span>
+                      <span className={cn(TXT_VALUE, 'text-zinc-500 font-semibold whitespace-nowrap')}>TARGET ₹</span>
                       <input type="number" min="0" placeholder="e.g. 5000" value={profitTarget}
                         onChange={e => setProfitTarget(e.target.value.replace(/-/g, ''))}
-                        className="w-24 bg-zinc-900 border border-zinc-700 text-zinc-200 text-xs font-mono
-                                   rounded px-2 py-1 focus:outline-none focus:border-emerald-500" />
+                        className={cn('w-24 bg-zinc-900 border border-zinc-700 text-zinc-200 text-xs font-mono rounded px-2 py-1 focus:outline-none focus:border-emerald-500', FOCUS_RING)} />
                     </div>
 
                     {/* Loss limit — always a positive magnitude ("exit when loss reaches ₹X"); Dhan rejects a negative value */}
                     <div className="flex items-center gap-1.5 shrink-0">
-                      <span className="text-[10px] text-zinc-500 font-semibold whitespace-nowrap">SL ₹</span>
+                      <span className={cn(TXT_VALUE, 'text-zinc-500 font-semibold whitespace-nowrap')}>SL ₹</span>
                       <input type="number" min="0" placeholder="e.g. 2000" value={lossLimit}
                         onChange={e => setLossLimit(e.target.value.replace(/-/g, ''))}
-                        className="w-24 bg-zinc-900 border border-zinc-700 text-zinc-200 text-xs font-mono
-                                   rounded px-2 py-1 focus:outline-none focus:border-rose-500" />
+                        className={cn('w-24 bg-zinc-900 border border-zinc-700 text-zinc-200 text-xs font-mono rounded px-2 py-1 focus:outline-none focus:border-rose-500', FOCUS_RING)} />
                     </div>
+
+                    <RiskRail totalPnl={totalPnl} target={Number(profitTarget) || null} stop={Number(lossLimit) || null} />
 
                     {/* Combined Strategy % Presets (Always visible; calculates Total P&L Guard Target & SL ₹) */}
                     <div className="flex items-center gap-1 bg-zinc-900 border border-zinc-800 px-2 py-1 rounded-lg shrink-0">
-                      <span className="text-[10px] text-zinc-400 font-bold whitespace-nowrap" title="Target & SL % for combined multi-leg portfolio">COMBINED %:</span>
-                      <span className="text-[10px] text-emerald-400 font-bold">TGT</span>
+                      <span className={cn(TXT_VALUE, 'text-zinc-400 font-bold whitespace-nowrap')} title="Target & SL % for combined multi-leg portfolio">COMBINED %:</span>
+                      <span className={cn(TXT_VALUE, 'text-emerald-400 font-bold')}>TGT</span>
                       {[10, 15, 20, 25, 30].map(pct => {
                         const isSelected = combinedTargetPct === pct;
                         return (
@@ -1929,11 +1944,13 @@ export default function AdvancedScalper() {
                                 if (calcTarget > 0) setProfitTarget(String(calcTarget));
                               }
                             }}
-                            className={`px-1.5 py-0.5 rounded font-mono text-[10px] font-bold transition-all ${
+                            className={cn(
+                              'px-1.5 py-0.5 rounded font-mono', TXT_VALUE, 'font-bold transition-all',
                               isSelected
                                 ? 'bg-emerald-600 text-oncolor border border-emerald-400 shadow-sm'
-                                : 'bg-emerald-950/80 border border-emerald-800/80 text-emerald-400 hover:bg-emerald-800 hover:text-oncolor'
-                            }`}
+                                : 'bg-emerald-950/80 border border-emerald-800/80 text-emerald-400 hover:bg-emerald-800 hover:text-oncolor',
+                              FOCUS_RING,
+                            )}
                             title={combinedStrategyStats.entryCapitalSum > 0
                               ? `Set total P&L Guard Target to +${pct}% (+₹${Math.round((combinedStrategyStats.entryCapitalSum * pct) / 100)})`
                               : `Set combined Target to +${pct}% (will apply when trade opens)`
@@ -1943,7 +1960,7 @@ export default function AdvancedScalper() {
                           </button>
                         );
                       })}
-                      <span className="text-[10px] text-rose-400 font-bold ml-1">SL</span>
+                      <span className={cn(TXT_VALUE, 'text-rose-400 font-bold ml-1')}>SL</span>
                       {[5, 10, 15, 20].map(pct => {
                         const isSelected = combinedSlPct === pct;
                         return (
@@ -1957,11 +1974,13 @@ export default function AdvancedScalper() {
                                 if (calcLoss > 0) setLossLimit(String(calcLoss));
                               }
                             }}
-                            className={`px-1.5 py-0.5 rounded font-mono text-[10px] font-bold transition-all ${
+                            className={cn(
+                              'px-1.5 py-0.5 rounded font-mono', TXT_VALUE, 'font-bold transition-all',
                               isSelected
                                 ? 'bg-rose-600 text-oncolor border border-rose-400 shadow-sm'
-                                : 'bg-rose-950/80 border border-rose-800/80 text-rose-400 hover:bg-rose-800 hover:text-oncolor'
-                            }`}
+                                : 'bg-rose-950/80 border border-rose-800/80 text-rose-400 hover:bg-rose-800 hover:text-oncolor',
+                              FOCUS_RING,
+                            )}
                             title={combinedStrategyStats.entryCapitalSum > 0
                               ? `Set total P&L Guard SL limit to -${pct}% (-₹${Math.round((combinedStrategyStats.entryCapitalSum * pct) / 100)})`
                               : `Set combined SL limit to -${pct}% (will apply when trade opens)`
@@ -1978,28 +1997,32 @@ export default function AdvancedScalper() {
                         <button key={pt} onClick={() => setGuardProductTypes(prev =>
                           prev.includes(pt) ? prev.filter(x => x !== pt) : [...prev, pt]
                         )}
-                          className={`px-2 py-1 rounded text-[10px] font-bold border transition-all whitespace-nowrap ${
+                          className={cn(
+                            TXT_VALUE, 'px-2 py-1 rounded font-bold border transition-all whitespace-nowrap',
                             guardProductTypes.includes(pt)
                               ? 'bg-violet-900/50 border-violet-500/40 text-violet-300'
-                              : 'bg-zinc-900 border-zinc-700 text-zinc-500 hover:text-zinc-300'
-                          }`}>
+                              : 'bg-zinc-900 border-zinc-700 text-zinc-500 hover:text-zinc-300',
+                            FOCUS_RING,
+                          )}>
                           {pt}
                         </button>
                       ))}
                     </div>
 
                     <button onClick={() => setEnableKillSwitch(v => !v)}
-                      className={`flex items-center gap-1.5 px-2.5 py-1 rounded text-[10px] font-bold border transition-all shrink-0 whitespace-nowrap ${
+                      aria-pressed={enableKillSwitch}
+                      className={cn(
+                        'flex items-center gap-1.5 px-2.5 py-1 rounded', TXT_VALUE, 'font-bold border transition-all shrink-0 whitespace-nowrap',
                         enableKillSwitch
                           ? 'bg-rose-900/50 border-rose-500/40 text-rose-300'
-                          : 'bg-zinc-900 border-zinc-700 text-zinc-500 hover:text-zinc-300'
-                      }`}>
+                          : 'bg-zinc-900 border-zinc-700 text-zinc-500 hover:text-zinc-300',
+                        FOCUS_RING,
+                      )}>
                       🔴 Kill Switch {enableKillSwitch ? 'ON' : 'OFF'}
                     </button>
 
                     <button onClick={handleSetPnl} disabled={settingPnl}
-                      className="px-3 py-1.5 text-xs font-bold rounded-lg bg-violet-600 hover:bg-violet-500
-                                 text-white border border-violet-500/40 transition-all disabled:opacity-50 shrink-0 whitespace-nowrap">
+                      className={cn('px-3 py-1.5 text-xs font-bold rounded-lg bg-violet-600 hover:bg-violet-500 text-white border border-violet-500/40 transition-all disabled:opacity-50 shrink-0 whitespace-nowrap', FOCUS_RING)}>
                       {settingPnl ? 'Setting…' : 'Set Guard'}
                     </button>
 
@@ -2008,8 +2031,7 @@ export default function AdvancedScalper() {
                         worst failure mode this bar has — say so loudly. */}
                     {uncoveredGuardProducts.length > 0 && (
                       <span
-                        className="px-2 py-1 rounded text-[10px] font-bold border bg-amber-900/50 border-amber-500/50
-                                   text-amber-300 shrink-0 whitespace-nowrap"
+                        className={cn(TXT_VALUE, 'px-2 py-1 rounded font-bold border bg-amber-900/50 border-amber-500/50 text-amber-300 shrink-0 whitespace-nowrap')}
                         title={`You hold open ${uncoveredGuardProducts.join(' / ')} position(s), but the guard is scoped to ${guardProductTypes.join(' / ') || 'nothing'}. Dhan will not square those off. Select the missing product above and press Set Guard again.`}>
                         ⚠ {uncoveredGuardProducts.join('/')} NOT COVERED
                       </span>
@@ -2017,26 +2039,46 @@ export default function AdvancedScalper() {
 
                     {hasConfig && (
                       <button onClick={handleClearPnl} disabled={clearingPnl}
-                        className={`px-3 py-1.5 text-xs font-bold rounded-lg border transition-all disabled:opacity-50 shrink-0 whitespace-nowrap ${
+                        className={cn(
+                          'px-3 py-1.5 text-xs font-bold rounded-lg border transition-all disabled:opacity-50 shrink-0 whitespace-nowrap',
                           confirmClear
                             ? 'bg-rose-600 border-rose-500/40 text-oncolor'
-                            : 'bg-zinc-900 border-zinc-700 text-zinc-400 hover:text-zinc-200'
-                        }`}>
+                            : 'bg-zinc-900 border-zinc-700 text-zinc-400 hover:text-zinc-200',
+                          FOCUS_RING,
+                        )}>
                         {clearingPnl ? 'Clearing…' : confirmClear ? 'Confirm Clear?' : 'Clear Guard'}
                       </button>
                     )}
                   </>
                 )}
 
-                {/* Close 50% of every open leg (lot-rounded, per-leg orders) */}
+                {/* Current guard values + persistent error, kept inside the Guard
+                    card since both describe its own state. */}
+                {broker === 'dhan' && hasConfig && (
+                  <span className={cn(TXT_VALUE, 'text-zinc-500 font-mono shrink-0 whitespace-nowrap')}>
+                    {Number(pnlGuardStatus?.profit) > 0 ? `🎯 ₹${pnlGuardStatus?.profit}` : ''}
+                    {Number(pnlGuardStatus?.profit) > 0 && Math.abs(Number(pnlGuardStatus?.loss)) > 0 ? '  ' : ''}
+                    {Math.abs(Number(pnlGuardStatus?.loss)) > 0 ? `🛑 ₹${Math.abs(Number(pnlGuardStatus?.loss))}` : ''}
+                  </span>
+                )}
+                {broker === 'dhan' && guardError && (
+                  <span className={cn(TXT_VALUE, 'text-rose-400 font-semibold shrink-0 whitespace-nowrap')}>⚠ {guardError}</span>
+                )}
+                </div>
+
+                {/* Close 50% of every open leg (lot-rounded, per-leg orders) — left
+                    outside the Guard card, alongside EXIT ALL below, so both nuclear
+                    actions keep their loud danger styling instead of blending in. */}
                 <button onClick={handleHalfAll} disabled={halvingAll || halfAllPlan.legs.length === 0}
-                  className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[11px] font-bold border transition-all active:scale-95 disabled:opacity-40 disabled:cursor-not-allowed shrink-0 whitespace-nowrap ${
+                  className={cn(
+                    'flex items-center gap-1.5 px-3 py-1.5 rounded-lg', TXT_CAPTION, 'font-bold border transition-all active:scale-95 disabled:opacity-40 disabled:cursor-not-allowed shrink-0 whitespace-nowrap',
                     halvingAll
                       ? 'bg-amber-900/40 border-amber-800 text-amber-400'
                       : confirmHalfAll
                       ? 'bg-amber-500 border-amber-400 text-oncolor-dark animate-pulse shadow-lg shadow-amber-500/20'
-                      : 'bg-amber-950/60 border-amber-900/60 text-amber-400 hover:bg-amber-900/40 hover:border-amber-700 hover:text-amber-300'
-                  }`}
+                      : 'bg-amber-950/60 border-amber-900/60 text-amber-400 hover:bg-amber-900/40 hover:border-amber-700 hover:text-amber-300',
+                    FOCUS_RING,
+                  )}
                   title={
                     halfAllPlan.legs.length === 0
                       ? halfAllPlan.skipped.length
@@ -2056,36 +2098,30 @@ export default function AdvancedScalper() {
 
                 {/* Exit ALL Positions (broker-level nuclear) */}
                 <button onClick={handleExitAll} disabled={exitingAll}
-                  className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[11px] font-bold border transition-all active:scale-95 disabled:opacity-40 disabled:cursor-not-allowed shrink-0 whitespace-nowrap ${
+                  className={cn(
+                    'flex items-center gap-1.5 px-3 py-1.5 rounded-lg', TXT_CAPTION, 'font-bold border transition-all active:scale-95 disabled:opacity-40 disabled:cursor-not-allowed shrink-0 whitespace-nowrap',
                     exitingAll
                       ? 'bg-red-900/40 border-red-800 text-red-400'
                       : confirmExitAll
                       ? 'bg-red-600 border-red-500 text-oncolor animate-pulse shadow-lg shadow-red-500/20'
-                      : 'bg-red-950/60 border-red-900/60 text-red-400 hover:bg-red-900/40 hover:border-red-700 hover:text-red-300'
-                  }`}
+                      : 'bg-red-950/60 border-red-900/60 text-red-400 hover:bg-red-900/40 hover:border-red-700 hover:text-red-300',
+                    FOCUS_RING,
+                  )}
                   title="Immediately liquidate ALL positions at broker level (DELETE /positions)">
                   {exitingAll ? <RefreshCw className="h-3 w-3 animate-spin" /> : <ShieldOff className="h-3 w-3" />}
                   {exitingAll ? 'Exiting…' : confirmExitAll ? 'Confirm EXIT ALL?' : 'EXIT ALL Positions'}
                 </button>
 
-                {/* Client-side minimum profit lock (total P&L floor) */}
-                <ProfitLockControls lock={profitLock} totalPnl={totalPnl} />
+                {/* Client-side minimum profit lock (total P&L floor) — leading
+                    divider hidden, same note as Scalper.tsx's identical treatment. */}
+                <div className="flex items-center gap-2 flex-nowrap shrink-0 bg-zinc-950/40 border border-zinc-800/60 rounded-xl px-3 py-1.5 [&>span:first-child]:hidden">
+                  <ProfitLockControls lock={profitLock} totalPnl={totalPnl} />
+                </div>
 
                 {/* Dhan → Zerodha trade replication (arm/disarm + multiplier) */}
-                <CopyTradeControls copyTrade={copyTrade} />
-
-                {broker === 'dhan' && hasConfig && (
-                  <span className="text-[10px] text-zinc-500 font-mono shrink-0 whitespace-nowrap">
-                    {Number(pnlGuardStatus?.profit) > 0 ? `🎯 ₹${pnlGuardStatus?.profit}` : ''}
-                    {Number(pnlGuardStatus?.profit) > 0 && Math.abs(Number(pnlGuardStatus?.loss)) > 0 ? '  ' : ''}
-                    {Math.abs(Number(pnlGuardStatus?.loss)) > 0 ? `🛑 ₹${Math.abs(Number(pnlGuardStatus?.loss))}` : ''}
-                  </span>
-                )}
-
-                {/* Persistent error — the toast auto-dismisses, this stays until the next attempt */}
-                {broker === 'dhan' && guardError && (
-                  <span className="text-[10px] text-rose-400 font-semibold shrink-0 whitespace-nowrap">⚠ {guardError}</span>
-                )}
+                <div className="flex items-center gap-2 flex-nowrap shrink-0 bg-zinc-950/40 border border-zinc-800/60 rounded-xl px-3 py-1.5 [&>span:first-child]:hidden">
+                  <CopyTradeControls copyTrade={copyTrade} />
+                </div>
               </div>
             );
           })()}
@@ -2309,18 +2345,22 @@ export default function AdvancedScalper() {
             ['mtm',       []]            as const,
           ]).map(([tab, data]) => (
             <button key={tab} onClick={() => { setActiveTab(tab as typeof activeTab); setTableSort({ key: 'none', dir: 'asc' }); }}
-              className={`px-3 py-1.5 text-xs font-semibold rounded-lg transition-all capitalize ${
+              className={cn(
+                'px-3 py-1.5 text-xs font-semibold rounded-lg transition-all capitalize',
                 activeTab === tab
                   ? 'bg-zinc-700 text-zinc-100 border border-zinc-600'
-                  : 'text-zinc-500 hover:text-zinc-300'
-              }`}>
+                  : 'text-zinc-500 hover:text-zinc-300',
+                FOCUS_RING,
+              )}>
               {tab}{data.length > 0 ? ` (${data.length})` : ''}
             </button>
           ))}
           <button onClick={fetchTabData} disabled={tabLoading}
-            className="ml-auto flex items-center gap-1 px-2.5 py-1.5 text-xs font-semibold rounded-lg
-                       border border-zinc-700 bg-zinc-900 text-zinc-400 hover:text-zinc-200
-                       transition-all disabled:opacity-50">
+            className={cn(
+              'ml-auto flex items-center gap-1 px-2.5 py-1.5 text-xs font-semibold rounded-lg',
+              'border border-zinc-700 bg-zinc-900 text-zinc-400 hover:text-zinc-200',
+              'transition-all disabled:opacity-50', FOCUS_RING,
+            )}>
             <RefreshCw className={`w-3 h-3 ${tabLoading ? 'animate-spin' : ''}`} />
             Refresh
           </button>
