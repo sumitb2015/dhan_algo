@@ -340,13 +340,22 @@ def scan_symbol(helper: DhanHelper, symbol: str, lot_size: int,
 
         # Heuristic blend of safety, return and liquidity, scaled to 0-100.
         # Capping annualised yield at 30% keeps one very rich strike from
-        # swamping safety; capping OI at 5000 does the same for liquidity.
-        # Risk is meant to be controlled by the no-hit filter, not by this
-        # score — it ranks attractiveness *within* whatever band is selected.
+        # swamping safety; capping OI (in LOTS, not shares — a lot ranges
+        # 20-2075 shares across the universe, so a flat share cap silently
+        # graded large-lot names on lot size rather than actual liquidity)
+        # does the same for liquidity. Safety blends no-hit (finishes above
+        # strike) with touch (never dips through it) — two strikes can share
+        # a no-hit% while one whipsaws through the strike and back, which
+        # no-hit alone can't see. Risk is meant to be controlled by the
+        # no-hit filter, not by this score — it ranks attractiveness *within*
+        # whatever band is selected.
+        oi_lots = c["oi"] / max(lot_size, 1)
+        touch_prob = prob_touch(spot, c["strike"], years, c["iv"])
+        safety = c["noHitProb"] * 0.7 + (1.0 - touch_prob) * 0.3
         score = round(
-            c["noHitProb"] * 45
+            safety * 45
             + min(ann_yield_pct / 30.0, 1.0) * 40
-            + min(c["oi"] / 5000.0, 1.0) * 15
+            + min(oi_lots / 200.0, 1.0) * 15
         )
 
         rows.append({
@@ -360,7 +369,7 @@ def scan_symbol(helper: DhanHelper, symbol: str, lot_size: int,
             "move1d": round(move_1d, 2),
             "move5d": round(move_5d, 2),
             "historyStale": history_stale,
-            "touchProb": round(prob_touch(spot, c["strike"], years, c["iv"]) * 100, 1),
+            "touchProb": round(touch_prob * 100, 1),
             "strike": c["strike"],
             "premium": round(c["premium"], 2),
             "premiumTotal": round(premium_total, 2),

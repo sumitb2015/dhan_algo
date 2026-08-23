@@ -1,11 +1,12 @@
 'use client';
 
 import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
-import { RefreshCw, Terminal, Plus, X, Play, Square, ChevronDown, BookOpen } from 'lucide-react';
+import { RefreshCw, Terminal, Plus, X, Play, Square, ChevronDown, BookOpen, Info } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import NavBar from './NavBar';
 import ShiftCspModal, { type ShiftTarget } from './ShiftCspModal';
 import CspGlossary from './CspGlossary';
+import CspGuide from './CspGuide';
 import {
   TH, TD, PctText, fmt, fmtInr, fmtCompactInr, fetchWithTimeout,
 } from './cspShared';
@@ -166,7 +167,12 @@ export default function CspScreener() {
   const [symbolsScanned, setSymbolsScanned] = useState<number | null>(null);
   const [scanSkipped, setScanSkipped] = useState<Record<string, string>>({});
   const [apiFailures, setApiFailures] = useState(0);
-  const [minNoHit, setMinNoHit] = useState(40);
+  // Defaults to the safe side of the curve, not the scanner's own 40% floor —
+  // yield and safety are almost perfectly inversely correlated (see
+  // cspColumns.ts Score doc), so the raw scanned universe is risk-sorted in
+  // reverse until this filter is applied. 65% keeps real capital out of
+  // coin-flip strikes without a manual step every session; still adjustable.
+  const [minNoHit, setMinNoHit] = useState(65);
   const [maxNoHit, setMaxNoHit] = useState(100);
   // A deep-OTM strike paying 0.02% is not worth the brokerage, so the default
   // hides them rather than making every session re-filter by hand.
@@ -194,6 +200,7 @@ export default function CspScreener() {
   const [sell, setSell] = useState<{ row: ScanRow; lots: string; submitting: boolean } | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [showGlossary, setShowGlossary] = useState(false);
+  const [showGuide, setShowGuide] = useState(false);
 
   const wasRunningRef = useRef(false);
 
@@ -572,6 +579,14 @@ export default function CspScreener() {
           <div className="flex flex-wrap items-center gap-2 border-b border-zinc-900 px-3 py-2">
             <h2 className="text-[13px] font-bold text-zinc-100">CSP Candidates</h2>
             <button
+              onClick={() => setShowGuide(true)}
+              title="How to use this page and choose trade candidates"
+              aria-label="How to use this page"
+              className="flex h-5 w-5 items-center justify-center rounded-sm border border-zinc-800 bg-zinc-900 text-zinc-500 transition-all hover:border-sky-900/40 hover:text-sky-400"
+            >
+              <Info className="h-3 w-3" />
+            </button>
+            <button
               onClick={() => setShowGlossary(true)}
               title="Column definitions — what each figure means and how it is computed"
               aria-label="Column definitions"
@@ -693,7 +708,7 @@ export default function CspScreener() {
               aria-label="Minimum no-hit probability"
             />
             <div className="flex items-center gap-1.5">
-              {[40, 60, 70, 80, 90].map((v) => (
+              {[40, 60, 65, 70, 80, 90].map((v) => (
                 <button
                   key={v}
                   onClick={() => { setMinNoHit(v); setMaxNoHit(100); }}
@@ -725,7 +740,7 @@ export default function CspScreener() {
                 type="number" min={0} step={1} value={minAnnYield}
                 onChange={(e) => setMinAnnYield(Math.max(0, Number(e.target.value) || 0))}
                 className="w-16 rounded-sm border border-zinc-800 bg-zinc-950 px-1.5 py-1 font-mono"
-                title="Minimum simple annualised return on the capital blocked (yield × 365/DTE, not compounded)"
+                title="Minimum simple annualised return"
               />
               <span className="text-zinc-600">%</span>
             </div>
@@ -749,7 +764,7 @@ export default function CspScreener() {
               type="number" min={0} step={500} value={minPremium}
               onChange={(e) => setMinPremium(Math.max(0, Number(e.target.value) || 0))}
               className="w-20 rounded-sm border border-zinc-800 bg-zinc-950 px-1.5 py-1 font-mono"
-              title="Minimum total premium collected per lot-set — covers brokerage & STT"
+              title="Minimum total premium per lot-set"
             />
 
             <span className="ml-1 h-4 w-px bg-zinc-800" />
@@ -845,7 +860,7 @@ export default function CspScreener() {
                     </TD>
                     <TD right className="text-zinc-200">{r.noHitProb.toFixed(1)}%</TD>
                     <TD right className="text-rose-400"
-                      title="Chance of trading at or below the strike at any point before expiry — always higher than the chance of merely finishing below">
+                      title="Chance spot dips to/below the strike before expiry">
                       {r.touchProb !== undefined ? `${r.touchProb.toFixed(1)}%` : '—'}
                     </TD>
                     <TD right>
@@ -869,7 +884,7 @@ export default function CspScreener() {
                             inert, so a mis-click can't open a long-premium trade. */}
                         <button
                           disabled
-                          title="Cash-secured puts are sold, not bought — use QuikTrade or Scalper to buy premium"
+                          title="CSPs are sold, not bought"
                           className="cursor-not-allowed rounded-sm border border-zinc-800 px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide text-zinc-600"
                         >
                           Buy
@@ -910,7 +925,7 @@ export default function CspScreener() {
               <button onClick={reconcile} disabled={reconciling}
                 className={cn('text-[11px] font-bold hover:text-amber-300 disabled:opacity-40',
                   needsReconcileCount > 0 ? 'text-amber-400' : 'text-sky-400')}
-                title="Replace tracked quantity and entry price with the broker's own figures, and find short puts that aren't tracked">
+                title="Sync qty/price from the broker; find untracked puts">
                 {reconciling ? 'Reconciling…'
                   : needsReconcileCount > 0 ? `Reconcile (${needsReconcileCount})` : 'Reconcile'}
               </button>
@@ -1109,6 +1124,7 @@ export default function CspScreener() {
         </section>
       </main>
 
+      {showGuide && <CspGuide onClose={() => setShowGuide(false)} />}
       {showGlossary && <CspGlossary onClose={() => setShowGlossary(false)} />}
 
       {sell && (
