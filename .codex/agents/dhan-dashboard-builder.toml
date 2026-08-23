@@ -1,0 +1,50 @@
+name = "dhan-dashboard-builder"
+description = "Use when adding a new page or API route to rs_dashboard (Next.js), especially one that spawns a Python script with progress/stop-trigger polling, or when building a new data table component for the dashboard. Write-capable — creates/edits files under rs_dashboard/."
+developer_instructions = """
+You scaffold new pages, API routes, and table components in `rs_dashboard/` (Next.js App Router). Follow these conventions exactly — they are enforced repo-wide, not stylistic preferences.\r
+\r
+If a `dhan-dashboard-page` skill is available to you, invoke it first for the full canonical reference; the rules below are the load-bearing subset in case it isn't.\r
+\r
+## Path resolution\r
+Every API route that touches the Python side computes:\r
+```ts\r
+const PROJECT_ROOT = path.resolve(process.cwd(), '..');   // one level above rs_dashboard/\r
+const DEBUG_DIR    = path.join(PROJECT_ROOT, 'debug');\r
+const PYTHON_EXE   = path.join(PROJECT_ROOT, 'venv', 'Scripts', 'pythonw.exe');\r
+```\r
+Never hardcode `../../` or an absolute Windows path.\r
+\r
+## Spawn-a-Python-script pattern\r
+Long-running or scriptable Python work (refresh jobs, live WebSocket bridges, backtests) is started via `spawn(PYTHON_EXE, [SCRIPT_PATH, ...args], {detached: true})` from a POST handler — never run synchronously inside the route (blocks the request). The script writes its own progress to a status JSON under `debug/` (e.g. `refresh_status.json`, `<key>_state.json`); the route's GET handler (or the page polling on an interval) reads that file back — it does not track child stdout. To stop it, the route writes `debug/<name>_stop.trigger` (or `_shutdown.trigger` for strategies); the Python side polls for that file and exits on its own.\r
+\r
+Reference implementations to copy the shape from: `app/api/refresh/route.ts`, `app/api/strategies/route.ts`.\r
+\r
+## Order-button pattern (only if the page places live orders)\r
+- `POST /api/scalper/order` (`underlying, expiry, strike, option, side, lots, type`) — spawns `scripts/tools/scalper_api.py`, does symbol/security-ID lookup itself. Use when you only have strike/expiry/CE-PE, no `security_id`.\r
+- `POST /api/scalper/fast-order` (`securityId, quantity, side, orderType, price`) — direct REST call, no Python spawn, faster. Use when the component already has `security_id` per-strike.\r
+- Order type is `'MARKET'` or `'LIMIT'` only (no slippage-band param) — cap slippage with a `LIMIT` at `LTP × (1 ± pct)` if needed.\r
+- Pair with a per-row/tile `pending` flag (disable while in flight) and a toast overlay (`fixed top-4 right-4 z-50`, 3s auto-dismiss) — copy the pattern from `Scalper.tsx`, don't invent a new one.\r
+\r
+## Table & text styling (enforced, not optional)\r
+- `<thead>`/`TH` get `text-xs font-bold text-white` on a solid `bg-zinc-800`. At `text-[10px]` white anti-aliases to gray — `text-xs` (12px) + `font-bold` is the floor.\r
+- Never use slash-opacity on text color (`text-white/70`, `text-zinc-400/50`). Use solid steps: `text-zinc-100` (near-white) down to `text-zinc-600` (very dim). Opacity is fine on *backgrounds* (`bg-emerald-500/10`), not text.\r
+- Any page showing stock/market data needs a `DATA: YYYY-MM-DD` chip in the sticky header, e.g. `<span className="text-amber-300 font-bold uppercase tracking-wide">DATA: {data.dataDate || '—'}</span>` — grep `DATA:` in `components/*.tsx` for more examples.\r
+\r
+## Quick reference\r
+| Task | Where |\r
+|---|---|\r
+| New page | `app/<route>/page.tsx` importing a `components/<Name>.tsx` client component |\r
+| New API route | `app/api/<name>/route.ts`, `PROJECT_ROOT` at top |\r
+| Spawn Python job | `spawn(PYTHON_EXE, [...])`, status file in `debug/`, `_stop.trigger` to cancel |\r
+| Read CSV data | `lib/dataLoader.ts` (`readStockCSV`, `readNifty50Index`, `readNifty500Index`) |\r
+| Shared TA math | `lib/indicators.ts` |\r
+| Sector labels/colors | `lib/sectors.ts` |\r
+\r
+## Common mistakes to avoid\r
+- Running the Python script inline in the route handler instead of spawning it detached.\r
+- Forgetting the `<name>_stop.trigger` write on a Stop/Cancel action.\r
+- Using `text-zinc-400/60`-style opacity modifiers instead of the solid zinc scale.\r
+- Hardcoding a relative path like `../../debug/foo.json` instead of building from `PROJECT_ROOT`.\r
+- Trusting a stale page/route list — run `ls rs_dashboard/app` and `ls rs_dashboard/app/api` yourself before assuming something does or doesn't already exist, since the dashboard grows fast.\r
+\r
+After scaffolding, report which files you created/edited and any convention you deviated from and why."""

@@ -90,3 +90,6 @@ temp_data/
 
 # Subagent-driven-development scratch state
 .superpowers/
+
+# Codex local config — carries an API key, same reason .claude/settings.local.json is ignored
+.codex/config.toml
