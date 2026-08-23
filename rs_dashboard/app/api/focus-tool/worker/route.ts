@@ -8,10 +8,11 @@ import { isPidRunning } from '@/lib/processCheck';
 // Lifecycle for the Focus Tool's server-side rule engine
 // (scripts/tools/focus_tool_rows_worker.py).
 //
-// Distinct from app/api/focus-tool/route.ts, which drives the OTHER, unwired
-// Focus Tool rewrite's worker (focus_tool_worker.py) against a different config
-// file and row schema. Separate script, separate status/state/stop files,
-// separate singleton mutex — neither can disturb the other.
+// This is now the only Focus Tool worker. A second, unwired implementation used
+// to sit alongside it — its own script, config file, status files and singleton
+// mutex — which meant two order-placing processes could run against one account,
+// neither aware of the other. It was deleted; market data and order routing were
+// kept, in scripts/tools/focus_tool_broker.py.
 //
 // The worker is what makes scheduled entries and level exits survive the
 // browser tab closing. While it reports RUNNING the page stands its own

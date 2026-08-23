@@ -8,7 +8,7 @@ page/bridge was started — unlike reconstructing VWAP from live WebSocket
 ticks (which would only cover the session from whenever this process
 happened to start watching).
 
-Same construction as scripts/tools/focus_tool_worker.py's premium_vwap() (an
+Same construction as focus_tool_rows_worker.py's side_vwap() (an
 unwired rewrite of this page kept elsewhere in the repo) and
 nifty_vwap_1min_straddle: typical price of the combined bar
 ((high+low+close)/3 per leg, summed), weighted by the average of the traded

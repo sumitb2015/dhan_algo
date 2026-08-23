@@ -106,6 +106,17 @@ export interface FocusToolConfig {
   triggerRupees: string;
   lockRupees: string;
   liveRealMoney: boolean;
+  /**
+   * IST date (YYYY-MM-DD) on which LIVE · REAL MONEY was last switched on.
+   *
+   * The arm expires with the session. `liveRealMoney` lives on disk and the
+   * worker auto-starts when the page mounts, so without this yesterday's "on"
+   * silently becomes today's "on": a page opened on Monday morning could start
+   * trading a config last looked at on Friday. Both readers — the page and
+   * focus_tool_rows_worker.py — treat live as OFF unless this is today, so
+   * going live is a decision that has to be made again each day.
+   */
+  liveArmedOn: string;
   updatedAt: string;
 }
 
@@ -132,6 +143,7 @@ export const DEFAULT_CONFIG: FocusToolConfig = {
   triggerRupees: '',
   lockRupees: '',
   liveRealMoney: false,
+  liveArmedOn: '',
   updatedAt: new Date().toISOString(),
 };
 

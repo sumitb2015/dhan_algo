@@ -10,13 +10,9 @@ or the browser crashes.
     venv\\Scripts\\python.exe scripts/tools/focus_tool_rows_worker.py --broker dhan
     venv\\Scripts\\python.exe scripts/tools/focus_tool_rows_worker.py --once --dry-run
 
-Not to be confused with scripts/tools/focus_tool_worker.py. That one drives the
-OTHER, unwired Focus Tool rewrite (lib/focusTool.ts + components/focus/*) and
-speaks a different config schema entirely — different file, different row
-shape, different rule vocabulary. This module deliberately shares nothing with
-it but the two genuinely generic pieces below (MarketData, OrderRouter), which
-are imported rather than copied because they only ever speak in
-underlying/expiry/strike/option-type and know nothing about either schema.
+Market data and order routing live in scripts/tools/focus_tool_broker.py
+(MarketData, OrderRouter) — they only ever speak in
+underlying/expiry/strike/option-type and know nothing about this schema.
 
 Contract with the dashboard, matching every other long-running process here:
   read   debug/focus_tool_rows.json          (the page's own config, reloaded on mtime)
@@ -39,6 +35,18 @@ Three deliberate non-behaviours:
   * It never trades unless the config's own LIVE - REAL MONEY switch is on.
     That flag is the page's master arm; a worker that ignored it would trade
     from a screen showing "dry run".
+
+  * It never treats a broker ACK as a fill. `place_order` returning an id means
+    Dhan accepted the order, not that the exchange traded it. Entries wait for a
+    terminal status and record the ACTUAL traded price and quantity; a leg that
+    cannot be confirmed is recorded as unconfirmed and reconciled against the
+    position book on the next tick rather than trusted.
+
+And one thing it does every tick: it reconciles its ledger against the broker's
+own position book, writing quantities DOWN (never up) when the broker shows
+less than the ledger claims. Without that, an exit order that was accepted but
+never filled would zero the ledger while the position was still live — the row
+would read as flat and every rule would stop watching it.
 
 Because it owns a fill ledger, P&L here is marked against what THIS worker
 opened, not against the whole account. That is also what the account-level
@@ -82,6 +90,17 @@ LOG_FILE     = os.path.join(DEBUG_DIR, 'focus_tool_rows_worker.log')
 # level-exit rules need — spot levels and stops are not sub-second decisions.
 TICK_SECONDS = 2.0
 
+# How long a freshly opened leg is exempt from reconciliation. The position book
+# lags a fill by a second or two, and reading that lag as "the broker shows
+# nothing" would drop a live leg from the ledger moments after opening it.
+RECONCILE_GRACE_SECONDS = 20.0
+
+# How long to wait for an entry order to reach a terminal status before giving
+# up and recording the leg as unconfirmed. Market orders on an index option fill
+# in well under this; the wait exists so a slow fill is not mistaken for a
+# failed one.
+FILL_TIMEOUT_SECONDS = 20
+
 # Repo-wide intraday auto-exit (CLAUDE.md), mirroring FocusTool.tsx's
 # INTRADAY_BACKSTOP_HM.
 INTRADAY_EXIT_MINUTES = 15 * 60 + 17
@@ -99,9 +118,7 @@ logger = logging.getLogger('focus_tool_rows')
 
 _singleton_handle = None
 
-# The two genuinely schema-agnostic pieces of the sibling worker. They speak
-# only in underlying/expiry/strike/option-type, so both schemas can drive them.
-from scripts.tools.focus_tool_worker import (      # noqa: E402
+from scripts.tools.focus_tool_broker import (      # noqa: E402
     MarketData, OrderRouter, UNDERLYING_EXCHANGE,
 )
 
@@ -110,6 +127,15 @@ from scripts.tools.focus_tool_worker import (      # noqa: E402
 
 def setup_logging():
     os.makedirs(DEBUG_DIR, exist_ok=True)
+    # Reason strings carry the same glyphs the screen shows (H↑, ₹, ×) so the
+    # two implementations can be compared character for character. The log file
+    # is already UTF-8; this stops the Windows console mangling them on the way
+    # to the spawn log, which is where a crash is read back from.
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding='utf-8', errors='replace')
+        except (AttributeError, ValueError):
+            pass
     logging.basicConfig(
         level=logging.INFO,
         format='%(asctime)s %(levelname)s %(message)s',
@@ -200,6 +226,17 @@ def num(value, default=None):
     return f if f == f else default   # NaN -> default
 
 
+def js_num(value):
+    """Format a number the way JavaScript's String(Number) does.
+
+    Parity detail, not cosmetics: the reason strings are asserted character for
+    character against lib/focusToolRules.ts (see focusToolRules.cases.json), and
+    JS prints 2000 as "2000" where Python's f-string prints 2000.0 as "2000.0".
+    """
+    f = float(value)
+    return str(int(f)) if f == int(f) else repr(f)
+
+
 def atm_strike(spot, step):
     if not (spot > 0) or not (step > 0):
         return 0
@@ -277,14 +314,22 @@ def resolve_row_strikes(row, atm, step, chain):
     return ce, pe
 
 
-def evaluate_entry(row, group, now_minutes, dte, strikes_ready):
-    """(enter, reason). A draft row never enters — that is what Arm is for."""
+def evaluate_entry(row, group, now_minutes, dte, strikes_ready, flat=True):
+    """(enter, reason). A draft row never enters — that is what Arm is for.
+
+    The ORDER of these checks is part of the contract, not an implementation
+    detail: `reason` is what gets logged and shown, and evaluateEntry in
+    lib/focusToolRules.ts reports the same reason for the same row. Both are
+    asserted against lib/focusToolRules.cases.json.
+    """
     if not group or not group.get('enabled'):
         return False, 'index not started'
     if str(row.get('status')) != 'armed':
         return False, f"status {row.get('status')}"
     if not (int(row.get('lots') or 0) > 0):
         return False, 'lots must be > 0'
+    if not flat:
+        return False, 'already holds a position'
     if not strikes_ready:
         return False, 'strikes unresolved'
     if not dte_matches(row.get('dte', 'Any'), dte):
@@ -307,24 +352,58 @@ def evaluate_entry(row, group, now_minutes, dte, strikes_ready):
     return True, f"entry time {row.get('entryTime')} reached"
 
 
+def evaluate_row_exit(row, spot, premium, entry_premium, pnl, vwap):
+    """The first LEVEL exit this row breaches, or None.
+
+    H-up, L-down, VWAP cross, SL rupees, SL multiple — in that order, character
+    for character identical to evaluateRowExit in lib/focusToolRules.ts. Both
+    are asserted against lib/focusToolRules.cases.json, so a rule changed on one
+    side fails the other until it is changed there too.
+
+    `premium`, `entry_premium` and `pnl` cover only the legs this row's Side
+    trades AND that are still open — a CE-only row measured against a CE+PE
+    premium would cross its threshold at the wrong number.
+
+    Spot rules are suppressed at spot <= 0 and premium rules at premium <= 0: a
+    failed quote read arrives as 0, and 0 is below every conceivable L-down
+    level, so treating it as a breach would flatten the book on one dropped tick.
+    """
+    hi = num(row.get('levelHigh'))
+    if hi is not None and spot > 0 and spot >= hi:
+        return f'H↑ breached: spot {spot:.2f} ≥ {js_num(hi)}'
+    lo = num(row.get('levelLow'))
+    if lo is not None and spot > 0 and spot <= lo:
+        return f'L↓ breached: spot {spot:.2f} ≤ {js_num(lo)}'
+
+    # This tool only ever opens with a SELL, so it is hurt by premium EXPANDING
+    # through VWAP or through a multiple of the entry price.
+    if row.get('levelVw') and vwap is not None and vwap > 0:
+        if premium > 0 and premium >= vwap:
+            return f'VW breached: premium {premium:.2f} ≥ VWAP {vwap:.2f}'
+
+    sl_rs = num(row.get('slRupees'))
+    if sl_rs is not None and sl_rs > 0 and pnl <= -sl_rs:
+        return f'SL ₹{js_num(sl_rs)} hit (P&L ₹{pnl:.0f})'
+
+    sl_mult = num(row.get('slMultiplier'))
+    if sl_mult is not None and sl_mult > 1:
+        if entry_premium > 0 and premium > 0 and premium >= entry_premium * sl_mult:
+            return (f'SL ×{js_num(sl_mult)} hit '
+                    f'(premium {premium:.2f} vs entry {entry_premium:.2f})')
+    return None
+
+
 def evaluate_exit(row, group, fill, now_minutes, spot, premium, vwap, pnl):
     """(exit, reason) for one row this worker holds open. First match wins:
 
         1. the 15:17 intraday bell (MIS rows only)
         2. the group's Book Exit spot level
         3. the row's own exit time
-        4. H-up / L-down spot levels
-        5. VWAP cross
-        6. SL rupees / SL multiple
+        4. everything in evaluate_row_exit — H-up / L-down / VWAP / SL
 
-    `premium` and `pnl` cover only the legs this row's Side trades, and so does
-    the entry price they are compared against — a CE-only row measured against
-    a CE+PE premium would cross its threshold at the wrong number.
-
-    Every spot-derived rule is suppressed when spot <= 0. A failed quote read
-    arrives as 0, and 0 is below every conceivable L-down level — treating that
-    as a breach would flatten the whole book on one dropped tick. Premium-driven
-    rules are likewise suppressed at 0.
+    The first three are clock- and group-driven and belong to the worker's
+    scheduler; the browser evaluates them in its own tick loop for the same
+    reason. Only the fourth is a shared, tested rule.
     """
     if not fill:
         return False, ''
@@ -338,37 +417,17 @@ def evaluate_exit(row, group, fill, now_minutes, spot, premium, vwap, pnl):
     if spot_known and (group or {}).get('bookExit'):
         hi, lo = num((group or {}).get('spotHigh')), num((group or {}).get('spotLow'))
         if hi is not None and hi > 0 and spot >= hi:
-            return True, f'Book exit: spot {spot:.2f} >= {hi}'
+            return True, f'Book exit: spot {spot:.2f} >= {js_num(hi)}'
         if lo is not None and lo > 0 and spot <= lo:
-            return True, f'Book exit: spot {spot:.2f} <= {lo}'
+            return True, f'Book exit: spot {spot:.2f} <= {js_num(lo)}'
 
     exit_at = parse_hhmm(row.get('exitTime'))
     if exit_at is not None and now_minutes >= exit_at:
         return True, f"Exit time {row.get('exitTime')}"
 
-    if spot_known:
-        hi, lo = num(row.get('levelHigh')), num(row.get('levelLow'))
-        if hi is not None and spot >= hi:
-            return True, f'H-up {hi} breached (spot {spot:.2f})'
-        if lo is not None and spot <= lo:
-            return True, f'L-down {lo} breached (spot {spot:.2f})'
-
-    # This tool only ever opens with a SELL, so it is hurt by premium EXPANDING
-    # through VWAP or through a multiple of the entry price.
-    if row.get('levelVw') and vwap and vwap > 0 and premium > 0 and premium >= vwap:
-        return True, f'Premium {premium:.2f} >= VWAP {vwap:.2f}'
-
-    sl_rs = num(row.get('slRupees'))
-    if sl_rs is not None and sl_rs > 0 and pnl <= -sl_rs:
-        return True, f'SL Rs{sl_rs:.0f} hit (P&L Rs{pnl:.0f})'
-
-    sl_mult = num(row.get('slMultiplier'))
-    if sl_mult is not None and sl_mult > 1 and premium > 0:
-        entry = float(fill.get('entryPremium') or 0.0)
-        if entry > 0 and premium >= entry * sl_mult:
-            return True, f'SL x{sl_mult}: premium {premium:.2f} vs entry {entry:.2f}'
-
-    return False, ''
+    reason = evaluate_row_exit(
+        row, spot, premium, float(fill.get('entryPremium') or 0.0), pnl, vwap)
+    return (True, reason) if reason else (False, '')
 
 
 def evaluate_leg_exit(row, leg, fill, ltp):
@@ -388,7 +447,8 @@ def evaluate_leg_exit(row, leg, fill, ltp):
     # Short: hurt by this leg's own premium expanding through a multiple of
     # what it was sold for.
     if entry > 0 and ltp >= entry * mult:
-        return True, f'{leg} SL x{mult}: premium {ltp:.2f} vs entry {entry:.2f}'
+        return True, (f'{leg} SL ×{js_num(mult)} hit '
+                      f'(premium {ltp:.2f} vs entry {entry:.2f})')
     return False, ''
 
 
@@ -409,10 +469,10 @@ def evaluate_global_risk(cfg, total_pnl, peak_pnl, lock_floor):
         target = num(cfg.get('targetRupees'))
         stop = num(cfg.get('stopRupees'))
         if target is not None and target > 0 and total_pnl >= target:
-            return True, f'Target Rs{target:.0f} reached (Rs{total_pnl:.0f})', lock_floor, trail_state
+            return True, f'Target ₹{target:.0f} reached (₹{total_pnl:.0f})', lock_floor, trail_state
         # STOP is stored as a positive magnitude; the UI labels it a loss limit.
         if stop is not None and stop > 0 and total_pnl <= -stop:
-            return True, f'Stop Rs{stop:.0f} hit (Rs{total_pnl:.0f})', lock_floor, trail_state
+            return True, f'Stop ₹{stop:.0f} hit (₹{total_pnl:.0f})', lock_floor, trail_state
 
     trigger = num(cfg.get('triggerRupees'))
     if cfg.get('trailEnabled') and trigger is not None and trigger > 0:
@@ -434,7 +494,8 @@ def evaluate_global_risk(cfg, total_pnl, peak_pnl, lock_floor):
                 lock_floor = ratchet
             if total_pnl <= lock_floor:
                 return (True,
-                        f'Trail lock Rs{lock_floor:.0f} hit (Rs{total_pnl:.0f}, peak Rs{peak_pnl:.0f})',
+                        f'Trail lock ₹{lock_floor:.0f} hit '
+                        f'(₹{total_pnl:.0f}, peak ₹{peak_pnl:.0f})',
                         lock_floor, trail_state)
 
     return False, '', lock_floor, trail_state
@@ -468,6 +529,7 @@ class FocusRowsWorker:
         self.trail_state = 'INACTIVE'
         self.events = []           # recent (ts, level, message) for the dashboard
         self._warned_orphans = set()   # ledger ids already reported as orphaned
+        self._warned_stale_arm = False # yesterday's live arm reported once
         self.started_at = datetime.now().isoformat()
         self._chain_cache = {}     # (underlying, expiry) -> (minute_key, chain)
         self._vwap_cache = {}      # (underlying, expiry, ce, pe, side) -> (minute_key, vwap)
@@ -484,6 +546,28 @@ class FocusRowsWorker:
         self.market = MarketData(self.helper)
         self.router = OrderRouter(self.helper, self.market, self.broker, self.dry_run)
         self.start_spot_feed()
+        self.start_order_feed()
+
+    def start_order_feed(self):
+        """Subscribe to Dhan's order-update WebSocket.
+
+        This is what makes an entry fill-confirmed rather than ACK-confirmed:
+        OrderRouter.confirm_fill waits on a terminal status, and wait_for_fill
+        reads this socket's cache before falling back to REST polling. Without
+        it every fill confirmation costs a REST poll every 0.5s against an
+        account-wide ~1 req/s budget shared with the leg quotes that gate exits.
+
+        Best-effort and Dhan-only: with the socket down, wait_for_fill still
+        works over REST, just more expensively. Child brokers have no
+        equivalent, and their legs are recorded unconfirmed either way.
+        """
+        if self.dry_run:
+            return
+        try:
+            self.helper.start_order_update_websocket()
+            self.log('info', 'Order-update feed subscribed')
+        except Exception as e:
+            self.log('warning', f'Order-update WebSocket unavailable, fills confirm over REST: {e}')
 
     def start_spot_feed(self):
         """Subscribe the three index spots over the market-feed WebSocket.
@@ -690,13 +774,33 @@ class FocusRowsWorker:
             strike = ce_strike if leg == 'CE' else pe_strike
             if strike is None:
                 continue
-            ok, detail = self.router.place(u, expiry, strike, leg, 'SELL', qty, product)
+            ok, detail, fill = self.router.place(u, expiry, strike, leg, 'SELL', qty, product)
             if not ok:
                 self.log('error', f"{u} {row['id'][-4:]} {int(strike)}{leg}: entry failed — {detail}")
                 continue
-            price = self.market.ltp(u, self.market.leg(u, expiry, strike, leg))
-            opened[leg] = {'strike': int(strike), 'qty': qty, 'entryPrice': price}
-            self.log('info', f"{u} {row['id'][-4:]}: SELL {qty} {int(strike)}{leg} @ ~{price:.2f} ({detail})")
+            if fill:
+                # Confirmed: the price actually traded and the quantity actually
+                # filled. SL x measures against this, and exits are sized off it.
+                price = float(fill['price'])
+                got = int(fill['qty'])
+                confirmed = True
+                if got < qty:
+                    self.log('warning', f"{u} {row['id'][-4:]} {int(strike)}{leg}: partial fill "
+                                        f"{got}/{qty} — the ledger holds the {got} that traded.")
+            else:
+                # ACKed but unconfirmed. An LTP read is the best entry price
+                # available; the leg is flagged so it is visible on screen, and
+                # reconcile() will size it against broker truth on a later tick.
+                price = self.market.ltp(u, self.market.leg(u, expiry, strike, leg))
+                got = qty
+                confirmed = False
+            if got <= 0:
+                self.log('error', f"{u} {row['id'][-4:]} {int(strike)}{leg}: nothing filled — not recorded")
+                continue
+            opened[leg] = {'strike': int(strike), 'qty': got, 'entryPrice': price,
+                           'confirmed': confirmed, 'openedTs': time.time()}
+            self.log('info', f"{u} {row['id'][-4:]}: SELL {got} {int(strike)}{leg} @ "
+                             f"{'' if confirmed else '~'}{price:.2f} ({detail})")
 
         if not opened:
             self.log('error', f"{u} {row['id'][-4:]}: entry aborted — no leg opened")
@@ -778,6 +882,73 @@ class FocusRowsWorker:
             # Left in the ledger untouched — evaluate_leg_exit re-fires next
             # tick and retries, same as exit_row's partial-failure path.
 
+    def reconcile(self):
+        """Write the ledger down to what the broker actually shows.
+
+        The ledger is this worker's sizing authority, and it moves on order
+        ACKs — which are not fills. Three ways it drifts above broker truth:
+
+          * an exit was accepted but never filled (or only partly), so the
+            ledger says flat while the position is live;
+          * a leg was closed elsewhere — another instance, a manual square-off,
+            the broker's own auto-square-off;
+          * an entry was ACKed but rejected at the exchange, so the ledger
+            claims a position that does not exist.
+
+        Reconciliation is strictly DOWNWARD. A broker quantity larger than the
+        ledger belongs to something else — another row, another strategy, a
+        manual trade — and claiming it would let this worker close a position it
+        never opened, which is the whole failure resolve_exit_qty exists to
+        prevent.
+
+        A leg is left alone for RECONCILE_GRACE_SECONDS after it was last
+        opened: the position book lags a fresh fill, and a zero read in that
+        window is latency, not truth.
+        """
+        if not self.fills:
+            return
+        underlyings = {f.get('underlying') for f in self.fills.values()}
+        snapshot = self.router.net_positions(underlyings=[u for u in underlyings if u])
+        if snapshot is None:
+            # Unknown, not empty. Leaving the ledger untouched is the only safe
+            # reading of a failed position call.
+            return
+
+        now = time.time()
+        changed = False
+        for rid, fill in list(self.fills.items()):
+            u = fill.get('underlying')
+            expiry = fill.get('expiry') or ''
+            for leg in ('CE', 'PE'):
+                held = fill.get(leg)
+                if not held:
+                    continue
+                if now - float(held.get('openedTs') or 0) < RECONCILE_GRACE_SECONDS:
+                    continue
+                key = self.router.position_key(u, expiry, held['strike'], leg)
+                if not key:
+                    continue
+                broker_qty = abs(int(snapshot.get(key, 0)))
+                own_qty = int(held.get('qty') or 0)
+                if broker_qty >= own_qty:
+                    continue
+                changed = True
+                if broker_qty <= 0:
+                    self.log('warning',
+                             f"{u} {rid[-4:]} {held['strike']}{leg}: broker shows no position but the "
+                             f"ledger held {own_qty} — dropping the leg (closed elsewhere, or the "
+                             f"entry never filled).")
+                    del fill[leg]
+                else:
+                    self.log('warning',
+                             f"{u} {rid[-4:]} {held['strike']}{leg}: ledger {own_qty} vs broker "
+                             f"{broker_qty} — writing the ledger down.")
+                    held['qty'] = broker_qty
+            if not any(k in fill for k in ('CE', 'PE')):
+                self.fills.pop(rid, None)
+        if changed:
+            self.save_state()
+
     def orphan_rows(self, rows):
         """Synthetic rows for ledger entries whose config row has been deleted.
 
@@ -837,17 +1008,33 @@ class FocusRowsWorker:
 
     def tick(self):
         self.load_config()
+        # Broker truth first: every rule below is priced and sized off the
+        # ledger, so it has to agree with the position book before it is used.
+        self.reconcile()
         cfg = self.cfg
         rows = list(cfg.get('rows') or [])
         # Fills whose config row is gone still hold real positions — see
         # orphan_rows. Appended so every loop below (quotes, exits, the status
         # snapshot and the account risk sweep) reaches them too.
         rows += self.orphan_rows(rows)
-        live = bool(cfg.get('liveRealMoney'))
 
         now = datetime.now(IST)
         now_minutes = now.hour * 60 + now.minute
         today = now.strftime('%Y-%m-%d')
+
+        # The live arm expires with the session. liveRealMoney lives on disk and
+        # this worker is auto-started when the page mounts, so without the date
+        # check a config armed on Friday would still be armed on Monday morning
+        # — trading a setup nobody has looked at today. Mirrors the same check
+        # in FocusTool.tsx's applyServerConfig.
+        live = bool(cfg.get('liveRealMoney')) and str(cfg.get('liveArmedOn') or '') == today
+        if bool(cfg.get('liveRealMoney')) and not live and not self._warned_stale_arm:
+            self._warned_stale_arm = True
+            self.log('warning', f"Config says live, but it was armed on "
+                                f"{cfg.get('liveArmedOn') or 'an unknown date'}, not {today}. "
+                                f"Treating as dry run — re-arm LIVE · REAL MONEY on the page.")
+        if live:
+            self._warned_stale_arm = False
 
         snapshot = []
         total_pnl = 0.0
@@ -992,7 +1179,7 @@ class FocusRowsWorker:
             else:
                 dte = dte_for(expiry, today)
                 ready = any((ce_strike if l == 'CE' else pe_strike) is not None for l in legs)
-                do_enter, _reason = evaluate_entry(row, group, now_minutes, dte, ready)
+                do_enter, _reason = evaluate_entry(row, group, now_minutes, dte, ready, flat=True)
                 if do_enter:
                     self.enter_row(row, group, expiry, ce_strike, pe_strike, _reason)
 

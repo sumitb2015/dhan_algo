@@ -20,6 +20,14 @@ import type {
   FocusToolConfig, FocusRow, FocusRowFill, FocusIndexGroup,
   FocusUnderlying, FocusDte, FocusSide, FocusRowStatus, FocusStrikeMode,
 } from '@/lib/focusToolRows';
+// The rule engine. Extracted so it can be tested, and so the same cases can be
+// run against focus_tool_rows_worker.py — see focusToolRules.cases.json.
+import {
+  INTRADAY_BACKSTOP_HM, EMPTY_ROW_LIVE,
+  legsOf, legsFlat, sidePremium, legStopReason,
+  dteMatches, dteForExpiry, evaluateRowExit, evaluateEntry, evaluateGlobalRisk,
+  type PosRow, type RowLive,
+} from '@/lib/focusToolRules';
 
 // â”€â”€ Constants â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
@@ -94,13 +102,6 @@ function fmtPrice(n: number | null | undefined): string {
   return n.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 }
 
-/**
- * Repo-wide intraday square-off time (see CLAUDE.md — every strategy hardcodes
- * 15:17 IST). Applied here as a backstop for MIS rows so a row whose own exit
- * time is later than the broker's own auto-square-off never rides into it.
- */
-const INTRADAY_BACKSTOP_HM = '15:17';
-
 /** Set once the user stops the server-side worker by hand, so the auto-start
  *  effect leaves it alone on the next mount. Per-browser, which is the right
  *  scope for a per-user decision on a local single-user tool. */
@@ -113,22 +114,15 @@ function istHm(): string {
   });
 }
 
-/** Whether a row's DTE filter admits an expiry that is `dte` days out. */
-function dteMatches(filter: FocusDte, dte: number | null): boolean {
-  if (filter === 'Any') return true;
-  if (dte == null) return false;
-  if (filter === '0') return dte === 0;
-  if (filter === '1') return dte === 1;
-  return dte === 0 || dte === 1;   // '0+1'
+/** Today's calendar date in IST, 'YYYY-MM-DD'. */
+function istToday(): string {
+  return new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
 }
 
-/** Whole days from today (IST) to `expiry`. Both sides are read as calendar
- *  dates, so this never drifts by an hour-of-day. */
+/** Whole days from today (IST) to `expiry`. The clock is read here so the pure
+ *  rule (dteForExpiry) stays testable at any date. */
 function dteFor(expiry: string): number | null {
-  if (!expiry) return null;
-  const today = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
-  const ms = Date.parse(`${expiry}T00:00:00Z`) - Date.parse(`${today}T00:00:00Z`);
-  return Number.isFinite(ms) ? Math.round(ms / 86_400_000) : null;
+  return dteForExpiry(expiry, istToday());
 }
 
 /** The option chain keys strikes as '24250.000000'; every other source uses
@@ -172,11 +166,6 @@ function underlyingOfSymbol(tradingSymbol: string | undefined): FocusUnderlying 
   return null;
 }
 
-/** Legs this row trades — `side` selects which, it is not a direction. */
-function legsOf(row: FocusRow): ('CE' | 'PE')[] {
-  return row.side === 'BOTH' ? ['CE', 'PE'] : [row.side as 'CE' | 'PE'];
-}
-
 /**
  * Per-leg rupee value and the PE/CE ratio between them, for the row's LTP
  * display.
@@ -208,68 +197,7 @@ function legValues(row: FocusRow, live: RowLive, lotSize: number | null): {
   };
 }
 
-/**
- * Current premium across only the legs this row's Side trades AND that are
- * still actually open. A leg the row's Side names but that has already been
- * closed (by a leg-wise stop, a manual Exit, or anything else) must not keep
- * contributing its market LTP here — evaluateRowExit only ever runs while the
- * row holds a position (see the auto-exit watcher), so this can never starve
- * the pre-entry preview, only avoid comparing against a phantom leg.
- */
-function sidePremium(row: FocusRow, live: RowLive): number {
-  let sum = 0;
-  for (const leg of legsOf(row)) {
-    const pos = leg === 'CE' ? live.cePosition : live.pePosition;
-    if (!pos || Number(pos.netQty) === 0) continue;
-    sum += (leg === 'CE' ? live.ltpCe : live.ltpPe) ?? 0;
-  }
-  return sum;
-}
-
-/**
- * (leg's own SL x reason, or null). Independent of the pair's combined
- * slMultiplier/slRupees, and independent of `row.side` — a leftover position
- * on a leg the row no longer trades still deserves its own stop. Only fires
- * while that leg actually holds a position; a flat leg has no premium to
- * measure a multiple against.
- */
-function legStopReason(row: FocusRow, leg: 'CE' | 'PE', live: RowLive): string | null {
-  const pos = leg === 'CE' ? live.cePosition : live.pePosition;
-  const qty = Number(pos?.netQty ?? 0);
-  if (qty === 0) return null;
-  const mult = Number(leg === 'CE' ? row.ceSlMultiplier : row.peSlMultiplier);
-  if (!(mult > 1)) return null;
-  // Short: hurt by the leg's own premium expanding through a multiple of what
-  // it was sold for (this tool only ever opens with a SELL — see placeLeg).
-  const entry = qty < 0 ? Number(pos?.sellAvg) || 0 : Number(pos?.buyAvg) || 0;
-  const now = (leg === 'CE' ? live.ltpCe : live.ltpPe) ?? 0;
-  if (entry > 0 && now > 0 && now >= entry * mult) {
-    return `${leg} SL ×${mult} hit (premium ${now.toFixed(2)} vs entry ${entry.toFixed(2)})`;
-  }
-  return null;
-}
-
-/** True once neither leg carries a broker quantity — safe to delete the row. */
-function legsFlat(live: RowLive): boolean {
-  const ceQty = Number(live.cePosition?.netQty ?? 0);
-  const peQty = Number(live.pePosition?.netQty ?? 0);
-  return ceQty === 0 && peQty === 0;
-}
-
 // â”€â”€ Types â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-
-interface PosRow {
-  tradingSymbol: string;
-  securityId: string;
-  exchangeSegment: string;
-  productType: string;
-  netQty: number;
-  buyAvg: number;
-  sellAvg: number;
-  lastTradedPrice?: number;
-  realizedProfit: number;
-  unrealizedProfit: number;
-}
 
 interface FutQuote {
   ltp: number;
@@ -286,30 +214,6 @@ interface ChainData {
   spot: number;
   oc: Record<string, { ce: number; pe: number }>;
 }
-
-/** Everything the table needs to draw one row live. */
-interface RowLive {
-  ceStrike: number | null;
-  peStrike: number | null;
-  ltpCe: number | null;
-  ltpPe: number | null;
-  cePosition: PosRow | null;
-  pePosition: PosRow | null;
-  /** Realised + unrealised P&L across the legs this row's Side actually trades,
-   *  read straight off the broker's own position(s) — see rowLive's doc comment. */
-  pnl: number;
-  /** Combined entry premium for those same legs, off the position's own avg price. */
-  entryPremium: number;
-  /** Session-open VWAP of the combined CE+PE premium at this row's strikes —
-   *  null until fetched (rows with VW off never fetch it) or if the intraday
-   *  data isn't available yet. See useEffect below / focus_tool_vwap.py. */
-  vwap: number | null;
-}
-
-const EMPTY_ROW_LIVE: RowLive = {
-  ceStrike: null, peStrike: null, ltpCe: null, ltpPe: null, cePosition: null, pePosition: null,
-  pnl: 0, entryPremium: 0, vwap: null,
-};
 
 /** Cache/lookup key for a strike pair's VWAP — shared across every row that
  *  happens to trade the same underlying/expiry/CE-strike/PE-strike/side, so two
@@ -344,6 +248,8 @@ interface WorkerStatus {
   liveRealMoney?: boolean;
   openRows?: number;
   totalPnl?: number;
+  peakPnl?: number;
+  lockFloor?: number | null;
   trailState?: string;
   lastUpdate?: string;
   note?: string;
@@ -412,6 +318,7 @@ const DEFAULT_CONFIG: FocusToolConfig = {
   triggerRupees: '',
   lockRupees: '',
   liveRealMoney: false,
+  liveArmedOn: '',
   updatedAt: new Date().toISOString(),
 };
 
@@ -1913,9 +1820,15 @@ export default function FocusTool() {
    *
    * Standing down while UNKNOWN is the safe asymmetry: a false "stopped"
    * duplicates real orders, a false "running" costs one 3s poll of delay.
+   *
+   * STALE is excluded for a different reason: it means the heartbeat stopped
+   * but the PID is still alive. That process can still place orders, so the tab
+   * taking over would be the double-driving this gate exists to prevent —
+   * except now against a worker nobody can see the state of. The banner below
+   * says so, and the Worker button restarts it (stop-and-wait, then respawn).
    */
-  const tabMayTrade = liveRealMoney && workerStatus.status !== 'RUNNING'
-    && workerStatus.status !== 'UNKNOWN';
+  const tabMayTrade = liveRealMoney
+    && !['RUNNING', 'UNKNOWN', 'STALE'].includes(workerStatus.status);
 
   const pollWorker = useCallback(() => {
     fetch('/api/focus-tool/worker')
@@ -2018,7 +1931,10 @@ export default function FocusTool() {
     setTrailEnabled(d.trailEnabled);
     setTriggerRupees(d.triggerRupees);
     setLockRupees(d.lockRupees);
-    setLiveRealMoney(d.liveRealMoney);
+    // The live arm expires with the session — see FocusToolConfig.liveArmedOn.
+    // A config saved live yesterday comes back disarmed, so opening the page in
+    // the morning never resumes trading a setup nobody has looked at today.
+    setLiveRealMoney(!!d.liveRealMoney && d.liveArmedOn === istToday());
   }, []);
 
   useEffect(() => {
@@ -2251,15 +2167,14 @@ export default function FocusTool() {
   }, [activeModal, fetchOrders]);
 
 
+  // The trailing floor is OWNED by the scheduler's evaluateGlobalRisk, which
+  // ratchets it forward between ticks (a floor recomputed from scratch each
+  // render could fall, which is the one thing a trailing lock must never do).
+  // This effect only RESETS it: turning the trail off, or changing its trigger
+  // or gap, invalidates a floor derived from the old settings.
   useEffect(() => {
-    const trigger = Number(triggerRupees) || 0;
-    const lock = Number(lockRupees) || 0;
-    if (trailEnabled && trigger > 0 && peakMtm >= trigger) {
-      setLockMtm(peakMtm - lock);
-    } else {
-      setLockMtm(null);
-    }
-  }, [trailEnabled, triggerRupees, lockRupees, peakMtm]);
+    setLockMtm(null);
+  }, [trailEnabled, triggerRupees, lockRupees]);
 
   const underlyingPnl = useMemo(() => {
     const out: Record<FocusUnderlying, number> = { NIFTY: 0, BANKNIFTY: 0, SENSEX: 0 };
@@ -3084,55 +2999,6 @@ export default function FocusTool() {
   }
 
   /**
-   * First level-exit rule this row breaches, or null if none has. Checked in
-   * this order: H↑, L↓, VW, SL ₹, SL × — matching the exit ladder in the
-   * sibling implementation (focus_tool_worker.py's evaluate_exit).
-   *
-   * H↑/L↓ compare against spot. VW compares against a genuine session-open
-   * VWAP (fetched once a minute per strike pair — see vwapWantedKey's effect
-   * and scripts/tools/focus_tool_vwap.py; live.vwap is null until fetched or
-   * if VW is off, so the rule is silently inert until real data exists —
-   * never fires on a guess). SL ₹/SL × against the broker's own P&L and
-   * entry price.
-   */
-  function evaluateRowExit(row: FocusRow, live: RowLive, spot: number): string | null {
-    const hi = Number(row.levelHigh);
-    if (row.levelHigh && Number.isFinite(hi) && spot > 0 && spot >= hi) {
-      return `H↑ breached: spot ${spot.toFixed(2)} ≥ ${hi}`;
-    }
-    const lo = Number(row.levelLow);
-    if (row.levelLow && Number.isFinite(lo) && spot > 0 && spot <= lo) {
-      return `L↓ breached: spot ${spot.toFixed(2)} ≤ ${lo}`;
-    }
-    // Premium of only the legs this row's Side trades. `entryPremium` is
-    // already restricted the same way (see rowLive), so a CE-only row must not
-    // compare a CE entry price against a CE+PE current price — that mismatch
-    // would fire, or fail to fire, a real-money exit at the wrong threshold.
-    const nowPremium = sidePremium(row, live);
-    if (row.levelVw && live.vwap != null && live.vwap > 0) {
-      // This tool only ever opens with a SELL (see placeLeg) — hurt by the
-      // premium expanding past VWAP, same as slMult below.
-      if (nowPremium > 0 && nowPremium >= live.vwap) {
-        return `VW breached: premium ${nowPremium.toFixed(2)} ≥ VWAP ${live.vwap.toFixed(2)}`;
-      }
-    }
-    const slRs = Number(row.slRupees);
-    if (row.slRupees && Number.isFinite(slRs) && slRs > 0) {
-      if (live.pnl <= -slRs) return `SL ₹${slRs} hit (P&L ₹${live.pnl.toFixed(0)})`;
-    }
-    const slMult = Number(row.slMultiplier);
-    if (row.slMultiplier && Number.isFinite(slMult) && slMult > 1) {
-      const entry = live.entryPremium;
-      // This tool only ever opens with a SELL (see placeLeg) — the position is
-      // hurt by the premium expanding past a multiple of what it was sold for.
-      if (entry > 0 && nowPremium > 0 && nowPremium >= entry * slMult) {
-        return `SL ×${slMult} hit (premium ${nowPremium.toFixed(2)} vs entry ${entry.toFixed(2)})`;
-      }
-    }
-    return null;
-  }
-
-  /**
    * The live tracking loop: whenever a row's resolved data changes (spot,
    * premiums or broker positions all flow through `rowLive`), check every row
    * that actually holds a position for a level-exit breach and square it off
@@ -3151,12 +3017,12 @@ export default function FocusTool() {
   // `config` — those are the values currently on screen, and a user who
   // toggles Risk on expects it to be watching straight away rather than only
   // after a separate Save.
-  const schedulerRef = useRef({
-    config, rowLive, spots, toolPnl, lockMtm, riskEnabled, targetRupees, stopRupees, trailEnabled,
-  });
-  schedulerRef.current = {
-    config, rowLive, spots, toolPnl, lockMtm, riskEnabled, targetRupees, stopRupees, trailEnabled,
+  const schedulerSnapshot = {
+    config, rowLive, spots, toolPnl, lockMtm, peakMtm,
+    riskEnabled, targetRupees, stopRupees, trailEnabled, triggerRupees, lockRupees,
   };
+  const schedulerRef = useRef(schedulerSnapshot);
+  schedulerRef.current = schedulerSnapshot;
   const expiriesRef = useRef(expiries);
   expiriesRef.current = expiries;
 
@@ -3323,8 +3189,9 @@ export default function FocusTool() {
 
     const tick = () => {
       const {
-        config: cfg, rowLive: live, spots: sp, toolPnl: tot, lockMtm: lock,
+        config: cfg, rowLive: live, spots: sp, toolPnl: tot, lockMtm: lock, peakMtm: peak,
         riskEnabled: riskOn, targetRupees: target$, stopRupees: stop$, trailEnabled: trailOn,
+        triggerRupees: trigger$, lockRupees: lock$,
       } = schedulerRef.current;
       const nowHm = istHm();
       const openRows = cfg.rows.filter(r => {
@@ -3332,22 +3199,19 @@ export default function FocusTool() {
         return l && !legsFlat(l);
       });
 
-      // ── 1. Account-wide risk: closes every open row at once ──
-      if (riskOn && openRows.length) {
-        const target = Number(target$);
-        const stop = Number(stop$);
-        let reason: string | null = null;
-        if (target$ && target > 0 && tot >= target) {
-          reason = `Account target hit: ${fmtInr(tot, true)} ≥ ${fmtInr(target)}`;
-        } else if (stop$ && stop > 0 && tot <= -stop) {
-          reason = `Account stop hit: ${fmtInr(tot, true)} ≤ ${fmtInr(-stop, true)}`;
-        } else if (trailOn && lock != null && tot <= lock) {
-          reason = `Trailing lock hit: ${fmtInr(tot, true)} ≤ ${fmtInr(lock, true)}`;
-        }
-        if (reason) {
-          for (const row of openRows) actionsRef.current.autoExitRow(row, reason);
-          return;   // nothing else should run on a tick that just flattened the book
-        }
+      // ── 1. Account-wide budget: closes every open row at once ──
+      // Delegated to the shared rule so the trail ratchets identically here and
+      // in the worker — the floor is carried between ticks rather than
+      // recomputed, so a spike that has already faded still counts.
+      const risk = evaluateGlobalRisk(
+        { riskEnabled: riskOn, targetRupees: target$, stopRupees: stop$,
+          trailEnabled: trailOn, triggerRupees: trigger$, lockRupees: lock$ },
+        { totalPnl: tot, peakPnl: peak, lockFloor: lock },
+      );
+      if (risk.lockFloor !== lock) setLockMtm(risk.lockFloor);
+      if (risk.exitAll && openRows.length) {
+        for (const row of openRows) actionsRef.current.autoExitRow(row, risk.reason);
+        return;   // nothing else should run on a tick that just flattened the book
       }
 
       // ── 2. Per-index Book Exit on spot levels ──
@@ -3381,21 +3245,21 @@ export default function FocusTool() {
       }
 
       // ── 4. Auto-entry for armed rows ──
+      // Every condition lives in the shared evaluateEntry, which the worker
+      // runs too — including the reason string, so both report the same thing
+      // about the same row.
       for (const row of cfg.rows) {
-        if (row.status !== 'armed') continue;
-        const l = live[row.id];
-        if (!l || !legsFlat(l)) continue;                       // already holds a position
+        const l = live[row.id] ?? EMPTY_ROW_LIVE;
         const group = cfg.groups.find(g => g.underlying === row.underlying);
-        if (!group?.enabled) continue;                          // index not started
-        if (!row.entryTime || nowHm < row.entryTime) continue;  // not yet
-        // Never enter into a window that has already closed — arming a row
-        // after its own exit time (or after the intraday backstop) must not
-        // open a position that the next tick immediately squares off.
-        if (row.exitTime && nowHm >= row.exitTime) continue;
-        if (group.product === 'INTRADAY' && nowHm >= INTRADAY_BACKSTOP_HM) continue;
-        if (!dteMatches(row.dte, dteFor(row.expiry || expiriesRef.current[row.underlying]?.[0] || ''))) continue;
-        if (!(l.ceStrike != null || l.peStrike != null)) continue;
-        actionsRef.current.autoEnterRow(row, `Entry time ${row.entryTime} reached`);
+        const decision = evaluateEntry(row, {
+          nowHm,
+          groupEnabled: !!group?.enabled,
+          product: group?.product ?? 'INTRADAY',
+          dte: dteFor(row.expiry || expiriesRef.current[row.underlying]?.[0] || ''),
+          strikesReady: l.ceStrike != null || l.peStrike != null,
+          flat: legsFlat(l),
+        });
+        if (decision.enter) actionsRef.current.autoEnterRow(row, decision.reason);
       }
     };
 
@@ -3457,7 +3321,7 @@ export default function FocusTool() {
    * about-to-be-stale `riskEnabled`/etc. closures, since setState is async.
    */
   function saveRiskPatch(partial: Partial<Pick<FocusToolConfig,
-    'riskEnabled' | 'trailEnabled' | 'liveRealMoney'
+    'riskEnabled' | 'trailEnabled' | 'liveRealMoney' | 'liveArmedOn'
   >>) {
     saveConfig({
       riskEnabled, targetRupees, stopRupees, trailEnabled, triggerRupees, lockRupees, liveRealMoney,
@@ -3479,7 +3343,9 @@ export default function FocusTool() {
   function toggleLiveRealMoney() {
     const next = !liveRealMoney;
     setLiveRealMoney(next);
-    saveRiskPatch({ liveRealMoney: next });
+    // Stamp the day the arm was made. Both this page and the worker refuse to
+    // treat a stale stamp as live, so the arm has to be renewed each session.
+    saveRiskPatch({ liveRealMoney: next, liveArmedOn: next ? istToday() : '' });
   }
 
   const rowsByUnderlying = useMemo<Record<FocusUnderlying, FocusRow[]>>(() => {
@@ -3530,7 +3396,9 @@ export default function FocusTool() {
         trailEnabled={trailEnabled} onToggleTrail={toggleTrailEnabled}
         triggerRupees={triggerRupees} setTriggerRupees={setTriggerRupees}
         lockRupees={lockRupees} setLockRupees={setLockRupees}
-        onSave={() => saveConfig()} saving={saving} peakMtm={peakMtm} lockMtm={lockMtm}
+        onSave={() => saveConfig()} saving={saving}
+        peakMtm={workerRunning ? (workerStatus.peakPnl ?? 0) : peakMtm}
+        lockMtm={workerRunning ? (workerStatus.lockFloor ?? null) : lockMtm}
         copyTrade={copyTrade}
         onOpenRisk={() => setActiveModal('risk')}
         onOpenOrders={() => setActiveModal('orderbook')}
@@ -3539,6 +3407,21 @@ export default function FocusTool() {
         workerStatus={workerStatus} onToggleWorker={toggleWorker}
         onExitAll={handleExitAll} confirmExitAll={confirmExitAll} exitingAll={exitingAll}
       />
+
+      {/* A wedged worker is the one state where NOTHING is watching: its PID is
+          alive so the tab must not take over (it would double-drive against a
+          process whose state nobody can see), but it has stopped evaluating.
+          Silence here would read exactly like a healthy quiet market. */}
+      {liveRealMoney && workerStatus.status === 'STALE' && (
+        <div className="mx-6 mt-4 rounded-xl border border-amber-500/40 bg-amber-500/10 px-4 py-2.5 flex items-center gap-3">
+          <ShieldOff className="h-4 w-4 text-amber-400 shrink-0" />
+          <p className="text-[11px] text-amber-300 leading-relaxed">
+            <strong>Nothing is watching your rules.</strong> The worker process (PID {workerStatus.pid ?? '?'})
+            {' '}is alive but has stopped heartbeating, so this tab will not take over — two executors against
+            {' '}one config would double every entry. Restart it with the Worker button. Open positions are untouched.
+          </p>
+        </div>
+      )}
 
       {/* Main */}
       <div className="flex-1 px-6 py-5 flex flex-col gap-6">

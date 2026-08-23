@@ -1,0 +1,335 @@
+{
+  "_comment": [
+    "Shared parity fixture for the Focus Tool rule engine.",
+    "",
+    "Two implementations decide when this terminal opens and closes real",
+    "positions: lib/focusToolRules.ts in the browser, and the evaluate_* ",
+    "functions in scripts/tools/focus_tool_rows_worker.py on the server. They",
+    "run against the same config file, and whichever is up at the time is the",
+    "one placing orders — so a disagreement between them means the screen shows",
+    "one thing and the account does another.",
+    "",
+    "Every case here is run against BOTH: lib/focusToolRules.test.ts (npm test)",
+    "and tests/test_focus_tool_parity.py. Change a rule and you change this",
+    "file, which fails the other side until it is changed too.",
+    "",
+    "`reason` is asserted, not just the boolean: the reason is what gets logged",
+    "and shown, and the order of the checks is what decides which one you see."
+  ],
+
+  "entry": [
+    {
+      "name": "armed row at its entry time enters",
+      "row": { "status": "armed", "lots": 1, "dte": "Any", "entryTime": "09:20", "exitTime": "15:15" },
+      "ctx": { "nowHm": "09:20", "groupEnabled": true, "product": "INTRADAY", "dte": 2, "strikesReady": true, "flat": true },
+      "expect": { "enter": true, "reason": "entry time 09:20 reached" }
+    },
+    {
+      "name": "a stopped index never enters, whatever the row says",
+      "row": { "status": "armed", "lots": 1, "dte": "Any", "entryTime": "09:20", "exitTime": "15:15" },
+      "ctx": { "nowHm": "09:20", "groupEnabled": false, "product": "INTRADAY", "dte": 2, "strikesReady": true, "flat": true },
+      "expect": { "enter": false, "reason": "index not started" }
+    },
+    {
+      "name": "a draft row never enters - this is what Arm is for",
+      "row": { "status": "draft", "lots": 1, "dte": "Any", "entryTime": "09:20", "exitTime": "15:15" },
+      "ctx": { "nowHm": "09:20", "groupEnabled": true, "product": "INTRADAY", "dte": 2, "strikesReady": true, "flat": true },
+      "expect": { "enter": false, "reason": "status draft" }
+    },
+    {
+      "name": "zero lots is refused before anything else is considered",
+      "row": { "status": "armed", "lots": 0, "dte": "Any", "entryTime": "09:20", "exitTime": "15:15" },
+      "ctx": { "nowHm": "09:20", "groupEnabled": true, "product": "INTRADAY", "dte": 2, "strikesReady": true, "flat": true },
+      "expect": { "enter": false, "reason": "lots must be > 0" }
+    },
+    {
+      "name": "a row already holding a position does not enter again",
+      "row": { "status": "armed", "lots": 1, "dte": "Any", "entryTime": "09:20", "exitTime": "15:15" },
+      "ctx": { "nowHm": "09:20", "groupEnabled": true, "product": "INTRADAY", "dte": 2, "strikesReady": true, "flat": false },
+      "expect": { "enter": false, "reason": "already holds a position" }
+    },
+    {
+      "name": "unresolved strikes hold the entry",
+      "row": { "status": "armed", "lots": 1, "dte": "Any", "entryTime": "09:20", "exitTime": "15:15" },
+      "ctx": { "nowHm": "09:20", "groupEnabled": true, "product": "INTRADAY", "dte": 2, "strikesReady": false, "flat": true },
+      "expect": { "enter": false, "reason": "strikes unresolved" }
+    },
+    {
+      "name": "DTE filter 0 refuses a 2-day expiry",
+      "row": { "status": "armed", "lots": 1, "dte": "0", "entryTime": "09:20", "exitTime": "15:15" },
+      "ctx": { "nowHm": "09:20", "groupEnabled": true, "product": "INTRADAY", "dte": 2, "strikesReady": true, "flat": true },
+      "expect": { "enter": false, "reason": "DTE 2 != 0" }
+    },
+    {
+      "name": "DTE 0+1 admits an expiry tomorrow",
+      "row": { "status": "armed", "lots": 1, "dte": "0+1", "entryTime": "09:20", "exitTime": "15:15" },
+      "ctx": { "nowHm": "09:20", "groupEnabled": true, "product": "INTRADAY", "dte": 1, "strikesReady": true, "flat": true },
+      "expect": { "enter": true, "reason": "entry time 09:20 reached" }
+    },
+    {
+      "name": "an unknown DTE never matches a specific filter",
+      "row": { "status": "armed", "lots": 1, "dte": "0", "entryTime": "09:20", "exitTime": "15:15" },
+      "ctx": { "nowHm": "09:20", "groupEnabled": true, "product": "INTRADAY", "dte": null, "strikesReady": true, "flat": true },
+      "expect": { "enter": false, "reason": "DTE None != 0" }
+    },
+    {
+      "name": "no entry time means the row only ever enters by hand",
+      "row": { "status": "armed", "lots": 1, "dte": "Any", "entryTime": "", "exitTime": "15:15" },
+      "ctx": { "nowHm": "09:20", "groupEnabled": true, "product": "INTRADAY", "dte": 2, "strikesReady": true, "flat": true },
+      "expect": { "enter": false, "reason": "no entry time" }
+    },
+    {
+      "name": "before the entry time, it waits",
+      "row": { "status": "armed", "lots": 1, "dte": "Any", "entryTime": "09:20", "exitTime": "15:15" },
+      "ctx": { "nowHm": "09:19", "groupEnabled": true, "product": "INTRADAY", "dte": 2, "strikesReady": true, "flat": true },
+      "expect": { "enter": false, "reason": "waiting for 09:20" }
+    },
+    {
+      "name": "arming a row after its own exit time must not open then square off",
+      "row": { "status": "armed", "lots": 1, "dte": "Any", "entryTime": "09:20", "exitTime": "10:00" },
+      "ctx": { "nowHm": "10:30", "groupEnabled": true, "product": "INTRADAY", "dte": 2, "strikesReady": true, "flat": true },
+      "expect": { "enter": false, "reason": "past its own exit time 10:00" }
+    },
+    {
+      "name": "MIS refuses to open at the 15:17 bell",
+      "row": { "status": "armed", "lots": 1, "dte": "Any", "entryTime": "09:20", "exitTime": "15:20" },
+      "ctx": { "nowHm": "15:17", "groupEnabled": true, "product": "INTRADAY", "dte": 2, "strikesReady": true, "flat": true },
+      "expect": { "enter": false, "reason": "past 15:17 intraday cutoff" }
+    },
+    {
+      "name": "NRML is not bound by the intraday bell",
+      "row": { "status": "armed", "lots": 1, "dte": "Any", "entryTime": "09:20", "exitTime": "15:20" },
+      "ctx": { "nowHm": "15:17", "groupEnabled": true, "product": "MARGIN", "dte": 2, "strikesReady": true, "flat": true },
+      "expect": { "enter": true, "reason": "entry time 09:20 reached" }
+    }
+  ],
+
+  "globalRisk": [
+    {
+      "name": "everything off does nothing",
+      "cfg": { "riskEnabled": false, "targetRupees": "", "stopRupees": "", "trailEnabled": false, "triggerRupees": "", "lockRupees": "" },
+      "ctx": { "totalPnl": 9999, "peakPnl": 9999, "lockFloor": null },
+      "expect": { "exitAll": false, "reason": "", "lockFloor": null, "trailState": "INACTIVE" }
+    },
+    {
+      "name": "target reached closes the book",
+      "cfg": { "riskEnabled": true, "targetRupees": "5000", "stopRupees": "3000", "trailEnabled": false, "triggerRupees": "", "lockRupees": "" },
+      "ctx": { "totalPnl": 5000, "peakPnl": 5200, "lockFloor": null },
+      "expect": { "exitAll": true, "reason": "Target ₹5000 reached (₹5000)", "lockFloor": null, "trailState": "INACTIVE" }
+    },
+    {
+      "name": "stop is a positive magnitude compared against a loss",
+      "cfg": { "riskEnabled": true, "targetRupees": "5000", "stopRupees": "3000", "trailEnabled": false, "triggerRupees": "", "lockRupees": "" },
+      "ctx": { "totalPnl": -3000, "peakPnl": 100, "lockFloor": null },
+      "expect": { "exitAll": true, "reason": "Stop ₹3000 hit (₹-3000)", "lockFloor": null, "trailState": "INACTIVE" }
+    },
+    {
+      "name": "a disabled risk block ignores its own numbers",
+      "cfg": { "riskEnabled": false, "targetRupees": "5000", "stopRupees": "3000", "trailEnabled": false, "triggerRupees": "", "lockRupees": "" },
+      "ctx": { "totalPnl": -9000, "peakPnl": 0, "lockFloor": null },
+      "expect": { "exitAll": false, "reason": "", "lockFloor": null, "trailState": "INACTIVE" }
+    },
+    {
+      "name": "an empty box is off, not a threshold of zero",
+      "cfg": { "riskEnabled": true, "targetRupees": "", "stopRupees": "", "trailEnabled": false, "triggerRupees": "", "lockRupees": "" },
+      "ctx": { "totalPnl": 0, "peakPnl": 0, "lockFloor": null },
+      "expect": { "exitAll": false, "reason": "", "lockFloor": null, "trailState": "INACTIVE" }
+    },
+    {
+      "name": "trail below its trigger stays dormant and arms nothing",
+      "cfg": { "riskEnabled": false, "targetRupees": "", "stopRupees": "", "trailEnabled": true, "triggerRupees": "2000", "lockRupees": "500" },
+      "ctx": { "totalPnl": 1999, "peakPnl": 1999, "lockFloor": null },
+      "expect": { "exitAll": false, "reason": "", "lockFloor": null, "trailState": "DORMANT" }
+    },
+    {
+      "name": "clearing the trigger arms the floor at trigger minus gap",
+      "cfg": { "riskEnabled": false, "targetRupees": "", "stopRupees": "", "trailEnabled": true, "triggerRupees": "2000", "lockRupees": "500" },
+      "ctx": { "totalPnl": 2000, "peakPnl": 2000, "lockFloor": null },
+      "expect": { "exitAll": false, "reason": "", "lockFloor": 1500, "trailState": "ARMED" }
+    },
+    {
+      "name": "the floor ratchets on the running peak, not the current tick",
+      "cfg": { "riskEnabled": false, "targetRupees": "", "stopRupees": "", "trailEnabled": true, "triggerRupees": "2000", "lockRupees": "500" },
+      "ctx": { "totalPnl": 4800, "peakPnl": 5000, "lockFloor": 1500 },
+      "expect": { "exitAll": false, "reason": "", "lockFloor": 4500, "trailState": "ARMED" }
+    },
+    {
+      "name": "a faded spike still ratchets, and the fall through it fires",
+      "cfg": { "riskEnabled": false, "targetRupees": "", "stopRupees": "", "trailEnabled": true, "triggerRupees": "2000", "lockRupees": "500" },
+      "ctx": { "totalPnl": 2600, "peakPnl": 5000, "lockFloor": 1500 },
+      "expect": { "exitAll": true, "reason": "Trail lock ₹4500 hit (₹2600, peak ₹5000)", "lockFloor": 4500, "trailState": "ARMED" }
+    },
+    {
+      "name": "the floor never falls when the peak does not move",
+      "cfg": { "riskEnabled": false, "targetRupees": "", "stopRupees": "", "trailEnabled": true, "triggerRupees": "2000", "lockRupees": "500" },
+      "ctx": { "totalPnl": 3000, "peakPnl": 3000, "lockFloor": 4500 },
+      "expect": { "exitAll": true, "reason": "Trail lock ₹4500 hit (₹3000, peak ₹3000)", "lockFloor": 4500, "trailState": "ARMED" }
+    },
+    {
+      "name": "falling to the floor closes the book",
+      "cfg": { "riskEnabled": false, "targetRupees": "", "stopRupees": "", "trailEnabled": true, "triggerRupees": "2000", "lockRupees": "500" },
+      "ctx": { "totalPnl": 4500, "peakPnl": 5000, "lockFloor": 4500 },
+      "expect": { "exitAll": true, "reason": "Trail lock ₹4500 hit (₹4500, peak ₹5000)", "lockFloor": 4500, "trailState": "ARMED" }
+    },
+    {
+      "name": "a trail with no gap locks the whole peak",
+      "cfg": { "riskEnabled": false, "targetRupees": "", "stopRupees": "", "trailEnabled": true, "triggerRupees": "2000", "lockRupees": "" },
+      "ctx": { "totalPnl": 3000, "peakPnl": 3000, "lockFloor": null },
+      "expect": { "exitAll": false, "reason": "", "lockFloor": 2000, "trailState": "ARMED" }
+    },
+    {
+      "name": "the hard stop outranks an armed trail",
+      "cfg": { "riskEnabled": true, "targetRupees": "", "stopRupees": "1000", "trailEnabled": true, "triggerRupees": "2000", "lockRupees": "500" },
+      "ctx": { "totalPnl": -1000, "peakPnl": 2500, "lockFloor": 2000 },
+      "expect": { "exitAll": true, "reason": "Stop ₹1000 hit (₹-1000)", "lockFloor": 2000, "trailState": "INACTIVE" }
+    }
+  ],
+
+  "rowExit": [
+    {
+      "name": "nothing breached",
+      "row": { "levelHigh": "", "levelLow": "", "levelVw": false, "slRupees": "", "slMultiplier": "1", "side": "BOTH" },
+      "live": { "ceLtp": 100, "peLtp": 80, "ceQty": -75, "peQty": -75, "ceEntry": 100, "peEntry": 80, "pnl": 0, "vwap": null },
+      "spot": 24000,
+      "expect": null
+    },
+    {
+      "name": "H-up breached",
+      "row": { "levelHigh": "24100", "levelLow": "", "levelVw": false, "slRupees": "", "slMultiplier": "1", "side": "BOTH" },
+      "live": { "ceLtp": 100, "peLtp": 80, "ceQty": -75, "peQty": -75, "ceEntry": 100, "peEntry": 80, "pnl": 0, "vwap": null },
+      "spot": 24100,
+      "expect": "H↑ breached: spot 24100.00 ≥ 24100"
+    },
+    {
+      "name": "L-down breached",
+      "row": { "levelHigh": "", "levelLow": "23900", "levelVw": false, "slRupees": "", "slMultiplier": "1", "side": "BOTH" },
+      "live": { "ceLtp": 100, "peLtp": 80, "ceQty": -75, "peQty": -75, "ceEntry": 100, "peEntry": 80, "pnl": 0, "vwap": null },
+      "spot": 23900,
+      "expect": "L↓ breached: spot 23900.00 ≤ 23900"
+    },
+    {
+      "name": "a failed spot read is unknown, not a breach of every low level",
+      "row": { "levelHigh": "", "levelLow": "23900", "levelVw": false, "slRupees": "", "slMultiplier": "1", "side": "BOTH" },
+      "live": { "ceLtp": 100, "peLtp": 80, "ceQty": -75, "peQty": -75, "ceEntry": 100, "peEntry": 80, "pnl": 0, "vwap": null },
+      "spot": 0,
+      "expect": null
+    },
+    {
+      "name": "H-up outranks L-down when both breach on one tick",
+      "row": { "levelHigh": "24000", "levelLow": "24000", "levelVw": false, "slRupees": "", "slMultiplier": "1", "side": "BOTH" },
+      "live": { "ceLtp": 100, "peLtp": 80, "ceQty": -75, "peQty": -75, "ceEntry": 100, "peEntry": 80, "pnl": 0, "vwap": null },
+      "spot": 24000,
+      "expect": "H↑ breached: spot 24000.00 ≥ 24000"
+    },
+    {
+      "name": "premium expanding through VWAP closes a short",
+      "row": { "levelHigh": "", "levelLow": "", "levelVw": true, "slRupees": "", "slMultiplier": "1", "side": "BOTH" },
+      "live": { "ceLtp": 110, "peLtp": 90, "ceQty": -75, "peQty": -75, "ceEntry": 100, "peEntry": 80, "pnl": -3000, "vwap": 195 },
+      "spot": 24000,
+      "expect": "VW breached: premium 200.00 ≥ VWAP 195.00"
+    },
+    {
+      "name": "VWAP is inert until it has been fetched",
+      "row": { "levelHigh": "", "levelLow": "", "levelVw": true, "slRupees": "", "slMultiplier": "1", "side": "BOTH" },
+      "live": { "ceLtp": 110, "peLtp": 90, "ceQty": -75, "peQty": -75, "ceEntry": 100, "peEntry": 80, "pnl": -3000, "vwap": null },
+      "spot": 24000,
+      "expect": null
+    },
+    {
+      "name": "a CE-only row measures only its CE premium against VWAP",
+      "row": { "levelHigh": "", "levelLow": "", "levelVw": true, "slRupees": "", "slMultiplier": "1", "side": "CE" },
+      "live": { "ceLtp": 110, "peLtp": 90, "ceQty": -75, "peQty": -75, "ceEntry": 100, "peEntry": 80, "pnl": -750, "vwap": 195 },
+      "spot": 24000,
+      "expect": null
+    },
+    {
+      "name": "a leg already closed stops contributing its premium",
+      "row": { "levelHigh": "", "levelLow": "", "levelVw": true, "slRupees": "", "slMultiplier": "1", "side": "BOTH" },
+      "live": { "ceLtp": 110, "peLtp": 90, "ceQty": -75, "peQty": 0, "ceEntry": 100, "peEntry": 80, "pnl": -750, "vwap": 195 },
+      "spot": 24000,
+      "expect": null
+    },
+    {
+      "name": "rupee stop hit",
+      "row": { "levelHigh": "", "levelLow": "", "levelVw": false, "slRupees": "2000", "slMultiplier": "1", "side": "BOTH" },
+      "live": { "ceLtp": 110, "peLtp": 90, "ceQty": -75, "peQty": -75, "ceEntry": 100, "peEntry": 80, "pnl": -2000, "vwap": null },
+      "spot": 24000,
+      "expect": "SL ₹2000 hit (P&L ₹-2000)"
+    },
+    {
+      "name": "a multiple of 1 is not a stop",
+      "row": { "levelHigh": "", "levelLow": "", "levelVw": false, "slRupees": "", "slMultiplier": "1", "side": "BOTH" },
+      "live": { "ceLtp": 200, "peLtp": 160, "ceQty": -75, "peQty": -75, "ceEntry": 100, "peEntry": 80, "pnl": -13500, "vwap": null },
+      "spot": 24000,
+      "expect": null
+    },
+    {
+      "name": "SL multiple hit on the pair",
+      "row": { "levelHigh": "", "levelLow": "", "levelVw": false, "slRupees": "", "slMultiplier": "2", "side": "BOTH" },
+      "live": { "ceLtp": 200, "peLtp": 160, "ceQty": -75, "peQty": -75, "ceEntry": 100, "peEntry": 80, "pnl": -13500, "vwap": null },
+      "spot": 24000,
+      "expect": "SL ×2 hit (premium 360.00 vs entry 180.00)"
+    },
+    {
+      "name": "the rupee stop is reported before the multiple when both breach",
+      "row": { "levelHigh": "", "levelLow": "", "levelVw": false, "slRupees": "2000", "slMultiplier": "2", "side": "BOTH" },
+      "live": { "ceLtp": 200, "peLtp": 160, "ceQty": -75, "peQty": -75, "ceEntry": 100, "peEntry": 80, "pnl": -13500, "vwap": null },
+      "spot": 24000,
+      "expect": "SL ₹2000 hit (P&L ₹-13500)"
+    },
+    {
+      "name": "a spot level outranks every premium rule",
+      "row": { "levelHigh": "24000", "levelLow": "", "levelVw": true, "slRupees": "2000", "slMultiplier": "2", "side": "BOTH" },
+      "live": { "ceLtp": 200, "peLtp": 160, "ceQty": -75, "peQty": -75, "ceEntry": 100, "peEntry": 80, "pnl": -13500, "vwap": 195 },
+      "spot": 24000,
+      "expect": "H↑ breached: spot 24000.00 ≥ 24000"
+    }
+  ],
+
+  "legStop": [
+    {
+      "name": "CE leg breaches its own multiple",
+      "row": { "ceSlMultiplier": "2", "peSlMultiplier": "1" },
+      "leg": "CE",
+      "live": { "ceLtp": 200, "peLtp": 80, "ceQty": -75, "peQty": -75, "ceEntry": 100, "peEntry": 80 },
+      "expect": "CE SL ×2 hit (premium 200.00 vs entry 100.00)"
+    },
+    {
+      "name": "just under the multiple does not fire",
+      "row": { "ceSlMultiplier": "2", "peSlMultiplier": "1" },
+      "leg": "CE",
+      "live": { "ceLtp": 199.99, "peLtp": 80, "ceQty": -75, "peQty": -75, "ceEntry": 100, "peEntry": 80 },
+      "expect": null
+    },
+    {
+      "name": "a flat leg has no entry price to measure against",
+      "row": { "ceSlMultiplier": "2", "peSlMultiplier": "1" },
+      "leg": "CE",
+      "live": { "ceLtp": 200, "peLtp": 80, "ceQty": 0, "peQty": -75, "ceEntry": 100, "peEntry": 80 },
+      "expect": null
+    },
+    {
+      "name": "the PE leg is judged independently of CE",
+      "row": { "ceSlMultiplier": "1", "peSlMultiplier": "1.5" },
+      "leg": "PE",
+      "live": { "ceLtp": 200, "peLtp": 120, "ceQty": -75, "peQty": -75, "ceEntry": 100, "peEntry": 80 },
+      "expect": "PE SL ×1.5 hit (premium 120.00 vs entry 80.00)"
+    },
+    {
+      "name": "a leg the row's Side no longer trades still gets its own stop",
+      "row": { "ceSlMultiplier": "2", "peSlMultiplier": "1" },
+      "leg": "CE",
+      "live": { "ceLtp": 250, "peLtp": 80, "ceQty": -75, "peQty": -75, "ceEntry": 100, "peEntry": 80 },
+      "expect": "CE SL ×2 hit (premium 250.00 vs entry 100.00)"
+    }
+  ],
+
+  "dte": [
+    { "expiry": "2026-08-25", "today": "2026-08-25", "expect": 0 },
+    { "expiry": "2026-08-26", "today": "2026-08-25", "expect": 1 },
+    { "expiry": "2026-09-01", "today": "2026-08-25", "expect": 7 },
+    { "expiry": "2026-08-24", "today": "2026-08-25", "expect": -1 },
+    { "expiry": "", "today": "2026-08-25", "expect": null },
+    { "expiry": "not-a-date", "today": "2026-08-25", "expect": null }
+  ]
+}
