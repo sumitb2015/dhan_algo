@@ -107,6 +107,36 @@ failure otherwise reads as "no data / market may have been closed". Thread
 a fatal error rather than burning 25s of paced calls to reach the same answer.
 (`5a6bdc7`)
 
+### 8. A detached spawn outlives the frontend that started it
+
+`spawn(PYTHON_EXE, [...], { detached: true })` (the Focus Tool rows worker,
+started from `app/api/focus-tool/worker/route.ts`) is intentionally independent
+of the Next.js process — that's what lets it keep watching entries/exits after
+the browser tab closes. It also means **restarting the Next.js dev server does
+not stop it**. Debugging a worker that appears stuck after a frontend restart
+by only restarting the frontend again is chasing nothing — the old process (or
+several, from repeated Start clicks) is still running, still writing to the
+same status file, and a fresh Start click can no-op against it (`currentStatus()`
+sees `RUNNING` with a matching broker and returns "already running" without
+spawning anything new).
+
+Diagnose with the OS, not the UI: `Get-CimInstance Win32_Process -Filter
+"Name='pythonw.exe'"` (PowerShell) filtered on the script's command line shows
+every live instance and its actual start time — compare that against when a
+code fix landed to tell whether you're looking at a fresh process or a stale
+one still running the old code. To clear a stuck one without a hard kill,
+write the same stop-trigger file the app's own Stop button writes
+(`debug/focus_tool_rows_worker_stop.trigger`) and confirm the process list goes
+empty — cleaner than `Stop-Process`, since it lets the worker exit through its
+own shutdown path rather than being killed mid-write. (Encountered while
+debugging `dd5c3a0 revert(focus-tool): back out the unfinished WebSocket-feed
+refactor` — two stale pre-fix processes kept erroring long after the source
+file was already corrected.)
+
+This applies to every `detached: true` spawn in the dashboard, not just this
+one — grep `detached: true` in `app/api/` before assuming a restart cleared
+anything.
+
 ## Before You Ship
 - Can two tabs run this at once? What happens if they do?
 - If this spawns something, what stops a second spawn during the startup window?

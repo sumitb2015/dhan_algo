@@ -63,10 +63,12 @@ pattern from `Scalper.tsx` rather than inventing a new one.
 
 ## Visual Language (enforced repo-wide, not optional)
 
-The dashboard is **dark-only**. `app/globals.css` defines a light `:root` block
-because shadcn ships one, but `<html>` is hardcoded `class="dark"` in
-`app/layout.tsx` and no theme toggle exists — do not spend effort on light-mode
-variants, and do not assume a token's `:root` value is the one in play.
+The dashboard defaults to dark but **light mode is real and maintained** — see
+`dhan-theme-tokens` for the mechanism (`app/globals.css`'s themed token ramp,
+`lib/theme.ts`, `components/ThemeToggle.tsx` in `NavBar`). Don't assume a
+token's `:root` value is the one in play, and don't skip verifying a new page
+in both themes — a component that "looks dark-only" today can still be toggled
+by the user.
 
 **Fonts** — `Geist` (`--font-geist-sans`) for UI, `Geist_Mono`
 (`--font-geist-mono`) for numerics, both loaded in `app/layout.tsx`. Any column
