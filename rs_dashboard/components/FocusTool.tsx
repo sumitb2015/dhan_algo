@@ -1238,12 +1238,20 @@ function Sparkline({ history, pnlHistory }: { history?: number[]; pnlHistory?: n
     const id = setInterval(() => setTick(t => t + 1), 1500);
     return () => clearInterval(id);
   }, []);
-  if (!history || history.length < 2) return null;
+  // The row this belongs to re-renders on every WS tick (up to ~60/sec,
+  // rAF-coalesced), but `history` only actually changes every 1.5s via the
+  // sampling interval — memoized so the min/max/points work runs once per
+  // real data change instead of once per tick riding along for free.
+  const pts = useMemo(() => {
+    if (!history || history.length < 2) return null;
+    const w = 56, h = 16;
+    const min = Math.min(...history), max = Math.max(...history);
+    const span = max - min || 1;
+    return history.map((v, i) =>
+      `${(i / (history.length - 1)) * w},${h - ((v - min) / span) * h}`).join(' ');
+  }, [history]);
+  if (!pts) return null;
   const w = 56, h = 16;
-  const min = Math.min(...history), max = Math.max(...history);
-  const span = max - min || 1;
-  const pts = history.map((v, i) =>
-    `${(i / (history.length - 1)) * w},${h - ((v - min) / span) * h}`).join(' ');
   const trendGood = pnlHistory && pnlHistory.length >= 2
     ? pnlHistory[pnlHistory.length - 1] >= pnlHistory[0] : null;
   const colorClass = trendGood == null ? 'text-zinc-500' : trendGood ? 'text-emerald-400' : 'text-rose-400';
