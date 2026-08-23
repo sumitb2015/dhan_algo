@@ -332,6 +332,15 @@ const DEFAULT_CONFIG: FocusToolConfig = {
  *  `focus`) keeps mouse clicks silent, matching the inputs' own behaviour. */
 const FOCUS_RING = 'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500/60 focus-visible:ring-offset-1 focus-visible:ring-offset-zinc-950';
 
+/** Micro-type scale for dense control/label text. FocusTool runs almost
+ *  entirely below Tailwind's text-xs (12px) floor — these are the four sizes
+ *  already in use throughout the file, named once so new UI picks one of
+ *  four instead of a fifth arbitrary value. */
+const TXT_MICRO   = 'text-[8px]';  // stat labels (SPOT/ATM/LOT/DTE), column footnotes
+const TXT_LABEL   = 'text-[9px]';  // field labels, badges, uppercase tags — default micro size
+const TXT_VALUE   = 'text-[10px]'; // secondary readouts: VWAP, PCR, timing text
+const TXT_CAPTION = 'text-[11px]'; // switch labels, primary compact inputs
+
 function LivePulse({ active }: { active: boolean }) {
   return (
     <span title={active ? 'Live tick feed connected' : 'Live tick feed not running'} className={cn(
@@ -354,7 +363,7 @@ function SwitchToggle({
       type="button"
       title={title}
       onClick={() => onChange(!checked)}
-      className={cn('inline-flex items-center gap-1.5 text-[11px] font-bold text-zinc-300 cursor-pointer select-none rounded', FOCUS_RING)}
+      className={cn('inline-flex items-center gap-1.5', TXT_CAPTION, 'font-bold text-zinc-300 cursor-pointer select-none rounded', FOCUS_RING)}
     >
       <span className={cn(
         'h-4 w-7 rounded-full border transition-all flex items-center px-0.5',
@@ -861,6 +870,63 @@ function FocusHeader({
 
 // â”€â”€ Control Strip (Positions + Risk merged) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
+/**
+ * Turns Target / Stop / Peak / Lock — four numbers with no visual relation
+ * today — into one bar: rose from -Stop to 0, emerald from 0 to +Target, a
+ * marker at the current total, and (once the trail has woken up) a thin
+ * amber tick at the lock floor. The exact numbers stay as text next to it —
+ * on a real-money page the figure matters more than the bar, so the bar is
+ * supplementary, never a replacement.
+ */
+function RiskRail({ totalPnl, target, stop, lockFloor, peakMtm }: {
+  totalPnl: number; target: number | null; stop: number | null;
+  lockFloor: number | null; peakMtm: number;
+}) {
+  const hasTarget = target != null && target > 0;
+  const hasStop = stop != null && stop > 0;
+
+  let bar: React.ReactNode = (
+    <div className="h-1.5 w-32 rounded-full bg-zinc-800" title="Set a Target or Stop to see it plotted here" />
+  );
+  if (hasTarget || hasStop) {
+    const lo = hasStop ? -(stop as number) : Math.min(totalPnl, 0) * 1.2 || -1;
+    const hi = hasTarget ? (target as number) : Math.max(totalPnl, 0) * 1.2 || 1;
+    if (hi > lo) {
+      const pct = (v: number) => ((Math.min(Math.max(v, lo), hi) - lo) / (hi - lo)) * 100;
+      const zero = pct(0);
+      bar = (
+        <div
+          className="relative h-1.5 w-32 rounded-full bg-zinc-800 overflow-hidden"
+          title={`Stop ${hasStop ? fmtInr(-(stop as number)) : '—'} · Target ${hasTarget ? fmtInr(target as number) : '—'} · Total ${fmtInr(totalPnl, true)}`}
+        >
+          <div className="absolute inset-y-0 bg-rose-500/25" style={{ left: 0, width: `${zero}%` }} />
+          <div className="absolute inset-y-0 bg-emerald-500/25" style={{ left: `${zero}%`, width: `${100 - zero}%` }} />
+          <div className="absolute inset-y-0 w-px bg-zinc-600" style={{ left: `${zero}%` }} />
+          {lockFloor != null && (
+            <div className="absolute inset-y-0 w-px bg-amber-400" style={{ left: `${pct(lockFloor)}%` }} />
+          )}
+          <div
+            className={cn('absolute -top-0.5 h-2.5 w-0.5 rounded-full', totalPnl >= 0 ? 'bg-emerald-400' : 'bg-rose-400')}
+            style={{ left: `${pct(totalPnl)}%` }}
+          />
+        </div>
+      );
+    }
+  }
+
+  return (
+    <div className="flex items-center gap-2">
+      {bar}
+      <span className={cn(TXT_VALUE, 'font-mono text-zinc-500 whitespace-nowrap')}
+        title="Peak: best total P&L so far today. Lock: the floor the trail is currently holding.">
+        Peak <strong className="text-zinc-300">{fmtInr(peakMtm, true)}</strong>
+        <span className="mx-1.5 text-zinc-700">&middot;</span>
+        Lock <strong className="text-zinc-300">{lockFloor != null ? fmtInr(lockFloor, true) : '—'}</strong>
+      </span>
+    </div>
+  );
+}
+
 function ControlStrip({
   liveRealMoney, onToggleLive, broker,
   riskEnabled, onToggleRisk,
@@ -869,7 +935,7 @@ function ControlStrip({
   trailEnabled, onToggleTrail,
   triggerRupees, setTriggerRupees,
   lockRupees, setLockRupees,
-  onSave, saving, peakMtm, lockMtm,
+  onSave, saving, totalPnl, peakMtm, lockMtm,
   copyTrade,
   onOpenRisk, onOpenOrders, onToggleViewMode, viewMode,
   workerStatus, onToggleWorker,
@@ -882,7 +948,7 @@ function ControlStrip({
   trailEnabled: boolean; onToggleTrail: () => void;
   triggerRupees: string; setTriggerRupees: (v: string) => void;
   lockRupees: string; setLockRupees: (v: string) => void;
-  onSave: () => void; saving: boolean; peakMtm: number; lockMtm: number | null;
+  onSave: () => void; saving: boolean; totalPnl: number; peakMtm: number; lockMtm: number | null;
   copyTrade: CopyTradeApi;
   onOpenRisk: () => void;
   onOpenOrders: () => void;
@@ -895,10 +961,10 @@ function ControlStrip({
   exitingAll: boolean;
 }) {
   return (
-    <div className="bg-zinc-900 border-b border-zinc-800 px-6 py-2.5 flex items-center gap-5 flex-nowrap overflow-x-auto">
+    <div className="bg-zinc-900 border-b border-zinc-800 px-6 py-2.5 flex items-center gap-3 flex-nowrap overflow-x-auto">
       {/* Positions section */}
-      <div className="flex items-center gap-2 flex-nowrap shrink-0">
-        <span className="text-[9px] font-black text-zinc-600 uppercase tracking-widest whitespace-nowrap">Positions</span>
+      <div className="flex items-center gap-2 flex-nowrap shrink-0 bg-zinc-950/40 border border-zinc-800/60 rounded-xl px-3 py-1.5">
+        <span className={cn(TXT_LABEL, 'font-black text-zinc-600 uppercase tracking-widest whitespace-nowrap')}>Positions</span>
         <button
           onClick={onToggleLive}
           title={liveRealMoney
@@ -977,24 +1043,22 @@ function ControlStrip({
         </GhostBtn>
       </div>
 
-      <div className="h-5 w-px bg-zinc-800 shrink-0" />
-
       {/* Risk section */}
-      <div className="flex items-center gap-3 flex-nowrap shrink-0">
-        <span className="text-[9px] font-black text-zinc-600 uppercase tracking-widest whitespace-nowrap">Risk</span>
+      <div className="flex items-center gap-3 flex-nowrap shrink-0 bg-zinc-950/40 border border-zinc-800/60 rounded-xl px-3 py-1.5">
+        <span className={cn(TXT_LABEL, 'font-black text-zinc-600 uppercase tracking-widest whitespace-nowrap')}>Risk</span>
         <SwitchToggle checked={riskEnabled} onChange={onToggleRisk}
           title="Enable the account-wide target and stop below" />
 
         <div className="flex items-center gap-1.5">
           <Target className="h-3 w-3 text-emerald-500" />
-          <span className="text-[10px] font-black text-zinc-500 uppercase">Target</span>
+          <span className={cn(TXT_VALUE, 'font-black text-zinc-500 uppercase')}>Target</span>
           <RuleNumInput value={targetRupees} onCommit={setTargetRupees} className="w-16" placeholder="0"
             title="Close every open row once total P&L reaches this profit (₹). Applies when you leave the field, not while typing." />
         </div>
 
         <div className="flex items-center gap-1.5">
           <ShieldOff className="h-3 w-3 text-rose-500" />
-          <span className="text-[10px] font-black text-zinc-500 uppercase">Stop</span>
+          <span className={cn(TXT_VALUE, 'font-black text-zinc-500 uppercase')}>Stop</span>
           <RuleNumInput value={stopRupees} onCommit={setStopRupees} className="w-16" placeholder="0"
             title="Close every open row once total P&L falls to this loss (₹). Applies when you leave the field, not while typing." />
         </div>
@@ -1005,32 +1069,31 @@ function ControlStrip({
           title="Ratchet a profit floor upward as P&L makes new peaks" />
 
         <div className="flex items-center gap-1.5">
-          <span className="text-[10px] font-black text-zinc-500 uppercase">Trigger</span>
+          <span className={cn(TXT_VALUE, 'font-black text-zinc-500 uppercase')}>Trigger</span>
           <RuleNumInput value={triggerRupees} onCommit={setTriggerRupees} className="w-16" placeholder="0"
             title="Profit (₹) at which the trail wakes up and starts locking" />
         </div>
 
         <div className="flex items-center gap-1.5">
           <Lock className="h-3 w-3 text-amber-500" />
-          <span className="text-[10px] font-black text-zinc-500 uppercase">Lock</span>
+          <span className={cn(TXT_VALUE, 'font-black text-zinc-500 uppercase')}>Lock</span>
           <RuleNumInput value={lockRupees} onCommit={setLockRupees} className="w-16" placeholder="0"
             title="Profit (₹) kept back from each new peak — the floor that never falls" />
         </div>
 
-        <span className="text-[10px] font-mono text-zinc-500"
-          title="Peak: best total P&L so far today. Lock: the floor the trail is currently holding.">
-          Peak <strong className="text-zinc-300">{peakMtm}</strong>
-          <span className="mx-1.5 text-zinc-700">&middot;</span>
-          Lock <strong className="text-zinc-300">{lockMtm != null ? lockMtm : '\u2014'}</strong>
-        </span>
+        <RiskRail totalPnl={totalPnl} target={Number(targetRupees) || null} stop={Number(stopRupees) || null}
+          lockFloor={lockMtm} peakMtm={peakMtm} />
       </div>
 
       {/* Copy Trade Controls — wrapped so its fragment's items (label, per-
           broker checkboxes, the ARM button) form one flex group that can't be
           split across a wrap point; the strip itself no longer wraps at all
           (flex-nowrap + overflow-x-auto above), but this keeps the group
-          intact if that ever changes. */}
-      <div className="flex items-center gap-2 flex-nowrap shrink-0">
+          intact if that ever changes. The leading divider CopyTradeControls
+          renders as its own first child is redundant now that this cluster is
+          its own card below — hidden rather than removed, since the
+          component is shared with AdvancedScalper/Scalper/Baskets. */}
+      <div className="flex items-center gap-2 flex-nowrap shrink-0 bg-zinc-950/40 border border-zinc-800/60 rounded-xl px-3 py-1.5 [&>span:first-child]:hidden">
         <CopyTradeControls copyTrade={copyTrade} />
       </div>
     </div>
@@ -1145,7 +1208,7 @@ function IndexGroupBar({
           { label: 'DTE', hint: 'Days to the nearest expiry', val: dte ?? '\u2014' },
         ] as const).map(({ label, val, hint }) => (
           <div key={label} className="flex flex-col items-center" title={hint}>
-            <span className="text-[8px] font-bold text-zinc-600 uppercase tracking-widest">{label}</span>
+            <span className={cn(TXT_MICRO, 'font-bold text-zinc-600 uppercase tracking-widest')}>{label}</span>
             <span className="text-xs font-mono font-bold text-zinc-200 tabular-nums">{val}</span>
           </div>
         ))}
@@ -1159,6 +1222,39 @@ function IndexGroupBar({
   );
 }
 
+/**
+ * A row's combined-premium trend over the last ~60-90s — a scalper reads
+ * momentum, not just level. History/color both come from refs sampled on a
+ * slow interval in the main component (never the WS tick path — see
+ * sparkHistoryRef there), so this redraws on its own cheap interval rather
+ * than the parent row re-rendering. Colored by the sign of the row's P&L
+ * trend (not the premium's own direction), since that answers "is this
+ * drifting for or against me" regardless of whether the row is long or
+ * short. Renders nothing until there are at least two samples.
+ */
+function Sparkline({ history, pnlHistory }: { history?: number[]; pnlHistory?: number[] }) {
+  const [, setTick] = useState(0);
+  useEffect(() => {
+    const id = setInterval(() => setTick(t => t + 1), 1500);
+    return () => clearInterval(id);
+  }, []);
+  if (!history || history.length < 2) return null;
+  const w = 56, h = 16;
+  const min = Math.min(...history), max = Math.max(...history);
+  const span = max - min || 1;
+  const pts = history.map((v, i) =>
+    `${(i / (history.length - 1)) * w},${h - ((v - min) / span) * h}`).join(' ');
+  const trendGood = pnlHistory && pnlHistory.length >= 2
+    ? pnlHistory[pnlHistory.length - 1] >= pnlHistory[0] : null;
+  const colorClass = trendGood == null ? 'text-zinc-500' : trendGood ? 'text-emerald-400' : 'text-rose-400';
+  return (
+    <svg viewBox={`0 0 ${w} ${h}`} width={w} height={h} className={colorClass} aria-hidden="true">
+      <polyline points={pts} fill="none" stroke="currentColor" strokeWidth="1.5"
+        strokeLinecap="round" strokeLinejoin="round" opacity="0.85" />
+    </svg>
+  );
+}
+
 // ── Table Row ─────────────────────────────────────────────────────────────────
 
 const STATUS_PILL: Record<FocusRowStatus, string> = {
@@ -1169,13 +1265,16 @@ const STATUS_PILL: Record<FocusRowStatus, string> = {
 };
 
 function FocusTableRow({
-  row, live, lotSize, spot, liveRealMoney, broker, busy,
+  row, rowIndex, live, lotSize, spot, liveRealMoney, broker, busy,
+  sparkHistory, sparkPnlHistory,
   onUpdate, onDelete, onArm, onDisarm, onExit, onAddLot, onReduceLot, onShift, onBlocked,
 }: {
   row: FocusRow;
+  rowIndex: number;
   live: RowLive;
   lotSize: number | null; spot: number; liveRealMoney: boolean; broker: Broker;
   busy: boolean;
+  sparkHistory?: number[]; sparkPnlHistory?: number[];
   onUpdate: (patch: Partial<FocusRow>, saveToDisk?: boolean) => void;
   onDelete: () => void; onArm: () => void; onDisarm: () => void;
   onExit: (leg: 'CE' | 'PE' | 'ALL') => void;
@@ -1209,7 +1308,11 @@ function FocusTableRow({
   const [peQty, setPeQty] = useState(1);
 
   return (
-    <tr className="border-b border-zinc-700/70 hover:bg-zinc-800/20 transition-colors">
+    <tr className={cn(
+      'border-b border-zinc-700/70 transition-colors',
+      rowIndex % 2 === 1 && 'bg-zinc-900/20',
+      'hover:bg-zinc-800/30',
+    )}>
 
       {/* TIMING */}
       <td className="p-3 align-top">
@@ -1261,9 +1364,12 @@ function FocusTableRow({
 
       {/* LTP */}
       <td className="p-3 align-middle">
-        <div title="Combined CE + PE premium right now"
-          className="text-base font-mono font-black text-zinc-100 tabular-nums">
-          {combinedLtp > 0 ? combinedLtp.toFixed(2) : '\u2014'}
+        <div className="flex items-center gap-2">
+          <div title="Combined CE + PE premium right now"
+            className="text-base font-mono font-black text-zinc-100 tabular-nums">
+            {combinedLtp > 0 ? combinedLtp.toFixed(2) : '\u2014'}
+          </div>
+          <Sparkline history={sparkHistory} pnlHistory={sparkPnlHistory} />
         </div>
         <div className="text-xs font-mono font-bold mt-0.5 flex items-center gap-1">
           <span className="text-emerald-400">CE {live.ltpCe != null ? live.ltpCe.toFixed(2) : '\u2014'}</span>
@@ -1298,7 +1404,7 @@ function FocusTableRow({
       </td>
 
       {/* STATUS / ACTIONS */}
-      <td className="p-3 align-middle text-center border-l border-r border-zinc-800">
+      <td className="p-3 align-middle text-center border-r border-zinc-800/60">
         <div className="flex flex-col items-center gap-2">
           <span title="Draft/Armed are this row's own watch state (set by Arm/Disarm below) — they track whether a position is actually open only loosely, since nothing here auto-enters yet. Whether legs are OPEN is shown by the CE/PE badges and Exit All below, straight off the broker."
             className={cn('text-[10px] font-bold px-2 py-0.5 rounded-full border capitalize', STATUS_PILL[row.status])}>
@@ -1376,7 +1482,7 @@ function FocusTableRow({
       </td>
 
       {/* PE */}
-      <td className="p-3 align-middle text-center border-r border-zinc-800">
+      <td className="p-3 align-middle text-center">
         <div className="flex flex-col items-center gap-1.5">
           <span title="Live premium of the put leg"
             className="text-sm font-mono font-bold text-rose-400 tabular-nums">
@@ -1467,12 +1573,14 @@ function FocusTableRow({
 
 function FocusRowCard({
   row, live, lotSize, spot, liveRealMoney, broker, busy,
+  sparkHistory, sparkPnlHistory,
   onUpdate, onDelete, onArm, onDisarm, onExit, onAddLot, onReduceLot, onShift, onBlocked,
 }: {
   row: FocusRow;
   live: RowLive;
   lotSize: number | null; spot: number; liveRealMoney: boolean; broker: Broker;
   busy: boolean;
+  sparkHistory?: number[]; sparkPnlHistory?: number[];
   onUpdate: (patch: Partial<FocusRow>, saveToDisk?: boolean) => void;
   onDelete: () => void; onArm: () => void; onDisarm: () => void;
   onExit: (leg: 'CE' | 'PE' | 'ALL') => void;
@@ -1576,7 +1684,10 @@ function FocusRowCard({
         </div>
         <div className="flex flex-col items-end">
           <span className="text-[8px] font-black text-zinc-500 uppercase tracking-wider">Premium</span>
-          <span className="text-sm font-mono font-black text-zinc-100 mt-0.5">{combinedLtp > 0 ? combinedLtp.toFixed(2) : '—'}</span>
+          <div className="flex items-center gap-2 mt-0.5">
+            <span className="text-sm font-mono font-black text-zinc-100">{combinedLtp > 0 ? combinedLtp.toFixed(2) : '—'}</span>
+            <Sparkline history={sparkHistory} pnlHistory={sparkPnlHistory} />
+          </div>
         </div>
       </div>
 
@@ -3096,6 +3207,34 @@ export default function FocusTool() {
   const expiriesRef = useRef(expiries);
   expiriesRef.current = expiries;
 
+  // Rolling per-row history for the LTP sparkline (UI-only — never touches
+  // RowLive/FocusRow, which are a cross-language contract with the Python
+  // worker). Sampled on its own slow interval off schedulerRef, not the WS
+  // tick path, so it can't add per-tick cost on top of the existing
+  // tick-driven re-renders. Written into refs (not state) so sampling itself
+  // never triggers a render — Sparkline redraws itself on its own interval.
+  const sparkHistoryRef = useRef<Record<string, number[]>>({});
+  const sparkPnlRef = useRef<Record<string, number[]>>({});
+  useEffect(() => {
+    const id = setInterval(() => {
+      const { config: cfg, rowLive: live } = schedulerRef.current;
+      for (const row of cfg.rows) {
+        const l = live[row.id];
+        if (!l) continue;
+        const premium = (l.ltpCe ?? 0) + (l.ltpPe ?? 0);
+        if (premium > 0) {
+          const buf = (sparkHistoryRef.current[row.id] ??= []);
+          buf.push(premium);
+          if (buf.length > 50) buf.shift();
+        }
+        const pbuf = (sparkPnlRef.current[row.id] ??= []);
+        pbuf.push(l.pnl);
+        if (pbuf.length > 50) pbuf.shift();
+      }
+    }, 1500);
+    return () => clearInterval(id);
+  }, []);
+
   /**
    * Square off every leg of one row at market and mark it exited. Deduped by
    * `autoExitingRef` so a rule that stays breached across ticks (they all do)
@@ -3485,6 +3624,7 @@ export default function FocusTool() {
         triggerRupees={triggerRupees} setTriggerRupees={setTriggerRupees}
         lockRupees={lockRupees} setLockRupees={setLockRupees}
         onSave={() => saveConfig()} saving={saving}
+        totalPnl={workerRunning ? (workerStatus.totalPnl ?? 0) : toolPnl}
         peakMtm={workerRunning ? (workerStatus.peakPnl ?? 0) : peakMtm}
         lockMtm={workerRunning ? (workerStatus.lockFloor ?? null) : lockMtm}
         copyTrade={copyTrade}
@@ -3548,6 +3688,8 @@ export default function FocusTool() {
                           lotSize={lotSizes[u]} spot={spots[u] ?? 0}
                           liveRealMoney={liveRealMoney} broker={broker}
                           busy={busyRows.has(row.id)}
+                          sparkHistory={sparkHistoryRef.current[row.id]}
+                          sparkPnlHistory={sparkPnlRef.current[row.id]}
                           onUpdate={(patch, save) => updateRow(row.id, patch, save)}
                           onDelete={() => deleteRow(row.id)}
                           onArm={() => armRow(row.id)}
@@ -3596,13 +3738,15 @@ export default function FocusTool() {
                       </tr>
                     </thead>
                     <tbody>
-                      {rows.map(row => (
+                      {rows.map((row, rowIndex) => (
                         <FocusTableRow
-                          key={row.id} row={row}
+                          key={row.id} row={row} rowIndex={rowIndex}
                           live={rowLive[row.id] ?? EMPTY_ROW_LIVE}
                           lotSize={lotSizes[u]} spot={spots[u] ?? 0}
                           liveRealMoney={liveRealMoney} broker={broker}
                           busy={busyRows.has(row.id)}
+                          sparkHistory={sparkHistoryRef.current[row.id]}
+                          sparkPnlHistory={sparkPnlRef.current[row.id]}
                           onUpdate={(patch, save) => updateRow(row.id, patch, save)}
                           onDelete={() => deleteRow(row.id)}
                           onArm={() => armRow(row.id)}
