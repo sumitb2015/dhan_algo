@@ -755,10 +755,14 @@ The strategy supports two rolling trigger variants selectable via CLI or the das
 | `--roll-trigger-pct PCT` | `0.4` | Percentage movement trigger for `percentage` variant (e.g. `0.4` for 0.4%) |
 | `--max-rolls N` | `5` | Maximum number of straddle rolls allowed per session |
 | `--roll-cooldown SEC` | `60` | Minimum cooldown delay in seconds between consecutive rolls |
-| `--profit-target VAL` | `4000` | Target profit in INR or % (e.g. `4000` or `50%`) |
-| `--stop-loss VAL` | `4000` | Stop loss in INR or % (e.g. `4000` or `50%`) |
+| `--target-profit VAL` | `25%` | Target profit in INR or % of combined entry premium (e.g. `4000` or `25%`) |
+| `--stop-loss VAL` | `25%` | Stop loss in INR or % of combined entry premium (e.g. `4000` or `25%`) |
 | `--trail-start-rs INR` | `500` | MTM profit level to activate trailing stop loss |
 | `--trail-gap-rs INR` | `300` | Trailing stop loss gap in INR |
+| `--entry-balance-threshold PCT` | `15.0` | Max CE/PE premium difference % allowed before entry proceeds; the strategy waits (status `BALANCING`) until premiums are within this band or EOD is reached. Set `0` to disable. |
+| `--start-time TIME` | `09:20` | Strategy start time (HH:MM IST) |
+| `--eod-time TIME` | `15:15` | Intraday auto-exit time (HH:MM IST) — overrides the repo-wide 15:17 default for this strategy |
+| `--instance-id ID` | *(none)* | Optional identifier appended to the state key, for running multiple instances side by side |
 
 ### C. Execution Examples
 

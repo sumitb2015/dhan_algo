@@ -255,32 +255,68 @@ class RollingStraddleStrategy:
         return None, None, None, None, None
 
     def exit_all_positions(self, reason):
+        """Buys back any live CE/PE legs. Returns True only once every leg that was open
+        is CONFIRMED closed (filled, or already flat at the broker) — never on a fired-but-
+        unconfirmed order. Callers must not treat the strategy as flat/stopped on a False
+        return; see force_exit_all().
+        """
         logger.warning(f"!!! EXITING ALL POSITIONS: {reason} !!!")
+        closed_ok = True
         if not self.dry_run:
-            if self.ce_id:
+            for label, leg_id, lots in (
+                ("CE", self.ce_id, self.ce_lots),
+                ("PE", self.pe_id, self.pe_lots),
+            ):
+                if not leg_id:
+                    continue
                 try:
-                    own_qty = self.ce_lots * self.nifty_lot_size
-                    qty_to_buy, _ = resolve_exit_qty(self.helper, self.ce_id, own_qty, "BUY", logger)
-                    if qty_to_buy > 0:
-                        ce_exit_id = self.helper.buy(str(self.ce_id), qty_to_buy)
-                        logger.info(f"CE Exit Order placed ({qty_to_buy} qty): {ce_exit_id}")
+                    own_qty = lots * self.nifty_lot_size
+                    qty_to_buy, _ = resolve_exit_qty(self.helper, leg_id, own_qty, "BUY", logger)
+                    if qty_to_buy <= 0:
+                        continue  # broker already flat on this leg
+                    order_id = self.helper.buy(str(leg_id), qty_to_buy)
+                    if not order_id or not self.helper.wait_for_fill(order_id, timeout=10):
+                        closed_ok = False
+                        logger.critical(
+                            f"Exit ({reason}): buy-to-close for {label} leg (ID: {leg_id}) "
+                            f"did not confirm (order_id={order_id}). Leg may still be OPEN."
+                        )
+                    else:
+                        logger.info(f"{label} Exit Order confirmed ({qty_to_buy} qty): {order_id}")
                 except Exception as e:
-                    logger.error(f"Exit CE Error: {e}")
-            if self.pe_id:
-                try:
-                    own_qty = self.pe_lots * self.nifty_lot_size
-                    qty_to_buy, _ = resolve_exit_qty(self.helper, self.pe_id, own_qty, "BUY", logger)
-                    if qty_to_buy > 0:
-                        pe_exit_id = self.helper.buy(str(self.pe_id), qty_to_buy)
-                        logger.info(f"PE Exit Order placed ({qty_to_buy} qty): {pe_exit_id}")
-                except Exception as e:
-                    logger.error(f"Exit PE Error: {e}")
+                    closed_ok = False
+                    logger.critical(f"Exit ({reason}): error closing {label} leg {leg_id}: {e}")
 
         # Update realized PnL from latest market price before exiting
         ce_ltp, pe_ltp, _ = self.fetch_ltps()
         if ce_ltp > 0 and pe_ltp > 0:
             final_pnl = self._calculate_pnl(ce_ltp, pe_ltp)
             self.realized_pnl = final_pnl
+
+        if not closed_ok:
+            logger.critical(
+                f"Exit ({reason}) did NOT confirm all legs closed — position tracked as still "
+                "OPEN (not going flat) so the caller retries rather than terminating the process "
+                "with a live position unmonitored."
+            )
+            return False
+
+        self.go_flat()
+        return True
+
+    def force_exit_all(self, reason, retry_interval=5):
+        """Retries exit_all_positions until every leg is confirmed closed.
+
+        Must never return while a leg might still be open: the caller terminates the
+        process right after this, and a dead process watching a live naked short is
+        the exact failure mode exit_all_positions() is built to avoid.
+        """
+        attempt = 1
+        while not self.exit_all_positions(reason):
+            logger.critical(f"Exit retry #{attempt} for '{reason}' unconfirmed — retrying in {retry_interval}s.")
+            self.save_state(0, 0, 0, self.realized_pnl, status="EXIT_RETRY")
+            time.sleep(retry_interval)
+            attempt += 1
 
     def enter_straddle(self, atm_strike, spot=0.0):
         """Finds and sells ATM CE and PE options at the specified strike.
@@ -431,6 +467,20 @@ class RollingStraddleStrategy:
     def roll_straddle(self, nifty_spot, direction):
         """Rolls the short straddle UP or DOWN to the new ATM strike."""
         new_atm = round(nifty_spot / 50.0) * 50
+
+        # NIFTY strikes step by 50pts. If roll_buffer/roll_trigger_pct is small enough
+        # that a bound breach can fire before spot has drifted a full strike-width away
+        # from the current ATM, `new_atm` can round right back to `current_atm_strike` —
+        # closing and reopening the identical straddle and paying the bid/ask spread
+        # twice for zero net change in position. Skip rather than churn.
+        if new_atm == self.current_atm_strike:
+            logger.info(
+                f"Roll skipped: bound breached (spot {nifty_spot:.2f}) but new ATM {new_atm} "
+                f"== current ATM {self.current_atm_strike} — buffer/trigger is smaller than "
+                "the 50pt strike step. Waiting for spot to move further."
+            )
+            return False
+
         logger.warning(f">>> ROLLING STRADDLE {direction.upper()} <<<")
         logger.warning(f"Spot: {nifty_spot:.2f} | Prev ATM: {self.current_atm_strike} -> New ATM: {new_atm}")
 
@@ -440,12 +490,6 @@ class RollingStraddleStrategy:
             return False
 
         old_ce_id, old_pe_id = self.ce_id, self.pe_id
-
-        # roll_count increments HERE, not on entry success: the roll is committed the
-        # moment we start closing the old legs. Counting it at entry success instead
-        # would let a failed entry followed by the main loop's flat re-entry move the
-        # position to a new strike without ever charging it against --max-rolls.
-        self.roll_count += 1
         self.last_roll_time = time.time()
 
         # Close existing CE & PE legs. The close must be CONFIRMED before we go flat:
@@ -470,20 +514,28 @@ class RollingStraddleStrategy:
                     if not oid or not self.helper.wait_for_fill(oid, timeout=10):
                         closed_ok = False
                         logger.critical(
-                            f"Roll #{self.roll_count}: buy-to-close for {label} leg (ID: {leg_id}) "
+                            f"Roll attempt #{self.roll_count + 1}: buy-to-close for {label} leg (ID: {leg_id}) "
                             f"did not confirm (order_id={oid}). Leg may still be OPEN."
                         )
                 except Exception as e:
                     closed_ok = False
-                    logger.critical(f"Roll #{self.roll_count}: error closing {label} leg {leg_id}: {e}")
+                    logger.critical(f"Roll attempt #{self.roll_count + 1}: error closing {label} leg {leg_id}: {e}")
 
         if not closed_ok:
             logger.critical(
-                f"Roll #{self.roll_count} ABORTED: at least one leg did not close. Keeping the "
+                f"Roll attempt #{self.roll_count + 1} ABORTED: at least one leg did not close. Keeping the "
                 "existing position tracked (NOT going flat) so the next tick retries rather than "
-                "opening a second straddle on top of live shorts."
+                "opening a second straddle on top of live shorts. Not charged against --max-rolls "
+                "since no roll actually happened."
             )
             return False
+
+        # Only now that both legs are CONFIRMED closed is the roll actually committed —
+        # count it here, not before the close attempt. A close that never completes (broker
+        # rejection, network blip) must not burn --max-rolls budget on a position that never
+        # moved; but a close that succeeds counts even if the re-entry below then fails, so a
+        # failed entry followed by the main loop's flat re-entry can't dodge the roll cap.
+        self.roll_count += 1
 
         # Book the close exactly once, only now that both legs are confirmed closed.
         close_ce_pnl = (self.ce_avg_price - ce_ltp) * (self.ce_lots * self.nifty_lot_size)
@@ -553,7 +605,7 @@ class RollingStraddleStrategy:
             exit_if_market_closed(self.helper, self.dry_run)
             if check_shutdown_trigger(self.state_key):
                 logger.info("UI Shutdown Request received during strategy run. Liquidation initiated.")
-                self.exit_all_positions("UI Graceful Stop")
+                self.force_exit_all("UI Graceful Stop")
                 self.save_state(spot, 0, 0, self.realized_pnl, status="STOPPED")
                 return
 
@@ -597,20 +649,20 @@ class RollingStraddleStrategy:
 
             # 1. EOD Exit Check
             if now_str >= self.eod_time:
-                self.exit_all_positions(f"Intraday EOD Time Reached ({self.eod_time})")
+                self.force_exit_all(f"Intraday EOD Time Reached ({self.eod_time})")
                 self.save_state(spot, ce_ltp, pe_ltp, total_pnl, status="STOPPED")
                 logger.info("Strategy finished for the day.")
                 return
 
             # 2. Profit Target Check
             if self.profit_target and total_pnl >= self.profit_target:
-                self.exit_all_positions(f"Target Hit (+Rs.{total_pnl:.0f} >= Rs.{self.profit_target:.0f})")
+                self.force_exit_all(f"Target Hit (+Rs.{total_pnl:.0f} >= Rs.{self.profit_target:.0f})")
                 self.save_state(spot, ce_ltp, pe_ltp, total_pnl, status="STOPPED")
                 return
 
             # 3. Stop Loss Check
             if self.stop_loss and total_pnl <= self.stop_loss:
-                self.exit_all_positions(f"Stop Loss Hit (Rs.{total_pnl:.0f} <= Rs.{self.stop_loss:.0f})")
+                self.force_exit_all(f"Stop Loss Hit (Rs.{total_pnl:.0f} <= Rs.{self.stop_loss:.0f})")
                 self.save_state(spot, ce_ltp, pe_ltp, total_pnl, status="STOPPED")
                 return
 
@@ -624,7 +676,7 @@ class RollingStraddleStrategy:
 
                 trail_exit_threshold = self.best_pnl - self.trail_gap_rs
                 if total_pnl <= trail_exit_threshold:
-                    self.exit_all_positions(f"Trailing Stop Loss Hit (PnL Rs.{total_pnl:.0f} <= Trail Exit Rs.{trail_exit_threshold:.0f})")
+                    self.force_exit_all(f"Trailing Stop Loss Hit (PnL Rs.{total_pnl:.0f} <= Trail Exit Rs.{trail_exit_threshold:.0f})")
                     self.save_state(spot, ce_ltp, pe_ltp, total_pnl, status="STOPPED")
                     return
 
