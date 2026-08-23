@@ -324,6 +324,14 @@ const DEFAULT_CONFIG: FocusToolConfig = {
 
 // â”€â”€ Primitives â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
+/** Visible keyboard-only focus ring for every clickable control on this page.
+ *  Inputs already get their own `focus:ring-violet-500/40` via NumInput /
+ *  RuleNumInput; buttons had nothing, so a keyboard user tabbing through
+ *  Arm/Exit/Delete/EXIT ALL had no visual confirmation of where focus was —
+ *  a real hazard on a page that fires live orders. `focus-visible` (not
+ *  `focus`) keeps mouse clicks silent, matching the inputs' own behaviour. */
+const FOCUS_RING = 'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500/60 focus-visible:ring-offset-1 focus-visible:ring-offset-zinc-950';
+
 function LivePulse({ active }: { active: boolean }) {
   return (
     <span title={active ? 'Live tick feed connected' : 'Live tick feed not running'} className={cn(
@@ -346,7 +354,7 @@ function SwitchToggle({
       type="button"
       title={title}
       onClick={() => onChange(!checked)}
-      className="inline-flex items-center gap-1.5 text-[11px] font-bold text-zinc-300 cursor-pointer select-none"
+      className={cn('inline-flex items-center gap-1.5 text-[11px] font-bold text-zinc-300 cursor-pointer select-none rounded', FOCUS_RING)}
     >
       <span className={cn(
         'h-4 w-7 rounded-full border transition-all flex items-center px-0.5',
@@ -450,7 +458,8 @@ function LotStepper({ value, onChange }: { value: number; onChange: (v: number) 
         type="button"
         onClick={() => onChange(Math.max(1, value - 1))}
         title="Reduce lots by one"
-        className="h-6 w-6 rounded-md bg-zinc-800 border border-zinc-700 text-zinc-300 font-bold flex items-center justify-center hover:bg-zinc-700 cursor-pointer transition-colors"
+        aria-label="Reduce lots by one"
+        className={cn('h-6 w-6 rounded-md bg-zinc-800 border border-zinc-700 text-zinc-300 font-bold flex items-center justify-center hover:bg-zinc-700 cursor-pointer transition-colors', FOCUS_RING)}
       >
         -
       </button>
@@ -464,7 +473,8 @@ function LotStepper({ value, onChange }: { value: number; onChange: (v: number) 
         type="button"
         onClick={() => onChange(value + 1)}
         title="Add one lot"
-        className="h-6 w-6 rounded-md bg-zinc-800 border border-zinc-700 text-zinc-300 font-bold flex items-center justify-center hover:bg-violet-600 hover:border-violet-600 hover:text-oncolor cursor-pointer transition-colors"
+        aria-label="Add one lot"
+        className={cn('h-6 w-6 rounded-md bg-zinc-800 border border-zinc-700 text-zinc-300 font-bold flex items-center justify-center hover:bg-violet-600 hover:border-violet-600 hover:text-oncolor cursor-pointer transition-colors', FOCUS_RING)}
       >
         +
       </button>
@@ -523,6 +533,7 @@ function SegPill<T extends string>({
           className={cn(
             'text-[10px] font-bold px-2.5 py-0.5 rounded-md cursor-pointer transition-colors',
             value === o ? 'bg-violet-600 text-oncolor' : 'text-zinc-400 hover:text-zinc-200',
+            FOCUS_RING,
           )}
         >{o}</button>
       ))}
@@ -579,9 +590,12 @@ function StrikeLegSelector({
             onClick={() => onShift('UP')}
             disabled={shiftDisabled || resolvedStrike == null}
             title={`Shift ${leg} strike up one step — closes and reopens any live position at the new strike`}
-            className="h-5 w-6 flex items-center justify-center rounded-t border border-emerald-500/20 bg-emerald-500/10 text-emerald-400
-                       hover:bg-emerald-500 hover:text-oncolor hover:border-emerald-500 disabled:opacity-30 disabled:cursor-not-allowed
-                       transition-all active:scale-95"
+            aria-label={`Shift ${leg} strike up one step`}
+            className={cn(
+              'h-5 w-6 flex items-center justify-center rounded-t border border-emerald-500/20 bg-emerald-500/10 text-emerald-400',
+              'hover:bg-emerald-500 hover:text-oncolor hover:border-emerald-500 disabled:opacity-30 disabled:cursor-not-allowed',
+              'transition-all active:scale-95', FOCUS_RING,
+            )}
           >
             <ChevronUp size={13} strokeWidth={3} />
           </button>
@@ -590,9 +604,12 @@ function StrikeLegSelector({
             onClick={() => onShift('DOWN')}
             disabled={shiftDisabled || resolvedStrike == null}
             title={`Shift ${leg} strike down one step — closes and reopens any live position at the new strike`}
-            className="h-5 w-6 flex items-center justify-center rounded-b border border-rose-500/20 bg-rose-500/10 text-rose-400
-                       hover:bg-rose-500 hover:text-oncolor hover:border-rose-500 disabled:opacity-30 disabled:cursor-not-allowed
-                       transition-all active:scale-95"
+            aria-label={`Shift ${leg} strike down one step`}
+            className={cn(
+              'h-5 w-6 flex items-center justify-center rounded-b border border-rose-500/20 bg-rose-500/10 text-rose-400',
+              'hover:bg-rose-500 hover:text-oncolor hover:border-rose-500 disabled:opacity-30 disabled:cursor-not-allowed',
+              'transition-all active:scale-95', FOCUS_RING,
+            )}
           >
             <ChevronDown size={13} strokeWidth={3} />
           </button>
@@ -700,7 +717,7 @@ function StrikeEditor({ row, live, step, onUpdate, onShift, shiftDisabled, onBlo
         </label>
         <div className="flex items-center gap-1.5">
           <button onClick={() => onUpdate(row, true)} title="Save this row's strike settings"
-            className="text-[9px] font-bold text-emerald-400 hover:text-emerald-300 cursor-pointer">
+            className={cn('text-[9px] font-bold text-emerald-400 hover:text-emerald-300 cursor-pointer rounded', FOCUS_RING)}>
             <Check className="h-2.5 w-2.5 inline -mt-0.5" /> Save
           </button>
           <button
@@ -711,7 +728,7 @@ function StrikeEditor({ row, live, step, onUpdate, onShift, shiftDisabled, onBlo
               }, true);
             }}
             title={anyOpen ? 'Locked while a leg is open — exit it first' : "Reset this row's strike settings to ATM"}
-            className="text-[9px] text-zinc-500 hover:text-zinc-400 cursor-pointer"
+            className={cn('text-[9px] text-zinc-500 hover:text-zinc-400 cursor-pointer rounded', FOCUS_RING)}
           >
             &times; clear
           </button>
@@ -726,7 +743,7 @@ function GhostBtn({ onClick, children, title }: { onClick?: () => void; children
     <button
       onClick={onClick}
       title={title}
-      className="flex items-center gap-1.5 text-xs font-bold px-3 py-1.5 rounded-lg border border-zinc-700 bg-zinc-900 text-zinc-300 hover:bg-zinc-800 hover:border-zinc-600 cursor-pointer transition-colors"
+      className={cn('flex items-center gap-1.5 text-xs font-bold px-3 py-1.5 rounded-lg border border-zinc-700 bg-zinc-900 text-zinc-300 hover:bg-zinc-800 hover:border-zinc-600 cursor-pointer transition-colors', FOCUS_RING)}
     >
       {children}
     </button>
@@ -890,6 +907,7 @@ function ControlStrip({
           className={cn(
             'flex items-center gap-1.5 text-xs font-extrabold px-3 py-1 rounded-full text-oncolor transition-colors cursor-pointer',
             liveRealMoney ? 'bg-rose-600 hover:bg-rose-500' : 'bg-zinc-700 hover:bg-zinc-600',
+            FOCUS_RING,
           )}
         >
           <span className="h-1.5 w-1.5 rounded-full bg-oncolor animate-pulse" />
@@ -912,6 +930,7 @@ function ControlStrip({
               : workerStatus.status === 'STALE' || workerStatus.status === 'ERROR'
                 ? 'border-amber-500/40 bg-amber-500/10 text-amber-300 hover:bg-amber-500/20'
                 : 'border-zinc-700 bg-zinc-900 text-zinc-400 hover:bg-zinc-800 hover:border-zinc-600',
+            FOCUS_RING,
           )}
         >
           <Server className={cn('h-3.5 w-3.5', workerStatus.status === 'UNKNOWN' && 'animate-pulse')} />
@@ -925,7 +944,7 @@ function ControlStrip({
           onClick={onSave}
           disabled={saving}
           title="Save the free-typed number fields — Target / Stop / Trigger / Lock and each group's Spot H↑/L↓ — to disk, where the Python worker reads them. Everything else (Arm/Exit, Start/Stop, ATM BY, Product, Strikes±, Risk/Trail on-off, LIVE · REAL MONEY) already saves itself the instant you click it."
-          className="flex items-center gap-1 text-xs font-bold px-3 py-1 rounded-lg bg-violet-600 text-oncolor hover:bg-violet-500 transition-colors cursor-pointer disabled:opacity-50"
+          className={cn('flex items-center gap-1 text-xs font-bold px-3 py-1 rounded-lg bg-violet-600 text-oncolor hover:bg-violet-500 transition-colors cursor-pointer disabled:opacity-50', FOCUS_RING)}
         >
           <Save className="h-3 w-3" /> {saving ? 'Saving…' : 'Save Preferences'}
         </button>
@@ -938,6 +957,7 @@ function ControlStrip({
             confirmExitAll
               ? 'border-rose-500 bg-rose-600 text-oncolor animate-pulse shadow-lg shadow-rose-500/20'
               : 'border-rose-500/40 bg-rose-500/10 text-rose-300 hover:bg-rose-500/20',
+            FOCUS_RING,
           )}
         >
           {exitingAll ? <RefreshCw className="h-3.5 w-3.5 animate-spin" /> : <ShieldOff className="h-3.5 w-3.5" />}
@@ -1044,6 +1064,7 @@ function IndexGroupBar({
           className={cn(
             'flex items-center gap-1 text-xs font-black px-3 py-1 rounded-lg text-oncolor transition-colors cursor-pointer',
             group.enabled ? 'bg-rose-600 hover:bg-rose-500' : 'bg-emerald-600 hover:bg-emerald-500',
+            FOCUS_RING,
           )}
         >
           <Zap className="h-3 w-3" />
@@ -1216,6 +1237,7 @@ function FocusTableRow({
                   row.dte === d
                     ? 'bg-violet-600 text-oncolor'
                     : 'bg-zinc-800 text-zinc-400 hover:bg-zinc-700 hover:text-zinc-200',
+                  FOCUS_RING,
                 )}
               >{d}</button>
             ))}
@@ -1224,7 +1246,7 @@ function FocusTableRow({
             <button
               onClick={() => onUpdate(row, true)}
               title="Save this row's timing settings"
-              className="flex items-center gap-1 text-[10px] font-bold text-emerald-400 border border-emerald-500/40 px-2 py-0.5 rounded hover:bg-emerald-500/10 cursor-pointer transition-colors"
+              className={cn('flex items-center gap-1 text-[10px] font-bold text-emerald-400 border border-emerald-500/40 px-2 py-0.5 rounded hover:bg-emerald-500/10 cursor-pointer transition-colors', FOCUS_RING)}
             >
               <Check className="h-3 w-3" /> Save
             </button>
@@ -1293,7 +1315,7 @@ function FocusTableRow({
             <button
               onClick={onArm}
               title="Watch this row and enter it at its entry time"
-              className="text-xs font-extrabold px-3 py-1 rounded-lg bg-violet-600 text-oncolor hover:bg-violet-500 cursor-pointer transition-colors"
+              className={cn('text-xs font-extrabold px-3 py-1 rounded-lg bg-violet-600 text-oncolor hover:bg-violet-500 cursor-pointer transition-colors', FOCUS_RING)}
             >
               Arm
             </button>
@@ -1302,7 +1324,7 @@ function FocusTableRow({
             <button
               onClick={onDisarm}
               title="Stop watching this row - it will not enter"
-              className="text-xs font-extrabold px-3 py-1 rounded-lg bg-zinc-700 text-zinc-200 hover:bg-zinc-600 cursor-pointer transition-colors"
+              className={cn('text-xs font-extrabold px-3 py-1 rounded-lg bg-zinc-700 text-zinc-200 hover:bg-zinc-600 cursor-pointer transition-colors', FOCUS_RING)}
             >
               Disarm
             </button>
@@ -1311,7 +1333,7 @@ function FocusTableRow({
             onClick={() => onExit('ALL')}
             disabled={flat || !canTrade}
             title={flat ? 'Nothing open on this row' : 'Close every open leg of this row at market'}
-            className="text-xs font-extrabold px-3 py-1 rounded-lg bg-rose-600 text-oncolor hover:bg-rose-500 cursor-pointer transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+            className={cn('text-xs font-extrabold px-3 py-1 rounded-lg bg-rose-600 text-oncolor hover:bg-rose-500 cursor-pointer transition-colors disabled:opacity-40 disabled:cursor-not-allowed', FOCUS_RING)}
           >
             Exit All
           </button>
@@ -1319,7 +1341,8 @@ function FocusTableRow({
             <button
               onClick={onDelete}
               title="Delete this row"
-              className="flex items-center gap-1 text-[10px] font-bold text-zinc-500 hover:text-rose-400 cursor-pointer transition-colors"
+              aria-label="Delete row"
+              className={cn('flex items-center gap-1 text-[10px] font-bold text-zinc-500 hover:text-rose-400 cursor-pointer transition-colors', FOCUS_RING)}
             >
               <X className="h-3 w-3" /> Delete
             </button>
@@ -1345,9 +1368,9 @@ function FocusTableRow({
           <div className="flex items-center gap-1">
             <NumInput value={String(ceQty)} onChange={v => setCeQty(Math.max(1, Number(v) || 1))}
               className="w-9 h-6 text-center px-1" title="Lots the CE +/- buttons act on" />
-            <button onClick={() => onAddLot('CE', ceQty)} disabled={!canTrade} title={canTrade ? `Add ${ceQty} lot(s) to the CE leg` : tradeBlockedWhy} className="h-6 w-6 rounded-md bg-zinc-800 border border-zinc-700 text-zinc-300 font-bold flex items-center justify-center hover:bg-violet-600 hover:border-violet-600 hover:text-oncolor cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed transition-colors">+</button>
-            <button onClick={() => onReduceLot('CE', ceQty)} disabled={!canTrade || ceFlat} title={ceFlat ? 'Nothing open on the CE leg' : canTrade ? `Reduce the CE leg by ${ceQty} lot(s)` : tradeBlockedWhy} className="h-6 w-6 rounded-md bg-zinc-800 border border-zinc-700 text-zinc-300 font-bold flex items-center justify-center hover:bg-zinc-700 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed transition-colors">-</button>
-            <button onClick={() => onExit('CE')} disabled={!canTrade || ceFlat} title={ceFlat ? 'Nothing open on the CE leg' : canTrade ? 'Close the CE leg at market' : tradeBlockedWhy} className="text-xs font-bold px-2 py-1 rounded-md bg-rose-600 text-oncolor hover:bg-rose-500 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed transition-colors">Exit</button>
+            <button onClick={() => onAddLot('CE', ceQty)} disabled={!canTrade} title={canTrade ? `Add ${ceQty} lot(s) to the CE leg` : tradeBlockedWhy} aria-label={`Add ${ceQty} lot(s) to the CE leg`} className={cn('h-6 w-6 rounded-md bg-zinc-800 border border-zinc-700 text-zinc-300 font-bold flex items-center justify-center hover:bg-violet-600 hover:border-violet-600 hover:text-oncolor cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed transition-colors', FOCUS_RING)}>+</button>
+            <button onClick={() => onReduceLot('CE', ceQty)} disabled={!canTrade || ceFlat} title={ceFlat ? 'Nothing open on the CE leg' : canTrade ? `Reduce the CE leg by ${ceQty} lot(s)` : tradeBlockedWhy} aria-label={`Reduce the CE leg by ${ceQty} lot(s)`} className={cn('h-6 w-6 rounded-md bg-zinc-800 border border-zinc-700 text-zinc-300 font-bold flex items-center justify-center hover:bg-zinc-700 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed transition-colors', FOCUS_RING)}>-</button>
+            <button onClick={() => onExit('CE')} disabled={!canTrade || ceFlat} title={ceFlat ? 'Nothing open on the CE leg' : canTrade ? 'Close the CE leg at market' : tradeBlockedWhy} className={cn('text-xs font-bold px-2 py-1 rounded-md bg-rose-600 text-oncolor hover:bg-rose-500 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed transition-colors', FOCUS_RING)}>Exit</button>
           </div>
         </div>
       </td>
@@ -1363,9 +1386,9 @@ function FocusTableRow({
           <div className="flex items-center gap-1">
             <NumInput value={String(peQty)} onChange={v => setPeQty(Math.max(1, Number(v) || 1))}
               className="w-9 h-6 text-center px-1" title="Lots the PE +/- buttons act on" />
-            <button onClick={() => onAddLot('PE', peQty)} disabled={!canTrade} title={canTrade ? `Add ${peQty} lot(s) to the PE leg` : tradeBlockedWhy} className="h-6 w-6 rounded-md bg-zinc-800 border border-zinc-700 text-zinc-300 font-bold flex items-center justify-center hover:bg-violet-600 hover:border-violet-600 hover:text-oncolor cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed transition-colors">+</button>
-            <button onClick={() => onReduceLot('PE', peQty)} disabled={!canTrade || peFlat} title={peFlat ? 'Nothing open on the PE leg' : canTrade ? `Reduce the PE leg by ${peQty} lot(s)` : tradeBlockedWhy} className="h-6 w-6 rounded-md bg-zinc-800 border border-zinc-700 text-zinc-300 font-bold flex items-center justify-center hover:bg-zinc-700 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed transition-colors">-</button>
-            <button onClick={() => onExit('PE')} disabled={!canTrade || peFlat} title={peFlat ? 'Nothing open on the PE leg' : canTrade ? 'Close the PE leg at market' : tradeBlockedWhy} className="text-xs font-bold px-2 py-1 rounded-md bg-rose-600 text-oncolor hover:bg-rose-500 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed transition-colors">Exit</button>
+            <button onClick={() => onAddLot('PE', peQty)} disabled={!canTrade} title={canTrade ? `Add ${peQty} lot(s) to the PE leg` : tradeBlockedWhy} aria-label={`Add ${peQty} lot(s) to the PE leg`} className={cn('h-6 w-6 rounded-md bg-zinc-800 border border-zinc-700 text-zinc-300 font-bold flex items-center justify-center hover:bg-violet-600 hover:border-violet-600 hover:text-oncolor cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed transition-colors', FOCUS_RING)}>+</button>
+            <button onClick={() => onReduceLot('PE', peQty)} disabled={!canTrade || peFlat} title={peFlat ? 'Nothing open on the PE leg' : canTrade ? `Reduce the PE leg by ${peQty} lot(s)` : tradeBlockedWhy} aria-label={`Reduce the PE leg by ${peQty} lot(s)`} className={cn('h-6 w-6 rounded-md bg-zinc-800 border border-zinc-700 text-zinc-300 font-bold flex items-center justify-center hover:bg-zinc-700 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed transition-colors', FOCUS_RING)}>-</button>
+            <button onClick={() => onExit('PE')} disabled={!canTrade || peFlat} title={peFlat ? 'Nothing open on the PE leg' : canTrade ? 'Close the PE leg at market' : tradeBlockedWhy} className={cn('text-xs font-bold px-2 py-1 rounded-md bg-rose-600 text-oncolor hover:bg-rose-500 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed transition-colors', FOCUS_RING)}>Exit</button>
           </div>
         </div>
       </td>
@@ -1422,14 +1445,14 @@ function FocusTableRow({
             <button
               onClick={() => onUpdate(row, true)}
               title="Save this row's level exits"
-              className="flex items-center gap-1 text-[10px] font-bold text-emerald-400 border border-emerald-500/40 px-2 py-0.5 rounded hover:bg-emerald-500/10 cursor-pointer transition-colors"
+              className={cn('flex items-center gap-1 text-[10px] font-bold text-emerald-400 border border-emerald-500/40 px-2 py-0.5 rounded hover:bg-emerald-500/10 cursor-pointer transition-colors', FOCUS_RING)}
             >
               <Check className="h-3 w-3" /> Save
             </button>
             <button
               onClick={() => onUpdate({ levelHigh: '', levelLow: '', levelVw: false, slRupees: '', slMultiplier: '1', ceSlMultiplier: '1', peSlMultiplier: '1' }, true)}
               title="Clear every level exit on this row"
-              className="text-[10px] font-bold text-zinc-600 hover:text-zinc-400 cursor-pointer transition-colors"
+              className={cn('text-[10px] font-bold text-zinc-600 hover:text-zinc-400 cursor-pointer transition-colors', FOCUS_RING)}
             >
               &times; clear
             </button>
@@ -1507,7 +1530,8 @@ function FocusRowCard({
             onClick={onDelete}
             disabled={!flat}
             title={flat ? 'Delete this row' : 'Exit the CE/PE legs before this row can be deleted'}
-            className="text-zinc-600 hover:text-rose-400 disabled:hover:text-zinc-700 disabled:cursor-not-allowed disabled:opacity-40 font-bold text-xs p-1"
+            aria-label="Delete row"
+            className={cn('text-zinc-600 hover:text-rose-400 disabled:hover:text-zinc-700 disabled:cursor-not-allowed disabled:opacity-40 font-bold text-xs p-1', FOCUS_RING)}
           >
             <X className="h-3.5 w-3.5" />
           </button>
@@ -1533,7 +1557,8 @@ function FocusRowCard({
                 onClick={() => onUpdate({ dte: d })}
                 className={cn(
                   'text-[9px] font-extrabold px-1.5 py-0.5 rounded cursor-pointer transition-colors',
-                  row.dte === d ? 'bg-violet-600 text-oncolor' : 'bg-zinc-800 text-zinc-500 hover:bg-zinc-700'
+                  row.dte === d ? 'bg-violet-600 text-oncolor' : 'bg-zinc-800 text-zinc-500 hover:bg-zinc-700',
+                  FOCUS_RING,
                 )}
               >{d}</button>
             ))}
@@ -1583,9 +1608,9 @@ function FocusRowCard({
           <div className="flex items-center gap-1">
             <NumInput value={String(ceQty)} onChange={v => setCeQty(Math.max(1, Number(v) || 1))}
               className="w-8 h-5 text-center px-0.5" title="Lots the CE +/- buttons act on" />
-            <button onClick={() => onAddLot('CE', ceQty)} disabled={!canTrade} title={canTrade ? `Add ${ceQty} CE lot(s)` : tradeBlockedWhy} className="h-5 w-5 rounded bg-zinc-800 text-zinc-300 font-bold flex items-center justify-center hover:bg-violet-600 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed">+</button>
-            <button onClick={() => onReduceLot('CE', ceQty)} disabled={!canTrade || ceFlat} title={ceFlat ? 'Nothing open on the CE leg' : canTrade ? `Reduce CE by ${ceQty} lot(s)` : tradeBlockedWhy} className="h-5 w-5 rounded bg-zinc-800 text-zinc-300 font-bold flex items-center justify-center hover:bg-zinc-700 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed">-</button>
-            <button onClick={() => onExit('CE')} disabled={!canTrade || ceFlat} title={ceFlat ? 'Nothing open on the CE leg' : canTrade ? 'Exit CE leg' : tradeBlockedWhy} className="text-[10px] font-bold px-1.5 py-0.5 rounded bg-rose-600 text-oncolor hover:bg-rose-500 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed">Exit</button>
+            <button onClick={() => onAddLot('CE', ceQty)} disabled={!canTrade} title={canTrade ? `Add ${ceQty} CE lot(s)` : tradeBlockedWhy} aria-label={`Add ${ceQty} CE lot(s)`} className={cn('h-5 w-5 rounded bg-zinc-800 text-zinc-300 font-bold flex items-center justify-center hover:bg-violet-600 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed', FOCUS_RING)}>+</button>
+            <button onClick={() => onReduceLot('CE', ceQty)} disabled={!canTrade || ceFlat} title={ceFlat ? 'Nothing open on the CE leg' : canTrade ? `Reduce CE by ${ceQty} lot(s)` : tradeBlockedWhy} aria-label={`Reduce CE by ${ceQty} lot(s)`} className={cn('h-5 w-5 rounded bg-zinc-800 text-zinc-300 font-bold flex items-center justify-center hover:bg-zinc-700 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed', FOCUS_RING)}>-</button>
+            <button onClick={() => onExit('CE')} disabled={!canTrade || ceFlat} title={ceFlat ? 'Nothing open on the CE leg' : canTrade ? 'Exit CE leg' : tradeBlockedWhy} className={cn('text-[10px] font-bold px-1.5 py-0.5 rounded bg-rose-600 text-oncolor hover:bg-rose-500 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed', FOCUS_RING)}>Exit</button>
           </div>
         </div>
         <div className="flex items-center justify-between">
@@ -1597,9 +1622,9 @@ function FocusRowCard({
           <div className="flex items-center gap-1">
             <NumInput value={String(peQty)} onChange={v => setPeQty(Math.max(1, Number(v) || 1))}
               className="w-8 h-5 text-center px-0.5" title="Lots the PE +/- buttons act on" />
-            <button onClick={() => onAddLot('PE', peQty)} disabled={!canTrade} title={canTrade ? `Add ${peQty} PE lot(s)` : tradeBlockedWhy} className="h-5 w-5 rounded bg-zinc-800 text-zinc-300 font-bold flex items-center justify-center hover:bg-violet-600 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed">+</button>
-            <button onClick={() => onReduceLot('PE', peQty)} disabled={!canTrade || peFlat} title={peFlat ? 'Nothing open on the PE leg' : canTrade ? `Reduce PE by ${peQty} lot(s)` : tradeBlockedWhy} className="h-5 w-5 rounded bg-zinc-800 text-zinc-300 font-bold flex items-center justify-center hover:bg-zinc-700 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed">-</button>
-            <button onClick={() => onExit('PE')} disabled={!canTrade || peFlat} title={peFlat ? 'Nothing open on the PE leg' : canTrade ? 'Exit PE leg' : tradeBlockedWhy} className="text-[10px] font-bold px-1.5 py-0.5 rounded bg-rose-600 text-oncolor hover:bg-rose-500 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed">Exit</button>
+            <button onClick={() => onAddLot('PE', peQty)} disabled={!canTrade} title={canTrade ? `Add ${peQty} PE lot(s)` : tradeBlockedWhy} aria-label={`Add ${peQty} PE lot(s)`} className={cn('h-5 w-5 rounded bg-zinc-800 text-zinc-300 font-bold flex items-center justify-center hover:bg-violet-600 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed', FOCUS_RING)}>+</button>
+            <button onClick={() => onReduceLot('PE', peQty)} disabled={!canTrade || peFlat} title={peFlat ? 'Nothing open on the PE leg' : canTrade ? `Reduce PE by ${peQty} lot(s)` : tradeBlockedWhy} aria-label={`Reduce PE by ${peQty} lot(s)`} className={cn('h-5 w-5 rounded bg-zinc-800 text-zinc-300 font-bold flex items-center justify-center hover:bg-zinc-700 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed', FOCUS_RING)}>-</button>
+            <button onClick={() => onExit('PE')} disabled={!canTrade || peFlat} title={peFlat ? 'Nothing open on the PE leg' : canTrade ? 'Exit PE leg' : tradeBlockedWhy} className={cn('text-[10px] font-bold px-1.5 py-0.5 rounded bg-rose-600 text-oncolor hover:bg-rose-500 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed', FOCUS_RING)}>Exit</button>
           </div>
         </div>
       </div>
@@ -1641,13 +1666,13 @@ function FocusRowCard({
           <div className="flex gap-2">
             <button
               onClick={() => onUpdate(row, true)}
-              className="text-[9px] font-bold text-emerald-400 border border-emerald-500/30 px-1.5 py-0.5 rounded hover:bg-emerald-500/10"
+              className={cn('text-[9px] font-bold text-emerald-400 border border-emerald-500/30 px-1.5 py-0.5 rounded hover:bg-emerald-500/10', FOCUS_RING)}
             >
               Save Exits
             </button>
             <button
               onClick={() => onUpdate({ levelHigh: '', levelLow: '', levelVw: false, slRupees: '', slMultiplier: '1', ceSlMultiplier: '1', peSlMultiplier: '1' }, true)}
-              className="text-[9px] text-zinc-500 hover:text-zinc-400"
+              className={cn('text-[9px] text-zinc-500 hover:text-zinc-400', FOCUS_RING)}
             >
               Clear
             </button>
@@ -1658,18 +1683,18 @@ function FocusRowCard({
       {/* Row Control Actions */}
       <div className="flex justify-end gap-2 border-t border-zinc-800/80 pt-2.5 mt-1">
         {row.status === 'draft' && (
-          <button onClick={onArm} className="text-xs font-bold px-3 py-1.5 rounded-lg bg-violet-600 text-oncolor hover:bg-violet-500">
+          <button onClick={onArm} className={cn('text-xs font-bold px-3 py-1.5 rounded-lg bg-violet-600 text-oncolor hover:bg-violet-500', FOCUS_RING)}>
             Arm Row
           </button>
         )}
         {row.status === 'armed' && (
-          <button onClick={onDisarm} className="text-xs font-bold px-3 py-1.5 rounded-lg bg-zinc-700 text-zinc-200 hover:bg-zinc-600">
+          <button onClick={onDisarm} className={cn('text-xs font-bold px-3 py-1.5 rounded-lg bg-zinc-700 text-zinc-200 hover:bg-zinc-600', FOCUS_RING)}>
             Disarm
           </button>
         )}
         <button onClick={() => onExit('ALL')} disabled={flat || !canTrade}
           title={flat ? 'Nothing open on this row' : 'Close every open leg of this row at market'}
-          className="text-xs font-extrabold px-3 py-1.5 rounded-lg bg-rose-600 text-oncolor hover:bg-rose-500 disabled:opacity-40 disabled:cursor-not-allowed">
+          className={cn('text-xs font-extrabold px-3 py-1.5 rounded-lg bg-rose-600 text-oncolor hover:bg-rose-500 disabled:opacity-40 disabled:cursor-not-allowed', FOCUS_RING)}>
           Exit All
         </button>
       </div>
@@ -1698,7 +1723,9 @@ function FocusModal({
           <h2 className="text-sm font-bold uppercase tracking-wider text-zinc-100">{title}</h2>
           <button
             onClick={onClose}
-            className="text-zinc-400 hover:text-white text-lg font-bold p-1 cursor-pointer"
+            title="Close"
+            aria-label="Close"
+            className={cn('text-zinc-400 hover:text-white text-lg font-bold p-1 cursor-pointer rounded', FOCUS_RING)}
           >
             &times;
           </button>
@@ -3607,7 +3634,7 @@ export default function FocusTool() {
                   <button
                     onClick={() => addRow(u)}
                     title={`Add another straddle / strangle rule for ${u}`}
-                    className="flex items-center gap-1.5 text-xs font-extrabold px-3 py-1.5 rounded-lg bg-violet-600 text-oncolor hover:bg-violet-500 transition-colors cursor-pointer"
+                    className={cn('flex items-center gap-1.5 text-xs font-extrabold px-3 py-1.5 rounded-lg bg-violet-600 text-oncolor hover:bg-violet-500 transition-colors cursor-pointer', FOCUS_RING)}
                   >
                     <Plus className="h-4 w-4" /> Add Row
                   </button>
@@ -3705,7 +3732,7 @@ export default function FocusTool() {
             <button
               onClick={fetchOrders}
               disabled={ordersLoading}
-              className="text-xs font-semibold px-2 py-1 rounded border border-zinc-700 bg-zinc-900 text-zinc-300 hover:text-white hover:border-zinc-500 cursor-pointer disabled:opacity-40 transition-all flex items-center gap-1"
+              className={cn('text-xs font-semibold px-2 py-1 rounded border border-zinc-700 bg-zinc-900 text-zinc-300 hover:text-white hover:border-zinc-500 cursor-pointer disabled:opacity-40 transition-all flex items-center gap-1', FOCUS_RING)}
             >
               <RefreshCw className={cn("h-3 w-3", ordersLoading && "animate-spin")} />
               Refresh
