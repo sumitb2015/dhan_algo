@@ -253,18 +253,25 @@ class OrderRouter:
                         continue
             return out
 
-        out = {}
+        # ONE call, not one per underlying. Child brokers are instantiated per
+        # underlying (Kotak's instrument cache is scoped that way), but both
+        # brokers' positions_rows() returns the WHOLE ACCOUNT — Zerodha's
+        # kite.positions() and Kotak's get_positions(client) alike. Asking each
+        # of three underlyings' children therefore made three identical
+        # account-wide calls on every reconcile. Any one session answers for
+        # all of them, so the first one that initialises is used.
         for u in (underlyings or ()):
             child = self._child(u)
             if not child:
-                return None
+                continue
             try:
-                for r in child.positions_rows():
-                    out[str(r['symbol'])] = int(r.get('qty') or 0)
+                return {str(r['symbol']): int(r.get('qty') or 0)
+                        for r in child.positions_rows()}
             except Exception as e:
-                logger.warning(f'{self.broker}: position snapshot failed for {u}: {e}')
+                logger.warning(f'{self.broker}: position snapshot failed via {u}: {e}')
                 return None
-        return out
+        # No session at all — unknown, not empty.
+        return None
 
     def position_key(self, underlying, expiry, strike, opt_type):
         """The key `net_positions` would file this leg under, or None."""

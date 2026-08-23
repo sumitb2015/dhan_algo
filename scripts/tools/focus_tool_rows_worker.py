@@ -109,6 +109,19 @@ RECONCILE_EVERY_SECONDS = 2.0
 # four disk writes a second for a panel that refreshes far more slowly.
 STATUS_EVERY_SECONDS = 1.0
 
+# How wide a strike ladder to keep on the tick feed, in steps either side of
+# ATM. Wide enough that a PREMIUM-mode target resolves without a REST chain and
+# that a strike shift lands on a contract already subscribed; the socket carries
+# hundreds of instruments, so the cost is master-list lookups, not bandwidth.
+LADDER_STEPS = 12
+
+# The refresher's own cadence, and how stale a published snapshot may be before
+# the tick refuses to use it. A dead refresher must make a rule go INERT, never
+# fire it on a number from several minutes ago — a stale VWAP closing a live
+# position is exactly the failure this design exists to avoid.
+REFRESH_EVERY_SECONDS = 1.0
+SNAPSHOT_STALE_SECONDS = 150.0
+
 # How long a freshly opened leg is exempt from reconciliation. The position book
 # lags a fill by a second or two, and reading that lag as "the broker shows
 # nothing" would drop a live leg from the ledger moments after opening it.
@@ -560,8 +573,13 @@ class FocusRowsWorker:
         # window so a close order does not pay for its own positions call.
         self._net_snapshot = None
         self.started_at = datetime.now().isoformat()
-        self._chain_cache = {}     # (underlying, expiry) -> (minute_key, chain)
-        self._vwap_cache = {}      # (underlying, expiry, ce, pe, side) -> (minute_key, vwap)
+        # Published by the refresher thread, read by the tick. Each value is
+        # (stamped_at, payload) so the tick can refuse a snapshot whose
+        # producer has died — see _fresh().
+        self._chain_snapshot = {}  # (underlying, expiry) -> (ts, {strike: {CE, PE}})
+        self._vwap_snapshot = {}   # (underlying, expiry, ce, pe, legs) -> (ts, vwap)
+        self._refresher = None
+        self._stopping = False
 
     # -- lifecycle ---------------------------------------------------
 
@@ -576,6 +594,7 @@ class FocusRowsWorker:
         self.router = OrderRouter(self.helper, self.market, self.broker, self.dry_run)
         self.start_spot_feed()
         self.start_order_feed()
+        self.start_refresher()
 
     def start_order_feed(self):
         """Subscribe to Dhan's order-update WebSocket and settle fills on it.
@@ -698,15 +717,164 @@ class FocusRowsWorker:
                 return g
         return None
 
-    def chain(self, underlying, expiry):
-        """{strike: {'CE': ltp, 'PE': ltp}} for PREMIUM-mode strike resolution,
-        refreshed once a minute. Only fetched for underlyings that actually have
-        a PREMIUM-mode row — Dhan's chain endpoint is rate-limited account-wide."""
-        key = (underlying, expiry)
-        minute = datetime.now().strftime('%Y-%m-%d %H:%M')
-        hit = self._chain_cache.get(key)
-        if hit and hit[0] == minute:
-            return hit[1]
+    # -- background market data --------------------------------------
+    #
+    # Nothing below runs on the tick thread. The tick only ever READS the
+    # snapshots these publish, so a slow REST call can never stall an exit.
+
+    def start_refresher(self):
+        """Start the thread that owns every remaining REST market-data call.
+
+        Two things used to fetch from inside the tick, once a minute each, and
+        both could stall it: the option chain (PREMIUM-mode strike resolution)
+        and the session VWAPs. The chain was the worse of the two — DhanHelper
+        paces that endpoint with a hard `time.sleep(3.0 - elapsed)`, so two
+        underlyings in premium mode meant a ~3s stall and three meant ~6s, once
+        a minute, while stops were live.
+        """
+        t = threading.Thread(target=self._refresher_loop, name='focus-refresher', daemon=True)
+        t.start()
+        self._refresher = t
+
+    def _refresher_loop(self):
+        while not self._stopping:
+            try:
+                self.refresh_market_data()
+            except Exception as e:
+                logger.warning(f'Refresher pass failed: {e}')
+            time.sleep(REFRESH_EVERY_SECONDS)
+
+    def refresh_market_data(self):
+        """One refresher pass: extend the ladder, republish chain and VWAP."""
+        cfg = self.cfg
+        rows = list(cfg.get('rows') or [])
+        with self._fills_lock:
+            fills = {k: dict(v) for k, v in self.fills.items()}
+
+        self._refresh_ladder(rows, fills)
+        self._refresh_chains(rows, fills)
+        self._refresh_vwaps(rows, fills)
+
+    def _refresh_ladder(self, rows, fills):
+        """Keep an ATM +/- LADDER_STEPS strike ladder on the tick feed.
+
+        This is what lets PREMIUM mode resolve with no REST at all: the chain
+        snapshot is built from live_data below. It also means a strike shift
+        usually lands on a contract that is already subscribed, so the new leg
+        has a price immediately instead of on the next feed round trip.
+        """
+        wanted = []
+        for u in {r.get('underlying') for r in rows if r.get('underlying') in UNDERLYINGS}:
+            # The FUTURE, for groups picking ATM off it rather than off spot.
+            # It is not an index and so was not covered by the spot feed, which
+            # left future_ltp() on the REST path — one blocking quote roughly
+            # every second once the tick dropped to 250ms, i.e. the faster loop
+            # made it worse. Subscribed here, it becomes a dict read like
+            # everything else.
+            try:
+                fut_sid = self.market.future_id(u)
+                if fut_sid:
+                    wanted.append((u, {'SECURITY_ID': int(fut_sid)}))
+            except Exception as e:
+                logger.warning(f'{u}: futures subscription skipped: {e}')
+
+            spot = self.market.spot(u)
+            step = STRIKE_STEP[u]
+            atm = atm_strike(spot, step)
+            if not atm:
+                continue
+            expiry = self._ladder_expiry(u, rows, fills)
+            if not expiry:
+                continue
+            for i in range(-LADDER_STEPS, LADDER_STEPS + 1):
+                strike = atm + i * step
+                for leg in ('CE', 'PE'):
+                    # find_option reads the in-memory master list and is cached
+                    # per contract, so a settled ladder costs nothing per pass.
+                    row = self.market.leg(u, expiry, strike, leg)
+                    if row is not None:
+                        wanted.append((u, row))
+        if wanted:
+            self.ensure_legs_subscribed(wanted)
+
+    def _ladder_expiry(self, underlying, rows, fills):
+        """The expiry this underlying's ladder should cover — whatever its rows
+        actually trade, else the nearest."""
+        for r in rows:
+            if r.get('underlying') == underlying:
+                held = fills.get(r.get('id')) or {}
+                exp = held.get('expiry') or r.get('expiry')
+                if exp:
+                    return exp
+        return self.market.nearest_expiry(underlying)
+
+    def _refresh_chains(self, rows, fills):
+        """Publish {strike: {'CE': ltp, 'PE': ltp}} per (underlying, expiry).
+
+        Built from live_data — the ladder above is already subscribed, so this
+        is a dict scan, not a REST call, and the prices are current rather than
+        up to a minute old. The REST chain is kept only as a cold-start
+        fallback for an underlying whose ticks have not arrived yet, and even
+        that runs here, off the tick thread.
+        """
+        needed = set()
+        for r in rows:
+            if str(r.get('strikeMode') or 'ATM') != 'PREMIUM':
+                continue
+            if r.get('underlying') not in UNDERLYINGS:
+                continue
+            if r['id'] not in fills and str(r.get('status')) != 'armed':
+                continue
+            expiry = ((fills.get(r['id']) or {}).get('expiry')
+                      or r.get('expiry')
+                      or self.market.nearest_expiry(r['underlying']))
+            if expiry:
+                needed.add((r['underlying'], expiry))
+        if not needed:
+            return
+
+        published = dict(self._chain_snapshot)
+        for u, expiry in needed:
+            live = self._chain_from_feed(u, expiry)
+            if live:
+                published[(u, expiry)] = (time.time(), live)
+                continue
+            # No ticks for this ladder yet. One REST chain, at most once a
+            # minute, and harmless here because nothing is waiting on it.
+            prev = published.get((u, expiry))
+            if prev and time.time() - prev[0] < 60.0:
+                continue
+            fetched = self._fetch_chain_rest(u, expiry)
+            if fetched:
+                published[(u, expiry)] = (time.time(), fetched)
+        self._chain_snapshot = published
+
+    def _chain_from_feed(self, underlying, expiry):
+        """The subscribed ladder's current prices, as a chain-shaped dict."""
+        step = STRIKE_STEP[underlying]
+        atm = atm_strike(self.market.spot(underlying), step)
+        if not atm:
+            return {}
+        out = {}
+        for i in range(-LADDER_STEPS, LADDER_STEPS + 1):
+            strike = atm + i * step
+            prices = {}
+            for leg in ('CE', 'PE'):
+                row = self.market.leg(underlying, expiry, strike, leg)
+                if row is None:
+                    continue
+                live = self.helper.live_data.get(str(int(row['SECURITY_ID'])))
+                if not live:
+                    continue
+                px = float(live.get('last_price') or live.get('LTP') or 0.0)
+                if px > 0:
+                    prices[leg] = px
+            if prices:
+                out[strike] = prices
+        return out
+
+    def _fetch_chain_rest(self, underlying, expiry):
+        """Cold-start fallback only. Refresher thread — never the tick."""
         chain = {}
         try:
             # SENSEX splits three ways (CLAUDE.md): its chain keys on security
@@ -716,14 +884,15 @@ class FocusRowsWorker:
                 df = self.helper.get_option_chain_df('1', expiry, exchange_segment='BSE_FNO')
             else:
                 df = self.helper.get_option_chain_df(underlying, expiry)
-            # get_option_chain_df sets Strike as the INDEX (dhan_helper.py:3534),
-            # not as a column — reading r['Strike'] silently yields nothing.
+            # get_option_chain_df sets Strike as the INDEX, not as a column —
+            # reading r['Strike'] silently yields nothing.
             if df is not None and not df.empty:
                 for strike_raw, r in df.iterrows():
                     try:
                         strike = int(round(float(strike_raw)))
                     except (TypeError, ValueError):
                         continue
+
                     def px(col):
                         try:
                             return float(r[col] or 0.0)
@@ -732,79 +901,117 @@ class FocusRowsWorker:
                     chain[strike] = {'CE': px('ce_last_price'), 'PE': px('pe_last_price')}
         except Exception as e:
             logger.warning(f'{underlying} {expiry}: chain fetch failed: {e}')
-        self._chain_cache[key] = (minute, chain)
         return chain
 
-    def side_vwap(self, underlying, expiry, ce_strike, pe_strike, legs):
-        """Session VWAP of the premium of just `legs`, recomputed once a minute.
+    def _refresh_vwaps(self, rows, fills):
+        """Recompute the session VWAP of each watched strike pair, once a minute.
+
+        Deliberately still REST and still closed-bar: that construction is what
+        makes this number match TradingView and the broker terminal. Computing
+        it from ticks instead would be faster and would change the price the
+        rule fires at, which is not a trade worth making for a stop.
+        """
+        wanted = set()
+        for r in rows:
+            if not r.get('levelVw'):
+                continue
+            fill = fills.get(r.get('id'))
+            if not fill:
+                continue
+            legs = tuple(l for l in ('CE', 'PE') if fill.get(l))
+            if not legs:
+                continue
+            ce = (fill.get('CE') or {}).get('strike')
+            pe = (fill.get('PE') or {}).get('strike')
+            wanted.add((r['underlying'], fill.get('expiry') or '', ce, pe, legs))
+
+        if not wanted:
+            return
+        published = dict(self._vwap_snapshot)
+        for key in wanted:
+            prev = published.get(key)
+            if prev and time.time() - prev[0] < 60.0:
+                continue
+            underlying, expiry, ce, pe, legs = key
+            value = self._compute_side_vwap(underlying, expiry, ce, pe, list(legs))
+            published[key] = (time.time(), value)
+        self._vwap_snapshot = published
+
+    def _compute_side_vwap(self, underlying, expiry, ce_strike, pe_strike, legs):
+        """Session VWAP of just `legs`, off closed 1-minute bars.
 
         Side-aware for the same reason evaluate_exit is: a CE-only row compared
-        against a combined CE+PE VWAP would cross at the wrong premium. Uses
-        only closed bars so the number matches what TradingView and the broker
-        terminal show (see scripts/tools/focus_tool_vwap.py, same construction).
+        against a combined CE+PE VWAP would cross at the wrong premium.
         """
-        key = (underlying, expiry, ce_strike, pe_strike, tuple(legs))
-        minute = datetime.now().strftime('%Y-%m-%d %H:%M')
-        hit = self._vwap_cache.get(key)
-        if hit and hit[0] == minute:
-            return hit[1]
-
-        vwap = None
         try:
             seg = 'BSE_FNO' if UNDERLYING_EXCHANGE.get(underlying) == 'BSE' else 'NSE_FNO'
             today = datetime.now().strftime('%Y-%m-%d')
             tomorrow = (datetime.now() + timedelta(days=1)).strftime('%Y-%m-%d')
-            now = datetime.now(tz=IST)
 
             per_leg = []
             for leg in legs:
                 strike = ce_strike if leg == 'CE' else pe_strike
+                if strike is None:
+                    return None
                 row = self.market.leg(underlying, expiry, strike, leg)
                 if not row:
-                    per_leg = []
-                    break
+                    return None
                 df = self.helper.get_intraday_minute_data(
                     security_id=str(int(row['SECURITY_ID'])), exchange_segment=seg,
                     instrument_type='OPTIDX', interval='1', from_date=today, to_date=tomorrow)
                 if df is None or df.empty:
-                    per_leg = []
-                    break
+                    return None
                 per_leg.append(df)
 
-            if per_leg and len(per_leg) == len(legs):
-                # Drop the still-forming bar: its partial volume would drag the
-                # running average away from every closed-bar platform's number.
-                n = min(len(df) for df in per_leg) - 1
-                if n > 0:
-                    num_ = den = 0.0
-                    for i in range(n):
-                        typical = vol = 0.0
-                        ok = True
-                        for df in per_leg:
-                            r = df.iloc[i]
-                            try:
-                                hi, lo, cl = float(r['high']), float(r['low']), float(r['close'])
-                                v = float(r['volume'])
-                            except (KeyError, TypeError, ValueError):
-                                ok = False
-                                break
-                            typical += (hi + lo + cl) / 3.0
-                            vol += v
-                        if not ok:
-                            num_ = den = 0.0
-                            break
-                        vol /= len(per_leg)
-                        num_ += typical * vol
-                        den += vol
-                    if den > 0:
-                        vwap = num_ / den
-            _ = now
+            if len(per_leg) != len(legs):
+                return None
+            # Drop the still-forming bar: its partial volume would drag the
+            # running average away from every closed-bar platform's number.
+            n = min(len(df) for df in per_leg) - 1
+            if n <= 0:
+                return None
+            num_ = den = 0.0
+            for i in range(n):
+                typical = vol = 0.0
+                for df in per_leg:
+                    r = df.iloc[i]
+                    try:
+                        hi, lo, cl = float(r['high']), float(r['low']), float(r['close'])
+                        v = float(r['volume'])
+                    except (KeyError, TypeError, ValueError):
+                        return None
+                    typical += (hi + lo + cl) / 3.0
+                    vol += v
+                vol /= len(per_leg)
+                num_ += typical * vol
+                den += vol
+            return num_ / den if den > 0 else None
         except Exception as e:
-            logger.warning(f'VWAP failed for {key}: {e}')
-            vwap = None
+            logger.warning(f'VWAP failed for {underlying} {ce_strike}/{pe_strike}: {e}')
+            return None
 
-        self._vwap_cache[key] = (minute, vwap)
-        return vwap
+    # -- snapshot readers (tick thread) ------------------------------
+
+    def _fresh(self, entry):
+        """A published snapshot value, or None once it is too old to act on.
+
+        A refresher that has died must make its rules go INERT rather than keep
+        firing them off a number from several minutes ago. A stale VWAP closing
+        a live position is exactly the failure this whole design avoids.
+        """
+        if not entry:
+            return None
+        stamped, value = entry
+        if time.time() - stamped > SNAPSHOT_STALE_SECONDS:
+            return None
+        return value
+
+    def chain_for(self, underlying, expiry):
+        return self._fresh(self._chain_snapshot.get((underlying, expiry))) or {}
+
+    def vwap_for(self, underlying, expiry, ce_strike, pe_strike, legs):
+        return self._fresh(self._vwap_snapshot.get(
+            (underlying, expiry, ce_strike, pe_strike, tuple(legs))))
 
     # -- trading -----------------------------------------------------
 
@@ -1149,16 +1356,11 @@ class FocusRowsWorker:
             if fut > 0:
                 atm_base[u] = fut
 
-        # Same budget reasoning as the leg quotes below: only PREMIUM-mode rows
-        # that are actually armed or open need a chain to resolve against.
-        needs_chain = {
-            (r['underlying'], r.get('expiry') or self.market.nearest_expiry(r['underlying']))
-            for r in rows
-            if str(r.get('strikeMode') or 'ATM') == 'PREMIUM'
-            and r.get('underlying') in UNDERLYINGS
-            and (r['id'] in self.fills or str(r.get('status')) == 'armed')
-        }
-        chains = {k: self.chain(*k) for k in needs_chain}
+        # No chain fetch here. The refresher thread publishes it (built from
+        # the subscribed ladder's live ticks, so it is current rather than up
+        # to a minute old); the tick only reads, and an absent snapshot simply
+        # leaves strikes unresolved, which evaluate_entry already refuses to
+        # trade on.
 
         for row in rows:
             u = row.get('underlying')
@@ -1170,7 +1372,7 @@ class FocusRowsWorker:
             expiry = row.get('expiry') or self.market.nearest_expiry(u)
             atm = atm_strike(atm_base.get(u, spot), step)
             ce_strike, pe_strike = resolve_row_strikes(
-                row, atm, step, chains.get((u, expiry)))
+                row, atm, step, self.chain_for(u, expiry))
 
             fill = self.fills.get(row['id'])
             if row.get('orphan'):
@@ -1223,7 +1425,7 @@ class FocusRowsWorker:
                 ce_s = (fill.get('CE') or {}).get('strike', ce_strike)
                 pe_s = (fill.get('PE') or {}).get('strike', pe_strike)
                 if ce_s is not None and pe_s is not None:
-                    vwap = self.side_vwap(u, expiry, ce_s, pe_s, legs)
+                    vwap = self.vwap_for(u, expiry, ce_s, pe_s, legs)
 
             snapshot.append({
                 'id': row['id'], 'underlying': u, 'status': row.get('status'),
@@ -1326,6 +1528,7 @@ class FocusRowsWorker:
                         os.remove(STOP_TRIGGER)
                     except OSError:
                         pass
+                    self._stopping = True
                     self.log('info', 'Stop trigger detected — exiting. Open positions left as they are.')
                     break
                 try:
@@ -1336,6 +1539,7 @@ class FocusRowsWorker:
         except KeyboardInterrupt:
             self.log('info', 'Interrupted — exiting. Open positions left as they are.')
         finally:
+            self._stopping = True
             st = read_json(STATUS_FILE) or {}
             st['status'] = 'STOPPED'
             st['lastUpdate'] = datetime.now().isoformat()
