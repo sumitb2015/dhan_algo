@@ -105,6 +105,15 @@ class ChildBroker:
     name = 'child'
     supports_exact_margin = False
 
+    # How long an unresolved placement stays watchable before it is given up on.
+    CONFIRM_TIMEOUT_SEC = 90.0
+    # Hard ceiling on the parked list. The copy-trade bridge drains it every 2s,
+    # but ChildBroker is also used by long-lived processes that never call
+    # confirm_placements at all (focus_tool_broker caches one child per
+    # underlying for the life of the worker). Self-eviction keeps it bounded
+    # there instead of relying on a drainer that may not exist.
+    PENDING_CONFIRM_MAX = 200
+
     def __init__(self, log=print):
         self.log = log
         self.freeze_qty = DEFAULT_FREEZE_QTY
@@ -124,6 +133,14 @@ class ChildBroker:
         # delta makes a just-opened position look flat, so the exit that follows
         # is classified as an entry and can be margin-blocked.
         self._positions_lock = threading.Lock()
+
+        # Orders the broker accepted synchronously but has not yet ruled on.
+        # Kotak's RMS rejects for margin AFTER returning stat: Ok, and a
+        # rejection nobody detects is a silent parent/child desync that also
+        # skips the margin top-up hedge (which only ever fires off a detected
+        # rejection). Appended by the placing thread, drained by the watchdog.
+        self.pending_confirm = []
+        self._pending_lock = threading.Lock()
         self.margin = {
             'available': None,      # total capacity; None = unknown -> fail open
             'cash': None,           # what option premium can actually be paid from
@@ -442,11 +459,17 @@ class ChildBroker:
 
     def place_child_order(self, symbol: str, side: str, qty: int, product=None,
                           margin_check: bool = False, exact_margin: bool = False,
-                          detail_out: dict = None, price=None):
+                          detail_out: dict = None, price=None, context: dict = None):
         """Place a MARKET order sliced to the freeze quantity.
 
         With `margin_check=True`, an unaffordable order is refused before
         anything is placed and the error is the MARGIN_BLOCKED sentinel.
+
+        `context` is the parent leg this order replicates (order_no, strike,
+        expiry, opt_type, …). It is attached to any pending confirmation so that
+        an asynchronous rejection can be re-queued — ensure_hedge_capacity
+        refuses to pick a hedge strike without strike/expiry/opt_type, so a
+        rejection without it could never trigger the margin top-up hedge.
 
         Returns (placed_qty, order_ids, error) — never raises. On a mid-slice
         failure, placed_qty reflects what actually went through, so the caller
@@ -480,9 +503,20 @@ class ChildBroker:
             chunk = min(remaining, self.freeze_qty)
             try:
                 order_id = self._place_one(symbol, side, chunk, product)
+            except PartialFill as e:
+                # The broker cancelled the REMAINDER of a slice that already
+                # partly traded. Count what filled so the caller queues only the
+                # rest — re-placing the whole slice would double the filled part.
+                if e.order_id:
+                    order_ids.append(e.order_id)
+                    self._attach_confirm_context(e.order_id, context)
+                placed += e.filled
+                self.note_position_delta(symbol, side, e.filled)
+                return placed, order_ids, str(e)
             except Exception as e:
                 return placed, order_ids, str(e)
             order_ids.append(order_id)
+            self._attach_confirm_context(order_id, context)
             placed += chunk
             remaining -= chunk
             # Keep the cached position map current between snapshot refreshes so
@@ -490,6 +524,44 @@ class ChildBroker:
             # reducing (and therefore never gated).
             self.note_position_delta(symbol, side, chunk)
         return placed, order_ids, None
+
+    def _park_pending(self, entry: dict):
+        """Register an unresolved placement, evicting anything already stale.
+
+        Pruning on append (rather than only on drain) is what makes this safe in
+        a process that never drains — see PENDING_CONFIRM_MAX.
+        """
+        cutoff = time.time() - self.CONFIRM_TIMEOUT_SEC
+        with self._pending_lock:
+            self.pending_confirm = [e for e in self.pending_confirm if e['ts'] >= cutoff]
+            if len(self.pending_confirm) >= self.PENDING_CONFIRM_MAX:
+                # Oldest first: a newer order is the one still worth confirming.
+                del self.pending_confirm[:len(self.pending_confirm)
+                                         - self.PENDING_CONFIRM_MAX + 1]
+            self.pending_confirm.append(entry)
+
+    def _attach_confirm_context(self, order_id, context):
+        """Label a pending confirmation with the parent leg it replicates."""
+        if context is None or order_id is None:
+            return
+        with self._pending_lock:
+            for entry in self.pending_confirm:
+                if entry['order_id'] == order_id and entry.get('context') is None:
+                    entry['context'] = context
+
+    def confirm_placements(self) -> list:
+        """Resolve orders the broker accepted but had not ruled on yet.
+
+        Returns the ones it has since REJECTED, as
+        [{'order_id', 'symbol', 'side', 'qty', 'product', 'reason', 'context'}].
+        Only a positive rejection is ever reported: re-placing an order that
+        actually went through would double a live position, so an unrecognised
+        status stays pending and a stale entry is dropped rather than guessed at.
+
+        Blocking — watchdog thread only. Brokers that rule synchronously (all
+        but Kotak today) never register anything, so this is a no-op for them.
+        """
+        return []
 
     def find_recent_matching_order(self, symbol: str, side: str, qty: int, since_ts):
         """Best-effort dedup check before RE-trying a chunk whose previous
@@ -729,6 +801,14 @@ class KotakChild(ChildBroker):
 
     RELOGIN_MAX_ATTEMPTS = 2
 
+    # Synchronous confirmation window after place_order. Short on purpose: this
+    # can run on the WS callback thread. ~1.2s covers the common RMS latency;
+    # anything slower is caught asynchronously by confirm_placements().
+    CONFIRM_POLL_ATTEMPTS = 3
+    CONFIRM_POLL_DELAY_SEC = 0.4
+    # Hard wall-clock ceiling on that window, so a hung order_report cannot
+    # multiply the SDK's 10s read timeout by the attempt count.
+    CONFIRM_POLL_BUDGET_SEC = 1.5
     def __init__(self, client, underlying='NIFTY', log=print):
         super().__init__(log=log)
         self.client = client
@@ -969,24 +1049,35 @@ class KotakChild(ChildBroker):
 
         order_id = order_id_of(res)
         if isinstance(res, dict) and res.get('stat') == 'Ok' and order_id:
-            # Kotak Neo API accepts orders with stat: Ok synchronously, but RMS can
-            # reject them in the order book a moment later due to margin shortfall.
-            # Brief pause to verify the status in the order book.
-            time.sleep(0.4)
-            from lib.kotak.responses import unwrap_list
-            try:
-                rows, _ = unwrap_list(self.client.order_report())
-                for o in rows or []:
-                    if str(o.get('nOrdNo') or '').strip() == str(order_id).strip():
-                        st = str(o.get('ordSt', '') or '').upper()
-                        if st in ('REJECTED', 'CANCELLED'):
-                            reason = str(o.get('rejRsn') or o.get('ordRejRsn') or o.get('errMsg') or o.get('emsg') or f'order status {st}')
-                            raise RuntimeError(f'Kotak RMS rejected order {order_id} ({st}): {reason}')
-                        break
-            except RuntimeError:
-                raise
-            except Exception:
-                pass  # network error reading report — return order_id and let watchdog handle it
+            # `stat: Ok` means ACCEPTED FOR PROCESSING, not accepted. Kotak's RMS
+            # rules on margin afterwards and flips the order to REJECTED in the
+            # order book a beat later. A rejection the bridge does not see is a
+            # silent desync AND a skipped margin top-up hedge, because the hedge
+            # is only ever reached from a detected rejection.
+            #
+            # So: poll the order book until the status is conclusive. Anything
+            # still unresolved when the window closes is parked in
+            # pending_confirm for the watchdog thread rather than assumed good —
+            # returning the id here is fail-open, and the parking is what stops
+            # fail-open from meaning "forgotten".
+            verdict, reason, filled = self._poll_order_status(order_id)
+            if verdict == 'rejected' and filled > 0:
+                # Cancelled after a partial fill. Reported as a partial rather
+                # than a rejection so the caller queues only the untraded
+                # remainder; a plain rejection would re-place what already
+                # traded.
+                raise PartialFill(
+                    f'Kotak cancelled order {order_id} after filling {filled}/'
+                    f'{int(qty)}: {reason}', order_id, min(filled, int(qty)))
+            if verdict == 'rejected':
+                raise RuntimeError(f'Kotak RMS rejected order {order_id}: {reason}')
+            if verdict != 'accepted':
+                self._park_pending({
+                    'order_id': order_id, 'symbol': symbol,
+                    'side': str(side).upper(), 'qty': int(qty),
+                    'product': str(product).upper(), 'ts': time.time(),
+                    'context': None,
+                })
             return order_id
 
         err = error_message(res) or str(res)
@@ -998,6 +1089,118 @@ class KotakChild(ChildBroker):
             raise RuntimeError(f'Kotak rejected the MARKET order (no LTP on {symbol}) — '
                                f'illiquid strike, place manually: {err}')
         raise RuntimeError(err)
+
+    def _fetch_order_rows(self):
+        """(rows, error) for the whole order book — ONE HTTP call.
+
+        Split out so a pass that has to resolve several orders fetches the book
+        once instead of once per order: this runs on the watchdog thread, which
+        also owns the retry drain, and the SDK read timeout is 10s.
+        """
+        from lib.kotak.responses import unwrap_list
+        try:
+            return unwrap_list(self.client.order_report())
+        except Exception as e:
+            return None, f'order book unreadable: {e}'
+
+    @staticmethod
+    def _status_from_rows(rows, err, order_id):
+        """(verdict, reason, filled_qty) for one order against a fetched book.
+
+        verdict is 'rejected' | 'accepted' | 'pending' | 'unknown' |
+        'unavailable'. 'unavailable' means the book could not be read at all —
+        never confused with "the order is not in it", which is itself
+        informative (Kotak has not published the row yet).
+        """
+        from lib.kotak.responses import (
+            classify_order_status, filled_qty_of, find_order_row, order_status_of,
+            rejection_reason,
+        )
+        if err:
+            return 'unavailable', f'order book unreadable: {err}', 0
+        row = find_order_row(rows, order_id)
+        if row is None:
+            # Confirmed-empty or simply not published yet — both mean "keep
+            # looking", never "accepted".
+            return 'pending', 'not in the order book yet', 0
+        verdict = classify_order_status(order_status_of(row))
+        filled = filled_qty_of(row)
+        if verdict == 'rejected':
+            return verdict, rejection_reason(row), filled
+        return verdict, order_status_of(row), filled
+
+    def _order_status(self, order_id):
+        """(verdict, reason, filled_qty) for one order, fetching the book."""
+        rows, err = self._fetch_order_rows()
+        return self._status_from_rows(rows, err, order_id)
+
+    def _poll_order_status(self, order_id):
+        """Wait out the RMS ruling, bounded. Returns (verdict, reason, filled).
+
+        Runs on whichever thread placed the order — including the order-update
+        WS callback thread, where a long stall drops the connection. So the loop
+        is bounded by WALL CLOCK, not just by attempt count: with a 10s SDK read
+        timeout, three attempts could otherwise block ~31s. The budget is
+        checked before starting another request, so the worst case is one hung
+        read plus the budget rather than a multiple of the timeout.
+
+        A rejection slower than that is caught by confirm_placements() on the
+        watchdog thread instead; this only shortens the desync, it is not the
+        safety net.
+        """
+        deadline = time.time() + self.CONFIRM_POLL_BUDGET_SEC
+        verdict, reason, filled = 'pending', 'not polled', 0
+        for attempt in range(self.CONFIRM_POLL_ATTEMPTS):
+            if attempt:
+                remaining = deadline - time.time()
+                if remaining <= 0:
+                    break
+                time.sleep(min(self.CONFIRM_POLL_DELAY_SEC, remaining))
+            verdict, reason, filled = self._order_status(order_id)
+            if verdict in ('rejected', 'accepted'):
+                return verdict, reason, filled
+        return verdict, reason, filled
+
+    def confirm_placements(self) -> list:
+        """See ChildBroker.confirm_placements. Watchdog thread only."""
+        with self._pending_lock:
+            pending = list(self.pending_confirm)
+        if not pending:
+            return []
+
+        # ONE fetch for the whole pass. Per-entry fetches meant N full
+        # order-book round-trips every 2s watchdog cycle, on the same thread
+        # that owns the retry drain — so several parked orders could stall the
+        # very drain that buys the margin top-up hedge.
+        rows, err = self._fetch_order_rows()
+
+        rejected, resolved = [], []
+        now = time.time()
+        for entry in pending:
+            verdict, reason, filled = self._status_from_rows(rows, err, entry['order_id'])
+            if verdict == 'rejected':
+                resolved.append(entry)
+                rejected.append({**entry, 'reason': reason,
+                                 'filled_qty': min(int(filled), int(entry['qty']))})
+                continue
+            if verdict == 'accepted':
+                resolved.append(entry)
+                continue
+            if now - entry['ts'] >= self.CONFIRM_TIMEOUT_SEC:
+                # Stop watching, but never guess. Re-placing on a hunch doubles
+                # a live position; the safety watchdog and copy_trade_reconcile
+                # are the backstop for a genuinely lost order.
+                resolved.append(entry)
+                self.log(f'[{self.name}] Could not confirm order {entry["order_id"]} '
+                         f'({entry["side"]} {entry["qty"]} {entry["symbol"]}) within '
+                         f'{self.CONFIRM_TIMEOUT_SEC:.0f}s — last seen "{verdict}: {reason}". '
+                         f'NOT re-placed; verify manually.')
+        if resolved:
+            ids = {e['order_id'] for e in resolved}
+            with self._pending_lock:
+                self.pending_confirm = [e for e in self.pending_confirm
+                                        if e['order_id'] not in ids]
+        return rejected
 
     def find_recent_matching_order(self, symbol, side, qty, since_ts):
         from lib.kotak.responses import unwrap_list
@@ -1036,6 +1239,20 @@ class KotakChild(ChildBroker):
         # it isn't.)
         return self._place_one(row['symbol'], side, qty, row.get('product', 'MIS'),
                                segment=row.get('exchange') or self._segment)
+
+
+class PartialFill(Exception):
+    """A slice that partly traded before the broker cancelled the remainder.
+
+    Distinct from a rejection: `filled` DID reach the market, so the caller must
+    count it as placed and queue only the difference. Re-placing the whole slice
+    would double the filled part.
+    """
+
+    def __init__(self, message, order_id=None, filled=0):
+        super().__init__(message)
+        self.order_id = order_id
+        self.filled = int(filled)
 
 
 class UnconfirmedOrder(Exception):

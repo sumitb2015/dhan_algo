@@ -104,3 +104,100 @@ def order_id_of(res) -> Optional[str]:
     data = res.get('data') if isinstance(res.get('data'), dict) else {}
     order_id = res.get('nOrdNo') or data.get('nOrdNo')
     return str(order_id) if order_id else None
+
+
+# ── order status ─────────────────────────────────────────────────────
+#
+# Kotak accepts an order synchronously (`stat: Ok` + `nOrdNo`) and lets RMS
+# reject it in the order book a second or three later. The bridge's margin
+# top-up hedge is only ever reached from a DETECTED rejection, so misreading a
+# not-yet-resolved order as accepted silently desyncs the child and skips the
+# hedge — which is exactly what happened on 2026-08-21.
+#
+# Statuses are therefore classified into three buckets and an explicit
+# "unknown", never a boolean. Anything not positively rejected AND not
+# positively accepted must stay `pending` so the caller keeps looking rather
+# than concluding either way.
+_REJECTED_STATUSES = {
+    'REJECTED', 'REJECT', 'REJ', 'CANCELLED', 'CANCELED', 'CAN',
+}
+_ACCEPTED_STATUSES = {
+    'OPEN', 'COMPLETE', 'COMPLETED', 'TRADED', 'EXECUTED', 'FILLED',
+    'PARTIALLY FILLED', 'PART TRADED', 'MODIFIED', 'TRIGGER PENDING',
+    'AFTER MARKET ORDER REQ RECEIVED',
+}
+_PENDING_STATUSES = {
+    '', 'PUT ORDER REQ RECEIVED', 'VALIDATION PENDING', 'OPEN PENDING',
+    'MODIFY PENDING', 'CANCEL PENDING', 'MODIFY VALIDATION PENDING',
+    'PENDING',
+}
+
+
+def order_status_of(row) -> str:
+    """The normalised (upper, single-spaced) order status of an order-book row."""
+    if not isinstance(row, dict):
+        return ''
+    raw = row.get('ordSt') or row.get('ordStatus') or row.get('status') or ''
+    return ' '.join(str(raw).upper().split())
+
+
+def classify_order_status(status: str) -> str:
+    """'rejected' | 'accepted' | 'pending' | 'unknown' for a normalised status.
+
+    `unknown` is deliberately distinct from `pending`: an unrecognised status
+    must never be re-placed (that would double a live position) but also must
+    never be silently treated as accepted.
+    """
+    st = ' '.join(str(status or '').upper().split())
+    if st in _REJECTED_STATUSES:
+        return 'rejected'
+    if st in _ACCEPTED_STATUSES:
+        return 'accepted'
+    if st in _PENDING_STATUSES:
+        return 'pending'
+    return 'unknown'
+
+
+def rejection_reason(row) -> str:
+    """The broker's stated reason for rejecting an order-book row."""
+    if not isinstance(row, dict):
+        return ''
+    for key in ('rejRsn', 'ordRejRsn', 'rejReason', 'errMsg', 'emsg', 'rejectionReason'):
+        val = row.get(key)
+        if val:
+            return str(val)
+    return f'order status {order_status_of(row)}'
+
+
+def filled_qty_of(row) -> int:
+    """How much of an order-book row actually traded.
+
+    Matters for CANCELLED rows: the exchange can cancel the remainder of a
+    MARKET order that already partly filled, and treating that as a whole-order
+    rejection would re-place the filled part on top of itself.
+    """
+    if not isinstance(row, dict):
+        return 0
+    for key in ('fldQty', 'filledQty', 'filled_qty', 'tradedQuantity'):
+        val = row.get(key)
+        if val in (None, ''):
+            continue
+        try:
+            return int(float(val))
+        except (TypeError, ValueError):
+            continue
+    return 0
+
+
+def find_order_row(rows, order_id):
+    """The order-book row for `order_id`, or None. Ids are compared as strings:
+    Kotak returns them as 19-digit numbers that lose precision as floats."""
+    target = str(order_id or '').strip()
+    if not target:
+        return None
+    for row in rows or []:
+        if not isinstance(row, dict):
+            continue
+        if str(row.get('nOrdNo') or row.get('ordNo') or '').strip() == target:
+            return row
+    return None

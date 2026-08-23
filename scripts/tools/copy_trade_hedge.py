@@ -172,6 +172,39 @@ def hedge_symbols_today(broker: str = None) -> set:
             if h.get('symbol') and (broker is None or entry_broker(h) == str(broker).lower())}
 
 
+def void_hedge_entry(broker: str, symbol: str, order_id=None) -> bool:
+    """Mark a hedge the broker rejected as never held.
+
+    A hedge accepted synchronously and rejected by RMS afterwards stays in the
+    state file as a live long. That phantom is netted out of the safety exit by
+    hedge_qty_today(), so a genuinely orphaned short at the same strike survives
+    the parent going flat — and it also eats the daily lot cap. Zeroing the
+    quantities (and stamping closed_at, the existing "not held any more" marker)
+    drops it from both without losing the audit trail.
+    """
+    state = load_hedge_state()
+    target = str(order_id or '').strip()
+    changed = False
+    for h in state.get('hedges', []):
+        if entry_broker(h) != str(broker).lower() or h.get('symbol') != symbol:
+            continue
+        if target and target not in [str(o) for o in h.get('order_ids') or []]:
+            continue
+        if h.get('closed_at'):
+            continue
+        h['result'] = 'rejected'
+        h['placed_qty'] = 0
+        h['qty'] = 0
+        h['lots'] = 0
+        h['closed_at'] = datetime.now().isoformat()
+        h['close_reason'] = 'broker rejected the hedge after accepting it'
+        changed = True
+        break
+    if changed:
+        save_hedge_state(state)
+    return changed
+
+
 def child_hedge_lots_today(broker: str) -> int:
     """Hedge lots bought for `broker` today — the daily cap's running total.
 

@@ -675,6 +675,12 @@ def watchdog_loop(helper, brokers: dict, stop_event: threading.Event, state: dic
                 flush_retry_queue(retry_queue, state, 'Market closed')
             state['market_was_open'] = market_open
 
+            # Resolve rejections the broker ruled on after accepting. A leg
+            # re-queued here is due FAST_RETRY_DELAY_SEC from now, so the drain
+            # that hedges and re-places it is the next cycle, not this one.
+            confirm_child_placements(brokers, retry_queue, state, armed,
+                                     child_hedge_qty=child_hedge_qty)
+
             if armed and market_open:
                 drain_retry_queue(helper, brokers, retry_queue, state, replication_scopes,
                                   margin_check=bool(cfg.get('margin_check', True)),
@@ -979,6 +985,129 @@ def ensure_hedge_capacity(helper, broker, item: dict, cfg: dict, child_hedge_qty
     return int(detail['lots_bought']), detail
 
 
+def confirm_child_placements(brokers: dict, retry_queue: list, state: dict,
+                             armed: bool, child_hedge_qty: dict = None, append=None):
+    """Turn an asynchronous child rejection back into a hedged retry.
+
+    Kotak accepts an order synchronously and lets RMS reject it for margin a
+    beat later. Before this existed the bridge logged those as `success`: the
+    child never got the position, and — because the margin top-up hedge only
+    ever fires off a DETECTED rejection — no hedge was bought either, so every
+    later leg failed the same way. That is the 2026-08-21 desync.
+
+    Re-queued items carry the parent leg's strike/expiry/opt_type, without which
+    ensure_hedge_capacity refuses to pick a hedge strike, and only the UNTRADED
+    remainder of the slice. No `queued_at` is set: the order was positively
+    rejected, so nothing is live on the broker and there is no lost-response
+    duplicate to guard against.
+
+    Watchdog thread only — confirm_placements() makes a blocking broker call.
+    """
+    append = append or append_log
+    for bname, broker in (brokers or {}).items():
+        try:
+            rejections = broker.confirm_placements()
+        except Exception as e:
+            print(f'[copy_trade_bridge] Placement confirmation failed for {bname}: {e!r}',
+                  flush=True)
+            continue
+        for rej in rejections:
+            ctx = rej.get('context') or {}
+            unfilled = int(rej['qty']) - int(rej.get('filled_qty') or 0)
+
+            # A hedge BUY carries no leg context (it replicates nothing). If the
+            # broker rejected it, the quantity ensure_hedge_capacity optimistically
+            # booked is a PHANTOM long: broker_hedges() would net it out of the
+            # safety exit and leave a real orphaned short open at that strike, and
+            # it would eat the daily lot cap. Unwind both.
+            if not ctx and rej['side'] == 'BUY':
+                holdings = (child_hedge_qty or {}).get(bname) or {}
+                if rej['symbol'] in holdings:
+                    holdings[rej['symbol']] = max(0, holdings[rej['symbol']] - unfilled)
+                    if not holdings[rej['symbol']]:
+                        holdings.pop(rej['symbol'], None)
+                    try:
+                        from scripts.tools.copy_trade_hedge import void_hedge_entry
+                        void_hedge_entry(bname, rej['symbol'], rej['order_id'])
+                    except Exception as e:
+                        print(f'[copy_trade_bridge] WARNING: could not void the rejected '
+                              f'{bname} hedge {rej["symbol"]} in the state file ({e}) — '
+                              f'it may still be counted against the daily cap',
+                              flush=True)
+            entry = {
+                'ts': datetime.now().isoformat(),
+                'order_no': ctx.get('order_no'),
+                'broker': bname,
+                'child_symbol': rej['symbol'],
+                'zerodha_symbol': rej['symbol'],
+                'side': rej['side'], 'child_qty': unfilled,
+                'filled_qty': int(rej.get('filled_qty') or 0),
+                'child_order_id': rej['order_id'],
+                'result': 'child_order_rejected',
+            }
+            state['failed_count'] += 1
+            # The optimistic delta booked at placement covered the whole slice;
+            # only the UNFILLED part never happened. Undoing that keeps the
+            # fast-path gate from reading the next order as an exit and waving it
+            # through ungated; the 5s snapshot refresh would fix it anyway, but
+            # not before the very next fill.
+            if unfilled > 0:
+                try:
+                    broker.note_position_delta(
+                        rej['symbol'], 'BUY' if rej['side'] == 'SELL' else 'SELL', unfilled)
+                except Exception:
+                    pass
+
+            # A re-queued item is placed again, may be rejected again, and would
+            # come back through here. `attempts` therefore RESUMES the leg's
+            # retry budget rather than restarting it — otherwise a persistently
+            # rejected order loops forever, buying a hedge every round until the
+            # daily cap and then re-placing rejections until the close.
+            attempts = int(ctx.get('attempts') or 0) + 1
+            hedgeable = (ctx.get('strike') is not None and ctx.get('expiry')
+                         and ctx.get('opt_type'))
+            # Only the untraded remainder may be re-placed. A MARKET order the
+            # exchange cancelled after a partial fill reports CANCELLED with a
+            # non-zero filled quantity, and re-placing the full slice would
+            # duplicate the part that already reached the market.
+            requeue = (armed and unfilled > 0 and hedgeable
+                       and attempts < RETRY_MAX_ATTEMPTS)
+            entry['attempt'] = attempts
+            if requeue:
+                with _retry_lock:
+                    retry_queue.append({
+                        'order_no': ctx.get('order_no'), 'broker': bname,
+                        'child_symbol': rej['symbol'],
+                        'strike': ctx.get('strike'), 'expiry': ctx.get('expiry'),
+                        'opt_type': ctx.get('opt_type'),
+                        'side': rej['side'], 'qty': unfilled, 'attempts': attempts,
+                        'next_ts': time.time() + FAST_RETRY_DELAY_SEC,
+                        'product': rej.get('product'), 'price': ctx.get('price'),
+                        'product_hints': ctx.get('product_hints', ()),
+                    })
+                entry['queued_for_retry'] = unfilled
+                entry['error'] = (f'{bname} RMS rejected order {rej["order_id"]} after '
+                                  f'accepting it ({rej.get("reason")}) — re-queued; a margin '
+                                  f'rejection now buys a top-up hedge before retrying')
+            else:
+                if not armed:
+                    why = 'disarmed'
+                elif unfilled <= 0:
+                    why = f'the whole slice ({rej.get("filled_qty")}) had already filled'
+                elif not hedgeable:
+                    why = 'leg context unknown'
+                else:
+                    why = f'retry budget exhausted after {attempts} attempts'
+                    entry['result'] = 'retry_exhausted'
+                entry['error'] = (f'{bname} RMS rejected order {rej["order_id"]} after '
+                                  f'accepting it ({rej.get("reason")}) — NOT re-queued '
+                                  f'({why}), parent/child DESYNCED, reconcile manually')
+            append(entry)
+            print(f'[copy_trade_bridge] {bname} RMS rejected {rej["side"]} {unfilled} '
+                  f'of {rej["qty"]} {rej["symbol"]} after accepting it: {rej.get("reason")}'
+                  + (' — re-queued' if requeue else ' — NOT re-queued'), flush=True)
+
+
 def drain_retry_queue(helper, brokers: dict, retry_queue: list, state: dict,
                       replication_scopes: dict = None, margin_check: bool = False,
                       cfg: dict = None, child_hedge_qty: dict = None):
@@ -1091,6 +1220,14 @@ def drain_retry_queue(helper, brokers: dict, retry_queue: list, state: dict,
                           f'{hdetail_pre.get("hedge", {}).get("symbol")} on '
                           f'{bname} for {item["order_no"]} (attempt {item["attempts"]+1})',
                           flush=True)
+                else:
+                    # A hedge that silently declines to fire is indistinguishable
+                    # from one that was never wired up — which is exactly how the
+                    # 2026-08-21 desync stayed invisible. Always record the reason.
+                    entry['hedge'] = hdetail_pre
+                    print(f'[copy_trade_bridge] Proactive margin top-up SKIPPED on '
+                          f'{bname} for {item["order_no"]}: '
+                          f'{hdetail_pre.get("error")}', flush=True)
 
         if dup_order_id is not None:
             placed, order_ids, err, verified_dup = item['qty'], [dup_order_id], None, True
@@ -1103,6 +1240,10 @@ def drain_retry_queue(helper, brokers: dict, retry_queue: list, state: dict,
                 product=item.get('product') or broker.default_product,
                 margin_check=use_margin_check, exact_margin=True,
                 detail_out=blk, price=item.get('price'),
+                context={'order_no': item['order_no'], 'strike': item.get('strike'),
+                         'expiry': item.get('expiry'), 'opt_type': item.get('opt_type'),
+                         'price': item.get('price'), 'attempts': item['attempts'],
+                         'product_hints': item.get('product_hints', ())},
             )
             verified_dup = False
             if margin_check and not use_margin_check:
@@ -1837,6 +1978,12 @@ def main():
                         child_symbol, side, child_qty, product=product,
                         margin_check=bool(cfg.get('margin_check', True)), exact_margin=False,
                         detail_out=blk, price=price,
+                        # Carried so an asynchronous RMS rejection can be
+                        # re-queued WITH a hedgeable leg (ensure_hedge_capacity
+                        # needs strike/expiry/opt_type).
+                        context={'order_no': order_no, 'strike': strike, 'expiry': expiry,
+                                 'opt_type': opt_type, 'price': price,
+                                 'product_hints': product_hints},
                     )
                     placed_so_far = placed
 
