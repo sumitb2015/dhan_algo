@@ -39,8 +39,16 @@ export interface TrendingOiResponse {
   rows: TrendingOiRow[];
   /** The script's own live/historical verdict — authoritative, unlike the presence of `?date=`. */
   is_live: boolean;
+  /** Legs that returned usable OI data vs. dropped (rate limit, missing contract). A nonzero
+   *  legs_failed means total_call_oi/total_put_oi and every diff column below are undercounted,
+   *  not just the free-text coverage_note. */
+  legs_ok: number;
+  legs_failed: number;
   backtrace_status: 'ok' | 'unavailable';
   coverage_note: string;
+  /** Set only when this response is a cached fallback served after a live fetch failed —
+   *  the data is real but may be older than LIVE_CACHE_TTL_MS/HISTORICAL_CACHE_TTL_MS. */
+  stale?: boolean;
   error?: string;
 }
 
@@ -106,7 +114,9 @@ export async function GET(request: NextRequest) {
     console.error('[/api/trending-oi] Error executing fetch script:', message);
 
     if (hit) {
-      return NextResponse.json({ success: true, data: hit.data }, {
+      const ageMs = Date.now() - hit.ts;
+      console.warn(`[/api/trending-oi] Serving stale cache entry (${Math.round(ageMs / 1000)}s old) after fetch failure.`);
+      return NextResponse.json({ success: true, data: { ...hit.data, stale: true } }, {
         headers: { 'Cache-Control': 'no-store' }
       });
     }

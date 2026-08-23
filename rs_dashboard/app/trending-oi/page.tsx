@@ -123,6 +123,8 @@ export default function TrendingOiPage() {
   const backtraceStatus = data?.backtrace_status;
   const coverageNote = data?.coverage_note;
   const noData = backtraceStatus === 'unavailable' && rows.length === 0;
+  const isStale = data?.stale === true;
+  const legsFailed = data?.legs_failed ?? 0;
 
   // The server echoes the band it actually used (including any cap it applied), so the chips
   // and picker stay truthful whether the selection came from the user or the default.
@@ -397,6 +399,23 @@ export default function TrendingOiPage() {
             );
           })}
         </div>
+
+        {isStale && (
+          <div className="flex items-start gap-2 bg-rose-500/10 border border-rose-500/30 rounded-lg px-3 py-2 text-xs text-rose-300">
+            <span className="font-bold">⚠</span>
+            <span>Showing a previous successful fetch — the backend failed on the last refresh attempt. This data is not current.</span>
+          </div>
+        )}
+
+        {legsFailed > 0 && (
+          <div className="flex items-start gap-2 bg-amber-500/10 border border-amber-500/30 rounded-lg px-3 py-2 text-xs text-amber-300">
+            <span className="font-bold">⚠</span>
+            <span>
+              {legsFailed} of {legsFailed + (data?.legs_ok ?? 0)} option legs returned no data this fetch —
+              the OI totals and changes below are undercounted.
+            </span>
+          </div>
+        )}
 
         {strikeSubstitution && (
           <div className="flex items-start gap-2 bg-amber-500/10 border border-amber-500/30 rounded-lg px-3 py-2 text-xs text-amber-300">

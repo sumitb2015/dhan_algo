@@ -444,7 +444,10 @@ def bucket_and_diff(series, interval_minutes, open_dt):
             if running_spot_low is None or spot < running_spot_low:
                 running_spot_low = spot
 
-        sentiment = "Bullish" if (diff_in_oi >= 0 or net_pcr >= 1.0) else "Bearish"
+        # net_pcr is a magnitude ratio (abs of changes after the open row, total-OI ratio
+        # on the open row itself) — not a directional signal, so it must never override the
+        # sign of diff_in_oi. sentiment tracks direction exactly, on purpose.
+        sentiment = "Bullish" if diff_in_oi >= 0 else "Bearish"
 
         rows.append({
             "date": time_ist.strftime("%d-%m-%Y"),
@@ -531,7 +534,8 @@ def main():
             "expiry": expiry, "interval": str(interval_minutes), "spot": spot,
             "selected_strikes": selected or [], "available_strikes": strikes or [],
             "requested_strikes": custom_strikes, "expiries": expiries, "rows": [],
-            "is_live": is_live, "backtrace_status": "unavailable",
+            "is_live": is_live, "legs_ok": 0, "legs_failed": 0,
+            "backtrace_status": "unavailable",
             "coverage_note": note,
         }))
         sys.exit(0)
@@ -674,6 +678,8 @@ def main():
         "expiries": expiries,
         "rows": rows,
         "is_live": is_live,
+        "legs_ok": band_data["legs_ok"],
+        "legs_failed": band_data["legs_failed"],
         "backtrace_status": "ok",
         "coverage_note": (
             f"{'Live' if is_live else 'Historical'} session for {day.isoformat()}, "
