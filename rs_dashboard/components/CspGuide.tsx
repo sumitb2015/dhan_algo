@@ -54,7 +54,7 @@ const CANDIDATES: Step[] = [
   },
   {
     title: 'Near vs Next vs Far month is a real tradeoff, not just more premium',
-    desc: 'A farther expiry pays a bigger absolute premium but ties up capital longer and gives the underlying more calendar time to move — no-hit and touch already price that in, so the same 65% floor is comparably safe at any expiry. Near month decays faster and cycles capital more often; Far month means fewer, larger decisions and more time exposed to news/earnings before you can react.',
+    desc: 'A farther expiry pays a bigger absolute premium but ties up capital longer and gives the underlying more calendar time to move — no-hit and touch already price that in, so the same 65% floor is comparably safe at any expiry. Near month decays faster and cycles capital more often; Far month means fewer, larger decisions and more time exposed to news/earnings before you can react. Note "Near month" means the nearest expiry at least 5 days out, not literally this calendar month — if this month\'s expiry is only a day or two away, Near month correctly rolls to next month\'s instead.',
   },
   {
     title: 'Don’t chase Yield / Ann. across the whole list',

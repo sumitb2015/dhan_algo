@@ -568,7 +568,7 @@ export default function CspScreener() {
             <button
               key={o.value}
               onClick={() => setExpiryOffset(o.value)}
-              title="Which listed expiry to scan — applied after the 5-day-out floor"
+              title="Nearest expiry at least 5 days out — skips one that's about to expire even if it's still this calendar month"
               className={cn(
                 'rounded px-2.5 py-1 font-semibold transition-all',
                 expiryOffset === o.value ? 'bg-amber-500/10 text-amber-400' : 'text-zinc-400 hover:text-zinc-200',
