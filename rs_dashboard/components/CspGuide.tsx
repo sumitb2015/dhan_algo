@@ -14,31 +14,35 @@ interface Step {
 
 const USAGE: Step[] = [
   {
-    title: '1. Run a scan',
+    title: '1. Pick universe and expiry',
+    desc: 'Nifty 50/500 and Near/Next/Far month are next-scan selections — changing either shows "Rescan to apply/load" until you actually rescan; the table on screen stays labelled by what it was last scanned with.',
+  },
+  {
+    title: '2. Run a scan',
     desc: 'Rescan sweeps the F&O universe (~2.5 min for Nifty 50, ~10 min for Nifty 500) and only replaces the table once it finishes — a running scan keeps showing the previous results, not a frozen page.',
   },
   {
-    title: '2. Check the No-hit floor first',
+    title: '3. Check the No-hit floor first',
     desc: 'This is the risk gate, not a display filter — it defaults to 65% so the page opens on the safe side of the curve, but the scan itself still fetches down to 40%. Raise or lower it to the lowest no-hit probability you are actually willing to hold before looking at anything else.',
   },
   {
-    title: '3. Narrow with Min yield / ann. / premium',
+    title: '4. Narrow with Min yield / ann. / premium',
     desc: 'These hide strikes not worth transacting (too little premium to clear brokerage and STT) — they are not risk controls, the No-hit floor is.',
   },
   {
-    title: '4. Collapse duplicates',
+    title: '5. Collapse duplicates',
     desc: 'Tick "Best per symbol" once you are comparing candidates — otherwise the same stock appears once per liquid strike.',
   },
   {
-    title: '5. Sell to trade',
+    title: '6. Sell to trade',
     desc: 'Sell places a REAL market order on Dhan and starts tracking the position. Buy is intentionally disabled — a cash-secured put is sold, not bought.',
   },
   {
-    title: '6. Manage tracked positions',
+    title: '7. Manage tracked positions',
     desc: '"Sync entry spots" refreshes marks for P&L. "Reconcile" replaces tracked quantity/avg price with the broker’s own figures and finds fills that landed without a tracked row. "Shift" rolls to a lower strike as two real market legs.',
   },
   {
-    title: '7. Re-scan before you trade',
+    title: '8. Re-scan before you trade',
     desc: 'Results are a point-in-time snapshot of last-traded prices. When markets are closed the scan can only return the last session’s quotes, however recently you ran it — re-run it once the market you plan to trade in is actually live.',
   },
 ];
@@ -47,6 +51,10 @@ const CANDIDATES: Step[] = [
   {
     title: 'Filter by No-hit / Touch, not Score or Yield',
     desc: 'No-hit and Touch are the only columns that measure risk directly. The 65% default is a starting point, not a rule — raise it further for real capital and confirm it matches your actual risk tolerance before you look at Score or Yield at all.',
+  },
+  {
+    title: 'Near vs Next vs Far month is a real tradeoff, not just more premium',
+    desc: 'A farther expiry pays a bigger absolute premium but ties up capital longer and gives the underlying more calendar time to move — no-hit and touch already price that in, so the same 65% floor is comparably safe at any expiry. Near month decays faster and cycles capital more often; Far month means fewer, larger decisions and more time exposed to news/earnings before you can react.',
   },
   {
     title: 'Don’t chase Yield / Ann. across the whole list',

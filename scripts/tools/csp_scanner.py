@@ -215,28 +215,38 @@ def prob_touch(spot: float, strike: float, years: float, iv: float,
 
 
 # ── Expiry selection ─────────────────────────────────────────────────────────
-def pick_expiry(expiries: list, min_dte: int = MIN_DTE) -> str:
-    """Nearest expiry at least min_dte away — a 1-day-out contract has almost no
-    premium left and would dominate the yield ranking for the wrong reason."""
+def pick_expiry(expiries: list, min_dte: int = MIN_DTE, offset: int = 0) -> str:
+    """The expiry `offset` slots out from the nearest one at least min_dte away
+    — offset 0 (default) is that nearest usable expiry, 1 is the one after it,
+    and so on. A 1-day-out contract has almost no premium left and would
+    dominate the yield ranking for the wrong reason, hence the min_dte floor
+    before offsetting. Clamped to the last available expiry rather than
+    returning nothing when a symbol lists fewer expiries than the offset
+    asks for — most F&O stocks only carry 2-3 months out."""
     today = datetime.now(IST).date()
-    best = None
+    usable = []
     for e in expiries:
         try:
             d = datetime.strptime(str(e)[:10], "%Y-%m-%d").date()
         except ValueError:
             continue
         dte = (d - today).days
-        if dte >= min_dte and (best is None or dte < best[0]):
-            best = (dte, str(e)[:10])
-    return best[1] if best else ''
+        if dte >= min_dte:
+            usable.append((dte, str(e)[:10]))
+    if not usable:
+        return ''
+    usable.sort(key=lambda x: x[0])
+    idx = min(max(offset, 0), len(usable) - 1)
+    return usable[idx][1]
 
 
 # ── Per-symbol scan ──────────────────────────────────────────────────────────
 def scan_symbol(helper: DhanHelper, symbol: str, lot_size: int,
                 target_prob: float, min_oi_lots: float, max_iv: float,
-                lot_by_expiry: dict = None, min_no_hit: float = 40.0) -> tuple:
-    """All sellable OTM put strikes for the symbol's nearest usable expiry,
-    one row each.
+                lot_by_expiry: dict = None, min_no_hit: float = 40.0,
+                expiry_offset: int = 0) -> tuple:
+    """All sellable OTM put strikes for the symbol's selected expiry (see
+    pick_expiry — offset 0 is the nearest usable one), one row each.
 
     Returns (rows, skip_reason). A symbol that yields nothing is not
     self-explanatory — an expiry list or chain that came back empty because the
@@ -245,7 +255,7 @@ def scan_symbol(helper: DhanHelper, symbol: str, lot_size: int,
     expiries = helper.get_expiries(symbol) or []
     if not expiries:
         return [], _api_reason(helper, "no expiries returned")
-    expiry = pick_expiry(expiries)
+    expiry = pick_expiry(expiries, offset=expiry_offset)
     if not expiry:
         return [], f"no expiry at least {MIN_DTE}d out"
 
@@ -407,6 +417,10 @@ def main():
                              "above this is listed (default 40)")
     parser.add_argument('--universe', choices=['nifty50', 'nifty500'], default='nifty500',
                         help="Symbol universe to scan (default nifty500)")
+    parser.add_argument('--expiry-offset', type=int, default=0, dest='expiry_offset',
+                        help="0 = nearest expiry at least min-dte out (default), 1 = the "
+                             "next one after that, 2 = the one after that. Clamped to a "
+                             "symbol's last listed expiry if it has fewer than requested.")
     args = parser.parse_args()
 
     if os.path.exists(STOP_FILE):
@@ -450,7 +464,7 @@ def main():
             try:
                 rows, reason = scan_symbol(helper, symbol, universe[symbol], args.target_prob,
                                            args.min_oi_lots, args.max_iv, lot_by_expiry,
-                                           args.min_no_hit)
+                                           args.min_no_hit, args.expiry_offset)
             except Exception as e:
                 skipped[symbol] = f"exception: {e}"
                 write_status(f"[{done}/{denom}]{label} {symbol} failed: {e}", done, denom)
@@ -507,6 +521,7 @@ def main():
             "targetProb": args.target_prob,
             "minNoHit": args.min_no_hit,
             "minOiLots": args.min_oi_lots,
+            "expiryOffset": args.expiry_offset,
             "symbolsScanned": total,
             "symbolsSkipped": skipped,
             "apiFailures": api_failures,

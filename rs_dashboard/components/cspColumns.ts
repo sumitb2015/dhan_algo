@@ -37,13 +37,13 @@ export const SCANNER_COLUMNS: ColumnDoc[] = [
   },
   {
     term: 'Expiry',
-    tip: 'Nearest expiry at least 5 days out.',
-    desc: 'Expiry of the contract being sold — the nearest one at least 5 days out.',
+    tip: 'Expiry of the contract, per the Near/Next/Far selector.',
+    desc: 'Expiry of the contract being sold — whichever of the symbol’s listed expiries the Near/Next/Far selector picked, always at least 5 days out.',
   },
   {
     term: 'DTE',
     tip: 'Calendar days to expiry.',
-    desc: 'Calendar days to expiry. The scanner picks the nearest expiry at least 5 days out — a 1-day contract has almost no premium left and would distort the yield ranking.',
+    desc: 'Calendar days to expiry. Every expiry the scanner can select is at least 5 days out — a 1-day contract has almost no premium left and would distort the yield ranking.',
   },
   {
     term: '1D',

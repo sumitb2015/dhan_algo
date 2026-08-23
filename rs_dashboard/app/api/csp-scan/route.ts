@@ -37,7 +37,7 @@ export async function GET() {
   const status = readJson<ScanStatus>(STATUS_FILE);
   const results = readJson<{
     scannedAt: string; universe?: 'nifty50' | 'nifty500'; targetProb: number;
-    minNoHit?: number; minOiLots?: number;
+    minNoHit?: number; minOiLots?: number; expiryOffset?: number;
     symbolsScanned?: number; symbolsSkipped?: Record<string, string>;
     apiFailures?: number; rows: unknown[];
   }>(RESULTS_FILE);
@@ -54,6 +54,7 @@ export async function GET() {
     targetProb: results?.targetProb ?? null,
     minNoHit: results?.minNoHit ?? null,
     minOiLots: results?.minOiLots ?? null,
+    expiryOffset: results?.expiryOffset ?? 0,
     symbolsScanned: results?.symbolsScanned ?? null,
     // Symbols the scan produced nothing for, with the reason. A throttled chain
     // call and a name with no liquid puts are the same empty result otherwise.
@@ -77,6 +78,7 @@ export async function POST(req: NextRequest) {
   const targetProb = Number(body?.targetProb);
   const limit = Number(body?.limit);
   const minNoHit = Number(body?.minNoHit);
+  const expiryOffset = Number(body?.expiryOffset);
   const universe = body?.universe === 'nifty50' ? 'nifty50' : 'nifty500';
 
   const args = [SCRIPT, '--universe', universe];
@@ -85,6 +87,9 @@ export async function POST(req: NextRequest) {
   }
   if (Number.isFinite(minNoHit) && minNoHit >= 0 && minNoHit <= 100) {
     args.push('--min-no-hit', String(minNoHit));
+  }
+  if (Number.isFinite(expiryOffset) && expiryOffset >= 0 && expiryOffset <= 5) {
+    args.push('--expiry-offset', String(Math.floor(expiryOffset)));
   }
   if (Number.isFinite(limit) && limit > 0) {
     args.push('--limit', String(Math.floor(limit)));

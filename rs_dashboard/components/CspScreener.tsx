@@ -22,6 +22,15 @@ const UNIVERSES = [
 ] as const;
 type Universe = typeof UNIVERSES[number]['value'];
 
+// Offset into each symbol's own expiry list, applied after the 5-day-out
+// floor — most F&O stocks only carry 2-3 months, so anything past "Far" has
+// nothing left to clamp to on most names.
+const EXPIRY_OFFSETS = [
+  { value: 0, label: 'Near month' },
+  { value: 1, label: 'Next month' },
+  { value: 2, label: 'Far month' },
+] as const;
+
 interface ScanRow {
   symbol: string;
   score: number;
@@ -164,6 +173,10 @@ export default function CspScreener() {
   const [universe, setUniverse] = useState<Universe>('nifty500');
   const [resultsUniverse, setResultsUniverse] = useState<Universe>('nifty500');
   const hasInitializedUniverseRef = useRef(false);
+  // Same next-scan-vs-currently-loaded split as universe/resultsUniverse above.
+  // 0 = nearest expiry at least 5 days out, 1 = the one after that, etc.
+  const [expiryOffset, setExpiryOffset] = useState(0);
+  const [resultsExpiryOffset, setResultsExpiryOffset] = useState(0);
   const [symbolsScanned, setSymbolsScanned] = useState<number | null>(null);
   const [scanSkipped, setScanSkipped] = useState<Record<string, string>>({});
   const [apiFailures, setApiFailures] = useState(0);
@@ -214,12 +227,15 @@ export default function CspScreener() {
         setScannedAt(j.scannedAt ?? null);
         const resultsUni: Universe = j.universe === 'nifty50' ? 'nifty50' : 'nifty500';
         setResultsUniverse(resultsUni);
-        // Seed the toggle from the last completed scan only once, so a page
-        // reload reflects it — but don't let later polls stomp a user's
-        // in-progress toggle click before they've rescanned.
+        const resultsOffset = Number.isFinite(j.expiryOffset) ? Number(j.expiryOffset) : 0;
+        setResultsExpiryOffset(resultsOffset);
+        // Seed the toggles from the last completed scan only once, so a page
+        // reload reflects them — but don't let later polls stomp a user's
+        // in-progress selection before they've rescanned.
         if (!hasInitializedUniverseRef.current) {
           hasInitializedUniverseRef.current = true;
           setUniverse(resultsUni);
+          setExpiryOffset(resultsOffset);
         }
         setSymbolsScanned(j.symbolsScanned ?? null);
         setScanSkipped(j.symbolsSkipped ?? {});
@@ -291,12 +307,12 @@ export default function CspScreener() {
     const res = await fetch('/api/csp-scan', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ universe }),
+      body: JSON.stringify({ universe, expiryOffset }),
     });
     const j = await res.json();
     if (j.success) setScanRunning(true);
     else setError(j.error ?? 'Failed to start scan');
-  }, [universe]);
+  }, [universe, expiryOffset]);
 
   const stopScan = useCallback(async () => {
     await fetch('/api/csp-scan', { method: 'DELETE' }).catch(() => {});
@@ -545,6 +561,28 @@ export default function CspScreener() {
             </button>
           ))}
         </div>
+        {/* Selects the expiry for the *next* Rescan — same next-scan-vs-loaded
+            split as the universe toggle above. */}
+        <div className="flex items-center gap-0.5 rounded-lg border border-zinc-800 bg-zinc-900 p-0.5 text-[11px]">
+          {EXPIRY_OFFSETS.map((o) => (
+            <button
+              key={o.value}
+              onClick={() => setExpiryOffset(o.value)}
+              title="Which listed expiry to scan — applied after the 5-day-out floor"
+              className={cn(
+                'rounded px-2.5 py-1 font-semibold transition-all',
+                expiryOffset === o.value ? 'bg-amber-500/10 text-amber-400' : 'text-zinc-400 hover:text-zinc-200',
+              )}
+            >
+              {o.label}
+            </button>
+          ))}
+        </div>
+        {expiryOffset !== resultsExpiryOffset && (
+          <span className="rounded-sm border border-amber-500/30 bg-amber-500/10 px-1.5 py-px font-mono text-[10px] font-bold text-amber-400">
+            Rescan to apply
+          </span>
+        )}
         <div className="ml-auto flex items-center gap-2">
           <span className="hidden rounded-sm border border-zinc-800 bg-zinc-900 px-2 py-0.5 font-mono text-[10px] font-bold uppercase tracking-wide text-zinc-400 md:inline">
             Broker: {BROKER}
@@ -600,6 +638,7 @@ export default function CspScreener() {
             <span className="ml-2 text-[11px] text-zinc-500">
               {`${distinctSymbols} symbols${symbolsScanned ? ` of ${symbolsScanned} scanned` : ''} · `}
               {resultsUniverse === 'nifty50' ? 'Nifty 50' : 'Nifty 500'} F&O
+              {` · ${EXPIRY_OFFSETS.find((o) => o.value === resultsExpiryOffset)?.label ?? 'Near month'}`}
             </span>
             {universe !== resultsUniverse && (
               <span className="rounded-sm border border-amber-500/30 bg-amber-500/10 px-1.5 py-px font-mono text-[10px] font-bold text-amber-400">
