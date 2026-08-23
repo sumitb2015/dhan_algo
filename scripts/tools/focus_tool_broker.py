@@ -253,25 +253,18 @@ class OrderRouter:
                         continue
             return out
 
-        # ONE call, not one per underlying. Child brokers are instantiated per
-        # underlying (Kotak's instrument cache is scoped that way), but both
-        # brokers' positions_rows() returns the WHOLE ACCOUNT — Zerodha's
-        # kite.positions() and Kotak's get_positions(client) alike. Asking each
-        # of three underlyings' children therefore made three identical
-        # account-wide calls on every reconcile. Any one session answers for
-        # all of them, so the first one that initialises is used.
+        out = {}
         for u in (underlyings or ()):
             child = self._child(u)
             if not child:
-                continue
-            try:
-                return {str(r['symbol']): int(r.get('qty') or 0)
-                        for r in child.positions_rows()}
-            except Exception as e:
-                logger.warning(f'{self.broker}: position snapshot failed via {u}: {e}')
                 return None
-        # No session at all — unknown, not empty.
-        return None
+            try:
+                for r in child.positions_rows():
+                    out[str(r['symbol'])] = int(r.get('qty') or 0)
+            except Exception as e:
+                logger.warning(f'{self.broker}: position snapshot failed for {u}: {e}')
+                return None
+        return out
 
     def position_key(self, underlying, expiry, strike, opt_type):
         """The key `net_positions` would file this leg under, or None."""
@@ -291,25 +284,26 @@ class OrderRouter:
         except Exception:
             return None
 
-    def read_fill(self, order_id):
+    def confirm_fill(self, order_id, timeout=20):
         """What an order ACTUALLY did: {'qty': int, 'price': float} or None.
 
-        A broker ACK is not a fill, so the ledger must not record one off the
-        ACK alone — that stores a position that may not exist at a price that
-        was never paid. This does a SINGLE non-blocking read of the order and
-        returns None unless it has actually traded.
+        A broker ACK is not a fill. `place_order` returning an id means Dhan
+        accepted the order, not that the exchange traded it — so sizing a
+        ledger, an exit or an SL x off the ACK records a position that may not
+        exist at a price that was never paid. This waits for a terminal status
+        on the order-update WebSocket (falling back to REST inside
+        wait_for_fill) and then reads the traded quantity and average price off
+        the order itself.
 
-        Never called on the tick thread: the order-update callback calls it the
-        moment the socket reports a terminal status. Returns None for "not
-        confirmed", which callers must treat as unknown, never as filled.
+        Returns None when the order did not fill, or when the fill cannot be
+        read back — callers must treat that as "unknown", never as "filled".
         """
         try:
+            if not self.helper.wait_for_fill(str(order_id), timeout=timeout):
+                return None
             detail = self.helper.get_order_by_id(str(order_id)) or {}
         except Exception as e:
-            logger.warning(f'Fill read failed for order {order_id}: {e}')
-            return None
-        status = str(detail.get('orderStatus') or detail.get('status') or '').upper()
-        if status and status != 'TRADED':
+            logger.warning(f'Fill confirmation failed for order {order_id}: {e}')
             return None
 
         def pick(*names):
@@ -331,12 +325,12 @@ class OrderRouter:
         return {'qty': int(qty), 'price': float(price or 0.0)}
 
     def place(self, underlying, expiry, strike, opt_type, side, qty, product):
-        """(ok, detail, order_id). `qty` is absolute units, never lots.
+        """(ok, detail, fill). `qty` is absolute units, never lots.
 
-        Returns as soon as the broker ACKs. `order_id` is the handle to settle
-        the real fill against later — see confirm_fill, which the caller runs
-        off the tick thread. None when there is no id to track (dry run, or a
-        child broker that reports no usable id).
+        `fill` is {'qty', 'price'} when the trade was confirmed against the
+        broker, and None when it was only ACKed — see confirm_fill. Callers
+        record the confirmed numbers when they have them and fall back to their
+        own estimate (with the leg flagged unconfirmed) when they do not.
         """
         if self.dry_run:
             return True, f'DRY-RUN {side} {qty} {underlying} {expiry} {int(strike)}{opt_type}', None
@@ -355,13 +349,14 @@ class OrderRouter:
                 return False, f'Order failed: {e}', None
             if not order_id:
                 return False, 'Order rejected by broker', None
-            # Deliberately does NOT wait for the fill. This runs on the worker's
-            # single tick thread, and blocking it to confirm one leg stalls the
-            # exit rules for every OTHER row — on a scalper terminal that trade
-            # is never worth making. The caller records the leg as unconfirmed
-            # against this order id, and the order-update callback (or the next
-            # reconcile) settles the real price and quantity out of band.
-            return True, str(order_id), str(order_id)
+            fill = self.confirm_fill(order_id)
+            if fill is None:
+                # Accepted but not confirmed traded. Reported as a success with
+                # no fill: the position may well exist, so refusing to record it
+                # would be worse than recording it as unconfirmed.
+                logger.warning(f'Order {order_id} accepted but its fill could not be confirmed')
+                return True, f'{order_id} (unconfirmed)', None
+            return True, str(order_id), fill
 
         child = self._child(underlying)
         if not child:
@@ -379,14 +374,13 @@ class OrderRouter:
             # No fill confirmation for child brokers: ChildBroker has no
             # equivalent of Dhan's order-update socket, and `placed` is what the
             # broker accepted, not what traded. The caller falls back to an LTP
-            # estimate and flags the leg unconfirmed; reconcile() sizes it
-            # against the position book on a later tick.
+            # estimate and flags the leg unconfirmed, same as an unconfirmed
+            # Dhan fill.
             return True, ','.join(str(o) for o in order_ids), None
         except Exception as e:
             return False, f'{self.broker}: {e}', None
 
-    def close(self, underlying, expiry, strike, opt_type, side, own_qty, product,
-              net_hint=None):
+    def close(self, underlying, expiry, strike, opt_type, side, own_qty, product):
         """Close a leg this worker opened. `side` is the closing direction:
         BUY to cover a short, SELL to exit a long.
 
@@ -403,25 +397,11 @@ class OrderRouter:
             if not row:
                 return False, f'Contract not found for exit: {int(strike)}{opt_type}'
             sec_id = str(int(row['SECURITY_ID']))
-            if net_hint is not None:
-                # The caller already has a fresh position snapshot, so the exit
-                # is sized from it rather than re-fetching the whole book on the
-                # critical path of the close order. Same clamp as
-                # resolve_exit_qty — exit what we opened, never more than the
-                # broker still shows in our direction — just without the extra
-                # ~50-100ms round trip in front of every exit.
-                net = int(net_hint)
-                available = -net if side == 'BUY' else net
-                qty = min(int(own_qty), available) if available > 0 else 0
-                if 0 < qty < int(own_qty):
-                    logger.warning(f'Leg {sec_id}: broker shows only {available} available but this '
-                                   f'worker tracks {own_qty}. Exiting {qty} — the rest went elsewhere.')
-            else:
-                try:
-                    from lib.strategy_risk import resolve_exit_qty
-                    qty, net = resolve_exit_qty(self.helper, sec_id, own_qty, side, log=logger)
-                except Exception as e:
-                    return False, f'Exit sizing failed: {e}'
+            try:
+                from lib.strategy_risk import resolve_exit_qty
+                qty, net = resolve_exit_qty(self.helper, sec_id, own_qty, side, log=logger)
+            except Exception as e:
+                return False, f'Exit sizing failed: {e}'
             if qty <= 0:
                 # Already flat — closed by another instance, manually, or by the
                 # broker. Report success so the row settles rather than retrying

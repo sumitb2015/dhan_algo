@@ -3,17 +3,9 @@
 Focus Tool worker for the LIVE terminal (rs_dashboard/components/FocusTool.tsx).
 
 The browser page can only act while its tab is open. This process runs the same
-rule engine server-side on a 250ms loop, so a scheduled entry, a spot-level stop
-or the 15:17 bell keeps working after the tab is closed, the laptop sleeps or
-the browser crashes.
-
-It is built to be FAST, which mostly means keeping blocking work off the tick:
-spot and every option leg arrive over the market-feed WebSocket rather than
-REST (a REST quote blocks the loop for ~1.1s on DhanHelper's shared limiter,
-which made exit latency scale with the number of open positions), fills settle
-on the order-update callback instead of being waited for, and the position book
-is reconciled on its own 2s cadence rather than in front of every rule. What is
-left on the tick is reading live_data and evaluating pure functions.
+rule engine server-side on a 1-second loop, so a scheduled entry, a spot-level
+stop or the 15:17 bell keeps working after the tab is closed, the laptop sleeps
+or the browser crashes.
 
     venv\\Scripts\\python.exe scripts/tools/focus_tool_rows_worker.py --broker dhan
     venv\\Scripts\\python.exe scripts/tools/focus_tool_rows_worker.py --once --dry-run
@@ -28,7 +20,7 @@ Contract with the dashboard, matching every other long-running process here:
   write  debug/focus_tool_rows_worker_state.json      (this worker's own fill ledger)
   stop   debug/focus_tool_rows_worker_stop.trigger
 
-Four deliberate non-behaviours:
+Three deliberate non-behaviours:
 
   * It never closes anything on shutdown. A stop trigger, a crash and a
     market-closed exit all leave open positions exactly where they are. They are
@@ -45,18 +37,16 @@ Four deliberate non-behaviours:
     from a screen showing "dry run".
 
   * It never treats a broker ACK as a fill. `place_order` returning an id means
-    Dhan accepted the order, not that the exchange traded it. A leg is recorded
-    unconfirmed at an LTP estimate and settled with the ACTUAL traded price and
-    quantity when the order-update socket reports one — off the tick thread, so
-    confirming one leg never stalls another row's exit rules.
+    Dhan accepted the order, not that the exchange traded it. Entries wait for a
+    terminal status and record the ACTUAL traded price and quantity; a leg that
+    cannot be confirmed is recorded as unconfirmed and reconciled against the
+    position book on the next tick rather than trusted.
 
-And one thing it does on its own cadence: it reconciles the ledger against the
-broker's own position book, writing quantities DOWN (never up) when the broker
-shows less than the ledger claims. Without that, an exit order that was accepted
-but never filled would zero the ledger while the position was still live — the
-row would read as flat and every rule would stop watching it. That snapshot is
-also what exits are sized from, so a close order does not pay for its own
-positions call.
+And one thing it does every tick: it reconciles its ledger against the broker's
+own position book, writing quantities DOWN (never up) when the broker shows
+less than the ledger claims. Without that, an exit order that was accepted but
+never filled would zero the ledger while the position was still live — the row
+would read as flat and every rule would stop watching it.
 
 Because it owns a fill ledger, P&L here is marked against what THIS worker
 opened, not against the whole account. That is also what the account-level
@@ -76,7 +66,6 @@ import json
 import logging
 import os
 import sys
-import threading
 import time
 from datetime import datetime, timedelta, timezone
 
@@ -94,50 +83,29 @@ STATE_FILE   = os.path.join(DEBUG_DIR, 'focus_tool_rows_worker_state.json')
 STOP_TRIGGER = os.path.join(DEBUG_DIR, 'focus_tool_rows_worker_stop.trigger')
 LOG_FILE     = os.path.join(DEBUG_DIR, 'focus_tool_rows_worker.log')
 
-# Spot AND every option leg arrive over the WebSocket (see ensure_legs_subscribed),
-# so a tick is pure CPU: read live_data, evaluate the rules, act. It used to be
-# 2s because each leg cost a blocking ~1.1s REST quote, which made exit latency
-# scale with the number of open positions. It no longer does, so the loop runs
-# at scalper cadence — the only REST left on the tick path is throttled below.
-TICK_SECONDS = 0.25
-
-# The position-book reconcile is a REST call, so it is paced independently of
-# the tick rather than running four times a second.
-RECONCILE_EVERY_SECONDS = 2.0
-
-# The dashboard polls the status file; rewriting it on every 250ms tick would be
-# four disk writes a second for a panel that refreshes far more slowly.
-STATUS_EVERY_SECONDS = 1.0
-
-# How wide a strike ladder to keep on the tick feed, in steps either side of
-# ATM. Wide enough that a PREMIUM-mode target resolves without a REST chain and
-# that a strike shift lands on a contract already subscribed; the socket carries
-# hundreds of instruments, so the cost is master-list lookups, not bandwidth.
-LADDER_STEPS = 12
-
-# The refresher's own cadence, and how stale a published snapshot may be before
-# the tick refuses to use it. A dead refresher must make a rule go INERT, never
-# fire it on a number from several minutes ago — a stale VWAP closing a live
-# position is exactly the failure this design exists to avoid.
-REFRESH_EVERY_SECONDS = 1.0
-SNAPSHOT_STALE_SECONDS = 150.0
+# Spot arrives over the WebSocket, but option-leg LTPs are still REST reads and
+# Dhan's quote endpoint is limited to roughly one request a second ACCOUNT-WIDE
+# (shared with every other script and the dashboard). Two seconds keeps an open
+# straddle's two legs inside that budget while staying far quicker than the
+# level-exit rules need — spot levels and stops are not sub-second decisions.
+TICK_SECONDS = 2.0
 
 # How long a freshly opened leg is exempt from reconciliation. The position book
 # lags a fill by a second or two, and reading that lag as "the broker shows
 # nothing" would drop a live leg from the ledger moments after opening it.
 RECONCILE_GRACE_SECONDS = 20.0
 
+# How long to wait for an entry order to reach a terminal status before giving
+# up and recording the leg as unconfirmed. Market orders on an index option fill
+# in well under this; the wait exists so a slow fill is not mistaken for a
+# failed one.
+FILL_TIMEOUT_SECONDS = 20
+
 # Repo-wide intraday auto-exit (CLAUDE.md), mirroring FocusTool.tsx's
 # INTRADAY_BACKSTOP_HM.
 INTRADAY_EXIT_MINUTES = 15 * 60 + 17
 
 STRIKE_STEP = {'NIFTY': 50, 'BANKNIFTY': 100, 'SENSEX': 100}
-
-# MarketFeed segment codes (mirrors focus_tool_ws.py / live_options_ws.py).
-IDX_FEED     = 0    # index segment, differentiated by security id
-NSE_FNO_FEED = 2
-BSE_FNO_FEED = 8
-FEED_FULL    = 21   # full packet
 UNDERLYINGS = ('NIFTY', 'BANKNIFTY', 'SENSEX')
 
 # Group product -> the product string each broker's order path expects. Mirrors
@@ -562,24 +530,9 @@ class FocusRowsWorker:
         self.events = []           # recent (ts, level, message) for the dashboard
         self._warned_orphans = set()   # ledger ids already reported as orphaned
         self._warned_stale_arm = False # yesterday's live arm reported once
-        self._subscribed = set()       # option security ids already on the tick feed
-        # self.fills is mutated by the tick thread AND by the order-update
-        # callback thread (see on_order_update), so every mutation takes this.
-        self._fills_lock = threading.RLock()
-        self._pending = {}             # order id -> (row id, leg), awaiting a fill
-        self._last_reconcile = 0.0
-        self._last_status = 0.0
-        # Last broker net-quantity snapshot, reused by exits within the same
-        # window so a close order does not pay for its own positions call.
-        self._net_snapshot = None
         self.started_at = datetime.now().isoformat()
-        # Published by the refresher thread, read by the tick. Each value is
-        # (stamped_at, payload) so the tick can refuse a snapshot whose
-        # producer has died — see _fresh().
-        self._chain_snapshot = {}  # (underlying, expiry) -> (ts, {strike: {CE, PE}})
-        self._vwap_snapshot = {}   # (underlying, expiry, ce, pe, legs) -> (ts, vwap)
-        self._refresher = None
-        self._stopping = False
+        self._chain_cache = {}     # (underlying, expiry) -> (minute_key, chain)
+        self._vwap_cache = {}      # (underlying, expiry, ce, pe, side) -> (minute_key, vwap)
 
     # -- lifecycle ---------------------------------------------------
 
@@ -594,75 +547,50 @@ class FocusRowsWorker:
         self.router = OrderRouter(self.helper, self.market, self.broker, self.dry_run)
         self.start_spot_feed()
         self.start_order_feed()
-        self.start_refresher()
 
     def start_order_feed(self):
-        """Subscribe to Dhan's order-update WebSocket and settle fills on it.
+        """Subscribe to Dhan's order-update WebSocket.
 
-        This is what keeps fill confirmation OFF the tick thread. An entry
-        records its order id and returns immediately; when the socket reports a
-        terminal status for that id, on_order_update() writes the real traded
-        price and quantity into the ledger. Blocking the loop to confirm one
-        leg would stall the exit rules for every other row.
+        This is what makes an entry fill-confirmed rather than ACK-confirmed:
+        OrderRouter.confirm_fill waits on a terminal status, and wait_for_fill
+        reads this socket's cache before falling back to REST polling. Without
+        it every fill confirmation costs a REST poll every 0.5s against an
+        account-wide ~1 req/s budget shared with the leg quotes that gate exits.
 
-        Best-effort and Dhan-only. With the socket down, legs simply stay
-        unconfirmed at their LTP estimate and reconcile() sizes them against the
-        position book — slower to settle, never wrong.
+        Best-effort and Dhan-only: with the socket down, wait_for_fill still
+        works over REST, just more expensively. Child brokers have no
+        equivalent, and their legs are recorded unconfirmed either way.
         """
-        if self.dry_run or self.broker != 'dhan':
+        if self.dry_run:
             return
         try:
-            self.helper.start_order_update_websocket(self.on_order_update)
+            self.helper.start_order_update_websocket()
             self.log('info', 'Order-update feed subscribed')
         except Exception as e:
-            self.log('warning', f'Order-update WebSocket unavailable, fills settle '
-                                f'from the position book instead: {e}')
+            self.log('warning', f'Order-update WebSocket unavailable, fills confirm over REST: {e}')
 
-    def on_order_update(self, payload):
-        """Settle one pending leg against its real fill. Runs on the SOCKET
-        thread — every ledger mutation here takes the lock, and nothing in it
-        may block or place an order."""
+    def start_spot_feed(self):
+        """Subscribe the three index spots over the market-feed WebSocket.
+
+        Spot is read on every tick for every underlying that has rows, and
+        Dhan's quote REST endpoint is rate-limited to roughly one request a
+        second ACCOUNT-WIDE. Polling it at tick speed would 429 constantly and
+        starve the option-leg quotes that actually gate exits. get_ltp()
+        prefers helper.live_data over REST (see CLAUDE.md), so one long-lived
+        subscription makes spot effectively free and leaves the REST budget for
+        the legs.
+
+        Best-effort: if the socket cannot start, MarketData.spot() falls back to
+        REST exactly as before — slower, but not wrong.
+        """
         try:
-            data = (payload or {}).get('Data') or {}
-            order_id = str(data.get('orderNo') or data.get('OrderNo') or '')
-            if not order_id:
-                return
-            with self._fills_lock:
-                target = self._pending.get(order_id)
-            if not target:
-                return   # not ours, or already settled
-            status = str(data.get('status') or data.get('Status') or '').upper()
-            if status in ('CANCELLED', 'REJECTED', 'EXPIRED'):
-                with self._fills_lock:
-                    self._pending.pop(order_id, None)
-                self.log('error', f'Order {order_id} came back {status} — the leg it opened '
-                                  f'is being sized off the position book instead.')
-                return
-            if status != 'TRADED':
-                return
-
-            fill = self.router.read_fill(order_id)
-            row_id, leg = target
-            with self._fills_lock:
-                self._pending.pop(order_id, None)
-                held = (self.fills.get(row_id) or {}).get(leg)
-                if not held or held.get('orderId') != order_id:
-                    return   # the leg was closed or rolled while the fill was in flight
-                if fill:
-                    held['qty'] = int(fill['qty'])
-                    held['entryPrice'] = float(fill['price'])
-                    held['confirmed'] = True
-                    # entryPremium drives SL x, so it has to follow the legs it
-                    # is the sum of.
-                    entry = self.fills.get(row_id) or {}
-                    entry['entryPremium'] = sum(
-                        float((entry.get(k) or {}).get('entryPrice') or 0.0)
-                        for k in ('CE', 'PE') if entry.get(k))
-                self.save_state()
-            if fill:
-                self.log('info', f"{row_id[-4:]} {leg}: filled {fill['qty']} @ {fill['price']:.2f}")
+            IDX_SEGMENT, FULL = 0, 21
+            instruments = [(IDX_SEGMENT, str(sid), FULL)
+                           for sid in (13, 25, 51)]   # NIFTY, BANKNIFTY, SENSEX
+            self.helper.start_websocket(instruments)
+            self.log('info', 'Spot feed subscribed (NIFTY, BANKNIFTY, SENSEX)')
         except Exception as e:
-            logger.warning(f'Order update handling failed: {e}')
+            self.log('warning', f'Spot WebSocket unavailable, falling back to REST quotes: {e}')
 
     def load_state(self):
         st = read_json(STATE_FILE) or {}
@@ -717,164 +645,15 @@ class FocusRowsWorker:
                 return g
         return None
 
-    # -- background market data --------------------------------------
-    #
-    # Nothing below runs on the tick thread. The tick only ever READS the
-    # snapshots these publish, so a slow REST call can never stall an exit.
-
-    def start_refresher(self):
-        """Start the thread that owns every remaining REST market-data call.
-
-        Two things used to fetch from inside the tick, once a minute each, and
-        both could stall it: the option chain (PREMIUM-mode strike resolution)
-        and the session VWAPs. The chain was the worse of the two — DhanHelper
-        paces that endpoint with a hard `time.sleep(3.0 - elapsed)`, so two
-        underlyings in premium mode meant a ~3s stall and three meant ~6s, once
-        a minute, while stops were live.
-        """
-        t = threading.Thread(target=self._refresher_loop, name='focus-refresher', daemon=True)
-        t.start()
-        self._refresher = t
-
-    def _refresher_loop(self):
-        while not self._stopping:
-            try:
-                self.refresh_market_data()
-            except Exception as e:
-                logger.warning(f'Refresher pass failed: {e}')
-            time.sleep(REFRESH_EVERY_SECONDS)
-
-    def refresh_market_data(self):
-        """One refresher pass: extend the ladder, republish chain and VWAP."""
-        cfg = self.cfg
-        rows = list(cfg.get('rows') or [])
-        with self._fills_lock:
-            fills = {k: dict(v) for k, v in self.fills.items()}
-
-        self._refresh_ladder(rows, fills)
-        self._refresh_chains(rows, fills)
-        self._refresh_vwaps(rows, fills)
-
-    def _refresh_ladder(self, rows, fills):
-        """Keep an ATM +/- LADDER_STEPS strike ladder on the tick feed.
-
-        This is what lets PREMIUM mode resolve with no REST at all: the chain
-        snapshot is built from live_data below. It also means a strike shift
-        usually lands on a contract that is already subscribed, so the new leg
-        has a price immediately instead of on the next feed round trip.
-        """
-        wanted = []
-        for u in {r.get('underlying') for r in rows if r.get('underlying') in UNDERLYINGS}:
-            # The FUTURE, for groups picking ATM off it rather than off spot.
-            # It is not an index and so was not covered by the spot feed, which
-            # left future_ltp() on the REST path — one blocking quote roughly
-            # every second once the tick dropped to 250ms, i.e. the faster loop
-            # made it worse. Subscribed here, it becomes a dict read like
-            # everything else.
-            try:
-                fut_sid = self.market.future_id(u)
-                if fut_sid:
-                    wanted.append((u, {'SECURITY_ID': int(fut_sid)}))
-            except Exception as e:
-                logger.warning(f'{u}: futures subscription skipped: {e}')
-
-            spot = self.market.spot(u)
-            step = STRIKE_STEP[u]
-            atm = atm_strike(spot, step)
-            if not atm:
-                continue
-            expiry = self._ladder_expiry(u, rows, fills)
-            if not expiry:
-                continue
-            for i in range(-LADDER_STEPS, LADDER_STEPS + 1):
-                strike = atm + i * step
-                for leg in ('CE', 'PE'):
-                    # find_option reads the in-memory master list and is cached
-                    # per contract, so a settled ladder costs nothing per pass.
-                    row = self.market.leg(u, expiry, strike, leg)
-                    if row is not None:
-                        wanted.append((u, row))
-        if wanted:
-            self.ensure_legs_subscribed(wanted)
-
-    def _ladder_expiry(self, underlying, rows, fills):
-        """The expiry this underlying's ladder should cover — whatever its rows
-        actually trade, else the nearest."""
-        for r in rows:
-            if r.get('underlying') == underlying:
-                held = fills.get(r.get('id')) or {}
-                exp = held.get('expiry') or r.get('expiry')
-                if exp:
-                    return exp
-        return self.market.nearest_expiry(underlying)
-
-    def _refresh_chains(self, rows, fills):
-        """Publish {strike: {'CE': ltp, 'PE': ltp}} per (underlying, expiry).
-
-        Built from live_data — the ladder above is already subscribed, so this
-        is a dict scan, not a REST call, and the prices are current rather than
-        up to a minute old. The REST chain is kept only as a cold-start
-        fallback for an underlying whose ticks have not arrived yet, and even
-        that runs here, off the tick thread.
-        """
-        needed = set()
-        for r in rows:
-            if str(r.get('strikeMode') or 'ATM') != 'PREMIUM':
-                continue
-            if r.get('underlying') not in UNDERLYINGS:
-                continue
-            if r['id'] not in fills and str(r.get('status')) != 'armed':
-                continue
-            expiry = ((fills.get(r['id']) or {}).get('expiry')
-                      or r.get('expiry')
-                      or self.market.nearest_expiry(r['underlying']))
-            if expiry:
-                needed.add((r['underlying'], expiry))
-        if not needed:
-            return
-
-        published = dict(self._chain_snapshot)
-        for u, expiry in needed:
-            live = self._chain_from_feed(u, expiry)
-            if live:
-                published[(u, expiry)] = (time.time(), live)
-                continue
-            # No ticks for this ladder yet. One REST chain, at most once a
-            # minute, and harmless here because nothing is waiting on it.
-            prev = published.get((u, expiry))
-            if prev and time.time() - prev[0] < 60.0:
-                continue
-            fetched = self._fetch_chain_rest(u, expiry)
-            if fetched:
-                published[(u, expiry)] = (time.time(), fetched)
-        self._chain_snapshot = published
-
-    def _chain_from_feed(self, underlying, expiry):
-        """The subscribed ladder's current prices, as a chain-shaped dict."""
-        step = STRIKE_STEP[underlying]
-        atm = atm_strike(self.market.spot(underlying), step)
-        if not atm:
-            return {}
-        out = {}
-        for i in range(-LADDER_STEPS, LADDER_STEPS + 1):
-            strike = atm + i * step
-            prices = {}
-            for leg in ('CE', 'PE'):
-                row = self.market.leg(underlying, expiry, strike, leg)
-                if row is None:
-                    continue
-                live = self.helper.live_data.get(str(int(row['SECURITY_ID'])))
-                if not live:
-                    continue
-                px = float(live.get('last_price') or live.get('LTP') or 0.0)
-                if px > 0:
-                    prices[leg] = px
-            if prices:
-                out[strike] = prices
-        return out
-
-    def _fetch_chain_rest(self, underlying, expiry):
-        """Cold-start fallback only. Refresher thread — never the tick."""
+    def chain(self, underlying, expiry):
+        """{strike: {'CE': ltp, 'PE': ltp}} for PREMIUM-mode strike resolution,
+        refreshed once a minute. Only fetched for underlyings that actually have
+        a PREMIUM-mode row — Dhan's chain endpoint is rate-limited account-wide."""
+        key = (underlying, expiry)
+        minute = datetime.now().strftime('%Y-%m-%d %H:%M')
+        hit = self._chain_cache.get(key)
+        if hit and hit[0] == minute:
+            return hit[1]
         chain = {}
         try:
             # SENSEX splits three ways (CLAUDE.md): its chain keys on security
@@ -884,15 +663,14 @@ class FocusRowsWorker:
                 df = self.helper.get_option_chain_df('1', expiry, exchange_segment='BSE_FNO')
             else:
                 df = self.helper.get_option_chain_df(underlying, expiry)
-            # get_option_chain_df sets Strike as the INDEX, not as a column —
-            # reading r['Strike'] silently yields nothing.
+            # get_option_chain_df sets Strike as the INDEX (dhan_helper.py:3534),
+            # not as a column — reading r['Strike'] silently yields nothing.
             if df is not None and not df.empty:
                 for strike_raw, r in df.iterrows():
                     try:
                         strike = int(round(float(strike_raw)))
                     except (TypeError, ValueError):
                         continue
-
                     def px(col):
                         try:
                             return float(r[col] or 0.0)
@@ -901,117 +679,79 @@ class FocusRowsWorker:
                     chain[strike] = {'CE': px('ce_last_price'), 'PE': px('pe_last_price')}
         except Exception as e:
             logger.warning(f'{underlying} {expiry}: chain fetch failed: {e}')
+        self._chain_cache[key] = (minute, chain)
         return chain
 
-    def _refresh_vwaps(self, rows, fills):
-        """Recompute the session VWAP of each watched strike pair, once a minute.
-
-        Deliberately still REST and still closed-bar: that construction is what
-        makes this number match TradingView and the broker terminal. Computing
-        it from ticks instead would be faster and would change the price the
-        rule fires at, which is not a trade worth making for a stop.
-        """
-        wanted = set()
-        for r in rows:
-            if not r.get('levelVw'):
-                continue
-            fill = fills.get(r.get('id'))
-            if not fill:
-                continue
-            legs = tuple(l for l in ('CE', 'PE') if fill.get(l))
-            if not legs:
-                continue
-            ce = (fill.get('CE') or {}).get('strike')
-            pe = (fill.get('PE') or {}).get('strike')
-            wanted.add((r['underlying'], fill.get('expiry') or '', ce, pe, legs))
-
-        if not wanted:
-            return
-        published = dict(self._vwap_snapshot)
-        for key in wanted:
-            prev = published.get(key)
-            if prev and time.time() - prev[0] < 60.0:
-                continue
-            underlying, expiry, ce, pe, legs = key
-            value = self._compute_side_vwap(underlying, expiry, ce, pe, list(legs))
-            published[key] = (time.time(), value)
-        self._vwap_snapshot = published
-
-    def _compute_side_vwap(self, underlying, expiry, ce_strike, pe_strike, legs):
-        """Session VWAP of just `legs`, off closed 1-minute bars.
+    def side_vwap(self, underlying, expiry, ce_strike, pe_strike, legs):
+        """Session VWAP of the premium of just `legs`, recomputed once a minute.
 
         Side-aware for the same reason evaluate_exit is: a CE-only row compared
-        against a combined CE+PE VWAP would cross at the wrong premium.
+        against a combined CE+PE VWAP would cross at the wrong premium. Uses
+        only closed bars so the number matches what TradingView and the broker
+        terminal show (see scripts/tools/focus_tool_vwap.py, same construction).
         """
+        key = (underlying, expiry, ce_strike, pe_strike, tuple(legs))
+        minute = datetime.now().strftime('%Y-%m-%d %H:%M')
+        hit = self._vwap_cache.get(key)
+        if hit and hit[0] == minute:
+            return hit[1]
+
+        vwap = None
         try:
             seg = 'BSE_FNO' if UNDERLYING_EXCHANGE.get(underlying) == 'BSE' else 'NSE_FNO'
             today = datetime.now().strftime('%Y-%m-%d')
             tomorrow = (datetime.now() + timedelta(days=1)).strftime('%Y-%m-%d')
+            now = datetime.now(tz=IST)
 
             per_leg = []
             for leg in legs:
                 strike = ce_strike if leg == 'CE' else pe_strike
-                if strike is None:
-                    return None
                 row = self.market.leg(underlying, expiry, strike, leg)
                 if not row:
-                    return None
+                    per_leg = []
+                    break
                 df = self.helper.get_intraday_minute_data(
                     security_id=str(int(row['SECURITY_ID'])), exchange_segment=seg,
                     instrument_type='OPTIDX', interval='1', from_date=today, to_date=tomorrow)
                 if df is None or df.empty:
-                    return None
+                    per_leg = []
+                    break
                 per_leg.append(df)
 
-            if len(per_leg) != len(legs):
-                return None
-            # Drop the still-forming bar: its partial volume would drag the
-            # running average away from every closed-bar platform's number.
-            n = min(len(df) for df in per_leg) - 1
-            if n <= 0:
-                return None
-            num_ = den = 0.0
-            for i in range(n):
-                typical = vol = 0.0
-                for df in per_leg:
-                    r = df.iloc[i]
-                    try:
-                        hi, lo, cl = float(r['high']), float(r['low']), float(r['close'])
-                        v = float(r['volume'])
-                    except (KeyError, TypeError, ValueError):
-                        return None
-                    typical += (hi + lo + cl) / 3.0
-                    vol += v
-                vol /= len(per_leg)
-                num_ += typical * vol
-                den += vol
-            return num_ / den if den > 0 else None
+            if per_leg and len(per_leg) == len(legs):
+                # Drop the still-forming bar: its partial volume would drag the
+                # running average away from every closed-bar platform's number.
+                n = min(len(df) for df in per_leg) - 1
+                if n > 0:
+                    num_ = den = 0.0
+                    for i in range(n):
+                        typical = vol = 0.0
+                        ok = True
+                        for df in per_leg:
+                            r = df.iloc[i]
+                            try:
+                                hi, lo, cl = float(r['high']), float(r['low']), float(r['close'])
+                                v = float(r['volume'])
+                            except (KeyError, TypeError, ValueError):
+                                ok = False
+                                break
+                            typical += (hi + lo + cl) / 3.0
+                            vol += v
+                        if not ok:
+                            num_ = den = 0.0
+                            break
+                        vol /= len(per_leg)
+                        num_ += typical * vol
+                        den += vol
+                    if den > 0:
+                        vwap = num_ / den
+            _ = now
         except Exception as e:
-            logger.warning(f'VWAP failed for {underlying} {ce_strike}/{pe_strike}: {e}')
-            return None
+            logger.warning(f'VWAP failed for {key}: {e}')
+            vwap = None
 
-    # -- snapshot readers (tick thread) ------------------------------
-
-    def _fresh(self, entry):
-        """A published snapshot value, or None once it is too old to act on.
-
-        A refresher that has died must make its rules go INERT rather than keep
-        firing them off a number from several minutes ago. A stale VWAP closing
-        a live position is exactly the failure this whole design avoids.
-        """
-        if not entry:
-            return None
-        stamped, value = entry
-        if time.time() - stamped > SNAPSHOT_STALE_SECONDS:
-            return None
-        return value
-
-    def chain_for(self, underlying, expiry):
-        return self._fresh(self._chain_snapshot.get((underlying, expiry))) or {}
-
-    def vwap_for(self, underlying, expiry, ce_strike, pe_strike, legs):
-        return self._fresh(self._vwap_snapshot.get(
-            (underlying, expiry, ce_strike, pe_strike, tuple(legs))))
+        self._vwap_cache[key] = (minute, vwap)
+        return vwap
 
     # -- trading -----------------------------------------------------
 
@@ -1034,21 +774,33 @@ class FocusRowsWorker:
             strike = ce_strike if leg == 'CE' else pe_strike
             if strike is None:
                 continue
-            ok, detail, order_id = self.router.place(u, expiry, strike, leg, 'SELL', qty, product)
+            ok, detail, fill = self.router.place(u, expiry, strike, leg, 'SELL', qty, product)
             if not ok:
                 self.log('error', f"{u} {row['id'][-4:]} {int(strike)}{leg}: entry failed — {detail}")
                 continue
-            # Recorded immediately at an LTP estimate and marked unconfirmed —
-            # the tick thread never waits for a fill. on_order_update() settles
-            # the real traded price and quantity when the socket reports one,
-            # and reconcile() sizes the leg against the position book either way.
-            price = self.market.ltp(u, self.market.leg(u, expiry, strike, leg))
-            opened[leg] = {'strike': int(strike), 'qty': qty, 'entryPrice': price,
-                           'confirmed': False, 'openedTs': time.time(),
-                           'orderId': str(order_id) if order_id else None}
-            if order_id:
-                self._pending[str(order_id)] = (row['id'], leg)
-            self.log('info', f"{u} {row['id'][-4:]}: SELL {qty} {int(strike)}{leg} @ ~{price:.2f} ({detail})")
+            if fill:
+                # Confirmed: the price actually traded and the quantity actually
+                # filled. SL x measures against this, and exits are sized off it.
+                price = float(fill['price'])
+                got = int(fill['qty'])
+                confirmed = True
+                if got < qty:
+                    self.log('warning', f"{u} {row['id'][-4:]} {int(strike)}{leg}: partial fill "
+                                        f"{got}/{qty} — the ledger holds the {got} that traded.")
+            else:
+                # ACKed but unconfirmed. An LTP read is the best entry price
+                # available; the leg is flagged so it is visible on screen, and
+                # reconcile() will size it against broker truth on a later tick.
+                price = self.market.ltp(u, self.market.leg(u, expiry, strike, leg))
+                got = qty
+                confirmed = False
+            if got <= 0:
+                self.log('error', f"{u} {row['id'][-4:]} {int(strike)}{leg}: nothing filled — not recorded")
+                continue
+            opened[leg] = {'strike': int(strike), 'qty': got, 'entryPrice': price,
+                           'confirmed': confirmed, 'openedTs': time.time()}
+            self.log('info', f"{u} {row['id'][-4:]}: SELL {got} {int(strike)}{leg} @ "
+                             f"{'' if confirmed else '~'}{price:.2f} ({detail})")
 
         if not opened:
             self.log('error', f"{u} {row['id'][-4:]}: entry aborted — no leg opened")
@@ -1063,28 +815,10 @@ class FocusRowsWorker:
         opened['entryPremium'] = sum(v['entryPrice'] for k, v in opened.items()
                                      if k in ('CE', 'PE'))
         opened['enteredAt'] = datetime.now().isoformat()
-        with self._fills_lock:
-            self.fills[row['id']] = opened
-            self.save_state()
+        self.fills[row['id']] = opened
+        self.save_state()
         self.log('info', f"{u} {row['id'][-4:]}: ENTERED ({reason}) — "
                          f"combined entry {opened['entryPremium']:.2f}")
-
-    def net_hint_for(self, underlying, expiry, strike, leg):
-        """This leg's net quantity from the last reconcile snapshot, or None.
-
-        None means "no fresh snapshot" and sends OrderRouter.close down its own
-        lookup — correct, just slower. Anything older than the reconcile window
-        is not offered: sizing an exit off a stale book is exactly the mistake
-        resolve_exit_qty exists to prevent.
-        """
-        if self._net_snapshot is None:
-            return None
-        if time.time() - self._last_reconcile > RECONCILE_EVERY_SECONDS:
-            return None
-        key = self.router.position_key(underlying, expiry, strike, leg)
-        if not key:
-            return None
-        return int(self._net_snapshot.get(key, 0))
 
     def exit_row(self, row, reason):
         """Close every leg the ledger says this row holds. The ledger entry is
@@ -1105,25 +839,22 @@ class FocusRowsWorker:
             if not held:
                 continue
             ok, detail = self.router.close(
-                u, expiry, held['strike'], leg, 'BUY', int(held['qty']), product,
-                net_hint=self.net_hint_for(u, expiry, held['strike'], leg))
+                u, expiry, held['strike'], leg, 'BUY', int(held['qty']), product)
             if ok:
                 self.log('info', f"{u} {row['id'][-4:]} {held['strike']}{leg}: closed ({detail})")
             else:
                 self.log('error', f"{u} {row['id'][-4:]} {held['strike']}{leg}: exit FAILED — {detail}")
                 remaining[leg] = held
 
-        with self._fills_lock:
-            if remaining:
-                remaining['expiry'] = expiry
-                remaining['product'] = product
-                remaining['underlying'] = fill.get('underlying')
-                remaining['entryPremium'] = fill.get('entryPremium')
-                remaining['enteredAt'] = fill.get('enteredAt')
-                self.fills[row['id']] = remaining
-            else:
-                self.fills.pop(row['id'], None)
-            self.save_state()
+        if remaining:
+            remaining['expiry'] = expiry
+            remaining['product'] = product
+            remaining['entryPremium'] = fill.get('entryPremium')
+            remaining['enteredAt'] = fill.get('enteredAt')
+            self.fills[row['id']] = remaining
+        else:
+            self.fills.pop(row['id'], None)
+        self.save_state()
 
     def exit_leg(self, row, leg, reason):
         """Close just ONE leg on its own SL x breach, leaving the other leg —
@@ -1139,15 +870,13 @@ class FocusRowsWorker:
         product = fill.get('product') or 'INTRADAY'
         self.log('info', f"{u} {row['id'][-4:]}: leg-exit {leg} — {reason}")
 
-        ok, detail = self.router.close(u, expiry, held['strike'], leg, 'BUY', int(held['qty']), product,
-                                       net_hint=self.net_hint_for(u, expiry, held['strike'], leg))
+        ok, detail = self.router.close(u, expiry, held['strike'], leg, 'BUY', int(held['qty']), product)
         if ok:
             self.log('info', f"{u} {row['id'][-4:]} {held['strike']}{leg}: closed ({detail})")
-            with self._fills_lock:
-                fill.pop(leg, None)
-                if not any(k in fill for k in ('CE', 'PE')):
-                    self.fills.pop(row['id'], None)
-                self.save_state()
+            del fill[leg]
+            if not any(k in fill for k in ('CE', 'PE')):
+                self.fills.pop(row['id'], None)
+            self.save_state()
         else:
             self.log('error', f"{u} {row['id'][-4:]} {held['strike']}{leg}: leg-exit FAILED — {detail}")
             # Left in the ledger untouched — evaluate_leg_exit re-fires next
@@ -1178,61 +907,47 @@ class FocusRowsWorker:
         """
         if not self.fills:
             return
-        # Throttled independently of the tick. The tick now runs several times a
-        # second so the exit rules react immediately; the position book does not
-        # change that fast and is a REST call against an account-wide budget, so
-        # reconciling on every tick would spend the budget the leg quotes and
-        # the order path depend on.
-        now = time.time()
-        if now - self._last_reconcile < RECONCILE_EVERY_SECONDS:
-            return
-        self._last_reconcile = now
-
-        with self._fills_lock:
-            underlyings = {f.get('underlying') for f in self.fills.values()}
+        underlyings = {f.get('underlying') for f in self.fills.values()}
         snapshot = self.router.net_positions(underlyings=[u for u in underlyings if u])
         if snapshot is None:
             # Unknown, not empty. Leaving the ledger untouched is the only safe
             # reading of a failed position call.
             return
-        # Kept for this tick's exits: resolve_exit_qty would otherwise repeat
-        # this very call on the critical path of every close order.
-        self._net_snapshot = snapshot
 
+        now = time.time()
         changed = False
-        with self._fills_lock:
-            for rid, fill in list(self.fills.items()):
-                u = fill.get('underlying')
-                expiry = fill.get('expiry') or ''
-                for leg in ('CE', 'PE'):
-                    held = fill.get(leg)
-                    if not held:
-                        continue
-                    if now - float(held.get('openedTs') or 0) < RECONCILE_GRACE_SECONDS:
-                        continue
-                    key = self.router.position_key(u, expiry, held['strike'], leg)
-                    if not key:
-                        continue
-                    broker_qty = abs(int(snapshot.get(key, 0)))
-                    own_qty = int(held.get('qty') or 0)
-                    if broker_qty >= own_qty:
-                        continue
-                    changed = True
-                    if broker_qty <= 0:
-                        self.log('warning',
-                                 f"{u} {rid[-4:]} {held['strike']}{leg}: broker shows no position but "
-                                 f"the ledger held {own_qty} — dropping the leg (closed elsewhere, or "
-                                 f"the entry never filled).")
-                        fill.pop(leg, None)
-                    else:
-                        self.log('warning',
-                                 f"{u} {rid[-4:]} {held['strike']}{leg}: ledger {own_qty} vs broker "
-                                 f"{broker_qty} — writing the ledger down.")
-                        held['qty'] = broker_qty
-                if not any(k in fill for k in ('CE', 'PE')):
-                    self.fills.pop(rid, None)
-            if changed:
-                self.save_state()
+        for rid, fill in list(self.fills.items()):
+            u = fill.get('underlying')
+            expiry = fill.get('expiry') or ''
+            for leg in ('CE', 'PE'):
+                held = fill.get(leg)
+                if not held:
+                    continue
+                if now - float(held.get('openedTs') or 0) < RECONCILE_GRACE_SECONDS:
+                    continue
+                key = self.router.position_key(u, expiry, held['strike'], leg)
+                if not key:
+                    continue
+                broker_qty = abs(int(snapshot.get(key, 0)))
+                own_qty = int(held.get('qty') or 0)
+                if broker_qty >= own_qty:
+                    continue
+                changed = True
+                if broker_qty <= 0:
+                    self.log('warning',
+                             f"{u} {rid[-4:]} {held['strike']}{leg}: broker shows no position but the "
+                             f"ledger held {own_qty} — dropping the leg (closed elsewhere, or the "
+                             f"entry never filled).")
+                    del fill[leg]
+                else:
+                    self.log('warning',
+                             f"{u} {rid[-4:]} {held['strike']}{leg}: ledger {own_qty} vs broker "
+                             f"{broker_qty} — writing the ledger down.")
+                    held['qty'] = broker_qty
+            if not any(k in fill for k in ('CE', 'PE')):
+                self.fills.pop(rid, None)
+        if changed:
+            self.save_state()
 
     def orphan_rows(self, rows):
         """Synthetic rows for ledger entries whose config row has been deleted.
@@ -1254,12 +969,10 @@ class FocusRowsWorker:
         """
         # Forget ids that have since been closed, so a row that is deleted,
         # re-added and deleted again warns each time rather than once ever.
-        with self._fills_lock:
-            self._warned_orphans &= set(self.fills)
-            ledger = list(self.fills.items())
+        self._warned_orphans &= set(self.fills)
         known = {r.get('id') for r in rows}
         out = []
-        for rid, fill in ledger:
+        for rid, fill in self.fills.items():
             if rid in known:
                 continue
             u = fill.get('underlying')
@@ -1326,9 +1039,6 @@ class FocusRowsWorker:
         snapshot = []
         total_pnl = 0.0
         spots = {}
-        # Legs quoted this tick — handed to the feed so the NEXT tick reads them
-        # from live_data instead of paying a blocking REST quote each.
-        tick_legs = []
 
         # Only touch underlyings that actually have rows — every quote costs an
         # API call against an account-wide rate limit.
@@ -1356,11 +1066,16 @@ class FocusRowsWorker:
             if fut > 0:
                 atm_base[u] = fut
 
-        # No chain fetch here. The refresher thread publishes it (built from
-        # the subscribed ladder's live ticks, so it is current rather than up
-        # to a minute old); the tick only reads, and an absent snapshot simply
-        # leaves strikes unresolved, which evaluate_entry already refuses to
-        # trade on.
+        # Same budget reasoning as the leg quotes below: only PREMIUM-mode rows
+        # that are actually armed or open need a chain to resolve against.
+        needs_chain = {
+            (r['underlying'], r.get('expiry') or self.market.nearest_expiry(r['underlying']))
+            for r in rows
+            if str(r.get('strikeMode') or 'ATM') == 'PREMIUM'
+            and r.get('underlying') in UNDERLYINGS
+            and (r['id'] in self.fills or str(r.get('status')) == 'armed')
+        }
+        chains = {k: self.chain(*k) for k in needs_chain}
 
         for row in rows:
             u = row.get('underlying')
@@ -1372,7 +1087,7 @@ class FocusRowsWorker:
             expiry = row.get('expiry') or self.market.nearest_expiry(u)
             atm = atm_strike(atm_base.get(u, spot), step)
             ce_strike, pe_strike = resolve_row_strikes(
-                row, atm, step, self.chain_for(u, expiry))
+                row, atm, step, chains.get((u, expiry)))
 
             fill = self.fills.get(row['id'])
             if row.get('orphan'):
@@ -1408,9 +1123,7 @@ class FocusRowsWorker:
                         ce_strike if leg == 'CE' else pe_strike)
                     if strike is None:
                         continue
-                    leg_row = self.market.leg(u, expiry, strike, leg)
-                    tick_legs.append((u, leg_row))
-                    ltp = self.market.ltp(u, leg_row)
+                    ltp = self.market.ltp(u, self.market.leg(u, expiry, strike, leg))
                     leg_ltp[leg] = ltp
                     premium += ltp
                     held = (fill or {}).get(leg)
@@ -1425,7 +1138,7 @@ class FocusRowsWorker:
                 ce_s = (fill.get('CE') or {}).get('strike', ce_strike)
                 pe_s = (fill.get('PE') or {}).get('strike', pe_strike)
                 if ce_s is not None and pe_s is not None:
-                    vwap = self.vwap_for(u, expiry, ce_s, pe_s, legs)
+                    vwap = self.side_vwap(u, expiry, ce_s, pe_s, legs)
 
             snapshot.append({
                 'id': row['id'], 'underlying': u, 'status': row.get('status'),
@@ -1470,9 +1183,6 @@ class FocusRowsWorker:
                 if do_enter:
                     self.enter_row(row, group, expiry, ce_strike, pe_strike, _reason)
 
-        # Anything quoted this tick joins the feed, so it is free from now on.
-        self.ensure_legs_subscribed(tick_legs)
-
         # Account-level budget, measured on this worker's own rows.
         if total_pnl > self.peak_pnl:
             self.peak_pnl = total_pnl
@@ -1487,12 +1197,7 @@ class FocusRowsWorker:
 
         self.write_status(snapshot, total_pnl, live)
 
-    def write_status(self, snapshot, total_pnl, live, force=False):
-        # Paced independently of the tick — see STATUS_EVERY_SECONDS.
-        now = time.time()
-        if not force and now - self._last_status < STATUS_EVERY_SECONDS:
-            return
-        self._last_status = now
+    def write_status(self, snapshot, total_pnl, live):
         atomic_write(STATUS_FILE_ONCE if self.once else STATUS_FILE, {
             'status': 'RUNNING',
             'pid': os.getpid(),
@@ -1528,7 +1233,6 @@ class FocusRowsWorker:
                         os.remove(STOP_TRIGGER)
                     except OSError:
                         pass
-                    self._stopping = True
                     self.log('info', 'Stop trigger detected — exiting. Open positions left as they are.')
                     break
                 try:
@@ -1539,7 +1243,6 @@ class FocusRowsWorker:
         except KeyboardInterrupt:
             self.log('info', 'Interrupted — exiting. Open positions left as they are.')
         finally:
-            self._stopping = True
             st = read_json(STATUS_FILE) or {}
             st['status'] = 'STOPPED'
             st['lastUpdate'] = datetime.now().isoformat()
