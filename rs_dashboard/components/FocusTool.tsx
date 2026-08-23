@@ -1786,6 +1786,17 @@ export default function FocusTool() {
   const autoEnteringRef = useRef<Set<string>>(new Set());
   const [peakMtm, setPeakMtm] = useState(0);
   const [lockMtm, setLockMtm] = useState<number | null>(null);
+  /**
+   * The AUTHORITATIVE trailing floor.
+   *
+   * A ref, not state: the tick-driven watcher ratchets it on every quote, and
+   * routing that through setState would re-render the whole terminal on each
+   * tick just to carry a number that changes a handful of times a session. The
+   * `lockMtm` state is a display mirror, refreshed once a second by the clock
+   * scheduler. Never read the state here — it lags by up to a second, and the
+   * floor must only ever rise.
+   */
+  const lockFloorRef = useRef<number | null>(null);
 
   const [activeModal, setActiveModal] = useState<'risk' | 'orderbook' | null>(null);
   const [viewMode, setViewMode] = useState<'table' | 'cards'>('table');
@@ -2057,7 +2068,14 @@ export default function FocusTool() {
   // realtime; the chain route caches 10s and is paced ~1 call/3s per
   // underlying account-wide, so it is polled at that cadence and only for
   // underlyings that actually have rows.
-  const activeUnderlyings = UNDERLYINGS.filter(u => config.rows.some(r => r.underlying === u));
+  // Pre-warmed, not lazy. Both /api/options/chain and /api/scalper/lookup spawn
+  // Python on a cold cache — measured at 6.5s and 2.7s respectively, against
+  // ~7ms once warm. Waiting until a row exists put that cold spawn in front of
+  // the first trade of the day, which is the worst possible place for it. An
+  // underlying whose GROUP is started is warmed even with no rows yet.
+  const activeUnderlyings = UNDERLYINGS.filter(u =>
+    config.rows.some(r => r.underlying === u)
+    || config.groups.some(g => g.underlying === u && g.enabled));
   const activeKey = activeUnderlyings.join('|');
   const chainSeq = React.useRef(0);
   useEffect(() => {
@@ -2173,6 +2191,7 @@ export default function FocusTool() {
   // This effect only RESETS it: turning the trail off, or changing its trigger
   // or gap, invalidates a floor derived from the old settings.
   useEffect(() => {
+    lockFloorRef.current = null;
     setLockMtm(null);
   }, [trailEnabled, triggerRupees, lockRupees]);
 
@@ -2330,28 +2349,49 @@ export default function FocusTool() {
       const cePosition = findPos('CE');
       const pePosition = findPos('PE');
 
-      // P&L and entry premium across only the legs this row's Side trades —
-      // read off the broker's own position, never a client-side guess (this
-      // tool doesn't stamp its own entry price anywhere).
+      const ltpCe = pick(ceWs?.ce?.ltp, ceCh?.ce);
+      const ltpPe = pick(peWs?.pe?.ltp, peCh?.pe);
+
+      /**
+       * P&L across only the legs this row's Side trades.
+       *
+       * Split by how fast each half moves. REALISED comes off the broker and
+       * only changes when something closes, so the 2s position poll is fine for
+       * it. UNREALISED is marked HERE against the live tick — the broker's own
+       * `unrealizedProfit` is a snapshot from that same 2s poll, and gating SL ₹
+       * on it meant a rupee stop could sit breached for two seconds while the
+       * price that breached it was already on screen.
+       *
+       * Dhan nets by security id, so a strike shared with another row (or a
+       * running strategy) is ONE position with ONE P&L. Each row takes only its
+       * own share, off the same ledger that clamps its exits — otherwise two
+       * rows at one strike each claim the whole thing and the account budget
+       * sees double the P&L that exists.
+       */
       let pnl = 0;
       let entryPremium = 0;
       for (const leg of legsOf(row)) {
         const pos = leg === 'CE' ? cePosition : pePosition;
         if (!pos) continue;
-        // Dhan nets by security id, so a strike shared with another row (or
-        // with a running strategy) is reported as ONE position with ONE P&L.
-        // Attribute this row only its own share of it, off the same fill
-        // ledger that clamps its exits — otherwise two rows at the same strike
-        // each claim the whole thing and the account budget below sees double
-        // the P&L that actually exists.
         const brokerQty = Math.abs(Number(pos.netQty) || 0);
         const ownQty = leg === 'CE' ? row.fill?.ceQty : row.fill?.peQty;
         const share = ownQty && ownQty > 0 && brokerQty > 0
           ? Math.min(1, ownQty / brokerQty)
           : 1;   // nothing to apportion by — treat the position as this row's
-        pnl += ((Number(pos.realizedProfit) || 0) + (Number(pos.unrealizedProfit) || 0)) * share;
+        pnl += (Number(pos.realizedProfit) || 0) * share;
+
+        const isShort = Number(pos.netQty) < 0;
+        const avg = isShort ? (Number(pos.sellAvg) || 0) : (Number(pos.buyAvg) || 0);
+        const ltp = (leg === 'CE' ? ltpCe : ltpPe) ?? 0;
+        const qty = ownQty && ownQty > 0 ? Math.min(ownQty, brokerQty) : brokerQty;
+        pnl += (ltp > 0 && avg > 0 && qty > 0)
+          ? (isShort ? avg - ltp : ltp - avg) * qty
+          // No live price yet (or no average to mark against): fall back to the
+          // broker's own number rather than reporting a confident zero.
+          : (Number(pos.unrealizedProfit) || 0) * share;
+
         // A price, not a quantity — never scaled.
-        entryPremium += pos.netQty < 0 ? (Number(pos.sellAvg) || 0) : (Number(pos.buyAvg) || 0);
+        entryPremium += avg;
       }
 
       const rowExpiry = row.expiry || expiries[u]?.[0] || '';
@@ -2361,8 +2401,7 @@ export default function FocusTool() {
 
       out[row.id] = {
         ceStrike, peStrike,
-        ltpCe: pick(ceWs?.ce?.ltp, ceCh?.ce),
-        ltpPe: pick(peWs?.pe?.ltp, peCh?.pe),
+        ltpCe, ltpPe,
         cePosition, pePosition,
         pnl, entryPremium, vwap,
       };
@@ -2867,7 +2906,11 @@ export default function FocusTool() {
     return runRowAction(row.id, async () => {
       const live = rowLive[row.id] ?? EMPTY_ROW_LIVE;
       const legs = leg === 'ALL' ? legsOf(row) : [leg];
-      for (const l of legs) await placeLeg(row, l, { reduce: true, all: true });
+      // Concurrently, not one after the other. This is the panic button: legs
+      // are independent orders against different contracts, and serialising
+      // them made a straddle's second leg wait out the first's full round trip
+      // (~60ms) for nothing. Each leg still reports its own rejection.
+      await Promise.all(legs.map(l => placeLeg(row, l, { reduce: true, all: true })));
       if (leg === 'ALL' && await waitRowFlat(row, live)) {
         updateRow(row.id, { status: 'exited', fill: undefined }, true);
       }
@@ -3085,9 +3128,54 @@ export default function FocusTool() {
     // rules server-side, so the tab must not race it — and must not act at all
     // until it knows whether the worker is up. See tabMayTrade.
     if (!tabMayTrade) return;
-    for (const row of config.rows) {
+
+    const openRows = config.rows.filter(r => {
+      const l = rowLive[r.id];
+      return l && !legsFlat(l);
+    });
+    if (!openRows.length) return;
+
+    // ── Account budget, on every tick ──
+    // This used to sit in the 5s scheduler, which meant a target could be
+    // overshot — or a stop breached — by up to five seconds of movement while
+    // the numbers driving it (spot, premiums) were already on screen. It is a
+    // pure function of data that arrives with the ticks, so it belongs here.
+    const risk = evaluateGlobalRisk(
+      { riskEnabled, targetRupees, stopRupees, trailEnabled, triggerRupees, lockRupees },
+      { totalPnl: toolPnl, peakPnl: peakMtm, lockFloor: lockFloorRef.current },
+    );
+    lockFloorRef.current = risk.lockFloor;
+    if (risk.exitAll) {
+      for (const row of openRows) autoExitRow(row, risk.reason);
+      return;   // nothing else runs on a tick that just flattened the book
+    }
+
+    // ── Book Exit, on every tick ──
+    // A spot LEVEL against a spot that moves continuously. Checking it five
+    // times a minute was the single largest hole on this side.
+    for (const g of config.groups) {
+      if (!g.bookExit) continue;
+      const spot = spots[g.underlying] ?? 0;
+      if (!(spot > 0)) continue;
+      const hi = Number(g.spotHigh);
+      const lo = Number(g.spotLow);
+      let reason: string | null = null;
+      if (g.spotHigh && Number.isFinite(hi) && hi > 0 && spot >= hi) {
+        reason = `${g.underlying} book exit: spot ${spot.toFixed(2)} ≥ ${hi}`;
+      } else if (g.spotLow && Number.isFinite(lo) && lo > 0 && spot <= lo) {
+        reason = `${g.underlying} book exit: spot ${spot.toFixed(2)} ≤ ${lo}`;
+      }
+      if (reason) {
+        for (const row of openRows.filter(r => r.underlying === g.underlying)) {
+          autoExitRow(row, reason);
+        }
+      }
+    }
+
+    // ── Per-row level exits ──
+    for (const row of openRows) {
       const live = rowLive[row.id];
-      if (!live || legsFlat(live)) continue;
+      if (!live) continue;
 
       // Leg-wise SL x first: it can fire independently of, and more often
       // than, the pair-level rules below. Skip the whole-row check this tick
@@ -3102,7 +3190,8 @@ export default function FocusTool() {
       if (reason) autoExitRow(row, reason);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [rowLive, spots, tabMayTrade]);
+  }, [rowLive, spots, tabMayTrade, toolPnl, riskEnabled, targetRupees, stopRupees,
+      trailEnabled, triggerRupees, lockRupees, peakMtm, lockMtm]);
 
   /**
    * Open every leg this row trades, at its configured lot size.
@@ -3188,51 +3277,23 @@ export default function FocusTool() {
     if (!tabMayTrade) return;
 
     const tick = () => {
-      const {
-        config: cfg, rowLive: live, spots: sp, toolPnl: tot, lockMtm: lock, peakMtm: peak,
-        riskEnabled: riskOn, targetRupees: target$, stopRupees: stop$, trailEnabled: trailOn,
-        triggerRupees: trigger$, lockRupees: lock$,
-      } = schedulerRef.current;
+      const { config: cfg, rowLive: live } = schedulerRef.current;
+      // Display mirror of the authoritative floor — see lockFloorRef. The
+      // identity return makes an unchanged floor a no-op rather than a render.
+      setLockMtm(prev => (prev === lockFloorRef.current ? prev : lockFloorRef.current));
       const nowHm = istHm();
       const openRows = cfg.rows.filter(r => {
         const l = live[r.id];
         return l && !legsFlat(l);
       });
 
-      // ── 1. Account-wide budget: closes every open row at once ──
-      // Delegated to the shared rule so the trail ratchets identically here and
-      // in the worker — the floor is carried between ticks rather than
-      // recomputed, so a spike that has already faded still counts.
-      const risk = evaluateGlobalRisk(
-        { riskEnabled: riskOn, targetRupees: target$, stopRupees: stop$,
-          trailEnabled: trailOn, triggerRupees: trigger$, lockRupees: lock$ },
-        { totalPnl: tot, peakPnl: peak, lockFloor: lock },
-      );
-      if (risk.lockFloor !== lock) setLockMtm(risk.lockFloor);
-      if (risk.exitAll && openRows.length) {
-        for (const row of openRows) actionsRef.current.autoExitRow(row, risk.reason);
-        return;   // nothing else should run on a tick that just flattened the book
-      }
+      // The account budget and Book Exit used to live here. Both are pure
+      // functions of data that arrives with the ticks, so they moved to the
+      // tick-driven watcher above — a spot level checked every 5s is a spot
+      // level checked five times a minute. What is left is genuinely
+      // clock-driven and must keep firing when no tick arrives at all.
 
-      // ── 2. Per-index Book Exit on spot levels ──
-      for (const g of cfg.groups) {
-        if (!g.bookExit) continue;
-        const spot = sp[g.underlying] ?? 0;
-        if (!(spot > 0)) continue;
-        const hi = Number(g.spotHigh);
-        const lo = Number(g.spotLow);
-        let reason: string | null = null;
-        if (g.spotHigh && Number.isFinite(hi) && hi > 0 && spot >= hi) {
-          reason = `${g.underlying} book exit: spot ${spot.toFixed(2)} ≥ ${hi}`;
-        } else if (g.spotLow && Number.isFinite(lo) && lo > 0 && spot <= lo) {
-          reason = `${g.underlying} book exit: spot ${spot.toFixed(2)} ≤ ${lo}`;
-        }
-        if (reason) {
-          for (const row of openRows.filter(r => r.underlying === g.underlying)) actionsRef.current.autoExitRow(row, reason);
-        }
-      }
-
-      // ── 3. Per-row time exit, plus the repo-wide 15:17 intraday backstop ──
+      // ── 1. Per-row time exit, plus the repo-wide 15:17 intraday backstop ──
       for (const row of openRows) {
         if (row.exitTime && nowHm >= row.exitTime) {
           actionsRef.current.autoExitRow(row, `Exit time ${row.exitTime} reached`);
@@ -3244,7 +3305,7 @@ export default function FocusTool() {
         }
       }
 
-      // ── 4. Auto-entry for armed rows ──
+      // ── 2. Auto-entry for armed rows ──
       // Every condition lives in the shared evaluateEntry, which the worker
       // runs too — including the reason string, so both report the same thing
       // about the same row.
@@ -3264,7 +3325,7 @@ export default function FocusTool() {
     };
 
     tick();
-    const t = setInterval(tick, 5000);
+    const t = setInterval(tick, 1000);
     return () => clearInterval(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tabMayTrade]);
