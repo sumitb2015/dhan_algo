@@ -1,7 +1,7 @@
 'use client';
 
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { Button } from '@/components/ui/button';
+import { cn } from '@/lib/utils';
 
 // ─── Types ────────────────────────────────────────────────────────
 
@@ -37,6 +37,15 @@ interface Toast {
   detail?: string;
 }
 
+// ─── Type scale (dhan-terminal-polish convention) ────────────────
+
+const TXT_MICRO   = 'text-[8px]';  // column footnotes
+const TXT_LABEL   = 'text-[9px]';  // field labels, badges
+const TXT_VALUE   = 'text-[10px]'; // secondary readouts
+const TXT_CAPTION = 'text-[11px]'; // primary compact values
+
+const FOCUS_RING = 'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500/60 focus-visible:ring-offset-1 focus-visible:ring-offset-zinc-950';
+
 // ─── Constants ────────────────────────────────────────────────────
 
 const UNDERLYING  = 'NIFTY';
@@ -50,13 +59,6 @@ const QUADRANTS: { label: QuadrantLabel; classes: string; dot: string }[] = [
   { label: 'Short Covering', classes: 'border-sky-500/25 bg-sky-500/5',         dot: 'bg-sky-400' },
   { label: 'Long Unwinding', classes: 'border-amber-500/25 bg-amber-500/5',     dot: 'bg-amber-400' },
 ];
-
-const TILE_CLASSES: Record<QuadrantLabel, string> = {
-  'Long Buildup':   'text-emerald-300 bg-emerald-500/10 border-emerald-500/25',
-  'Short Buildup':  'text-red-300 bg-red-500/10 border-red-500/25',
-  'Short Covering': 'text-sky-300 bg-sky-500/10 border-sky-500/25',
-  'Long Unwinding': 'text-amber-300 bg-amber-500/10 border-amber-500/25',
-};
 
 // ─── Helpers ──────────────────────────────────────────────────────
 
@@ -93,13 +95,18 @@ function fmtPct(pct: number | null): string {
   return (pct >= 0 ? '+' : '') + pct.toFixed(1) + '%';
 }
 
+function pctClass(pct: number | null): string {
+  if (pct === null) return 'text-zinc-500';
+  return pct > 0 ? 'text-emerald-400' : pct < 0 ? 'text-red-400' : 'text-zinc-400';
+}
+
 // ─── Tile ─────────────────────────────────────────────────────────
 
 // CE/PE get a fixed identity color independent of buildup-quadrant color,
 // so option type reads at a glance regardless of which quadrant a tile sits in.
-const OPTION_TYPE_CLASSES: Record<'CE' | 'PE', string> = {
-  CE: 'border-l-4 border-l-cyan-400',
-  PE: 'border-l-4 border-l-fuchsia-400',
+const OPTION_TYPE_RING: Record<'CE' | 'PE', string> = {
+  CE: 'ring-1 ring-inset ring-cyan-500/30',
+  PE: 'ring-1 ring-inset ring-fuchsia-500/30',
 };
 const OPTION_TYPE_BADGE: Record<'CE' | 'PE', string> = {
   CE: 'bg-cyan-500 text-cyan-950',
@@ -107,43 +114,71 @@ const OPTION_TYPE_BADGE: Record<'CE' | 'PE', string> = {
 };
 
 function QuadrantTile({
-  tile, label, pending, onTrade,
+  tile, pending, onTrade,
 }: {
   tile: Tile;
-  label: QuadrantLabel;
   pending: boolean;
   onTrade: (tile: Tile, side: 'BUY' | 'SELL') => void;
 }) {
   return (
-    <div className={`flex flex-col gap-1.5 px-2.5 py-2 rounded-lg border text-[11px] font-semibold tabular-nums ${TILE_CLASSES[label]} ${OPTION_TYPE_CLASSES[tile.type]}`}>
-      <div className="flex items-center gap-1.5">
-        <span className="font-bold">{tile.strike.toLocaleString('en-IN')}</span>
-        <span className={`text-[9px] font-extrabold px-1.5 py-0.5 rounded ${OPTION_TYPE_BADGE[tile.type]}`}>{tile.type}</span>
+    <div className={cn(
+      'flex flex-col rounded-xl overflow-hidden bg-zinc-950/60 border border-zinc-800/80',
+      OPTION_TYPE_RING[tile.type],
+      pending && 'animate-pulse',
+    )}>
+      {/* Header: strike + type */}
+      <div className="flex items-center justify-between px-2.5 pt-2 pb-1.5">
+        <span className={cn(TXT_CAPTION, 'font-black text-zinc-100 tabular-nums')}>
+          {tile.strike.toLocaleString('en-IN')}
+        </span>
+        <span className={cn(TXT_MICRO, 'font-extrabold px-1.5 py-0.5 rounded', OPTION_TYPE_BADGE[tile.type])}>
+          {tile.type}
+        </span>
       </div>
-      <div className="flex items-center gap-2 text-[10px] opacity-90">
-        <span>₹{tile.ltp.toFixed(1)}</span>
-        <span>{fmtPct(tile.priceChgPct)}</span>
-        <span>OI {fmtPct(tile.oiChgPct)}</span>
+
+      {/* Price + OI readout */}
+      <div className="flex items-baseline justify-between px-2.5 pb-2 gap-1.5">
+        <span className={cn(TXT_CAPTION, 'font-bold text-zinc-200 tabular-nums whitespace-nowrap')}>
+          ₹{tile.ltp.toFixed(1)}
+        </span>
+        <span className={cn(TXT_MICRO, 'tabular-nums whitespace-nowrap', pctClass(tile.priceChgPct))}>
+          {fmtPct(tile.priceChgPct)}
+        </span>
+        <span className={cn(TXT_MICRO, 'tabular-nums whitespace-nowrap ml-auto', pctClass(tile.oiChgPct))} title="OI change vs previous session">
+          OI {fmtPct(tile.oiChgPct)}
+        </span>
       </div>
-      <div className="flex items-center gap-1 pt-0.5 border-t border-white/10 mt-0.5">
-        <Button
-          size="icon-xs"
+
+      {/* Trade actions */}
+      <div className="grid grid-cols-2 border-t border-zinc-800/80">
+        <button
+          type="button"
           disabled={pending}
           onClick={() => onTrade(tile, 'BUY')}
-          className="flex-1 h-5 bg-emerald-600 hover:bg-emerald-500 text-oncolor font-extrabold text-[10px] disabled:opacity-40"
           title={`Buy ${tile.strike} ${tile.type}`}
+          className={cn(
+            'flex items-center justify-center gap-1 h-7 border-r border-zinc-800/80',
+            'bg-emerald-600/90 hover:bg-emerald-500 active:bg-emerald-600 text-oncolor font-extrabold',
+            TXT_VALUE, 'transition-colors disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer',
+            FOCUS_RING,
+          )}
         >
-          B
-        </Button>
-        <Button
-          size="icon-xs"
+          BUY
+        </button>
+        <button
+          type="button"
           disabled={pending}
           onClick={() => onTrade(tile, 'SELL')}
-          className="flex-1 h-5 bg-rose-600 hover:bg-rose-500 text-oncolor font-extrabold text-[10px] disabled:opacity-40"
           title={`Sell ${tile.strike} ${tile.type}`}
+          className={cn(
+            'flex items-center justify-center gap-1 h-7',
+            'bg-rose-600/90 hover:bg-rose-500 active:bg-rose-600 text-oncolor font-extrabold',
+            TXT_VALUE, 'transition-colors disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer',
+            FOCUS_RING,
+          )}
         >
-          S
-        </Button>
+          SELL
+        </button>
       </div>
     </div>
   );
@@ -271,55 +306,85 @@ export default function QuikTradeQuadrants({ expiry }: { expiry: string }) {
       {/* Toast overlay */}
       <div className="fixed top-4 right-4 z-50 flex flex-col gap-2 pointer-events-none">
         {toasts.map(t => (
-          <div key={t.id} className={`pointer-events-auto px-4 py-3 rounded-xl border text-sm font-semibold
-            shadow-2xl max-w-xs
-            ${t.kind === 'success'
+          <div key={t.id} className={cn(
+            'pointer-events-auto px-4 py-3 rounded-xl border text-sm font-semibold shadow-2xl max-w-xs',
+            t.kind === 'success'
               ? 'bg-emerald-900/95 border-emerald-500/40 text-emerald-200'
-              : 'bg-rose-900/95 border-rose-500/40 text-rose-200'}`}>
+              : 'bg-rose-900/95 border-rose-500/40 text-rose-200',
+          )}>
             <p>{t.message}</p>
             {t.detail && <p className="text-xs opacity-70 mt-0.5 font-mono">{t.detail}</p>}
           </div>
         ))}
       </div>
 
-      <div className="flex items-center gap-4 text-[10px] text-zinc-500 font-medium">
-        {loading && <span className="text-zinc-400 animate-pulse">Refreshing…</span>}
-        {lastUpdated && <span>Updated {lastUpdated}</span>}
-        {atm > 0 && (
-          <span className="text-[10px] font-bold text-amber-400 bg-amber-500/10 px-2 py-0.5 rounded border border-amber-500/20">
-            ATM {atm.toLocaleString('en-IN')}
-          </span>
-        )}
-        <div className="ml-auto flex items-center gap-2">
-          <label className="text-[10px] text-zinc-500 font-semibold uppercase tracking-wide">Lots</label>
-          <input
-            type="number" min={1} step={1}
-            value={lots}
-            onChange={e => setLots(Math.max(1, Number(e.target.value) || 1))}
-            className="w-12 bg-zinc-900 border border-zinc-800 rounded-md px-1.5 py-0.5 text-[11px] font-bold text-zinc-200 tabular-nums focus:outline-none focus:border-emerald-500"
-          />
-          <span>Auto-refresh: 30s · ATM ±{WINGS} strikes</span>
+      {/* Control strip */}
+      <div className="flex items-center gap-2 flex-wrap">
+        <div className="flex items-center gap-3 bg-zinc-950/40 border border-zinc-800/60 rounded-xl px-3 py-1.5">
+          {loading && <span className={cn(TXT_VALUE, 'text-zinc-400 animate-pulse')}>Refreshing…</span>}
+          {lastUpdated && <span className={cn(TXT_VALUE, 'text-zinc-500')}>Updated {lastUpdated}</span>}
+          {atm > 0 && (
+            <span className={cn(TXT_LABEL, 'font-bold text-amber-400 bg-amber-500/10 px-2 py-0.5 rounded border border-amber-500/20')}>
+              ATM {atm.toLocaleString('en-IN')}
+            </span>
+          )}
+          <span className={cn(TXT_MICRO, 'text-zinc-600')}>Auto-refresh 30s · ATM ±{WINGS} strikes</span>
+        </div>
+
+        <div className="ml-auto flex items-center gap-2 bg-zinc-950/40 border border-zinc-800/60 rounded-xl px-3 py-1.5">
+          <span className={cn(TXT_LABEL, 'font-black text-zinc-600 uppercase tracking-widest')}>Lots</span>
+          <div className="inline-flex items-center gap-1">
+            <button
+              type="button"
+              onClick={() => setLots(v => Math.max(1, v - 1))}
+              title="Reduce lots by one"
+              aria-label="Reduce lots by one"
+              className={cn('h-6 w-6 rounded-md bg-zinc-800 border border-zinc-700 text-zinc-300 font-bold flex items-center justify-center hover:bg-zinc-700 cursor-pointer transition-colors', FOCUS_RING)}
+            >
+              −
+            </button>
+            <input
+              type="number" min={1} step={1}
+              value={lots}
+              onChange={e => setLots(Math.max(1, Number(e.target.value) || 1))}
+              title="Lots to trade per leg"
+              className={cn(
+                'w-10 h-6 text-center bg-zinc-900 border border-zinc-700 rounded-md',
+                TXT_CAPTION, 'font-bold text-zinc-100 tabular-nums',
+                'focus:outline-none focus:border-violet-500 focus:ring-1 focus:ring-violet-500/40',
+              )}
+            />
+            <button
+              type="button"
+              onClick={() => setLots(v => v + 1)}
+              title="Add one lot"
+              aria-label="Add one lot"
+              className={cn('h-6 w-6 rounded-md bg-zinc-800 border border-zinc-700 text-zinc-300 font-bold flex items-center justify-center hover:bg-violet-600 hover:border-violet-600 hover:text-oncolor cursor-pointer transition-colors', FOCUS_RING)}
+            >
+              +
+            </button>
+          </div>
         </div>
       </div>
 
       {error && (
-        <div className="text-xs text-red-400 bg-red-500/10 border border-red-500/30 rounded-lg px-4 py-2">
+        <div className={cn(TXT_VALUE, 'text-red-400 bg-red-500/10 border border-red-500/30 rounded-lg px-4 py-2')}>
           {error}
         </div>
       )}
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
         {QUADRANTS.map(q => (
-          <div key={q.label} className={`border rounded-2xl p-4 ${q.classes}`}>
+          <div key={q.label} className={cn('border rounded-2xl p-4', q.classes)}>
             <div className="flex items-center gap-2 mb-3">
-              <span className={`h-2 w-2 rounded-full ${q.dot}`} />
+              <span className={cn('h-2 w-2 rounded-full', q.dot)} />
               <span className="text-sm font-bold text-white">{q.label}</span>
-              <span className="text-[10px] text-zinc-500 ml-auto">
+              <span className={cn(TXT_VALUE, 'text-zinc-500 ml-auto')}>
                 {tilesByQuadrant[q.label].length} legs
               </span>
             </div>
             {tilesByQuadrant[q.label].length === 0 ? (
-              <span className="text-[11px] text-zinc-600 py-2">
+              <span className={cn(TXT_VALUE, 'text-zinc-600 py-2 block')}>
                 {loading ? 'Loading…' : 'No legs'}
               </span>
             ) : (
@@ -328,21 +393,20 @@ export default function QuikTradeQuadrants({ expiry }: { expiry: string }) {
                   const legs = tilesByQuadrant[q.label].filter(t => t.type === type);
                   return (
                     <div key={type} className="flex flex-col gap-2">
-                      <span className={`text-[9px] font-extrabold uppercase tracking-wider px-1.5 py-0.5 rounded self-start ${OPTION_TYPE_BADGE[type]}`}>
+                      <span className={cn(TXT_LABEL, 'font-extrabold uppercase tracking-wider px-1.5 py-0.5 rounded self-start', OPTION_TYPE_BADGE[type])}>
                         {type === 'CE' ? 'Calls' : 'Puts'}
                       </span>
-                      <div className="flex flex-wrap gap-2">
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
                         {legs.map(tile => (
                           <QuadrantTile
                             key={`${tile.strike}-${tile.type}`}
                             tile={tile}
-                            label={q.label}
                             pending={pendingKey === `${tile.strike}-${tile.type}`}
                             onTrade={placeOrder}
                           />
                         ))}
                         {legs.length === 0 && (
-                          <span className="text-[10px] text-zinc-600 py-1">None</span>
+                          <span className={cn(TXT_VALUE, 'text-zinc-600 py-1')}>None</span>
                         )}
                       </div>
                     </div>
