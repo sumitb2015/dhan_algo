@@ -38,31 +38,16 @@ export const SCANNER_COLUMNS: ColumnDoc[] = [
     desc: 'Calendar days to expiry. The scanner picks the nearest expiry at least 5 days out — a 1-day contract has almost no premium left and would distort the yield ranking.',
   },
   {
-    term: 'Cycle Start',
-    formula: 'first session after the previous monthly expiry',
-    desc: 'When the current option cycle opened, with the underlying’s close on that day beneath it. Indian stock options are monthly, so this is the natural window for the contract being sold.',
-  },
-  {
     term: '1D',
-    desc: 'Underlying’s percentage move over the last trading session.',
+    desc: 'Underlying’s percentage move over the last trading session. A trailing amber * means the daily-history CSV this is computed from hasn\'t refreshed in a few days — treat 1D/5D as stale for that row.',
   },
   {
     term: '5D',
     desc: 'Underlying’s percentage move over the last 5 trading sessions.',
   },
   {
-    term: 'Cycle',
-    formula: '(LTP − cycle-open price) ÷ cycle-open price',
-    desc: 'Move since the cycle opened — i.e. how the stock has travelled over the life of this contract.',
-  },
-  {
     term: 'Suggested Strike',
     desc: 'The OTM put strike for this row, with its no-hit probability and lot size. Every liquid strike above the scan floor gets its own row, so one symbol usually appears several times at different risk levels.',
-  },
-  {
-    term: 'To Strike',
-    formula: '(cycle-open price − strike) ÷ cycle-open price',
-    desc: 'Headroom between the cycle-open price and the strike, anchored the same way the move columns are. The smaller "now" figure underneath is the same gap measured from today’s LTP. Negative means the strike now sits above where the cycle opened.',
   },
   {
     term: 'Yield',
@@ -72,7 +57,7 @@ export const SCANNER_COLUMNS: ColumnDoc[] = [
   {
     term: 'Ann.',
     formula: 'yield × (365 ÷ DTE)',
-    desc: 'Yield scaled to a year so strikes on different expiries compare honestly. Treat it as a run-rate, not a forecast: it extrapolates a ~10-day contract and assumes you keep redeploying at the same rate.',
+    desc: 'Simple annualised return — yield scaled linearly by calendar days to expiry, not compounded and not trading-day (252) based. Treat it as a run-rate, not a forecast or a CAGR: it extrapolates a ~10-day contract and assumes you keep redeploying at the same rate with no compounding.',
   },
   {
     term: 'Premium',

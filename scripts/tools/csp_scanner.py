@@ -1,13 +1,14 @@
 """
-Cash Secured Put scanner over the Nifty 500 F&O universe.
+Cash Secured Put scanner over the Nifty 500 (default) or Nifty 50 F&O universe.
 
 Long-running: the Dhan option-chain endpoint self-throttles to one call every
-3 seconds, so a full sweep of ~200 F&O names takes ~10 minutes. The dashboard
-spawns this detached and polls debug/csp_scan_status.json, the same way the
-data refresh works.
+3 seconds, so a full Nifty 500 sweep (~200 F&O names) takes ~10 minutes; Nifty 50
+(~50 names) takes ~2.5 minutes. The dashboard spawns this detached and polls
+debug/csp_scan_status.json, the same way the data refresh works.
 
 Usage:
-    python csp_scanner.py                      # full scan
+    python csp_scanner.py                      # full Nifty 500 scan
+    python csp_scanner.py --universe nifty50   # Nifty 50 only
     python csp_scanner.py --target-prob 0.85   # aim for a safer strike
     python csp_scanner.py --limit 20           # partial scan (testing)
 """
@@ -18,7 +19,8 @@ import json
 import math
 import argparse
 import warnings
-from datetime import datetime, timezone, date, timedelta
+from datetime import datetime, timezone, date
+from zoneinfo import ZoneInfo
 
 warnings.filterwarnings("ignore")
 
@@ -27,6 +29,7 @@ sys.path.insert(0, PROJECT_ROOT)
 
 from login import get_dhan_client
 from lib.dhan_helper import DhanHelper
+from live_equity_ws import NIFTY50_SYMBOLS
 
 DEBUG_DIR    = os.path.join(PROJECT_ROOT, "debug")
 STATUS_FILE  = os.path.join(DEBUG_DIR, "csp_scan_status.json")
@@ -37,6 +40,8 @@ STOCKS_DIR   = os.path.join(PROJECT_ROOT, "Daily_Historical_Data_Fresh")
 
 RISK_FREE_RATE = 0.065
 MIN_DTE = 5
+IST = ZoneInfo("Asia/Kolkata")
+HISTORY_STALE_DAYS = 3
 
 os.makedirs(DEBUG_DIR, exist_ok=True)
 
@@ -124,6 +129,12 @@ def read_nifty500() -> list:
     return symbols
 
 
+def read_nifty50() -> list:
+    """The hand-maintained Nifty 50 constituent list already used by the live
+    equity WebSocket bridge — reused here rather than keeping a third copy."""
+    return list(NIFTY50_SYMBOLS)
+
+
 def fo_universe(helper: DhanHelper, symbols: list) -> tuple:
     """Filter to symbols that actually have stock option contracts.
 
@@ -156,7 +167,7 @@ def fo_universe(helper: DhanHelper, symbols: list) -> tuple:
     return default_lot, by_expiry
 
 
-# ── Price history (for the 1D / 5D / cycle move columns) ─────────────────────
+# ── Price history (for the 1D / 5D move columns) ──────────────────────────────
 def read_history(symbol: str) -> list:
     """Trailing (date, close) pairs, oldest first. Empty when the CSV is missing."""
     path = os.path.join(STOCKS_DIR, f"{symbol}_Daily_2Y.csv")
@@ -185,29 +196,6 @@ def pct_move(closes: list, lookback: int) -> float:
     return (closes[-1] - prev) / prev * 100.0
 
 
-def prev_monthly_expiry(expiry: date) -> date:
-    """Previous month's expiry — the last same-weekday of the preceding month.
-    Indian stock options are monthly, so the option 'cycle' runs from the day
-    after one expiry to the next."""
-    first_of_month = expiry.replace(day=1)
-    last_prev_month = first_of_month - timedelta(days=1)
-    offset = (last_prev_month.weekday() - expiry.weekday()) % 7
-    return last_prev_month - timedelta(days=offset)
-
-
-def cycle_start(history: list, expiry: date):
-    """First trading day of the current option cycle and its close — i.e. the
-    session after the previous monthly expiry. Returns (None, 0.0) when the
-    CSV doesn't reach back that far."""
-    if not history:
-        return None, 0.0
-    prev_exp = prev_monthly_expiry(expiry)
-    for d, close in history:
-        if d > prev_exp:
-            return d, close
-    return None, 0.0
-
-
 def prob_touch(spot: float, strike: float, years: float, iv: float,
                r: float = RISK_FREE_RATE) -> float:
     """Probability the underlying trades at or below the strike at any point
@@ -230,7 +218,7 @@ def prob_touch(spot: float, strike: float, years: float, iv: float,
 def pick_expiry(expiries: list, min_dte: int = MIN_DTE) -> str:
     """Nearest expiry at least min_dte away — a 1-day-out contract has almost no
     premium left and would dominate the yield ranking for the wrong reason."""
-    today = date.today()
+    today = datetime.now(IST).date()
     best = None
     for e in expiries:
         try:
@@ -265,6 +253,11 @@ def scan_symbol(helper: DhanHelper, symbol: str, lot_size: int,
     if lot_by_expiry:
         lot_size = lot_by_expiry.get((symbol, expiry), lot_size)
 
+    # A full sweep takes ~10 minutes, so a symbol scanned early is stale relative
+    # to one scanned late by the time both are ranked together — stamped per row
+    # rather than once for the whole run so the UI can show each row's own age.
+    scanned_at = datetime.now(timezone.utc).isoformat()
+
     df = helper.get_option_chain_df(symbol, expiry)
     if df.empty:
         return [], _api_reason(helper, "empty option chain")
@@ -277,7 +270,7 @@ def scan_symbol(helper: DhanHelper, symbol: str, lot_size: int,
     if spot <= 0:
         return [], _api_reason(helper, "no spot price")
 
-    dte = (datetime.strptime(expiry, "%Y-%m-%d").date() - date.today()).days
+    dte = (datetime.strptime(expiry, "%Y-%m-%d").date() - datetime.now(IST).date()).days
     years = max(dte, 1) / 365.0
 
     # Open interest is quoted in shares, but tradeability is a question of lots:
@@ -327,12 +320,12 @@ def scan_symbol(helper: DhanHelper, symbol: str, lot_size: int,
     closes = [c for _, c in history]
     move_1d = pct_move(closes, 1)
     move_5d = pct_move(closes, 5)
-
-    # Anchored to the option cycle (day after the previous monthly expiry)
-    # rather than a fixed 21-session lookback, so the move lines up with the
-    # life of the contract being sold.
-    cyc_date, cyc_spot = cycle_start(history, datetime.strptime(expiry, "%Y-%m-%d").date())
-    move_cycle = ((spot - cyc_spot) / cyc_spot * 100.0) if cyc_spot > 0 else 0.0
+    # No freshness check on the CSV itself — if the daily-refresh pipeline lags,
+    # move1d/move5d would otherwise go stale silently, unlike the option-chain
+    # path above which distinguishes an API failure from a genuinely empty result.
+    history_stale = (
+        not history or (datetime.now(IST).date() - history[-1][0]).days > HISTORY_STALE_DAYS
+    )
 
     rows = []
     for c in candidates:
@@ -363,15 +356,10 @@ def scan_symbol(helper: DhanHelper, symbol: str, lot_size: int,
             "expiry": expiry,
             "dte": dte,
             "lotSize": lot_size,
+            "scannedAt": scanned_at,
             "move1d": round(move_1d, 2),
             "move5d": round(move_5d, 2),
-            "moveCycle": round(move_cycle, 2),
-            "cycleStart": cyc_date.isoformat() if cyc_date else None,
-            "cycleSpot": round(cyc_spot, 2) if cyc_spot > 0 else None,
-            # Headroom measured from where the cycle opened, matching how the
-            # move columns are anchored; distancePct below is the same gap from
-            # today's spot.
-            "toStrikePct": round((cyc_spot - c["strike"]) / cyc_spot * 100.0, 2) if cyc_spot > 0 else None,
+            "historyStale": history_stale,
             "touchProb": round(prob_touch(spot, c["strike"], years, c["iv"]) * 100, 1),
             "strike": c["strike"],
             "premium": round(c["premium"], 2),
@@ -381,7 +369,6 @@ def scan_symbol(helper: DhanHelper, symbol: str, lot_size: int,
             "oi": c["oi"],
             "yieldPct": round(yield_pct, 2),
             "annYieldPct": round(ann_yield_pct, 1),
-            "distancePct": round(distance_pct, 2),
             "capitalRequired": round(capital, 2),
             "isPick": c is pick,
             "rationale": (
@@ -409,6 +396,8 @@ def main():
     parser.add_argument('--min-no-hit', type=float, default=40.0, dest='min_no_hit',
                         help="Lowest no-hit %% to emit; every liquid strike at or "
                              "above this is listed (default 40)")
+    parser.add_argument('--universe', choices=['nifty50', 'nifty500'], default='nifty500',
+                        help="Symbol universe to scan (default nifty500)")
     args = parser.parse_args()
 
     if os.path.exists(STOP_FILE):
@@ -424,9 +413,10 @@ def main():
         write_status(f"Auth failed: {e}", done=True, error=str(e))
         return 1
 
-    write_status("Building F&O universe…")
+    write_status(f"Building F&O universe ({args.universe})…")
     try:
-        universe, lot_by_expiry = fo_universe(helper, read_nifty500())
+        symbol_list = read_nifty50() if args.universe == 'nifty50' else read_nifty500()
+        universe, lot_by_expiry = fo_universe(helper, symbol_list)
     except Exception as e:
         write_status(f"Universe build failed: {e}", done=True, error=str(e))
         return 1
@@ -504,6 +494,7 @@ def main():
     with open(tmp, "w", encoding='utf-8') as f:
         json.dump({
             "scannedAt": datetime.now(timezone.utc).isoformat(),
+            "universe": args.universe,
             "targetProb": args.target_prob,
             "minNoHit": args.min_no_hit,
             "minOiLots": args.min_oi_lots,

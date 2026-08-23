@@ -36,7 +36,8 @@ interface ScanStatus {
 export async function GET() {
   const status = readJson<ScanStatus>(STATUS_FILE);
   const results = readJson<{
-    scannedAt: string; targetProb: number; minNoHit?: number; minOiLots?: number;
+    scannedAt: string; universe?: 'nifty50' | 'nifty500'; targetProb: number;
+    minNoHit?: number; minOiLots?: number;
     symbolsScanned?: number; symbolsSkipped?: Record<string, string>;
     apiFailures?: number; rows: unknown[];
   }>(RESULTS_FILE);
@@ -47,6 +48,9 @@ export async function GET() {
     running,
     status,
     scannedAt: results?.scannedAt ?? null,
+    // Which universe the currently-displayed rows actually came from — not
+    // necessarily what the client's toggle is set to for the *next* scan.
+    universe: results?.universe ?? 'nifty500',
     targetProb: results?.targetProb ?? null,
     minNoHit: results?.minNoHit ?? null,
     minOiLots: results?.minOiLots ?? null,
@@ -73,8 +77,9 @@ export async function POST(req: NextRequest) {
   const targetProb = Number(body?.targetProb);
   const limit = Number(body?.limit);
   const minNoHit = Number(body?.minNoHit);
+  const universe = body?.universe === 'nifty50' ? 'nifty50' : 'nifty500';
 
-  const args = [SCRIPT];
+  const args = [SCRIPT, '--universe', universe];
   if (Number.isFinite(targetProb) && targetProb > 0 && targetProb < 1) {
     args.push('--target-prob', String(targetProb));
   }

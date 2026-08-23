@@ -15,6 +15,12 @@ import { SCANNER_COLUMNS, TRACKED_COLUMNS, columnTip, type ColumnDoc } from './c
 // csp_watchlist.py CLI both go through the Dhan client, so no broker selector.
 const BROKER = 'dhan' as const;
 
+const UNIVERSES = [
+  { value: 'nifty500', label: 'NIFTY 500' },
+  { value: 'nifty50',  label: 'NIFTY 50' },
+] as const;
+type Universe = typeof UNIVERSES[number]['value'];
+
 interface ScanRow {
   symbol: string;
   score: number;
@@ -22,14 +28,14 @@ interface ScanRow {
   expiry: string;
   dte: number;
   lotSize: number;
+  /** When this row's own quote was fetched — a full sweep takes ~10 minutes,
+   * so this can lag well behind the header's overall scan-completion time. */
+  scannedAt?: string;
   move1d: number;
   move5d: number;
-  /** Move since the option cycle opened (day after the previous expiry). */
-  moveCycle: number;
-  cycleStart?: string | null;
-  cycleSpot?: number | null;
-  /** Strike's headroom measured from the cycle-open price. */
-  toStrikePct?: number | null;
+  /** Daily-history CSV hasn't refreshed recently — move1d/move5d may be
+   * computed against a stale close. */
+  historyStale?: boolean;
   /** Chance of trading at/below the strike at any point before expiry. */
   touchProb?: number;
   strike: number;
@@ -41,7 +47,6 @@ interface ScanRow {
   yieldPct: number;
   /** Yield scaled to a year, so strikes on different expiries compare. */
   annYieldPct?: number;
-  distancePct: number;
   capitalRequired: number;
   /** Marks the strike nearest the scan's target probability for this symbol. */
   isPick?: boolean;
@@ -152,6 +157,12 @@ const SYNC_CLIENT_TIMEOUT_MS = 300_000;
 export default function CspScreener() {
   const [scanRows, setScanRows] = useState<ScanRow[]>([]);
   const [scannedAt, setScannedAt] = useState<string | null>(null);
+  // `universe` is the next-scan selection the toggle controls; `resultsUniverse`
+  // is what the currently-displayed rows actually came from — they diverge
+  // whenever the user flips the toggle without rescanning yet.
+  const [universe, setUniverse] = useState<Universe>('nifty500');
+  const [resultsUniverse, setResultsUniverse] = useState<Universe>('nifty500');
+  const hasInitializedUniverseRef = useRef(false);
   const [symbolsScanned, setSymbolsScanned] = useState<number | null>(null);
   const [scanSkipped, setScanSkipped] = useState<Record<string, string>>({});
   const [apiFailures, setApiFailures] = useState(0);
@@ -194,6 +205,15 @@ export default function CspScreener() {
       if (j.success) {
         setScanRows(j.rows ?? []);
         setScannedAt(j.scannedAt ?? null);
+        const resultsUni: Universe = j.universe === 'nifty50' ? 'nifty50' : 'nifty500';
+        setResultsUniverse(resultsUni);
+        // Seed the toggle from the last completed scan only once, so a page
+        // reload reflects it — but don't let later polls stomp a user's
+        // in-progress toggle click before they've rescanned.
+        if (!hasInitializedUniverseRef.current) {
+          hasInitializedUniverseRef.current = true;
+          setUniverse(resultsUni);
+        }
         setSymbolsScanned(j.symbolsScanned ?? null);
         setScanSkipped(j.symbolsSkipped ?? {});
         setApiFailures(Number(j.apiFailures) || 0);
@@ -264,12 +284,12 @@ export default function CspScreener() {
     const res = await fetch('/api/csp-scan', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({}),
+      body: JSON.stringify({ universe }),
     });
     const j = await res.json();
     if (j.success) setScanRunning(true);
     else setError(j.error ?? 'Failed to start scan');
-  }, []);
+  }, [universe]);
 
   const stopScan = useCallback(async () => {
     await fetch('/api/csp-scan', { method: 'DELETE' }).catch(() => {});
@@ -455,6 +475,15 @@ export default function CspScreener() {
   const annYieldOf = (r: ScanRow) =>
     r.annYieldPct ?? (r.dte > 0 ? r.yieldPct * (365 / r.dte) : r.yieldPct);
 
+  // A full sweep takes ~10 minutes, so a row scanned early can be well behind
+  // the header's "DATA:" badge (which is stamped once, at sweep completion).
+  const scanAgeLabel = (r: ScanRow) => {
+    if (!r.scannedAt) return null;
+    const ageMin = Math.round((Date.now() - new Date(r.scannedAt).getTime()) / 60000);
+    if (ageMin < 1) return 'scanned <1m ago';
+    return `scanned ${ageMin}m ago`;
+  };
+
   const visibleScanRows = useMemo(() => {
     const q = symbolFilter.trim().toUpperCase();
     let rows = scanRows.filter((r) =>
@@ -493,6 +522,22 @@ export default function CspScreener() {
         </div>
         <div className="hidden h-5 w-px bg-zinc-800 sm:block" />
         <NavBar />
+        {/* Selects the universe for the *next* Rescan — does not affect the
+            rows currently on screen, which stay labelled by resultsUniverse. */}
+        <div className="flex items-center gap-0.5 rounded-lg border border-zinc-800 bg-zinc-900 p-0.5 text-[11px]">
+          {UNIVERSES.map((u) => (
+            <button
+              key={u.value}
+              onClick={() => setUniverse(u.value)}
+              className={cn(
+                'rounded px-2.5 py-1 font-semibold transition-all',
+                universe === u.value ? 'bg-amber-500/10 text-amber-400' : 'text-zinc-400 hover:text-zinc-200',
+              )}
+            >
+              {u.label}
+            </button>
+          ))}
+        </div>
         <div className="ml-auto flex items-center gap-2">
           <span className="hidden rounded-sm border border-zinc-800 bg-zinc-900 px-2 py-0.5 font-mono text-[10px] font-bold uppercase tracking-wide text-zinc-400 md:inline">
             Broker: {BROKER}
@@ -538,8 +583,14 @@ export default function CspScreener() {
               ({visibleScanRows.length}{visibleScanRows.length !== scanRows.length && ` of ${scanRows.length}`})
             </span>
             <span className="ml-2 text-[11px] text-zinc-500">
-              {`${distinctSymbols} symbols${symbolsScanned ? ` of ${symbolsScanned} scanned` : ''} · Nifty 500 F&O`}
+              {`${distinctSymbols} symbols${symbolsScanned ? ` of ${symbolsScanned} scanned` : ''} · `}
+              {resultsUniverse === 'nifty50' ? 'Nifty 50' : 'Nifty 500'} F&O
             </span>
+            {universe !== resultsUniverse && (
+              <span className="rounded-sm border border-amber-500/30 bg-amber-500/10 px-1.5 py-px font-mono text-[10px] font-bold text-amber-400">
+                {`Rescan to load ${universe === 'nifty50' ? 'NIFTY 50' : 'NIFTY 500'}`}
+              </span>
+            )}
             {skippedCount > 0 && (
               // Without this a symbol dropped by a throttled chain call is
               // indistinguishable from one with no sellable puts, and the scan
@@ -674,7 +725,7 @@ export default function CspScreener() {
                 type="number" min={0} step={1} value={minAnnYield}
                 onChange={(e) => setMinAnnYield(Math.max(0, Number(e.target.value) || 0))}
                 className="w-16 rounded-sm border border-zinc-800 bg-zinc-950 px-1.5 py-1 font-mono"
-                title="Minimum annualised return on the capital blocked"
+                title="Minimum simple annualised return on the capital blocked (yield × 365/DTE, not compounded)"
               />
               <span className="text-zinc-600">%</span>
             </div>
@@ -730,12 +781,9 @@ export default function CspScreener() {
                   <ScanTH right>LTP</ScanTH>
                   <ScanTH>Expiry</ScanTH>
                   <ScanTH right>DTE</ScanTH>
-                  <ScanTH>Cycle Start</ScanTH>
                   <ScanTH right>1D</ScanTH>
                   <ScanTH right>5D</ScanTH>
-                  <ScanTH right>Cycle</ScanTH>
                   <ScanTH>Suggested Strike</ScanTH>
-                  <ScanTH right>To Strike</ScanTH>
                   <ScanTH right>Yield</ScanTH>
                   <ScanTH right>Ann.</ScanTH>
                   <ScanTH right>Premium</ScanTH>
@@ -748,7 +796,7 @@ export default function CspScreener() {
               </thead>
               <tbody>
                 {visibleScanRows.length === 0 && (
-                  <tr><td colSpan={19} className="py-6 text-center text-[11px] text-zinc-600">
+                  <tr><td colSpan={16} className="py-6 text-center text-[11px] text-zinc-600">
                     {scanLoading ? 'Loading…'
                       : scanRunning ? 'Scan in progress — results appear when it finishes.'
                         : scanRows.length > 0
@@ -760,36 +808,29 @@ export default function CspScreener() {
                 {visibleScanRows.map((r) => (
                   // Multiple strikes per symbol now, so the key must include one.
                   <tr key={`${r.symbol}-${r.strike}`} className="border-b border-zinc-900/80 hover:bg-zinc-900/40">
-                    <TD className="font-bold text-zinc-100">{r.symbol}</TD>
+                    <TD className="font-bold text-zinc-100" title={scanAgeLabel(r) ?? undefined}>{r.symbol}</TD>
                     <TD right><ScoreBadge v={r.score} /></TD>
                     <TD right className="text-zinc-200">{fmt(r.ltp)}</TD>
                     <TD className="text-zinc-400">{r.expiry}</TD>
                     <TD right className="text-zinc-400">{r.dte}</TD>
-                    <TD>
-                      {r.cycleStart ? (
-                        <div className="flex flex-col">
-                          <span className="text-zinc-400">{r.cycleStart}</span>
-                          <span className="text-[10px] text-zinc-500">{fmt(r.cycleSpot ?? 0)}</span>
-                        </div>
-                      ) : <span className="text-zinc-600">—</span>}
+                    <TD right>
+                      <div className="flex items-center justify-end gap-1">
+                        <PctText v={r.move1d} />
+                        {r.historyStale && (
+                          <span
+                            className="text-amber-500"
+                            title="Daily history CSV hasn't refreshed recently — 1D/5D may be stale"
+                          >
+                            *
+                          </span>
+                        )}
+                      </div>
                     </TD>
-                    <TD right><PctText v={r.move1d} /></TD>
                     <TD right><PctText v={r.move5d} /></TD>
-                    <TD right><PctText v={r.moveCycle} /></TD>
                     <TD>
                       <div className="flex flex-col">
                         <span className="font-bold text-sky-400">{r.strike} PE</span>
                         <span className="text-[10px] text-zinc-500">{r.noHitProb.toFixed(0)}% safe · lot {r.lotSize}</span>
-                      </div>
-                    </TD>
-                    <TD right>
-                      {/* Main figure is anchored to the cycle open, matching the
-                          move columns; the sub-line is the same gap from today. */}
-                      <div className="flex flex-col items-end">
-                        <span className="font-bold text-zinc-200">
-                          {r.toStrikePct !== null && r.toStrikePct !== undefined ? `${r.toStrikePct.toFixed(1)}%` : '—'}
-                        </span>
-                        <span className="text-[10px] text-zinc-500">now {r.distancePct.toFixed(1)}%</span>
                       </div>
                     </TD>
                     <TD right className="text-zinc-200">{r.yieldPct.toFixed(2)}%</TD>
