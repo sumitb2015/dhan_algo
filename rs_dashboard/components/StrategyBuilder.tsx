@@ -15,16 +15,20 @@ import {
   ChainOc, ResolvedLeg, PayoffStats,
 } from '@/lib/optionsStrategy';
 import { fetchMarginSummary, type MarginSummary } from '@/lib/optionsMargin';
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
-import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Alert, AlertTitle } from '@/components/ui/alert';
-import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import {
   Table, TableBody, TableCell, TableHead, TableHeader, TableRow,
 } from '@/components/ui/table';
 import { AlertTriangle, CheckIcon, Minus, Plus } from 'lucide-react';
 import { cn } from '@/lib/utils';
+
+const TABS = [
+  { id: 'builder', label: 'Builder' },
+  { id: 'pct_strangle', label: '% Strangle' },
+  { id: 'saved', label: 'Saved Strategies' },
+  { id: 'positions', label: 'Positions' },
+] as const;
 
 const UNDERLYING = 'NIFTY';
 // PREVIEW ONLY — scales the payoff curve/stats for the moment before
@@ -424,36 +428,57 @@ export default function StrategyBuilder() {
   const displayedCurve = useMemo(() => curve, [curve]);
 
   return (
-    <div className="min-h-screen text-zinc-300">
+    <div className="flex flex-col min-h-screen bg-zinc-950 text-white">
       <NavBar />
 
-      <div className="sticky top-0 z-30 border-b border-zinc-800 bg-zinc-950/80 px-4 py-3 backdrop-blur-md">
-        <div className="mx-auto flex flex-wrap items-center gap-3">
-          <h1 className="mr-2 text-sm font-bold text-white">Strategy Builder</h1>
-          <Badge variant="outline" className="border-zinc-700 bg-zinc-900 font-mono text-zinc-300">NIFTY</Badge>
-          <Badge variant="outline" className="border-emerald-500/30 bg-emerald-500/10 font-mono tabular-nums text-emerald-400">
-            SPOT {spot > 0 ? spot.toFixed(1) : '—'}
-          </Badge>
-          <Badge variant="outline" className="border-zinc-700 bg-zinc-900 font-mono tabular-nums text-zinc-400">
-            LOT {lotSize ?? '…'}
-          </Badge>
+      <div className="sticky top-0 z-30 flex items-center justify-between gap-3 flex-wrap
+                      px-6 py-3 border-b border-zinc-800 bg-zinc-950/95 backdrop-blur">
+        <div className="flex items-center gap-3">
+          <div className="flex items-center justify-center w-8 h-8 rounded-lg bg-emerald-500/10 border border-emerald-500/25 shrink-0">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" className="text-emerald-400">
+              <path d="M4 20V10M12 20V4M20 20v-7" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" />
+            </svg>
+          </div>
+          <div>
+            <p className="text-[9px] font-bold text-emerald-500 uppercase tracking-[0.18em] mb-0.5">
+              Options · {UNDERLYING}
+            </p>
+            <h1 className="text-sm font-bold text-white tracking-tight leading-none">Strategy Builder</h1>
+            <p className="text-[10px] text-zinc-500 font-medium mt-1">
+              Construct, price and enter multi-leg option strategies
+            </p>
+          </div>
 
-          <Tabs
-            value={activeTab}
-            onValueChange={(v) => setActiveTab(v as typeof activeTab)}
-            className="ml-auto"
-          >
-            <TabsList className="bg-zinc-900">
-              <TabsTrigger value="builder">Builder</TabsTrigger>
-              <TabsTrigger value="pct_strangle">% Strangle</TabsTrigger>
-              <TabsTrigger value="saved">Saved Strategies</TabsTrigger>
-              <TabsTrigger value="positions">Positions</TabsTrigger>
-            </TabsList>
-          </Tabs>
+          <div className="flex items-center gap-1.5 ml-3">
+            <span className="rounded-lg border border-emerald-500/30 bg-emerald-500/10 px-2.5 py-1.5 text-xs font-mono font-semibold tabular-nums text-emerald-400">
+              SPOT {spot > 0 ? spot.toFixed(1) : '—'}
+            </span>
+            <span className="rounded-lg border border-zinc-700 bg-zinc-900 px-2.5 py-1.5 text-xs font-mono font-semibold tabular-nums text-zinc-400">
+              LOT {lotSize ?? '…'}
+            </span>
+          </div>
+        </div>
+
+        <div className="flex items-center gap-1 bg-zinc-900 border border-zinc-800 p-0.5 rounded-lg">
+          {TABS.map((t) => (
+            <button
+              key={t.id}
+              type="button"
+              onClick={() => setActiveTab(t.id)}
+              className={cn(
+                'px-3 py-1.5 text-xs font-semibold rounded-md transition-colors',
+                activeTab === t.id
+                  ? 'bg-emerald-500/15 text-emerald-400'
+                  : 'text-zinc-400 hover:text-zinc-200',
+              )}
+            >
+              {t.label}
+            </button>
+          ))}
         </div>
       </div>
 
-      <div className="mx-auto px-4 py-6 space-y-6">
+      <div className="flex-1 px-6 py-5 space-y-5">
         {activeTab === 'positions' ? (
           <PositionalTradesTab lotSize={lotSize} />
         ) : activeTab === 'saved' ? (
@@ -542,11 +567,11 @@ export default function StrategyBuilder() {
             )}
 
             {resolvedLegs && resolvedLegs.length > 0 && (
-              <Card className="bg-card/80">
-                <CardHeader className="border-b [.border-b]:pb-3">
-                  <CardTitle className="text-xs font-bold uppercase tracking-wider text-white">Strategy legs</CardTitle>
-                </CardHeader>
-                <CardContent className="px-0">
+              <div className="bg-zinc-900/60 border border-zinc-800 rounded-2xl overflow-hidden">
+                <div className="px-5 py-3 border-b border-zinc-800">
+                  <h2 className="text-xs font-bold uppercase tracking-wider text-white">Strategy legs</h2>
+                </div>
+                <div className="px-0 py-0">
                   <Table className="text-xs">
                     <TableHeader>
                       <TableRow className="bg-zinc-800 hover:bg-zinc-800">
@@ -564,17 +589,16 @@ export default function StrategyBuilder() {
                       {resolvedLegs.map((leg, idx) => (
                         <TableRow key={idx} className="border-zinc-800/60">
                           <TableCell className="px-4 py-3">
-                            <Badge
-                              variant="outline"
+                            <span
                               className={cn(
-                                'rounded-md text-[10px] font-bold',
+                                'inline-flex items-center rounded-md border px-2 py-0.5 text-[10px] font-bold',
                                 leg.side === 'BUY'
                                   ? 'border-sky-500/30 bg-sky-500/10 text-sky-400'
                                   : 'border-rose-500/30 bg-rose-500/10 text-rose-400',
                               )}
                             >
                               {leg.side}
-                            </Badge>
+                            </span>
                           </TableCell>
                           <TableCell className="py-3 font-mono text-zinc-300">{selectedExpiry}</TableCell>
                           <TableCell className="py-3">
@@ -633,24 +657,20 @@ export default function StrategyBuilder() {
                       ))}
                     </TableBody>
                   </Table>
-                </CardContent>
-              </Card>
+                </div>
+              </div>
             )}
 
             {stats && (
               <>
-                <Card className="bg-card/80">
-                  <CardHeader className="border-b [.border-b]:pb-3">
-                    <CardTitle className="text-xs font-bold uppercase tracking-wider text-white">Payoff at expiry</CardTitle>
-                  </CardHeader>
-                  <CardContent>
-                    <PayoffDiagram
-                      curve={displayedCurve}
-                      currentSpot={spot}
-                      breakevens={breakevenMode === 'expiry' ? stats.breakevensExpiry : (targetBreakevens ?? [])}
-                    />
-                  </CardContent>
-                </Card>
+                <div className="bg-zinc-900/60 border border-zinc-800 rounded-2xl p-5">
+                  <h2 className="text-xs font-bold uppercase tracking-wider text-white mb-3">Payoff at expiry</h2>
+                  <PayoffDiagram
+                    curve={displayedCurve}
+                    currentSpot={spot}
+                    breakevens={breakevenMode === 'expiry' ? stats.breakevensExpiry : (targetBreakevens ?? [])}
+                  />
+                </div>
                 <StrategySummaryPanel
                   stats={stats}
                   targetBreakevens={targetBreakevens}

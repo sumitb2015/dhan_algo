@@ -1,7 +1,6 @@
 'use client';
 
 import { StrategyTemplate } from '@/lib/optionsStrategy';
-import { Card, CardContent } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -63,13 +62,13 @@ export default function StrategySettingsPanel({
   const live = tradingType === 'live';
 
   return (
-    <Card
+    <div
       className={cn(
-        'bg-card/80 backdrop-blur-sm transition-shadow',
-        live && 'ring-amber-500/40 shadow-[0_0_24px_-8px_rgba(245,158,11,0.35)]',
+        'bg-zinc-900/60 border border-zinc-800 rounded-2xl p-5 backdrop-blur-sm transition-shadow',
+        live && 'border-amber-500/40 shadow-[0_0_24px_-8px_rgba(245,158,11,0.35)]',
       )}
     >
-      <CardContent className="space-y-4">
+      <div className="space-y-4">
         {/* Contract row */}
         <div className="flex flex-wrap items-end gap-x-6 gap-y-3">
           <div className="flex flex-col gap-1.5">
@@ -263,7 +262,7 @@ export default function StrategySettingsPanel({
             </Button>
           </div>
         </div>
-      </CardContent>
-    </Card>
+      </div>
+    </div>
   );
 }

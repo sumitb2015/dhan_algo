@@ -1,7 +1,6 @@
 'use client';
 
 import { PayoffStats } from '@/lib/optionsStrategy';
-import { Card, CardContent } from '@/components/ui/card';
 import { Separator } from '@/components/ui/separator';
 import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group';
 import { Progress } from '@/components/ui/progress';
@@ -43,8 +42,8 @@ export default function StrategySummaryPanel({
   return (
     <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
       {/* Risk profile */}
-      <Card className="bg-card/80">
-        <CardContent className="space-y-3">
+      <div className="bg-zinc-900/60 border border-zinc-800 rounded-2xl p-5">
+        <div className="space-y-3">
           <div>
             <TileLabel>Max profit</TileLabel>
             <div className="mt-0.5 font-mono text-2xl font-bold tabular-nums text-emerald-400">
@@ -71,12 +70,12 @@ export default function StrategySummaryPanel({
               {stats.popPct === null ? '—' : `${stats.popPct}%`}
             </span>
           </div>
-        </CardContent>
-      </Card>
+        </div>
+      </div>
 
       {/* Breakevens & premium composition */}
-      <Card className="bg-card/80">
-        <CardContent className="space-y-3">
+      <div className="bg-zinc-900/60 border border-zinc-800 rounded-2xl p-5">
+        <div className="space-y-3">
           <div className="flex items-center justify-between">
             <TileLabel>Breakeven</TileLabel>
             <ToggleGroup
@@ -122,12 +121,12 @@ export default function StrategySummaryPanel({
             <TileLabel>Intrinsic value</TileLabel>
             <span className="font-mono text-sm tabular-nums text-zinc-200">{fmtRupee(stats.intrinsicValue)}</span>
           </div>
-        </CardContent>
-      </Card>
+        </div>
+      </div>
 
       {/* Funds & margin */}
-      <Card className="bg-card/80">
-        <CardContent className="space-y-3">
+      <div className="bg-zinc-900/60 border border-zinc-800 rounded-2xl p-5">
+        <div className="space-y-3">
           <TileLabel>Funds &amp; margins</TileLabel>
           {marginLoading ? (
             <div className="space-y-2 animate-pulse">
@@ -177,8 +176,8 @@ export default function StrategySummaryPanel({
               )}
             </div>
           )}
-        </CardContent>
-      </Card>
+        </div>
+      </div>
     </div>
   );
 }

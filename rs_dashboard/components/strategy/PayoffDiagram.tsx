@@ -1,9 +1,17 @@
 'use client';
 
-import {
-  ComposedChart, Area, Line, XAxis, YAxis, CartesianGrid, Tooltip,
-  ReferenceLine, ResponsiveContainer,
-} from 'recharts';
+/**
+ * Payoff-at-expiry chart for the strategy builder.
+ *
+ * Hand-rolled SVG rather than recharts — recharts can't stroke a single line in two
+ * colors split at y=0, so the old ComposedChart version drew a single pale line
+ * regardless of profit/loss and only tinted the fill gradient underneath. This follows
+ * the same clip-path-per-sign technique as components/analytics/PositionsPayoffChart.tsx
+ * (the two components read as one family) so the line itself goes green above zero and
+ * red below it.
+ */
+
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 interface PayoffDiagramProps {
   curve: { spot: number; pnl: number }[];
@@ -11,158 +19,216 @@ interface PayoffDiagramProps {
   breakevens: number[];
 }
 
-function PayoffTooltip({ active, payload }: { active?: boolean; payload?: { value: number; payload: { spot: number; pnl: number } }[] }) {
-  if (!active || !payload?.length) return null;
-  const { spot, pnl } = payload[0].payload;
-  return (
-    <div className="bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-2 text-xs shadow-2xl backdrop-blur-md">
-      <div className="text-zinc-400 mb-0.5">Spot: <span className="font-mono text-zinc-100 font-semibold">{spot.toFixed(1)}</span></div>
-      <div className={`font-semibold font-mono ${pnl >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
-        P&amp;L: {pnl >= 0 ? '+' : ''}₹{pnl.toLocaleString('en-IN', { maximumFractionDigits: 0 })}
-      </div>
-    </div>
-  );
+const STEP = 50;
+const H = 320;
+const PAD = { top: 16, right: 20, bottom: 28, left: 68 };
+
+function fmtInr(v: number): string {
+  if (v === 0) return '0';
+  const abs = Math.abs(v);
+  const sign = v > 0 ? '+' : '-';
+  if (abs >= 1000) return `${sign}₹${(abs / 1000).toFixed(1).replace('.0', '')}k`;
+  return `${sign}₹${abs.toFixed(0)}`;
 }
 
-const STEP = 50;
+/** "Nice" tick values covering [lo, hi] — same helper as PositionsPayoffChart. */
+function niceTicks(lo: number, hi: number, count: number): number[] {
+  const span = hi - lo;
+  if (span <= 0) return [lo];
+  const raw = span / count;
+  const mag = Math.pow(10, Math.floor(Math.log10(raw)));
+  const norm = raw / mag;
+  const step = (norm >= 5 ? 10 : norm >= 2 ? 5 : norm >= 1 ? 2 : 1) * mag;
+  const ticks: number[] = [];
+  for (let v = Math.ceil(lo / step) * step; v <= hi + 1e-9; v += step) ticks.push(v);
+  return ticks;
+}
+
+/** P&L on a piecewise-linear curve at an arbitrary spot, by interpolation. */
+function pnlAt(curve: { spot: number; pnl: number }[], spot: number): number | null {
+  if (curve.length < 2) return null;
+  if (spot <= curve[0].spot) return curve[0].pnl;
+  if (spot >= curve[curve.length - 1].spot) return curve[curve.length - 1].pnl;
+  let lo = 0, hi = curve.length - 1;
+  while (hi - lo > 1) {
+    const mid = (lo + hi) >> 1;
+    if (curve[mid].spot <= spot) lo = mid; else hi = mid;
+  }
+  const a = curve[lo], b = curve[hi];
+  if (b.spot === a.spot) return a.pnl;
+  return a.pnl + ((spot - a.spot) / (b.spot - a.spot)) * (b.pnl - a.pnl);
+}
 
 export default function PayoffDiagram({ curve, currentSpot, breakevens }: PayoffDiagramProps) {
-  if (curve.length === 0) return null;
+  const svgRef = useRef<SVGSVGElement | null>(null);
+  const [hoverSpot, setHoverSpot] = useState<number | null>(null);
+  const [boxW, setBoxW] = useState(900);
+  const roRef = useRef<ResizeObserver | null>(null);
 
-  // --- Smart X domain: cover all key points with tight padding ---
-  const allStrikes = curve
-    .filter((_, i) => i === 0 || i === curve.length - 1 ||
-      Math.abs(curve[i].pnl - curve[i - 1].pnl) > 0) // strike kinks
-    .map((c) => c.spot);
-  const keyX = [...breakevens, currentSpot, ...allStrikes];
-  const rawMin = Math.min(...keyX);
-  const rawMax = Math.max(...keyX);
-  const pad = Math.max(STEP * 4, (rawMax - rawMin) * 0.12);
-  const xMin = rawMin - pad;
-  const xMax = rawMax + pad;
+  const boxRef = useCallback((el: HTMLDivElement | null) => {
+    roRef.current?.disconnect();
+    roRef.current = null;
+    if (!el || typeof ResizeObserver === 'undefined') return;
+    const ro = new ResizeObserver(([entry]) => setBoxW(entry.contentRect.width));
+    ro.observe(el);
+    roRef.current = ro;
+    setBoxW(el.clientWidth);
+  }, []);
 
-  // Filter curve to the visible X domain
-  const visible = curve.filter((c) => c.spot >= xMin && c.spot <= xMax);
-  if (visible.length < 2) return null;
+  useEffect(() => () => roRef.current?.disconnect(), []);
 
-  // --- Smart Y domain: clamp so zero-crossing is prominent ---
-  const visiblePnls = visible.map((c) => c.pnl);
-  const yMin = Math.min(...visiblePnls);
-  const yMax = Math.max(...visiblePnls);
-  // For unlimited-loss strategies, cap the loss tail at 3× max profit so the
-  // P=0 region stays in the upper ~25% of the chart instead of near the bottom.
-  const clampedYMin = yMax > 0 ? Math.max(yMin, -yMax * 3) : yMin * 1.1;
-  const clampedYMax = yMin < 0 ? Math.min(yMax, Math.abs(yMin) * 3) : yMax * 1.1;
-  const yPad = (clampedYMax - clampedYMin) * 0.08;
-  const yDomain: [number, number] = [clampedYMin - yPad, clampedYMax + yPad];
+  const W = Math.max(480, Math.round(boxW));
 
-  // Gradient split ratio based on clamped domain
-  const domainSpan = yDomain[1] - yDomain[0];
-  const off = domainSpan > 0
-    ? Math.min(1, Math.max(0, (yDomain[1]) / domainSpan))
-    : 0.5;
-  const offPct = (off * 100).toFixed(1);
+  const model = useMemo(() => {
+    if (curve.length === 0) return null;
 
-  // X-axis ticks: 5 evenly spaced across domain, always include currentSpot
-  const span = xMax - xMin;
-  const rawTicks = [xMin, xMin + span * 0.25, xMin + span * 0.5, xMin + span * 0.75, xMax];
-  const ticks = Array.from(new Set([...rawTicks.map((t) => Math.round(t / STEP) * STEP), Math.round(currentSpot / STEP) * STEP])).sort((a, b) => a - b);
+    // --- Smart X domain: cover all key points with tight padding ---
+    const allStrikes = curve
+      .filter((_, i) => i === 0 || i === curve.length - 1 ||
+        Math.abs(curve[i].pnl - curve[i - 1].pnl) > 0) // strike kinks
+      .map((c) => c.spot);
+    const keyX = [...breakevens, currentSpot, ...allStrikes];
+    const rawMin = Math.min(...keyX);
+    const rawMax = Math.max(...keyX);
+    const pad = Math.max(STEP * 4, (rawMax - rawMin) * 0.12);
+    const xLo = rawMin - pad;
+    const xHi = rawMax + pad;
 
-  // Custom label renderer for reference lines — stacks labels by index so they never collide
-  const makeSpotLabel = () => (props: any) => {
-    const x = props?.viewBox?.x ?? 0;
-    return (
-      <text x={x + 5} y={14} fill="#38bdf8" fontSize={10} fontFamily="monospace" fontWeight="bold" textAnchor="start">
-        {currentSpot.toFixed(0)}
-      </text>
-    );
+    const visible = curve.filter((c) => c.spot >= xLo && c.spot <= xHi);
+    if (visible.length < 2) return null;
+
+    // --- Smart Y domain: clamp so zero-crossing is prominent ---
+    const visiblePnls = visible.map((c) => c.pnl);
+    const rawYMin = Math.min(...visiblePnls);
+    const rawYMax = Math.max(...visiblePnls);
+    // For unlimited-loss strategies, cap the loss tail at 3x max profit so the
+    // P=0 region stays in the upper ~25% of the chart instead of near the bottom.
+    const clampedYMin = rawYMax > 0 ? Math.max(rawYMin, -rawYMax * 3) : rawYMin * 1.1;
+    const clampedYMax = rawYMin < 0 ? Math.min(rawYMax, Math.abs(rawYMin) * 3) : rawYMax * 1.1;
+    const yPad = (clampedYMax - clampedYMin) * 0.08 || 1;
+    const yLo = clampedYMin - yPad;
+    const yHi = clampedYMax + yPad;
+
+    const sx = (x: number) => PAD.left + ((x - xLo) / (xHi - xLo)) * (W - PAD.left - PAD.right);
+    const sy = (y: number) => PAD.top + ((yHi - y) / (yHi - yLo)) * (H - PAD.top - PAD.bottom);
+
+    const line = visible.map((p, i) => `${i ? 'L' : 'M'}${sx(p.spot).toFixed(1)},${sy(p.pnl).toFixed(1)}`).join('');
+    const area = `${line}L${sx(xHi).toFixed(1)},${sy(0).toFixed(1)}L${sx(xLo).toFixed(1)},${sy(0).toFixed(1)}Z`;
+
+    return {
+      xLo, xHi, yLo, yHi, sx, sy, line, area,
+      zeroY: sy(0),
+      xTicks: niceTicks(xLo, xHi, 6),
+      yTicks: niceTicks(yLo, yHi, 6),
+      visible,
+    };
+  }, [curve, currentSpot, breakevens, W]);
+
+  if (!model) return null;
+
+  const { sx, sy, xLo, xHi, zeroY } = model;
+
+  const readoutSpot = hoverSpot ?? currentSpot;
+  const readoutPnl = pnlAt(model.visible, readoutSpot);
+
+  const onMove = (e: React.MouseEvent<SVGSVGElement>) => {
+    const rect = svgRef.current?.getBoundingClientRect();
+    if (!rect) return;
+    const px = ((e.clientX - rect.left) / rect.width) * W;
+    const frac = (px - PAD.left) / (W - PAD.left - PAD.right);
+    if (frac < 0 || frac > 1) { setHoverSpot(null); return; }
+    setHoverSpot(xLo + frac * (xHi - xLo));
   };
 
-  const makeBeLabel = (be: number, i: number) => (props: any) => {
-    const x = props?.viewBox?.x ?? 0;
-    // Stack each BE label 16px below the previous; spot label occupies y=14
-    const y = 14 + (i + 1) * 16;
-    return (
-      <text x={x + 5} y={y} fill="#fbbf24" fontSize={10} fontFamily="monospace" fontWeight="bold" textAnchor="start">
-        BE {be.toFixed(0)}
-      </text>
-    );
-  };
+  const tooltipLeft = sx(readoutSpot) > W * 0.6;
 
   return (
-    <div className="h-[320px] w-full">
-      <ResponsiveContainer width="100%" height="100%">
-        <ComposedChart data={visible} margin={{ top: 10, right: 24, bottom: 8, left: 10 }}>
-          <defs>
-            <linearGradient id="pnlSplit" x1="0" y1="0" x2="0" y2="1">
-              <stop offset="0%" stopColor="#10b981" stopOpacity={0.25} />
-              <stop offset={`${offPct}%`} stopColor="#10b981" stopOpacity={0.01} />
-              <stop offset={`${offPct}%`} stopColor="#ef4444" stopOpacity={0.01} />
-              <stop offset="100%" stopColor="#ef4444" stopOpacity={0.25} />
-            </linearGradient>
-          </defs>
-          <CartesianGrid strokeDasharray="3 3" stroke="#27272a" vertical={false} />
-          <XAxis
-            dataKey="spot"
-            type="number"
-            domain={[xMin, xMax]}
-            ticks={ticks}
-            tick={{ fill: '#71717a', fontSize: 10, fontFamily: 'monospace' }}
-            axisLine={{ stroke: '#27272a' }}
-            tickLine={false}
-            tickFormatter={(v: number) => v.toFixed(0)}
-          />
-          <YAxis
-            domain={yDomain}
-            tick={{ fill: '#71717a', fontSize: 10, fontFamily: 'monospace' }}
-            axisLine={{ stroke: '#27272a' }}
-            tickLine={false}
-            width={64}
-            tickFormatter={(v: number) => {
-              if (v === 0) return '0';
-              const absVal = Math.abs(v);
-              const sign = v > 0 ? '+' : '-';
-              if (absVal >= 1000) return `${sign}₹${(absVal / 1000).toFixed(1).replace('.0', '')}k`;
-              return `${sign}₹${absVal.toFixed(0)}`;
-            }}
-          />
-          <Tooltip content={<PayoffTooltip />} />
-          <ReferenceLine y={0} stroke="#3f3f46" strokeWidth={1.5} />
-          <ReferenceLine
-            x={currentSpot}
-            stroke="#0ea5e9"
-            strokeWidth={1.5}
-            strokeDasharray="4 3"
-            label={makeSpotLabel()}
-          />
-          {breakevens.map((be, i) => (
-            <ReferenceLine
-              key={be}
-              x={be}
-              stroke="#f59e0b"
-              strokeWidth={1.5}
-              strokeDasharray="4 3"
-              label={makeBeLabel(be, i)}
-            />
-          ))}
-          <Area
-            type="linear"
-            dataKey="pnl"
-            stroke="none"
-            fill="url(#pnlSplit)"
-            baseValue={0}
-            isAnimationActive={false}
-          />
-          <Line
-            type="linear"
-            dataKey="pnl"
-            stroke="#f4f4f5"
-            strokeWidth={2}
-            dot={false}
-            isAnimationActive={false}
-          />
-        </ComposedChart>
-      </ResponsiveContainer>
+    <div ref={boxRef} className="w-full">
+      <svg
+        ref={svgRef}
+        viewBox={`0 0 ${W} ${H}`}
+        width={W}
+        height={H}
+        className="block max-w-full select-none"
+        role="img"
+        aria-label="Strategy payoff at expiry"
+        onMouseMove={onMove}
+        onMouseLeave={() => setHoverSpot(null)}
+      >
+        <defs>
+          <clipPath id="sb-clip-profit"><rect x={0} y={0} width={W} height={zeroY} /></clipPath>
+          <clipPath id="sb-clip-loss"><rect x={0} y={zeroY} width={W} height={H - zeroY} /></clipPath>
+        </defs>
+
+        {/* Y grid + rupee axis */}
+        {model.yTicks.map((t) => (
+          <g key={`y${t}`}>
+            <line x1={PAD.left} x2={W - PAD.right} y1={sy(t)} y2={sy(t)}
+              stroke="#27272a" strokeWidth={1} strokeDasharray={t === 0 ? undefined : '3 4'} />
+            <text x={PAD.left - 8} y={sy(t) + 3.5} textAnchor="end" fontSize={10} fill="#71717a" className="font-mono">
+              {fmtInr(t)}
+            </text>
+          </g>
+        ))}
+
+        {/* X axis */}
+        {model.xTicks.map((t) => (
+          <text key={`x${t}`} x={sx(t)} y={H - PAD.bottom + 17} textAnchor="middle" fontSize={10}
+            fill="#71717a" className="font-mono">
+            {t.toFixed(0)}
+          </text>
+        ))}
+
+        {/* Payoff curve: green above zero, red below */}
+        <g clipPath="url(#sb-clip-profit)"><path d={model.area} fill="#10b981" fillOpacity={0.18} /></g>
+        <g clipPath="url(#sb-clip-loss)"><path d={model.area} fill="#ef4444" fillOpacity={0.18} /></g>
+        <g clipPath="url(#sb-clip-profit)"><path d={model.line} fill="none" stroke="#10b981" strokeWidth={2} /></g>
+        <g clipPath="url(#sb-clip-loss)"><path d={model.line} fill="none" stroke="#ef4444" strokeWidth={2} /></g>
+
+        <line x1={PAD.left} x2={W - PAD.right} y1={zeroY} y2={zeroY} stroke="#52525b" strokeWidth={1.25} />
+
+        {/* Breakevens */}
+        {breakevens.filter((b) => b >= xLo && b <= xHi).map((be) => (
+          <g key={`be${be}`}>
+            <circle cx={sx(be)} cy={zeroY} r={4} fill="#f59e0b" stroke="#09090b" strokeWidth={2} />
+            <text x={sx(be)} y={zeroY - 9} textAnchor="middle" fontSize={9.5} fontWeight={700} fill="#fbbf24" className="font-mono">
+              BE {be.toFixed(0)}
+            </text>
+          </g>
+        ))}
+
+        {/* Current spot marker */}
+        {currentSpot >= xLo && currentSpot <= xHi && (
+          <g>
+            <line x1={sx(currentSpot)} x2={sx(currentSpot)} y1={PAD.top} y2={H - PAD.bottom}
+              stroke="#0ea5e9" strokeWidth={1.25} strokeDasharray="4 3" />
+            <text x={sx(currentSpot)} y={PAD.top - 5} textAnchor="middle" fontSize={10} fontWeight={700}
+              fill="#38bdf8" className="font-mono">
+              {currentSpot.toFixed(0)}
+            </text>
+          </g>
+        )}
+
+        {/* Readout crosshair — follows the cursor, parks on current spot otherwise */}
+        {readoutSpot >= xLo && readoutSpot <= xHi && readoutPnl !== null && (
+          <g pointerEvents="none">
+            <line x1={sx(readoutSpot)} x2={sx(readoutSpot)} y1={PAD.top} y2={H - PAD.bottom}
+              stroke="#a1a1aa" strokeWidth={1} strokeDasharray="2 3" />
+            <circle cx={sx(readoutSpot)} cy={sy(readoutPnl)} r={4.5}
+              fill={readoutPnl >= 0 ? '#10b981' : '#ef4444'} stroke="#09090b" strokeWidth={2} />
+            <g transform={`translate(${tooltipLeft ? sx(readoutSpot) - 118 : sx(readoutSpot) + 10}, ${PAD.top + 4})`}>
+              <rect width={108} height={34} rx={6} fill="#09090b" fillOpacity={0.9} stroke="#3f3f46" />
+              <text x={8} y={13} fontSize={9.5} fill="#a1a1aa" className="font-mono">
+                Spot {readoutSpot.toFixed(0)}
+              </text>
+              <text x={8} y={26} fontSize={11} fontWeight={700} className="font-mono"
+                fill={readoutPnl >= 0 ? '#10b981' : '#ef4444'}>
+                {readoutPnl >= 0 ? '+' : ''}₹{readoutPnl.toLocaleString('en-IN', { maximumFractionDigits: 0 })}
+              </text>
+            </g>
+          </g>
+        )}
+      </svg>
     </div>
   );
 }
