@@ -17,7 +17,7 @@ import { useCopyTrade, CopyTradeControls, type CopyTradeApi } from './CopyTrade'
 import { useFocusToolWS } from '@/lib/useFocusToolWS';
 import { cn } from '@/lib/utils';
 import type {
-  FocusToolConfig, FocusRow, FocusIndexGroup,
+  FocusToolConfig, FocusRow, FocusRowFill, FocusIndexGroup,
   FocusUnderlying, FocusDte, FocusSide, FocusRowStatus, FocusStrikeMode,
 } from '@/lib/focusToolRows';
 
@@ -101,6 +101,11 @@ function fmtPrice(n: number | null | undefined): string {
  */
 const INTRADAY_BACKSTOP_HM = '15:17';
 
+/** Set once the user stops the server-side worker by hand, so the auto-start
+ *  effect leaves it alone on the next mount. Per-browser, which is the right
+ *  scope for a per-user decision on a local single-user tool. */
+const WORKER_OPT_OUT_KEY = 'focusTool.workerStoppedByUser';
+
 /** Wall-clock 'HH:MM' in IST, regardless of the browser's own timezone. */
 function istHm(): string {
   return new Date().toLocaleTimeString('en-GB', {
@@ -136,6 +141,11 @@ function newId(): string {
   return `ft_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`;
 }
 
+/** A rupee leg value, or an em dash while the lot size is still unresolved. */
+function fmtValue(n: number | null): string {
+  return n == null ? '—' : n.toLocaleString('en-IN', { maximumFractionDigits: 0 });
+}
+
 function pnlClass(n: number | null | undefined): string {
   if (n == null || n === 0) return 'text-zinc-400';
   return n > 0 ? 'text-emerald-400' : 'text-rose-400';
@@ -168,15 +178,34 @@ function legsOf(row: FocusRow): ('CE' | 'PE')[] {
 }
 
 /**
- * Per-leg value (lots × premium) and the PE/CE ratio between them, for the
- * row's LTP display. PCR is PE value ÷ CE value — mathematically identical to
- * PE LTP ÷ CE LTP since `lots` is the same for both legs and cancels out, but
- * computed off the values for clarity at the call site.
+ * Per-leg rupee value and the PE/CE ratio between them, for the row's LTP
+ * display.
+ *
+ * Value is premium × CONTRACTS, not premium × lots: one NIFTY lot at a premium
+ * of 100 is worth 100 × 65 = ₹6,500, and the old `× row.lots` form printed
+ * "₹100" — a number in no unit at all. Contracts come from what the row
+ * actually holds once it is open, and from its configured size before that.
+ * Null when the lot size has not resolved yet, so the cell shows — rather than
+ * a confident zero.
  */
-function legValues(row: FocusRow, live: RowLive): { ceValue: number; peValue: number; pcr: number | null } {
-  const ceValue = (live.ltpCe ?? 0) * row.lots;
-  const peValue = (live.ltpPe ?? 0) * row.lots;
-  return { ceValue, peValue, pcr: ceValue > 0 ? peValue / ceValue : null };
+function legValues(row: FocusRow, live: RowLive, lotSize: number | null): {
+  ceValue: number | null; peValue: number | null; pcr: number | null;
+} {
+  const lot = lotSize && lotSize > 0 ? lotSize : 0;
+  const units = (leg: 'CE' | 'PE'): number => {
+    const held = Math.abs(Number((leg === 'CE' ? live.cePosition : live.pePosition)?.netQty) || 0);
+    return held > 0 ? held : row.lots * lot;
+  };
+  const value = (ltp: number | null, leg: 'CE' | 'PE'): number | null => {
+    const n = units(leg);
+    return n > 0 ? (ltp ?? 0) * n : null;
+  };
+  const ceValue = value(live.ltpCe, 'CE');
+  const peValue = value(live.ltpPe, 'PE');
+  return {
+    ceValue, peValue,
+    pcr: ceValue != null && peValue != null && ceValue > 0 ? peValue / ceValue : null,
+  };
 }
 
 /**
@@ -295,8 +324,20 @@ function vwapKey(
 
 /** Heartbeat record from scripts/tools/focus_tool_rows_worker.py, corrected by
  *  the API route against the PID and the heartbeat age. */
+interface WorkerStatusRow {
+  id: string;
+  /** The worker's ledger holds a position for this row. */
+  open?: boolean;
+  ceStrike?: number | null;
+  peStrike?: number | null;
+}
+
 interface WorkerStatus {
-  status: 'RUNNING' | 'STOPPED' | 'STALE' | 'ERROR';
+  /** UNKNOWN is the client-side initial value, before the first heartbeat poll
+   *  has landed — it is never reported by the API. It exists so the in-tab
+   *  executor can tell "the worker is stopped" apart from "we have not asked
+   *  yet", which are not the same decision. */
+  status: 'RUNNING' | 'STOPPED' | 'STALE' | 'ERROR' | 'UNKNOWN';
   pid?: number;
   broker?: string;
   dryRun?: boolean;
@@ -307,6 +348,11 @@ interface WorkerStatus {
   lastUpdate?: string;
   note?: string;
   error?: string;
+  /** Per-row snapshot. Used as a strike pin for rows the WORKER entered — it
+   *  never writes `status: 'entered'` back into the config, so without this the
+   *  page would keep resolving those rows off the live ATM and lose them the
+   *  same way it lost its own (see FocusRowFill). */
+  rows?: WorkerStatusRow[];
 }
 
 interface Toast {
@@ -422,6 +468,62 @@ function NumInput({ value, onChange, placeholder, className, title, disabled }: 
       value={value}
       onChange={e => onChange(e.target.value)}
       placeholder={placeholder}
+      className={cn(
+        'h-7 text-[11px] font-mono font-bold px-2 border border-zinc-700 rounded-md',
+        'bg-zinc-900 text-zinc-100 placeholder-zinc-600',
+        'focus:outline-none focus:border-violet-500 focus:ring-1 focus:ring-violet-500/40',
+        'disabled:opacity-50 disabled:cursor-not-allowed',
+        className,
+      )}
+    />
+  );
+}
+
+/**
+ * A number box that commits on blur or Enter, never per keystroke.
+ *
+ * Every value this wraps is read by an executor that places real orders — the
+ * 5s scheduler and the level-exit watcher both read component state directly,
+ * not the saved file. Committing per keystroke means typing a Stop of "5000"
+ * transiently commits 5, and a tick landing in that window reads "total P&L
+ * <= -5" as breached and flattens the whole book. Same for an H↑ of "25600":
+ * the first keystroke is 2, and spot is always >= 2.
+ *
+ * `NumInput` (immediate) is still correct for UI-only values — the +/- lot
+ * counters, which nothing evaluates.
+ */
+function RuleNumInput({ value, onCommit, placeholder, className, title, disabled }: {
+  value: string; onCommit: (v: string) => void; placeholder?: string; className?: string;
+  title?: string; disabled?: boolean;
+}) {
+  const [draft, setDraft] = useState(value);
+  // Re-sync when the value changes underneath us (a config load, a clear
+  // button) — but never while this field has focus, or the user's own typing
+  // would be reverted mid-edit.
+  const focusedRef = useRef(false);
+  useEffect(() => {
+    if (!focusedRef.current) setDraft(value);
+  }, [value]);
+
+  const commit = (next: string) => {
+    if (next !== value) onCommit(next);
+  };
+
+  return (
+    <input
+      type="text"
+      inputMode="decimal"
+      title={title}
+      disabled={disabled}
+      value={draft}
+      placeholder={placeholder}
+      onFocus={() => { focusedRef.current = true; }}
+      onChange={e => setDraft(e.target.value)}
+      onBlur={() => { focusedRef.current = false; commit(draft); }}
+      onKeyDown={e => {
+        if (e.key === 'Enter') { commit(draft); (e.target as HTMLInputElement).blur(); }
+        if (e.key === 'Escape') { setDraft(value); (e.target as HTMLInputElement).blur(); }
+      }}
       className={cn(
         'h-7 text-[11px] font-mono font-bold px-2 border border-zinc-700 rounded-md',
         'bg-zinc-900 text-zinc-100 placeholder-zinc-600',
@@ -557,7 +659,7 @@ function StrikeLegSelector({
           ))}
         </select>
       ) : (
-        <NumInput value={premium} onChange={onPremiumChange} className="w-16 h-6" disabled={locked}
+        <RuleNumInput value={premium} onCommit={onPremiumChange} className="w-16 h-6" disabled={locked}
           placeholder="₹" title={locked ? lockedTitle : `Target premium for the ${leg} leg — resolves to the closest listed strike priced at or below this value`} />
       )}
       <span className="text-[11px] font-mono font-bold text-zinc-300 min-w-[42px] text-right">
@@ -892,7 +994,10 @@ function ControlStrip({
             ? `Rules are running server-side (PID ${workerStatus.pid ?? '?'}) — entries and exits fire even with this tab closed. Click to stop; open positions are left as they are.`
             : workerStatus.status === 'STALE'
               ? 'The worker process stopped heartbeating — nothing is watching. Click to restart.'
-              : 'Rules currently run only while this tab is open. Start the worker to keep them running server-side.'}
+              : workerStatus.status === 'UNKNOWN'
+                // Neither executor acts in this window — see tabMayTrade.
+                ? 'Checking whether the server-side worker is running. Nothing enters or exits until this resolves.'
+                : 'Rules currently run only while this tab is open. Start the worker to keep them running server-side.'}
           className={cn(
             'flex items-center gap-1.5 text-xs font-bold px-3 py-1.5 rounded-lg border cursor-pointer transition-colors',
             workerStatus.status === 'RUNNING'
@@ -902,11 +1007,12 @@ function ControlStrip({
                 : 'border-zinc-700 bg-zinc-900 text-zinc-400 hover:bg-zinc-800 hover:border-zinc-600',
           )}
         >
-          <Server className="h-3.5 w-3.5" />
+          <Server className={cn('h-3.5 w-3.5', workerStatus.status === 'UNKNOWN' && 'animate-pulse')} />
           {workerStatus.status === 'RUNNING'
             ? `Worker on${workerStatus.openRows ? ` · ${workerStatus.openRows}` : ''}`
             : workerStatus.status === 'STALE' ? 'Worker stale'
-              : workerStatus.status === 'ERROR' ? 'Worker error' : 'Worker off'}
+              : workerStatus.status === 'ERROR' ? 'Worker error'
+                : workerStatus.status === 'UNKNOWN' ? 'Worker…' : 'Worker off'}
         </button>
         <button
           onClick={onSave}
@@ -955,15 +1061,15 @@ function ControlStrip({
         <div className="flex items-center gap-1.5">
           <Target className="h-3 w-3 text-emerald-500" />
           <span className="text-[10px] font-black text-zinc-500 uppercase">Target</span>
-          <NumInput value={targetRupees} onChange={setTargetRupees} className="w-16" placeholder="0"
-            title="Close every open row once total P&L reaches this profit (₹)" />
+          <RuleNumInput value={targetRupees} onCommit={setTargetRupees} className="w-16" placeholder="0"
+            title="Close every open row once total P&L reaches this profit (₹). Applies when you leave the field, not while typing." />
         </div>
 
         <div className="flex items-center gap-1.5">
           <ShieldOff className="h-3 w-3 text-rose-500" />
           <span className="text-[10px] font-black text-zinc-500 uppercase">Stop</span>
-          <NumInput value={stopRupees} onChange={setStopRupees} className="w-16" placeholder="0"
-            title="Close every open row once total P&L falls to this loss (₹)" />
+          <RuleNumInput value={stopRupees} onCommit={setStopRupees} className="w-16" placeholder="0"
+            title="Close every open row once total P&L falls to this loss (₹). Applies when you leave the field, not while typing." />
         </div>
 
         <div className="h-4 w-px bg-zinc-800" />
@@ -973,14 +1079,14 @@ function ControlStrip({
 
         <div className="flex items-center gap-1.5">
           <span className="text-[10px] font-black text-zinc-500 uppercase">Trigger</span>
-          <NumInput value={triggerRupees} onChange={setTriggerRupees} className="w-16" placeholder="0"
+          <RuleNumInput value={triggerRupees} onCommit={setTriggerRupees} className="w-16" placeholder="0"
             title="Profit (₹) at which the trail wakes up and starts locking" />
         </div>
 
         <div className="flex items-center gap-1.5">
           <Lock className="h-3 w-3 text-amber-500" />
           <span className="text-[10px] font-black text-zinc-500 uppercase">Lock</span>
-          <NumInput value={lockRupees} onChange={setLockRupees} className="w-16" placeholder="0"
+          <RuleNumInput value={lockRupees} onCommit={setLockRupees} className="w-16" placeholder="0"
             title="Profit (₹) kept back from each new peak — the floor that never falls" />
         </div>
 
@@ -1090,13 +1196,13 @@ function IndexGroupBar({
           <div className="flex items-center gap-3">
             <div className="flex items-center gap-1.5">
               <span className="text-[9px] font-black text-rose-400 uppercase">Spot H&uarr;</span>
-              <NumInput value={group.spotHigh} onChange={v => onChange({ spotHigh: v })} className="w-16"
-                title="Book out when spot trades at or above this level" />
+              <RuleNumInput value={group.spotHigh} onCommit={v => onChange({ spotHigh: v })} className="w-16"
+                title="Book out when spot trades at or above this level. Applies when you leave the field, not while typing." />
             </div>
             <div className="flex items-center gap-1.5">
               <span className="text-[9px] font-black text-emerald-400 uppercase">Spot L&darr;</span>
-              <NumInput value={group.spotLow} onChange={v => onChange({ spotLow: v })} className="w-16"
-                title="Book out when spot trades at or below this level" />
+              <RuleNumInput value={group.spotLow} onCommit={v => onChange({ spotLow: v })} className="w-16"
+                title="Book out when spot trades at or below this level. Applies when you leave the field, not while typing." />
             </div>
           </div>
         )}
@@ -1151,11 +1257,22 @@ function FocusTableRow({
   onBlocked: (message: string) => void;
 }) {
   const combinedLtp = (live.ltpCe ?? 0) + (live.ltpPe ?? 0);
-  const { ceValue, peValue, pcr } = legValues(row, live);
+  const { ceValue, peValue, pcr } = legValues(row, live, lotSize);
   // Orders are only sendable once at least one leg's contract and the lot size
   // are known — placeLeg re-checks the specific leg it is about to trade.
   const canTrade = liveRealMoney && !busy && (live.ceStrike != null || live.peStrike != null) && (lotSize ?? 0) > 0;
   const flat = legsFlat(live);
+  const ceFlat = Number(live.cePosition?.netQty ?? 0) === 0;
+  const peFlat = Number(live.pePosition?.netQty ?? 0) === 0;
+  // Why the leg buttons are greyed out. They used to stay clickable in every
+  // one of these states and only report the problem as a toast after the fact.
+  const tradeBlockedWhy = !liveRealMoney
+    ? 'Dry run — turn on LIVE · REAL MONEY to place orders'
+    : busy
+      ? 'An order for this row is already in flight'
+      : (lotSize ?? 0) <= 0
+        ? 'Lot size for this index has not resolved yet'
+        : 'Strike not resolved yet';
   const step = STRIKE_STEP[row.underlying];
   // How many lots the +/- buttons act on, independently per leg — e.g. add 2
   // lots of CE and 1 of PE in one click each, rather than clicking + twice on
@@ -1225,10 +1342,10 @@ function FocusTableRow({
           <span className="text-rose-400">PE {live.ltpPe != null ? live.ltpPe.toFixed(2) : '\u2014'}</span>
         </div>
         <div className="text-[10px] font-mono font-semibold mt-1 flex items-center gap-1 whitespace-nowrap"
-          title="Value = lots &times; premium per leg">
-          <span className="text-emerald-500">CE&nbsp;&#8377;{ceValue.toFixed(2)}</span>
+          title="Value = premium &times; contracts held (or contracts this row is sized for, before it opens)">
+          <span className="text-emerald-500">CE&nbsp;&#8377;{fmtValue(ceValue)}</span>
           <span className="text-zinc-700">/</span>
-          <span className="text-rose-500">PE&nbsp;&#8377;{peValue.toFixed(2)}</span>
+          <span className="text-rose-500">PE&nbsp;&#8377;{fmtValue(peValue)}</span>
         </div>
         <div className="text-[10px] font-mono font-bold mt-0.5 text-amber-400"
           title="PCR = PE value &#247; CE value">
@@ -1321,9 +1438,9 @@ function FocusTableRow({
           <div className="flex items-center gap-1">
             <NumInput value={String(ceQty)} onChange={v => setCeQty(Math.max(1, Number(v) || 1))}
               className="w-9 h-6 text-center px-1" title="Lots the CE +/- buttons act on" />
-            <button onClick={() => onAddLot('CE', ceQty)} title={`Add ${ceQty} lot(s) to the CE leg`} className="h-6 w-6 rounded-md bg-zinc-800 border border-zinc-700 text-zinc-300 font-bold flex items-center justify-center hover:bg-violet-600 hover:border-violet-600 hover:text-oncolor cursor-pointer transition-colors">+</button>
-            <button onClick={() => onReduceLot('CE', ceQty)} title={`Reduce the CE leg by ${ceQty} lot(s)`} className="h-6 w-6 rounded-md bg-zinc-800 border border-zinc-700 text-zinc-300 font-bold flex items-center justify-center hover:bg-zinc-700 cursor-pointer transition-colors">-</button>
-            <button onClick={() => onExit('CE')} title="Close the CE leg at market" className="text-xs font-bold px-2 py-1 rounded-md bg-rose-600 text-oncolor hover:bg-rose-500 cursor-pointer transition-colors">Exit</button>
+            <button onClick={() => onAddLot('CE', ceQty)} disabled={!canTrade} title={canTrade ? `Add ${ceQty} lot(s) to the CE leg` : tradeBlockedWhy} className="h-6 w-6 rounded-md bg-zinc-800 border border-zinc-700 text-zinc-300 font-bold flex items-center justify-center hover:bg-violet-600 hover:border-violet-600 hover:text-oncolor cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed transition-colors">+</button>
+            <button onClick={() => onReduceLot('CE', ceQty)} disabled={!canTrade || ceFlat} title={ceFlat ? 'Nothing open on the CE leg' : canTrade ? `Reduce the CE leg by ${ceQty} lot(s)` : tradeBlockedWhy} className="h-6 w-6 rounded-md bg-zinc-800 border border-zinc-700 text-zinc-300 font-bold flex items-center justify-center hover:bg-zinc-700 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed transition-colors">-</button>
+            <button onClick={() => onExit('CE')} disabled={!canTrade || ceFlat} title={ceFlat ? 'Nothing open on the CE leg' : canTrade ? 'Close the CE leg at market' : tradeBlockedWhy} className="text-xs font-bold px-2 py-1 rounded-md bg-rose-600 text-oncolor hover:bg-rose-500 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed transition-colors">Exit</button>
           </div>
         </div>
       </td>
@@ -1339,9 +1456,9 @@ function FocusTableRow({
           <div className="flex items-center gap-1">
             <NumInput value={String(peQty)} onChange={v => setPeQty(Math.max(1, Number(v) || 1))}
               className="w-9 h-6 text-center px-1" title="Lots the PE +/- buttons act on" />
-            <button onClick={() => onAddLot('PE', peQty)} title={`Add ${peQty} lot(s) to the PE leg`} className="h-6 w-6 rounded-md bg-zinc-800 border border-zinc-700 text-zinc-300 font-bold flex items-center justify-center hover:bg-violet-600 hover:border-violet-600 hover:text-oncolor cursor-pointer transition-colors">+</button>
-            <button onClick={() => onReduceLot('PE', peQty)} title={`Reduce the PE leg by ${peQty} lot(s)`} className="h-6 w-6 rounded-md bg-zinc-800 border border-zinc-700 text-zinc-300 font-bold flex items-center justify-center hover:bg-zinc-700 cursor-pointer transition-colors">-</button>
-            <button onClick={() => onExit('PE')} title="Close the PE leg at market" className="text-xs font-bold px-2 py-1 rounded-md bg-rose-600 text-oncolor hover:bg-rose-500 cursor-pointer transition-colors">Exit</button>
+            <button onClick={() => onAddLot('PE', peQty)} disabled={!canTrade} title={canTrade ? `Add ${peQty} lot(s) to the PE leg` : tradeBlockedWhy} className="h-6 w-6 rounded-md bg-zinc-800 border border-zinc-700 text-zinc-300 font-bold flex items-center justify-center hover:bg-violet-600 hover:border-violet-600 hover:text-oncolor cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed transition-colors">+</button>
+            <button onClick={() => onReduceLot('PE', peQty)} disabled={!canTrade || peFlat} title={peFlat ? 'Nothing open on the PE leg' : canTrade ? `Reduce the PE leg by ${peQty} lot(s)` : tradeBlockedWhy} className="h-6 w-6 rounded-md bg-zinc-800 border border-zinc-700 text-zinc-300 font-bold flex items-center justify-center hover:bg-zinc-700 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed transition-colors">-</button>
+            <button onClick={() => onExit('PE')} disabled={!canTrade || peFlat} title={peFlat ? 'Nothing open on the PE leg' : canTrade ? 'Close the PE leg at market' : tradeBlockedWhy} className="text-xs font-bold px-2 py-1 rounded-md bg-rose-600 text-oncolor hover:bg-rose-500 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed transition-colors">Exit</button>
           </div>
         </div>
       </td>
@@ -1352,13 +1469,13 @@ function FocusTableRow({
           <div className="flex items-center gap-2">
             <div className="flex items-center gap-1">
               <span className="text-[9px] font-black text-rose-400">H&uarr;</span>
-              <NumInput value={row.levelHigh} onChange={v => onUpdate({ levelHigh: v })} className="w-20"
-                title="Exit this row when spot trades at or above this level" />
+              <RuleNumInput value={row.levelHigh} onCommit={v => onUpdate({ levelHigh: v })} className="w-20"
+                title="Exit this row when spot trades at or above this level. Applies when you leave the field, not while typing." />
             </div>
             <div className="flex items-center gap-1">
               <span className="text-[9px] font-black text-emerald-400">L&darr;</span>
-              <NumInput value={row.levelLow} onChange={v => onUpdate({ levelLow: v })} className="w-20"
-                title="Exit this row when spot trades at or below this level" />
+              <RuleNumInput value={row.levelLow} onCommit={v => onUpdate({ levelLow: v })} className="w-20"
+                title="Exit this row when spot trades at or below this level. Applies when you leave the field, not while typing." />
             </div>
           </div>
           <div className="flex items-center gap-2 mt-0.5">
@@ -1372,24 +1489,24 @@ function FocusTableRow({
             <div className="flex items-center gap-2">
               <div className="flex items-center gap-1">
                 <span className="text-[9px] font-black text-amber-400">SL &#8377;</span>
-                <NumInput value={row.slRupees} onChange={v => onUpdate({ slRupees: v })} className="w-14"
-                  title="Exit at this rupee loss on the pair — independent of SL &times;" />
+                <RuleNumInput value={row.slRupees} onCommit={v => onUpdate({ slRupees: v })} className="w-14"
+                  title="Exit at this rupee loss on the pair — independent of SL &times;. Applies when you leave the field, not while typing." />
               </div>
               <div className="flex items-center gap-1">
                 <span className="text-[9px] font-black text-amber-500">SL &times;</span>
-                <NumInput value={row.slMultiplier} onChange={v => onUpdate({ slMultiplier: v })} className="w-9"
+                <RuleNumInput value={row.slMultiplier} onCommit={v => onUpdate({ slMultiplier: v })} className="w-9"
                   title="Exit when premium moves this multiple against you (must be above 1) — independent of SL &#8377;" />
               </div>
             </div>
             <div className="flex items-center gap-2">
               <div className="flex items-center gap-1">
                 <span className="text-[9px] font-black text-emerald-400">CE &times;</span>
-                <NumInput value={row.ceSlMultiplier ?? '1'} onChange={v => onUpdate({ ceSlMultiplier: v })} className="w-9"
+                <RuleNumInput value={row.ceSlMultiplier ?? '1'} onCommit={v => onUpdate({ ceSlMultiplier: v })} className="w-9"
                   title="Exit CE alone when its own premium moves this multiple against its own entry — independent of PE and of the pair SL &times; above" />
               </div>
               <div className="flex items-center gap-1">
                 <span className="text-[9px] font-black text-rose-400">PE &times;</span>
-                <NumInput value={row.peSlMultiplier ?? '1'} onChange={v => onUpdate({ peSlMultiplier: v })} className="w-9"
+                <RuleNumInput value={row.peSlMultiplier ?? '1'} onCommit={v => onUpdate({ peSlMultiplier: v })} className="w-9"
                   title="Exit PE alone when its own premium moves this multiple against its own entry — independent of CE and of the pair SL &times; above" />
               </div>
             </div>
@@ -1435,9 +1552,20 @@ function FocusRowCard({
   onBlocked: (message: string) => void;
 }) {
   const combinedLtp = (live.ltpCe ?? 0) + (live.ltpPe ?? 0);
-  const { ceValue, peValue, pcr } = legValues(row, live);
+  const { ceValue, peValue, pcr } = legValues(row, live, lotSize);
   const canTrade = liveRealMoney && !busy && (live.ceStrike != null || live.peStrike != null) && (lotSize ?? 0) > 0;
   const flat = legsFlat(live);
+  const ceFlat = Number(live.cePosition?.netQty ?? 0) === 0;
+  const peFlat = Number(live.pePosition?.netQty ?? 0) === 0;
+  // Why the leg buttons are greyed out. They used to stay clickable in every
+  // one of these states and only report the problem as a toast after the fact.
+  const tradeBlockedWhy = !liveRealMoney
+    ? 'Dry run — turn on LIVE · REAL MONEY to place orders'
+    : busy
+      ? 'An order for this row is already in flight'
+      : (lotSize ?? 0) <= 0
+        ? 'Lot size for this index has not resolved yet'
+        : 'Strike not resolved yet';
   const step = STRIKE_STEP[row.underlying];
   // How many lots the +/- buttons act on, independently per leg — see the
   // matching note in FocusTableRow. UI-only, not persisted.
@@ -1522,10 +1650,10 @@ function FocusRowCard({
 
       {/* CE/PE value + PCR */}
       <div className="flex items-center justify-between bg-zinc-950/20 rounded-xl px-3 py-2 border border-zinc-800/40 text-[10px] font-mono font-semibold">
-        <span title="Value = lots × premium per leg">
-          <span className="text-emerald-500">CE&nbsp;₹{ceValue.toFixed(2)}</span>
+        <span title="Value = premium × contracts held (or contracts this row is sized for, before it opens)">
+          <span className="text-emerald-500">CE&nbsp;₹{fmtValue(ceValue)}</span>
           <span className="text-zinc-700 mx-1">/</span>
-          <span className="text-rose-500">PE&nbsp;₹{peValue.toFixed(2)}</span>
+          <span className="text-rose-500">PE&nbsp;₹{fmtValue(peValue)}</span>
         </span>
         <span className="text-amber-400 font-bold" title="PCR = PE value ÷ CE value">
           PCR {pcr != null ? pcr.toFixed(2) : '—'}
@@ -1548,9 +1676,9 @@ function FocusRowCard({
           <div className="flex items-center gap-1">
             <NumInput value={String(ceQty)} onChange={v => setCeQty(Math.max(1, Number(v) || 1))}
               className="w-8 h-5 text-center px-0.5" title="Lots the CE +/- buttons act on" />
-            <button onClick={() => onAddLot('CE', ceQty)} title={`Add ${ceQty} CE lot(s)`} className="h-5 w-5 rounded bg-zinc-800 text-zinc-300 font-bold flex items-center justify-center hover:bg-violet-600 cursor-pointer">+</button>
-            <button onClick={() => onReduceLot('CE', ceQty)} title={`Reduce CE by ${ceQty} lot(s)`} className="h-5 w-5 rounded bg-zinc-800 text-zinc-300 font-bold flex items-center justify-center hover:bg-zinc-700 cursor-pointer">-</button>
-            <button onClick={() => onExit('CE')} title="Exit CE leg" className="text-[10px] font-bold px-1.5 py-0.5 rounded bg-rose-600 text-oncolor hover:bg-rose-500 cursor-pointer">Exit</button>
+            <button onClick={() => onAddLot('CE', ceQty)} disabled={!canTrade} title={canTrade ? `Add ${ceQty} CE lot(s)` : tradeBlockedWhy} className="h-5 w-5 rounded bg-zinc-800 text-zinc-300 font-bold flex items-center justify-center hover:bg-violet-600 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed">+</button>
+            <button onClick={() => onReduceLot('CE', ceQty)} disabled={!canTrade || ceFlat} title={ceFlat ? 'Nothing open on the CE leg' : canTrade ? `Reduce CE by ${ceQty} lot(s)` : tradeBlockedWhy} className="h-5 w-5 rounded bg-zinc-800 text-zinc-300 font-bold flex items-center justify-center hover:bg-zinc-700 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed">-</button>
+            <button onClick={() => onExit('CE')} disabled={!canTrade || ceFlat} title={ceFlat ? 'Nothing open on the CE leg' : canTrade ? 'Exit CE leg' : tradeBlockedWhy} className="text-[10px] font-bold px-1.5 py-0.5 rounded bg-rose-600 text-oncolor hover:bg-rose-500 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed">Exit</button>
           </div>
         </div>
         <div className="flex items-center justify-between">
@@ -1562,9 +1690,9 @@ function FocusRowCard({
           <div className="flex items-center gap-1">
             <NumInput value={String(peQty)} onChange={v => setPeQty(Math.max(1, Number(v) || 1))}
               className="w-8 h-5 text-center px-0.5" title="Lots the PE +/- buttons act on" />
-            <button onClick={() => onAddLot('PE', peQty)} title={`Add ${peQty} PE lot(s)`} className="h-5 w-5 rounded bg-zinc-800 text-zinc-300 font-bold flex items-center justify-center hover:bg-violet-600 cursor-pointer">+</button>
-            <button onClick={() => onReduceLot('PE', peQty)} title={`Reduce PE by ${peQty} lot(s)`} className="h-5 w-5 rounded bg-zinc-800 text-zinc-300 font-bold flex items-center justify-center hover:bg-zinc-700 cursor-pointer">-</button>
-            <button onClick={() => onExit('PE')} title="Exit PE leg" className="text-[10px] font-bold px-1.5 py-0.5 rounded bg-rose-600 text-oncolor hover:bg-rose-500 cursor-pointer">Exit</button>
+            <button onClick={() => onAddLot('PE', peQty)} disabled={!canTrade} title={canTrade ? `Add ${peQty} PE lot(s)` : tradeBlockedWhy} className="h-5 w-5 rounded bg-zinc-800 text-zinc-300 font-bold flex items-center justify-center hover:bg-violet-600 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed">+</button>
+            <button onClick={() => onReduceLot('PE', peQty)} disabled={!canTrade || peFlat} title={peFlat ? 'Nothing open on the PE leg' : canTrade ? `Reduce PE by ${peQty} lot(s)` : tradeBlockedWhy} className="h-5 w-5 rounded bg-zinc-800 text-zinc-300 font-bold flex items-center justify-center hover:bg-zinc-700 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed">-</button>
+            <button onClick={() => onExit('PE')} disabled={!canTrade || peFlat} title={peFlat ? 'Nothing open on the PE leg' : canTrade ? 'Exit PE leg' : tradeBlockedWhy} className="text-[10px] font-bold px-1.5 py-0.5 rounded bg-rose-600 text-oncolor hover:bg-rose-500 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed">Exit</button>
           </div>
         </div>
       </div>
@@ -1573,27 +1701,27 @@ function FocusRowCard({
       <div className="flex flex-col gap-1 text-[11px]">
         <div className="flex justify-between items-center">
           <span className="text-rose-400 text-[9px] font-black">H&uarr;</span>
-          <NumInput value={row.levelHigh} onChange={v => onUpdate({ levelHigh: v })} className="w-20 h-6" />
+          <RuleNumInput value={row.levelHigh} onCommit={v => onUpdate({ levelHigh: v })} className="w-20 h-6" />
         </div>
         <div className="flex justify-between items-center mt-1">
           <span className="text-emerald-400 text-[9px] font-black">L&darr;</span>
-          <NumInput value={row.levelLow} onChange={v => onUpdate({ levelLow: v })} className="w-20 h-6" />
+          <RuleNumInput value={row.levelLow} onCommit={v => onUpdate({ levelLow: v })} className="w-20 h-6" />
         </div>
         <div className="flex justify-between items-center mt-1">
           <span className="text-amber-400 text-[9px] font-black">SL ₹</span>
-          <NumInput value={row.slRupees} onChange={v => onUpdate({ slRupees: v })} className="w-20 h-6" />
+          <RuleNumInput value={row.slRupees} onCommit={v => onUpdate({ slRupees: v })} className="w-20 h-6" />
         </div>
         <div className="flex justify-between items-center mt-1">
           <span className="text-amber-500 text-[9px] font-black">SL &times;</span>
-          <NumInput value={row.slMultiplier} onChange={v => onUpdate({ slMultiplier: v })} className="w-20 h-6" />
+          <RuleNumInput value={row.slMultiplier} onCommit={v => onUpdate({ slMultiplier: v })} className="w-20 h-6" />
         </div>
         <div className="flex justify-between items-center mt-1">
           <span className="text-emerald-400 text-[9px] font-black" title="Exit CE alone on its own premium multiple, independent of PE and of SL × above">CE &times;</span>
-          <NumInput value={row.ceSlMultiplier ?? '1'} onChange={v => onUpdate({ ceSlMultiplier: v })} className="w-20 h-6" />
+          <RuleNumInput value={row.ceSlMultiplier ?? '1'} onCommit={v => onUpdate({ ceSlMultiplier: v })} className="w-20 h-6" />
         </div>
         <div className="flex justify-between items-center mt-1">
           <span className="text-rose-400 text-[9px] font-black" title="Exit PE alone on its own premium multiple, independent of CE and of SL × above">PE &times;</span>
-          <NumInput value={row.peSlMultiplier ?? '1'} onChange={v => onUpdate({ peSlMultiplier: v })} className="w-20 h-6" />
+          <RuleNumInput value={row.peSlMultiplier ?? '1'} onCommit={v => onUpdate({ peSlMultiplier: v })} className="w-20 h-6" />
         </div>
         <div className="flex justify-between items-center mt-1">
           <SwitchToggle checked={row.levelVw} onChange={v => onUpdate({ levelVw: v })} label="VW"
@@ -1772,8 +1900,22 @@ export default function FocusTool() {
   // outside the browser, so a scheduled entry or a level exit still fires with
   // this tab closed. While it is RUNNING the in-tab scheduler stands down —
   // see the scheduler effect — so only one of the two ever places orders.
-  const [workerStatus, setWorkerStatus] = useState<WorkerStatus>({ status: 'STOPPED' });
+  const [workerStatus, setWorkerStatus] = useState<WorkerStatus>({ status: 'UNKNOWN' });
   const workerRunning = workerStatus.status === 'RUNNING';
+  /**
+   * May THIS TAB place orders right now?
+   *
+   * Not simply `liveRealMoney && !workerRunning`. On mount the worker status is
+   * UNKNOWN for up to one poll interval, and the saved config (which can carry
+   * liveRealMoney: true) usually lands first — so the scheduler's immediate
+   * first tick used to run while the worker was up and running the very same
+   * rules, double-entering any armed row whose entry time had passed.
+   *
+   * Standing down while UNKNOWN is the safe asymmetry: a false "stopped"
+   * duplicates real orders, a false "running" costs one 3s poll of delay.
+   */
+  const tabMayTrade = liveRealMoney && workerStatus.status !== 'RUNNING'
+    && workerStatus.status !== 'UNKNOWN';
 
   const pollWorker = useCallback(() => {
     fetch('/api/focus-tool/worker')
@@ -1792,6 +1934,13 @@ export default function FocusTool() {
 
   const toggleWorker = useCallback(async () => {
     const starting = !workerRunning;
+    // Remember an explicit stop so the auto-start effect below does not undo
+    // it the next time this page mounts. A process that places real orders
+    // must not come back just because the user navigated away and returned.
+    try {
+      if (starting) localStorage.removeItem(WORKER_OPT_OUT_KEY);
+      else localStorage.setItem(WORKER_OPT_OUT_KEY, '1');
+    } catch { /* private mode / storage disabled — auto-start stays as it was */ }
     try {
       const res = await fetch('/api/focus-tool/worker', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -1822,6 +1971,10 @@ export default function FocusTool() {
   // worker only PLACES an order once the config's own LIVE - REAL MONEY switch
   // is on, so starting it here is not itself a live-trading decision.
   useEffect(() => {
+    // ...unless the user turned it off by hand. See toggleWorker.
+    try {
+      if (localStorage.getItem(WORKER_OPT_OUT_KEY) === '1') return;
+    } catch { /* storage unavailable — fall through and auto-start */ }
     fetch('/api/focus-tool/worker', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -2097,11 +2250,6 @@ export default function FocusTool() {
     }
   }, [activeModal, fetchOrders]);
 
-  useEffect(() => {
-    if (total > 0) {
-      setPeakMtm(prev => Math.max(prev, total));
-    }
-  }, [total]);
 
   useEffect(() => {
     const trigger = Number(triggerRupees) || 0;
@@ -2179,13 +2327,22 @@ export default function FocusTool() {
    * shape once the legs are independent); PREMIUM mode is the chain strike
    * closest to the leg's target rupee value. Recomputed continuously (not
    * stamped once at row creation) so the table always shows what a draft or
-   * armed row would trade right now.
+   * armed row would trade right now — but ONLY until the row opens. An open
+   * row switches to the strikes it actually filled at (its own fill ledger, or
+   * the worker's when the worker holds it); re-resolving a live position off a
+   * moving ATM is how the page used to lose track of it entirely. See
+   * FocusRowFill.
    *
    * Premium: the NIFTY tick bridge first when it is on this row's expiry —
    * it is realtime, where the chain route caches 10s — then the chain.
    */
   const rowLive = useMemo<Record<string, RowLive>>(() => {
     const out: Record<string, RowLive> = {};
+    // Strike pins for rows the WORKER holds — see WorkerStatus.rows.
+    const workerFills: Record<string, { ceStrike: number | null; peStrike: number | null }> = {};
+    for (const r of workerStatus.rows ?? []) {
+      if (r?.open && r.id) workerFills[r.id] = { ceStrike: r.ceStrike ?? null, peStrike: r.peStrike ?? null };
+    }
     for (const row of config.rows) {
       const u = row.underlying;
       const step = STRIKE_STEP[u];
@@ -2200,12 +2357,27 @@ export default function FocusTool() {
       const atm = atmBase > 0 ? Math.round(atmBase / step) * step : null;
       const oc = chains[u]?.oc;
 
-      const ceStrike = row.strikeMode === 'PREMIUM'
+      const resolvedCe = row.strikeMode === 'PREMIUM'
         ? nearestStrikeByPremium(oc, 'CE', Number(row.cePremium))
         : (atm != null ? atm + (row.ceOffset ?? 0) * step : null);
-      const peStrike = row.strikeMode === 'PREMIUM'
+      const resolvedPe = row.strikeMode === 'PREMIUM'
         ? nearestStrikeByPremium(oc, 'PE', Number(row.pePremium))
         : (atm != null ? atm + (row.peOffset ?? 0) * step : null);
+
+      // An OPEN row uses the strikes it actually filled at, never the live
+      // resolution. ATM moves every time spot crosses a half-step, and a row
+      // that re-resolved would look its own position up at a strike nobody
+      // holds: P&L blanks, legsFlat() goes true, and every exit rule silently
+      // stops being evaluated against a position that is still very much open.
+      // The pin comes from this page's own fill record, or from the worker's
+      // ledger when the worker is the one holding it.
+      // The pin is live as soon as the ledger names a strike — not gated on
+      // `status`, because the worker never writes `entered` back into the
+      // config and the page's own first leg is away before it does.
+      const hasPin = !!row.fill && (row.fill.ceStrike != null || row.fill.peStrike != null);
+      const pin = workerFills[row.id] ?? (hasPin ? row.fill : undefined);
+      const ceStrike = pin ? (pin.ceStrike ?? null) : resolvedCe;
+      const peStrike = pin ? (pin.peStrike ?? null) : resolvedPe;
 
       if (ceStrike == null && peStrike == null) { out[row.id] = EMPTY_ROW_LIVE; continue; }
 
@@ -2251,7 +2423,19 @@ export default function FocusTool() {
       for (const leg of legsOf(row)) {
         const pos = leg === 'CE' ? cePosition : pePosition;
         if (!pos) continue;
-        pnl += (Number(pos.realizedProfit) || 0) + (Number(pos.unrealizedProfit) || 0);
+        // Dhan nets by security id, so a strike shared with another row (or
+        // with a running strategy) is reported as ONE position with ONE P&L.
+        // Attribute this row only its own share of it, off the same fill
+        // ledger that clamps its exits — otherwise two rows at the same strike
+        // each claim the whole thing and the account budget below sees double
+        // the P&L that actually exists.
+        const brokerQty = Math.abs(Number(pos.netQty) || 0);
+        const ownQty = leg === 'CE' ? row.fill?.ceQty : row.fill?.peQty;
+        const share = ownQty && ownQty > 0 && brokerQty > 0
+          ? Math.min(1, ownQty / brokerQty)
+          : 1;   // nothing to apportion by — treat the position as this row's
+        pnl += ((Number(pos.realizedProfit) || 0) + (Number(pos.unrealizedProfit) || 0)) * share;
+        // A price, not a quantity — never scaled.
         entryPremium += pos.netQty < 0 ? (Number(pos.sellAvg) || 0) : (Number(pos.buyAvg) || 0);
       }
 
@@ -2269,7 +2453,27 @@ export default function FocusTool() {
       };
     }
     return out;
-  }, [config.rows, config.groups, spots, futQuotes, chains, focusWsQuotes, lookups, positions, broker, expiries, rowVwap]);
+  }, [config.rows, config.groups, spots, futQuotes, chains, focusWsQuotes, lookups, positions, broker, expiries, rowVwap, workerStatus.rows]);
+
+  /**
+   * P&L across THIS TOOL'S OWN rows — the book the account budget is measured
+   * on, and the number the Python worker already uses for the same job.
+   *
+   * `total` (the header tiles) is whole-account F&O P&L and is deliberately
+   * NOT used here: an unrelated strategy's drawdown must not trip this tool's
+   * Stop and flatten its rows. The two executors disagreeing about which book
+   * the budget watches meant the same Stop ₹ behaved differently depending on
+   * whether the tab or the worker happened to be driving.
+   */
+  const toolPnl = useMemo(() => {
+    let sum = 0;
+    for (const row of config.rows) sum += rowLive[row.id]?.pnl ?? 0;
+    return sum;
+  }, [config.rows, rowLive]);
+
+  useEffect(() => {
+    if (toolPnl > 0) setPeakMtm(prev => Math.max(prev, toolPnl));
+  }, [toolPnl]);
 
   // Distinct strike pairs that need a VWAP, among rows with VW enabled. A
   // plain string, not the wanted objects themselves, so the fetch effect
@@ -2426,18 +2630,28 @@ export default function FocusTool() {
   }
 
   function updateRow(id: string, patch: Partial<FocusRow>, saveToDisk = false) {
+    // A level exit is validated before it reaches STATE, not just before it
+    // reaches disk. The in-tab watcher reads component state directly, so a
+    // level on the wrong side of spot fires a real exit the moment it lands —
+    // rejecting it only at save time protected the Python worker and nothing
+    // else. Only a level that actually CHANGES is checked, so re-saving a row
+    // whose level spot has since travelled past is not blocked (that row has
+    // already exited on it anyway), and neither is an unrelated Timing save.
+    const current = config.rows.find(r => r.id === id);
+    const levelChanged =
+      ('levelHigh' in patch && patch.levelHigh !== current?.levelHigh) ||
+      ('levelLow'  in patch && patch.levelLow  !== current?.levelLow);
+    if (levelChanged && current) {
+      const err = validateLevelExits({ ...current, ...patch }, spots[current.underlying] ?? 0);
+      if (err) {
+        addToast('error', 'Level exit rejected', err);
+        return;
+      }
+    }
     setConfig(prev => {
       const nextRows = prev.rows.map(r => r.id === id ? { ...r, ...patch, updatedAt: new Date().toISOString() } : r);
       const nextConfig = { ...prev, rows: nextRows };
-      if (saveToDisk) {
-        const row = nextRows.find(r => r.id === id);
-        const err = row ? validateLevelExits(row, spots[row.underlying] ?? 0) : null;
-        if (err) {
-          addToast('error', 'Level exit not saved', err);
-        } else {
-          saveConfig(nextConfig);
-        }
-      }
+      if (saveToDisk) saveConfig(nextConfig);
       return nextConfig;
     });
   }
@@ -2447,16 +2661,27 @@ export default function FocusTool() {
    *  again — otherwise re-arming would look accepted but never fire. */
   function armRow(id: string) {
     autoEnteringRef.current.delete(id);
-    updateRow(id, { status: 'armed' }, true);
+    // Drop any stale fill pin — arming means this row resolves its strikes
+    // fresh at the next entry, so a pin from the previous cycle would make it
+    // look its new position up at last time's strikes.
+    updateRow(id, { status: 'armed', fill: undefined }, true);
   }
 
   function deleteRow(id: string) {
-    autoEnteringRef.current.delete(id);
-    autoExitingRef.current.delete(id);
+    // The worker's own ledger is checked before the broker book: deleting a row
+    // it holds leaves that position with no config row to evaluate it against
+    // — see orphan_rows() in focus_tool_rows_worker.py, which then has to keep
+    // it alive on the bell alone. Better to refuse the delete here.
+    if ((workerStatus.rows ?? []).some(r => r.id === id && r.open)) {
+      addToast('error', 'Cannot delete row', 'The server-side worker still holds a position for this row — exit it first');
+      return;
+    }
     if (!legsFlat(rowLive[id] ?? EMPTY_ROW_LIVE)) {
       addToast('error', 'Cannot delete row', 'Exit the CE/PE legs first — this row still holds a position');
       return;
     }
+    autoEnteringRef.current.delete(id);
+    autoExitingRef.current.delete(id);
     setConfig(prev => {
       const nextRows = prev.rows.filter(r => r.id !== id);
       const nextConfig = { ...prev, rows: nextRows };
@@ -2483,6 +2708,34 @@ export default function FocusTool() {
       return nextConfig;
     });
     addToast('success', `Added ${underlying} row`);
+  }
+
+  /**
+   * Move this row's own fill ledger after an accepted order: `delta` units on
+   * one leg, and the strike it was opened at when opening.
+   *
+   * Written through a functional update rather than off the render's `config`
+   * so a burst of orders (both legs of an entry, a double leg-exit) composes
+   * correctly even when React has not re-rendered between them.
+   */
+  function adjustFillQty(rowId: string, leg: 'CE' | 'PE', delta: number, strike?: number) {
+    setConfig(prev => {
+      const nextRows = prev.rows.map(r => {
+        if (r.id !== rowId) return r;
+        const f = r.fill;
+        const nextFill: FocusRowFill = {
+          ceStrike: leg === 'CE' && strike != null ? strike : (f?.ceStrike ?? null),
+          peStrike: leg === 'PE' && strike != null ? strike : (f?.peStrike ?? null),
+          ceQty: leg === 'CE' ? Math.max(0, (f?.ceQty ?? 0) + delta) : (f?.ceQty ?? 0),
+          peQty: leg === 'PE' ? Math.max(0, (f?.peQty ?? 0) + delta) : (f?.peQty ?? 0),
+          ts: f?.ts ?? new Date().toISOString(),
+        };
+        return { ...r, fill: nextFill, updatedAt: new Date().toISOString() };
+      });
+      const nextConfig = { ...prev, rows: nextRows };
+      saveConfig(nextConfig);
+      return nextConfig;
+    });
   }
 
   // ── Leg orders ──────────────────────────────────────────────────
@@ -2545,8 +2798,29 @@ export default function FocusTool() {
       // Close against the direction the broker actually shows, not against an
       // assumed short — a row could be held long.
       side = netQty < 0 ? 'BUY' : 'SELL';
-      const want = opts.all ? Math.abs(netQty) : (opts.lots ?? 1) * lotSize;
-      quantity = Math.min(want, Math.abs(netQty));
+
+      // Size against THIS row's own ledger, clamped by what the broker still
+      // shows — the same rule lib/strategy_risk.resolve_exit_qty applies on the
+      // Python side, and for the same reason: Dhan nets by security id, so two
+      // rows at the same strike (or a row sharing a strike with a running
+      // strategy) are ONE broker position. Sizing off the raw net quantity lets
+      // whichever exits first flatten the other's leg too.
+      const ownQty = leg === 'CE' ? row.fill?.ceQty : row.fill?.peQty;
+      const brokerQty = Math.abs(netQty);
+      if (ownQty === undefined || ownQty <= 0) {
+        // No ledger entry — a position this page did not open (or one from
+        // before the ledger existed). There is no "own" share to clamp to, so
+        // fall back to the broker quantity and say so, rather than refuse to
+        // let the user manage it.
+        quantity = Math.min(opts.all ? brokerQty : (opts.lots ?? 1) * lotSize, brokerQty);
+        if (opts.all && brokerQty > 0) {
+          addToast('error', `${what}: unclamped exit`,
+            `No fill record for this leg — closing the broker's full ${brokerQty} qty. If another row or strategy shares this strike, it is being closed too.`);
+        }
+      } else {
+        const want = opts.all ? ownQty : (opts.lots ?? 1) * lotSize;
+        quantity = Math.min(want, ownQty, brokerQty);
+      }
     } else {
       side = 'SELL';
       quantity = (opts.lots ?? 1) * lotSize;
@@ -2577,6 +2851,10 @@ export default function FocusTool() {
       const j = await res.json() as { success?: boolean; order_id?: string; error?: string };
       if (j.success) {
         addToast('success', `${side} ${quantity} ${strike} ${leg}`, j.order_id ? `Order ${j.order_id}` : undefined);
+        // Keep the row's own ledger in step with what it just traded — this is
+        // what the next exit is sized against.
+        adjustFillQty(row.id, leg, opts.reduce ? -quantity : quantity,
+          opts.reduce ? undefined : Number(strike));
         pollPositions();
         return true;
       }
@@ -2626,6 +2904,62 @@ export default function FocusTool() {
   }
 
   /**
+   * Poll the broker's position book until neither of this row's legs shows any
+   * quantity at the strikes it actually holds.
+   *
+   * Returns false if it is still not flat when the deadline passes, or if
+   * every fetch failed — the caller must treat that as "unknown", never as
+   * "flat". `live` is captured before the closing orders go out so the strikes
+   * checked are the ones that were closed.
+   */
+  async function waitRowFlat(row: FocusRow, live: RowLive, maxWaitMs = 4000): Promise<boolean> {
+    const u = row.underlying;
+    const handles = (['CE', 'PE'] as const).map(leg => {
+      const strike = leg === 'CE' ? live.ceStrike : live.peStrike;
+      if (strike == null) return null;
+      const ref = lookups[u]?.strikes?.[strikeKey(strike)];
+      const id = leg === 'CE' ? ref?.ceId : ref?.peId;
+      const sym = leg === 'CE' ? ref?.ceSymbol : ref?.peSymbol;
+      return broker === 'dhan' ? (id ? { id } : null) : (sym ? { sym } : null);
+    }).filter(Boolean) as ({ id?: string; sym?: string })[];
+
+    if (!handles.length) return false;
+
+    const deadline = Date.now() + maxWaitMs;
+    for (;;) {
+      await new Promise(r => setTimeout(r, 400));
+      const rows = await fetchPositionsNow();
+      if (rows) {
+        const stillOpen = handles.some(h => {
+          const pos = h.id
+            ? rows.find(p => String(p.securityId) === String(h.id))
+            : rows.find(p => String(p.tradingSymbol) === h.sym);
+          return Math.abs(Number(pos?.netQty ?? 0)) > 0;
+        });
+        if (!stillOpen) return true;
+      }
+      if (Date.now() >= deadline) return false;
+    }
+  }
+
+  /**
+   * The row's own Exit buttons. 'ALL' closes every leg this row trades,
+   * sequentially so one rejection is reported against the leg it belongs to;
+   * once the book confirms the row is flat the strike pin is dropped, the same
+   * way an auto-exit drops it.
+   */
+  function handleManualExit(row: FocusRow, leg: 'CE' | 'PE' | 'ALL') {
+    return runRowAction(row.id, async () => {
+      const live = rowLive[row.id] ?? EMPTY_ROW_LIVE;
+      const legs = leg === 'ALL' ? legsOf(row) : [leg];
+      for (const l of legs) await placeLeg(row, l, { reduce: true, all: true });
+      if (leg === 'ALL' && await waitRowFlat(row, live)) {
+        updateRow(row.id, { status: 'exited', fill: undefined }, true);
+      }
+    });
+  }
+
+  /**
    * Shift one leg's strike up or down by one listed step — same behavior as
    * AdvancedScalper's chevrons: an open position is closed at the current
    * strike and reopened at the new one for the same quantity, then the row's
@@ -2657,7 +2991,9 @@ export default function FocusTool() {
     await runRowAction(row.id, async () => {
       const pos = leg === 'CE' ? live.cePosition : live.pePosition;
       const netQty = Number(pos?.netQty ?? 0);
-
+      // The row's fill ledger follows the roll on its own: the close decrements
+      // this leg to zero and the reopen re-stamps it at newStrike, both through
+      // placeLeg. Nothing extra to maintain here.
       if (netQty !== 0) {
         const lotSize = lotSizes[u];
         if (!lotSize) {
@@ -2816,10 +3152,10 @@ export default function FocusTool() {
   // toggles Risk on expects it to be watching straight away rather than only
   // after a separate Save.
   const schedulerRef = useRef({
-    config, rowLive, spots, total, lockMtm, riskEnabled, targetRupees, stopRupees, trailEnabled,
+    config, rowLive, spots, toolPnl, lockMtm, riskEnabled, targetRupees, stopRupees, trailEnabled,
   });
   schedulerRef.current = {
-    config, rowLive, spots, total, lockMtm, riskEnabled, targetRupees, stopRupees, trailEnabled,
+    config, rowLive, spots, toolPnl, lockMtm, riskEnabled, targetRupees, stopRupees, trailEnabled,
   };
   const expiriesRef = useRef(expiries);
   expiriesRef.current = expiries;
@@ -2830,8 +3166,14 @@ export default function FocusTool() {
    * cannot fire a second time while the first exit is still in flight.
    */
   function autoExitRow(row: FocusRow, reason: string) {
-    if (autoExitingRef.current.has(row.id)) return;
+    if (autoExitingRef.current.has(row.id) || busyRows.has(row.id)) return;
     autoExitingRef.current.add(row.id);
+    // Also hold the manual busy lock: the row's own Exit All / +/- buttons go
+    // through runRowAction, and without a shared lock a click landing while
+    // this exit is in flight sends a SECOND full-size closing order and flips
+    // the position the other way.
+    setBusyRows(prev => new Set(prev).add(row.id));
+    const live = rowLive[row.id] ?? EMPTY_ROW_LIVE;
     addToast('error', `Auto-exit: ${row.underlying} ${row.id.slice(-4)}`, reason);
     Promise.all(legsOf(row).map(leg => placeLeg(row, leg, { reduce: true, all: true })))
       .then(async accepted => {
@@ -2843,10 +3185,18 @@ export default function FocusTool() {
           addToast('error', 'Auto-exit incomplete', `${row.underlying}: a leg was rejected — still open, check the position book`);
           return;
         }
-        const rows = await fetchPositionsNow();
-        if (rows) updateRow(row.id, { status: 'exited' }, true);
+        if (await waitRowFlat(row, live)) {
+          // Flat and confirmed — retire the row and drop its strike pin.
+          updateRow(row.id, { status: 'exited', fill: undefined }, true);
+        } else {
+          addToast('error', 'Auto-exit unconfirmed',
+            `${row.underlying}: orders were accepted but the book still shows quantity — left open so the rules keep watching it. Check the position book.`);
+        }
       })
-      .finally(() => autoExitingRef.current.delete(row.id));
+      .finally(() => {
+        autoExitingRef.current.delete(row.id);
+        setBusyRows(prev => { const next = new Set(prev); next.delete(row.id); return next; });
+      });
   }
 
   /**
@@ -2866,8 +3216,9 @@ export default function FocusTool() {
 
   useEffect(() => {
     // Same hand-off as the scheduler below: the worker evaluates these very
-    // rules server-side, so the tab must not race it.
-    if (!liveRealMoney || workerRunning) return;
+    // rules server-side, so the tab must not race it — and must not act at all
+    // until it knows whether the worker is up. See tabMayTrade.
+    if (!tabMayTrade) return;
     for (const row of config.rows) {
       const live = rowLive[row.id];
       if (!live || legsFlat(live)) continue;
@@ -2885,7 +3236,7 @@ export default function FocusTool() {
       if (reason) autoExitRow(row, reason);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [rowLive, spots, liveRealMoney, workerRunning]);
+  }, [rowLive, spots, tabMayTrade]);
 
   /**
    * Open every leg this row trades, at its configured lot size.
@@ -2899,17 +3250,43 @@ export default function FocusTool() {
     autoEnteringRef.current.add(row.id);
     addToast('success', `Auto-entry: ${row.underlying} ${row.id.slice(-4)}`, reason);
     (async () => {
-      let anyFilled = false;
+      // Each accepted leg stamps its own strike and quantity onto the row's
+      // fill ledger from inside placeLeg, so the row stops re-resolving off the
+      // live ATM the moment the first leg is away (see FocusRowFill).
+      const wanted = legsOf(row);
+      const filled: Record<'CE' | 'PE', boolean> = { CE: false, PE: false };
+
       // Sequential, so one leg's rejection is reported against that leg and a
       // failure part-way through doesn't leave two orders racing.
-      for (const leg of legsOf(row)) {
-        if (await placeLeg(row, leg, { reduce: false, lots: row.lots })) anyFilled = true;
+      for (const leg of wanted) {
+        if (await placeLeg(row, leg, { reduce: false, lots: row.lots })) filled[leg] = true;
       }
-      if (anyFilled) {
-        updateRow(row.id, { status: 'entered' }, true);
-      } else {
+
+      // A BOTH row that only got one leg away is a NAKED short, not a
+      // straddle. Retry the missing leg once before accepting that shape —
+      // and if it still will not go, say so loudly rather than marking the row
+      // entered and moving on, which is how a naked leg used to go unnoticed.
+      const missing = wanted.filter(l => !filled[l]);
+      if (missing.length && missing.length < wanted.length) {
+        for (const leg of missing) {
+          if (await placeLeg(row, leg, { reduce: false, lots: row.lots })) filled[leg] = true;
+        }
+      }
+
+      const opened = wanted.filter(l => filled[l]);
+      if (!opened.length) {
         addToast('error', 'Auto-entry failed', `${row.underlying}: no leg was accepted — row left armed`);
         autoEnteringRef.current.delete(row.id);   // let it retry on a later tick
+        await fetchPositionsNow();
+        return;
+      }
+
+      updateRow(row.id, { status: 'entered' }, true);
+
+      const stillMissing = wanted.filter(l => !filled[l]);
+      if (stillMissing.length) {
+        addToast('error', `${row.underlying}: NAKED ${stillMissing.join('+')} leg`,
+          `${opened.join('+')} opened but ${stillMissing.join('+')} was rejected twice — this row is one-sided. Close it or place the missing leg manually.`);
       }
       await fetchPositionsNow();
     })().catch(() => autoEnteringRef.current.delete(row.id));
@@ -2940,12 +3317,13 @@ export default function FocusTool() {
   useEffect(() => {
     // The Python worker is the authority whenever it is up: it runs the same
     // rules against the same config, so both acting would double every entry
-    // and race every exit.
-    if (!liveRealMoney || workerRunning) return;
+    // and race every exit. Until its status is known, neither acts. See
+    // tabMayTrade.
+    if (!tabMayTrade) return;
 
     const tick = () => {
       const {
-        config: cfg, rowLive: live, spots: sp, total: tot, lockMtm: lock,
+        config: cfg, rowLive: live, spots: sp, toolPnl: tot, lockMtm: lock,
         riskEnabled: riskOn, targetRupees: target$, stopRupees: stop$, trailEnabled: trailOn,
       } = schedulerRef.current;
       const nowHm = istHm();
@@ -3025,7 +3403,7 @@ export default function FocusTool() {
     const t = setInterval(tick, 5000);
     return () => clearInterval(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [liveRealMoney, workerRunning]);
+  }, [tabMayTrade]);
 
   /**
    * Start/Stop, ATM BY, Product, Strikes±, and the Book Exit on/off toggle are
@@ -3044,6 +3422,21 @@ export default function FocusTool() {
   function updateGroup(underlying: FocusUnderlying, patch: Partial<FocusIndexGroup>) {
     const freeTextFields = new Set(['spotHigh', 'spotLow']);
     const isFreeTextEdit = Object.keys(patch).every(k => freeTextFields.has(k));
+
+    // Book Exit levels get the same before-state check as a row's H↑/L↓: the
+    // 5s scheduler reads these out of memory, so a level already behind spot
+    // books out every row in the index on the next tick.
+    const spot = spots[underlying] ?? 0;
+    const hi = Number(patch.spotHigh);
+    const lo = Number(patch.spotLow);
+    if (patch.spotHigh && Number.isFinite(hi) && spot > 0 && hi <= spot) {
+      addToast('error', 'Book exit level rejected', `Spot H↑ (${hi}) must be above the current ${underlying} spot (${spot.toFixed(2)})`);
+      return;
+    }
+    if (patch.spotLow && Number.isFinite(lo) && spot > 0 && lo >= spot) {
+      addToast('error', 'Book exit level rejected', `Spot L↓ (${lo}) must be below the current ${underlying} spot (${spot.toFixed(2)})`);
+      return;
+    }
 
     setConfig(prev => {
       const nextGroups = prev.groups.map(g => g.underlying === underlying ? { ...g, ...patch } : g);
@@ -3188,10 +3581,7 @@ export default function FocusTool() {
                           onDelete={() => deleteRow(row.id)}
                           onArm={() => armRow(row.id)}
                           onDisarm={() => updateRow(row.id, { status: 'draft' }, true)}
-                          onExit={leg => runRowAction(row.id, async () => {
-                            const legs = leg === 'ALL' ? legsOf(row) : [leg];
-                            for (const l of legs) await placeLeg(row, l, { reduce: true, all: true });
-                          })}
+                          onExit={leg => handleManualExit(row, leg)}
                           onAddLot={(leg, lots) => runRowAction(row.id, () => placeLeg(row, leg, { reduce: false, lots }))}
                           onReduceLot={(leg, lots) => runRowAction(row.id, () => placeLeg(row, leg, { reduce: true, lots }))}
                           onShift={(leg, dir) => handleShiftStrike(row, leg, dir)}
@@ -3201,7 +3591,13 @@ export default function FocusTool() {
                     </div>
                   )
                 ) : (
-                  <table className="w-full border-collapse text-left">
+                  /* A row has a hard minimum width — a 200px strike editor, a
+                     LTP stack, and six numeric level-exit boxes on one line.
+                     Without this scroller the table overflowed the rounded-2xl
+                     `overflow-hidden` wrapper above and the Level Exits column
+                     was simply clipped: no scrollbar, no way to reach it. */
+                  <div className="overflow-x-auto">
+                  <table className="w-full border-collapse text-left min-w-[1560px]">
                     <thead>
                       {/* Section group headers */}
                       <tr className="border-b border-zinc-800">
@@ -3240,13 +3636,7 @@ export default function FocusTool() {
                           onDelete={() => deleteRow(row.id)}
                           onArm={() => armRow(row.id)}
                           onDisarm={() => updateRow(row.id, { status: 'draft' }, true)}
-                          onExit={leg => runRowAction(row.id, async () => {
-                            // 'ALL' is the row's Exit All button: close every leg
-                            // this row trades, sequentially so one rejection is
-                            // reported against the leg it belongs to.
-                            const legs = leg === 'ALL' ? legsOf(row) : [leg];
-                            for (const l of legs) await placeLeg(row, l, { reduce: true, all: true });
-                          })}
+                          onExit={leg => handleManualExit(row, leg)}
                           onAddLot={(leg, lots) => runRowAction(row.id, () => placeLeg(row, leg, { reduce: false, lots }))}
                           onReduceLot={(leg, lots) => runRowAction(row.id, () => placeLeg(row, leg, { reduce: true, lots }))}
                           onShift={(leg, dir) => handleShiftStrike(row, leg, dir)}
@@ -3266,6 +3656,7 @@ export default function FocusTool() {
                       )}
                     </tbody>
                   </table>
+                  </div>
                 )}
 
                 <div className="px-4 py-3 bg-zinc-900/40 border-t border-zinc-800 mt-3">
@@ -3304,13 +3695,18 @@ export default function FocusTool() {
               <span className={cn("text-lg font-mono font-bold mt-1", pnlClass(total))}>{fmtInr(total, true)}</span>
             </div>
             <div className="bg-zinc-950/40 border border-zinc-850 rounded-xl p-3 flex flex-col">
-              <span className="text-[9px] font-black text-zinc-500 uppercase tracking-widest">Session Peak P&L</span>
-              <span className={cn("text-lg font-mono font-bold mt-1", pnlClass(peakMtm))}>{fmtInr(peakMtm, true)}</span>
+              <span className="text-[9px] font-black text-zinc-500 uppercase tracking-widest">This Tool&apos;s P&L</span>
+              <span className={cn("text-lg font-mono font-bold mt-1", pnlClass(toolPnl))}>{fmtInr(toolPnl, true)}</span>
             </div>
           </div>
 
           <div className="bg-zinc-950/40 border border-zinc-800 rounded-xl p-4 flex flex-col gap-3">
             <h3 className="text-xs font-bold text-white uppercase tracking-wider">Account Budget</h3>
+            <p className="text-[10px] text-zinc-500 leading-relaxed -mt-1">
+              Target, Stop and Trail are measured on <strong className="text-zinc-300">this tool&apos;s own rows</strong>
+              {' '}({fmtInr(toolPnl, true)}), not on the whole-account total above — an unrelated strategy&apos;s
+              drawdown must not flatten these positions. Session peak {fmtInr(peakMtm, true)}.
+            </p>
             <div className="grid grid-cols-2 gap-x-4 gap-y-2 text-xs">
               <div className="flex justify-between border-b border-zinc-850 py-1">
                 <span className="text-zinc-500">Target Profit:</span>
@@ -3330,8 +3726,8 @@ export default function FocusTool() {
               </div>
               <div className="flex justify-between border-b border-zinc-850 py-1 col-span-2">
                 <span className="text-zinc-500">Room to Stop:</span>
-                <span className={cn("font-mono font-bold", total + (Number(stopRupees) || 0) < 0 ? "text-rose-400" : "text-zinc-300")}>
-                  {stopRupees ? fmtInr(total + Number(stopRupees), true) : '—'}
+                <span className={cn("font-mono font-bold", toolPnl + (Number(stopRupees) || 0) < 0 ? "text-rose-400" : "text-zinc-300")}>
+                  {stopRupees ? fmtInr(toolPnl + Number(stopRupees), true) : '—'}
                 </span>
               </div>
             </div>
@@ -3360,7 +3756,7 @@ export default function FocusTool() {
         <div className="flex flex-col gap-3">
           <div className="flex items-center justify-between mb-1">
             <span className="text-[10px] text-zinc-500 uppercase tracking-wider leading-tight">
-              Every order on the account, not only this tool's
+              Every order on the account, not only this tool&apos;s
             </span>
             <button
               onClick={fetchOrders}

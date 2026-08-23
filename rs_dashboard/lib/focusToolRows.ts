@@ -24,6 +24,37 @@ export interface FocusIndexGroup {
 
 export type FocusStrikeMode = 'ATM' | 'PREMIUM';
 
+/**
+ * What a row actually holds — this page's own fill ledger, the counterpart of
+ * `self.fills` in focus_tool_rows_worker.py.
+ *
+ * Two jobs, both of which the page used to do wrong by having no record at all:
+ *
+ *  * The STRIKES. `ceStrike`/`peStrike` were recomputed live from the current
+ *    ATM on every tick, so the moment spot crossed a half-step the row started
+ *    looking its position up at a strike it did not hold — P&L blanked, the row
+ *    reported itself flat, and every level exit quietly stopped being evaluated
+ *    against a live position.
+ *
+ *  * The QUANTITIES. Exits sized off the broker's raw net quantity, and Dhan
+ *    nets by security id — so two rows at the same strike (or a row sharing a
+ *    strike with a running strategy) share ONE position, and exiting either
+ *    flattened the other. `ceQty`/`peQty` are what THIS row opened, and an
+ *    exit is clamped to them exactly as lib/strategy_risk.resolve_exit_qty
+ *    clamps the Python side.
+ *
+ * Adjusted on every accepted order, cleared on Arm (which re-resolves from
+ * scratch) and once a confirmed exit leaves both legs flat.
+ */
+export interface FocusRowFill {
+  ceStrike: number | null;
+  peStrike: number | null;
+  /** Absolute units this row holds, already lot-multiplied. Never lots. */
+  ceQty: number;
+  peQty: number;
+  ts: string;
+}
+
 export interface FocusRow {
   id: string;
   underlying: FocusUnderlying;
@@ -58,6 +89,8 @@ export interface FocusRow {
   // means off, same convention as slMultiplier.
   ceSlMultiplier: string;
   peSlMultiplier: string;
+  // What this row actually holds — see FocusRowFill. Absent until it enters.
+  fill?: FocusRowFill;
   // Audit
   createdAt: string;
   updatedAt: string;

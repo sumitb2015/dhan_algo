@@ -467,6 +467,7 @@ class FocusRowsWorker:
         self.lock_floor = None
         self.trail_state = 'INACTIVE'
         self.events = []           # recent (ts, level, message) for the dashboard
+        self._warned_orphans = set()   # ledger ids already reported as orphaned
         self.started_at = datetime.now().isoformat()
         self._chain_cache = {}     # (underlying, expiry) -> (minute_key, chain)
         self._vwap_cache = {}      # (underlying, expiry, ce, pe, side) -> (minute_key, vwap)
@@ -703,6 +704,10 @@ class FocusRowsWorker:
 
         opened['expiry'] = expiry
         opened['product'] = product
+        # Recorded so the ledger entry stays self-describing: if its config row
+        # is later deleted, orphan_rows() can still tell what this position is
+        # and keep the exit ladder reaching it.
+        opened['underlying'] = u
         opened['entryPremium'] = sum(v['entryPrice'] for k, v in opened.items()
                                      if k in ('CE', 'PE'))
         opened['enteredAt'] = datetime.now().isoformat()
@@ -773,12 +778,71 @@ class FocusRowsWorker:
             # Left in the ledger untouched — evaluate_leg_exit re-fires next
             # tick and retries, same as exit_row's partial-failure path.
 
+    def orphan_rows(self, rows):
+        """Synthetic rows for ledger entries whose config row has been deleted.
+
+        Deleting a row does not close its position. The page blocks the delete
+        while it can see one, but it resolves positions off the row's CURRENT
+        strike config, so a row whose strikes have drifted (or that this worker
+        entered without the page ever marking it entered) can be deleted while
+        this worker is still holding it. Those fills would otherwise never be
+        looked at again: never exited, never bell-squared, never shown on
+        screen — a live short sitting in a state file.
+
+        They are rebuilt into minimal rows so the exit ladder still reaches
+        them. Every user-configured rule is dropped, because there is no
+        config left to read: no H-up/L-down, no SL, no VWAP, no book exit, no
+        exit time. What survives is only what was never the user's to opt out
+        of — the 15:17 intraday bell (via the fill's own recorded product) and
+        the account-level risk budget.
+        """
+        # Forget ids that have since been closed, so a row that is deleted,
+        # re-added and deleted again warns each time rather than once ever.
+        self._warned_orphans &= set(self.fills)
+        known = {r.get('id') for r in rows}
+        out = []
+        for rid, fill in self.fills.items():
+            if rid in known:
+                continue
+            u = fill.get('underlying')
+            if u not in UNDERLYINGS:
+                # A ledger entry from before `underlying` was recorded. It
+                # cannot be quoted or closed without knowing its index, so it
+                # is reported and left alone rather than acted on blindly.
+                if rid not in self._warned_orphans:
+                    self._warned_orphans.add(rid)
+                    self.log('error', f'Orphaned fill {rid[-4:]} has no underlying recorded — '
+                                      f'cannot manage it. Close it manually at the broker.')
+                continue
+            if rid not in self._warned_orphans:
+                self._warned_orphans.add(rid)
+                held = ', '.join(f"{fill[l]['strike']}{l}" for l in ('CE', 'PE') if fill.get(l))
+                self.log('warning', f'Row {rid[-4:]} was deleted from the config but this worker '
+                                    f'still holds {u} {held}. Keeping the 15:17 bell and the '
+                                    f'account risk budget on it; its own level exits are gone.')
+            out.append({
+                'id': rid,
+                'underlying': u,
+                'status': 'entered',
+                'orphan': True,
+                'expiry': fill.get('expiry') or '',
+                'side': 'BOTH',
+                'dte': 'Any',
+                'entryTime': '',
+                'exitTime': '',
+            })
+        return out
+
     # -- the tick ----------------------------------------------------
 
     def tick(self):
         self.load_config()
         cfg = self.cfg
-        rows = cfg.get('rows') or []
+        rows = list(cfg.get('rows') or [])
+        # Fills whose config row is gone still hold real positions — see
+        # orphan_rows. Appended so every loop below (quotes, exits, the status
+        # snapshot and the account risk sweep) reaches them too.
+        rows += self.orphan_rows(rows)
         live = bool(cfg.get('liveRealMoney'))
 
         now = datetime.now(IST)
@@ -839,6 +903,12 @@ class FocusRowsWorker:
                 row, atm, step, chains.get((u, expiry)))
 
             fill = self.fills.get(row['id'])
+            if row.get('orphan'):
+                # No config row left, so no index group either. The product
+                # comes from the fill itself (that is what the position was
+                # opened under) and every optional rule stays off.
+                group = {'underlying': u, 'enabled': False, 'bookExit': False,
+                         'product': (fill or {}).get('product') or 'INTRADAY'}
             # Once a row is open, only quote legs the ledger actually still
             # holds — NOT legs_of(row) blindly. A leg closed by exit_leg (the
             # per-leg SL x below) is gone from `fill`, and legs_of(row) still
@@ -885,7 +955,13 @@ class FocusRowsWorker:
 
             snapshot.append({
                 'id': row['id'], 'underlying': u, 'status': row.get('status'),
-                'ceStrike': ce_strike, 'peStrike': pe_strike, 'expiry': expiry,
+                # The strikes actually HELD once open, not the live ATM
+                # resolution — the page pins its position lookup to these, and
+                # a drifting ATM would point it at a strike nobody holds.
+                'ceStrike': (fill.get('CE') or {}).get('strike') if fill else ce_strike,
+                'peStrike': (fill.get('PE') or {}).get('strike') if fill else pe_strike,
+                'expiry': expiry,
+                'orphan': bool(row.get('orphan')),
                 'open': bool(fill), 'premium': round(premium, 2),
                 'pnl': round(pnl, 2), 'vwap': round(vwap, 2) if vwap else None,
                 'entryPremium': round(float((fill or {}).get('entryPremium') or 0.0), 2),
