@@ -107,6 +107,10 @@ function fmtPrice(n: number | null | undefined): string {
  *  scope for a per-user decision on a local single-user tool. */
 const WORKER_OPT_OUT_KEY = 'focusTool.workerStoppedByUser';
 
+/** User setting: show/hide the per-row combined-premium sparkline. Per-browser,
+ *  same scope as WORKER_OPT_OUT_KEY above. Defaults off. */
+const SPARKLINE_ENABLED_KEY = 'focusTool.sparklineEnabled';
+
 /** Wall-clock 'HH:MM' in IST, regardless of the browser's own timezone. */
 function istHm(): string {
   return new Date().toLocaleTimeString('en-GB', {
@@ -938,6 +942,7 @@ function ControlStrip({
   onSave, saving, totalPnl, peakMtm, lockMtm,
   copyTrade,
   onOpenRisk, onOpenOrders, onToggleViewMode, viewMode,
+  sparklineEnabled, onToggleSparkline,
   workerStatus, onToggleWorker,
   onExitAll, confirmExitAll, exitingAll,
 }: {
@@ -954,6 +959,8 @@ function ControlStrip({
   onOpenOrders: () => void;
   onToggleViewMode: () => void;
   viewMode: 'table' | 'cards';
+  sparklineEnabled: boolean;
+  onToggleSparkline: () => void;
   workerStatus: WorkerStatus;
   onToggleWorker: () => void;
   onExitAll: () => void;
@@ -1040,6 +1047,10 @@ function ControlStrip({
         <GhostBtn onClick={onToggleViewMode} title="Toggle between Table and Cards view">
           <Layers className="h-3.5 w-3.5 text-zinc-400" />
           {viewMode === 'cards' ? 'Table' : 'Cards'}
+        </GhostBtn>
+        <GhostBtn onClick={onToggleSparkline} title={sparklineEnabled ? 'Hide the per-row premium sparkline' : 'Show the per-row premium sparkline'}>
+          <TrendingUp className={cn('h-3.5 w-3.5', sparklineEnabled ? 'text-violet-400' : 'text-zinc-500')} />
+          Sparkline {sparklineEnabled ? 'On' : 'Off'}
         </GhostBtn>
       </div>
 
@@ -1972,6 +1983,17 @@ export default function FocusTool() {
 
   const [activeModal, setActiveModal] = useState<'risk' | 'orderbook' | null>(null);
   const [viewMode, setViewMode] = useState<'table' | 'cards'>('table');
+  const [sparklineEnabled, setSparklineEnabled] = useState(false);
+  useEffect(() => {
+    setSparklineEnabled(localStorage.getItem(SPARKLINE_ENABLED_KEY) === '1');
+  }, []);
+  const toggleSparkline = useCallback(() => {
+    setSparklineEnabled(prev => {
+      const next = !prev;
+      localStorage.setItem(SPARKLINE_ENABLED_KEY, next ? '1' : '0');
+      return next;
+    });
+  }, []);
   const [orders, setOrders] = useState<Record<string, unknown>[]>([]);
   const [ordersLoading, setOrdersLoading] = useState(false);
   const [ordersError, setOrdersError] = useState<string | null>(null);
@@ -3797,6 +3819,7 @@ export default function FocusTool() {
         onOpenOrders={() => setActiveModal('orderbook')}
         onToggleViewMode={() => setViewMode(v => v === 'cards' ? 'table' : 'cards')}
         viewMode={viewMode}
+        sparklineEnabled={sparklineEnabled} onToggleSparkline={toggleSparkline}
         workerStatus={workerStatus} onToggleWorker={toggleWorker}
         onExitAll={handleExitAll} confirmExitAll={confirmExitAll} exitingAll={exitingAll}
       />
@@ -3853,8 +3876,8 @@ export default function FocusTool() {
                           lotSize={lotSizes[u]} spot={spots[u] ?? 0}
                           liveRealMoney={liveRealMoney} broker={broker}
                           busy={busyRows.has(row.id)}
-                          sparkHistory={sparkHistoryRef.current[row.id]}
-                          sparkPnlHistory={sparkPnlRef.current[row.id]}
+                          sparkHistory={sparklineEnabled ? sparkHistoryRef.current[row.id] : undefined}
+                          sparkPnlHistory={sparklineEnabled ? sparkPnlRef.current[row.id] : undefined}
                           onUpdate={(patch, save) => updateRow(row.id, patch, save)}
                           onDelete={() => deleteRow(row.id)}
                           onArm={() => armRow(row.id)}
@@ -3910,8 +3933,8 @@ export default function FocusTool() {
                           lotSize={lotSizes[u]} spot={spots[u] ?? 0}
                           liveRealMoney={liveRealMoney} broker={broker}
                           busy={busyRows.has(row.id)}
-                          sparkHistory={sparkHistoryRef.current[row.id]}
-                          sparkPnlHistory={sparkPnlRef.current[row.id]}
+                          sparkHistory={sparklineEnabled ? sparkHistoryRef.current[row.id] : undefined}
+                          sparkPnlHistory={sparklineEnabled ? sparkPnlRef.current[row.id] : undefined}
                           onUpdate={(patch, save) => updateRow(row.id, patch, save)}
                           onDelete={() => deleteRow(row.id)}
                           onArm={() => armRow(row.id)}
