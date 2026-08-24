@@ -24,7 +24,7 @@ import type {
 // run against focus_tool_rows_worker.py — see focusToolRules.cases.json.
 import {
   INTRADAY_BACKSTOP_HM, EMPTY_ROW_LIVE,
-  legsOf, legsFlat, rowOwnsLeg, sidePremium, legStopReason,
+  legsOf, legsFlat, rowFlat, rowOwnsLeg, sidePremium, legStopReason,
   dteMatches, dteForExpiry, evaluateRowExit, evaluateEntry, evaluateGlobalRisk,
   type PosRow, type RowLive,
 } from '@/lib/focusToolRules';
@@ -75,6 +75,53 @@ const PRODUCT_ALIAS: Record<'INTRADAY' | 'MARGIN', Record<Broker, string>> = {
   INTRADAY: { dhan: 'INTRADAY', zerodha: 'MIS',  kotak: 'MIS'  },
   MARGIN:   { dhan: 'MARGIN',   zerodha: 'NRML', kotak: 'NRML' },
 };
+
+/**
+ * Pick the one position that matches `wantProduct` out of a same-symbol/id
+ * candidate list, or the single unambiguous candidate if none carries a
+ * recognised product.
+ *
+ * Same strike can be open under two products at once (this row plus a
+ * running strategy, or the other product tab) — matching by id/symbol alone
+ * resolves both to whichever the broker lists first, so one book gets closed
+ * twice and the other never (see lib/positionProduct.ts).
+ */
+function pickPositionByProduct(candidates: PosRow[], wantProduct: string): PosRow | null {
+  if (candidates.length === 0) return null;
+  const matched = candidates.find(
+    p => positionProduct(p as unknown as Record<string, unknown>) === wantProduct);
+  if (matched) return matched;
+  return candidates.length === 1
+    && !positionProduct(candidates[0] as unknown as Record<string, unknown>)
+    ? candidates[0] : null;
+}
+
+/**
+ * The broker position for one leg's contract, as named by `ref` (a strike's
+ * lookup entry) — NOT by a row's resolved/pinned strike. Callers that need
+ * "whatever this row currently holds" go through `rowLive.cePosition`/
+ * `pePosition` instead; this is for callers (like a strike-shift reopen) that
+ * must resolve a position for a SPECIFIC contract that may differ from the
+ * row's current pin.
+ */
+function findPositionForRef(
+  positions: PosRow[],
+  broker: Broker,
+  ref: StrikeRef | undefined,
+  leg: 'CE' | 'PE',
+  wantProduct: string,
+): PosRow | null {
+  // Dhan is the only broker with a numeric security id; the rest join by
+  // trading symbol.
+  if (broker === 'dhan') {
+    const id = leg === 'CE' ? ref?.ceId : ref?.peId;
+    if (!id) return null;
+    return pickPositionByProduct(positions.filter(p => String(p.securityId) === String(id)), wantProduct);
+  }
+  const sym = leg === 'CE' ? ref?.ceSymbol : ref?.peSymbol;
+  if (!sym) return null;
+  return pickPositionByProduct(positions.filter(p => String(p.tradingSymbol) === sym), wantProduct);
+}
 
 // Per-underlying accent colours for group cards
 const UNDERLYING_DOT: Record<FocusUnderlying, string> = {
@@ -2608,38 +2655,12 @@ export default function FocusTool() {
 
       const ceRef = ceKey ? lookups[u]?.strikes?.[ceKey] : undefined;
       const peRef = peKey ? lookups[u]?.strikes?.[peKey] : undefined;
-      // Same strike can be open under two products at once (this row plus a
-      // running strategy, or the other product tab) — matching by id/symbol
-      // alone resolves both to whichever the broker lists first, so one book
-      // gets closed twice and the other never (see lib/positionProduct.ts).
       // Prefer the candidate under this row's own group product; only fall
-      // back to a symbol/id-only match when it is unambiguous.
+      // back to a symbol/id-only match when it is unambiguous — see
+      // findPositionForRef's own doc comment.
       const wantProduct = PRODUCT_ALIAS[group?.product ?? 'INTRADAY'][broker];
-      const pickPos = (candidates: PosRow[]): PosRow | null => {
-        if (candidates.length === 0) return null;
-        const matched = candidates.find(
-          p => positionProduct(p as unknown as Record<string, unknown>) === wantProduct);
-        if (matched) return matched;
-        return candidates.length === 1
-          && !positionProduct(candidates[0] as unknown as Record<string, unknown>)
-          ? candidates[0] : null;
-      };
-      const findPos = (leg: 'CE' | 'PE'): PosRow | null => {
-        const ref = leg === 'CE' ? ceRef : peRef;
-        // Dhan is the only broker with a numeric security id; the rest join by
-        // trading symbol.
-        if (broker === 'dhan') {
-          const id = leg === 'CE' ? ref?.ceId : ref?.peId;
-          if (!id) return null;
-          return pickPos(positions.filter(p => String(p.securityId) === String(id)));
-        }
-        const sym = leg === 'CE' ? ref?.ceSymbol : ref?.peSymbol;
-        if (!sym) return null;
-        return pickPos(positions.filter(p => String(p.tradingSymbol) === sym));
-      };
-
-      const cePosition = findPos('CE');
-      const pePosition = findPos('PE');
+      const cePosition = findPositionForRef(positions, broker, ceRef, 'CE', wantProduct);
+      const pePosition = findPositionForRef(positions, broker, peRef, 'PE', wantProduct);
 
       const ltpCe = pick(ceWs?.ce?.ltp, ceCh?.ce);
       const ltpPe = pick(peWs?.pe?.ltp, peCh?.pe);
@@ -2664,11 +2685,18 @@ export default function FocusTool() {
        * `realizedProfit` of the current pin: a strike shift leaves realised on
        * the OLD security id, which this row no longer looks up.
        */
+      const workerHold = (workerStatus.rows ?? []).find(r => r.id === row.id) ?? null;
       let entryPremium = 0;
       const liveLegs: Parameters<typeof computeRowPnl>[1] = [];
       for (const leg of legsOf(row)) {
         const pos = leg === 'CE' ? cePosition : pePosition;
         if (!pos) continue;
+        // A broker position at this leg's strike that this row didn't open —
+        // another row, a manual trade, a running strategy — must not be
+        // counted as this row's premium/P&L. Without this, ownShare()/
+        // computeRowPnl() in focusToolPnl.ts read a missing own qty as
+        // "attribute the whole position to this row" instead of "none of it."
+        if (!rowOwnsLeg(row, leg, workerHold)) continue;
         const ownQty = leg === 'CE' ? row.fill?.ceQty : row.fill?.peQty;
         const isShort = Number(pos.netQty) < 0;
         const avg = isShort ? (Number(pos.sellAvg) || 0) : (Number(pos.buyAvg) || 0);
@@ -3102,7 +3130,17 @@ export default function FocusTool() {
       return false;
     }
 
-    const pos = leg === 'CE' ? live.cePosition : live.pePosition;
+    // Resolved against `strike` (the contract this order actually targets),
+    // NOT `live.cePosition`/`pePosition` — those are pinned to the row's
+    // CURRENT config strike, which is stale whenever `opts.strikeOverride`
+    // names a different contract (a strike-shift reopen). Using the stale
+    // pin here fed a wrong-security netQty into confirmLegFillQty's fill
+    // check below, which made every shift-reopen report itself as unfilled
+    // even when the real market order went through in full — see the shift
+    // audit for the exact mechanism.
+    const group = config.groups.find(g => g.underlying === u);
+    const wantProduct = PRODUCT_ALIAS[group?.product ?? 'INTRADAY'][broker];
+    const pos = findPositionForRef(positions, broker, ref, leg, wantProduct);
     const netQty = Number(pos?.netQty ?? 0);
 
     let quantity: number;
@@ -3145,7 +3183,6 @@ export default function FocusTool() {
     if (!(quantity > 0)) return false;
 
     // Reducing: the position's own product. Opening: the group's.
-    const group = config.groups.find(g => g.underlying === u);
     const rawProduct = opts.reduce && pos
       ? positionProduct(pos as unknown as Record<string, unknown>)
       : PRODUCT_ALIAS[group?.product ?? 'INTRADAY'][broker];
@@ -3378,6 +3415,21 @@ export default function FocusTool() {
       const netQty = Number(pos?.netQty ?? 0);
       const workerHold = (workerStatus.rows ?? []).find(r => r.id === row.id);
       const owns = rowOwnsLeg(row, leg, workerHold);
+      // The worker tracks positions purely through its own state file,
+      // written only by itself — a shift placed from this tab goes through
+      // the dashboard's own order route and never touches it. The worker's
+      // own reconciliation pass would then see the old strike go flat and
+      // DROP the leg from its ledger entirely, never discovering the new
+      // strike — silently ending SL/exit-time/book-exit/account-risk
+      // enforcement for it on both engines. Refuse rather than shift into a
+      // state the worker can't track; the user must stop the worker (or exit
+      // the leg through it) first.
+      const heldStrike = leg === 'CE' ? workerHold?.ceStrike : workerHold?.peStrike;
+      if (workerHold?.open && heldStrike != null) {
+        addToast('error', 'Cannot shift',
+          `${currStrike} ${leg} is held by the server-side worker — stop the worker (or exit this leg through it) before rolling it from this tab`);
+        return;
+      }
       // Only roll a position this row opened. A coincidental book at the
       // resolved strike is someone else's — moving THIS row's offset must
       // not close and reopen it.
@@ -3532,6 +3584,7 @@ export default function FocusTool() {
   const schedulerSnapshot = {
     config, rowLive, spots, toolPnl, lockMtm, peakMtm,
     riskEnabled, targetRupees, stopRupees, trailEnabled, triggerRupees, lockRupees,
+    workerRows: workerStatus.rows,
   };
   const schedulerRef = useRef(schedulerSnapshot);
   schedulerRef.current = schedulerSnapshot;
@@ -3635,7 +3688,9 @@ export default function FocusTool() {
 
     const openRows = config.rows.filter(r => {
       const l = rowLive[r.id];
-      return l && !legsFlat(l);
+      if (!l) return false;
+      const workerHold = (workerStatus.rows ?? []).find(w => w.id === r.id) ?? null;
+      return !rowFlat(r, workerHold);
     });
     if (!openRows.length) return;
 
@@ -3685,17 +3740,18 @@ export default function FocusTool() {
       // than, the pair-level rules below. Skip the whole-row check this tick
       // once a leg exit has been sent — the position book it would be
       // evaluated against is about to change.
-      const ceReason = legStopReason(row, 'CE', live);
+      const workerHold = (workerStatus.rows ?? []).find(w => w.id === row.id) ?? null;
+      const ceReason = legStopReason(row, 'CE', live, workerHold);
       if (ceReason) { autoExitLeg(row, 'CE', ceReason); continue; }
-      const peReason = legStopReason(row, 'PE', live);
+      const peReason = legStopReason(row, 'PE', live, workerHold);
       if (peReason) { autoExitLeg(row, 'PE', peReason); continue; }
 
-      const reason = evaluateRowExit(row, live, spots[row.underlying] ?? 0);
+      const reason = evaluateRowExit(row, live, spots[row.underlying] ?? 0, workerHold);
       if (reason) autoExitRow(row, reason);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [rowLive, spots, tabMayTrade, toolPnl, riskEnabled, targetRupees, stopRupees,
-      trailEnabled, triggerRupees, lockRupees, peakMtm, lockMtm]);
+      trailEnabled, triggerRupees, lockRupees, peakMtm, lockMtm, workerStatus.rows]);
 
   /**
    * Open every leg this row trades, at its configured lot size.
@@ -3781,14 +3837,15 @@ export default function FocusTool() {
     if (!tabMayTrade) return;
 
     const tick = () => {
-      const { config: cfg, rowLive: live } = schedulerRef.current;
+      const { config: cfg, rowLive: live, workerRows } = schedulerRef.current;
       // Display mirror of the authoritative floor — see lockFloorRef. The
       // identity return makes an unchanged floor a no-op rather than a render.
       setLockMtm(prev => (prev === lockFloorRef.current ? prev : lockFloorRef.current));
       const nowHm = istHm();
+      const findWorkerHold = (id: string) => (workerRows ?? []).find(w => w.id === id) ?? null;
       const openRows = cfg.rows.filter(r => {
         const l = live[r.id];
-        return l && !legsFlat(l);
+        return l && !rowFlat(r, findWorkerHold(r.id));
       });
 
       // The account budget and Book Exit used to live here. Both are pure
@@ -3822,7 +3879,7 @@ export default function FocusTool() {
           product: group?.product ?? 'INTRADAY',
           dte: dteFor(row.expiry || expiriesRef.current[row.underlying]?.[0] || ''),
           strikesReady: l.ceStrike != null || l.peStrike != null,
-          flat: legsFlat(l),
+          flat: rowFlat(row, findWorkerHold(row.id)),
         });
         if (decision.enter) actionsRef.current.autoEnterRow(row, decision.reason);
       }

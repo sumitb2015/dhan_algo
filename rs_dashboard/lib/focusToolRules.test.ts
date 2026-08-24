@@ -72,6 +72,25 @@ function row(partial: Partial<FocusRow>): FocusRow {
   } as FocusRow;
 }
 
+/**
+ * The shared fixture (focusToolRules.cases.json) predates row-ownership
+ * gating and has no notion of it — every rowExit/legStop case implicitly
+ * assumes the row owns whatever position `live()` constructs for it. Stamp a
+ * matching `fill` so `rowOwnsLeg` sees that ownership, exactly as a row's own
+ * placeLeg() would once its entry actually filled.
+ */
+function ownedRow(partial: Partial<FocusRow>, c: LiveCase): FocusRow {
+  return row({
+    fill: {
+      ceStrike: c.ceQty ? 24000 : null,
+      peStrike: c.peQty ? 24000 : null,
+      ceQty: Math.abs(c.ceQty), peQty: Math.abs(c.peQty),
+      ts: '',
+    },
+    ...partial,
+  });
+}
+
 // ── Shared fixture ───────────────────────────────────────────────────────────
 
 test('entry rules', async t => {
@@ -101,7 +120,7 @@ test('account budget', async t => {
 test('row exit ladder', async t => {
   for (const c of CASES.rowExit) {
     await t.test(c.name, () => {
-      assert.equal(evaluateRowExit(row(c.row), live(c.live), c.spot), c.expect);
+      assert.equal(evaluateRowExit(ownedRow(c.row, c.live), live(c.live), c.spot), c.expect);
     });
   }
 });
@@ -109,7 +128,7 @@ test('row exit ladder', async t => {
 test('leg-wise stops', async t => {
   for (const c of CASES.legStop) {
     await t.test(c.name, () => {
-      assert.equal(legStopReason(row(c.row), c.leg, live(c.live)), c.expect);
+      assert.equal(legStopReason(ownedRow(c.row, c.live), c.leg, live(c.live)), c.expect);
     });
   }
 });
@@ -163,21 +182,32 @@ test('rowOwnsLeg: the worker ledger owns an open leg even without page fill', ()
 });
 
 test('sidePremium counts only legs that are both traded and open', () => {
-  const l = live({ ceLtp: 100, peLtp: 80, ceQty: -75, peQty: -75, ceEntry: 100, peEntry: 80 });
-  assert.equal(sidePremium({ side: 'BOTH' } as FocusRow, l), 180);
-  assert.equal(sidePremium({ side: 'CE' } as FocusRow, l), 100);
+  const c = { ceLtp: 100, peLtp: 80, ceQty: -75, peQty: -75, ceEntry: 100, peEntry: 80 };
+  const l = live(c);
+  const owned = ownedRow({}, c);
+  assert.equal(sidePremium({ ...owned, side: 'BOTH' } as FocusRow, l), 180);
+  assert.equal(sidePremium({ ...owned, side: 'CE' } as FocusRow, l), 100);
 
-  const peClosed = live({ ceLtp: 100, peLtp: 80, ceQty: -75, peQty: 0, ceEntry: 100, peEntry: 80 });
-  assert.equal(sidePremium({ side: 'BOTH' } as FocusRow, peClosed), 100);
+  const peClosedCase = { ceLtp: 100, peLtp: 80, ceQty: -75, peQty: 0, ceEntry: 100, peEntry: 80 };
+  const peClosed = live(peClosedCase);
+  const ownedPeClosed = ownedRow({}, peClosedCase);
+  assert.equal(sidePremium({ ...ownedPeClosed, side: 'BOTH' } as FocusRow, peClosed), 100);
+});
+
+test('sidePremium excludes a leg the row does not own even if the broker shows it', () => {
+  const c = { ceLtp: 100, peLtp: 80, ceQty: -75, peQty: -75, ceEntry: 100, peEntry: 80 };
+  const l = live(c);
+  // No fill at all — a brand-new/draft row that merely resolved onto a strike
+  // someone else already holds.
+  assert.equal(sidePremium({ ...row({}), side: 'BOTH' } as FocusRow, l), 0);
 });
 
 test('a zero premium never satisfies a premium rule', () => {
   // Two failed quote reads sum to 0. Without the > 0 guards that reads as
   // "collapsed below VWAP" and as an infinite loss multiple.
-  const dead = live({
-    ceLtp: 0, peLtp: 0, ceQty: -75, peQty: -75, ceEntry: 100, peEntry: 80, vwap: 195, vwapClose: 0,
-  });
-  assert.equal(evaluateRowExit(row({ levelVw: true, slMultiplier: '2' }), dead, 24000), null);
+  const c = { ceLtp: 0, peLtp: 0, ceQty: -75, peQty: -75, ceEntry: 100, peEntry: 80, vwap: 195, vwapClose: 0 };
+  const dead = live(c);
+  assert.equal(evaluateRowExit(ownedRow({ levelVw: true, slMultiplier: '2' }, c), dead, 24000), null);
 });
 
 test('the trail floor is monotonic across a falling sequence', () => {

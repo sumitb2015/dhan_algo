@@ -98,16 +98,28 @@ export function legsFlat(live: RowLive): boolean {
  * onto someone else's 24150 PE; locking that selector (or rolling it with the
  * chevrons) would freeze or flatten a position this row never opened.
  */
+export type WorkerHold = { open?: boolean; ceStrike?: number | null; peStrike?: number | null } | null | undefined;
+
 export function rowOwnsLeg(
   row: Pick<FocusRow, 'fill'>,
   leg: 'CE' | 'PE',
-  workerHold?: { open?: boolean; ceStrike?: number | null; peStrike?: number | null } | null,
+  workerHold?: WorkerHold,
 ): boolean {
   const qty = leg === 'CE' ? Number(row.fill?.ceQty) || 0 : Number(row.fill?.peQty) || 0;
   if (qty > 0) return true;
   if (!workerHold?.open) return false;
   const strike = leg === 'CE' ? workerHold.ceStrike : workerHold.peStrike;
   return strike != null;
+}
+
+/**
+ * True when this row owns neither leg — i.e. every broker position at its
+ * resolved strikes belongs to something else (a manual trade, another row, a
+ * running strategy). Replaces raw `legsFlat` wherever the real question is
+ * "does THIS row hold anything," not "is the broker flat at this strike."
+ */
+export function rowFlat(row: Pick<FocusRow, 'fill'>, workerHold?: WorkerHold): boolean {
+  return !rowOwnsLeg(row, 'CE', workerHold) && !rowOwnsLeg(row, 'PE', workerHold);
 }
 
 /**
@@ -119,11 +131,16 @@ export function rowOwnsLeg(
  * rules would then be measured against a phantom leg with no position behind
  * it, and would cross their threshold at the wrong number.
  */
-export function sidePremium(row: Pick<FocusRow, 'side'>, live: RowLive): number {
+export function sidePremium(
+  row: Pick<FocusRow, 'side' | 'fill'>,
+  live: RowLive,
+  workerHold?: WorkerHold,
+): number {
   let sum = 0;
   for (const leg of legsOf(row)) {
     const pos = leg === 'CE' ? live.cePosition : live.pePosition;
     if (!pos || Number(pos.netQty) === 0) continue;
+    if (!rowOwnsLeg(row, leg, workerHold)) continue;
     sum += (leg === 'CE' ? live.ltpCe : live.ltpPe) ?? 0;
   }
   return sum;
@@ -138,10 +155,12 @@ export function sidePremium(row: Pick<FocusRow, 'side'>, live: RowLive): number 
  * flat leg has no premium to measure a multiple against.
  */
 export function legStopReason(
-  row: Pick<FocusRow, 'ceSlMultiplier' | 'peSlMultiplier'>,
+  row: Pick<FocusRow, 'ceSlMultiplier' | 'peSlMultiplier' | 'fill'>,
   leg: 'CE' | 'PE',
   live: RowLive,
+  workerHold?: WorkerHold,
 ): string | null {
+  if (!rowOwnsLeg(row, leg, workerHold)) return null;
   const pos = leg === 'CE' ? live.cePosition : live.pePosition;
   const qty = Number(pos?.netQty ?? 0);
   if (qty === 0) return null;
@@ -200,7 +219,12 @@ export function dteMatches(filter: FocusDte, dte: number | null): boolean {
  * those are clock- and aggregate-driven and live in the scheduler, which keeps
  * firing even when no tick arrives.
  */
-export function evaluateRowExit(row: FocusRow, live: RowLive, spot: number): string | null {
+export function evaluateRowExit(
+  row: FocusRow,
+  live: RowLive,
+  spot: number,
+  workerHold?: WorkerHold,
+): string | null {
   const hi = Number(row.levelHigh);
   if (row.levelHigh && Number.isFinite(hi) && spot > 0 && spot >= hi) {
     return `H↑ breached: spot ${spot.toFixed(2)} ≥ ${hi}`;
@@ -210,10 +234,11 @@ export function evaluateRowExit(row: FocusRow, live: RowLive, spot: number): str
     return `L↓ breached: spot ${spot.toFixed(2)} ≤ ${lo}`;
   }
 
-  // Premium of only the legs this row's Side trades. `entryPremium` is
-  // restricted the same way, so a CE-only row never compares a CE entry price
-  // against a CE+PE current price.
-  const nowPremium = sidePremium(row, live);
+  // Premium of only the legs this row's Side trades AND actually owns.
+  // `entryPremium` is restricted the same way, so a CE-only row never
+  // compares a CE entry price against a CE+PE current price, and a leg this
+  // row doesn't own never contributes its premium either.
+  const nowPremium = sidePremium(row, live, workerHold);
 
   if (row.levelVw && live.vwapClose != null && live.vwapClose > 0 && live.vwap != null && live.vwap > 0) {
     // Checked against the last CLOSED candle's premium, not the live tick —
