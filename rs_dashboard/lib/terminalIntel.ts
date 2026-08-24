@@ -51,7 +51,7 @@ export function regime(state: TerminalState | null): Regime | null {
   const pct = (f: (c: TerminalCandidate) => boolean) => (list.filter(f).length / n) * 100;
 
   const aboveVwapPct = pct((c) => !!c.conditions?.above_vwap);
-  const stBullPct = pct((c) => !!c.conditions?.st_bull_5m);
+  const stBullPct = pct((c) => !!c.conditions?.st_bull_htf);
   const rsDayPct = pct((c) => !!c.conditions?.rs_day_ok);
   const score = (aboveVwapPct + stBullPct + rsDayPct) / 3;
 

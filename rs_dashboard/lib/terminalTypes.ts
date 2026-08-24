@@ -13,7 +13,7 @@ export const STRATEGY_KEY = 'nifty50_vwap_rs';
 export const CONDITION_NAMES = [
   'above_vwap',
   'ema_stacked',
-  'st_bull_5m',
+  'st_bull_htf',
   'adx_ok',
   'rs_day_ok',
   'rs_lb_ok',
@@ -26,7 +26,7 @@ export type ConditionName = (typeof CONDITION_NAMES)[number];
 /** Conditions that must ALL pass for a name to be tradeable. The rest only score. */
 export const HARD_GATES: ConditionName[] = [
   'above_vwap',
-  'st_bull_5m',
+  'st_bull_htf',
   'adx_ok',
   'rs_day_ok',
   'not_stretched',
@@ -36,7 +36,7 @@ export const HARD_GATES: ConditionName[] = [
 export const CONDITION_LABELS: Record<ConditionName, string> = {
   above_vwap: 'VW',
   ema_stacked: 'EM',
-  st_bull_5m: 'ST',
+  st_bull_htf: 'ST',
   adx_ok: 'AD',
   rs_day_ok: 'RD',
   rs_lb_ok: 'RL',
@@ -47,13 +47,36 @@ export const CONDITION_LABELS: Record<ConditionName, string> = {
 export const CONDITION_TOOLTIPS: Record<ConditionName, string> = {
   above_vwap: 'Price has a real edge over session VWAP (hard gate)',
   ema_stacked: 'EMA9 above EMA20 (soft — scores only)',
-  st_bull_5m: '5-minute Supertrend is bullish (hard gate)',
-  adx_ok: '5-minute ADX above the trend threshold (hard gate)',
+  st_bull_htf: 'HTF Supertrend is bullish (hard gate; default 30m)',
+  adx_ok: 'HTF ADX above the trend threshold (hard gate)',
   rs_day_ok: 'Outperforming NIFTY since the open (hard gate)',
   rs_lb_ok: 'Outperforming NIFTY over the lookback (soft — scores only)',
   not_stretched: 'Not over-extended from VWAP in ATR terms (hard gate)',
   vol_ok: 'Volume above its 20-bar average (soft — scores only)',
 };
+
+/** Mirrors lib/intraday_signals.py SCORE_CAPS. Ranking heuristic, not a quality filter. */
+export const SCORE_CAPS = {
+  rs: 30,
+  trend: 20,
+  vwap: 20,
+  supertrend: 15,
+  ema: 10,
+  volume: 5,
+} as const;
+
+export type ScoreLeg = keyof typeof SCORE_CAPS;
+
+export const SCORE_LEG_LABELS: Record<ScoreLeg, string> = {
+  rs: 'RS lookback',
+  trend: 'ADX',
+  vwap: 'VWAP edge',
+  supertrend: 'ST headroom',
+  ema: 'EMA stack',
+  volume: 'Volume',
+};
+
+export type ScoreBreakdown = Record<ScoreLeg, number>;
 
 export type StrategyStatus =
   | 'INITIALIZING'
@@ -74,6 +97,7 @@ export interface TerminalCandidate {
   gated: boolean;
   conditions: Record<ConditionName, boolean>;
   blocked_by: ConditionName[];
+  score_breakdown?: ScoreBreakdown;
   ts: string | null;
 }
 
@@ -127,13 +151,20 @@ export interface TerminalState {
   as_of: string;
   pid?: number;
   last_update?: string;
-  session: { entry_start: string; entry_cutoff: string; square_off: string };
+  session: {
+    entry_start: string;
+    entry_cutoff: string;
+    square_off: string;
+    base_tf_min?: number;
+    htf_min?: number;
+  };
   benchmark: { symbol: string; ltp: number; day_pct: number };
   risk: {
     max_positions: number;
     open: number;
     max_per_sector: number;
     risk_per_trade: number;
+    min_score?: number;
     max_daily_loss: number;
     daily_loss_used: number;
     target_profit: number;

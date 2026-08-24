@@ -25,9 +25,9 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from lib.intraday_signals import (  # noqa: E402
     IntradayConfig, Position, Conditions,
     adx, atr, build_features, ema, evaluate, initial_stop, is_gated,
-    position_size, rank_candidates, resample_5m, score, select_new_entries,
+    position_size, rank_candidates, pick_watchlist, resample_5m, score, select_new_entries,
     session_vwap, supertrend, target_price, trail_stop, exit_reason,
-    sector_of, NIFTY50, SECTORS, HARD_GATES, CONDITION_NAMES,
+    sector_of, NIFTY50, SECTORS, HARD_GATES, CONDITION_NAMES, SCORE_CAPS,
 )
 
 
@@ -315,11 +315,11 @@ def test_five_min_features_lag_by_one_bucket(bars, bench):
     if nxt not in feats.index:
         pytest.skip("probe bucket at the tail of the sample")
 
-    assert feats.loc[nxt, "st_dir_5m"] == st5.loc[probe, "st_dir"]
+    assert feats.loc[nxt, "st_dir_htf"] == st5.loc[probe, "st_dir"]
     # And during the bucket itself, we still see the PREVIOUS bucket's value.
     inside = probe + pd.Timedelta(minutes=2)
     prev = df5.index[29]
-    assert feats.loc[inside, "st_dir_5m"] == st5.loc[prev, "st_dir"]
+    assert feats.loc[inside, "st_dir_htf"] == st5.loc[prev, "st_dir"]
 
 
 def test_build_features_columns_and_empty(cfg):
@@ -340,7 +340,7 @@ def test_build_features_without_benchmark_is_neutral(bars, cfg):
 def _row(**kw) -> pd.Series:
     base = dict(Open=100.0, High=101.0, Low=99.0, Close=100.0, Volume=50_000.0,
                 vwap=99.5, vwap_bps=50.0, ema_fast=100.2, ema_slow=99.8, ema_stack=1,
-                atr=1.0, vol_ratio=1.5, st_line_5m=98.0, st_dir_5m=1, adx_5m=25.0,
+                atr=1.0, vol_ratio=1.5, st_line_htf=98.0, st_dir_htf=1, adx_htf=25.0,
                 bench_ret_day=0.001, bench_ret_lb=0.0, rs_day=0.004, rs_lb=0.003)
     base.update(kw)
     s = pd.Series(base)
@@ -366,8 +366,8 @@ def test_evaluate_nan_bar_is_all_false(cfg):
 
 @pytest.mark.parametrize("kw,flag", [
     (dict(vwap_bps=1.0), "above_vwap"),
-    (dict(st_dir_5m=-1), "st_bull_5m"),
-    (dict(adx_5m=10.0), "adx_ok"),
+    (dict(st_dir_htf=-1), "st_bull_htf"),
+    (dict(adx_htf=10.0), "adx_ok"),
     (dict(rs_day=-0.01), "rs_day_ok"),
     (dict(Close=102.0, vwap=100.0, atr=1.0), "not_stretched"),  # stretch 2.0 > 1.50
 ])
@@ -386,21 +386,21 @@ def test_soft_conditions_do_not_block(cfg):
 
 def test_score_bounds_and_monotonicity(cfg):
     assert 0.0 <= score(_row(), cfg) <= 100.0
-    weak = score(_row(rs_lb=0.0, adx_5m=20.0, vwap_bps=5.0, ema_stack=-1, vol_ratio=0.0), cfg)
-    strong = score(_row(rs_lb=0.02, adx_5m=45.0, vwap_bps=40.0, ema_stack=1, vol_ratio=3.0), cfg)
+    weak = score(_row(rs_lb=0.0, adx_htf=20.0, vwap_bps=5.0, ema_stack=-1, vol_ratio=0.0), cfg)
+    strong = score(_row(rs_lb=0.02, adx_htf=45.0, vwap_bps=40.0, ema_stack=1, vol_ratio=3.0), cfg)
     assert strong > weak
-    assert score(_row(rs_lb=999.0, adx_5m=999.0, vwap_bps=999.0, vol_ratio=999.0), cfg) <= 100.0
+    assert score(_row(rs_lb=999.0, adx_htf=999.0, vwap_bps=999.0, vol_ratio=999.0), cfg) <= 100.0
 
 
 def test_short_side_mirrors_long(cfg):
     c = IntradayConfig(allow_short=True)
-    bear = _row(vwap_bps=-50.0, ema_stack=-1, st_dir_5m=-1, rs_day=-0.004, rs_lb=-0.003)
+    bear = _row(vwap_bps=-50.0, ema_stack=-1, st_dir_htf=-1, rs_day=-0.004, rs_lb=-0.003)
     assert is_gated(evaluate(bear, c, "SHORT"))
     assert not is_gated(evaluate(bear, c, "LONG"))
 
 
 def test_rank_candidates_orders_and_excludes(cfg):
-    rows = {"AAA": _row(rs_lb=0.01), "BBB": _row(rs_lb=0.002), "CCC": _row(adx_5m=5.0)}
+    rows = {"AAA": _row(rs_lb=0.01), "BBB": _row(rs_lb=0.002), "CCC": _row(adx_htf=5.0)}
     ranked = rank_candidates(rows, cfg)
     assert [c.symbol for c in ranked] == ["AAA", "BBB"]   # CCC fails the ADX gate
     assert ranked[0].score >= ranked[1].score
@@ -408,7 +408,7 @@ def test_rank_candidates_orders_and_excludes(cfg):
 
 
 def test_rank_candidates_include_ungated_shows_everything(cfg):
-    rows = {"AAA": _row(), "CCC": _row(adx_5m=5.0)}
+    rows = {"AAA": _row(), "CCC": _row(adx_htf=5.0)}
     ranked = rank_candidates(rows, cfg, include_ungated=True)
     assert len(ranked) == 2
     ccc = next(c for c in ranked if c.symbol == "CCC")
@@ -540,7 +540,7 @@ def test_exit_reason_stop_and_target(cfg):
 def test_exit_reason_signal_exits(cfg):
     pos = _pos("INFY", entry=100.0, stop=90.0)
     pos.target = 130.0
-    assert exit_reason(pos, _row(st_dir_5m=-1), cfg, "11:00", ltp=101.0) == "ST_FLIP"
+    assert exit_reason(pos, _row(st_dir_htf=-1), cfg, "11:00", ltp=101.0) == "ST_FLIP"
 
     # VWAP exit is OFF by default (it cost -0.75R over 222 trades), so the
     # default config must NOT fire it — and the opt-in must still work.
@@ -557,14 +557,14 @@ def test_exit_reason_stop_beats_signal_exit(cfg):
     """A stop hit and a Supertrend flip on the same bar must exit at the stop."""
     pos = _pos("INFY", entry=100.0, stop=97.0)
     pos.target = 106.0
-    assert exit_reason(pos, _row(st_dir_5m=-1), cfg, "11:00", ltp=96.0) == "STOP"
+    assert exit_reason(pos, _row(st_dir_htf=-1), cfg, "11:00", ltp=96.0) == "STOP"
 
 
 def test_exit_reason_short_side_levels(cfg):
     pos = _pos("INFY", entry=100.0, stop=103.0, side="SHORT")
     pos.target = 94.0
-    assert exit_reason(pos, _row(st_dir_5m=-1), cfg, "11:00", ltp=103.5) == "STOP"
-    assert exit_reason(pos, _row(st_dir_5m=-1), cfg, "11:00", ltp=93.5) == "TARGET"
+    assert exit_reason(pos, _row(st_dir_htf=-1), cfg, "11:00", ltp=103.5) == "STOP"
+    assert exit_reason(pos, _row(st_dir_htf=-1), cfg, "11:00", ltp=93.5) == "TARGET"
 
 
 # ── Position accounting ───────────────────────────────────────────────────────
@@ -602,6 +602,27 @@ def test_candidate_to_dict_is_json_safe(cfg):
     d = c.to_dict()
     json.dumps(d)
     assert set(d["conditions"]) == set(CONDITION_NAMES)
+    assert set(d["score_breakdown"]) == set(SCORE_CAPS)
+    assert abs(sum(d["score_breakdown"].values()) - d["score"]) < 0.2
+
+
+def test_pick_watchlist_prefers_gated_then_near_miss(cfg):
+    """Candle budget follows names that can fire, not merely high-score blocked ones."""
+    gated_low = rank_candidates({"RELIANCE": _row(rs_lb=0.002)}, cfg, include_ungated=True)[0]
+    gated_high = rank_candidates({"INFY": _row(rs_lb=0.02)}, cfg, include_ungated=True)[0]
+    near = rank_candidates({"TCS": _row(rs_lb=0.05, adx_htf=5.0)}, cfg, include_ungated=True)[0]
+    blocked = rank_candidates(
+        {"WIPRO": _row(rs_lb=0.08, adx_htf=5.0, st_dir_htf=-1)}, cfg, include_ungated=True,
+    )[0]
+    assert gated_high.gated and gated_low.gated
+    assert not near.gated and len(near.conditions.blocked_by()) == 1
+    assert not blocked.gated and len(blocked.conditions.blocked_by()) > 1
+    assert blocked.score > gated_low.score
+
+    ordered = sorted([gated_low, gated_high, near, blocked], key=lambda c: (-c.score, c.symbol))
+    assert pick_watchlist(ordered, 2) == [gated_high.symbol, gated_low.symbol]
+    assert pick_watchlist(ordered, 3) == [gated_high.symbol, gated_low.symbol, near.symbol]
+    assert pick_watchlist(ordered, 4)[-1] == blocked.symbol
 
 
 # ── End-to-end on real store data (skipped when the store is absent) ──────────
@@ -617,10 +638,10 @@ def test_real_store_features_are_sane(cfg):
     from lib.intraday_signals import resample_tf
     assert len(feats) == len(resample_tf(df, cfg.base_tf_min))
     warm = feats.iloc[400:]
-    for col in ("vwap", "atr", "adx_5m", "rs_day"):
+    for col in ("vwap", "atr", "adx_htf", "rs_day"):
         assert warm[col].notna().mean() > 0.95, f"{col} is mostly NaN after warmup"
     assert (warm["vwap"] > 0).all()
     assert (warm["atr"] > 0).all()
-    assert set(np.unique(feats["st_dir_5m"].dropna())) <= {-1.0, 0.0, 1.0}
+    assert set(np.unique(feats["st_dir_htf"].dropna())) <= {-1.0, 0.0, 1.0}
     # VWAP must track price, not drift off as a multi-day average.
     assert (warm["vwap_bps"].abs() < 2000).mean() > 0.99

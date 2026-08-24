@@ -24,15 +24,21 @@ Long-only by default. Evaluated on the last **confirmed** bar (`iloc[-2]`).
 | Gate | Meaning |
 |---|---|
 | `above_vwap` | Price at least `min_vwap_edge_bps` above session VWAP |
-| `st_bull_5m` | 5-minute Supertrend bullish |
-| `adx_ok` | 5-minute ADX ≥ `adx_min` |
+| `st_bull_htf` | Supertrend bullish on the confirmation frame (`htf_min`, default **30m**) |
+| `adx_ok` | HTF ADX ≥ `adx_min` |
 | `rs_day_ok` | Outperforming NIFTY since the open |
 | `not_stretched` | Within `max_vwap_stretch_atr` ATRs of VWAP (don't chase) |
 
 **Soft (score only):** `ema_stacked` (EMA9 > EMA20), `rs_lb_ok` (lookback RS), `vol_ok`.
 
 **Score, 0–100:** RS 30 · ADX 20 · VWAP edge 20 · Supertrend headroom 15 · EMA stack 10 ·
-volume 5. Candidates are ranked, then filtered by `max_positions` and `max_per_sector`.
+volume 5. This is a **ranking heuristic**, not a proven quality filter — no score bucket
+was profitable in the 81-session sample. `min_score` (default 60) is only a cutoff after
+the hard gates. Candidates are ranked, then filtered by `max_positions` and `max_per_sector`.
+
+The live poller watches a subset of the universe between full sweeps. That watchlist is
+built **gated first, then one-hard-gate-away, then remaining by score** so candle budget
+follows names that can actually trade.
 
 ## Risk and exits
 

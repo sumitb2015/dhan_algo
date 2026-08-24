@@ -162,6 +162,7 @@ export default function IntradayTerminal() {
 
   const dayPnl = state?.pnl.day ?? 0;
   const equity = (state?.equity_curve ?? []).map((p) => ({ ts: p.ts, pnl: p.day_pnl }));
+  const selectedCandidate = state?.candidates.find((c) => c.symbol === selected) ?? null;
   const selectedPosition = state?.positions.find((p) => p.symbol === selected) ?? null;
 
   return (
@@ -293,6 +294,7 @@ export default function IntradayTerminal() {
               health={feedHealth}
               stats={intel.stats}
               dayPnl={dayPnl}
+              htfMin={state.session.htf_min}
             />
           </div>
 
@@ -317,6 +319,7 @@ export default function IntradayTerminal() {
               onSelect={setSelected}
               flash={flash}
               nearMiss={intel.nearSet}
+              minScore={state.risk.min_score}
             />
           </Panel>
 
@@ -342,12 +345,16 @@ export default function IntradayTerminal() {
           <Panel
             title={selected ? `${selected} — ${interval}m` : 'Chart'}
             subtitle={selected
-              ? (selectedPosition ? 'Open position — entry, stop and target overlaid' : 'VWAP overlay')
+              ? (selectedPosition ? 'Open position — entry, stop and target overlaid' : 'VWAP overlay · score legs')
               : 'Select a symbol from the blotter'}
             className="col-span-12 xl:col-span-8 h-[38vh]"
             right={<Segmented options={INTERVALS} value={interval} onChange={setIntervalPref} />}
           >
-            <MiniChart payload={shownCandles} position={selectedPosition} />
+            <MiniChart
+              payload={shownCandles}
+              position={selectedPosition}
+              breakdown={selectedCandidate?.score_breakdown}
+            />
           </Panel>
 
           {/* ── Sector heat ──────────────────────────────────────────── */}

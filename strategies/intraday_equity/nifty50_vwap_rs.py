@@ -68,7 +68,7 @@ from lib.strategy_state_helper import (                              # noqa: E40
 from lib.intraday_signals import (                                   # noqa: E402
     NIFTY50, IntradayConfig, Candidate, Position,
     build_features, exit_reason, initial_stop, position_size,
-    rank_candidates, select_new_entries, sector_of, target_price, trail_stop,
+    rank_candidates, pick_watchlist, select_new_entries, sector_of, target_price, trail_stop,
 )
 
 STRATEGY_KEY = "nifty50_vwap_rs"
@@ -219,13 +219,16 @@ class IntradayEquityStrategy:
             "as_of": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "session": {"entry_start": self.cfg.entry_start,
                         "entry_cutoff": self.cfg.entry_cutoff,
-                        "square_off": self.cfg.square_off},
+                        "square_off": self.cfg.square_off,
+                        "base_tf_min": self.cfg.base_tf_min,
+                        "htf_min": self.cfg.htf_min},
             "benchmark": {"symbol": "NIFTY 50", "ltp": round(self.bench_ltp, 2),
                           "day_pct": round((self.bench_ltp / self.bench_open - 1) * 100, 2)
                           if self.bench_open else 0.0},
             "risk": {"max_positions": self.cfg.max_positions, "open": len(self.positions),
                      "max_per_sector": self.cfg.max_per_sector,
                      "risk_per_trade": self.cfg.risk_per_trade,
+                     "min_score": self.cfg.min_score,
                      "max_daily_loss": self.max_daily_loss,
                      "daily_loss_used": round(max(0.0, -day), 2),
                      "target_profit": self.target_profit,
@@ -397,7 +400,7 @@ class IntradayEquityStrategy:
         with self._snap_lock:
             feat = dict(self._feat)
         ranked = rank_candidates(feat, self.cfg, include_ungated=True)
-        watch = [c.symbol for c in ranked[:self.watchlist_size]]
+        watch = pick_watchlist(ranked, self.watchlist_size)
         for sym in self.positions:            # never drop an open position
             if sym not in watch:
                 watch.append(sym)

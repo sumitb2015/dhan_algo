@@ -15,8 +15,10 @@ import {
 import { cn } from '@/lib/utils';
 import {
   CONDITION_LABELS, CONDITION_NAMES, CONDITION_TOOLTIPS, HARD_GATES,
-  type CandleBar, type CandlePayload, type ConditionName, type TerminalCandidate,
-  type TerminalEvent, type TerminalOrder, type TerminalPosition, type TerminalState,
+  SCORE_CAPS, SCORE_LEG_LABELS,
+  type CandleBar, type CandlePayload, type ConditionName, type ScoreBreakdown, type ScoreLeg,
+  type TerminalCandidate, type TerminalEvent, type TerminalOrder, type TerminalPosition,
+  type TerminalState,
 } from '@/lib/terminalTypes';
 import {
   vwapBps,
@@ -134,18 +136,64 @@ export function ConditionStrip({ conds, blocked }: {
   );
 }
 
-export function ScoreBar({ score }: { score: number }) {
+export function ScoreBar({ score, breakdown, minScore }: {
+  score: number;
+  breakdown?: ScoreBreakdown;
+  minScore?: number;
+}) {
   const pct = Math.max(0, Math.min(100, score));
+  const cutoff = minScore ?? 60;
+  const legs = breakdown
+    ? (Object.keys(SCORE_CAPS) as ScoreLeg[])
+      .map((k) => `${SCORE_LEG_LABELS[k]} ${breakdown[k]?.toFixed(0) ?? 0}/${SCORE_CAPS[k]}`)
+      .join(' · ')
+    : '';
+  const title = [
+    legs,
+    `Cutoff ${cutoff} ranks after hard gates — not a proven quality filter (no score bucket was profitable in the 81-session backtest).`,
+  ].filter(Boolean).join('\n');
   return (
-    <div className="flex items-center gap-1.5">
+    <div className="flex items-center gap-1.5" title={title}>
       <span className="tabular-nums text-zinc-100 w-8 text-right">{score.toFixed(0)}</span>
       <span className="h-[4px] w-12 rounded-full bg-zinc-800 overflow-hidden">
         <span
           className={cn('block h-full rounded-full',
-            pct >= 75 ? 'bg-emerald-500' : pct >= 60 ? 'bg-blue-500' : 'bg-zinc-600')}
+            pct >= 75 ? 'bg-emerald-500' : pct >= cutoff ? 'bg-blue-500' : 'bg-zinc-600')}
           style={{ width: `${pct}%` }}
         />
       </span>
+    </div>
+  );
+}
+
+const SCORE_LEG_ORDER: ScoreLeg[] = ['rs', 'trend', 'vwap', 'supertrend', 'ema', 'volume'];
+
+export function ScoreBreakdownBars({ breakdown }: { breakdown?: ScoreBreakdown }) {
+  if (!breakdown) {
+    return (
+      <p className="px-3 py-2 text-[10px] text-zinc-500">
+        Score legs appear once the strategy republishes state.
+      </p>
+    );
+  }
+  return (
+    <div className="px-3 py-2 grid grid-cols-2 sm:grid-cols-3 gap-x-4 gap-y-1.5">
+      {SCORE_LEG_ORDER.map((k) => {
+        const cap = SCORE_CAPS[k];
+        const v = breakdown[k] ?? 0;
+        const pct = cap > 0 ? Math.max(0, Math.min(100, (v / cap) * 100)) : 0;
+        return (
+          <div key={k}>
+            <div className="flex justify-between text-[10px] mb-0.5">
+              <span className="text-zinc-500 font-medium">{SCORE_LEG_LABELS[k]}</span>
+              <span className="tabular-nums text-zinc-300">{v.toFixed(0)}/{cap}</span>
+            </div>
+            <div className="h-1 rounded-full bg-zinc-800 overflow-hidden">
+              <div className="h-full rounded-full bg-blue-500" style={{ width: `${pct}%` }} />
+            </div>
+          </div>
+        );
+      })}
     </div>
   );
 }
@@ -200,12 +248,13 @@ function RibbonBlock({ children, first }: { children: React.ReactNode; first?: b
  * The read-at-a-glance strip: is the tape tradeable, how much of the entry
  * window is left, is the feed honest, and what has today actually produced.
  */
-export function IntelRibbon({ regime, clock, health, stats, dayPnl }: {
+export function IntelRibbon({ regime, clock, health, stats, dayPnl, htfMin }: {
   regime: Regime | null;
   clock: SessionClock | null;
   health: Health;
   stats: TradeStats | null;
   dayPnl: number;
+  htfMin?: number;
 }) {
   const rTone = regime?.tone ?? 'neutral';
   const ring = rTone === 'up' ? 'border-emerald-500/30' : rTone === 'down' ? 'border-red-500/30' : 'border-amber-500/30';
@@ -238,7 +287,7 @@ export function IntelRibbon({ regime, clock, health, stats, dayPnl }: {
           <RibbonBlock>
             <div className="flex gap-4 flex-wrap">
               <BreadthBar label="Above VWAP" pct={regime.aboveVwapPct} />
-              <BreadthBar label="ST bull 5m" pct={regime.stBullPct} />
+              <BreadthBar label={`ST bull ${htfMin ?? 30}m`} pct={regime.stBullPct} />
               <BreadthBar label="RS+ vs NIFTY" pct={regime.rsDayPct} />
             </div>
           </RibbonBlock>
@@ -473,12 +522,13 @@ export function BlotterControls({ sortKey, onSort, showAll, onToggleAll, total }
   );
 }
 
-export function BlotterTable({ rows, selected, onSelect, flash, nearMiss }: {
+export function BlotterTable({ rows, selected, onSelect, flash, nearMiss, minScore }: {
   rows: TerminalCandidate[];
   selected: string | null;
   onSelect: (s: string) => void;
   flash: Record<string, 'up' | 'down'>;
   nearMiss: Set<string>;
+  minScore?: number;
 }) {
   return (
     <table className="w-full text-[11px]">
@@ -520,7 +570,9 @@ export function BlotterTable({ rows, selected, onSelect, flash, nearMiss }: {
                   <span className="ml-1.5 text-[9px] font-bold text-amber-400" title="One hard gate away">◐</span>
                 )}
               </td>
-              <td className="px-2 py-1"><ScoreBar score={c.score} /></td>
+              <td className="px-2 py-1">
+                <ScoreBar score={c.score} breakdown={c.score_breakdown} minScore={minScore} />
+              </td>
               <td className={cn('px-2 py-1 text-right tabular-nums',
                 f === 'up' ? 'bg-emerald-500/15 text-emerald-300'
                   : f === 'down' ? 'bg-red-500/15 text-red-300' : 'text-zinc-200')}>
@@ -699,9 +751,10 @@ function sessionVwap(bars: CandleBar[]): number[] {
  * rather than taken from the state file: the state carries one scalar for the
  * latest tick, and the whole point of the overlay is the session's path.
  */
-export function MiniChart({ payload, position }: {
+export function MiniChart({ payload, position, breakdown }: {
   payload: CandlePayload | null;
   position?: TerminalPosition | null;
+  breakdown?: ScoreBreakdown;
 }) {
   if (!payload) {
     return <div className="h-full grid place-items-center text-zinc-500 text-[11px]">
@@ -756,6 +809,11 @@ export function MiniChart({ payload, position }: {
         </span>
         <span className="ml-auto text-zinc-600">{show.length} bars · {payload.interval}m</span>
       </div>
+      {breakdown && (
+        <div className="border-b border-zinc-800/40">
+          <ScoreBreakdownBars breakdown={breakdown} />
+        </div>
+      )}
       <div className="flex-1 min-h-0">
         <svg viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none" className="w-full h-full text-zinc-500">
           {levels.map((l) => (

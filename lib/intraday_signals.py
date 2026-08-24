@@ -414,7 +414,7 @@ FEATURE_COLUMNS = [
     "Open", "High", "Low", "Close", "Volume",
     "vwap", "vwap_bps", "ema_fast", "ema_slow", "ema_stack",
     "atr", "vol_ratio",
-    "st_line_5m", "st_dir_5m", "adx_5m",
+    "st_line_htf", "st_dir_htf", "adx_htf",
     "bench_ret_day", "bench_ret_lb", "rs_day", "rs_lb",
 ]
 
@@ -466,9 +466,9 @@ def build_features(sym_1m: pd.DataFrame, bench_1m: Optional[pd.DataFrame],
         st5 = supertrend(df5, cfg.st_period, cfg.st_multiplier)
         adx5 = adx(df5, cfg.adx_period)
         feat5 = pd.DataFrame({
-            "st_line_5m": st5["st_line"],
-            "st_dir_5m": st5["st_dir"],
-            "adx_5m": adx5["adx"],
+            "st_line_htf": st5["st_line"],
+            "st_dir_htf": st5["st_dir"],
+            "adx_htf": adx5["adx"],
         }, index=df5.index)
         # THE shift. A 5-min bar stamped 09:35 covers 09:35-09:39 and is only
         # complete at 09:40, so its values must not be visible before then.
@@ -478,11 +478,11 @@ def build_features(sym_1m: pd.DataFrame, bench_1m: Optional[pd.DataFrame],
         broadcast = feat5.reindex(out.index, method="ffill")
     else:
         broadcast = pd.DataFrame(index=out.index,
-                                 columns=["st_line_5m", "st_dir_5m", "adx_5m"], dtype="float64")
+                                 columns=["st_line_htf", "st_dir_htf", "adx_htf"], dtype="float64")
 
-    out["st_line_5m"] = broadcast["st_line_5m"]
-    out["st_dir_5m"] = broadcast["st_dir_5m"].fillna(0)
-    out["adx_5m"] = broadcast["adx_5m"]
+    out["st_line_htf"] = broadcast["st_line_htf"]
+    out["st_dir_htf"] = broadcast["st_dir_htf"].fillna(0)
+    out["adx_htf"] = broadcast["adx_htf"]
 
     # ── Relative strength vs the benchmark ───────────────────────────────────
     # rs_lookback_min is wall-clock MINUTES, so it must become a bar count on the
@@ -513,19 +513,26 @@ def build_features(sym_1m: pd.DataFrame, bench_1m: Optional[pd.DataFrame],
 
 
 # ── Conditions / scoring ──────────────────────────────────────────────────────
-CONDITION_NAMES = ("above_vwap", "ema_stacked", "st_bull_5m", "adx_ok",
+CONDITION_NAMES = ("above_vwap", "ema_stacked", "st_bull_htf", "adx_ok",
                    "rs_day_ok", "rs_lb_ok", "not_stretched", "vol_ok")
 
 # Hard gates must ALL pass for a candidate to be tradeable. The rest only move
 # the score, so a name can rank highly without being perfect on every axis.
-HARD_GATES = ("above_vwap", "st_bull_5m", "adx_ok", "rs_day_ok", "not_stretched")
+HARD_GATES = ("above_vwap", "st_bull_htf", "adx_ok", "rs_day_ok", "not_stretched")
+
+# Score legs and their caps. The 0-100 total is a ranking heuristic, not a
+# proven quality filter — see strategies/intraday_equity/strategy.md.
+SCORE_CAPS: Dict[str, float] = {
+    "rs": 30.0, "trend": 20.0, "vwap": 20.0,
+    "supertrend": 15.0, "ema": 10.0, "volume": 5.0,
+}
 
 
 @dataclass(frozen=True)
 class Conditions:
     above_vwap: bool = False
     ema_stacked: bool = False
-    st_bull_5m: bool = False
+    st_bull_htf: bool = False
     adx_ok: bool = False
     rs_day_ok: bool = False
     rs_lb_ok: bool = False
@@ -559,8 +566,8 @@ def evaluate(row: pd.Series, cfg: IntradayConfig, side: str = "LONG") -> Conditi
     atr_v = _f(row, "atr")
     vwap = _f(row, "vwap")
     stack = _f(row, "ema_stack", 0.0)
-    st_dir = _f(row, "st_dir_5m", 0.0)
-    adx_v = _f(row, "adx_5m")
+    st_dir = _f(row, "st_dir_htf", 0.0)
+    adx_v = _f(row, "adx_htf")
     rs_day = _f(row, "rs_day")
     rs_lb = _f(row, "rs_lb")
     vol_ratio = _f(row, "vol_ratio")
@@ -576,7 +583,7 @@ def evaluate(row: pd.Series, cfg: IntradayConfig, side: str = "LONG") -> Conditi
     return Conditions(
         above_vwap=np.isfinite(vwap_bps) and sign * vwap_bps >= cfg.min_vwap_edge_bps,
         ema_stacked=sign * stack > 0,
-        st_bull_5m=sign * st_dir > 0,
+        st_bull_htf=sign * st_dir > 0,
         adx_ok=np.isfinite(adx_v) and adx_v >= cfg.adx_min,
         rs_day_ok=np.isfinite(rs_day) and sign * rs_day >= cfg.rs_min_day,
         rs_lb_ok=np.isfinite(rs_lb) and sign * rs_lb >= cfg.rs_min_lb,
@@ -607,10 +614,10 @@ def score_breakdown(row: pd.Series, cfg: IntradayConfig, side: str = "LONG") -> 
     sign = 1.0 if side == "LONG" else -1.0
     atr_v = _f(row, "atr")
     close = _f(row, "Close")
-    st_line = _f(row, "st_line_5m")
+    st_line = _f(row, "st_line_htf")
 
     rs_lb = _f(row, "rs_lb", 0.0)
-    adx_v = _f(row, "adx_5m", 0.0)
+    adx_v = _f(row, "adx_htf", 0.0)
     vwap_bps = _f(row, "vwap_bps", 0.0)
     stack = _f(row, "ema_stack", 0.0)
     vol_ratio = _f(row, "vol_ratio", 0.0)
@@ -620,12 +627,12 @@ def score_breakdown(row: pd.Series, cfg: IntradayConfig, side: str = "LONG") -> 
                 if np.isfinite(st_line) and np.isfinite(atr_v) and atr_v > 0 else 0.0)
 
     return {
-        "rs":         30.0 * _clamp01(sign * rs_lb / rs_den),
-        "trend":      20.0 * _clamp01((adx_v - cfg.adx_min) / 20.0),
-        "vwap":       20.0 * _clamp01(sign * vwap_bps / 40.0),
-        "supertrend": 15.0 * _clamp01(headroom / 2.0),
-        "ema":        10.0 if sign * stack > 0 else 0.0,
-        "volume":      5.0 * _clamp01(vol_ratio / 2.0),
+        "rs":         SCORE_CAPS["rs"] * _clamp01(sign * rs_lb / rs_den),
+        "trend":      SCORE_CAPS["trend"] * _clamp01((adx_v - cfg.adx_min) / 20.0),
+        "vwap":       SCORE_CAPS["vwap"] * _clamp01(sign * vwap_bps / 40.0),
+        "supertrend": SCORE_CAPS["supertrend"] * _clamp01(headroom / 2.0),
+        "ema":        SCORE_CAPS["ema"] if sign * stack > 0 else 0.0,
+        "volume":     SCORE_CAPS["volume"] * _clamp01(vol_ratio / 2.0),
     }
 
 
@@ -640,6 +647,7 @@ class Candidate:
     conditions: Conditions
     gated: bool
     ts: Optional[pd.Timestamp] = None
+    breakdown: Dict[str, float] = field(default_factory=dict)
 
     @property
     def sector(self) -> str:
@@ -657,6 +665,7 @@ class Candidate:
             "gated": bool(self.gated),
             "conditions": self.conditions.as_dict(),
             "blocked_by": self.conditions.blocked_by(),
+            "score_breakdown": {k: round(float(self.breakdown.get(k, 0.0)), 1) for k in SCORE_CAPS},
             "ts": self.ts.strftime("%Y-%m-%d %H:%M:%S") if self.ts is not None else None,
         }
 
@@ -670,19 +679,21 @@ def build_candidate(symbol: str, row, cfg: IntradayConfig,
     faster and the field access below is identical for both.
     """
     cond = evaluate(row, cfg, side)
+    bd = score_breakdown(row, cfg, side)
     if ts is None:
         name = getattr(row, "name", None)
         ts = name if isinstance(name, pd.Timestamp) else None
     return Candidate(
         symbol=symbol,
         side=side,
-        score=score(row, cfg, side),
+        score=sum(bd.values()),
         price=_f(row, "Close", 0.0),
         vwap=_f(row, "vwap", 0.0),
         atr=_f(row, "atr", 0.0),
         conditions=cond,
         gated=is_gated(cond),
         ts=ts,
+        breakdown=bd,
     )
 
 
@@ -716,6 +727,40 @@ def rank_candidates(rows: Dict[str, object], cfg: IntradayConfig,
             out.append(best)
 
     out.sort(key=lambda c: (-c.score, c.symbol))
+    return out
+
+
+def pick_watchlist(candidates: Sequence[Candidate], size: int) -> List[str]:
+    """Prefer names that can actually trade, then near-misses, then fill by score.
+
+    Live candle polling is budgeted: only the watchlist is refreshed between
+    full-universe sweeps. Ranking the watchlist by ungated score lets a
+    high-RS blocked name starve a gated one of updates. `candidates` is
+    assumed already score-sorted (as `rank_candidates` returns).
+    """
+    if size < 1:
+        return []
+    gated: List[Candidate] = []
+    near: List[Candidate] = []
+    rest: List[Candidate] = []
+    for c in candidates:
+        n_block = len(c.conditions.blocked_by())
+        if c.gated:
+            gated.append(c)
+        elif n_block == 1:
+            near.append(c)
+        else:
+            rest.append(c)
+
+    out: List[str] = []
+    seen: Set[str] = set()
+    for c in (*gated, *near, *rest):
+        if c.symbol in seen:
+            continue
+        seen.add(c.symbol)
+        out.append(c.symbol)
+        if len(out) >= size:
+            break
     return out
 
 
@@ -918,7 +963,7 @@ def exit_reason(pos: Position, row: pd.Series, cfg: IntradayConfig,
         if px <= pos.target:
             return "TARGET"
 
-    st_dir = _f(row, "st_dir_5m", 0.0)
+    st_dir = _f(row, "st_dir_htf", 0.0)
     if np.isfinite(st_dir) and st_dir != 0 and st_dir * pos.sign < 0:
         return "ST_FLIP"
 
