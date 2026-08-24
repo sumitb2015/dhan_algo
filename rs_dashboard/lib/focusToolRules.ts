@@ -90,6 +90,27 @@ export function legsFlat(live: RowLive): boolean {
 }
 
 /**
+ * Whether THIS row opened `leg` — fill ledger, or the worker's open pin.
+ *
+ * A coincidental broker position at the same strike (another row, another
+ * strategy, a leftover from a previous session) is not ownership. Strike
+ * config must stay editable on a draft ATM row that merely happens to resolve
+ * onto someone else's 24150 PE; locking that selector (or rolling it with the
+ * chevrons) would freeze or flatten a position this row never opened.
+ */
+export function rowOwnsLeg(
+  row: Pick<FocusRow, 'fill'>,
+  leg: 'CE' | 'PE',
+  workerHold?: { open?: boolean; ceStrike?: number | null; peStrike?: number | null } | null,
+): boolean {
+  const qty = leg === 'CE' ? Number(row.fill?.ceQty) || 0 : Number(row.fill?.peQty) || 0;
+  if (qty > 0) return true;
+  if (!workerHold?.open) return false;
+  const strike = leg === 'CE' ? workerHold.ceStrike : workerHold.peStrike;
+  return strike != null;
+}
+
+/**
  * Current premium across only the legs this row's Side trades AND that are
  * still actually open.
  *

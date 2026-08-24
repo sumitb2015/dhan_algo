@@ -24,7 +24,7 @@ import type {
 // run against focus_tool_rows_worker.py — see focusToolRules.cases.json.
 import {
   INTRADAY_BACKSTOP_HM, EMPTY_ROW_LIVE,
-  legsOf, legsFlat, sidePremium, legStopReason,
+  legsOf, legsFlat, rowOwnsLeg, sidePremium, legStopReason,
   dteMatches, dteForExpiry, evaluateRowExit, evaluateEntry, evaluateGlobalRisk,
   type PosRow, type RowLive,
 } from '@/lib/focusToolRules';
@@ -641,7 +641,7 @@ function StrikeLegSelector({
 
 /** The full CE/PE strike editor for one row: ATM±/₹ mode toggle, independent
  *  CE and PE selectors, a link checkbox to keep them mirrored, and Save/clear. */
-function StrikeEditor({ row, live, step, onUpdate, onShift, shiftDisabled, onBlocked }: {
+function StrikeEditor({ row, live, step, onUpdate, onShift, shiftDisabled, onBlocked, workerHold }: {
   row: FocusRow;
   live: RowLive;
   step: number;
@@ -649,23 +649,27 @@ function StrikeEditor({ row, live, step, onUpdate, onShift, shiftDisabled, onBlo
   onShift?: (leg: 'CE' | 'PE', direction: 'UP' | 'DOWN') => void;
   shiftDisabled?: boolean;
   onBlocked?: (message: string) => void;
+  workerHold?: WorkerStatusRow | null;
 }) {
   /**
-   * A leg holding an open broker position is LOCKED against strike-config
-   * edits.
+   * A leg THIS ROW opened is LOCKED against strike-config edits.
    *
-   * This row finds its positions by looking up whatever strike its config
-   * currently resolves to (see rowLive's findPos). Move the config off an open
-   * position and that position stops being found: its badge vanishes, the row
-   * reports itself flat, Exit All disappears and Delete Row unlocks — while
-   * the position is still very much open at the broker, now with nothing on
-   * this page tracking it. So editing an open leg's strike is refused, and the
-   * shift chevrons — which close and reopen the position at the new strike —
-   * are the sanctioned way to move it.
+   * This row finds broker positions by looking up whatever strike its config
+   * currently resolves to (see rowLive's findPos). Move the config off a
+   * position it opened and that position stops being found: its badge
+   * vanishes, the row reports itself flat, Exit All disappears and Delete Row
+   * unlocks — while the position is still very much open at the broker, now
+   * with nothing on this page tracking it. So editing an owned leg's strike
+   * is refused, and the shift chevrons — which close and reopen the position
+   * at the new strike — are the sanctioned way to move it.
+   *
+   * A coincidental book at the same strike (another strategy, a leftover PE)
+   * is not ownership. Locking that would freeze a brand-new ATM row onto
+   * someone else's 24150 PE and refuse every offset change.
    */
   const legOpen = {
-    CE: Number(live.cePosition?.netQty ?? 0) !== 0,
-    PE: Number(live.pePosition?.netQty ?? 0) !== 0,
+    CE: rowOwnsLeg(row, 'CE', workerHold),
+    PE: rowOwnsLeg(row, 'PE', workerHold),
   };
   const anyOpen = legOpen.CE || legOpen.PE;
   const blockedNote = (leg: 'CE' | 'PE') =>
@@ -1304,19 +1308,23 @@ const STATUS_PILL: Record<FocusRowStatus, string> = {
 function rowDataPropsEqual(
   prev: { row: FocusRow; live: RowLive; lotSize: number | null; spot: number;
     liveRealMoney: boolean; broker: Broker; busy: boolean;
-    sparkHistory?: number[]; sparkPnlHistory?: number[]; rowIndex?: number },
+    sparkHistory?: number[]; sparkPnlHistory?: number[]; rowIndex?: number;
+    workerHold?: WorkerStatusRow | null },
   next: typeof prev,
 ): boolean {
   return prev.row === next.row && prev.live === next.live
     && prev.lotSize === next.lotSize && prev.spot === next.spot
     && prev.liveRealMoney === next.liveRealMoney && prev.broker === next.broker
     && prev.busy === next.busy && prev.rowIndex === next.rowIndex
-    && prev.sparkHistory === next.sparkHistory && prev.sparkPnlHistory === next.sparkPnlHistory;
+    && prev.sparkHistory === next.sparkHistory && prev.sparkPnlHistory === next.sparkPnlHistory
+    && prev.workerHold?.open === next.workerHold?.open
+    && prev.workerHold?.ceStrike === next.workerHold?.ceStrike
+    && prev.workerHold?.peStrike === next.workerHold?.peStrike;
 }
 
 function FocusTableRowImpl({
   row, rowIndex, live, lotSize, spot, liveRealMoney, broker, busy,
-  sparkHistory, sparkPnlHistory,
+  sparkHistory, sparkPnlHistory, workerHold,
   onUpdate, onDelete, onArm, onDisarm, onExit, onAddLot, onReduceLot, onShift, onBlocked,
 }: {
   row: FocusRow;
@@ -1325,6 +1333,7 @@ function FocusTableRowImpl({
   lotSize: number | null; spot: number; liveRealMoney: boolean; broker: Broker;
   busy: boolean;
   sparkHistory?: number[]; sparkPnlHistory?: number[];
+  workerHold?: WorkerStatusRow | null;
   onUpdate: (patch: Partial<FocusRow>, saveToDisk?: boolean) => void;
   onDelete: () => void; onArm: () => void; onDisarm: () => void;
   onExit: (leg: 'CE' | 'PE' | 'ALL') => void;
@@ -1409,7 +1418,7 @@ function FocusTableRowImpl({
 
       {/* CE / PE STRIKES */}
       <td className="p-3 align-top">
-        <StrikeEditor row={row} live={live} step={step} onUpdate={onUpdate} onShift={onShift} shiftDisabled={busy} onBlocked={onBlocked} />
+        <StrikeEditor row={row} live={live} step={step} onUpdate={onUpdate} onShift={onShift} shiftDisabled={busy} onBlocked={onBlocked} workerHold={workerHold} />
       </td>
 
       {/* LTP */}
@@ -1640,7 +1649,7 @@ const FocusTableRow = memo(FocusTableRowImpl, rowDataPropsEqual);
 
 function FocusRowCardImpl({
   row, live, lotSize, spot, liveRealMoney, broker, busy,
-  sparkHistory, sparkPnlHistory,
+  sparkHistory, sparkPnlHistory, workerHold,
   onUpdate, onDelete, onArm, onDisarm, onExit, onAddLot, onReduceLot, onShift, onBlocked,
 }: {
   row: FocusRow;
@@ -1648,6 +1657,7 @@ function FocusRowCardImpl({
   lotSize: number | null; spot: number; liveRealMoney: boolean; broker: Broker;
   busy: boolean;
   sparkHistory?: number[]; sparkPnlHistory?: number[];
+  workerHold?: WorkerStatusRow | null;
   onUpdate: (patch: Partial<FocusRow>, saveToDisk?: boolean) => void;
   onDelete: () => void; onArm: () => void; onDisarm: () => void;
   onExit: (leg: 'CE' | 'PE' | 'ALL') => void;
@@ -1772,7 +1782,7 @@ function FocusRowCardImpl({
 
       {/* Strike editor */}
       <div className="bg-zinc-950/20 border border-zinc-800/40 rounded-xl p-3">
-        <StrikeEditor row={row} live={live} step={step} onUpdate={onUpdate} onShift={onShift} shiftDisabled={busy} onBlocked={onBlocked} />
+        <StrikeEditor row={row} live={live} step={step} onUpdate={onUpdate} onShift={onShift} shiftDisabled={busy} onBlocked={onBlocked} workerHold={workerHold} />
       </div>
 
       {/* CE and PE Legs */}
@@ -2923,7 +2933,9 @@ export default function FocusTool() {
       addToast('error', 'Cannot delete row', 'The server-side worker still holds a position for this row — exit it first');
       return;
     }
-    if (!legsFlat(rowLive[id] ?? EMPTY_ROW_LIVE)) {
+    const cfgRow = config.rows.find(r => r.id === id);
+    const workerHold = (workerStatus.rows ?? []).find(r => r.id === id);
+    if (cfgRow && (rowOwnsLeg(cfgRow, 'CE', workerHold) || rowOwnsLeg(cfgRow, 'PE', workerHold))) {
       addToast('error', 'Cannot delete row', 'Exit the CE/PE legs first — this row still holds a position');
       return;
     }
@@ -3364,10 +3376,12 @@ export default function FocusTool() {
     await runRowAction(row.id, async () => {
       const pos = leg === 'CE' ? live.cePosition : live.pePosition;
       const netQty = Number(pos?.netQty ?? 0);
-      // The row's fill ledger follows the roll on its own: the close decrements
-      // this leg to zero and the reopen re-stamps it at newStrike, both through
-      // placeLeg. Nothing extra to maintain here.
-      if (netQty !== 0) {
+      const workerHold = (workerStatus.rows ?? []).find(r => r.id === row.id);
+      const owns = rowOwnsLeg(row, leg, workerHold);
+      // Only roll a position this row opened. A coincidental book at the
+      // resolved strike is someone else's — moving THIS row's offset must
+      // not close and reopen it.
+      if (netQty !== 0 && owns) {
         const lotSize = lotSizes[u];
         if (!lotSize) {
           addToast('error', 'Cannot shift', `Lot size for ${u} not resolved yet`);
@@ -3457,9 +3471,7 @@ export default function FocusTool() {
       // leave its live position at a strike this row no longer looks up —
       // untracked and unexitable from this page (see StrikeEditor's note).
       const otherLeg = leg === 'CE' ? 'PE' : 'CE';
-      const otherOpen = Number(
-        (otherLeg === 'CE' ? live.cePosition : live.pePosition)?.netQty ?? 0,
-      ) !== 0;
+      const otherOpen = rowOwnsLeg(row, otherLeg, workerHold);
       const linked = (row.linked ?? true) && !otherOpen;
       if ((row.linked ?? true) && otherOpen) {
         addToast('error', 'Linked leg kept its strike', `${otherLeg} holds an open position — only ${leg} was rolled`);
@@ -4025,6 +4037,7 @@ export default function FocusTool() {
                           busy={busyRows.has(row.id)}
                           sparkHistory={sparklineEnabled ? sparkHistoryRef.current[row.id] : undefined}
                           sparkPnlHistory={sparklineEnabled ? sparkPnlRef.current[row.id] : undefined}
+                          workerHold={(workerStatus.rows ?? []).find(r => r.id === row.id) ?? null}
                           onUpdate={(patch, save) => updateRow(row.id, patch, save)}
                           onDelete={() => deleteRow(row.id)}
                           onArm={() => armRow(row.id)}
@@ -4082,6 +4095,7 @@ export default function FocusTool() {
                           busy={busyRows.has(row.id)}
                           sparkHistory={sparklineEnabled ? sparkHistoryRef.current[row.id] : undefined}
                           sparkPnlHistory={sparklineEnabled ? sparkPnlRef.current[row.id] : undefined}
+                          workerHold={(workerStatus.rows ?? []).find(r => r.id === row.id) ?? null}
                           onUpdate={(patch, save) => updateRow(row.id, patch, save)}
                           onDelete={() => deleteRow(row.id)}
                           onArm={() => armRow(row.id)}

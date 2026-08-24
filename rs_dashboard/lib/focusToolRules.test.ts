@@ -15,7 +15,7 @@ import path from 'node:path';
 
 import {
   evaluateEntry, evaluateGlobalRisk, evaluateRowExit, legStopReason,
-  dteForExpiry, dteMatches, sidePremium, legsOf, legsFlat,
+  dteForExpiry, dteMatches, sidePremium, legsOf, legsFlat, rowOwnsLeg,
   type RowLive, type PosRow,
 } from './focusToolRules.ts';
 import type { FocusRow } from './focusToolRows.ts';
@@ -141,6 +141,25 @@ test('legsOf: Side selects legs, it is not a direction', () => {
 test('legsFlat is true only when neither leg carries quantity', () => {
   assert.equal(legsFlat(live({ ceLtp: 1, peLtp: 1, ceQty: 0, peQty: 0, ceEntry: 1, peEntry: 1 })), true);
   assert.equal(legsFlat(live({ ceLtp: 1, peLtp: 1, ceQty: -75, peQty: 0, ceEntry: 1, peEntry: 1 })), false);
+});
+
+test('rowOwnsLeg: a coincidental broker PE does not lock a draft row', () => {
+  const draft = row({ fill: undefined });
+  assert.equal(rowOwnsLeg(draft, 'PE'), false);
+  assert.equal(rowOwnsLeg(draft, 'CE'), false);
+  assert.equal(rowOwnsLeg(draft, 'PE', { open: false, peStrike: 24150 }), false);
+});
+
+test('rowOwnsLeg: this row\'s fill ledger owns the leg', () => {
+  const held = row({ fill: { ceStrike: null, peStrike: 24150, ceQty: 0, peQty: 65, ts: '' } });
+  assert.equal(rowOwnsLeg(held, 'PE'), true);
+  assert.equal(rowOwnsLeg(held, 'CE'), false);
+});
+
+test('rowOwnsLeg: the worker ledger owns an open leg even without page fill', () => {
+  const draft = row({ fill: undefined });
+  assert.equal(rowOwnsLeg(draft, 'PE', { open: true, ceStrike: null, peStrike: 24150 }), true);
+  assert.equal(rowOwnsLeg(draft, 'CE', { open: true, ceStrike: null, peStrike: 24150 }), false);
 });
 
 test('sidePremium counts only legs that are both traded and open', () => {
