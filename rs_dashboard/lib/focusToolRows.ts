@@ -80,6 +80,14 @@ export interface FocusRow {
   levelHigh: string;
   levelLow: string;
   levelVw: boolean;
+  // Candle interval (minutes) the VW rule's session-open VWAP is computed
+  // from — '1' or '5', per the Dhan intraday intervals the backend supports.
+  vwapInterval: string;
+  // VW exits fire off the last CLOSED candle's combined premium, not a live
+  // tick — a spurious wick doesn't trigger it. This is a % buffer past VWAP
+  // that close must clear before it counts as a breach. '' or '0' means no
+  // buffer (close at/above VWAP exits).
+  vwapBufferPct: string;
   slRupees: string;
   slMultiplier: string;
   // Leg-wise stop, independent of the pair-level slMultiplier above: exits

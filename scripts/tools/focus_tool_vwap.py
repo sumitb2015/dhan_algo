@@ -194,7 +194,17 @@ def main():
         den += vol
 
     vwap = (num / den) if den > 0 else None
-    print(json.dumps({'vwap': round(vwap, 4) if vwap is not None else None}))
+
+    # Combined premium of the LAST closed bar — what the exit rule actually
+    # compares against vwap, so a live-tick spike can't trigger the exit on
+    # its own (see evaluateRowExit in lib/focusToolRules.ts).
+    last_minute = common[-1]
+    close = sum(float(per_leg[leg][0][last_minute][per_leg[leg][1]['cl']]) for leg in legs)
+
+    print(json.dumps({
+        'vwap': round(vwap, 4) if vwap is not None else None,
+        'close': round(close, 4),
+    }))
 
 
 if __name__ == '__main__':

@@ -334,34 +334,73 @@ export default function AdvancedScalper() {
     });
   }, [positionsData]);
 
+  // liveQuotes is a brand-new object reference on every WS-coalesced tick
+  // (the bridge re-parses a full snapshot every message), so this would
+  // otherwise recompute — and hand out a fresh object for — every position
+  // on every tick, regardless of which strike actually moved. Value-diff
+  // against the previous tick's result per position (keyed the same way
+  // guards/in-flight tracking already are) and reuse the same object when
+  // nothing this memo actually varies has changed, so PositionsTable's
+  // per-row memoization (see PositionRow in Scalper.tsx) can skip
+  // re-rendering rows whose numbers didn't move.
+  const enrichedPositionsPrevRef = useRef<Record<string, Record<string, unknown>>>({});
+  const computeEnrichedRow = (pos: Record<string, unknown>): Record<string, unknown> => {
+    if (!liveQuotes?.strikes || Object.keys(secIdToStrikeSide).length === 0) return pos;
+    const secId = positionJoinKey(pos);
+    const mapping = secIdToStrikeSide[secId];
+    if (!mapping) return pos;
+
+    const strikeData = liveQuotes.strikes[String(mapping.strike)];
+    if (!strikeData) return pos;
+
+    const liveLtp = strikeData[mapping.side]?.ltp ?? 0;
+    if (liveLtp <= 0) return pos;
+
+    const netQty = Number(pos.netQty);
+    const buyAvg = Number(pos.buyAvg);
+    const sellAvg = Number(pos.sellAvg);
+    const mult = contractMultiplier(pos);
+    const unrealizedProfit = netQty === 0
+      ? Number(pos.unrealizedProfit)
+      : netQty > 0
+        ? mult * netQty * (liveLtp - buyAvg)
+        : mult * Math.abs(netQty) * (sellAvg - liveLtp);
+
+    return { ...pos, lastTradedPrice: liveLtp, unrealizedProfit };
+  };
+  /* eslint-disable react-hooks/refs --
+   * Read-then-write a plain cache ref inside useMemo to reuse unchanged row
+   * objects across ticks — the exact same pattern as FocusTool.tsx's rowLive
+   * memo (rowLivePrevRef/rowLiveEqual), which lints clean; this rule's
+   * whole-component analysis appears to false-positive on it here only in
+   * interaction with this file's other refs. The ref is never read/written
+   * anywhere else, so there's no risk of it going stale across renders. */
   const enrichedPositions = useMemo(() => {
-    if (!liveQuotes?.strikes || Object.keys(secIdToStrikeSide).length === 0)
-      return realizedFixedPositions;
-
-    return realizedFixedPositions.map(pos => {
-      const secId = positionJoinKey(pos);
-      const mapping = secIdToStrikeSide[secId];
-      if (!mapping) return pos;
-
-      const strikeData = liveQuotes.strikes[String(mapping.strike)];
-      if (!strikeData) return pos;
-
-      const liveLtp = strikeData[mapping.side]?.ltp ?? 0;
-      if (liveLtp <= 0) return pos;
-
-      const netQty = Number(pos.netQty);
-      const buyAvg = Number(pos.buyAvg);
-      const sellAvg = Number(pos.sellAvg);
-      const mult = contractMultiplier(pos);
-      const unrealizedProfit = netQty === 0
-        ? Number(pos.unrealizedProfit)
-        : netQty > 0
-          ? mult * netQty * (liveLtp - buyAvg)
-          : mult * Math.abs(netQty) * (sellAvg - liveLtp);
-
-      return { ...pos, lastTradedPrice: liveLtp, unrealizedProfit };
-    });
+    const prevByKey = enrichedPositionsPrevRef.current;
+    const nextByKey: Record<string, Record<string, unknown>> = {};
+    const out: Record<string, unknown>[] = [];
+    for (const pos of realizedFixedPositions) {
+      const computed = computeEnrichedRow(pos);
+      const k = positionKey(pos);
+      const prevRow = prevByKey[k];
+      const reused = prevRow
+        && prevRow.lastTradedPrice === computed.lastTradedPrice
+        && prevRow.unrealizedProfit === computed.unrealizedProfit
+        && prevRow.realizedProfit === computed.realizedProfit
+        && prevRow.netQty === computed.netQty
+        ? prevRow : computed;
+      nextByKey[k] = reused;
+      out.push(reused);
+    }
+    enrichedPositionsPrevRef.current = nextByKey;
+    return out;
+    // computeEnrichedRow deliberately omitted below: it's a fresh closure every
+    // render but pure w.r.t. these same deps (only reads liveQuotes/
+    // secIdToStrikeSide, both already listed), so this recomputes exactly when
+    // it needs to without thrashing on its own identity every render.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [realizedFixedPositions, liveQuotes, secIdToStrikeSide, positionJoinKey]);
+  /* eslint-enable react-hooks/refs */
 
   const totalPnl = useMemo(() => enrichedPositions.reduce((sum, p) =>
     sum + (Number(p.realizedProfit) || 0) + (Number(p.unrealizedProfit) || 0), 0),
@@ -1040,28 +1079,26 @@ export default function AdvancedScalper() {
       let liveSecId = fallbackSecId;
       let liveExchange = String(pos.exchangeSegment ?? pos.exchange ??
         (broker === 'kotak' ? 'nse_fo' : broker === 'zerodha' ? 'NFO' : 'NSE_FNO'));
-      try {
-        const posUrl = scalperRoute(broker, 'positions');
-        const posRes = await fetch(posUrl);
-        const posJson = await posRes.json() as { success: boolean; data?: Record<string, unknown>[] };
-        if (posJson.success && posJson.data) {
-          const found = findLivePosition(posJson.data, pos);
-          if (found.kind === 'ambiguous') {
-            // `triggered` is deliberately left set: a guard that cannot identify
-            // its own row cannot close it either, and re-entering here every
-            // second would bury every other toast under a storm of this one.
-            addToast('error', `Cannot close ${sym}`,
-              `${found.count} rows share this symbol and the position reports no product — close it from the broker terminal`);
-            return { ok: false, qty: 0, closedUnits: 0, partial: false };
-          }
-          if (found.kind === 'match') {
-            liveNetQty = Number(found.row.netQty);
-            liveSecId = String(found.row.securityId ?? found.row.security_id ?? fallbackSecId);
-            liveExchange = String(found.row.exchangeSegment ?? found.row.exchange ?? liveExchange);
-          }
-        }
-      } catch {
-        liveNetQty = Number(pos.netQty);
+      // Re-derive identity off the terminal's own live positions snapshot
+      // instead of a dedicated broker fetch — positionsRef is already kept
+      // current via the 5s poll + WS-tick enrichment (same broker-shaped
+      // rows: tradingSymbol/netQty/securityId/exchangeSegment all pass
+      // through untouched), so this no longer costs a network round trip on
+      // the order-send path. A close is real money moving; every millisecond
+      // between click and the order actually leaving matters here.
+      const found = findLivePosition(positionsRef.current, pos);
+      if (found.kind === 'ambiguous') {
+        // `triggered` is deliberately left set: a guard that cannot identify
+        // its own row cannot close it either, and re-entering here every
+        // second would bury every other toast under a storm of this one.
+        addToast('error', `Cannot close ${sym}`,
+          `${found.count} rows share this symbol and the position reports no product — close it from the broker terminal`);
+        return { ok: false, qty: 0, closedUnits: 0, partial: false };
+      }
+      if (found.kind === 'match') {
+        liveNetQty = Number(found.row.netQty);
+        liveSecId = String(found.row.securityId ?? found.row.security_id ?? fallbackSecId);
+        liveExchange = String(found.row.exchangeSegment ?? found.row.exchange ?? liveExchange);
       }
 
       if (liveNetQty === 0) {
@@ -1365,20 +1402,31 @@ export default function AdvancedScalper() {
   }, [boxes, visibleStrikes, allStrikes, strikeStep, boxSecId, positionsBySecId, lotSize, updateBox, strikeMap, broker, underlying, productType, expiry, closePosition, addToast, fetchTabData]);
 
   // ─── Client-side profit lock (total P&L floor) ────────────────────
+  //
+  // Scoped to F&O only, same as the manual Exit All button's `scope: 'fno'`
+  // (see handleExitAll below) — an unattended trigger must not sweep up an
+  // unrelated equity/CNC holding just because it happened to be open when
+  // the F&O side crossed the floor. Both the exit set AND the P&L basis that
+  // arms/fires the lock are filtered; the account-wide `totalPnl` display
+  // elsewhere (header, RiskRail) is untouched.
 
   const exitAllForLock = useCallback(async (reason: string) => {
-    const open = positionsRef.current.filter(p => Number(p.netQty) !== 0);
+    const open = positionsRef.current.filter(p => Number(p.netQty) !== 0 && isFnoSegment(p));
     await Promise.allSettled(open.map(pos => closePosition(pos, reason)));
     setTimeout(fetchTabData, 1000);
   }, [closePosition, fetchTabData]);
 
-  const hasOpenPositions = useMemo(
-    () => enrichedPositions.some(p => Number(p.netQty) !== 0),
+  const fnoPnl = useMemo(() => enrichedPositions.reduce((sum, p) =>
+    isFnoSegment(p) ? sum + (Number(p.realizedProfit) || 0) + (Number(p.unrealizedProfit) || 0) : sum, 0),
+    [enrichedPositions]);
+
+  const hasOpenFnoPositions = useMemo(
+    () => enrichedPositions.some(p => Number(p.netQty) !== 0 && isFnoSegment(p)),
     [enrichedPositions]);
 
   const profitLock = useProfitLock({
-    totalPnl,
-    hasOpenPositions,
+    totalPnl: fnoPnl,
+    hasOpenPositions: hasOpenFnoPositions,
     exitAll: exitAllForLock,
     notify: addToast,
     storageKey: 'profit_lock_v1',

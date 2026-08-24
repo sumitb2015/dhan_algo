@@ -45,6 +45,10 @@ export interface FocusWSUnderlyingQuotes {
   spot: number;
   atm: number;
   expiry: string;
+  fut?: {
+    ltp: number;
+    change_pct: number | null;
+  } | null;
   strikes: Record<string, FocusWSStrike>;
 }
 

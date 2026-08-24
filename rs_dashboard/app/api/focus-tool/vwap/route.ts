@@ -15,7 +15,7 @@ import { PROJECT_ROOT, dedupe, spaced, runPythonJson } from '@/lib/pyExec';
 
 const SCRIPT = path.join(PROJECT_ROOT, 'scripts', 'tools', 'focus_tool_vwap.py');
 
-interface VwapResult { vwap: number | null; error?: string }
+interface VwapResult { vwap: number | null; close?: number | null; error?: string }
 interface CacheEntry { minuteKey: string; result: VwapResult }
 
 const cache = new Map<string, CacheEntry>();

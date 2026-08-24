@@ -189,98 +189,119 @@
     {
       "name": "nothing breached",
       "row": { "levelHigh": "", "levelLow": "", "levelVw": false, "slRupees": "", "slMultiplier": "1", "side": "BOTH" },
-      "live": { "ceLtp": 100, "peLtp": 80, "ceQty": -75, "peQty": -75, "ceEntry": 100, "peEntry": 80, "pnl": 0, "vwap": null },
+      "live": { "ceLtp": 100, "peLtp": 80, "ceQty": -75, "peQty": -75, "ceEntry": 100, "peEntry": 80, "pnl": 0, "vwap": null, "vwapClose": null },
       "spot": 24000,
       "expect": null
     },
     {
       "name": "H-up breached",
       "row": { "levelHigh": "24100", "levelLow": "", "levelVw": false, "slRupees": "", "slMultiplier": "1", "side": "BOTH" },
-      "live": { "ceLtp": 100, "peLtp": 80, "ceQty": -75, "peQty": -75, "ceEntry": 100, "peEntry": 80, "pnl": 0, "vwap": null },
+      "live": { "ceLtp": 100, "peLtp": 80, "ceQty": -75, "peQty": -75, "ceEntry": 100, "peEntry": 80, "pnl": 0, "vwap": null, "vwapClose": null },
       "spot": 24100,
       "expect": "H↑ breached: spot 24100.00 ≥ 24100"
     },
     {
       "name": "L-down breached",
       "row": { "levelHigh": "", "levelLow": "23900", "levelVw": false, "slRupees": "", "slMultiplier": "1", "side": "BOTH" },
-      "live": { "ceLtp": 100, "peLtp": 80, "ceQty": -75, "peQty": -75, "ceEntry": 100, "peEntry": 80, "pnl": 0, "vwap": null },
+      "live": { "ceLtp": 100, "peLtp": 80, "ceQty": -75, "peQty": -75, "ceEntry": 100, "peEntry": 80, "pnl": 0, "vwap": null, "vwapClose": null },
       "spot": 23900,
       "expect": "L↓ breached: spot 23900.00 ≤ 23900"
     },
     {
       "name": "a failed spot read is unknown, not a breach of every low level",
       "row": { "levelHigh": "", "levelLow": "23900", "levelVw": false, "slRupees": "", "slMultiplier": "1", "side": "BOTH" },
-      "live": { "ceLtp": 100, "peLtp": 80, "ceQty": -75, "peQty": -75, "ceEntry": 100, "peEntry": 80, "pnl": 0, "vwap": null },
+      "live": { "ceLtp": 100, "peLtp": 80, "ceQty": -75, "peQty": -75, "ceEntry": 100, "peEntry": 80, "pnl": 0, "vwap": null, "vwapClose": null },
       "spot": 0,
       "expect": null
     },
     {
       "name": "H-up outranks L-down when both breach on one tick",
       "row": { "levelHigh": "24000", "levelLow": "24000", "levelVw": false, "slRupees": "", "slMultiplier": "1", "side": "BOTH" },
-      "live": { "ceLtp": 100, "peLtp": 80, "ceQty": -75, "peQty": -75, "ceEntry": 100, "peEntry": 80, "pnl": 0, "vwap": null },
+      "live": { "ceLtp": 100, "peLtp": 80, "ceQty": -75, "peQty": -75, "ceEntry": 100, "peEntry": 80, "pnl": 0, "vwap": null, "vwapClose": null },
       "spot": 24000,
       "expect": "H↑ breached: spot 24000.00 ≥ 24000"
     },
     {
-      "name": "premium expanding through VWAP closes a short",
-      "row": { "levelHigh": "", "levelLow": "", "levelVw": true, "slRupees": "", "slMultiplier": "1", "side": "BOTH" },
-      "live": { "ceLtp": 110, "peLtp": 90, "ceQty": -75, "peQty": -75, "ceEntry": 100, "peEntry": 80, "pnl": -3000, "vwap": 195 },
+      "name": "closed candle premium expanding through VWAP closes a short",
+      "row": { "levelHigh": "", "levelLow": "", "levelVw": true, "vwapBufferPct": "", "slRupees": "", "slMultiplier": "1", "side": "BOTH" },
+      "live": { "ceLtp": 110, "peLtp": 90, "ceQty": -75, "peQty": -75, "ceEntry": 100, "peEntry": 80, "pnl": -3000, "vwap": 195, "vwapClose": 200 },
       "spot": 24000,
-      "expect": "VW breached: premium 200.00 ≥ VWAP 195.00"
+      "expect": "VW breached: closed premium 200.00 ≥ VWAP+buffer 195.00"
+    },
+    {
+      "name": "a live tick above VWAP does not exit on its own - only the closed candle counts",
+      "row": { "levelHigh": "", "levelLow": "", "levelVw": true, "vwapBufferPct": "", "slRupees": "", "slMultiplier": "1", "side": "BOTH" },
+      "live": { "ceLtp": 300, "peLtp": 250, "ceQty": -75, "peQty": -75, "ceEntry": 100, "peEntry": 80, "pnl": -3000, "vwap": 195, "vwapClose": 190 },
+      "spot": 24000,
+      "expect": null
+    },
+    {
+      "name": "VW buffer blocks a marginal close",
+      "row": { "levelHigh": "", "levelLow": "", "levelVw": true, "vwapBufferPct": "5", "slRupees": "", "slMultiplier": "1", "side": "BOTH" },
+      "live": { "ceLtp": 110, "peLtp": 90, "ceQty": -75, "peQty": -75, "ceEntry": 100, "peEntry": 80, "pnl": -3000, "vwap": 195, "vwapClose": 198 },
+      "spot": 24000,
+      "expect": null
+    },
+    {
+      "name": "VW buffer still fires once the close clears it",
+      "row": { "levelHigh": "", "levelLow": "", "levelVw": true, "vwapBufferPct": "5", "slRupees": "", "slMultiplier": "1", "side": "BOTH" },
+      "live": { "ceLtp": 110, "peLtp": 90, "ceQty": -75, "peQty": -75, "ceEntry": 100, "peEntry": 80, "pnl": -3000, "vwap": 195, "vwapClose": 210 },
+      "spot": 24000,
+      "expect": "VW breached: closed premium 210.00 ≥ VWAP+buffer 204.75"
     },
     {
       "name": "VWAP is inert until it has been fetched",
       "row": { "levelHigh": "", "levelLow": "", "levelVw": true, "slRupees": "", "slMultiplier": "1", "side": "BOTH" },
-      "live": { "ceLtp": 110, "peLtp": 90, "ceQty": -75, "peQty": -75, "ceEntry": 100, "peEntry": 80, "pnl": -3000, "vwap": null },
+      "live": { "ceLtp": 110, "peLtp": 90, "ceQty": -75, "peQty": -75, "ceEntry": 100, "peEntry": 80, "pnl": -3000, "vwap": null, "vwapClose": null },
       "spot": 24000,
       "expect": null
     },
     {
       "name": "a CE-only row measures only its CE premium against VWAP",
       "row": { "levelHigh": "", "levelLow": "", "levelVw": true, "slRupees": "", "slMultiplier": "1", "side": "CE" },
-      "live": { "ceLtp": 110, "peLtp": 90, "ceQty": -75, "peQty": -75, "ceEntry": 100, "peEntry": 80, "pnl": -750, "vwap": 195 },
+      "live": { "ceLtp": 110, "peLtp": 90, "ceQty": -75, "peQty": -75, "ceEntry": 100, "peEntry": 80, "pnl": -750, "vwap": 195, "vwapClose": 110 },
       "spot": 24000,
       "expect": null
     },
     {
       "name": "a leg already closed stops contributing its premium",
       "row": { "levelHigh": "", "levelLow": "", "levelVw": true, "slRupees": "", "slMultiplier": "1", "side": "BOTH" },
-      "live": { "ceLtp": 110, "peLtp": 90, "ceQty": -75, "peQty": 0, "ceEntry": 100, "peEntry": 80, "pnl": -750, "vwap": 195 },
+      "live": { "ceLtp": 110, "peLtp": 90, "ceQty": -75, "peQty": 0, "ceEntry": 100, "peEntry": 80, "pnl": -750, "vwap": 195, "vwapClose": null },
       "spot": 24000,
       "expect": null
     },
     {
       "name": "rupee stop hit",
       "row": { "levelHigh": "", "levelLow": "", "levelVw": false, "slRupees": "2000", "slMultiplier": "1", "side": "BOTH" },
-      "live": { "ceLtp": 110, "peLtp": 90, "ceQty": -75, "peQty": -75, "ceEntry": 100, "peEntry": 80, "pnl": -2000, "vwap": null },
+      "live": { "ceLtp": 110, "peLtp": 90, "ceQty": -75, "peQty": -75, "ceEntry": 100, "peEntry": 80, "pnl": -2000, "vwap": null, "vwapClose": null },
       "spot": 24000,
       "expect": "SL ₹2000 hit (P&L ₹-2000)"
     },
     {
       "name": "a multiple of 1 is not a stop",
       "row": { "levelHigh": "", "levelLow": "", "levelVw": false, "slRupees": "", "slMultiplier": "1", "side": "BOTH" },
-      "live": { "ceLtp": 200, "peLtp": 160, "ceQty": -75, "peQty": -75, "ceEntry": 100, "peEntry": 80, "pnl": -13500, "vwap": null },
+      "live": { "ceLtp": 200, "peLtp": 160, "ceQty": -75, "peQty": -75, "ceEntry": 100, "peEntry": 80, "pnl": -13500, "vwap": null, "vwapClose": null },
       "spot": 24000,
       "expect": null
     },
     {
       "name": "SL multiple hit on the pair",
       "row": { "levelHigh": "", "levelLow": "", "levelVw": false, "slRupees": "", "slMultiplier": "2", "side": "BOTH" },
-      "live": { "ceLtp": 200, "peLtp": 160, "ceQty": -75, "peQty": -75, "ceEntry": 100, "peEntry": 80, "pnl": -13500, "vwap": null },
+      "live": { "ceLtp": 200, "peLtp": 160, "ceQty": -75, "peQty": -75, "ceEntry": 100, "peEntry": 80, "pnl": -13500, "vwap": null, "vwapClose": null },
       "spot": 24000,
       "expect": "SL ×2 hit (premium 360.00 vs entry 180.00)"
     },
     {
       "name": "the rupee stop is reported before the multiple when both breach",
       "row": { "levelHigh": "", "levelLow": "", "levelVw": false, "slRupees": "2000", "slMultiplier": "2", "side": "BOTH" },
-      "live": { "ceLtp": 200, "peLtp": 160, "ceQty": -75, "peQty": -75, "ceEntry": 100, "peEntry": 80, "pnl": -13500, "vwap": null },
+      "live": { "ceLtp": 200, "peLtp": 160, "ceQty": -75, "peQty": -75, "ceEntry": 100, "peEntry": 80, "pnl": -13500, "vwap": null, "vwapClose": null },
       "spot": 24000,
       "expect": "SL ₹2000 hit (P&L ₹-13500)"
     },
     {
       "name": "a spot level outranks every premium rule",
       "row": { "levelHigh": "24000", "levelLow": "", "levelVw": true, "slRupees": "2000", "slMultiplier": "2", "side": "BOTH" },
-      "live": { "ceLtp": 200, "peLtp": 160, "ceQty": -75, "peQty": -75, "ceEntry": 100, "peEntry": 80, "pnl": -13500, "vwap": 195 },
+      "live": { "ceLtp": 200, "peLtp": 160, "ceQty": -75, "peQty": -75, "ceEntry": 100, "peEntry": 80, "pnl": -13500, "vwap": 195, "vwapClose": 200 },
       "spot": 24000,
       "expect": "H↑ breached: spot 24000.00 ≥ 24000"
     }

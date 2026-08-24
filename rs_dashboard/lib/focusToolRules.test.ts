@@ -41,7 +41,7 @@ function pos(qty: number, entry: number): PosRow | null {
 
 interface LiveCase {
   ceLtp: number; peLtp: number; ceQty: number; peQty: number;
-  ceEntry: number; peEntry: number; pnl?: number; vwap?: number | null;
+  ceEntry: number; peEntry: number; pnl?: number; vwap?: number | null; vwapClose?: number | null;
 }
 
 function live(c: LiveCase): RowLive {
@@ -55,6 +55,7 @@ function live(c: LiveCase): RowLive {
     // Entry premium covers only the legs actually held, exactly as rowLive builds it.
     entryPremium: (cePosition ? c.ceEntry : 0) + (pePosition ? c.peEntry : 0),
     vwap: c.vwap ?? null,
+    vwapClose: c.vwapClose ?? null,
   };
 }
 
@@ -63,7 +64,8 @@ function row(partial: Partial<FocusRow>): FocusRow {
     id: 't', underlying: 'NIFTY', entryTime: '', exitTime: '', dte: 'Any', expiry: '',
     strikeMode: 'ATM', linked: true, ceOffset: 0, peOffset: 0, cePremium: '', pePremium: '',
     lots: 1, side: 'BOTH', status: 'draft',
-    levelHigh: '', levelLow: '', levelVw: false, slRupees: '', slMultiplier: '1',
+    levelHigh: '', levelLow: '', levelVw: false, vwapInterval: '1', vwapBufferPct: '',
+    slRupees: '', slMultiplier: '1',
     ceSlMultiplier: '1', peSlMultiplier: '1',
     createdAt: '', updatedAt: '',
     ...partial,
@@ -153,7 +155,9 @@ test('sidePremium counts only legs that are both traded and open', () => {
 test('a zero premium never satisfies a premium rule', () => {
   // Two failed quote reads sum to 0. Without the > 0 guards that reads as
   // "collapsed below VWAP" and as an infinite loss multiple.
-  const dead = live({ ceLtp: 0, peLtp: 0, ceQty: -75, peQty: -75, ceEntry: 100, peEntry: 80, vwap: 195 });
+  const dead = live({
+    ceLtp: 0, peLtp: 0, ceQty: -75, peQty: -75, ceEntry: 100, peEntry: 80, vwap: 195, vwapClose: 0,
+  });
   assert.equal(evaluateRowExit(row({ levelVw: true, slMultiplier: '2' }), dead, 24000), null);
 });
 

@@ -39,6 +39,7 @@ sys.path.insert(0, ROOT)
 
 from login import get_dhan_client
 from lib.dhan_helper import DhanHelper
+from scripts.tools.premarket_data import _find_nearest_future
 
 DEBUG_DIR    = os.path.join(ROOT, 'debug')
 QUOTES_FILE  = os.path.join(DEBUG_DIR, 'focus_tool_ws_quotes_dhan.json')
@@ -49,7 +50,8 @@ STOP_TRIGGER = os.path.join(DEBUG_DIR, 'focus_tool_ws_stop_dhan.trigger')
 NSE_FNO    = 2   # NSE F&O segment
 BSE_FNO    = 8   # BSE F&O segment
 IDX        = 0   # Index segment (shared across exchanges, differentiated by security ID)
-FULL       = 21  # Full packet — includes OI
+FEED_QUOTE = 17  # Quote packet — LTP + OHLC + prev_close (required for Index)
+FULL       = 21  # Full packet — includes OI (for F&O contracts)
 
 UNDERLYINGS = ['NIFTY', 'BANKNIFTY', 'SENSEX']
 
@@ -222,7 +224,7 @@ def main():
     helper = DhanHelper(dhan)
 
     # ── Resolve spot/ATM/strike ladder/contracts for all three underlyings ──
-    state: dict[str, dict] = {}   # underlying -> {step, exchange, spot, atm, sid, sid_map}
+    state: dict[str, dict] = {}   # underlying -> {step, exchange, spot, atm, sid, sid_map, fut}
     instruments: list = []
 
     for u in UNDERLYINGS:
@@ -234,7 +236,7 @@ def main():
         print(f'[focus_tool_ws] {u}: fetching spot…', flush=True)
         spot = 0.0
         for attempt in range(5):
-            spot = helper.get_ltp(u, exchange=exchange, instrument='INDEX') or 0.0
+            spot = helper.get_ltp(sid, exchange='IDX_I', instrument='INDEX') or 0.0
             if spot > 0:
                 break
             print(f'[focus_tool_ws] {u}: WARN spot fetch failed (attempt {attempt + 1}/5), retrying in 5s…', flush=True)
@@ -255,13 +257,36 @@ def main():
                 sid_map[osid] = {'underlying': u, 'strike': int(strike), 'type': opt_type}
                 instruments.append((option_feed_segment, osid, FULL))
 
-        instruments.append((IDX, sid, FULL))
+        # Index spot canary — strictly FEED_QUOTE (17), not FULL (21)
+        instruments.append((IDX, sid, FEED_QUOTE))
+
+        # Near-month futures contract
+        fut_info = None
+        try:
+            fut_contract = _find_nearest_future(helper, u, exchange=exchange, instrument='FUTIDX')
+            if fut_contract:
+                fut_sid = str(int(fut_contract['SECURITY_ID']))
+                fut_sym = str(fut_contract.get('TRADING_SYMBOL') or fut_contract.get('DISPLAY_NAME') or f'{u} FUT').strip()
+                fut_prev = _f(fut_contract.get('PREV_CLOSE') or fut_contract.get('PDC'))
+                instruments.append((option_feed_segment, fut_sid, FULL))
+                fut_info = {
+                    'sid': fut_sid,
+                    'symbol': fut_sym,
+                    'prev_close': fut_prev,
+                    'ltp': 0.0,
+                    'change_pct': None,
+                }
+                print(f'[focus_tool_ws] {u}: resolved future SID={fut_sid} ({fut_sym})', flush=True)
+        except Exception as e:
+            print(f'[focus_tool_ws] {u}: WARNING could not resolve future contract: {e}', flush=True)
+
         state[u] = {'step': step, 'exchange': exchange, 'spot': spot, 'atm': atm, 'sid': sid,
-                    'expiry': expiry, 'sid_map': sid_map}
+                    'expiry': expiry, 'sid_map': sid_map, 'fut': fut_info}
         print(f'[focus_tool_ws] {u}: resolved {len(sid_map)} option contracts', flush=True)
 
     total_contracts = sum(len(s['sid_map']) for s in state.values())
-    print(f'[focus_tool_ws] Subscribing to {total_contracts} option contracts + 3 index canaries…', flush=True)
+    total_futs = sum(1 for s in state.values() if s.get('fut'))
+    print(f'[focus_tool_ws] Subscribing to {total_contracts} option contracts + {total_futs} futures + 3 index canaries…', flush=True)
 
     if total_contracts == 0:
         print('[focus_tool_ws] ERROR: no contracts resolved for any underlying — aborting', flush=True)
@@ -317,6 +342,28 @@ def main():
                         s['spot'] = live_spot
                         s['atm'] = round(live_spot / s['step']) * s['step']
 
+                # Futures quote
+                fut_payload = None
+                if s.get('fut'):
+                    f_meta = s['fut']
+                    f_tick = helper.live_data.get(f_meta['sid'])
+                    if f_tick:
+                        f_ltp = _f(f_tick.get('LTP') or f_tick.get('last_price'))
+                        f_prev = _f(f_tick.get('prev_close') or f_tick.get('close') or f_tick.get('previous_close_price'))
+                        if f_prev > 0:
+                            f_meta['prev_close'] = f_prev
+                        if f_ltp > 0:
+                            f_meta['ltp'] = f_ltp
+                    
+                    cur_ltp = f_meta.get('ltp', 0.0)
+                    cur_prev = f_meta.get('prev_close', 0.0)
+                    chg_pct = round(((cur_ltp - cur_prev) / cur_prev) * 100, 2) if (cur_ltp > 0 and cur_prev > 0) else None
+                    if cur_ltp > 0:
+                        fut_payload = {
+                            'ltp': round(cur_ltp, 2),
+                            'change_pct': chg_pct,
+                        }
+
                 strikes_data: dict[str, dict] = {}
                 for sid, meta in s['sid_map'].items():
                     sk_key = str(meta['strike'])
@@ -331,6 +378,7 @@ def main():
                     'spot': round(s['spot'], 2),
                     'atm': s['atm'],
                     'expiry': s['expiry'],
+                    'fut': fut_payload,
                     'strikes': strikes_data,
                 }
 

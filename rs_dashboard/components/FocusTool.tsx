@@ -220,14 +220,18 @@ interface ChainData {
 }
 
 /** Cache/lookup key for a strike pair's VWAP — shared across every row that
- *  happens to trade the same underlying/expiry/CE-strike/PE-strike/side, so two
- *  rows on the same strangle share one fetch instead of doubling it. Side is
- *  part of the key because a CE-only row needs a CE-only VWAP: comparing it
- *  against a combined CE+PE VWAP would exit at the wrong premium. */
+ *  happens to trade the same underlying/expiry/CE-strike/PE-strike/side/interval,
+ *  so two rows on the same strangle at the same interval share one fetch
+ *  instead of doubling it. Side is part of the key because a CE-only row
+ *  needs a CE-only VWAP: comparing it against a combined CE+PE VWAP would
+ *  exit at the wrong premium. Interval is part of the key so two rows on the
+ *  same strangle at different intervals don't clobber each other's cached
+ *  value. */
 function vwapKey(
   underlying: FocusUnderlying, expiry: string, ceStrike: number, peStrike: number, side: FocusSide,
+  interval: string,
 ): string {
-  return `${underlying}:${expiry}:${ceStrike}:${peStrike}:${side}`;
+  return `${underlying}:${expiry}:${ceStrike}:${peStrike}:${side}:${interval}`;
 }
 
 /** Heartbeat record from scripts/tools/focus_tool_rows_worker.py, corrected by
@@ -293,6 +297,8 @@ const makeRow = (underlying: FocusUnderlying): FocusRow => ({
   levelHigh: '',
   levelLow: '',
   levelVw: false,
+  vwapInterval: '1',
+  vwapBufferPct: '',
   slRupees: '',
   slMultiplier: '1',
   ceSlMultiplier: '1',
@@ -1561,9 +1567,25 @@ function FocusTableRowImpl({
             <SwitchToggle checked={row.levelVw} onChange={v => onUpdate({ levelVw: v })} label="VW"
               title="Exit when the combined premium crosses its session-open VWAP against you" />
             {row.levelVw && (
-              <span className="text-[9px] font-mono font-bold text-zinc-500" title="Session-open VWAP of the combined premium, refreshed once a minute">
-                {live.vwap != null ? `VWAP ${live.vwap.toFixed(2)}` : 'VWAP —'}
-              </span>
+              <>
+                <select
+                  value={row.vwapInterval || '1'}
+                  title="Candle interval the session-open VWAP is computed from"
+                  onChange={e => onUpdate({ vwapInterval: e.target.value })}
+                  className="text-[9px] font-bold h-5 px-1 border border-zinc-700 rounded bg-zinc-900 text-zinc-300 focus:outline-none focus:border-violet-500"
+                >
+                  <option value="1">1m</option>
+                  <option value="5">5m</option>
+                </select>
+                <div className="flex items-center gap-0.5">
+                  <span className="text-[9px] font-black text-zinc-500">buf%</span>
+                  <RuleNumInput value={row.vwapBufferPct} onCommit={v => onUpdate({ vwapBufferPct: v })} className="w-10"
+                    title="Require the closed candle to clear VWAP by more than this % before exiting — blank means no buffer" />
+                </div>
+                <span className="text-[9px] font-mono font-bold text-zinc-500" title="Session-open VWAP of the combined premium, refreshed once a minute">
+                  {live.vwap != null ? `VWAP ${live.vwap.toFixed(2)}` : 'VWAP —'}
+                </span>
+              </>
             )}
             <div className="flex items-center gap-2">
               <div className="flex items-center gap-1">
@@ -1599,7 +1621,7 @@ function FocusTableRowImpl({
               <Check className="h-3 w-3" /> Save
             </button>
             <button
-              onClick={() => onUpdate({ levelHigh: '', levelLow: '', levelVw: false, slRupees: '', slMultiplier: '1', ceSlMultiplier: '1', peSlMultiplier: '1' }, true)}
+              onClick={() => onUpdate({ levelHigh: '', levelLow: '', levelVw: false, vwapInterval: '1', vwapBufferPct: '', slRupees: '', slMultiplier: '1', ceSlMultiplier: '1', peSlMultiplier: '1' }, true)}
               title="Clear every level exit on this row"
               className={cn('text-[10px] font-bold text-zinc-600 hover:text-zinc-400 cursor-pointer transition-colors', FOCUS_RING)}
             >
@@ -1814,9 +1836,25 @@ function FocusRowCardImpl({
           <SwitchToggle checked={row.levelVw} onChange={v => onUpdate({ levelVw: v })} label="VW"
             title="Exit when the combined premium crosses its session-open VWAP against you" />
           {row.levelVw && (
-            <span className="text-[9px] font-mono font-bold text-zinc-500">
-              {live.vwap != null ? `VWAP ${live.vwap.toFixed(2)}` : 'VWAP —'}
-            </span>
+            <>
+              <select
+                value={row.vwapInterval || '1'}
+                title="Candle interval the session-open VWAP is computed from"
+                onChange={e => onUpdate({ vwapInterval: e.target.value })}
+                className="text-[9px] font-bold h-5 px-1 border border-zinc-700 rounded bg-zinc-900 text-zinc-300 focus:outline-none focus:border-violet-500"
+              >
+                <option value="1">1m</option>
+                <option value="5">5m</option>
+              </select>
+              <div className="flex items-center gap-0.5">
+                <span className="text-[9px] font-black text-zinc-500">buf%</span>
+                <RuleNumInput value={row.vwapBufferPct} onCommit={v => onUpdate({ vwapBufferPct: v })} className="w-10 h-6"
+                  title="Require the closed candle to clear VWAP by more than this % before exiting — blank means no buffer" />
+              </div>
+              <span className="text-[9px] font-mono font-bold text-zinc-500">
+                {live.vwap != null ? `VWAP ${live.vwap.toFixed(2)}` : 'VWAP —'}
+              </span>
+            </>
           )}
           <div className="flex gap-2">
             <button
@@ -1826,7 +1864,7 @@ function FocusRowCardImpl({
               Save Exits
             </button>
             <button
-              onClick={() => onUpdate({ levelHigh: '', levelLow: '', levelVw: false, slRupees: '', slMultiplier: '1', ceSlMultiplier: '1', peSlMultiplier: '1' }, true)}
+              onClick={() => onUpdate({ levelHigh: '', levelLow: '', levelVw: false, vwapInterval: '1', vwapBufferPct: '', slRupees: '', slMultiplier: '1', ceSlMultiplier: '1', peSlMultiplier: '1' }, true)}
               className={cn('text-[9px] text-zinc-500 hover:text-zinc-400', FOCUS_RING)}
             >
               Clear
@@ -1922,9 +1960,12 @@ export default function FocusTool() {
   // renamed, so this stays a drop-in match for /api/scalper[/<broker>]/funds's
   // actual response shape — see Scalper.tsx's FundsView for the shared origin.
   const [fundsData, setFundsData] = useState<{ availabelBalance?: number; utilizedAmount?: number } | null>(null);
-  // Session-open VWAP per strike pair (see vwapKey) — only fetched for rows
-  // that actually enabled VW, refreshed once a minute via /api/focus-tool/vwap.
-  const [rowVwap, setRowVwap] = useState<Record<string, number | null>>({});
+  // Session-open VWAP + last-closed-candle combined premium per strike pair
+  // (see vwapKey) — only fetched for rows that actually enabled VW, refreshed
+  // once a minute via /api/focus-tool/vwap. `close` is what the exit rule
+  // actually compares against `vwap` (see evaluateRowExit) — a live tick
+  // spike can't fire the exit on its own.
+  const [rowVwap, setRowVwap] = useState<Record<string, { vwap: number | null; close: number | null }>>({});
   const { realised, unrealised, total } = useMemo(() => {
     let r = 0, u = 0;
     for (const p of positions) { r += Number(p.realizedProfit) || 0; u += Number(p.unrealizedProfit) || 0; }
@@ -2419,6 +2460,19 @@ export default function FocusTool() {
     return out;
   }, [spotPrices, chains, focusWsQuotes]);
 
+  // Futures quotes: prefer realtime WebSocket updates from the Focus Tool bridge,
+  // falling back to the 3s REST poll while WS is connecting/down.
+  const effectiveFutQuotes = useMemo<Record<FocusUnderlying, FutQuote | null>>(() => {
+    const out = { ...futQuotes };
+    for (const u of UNDERLYINGS) {
+      const wsFut = focusWsQuotes?.[u]?.fut;
+      if (wsFut && wsFut.ltp > 0) {
+        out[u] = { ltp: wsFut.ltp, change_pct: wsFut.change_pct ?? null };
+      }
+    }
+    return out;
+  }, [futQuotes, focusWsQuotes]);
+
   /**
    * The listed strike whose LTP sits closest to `target`, scanning this
    * underlying's fetched chain. Only PREMIUM-mode legs use this; ATM-mode legs
@@ -2479,7 +2533,7 @@ export default function FocusTool() {
     a.ceStrike === b.ceStrike && a.peStrike === b.peStrike
     && a.ltpCe === b.ltpCe && a.ltpPe === b.ltpPe
     && a.cePosition === b.cePosition && a.pePosition === b.pePosition
-    && a.pnl === b.pnl && a.entryPremium === b.entryPremium && a.vwap === b.vwap;
+    && a.pnl === b.pnl && a.entryPremium === b.entryPremium && a.vwap === b.vwap && a.vwapClose === b.vwapClose;
   const rowLive = useMemo<Record<string, RowLive>>(() => {
     const out: Record<string, RowLive> = {};
     const prevOut = rowLivePrevRef.current;
@@ -2497,7 +2551,7 @@ export default function FocusTool() {
       // premium/discount to spot). Falls back to spot if the futures strip
       // hasn't resolved yet, so a row is never left unresolved by a slow feed.
       const group = config.groups.find(g => g.underlying === u);
-      const futLtp = futQuotes[u]?.ltp ?? 0;
+      const futLtp = effectiveFutQuotes[u]?.ltp ?? 0;
       const atmBase = group?.atmBy === 'Fut' && futLtp > 0 ? futLtp : spot;
       const atm = atmBase > 0 ? Math.round(atmBase / step) * step : null;
       const oc = chains[u]?.oc;
@@ -2622,15 +2676,17 @@ export default function FocusTool() {
       }
 
       const rowExpiry = row.expiry || expiries[u]?.[0] || '';
-      const vwap = row.levelVw && ceStrike != null && peStrike != null && rowExpiry
-        ? (rowVwap[vwapKey(u, rowExpiry, ceStrike, peStrike, row.side)] ?? null)
-        : null;
+      const vwapEntry = row.levelVw && ceStrike != null && peStrike != null && rowExpiry
+        ? rowVwap[vwapKey(u, rowExpiry, ceStrike, peStrike, row.side, row.vwapInterval || '1')]
+        : undefined;
+      const vwap = vwapEntry?.vwap ?? null;
+      const vwapClose = vwapEntry?.close ?? null;
 
       const computed: RowLive = {
         ceStrike, peStrike,
         ltpCe, ltpPe,
         cePosition, pePosition,
-        pnl, entryPremium, vwap,
+        pnl, entryPremium, vwap, vwapClose,
       };
       const prevLive = prevOut[row.id];
       out[row.id] = prevLive && rowLiveEqual(prevLive, computed) ? prevLive : computed;
@@ -2672,30 +2728,36 @@ export default function FocusTool() {
       if (!live || live.ceStrike == null || live.peStrike == null) continue;
       const expiry = row.expiry || expiries[row.underlying]?.[0] || '';
       if (!expiry) continue;
-      keys.add(vwapKey(row.underlying, expiry, live.ceStrike, live.peStrike, row.side));
+      keys.add(vwapKey(row.underlying, expiry, live.ceStrike, live.peStrike, row.side, row.vwapInterval || '1'));
     }
     return Array.from(keys).sort().join('|');
   }, [config.rows, rowLive, expiries]);
 
-  // Session-open VWAP fetch: one call per distinct strike pair among rows
-  // that actually enabled VW, refreshed once a minute (the underlying data
-  // only moves in whole-minute bars anyway — see focus_tool_vwap.py).
+  // Session-open VWAP fetch: one call per distinct strike pair + interval
+  // among rows that actually enabled VW, refreshed once a minute (the
+  // underlying data only moves in whole-minute bars anyway — see
+  // focus_tool_vwap.py).
   useEffect(() => {
     if (!vwapWantedKey) return;
     const wanted = vwapWantedKey.split('|').map(key => {
-      const [underlying, expiry, ceStrike, peStrike, side] = key.split(':');
-      return { key, underlying, expiry, ceStrike, peStrike, side };
+      const [underlying, expiry, ceStrike, peStrike, side, interval] = key.split(':');
+      return { key, underlying, expiry, ceStrike, peStrike, side, interval };
     });
 
     let cancelled = false;
     const fetchAll = () => {
-      wanted.forEach(({ key, underlying, expiry, ceStrike, peStrike, side }) => {
-        const url = `/api/focus-tool/vwap?underlying=${underlying}&expiry=${expiry}&ceStrike=${ceStrike}&peStrike=${peStrike}&side=${side}`;
+      wanted.forEach(({ key, underlying, expiry, ceStrike, peStrike, side, interval }) => {
+        const url = `/api/focus-tool/vwap?underlying=${underlying}&expiry=${expiry}&ceStrike=${ceStrike}&peStrike=${peStrike}&side=${side}&interval=${interval}`;
         fetch(url)
           .then(r => r.json())
-          .then((j: { success?: boolean; vwap?: number | null }) => {
+          .then((j: { success?: boolean; vwap?: number | null; close?: number | null }) => {
             if (cancelled || !j.success) return;
-            setRowVwap(prev => (prev[key] === (j.vwap ?? null) ? prev : { ...prev, [key]: j.vwap ?? null }));
+            const next = { vwap: j.vwap ?? null, close: j.close ?? null };
+            setRowVwap(prev => {
+              const p = prev[key];
+              if (p && p.vwap === next.vwap && p.close === next.close) return prev;
+              return { ...prev, [key]: next };
+            });
           })
           .catch(() => {});
       });
@@ -3782,7 +3844,7 @@ export default function FocusTool() {
       </div>
 
       <FocusHeader
-        futQuotes={futQuotes}
+        futQuotes={effectiveFutQuotes}
         realised={realised}
         unrealised={unrealised}
         total={total}
@@ -3852,8 +3914,8 @@ export default function FocusTool() {
                 onChange={patch => updateGroup(u, patch)}
                 spot={spots[u] ?? 0}
                 liveAtm={(() => {
-                  const base = group.atmBy === 'Fut' && (futQuotes[u]?.ltp ?? 0) > 0
-                    ? futQuotes[u]!.ltp : (spots[u] ?? 0);
+                  const base = group.atmBy === 'Fut' && (effectiveFutQuotes[u]?.ltp ?? 0) > 0
+                    ? effectiveFutQuotes[u]!.ltp : (spots[u] ?? 0);
                   return base > 0 ? Math.round(base / STRIKE_STEP[u]) * STRIKE_STEP[u] : 0;
                 })()}
                 lot={lotSizes[u]} dte={dteFor(expiries[u]?.[0] ?? '')} wsLive={wsLive}

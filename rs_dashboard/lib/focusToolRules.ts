@@ -63,11 +63,16 @@ export interface RowLive {
   entryPremium: number;
   /** Session VWAP of the combined premium; null until fetched, or if VW is off. */
   vwap: number | null;
+  /** Combined premium of the last CLOSED candle at the row's chosen VW
+   *  interval — what the VW rule actually compares against VWAP, so a live
+   *  tick spike can't trigger the exit on its own. Null until fetched, or if
+   *  VW is off. */
+  vwapClose: number | null;
 }
 
 export const EMPTY_ROW_LIVE: RowLive = {
   ceStrike: null, peStrike: null, ltpCe: null, ltpPe: null,
-  cePosition: null, pePosition: null, pnl: 0, entryPremium: 0, vwap: null,
+  cePosition: null, pePosition: null, pnl: 0, entryPremium: 0, vwap: null, vwapClose: null,
 };
 
 // ── Legs ─────────────────────────────────────────────────────────────────────
@@ -189,11 +194,17 @@ export function evaluateRowExit(row: FocusRow, live: RowLive, spot: number): str
   // against a CE+PE current price.
   const nowPremium = sidePremium(row, live);
 
-  if (row.levelVw && live.vwap != null && live.vwap > 0) {
-    // This tool only ever opens with a SELL — hurt by the premium expanding
-    // past VWAP, same as slMultiplier below.
-    if (nowPremium > 0 && nowPremium >= live.vwap) {
-      return `VW breached: premium ${nowPremium.toFixed(2)} ≥ VWAP ${live.vwap.toFixed(2)}`;
+  if (row.levelVw && live.vwapClose != null && live.vwapClose > 0 && live.vwap != null && live.vwap > 0) {
+    // Checked against the last CLOSED candle's premium, not the live tick —
+    // a spurious wick shouldn't fire a real exit. bufferPct additionally
+    // requires the close to clear VWAP by more than a % margin before it
+    // counts as a breach; blank/0 means no buffer. This tool only ever opens
+    // with a SELL — hurt by the premium expanding past VWAP, same as
+    // slMultiplier below.
+    const bufferPct = Number(row.vwapBufferPct) || 0;
+    const threshold = live.vwap * (1 + bufferPct / 100);
+    if (live.vwapClose >= threshold) {
+      return `VW breached: closed premium ${live.vwapClose.toFixed(2)} ≥ VWAP+buffer ${threshold.toFixed(2)}`;
     }
   }
 

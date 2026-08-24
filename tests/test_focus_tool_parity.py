@@ -103,7 +103,7 @@ def test_row_exit(cases):
         premium, entry = premium_and_entry(live, row['side'])
         got = evaluate_row_exit(
             row, float(c['spot']), premium, entry,
-            float(live.get('pnl') or 0.0), live.get('vwap'))
+            float(live.get('pnl') or 0.0), live.get('vwap'), live.get('vwapClose'))
         check(f"rowExit :: {c['name']}", got, c['expect'])
 
 
@@ -143,7 +143,7 @@ def test_local_invariants():
     dead = {'levelHigh': '', 'levelLow': '', 'levelVw': True,
             'slRupees': '', 'slMultiplier': '2', 'side': 'BOTH'}
     check('zero premium never fires a premium rule',
-          evaluate_row_exit(dead, 24000.0, 0.0, 180.0, 0.0, 195.0), None)
+          evaluate_row_exit(dead, 24000.0, 0.0, 180.0, 0.0, 195.0, 0.0), None)
 
     # The floor can only ever rise, and the fall through it fires.
     cfg = {'riskEnabled': False, 'targetRupees': '', 'stopRupees': '',

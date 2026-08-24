@@ -2022,6 +2022,28 @@ const BUILDUP_STYLES: Record<string, { text: string; cls: string }> = {
   LU: { text: 'Long Unwinding', cls: 'bg-zinc-500/10 text-zinc-400 border-zinc-600' },
 };
 
+/**
+ * Ignores every on* callback prop on purpose: the caller (AdvancedScalper's
+ * boxes.map) hands this a freshly-created closure for every one of them on
+ * every render (they close over `box.id`), which would defeat memoization
+ * if compared, but they're otherwise harmless to recreate. Only the data
+ * props are compared — `strike`/`ltp`/`pct`/etc are the values that
+ * actually change per WS tick, and `visibleStrikes` is itself a stable
+ * memoized array at the call site, so this comparator is what lets an
+ * option-ticket box skip re-rendering on a tick that didn't touch it.
+ */
+function optionPanelPropsEqual(prev: OptionPanelProps, next: OptionPanelProps): boolean {
+  return prev.side === next.side && prev.label === next.label && prev.strike === next.strike
+    && prev.visibleStrikes === next.visibleStrikes && prev.atm === next.atm && prev.ltp === next.ltp
+    && prev.pct === next.pct && prev.high === next.high && prev.low === next.low
+    && prev.buildup === next.buildup && prev.oiChgPct === next.oiChgPct
+    && prev.limitPrice === next.limitPrice && prev.orderMode === next.orderMode
+    && prev.moveFraction === next.moveFraction && prev.halfMoveDisabled === next.halfMoveDisabled
+    && prev.halfMoveDisabledReason === next.halfMoveDisabledReason
+    && prev.lots === next.lots && prev.canRemove === next.canRemove && prev.pnl === next.pnl
+    && prev.pending === next.pending && prev.strikesReady === next.strikesReady;
+}
+
 export const OptionPanel = React.memo(function OptionPanel({
   side, label, strike, visibleStrikes, atm, ltp, pct, high, low, buildup, oiChgPct,
   limitPrice, orderMode, onStrikeChange, onShiftUp, onShiftDown, onLimitPriceChange, onBuy, onSell,
@@ -2289,7 +2311,7 @@ export const OptionPanel = React.memo(function OptionPanel({
       </div>
     </div>
   );
-});
+}, optionPanelPropsEqual);
 
 // ─── Sorting helpers ────────────────────────────────────────────────
 
@@ -2448,6 +2470,260 @@ export interface PositionsTableProps {
  *  a mix of % and point chips read ambiguously on options priced ₹5–₹400. */
 const GUARD_PRESET_PCTS = [10, 15, 20, 25, 30];
 
+interface PositionRowProps {
+  row: Record<string, unknown>;
+  rowKey: string;
+  guard?: PositionGuard;
+  isClosing: boolean;
+  onGuardChange: (positionKey: string, field: 'target' | 'sl', value: string) => void;
+  onTrailToggle: (positionKey: string) => void;
+  onClose: (pos: Record<string, unknown>) => void;
+  onAddLeg: (pos: Record<string, unknown>) => void;
+  lotSizeFor?: (row: Record<string, unknown>) => number | null;
+  onClosePartial?: (pos: Record<string, unknown>, units: number, pct: number) => void;
+}
+
+/**
+ * Ignores the on* callback props on purpose: PositionsTable hands this a
+ * freshly-created closure for each of them on every render (they close over
+ * `row`/`rowKey`), which would defeat memoization if compared, but they're
+ * otherwise harmless to recreate. `row` and `guard` are what actually vary
+ * per tick, and both come from AdvancedScalper's own value-diffed
+ * `enrichedPositions`/`posGuards`, which keep the same object reference
+ * across ticks that don't change this row's numbers — that's what makes
+ * this comparator useful rather than a no-op.
+ */
+function positionRowPropsEqual(prev: PositionRowProps, next: PositionRowProps): boolean {
+  return prev.row === next.row && prev.guard === next.guard && prev.isClosing === next.isClosing;
+}
+
+const PositionRow = React.memo(function PositionRow({
+  row, rowKey, guard, isClosing, onGuardChange, onTrailToggle, onClose, onAddLeg, lotSizeFor, onClosePartial,
+}: PositionRowProps) {
+  const sym = String(row.tradingSymbol ?? '');
+  const netQty = Number(row.netQty);
+  const ltp = Number(row.lastTradedPrice);
+  const isLong = netQty > 0;
+  const realPnl = Number(row.realizedProfit);
+  const unrealPnl = Number(row.unrealizedProfit);
+  const buyAvg = Number(row.buyAvg);
+  const sellAvg = Number(row.sellAvg);
+
+  // Compute current effective trailing SL price to show below the checkbox
+  const targetNum = parseFloat(guard?.target ?? '');
+  const slNum = parseFloat(guard?.sl ?? '');
+  const entryPrice = isLong ? buyAvg : sellAvg;
+  const initialRisk = (entryPrice > 0 && !isNaN(slNum) && slNum > 0) ? Math.abs(slNum - entryPrice) : 0;
+  const trailBest = guard?.bestPrice ?? 0;
+  const effectiveTrailSL = (netQty !== 0 && guard?.trailEnabled && trailBest > 0 && initialRisk > 0)
+    ? (isLong ? trailBest - initialRisk : trailBest + initialRisk)
+    : null;
+
+  const mult = contractMultiplier(row);
+  // A flat row (netQty 0) is a closed-out leg the broker still reports for
+  // the day. There is nothing left to protect, so every guard control is
+  // inert — the monitoring loop skips netQty === 0 rows anyway.
+  const isFlat = netQty === 0;
+  const guardsDisabled = isClosing || isFlat;
+  const hasGuard = !isFlat && guard && (guard.target || guard.sl || guard.trailEnabled);
+  // Rupee magnitude of the Target/SL price levels, for the RiskRail —
+  // same diff*qty*mult math the Target/SL subtexts below compute inline,
+  // pulled up so the rail can share it without duplicating the formula.
+  const targetRupeeMag = (!isFlat && !isNaN(targetNum) && targetNum > 0 && entryPrice > 0 && mult > 0)
+    ? Math.abs((isLong ? targetNum - entryPrice : entryPrice - targetNum) * Math.abs(netQty) * mult) : null;
+  const slRupeeMag = (!isFlat && !isNaN(slNum) && slNum > 0 && entryPrice > 0 && mult > 0)
+    ? Math.abs((isLong ? entryPrice - slNum : slNum - entryPrice) * Math.abs(netQty) * mult) : null;
+
+  return (
+    <tr className={`hover:bg-zinc-800/40 transition-colors ${isClosing ? 'opacity-40' : ''} ${guard?.triggered ? 'bg-zinc-800/20' : ''}`}>
+      <td className="px-3 py-2 whitespace-nowrap font-mono text-zinc-300">
+        <div className="flex items-center gap-1.5">
+          {hasGuard && !guard.triggered && (
+            <span className="w-1.5 h-1.5 rounded-full bg-violet-400 flex-shrink-0" title="Guard active" />
+          )}
+          {sym}
+        </div>
+      </td>
+      <td className="px-3 py-2 whitespace-nowrap font-mono text-right tabular-nums text-zinc-300">{netQty}</td>
+      <td className="px-3 py-2 whitespace-nowrap font-mono text-right tabular-nums text-zinc-300">{buyAvg > 0 ? buyAvg.toFixed(2) : '—'}</td>
+      <td className="px-3 py-2 whitespace-nowrap font-mono text-right tabular-nums text-zinc-300">{sellAvg > 0 ? sellAvg.toFixed(2) : '—'}</td>
+      <td className="px-3 py-2 whitespace-nowrap font-mono text-right tabular-nums text-zinc-300">{ltp > 0 ? ltp.toFixed(2) : '—'}</td>
+      <td className={`px-3 py-2 whitespace-nowrap font-mono text-right tabular-nums ${!isNaN(realPnl) && realPnl !== 0 ? (realPnl > 0 ? 'text-emerald-400' : 'text-rose-400') : 'text-zinc-400'}`}>
+        {isNaN(realPnl) ? '—' : realPnl.toFixed(0)}
+      </td>
+      <td className={`px-3 py-2 whitespace-nowrap font-mono text-right tabular-nums ${!isNaN(unrealPnl) && unrealPnl !== 0 ? (unrealPnl > 0 ? 'text-emerald-400' : 'text-rose-400') : 'text-zinc-400'}`}>
+        {isNaN(unrealPnl) ? '—' : unrealPnl.toFixed(0)}
+      </td>
+      <td className="px-3 py-2 whitespace-nowrap font-mono text-zinc-300">{String(row.productType ?? '—')}</td>
+
+      {/* Target input & quick presets */}
+      <td className="px-2 py-1.5">
+        <div className="flex flex-col items-center gap-1">
+          <GuardInput
+            value={guard?.target ?? ''}
+            onCommit={v => onGuardChange(rowKey, 'target', v)}
+            colorCls="text-emerald-300"
+            focusBorderCls="focus:border-emerald-500"
+            disabled={guardsDisabled}
+          />
+          {/* Preset Chips */}
+          <div className={cn('flex items-center gap-0.5', TXT_LABEL, 'font-mono')}>
+            {GUARD_PRESET_PCTS.map(pct => (
+              <button
+                key={pct}
+                disabled={guardsDisabled || entryPrice <= 0}
+                onClick={() => {
+                  if (entryPrice <= 0) return;
+                  // Target is always a move IN FAVOUR of the position:
+                  // longs profit as price rises, shorts as it falls.
+                  const calculated = isLong
+                    ? entryPrice * (1 + pct / 100)
+                    : entryPrice * (1 - pct / 100);
+                  if (calculated > 0) onGuardChange(rowKey, 'target', calculated.toFixed(2));
+                }}
+                className={cn('px-1 py-0.5 rounded bg-emerald-950/80 border border-emerald-800/60 text-emerald-400 hover:bg-emerald-800 hover:text-oncolor transition-all disabled:opacity-30', FOCUS_RING)}
+                title={`Set Target ${pct}% in profit from entry ₹${entryPrice.toFixed(2)}`}
+              >
+                +{pct}%
+              </button>
+            ))}
+          </div>
+          {/* Target P&L Subtext */}
+          {!isFlat && !isNaN(targetNum) && targetNum > 0 && entryPrice > 0 && mult > 0 && (() => {
+            const diff = isLong ? targetNum - entryPrice : entryPrice - targetNum;
+            const pctVal = (diff / entryPrice) * 100;
+            const rupeeVal = diff * Math.abs(netQty) * mult;
+            const isProfit = diff >= 0;
+            return (
+              <span className={cn(TXT_LABEL, 'font-mono tabular-nums whitespace-nowrap', isProfit ? 'text-emerald-400/90' : 'text-rose-400/90')}>
+                {isProfit ? '+' : ''}{pctVal.toFixed(1)}% ({isProfit ? '+' : ''}₹{rupeeVal.toFixed(0)})
+              </span>
+            );
+          })()}
+        </div>
+      </td>
+
+      {/* SL input & quick presets */}
+      <td className="px-2 py-1.5">
+        <div className="flex flex-col items-center gap-1">
+          <GuardInput
+            value={guard?.sl ?? ''}
+            onCommit={v => onGuardChange(rowKey, 'sl', v)}
+            colorCls="text-rose-300"
+            focusBorderCls="focus:border-rose-500"
+            disabled={guardsDisabled}
+          />
+          {/* Preset Chips */}
+          <div className={cn('flex items-center gap-0.5', TXT_LABEL, 'font-mono')}>
+            {GUARD_PRESET_PCTS.map(pct => (
+              <button
+                key={pct}
+                disabled={guardsDisabled || entryPrice <= 0}
+                onClick={() => {
+                  if (entryPrice <= 0) return;
+                  // SL is always a move AGAINST the position.
+                  const calculated = isLong
+                    ? entryPrice * (1 - pct / 100)
+                    : entryPrice * (1 + pct / 100);
+                  if (calculated > 0) onGuardChange(rowKey, 'sl', calculated.toFixed(2));
+                }}
+                className={cn('px-1 py-0.5 rounded bg-rose-950/80 border border-rose-800/60 text-rose-400 hover:bg-rose-800 hover:text-oncolor transition-all disabled:opacity-30', FOCUS_RING)}
+                title={`Set SL ${pct}% in loss from entry ₹${entryPrice.toFixed(2)}`}
+              >
+                -{pct}%
+              </button>
+            ))}
+          </div>
+          {/* SL Loss Subtext */}
+          {!isFlat && !isNaN(slNum) && slNum > 0 && entryPrice > 0 && mult > 0 && (() => {
+            const diff = isLong ? entryPrice - slNum : slNum - entryPrice;
+            const pctVal = (diff / entryPrice) * 100;
+            const rupeeVal = diff * Math.abs(netQty) * mult;
+            const isLoss = diff >= 0;
+            return (
+              <span className={cn(TXT_LABEL, 'font-mono tabular-nums whitespace-nowrap', isLoss ? 'text-rose-400/90' : 'text-emerald-400/90')}>
+                {isLoss ? '-' : '+'}{pctVal.toFixed(1)}% ({isLoss ? '-' : '+'}₹{Math.abs(rupeeVal).toFixed(0)})
+              </span>
+            );
+          })()}
+          {/* Risk rail — where this leg's unrealized P&L sits between its
+              SL and Target rupee levels, at a glance rather than reading
+              three disconnected numbers across two columns. */}
+          {(targetRupeeMag != null || slRupeeMag != null) && (
+            <RiskRail totalPnl={unrealPnl} target={targetRupeeMag} stop={slRupeeMag} />
+          )}
+        </div>
+      </td>
+
+      {/* Trail SL checkbox + effective SL price when active */}
+      <td className="px-2 py-1.5 text-center">
+        <div className="flex flex-col items-center gap-0.5">
+          <input
+            type="checkbox"
+            checked={guard?.trailEnabled ?? false}
+            onChange={() => onTrailToggle(rowKey)}
+            disabled={guardsDisabled || !guard?.sl}
+            title={isFlat ? 'Position is flat' : guard?.sl ? 'Trail SL 1:1 with profit' : 'Set SL first'}
+            className="w-4 h-4 accent-amber-400 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
+          />
+          {effectiveTrailSL !== null && (
+            <span className={cn(TXT_VALUE, 'font-mono text-amber-400 tabular-nums')}>
+              @{effectiveTrailSL.toFixed(1)}
+            </span>
+          )}
+        </div>
+      </td>
+
+      {/* Manual close / add-leg buttons + partial square-off chips */}
+      <td className="px-2 py-1.5 text-center">
+        <div className="flex flex-col items-center gap-1">
+          <div className="flex items-center justify-center gap-1.5">
+            <button
+              onClick={() => onAddLeg(row)}
+              disabled={isClosing || netQty === 0}
+              title={`Load ${sym}'s strike into the order panel to add more or hedge`}
+              className={cn('px-2.5 py-1', TXT_CAPTION, 'font-bold rounded border transition-all disabled:opacity-40 disabled:cursor-not-allowed bg-emerald-900/40 border-emerald-500/30 text-emerald-400 hover:bg-emerald-800/60 hover:text-emerald-200 active:scale-95', FOCUS_RING)}
+            >
+              Add
+            </button>
+            <button
+              onClick={() => onClose(row)}
+              disabled={isClosing || netQty === 0}
+              title={`Market close ${sym} — 100% (${Math.abs(netQty)} qty)`}
+              className={cn('px-2.5 py-1', TXT_CAPTION, 'font-bold rounded border transition-all disabled:opacity-40 disabled:cursor-not-allowed bg-rose-900/40 border-rose-500/30 text-rose-400 hover:bg-rose-800/60 hover:text-rose-200 active:scale-95', FOCUS_RING)}
+            >
+              {isClosing ? '…' : 'Close'}
+            </button>
+          </div>
+          {/* Partial square-off. 100% is the Close button above, so only the
+              fractions appear here. A chip is disabled when it maps to under a
+              lot, or to the same lot count as a smaller one — see lib/partialQty. */}
+          {onClosePartial && lotSizeFor && netQty !== 0 && (() => {
+            const ls = lotSizeFor(row);
+            if (!ls || ls <= 0) return null;
+            return (
+              <div className={cn('flex items-center gap-0.5', TXT_LABEL, 'font-mono')}>
+                {partialCloseChips(netQty, ls, [25, 50, 75]).map(c => (
+                  <button
+                    key={c.pct}
+                    type="button"
+                    disabled={isClosing || !c.enabled}
+                    onClick={() => onClosePartial(row, c.units, c.pct)}
+                    title={c.title}
+                    className={cn('px-1 py-0.5 rounded bg-rose-950/80 border border-rose-800/60 text-rose-400 hover:bg-rose-800 hover:text-oncolor transition-all disabled:opacity-30 disabled:cursor-not-allowed', FOCUS_RING)}
+                  >
+                    {c.pct}%
+                  </button>
+                ))}
+              </div>
+            );
+          })()}
+        </div>
+      </td>
+    </tr>
+  );
+}, positionRowPropsEqual);
+
 export const PositionsTable = React.memo(function PositionsTable({ data, guards, closingPositions, onGuardChange, onTrailToggle, onClose, onAddLeg, lotSizeFor, onClosePartial, sort, onSort, error }: PositionsTableProps) {
   const sortedData = useMemo(() => sortRows(data, sort), [data, sort]);
 
@@ -2482,233 +2758,24 @@ export const PositionsTable = React.memo(function PositionsTable({ data, guards,
         </tr>
       </thead>
       <tbody className="divide-y divide-zinc-800/50">
-        {sortedData.map((row, i) => {
-          const sym = String(row.tradingSymbol ?? '');
+        {sortedData.map(row => {
           // Guards and the closing spinner are keyed per (symbol, product): two
           // rows can share a symbol, and they are separate positions.
           const rowKey = positionKey(row);
-          const guard = guards[rowKey];
-          const isClosing = closingPositions.has(rowKey);
-          const netQty = Number(row.netQty);
-          const ltp = Number(row.lastTradedPrice);
-          const isLong = netQty > 0;
-          const realPnl = Number(row.realizedProfit);
-          const unrealPnl = Number(row.unrealizedProfit);
-          const buyAvg = Number(row.buyAvg);
-          const sellAvg = Number(row.sellAvg);
-
-          // Compute current effective trailing SL price to show below the checkbox
-          const targetNum = parseFloat(guard?.target ?? '');
-          const slNum = parseFloat(guard?.sl ?? '');
-          const entryPrice = isLong ? buyAvg : sellAvg;
-          const initialRisk = (entryPrice > 0 && !isNaN(slNum) && slNum > 0) ? Math.abs(slNum - entryPrice) : 0;
-          const trailBest = guard?.bestPrice ?? 0;
-          const effectiveTrailSL = (netQty !== 0 && guard?.trailEnabled && trailBest > 0 && initialRisk > 0)
-            ? (isLong ? trailBest - initialRisk : trailBest + initialRisk)
-            : null;
-
-          const mult = contractMultiplier(row);
-          // A flat row (netQty 0) is a closed-out leg the broker still reports for
-          // the day. There is nothing left to protect, so every guard control is
-          // inert — the monitoring loop skips netQty === 0 rows anyway.
-          const isFlat = netQty === 0;
-          const guardsDisabled = isClosing || isFlat;
-          const hasGuard = !isFlat && guard && (guard.target || guard.sl || guard.trailEnabled);
-          // Rupee magnitude of the Target/SL price levels, for the RiskRail —
-          // same diff*qty*mult math the Target/SL subtexts below compute inline,
-          // pulled up so the rail can share it without duplicating the formula.
-          const targetRupeeMag = (!isFlat && !isNaN(targetNum) && targetNum > 0 && entryPrice > 0 && mult > 0)
-            ? Math.abs((isLong ? targetNum - entryPrice : entryPrice - targetNum) * Math.abs(netQty) * mult) : null;
-          const slRupeeMag = (!isFlat && !isNaN(slNum) && slNum > 0 && entryPrice > 0 && mult > 0)
-            ? Math.abs((isLong ? entryPrice - slNum : slNum - entryPrice) * Math.abs(netQty) * mult) : null;
-
           return (
-            <tr key={i} className={`hover:bg-zinc-800/40 transition-colors ${isClosing ? 'opacity-40' : ''} ${guard?.triggered ? 'bg-zinc-800/20' : ''}`}>
-              <td className="px-3 py-2 whitespace-nowrap font-mono text-zinc-300">
-                <div className="flex items-center gap-1.5">
-                  {hasGuard && !guard.triggered && (
-                    <span className="w-1.5 h-1.5 rounded-full bg-violet-400 flex-shrink-0" title="Guard active" />
-                  )}
-                  {sym}
-                </div>
-              </td>
-              <td className="px-3 py-2 whitespace-nowrap font-mono text-right tabular-nums text-zinc-300">{netQty}</td>
-              <td className="px-3 py-2 whitespace-nowrap font-mono text-right tabular-nums text-zinc-300">{buyAvg > 0 ? buyAvg.toFixed(2) : '—'}</td>
-              <td className="px-3 py-2 whitespace-nowrap font-mono text-right tabular-nums text-zinc-300">{sellAvg > 0 ? sellAvg.toFixed(2) : '—'}</td>
-              <td className="px-3 py-2 whitespace-nowrap font-mono text-right tabular-nums text-zinc-300">{ltp > 0 ? ltp.toFixed(2) : '—'}</td>
-              <td className={`px-3 py-2 whitespace-nowrap font-mono text-right tabular-nums ${!isNaN(realPnl) && realPnl !== 0 ? (realPnl > 0 ? 'text-emerald-400' : 'text-rose-400') : 'text-zinc-400'}`}>
-                {isNaN(realPnl) ? '—' : realPnl.toFixed(0)}
-              </td>
-              <td className={`px-3 py-2 whitespace-nowrap font-mono text-right tabular-nums ${!isNaN(unrealPnl) && unrealPnl !== 0 ? (unrealPnl > 0 ? 'text-emerald-400' : 'text-rose-400') : 'text-zinc-400'}`}>
-                {isNaN(unrealPnl) ? '—' : unrealPnl.toFixed(0)}
-              </td>
-              <td className="px-3 py-2 whitespace-nowrap font-mono text-zinc-300">{String(row.productType ?? '—')}</td>
-
-              {/* Target input & quick presets */}
-              <td className="px-2 py-1.5">
-                <div className="flex flex-col items-center gap-1">
-                  <GuardInput
-                    value={guard?.target ?? ''}
-                    onCommit={v => onGuardChange(rowKey, 'target', v)}
-                    colorCls="text-emerald-300"
-                    focusBorderCls="focus:border-emerald-500"
-                    disabled={guardsDisabled}
-                  />
-                  {/* Preset Chips */}
-                  <div className={cn('flex items-center gap-0.5', TXT_LABEL, 'font-mono')}>
-                    {GUARD_PRESET_PCTS.map(pct => (
-                      <button
-                        key={pct}
-                        disabled={guardsDisabled || entryPrice <= 0}
-                        onClick={() => {
-                          if (entryPrice <= 0) return;
-                          // Target is always a move IN FAVOUR of the position:
-                          // longs profit as price rises, shorts as it falls.
-                          const calculated = isLong
-                            ? entryPrice * (1 + pct / 100)
-                            : entryPrice * (1 - pct / 100);
-                          if (calculated > 0) onGuardChange(rowKey, 'target', calculated.toFixed(2));
-                        }}
-                        className={cn('px-1 py-0.5 rounded bg-emerald-950/80 border border-emerald-800/60 text-emerald-400 hover:bg-emerald-800 hover:text-oncolor transition-all disabled:opacity-30', FOCUS_RING)}
-                        title={`Set Target ${pct}% in profit from entry ₹${entryPrice.toFixed(2)}`}
-                      >
-                        +{pct}%
-                      </button>
-                    ))}
-                  </div>
-                  {/* Target P&L Subtext */}
-                  {!isFlat && !isNaN(targetNum) && targetNum > 0 && entryPrice > 0 && mult > 0 && (() => {
-                    const diff = isLong ? targetNum - entryPrice : entryPrice - targetNum;
-                    const pctVal = (diff / entryPrice) * 100;
-                    const rupeeVal = diff * Math.abs(netQty) * mult;
-                    const isProfit = diff >= 0;
-                    return (
-                      <span className={cn(TXT_LABEL, 'font-mono tabular-nums whitespace-nowrap', isProfit ? 'text-emerald-400/90' : 'text-rose-400/90')}>
-                        {isProfit ? '+' : ''}{pctVal.toFixed(1)}% ({isProfit ? '+' : ''}₹{rupeeVal.toFixed(0)})
-                      </span>
-                    );
-                  })()}
-                </div>
-              </td>
-
-              {/* SL input & quick presets */}
-              <td className="px-2 py-1.5">
-                <div className="flex flex-col items-center gap-1">
-                  <GuardInput
-                    value={guard?.sl ?? ''}
-                    onCommit={v => onGuardChange(rowKey, 'sl', v)}
-                    colorCls="text-rose-300"
-                    focusBorderCls="focus:border-rose-500"
-                    disabled={guardsDisabled}
-                  />
-                  {/* Preset Chips */}
-                  <div className={cn('flex items-center gap-0.5', TXT_LABEL, 'font-mono')}>
-                    {GUARD_PRESET_PCTS.map(pct => (
-                      <button
-                        key={pct}
-                        disabled={guardsDisabled || entryPrice <= 0}
-                        onClick={() => {
-                          if (entryPrice <= 0) return;
-                          // SL is always a move AGAINST the position.
-                          const calculated = isLong
-                            ? entryPrice * (1 - pct / 100)
-                            : entryPrice * (1 + pct / 100);
-                          if (calculated > 0) onGuardChange(rowKey, 'sl', calculated.toFixed(2));
-                        }}
-                        className={cn('px-1 py-0.5 rounded bg-rose-950/80 border border-rose-800/60 text-rose-400 hover:bg-rose-800 hover:text-oncolor transition-all disabled:opacity-30', FOCUS_RING)}
-                        title={`Set SL ${pct}% in loss from entry ₹${entryPrice.toFixed(2)}`}
-                      >
-                        -{pct}%
-                      </button>
-                    ))}
-                  </div>
-                  {/* SL Loss Subtext */}
-                  {!isFlat && !isNaN(slNum) && slNum > 0 && entryPrice > 0 && mult > 0 && (() => {
-                    const diff = isLong ? entryPrice - slNum : slNum - entryPrice;
-                    const pctVal = (diff / entryPrice) * 100;
-                    const rupeeVal = diff * Math.abs(netQty) * mult;
-                    const isLoss = diff >= 0;
-                    return (
-                      <span className={cn(TXT_LABEL, 'font-mono tabular-nums whitespace-nowrap', isLoss ? 'text-rose-400/90' : 'text-emerald-400/90')}>
-                        {isLoss ? '-' : '+'}{pctVal.toFixed(1)}% ({isLoss ? '-' : '+'}₹{Math.abs(rupeeVal).toFixed(0)})
-                      </span>
-                    );
-                  })()}
-                  {/* Risk rail — where this leg's unrealized P&L sits between its
-                      SL and Target rupee levels, at a glance rather than reading
-                      three disconnected numbers across two columns. */}
-                  {(targetRupeeMag != null || slRupeeMag != null) && (
-                    <RiskRail totalPnl={unrealPnl} target={targetRupeeMag} stop={slRupeeMag} />
-                  )}
-                </div>
-              </td>
-
-              {/* Trail SL checkbox + effective SL price when active */}
-              <td className="px-2 py-1.5 text-center">
-                <div className="flex flex-col items-center gap-0.5">
-                  <input
-                    type="checkbox"
-                    checked={guard?.trailEnabled ?? false}
-                    onChange={() => onTrailToggle(rowKey)}
-                    disabled={guardsDisabled || !guard?.sl}
-                    title={isFlat ? 'Position is flat' : guard?.sl ? 'Trail SL 1:1 with profit' : 'Set SL first'}
-                    className="w-4 h-4 accent-amber-400 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
-                  />
-                  {effectiveTrailSL !== null && (
-                    <span className={cn(TXT_VALUE, 'font-mono text-amber-400 tabular-nums')}>
-                      @{effectiveTrailSL.toFixed(1)}
-                    </span>
-                  )}
-                </div>
-              </td>
-
-              {/* Manual close / add-leg buttons + partial square-off chips */}
-              <td className="px-2 py-1.5 text-center">
-                <div className="flex flex-col items-center gap-1">
-                  <div className="flex items-center justify-center gap-1.5">
-                    <button
-                      onClick={() => onAddLeg(row)}
-                      disabled={isClosing || netQty === 0}
-                      title={`Load ${sym}'s strike into the order panel to add more or hedge`}
-                      className={cn('px-2.5 py-1', TXT_CAPTION, 'font-bold rounded border transition-all disabled:opacity-40 disabled:cursor-not-allowed bg-emerald-900/40 border-emerald-500/30 text-emerald-400 hover:bg-emerald-800/60 hover:text-emerald-200 active:scale-95', FOCUS_RING)}
-                    >
-                      Add
-                    </button>
-                    <button
-                      onClick={() => onClose(row)}
-                      disabled={isClosing || netQty === 0}
-                      title={`Market close ${sym} — 100% (${Math.abs(netQty)} qty)`}
-                      className={cn('px-2.5 py-1', TXT_CAPTION, 'font-bold rounded border transition-all disabled:opacity-40 disabled:cursor-not-allowed bg-rose-900/40 border-rose-500/30 text-rose-400 hover:bg-rose-800/60 hover:text-rose-200 active:scale-95', FOCUS_RING)}
-                    >
-                      {isClosing ? '…' : 'Close'}
-                    </button>
-                  </div>
-                  {/* Partial square-off. 100% is the Close button above, so only the
-                      fractions appear here. A chip is disabled when it maps to under a
-                      lot, or to the same lot count as a smaller one — see lib/partialQty. */}
-                  {onClosePartial && lotSizeFor && netQty !== 0 && (() => {
-                    const ls = lotSizeFor(row);
-                    if (!ls || ls <= 0) return null;
-                    return (
-                      <div className={cn('flex items-center gap-0.5', TXT_LABEL, 'font-mono')}>
-                        {partialCloseChips(netQty, ls, [25, 50, 75]).map(c => (
-                          <button
-                            key={c.pct}
-                            type="button"
-                            disabled={isClosing || !c.enabled}
-                            onClick={() => onClosePartial(row, c.units, c.pct)}
-                            title={c.title}
-                            className={cn('px-1 py-0.5 rounded bg-rose-950/80 border border-rose-800/60 text-rose-400 hover:bg-rose-800 hover:text-oncolor transition-all disabled:opacity-30 disabled:cursor-not-allowed', FOCUS_RING)}
-                          >
-                            {c.pct}%
-                          </button>
-                        ))}
-                      </div>
-                    );
-                  })()}
-                </div>
-              </td>
-            </tr>
+            <PositionRow
+              key={rowKey}
+              row={row}
+              rowKey={rowKey}
+              guard={guards[rowKey]}
+              isClosing={closingPositions.has(rowKey)}
+              onGuardChange={onGuardChange}
+              onTrailToggle={onTrailToggle}
+              onClose={onClose}
+              onAddLeg={onAddLeg}
+              lotSizeFor={lotSizeFor}
+              onClosePartial={onClosePartial}
+            />
           );
         })}
       </tbody>

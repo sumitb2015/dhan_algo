@@ -352,7 +352,7 @@ def evaluate_entry(row, group, now_minutes, dte, strikes_ready, flat=True):
     return True, f"entry time {row.get('entryTime')} reached"
 
 
-def evaluate_row_exit(row, spot, premium, entry_premium, pnl, vwap):
+def evaluate_row_exit(row, spot, premium, entry_premium, pnl, vwap, vwap_close):
     """The first LEVEL exit this row breaches, or None.
 
     H-up, L-down, VWAP cross, SL rupees, SL multiple — in that order, character
@@ -375,11 +375,16 @@ def evaluate_row_exit(row, spot, premium, entry_premium, pnl, vwap):
     if lo is not None and spot > 0 and spot <= lo:
         return f'L↓ breached: spot {spot:.2f} ≤ {js_num(lo)}'
 
-    # This tool only ever opens with a SELL, so it is hurt by premium EXPANDING
-    # through VWAP or through a multiple of the entry price.
-    if row.get('levelVw') and vwap is not None and vwap > 0:
-        if premium > 0 and premium >= vwap:
-            return f'VW breached: premium {premium:.2f} ≥ VWAP {vwap:.2f}'
+    # Checked against the last CLOSED candle's premium, not the live tick — a
+    # spurious wick shouldn't fire a real exit. vwapBufferPct additionally
+    # requires the close to clear VWAP by more than a % margin before it
+    # counts as a breach; blank/0 means no buffer. This tool only ever opens
+    # with a SELL, so it is hurt by premium EXPANDING through VWAP.
+    if row.get('levelVw') and vwap_close is not None and vwap_close > 0 and vwap is not None and vwap > 0:
+        buffer_pct = num(row.get('vwapBufferPct')) or 0.0
+        threshold = vwap * (1 + buffer_pct / 100.0)
+        if vwap_close >= threshold:
+            return f'VW breached: closed premium {vwap_close:.2f} ≥ VWAP+buffer {threshold:.2f}'
 
     sl_rs = num(row.get('slRupees'))
     if sl_rs is not None and sl_rs > 0 and pnl <= -sl_rs:
@@ -393,7 +398,7 @@ def evaluate_row_exit(row, spot, premium, entry_premium, pnl, vwap):
     return None
 
 
-def evaluate_exit(row, group, fill, now_minutes, spot, premium, vwap, pnl):
+def evaluate_exit(row, group, fill, now_minutes, spot, premium, vwap, vwap_close, pnl):
     """(exit, reason) for one row this worker holds open. First match wins:
 
         1. the 15:17 intraday bell (MIS rows only)
@@ -426,7 +431,7 @@ def evaluate_exit(row, group, fill, now_minutes, spot, premium, vwap, pnl):
         return True, f"Exit time {row.get('exitTime')}"
 
     reason = evaluate_row_exit(
-        row, spot, premium, float(fill.get('entryPremium') or 0.0), pnl, vwap)
+        row, spot, premium, float(fill.get('entryPremium') or 0.0), pnl, vwap, vwap_close)
     return (True, reason) if reason else (False, '')
 
 
@@ -584,8 +589,8 @@ class FocusRowsWorker:
         REST exactly as before — slower, but not wrong.
         """
         try:
-            IDX_SEGMENT, FULL = 0, 21
-            instruments = [(IDX_SEGMENT, str(sid), FULL)
+            IDX_SEGMENT, FEED_QUOTE = 0, 17
+            instruments = [(IDX_SEGMENT, str(sid), FEED_QUOTE)
                            for sid in (13, 25, 51)]   # NIFTY, BANKNIFTY, SENSEX
             self.helper.start_websocket(instruments)
             self.log('info', 'Spot feed subscribed (NIFTY, BANKNIFTY, SENSEX)')
@@ -682,21 +687,23 @@ class FocusRowsWorker:
         self._chain_cache[key] = (minute, chain)
         return chain
 
-    def side_vwap(self, underlying, expiry, ce_strike, pe_strike, legs):
+    def side_vwap(self, underlying, expiry, ce_strike, pe_strike, legs, interval='1'):
         """Session VWAP of the premium of just `legs`, recomputed once a minute.
 
         Side-aware for the same reason evaluate_exit is: a CE-only row compared
         against a combined CE+PE VWAP would cross at the wrong premium. Uses
         only closed bars so the number matches what TradingView and the broker
         terminal show (see scripts/tools/focus_tool_vwap.py, same construction).
+        `interval` mirrors the row's vwapInterval setting from the dashboard.
         """
-        key = (underlying, expiry, ce_strike, pe_strike, tuple(legs))
+        key = (underlying, expiry, ce_strike, pe_strike, tuple(legs), interval)
         minute = datetime.now().strftime('%Y-%m-%d %H:%M')
         hit = self._vwap_cache.get(key)
         if hit and hit[0] == minute:
             return hit[1]
 
         vwap = None
+        vwap_close = None
         try:
             seg = 'BSE_FNO' if UNDERLYING_EXCHANGE.get(underlying) == 'BSE' else 'NSE_FNO'
             today = datetime.now().strftime('%Y-%m-%d')
@@ -712,7 +719,7 @@ class FocusRowsWorker:
                     break
                 df = self.helper.get_intraday_minute_data(
                     security_id=str(int(row['SECURITY_ID'])), exchange_segment=seg,
-                    instrument_type='OPTIDX', interval='1', from_date=today, to_date=tomorrow)
+                    instrument_type='OPTIDX', interval=interval, from_date=today, to_date=tomorrow)
                 if df is None or df.empty:
                     per_leg = []
                     break
@@ -745,13 +752,22 @@ class FocusRowsWorker:
                         den += vol
                     if den > 0:
                         vwap = num_ / den
+                    # Combined premium of the LAST closed bar — what the exit
+                    # rule actually compares against vwap, not a live tick, so
+                    # a spurious wick can't fire the exit on its own.
+                    try:
+                        vwap_close = sum(float(df.iloc[n - 1]['close']) for df in per_leg)
+                    except (KeyError, TypeError, ValueError):
+                        vwap_close = None
             _ = now
         except Exception as e:
             logger.warning(f'VWAP failed for {key}: {e}')
             vwap = None
+            vwap_close = None
 
-        self._vwap_cache[key] = (minute, vwap)
-        return vwap
+        result = (vwap, vwap_close)
+        self._vwap_cache[key] = (minute, result)
+        return result
 
     # -- trading -----------------------------------------------------
 
@@ -1134,11 +1150,12 @@ class FocusRowsWorker:
                 total_pnl += pnl
 
             vwap = None
+            vwap_close = None
             if row.get('levelVw') and fill:
                 ce_s = (fill.get('CE') or {}).get('strike', ce_strike)
                 pe_s = (fill.get('PE') or {}).get('strike', pe_strike)
                 if ce_s is not None and pe_s is not None:
-                    vwap = self.side_vwap(u, expiry, ce_s, pe_s, legs)
+                    vwap, vwap_close = self.side_vwap(u, expiry, ce_s, pe_s, legs, row.get('vwapInterval') or '1')
 
             snapshot.append({
                 'id': row['id'], 'underlying': u, 'status': row.get('status'),
@@ -1173,7 +1190,7 @@ class FocusRowsWorker:
                     continue
 
                 do_exit, reason = evaluate_exit(
-                    row, group, fill, now_minutes, spot, premium, vwap, pnl)
+                    row, group, fill, now_minutes, spot, premium, vwap, vwap_close, pnl)
                 if do_exit:
                     self.exit_row(row, reason)
             else:
