@@ -369,7 +369,7 @@ def test_evaluate_nan_bar_is_all_false(cfg):
     (dict(st_dir_5m=-1), "st_bull_5m"),
     (dict(adx_5m=10.0), "adx_ok"),
     (dict(rs_day=-0.01), "rs_day_ok"),
-    (dict(Close=100.0, vwap=99.0, atr=1.0), "not_stretched"),  # stretch 1.0 > 0.60
+    (dict(Close=102.0, vwap=100.0, atr=1.0), "not_stretched"),  # stretch 2.0 > 1.50
 ])
 def test_hard_gates_block(cfg, kw, flag):
     c = evaluate(_row(**kw), cfg, "LONG")

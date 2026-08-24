@@ -134,8 +134,8 @@ class IntradayConfig:
     rs_min_lb: float = 0.0010       # 10 bps outperformance over the lookback
 
     # Entry quality
-    max_vwap_stretch_atr: float = 0.60  # don't chase: |close-vwap| <= this * ATR
-    min_vwap_edge_bps: float = 5.0      # but require a real edge, not noise
+    max_vwap_stretch_atr: float = 1.50  # don't chase: |close-vwap| <= this * ATR (widened from 0.60)
+    min_vwap_edge_bps: float = 2.0      # require a real edge (2 bps / 0.02%), not noise (adjusted from 5.0)
     vol_surge_mult: float = 1.2         # 1-min volume vs its 20-bar mean
 
     # Selection

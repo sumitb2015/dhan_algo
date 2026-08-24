@@ -783,6 +783,8 @@ def main():
     p.add_argument("--allow-short", action="store_true")
     # Off by default — it fired on 222/338 trades at -0.75R. Flag re-enables it.
     p.add_argument("--vwap-exit", dest="vwap_exit", action="store_true", default=False)
+    p.add_argument("--vwap-stretch", type=float, default=1.50, help="Max distance from VWAP in ATR terms")
+    p.add_argument("--min-vwap-edge", type=float, default=2.0, help="Min edge above VWAP in bps")
     p.add_argument("--base-tf", type=int, default=5, help="Signal timeframe, minutes")
     p.add_argument("--htf", type=int, default=30, help="Supertrend/ADX timeframe, minutes")
 
@@ -824,6 +826,7 @@ def main():
         entry_spacing_s=args.entry_spacing, min_score=args.min_score, adx_min=args.adx_min,
         atr_stop_mult=args.atr_stop_mult, target_r=args.target_r,
         allow_short=args.allow_short, exit_on_vwap_loss=args.vwap_exit,
+        max_vwap_stretch_atr=args.vwap_stretch, min_vwap_edge_bps=args.min_vwap_edge,
         base_tf_min=args.base_tf, htf_min=args.htf,
         entry_start=args.entry_start, entry_cutoff=args.entry_cutoff,
         square_off=args.square_off,
