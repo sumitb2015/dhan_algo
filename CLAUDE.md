@@ -263,6 +263,7 @@ These are not obvious and have caused runtime errors in the past (see [GEMINI.md
 - **Lot sizes are dynamic** — fetch with `helper.get_lot_size("NIFTY")`. For index symbols, this automatically queries derivative contracts to return the option lot size, not the index placeholder of `1`.
 - **Previous day levels**: use `helper.get_prev_day_levels("NIFTY")` — do not inline `get_historical_data()` calls for PDH/PDL/PDC. (It reads the returned row's actual date rather than assuming row-count offsets — Dhan's DAILY endpoint doesn't publish today's row until the session closes, so a fixed "step back N rows" offset returns the wrong day intraday.)
 - **Data API failures are silent by default** — historical/intraday data methods return empty results on API errors (e.g. `DH-902` when the Data API subscription lapses). Check `helper.last_api_error` after an empty response before concluding "no data" / "up to date"; scripts that report freshness must surface it.
+- **`find_future()` must filter out expired contracts before picking nearest.** Dhan's master list keeps expired futures rows for days after expiry, sorted by expiry date — picking the earliest-sorted match without an `SM_EXPIRY_DATE >= today` filter can resolve a dead security ID with no live OHLC/quote data.
 
 ## Strategy Conventions
 
