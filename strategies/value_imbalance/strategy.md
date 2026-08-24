@@ -759,9 +759,11 @@ The strategy supports two rolling trigger variants selectable via CLI or the das
 | `--stop-loss VAL` | `25%` | Stop loss in INR or % of combined entry premium (e.g. `4000` or `25%`) |
 | `--trail-start-rs INR` | `500` | MTM profit level to activate trailing stop loss |
 | `--trail-gap-rs INR` | `300` | Trailing stop loss gap in INR |
-| `--entry-balance-threshold PCT` | `15.0` | Max CE/PE premium difference % allowed before entry proceeds; the strategy waits (status `BALANCING`) until premiums are within this band or EOD is reached. Set `0` to disable. |
+| `--entry-balance-threshold PCT` | `15.0` | Max CE/PE premium difference % allowed before entry proceeds; the strategy waits (status `BALANCING`) until premiums are within this band, the timeout below elapses, or EOD is reached. Set `0` to disable. |
+| `--entry-balance-timeout SEC` | `30.0` | Max seconds to wait for CE/PE balance before entering anyway at current premiums — rolls fire on trending moves, exactly when the new ATM's premiums are least likely to balance, so this bounds how long the strategy can sit flat after a roll. Set `0` to disable (wait indefinitely). |
 | `--start-time TIME` | `09:20` | Strategy start time (HH:MM IST) |
-| `--eod-time TIME` | `15:15` | Intraday auto-exit time (HH:MM IST) — overrides the repo-wide 15:17 default for this strategy |
+| `--eod-time TIME` | `15:17` | Intraday auto-exit time (HH:MM IST) — matches the repo-wide 15:17 convention |
+| `--exit-on-max-rolls` / `--no-exit-on-max-rolls` | on | Once `roll_count` reaches `max_rolls`, force-close the position on the next bound breach instead of riding an increasingly stale, non-ATM strike. Disable to keep the pre-fix behavior of never force-exiting on roll exhaustion. |
 | `--instance-id ID` | *(none)* | Optional identifier appended to the state key, for running multiple instances side by side |
 
 ### C. Execution Examples

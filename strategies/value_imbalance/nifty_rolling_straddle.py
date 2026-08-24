@@ -46,9 +46,10 @@ logger = logging.getLogger(__name__)
 class RollingStraddleStrategy:
     def __init__(self, dry_run=True, initial_lots=1, roll_buffer=35.0, max_rolls=5,
                  roll_cooldown=60, profit_target=4000.0, profit_target_is_pct=False,
-                 stop_loss=4000.0, stop_loss_is_pct=False, start_time="09:20", eod_time="15:15",
+                 stop_loss=4000.0, stop_loss_is_pct=False, start_time="09:20", eod_time="15:17",
                  trail_start_rs=500.0, trail_gap_rs=300.0, roll_type="points",
                  roll_trigger_pct=0.4, entry_balance_threshold=15.0,
+                 entry_balance_timeout=30, exit_on_max_rolls=True,
                  state_key="nifty_rolling_straddle"):
         self.state_key = state_key
         self.dry_run = dry_run
@@ -71,6 +72,8 @@ class RollingStraddleStrategy:
         self.trail_start_rs = float(trail_start_rs)
         self.trail_gap_rs = float(trail_gap_rs)
         self.entry_balance_threshold = float(entry_balance_threshold)
+        self.entry_balance_timeout = float(entry_balance_timeout)
+        self.exit_on_max_rolls = bool(exit_on_max_rolls)
 
         self.dhan = get_dhan_client()
         if not self.dhan:
@@ -186,6 +189,8 @@ class RollingStraddleStrategy:
             "roll_buffer": self.roll_buffer,
             "roll_trigger_pct": self.roll_trigger_pct,
             "entry_balance_threshold": self.entry_balance_threshold,
+            "entry_balance_timeout": self.entry_balance_timeout,
+            "exit_on_max_rolls": self.exit_on_max_rolls,
             "ref_spot": self.ref_spot,
             "max_rolls": self.max_rolls,
             "roll_count": self.roll_count,
@@ -353,6 +358,7 @@ class RollingStraddleStrategy:
         # --- Entry Balance Wait ---
         if self.entry_balance_threshold > 0:
             logger.info(f"Waiting for CE/PE premium to balance (diff < {self.entry_balance_threshold:.1f}%)...")
+            wait_start = time.time()
             while True:
                 ce_ltp_w, pe_ltp_w, spot_w = self._fetch_ltps_for(ce_id, pe_id)
 
@@ -379,6 +385,7 @@ class RollingStraddleStrategy:
                 # cannot tell a balancing strategy from a hung one.
                 self.save_state(spot_w or spot, ce_ltp_w, pe_ltp_w, self.realized_pnl, status="BALANCING")
 
+                diff_pct = None
                 if ce_ltp_w > 0 and pe_ltp_w > 0:
                     max_prem = max(ce_ltp_w, pe_ltp_w)
                     diff_pct = abs(ce_ltp_w - pe_ltp_w) / max_prem * 100.0
@@ -389,6 +396,23 @@ class RollingStraddleStrategy:
                         ce_price = ce_ltp_w
                         pe_price = pe_ltp_w
                         break
+
+                # Timeout: rolls fire on trending moves, exactly when the new ATM's
+                # CE/PE premiums are least likely to balance — an unbounded wait here
+                # would leave the strategy flat (no position, no risk control active)
+                # for an extended stretch right when spot keeps moving away. Enter at
+                # the best prices we have rather than staying flat indefinitely.
+                if self.entry_balance_timeout > 0 and (time.time() - wait_start) >= self.entry_balance_timeout:
+                    diff_desc = f"{diff_pct:.1f}%" if diff_pct is not None else "n/a"
+                    logger.warning(
+                        f"Balance wait timed out after {self.entry_balance_timeout:.0f}s "
+                        f"(diff {diff_desc} >= threshold {self.entry_balance_threshold:.1f}%) — "
+                        "entering at current premiums to avoid staying flat mid-move."
+                    )
+                    if ce_ltp_w > 0 and pe_ltp_w > 0:
+                        ce_price = ce_ltp_w
+                        pe_price = pe_ltp_w
+                    break
                 time.sleep(2)
 
         if self.dry_run:
@@ -682,6 +706,7 @@ class RollingStraddleStrategy:
 
             # 5. Rolling Straddle Check
             now_time = time.time()
+            bound_breached = spot >= self.upper_bound or spot <= self.lower_bound
             if self.roll_count < self.max_rolls and (now_time - self.last_roll_time) >= self.roll_cooldown:
                 if spot >= self.upper_bound:
                     logger.warning(f"Upper Bound Breached! Spot {spot:.2f} >= {self.upper_bound:.2f}")
@@ -689,6 +714,13 @@ class RollingStraddleStrategy:
                 elif spot <= self.lower_bound:
                     logger.warning(f"Lower Bound Breached! Spot {spot:.2f} <= {self.lower_bound:.2f}")
                     self.roll_straddle(spot, direction="DOWN")
+            elif self.roll_count >= self.max_rolls and bound_breached and self.exit_on_max_rolls:
+                self.force_exit_all(
+                    f"Max Rolls Exhausted ({self.roll_count}/{self.max_rolls}) — Bound Breached "
+                    f"(Spot {spot:.2f}, Bounds [{self.lower_bound:.1f} - {self.upper_bound:.1f}])"
+                )
+                self.save_state(spot, ce_ltp, pe_ltp, total_pnl, status="STOPPED")
+                return
 
             time.sleep(1)
 
@@ -705,11 +737,17 @@ def main():
     parser.add_argument("--target-profit", type=str, default="25%", help="Profit target in INR or percentage (e.g. 25%% or 4000)")
     parser.add_argument("--stop-loss", type=str, default="25%", help="Stop loss in INR or percentage (e.g. 25%% or 4000)")
     parser.add_argument("--start-time", type=str, default="09:20", help="Strategy start time (HH:MM)")
-    parser.add_argument("--eod-time", type=str, default="15:15", help="Intraday auto-exit time (HH:MM)")
+    parser.add_argument("--eod-time", type=str, default="15:17", help="Intraday auto-exit time (HH:MM)")
     parser.add_argument("--trail-start-rs", type=float, default=500.0, help="MTM profit level to activate trailing SL")
     parser.add_argument("--trail-gap-rs", type=float, default=300.0, help="Trailing SL gap in INR")
     parser.add_argument("--entry-balance-threshold", type=float, default=15.0, metavar="PCT",
                         help="Max CE/PE premium difference %% allowed at entry (default: 15.0, set 0 to disable)")
+    parser.add_argument("--entry-balance-timeout", type=float, default=30.0, metavar="SECONDS",
+                        help="Max seconds to wait for CE/PE balance before entering anyway (default: 30, set 0 to disable)")
+    parser.add_argument("--exit-on-max-rolls", dest="exit_on_max_rolls", action="store_true", default=True,
+                        help="Force-close the position once max-rolls is exhausted and bounds are still breached (default: on)")
+    parser.add_argument("--no-exit-on-max-rolls", dest="exit_on_max_rolls", action="store_false",
+                        help="Disable forced exit on max-rolls exhaustion; ride the stale strike instead")
     parser.add_argument("--instance-id", type=str, default=None, help="Optional instance identifier for multi-running")
 
     args = parser.parse_args()
@@ -739,6 +777,8 @@ def main():
         trail_start_rs=args.trail_start_rs,
         trail_gap_rs=args.trail_gap_rs,
         entry_balance_threshold=args.entry_balance_threshold,
+        entry_balance_timeout=args.entry_balance_timeout,
+        exit_on_max_rolls=args.exit_on_max_rolls,
         state_key=state_key
     )
 
