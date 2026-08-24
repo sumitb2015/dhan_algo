@@ -344,14 +344,24 @@ class DhanHelper:
         
         res = df[mask]
         if res.empty: return None
-        
+
         # Sort by expiry to handle "nearest" logic
         res = res.sort_values(by='SM_EXPIRY_DATE')
-        
+
         if expiry:
             match = res[res['SM_EXPIRY_DATE'] == expiry]
             return match.iloc[0].to_dict() if not match.empty else None
-        
+
+        # No explicit expiry: pick the nearest contract that hasn't expired yet.
+        # Broker master lists can keep an expired row around for days after
+        # expiry, so a plain "earliest row" pick can hand back a dead contract
+        # with no live OHLC/quote data.
+        today = datetime.now().strftime('%Y-%m-%d')
+        unexpired = res[res['SM_EXPIRY_DATE'] >= today]
+        if not unexpired.empty:
+            return unexpired.iloc[0].to_dict()
+
+        logger.warning(f"find_future: all {underlying} contracts in master list are expired (as of {today}); returning nearest anyway.")
         return res.iloc[0].to_dict()
 
     def find_option(self, underlying: str, expiry: str, strike: float, option_type: str, exchange: str = "NSE", instrument: str = "OPTIDX") -> Optional[Dict]:
