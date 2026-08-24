@@ -52,6 +52,15 @@ export interface FocusRowFill {
   /** Absolute units this row holds, already lot-multiplied. Never lots. */
   ceQty: number;
   peQty: number;
+  /**
+   * Realised P&L from qty this row has already closed or rolled away.
+   *
+   * The pin tracks only the CURRENT strike per leg. Closing (or shifting off)
+   * a strike leaves broker realised on that old security id — without this
+   * running total, that money drops out of the row the moment the pin moves.
+   * Optional on disk for older sessions; readers treat missing as 0.
+   */
+  bookedPnl?: number;
   ts: string;
 }
 

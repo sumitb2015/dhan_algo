@@ -28,6 +28,7 @@ import {
   dteMatches, dteForExpiry, evaluateRowExit, evaluateEntry, evaluateGlobalRisk,
   type PosRow, type RowLive,
 } from '@/lib/focusToolRules';
+import { computeRowPnl, mtmForQty, shiftMayReopen, canMarkMtm, shiftCloseConfirmed } from '@/lib/focusToolPnl';
 
 // â”€â”€ Constants â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
@@ -2648,32 +2649,32 @@ export default function FocusTool() {
        * own share, off the same ledger that clamps its exits — otherwise two
        * rows at one strike each claim the whole thing and the account budget
        * sees double the P&L that exists.
+       *
+       * Closed/rolled P&L lives on `fill.bookedPnl`, not on broker
+       * `realizedProfit` of the current pin: a strike shift leaves realised on
+       * the OLD security id, which this row no longer looks up.
        */
-      let pnl = 0;
       let entryPremium = 0;
+      const liveLegs: Parameters<typeof computeRowPnl>[1] = [];
       for (const leg of legsOf(row)) {
         const pos = leg === 'CE' ? cePosition : pePosition;
         if (!pos) continue;
-        const brokerQty = Math.abs(Number(pos.netQty) || 0);
         const ownQty = leg === 'CE' ? row.fill?.ceQty : row.fill?.peQty;
-        const share = ownQty && ownQty > 0 && brokerQty > 0
-          ? Math.min(1, ownQty / brokerQty)
-          : 1;   // nothing to apportion by — treat the position as this row's
-        pnl += (Number(pos.realizedProfit) || 0) * share;
-
         const isShort = Number(pos.netQty) < 0;
         const avg = isShort ? (Number(pos.sellAvg) || 0) : (Number(pos.buyAvg) || 0);
-        const ltp = (leg === 'CE' ? ltpCe : ltpPe) ?? 0;
-        const qty = ownQty && ownQty > 0 ? Math.min(ownQty, brokerQty) : brokerQty;
-        pnl += (ltp > 0 && avg > 0 && qty > 0)
-          ? (isShort ? avg - ltp : ltp - avg) * qty
-          // No live price yet (or no average to mark against): fall back to the
-          // broker's own number rather than reporting a confident zero.
-          : (Number(pos.unrealizedProfit) || 0) * share;
-
+        const ltp = leg === 'CE' ? ltpCe : ltpPe;
+        liveLegs.push({
+          netQty: Number(pos.netQty) || 0,
+          buyAvg: Number(pos.buyAvg) || 0,
+          sellAvg: Number(pos.sellAvg) || 0,
+          ltp,
+          unrealizedProfit: Number(pos.unrealizedProfit) || 0,
+          ownQty,
+        });
         // A price, not a quantity — never scaled.
         entryPremium += avg;
       }
+      const pnl = computeRowPnl(row.fill?.bookedPnl ?? 0, liveLegs);
 
       const rowExpiry = row.expiry || expiries[u]?.[0] || '';
       const vwapEntry = row.levelVw && ceStrike != null && peStrike != null && rowExpiry
@@ -2964,7 +2965,9 @@ export default function FocusTool() {
    * so a burst of orders (both legs of an entry, a double leg-exit) composes
    * correctly even when React has not re-rendered between them.
    */
-  function adjustFillQty(rowId: string, leg: 'CE' | 'PE', delta: number, strike?: number) {
+  function adjustFillQty(
+    rowId: string, leg: 'CE' | 'PE', delta: number, strike?: number, bookedDelta = 0,
+  ) {
     setConfig(prev => {
       const nextRows = prev.rows.map(r => {
         if (r.id !== rowId) return r;
@@ -2974,6 +2977,7 @@ export default function FocusTool() {
           peStrike: leg === 'PE' && strike != null ? strike : (f?.peStrike ?? null),
           ceQty: leg === 'CE' ? Math.max(0, (f?.ceQty ?? 0) + delta) : (f?.ceQty ?? 0),
           peQty: leg === 'PE' ? Math.max(0, (f?.peQty ?? 0) + delta) : (f?.peQty ?? 0),
+          bookedPnl: (f?.bookedPnl ?? 0) + (Number(bookedDelta) || 0),
           ts: f?.ts ?? new Date().toISOString(),
         };
         return { ...r, fill: nextFill, updatedAt: new Date().toISOString() };
@@ -3006,12 +3010,17 @@ export default function FocusTool() {
    */
   async function confirmLegFillQty(
     u: FocusUnderlying, leg: 'CE' | 'PE', strike: number, product: string,
-    netQtyBefore: number, side: 'BUY' | 'SELL', requested: number, maxWaitMs = 2500,
+    netQtyBefore: number, side: 'BUY' | 'SELL', requested: number,
+    opts: { maxWaitMs?: number; strict?: boolean } = {},
   ): Promise<number> {
+    const maxWaitMs = opts.maxWaitMs ?? 2500;
+    // strict: unread/unknown book → 0 (shift must not pretend the fill landed).
+    // Non-strict keeps the pre-fix fallback of trusting `requested`.
+    const onUnknown = opts.strict ? 0 : requested;
     const ref = lookups[u]?.strikes?.[strikeKey(strike)];
     const id = leg === 'CE' ? ref?.ceId : ref?.peId;
     const sym = leg === 'CE' ? ref?.ceSymbol : ref?.peSymbol;
-    if (broker === 'dhan' ? !id : !sym) return requested;
+    if (broker === 'dhan' ? !id : !sym) return onUnknown;
 
     const deadline = Date.now() + maxWaitMs;
     for (;;) {
@@ -3033,7 +3042,7 @@ export default function FocusTool() {
         if (observed >= requested) return requested;
         if (Date.now() >= deadline) return Math.max(observed, 0);
       } else if (Date.now() >= deadline) {
-        return requested;
+        return onUnknown;
       }
     }
   }
@@ -3048,7 +3057,7 @@ export default function FocusTool() {
   async function placeLeg(
     row: FocusRow,
     leg: 'CE' | 'PE',
-    opts: { reduce: boolean; lots?: number; all?: boolean; strikeOverride?: number },
+    opts: { reduce: boolean; lots?: number; all?: boolean; strikeOverride?: number; awaitFill?: boolean },
   ): Promise<boolean> {
     const u = row.underlying;
     const what = `${u} ${leg}`;
@@ -3157,13 +3166,44 @@ export default function FocusTool() {
         // min(ownQty, brokerQty) clamp already protects against over-closing
         // in the meantime, since it never trusts the ledger past what the
         // broker book actually shows.
-        confirmLegFillQty(u, leg, strike, rawProduct, netQty, side, quantity).then(filled => {
+        // Snapshot entry avg + LTP now so a reduce can bank the closed slice's
+        // MTM into fill.bookedPnl (the pin moves off this strike on a roll).
+        const bookedSnap = opts.reduce ? {
+          netQty,
+          buyAvg: Number(pos?.buyAvg) || 0,
+          sellAvg: Number(pos?.sellAvg) || 0,
+          ltp: Number(leg === 'CE' ? live?.ltpCe : live?.ltpPe) || 0,
+        } : null;
+        const applyFill = (filled: number) => {
           if (filled < quantity) {
             addToast('error', `${what}: partial fill`,
               `Requested ${quantity}, broker confirms ${filled} filled — ledger updated to match`);
           }
+          let bookedDelta = 0;
+          let markOk = true;
+          if (opts.reduce && filled > 0 && bookedSnap) {
+            if (canMarkMtm({ ...bookedSnap, qty: filled })) {
+              bookedDelta = mtmForQty({ ...bookedSnap, qty: filled });
+            } else if (opts.awaitFill) {
+              // Qty still updates below so the ledger matches the book; shift
+              // must not reopen/move pin without a bankable mark.
+              markOk = false;
+            }
+          }
           adjustFillQty(row.id, leg, opts.reduce ? -filled : filled,
-            opts.reduce ? undefined : Number(strike));
+            opts.reduce ? undefined : Number(strike), bookedDelta);
+          return filled >= quantity && markOk;
+        };
+        if (opts.awaitFill) {
+          const filled = await confirmLegFillQty(
+            u, leg, strike, rawProduct, netQty, side, quantity,
+            { maxWaitMs: 5000, strict: true },
+          );
+          pollPositions();
+          return applyFill(filled);
+        }
+        confirmLegFillQty(u, leg, strike, rawProduct, netQty, side, quantity).then(filled => {
+          applyFill(filled);
         });
         pollPositions();
         return true;
@@ -3177,18 +3217,21 @@ export default function FocusTool() {
   }
 
   /**
-   * Poll the broker's position book until one leg at `strike` reads flat, and
-   * return how many units actually left the book.
+   * Poll until this row's close at `strike` has fully landed.
    *
-   * Returns null if the leg is still not flat when the deadline passes, or if
-   * every position fetch failed — the caller must treat that as "unknown", not
-   * as "flat". A market close normally settles well inside this window; the
-   * retries exist so a slow fill isn't mistaken for a failed one.
+   * `targetRemaining` is how much of the broker position may still be open
+   * after OUR close (0 when we alone hold the strike; brokerQty − ownQty when
+   * another row/strategy shares it). Success only when remaining ≤ that floor
+   * — a partial fill of the close returns null, never a fraction. Strike
+   * shifts must not reopen until this returns a number.
    */
   async function verifyLegClosed(
-    u: FocusUnderlying, leg: 'CE' | 'PE', strike: number, qtyBefore: number, product: string,
-    maxWaitMs = 4000,
+    u: FocusUnderlying, leg: 'CE' | 'PE', strike: number, closedQty: number, product: string,
+    opts: { maxWaitMs?: number; targetRemaining?: number; brokerQtyBefore?: number } = {},
   ): Promise<number | null> {
+    const maxWaitMs = opts.maxWaitMs ?? 4000;
+    const targetRemaining = Math.max(0, opts.targetRemaining ?? 0);
+    const brokerQtyBefore = Math.max(closedQty, Number(opts.brokerQtyBefore) || closedQty);
     const ref = lookups[u]?.strikes?.[strikeKey(strike)];
     const id = leg === 'CE' ? ref?.ceId : ref?.peId;
     const sym = leg === 'CE' ? ref?.ceSymbol : ref?.peSymbol;
@@ -3209,10 +3252,13 @@ export default function FocusTool() {
           ? candidates.find(p => positionProduct(p as unknown as Record<string, unknown>) === product)
           : (candidates.length === 1 ? candidates[0] : undefined);
         const remaining = Math.abs(Number(pos?.netQty ?? 0));
-        if (remaining === 0) return qtyBefore;
-        // Partially filled and no longer shrinking is still reported once the
-        // deadline passes; until then keep waiting for the rest.
-        if (Date.now() >= deadline) return remaining < qtyBefore ? qtyBefore - remaining : null;
+        const observedClosed = Math.max(0, brokerQtyBefore - remaining);
+        // Need BOTH: book at/under the shared-strike floor AND enough qty
+        // left the book to cover OUR close (floor alone is not proof).
+        if (remaining <= targetRemaining && observedClosed >= closedQty) return closedQty;
+        // Incomplete close: keep waiting. Never report a partial amount —
+        // callers (strike shift) must not reopen on a fraction.
+        if (Date.now() >= deadline) return null;
       } else if (Date.now() >= deadline) {
         return null;
       }
@@ -3288,14 +3334,13 @@ export default function FocusTool() {
   }
 
   /**
-   * Shift one leg's strike up or down by one listed step — same behavior as
-   * AdvancedScalper's chevrons: an open position is closed at the current
-   * strike and reopened at the new one for the same quantity, then the row's
-   * own strike-resolution config is moved so it keeps pointing at the new
-   * strike (ATM mode: the leg's offset ±1 step, mirrored to the other leg
-   * when linked; PREMIUM mode: the leg's target premium reset to the new
-   * strike's own LTP so it keeps resolving there). A flat leg just moves the
-   * config — no orders.
+   * Shift one leg's strike up or down by one listed step.
+   *
+   * All-or-nothing on an open leg: the full qty at the current strike must
+   * close and confirm flat before anything opens at the new strike and before
+   * the pin/config moves. A partial close aborts with the pin left on the old
+   * strike. Flat legs only move the config (ATM ±1 or PREMIUM target = new LTP),
+   * mirrored when linked and the other leg is flat.
    */
   async function handleShiftStrike(row: FocusRow, leg: 'CE' | 'PE', direction: 'UP' | 'DOWN') {
     if (busyRows.has(row.id)) return;
@@ -3328,42 +3373,79 @@ export default function FocusTool() {
           addToast('error', 'Cannot shift', `Lot size for ${u} not resolved yet`);
           return;
         }
-        const accepted = await placeLeg(row, leg, { reduce: true, all: true });
-        if (!accepted) {
-          addToast('error', 'Shift aborted', `${currStrike} ${leg} close was not confirmed — position left untouched`);
+        // All-or-nothing: close THIS row's full qty at the old strike, confirm
+        // OUR fill + book floor, then reopen the same lots. Never move the pin
+        // on a partial close or an unmarked bookedPnl.
+        const brokerQty = Math.abs(netQty);
+        const ledgerQty = leg === 'CE' ? row.fill?.ceQty : row.fill?.peQty;
+        const closeQty = ledgerQty && ledgerQty > 0 ? Math.min(ledgerQty, brokerQty) : brokerQty;
+        if (!(closeQty > 0) || closeQty % lotSize !== 0) {
+          addToast('error', 'Cannot shift',
+            `${currStrike} ${leg} qty ${closeQty} is not a whole-lot multiple of ${lotSize}`);
+          return;
+        }
+        const lots = closeQty / lotSize;
+        const targetRemaining = Math.max(0, brokerQty - closeQty);
+        const markSnap = {
+          netQty,
+          buyAvg: Number(pos?.buyAvg) || 0,
+          sellAvg: Number(pos?.sellAvg) || 0,
+          ltp: Number(leg === 'CE' ? live.ltpCe : live.ltpPe) || 0,
+          qty: closeQty,
+        };
+        if (!canMarkMtm(markSnap)) {
+          addToast('error', 'Cannot shift',
+            `${currStrike} ${leg}: no live premium/avg to bank P&L — wait for a quote and retry`);
           return;
         }
 
-        // An accepted order is not a filled order. Reopening at the new strike
-        // on the strength of the broker's ACK alone would double this leg's
-        // exposure whenever the close doesn't fill (or only partly fills), so
-        // confirm against the position book before opening anything.
+        const closedOk = await placeLeg(row, leg, { reduce: true, all: true, awaitFill: true });
+        if (!closedOk) {
+          addToast('error', 'Shift aborted', `${currStrike} ${leg} close did not fully fill — position left on this strike`);
+          return;
+        }
+
+        const product = positionProduct(pos as unknown as Record<string, unknown>);
         const closedUnits = await verifyLegClosed(
-          u, leg, currStrike, Math.abs(netQty),
-          positionProduct(pos as unknown as Record<string, unknown>));
-        if (closedUnits == null) {
-          addToast('error', 'Shift halted', `Could not confirm ${currStrike} ${leg} is flat — no new leg opened. Check the position book.`);
+          u, leg, currStrike, closeQty, product,
+          { targetRemaining, brokerQtyBefore: brokerQty },
+        );
+        const afterRows = await fetchPositionsNow();
+        if (!afterRows) {
+          addToast('error', 'Shift halted — old strike not fully closed',
+            `Could not re-read positions after closing ${currStrike} ${leg} — no new leg opened.`);
           return;
         }
-        if (closedUnits === 0) {
-          addToast('error', 'Shift aborted', `Nothing left ${currStrike} ${leg} — no new leg opened`);
+        const afterRef = lookups[u]?.strikes?.[strikeKey(currStrike)];
+        const afterId = leg === 'CE' ? afterRef?.ceId : afterRef?.peId;
+        const afterSym = leg === 'CE' ? afterRef?.ceSymbol : afterRef?.peSymbol;
+        const afterPos = broker === 'dhan'
+          ? afterRows.find(p => String(p.securityId) === String(afterId)
+            && positionProduct(p as unknown as Record<string, unknown>) === product)
+          : afterRows.find(p => String(p.tradingSymbol) === afterSym
+            && positionProduct(p as unknown as Record<string, unknown>) === product);
+        const brokerAfter = Math.abs(Number(afterPos?.netQty ?? 0));
+        if (
+          closedUnits == null
+          || !shiftMayReopen(closeQty, closedUnits)
+          || !shiftCloseConfirmed({
+            requestedClose: closeQty,
+            filled: closeQty, // placeLeg awaitFill already required full fill
+            brokerQtyAfter: brokerAfter,
+            targetRemaining,
+          })
+        ) {
+          addToast('error', 'Shift halted — old strike not fully closed',
+            `Could not confirm ${currStrike} ${leg} flat for ${closeQty} qty — no new leg opened. Check the position book and retry.`);
           return;
         }
 
-        // Size the new leg off what ACTUALLY left the book, never off the
-        // pre-close snapshot — a partial fill re-opened at full size would
-        // leave the account net long/short after the roll.
-        const lots = Math.floor(closedUnits / lotSize);
-        if (lots < 1) {
-          addToast('error', 'Shift incomplete', `${closedUnits} qty closed at ${currStrike} ${leg} is under one lot — reopen manually at ${newStrike}`);
-        } else {
-          if (closedUnits % lotSize !== 0) {
-            addToast('error', 'Partial re-entry', `Reopening ${lots} lot(s) of the ${closedUnits} qty closed — the remainder stays flat`);
-          }
-          const opened = await placeLeg(row, leg, { reduce: false, lots, strikeOverride: newStrike });
-          if (!opened) {
-            addToast('error', 'Shift incomplete', `Closed ${currStrike} ${leg} but the new ${newStrike} ${leg} order failed — reopen manually`);
-          }
+        const opened = await placeLeg(row, leg, {
+          reduce: false, lots, strikeOverride: newStrike, awaitFill: true,
+        });
+        if (!opened) {
+          addToast('error', 'Shift incomplete', `Closed ${currStrike} ${leg} but the new ${newStrike} ${leg} order failed or did not fill — reopen manually`);
+          return;
         }
       }
 
@@ -3386,13 +3468,16 @@ export default function FocusTool() {
         const oc = chains[u]?.oc;
         const newLtp = oc?.[strikeKey(newStrike)]?.[leg === 'CE' ? 'ce' : 'pe'];
         if (!(Number(newLtp) > 0)) {
-          addToast('error', 'Strike shifted, target not updated', `No live premium for ${newStrike} ${leg} yet — set the ₹ target manually`);
-          return;
+          // Book/pin already moved (fill ledger stamped newStrike). Keep the
+          // old ₹ target rather than aborting — user can retarget manually.
+          addToast('error', 'Strike shifted — set ₹ target',
+            `Position is at ${newStrike} ${leg}; no live premium yet to auto-update the target`);
+        } else {
+          const val = String(newLtp);
+          const patch: Partial<FocusRow> = leg === 'CE' ? { cePremium: val } : { pePremium: val };
+          if (linked) { if (leg === 'CE') patch.pePremium = val; else patch.cePremium = val; }
+          updateRow(row.id, patch, true);
         }
-        const val = String(newLtp);
-        const patch: Partial<FocusRow> = leg === 'CE' ? { cePremium: val } : { pePremium: val };
-        if (linked) { if (leg === 'CE') patch.pePremium = val; else patch.cePremium = val; }
-        updateRow(row.id, patch, true);
       } else {
         const curOffset = leg === 'CE' ? (row.ceOffset ?? 0) : (row.peOffset ?? 0);
         const newOffset = curOffset + (direction === 'UP' ? 1 : -1);
