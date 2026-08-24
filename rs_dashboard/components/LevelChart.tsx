@@ -378,27 +378,55 @@ export default function LevelChart({ candles, levelBuckets, label, indicators, p
 
   // Previous Day High/Low/Close reference lines — same createPriceLine() rail pattern as
   // FootprintChart.tsx's POC/VAH/VAL lines.
+  //
+  // createPriceLine() does NOT participate in the price scale's autoscale — it only draws at
+  // whatever y-coordinate its price maps to under the range the candles alone produce. On a day
+  // that gaps or trends away from the prior session (e.g. crude oil dropping from a PDH near
+  // 8386 down through a today's-range ceiling of ~8255), PDH/PDC land above the visible viewport
+  // and silently render off-screen — confirmed 2026-08-24 on CRUDEOIL, where only PDL (inside
+  // today's range) showed while PDH/PDC (above it) did not. Widen the series' own autoscale
+  // range to include the rail prices whenever they're outside it, same technique as the
+  // autoscaleInfoProvider doc example.
   useEffect(() => {
     const series = seriesRef.current;
     if (!series) return;
     for (const line of pdcLinesRef.current) series.removePriceLine(line);
     pdcLinesRef.current = [];
-    if (!visible.pdc || !prevDayLevels) return;
 
-    const rails: { price: number; title: string }[] = [
-      { price: prevDayLevels.high, title: 'PDH' },
-      { price: prevDayLevels.close, title: 'PDC' },
-      { price: prevDayLevels.low, title: 'PDL' },
-    ];
-    for (const rail of rails) {
-      if (!Number.isFinite(rail.price)) continue;
-      pdcLinesRef.current.push(
-        series.createPriceLine({
-          price: rail.price, color: PDC_COLOR, lineWidth: 1, lineStyle: LineStyle.Dashed,
-          axisLabelVisible: true, title: rail.title,
-        }),
-      );
+    const rails: { price: number; title: string }[] = prevDayLevels
+      ? [
+          { price: prevDayLevels.high, title: 'PDH' },
+          { price: prevDayLevels.close, title: 'PDC' },
+          { price: prevDayLevels.low, title: 'PDL' },
+        ]
+      : [];
+    const finiteRails = rails.filter((r) => Number.isFinite(r.price));
+
+    if (visible.pdc) {
+      for (const rail of finiteRails) {
+        pdcLinesRef.current.push(
+          series.createPriceLine({
+            price: rail.price, color: PDC_COLOR, lineWidth: 1, lineStyle: LineStyle.Dashed,
+            axisLabelVisible: true, title: rail.title,
+          }),
+        );
+      }
     }
+
+    series.applyOptions({
+      autoscaleInfoProvider: (original: () => { priceRange: { minValue: number; maxValue: number } | null } | null) => {
+        const res = original();
+        if (!visible.pdc || !res?.priceRange || finiteRails.length === 0) return res;
+        const prices = finiteRails.map((r) => r.price);
+        return {
+          ...res,
+          priceRange: {
+            minValue: Math.min(res.priceRange.minValue, ...prices),
+            maxValue: Math.max(res.priceRange.maxValue, ...prices),
+          },
+        };
+      },
+    });
   }, [prevDayLevels, visible.pdc]);
 
   // High/50%/Low zone overlay, drawn on a canvas sibling to the chart — lightweight-charts has
