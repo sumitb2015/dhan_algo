@@ -611,7 +611,7 @@ function SegPill<T extends string>({
 /** One leg's strike selector: an ATM-offset dropdown or a target-premium
  *  input, with the currently resolved strike shown alongside. */
 function StrikeLegSelector({
-  leg, mode, offset, premium, resolvedStrike, step, onOffsetChange, onPremiumChange, onShift, shiftDisabled, locked,
+  leg, mode, offset, premium, resolvedStrike, step, ltp, onOffsetChange, onPremiumChange, onShift, shiftDisabled, locked,
 }: {
   leg: 'CE' | 'PE';
   mode: FocusStrikeMode;
@@ -619,6 +619,10 @@ function StrikeLegSelector({
   premium: string;
   resolvedStrike: number | null;
   step: number;
+  /** Live premium of `resolvedStrike` — shown next to the strike itself so a
+   *  trader can see what price they'd be entering at without scanning over
+   *  to the row's separate LTP column. */
+  ltp?: number | null;
   onOffsetChange: (n: number) => void;
   onPremiumChange: (v: string) => void;
   onShift?: (direction: 'UP' | 'DOWN') => void;
@@ -649,6 +653,12 @@ function StrikeLegSelector({
       )}
       <span className="text-[11px] font-mono font-bold text-zinc-300 min-w-[42px] text-right">
         {resolvedStrike ?? '—'}
+      </span>
+      <span
+        className="text-[10px] font-mono font-semibold text-zinc-500 min-w-[38px] text-right"
+        title={`Live ${leg} premium at this strike — the reference entry price`}
+      >
+        {resolvedStrike != null && ltp != null && ltp > 0 ? `@${ltp.toFixed(2)}` : '—'}
       </span>
       {onShift && (
         <div className="flex flex-col gap-0.5">
@@ -756,7 +766,7 @@ function StrikeEditor({ row, live, step, onUpdate, onShift, shiftDisabled, onBlo
   const mode = row.strikeMode ?? 'ATM';
 
   return (
-    <div className="flex flex-col gap-1 w-[200px]">
+    <div className="flex flex-col gap-1 w-[236px]">
       <SegPill options={['ATM±', '₹'] as const}
         value={mode === 'ATM' ? 'ATM±' : '₹'}
         onChange={v => {
@@ -770,12 +780,12 @@ function StrikeEditor({ row, live, step, onUpdate, onShift, shiftDisabled, onBlo
           : 'ATM± picks a strike by steps from ATM; ₹ picks the closest strike priced at or below a target premium'}
         className="self-start" />
       <StrikeLegSelector leg="CE" mode={mode} offset={row.ceOffset ?? 0} premium={row.cePremium ?? ''}
-        resolvedStrike={live.ceStrike} step={step} locked={legOpen.CE}
+        resolvedStrike={live.ceStrike} step={step} ltp={live.ltpCe} locked={legOpen.CE}
         onOffsetChange={n => setLeg('CE', { ceOffset: n })}
         onPremiumChange={v => setLeg('CE', { cePremium: v })}
         onShift={onShift ? dir => onShift('CE', dir) : undefined} shiftDisabled={shiftDisabled} />
       <StrikeLegSelector leg="PE" mode={mode} offset={row.peOffset ?? 0} premium={row.pePremium ?? ''}
-        resolvedStrike={live.peStrike} step={step} locked={legOpen.PE}
+        resolvedStrike={live.peStrike} step={step} ltp={live.ltpPe} locked={legOpen.PE}
         onOffsetChange={n => setLeg('PE', { peOffset: n })}
         onPremiumChange={v => setLeg('PE', { pePremium: v })}
         onShift={onShift ? dir => onShift('PE', dir) : undefined} shiftDisabled={shiftDisabled} />
@@ -1098,9 +1108,9 @@ function ControlStrip({
           <Shield className="h-3.5 w-3.5 text-violet-400" />
           Risk / MTM
         </GhostBtn>
-        <GhostBtn onClick={onOpenOrders} title="Today's broker order book for this account">
+        <GhostBtn onClick={onOpenOrders} title="Today's broker order book and tradebook for this account">
           <Activity className="h-3.5 w-3.5 text-zinc-400" />
-          Order Book
+          Orders
         </GhostBtn>
         <GhostBtn onClick={onToggleViewMode} title="Toggle between Table and Cards view">
           <Layers className="h-3.5 w-3.5 text-zinc-400" />
@@ -1961,13 +1971,40 @@ function FocusModal({
   onClose,
   title,
   children,
+  variant = 'drawer',
 }: {
   isOpen: boolean;
   onClose: () => void;
   title: string;
   children: React.ReactNode;
+  /** 'drawer' (default): right-side sliding panel, for compact detail views.
+   *  'center': full-width centered dialog, for data-table-heavy content like
+   *  the order/trade book that needs every column visible without scrolling. */
+  variant?: 'drawer' | 'center';
 }) {
   if (!isOpen) return null;
+  if (variant === 'center') {
+    return (
+      <div className="fixed inset-0 z-50 flex items-center justify-center p-6 bg-oncolor-dark/70 backdrop-blur-sm transition-opacity">
+        <div className="w-full max-w-6xl max-h-[90vh] bg-zinc-900 border border-zinc-800 rounded-2xl p-6 flex flex-col gap-4 shadow-2xl text-white overflow-hidden">
+          <div className="flex items-center justify-between border-b border-zinc-800 pb-3 shrink-0">
+            <h2 className="text-sm font-bold uppercase tracking-wider text-zinc-100">{title}</h2>
+            <button
+              onClick={onClose}
+              title="Close"
+              aria-label="Close"
+              className={cn('text-zinc-400 hover:text-white text-lg font-bold p-1 cursor-pointer rounded', FOCUS_RING)}
+            >
+              &times;
+            </button>
+          </div>
+          <div className="flex-1 overflow-y-auto">
+            {children}
+          </div>
+        </div>
+      </div>
+    );
+  }
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-end bg-oncolor-dark/70 backdrop-blur-sm transition-opacity">
       <div className="h-full w-full max-w-xl bg-zinc-900 border-l border-zinc-800 p-6 flex flex-col gap-4 shadow-2xl text-white overflow-y-auto">
@@ -2097,6 +2134,11 @@ export default function FocusTool() {
   const [ordersLoading, setOrdersLoading] = useState(false);
   const [ordersError, setOrdersError] = useState<string | null>(null);
   const [orderSort, setOrderSort] = useState<SortState>({ key: 'createTime', dir: 'desc' });
+  const [ordersTab, setOrdersTab] = useState<'orders' | 'trades'>('orders');
+  const [trades, setTrades] = useState<Record<string, unknown>[]>([]);
+  const [tradesLoading, setTradesLoading] = useState(false);
+  const [tradesError, setTradesError] = useState<string | null>(null);
+  const [tradeSort, setTradeSort] = useState<SortState>({ key: 'createTime', dir: 'desc' });
 
   const [riskEnabled, setRiskEnabled] = useState(config.riskEnabled);
   const [targetRupees, setTargetRupees] = useState(config.targetRupees);
@@ -2471,11 +2513,30 @@ export default function FocusTool() {
     }
   }, [broker]);
 
+  const fetchTrades = useCallback(async () => {
+    setTradesLoading(true);
+    setTradesError(null);
+    try {
+      const res = await fetch(scalperRoute(broker, 'trades'));
+      const j = await res.json();
+      if (j.success && j.data) {
+        setTrades(j.data);
+      } else {
+        setTradesError(j.error ?? 'Failed to fetch trades');
+      }
+    } catch (e) {
+      setTradesError(String(e));
+    } finally {
+      setTradesLoading(false);
+    }
+  }, [broker]);
+
   useEffect(() => {
     if (activeModal === 'orderbook') {
       fetchOrders();
+      fetchTrades();
     }
-  }, [activeModal, fetchOrders]);
+  }, [activeModal, fetchOrders, fetchTrades]);
 
 
   // The trailing floor is OWNED by the scheduler's evaluateGlobalRisk, which
@@ -4272,43 +4333,91 @@ export default function FocusTool() {
       <FocusModal
         isOpen={activeModal === 'orderbook'}
         onClose={() => setActiveModal(null)}
-        title="Broker Order Book"
+        title="Orders"
+        variant="center"
       >
         <div className="flex flex-col gap-3">
           <div className="flex items-center justify-between mb-1">
-            <span className="text-[10px] text-zinc-500 uppercase tracking-wider leading-tight">
-              Every order on the account, not only this tool&apos;s
-            </span>
-            <button
-              onClick={fetchOrders}
-              disabled={ordersLoading}
-              className={cn('text-xs font-semibold px-2 py-1 rounded border border-zinc-700 bg-zinc-900 text-zinc-300 hover:text-white hover:border-zinc-500 cursor-pointer disabled:opacity-40 transition-all flex items-center gap-1', FOCUS_RING)}
-            >
-              <RefreshCw className={cn("h-3 w-3", ordersLoading && "animate-spin")} />
-              Refresh
-            </button>
+            <div className="flex items-center gap-1">
+              {([['orders', 'Order Book', orders.length], ['trades', 'Tradebook', trades.length]] as const).map(
+                ([tab, label, count]) => (
+                  <button
+                    key={tab}
+                    onClick={() => setOrdersTab(tab)}
+                    className={cn(
+                      'px-3 py-1.5 text-xs font-semibold rounded-lg transition-all',
+                      ordersTab === tab
+                        ? 'bg-zinc-700 text-zinc-100 border border-zinc-600'
+                        : 'text-zinc-500 hover:text-zinc-300 border border-transparent',
+                      FOCUS_RING,
+                    )}
+                  >
+                    {label}{count > 0 ? ` (${count})` : ''}
+                  </button>
+                ),
+              )}
+            </div>
+            <div className="flex items-center gap-3">
+              <span className="text-[10px] text-zinc-500 uppercase tracking-wider leading-tight">
+                Every {ordersTab === 'orders' ? 'order' : 'trade'} on the account, not only this tool&apos;s
+              </span>
+              <button
+                onClick={() => { fetchOrders(); fetchTrades(); }}
+                disabled={ordersLoading || tradesLoading}
+                className={cn('text-xs font-semibold px-2 py-1 rounded border border-zinc-700 bg-zinc-900 text-zinc-300 hover:text-white hover:border-zinc-500 cursor-pointer disabled:opacity-40 transition-all flex items-center gap-1', FOCUS_RING)}
+              >
+                <RefreshCw className={cn("h-3 w-3", (ordersLoading || tradesLoading) && "animate-spin")} />
+                Refresh
+              </button>
+            </div>
           </div>
 
-          {ordersError && (
-            <div className="text-rose-400 text-xs bg-rose-500/10 border border-rose-500/20 rounded-lg p-3 font-mono">
-              Error loading orders: {ordersError}
-            </div>
-          )}
-
-          {ordersLoading && !orders.length ? (
-            <div className="flex flex-col items-center justify-center py-16 gap-3">
-              <RefreshCw className="h-6 w-6 text-zinc-600 animate-spin" />
-              <span className="text-xs text-zinc-500">Loading order book…</span>
-            </div>
+          {ordersTab === 'orders' ? (
+            <>
+              {ordersError && (
+                <div className="text-rose-400 text-xs bg-rose-500/10 border border-rose-500/20 rounded-lg p-3 font-mono">
+                  Error loading orders: {ordersError}
+                </div>
+              )}
+              {ordersLoading && !orders.length ? (
+                <div className="flex flex-col items-center justify-center py-16 gap-3">
+                  <RefreshCw className="h-6 w-6 text-zinc-600 animate-spin" />
+                  <span className="text-xs text-zinc-500">Loading order book…</span>
+                </div>
+              ) : (
+                <div className="border border-zinc-800 rounded-xl overflow-hidden max-h-[65vh] overflow-y-auto">
+                  <TabTable
+                    tab="orders"
+                    data={orders}
+                    sort={orderSort}
+                    onSort={key => setOrderSort(prev => prev.key === key ? { key, dir: prev.dir === 'desc' ? 'asc' : 'desc' } : { key, dir: 'desc' })}
+                  />
+                </div>
+              )}
+            </>
           ) : (
-            <div className="border border-zinc-800 rounded-xl overflow-hidden max-h-[500px] overflow-y-auto">
-              <TabTable
-                tab="orders"
-                data={orders}
-                sort={orderSort}
-                onSort={key => setOrderSort(prev => prev.key === key ? { key, dir: prev.dir === 'desc' ? 'asc' : 'desc' } : { key, dir: 'desc' })}
-              />
-            </div>
+            <>
+              {tradesError && (
+                <div className="text-rose-400 text-xs bg-rose-500/10 border border-rose-500/20 rounded-lg p-3 font-mono">
+                  Error loading trades: {tradesError}
+                </div>
+              )}
+              {tradesLoading && !trades.length ? (
+                <div className="flex flex-col items-center justify-center py-16 gap-3">
+                  <RefreshCw className="h-6 w-6 text-zinc-600 animate-spin" />
+                  <span className="text-xs text-zinc-500">Loading tradebook…</span>
+                </div>
+              ) : (
+                <div className="border border-zinc-800 rounded-xl overflow-hidden max-h-[65vh] overflow-y-auto">
+                  <TabTable
+                    tab="trades"
+                    data={trades}
+                    sort={tradeSort}
+                    onSort={key => setTradeSort(prev => prev.key === key ? { key, dir: prev.dir === 'desc' ? 'asc' : 'desc' } : { key, dir: 'desc' })}
+                  />
+                </div>
+              )}
+            </>
           )}
         </div>
       </FocusModal>
