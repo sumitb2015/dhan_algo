@@ -77,6 +77,7 @@ const NAV_GROUPS = [
     label: 'Trading',
     icon: Zap,
     links: [
+      { href: '/level-chart', label: 'Level Chart', desc: 'Live High/50%/Low interval-level zones for any stock, index or crude oil future' },
       { href: '/options-analytics/live', label: 'Live Payoff', desc: 'Live combined payoff diagram for every underlying with open option positions' },
       { href: '/scalper', label: 'Scalper', desc: 'Multi-window active trading & scalping order ticket' },
       { href: '/advanced-scalper', label: 'Advanced Scalper', desc: 'Configurable 2-5 box scalper with per-box CE/PE, strike & lot presets' },
