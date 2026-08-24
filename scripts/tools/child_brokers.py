@@ -549,19 +549,22 @@ class ChildBroker:
                 if entry['order_id'] == order_id and entry.get('context') is None:
                     entry['context'] = context
 
-    def confirm_placements(self) -> list:
+    def confirm_placements(self):
         """Resolve orders the broker accepted but had not ruled on yet.
 
-        Returns the ones it has since REJECTED, as
+        Returns (rejected, timed_out) — both
         [{'order_id', 'symbol', 'side', 'qty', 'product', 'reason', 'context'}].
-        Only a positive rejection is ever reported: re-placing an order that
-        actually went through would double a live position, so an unrecognised
-        status stays pending and a stale entry is dropped rather than guessed at.
+        `rejected` is a positive REJECTED/CANCELLED verdict; re-placing an order
+        that actually went through would double a live position, so an
+        unrecognised status stays pending rather than being guessed at.
+        `timed_out` is an entry dropped after CONFIRM_TIMEOUT_SEC with no
+        positive verdict either way — never re-placed, but the caller should
+        still record it rather than let it vanish silently.
 
         Blocking — watchdog thread only. Brokers that rule synchronously (all
         but Kotak today) never register anything, so this is a no-op for them.
         """
-        return []
+        return [], []
 
     def find_recent_matching_order(self, symbol: str, side: str, qty: int, since_ts):
         """Best-effort dedup check before RE-trying a chunk whose previous
@@ -1161,12 +1164,12 @@ class KotakChild(ChildBroker):
                 return verdict, reason, filled
         return verdict, reason, filled
 
-    def confirm_placements(self) -> list:
+    def confirm_placements(self):
         """See ChildBroker.confirm_placements. Watchdog thread only."""
         with self._pending_lock:
             pending = list(self.pending_confirm)
         if not pending:
-            return []
+            return [], []
 
         # ONE fetch for the whole pass. Per-entry fetches meant N full
         # order-book round-trips every 2s watchdog cycle, on the same thread
@@ -1174,7 +1177,7 @@ class KotakChild(ChildBroker):
         # very drain that buys the margin top-up hedge.
         rows, err = self._fetch_order_rows()
 
-        rejected, resolved = [], []
+        rejected, timed_out, resolved = [], [], []
         now = time.time()
         for entry in pending:
             verdict, reason, filled = self._status_from_rows(rows, err, entry['order_id'])
@@ -1189,8 +1192,10 @@ class KotakChild(ChildBroker):
             if now - entry['ts'] >= self.CONFIRM_TIMEOUT_SEC:
                 # Stop watching, but never guess. Re-placing on a hunch doubles
                 # a live position; the safety watchdog and copy_trade_reconcile
-                # are the backstop for a genuinely lost order.
+                # are the backstop for a genuinely lost order — surfaced to both
+                # via the returned entry rather than only this log line.
                 resolved.append(entry)
+                timed_out.append({**entry, 'reason': f'{verdict}: {reason}'})
                 self.log(f'[{self.name}] Could not confirm order {entry["order_id"]} '
                          f'({entry["side"]} {entry["qty"]} {entry["symbol"]}) within '
                          f'{self.CONFIRM_TIMEOUT_SEC:.0f}s — last seen "{verdict}: {reason}". '
@@ -1200,7 +1205,7 @@ class KotakChild(ChildBroker):
             with self._pending_lock:
                 self.pending_confirm = [e for e in self.pending_confirm
                                         if e['order_id'] not in ids]
-        return rejected
+        return rejected, timed_out
 
     def find_recent_matching_order(self, symbol, side, qty, since_ts):
         from lib.kotak.responses import unwrap_list

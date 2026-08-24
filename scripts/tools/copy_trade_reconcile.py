@@ -48,6 +48,7 @@ UNREPLICATED_RESULTS = {
     'baseline_skipped':   'filled while the bridge was down — deliberately not replicated',
     'safety_exit_gave_up': 'watchdog could not force-close an orphaned child position',
     'margin_blocked':     'refused up front — insufficient Zerodha margin',
+    'pending_confirm_timeout': 'Kotak order status never resolved within CONFIRM_TIMEOUT_SEC — parent/child may be desynced, verify manually',
 }
 
 

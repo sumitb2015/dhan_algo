@@ -1006,11 +1006,30 @@ def confirm_child_placements(brokers: dict, retry_queue: list, state: dict,
     append = append or append_log
     for bname, broker in (brokers or {}).items():
         try:
-            rejections = broker.confirm_placements()
+            rejections, timed_out = broker.confirm_placements()
         except Exception as e:
             print(f'[copy_trade_bridge] Placement confirmation failed for {bname}: {e!r}',
                   flush=True)
             continue
+        for to in timed_out:
+            # Never re-placed (a guess could double a live position) and never
+            # hedged (no positive rejection to answer) — logged so a stuck
+            # confirmation is a visible desync signal instead of only a print
+            # line, and so copy_trade_reconcile can surface it.
+            state['failed_count'] += 1
+            entry = {
+                'ts': datetime.now().isoformat(), 'order_no': (to.get('context') or {}).get('order_no'),
+                'broker': bname, 'child_symbol': to['symbol'], 'zerodha_symbol': to['symbol'],
+                'side': to['side'], 'child_qty': to['qty'], 'child_order_id': to['order_id'],
+                'result': 'pending_confirm_timeout',
+                'error': (f'{bname} order {to["order_id"]} ({to["side"]} {to["qty"]} {to["symbol"]}) '
+                          f'never resolved to accepted or rejected within the confirm window '
+                          f'({to.get("reason")}) — NOT re-placed, parent/child DESYNCED, '
+                          f'reconcile manually'),
+            }
+            append(entry)
+            print(f'[copy_trade_bridge] {bname} order {to["order_id"]} for {to["symbol"]} '
+                  f'timed out unconfirmed — parent/child DESYNCED, reconcile manually', flush=True)
         for rej in rejections:
             ctx = rej.get('context') or {}
             unfilled = int(rej['qty']) - int(rej.get('filled_qty') or 0)

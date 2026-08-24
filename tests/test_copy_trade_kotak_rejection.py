@@ -135,14 +135,15 @@ def test_confirm_placements_reports_a_late_rejection():
     child._place_one('NIFTY26AUG24250PE', 'SELL', 65, 'MIS')
     child.client._reports.append(_ok([_row('REJECTED', 'RMS:Margin Exceeds')]))
 
-    rejections = child.confirm_placements()
+    rejections, timed_out = child.confirm_placements()
     assert len(rejections) == 1
+    assert timed_out == []
     assert rejections[0]['symbol'] == 'NIFTY26AUG24250PE'
     assert rejections[0]['side'] == 'SELL'
     assert rejections[0]['qty'] == 65
     assert 'Margin Exceeds' in rejections[0]['reason']
     assert child.pending_confirm == []      # resolved, not re-reported
-    assert child.confirm_placements() == []
+    assert child.confirm_placements() == ([], [])
 
 
 def test_confirm_placements_never_reports_an_accepted_or_unknown_order():
@@ -151,22 +152,55 @@ def test_confirm_placements_never_reports_an_accepted_or_unknown_order():
     child = _child([_empty(), _empty(), _empty()])
     child._place_one('NIFTY26AUG24250PE', 'SELL', 65, 'MIS')
     child.client._reports.append(_ok([_row('COMPLETE')]))
-    assert child.confirm_placements() == []
+    assert child.confirm_placements() == ([], [])
     assert child.pending_confirm == []
 
     child2 = _child([_empty(), _empty(), _empty()])
     child2._place_one('NIFTY26AUG24250PE', 'SELL', 65, 'MIS')
     child2.client._reports.append(_ok([_row('SOME NEW STATUS')]))
-    assert child2.confirm_placements() == []
+    assert child2.confirm_placements() == ([], [])
     assert len(child2.pending_confirm) == 1   # still watched, never re-placed
 
 
 def test_confirm_placements_gives_up_after_the_timeout():
+    """A timed-out entry is dropped (never re-placed on a guess) but must not
+    vanish silently — it comes back as `timed_out`, not `rejected`, so the
+    caller can still log the desync rather than lose it entirely."""
     child = _child([_empty(), _empty(), _empty()])
     child._place_one('NIFTY26AUG24250PE', 'SELL', 65, 'MIS')
     child.pending_confirm[0]['ts'] = time.time() - (KotakChild.CONFIRM_TIMEOUT_SEC + 1)
-    assert child.confirm_placements() == []
+    rejected, timed_out = child.confirm_placements()
+    assert rejected == []
+    assert len(timed_out) == 1
+    assert timed_out[0]['symbol'] == 'NIFTY26AUG24250PE'
+    assert timed_out[0]['order_id'] == ORDER_ID
     assert child.pending_confirm == []
+
+
+def test_bridge_logs_a_structured_entry_for_a_timed_out_confirmation():
+    """A pending order that never resolves before CONFIRM_TIMEOUT_SEC must not
+    vanish as only a print line — it has to land in the log with enough
+    detail for copy_trade_reconcile to flag the desync."""
+    from scripts.tools import copy_trade_bridge as ctb
+
+    child = _child([_empty(), _empty(), _empty()])
+    ctx = {'order_no': 'P1', 'strike': 24250.0, 'expiry': '2026-08-28', 'opt_type': 'PE'}
+    child.place_child_order('NIFTY26AUG24250PE', 'SELL', 65, product='MIS', context=ctx)
+    child.pending_confirm[0]['ts'] = time.time() - (KotakChild.CONFIRM_TIMEOUT_SEC + 1)
+
+    retry_queue, state, logged = [], {'failed_count': 0}, []
+    ctb.confirm_child_placements({'kotak': child}, retry_queue, state,
+                                 armed=True, append=logged.append)
+
+    assert retry_queue == []                 # never re-placed on a guess
+    assert child.pending_confirm == []
+    assert len(logged) == 1
+    assert logged[0]['result'] == 'pending_confirm_timeout'
+    assert logged[0]['child_symbol'] == 'NIFTY26AUG24250PE'
+    assert logged[0]['side'] == 'SELL'
+    assert logged[0]['child_qty'] == 65
+    assert 'reconcile manually' in logged[0]['error']
+    assert state['failed_count'] == 1
 
 
 def test_place_child_order_attaches_the_leg_context_for_the_hedge():
@@ -181,7 +215,8 @@ def test_place_child_order_attaches_the_leg_context_for_the_hedge():
     assert child.pending_confirm[0]['context'] == ctx
 
     child.client._reports.append(_ok([_row('REJECTED', 'RMS:Margin Exceeds')]))
-    rej = child.confirm_placements()
+    rej, timed_out = child.confirm_placements()
+    assert timed_out == []
     assert rej[0]['context']['strike'] == 24250.0
 
 
@@ -289,8 +324,9 @@ def test_confirm_placements_fetches_the_order_book_once_per_pass():
                           'rejRsn': 'RMS:Margin Exceeds'}
                          for e in child.pending_confirm]
     before = child.client.report_calls
-    rejections = child.confirm_placements()
+    rejections, timed_out = child.confirm_placements()
     assert len(rejections) == 3
+    assert timed_out == []
     assert child.client.report_calls - before == 1
 
 
@@ -354,6 +390,103 @@ def test_fully_filled_slice_is_never_requeued():
                                  armed=True, append=logged.append)
     assert q == []
     assert 'already filled' in logged[0]['error']
+
+
+def _hedge_pick(symbol='NIFTY26AUG24750CE', strike=24750.0):
+    return {'symbol': symbol, 'strike': strike, 'opt_type': 'CE',
+            'lot_size': 65, 'ltp': 2.6, 'premium_per_lot': 169.0}
+
+
+def test_drain_retry_queue_fires_a_proactive_hedge_on_cached_shortfall(monkeypatch, tmp_path):
+    """A re-queued SELL whose cached margin estimate still shows a shortfall
+    must actually buy the top-up hedge before retrying — not just log that it
+    would have. This is the step the 2026-08-21 desync needed and nothing
+    previously exercised end-to-end."""
+    from scripts.tools import copy_trade_bridge as ctb
+    from scripts.tools import copy_trade_hedge
+
+    monkeypatch.setattr(copy_trade_hedge, 'HEDGE_FILE', str(tmp_path / 'hedges.json'))
+    monkeypatch.setattr(copy_trade_hedge, 'pick_child_hedge',
+                        lambda *a, **k: (_hedge_pick(), None))
+    logged = []
+    monkeypatch.setattr(ctb, 'append_log', logged.append)
+
+    # First OPEN resolves the hedge BUY's own confirm poll; second resolves
+    # the retried SELL.
+    child = _child([_ok([_row('OPEN')]), _ok([_row('OPEN')])])
+    child.set_position_snapshot({})
+    child.margin['available'] = 1000.0
+    child.margin['per_lot'] = 200000.0
+    child.margin['lot_size'] = 65
+
+    item = {'order_no': 'P1', 'broker': 'kotak', 'child_symbol': 'NIFTY26AUG24250PE',
+            'strike': 24250.0, 'expiry': '2026-08-28', 'opt_type': 'PE', 'side': 'SELL',
+            'qty': 65, 'attempts': 1, 'next_ts': 0.0, 'product': 'MIS', 'price': 120.0,
+            'product_hints': ()}
+    retry_queue = [item]
+    chq = {}
+
+    ctb.drain_retry_queue(object(), {'kotak': child}, retry_queue, {'failed_count': 0},
+                          margin_check=True, cfg={}, child_hedge_qty=chq)
+
+    assert chq['kotak']['NIFTY26AUG24750CE'] == 130
+    assert len(child.client.placed) == 2
+    # The hedge BUY is placed before the SELL retry.
+    assert child.client.placed[0]['transaction_type'] == 'B'
+    assert child.client.placed[0]['trading_symbol'] == 'NIFTY26AUG24750CE'
+    assert int(child.client.placed[0]['quantity']) == 130
+    assert child.client.placed[1]['transaction_type'] == 'S'
+    assert copy_trade_hedge.load_hedge_state()['hedges'][0]['result'] == 'placed'
+    assert retry_queue == []
+    assert logged[-1]['result'] == 'retry_success'
+
+
+def test_drain_retry_queue_fires_a_reactive_hedge_on_a_second_margin_rejection(monkeypatch, tmp_path):
+    """If the cached estimate looked fine but the broker rejects the retry
+    itself for margin, that rejection must ALSO buy a hedge — the reactive
+    path, distinct from the proactive one above."""
+    from scripts.tools import copy_trade_bridge as ctb
+    from scripts.tools import copy_trade_hedge
+
+    monkeypatch.setattr(copy_trade_hedge, 'HEDGE_FILE', str(tmp_path / 'hedges.json'))
+    monkeypatch.setattr(copy_trade_hedge, 'pick_child_hedge',
+                        lambda *a, **k: (_hedge_pick(), None))
+    logged = []
+    monkeypatch.setattr(ctb, 'append_log', logged.append)
+
+    # Pending then REJECTED resolves the SELL retry's own synchronous confirm
+    # poll (mirrors test_rejection_arriving_after_the_first_poll_is_still_detected);
+    # the trailing OPEN resolves the reactive hedge BUY.
+    child = _child([
+        _ok([_row('put order req received')]),
+        _ok([_row('REJECTED', 'RMS:Margin Exceeds,Required:1,Available:0')]),
+        _ok([_row('OPEN')]),
+    ])
+    # ensure_hedge_capacity needs a position snapshot to prove this opens
+    # exposure, even though the reactive path never calls check_margin.
+    child.set_position_snapshot({})
+
+    item = {'order_no': 'P1', 'broker': 'kotak', 'child_symbol': 'NIFTY26AUG24250PE',
+            'strike': 24250.0, 'expiry': '2026-08-28', 'opt_type': 'PE', 'side': 'SELL',
+            'qty': 65, 'attempts': 1, 'next_ts': 0.0, 'product': 'MIS', 'price': 120.0,
+            'product_hints': ()}
+    retry_queue = [item]
+    chq = {}
+
+    ctb.drain_retry_queue(object(), {'kotak': child}, retry_queue, {'failed_count': 0},
+                          margin_check=False, cfg={}, child_hedge_qty=chq)
+
+    assert chq['kotak']['NIFTY26AUG24750CE'] == 130
+    assert len(child.client.placed) == 2
+    assert child.client.placed[0]['transaction_type'] == 'S'   # the failed retry
+    assert child.client.placed[1]['transaction_type'] == 'B'   # the reactive hedge
+    # Not dropped — it stays queued to retry now that the hedge freed margin.
+    assert item in retry_queue
+    assert item['hedge_rounds'] == 1
+    assert item['attempts'] == 1                                # no attempt spent on a hedge round
+    assert copy_trade_hedge.load_hedge_state()['hedges'][0]['result'] == 'placed'
+    assert logged[-1]['result'] == 'margin_hedge_bought'
+    assert logged[-1]['hedge']['hedge']['symbol'] == 'NIFTY26AUG24750CE'
 
 
 def test_rejected_hedge_buy_stops_counting_as_a_held_hedge():
@@ -442,4 +575,4 @@ def test_zerodha_child_is_unaffected_by_the_confirmation_machinery():
                                            context={'strike': 24250.0})
     assert (placed, err) == (65, None)
     assert z.pending_confirm == []          # never parks anything
-    assert z.confirm_placements() == []
+    assert z.confirm_placements() == ([], [])
