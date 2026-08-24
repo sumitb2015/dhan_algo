@@ -60,19 +60,24 @@ logger = logging.getLogger(__name__)
 # Signal core (pure — unit-testable without a broker session)
 # ---------------------------------------------------------------------------
 
-def desired_direction(price: float, st_val: float, vwap_val: float, current: str) -> str:
+def desired_direction(price: float, st_val: float, vwap_val: float, current: str, min_distance: float = 0.0) -> str:
     """Always-on with hysteresis: enter or flip only when price clears BOTH bands.
 
     Above Supertrend AND above VWAP  -> LONG
     Below Supertrend AND below VWAP  -> SHORT
     Anything in between (the "mixed zone") returns `current`, so an open
     position is HELD through mixed signals and a flat book stays flat.
+
+    `min_distance` (default 0, byte-identical to the old any-clearance rule) requires
+    price to clear both bands by at least this many points — pass an ATR-scaled value
+    to stop a flip/entry from firing on a hairline clearance when ST and VWAP nearly
+    coincide.
     """
     if price <= 0 or st_val <= 0 or vwap_val <= 0:
         return current  # indicators/price not ready — never act on a partial view
-    if price > st_val and price > vwap_val:
+    if price > st_val + min_distance and price > vwap_val + min_distance:
         return "LONG"
-    if price < st_val and price < vwap_val:
+    if price < st_val - min_distance and price < vwap_val - min_distance:
         return "SHORT"
     return current
 
@@ -96,6 +101,7 @@ class CrudeOilMVwapSupertrendStrategy:
         allow_reverse: bool = True,
         exit_on_close: bool = False,
         flip_cooldown: int = 30,
+        min_flip_atr_mult: float = 0.0,
     ):
         self.dry_run = dry_run
         self.lots = lots
@@ -113,6 +119,7 @@ class CrudeOilMVwapSupertrendStrategy:
         self.allow_reverse = allow_reverse
         self.exit_on_close = exit_on_close
         self.flip_cooldown = flip_cooldown
+        self.min_flip_atr_mult = min_flip_atr_mult
         # Backoff after a rejected entry, so a persistently failing order does not
         # get resubmitted once per second.
         self.entry_retry_seconds = max(5, poll_seconds)
@@ -184,6 +191,7 @@ class CrudeOilMVwapSupertrendStrategy:
         indicators = [
             {"kind": "supertrend", "length": self.supertrend_period, "multiplier": self.supertrend_multiplier},
             {"kind": "vwap", "anchor": self.vwap_anchor},
+            {"kind": "atr", "length": self.supertrend_period},
         ]
         df = self.helper.get_indicators_ta(
             symbol=SYMBOL, interval=self.interval, indicators=indicators, days=self.days
@@ -212,8 +220,11 @@ class CrudeOilMVwapSupertrendStrategy:
             return None
         vwap_val = 0.0 if pd.isna(row[vwap_cols[0]]) else float(row[vwap_cols[0]])
 
+        atr_cols = [c for c in df.columns if c.startswith("ATR")]
+        atr_val = 0.0 if not atr_cols or pd.isna(row[atr_cols[0]]) else float(row[atr_cols[0]])
+
         candle_ts = str(df.index[-2])
-        snap = (close, st_val, vwap_val, candle_ts)
+        snap = (close, st_val, vwap_val, candle_ts, atr_val)
         with self._snap_lock:
             self._snapshot = snap
 
@@ -221,8 +232,8 @@ class CrudeOilMVwapSupertrendStrategy:
             zone = "ABOVE BOTH" if (close > st_val > 0 and close > vwap_val > 0) else \
                    "BELOW BOTH" if (0 < st_val and close < st_val and 0 < vwap_val and close < vwap_val) else "MIXED"
             logger.info(
-                "[SIGNAL] Candle: %s | Close: %.2f | ST: %.2f | VWAP: %.2f | Zone: %s",
-                candle_ts, close, st_val, vwap_val, zone
+                "[SIGNAL] Candle: %s | Close: %.2f | ST: %.2f | VWAP: %.2f | ATR: %.2f | Zone: %s",
+                candle_ts, close, st_val, vwap_val, atr_val, zone
             )
             self.last_processed_candle_time = candle_ts
         return snap
@@ -240,16 +251,17 @@ class CrudeOilMVwapSupertrendStrategy:
         snap = self._read_snapshot()
         if snap is None:
             return self.direction
-        close, st_val, vwap_val, candle_ts = snap
+        close, st_val, vwap_val, candle_ts, atr_val = snap
+        min_distance = atr_val * self.min_flip_atr_mult
 
         if self.direction == "NONE":
             if candle_ts and candle_ts == self.reentry_block_candle:
                 return "NONE"  # one-candle cooldown after a --no-reverse signal exit
-            want = desired_direction(close, st_val, vwap_val, "NONE")
+            want = desired_direction(close, st_val, vwap_val, "NONE", min_distance)
             return want if want != "NONE" else "NONE"
 
         price = close if self.exit_on_close else (self.ltp if self.ltp > 0 else close)
-        return desired_direction(price, st_val, vwap_val, self.direction)
+        return desired_direction(price, st_val, vwap_val, self.direction, min_distance)
 
     # ------------------------------------------------------------------
     # Entry
@@ -337,12 +349,14 @@ class CrudeOilMVwapSupertrendStrategy:
 
             if order_id is None:
                 logger.critical("Exit order placement FAILED for %s %s. Manual intervention required!", self.direction, SYMBOL)
+                self.save_state(status="ERROR_EXIT_ORDER_FAILED")
                 sys.exit(1)
 
             self.helper.wait_for_fill(order_id, timeout=10)
             order_data = self.helper.get_order_by_id(order_id) or {}
             if order_data.get("orderStatus") != "TRADED":
                 logger.critical("Exit order %s not confirmed as TRADED. Manual intervention required!", order_id)
+                self.save_state(status="ERROR_EXIT_NOT_CONFIRMED")
                 sys.exit(1)
 
             exit_price = float(
@@ -423,6 +437,8 @@ class CrudeOilMVwapSupertrendStrategy:
             "st_level": round(snap[1], 2) if snap else 0.0,
             "vwap": round(snap[2], 2) if snap else 0.0,
             "signal_close": round(snap[0], 2) if snap else 0.0,
+            "atr": round(snap[4], 2) if snap else 0.0,
+            "min_flip_atr_mult": self.min_flip_atr_mult,
             "qty": self.qty,
             "lots": self.lots,
             "contract_size": self.contract_size,
@@ -587,7 +603,9 @@ class CrudeOilMVwapSupertrendStrategy:
             f"  VWAP anchor : {self.vwap_anchor}\n"
             f"  Rule        : LONG above BOTH | SHORT below BOTH | hold in between\n"
             f"  On flip     : {'stop-and-reverse' if self.allow_reverse else 'exit to flat (--no-reverse)'}"
-            f" (min {self.flip_cooldown}s between flips)\n"
+            f" (min {self.flip_cooldown}s between flips"
+            + (f", min clearance {self.min_flip_atr_mult}x ATR" if self.min_flip_atr_mult > 0 else "")
+            + f")\n"
             f"  Exit price  : {'confirmed close' if self.exit_on_close else 'live LTP'}\n"
             f"  Quantity    : {self.lots} lot(s) -> broker qty {self.qty}, exposure {self.exposure} barrels\n"
             f"  Day target  : +{self.target_profit:.0f} INR | Day stop: -{self.stop_loss:.0f} INR\n"
@@ -694,8 +712,8 @@ class CrudeOilMVwapSupertrendStrategy:
                 now_ts = time.time()
                 if now_ts - last_log_time >= 30:
                     logger.info(
-                        "[MONITOR] Dir: %s | Entry: %.2f | LTP: %.2f | ST: %.2f | VWAP: %.2f | Pos P&L: %.2f | Day P&L: %.2f (T:+%.0f/S:-%.0f)",
-                        self.direction, self.entry_price, self.ltp, snap[1], snap[2],
+                        "[MONITOR] Dir: %s | Entry: %.2f | LTP: %.2f | ST: %.2f | VWAP: %.2f | ATR: %.2f | Pos P&L: %.2f | Day P&L: %.2f (T:+%.0f/S:-%.0f)",
+                        self.direction, self.entry_price, self.ltp, snap[1], snap[2], snap[4],
                         self.position_pnl, self.cumulative_pnl + self.position_pnl,
                         self.target_profit, self.stop_loss,
                     )
@@ -772,6 +790,10 @@ Examples:
     parser.add_argument("--flip-cooldown", type=int, default=30,
                         help="Minimum seconds between position flips (default: 30). Guards against "
                              "tick-level thrash when the Supertrend and VWAP nearly coincide")
+    parser.add_argument("--min-flip-atr-mult", type=float, default=0.0,
+                        help="Minimum ATR multiple a flip/entry must clear both ST and VWAP by, on top "
+                             "of the time-based --flip-cooldown (default: 0, disabled — any clearance "
+                             "counts, matching prior behavior)")
     parser.add_argument("--instance-id", type=str, default="", metavar="ID",
                         help="Suffix for debug/state files to run a second concurrent copy of this strategy")
     args = parser.parse_args()
@@ -800,6 +822,8 @@ Examples:
         problems.append("--days must be at least 1")
     if args.flip_cooldown < 0:
         problems.append("--flip-cooldown cannot be negative")
+    if args.min_flip_atr_mult < 0:
+        problems.append("--min-flip-atr-mult cannot be negative")
     if not str(args.interval).isdigit() or int(args.interval) < 1:
         problems.append("--interval must be a positive whole number of minutes")
     for flag, value in (("--start-time", args.start_time), ("--eod-time", args.eod_time)):
@@ -832,6 +856,7 @@ Examples:
         allow_reverse=not args.no_reverse,
         exit_on_close=args.exit_on_close,
         flip_cooldown=args.flip_cooldown,
+        min_flip_atr_mult=args.min_flip_atr_mult,
     )
 
     try:
