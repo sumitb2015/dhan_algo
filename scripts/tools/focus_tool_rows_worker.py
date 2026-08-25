@@ -49,11 +49,18 @@ never filled would zero the ledger while the position was still live — the row
 would read as flat and every rule would stop watching it.
 
 Because it owns a fill ledger, P&L here is marked against what THIS worker
-opened, not against the whole account. That is also what the account-level
+opened, not against the whole account. Closed/rolled legs bank into
+`bookedPnl` on the fill (and into `sessionBookedPnl` once the row goes fully
+flat), so a leg-wise SL that drops the CE does not make the row's P&L collapse
+to only the leftover PE. That cumulative number is also what the account-level
 Target/Stop/Trail is measured on — an unrelated strategy's drawdown must not
 flatten this tool's rows. The browser's Risk/MTM panel shows whole-account P&L
 and so can differ; the page stands its own scheduler down whenever this worker
 is running, so only one of the two is ever acting.
+
+Status on the config row is written by this worker too: `entered` on a
+successful entry, `exited` once every leg is gone. Leaving status at `armed`
+was how a finished cycle immediately re-entered on the next tick.
 
 The rule functions mirror FocusTool.tsx's evaluateRowExit / the scheduler
 effect. Change one, change both in the same commit: a disagreement means the
@@ -81,6 +88,12 @@ STATUS_FILE  = os.path.join(DEBUG_DIR, 'focus_tool_rows_worker_status.json')
 STATUS_FILE_ONCE = os.path.join(DEBUG_DIR, 'focus_tool_rows_worker_status_once.json')
 STATE_FILE   = os.path.join(DEBUG_DIR, 'focus_tool_rows_worker_state.json')
 STOP_TRIGGER = os.path.join(DEBUG_DIR, 'focus_tool_rows_worker_stop.trigger')
+# Page writes this when it sees the broker already flat on a leg the worker
+# still pins (auth-failed reconcile, manual square-off elsewhere). Same
+# consume-and-delete shape as STOP_TRIGGER.
+DROP_LEGS_FILE = os.path.join(DEBUG_DIR, 'focus_tool_drop_legs.json')
+# Per-request drop files from the page (Exit All races a shared JSON queue).
+DROP_LEGS_GLOB = os.path.join(DEBUG_DIR, 'focus_tool_drop_*.json')
 LOG_FILE     = os.path.join(DEBUG_DIR, 'focus_tool_rows_worker.log')
 
 # Spot arrives over the WebSocket, but option-leg LTPs are still REST reads and
@@ -457,6 +470,62 @@ def evaluate_leg_exit(row, leg, fill, ltp):
     return False, ''
 
 
+def bank_closed_leg(held, ltp):
+    """Realised P&L for qty this worker is about to drop off the pin.
+
+    Short only (this tool opens with SELL): profit when premium falls below
+    entry. Returns 0 when LTP or entry is missing — never silently bank a
+    fabricated flat, which is how closed-leg money used to vanish from the
+    row after a leg-wise SL (see tests/test_focus_tool_booked_pnl.py).
+    """
+    if not held:
+        return 0.0
+    qty = abs(float(held.get('qty') or 0))
+    entry = float(held.get('entryPrice') or 0.0)
+    mark = float(ltp or 0.0)
+    if not (qty > 0 and entry > 0 and mark > 0):
+        return 0.0
+    return (entry - mark) * qty
+
+
+def cumulative_row_pnl(fill, leg_ltp):
+    """booked (closed/rolled) + live MTM on still-open legs.
+
+    This is what the status snapshot and the account budget must report after
+    a leg-wise SL: without `bookedPnl`, the closed CE's loss disappears the
+    moment the pin drops it and the row shows only the leftover PE.
+    """
+    if not fill:
+        return 0.0
+    pnl = float(fill.get('bookedPnl') or 0.0)
+    for leg in ('CE', 'PE'):
+        held = fill.get(leg)
+        if not held:
+            continue
+        ltp = float((leg_ltp or {}).get(leg) or 0.0)
+        if ltp > 0:
+            pnl += bank_closed_leg(held, ltp)
+    return pnl
+
+
+def apply_leg_drop(fills, row_id, leg):
+    """Drop one leg from the ledger (ghost clear / already-flat close).
+
+    Returns (changed, booked_released). `booked_released` is the fill's
+    bookedPnl when the row goes fully flat and is popped — callers add it to
+    the session realised total so the account budget keeps counting it.
+    """
+    fill = (fills or {}).get(row_id)
+    if not fill or not fill.get(leg):
+        return False, 0.0
+    del fill[leg]
+    if not any(k in fill for k in ('CE', 'PE')):
+        booked = float(fill.get('bookedPnl') or 0.0)
+        fills.pop(row_id, None)
+        return True, booked
+    return True, 0.0
+
+
 def evaluate_global_risk(cfg, total_pnl, peak_pnl, lock_floor):
     """(exit_all, reason, lock_floor, trail_state) for the account-level budget.
 
@@ -528,10 +597,14 @@ class FocusRowsWorker:
 
         self.cfg = {}
         self._cfg_mtime = None
-        self.fills = {}            # row id -> {'CE'|'PE': {...}, 'entryPremium': float}
+        self.fills = {}            # row id -> {'CE'|'PE': {...}, 'entryPremium': float, 'bookedPnl': float}
         self.peak_pnl = 0.0
         self.lock_floor = None
         self.trail_state = 'INACTIVE'
+        # Realised P&L from rows that have fully closed this session. Survives
+        # the fill being popped so Target/Stop/Trail keep counting a finished
+        # cycle instead of resetting to zero the moment the last leg flats.
+        self.session_booked_pnl = 0.0
         self.events = []           # recent (ts, level, message) for the dashboard
         self._warned_orphans = set()   # ledger ids already reported as orphaned
         self._warned_stale_arm = False # yesterday's live arm reported once
@@ -606,6 +679,7 @@ class FocusRowsWorker:
             self.fills = st.get('fills') or {}
             self.peak_pnl = float(st.get('peakPnl') or 0.0)
             self.lock_floor = st.get('lockFloor')
+            self.session_booked_pnl = float(st.get('sessionBookedPnl') or 0.0)
             if self.fills:
                 self.log('info', f'Resumed {len(self.fills)} open row(s) from state file')
         elif st:
@@ -617,8 +691,46 @@ class FocusRowsWorker:
             'fills': self.fills,
             'peakPnl': self.peak_pnl,
             'lockFloor': self.lock_floor,
+            'sessionBookedPnl': self.session_booked_pnl,
             'updatedAt': datetime.now().isoformat(),
         })
+
+    def set_row_status(self, row_id, status):
+        """Patch one row's status on disk so evaluate_entry and the page agree.
+
+        The worker used to leave status at `armed` forever. After a full exit
+        (or a reconcile that dropped the last leg) that meant the next tick
+        immediately re-entered — the 09:19 re-entry on 2026-08-25. Mirrors the
+        page's own enter→entered / flat→exited transitions.
+        """
+        cfg = read_json(CONFIG_FILE)
+        if not isinstance(cfg, dict):
+            return
+        rows = cfg.get('rows') or []
+        changed = False
+        for r in rows:
+            if r.get('id') == row_id and r.get('status') != status:
+                r['status'] = status
+                r['updatedAt'] = datetime.now().isoformat()
+                changed = True
+                break
+        if not changed:
+            return
+        cfg['rows'] = rows
+        cfg['updatedAt'] = datetime.now().isoformat()
+        if atomic_write(CONFIG_FILE, cfg):
+            # Force reload on next load_config — we just wrote the file ourselves.
+            try:
+                self._cfg_mtime = os.path.getmtime(CONFIG_FILE)
+            except OSError:
+                self._cfg_mtime = None
+            self.cfg = cfg
+
+    def release_row_booked(self, fill):
+        """Move a fully-closed row's bookedPnl into the session total."""
+        if not fill:
+            return
+        self.session_booked_pnl += float(fill.get('bookedPnl') or 0.0)
 
     def load_config(self):
         """Reload only when the file's mtime moves — the page rewrites it on
@@ -828,11 +940,25 @@ class FocusRowsWorker:
         # is later deleted, orphan_rows() can still tell what this position is
         # and keep the exit ladder reaching it.
         opened['underlying'] = u
-        opened['entryPremium'] = sum(v['entryPrice'] for k, v in opened.items()
-                                     if k in ('CE', 'PE'))
+        opened['entryPremium'] = (
+            sum(v['entryPrice'] * int(v['qty']) for k, v in opened.items() if k in ('CE', 'PE'))
+            / sum(int(v['qty']) for k, v in opened.items() if k in ('CE', 'PE'))
+        ) if any(k in ('CE', 'PE') for k in opened) else 0.0
+        # Guard zero-qty (should not happen after the got <= 0 continue above).
+        qty_sum = sum(int(v['qty']) for k, v in opened.items() if k in ('CE', 'PE'))
+        if qty_sum > 0:
+            opened['entryPremium'] = sum(
+                float(v['entryPrice']) * int(v['qty']) for k, v in opened.items() if k in ('CE', 'PE')
+            ) / qty_sum
+        else:
+            opened['entryPremium'] = 0.0
         opened['enteredAt'] = datetime.now().isoformat()
+        opened['bookedPnl'] = 0.0
         self.fills[row['id']] = opened
         self.save_state()
+        # Armed → entered so a later full flat cannot silently re-enter on the
+        # same arm. User must Arm again (page) which sets status back to armed.
+        self.set_row_status(row['id'], 'entered')
         self.log('info', f"{u} {row['id'][-4:]}: ENTERED ({reason}) — "
                          f"combined entry {opened['entryPremium']:.2f}")
 
@@ -850,13 +976,18 @@ class FocusRowsWorker:
         self.log('info', f"{u} {row['id'][-4:]}: exiting — {reason}")
 
         remaining = {}
+        booked = float(fill.get('bookedPnl') or 0.0)
         for leg in ('CE', 'PE'):
             held = fill.get(leg)
             if not held:
                 continue
+            # Mark against live LTP before the close so the realised slice
+            # survives the pin drop — same banking the page does on reduce.
+            ltp = self.market.ltp(u, self.market.leg(u, expiry, held['strike'], leg))
             ok, detail = self.router.close(
                 u, expiry, held['strike'], leg, 'BUY', int(held['qty']), product)
             if ok:
+                booked += bank_closed_leg(held, ltp)
                 self.log('info', f"{u} {row['id'][-4:]} {held['strike']}{leg}: closed ({detail})")
             else:
                 self.log('error', f"{u} {row['id'][-4:]} {held['strike']}{leg}: exit FAILED — {detail}")
@@ -867,16 +998,25 @@ class FocusRowsWorker:
             remaining['product'] = product
             remaining['entryPremium'] = fill.get('entryPremium')
             remaining['enteredAt'] = fill.get('enteredAt')
+            remaining['underlying'] = fill.get('underlying')
+            remaining['bookedPnl'] = booked
             self.fills[row['id']] = remaining
         else:
+            self.session_booked_pnl += booked
             self.fills.pop(row['id'], None)
+            self.set_row_status(row['id'], 'exited')
         self.save_state()
 
-    def exit_leg(self, row, leg, reason):
+    def exit_leg(self, row, leg, reason, ltp=None):
         """Close just ONE leg on its own SL x breach, leaving the other leg —
         and the row itself — exactly as it was. Mirrors exit_row's
         retry-on-failure shape but only ever touches this one leg's ledger
-        entry; the other leg (and its own rules) is untouched."""
+        entry; the other leg (and its own rules) is untouched.
+
+        `ltp` is the premium that triggered the breach when the caller already
+        has it — banking against that mark keeps bookedPnl aligned with what
+        the rule actually saw, rather than a second quote a tick later.
+        """
         fill = self.fills.get(row['id'])
         held = (fill or {}).get(leg)
         if not held:
@@ -886,12 +1026,18 @@ class FocusRowsWorker:
         product = fill.get('product') or 'INTRADAY'
         self.log('info', f"{u} {row['id'][-4:]}: leg-exit {leg} — {reason}")
 
+        mark = float(ltp or 0.0)
+        if not (mark > 0):
+            mark = self.market.ltp(u, self.market.leg(u, expiry, held['strike'], leg))
         ok, detail = self.router.close(u, expiry, held['strike'], leg, 'BUY', int(held['qty']), product)
         if ok:
+            fill['bookedPnl'] = float(fill.get('bookedPnl') or 0.0) + bank_closed_leg(held, mark)
             self.log('info', f"{u} {row['id'][-4:]} {held['strike']}{leg}: closed ({detail})")
             del fill[leg]
             if not any(k in fill for k in ('CE', 'PE')):
+                self.release_row_booked(fill)
                 self.fills.pop(row['id'], None)
+                self.set_row_status(row['id'], 'exited')
             self.save_state()
         else:
             self.log('error', f"{u} {row['id'][-4:]} {held['strike']}{leg}: leg-exit FAILED — {detail}")
@@ -950,6 +1096,10 @@ class FocusRowsWorker:
                     continue
                 changed = True
                 if broker_qty <= 0:
+                    # Closed elsewhere — drop without banking. We did not place
+                    # the close, so we have no trustworthy exit mark; inventing
+                    # one from the current LTP poisons the session budget.
+                    # exit_leg / exit_row bank when THIS worker closes.
                     self.log('warning',
                              f"{u} {rid[-4:]} {held['strike']}{leg}: broker shows no position but the "
                              f"ledger held {own_qty} — dropping the leg (closed elsewhere, or the "
@@ -961,7 +1111,58 @@ class FocusRowsWorker:
                              f"{broker_qty} — writing the ledger down.")
                     held['qty'] = broker_qty
             if not any(k in fill for k in ('CE', 'PE')):
+                self.release_row_booked(fill)
                 self.fills.pop(rid, None)
+                self.set_row_status(rid, 'exited')
+        if changed:
+            self.save_state()
+
+    def apply_drop_requests(self):
+        """Consume page-written ghost-leg drops (broker already flat).
+
+        Accepts the legacy single-queue file and the per-request
+        `focus_tool_drop_*.json` files the page writes so Exit All's parallel
+        CE+PE clears cannot overwrite each other.
+        """
+        import glob
+        reqs = []
+        legacy = read_json(DROP_LEGS_FILE)
+        if legacy:
+            try:
+                os.remove(DROP_LEGS_FILE)
+            except OSError:
+                pass
+            reqs.extend(legacy if isinstance(legacy, list) else [legacy])
+        for path in glob.glob(DROP_LEGS_GLOB):
+            # Don't pick up the legacy queue name if it somehow matches.
+            if path.replace('\\', '/').endswith('focus_tool_drop_legs.json'):
+                continue
+            one = read_json(path)
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+            if one:
+                reqs.append(one)
+
+        if not reqs:
+            return
+        changed = False
+        for req in reqs:
+            if not isinstance(req, dict):
+                continue
+            rid = req.get('rowId')
+            leg = req.get('leg')
+            if not rid or leg not in ('CE', 'PE'):
+                continue
+            dropped, booked_out = apply_leg_drop(self.fills, rid, leg)
+            if not dropped:
+                continue
+            changed = True
+            self.session_booked_pnl += booked_out
+            if rid not in self.fills:
+                self.set_row_status(rid, 'exited')
+            self.log('info', f"{rid[-4:]}: dropped ghost {leg} (page reported broker flat)")
         if changed:
             self.save_state()
 
@@ -1027,6 +1228,8 @@ class FocusRowsWorker:
         # Broker truth first: every rule below is priced and sized off the
         # ledger, so it has to agree with the position book before it is used.
         self.reconcile()
+        # Page-requested ghost clears (Exit on an already-flat broker leg).
+        self.apply_drop_requests()
         cfg = self.cfg
         rows = list(cfg.get('rows') or [])
         # Fills whose config row is gone still hold real positions — see
@@ -1142,11 +1345,9 @@ class FocusRowsWorker:
                     ltp = self.market.ltp(u, self.market.leg(u, expiry, strike, leg))
                     leg_ltp[leg] = ltp
                     premium += ltp
-                    held = (fill or {}).get(leg)
-                    if held and ltp > 0:
-                        # Short: profit is the premium decaying below what it sold for.
-                        pnl += (float(held['entryPrice']) - ltp) * float(held['qty'])
             if fill:
+                # booked (closed CE on SL ×, etc.) + live MTM on still-open legs.
+                pnl = cumulative_row_pnl(fill, leg_ltp)
                 total_pnl += pnl
 
             vwap = None
@@ -1164,6 +1365,9 @@ class FocusRowsWorker:
                 # a drifting ATM would point it at a strike nobody holds.
                 'ceStrike': (fill.get('CE') or {}).get('strike') if fill else ce_strike,
                 'peStrike': (fill.get('PE') or {}).get('strike') if fill else pe_strike,
+                'ceQty': int((fill.get('CE') or {}).get('qty') or 0) if fill else 0,
+                'peQty': int((fill.get('PE') or {}).get('qty') or 0) if fill else 0,
+                'bookedPnl': round(float((fill or {}).get('bookedPnl') or 0.0), 2),
                 'expiry': expiry,
                 'orphan': bool(row.get('orphan')),
                 'open': bool(fill), 'premium': round(premium, 2),
@@ -1183,7 +1387,7 @@ class FocusRowsWorker:
                 for leg in ('CE', 'PE'):
                     do_leg_exit, leg_reason = evaluate_leg_exit(row, leg, fill, leg_ltp.get(leg, 0.0))
                     if do_leg_exit:
-                        self.exit_leg(row, leg, leg_reason)
+                        self.exit_leg(row, leg, leg_reason, ltp=leg_ltp.get(leg, 0.0))
                         leg_exit_sent = True
                         break
                 if leg_exit_sent:
@@ -1200,7 +1404,9 @@ class FocusRowsWorker:
                 if do_enter:
                     self.enter_row(row, group, expiry, ce_strike, pe_strike, _reason)
 
-        # Account-level budget, measured on this worker's own rows.
+        # Account-level budget, measured on this worker's own rows — including
+        # realised from cycles that have already fully closed this session.
+        total_pnl += self.session_booked_pnl
         if total_pnl > self.peak_pnl:
             self.peak_pnl = total_pnl
         exit_all, risk_reason, self.lock_floor, self.trail_state = evaluate_global_risk(

@@ -289,7 +289,7 @@
       "row": { "levelHigh": "", "levelLow": "", "levelVw": false, "slRupees": "", "slMultiplier": "2", "side": "BOTH" },
       "live": { "ceLtp": 200, "peLtp": 160, "ceQty": -75, "peQty": -75, "ceEntry": 100, "peEntry": 80, "pnl": -13500, "vwap": null, "vwapClose": null },
       "spot": 24000,
-      "expect": "SL ×2 hit (premium 360.00 vs entry 180.00)"
+      "expect": "SL ×2 hit (premium 180.00 vs entry 90.00)"
     },
     {
       "name": "the rupee stop is reported before the multiple when both breach",
