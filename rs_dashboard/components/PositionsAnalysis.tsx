@@ -28,14 +28,13 @@ import { fetchMarginSummary } from '@/lib/optionsMargin';
 import { STRIKE_STEP, lotSizeOverride, type AnalyticsUnderlying } from '@/lib/analyticsUnderlyings';
 import { todayIso, fmtExpiryShort } from '@/components/crudeoil/format';
 import type { ScalperPosition } from '@/lib/zerodhaShape';
-import type { KellyStats } from '@/app/api/options/kelly-stats/route';
 import { closeLeg } from '@/lib/legClose';
 import { legKey } from '@/components/analytics/PositionsLegTable';
 import type { ClosePct } from '@/lib/partialQty';
 
 import PositionsPayoffChart, { pnlAt, type OiBar } from '@/components/analytics/PositionsPayoffChart';
 import PayoffMetricStrip from '@/components/analytics/PayoffMetricStrip';
-import KellySizingCard from '@/components/analytics/KellySizingCard';
+import BookRiskCard from '@/components/analytics/BookRiskCard';
 import PositionsLegTable, { legPnl } from '@/components/analytics/PositionsLegTable';
 import GreeksTab from '@/components/analytics/GreeksTab';
 import PnlTableTab from '@/components/analytics/PnlTableTab';
@@ -99,7 +98,6 @@ export default function PositionsAnalysis({ underlying }: { underlying: Analytic
   const [fetchedLotError, setFetchedLotError] = useState<string | null>(null);
   const [funds, setFunds] = useState<number | null>(null);
   const [standaloneMargin, setStandaloneMargin] = useState<number | null>(null);
-  const [kelly, setKelly] = useState<KellyStats | null>(null);
 
   const [tab, setTab] = useState<Tab>('payoff');
   const [expiryFilter, setExpiryFilter] = useState<string>('ALL');
@@ -148,11 +146,6 @@ export default function PositionsAnalysis({ underlying }: { underlying: Analytic
       .catch((e) => { if (!cancelled) setFetchedLotError(String(e)); });
     return () => { cancelled = true; };
   }, [underlying, lotOverride]);
-
-  // ── Kelly history (once) ───────────────────────────────────────────────────
-  useEffect(() => {
-    fetch('/api/options/kelly-stats').then((r) => r.json()).then(setKelly).catch(() => setKelly(null));
-  }, []);
 
   // ── broker instrument cache (non-Dhan only) ────────────────────────────────
   useEffect(() => {
@@ -589,7 +582,7 @@ export default function PositionsAnalysis({ underlying }: { underlying: Analytic
           </div>
         )}
 
-        <div className="grid grid-cols-1 gap-4 xl:grid-cols-[minmax(0,640px)_minmax(0,1fr)]">
+        <div className="grid grid-cols-1 gap-4 xl:grid-cols-[minmax(0,1fr)_minmax(0,1.4fr)]">
           {/* ── Left: positions + sizing ────────────────────────────────── */}
           <div className="flex flex-col gap-4">
           <section className="space-y-3 rounded-xl border border-zinc-800 bg-zinc-950 p-3">
@@ -677,8 +670,8 @@ export default function PositionsAnalysis({ underlying }: { underlying: Analytic
                 />}
           </section>
 
-          <KellySizingCard
-            exposure={exposure} stats={kelly} capital={funds} nav={funds} stopMultiple={2} />
+          <BookRiskCard
+            exposure={exposure} capital={funds} nav={funds} stopMultiple={2} />
           </div>
 
           {/* ── Right: analytics ────────────────────────────────────────── */}

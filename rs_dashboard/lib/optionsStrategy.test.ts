@@ -53,6 +53,28 @@ test('a naked short book reports Unlimited, and its in-range loss is annotated',
   assert.ok(stats.maxLossAtSpot >= stats.rangeLo && stats.maxLossAtSpot <= stats.rangeHi);
 });
 
+test('a naked long call reports Unlimited max profit, and its in-range profit is annotated', () => {
+  const longCall: ResolvedLeg[] = [
+    leg({ strike: 78_500, type: 'CE', side: 'BUY', qtyLots: 20, price: 200 }),
+  ];
+  const stats = computePayoffStats(longCall, SPOT, 1, EXPIRY, SENSEX_STEP, 0.05);
+  assert.strictEqual(stats.maxProfit, 'Unlimited');
+  assert.strictEqual(stats.rewardRisk, null);
+  assert.ok(stats.maxProfitInRange > 0);
+  assert.ok(stats.maxProfitAtSpot >= stats.rangeLo && stats.maxProfitAtSpot <= stats.rangeHi);
+  // The defined-risk side must stay a real number — only the long call's
+  // upside is unbounded, the debit paid still caps the downside.
+  assert.notStrictEqual(stats.maxLoss, 'Unlimited');
+});
+
+test('a naked long put has bounded max profit (spot cannot go below zero)', () => {
+  const longPut: ResolvedLeg[] = [
+    leg({ strike: 78_000, type: 'PE', side: 'BUY', qtyLots: 20, price: 300 }),
+  ];
+  const stats = computePayoffStats(longPut, SPOT, 1, EXPIRY, SENSEX_STEP, 0.05);
+  assert.notStrictEqual(stats.maxProfit, 'Unlimited');
+});
+
 test('widening the span deepens the reported in-range loss on an unlimited book', () => {
   const narrow = computePayoffStats(STRANGLE, SPOT, 1, EXPIRY, SENSEX_STEP, 0.02);
   const wide = computePayoffStats(STRANGLE, SPOT, 1, EXPIRY, SENSEX_STEP, 0.08);
