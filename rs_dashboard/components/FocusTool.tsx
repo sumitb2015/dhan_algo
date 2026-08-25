@@ -16,6 +16,7 @@ import { scaleBrokerPnl } from '@/lib/positionPnl';
 import { useCopyTrade, CopyTradeControls, type CopyTradeApi } from './CopyTrade';
 import { useFocusToolWS, focusWsBookForExpiry } from '@/lib/useFocusToolWS';
 import FocusOptionChainModal from './FocusOptionChainModal';
+import { partialCloseChips } from '@/lib/partialQty';
 import { cn } from '@/lib/utils';
 import type {
   FocusToolConfig, FocusRow, FocusRowFill, FocusIndexGroup,
@@ -1689,7 +1690,7 @@ function rowDataPropsEqual(
 function FocusTableRowImpl({
   row, rowIndex, live, lotSize, spot, liveRealMoney, broker, busy,
   workerHold, expiries, buildupWsActive, buildupExpiryHint,
-  onUpdate, onDelete, onArm, onDisarm, onExit, onAddLot, onReduceLot, onShift, onBlocked,
+  onUpdate, onDelete, onArm, onDisarm, onExit, onExitPartial, onAddLot, onReduceLot, onShift, onBlocked,
 }: {
   row: FocusRow;
   rowIndex: number;
@@ -1704,6 +1705,7 @@ function FocusTableRowImpl({
   onUpdate: (patch: Partial<FocusRow>, saveToDisk?: boolean) => void;
   onDelete: () => void; onArm: () => void; onDisarm: () => void;
   onExit: (leg: 'CE' | 'PE' | 'ALL') => void;
+  onExitPartial: (leg: 'CE' | 'PE', pct: 25 | 50 | 75) => void;
   onAddLot: (leg: 'CE' | 'PE', lots: number) => void;
   onReduceLot: (leg: 'CE' | 'PE', lots: number) => void;
   onShift: (leg: 'CE' | 'PE', direction: 'UP' | 'DOWN') => void;
@@ -1720,6 +1722,9 @@ function FocusTableRowImpl({
   const flat = rowFlat(row, workerHold);
   const ceFlat = !rowOwnsLeg(row, 'CE', workerHold);
   const peFlat = !rowOwnsLeg(row, 'PE', workerHold);
+  // Quick partial-exit chips, same lot-aware rounding as Scalper/AdvancedScalper.
+  const ceChips = partialCloseChips(Number(live.cePosition?.netQty ?? 0), lotSize ?? 0, [25, 50, 75]);
+  const peChips = partialCloseChips(Number(live.pePosition?.netQty ?? 0), lotSize ?? 0, [25, 50, 75]);
   // Why the leg buttons are greyed out. They used to stay clickable in every
   // one of these states and only report the problem as a toast after the fact.
   const tradeBlockedWhy = !liveRealMoney
@@ -1926,6 +1931,17 @@ function FocusTableRowImpl({
             <button onClick={() => onReduceLot('CE', ceQty)} disabled={!canTrade || ceFlat} title={ceFlat ? 'Nothing open on the CE leg' : canTrade ? `Reduce the CE leg by ${ceQty} lot(s)` : tradeBlockedWhy} aria-label={`Reduce the CE leg by ${ceQty} lot(s)`} className={cn('h-6 w-6 rounded-md bg-zinc-800 border border-zinc-700 text-zinc-300 font-bold flex items-center justify-center hover:bg-zinc-700 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed transition-colors', FOCUS_RING)}>-</button>
             <button onClick={() => onExit('CE')} disabled={!canTrade || ceFlat} title={ceFlat ? 'Nothing open on the CE leg' : canTrade ? 'Close the CE leg at market' : tradeBlockedWhy} className={cn('text-xs font-bold px-2 py-1 rounded-md bg-rose-600 text-oncolor hover:bg-rose-500 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed transition-colors', FOCUS_RING)}>Exit</button>
           </div>
+          {!ceFlat && (
+            <div className="flex items-center gap-0.5 font-mono text-[9px]">
+              {ceChips.map(c => (
+                <button key={c.pct} type="button" onClick={() => onExitPartial('CE', c.pct as 25 | 50 | 75)}
+                  disabled={!canTrade || !c.enabled} title={canTrade ? c.title : tradeBlockedWhy}
+                  className={cn('px-1 py-0.5 rounded bg-rose-950/80 border border-rose-800/60 text-rose-400 hover:bg-rose-800 hover:text-oncolor transition-all disabled:opacity-30 disabled:cursor-not-allowed', FOCUS_RING)}>
+                  {c.pct}%
+                </button>
+              ))}
+            </div>
+          )}
           <LegSlLevels row={row} live={live} leg="CE" workerHold={workerHold} lotSize={lotSize} />
         </div>
       </td>
@@ -1945,6 +1961,17 @@ function FocusTableRowImpl({
             <button onClick={() => onReduceLot('PE', peQty)} disabled={!canTrade || peFlat} title={peFlat ? 'Nothing open on the PE leg' : canTrade ? `Reduce the PE leg by ${peQty} lot(s)` : tradeBlockedWhy} aria-label={`Reduce the PE leg by ${peQty} lot(s)`} className={cn('h-6 w-6 rounded-md bg-zinc-800 border border-zinc-700 text-zinc-300 font-bold flex items-center justify-center hover:bg-zinc-700 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed transition-colors', FOCUS_RING)}>-</button>
             <button onClick={() => onExit('PE')} disabled={!canTrade || peFlat} title={peFlat ? 'Nothing open on the PE leg' : canTrade ? 'Close the PE leg at market' : tradeBlockedWhy} className={cn('text-xs font-bold px-2 py-1 rounded-md bg-rose-600 text-oncolor hover:bg-rose-500 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed transition-colors', FOCUS_RING)}>Exit</button>
           </div>
+          {!peFlat && (
+            <div className="flex items-center gap-0.5 font-mono text-[9px]">
+              {peChips.map(c => (
+                <button key={c.pct} type="button" onClick={() => onExitPartial('PE', c.pct as 25 | 50 | 75)}
+                  disabled={!canTrade || !c.enabled} title={canTrade ? c.title : tradeBlockedWhy}
+                  className={cn('px-1 py-0.5 rounded bg-rose-950/80 border border-rose-800/60 text-rose-400 hover:bg-rose-800 hover:text-oncolor transition-all disabled:opacity-30 disabled:cursor-not-allowed', FOCUS_RING)}>
+                  {c.pct}%
+                </button>
+              ))}
+            </div>
+          )}
           <LegSlLevels row={row} live={live} leg="PE" workerHold={workerHold} lotSize={lotSize} />
         </div>
       </td>
@@ -2041,7 +2068,7 @@ const FocusTableRow = memo(FocusTableRowImpl, rowDataPropsEqual);
 function FocusRowCardImpl({
   row, live, lotSize, spot, liveRealMoney, broker, busy,
   workerHold, expiries, buildupWsActive, buildupExpiryHint,
-  onUpdate, onDelete, onArm, onDisarm, onExit, onAddLot, onReduceLot, onShift, onBlocked,
+  onUpdate, onDelete, onArm, onDisarm, onExit, onExitPartial, onAddLot, onReduceLot, onShift, onBlocked,
 }: {
   row: FocusRow;
   live: RowLive;
@@ -2055,6 +2082,7 @@ function FocusRowCardImpl({
   onUpdate: (patch: Partial<FocusRow>, saveToDisk?: boolean) => void;
   onDelete: () => void; onArm: () => void; onDisarm: () => void;
   onExit: (leg: 'CE' | 'PE' | 'ALL') => void;
+  onExitPartial: (leg: 'CE' | 'PE', pct: 25 | 50 | 75) => void;
   onAddLot: (leg: 'CE' | 'PE', lots: number) => void;
   onReduceLot: (leg: 'CE' | 'PE', lots: number) => void;
   onShift: (leg: 'CE' | 'PE', direction: 'UP' | 'DOWN') => void;
@@ -2069,6 +2097,9 @@ function FocusRowCardImpl({
   const flat = rowFlat(row, workerHold);
   const ceFlat = !rowOwnsLeg(row, 'CE', workerHold);
   const peFlat = !rowOwnsLeg(row, 'PE', workerHold);
+  // Quick partial-exit chips, same lot-aware rounding as Scalper/AdvancedScalper.
+  const ceChips = partialCloseChips(Number(live.cePosition?.netQty ?? 0), lotSize ?? 0, [25, 50, 75]);
+  const peChips = partialCloseChips(Number(live.pePosition?.netQty ?? 0), lotSize ?? 0, [25, 50, 75]);
   // Why the leg buttons are greyed out. They used to stay clickable in every
   // one of these states and only report the problem as a toast after the fact.
   const tradeBlockedWhy = !liveRealMoney
@@ -2211,6 +2242,17 @@ function FocusRowCardImpl({
             <button onClick={() => onExit('CE')} disabled={!canTrade || ceFlat} title={ceFlat ? 'Nothing open on the CE leg' : canTrade ? 'Exit CE leg' : tradeBlockedWhy} className={cn('text-[10px] font-bold px-1.5 py-0.5 rounded bg-rose-600 text-oncolor hover:bg-rose-500 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed', FOCUS_RING)}>Exit</button>
           </div>
         </div>
+        {!ceFlat && (
+          <div className="flex items-center justify-end gap-0.5 font-mono text-[9px]">
+            {ceChips.map(c => (
+              <button key={c.pct} type="button" onClick={() => onExitPartial('CE', c.pct as 25 | 50 | 75)}
+                disabled={!canTrade || !c.enabled} title={canTrade ? c.title : tradeBlockedWhy}
+                className={cn('px-1 py-0.5 rounded bg-rose-950/80 border border-rose-800/60 text-rose-400 hover:bg-rose-800 hover:text-oncolor transition-all disabled:opacity-30 disabled:cursor-not-allowed', FOCUS_RING)}>
+                {c.pct}%
+              </button>
+            ))}
+          </div>
+        )}
         <LegSlLevels row={row} live={live} leg="CE" workerHold={workerHold} lotSize={lotSize} align="start" />
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2">
@@ -2226,6 +2268,17 @@ function FocusRowCardImpl({
             <button onClick={() => onExit('PE')} disabled={!canTrade || peFlat} title={peFlat ? 'Nothing open on the PE leg' : canTrade ? 'Exit PE leg' : tradeBlockedWhy} className={cn('text-[10px] font-bold px-1.5 py-0.5 rounded bg-rose-600 text-oncolor hover:bg-rose-500 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed', FOCUS_RING)}>Exit</button>
           </div>
         </div>
+        {!peFlat && (
+          <div className="flex items-center justify-end gap-0.5 font-mono text-[9px]">
+            {peChips.map(c => (
+              <button key={c.pct} type="button" onClick={() => onExitPartial('PE', c.pct as 25 | 50 | 75)}
+                disabled={!canTrade || !c.enabled} title={canTrade ? c.title : tradeBlockedWhy}
+                className={cn('px-1 py-0.5 rounded bg-rose-950/80 border border-rose-800/60 text-rose-400 hover:bg-rose-800 hover:text-oncolor transition-all disabled:opacity-30 disabled:cursor-not-allowed', FOCUS_RING)}>
+                {c.pct}%
+              </button>
+            ))}
+          </div>
+        )}
         <LegSlLevels row={row} live={live} leg="PE" workerHold={workerHold} lotSize={lotSize} align="start" />
       </div>
 
@@ -4036,6 +4089,26 @@ export default function FocusTool() {
   }
 
   /**
+   * Quick partial exit — the 25/50/75% chips below CE/PE. Sizing mirrors
+   * Scalper/AdvancedScalper's own chips (`partialCloseChips`, round-down to
+   * whole lots off the broker's net qty); placeLeg then re-clamps that lot
+   * count against this row's own ledger, same as a full Exit does.
+   */
+  function handleManualExitPartial(row: FocusRow, leg: 'CE' | 'PE', pct: 25 | 50 | 75) {
+    return runRowAction(row.id, async () => {
+      const u = row.underlying;
+      const live = rowLive[row.id];
+      const pos = leg === 'CE' ? live?.cePosition : live?.pePosition;
+      const netQty = Number(pos?.netQty ?? 0);
+      const lotSize = lotSizes[u];
+      if (!lotSize) return;
+      const chip = partialCloseChips(netQty, lotSize, [pct]).find(c => c.pct === pct);
+      if (!chip?.enabled) return;
+      await placeLeg(row, leg, { reduce: true, lots: chip.lots, awaitFill: true });
+    });
+  }
+
+  /**
    * Shift one leg's strike up or down by one listed step.
    *
    * All-or-nothing on an open leg: the full qty at the current strike must
@@ -4755,6 +4828,7 @@ export default function FocusTool() {
                           onArm={() => armRow(row.id)}
                           onDisarm={() => updateRow(row.id, { status: 'draft' }, true)}
                           onExit={leg => handleManualExit(row, leg)}
+                          onExitPartial={(leg, pct) => handleManualExitPartial(row, leg, pct)}
                           onAddLot={(leg, lots) => runRowAction(row.id, () => placeLeg(row, leg, { reduce: false, lots }))}
                           onReduceLot={(leg, lots) => runRowAction(row.id, () => placeLeg(row, leg, { reduce: true, lots }))}
                           onShift={(leg, dir) => handleShiftStrike(row, leg, dir)}
@@ -4825,6 +4899,7 @@ export default function FocusTool() {
                           onArm={() => armRow(row.id)}
                           onDisarm={() => updateRow(row.id, { status: 'draft' }, true)}
                           onExit={leg => handleManualExit(row, leg)}
+                          onExitPartial={(leg, pct) => handleManualExitPartial(row, leg, pct)}
                           onAddLot={(leg, lots) => runRowAction(row.id, () => placeLeg(row, leg, { reduce: false, lots }))}
                           onReduceLot={(leg, lots) => runRowAction(row.id, () => placeLeg(row, leg, { reduce: true, lots }))}
                           onShift={(leg, dir) => handleShiftStrike(row, leg, dir)}
