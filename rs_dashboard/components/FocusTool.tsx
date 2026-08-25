@@ -346,7 +346,7 @@ const makeRow = (underlying: FocusUnderlying): FocusRow => ({
   levelLow: '',
   levelVw: false,
   vwapInterval: '1',
-  vwapBufferPct: '',
+  vwapBufferPct: '0.1',
   slRupees: '',
   slMultiplier: '1',
   ceSlMultiplier: '1',
@@ -1720,7 +1720,7 @@ function FocusTableRowImpl({
               <Check className="h-3 w-3" /> Save
             </button>
             <button
-              onClick={() => onUpdate({ levelHigh: '', levelLow: '', levelVw: false, vwapInterval: '1', vwapBufferPct: '', slRupees: '', slMultiplier: '1', ceSlMultiplier: '1', peSlMultiplier: '1' }, true)}
+              onClick={() => onUpdate({ levelHigh: '', levelLow: '', levelVw: false, vwapInterval: '1', vwapBufferPct: '0.1', slRupees: '', slMultiplier: '1', ceSlMultiplier: '1', peSlMultiplier: '1' }, true)}
               title="Clear every level exit on this row"
               className={cn('text-[10px] font-bold text-zinc-600 hover:text-zinc-400 cursor-pointer transition-colors', FOCUS_RING)}
             >
@@ -1964,7 +1964,7 @@ function FocusRowCardImpl({
               Save Exits
             </button>
             <button
-              onClick={() => onUpdate({ levelHigh: '', levelLow: '', levelVw: false, vwapInterval: '1', vwapBufferPct: '', slRupees: '', slMultiplier: '1', ceSlMultiplier: '1', peSlMultiplier: '1' }, true)}
+              onClick={() => onUpdate({ levelHigh: '', levelLow: '', levelVw: false, vwapInterval: '1', vwapBufferPct: '0.1', slRupees: '', slMultiplier: '1', ceSlMultiplier: '1', peSlMultiplier: '1' }, true)}
               className={cn('text-[9px] text-zinc-500 hover:text-zinc-400', FOCUS_RING)}
             >
               Clear
