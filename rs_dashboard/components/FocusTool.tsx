@@ -1639,19 +1639,19 @@ function FocusTableRowImpl({
               </div>
               <div className="flex items-center gap-1">
                 <span className="text-[9px] font-black text-amber-500">SL &times;</span>
-                <RuleNumInput value={row.slMultiplier} onCommit={v => onUpdate({ slMultiplier: v })} className="w-9"
+                <RuleNumInput value={row.slMultiplier} onCommit={v => onUpdate({ slMultiplier: v })} className="w-12"
                   title="Exit when premium moves this multiple against you (must be above 1) — independent of SL &#8377;" />
               </div>
             </div>
             <div className="flex items-center gap-2">
               <div className="flex items-center gap-1">
                 <span className="text-[9px] font-black text-emerald-400">CE &times;</span>
-                <RuleNumInput value={row.ceSlMultiplier ?? '1.2'} onCommit={v => onUpdate({ ceSlMultiplier: v })} className="w-9"
+                <RuleNumInput value={row.ceSlMultiplier ?? '1.2'} onCommit={v => onUpdate({ ceSlMultiplier: v })} className="w-12"
                   title="Exit CE alone when its own premium moves this multiple against its own entry — independent of PE and of the pair SL &times; above" />
               </div>
               <div className="flex items-center gap-1">
                 <span className="text-[9px] font-black text-rose-400">PE &times;</span>
-                <RuleNumInput value={row.peSlMultiplier ?? '1.2'} onCommit={v => onUpdate({ peSlMultiplier: v })} className="w-9"
+                <RuleNumInput value={row.peSlMultiplier ?? '1.2'} onCommit={v => onUpdate({ peSlMultiplier: v })} className="w-12"
                   title="Exit PE alone when its own premium moves this multiple against its own entry — independent of CE and of the pair SL &times; above" />
               </div>
             </div>
