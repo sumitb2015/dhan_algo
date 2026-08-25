@@ -74,6 +74,7 @@ import logging
 import os
 import sys
 import time
+from collections import Counter
 from datetime import datetime, timedelta, timezone
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -448,12 +449,23 @@ def evaluate_exit(row, group, fill, now_minutes, spot, premium, vwap, vwap_close
     return (True, reason) if reason else (False, '')
 
 
-def evaluate_leg_exit(row, leg, fill, ltp):
+def evaluate_leg_exit(row, leg, fill, ltp, broker_avg=None):
     """(exit, reason) for one leg's OWN SL x — independent of the pair-level
     slMultiplier/slRupees in evaluate_exit, and independent of row['side']: a
     leftover position on a leg the row no longer trades still deserves its own
     stop. Only fires while that leg is actually held; a closed leg has no
     entry price left to compare against.
+
+    `broker_avg`, when given and positive, is the broker's own LIVE position
+    average (sellAvg for a short) and is preferred over the ledger's own
+    `entryPrice`. This worker's ledger only ever records the price of the
+    order IT placed; if this leg's average has since moved because of a fill
+    the ledger never saw (an add from elsewhere, a reconcile write-down), the
+    ledger price silently diverges from what the position is actually costed
+    at — and the page's own SL x display already reads the broker average
+    (legStopPremium in focusToolRules.ts), so the two disagreed about where
+    the stop sits. Falls back to the ledger price when unavailable (position
+    call failed this tick, or the fill is too fresh to appear yet).
     """
     held = (fill or {}).get(leg)
     if not held:
@@ -461,7 +473,7 @@ def evaluate_leg_exit(row, leg, fill, ltp):
     mult = num(row.get('ceSlMultiplier' if leg == 'CE' else 'peSlMultiplier'))
     if mult is None or mult <= 1 or not (ltp > 0):
         return False, ''
-    entry = float(held.get('entryPrice') or 0.0)
+    entry = float(broker_avg) if broker_avg else float(held.get('entryPrice') or 0.0)
     # Short: hurt by this leg's own premium expanding through a multiple of
     # what it was sold for.
     if entry > 0 and ltp >= entry * mult:
@@ -470,25 +482,29 @@ def evaluate_leg_exit(row, leg, fill, ltp):
     return False, ''
 
 
-def bank_closed_leg(held, ltp):
+def bank_closed_leg(held, ltp, entry_override=None):
     """Realised P&L for qty this worker is about to drop off the pin.
 
     Short only (this tool opens with SELL): profit when premium falls below
     entry. Returns 0 when LTP or entry is missing — never silently bank a
     fabricated flat, which is how closed-leg money used to vanish from the
     row after a leg-wise SL (see tests/test_focus_tool_booked_pnl.py).
+
+    `entry_override`, when given and positive, is the broker's own live
+    position average — see evaluate_leg_exit's doc comment for why this is
+    preferred over the ledger's own `entryPrice`.
     """
     if not held:
         return 0.0
     qty = abs(float(held.get('qty') or 0))
-    entry = float(held.get('entryPrice') or 0.0)
+    entry = float(entry_override) if entry_override else float(held.get('entryPrice') or 0.0)
     mark = float(ltp or 0.0)
     if not (qty > 0 and entry > 0 and mark > 0):
         return 0.0
     return (entry - mark) * qty
 
 
-def cumulative_row_pnl(fill, leg_ltp):
+def cumulative_row_pnl(fill, leg_ltp, broker_avg=None):
     """booked (closed/rolled) + live MTM on still-open legs.
 
     This is what the status snapshot and the account budget must report after
@@ -504,7 +520,7 @@ def cumulative_row_pnl(fill, leg_ltp):
             continue
         ltp = float((leg_ltp or {}).get(leg) or 0.0)
         if ltp > 0:
-            pnl += bank_closed_leg(held, ltp)
+            pnl += bank_closed_leg(held, ltp, (broker_avg or {}).get(leg))
     return pnl
 
 
@@ -962,11 +978,16 @@ class FocusRowsWorker:
         self.log('info', f"{u} {row['id'][-4:]}: ENTERED ({reason}) — "
                          f"combined entry {opened['entryPremium']:.2f}")
 
-    def exit_row(self, row, reason):
+    def exit_row(self, row, reason, broker_avg=None):
         """Close every leg the ledger says this row holds. The ledger entry is
         dropped only once every leg reports closed, so a partial failure leaves
         the remainder tracked and retried on the next tick instead of being
-        forgotten while still open."""
+        forgotten while still open.
+
+        `broker_avg`, when given, maps leg -> the broker's live position
+        average — see evaluate_leg_exit's doc comment. Callers that don't have
+        a fresh snapshot handy (the account-risk sweep) pass nothing and this
+        falls back to the ledger's own entryPrice per leg, same as before."""
         fill = self.fills.get(row['id'])
         if not fill:
             return
@@ -987,7 +1008,7 @@ class FocusRowsWorker:
             ok, detail = self.router.close(
                 u, expiry, held['strike'], leg, 'BUY', int(held['qty']), product)
             if ok:
-                booked += bank_closed_leg(held, ltp)
+                booked += bank_closed_leg(held, ltp, (broker_avg or {}).get(leg))
                 self.log('info', f"{u} {row['id'][-4:]} {held['strike']}{leg}: closed ({detail})")
             else:
                 self.log('error', f"{u} {row['id'][-4:]} {held['strike']}{leg}: exit FAILED — {detail}")
@@ -1007,7 +1028,7 @@ class FocusRowsWorker:
             self.set_row_status(row['id'], 'exited')
         self.save_state()
 
-    def exit_leg(self, row, leg, reason, ltp=None):
+    def exit_leg(self, row, leg, reason, ltp=None, broker_avg=None):
         """Close just ONE leg on its own SL x breach, leaving the other leg —
         and the row itself — exactly as it was. Mirrors exit_row's
         retry-on-failure shape but only ever touches this one leg's ledger
@@ -1016,6 +1037,8 @@ class FocusRowsWorker:
         `ltp` is the premium that triggered the breach when the caller already
         has it — banking against that mark keeps bookedPnl aligned with what
         the rule actually saw, rather than a second quote a tick later.
+        `broker_avg`, when given, is the broker's own live position average
+        for this leg — see evaluate_leg_exit's doc comment.
         """
         fill = self.fills.get(row['id'])
         held = (fill or {}).get(leg)
@@ -1031,7 +1054,7 @@ class FocusRowsWorker:
             mark = self.market.ltp(u, self.market.leg(u, expiry, held['strike'], leg))
         ok, detail = self.router.close(u, expiry, held['strike'], leg, 'BUY', int(held['qty']), product)
         if ok:
-            fill['bookedPnl'] = float(fill.get('bookedPnl') or 0.0) + bank_closed_leg(held, mark)
+            fill['bookedPnl'] = float(fill.get('bookedPnl') or 0.0) + bank_closed_leg(held, mark, broker_avg)
             self.log('info', f"{u} {row['id'][-4:]} {held['strike']}{leg}: closed ({detail})")
             del fill[leg]
             if not any(k in fill for k in ('CE', 'PE')):
@@ -1043,6 +1066,27 @@ class FocusRowsWorker:
             self.log('error', f"{u} {row['id'][-4:]} {held['strike']}{leg}: leg-exit FAILED — {detail}")
             # Left in the ledger untouched — evaluate_leg_exit re-fires next
             # tick and retries, same as exit_row's partial-failure path.
+
+    def _broker_avg(self, snapshot, u, expiry, strike, leg):
+        """The broker's live position average for one leg, or None.
+
+        None means "use the ledger's own entryPrice" — a missing/failed
+        snapshot, or a leg not (yet) visible in it, must fall back rather than
+        be read as a genuine zero average.
+        """
+        if not snapshot:
+            return None
+        key = self.router.position_key(u, expiry, strike, leg)
+        if not key:
+            return None
+        row = snapshot.get(key)
+        if not row:
+            return None
+        qty = int(row.get('qty') or 0)
+        if qty == 0:
+            return None
+        avg = row.get('sellAvg') if qty < 0 else row.get('buyAvg')
+        return float(avg) if avg else None
 
     def reconcile(self):
         """Write the ledger down to what the broker actually shows.
@@ -1066,15 +1110,19 @@ class FocusRowsWorker:
         A leg is left alone for RECONCILE_GRACE_SECONDS after it was last
         opened: the position book lags a fresh fill, and a zero read in that
         window is latency, not truth.
+
+        Returns the raw snapshot (or None) so the caller can reuse the SAME
+        broker call for the leg-exit rules' entry-price lookup rather than
+        spending a second position request on the same tick.
         """
         if not self.fills:
-            return
+            return None
         underlyings = {f.get('underlying') for f in self.fills.values()}
         snapshot = self.router.net_positions(underlyings=[u for u in underlyings if u])
         if snapshot is None:
             # Unknown, not empty. Leaving the ledger untouched is the only safe
             # reading of a failed position call.
-            return
+            return None
 
         now = time.time()
         changed = False
@@ -1090,7 +1138,7 @@ class FocusRowsWorker:
                 key = self.router.position_key(u, expiry, held['strike'], leg)
                 if not key:
                     continue
-                broker_qty = abs(int(snapshot.get(key, 0)))
+                broker_qty = abs(int((snapshot.get(key) or {}).get('qty', 0)))
                 own_qty = int(held.get('qty') or 0)
                 if broker_qty >= own_qty:
                     continue
@@ -1116,6 +1164,7 @@ class FocusRowsWorker:
                 self.set_row_status(rid, 'exited')
         if changed:
             self.save_state()
+        return snapshot
 
     def apply_drop_requests(self):
         """Consume page-written ghost-leg drops (broker already flat).
@@ -1227,7 +1276,9 @@ class FocusRowsWorker:
         self.load_config()
         # Broker truth first: every rule below is priced and sized off the
         # ledger, so it has to agree with the position book before it is used.
-        self.reconcile()
+        # The snapshot is reused below for the leg-exit rules' entry price —
+        # one position call, not two, off the same account-wide REST budget.
+        position_snapshot = self.reconcile()
         # Page-requested ghost clears (Exit on an already-flat broker leg).
         self.apply_drop_requests()
         cfg = self.cfg
@@ -1236,6 +1287,24 @@ class FocusRowsWorker:
         # orphan_rows. Appended so every loop below (quotes, exits, the status
         # snapshot and the account risk sweep) reaches them too.
         rows += self.orphan_rows(rows)
+
+        # Legs more than one row's OWN ledger currently holds at the same
+        # (underlying, expiry, strike, leg) — two straddles parked on the same
+        # ATM strike in different rows is a legitimate shape, and Dhan nets
+        # them into ONE broker position with ONE blended average. That average
+        # is neither row's own true entry price, so using it for both would
+        # hand two independently-entered rows the identical SL x level
+        # regardless of when each actually opened. Those legs skip the
+        # broker-average override below and keep using each row's own
+        # remembered entryPrice, exactly as before this change; a leg only one
+        # row holds (the common case, and the one the drift bug actually hit)
+        # still gets the accurate broker-truth average.
+        shared_leg_keys = Counter(
+            (f.get('underlying'), f.get('expiry') or '', held['strike'], leg)
+            for f in self.fills.values()
+            for leg in ('CE', 'PE')
+            if (held := f.get(leg))
+        )
 
         now = datetime.now(IST)
         now_minutes = now.hour * 60 + now.minute
@@ -1335,6 +1404,24 @@ class FocusRowsWorker:
             premium = 0.0
             pnl = 0.0
             leg_ltp = {}
+            # Broker's own live position average per held leg — preferred over
+            # this worker's remembered entryPrice for every entry comparison
+            # below (SL x, booked P&L). See evaluate_leg_exit's doc comment for
+            # why: the ledger price is only ever what THIS worker's own order
+            # traded at, and drifts from the position's real cost basis the
+            # moment anything else touches the same leg. Skipped for a strike
+            # another row's own ledger also holds — see shared_leg_keys above.
+            broker_avg = {}
+            if fill:
+                for leg in ('CE', 'PE'):
+                    held = fill.get(leg)
+                    if not held:
+                        continue
+                    if shared_leg_keys.get((u, expiry, held['strike'], leg), 0) > 1:
+                        continue
+                    av = self._broker_avg(position_snapshot, u, expiry, held['strike'], leg)
+                    if av:
+                        broker_avg[leg] = av
             needs_quotes = bool(fill) or str(row.get('status')) == 'armed'
             if needs_quotes:
                 for leg in legs:
@@ -1347,7 +1434,7 @@ class FocusRowsWorker:
                     premium += ltp
             if fill:
                 # booked (closed CE on SL ×, etc.) + live MTM on still-open legs.
-                pnl = cumulative_row_pnl(fill, leg_ltp)
+                pnl = cumulative_row_pnl(fill, leg_ltp, broker_avg)
                 total_pnl += pnl
 
             vwap = None
@@ -1385,9 +1472,11 @@ class FocusRowsWorker:
                 # would be evaluated against is about to change underneath it.
                 leg_exit_sent = False
                 for leg in ('CE', 'PE'):
-                    do_leg_exit, leg_reason = evaluate_leg_exit(row, leg, fill, leg_ltp.get(leg, 0.0))
+                    do_leg_exit, leg_reason = evaluate_leg_exit(
+                        row, leg, fill, leg_ltp.get(leg, 0.0), broker_avg.get(leg))
                     if do_leg_exit:
-                        self.exit_leg(row, leg, leg_reason, ltp=leg_ltp.get(leg, 0.0))
+                        self.exit_leg(row, leg, leg_reason, ltp=leg_ltp.get(leg, 0.0),
+                                      broker_avg=broker_avg.get(leg))
                         leg_exit_sent = True
                         break
                 if leg_exit_sent:
@@ -1396,7 +1485,7 @@ class FocusRowsWorker:
                 do_exit, reason = evaluate_exit(
                     row, group, fill, now_minutes, spot, premium, vwap, vwap_close, pnl)
                 if do_exit:
-                    self.exit_row(row, reason)
+                    self.exit_row(row, reason, broker_avg=broker_avg)
             else:
                 dte = dte_for(expiry, today)
                 ready = any((ce_strike if l == 'CE' else pe_strike) is not None for l in legs)
