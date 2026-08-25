@@ -14,7 +14,7 @@ import { useBrokerSelector, scalperRoute, BROKER_LABELS, type Broker } from '@/h
 import { closeOrderProduct, positionProduct } from '@/lib/positionProduct';
 import { scaleBrokerPnl } from '@/lib/positionPnl';
 import { useCopyTrade, CopyTradeControls, type CopyTradeApi } from './CopyTrade';
-import { useFocusToolWS } from '@/lib/useFocusToolWS';
+import { useFocusToolWS, focusWsBookForExpiry } from '@/lib/useFocusToolWS';
 import FocusOptionChainModal from './FocusOptionChainModal';
 import { cn } from '@/lib/utils';
 import type {
@@ -179,6 +179,54 @@ function dteFor(expiry: string): number | null {
  *  '24250'. Normalise both onto the integer form before joining them. */
 function strikeKey(n: number | string): string {
   return String(Math.round(Number(n)));
+}
+
+/** Whether Focus WS buildup applies to this row, plus an expiry-mismatch hint.
+ *
+ *  The bridge subscribes to the union of expiries Focus Tool rows need
+ *  (comma-separated in status/quotes). A row whose date is not in that set
+ *  still gets polled-chain LTP, so without this the strike column looks
+ *  "live" with no LB/SB chip and no explanation.
+ *
+ *  Prefer live quote book keys; fall back to the status-file fingerprint so a
+ *  RUNNING bridge with a momentarily empty quotes object still arms the slot. */
+function rowBuildupWsFlags(
+  row: FocusRow,
+  wsLive: boolean,
+  subscribedExpiries: string | undefined,
+): { buildupWsActive: boolean; buildupExpiryHint: string | null } {
+  if (!wsLive || !subscribedExpiries) {
+    return { buildupWsActive: false, buildupExpiryHint: null };
+  }
+  const set = subscribedExpiries.split(',').map(s => s.trim()).filter(Boolean);
+  if (set.length === 0) {
+    return { buildupWsActive: false, buildupExpiryHint: null };
+  }
+  const matches = !row.expiry || set.includes(row.expiry);
+  return {
+    buildupWsActive: matches,
+    buildupExpiryHint: matches
+      ? null
+      : `OI buildup is only available on Focus WS expiries (${set.join(', ')}). This row is on ${row.expiry}.`,
+  };
+}
+
+/** Comma-joined expiries the Focus WS should subscribe for one underlying:
+ *  always nearest, plus every explicit (or blank→nearest) row expiry. */
+function bridgeExpiriesForUnderlying(
+  u: FocusUnderlying,
+  rows: FocusRow[],
+  listed: string[],
+): string {
+  const nearest = listed[0];
+  if (!nearest) return '';
+  const needed = new Set<string>([nearest]);
+  for (const r of rows) {
+    if (r.underlying !== u) continue;
+    needed.add(r.expiry || nearest);
+  }
+  const rest = [...needed].filter(e => e !== nearest).sort();
+  return [nearest, ...rest].join(',');
 }
 
 function newId(): string {
@@ -736,24 +784,27 @@ function slTone(now: number | null, stop: number | null, idle: string): string {
 
 /** Calculated SL × premiums under a CE/PE position cell. */
 function LegSlLevels({
-  row, live, leg, workerHold, align = 'center',
+  row, live, leg, workerHold, lotSize, align = 'center',
 }: {
   row: FocusRow;
   live: RowLive;
   leg: 'CE' | 'PE';
   workerHold?: WorkerStatusRow | null;
+  lotSize: number | null;
   align?: 'center' | 'start';
 }) {
   const legLevel = legStopPremium(row, leg, live, workerHold);
-  const pairLevel = pairStopPremium(row, live, workerHold);
+  const pairLevel = pairStopPremium(row, live, workerHold, lotSize);
   if (legLevel == null && pairLevel == null) return null;
   const nowLeg = (leg === 'CE' ? live.ltpCe : live.ltpPe) ?? null;
   const nowPair = live.entryPremium > 0
-    ? sidePremium(row, live, workerHold)
+    ? sidePremium(row, live, workerHold, lotSize)
     : (() => {
         const legs = legsOf(row);
         if (!legs.length) return 0;
-        return legs.reduce((s, l) => s + ((l === 'CE' ? live.ltpCe : live.ltpPe) ?? 0), 0) / legs.length;
+        const lots = Number(row.lots) || 0;
+        if (!(lots > 0)) return 0;
+        return lots * legs.reduce((s, l) => s + ((l === 'CE' ? live.ltpCe : live.ltpPe) ?? 0), 0);
       })();
   return (
     <div className={cn('flex flex-col gap-0.5 leading-none', align === 'start' ? 'items-start' : 'items-center')}>
@@ -768,7 +819,7 @@ function LegSlLevels({
       {pairLevel != null && (
         <span
           className={cn('text-[10px] font-mono font-bold tabular-nums', slTone(nowPair, pairLevel, 'text-amber-500'))}
-          title={`Pair SL × fires when the qty-weighted premium of this row's open legs reaches ${pairLevel.toFixed(2)} (weighted entry × ${row.slMultiplier})`}
+          title={`Pair SL × fires when combined lots×premium of this row's open legs reaches ${pairLevel.toFixed(2)} (combined entry × ${row.slMultiplier})`}
         >
           SL × {pairLevel.toFixed(2)}
         </span>
@@ -838,7 +889,7 @@ function SegPill<T extends string>({
  *  input, with the currently resolved strike shown alongside. */
 function StrikeLegSelector({
   leg, mode, offset, premium, resolvedStrike, step, ltp, buildup, oiChgPct,
-  onOffsetChange, onPremiumChange, onShift, shiftDisabled, locked,
+  buildupWsActive, buildupExpiryHint, onOffsetChange, onPremiumChange, onShift, shiftDisabled, locked,
 }: {
   leg: 'CE' | 'PE';
   mode: FocusStrikeMode;
@@ -851,10 +902,17 @@ function StrikeLegSelector({
    *  to the row's separate LTP column. */
   ltp?: number | null;
   /** 4-way OI-buildup label at this strike ('LB'|'SB'|'SC'|'LU'), same source
-   *  and thresholds as AdvancedScalper — null/'' hides the chip. */
+   *  and thresholds as AdvancedScalper — null/'' with buildupWsActive shows a
+   *  muted placeholder so dead-band is not mistaken for a missing feature. */
   buildup?: string | null;
   /** OI change vs prev day (%), shown alongside the buildup chip. */
   oiChgPct?: number | null;
+  /** Focus WS is live and this row's expiry matches the bridge — buildup
+   *  (or a placeholder) should render for a resolved strike. */
+  buildupWsActive?: boolean;
+  /** When set, this row's expiry is off the Focus WS book — show a visible
+   *  muted note instead of a blank (tooltip alone was too easy to miss). */
+  buildupExpiryHint?: string | null;
   onOffsetChange: (n: number) => void;
   onPremiumChange: (v: string) => void;
   onShift?: (direction: 'UP' | 'DOWN') => void;
@@ -865,72 +923,106 @@ function StrikeLegSelector({
 }) {
   const buildupStyle = buildup ? BUILDUP_STYLES[buildup] : undefined;
   const lockedTitle = `${leg} holds an open position — use the chevrons to roll it, or exit the leg first`;
+  const showBuildupSlot = resolvedStrike != null && (
+    buildupStyle != null || !!buildupWsActive || !!buildupExpiryHint
+  );
   return (
-    <div className="flex items-center gap-1.5">
-      <span className={cn('text-[9px] font-black w-5', leg === 'CE' ? 'text-emerald-400' : 'text-rose-400')}>{leg}</span>
-      {mode === 'ATM' ? (
-        <select
-          value={offset}
-          disabled={locked}
-          title={locked ? lockedTitle : `${leg} strike as a step offset from ATM`}
-          onChange={e => onOffsetChange(Number(e.target.value))}
-          className="text-[10px] font-bold h-6 px-1 border border-zinc-700 rounded bg-zinc-900 text-zinc-200 focus:outline-none focus:border-violet-500 w-24 disabled:opacity-50 disabled:cursor-not-allowed"
-        >
-          {OFFSET_OPTIONS.map(n => (
-            <option key={n} value={n}>{offsetLabel(n, step)}</option>
-          ))}
-        </select>
-      ) : (
-        <RuleNumInput value={premium} onCommit={onPremiumChange} className="w-16 h-6" disabled={locked}
-          placeholder="₹" title={locked ? lockedTitle : `Target premium for the ${leg} leg — resolves to the closest listed strike priced at or below this value`} />
-      )}
-      <span className="text-[11px] font-mono font-bold text-zinc-300 min-w-[42px] text-right">
-        {resolvedStrike ?? '—'}
-      </span>
-      <span
-        className="text-[10px] font-mono font-semibold text-zinc-500 min-w-[38px] text-right"
-        title={`Live ${leg} premium at this strike — the reference entry price`}
-      >
-        {resolvedStrike != null && ltp != null && ltp > 0 ? `@${ltp.toFixed(2)}` : '—'}
-      </span>
-      {buildupStyle && (
-        <span
-          className={cn('text-[8px] font-black px-1 py-0.5 rounded border leading-none', buildupStyle.cls)}
-          title={`${buildupStyle.text}${oiChgPct != null && oiChgPct !== 0 ? ` — OI ${oiChgPct > 0 ? '+' : ''}${oiChgPct.toFixed(1)}%` : ''}`}
-        >
-          {buildup}
+    <div className="flex flex-col gap-0.5">
+      <div className="flex items-center gap-1.5">
+        <span className={cn('text-[9px] font-black w-5', leg === 'CE' ? 'text-emerald-400' : 'text-rose-400')}>{leg}</span>
+        {mode === 'ATM' ? (
+          <select
+            value={offset}
+            disabled={locked}
+            title={locked ? lockedTitle : `${leg} strike as a step offset from ATM`}
+            onChange={e => onOffsetChange(Number(e.target.value))}
+            className="text-[10px] font-bold h-6 px-1 border border-zinc-700 rounded bg-zinc-900 text-zinc-200 focus:outline-none focus:border-violet-500 w-24 disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            {OFFSET_OPTIONS.map(n => (
+              <option key={n} value={n}>{offsetLabel(n, step)}</option>
+            ))}
+          </select>
+        ) : (
+          <RuleNumInput value={premium} onCommit={onPremiumChange} className="w-16 h-6" disabled={locked}
+            placeholder="₹" title={locked ? lockedTitle : `Target premium for the ${leg} leg — resolves to the closest listed strike priced at or below this value`} />
+        )}
+        <span className="text-[11px] font-mono font-bold text-zinc-300 min-w-[42px] text-right">
+          {resolvedStrike ?? '—'}
         </span>
-      )}
-      {onShift && (
-        <div className="flex flex-col gap-0.5">
-          <button
-            type="button"
-            onClick={() => onShift('UP')}
-            disabled={shiftDisabled || resolvedStrike == null}
-            title={`Shift ${leg} strike up one step — closes and reopens any live position at the new strike`}
-            aria-label={`Shift ${leg} strike up one step`}
-            className={cn(
-              'h-5 w-6 flex items-center justify-center rounded-t border border-emerald-500/20 bg-emerald-500/10 text-emerald-400',
-              'hover:bg-emerald-500 hover:text-oncolor hover:border-emerald-500 disabled:opacity-30 disabled:cursor-not-allowed',
-              'transition-all active:scale-95', FOCUS_RING,
-            )}
-          >
-            <ChevronUp size={13} strokeWidth={3} />
-          </button>
-          <button
-            type="button"
-            onClick={() => onShift('DOWN')}
-            disabled={shiftDisabled || resolvedStrike == null}
-            title={`Shift ${leg} strike down one step — closes and reopens any live position at the new strike`}
-            aria-label={`Shift ${leg} strike down one step`}
-            className={cn(
-              'h-5 w-6 flex items-center justify-center rounded-b border border-rose-500/20 bg-rose-500/10 text-rose-400',
-              'hover:bg-rose-500 hover:text-oncolor hover:border-rose-500 disabled:opacity-30 disabled:cursor-not-allowed',
-              'transition-all active:scale-95', FOCUS_RING,
-            )}
-          >
-            <ChevronDown size={13} strokeWidth={3} />
-          </button>
+        <span
+          className="text-[10px] font-mono font-semibold text-zinc-500 min-w-[38px] text-right"
+          title={`Live ${leg} premium at this strike — the reference entry price`}
+        >
+          {resolvedStrike != null && ltp != null && ltp > 0 ? `@${ltp.toFixed(2)}` : '—'}
+        </span>
+        {onShift && (
+          <div className="flex flex-col gap-0.5">
+            <button
+              type="button"
+              onClick={() => onShift('UP')}
+              disabled={shiftDisabled || resolvedStrike == null}
+              title={`Shift ${leg} strike up one step — closes and reopens any live position at the new strike`}
+              aria-label={`Shift ${leg} strike up one step`}
+              className={cn(
+                'h-5 w-6 flex items-center justify-center rounded-t border border-emerald-500/20 bg-emerald-500/10 text-emerald-400',
+                'hover:bg-emerald-500 hover:text-oncolor hover:border-emerald-500 disabled:opacity-30 disabled:cursor-not-allowed',
+                'transition-all active:scale-95', FOCUS_RING,
+              )}
+            >
+              <ChevronUp size={13} strokeWidth={3} />
+            </button>
+            <button
+              type="button"
+              onClick={() => onShift('DOWN')}
+              disabled={shiftDisabled || resolvedStrike == null}
+              title={`Shift ${leg} strike down one step — closes and reopens any live position at the new strike`}
+              aria-label={`Shift ${leg} strike down one step`}
+              className={cn(
+                'h-5 w-6 flex items-center justify-center rounded-b border border-rose-500/20 bg-rose-500/10 text-rose-400',
+                'hover:bg-rose-500 hover:text-oncolor hover:border-rose-500 disabled:opacity-30 disabled:cursor-not-allowed',
+                'transition-all active:scale-95', FOCUS_RING,
+              )}
+            >
+              <ChevronDown size={13} strokeWidth={3} />
+            </button>
+          </div>
+        )}
+      </div>
+      {showBuildupSlot && (
+        <div className="flex items-center gap-1 pl-6">
+          {buildupStyle ? (
+            <span
+              className={cn('text-[8px] font-black px-1 py-0.5 rounded border leading-none', buildupStyle.cls)}
+              title={`${buildupStyle.text}${oiChgPct != null && oiChgPct !== 0 ? ` — OI ${oiChgPct > 0 ? '+' : ''}${oiChgPct.toFixed(1)}%` : ''}`}
+            >
+              {buildup}
+            </span>
+          ) : buildupExpiryHint ? (
+            <span
+              className="text-[8px] font-bold text-zinc-500 leading-none px-1 py-0.5 rounded border border-zinc-700"
+              title={buildupExpiryHint}
+            >
+              OI n/a
+            </span>
+          ) : (
+            <span
+              className="text-[8px] font-bold text-zinc-600 leading-none"
+              title="OI buildup not classified yet (inside dead-band or waiting for prev-day baseline)"
+            >
+              —
+            </span>
+          )}
+          {buildupStyle && oiChgPct != null && oiChgPct !== 0 && (
+            <span
+              className={cn(
+                'text-[8px] font-mono font-semibold tabular-nums leading-none',
+                oiChgPct > 0 ? 'text-emerald-500' : 'text-rose-500',
+              )}
+              title={`OI change vs previous day: ${oiChgPct > 0 ? '+' : ''}${oiChgPct.toFixed(1)}%`}
+            >
+              OI {oiChgPct > 0 ? '+' : ''}{oiChgPct.toFixed(1)}%
+            </span>
+          )}
         </div>
       )}
     </div>
@@ -939,7 +1031,10 @@ function StrikeLegSelector({
 
 /** The full CE/PE strike editor for one row: ATM±/₹ mode toggle, independent
  *  CE and PE selectors, a link checkbox to keep them mirrored, and Save/clear. */
-function StrikeEditor({ row, live, step, onUpdate, onShift, shiftDisabled, onBlocked, workerHold }: {
+function StrikeEditor({
+  row, live, step, onUpdate, onShift, shiftDisabled, onBlocked, workerHold,
+  buildupWsActive, buildupExpiryHint,
+}: {
   row: FocusRow;
   live: RowLive;
   step: number;
@@ -948,6 +1043,10 @@ function StrikeEditor({ row, live, step, onUpdate, onShift, shiftDisabled, onBlo
   shiftDisabled?: boolean;
   onBlocked?: (message: string) => void;
   workerHold?: WorkerStatusRow | null;
+  /** Focus WS running and this row's expiry matches — show buildup / placeholder. */
+  buildupWsActive?: boolean;
+  /** When set, title explains why buildup is unavailable (usually far expiry). */
+  buildupExpiryHint?: string | null;
 }) {
   /**
    * A leg THIS ROW opened is LOCKED against strike-config edits.
@@ -1007,7 +1106,10 @@ function StrikeEditor({ row, live, step, onUpdate, onShift, shiftDisabled, onBlo
   const mode = row.strikeMode ?? 'ATM';
 
   return (
-    <div className="flex flex-col gap-1 w-[236px]">
+    <div
+      className="flex flex-col gap-1 min-w-[280px] w-max"
+      title={buildupExpiryHint || undefined}
+    >
       <SegPill options={['ATM±', '₹'] as const}
         value={mode === 'ATM' ? 'ATM±' : '₹'}
         onChange={v => {
@@ -1022,13 +1124,15 @@ function StrikeEditor({ row, live, step, onUpdate, onShift, shiftDisabled, onBlo
         className="self-start" />
       <StrikeLegSelector leg="CE" mode={mode} offset={row.ceOffset ?? 0} premium={row.cePremium ?? ''}
         resolvedStrike={live.ceStrike} step={step} ltp={live.ltpCe} locked={legOpen.CE}
-        buildup={live.ceBuildup} oiChgPct={live.ceOiChgPct}
+        buildup={live.ceBuildup} oiChgPct={live.ceOiChgPct} buildupWsActive={buildupWsActive}
+        buildupExpiryHint={buildupExpiryHint}
         onOffsetChange={n => setLeg('CE', { ceOffset: n })}
         onPremiumChange={v => setLeg('CE', { cePremium: v })}
         onShift={onShift ? dir => onShift('CE', dir) : undefined} shiftDisabled={shiftDisabled} />
       <StrikeLegSelector leg="PE" mode={mode} offset={row.peOffset ?? 0} premium={row.pePremium ?? ''}
         resolvedStrike={live.peStrike} step={step} ltp={live.ltpPe} locked={legOpen.PE}
-        buildup={live.peBuildup} oiChgPct={live.peOiChgPct}
+        buildup={live.peBuildup} oiChgPct={live.peOiChgPct} buildupWsActive={buildupWsActive}
+        buildupExpiryHint={buildupExpiryHint}
         onOffsetChange={n => setLeg('PE', { peOffset: n })}
         onPremiumChange={v => setLeg('PE', { pePremium: v })}
         onShift={onShift ? dir => onShift('PE', dir) : undefined} shiftDisabled={shiftDisabled} />
@@ -1566,7 +1670,8 @@ function rowDataPropsEqual(
   prev: { row: FocusRow; live: RowLive; lotSize: number | null; spot: number;
     liveRealMoney: boolean; broker: Broker; busy: boolean;
     rowIndex?: number;
-    workerHold?: WorkerStatusRow | null; expiries?: string[] },
+    workerHold?: WorkerStatusRow | null; expiries?: string[];
+    buildupWsActive?: boolean; buildupExpiryHint?: string | null },
   next: typeof prev,
 ): boolean {
   return prev.row === next.row && prev.live === next.live
@@ -1576,12 +1681,14 @@ function rowDataPropsEqual(
     && prev.workerHold?.open === next.workerHold?.open
     && prev.workerHold?.ceStrike === next.workerHold?.ceStrike
     && prev.workerHold?.peStrike === next.workerHold?.peStrike
-    && prev.expiries === next.expiries;
+    && prev.expiries === next.expiries
+    && prev.buildupWsActive === next.buildupWsActive
+    && prev.buildupExpiryHint === next.buildupExpiryHint;
 }
 
 function FocusTableRowImpl({
   row, rowIndex, live, lotSize, spot, liveRealMoney, broker, busy,
-  workerHold, expiries,
+  workerHold, expiries, buildupWsActive, buildupExpiryHint,
   onUpdate, onDelete, onArm, onDisarm, onExit, onAddLot, onReduceLot, onShift, onBlocked,
 }: {
   row: FocusRow;
@@ -1592,6 +1699,8 @@ function FocusTableRowImpl({
   workerHold?: WorkerStatusRow | null;
   /** This row's underlying's available expiries, nearest first. */
   expiries: string[];
+  buildupWsActive?: boolean;
+  buildupExpiryHint?: string | null;
   onUpdate: (patch: Partial<FocusRow>, saveToDisk?: boolean) => void;
   onDelete: () => void; onArm: () => void; onDisarm: () => void;
   onExit: (leg: 'CE' | 'PE' | 'ALL') => void;
@@ -1710,7 +1819,8 @@ function FocusTableRowImpl({
 
       {/* CE / PE STRIKES */}
       <td className="p-3 align-top">
-        <StrikeEditor row={row} live={live} step={step} onUpdate={onUpdate} onShift={onShift} shiftDisabled={busy} onBlocked={onBlocked} workerHold={workerHold} />
+        <StrikeEditor row={row} live={live} step={step} onUpdate={onUpdate} onShift={onShift} shiftDisabled={busy} onBlocked={onBlocked} workerHold={workerHold}
+          buildupWsActive={buildupWsActive} buildupExpiryHint={buildupExpiryHint} />
       </td>
 
       {/* LTP */}
@@ -1816,7 +1926,7 @@ function FocusTableRowImpl({
             <button onClick={() => onReduceLot('CE', ceQty)} disabled={!canTrade || ceFlat} title={ceFlat ? 'Nothing open on the CE leg' : canTrade ? `Reduce the CE leg by ${ceQty} lot(s)` : tradeBlockedWhy} aria-label={`Reduce the CE leg by ${ceQty} lot(s)`} className={cn('h-6 w-6 rounded-md bg-zinc-800 border border-zinc-700 text-zinc-300 font-bold flex items-center justify-center hover:bg-zinc-700 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed transition-colors', FOCUS_RING)}>-</button>
             <button onClick={() => onExit('CE')} disabled={!canTrade || ceFlat} title={ceFlat ? 'Nothing open on the CE leg' : canTrade ? 'Close the CE leg at market' : tradeBlockedWhy} className={cn('text-xs font-bold px-2 py-1 rounded-md bg-rose-600 text-oncolor hover:bg-rose-500 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed transition-colors', FOCUS_RING)}>Exit</button>
           </div>
-          <LegSlLevels row={row} live={live} leg="CE" workerHold={workerHold} />
+          <LegSlLevels row={row} live={live} leg="CE" workerHold={workerHold} lotSize={lotSize} />
         </div>
       </td>
 
@@ -1835,7 +1945,7 @@ function FocusTableRowImpl({
             <button onClick={() => onReduceLot('PE', peQty)} disabled={!canTrade || peFlat} title={peFlat ? 'Nothing open on the PE leg' : canTrade ? `Reduce the PE leg by ${peQty} lot(s)` : tradeBlockedWhy} aria-label={`Reduce the PE leg by ${peQty} lot(s)`} className={cn('h-6 w-6 rounded-md bg-zinc-800 border border-zinc-700 text-zinc-300 font-bold flex items-center justify-center hover:bg-zinc-700 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed transition-colors', FOCUS_RING)}>-</button>
             <button onClick={() => onExit('PE')} disabled={!canTrade || peFlat} title={peFlat ? 'Nothing open on the PE leg' : canTrade ? 'Close the PE leg at market' : tradeBlockedWhy} className={cn('text-xs font-bold px-2 py-1 rounded-md bg-rose-600 text-oncolor hover:bg-rose-500 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed transition-colors', FOCUS_RING)}>Exit</button>
           </div>
-          <LegSlLevels row={row} live={live} leg="PE" workerHold={workerHold} />
+          <LegSlLevels row={row} live={live} leg="PE" workerHold={workerHold} lotSize={lotSize} />
         </div>
       </td>
 
@@ -1930,7 +2040,7 @@ const FocusTableRow = memo(FocusTableRowImpl, rowDataPropsEqual);
 
 function FocusRowCardImpl({
   row, live, lotSize, spot, liveRealMoney, broker, busy,
-  workerHold, expiries,
+  workerHold, expiries, buildupWsActive, buildupExpiryHint,
   onUpdate, onDelete, onArm, onDisarm, onExit, onAddLot, onReduceLot, onShift, onBlocked,
 }: {
   row: FocusRow;
@@ -1940,6 +2050,8 @@ function FocusRowCardImpl({
   workerHold?: WorkerStatusRow | null;
   /** This row's underlying's available expiries, nearest first. */
   expiries: string[];
+  buildupWsActive?: boolean;
+  buildupExpiryHint?: string | null;
   onUpdate: (patch: Partial<FocusRow>, saveToDisk?: boolean) => void;
   onDelete: () => void; onArm: () => void; onDisarm: () => void;
   onExit: (leg: 'CE' | 'PE' | 'ALL') => void;
@@ -2079,7 +2191,8 @@ function FocusRowCardImpl({
 
       {/* Strike editor */}
       <div className="bg-zinc-950/20 border border-zinc-800/40 rounded-xl p-3">
-        <StrikeEditor row={row} live={live} step={step} onUpdate={onUpdate} onShift={onShift} shiftDisabled={busy} onBlocked={onBlocked} workerHold={workerHold} />
+        <StrikeEditor row={row} live={live} step={step} onUpdate={onUpdate} onShift={onShift} shiftDisabled={busy} onBlocked={onBlocked} workerHold={workerHold}
+          buildupWsActive={buildupWsActive} buildupExpiryHint={buildupExpiryHint} />
       </div>
 
       {/* CE and PE Legs */}
@@ -2098,7 +2211,7 @@ function FocusRowCardImpl({
             <button onClick={() => onExit('CE')} disabled={!canTrade || ceFlat} title={ceFlat ? 'Nothing open on the CE leg' : canTrade ? 'Exit CE leg' : tradeBlockedWhy} className={cn('text-[10px] font-bold px-1.5 py-0.5 rounded bg-rose-600 text-oncolor hover:bg-rose-500 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed', FOCUS_RING)}>Exit</button>
           </div>
         </div>
-        <LegSlLevels row={row} live={live} leg="CE" workerHold={workerHold} align="start" />
+        <LegSlLevels row={row} live={live} leg="CE" workerHold={workerHold} lotSize={lotSize} align="start" />
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2">
             <span className="text-[9px] font-black text-rose-400">PE</span>
@@ -2113,7 +2226,7 @@ function FocusRowCardImpl({
             <button onClick={() => onExit('PE')} disabled={!canTrade || peFlat} title={peFlat ? 'Nothing open on the PE leg' : canTrade ? 'Exit PE leg' : tradeBlockedWhy} className={cn('text-[10px] font-bold px-1.5 py-0.5 rounded bg-rose-600 text-oncolor hover:bg-rose-500 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed', FOCUS_RING)}>Exit</button>
           </div>
         </div>
-        <LegSlLevels row={row} live={live} leg="PE" workerHold={workerHold} align="start" />
+        <LegSlLevels row={row} live={live} leg="PE" workerHold={workerHold} lotSize={lotSize} align="start" />
       </div>
 
       {/* Level Exits */}
@@ -2518,24 +2631,29 @@ export default function FocusTool() {
   const { quotes: focusWsQuotes, bridgeStatus: focusWsStatus } = useFocusToolWS();
   const wsLive = focusWsStatus.status === 'RUNNING';
 
-  // Start (or restart onto new expiries) the bridge once all three
-  // underlyings' nearest expiry is known. Never stopped on unmount — same
-  // long-lived-background-process convention the AdvancedScalper bridge
-  // follows, so returning to this page reconnects instantly.
-  const niftyExpiry = expiries.NIFTY?.[0];
-  const bankniftyExpiry = expiries.BANKNIFTY?.[0];
-  const sensexExpiry = expiries.SENSEX?.[0];
+  // Start (or restart onto new expiries) once each underlying's listed
+  // nearest is known. Subscribe to the union of nearest + every row's chosen
+  // expiry (comma-separated) so a Sept monthly row still gets WS LTP/OI —
+  // not nearest-only. Never stopped on unmount — same long-lived convention
+  // as AdvancedScalper, so returning reconnects instantly.
+  const niftyBridgeExpiry = bridgeExpiriesForUnderlying('NIFTY', config.rows, expiries.NIFTY ?? []);
+  const bankniftyBridgeExpiry = bridgeExpiriesForUnderlying('BANKNIFTY', config.rows, expiries.BANKNIFTY ?? []);
+  const sensexBridgeExpiry = bridgeExpiriesForUnderlying('SENSEX', config.rows, expiries.SENSEX ?? []);
   useEffect(() => {
-    if (!niftyExpiry || !bankniftyExpiry || !sensexExpiry) return;
+    if (!niftyBridgeExpiry || !bankniftyBridgeExpiry || !sensexBridgeExpiry) return;
     fetch('/api/focus-tool/live-ws', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         action: 'start',
-        expiries: { NIFTY: niftyExpiry, BANKNIFTY: bankniftyExpiry, SENSEX: sensexExpiry },
+        expiries: {
+          NIFTY: niftyBridgeExpiry,
+          BANKNIFTY: bankniftyBridgeExpiry,
+          SENSEX: sensexBridgeExpiry,
+        },
       }),
     }).catch(() => {});
-  }, [niftyExpiry, bankniftyExpiry, sensexExpiry]);
+  }, [niftyBridgeExpiry, bankniftyBridgeExpiry, sensexBridgeExpiry]);
 
   /** Adopt a server-authoritative config: state plus the risk-bar mirrors. */
   const applyServerConfig = useCallback((d: FocusToolConfig) => {
@@ -2951,7 +3069,8 @@ export default function FocusTool() {
     a.ceStrike === b.ceStrike && a.peStrike === b.peStrike
     && a.ltpCe === b.ltpCe && a.ltpPe === b.ltpPe
     && a.cePosition === b.cePosition && a.pePosition === b.pePosition
-    && a.pnl === b.pnl && a.entryPremium === b.entryPremium && a.vwap === b.vwap && a.vwapClose === b.vwapClose
+    && a.pnl === b.pnl && a.entryPremium === b.entryPremium && a.lotSize === b.lotSize
+    && a.vwap === b.vwap && a.vwapClose === b.vwapClose
     && a.ceBuildup === b.ceBuildup && a.peBuildup === b.peBuildup
     && a.ceOiChgPct === b.ceOiChgPct && a.peOiChgPct === b.peOiChgPct
     && a.ceOi === b.ceOi && a.peOi === b.peOi
@@ -3013,11 +3132,11 @@ export default function FocusTool() {
       if (ceStrike == null && peStrike == null) { out[row.id] = EMPTY_ROW_LIVE; continue; }
 
       const uWs = focusWsQuotes?.[u];
-      const wsOnThisRow = !!uWs && (!row.expiry || uWs.expiry === row.expiry);
+      const wsBook = focusWsBookForExpiry(uWs, rowExpiry);
       const ceKey = ceStrike != null ? strikeKey(ceStrike) : null;
       const peKey = peStrike != null ? strikeKey(peStrike) : null;
-      const ceWs = ceKey && wsOnThisRow ? uWs!.strikes?.[ceKey] : undefined;
-      const peWs = peKey && wsOnThisRow ? uWs!.strikes?.[peKey] : undefined;
+      const ceWs = ceKey && wsBook ? wsBook.strikes?.[ceKey] : undefined;
+      const peWs = peKey && wsBook ? wsBook.strikes?.[peKey] : undefined;
       const ceCh = ceKey ? oc?.[ceKey] : undefined;
       const peCh = peKey ? oc?.[peKey] : undefined;
 
@@ -3076,8 +3195,8 @@ export default function FocusTool() {
        * leftover PE's live MTM after a CE SL.
        */
       const workerHold = (workerStatus.rows ?? []).find(r => r.id === row.id) ?? null;
+      const lotSize = lotSizes[u] ?? lookups[expKey(u, rowExpiry)]?.lotSize ?? 0;
       let entryNum = 0;
-      let entryDen = 0;
       const liveLegs: Parameters<typeof computeRowPnl>[1] = [];
       for (const leg of legsOf(row)) {
         const pos = leg === 'CE' ? cePosition : pePosition;
@@ -3106,10 +3225,9 @@ export default function FocusTool() {
           unrealizedProfit: Number(pos.unrealizedProfit) || 0,
           ownQty,
         });
-        // Qty-weighted entry for pair SL × — unequal CE/PE sizes must not be
-        // treated as a 1-lot CE+PE sum. NEVER falls back to the broker net:
-        // an unowned/unresolved leg contributes nothing to the weighting,
-        // not the whole shared position (see legOwnContracts above).
+        // Combined entry for pair SL ×: Σ (lots × entry) = Σ (contracts ×
+        // entry) / lotSize. NEVER falls back to the broker net: an
+        // unowned/unresolved leg contributes nothing (see legOwnContracts).
         //
         // The broker's live avg is only trusted as THIS row's own entry when
         // this row's own qty fully accounts for the whole broker position
@@ -3128,10 +3246,9 @@ export default function FocusTool() {
         const q = owned;
         if (q > 0 && entryAvg > 0) {
           entryNum += entryAvg * q;
-          entryDen += q;
         }
       }
-      const entryPremium = entryDen > 0 ? entryNum / entryDen : 0;
+      const entryPremium = lotSize > 0 && entryNum > 0 ? entryNum / lotSize : 0;
       const pnl = computeRowPnl(
         rowDisplayBookedPnl(row.fill?.bookedPnl, workerHold),
         liveLegs,
@@ -3157,7 +3274,7 @@ export default function FocusTool() {
         ceStrike, peStrike,
         ltpCe, ltpPe,
         cePosition, pePosition,
-        pnl, entryPremium, vwap, vwapClose,
+        pnl, entryPremium, lotSize: lotSize > 0 ? lotSize : 0, vwap, vwapClose,
         ceBuildup, peBuildup, ceOiChgPct, peOiChgPct, ceOi, peOi,
         vwap1m, vwapClose1m,
       };
@@ -3166,7 +3283,7 @@ export default function FocusTool() {
     }
     rowLivePrevRef.current = out;
     return out;
-  }, [config.rows, config.groups, spots, futQuotes, chains, focusWsQuotes, lookups, positions, broker, expiries, rowVwap, workerStatus.rows]);
+  }, [config.rows, config.groups, spots, futQuotes, chains, focusWsQuotes, lookups, lotSizes, positions, broker, expiries, rowVwap, workerStatus.rows]);
 
   /**
    * P&L across THIS TOOL'S OWN rows — the book the account budget is measured
@@ -4270,7 +4387,9 @@ export default function FocusTool() {
       const peReason = legStopReason(row, 'PE', live, workerHold);
       if (peReason) { autoExitLeg(row, 'PE', peReason); continue; }
 
-      const reason = evaluateRowExit(row, live, spots[row.underlying] ?? 0, workerHold);
+      const reason = evaluateRowExit(
+        row, live, spots[row.underlying] ?? 0, workerHold, live.lotSize,
+      );
       if (reason) autoExitRow(row, reason);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -4610,7 +4729,17 @@ export default function FocusTool() {
                     </div>
                   ) : (
                     <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-                      {rows.map(row => (
+                      {rows.map(row => {
+                        const { buildupWsActive, buildupExpiryHint } = rowBuildupWsFlags(
+                          row, wsLive,
+                          // Prefer book keys (multi-expiry); fall back to status fingerprint.
+                          (focusWsQuotes?.[u]?.books
+                            ? Object.keys(focusWsQuotes[u]!.books!).join(',')
+                            : undefined)
+                            ?? focusWsQuotes?.[u]?.expiry
+                            ?? focusWsStatus.expiries?.[u],
+                        );
+                        return (
                         <FocusRowCard
                           key={row.id} row={row}
                           live={rowLive[row.id] ?? EMPTY_ROW_LIVE}
@@ -4619,6 +4748,8 @@ export default function FocusTool() {
                           busy={busyRows.has(row.id)}
                           workerHold={(workerStatus.rows ?? []).find(r => r.id === row.id) ?? null}
                           expiries={expiries[u] ?? []}
+                          buildupWsActive={buildupWsActive}
+                          buildupExpiryHint={buildupExpiryHint}
                           onUpdate={(patch, save) => updateRow(row.id, patch, save)}
                           onDelete={() => deleteRow(row.id)}
                           onArm={() => armRow(row.id)}
@@ -4629,15 +4760,17 @@ export default function FocusTool() {
                           onShift={(leg, dir) => handleShiftStrike(row, leg, dir)}
                           onBlocked={msg => addToast('error', 'Strike locked', msg)}
                         />
-                      ))}
+                        );
+                      })}
                     </div>
                   )
                 ) : (
-                  /* A row has a hard minimum width — a 200px strike editor, a
-                     LTP stack, and six numeric level-exit boxes on one line.
-                     Without this scroller the table overflowed the rounded-2xl
-                     `overflow-hidden` wrapper above and the Level Exits column
-                     was simply clipped: no scrollbar, no way to reach it. */
+                  /* A row has a hard minimum width — strike editor (now ~280px+
+                     with OI-buildup on a second line), LTP stack, and six
+                     numeric level-exit boxes on one line. Without this scroller
+                     the table overflowed the rounded-2xl `overflow-hidden`
+                     wrapper above and the Level Exits column was simply
+                     clipped: no scrollbar, no way to reach it. */
                   <div className="overflow-x-auto">
                   <table className="w-full border-collapse text-left min-w-[1560px]">
                     <thead>
@@ -4667,7 +4800,16 @@ export default function FocusTool() {
                       </tr>
                     </thead>
                     <tbody>
-                      {rows.map((row, rowIndex) => (
+                      {rows.map((row, rowIndex) => {
+                        const { buildupWsActive, buildupExpiryHint } = rowBuildupWsFlags(
+                          row, wsLive,
+                          (focusWsQuotes?.[u]?.books
+                            ? Object.keys(focusWsQuotes[u]!.books!).join(',')
+                            : undefined)
+                            ?? focusWsQuotes?.[u]?.expiry
+                            ?? focusWsStatus.expiries?.[u],
+                        );
+                        return (
                         <FocusTableRow
                           key={row.id} row={row} rowIndex={rowIndex}
                           live={rowLive[row.id] ?? EMPTY_ROW_LIVE}
@@ -4676,6 +4818,8 @@ export default function FocusTool() {
                           busy={busyRows.has(row.id)}
                           workerHold={(workerStatus.rows ?? []).find(r => r.id === row.id) ?? null}
                           expiries={expiries[u] ?? []}
+                          buildupWsActive={buildupWsActive}
+                          buildupExpiryHint={buildupExpiryHint}
                           onUpdate={(patch, save) => updateRow(row.id, patch, save)}
                           onDelete={() => deleteRow(row.id)}
                           onArm={() => armRow(row.id)}
@@ -4686,7 +4830,8 @@ export default function FocusTool() {
                           onShift={(leg, dir) => handleShiftStrike(row, leg, dir)}
                           onBlocked={msg => addToast('error', 'Strike locked', msg)}
                         />
-                      ))}
+                        );
+                      })}
                       {rows.length === 0 && (
                         <tr>
                           <td colSpan={9} className="py-12 text-center">

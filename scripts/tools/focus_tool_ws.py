@@ -20,6 +20,9 @@ Usage:
     venv\\Scripts\\python.exe scripts/tools/focus_tool_ws.py \\
         --nifty-expiry 2026-06-27 --banknifty-expiry 2026-06-25 --sensex-expiry 2026-06-26
 
+    Multiple expiries per underlying (comma-separated) when Focus Tool rows
+    pick different dates — e.g. --nifty-expiry 2026-08-25,2026-09-01.
+
 Stop gracefully by writing debug/focus_tool_ws_stop_dhan.trigger (done
 automatically by the dashboard's /api/focus-tool/live-ws POST {action:"stop"}).
 """
@@ -249,18 +252,44 @@ class QuotePushServer:
             self.thread.join(timeout=2)
 
 
+
+def _parse_expiry_list(raw: str) -> list[str]:
+    """Comma-separated YYYY-MM-DD list, deduped, order preserved."""
+    out: list[str] = []
+    seen: set[str] = set()
+    for part in str(raw or '').split(','):
+        e = part.strip()
+        if not e or e in seen:
+            continue
+        seen.add(e)
+        out.append(e)
+    return out
+
+
 def main():
     parser = argparse.ArgumentParser(description='Focus Tool live WebSocket bridge — all three indices at once')
-    parser.add_argument('--nifty-expiry', required=True, help='NIFTY expiry YYYY-MM-DD')
-    parser.add_argument('--banknifty-expiry', required=True, help='BANKNIFTY expiry YYYY-MM-DD')
-    parser.add_argument('--sensex-expiry', required=True, help='SENSEX expiry YYYY-MM-DD')
+    parser.add_argument('--nifty-expiry', required=True,
+                        help='NIFTY expiry YYYY-MM-DD (comma-separated for multiple)')
+    parser.add_argument('--banknifty-expiry', required=True,
+                        help='BANKNIFTY expiry YYYY-MM-DD (comma-separated for multiple)')
+    parser.add_argument('--sensex-expiry', required=True,
+                        help='SENSEX expiry YYYY-MM-DD (comma-separated for multiple)')
     parser.add_argument('--num-strikes', type=int, default=12,
                         help='Number of strikes each side of ATM, per underlying (default 12)')
     parser.add_argument('--ws-port', type=int, default=8965,
                         help='Localhost WebSocket push server port (default 8965)')
     args = parser.parse_args()
 
-    expiries = {'NIFTY': args.nifty_expiry, 'BANKNIFTY': args.banknifty_expiry, 'SENSEX': args.sensex_expiry}
+    expiry_lists = {
+        'NIFTY': _parse_expiry_list(args.nifty_expiry),
+        'BANKNIFTY': _parse_expiry_list(args.banknifty_expiry),
+        'SENSEX': _parse_expiry_list(args.sensex_expiry),
+    }
+    if not all(expiry_lists.values()):
+        print('[focus_tool_ws] ERROR: each underlying needs at least one expiry', flush=True)
+        sys.exit(1)
+    # Status / restart fingerprint — comma-joined, same order as subscribed.
+    expiries = {u: ','.join(expiry_lists[u]) for u in UNDERLYINGS}
 
     os.makedirs(DEBUG_DIR, exist_ok=True)
     started_at = datetime.now().isoformat()
@@ -281,15 +310,15 @@ def main():
 
     helper = DhanHelper(dhan)
 
-    # ── Resolve spot/ATM/strike ladder/contracts for all three underlyings ──
-    state: dict[str, dict] = {}   # underlying -> {step, exchange, spot, atm, sid, sid_map, fut}
+    # state[u].books is one entry per subscribed expiry (sid_map + prev_meta).
+    state: dict[str, dict] = {}
     instruments: list = []
 
     for u in UNDERLYINGS:
         step = STRIKE_STEP[u]
         exchange = UNDERLYING_EXCHANGE[u]
         sid = UNDERLYING_SIDS[u]
-        expiry = expiries[u]
+        u_expiries = expiry_lists[u]
 
         print(f'[focus_tool_ws] {u}: fetching spot…', flush=True)
         spot = 0.0
@@ -300,31 +329,32 @@ def main():
             print(f'[focus_tool_ws] {u}: WARN spot fetch failed (attempt {attempt + 1}/5), retrying in 5s…', flush=True)
             time.sleep(5)
         atm = round(spot / step) * step if spot > 0 else 0
-        print(f'[focus_tool_ws] {u}: spot={spot:.2f} atm={atm} step={step}', flush=True)
+        print(f'[focus_tool_ws] {u}: spot={spot:.2f} atm={atm} step={step} expiries={u_expiries}', flush=True)
 
-        # Prev-day OI/close baseline for OI-buildup labels (LB/SB/SC/LU) — same
-        # source and shape as live_options_ws.py's AdvancedScalper panels.
         chain_seg = 'IDX_I' if exchange == 'NSE' else 'BSE_IDX'
-        prev_meta = _fetch_prev_meta(helper, u, expiry, exchange_segment=chain_seg)
-        print(f'[focus_tool_ws] {u}: prev-day baseline for {len(prev_meta)} strikes', flush=True)
-
-        strikes = [atm + i * step for i in range(-args.num_strikes, args.num_strikes + 1)] if atm > 0 else []
-        sid_map: dict[str, dict] = {}   # sid -> {underlying, strike, type}
         option_feed_segment = OPTION_FEED_SEGMENT[exchange]
+        strikes = [atm + i * step for i in range(-args.num_strikes, args.num_strikes + 1)] if atm > 0 else []
 
-        for strike in strikes:
-            for opt_type in ('CE', 'PE'):
-                opt = helper.find_option(u, expiry, float(strike), opt_type, exchange=exchange)
-                if opt is None:
-                    continue
-                osid = str(int(opt['SECURITY_ID']))
-                sid_map[osid] = {'underlying': u, 'strike': int(strike), 'type': opt_type}
-                instruments.append((option_feed_segment, osid, FULL))
+        books: list[dict] = []
+        for expiry in u_expiries:
+            prev_meta = _fetch_prev_meta(helper, u, expiry, exchange_segment=chain_seg)
+            print(f'[focus_tool_ws] {u} {expiry}: prev-day baseline for {len(prev_meta)} strikes', flush=True)
+            sid_map: dict[str, dict] = {}
+            for strike in strikes:
+                for opt_type in ('CE', 'PE'):
+                    opt = helper.find_option(u, expiry, float(strike), opt_type, exchange=exchange)
+                    if opt is None:
+                        continue
+                    osid = str(int(opt['SECURITY_ID']))
+                    sid_map[osid] = {
+                        'underlying': u, 'strike': int(strike), 'type': opt_type, 'expiry': expiry,
+                    }
+                    instruments.append((option_feed_segment, osid, FULL))
+            books.append({'expiry': expiry, 'sid_map': sid_map, 'prev_meta': prev_meta})
+            print(f'[focus_tool_ws] {u} {expiry}: resolved {len(sid_map)} option contracts', flush=True)
 
-        # Index spot canary — strictly FEED_QUOTE (17), not FULL (21)
         instruments.append((IDX, sid, FEED_QUOTE))
 
-        # Near-month futures contract
         fut_info = None
         try:
             fut_contract = _find_nearest_future(helper, u, exchange=exchange, instrument='FUTIDX')
@@ -344,11 +374,12 @@ def main():
         except Exception as e:
             print(f'[focus_tool_ws] {u}: WARNING could not resolve future contract: {e}', flush=True)
 
-        state[u] = {'step': step, 'exchange': exchange, 'spot': spot, 'atm': atm, 'sid': sid,
-                    'expiry': expiry, 'sid_map': sid_map, 'fut': fut_info, 'prev_meta': prev_meta}
-        print(f'[focus_tool_ws] {u}: resolved {len(sid_map)} option contracts', flush=True)
+        state[u] = {
+            'step': step, 'exchange': exchange, 'spot': spot, 'atm': atm, 'sid': sid,
+            'books': books, 'fut': fut_info,
+        }
 
-    total_contracts = sum(len(s['sid_map']) for s in state.values())
+    total_contracts = sum(len(b['sid_map']) for s in state.values() for b in s['books'])
     total_futs = sum(1 for s in state.values() if s.get('fut'))
     print(f'[focus_tool_ws] Subscribing to {total_contracts} option contracts + {total_futs} futures + 3 index canaries…', flush=True)
 
@@ -359,7 +390,7 @@ def main():
 
     dirty = threading.Event()
     helper.start_websocket(instruments, on_message=lambda inst, msg: dirty.set())
-    time.sleep(3)  # wait for connection + first tick batch
+    time.sleep(3)
 
     for u, s in state.items():
         idx_initial = helper.live_data.get(s['sid'])
@@ -406,7 +437,6 @@ def main():
                         s['spot'] = live_spot
                         s['atm'] = round(live_spot / s['step']) * s['step']
 
-                # Futures quote
                 fut_payload = None
                 if s.get('fut'):
                     f_meta = s['fut']
@@ -418,7 +448,7 @@ def main():
                             f_meta['prev_close'] = f_prev
                         if f_ltp > 0:
                             f_meta['ltp'] = f_ltp
-                    
+
                     cur_ltp = f_meta.get('ltp', 0.0)
                     cur_prev = f_meta.get('prev_close', 0.0)
                     chg_pct = round(((cur_ltp - cur_prev) / cur_prev) * 100, 2) if (cur_ltp > 0 and cur_prev > 0) else None
@@ -429,52 +459,62 @@ def main():
                         }
 
                 empty_leg = {'ltp': 0, 'oi': 0, 'change_pct': 0.0, 'oi_chg_pct': 0.0, 'buildup': ''}
-                strikes_data: dict[str, dict] = {}
-                for sid, meta in s['sid_map'].items():
-                    sk_key = str(meta['strike'])
-                    if sk_key not in strikes_data:
-                        strikes_data[sk_key] = {'strike': meta['strike'], 'ce': dict(empty_leg), 'pe': dict(empty_leg)}
-                    tick = helper.live_data.get(sid)
-                    if tick:
-                        ltp = _f(tick.get('LTP') or tick.get('last_price'))
-                        oi  = int(tick.get('OI', 0) or tick.get('oi', 0) or 0)
+                books_out: dict[str, dict] = {}
+                for book in s['books']:
+                    strikes_data: dict[str, dict] = {}
+                    for sid_key, meta in book['sid_map'].items():
+                        sk_key = str(meta['strike'])
+                        if sk_key not in strikes_data:
+                            strikes_data[sk_key] = {
+                                'strike': meta['strike'], 'ce': dict(empty_leg), 'pe': dict(empty_leg),
+                            }
+                        tick = helper.live_data.get(sid_key)
+                        if tick:
+                            ltp = _f(tick.get('LTP') or tick.get('last_price'))
+                            oi = int(tick.get('OI', 0) or tick.get('oi', 0) or 0)
 
-                        side_key = meta['type'].lower()
-                        strike_meta = s['prev_meta'].get(meta['strike']) or {}
-                        side_prev_oi = _f(strike_meta.get(f'{side_key}_oi'))
-                        fallback_prev_close = _f(strike_meta.get(f'{side_key}_close'))
+                            side_key = meta['type'].lower()
+                            strike_meta = book['prev_meta'].get(meta['strike']) or {}
+                            side_prev_oi = _f(strike_meta.get(f'{side_key}_oi'))
+                            fallback_prev_close = _f(strike_meta.get(f'{side_key}_close'))
 
-                        prev_close = _f(tick.get('prev_close') or tick.get('close'))
-                        if prev_close == 0.0:
-                            ohlc = tick.get('ohlc') or {}
-                            prev_close = _f(ohlc.get('close'))
-                        if prev_close == 0.0:
-                            prev_close = fallback_prev_close
+                            prev_close = _f(tick.get('prev_close') or tick.get('close'))
+                            if prev_close == 0.0:
+                                ohlc = tick.get('ohlc') or {}
+                                prev_close = _f(ohlc.get('close'))
+                            if prev_close == 0.0:
+                                prev_close = fallback_prev_close
 
-                        change_pct = ((ltp - prev_close) / prev_close * 100) if prev_close > 0 else 0.0
-                        oi_chg_pct = ((oi - side_prev_oi) / side_prev_oi * 100) if side_prev_oi > 0 and oi > 0 else 0.0
+                            change_pct = ((ltp - prev_close) / prev_close * 100) if prev_close > 0 else 0.0
+                            oi_chg_pct = ((oi - side_prev_oi) / side_prev_oi * 100) if side_prev_oi > 0 and oi > 0 else 0.0
 
-                        strikes_data[sk_key][side_key] = {
-                            'ltp':        round(ltp, 2),
-                            'oi':         oi,
-                            'change_pct': round(change_pct, 4),
-                            'oi_chg_pct': round(oi_chg_pct, 2),
-                            'buildup':    _classify_buildup(change_pct, oi_chg_pct),
-                        }
+                            strikes_data[sk_key][side_key] = {
+                                'ltp':        round(ltp, 2),
+                                'oi':         oi,
+                                'change_pct': round(change_pct, 4),
+                                'oi_chg_pct': round(oi_chg_pct, 2),
+                                'buildup':    _classify_buildup(change_pct, oi_chg_pct),
+                            }
+                    books_out[book['expiry']] = {
+                        'atm': s['atm'],
+                        'strikes': strikes_data,
+                    }
 
+                primary_expiry = s['books'][0]['expiry']
+                primary_book = books_out.get(primary_expiry) or {'atm': s['atm'], 'strikes': {}}
                 payload[u] = {
                     'spot': round(s['spot'], 2),
-                    'atm': s['atm'],
-                    'expiry': s['expiry'],
+                    'atm': primary_book['atm'],
+                    'expiry': primary_expiry,
                     'fut': fut_payload,
-                    'strikes': strikes_data,
+                    'strikes': primary_book['strikes'],
+                    # Per-expiry books so a Focus Tool row on a non-nearest
+                    # expiry still gets LTP + OI-buildup for ITS date.
+                    'books': books_out,
                 }
 
             now_ts = time.time()
 
-            # WS push (hot path): push immediately whenever the combined snapshot
-            # changed. Compare before stamping the volatile updated_at/pushed_at
-            # fields so identical market data never re-pushes.
             comparable = {k: v for k, v in payload.items() if k != 'updated_at'}
             if comparable != last_pushed:
                 push_payload = dict(payload)
@@ -482,13 +522,10 @@ def main():
                 push_server.broadcast(json.dumps(push_payload))
                 last_pushed = comparable
 
-            # Quotes file (fallback for the poll transport): relaxed 500ms cadence.
             if comparable != last_quotes and now_ts - last_file_write >= 0.5:
                 if atomic_write(QUOTES_FILE, payload):
                     last_quotes = comparable
                     last_file_write = now_ts
-                # else: write dropped (lock contention) — leave last_quotes so
-                # this same state is retried next loop rather than going stale.
 
             if now_ts - last_print > 10:
                 spots = ' | '.join(f'{u}={state[u]["spot"]:.2f}' for u in UNDERLYINGS)

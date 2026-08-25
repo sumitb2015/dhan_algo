@@ -27,7 +27,16 @@ const FALLBACK_POLL_MS = 100;
 const WS_RETRY_BASE_MS = 500;
 const WS_RETRY_MAX_MS  = 5000;
 const WS_FAILS_TO_POLL = 3;
+/** Live WS frames older than this are ignored (half-open / stuck bridge). */
 const STALE_MS         = 10_000;
+/**
+ * HTTP poll may surface the last file snapshot hours after the last tick
+ * (after the close, or while the bridge is RUNNING but idle). Rejecting that
+ * on the same 10s window blanked OI-buildup / spot the moment ticks stopped,
+ * even though LIVE still showed from the status file. Seed once from disk
+ * with this longer window; live WS frames stay on STALE_MS.
+ */
+const HTTP_SEED_STALE_MS = 6 * 60 * 60 * 1000;
 
 export type FocusUnderlying = 'NIFTY' | 'BANKNIFTY' | 'SENSEX';
 
@@ -49,15 +58,42 @@ export interface FocusWSStrike {
   pe: FocusWSLeg;
 }
 
+/** Per-expiry option book (ATM + strike ladder) inside a Focus WS payload. */
+export interface FocusWSBook {
+  atm: number;
+  strikes: Record<string, FocusWSStrike>;
+}
+
 export interface FocusWSUnderlyingQuotes {
   spot: number;
   atm: number;
+  /** Primary / first subscribed expiry (compat with single-expiry consumers). */
   expiry: string;
   fut?: {
     ltp: number;
     change_pct: number | null;
   } | null;
+  /** Primary book's strikes — same as books[expiry] when books is present. */
   strikes: Record<string, FocusWSStrike>;
+  /**
+   * Per-expiry books when the bridge was started with comma-separated
+   * expiries (row-driven). Prefer books[rowExpiry] over top-level strikes.
+   */
+  books?: Record<string, FocusWSBook>;
+}
+
+/** Resolve the option book for a Focus Tool row's expiry. */
+export function focusWsBookForExpiry(
+  uWs: FocusWSUnderlyingQuotes | undefined,
+  rowExpiry: string,
+): FocusWSBook | undefined {
+  if (!uWs) return undefined;
+  if (rowExpiry && uWs.books?.[rowExpiry]) return uWs.books[rowExpiry];
+  // Compat: older bridge / primary book only.
+  if (!rowExpiry || uWs.expiry === rowExpiry) {
+    return { atm: uWs.atm, strikes: uWs.strikes };
+  }
+  return undefined;
 }
 
 export interface FocusWSQuotes {
@@ -111,11 +147,11 @@ function runChannel(onUpdate: (patch: Partial<ChannelState>) => void): () => voi
   let watchdogInterval: ReturnType<typeof setInterval> | null = null;
   let lastStatusKey = '';
 
-  const acceptQuotes = (q: FocusWSQuotes | null): boolean => {
+  const acceptQuotes = (q: FocusWSQuotes | null, maxAgeMs: number = STALE_MS): boolean => {
     if (!q) return false;
     if (q.updated_at) {
       const ageMs = Date.now() - new Date(q.updated_at).getTime();
-      if (!(ageMs <= STALE_MS)) return false;   // NaN-safe: fail stale
+      if (!(ageMs <= maxAgeMs)) return false;   // NaN-safe: fail stale
     }
     return !!(q.NIFTY || q.BANKNIFTY || q.SENSEX);
   };
@@ -134,7 +170,11 @@ function runChannel(onUpdate: (patch: Partial<ChannelState>) => void): () => voi
       .then(r => r.json())
       .then((j: { success: boolean; status: FocusWSBridgeStatus; quotes: FocusWSQuotes }) => {
         if (disposed || !j.success) return;
-        if (acceptQuotes(j.quotes)) {
+        // First paint: accept the last file snapshot even if ticks have stopped
+        // (after hours). Once we hold quotes, only refresh them when fresh —
+        // don't overwrite a live book with an older idle file.
+        const maxAge = latestRef.quotes ? STALE_MS : HTTP_SEED_STALE_MS;
+        if (acceptQuotes(j.quotes, maxAge)) {
           latestRef.quotes = j.quotes;
           scheduleFlush();
         }

@@ -438,26 +438,40 @@ def broker_avg_trusted(broker_qty, own_qty):
     return broker_qty is not None and broker_qty == own_qty
 
 
-def side_premium_entry(fill, leg_ltp, broker_avg=None):
-    """Qty-weighted average (premium, entry_premium) across held legs.
+def combined_entry_premium(fill, lot_size):
+    """Σ (lots × entryPrice) across open legs — pair SL × baseline.
 
-    Mirrors sidePremium / the qty-weighted `entryPremium` FocusTool.tsx stamps
-    onto RowLive, unit for unit: `num += price * qty; den += qty; num / den`.
-    The pair SL x rule compares premium against entry_premium, so both MUST be
-    on the same scale — a raw CE+PE sum compared against a weighted average
-    (or vice versa) breaches at roughly double or half the intended level, and
-    is unrelated to what the equal-notional case happens to look like. This
-    used to feed evaluate_exit a plain sum (`premium += ltp` in the tick loop)
-    against the ledger's own sum-at-entry `entryPremium` field — self
-    consistent in isolation, but not what the browser's evaluateRowExit
-    actually computes once sidePremium became qty-weighted, so the same row
-    could breach on one engine and not the other.
-
-    `broker_avg`, when given, is preferred per leg over the ledger's own
-    entryPrice for the entry side — see evaluate_leg_exit's doc comment.
+    Fill qty is absolute contracts; divide by lot_size to get lots so the
+    figure matches the browser (CE 2@40 + PE 4@60 → 320, not a mid-price).
     """
-    num_p = den_p = 0.0
-    num_e = den_e = 0.0
+    lot = float(lot_size or 0)
+    if not (lot > 0):
+        return 0.0
+    total = 0.0
+    for k in ('CE', 'PE'):
+        held = (fill or {}).get(k)
+        if not held:
+            continue
+        qty = abs(float(held.get('qty') or 0))
+        price = float(held.get('entryPrice') or 0.0)
+        if qty > 0 and price > 0:
+            total += price * qty
+    return total / lot if total > 0 else 0.0
+
+
+def side_premium_entry(fill, leg_ltp, broker_avg=None, lot_size=None):
+    """Combined (lots × premium) live and entry across held legs.
+
+    Mirrors sidePremium / the lot×premium `entryPremium` FocusTool.tsx stamps
+    onto RowLive, unit for unit: `num += price * qty; num / lot_size`.
+    The pair SL x rule compares premium against entry_premium, so both MUST be
+    on the same scale.
+    """
+    lot = float(lot_size or 0)
+    if not (lot > 0):
+        return 0.0, 0.0
+    num_p = 0.0
+    num_e = 0.0
     for leg in ('CE', 'PE'):
         held = (fill or {}).get(leg)
         if not held:
@@ -468,14 +482,12 @@ def side_premium_entry(fill, leg_ltp, broker_avg=None):
         ltp = float((leg_ltp or {}).get(leg) or 0.0)
         if ltp > 0:
             num_p += ltp * qty
-            den_p += qty
         av = (broker_avg or {}).get(leg)
         entry = float(av) if av else float(held.get('entryPrice') or 0.0)
         if entry > 0:
             num_e += entry * qty
-            den_e += qty
-    premium = num_p / den_p if den_p > 0 else 0.0
-    entry_premium = num_e / den_e if den_e > 0 else 0.0
+    premium = num_p / lot if num_p > 0 else 0.0
+    entry_premium = num_e / lot if num_e > 0 else 0.0
     return premium, entry_premium
 
 
@@ -491,9 +503,9 @@ def evaluate_exit(row, group, fill, now_minutes, spot, premium, entry_premium, v
     scheduler; the browser evaluates them in its own tick loop for the same
     reason. Only the fourth is a shared, tested rule.
 
-    `premium`/`entry_premium` must already be the qty-weighted pair from
-    side_premium_entry — see its doc comment for why a plain sum does not
-    parity-match the browser's sidePremium/entryPremium.
+    `premium`/`entry_premium` must already be the lot×premium pair from
+    side_premium_entry — see its doc comment for why the scale must match
+    the browser's sidePremium/entryPremium.
     """
     if not fill:
         return False, ''
@@ -774,14 +786,9 @@ class FocusRowsWorker:
                     held['entryPrice'] = float(fill['price'])
                     held['confirmed'] = True
                     entry = self.fills.get(row_id) or {}
-                    qty_sum = sum(int((entry.get(k) or {}).get('qty') or 0)
-                                  for k in ('CE', 'PE') if entry.get(k))
-                    if qty_sum > 0:
-                        entry['entryPremium'] = sum(
-                            float((entry.get(k) or {}).get('entryPrice') or 0.0)
-                            * int((entry.get(k) or {}).get('qty') or 0)
-                            for k in ('CE', 'PE') if entry.get(k)
-                        ) / qty_sum
+                    u = entry.get('underlying') or ''
+                    lot = self.market.lot_size(u) if u else 0
+                    entry['entryPremium'] = combined_entry_premium(entry, lot)
                 self.save_state()
             if fill:
                 self.log('info', f"{row_id[-4:]} {leg}: filled {fill['qty']} @ {fill['price']:.2f}")
@@ -1121,13 +1128,7 @@ class FocusRowsWorker:
         opened['expiry'] = expiry
         opened['product'] = product
         opened['underlying'] = u
-        qty_sum = sum(int(v['qty']) for k, v in opened.items() if k in ('CE', 'PE'))
-        if qty_sum > 0:
-            opened['entryPremium'] = sum(
-                float(v['entryPrice']) * int(v['qty']) for k, v in opened.items() if k in ('CE', 'PE')
-            ) / qty_sum
-        else:
-            opened['entryPremium'] = 0.0
+        opened['entryPremium'] = combined_entry_premium(opened, lot)
         opened['enteredAt'] = datetime.now().isoformat()
         opened['bookedPnl'] = 0.0
         with self._fills_lock:
@@ -1179,7 +1180,7 @@ class FocusRowsWorker:
             if remaining:
                 remaining['expiry'] = expiry
                 remaining['product'] = product
-                remaining['entryPremium'] = fill.get('entryPremium')
+                remaining['entryPremium'] = combined_entry_premium(remaining, self.market.lot_size(u))
                 remaining['enteredAt'] = fill.get('enteredAt')
                 remaining['underlying'] = fill.get('underlying')
                 remaining['bookedPnl'] = booked
@@ -1230,6 +1231,9 @@ class FocusRowsWorker:
                     self.release_row_booked(fill)
                     self.fills.pop(row['id'], None)
                     self.set_row_status(row['id'], 'exited')
+                else:
+                    fill['entryPremium'] = combined_entry_premium(
+                        fill, self.market.lot_size(u))
                 self.save_state()
         else:
             self.log('error', f"{u} {row['id'][-4:]} {held['strike']}{leg}: leg-exit FAILED — {detail}")
@@ -1644,11 +1648,12 @@ class FocusRowsWorker:
                 if leg_exit_sent:
                     continue
 
-                # Qty-weighted, NOT the `premium` sum above (that one is the
-                # display figure, matching the browser's own combinedLtp) —
-                # see side_premium_entry's doc comment for why the pair SL x
-                # needs the same weighting the browser's sidePremium uses.
-                weighted_premium, weighted_entry = side_premium_entry(fill, leg_ltp, broker_avg)
+                # Lot×premium combined figure — see side_premium_entry's doc
+                # comment for why the pair SL x needs the same scale the
+                # browser's sidePremium uses.
+                lot = self.market.lot_size(u)
+                weighted_premium, weighted_entry = side_premium_entry(
+                    fill, leg_ltp, broker_avg, lot)
                 do_exit, reason = evaluate_exit(
                     row, group, fill, now_minutes, spot, weighted_premium, weighted_entry,
                     vwap, vwap_close, pnl)

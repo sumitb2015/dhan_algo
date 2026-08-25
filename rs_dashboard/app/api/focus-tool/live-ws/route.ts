@@ -115,6 +115,8 @@ export async function POST(request: NextRequest) {
 
   if (action === 'start') {
     const expiries = (body.expiries ?? {}) as Record<string, unknown>;
+    // Each value may be a single YYYY-MM-DD or a comma-separated list when
+    // Focus Tool rows span multiple expiries on the same underlying.
     const niftyExpiry = String(expiries.NIFTY ?? '');
     const bankniftyExpiry = String(expiries.BANKNIFTY ?? '');
     const sensexExpiry = String(expiries.SENSEX ?? '');

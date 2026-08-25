@@ -55,16 +55,16 @@ def load_cases():
 # ── Fixture -> the shapes the Python rules take ──────────────────────────────
 
 def premium_and_entry(case_live, side):
-    """Qty-weighted average premium and entry premium across the legs this
-    Side trades AND that are still open — matching lib/focusToolRules.test.ts's
-    own `live()` fixture helper, which builds RowLive.entryPremium the same
-    way FocusTool.tsx does (qty-weighted), and matching sidePremium in
-    lib/focusToolRules.ts, which is qty-weighted too (not a plain CE+PE sum —
-    a straddle with uneven CE/PE lots must not be measured as if both sides
-    were worth one lot each)."""
+    """Combined (lots × premium) live and entry across open legs this Side
+    trades — matching lib/focusToolRules.test.ts's `live()` fixture helper
+    and sidePremium in lib/focusToolRules.ts. Fill qty is absolute contracts;
+    lotSize (default 75) converts to lots so CE 2@40 + PE 4@60 → 320."""
     legs = ['CE', 'PE'] if side == 'BOTH' else [side]
-    num_p = den_p = 0.0
-    num_e = den_e = 0.0
+    lot = float(case_live.get('lotSize') or 75)
+    if not (lot > 0):
+        return 0.0, 0.0
+    num_p = 0.0
+    num_e = 0.0
     for leg in legs:
         qty = abs(case_live['ceQty'] if leg == 'CE' else case_live['peQty'])
         if qty == 0:
@@ -72,11 +72,9 @@ def premium_and_entry(case_live, side):
         ltp = case_live['ceLtp'] if leg == 'CE' else case_live['peLtp']
         entry = case_live['ceEntry'] if leg == 'CE' else case_live['peEntry']
         num_p += ltp * qty
-        den_p += qty
         num_e += entry * qty
-        den_e += qty
-    premium = num_p / den_p if den_p > 0 else 0.0
-    entry_premium = num_e / den_e if den_e > 0 else 0.0
+    premium = num_p / lot if num_p > 0 else 0.0
+    entry_premium = num_e / lot if num_e > 0 else 0.0
     return premium, entry_premium
 
 
@@ -155,7 +153,7 @@ def test_local_invariants():
     dead = {'levelHigh': '', 'levelLow': '', 'levelVw': True,
             'slRupees': '', 'slMultiplier': '2', 'side': 'BOTH'}
     check('zero premium never fires a premium rule',
-          evaluate_row_exit(dead, 24000.0, 0.0, 180.0, 0.0, 195.0, 0.0), None)
+          evaluate_row_exit(dead, 24000.0, 0.0, 360.0, 0.0, 195.0, 0.0), None)
 
     # The floor can only ever rise, and the fall through it fires.
     cfg = {'riskEnabled': False, 'targetRupees': '', 'stopRupees': '',

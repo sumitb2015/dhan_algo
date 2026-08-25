@@ -59,8 +59,11 @@ export interface RowLive {
   /** Realised + unrealised across the legs this row's Side trades, apportioned
    *  to this row's share of a netted broker position. */
   pnl: number;
-  /** Combined entry premium for those same legs, off the position's own avg. */
+  /** Combined entry for those same legs: Σ (lots × entry), off each leg's avg. */
   entryPremium: number;
+  /** Contracts per lot for this row's underlying — converts fill qty to lots
+   *  for pair SL ×. 0 when unresolved. */
+  lotSize: number;
   /** Session VWAP of the combined premium; null until fetched, or if VW is off. */
   vwap: number | null;
   /** Combined premium of the last CLOSED candle at the row's chosen VW
@@ -91,7 +94,8 @@ export interface RowLive {
 
 export const EMPTY_ROW_LIVE: RowLive = {
   ceStrike: null, peStrike: null, ltpCe: null, ltpPe: null,
-  cePosition: null, pePosition: null, pnl: 0, entryPremium: 0, vwap: null, vwapClose: null,
+  cePosition: null, pePosition: null, pnl: 0, entryPremium: 0, lotSize: 0,
+  vwap: null, vwapClose: null,
   ceBuildup: null, peBuildup: null, ceOiChgPct: null, peOiChgPct: null,
   ceOi: null, peOi: null, vwap1m: null, vwapClose1m: null,
 };
@@ -184,13 +188,11 @@ export function legOwnContracts(
 }
 
 /**
- * Qty-weighted average premium across only the legs this row's Side trades AND
- * that are still actually open.
+ * Combined premium across only the legs this row's Side trades AND that are
+ * still actually open: Σ (lots × LTP), where lots = ownContracts / lotSize.
  *
- * Weighting by this row's own contracts (not a bare CE+PE sum) matters when the
- * legs have different sizes — a 7-lot PE and a 5-lot CE must not be treated as a
- * 1-lot straddle for pair SL ×. Equal lots are algebraically identical to the
- * old unweighted sum for the `premium >= entry × mult` comparison.
+ * Example: CE 2 lots @ 40 + PE 4 lots @ 60 → 80 + 240 = 320. Pair SL × scales
+ * that figure (320 × 1.2 = 384), not a per-unit average.
  *
  * A leg the Side names but that has already been closed — by a leg-wise stop, a
  * manual Exit, anything — must not keep contributing its market LTP: the pair
@@ -201,35 +203,39 @@ export function sidePremium(
   row: Pick<FocusRow, 'side' | 'fill'>,
   live: RowLive,
   workerHold?: WorkerHold,
+  lotSize?: number | null,
 ): number {
+  const lot = Number(lotSize);
+  if (!(lot > 0)) return 0;
   let num = 0;
-  let den = 0;
   for (const leg of legsOf(row)) {
     const qty = legOwnContracts(row, leg, live, workerHold);
     if (qty <= 0) continue;
     num += ((leg === 'CE' ? live.ltpCe : live.ltpPe) ?? 0) * qty;
-    den += qty;
   }
-  return den > 0 ? num / den : 0;
+  return num > 0 ? num / lot : 0;
 }
 
 /**
- * Qty-weighted average entry premium across open owned legs — the denominator
- * for pair SL ×. Same weighting as sidePremium.
+ * Combined entry premium across open owned legs: Σ (lots × entry).
+ * Same scale as sidePremium — the baseline for pair SL ×.
+ *
+ * `qty` on each leg is absolute contracts (never lots); divided by lotSize.
  */
 export function entryPremiumWeighted(
   legs: { premium: number; qty: number }[],
+  lotSize?: number | null,
 ): number {
+  const lot = Number(lotSize);
+  if (!(lot > 0)) return 0;
   let num = 0;
-  let den = 0;
   for (const { premium, qty } of legs) {
     const q = Math.abs(Number(qty) || 0);
     const p = Number(premium) || 0;
     if (q <= 0 || !(p > 0)) continue;
     num += p * q;
-    den += q;
   }
-  return den > 0 ? num / den : 0;
+  return num > 0 ? num / lot : 0;
 }
 
 /**
@@ -278,16 +284,18 @@ export function stopPremium(
   return e * m;
 }
 
-function previewCombinedPremium(row: Pick<FocusRow, 'side'>, live: RowLive): number {
-  let num = 0;
-  let den = 0;
+/** Flat-row preview: row.lots on each named leg × live LTP, summed. */
+function previewCombinedPremium(
+  row: Pick<FocusRow, 'side' | 'lots'>,
+  live: RowLive,
+): number {
+  const lots = Number(row.lots) || 0;
+  if (!(lots > 0)) return 0;
+  let sum = 0;
   for (const leg of legsOf(row)) {
-    const p = (leg === 'CE' ? live.ltpCe : live.ltpPe) ?? 0;
-    // Flat preview: equal weight per named leg (no position sizes yet).
-    num += p;
-    den += 1;
+    sum += (leg === 'CE' ? live.ltpCe : live.ltpPe) ?? 0;
   }
-  return den > 0 ? num / den : 0;
+  return sum * lots;
 }
 
 /** This leg's SL × level. Uses sell/buy avg while owned and open, else live LTP (preview). */
@@ -307,11 +315,12 @@ export function legStopPremium(
   return stopPremium(entry, leg === 'CE' ? row.ceSlMultiplier : row.peSlMultiplier);
 }
 
-/** Pair SL × level. Uses qty-weighted entry premium while open, else equal-weight live LTP. */
+/** Pair SL × level. Uses combined (lots × premium) entry while open, else preview. */
 export function pairStopPremium(
-  row: Pick<FocusRow, 'slMultiplier' | 'side' | 'fill'>,
+  row: Pick<FocusRow, 'slMultiplier' | 'side' | 'fill' | 'lots'>,
   live: RowLive,
   workerHold?: WorkerHold,
+  lotSize?: number | null,
 ): number | null {
   let entry = live.entryPremium;
   if (!(entry > 0)) {
@@ -324,7 +333,7 @@ export function pairStopPremium(
       const avg = q < 0 ? Number(pos?.sellAvg) || 0 : Number(pos?.buyAvg) || 0;
       if (qty > 0 && avg > 0) legs.push({ premium: avg, qty });
     }
-    entry = entryPremiumWeighted(legs);
+    entry = entryPremiumWeighted(legs, lotSize);
   }
   if (!(entry > 0)) entry = previewCombinedPremium(row, live);
   return stopPremium(entry, row.slMultiplier);
@@ -378,6 +387,7 @@ export function evaluateRowExit(
   live: RowLive,
   spot: number,
   workerHold?: WorkerHold,
+  lotSize?: number | null,
 ): string | null {
   const hi = Number(row.levelHigh);
   if (row.levelHigh && Number.isFinite(hi) && spot > 0 && spot >= hi) {
@@ -388,11 +398,11 @@ export function evaluateRowExit(
     return `L↓ breached: spot ${spot.toFixed(2)} ≤ ${lo}`;
   }
 
-  // Premium of only the legs this row's Side trades AND actually owns.
-  // `entryPremium` is restricted the same way, so a CE-only row never
-  // compares a CE entry price against a CE+PE current price, and a leg this
-  // row doesn't own never contributes its premium either.
-  const nowPremium = sidePremium(row, live, workerHold);
+  // Combined (lots × premium) of only the legs this row's Side trades AND
+  // actually owns. `entryPremium` is restricted the same way, so a CE-only
+  // row never compares a CE entry against a CE+PE current figure, and a leg
+  // this row doesn't own never contributes either.
+  const nowPremium = sidePremium(row, live, workerHold, lotSize);
 
   if (row.levelVw && live.vwapClose != null && live.vwapClose > 0 && live.vwap != null && live.vwap > 0) {
     // Checked against the last CLOSED candle's premium, not the live tick —
