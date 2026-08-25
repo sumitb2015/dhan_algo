@@ -2,7 +2,7 @@
 
 import React, { useState, useEffect, useRef } from 'react';
 import {
-  AreaChart, Area, XAxis, YAxis, CartesianGrid,
+  AreaChart, Area, LineChart, Line, XAxis, YAxis, CartesianGrid,
   Tooltip, ResponsiveContainer, ReferenceLine, Legend,
 } from 'recharts';
 
@@ -15,6 +15,26 @@ interface TimePoint {
   ceOI: number;
   peOI: number;
   diff: number;
+  slope: number;
+  accel: number;
+  wpi: number;
+}
+
+type RegimeLabel = 'Bullish' | 'Weak Bullish' | 'Neutral' | 'Weak Bearish' | 'Bearish';
+
+interface RegimeSnapshot {
+  finalScore: number;
+  oiScore: number;
+  momentumScore: number;
+  confirmScore: number;
+  pBullish: number;
+  label: RegimeLabel;
+  strategy: string;
+  tradable: boolean;
+  transitionFlag: boolean;
+  transitionDirection: 'bullish' | 'bearish' | null;
+  warmingUp: boolean;
+  sampleCount: number;
 }
 
 interface CumulativeResponse {
@@ -24,6 +44,7 @@ interface CumulativeResponse {
   expiry:  string;
   wings:   number;
   data:    TimePoint[];
+  regime?: RegimeSnapshot;
   error?:  string;
 }
 
@@ -46,6 +67,26 @@ function sessionBoundsIST(date: string): { start: number; end: number } {
   const start = new Date(`${date}T09:15:00+05:30`).getTime();
   const end   = new Date(`${date}T15:30:00+05:30`).getTime();
   return { start, end };
+}
+
+function regimeColor(label: RegimeLabel): string {
+  switch (label) {
+    case 'Bullish':      return 'text-emerald-400';
+    case 'Weak Bullish':
+    case 'Neutral':
+    case 'Weak Bearish': return 'text-yellow-400';
+    case 'Bearish':      return 'text-red-400';
+  }
+}
+
+function regimeBarColor(label: RegimeLabel): string {
+  switch (label) {
+    case 'Bullish':      return 'bg-emerald-400';
+    case 'Weak Bullish':
+    case 'Neutral':
+    case 'Weak Bearish': return 'bg-yellow-400';
+    case 'Bearish':      return 'bg-red-400';
+  }
 }
 
 // ─── Tooltips ─────────────────────────────────────────────────────
@@ -151,6 +192,7 @@ export default function OptionsCumulativeOITab({ expiry: _expiry }: { expiry: st
   const data   = response?.data   ?? [];
   const atm    = response?.atm    ?? 0;
   const date   = response?.date   ?? '';
+  const regime = response?.regime ?? null;
   const last   = data.length > 0 ? data[data.length - 1] : null;
   const ceOI   = last?.ceOI ?? 0;
   const peOI   = last?.peOI ?? 0;
@@ -240,6 +282,15 @@ export default function OptionsCumulativeOITab({ expiry: _expiry }: { expiry: st
         <StatChip label="Expiry" value={response?.expiry || '—'} />
 
         <div className="ml-auto flex items-center gap-3 flex-wrap">
+          {regime?.transitionFlag && (
+            <span className={`text-[10px] font-bold px-2.5 py-1 rounded-full tracking-widest uppercase border ${
+              regime.transitionDirection === 'bullish'
+                ? 'text-emerald-400 bg-emerald-500/10 border-emerald-500/30'
+                : 'text-red-400 bg-red-500/10 border-red-500/30'
+            }`}>
+              ⇄ Regime shift: {regime.transitionDirection === 'bullish' ? 'turning bullish' : 'turning bearish'}
+            </span>
+          )}
           {date && (
             <span className="text-[10px] font-bold text-zinc-400 bg-zinc-800/80 border border-zinc-700 px-2.5 py-1 rounded-full tracking-widest uppercase">
               DATA: {date}
@@ -279,6 +330,67 @@ export default function OptionsCumulativeOITab({ expiry: _expiry }: { expiry: st
           Accumulating data — first point appears within 30s of collector start…
         </div>
       ) : (
+        <>
+        {/* ── Options Regime Score ────────────────────────────────────── */}
+        {regime && (
+          <div className="bg-zinc-900/60 border border-zinc-800 rounded-2xl p-5">
+            {regime.warmingUp ? (
+              <div className="flex items-center gap-3 py-2">
+                <div className="w-4 h-4 border-2 border-zinc-700 border-t-zinc-500 rounded-full animate-spin" />
+                <p className="text-sm text-zinc-500 font-medium">
+                  Building history — regime score available after ~5 min of data
+                  ({regime.sampleCount}/10 samples)
+                </p>
+              </div>
+            ) : (
+              <div className="flex flex-col gap-3">
+                <div className="flex items-center justify-between flex-wrap gap-3">
+                  <div>
+                    <p className="text-sm font-bold text-white tracking-tight">Options Regime Score</p>
+                    <p className="text-[10px] text-zinc-400 mt-0.5">
+                      0.4×OI Pressure + 0.3×Momentum + 0.3×Confirmation · thresholds: &gt;+1 Bullish, &lt;-1 Bearish, |x|&lt;0.5 Neutral
+                    </p>
+                  </div>
+                  <div className="flex items-center gap-4">
+                    <span className={`text-lg font-bold tabular-nums ${regimeColor(regime.label)}`}>
+                      {regime.label}
+                    </span>
+                    <span className="text-xs text-zinc-400 tabular-nums">
+                      Score {regime.finalScore >= 0 ? '+' : ''}{regime.finalScore.toFixed(2)}
+                    </span>
+                  </div>
+                </div>
+
+                <div className="w-full h-2.5 bg-zinc-800 rounded-full overflow-hidden">
+                  <div
+                    className={`h-full ${regimeBarColor(regime.label)} transition-all duration-500`}
+                    style={{ width: `${Math.round(regime.pBullish * 100)}%` }}
+                  />
+                </div>
+
+                <div className="flex items-center gap-5 flex-wrap">
+                  <StatChip label="Layer 1 · OI Pressure" value={`${regime.oiScore >= 0 ? '+' : ''}${regime.oiScore.toFixed(2)}`} />
+                  <StatChip label="Layer 2 · Momentum" value={`${regime.momentumScore >= 0 ? '+' : ''}${regime.momentumScore.toFixed(2)}`} />
+                  <StatChip label="Layer 3 · Confirmation" value={`${regime.confirmScore >= 0 ? '+' : ''}${regime.confirmScore.toFixed(2)}`} />
+                </div>
+
+                <div className="flex items-center justify-between flex-wrap gap-2">
+                  <p className="text-xs text-zinc-300">
+                    {regime.tradable ? 'Suggested' : 'Weak/uncertain — spec says ignore for trading'} (informational):{' '}
+                    <span className="font-semibold text-zinc-100">{regime.strategy}</span>
+                  </p>
+                  <p className="text-[10px] text-zinc-500">Informational only — not a trade signal</p>
+                </div>
+
+                <p className="text-[10px] text-zinc-600 border-t border-zinc-800 pt-2">
+                  Weights (0.4/0.3/0.3) are the spec's untuned defaults, not backtested. Optimize for expected value
+                  (P(win)×avgWin − P(loss)×avgLoss), not win rate, before sizing trades off this score.
+                </p>
+              </div>
+            )}
+          </div>
+        )}
+
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
 
           {/* ── Chart 1: CE OI vs PE OI ──────────────────────────────── */}
@@ -394,6 +506,56 @@ export default function OptionsCumulativeOITab({ expiry: _expiry }: { expiry: st
           </div>
 
         </div>
+
+        {/* ── Chart 3: Writing Pressure Index & Divergence Slope ──────── */}
+        <div className="bg-zinc-900/60 border border-zinc-800 rounded-2xl p-5">
+          <div className="flex items-center justify-between mb-4">
+            <div>
+              <p className="text-sm font-bold text-white tracking-tight">Writing Pressure &amp; Divergence Slope</p>
+              <p className="text-[10px] text-zinc-400 mt-0.5">
+                WPI positive = put writing / call buying dominant (bullish) · Slope = momentum of OI divergence
+              </p>
+            </div>
+            <div className="flex items-center gap-3 text-[10px] font-semibold">
+              <span className="flex items-center gap-1.5">
+                <span className="w-3 h-3 rounded-sm bg-purple-400" />
+                <span className="text-zinc-300">WPI</span>
+              </span>
+              <span className="flex items-center gap-1.5">
+                <span className="w-3 h-3 rounded-sm bg-amber-400" />
+                <span className="text-zinc-300">Slope</span>
+              </span>
+            </div>
+          </div>
+
+          <ResponsiveContainer width="100%" height={260}>
+            <LineChart data={data} margin={{ top: 8, right: 16, left: 0, bottom: 0 }}>
+              <CartesianGrid {...gridProps} />
+              <XAxis {...xAxisProps} />
+              <YAxis
+                tick={{ fontSize: 10, fill: '#a1a1aa', fontWeight: 500 }}
+                tickLine={false}
+                axisLine={false}
+                domain={['auto', 'auto']}
+                width={48}
+                tickFormatter={v => v.toFixed(2)}
+              />
+              <Tooltip
+                contentStyle={{ background: '#09090b', border: '1px solid #3f3f46', borderRadius: 12, fontSize: 11 }}
+                labelFormatter={v => (typeof v === 'number' ? fmtTick(v) : String(v))}
+                formatter={(v, name) => [typeof v === 'number' ? v.toFixed(3) : String(v), String(name)]}
+              />
+              <ReferenceLine y={0} stroke="#52525b" strokeWidth={1.5} />
+              <Legend
+                wrapperStyle={{ fontSize: 11, paddingTop: 12 }}
+                formatter={(v: string) => <span style={{ color: '#d4d4d8', fontWeight: 600 }}>{v}</span>}
+              />
+              <Line type="monotone" dataKey="wpi" name="WPI" stroke="#c084fc" strokeWidth={2} dot={false} activeDot={{ r: 4 }} />
+              <Line type="monotone" dataKey="slope" name="Slope" stroke="#fbbf24" strokeWidth={2} dot={false} activeDot={{ r: 4 }} />
+            </LineChart>
+          </ResponsiveContainer>
+        </div>
+        </>
       )}
     </div>
   );

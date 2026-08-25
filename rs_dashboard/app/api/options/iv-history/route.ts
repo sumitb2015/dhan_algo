@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import path from 'path';
 import fs from 'fs';
+import { computeRegimeSeries, type RegimeInputPoint } from '@/lib/optionsRegime';
 
 const PROJECT_ROOT = path.resolve(process.cwd(), '..');
 const DEBUG_DIR    = path.join(PROJECT_ROOT, 'debug');
@@ -147,16 +148,31 @@ export async function GET(request: NextRequest) {
     const clampedWings = Math.min(Math.max(wings, 1), maxWings);
     const wingRange = clampedWings * strikeStep;
 
-    // Group by timestamp, sum OI for strikes within atm±wings
-    const byTs = new Map<string, { spot: number; ceOI: number; peOI: number }>();
+    // Group by timestamp, sum OI for strikes within atm±wings.
+    // LTP is tracked as an OI-weighted sum (divided by total OI below) rather than
+    // a plain sum across strikes, since summing premiums across different strikes
+    // is not meaningful — the weighted average reflects where OI pressure sits.
+    const byTs = new Map<string, {
+      spot: number; ceOI: number; peOI: number;
+      ceLtpWeighted: number; peLtpWeighted: number;
+      ceChgOI: number; peChgOI: number;
+    }>();
     for (const row of allRows) {
       if (Math.abs(row.strike - atm) > wingRange) continue;
       const existing = byTs.get(row.timestamp);
       if (existing) {
         existing.ceOI += row.CE_OI;
         existing.peOI += row.PE_OI;
+        existing.ceLtpWeighted += row.CE_LTP * row.CE_OI;
+        existing.peLtpWeighted += row.PE_LTP * row.PE_OI;
+        existing.ceChgOI += row.CE_change_OI;
+        existing.peChgOI += row.PE_change_OI;
       } else {
-        byTs.set(row.timestamp, { spot: row.spot, ceOI: row.CE_OI, peOI: row.PE_OI });
+        byTs.set(row.timestamp, {
+          spot: row.spot, ceOI: row.CE_OI, peOI: row.PE_OI,
+          ceLtpWeighted: row.CE_LTP * row.CE_OI, peLtpWeighted: row.PE_LTP * row.PE_OI,
+          ceChgOI: row.CE_change_OI, peChgOI: row.PE_change_OI,
+        });
       }
     }
 
@@ -180,17 +196,31 @@ export async function GET(request: NextRequest) {
       }
     }
 
-    const data = sorted.map(([timestamp, { spot, ceOI, peOI }]) => ({
+    const regimeInput: RegimeInputPoint[] = sorted.map(([, v]) => ({
+      spot: v.spot,
+      ceOI: v.ceOI,
+      peOI: v.peOI,
+      ceLTP: v.ceOI > 0 ? v.ceLtpWeighted / v.ceOI : 0,
+      peLTP: v.peOI > 0 ? v.peLtpWeighted / v.peOI : 0,
+      ceChgOI: v.ceChgOI,
+      peChgOI: v.peChgOI,
+    }));
+    const { points: regimePoints, latest: regime } = computeRegimeSeries(regimeInput);
+
+    const data = sorted.map(([timestamp, { spot, ceOI, peOI }], i) => ({
       time: timestamp.slice(11, 19),
       ts:   istStringToEpoch(timestamp),
       spot,
       ceOI,
       peOI,
       diff: peOI - ceOI,
+      slope: regimePoints[i].slope,
+      accel: regimePoints[i].accel,
+      wpi: regimePoints[i].wpi,
     }));
 
     const response = NextResponse.json({
-      success: true, date, atm, expiry, wings: clampedWings, data,
+      success: true, date, atm, expiry, wings: clampedWings, data, regime,
     });
     response.headers.set('Cache-Control', 'public, s-maxage=30, stale-while-revalidate=60');
     return response;

@@ -71,6 +71,19 @@ def is_after_close(dt: datetime) -> bool:
     return minutes_since_midnight(dt) >= close_mins
 
 
+def is_trading_day(d: date) -> bool:
+    """Weekday + NSE holiday check.
+
+    The collector is auto-spawned with the dashboard server every day, including
+    weekends and holidays. Without this gate it still polls the option chain and
+    writes a full 09:15-15:30 CSV of the market's last stale quote (confirmed on
+    2026-08-16/22/23) — junk data indistinguishable from a real session until read.
+    """
+    if d.weekday() >= 5:  # 5=Sat, 6=Sun
+        return False
+    return d.isoformat() not in DhanHelper.NSE_HOLIDAYS
+
+
 def csv_path(today: date) -> str:
     debug_dir = os.path.join(ROOT, 'debug')
     os.makedirs(debug_dir, exist_ok=True)
@@ -82,13 +95,23 @@ def stop_trigger_path() -> str:
 
 
 def extract_side(side: dict) -> dict:
-    """Extract all useful fields from a CE or PE option side dict."""
+    """Extract all useful fields from a CE or PE option side dict.
+
+    Dhan's option-chain response has no direct OI-change field — the keys this
+    used to look for ('change_in_open_interest', 'oi_change') don't exist in the
+    actual response, so change_OI was silently blank for every row ever collected.
+    Dhan reports 'oi' (current) and 'previous_oi' (prior day's close OI, per
+    CLAUDE.md) — change is derived from those two.
+    """
     greeks = side.get('greeks', {}) or {}
+    oi = side.get('oi', '')
+    previous_oi = side.get('previous_oi', '')
+    change_oi = (oi - previous_oi) if isinstance(oi, (int, float)) and isinstance(previous_oi, (int, float)) else ''
     return {
         'LTP':       side.get('last_price', ''),
         'IV':        side.get('implied_volatility') or greeks.get('iv', ''),
-        'OI':        side.get('oi', ''),
-        'change_OI': side.get('change_in_open_interest') or side.get('oi_change', ''),
+        'OI':        oi,
+        'change_OI': change_oi,
         'volume':    side.get('volume', ''),
         'bid':       side.get('bid_price', ''),
         'ask':       side.get('ask_price', ''),
@@ -243,6 +266,10 @@ def main():
     args = parser.parse_args()
 
     underlying = args.underlying.upper()
+
+    if not args.ignore_market_hours and not is_trading_day(ist_now().date()):
+        log.info('Not a trading day (%s) — exiting without collecting', ist_now().date().isoformat())
+        return
 
     dhan = get_dhan_client()
     if not dhan:
