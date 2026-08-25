@@ -517,6 +517,38 @@ function RuleNumInput({ value, onCommit, placeholder, className, title, disabled
   );
 }
 
+/** RuleNumInput flanked by -/+ steppers, step size 1 — for level-exit H/L price fields. */
+function RuleNumStepper({ value, onCommit, className, title, disabled }: {
+  value: string; onCommit: (v: string) => void; className?: string; title?: string; disabled?: boolean;
+}) {
+  const step = (delta: number) => onCommit(String((Number(value) || 0) + delta));
+  return (
+    <div className="inline-flex items-center gap-0.5">
+      <button
+        type="button"
+        onClick={() => step(-1)}
+        disabled={disabled}
+        title="Decrease by 1"
+        aria-label="Decrease by 1"
+        className={cn('h-6 w-5 shrink-0 rounded bg-zinc-800 border border-zinc-700 text-zinc-300 text-[10px] font-bold flex items-center justify-center hover:bg-zinc-700 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed transition-colors', FOCUS_RING)}
+      >
+        -
+      </button>
+      <RuleNumInput value={value} onCommit={onCommit} className={className} title={title} disabled={disabled} />
+      <button
+        type="button"
+        onClick={() => step(1)}
+        disabled={disabled}
+        title="Increase by 1"
+        aria-label="Increase by 1"
+        className={cn('h-6 w-5 shrink-0 rounded bg-zinc-800 border border-zinc-700 text-zinc-300 text-[10px] font-bold flex items-center justify-center hover:bg-violet-600 hover:border-violet-600 hover:text-oncolor cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed transition-colors', FOCUS_RING)}
+      >
+        +
+      </button>
+    </div>
+  );
+}
+
 /** Lots-per-leg config field: a number box flanked by -/+ steppers, clamped at 1. */
 function LotStepper({ value, onChange }: { value: number; onChange: (v: number) => void }) {
   return (
@@ -1621,12 +1653,12 @@ function FocusTableRowImpl({
           <div className="flex items-center gap-2">
             <div className="flex items-center gap-1">
               <span className="text-[9px] font-black text-rose-400">H&uarr;</span>
-              <RuleNumInput value={row.levelHigh} onCommit={v => onUpdate({ levelHigh: v })} className="w-20"
+              <RuleNumStepper value={row.levelHigh} onCommit={v => onUpdate({ levelHigh: v })} className="w-14"
                 title="Exit this row when spot trades at or above this level. Applies when you leave the field, not while typing." />
             </div>
             <div className="flex items-center gap-1">
               <span className="text-[9px] font-black text-emerald-400">L&darr;</span>
-              <RuleNumInput value={row.levelLow} onCommit={v => onUpdate({ levelLow: v })} className="w-20"
+              <RuleNumStepper value={row.levelLow} onCommit={v => onUpdate({ levelLow: v })} className="w-14"
                 title="Exit this row when spot trades at or below this level. Applies when you leave the field, not while typing." />
             </div>
           </div>
@@ -1878,11 +1910,11 @@ function FocusRowCardImpl({
       <div className="flex flex-col gap-1 text-[11px]">
         <div className="flex justify-between items-center">
           <span className="text-rose-400 text-[9px] font-black">H&uarr;</span>
-          <RuleNumInput value={row.levelHigh} onCommit={v => onUpdate({ levelHigh: v })} className="w-20 h-6" />
+          <RuleNumStepper value={row.levelHigh} onCommit={v => onUpdate({ levelHigh: v })} className="w-14 h-6" />
         </div>
         <div className="flex justify-between items-center mt-1">
           <span className="text-emerald-400 text-[9px] font-black">L&darr;</span>
-          <RuleNumInput value={row.levelLow} onCommit={v => onUpdate({ levelLow: v })} className="w-20 h-6" />
+          <RuleNumStepper value={row.levelLow} onCommit={v => onUpdate({ levelLow: v })} className="w-14 h-6" />
         </div>
         <div className="flex justify-between items-center mt-1">
           <span className="text-amber-400 text-[9px] font-black">SL ₹</span>
