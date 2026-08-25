@@ -2015,7 +2015,7 @@ export interface OptionPanelProps {
   strikesReady?: boolean;
 }
 
-const BUILDUP_STYLES: Record<string, { text: string; cls: string }> = {
+export const BUILDUP_STYLES: Record<string, { text: string; cls: string }> = {
   LB: { text: 'Long Buildup',   cls: 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20' },
   SB: { text: 'Short Buildup',  cls: 'bg-rose-500/10 text-rose-400 border-rose-500/20' },
   SC: { text: 'Short Covering', cls: 'bg-amber-500/10 text-amber-400 border-amber-500/20' },

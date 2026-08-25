@@ -9,7 +9,7 @@ import {
   Clock, Plus, Check, Save, Layers, Target, Lock, RefreshCw, X,
   ChevronUp, ChevronDown, Server,
 } from 'lucide-react';
-import { TabTable, type SortState } from './Scalper';
+import { TabTable, type SortState, BUILDUP_STYLES } from './Scalper';
 import { useBrokerSelector, scalperRoute, BROKER_LABELS, type Broker } from '@/hooks/useBrokerSelector';
 import { closeOrderProduct, positionProduct } from '@/lib/positionProduct';
 import { scaleBrokerPnl } from '@/lib/positionPnl';
@@ -639,7 +639,8 @@ function SegPill<T extends string>({
 /** One leg's strike selector: an ATM-offset dropdown or a target-premium
  *  input, with the currently resolved strike shown alongside. */
 function StrikeLegSelector({
-  leg, mode, offset, premium, resolvedStrike, step, ltp, onOffsetChange, onPremiumChange, onShift, shiftDisabled, locked,
+  leg, mode, offset, premium, resolvedStrike, step, ltp, buildup, oiChgPct,
+  onOffsetChange, onPremiumChange, onShift, shiftDisabled, locked,
 }: {
   leg: 'CE' | 'PE';
   mode: FocusStrikeMode;
@@ -651,6 +652,11 @@ function StrikeLegSelector({
    *  trader can see what price they'd be entering at without scanning over
    *  to the row's separate LTP column. */
   ltp?: number | null;
+  /** 4-way OI-buildup label at this strike ('LB'|'SB'|'SC'|'LU'), same source
+   *  and thresholds as AdvancedScalper — null/'' hides the chip. */
+  buildup?: string | null;
+  /** OI change vs prev day (%), shown alongside the buildup chip. */
+  oiChgPct?: number | null;
   onOffsetChange: (n: number) => void;
   onPremiumChange: (v: string) => void;
   onShift?: (direction: 'UP' | 'DOWN') => void;
@@ -659,6 +665,7 @@ function StrikeLegSelector({
    *  position cannot be orphaned. See StrikeEditor's doc comment. */
   locked?: boolean;
 }) {
+  const buildupStyle = buildup ? BUILDUP_STYLES[buildup] : undefined;
   const lockedTitle = `${leg} holds an open position — use the chevrons to roll it, or exit the leg first`;
   return (
     <div className="flex items-center gap-1.5">
@@ -688,6 +695,14 @@ function StrikeLegSelector({
       >
         {resolvedStrike != null && ltp != null && ltp > 0 ? `@${ltp.toFixed(2)}` : '—'}
       </span>
+      {buildupStyle && (
+        <span
+          className={cn('text-[8px] font-black px-1 py-0.5 rounded border leading-none', buildupStyle.cls)}
+          title={`${buildupStyle.text}${oiChgPct != null && oiChgPct !== 0 ? ` — OI ${oiChgPct > 0 ? '+' : ''}${oiChgPct.toFixed(1)}%` : ''}`}
+        >
+          {buildup}
+        </span>
+      )}
       {onShift && (
         <div className="flex flex-col gap-0.5">
           <button
@@ -809,11 +824,13 @@ function StrikeEditor({ row, live, step, onUpdate, onShift, shiftDisabled, onBlo
         className="self-start" />
       <StrikeLegSelector leg="CE" mode={mode} offset={row.ceOffset ?? 0} premium={row.cePremium ?? ''}
         resolvedStrike={live.ceStrike} step={step} ltp={live.ltpCe} locked={legOpen.CE}
+        buildup={live.ceBuildup} oiChgPct={live.ceOiChgPct}
         onOffsetChange={n => setLeg('CE', { ceOffset: n })}
         onPremiumChange={v => setLeg('CE', { cePremium: v })}
         onShift={onShift ? dir => onShift('CE', dir) : undefined} shiftDisabled={shiftDisabled} />
       <StrikeLegSelector leg="PE" mode={mode} offset={row.peOffset ?? 0} premium={row.pePremium ?? ''}
         resolvedStrike={live.peStrike} step={step} ltp={live.ltpPe} locked={legOpen.PE}
+        buildup={live.peBuildup} oiChgPct={live.peOiChgPct}
         onOffsetChange={n => setLeg('PE', { peOffset: n })}
         onPremiumChange={v => setLeg('PE', { pePremium: v })}
         onShift={onShift ? dir => onShift('PE', dir) : undefined} shiftDisabled={shiftDisabled} />
@@ -2616,7 +2633,9 @@ export default function FocusTool() {
     a.ceStrike === b.ceStrike && a.peStrike === b.peStrike
     && a.ltpCe === b.ltpCe && a.ltpPe === b.ltpPe
     && a.cePosition === b.cePosition && a.pePosition === b.pePosition
-    && a.pnl === b.pnl && a.entryPremium === b.entryPremium && a.vwap === b.vwap && a.vwapClose === b.vwapClose;
+    && a.pnl === b.pnl && a.entryPremium === b.entryPremium && a.vwap === b.vwap && a.vwapClose === b.vwapClose
+    && a.ceBuildup === b.ceBuildup && a.peBuildup === b.peBuildup
+    && a.ceOiChgPct === b.ceOiChgPct && a.peOiChgPct === b.peOiChgPct;
   const rowLive = useMemo<Record<string, RowLive>>(() => {
     const out: Record<string, RowLive> = {};
     const prevOut = rowLivePrevRef.current;
@@ -2689,6 +2708,14 @@ export default function FocusTool() {
 
       const ltpCe = pick(ceWs?.ce?.ltp, ceCh?.ce);
       const ltpPe = pick(peWs?.pe?.ltp, peCh?.pe);
+      // OI-buildup label/OI-change — display only, sourced straight off
+      // focus_tool_ws.py (the single source of these labels, same thresholds
+      // as AdvancedScalper's live_options_ws.py). '' from the bridge means
+      // "not classifiable yet", normalized here to null.
+      const ceBuildup = ceWs?.ce?.buildup || null;
+      const peBuildup = peWs?.pe?.buildup || null;
+      const ceOiChgPct = ceWs?.ce?.oi_chg_pct ?? null;
+      const peOiChgPct = peWs?.pe?.oi_chg_pct ?? null;
 
       /**
        * P&L across only the legs this row's Side trades.
@@ -2751,6 +2778,7 @@ export default function FocusTool() {
         ltpCe, ltpPe,
         cePosition, pePosition,
         pnl, entryPremium, vwap, vwapClose,
+        ceBuildup, peBuildup, ceOiChgPct, peOiChgPct,
       };
       const prevLive = prevOut[row.id];
       out[row.id] = prevLive && rowLiveEqual(prevLive, computed) ? prevLive : computed;

@@ -68,11 +68,20 @@ export interface RowLive {
    *  tick spike can't trigger the exit on its own. Null until fetched, or if
    *  VW is off. */
   vwapClose: number | null;
+  /** Display-only OI-buildup label ('LB'|'SB'|'SC'|'LU'|null) and OI change %
+   *  per leg, straight off focus_tool_ws.py — the rule engine does not read
+   *  these (no exit rule reacts to OI), so they carry no test-fixture weight
+   *  in focusToolRules.cases.json. */
+  ceBuildup: string | null;
+  peBuildup: string | null;
+  ceOiChgPct: number | null;
+  peOiChgPct: number | null;
 }
 
 export const EMPTY_ROW_LIVE: RowLive = {
   ceStrike: null, peStrike: null, ltpCe: null, ltpPe: null,
   cePosition: null, pePosition: null, pnl: 0, entryPremium: 0, vwap: null, vwapClose: null,
+  ceBuildup: null, peBuildup: null, ceOiChgPct: null, peOiChgPct: null,
 };
 
 // ── Legs ─────────────────────────────────────────────────────────────────────

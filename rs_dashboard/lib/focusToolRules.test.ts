@@ -56,6 +56,7 @@ function live(c: LiveCase): RowLive {
     entryPremium: (cePosition ? c.ceEntry : 0) + (pePosition ? c.peEntry : 0),
     vwap: c.vwap ?? null,
     vwapClose: c.vwapClose ?? null,
+    ceBuildup: null, peBuildup: null, ceOiChgPct: null, peOiChgPct: null,
   };
 }
 

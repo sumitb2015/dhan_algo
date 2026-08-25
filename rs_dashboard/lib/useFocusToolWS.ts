@@ -33,6 +33,14 @@ export type FocusUnderlying = 'NIFTY' | 'BANKNIFTY' | 'SENSEX';
 
 export interface FocusWSLeg {
   ltp: number;
+  /** OI-buildup fields, all optional — populated by focus_tool_ws.py once its
+   *  prev-day baseline fetch completes. Same 4-way label/thresholds as
+   *  AdvancedScalper's live_options_ws.py bridge (LB/SB/SC/LU); '' means not
+   *  classifiable (inside the dead-band or no baseline yet), not "flat". */
+  oi?: number;
+  change_pct?: number | null;
+  oi_chg_pct?: number;
+  buildup?: string;
 }
 
 export interface FocusWSStrike {

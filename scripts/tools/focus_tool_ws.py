@@ -71,6 +71,59 @@ def _f(val, default: float = 0.0) -> float:
         return default
 
 
+# Buildup dead-bands — copied from scripts/tools/live_options_ws.py rather than
+# imported (this bridge is deliberately standalone, see module docstring), but
+# MUST stay numerically identical: AdvancedScalper and Focus Tool would
+# otherwise label the same strike differently depending on which page you're
+# looking at.
+BUILDUP_MIN_PRICE_PCT = 0.01
+BUILDUP_MIN_OI_PCT    = 0.5
+
+
+def _classify_buildup(change_pct: float, oi_chg_pct: float) -> str:
+    """4-way OI buildup label: LB/SB (OI up), SC/LU (OI down); '' inside dead-band."""
+    if abs(change_pct) < BUILDUP_MIN_PRICE_PCT or abs(oi_chg_pct) < BUILDUP_MIN_OI_PCT:
+        return ''
+    if oi_chg_pct > 0:
+        return 'LB' if change_pct > 0 else 'SB'
+    return 'SC' if change_pct > 0 else 'LU'
+
+
+def _fetch_prev_meta(helper, underlying: str, expiry: str, exchange_segment: str, attempts: int = 5, delay: float = 5.0) -> dict:
+    """Fetch previous-day OI and previous-day Close per strike/side from the option
+    chain (at startup). Retries on transient failures (429s, empty chain) since a
+    single missed fetch would otherwise disable buildup labels for the whole
+    session. Returns {strike_int: {'ce_oi', 'pe_oi', 'ce_close', 'pe_close'}}.
+
+    Only genuine previous-day fields are accepted — see live_options_ws.py's
+    identical function for why a current-value fallback would be fabricated data.
+    """
+    for attempt in range(attempts):
+        prev_meta: dict = {}
+        try:
+            chain = helper.get_option_chain(underlying, expiry, exchange_segment=exchange_segment)
+            for strike_str, data in ((chain or {}).get('oc') or {}).items():
+                strike = int(float(strike_str))
+                ce_data = data.get('ce') or {}
+                pe_data = data.get('pe') or {}
+                prev_meta[strike] = {
+                    'ce_oi':    int(_f(ce_data.get('previous_oi'))),
+                    'pe_oi':    int(_f(pe_data.get('previous_oi'))),
+                    'ce_close': _f(ce_data.get('previous_close')),
+                    'pe_close': _f(pe_data.get('previous_close')),
+                }
+        except Exception as e:
+            print(f'[focus_tool_ws] WARN: prev_meta fetch failed for {underlying} (attempt {attempt + 1}/{attempts}): {e}', flush=True)
+            prev_meta = {}
+
+        if prev_meta:
+            return prev_meta
+        if attempt < attempts - 1:
+            print(f'[focus_tool_ws] WARN: prev_meta fetch for {underlying} returned no strikes (attempt {attempt + 1}/{attempts}), retrying in {delay:.0f}s…', flush=True)
+            time.sleep(delay)
+    return {}
+
+
 def atomic_write(path: str, data: dict) -> bool:
     tmp = path + '.tmp'
     try:
@@ -244,6 +297,12 @@ def main():
         atm = round(spot / step) * step if spot > 0 else 0
         print(f'[focus_tool_ws] {u}: spot={spot:.2f} atm={atm} step={step}', flush=True)
 
+        # Prev-day OI/close baseline for OI-buildup labels (LB/SB/SC/LU) — same
+        # source and shape as live_options_ws.py's AdvancedScalper panels.
+        chain_seg = 'IDX_I' if exchange == 'NSE' else 'BSE_IDX'
+        prev_meta = _fetch_prev_meta(helper, u, expiry, exchange_segment=chain_seg)
+        print(f'[focus_tool_ws] {u}: prev-day baseline for {len(prev_meta)} strikes', flush=True)
+
         strikes = [atm + i * step for i in range(-args.num_strikes, args.num_strikes + 1)] if atm > 0 else []
         sid_map: dict[str, dict] = {}   # sid -> {underlying, strike, type}
         option_feed_segment = OPTION_FEED_SEGMENT[exchange]
@@ -281,7 +340,7 @@ def main():
             print(f'[focus_tool_ws] {u}: WARNING could not resolve future contract: {e}', flush=True)
 
         state[u] = {'step': step, 'exchange': exchange, 'spot': spot, 'atm': atm, 'sid': sid,
-                    'expiry': expiry, 'sid_map': sid_map, 'fut': fut_info}
+                    'expiry': expiry, 'sid_map': sid_map, 'fut': fut_info, 'prev_meta': prev_meta}
         print(f'[focus_tool_ws] {u}: resolved {len(sid_map)} option contracts', flush=True)
 
     total_contracts = sum(len(s['sid_map']) for s in state.values())
@@ -364,15 +423,39 @@ def main():
                             'change_pct': chg_pct,
                         }
 
+                empty_leg = {'ltp': 0, 'oi': 0, 'change_pct': 0.0, 'oi_chg_pct': 0.0, 'buildup': ''}
                 strikes_data: dict[str, dict] = {}
                 for sid, meta in s['sid_map'].items():
                     sk_key = str(meta['strike'])
                     if sk_key not in strikes_data:
-                        strikes_data[sk_key] = {'strike': meta['strike'], 'ce': {'ltp': 0}, 'pe': {'ltp': 0}}
+                        strikes_data[sk_key] = {'strike': meta['strike'], 'ce': dict(empty_leg), 'pe': dict(empty_leg)}
                     tick = helper.live_data.get(sid)
                     if tick:
                         ltp = _f(tick.get('LTP') or tick.get('last_price'))
-                        strikes_data[sk_key][meta['type'].lower()] = {'ltp': round(ltp, 2)}
+                        oi  = int(tick.get('OI', 0) or tick.get('oi', 0) or 0)
+
+                        side_key = meta['type'].lower()
+                        strike_meta = s['prev_meta'].get(meta['strike']) or {}
+                        side_prev_oi = _f(strike_meta.get(f'{side_key}_oi'))
+                        fallback_prev_close = _f(strike_meta.get(f'{side_key}_close'))
+
+                        prev_close = _f(tick.get('prev_close') or tick.get('close'))
+                        if prev_close == 0.0:
+                            ohlc = tick.get('ohlc') or {}
+                            prev_close = _f(ohlc.get('close'))
+                        if prev_close == 0.0:
+                            prev_close = fallback_prev_close
+
+                        change_pct = ((ltp - prev_close) / prev_close * 100) if prev_close > 0 else 0.0
+                        oi_chg_pct = ((oi - side_prev_oi) / side_prev_oi * 100) if side_prev_oi > 0 and oi > 0 else 0.0
+
+                        strikes_data[sk_key][side_key] = {
+                            'ltp':        round(ltp, 2),
+                            'oi':         oi,
+                            'change_pct': round(change_pct, 4),
+                            'oi_chg_pct': round(oi_chg_pct, 2),
+                            'buildup':    _classify_buildup(change_pct, oi_chg_pct),
+                        }
 
                 payload[u] = {
                     'spot': round(s['spot'], 2),
