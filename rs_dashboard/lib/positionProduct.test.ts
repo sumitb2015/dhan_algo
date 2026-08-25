@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert';
 import {
-  positionProduct, positionKey, findLivePosition, closeOrderProduct,
+  positionProduct, positionKey, findLivePosition, closeOrderProduct, isIntradayProduct,
 } from './positionProduct.ts';
 
 const row = (tradingSymbol: string, productType: string, netQty = 75) =>
@@ -95,4 +95,20 @@ test('broker-managed CO/BO legs are refused', () => {
 test('an unreported product falls back to the route default, flagged as assumed', () => {
   assert.deepStrictEqual(closeOrderProduct('dhan', ''), { fields: {}, assumed: true });
   assert.deepStrictEqual(closeOrderProduct('zerodha', '   '), { fields: {}, assumed: true });
+});
+
+test('isIntradayProduct recognises INTRADAY (Dhan) and MIS (Kite/Neo), case- and whitespace-insensitively', () => {
+  assert.strictEqual(isIntradayProduct('INTRADAY'), true);
+  assert.strictEqual(isIntradayProduct('intraday'), true);
+  assert.strictEqual(isIntradayProduct(' MIS '), true);
+  assert.strictEqual(isIntradayProduct('mis'), true);
+});
+
+test('isIntradayProduct treats carried-forward and unknown products as NOT intraday', () => {
+  assert.strictEqual(isIntradayProduct('MARGIN'), false);
+  assert.strictEqual(isIntradayProduct('NRML'), false);
+  assert.strictEqual(isIntradayProduct('CNC'), false);
+  assert.strictEqual(isIntradayProduct(''), false);
+  // @ts-expect-error exercising a broker payload with no product field at all
+  assert.strictEqual(isIntradayProduct(undefined), false);
 });
