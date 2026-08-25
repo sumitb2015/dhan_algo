@@ -109,8 +109,13 @@ def _fetch_prev_meta(helper, underlying: str, expiry: str, exchange_segment: str
                 prev_meta[strike] = {
                     'ce_oi':    int(_f(ce_data.get('previous_oi'))),
                     'pe_oi':    int(_f(pe_data.get('previous_oi'))),
-                    'ce_close': _f(ce_data.get('previous_close')),
-                    'pe_close': _f(pe_data.get('previous_close')),
+                    # Dhan's option-chain response names this field
+                    # 'previous_close_price', not 'previous_close' — confirmed
+                    # against the raw API response 2026-08-25. live_options_ws.py
+                    # has the same (harmless there, masked by its tick-based
+                    # prev_close winning first) typo; not touched here.
+                    'ce_close': _f(ce_data.get('previous_close_price')),
+                    'pe_close': _f(pe_data.get('previous_close_price')),
                 }
         except Exception as e:
             print(f'[focus_tool_ws] WARN: prev_meta fetch failed for {underlying} (attempt {attempt + 1}/{attempts}): {e}', flush=True)
