@@ -4,6 +4,7 @@ import React, { useMemo } from 'react';
 import { AlertTriangle } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import type { PositionLeg } from '@/lib/positionLegs';
+import { computeNetGreeks } from '@/lib/positionGreeks';
 import { StatChip } from './PayoffMetricStrip';
 
 const TH = 'bg-zinc-800 px-2.5 py-2 text-xs font-bold text-white whitespace-nowrap';
@@ -11,31 +12,6 @@ const TD = 'px-2.5 py-2 font-mono text-xs tabular-nums text-zinc-200 whitespace-
 
 /** Signed multiplier taking a per-contract greek to a position greek. */
 const posSign = (leg: PositionLeg) => (leg.side === 'SELL' ? -1 : 1) * leg.qtyLots;
-
-export interface NetGreeks {
-  delta: number; gamma: number; theta: number; vega: number;
-  /** Legs whose greeks the chain did not supply — excluded from the sums above. */
-  missing: PositionLeg[];
-}
-
-export function computeNetGreeks(legs: PositionLeg[]): NetGreeks {
-  let delta = 0, gamma = 0, theta = 0, vega = 0;
-  const missing: PositionLeg[] = [];
-
-  for (const leg of legs) {
-    // Dhan's chain returns all-zero greeks often enough that a leg with no delta
-    // AND no gamma is almost certainly unpopulated rather than genuinely neutral.
-    // Summing those zeros silently understates net exposure, so they are excluded
-    // and reported instead.
-    if (leg.delta === null && leg.gamma === null) { missing.push(leg); continue; }
-    const k = posSign(leg);
-    delta += (leg.delta ?? 0) * k;
-    gamma += (leg.gamma ?? 0) * k;
-    theta += (leg.theta ?? 0) * k;
-    vega += (leg.vega ?? 0) * k;
-  }
-  return { delta, gamma, theta, vega, missing };
-}
 
 function fmt(n: number | null, dec: number): string {
   return n === null ? '—' : n.toFixed(dec);

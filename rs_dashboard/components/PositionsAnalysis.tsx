@@ -32,10 +32,12 @@ import { closeLeg } from '@/lib/legClose';
 import { legKey } from '@/components/analytics/PositionsLegTable';
 import type { ClosePct } from '@/lib/partialQty';
 import { isIntradayProduct } from '@/lib/positionProduct';
+import type { Suggestion } from '@/app/api/options/suggestions/route';
 
 import PositionsPayoffChart, { pnlAt, type OiBar } from '@/components/analytics/PositionsPayoffChart';
 import PayoffMetricStrip from '@/components/analytics/PayoffMetricStrip';
 import BookRiskCard from '@/components/analytics/BookRiskCard';
+import SuggestedActionsCard from '@/components/analytics/SuggestedActionsCard';
 import PositionsLegTable, { legPnl } from '@/components/analytics/PositionsLegTable';
 import GreeksTab from '@/components/analytics/GreeksTab';
 import PnlTableTab from '@/components/analytics/PnlTableTab';
@@ -99,6 +101,8 @@ export default function PositionsAnalysis({ underlying }: { underlying: Analytic
   const [fetchedLotError, setFetchedLotError] = useState<string | null>(null);
   const [funds, setFunds] = useState<number | null>(null);
   const [standaloneMargin, setStandaloneMargin] = useState<number | null>(null);
+  const [suggestions, setSuggestions] = useState<Suggestion[]>([]);
+  const [dismissedSuggestionIds, setDismissedSuggestionIds] = useState<Set<string>>(new Set());
 
   const [tab, setTab] = useState<Tab>('payoff');
   const [expiryFilter, setExpiryFilter] = useState<string>('ALL');
@@ -264,6 +268,23 @@ export default function PositionsAnalysis({ underlying }: { underlying: Analytic
     const id = setInterval(load, FUNDS_POLL_MS);
     return () => { cancelled = true; clearInterval(id); };
   }, [broker]);
+
+  // ── suggested actions (written by a Claude session asked to review this book —
+  // see rs_dashboard/scripts/analyze-positions.ts) ────────────────────────────
+  useEffect(() => {
+    let cancelled = false;
+    const load = async () => {
+      try {
+        const res = await fetch(`/api/options/suggestions?underlying=${underlying}`);
+        const json = await res.json();
+        if (cancelled || !json?.success) return;
+        setSuggestions(json.suggestions ?? []);
+      } catch { /* suggestions are advisory — a failure must not blank the page */ }
+    };
+    load();
+    const id = setInterval(load, FUNDS_POLL_MS);
+    return () => { cancelled = true; clearInterval(id); };
+  }, [underlying]);
 
   // ── legs (needs chains for greeks, so it runs twice: bare, then enriched) ───
   const { legs: allLegs, unparseable } = useMemo(() => {
@@ -611,6 +632,14 @@ export default function PositionsAnalysis({ underlying }: { underlying: Analytic
         <div className="grid grid-cols-1 gap-4 xl:grid-cols-[minmax(0,1fr)_minmax(0,1.4fr)]">
           {/* ── Left: positions + sizing ────────────────────────────────── */}
           <div className="flex flex-col gap-4">
+          <SuggestedActionsCard
+            suggestions={suggestions.filter((s) => !dismissedSuggestionIds.has(s.id))}
+            legs={legs}
+            closingKeys={closingKeys}
+            legKeyOf={legKey}
+            onConfirm={handleCloseLeg}
+            onDismiss={(id) => setDismissedSuggestionIds((prev) => new Set(prev).add(id))}
+          />
           <section className="space-y-3 rounded-xl border border-zinc-800 bg-zinc-950 p-3">
             <div className="flex items-center gap-2">
               <h2 className="text-xs font-bold uppercase tracking-wider text-white">{underlying} Positions</h2>
