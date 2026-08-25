@@ -71,6 +71,19 @@ def is_after_close(dt: datetime) -> bool:
     return minutes_since_midnight(dt) >= close_mins
 
 
+def is_trading_day(d: date) -> bool:
+    """Weekday + NSE holiday check.
+
+    The collector is auto-spawned with the dashboard server every day, including
+    weekends and holidays. Without this gate it still polls the option chain and
+    writes a full 09:15-15:30 CSV of the market's last stale quote (confirmed on
+    2026-08-16/22/23) — junk data indistinguishable from a real session until read.
+    """
+    if d.weekday() >= 5:  # 5=Sat, 6=Sun
+        return False
+    return d.isoformat() not in DhanHelper.NSE_HOLIDAYS
+
+
 def csv_path(today: date) -> str:
     debug_dir = os.path.join(ROOT, 'debug')
     os.makedirs(debug_dir, exist_ok=True)
@@ -253,6 +266,10 @@ def main():
     args = parser.parse_args()
 
     underlying = args.underlying.upper()
+
+    if not args.ignore_market_hours and not is_trading_day(ist_now().date()):
+        log.info('Not a trading day (%s) — exiting without collecting', ist_now().date().isoformat())
+        return
 
     dhan = get_dhan_client()
     if not dhan:
