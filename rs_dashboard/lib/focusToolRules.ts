@@ -80,13 +80,20 @@ export interface RowLive {
    *  (display-only; feeds the OI PCR chip next to premium Val PCR). */
   ceOi: number | null;
   peOi: number | null;
+  /** Session VWAP of the combined premium at a FIXED 1-minute interval —
+   *  shown under the LTP regardless of the row's own VW exit-rule setting.
+   *  Independent of `vwap`/`vwapClose` above, which follow the row's own
+   *  configured VW-rule interval and stay null unless `levelVw` is on. Null
+   *  until fetched. */
+  vwap1m: number | null;
+  vwapClose1m: number | null;
 }
 
 export const EMPTY_ROW_LIVE: RowLive = {
   ceStrike: null, peStrike: null, ltpCe: null, ltpPe: null,
   cePosition: null, pePosition: null, pnl: 0, entryPremium: 0, vwap: null, vwapClose: null,
   ceBuildup: null, peBuildup: null, ceOiChgPct: null, peOiChgPct: null,
-  ceOi: null, peOi: null,
+  ceOi: null, peOi: null, vwap1m: null, vwapClose1m: null,
 };
 
 // ── Legs ─────────────────────────────────────────────────────────────────────

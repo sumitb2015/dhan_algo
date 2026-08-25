@@ -231,7 +231,8 @@ function underlyingOfSymbol(tradingSymbol: string | undefined): FocusUnderlying 
  * the same strikes (PE OI ÷ CE OI), off the live WS ticks.
  */
 function legValues(row: FocusRow, live: RowLive, lotSize: number | null): {
-  ceValue: number | null; peValue: number | null; pcr: number | null; pcrOi: number | null;
+  ceValue: number | null; peValue: number | null; totalValue: number | null;
+  pcr: number | null; pcrOi: number | null;
 } {
   const lot = lotSize && lotSize > 0 ? lotSize : 0;
   const units = (leg: 'CE' | 'PE'): number => {
@@ -244,21 +245,26 @@ function legValues(row: FocusRow, live: RowLive, lotSize: number | null): {
   };
   const ceValue = value(live.ltpCe, 'CE');
   const peValue = value(live.ltpPe, 'PE');
+  // Combined rupee value across every lot this row holds (or is sized for)
+  // on both legs — ceValue/peValue are per-leg; a straddle's actual notional
+  // is the two added together, not either one alone.
+  const totalValue = ceValue == null && peValue == null ? null : (ceValue ?? 0) + (peValue ?? 0);
   return {
-    ceValue, peValue,
+    ceValue, peValue, totalValue,
     pcr: valuePutCallRatio(peValue, ceValue, live.ltpPe, live.ltpCe),
     pcrOi: putCallRatio(live.peOi, live.ceOi),
   };
 }
 
-/** Compact LTP column: combined premium → CE/PE → ₹ values → Val/OI PCR strip. */
+/** Compact LTP column: combined premium → VWAP 1m → CE/PE → ₹ values → total ₹ → Val/OI PCR strip. */
 function LtpStack({
-  combinedLtp, live, ceValue, peValue, pcr, pcrOi, compact = false,
+  combinedLtp, live, ceValue, peValue, totalValue, pcr, pcrOi, compact = false,
 }: {
   combinedLtp: number;
   live: RowLive;
   ceValue: number | null;
   peValue: number | null;
+  totalValue: number | null;
   pcr: number | null;
   pcrOi: number | null;
   compact?: boolean;
@@ -279,6 +285,12 @@ function LtpStack({
         >
           {combinedLtp > 0 ? combinedLtp.toFixed(2) : '\u2014'}
         </div>
+        <div
+          title="Session VWAP of the combined CE+PE premium, fixed 1-minute interval \u2014 independent of this row's own VW exit-rule setting"
+          className="text-[10px] font-mono font-semibold text-violet-400 tabular-nums leading-none mt-1"
+        >
+          VWAP 1m {live.vwap1m != null ? live.vwap1m.toFixed(2) : '\u2014'}
+        </div>
       </div>
       <div className={cn(
         'font-mono font-bold flex items-baseline gap-1 tabular-nums leading-none',
@@ -295,6 +307,15 @@ function LtpStack({
         <span className="text-emerald-500">₹{fmtValue(ceValue)}</span>
         <span className="text-zinc-700" aria-hidden>/</span>
         <span className="text-rose-500">₹{fmtValue(peValue)}</span>
+      </div>
+      <div
+        className={cn(
+          'font-mono font-black text-zinc-100 tabular-nums leading-none whitespace-nowrap',
+          compact ? 'text-[11px]' : 'text-xs',
+        )}
+        title="Total rupee value across every lot this row holds — CE + PE combined"
+      >
+        Total ₹{fmtValue(totalValue)}
       </div>
       <div className="flex rounded-md border border-zinc-800 divide-x divide-zinc-800 overflow-hidden">
         <span
@@ -1578,7 +1599,7 @@ function FocusTableRowImpl({
   onBlocked: (message: string) => void;
 }) {
   const combinedLtp = (live.ltpCe ?? 0) + (live.ltpPe ?? 0);
-  const { ceValue, peValue, pcr, pcrOi } = legValues(row, live, lotSize);
+  const { ceValue, peValue, totalValue, pcr, pcrOi } = legValues(row, live, lotSize);
   // Orders are only sendable once at least one leg's contract and the lot size
   // are known — placeLeg re-checks the specific leg it is about to trade.
   const canTrade = liveRealMoney && !busy && (live.ceStrike != null || live.peStrike != null) && (lotSize ?? 0) > 0;
@@ -1697,6 +1718,7 @@ function FocusTableRowImpl({
           live={live}
           ceValue={ceValue}
           peValue={peValue}
+          totalValue={totalValue}
           pcr={pcr}
           pcrOi={pcrOi}
         />
@@ -1925,7 +1947,7 @@ function FocusRowCardImpl({
   onBlocked: (message: string) => void;
 }) {
   const combinedLtp = (live.ltpCe ?? 0) + (live.ltpPe ?? 0);
-  const { ceValue, peValue, pcr, pcrOi } = legValues(row, live, lotSize);
+  const { ceValue, peValue, totalValue, pcr, pcrOi } = legValues(row, live, lotSize);
   const canTrade = liveRealMoney && !busy && (live.ceStrike != null || live.peStrike != null) && (lotSize ?? 0) > 0;
   // Ownership, not raw broker qty: a ghost worker pin (broker already flat) must
   // still offer Exit so placeLeg can queue the drop-leg clear. A coincidental
@@ -2046,6 +2068,7 @@ function FocusRowCardImpl({
           live={live}
           ceValue={ceValue}
           peValue={peValue}
+          totalValue={totalValue}
           pcr={pcr}
           pcrOi={pcrOi}
           compact
@@ -2923,7 +2946,8 @@ export default function FocusTool() {
     && a.pnl === b.pnl && a.entryPremium === b.entryPremium && a.vwap === b.vwap && a.vwapClose === b.vwapClose
     && a.ceBuildup === b.ceBuildup && a.peBuildup === b.peBuildup
     && a.ceOiChgPct === b.ceOiChgPct && a.peOiChgPct === b.peOiChgPct
-    && a.ceOi === b.ceOi && a.peOi === b.peOi;
+    && a.ceOi === b.ceOi && a.peOi === b.peOi
+    && a.vwap1m === b.vwap1m && a.vwapClose1m === b.vwapClose1m;
   const rowLive = useMemo<Record<string, RowLive>>(() => {
     const out: Record<string, RowLive> = {};
     const prevOut = rowLivePrevRef.current;
@@ -3091,12 +3115,23 @@ export default function FocusTool() {
       const vwap = vwapEntry?.vwap ?? null;
       const vwapClose = vwapEntry?.close ?? null;
 
+      // Display-only VWAP under the LTP, at a FIXED 1m interval — independent
+      // of the row's own VW exit rule (which may be off, or set to a
+      // different interval). Shares vwapWantedKey's fetch below with the
+      // exit-rule VWAP when a row's own interval already happens to be '1'.
+      const vwap1mEntry = ceStrike != null && peStrike != null && rowExpiry
+        ? rowVwap[vwapKey(u, rowExpiry, ceStrike, peStrike, row.side, '1')]
+        : undefined;
+      const vwap1m = vwap1mEntry?.vwap ?? null;
+      const vwapClose1m = vwap1mEntry?.close ?? null;
+
       const computed: RowLive = {
         ceStrike, peStrike,
         ltpCe, ltpPe,
         cePosition, pePosition,
         pnl, entryPremium, vwap, vwapClose,
         ceBuildup, peBuildup, ceOiChgPct, peOiChgPct, ceOi, peOi,
+        vwap1m, vwapClose1m,
       };
       const prevLive = prevOut[row.id];
       out[row.id] = prevLive && rowLiveEqual(prevLive, computed) ? prevLive : computed;
@@ -3125,7 +3160,9 @@ export default function FocusTool() {
     if (toolPnl > 0) setPeakMtm(prev => Math.max(prev, toolPnl));
   }, [toolPnl]);
 
-  // Distinct strike pairs that need a VWAP, among rows with VW enabled. A
+  // Distinct strike pairs that need a VWAP: every row's own VW-rule interval
+  // when that rule is on, PLUS a fixed 1m interval for every row with
+  // resolved strikes (shown under the LTP regardless of the VW rule). A
   // plain string, not the wanted objects themselves, so the fetch effect
   // below only re-runs when the SET of strike pairs actually changes — not
   // on every live tick, which changes rowLive's identity constantly but
@@ -3133,12 +3170,14 @@ export default function FocusTool() {
   const vwapWantedKey = useMemo(() => {
     const keys = new Set<string>();
     for (const row of config.rows) {
-      if (!row.levelVw) continue;
       const live = rowLive[row.id];
       if (!live || live.ceStrike == null || live.peStrike == null) continue;
       const expiry = row.expiry || expiries[row.underlying]?.[0] || '';
       if (!expiry) continue;
-      keys.add(vwapKey(row.underlying, expiry, live.ceStrike, live.peStrike, row.side, row.vwapInterval || '1'));
+      if (row.levelVw) {
+        keys.add(vwapKey(row.underlying, expiry, live.ceStrike, live.peStrike, row.side, row.vwapInterval || '1'));
+      }
+      keys.add(vwapKey(row.underlying, expiry, live.ceStrike, live.peStrike, row.side, '1'));
     }
     return Array.from(keys).sort().join('|');
   }, [config.rows, rowLive, expiries]);
