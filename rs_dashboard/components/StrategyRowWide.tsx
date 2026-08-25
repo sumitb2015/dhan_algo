@@ -56,6 +56,11 @@ interface StrategyState {
   // CrudeOil Mini VWAP + Supertrend (also reuses entry_price/st_level/vwap/ltp/daily_pnl above)
   signal_close?: number; contract_size?: number; exposure_units?: number;
   allow_reverse?: boolean; exit_on_close?: boolean;
+  // Anti-chop regime gate + per-trade stop (stop_level/stop_source shared with ORB above)
+  regime?: string; regime_reason?: string; adx?: number; chop?: number;
+  htf_st_dir?: number; htf_interval?: string; band_gap?: number;
+  blocked_reason?: string; trades_today?: number; max_trades_per_day?: number;
+  loss_streak?: number;
   // ST+OI Bear Call Spread
   phase?: string; index_interval?: string; option_interval?: string;
   index_st_period?: number; index_st_multiplier?: number;
@@ -757,6 +762,39 @@ function StrategyRowWide({ meta, state, onRefresh, instanceId, onAddInstance, on
             <div className="text-[9px] text-zinc-500 font-mono whitespace-nowrap">
               {state.interval ?? 5}m ST({state.supertrend_period ?? 7},{state.supertrend_multiplier ?? 2}) + VWAP
             </div>
+          </div>
+          {/* Regime gate. Without this the strategy sitting flat through a live
+              ABOVE-BOTH/BELOW-BOTH signal reads as hung rather than as filtered. */}
+          <div className="px-3 flex flex-col justify-center shrink-0">
+            <div className={lbl}>Regime</div>
+            <div className={`font-mono font-bold text-xs leading-tight ${state.regime === 'TREND' ? 'text-emerald-400' : 'text-amber-400'}`}>
+              {state.regime ?? '—'}
+            </div>
+            <div className="text-[9px] text-zinc-500 font-mono whitespace-nowrap">
+              ADX {state.adx?.toFixed(0) ?? '—'} · CHOP {state.chop?.toFixed(0) ?? '—'} · HTF{' '}
+              <span className={state.htf_st_dir === 1 ? 'text-emerald-400' : state.htf_st_dir === -1 ? 'text-rose-400' : 'text-zinc-500'}>
+                {state.htf_st_dir === 1 ? 'BULL' : state.htf_st_dir === -1 ? 'BEAR' : '?'}
+              </span>
+            </div>
+          </div>
+          <div className="px-3 flex flex-col justify-center shrink-0 min-w-[120px]">
+            <div className={lbl}>{state.direction && state.direction !== 'NONE' ? 'Stop' : 'Blocked By'}</div>
+            {state.direction && state.direction !== 'NONE' ? (
+              <>
+                <div className={val}>{state.stop_level != null && state.stop_level > 0 ? state.stop_level.toFixed(2) : '—'}</div>
+                <div className="text-[9px] text-zinc-500 font-mono whitespace-nowrap">
+                  {state.stop_source || 'no stop'} · {state.trades_today ?? 0}{state.max_trades_per_day ? `/${state.max_trades_per_day}` : ''} trades
+                </div>
+              </>
+            ) : (
+              <>
+                <div className="font-mono text-[10px] text-amber-400 leading-tight">{state.blocked_reason || '—'}</div>
+                <div className="text-[9px] text-zinc-500 font-mono whitespace-nowrap">
+                  {state.trades_today ?? 0}{state.max_trades_per_day ? `/${state.max_trades_per_day}` : ''} trades
+                  {state.loss_streak ? ` · ${state.loss_streak} loss streak` : ''}
+                </div>
+              </>
+            )}
           </div>
           <div className="px-3 flex flex-col justify-center shrink-0">
             <div className={lbl}>Day P&amp;L</div>

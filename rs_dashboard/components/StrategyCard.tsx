@@ -123,6 +123,27 @@ interface StrategyState {
   allow_reverse?: boolean;
   exit_on_close?: boolean;
   position_pnl?: number;
+  // Anti-chop regime gate + per-trade stop
+  regime?: string;
+  regime_reason?: string;
+  adx?: number;
+  chop?: number;
+  htf_st_dir?: number;
+  htf_interval?: string;
+  band_gap?: number;
+  blocked_reason?: string;
+  stop_level?: number;
+  stop_source?: string;
+  trades_today?: number;
+  max_trades_per_day?: number;
+  loss_streak?: number;
+  // VWAP+Supertrend OI confirmation gate (CRUDEOIL chain, off by default).
+  // oi_diff itself is declared once already above (shared name with oi_directional).
+  oi_bias?: string;
+  oi_reason?: string;
+  oi_symbol?: string;
+  require_oi_confirmation?: boolean;
+  collect_oi?: boolean;
   // ST+OI Bear Call Spread
   phase?: string;
   index_interval?: string;
@@ -1938,6 +1959,50 @@ function StrategyCard({ meta, state, onRefresh }: StrategyCardProps) {
                     <span className="text-[10px] text-zinc-500 font-mono whitespace-nowrap">
                       {state.interval ?? 5}m ST({state.supertrend_period ?? 7},{state.supertrend_multiplier ?? 2}) + VWAP
                     </span>
+                  </div>
+                  {/* Regime gate. Without this the strategy sitting flat through a live
+                      ABOVE-BOTH/BELOW-BOTH signal reads as hung rather than as filtered. */}
+                  <div className="px-3 py-2 flex flex-col gap-1 shrink-0 min-w-[128px]">
+                    <span className={lbl}>Regime</span>
+                    <span className={`font-mono font-bold ${
+                      state.regime === 'TREND' ? 'text-emerald-400' : 'text-amber-400'
+                    }`}>
+                      {state.regime ?? '—'}
+                    </span>
+                    <span className="text-[10px] text-zinc-500 font-mono whitespace-nowrap">
+                      ADX {state.adx?.toFixed(0) ?? '—'} · CHOP {state.chop?.toFixed(0) ?? '—'} · HTF{' '}
+                      <span className={
+                        state.htf_st_dir === 1 ? 'text-emerald-400'
+                          : state.htf_st_dir === -1 ? 'text-rose-400' : 'text-zinc-500'
+                      }>
+                        {state.htf_st_dir === 1 ? 'BULL' : state.htf_st_dir === -1 ? 'BEAR' : '?'}
+                      </span>
+                    </span>
+                  </div>
+                  <div className="px-3 py-2 flex flex-col gap-1 shrink-0 min-w-[120px]">
+                    <span className={lbl}>{state.direction && state.direction !== 'NONE' ? 'Stop' : 'Blocked By'}</span>
+                    {state.direction && state.direction !== 'NONE' ? (
+                      <>
+                        <span className="font-mono font-bold text-zinc-200">
+                          {state.stop_level != null && state.stop_level > 0 ? state.stop_level.toFixed(2) : '—'}
+                        </span>
+                        <span className="text-[10px] text-zinc-500 font-mono whitespace-nowrap">
+                          {state.stop_source || 'no stop'} · {state.trades_today ?? 0}
+                          {state.max_trades_per_day ? `/${state.max_trades_per_day}` : ''} trades
+                        </span>
+                      </>
+                    ) : (
+                      <>
+                        <span className="font-mono text-[11px] text-amber-400 leading-tight">
+                          {state.blocked_reason || '—'}
+                        </span>
+                        <span className="text-[10px] text-zinc-500 font-mono whitespace-nowrap">
+                          {state.trades_today ?? 0}
+                          {state.max_trades_per_day ? `/${state.max_trades_per_day}` : ''} trades
+                          {state.loss_streak ? ` · ${state.loss_streak} loss streak` : ''}
+                        </span>
+                      </>
+                    )}
                   </div>
                   <div className="px-3 py-2 flex flex-col gap-1 shrink-0">
                     <span className={lbl}>Day P&amp;L</span>

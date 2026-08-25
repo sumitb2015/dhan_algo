@@ -36,6 +36,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 from login import get_dhan_client
 from lib.dhan_helper import DhanHelper
 from lib.pivots import PivotTracker
+from lib.trade_stops import ratchet_stop, stop_hit
 from lib.strategy_state_helper import save_strategy_state, check_shutdown_trigger, instance_log_suffix
 
 # --- Constants ---
@@ -183,33 +184,9 @@ def breakout_signal(
     return "NEUTRAL", f"close {close:.2f} inside range [{orl:.2f}, {orh:.2f}]"
 
 
-def ratchet_stop(direction: str, current_stop: float, pivot_price: Optional[float]) -> float:
-    """Tighten the stop toward a newly confirmed pivot. Never loosens it.
-
-    For a LONG the stop only moves UP; a pivot low that forms below the current stop is
-    ignored. Without this a mid-trend pullback would hand back profit already locked in.
-    An unset (`<= 0`) stop adopts the pivot outright.
-    """
-    if pivot_price is None or pivot_price <= 0:
-        return current_stop
-    if current_stop <= 0:
-        return float(pivot_price)
-    if direction == "LONG":
-        return max(current_stop, float(pivot_price))
-    if direction == "SHORT":
-        return min(current_stop, float(pivot_price))
-    return current_stop
-
-
-def stop_hit(direction: str, ltp: float, stop_level: float) -> bool:
-    """Has price traded through the stop?"""
-    if stop_level <= 0 or ltp <= 0:
-        return False
-    if direction == "LONG":
-        return ltp < stop_level
-    if direction == "SHORT":
-        return ltp > stop_level
-    return False
+# ratchet_stop / stop_hit now live in lib/trade_stops.py so the VWAP+Supertrend
+# strategy can share them. Re-exported here: this module's public names are
+# unchanged for callers and tests.
 
 
 # ---------------------------------------------------------------------------

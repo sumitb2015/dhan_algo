@@ -114,11 +114,19 @@ python strategies/crudeoil/crudeoilm_renko_sar.py --box-size 10 --reverse-bricks
 # CrudeOil Mini VWAP + Supertrend Always-On Strategy
 
 ## Overview
-Always-on MCX CRUDEOILM futures strategy requiring **dual confirmation**: it is long
-only while price is above both the Supertrend and the session VWAP, short only while
-below both, and flips straight from one side to the other. Unlike the Supertrend
-strategy above, it does not sit flat between trades; unlike Renko SAR, it does have
-daily profit/loss caps that end the day.
+MCX CRUDEOILM futures strategy requiring **dual confirmation**: it is long only while
+price is above both the Supertrend and the session VWAP, short only while below both,
+and flips straight from one side to the other. Unlike Renko SAR, it has daily
+profit/loss caps that end the day.
+
+**It is no longer unconditionally always-on.** A directional strategy in a range-bound
+market is structurally obliged to keep picking sides, and the dual-band rule is at its
+weakest exactly then: in a range the Supertrend converges onto VWAP, the hold-zone
+between them collapses to a point, and every tick across it becomes a full
+stop-and-reverse. A **regime gate** now decides whether the strategy may hold a
+position at all — see below. Pass `--no-regime-filter --no-htf-filter
+--min-band-gap-atr 0 --atr-stop-mult 0 --min-flip-atr-mult 0 --flip-cooldown 30
+--max-trades-per-day 0 --loss-streak-pause 0` to get the pre-2026-08-24 behaviour back.
 
 ## Signal Rule
 
@@ -142,8 +150,136 @@ would do nothing.
 
 **Flip cooldown.** The Supertrend and the VWAP cross each other regularly. When they nearly
 coincide the hold-zone collapses to a point, and a price ticking across it would flip a live
-position every second. `--flip-cooldown` (default 30s) is the minimum gap between flips —
+position every second. `--flip-cooldown` (default 60s) is the minimum gap between flips —
 the initial entry starts the clock too. Set it to 0 only if you want every crossing acted on.
+
+## Regime Gate (the anti-chop layer)
+
+A new position is only opened while the market is in a **TREND** regime. Three
+independent gates, each of which can be disabled:
+
+| Gate | Rule | Flag |
+|---|---|---|
+| Trend strength | ADX on the signal timeframe | `--adx-enter` / `--adx-exit` |
+| Range detection | Choppiness Index | `--chop-max` |
+| Higher timeframe | that timeframe's Supertrend must agree with the side being opened | `--htf-interval` |
+| Band separation | \|ST − VWAP\| must be at least N ATRs | `--min-band-gap-atr` |
+
+**The regime is two-sided on purpose.** TREND is entered at `--adx-enter` (22) but only
+given up below the *separate, lower* `--adx-exit` (18), and a flip must survive
+`--regime-confirm-candles` (2) consecutive **confirmed candles**. A single threshold in
+both directions would just move the chop out of the price rule and into the filter: a
+market parked at ADX ≈ 22 would flap the regime and flatten/re-enter on every recompute.
+For the same reason the regime is evaluated once per closed candle, never on a live tick.
+
+**Turning CHOP flattens any open position** and stands aside until TREND returns.
+
+**Band separation is the most direct expression of this strategy's own failure mode.**
+When the Supertrend and VWAP sit on top of each other there is no hysteresis left, so an
+entry is refused until they are `--min-band-gap-atr` ATRs apart.
+
+Missing indicator data **fails closed** — a missing ADX/CHOP column or an unavailable
+higher-timeframe Supertrend blocks new entries rather than waving them through. A filter
+that silently disappears is worse than one that blocks.
+
+## Interval Verification (startup)
+
+Dhan does **not** reject an interval it cannot serve. Measured against CRUDEOILM on
+2026-08-24: `3` works, `30` silently returns **15-minute** candles, and `60` returns
+**nothing at all**. Trusting the requested number would gate the strategy on the wrong
+timeframe, or leave it in SCANNING all session with nothing in the log to say why.
+
+So at startup the strategy fetches candles at each interval and measures the actual
+spacing. A mismatched `--interval` or explicit `--htf-interval` is fatal
+(`ERROR_BAD_INTERVAL`). `--htf-interval auto` (the default) probes candidates above the
+signal interval and takes the first Dhan really serves, disabling just the HTF filter
+with a warning if none does.
+
+## Per-Trade Stop and Trail
+
+The signal flip is no longer the only stop. On entry the stop is placed at
+`--atr-stop-mult` (1.5) ATRs from the fill. Once the trade is `--trail-trigger-atr`
+(1.0) ATRs in profit the stop hands over to the Supertrend band and **ratchets only** —
+`lib/trade_stops.py`'s `ratchet_stop()`, shared with the ORB strategy — so a mid-trend
+pullback cannot hand back locked-in profit. The band is never adopted if it is already
+on the wrong side of price, which would stop the trade out on the tick that armed it.
+The stop is checked against the live LTP but **only while the position is priced**: a
+`0.0` from a failed `get_ltp()` is below every long stop.
+
+## Churn Brakes
+
+Count- and P&L-based limits, independent of the indicators. A losing streak *is* a chop
+reading, and it arrives before ADX agrees.
+
+- `--max-trades-per-day` (6) — entries per day, reversal legs included.
+- `--loss-streak-pause` (2) / `--loss-streak-pause-minutes` (30) — pause after N
+  consecutive losers.
+- `--cooldown-candles` (1) — confirmed candles to wait after **any** flat-going exit.
+- `--flip-cooldown` (now 60s, was 30) and `--min-flip-atr-mult` (now 0.35, **was 0** —
+  the guard shipped disabled).
+
+All of these **survive a process restart**, restored from the state file alongside the
+day's P&L. Restoring only the P&L would let a crash-loop reset the trade cap.
+
+## OI Confirmation Gate (optional, off by default)
+
+An additional gate on CE/PE open-interest buildup, ported from
+`strategies/oi_directional/nifty_oi_directional.py`'s expansion check.
+
+**It reads the CRUDEOIL chain, not CRUDEOILM.** CRUDEOILM has no options of its own;
+CRUDEOIL trades the same per-barrel price, so its option chain is the only real crude
+OI available. Verified live on 2026-08-24 — `helper.get_option_chain_df("CRUDEOIL",
+expiry, exchange_segment="MCX_COMM")` returns real strikes and OI around CRUDEOILM's
+own price level. `--oi-symbol` can point elsewhere if that ever needs to change; `--no-
+oi-tracking` disables the fetch entirely.
+
+**Expiry is resolved from this strategy's own futures contract**, not by re-resolving
+CRUDEOIL from scratch: `get_expiry_list(under_security_id=int(self.security_id),
+exchange_segment="MCX_COMM")`. Two things worth knowing:
+- `get_expiry_list` **fails silently** (returns an empty list, no exception) if the
+  security id is passed as a string instead of an `int` — measured directly, not
+  inferred. `self.security_id` is stored as `str` everywhere else in this strategy for
+  the order/quote calls, so the OI code casts it back explicitly.
+- The resolved options expiry will normally be **earlier** than the futures contract's
+  own `SM_EXPIRY_DATE` — MCX commodity options expire a few days before the future
+  itself. That mismatch is logged once at INFO and is expected, not a bug to chase.
+
+**Bias formula** (`compute_oi_bias`, a direct port): sum CE OI and PE OI over strikes
+within `--oi-strike-range` (250 points) of the underlying LTP, track
+`diff = CE_OI - PE_OI` across snapshots, and compare only the last two:
+- CE-dominant **and still growing** away from zero → **BEARISH** (resistance building).
+- PE-dominant **and still growing** away from zero → **BULLISH** (support building).
+- Otherwise (shrinking, or not yet dominant) → **NEUTRAL**.
+
+As a **confirmation** gate this is intentionally strict: `NEUTRAL` and `UNAVAILABLE`
+both block, the same fail-closed stance as the higher-timeframe gate — an unconfirmed
+trade is not waved through just because OI didn't actively disagree.
+
+**Always computed, gate is opt-in.** Same convention as the regime/HTF filters:
+`--require-oi-confirmation` (off by default) is what makes this a BLOCKING gate; the OI
+bias is fetched every `--oi-refresh-seconds` (45) and written to the decision telemetry
+regardless, so it can be reviewed before being turned on. There are only two stale days
+of crude OI anywhere in this repo (`debug/crudeoil_oi_snapshots_2026-07-1[56].csv`) — not
+enough to validate `--oi-strike-range` or the expansion window against, so treat this
+gate the same as the regime thresholds: convention, not measurement, until the
+telemetry says otherwise.
+
+Rate limits: Dhan's option-chain endpoint enforces a ~3s minimum spacing between real
+calls and a 5s response cache (both shared with `get_expiry_list`) — `--oi-refresh-
+seconds` is rejected below 5 for that reason.
+
+## Decision Telemetry
+
+Every confirmed candle appends one JSON line to
+`debug/crudeoilm_vwap_supertrend[_<instance>]_signals.jsonl`: close, ST, VWAP, ATR, ADX,
+CHOP, HTF direction, band gap, regime, OI bias/diff, the **raw** signal the original rule
+would have given, whether the gates passed, and what blocked it.
+
+Every threshold above is a convention, not a measured optimum — there is no CRUDEOILM
+price history in this repo and no crude backtest. This file is what lets them be retuned
+from what actually happened. After a session, count how many flips the gates suppressed
+and what those trades would have made; if that number is near zero the thresholds are
+too loose to be doing anything.
 
 ## Hybrid Signal Price
 - **Entries** use the last CONFIRMED closed candle (`df.iloc[-2]`) — no intra-candle churn.
@@ -170,14 +306,19 @@ confirm the broker's reported `netQty` matches `--lots 1`.
 2. EOD time reached (flatten and stop)
 3. Daily profit target hit (cumulative, INR) — flatten and stop for the day
 4. Daily stop loss hit (cumulative, INR) — flatten and stop for the day
-5. Signal flip → stop-and-reverse (this does not end the day)
+5. **Per-trade stop / Supertrend trail hit** → flat (does not end the day)
+6. **Regime turned CHOP** → flat, stand aside (does not end the day)
+7. Signal flip → stop-and-reverse, *if the new side passes the entry gates*. If the price
+   rule wants out but the gates reject the other side, the exit half still happens and the
+   strategy goes flat — otherwise being in a position would bypass every filter.
 
-Only 1–4 end the always-on cycle. There is no per-trade stop: the Supertrend/VWAP flip *is*
-the stop, and it puts you on the other side rather than flat.
+Only 1–4 end the day.
 
 ## Restart Behavior
-Only the day's realized P&L is restored from the state file. Positions are NOT recovered —
-on a live restart while holding a position, flatten manually first.
+The day's realized P&L **and the churn brakes** (`trades_today`, `loss_streak`,
+`paused_until`, `exit_candle_time`) are restored from the state file. Positions are NOT
+recovered — on a live restart while holding a position, flatten manually first. The regime
+restarts as CHOP and must re-confirm, so nothing trades until a trend is proven again.
 
 ## Key CLI Flags
 ```
@@ -194,9 +335,44 @@ on a live restart while holding a position, flatten manually first.
 --eod-time STR                 EOD flatten HH:MM (default: 23:30)
 --poll-seconds INT             Indicator refresh cadence (default: 15)
 --days INT                     Candle lookback for the indicator fetch (default: 3)
---flip-cooldown INT            Minimum seconds between flips (default: 30)
+--flip-cooldown INT            Minimum seconds between flips (default: 60)
+--min-flip-atr-mult FLOAT      ATR multiple a flip/entry must clear both bands by (default: 0.35)
 --no-reverse                   Exit to flat on a flip instead of reversing
 --exit-on-close                Exit on confirmed close instead of live LTP
+
+Regime gate
+--adx-period INT               ADX length on the signal timeframe (default: 14)
+--adx-enter FLOAT              ADX at/above which the regime becomes TREND (default: 22)
+--adx-exit FLOAT               ADX below which TREND reverts to CHOP (default: 18; must be
+                               strictly lower than --adx-enter — that gap IS the hysteresis)
+--chop-length INT              Choppiness Index length (default: 14)
+--chop-max FLOAT               Choppiness at/below which TREND is allowed (default: 55;
+                               reverting needs this + 5)
+--regime-confirm-candles INT   Confirmed candles a regime flip must survive (default: 2)
+--htf-interval STR             Higher-timeframe confirmation, minutes or 'auto' (default: auto)
+--htf-refresh-seconds INT      Higher-timeframe refresh cadence (default: 60)
+--min-band-gap-atr FLOAT       Min ATR multiple between ST and VWAP to enter (default: 0.5)
+--no-regime-filter             Disable the ADX/Choppiness gate
+--no-htf-filter                Disable the higher-timeframe agreement filter
+
+Per-trade risk
+--atr-stop-mult FLOAT          Initial stop in ATRs from entry (default: 1.5; 0 disables)
+--trail-trigger-atr FLOAT      ATRs of profit before the Supertrend trail arms (default: 1.0)
+
+Churn brakes
+--max-trades-per-day INT       Entries per day, reversal legs included (default: 6; 0 = off)
+--cooldown-candles INT         Confirmed candles after any flat-going exit (default: 1)
+--loss-streak-pause INT        Consecutive losers before entries pause (default: 2; 0 = off)
+--loss-streak-pause-minutes INT  Length of that pause (default: 30)
+
+OI confirmation (optional; always fetched for telemetry, only blocks with --require-oi-confirmation)
+--oi-symbol STR                Option-chain underlying (default: CRUDEOIL — CRUDEOILM has no options)
+--oi-strike-range FLOAT        Points around the underlying LTP summed for the bias (default: 250)
+--oi-strike-step FLOAT         Informational strike spacing (default: 50)
+--oi-expansion-window INT      Snapshots kept for the expansion check (default: 3; min 2)
+--oi-refresh-seconds INT       OI chain refresh cadence (default: 45; min 5 — Dhan's chain cache is 5s)
+--require-oi-confirmation      BLOCK entries unless CE/PE OI buildup agrees with the side
+--no-oi-tracking                Disable the OI fetch entirely (no telemetry, no gate)
 ```
 
 Arguments are validated at startup and the run is refused on values that would silently
@@ -220,6 +396,17 @@ python strategies/crudeoil/crudeoilm_vwap_supertrend.py --live --lots 5 --target
 
 # Faster signal, exit only on confirmed closes
 python strategies/crudeoil/crudeoilm_vwap_supertrend.py --interval 3 --exit-on-close
+
+# Stricter regime gate for a known-choppy session
+python strategies/crudeoil/crudeoilm_vwap_supertrend.py --adx-enter 28 --chop-max 45 --max-trades-per-day 3
+
+# Turn on OI confirmation after reviewing the telemetry
+python strategies/crudeoil/crudeoilm_vwap_supertrend.py --require-oi-confirmation
+
+# Pre-2026-08-24 behaviour (every filter off) — for comparing against the telemetry
+python strategies/crudeoil/crudeoilm_vwap_supertrend.py --no-regime-filter --no-htf-filter \
+    --min-band-gap-atr 0 --atr-stop-mult 0 --min-flip-atr-mult 0 --flip-cooldown 30 \
+    --max-trades-per-day 0 --loss-streak-pause 0
 ```
 
 ---
