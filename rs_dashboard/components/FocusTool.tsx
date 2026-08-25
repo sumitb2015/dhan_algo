@@ -344,9 +344,9 @@ const makeRow = (underlying: FocusUnderlying): FocusRow => ({
   vwapInterval: '1',
   vwapBufferPct: '0.1',
   slRupees: '',
-  slMultiplier: '1',
-  ceSlMultiplier: '1',
-  peSlMultiplier: '1',
+  slMultiplier: '1.2',
+  ceSlMultiplier: '1.2',
+  peSlMultiplier: '1.2',
   createdAt: new Date().toISOString(),
   updatedAt: new Date().toISOString(),
 });
@@ -1646,12 +1646,12 @@ function FocusTableRowImpl({
             <div className="flex items-center gap-2">
               <div className="flex items-center gap-1">
                 <span className="text-[9px] font-black text-emerald-400">CE &times;</span>
-                <RuleNumInput value={row.ceSlMultiplier ?? '1'} onCommit={v => onUpdate({ ceSlMultiplier: v })} className="w-9"
+                <RuleNumInput value={row.ceSlMultiplier ?? '1.2'} onCommit={v => onUpdate({ ceSlMultiplier: v })} className="w-9"
                   title="Exit CE alone when its own premium moves this multiple against its own entry — independent of PE and of the pair SL &times; above" />
               </div>
               <div className="flex items-center gap-1">
                 <span className="text-[9px] font-black text-rose-400">PE &times;</span>
-                <RuleNumInput value={row.peSlMultiplier ?? '1'} onCommit={v => onUpdate({ peSlMultiplier: v })} className="w-9"
+                <RuleNumInput value={row.peSlMultiplier ?? '1.2'} onCommit={v => onUpdate({ peSlMultiplier: v })} className="w-9"
                   title="Exit PE alone when its own premium moves this multiple against its own entry — independent of CE and of the pair SL &times; above" />
               </div>
             </div>
@@ -1665,7 +1665,7 @@ function FocusTableRowImpl({
               <Check className="h-3 w-3" /> Save
             </button>
             <button
-              onClick={() => onUpdate({ levelHigh: '', levelLow: '', levelVw: false, vwapInterval: '1', vwapBufferPct: '0.1', slRupees: '', slMultiplier: '1', ceSlMultiplier: '1', peSlMultiplier: '1' }, true)}
+              onClick={() => onUpdate({ levelHigh: '', levelLow: '', levelVw: false, vwapInterval: '1', vwapBufferPct: '0.1', slRupees: '', slMultiplier: '1.2', ceSlMultiplier: '1.2', peSlMultiplier: '1.2' }, true)}
               title="Clear every level exit on this row"
               className={cn('text-[10px] font-bold text-zinc-600 hover:text-zinc-400 cursor-pointer transition-colors', FOCUS_RING)}
             >
@@ -1869,11 +1869,11 @@ function FocusRowCardImpl({
         </div>
         <div className="flex justify-between items-center mt-1">
           <span className="text-emerald-400 text-[9px] font-black" title="Exit CE alone on its own premium multiple, independent of PE and of SL × above">CE &times;</span>
-          <RuleNumInput value={row.ceSlMultiplier ?? '1'} onCommit={v => onUpdate({ ceSlMultiplier: v })} className="w-20 h-6" />
+          <RuleNumInput value={row.ceSlMultiplier ?? '1.2'} onCommit={v => onUpdate({ ceSlMultiplier: v })} className="w-20 h-6" />
         </div>
         <div className="flex justify-between items-center mt-1">
           <span className="text-rose-400 text-[9px] font-black" title="Exit PE alone on its own premium multiple, independent of CE and of SL × above">PE &times;</span>
-          <RuleNumInput value={row.peSlMultiplier ?? '1'} onCommit={v => onUpdate({ peSlMultiplier: v })} className="w-20 h-6" />
+          <RuleNumInput value={row.peSlMultiplier ?? '1.2'} onCommit={v => onUpdate({ peSlMultiplier: v })} className="w-20 h-6" />
         </div>
         <div className="flex justify-between items-center mt-1">
           <SwitchToggle checked={row.levelVw} onChange={v => onUpdate({ levelVw: v })} label="VW"
@@ -1907,7 +1907,7 @@ function FocusRowCardImpl({
               Save Exits
             </button>
             <button
-              onClick={() => onUpdate({ levelHigh: '', levelLow: '', levelVw: false, vwapInterval: '1', vwapBufferPct: '0.1', slRupees: '', slMultiplier: '1', ceSlMultiplier: '1', peSlMultiplier: '1' }, true)}
+              onClick={() => onUpdate({ levelHigh: '', levelLow: '', levelVw: false, vwapInterval: '1', vwapBufferPct: '0.1', slRupees: '', slMultiplier: '1.2', ceSlMultiplier: '1.2', peSlMultiplier: '1.2' }, true)}
               className={cn('text-[9px] text-zinc-500 hover:text-zinc-400', FOCUS_RING)}
             >
               Clear
