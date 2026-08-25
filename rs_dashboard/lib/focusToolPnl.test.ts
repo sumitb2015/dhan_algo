@@ -31,8 +31,22 @@ test('mtmForQty: marks only the closed slice on a partial reduce', () => {
 
 test('ownShare apportions a netted broker position', () => {
   assert.equal(ownShare(65, 130), 0.5);
-  assert.equal(ownShare(undefined, 130), 1);
-  assert.equal(ownShare(0, 130), 1);
+  // A missing/zero own qty owns NOTHING of a shared position — never the
+  // whole thing. That share belongs to another row/strategy until this
+  // row's own ledger claims it.
+  assert.equal(ownShare(undefined, 130), 0);
+  assert.equal(ownShare(0, 130), 0);
+});
+
+test('computeRowPnl: an unowned leg contributes nothing, not the whole broker position', () => {
+  // Two rows share a strike; THIS row's ledger shows nothing on it (e.g. the
+  // worker holds it and hasn't reported this row's own qty yet) — must not
+  // attribute the other row's/strategy's whole position to this one.
+  const pnl = computeRowPnl(0, [{
+    netQty: -650, buyAvg: 0, sellAvg: 31.67, ltp: 14.45,
+    unrealizedProfit: 11245.5, ownQty: undefined,
+  }]);
+  assert.equal(pnl, 0);
 });
 
 test('shiftMayReopen requires the full close — never a partial', () => {

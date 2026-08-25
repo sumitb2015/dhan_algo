@@ -25,7 +25,7 @@ import type {
 // run against focus_tool_rows_worker.py — see focusToolRules.cases.json.
 import {
   INTRADAY_BACKSTOP_HM, EMPTY_ROW_LIVE,
-  legsOf, rowFlat, rowOwnsLeg, sidePremium, legStopReason,
+  legsOf, rowFlat, rowOwnsLeg, sidePremium, legStopReason, legOwnContracts,
   dteMatches, dteForExpiry, evaluateRowExit, evaluateEntry, evaluateGlobalRisk,
   legStopPremium, pairStopPremium,
   type PosRow, type RowLive,
@@ -3078,12 +3078,13 @@ export default function FocusTool() {
         // computeRowPnl() in focusToolPnl.ts read a missing own qty as
         // "attribute the whole position to this row" instead of "none of it."
         if (!rowOwnsLeg(row, leg, workerHold)) continue;
-        // Prefer the worker's own qty when the page fill is empty (worker
-        // entered this row without writing the page ledger).
-        const pageOwn = leg === 'CE' ? row.fill?.ceQty : row.fill?.peQty;
-        const workerOwn = leg === 'CE' ? workerHold?.ceQty : workerHold?.peQty;
-        const ownQty = (Number(pageOwn) > 0 ? pageOwn : undefined)
-          ?? (Number(workerOwn) > 0 ? workerOwn : undefined);
+        // legOwnContracts sums the page ledger + the worker ledger (both can
+        // independently hold real lots for this row) and never falls back to
+        // the raw broker net — the single implementation of "how much does
+        // this row own," also used by sidePremium/pairStopPremium so the
+        // exit rules and this P&L calc can't disagree with each other.
+        const owned = legOwnContracts(row, leg, { cePosition, pePosition } as RowLive, workerHold);
+        const ownQty = owned > 0 ? owned : undefined;
         const isShort = Number(pos.netQty) < 0;
         const avg = isShort ? (Number(pos.sellAvg) || 0) : (Number(pos.buyAvg) || 0);
         const ltp = leg === 'CE' ? ltpCe : ltpPe;
@@ -3096,10 +3097,27 @@ export default function FocusTool() {
           ownQty,
         });
         // Qty-weighted entry for pair SL × — unequal CE/PE sizes must not be
-        // treated as a 1-lot CE+PE sum.
-        const q = Math.abs(Number(ownQty) || Number(pos.netQty) || 0);
-        if (q > 0 && avg > 0) {
-          entryNum += avg * q;
+        // treated as a 1-lot CE+PE sum. NEVER falls back to the broker net:
+        // an unowned/unresolved leg contributes nothing to the weighting,
+        // not the whole shared position (see legOwnContracts above).
+        //
+        // The broker's live avg is only trusted as THIS row's own entry when
+        // this row's own qty fully accounts for the whole broker position
+        // (sole owner) — matching broker_avg_trusted's Python-side twin.
+        // Otherwise (a strike another row's own ledger also holds, or an
+        // untracked residual) the broker average is a blend of more than
+        // this row's own entries, so prefer the row's own stored
+        // ceEntry/peEntry (see FocusRowFill.ceEntry) — falling back to the
+        // broker average, with the same contamination caveat, only when
+        // this row genuinely has no stored entry yet (a worker-only entry,
+        // or a pre-follow-up session).
+        const net = Math.abs(Number(pos.netQty) || 0);
+        const soleOwner = net > 0 && owned === net;
+        const storedEntry = Number(leg === 'CE' ? row.fill?.ceEntry : row.fill?.peEntry) || 0;
+        const entryAvg = soleOwner ? avg : (storedEntry > 0 ? storedEntry : avg);
+        const q = owned;
+        if (q > 0 && entryAvg > 0) {
+          entryNum += entryAvg * q;
           entryDen += q;
         }
       }
@@ -3448,16 +3466,29 @@ export default function FocusTool() {
    */
   function adjustFillQty(
     rowId: string, leg: 'CE' | 'PE', delta: number, strike?: number, bookedDelta = 0,
+    entryPrice?: number,
   ) {
     setConfig(prev => {
       const nextRows = prev.rows.map(r => {
         if (r.id !== rowId) return r;
         const f = r.fill;
+        const prevQty = leg === 'CE' ? (f?.ceQty ?? 0) : (f?.peQty ?? 0);
+        const prevEntry = leg === 'CE' ? (f?.ceEntry ?? null) : (f?.peEntry ?? null);
+        // Qty-weighted blend across every ADD on this leg (delta > 0) — a
+        // reduce (delta < 0) never touches the stored entry, only the
+        // remaining qty still carries it. No price for this fill (e.g. LTP
+        // unavailable) leaves the existing entry untouched rather than
+        // diluting it toward 0.
+        const nextEntry = delta > 0 && Number(entryPrice) > 0
+          ? ((Number(prevEntry) || 0) * prevQty + Number(entryPrice) * delta) / (prevQty + delta)
+          : prevEntry;
         const nextFill: FocusRowFill = {
           ceStrike: leg === 'CE' && strike != null ? strike : (f?.ceStrike ?? null),
           peStrike: leg === 'PE' && strike != null ? strike : (f?.peStrike ?? null),
           ceQty: leg === 'CE' ? Math.max(0, (f?.ceQty ?? 0) + delta) : (f?.ceQty ?? 0),
           peQty: leg === 'PE' ? Math.max(0, (f?.peQty ?? 0) + delta) : (f?.peQty ?? 0),
+          ceEntry: leg === 'CE' ? nextEntry : (f?.ceEntry ?? null),
+          peEntry: leg === 'PE' ? nextEntry : (f?.peEntry ?? null),
           bookedPnl: (f?.bookedPnl ?? 0) + (Number(bookedDelta) || 0),
           ts: f?.ts ?? new Date().toISOString(),
         };
@@ -3629,14 +3660,17 @@ export default function FocusTool() {
       // rows at the same strike (or a row sharing a strike with a running
       // strategy) are ONE broker position. Sizing off the raw net quantity lets
       // whichever exits first flatten the other's leg too.
-      // Prefer the page fill; fall back to the worker's published qty when the
-      // worker entered this row (page fill stays empty for those).
+      // Sum the page fill and the worker's published qty — NOT "pick
+      // whichever is nonzero". The tab and the worker can each
+      // independently hold real lots for this same row (the worker enters/
+      // exits without ever writing the page's fill; the tab can add lots the
+      // worker never learns about), so this row's true ownership is often
+      // split across both ledgers. Picking one and discarding the other
+      // under-sizes the close against this row's real exposure.
       const workerHold = (workerStatus.rows ?? []).find(r => r.id === row.id);
-      const pageOwn = leg === 'CE' ? row.fill?.ceQty : row.fill?.peQty;
-      const workerOwn = leg === 'CE' ? workerHold?.ceQty : workerHold?.peQty;
-      const ownQty = (Number(pageOwn) > 0 ? Number(pageOwn) : 0)
-        || (Number(workerOwn) > 0 ? Number(workerOwn) : 0)
-        || undefined;
+      const pageOwn = Number(leg === 'CE' ? row.fill?.ceQty : row.fill?.peQty) || 0;
+      const workerOwn = Number(leg === 'CE' ? workerHold?.ceQty : workerHold?.peQty) || 0;
+      const ownQty = (pageOwn + workerOwn) > 0 ? (pageOwn + workerOwn) : undefined;
       const brokerQty = Math.abs(netQty);
       if (ownQty === undefined || ownQty <= 0) {
         // No ledger entry — a position this page did not open (or one from
@@ -3719,6 +3753,11 @@ export default function FocusTool() {
           sellAvg: Number(pos?.sellAvg) || 0,
           ltp: Number(leg === 'CE' ? live?.ltpCe : live?.ltpPe) || 0,
         } : null;
+        // Opening: the LTP right before this order went out is this fill's
+        // own entry-price estimate — stamped into fill.ceEntry/peEntry so a
+        // shared-strike row's SL × entry side has a cost basis scoped to
+        // only what THIS row itself opened (see FocusRowFill.ceEntry).
+        const openEntryPx = !opts.reduce ? Number(leg === 'CE' ? live?.ltpCe : live?.ltpPe) || 0 : 0;
         const applyFill = (filled: number) => {
           if (filled < quantity) {
             addToast('error', `${what}: partial fill`,
@@ -3736,7 +3775,7 @@ export default function FocusTool() {
             }
           }
           adjustFillQty(row.id, leg, opts.reduce ? -filled : filled,
-            opts.reduce ? undefined : Number(strike), bookedDelta);
+            opts.reduce ? undefined : Number(strike), bookedDelta, openEntryPx);
           return filled >= quantity && markOk;
         };
         if (opts.awaitFill) {
@@ -3811,42 +3850,31 @@ export default function FocusTool() {
   }
 
   /**
-   * Poll the broker's position book until neither of this row's legs shows any
-   * quantity at the strikes it actually holds.
+   * Poll until THIS ROW'S OWN ledger reports flat on both legs — NOT until
+   * the broker's raw book at its strikes reaches zero. Broker netQty can
+   * never reach zero while a sibling row (two straddles parked on the same
+   * ATM strike is a legitimate shape) or an untracked residual still holds
+   * quantity at the same security, which used to leave a row's own
+   * successful close reported as "unconfirmed" indefinitely — stuck at its
+   * pre-close status forever, with only a toast as any trace.
    *
-   * Returns false if it is still not flat when the deadline passes, or if
-   * every fetch failed — the caller must treat that as "unknown", never as
-   * "flat". `live` is captured before the closing orders go out so the strikes
-   * checked are the ones that were closed.
+   * Ledger-based flatness (`rowFlat`) is only trustworthy once the closing
+   * order's fill is CONFIRMED — callers MUST place the close with
+   * `awaitFill: true` before calling this, or the ledger still shows the
+   * pre-close qty on the very first check and this returns false even
+   * though the close landed. Re-reads the row/workerHold fresh off
+   * `schedulerRef` each pass rather than a snapshot captured before the
+   * close, since `adjustFillQty`/the worker-status poll both update
+   * asynchronously.
    */
-  async function waitRowFlat(row: FocusRow, live: RowLive, maxWaitMs = 4000): Promise<boolean> {
-    const u = row.underlying;
-    const expiry = row.expiry || expiries[u]?.[0] || '';
-    const handles = (['CE', 'PE'] as const).map(leg => {
-      const strike = leg === 'CE' ? live.ceStrike : live.peStrike;
-      if (strike == null) return null;
-      const ref = lookups[expKey(u, expiry)]?.strikes?.[strikeKey(strike)];
-      const id = leg === 'CE' ? ref?.ceId : ref?.peId;
-      const sym = leg === 'CE' ? ref?.ceSymbol : ref?.peSymbol;
-      return broker === 'dhan' ? (id ? { id } : null) : (sym ? { sym } : null);
-    }).filter(Boolean) as ({ id?: string; sym?: string })[];
-
-    if (!handles.length) return false;
-
+  async function waitRowFlat(rowId: string, maxWaitMs = 4000): Promise<boolean> {
     const deadline = Date.now() + maxWaitMs;
     for (;;) {
-      await new Promise(r => setTimeout(r, 400));
-      const rows = await fetchPositionsNow();
-      if (rows) {
-        const stillOpen = handles.some(h => {
-          const pos = h.id
-            ? rows.find(p => String(p.securityId) === String(h.id))
-            : rows.find(p => String(p.tradingSymbol) === h.sym);
-          return Math.abs(Number(pos?.netQty ?? 0)) > 0;
-        });
-        if (!stillOpen) return true;
-      }
+      const currentRow = schedulerRef.current.config.rows.find(r => r.id === rowId);
+      const workerHold = (schedulerRef.current.workerRows ?? []).find(w => w.id === rowId) ?? null;
+      if (currentRow && rowFlat(currentRow, workerHold)) return true;
       if (Date.now() >= deadline) return false;
+      await new Promise(r => setTimeout(r, 400));
     }
   }
 
@@ -3858,13 +3886,14 @@ export default function FocusTool() {
    */
   function handleManualExit(row: FocusRow, leg: 'CE' | 'PE' | 'ALL') {
     return runRowAction(row.id, async () => {
-      const live = rowLive[row.id] ?? EMPTY_ROW_LIVE;
       const legs = leg === 'ALL' ? legsOf(row) : [leg];
       // Concurrently, not one after the other. This is the panic button: legs
       // are independent orders against different contracts, and serialising
       // them made a straddle's second leg wait out the first's full round trip
       // (~60ms) for nothing. Each leg still reports its own rejection.
-      const accepted = await Promise.all(legs.map(l => placeLeg(row, l, { reduce: true, all: true })));
+      // awaitFill so the ledger is confirmed-updated by the time waitRowFlat
+      // reads it below.
+      const accepted = await Promise.all(legs.map(l => placeLeg(row, l, { reduce: true, all: true, awaitFill: true })));
       // Each leg already reported its own rejection via placeLeg's own toast;
       // still short-circuit here so a rejected leg does not sit through the
       // full waitRowFlat timeout for a row that was never fully closed (same
@@ -3873,7 +3902,7 @@ export default function FocusTool() {
         addToast('error', 'Exit incomplete', `${row.underlying}: a leg was rejected — still open, check the position book`);
         return;
       }
-      if (leg === 'ALL' && await waitRowFlat(row, live)) {
+      if (leg === 'ALL' && await waitRowFlat(row.id)) {
         updateRow(row.id, { status: 'exited', fill: undefined }, true);
       }
     });
@@ -4103,9 +4132,10 @@ export default function FocusTool() {
     // this exit is in flight sends a SECOND full-size closing order and flips
     // the position the other way.
     setBusyRows(prev => new Set(prev).add(row.id));
-    const live = rowLive[row.id] ?? EMPTY_ROW_LIVE;
     addToast('error', `Auto-exit: ${row.underlying} ${row.id.slice(-4)}`, reason);
-    Promise.all(legsOf(row).map(leg => placeLeg(row, leg, { reduce: true, all: true })))
+    // awaitFill so the ledger is confirmed-updated by the time waitRowFlat
+    // reads it below.
+    Promise.all(legsOf(row).map(leg => placeLeg(row, leg, { reduce: true, all: true, awaitFill: true })))
       .then(async accepted => {
         // Only call the row exited once the broker's own book agrees every
         // leg is flat. Marking it exited off the order ACKs alone would
@@ -4115,7 +4145,7 @@ export default function FocusTool() {
           addToast('error', 'Auto-exit incomplete', `${row.underlying}: a leg was rejected — still open, check the position book`);
           return;
         }
-        if (await waitRowFlat(row, live)) {
+        if (await waitRowFlat(row.id)) {
           // Flat and confirmed — retire the row and drop its strike pin.
           updateRow(row.id, { status: 'exited', fill: undefined }, true);
         } else {
@@ -4148,12 +4178,13 @@ export default function FocusTool() {
     // click on this row's own Exit/Add/Reduce buttons while this leg's close
     // is in flight sends a second concurrent order against the same leg.
     setBusyRows(prev => new Set(prev).add(row.id));
-    const live = rowLive[row.id] ?? EMPTY_ROW_LIVE;
     addToast('error', `Auto-exit ${leg}: ${row.underlying} ${row.id.slice(-4)}`, reason);
-    placeLeg(row, leg, { reduce: true, all: true })
+    // awaitFill so the ledger is confirmed-updated by the time waitRowFlat
+    // reads it below.
+    placeLeg(row, leg, { reduce: true, all: true, awaitFill: true })
       .then(async accepted => {
         if (!accepted) return;
-        if (await waitRowFlat(row, live)) {
+        if (await waitRowFlat(row.id)) {
           updateRow(row.id, { status: 'exited', fill: undefined }, true);
         }
       })

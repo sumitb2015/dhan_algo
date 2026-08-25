@@ -74,7 +74,6 @@ import logging
 import os
 import sys
 import time
-from collections import Counter
 from datetime import datetime, timedelta, timezone
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -410,6 +409,28 @@ def evaluate_row_exit(row, spot, premium, entry_premium, pnl, vwap, vwap_close):
             return (f'SL ×{js_num(sl_mult)} hit '
                     f'(premium {premium:.2f} vs entry {entry_premium:.2f})')
     return None
+
+
+def broker_avg_trusted(broker_qty, own_qty):
+    """Safe to treat the broker's live position average as THIS row's own
+    entry price for one leg?
+
+    Only when the broker's whole position at that security exactly equals
+    what this row's own ledger claims — i.e. this row can fully account for
+    it. A broker qty larger than our own means something else also holds
+    this leg: another row's own ledger (two straddles parked on the same ATM
+    strike is a legitimate shape, and Dhan nets them into one blended
+    average that is neither row's own true entry price), OR an untracked
+    residual with no ledger entry at all (a leg-wise SL close, a ghost-pin
+    drop, a partial fill that never fully reconciled) — the kind of sharing
+    a same-row-id count alone cannot see. A broker qty SMALLER than our own
+    means the snapshot/ledger disagree (a stale read). Neither is a safe
+    "this average is only mine" signal.
+
+    `broker_qty` is None when the security wasn't found in the snapshot at
+    all (unknown, not zero) — also untrusted.
+    """
+    return broker_qty is not None and broker_qty == own_qty
 
 
 def side_premium_entry(fill, leg_ltp, broker_avg=None):
@@ -1333,24 +1354,6 @@ class FocusRowsWorker:
         # snapshot and the account risk sweep) reaches them too.
         rows += self.orphan_rows(rows)
 
-        # Legs more than one row's OWN ledger currently holds at the same
-        # (underlying, expiry, strike, leg) — two straddles parked on the same
-        # ATM strike in different rows is a legitimate shape, and Dhan nets
-        # them into ONE broker position with ONE blended average. That average
-        # is neither row's own true entry price, so using it for both would
-        # hand two independently-entered rows the identical SL x level
-        # regardless of when each actually opened. Those legs skip the
-        # broker-average override below and keep using each row's own
-        # remembered entryPrice, exactly as before this change; a leg only one
-        # row holds (the common case, and the one the drift bug actually hit)
-        # still gets the accurate broker-truth average.
-        shared_leg_keys = Counter(
-            (f.get('underlying'), f.get('expiry') or '', held['strike'], leg)
-            for f in self.fills.values()
-            for leg in ('CE', 'PE')
-            if (held := f.get(leg))
-        )
-
         now = datetime.now(IST)
         now_minutes = now.hour * 60 + now.minute
         today = now.strftime('%Y-%m-%d')
@@ -1451,18 +1454,23 @@ class FocusRowsWorker:
             leg_ltp = {}
             # Broker's own live position average per held leg — preferred over
             # this worker's remembered entryPrice for every entry comparison
-            # below (SL x, booked P&L). See evaluate_leg_exit's doc comment for
-            # why: the ledger price is only ever what THIS worker's own order
-            # traded at, and drifts from the position's real cost basis the
-            # moment anything else touches the same leg. Skipped for a strike
-            # another row's own ledger also holds — see shared_leg_keys above.
+            # below (SL x, booked P&L). See evaluate_leg_exit's and
+            # broker_avg_trusted's doc comments for why: the ledger price is
+            # only ever what THIS worker's own order traded at, and the
+            # broker average is only safe to adopt when this row's own
+            # ledger can fully account for the whole position at that
+            # security.
             broker_avg = {}
             if fill:
                 for leg in ('CE', 'PE'):
                     held = fill.get(leg)
                     if not held:
                         continue
-                    if shared_leg_keys.get((u, expiry, held['strike'], leg), 0) > 1:
+                    key = self.router.position_key(u, expiry, held['strike'], leg)
+                    snap = position_snapshot.get(key) if position_snapshot and key else None
+                    broker_qty = abs(int(snap.get('qty') or 0)) if snap is not None else None
+                    own_qty = int(held.get('qty') or 0)
+                    if not broker_avg_trusted(broker_qty, own_qty):
                         continue
                     av = self._broker_avg(position_snapshot, u, expiry, held['strike'], leg)
                     if av:

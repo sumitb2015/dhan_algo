@@ -61,6 +61,20 @@ export interface FocusRowFill {
    * Optional on disk for older sessions; readers treat missing as 0.
    */
   bookedPnl?: number;
+  /**
+   * This row's own qty-weighted average entry premium per leg — an LTP
+   * estimate at order-send time, blended across every opening add on this
+   * leg. Unlike the broker's own live buyAvg/sellAvg (which blends in
+   * everything else sharing the same strike/security), this is scoped to
+   * only what THIS row's own orders opened, so a shared-strike row's SL ×
+   * entry side isn't contaminated by another row's/strategy's cost basis.
+   * Optional on disk for older sessions or worker-only entries; readers
+   * treat missing as "fall back to the broker average" (only when this row
+   * can fully account for the whole broker position — see
+   * broker_avg_trusted's Python-side twin).
+   */
+  ceEntry?: number | null;
+  peEntry?: number | null;
   ts: string;
 }
 
