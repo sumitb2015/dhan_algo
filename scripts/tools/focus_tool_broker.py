@@ -301,26 +301,24 @@ class OrderRouter:
         except Exception:
             return None
 
-    def confirm_fill(self, order_id, timeout=20):
+    def read_fill(self, order_id):
         """What an order ACTUALLY did: {'qty': int, 'price': float} or None.
 
-        A broker ACK is not a fill. `place_order` returning an id means Dhan
-        accepted the order, not that the exchange traded it — so sizing a
-        ledger, an exit or an SL x off the ACK records a position that may not
-        exist at a price that was never paid. This waits for a terminal status
-        on the order-update WebSocket (falling back to REST inside
-        wait_for_fill) and then reads the traded quantity and average price off
-        the order itself.
+        A broker ACK is not a fill, so the ledger must not record one off the
+        ACK alone. This does a SINGLE non-blocking read of the order and
+        returns None unless it has actually traded.
 
-        Returns None when the order did not fill, or when the fill cannot be
-        read back — callers must treat that as "unknown", never as "filled".
+        Never called on the tick thread: the order-update callback calls it the
+        moment the socket reports a terminal status. Returns None for "not
+        confirmed", which callers must treat as unknown, never as filled.
         """
         try:
-            if not self.helper.wait_for_fill(str(order_id), timeout=timeout):
-                return None
             detail = self.helper.get_order_by_id(str(order_id)) or {}
         except Exception as e:
-            logger.warning(f'Fill confirmation failed for order {order_id}: {e}')
+            logger.warning(f'Fill read failed for order {order_id}: {e}')
+            return None
+        status = str(detail.get('orderStatus') or detail.get('status') or '').upper()
+        if status and status != 'TRADED':
             return None
 
         def pick(*names):
@@ -342,12 +340,12 @@ class OrderRouter:
         return {'qty': int(qty), 'price': float(price or 0.0)}
 
     def place(self, underlying, expiry, strike, opt_type, side, qty, product):
-        """(ok, detail, fill). `qty` is absolute units, never lots.
+        """(ok, detail, order_id). `qty` is absolute units, never lots.
 
-        `fill` is {'qty', 'price'} when the trade was confirmed against the
-        broker, and None when it was only ACKed — see confirm_fill. Callers
-        record the confirmed numbers when they have them and fall back to their
-        own estimate (with the leg flagged unconfirmed) when they do not.
+        Returns as soon as the broker ACKs. `order_id` is the handle to settle
+        the real fill against later — see read_fill, which the caller runs off
+        the tick thread via the order-update callback. None when there is no id
+        to track (dry run, or a child broker that reports no usable id).
         """
         if self.dry_run:
             return True, f'DRY-RUN {side} {qty} {underlying} {expiry} {int(strike)}{opt_type}', None
@@ -366,14 +364,10 @@ class OrderRouter:
                 return False, f'Order failed: {e}', None
             if not order_id:
                 return False, 'Order rejected by broker', None
-            fill = self.confirm_fill(order_id)
-            if fill is None:
-                # Accepted but not confirmed traded. Reported as a success with
-                # no fill: the position may well exist, so refusing to record it
-                # would be worse than recording it as unconfirmed.
-                logger.warning(f'Order {order_id} accepted but its fill could not be confirmed')
-                return True, f'{order_id} (unconfirmed)', None
-            return True, str(order_id), fill
+            # Deliberately does NOT wait for the fill. This runs on the worker's
+            # single tick thread, and blocking it to confirm one leg stalls the
+            # exit rules for every OTHER row.
+            return True, str(order_id), str(order_id)
 
         child = self._child(underlying)
         if not child:
@@ -391,8 +385,8 @@ class OrderRouter:
             # No fill confirmation for child brokers: ChildBroker has no
             # equivalent of Dhan's order-update socket, and `placed` is what the
             # broker accepted, not what traded. The caller falls back to an LTP
-            # estimate and flags the leg unconfirmed, same as an unconfirmed
-            # Dhan fill.
+            # estimate and flags the leg unconfirmed; reconcile() sizes it
+            # against the position book on a later tick.
             return True, ','.join(str(o) for o in order_ids), None
         except Exception as e:
             return False, f'{self.broker}: {e}', None

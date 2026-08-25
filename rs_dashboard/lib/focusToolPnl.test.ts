@@ -13,7 +13,7 @@ import assert from 'node:assert/strict';
 import {
   computeRowPnl, mtmForQty, ownShare, shiftMayReopen,
   canMarkMtm, shiftCloseConfirmed, rowDisplayBookedPnl, putCallRatio,
-  valuePutCallRatio,
+  valuePutCallRatio, pickOpenInterest,
 } from './focusToolPnl.ts';
 
 test('mtmForQty: short leg profits when premium falls', () => {
@@ -160,6 +160,17 @@ test('putCallRatio: PE ÷ CE for value and OI PCR', () => {
   assert.equal(putCallRatio(50, 0), null);
   assert.equal(putCallRatio(null, 100), null);
   assert.equal(putCallRatio(50, null), null);
+});
+
+test('pickOpenInterest prefers live WS OI, falls back to chain', () => {
+  // Non-nearest rows (e.g. 2026-09-01 while the bridge is on the weekly) have
+  // no matching WS tick — OI PCR must still resolve off the polled chain.
+  assert.equal(pickOpenInterest(1459445, 999), 1459445);
+  assert.equal(pickOpenInterest(undefined, 3357380), 3357380);
+  assert.equal(pickOpenInterest(null, 0), 0);
+  assert.equal(pickOpenInterest(undefined, undefined), null);
+  assert.equal(pickOpenInterest(null, null), null);
+  assert.equal(pickOpenInterest(NaN, 100), 100);
 });
 
 test('valuePutCallRatio prefers ₹ values, falls back to premiums', () => {

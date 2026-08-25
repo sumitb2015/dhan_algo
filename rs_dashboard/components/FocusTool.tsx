@@ -30,7 +30,7 @@ import {
   legStopPremium, pairStopPremium,
   type PosRow, type RowLive,
 } from '@/lib/focusToolRules';
-import { computeRowPnl, mtmForQty, shiftMayReopen, canMarkMtm, shiftCloseConfirmed, rowDisplayBookedPnl, putCallRatio, valuePutCallRatio } from '@/lib/focusToolPnl';
+import { computeRowPnl, mtmForQty, shiftMayReopen, canMarkMtm, shiftCloseConfirmed, rowDisplayBookedPnl, putCallRatio, valuePutCallRatio, pickOpenInterest } from '@/lib/focusToolPnl';
 
 // â”€â”€ Constants â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
@@ -359,10 +359,12 @@ interface FutQuote {
 interface StrikeRef { ceId?: string; peId?: string; ceSymbol?: string; peSymbol?: string }
 interface LookupData { lotSize: number; strikes: Record<string, StrikeRef> }
 
-/** Spot + per-strike premiums, flattened out of /api/options/chain. */
+/** Spot + per-strike premiums/OI, flattened out of /api/options/chain.
+ *  LTP drives the premium column; OI feeds OI PCR when the WS bridge is on a
+ *  different expiry than this row (bridge stays on nearest). */
 interface ChainData {
   spot: number;
-  oc: Record<string, { ce: number; pe: number }>;
+  oc: Record<string, { ce: number; pe: number; ceOi?: number | null; peOi?: number | null }>;
 }
 
 /** Cache key for `lookups`/`chains` — a row can trade any listed expiry, not
@@ -2717,7 +2719,7 @@ export default function FocusTool() {
           .then((j: {
             success?: boolean;
             data?: { chain?: { last_price?: number; oc?: Record<string, {
-              ce?: { last_price?: number }; pe?: { last_price?: number };
+              ce?: { last_price?: number; oi?: number }; pe?: { last_price?: number; oi?: number };
             }> } };
           }) => {
             if (seq !== chainSeq.current) return;
@@ -2727,9 +2729,15 @@ export default function FocusTool() {
             if (!j.success || !oc) return;
             const flat: ChainData['oc'] = {};
             for (const [k, v] of Object.entries(oc)) {
+              const ceOiRaw = v.ce?.oi;
+              const peOiRaw = v.pe?.oi;
               flat[strikeKey(k)] = {
                 ce: Number(v.ce?.last_price ?? 0),
                 pe: Number(v.pe?.last_price ?? 0),
+                // Keep absolute OI so non-nearest rows (WS gated off) can still
+                // show OI PCR — same chain that already backs their LTP.
+                ceOi: ceOiRaw != null && Number(ceOiRaw) >= 0 ? Number(ceOiRaw) : null,
+                peOi: peOiRaw != null && Number(peOiRaw) >= 0 ? Number(peOiRaw) : null,
               };
             }
             setChains(prev => ({ ...prev, [expKey(u, expiry)]: { spot: Number(j.data?.chain?.last_price ?? 0), oc: flat } }));
@@ -3038,8 +3046,10 @@ export default function FocusTool() {
       const peBuildup = peWs?.pe?.buildup || null;
       const ceOiChgPct = ceWs?.ce?.oi_chg_pct ?? null;
       const peOiChgPct = peWs?.pe?.oi_chg_pct ?? null;
-      const ceOi = ceWs?.ce?.oi != null && Number(ceWs.ce.oi) >= 0 ? Number(ceWs.ce.oi) : null;
-      const peOi = peWs?.pe?.oi != null && Number(peWs.pe.oi) >= 0 ? Number(peWs.pe.oi) : null;
+      // Prefer WS OI when this row's expiry matches the bridge; otherwise the
+      // polled chain (already fetched for this row's expiry for LTP/PREMIUM).
+      const ceOi = pickOpenInterest(ceWs?.ce?.oi, ceCh?.ceOi);
+      const peOi = pickOpenInterest(peWs?.pe?.oi, peCh?.peOi);
 
       /**
        * P&L across only the legs this row's Side trades.

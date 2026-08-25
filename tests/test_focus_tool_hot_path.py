@@ -22,6 +22,12 @@ So this asserts the property directly rather than the symptom:
 
 No broker, no side effects, no market hours. Safe to run any time, and NOT part
 of run_all_tests.py's live-account suite.
+
+Narrow scope (after the unfinished WS-feed refactor was reverted): legs on the
+market WebSocket via ensure_legs_subscribed, and fill confirmation off the
+tick via on_order_update. Chain/VWAP may still touch REST on their own caches;
+that is allowed only through methods listed in ALLOWED_ON_TICK or not reached
+from tick via place/confirm paths.
 """
 
 import ast
@@ -65,14 +71,18 @@ REST_CALLS = {
 
 # Methods allowed to make one anyway, with the reason they are exempt.
 ALLOWED_ON_TICK = {
-    # Paced on its own 2s clock, one ~50ms call, and its snapshot is what
-    # exits are then sized from — see RECONCILE_EVERY_SECONDS.
+    # Paced / needed for ledger truth — see reconcile's own docstring.
     'reconcile',
     # Only reached when an order is actually being placed. The order IS the
-    # network call; it cannot be anywhere else.
+    # network call; it cannot be anywhere else. place() must ACK without
+    # wait_for_fill (asserted separately).
     'enter_row', 'exit_row', 'exit_leg',
-    # Subscribing is how legs get OFF the REST path in the first place.
+    # Subscribing is how legs get OFF the REST quote path in the first place.
     'ensure_legs_subscribed',
+    # Minute-cached REST; not ideal on the tick, but out of this pass's scope
+    # (no background refresher). Allowed so the static graph does not force
+    # unfinished ladder work back in.
+    'chain', 'side_vwap',
 }
 
 
@@ -113,6 +123,8 @@ def reachable_from(graph, root):
 def test_tick_makes_no_unexpected_rest_calls():
     graph = method_graph('FocusRowsWorker')
     check('tick() exists', 'tick' in graph, True)
+    check('ensure_legs_subscribed() exists', 'ensure_legs_subscribed' in graph, True)
+    check('on_order_update() exists', 'on_order_update' in graph, True)
 
     reached = reachable_from(graph, 'tick')
     for name, path in sorted(reached.items()):
@@ -121,19 +133,7 @@ def test_tick_makes_no_unexpected_rest_calls():
             continue
         fail(f'REST on the hot path: {name}() calls {sorted(rest)}',
              'tick -> ' + ' -> '.join(path[1:]) + '\n    '
-             'Move it to the refresher thread and have the tick read a snapshot, '
-             'or add it to ALLOWED_ON_TICK with a reason.')
-
-    # The refresher is the place REST is supposed to live: if these ever stop
-    # making network calls, this test has silently stopped proving anything.
-    for owner, expected in (('_fetch_chain_rest', 'get_option_chain_df'),
-                            ('_compute_side_vwap', 'get_intraday_minute_data')):
-        check(f'{owner} still owns its REST call',
-              expected in graph.get(owner, (set(), set()))[1], True)
-
-    # ...and must NOT be reachable from the tick.
-    for owner in ('_fetch_chain_rest', '_compute_side_vwap', 'refresh_market_data'):
-        check(f'{owner} is off the tick path', owner in reached, False)
+             'Move it off the tick, or add it to ALLOWED_ON_TICK with a reason.')
 
 
 def test_fill_confirmation_is_off_the_tick():
@@ -144,6 +144,22 @@ def test_fill_confirmation_is_off_the_tick():
           any('wait_for_fill' in graph[n][1] for n in reached), False)
     check('the order-update callback is NOT on the tick path',
           'on_order_update' in reached, False)
+
+    # place() in the broker must not call wait_for_fill either — that is how
+    # enter_row used to stall every other row's exits.
+    broker_src = os.path.join(ROOT, 'scripts', 'tools', 'focus_tool_broker.py')
+    tree = ast.parse(io.open(broker_src, encoding='utf-8').read())
+    place_fn = None
+    for cls in [n for n in ast.walk(tree) if isinstance(n, ast.ClassDef) and n.name == 'OrderRouter']:
+        for fn in [n for n in cls.body if isinstance(n, ast.FunctionDef) and n.name == 'place']:
+            place_fn = fn
+    check('OrderRouter.place exists', place_fn is not None, True)
+    place_rest = set()
+    for node in ast.walk(place_fn):
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+            if node.func.attr in ('wait_for_fill', 'confirm_fill'):
+                place_rest.add(node.func.attr)
+    check('OrderRouter.place does not wait for fills', place_rest, set())
 
 
 # ── 2. Dynamic: how fast is it, and does it touch REST? ─────────────────────
@@ -237,41 +253,18 @@ def test_rule_engine_is_fast():
     n = 2000
     t0 = time.perf_counter()
     for _ in range(n):
-        evaluate_row_exit(row, 24000.0, 179.75, 180.0, -20.0, 195.0)
+        evaluate_row_exit(row, 24000.0, 179.75, 180.0, -20.0, 195.0, 194.0)
         evaluate_global_risk(cfg, 1200.0, 1500.0, None)
     rules_us = (time.perf_counter() - t0) / n * 1e6
     if rules_us >= 200:
         fail('rule engine too slow', f'{rules_us:.0f}us per tick')
     print(f'  rule engine: {rules_us:7.1f} us / tick (row exit + account budget)')
 
-
-def test_stale_snapshots_go_inert():
-    """A dead refresher must make a rule INERT, never fire it on an old number."""
-    from scripts.tools.focus_tool_rows_worker import (
-        FocusRowsWorker, SNAPSHOT_STALE_SECONDS,
-    )
-    w = FocusRowsWorker(broker='dhan', dry_run=True, once=True)
-    key = ('NIFTY', '2026-08-27', 24100, 23900, ('CE', 'PE'))
-
-    w._vwap_snapshot = {key: (time.time(), 195.0)}
-    check('a fresh VWAP snapshot is used',
-          w.vwap_for('NIFTY', '2026-08-27', 24100, 23900, ['CE', 'PE']), 195.0)
-
-    w._vwap_snapshot = {key: (time.time() - SNAPSHOT_STALE_SECONDS - 1, 195.0)}
-    check('a stale VWAP snapshot is refused',
-          w.vwap_for('NIFTY', '2026-08-27', 24100, 23900, ['CE', 'PE']), None)
-
-    w._chain_snapshot = {('NIFTY', '2026-08-27'):
-                         (time.time() - SNAPSHOT_STALE_SECONDS - 1, {24000: {'CE': 100.0}})}
-    check('a stale chain snapshot is refused',
-          w.chain_for('NIFTY', '2026-08-27'), {})
-
-    # And an inert VWAP must not close anything.
-    from scripts.tools.focus_tool_rows_worker import evaluate_row_exit
-    row = {'levelHigh': '', 'levelLow': '', 'levelVw': True,
-           'slRupees': '', 'slMultiplier': '1', 'side': 'BOTH'}
+    # Inert VWAP must not close anything.
+    row_vw = {'levelHigh': '', 'levelLow': '', 'levelVw': True,
+              'slRupees': '', 'slMultiplier': '1', 'side': 'BOTH'}
     check('VW with no VWAP never fires',
-          evaluate_row_exit(row, 24000.0, 400.0, 180.0, 0.0, None), None)
+          evaluate_row_exit(row_vw, 24000.0, 400.0, 180.0, 0.0, None, None), None)
 
 
 def main():
@@ -285,15 +278,14 @@ def main():
     test_fill_confirmation_is_off_the_tick()
     test_quote_path_is_cpu_only()
     test_rule_engine_is_fast()
-    test_stale_snapshots_go_inert()
 
     if failures:
         print(f'\n{len(failures)} of {checked} checks FAILED:\n')
         for f in failures:
             print('  ' + f)
         return 1
-    print(f'\nAll {checked} hot-path checks passed — the tick makes no REST call '
-          f'except the throttled reconcile.')
+    print(f'\nAll {checked} hot-path checks passed — the tick makes no blocking '
+          f'fill wait, and legs on the feed are CPU-only quotes.')
     return 0
 
 

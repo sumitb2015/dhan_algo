@@ -171,6 +171,25 @@ export function putCallRatio(
   return p / c;
 }
 
+/**
+ * Absolute OI for one leg: prefer the live WS tick, else the polled option
+ * chain. Unlike LTP, 0 is a real reading (empty book), so it is not treated
+ * as "missing". Used so a row on a non-nearest expiry (WS bridge stays on
+ * the weekly) can still populate OI PCR from the chain fallback.
+ */
+export function pickOpenInterest(
+  fromWs: number | null | undefined,
+  fromChain: number | null | undefined,
+): number | null {
+  if (fromWs != null && !Number.isNaN(Number(fromWs)) && Number(fromWs) >= 0) {
+    return Number(fromWs);
+  }
+  if (fromChain != null && !Number.isNaN(Number(fromChain)) && Number(fromChain) >= 0) {
+    return Number(fromChain);
+  }
+  return null;
+}
+
 /** Val PCR: PE ₹ ÷ CE ₹ when both values exist, else PE premium ÷ CE premium. */
 export function valuePutCallRatio(
   peValue: number | null | undefined,
