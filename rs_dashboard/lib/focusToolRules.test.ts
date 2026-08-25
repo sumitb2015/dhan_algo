@@ -16,6 +16,7 @@ import path from 'node:path';
 import {
   evaluateEntry, evaluateGlobalRisk, evaluateRowExit, legStopReason,
   dteForExpiry, dteMatches, sidePremium, legsOf, legsFlat, rowOwnsLeg,
+  stopPremium, legStopPremium, pairStopPremium,
   type RowLive, type PosRow,
 } from './focusToolRules.ts';
 import type { FocusRow } from './focusToolRows.ts';
@@ -52,11 +53,18 @@ function live(c: LiveCase): RowLive {
     ltpCe: c.ceLtp, ltpPe: c.peLtp,
     cePosition, pePosition,
     pnl: c.pnl ?? 0,
-    // Entry premium covers only the legs actually held, exactly as rowLive builds it.
-    entryPremium: (cePosition ? c.ceEntry : 0) + (pePosition ? c.peEntry : 0),
+    // Entry premium is qty-weighted across open owned legs (equal lots → mid).
+    entryPremium: (() => {
+      const ceQ = Math.abs(c.ceQty);
+      const peQ = Math.abs(c.peQty);
+      const den = (cePosition ? ceQ : 0) + (pePosition ? peQ : 0);
+      if (!den) return 0;
+      return ((cePosition ? c.ceEntry * ceQ : 0) + (pePosition ? c.peEntry * peQ : 0)) / den;
+    })(),
     vwap: c.vwap ?? null,
     vwapClose: c.vwapClose ?? null,
     ceBuildup: null, peBuildup: null, ceOiChgPct: null, peOiChgPct: null,
+    ceOi: null, peOi: null,
   };
 }
 
@@ -186,13 +194,25 @@ test('sidePremium counts only legs that are both traded and open', () => {
   const c = { ceLtp: 100, peLtp: 80, ceQty: -75, peQty: -75, ceEntry: 100, peEntry: 80 };
   const l = live(c);
   const owned = ownedRow({}, c);
-  assert.equal(sidePremium({ ...owned, side: 'BOTH' } as FocusRow, l), 180);
+  // Equal lots → qty-weighted average equals the mid of the two premiums.
+  assert.equal(sidePremium({ ...owned, side: 'BOTH' } as FocusRow, l), 90);
   assert.equal(sidePremium({ ...owned, side: 'CE' } as FocusRow, l), 100);
 
   const peClosedCase = { ceLtp: 100, peLtp: 80, ceQty: -75, peQty: 0, ceEntry: 100, peEntry: 80 };
   const peClosed = live(peClosedCase);
   const ownedPeClosed = ownedRow({}, peClosedCase);
   assert.equal(sidePremium({ ...ownedPeClosed, side: 'BOTH' } as FocusRow, peClosed), 100);
+});
+
+test('sidePremium weights unequal CE/PE lots', () => {
+  // Live book: CE 455 @ LTP 100, PE 585 @ LTP 24.50 — PE-heavy, so PE moves dominate.
+  const c = { ceLtp: 100, peLtp: 24.5, ceQty: -455, peQty: -585, ceEntry: 35.6, peEntry: 32.91 };
+  const l = live(c);
+  const owned = ownedRow({ slMultiplier: '1.8' }, c);
+  const w = (100 * 455 + 24.5 * 585) / (455 + 585);
+  assert.ok(Math.abs(sidePremium(owned, l) - w) < 1e-9);
+  // Equal-weight sum would be 124.5 and would trip ×1.8 off entry 68.51; weighted must not.
+  assert.equal(evaluateRowExit(owned, l, 24000), null);
 });
 
 test('sidePremium excludes a leg the row does not own even if the broker shows it', () => {
@@ -233,4 +253,41 @@ test('the trail floor is monotonic across a falling sequence', () => {
       `floor fell from ${seen[i - 1]} to ${seen[i]}`);
   }
   assert.equal(floor, 4500);
+});
+
+test('stopPremium: entry × multiplier, off at 1 or missing entry', () => {
+  assert.equal(stopPremium(40, 1.8), 72);
+  assert.equal(stopPremium(40, '1.8'), 72);
+  assert.equal(stopPremium(40, 1), null);
+  assert.equal(stopPremium(40, '1.2'), 48);
+  assert.equal(stopPremium(0, 1.8), null);
+  assert.equal(stopPremium(40, ''), null);
+});
+
+test('legStopPremium uses sellAvg when the row owns a short, else live LTP', () => {
+  const c = { ceLtp: 50, peLtp: 30, ceQty: -65, peQty: 0, ceEntry: 40, peEntry: 0 };
+  const open = ownedRow({ ceSlMultiplier: '1.8', peSlMultiplier: '1.8' }, c);
+  assert.equal(legStopPremium(open, 'CE', live(c)), 72);
+  assert.equal(legStopPremium(open, 'PE', live(c)), 54); // PE flat → 30 × 1.8
+  const draft = row({ ceSlMultiplier: '1.8', peSlMultiplier: '1.8' });
+  assert.equal(legStopPremium(draft, 'CE', live({ ...c, ceQty: 0, ceEntry: 0 })), 90);
+});
+
+test('pairStopPremium uses combined entry when open, combined LTP when flat', () => {
+  const c = { ceLtp: 50, peLtp: 40, ceQty: -65, peQty: -65, ceEntry: 38, peEntry: 25 };
+  const open = ownedRow({ slMultiplier: '1.8' }, c);
+  // Equal lots → weighted mid (38+25)/2 = 31.5, ×1.8 = 56.7
+  assert.equal(pairStopPremium(open, live(c)), 31.5 * 1.8);
+  const draft = row({ slMultiplier: '1.8' });
+  assert.equal(pairStopPremium(draft, live({ ...c, ceQty: 0, peQty: 0, ceEntry: 0, peEntry: 0 })), 45 * 1.8);
+  assert.equal(pairStopPremium(row({ slMultiplier: '1' }), live(c)), null);
+});
+
+test('pairStopPremium weights unequal lots (not a 1-lot CE+PE sum)', () => {
+  const c = { ceLtp: 34.7, peLtp: 24.5, ceQty: -455, peQty: -585, ceEntry: 35.6, peEntry: 32.91 };
+  const open = ownedRow({ slMultiplier: '1.8' }, c);
+  const entryW = (35.6 * 455 + 32.91 * 585) / (455 + 585);
+  assert.ok(Math.abs((pairStopPremium(open, live(c)) as number) - entryW * 1.8) < 1e-6);
+  // Unweighted (35.6+32.91)*1.8 = 123.318 — must NOT be what we show.
+  assert.notEqual(pairStopPremium(open, live(c)), (35.6 + 32.91) * 1.8);
 });

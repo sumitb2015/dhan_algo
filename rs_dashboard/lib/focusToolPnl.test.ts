@@ -12,7 +12,8 @@ import assert from 'node:assert/strict';
 
 import {
   computeRowPnl, mtmForQty, ownShare, shiftMayReopen,
-  canMarkMtm, shiftCloseConfirmed,
+  canMarkMtm, shiftCloseConfirmed, rowDisplayBookedPnl, putCallRatio,
+  valuePutCallRatio,
 } from './focusToolPnl.ts';
 
 test('mtmForQty: short leg profits when premium falls', () => {
@@ -115,4 +116,40 @@ test('computeRowPnl falls back to broker unrealized when LTP is missing', () => 
     unrealizedProfit: 500, ownQty: 65,
   }]);
   assert.equal(pnl, 600);
+});
+
+test('rowDisplayBookedPnl: worker open uses worker booked (leg-wise SL case)', () => {
+  // Worker closed CE on SL and banked −1040; page fill still empty.
+  assert.equal(rowDisplayBookedPnl(0, { open: true, bookedPnl: -1040 }), -1040);
+  assert.equal(rowDisplayBookedPnl(undefined, { open: true, bookedPnl: -1040 }), -1040);
+});
+
+test('rowDisplayBookedPnl: page fill wins when worker is not holding', () => {
+  assert.equal(rowDisplayBookedPnl(2921.75, { open: false, bookedPnl: 0 }), 2921.75);
+  assert.equal(rowDisplayBookedPnl(500, null), 500);
+});
+
+test('leg-wise SL cumulative: booked CE + live PE, not PE alone', () => {
+  // Short CE @ 38 closed at 46 → booked −1040. PE still short 130 @ 49.6, LTP 40.
+  const booked = rowDisplayBookedPnl(0, { open: true, bookedPnl: -1040 });
+  const pnl = computeRowPnl(booked, [{
+    netQty: -130, buyAvg: 0, sellAvg: 49.6, ltp: 40,
+    unrealizedProfit: 1248, ownQty: 130,
+  }]);
+  assert.equal(pnl, -1040 + (49.6 - 40) * 130);
+});
+
+test('putCallRatio: PE ÷ CE for value and OI PCR', () => {
+  assert.equal(putCallRatio(110, 100), 1.1);
+  assert.equal(putCallRatio(85000, 100000), 0.85);
+  assert.equal(putCallRatio(0, 100), 0);
+  assert.equal(putCallRatio(50, 0), null);
+  assert.equal(putCallRatio(null, 100), null);
+  assert.equal(putCallRatio(50, null), null);
+});
+
+test('valuePutCallRatio prefers ₹ values, falls back to premiums', () => {
+  assert.equal(valuePutCallRatio(110, 100, 25, 50), 1.1);
+  assert.equal(valuePutCallRatio(null, null, 25.35, 37.55), 25.35 / 37.55);
+  assert.equal(valuePutCallRatio(null, null, 25, 0), null);
 });

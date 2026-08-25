@@ -130,3 +130,44 @@ export function shiftMayReopen(qtyBefore: number, closedUnits: number): boolean 
   const closed = Number(closedUnits) || 0;
   return before > 0 && closed === before;
 }
+
+/**
+ * Booked (already-closed) P&L for the row display / budget.
+ *
+ * When the server-side worker holds the row it is the authority — it banks
+ * each leg-wise SL / exit into its own ledger. The page's fill.bookedPnl is
+ * only written for orders THIS tab placed, so after a worker CE SL the page
+ * fill would still be 0 and the row would show only the leftover PE's MTM.
+ */
+export function rowDisplayBookedPnl(
+  fillBooked: number | undefined | null,
+  workerHold?: { open?: boolean; bookedPnl?: number | null } | null,
+): number {
+  if (workerHold?.open) return Number(workerHold.bookedPnl) || 0;
+  return Number(fillBooked) || 0;
+}
+
+/**
+ * Put-call ratio = PE ÷ CE. Used for both premium-value PCR and OI PCR.
+ * Null when either side is missing or CE is non-positive (undefined ratio).
+ */
+export function putCallRatio(
+  pe: number | null | undefined,
+  ce: number | null | undefined,
+): number | null {
+  if (pe == null || ce == null) return null;
+  const p = Number(pe);
+  const c = Number(ce);
+  if (!(c > 0) || Number.isNaN(p) || Number.isNaN(c)) return null;
+  return p / c;
+}
+
+/** Val PCR: PE ₹ ÷ CE ₹ when both values exist, else PE premium ÷ CE premium. */
+export function valuePutCallRatio(
+  peValue: number | null | undefined,
+  ceValue: number | null | undefined,
+  peLtp: number | null | undefined,
+  ceLtp: number | null | undefined,
+): number | null {
+  return putCallRatio(peValue, ceValue) ?? putCallRatio(peLtp, ceLtp);
+}

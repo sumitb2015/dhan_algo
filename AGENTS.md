@@ -242,8 +242,9 @@ distilled from 7-10 repeat bug-fix commits:
 `dhan-broker-positions` (scalper terminals, broker payloads, P&L, close/exit orders),
 `dhan-live-chart` (lightweight-charts canvas charts and polled series),
 `dhan-polling-guards` (poll loops, caches, JSON read-modify-write, process spawns),
-`dhan-theme-tokens` (the theme system), plus `dhan-dashboard-page`,
-`dhan-new-strategy` and `dhan-quant-terminal-page`.
+`dhan-theme-tokens` (the theme system), `dhan-commit-on-blur` (free-typed inputs
+must commit on blur/Enter so mid-edit values cannot fire live rules), plus
+`dhan-dashboard-page`, `dhan-new-strategy` and `dhan-quant-terminal-page`.
 
 **"Quant-terminal" chart pages**: several pages (Options Premium Bar, Futures, IV Charts, Straddle/Strangle Analysis, Breadth, Live Charts) share a chart-driven dark-glass redesign built around `recharts`. Use the `dhan-quant-terminal-page` skill when building or redesigning a page into this style — it documents the sticky-header shell, chart-panel/tooltip conventions, and the reference implementation to copy from.
 

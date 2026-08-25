@@ -110,6 +110,25 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ success: true, message: 'Stop trigger written' });
   }
 
+  if (action === 'drop-leg') {
+    // Broker is already flat on a leg the worker still pins (manual square-off,
+    // auth-failed reconcile, etc.). One file per request — Exit All fires both
+    // legs via Promise.all, and a shared JSON queue would race (both read [],
+    // one overwrite loses a drop). Worker globs and consumes every pending file.
+    const rowId = String(body.rowId ?? '');
+    const leg = String(body.leg ?? '');
+    if (!rowId || !['CE', 'PE'].includes(leg)) {
+      return NextResponse.json({ success: false, error: 'rowId and leg (CE|PE) required' }, { status: 400 });
+    }
+    const safeId = rowId.replace(/[^\w-]/g, '_');
+    const dropPath = path.join(
+      DEBUG_DIR,
+      `focus_tool_drop_${safeId}_${leg}_${Date.now()}.json`,
+    );
+    fs.writeFileSync(dropPath, JSON.stringify({ rowId, leg, ts: new Date().toISOString() }));
+    return NextResponse.json({ success: true, message: `Queued drop ${leg} on ${rowId.slice(-4)}` });
+  }
+
   if (action === 'start') {
     const broker = String(body.broker ?? 'dhan');
     if (!['dhan', 'zerodha', 'kotak'].includes(broker)) {

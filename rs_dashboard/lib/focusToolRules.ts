@@ -76,12 +76,17 @@ export interface RowLive {
   peBuildup: string | null;
   ceOiChgPct: number | null;
   peOiChgPct: number | null;
+  /** Absolute open interest at the row's pinned/resolved CE and PE strikes
+   *  (display-only; feeds the OI PCR chip next to premium Val PCR). */
+  ceOi: number | null;
+  peOi: number | null;
 }
 
 export const EMPTY_ROW_LIVE: RowLive = {
   ceStrike: null, peStrike: null, ltpCe: null, ltpPe: null,
   cePosition: null, pePosition: null, pnl: 0, entryPremium: 0, vwap: null, vwapClose: null,
   ceBuildup: null, peBuildup: null, ceOiChgPct: null, peOiChgPct: null,
+  ceOi: null, peOi: null,
 };
 
 // ── Legs ─────────────────────────────────────────────────────────────────────
@@ -107,7 +112,15 @@ export function legsFlat(live: RowLive): boolean {
  * onto someone else's 24150 PE; locking that selector (or rolling it with the
  * chevrons) would freeze or flatten a position this row never opened.
  */
-export type WorkerHold = { open?: boolean; ceStrike?: number | null; peStrike?: number | null } | null | undefined;
+export type WorkerHold = {
+  open?: boolean;
+  ceStrike?: number | null;
+  peStrike?: number | null;
+  /** Absolute contracts this worker still holds on each leg — used to qty-weight
+   *  pair SL × when the page fill ledger is empty. */
+  ceQty?: number;
+  peQty?: number;
+} | null | undefined;
 
 export function rowOwnsLeg(
   row: Pick<FocusRow, 'fill'>,
@@ -132,8 +145,34 @@ export function rowFlat(row: Pick<FocusRow, 'fill'>, workerHold?: WorkerHold): b
 }
 
 /**
- * Current premium across only the legs this row's Side trades AND that are
- * still actually open.
+ * Absolute contracts THIS row owns on a leg, for qty-weighting pair SL ×.
+ * Prefers the page fill ledger, then the worker ledger, then falls back to the
+ * broker net (only when ownership is already established). 0 when flat / not owned.
+ */
+export function legOwnContracts(
+  row: Pick<FocusRow, 'fill'>,
+  leg: 'CE' | 'PE',
+  live: RowLive,
+  workerHold?: WorkerHold,
+): number {
+  if (!rowOwnsLeg(row, leg, workerHold)) return 0;
+  const pos = leg === 'CE' ? live.cePosition : live.pePosition;
+  const net = Math.abs(Number(pos?.netQty) || 0);
+  if (net === 0) return 0;
+  const pageOwn = Math.abs(Number(leg === 'CE' ? row.fill?.ceQty : row.fill?.peQty) || 0);
+  const workerOwn = Math.abs(Number(leg === 'CE' ? workerHold?.ceQty : workerHold?.peQty) || 0);
+  const own = pageOwn > 0 ? pageOwn : workerOwn > 0 ? workerOwn : net;
+  return Math.min(own, net);
+}
+
+/**
+ * Qty-weighted average premium across only the legs this row's Side trades AND
+ * that are still actually open.
+ *
+ * Weighting by this row's own contracts (not a bare CE+PE sum) matters when the
+ * legs have different sizes — a 7-lot PE and a 5-lot CE must not be treated as a
+ * 1-lot straddle for pair SL ×. Equal lots are algebraically identical to the
+ * old unweighted sum for the `premium >= entry × mult` comparison.
  *
  * A leg the Side names but that has already been closed — by a leg-wise stop, a
  * manual Exit, anything — must not keep contributing its market LTP: the pair
@@ -145,14 +184,34 @@ export function sidePremium(
   live: RowLive,
   workerHold?: WorkerHold,
 ): number {
-  let sum = 0;
+  let num = 0;
+  let den = 0;
   for (const leg of legsOf(row)) {
-    const pos = leg === 'CE' ? live.cePosition : live.pePosition;
-    if (!pos || Number(pos.netQty) === 0) continue;
-    if (!rowOwnsLeg(row, leg, workerHold)) continue;
-    sum += (leg === 'CE' ? live.ltpCe : live.ltpPe) ?? 0;
+    const qty = legOwnContracts(row, leg, live, workerHold);
+    if (qty <= 0) continue;
+    num += ((leg === 'CE' ? live.ltpCe : live.ltpPe) ?? 0) * qty;
+    den += qty;
   }
-  return sum;
+  return den > 0 ? num / den : 0;
+}
+
+/**
+ * Qty-weighted average entry premium across open owned legs — the denominator
+ * for pair SL ×. Same weighting as sidePremium.
+ */
+export function entryPremiumWeighted(
+  legs: { premium: number; qty: number }[],
+): number {
+  let num = 0;
+  let den = 0;
+  for (const { premium, qty } of legs) {
+    const q = Math.abs(Number(qty) || 0);
+    const p = Number(premium) || 0;
+    if (q <= 0 || !(p > 0)) continue;
+    num += p * q;
+    den += q;
+  }
+  return den > 0 ? num / den : 0;
 }
 
 /**
@@ -183,6 +242,74 @@ export function legStopReason(
     return `${leg} SL ×${mult} hit (premium ${now.toFixed(2)} vs entry ${entry.toFixed(2)})`;
   }
   return null;
+}
+
+/**
+ * Premium level a stop-multiple fires at: entry × multiplier.
+ * Null when the multiple is off (blank / ≤1) or there is no entry to scale.
+ * Display-only — evaluateRowExit / legStopReason remain the authority on
+ * whether a stop actually fires.
+ */
+export function stopPremium(
+  entry: number,
+  multiplier: string | number | null | undefined,
+): number | null {
+  const m = Number(multiplier);
+  const e = Number(entry);
+  if (!(m > 1) || !(e > 0) || !Number.isFinite(m) || !Number.isFinite(e)) return null;
+  return e * m;
+}
+
+function previewCombinedPremium(row: Pick<FocusRow, 'side'>, live: RowLive): number {
+  let num = 0;
+  let den = 0;
+  for (const leg of legsOf(row)) {
+    const p = (leg === 'CE' ? live.ltpCe : live.ltpPe) ?? 0;
+    // Flat preview: equal weight per named leg (no position sizes yet).
+    num += p;
+    den += 1;
+  }
+  return den > 0 ? num / den : 0;
+}
+
+/** This leg's SL × level. Uses sell/buy avg while owned and open, else live LTP (preview). */
+export function legStopPremium(
+  row: Pick<FocusRow, 'ceSlMultiplier' | 'peSlMultiplier' | 'fill'>,
+  leg: 'CE' | 'PE',
+  live: RowLive,
+  workerHold?: WorkerHold,
+): number | null {
+  const pos = leg === 'CE' ? live.cePosition : live.pePosition;
+  const qty = Number(pos?.netQty ?? 0);
+  const ltp = (leg === 'CE' ? live.ltpCe : live.ltpPe) ?? 0;
+  const owned = rowOwnsLeg(row, leg, workerHold) && qty !== 0;
+  const entry = owned
+    ? (qty < 0 ? Number(pos?.sellAvg) || 0 : Number(pos?.buyAvg) || 0)
+    : ltp;
+  return stopPremium(entry, leg === 'CE' ? row.ceSlMultiplier : row.peSlMultiplier);
+}
+
+/** Pair SL × level. Uses qty-weighted entry premium while open, else equal-weight live LTP. */
+export function pairStopPremium(
+  row: Pick<FocusRow, 'slMultiplier' | 'side' | 'fill'>,
+  live: RowLive,
+  workerHold?: WorkerHold,
+): number | null {
+  let entry = live.entryPremium;
+  if (!(entry > 0)) {
+    // Recompute from live legs when entryPremium has not been stamped yet.
+    const legs: { premium: number; qty: number }[] = [];
+    for (const leg of legsOf(row)) {
+      const qty = legOwnContracts(row, leg, live, workerHold);
+      const pos = leg === 'CE' ? live.cePosition : live.pePosition;
+      const q = Number(pos?.netQty) || 0;
+      const avg = q < 0 ? Number(pos?.sellAvg) || 0 : Number(pos?.buyAvg) || 0;
+      if (qty > 0 && avg > 0) legs.push({ premium: avg, qty });
+    }
+    entry = entryPremiumWeighted(legs);
+  }
+  if (!(entry > 0)) entry = previewCombinedPremium(row, live);
+  return stopPremium(entry, row.slMultiplier);
 }
 
 // ── DTE ──────────────────────────────────────────────────────────────────────

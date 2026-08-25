@@ -215,11 +215,23 @@ class OrderRouter:
         return child
 
     def net_positions(self, underlyings=()):
-        """One broker-truth snapshot of every open F&O leg: {key: signed qty}.
+        """One broker-truth snapshot of every open F&O leg:
+        {key: {'qty': signed qty, 'buyAvg': float, 'sellAvg': float}}.
 
         The key is what that broker joins positions by — Dhan's numeric security
         id, everyone else's trading symbol — matching how `leg()` and
         `resolve_symbol()` identify a contract elsewhere in this module.
+
+        buyAvg/sellAvg are the broker's own live average price for that side of
+        the position — the SAME field the page reads for its SL x / P&L display
+        (FocusTool.tsx's legStopPremium). Exit rules here used to compare
+        against this worker's own remembered `entryPrice` instead, which drifts
+        from broker truth the moment a leg's average is affected by anything
+        this worker did not itself place — leaving the page and the worker
+        disagreeing about where a leg's SL actually sits. Callers should prefer
+        these over a ledger's own `entryPrice` whenever the leg is found here.
+        Only Dhan reports them today; child brokers get qty only (0.0 avgs) and
+        exits there keep falling back to the ledger price exactly as before.
 
         Returns None if the book could not be read. That is NOT the same as an
         empty book, and callers reconciling a ledger against this must treat it
@@ -248,7 +260,11 @@ class OrderRouter:
             if not df.empty and 'securityId' in df.columns:
                 for _, r in df.iterrows():
                     try:
-                        out[str(int(r['securityId']))] = int(r.get('netQty') or 0)
+                        out[str(int(r['securityId']))] = {
+                            'qty': int(r.get('netQty') or 0),
+                            'buyAvg': float(r.get('buyAvg') or 0.0),
+                            'sellAvg': float(r.get('sellAvg') or 0.0),
+                        }
                     except (TypeError, ValueError):
                         continue
             return out
@@ -260,7 +276,8 @@ class OrderRouter:
                 return None
             try:
                 for r in child.positions_rows():
-                    out[str(r['symbol'])] = int(r.get('qty') or 0)
+                    out[str(r['symbol'])] = {'qty': int(r.get('qty') or 0),
+                                              'buyAvg': 0.0, 'sellAvg': 0.0}
             except Exception as e:
                 logger.warning(f'{self.broker}: position snapshot failed for {u}: {e}')
                 return None

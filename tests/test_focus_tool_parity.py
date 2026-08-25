@@ -55,17 +55,29 @@ def load_cases():
 # ── Fixture -> the shapes the Python rules take ──────────────────────────────
 
 def premium_and_entry(case_live, side):
-    """Combined premium and entry premium across the legs this Side trades AND
-    that are still open — the same restriction sidePremium applies in the TS."""
+    """Qty-weighted average premium and entry premium across the legs this
+    Side trades AND that are still open — matching lib/focusToolRules.test.ts's
+    own `live()` fixture helper, which builds RowLive.entryPremium the same
+    way FocusTool.tsx does (qty-weighted), and matching sidePremium in
+    lib/focusToolRules.ts, which is qty-weighted too (not a plain CE+PE sum —
+    a straddle with uneven CE/PE lots must not be measured as if both sides
+    were worth one lot each)."""
     legs = ['CE', 'PE'] if side == 'BOTH' else [side]
-    premium = entry = 0.0
+    num_p = den_p = 0.0
+    num_e = den_e = 0.0
     for leg in legs:
-        qty = case_live['ceQty'] if leg == 'CE' else case_live['peQty']
+        qty = abs(case_live['ceQty'] if leg == 'CE' else case_live['peQty'])
         if qty == 0:
             continue
-        premium += case_live['ceLtp'] if leg == 'CE' else case_live['peLtp']
-        entry += case_live['ceEntry'] if leg == 'CE' else case_live['peEntry']
-    return premium, entry
+        ltp = case_live['ceLtp'] if leg == 'CE' else case_live['peLtp']
+        entry = case_live['ceEntry'] if leg == 'CE' else case_live['peEntry']
+        num_p += ltp * qty
+        den_p += qty
+        num_e += entry * qty
+        den_e += qty
+    premium = num_p / den_p if den_p > 0 else 0.0
+    entry_premium = num_e / den_e if den_e > 0 else 0.0
+    return premium, entry_premium
 
 
 def test_entry(cases):
