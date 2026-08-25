@@ -31,6 +31,7 @@ import type { ScalperPosition } from '@/lib/zerodhaShape';
 import { closeLeg } from '@/lib/legClose';
 import { legKey } from '@/components/analytics/PositionsLegTable';
 import type { ClosePct } from '@/lib/partialQty';
+import { isIntradayProduct } from '@/lib/positionProduct';
 
 import PositionsPayoffChart, { pnlAt, type OiBar } from '@/components/analytics/PositionsPayoffChart';
 import PayoffMetricStrip from '@/components/analytics/PayoffMetricStrip';
@@ -57,7 +58,7 @@ const MAX_CHAIN_EXPIRIES = 4;
 // of the rate limit even with MAX_CHAIN_EXPIRIES loaded.
 const CHAIN_POLL_MS = 15_000;
 
-type Tab = 'payoff' | 'greeks' | 'pnl';
+type Tab = 'payoff' | 'greeks' | 'pnl' | 'intraday';
 
 function fmtInr(n: number): string {
   const abs = Math.abs(n);
@@ -397,6 +398,31 @@ export default function PositionsAnalysis({ underlying }: { underlying: Analytic
     });
   }, [visibleLegs, spot, finalExpiry]);
 
+  // ── Intraday (MIS) scope, for the dedicated tab ─────────────────────────────
+  // Its own final-expiry, NOT the page's `finalExpiry`: that is the latest
+  // expiry across every VISIBLE leg (which can be a far-dated positional one)
+  // and has nothing to do with what an intraday leg is actually pricing against.
+  const intradayLegs = useMemo(
+    () => pricedLegs.filter((l) => isIntradayProduct(l.display.productType)),
+    [pricedLegs],
+  );
+  const intradayFinalExpiry = useMemo(() => {
+    const es = legExpiries(intradayLegs);
+    return es.length ? es[es.length - 1] : null;
+  }, [intradayLegs]);
+  const intradayCurve = useMemo(
+    () => (intradayLegs.length && spot && intradayFinalExpiry
+      ? buildMultiExpiryCurve(intradayLegs, spot, 1, intradayFinalExpiry, strikeStep, spanPct)
+      : []),
+    [intradayLegs, spot, intradayFinalExpiry, strikeStep, spanPct],
+  );
+  const intradayStats = useMemo<PayoffStats | null>(
+    () => (intradayLegs.length && spot && intradayFinalExpiry
+      ? computePayoffStats(intradayLegs, spot, 1, intradayFinalExpiry, strikeStep, spanPct)
+      : null),
+    [intradayLegs, spot, intradayFinalExpiry, strikeStep, spanPct],
+  );
+
   const expiryCurve = useMemo(
     () => (pricedLegs.length && spot && finalExpiry
       ? buildMultiExpiryCurve(pricedLegs, spot, 1, finalExpiry, strikeStep, spanPct)
@@ -677,7 +703,7 @@ export default function PositionsAnalysis({ underlying }: { underlying: Analytic
           {/* ── Right: analytics ────────────────────────────────────────── */}
           <section className="space-y-4">
             <div className="flex items-center gap-1 border-b border-zinc-800">
-              {([['payoff', 'Payoff Graph'], ['greeks', 'Greeks'], ['pnl', 'P&L Table']] as const).map(([id, label]) => (
+              {([['payoff', 'Payoff Graph'], ['greeks', 'Greeks'], ['pnl', 'P&L Table'], ['intraday', 'Intraday (MIS)']] as const).map(([id, label]) => (
                 <button key={id} type="button" onClick={() => setTab(id)}
                   className={cn(
                     'px-3 py-2 text-xs font-bold transition-colors',
@@ -688,7 +714,10 @@ export default function PositionsAnalysis({ underlying }: { underlying: Analytic
               ))}
             </div>
 
-            {stats && <PayoffMetricStrip
+            {/* Combined-book stats. Suppressed on the Intraday tab, which shows its
+                own MIS-scoped strip below — otherwise this would sit above an
+                intraday-scoped chart while still describing the whole book. */}
+            {stats && tab !== 'intraday' && <PayoffMetricStrip
               stats={stats} lotSize={lotSize ?? 0}
               standaloneMargin={standaloneMargin} standaloneMarginReason={standaloneMarginReason}
               marginAvailable={funds} />}
@@ -782,6 +811,48 @@ export default function PositionsAnalysis({ underlying }: { underlying: Analytic
             {tab === 'pnl' && (
               <div className="rounded-xl border border-zinc-800 bg-zinc-950 p-3">
                 <PnlTableTab legs={pricedLegs} spot={spot} strikeStep={strikeStep} expiry={finalExpiry ?? ''} />
+              </div>
+            )}
+
+            {tab === 'intraday' && (
+              <div className="space-y-4">
+                <div className="rounded-xl border border-zinc-800 bg-zinc-950 p-3">
+                  <PositionsLegTable
+                    legs={intradayLegs} unparseable={[]} lotSize={lotSize ?? 0}
+                    onClose={handleCloseLeg} closingKeys={closingKeys}
+                  />
+                </div>
+
+                {intradayStats && <PayoffMetricStrip
+                  stats={intradayStats} lotSize={lotSize ?? 0}
+                  standaloneMargin={null} standaloneMarginReason="Margin sizing shown only on the combined view"
+                  marginAvailable={funds} />}
+
+                <div className="rounded-xl border border-zinc-800 bg-zinc-950 p-3">
+                  <PositionsPayoffChart
+                    height={440}
+                    expiryCurve={intradayCurve}
+                    targetCurve={null}
+                    breakevens={intradayStats?.breakevensExpiry ?? []}
+                    spot={spot}
+                    targetSpot={spot}
+                    expiryLabel={intradayFinalExpiry ? fmtExpiryShort(intradayFinalExpiry) : '—'}
+                    targetLabel="Today"
+                    oiBars={oiBars}
+                    showOi={showOi}
+                    onToggleOi={() => setShowOi((v) => !v)}
+                    onZoomIn={() => setSpanIndex((i) => Math.max(0, i - 1))}
+                    onZoomOut={() => setSpanIndex((i) => Math.min(SPAN_STEPS.length - 1, i + 1))}
+                    canZoomIn={spanIndex > 0}
+                    canZoomOut={spanIndex < SPAN_STEPS.length - 1}
+                    emptyReason={
+                      !loadedOnce ? 'Loading positions…'
+                      : !intradayLegs.length ? 'No intraday (MIS) positions open'
+                      : !spot ? 'Waiting for spot price from the option chain…'
+                      : undefined
+                    }
+                  />
+                </div>
               </div>
             )}
           </section>

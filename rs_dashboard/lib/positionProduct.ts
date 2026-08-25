@@ -109,3 +109,17 @@ export function closeOrderProduct(
   }
   return KITE_NEO_PRODUCTS.has(p) ? { fields: { product: p }, assumed: false } : null;
 }
+
+/**
+ * Whether a position's own product books it same-day: Dhan's `INTRADAY` or the
+ * Kite/Neo vocabulary's `MIS` — vs a carried-forward `MARGIN`/`NRML`/`CNC`.
+ *
+ * Unknown/empty product strings return false rather than being folded into
+ * "intraday" by default — a same-day leg must self-identify. Silently including
+ * an unclassifiable leg here would put a possibly-carried position into a
+ * same-day risk view instead of just leaving it out of the wrong bucket.
+ */
+export function isIntradayProduct(product: string): boolean {
+  const p = String(product ?? '').trim().toUpperCase();
+  return p === 'INTRADAY' || p === 'MIS';
+}
