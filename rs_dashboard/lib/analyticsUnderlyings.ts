@@ -1,4 +1,4 @@
-import { MCX_LOT_MULTIPLIER } from './positionPnl';
+import { MCX_LOT_MULTIPLIER } from './positionPnl.ts';
 
 /**
  * Underlyings the positions-analytics page supports.
