@@ -13,7 +13,7 @@
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import Link from 'next/link';
-import { ArrowLeft, RefreshCw, AlertTriangle, Loader2 } from 'lucide-react';
+import { ArrowLeft, RefreshCw, AlertTriangle, Loader2, Sparkles } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { useBrokerSelector, scalperRoute, BROKER_LABELS, type Broker } from '@/hooks/useBrokerSelector';
 import {
@@ -38,6 +38,7 @@ import PositionsPayoffChart, { pnlAt, type OiBar } from '@/components/analytics/
 import PayoffMetricStrip from '@/components/analytics/PayoffMetricStrip';
 import BookRiskCard from '@/components/analytics/BookRiskCard';
 import SuggestedActionsCard from '@/components/analytics/SuggestedActionsCard';
+import AnalyzeModal from '@/components/analytics/AnalyzeModal';
 import PositionsLegTable, { legPnl } from '@/components/analytics/PositionsLegTable';
 import GreeksTab from '@/components/analytics/GreeksTab';
 import PnlTableTab from '@/components/analytics/PnlTableTab';
@@ -103,6 +104,10 @@ export default function PositionsAnalysis({ underlying }: { underlying: Analytic
   const [standaloneMargin, setStandaloneMargin] = useState<number | null>(null);
   const [suggestions, setSuggestions] = useState<Suggestion[]>([]);
   const [dismissedSuggestionIds, setDismissedSuggestionIds] = useState<Set<string>>(new Set());
+  const [showAnalyzeModal, setShowAnalyzeModal] = useState(false);
+  const [analyzing, setAnalyzing] = useState(false);
+  const [analyzeError, setAnalyzeError] = useState<string | null>(null);
+  const [analyzeSummary, setAnalyzeSummary] = useState<string | null>(null);
 
   const [tab, setTab] = useState<Tab>('payoff');
   const [expiryFilter, setExpiryFilter] = useState<string>('ALL');
@@ -250,6 +255,31 @@ export default function PositionsAnalysis({ underlying }: { underlying: Analytic
       await handleCloseLeg(leg, 100);
     }
   }, [confirmExitExpiry, handleCloseLeg]);
+
+  const handleAnalyze = useCallback(async () => {
+    setShowAnalyzeModal(true);
+    setAnalyzing(true);
+    setAnalyzeError(null);
+    setAnalyzeSummary(null);
+    try {
+      const res = await fetch('/api/options/analyze', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ underlying, broker }),
+      });
+      const json = await res.json();
+      if (!json.success) { setAnalyzeError(json.error ?? 'Analysis failed'); return; }
+      setAnalyzeSummary(json.summary ?? null);
+      // The route already persisted these to debug/options_suggestions_<underlying>.json —
+      // setting state directly here just means the sidebar card doesn't have to
+      // wait for its next poll to show the same result.
+      setSuggestions(json.suggestions ?? []);
+    } catch (err) {
+      setAnalyzeError(String((err as Error).message ?? err));
+    } finally {
+      setAnalyzing(false);
+    }
+  }, [underlying, broker]);
 
   // ── funds ──────────────────────────────────────────────────────────────────
   useEffect(() => {
@@ -592,6 +622,10 @@ export default function PositionsAnalysis({ underlying }: { underlying: Analytic
             className="flex items-center gap-1 rounded border border-zinc-700 bg-zinc-900 px-2 py-1 text-xs text-zinc-300 hover:text-white">
             <RefreshCw className="h-3 w-3" /> Refresh
           </button>
+          <button type="button" onClick={handleAnalyze} disabled={analyzing}
+            className="flex items-center gap-1 rounded border border-sky-800 bg-sky-950 px-2 py-1 text-xs font-bold text-sky-300 hover:bg-sky-900 disabled:opacity-50">
+            <Sparkles className="h-3 w-3" /> {analyzing ? 'Analyzing…' : 'Analyze'}
+          </button>
           {refreshedAt && (
             <span className="font-mono text-[10px] text-zinc-500">
               {refreshedAt.toLocaleTimeString('en-IN', { hour12: false })}
@@ -887,6 +921,20 @@ export default function PositionsAnalysis({ underlying }: { underlying: Analytic
           </section>
         </div>
       </div>
+
+      <AnalyzeModal
+        open={showAnalyzeModal}
+        onClose={() => setShowAnalyzeModal(false)}
+        loading={analyzing}
+        error={analyzeError}
+        summary={analyzeSummary}
+        suggestions={suggestions.filter((s) => !dismissedSuggestionIds.has(s.id))}
+        legs={legs}
+        closingKeys={closingKeys}
+        legKeyOf={legKey}
+        onConfirm={handleCloseLeg}
+        onDismiss={(id) => setDismissedSuggestionIds((prev) => new Set(prev).add(id))}
+      />
 
       {/* Order-result toasts (leg exit/adjust) */}
       {toasts.length > 0 && (
