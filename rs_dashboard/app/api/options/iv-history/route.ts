@@ -214,9 +214,9 @@ export async function GET(request: NextRequest) {
       ceOI,
       peOI,
       diff: peOI - ceOI,
-      slope: regimePoints[i].slope,
-      accel: regimePoints[i].accel,
-      wpi: regimePoints[i].wpi,
+      oiZ: regimePoints[i].oiZ,
+      slopeZ: regimePoints[i].slopeZ,
+      wpiZ: regimePoints[i].wpiZ,
     }));
 
     const response = NextResponse.json({
