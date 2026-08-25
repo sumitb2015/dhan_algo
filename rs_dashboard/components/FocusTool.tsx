@@ -4091,10 +4091,15 @@ export default function FocusTool() {
   }
 
   /**
-   * Close just one leg on its own SL x breach, leaving the other leg (and the
-   * row itself) exactly as it was. Unlike autoExitRow this never touches
-   * `status` — a partial exit does not mean the row is done, and the other
-   * leg's own rules keep being evaluated on later ticks.
+   * Close just one leg on its own SL x breach, leaving the other leg exactly
+   * as it was. If the OTHER leg is already flat this was the row's last leg,
+   * though — same as autoExitRow, retire it (status 'exited', pin dropped)
+   * once the broker book confirms both strikes are flat, or a row this
+   * worker-off tab flattens leg-by-leg is stuck at 'entered' forever with no
+   * Arm button (see the STATUS/ACTIONS cell: Arm only shows for
+   * draft/exited). When the other leg is genuinely still open, waitRowFlat
+   * below simply times out seeing its live quantity and this is a no-op,
+   * same as today.
    */
   function autoExitLeg(row: FocusRow, leg: 'CE' | 'PE', reason: string) {
     const key = `${row.id}:${leg}`;
@@ -4104,8 +4109,15 @@ export default function FocusTool() {
     // click on this row's own Exit/Add/Reduce buttons while this leg's close
     // is in flight sends a second concurrent order against the same leg.
     setBusyRows(prev => new Set(prev).add(row.id));
+    const live = rowLive[row.id] ?? EMPTY_ROW_LIVE;
     addToast('error', `Auto-exit ${leg}: ${row.underlying} ${row.id.slice(-4)}`, reason);
     placeLeg(row, leg, { reduce: true, all: true })
+      .then(async accepted => {
+        if (!accepted) return;
+        if (await waitRowFlat(row, live)) {
+          updateRow(row.id, { status: 'exited', fill: undefined }, true);
+        }
+      })
       .finally(() => {
         autoExitingLegRef.current.delete(key);
         setBusyRows(prev => { const next = new Set(prev); next.delete(row.id); return next; });
