@@ -7,7 +7,7 @@ import NavBar from './NavBar';
 import {
   TrendingUp, Zap, ShieldOff, Shield, Activity,
   Clock, Plus, Check, Save, Layers, Target, Lock, RefreshCw, X,
-  ChevronUp, ChevronDown, Server,
+  ChevronUp, ChevronDown, Server, Grid3x3,
 } from 'lucide-react';
 import { TabTable, type SortState, BUILDUP_STYLES } from './Scalper';
 import { useBrokerSelector, scalperRoute, BROKER_LABELS, type Broker } from '@/hooks/useBrokerSelector';
@@ -15,6 +15,7 @@ import { closeOrderProduct, positionProduct } from '@/lib/positionProduct';
 import { scaleBrokerPnl } from '@/lib/positionPnl';
 import { useCopyTrade, CopyTradeControls, type CopyTradeApi } from './CopyTrade';
 import { useFocusToolWS } from '@/lib/useFocusToolWS';
+import FocusOptionChainModal from './FocusOptionChainModal';
 import { cn } from '@/lib/utils';
 import type {
   FocusToolConfig, FocusRow, FocusRowFill, FocusIndexGroup,
@@ -1054,7 +1055,7 @@ function ControlStrip({
   lockRupees, setLockRupees,
   onSave, saving, totalPnl, peakMtm, lockMtm,
   copyTrade,
-  onOpenRisk, onOpenOrders, onToggleViewMode, viewMode,
+  onOpenRisk, onOpenOrders, onOpenOptionChain, onToggleViewMode, viewMode,
   workerStatus, onToggleWorker,
   onExitAll, confirmExitAll, exitingAll,
 }: {
@@ -1069,6 +1070,7 @@ function ControlStrip({
   copyTrade: CopyTradeApi;
   onOpenRisk: () => void;
   onOpenOrders: () => void;
+  onOpenOptionChain: () => void;
   onToggleViewMode: () => void;
   viewMode: 'table' | 'cards';
   workerStatus: WorkerStatus;
@@ -1153,6 +1155,10 @@ function ControlStrip({
         <GhostBtn onClick={onOpenOrders} title="Today's broker order book and tradebook for this account">
           <Activity className="h-3.5 w-3.5 text-zinc-400" />
           Orders
+        </GhostBtn>
+        <GhostBtn onClick={onOpenOptionChain} title="Live NIFTY option chain — price/OI/volume by strike, with Buy/Sell">
+          <Grid3x3 className="h-3.5 w-3.5 text-cyan-400" />
+          Option Chain
         </GhostBtn>
         <GhostBtn onClick={onToggleViewMode} title="Toggle between Table and Cards view">
           <Layers className="h-3.5 w-3.5 text-zinc-400" />
@@ -1958,7 +1964,7 @@ const FocusRowCard = memo(FocusRowCardImpl, rowDataPropsEqual);
 
 // ── Side Drawer Modal ────────────────────────────────────────────────────────
 
-function FocusModal({
+export function FocusModal({
   isOpen,
   onClose,
   title,
@@ -2109,7 +2115,7 @@ export default function FocusTool() {
    */
   const lockFloorRef = useRef<number | null>(null);
 
-  const [activeModal, setActiveModal] = useState<'risk' | 'orderbook' | null>(null);
+  const [activeModal, setActiveModal] = useState<'risk' | 'orderbook' | 'optionchain' | null>(null);
   const [viewMode, setViewMode] = useState<'table' | 'cards'>('table');
   const [orders, setOrders] = useState<Record<string, unknown>[]>([]);
   const [ordersLoading, setOrdersLoading] = useState(false);
@@ -4058,6 +4064,7 @@ export default function FocusTool() {
         copyTrade={copyTrade}
         onOpenRisk={() => setActiveModal('risk')}
         onOpenOrders={() => setActiveModal('orderbook')}
+        onOpenOptionChain={() => setActiveModal('optionchain')}
         onToggleViewMode={() => setViewMode(v => v === 'cards' ? 'table' : 'cards')}
         viewMode={viewMode}
         workerStatus={workerStatus} onToggleWorker={toggleWorker}
@@ -4380,6 +4387,12 @@ export default function FocusTool() {
           )}
         </div>
       </FocusModal>
+
+      <FocusOptionChainModal
+        isOpen={activeModal === 'optionchain'}
+        onClose={() => setActiveModal(null)}
+        expiries={expiries.NIFTY ?? []}
+      />
     </div>
   );
 }
