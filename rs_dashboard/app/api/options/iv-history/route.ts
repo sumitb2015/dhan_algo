@@ -197,7 +197,6 @@ export async function GET(request: NextRequest) {
     }
 
     const regimeInput: RegimeInputPoint[] = sorted.map(([, v]) => ({
-      ts: 0, // unused by computeRegimeSeries — kept for type shape only
       spot: v.spot,
       ceOI: v.ceOI,
       peOI: v.peOI,
@@ -215,11 +214,9 @@ export async function GET(request: NextRequest) {
       ceOI,
       peOI,
       diff: peOI - ceOI,
-      dNorm: regimePoints[i].dNorm,
       slope: regimePoints[i].slope,
       accel: regimePoints[i].accel,
       wpi: regimePoints[i].wpi,
-      priceTrend: regimePoints[i].priceTrend,
     }));
 
     const response = NextResponse.json({

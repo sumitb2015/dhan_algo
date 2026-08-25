@@ -15,20 +15,22 @@ interface TimePoint {
   ceOI: number;
   peOI: number;
   diff: number;
-  dNorm: number;
   slope: number;
   accel: number;
   wpi: number;
-  priceTrend: number;
 }
 
-type RegimeLabel = 'Strong Bullish' | 'Bullish' | 'Neutral' | 'Bearish' | 'Strong Bearish';
+type RegimeLabel = 'Bullish' | 'Weak Bullish' | 'Neutral' | 'Weak Bearish' | 'Bearish';
 
 interface RegimeSnapshot {
-  score: number;
+  finalScore: number;
+  oiScore: number;
+  momentumScore: number;
+  confirmScore: number;
   pBullish: number;
   label: RegimeLabel;
   strategy: string;
+  tradable: boolean;
   transitionFlag: boolean;
   transitionDirection: 'bullish' | 'bearish' | null;
   warmingUp: boolean;
@@ -69,21 +71,21 @@ function sessionBoundsIST(date: string): { start: number; end: number } {
 
 function regimeColor(label: RegimeLabel): string {
   switch (label) {
-    case 'Strong Bullish': return 'text-emerald-400';
-    case 'Bullish':        return 'text-emerald-300';
-    case 'Neutral':        return 'text-yellow-400';
-    case 'Bearish':        return 'text-red-300';
-    case 'Strong Bearish': return 'text-red-400';
+    case 'Bullish':      return 'text-emerald-400';
+    case 'Weak Bullish':
+    case 'Neutral':
+    case 'Weak Bearish': return 'text-yellow-400';
+    case 'Bearish':      return 'text-red-400';
   }
 }
 
 function regimeBarColor(label: RegimeLabel): string {
   switch (label) {
-    case 'Strong Bullish':
-    case 'Bullish':        return 'bg-emerald-400';
-    case 'Neutral':        return 'bg-yellow-400';
-    case 'Bearish':
-    case 'Strong Bearish': return 'bg-red-400';
+    case 'Bullish':      return 'bg-emerald-400';
+    case 'Weak Bullish':
+    case 'Neutral':
+    case 'Weak Bearish': return 'bg-yellow-400';
+    case 'Bearish':      return 'bg-red-400';
   }
 }
 
@@ -346,7 +348,7 @@ export default function OptionsCumulativeOITab({ expiry: _expiry }: { expiry: st
                   <div>
                     <p className="text-sm font-bold text-white tracking-tight">Options Regime Score</p>
                     <p className="text-[10px] text-zinc-400 mt-0.5">
-                      Normalized OI divergence + slope/acceleration + writing pressure + volatility-adjusted price trend
+                      0.4×OI Pressure + 0.3×Momentum + 0.3×Confirmation · thresholds: &gt;+1 Bullish, &lt;-1 Bearish, |x|&lt;0.5 Neutral
                     </p>
                   </div>
                   <div className="flex items-center gap-4">
@@ -354,7 +356,7 @@ export default function OptionsCumulativeOITab({ expiry: _expiry }: { expiry: st
                       {regime.label}
                     </span>
                     <span className="text-xs text-zinc-400 tabular-nums">
-                      P(bullish) {(regime.pBullish * 100).toFixed(0)}%
+                      Score {regime.finalScore >= 0 ? '+' : ''}{regime.finalScore.toFixed(2)}
                     </span>
                   </div>
                 </div>
@@ -366,12 +368,24 @@ export default function OptionsCumulativeOITab({ expiry: _expiry }: { expiry: st
                   />
                 </div>
 
+                <div className="flex items-center gap-5 flex-wrap">
+                  <StatChip label="Layer 1 · OI Pressure" value={`${regime.oiScore >= 0 ? '+' : ''}${regime.oiScore.toFixed(2)}`} />
+                  <StatChip label="Layer 2 · Momentum" value={`${regime.momentumScore >= 0 ? '+' : ''}${regime.momentumScore.toFixed(2)}`} />
+                  <StatChip label="Layer 3 · Confirmation" value={`${regime.confirmScore >= 0 ? '+' : ''}${regime.confirmScore.toFixed(2)}`} />
+                </div>
+
                 <div className="flex items-center justify-between flex-wrap gap-2">
                   <p className="text-xs text-zinc-300">
-                    Suggested (informational): <span className="font-semibold text-zinc-100">{regime.strategy}</span>
+                    {regime.tradable ? 'Suggested' : 'Weak/uncertain — spec says ignore for trading'} (informational):{' '}
+                    <span className="font-semibold text-zinc-100">{regime.strategy}</span>
                   </p>
                   <p className="text-[10px] text-zinc-500">Informational only — not a trade signal</p>
                 </div>
+
+                <p className="text-[10px] text-zinc-600 border-t border-zinc-800 pt-2">
+                  Weights (0.4/0.3/0.3) are the spec's untuned defaults, not backtested. Optimize for expected value
+                  (P(win)×avgWin − P(loss)×avgLoss), not win rate, before sizing trades off this score.
+                </p>
               </div>
             )}
           </div>
