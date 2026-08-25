@@ -412,7 +412,48 @@ def evaluate_row_exit(row, spot, premium, entry_premium, pnl, vwap, vwap_close):
     return None
 
 
-def evaluate_exit(row, group, fill, now_minutes, spot, premium, vwap, vwap_close, pnl):
+def side_premium_entry(fill, leg_ltp, broker_avg=None):
+    """Qty-weighted average (premium, entry_premium) across held legs.
+
+    Mirrors sidePremium / the qty-weighted `entryPremium` FocusTool.tsx stamps
+    onto RowLive, unit for unit: `num += price * qty; den += qty; num / den`.
+    The pair SL x rule compares premium against entry_premium, so both MUST be
+    on the same scale — a raw CE+PE sum compared against a weighted average
+    (or vice versa) breaches at roughly double or half the intended level, and
+    is unrelated to what the equal-notional case happens to look like. This
+    used to feed evaluate_exit a plain sum (`premium += ltp` in the tick loop)
+    against the ledger's own sum-at-entry `entryPremium` field — self
+    consistent in isolation, but not what the browser's evaluateRowExit
+    actually computes once sidePremium became qty-weighted, so the same row
+    could breach on one engine and not the other.
+
+    `broker_avg`, when given, is preferred per leg over the ledger's own
+    entryPrice for the entry side — see evaluate_leg_exit's doc comment.
+    """
+    num_p = den_p = 0.0
+    num_e = den_e = 0.0
+    for leg in ('CE', 'PE'):
+        held = (fill or {}).get(leg)
+        if not held:
+            continue
+        qty = abs(float(held.get('qty') or 0))
+        if not (qty > 0):
+            continue
+        ltp = float((leg_ltp or {}).get(leg) or 0.0)
+        if ltp > 0:
+            num_p += ltp * qty
+            den_p += qty
+        av = (broker_avg or {}).get(leg)
+        entry = float(av) if av else float(held.get('entryPrice') or 0.0)
+        if entry > 0:
+            num_e += entry * qty
+            den_e += qty
+    premium = num_p / den_p if den_p > 0 else 0.0
+    entry_premium = num_e / den_e if den_e > 0 else 0.0
+    return premium, entry_premium
+
+
+def evaluate_exit(row, group, fill, now_minutes, spot, premium, entry_premium, vwap, vwap_close, pnl):
     """(exit, reason) for one row this worker holds open. First match wins:
 
         1. the 15:17 intraday bell (MIS rows only)
@@ -423,6 +464,10 @@ def evaluate_exit(row, group, fill, now_minutes, spot, premium, vwap, vwap_close
     The first three are clock- and group-driven and belong to the worker's
     scheduler; the browser evaluates them in its own tick loop for the same
     reason. Only the fourth is a shared, tested rule.
+
+    `premium`/`entry_premium` must already be the qty-weighted pair from
+    side_premium_entry — see its doc comment for why a plain sum does not
+    parity-match the browser's sidePremium/entryPremium.
     """
     if not fill:
         return False, ''
@@ -445,7 +490,7 @@ def evaluate_exit(row, group, fill, now_minutes, spot, premium, vwap, vwap_close
         return True, f"Exit time {row.get('exitTime')}"
 
     reason = evaluate_row_exit(
-        row, spot, premium, float(fill.get('entryPremium') or 0.0), pnl, vwap, vwap_close)
+        row, spot, premium, entry_premium, pnl, vwap, vwap_close)
     return (True, reason) if reason else (False, '')
 
 
@@ -1482,8 +1527,14 @@ class FocusRowsWorker:
                 if leg_exit_sent:
                     continue
 
+                # Qty-weighted, NOT the `premium` sum above (that one is the
+                # display figure, matching the browser's own combinedLtp) —
+                # see side_premium_entry's doc comment for why the pair SL x
+                # needs the same weighting the browser's sidePremium uses.
+                weighted_premium, weighted_entry = side_premium_entry(fill, leg_ltp, broker_avg)
                 do_exit, reason = evaluate_exit(
-                    row, group, fill, now_minutes, spot, premium, vwap, vwap_close, pnl)
+                    row, group, fill, now_minutes, spot, weighted_premium, weighted_entry,
+                    vwap, vwap_close, pnl)
                 if do_exit:
                     self.exit_row(row, reason, broker_avg=broker_avg)
             else:
