@@ -402,6 +402,9 @@ export interface PayoffStats {
    */
   maxLossInRange: number;
   maxLossAtSpot: number;
+  /** Same caveat as maxLossInRange, mirrored for the upside: only meaningful when `maxProfit` is 'Unlimited'. */
+  maxProfitInRange: number;
+  maxProfitAtSpot: number;
   rangeLo: number;
   rangeHi: number;
 }
@@ -416,15 +419,19 @@ export function computePayoffStats(
   const netCallQty = legs.filter(l => l.type === 'CE').reduce((s, l) => s + (l.side === 'SELL' ? l.qtyLots : -l.qtyLots), 0);
   const netPutQty  = legs.filter(l => l.type === 'PE').reduce((s, l) => s + (l.side === 'SELL' ? l.qtyLots : -l.qtyLots), 0);
 
-  const upsideUnlimited = netCallQty > 0;
-  const downsideUnlimited = netPutQty > 0;
+  const upsideUnlimitedLoss = netCallQty > 0;
+  const downsideUnlimitedLoss = netPutQty > 0;
+  // A net LONG call has no ceiling as spot -> infinity. A net long put's profit
+  // is bounded (spot cannot go below 0), so there is no equivalent downside case.
+  const upsideUnlimitedProfit = netCallQty < 0;
 
   const pnls = curve.map(c => c.pnl);
-  const maxProfit = Math.max(...pnls);
+  const boundedMaxProfit = Math.max(...pnls);
   const boundedMinLoss = Math.min(...pnls);
-  const maxLoss: number | 'Unlimited' = (upsideUnlimited || downsideUnlimited) ? 'Unlimited' : boundedMinLoss;
+  const maxLoss: number | 'Unlimited' = (upsideUnlimitedLoss || downsideUnlimitedLoss) ? 'Unlimited' : boundedMinLoss;
+  const maxProfit: number | 'Unlimited' = upsideUnlimitedProfit ? 'Unlimited' : boundedMaxProfit;
 
-  const rewardRisk = (maxLoss === 'Unlimited' || maxLoss === 0) ? null : Math.abs(maxProfit / maxLoss);
+  const rewardRisk = (maxLoss === 'Unlimited' || maxProfit === 'Unlimited' || maxLoss === 0) ? null : Math.abs(maxProfit / maxLoss);
 
   const netPremium = legs.reduce((sum, leg) => sum + (leg.side === 'SELL' ? leg.price : -leg.price) * leg.qtyLots, 0);
 
@@ -470,6 +477,7 @@ export function computePayoffStats(
   }
 
   const worstIdx = pnls.reduce((best, p, i) => (p < pnls[best] ? i : best), 0);
+  const bestIdx = pnls.reduce((best, p, i) => (p > pnls[best] ? i : best), 0);
 
   return {
     maxProfit,
@@ -482,6 +490,8 @@ export function computePayoffStats(
     popPct,
     maxLossInRange: boundedMinLoss,
     maxLossAtSpot: curve[worstIdx]?.spot ?? spot,
+    maxProfitInRange: boundedMaxProfit,
+    maxProfitAtSpot: curve[bestIdx]?.spot ?? spot,
     rangeLo: curve[0]?.spot ?? spot,
     rangeHi: curve[curve.length - 1]?.spot ?? spot,
   };
