@@ -29,6 +29,9 @@ import { STRIKE_STEP, lotSizeOverride, type AnalyticsUnderlying } from '@/lib/an
 import { todayIso, fmtExpiryShort } from '@/components/crudeoil/format';
 import type { ScalperPosition } from '@/lib/zerodhaShape';
 import type { KellyStats } from '@/app/api/options/kelly-stats/route';
+import { closeLeg } from '@/lib/legClose';
+import { legKey } from '@/components/analytics/PositionsLegTable';
+import type { ClosePct } from '@/lib/partialQty';
 
 import PositionsPayoffChart, { pnlAt, type OiBar } from '@/components/analytics/PositionsPayoffChart';
 import PayoffMetricStrip from '@/components/analytics/PayoffMetricStrip';
@@ -36,6 +39,8 @@ import KellySizingCard from '@/components/analytics/KellySizingCard';
 import PositionsLegTable, { legPnl } from '@/components/analytics/PositionsLegTable';
 import GreeksTab from '@/components/analytics/GreeksTab';
 import PnlTableTab from '@/components/analytics/PnlTableTab';
+
+interface Toast { id: number; type: 'success' | 'error'; message: string; detail?: string }
 
 /** Brokers this page supports. Zerodha is deliberately out of scope. */
 const BROKERS: Broker[] = ['dhan', 'kotak'];
@@ -98,6 +103,9 @@ export default function PositionsAnalysis({ underlying }: { underlying: Analytic
 
   const [tab, setTab] = useState<Tab>('payoff');
   const [expiryFilter, setExpiryFilter] = useState<string>('ALL');
+  const [toasts, setToasts] = useState<Toast[]>([]);
+  const [closingKeys, setClosingKeys] = useState<Set<string>>(new Set());
+  const [confirmExitExpiry, setConfirmExitExpiry] = useState<string | null>(null);
   const [spanIndex, setSpanIndex] = useState<number>(DEFAULT_SPAN_INDEX);
   const [showOi, setShowOi] = useState(true);
   const [targetSpot, setTargetSpot] = useState<number | null>(null);
@@ -199,6 +207,51 @@ export default function PositionsAnalysis({ underlying }: { underlying: Analytic
     const id = setInterval(loadPositions, POSITIONS_POLL_MS);
     return () => clearInterval(id);
   }, [loadPositions, broker]);
+
+  // ── leg exit / adjust (real orders) ─────────────────────────────────────────
+  const addToast = useCallback((type: Toast['type'], message: string, detail?: string) => {
+    const id = Date.now() + Math.random();
+    setToasts((prev) => [...prev, { id, type, message, detail }]);
+    setTimeout(() => setToasts((prev) => prev.filter((t) => t.id !== id)), type === 'error' ? 7000 : 3500);
+  }, []);
+
+  const handleCloseLeg = useCallback(async (leg: PositionLeg, pct: ClosePct) => {
+    if (!lotSize) { addToast('error', 'Lot size unresolved', `Cannot size a close order for ${underlying}`); return; }
+    const key = legKey(leg);
+    if (closingKeys.has(key)) return;
+    setClosingKeys((prev) => new Set(prev).add(key));
+    const label = `${leg.side === 'SELL' ? 'S' : 'B'} ${leg.strike} ${leg.type}`;
+    try {
+      const res = await closeLeg(broker, leg, lotSize, pct / 100);
+      if (res.ok && res.units === 0) {
+        addToast('success', `${label} already flat`);
+      } else if (res.ok) {
+        addToast('success', `${pct === 100 ? 'Closed' : `Trimmed ${pct}% of`} ${label}`, res.orderId ? `ID: ${res.orderId}` : undefined);
+        setTimeout(loadPositions, 1000);
+      } else {
+        addToast('error', `${label} close failed`, res.error);
+      }
+    } finally {
+      setClosingKeys((prev) => { const next = new Set(prev); next.delete(key); return next; });
+    }
+  }, [broker, lotSize, underlying, closingKeys, addToast, loadPositions]);
+
+  /** `scopeKey` arms independently per button (e.g. 'ALL' vs one expiry's date), so confirming one never fires another. */
+  const handleExitScope = useCallback(async (scopeKey: string, targets: PositionLeg[]) => {
+    if (confirmExitExpiry !== scopeKey) {
+      setConfirmExitExpiry(scopeKey);
+      setTimeout(() => setConfirmExitExpiry((e) => (e === scopeKey ? null : e)), 3000);
+      return;
+    }
+    setConfirmExitExpiry(null);
+    for (const leg of targets) {
+      // Sequential, not Promise.all: closeLeg() re-fetches live positions before
+      // each order, and firing them concurrently would race that fetch against
+      // the previous leg's own not-yet-reflected fill.
+      // eslint-disable-next-line no-await-in-loop
+      await handleCloseLeg(leg, 100);
+    }
+  }, [confirmExitExpiry, handleCloseLeg]);
 
   // ── funds ──────────────────────────────────────────────────────────────────
   useEffect(() => {
@@ -544,6 +597,17 @@ export default function PositionsAnalysis({ underlying }: { underlying: Analytic
               <h2 className="text-xs font-bold uppercase tracking-wider text-white">{underlying} Positions</h2>
               {chainLoading && <Loader2 className="h-3 w-3 animate-spin text-zinc-500" />}
               <span className="ml-auto font-mono text-[11px] text-zinc-500">{visibleLegs.length} leg(s)</span>
+              {visibleLegs.length > 0 && (
+                <button type="button" onClick={() => handleExitScope(`scope:${expiryFilter}`, visibleLegs)}
+                  className={cn('rounded border px-2 py-0.5 font-mono text-[10px] font-bold transition-colors',
+                    confirmExitExpiry === `scope:${expiryFilter}`
+                      ? 'border-rose-500 bg-rose-500/20 text-rose-200'
+                      : 'border-rose-800 bg-rose-950 text-rose-300 hover:bg-rose-900')}>
+                  {confirmExitExpiry === `scope:${expiryFilter}`
+                    ? 'Confirm Exit All?'
+                    : expiryFilter === 'ALL' ? 'Exit All' : `Exit ${fmtExpiryShort(expiryFilter)}`}
+                </button>
+              )}
             </div>
 
             {bookExpiries.length > 1 && (
@@ -557,13 +621,24 @@ export default function PositionsAnalysis({ underlying }: { underlying: Analytic
                   All ({legs.length})
                 </button>
                 {bookExpiries.map((e) => (
-                  <button key={e} type="button" onClick={() => setExpiryFilter(e)}
-                    className={cn('rounded border px-2 py-0.5 font-mono text-[10px] font-bold',
-                      expiryFilter === e
-                        ? 'border-sky-500 bg-sky-500/15 text-sky-300'
-                        : 'border-zinc-700 bg-zinc-900 text-zinc-400 hover:text-zinc-200')}>
-                    {fmtExpiryShort(e)} ({legs.filter((l) => l.expiry === e).length})
-                  </button>
+                  <div key={e} className="flex items-center gap-1">
+                    <button type="button" onClick={() => setExpiryFilter(e)}
+                      className={cn('rounded border px-2 py-0.5 font-mono text-[10px] font-bold',
+                        expiryFilter === e
+                          ? 'border-sky-500 bg-sky-500/15 text-sky-300'
+                          : 'border-zinc-700 bg-zinc-900 text-zinc-400 hover:text-zinc-200')}>
+                      {fmtExpiryShort(e)} ({legs.filter((l) => l.expiry === e).length})
+                    </button>
+                    <button type="button"
+                      title={`Exit every ${fmtExpiryShort(e)} leg`}
+                      onClick={() => handleExitScope(`expiry:${e}`, legs.filter((l) => l.expiry === e))}
+                      className={cn('rounded border px-1.5 py-0.5 font-mono text-[9px] font-bold transition-colors',
+                        confirmExitExpiry === `expiry:${e}`
+                          ? 'border-rose-500 bg-rose-500/20 text-rose-200'
+                          : 'border-zinc-800 bg-zinc-900 text-zinc-600 hover:border-rose-800 hover:text-rose-300')}>
+                      {confirmExitExpiry === `expiry:${e}` ? 'Confirm?' : 'Exit'}
+                    </button>
+                  </div>
                 ))}
               </div>
             )}
@@ -596,7 +671,10 @@ export default function PositionsAnalysis({ underlying }: { underlying: Analytic
 
             {!loadedOnce
               ? <p className="px-3 py-6 text-center text-xs text-zinc-500">Loading positions…</p>
-              : <PositionsLegTable legs={visibleLegs} unparseable={unparseable} lotSize={lotSize ?? 0} />}
+              : <PositionsLegTable
+                  legs={visibleLegs} unparseable={unparseable} lotSize={lotSize ?? 0}
+                  onClose={handleCloseLeg} closingKeys={closingKeys}
+                />}
           </section>
 
           <KellySizingCard
@@ -716,6 +794,24 @@ export default function PositionsAnalysis({ underlying }: { underlying: Analytic
           </section>
         </div>
       </div>
+
+      {/* Order-result toasts (leg exit/adjust) */}
+      {toasts.length > 0 && (
+        <div className="fixed bottom-4 right-4 z-50 flex w-80 flex-col gap-2">
+          {toasts.map((t) => (
+            <div key={t.id}
+              className={cn(
+                'rounded-lg border px-3 py-2 text-xs shadow-lg backdrop-blur-md',
+                t.type === 'success'
+                  ? 'border-emerald-700 bg-emerald-950/90 text-emerald-200'
+                  : 'border-rose-700 bg-rose-950/90 text-rose-200',
+              )}>
+              <div className="font-bold">{t.message}</div>
+              {t.detail && <div className="mt-0.5 text-[11px] opacity-80">{t.detail}</div>}
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
