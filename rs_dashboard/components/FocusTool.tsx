@@ -264,6 +264,13 @@ interface ChainData {
   oc: Record<string, { ce: number; pe: number }>;
 }
 
+/** Cache key for `lookups`/`chains` — a row can trade any listed expiry, not
+ *  just the nearest, so both caches are keyed per (underlying, expiry) pair
+ *  rather than per underlying alone. */
+function expKey(underlying: FocusUnderlying, expiry: string): string {
+  return `${underlying}:${expiry}`;
+}
+
 /** Cache/lookup key for a strike pair's VWAP — shared across every row that
  *  happens to trade the same underlying/expiry/CE-strike/PE-strike/side/interval,
  *  so two rows on the same strangle at the same interval share one fetch
@@ -1369,7 +1376,7 @@ function rowDataPropsEqual(
   prev: { row: FocusRow; live: RowLive; lotSize: number | null; spot: number;
     liveRealMoney: boolean; broker: Broker; busy: boolean;
     rowIndex?: number;
-    workerHold?: WorkerStatusRow | null },
+    workerHold?: WorkerStatusRow | null; expiries?: string[] },
   next: typeof prev,
 ): boolean {
   return prev.row === next.row && prev.live === next.live
@@ -1378,12 +1385,13 @@ function rowDataPropsEqual(
     && prev.busy === next.busy && prev.rowIndex === next.rowIndex
     && prev.workerHold?.open === next.workerHold?.open
     && prev.workerHold?.ceStrike === next.workerHold?.ceStrike
-    && prev.workerHold?.peStrike === next.workerHold?.peStrike;
+    && prev.workerHold?.peStrike === next.workerHold?.peStrike
+    && prev.expiries === next.expiries;
 }
 
 function FocusTableRowImpl({
   row, rowIndex, live, lotSize, spot, liveRealMoney, broker, busy,
-  workerHold,
+  workerHold, expiries,
   onUpdate, onDelete, onArm, onDisarm, onExit, onAddLot, onReduceLot, onShift, onBlocked,
 }: {
   row: FocusRow;
@@ -1392,6 +1400,8 @@ function FocusTableRowImpl({
   lotSize: number | null; spot: number; liveRealMoney: boolean; broker: Broker;
   busy: boolean;
   workerHold?: WorkerStatusRow | null;
+  /** This row's underlying's available expiries, nearest first. */
+  expiries: string[];
   onUpdate: (patch: Partial<FocusRow>, saveToDisk?: boolean) => void;
   onDelete: () => void; onArm: () => void; onDisarm: () => void;
   onExit: (leg: 'CE' | 'PE' | 'ALL') => void;
@@ -1423,6 +1433,14 @@ function FocusTableRowImpl({
   // one side. UI-only convenience, not persisted with the row.
   const [ceQty, setCeQty] = useState(1);
   const [peQty, setPeQty] = useState(1);
+  // Expiry, like strike, is locked once this row owns a leg — moving it would
+  // orphan position tracking the same way editing an owned leg's strike would
+  // (see StrikeEditor's doc comment).
+  const expiryLocked = rowOwnsLeg(row, 'CE', workerHold) || rowOwnsLeg(row, 'PE', workerHold);
+  // DTE (0/1/0+1) only means something relative to the NEAREST expiry — a row
+  // that picked a further-out expiry has its own fixed DTE that never changes
+  // day to day, so the filter is disabled rather than silently inert.
+  const onNearestExpiry = !row.expiry || row.expiry === expiries[0];
 
   return (
     <tr className={cn(
@@ -1445,15 +1463,32 @@ function FocusTableRowImpl({
               title="Time of day this row closes, whatever the P&L" />
           </div>
           <div className="flex items-center gap-1 mt-1">
+            <span className="text-[9px] font-black text-zinc-600 w-8">EXPY</span>
+            <select
+              value={row.expiry || expiries[0] || ''}
+              disabled={expiryLocked || expiries.length === 0}
+              onChange={e => onUpdate({ expiry: e.target.value })}
+              title={expiryLocked
+                ? 'Locked while a leg is open — exit it first, or use the shift chevrons to roll it'
+                : 'Which listed expiry this row trades'}
+              className="text-[10px] font-bold h-6 px-1 border border-zinc-700 rounded bg-zinc-900 text-zinc-200 focus:outline-none focus:border-violet-500 disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              {expiries.map(e => <option key={e} value={e}>{e}</option>)}
+            </select>
+          </div>
+          <div className="flex items-center gap-1 mt-1">
             <span className="text-[9px] font-black text-zinc-600 w-8"
-              title="Only enter when the nearest expiry is this many days away">DTE</span>
+              title="Only enter when the row's expiry is this many days away — active only while trading the nearest expiry">DTE</span>
             {(['Any', '0', '1', '0+1'] as FocusDte[]).map(d => (
               <button
                 key={d}
                 onClick={() => onUpdate({ dte: d })}
-                title={d === 'Any' ? 'Enter on any expiry' : `Enter only when expiry is ${d} day(s) away`}
+                disabled={!onNearestExpiry}
+                title={!onNearestExpiry
+                  ? 'DTE only applies when trading the nearest expiry'
+                  : d === 'Any' ? 'Enter on any expiry' : `Enter only when expiry is ${d} day(s) away`}
                 className={cn(
-                  'text-[10px] font-extrabold px-2 py-0.5 rounded cursor-pointer transition-colors',
+                  'text-[10px] font-extrabold px-2 py-0.5 rounded cursor-pointer transition-colors disabled:opacity-40 disabled:cursor-not-allowed',
                   row.dte === d
                     ? 'bg-violet-600 text-oncolor'
                     : 'bg-zinc-800 text-zinc-400 hover:bg-zinc-700 hover:text-zinc-200',
@@ -1706,7 +1741,7 @@ const FocusTableRow = memo(FocusTableRowImpl, rowDataPropsEqual);
 
 function FocusRowCardImpl({
   row, live, lotSize, spot, liveRealMoney, broker, busy,
-  workerHold,
+  workerHold, expiries,
   onUpdate, onDelete, onArm, onDisarm, onExit, onAddLot, onReduceLot, onShift, onBlocked,
 }: {
   row: FocusRow;
@@ -1714,6 +1749,8 @@ function FocusRowCardImpl({
   lotSize: number | null; spot: number; liveRealMoney: boolean; broker: Broker;
   busy: boolean;
   workerHold?: WorkerStatusRow | null;
+  /** This row's underlying's available expiries, nearest first. */
+  expiries: string[];
   onUpdate: (patch: Partial<FocusRow>, saveToDisk?: boolean) => void;
   onDelete: () => void; onArm: () => void; onDisarm: () => void;
   onExit: (leg: 'CE' | 'PE' | 'ALL') => void;
@@ -1742,6 +1779,9 @@ function FocusRowCardImpl({
   // matching note in FocusTableRow. UI-only, not persisted.
   const [ceQty, setCeQty] = useState(1);
   const [peQty, setPeQty] = useState(1);
+  // See the matching note in FocusTableRow.
+  const expiryLocked = rowOwnsLeg(row, 'CE', workerHold) || rowOwnsLeg(row, 'PE', workerHold);
+  const onNearestExpiry = !row.expiry || row.expiry === expiries[0];
 
   return (
     <div className={cn(
@@ -1790,14 +1830,30 @@ function FocusRowCardImpl({
           <TimeInput value={row.exitTime} onChange={v => onUpdate({ exitTime: v })} />
         </div>
         <div className="col-span-2 flex items-center gap-1.5 mt-0.5">
-          <span className="text-[8px] font-black text-zinc-500 w-9">DTE</span>
+          <span className="text-[8px] font-black text-zinc-500 w-9">EXPY</span>
+          <select
+            value={row.expiry || expiries[0] || ''}
+            disabled={expiryLocked || expiries.length === 0}
+            onChange={e => onUpdate({ expiry: e.target.value })}
+            title={expiryLocked
+              ? 'Locked while a leg is open — exit it first, or use the shift chevrons to roll it'
+              : 'Which listed expiry this row trades'}
+            className="text-[9px] font-bold h-5 px-1 border border-zinc-700 rounded bg-zinc-900 text-zinc-200 focus:outline-none focus:border-violet-500 disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            {expiries.map(e => <option key={e} value={e}>{e}</option>)}
+          </select>
+        </div>
+        <div className="col-span-2 flex items-center gap-1.5 mt-0.5">
+          <span className="text-[8px] font-black text-zinc-500 w-9" title="Active only while trading the nearest expiry">DTE</span>
           <div className="flex gap-1">
             {(['Any', '0', '1', '0+1'] as FocusDte[]).map(d => (
               <button
                 key={d}
                 onClick={() => onUpdate({ dte: d })}
+                disabled={!onNearestExpiry}
+                title={!onNearestExpiry ? 'DTE only applies when trading the nearest expiry' : undefined}
                 className={cn(
-                  'text-[9px] font-extrabold px-1.5 py-0.5 rounded cursor-pointer transition-colors',
+                  'text-[9px] font-extrabold px-1.5 py-0.5 rounded cursor-pointer transition-colors disabled:opacity-40 disabled:cursor-not-allowed',
                   row.dte === d ? 'bg-violet-600 text-oncolor' : 'bg-zinc-800 text-zinc-500 hover:bg-zinc-700',
                   FOCUS_RING,
                 )}
@@ -2076,12 +2132,11 @@ export default function FocusTool() {
   const [expiries, setExpiries] = useState<Record<FocusUnderlying, string[]>>({
     NIFTY: [], BANKNIFTY: [], SENSEX: [],
   });
-  const [lookups, setLookups] = useState<Record<FocusUnderlying, LookupData | null>>({
-    NIFTY: null, BANKNIFTY: null, SENSEX: null,
-  });
-  const [chains, setChains] = useState<Record<FocusUnderlying, ChainData | null>>({
-    NIFTY: null, BANKNIFTY: null, SENSEX: null,
-  });
+  // Keyed by expKey(underlying, expiry) — a row can trade any listed expiry,
+  // not just the nearest, so these can no longer be one entry per underlying.
+  // See expKey's doc comment.
+  const [lookups, setLookups] = useState<Record<string, LookupData | null>>({});
+  const [chains, setChains] = useState<Record<string, ChainData | null>>({});
   // Rows with an order in flight — their leg buttons are disabled so a
   // double-click cannot send the same market order twice.
   const [busyRows, setBusyRows] = useState<Set<string>>(new Set());
@@ -2356,17 +2411,30 @@ export default function FocusTool() {
   // wholesale on every fetch, so depending on the object itself would re-run
   // these effects on every poll even when nothing changed.
   const expiryKey = UNDERLYINGS.map(u => expiries[u]?.[0] ?? '').join('|');
+  // Every row's own picked expiry (or '' if it hasn't picked one yet), as a
+  // scalar dep — a row can trade any listed expiry, not just nearest, so the
+  // lookup/chain effects below must also warm whatever a row actually picked.
+  const rowExpiryKey = config.rows.map(r => `${r.underlying}:${r.expiry ?? ''}`).join('|');
 
   // ── Lot sizes + per-strike order handles ────────────────────────
-  // One lookup per underlying per expiry: it carries the lot size AND the
+  // One lookup per (underlying, expiry): it carries the lot size AND the
   // ce/pe security ids (Dhan) or trading symbols (everyone else) that the leg
-  // buttons need to place an order.
+  // buttons need to place an order. Nearest expiry is pre-warmed for every
+  // underlying unconditionally (see the chain effect below for why); each
+  // row's own picked expiry is added on top since it may not be nearest.
   const lookupSeq = React.useRef(0);
   useEffect(() => {
     const seq = ++lookupSeq.current;
+    const pairs = new Map<string, { u: FocusUnderlying; expiry: string }>();
     UNDERLYINGS.forEach(u => {
-      const expiry = expiries[u]?.[0];
-      if (!expiry) return;
+      const nearest = expiries[u]?.[0];
+      if (nearest) pairs.set(expKey(u, nearest), { u, expiry: nearest });
+    });
+    config.rows.forEach(r => {
+      const e = r.expiry || expiries[r.underlying]?.[0];
+      if (e) pairs.set(expKey(r.underlying, e), { u: r.underlying, expiry: e });
+    });
+    pairs.forEach(({ u, expiry }) => {
       fetch(`${scalperRoute(broker, 'lookup')}?underlying=${u}&expiry=${expiry}`)
         .then(r => r.json())
         .then((j: { success?: boolean; data?: LookupData }) => {
@@ -2374,14 +2442,14 @@ export default function FocusTool() {
           // land on top of the current one's — those ids place orders.
           if (seq !== lookupSeq.current) return;
           if (!j.success || !j.data?.strikes) return;
-          setLookups(prev => ({ ...prev, [u]: j.data! }));
+          setLookups(prev => ({ ...prev, [expKey(u, expiry)]: j.data! }));
           if (Number(j.data.lotSize) > 0) {
             setLotSizes(prev => ({ ...prev, [u]: Number(j.data!.lotSize) }));
           }
         })
         .catch(() => {});
     });
-  }, [broker, expiryKey]);
+  }, [broker, expiryKey, rowExpiryKey]);
 
   // ── Option premiums ─────────────────────────────────────────────
   // The chain is the fallback LTP source for every underlying, and the spot
@@ -2404,10 +2472,21 @@ export default function FocusTool() {
     if (!activeKey) return;
     const seq = ++chainSeq.current;
     const fetchChains = () => {
+      const pairs = new Map<string, { u: FocusUnderlying; expiry: string }>();
       activeKey.split('|').forEach(name => {
         const u = name as FocusUnderlying;
-        const expiry = expiries[u]?.[0];
-        if (!expiry) return;
+        const nearest = expiries[u]?.[0];
+        if (nearest) pairs.set(expKey(u, nearest), { u, expiry: nearest });
+      });
+      // Every row's own picked expiry, even on an underlying whose group
+      // isn't "active" by the enabled/has-rows test above — a lone draft row
+      // pointed at a further expiry still needs its own chain to resolve
+      // PREMIUM-mode strikes and show a live LTP.
+      config.rows.forEach(r => {
+        const e = r.expiry || expiries[r.underlying]?.[0];
+        if (e) pairs.set(expKey(r.underlying, e), { u: r.underlying, expiry: e });
+      });
+      pairs.forEach(({ u, expiry }) => {
         fetch(`/api/options/chain?underlying=${u}&expiry=${expiry}&broker=${broker}`)
           .then(r => r.json())
           .then((j: {
@@ -2428,7 +2507,7 @@ export default function FocusTool() {
                 pe: Number(v.pe?.last_price ?? 0),
               };
             }
-            setChains(prev => ({ ...prev, [u]: { spot: Number(j.data?.chain?.last_price ?? 0), oc: flat } }));
+            setChains(prev => ({ ...prev, [expKey(u, expiry)]: { spot: Number(j.data?.chain?.last_price ?? 0), oc: flat } }));
           })
           .catch(() => {});
       });
@@ -2436,7 +2515,7 @@ export default function FocusTool() {
     fetchChains();
     const t = setInterval(fetchChains, 3000);
     return () => clearInterval(t);
-  }, [broker, expiryKey, activeKey]);
+  }, [broker, expiryKey, activeKey, rowExpiryKey]);
 
   /** Fetch the broker's position book once and return it, also refreshing
    *  state. Returns null if the call failed — callers that gate a real-money
@@ -2561,10 +2640,10 @@ export default function FocusTool() {
     for (const u of UNDERLYINGS) {
       const wsSpot = focusWsQuotes?.[u]?.spot;
       if (wsSpot && wsSpot > 0) { out[u] = wsSpot; continue; }
-      if (!(out[u] > 0)) out[u] = Number(chains[u]?.spot ?? 0);
+      if (!(out[u] > 0)) out[u] = Number(chains[expKey(u, expiries[u]?.[0] ?? '')]?.spot ?? 0);
     }
     return out;
-  }, [spotPrices, chains, focusWsQuotes]);
+  }, [spotPrices, chains, focusWsQuotes, expiries]);
 
   // Futures quotes: prefer realtime WebSocket updates from the Focus Tool bridge,
   // falling back to the 3s REST poll while WS is connecting/down.
@@ -2652,6 +2731,11 @@ export default function FocusTool() {
     }
     for (const row of config.rows) {
       const u = row.underlying;
+      // The expiry THIS row trades — its own pick, or nearest until it picks
+      // one. Everything below (chain/lookup lookups, WS-tick gating) must key
+      // off this, not the underlying's nearest, now that a row can pick any
+      // listed expiry.
+      const rowExpiry = row.expiry || expiries[u]?.[0] || '';
       const step = STRIKE_STEP[u];
       const spot = spots[u] ?? 0;
       // ATM base per the index group's own "ATM BY" pick — Spot (the index
@@ -2662,7 +2746,7 @@ export default function FocusTool() {
       const futLtp = effectiveFutQuotes[u]?.ltp ?? 0;
       const atmBase = group?.atmBy === 'Fut' && futLtp > 0 ? futLtp : spot;
       const atm = atmBase > 0 ? Math.round(atmBase / step) * step : null;
-      const oc = chains[u]?.oc;
+      const oc = chains[expKey(u, rowExpiry)]?.oc;
 
       const resolvedCe = row.strikeMode === 'PREMIUM'
         ? nearestStrikeByPremium(oc, 'CE', Number(row.cePremium))
@@ -2703,8 +2787,8 @@ export default function FocusTool() {
         return null;
       };
 
-      const ceRef = ceKey ? lookups[u]?.strikes?.[ceKey] : undefined;
-      const peRef = peKey ? lookups[u]?.strikes?.[peKey] : undefined;
+      const ceRef = ceKey ? lookups[expKey(u, rowExpiry)]?.strikes?.[ceKey] : undefined;
+      const peRef = peKey ? lookups[expKey(u, rowExpiry)]?.strikes?.[peKey] : undefined;
       // Prefer the candidate under this row's own group product; only fall
       // back to a symbol/id-only match when it is unambiguous — see
       // findPositionForRef's own doc comment.
@@ -2772,7 +2856,6 @@ export default function FocusTool() {
       }
       const pnl = computeRowPnl(row.fill?.bookedPnl ?? 0, liveLegs);
 
-      const rowExpiry = row.expiry || expiries[u]?.[0] || '';
       const vwapEntry = row.levelVw && ceStrike != null && peStrike != null && rowExpiry
         ? rowVwap[vwapKey(u, rowExpiry, ceStrike, peStrike, row.side, row.vwapInterval || '1')]
         : undefined;
@@ -3108,7 +3191,7 @@ export default function FocusTool() {
    * behavior) rather than silently zeroing a real fill out of the ledger.
    */
   async function confirmLegFillQty(
-    u: FocusUnderlying, leg: 'CE' | 'PE', strike: number, product: string,
+    u: FocusUnderlying, expiry: string, leg: 'CE' | 'PE', strike: number, product: string,
     netQtyBefore: number, side: 'BUY' | 'SELL', requested: number,
     opts: { maxWaitMs?: number; strict?: boolean } = {},
   ): Promise<number> {
@@ -3116,7 +3199,7 @@ export default function FocusTool() {
     // strict: unread/unknown book → 0 (shift must not pretend the fill landed).
     // Non-strict keeps the pre-fix fallback of trusting `requested`.
     const onUnknown = opts.strict ? 0 : requested;
-    const ref = lookups[u]?.strikes?.[strikeKey(strike)];
+    const ref = lookups[expKey(u, expiry)]?.strikes?.[strikeKey(strike)];
     const id = leg === 'CE' ? ref?.ceId : ref?.peId;
     const sym = leg === 'CE' ? ref?.ceSymbol : ref?.peSymbol;
     if (broker === 'dhan' ? !id : !sym) return onUnknown;
@@ -3159,6 +3242,7 @@ export default function FocusTool() {
     opts: { reduce: boolean; lots?: number; all?: boolean; strikeOverride?: number; awaitFill?: boolean },
   ): Promise<boolean> {
     const u = row.underlying;
+    const expiry = row.expiry || expiries[u]?.[0] || '';
     const what = `${u} ${leg}`;
 
     if (!liveRealMoney) {
@@ -3181,7 +3265,7 @@ export default function FocusTool() {
       return false;
     }
 
-    const ref = lookups[u]?.strikes?.[strikeKey(strike)];
+    const ref = lookups[expKey(u, expiry)]?.strikes?.[strikeKey(strike)];
     const securityId = leg === 'CE' ? ref?.ceId : ref?.peId;
     const symbol     = leg === 'CE' ? ref?.ceSymbol : ref?.peSymbol;
     if (broker === 'dhan' ? !securityId : !symbol) {
@@ -3304,13 +3388,13 @@ export default function FocusTool() {
         };
         if (opts.awaitFill) {
           const filled = await confirmLegFillQty(
-            u, leg, strike, rawProduct, netQty, side, quantity,
+            u, expiry, leg, strike, rawProduct, netQty, side, quantity,
             { maxWaitMs: 5000, strict: true },
           );
           pollPositions();
           return applyFill(filled);
         }
-        confirmLegFillQty(u, leg, strike, rawProduct, netQty, side, quantity).then(filled => {
+        confirmLegFillQty(u, expiry, leg, strike, rawProduct, netQty, side, quantity).then(filled => {
           applyFill(filled);
         });
         pollPositions();
@@ -3334,13 +3418,13 @@ export default function FocusTool() {
    * shifts must not reopen until this returns a number.
    */
   async function verifyLegClosed(
-    u: FocusUnderlying, leg: 'CE' | 'PE', strike: number, closedQty: number, product: string,
+    u: FocusUnderlying, expiry: string, leg: 'CE' | 'PE', strike: number, closedQty: number, product: string,
     opts: { maxWaitMs?: number; targetRemaining?: number; brokerQtyBefore?: number } = {},
   ): Promise<number | null> {
     const maxWaitMs = opts.maxWaitMs ?? 4000;
     const targetRemaining = Math.max(0, opts.targetRemaining ?? 0);
     const brokerQtyBefore = Math.max(closedQty, Number(opts.brokerQtyBefore) || closedQty);
-    const ref = lookups[u]?.strikes?.[strikeKey(strike)];
+    const ref = lookups[expKey(u, expiry)]?.strikes?.[strikeKey(strike)];
     const id = leg === 'CE' ? ref?.ceId : ref?.peId;
     const sym = leg === 'CE' ? ref?.ceSymbol : ref?.peSymbol;
     if (broker === 'dhan' ? !id : !sym) return null;
@@ -3384,10 +3468,11 @@ export default function FocusTool() {
    */
   async function waitRowFlat(row: FocusRow, live: RowLive, maxWaitMs = 4000): Promise<boolean> {
     const u = row.underlying;
+    const expiry = row.expiry || expiries[u]?.[0] || '';
     const handles = (['CE', 'PE'] as const).map(leg => {
       const strike = leg === 'CE' ? live.ceStrike : live.peStrike;
       if (strike == null) return null;
-      const ref = lookups[u]?.strikes?.[strikeKey(strike)];
+      const ref = lookups[expKey(u, expiry)]?.strikes?.[strikeKey(strike)];
       const id = leg === 'CE' ? ref?.ceId : ref?.peId;
       const sym = leg === 'CE' ? ref?.ceSymbol : ref?.peSymbol;
       return broker === 'dhan' ? (id ? { id } : null) : (sym ? { sym } : null);
@@ -3453,6 +3538,8 @@ export default function FocusTool() {
   async function handleShiftStrike(row: FocusRow, leg: 'CE' | 'PE', direction: 'UP' | 'DOWN') {
     if (busyRows.has(row.id)) return;
     const u = row.underlying;
+    // A shift only moves the strike, never the expiry — always this row's own.
+    const expiry = row.expiry || expiries[u]?.[0] || '';
     const step = STRIKE_STEP[u];
     const live = rowLive[row.id] ?? EMPTY_ROW_LIVE;
     const currStrike = leg === 'CE' ? live.ceStrike : live.peStrike;
@@ -3461,7 +3548,7 @@ export default function FocusTool() {
       return;
     }
     const newStrike = direction === 'UP' ? currStrike + step : currStrike - step;
-    const newRef = lookups[u]?.strikes?.[strikeKey(newStrike)];
+    const newRef = lookups[expKey(u, expiry)]?.strikes?.[strikeKey(newStrike)];
     const hasContract = broker === 'dhan' ? !!(leg === 'CE' ? newRef?.ceId : newRef?.peId)
                                            : !!(leg === 'CE' ? newRef?.ceSymbol : newRef?.peSymbol);
     if (!hasContract) {
@@ -3532,7 +3619,7 @@ export default function FocusTool() {
 
         const product = positionProduct(pos as unknown as Record<string, unknown>);
         const closedUnits = await verifyLegClosed(
-          u, leg, currStrike, closeQty, product,
+          u, expiry, leg, currStrike, closeQty, product,
           { targetRemaining, brokerQtyBefore: brokerQty },
         );
         const afterRows = await fetchPositionsNow();
@@ -3541,7 +3628,7 @@ export default function FocusTool() {
             `Could not re-read positions after closing ${currStrike} ${leg} — no new leg opened.`);
           return;
         }
-        const afterRef = lookups[u]?.strikes?.[strikeKey(currStrike)];
+        const afterRef = lookups[expKey(u, expiry)]?.strikes?.[strikeKey(currStrike)];
         const afterId = leg === 'CE' ? afterRef?.ceId : afterRef?.peId;
         const afterSym = leg === 'CE' ? afterRef?.ceSymbol : afterRef?.peSymbol;
         const afterPos = broker === 'dhan'
@@ -3588,7 +3675,7 @@ export default function FocusTool() {
         addToast('error', 'Linked leg kept its strike', `${otherLeg} holds an open position — only ${leg} was rolled`);
       }
       if (row.strikeMode === 'PREMIUM') {
-        const oc = chains[u]?.oc;
+        const oc = chains[expKey(u, expiry)]?.oc;
         const newLtp = oc?.[strikeKey(newStrike)]?.[leg === 'CE' ? 'ce' : 'pe'];
         if (!(Number(newLtp) > 0)) {
           // Book/pin already moved (fill ledger stamped newStrike). Keep the
@@ -4124,6 +4211,7 @@ export default function FocusTool() {
                           liveRealMoney={liveRealMoney} broker={broker}
                           busy={busyRows.has(row.id)}
                           workerHold={(workerStatus.rows ?? []).find(r => r.id === row.id) ?? null}
+                          expiries={expiries[u] ?? []}
                           onUpdate={(patch, save) => updateRow(row.id, patch, save)}
                           onDelete={() => deleteRow(row.id)}
                           onArm={() => armRow(row.id)}
@@ -4180,6 +4268,7 @@ export default function FocusTool() {
                           liveRealMoney={liveRealMoney} broker={broker}
                           busy={busyRows.has(row.id)}
                           workerHold={(workerStatus.rows ?? []).find(r => r.id === row.id) ?? null}
+                          expiries={expiries[u] ?? []}
                           onUpdate={(patch, save) => updateRow(row.id, patch, save)}
                           onDelete={() => deleteRow(row.id)}
                           onArm={() => armRow(row.id)}
