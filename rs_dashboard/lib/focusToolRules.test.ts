@@ -16,8 +16,8 @@ import path from 'node:path';
 import {
   evaluateEntry, evaluateGlobalRisk, evaluateRowExit, legStopReason,
   dteForExpiry, dteMatches, sidePremium, legsOf, legsFlat, rowOwnsLeg,
-  stopPremium, legStopPremium, pairStopPremium,
-  type RowLive, type PosRow,
+  stopPremium, legStopPremium, pairStopPremium, legOwnContracts,
+  type RowLive, type PosRow, type WorkerHold,
 } from './focusToolRules.ts';
 import type { FocusRow } from './focusToolRows.ts';
 
@@ -213,6 +213,31 @@ test('sidePremium weights unequal CE/PE lots', () => {
   assert.ok(Math.abs(sidePremium(owned, l) - w) < 1e-9);
   // Equal-weight sum would be 124.5 and would trip ×1.8 off entry 68.51; weighted must not.
   assert.equal(evaluateRowExit(owned, l, 24000), null);
+});
+
+test('legOwnContracts: a small own qty is used even against a much larger broker position', () => {
+  // Two rows share the strike: this row's own ledger recorded 195, but the
+  // broker's netQty at that security is the combined 650 (another row's
+  // lots too). Must report 195, never the full 650.
+  const c = { ceLtp: 0, peLtp: 14.45, ceQty: 0, peQty: -650, ceEntry: 0, peEntry: 31.67 };
+  const l = live(c);
+  const owned = ownedRow({}, { ...c, peQty: -195 }); // fill ledger records only 195
+  assert.equal(legOwnContracts(owned, 'PE', l), 195);
+});
+
+test('legOwnContracts: page ledger and worker ledger both holding real lots for one row are summed, not picked', () => {
+  const c = { ceLtp: 0, peLtp: 14.45, ceQty: 0, peQty: -455, ceEntry: 0, peEntry: 31.67 };
+  const l = live(c);
+  const owned = ownedRow({}, { ...c, peQty: -260 }); // page fill: 260
+  const workerHold: WorkerHold = { open: true, peStrike: 24000, peQty: 195 }; // worker: 195
+  assert.equal(legOwnContracts(owned, 'PE', l, workerHold), 455);
+});
+
+test('legOwnContracts: no ledger on either side owns nothing, never the broker net', () => {
+  const c = { ceLtp: 0, peLtp: 14.45, ceQty: 0, peQty: -650, ceEntry: 0, peEntry: 31.67 };
+  const l = live(c);
+  const draft = row({ fill: undefined });
+  assert.equal(legOwnContracts(draft, 'PE', l), 0);
 });
 
 test('sidePremium excludes a leg the row does not own even if the broker shows it', () => {

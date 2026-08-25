@@ -35,13 +35,20 @@ export function mtmForQty(input: MtmInput): number {
 
 /**
  * Share of a netted broker position that belongs to this row.
- * Missing/zero own qty → 1 (treat the whole position as this row's).
+ *
+ * Missing/zero own qty → 0, NEVER 1. A row with no recorded ownership on a
+ * leg owns nothing on it — the position belongs to another row, another
+ * strategy, or a manual trade until this row's own ledger says otherwise.
+ * Attributing the whole netted position on an empty ledger is how a row
+ * sharing a strike ends up double-counting P&L (or the whole of someone
+ * else's) — see legOwnContracts in focusToolRules.ts for the same rule on
+ * the quantity side.
  */
 export function ownShare(ownQty: number | undefined | null, brokerQty: number): number {
   const own = Number(ownQty) || 0;
   const broker = Math.abs(Number(brokerQty) || 0);
-  if (own > 0 && broker > 0) return Math.min(1, own / broker);
-  return 1;
+  if (broker <= 0) return 0;
+  return Math.min(1, own / broker);
 }
 
 export interface LiveLegPnl {
@@ -68,8 +75,10 @@ export function computeRowPnl(bookedPnl: number, legs: LiveLegPnl[]): number {
   for (const leg of legs) {
     const brokerQty = Math.abs(Number(leg.netQty) || 0);
     if (brokerQty <= 0) continue;
+    // Never fall back to the full brokerQty on a missing own qty — see
+    // ownShare's doc comment above for why 0 owned means 0 counted.
     const own = Number(leg.ownQty) || 0;
-    const qty = own > 0 ? Math.min(own, brokerQty) : brokerQty;
+    const qty = Math.min(own, brokerQty);
     const ltp = Number(leg.ltp) || 0;
     if (ltp > 0) {
       pnl += mtmForQty({

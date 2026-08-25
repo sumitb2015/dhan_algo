@@ -153,8 +153,20 @@ export function rowFlat(row: Pick<FocusRow, 'fill'>, workerHold?: WorkerHold): b
 
 /**
  * Absolute contracts THIS row owns on a leg, for qty-weighting pair SL ×.
- * Prefers the page fill ledger, then the worker ledger, then falls back to the
- * broker net (only when ownership is already established). 0 when flat / not owned.
+ *
+ * Sums the page fill ledger and the worker ledger — NOT "whichever is
+ * nonzero" — because the tab and the worker can each independently place
+ * real opening orders against the same row (the worker enters/exits without
+ * ever writing the page's fill; the tab can add lots without the worker
+ * knowing), so a row's true ownership is often split across both. Picking
+ * one and discarding the other under-counts real ownership and is exactly
+ * how a page ledger has been observed drifting to look like an entire
+ * shared-strike broker position — see the module's ownership skill.
+ *
+ * NEVER falls back to the broker net: a row whose own ledgers both read 0
+ * owns 0 on this leg, even if the broker shows real quantity there — that
+ * quantity belongs to another row, another strategy, or a manual trade
+ * until this row's own ledger says otherwise.
  */
 export function legOwnContracts(
   row: Pick<FocusRow, 'fill'>,
@@ -168,8 +180,7 @@ export function legOwnContracts(
   if (net === 0) return 0;
   const pageOwn = Math.abs(Number(leg === 'CE' ? row.fill?.ceQty : row.fill?.peQty) || 0);
   const workerOwn = Math.abs(Number(leg === 'CE' ? workerHold?.ceQty : workerHold?.peQty) || 0);
-  const own = pageOwn > 0 ? pageOwn : workerOwn > 0 ? workerOwn : net;
-  return Math.min(own, net);
+  return Math.min(pageOwn + workerOwn, net);
 }
 
 /**
