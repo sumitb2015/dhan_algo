@@ -11,6 +11,7 @@
     "test": "node --test lib/*.test.ts"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.120.0",
     "@base-ui/react": "^1.6.0",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
