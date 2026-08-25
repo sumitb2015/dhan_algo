@@ -155,10 +155,6 @@ function fmtPrice(n: number | null | undefined): string {
  *  scope for a per-user decision on a local single-user tool. */
 const WORKER_OPT_OUT_KEY = 'focusTool.workerStoppedByUser';
 
-/** User setting: show/hide the per-row combined-premium sparkline. Per-browser,
- *  same scope as WORKER_OPT_OUT_KEY above. Defaults off. */
-const SPARKLINE_ENABLED_KEY = 'focusTool.sparklineEnabled';
-
 /** Wall-clock 'HH:MM' in IST, regardless of the browser's own timezone. */
 function istHm(): string {
   return new Date().toLocaleTimeString('en-GB', {
@@ -1042,7 +1038,6 @@ function ControlStrip({
   onSave, saving, totalPnl, peakMtm, lockMtm,
   copyTrade,
   onOpenRisk, onOpenOrders, onToggleViewMode, viewMode,
-  sparklineEnabled, onToggleSparkline,
   workerStatus, onToggleWorker,
   onExitAll, confirmExitAll, exitingAll,
 }: {
@@ -1059,8 +1054,6 @@ function ControlStrip({
   onOpenOrders: () => void;
   onToggleViewMode: () => void;
   viewMode: 'table' | 'cards';
-  sparklineEnabled: boolean;
-  onToggleSparkline: () => void;
   workerStatus: WorkerStatus;
   onToggleWorker: () => void;
   onExitAll: () => void;
@@ -1147,10 +1140,6 @@ function ControlStrip({
         <GhostBtn onClick={onToggleViewMode} title="Toggle between Table and Cards view">
           <Layers className="h-3.5 w-3.5 text-zinc-400" />
           {viewMode === 'cards' ? 'Table' : 'Cards'}
-        </GhostBtn>
-        <GhostBtn onClick={onToggleSparkline} title={sparklineEnabled ? 'Hide the per-row premium sparkline' : 'Show the per-row premium sparkline'}>
-          <TrendingUp className={cn('h-3.5 w-3.5', sparklineEnabled ? 'text-violet-400' : 'text-zinc-500')} />
-          Sparkline {sparklineEnabled ? 'On' : 'Off'}
         </GhostBtn>
       </div>
 
@@ -1333,47 +1322,6 @@ function IndexGroupBar({
   );
 }
 
-/**
- * A row's combined-premium trend over the last ~60-90s — a scalper reads
- * momentum, not just level. History/color both come from refs sampled on a
- * slow interval in the main component (never the WS tick path — see
- * sparkHistoryRef there), so this redraws on its own cheap interval rather
- * than the parent row re-rendering. Colored by the sign of the row's P&L
- * trend (not the premium's own direction), since that answers "is this
- * drifting for or against me" regardless of whether the row is long or
- * short. Renders nothing until there are at least two samples.
- */
-function Sparkline({ history, pnlHistory }: { history?: number[]; pnlHistory?: number[] }) {
-  const [, setTick] = useState(0);
-  useEffect(() => {
-    const id = setInterval(() => setTick(t => t + 1), 1500);
-    return () => clearInterval(id);
-  }, []);
-  // The row this belongs to re-renders on every WS tick (up to ~60/sec,
-  // rAF-coalesced), but `history` only actually changes every 1.5s via the
-  // sampling interval — memoized so the min/max/points work runs once per
-  // real data change instead of once per tick riding along for free.
-  const pts = useMemo(() => {
-    if (!history || history.length < 2) return null;
-    const w = 56, h = 16;
-    const min = Math.min(...history), max = Math.max(...history);
-    const span = max - min || 1;
-    return history.map((v, i) =>
-      `${(i / (history.length - 1)) * w},${h - ((v - min) / span) * h}`).join(' ');
-  }, [history]);
-  if (!pts) return null;
-  const w = 56, h = 16;
-  const trendGood = pnlHistory && pnlHistory.length >= 2
-    ? pnlHistory[pnlHistory.length - 1] >= pnlHistory[0] : null;
-  const colorClass = trendGood == null ? 'text-zinc-500' : trendGood ? 'text-emerald-400' : 'text-rose-400';
-  return (
-    <svg viewBox={`0 0 ${w} ${h}`} width={w} height={h} className={colorClass} aria-hidden="true">
-      <polyline points={pts} fill="none" stroke="currentColor" strokeWidth="1.5"
-        strokeLinecap="round" strokeLinejoin="round" opacity="0.85" />
-    </svg>
-  );
-}
-
 // ── Table Row ─────────────────────────────────────────────────────────────────
 
 const STATUS_PILL: Record<FocusRowStatus, string> = {
@@ -1397,7 +1345,7 @@ const STATUS_PILL: Record<FocusRowStatus, string> = {
 function rowDataPropsEqual(
   prev: { row: FocusRow; live: RowLive; lotSize: number | null; spot: number;
     liveRealMoney: boolean; broker: Broker; busy: boolean;
-    sparkHistory?: number[]; sparkPnlHistory?: number[]; rowIndex?: number;
+    rowIndex?: number;
     workerHold?: WorkerStatusRow | null },
   next: typeof prev,
 ): boolean {
@@ -1405,7 +1353,6 @@ function rowDataPropsEqual(
     && prev.lotSize === next.lotSize && prev.spot === next.spot
     && prev.liveRealMoney === next.liveRealMoney && prev.broker === next.broker
     && prev.busy === next.busy && prev.rowIndex === next.rowIndex
-    && prev.sparkHistory === next.sparkHistory && prev.sparkPnlHistory === next.sparkPnlHistory
     && prev.workerHold?.open === next.workerHold?.open
     && prev.workerHold?.ceStrike === next.workerHold?.ceStrike
     && prev.workerHold?.peStrike === next.workerHold?.peStrike;
@@ -1413,7 +1360,7 @@ function rowDataPropsEqual(
 
 function FocusTableRowImpl({
   row, rowIndex, live, lotSize, spot, liveRealMoney, broker, busy,
-  sparkHistory, sparkPnlHistory, workerHold,
+  workerHold,
   onUpdate, onDelete, onArm, onDisarm, onExit, onAddLot, onReduceLot, onShift, onBlocked,
 }: {
   row: FocusRow;
@@ -1421,7 +1368,6 @@ function FocusTableRowImpl({
   live: RowLive;
   lotSize: number | null; spot: number; liveRealMoney: boolean; broker: Broker;
   busy: boolean;
-  sparkHistory?: number[]; sparkPnlHistory?: number[];
   workerHold?: WorkerStatusRow | null;
   onUpdate: (patch: Partial<FocusRow>, saveToDisk?: boolean) => void;
   onDelete: () => void; onArm: () => void; onDisarm: () => void;
@@ -1517,7 +1463,6 @@ function FocusTableRowImpl({
             className="text-base font-mono font-black text-zinc-100 tabular-nums">
             {combinedLtp > 0 ? combinedLtp.toFixed(2) : '\u2014'}
           </div>
-          <Sparkline history={sparkHistory} pnlHistory={sparkPnlHistory} />
         </div>
         <div className="text-xs font-mono font-bold mt-0.5 flex items-center gap-1">
           <span className="text-emerald-400">CE {live.ltpCe != null ? live.ltpCe.toFixed(2) : '\u2014'}</span>
@@ -1738,14 +1683,13 @@ const FocusTableRow = memo(FocusTableRowImpl, rowDataPropsEqual);
 
 function FocusRowCardImpl({
   row, live, lotSize, spot, liveRealMoney, broker, busy,
-  sparkHistory, sparkPnlHistory, workerHold,
+  workerHold,
   onUpdate, onDelete, onArm, onDisarm, onExit, onAddLot, onReduceLot, onShift, onBlocked,
 }: {
   row: FocusRow;
   live: RowLive;
   lotSize: number | null; spot: number; liveRealMoney: boolean; broker: Broker;
   busy: boolean;
-  sparkHistory?: number[]; sparkPnlHistory?: number[];
   workerHold?: WorkerStatusRow | null;
   onUpdate: (patch: Partial<FocusRow>, saveToDisk?: boolean) => void;
   onDelete: () => void; onArm: () => void; onDisarm: () => void;
@@ -1852,7 +1796,6 @@ function FocusRowCardImpl({
           <span className="text-[8px] font-black text-zinc-500 uppercase tracking-wider">Premium</span>
           <div className="flex items-center gap-2 mt-0.5">
             <span className="text-sm font-mono font-black text-zinc-100">{combinedLtp > 0 ? combinedLtp.toFixed(2) : '—'}</span>
-            <Sparkline history={sparkHistory} pnlHistory={sparkPnlHistory} />
           </div>
         </div>
       </div>
@@ -2151,17 +2094,6 @@ export default function FocusTool() {
 
   const [activeModal, setActiveModal] = useState<'risk' | 'orderbook' | null>(null);
   const [viewMode, setViewMode] = useState<'table' | 'cards'>('table');
-  const [sparklineEnabled, setSparklineEnabled] = useState(false);
-  useEffect(() => {
-    setSparklineEnabled(localStorage.getItem(SPARKLINE_ENABLED_KEY) === '1');
-  }, []);
-  const toggleSparkline = useCallback(() => {
-    setSparklineEnabled(prev => {
-      const next = !prev;
-      localStorage.setItem(SPARKLINE_ENABLED_KEY, next ? '1' : '0');
-      return next;
-    });
-  }, []);
   const [orders, setOrders] = useState<Record<string, unknown>[]>([]);
   const [ordersLoading, setOrdersLoading] = useState(false);
   const [ordersError, setOrdersError] = useState<string | null>(null);
@@ -3684,34 +3616,6 @@ export default function FocusTool() {
   const expiriesRef = useRef(expiries);
   expiriesRef.current = expiries;
 
-  // Rolling per-row history for the LTP sparkline (UI-only — never touches
-  // RowLive/FocusRow, which are a cross-language contract with the Python
-  // worker). Sampled on its own slow interval off schedulerRef, not the WS
-  // tick path, so it can't add per-tick cost on top of the existing
-  // tick-driven re-renders. Written into refs (not state) so sampling itself
-  // never triggers a render — Sparkline redraws itself on its own interval.
-  const sparkHistoryRef = useRef<Record<string, number[]>>({});
-  const sparkPnlRef = useRef<Record<string, number[]>>({});
-  useEffect(() => {
-    const id = setInterval(() => {
-      const { config: cfg, rowLive: live } = schedulerRef.current;
-      for (const row of cfg.rows) {
-        const l = live[row.id];
-        if (!l) continue;
-        const premium = (l.ltpCe ?? 0) + (l.ltpPe ?? 0);
-        if (premium > 0) {
-          // Reassign (not mutate) the buffer — Sparkline's useMemo keys on
-          // this reference, so an in-place push/shift would never
-          // invalidate the memo and the sparkline would freeze after its
-          // first paint.
-          sparkHistoryRef.current[row.id] = [...(sparkHistoryRef.current[row.id] ?? []), premium].slice(-50);
-        }
-        sparkPnlRef.current[row.id] = [...(sparkPnlRef.current[row.id] ?? []), l.pnl].slice(-50);
-      }
-    }, 1500);
-    return () => clearInterval(id);
-  }, []);
-
   /**
    * Square off every leg of one row at market and mark it exited. Deduped by
    * `autoExitingRef` so a rule that stays breached across ticks (they all do)
@@ -4128,7 +4032,6 @@ export default function FocusTool() {
         onOpenOrders={() => setActiveModal('orderbook')}
         onToggleViewMode={() => setViewMode(v => v === 'cards' ? 'table' : 'cards')}
         viewMode={viewMode}
-        sparklineEnabled={sparklineEnabled} onToggleSparkline={toggleSparkline}
         workerStatus={workerStatus} onToggleWorker={toggleWorker}
         onExitAll={handleExitAll} confirmExitAll={confirmExitAll} exitingAll={exitingAll}
       />
@@ -4185,8 +4088,6 @@ export default function FocusTool() {
                           lotSize={lotSizes[u]} spot={spots[u] ?? 0}
                           liveRealMoney={liveRealMoney} broker={broker}
                           busy={busyRows.has(row.id)}
-                          sparkHistory={sparklineEnabled ? sparkHistoryRef.current[row.id] : undefined}
-                          sparkPnlHistory={sparklineEnabled ? sparkPnlRef.current[row.id] : undefined}
                           workerHold={(workerStatus.rows ?? []).find(r => r.id === row.id) ?? null}
                           onUpdate={(patch, save) => updateRow(row.id, patch, save)}
                           onDelete={() => deleteRow(row.id)}
@@ -4243,8 +4144,6 @@ export default function FocusTool() {
                           lotSize={lotSizes[u]} spot={spots[u] ?? 0}
                           liveRealMoney={liveRealMoney} broker={broker}
                           busy={busyRows.has(row.id)}
-                          sparkHistory={sparklineEnabled ? sparkHistoryRef.current[row.id] : undefined}
-                          sparkPnlHistory={sparklineEnabled ? sparkPnlRef.current[row.id] : undefined}
                           workerHold={(workerStatus.rows ?? []).find(r => r.id === row.id) ?? null}
                           onUpdate={(patch, save) => updateRow(row.id, patch, save)}
                           onDelete={() => deleteRow(row.id)}
