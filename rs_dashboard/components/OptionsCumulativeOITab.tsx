@@ -21,6 +21,9 @@ interface TimePoint {
 }
 
 type RegimeLabel = 'Strong Bullish' | 'Bullish' | 'Neutral' | 'Bearish' | 'Strong Bearish';
+type Zone = 'Bullish' | 'Neutral' | 'Bearish';
+type ConfidenceLabel = 'Low' | 'Moderate' | 'High';
+type ConfirmationState = 'Confirmed' | 'Pending' | 'N/A';
 
 interface RegimeSnapshot {
   signal: number;
@@ -29,9 +32,17 @@ interface RegimeSnapshot {
   accelZ: number;
   wpiZ: number;
   priceTrendZ: number;
+  oiZone: Zone;
+  slopeZone: Zone;
+  wpiZone: Zone;
+  priceTrendZone: Zone;
+  confidence: number;
+  confidenceLabel: ConfidenceLabel;
   label: RegimeLabel;
   strategy: string;
   confirmed: boolean;
+  confirmationState: ConfirmationState;
+  reason: string;
   transitionFlag: boolean;
   transitionDirection: 'bullish' | 'bearish' | null;
   warmingUp: boolean;
@@ -93,6 +104,22 @@ function regimeBarColor(label: RegimeLabel): string {
 /** Maps a signal in roughly [-3, +3] to a 0-100% gauge width, clamped. */
 function signalToPct(signal: number): number {
   return Math.max(0, Math.min(100, Math.round(((signal + 3) / 6) * 100)));
+}
+
+function zoneDot(zone: Zone): string {
+  switch (zone) {
+    case 'Bullish': return '🟢';
+    case 'Bearish': return '🔴';
+    case 'Neutral': return '⚪';
+  }
+}
+
+function confirmationColor(state: ConfirmationState): string {
+  switch (state) {
+    case 'Confirmed': return 'text-emerald-400';
+    case 'Pending':   return 'text-yellow-400';
+    case 'N/A':       return 'text-zinc-500';
+  }
 }
 
 // ─── Tooltips ─────────────────────────────────────────────────────
@@ -350,11 +377,12 @@ export default function OptionsCumulativeOITab({ expiry: _expiry }: { expiry: st
               </div>
             ) : (
               <div className="flex flex-col gap-3">
+                {/* Market Regime (bias) */}
                 <div className="flex items-center justify-between flex-wrap gap-3">
                   <div>
-                    <p className="text-sm font-bold text-white tracking-tight">Options Regime Score</p>
+                    <p className="text-sm font-bold text-white tracking-tight">Market Regime</p>
                     <p className="text-[10px] text-zinc-400 mt-0.5">
-                      0.25×OI_Z + 0.20×Slope_Z + 0.10×Accel_Z + 0.25×WPI_Z + 0.20×PriceTrend_Z (all standardized)
+                      0.25×OI_Z* + 0.20×Slope_Z* + 0.10×Accel_Z* + 0.25×WPI_Z* + 0.20×PriceTrend_Z* (Z* capped ±3)
                     </p>
                   </div>
                   <div className="flex items-center gap-4">
@@ -362,7 +390,7 @@ export default function OptionsCumulativeOITab({ expiry: _expiry }: { expiry: st
                       {regime.label}
                     </span>
                     <span className="text-xs text-zinc-400 tabular-nums">
-                      Signal {regime.signal >= 0 ? '+' : ''}{regime.signal.toFixed(2)}
+                      Score {regime.signal >= 0 ? '+' : ''}{regime.signal.toFixed(2)}
                     </span>
                   </div>
                 </div>
@@ -375,17 +403,27 @@ export default function OptionsCumulativeOITab({ expiry: _expiry }: { expiry: st
                 </div>
 
                 <div className="flex items-center gap-5 flex-wrap">
-                  <StatChip label="OI_Z" value={`${regime.oiZ >= 0 ? '+' : ''}${regime.oiZ.toFixed(2)}`} />
-                  <StatChip label="Slope_Z" value={`${regime.slopeZ >= 0 ? '+' : ''}${regime.slopeZ.toFixed(2)}`} />
+                  <StatChip label={`${zoneDot(regime.oiZone)} OI_Z`} value={`${regime.oiZ >= 0 ? '+' : ''}${regime.oiZ.toFixed(2)}`} sub={regime.oiZone} />
+                  <StatChip label={`${zoneDot(regime.slopeZone)} Slope_Z`} value={`${regime.slopeZ >= 0 ? '+' : ''}${regime.slopeZ.toFixed(2)}`} sub={regime.slopeZone} />
                   <StatChip label="Accel_Z" value={`${regime.accelZ >= 0 ? '+' : ''}${regime.accelZ.toFixed(2)}`} />
-                  <StatChip label="WPI_Z" value={`${regime.wpiZ >= 0 ? '+' : ''}${regime.wpiZ.toFixed(2)}`} />
-                  <StatChip label="PriceTrend_Z" value={`${regime.priceTrendZ >= 0 ? '+' : ''}${regime.priceTrendZ.toFixed(2)}`} />
+                  <StatChip label={`${zoneDot(regime.wpiZone)} WPI_Z`} value={`${regime.wpiZ >= 0 ? '+' : ''}${regime.wpiZ.toFixed(2)}`} sub={regime.wpiZone} />
+                  <StatChip label={`${zoneDot(regime.priceTrendZone)} PriceTrend_Z`} value={`${regime.priceTrendZ >= 0 ? '+' : ''}${regime.priceTrendZ.toFixed(2)}`} sub={regime.priceTrendZone} />
+                </div>
+
+                {/* Trade Confirmation — deliberately separate from the bias above:
+                    "I think the market is bullish" vs "I have enough evidence to sell a bullish structure." */}
+                <div className="flex items-center gap-5 flex-wrap border-t border-zinc-800 pt-3">
+                  <StatChip label="Confidence" value={regime.confidenceLabel} sub={regime.confidence.toFixed(2)} />
+                  <StatChip label="Confirmation" value={regime.confirmationState} color={confirmationColor(regime.confirmationState)} />
+                  <div className="flex-1 min-w-[220px]">
+                    <span className="text-[10px] font-bold text-zinc-300 uppercase tracking-widest">Reason</span>
+                    <p className="text-xs text-zinc-300 mt-0.5">{regime.reason}</p>
+                  </div>
                 </div>
 
                 <div className="flex items-center justify-between flex-wrap gap-2">
                   <p className="text-xs text-zinc-300">
-                    {regime.confirmed ? 'Suggested' : 'Not confirmed — OI/Slope/WPI/PriceTrend disagree'} (informational):{' '}
-                    <span className="font-semibold text-zinc-100">{regime.strategy}</span>
+                    Strategy (informational): <span className="font-semibold text-zinc-100">{regime.strategy}</span>
                   </p>
                   <p className="text-[10px] text-zinc-500">Informational only — not a trade signal</p>
                 </div>
