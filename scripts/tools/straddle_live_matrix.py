@@ -154,6 +154,7 @@ def _fetch_intraday_paged(
 def _compute_from_sqlite(
     target_date: str,
     interval_minutes: int = 30,
+    expiry_input: str | None = None,
 ) -> dict | None:
     """Fast simulation directly from SQLite nifty_options.db if available for target_date."""
     if not os.path.exists(DB_PATH):
@@ -173,7 +174,18 @@ def _compute_from_sqlite(
 
         # Expiry & DTE
         expiries = sorted([str(e) for e in df["expiry"].dropna().unique()])
-        expiry_val = expiries[0] if expiries else target_date
+        if not expiries:
+            return None
+        expiry_val = expiry_input if expiry_input and expiry_input in expiries else expiries[0]
+
+        # A single day's rows can span multiple expiries (e.g. weekly + monthly)
+        # sharing the same strikes — restrict to the chosen expiry before building
+        # candle series, otherwise rows from a different expiry silently clobber
+        # entries at the same (strike, option_type, minute) key.
+        df = df[df["expiry"].astype(str) == expiry_val].copy()
+        if df.empty:
+            return None
+
         try:
             exp_date = datetime.strptime(expiry_val, "%Y-%m-%d").date()
             t_date = datetime.strptime(target_date, "%Y-%m-%d").date()
@@ -423,7 +435,7 @@ def _compute_straddle_matrix(
 ) -> dict:
     # 0. If target date is in SQLite nifty_options.db, use fast SQLite simulation
     if target_date_input and underlying.upper() == "NIFTY":
-        sqlite_res = _compute_from_sqlite(target_date_input, interval_minutes)
+        sqlite_res = _compute_from_sqlite(target_date_input, interval_minutes, expiry_input)
         if sqlite_res is not None:
             return sqlite_res
 
@@ -485,8 +497,21 @@ def _compute_straddle_matrix(
         try:
             target_d = datetime.strptime(target_date_input, "%Y-%m-%d").date()
         except Exception:
-            target_d = all_dates[-1]
+            return {"error": f"Invalid date format: {target_date_input!r}, expected YYYY-MM-DD"}
         if target_d not in all_dates:
+            if underlying.upper() == "NIFTY":
+                # This path only runs for NIFTY when the date isn't in nifty_options.db.
+                # The broker API window above only reaches back a few days from now, so
+                # silently substituting the newest fetched date here would mislabel
+                # today's (or yesterday's) live data as the requested historical date.
+                return {
+                    "error": (
+                        f"No intraday data available for NIFTY on {target_date_input}. "
+                        f"The live broker API only covers {all_dates[0].isoformat()} to "
+                        f"{all_dates[-1].isoformat()}, and this date isn't in "
+                        "Options Data/nifty_options.db either."
+                    )
+                }
             target_d = all_dates[-1]
     else:
         target_d = all_dates[-1]

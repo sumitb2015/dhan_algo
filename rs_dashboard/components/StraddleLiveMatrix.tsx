@@ -48,7 +48,7 @@ function CellDetailModal({ cell, colData, lotSize, unit, onClose }: CellDetailMo
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm animate-in fade-in duration-150">
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-oncolor-dark/70 backdrop-blur-sm animate-in fade-in duration-150">
       <div className="relative w-full max-w-lg bg-zinc-900 border border-zinc-700/80 rounded-2xl shadow-2xl overflow-hidden">
         {/* Header */}
         <div className="flex items-center justify-between px-5 py-4 border-b border-zinc-800 bg-zinc-950/60">
@@ -232,8 +232,13 @@ export default function StraddleLiveMatrix() {
     colData: ColumnData;
   } | null>(null);
 
+  // Monotonic sequence guard so a slow, abandoned fetch (e.g. from a fast
+  // underlying/date switch) can't overwrite a response for a newer selection.
+  const requestSeq = React.useRef(0);
+
   const fetchData = useCallback(async (isManual = false) => {
     if (isManual) setRefreshing(true);
+    const seq = ++requestSeq.current;
     try {
       const params = new URLSearchParams({
         underlying,
@@ -247,6 +252,8 @@ export default function StraddleLiveMatrix() {
       const res = await fetch(`/api/straddle-matrix?${params.toString()}`);
       const json = await res.json();
 
+      if (seq !== requestSeq.current) return;
+
       if (!res.ok || !json.success) {
         throw new Error(json.error || 'Failed to fetch straddle matrix data');
       }
@@ -258,11 +265,14 @@ export default function StraddleLiveMatrix() {
       setError(null);
       setLastUpdated(new Date().toLocaleTimeString('en-IN', { hour12: false }));
     } catch (err: unknown) {
+      if (seq !== requestSeq.current) return;
       const msg = err instanceof Error ? err.message : String(err);
       setError(msg);
     } finally {
-      setLoading(false);
-      if (isManual) setRefreshing(false);
+      if (seq === requestSeq.current) {
+        setLoading(false);
+        if (isManual) setRefreshing(false);
+      }
     }
   }, [underlying, expiry, interval, mode, selectedDate]);
 
@@ -302,11 +312,11 @@ export default function StraddleLiveMatrix() {
       case 'intact-':
         return 'bg-red-950/40 text-red-300 border-red-700/40 hover:bg-red-900/60';
       case 'ce_out':
-        return 'bg-[#b45309]/85 text-amber-100 border-amber-500/50 hover:bg-[#b45309]';
+        return 'bg-amber-700/85 text-amber-100 border-amber-500/50 hover:bg-amber-700';
       case 'pe_out':
-        return 'bg-[#7e22ce]/85 text-purple-100 border-purple-500/50 hover:bg-[#7e22ce]';
+        return 'bg-purple-700/85 text-purple-100 border-purple-500/50 hover:bg-purple-700';
       case 'both_out':
-        return 'bg-[#be185d]/85 text-pink-100 border-pink-500/50 hover:bg-[#be185d]';
+        return 'bg-pink-700/85 text-pink-100 border-pink-500/50 hover:bg-pink-700';
       default:
         return 'bg-zinc-850 text-zinc-300 border-zinc-700 hover:bg-zinc-800';
     }
@@ -325,10 +335,23 @@ export default function StraddleLiveMatrix() {
   return (
     <div className="w-full space-y-4 pb-12">
       {/* Sticky Header Control Bar */}
-      <div className="sticky top-0 z-30 bg-zinc-950/90 backdrop-blur-md border border-zinc-800 p-3 rounded-2xl shadow-xl space-y-3">
+      <div className="sticky top-0 z-30 bg-zinc-900/95 backdrop-blur-md border border-zinc-800 p-3 rounded-2xl shadow-xl space-y-3">
         <div className="flex flex-wrap items-center justify-between gap-3">
           {/* Left Title & Mode Switcher */}
           <div className="flex items-center flex-wrap gap-2.5">
+            {/* Identity */}
+            <div className="flex items-center gap-2 pr-2.5 mr-0.5 border-r border-zinc-800">
+              <div className="flex items-center justify-center w-7 h-7 rounded-lg bg-sky-500/10 border border-sky-500/25 shrink-0">
+                <Layers className="h-3.5 w-3.5 text-sky-400" />
+              </div>
+              <div className="leading-tight">
+                <p className="text-[9px] font-bold text-sky-500 uppercase tracking-[0.18em]">
+                  Options · Straddle
+                </p>
+                <h1 className="text-xs font-bold text-white tracking-tight">SL Matrix</h1>
+              </div>
+            </div>
+
             {/* Mode Toggle (Live vs Past Days) */}
             <div className="flex items-center rounded-xl bg-zinc-900 border border-zinc-800 p-0.5 shadow-inner">
               <button
@@ -406,7 +429,10 @@ export default function StraddleLiveMatrix() {
                 <input
                   type="date"
                   value={selectedDate}
-                  onChange={(e) => setSelectedDate(e.target.value)}
+                  onChange={(e) => {
+                    setSelectedDate(e.target.value);
+                    setExpiry('');
+                  }}
                   className="bg-transparent text-xs font-bold text-zinc-100 outline-none cursor-pointer"
                 />
               </div>
@@ -422,7 +448,10 @@ export default function StraddleLiveMatrix() {
                 ].map((s) => (
                   <button
                     key={s.d}
-                    onClick={() => setSelectedDate(s.d)}
+                    onClick={() => {
+                      setSelectedDate(s.d);
+                      setExpiry('');
+                    }}
                     className={cn(
                       "px-2 py-0.8 text-[10px] font-mono font-semibold rounded-lg transition-all cursor-pointer",
                       selectedDate === s.d
@@ -606,7 +635,7 @@ export default function StraddleLiveMatrix() {
       {data?.summary && (
         <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3">
           {/* Best Strategy PnL */}
-          <div className="p-3.5 rounded-2xl bg-zinc-950/60 border border-zinc-800 shadow-md">
+          <div className="p-3.5 rounded-2xl bg-zinc-900 border border-zinc-800 shadow-md">
             <span className="text-[11px] font-bold text-zinc-400 uppercase tracking-wider block">
               Combined Best SL P&L
             </span>
@@ -624,7 +653,7 @@ export default function StraddleLiveMatrix() {
           </div>
 
           {/* Win Rate */}
-          <div className="p-3.5 rounded-2xl bg-zinc-950/60 border border-zinc-800 shadow-md">
+          <div className="p-3.5 rounded-2xl bg-zinc-900 border border-zinc-800 shadow-md">
             <span className="text-[11px] font-bold text-zinc-400 uppercase tracking-wider block">
               Win Rate (Best SL)
             </span>
@@ -642,7 +671,7 @@ export default function StraddleLiveMatrix() {
           </div>
 
           {/* Best Fixed SL */}
-          <div className="p-3.5 rounded-2xl bg-zinc-950/60 border border-zinc-800 shadow-md">
+          <div className="p-3.5 rounded-2xl bg-zinc-900 border border-zinc-800 shadow-md">
             <span className="text-[11px] font-bold text-zinc-400 uppercase tracking-wider block">
               Best Fixed SL Overall
             </span>
@@ -663,7 +692,7 @@ export default function StraddleLiveMatrix() {
           </div>
 
           {/* Total VaR / Drawdown */}
-          <div className="p-3.5 rounded-2xl bg-zinc-950/60 border border-zinc-800 shadow-md">
+          <div className="p-3.5 rounded-2xl bg-zinc-900 border border-zinc-800 shadow-md">
             <span className="text-[11px] font-bold text-zinc-400 uppercase tracking-wider block">
               Total VaR / Max DD
             </span>
@@ -678,7 +707,7 @@ export default function StraddleLiveMatrix() {
           </div>
 
           {/* Grand Row Total */}
-          <div className="p-3.5 rounded-2xl bg-zinc-950/60 border border-zinc-800 shadow-md col-span-2 sm:col-span-1">
+          <div className="p-3.5 rounded-2xl bg-zinc-900 border border-zinc-800 shadow-md col-span-2 sm:col-span-1">
             <span className="text-[11px] font-bold text-zinc-400 uppercase tracking-wider block">
               SL Matrix Grand Sum
             </span>
@@ -698,7 +727,7 @@ export default function StraddleLiveMatrix() {
       )}
 
       {/* Main Straddle Matrix Table */}
-      <div className="rounded-2xl border border-zinc-800 bg-zinc-950/70 shadow-2xl overflow-hidden">
+      <div className="rounded-2xl border border-zinc-800 bg-zinc-900 shadow-2xl overflow-hidden">
         {loading && !data ? (
           <div className="p-16 flex flex-col items-center justify-center gap-3 text-zinc-400">
             <RefreshCw className="h-7 w-7 animate-spin text-emerald-400" />
