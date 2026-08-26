@@ -1,7 +1,11 @@
 // Places a brand-new MARKET option order (as opposed to lib/legClose.ts, which
-// reduces an existing one). No productType is sent — the Dhan fast-order route
-// and the non-Dhan order routes both default a missing product to INTRADAY,
-// same as components/Scalper.tsx's placeOrder(), which this mirrors.
+// reduces an existing one). Unlike Scalper's placeOrder() (which leaves
+// productType unset and lets the order routes default to intraday), every
+// order from this page is explicitly booked as a positional product —
+// this page analyses a standing book, not an intraday scalp, so opening a
+// fresh leg here as MIS/INTRADAY would (a) get force-squared-off same day
+// and (b) get rejected outright by broker RMS after ~3:20pm, which is
+// exactly the bug this fixes.
 
 import { scalperRoute, type Broker } from '@/hooks/useBrokerSelector';
 
@@ -37,6 +41,7 @@ export async function placeOptionOrder(params: PlaceOptionOrderParams): Promise<
           side,
           orderType: 'MARKET',
           exchangeSegment: underlying === 'SENSEX' ? 'BSE_FNO' : 'NSE_FNO',
+          productType: 'MARGIN',
         }),
       });
     } else {
@@ -52,6 +57,7 @@ export async function placeOptionOrder(params: PlaceOptionOrderParams): Promise<
           exchange: broker === 'kotak'
             ? (underlying === 'SENSEX' ? 'bse_fo' : 'nse_fo')
             : (underlying === 'SENSEX' ? 'BFO' : 'NFO'),
+          product: 'NRML',
         }),
       });
     }

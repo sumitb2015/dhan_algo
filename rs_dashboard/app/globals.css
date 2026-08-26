@@ -600,4 +600,19 @@ body {
   [class*="bg-violet-900"] * {
     color: #5b21b6 !important;
   }
+
+  [class*="bg-sky-950"],
+  [class*="bg-sky-900"],
+  [class*="bg-blue-950"],
+  [class*="bg-blue-900"] {
+    background-color: #e0f2fe !important;
+    border-color: #bae6fd !important;
+    color: #075985 !important;
+  }
+  [class*="bg-sky-950"] *,
+  [class*="bg-sky-900"] *,
+  [class*="bg-blue-950"] *,
+  [class*="bg-blue-900"] * {
+    color: #075985 !important;
+  }
 }
