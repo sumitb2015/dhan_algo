@@ -60,6 +60,10 @@ interface Props {
   onClose?: (leg: PositionLeg, pct: ClosePct) => void;
   /** Keys (legKey(leg)) currently mid-close, so the row can show a spinner and block re-clicks. */
   closingKeys?: Set<string>;
+  /** Omitted -> no per-row Buy/Sell add control is rendered. */
+  onAdd?: (leg: PositionLeg, side: 'BUY' | 'SELL', lots: number) => void;
+  /** Keys (legKey(leg)) currently mid-add, so the row can show a spinner and block re-clicks. */
+  addingKeys?: Set<string>;
 }
 
 // Unique per row: tradingSymbol alone collides when the same contract is held
@@ -122,7 +126,58 @@ function ExitChips({
   );
 }
 
-export default function PositionsLegTable({ legs, unparseable, lotSize, onClose, closingKeys }: Props) {
+/**
+ * One row's quick-add lots stepper + Buy/Sell, same click-to-arm /
+ * click-to-confirm interaction as ExitChips — this places a real order too.
+ */
+function AddChips({
+  adding, onAdd,
+}: {
+  adding: boolean; onAdd: (side: 'BUY' | 'SELL', lots: number) => void;
+}) {
+  const [lots, setLots] = useState(1);
+  const [armed, setArmed] = useState<'BUY' | 'SELL' | null>(null);
+
+  if (adding) {
+    return (
+      <span className="inline-flex items-center gap-1 text-[10px] text-zinc-400">
+        <Loader2 className="h-3 w-3 animate-spin" /> Adding…
+      </span>
+    );
+  }
+
+  const fire = (side: 'BUY' | 'SELL') => {
+    if (armed !== side) {
+      setArmed(side);
+      setTimeout(() => setArmed((a) => (a === side ? null : a)), 3000);
+      return;
+    }
+    setArmed(null);
+    onAdd(side, lots);
+  };
+
+  return (
+    <div className="flex items-center gap-1">
+      <button type="button" onClick={() => setLots((l) => Math.max(1, l - 1))}
+        className="h-5 w-5 rounded border border-zinc-700 bg-zinc-900 text-[10px] text-zinc-400 hover:text-zinc-200">−</button>
+      <span className="w-4 text-center font-mono text-[10px] text-zinc-300">{lots}</span>
+      <button type="button" onClick={() => setLots((l) => l + 1)}
+        className="h-5 w-5 rounded border border-zinc-700 bg-zinc-900 text-[10px] text-zinc-400 hover:text-zinc-200">+</button>
+      <button type="button" onClick={() => fire('BUY')}
+        className={cn('rounded border px-1.5 py-0.5 font-mono text-[10px] font-bold transition-colors',
+          armed === 'BUY' ? 'border-sky-400 bg-sky-500/25 text-sky-100' : 'border-sky-800 bg-sky-950 text-sky-300 hover:bg-sky-900')}>
+        {armed === 'BUY' ? 'Confirm?' : 'B'}
+      </button>
+      <button type="button" onClick={() => fire('SELL')}
+        className={cn('rounded border px-1.5 py-0.5 font-mono text-[10px] font-bold transition-colors',
+          armed === 'SELL' ? 'border-rose-500 bg-rose-500/20 text-rose-200' : 'border-rose-800 bg-rose-950 text-rose-300 hover:bg-rose-900')}>
+        {armed === 'SELL' ? 'Confirm?' : 'S'}
+      </button>
+    </div>
+  );
+}
+
+export default function PositionsLegTable({ legs, unparseable, lotSize, onClose, closingKeys, onAdd, addingKeys }: Props) {
   if (!legs.length && !unparseable.length) {
     return <p className="px-3 py-6 text-center text-xs text-zinc-500">No open option positions.</p>;
   }
@@ -199,11 +254,19 @@ export default function PositionsLegTable({ legs, unparseable, lotSize, onClose,
                   </td>
                   {onClose && (
                     <td className={cn(TD, 'text-right')}>
-                      <ExitChips
-                        leg={l} lotSize={lotSize}
-                        closing={closingKeys?.has(key) ?? false}
-                        onClose={(pct) => onClose(l, pct)}
-                      />
+                      <div className="flex items-center justify-end gap-2">
+                        {onAdd && (
+                          <AddChips
+                            adding={addingKeys?.has(key) ?? false}
+                            onAdd={(side, lots) => onAdd(l, side, lots)}
+                          />
+                        )}
+                        <ExitChips
+                          leg={l} lotSize={lotSize}
+                          closing={closingKeys?.has(key) ?? false}
+                          onClose={(pct) => onClose(l, pct)}
+                        />
+                      </div>
                     </td>
                   )}
                 </tr>

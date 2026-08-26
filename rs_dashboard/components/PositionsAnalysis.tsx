@@ -29,6 +29,8 @@ import { STRIKE_STEP, lotSizeOverride, type AnalyticsUnderlying } from '@/lib/an
 import { todayIso, fmtExpiryShort } from '@/components/crudeoil/format';
 import type { ScalperPosition } from '@/lib/zerodhaShape';
 import { closeLeg } from '@/lib/legClose';
+import { placeOptionOrder } from '@/lib/optionOrder';
+import { fetchStrikeMap } from '@/lib/strikeLookup';
 import { legKey } from '@/components/analytics/PositionsLegTable';
 import type { ClosePct } from '@/lib/partialQty';
 import { isIntradayProduct } from '@/lib/positionProduct';
@@ -40,6 +42,7 @@ import BookRiskCard from '@/components/analytics/BookRiskCard';
 import SuggestedActionsCard from '@/components/analytics/SuggestedActionsCard';
 import AnalyzeModal from '@/components/analytics/AnalyzeModal';
 import PositionsLegTable, { legPnl } from '@/components/analytics/PositionsLegTable';
+import AddStrikePicker from '@/components/analytics/AddStrikePicker';
 import GreeksTab from '@/components/analytics/GreeksTab';
 import PnlTableTab from '@/components/analytics/PnlTableTab';
 
@@ -115,6 +118,7 @@ export default function PositionsAnalysis({ underlying }: { underlying: Analytic
   const [expiryFilter, setExpiryFilter] = useState<string>('ALL');
   const [toasts, setToasts] = useState<Toast[]>([]);
   const [closingKeys, setClosingKeys] = useState<Set<string>>(new Set());
+  const [addingKeys, setAddingKeys] = useState<Set<string>>(new Set());
   const [confirmExitExpiry, setConfirmExitExpiry] = useState<string | null>(null);
   const [spanIndex, setSpanIndex] = useState<number>(DEFAULT_SPAN_INDEX);
   const [showOi, setShowOi] = useState(true);
@@ -240,6 +244,40 @@ export default function PositionsAnalysis({ underlying }: { underlying: Analytic
       setClosingKeys((prev) => { const next = new Set(prev); next.delete(key); return next; });
     }
   }, [broker, lotSize, underlying, closingKeys, addToast, loadPositions]);
+
+  /**
+   * Scale into an EXISTING leg's strike — a fresh order on the same
+   * (expiry, strike, type), not a close. Looks up this leg's own expiry's
+   * strike map (cached by lib/strikeLookup.ts) rather than trusting the
+   * leg's chain-derived securityId, which is Dhan-only and useless for a
+   * Kotak order.
+   */
+  const handleAddToLeg = useCallback(async (leg: PositionLeg, side: 'BUY' | 'SELL', lots: number) => {
+    if (!lotSize) { addToast('error', 'Lot size unresolved', `Cannot size an add order for ${underlying}`); return; }
+    if (!leg.expiry) { addToast('error', 'Cannot add', 'This leg has no resolved expiry'); return; }
+    const key = legKey(leg);
+    if (addingKeys.has(key)) return;
+    setAddingKeys((prev) => new Set(prev).add(key));
+    const label = `${side === 'BUY' ? 'B' : 'S'} ${leg.strike} ${leg.type} × ${lots}L`;
+    try {
+      const map = await fetchStrikeMap(broker, underlying, leg.expiry);
+      const entry = map?.strikes?.[String(leg.strike)];
+      if (!entry) { addToast('error', `${label} failed`, 'Strike data unavailable for this expiry'); return; }
+      const res = await placeOptionOrder({
+        broker, underlying, side, quantity: lots * lotSize,
+        dhanSecurityId: leg.type === 'CE' ? entry.ceId : entry.peId,
+        tradingSymbol: leg.type === 'CE' ? entry.ceSymbol : entry.peSymbol,
+      });
+      if (res.ok) {
+        addToast('success', `${label} placed`, res.orderId ? `ID: ${res.orderId}` : undefined);
+        setTimeout(loadPositions, 1000);
+      } else {
+        addToast('error', `${label} failed`, res.error);
+      }
+    } finally {
+      setAddingKeys((prev) => { const next = new Set(prev); next.delete(key); return next; });
+    }
+  }, [broker, lotSize, underlying, addingKeys, addToast, loadPositions]);
 
   /** `scopeKey` arms independently per button (e.g. 'ALL' vs one expiry's date), so confirming one never fires another. */
   const handleExitScope = useCallback(async (scopeKey: string, targets: PositionLeg[]) => {
@@ -813,11 +851,21 @@ export default function PositionsAnalysis({ underlying }: { underlying: Analytic
               )}
             </div>
 
+            <AddStrikePicker
+              broker={broker} underlying={underlying} strikeStep={strikeStep} spot={spot} lotSize={lotSize}
+              onPlaced={(label, orderId) => {
+                addToast('success', `${label} placed`, orderId ? `ID: ${orderId}` : undefined);
+                setTimeout(loadPositions, 1000);
+              }}
+              onError={(label, error) => addToast('error', `${label} failed`, error)}
+            />
+
             {!loadedOnce
               ? <p className="px-3 py-6 text-center text-xs text-zinc-500">Loading positions…</p>
               : <PositionsLegTable
                   legs={visibleLegs} unparseable={unparseable} lotSize={lotSize ?? 0}
                   onClose={handleCloseLeg} closingKeys={closingKeys}
+                  onAdd={handleAddToLeg} addingKeys={addingKeys}
                 />}
           </section>
 
@@ -941,10 +989,19 @@ export default function PositionsAnalysis({ underlying }: { underlying: Analytic
 
             {tab === 'intraday' && (
               <div className="space-y-4">
-                <div className="rounded-xl border border-zinc-800 bg-zinc-950 p-3">
+                <div className="space-y-3 rounded-xl border border-zinc-800 bg-zinc-950 p-3">
+                  <AddStrikePicker
+                    broker={broker} underlying={underlying} strikeStep={strikeStep} spot={spot} lotSize={lotSize}
+                    onPlaced={(label, orderId) => {
+                      addToast('success', `${label} placed`, orderId ? `ID: ${orderId}` : undefined);
+                      setTimeout(loadPositions, 1000);
+                    }}
+                    onError={(label, error) => addToast('error', `${label} failed`, error)}
+                  />
                   <PositionsLegTable
                     legs={intradayLegs} unparseable={[]} lotSize={lotSize ?? 0}
                     onClose={handleCloseLeg} closingKeys={closingKeys}
+                    onAdd={handleAddToLeg} addingKeys={addingKeys}
                   />
                 </div>
 
