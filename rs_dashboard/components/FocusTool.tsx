@@ -451,6 +451,13 @@ interface WorkerStatusRow {
   /** Absolute units the worker still holds on each leg. */
   ceQty?: number;
   peQty?: number;
+  /** Unix seconds each leg was opened, or null/undefined if not held. Used to
+   *  refuse a ghost-drop request (see the Exit path's `netQty === 0` branch)
+   *  while the leg is still within the broker's own fill-settling window —
+   *  a single stale position poll right after a real fill has, for real,
+   *  made this page tell the worker to drop a live short as a "ghost". */
+  ceOpenedTs?: number | null;
+  peOpenedTs?: number | null;
   /** Realised from legs this worker already closed/rolled on this row. */
   bookedPnl?: number;
   pnl?: number;
@@ -3807,6 +3814,20 @@ export default function FocusTool() {
         // a dead end and Arm is blocked forever.
         const workerHold = (workerStatus.rows ?? []).find(r => r.id === row.id);
         const heldStrike = leg === 'CE' ? workerHold?.ceStrike : workerHold?.peStrike;
+        const heldOpenedTs = leg === 'CE' ? workerHold?.ceOpenedTs : workerHold?.peOpenedTs;
+        // Refuse to ghost-drop a leg the worker only just opened. This poll's
+        // netQty === 0 can be the broker's own book lagging a real fill —
+        // Kotak/Zerodha have no fill-confirmation socket the way Dhan does —
+        // and trusting it here has, for real, dropped a live short as a
+        // "ghost" and let a second entry double the position on top of it.
+        // Mirrors the worker's own RECONCILE_GRACE_SECONDS (focus_tool_rows_
+        // worker.py) — keep the two in sync.
+        const GHOST_DROP_GRACE_MS = 20_000;
+        if (heldOpenedTs != null && Date.now() - heldOpenedTs * 1000 < GHOST_DROP_GRACE_MS) {
+          addToast('error', `${what} not sent`,
+            'Position just opened — broker book may still be catching up. Wait a few seconds and retry.');
+          return false;
+        }
         if (workerHold?.open && heldStrike != null && rowOwnsLeg(row, leg, workerHold)) {
           try {
             const dropRes = await fetch('/api/focus-tool/worker', {

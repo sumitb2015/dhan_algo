@@ -1346,6 +1346,16 @@ class FocusRowsWorker:
         Accepts the legacy single-queue file and the per-request
         `focus_tool_drop_*.json` files the page writes so Exit All's parallel
         CE+PE clears cannot overwrite each other.
+
+        A request this fresh is refused rather than honoured: it is built off
+        the PAGE's own position poll, which — unlike this worker's own
+        reconcile() — has no fill-confirmation socket to wait on for a child
+        broker (Kotak/Zerodha), so a poll taken moments after a real fill can
+        still read the pre-fill (flat) book. Trusting that single stale read
+        here has, for real, dropped a live short as a "ghost" and let a
+        second entry double the position on top of it. reconcile() already
+        protects itself with RECONCILE_GRACE_SECONDS off `openedTs` — this
+        path bypassed that guard entirely until now.
         """
         import glob
         reqs = []
@@ -1371,6 +1381,7 @@ class FocusRowsWorker:
         if not reqs:
             return
         changed = False
+        now = time.time()
         with self._fills_lock:
             for req in reqs:
                 if not isinstance(req, dict):
@@ -1378,6 +1389,14 @@ class FocusRowsWorker:
                 rid = req.get('rowId')
                 leg = req.get('leg')
                 if not rid or leg not in ('CE', 'PE'):
+                    continue
+                held = (self.fills.get(rid) or {}).get(leg)
+                if held and now - float(held.get('openedTs') or 0) < RECONCILE_GRACE_SECONDS:
+                    self.log('warning',
+                             f"{rid[-4:]}: refused ghost-drop of {leg} — opened "
+                             f"{now - float(held.get('openedTs') or 0):.0f}s ago, "
+                             f"within the {RECONCILE_GRACE_SECONDS:.0f}s settle grace. "
+                             f"The broker book may just be lagging the fill.")
                     continue
                 dropped, booked_out = apply_leg_drop(self.fills, rid, leg)
                 if not dropped:
@@ -1620,6 +1639,11 @@ class FocusRowsWorker:
                 'peStrike': (fill.get('PE') or {}).get('strike') if fill else pe_strike,
                 'ceQty': int((fill.get('CE') or {}).get('qty') or 0) if fill else 0,
                 'peQty': int((fill.get('PE') or {}).get('qty') or 0) if fill else 0,
+                # When each leg was actually opened — the page uses this to refuse
+                # a ghost-drop request while the leg is still within the broker's
+                # own fill-settling window (see apply_drop_requests).
+                'ceOpenedTs': (fill.get('CE') or {}).get('openedTs') if fill else None,
+                'peOpenedTs': (fill.get('PE') or {}).get('openedTs') if fill else None,
                 'bookedPnl': round(float((fill or {}).get('bookedPnl') or 0.0), 2),
                 'expiry': expiry,
                 'orphan': bool(row.get('orphan')),
