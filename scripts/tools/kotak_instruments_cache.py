@@ -42,8 +42,12 @@ UNDERLYING_SEGMENT = {
 
 # Option instrument types worth caching, per segment. MCX lists options ON THE
 # FUTURE (OPTFUT), so the equity-derivative filter drops every crude contract.
+# BSE (bse_fo, i.e. SENSEX) tags its index options 'IO' rather than NSE's
+# 'OPTIDX' — the default filter silently dropped every SENSEX row, caching an
+# empty instrument list and leaving Kotak+SENSEX unable to resolve a strike.
 SEGMENT_OPTION_TYPES = {
     'mcx_fo': ('OPTFUT', 'OPTCOM'),
+    'bse_fo': ('IO',),
 }
 DEFAULT_OPTION_TYPES = ('OPTIDX', 'OPTSTK')
 
@@ -59,11 +63,13 @@ def master_file(segment: str) -> str:
 
 
 def map_mcx_expiry_date(raw) -> str:
-    """Expiry date for an mcx_fo contract: the UTC date of a genuine epoch.
+    """Expiry date for an mcx_fo or bse_fo contract: the UTC date of a genuine epoch.
 
-    The mcx_fo master does NOT share nse_fo's decade shift — verified against the
-    live master, where raw 1787011199 belongs to symbols tagged `17AUG26`.
-    Applying map_expiry_date()'s +10 years here would return 2036.
+    Neither segment shares nse_fo's decade shift — verified against the live
+    master for mcx_fo (raw 1787011199 belongs to symbols tagged `17AUG26`) and
+    for bse_fo (raw 1787855399 belongs to SENSEX26AUG85000CE, i.e. 2026-08-27).
+    Applying map_expiry_date()'s +10 years to either would return a decade
+    late (2036 for the SENSEX example above).
 
     It must be read in UTC, not local time. Kotak stamps 23:59:59 UTC, so
     parsing in IST rolls every expiry forward one day (2026-08-17 -> 2026-08-18)
@@ -81,8 +87,8 @@ def map_mcx_expiry_date(raw) -> str:
 def map_expiry_date(raw) -> str:
     """Correct Kotak's 1980-based expiry epoch by adding 10 calendar years.
 
-    NSE/BSE segments only — see map_mcx_expiry_date() for mcx_fo, which uses a
-    real epoch and must not be shifted.
+    NSE segments only — see map_mcx_expiry_date() for mcx_fo AND bse_fo, both
+    of which use a real epoch and must not be shifted.
 
     Parsing their timestamp with a 1970 epoch lands exactly a decade early
     (2016 -> actually 2026).
@@ -185,9 +191,10 @@ def _num(value, default=0.0) -> float:
 
 
 def build_rows(master_rows, underlying: str, segment: str = 'nse_fo'):
-    is_mcx = segment == 'mcx_fo'
     option_types = SEGMENT_OPTION_TYPES.get(segment, DEFAULT_OPTION_TYPES)
-    expiry_mapper = map_mcx_expiry_date if is_mcx else map_expiry_date
+    # bse_fo (SENSEX) shares mcx_fo's real, unshifted epoch — see
+    # map_mcx_expiry_date's docstring.
+    expiry_mapper = map_mcx_expiry_date if segment in ('mcx_fo', 'bse_fo') else map_expiry_date
 
     rows = []
     for row in master_rows:
