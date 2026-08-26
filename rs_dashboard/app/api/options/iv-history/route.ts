@@ -217,6 +217,8 @@ export async function GET(request: NextRequest) {
       oiZ: regimePoints[i].oiZ,
       slopeZ: regimePoints[i].slopeZ,
       wpiZ: regimePoints[i].wpiZ,
+      regimeLabel: regimePoints[i].label,
+      regimeConfirmed: regimePoints[i].confirmed,
     }));
 
     const response = NextResponse.json({

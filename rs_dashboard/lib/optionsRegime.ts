@@ -75,6 +75,8 @@ export interface RegimePoint {
   accelZ: number;
   wpiZ: number;
   priceTrendZ: number;
+  label: RegimeLabel;
+  confirmed: boolean;
 }
 
 export interface RegimeSnapshot {
@@ -306,8 +308,6 @@ export function computeRegimeSeries(input: RegimeInputPoint[]): RegimeSeriesResu
     const wpiZ = zscore(wpiSeries, i);
     const priceTrendZ = (zscore(spotDeviationSeries, i) + zscore(niftyReturnSeries, i)) / 2;
 
-    points[i] = { oiZ, slopeZ, accelZ, wpiZ, priceTrendZ };
-
     // Capped before combining so one extreme reading can't dominate the score
     const oiZ_ = clip(oiZ), slopeZ_ = clip(slopeZ), accelZ_ = clip(accelZ), wpiZ_ = clip(wpiZ), priceTrendZ_ = clip(priceTrendZ);
     signalSeries[i] =
@@ -316,6 +316,16 @@ export function computeRegimeSeries(input: RegimeInputPoint[]): RegimeSeriesResu
     confidenceSeries[i] =
       CONFIDENCE_WEIGHTS.oi * Math.abs(oiZ_) + CONFIDENCE_WEIGHTS.slope * Math.abs(slopeZ_) +
       CONFIDENCE_WEIGHTS.wpi * Math.abs(wpiZ_) + CONFIDENCE_WEIGHTS.priceTrend * Math.abs(priceTrendZ_);
+
+    // Per-point label/confirmed — same gating as the "latest" snapshot, so the
+    // regime timeline reflects exactly what would have been shown at that minute.
+    const pointWarmingUp = i < MIN_SAMPLES;
+    const pointLabel = pointWarmingUp ? 'Neutral' : regimeLabelForSignal(signalSeries[i]);
+    const pointConfirmed = pointWarmingUp
+      ? true
+      : isConfirmed(pointLabel, zoneFor(oiZ), zoneFor(wpiZ), zoneFor(priceTrendZ));
+
+    points[i] = { oiZ, slopeZ, accelZ, wpiZ, priceTrendZ, label: pointLabel, confirmed: pointConfirmed };
   }
 
   if (n === 0) {
@@ -335,10 +345,10 @@ export function computeRegimeSeries(input: RegimeInputPoint[]): RegimeSeriesResu
   const last = n - 1;
   const warmingUp = n <= MIN_SAMPLES;
   const p = points[last];
-  const label = warmingUp ? 'Neutral' : regimeLabelForSignal(signalSeries[last]);
+  const label = p.label;
+  const confirmed = p.confirmed;
 
   const oiZone = zoneFor(p.oiZ), slopeZone = zoneFor(p.slopeZ), wpiZone = zoneFor(p.wpiZ), priceTrendZone = zoneFor(p.priceTrendZ);
-  const confirmed = warmingUp ? true : isConfirmed(label, oiZone, wpiZone, priceTrendZone);
   const confirmationState: ConfirmationState = label === 'Neutral' ? 'N/A' : confirmed ? 'Confirmed' : 'Pending';
   const reason = warmingUp ? 'Warming up.' : buildReason(label, oiZone, slopeZone, wpiZone, priceTrendZone);
 

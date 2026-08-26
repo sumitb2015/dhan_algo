@@ -18,6 +18,8 @@ interface TimePoint {
   oiZ: number;
   slopeZ: number;
   wpiZ: number;
+  regimeLabel: RegimeLabel;
+  regimeConfirmed: boolean;
 }
 
 type RegimeLabel = 'Strong Bullish' | 'Bullish' | 'Neutral' | 'Bearish' | 'Strong Bearish';
@@ -434,6 +436,53 @@ export default function OptionsCumulativeOITab({ expiry: _expiry }: { expiry: st
                 </p>
               </div>
             )}
+          </div>
+        )}
+
+        {/* ── Regime Timeline ─────────────────────────────────────────── */}
+        {data.length > 1 && (
+          <div className="bg-zinc-900/60 border border-zinc-800 rounded-2xl p-5">
+            <div className="flex items-center justify-between mb-3">
+              <div>
+                <p className="text-sm font-bold text-white tracking-tight">Regime Timeline</p>
+                <p className="text-[10px] text-zinc-400 mt-0.5">
+                  Bias per minute · ▲ marks a confirmed signal (bias with OI/WPI/PriceTrend all agreeing)
+                </p>
+              </div>
+              <div className="flex items-center gap-3 text-[10px] font-semibold">
+                <span className="flex items-center gap-1.5"><span className="w-2.5 h-2.5 rounded-sm bg-emerald-400" /><span className="text-zinc-300">Bullish</span></span>
+                <span className="flex items-center gap-1.5"><span className="w-2.5 h-2.5 rounded-sm bg-yellow-400" /><span className="text-zinc-300">Neutral</span></span>
+                <span className="flex items-center gap-1.5"><span className="w-2.5 h-2.5 rounded-sm bg-red-400" /><span className="text-zinc-300">Bearish</span></span>
+              </div>
+            </div>
+
+            <div className="relative h-8 bg-zinc-950 rounded-lg overflow-hidden">
+              {data.map((d, i) => {
+                const nextTs = i < data.length - 1 ? data[i + 1].ts : xEnd;
+                const leftPct = ((d.ts - xStart) / (xEnd - xStart)) * 100;
+                const widthPct = ((nextTs - d.ts) / (xEnd - xStart)) * 100;
+                return (
+                  <div
+                    key={d.ts}
+                    title={`${fmtTick(d.ts)} — ${d.regimeLabel}${d.regimeConfirmed && d.regimeLabel !== 'Neutral' ? ' (confirmed)' : ''}`}
+                    className={`absolute top-0 h-full ${regimeBarColor(d.regimeLabel)}`}
+                    style={{ left: `${leftPct}%`, width: `${Math.max(widthPct, 0.15)}%` }}
+                  />
+                );
+              })}
+            </div>
+            <div className="relative h-3 mt-0.5">
+              {data.map(d => (
+                d.regimeConfirmed && d.regimeLabel !== 'Neutral' ? (
+                  <span
+                    key={d.ts}
+                    title={`${fmtTick(d.ts)} — confirmed ${d.regimeLabel}`}
+                    className={`absolute text-[9px] leading-none -translate-x-1/2 ${d.regimeLabel.includes('Bullish') ? 'text-emerald-400' : 'text-red-400'}`}
+                    style={{ left: `${((d.ts - xStart) / (xEnd - xStart)) * 100}%` }}
+                  >▲</span>
+                ) : null
+              ))}
+            </div>
           </div>
         )}
 
