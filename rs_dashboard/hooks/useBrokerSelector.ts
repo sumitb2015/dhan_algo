@@ -29,13 +29,22 @@ export function scalperRoute(broker: Broker, endpoint: string): string {
   return broker === 'dhan' ? `/api/scalper/${endpoint}` : `/api/scalper/${broker}/${endpoint}`;
 }
 
+const STORAGE_KEY = 'dhan_algo.selected_broker';
+
 /**
- * Tracks the selected broker (always defaults to 'dhan' on mount, no
- * persistence) and which brokers currently have a valid session, fetched
+ * Tracks the selected broker (persisted in localStorage so choices survive
+ * reloads) and which brokers currently have a valid session, fetched
  * once from /api/auth/broker-status.
  */
 export function useBrokerSelector() {
-  const [broker, setBroker] = useState<Broker>('dhan');
+  const [broker, setBrokerState] = useState<Broker>(() => {
+    if (typeof window === 'undefined') return 'dhan';
+    try {
+      const saved = localStorage.getItem(STORAGE_KEY) as Broker | null;
+      if (saved && BROKERS.includes(saved)) return saved;
+    } catch {}
+    return 'dhan';
+  });
   const [authenticatedBrokers, setAuthenticatedBrokers] = useState<Broker[]>(['dhan']);
   // True once /api/auth/broker-status has actually confirmed at least one
   // broker session — distinct from authenticatedBrokers, which always falls
@@ -44,6 +53,13 @@ export function useBrokerSelector() {
   // placement) should check this instead of authenticatedBrokers.length.
   const [hasAuthenticatedBroker, setHasAuthenticatedBroker] = useState(true);
   const [authChecked, setAuthChecked] = useState(false);
+
+  const setBroker = (b: Broker) => {
+    setBrokerState(b);
+    try {
+      localStorage.setItem(STORAGE_KEY, b);
+    } catch {}
+  };
 
   useEffect(() => {
     fetch('/api/auth/broker-status')

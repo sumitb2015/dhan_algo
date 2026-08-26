@@ -108,6 +108,8 @@ export default function PositionsAnalysis({ underlying }: { underlying: Analytic
   const [analyzing, setAnalyzing] = useState(false);
   const [analyzeError, setAnalyzeError] = useState<string | null>(null);
   const [analyzeSummary, setAnalyzeSummary] = useState<string | null>(null);
+  const [sentinelRunning, setSentinelRunning] = useState(false);
+  const [sentinelToggling, setSentinelToggling] = useState(false);
 
   const [tab, setTab] = useState<Tab>('payoff');
   const [expiryFilter, setExpiryFilter] = useState<string>('ALL');
@@ -280,6 +282,54 @@ export default function PositionsAnalysis({ underlying }: { underlying: Analytic
       setAnalyzing(false);
     }
   }, [underlying, broker]);
+
+  // ── daemon status poll ────────────────────────────────────────────────────
+  useEffect(() => {
+    let cancelled = false;
+    const checkDaemon = async () => {
+      try {
+        const res = await fetch('/api/options/analyzer-daemon');
+        const json = await res.json();
+        if (cancelled || !json?.success) return;
+        setSentinelRunning(json.status?.status === 'RUNNING');
+      } catch { /* advisory */ }
+    };
+    checkDaemon();
+    const id = setInterval(checkDaemon, 10_000);
+    return () => { cancelled = true; clearInterval(id); };
+  }, []);
+
+  const handleToggleSentinel = useCallback(async () => {
+    setSentinelToggling(true);
+    try {
+      const action = sentinelRunning ? 'stop' : 'start';
+      const res = await fetch('/api/options/analyzer-daemon', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action, underlying, broker, interval: 180 }),
+      });
+      const json = await res.json();
+      if (json.success) {
+        setSentinelRunning(action === 'start');
+        setToasts((t) => [
+          ...t,
+          {
+            id: Date.now(),
+            type: 'success',
+            message: action === 'start' ? `Antigravity Sentinel started for ${underlying}` : 'Antigravity Sentinel stopped',
+            detail: action === 'start' ? 'Monitoring risk in background every 3m' : undefined,
+          },
+        ]);
+      }
+    } catch (err) {
+      setToasts((t) => [
+        ...t,
+        { id: Date.now(), type: 'error', message: 'Failed to toggle sentinel', detail: String(err) },
+      ]);
+    } finally {
+      setSentinelToggling(false);
+    }
+  }, [sentinelRunning, underlying, broker]);
 
   // ── funds ──────────────────────────────────────────────────────────────────
   useEffect(() => {
@@ -625,6 +675,18 @@ export default function PositionsAnalysis({ underlying }: { underlying: Analytic
           <button type="button" onClick={handleAnalyze} disabled={analyzing}
             className="flex items-center gap-1 rounded border border-sky-800 bg-sky-950 px-2 py-1 text-xs font-bold text-sky-300 hover:bg-sky-900 disabled:opacity-50">
             <Sparkles className="h-3 w-3" /> {analyzing ? 'Analyzing…' : 'Analyze'}
+          </button>
+          <button type="button" onClick={handleToggleSentinel} disabled={sentinelToggling}
+            className={cn(
+              'flex items-center gap-1.5 rounded border px-2 py-1 text-xs font-bold transition-colors disabled:opacity-50',
+              sentinelRunning
+                ? 'border-emerald-700 bg-emerald-950/80 text-emerald-300 hover:bg-emerald-900'
+                : 'border-zinc-700 bg-zinc-900 text-zinc-400 hover:text-zinc-200',
+            )}
+            title={sentinelRunning ? 'Antigravity Sentinel is actively monitoring risk in the background' : 'Enable continuous background risk monitoring'}
+          >
+            <span className={cn('h-2 w-2 rounded-full', sentinelRunning ? 'animate-pulse bg-emerald-400' : 'bg-zinc-500')} />
+            {sentinelRunning ? 'Sentinel: ON' : 'Sentinel: OFF'}
           </button>
           {refreshedAt && (
             <span className="font-mono text-[10px] text-zinc-500">

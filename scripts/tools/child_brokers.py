@@ -202,8 +202,17 @@ class ChildBroker:
         """Lookup with a one-shot (throttled) cache refresh on miss. Blocking —
         only ever call from the watchdog thread, never the WS callback."""
         sym = self.find_symbol(strike, expiry, opt_type)
-        if sym is None and self.refresh_instruments():
-            sym = self.find_symbol(strike, expiry, opt_type)
+        if sym is None:
+            # First try reloading the cached JSON from disk (e.g. if freshly updated by another process)
+            try:
+                disk_inst = self.load_instruments()
+                if disk_inst and len(disk_inst) != len(self._instruments):
+                    self._set_instruments(disk_inst)
+                    sym = self.find_symbol(strike, expiry, opt_type)
+            except Exception:
+                pass
+            if sym is None and self.refresh_instruments():
+                sym = self.find_symbol(strike, expiry, opt_type)
         return sym
 
     def expiries(self, on_or_after: str = None) -> list:

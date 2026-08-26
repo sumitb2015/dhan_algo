@@ -11,7 +11,7 @@
  */
 
 import React, { useEffect } from 'react';
-import { Sparkles, X, Loader2, AlertTriangle } from 'lucide-react';
+import { Sparkles, X, Loader2, AlertTriangle, ShieldCheck } from 'lucide-react';
 import type { PositionLeg } from '@/lib/positionLegs';
 import type { Suggestion } from '@/app/api/options/suggestions/route';
 import type { ClosePct } from '@/lib/partialQty';
@@ -54,7 +54,10 @@ export default function AnalyzeModal({
       <div className="flex max-h-[85vh] w-full max-w-xl flex-col overflow-hidden rounded-xl border border-zinc-700 bg-zinc-900 shadow-2xl">
         <div className="flex items-center gap-2 border-b border-zinc-800 px-4 py-3">
           <Sparkles className="h-4 w-4 text-sky-400" />
-          <h2 className="text-sm font-bold text-zinc-100">Position Analysis</h2>
+          <h2 className="text-sm font-bold text-zinc-100">Antigravity Position Analysis</h2>
+          <span className="rounded border border-sky-800 bg-sky-950/60 px-1.5 py-0.5 font-mono text-[10px] font-bold text-sky-300">
+            Risk &amp; Adjustment Engine
+          </span>
           <button type="button" onClick={onClose} aria-label="Close"
             className="ml-auto rounded p-1 text-zinc-500 hover:bg-zinc-800 hover:text-zinc-200">
             <X className="h-4 w-4" />
@@ -64,7 +67,7 @@ export default function AnalyzeModal({
         <div className="space-y-3 overflow-y-auto px-4 py-4">
           {loading && (
             <div className="flex items-center gap-2 py-8 text-sm text-zinc-400">
-              <Loader2 className="h-4 w-4 animate-spin" /> Reviewing your open positions…
+              <Loader2 className="h-4 w-4 animate-spin text-sky-400" /> Reviewing open positions &amp; Greeks risk profile…
             </div>
           )}
 
@@ -75,13 +78,17 @@ export default function AnalyzeModal({
           )}
 
           {!loading && !error && summary && (
-            <p className="rounded-lg border border-zinc-800 bg-zinc-950 px-3 py-2.5 text-xs leading-relaxed text-zinc-300">
-              {summary}
-            </p>
+            <div className="rounded-lg border border-zinc-800 bg-zinc-950 px-3.5 py-3 text-xs leading-relaxed text-zinc-300 space-y-1">
+              <div className="flex items-center gap-1.5 font-bold text-zinc-200">
+                <ShieldCheck className="h-3.5 w-3.5 text-emerald-400" />
+                <span>Executive Risk Summary</span>
+              </div>
+              <p className="text-zinc-400">{summary}</p>
+            </div>
           )}
 
           {!loading && !error && suggestions.length === 0 && summary && (
-            <p className="text-[11px] text-zinc-500">No adjustments suggested right now.</p>
+            <p className="text-[11px] text-zinc-500">No adjustments suggested right now. Book risk is balanced.</p>
           )}
 
           {!loading && !error && (
