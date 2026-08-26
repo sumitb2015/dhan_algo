@@ -839,7 +839,7 @@ export default function StraddleLiveMatrix() {
                           className={cn(
                             "px-2 py-2 text-center text-xs font-semibold tabular-nums cursor-pointer transition-all border border-zinc-850",
                             getCellBgClass(cell.status),
-                            isBest && "ring-2 ring-sky-400 ring-offset-1 ring-offset-zinc-950 shadow-[0_0_12px_rgba(56,189,248,0.4)] z-10 font-bold text-white relative"
+                            isBest && "ring-4 ring-inset ring-sky-400 shadow-[0_0_12px_rgba(56,189,248,0.4)] z-10 font-bold text-white relative"
                           )}
                           title={`${cell.time} SL ${cell.sl_pct}%: ${cell.pnl_pts} pts (${cell.status}) — Click for breakdown`}
                         >
