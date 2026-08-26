@@ -2530,11 +2530,12 @@ export default function FocusTool() {
   const [ordersLoading, setOrdersLoading] = useState(false);
   const [ordersError, setOrdersError] = useState<string | null>(null);
   const [orderSort, setOrderSort] = useState<SortState>({ key: 'createTime', dir: 'desc' });
-  const [ordersTab, setOrdersTab] = useState<'orders' | 'trades'>('orders');
+  const [ordersTab, setOrdersTab] = useState<'orders' | 'trades' | 'positions'>('orders');
   const [trades, setTrades] = useState<Record<string, unknown>[]>([]);
   const [tradesLoading, setTradesLoading] = useState(false);
   const [tradesError, setTradesError] = useState<string | null>(null);
   const [tradeSort, setTradeSort] = useState<SortState>({ key: 'createTime', dir: 'desc' });
+  const [positionSort, setPositionSort] = useState<SortState>({ key: 'unrealizedProfit', dir: 'desc' });
 
   const [riskEnabled, setRiskEnabled] = useState(config.riskEnabled);
   const [targetRupees, setTargetRupees] = useState(config.targetRupees);
@@ -5021,7 +5022,7 @@ export default function FocusTool() {
         <div className="flex flex-col gap-3">
           <div className="flex items-center justify-between mb-1">
             <div className="flex items-center gap-1">
-              {([['orders', 'Order Book', orders.length], ['trades', 'Tradebook', trades.length]] as const).map(
+              {([['orders', 'Order Book', orders.length], ['trades', 'Tradebook', trades.length], ['positions', 'Positions', positions.length]] as const).map(
                 ([tab, label, count]) => (
                   <button
                     key={tab}
@@ -5041,10 +5042,10 @@ export default function FocusTool() {
             </div>
             <div className="flex items-center gap-3">
               <span className="text-[10px] text-zinc-500 uppercase tracking-wider leading-tight">
-                Every {ordersTab === 'orders' ? 'order' : 'trade'} on the account, not only this tool&apos;s
+                Every {ordersTab === 'orders' ? 'order' : ordersTab === 'trades' ? 'trade' : 'position'} on the account, not only this tool&apos;s
               </span>
               <button
-                onClick={() => { fetchOrders(); fetchTrades(); }}
+                onClick={() => { fetchOrders(); fetchTrades(); void fetchPositionsNow(); }}
                 disabled={ordersLoading || tradesLoading}
                 className={cn('text-xs font-semibold px-2 py-1 rounded border border-zinc-700 bg-zinc-900 text-zinc-300 hover:text-white hover:border-zinc-500 cursor-pointer disabled:opacity-40 transition-all flex items-center gap-1', FOCUS_RING)}
               >
@@ -5077,7 +5078,7 @@ export default function FocusTool() {
                 </div>
               )}
             </>
-          ) : (
+          ) : ordersTab === 'trades' ? (
             <>
               {tradesError && (
                 <div className="text-rose-400 text-xs bg-rose-500/10 border border-rose-500/20 rounded-lg p-3 font-mono">
@@ -5100,6 +5101,15 @@ export default function FocusTool() {
                 </div>
               )}
             </>
+          ) : (
+            <div className="border border-zinc-800 rounded-xl overflow-hidden max-h-[65vh] overflow-y-auto">
+              <TabTable
+                tab="positions"
+                data={positions as unknown as Record<string, unknown>[]}
+                sort={positionSort}
+                onSort={key => setPositionSort(prev => prev.key === key ? { key, dir: prev.dir === 'desc' ? 'asc' : 'desc' } : { key, dir: 'desc' })}
+              />
+            </div>
           )}
         </div>
       </FocusModal>

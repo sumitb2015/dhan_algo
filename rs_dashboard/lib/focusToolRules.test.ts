@@ -66,6 +66,8 @@ function live(c: LiveCase): RowLive {
     lotSize: lot,
     vwap: c.vwap ?? null,
     vwapClose: c.vwapClose ?? null,
+    vwap1m: null,
+    vwapClose1m: null,
     ceBuildup: null, peBuildup: null, ceOiChgPct: null, peOiChgPct: null,
     ceOi: null, peOi: null,
   };
