@@ -317,6 +317,337 @@ def _prev_day_levels(helper: DhanHelper, symbol_type: str, symbol: str, security
     return _prev_day_levels_mcx(helper, security_id, exchange_segment, instrument_type)
 
 
+def _get_strike_step(symbol: str, symbol_type: str, ltp: float) -> int:
+    sym = symbol.upper()
+    if sym in ("NIFTY", "FINNIFTY"):
+        return 50
+    if sym in ("BANKNIFTY", "SENSEX", "BANKEX"):
+        return 100
+    if sym in ("MIDCPNIFTY",):
+        return 25
+    if symbol_type in ("crudeoil", "crudeoilm") or "CRUDE" in sym:
+        return 50
+    if ltp > 5000:
+        return 100
+    if ltp > 1000:
+        return 50
+    if ltp > 250:
+        return 10
+    return 5
+
+
+def _compute_confluence(
+    df: pd.DataFrame,
+    candles_df: pd.DataFrame,
+    levels_df: pd.DataFrame,
+    warm_df: pd.DataFrame,
+    prev_day_levels: dict | None,
+    symbol: str,
+    symbol_type: str,
+) -> dict:
+    import numpy as np
+    import talib
+
+    if candles_df.empty:
+        return {}
+
+    ltp = float(candles_df.iloc[-1]["close"])
+    curr_open = float(candles_df.iloc[-1]["open"])
+
+    # --- 1. Statistically Robust ATR (Computed on 2-day warm history) ---
+    warm_c = warm_df["close"].to_numpy(dtype=float)
+    warm_h = warm_df["high"].to_numpy(dtype=float)
+    warm_l = warm_df["low"].to_numpy(dtype=float)
+    n_warm = len(warm_c)
+    if n_warm >= 14:
+        atr_arr = talib.ATR(warm_h, warm_l, warm_c, timeperiod=14)
+        valid_atr = atr_arr[~np.isnan(atr_arr)]
+        atr = float(valid_atr[-1]) if len(valid_atr) > 0 else float(warm_h[-1] - warm_l[-1])
+    elif n_warm >= 2:
+        atr_arr = talib.ATR(warm_h, warm_l, warm_c, timeperiod=n_warm - 1)
+        valid_atr = atr_arr[~np.isnan(atr_arr)]
+        atr = float(valid_atr[-1]) if len(valid_atr) > 0 else float(warm_h[-1] - warm_l[-1])
+    else:
+        atr = float(warm_h[-1] - warm_l[-1]) if n_warm > 0 else 1.0
+    atr = max(atr, 1.0)
+
+    # --- 2. Macro (1H) Structure (Max 25 pts) ---
+    df_1h = _resample_candles(df, 60)
+    if len(df_1h) >= 2:
+        prev_1h = df_1h.iloc[-2]
+        curr_1h = df_1h.iloc[-1]
+        h1_high = float(prev_1h["high"])
+        h1_low = float(prev_1h["low"])
+        h1_mid = (h1_high + h1_low) / 2.0
+        curr_h1_open = float(curr_1h["open"])
+
+        if ltp >= h1_high:
+            htf_score = 25.0
+            htf_status = "Strong Bullish"
+            htf_detail = f"Price ({ltp:.1f}) breaking above Prior 1H High ({h1_high:.1f})"
+        elif ltp > h1_mid and ltp >= curr_h1_open:
+            htf_score = 20.0
+            htf_status = "Bullish"
+            htf_detail = f"Price above Prior 1H Mid ({h1_mid:.1f}) and current 1H candle is green"
+        elif ltp > h1_mid:
+            htf_score = 15.0
+            htf_status = "Moderate Bullish"
+            htf_detail = f"Price holding above Prior 1H Mid ({h1_mid:.1f})"
+        elif ltp >= h1_low:
+            htf_score = 8.0
+            htf_status = "Bearish"
+            htf_detail = f"Price below Prior 1H Mid ({h1_mid:.1f}), holding above 1H Low ({h1_low:.1f})"
+        else:
+            htf_score = 0.0
+            htf_status = "Strong Bearish"
+            htf_detail = f"Price breaking below Prior 1H Low ({h1_low:.1f})"
+    elif len(df_1h) == 1:
+        curr_1h = df_1h.iloc[-1]
+        h1_high = float(curr_1h["high"])
+        h1_low = float(curr_1h["low"])
+        h1_mid = (h1_high + h1_low) / 2.0
+        htf_score = 15.0 if ltp >= h1_mid else 8.0
+        htf_status = "Moderate Bullish" if ltp >= h1_mid else "Bearish"
+        htf_detail = f"Price {'above' if ltp >= h1_mid else 'below'} 1H Mid ({h1_mid:.1f})"
+    else:
+        htf_score = 12.5
+        htf_status = "Neutral"
+        htf_detail = "Insufficient 1H history"
+        h1_high, h1_low, h1_mid = ltp + atr * 2, ltp - atr * 2, ltp
+
+    # --- 3. Intermediate (15M) Structure & EMAs (Max 25 pts) ---
+    df_15m = _resample_candles(df, 15)
+    if not df_15m.empty:
+        ref_15m = df_15m.iloc[-2] if len(df_15m) >= 2 else df_15m.iloc[-1]
+        m15_high = float(ref_15m["high"])
+        m15_low = float(ref_15m["low"])
+        m15_mid = (m15_high + m15_low) / 2.0
+        ema9_15m = float(df_15m["close"].ewm(span=9, adjust=False).mean().iloc[-1])
+        ema20_15m = float(df_15m["close"].ewm(span=20, adjust=False).mean().iloc[-1])
+        ema_bullish = ema9_15m >= ema20_15m
+
+        if ltp >= m15_high and ema_bullish:
+            itf_score = 25.0
+            itf_status = "Strong Bullish"
+            itf_detail = f"15M EMA9 > EMA20 and price testing 15M High ({m15_high:.1f})"
+        elif ltp > m15_mid and ema_bullish:
+            itf_score = 20.0
+            itf_status = "Bullish"
+            itf_detail = f"Price > 15M Mid ({m15_mid:.1f}) with bullish EMA alignment"
+        elif ltp > m15_mid and not ema_bullish:
+            itf_score = 12.0
+            itf_status = "Neutral / Mixed"
+            itf_detail = f"Price > 15M Mid but 15M EMA9 < EMA20 (Compression)"
+        elif ltp >= m15_low and not ema_bullish:
+            itf_score = 5.0
+            itf_status = "Bearish"
+            itf_detail = f"Price < 15M Mid with bearish EMA alignment"
+        else:
+            itf_score = 0.0
+            itf_status = "Strong Bearish"
+            itf_detail = f"Price breaking below 15M Low ({m15_low:.1f})"
+    else:
+        itf_score = 12.5
+        itf_status = "Neutral"
+        itf_detail = "Insufficient 15M history"
+        m15_high, m15_low, m15_mid = ltp + atr, ltp - atr, ltp
+
+    # --- 4. Intraday VWAP & Supertrend (Max 20 pts) ---
+    vwap_series = _vwap(candles_df)
+    vwap_val = float(vwap_series.iloc[-1]) if not vwap_series.dropna().empty else ltp
+    above_vwap = ltp >= vwap_val
+
+    st_val_full, st_dir_full = _supertrend(
+        warm_df["high"], warm_df["low"], warm_df["close"], length=10, multiplier=3.0
+    )
+    today_mask = warm_df["time"].dt.date == candles_df["time"].iloc[-1].date()
+    st_dir_today = st_dir_full[today_mask]
+    st_dir_valid = st_dir_today[st_dir_today != 0].dropna()
+    st_bullish = bool(st_dir_valid.iloc[-1] == 1) if not st_dir_valid.empty else True
+
+    intraday_score = 0.0
+    if above_vwap:
+        intraday_score += 10.0
+    if st_bullish:
+        intraday_score += 10.0
+
+    if above_vwap and st_bullish:
+        intraday_status = "Bullish"
+        intraday_detail = f"Above VWAP ({vwap_val:.1f}) + Supertrend Green"
+    elif not above_vwap and not st_bullish:
+        intraday_status = "Bearish"
+        intraday_detail = f"Below VWAP ({vwap_val:.1f}) + Supertrend Red"
+    else:
+        intraday_status = "Mixed"
+        intraday_detail = f"{'Above' if above_vwap else 'Below'} VWAP, ST is {'Green' if st_bullish else 'Red'}"
+
+    # --- 5. Support/Resistance Proximity & Reaction (Max 20 pts) ---
+    candidate_supports = [l for l in [h1_low, m15_low] if l < ltp]
+    if not levels_df.empty:
+        candidate_supports.extend([float(row["low"]) for _, row in levels_df.iterrows() if float(row["low"]) < ltp])
+    nearest_support = max(candidate_supports) if candidate_supports else (ltp - atr * 1.5)
+
+    candidate_resistances = [h for h in [h1_high, m15_high] if h > ltp]
+    if not levels_df.empty:
+        candidate_resistances.extend([float(row["high"]) for _, row in levels_df.iterrows() if float(row["high"]) > ltp])
+    nearest_resistance = min(candidate_resistances) if candidate_resistances else (ltp + atr * 1.5)
+
+    dist_supp_atr = (ltp - nearest_support) / atr
+    dist_res_atr = (nearest_resistance - ltp) / atr
+
+    if ltp >= nearest_resistance:
+        proximity_score = 20.0
+        proximity_status = "Breakout Resistance"
+        proximity_detail = f"Breaking resistance at {nearest_resistance:.1f}"
+    elif dist_supp_atr <= 0.6 and ltp >= curr_open:
+        proximity_score = 16.0
+        proximity_status = "Support Bounce"
+        proximity_detail = f"Bouncing off support {nearest_support:.1f} ({dist_supp_atr:.1f} ATR)"
+    elif dist_supp_atr > 0.8 and dist_res_atr > 0.8:
+        proximity_score = 10.0
+        proximity_status = "Mid Channel"
+        proximity_detail = f"Safe distance: {dist_supp_atr:.1f} ATR to Support, {dist_res_atr:.1f} ATR to Resist"
+    elif dist_res_atr <= 0.6 and ltp <= curr_open:
+        proximity_score = 4.0
+        proximity_status = "Resistance Rejection"
+        proximity_detail = f"Rejection near resistance {nearest_resistance:.1f} ({dist_res_atr:.1f} ATR)"
+    elif ltp <= nearest_support:
+        proximity_score = 0.0
+        proximity_status = "Breakdown Support"
+        proximity_detail = f"Breaking below support at {nearest_support:.1f}"
+    else:
+        proximity_score = 10.0
+        proximity_status = "Channel Range"
+        proximity_detail = f"Support: {nearest_support:.1f}, Resistance: {nearest_resistance:.1f}"
+
+    # --- 6. Key Anchors: PDH/PDL & Opening Range (Max 10 pts) ---
+    key_score = 0.0
+    or_bars = candles_df.iloc[:min(3, len(candles_df))]
+    or_high = float(or_bars["high"].max())
+    or_low = float(or_bars["low"].min())
+
+    if ltp > or_high:
+        key_score += 5.0
+        or_text = "Above OR High"
+    elif ltp < or_low:
+        or_text = "Below OR Low"
+    else:
+        key_score += 2.5
+        or_text = "Inside Opening Range"
+
+    pdh_pdl_text = "N/A"
+    if prev_day_levels and "high" in prev_day_levels and "low" in prev_day_levels:
+        pdh = float(prev_day_levels["high"])
+        pdl = float(prev_day_levels["low"])
+        if ltp > pdh:
+            key_score += 5.0
+            pdh_pdl_text = f"Above PDH ({pdh:.1f})"
+        elif ltp < pdl:
+            pdh_pdl_text = f"Below PDL ({pdl:.1f})"
+        else:
+            key_score += 2.5
+            pdh_pdl_text = "Inside PDH-PDL Range"
+    else:
+        key_score += 2.5
+
+    key_detail = f"{or_text} · {pdh_pdl_text}"
+
+    # --- Total Score ---
+    total_score = round(htf_score + itf_score + intraday_score + proximity_score + key_score, 1)
+    total_score = max(0.0, min(100.0, total_score))
+
+    # --- Regime & Option Bias ---
+    step = _get_strike_step(symbol, symbol_type, ltp)
+    pe_strike = int(np.floor((nearest_support - 0.2 * atr) / step) * step)
+    ce_strike = int(np.ceil((nearest_resistance + 0.2 * atr) / step) * step)
+    if pe_strike >= ce_strike:
+        pe_strike = ce_strike - step
+
+    spread_wing = 2 * step
+    pe_hedge = pe_strike - spread_wing
+    ce_hedge = ce_strike + spread_wing
+
+    if total_score >= 75:
+        regime = "STRONG_BULLISH"
+        regime_label = "Strong Bullish"
+        bias = "PE_SELL"
+        action_text = f"Sell PE / Bull Put Spread (Sell {pe_strike} PE / Buy {pe_hedge} PE)"
+    elif total_score >= 60:
+        regime = "BULLISH"
+        regime_label = "Bullish"
+        bias = "PE_SELL"
+        action_text = f"Bull Put Spread Preferred (Sell {pe_strike} PE / Buy {pe_hedge} PE)"
+    elif total_score <= 25:
+        regime = "STRONG_BEARISH"
+        regime_label = "Strong Bearish"
+        bias = "CE_SELL"
+        action_text = f"Sell CE / Bear Call Spread (Sell {ce_strike} CE / Buy {ce_hedge} CE)"
+    elif total_score <= 40:
+        regime = "BEARISH"
+        regime_label = "Bearish"
+        bias = "CE_SELL"
+        action_text = f"Bear Call Spread Preferred (Sell {ce_strike} CE / Buy {ce_hedge} CE)"
+    else:
+        regime = "NEUTRAL_RANGE"
+        regime_label = "Neutral / Range-Bound"
+        bias = "STRANGLE"
+        action_text = f"Sell Short Strangle / Iron Condor ({pe_strike} PE / {ce_strike} CE)"
+
+    return {
+        "totalScore": total_score,
+        "regime": regime,
+        "regimeLabel": regime_label,
+        "bias": bias,
+        "actionText": action_text,
+        "nearestSupport": round(nearest_support, 2),
+        "nearestResistance": round(nearest_resistance, 2),
+        "suggestedPeStrike": pe_strike,
+        "suggestedCeStrike": ce_strike,
+        "suggestedPeHedge": pe_hedge,
+        "suggestedCeHedge": ce_hedge,
+        "atr": round(atr, 2),
+        "distSupportAtr": round(dist_supp_atr, 2),
+        "distResistAtr": round(dist_res_atr, 2),
+        "breakdown": {
+            "htf": {
+                "score": round(htf_score, 1),
+                "max": 25,
+                "label": "1H Macro Structure",
+                "status": htf_status,
+                "detail": htf_detail,
+            },
+            "itf": {
+                "score": round(itf_score, 1),
+                "max": 25,
+                "label": "15M Trend & EMAs",
+                "status": itf_status,
+                "detail": itf_detail,
+            },
+            "intraday": {
+                "score": round(intraday_score, 1),
+                "max": 20,
+                "label": "VWAP & Supertrend",
+                "status": intraday_status,
+                "detail": intraday_detail,
+            },
+            "proximity": {
+                "score": round(proximity_score, 1),
+                "max": 20,
+                "label": "S/R Reaction & ATR",
+                "status": proximity_status,
+                "detail": proximity_detail,
+            },
+            "keyLevels": {
+                "score": round(key_score, 1),
+                "max": 10,
+                "label": "PDH/PDL & Opening Range",
+                "status": or_text,
+                "detail": key_detail,
+            },
+        },
+    }
+
+
 def fetch(symbol_type: str, symbol: str, chart_interval: int, level_interval: int, indicator_settings: dict) -> dict:
     dhan = get_dhan_client()
     if not dhan:
@@ -352,6 +683,16 @@ def fetch(symbol_type: str, symbol: str, chart_interval: int, level_interval: in
         # here shouldn't fail the whole candle fetch.
         prev_day_levels = None
 
+    confluence = _compute_confluence(
+        df=df,
+        candles_df=candles_df,
+        levels_df=levels_df,
+        warm_df=warm_df,
+        prev_day_levels=prev_day_levels,
+        symbol=symbol,
+        symbol_type=symbol_type,
+    )
+
     return {
         "dataDate": str(today_date),
         "candles": [
@@ -364,6 +705,7 @@ def fetch(symbol_type: str, symbol: str, chart_interval: int, level_interval: in
         ],
         "indicators": _compute_overlays(candles_df, warm_df, today_date, indicator_settings),
         "prevDayLevels": prev_day_levels,
+        "confluence": confluence,
     }
 
 

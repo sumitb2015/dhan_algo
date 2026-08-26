@@ -4,7 +4,8 @@ import React, { useEffect, useRef, useState } from 'react';
 import NavBar from './NavBar';
 import SymbolPicker, { type SymbolSelection } from './SymbolPicker';
 import LevelChart, { type OverlayVisibility, type LevelsMode } from './LevelChart';
-import type { LevelCandle, LevelBucket, LevelChartIndicators, PrevDayLevels } from '@/app/api/level-chart/route';
+import LevelScoreCard from './LevelScoreCard';
+import type { LevelCandle, LevelBucket, LevelChartIndicators, PrevDayLevels, LevelConfluenceAnalysis } from '@/app/api/level-chart/route';
 
 const OVERLAY_TOGGLES: { key: keyof OverlayVisibility; label: string }[] = [
   { key: 'vwap', label: 'VWAP' },
@@ -117,6 +118,7 @@ interface ApiResponse {
   levelBuckets?: LevelBucket[];
   indicators?: LevelChartIndicators;
   prevDayLevels?: PrevDayLevels | null;
+  confluence?: LevelConfluenceAnalysis;
   error?: string;
 }
 
@@ -132,6 +134,7 @@ export default function LevelChartPage() {
   const [levelBuckets, setLevelBuckets] = useState<LevelBucket[]>([]);
   const [indicators, setIndicators] = useState<LevelChartIndicators | undefined>(undefined);
   const [prevDayLevels, setPrevDayLevels] = useState<PrevDayLevels | null>(null);
+  const [confluence, setConfluence] = useState<LevelConfluenceAnalysis | null>(null);
   const [dataDate, setDataDate] = useState<string | undefined>(undefined);
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(true);
@@ -191,6 +194,7 @@ export default function LevelChartPage() {
           setLevelBuckets(j.levelBuckets ?? []);
           setIndicators(j.indicators);
           setPrevDayLevels(j.prevDayLevels ?? null);
+          setConfluence(j.confluence ?? null);
           setDataDate(j.dataDate);
         })
         .catch((e) => { if (!cancelled) setError(String(e)); })
@@ -331,6 +335,8 @@ export default function LevelChartPage() {
           </div>
         </div>
       </div>
+
+      <LevelScoreCard confluence={confluence} symbol={selection.symbol} />
 
       {error && (
         <div className="mx-6 mt-3 px-3 py-2 bg-red-900/20 border border-red-700/40 rounded-lg text-xs text-red-400">

@@ -22,12 +22,45 @@ export interface LevelChartIndicators {
 }
 export interface PrevDayLevels { high: number; low: number; close: number }
 
+export interface ConfluenceBreakdownItem {
+  score: number;
+  max: number;
+  label: string;
+  status: string;
+  detail: string;
+}
+
+export interface LevelConfluenceAnalysis {
+  totalScore: number;
+  regime: 'STRONG_BULLISH' | 'BULLISH' | 'NEUTRAL_RANGE' | 'BEARISH' | 'STRONG_BEARISH';
+  regimeLabel: string;
+  bias: 'PE_SELL' | 'CE_SELL' | 'STRANGLE' | 'WAIT';
+  actionText: string;
+  nearestSupport: number;
+  nearestResistance: number;
+  suggestedPeStrike?: number;
+  suggestedCeStrike?: number;
+  suggestedPeHedge?: number;
+  suggestedCeHedge?: number;
+  atr: number;
+  distSupportAtr?: number;
+  distResistAtr?: number;
+  breakdown: {
+    htf: ConfluenceBreakdownItem;
+    itf: ConfluenceBreakdownItem;
+    intraday: ConfluenceBreakdownItem;
+    proximity: ConfluenceBreakdownItem;
+    keyLevels: ConfluenceBreakdownItem;
+  };
+}
+
 interface ScriptPayload {
   dataDate?: string;
   candles?: LevelCandle[];
   levelBuckets?: LevelBucket[];
   indicators?: LevelChartIndicators;
   prevDayLevels?: PrevDayLevels | null;
+  confluence?: LevelConfluenceAnalysis;
   error?: string;
 }
 interface CacheEntry {
@@ -36,6 +69,7 @@ interface CacheEntry {
   levelBuckets: LevelBucket[];
   indicators?: LevelChartIndicators;
   prevDayLevels?: PrevDayLevels | null;
+  confluence?: LevelConfluenceAnalysis;
   ts: number;
 }
 
@@ -66,7 +100,7 @@ export async function GET(request: NextRequest) {
   if (hit && Date.now() - hit.ts < CACHE_TTL) {
     return NextResponse.json({
       success: true, dataDate: hit.dataDate, candles: hit.candles, levelBuckets: hit.levelBuckets,
-      indicators: hit.indicators, prevDayLevels: hit.prevDayLevels,
+      indicators: hit.indicators, prevDayLevels: hit.prevDayLevels, confluence: hit.confluence,
     });
   }
 
@@ -98,11 +132,12 @@ export async function GET(request: NextRequest) {
     const dataDate = parsed.dataDate;
     const indicators = parsed.indicators;
     const prevDayLevels = parsed.prevDayLevels ?? null;
+    const confluence = parsed.confluence;
 
     if (candles.length) {
-      cache.set(cacheKey, { dataDate, candles, levelBuckets, indicators, prevDayLevels, ts: Date.now() });
+      cache.set(cacheKey, { dataDate, candles, levelBuckets, indicators, prevDayLevels, confluence, ts: Date.now() });
     }
-    return NextResponse.json({ success: true, dataDate, candles, levelBuckets, indicators, prevDayLevels });
+    return NextResponse.json({ success: true, dataDate, candles, levelBuckets, indicators, prevDayLevels, confluence });
   } catch (err) {
     console.error('[/api/level-chart] error:', err);
     return NextResponse.json({ success: false, error: String(err) }, { status: 500 });
