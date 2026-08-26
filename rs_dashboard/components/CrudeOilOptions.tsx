@@ -111,7 +111,43 @@ export default function CrudeOilOptions() {
   const tradesIntervalRef = useRef<NodeJS.Timeout | null>(null);
 
   const bookIsCurrent  = book.broker === broker;
-  const crudePositions = bookIsCurrent ? book.positions : [];
+
+  // Kotak's own positions payload never carries an LTP (see shapeKotakPosition),
+  // so realizedProfit/unrealizedProfit come back 0 for every open leg. Join the
+  // live LTP from the Dhan-sourced chain (`rows`) onto each Kotak position by
+  // trading symbol — the same join Scalper.tsx does for the scalper terminals —
+  // and recompute unrealizedProfit from it. Dhan positions already carry a real
+  // LTP and pass through unchanged.
+  const kotakSymbolToStrike = useMemo(() => {
+    const map: Record<string, { strike: number; side: 'ce' | 'pe' }> = {};
+    if (!kotakSymbols) return map;
+    for (const [strikeStr, entry] of Object.entries(kotakSymbols.strikes)) {
+      const strike = Number(strikeStr);
+      if (entry.ceSymbol) map[entry.ceSymbol] = { strike, side: 'ce' };
+      if (entry.peSymbol) map[entry.peSymbol] = { strike, side: 'pe' };
+    }
+    return map;
+  }, [kotakSymbols]);
+
+  const crudePositions = useMemo(() => {
+    const base = bookIsCurrent ? book.positions : [];
+    if (!isKotak) return base;
+    return base.map(p => {
+      const mapping = kotakSymbolToStrike[p.tradingSymbol ?? p.symbol];
+      if (!mapping) return p;
+      const row = rows.find(r => r.strike === mapping.strike);
+      const liveLtp = row?.[mapping.side]?.last_price ?? 0;
+      if (liveLtp <= 0) return p;
+      const netQty = p.netQty;
+      const unrealizedProfit = netQty === 0
+        ? p.unrealizedProfit
+        : netQty > 0
+          ? netQty * (liveLtp - p.buyAvg)
+          : Math.abs(netQty) * (p.sellAvg - liveLtp);
+      return { ...p, lastPrice: liveLtp, unrealizedProfit };
+    });
+  }, [bookIsCurrent, book.positions, isKotak, kotakSymbolToStrike, rows]);
+
   const crudeOrders    = bookIsCurrent ? book.orders : [];
   const crudeTrades    = bookIsCurrent ? book.trades : [];
   const tradesError    = bookIsCurrent ? book.error : null;
