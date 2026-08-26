@@ -22,8 +22,16 @@ export function computeNetGreeks(legs: PositionLeg[]): NetGreeks {
     // Dhan's chain returns all-zero greeks often enough that a leg with no delta
     // AND no gamma is almost certainly unpopulated rather than genuinely neutral.
     // Summing those zeros silently understates net exposure, so they are excluded
-    // and reported instead.
-    if (leg.delta === null && leg.gamma === null) { missing.push(leg); continue; }
+    // and reported instead. This also catches Dhan literally returning
+    // {delta:0, theta:0, gamma:0, vega:0} for a priced-but-ungreeked contract
+    // (observed live on a deep-ITM strike) — a real option's four greeks are
+    // never simultaneously exactly zero, so that combination is the same
+    // "unpopulated" signal as all-null, just spelled differently.
+    const allNullOrZero = (v: number | null | undefined) => v === null || v === undefined || v === 0;
+    if (allNullOrZero(leg.delta) && allNullOrZero(leg.gamma) && allNullOrZero(leg.theta) && allNullOrZero(leg.vega)) {
+      missing.push(leg);
+      continue;
+    }
     const k = posSign(leg);
     delta += (leg.delta ?? 0) * k;
     gamma += (leg.gamma ?? 0) * k;
