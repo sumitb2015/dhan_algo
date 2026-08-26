@@ -95,6 +95,11 @@ STANDARD_TIMESTAMPS_15 = [
 
 SL_PERCENTAGES = [10, 20, 30, 40, 50, 60, 70, 80, 90, 100]
 
+# Caps the NIFTY expiry selector to the near term — Dhan's expiry-list API also
+# returns far-dated LEAPS-style listings (multi-year out) that are irrelevant noise
+# for a same-day short-straddle SL tool.
+NEAR_TERM_EXPIRY_LIMIT = 8
+
 _last_intraday_call = 0.0
 
 
@@ -467,7 +472,13 @@ def _compute_straddle_matrix(
     if not valid_expiries:
         valid_expiries = sorted(expiries_list)
 
-    chosen_expiry = expiry_input if expiry_input and expiry_input in expiries_list else valid_expiries[0]
+    if underlying.upper() == "NIFTY":
+        # Dhan's expiry-list endpoint also returns far-dated LEAPS-style listings
+        # (multi-year out) alongside the weekly/monthly ones — irrelevant noise for
+        # a same-day short-straddle SL tool, so cap the selector to the near term.
+        valid_expiries = valid_expiries[:NEAR_TERM_EXPIRY_LIMIT]
+
+    chosen_expiry = expiry_input if expiry_input and expiry_input in valid_expiries else valid_expiries[0]
 
     # Calculate DTE
     try:
