@@ -1,10 +1,12 @@
 'use client';
 
 import React, { useState, useEffect, useRef } from 'react';
+import Link from 'next/link';
 import {
   AreaChart, Area, LineChart, Line, XAxis, YAxis, CartesianGrid,
-  Tooltip, ResponsiveContainer, ReferenceLine, Legend,
+  Tooltip, ResponsiveContainer, ReferenceLine, ReferenceArea, Legend,
 } from 'recharts';
+import { Sparkles, HelpCircle, ArrowRight, ShieldCheck, Layers, TrendingUp, Zap, DollarSign } from 'lucide-react';
 
 // ─── Types ────────────────────────────────────────────────────────
 
@@ -61,6 +63,8 @@ interface CumulativeResponse {
   regime?: RegimeSnapshot;
   error?:  string;
 }
+
+type ZMetricFilter = 'all' | 'oiZ' | 'slopeZ' | 'wpiZ';
 
 // ─── Helpers ──────────────────────────────────────────────────────
 
@@ -172,6 +176,40 @@ const DiffTooltip = ({ active, payload, label }: Record<string, unknown>) => {
   );
 };
 
+const ZScoreTooltip = ({ active, payload, label }: Record<string, unknown>) => {
+  if (!active || !Array.isArray(payload) || !payload.length) return null;
+  const getVal = (name: string) => (payload as Array<{ name: string; value: number }>).find(p => p.name === name)?.value ?? 0;
+  const oiZ = getVal('OI_Z');
+  const slopeZ = getVal('Slope_Z');
+  const wpiZ = getVal('WPI_Z');
+
+  const oiTag = oiZ > 0.5 ? 'Put Writing (Support)' : oiZ < -0.5 ? 'Call Writing (Resistance)' : 'Neutral Balance';
+  const slopeTag = slopeZ > 0.5 ? 'Accelerating Put Writing' : slopeZ < -0.5 ? 'Accelerating Call Writing' : 'Steady Speed';
+  const wpiTag = wpiZ > 0.5 ? 'Institutional Put Premium Inflow' : wpiZ < -0.5 ? 'Institutional Call Premium Inflow' : 'Balanced Flows';
+
+  return (
+    <div className="bg-zinc-950/98 border border-zinc-700/70 rounded-xl px-4 py-3 text-xs shadow-2xl backdrop-blur min-w-[260px] space-y-2">
+      <p className="text-zinc-300 font-bold border-b border-zinc-800 pb-1">
+        {typeof label === 'number' ? fmtTick(label) : String(label)}
+      </p>
+      <div className="space-y-1.5 font-mono text-[11px]">
+        <div className="flex justify-between items-center gap-4">
+          <span className="text-blue-400 font-semibold">OI_Z ({oiZ >= 0 ? '+' : ''}{oiZ.toFixed(2)})</span>
+          <span className={`text-[10px] font-sans font-semibold ${oiZ > 0.5 ? 'text-emerald-400' : oiZ < -0.5 ? 'text-red-400' : 'text-zinc-400'}`}>{oiTag}</span>
+        </div>
+        <div className="flex justify-between items-center gap-4">
+          <span className="text-amber-400 font-semibold">Slope_Z ({slopeZ >= 0 ? '+' : ''}{slopeZ.toFixed(2)})</span>
+          <span className={`text-[10px] font-sans font-semibold ${slopeZ > 0.5 ? 'text-emerald-400' : slopeZ < -0.5 ? 'text-red-400' : 'text-zinc-400'}`}>{slopeTag}</span>
+        </div>
+        <div className="flex justify-between items-center gap-4">
+          <span className="text-purple-400 font-semibold">WPI_Z ({wpiZ >= 0 ? '+' : ''}{wpiZ.toFixed(2)})</span>
+          <span className={`text-[10px] font-sans font-semibold ${wpiZ > 0.5 ? 'text-emerald-400' : wpiZ < -0.5 ? 'text-red-400' : 'text-zinc-400'}`}>{wpiTag}</span>
+        </div>
+      </div>
+    </div>
+  );
+};
+
 // ─── Stat chip ────────────────────────────────────────────────────
 
 function StatChip({ label, value, sub, color = 'text-white' }: {
@@ -193,156 +231,120 @@ export default function OptionsCumulativeOITab({ expiry: _expiry }: { expiry: st
   const [loading, setLoading]     = useState(true);
   const [error, setError]         = useState('');
   const [wingCount, setWingCount] = useState(10);
+  const [showZGuide, setShowZGuide] = useState(false);
+  const [metricFilter, setMetricFilter] = useState<ZMetricFilter>('all');
   const pollRef    = useRef<NodeJS.Timeout | null>(null);
-  // Ref keeps the interval from closing over a stale wingCount value
   const wingRef    = useRef(10);
 
   const fetchData = (wings = wingRef.current) => {
-    fetch(`/api/options/iv-history?mode=cumulative&wings=${wings}`)
-      .then(r => r.json())
-      .then((j: CumulativeResponse) => {
-        if (j.success) { setResponse(j); setError(''); }
-        else           { setError(j.error ?? 'No data'); setResponse(null); }
+    fetch(`/api/options/iv-history?mode=cumulative&underlying=NIFTY&wings=${wings}`)
+      .then(res => res.json())
+      .then((json: CumulativeResponse) => {
+        setLoading(false);
+        if (json.success) {
+          setResponse(json);
+          setError('');
+        } else {
+          setError(json.error || 'Failed to load options data');
+        }
       })
-      .catch(e => setError(String(e)))
-      .finally(() => setLoading(false));
+      .catch(err => {
+        setLoading(false);
+        setError(err.message || 'Network error');
+      });
   };
 
-  // Initial load + 30-second refresh; interval reads from wingRef (always current)
   useEffect(() => {
+    wingRef.current = wingCount;
     setLoading(true);
-    fetchData();
-    pollRef.current = setInterval(() => fetchData(), 30_000);
-    return () => { if (pollRef.current) clearInterval(pollRef.current); };
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+    fetchData(wingCount);
 
-  // Re-fetch when wing count changes; update ref so the interval picks it up
-  const handleWingChange = (w: number) => {
-    wingRef.current = w;
-    setWingCount(w);
-    fetchData(w);
+    pollRef.current = setInterval(() => {
+      fetchData(wingRef.current);
+    }, 15_000);
+
+    return () => {
+      if (pollRef.current) clearInterval(pollRef.current);
+    };
+  }, [wingCount]);
+
+  const handleWingChange = (val: number) => {
+    setWingCount(val);
   };
 
-  const data   = response?.data   ?? [];
-  const atm    = response?.atm    ?? 0;
-  const date   = response?.date   ?? '';
-  const regime = response?.regime ?? null;
-  const last   = data.length > 0 ? data[data.length - 1] : null;
-  const ceOI   = last?.ceOI ?? 0;
-  const peOI   = last?.peOI ?? 0;
-  const diff   = last?.diff  ?? 0;
-  const spot   = last?.spot  ?? 0;
-  const pcr    = ceOI > 0 ? peOI / ceOI : 0;
+  if (loading && !response) {
+    return (
+      <div className="flex flex-col items-center justify-center py-24 text-zinc-400 gap-3">
+        <div className="w-6 h-6 border-2 border-blue-500 border-t-transparent rounded-full animate-spin" />
+        <p className="text-sm font-medium">Computing Cumulative OI &amp; Options Regime…</p>
+      </div>
+    );
+  }
 
-  const pcrColor  = pcr > 1.3 ? 'text-emerald-400' : pcr > 0 && pcr < 0.7 ? 'text-red-400' : 'text-yellow-400';
-  const pcrLabel  = pcr > 1.3 ? 'Bullish' : pcr > 0 && pcr < 0.7 ? 'Bearish' : 'Neutral';
-  const diffColor = diff > 0 ? 'text-emerald-400' : diff < 0 ? 'text-red-400' : 'text-zinc-400';
-  const diffLabel = diff > 0 ? 'PE dominant' : diff < 0 ? 'CE dominant' : undefined;
+  if (error && !response) {
+    return (
+      <div className="bg-red-500/10 border border-red-500/20 rounded-xl p-4 text-red-400 text-sm font-medium my-4">
+        {error}
+      </div>
+    );
+  }
 
-  // X-axis spans full session (9:15–15:30) using the CSV date
-  const { start: xStart, end: xEnd } = date
-    ? sessionBoundsIST(date)
-    : { start: Date.now() - 30 * 60_000, end: Date.now() };
-
-  const sessionTicks = (() => {
-    const interval = 30 * 60_000;
-    const first    = Math.ceil(xStart / interval) * interval;
-    const ticks: number[] = [];
-    for (let t = first; t <= xEnd; t += interval) ticks.push(t);
-    return ticks;
-  })();
+  const data      = response?.data || [];
+  const regime    = response?.regime;
+  const date      = response?.date || new Date().toISOString().slice(0, 10);
+  const bounds    = sessionBoundsIST(date);
+  const xStart    = bounds.start;
+  const xEnd      = bounds.end;
+  const lastPoint = data[data.length - 1];
+  const diff      = lastPoint?.diff ?? 0;
 
   const xAxisProps = {
-    dataKey:           'ts' as const,
-    type:              'number' as const,
-    scale:             'time' as const,
-    domain:            [xStart, xEnd] as [number, number],
-    ticks:             sessionTicks,
-    tickFormatter:     fmtTick,
-    allowDataOverflow: false,
-    tick:              { fontSize: 10, fill: '#a1a1aa', fontWeight: 500 as const },
-    tickLine:          false,
-    axisLine:          { stroke: '#27272a' },
+    dataKey: 'ts',
+    type: 'number' as const,
+    domain: [xStart, xEnd],
+    tickFormatter: fmtTick,
+    ticks: [
+      new Date(`${date}T09:15:00+05:30`).getTime(),
+      new Date(`${date}T10:30:00+05:30`).getTime(),
+      new Date(`${date}T11:45:00+05:30`).getTime(),
+      new Date(`${date}T13:00:00+05:30`).getTime(),
+      new Date(`${date}T14:15:00+05:30`).getTime(),
+      new Date(`${date}T15:30:00+05:30`).getTime(),
+    ],
+    tick: { fontSize: 10, fill: '#a1a1aa', fontWeight: 500 },
+    tickLine: false,
+    axisLine: false,
   };
-  const gridProps = { strokeDasharray: '4 4', stroke: '#27272a', vertical: false as const };
 
-  if (loading) {
-    return (
-      <div className="flex flex-col items-center justify-center py-24 gap-3">
-        <div className="w-6 h-6 border-2 border-zinc-700 border-t-zinc-400 rounded-full animate-spin" />
-        <p className="text-sm text-zinc-400 font-medium">Loading OI data…</p>
-      </div>
-    );
-  }
+  const gridProps = {
+    strokeDasharray: '3 3',
+    stroke: '#27272a',
+    vertical: true,
+    horizontal: true,
+  };
 
-  if (error) {
-    return (
-      <div className="flex flex-col items-center justify-center py-24 gap-3">
-        <p className="text-sm text-zinc-400 font-medium text-center max-w-sm">
-          {error.includes('No IV snapshot') || error.includes('No data')
-            ? 'No OI snapshot data for today — start iv_snapshot_collector.py (auto-starts with the server)'
-            : error}
-        </p>
-        <p className="text-xs text-zinc-600 font-mono">python scripts/tools/iv_snapshot_collector.py</p>
-      </div>
-    );
-  }
+  // Helper for actionable readout recommendation
+  const isConfirmedBullish = regime?.confirmed && regime?.label.includes('Bullish');
+  const isConfirmedBearish = regime?.confirmed && regime?.label.includes('Bearish');
 
   return (
-    <div className="flex flex-col gap-4">
+    <div className="flex flex-col gap-6 py-2">
+      {/* ── Top Bar ──────────────────────────────────────────────────── */}
+      <div className="flex items-center justify-between flex-wrap gap-4 bg-zinc-900/60 border border-zinc-800 rounded-2xl p-4">
+        <div className="flex items-center gap-3">
+          <div>
+            <h2 className="text-base font-bold text-white tracking-tight">Cumulative Options OI &amp; Regime</h2>
+            <p className="text-xs text-zinc-400">
+              NIFTY Expiry: <span className="text-zinc-200 font-semibold">{response?.expiry || '—'}</span> · ATM: <span className="text-zinc-200 font-semibold">{response?.atm ? response.atm.toLocaleString('en-IN') : '—'}</span>
+            </p>
+          </div>
+        </div>
 
-      {/* ── Status bar ──────────────────────────────────────────────── */}
-      <div className="flex items-center gap-5 px-4 py-3 bg-zinc-900/80 rounded-xl border border-zinc-800 flex-wrap">
-        <StatChip label="Spot"     value={spot > 0 ? spot.toLocaleString('en-IN') : '—'} />
-        <div className="w-px h-6 bg-zinc-800" />
-        <StatChip label="ATM"      value={atm  > 0 ? atm.toLocaleString('en-IN')  : '—'} />
-        <div className="w-px h-6 bg-zinc-800" />
-        <StatChip label="Total CE OI" value={ceOI > 0 ? fmtOI(ceOI) : '—'} color="text-blue-400" />
-        <div className="w-px h-6 bg-zinc-800" />
-        <StatChip label="Total PE OI" value={peOI > 0 ? fmtOI(peOI) : '—'} color="text-red-400" />
-        <div className="w-px h-6 bg-zinc-800" />
-        <StatChip label="Chain PCR"
-          value={pcr > 0 ? pcr.toFixed(2) : '—'}
-          sub={pcr > 0 ? pcrLabel : undefined}
-          color={pcrColor}
-        />
-        <div className="w-px h-6 bg-zinc-800" />
-        <StatChip label="PE − CE"
-          value={ceOI > 0 || peOI > 0 ? `${diff >= 0 ? '+' : ''}${fmtOI(diff)}` : '—'}
-          sub={diffLabel}
-          color={diffColor}
-        />
-        <div className="w-px h-6 bg-zinc-800" />
-        <StatChip label="Expiry" value={response?.expiry || '—'} />
-
-        <div className="ml-auto flex items-center gap-3 flex-wrap">
-          {regime?.transitionFlag && (
-            <span className={`text-[10px] font-bold px-2.5 py-1 rounded-full tracking-widest uppercase border ${
-              regime.transitionDirection === 'bullish'
-                ? 'text-emerald-400 bg-emerald-500/10 border-emerald-500/30'
-                : 'text-red-400 bg-red-500/10 border-red-500/30'
-            }`}>
-              ⇄ Regime shift: {regime.transitionDirection === 'bullish' ? 'turning bullish' : 'turning bearish'}
-            </span>
-          )}
-          {date && (
-            <span className="text-[10px] font-bold text-zinc-400 bg-zinc-800/80 border border-zinc-700 px-2.5 py-1 rounded-full tracking-widest uppercase">
-              DATA: {date}
-            </span>
-          )}
-          {data.length > 0 && (
-            <span className="text-[10px] text-zinc-400 tabular-nums">
-              {data.length} pt{data.length !== 1 ? 's' : ''} · refreshes every 30s
-            </span>
-          )}
-
-          {/* Wing count */}
-          <div className="flex items-center gap-1.5">
-            <span className="text-[10px] font-bold text-zinc-400 uppercase tracking-widest whitespace-nowrap">
-              Strikes ±
-            </span>
+        <div className="flex items-center gap-4">
+          <div className="flex items-center gap-2">
+            <label htmlFor="wings-input" className="text-xs text-zinc-400 font-medium">ATM ± Wings:</label>
             <input
+              id="wings-input"
               type="number"
               min={3}
               max={10}
@@ -355,7 +357,7 @@ export default function OptionsCumulativeOITab({ expiry: _expiry }: { expiry: st
 
           <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold bg-emerald-500/15 text-emerald-400 border border-emerald-500/30">
             <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
-            CSV
+            LIVE
           </span>
         </div>
       </div>
@@ -368,7 +370,7 @@ export default function OptionsCumulativeOITab({ expiry: _expiry }: { expiry: st
         <>
         {/* ── Options Regime Score ────────────────────────────────────── */}
         {regime && (
-          <div className="bg-zinc-900/60 border border-zinc-800 rounded-2xl p-5">
+          <div className="bg-zinc-900/60 border border-zinc-800 rounded-2xl p-5 space-y-4">
             {regime.warmingUp ? (
               <div className="flex items-center gap-3 py-2">
                 <div className="w-4 h-4 border-2 border-zinc-700 border-t-zinc-500 rounded-full animate-spin" />
@@ -378,13 +380,16 @@ export default function OptionsCumulativeOITab({ expiry: _expiry }: { expiry: st
                 </p>
               </div>
             ) : (
-              <div className="flex flex-col gap-3">
-                {/* Market Regime (bias) */}
+              <div className="flex flex-col gap-4">
+                {/* Market Regime Header */}
                 <div className="flex items-center justify-between flex-wrap gap-3">
                   <div>
-                    <p className="text-sm font-bold text-white tracking-tight">Market Regime</p>
+                    <div className="flex items-center gap-2">
+                      <ShieldCheck className="h-4 w-4 text-sky-400" />
+                      <p className="text-sm font-bold text-white tracking-tight">Market Regime Score</p>
+                    </div>
                     <p className="text-[10px] text-zinc-400 mt-0.5">
-                      0.25×OI_Z* + 0.20×Slope_Z* + 0.10×Accel_Z* + 0.25×WPI_Z* + 0.20×PriceTrend_Z* (Z* capped ±3)
+                      Weighted Z-score: 0.25×OI_Z + 0.20×Slope_Z + 0.10×Accel_Z + 0.25×WPI_Z + 0.20×PriceTrend_Z
                     </p>
                   </div>
                   <div className="flex items-center gap-4">
@@ -412,27 +417,66 @@ export default function OptionsCumulativeOITab({ expiry: _expiry }: { expiry: st
                   <StatChip label={`${zoneDot(regime.priceTrendZone)} PriceTrend_Z`} value={`${regime.priceTrendZ >= 0 ? '+' : ''}${regime.priceTrendZ.toFixed(2)}`} sub={regime.priceTrendZone} />
                 </div>
 
-                {/* Trade Confirmation — deliberately separate from the bias above:
-                    "I think the market is bullish" vs "I have enough evidence to sell a bullish structure." */}
-                <div className="flex items-center gap-5 flex-wrap border-t border-zinc-800 pt-3">
+                {/* Trade Confirmation & Reason */}
+                <div className="flex items-center gap-5 flex-wrap border-t border-zinc-800/80 pt-3">
                   <StatChip label="Confidence" value={regime.confidenceLabel} sub={regime.confidence.toFixed(2)} />
                   <StatChip label="Confirmation" value={regime.confirmationState} color={confirmationColor(regime.confirmationState)} />
                   <div className="flex-1 min-w-[220px]">
-                    <span className="text-[10px] font-bold text-zinc-300 uppercase tracking-widest">Reason</span>
+                    <span className="text-[10px] font-bold text-zinc-300 uppercase tracking-widest">Confirmation Status</span>
                     <p className="text-xs text-zinc-300 mt-0.5">{regime.reason}</p>
                   </div>
                 </div>
 
-                <div className="flex items-center justify-between flex-wrap gap-2">
-                  <p className="text-xs text-zinc-300">
-                    Strategy (informational): <span className="font-semibold text-zinc-100">{regime.strategy}</span>
-                  </p>
-                  <p className="text-[10px] text-zinc-500">Informational only — not a trade signal</p>
+                {/* ── Actionable Trade Blueprint Card ────────────────────── */}
+                <div className="rounded-xl border border-sky-800/60 bg-sky-950/20 p-4 space-y-2">
+                  <div className="flex items-center justify-between flex-wrap gap-2">
+                    <div className="flex items-center gap-2">
+                      <Sparkles className="h-4 w-4 text-sky-400" />
+                      <h3 className="text-xs font-bold uppercase tracking-wider text-sky-300">Actionable Trading Blueprint</h3>
+                    </div>
+                    <Link
+                      href="/strategy-builder"
+                      className="flex items-center gap-1 text-[11px] font-bold text-sky-400 hover:text-sky-200 transition-colors"
+                    >
+                      <span>Model in Strategy Builder</span>
+                      <ArrowRight className="h-3 w-3" />
+                    </Link>
+                  </div>
+
+                  <div className="grid grid-cols-1 md:grid-cols-3 gap-3 pt-1">
+                    <div className="rounded-lg border border-zinc-800 bg-zinc-950/70 p-2.5">
+                      <span className="text-[10px] font-bold uppercase tracking-widest text-zinc-400">Market Bias</span>
+                      <p className={`mt-0.5 text-xs font-bold ${regimeColor(regime.label)}`}>
+                        {regime.label} {regime.confirmed ? '(Confirmed)' : '(Pending)'}
+                      </p>
+                    </div>
+
+                    <div className="rounded-lg border border-zinc-800 bg-zinc-950/70 p-2.5">
+                      <span className="text-[10px] font-bold uppercase tracking-widest text-zinc-400">Recommended Structure</span>
+                      <p className="mt-0.5 text-xs font-bold text-white">
+                        {isConfirmedBullish
+                          ? 'Bull Put Credit Spread (Sell OTM PE / Buy Lower PE)'
+                          : isConfirmedBearish
+                          ? 'Bear Call Credit Spread (Sell OTM CE / Buy Higher CE)'
+                          : 'Stand Aside / Delta-Neutral Range'}
+                      </p>
+                    </div>
+
+                    <div className="rounded-lg border border-zinc-800 bg-zinc-950/70 p-2.5">
+                      <span className="text-[10px] font-bold uppercase tracking-widest text-zinc-400">Institutional Activity</span>
+                      <p className="mt-0.5 text-xs font-medium text-zinc-300">
+                        {regime.wpiZ > 0.5
+                          ? 'Institutions writing Puts (Building Floor)'
+                          : regime.wpiZ < -0.5
+                          ? 'Institutions writing Calls (Building Resistance)'
+                          : 'Balanced Option Premium Collection'}
+                      </p>
+                    </div>
+                  </div>
                 </div>
 
-                <p className="text-[10px] text-zinc-600 border-t border-zinc-800 pt-2">
-                  Weights are the spec's untuned defaults, not backtested. Optimize for expected value
-                  (P(win)×avgWin − P(loss)×avgLoss), not win rate, before sizing trades off this score.
+                <p className="text-[10px] text-zinc-500 border-t border-zinc-800/80 pt-2">
+                  Informational regime readout. Always verify expected value (P(win)×avgWin − P(loss)×avgLoss) and strike distance before opening live options orders.
                 </p>
               </div>
             )}
@@ -603,55 +647,178 @@ export default function OptionsCumulativeOITab({ expiry: _expiry }: { expiry: st
         </div>
 
         {/* ── Chart 3: OI Divergence / Slope / WPI — standardized (Z-score) ── */}
-        <div className="bg-zinc-900/60 border border-zinc-800 rounded-2xl p-5">
-          <div className="flex items-center justify-between mb-4">
+        <div className="bg-zinc-900/60 border border-zinc-800 rounded-2xl p-5 space-y-4">
+          <div className="flex items-center justify-between flex-wrap gap-3">
             <div>
-              <p className="text-sm font-bold text-white tracking-tight">OI Pressure — Standardized (Z-score)</p>
+              <div className="flex items-center gap-2">
+                <p className="text-sm font-bold text-white tracking-tight">OI Pressure &amp; Flow Dynamics — Standardized (Z-Score)</p>
+                <button
+                  type="button"
+                  onClick={() => setShowZGuide(prev => !prev)}
+                  className="flex items-center gap-1 text-[10px] font-bold text-sky-400 hover:text-sky-200 transition-colors"
+                >
+                  <HelpCircle className="h-3.5 w-3.5" />
+                  <span>{showZGuide ? 'Hide Guide' : 'How to Read Z-Scores'}</span>
+                </button>
+              </div>
               <p className="text-[10px] text-zinc-400 mt-0.5">
-                All three z-scored to a comparable scale · positive = bullish pressure/momentum/writing activity
+                Standardized scale [-3 to +3] · <strong className="text-emerald-400">&gt; +0.5 = Bullish Force</strong> (Put Support) · <strong className="text-red-400">&lt; -0.5 = Bearish Force</strong> (Call Resistance)
               </p>
             </div>
-            <div className="flex items-center gap-3 text-[10px] font-semibold">
-              <span className="flex items-center gap-1.5">
-                <span className="w-3 h-3 rounded-sm bg-blue-400" />
-                <span className="text-zinc-300">OI_Z</span>
-              </span>
-              <span className="flex items-center gap-1.5">
-                <span className="w-3 h-3 rounded-sm bg-amber-400" />
-                <span className="text-zinc-300">Slope_Z</span>
-              </span>
-              <span className="flex items-center gap-1.5">
-                <span className="w-3 h-3 rounded-sm bg-purple-400" />
-                <span className="text-zinc-300">WPI_Z</span>
-              </span>
+
+            {/* Metric Filter Tabs */}
+            <div className="flex items-center gap-1 rounded-lg border border-zinc-800 bg-zinc-950 p-1 text-[11px] font-medium">
+              <button
+                type="button"
+                onClick={() => setMetricFilter('all')}
+                className={`flex items-center gap-1 rounded px-2 py-1 transition-colors ${metricFilter === 'all' ? 'bg-zinc-800 font-bold text-white' : 'text-zinc-400 hover:text-zinc-200'}`}
+              >
+                <Layers className="h-3 w-3" />
+                <span>All 3 Factors</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setMetricFilter('oiZ')}
+                className={`flex items-center gap-1 rounded px-2 py-1 transition-colors ${metricFilter === 'oiZ' ? 'bg-blue-950/80 font-bold text-blue-300 border border-blue-800/80' : 'text-zinc-400 hover:text-blue-300'}`}
+              >
+                <span>OI Balance (OI_Z)</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setMetricFilter('slopeZ')}
+                className={`flex items-center gap-1 rounded px-2 py-1 transition-colors ${metricFilter === 'slopeZ' ? 'bg-amber-950/80 font-bold text-amber-300 border border-amber-800/80' : 'text-zinc-400 hover:text-amber-300'}`}
+              >
+                <span>OI Speed (Slope_Z)</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setMetricFilter('wpiZ')}
+                className={`flex items-center gap-1 rounded px-2 py-1 transition-colors ${metricFilter === 'wpiZ' ? 'bg-purple-950/80 font-bold text-purple-300 border border-purple-800/80' : 'text-zinc-400 hover:text-purple-300'}`}
+              >
+                <span>Cash Flow (WPI_Z)</span>
+              </button>
             </div>
           </div>
 
-          <ResponsiveContainer width="100%" height={260}>
-            <LineChart data={data} margin={{ top: 8, right: 16, left: 0, bottom: 0 }}>
+          {/* Current Live Readings Bar */}
+          {lastPoint && (
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 rounded-xl border border-zinc-800/80 bg-zinc-950/60 p-2.5 text-xs">
+              <div className="flex items-center justify-between px-2">
+                <div className="flex items-center gap-1.5">
+                  <span className="h-2 w-2 rounded-full bg-blue-400" />
+                  <span className="font-semibold text-zinc-300">OI Balance (OI_Z):</span>
+                </div>
+                <div className="flex items-center gap-1 font-mono font-bold">
+                  <span className="text-white">{lastPoint.oiZ >= 0 ? '+' : ''}{lastPoint.oiZ.toFixed(2)}</span>
+                  <span className={`text-[10px] font-sans px-1 rounded ${lastPoint.oiZ > 0.5 ? 'bg-emerald-950 text-emerald-400' : lastPoint.oiZ < -0.5 ? 'bg-red-950 text-red-400' : 'text-zinc-400'}`}>
+                    {lastPoint.oiZ > 0.5 ? 'Put Support' : lastPoint.oiZ < -0.5 ? 'Call Resistance' : 'Neutral'}
+                  </span>
+                </div>
+              </div>
+
+              <div className="flex items-center justify-between px-2 border-t sm:border-t-0 sm:border-l border-zinc-800 pt-1.5 sm:pt-0">
+                <div className="flex items-center gap-1.5">
+                  <span className="h-2 w-2 rounded-full bg-amber-400" />
+                  <span className="font-semibold text-zinc-300">OI Velocity (Slope_Z):</span>
+                </div>
+                <div className="flex items-center gap-1 font-mono font-bold">
+                  <span className="text-white">{lastPoint.slopeZ >= 0 ? '+' : ''}{lastPoint.slopeZ.toFixed(2)}</span>
+                  <span className={`text-[10px] font-sans px-1 rounded ${lastPoint.slopeZ > 0.5 ? 'bg-emerald-950 text-emerald-400' : lastPoint.slopeZ < -0.5 ? 'bg-red-950 text-red-400' : 'text-zinc-400'}`}>
+                    {lastPoint.slopeZ > 0.5 ? 'Accelerating' : lastPoint.slopeZ < -0.5 ? 'Decelerating' : 'Steady'}
+                  </span>
+                </div>
+              </div>
+
+              <div className="flex items-center justify-between px-2 border-t sm:border-t-0 sm:border-l border-zinc-800 pt-1.5 sm:pt-0">
+                <div className="flex items-center gap-1.5">
+                  <span className="h-2 w-2 rounded-full bg-purple-400" />
+                  <span className="font-semibold text-zinc-300">Money Flow (WPI_Z):</span>
+                </div>
+                <div className="flex items-center gap-1 font-mono font-bold">
+                  <span className="text-white">{lastPoint.wpiZ >= 0 ? '+' : ''}{lastPoint.wpiZ.toFixed(2)}</span>
+                  <span className={`text-[10px] font-sans px-1 rounded ${lastPoint.wpiZ > 0.5 ? 'bg-emerald-950 text-emerald-400' : lastPoint.wpiZ < -0.5 ? 'bg-red-950 text-red-400' : 'text-zinc-400'}`}>
+                    {lastPoint.wpiZ > 0.5 ? 'Put Writing Inflow' : lastPoint.wpiZ < -0.5 ? 'Call Writing Inflow' : 'Balanced'}
+                  </span>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* Interactive Z-Score Guide & Legend Banner */}
+          {showZGuide && (
+            <div className="rounded-xl border border-zinc-800 bg-zinc-950 p-4 space-y-3 text-xs">
+              <div className="flex items-center gap-1.5 font-bold text-zinc-200">
+                <HelpCircle className="h-4 w-4 text-sky-400" />
+                <span>Plain-Language Z-Score Cheat Sheet</span>
+              </div>
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-3 text-[11px]">
+                <div className="rounded-lg border border-zinc-800/80 bg-zinc-900/60 p-3 space-y-1">
+                  <div className="flex items-center gap-1 font-bold text-blue-400">
+                    <TrendingUp className="h-3.5 w-3.5" />
+                    <span>OI_Z (Accumulated OI Balance)</span>
+                  </div>
+                  <p className="text-zinc-400">
+                    Measures Put vs Call OI volume. <strong className="text-emerald-400">&gt; +0.5</strong> means Put writing forms support. <strong className="text-red-400">&lt; -0.5</strong> means Call writing forms resistance.
+                  </p>
+                </div>
+                <div className="rounded-lg border border-zinc-800/80 bg-zinc-900/60 p-3 space-y-1">
+                  <div className="flex items-center gap-1 font-bold text-amber-400">
+                    <Zap className="h-3.5 w-3.5" />
+                    <span>Slope_Z (OI Velocity / Speed)</span>
+                  </div>
+                  <p className="text-zinc-400">
+                    Measures the 15-minute linear regression slope of writing. Indicates whether writing is aggressively accelerating or cooling off.
+                  </p>
+                </div>
+                <div className="rounded-lg border border-zinc-800/80 bg-zinc-900/60 p-3 space-y-1">
+                  <div className="flex items-center gap-1 font-bold text-purple-400">
+                    <DollarSign className="h-3.5 w-3.5" />
+                    <span>WPI_Z (Weighted Premium Intake)</span>
+                  </div>
+                  <p className="text-zinc-400">
+                    Measures actual ₹ premium collected by option sellers. <strong className="text-emerald-400">&gt; +0.5</strong> = Big money selling Puts. <strong className="text-red-400">&lt; -0.5</strong> = Selling Calls.
+                  </p>
+                </div>
+              </div>
+            </div>
+          )}
+
+          <ResponsiveContainer width="100%" height={280}>
+            <LineChart data={data} margin={{ top: 12, right: 16, left: 0, bottom: 0 }}>
               <CartesianGrid {...gridProps} />
               <XAxis {...xAxisProps} />
               <YAxis
                 tick={{ fontSize: 10, fill: '#a1a1aa', fontWeight: 500 }}
                 tickLine={false}
                 axisLine={false}
-                domain={['auto', 'auto']}
+                domain={[-3, 3]}
                 width={40}
                 tickFormatter={v => v.toFixed(1)}
               />
-              <Tooltip
-                contentStyle={{ background: '#09090b', border: '1px solid #3f3f46', borderRadius: 12, fontSize: 11 }}
-                labelFormatter={v => (typeof v === 'number' ? fmtTick(v) : String(v))}
-                formatter={(v, name) => [typeof v === 'number' ? v.toFixed(2) : String(v), String(name)]}
-              />
-              <ReferenceLine y={0} stroke="#52525b" strokeWidth={1.5} />
+              <Tooltip content={<ZScoreTooltip />} cursor={{ stroke: '#3f3f46', strokeWidth: 1 }} />
+              
+              {/* Shaded Bullish and Bearish Reference Zones */}
+              <ReferenceArea y1={0.5} y2={3.0} fill="#10b981" fillOpacity={0.04} />
+              <ReferenceArea y1={-3.0} y2={-0.5} fill="#ef4444" fillOpacity={0.04} />
+
+              <ReferenceLine y={0.5} stroke="#10b981" strokeDasharray="3 3" strokeWidth={1} label={{ value: '+0.5 Bullish', fill: '#10b981', fontSize: 10, position: 'right' }} />
+              <ReferenceLine y={-0.5} stroke="#ef4444" strokeDasharray="3 3" strokeWidth={1} label={{ value: '-0.5 Bearish', fill: '#ef4444', fontSize: 10, position: 'right' }} />
+              <ReferenceLine y={0} stroke="#71717a" strokeWidth={1.5} />
+              
               <Legend
                 wrapperStyle={{ fontSize: 11, paddingTop: 12 }}
                 formatter={(v: string) => <span style={{ color: '#d4d4d8', fontWeight: 600 }}>{v}</span>}
               />
-              <Line type="monotone" dataKey="oiZ" name="OI_Z" stroke="#60a5fa" strokeWidth={2} dot={false} activeDot={{ r: 4 }} />
-              <Line type="monotone" dataKey="slopeZ" name="Slope_Z" stroke="#fbbf24" strokeWidth={2} dot={false} activeDot={{ r: 4 }} />
-              <Line type="monotone" dataKey="wpiZ" name="WPI_Z" stroke="#c084fc" strokeWidth={2} dot={false} activeDot={{ r: 4 }} />
+
+              {(metricFilter === 'all' || metricFilter === 'oiZ') && (
+                <Line type="monotone" dataKey="oiZ" name="OI_Z" stroke="#60a5fa" strokeWidth={2.5} dot={false} activeDot={{ r: 4 }} />
+              )}
+              {(metricFilter === 'all' || metricFilter === 'slopeZ') && (
+                <Line type="monotone" dataKey="slopeZ" name="Slope_Z" stroke="#fbbf24" strokeWidth={2} dot={false} activeDot={{ r: 4 }} />
+              )}
+              {(metricFilter === 'all' || metricFilter === 'wpiZ') && (
+                <Line type="monotone" dataKey="wpiZ" name="WPI_Z" stroke="#c084fc" strokeWidth={2} dot={false} activeDot={{ r: 4 }} />
+              )}
             </LineChart>
           </ResponsiveContainer>
         </div>
