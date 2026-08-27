@@ -22,7 +22,8 @@ import {
 } from '@/lib/positionLegs';
 import {
   buildMultiExpiryCurve, computePayoffStats, legsMissingIv, daysBetweenDates,
-  impliedVolFromPrice, lookupChainLegData, type ChainOc, type PayoffStats,
+  impliedVolFromPrice, lookupChainLegData, resolveFreeformLegs,
+  type ChainOc, type PayoffStats, type ResolvedLeg,
 } from '@/lib/optionsStrategy';
 import { fetchMarginSummary } from '@/lib/optionsMargin';
 import { STRIKE_STEP, lotSizeOverride, type AnalyticsUnderlying } from '@/lib/analyticsUnderlyings';
@@ -43,6 +44,7 @@ import SuggestedActionsCard from '@/components/analytics/SuggestedActionsCard';
 import AnalyzeModal from '@/components/analytics/AnalyzeModal';
 import PositionsLegTable, { legPnl } from '@/components/analytics/PositionsLegTable';
 import AddStrikePicker from '@/components/analytics/AddStrikePicker';
+import DraftStrikeBuilder, { type DraftLegSpec } from '@/components/analytics/DraftStrikeBuilder';
 import GreeksTab from '@/components/analytics/GreeksTab';
 import PnlTableTab from '@/components/analytics/PnlTableTab';
 
@@ -123,6 +125,9 @@ export default function PositionsAnalysis({ underlying }: { underlying: Analytic
   const [closingKeys, setClosingKeys] = useState<Set<string>>(new Set());
   const [addingKeys, setAddingKeys] = useState<Set<string>>(new Set());
   const [selectedKeys, setSelectedKeys] = useState<Set<string>>(new Set());
+  const [draftLegs, setDraftLegs] = useState<DraftLegSpec[]>([]);
+  const [draftBuilderExpiry, setDraftBuilderExpiry] = useState<string | null>(null);
+  const [placingDrafts, setPlacingDrafts] = useState(false);
   const [confirmExitExpiry, setConfirmExitExpiry] = useState<string | null>(null);
   const [spanIndex, setSpanIndex] = useState<number>(DEFAULT_SPAN_INDEX);
   const [showOi, setShowOi] = useState(true);
@@ -325,6 +330,31 @@ export default function PositionsAnalysis({ underlying }: { underlying: Analytic
     });
   }, []);
 
+  const handlePlaceDrafts = useCallback(async () => {
+    if (!lotSize || placingDrafts || !draftLegs.length) return;
+    setPlacingDrafts(true);
+    for (const d of draftLegs) {
+      // Sequential — same reasoning as handleExitScope: avoid bursting the
+      // broker order API and keep per-leg toasts in a legible order.
+      // eslint-disable-next-line no-await-in-loop
+      const map = await fetchStrikeMap(broker, underlying, d.expiry);
+      const entry = map?.strikes?.[String(d.strike)];
+      const label = `${d.side === 'BUY' ? 'B' : 'S'} ${d.strike} ${d.type} × ${d.lots}L`;
+      if (!entry) { addToast('error', `${label} failed`, 'Strike data unavailable for this expiry'); continue; }
+      // eslint-disable-next-line no-await-in-loop
+      const res = await placeOptionOrder({
+        broker, underlying, side: d.side, quantity: d.lots * lotSize,
+        dhanSecurityId: d.type === 'CE' ? entry.ceId : entry.peId,
+        tradingSymbol: d.type === 'CE' ? entry.ceSymbol : entry.peSymbol,
+      });
+      if (res.ok) addToast('success', `${label} placed`, res.orderId ? `ID: ${res.orderId}` : undefined);
+      else addToast('error', `${label} failed`, res.error);
+    }
+    setDraftLegs([]);
+    setPlacingDrafts(false);
+    setTimeout(loadPositions, 1000);
+  }, [draftLegs, broker, underlying, lotSize, placingDrafts, addToast, loadPositions]);
+
   const handleAnalyze = useCallback(async () => {
     setShowAnalyzeModal(true);
     setAnalyzing(true);
@@ -483,14 +513,25 @@ export default function PositionsAnalysis({ underlying }: { underlying: Analytic
   const bookExpiries = useMemo(() => legExpiries(legs), [legs]);
   const bookExpiriesKey = bookExpiries.join(',');
 
-  // ── chains, one per expiry present in the book ─────────────────────────────
+  // Expiries a draft leg needs a chain for — the builder's in-progress
+  // (not-yet-added) expiry selection plus every committed draft leg's expiry.
+  const draftExpiries = useMemo(
+    () => [...new Set([...draftLegs.map((d) => d.expiry), draftBuilderExpiry].filter((e): e is string => !!e))],
+    [draftLegs, draftBuilderExpiry],
+  );
+  const draftExpiriesKey = draftExpiries.join(',');
+
+  // ── chains, one per expiry present in the book (+ any draft expiries) ──────
   useEffect(() => {
-    if (!bookExpiries.length) return;
+    if (!bookExpiries.length && !draftExpiries.length) return;
     let cancelled = false;
 
     const fetchChains = async () => {
       setChainLoading(true);
-      const wanted = bookExpiries.slice(0, MAX_CHAIN_EXPIRIES);
+      // Real positions take priority within the rate-limited budget — a draft
+      // is exploratory, not committed capital, and can wait a poll cycle.
+      const extraDraft = draftExpiries.filter((e) => !bookExpiries.includes(e));
+      const wanted = [...bookExpiries, ...extraDraft].slice(0, MAX_CHAIN_EXPIRIES);
       for (let i = 0; i < wanted.length; i++) {
         if (cancelled) return;
         // Spaced sequentially: the Dhan chain API 429s on parallel calls for the
@@ -512,8 +553,12 @@ export default function PositionsAnalysis({ underlying }: { underlying: Analytic
           if (!cancelled) setChainError(String((err as Error).message ?? err));
         }
       }
-      if (bookExpiries.length > MAX_CHAIN_EXPIRIES) {
-        setChainError(`Greeks loaded for the nearest ${MAX_CHAIN_EXPIRIES} expiries only; ${bookExpiries.length - MAX_CHAIN_EXPIRIES} further expiry/expiries will price without IV.`);
+      const droppedBook = Math.max(0, bookExpiries.length - MAX_CHAIN_EXPIRIES);
+      const droppedDraft = extraDraft.length - Math.max(0, MAX_CHAIN_EXPIRIES - bookExpiries.length);
+      if (droppedBook > 0) {
+        setChainError(`Greeks loaded for the nearest ${MAX_CHAIN_EXPIRIES} expiries only; ${droppedBook} further expiry/expiries will price without IV.`);
+      } else if (droppedDraft > 0) {
+        setChainError(`Chain budget full with real positions; ${droppedDraft} draft expiry/expiries will load once a slot frees up.`);
       }
       if (!cancelled) setChainLoading(false);
     };
@@ -523,11 +568,12 @@ export default function PositionsAnalysis({ underlying }: { underlying: Analytic
     // freezing at the values captured when the book's expiry set last changed.
     const id = setInterval(fetchChains, CHAIN_POLL_MS);
     return () => { cancelled = true; clearInterval(id); };
-    // Deliberately keyed on the JOINED expiry list, not the array: `bookExpiries`
-    // is a fresh array on every 2 s positions poll, so depending on the reference
-    // would refetch a rate-limited chain API continuously.
+    // Deliberately keyed on the JOINED expiry lists, not the arrays: `bookExpiries`
+    // is a fresh array on every 2 s positions poll and `draftExpiries` is a fresh
+    // array on every render that touches draft state, so depending on either
+    // reference would refetch a rate-limited chain API continuously.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [bookExpiriesKey, underlying]);
+  }, [bookExpiriesKey, draftExpiriesKey, underlying]);
 
   // ── filtering ──────────────────────────────────────────────────────────────
   const visibleLegs = useMemo(
@@ -624,6 +670,68 @@ export default function PositionsAnalysis({ underlying }: { underlying: Analytic
       ? computePayoffStats(pricedLegs, spot, 1, finalExpiry, strikeStep, spanPct)
       : null),
     [pricedLegs, spot, finalExpiry, strikeStep, spanPct],
+  );
+
+  // ── draft ("what-if") legs — client-only, resolved against the same chain
+  // cache, never touching the broker until the user commits ──────────────────
+  const draftGroups = useMemo(() => {
+    const byExpiry = new Map<string, DraftLegSpec[]>();
+    for (const d of draftLegs) {
+      const arr = byExpiry.get(d.expiry) ?? [];
+      arr.push(d);
+      byExpiry.set(d.expiry, arr);
+    }
+    return byExpiry;
+  }, [draftLegs]);
+
+  const { resolvedDraftLegs, draftMissingStrikes } = useMemo(() => {
+    const resolved: ResolvedLeg[] = [];
+    const missing: number[] = [];
+    for (const [expiry, specs] of draftGroups) {
+      const oc = chains[expiry];
+      if (!oc) { missing.push(...specs.map((s) => s.strike)); continue; }
+      const { legs: legsFromChain, missingStrikes } = resolveFreeformLegs(
+        specs.map((s) => ({ strike: s.strike, type: s.type, side: s.side, qtyLots: s.lots * (lotSize ?? 0) })),
+        oc,
+      );
+      // resolveFreeformLegs does not stamp `.expiry` — without it, a draft leg
+      // on a later expiry than the book would silently price at pure intrinsic
+      // (buildMultiExpiryCurve treats a legless expiry as "expires today").
+      resolved.push(...legsFromChain.map((l) => ({ ...l, expiry })));
+      missing.push(...missingStrikes);
+    }
+    return { resolvedDraftLegs: resolved, draftMissingStrikes: missing };
+  }, [draftGroups, chains, lotSize]);
+
+  const combinedLegs = useMemo(() => [...pricedLegs, ...resolvedDraftLegs], [pricedLegs, resolvedDraftLegs]);
+
+  const draftExpiriesForCurve = useMemo(
+    () => [...new Set(resolvedDraftLegs.map((l) => l.expiry).filter((e): e is string => !!e))],
+    [resolvedDraftLegs],
+  );
+
+  const combinedFinalExpiry = useMemo(() => {
+    const all = [finalExpiry, ...draftExpiriesForCurve].filter((e): e is string => !!e);
+    return all.length ? all.sort().at(-1)! : null;
+  }, [finalExpiry, draftExpiriesForCurve]);
+
+  // Guard on resolvedDraftLegs (actually resolved against a loaded chain),
+  // not draftLegs.length — a draft whose chain hasn't loaded yet must not
+  // draw a misleading flat/unchanged curve.
+  const hasResolvedDrafts = resolvedDraftLegs.length > 0;
+
+  const draftCurve = useMemo(
+    () => (hasResolvedDrafts && spot && combinedFinalExpiry
+      ? buildMultiExpiryCurve(combinedLegs, spot, 1, combinedFinalExpiry, strikeStep, spanPct)
+      : null),
+    [hasResolvedDrafts, combinedLegs, spot, combinedFinalExpiry, strikeStep, spanPct],
+  );
+
+  const draftStats = useMemo<PayoffStats | null>(
+    () => (hasResolvedDrafts && spot && combinedFinalExpiry
+      ? computePayoffStats(combinedLegs, spot, 1, combinedFinalExpiry, strikeStep, spanPct)
+      : null),
+    [hasResolvedDrafts, combinedLegs, spot, combinedFinalExpiry, strikeStep, spanPct],
   );
 
   const ivWarning = useMemo(() => {
@@ -937,6 +1045,19 @@ export default function PositionsAnalysis({ underlying }: { underlying: Analytic
               onError={(label, error) => addToast('error', `${label} failed`, error)}
             />
 
+            <DraftStrikeBuilder
+              broker={broker} underlying={underlying} strikeStep={strikeStep} spot={spot} lotSize={lotSize}
+              chains={chains}
+              draftLegs={draftLegs}
+              onAddDraft={(leg) => setDraftLegs((prev) => [...prev, leg])}
+              onRemoveDraft={(id) => setDraftLegs((prev) => prev.filter((d) => d.id !== id))}
+              onClearDrafts={() => setDraftLegs([])}
+              onExpirySelected={setDraftBuilderExpiry}
+              onPlaceDrafts={handlePlaceDrafts}
+              placing={placingDrafts}
+              missingStrikesCount={draftMissingStrikes.length}
+            />
+
             {!loadedOnce
               ? <p className="px-3 py-6 text-center text-xs text-zinc-500">Loading positions…</p>
               : <PositionsLegTable
@@ -973,12 +1094,25 @@ export default function PositionsAnalysis({ underlying }: { underlying: Analytic
               standaloneMargin={standaloneMargin} standaloneMarginReason={standaloneMarginReason}
               marginAvailable={funds} livePnl={rollup.total} usedMargin={usedMargin} />}
 
+            {draftStats && tab !== 'intraday' && (
+              <div className="rounded-xl border-l-2 border-violet-600">
+                <div className="px-2 pt-2 text-[10px] font-bold uppercase tracking-widest text-violet-400">
+                  Preview — Book + Draft
+                </div>
+                <PayoffMetricStrip
+                  stats={draftStats} lotSize={lotSize ?? 0}
+                  standaloneMargin={null} standaloneMarginReason="Draft preview — margin not computed"
+                  marginAvailable={funds} />
+              </div>
+            )}
+
             {tab === 'payoff' && (
               <div className="rounded-xl border border-zinc-800 bg-zinc-950 p-3">
                 <PositionsPayoffChart
                   height={440}
                   expiryCurve={expiryCurve}
                   targetCurve={targetCurve}
+                  draftCurve={draftCurve}
                   breakevens={stats?.breakevensExpiry ?? []}
                   spot={spot}
                   targetSpot={effectiveTargetSpot}

@@ -22,6 +22,12 @@ interface Props {
   expiryCurve: CurvePoint[];
   /** Pre-expiry curve at the target date. Omit when no leg has usable IV. */
   targetCurve?: CurvePoint[] | null;
+  /**
+   * Real book + draft legs combined, at expiry — a "what if I added this"
+   * overlay. Its x-range is always >= expiryCurve's (drafts only ever widen
+   * the strike set), so it doubles as the domain source whenever present.
+   */
+  draftCurve?: CurvePoint[] | null;
   breakevens: number[];
   spot: number;
   /** Where the "projected" readout is taken — the target-price slider value. */
@@ -97,7 +103,7 @@ export function pnlAt(curve: CurvePoint[], spot: number): number | null {
 }
 
 export default function PositionsPayoffChart({
-  expiryCurve, targetCurve, breakevens, spot, targetSpot,
+  expiryCurve, targetCurve, draftCurve, breakevens, spot, targetSpot,
   expiryLabel, targetLabel, oiBars, showOi, onToggleOi,
   onZoomIn, onZoomOut, canZoomIn, canZoomOut, height, ivWarning, emptyReason,
 }: Props) {
@@ -126,14 +132,23 @@ export default function PositionsPayoffChart({
   const H_ = full ? H_FULL : (height ?? H);
 
   const model = useMemo(() => {
-    if (expiryCurve.length < 2) return null;
+    const hasExpiry = expiryCurve.length >= 2;
+    const hasDraft = !!draftCurve && draftCurve.length >= 2;
+    if (!hasExpiry && !hasDraft) return null;
 
-    const xLo = expiryCurve[0].spot;
-    const xHi = expiryCurve[expiryCurve.length - 1].spot;
+    // draftCurve is built from the real book PLUS draft legs, so its strike
+    // set (and therefore its sampled x-range) is always >= expiryCurve's —
+    // use it as the domain source whenever present, falling back to
+    // expiryCurve when there's no draft (unchanged behavior for everyone
+    // without an active draft).
+    const domainCurve = hasDraft ? draftCurve! : expiryCurve;
+    const xLo = domainCurve[0].spot;
+    const xHi = domainCurve[domainCurve.length - 1].spot;
 
     const allPnl = [
       ...expiryCurve.map((p) => p.pnl),
       ...(targetCurve ?? []).map((p) => p.pnl),
+      ...(draftCurve ?? []).map((p) => p.pnl),
       0,
     ];
     let yLo = Math.min(...allPnl);
@@ -148,8 +163,10 @@ export default function PositionsPayoffChart({
     const path = (c: CurvePoint[]) =>
       c.map((p, i) => `${i ? 'L' : 'M'}${sx(p.spot).toFixed(1)},${sy(p.pnl).toFixed(1)}`).join('');
 
-    const line = path(expiryCurve);
-    const area = `${line}L${sx(xHi).toFixed(1)},${sy(0).toFixed(1)}L${sx(xLo).toFixed(1)},${sy(0).toFixed(1)}Z`;
+    const line = hasExpiry ? path(expiryCurve) : null;
+    const area = hasExpiry
+      ? `${line}L${sx(xHi).toFixed(1)},${sy(0).toFixed(1)}L${sx(xLo).toFixed(1)},${sy(0).toFixed(1)}Z`
+      : null;
 
     // OI bars share the x scale but get their own right-hand axis, so a 60-lakh
     // OI never dictates the rupee axis the P&L curve is read against.
@@ -161,6 +178,7 @@ export default function PositionsPayoffChart({
     return {
       xLo, xHi, yLo, yHi, sx, sy, line, area,
       targetLine: targetCurve && targetCurve.length > 1 ? path(targetCurve) : null,
+      draftLine: hasDraft ? path(draftCurve!) : null,
       zeroY: sy(0),
       xTicks: niceTicks(xLo, xHi, 6),
       yTicks: niceTicks(yLo, yHi, 6),
@@ -170,7 +188,7 @@ export default function PositionsPayoffChart({
         ? Math.max(2, ((W - PAD.left - PAD.right) / visibleOi.length) * 0.34)
         : 4,
     };
-  }, [expiryCurve, targetCurve, oiBars, W, H_]);
+  }, [expiryCurve, targetCurve, draftCurve, oiBars, W, H_]);
 
   if (!model) {
     return (
@@ -186,6 +204,7 @@ export default function PositionsPayoffChart({
   const readoutSpot = hoverSpot ?? targetSpot;
   const expiryPnl = pnlAt(expiryCurve, readoutSpot);
   const targetPnl = targetCurve ? pnlAt(targetCurve, readoutSpot) : null;
+  const draftPnl = draftCurve ? pnlAt(draftCurve, readoutSpot) : null;
 
   const onMove = (e: React.MouseEvent<SVGSVGElement>) => {
     const rect = svgRef.current?.getBoundingClientRect();
@@ -208,12 +227,19 @@ export default function PositionsPayoffChart({
           </span>
         )}
         <div className="ml-auto flex items-center gap-3">
-          <span className="flex items-center gap-1.5 text-[11px] text-zinc-300">
-            <span className="inline-block h-0.5 w-4 bg-emerald-400" /> On Expiry ({expiryLabel})
-          </span>
+          {model.line && (
+            <span className="flex items-center gap-1.5 text-[11px] text-zinc-300">
+              <span className="inline-block h-0.5 w-4 bg-emerald-400" /> On Expiry ({expiryLabel})
+            </span>
+          )}
           {model.targetLine && (
             <span className="flex items-center gap-1.5 text-[11px] text-zinc-300">
               <span className="inline-block h-0.5 w-4 bg-sky-400" /> On {targetLabel}
+            </span>
+          )}
+          {model.draftLine && (
+            <span className="flex items-center gap-1.5 text-[11px] text-zinc-300">
+              <span className="inline-block h-0.5 w-4 border-t-2 border-dashed border-violet-400" /> With Draft
             </span>
           )}
           <button
@@ -306,14 +332,23 @@ export default function PositionsPayoffChart({
         ))}
 
         {/* Expiry curve: green above zero, red below */}
-        <g clipPath="url(#pa-clip-profit)"><path d={model.area} fill="#10b981" fillOpacity={0.18} /></g>
-        <g clipPath="url(#pa-clip-loss)"><path d={model.area} fill="#ef4444" fillOpacity={0.18} /></g>
-        <g clipPath="url(#pa-clip-profit)"><path d={model.line} fill="none" stroke="#10b981" strokeWidth={2} /></g>
-        <g clipPath="url(#pa-clip-loss)"><path d={model.line} fill="none" stroke="#ef4444" strokeWidth={2} /></g>
+        {model.line && model.area && (
+          <>
+            <g clipPath="url(#pa-clip-profit)"><path d={model.area} fill="#10b981" fillOpacity={0.18} /></g>
+            <g clipPath="url(#pa-clip-loss)"><path d={model.area} fill="#ef4444" fillOpacity={0.18} /></g>
+            <g clipPath="url(#pa-clip-profit)"><path d={model.line} fill="none" stroke="#10b981" strokeWidth={2} /></g>
+            <g clipPath="url(#pa-clip-loss)"><path d={model.line} fill="none" stroke="#ef4444" strokeWidth={2} /></g>
+          </>
+        )}
 
         {/* Target-date curve */}
         {model.targetLine && (
           <path d={model.targetLine} fill="none" stroke="#38bdf8" strokeWidth={1.75} />
+        )}
+
+        {/* Draft overlay: real book + hypothetical draft legs, at expiry */}
+        {model.draftLine && (
+          <path d={model.draftLine} fill="none" stroke="#a78bfa" strokeWidth={1.75} strokeDasharray="5 3" />
         )}
 
         <line x1={PAD.left} x2={W - PAD.right} y1={zeroY} y2={zeroY} stroke="#52525b" strokeWidth={1.25} />
@@ -339,28 +374,41 @@ export default function PositionsPayoffChart({
         )}
 
         {/* Readout crosshair — follows the cursor, parks on the target price otherwise */}
-        {readoutSpot >= xLo && readoutSpot <= xHi && expiryPnl !== null && (
+        {readoutSpot >= xLo && readoutSpot <= xHi && (expiryPnl !== null || draftPnl !== null) && (
           <g pointerEvents="none">
             <line x1={sx(readoutSpot)} x2={sx(readoutSpot)} y1={PAD.top} y2={H_ - PAD.bottom}
               stroke="#a1a1aa" strokeWidth={1} strokeDasharray="2 3" />
-            <circle cx={sx(readoutSpot)} cy={sy(expiryPnl)} r={4.5}
-              fill={expiryPnl >= 0 ? '#10b981' : '#ef4444'} stroke="#18181b" strokeWidth={2} />
+            {expiryPnl !== null && (
+              <circle cx={sx(readoutSpot)} cy={sy(expiryPnl)} r={4.5}
+                fill={expiryPnl >= 0 ? '#10b981' : '#ef4444'} stroke="#18181b" strokeWidth={2} />
+            )}
             {targetPnl !== null && (
               <circle cx={sx(readoutSpot)} cy={sy(targetPnl)} r={4} fill="#38bdf8" stroke="#18181b" strokeWidth={2} />
             )}
+            {draftPnl !== null && (
+              <circle cx={sx(readoutSpot)} cy={sy(draftPnl)} r={4} fill="#a78bfa" stroke="#18181b" strokeWidth={2} />
+            )}
             <g transform={`translate(${tooltipLeft ? sx(readoutSpot) - 108 : sx(readoutSpot) + 8}, ${PAD.top + 4})`}>
-              <rect width={100} height={targetPnl !== null ? 40 : 29} rx={5}
-                fill="#18181b" fillOpacity={0.68} stroke="#3f3f46" strokeOpacity={0.7} />
+              <rect width={100}
+                height={18 + (expiryPnl !== null ? 11 : 0) + (targetPnl !== null ? 11 : 0) + (draftPnl !== null ? 11 : 0)}
+                rx={5} fill="#18181b" fillOpacity={0.68} stroke="#3f3f46" strokeOpacity={0.7} />
               <text x={7} y={11} fontSize={7} fill="#a1a1aa" className="font-mono">
                 At {readoutSpot.toLocaleString('en-IN', { maximumFractionDigits: 0 })}
               </text>
-              <text x={7} y={21.5} fontSize={8} fontWeight={700} className="font-mono"
-                fill={expiryPnl >= 0 ? '#10b981' : '#ef4444'}>
-                Expiry {fmtInrCompact(expiryPnl)}
-              </text>
+              {expiryPnl !== null && (
+                <text x={7} y={21.5} fontSize={8} fontWeight={700} className="font-mono"
+                  fill={expiryPnl >= 0 ? '#10b981' : '#ef4444'}>
+                  Expiry {fmtInrCompact(expiryPnl)}
+                </text>
+              )}
               {targetPnl !== null && (
-                <text x={7} y={32} fontSize={8} fontWeight={700} className="font-mono" fill="#38bdf8">
+                <text x={7} y={21.5 + (expiryPnl !== null ? 10.5 : 0)} fontSize={8} fontWeight={700} className="font-mono" fill="#38bdf8">
                   {targetLabel} {fmtInrCompact(targetPnl)}
+                </text>
+              )}
+              {draftPnl !== null && (
+                <text x={7} y={21.5 + (expiryPnl !== null ? 10.5 : 0) + (targetPnl !== null ? 10.5 : 0)} fontSize={8} fontWeight={700} className="font-mono" fill="#a78bfa">
+                  Draft {fmtInrCompact(draftPnl)}
                 </text>
               )}
             </g>
