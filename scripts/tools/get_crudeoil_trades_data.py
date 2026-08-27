@@ -26,6 +26,10 @@ def main():
     helper = DhanHelper(dhan)
 
     # --- Positions ---
+    # A bare "except: pass" here used to report success with an empty list on
+    # ANY failure (network blip, rate limit, transient auth hiccup) — which
+    # renders identically to "you genuinely have zero positions" on the
+    # dashboard. Surface positions failures as a real error instead.
     positions_list = []
     try:
         df_positions = helper.get_positions()
@@ -38,12 +42,12 @@ def main():
                 net_qty = int(row.get('netQty', 0) or 0)
                 cost_price = float(row.get('costPrice', 0) or 0)
                 raw_unrealized = float(row.get('unrealizedProfit', 0) or 0)
-                
+
                 if net_qty != 0:
                     ltp = cost_price + (raw_unrealized / net_qty)
                 else:
                     ltp = float(row.get('lastPrice', 0) or row.get('lastTradedPrice', 0) or 0)
-                
+
                 # Check if it is a crude oil option contract to multiply P&L by the lot size (100)
                 is_option = any(suffix in symbol.upper() for suffix in ["-CE", "-PE", "CALL", "PUT"])
                 multiplier = 100 if is_option else 1
@@ -60,8 +64,9 @@ def main():
                     "realizedProfit": float(row.get('realizedProfit', 0) or 0),
                     "unrealizedProfit": float(row.get('unrealizedProfit', 0) or 0) * multiplier,
                 })
-    except Exception:
-        pass
+    except Exception as e:
+        print(json.dumps({"success": False, "error": f"Failed to fetch positions: {e}"}))
+        sys.exit(1)
 
     # --- Order Book ---
     orders_list = []

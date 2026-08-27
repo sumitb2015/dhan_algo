@@ -2,9 +2,9 @@
 
 import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import NavBar from './NavBar';
-import { Zap, RefreshCw, Shield, ShieldOff, Plus, Scissors } from 'lucide-react';
+import { Zap, RefreshCw, Shield, ShieldOff, Plus, Scissors, Wallet } from 'lucide-react';
 import {
-  OptionPanel, PositionsTable, TabTable, FundsView, pollPositionFlat, pollPositionReduced,
+  OptionPanel, PositionsTable, TabTable, FundsView, formatFundsValue, pollPositionFlat, pollPositionReduced,
   type ChainOcEntry, type Toast,
   type PnlGuardStatus, type PositionGuard, type SortState,
   FOCUS_RING, TXT_LABEL, TXT_VALUE, TXT_CAPTION, RiskRail,
@@ -820,11 +820,23 @@ export default function AdvancedScalper() {
       .catch(() => {});
   }, [broker]);
 
+  const pollFunds = useCallback(() => {
+    fetch(scalperRoute(broker, 'funds'))
+      .then(r => r.json())
+      .then((j: { success: boolean; data?: Record<string, any> }) => {
+        if (j.success) setFundsData(j.data ?? null);
+      })
+      .catch(() => {});
+  }, [broker]);
+
   useEffect(() => {
     fetchTabData();
     const id = setInterval(pollTabData, 5000);
-    return () => clearInterval(id);
-  }, [fetchTabData, pollTabData]);
+    // Funds change only on order fills — a 15s refresh keeps the header chip
+    // current without adding to the hot 5s positions poll.
+    const fundsId = setInterval(pollFunds, 15000);
+    return () => { clearInterval(id); clearInterval(fundsId); };
+  }, [fetchTabData, pollTabData, pollFunds]);
 
   useEffect(() => { positionsRef.current = enrichedPositions; }, [enrichedPositions]);
   useEffect(() => { posGuardsRef.current = posGuards; }, [posGuards]);
@@ -1918,6 +1930,19 @@ export default function AdvancedScalper() {
               </span>
               {lastUpdated && <span className={cn(TXT_VALUE, 'text-zinc-500 font-mono whitespace-nowrap')}>{lastUpdated}</span>}
             </div>
+
+            {/* Available margin chip — updates dynamically based on the selected broker (Dhan / Zerodha / Kotak) */}
+            {fundsData && (
+              <button
+                type="button"
+                onClick={() => setActiveTab('funds')}
+                className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-bold font-mono tabular-nums bg-zinc-900 border border-zinc-700 text-zinc-200 hover:border-zinc-500 hover:text-white transition-colors min-w-[110px] justify-center shrink-0 whitespace-nowrap"
+                title={`Available margin (${BROKER_LABELS[broker]}) — click to view funds breakdown`}
+              >
+                <Wallet className="w-3 h-3 text-sky-400" />
+                ₹{formatFundsValue(Number(fundsData.availabelBalance) || 0)}
+              </button>
+            )}
 
           </div>
         </div>

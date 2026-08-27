@@ -206,11 +206,16 @@ export default function RiskRail({
           <CardTitle className="text-xs font-bold uppercase tracking-wider text-white">Crude P&amp;L</CardTitle>
         </CardHeader>
         <CardContent className="flex flex-col gap-3 pt-1">
-          <div className={`text-2xl font-bold tabular-nums ${pctColor(totalPnl)}`}>{fmtPnl(totalPnl)}</div>
+          {/* Loading and "confirmed zero positions" must never look identical —
+              a slow/failed first fetch showing "Open 0" reads as "you have no
+              positions" when it may just not have loaded yet. */}
+          <div className={`text-2xl font-bold tabular-nums ${loading ? 'text-zinc-600' : pctColor(totalPnl)}`}>
+            {loading ? '—' : fmtPnl(totalPnl)}
+          </div>
           <div className="grid grid-cols-3 gap-2">
-            <Metric label="Realized"   value={fmtPnl(totalRealized)}   cls={pctColor(totalRealized)} />
-            <Metric label="Unrealized" value={fmtPnl(totalUnrealized)} cls={pctColor(totalUnrealized)} />
-            <Metric label="Open"       value={String(openPositions.length)} />
+            <Metric label="Realized"   value={loading ? '—' : fmtPnl(totalRealized)}   cls={loading ? 'text-zinc-600' : pctColor(totalRealized)} />
+            <Metric label="Unrealized" value={loading ? '—' : fmtPnl(totalUnrealized)} cls={loading ? 'text-zinc-600' : pctColor(totalUnrealized)} />
+            <Metric label="Open"       value={loading ? '—' : String(openPositions.length)} cls={loading ? 'text-zinc-600' : undefined} />
           </div>
           <Button
             variant="destructive"
