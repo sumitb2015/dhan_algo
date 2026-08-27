@@ -37,14 +37,18 @@ const STORAGE_KEY = 'dhan_algo.selected_broker';
  * once from /api/auth/broker-status.
  */
 export function useBrokerSelector() {
-  const [broker, setBrokerState] = useState<Broker>(() => {
-    if (typeof window === 'undefined') return 'dhan';
+  // Always initialize to 'dhan' so the client's first render matches the SSR
+  // HTML — reading localStorage here (even guarded by typeof window) still
+  // runs during the client's first render pass, before hydration reconciles,
+  // so it diverged from the server's output and threw a hydration mismatch.
+  const [broker, setBrokerState] = useState<Broker>('dhan');
+
+  useEffect(() => {
     try {
       const saved = localStorage.getItem(STORAGE_KEY) as Broker | null;
-      if (saved && BROKERS.includes(saved)) return saved;
+      if (saved && BROKERS.includes(saved)) setBrokerState(saved);
     } catch {}
-    return 'dhan';
-  });
+  }, []);
   const [authenticatedBrokers, setAuthenticatedBrokers] = useState<Broker[]>(['dhan']);
   // True once /api/auth/broker-status has actually confirmed at least one
   // broker session — distinct from authenticatedBrokers, which always falls

@@ -36,6 +36,8 @@ export interface LegPnl {
   booked: number;
   unbooked: number | null;   // null when the LTP is unknown
   total: number | null;
+  /** total P&L as a % of the entry premium value (|entryAvg * netQty|); null when total is null or there's no premium to divide by. */
+  totalPct: number | null;
 }
 
 /**
@@ -47,9 +49,12 @@ export interface LegPnl {
  */
 export function legPnl(leg: PositionLeg): LegPnl {
   const booked = leg.display.realizedProfit;
-  if (leg.display.ltp === null) return { booked, unbooked: null, total: null };
+  if (leg.display.ltp === null) return { booked, unbooked: null, total: null, totalPct: null };
   const unbooked = leg.display.netQty * (leg.display.ltp - leg.display.entryAvg);
-  return { booked, unbooked, total: booked + unbooked };
+  const total = booked + unbooked;
+  const premium = Math.abs(leg.display.entryAvg * leg.display.netQty);
+  const totalPct = premium > 0 ? (total / premium) * 100 : null;
+  return { booked, unbooked, total, totalPct };
 }
 
 interface Props {
@@ -64,6 +69,11 @@ interface Props {
   onAdd?: (leg: PositionLeg, side: 'BUY' | 'SELL', lots: number) => void;
   /** Keys (legKey(leg)) currently mid-add, so the row can show a spinner and block re-clicks. */
   addingKeys?: Set<string>;
+  /** Omitted -> no selection checkboxes are rendered at all (backward-compatible with existing callers). */
+  selectedKeys?: Set<string>;
+  onToggleSelect?: (key: string) => void;
+  /** Called with every currently-rendered leg key when the header checkbox is used to select/deselect all at once. */
+  onToggleSelectAll?: (keys: string[]) => void;
 }
 
 // Unique per row: tradingSymbol alone collides when the same contract is held
@@ -177,10 +187,17 @@ function AddChips({
   );
 }
 
-export default function PositionsLegTable({ legs, unparseable, lotSize, onClose, closingKeys, onAdd, addingKeys }: Props) {
+export default function PositionsLegTable({
+  legs, unparseable, lotSize, onClose, closingKeys, onAdd, addingKeys,
+  selectedKeys, onToggleSelect, onToggleSelectAll,
+}: Props) {
   if (!legs.length && !unparseable.length) {
     return <p className="px-3 py-6 text-center text-xs text-zinc-500">No open option positions.</p>;
   }
+
+  const selectable = !!selectedKeys && !!onToggleSelect;
+  const allKeys = legs.map(legKey);
+  const allSelected = selectable && allKeys.length > 0 && allKeys.every((k) => selectedKeys!.has(k));
 
   return (
     <div className="space-y-2">
@@ -209,6 +226,17 @@ export default function PositionsLegTable({ legs, unparseable, lotSize, onClose,
         <table className="w-full border-collapse">
           <thead>
             <tr>
+              {selectable && (
+                <th className={cn(TH, 'text-left')}>
+                  <input
+                    type="checkbox"
+                    checked={allSelected}
+                    onChange={() => onToggleSelectAll?.(allKeys)}
+                    className="h-3.5 w-3.5 cursor-pointer accent-sky-500"
+                    aria-label={allSelected ? 'Deselect all legs' : 'Select all legs'}
+                  />
+                </th>
+              )}
               <th className={cn(TH, 'text-left')}>Instrument</th>
               <th className={TH}>Expiry</th>
               <th className={TH}>Qty</th>
@@ -218,6 +246,7 @@ export default function PositionsLegTable({ legs, unparseable, lotSize, onClose,
               <th className={TH}>Booked</th>
               <th className={TH}>Unbook</th>
               <th className={TH}>P&amp;L</th>
+              <th className={TH}>P&amp;L %</th>
               {onClose && <th className={cn(TH, 'text-right')}>Actions</th>}
             </tr>
           </thead>
@@ -229,6 +258,17 @@ export default function PositionsLegTable({ legs, unparseable, lotSize, onClose,
               return (
                 <tr key={key} className="border-b border-zinc-800 hover:bg-zinc-900"
                     title={`${l.display.tradingSymbol} · ${l.display.productType}`}>
+                  {selectable && (
+                    <td className={cn(TD, 'text-left')}>
+                      <input
+                        type="checkbox"
+                        checked={selectedKeys!.has(key)}
+                        onChange={() => onToggleSelect!(key)}
+                        className="h-3.5 w-3.5 cursor-pointer accent-sky-500"
+                        aria-label={`Select ${l.strike} ${l.type} for bulk exit`}
+                      />
+                    </td>
+                  )}
                   <td className={cn(TD, 'text-left')}>
                     <span className={cn(
                       'mr-1.5 inline-block rounded px-1 py-px text-[9px] font-bold',
@@ -251,6 +291,9 @@ export default function PositionsLegTable({ legs, unparseable, lotSize, onClose,
                   </td>
                   <td className={cn(TD, 'font-bold', p.total === null ? 'text-zinc-500' : pnlColor(p.total))}>
                     {p.total === null ? '—' : fmtInr(p.total)}
+                  </td>
+                  <td className={cn(TD, p.totalPct === null ? 'text-zinc-500' : pnlColor(p.totalPct))}>
+                    {p.totalPct === null ? '—' : `${p.totalPct >= 0 ? '+' : ''}${p.totalPct.toFixed(1)}%`}
                   </td>
                   {onClose && (
                     <td className={cn(TD, 'text-right')}>

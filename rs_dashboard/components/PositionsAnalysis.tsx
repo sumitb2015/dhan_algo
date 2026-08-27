@@ -93,6 +93,8 @@ export default function PositionsAnalysis({ underlying }: { underlying: Analytic
   const [positionsError, setPositionsError] = useState<string | null>(null);
   const [loadedOnce, setLoadedOnce] = useState(false);
   const [refreshedAt, setRefreshedAt] = useState<Date | null>(null);
+  const [dataDate, setDataDate] = useState<string | null>(null);
+  useEffect(() => { setDataDate(todayIso()); }, []);
 
   const [instruments, setInstruments] = useState<Map<string, InstrumentRow> | undefined>(undefined);
   const [chains, setChains] = useState<Record<string, ChainOc>>({});
@@ -119,6 +121,7 @@ export default function PositionsAnalysis({ underlying }: { underlying: Analytic
   const [toasts, setToasts] = useState<Toast[]>([]);
   const [closingKeys, setClosingKeys] = useState<Set<string>>(new Set());
   const [addingKeys, setAddingKeys] = useState<Set<string>>(new Set());
+  const [selectedKeys, setSelectedKeys] = useState<Set<string>>(new Set());
   const [confirmExitExpiry, setConfirmExitExpiry] = useState<string | null>(null);
   const [spanIndex, setSpanIndex] = useState<number>(DEFAULT_SPAN_INDEX);
   const [showOi, setShowOi] = useState(true);
@@ -294,7 +297,32 @@ export default function PositionsAnalysis({ underlying }: { underlying: Analytic
       // eslint-disable-next-line no-await-in-loop
       await handleCloseLeg(leg, 100);
     }
+    setSelectedKeys((prev) => {
+      const next = new Set(prev);
+      targets.forEach((leg) => next.delete(legKey(leg)));
+      return next;
+    });
   }, [confirmExitExpiry, handleCloseLeg]);
+
+  const toggleSelectLeg = useCallback((key: string) => {
+    setSelectedKeys((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key); else next.add(key);
+      return next;
+    });
+  }, []);
+
+  const toggleSelectAllLegs = useCallback((keys: string[]) => {
+    setSelectedKeys((prev) => {
+      const allSelected = keys.length > 0 && keys.every((k) => prev.has(k));
+      if (allSelected) {
+        const next = new Set(prev);
+        keys.forEach((k) => next.delete(k));
+        return next;
+      }
+      return new Set([...prev, ...keys]);
+    });
+  }, []);
 
   const handleAnalyze = useCallback(async () => {
     setShowAnalyzeModal(true);
@@ -504,6 +532,11 @@ export default function PositionsAnalysis({ underlying }: { underlying: Analytic
     [legs, expiryFilter],
   );
 
+  const selectedVisibleLegs = useMemo(
+    () => visibleLegs.filter((l) => selectedKeys.has(legKey(l))),
+    [visibleLegs, selectedKeys],
+  );
+
   /** The date at which every visible leg has settled — the "on expiry" view. */
   const finalExpiry = useMemo(() => {
     const es = legExpiries(visibleLegs);
@@ -682,7 +715,7 @@ export default function PositionsAnalysis({ underlying }: { underlying: Analytic
         <div className="mx-auto flex flex-wrap items-center gap-3">
           <h1 className="text-sm font-bold text-white">{underlying} Analysis</h1>
           <span className="rounded bg-zinc-800 px-2 py-0.5 font-mono text-xs text-zinc-400">
-            DATA: {todayIso()}
+            DATA: {dataDate ?? '—'}
           </span>
           {spot > 0 && (
             <span className={cn(
@@ -790,6 +823,15 @@ export default function PositionsAnalysis({ underlying }: { underlying: Analytic
                     : expiryFilter === 'ALL' ? 'Exit All' : `Exit ${fmtExpiryShort(expiryFilter)}`}
                 </button>
               )}
+              {selectedVisibleLegs.length > 0 && (
+                <button type="button" onClick={() => handleExitScope('scope:selected', selectedVisibleLegs)}
+                  className={cn('rounded border px-2 py-0.5 font-mono text-[10px] font-bold transition-colors',
+                    confirmExitExpiry === 'scope:selected'
+                      ? 'border-rose-500 bg-rose-500/20 text-rose-200'
+                      : 'border-rose-800 bg-rose-950 text-rose-300 hover:bg-rose-900')}>
+                  {confirmExitExpiry === 'scope:selected' ? 'Confirm?' : `Exit Selected (${selectedVisibleLegs.length})`}
+                </button>
+              )}
             </div>
 
             {bookExpiries.length > 1 && (
@@ -866,6 +908,7 @@ export default function PositionsAnalysis({ underlying }: { underlying: Analytic
                   legs={visibleLegs} unparseable={unparseable} lotSize={lotSize ?? 0}
                   onClose={handleCloseLeg} closingKeys={closingKeys}
                   onAdd={handleAddToLeg} addingKeys={addingKeys}
+                  selectedKeys={selectedKeys} onToggleSelect={toggleSelectLeg} onToggleSelectAll={toggleSelectAllLegs}
                 />}
           </section>
 
