@@ -123,7 +123,7 @@ function ExitChips({
           className={cn(
             'rounded border px-1.5 py-0.5 font-mono text-[10px] font-bold transition-colors disabled:cursor-not-allowed disabled:opacity-30',
             armedPct === c.pct
-              ? 'border-rose-500 bg-rose-500/20 text-rose-200'
+              ? 'border-rose-500 bg-rose-500/20 text-rose-200 hover:bg-rose-500/30'
               : c.pct === 100
                 ? 'border-zinc-600 bg-zinc-800 text-zinc-200 hover:border-rose-600 hover:text-rose-300'
                 : 'border-zinc-700 bg-zinc-900 text-zinc-400 hover:border-zinc-500 hover:text-zinc-200',
@@ -175,12 +175,12 @@ function AddChips({
         className="h-5 w-5 rounded border border-zinc-700 bg-zinc-900 text-[10px] text-zinc-400 hover:text-zinc-200">+</button>
       <button type="button" onClick={() => fire('BUY')}
         className={cn('rounded border px-1.5 py-0.5 font-mono text-[10px] font-bold transition-colors',
-          armed === 'BUY' ? 'border-sky-400 bg-sky-500/25 text-sky-100' : 'border-sky-800 bg-sky-950 text-sky-300 hover:bg-sky-900')}>
+          armed === 'BUY' ? 'border-sky-400 bg-sky-500/25 text-sky-100 hover:bg-sky-500/35' : 'border-sky-800 bg-sky-950 text-sky-300 hover:bg-sky-900')}>
         {armed === 'BUY' ? 'Confirm?' : 'B'}
       </button>
       <button type="button" onClick={() => fire('SELL')}
         className={cn('rounded border px-1.5 py-0.5 font-mono text-[10px] font-bold transition-colors',
-          armed === 'SELL' ? 'border-rose-500 bg-rose-500/20 text-rose-200' : 'border-rose-800 bg-rose-950 text-rose-300 hover:bg-rose-900')}>
+          armed === 'SELL' ? 'border-rose-500 bg-rose-500/20 text-rose-200 hover:bg-rose-500/30' : 'border-rose-800 bg-rose-950 text-rose-300 hover:bg-rose-900')}>
         {armed === 'SELL' ? 'Confirm?' : 'S'}
       </button>
     </div>
@@ -232,7 +232,7 @@ export default function PositionsLegTable({
                     type="checkbox"
                     checked={allSelected}
                     onChange={() => onToggleSelectAll?.(allKeys)}
-                    className="h-3.5 w-3.5 cursor-pointer accent-sky-500"
+                    className="h-3.5 w-3.5 cursor-pointer rounded-sm accent-sky-500 hover:ring-2 hover:ring-sky-500/50"
                     aria-label={allSelected ? 'Deselect all legs' : 'Select all legs'}
                   />
                 </th>
@@ -264,7 +264,7 @@ export default function PositionsLegTable({
                         type="checkbox"
                         checked={selectedKeys!.has(key)}
                         onChange={() => onToggleSelect!(key)}
-                        className="h-3.5 w-3.5 cursor-pointer accent-sky-500"
+                        className="h-3.5 w-3.5 cursor-pointer rounded-sm accent-sky-500 hover:ring-2 hover:ring-sky-500/50"
                         aria-label={`Select ${l.strike} ${l.type} for bulk exit`}
                       />
                     </td>

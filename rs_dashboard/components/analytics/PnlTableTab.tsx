@@ -92,9 +92,9 @@ export default function PnlTableTab({ legs, spot, strikeStep, expiry }: Props) {
           {RANGE_OPTIONS.map((r) => (
             <button key={r} type="button" onClick={() => setRangePct(r)}
               className={cn(
-                'rounded border px-2 py-0.5 font-mono text-[10px] font-bold',
+                'rounded border px-2 py-0.5 font-mono text-[10px] font-bold transition-colors',
                 rangePct === r
-                  ? 'border-sky-500 bg-sky-500/15 text-sky-300'
+                  ? 'border-sky-500 bg-sky-500/15 text-sky-300 hover:bg-sky-500/25'
                   : 'border-zinc-700 bg-zinc-900 text-zinc-400 hover:text-zinc-200',
               )}>
               ±{(r * 100).toFixed(0)}%
@@ -106,9 +106,9 @@ export default function PnlTableTab({ legs, spot, strikeStep, expiry }: Props) {
           {IV_OPTIONS.map((o) => (
             <button key={o.label} type="button" onClick={() => setIvMultiplier(o.value)}
               className={cn(
-                'rounded border px-2 py-0.5 font-mono text-[10px] font-bold',
+                'rounded border px-2 py-0.5 font-mono text-[10px] font-bold transition-colors',
                 ivMultiplier === o.value
-                  ? 'border-violet-500 bg-violet-500/15 text-violet-300'
+                  ? 'border-violet-500 bg-violet-500/15 text-violet-300 hover:bg-violet-500/25'
                   : 'border-zinc-700 bg-zinc-900 text-zinc-400 hover:text-zinc-200',
               )}>
               {o.label}

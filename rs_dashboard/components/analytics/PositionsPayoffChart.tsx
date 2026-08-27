@@ -222,7 +222,7 @@ export default function PositionsPayoffChart({
             className={cn(
               'rounded border px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider transition-colors',
               showOi
-                ? 'border-violet-500 bg-violet-500/15 text-violet-300'
+                ? 'border-violet-500 bg-violet-500/15 text-violet-300 hover:bg-violet-500/25'
                 : 'border-zinc-700 bg-zinc-900 text-zinc-400 hover:text-zinc-200',
             )}
           >

@@ -131,7 +131,7 @@ export default function AddStrikePicker({ broker, underlying, strikeStep, spot, 
         {(['CE', 'PE'] as const).map((t) => (
           <button key={t} type="button" onClick={() => setOptType(t)}
             className={cn('px-2 py-1 font-mono text-[10px] font-bold transition-colors',
-              optType === t ? 'bg-sky-500/20 text-sky-300' : 'bg-zinc-950 text-zinc-500 hover:text-zinc-300')}>
+              optType === t ? 'bg-sky-500/20 text-sky-300 hover:bg-sky-500/30' : 'bg-zinc-950 text-zinc-500 hover:text-zinc-300')}>
             {t}
           </button>
         ))}
@@ -153,12 +153,12 @@ export default function AddStrikePicker({ broker, underlying, strikeStep, spot, 
         <div className="flex gap-1">
           <button type="button" disabled={!ready} onClick={() => place('BUY')}
             className={cn('rounded border px-2 py-1 font-mono text-[10px] font-bold transition-colors disabled:cursor-not-allowed disabled:opacity-30',
-              armed === 'BUY' ? 'border-sky-400 bg-sky-500/25 text-sky-100' : 'border-sky-800 bg-sky-950 text-sky-300 hover:bg-sky-900')}>
+              armed === 'BUY' ? 'border-sky-400 bg-sky-500/25 text-sky-100 hover:bg-sky-500/35' : 'border-sky-800 bg-sky-950 text-sky-300 hover:bg-sky-900')}>
             {armed === 'BUY' ? 'Confirm?' : 'Buy'}
           </button>
           <button type="button" disabled={!ready} onClick={() => place('SELL')}
             className={cn('rounded border px-2 py-1 font-mono text-[10px] font-bold transition-colors disabled:cursor-not-allowed disabled:opacity-30',
-              armed === 'SELL' ? 'border-rose-500 bg-rose-500/20 text-rose-200' : 'border-rose-800 bg-rose-950 text-rose-300 hover:bg-rose-900')}>
+              armed === 'SELL' ? 'border-rose-500 bg-rose-500/20 text-rose-200 hover:bg-rose-500/30' : 'border-rose-800 bg-rose-950 text-rose-300 hover:bg-rose-900')}>
             {armed === 'SELL' ? 'Confirm?' : 'Sell'}
           </button>
         </div>

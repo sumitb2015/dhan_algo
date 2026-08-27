@@ -75,7 +75,7 @@ export default function SuggestedActionsCard({ suggestions, legs, closingKeys, l
                     }}
                     className={cn('rounded border px-2 py-1 font-mono text-[10px] font-bold transition-colors',
                       armed
-                        ? 'border-rose-500 bg-rose-500/20 text-rose-200'
+                        ? 'border-rose-500 bg-rose-500/20 text-rose-200 hover:bg-rose-500/30'
                         : 'border-emerald-700 bg-emerald-950 text-emerald-300 hover:bg-emerald-900')}>
                     {armed ? 'Confirm?' : 'Confirm'}
                   </button>

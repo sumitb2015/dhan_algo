@@ -740,7 +740,7 @@ export default function PositionsAnalysis({ underlying }: { underlying: Analytic
           )}
 
           <button type="button" onClick={loadPositions}
-            className="flex items-center gap-1 rounded border border-zinc-700 bg-zinc-900 px-2 py-1 text-xs text-zinc-300 hover:text-white">
+            className="flex items-center gap-1 rounded border border-zinc-700 bg-zinc-900 px-2 py-1 text-xs text-zinc-300 transition-colors hover:border-zinc-600 hover:bg-zinc-800 hover:text-white">
             <RefreshCw className="h-3 w-3" /> Refresh
           </button>
           <button type="button" onClick={handleAnalyze} disabled={analyzing}
@@ -816,7 +816,7 @@ export default function PositionsAnalysis({ underlying }: { underlying: Analytic
                 <button type="button" onClick={() => handleExitScope(`scope:${expiryFilter}`, visibleLegs)}
                   className={cn('rounded border px-2 py-0.5 font-mono text-[10px] font-bold transition-colors',
                     confirmExitExpiry === `scope:${expiryFilter}`
-                      ? 'border-rose-500 bg-rose-500/20 text-rose-200'
+                      ? 'border-rose-500 bg-rose-500/20 text-rose-200 hover:bg-rose-500/30'
                       : 'border-rose-800 bg-rose-950 text-rose-300 hover:bg-rose-900')}>
                   {confirmExitExpiry === `scope:${expiryFilter}`
                     ? 'Confirm Exit All?'
@@ -827,7 +827,7 @@ export default function PositionsAnalysis({ underlying }: { underlying: Analytic
                 <button type="button" onClick={() => handleExitScope('scope:selected', selectedVisibleLegs)}
                   className={cn('rounded border px-2 py-0.5 font-mono text-[10px] font-bold transition-colors',
                     confirmExitExpiry === 'scope:selected'
-                      ? 'border-rose-500 bg-rose-500/20 text-rose-200'
+                      ? 'border-rose-500 bg-rose-500/20 text-rose-200 hover:bg-rose-500/30'
                       : 'border-rose-800 bg-rose-950 text-rose-300 hover:bg-rose-900')}>
                   {confirmExitExpiry === 'scope:selected' ? 'Confirm?' : `Exit Selected (${selectedVisibleLegs.length})`}
                 </button>
@@ -838,18 +838,18 @@ export default function PositionsAnalysis({ underlying }: { underlying: Analytic
               <div className="flex flex-wrap items-center gap-1.5">
                 <span className="text-[10px] font-bold uppercase tracking-widest text-zinc-400">Expiry</span>
                 <button type="button" onClick={() => setExpiryFilter('ALL')}
-                  className={cn('rounded border px-2 py-0.5 font-mono text-[10px] font-bold',
+                  className={cn('rounded border px-2 py-0.5 font-mono text-[10px] font-bold transition-colors',
                     expiryFilter === 'ALL'
-                      ? 'border-sky-500 bg-sky-500/15 text-sky-300'
+                      ? 'border-sky-500 bg-sky-500/15 text-sky-300 hover:bg-sky-500/25'
                       : 'border-zinc-700 bg-zinc-900 text-zinc-400 hover:text-zinc-200')}>
                   All ({legs.length})
                 </button>
                 {bookExpiries.map((e) => (
                   <div key={e} className="flex items-center gap-1">
                     <button type="button" onClick={() => setExpiryFilter(e)}
-                      className={cn('rounded border px-2 py-0.5 font-mono text-[10px] font-bold',
+                      className={cn('rounded border px-2 py-0.5 font-mono text-[10px] font-bold transition-colors',
                         expiryFilter === e
-                          ? 'border-sky-500 bg-sky-500/15 text-sky-300'
+                          ? 'border-sky-500 bg-sky-500/15 text-sky-300 hover:bg-sky-500/25'
                           : 'border-zinc-700 bg-zinc-900 text-zinc-400 hover:text-zinc-200')}>
                       {fmtExpiryShort(e)} ({legs.filter((l) => l.expiry === e).length})
                     </button>
@@ -858,7 +858,7 @@ export default function PositionsAnalysis({ underlying }: { underlying: Analytic
                       onClick={() => handleExitScope(`expiry:${e}`, legs.filter((l) => l.expiry === e))}
                       className={cn('rounded border px-1.5 py-0.5 font-mono text-[9px] font-bold transition-colors',
                         confirmExitExpiry === `expiry:${e}`
-                          ? 'border-rose-500 bg-rose-500/20 text-rose-200'
+                          ? 'border-rose-500 bg-rose-500/20 text-rose-200 hover:bg-rose-500/30'
                           : 'border-zinc-800 bg-zinc-900 text-zinc-600 hover:border-rose-800 hover:text-rose-300')}>
                       {confirmExitExpiry === `expiry:${e}` ? 'Confirm?' : 'Exit'}
                     </button>
@@ -923,7 +923,7 @@ export default function PositionsAnalysis({ underlying }: { underlying: Analytic
                 <button key={id} type="button" onClick={() => setTab(id)}
                   className={cn(
                     'px-3 py-2 text-xs font-bold transition-colors',
-                    tab === id ? 'border-b-2 border-sky-500 text-white' : 'text-zinc-400 hover:text-zinc-200',
+                    tab === id ? 'border-b-2 border-sky-500 text-white hover:bg-zinc-900' : 'text-zinc-400 hover:text-zinc-200',
                   )}>
                   {label}
                 </button>
