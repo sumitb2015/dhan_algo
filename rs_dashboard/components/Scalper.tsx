@@ -2725,7 +2725,21 @@ const PositionRow = React.memo(function PositionRow({
 }, positionRowPropsEqual);
 
 export const PositionsTable = React.memo(function PositionsTable({ data, guards, closingPositions, onGuardChange, onTrailToggle, onClose, onAddLeg, lotSizeFor, onClosePartial, sort, onSort, error }: PositionsTableProps) {
-  const sortedData = useMemo(() => sortRows(data, sort), [data, sort]);
+  // The broker positions API does not guarantee a stable row order between
+  // polls, so with no explicit column sort applied ('none') the rows would
+  // otherwise reshuffle on every 5s refresh. Pin each row to the order it was
+  // first seen in, so the table only reorders when the user picks a sort.
+  const rowOrderRef = useRef<Map<string, number>>(new Map());
+  const nextOrderRef = useRef(0);
+  const sortedData = useMemo(() => {
+    if (sort.key !== 'none') return sortRows(data, sort);
+    const order = rowOrderRef.current;
+    for (const row of data) {
+      const k = positionKey(row);
+      if (!order.has(k)) order.set(k, nextOrderRef.current++);
+    }
+    return [...data].sort((a, b) => (order.get(positionKey(a))! - order.get(positionKey(b))!));
+  }, [data, sort]);
 
   if (!data.length) {
     return (
