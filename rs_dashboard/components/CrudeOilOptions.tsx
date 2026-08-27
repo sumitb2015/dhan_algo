@@ -37,6 +37,11 @@ import {
 
 const POLL_MS     = 15_000;
 const SPOT_FALLBACK_POLL_MS = 60_000;
+// Background pricing for the non-displayed underlying's open positions only
+// needs to be fresh enough for P&L, not trading-fast — kept slower than the
+// main chain's POLL_MS so it never doubles up the Dhan option-chain rate
+// limit the way concurrent fetchChain+fetchSpot calls once did.
+const OTHER_UNDERLYING_POLL_MS = 45_000;
 
 // Chain, spot, IV and OI always come from Dhan regardless of the selected
 // broker. An option's LTP is set by the exchange, not the broker, so Kotak's
@@ -53,6 +58,21 @@ const POSITIONS_ROUTE: Record<CrudeBroker, string> = {
 const RISK_KEY_LEGACY = 'crude_risk_configs_v2';
 const RISK_KEY = (b: CrudeBroker, u: CrudeUnderlying) => `${RISK_KEY_LEGACY}:${b}:${u}`;
 
+/**
+ * Which of the two contract families a trading symbol belongs to, from its
+ * own prefix (e.g. "CRUDEOILM17SEP267500PE" / "CRUDEOIL17SEP268100CE") — used
+ * to price a position against the RIGHT underlying's chain regardless of
+ * which one is currently selected for display. Checks the digit right after
+ * the prefix so "CRUDEOILM..." never false-matches the "CRUDEOIL" prefix.
+ */
+function crudeSymbolUnderlying(symbol: string): CrudeUnderlying | null {
+  const s = symbol.toUpperCase();
+  for (const u of CRUDE_UNDERLYINGS) {
+    if (s.startsWith(u) && /[0-9]/.test(s[u.length] ?? '')) return u;
+  }
+  return null;
+}
+
 // ─── Main Component ───────────────────────────────────────────────
 
 export default function CrudeOilOptions() {
@@ -60,6 +80,11 @@ export default function CrudeOilOptions() {
   const [underlying, setUnderlying]   = useState<CrudeUnderlying>('CRUDEOIL');
   const underlyingLabel               = CRUDE_UNDERLYING_LABELS[underlying];
   const strikeStep                    = STRIKE_STEP_BY_UNDERLYING[underlying];
+  // The one not currently on screen — its open positions still need pricing
+  // for the Positions tab, which lists both families regardless of the
+  // selector (see the background chain poll further down).
+  const otherUnderlying: CrudeUnderlying = underlying === 'CRUDEOIL' ? 'CRUDEOILM' : 'CRUDEOIL';
+  const otherStrikeStep                = STRIKE_STEP_BY_UNDERLYING[otherUnderlying];
 
   const [expiries, setExpiries]       = useState<string[]>([]);
   const [expiry, setExpiry]           = useState<string>('');
@@ -116,6 +141,20 @@ export default function CrudeOilOptions() {
   const [activeActivityTab, setActiveActivityTab] = useState<ActivityTab>('positions');
   const tradesIntervalRef = useRef<NodeJS.Timeout | null>(null);
 
+  // ─── Background pricing for the OTHER underlying's open positions ──────
+  // The Positions tab lists both CRUDEOIL and CRUDEOILM regardless of which
+  // one is selected for the chain view. Dhan positions already carry a real
+  // LTP from the broker itself, but Kotak's never do (see shapeKotakPosition)
+  // — those need a live price joined in from a chain, and the selected
+  // chain only covers the selected underlying. This is that second, slower
+  // chain for whichever underlying is NOT on screen, kept minimal (strike ->
+  // CE/PE last_price only, no OI/stats) and only run when there is actually
+  // an open Kotak position to price.
+  const [otherExpiry, setOtherExpiry]           = useState('');
+  const [otherRows, setOtherRows]               = useState<ProcessedRow[]>([]);
+  const [otherSpot, setOtherSpot]               = useState(0);
+  const [otherKotakSymbols, setOtherKotakSymbols] = useState<KotakSymbolMap | null>(null);
+
   // CRUDEOIL and CRUDEOILM are separate contract families (different strike
   // ladders, different expiry lists) — clear everything chain-shaped on
   // switch so a stale chain never renders under the new underlying's heading
@@ -133,56 +172,82 @@ export default function CrudeOilOptions() {
     setKotakSymbolsError(null);
     setError('');
     chainFailsRef.current = 0;
+    // "Other" flips along with the selector — its old data belongs to what
+    // is now the SELECTED underlying and would be wrong background pricing.
+    setOtherExpiry('');
+    setOtherRows([]);
+    setOtherSpot(0);
+    setOtherKotakSymbols(null);
   }, [underlying]);
 
   const bookIsCurrent  = book.broker === broker;
 
   // Kotak's own positions payload never carries an LTP (see shapeKotakPosition),
   // so realizedProfit/unrealizedProfit come back 0 for every open leg. Join the
-  // live LTP from the Dhan-sourced chain (`rows`) onto each Kotak position by
-  // trading symbol — the same join Scalper.tsx does for the scalper terminals —
-  // and recompute unrealizedProfit from it. Dhan positions already carry a real
-  // LTP and pass through unchanged.
-  const kotakSymbolToStrike = useMemo(() => {
+  // live LTP from a Dhan-sourced chain onto each Kotak position by trading
+  // symbol — the same join Scalper.tsx does for the scalper terminals — and
+  // recompute unrealizedProfit from it. Dhan positions already carry a real
+  // LTP and pass through unchanged. The Positions tab lists BOTH underlyings
+  // regardless of the selector, so the join is keyed by each POSITION's own
+  // underlying (from its symbol), not by whichever one is on screen.
+  function buildStrikeMap(km: KotakSymbolMap | null): Record<string, { strike: number; side: 'ce' | 'pe' }> {
     const map: Record<string, { strike: number; side: 'ce' | 'pe' }> = {};
-    if (!kotakSymbols) return map;
-    for (const [strikeStr, entry] of Object.entries(kotakSymbols.strikes)) {
+    if (!km) return map;
+    for (const [strikeStr, entry] of Object.entries(km.strikes)) {
       const strike = Number(strikeStr);
       if (entry.ceSymbol) map[entry.ceSymbol] = { strike, side: 'ce' };
       if (entry.peSymbol) map[entry.peSymbol] = { strike, side: 'pe' };
     }
     return map;
-  }, [kotakSymbols]);
+  }
+
+  const kotakSymbolToStrikeByUnderlying = useMemo(() => ({
+    [underlying]: buildStrikeMap(kotakSymbols),
+    [otherUnderlying]: buildStrikeMap(otherKotakSymbols),
+  } as Record<CrudeUnderlying, Record<string, { strike: number; side: 'ce' | 'pe' }>>),
+  [underlying, otherUnderlying, kotakSymbols, otherKotakSymbols]);
+
+  const rowsByUnderlying = useMemo(() => ({
+    [underlying]: rows,
+    [otherUnderlying]: otherRows,
+  } as Record<CrudeUnderlying, ProcessedRow[]>), [underlying, otherUnderlying, rows, otherRows]);
+
+  const spotByUnderlying = useMemo(() => ({
+    [underlying]: spot,
+    [otherUnderlying]: otherSpot,
+  } as Record<CrudeUnderlying, number>), [underlying, otherUnderlying, spot, otherSpot]);
 
   /**
-   * True when `symbol` is the nearest-month MCX future for `underlying` (e.g.
+   * True when `symbol` is the nearest-month MCX future for `u` (e.g.
    * "CRUDEOILM21SEP26FUT"), not an option on it. Checked digit-after-prefix
    * the same way the backend's `isCrude()` regex does, so CRUDEOIL doesn't
    * false-match a CRUDEOILM future (both start with "CRUDEOIL").
    */
-  const isCrudeFuture = useCallback((symbol: string): boolean => {
+  function isCrudeFutureFor(symbol: string, u: CrudeUnderlying): boolean {
     const s = symbol.toUpperCase();
-    if (!s.endsWith('FUT') || !s.startsWith(underlying)) return false;
-    return /[0-9]/.test(s[underlying.length] ?? '');
-  }, [underlying]);
+    if (!s.endsWith('FUT') || !s.startsWith(u)) return false;
+    return /[0-9]/.test(s[u.length] ?? '');
+  }
 
   const crudePositions = useMemo(() => {
     const base = bookIsCurrent ? book.positions : [];
     if (!isKotak) return base;
     return base.map(p => {
       const sym = p.tradingSymbol ?? p.symbol;
-      const mapping = kotakSymbolToStrike[sym];
+      const posUnderlying = crudeSymbolUnderlying(sym);
+      if (!posUnderlying) return p;
+      const mapping = kotakSymbolToStrikeByUnderlying[posUnderlying][sym];
       let liveLtp = 0;
       if (mapping) {
-        const row = rows.find(r => r.strike === mapping.strike);
+        const row = rowsByUnderlying[posUnderlying].find(r => r.strike === mapping.strike);
         liveLtp = row?.[mapping.side]?.last_price ?? 0;
-      } else if (isCrudeFuture(sym)) {
+      } else if (isCrudeFutureFor(sym, posUnderlying)) {
         // A futures leg has no strike to join through the option chain — the
-        // page already has its live price as the header's own SPOT reading
-        // (chain fetch pulls it from the nearest-month future's own OHLC).
-        // Only correct while that future is still the nearest month; a
-        // rolled/far-month position would need its own OHLC lookup.
-        liveLtp = spot;
+        // page already has its live price as that underlying's own SPOT
+        // reading (chain fetch pulls it from the nearest-month future's own
+        // OHLC). Only correct while that future is still the nearest month;
+        // a rolled/far-month position would need its own OHLC lookup.
+        liveLtp = spotByUnderlying[posUnderlying];
       }
       if (liveLtp <= 0) return p;
       const netQty = p.netQty;
@@ -193,7 +258,16 @@ export default function CrudeOilOptions() {
           : Math.abs(netQty) * (p.sellAvg - liveLtp);
       return { ...p, lastPrice: liveLtp, unrealizedProfit };
     });
-  }, [bookIsCurrent, book.positions, isKotak, kotakSymbolToStrike, rows, isCrudeFuture, spot]);
+  }, [bookIsCurrent, book.positions, isKotak, kotakSymbolToStrikeByUnderlying, rowsByUnderlying, spotByUnderlying]);
+
+  // Only run the background chain/lookup poll for the OTHER underlying when
+  // there is an actual open Kotak position to price there — otherwise it's
+  // pure wasted Dhan option-chain calls (rate-limited to ~1 call/3s).
+  const hasOtherOpenKotakPosition = useMemo(() => {
+    if (!isKotak || !bookIsCurrent) return false;
+    return book.positions.some(p =>
+      p.netQty !== 0 && crudeSymbolUnderlying(p.tradingSymbol ?? p.symbol) === otherUnderlying);
+  }, [isKotak, bookIsCurrent, book.positions, otherUnderlying]);
 
   const crudeOrders    = bookIsCurrent ? book.orders : [];
   const crudeTrades    = bookIsCurrent ? book.trades : [];
@@ -661,6 +735,64 @@ export default function CrudeOilOptions() {
     const id = setInterval(fetchSpot, SPOT_FALLBACK_POLL_MS);
     return () => clearInterval(id);
   }, [fetchSpot]);
+
+  // ─── Background pricing for the OTHER underlying ───────────────────
+  // Only runs while there's an open Kotak position on the non-displayed
+  // underlying to price (Dhan positions already carry a real LTP and need
+  // none of this). Expiry first, then chain+Kotak-symbol-lookup off it —
+  // mirrors the main fetch pipeline above but scoped to `otherUnderlying`.
+  useEffect(() => {
+    if (!hasOtherOpenKotakPosition) { setOtherExpiry(''); return; }
+    let cancelled = false;
+    fetch(`/api/options/expiries?underlying=${otherUnderlying}`)
+      .then(r => r.json())
+      .then((j: { success: boolean; data?: string[] }) => {
+        if (!cancelled && j.success && j.data?.length) setOtherExpiry(j.data[0]);
+      })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, [hasOtherOpenKotakPosition, otherUnderlying]);
+
+  useEffect(() => {
+    if (!hasOtherOpenKotakPosition || !otherExpiry) { setOtherKotakSymbols(null); return; }
+    let cancelled = false;
+    fetch(`/api/scalper/kotak/lookup?underlying=${otherUnderlying}&expiry=${otherExpiry}`)
+      .then(r => r.json())
+      .then((j: { success: boolean; data?: KotakSymbolMap }) => {
+        if (!cancelled && j.success && j.data) setOtherKotakSymbols(j.data);
+      })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, [hasOtherOpenKotakPosition, otherUnderlying, otherExpiry]);
+
+  useEffect(() => {
+    if (!hasOtherOpenKotakPosition || !otherExpiry) return;
+    let cancelled = false;
+    const fetchOtherChain = async () => {
+      try {
+        const res = await fetch(`/api/options/chain?underlying=${otherUnderlying}&expiry=${otherExpiry}`);
+        const json = await res.json() as {
+          success: boolean;
+          data?: { chain: { oc?: Record<string, RawChainEntry> }; spot: number };
+        };
+        if (cancelled || !json.success || !json.data?.chain?.oc) return;
+        setOtherSpot(json.data.spot ?? 0);
+        const entries = parseStrikeEntries(json.data.chain.oc)
+          .filter(({ strike }) => strike % otherStrikeStep === 0);
+        // Minimal rows — only strike/ce/pe are read by the position join, so
+        // the OI-wall/max-pain/straddle stats the main chain computes are
+        // skipped here on purpose.
+        setOtherRows(entries.map(({ strike, entry }) => ({
+          strike, ce: entry.ce ?? null, pe: entry.pe ?? null,
+          ceOIPct: 0, peOIPct: 0, pcr: null, straddle: 0,
+          isATM: false, isMaxCEOI: false, isMaxPEOI: false, isMinStraddle: false,
+        })));
+      } catch { /* best-effort background pricing — leave last-known rows in place */ }
+    };
+    void fetchOtherChain();
+    const id = setInterval(fetchOtherChain, OTHER_UNDERLYING_POLL_MS);
+    return () => { cancelled = true; clearInterval(id); };
+  }, [hasOtherOpenKotakPosition, otherUnderlying, otherExpiry, otherStrikeStep]);
 
   useEffect(() => {
     void fetchCrudeTrades();
