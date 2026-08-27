@@ -154,14 +154,36 @@ export default function CrudeOilOptions() {
     return map;
   }, [kotakSymbols]);
 
+  /**
+   * True when `symbol` is the nearest-month MCX future for `underlying` (e.g.
+   * "CRUDEOILM21SEP26FUT"), not an option on it. Checked digit-after-prefix
+   * the same way the backend's `isCrude()` regex does, so CRUDEOIL doesn't
+   * false-match a CRUDEOILM future (both start with "CRUDEOIL").
+   */
+  const isCrudeFuture = useCallback((symbol: string): boolean => {
+    const s = symbol.toUpperCase();
+    if (!s.endsWith('FUT') || !s.startsWith(underlying)) return false;
+    return /[0-9]/.test(s[underlying.length] ?? '');
+  }, [underlying]);
+
   const crudePositions = useMemo(() => {
     const base = bookIsCurrent ? book.positions : [];
     if (!isKotak) return base;
     return base.map(p => {
-      const mapping = kotakSymbolToStrike[p.tradingSymbol ?? p.symbol];
-      if (!mapping) return p;
-      const row = rows.find(r => r.strike === mapping.strike);
-      const liveLtp = row?.[mapping.side]?.last_price ?? 0;
+      const sym = p.tradingSymbol ?? p.symbol;
+      const mapping = kotakSymbolToStrike[sym];
+      let liveLtp = 0;
+      if (mapping) {
+        const row = rows.find(r => r.strike === mapping.strike);
+        liveLtp = row?.[mapping.side]?.last_price ?? 0;
+      } else if (isCrudeFuture(sym)) {
+        // A futures leg has no strike to join through the option chain — the
+        // page already has its live price as the header's own SPOT reading
+        // (chain fetch pulls it from the nearest-month future's own OHLC).
+        // Only correct while that future is still the nearest month; a
+        // rolled/far-month position would need its own OHLC lookup.
+        liveLtp = spot;
+      }
       if (liveLtp <= 0) return p;
       const netQty = p.netQty;
       const unrealizedProfit = netQty === 0
@@ -171,7 +193,7 @@ export default function CrudeOilOptions() {
           : Math.abs(netQty) * (p.sellAvg - liveLtp);
       return { ...p, lastPrice: liveLtp, unrealizedProfit };
     });
-  }, [bookIsCurrent, book.positions, isKotak, kotakSymbolToStrike, rows]);
+  }, [bookIsCurrent, book.positions, isKotak, kotakSymbolToStrike, rows, isCrudeFuture, spot]);
 
   const crudeOrders    = bookIsCurrent ? book.orders : [];
   const crudeTrades    = bookIsCurrent ? book.trades : [];
