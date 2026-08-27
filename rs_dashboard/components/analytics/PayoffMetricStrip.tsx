@@ -9,6 +9,10 @@ function fmtInr(n: number): string {
   return `${n < 0 ? '-' : ''}₹${abs.toLocaleString('en-IN', { maximumFractionDigits: 0 })}`;
 }
 
+function pnlColor(n: number): string {
+  return n > 0 ? 'text-emerald-400' : n < 0 ? 'text-red-400' : 'text-zinc-400';
+}
+
 export function StatChip({
   label, value, sub, color, title,
 }: {
@@ -30,15 +34,28 @@ interface Props {
   /** Why standaloneMargin is null, when it's a known limitation rather than a fetch failure. */
   standaloneMarginReason?: string | null;
   marginAvailable: number | null;
+  /** Booked + unbooked P&L for the same leg scope as `stats`, right now. Omitted -> the Running P&L / Remaining Profit / Profit % chips are not rendered. */
+  livePnl?: number | null;
+  /** Margin blocked by the book overall (account-wide), used as the Profit % denominator when standaloneMargin is unavailable (e.g. a book spanning multiple expiries). */
+  usedMargin?: number | null;
 }
 
 export default function PayoffMetricStrip({
-  stats, lotSize, standaloneMargin, standaloneMarginReason, marginAvailable,
+  stats, lotSize, standaloneMargin, standaloneMarginReason, marginAvailable, livePnl, usedMargin,
 }: Props) {
   const lossUnlimited = stats.maxLoss === 'Unlimited';
   const profitUnlimited = stats.maxProfit === 'Unlimited';
 
   const rangeLabel = `${Math.round(stats.rangeLo).toLocaleString('en-IN')}–${Math.round(stats.rangeHi).toLocaleString('en-IN')}`;
+
+  const showLive = livePnl !== undefined && livePnl !== null;
+  const remainingProfit = showLive && !profitUnlimited ? (stats.maxProfit as number) - livePnl! : null;
+  const remainingProfitInRange = showLive ? stats.maxProfitInRange - livePnl! : null;
+  const marginBasis = standaloneMargin ?? usedMargin ?? null;
+  const profitPct = showLive && marginBasis !== null && marginBasis > 0 ? (livePnl! / marginBasis) * 100 : null;
+  // Net premium is the ceiling on a pure-credit book's profit (every leg expiring
+  // worthless) — expressed as % of margin, this is the book's max ROI-on-margin.
+  const netPremiumPct = marginBasis !== null && marginBasis > 0 ? (stats.netPremium / marginBasis) * 100 : null;
 
   return (
     <div className="flex flex-col gap-3 rounded-xl border border-zinc-800 bg-zinc-900 px-2 py-3">
@@ -71,6 +88,37 @@ export default function PayoffMetricStrip({
             ? `Loss is unbounded. Within the plotted range ${rangeLabel} the worst outcome is ${fmtInr(stats.maxLossInRange)} at ${Math.round(stats.maxLossAtSpot).toLocaleString('en-IN')}. Zoom out to widen the window.`
             : undefined}
         />
+
+        {showLive && (
+          <StatChip
+            label="Running P&L"
+            value={fmtInr(livePnl!)}
+            color={pnlColor(livePnl!)}
+            title="Booked + unbooked P&L for this book right now."
+          />
+        )}
+
+        {showLive && (
+          <StatChip
+            label="Remaining Profit"
+            value={profitUnlimited ? 'Unlimited' : fmtInr(remainingProfit as number)}
+            sub={profitUnlimited ? `${fmtInr(remainingProfitInRange as number)} within ${rangeLabel}` : undefined}
+            color="text-emerald-400"
+            title={profitUnlimited
+              ? `Max profit is unbounded, so this is the gap to the plotted range's best outcome (${fmtInr(stats.maxProfitInRange)} at ${Math.round(stats.maxProfitAtSpot).toLocaleString('en-IN')}), not a true ceiling.`
+              : 'Max Profit minus the running P&L — how much more this book can make if held to that best case.'}
+          />
+        )}
+
+        {showLive && (
+          <StatChip
+            label="Profit %"
+            value={profitPct === null ? '—' : `${profitPct >= 0 ? '+' : ''}${profitPct.toFixed(1)}%`}
+            sub={profitPct === null ? (marginBasis === null ? 'no margin figure' : undefined) : undefined}
+            color={profitPct === null ? undefined : pnlColor(profitPct)}
+            title={`Running P&L as a % of ${standaloneMargin !== null ? 'standalone margin for this book' : 'account-wide used margin (standalone margin unavailable)'}.`}
+          />
+        )}
 
         <StatChip
           label="Reward : Risk"
@@ -107,8 +155,9 @@ export default function PayoffMetricStrip({
         <StatChip
           label="Net Premium"
           value={`${stats.netPremium >= 0 ? 'Cr' : 'Db'} ${fmtInr(Math.abs(stats.netPremium))}`}
+          sub={netPremiumPct === null ? undefined : `${netPremiumPct >= 0 ? '+' : ''}${netPremiumPct.toFixed(1)}% of margin`}
           color={stats.netPremium >= 0 ? 'text-emerald-400' : 'text-red-400'}
-          title={`Lot size ${lotSize}. Credit is positive, debit negative.`}
+          title={`Lot size ${lotSize}. Credit is positive, debit negative.${netPremiumPct === null ? '' : ` As a % of ${standaloneMargin !== null ? 'standalone margin' : 'account-wide used margin'}, this is the book's max profit potential if every leg expires worthless.`}`}
         />
 
         <StatChip

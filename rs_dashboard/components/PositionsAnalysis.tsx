@@ -106,6 +106,7 @@ export default function PositionsAnalysis({ underlying }: { underlying: Analytic
   const [fetchedLotSize, setFetchedLotSize] = useState<number | null>(null);
   const [fetchedLotError, setFetchedLotError] = useState<string | null>(null);
   const [funds, setFunds] = useState<number | null>(null);
+  const [usedMargin, setUsedMargin] = useState<number | null>(null);
   const [standaloneMargin, setStandaloneMargin] = useState<number | null>(null);
   const [suggestions, setSuggestions] = useState<Suggestion[]>([]);
   const [dismissedSuggestionIds, setDismissedSuggestionIds] = useState<Set<string>>(new Set());
@@ -408,6 +409,8 @@ export default function PositionsAnalysis({ underlying }: { underlying: Analytic
         // Dhan misspells this field; the Kotak and Zerodha shims emit it too.
         const bal = json.data?.availabelBalance ?? json.data?.availableBalance;
         setFunds(typeof bal === 'number' ? bal : null);
+        const used = json.data?.utilizedAmount;
+        setUsedMargin(typeof used === 'number' ? used : null);
       } catch { /* funds are advisory — a failure must not blank the page */ }
     };
     load();
@@ -696,6 +699,16 @@ export default function PositionsAnalysis({ underlying }: { underlying: Analytic
     return { booked, unbooked, total: booked + unbooked, unknown };
   }, [visibleLegs]);
 
+  const intradayRollup = useMemo(() => {
+    let booked = 0, unbooked = 0;
+    for (const l of intradayLegs) {
+      const p = legPnl(l);
+      booked += p.booked;
+      if (p.unbooked !== null) unbooked += p.unbooked;
+    }
+    return { total: booked + unbooked };
+  }, [intradayLegs]);
+
   const exposure = useMemo(
     () => computeExposure(pricedLegs, { capital: funds, nav: funds }),
     [pricedLegs, funds],
@@ -737,6 +750,28 @@ export default function PositionsAnalysis({ underlying }: { underlying: Analytic
             >
               {availableBrokers.map((b) => <option key={b} value={b}>{BROKER_LABELS[b]}</option>)}
             </select>
+          )}
+
+          {(funds !== null || usedMargin !== null) && (
+            <div
+              className="flex items-center gap-2 rounded border border-zinc-800 bg-zinc-900 px-2 py-1 font-mono text-[10px]"
+              title={`${BROKER_LABELS[broker]} portfolio margin — used vs. available`}
+            >
+              <span className="text-zinc-500">Margin</span>
+              <span className="text-amber-400">
+                Used {usedMargin === null ? '—' : fmtInr(usedMargin)}
+              </span>
+              <span className="text-zinc-700">/</span>
+              <span className="text-emerald-400">
+                Avail {funds === null ? '—' : fmtInr(funds)}
+              </span>
+              {funds !== null && usedMargin !== null && (
+                <>
+                  <span className="text-zinc-700">/</span>
+                  <span className="text-zinc-400">Total {fmtInr(funds + usedMargin)}</span>
+                </>
+              )}
+            </div>
           )}
 
           <button type="button" onClick={loadPositions}
@@ -936,7 +971,7 @@ export default function PositionsAnalysis({ underlying }: { underlying: Analytic
             {stats && tab !== 'intraday' && <PayoffMetricStrip
               stats={stats} lotSize={lotSize ?? 0}
               standaloneMargin={standaloneMargin} standaloneMarginReason={standaloneMarginReason}
-              marginAvailable={funds} />}
+              marginAvailable={funds} livePnl={rollup.total} usedMargin={usedMargin} />}
 
             {tab === 'payoff' && (
               <div className="rounded-xl border border-zinc-800 bg-zinc-950 p-3">
@@ -1051,7 +1086,7 @@ export default function PositionsAnalysis({ underlying }: { underlying: Analytic
                 {intradayStats && <PayoffMetricStrip
                   stats={intradayStats} lotSize={lotSize ?? 0}
                   standaloneMargin={null} standaloneMarginReason="Margin sizing shown only on the combined view"
-                  marginAvailable={funds} />}
+                  marginAvailable={funds} livePnl={intradayRollup.total} usedMargin={usedMargin} />}
 
                 <div className="rounded-xl border border-zinc-800 bg-zinc-950 p-3">
                   <PositionsPayoffChart
