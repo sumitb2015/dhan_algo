@@ -16,26 +16,25 @@ import { cn } from '@/lib/utils';
 import CrudeOilOITab from './CrudeOilOITab';
 import CrudeOilCumulativeOITab from './CrudeOilCumulativeOITab';
 
-import ActivityTables, { type ActivityTab } from './crudeoil/ActivityTables';
+import ActivityPanel, { type ActivityTab } from './crudeoil/ActivityPanel';
 import ChainTable from './crudeoil/ChainTable';
 import ConfirmDialog from './crudeoil/ConfirmDialog';
 import MarketSnapshot from './crudeoil/MarketSnapshot';
-import RiskRail from './crudeoil/RiskRail';
+import TradeTicketBar from './crudeoil/TradeTicketBar';
 import {
   computeMaxPain, daysToExpiry, fmtExpiryLong, fmtExpiryShort, fmtNum,
   parseStrikeEntries, pctColor, pctSign, sideIV, todayIso,
 } from './crudeoil/format';
 import {
-  CRUDE_BROKERS, CRUDE_BROKER_LABELS, EMPTY_CHAIN_STATS, WING_OPTIONS,
+  CRUDE_BROKERS, CRUDE_BROKER_LABELS, CRUDE_UNDERLYINGS, CRUDE_UNDERLYING_LABELS,
+  EMPTY_CHAIN_STATS, STRIKE_STEP_BY_UNDERLYING, WING_OPTIONS,
   type ChainStats, type ConfirmPayload, type CrudeBroker, type CrudeOrder,
-  type CrudePosition, type CrudeTrade, type KotakSymbolMap, type ProcessedRow,
-  type RawChainEntry, type Wings,
+  type CrudePosition, type CrudeTrade, type CrudeUnderlying, type KotakSymbolMap,
+  type ProcessedRow, type RawChainEntry, type Wings,
 } from './crudeoil/types';
 
 // ─── Constants ────────────────────────────────────────────────────
 
-const UNDERLYING  = 'CRUDEOIL';
-const STRIKE_STEP = 100;
 const POLL_MS     = 15_000;
 const SPOT_FALLBACK_POLL_MS = 60_000;
 
@@ -48,13 +47,20 @@ const POSITIONS_ROUTE: Record<CrudeBroker, string> = {
   kotak: '/api/crudeoil-trades/kotak',
 };
 
-// SL/Target thresholds are per broker — see the loader below for why.
+// SL/Target thresholds are per broker AND per underlying — see the loader
+// below for why (Kotak/Dhan name the same contract differently, and CRUDEOIL
+// vs CRUDEOILM are separate contract families with their own symbols).
 const RISK_KEY_LEGACY = 'crude_risk_configs_v2';
-const RISK_KEY = (b: CrudeBroker) => `${RISK_KEY_LEGACY}:${b}`;
+const RISK_KEY = (b: CrudeBroker, u: CrudeUnderlying) => `${RISK_KEY_LEGACY}:${b}:${u}`;
 
 // ─── Main Component ───────────────────────────────────────────────
 
 export default function CrudeOilOptions() {
+  // ─── Underlying selection ──────────────────────────────────────────
+  const [underlying, setUnderlying]   = useState<CrudeUnderlying>('CRUDEOIL');
+  const underlyingLabel               = CRUDE_UNDERLYING_LABELS[underlying];
+  const strikeStep                    = STRIKE_STEP_BY_UNDERLYING[underlying];
+
   const [expiries, setExpiries]       = useState<string[]>([]);
   const [expiry, setExpiry]           = useState<string>('');
   const [spot, setSpot]               = useState(0);
@@ -107,8 +113,27 @@ export default function CrudeOilOptions() {
     error: string | null;
     loaded: boolean;
   }>({ broker: 'dhan', positions: [], orders: [], trades: [], error: null, loaded: false });
-  const [activeActivityTab, setActiveActivityTab] = useState<ActivityTab>('orders');
+  const [activeActivityTab, setActiveActivityTab] = useState<ActivityTab>('positions');
   const tradesIntervalRef = useRef<NodeJS.Timeout | null>(null);
+
+  // CRUDEOIL and CRUDEOILM are separate contract families (different strike
+  // ladders, different expiry lists) — clear everything chain-shaped on
+  // switch so a stale chain never renders under the new underlying's heading
+  // while the fresh expiries/spot/chain fetches are in flight.
+  useEffect(() => {
+    setExpiry('');
+    setExpiries([]);
+    setRows([]);
+    setStats(EMPTY_CHAIN_STATS);
+    setSpot(0);
+    setPrevClose(0);
+    setChange(0);
+    setChangePct(0);
+    setKotakSymbols(null);
+    setKotakSymbolsError(null);
+    setError('');
+    chainFailsRef.current = 0;
+  }, [underlying]);
 
   const bookIsCurrent  = book.broker === broker;
 
@@ -212,7 +237,7 @@ export default function CrudeOilOptions() {
     if (!isKotak || !expiry) { setKotakSymbols(null); setKotakSymbolsError(null); return; }
     let cancelled = false;
     setKotakSymbolsError(null);
-    fetch(`/api/scalper/kotak/lookup?underlying=${UNDERLYING}&expiry=${expiry}`)
+    fetch(`/api/scalper/kotak/lookup?underlying=${underlying}&expiry=${expiry}`)
       .then(r => r.json())
       .then((j: { success: boolean; data?: KotakSymbolMap; error?: string }) => {
         if (cancelled) return;
@@ -221,7 +246,7 @@ export default function CrudeOilOptions() {
       })
       .catch(err => { if (!cancelled) { setKotakSymbols(null); setKotakSymbolsError(String(err)); } });
     return () => { cancelled = true; };
-  }, [isKotak, expiry]);
+  }, [isKotak, expiry, underlying]);
 
   /** Kotak trading symbol for a strike/side, or null when the contract is unlisted. */
   const kotakSymbolFor = useCallback((strike: number, optType: 'CE' | 'PE'): string | null => {
@@ -307,13 +332,13 @@ export default function CrudeOilOptions() {
   }, [activePositions, brokerLabel, doExitAll]);
 
   useEffect(() => {
-    fetch(`/api/lotsize?symbol=${UNDERLYING}`)
+    fetch(`/api/lotsize?symbol=${underlying}`)
       .then(r => r.json())
       .then(json => {
         if (json.lot_size) setDhanLotSize(json.lot_size);
       })
       .catch(() => {});
-  }, []);
+  }, [underlying]);
 
   useEffect(() => {
     if (orderMessage) {
@@ -337,8 +362,8 @@ export default function CrudeOilOptions() {
     if (!kotakSymbols) return 'Loading Kotak contracts…';
     return kotakSymbolFor(row.strike, optType)
       ? ''
-      : `Kotak does not list ${UNDERLYING} ${row.strike} ${optType} for this expiry`;
-  }, [broker, brokerAuth, brokerLabel, isKotak, kotakSymbols, kotakSymbolsError, kotakSymbolFor]);
+      : `Kotak does not list ${underlying} ${row.strike} ${optType} for this expiry`;
+  }, [broker, brokerAuth, brokerLabel, isKotak, kotakSymbols, kotakSymbolsError, kotakSymbolFor, underlying]);
 
   const handlePlaceOrder = useCallback(async (strike: number, optType: 'CE' | 'PE', side: 'BUY' | 'SELL') => {
     if (ordering) return;
@@ -394,11 +419,12 @@ export default function CrudeOilOptions() {
     }
   }, [brokerLabel, fetchCrudeTrades, isKotak, kotakSymbolFor, lots, lotSize, ordering, rows, tradeBlockedReason]);
 
-  // Fetch expiries
+  // Fetch expiries — re-runs on underlying switch, since CRUDEOIL and
+  // CRUDEOILM are separate contract families with independent expiry lists.
   useEffect(() => {
     async function loadExpiries() {
       try {
-        const res = await fetch(`/api/options/expiries?underlying=${UNDERLYING}`);
+        const res = await fetch(`/api/options/expiries?underlying=${underlying}`);
         const json = await res.json() as { success: boolean; data?: string[]; error?: string };
         if (json.success && json.data?.length) {
           setExpiries(json.data);
@@ -411,12 +437,12 @@ export default function CrudeOilOptions() {
       }
     }
     void loadExpiries();
-  }, []);
+  }, [underlying]);
 
   // Fetch spot price
   const fetchSpot = useCallback(async () => {
     try {
-      const res = await fetch(`/api/options/spot?underlying=${UNDERLYING}`);
+      const res = await fetch(`/api/options/spot?underlying=${underlying}`);
       const json = await res.json() as {
         success: boolean;
         spot?: number;
@@ -431,7 +457,7 @@ export default function CrudeOilOptions() {
         setChangePct(json.change_pct ?? 0);
       }
     } catch { /* ignore spot errors, chain fetch has fallback spot */ }
-  }, []);
+  }, [underlying]);
 
   // Fetch option chain
   const fetchChain = useCallback(async () => {
@@ -450,7 +476,7 @@ export default function CrudeOilOptions() {
     };
 
     try {
-      const res = await fetch(`/api/options/chain?underlying=${UNDERLYING}&expiry=${expiry}`);
+      const res = await fetch(`/api/options/chain?underlying=${underlying}&expiry=${expiry}`);
       const json = await res.json() as {
         success: boolean;
         data?: {
@@ -473,7 +499,7 @@ export default function CrudeOilOptions() {
         onTransientFail('Spot price unavailable — retrying');
         return;
       }
-      const atmStrike = Math.round(spotPrice / STRIKE_STEP) * STRIKE_STEP;
+      const atmStrike = Math.round(spotPrice / strikeStep) * strikeStep;
 
       const oc        = json.data.chain.oc;
       if (!oc || Object.keys(oc).length === 0) {
@@ -481,7 +507,7 @@ export default function CrudeOilOptions() {
         return;
       }
 
-      const allEntries = parseStrikeEntries(oc).filter(({ strike }) => strike % STRIKE_STEP === 0);
+      const allEntries = parseStrikeEntries(oc).filter(({ strike }) => strike % strikeStep === 0);
       const mpStrike = computeMaxPain(allEntries);
 
       // Slicing window around ATM
@@ -583,7 +609,7 @@ export default function CrudeOilOptions() {
     } finally {
       setLoading(false);
     }
-  }, [expiry, wings]);
+  }, [expiry, wings, underlying, strikeStep]);
 
   // Combined fetch trigger. Spot is intentionally NOT fetched here every
   // cycle: fetchChain's response already carries a dedicated live spot/
@@ -626,23 +652,24 @@ export default function CrudeOilOptions() {
   // riskConfigs holds committed threshold values (these are only dashboard-level triggers — NOT broker orders)
   const [riskConfigs, setRiskConfigs] = useState<Record<string, { sl: number | null; target: number | null }>>({});
 
-  // Thresholds are stored PER BROKER. The two brokers name the same contract
-  // differently (CRUDEOIL17AUG267300CE on Kotak vs Dhan's own symbol), and the
-  // prune-on-close effect below deletes any config with no matching open
-  // position — so a single shared store loses every Dhan threshold the moment
-  // you look at the Kotak book.
+  // Thresholds are stored PER BROKER AND PER UNDERLYING. The two brokers name
+  // the same contract differently (CRUDEOIL17AUG267300CE on Kotak vs Dhan's
+  // own symbol), and the prune-on-close effect below deletes any config with
+  // no matching open position — so a single shared store loses every Dhan
+  // threshold the moment you look at the Kotak book (same reasoning extends
+  // to CRUDEOIL vs CRUDEOILM, which are separate contract families).
   useEffect(() => {
     try {
-      const saved = localStorage.getItem(RISK_KEY(broker))
-        // One-time carry-over: the pre-broker-selector store held Dhan's.
-        ?? (broker === 'dhan' ? localStorage.getItem(RISK_KEY_LEGACY) : null);
+      const saved = localStorage.getItem(RISK_KEY(broker, underlying))
+        // One-time carry-over: the pre-broker-selector store held Dhan's CRUDEOIL.
+        ?? (broker === 'dhan' && underlying === 'CRUDEOIL' ? localStorage.getItem(RISK_KEY_LEGACY) : null);
       setRiskConfigs(saved ? JSON.parse(saved) : {});
     } catch { setRiskConfigs({}); }
-  }, [broker]);
+  }, [broker, underlying]);
 
   const saveRiskConfigs = (updated: typeof riskConfigs) => {
     setRiskConfigs(updated);
-    localStorage.setItem(RISK_KEY(broker), JSON.stringify(updated));
+    localStorage.setItem(RISK_KEY(broker, underlying), JSON.stringify(updated));
   };
 
   const handleInputChange = (symbol: string, key: 'sl' | 'target', value: string) => {
@@ -860,10 +887,26 @@ export default function CrudeOilOptions() {
               <Fuel className="size-4 text-white" />
             </div>
             <div>
-              <div className="text-sm font-bold leading-none text-zinc-100">Crude Oil Options</div>
-              <div className="mt-0.5 text-[10px] text-zinc-500">MCX · CRUDEOIL</div>
+              <div className="text-sm font-bold leading-none text-zinc-100">{underlyingLabel} Options</div>
+              <div className="mt-0.5 text-[10px] text-zinc-500">MCX · {underlying}</div>
             </div>
           </div>
+
+          <Select
+            value={underlying}
+            onValueChange={(v) => { if (typeof v === 'string' && v) setUnderlying(v as CrudeUnderlying); }}
+          >
+            <SelectTrigger size="sm" className="min-w-36 font-mono">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {CRUDE_UNDERLYINGS.map(u => (
+                <SelectItem key={u} value={u} className="font-mono">
+                  {CRUDE_UNDERLYING_LABELS[u]}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
 
           <div className="flex flex-wrap items-center gap-2">
             <Badge
@@ -1021,79 +1064,74 @@ export default function CrudeOilOptions() {
           )}
 
           {activeTab === 'chain' && (
-            <div className="flex flex-col gap-4 xl:grid xl:grid-cols-[minmax(0,1fr)_360px] xl:items-start xl:gap-4">
-              {/* Left: chain + activity */}
-              <div className="order-2 flex min-w-0 flex-col gap-4 xl:order-1">
-                <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-zinc-800 bg-zinc-900 px-3 py-2">
-                  <div className="flex items-center gap-2">
-                    <span className="text-[10px] font-bold uppercase tracking-wider text-zinc-500">Strikes around ATM</span>
-                    <ToggleGroup
-                      value={[String(wings)]}
-                      onValueChange={(v) => { if (v[0]) setWings(Number(v[0]) as Wings); }}
-                      variant="outline"
-                      size="sm"
-                      spacing={0}
-                    >
-                      {WING_OPTIONS.map(w => (
-                        <ToggleGroupItem key={w} value={String(w)} className="tabular-nums">
-                          ±{w}
-                        </ToggleGroupItem>
-                      ))}
-                    </ToggleGroup>
-                  </div>
-                  <span className="text-[11px] tabular-nums text-zinc-500">
-                    {rows.length} rows · {brokerLabel} · ticket {qtyLabel}
-                  </span>
+            <div className="flex flex-col gap-4">
+              <TradeTicketBar
+                lots={lots}
+                lotSize={lotSize}
+                setLots={setLots}
+                brokerLabel={brokerLabel}
+                loading={tradesLoading}
+                totalRealized={totalRealized}
+                totalUnrealized={totalUnrealized}
+                totalPnl={totalPnl}
+                openCount={activePositions.length}
+                exitingAll={exitingAll}
+                onExitAll={handleExitAll}
+              />
+
+              <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-zinc-800 bg-zinc-900 px-3 py-2">
+                <div className="flex items-center gap-2">
+                  <span className="text-[10px] font-bold uppercase tracking-wider text-zinc-500">Strikes around ATM</span>
+                  <ToggleGroup
+                    value={[String(wings)]}
+                    onValueChange={(v) => { if (v[0]) setWings(Number(v[0]) as Wings); }}
+                    variant="outline"
+                    size="sm"
+                    spacing={0}
+                  >
+                    {WING_OPTIONS.map(w => (
+                      <ToggleGroupItem key={w} value={String(w)} className="tabular-nums">
+                        ±{w}
+                      </ToggleGroupItem>
+                    ))}
+                  </ToggleGroup>
                 </div>
-
-                <ChainTable
-                  rows={rows}
-                  spot={spot}
-                  loading={loading}
-                  ordering={ordering}
-                  qtyLabel={qtyLabel}
-                  onOrder={handlePlaceOrder}
-                  canTrade={tradeBlockedReason}
-                />
-
-                {tradesError && (
-                  <Alert variant="destructive" className="border-red-500/40 bg-red-500/10">
-                    <AlertCircle />
-                    <AlertTitle>Positions feed unavailable</AlertTitle>
-                    <AlertDescription>{tradesError}</AlertDescription>
-                  </Alert>
-                )}
-
-                <ActivityTables
-                  tab={activeActivityTab}
-                  setTab={setActiveActivityTab}
-                  orders={crudeOrders}
-                  trades={crudeTrades}
-                  loading={tradesLoading}
-                />
+                <span className="text-[11px] tabular-nums text-zinc-500">
+                  {rows.length} rows · {brokerLabel} · ticket {qtyLabel}
+                </span>
               </div>
 
-              {/* Right: live risk rail — sticks beside the chain on wide screens,
-                  sits above it on narrower ones so it is never buried. */}
-              <div className="order-1 xl:order-2 xl:sticky xl:top-24 xl:self-start">
-                <RiskRail
-                  lots={lots}
-                  lotSize={lotSize}
-                  setLots={setLots}
-                  brokerLabel={brokerLabel}
-                  positions={crudePositions}
-                  loading={tradesLoading}
-                  totalRealized={totalRealized}
-                  totalUnrealized={totalUnrealized}
-                  totalPnl={totalPnl}
-                  exitingAll={exitingAll}
-                  onExitAll={handleExitAll}
-                  riskConfigs={riskConfigs}
-                  editingConfigs={editingConfigs}
-                  onThresholdChange={handleInputChange}
-                  onThresholdCommit={handleInputCommit}
-                />
-              </div>
+              <ChainTable
+                rows={rows}
+                spot={spot}
+                loading={loading}
+                ordering={ordering}
+                qtyLabel={qtyLabel}
+                onOrder={handlePlaceOrder}
+                canTrade={tradeBlockedReason}
+              />
+
+              {tradesError && (
+                <Alert variant="destructive" className="border-red-500/40 bg-red-500/10">
+                  <AlertCircle />
+                  <AlertTitle>Positions feed unavailable</AlertTitle>
+                  <AlertDescription>{tradesError}</AlertDescription>
+                </Alert>
+              )}
+
+              <ActivityPanel
+                tab={activeActivityTab}
+                setTab={setActiveActivityTab}
+                positions={crudePositions}
+                positionsLoading={tradesLoading}
+                orders={crudeOrders}
+                trades={crudeTrades}
+                loading={tradesLoading}
+                riskConfigs={riskConfigs}
+                editingConfigs={editingConfigs}
+                onThresholdChange={handleInputChange}
+                onThresholdCommit={handleInputCommit}
+              />
             </div>
           )}
 
