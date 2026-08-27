@@ -88,11 +88,11 @@ def main():
 
     if args.cmd == 'expiries':
         under = args.underlying.upper()
-        if under == 'CRUDEOIL':
+        if under in ('CRUDEOIL', 'CRUDEOILM'):
             from scripts.tools.premarket_data import _find_nearest_future
-            fut = _find_nearest_future(helper, "CRUDEOIL", exchange="MCX", instrument="FUTCOM")
+            fut = _find_nearest_future(helper, under, exchange="MCX", instrument="FUTCOM")
             if not fut:
-                print(json.dumps({'error': 'CRUDEOIL future contract not found'}))
+                print(json.dumps({'error': f'{under} future contract not found'}))
                 sys.exit(0)
             uid = int(fut["SECURITY_ID"])
             seg = 'MCX_COMM'
@@ -117,7 +117,7 @@ def main():
 
     elif args.cmd == 'chain':
         under = args.underlying.upper()
-        is_crude = (under == 'CRUDEOIL')
+        is_crude = under in ('CRUDEOIL', 'CRUDEOILM')
         is_index = under in UNDERLYINGS
         # Leave seg=None for equity underlyings — get_option_chain() auto-resolves
         # the symbol and its segment (NSE_EQ -> NSE_FNO) via the master list.
@@ -135,9 +135,9 @@ def main():
         fut_sid = None
         if is_crude:
             from scripts.tools.premarket_data import _find_nearest_future
-            fut = _find_nearest_future(helper, "CRUDEOIL", exchange="MCX", instrument="FUTCOM")
+            fut = _find_nearest_future(helper, under, exchange="MCX", instrument="FUTCOM")
             if not fut:
-                print(json.dumps({'error': 'CRUDEOIL future contract not found'}))
+                print(json.dumps({'error': f'{under} future contract not found'}))
                 sys.exit(0)
             fut_sid = int(fut["SECURITY_ID"])
             chain_symbol = str(fut_sid)
@@ -197,10 +197,10 @@ def main():
 
     elif args.cmd == 'ltp':
         under = args.underlying.upper()
-        is_crude = (under == 'CRUDEOIL')
+        is_crude = under in ('CRUDEOIL', 'CRUDEOILM')
         if is_crude:
             from scripts.tools.premarket_data import _find_nearest_future
-            fut = _find_nearest_future(helper, "CRUDEOIL", exchange="MCX", instrument="FUTCOM")
+            fut = _find_nearest_future(helper, under, exchange="MCX", instrument="FUTCOM")
             if fut:
                 sid = int(fut["SECURITY_ID"])
                 ohlc_raw = helper.get_ohlc_data({"MCX_COMM": [sid]})

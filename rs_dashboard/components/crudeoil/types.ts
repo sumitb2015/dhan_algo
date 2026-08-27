@@ -123,6 +123,21 @@ export const EMPTY_CHAIN_STATS: ChainStats = {
 export const WING_OPTIONS = [5, 10, 15, 20] as const;
 export type Wings = typeof WING_OPTIONS[number];
 
+/** Underlyings this terminal can trade — each has its own genuine option chain. */
+export const CRUDE_UNDERLYINGS = ['CRUDEOIL', 'CRUDEOILM'] as const;
+export type CrudeUnderlying = typeof CRUDE_UNDERLYINGS[number];
+
+export const CRUDE_UNDERLYING_LABELS: Record<CrudeUnderlying, string> = {
+  CRUDEOIL: 'Crude Oil',
+  CRUDEOILM: 'Crude Oil Mini',
+};
+
+/** Strike ladder spacing differs per contract — CRUDEOILM lists every 50, not 100. */
+export const STRIKE_STEP_BY_UNDERLYING: Record<CrudeUnderlying, number> = {
+  CRUDEOIL: 100,
+  CRUDEOILM: 50,
+};
+
 /** Brokers that can trade MCX crude from this page. */
 export const CRUDE_BROKERS = ['dhan', 'kotak'] as const;
 export type CrudeBroker = typeof CRUDE_BROKERS[number];
