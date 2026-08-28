@@ -116,6 +116,60 @@ function ThresholdField({
   );
 }
 
+/**
+ * Add-lots stepper + Close button for one position row. Kept as its own
+ * component (rather than lifting the input value into ActivityPanel state)
+ * so typing in one row's box never re-renders the rest of the table.
+ */
+function PositionActionsCell({
+  position,
+  disabled,
+  onAdd,
+  onClose,
+}: {
+  position: CrudePosition;
+  disabled: boolean;
+  onAdd: (position: CrudePosition, addLots: number) => void;
+  onClose: (position: CrudePosition) => void;
+}) {
+  const [addLots, setAddLots] = React.useState('1');
+  const parsed = parseFloat(addLots);
+  const validAdd = Number.isFinite(parsed) && parsed > 0;
+
+  return (
+    <div className="flex items-center justify-end gap-1.5">
+      <Input
+        type="number"
+        min="0"
+        step="1"
+        value={addLots}
+        onChange={(e) => setAddLots(e.target.value)}
+        disabled={disabled}
+        aria-label={`Lots to add to ${position.symbol}`}
+        className="h-7 w-16 text-center text-xs tabular-nums"
+      />
+      <Button
+        size="sm"
+        variant="outline"
+        disabled={disabled || !validAdd}
+        onClick={() => onAdd(position, parsed)}
+        className="h-7 border-emerald-500/40 bg-emerald-500/10 px-2 text-xs text-emerald-300 hover:bg-emerald-500/20"
+      >
+        Add
+      </Button>
+      <Button
+        size="sm"
+        variant="outline"
+        disabled={disabled}
+        onClick={() => onClose(position)}
+        className="h-7 border-red-500/40 bg-red-500/10 px-2 text-xs text-red-300 hover:bg-red-500/20"
+      >
+        Close
+      </Button>
+    </div>
+  );
+}
+
 export default function ActivityPanel({
   tab,
   setTab,
@@ -128,6 +182,9 @@ export default function ActivityPanel({
   editingConfigs,
   onThresholdChange,
   onThresholdCommit,
+  onAddToPosition,
+  onClosePosition,
+  actionsBusy,
 }: {
   tab: ActivityTab;
   setTab: (t: ActivityTab) => void;
@@ -140,6 +197,12 @@ export default function ActivityPanel({
   editingConfigs: EditingConfigs;
   onThresholdChange: (symbol: string, key: 'sl' | 'target', value: string) => void;
   onThresholdCommit: (symbol: string, key: 'sl' | 'target', override?: string) => void;
+  /** Places a market order in the position's own direction for `addLots` lots. */
+  onAddToPosition: (position: CrudePosition, addLots: number) => void;
+  /** Squares off this single position at market (with confirmation upstream). */
+  onClosePosition: (position: CrudePosition) => void;
+  /** True while any order for this book is in flight — disables Add/Close. */
+  actionsBusy: boolean;
 }) {
   const count = tab === 'positions' ? positions.length : tab === 'orders' ? orders.length : trades.length;
 
@@ -180,13 +243,14 @@ export default function ActivityPanel({
                 <TableHead className={`${TH} text-right`}>Realized</TableHead>
                 <TableHead className={TH}>Stop-Loss</TableHead>
                 <TableHead className={TH}>Target</TableHead>
+                <TableHead className={`${TH} text-right`}>Actions</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
               {positionsLoading ? (
-                <TableRow className="hover:bg-transparent"><TableCell colSpan={11} className="py-8 text-center text-zinc-500">Loading positions…</TableCell></TableRow>
+                <TableRow className="hover:bg-transparent"><TableCell colSpan={12} className="py-8 text-center text-zinc-500">Loading positions…</TableCell></TableRow>
               ) : positions.length === 0 ? (
-                <TableRow className="hover:bg-transparent"><TableCell colSpan={11} className="py-8 text-center text-zinc-500">No open positions</TableCell></TableRow>
+                <TableRow className="hover:bg-transparent"><TableCell colSpan={12} className="py-8 text-center text-zinc-500">No open positions</TableCell></TableRow>
               ) : (
                 positions.map((p, i) => {
                   const config  = riskConfigs[p.symbol] ?? { sl: null, target: null };
@@ -239,6 +303,16 @@ export default function ActivityPanel({
                             editingValue={editing.target}
                             onChange={onThresholdChange}
                             onCommit={onThresholdCommit}
+                          />
+                        )}
+                      </TableCell>
+                      <TableCell>
+                        {flat ? <span className="flex justify-end text-zinc-600">—</span> : (
+                          <PositionActionsCell
+                            position={p}
+                            disabled={actionsBusy}
+                            onAdd={onAddToPosition}
+                            onClose={onClosePosition}
                           />
                         )}
                       </TableCell>

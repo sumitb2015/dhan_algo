@@ -410,6 +410,109 @@ export default function CrudeOilOptions() {
     }
   }, [activePositions, buildExitRequest, brokerLabel, fetchCrudeTrades]);
 
+  /**
+   * Places a MARKET order in the position's own direction (BUY for a long,
+   * SELL for a short) for `addLots` lots, using the position's own
+   * securityId/tradingSymbol directly rather than re-resolving a strike —
+   * it's already the exact contract held.
+   */
+  const handleAddToPosition = useCallback(async (position: CrudePosition, addLots: number) => {
+    if (ordering) return;
+    if (!Number.isFinite(addLots) || addLots <= 0) {
+      setOrderMessage({ text: 'Enter a valid number of lots to add.', isError: true });
+      return;
+    }
+
+    const side: 'BUY' | 'SELL' = position.netQty < 0 ? 'SELL' : 'BUY';
+    // Kotak's netQty/lotSize are absolute barrels; Dhan's MCX quantity is
+    // already a lot count (its lot size is always 1), so no multiplier there.
+    const posLotSize = isKotak ? (position.lotSize ?? 1) : 1;
+    const qty = addLots * posLotSize;
+
+    let url: string;
+    let body: unknown;
+    if (isKotak) {
+      const tradingsymbol = position.tradingSymbol || position.symbol;
+      url = '/api/crudeoil/kotak-order';
+      body = { legs: [{ tradingsymbol, quantity: qty, side }], mode: 'positional' };
+    } else {
+      url = '/api/options/order';
+      body = {
+        legs: [{
+          securityId: position.securityId || '',
+          quantity: qty,
+          side,
+          exchangeSegment: position.exchangeSegment || 'MCX_COMM',
+        }],
+        mode: 'positional',
+      };
+    }
+
+    setOrdering(true);
+    setOrderMessage(null);
+    try {
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      const json = await res.json();
+      if (json.success) {
+        setOrderMessage({
+          text: `${brokerLabel}: MARKET ${side} ${position.symbol} — added ${qty} qty (${addLots} lot${addLots > 1 ? 's' : ''}).`,
+          isError: false,
+        });
+        void fetchCrudeTrades();
+      } else {
+        setOrderMessage({ text: `Failed to add to ${position.symbol}: ${json.error || 'Unknown error'}`, isError: true });
+      }
+    } catch (err) {
+      setOrderMessage({ text: `Error adding to position: ${String(err)}`, isError: true });
+    } finally {
+      setOrdering(false);
+    }
+  }, [ordering, isKotak, brokerLabel, fetchCrudeTrades]);
+
+  /** Squares off a single position at market, behind the same confirmation dialog Exit All uses. */
+  const handleClosePosition = useCallback((position: CrudePosition) => {
+    if (position.netQty === 0) return;
+    const { url, body } = buildExitRequest([position]);
+
+    setPendingConfirm({
+      title: 'Close position?',
+      subtitle: `${position.symbol} · ${brokerLabel}`,
+      reason: `This position will be closed immediately at market on ${brokerLabel}.`,
+      detail: (
+        <>
+          A <span className="font-bold text-zinc-300">MARKET</span> order will be sent to{' '}
+          <span className="font-bold text-zinc-300">{brokerLabel}</span> to close{' '}
+          <span className="font-bold text-zinc-300">{position.symbol}</span>. This cannot be undone.
+        </>
+      ),
+      confirmLabel: 'Close Position',
+      onConfirm: () => {
+        setPendingConfirm(null);
+        void (async () => {
+          setOrderMessage(null);
+          try {
+            const res = await fetch(url, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify(body),
+            });
+            const json = await res.json() as { success: boolean; error?: string };
+            setOrderMessage(json.success
+              ? { text: `Close order placed for ${position.symbol} on ${brokerLabel}.`, isError: false }
+              : { text: `Failed to close ${position.symbol}: ${json.error ?? 'Unknown error'}`, isError: true });
+            void fetchCrudeTrades();
+          } catch (err) {
+            setOrderMessage({ text: `Error closing position: ${String(err)}`, isError: true });
+          }
+        })();
+      },
+    });
+  }, [buildExitRequest, brokerLabel, fetchCrudeTrades]);
+
   const handleExitAll = useCallback(() => {
     if (activePositions.length === 0) return;
     setPendingConfirm({
@@ -1285,6 +1388,9 @@ export default function CrudeOilOptions() {
                 editingConfigs={editingConfigs}
                 onThresholdChange={handleInputChange}
                 onThresholdCommit={handleInputCommit}
+                onAddToPosition={handleAddToPosition}
+                onClosePosition={handleClosePosition}
+                actionsBusy={ordering}
               />
             </div>
           )}
