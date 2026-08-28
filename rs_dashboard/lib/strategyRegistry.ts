@@ -17,56 +17,71 @@ export const DEBUG_DIR = path.join(PROJECT_ROOT, 'debug');
  * page follows this object's key order, so place a new entry next to its siblings rather
  * than maintaining a separate ordering list.
  */
-export const STRATEGIES_METADATA: Record<string, { name: string; path: string; underlying: string }> = {
+export const STRATEGIES_METADATA: Record<string, {
+  name: string;
+  path: string;
+  underlying: string;
+  execBrokerEligible?: boolean;
+}> = {
   nifty_advanced_imbalance: {
     name: 'Nifty Advanced Imbalance',
     underlying: 'NIFTY',
-    path: path.join(PROJECT_ROOT, 'strategies', 'value_imbalance', 'nifty_advanced_imbalance.py')
+    path: path.join(PROJECT_ROOT, 'strategies', 'value_imbalance', 'nifty_advanced_imbalance.py'),
+    execBrokerEligible: true,
   },
   nifty_delta_neutral: {
     name: 'Nifty Delta Neutral (0.5 Delta)',
     underlying: 'NIFTY',
-    path: path.join(PROJECT_ROOT, 'strategies', 'value_imbalance', 'nifty_delta_neutral.py')
+    path: path.join(PROJECT_ROOT, 'strategies', 'value_imbalance', 'nifty_delta_neutral.py'),
+    execBrokerEligible: true,
   },
   nifty_value_imbalance_straddle: {
     name: 'Nifty Value Imbalance Straddle',
     underlying: 'NIFTY',
-    path: path.join(PROJECT_ROOT, 'strategies', 'value_imbalance', 'nifty_value_imbalance_straddle.py')
+    path: path.join(PROJECT_ROOT, 'strategies', 'value_imbalance', 'nifty_value_imbalance_straddle.py'),
+    execBrokerEligible: true,
   },
   nifty_value_imbalance_strangle: {
     name: 'Nifty Value Imbalance Strangle',
     underlying: 'NIFTY',
-    path: path.join(PROJECT_ROOT, 'strategies', 'value_imbalance', 'nifty_value_imbalance_strangle.py')
+    path: path.join(PROJECT_ROOT, 'strategies', 'value_imbalance', 'nifty_value_imbalance_strangle.py'),
+    execBrokerEligible: true,
   },
   nifty_vwap_1min_straddle: {
     name: 'Nifty VWAP 1-Min Straddle',
     underlying: 'NIFTY',
-    path: path.join(PROJECT_ROOT, 'strategies', 'value_imbalance', 'nifty_vwap_1min_straddle.py')
+    path: path.join(PROJECT_ROOT, 'strategies', 'value_imbalance', 'nifty_vwap_1min_straddle.py'),
+    execBrokerEligible: true,
   },
   nifty_vix_straddle: {
     name: 'Nifty VIX-Filtered Straddle',
     underlying: 'NIFTY',
-    path: path.join(PROJECT_ROOT, 'strategies', 'value_imbalance', 'nifty_vix_straddle.py')
+    path: path.join(PROJECT_ROOT, 'strategies', 'value_imbalance', 'nifty_vix_straddle.py'),
+    execBrokerEligible: true,
   },
   nifty_spread_trend: {
     name: 'Nifty Spread Trend-Following',
     underlying: 'NIFTY',
-    path: path.join(PROJECT_ROOT, 'strategies', 'spread_trend', 'nifty_spread_trend.py')
+    path: path.join(PROJECT_ROOT, 'strategies', 'spread_trend', 'nifty_spread_trend.py'),
+    execBrokerEligible: true,
   },
   nifty_oi_directional: {
     name: 'Nifty OI Directional',
     underlying: 'NIFTY',
-    path: path.join(PROJECT_ROOT, 'strategies', 'oi_directional', 'nifty_oi_directional.py')
+    path: path.join(PROJECT_ROOT, 'strategies', 'oi_directional', 'nifty_oi_directional.py'),
+    execBrokerEligible: true,
   },
   nifty_st_oi_bearcall: {
     name: 'Nifty ST+OI Bear Call Spread',
     underlying: 'NIFTY',
-    path: path.join(PROJECT_ROOT, 'strategies', 'st_oi_bearcall', 'nifty_st_oi_bearcall.py')
+    path: path.join(PROJECT_ROOT, 'strategies', 'st_oi_bearcall', 'nifty_st_oi_bearcall.py'),
+    execBrokerEligible: true,
   },
   nifty_rolling_straddle: {
     name: 'Nifty Rolling Short Straddle',
     underlying: 'NIFTY',
-    path: path.join(PROJECT_ROOT, 'strategies', 'value_imbalance', 'nifty_rolling_straddle.py')
+    path: path.join(PROJECT_ROOT, 'strategies', 'value_imbalance', 'nifty_rolling_straddle.py'),
+    execBrokerEligible: true,
   },
   crudeoilm_supertrend: {
     name: 'CrudeOil Mini Supertrend',
