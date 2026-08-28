@@ -13,7 +13,7 @@
  * something. Reintroduce alongside that manager, not before.
  */
 
-import React, { useState } from 'react';
+import React, { useState, useMemo } from 'react';
 import { AlertTriangle, Loader2 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import type { PositionLeg, UnparseableLeg } from '@/lib/positionLegs';
@@ -22,6 +22,55 @@ import { partialCloseChips, type ClosePct } from '@/lib/partialQty';
 
 const TH = 'bg-zinc-800 px-1.5 py-2 text-xs font-bold text-white whitespace-nowrap';
 const TD = 'px-1.5 py-2 font-mono text-xs tabular-nums text-zinc-200 whitespace-nowrap';
+
+export type PositionSortKey =
+  | 'instrument'
+  | 'expiry'
+  | 'qty'
+  | 'lots'
+  | 'avg'
+  | 'ltp'
+  | 'booked'
+  | 'unbooked'
+  | 'pnl'
+  | 'pnlPct';
+
+export type SortDir = 'asc' | 'desc';
+
+function SortHeader({
+  colKey,
+  label,
+  align = 'center',
+  currentKey,
+  dir,
+  onSort,
+}: {
+  colKey: PositionSortKey;
+  label: string;
+  align?: 'left' | 'center' | 'right';
+  currentKey: PositionSortKey | null;
+  dir: SortDir;
+  onSort: (k: PositionSortKey) => void;
+}) {
+  const active = currentKey === colKey;
+  return (
+    <th
+      className={cn(
+        TH,
+        align === 'left' ? 'text-left' : align === 'right' ? 'text-right' : 'text-center',
+        'cursor-pointer select-none transition-colors hover:bg-zinc-700',
+      )}
+      onClick={() => onSort(colKey)}
+    >
+      <div className={cn('inline-flex items-center gap-1', align === 'right' ? 'justify-end' : align === 'left' ? 'justify-start' : 'justify-center')}>
+        <span>{label}</span>
+        <span className={cn('text-[10px]', active ? 'text-sky-400 font-bold' : 'text-zinc-500')}>
+          {active ? (dir === 'asc' ? '▲' : '▼') : '↕'}
+        </span>
+      </div>
+    </th>
+  );
+}
 
 function fmtInr(n: number, dec = 0): string {
   const abs = Math.abs(n);
@@ -192,12 +241,63 @@ export default function PositionsLegTable({
   legs, unparseable, lotSize, onClose, closingKeys, onAdd, addingKeys,
   selectedKeys, onToggleSelect, onToggleSelectAll,
 }: Props) {
+  const [sortKey, setSortKey] = useState<PositionSortKey | null>(null);
+  const [sortDir, setSortDir] = useState<SortDir>('desc');
+
+  const handleSort = (key: PositionSortKey) => {
+    if (sortKey === key) {
+      setSortDir((d) => (d === 'asc' ? 'desc' : 'asc'));
+    } else {
+      setSortKey(key);
+      setSortDir(key === 'instrument' || key === 'expiry' ? 'asc' : 'desc');
+    }
+  };
+
+  const sortedLegs = useMemo(() => {
+    if (!sortKey) return legs;
+    return [...legs].sort((a, b) => {
+      let diff = 0;
+      if (sortKey === 'instrument') {
+        if (a.strike !== b.strike) diff = a.strike - b.strike;
+        else if (a.type !== b.type) diff = a.type.localeCompare(b.type);
+        else diff = a.side.localeCompare(b.side);
+      } else if (sortKey === 'expiry') {
+        diff = (a.expiry ?? '').localeCompare(b.expiry ?? '');
+      } else if (sortKey === 'qty') {
+        diff = a.display.netQty - b.display.netQty;
+      } else if (sortKey === 'lots') {
+        diff = a.qtyLots - b.qtyLots;
+      } else if (sortKey === 'avg') {
+        diff = a.display.entryAvg - b.display.entryAvg;
+      } else if (sortKey === 'ltp') {
+        const la = a.display.ltp ?? -Infinity;
+        const lb = b.display.ltp ?? -Infinity;
+        diff = la - lb;
+      } else if (sortKey === 'booked') {
+        diff = a.display.realizedProfit - b.display.realizedProfit;
+      } else if (sortKey === 'unbooked') {
+        const pa = legPnl(a).unbooked ?? -Infinity;
+        const pb = legPnl(b).unbooked ?? -Infinity;
+        diff = pa - pb;
+      } else if (sortKey === 'pnl') {
+        const pa = legPnl(a).total ?? -Infinity;
+        const pb = legPnl(b).total ?? -Infinity;
+        diff = pa - pb;
+      } else if (sortKey === 'pnlPct') {
+        const pa = legPnl(a).totalPct ?? -Infinity;
+        const pb = legPnl(b).totalPct ?? -Infinity;
+        diff = pa - pb;
+      }
+      return sortDir === 'asc' ? diff : -diff;
+    });
+  }, [legs, sortKey, sortDir]);
+
   if (!legs.length && !unparseable.length) {
     return <p className="px-3 py-6 text-center text-xs text-zinc-500">No open option positions.</p>;
   }
 
   const selectable = !!selectedKeys && !!onToggleSelect;
-  const allKeys = legs.map(legKey);
+  const allKeys = sortedLegs.map(legKey);
   const allSelected = selectable && allKeys.length > 0 && allKeys.every((k) => selectedKeys!.has(k));
 
   return (
@@ -238,21 +338,21 @@ export default function PositionsLegTable({
                   />
                 </th>
               )}
-              <th className={cn(TH, 'text-left')}>Instrument</th>
-              <th className={TH}>Expiry</th>
-              <th className={TH}>Qty</th>
-              <th className={TH}>Lots</th>
-              <th className={TH}>Avg</th>
-              <th className={TH}>LTP</th>
-              <th className={TH}>Booked</th>
-              <th className={TH}>Unbook</th>
-              <th className={TH}>P&amp;L</th>
-              <th className={TH}>P&amp;L %</th>
+              <SortHeader colKey="instrument" label="Instrument" align="left" currentKey={sortKey} dir={sortDir} onSort={handleSort} />
+              <SortHeader colKey="expiry" label="Expiry" align="center" currentKey={sortKey} dir={sortDir} onSort={handleSort} />
+              <SortHeader colKey="qty" label="Qty" align="center" currentKey={sortKey} dir={sortDir} onSort={handleSort} />
+              <SortHeader colKey="lots" label="Lots" align="center" currentKey={sortKey} dir={sortDir} onSort={handleSort} />
+              <SortHeader colKey="avg" label="Avg" align="center" currentKey={sortKey} dir={sortDir} onSort={handleSort} />
+              <SortHeader colKey="ltp" label="LTP" align="center" currentKey={sortKey} dir={sortDir} onSort={handleSort} />
+              <SortHeader colKey="booked" label="Booked" align="center" currentKey={sortKey} dir={sortDir} onSort={handleSort} />
+              <SortHeader colKey="unbooked" label="Unbook" align="center" currentKey={sortKey} dir={sortDir} onSort={handleSort} />
+              <SortHeader colKey="pnl" label="P&L" align="center" currentKey={sortKey} dir={sortDir} onSort={handleSort} />
+              <SortHeader colKey="pnlPct" label="P&L %" align="center" currentKey={sortKey} dir={sortDir} onSort={handleSort} />
               {onClose && <th className={cn(TH, 'text-right')}>Actions</th>}
             </tr>
           </thead>
           <tbody>
-            {legs.map((l) => {
+            {sortedLegs.map((l) => {
               const key = legKey(l);
               const p = legPnl(l);
               const lots = lotSize > 0 ? l.qtyLots / lotSize : null;
