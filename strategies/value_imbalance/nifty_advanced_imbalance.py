@@ -12,7 +12,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 from login import get_dhan_client
 from lib.dhan_helper import DhanHelper
 from lib.strategy_state_helper import save_strategy_state, check_shutdown_trigger, exit_if_market_closed, parse_target_spec, instance_log_suffix
-from lib.strategy_risk import resolve_exit_qty
+from lib.strategy_risk import resolve_exit_qty_broker
+from lib.execution_broker import ExecutionBroker, ExecutionBrokerError
 
 # Setup Logging
 project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -55,8 +56,9 @@ class NiftyAdvancedImbalance:
                  leg_sl_pct=0.20,
                  trail_start_rs=500.0, trail_gap_rs=300.0,
                  scalp_floor_pct=0.0, multi_cycle=False, cycle_cooldown=300,
-                 state_key="nifty_advanced_imbalance"):
+                 state_key="nifty_advanced_imbalance", broker="dhan"):
         self.state_key = state_key
+        self.broker_name = broker
         self.mode = mode.lower()
         self.dry_run = dry_run
         self.initial_lots = initial_lots
@@ -94,7 +96,13 @@ class NiftyAdvancedImbalance:
         if not self.dhan:
             raise Exception("Failed to connect to Dhan.")
         self.helper = DhanHelper(self.dhan)
-        
+
+        try:
+            self.broker = ExecutionBroker.create(broker, self.helper, underlying="NIFTY", log=logger.info)
+        except ExecutionBrokerError as e:
+            logger.error(f"Could not start {broker} execution: {e}")
+            sys.exit(1)
+
         # Start WebSocket for Nifty Spot (Essential for reliable LTP)
         logger.info("Starting WebSocket for NIFTY Index...")
         self.helper.start_websocket([("IDX_I", "13", 15)])
@@ -177,6 +185,7 @@ class NiftyAdvancedImbalance:
         state_dict = {
             "strategy": "nifty_advanced_imbalance",
             "status": status,
+            "broker": self.broker_name,
             "mode": self.mode,
             "dry_run": self.dry_run,
             "entry_type": self.entry_type,
@@ -357,10 +366,10 @@ class NiftyAdvancedImbalance:
             closed_qty = self.ce_lots * self.nifty_lot_size
             if not self.dry_run:
                 own_qty = closed_qty
-                qty_to_buy, net_qty = resolve_exit_qty(self.helper, self.ce_id, own_qty, "BUY", logger)
+                qty_to_buy, net_qty = resolve_exit_qty_broker(self.broker, self.ce_strike, self.expiry, "CE", own_qty, "BUY", logger)
                 closed_qty = qty_to_buy
                 if qty_to_buy > 0:
-                    buy_oid = self.helper.buy(str(self.ce_id), qty_to_buy)
+                    buy_oid = self.broker.buy(self.ce_strike, self.expiry, "CE", qty_to_buy)
                     if buy_oid:
                         actual_exit = self.get_execution_price(buy_oid, ce_ltp)
                         logger.info(f"CE SL exit for {qty_to_buy} qty (own {own_qty}, broker net {net_qty}): {buy_oid}")
@@ -399,10 +408,10 @@ class NiftyAdvancedImbalance:
             closed_qty = self.pe_lots * self.nifty_lot_size
             if not self.dry_run:
                 own_qty = closed_qty
-                qty_to_buy, net_qty = resolve_exit_qty(self.helper, self.pe_id, own_qty, "BUY", logger)
+                qty_to_buy, net_qty = resolve_exit_qty_broker(self.broker, self.pe_strike, self.expiry, "PE", own_qty, "BUY", logger)
                 closed_qty = qty_to_buy
                 if qty_to_buy > 0:
-                    buy_oid = self.helper.buy(str(self.pe_id), qty_to_buy)
+                    buy_oid = self.broker.buy(self.pe_strike, self.expiry, "PE", qty_to_buy)
                     if buy_oid:
                         actual_exit = self.get_execution_price(buy_oid, pe_ltp)
                         logger.info(f"PE SL exit for {qty_to_buy} qty (own {own_qty}, broker net {net_qty}): {buy_oid}")
@@ -438,7 +447,7 @@ class NiftyAdvancedImbalance:
             actual_entry = ce_ltp
             success = True
             if not self.dry_run:
-                sell_oid = self.helper.sell(str(self.ce_id), self.initial_lots * self.nifty_lot_size)
+                sell_oid = self.broker.sell(self.ce_strike, self.expiry, "CE", self.initial_lots * self.nifty_lot_size)
                 if sell_oid:
                     actual_entry = self.get_execution_price(sell_oid, ce_ltp)
                 else:
@@ -461,7 +470,7 @@ class NiftyAdvancedImbalance:
             actual_entry = pe_ltp
             success = True
             if not self.dry_run:
-                sell_oid = self.helper.sell(str(self.pe_id), self.initial_lots * self.nifty_lot_size)
+                sell_oid = self.broker.sell(self.pe_strike, self.expiry, "PE", self.initial_lots * self.nifty_lot_size)
                 if sell_oid:
                     actual_entry = self.get_execution_price(sell_oid, pe_ltp)
                 else:
@@ -483,9 +492,9 @@ class NiftyAdvancedImbalance:
             if self.ce_id:
                 try:
                     own_qty = self.ce_lots * self.nifty_lot_size
-                    qty_to_buy, net_qty = resolve_exit_qty(self.helper, self.ce_id, own_qty, "BUY", logger)
+                    qty_to_buy, net_qty = resolve_exit_qty_broker(self.broker, self.ce_strike, self.expiry, "CE", own_qty, "BUY", logger)
                     if qty_to_buy > 0:
-                        ce_exit_id = self.helper.buy(str(self.ce_id), qty_to_buy)
+                        ce_exit_id = self.broker.buy(self.ce_strike, self.expiry, "CE", qty_to_buy)
                         logger.info(f"CE short exit order placed for {qty_to_buy} qty (own {own_qty}, broker net {net_qty}): {ce_exit_id}")
                         if ce_exit_id and not self.dry_run:
                             self.helper.wait_for_fill(ce_exit_id, timeout=5)
@@ -494,9 +503,9 @@ class NiftyAdvancedImbalance:
             if self.pe_id:
                 try:
                     own_qty = self.pe_lots * self.nifty_lot_size
-                    qty_to_buy, net_qty = resolve_exit_qty(self.helper, self.pe_id, own_qty, "BUY", logger)
+                    qty_to_buy, net_qty = resolve_exit_qty_broker(self.broker, self.pe_strike, self.expiry, "PE", own_qty, "BUY", logger)
                     if qty_to_buy > 0:
-                        pe_exit_id = self.helper.buy(str(self.pe_id), qty_to_buy)
+                        pe_exit_id = self.broker.buy(self.pe_strike, self.expiry, "PE", qty_to_buy)
                         logger.info(f"PE short exit order placed for {qty_to_buy} qty (own {own_qty}, broker net {net_qty}): {pe_exit_id}")
                         if pe_exit_id and not self.dry_run:
                             self.helper.wait_for_fill(pe_exit_id, timeout=5)
@@ -507,9 +516,9 @@ class NiftyAdvancedImbalance:
             for wing in self.ce_wings:
                 try:
                     own_qty = wing['lots'] * self.nifty_lot_size
-                    qty_to_sell, net_qty = resolve_exit_qty(self.helper, wing['id'], own_qty, "SELL", logger)
+                    qty_to_sell, net_qty = resolve_exit_qty_broker(self.broker, wing['strike'], self.expiry, "CE", own_qty, "SELL", logger)
                     if qty_to_sell > 0:
-                        wing_exit_id = self.helper.sell(str(wing['id']), qty_to_sell)
+                        wing_exit_id = self.broker.sell(wing['strike'], self.expiry, "CE", qty_to_sell)
                         logger.info(f"CE long wing {wing['strike']} exit order placed for {qty_to_sell} qty (own {own_qty}, broker net {net_qty}): {wing_exit_id}")
                         if wing_exit_id and not self.dry_run:
                             self.helper.wait_for_fill(wing_exit_id, timeout=5)
@@ -518,9 +527,9 @@ class NiftyAdvancedImbalance:
             for wing in self.pe_wings:
                 try:
                     own_qty = wing['lots'] * self.nifty_lot_size
-                    qty_to_sell, net_qty = resolve_exit_qty(self.helper, wing['id'], own_qty, "SELL", logger)
+                    qty_to_sell, net_qty = resolve_exit_qty_broker(self.broker, wing['strike'], self.expiry, "PE", own_qty, "SELL", logger)
                     if qty_to_sell > 0:
-                        wing_exit_id = self.helper.sell(str(wing['id']), qty_to_sell)
+                        wing_exit_id = self.broker.sell(wing['strike'], self.expiry, "PE", qty_to_sell)
                         logger.info(f"PE long wing {wing['strike']} exit order placed for {qty_to_sell} qty (own {own_qty}, broker net {net_qty}): {wing_exit_id}")
                         if wing_exit_id and not self.dry_run:
                             self.helper.wait_for_fill(wing_exit_id, timeout=5)
@@ -839,17 +848,17 @@ class NiftyAdvancedImbalance:
                 continue
 
             if not self.dry_run:
-                ce_oid = self.helper.sell(str(self.ce_id), self.initial_lots * self.nifty_lot_size)
-                pe_oid = self.helper.sell(str(self.pe_id), self.initial_lots * self.nifty_lot_size)
+                ce_oid = self.broker.sell(self.ce_strike, self.expiry, "CE", self.initial_lots * self.nifty_lot_size)
+                pe_oid = self.broker.sell(self.pe_strike, self.expiry, "PE", self.initial_lots * self.nifty_lot_size)
                 if not ce_oid or not pe_oid:
                     logger.error("Entry Failed. Rolling back any successful order to prevent orphaned legs.")
                     if ce_oid and not pe_oid:
                         logger.warning("Rolling back CE order...")
-                        try: self.helper.buy(str(self.ce_id), self.initial_lots * self.nifty_lot_size)
+                        try: self.broker.buy(self.ce_strike, self.expiry, "CE", self.initial_lots * self.nifty_lot_size)
                         except Exception as rollback_err: logger.error(f"CE Rollback exception: {rollback_err}")
                     elif pe_oid and not ce_oid:
                         logger.warning("Rolling back PE order...")
-                        try: self.helper.buy(str(self.pe_id), self.initial_lots * self.nifty_lot_size)
+                        try: self.broker.buy(self.pe_strike, self.expiry, "PE", self.initial_lots * self.nifty_lot_size)
                         except Exception as rollback_err: logger.error(f"PE Rollback exception: {rollback_err}")
                     continue
                 self.ce_avg_price = self.get_execution_price(ce_oid, self.ce_avg_price)
@@ -1157,7 +1166,7 @@ class NiftyAdvancedImbalance:
                             if exit_price > 0:
                                 buy_oid = None
                                 if not self.dry_run:
-                                    buy_oid = self.helper.buy(old_id, winner_lots * self.nifty_lot_size)
+                                    buy_oid = self.broker.buy(current_winner_strike, self.expiry, winner, winner_lots * self.nifty_lot_size)
                                     if not buy_oid:
                                         logger.error(f"Failed to buy-to-close old winner {old_id}. Aborting adjustment.")
                                         continue
@@ -1187,7 +1196,7 @@ class NiftyAdvancedImbalance:
                                         
                                     sell_oid = None
                                     if not self.dry_run:
-                                        sell_oid = self.helper.sell(str(new_id), winner_lots * self.nifty_lot_size)
+                                        sell_oid = self.broker.sell(new_strike, self.expiry, winner, winner_lots * self.nifty_lot_size)
                                         if not sell_oid:
                                             logger.critical(f"CRITICAL ERROR: Failed to place sell order for new winner strike {new_id}! Executing emergency exit.")
                                             try:
@@ -1250,13 +1259,14 @@ class NiftyAdvancedImbalance:
                                 break
 
                             old_id = str(self.ce_id) if loser == "CE" else str(self.pe_id)
+                            old_strike = self.ce_strike if loser == "CE" else self.pe_strike
                             old_avg = self.ce_avg_price if loser == "CE" else self.pe_avg_price
                             exit_price = self.helper.get_ltp(old_id, exchange="NSE_FNO", instrument="OPTIDX")
-                            
+
                             if exit_price > 0:
                                 buy_oid = None
                                 if not self.dry_run:
-                                    buy_oid = self.helper.buy(old_id, loser_lots * self.nifty_lot_size)
+                                    buy_oid = self.broker.buy(old_strike, self.expiry, loser, loser_lots * self.nifty_lot_size)
                                     if not buy_oid:
                                         logger.error(f"Failed to buy-to-close old loser leg. Aborting adjustment.")
                                         continue
@@ -1285,7 +1295,7 @@ class NiftyAdvancedImbalance:
                                         
                                     sell_oid = None
                                     if not self.dry_run:
-                                        sell_oid = self.helper.sell(str(new_id), new_loser_lots * self.nifty_lot_size)
+                                        sell_oid = self.broker.sell(new_strike, self.expiry, loser, new_loser_lots * self.nifty_lot_size)
                                         if not sell_oid:
                                             logger.critical(f"CRITICAL ERROR: Failed to place sell order for new OTM loser strike {new_id}! Executing emergency exit.")
                                             try:
@@ -1334,19 +1344,19 @@ class NiftyAdvancedImbalance:
                                 # 1. Buy Wing First (Safety First)
                                 wing_oid = None
                                 if not self.dry_run:
-                                    wing_oid = self.helper.buy(str(wing_id), self.nifty_lot_size)
+                                    wing_oid = self.broker.buy(wing_strike, self.expiry, winner, self.nifty_lot_size)
                                     if not wing_oid:
                                         logger.error(f"Failed to place buy-to-open order for protective wing {wing_id}. Aborting short adjustment.")
                                         continue
                                 exec_wing_price = self.get_execution_price(wing_oid, wing_price) if wing_oid else wing_price
-                                
+
                                 # 2. Sell short option
                                 sell_oid = None
                                 if not self.dry_run:
-                                    sell_oid = self.helper.sell(winner_id, self.nifty_lot_size)
+                                    sell_oid = self.broker.sell(winner_strike, self.expiry, winner, self.nifty_lot_size)
                                     if not sell_oid:
                                         logger.critical(f"Failed to place sell order for short leg {winner_id}! Close protective wing to prevent unmatched long.")
-                                        try: self.helper.sell(str(wing_id), self.nifty_lot_size)
+                                        try: self.broker.sell(wing_strike, self.expiry, winner, self.nifty_lot_size)
                                         except Exception as close_err: logger.error(f"Failed to dump protective wing: {close_err}")
                                         continue
                                 exec_short_price = self.get_execution_price(sell_oid, new_price) if sell_oid else new_price
@@ -1393,12 +1403,13 @@ class NiftyAdvancedImbalance:
                         if winner_lots < self.max_lots:
                             logger.info(f"!!! Legacy Lot Addition !!! Diff: {diff_pct:.2f}%")
                             symbol_id = str(self.ce_id) if winner == "CE" else str(self.pe_id)
+                            winner_strike = self.ce_strike if winner == "CE" else self.pe_strike
                             new_price = self.helper.get_ltp(symbol_id, exchange="NSE_FNO", instrument="OPTIDX")
-                            
+
                             if new_price > 0:
                                 oid = None
                                 if not self.dry_run:
-                                    oid = self.helper.sell(symbol_id, self.nifty_lot_size)
+                                    oid = self.broker.sell(winner_strike, self.expiry, winner, self.nifty_lot_size)
                                     if not oid:
                                         logger.error(f"Failed to place legacy short addition order for {symbol_id}. Aborting adjustment.")
                                         continue
@@ -1519,6 +1530,13 @@ Examples:
 
     parser.add_argument("--instance-id", type=str, default="", metavar="ID",
                         help="Suffix for debug/state files to run a second concurrent copy of this strategy")
+
+    parser.add_argument(
+        "--broker", choices=["dhan", "zerodha", "kotak"], default="dhan",
+        help="Execution broker for order placement. Market data always comes from Dhan. "
+             "Zerodha/Kotak stop-loss/target exits are software-managed only (no resting "
+             "broker-side stop order)."
+    )
 
     args = parser.parse_args()
     STATE_KEY = f"nifty_advanced_imbalance_{args.instance_id}" if args.instance_id else "nifty_advanced_imbalance"
@@ -1683,6 +1701,7 @@ Examples:
         multi_cycle=args.multi_cycle,
         cycle_cooldown=args.cycle_cooldown,
         state_key=STATE_KEY,
+        broker=args.broker,
     )
     try:
         strat.run()
