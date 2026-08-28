@@ -78,8 +78,9 @@ interface Props {
 
 // Unique per row: tradingSymbol alone collides when the same contract is held
 // under two product types (e.g. an MTF-converted leg alongside a fresh MARGIN
-// one), which would merge two distinct rows onto one selection/warning key.
-export const legKey = (l: PositionLeg) => `${l.display.tradingSymbol}|${l.display.productType}`;
+// one), or across different weekly expiries where Dhan's tradingSymbol only
+// includes the month name (e.g. NIFTY-Sep2026-23900-PE on 01-Sep and 08-Sep).
+export const legKey = (l: PositionLeg) => `${l.display.tradingSymbol}|${l.expiry ?? ''}|${l.display.productType}`;
 
 /**
  * One row's quick-exit chips: 25/50/75/100%, click-to-arm / click-to-confirm

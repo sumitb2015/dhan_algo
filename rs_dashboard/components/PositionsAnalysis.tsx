@@ -576,6 +576,12 @@ export default function PositionsAnalysis({ underlying }: { underlying: Analytic
   }, [bookExpiriesKey, draftExpiriesKey, underlying]);
 
   // ── filtering ──────────────────────────────────────────────────────────────
+  useEffect(() => {
+    if (expiryFilter !== 'ALL' && bookExpiries.length > 0 && !bookExpiries.includes(expiryFilter)) {
+      setExpiryFilter('ALL');
+    }
+  }, [bookExpiries, expiryFilter]);
+
   const visibleLegs = useMemo(
     () => (expiryFilter === 'ALL' ? legs : legs.filter((l) => l.expiry === expiryFilter)),
     [legs, expiryFilter],

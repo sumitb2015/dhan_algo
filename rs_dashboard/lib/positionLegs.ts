@@ -62,21 +62,30 @@ export type PositionLeg = Omit<ResolvedLeg, 'gamma' | 'theta' | 'expiry'> & {
 
 // ── Field normalization ───────────────────────────────────────────────────────
 
+const MONTHS: Record<string, string> = {
+  JAN: '01', FEB: '02', MAR: '03', APR: '04', MAY: '05', JUN: '06',
+  JUL: '07', AUG: '08', SEP: '09', OCT: '10', NOV: '11', DEC: '12',
+};
+
 /**
  * Dhan's `drvExpiryDate` -> bare YYYY-MM-DD.
  *
- * Mirrors dhan_expiry() in scripts/tools/copy_trade_reconcile.py: the order-update
- * WS is confirmed to send YYYY-MM-DD, but the positions endpoint's value has not
- * been observed on a live position, so DD-MM-YYYY and a trailing timestamp are
- * both handled.
+ * Handles YYYY-MM-DD, timestamps (YYYY-MM-DD HH:MM:SS), DD-MM-YYYY, DD/MM/YYYY,
+ * and DD-Mon-YYYY.
  */
 export function normalizeExpiry(raw: unknown): string | null {
   const s = String(raw ?? '').trim();
   if (!s || s === 'NA') return null;
   const bare = s.split('T')[0].split(' ')[0];
   const parts = bare.replace(/\//g, '-').split('-');
-  if (parts.length === 3 && parts[0].length === 2 && parts[2].length === 4) {
-    return `${parts[2]}-${parts[1]}-${parts[0]}`; // DD-MM-YYYY -> YYYY-MM-DD
+  if (parts.length === 3) {
+    if (parts[0].length === 2 && parts[2].length === 4) {
+      const mm = MONTHS[parts[1].toUpperCase()] ?? parts[1].padStart(2, '0');
+      if (/^\d{2}$/.test(mm)) return `${parts[2]}-${mm}-${parts[0]}`;
+    } else if (parts[0].length === 4 && parts[2].length === 2) {
+      const mm = MONTHS[parts[1].toUpperCase()] ?? parts[1].padStart(2, '0');
+      if (/^\d{2}$/.test(mm)) return `${parts[0]}-${mm}-${parts[2]}`;
+    }
   }
   return /^\d{4}-\d{2}-\d{2}$/.test(bare) ? bare : null;
 }
@@ -88,11 +97,6 @@ export function normalizeOptType(raw: unknown): OptType | null {
   if (s === 'PUT' || s === 'PE' || s === 'P') return 'PE';
   return null;
 }
-
-const MONTHS: Record<string, string> = {
-  JAN: '01', FEB: '02', MAR: '03', APR: '04', MAY: '05', JUN: '06',
-  JUL: '07', AUG: '08', SEP: '09', OCT: '10', NOV: '11', DEC: '12',
-};
 
 export interface ParsedSymbol {
   underlying: string;
@@ -278,14 +282,16 @@ export function buildPositionLegs(
     }
 
     const side = pos.netQty > 0 ? 'BUY' : 'SELL';
-    const entryAvg = side === 'BUY' ? pos.buyAvg : pos.sellAvg;
+    const dayAvg = side === 'BUY' ? pos.buyAvg : pos.sellAvg;
+    const rawCost = Number((rawByIndex[i] as any)?.costPrice ?? (pos as any)?.costPrice ?? 0);
+    const entryAvg = dayAvg > 0 ? dayAvg : rawCost;
 
     if (!(entryAvg > 0)) {
       unparseable.push({
         tradingSymbol: pos.tradingSymbol,
         productType: pos.productType,
         netQty: pos.netQty,
-        reason: `no ${side === 'BUY' ? 'buy' : 'sell'} average price — cannot measure P&L from entry`,
+        reason: `no ${side === 'BUY' ? 'buy' : 'sell'} average price or costPrice — cannot measure P&L from entry`,
       });
       return;
     }

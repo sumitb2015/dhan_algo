@@ -31,6 +31,8 @@ test('normalizeExpiry handles both Dhan date shapes and rejects junk', () => {
   assert.strictEqual(normalizeExpiry('2026-08-20 14:30:00'), '2026-08-20');
   assert.strictEqual(normalizeExpiry('20-08-2026'), '2026-08-20');
   assert.strictEqual(normalizeExpiry('20/08/2026'), '2026-08-20');
+  assert.strictEqual(normalizeExpiry('20-Aug-2026'), '2026-08-20');
+  assert.strictEqual(normalizeExpiry('20-AUG-2026'), '2026-08-20');
   assert.strictEqual(normalizeExpiry('NA'), null);
   assert.strictEqual(normalizeExpiry(''), null);
   assert.strictEqual(normalizeExpiry(null), null);
@@ -106,6 +108,16 @@ test('a leg with no entry average is reported, not priced at zero', () => {
   const { legs, unparseable } = buildPositionLegs([pos({ sellAvg: 0 })]);
   assert.strictEqual(legs.length, 0);
   assert.match(unparseable[0].reason, /no sell average/);
+});
+
+test('a carry-forward leg with sellAvg 0 resolves entry price from costPrice', () => {
+  const { legs, unparseable } = buildPositionLegs(
+    [pos({ sellAvg: 0 })],
+    { raw: [{ costPrice: 45.8, drvStrikePrice: 78000, drvOptionType: 'PUT', drvExpiryDate: '2026-08-20' }] },
+  );
+  assert.strictEqual(unparseable.length, 0);
+  assert.strictEqual(legs.length, 1);
+  assert.strictEqual(legs[0].price, 45.8);
 });
 
 test('flat rows are skipped and other underlyings are filtered without flagging', () => {
