@@ -11,8 +11,9 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 
 from login import get_dhan_client
 from lib.dhan_helper import DhanHelper
+from lib.execution_broker import ExecutionBroker, ExecutionBrokerError
 from lib.strategy_state_helper import save_strategy_state, check_shutdown_trigger, exit_if_market_closed, parse_target_spec, instance_log_suffix
-from lib.strategy_risk import resolve_exit_qty
+from lib.strategy_risk import resolve_exit_qty_broker
 
 # Setup Logging
 project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -50,7 +51,7 @@ class RollingStraddleStrategy:
                  trail_start_rs=500.0, trail_gap_rs=300.0, roll_type="points",
                  roll_trigger_pct=0.4, entry_balance_threshold=15.0,
                  entry_balance_timeout=30, exit_on_max_rolls=True,
-                 state_key="nifty_rolling_straddle"):
+                 state_key="nifty_rolling_straddle", broker="dhan"):
         self.state_key = state_key
         self.dry_run = dry_run
         self.initial_lots = initial_lots
@@ -79,6 +80,12 @@ class RollingStraddleStrategy:
         if not self.dhan:
             raise Exception("Failed to connect to Dhan API.")
         self.helper = DhanHelper(self.dhan)
+
+        self.broker_name = broker
+        try:
+            self.broker = ExecutionBroker.create(broker, self.helper, underlying="NIFTY", log=logger.info)
+        except ExecutionBrokerError as e:
+            raise RuntimeError(f"Could not start {broker} execution: {e}") from e
 
         # Start WebSocket for NIFTY Index (SID 13, IDX_I)
         logger.info("Starting WebSocket for NIFTY Index spot...")
@@ -216,6 +223,7 @@ class RollingStraddleStrategy:
             "trail_gap_rs": self.trail_gap_rs,
             "best_pnl": round(self.best_pnl, 2),
             "trail_exit_pnl": round(self.best_pnl - self.trail_gap_rs, 2) if self.trail_active else None,
+            "broker": self.broker_name,
         }
         save_strategy_state(self.state_key, state_dict)
 
@@ -268,18 +276,18 @@ class RollingStraddleStrategy:
         logger.warning(f"!!! EXITING ALL POSITIONS: {reason} !!!")
         closed_ok = True
         if not self.dry_run:
-            for label, leg_id, lots in (
-                ("CE", self.ce_id, self.ce_lots),
-                ("PE", self.pe_id, self.pe_lots),
+            for label, leg_id, strike, lots in (
+                ("CE", self.ce_id, self.ce_strike, self.ce_lots),
+                ("PE", self.pe_id, self.pe_strike, self.pe_lots),
             ):
-                if not leg_id:
+                if not leg_id or not strike:
                     continue
                 try:
                     own_qty = lots * self.nifty_lot_size
-                    qty_to_buy, _ = resolve_exit_qty(self.helper, leg_id, own_qty, "BUY", logger)
+                    qty_to_buy, _ = resolve_exit_qty_broker(self.broker, strike, self.expiry, label, own_qty, "BUY", logger)
                     if qty_to_buy <= 0:
                         continue  # broker already flat on this leg
-                    order_id = self.helper.buy(str(leg_id), qty_to_buy)
+                    order_id = self.broker.buy(strike, self.expiry, label, qty_to_buy)
                     if not order_id or not self.helper.wait_for_fill(order_id, timeout=10):
                         closed_ok = False
                         logger.critical(
@@ -422,7 +430,7 @@ class RollingStraddleStrategy:
             logger.info(f"[DRY-RUN] Shorted {self.initial_lots} lot {pe_symbol} @ {pe_price:.2f}")
         else:
             logger.info(f"Placing live SELL order for {self.initial_lots} lot {ce_symbol}...")
-            ce_order_id = self.helper.sell(str(ce_id), qty)
+            ce_order_id = self.broker.sell(atm_strike, expiry, "CE", qty)
             if not ce_order_id:
                 logger.error("CE sell order failed; aborting entry.")
                 self.unsubscribe_legs(ce_id, pe_id)
@@ -430,11 +438,11 @@ class RollingStraddleStrategy:
             ce_avg_price = self.get_execution_price(ce_order_id, ce_price)
 
             logger.info(f"Placing live SELL order for {self.initial_lots} lot {pe_symbol}...")
-            pe_order_id = self.helper.sell(str(pe_id), qty)
+            pe_order_id = self.broker.sell(atm_strike, expiry, "PE", qty)
             if not pe_order_id:
                 logger.error("PE sell order failed; rolling back CE leg to avoid a naked short.")
                 try:
-                    self.helper.buy(str(ce_id), qty)
+                    self.broker.buy(atm_strike, expiry, "CE", qty)
                 except Exception as rb:
                     logger.critical(f"CE rollback failed — CE leg may remain OPEN: {rb}")
                 self.unsubscribe_legs(ce_id, pe_id)
@@ -514,6 +522,7 @@ class RollingStraddleStrategy:
             return False
 
         old_ce_id, old_pe_id = self.ce_id, self.pe_id
+        old_ce_strike, old_pe_strike = self.ce_strike, self.pe_strike
         self.last_roll_time = time.time()
 
         # Close existing CE & PE legs. The close must be CONFIRMED before we go flat:
@@ -523,18 +532,18 @@ class RollingStraddleStrategy:
         # top of them.
         closed_ok = True
         if not self.dry_run:
-            for label, leg_id, lots in (
-                ("CE", old_ce_id, self.ce_lots),
-                ("PE", old_pe_id, self.pe_lots),
+            for label, leg_id, strike, lots in (
+                ("CE", old_ce_id, old_ce_strike, self.ce_lots),
+                ("PE", old_pe_id, old_pe_strike, self.pe_lots),
             ):
-                if not leg_id:
+                if not leg_id or not strike:
                     continue
                 try:
                     own_qty = lots * self.nifty_lot_size
-                    qty_to_buy, _ = resolve_exit_qty(self.helper, leg_id, own_qty, "BUY", logger)
+                    qty_to_buy, _ = resolve_exit_qty_broker(self.broker, strike, self.expiry, label, own_qty, "BUY", logger)
                     if qty_to_buy <= 0:
                         continue  # broker already flat on this leg
-                    oid = self.helper.buy(str(leg_id), qty_to_buy)
+                    oid = self.broker.buy(strike, self.expiry, label, qty_to_buy)
                     if not oid or not self.helper.wait_for_fill(oid, timeout=10):
                         closed_ok = False
                         logger.critical(
@@ -749,6 +758,12 @@ def main():
     parser.add_argument("--no-exit-on-max-rolls", dest="exit_on_max_rolls", action="store_false",
                         help="Disable forced exit on max-rolls exhaustion; ride the stale strike instead")
     parser.add_argument("--instance-id", type=str, default=None, help="Optional instance identifier for multi-running")
+    parser.add_argument(
+        "--broker", choices=["dhan", "zerodha", "kotak"], default="dhan",
+        help="Execution broker for order placement. Market data always comes from Dhan. "
+             "Zerodha/Kotak stop-loss/target exits are software-managed only (no resting "
+             "broker-side stop order)."
+    )
 
     args = parser.parse_args()
 
@@ -779,7 +794,8 @@ def main():
         entry_balance_threshold=args.entry_balance_threshold,
         entry_balance_timeout=args.entry_balance_timeout,
         exit_on_max_rolls=args.exit_on_max_rolls,
-        state_key=state_key
+        state_key=state_key,
+        broker=args.broker,
     )
 
     strategy.run()
