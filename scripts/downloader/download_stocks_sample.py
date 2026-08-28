@@ -27,17 +27,12 @@ def main():
         print(f"[FAIL] CSV file not found: {csv_path}")
         return
         
-    try:
-        # Adjusted for the cleaner CSV format found in the workspace
-        # Header is on the first line (index 0)
         df_list = pd.read_csv(csv_path)
-        
-        # Column 0 is "SYMBOL \n" (based on `Get-Content` output showing newlines in headers)
-        # We'll just grab the first column by index to be safe
-        symbols = df_list.iloc[:, 0].astype(str).str.strip().tolist()
+        symbol_col = next((c for c in df_list.columns if str(c).strip().upper() == "SYMBOL"), df_list.columns[0])
+        symbols = df_list[symbol_col].astype(str).str.strip().tolist()
         
         # Filter out "NIFTY 500" if it's in the list
-        symbols = [s for s in symbols if s != "NIFTY 500"]
+        symbols = [s for s in symbols if s and s != "NIFTY 500" and not s.startswith("Note") and s != "nan"]
         
         # LIMIT TO TOP 5 FOR DEMO
         print(f">>> Found {len(symbols)} stocks. Limiting to top 5 for demonstration.")

@@ -32,7 +32,7 @@ export interface MtmStats {
 const MAX_TAIL_POINTS = 2000;
 const SAMPLE_MS        = 2000; // cadence of the live tail sampled after the last trade fill
 
-const FNO_CLOSE_MINUTES = 15 * 60 + 40; // 15:40 IST — matches NSE/BSE F&O session end
+const FNO_CLOSE_MINUTES = 15 * 60 + 30; // 15:30 IST — matches NSE/BSE F&O session end
 const MCX_CLOSE_MINUTES = 23 * 60 + 30; // 23:30 IST — MCX runs an evening session
 
 function istMinutesSinceMidnight(d: Date): number | null {
@@ -51,11 +51,9 @@ function withinSession(iso: string, closeMinutes: number): boolean {
 }
 
 /** When does today's book stop trading? An MCX leg runs to 23:30, so clipping the whole
- *  chart at the 15:40 equity close silently discards every evening commodity fill — on a
- *  Kotak crude book that dropped 18 of 88 fills and left the live tail's realized anchor
- *  ₹990 short (observed 2026-08-21). */
-function sessionCloseMinutes(trades: Record<string, unknown>[]): number {
-  return trades.some(isMcxRow) ? MCX_CLOSE_MINUTES : FNO_CLOSE_MINUTES;
+ *  chart at the 15:30 equity close silently discards every evening commodity fill. */
+function sessionCloseMinutes(trades: Record<string, unknown>[], positions?: Record<string, unknown>[]): number {
+  return trades.some(isMcxRow) || (positions ?? []).some(isMcxRow) ? MCX_CLOSE_MINUTES : FNO_CLOSE_MINUTES;
 }
 
 function todayIstDateString(): string {
@@ -74,43 +72,65 @@ function normalizeTradeTime(raw: string): string {
   return BARE_TIME.test(raw) ? `${todayIstDateString()}T${raw}+05:30` : raw;
 }
 
+function extractClientStartingPositions(positions: Record<string, unknown>[]): Map<string, { qty: number; avgPrice: number; mult: number }> {
+  const map = new Map<string, { qty: number; avgPrice: number; mult: number }>();
+  for (const p of positions) {
+    const sym = String(p.tradingSymbol ?? p.customSymbol ?? p.tradingsymbol ?? p.symbol ?? '');
+    if (!sym) continue;
+    const mult = contractMultiplier(p);
+    const cfBuy = Number(p.carryForwardBuyQty ?? p.cfBuyQty) || 0;
+    const cfSell = Number(p.carryForwardSellQty ?? p.cfSellQty) || 0;
+    const cfBuyVal = Number(p.carryForwardBuyValue ?? p.cfBuyAmt) || 0;
+    const cfSellVal = Number(p.carryForwardSellValue ?? p.cfSellAmt) || 0;
+
+    const overnight = Number(p.overnightQuantity ?? p.overnight_quantity) || 0;
+    let buy = cfBuy;
+    let sell = cfSell;
+    let buyVal = cfBuyVal;
+    let sellVal = cfSellVal;
+
+    if (overnight !== 0 && buy === 0 && sell === 0) {
+      if (overnight > 0) {
+        buy = overnight;
+        buyVal = overnight * (Number(p.buyAvg ?? p.buy_price) || 0);
+      } else {
+        sell = Math.abs(overnight);
+        sellVal = Math.abs(overnight) * (Number(p.sellAvg ?? p.sell_price) || 0);
+      }
+    }
+
+    if (buy > 0) {
+      const avg = buyVal && mult > 0 ? buyVal / (buy * mult) : (Number(p.buyAvg) || 0);
+      map.set(sym, { qty: buy, avgPrice: avg, mult });
+    } else if (sell > 0) {
+      const avg = sellVal && mult > 0 ? sellVal / (sell * mult) : (Number(p.sellAvg) || 0);
+      map.set(sym, { qty: -sell, avgPrice: avg, mult });
+    }
+  }
+  return map;
+}
+
 // ─── Fallback: cumulative REALIZED P&L from the trade book ─────────
-//
-// Walks today's fills in order, tracking a weighted-average cost per symbol (same
-// method Dhan/Zerodha/Kotak positions already use), and books realized P&L each time
-// a fill reduces, closes, or reverses an open quantity.
-//
-// This is *not* MTM and must never be presented as such on its own: it is blind to what
-// an open position is doing. On a two-legged book, closing the losing leg prints the whole
-// loss as a cliff while the winning leg's offsetting gain stays invisible until it too is
-// closed — so the curve plunges and then teleports back up, and Day Low / Max Drawdown are
-// read off an event that never happened (observed 2026-08-21: a -₹6,725 trough on a day
-// whose true floor was -₹1,872). The real curve comes from `useMarkedMtmSeries` below,
-// which marks the open book against 1-minute candles server-side.
-//
-// It survives here because it needs no round-trip: it renders instantly on mount and
-// covers the case where the marking request fails, unlike a client-side sample buffer that
-// only grows from the moment the page was opened.
-function buildTradeMtmSeries(trades: Record<string, unknown>[]): MtmPoint[] {
-  const closeMinutes = sessionCloseMinutes(trades);
+function buildTradeMtmSeries(trades: Record<string, unknown>[], positions: Record<string, unknown>[] = []): MtmPoint[] {
+  const closeMinutes = sessionCloseMinutes(trades, positions);
   const fills = trades
     .map(t => ({
-      symbol: String(t.tradingSymbol ?? t.customSymbol ?? ''),
+      symbol: String(t.tradingSymbol ?? t.customSymbol ?? t.tradingsymbol ?? t.symbol ?? ''),
       side: String(t.transactionType ?? '').toUpperCase(),
-      qty: Number(t.tradedQuantity) || 0,
-      price: Number(t.tradedPrice) || 0,
-      time: normalizeTradeTime(String(t.createTime ?? t.exchangeTime ?? '')),
+      qty: Number(t.tradedQuantity ?? t.quantity) || 0,
+      price: Number(t.tradedPrice ?? t.price) || 0,
+      time: normalizeTradeTime(String(t.createTime ?? t.exchangeTime ?? t.fill_timestamp ?? '')),
       mult: contractMultiplier(t),
     }))
     .filter(t => t.symbol && t.qty > 0 && t.price > 0 && t.time && withinSession(t.time, closeMinutes) && (t.side === 'BUY' || t.side === 'SELL'))
     .sort((a, b) => new Date(a.time).getTime() - new Date(b.time).getTime());
 
-  const running = new Map<string, { qty: number; avgPrice: number }>();
+  const running = extractClientStartingPositions(positions);
   let cumRealized = 0;
   const points: MtmPoint[] = [];
 
   for (const fill of fills) {
-    const pos = running.get(fill.symbol) ?? { qty: 0, avgPrice: 0 };
+    const pos = running.get(fill.symbol) ?? { qty: 0, avgPrice: 0, mult: fill.mult };
     const signedQty = fill.side === 'BUY' ? fill.qty : -fill.qty;
 
     if (pos.qty === 0 || Math.sign(pos.qty) === Math.sign(signedQty)) {
@@ -118,6 +138,7 @@ function buildTradeMtmSeries(trades: Record<string, unknown>[]): MtmPoint[] {
       const newQty = pos.qty + signedQty;
       pos.avgPrice = (pos.avgPrice * Math.abs(pos.qty) + fill.price * fill.qty) / Math.abs(newQty);
       pos.qty = newQty;
+      pos.mult = fill.mult;
     } else {
       // Reducing, closing, or reversing through zero.
       const closingQty = Math.min(Math.abs(pos.qty), fill.qty);
@@ -126,18 +147,15 @@ function buildTradeMtmSeries(trades: Record<string, unknown>[]): MtmPoint[] {
       const remaining = fill.qty - closingQty;
       pos.qty += signedQty;
       if (remaining > 0) pos.avgPrice = fill.price; // reversed — leftover opens fresh in the other direction
+      pos.mult = fill.mult;
       cumRealized += realizedDelta;
     }
 
     running.set(fill.symbol, pos);
-    points.push({ time: fill.time, pnl: cumRealized });
+    points.push({ time: fill.time, pnl: cumRealized, realized: cumRealized });
   }
 
-  // Dhan/Kotak trade timestamps only carry 1-second resolution, so two fills landing in the
-  // same second produce two points with an identical x-axis category value. Recharts' category
-  // scale plots same-label points at one pixel column, distorting the line into a false spike
-  // and confusing which point's value hover/tooltip resolves to — so collapse duplicates down
-  // to the last (most current) cumulative value for that displayed second.
+  // Deduplicate points with identical second stamps
   const deduped: MtmPoint[] = [];
   for (const p of points) {
     if (deduped.length && deduped[deduped.length - 1].time === p.time) {
@@ -153,29 +171,28 @@ function buildTradeMtmSeries(trades: Record<string, unknown>[]): MtmPoint[] {
 
 const IDLE_SOURCE: MtmSource = { status: 'idle', unresolved: [], truncated: 0, error: null };
 
-// Stable identity, so downstream memos don't rerun while the book is stale.
+// Stable identities, so downstream memos don't rerun while the book is stale.
 const NO_TRADES: Record<string, unknown>[] = [];
+const NO_POSITIONS: Record<string, unknown>[] = [];
 
-/** The trade book, but empty while it still belongs to the PREVIOUS broker.
- *
- *  On the render where `broker` flips, `trades` has not changed yet: the parent clears it
- *  from an effect declared *after* this component's hooks, so every effect here sees the old
- *  account's book paired with the new broker's name. That mismatch is not cosmetic — it made
- *  the server resolve Dhan symbols against Kotak's instrument cache (every contract missed),
- *  and let a live-tail sample anchor Dhan's curve on Kotak's realized total (observed
- *  2026-08-21: Dhan's tab reading +₹3,115.50, which was Kotak's number).
- *
- *  Resolved at render time rather than in an effect, so there is no window where a consumer
- *  can act on the mismatch: an array reference is tagged with whichever broker was current
- *  when it arrived, and anything older than the current broker reads as empty. */
-function useBrokerTrades(broker: Broker, trades: Record<string, unknown>[]): Record<string, unknown>[] {
+function useBrokerData(
+  broker: Broker,
+  trades: Record<string, unknown>[],
+  positions: Record<string, unknown>[],
+): { trades: Record<string, unknown>[]; positions: Record<string, unknown>[] } {
   const seenTrades = useRef(trades);
-  const brokerOfTrades = useRef(broker);
-  if (seenTrades.current !== trades) {
+  const seenPositions = useRef(positions);
+  const brokerRef = useRef(broker);
+  if (seenTrades.current !== trades || seenPositions.current !== positions) {
     seenTrades.current = trades;
-    brokerOfTrades.current = broker;
+    seenPositions.current = positions;
+    brokerRef.current = broker;
   }
-  return brokerOfTrades.current === broker ? trades : NO_TRADES;
+  const isCurrent = brokerRef.current === broker;
+  return {
+    trades: isCurrent ? trades : NO_TRADES,
+    positions: isCurrent ? positions : NO_POSITIONS,
+  };
 }
 
 // Rebuilding the curve costs one rate-limited Dhan intraday call per contract traded today,
@@ -184,17 +201,21 @@ function useBrokerTrades(broker: Broker, trades: Record<string, unknown>[]): Rec
 const MARK_REFRESH_MS = 60_000;
 
 /** Asks the server to re-mark today's book against 1-minute candles. Refetches when the fill
- *  count changes (throttled), never on the 5s position poll alone. */
-function useMarkedMtmSeries(broker: Broker, trades: Record<string, unknown>[]) {
+ *  count or positions count changes (throttled), never on the 5s position poll alone. */
+function useMarkedMtmSeries(
+  broker: Broker,
+  trades: Record<string, unknown>[],
+  positions: Record<string, unknown>[],
+) {
   const [points, setPoints] = useState<MtmPoint[]>([]);
   const [source, setSource] = useState<MtmSource>(IDLE_SOURCE);
-  const lastCount = useRef(-1);
+  const lastKey = useRef('');
   const lastFetchAt = useRef(0);
   const reqId = useRef(0);
 
   useEffect(() => {
     // Broker switch ⇒ a different account's book; drop the curve rather than re-marking onto it.
-    lastCount.current = -1;
+    lastKey.current = '';
     lastFetchAt.current = 0;
     reqId.current += 1;
     setPoints([]);
@@ -202,13 +223,12 @@ function useMarkedMtmSeries(broker: Broker, trades: Record<string, unknown>[]) {
   }, [broker]);
 
   useEffect(() => {
-    const count = trades.length;
-    if (count === 0 || count === lastCount.current) return;
-    // Still cooling down. `trades` gets a fresh reference on every 5s poll, so this effect
-    // re-runs and picks the fetch up again once the window lapses — no timer needed.
+    const key = `${trades.length}:${positions.length}`;
+    if ((trades.length === 0 && positions.length === 0) || key === lastKey.current) return;
+    // Still cooling down.
     if (Date.now() - lastFetchAt.current < MARK_REFRESH_MS) return;
 
-    lastCount.current = count;
+    lastKey.current = key;
     lastFetchAt.current = Date.now();
     const id = ++reqId.current;
     setSource(prev => ({ ...prev, status: 'loading' }));
@@ -216,7 +236,7 @@ function useMarkedMtmSeries(broker: Broker, trades: Record<string, unknown>[]) {
     fetch('/api/scalper/mtm-history', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ broker, trades }),
+      body: JSON.stringify({ broker, trades, positions }),
     })
       .then(r => r.json())
       .then((json: { success?: boolean; points?: MtmPoint[]; unresolved?: string[]; truncated?: number; error?: string }) => {
@@ -234,10 +254,10 @@ function useMarkedMtmSeries(broker: Broker, trades: Record<string, unknown>[]) {
       .catch((err: Error) => {
         if (id !== reqId.current) return;
         // Let the next poll retry once the cooldown lapses rather than wedging on one failure.
-        lastCount.current = -1;
+        lastKey.current = '';
         setSource({ status: 'error', unresolved: [], truncated: 0, error: err.message });
       });
-  }, [broker, trades]);
+  }, [broker, trades, positions]);
 
   return { points, source };
 }
@@ -247,18 +267,20 @@ function useMarkedMtmSeries(broker: Broker, trades: Record<string, unknown>[]) {
 export function useMtmHistory(
   broker: Broker,
   rawTrades: Record<string, unknown>[],
+  rawPositions: Record<string, unknown>[],
   unrealizedPnl: number,
 ): { data: MtmPoint[]; stats: MtmStats; source: MtmSource } {
-  const trades = useBrokerTrades(broker, rawTrades);
-  const fallbackSeries = useMemo(() => buildTradeMtmSeries(trades), [trades]);
-  const { points: markedSeries, source } = useMarkedMtmSeries(broker, trades);
+  const { trades, positions } = useBrokerData(broker, rawTrades, rawPositions);
+  const fallbackSeries = useMemo(() => buildTradeMtmSeries(trades, positions), [trades, positions]);
+  const { points: markedSeries, source } = useMarkedMtmSeries(broker, trades, positions);
 
   // Prefer the marked curve; the realized-only replay just fills the gap until it arrives.
   const history = markedSeries.length ? markedSeries : fallbackSeries;
 
-  // The tail anchor is always the realized-only total — that IS cumulative realized P&L for
-  // every fill today, regardless of which series is being drawn.
-  const lastRealized = fallbackSeries.length ? fallbackSeries[fallbackSeries.length - 1].pnl : 0;
+  // The tail anchor is the cumulative realized P&L from the marked series or fallback.
+  const lastRealized = markedSeries.length
+    ? (markedSeries[markedSeries.length - 1].realized ?? 0)
+    : (fallbackSeries.length ? fallbackSeries[fallbackSeries.length - 1].pnl : 0);
 
   const [liveTail, setLiveTail] = useState<MtmPoint[]>([]);
   const brokerRef = useRef(broker);
@@ -274,28 +296,21 @@ export function useMtmHistory(
     setLiveTail([]);
   }, [broker]);
 
-  // The live tail only fills the gap between "last trade fill" and "now" — the currently-open
-  // book's unrealized swing, which the trade book alone can't show. It's anchored on the
-  // trade-derived realized total (not the broker's live totalPnl) so the curve stays continuous:
-  // totalPnl bakes in brokerage/charges the naive trade replay above doesn't model, and splicing
-  // it in directly would show a fake jump at the exact moment the series crosses from trade-
-  // derived points to live samples. Sampling (and therefore the chart) stops at session close.
-  const closeMinutes = useMemo(() => sessionCloseMinutes(trades), [trades]);
+  const closeMinutes = useMemo(() => sessionCloseMinutes(trades, positions), [trades, positions]);
   const closeMinutesRef = useRef(closeMinutes);
   closeMinutesRef.current = closeMinutes;
-  // No book for this broker yet ⇒ `lastRealized` is 0 while the parent's positions may still
-  // be the previous account's, so a sample now would plot a number belonging to neither.
-  const hasTradesRef = useRef(trades.length > 0);
-  hasTradesRef.current = trades.length > 0;
+
+  const hasDataRef = useRef(trades.length > 0 || positions.length > 0);
+  hasDataRef.current = trades.length > 0 || positions.length > 0;
 
   useEffect(() => {
     const sample = () => {
       const unrealized = unrealizedRef.current;
       const now = new Date();
-      if (!hasTradesRef.current) return;
+      if (!hasDataRef.current) return;
       if (!Number.isFinite(unrealized) || !withinSession(now.toISOString(), closeMinutesRef.current)) return;
       const pnl = lastRealizedRef.current + unrealized;
-      setLiveTail(prev => [...prev, { time: now.toISOString(), pnl }].slice(-MAX_TAIL_POINTS));
+      setLiveTail(prev => [...prev, { time: now.toISOString(), pnl, realized: lastRealizedRef.current, unrealized }].slice(-MAX_TAIL_POINTS));
     };
     sample();
     const id = setInterval(sample, SAMPLE_MS);

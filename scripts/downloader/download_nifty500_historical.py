@@ -34,15 +34,15 @@ def parse_nifty500_symbols(csv_path: str) -> List[str]:
         print(f"[FAIL] CSV file not found: {csv_path}")
         return []
     try:
-        df_temp = pd.read_csv(csv_path)
-        first_col_name = str(df_temp.columns[0]).upper().strip()
-        
-        if "SYMBOL" in first_col_name:
-            df_list = df_temp
-        else:
-            df_list = pd.read_csv(csv_path, skiprows=16)
+        df = pd.read_csv(csv_path)
+        symbol_col = next((c for c in df.columns if str(c).strip().upper() == "SYMBOL"), None)
+        if symbol_col is None:
+            first_col = str(df.columns[0]).upper().strip()
+            if "SYMBOL" not in first_col:
+                df = pd.read_csv(csv_path, skiprows=16)
+            symbol_col = df.columns[0]
             
-        symbols = df_list.iloc[:, 0].astype(str).str.strip().tolist()
+        symbols = df[symbol_col].astype(str).str.strip().tolist()
         # Filter unwanted symbols
         symbols = [s for s in symbols if s and s != "NIFTY 500" and not s.startswith("Note") and len(s) > 0 and s != 'nan']
         return symbols

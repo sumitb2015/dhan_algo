@@ -30,7 +30,7 @@ interface MtmResult {
 const cache = new Map<string, { at: number; value: MtmResult }>();
 
 export async function POST(request: NextRequest) {
-  let body: { broker?: string; trades?: unknown };
+  let body: { broker?: string; trades?: unknown; positions?: unknown };
   try {
     body = await request.json();
   } catch {
@@ -42,11 +42,12 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ success: false, error: `broker must be one of ${BROKERS.join(', ')}` }, { status: 400 });
   }
   const trades = Array.isArray(body.trades) ? body.trades : [];
-  if (trades.length === 0) {
+  const positions = Array.isArray(body.positions) ? body.positions : [];
+  if (trades.length === 0 && positions.length === 0) {
     return NextResponse.json({ success: true, points: [], unresolved: [], truncated: 0, error: null });
   }
 
-  const key = `${broker}:${trades.length}`;
+  const key = `${broker}:${trades.length}:${positions.length}`;
   const hit = cache.get(key);
   if (hit && Date.now() - hit.at < CACHE_TTL_MS) {
     return NextResponse.json(hit.value);
@@ -58,7 +59,7 @@ export async function POST(request: NextRequest) {
       // so hand the request over as a file. Uniquely named: two brokers can be in flight
       // at once, and the loser of a rename race would otherwise be charted as the winner.
       const reqPath = path.join(PROJECT_ROOT, 'debug', `mtm_request_${broker}_${process.pid}_${Date.now()}.json`);
-      await fs.writeFile(reqPath, JSON.stringify({ broker, trades }), 'utf8');
+      await fs.writeFile(reqPath, JSON.stringify({ broker, trades, positions }), 'utf8');
       try {
         return await runPythonJson<MtmResult>(SCRIPT, [reqPath], TIMEOUT_MS);
       } finally {

@@ -79,6 +79,7 @@ Pygments==2.19.2
 pyOpenSSL==25.3.0
 pyotp==2.9.0
 pyproject_hooks==1.2.0
+pyarrow>=19.0.0
 pytest==9.0.2
 pytest-base-url==2.1.0
 pytest-playwright==0.7.2

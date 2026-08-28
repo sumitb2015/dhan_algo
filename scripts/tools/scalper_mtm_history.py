@@ -58,10 +58,9 @@ from lib.dhan_helper import DhanHelper         # noqa: E402
 IST = ZoneInfo("Asia/Kolkata")
 DEBUG_DIR = os.path.join(ROOT, "debug")
 
-# NSE/BSE F&O settles at 15:30; the extra 10 minutes mirror the chart's own window and
-# absorb late trade-book stamps. MCX runs to 23:30, so a book holding any MCX leg must not
+# NSE/BSE F&O settles at 15:30. MCX runs to 23:30, so a book holding any MCX leg must not
 # be truncated at the equity close.
-SESSION_END_FNO = (15, 40)
+SESSION_END_FNO = (15, 30)
 SESSION_END_MCX = (23, 30)
 SESSION_START_FNO = (9, 15)
 SESSION_START_MCX = (9, 0)
@@ -112,7 +111,7 @@ def contract_multiplier(row: dict) -> float:
     segment = str(row.get("exchangeSegment") or row.get("exchange") or "")
     if segment != "MCX_COMM":
         return 1.0
-    trading_symbol = str(row.get("tradingSymbol") or row.get("customSymbol") or "")
+    trading_symbol = str(row.get("tradingSymbol") or row.get("customSymbol") or row.get("tradingsymbol") or row.get("symbol") or "")
     underlying = trading_symbol.split("-")[0].upper()
     return float(MCX_LOT_MULTIPLIER.get(underlying, 1))
 
@@ -141,14 +140,14 @@ def normalize_fills(trades: list, today: str) -> list[dict]:
     for row in trades:
         if not isinstance(row, dict):
             continue
-        symbol = str(row.get("tradingSymbol") or row.get("customSymbol") or "")
+        symbol = str(row.get("tradingSymbol") or row.get("customSymbol") or row.get("tradingsymbol") or row.get("symbol") or "")
         side = str(row.get("transactionType") or "").upper()
         try:
-            qty = float(row.get("tradedQuantity") or 0)
-            price = float(row.get("tradedPrice") or 0)
+            qty = float(row.get("tradedQuantity") or row.get("quantity") or 0)
+            price = float(row.get("tradedPrice") or row.get("price") or 0)
         except (TypeError, ValueError):
             continue
-        when = parse_fill_time(row.get("createTime") or row.get("exchangeTime") or "", today)
+        when = parse_fill_time(row.get("createTime") or row.get("exchangeTime") or row.get("fill_timestamp") or "", today)
         if not symbol or qty <= 0 or price <= 0 or when is None or side not in ("BUY", "SELL"):
             continue
         fills.append({
@@ -158,11 +157,68 @@ def normalize_fills(trades: list, today: str) -> list[dict]:
             "price": price,
             "time": when,
             "mult": contract_multiplier(row),
-            "security_id": str(row.get("securityId") or row.get("security_id") or ""),
+            "security_id": str(row.get("securityId") or row.get("security_id") or row.get("instrument_token") or ""),
             "segment": str(row.get("exchangeSegment") or row.get("exchange") or ""),
         })
     fills.sort(key=lambda f: f["time"])
     return fills
+
+
+def extract_starting_positions(broker: str, positions: list) -> dict[str, dict]:
+    """Extract opening carry-forward (overnight) positions at the start of today's session."""
+    starting: dict[str, dict] = {}
+    for p in positions:
+        if not isinstance(p, dict):
+            continue
+        sym = str(p.get("tradingSymbol") or p.get("customSymbol") or p.get("tradingsymbol") or p.get("symbol") or "")
+        if not sym:
+            continue
+        mult = contract_multiplier(p)
+        sec_id = str(p.get("securityId") or p.get("security_id") or p.get("instrument_token") or "")
+        segment = str(p.get("exchangeSegment") or p.get("exchange") or "")
+        instrument = str(p.get("drvOptionType") or p.get("instrumentType") or p.get("instrument") or "OPTIDX")
+
+        cf_buy = float(p.get("carryForwardBuyQty") or p.get("cfBuyQty") or 0)
+        cf_sell = float(p.get("carryForwardSellQty") or p.get("cfSellQty") or 0)
+        cf_buy_val = float(p.get("carryForwardBuyValue") or p.get("cfBuyAmt") or 0)
+        cf_sell_val = float(p.get("carryForwardSellValue") or p.get("cfSellAmt") or 0)
+
+        # Kite-specific overnight quantity check if carryForward* was not set directly
+        overnight = p.get("overnight_quantity") or p.get("overnightQuantity")
+        if overnight is not None and cf_buy == 0 and cf_sell == 0:
+            try:
+                oq = float(overnight)
+                if oq > 0:
+                    cf_buy = oq
+                    cf_buy_val = oq * float(p.get("buy_price") or p.get("buyAvg") or 0)
+                elif oq < 0:
+                    cf_sell = abs(oq)
+                    cf_sell_val = abs(oq) * float(p.get("sell_price") or p.get("sellAvg") or 0)
+            except (TypeError, ValueError):
+                pass
+
+        if cf_buy > 0:
+            avg_unit = (cf_buy_val / (cf_buy * mult)) if (cf_buy > 0 and mult > 0 and cf_buy_val > 0) else float(p.get("buyAvg") or 0)
+            starting[sym] = {
+                "qty": cf_buy,
+                "avg_price": avg_unit,
+                "mult": mult,
+                "security_id": sec_id,
+                "segment": segment,
+                "instrument": instrument,
+            }
+        elif cf_sell > 0:
+            avg_unit = (cf_sell_val / (cf_sell * mult)) if (cf_sell > 0 and mult > 0 and cf_sell_val > 0) else float(p.get("sellAvg") or 0)
+            starting[sym] = {
+                "qty": -cf_sell,
+                "avg_price": avg_unit,
+                "mult": mult,
+                "security_id": sec_id,
+                "segment": segment,
+                "instrument": instrument,
+            }
+
+    return starting
 
 
 # ── Contract resolution: broker symbol -> Dhan (security id, segment, instrument) ────
@@ -201,21 +257,27 @@ def load_broker_instruments(broker: str) -> dict[str, dict]:
     return index
 
 
-def resolve_contracts(helper: DhanHelper, broker: str, fills: list[dict]) -> tuple[dict, list[str]]:
+def resolve_contracts(helper: DhanHelper, broker: str, fills: list[dict],
+                      starting_positions: dict[str, dict]) -> tuple[dict, list[str]]:
     """symbol -> {security_id, segment, instrument}; plus the symbols that could not be resolved."""
     resolved: dict[str, dict] = {}
     unresolved: list[str] = []
-    symbols = list(dict.fromkeys(f["symbol"] for f in fills))
+    symbols = list(dict.fromkeys([f["symbol"] for f in fills] + list(starting_positions.keys())))
 
     if broker == "dhan":
-        # Dhan trade rows are a raw passthrough of /trades and already carry both fields.
+        # Dhan trade rows and position rows carry securityId and segment.
         master = helper._load_master_list()
         by_sid = master.copy()
         by_sid["_sid"] = by_sid["SECURITY_ID"].apply(lambda v: str(int(float(v))) if pd.notna(v) else "")
         by_sid = by_sid.set_index("_sid")
         for symbol in symbols:
-            fill = next(f for f in fills if f["symbol"] == symbol)
-            sid, segment = fill["security_id"], fill["segment"]
+            fill = next((f for f in fills if f["symbol"] == symbol), None)
+            if fill and fill.get("security_id") and fill.get("segment"):
+                sid, segment = fill["security_id"], fill["segment"]
+            else:
+                sp = starting_positions.get(symbol, {})
+                sid, segment = sp.get("security_id", ""), sp.get("segment", "")
+
             if not sid or not segment:
                 unresolved.append(symbol)
                 continue
@@ -331,14 +393,24 @@ def build_minute_grid(start: datetime, end: datetime) -> list[datetime]:
     return grid
 
 
-def build_points(fills: list[dict], closes_by_symbol: dict[str, dict[str, float]],
+def build_points(fills: list[dict], starting_positions: dict[str, dict],
+                 closes_by_symbol: dict[str, dict[str, float]],
                  grid: list[datetime]) -> list[dict]:
     """Walk the session minute by minute, applying fills as they land and marking whatever
     is still open against that minute's candle close."""
     book: dict[str, dict] = {}          # symbol -> {qty, avg_price, mult, last_price}
+    for sym, sp in starting_positions.items():
+        book[sym] = {
+            "qty": sp["qty"],
+            "avg_price": sp["avg_price"],
+            "mult": sp["mult"],
+            "last_price": sp["avg_price"],
+        }
+
     realized = 0.0
     idx = 0
     points: list[dict] = []
+    last_known_close: dict[str, float] = {}
 
     for minute in grid:
         key = minute.strftime("%H:%M")
@@ -369,11 +441,13 @@ def build_points(fills: list[dict], closes_by_symbol: dict[str, dict[str, float]
         for symbol, pos in book.items():
             if pos["qty"] == 0:
                 continue
-            # No candle for this minute (contract unresolved, or the bar has not printed
-            # yet) - fall back to the last price we actually saw traded rather than 0.
             mark = closes_by_symbol.get(symbol, {}).get(key)
+            if mark is not None:
+                last_known_close[symbol] = mark
+            else:
+                mark = last_known_close.get(symbol)
             if mark is None:
-                mark = pos["last_price"]
+                mark = pos["avg_price"]
             unrealized += pos["qty"] * (mark - pos["avg_price"]) * pos["mult"]
 
         points.append({
@@ -395,11 +469,14 @@ def main() -> None:
 
     broker = str(request.get("broker") or "dhan").lower()
     trades = request.get("trades") or []
+    positions = request.get("positions") or []
     now = datetime.now(IST)
     today = now.strftime("%Y-%m-%d")
 
     fills = normalize_fills(trades, today)
-    if not fills:
+    starting_positions = extract_starting_positions(broker, positions)
+
+    if not fills and not starting_positions:
         emit({"success": True, "points": [], "unresolved": [], "truncated": 0, "error": None})
         return
 
@@ -410,14 +487,12 @@ def main() -> None:
         return
     helper = DhanHelper(dhan)
 
-    resolved, unresolved = resolve_contracts(helper, broker, fills)
+    resolved, unresolved = resolve_contracts(helper, broker, fills, starting_positions)
     if unresolved:
         log(f"[mtm] {len(unresolved)} contract(s) unresolved: {unresolved}")
     if not resolved:
         # Nothing resolved at all - a missing instrument cache, or a payload from a different
-        # broker than the one named. Marking every leg at its last traded price would draw a
-        # confident-looking curve out of nothing, so refuse and let the caller fall back to
-        # the realized-only series, which is at least honestly labelled.
+        # broker than the one named.
         emit({"success": False, "points": [], "unresolved": unresolved, "truncated": 0,
               "error": f"could not resolve any of {len(unresolved)} contract(s) for broker '{broker}'"})
         return
@@ -437,6 +512,7 @@ def main() -> None:
             unresolved.append(symbol)
 
     is_mcx = any(f["segment"] == "MCX_COMM" for f in fills) or \
+        any(sp["segment"] == "MCX_COMM" for sp in starting_positions.values()) or \
         any(c["segment"] == "MCX_COMM" for c in resolved.values())
     start_h, start_m = SESSION_START_MCX if is_mcx else SESSION_START_FNO
     end_h, end_m = SESSION_END_MCX if is_mcx else SESSION_END_FNO
@@ -444,11 +520,12 @@ def main() -> None:
     end = min(now.replace(hour=end_h, minute=end_m, second=0, microsecond=0),
               now.replace(second=0, microsecond=0))
     # A fill stamped before the nominal open (or a clock skew) must not fall off the left edge.
-    start = min(start, fills[0]["time"].replace(second=0, microsecond=0))
+    if fills:
+        start = min(start, fills[0]["time"].replace(second=0, microsecond=0))
     if end < start:
         end = start
 
-    points = build_points(fills, closes_by_symbol, build_minute_grid(start, end))
+    points = build_points(fills, starting_positions, closes_by_symbol, build_minute_grid(start, end))
     emit({"success": True, "points": points, "unresolved": unresolved,
           "truncated": truncated, "error": None})
 

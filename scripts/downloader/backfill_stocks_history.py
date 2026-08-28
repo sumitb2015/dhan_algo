@@ -21,6 +21,7 @@ import sys
 import os
 import time
 import json
+import logging
 import argparse
 import warnings
 import pandas as pd
@@ -72,13 +73,20 @@ def parse_nifty500_symbols() -> list:
     if not os.path.exists(N500_LIST):
         files = [f for f in os.listdir(STOCKS_DIR) if f.endswith("_Daily_2Y.csv")]
         return [f.replace("_Daily_2Y.csv", "") for f in sorted(files)]
-    df = pd.read_csv(N500_LIST)
-    first_col = str(df.columns[0]).upper().strip()
-    if "SYMBOL" not in first_col:
-        df = pd.read_csv(N500_LIST, skiprows=16)
-    symbols = df.iloc[:, 0].astype(str).str.strip().tolist()
-    return [s for s in symbols if s and s != "NIFTY 500" and not s.startswith("Note")
-            and len(s) > 0 and s != "nan"]
+    try:
+        df = pd.read_csv(N500_LIST)
+        symbol_col = next((c for c in df.columns if str(c).strip().upper() == "SYMBOL"), None)
+        if symbol_col is None:
+            first_col = str(df.columns[0]).upper().strip()
+            if "SYMBOL" not in first_col:
+                df = pd.read_csv(N500_LIST, skiprows=16)
+            symbol_col = df.columns[0]
+        symbols = df[symbol_col].astype(str).str.strip().tolist()
+        return [s for s in symbols if s and s != "NIFTY 500" and not s.startswith("Note")
+                and len(s) > 0 and s != "nan"]
+    except Exception:
+        files = [f for f in os.listdir(STOCKS_DIR) if f.endswith("_Daily_2Y.csv")]
+        return [f.replace("_Daily_2Y.csv", "") for f in sorted(files)]
 
 
 def get_earliest_date(csv_path: str):
@@ -124,19 +132,29 @@ def fetch_range_chunked(helper, security_id, segment, instr, from_date, to_date)
     chunks = []
     cur = datetime.strptime(from_date, "%Y-%m-%d")
     end = datetime.strptime(to_date, "%Y-%m-%d")
-    while cur <= end:
-        chunk_end = min(cur + timedelta(days=365), end)
-        df_chunk = helper.get_historical_daily_data(
-            security_id=security_id,
-            exchange_segment=segment,
-            instrument_type=instr,
-            from_date=cur.strftime("%Y-%m-%d"),
-            to_date=chunk_end.strftime("%Y-%m-%d"),
-        )
-        if not df_chunk.empty:
-            chunks.append(normalize_historical_df(df_chunk))
-        cur = chunk_end + timedelta(days=1)
-        time.sleep(0.4)
+    
+    # Temporarily silence DH-907 'no data present' errors during pre-IPO chunk probing
+    dh_logger = logging.getLogger("lib.dhan_helper")
+    old_level = dh_logger.level
+    dh_logger.setLevel(logging.CRITICAL)
+    
+    try:
+        while cur <= end:
+            chunk_end = min(cur + timedelta(days=365), end)
+            df_chunk = helper.get_historical_daily_data(
+                security_id=security_id,
+                exchange_segment=segment,
+                instrument_type=instr,
+                from_date=cur.strftime("%Y-%m-%d"),
+                to_date=chunk_end.strftime("%Y-%m-%d"),
+            )
+            if not df_chunk.empty:
+                chunks.append(normalize_historical_df(df_chunk))
+            cur = chunk_end + timedelta(days=1)
+            time.sleep(0.6)
+    finally:
+        dh_logger.setLevel(old_level)
+        
     if not chunks:
         return pd.DataFrame()
     out = pd.concat(chunks)
@@ -148,7 +166,7 @@ def backfill_symbol(helper, symbol: str, start_date: str) -> str:
     earliest = get_earliest_date(csv_path)
 
     if earliest and earliest <= start_date:
-        return "up-to-date"
+        return f"up-to-date (starts {earliest})"
 
     to_date = (
         (datetime.strptime(earliest, "%Y-%m-%d") - timedelta(days=1)).strftime("%Y-%m-%d")
@@ -158,7 +176,7 @@ def backfill_symbol(helper, symbol: str, start_date: str) -> str:
 
     sec = helper.get_security_id(symbol=symbol, instrument="EQUITY")
     if not sec:
-        return "not-found"
+        return "not-found in master list"
 
     security_id = int(sec["SECURITY_ID"])
     instr = sec.get("INSTRUMENT", "EQUITY")
@@ -167,7 +185,9 @@ def backfill_symbol(helper, symbol: str, start_date: str) -> str:
 
     old_df = fetch_range_chunked(helper, security_id, segment, instr, start_date, to_date)
     if old_df.empty:
-        return "no-data"
+        if earliest:
+            return f"max history reached (starts {earliest})"
+        return "no data available from broker"
 
     if os.path.exists(csv_path):
         existing = pd.read_csv(csv_path, on_bad_lines="skip")
@@ -184,7 +204,7 @@ def backfill_symbol(helper, symbol: str, start_date: str) -> str:
         combined = old_df
 
     df_to_stock_csv(combined, csv_path)
-    return f"+{len(old_df)} rows -> {len(combined)} total"
+    return f"+{len(old_df)} rows -> {len(combined)} total (now starts {combined.index.min().strftime('%Y-%m-%d')})"
 
 
 def main():

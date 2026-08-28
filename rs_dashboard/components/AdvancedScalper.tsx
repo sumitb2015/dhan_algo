@@ -411,7 +411,7 @@ export default function AdvancedScalper() {
     [enrichedPositions]);
 
   // Anchored on the trade book's own realized total, not totalPnl — see useMtmHistory for why.
-  const { data: mtmHistory, stats: mtmStats, source: mtmSource } = useMtmHistory(broker, tradesData, totalUnrealizedPnl);
+  const { data: mtmHistory, stats: mtmStats, source: mtmSource } = useMtmHistory(broker, tradesData, positionsData, totalUnrealizedPnl);
 
   // Combined Multi-Leg Premium Tracking & Strategy Stats
   const combinedStrategyStats = useMemo(() => {

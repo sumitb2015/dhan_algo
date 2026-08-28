@@ -537,14 +537,19 @@ export function readIndexCSV(meta: IndexMeta): OHLCVRow[] {
 // ─── Read Nifty500 watchlist CSV ──────────────────────────────────────────────
 let _nifty500ListCache: string[] | null = null;
 export function readNifty500List(): string[] {
-  if (_nifty500ListCache) return _nifty500ListCache;
+  if (_nifty500ListCache && _nifty500ListCache.length > 0) return _nifty500ListCache;
   const listPath = path.join(process.cwd(), '..', 'MW-NIFTY-500-25-Jan-2026.csv');
   try {
     const content = fs.readFileSync(listPath, 'utf-8');
     const rows = parseCSV(content);
-    _nifty500ListCache = rows
-      .map((r) => (r.SYMBOL || '').trim())
-      .filter(Boolean);
+    const syms = rows
+      .map((r) => (r.Symbol || r.SYMBOL || r.symbol || '').trim())
+      .filter((s) => s && s !== 'NIFTY 500' && !s.startsWith('Note') && s !== 'nan');
+    if (syms.length > 0) {
+      _nifty500ListCache = syms;
+      return _nifty500ListCache;
+    }
+    _nifty500ListCache = listAvailableSymbols().slice(0, 500);
     return _nifty500ListCache;
   } catch {
     // Fall back to all available symbols

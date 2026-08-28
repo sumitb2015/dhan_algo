@@ -52,7 +52,7 @@ export function shapeKotakPosition(p: Record<string, any>): ScalperPosition {
     ? 0
     : netQty * (lastPrice - (netQty > 0 ? buyAvg : sellAvg));
 
-  return {
+  const base: ScalperPosition = {
     tradingSymbol: String(p.trdSym ?? p.sym ?? ''),
     securityId: String(p.tok ?? ''),
     exchange: String(p.exSeg ?? 'nse_fo'),
@@ -66,6 +66,17 @@ export function shapeKotakPosition(p: Record<string, any>): ScalperPosition {
     unrealizedProfit: unrealized,
     productType: String(p.prod ?? p.prd ?? ''),
   };
+  if (cfBuyQty > 0 || cfSellQty > 0) {
+    base.cfBuyQty = cfBuyQty;
+    base.cfSellQty = cfSellQty;
+    base.cfBuyAmt = cfBuyAmt;
+    base.cfSellAmt = cfSellAmt;
+    base.carryForwardBuyQty = cfBuyQty;
+    base.carryForwardSellQty = cfSellQty;
+    base.carryForwardBuyValue = cfBuyAmt;
+    base.carryForwardSellValue = cfSellAmt;
+  }
+  return base;
 }
 
 /** Kotak's single-letter transaction type -> the BUY/SELL the UI expects. */

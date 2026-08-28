@@ -11,6 +11,15 @@ export interface ScalperPosition {
   realizedProfit: number;
   unrealizedProfit: number;
   productType: string;
+  carryForwardBuyQty?: number;
+  carryForwardSellQty?: number;
+  carryForwardBuyValue?: number;
+  carryForwardSellValue?: number;
+  overnightQuantity?: number;
+  cfBuyQty?: number;
+  cfSellQty?: number;
+  cfBuyAmt?: number;
+  cfSellAmt?: number;
 }
 
 export interface ScalperOrder {
@@ -36,6 +45,7 @@ export function shapeZerodhaPosition(p: Record<string, any>): ScalperPosition {
   const lastPrice = Number(p.last_price) || 0;
   const buyAvg = Number(p.buy_price) || 0;
   const sellAvg = Number(p.sell_price) || 0;
+  const overnightQty = Number(p.overnight_quantity) || 0;
   // Do NOT map Kite's `realised`/`unrealised` fields directly: on a closed
   // intraday position both can carry the full day P&L, and the UI (which sums
   // realized + unrealized) then shows exactly double. Kite's authoritative
@@ -44,7 +54,7 @@ export function shapeZerodhaPosition(p: Record<string, any>): ScalperPosition {
   // everything else is realized (0/full-pnl respectively when flat).
   const totalPnl = Number(p.pnl) || 0;
   const unrealized = netQty === 0 ? 0 : netQty * (lastPrice - (netQty > 0 ? buyAvg : sellAvg));
-  return {
+  const base: ScalperPosition = {
     tradingSymbol: String(p.tradingsymbol ?? ''),
     securityId: String(p.instrument_token ?? ''),
     exchange: String(p.exchange ?? 'NFO'),
@@ -58,6 +68,14 @@ export function shapeZerodhaPosition(p: Record<string, any>): ScalperPosition {
     unrealizedProfit: unrealized,
     productType: String(p.product ?? ''),
   };
+  if (overnightQty !== 0) {
+    base.overnightQuantity = overnightQty;
+    base.carryForwardBuyQty = overnightQty > 0 ? overnightQty : 0;
+    base.carryForwardSellQty = overnightQty < 0 ? Math.abs(overnightQty) : 0;
+    base.carryForwardBuyValue = overnightQty > 0 ? overnightQty * buyAvg : 0;
+    base.carryForwardSellValue = overnightQty < 0 ? Math.abs(overnightQty) * sellAvg : 0;
+  }
+  return base;
 }
 
 export function shapeZerodhaOrder(o: Record<string, any>): ScalperOrder {
