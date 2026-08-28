@@ -365,7 +365,7 @@ export default function CrudeOilOptions() {
             quantity: Math.abs(p.netQty),
             side: (p.netQty > 0 ? 'SELL' : 'BUY') as 'BUY' | 'SELL',
           })),
-          mode: 'intraday',
+          mode: 'positional',
         },
       };
     }
@@ -378,7 +378,7 @@ export default function CrudeOilOptions() {
           side: (p.netQty > 0 ? 'SELL' : 'BUY') as 'BUY' | 'SELL',
           exchangeSegment: p.exchangeSegment || 'MCX_COMM',
         })),
-        mode: 'intraday',
+        mode: 'positional',
       },
     };
   }, [isKotak]);
@@ -480,13 +480,13 @@ export default function CrudeOilOptions() {
         return;
       }
       url = '/api/crudeoil/kotak-order';
-      body = { legs: [{ tradingsymbol, quantity: qty, side }], mode: 'intraday' };
+      body = { legs: [{ tradingsymbol, quantity: qty, side }], mode: 'positional' };
     } else {
       const securityId = (optType === 'CE' ? row.ce : row.pe)?.security_id;
       url = '/api/options/order';
       body = {
         legs: [{ securityId: String(securityId), quantity: qty, side, exchangeSegment: 'MCX_COMM' }],
-        mode: 'intraday',
+        mode: 'positional',
       };
     }
 
