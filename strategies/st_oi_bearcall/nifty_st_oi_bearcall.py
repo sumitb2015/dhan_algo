@@ -12,6 +12,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 
 from login import get_dhan_client
 from lib.dhan_helper import DhanHelper
+from lib.execution_broker import ExecutionBroker, ExecutionBrokerError
 from lib.strategy_state_helper import save_strategy_state, check_shutdown_trigger, exit_if_market_closed, parse_target_spec, instance_log_suffix
 
 STRATEGY_KEY = "nifty_st_oi_bearcall"
@@ -77,7 +78,7 @@ class NiftySTOIBearCallStrategy:
                  stop_loss=2000.0, stop_loss_is_pct=False,
                  exit_on_signal_flip=True, exit_on_option_st_flip=True,
                  eod_time="15:15", cooldown_minutes=5, min_hold_minutes=5,
-                 product_type="INTRADAY"):
+                 product_type="INTRADAY", broker="dhan"):
         self.dry_run = dry_run
         self.symbol = symbol.upper()
         self.index_interval = index_interval
@@ -135,6 +136,12 @@ class NiftySTOIBearCallStrategy:
         if not self.dhan:
             raise Exception("Failed to connect to Dhan API.")
         self.helper = DhanHelper(self.dhan)
+
+        self.broker_name = broker
+        try:
+            self.broker = ExecutionBroker.create(broker, self.helper, underlying=self.symbol, log=logger.info)
+        except ExecutionBrokerError as e:
+            raise RuntimeError(f"Could not start {broker} execution: {e}") from e
 
         # Dynamic strike rounding step
         self.strike_step = 100 if self.symbol == "BANKNIFTY" else 50
@@ -393,6 +400,7 @@ class NiftySTOIBearCallStrategy:
             "profit_target": self.target_profit,
             "stop_loss": self.stop_loss,
             "eod_time": self.eod_time,
+            "broker": self.broker_name,
         }
         save_strategy_state(STRATEGY_KEY, state_dict)
 
@@ -564,7 +572,7 @@ class NiftySTOIBearCallStrategy:
         if not self.dry_run:
             logger.info("PLACING LIVE ENTRY ORDERS...")
             # 1. Buy Long Leg (Hedge) first
-            long_oid = self.helper.buy(str(self.long_id), total_qty, product=self.product_type)
+            long_oid = self.broker.buy(self.long_strike, self.expiry, "CE", total_qty, product=self.product_type)
             if not long_oid:
                 logger.error("Failed to place Buy (Long Hedge) order. Aborting entry.")
                 self._reset_position_state()
@@ -581,11 +589,11 @@ class NiftySTOIBearCallStrategy:
                 return
 
             # 2. Sell Short Leg
-            short_oid = self.helper.sell(str(self.short_id), total_qty, product=self.product_type)
+            short_oid = self.broker.sell(self.short_strike, self.expiry, "CE", total_qty, product=self.product_type)
             if not short_oid:
                 logger.error("Failed to place Sell (Short) order. Rolling back Long Hedge order immediately to prevent naked long.")
                 try:
-                    self.helper.sell(str(self.long_id), total_qty, product=self.product_type)
+                    self.broker.sell(self.long_strike, self.expiry, "CE", total_qty, product=self.product_type)
                 except Exception as rollback_err:
                     logger.critical(f"Failed to sell-close Long Hedge order during rollback: {rollback_err}")
                 self._reset_position_state()
@@ -599,7 +607,7 @@ class NiftySTOIBearCallStrategy:
                 except Exception as cancel_err:
                     logger.error(f"Failed to cancel unfilled Short Leg order: {cancel_err}")
                 try:
-                    self.helper.sell(str(self.long_id), total_qty, product=self.product_type)
+                    self.broker.sell(self.long_strike, self.expiry, "CE", total_qty, product=self.product_type)
                 except Exception as rollback_err:
                     logger.critical(f"Failed to sell-close Long Hedge order during rollback: {rollback_err}")
                 self._reset_position_state()
@@ -759,19 +767,21 @@ class NiftySTOIBearCallStrategy:
 
         short_closed = False
         if not self.dry_run:
-            if self.short_id:
+            if self.short_id and self.short_strike:
                 try:
-                    short_exit_oid = self.helper.buy(str(self.short_id), total_qty, product=self.product_type)
+                    short_exit_oid = self.broker.buy(self.short_strike, self.expiry, "CE", total_qty, product=self.product_type)
                     if not short_exit_oid:
                         self._halt(f"Failed to place buy-to-close order for Short Leg {self.short_symbol} (ID: {self.short_id}). Hedge leg retained to prevent naked risk.")
                     else:
                         logger.info(f"Short Leg buy-to-close order placed: {short_exit_oid}")
                         if self.helper.wait_for_fill(short_exit_oid, timeout=10):
                             short_closed = True
+                            logger.info("Short Leg close order filled.")
                         else:
                             ord_details = self.helper.get_order_by_id(short_exit_oid)
                             if ord_details and ord_details.get('orderStatus') == 'TRADED':
                                 short_closed = True
+                                logger.info("Short Leg close order confirmed filled via order status check.")
                             else:
                                 self._halt("Short Leg close order did not fill. Hedge leg retained to prevent naked risk.")
                 except Exception as e:
@@ -779,9 +789,9 @@ class NiftySTOIBearCallStrategy:
             else:
                 short_closed = True
 
-            if self.long_id and short_closed:
+            if self.long_id and self.long_strike and short_closed:
                 try:
-                    long_exit_oid = self.helper.sell(str(self.long_id), total_qty, product=self.product_type)
+                    long_exit_oid = self.broker.sell(self.long_strike, self.expiry, "CE", total_qty, product=self.product_type)
                     if not long_exit_oid:
                         self._halt(f"Failed to place sell-to-close order for Long Leg {self.long_symbol} (ID: {self.long_id}).")
                     else:
@@ -975,6 +985,12 @@ Examples:
                         help="Order product type (default: INTRADAY)")
     parser.add_argument("--instance-id", type=str, default="", metavar="ID",
                         help="Suffix for debug/state files to run a second concurrent copy of this strategy")
+    parser.add_argument(
+        "--broker", choices=["dhan", "zerodha", "kotak"], default="dhan",
+        help="Execution broker for order placement. Market data always comes from Dhan. "
+             "Zerodha/Kotak stop-loss/target exits are software-managed only (no resting "
+             "broker-side stop order)."
+    )
 
     args = parser.parse_args()
     if args.instance_id:
@@ -998,6 +1014,7 @@ Examples:
     logger.info(f"Lots: {args.lots} | Target Profit: {target_label} | Stop Loss: {stop_label}")
     logger.info(f"Poll Interval: {args.poll_interval}s | Max Wait: {args.max_wait_minutes}m | Cooldown: {args.cooldown_minutes}m | Min Hold: {args.min_hold_minutes}m")
     logger.info(f"Exit on Index ST Flip: {args.exit_on_signal_flip} | Exit on Option ST Flip: {args.exit_on_option_st_flip} | EOD: {args.eod_time}")
+    logger.info(f"Execution Broker: {args.broker}")
     logger.info("=" * 60)
 
     strat = NiftySTOIBearCallStrategy(
@@ -1027,6 +1044,7 @@ Examples:
         cooldown_minutes=args.cooldown_minutes,
         min_hold_minutes=args.min_hold_minutes,
         product_type=args.product_type,
+        broker=args.broker,
     )
     try:
         strat.run()
