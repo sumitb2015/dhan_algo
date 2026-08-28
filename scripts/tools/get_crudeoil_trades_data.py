@@ -57,6 +57,7 @@ def main():
                     "securityId": str(row.get('securityId', '')),
                     "exchangeSegment": str(row.get('exchangeSegment', '')),
                     "positionType": str(row.get('positionType', '')),
+                    "productType": str(row.get('productType', '')),
                     "netQty": int(row.get('netQty', 0) or 0),
                     "buyAvg": float(row.get('buyAvg', 0) or 0),
                     "sellAvg": float(row.get('sellAvg', 0) or 0),

@@ -37,6 +37,8 @@ export interface CrudePosition {
   tradingSymbol?: string;
   exchangeSegment?: string;
   positionType: string;
+  /** Broker's raw product code — Dhan: INTRADAY/MARGIN; Kotak: MIS/NRML. */
+  productType?: string;
   /**
    * Dhan reports this in LOTS (its MCX lot size is 1); Kotak reports ABSOLUTE
    * quantity (100 per CRUDEOIL lot, 10 per CRUDEOILM). Always exit with this

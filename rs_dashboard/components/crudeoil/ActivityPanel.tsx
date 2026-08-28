@@ -35,6 +35,14 @@ function qtyLabelFor(p: CrudePosition): string {
   return `${lotText} lot${lots === 1 ? '' : 's'} · ${qty}`;
 }
 
+/** Broker product code -> Intraday/Normal label. Dhan: INTRADAY/MARGIN. Kotak: MIS/NRML. */
+function productLabelFor(p: CrudePosition): string {
+  const code = (p.productType ?? '').toUpperCase();
+  if (code === 'INTRADAY' || code === 'MIS') return 'Intraday';
+  if (code === 'MARGIN' || code === 'NRML' || code === 'CNC') return 'Normal';
+  return code || '—';
+}
+
 function ThresholdField({
   kind,
   position,
@@ -163,6 +171,7 @@ export default function ActivityPanel({
               <TableRow className="hover:bg-transparent">
                 <TableHead className={TH}>Symbol</TableHead>
                 <TableHead className={TH}>Side</TableHead>
+                <TableHead className={TH}>Product</TableHead>
                 <TableHead className={`${TH} text-right`}>Qty</TableHead>
                 <TableHead className={`${TH} text-right`}>LTP</TableHead>
                 <TableHead className={`${TH} text-right`}>Buy Avg</TableHead>
@@ -175,9 +184,9 @@ export default function ActivityPanel({
             </TableHeader>
             <TableBody>
               {positionsLoading ? (
-                <TableRow className="hover:bg-transparent"><TableCell colSpan={10} className="py-8 text-center text-zinc-500">Loading positions…</TableCell></TableRow>
+                <TableRow className="hover:bg-transparent"><TableCell colSpan={11} className="py-8 text-center text-zinc-500">Loading positions…</TableCell></TableRow>
               ) : positions.length === 0 ? (
-                <TableRow className="hover:bg-transparent"><TableCell colSpan={10} className="py-8 text-center text-zinc-500">No open positions</TableCell></TableRow>
+                <TableRow className="hover:bg-transparent"><TableCell colSpan={11} className="py-8 text-center text-zinc-500">No open positions</TableCell></TableRow>
               ) : (
                 positions.map((p, i) => {
                   const config  = riskConfigs[p.symbol] ?? { sl: null, target: null };
@@ -202,6 +211,7 @@ export default function ActivityPanel({
                           {flat ? 'FLAT' : isShort ? 'SHORT' : 'LONG'}
                         </Badge>
                       </TableCell>
+                      <TableCell className="text-zinc-300">{productLabelFor(p)}</TableCell>
                       <TableCell className="text-right tabular-nums text-zinc-200">{qtyLabelFor(p)}</TableCell>
                       <TableCell className="text-right tabular-nums text-zinc-200">{fmtLTP(p.lastPrice)}</TableCell>
                       <TableCell className="text-right tabular-nums text-zinc-400">{fmtLTP(p.buyAvg)}</TableCell>
