@@ -388,26 +388,26 @@ export default function PositionsPayoffChart({
             {draftPnl !== null && (
               <circle cx={sx(readoutSpot)} cy={sy(draftPnl)} r={4} fill="#a78bfa" stroke="#18181b" strokeWidth={2} />
             )}
-            <g transform={`translate(${tooltipLeft ? sx(readoutSpot) - 108 : sx(readoutSpot) + 8}, ${PAD.top + 4})`}>
-              <rect width={100}
-                height={18 + (expiryPnl !== null ? 11 : 0) + (targetPnl !== null ? 11 : 0) + (draftPnl !== null ? 11 : 0)}
-                rx={5} fill="#18181b" fillOpacity={0.68} stroke="#3f3f46" strokeOpacity={0.7} />
-              <text x={7} y={11} fontSize={7} fill="#a1a1aa" className="font-mono">
+            <g transform={`translate(${tooltipLeft ? sx(readoutSpot) - 140 : sx(readoutSpot) + 10}, ${PAD.top + 4})`}>
+              <rect width={130}
+                height={26 + (expiryPnl !== null ? 16 : 0) + (targetPnl !== null ? 16 : 0) + (draftPnl !== null ? 16 : 0)}
+                rx={6} fill="#18181b" fillOpacity={0} stroke="#3f3f46" strokeOpacity={0.7} />
+              <text x={9} y={15} fontSize={10} fill="#d4d4d8" className="font-mono">
                 At {readoutSpot.toLocaleString('en-IN', { maximumFractionDigits: 0 })}
               </text>
               {expiryPnl !== null && (
-                <text x={7} y={21.5} fontSize={8} fontWeight={700} className="font-mono"
+                <text x={9} y={30} fontSize={12} fontWeight={700} className="font-mono"
                   fill={expiryPnl >= 0 ? '#10b981' : '#ef4444'}>
                   Expiry {fmtInrCompact(expiryPnl)}
                 </text>
               )}
               {targetPnl !== null && (
-                <text x={7} y={21.5 + (expiryPnl !== null ? 10.5 : 0)} fontSize={8} fontWeight={700} className="font-mono" fill="#38bdf8">
+                <text x={9} y={30 + (expiryPnl !== null ? 16 : 0)} fontSize={12} fontWeight={700} className="font-mono" fill="#38bdf8">
                   {targetLabel} {fmtInrCompact(targetPnl)}
                 </text>
               )}
               {draftPnl !== null && (
-                <text x={7} y={21.5 + (expiryPnl !== null ? 10.5 : 0) + (targetPnl !== null ? 10.5 : 0)} fontSize={8} fontWeight={700} className="font-mono" fill="#a78bfa">
+                <text x={9} y={30 + (expiryPnl !== null ? 16 : 0) + (targetPnl !== null ? 16 : 0)} fontSize={12} fontWeight={700} className="font-mono" fill="#a78bfa">
                   Draft {fmtInrCompact(draftPnl)}
                 </text>
               )}
