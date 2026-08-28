@@ -392,7 +392,7 @@ export default function PositionsPayoffChart({
               <rect width={130}
                 height={26 + (expiryPnl !== null ? 16 : 0) + (targetPnl !== null ? 16 : 0) + (draftPnl !== null ? 16 : 0)}
                 rx={6} fill="#ffffff" fillOpacity={0.12} stroke="#3f3f46" strokeOpacity={0.7} />
-              <text x={9} y={15} fontSize={10} fill="#d4d4d8" className="font-mono">
+              <text x={9} y={15} fontSize={10} fill="#000000" className="font-mono">
                 At {readoutSpot.toLocaleString('en-IN', { maximumFractionDigits: 0 })}
               </text>
               {expiryPnl !== null && (
