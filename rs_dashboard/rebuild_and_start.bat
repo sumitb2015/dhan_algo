@@ -1,7 +1,21 @@
 @echo off
 setlocal enabledelayedexpansion
+cd /d "C:\dhan_algo\dhan_algo"
+
+echo ============================================
+echo  Pulling latest changes from master...
+echo ============================================
+call git pull origin master
+if errorlevel 1 (
+    echo.
+    echo git pull failed. Aborting startup.
+    pause
+    exit /b 1
+)
+
 cd /d "C:\dhan_algo\dhan_algo\rs_dashboard"
 
+echo.
 echo ============================================
 echo  Stopping any process on port 3000...
 echo ============================================
