@@ -12,6 +12,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 
 from login import get_dhan_client
 from lib.dhan_helper import DhanHelper
+from lib.execution_broker import ExecutionBroker, ExecutionBrokerError
 from lib.strategy_state_helper import save_strategy_state, check_shutdown_trigger, exit_if_market_closed, parse_target_spec, instance_log_suffix
 
 # Configure Logging
@@ -52,7 +53,7 @@ class NiftySpreadTrendStrategy:
                  stop_loss=2000.0, stop_loss_is_pct=False, exit_on_signal_change=True,
                  eod_time="15:15", cooldown_minutes=5,
                  use_ema=True, use_supertrend=True, min_hold_minutes=5,
-                 state_key="nifty_spread_trend"):
+                 state_key="nifty_spread_trend", broker="dhan"):
         self.state_key = state_key
         self.dry_run = dry_run
         self.symbol = symbol.upper()
@@ -83,6 +84,12 @@ class NiftySpreadTrendStrategy:
         if not self.dhan:
             raise Exception("Failed to connect to Dhan API.")
         self.helper = DhanHelper(self.dhan)
+
+        self.broker_name = broker
+        try:
+            self.broker = ExecutionBroker.create(broker, self.helper, underlying=self.symbol, log=logger.info)
+        except ExecutionBrokerError as e:
+            raise RuntimeError(f"Could not start {broker} execution: {e}") from e
 
         # Dynamic strike rounding steps
         if self.symbol == "BANKNIFTY":
@@ -264,6 +271,7 @@ class NiftySpreadTrendStrategy:
             "stop_loss": self.stop_loss,
             "option_vwap": round(self.option_vwap, 2),
             "option_st_level": round(self.option_st_level, 2),
+            "broker": self.broker_name,
         }
         save_strategy_state(self.state_key, state_dict)
 
@@ -484,7 +492,7 @@ class NiftySpreadTrendStrategy:
         if not self.dry_run:
             logger.info("PLACING LIVE ENTRY ORDERS...")
             # 1. Buy Long Leg (Hedge)
-            long_oid = self.helper.buy(str(self.long_id), total_qty)
+            long_oid = self.broker.buy(self.long_strike, self.expiry, option_type, total_qty)
             if not long_oid:
                 logger.error("Failed to place Buy (Long Hedge) order. Aborting entry.")
                 self.active_spread = None
@@ -502,11 +510,11 @@ class NiftySpreadTrendStrategy:
                 return
             
             # 2. Sell Short Leg
-            short_oid = self.helper.sell(str(self.short_id), total_qty)
+            short_oid = self.broker.sell(self.short_strike, self.expiry, option_type, total_qty)
             if not short_oid:
                 logger.error("Failed to place Sell (Short) order. Rolling back Long Hedge order immediately to prevent naked long.")
                 try:
-                    self.helper.sell(str(self.long_id), total_qty)
+                    self.broker.sell(self.long_strike, self.expiry, option_type, total_qty)
                 except Exception as rollback_err:
                     logger.critical(f"Failed to sell-close Long Hedge order during rollback: {rollback_err}")
                 self.active_spread = None
@@ -521,7 +529,7 @@ class NiftySpreadTrendStrategy:
                 except Exception as cancel_err:
                     logger.error(f"Failed to cancel unfilled Short Leg order: {cancel_err}")
                 try:
-                    self.helper.sell(str(self.long_id), total_qty)
+                    self.broker.sell(self.long_strike, self.expiry, option_type, total_qty)
                 except Exception as rollback_err:
                     logger.critical(f"Failed to sell-close Long Hedge order during rollback: {rollback_err}")
                 self.active_spread = None
@@ -697,11 +705,12 @@ class NiftySpreadTrendStrategy:
             exit_long_ltp = self.long_entry_price
 
         short_closed = False
+        opt_type = "PE" if self.active_spread == "BULL_PUT" else "CE"
         if not self.dry_run:
             # 1. Buy back Short Leg first (closes short, prevents naked short risk)
-            if self.short_id:
+            if self.short_id and self.short_strike:
                 try:
-                    short_exit_oid = self.helper.buy(str(self.short_id), total_qty)
+                    short_exit_oid = self.broker.buy(self.short_strike, self.expiry, opt_type, total_qty)
                     if not short_exit_oid:
                         self._halt(f"Failed to place buy-to-close order for Short Leg {self.short_symbol} (ID: {self.short_id}). Hedge leg retained to prevent naked risk.")
                     else:
@@ -723,9 +732,9 @@ class NiftySpreadTrendStrategy:
                 short_closed = True
                 
             # 2. Sell Long Leg second (closes hedge) - ONLY if short is confirmed closed!
-            if self.long_id and short_closed:
+            if self.long_id and self.long_strike and short_closed:
                 try:
-                    long_exit_oid = self.helper.sell(str(self.long_id), total_qty)
+                    long_exit_oid = self.broker.sell(self.long_strike, self.expiry, opt_type, total_qty)
                     if not long_exit_oid:
                         self._halt(f"Failed to place sell-to-close order for Long Leg {self.long_symbol} (ID: {self.long_id}).")
                     else:
@@ -922,6 +931,12 @@ Examples:
 
     parser.add_argument("--instance-id", type=str, default="", metavar="ID",
                         help="Suffix for debug/state files to run a second concurrent copy of this strategy")
+    parser.add_argument(
+        "--broker", choices=["dhan", "zerodha", "kotak"], default="dhan",
+        help="Execution broker for order placement. Market data always comes from Dhan. "
+             "Zerodha/Kotak stop-loss/target exits are software-managed only (no resting "
+             "broker-side stop order)."
+    )
 
     args = parser.parse_args()
     STATE_KEY = f"nifty_spread_trend_{args.instance_id}" if args.instance_id else "nifty_spread_trend"
@@ -948,6 +963,7 @@ Examples:
     logger.info(f"Spread Config: CE Offset +{args.ce_offset} | PE Offset -{args.pe_offset} | Width: {args.spread_width}")
     logger.info(f"Lots: {args.lots} | Target Profit: {target_label} | Stop Loss: {stop_label}")
     logger.info(f"Exit on Trend Reversal: {args.exit_on_signal_change} | Cooldown: {args.cooldown_minutes}m | Min Hold: {args.min_hold_minutes}m")
+    logger.info(f"Execution Broker: {args.broker}")
     logger.info("=" * 60)
 
     strat = NiftySpreadTrendStrategy(
@@ -972,6 +988,7 @@ Examples:
         use_supertrend=args.use_supertrend,
         min_hold_minutes=args.min_hold_minutes,
         state_key=STATE_KEY,
+        broker=args.broker,
     )
     try:
         strat.run()
