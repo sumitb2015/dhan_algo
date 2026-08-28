@@ -14,9 +14,6 @@ then calls helper.buy()/sell() unchanged. Every strategy run without
 --broker (or with --broker dhan) behaves exactly as before this module
 existed.
 """
-import logging
-
-logger = logging.getLogger(__name__)
 
 EXECUTION_BROKERS = ("dhan", "zerodha", "kotak")
 
@@ -49,7 +46,10 @@ class ExecutionBroker:
             child.init_instruments()
         except Exception as e:
             raise ExecutionBrokerError(f"Could not start {broker} execution: {e}") from e
-        ok, detail = child.verify_session()
+        try:
+            ok, detail = child.verify_session()
+        except Exception as e:
+            raise ExecutionBrokerError(f"Could not verify {broker} session: {e}") from e
         if not ok:
             raise ExecutionBrokerError(detail)
         return cls(broker, helper, underlying, child=child, log=log)
@@ -93,6 +93,14 @@ class ExecutionBroker:
         return order_ids[-1] if order_ids else None
 
     def get_owned_net_qty(self, strike, expiry, opt_type) -> int:
+        """Return the account-wide net quantity for this leg (possibly held by multiple strategies).
+
+        ⚠️ WARNING: Do NOT use this value directly to size an exit order. The returned qty
+        may include positions opened by other strategy instances trading the same strike.
+        Exiting based on this account-wide net caused a production incident on 2026-07-30
+        where one strategy flattened a sibling instance's leg. Always use
+        lib/strategy_risk.py's resolve_exit_qty_broker() instead, which exits only what
+        this strategy instance opened."""
         if self.broker == "dhan":
             sec_id = self._dhan_security_id(strike, expiry, opt_type)
             if not sec_id:
