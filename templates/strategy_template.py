@@ -2,6 +2,7 @@
 """
 Strategy Template using High-Level DhanHelper Abstractions
 """
+import argparse
 import time
 import logging
 import sys
@@ -13,15 +14,22 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from login import get_dhan_client
 from lib.dhan_helper import DhanHelper
 from lib.strategy_risk import resolve_exit_qty
+from lib.execution_broker import ExecutionBroker, ExecutionBrokerError
 
 # Configure Logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-def run_strategy():
+def run_strategy(args):
     # 1. Initialize
     dhan = get_dhan_client()
     helper = DhanHelper(dhan)
+
+    try:
+        broker = ExecutionBroker.create(args.broker, helper, underlying="NIFTY", log=logger.info)
+    except ExecutionBrokerError as e:
+        logger.error(f"Could not start {args.broker} execution: {e}")
+        sys.exit(1)
     
     SYMBOL = "TCS"
     QUANTITY = 10
@@ -100,4 +108,12 @@ def run_strategy():
             time.sleep(5)
 
 if __name__ == "__main__":
-    run_strategy()
+    parser = argparse.ArgumentParser(description="Strategy Template")
+    parser.add_argument(
+        "--broker", choices=["dhan", "zerodha", "kotak"], default="dhan",
+        help="Execution broker for order placement. Market data always comes from Dhan. "
+             "Zerodha/Kotak stop-loss/target exits are software-managed only (no resting "
+             "broker-side stop order)."
+    )
+    args = parser.parse_args()
+    run_strategy(args)
