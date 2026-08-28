@@ -135,10 +135,35 @@ def parse_fill_time(raw: str, today: str) -> datetime | None:
     return dt.to_pydatetime()
 
 
+def extract_row_symbol(row: dict) -> str:
+    return str(row.get("tradingSymbol") or row.get("trdSym") or row.get("customSymbol") or row.get("tradingsymbol") or row.get("sym") or row.get("symbol") or "").strip()
+
+
+def extract_row_security_id(row: dict) -> str:
+    return str(row.get("securityId") or row.get("security_id") or row.get("instrument_token") or row.get("tok") or "").strip()
+
+
+def extract_row_product(row: dict) -> str:
+    return str(row.get("productType") or row.get("product") or row.get("prod") or row.get("prd") or "").strip().upper()
+
+
+def extract_row_segment(row: dict) -> str:
+    return str(row.get("exchangeSegment") or row.get("exSeg") or row.get("exchange") or "").strip()
+
+
+def extract_row_side(row: dict) -> str:
+    t = str(row.get("transactionType") or row.get("trnsTp") or "").strip().upper()
+    if t in ("B", "BUY"):
+        return "BUY"
+    if t in ("S", "SELL"):
+        return "SELL"
+    return ""
+
+
 def position_key(row: dict) -> str:
-    sec_id = str(row.get("securityId") or row.get("security_id") or row.get("instrument_token") or row.get("tok") or "").strip()
-    prod = str(row.get("productType") or row.get("product") or row.get("prod") or "").strip().upper()
-    sym = str(row.get("tradingSymbol") or row.get("customSymbol") or row.get("tradingsymbol") or row.get("symbol") or "").strip()
+    sec_id = extract_row_security_id(row)
+    prod = extract_row_product(row)
+    sym = extract_row_symbol(row)
     if sec_id:
         return f"{sec_id}::{prod}" if prod else sec_id
     if sym:
@@ -151,16 +176,17 @@ def normalize_fills(trades: list, today: str) -> list[dict]:
     for row in trades:
         if not isinstance(row, dict):
             continue
-        symbol = str(row.get("tradingSymbol") or row.get("customSymbol") or row.get("tradingsymbol") or row.get("symbol") or "")
-        side = str(row.get("transactionType") or "").upper()
+        symbol = extract_row_symbol(row)
+        side = extract_row_side(row)
         try:
-            qty = float(row.get("tradedQuantity") or row.get("quantity") or 0)
-            price = float(row.get("tradedPrice") or row.get("price") or 0)
+            qty = float(row.get("tradedQuantity") or row.get("fldQty") or row.get("flQty") or row.get("quantity") or row.get("qty") or 0)
+            price = float(row.get("tradedPrice") or row.get("avgPrc") or row.get("price") or row.get("prc") or 0)
         except (TypeError, ValueError):
             continue
-        when = parse_fill_time(row.get("createTime") or row.get("exchangeTime") or row.get("fill_timestamp") or "", today)
+        when_raw = str(row.get("createTime") or row.get("exchangeTime") or row.get("fill_timestamp") or row.get("flTm") or row.get("exTm") or row.get("hsUpTm") or "")
+        when = parse_fill_time(when_raw, today)
         k = position_key(row)
-        if not symbol or qty <= 0 or price <= 0 or when is None or side not in ("BUY", "SELL"):
+        if not symbol or qty <= 0 or price <= 0 or when is None or not side:
             continue
         fills.append({
             "key": k or symbol,
@@ -170,8 +196,8 @@ def normalize_fills(trades: list, today: str) -> list[dict]:
             "price": price,
             "time": when,
             "mult": contract_multiplier(row),
-            "security_id": str(row.get("securityId") or row.get("security_id") or row.get("instrument_token") or ""),
-            "segment": str(row.get("exchangeSegment") or row.get("exchange") or ""),
+            "security_id": extract_row_security_id(row),
+            "segment": extract_row_segment(row),
         })
     fills.sort(key=lambda f: f["time"])
     return fills
@@ -183,14 +209,14 @@ def extract_starting_positions(broker: str, positions: list) -> dict[str, dict]:
     for p in positions:
         if not isinstance(p, dict):
             continue
-        sym = str(p.get("tradingSymbol") or p.get("customSymbol") or p.get("tradingsymbol") or p.get("symbol") or "")
+        sym = extract_row_symbol(p)
         if not sym:
             continue
         k = position_key(p) or sym
         mult = contract_multiplier(p)
-        sec_id = str(p.get("securityId") or p.get("security_id") or p.get("instrument_token") or "")
-        segment = str(p.get("exchangeSegment") or p.get("exchange") or "")
-        instrument = str(p.get("drvOptionType") or p.get("instrumentType") or p.get("instrument") or "OPTIDX")
+        sec_id = extract_row_security_id(p)
+        segment = extract_row_segment(p)
+        instrument = str(p.get("drvOptionType") or p.get("instrumentType") or p.get("instrument") or p.get("it") or p.get("type") or "OPTIDX")
 
         cf_buy = float(p.get("carryForwardBuyQty") or p.get("cfBuyQty") or 0)
         cf_sell = float(p.get("carryForwardSellQty") or p.get("cfSellQty") or 0)
@@ -298,61 +324,79 @@ def resolve_contracts(helper: DhanHelper, broker: str, fills: list[dict],
                 "instrument": "OPTIDX",
             }
 
-    if broker == "dhan":
-        df = helper._load_master_list()
-        by_sid = None
-        if df is not None and not df.empty and "SECURITY_ID" in df.columns:
-            m = df.copy()
-            m["_sid"] = m["SECURITY_ID"].apply(lambda v: str(int(float(v))) if pd.notna(v) else "")
-            by_sid = m.set_index("_sid")
+    df = helper._load_master_list()
+    by_sid = None
+    if df is not None and not df.empty and "SECURITY_ID" in df.columns:
+        m = df.copy()
+        m["_sid"] = m["SECURITY_ID"].apply(lambda v: str(int(float(v))) if pd.notna(v) else "")
+        by_sid = m.set_index("_sid")
 
-        for k, meta in key_meta.items():
-            sid = meta["security_id"]
-            segment = meta["segment"]
-            symbol = meta["symbol"]
-            if not sid or not segment:
-                unresolved.append(symbol or k)
-                continue
-            instrument = "OPTIDX"
-            if by_sid is not None:
-                try:
-                    value = by_sid.loc[sid, "INSTRUMENT"]
-                    instrument = str(value.iloc[0] if hasattr(value, "iloc") else value)
-                except (KeyError, TypeError, ValueError):
-                    pass
-            resolved[k] = {"security_id": sid, "segment": segment, "instrument": instrument, "symbol": symbol}
-        return resolved, unresolved
+    instruments = load_broker_instruments(broker) if broker != "dhan" else {}
 
-    instruments = load_broker_instruments(broker)
     for k, meta in key_meta.items():
+        sid = meta["security_id"]
+        segment = meta["segment"]
         symbol = meta["symbol"]
-        cached = instruments.get(symbol.upper())
-        if not cached:
-            unresolved.append(symbol or k)
+
+        # 1. If security_id exists in Dhan master list, resolve directly:
+        if sid and by_sid is not None and sid in by_sid.index:
+            row = by_sid.loc[sid]
+            inst = str(row["INSTRUMENT"].iloc[0] if hasattr(row["INSTRUMENT"], "iloc") else row["INSTRUMENT"] if "INSTRUMENT" in row else "OPTIDX")
+            exch = str(row["EXCH_ID"].iloc[0] if hasattr(row["EXCH_ID"], "iloc") else row["EXCH_ID"] if "EXCH_ID" in row else "")
+            seg = "MCX_COMM" if exch == "MCX" else "BSE_FNO" if exch == "BSE" else "NSE_FNO"
+            resolved[k] = {"security_id": sid, "segment": seg, "instrument": inst, "symbol": symbol}
             continue
-        underlying = str(cached.get("underlying") or "").upper()
-        exch, segment, instrument_types = UNDERLYING_MARKET.get(underlying, DEFAULT_MARKET)
-        expiry = str(cached.get("expiry") or "")
-        opt_type = str(cached.get("instrument_type") or "").upper()
-        try:
-            strike = float(cached.get("strike") or 0)
-        except (TypeError, ValueError):
-            strike = 0.0
-        row = None
-        for instrument in instrument_types:
-            row = helper.find_option(underlying, expiry, strike, opt_type,
-                                     exchange=exch, instrument=instrument)
+
+        # 2. Look up in broker instruments cache
+        cached = instruments.get(symbol.upper()) if instruments else None
+        if cached:
+            underlying = str(cached.get("underlying") or "").upper()
+            exch, segment, instrument_types = UNDERLYING_MARKET.get(underlying, DEFAULT_MARKET)
+            expiry = str(cached.get("expiry") or "")
+            opt_type = str(cached.get("instrument_type") or "").upper()
+            try:
+                strike = float(cached.get("strike") or 0)
+            except (TypeError, ValueError):
+                strike = 0.0
+            row = None
+            for instrument in instrument_types:
+                row = helper.find_option(underlying, expiry, strike, opt_type,
+                                         exchange=exch, instrument=instrument)
+                if row:
+                    break
             if row:
-                break
-        if not row:
-            unresolved.append(symbol or k)
-            continue
-        resolved[k] = {
-            "security_id": str(int(float(row["SECURITY_ID"]))),
-            "segment": segment,
-            "instrument": str(row.get("INSTRUMENT") or instrument),
-            "symbol": symbol,
-        }
+                resolved[k] = {
+                    "security_id": str(int(float(row["SECURITY_ID"]))),
+                    "segment": segment,
+                    "instrument": str(row.get("INSTRUMENT") or instrument),
+                    "symbol": symbol,
+                }
+                continue
+
+        # 3. If it's a Future contract (e.g. CRUDEOILM21SEP26FUT or NIFTY26AUGFUT), lookup in master list
+        if df is not None and not df.empty and symbol.upper().endswith("FUT"):
+            m = re.match(r"^([A-Z]+)(\d{2}[A-Z]{3}\d{2})FUT$", symbol.upper())
+            if m:
+                und = m.group(1)
+                exp_dt = None
+                try:
+                    exp_dt = datetime.strptime(m.group(2), "%d%b%y").strftime("%Y-%m-%d")
+                except ValueError:
+                    pass
+                fut_matches = df[(df["SYMBOL_NAME"] == und) & (df["INSTRUMENT"].isin(["FUTCOM", "FUTIDX", "FUTSTK"]))]
+                if exp_dt:
+                    fut_matches = fut_matches[fut_matches["SM_EXPIRY_DATE"] == exp_dt]
+                if not fut_matches.empty:
+                    fut_row = fut_matches.iloc[0]
+                    sid = str(int(float(fut_row["SECURITY_ID"])))
+                    inst = str(fut_row.get("INSTRUMENT", "FUTIDX"))
+                    exch = str(fut_row.get("EXCH_ID", "NSE"))
+                    seg = "MCX_COMM" if exch == "MCX" else "BSE_FNO" if exch == "BSE" else "NSE_FNO"
+                    resolved[k] = {"security_id": sid, "segment": seg, "instrument": inst, "symbol": symbol}
+                    continue
+
+        unresolved.append(symbol or k)
+
     return resolved, unresolved
 
 
