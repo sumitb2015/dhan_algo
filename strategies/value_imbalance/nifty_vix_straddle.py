@@ -59,6 +59,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 
 from login import get_dhan_client
 from lib.dhan_helper import DhanHelper
+from lib.execution_broker import ExecutionBroker, ExecutionBrokerError
 from lib.strategy_state_helper import save_strategy_state, check_shutdown_trigger, exit_if_market_closed, parse_target_spec, instance_log_suffix
 
 # ── Logging setup ────────────────────────────────────────────────────────────
@@ -125,6 +126,7 @@ class NiftyVixStraddle:
         cooldown_seconds: int = 90,
         max_spread_pct: float = 8.0,
         atm_shift_buffer: float = 5.0,
+        broker: str = "dhan",
     ):
         self.dry_run = dry_run
         self.lots = lots
@@ -156,6 +158,14 @@ class NiftyVixStraddle:
         if not self.dhan:
             raise RuntimeError("Failed to connect to Dhan.")
         self.helper = DhanHelper(self.dhan)
+
+        self.broker_name = broker
+        try:
+            self.broker = ExecutionBroker.create(broker, self.helper, underlying="NIFTY", log=logger.info)
+        except ExecutionBrokerError as e:
+            raise RuntimeError(f"Could not start {broker} execution: {e}") from e
+
+        self.expiry = None
 
         logger.info("Starting WebSocket for NIFTY Index (security ID 13)...")
         self.helper.start_websocket([("IDX_I", "13", 15)])
@@ -277,6 +287,7 @@ class NiftyVixStraddle:
                 "max_loss_per_trade": self.max_loss_per_trade,
                 "cooldown_active": time.time() < self._cooldown_until,
                 "api_error_streak": self._api_error_streak,
+                "broker": self.broker_name,
             },
         )
 
@@ -656,17 +667,18 @@ class NiftyVixStraddle:
     # ── option info ───────────────────────────────────────────────────────────
 
     def _get_option_info(self, strike: int, option_type: str):
-        """Return (security_id, ltp, symbol_name) for a NIFTY option, or (None, 0, '') on failure."""
+        """Return (security_id, ltp, symbol_name, expiry) for a NIFTY option, or (None, 0, '', None) on failure."""
         quote = self.helper.option("NIFTY", strike, option_type)
         if not quote:
-            return None, 0.0, ""
+            return None, 0.0, "", None
         if isinstance(quote, dict) and "CONTRACT_INFO" in quote:
             ci = quote["CONTRACT_INFO"]
             sid = str(ci.get("SECURITY_ID", ""))
             ltp = float(quote.get("last_price", 0) or quote.get("LTP", 0))
             name = ci.get("SYMBOL_NAME", f"NIFTY-{strike}-{option_type}")
-            return sid, ltp, name
-        return None, 0.0, ""
+            expiry = ci.get("SM_EXPIRY_DATE") or self.expiry or self.helper.get_nearest_expiry("NIFTY")
+            return sid, ltp, name, expiry
+        return None, 0.0, "", None
 
     def _spread_ok(self, ce_id: str, pe_id: str) -> bool:
         """
@@ -716,15 +728,15 @@ class NiftyVixStraddle:
     def _enter_straddle(self, ce_id: str, pe_id: str, ce_ltp: float, pe_ltp: float) -> bool:
         qty = self.lots * self.lot_size
         if not self.dry_run:
-            ce_oid = self.helper.sell(ce_id, qty)
+            ce_oid = self.broker.sell(self.ce_strike, self.expiry, "CE", qty)
             if not ce_oid:
                 logger.error("CE sell order failed; aborting entry.")
                 return False
-            pe_oid = self.helper.sell(pe_id, qty)
+            pe_oid = self.broker.sell(self.pe_strike, self.expiry, "PE", qty)
             if not pe_oid:
                 logger.error("PE sell order failed; rolling back CE leg.")
                 try:
-                    self.helper.buy(ce_id, qty)
+                    self.broker.buy(self.ce_strike, self.expiry, "CE", qty)
                 except Exception as rb:
                     logger.error(f"CE rollback failed: {rb}")
                 return False
@@ -764,11 +776,11 @@ class NiftyVixStraddle:
         )
         return True
 
-    def _close_leg_with_retry(self, sid: str, qty: int, leg: str, attempts: int = EXIT_RETRY_ATTEMPTS) -> bool:
+    def _close_leg_with_retry(self, sid: str, strike: int, leg: str, qty: int, attempts: int = EXIT_RETRY_ATTEMPTS) -> bool:
         """Attempt to buy-to-cover a leg, retrying on failed placement or unfilled order."""
         for attempt in range(1, attempts + 1):
             try:
-                oid = self.helper.buy(sid, qty)
+                oid = self.broker.buy(strike, self.expiry, leg, qty)
             except Exception as e:
                 logger.error(f"Exit {leg} error (attempt {attempt}/{attempts}): {e}")
                 oid = None
@@ -791,10 +803,13 @@ class NiftyVixStraddle:
         pe_ltp = self._ltp(self.pe_id) or self.pe_avg
 
         if not self.dry_run:
-            for leg, sid, attr in [("CE", self.ce_id, "ce_closed"), ("PE", self.pe_id, "pe_closed")]:
+            for leg, sid, strike, attr in [
+                ("CE", self.ce_id, self.ce_strike, "ce_closed"),
+                ("PE", self.pe_id, self.pe_strike, "pe_closed"),
+            ]:
                 if getattr(self, attr):
                     continue
-                if self._close_leg_with_retry(sid, qty, leg):
+                if self._close_leg_with_retry(sid, strike, leg, qty):
                     setattr(self, attr, True)
                 else:
                     logger.critical(
@@ -840,8 +855,8 @@ class NiftyVixStraddle:
         atm = self._atm(spot)
         logger.info(f"Setting up ATM cycle at {atm} (Spot: {spot:.2f})")
 
-        ce_id, ce_ltp, ce_name = self._get_option_info(atm, "CE")
-        pe_id, pe_ltp, pe_name = self._get_option_info(atm, "PE")
+        ce_id, ce_ltp, ce_name, ce_expiry = self._get_option_info(atm, "CE")
+        pe_id, pe_ltp, pe_name, pe_expiry = self._get_option_info(atm, "PE")
 
         if not ce_id or not pe_id or ce_ltp <= 0 or pe_ltp <= 0:
             logger.error(f"Could not fetch quotes for {atm} CE/PE. Will retry.")
@@ -851,6 +866,7 @@ class NiftyVixStraddle:
         self.pe_strike = atm
         self.ce_id = ce_id
         self.pe_id = pe_id
+        self.expiry = ce_expiry or pe_expiry or self.expiry
         self._reset_indicators()
 
         self._subscribe(ce_id, pe_id)
@@ -1185,6 +1201,12 @@ Examples:
                         help="Max bid-ask spread %% per leg to allow entry (default: 8, 0=disabled)")
     parser.add_argument("--instance-id", type=str, default="", metavar="ID",
                         help="Suffix for debug/state files to run a second concurrent copy of this strategy")
+    parser.add_argument(
+        "--broker", choices=["dhan", "zerodha", "kotak"], default="dhan",
+        help="Execution broker for order placement. Market data always comes from Dhan. "
+             "Zerodha/Kotak stop-loss/target exits are software-managed only (no resting "
+             "broker-side stop order)."
+    )
 
     args = parser.parse_args()
     if args.instance_id:
@@ -1208,6 +1230,7 @@ Examples:
         f" max_loss_per_trade={args.max_loss_per_trade} max_trades_per_day={args.max_trades_per_day}"
         f" cooldown={args.cooldown_seconds}s max_spread={args.max_spread_pct}%"
         f" atm_shift_buffer={args.atm_shift_buffer}pts"
+        f" broker={args.broker}"
     )
 
     try:
@@ -1233,6 +1256,7 @@ Examples:
             cooldown_seconds=args.cooldown_seconds,
             max_spread_pct=args.max_spread_pct,
             atm_shift_buffer=args.atm_shift_buffer,
+            broker=args.broker,
         )
     except Exception as init_err:
         logger.critical(f"Strategy initialisation failed: {init_err}", exc_info=True)
