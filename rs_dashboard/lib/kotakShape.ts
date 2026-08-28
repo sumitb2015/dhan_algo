@@ -28,6 +28,11 @@ function first(row: Record<string, any>, ...keys: string[]): number {
 export function shapeKotakPosition(p: Record<string, any>): ScalperPosition {
   // No net-qty field exists — sum the four legs. Carry-forward first so an
   // overnight position that traded again today still nets correctly.
+  const cfBuyQty = num(p, 'cfBuyQty');
+  const cfSellQty = num(p, 'cfSellQty');
+  const cfBuyAmt = num(p, 'cfBuyAmt');
+  const cfSellAmt = num(p, 'cfSellAmt');
+
   const buyQty = num(p, 'cfBuyQty', 'flBuyQty');
   const sellQty = num(p, 'cfSellQty', 'flSellQty');
   const netQty = buyQty - sellQty;
