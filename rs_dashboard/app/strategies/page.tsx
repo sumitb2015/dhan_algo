@@ -8,7 +8,9 @@ import {
 } from 'lucide-react';
 import StrategyCard from '@/components/StrategyCard';
 import NavBar from '@/components/NavBar';
+import BrokerSelector from '@/components/BrokerSelector';
 import { usePortfolio } from '@/lib/usePortfolio';
+import { useBrokerSelector } from '@/hooks/useBrokerSelector';
 import {
   useGroupCollapse, groupByUnderlying, runningInstancesOf, sessionPnlOf, inr, signedInr,
 } from '@/lib/useStrategyGroups';
@@ -46,6 +48,7 @@ function StatTile({
 }
 
 export default function StrategiesPage() {
+  const { broker, setBroker, authenticatedBrokers } = useBrokerSelector();
   const [strategies, setStrategies] = useState<Record<string, any>>({});
   const [loading, setLoading] = useState<boolean>(true);
   const [error, setError] = useState<string | null>(null);
@@ -193,6 +196,11 @@ export default function StrategiesPage() {
         <NavBar />
 
         <div className="flex items-center gap-2 ml-auto shrink-0">
+          <BrokerSelector
+            broker={broker}
+            setBroker={setBroker}
+            authenticatedBrokers={authenticatedBrokers}
+          />
           {/* Poll freshness — turns amber if the 2s poll has clearly stalled */}
           {staleSeconds !== null && (
             <span
@@ -468,6 +476,7 @@ export default function StrategiesPage() {
                           meta={item.meta}
                           state={item.state}
                           onRefresh={fetchStrategies}
+                          selectedBroker={broker}
                         />
                       ))}
                     </div>

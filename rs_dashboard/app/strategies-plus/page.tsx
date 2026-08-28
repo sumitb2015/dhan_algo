@@ -8,7 +8,9 @@ import {
 } from 'lucide-react';
 import StrategyRowWide from '@/components/StrategyRowWide';
 import NavBar from '@/components/NavBar';
+import BrokerSelector from '@/components/BrokerSelector';
 import { usePortfolio } from '@/lib/usePortfolio';
+import { useBrokerSelector } from '@/hooks/useBrokerSelector';
 import { useGroupCollapse, groupByUnderlying } from '@/lib/useStrategyGroups';
 
 interface IndexQuote { ltp: number; prevClose: number }
@@ -80,6 +82,7 @@ function withAllBrokers(children: CopyTradeChild[]): CopyTradeChild[] {
 let toastCounter = 0;
 
 export default function StrategiesPlusPage() {
+  const { broker, setBroker, authenticatedBrokers } = useBrokerSelector();
   const [strategies, setStrategies] = useState<Record<string, any>>({});
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -571,8 +574,13 @@ export default function StrategiesPlusPage() {
 
         <NavBar />
 
-        {/* Live NIFTY + India VIX ticker */}
         <div className="flex items-center gap-3 ml-auto shrink-0">
+          <BrokerSelector
+            broker={broker}
+            setBroker={setBroker}
+            authenticatedBrokers={authenticatedBrokers}
+          />
+          {/* Live NIFTY + India VIX ticker */}
           {([
             { key: 'NIFTY', q: indexTicker?.nifty, decimals: 2 },
             { key: 'VIX', q: indexTicker?.vix, decimals: 2 },
@@ -1207,6 +1215,7 @@ export default function StrategiesPlusPage() {
                           instanceId={instanceId || undefined}
                           onAddInstance={instanceId === '' ? addInstance : undefined}
                           onRemoveInstance={instanceId === '' ? undefined : removeInstance}
+                          selectedBroker={broker}
                         />
                       ))}
                     </div>

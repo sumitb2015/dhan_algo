@@ -10,10 +10,13 @@ import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue
 } from '@/components/ui/select';
 import { Tooltip, TooltipTrigger, TooltipContent } from '@/components/ui/tooltip';
+import { type Broker } from '@/hooks/useBrokerSelector';
 
 interface StrategyMeta {
   key: string;
   name: string;
+  underlying?: string;
+  execBrokerEligible?: boolean;
 }
 
 // Dhan's intraday candle endpoint accepts only these. Anything else comes back as an API
@@ -172,15 +175,17 @@ interface StrategyState {
   current_atm?: number | null;
   upper_bound?: number | null;
   lower_bound?: number | null;
+  broker?: string;
 }
 
 interface StrategyCardProps {
   meta: StrategyMeta;
   state: StrategyState;
   onRefresh: () => void;
+  selectedBroker?: Broker;
 }
 
-function StrategyCard({ meta, state, onRefresh }: StrategyCardProps) {
+function StrategyCard({ meta, state, onRefresh, selectedBroker }: StrategyCardProps) {
   const [showConfig, setShowConfig] = useState<boolean>(false);
   const [showLogs, setShowLogs] = useState<boolean>(false);
   const [submitting, setSubmitting] = useState<boolean>(false);
@@ -559,10 +564,15 @@ function StrategyCard({ meta, state, onRefresh }: StrategyCardProps) {
         args.push('--trail-gap-rs', String(trailGapRs));
       }
 
+      const payload: any = { action: 'start', strategy: meta.key, args };
+      if (meta.execBrokerEligible && selectedBroker && selectedBroker !== 'dhan') {
+        payload.broker = selectedBroker;
+      }
+
       const res = await fetch('/api/strategies', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action: 'start', strategy: meta.key, args }),
+        body: JSON.stringify(payload),
       });
       const data = await res.json();
       if (data.success) { onRefresh(); setShowLogs(true); setShowConfig(false); }
@@ -1721,6 +1731,15 @@ function StrategyCard({ meta, state, onRefresh }: StrategyCardProps) {
 
         {/* Right: badges + actions */}
         <div className="flex items-center gap-1.5 shrink-0">
+          {isRunning && (
+            <Badge className={`text-[9px] h-4 px-1.5 font-mono uppercase shrink-0 ${
+              state.broker === 'zerodha' ? 'bg-sky-500/10 text-sky-400 border-sky-500/20' :
+              state.broker === 'kotak' ? 'bg-amber-500/10 text-amber-400 border-amber-500/20' :
+              'bg-emerald-500/10 text-emerald-400 border-emerald-500/20'
+            }`}>
+              {state.broker || 'dhan'}
+            </Badge>
+          )}
           {isRunning && state.dry_run && (
             <Badge className="gap-0.5 text-[9px] font-bold h-4 px-1.5 bg-amber-500/10 text-amber-400 border-amber-500/20">
               <ShieldAlert className="h-2.5 w-2.5" />SIM

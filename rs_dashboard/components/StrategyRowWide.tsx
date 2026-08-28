@@ -10,8 +10,14 @@ import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue
 } from '@/components/ui/select';
 import { Tooltip, TooltipTrigger, TooltipContent } from '@/components/ui/tooltip';
+import { type Broker } from '@/hooks/useBrokerSelector';
 
-interface StrategyMeta { key: string; name: string }
+interface StrategyMeta {
+  key: string;
+  name: string;
+  underlying?: string;
+  execBrokerEligible?: boolean;
+}
 
 // Dhan's intraday candle endpoint accepts only these. Anything else returns an API error →
 // empty DataFrame, so the strategy would silently never see a candle. A dropdown rather than
@@ -73,6 +79,7 @@ interface StrategyState {
   // Rolling Short Straddle
   roll_type?: 'points' | 'percentage'; roll_buffer?: number; roll_trigger_pct?: number; ref_spot?: number; max_rolls?: number; roll_count?: number;
   current_atm?: number | null; upper_bound?: number | null; lower_bound?: number | null;
+  broker?: string;
 }
 
 interface Props {
@@ -81,9 +88,10 @@ interface Props {
   onAddInstance?: (strategyKey: string) => void;
   /** Only passed for duplicate rows — discards the stopped instance and its debug files. */
   onRemoveInstance?: (strategyKey: string, instanceId: string) => void;
+  selectedBroker?: Broker;
 }
 
-function StrategyRowWide({ meta, state, onRefresh, instanceId, onAddInstance, onRemoveInstance }: Props) {
+function StrategyRowWide({ meta, state, onRefresh, instanceId, onAddInstance, onRemoveInstance, selectedBroker }: Props) {
   const [showConfig, setShowConfig] = useState(false);
   const [showLogs, setShowLogs] = useState(false);
   const [submitting, setSubmitting] = useState(false);
@@ -434,10 +442,15 @@ function StrategyRowWide({ meta, state, onRefresh, instanceId, onAddInstance, on
         args.push('--trail-gap-rs', String(trailGapRs));
       }
 
+      const payload: any = { action: 'start', strategy: meta.key, args, instanceId };
+      if (meta.execBrokerEligible && selectedBroker && selectedBroker !== 'dhan') {
+        payload.broker = selectedBroker;
+      }
+
       const res = await fetch('/api/strategies', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action: 'start', strategy: meta.key, args, instanceId }),
+        body: JSON.stringify(payload),
       });
       const data = await res.json();
       if (data.success) { onRefresh(); setShowLogs(true); setShowConfig(false); }
@@ -1693,6 +1706,15 @@ function StrategyRowWide({ meta, state, onRefresh, instanceId, onAddInstance, on
               {state.entry_type && (
                 <span className="text-[9px] font-mono text-zinc-500 bg-zinc-800/60 border border-zinc-700/40 px-1 rounded capitalize">
                   {state.entry_type}
+                </span>
+              )}
+              {isRunning && (
+                <span className={`px-1 py-0.5 rounded text-[8px] font-bold font-mono uppercase ${
+                  state.broker === 'zerodha' ? 'bg-sky-500/10 text-sky-400 border border-sky-500/20' :
+                  state.broker === 'kotak' ? 'bg-amber-500/10 text-amber-400 border border-amber-500/20' :
+                  'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20'
+                }`}>
+                  {state.broker || 'dhan'}
                 </span>
               )}
               {state.dry_run && (
