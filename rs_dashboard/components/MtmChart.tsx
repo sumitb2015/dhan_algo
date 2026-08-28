@@ -72,11 +72,20 @@ function normalizeTradeTime(raw: string): string {
   return BARE_TIME.test(raw) ? `${todayIstDateString()}T${raw}+05:30` : raw;
 }
 
+function rowIdentityKey(row: Record<string, unknown>): string {
+  const secId = String(row.securityId ?? row.security_id ?? row.instrument_token ?? row.tok ?? '').trim();
+  const prod = String(row.productType ?? row.product ?? row.prod ?? '').trim().toUpperCase();
+  const sym = String(row.tradingSymbol ?? row.customSymbol ?? row.tradingsymbol ?? row.symbol ?? '').trim();
+  if (secId) return prod ? `${secId}::${prod}` : secId;
+  if (sym) return prod ? `${sym}::${prod}` : sym;
+  return '';
+}
+
 function extractClientStartingPositions(positions: Record<string, unknown>[]): Map<string, { qty: number; avgPrice: number; mult: number }> {
   const map = new Map<string, { qty: number; avgPrice: number; mult: number }>();
   for (const p of positions) {
-    const sym = String(p.tradingSymbol ?? p.customSymbol ?? p.tradingsymbol ?? p.symbol ?? '');
-    if (!sym) continue;
+    const k = rowIdentityKey(p);
+    if (!k) continue;
     const mult = contractMultiplier(p);
     const cfBuy = Number(p.carryForwardBuyQty ?? p.cfBuyQty) || 0;
     const cfSell = Number(p.carryForwardSellQty ?? p.cfSellQty) || 0;
@@ -101,10 +110,10 @@ function extractClientStartingPositions(positions: Record<string, unknown>[]): M
 
     if (buy > 0) {
       const avg = buyVal && mult > 0 ? buyVal / (buy * mult) : (Number(p.buyAvg) || 0);
-      map.set(sym, { qty: buy, avgPrice: avg, mult });
+      map.set(k, { qty: buy, avgPrice: avg, mult });
     } else if (sell > 0) {
       const avg = sellVal && mult > 0 ? sellVal / (sell * mult) : (Number(p.sellAvg) || 0);
-      map.set(sym, { qty: -sell, avgPrice: avg, mult });
+      map.set(k, { qty: -sell, avgPrice: avg, mult });
     }
   }
   return map;
@@ -115,6 +124,7 @@ function buildTradeMtmSeries(trades: Record<string, unknown>[], positions: Recor
   const closeMinutes = sessionCloseMinutes(trades, positions);
   const fills = trades
     .map(t => ({
+      key: rowIdentityKey(t),
       symbol: String(t.tradingSymbol ?? t.customSymbol ?? t.tradingsymbol ?? t.symbol ?? ''),
       side: String(t.transactionType ?? '').toUpperCase(),
       qty: Number(t.tradedQuantity ?? t.quantity) || 0,
@@ -130,7 +140,8 @@ function buildTradeMtmSeries(trades: Record<string, unknown>[], positions: Recor
   const points: MtmPoint[] = [];
 
   for (const fill of fills) {
-    const pos = running.get(fill.symbol) ?? { qty: 0, avgPrice: 0, mult: fill.mult };
+    const k = fill.key || fill.symbol;
+    const pos = running.get(k) ?? { qty: 0, avgPrice: 0, mult: fill.mult };
     const signedQty = fill.side === 'BUY' ? fill.qty : -fill.qty;
 
     if (pos.qty === 0 || Math.sign(pos.qty) === Math.sign(signedQty)) {
@@ -151,7 +162,7 @@ function buildTradeMtmSeries(trades: Record<string, unknown>[], positions: Recor
       cumRealized += realizedDelta;
     }
 
-    running.set(fill.symbol, pos);
+    running.set(k, pos);
     points.push({ time: fill.time, pnl: cumRealized, realized: cumRealized });
   }
 

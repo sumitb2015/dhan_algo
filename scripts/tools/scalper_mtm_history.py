@@ -135,6 +135,17 @@ def parse_fill_time(raw: str, today: str) -> datetime | None:
     return dt.to_pydatetime()
 
 
+def position_key(row: dict) -> str:
+    sec_id = str(row.get("securityId") or row.get("security_id") or row.get("instrument_token") or row.get("tok") or "").strip()
+    prod = str(row.get("productType") or row.get("product") or row.get("prod") or "").strip().upper()
+    sym = str(row.get("tradingSymbol") or row.get("customSymbol") or row.get("tradingsymbol") or row.get("symbol") or "").strip()
+    if sec_id:
+        return f"{sec_id}::{prod}" if prod else sec_id
+    if sym:
+        return f"{sym}::{prod}" if prod else sym
+    return ""
+
+
 def normalize_fills(trades: list, today: str) -> list[dict]:
     fills = []
     for row in trades:
@@ -148,9 +159,11 @@ def normalize_fills(trades: list, today: str) -> list[dict]:
         except (TypeError, ValueError):
             continue
         when = parse_fill_time(row.get("createTime") or row.get("exchangeTime") or row.get("fill_timestamp") or "", today)
+        k = position_key(row)
         if not symbol or qty <= 0 or price <= 0 or when is None or side not in ("BUY", "SELL"):
             continue
         fills.append({
+            "key": k or symbol,
             "symbol": symbol,
             "side": side,
             "qty": qty,
@@ -173,6 +186,7 @@ def extract_starting_positions(broker: str, positions: list) -> dict[str, dict]:
         sym = str(p.get("tradingSymbol") or p.get("customSymbol") or p.get("tradingsymbol") or p.get("symbol") or "")
         if not sym:
             continue
+        k = position_key(p) or sym
         mult = contract_multiplier(p)
         sec_id = str(p.get("securityId") or p.get("security_id") or p.get("instrument_token") or "")
         segment = str(p.get("exchangeSegment") or p.get("exchange") or "")
@@ -199,7 +213,8 @@ def extract_starting_positions(broker: str, positions: list) -> dict[str, dict]:
 
         if cf_buy > 0:
             avg_unit = (cf_buy_val / (cf_buy * mult)) if (cf_buy > 0 and mult > 0 and cf_buy_val > 0) else float(p.get("buyAvg") or 0)
-            starting[sym] = {
+            starting[k] = {
+                "symbol": sym,
                 "qty": cf_buy,
                 "avg_price": avg_unit,
                 "mult": mult,
@@ -209,7 +224,8 @@ def extract_starting_positions(broker: str, positions: list) -> dict[str, dict]:
             }
         elif cf_sell > 0:
             avg_unit = (cf_sell_val / (cf_sell * mult)) if (cf_sell > 0 and mult > 0 and cf_sell_val > 0) else float(p.get("sellAvg") or 0)
-            starting[sym] = {
+            starting[k] = {
+                "symbol": sym,
                 "qty": -cf_sell,
                 "avg_price": avg_unit,
                 "mult": mult,
@@ -258,42 +274,61 @@ def load_broker_instruments(broker: str) -> dict[str, dict]:
 
 
 def resolve_contracts(helper: DhanHelper, broker: str, fills: list[dict],
-                      starting_positions: dict[str, dict]) -> tuple[dict, list[str]]:
-    """symbol -> {security_id, segment, instrument}; plus the symbols that could not be resolved."""
+                      starting_positions: dict[str, dict]) -> tuple[dict[str, dict], list[str]]:
+    """Map each position key to (security_id, segment, instrument)."""
     resolved: dict[str, dict] = {}
     unresolved: list[str] = []
-    symbols = list(dict.fromkeys([f["symbol"] for f in fills] + list(starting_positions.keys())))
+
+    # Map key -> metadata
+    key_meta: dict[str, dict] = {}
+    for k, sp in starting_positions.items():
+        key_meta[k] = {
+            "symbol": sp.get("symbol", ""),
+            "security_id": sp.get("security_id", ""),
+            "segment": sp.get("segment", ""),
+            "instrument": sp.get("instrument", "OPTIDX"),
+        }
+    for f in fills:
+        k = f["key"]
+        if k not in key_meta or not key_meta[k]["security_id"]:
+            key_meta[k] = {
+                "symbol": f.get("symbol", ""),
+                "security_id": f.get("security_id", ""),
+                "segment": f.get("segment", ""),
+                "instrument": "OPTIDX",
+            }
 
     if broker == "dhan":
-        # Dhan trade rows and position rows carry securityId and segment.
-        master = helper._load_master_list()
-        by_sid = master.copy()
-        by_sid["_sid"] = by_sid["SECURITY_ID"].apply(lambda v: str(int(float(v))) if pd.notna(v) else "")
-        by_sid = by_sid.set_index("_sid")
-        for symbol in symbols:
-            fill = next((f for f in fills if f["symbol"] == symbol), None)
-            if fill and fill.get("security_id") and fill.get("segment"):
-                sid, segment = fill["security_id"], fill["segment"]
-            else:
-                sp = starting_positions.get(symbol, {})
-                sid, segment = sp.get("security_id", ""), sp.get("segment", "")
+        df = helper._load_master_list()
+        by_sid = None
+        if df is not None and not df.empty and "SECURITY_ID" in df.columns:
+            m = df.copy()
+            m["_sid"] = m["SECURITY_ID"].apply(lambda v: str(int(float(v))) if pd.notna(v) else "")
+            by_sid = m.set_index("_sid")
 
+        for k, meta in key_meta.items():
+            sid = meta["security_id"]
+            segment = meta["segment"]
+            symbol = meta["symbol"]
             if not sid or not segment:
-                unresolved.append(symbol)
+                unresolved.append(symbol or k)
                 continue
-            try:
-                value = by_sid.loc[sid, "INSTRUMENT"]
-                instrument = str(value.iloc[0] if hasattr(value, "iloc") else value)
-            except (KeyError, TypeError, ValueError):
-                instrument = "OPTIDX"
-            resolved[symbol] = {"security_id": sid, "segment": segment, "instrument": instrument}
+            instrument = "OPTIDX"
+            if by_sid is not None:
+                try:
+                    value = by_sid.loc[sid, "INSTRUMENT"]
+                    instrument = str(value.iloc[0] if hasattr(value, "iloc") else value)
+                except (KeyError, TypeError, ValueError):
+                    pass
+            resolved[k] = {"security_id": sid, "segment": segment, "instrument": instrument, "symbol": symbol}
         return resolved, unresolved
 
     instruments = load_broker_instruments(broker)
-    for symbol in symbols:
+    for k, meta in key_meta.items():
+        symbol = meta["symbol"]
         cached = instruments.get(symbol.upper())
         if not cached:
-            unresolved.append(symbol)
+            unresolved.append(symbol or k)
             continue
         underlying = str(cached.get("underlying") or "").upper()
         exch, segment, instrument_types = UNDERLYING_MARKET.get(underlying, DEFAULT_MARKET)
@@ -310,14 +345,13 @@ def resolve_contracts(helper: DhanHelper, broker: str, fills: list[dict],
             if row:
                 break
         if not row:
-            unresolved.append(symbol)
+            unresolved.append(symbol or k)
             continue
-        resolved[symbol] = {
-            # SECURITY_ID arrives as a float in the master frame, and Dhan's intraday API
-            # rejects a "65891.0"-shaped id with DH-905.
+        resolved[k] = {
             "security_id": str(int(float(row["SECURITY_ID"]))),
             "segment": segment,
             "instrument": str(row.get("INSTRUMENT") or instrument),
+            "symbol": symbol,
         }
     return resolved, unresolved
 
@@ -394,13 +428,13 @@ def build_minute_grid(start: datetime, end: datetime) -> list[datetime]:
 
 
 def build_points(fills: list[dict], starting_positions: dict[str, dict],
-                 closes_by_symbol: dict[str, dict[str, float]],
+                 closes_by_key: dict[str, dict[str, float]],
                  grid: list[datetime]) -> list[dict]:
     """Walk the session minute by minute, applying fills as they land and marking whatever
     is still open against that minute's candle close."""
-    book: dict[str, dict] = {}          # symbol -> {qty, avg_price, mult, last_price}
-    for sym, sp in starting_positions.items():
-        book[sym] = {
+    book: dict[str, dict] = {}          # key -> {qty, avg_price, mult, last_price}
+    for k, sp in starting_positions.items():
+        book[k] = {
             "qty": sp["qty"],
             "avg_price": sp["avg_price"],
             "mult": sp["mult"],
@@ -417,8 +451,8 @@ def build_points(fills: list[dict], starting_positions: dict[str, dict],
         while idx < len(fills) and fills[idx]["time"] <= minute + timedelta(seconds=59):
             fill = fills[idx]
             idx += 1
-            pos = book.setdefault(fill["symbol"], {"qty": 0.0, "avg_price": 0.0,
-                                                   "mult": fill["mult"], "last_price": fill["price"]})
+            pos = book.setdefault(fill["key"], {"qty": 0.0, "avg_price": 0.0,
+                                                "mult": fill["mult"], "last_price": fill["price"]})
             pos["last_price"] = fill["price"]
             pos["mult"] = fill["mult"]
             signed = fill["qty"] if fill["side"] == "BUY" else -fill["qty"]
@@ -438,14 +472,14 @@ def build_points(fills: list[dict], starting_positions: dict[str, dict],
                     pos["avg_price"] = fill["price"]
 
         unrealized = 0.0
-        for symbol, pos in book.items():
+        for k, pos in book.items():
             if pos["qty"] == 0:
                 continue
-            mark = closes_by_symbol.get(symbol, {}).get(key)
+            mark = closes_by_key.get(k, {}).get(key)
             if mark is not None:
-                last_known_close[symbol] = mark
+                last_known_close[k] = mark
             else:
-                mark = last_known_close.get(symbol)
+                mark = last_known_close.get(k)
             if mark is None:
                 mark = pos["avg_price"]
             unrealized += pos["qty"] * (mark - pos["avg_price"]) * pos["mult"]
@@ -497,19 +531,30 @@ def main() -> None:
               "error": f"could not resolve any of {len(unresolved)} contract(s) for broker '{broker}'"})
         return
 
-    truncated = 0
-    wanted = list(resolved.items())
-    if len(wanted) > MAX_SECURITIES:
-        truncated = len(wanted) - MAX_SECURITIES
-        log(f"[mtm] {truncated} contract(s) beyond the {MAX_SECURITIES} cap left unpriced")
-        wanted = wanted[:MAX_SECURITIES]
+    # Deduplicate distinct security IDs to fetch candles efficiently
+    sec_id_to_closes: dict[str, dict[str, float]] = {}
+    distinct_sec_calls: list[tuple[str, str, str]] = []
+    for k, contract in resolved.items():
+        entry = (contract["security_id"], contract["segment"], contract["instrument"])
+        if entry not in distinct_sec_calls:
+            distinct_sec_calls.append(entry)
 
-    closes_by_symbol: dict[str, dict[str, float]] = {}
-    for symbol, contract in wanted:
-        closes_by_symbol[symbol] = fetch_minute_closes(
-            helper, contract["security_id"], contract["segment"], contract["instrument"], now)
-        if not closes_by_symbol[symbol] and symbol not in unresolved:
-            unresolved.append(symbol)
+    truncated = 0
+    if len(distinct_sec_calls) > MAX_SECURITIES:
+        truncated = len(distinct_sec_calls) - MAX_SECURITIES
+        log(f"[mtm] {truncated} contract(s) beyond the {MAX_SECURITIES} cap left unpriced")
+        distinct_sec_calls = distinct_sec_calls[:MAX_SECURITIES]
+
+    for sid, seg, inst in distinct_sec_calls:
+        sec_id_to_closes[sid] = fetch_minute_closes(helper, sid, seg, inst, now)
+
+    closes_by_key: dict[str, dict[str, float]] = {}
+    for k, contract in resolved.items():
+        sid = contract["security_id"]
+        c = sec_id_to_closes.get(sid, {})
+        closes_by_key[k] = c
+        if not c and contract.get("symbol") and contract["symbol"] not in unresolved:
+            unresolved.append(contract["symbol"])
 
     is_mcx = any(f["segment"] == "MCX_COMM" for f in fills) or \
         any(sp["segment"] == "MCX_COMM" for sp in starting_positions.values()) or \
@@ -525,7 +570,7 @@ def main() -> None:
     if end < start:
         end = start
 
-    points = build_points(fills, starting_positions, closes_by_symbol, build_minute_grid(start, end))
+    points = build_points(fills, starting_positions, closes_by_key, build_minute_grid(start, end))
     emit({"success": True, "points": points, "unresolved": unresolved,
           "truncated": truncated, "error": None})
 
