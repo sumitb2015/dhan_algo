@@ -418,8 +418,8 @@ export default function CrudeOilOptions() {
    */
   const handleAddToPosition = useCallback(async (position: CrudePosition, addLots: number) => {
     if (ordering) return;
-    if (!Number.isFinite(addLots) || addLots <= 0) {
-      setOrderMessage({ text: 'Enter a valid number of lots to add.', isError: true });
+    if (!Number.isInteger(addLots) || addLots <= 0) {
+      setOrderMessage({ text: 'Enter a whole number of lots to add.', isError: true });
       return;
     }
 
@@ -493,6 +493,7 @@ export default function CrudeOilOptions() {
       onConfirm: () => {
         setPendingConfirm(null);
         void (async () => {
+          setOrdering(true);
           setOrderMessage(null);
           try {
             const res = await fetch(url, {
@@ -507,6 +508,8 @@ export default function CrudeOilOptions() {
             void fetchCrudeTrades();
           } catch (err) {
             setOrderMessage({ text: `Error closing position: ${String(err)}`, isError: true });
+          } finally {
+            setOrdering(false);
           }
         })();
       },
@@ -1390,7 +1393,7 @@ export default function CrudeOilOptions() {
                 onThresholdCommit={handleInputCommit}
                 onAddToPosition={handleAddToPosition}
                 onClosePosition={handleClosePosition}
-                actionsBusy={ordering}
+                actionsBusy={ordering || exitingAll}
               />
             </div>
           )}

@@ -134,7 +134,7 @@ function PositionActionsCell({
 }) {
   const [addLots, setAddLots] = React.useState('1');
   const parsed = parseFloat(addLots);
-  const validAdd = Number.isFinite(parsed) && parsed > 0;
+  const validAdd = Number.isInteger(parsed) && parsed > 0;
 
   return (
     <div className="flex items-center justify-end gap-1.5">
