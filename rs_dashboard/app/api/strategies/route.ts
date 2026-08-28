@@ -3,6 +3,7 @@ import path from 'path';
 import fs from 'fs';
 import { execSync, spawn } from 'child_process';
 import { isPidRunning, isPidRunningAt, resolveWorkerPid } from '@/lib/processCheck';
+import { runPythonJson } from '@/lib/pyExec';
 import {
   PROJECT_ROOT, DEBUG_DIR, STRATEGIES_METADATA, pidMetaPath, isStrategyRunning,
   isValidInstanceId, stateKeyFor, discoverInstanceIds,
@@ -139,7 +140,7 @@ export async function GET() {
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
-    const { action, strategy, args = [], instanceId: rawInstanceId, realizedPnl } = body;
+    const { action, strategy, args = [], instanceId: rawInstanceId, realizedPnl, broker } = body;
 
     if (!fs.existsSync(DEBUG_DIR)) {
       fs.mkdirSync(DEBUG_DIR, { recursive: true });
@@ -183,6 +184,52 @@ export async function POST(request: NextRequest) {
     const meta = STRATEGIES_METADATA[strategy];
 
     if (action === 'start') {
+      // Determine execution broker
+      let targetBroker = (broker as string | undefined)?.toLowerCase().trim();
+      if (!targetBroker) {
+        for (let i = 0; i < args.length; i++) {
+          if (args[i] === '--broker' && args[i + 1]) {
+            targetBroker = String(args[i + 1]).toLowerCase().trim();
+            break;
+          }
+          if (typeof args[i] === 'string' && args[i].startsWith('--broker=')) {
+            targetBroker = args[i].split('=')[1]?.toLowerCase().trim();
+            break;
+          }
+        }
+      }
+
+      // Pre-flight session check for alternate execution broker
+      if (meta.execBrokerEligible && targetBroker && targetBroker !== 'dhan') {
+        try {
+          const verifyScript = path.join(PROJECT_ROOT, 'scripts', 'tools', 'verify_broker_session.py');
+          const verifyRes = await runPythonJson<{ status: string; broker: string; message: string }>(
+            verifyScript,
+            [targetBroker],
+            10000
+          );
+          if (verifyRes.status !== 'ok') {
+            return NextResponse.json({
+              success: false,
+              error: `Broker session verification failed for ${targetBroker}: ${verifyRes.message || 'Session invalid'}`,
+            }, { status: 400 });
+          }
+        } catch (verifyErr: any) {
+          let errMsg = String(verifyErr.message || verifyErr);
+          if (verifyErr.stdout) {
+            try {
+              const lastLine = verifyErr.stdout.trim().split('\n').pop();
+              const parsed = JSON.parse(lastLine);
+              if (parsed.message) errMsg = parsed.message;
+            } catch {}
+          }
+          return NextResponse.json({
+            success: false,
+            error: `Broker session verification failed for ${targetBroker}: ${errMsg}`,
+          }, { status: 400 });
+        }
+      }
+
       // Check if this specific instance is already running
       const stateFile = path.join(DEBUG_DIR, `${stateKey}_state.json`);
       // Carried across a same-day restart so the strategy's daily target/stop keeps
@@ -213,6 +260,21 @@ export async function POST(request: NextRequest) {
         if (args[i] === '--instance-id') { i++; continue; }
         if (typeof args[i] === 'string' && args[i].startsWith('--instance-id=')) continue;
         cleanArgs.push(args[i]);
+      }
+
+      // Ensure --broker is forwarded for eligible strategies if specified
+      if (meta.execBrokerEligible && targetBroker) {
+        let hasBroker = false;
+        for (let i = 0; i < cleanArgs.length; i++) {
+          if (cleanArgs[i] === '--broker') {
+            cleanArgs[i + 1] = targetBroker;
+            hasBroker = true;
+            break;
+          }
+        }
+        if (!hasBroker) {
+          cleanArgs.push('--broker', targetBroker);
+        }
       }
 
       // Spawn process in background
@@ -255,6 +317,7 @@ export async function POST(request: NextRequest) {
         realized_pnl: 0,
         spot: 0,
         adjustments: 0,
+        broker: targetBroker || 'dhan',
         ...carried,
         last_update: new Date().toISOString()
       };
