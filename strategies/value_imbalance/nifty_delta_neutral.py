@@ -12,7 +12,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 from login import get_dhan_client
 from lib.dhan_helper import DhanHelper
 from lib.strategy_state_helper import save_strategy_state, check_shutdown_trigger, exit_if_market_closed, parse_target_spec, instance_log_suffix
-from lib.strategy_risk import resolve_exit_qty
+from lib.strategy_risk import resolve_exit_qty_broker
+from lib.execution_broker import ExecutionBroker, ExecutionBrokerError
 
 # Setup Logging
 project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -51,8 +52,9 @@ class NiftyDeltaNeutral:
                  target_delta=0.5,
                  start_time="09:20",
                  trail_start_rs=500.0, trail_gap_rs=300.0,
-                 state_key="nifty_delta_neutral"):
+                 state_key="nifty_delta_neutral", broker="dhan"):
         self.state_key = state_key
+        self.broker_name = broker
         self.dry_run = dry_run
         self.initial_lots = initial_lots
         self.threshold_lot = threshold_lot
@@ -73,6 +75,12 @@ class NiftyDeltaNeutral:
         if not self.dhan:
             raise Exception("Failed to connect to Dhan.")
         self.helper = DhanHelper(self.dhan)
+
+        try:
+            self.broker = ExecutionBroker.create(broker, self.helper, underlying="NIFTY", log=logger.info)
+        except ExecutionBrokerError as e:
+            logger.error(f"Could not start {broker} execution: {e}")
+            sys.exit(1)
 
         # Start WebSocket for Nifty Spot (Essential for reliable LTP)
         logger.info("Starting WebSocket for NIFTY Index...")
@@ -123,6 +131,7 @@ class NiftyDeltaNeutral:
             "strategy": "nifty_delta_neutral",
             "status": status,
             "mode": "delta_neutral_winner_roll",
+            "broker": self.broker_name,
             "dry_run": self.dry_run,
             "target_delta": self.target_delta,
             "lots": self.initial_lots,
@@ -267,9 +276,9 @@ class NiftyDeltaNeutral:
             if self.ce_id:
                 try:
                     own_qty = self.ce_lots * self.nifty_lot_size
-                    qty_to_buy, net_qty = resolve_exit_qty(self.helper, self.ce_id, own_qty, "BUY", logger)
+                    qty_to_buy, net_qty = resolve_exit_qty_broker(self.broker, self.ce_strike, self.expiry, "CE", own_qty, "BUY", logger)
                     if qty_to_buy > 0:
-                        ce_exit_id = self.helper.buy(str(self.ce_id), qty_to_buy)
+                        ce_exit_id = self.broker.buy(self.ce_strike, self.expiry, "CE", qty_to_buy)
                         logger.info(f"CE short exit order placed for {qty_to_buy} qty (own {own_qty}, broker net {net_qty}): {ce_exit_id}")
                         if not ce_exit_id:
                             logger.critical(f"CRITICAL ERROR: Exit order FAILED for CE (ID: {self.ce_id})!")
@@ -279,9 +288,9 @@ class NiftyDeltaNeutral:
             if self.pe_id:
                 try:
                     own_qty = self.pe_lots * self.nifty_lot_size
-                    qty_to_buy, net_qty = resolve_exit_qty(self.helper, self.pe_id, own_qty, "BUY", logger)
+                    qty_to_buy, net_qty = resolve_exit_qty_broker(self.broker, self.pe_strike, self.expiry, "PE", own_qty, "BUY", logger)
                     if qty_to_buy > 0:
-                        pe_exit_id = self.helper.buy(str(self.pe_id), qty_to_buy)
+                        pe_exit_id = self.broker.buy(self.pe_strike, self.expiry, "PE", qty_to_buy)
                         logger.info(f"PE short exit order placed for {qty_to_buy} qty (own {own_qty}, broker net {net_qty}): {pe_exit_id}")
                         if not pe_exit_id:
                             logger.critical(f"CRITICAL ERROR: Exit order FAILED for PE (ID: {self.pe_id})!")
@@ -525,17 +534,17 @@ class NiftyDeltaNeutral:
                 continue
 
             if not self.dry_run:
-                ce_oid = self.helper.sell(str(self.ce_id), self.initial_lots * self.nifty_lot_size)
-                pe_oid = self.helper.sell(str(self.pe_id), self.initial_lots * self.nifty_lot_size)
+                ce_oid = self.broker.sell(self.ce_strike, self.expiry, "CE", self.initial_lots * self.nifty_lot_size)
+                pe_oid = self.broker.sell(self.pe_strike, self.expiry, "PE", self.initial_lots * self.nifty_lot_size)
                 if not ce_oid or not pe_oid:
                     logger.error("Entry Failed. Rolling back any successful order to prevent orphaned legs.")
                     if ce_oid and not pe_oid:
                         logger.warning("Rolling back CE order...")
-                        try: self.helper.buy(str(self.ce_id), self.initial_lots * self.nifty_lot_size)
+                        try: self.broker.buy(self.ce_strike, self.expiry, "CE", self.initial_lots * self.nifty_lot_size)
                         except Exception as rollback_err: logger.error(f"CE Rollback exception: {rollback_err}")
                     elif pe_oid and not ce_oid:
                         logger.warning("Rolling back PE order...")
-                        try: self.helper.buy(str(self.pe_id), self.initial_lots * self.nifty_lot_size)
+                        try: self.broker.buy(self.pe_strike, self.expiry, "PE", self.initial_lots * self.nifty_lot_size)
                         except Exception as rollback_err: logger.error(f"PE Rollback exception: {rollback_err}")
                     continue
                 self.ce_avg_price = self.get_execution_price(ce_oid, self.ce_avg_price)
@@ -694,7 +703,7 @@ class NiftyDeltaNeutral:
                         if exit_price > 0:
                             buy_oid = None
                             if not self.dry_run:
-                                buy_oid = self.helper.buy(old_id, winner_lots * self.nifty_lot_size)
+                                buy_oid = self.broker.buy(current_winner_strike, self.expiry, winner, winner_lots * self.nifty_lot_size)
                                 if not buy_oid:
                                     logger.error(f"Failed to buy-to-close old winner {old_id}. Aborting adjustment.")
                                     continue
@@ -742,7 +751,7 @@ class NiftyDeltaNeutral:
 
                                 sell_oid = None
                                 if not self.dry_run:
-                                    sell_oid = self.helper.sell(str(new_id), winner_lots * self.nifty_lot_size)
+                                    sell_oid = self.broker.sell(new_strike, self.expiry, winner, winner_lots * self.nifty_lot_size)
                                     if not sell_oid:
                                         logger.critical(f"CRITICAL ERROR: Failed to place sell order for new winner strike {new_id}! Executing emergency exit.")
                                         try:
@@ -826,6 +835,13 @@ Examples:
     parser.add_argument("--instance-id", type=str, default="", metavar="ID",
                         help="Suffix for debug/state files to run a second concurrent copy of this strategy")
 
+    parser.add_argument(
+        "--broker", choices=["dhan", "zerodha", "kotak"], default="dhan",
+        help="Execution broker for order placement. Market data always comes from Dhan. "
+             "Zerodha/Kotak stop-loss/target exits are software-managed only (no resting "
+             "broker-side stop order)."
+    )
+
     args = parser.parse_args()
     STATE_KEY = f"nifty_delta_neutral_{args.instance_id}" if args.instance_id else "nifty_delta_neutral"
 
@@ -877,6 +893,7 @@ Examples:
         trail_start_rs=args.trail_start_rs,
         trail_gap_rs=args.trail_gap_rs,
         state_key=STATE_KEY,
+        broker=args.broker,
     )
     try:
         strat.run()
