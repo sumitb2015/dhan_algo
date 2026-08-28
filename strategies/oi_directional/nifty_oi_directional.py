@@ -45,8 +45,9 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 
 from login import get_dhan_client
 from lib.dhan_helper import DhanHelper
+from lib.execution_broker import ExecutionBroker, ExecutionBrokerError
 from lib.strategy_state_helper import save_strategy_state, check_shutdown_trigger, exit_if_market_closed, parse_target_spec, instance_log_suffix
-from lib.strategy_risk import resolve_exit_qty
+from lib.strategy_risk import resolve_exit_qty_broker
 
 # ── Logging setup ────────────────────────────────────────────────────────────
 project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -94,6 +95,7 @@ class NiftyOIDirectional:
         profit_target_is_pct: bool = False,
         stop_loss: float = 5000.0,
         stop_loss_is_pct: bool = False,
+        broker: str = "dhan",
     ):
         self.dry_run = dry_run
         self.lots = lots
@@ -115,6 +117,14 @@ class NiftyOIDirectional:
         if not self.dhan:
             raise RuntimeError("Failed to connect to Dhan.")
         self.helper = DhanHelper(self.dhan)
+
+        self.broker_name = broker
+        try:
+            self.broker = ExecutionBroker.create(broker, self.helper, underlying="NIFTY", log=logger.info)
+        except ExecutionBrokerError as e:
+            raise RuntimeError(f"Could not start {broker} execution: {e}") from e
+
+        self.expiry = None
 
         logger.info("Starting WebSocket for NIFTY Index (security ID 13)...")
         self.helper.start_websocket([("IDX_I", "13", 15)])
@@ -310,6 +320,7 @@ class NiftyOIDirectional:
                 "pcr_threshold": self.pcr_threshold,
                 "profit_target": self.profit_target,
                 "stop_loss": self.stop_loss,
+                "broker": self.broker_name,
             },
         )
 
@@ -404,23 +415,24 @@ class NiftyOIDirectional:
     # ── order execution ──────────────────────────────────────────────────────
 
     def _get_option_sid_ltp(self, strike: int, option_type: str):
-        """Return (security_id, ltp) for NIFTY option. Returns (None, 0) on failure."""
+        """Return (security_id, ltp, expiry) for NIFTY option. Returns (None, 0, None) on failure."""
         quote = self.helper.option("NIFTY", strike, option_type)
         if not quote:
-            return None, 0.0
+            return None, 0.0, None
         if isinstance(quote, dict) and "CONTRACT_INFO" in quote:
             ci = quote["CONTRACT_INFO"]
             sid = str(ci.get("SECURITY_ID", ""))
             ltp = float(quote.get("last_price", 0) or quote.get("LTP", 0))
-            return sid, ltp
-        return None, 0.0
+            expiry = ci.get("SM_EXPIRY_DATE") or self.expiry or self.helper.get_nearest_expiry("NIFTY")
+            return sid, ltp, expiry
+        return None, 0.0, None
 
     def _enter_position(self, strike: int, option_type: str, security_id: str, ltp: float, pcr: float) -> bool:
         qty = self.lots * self.lot_size
         fill_price = ltp
 
         if not self.dry_run:
-            oid = self.helper.sell(security_id, qty)
+            oid = self.broker.sell(strike, self.expiry, option_type, qty)
             if not oid:
                 logger.error(f"Sell order failed for {strike}{option_type}")
                 return False
@@ -479,21 +491,22 @@ class NiftyOIDirectional:
         logger.warning(f"EXITING {self.position_type} ({self.sold_strike}): {reason}")
         qty = self.lots * self.lot_size
         ltp = current_ltp or self._ltp(self.sold_security_id) or self.avg_price
+        opt_type = "PE" if "PE" in self.position_type else "CE"
 
         if not self.dry_run:
             try:
                 # Never buy back more than the broker actually shows short for this
                 # contract — a raw qty would flip the leg long if a partial exit or a
                 # manual square-off already reduced it.
-                qty_to_buy, net_qty = resolve_exit_qty(self.helper, self.sold_security_id, qty, "BUY", logger)
+                qty_to_buy, net_qty = resolve_exit_qty_broker(self.broker, self.sold_strike, self.expiry, opt_type, qty, "BUY", logger)
                 if qty_to_buy <= 0:
                     logger.warning(
-                        f"Broker reports no short position for {self.sold_security_id} "
+                        f"Broker reports no short position for {self.sold_strike} {opt_type} "
                         f"(net {net_qty}); skipping exit order."
                     )
                     oid = None
                 else:
-                    oid = self.helper.buy(self.sold_security_id, qty_to_buy)
+                    oid = self.broker.buy(self.sold_strike, self.expiry, opt_type, qty_to_buy)
                 if qty_to_buy > 0 and not oid:
                     logger.critical(
                         f"Exit buy order FAILED for {self.sold_strike} {self.position_type}!"
@@ -527,20 +540,20 @@ class NiftyOIDirectional:
         realized = (self.avg_price - ltp) * self.lots * self.lot_size
         self.realized_pnl += realized
         logger.info(
-            f"Leg PnL: {realized:+.2f} | Session realized: {self.realized_pnl:+.2f}"
+            f"Exit PnL this trade: {realized:.2f} | Session realized: {self.realized_pnl:.2f}"
         )
         self._reset_position()
 
-    # ── main loop ────────────────────────────────────────────────────────────
+    # ── main strategy loop ───────────────────────────────────────────────────
 
     def run(self):
-        exit_if_market_closed(self.helper, self.dry_run)
+        logger.info("=== STARTING NIFTY OI-DIRECTIONAL STRATEGY ===")
         logger.info(
-            f"NiftyOIDirectional START | dry_run={self.dry_run} | lots={self.lots}"
-            f" | pcr_threshold={self.pcr_threshold}"
-            f" | exit_pcr_change={self.exit_pcr_change_pct}%"
-            f" | poll={self.poll_interval}s"
-            f" | expansion_window={self.expansion_window}"
+            f"Config: Mode={'LIVE' if not self.dry_run else 'DRY'} | Lots={self.lots}"
+            f" | Start={self.start_time} | PCR Thr={self.pcr_threshold}"
+            f" | Exit PCR Change={self.exit_pcr_change_pct}%"
+            f" | Poll={self.poll_interval}s | Window={self.expansion_window}"
+            f" | Target={self.profit_target} | SL={self.stop_loss}"
         )
 
         while True:
@@ -561,6 +574,7 @@ class NiftyOIDirectional:
                 logger.error("Could not fetch NIFTY expiry. Retrying in 60s.")
                 time.sleep(60)
                 continue
+            self.expiry = expiry
             logger.info(f"Trading nearest expiry: {expiry}")
             self.diff_history.clear()
             self._start_chain_poller(expiry)
@@ -671,7 +685,9 @@ class NiftyOIDirectional:
                         entry = self._find_entry(df, monitored_strikes, direction)
                         if entry:
                             strike, option_type, pcr = entry
-                            sec_id, ltp = self._get_option_sid_ltp(strike, option_type)
+                            sec_id, ltp, opt_expiry = self._get_option_sid_ltp(strike, option_type)
+                            if opt_expiry:
+                                self.expiry = opt_expiry
                             if sec_id and ltp > 0:
                                 logger.info(
                                     f"Entry signal | {direction}"
@@ -743,6 +759,12 @@ Examples:
                              "e.g. '20%%' (default: 5000)")
     parser.add_argument("--instance-id", type=str, default="", metavar="ID",
                         help="Suffix for debug/state files to run a second concurrent copy of this strategy")
+    parser.add_argument(
+        "--broker", choices=["dhan", "zerodha", "kotak"], default="dhan",
+        help="Execution broker for order placement. Market data always comes from Dhan. "
+             "Zerodha/Kotak stop-loss/target exits are software-managed only (no resting "
+             "broker-side stop order)."
+    )
 
     args = parser.parse_args()
     if args.instance_id:
@@ -763,6 +785,7 @@ Examples:
         f" poll={args.poll_interval}s"
         f" expansion_window={args.expansion_window}"
         f" target={target_val}{'%' if target_is_pct else ''} sl={stop_val}{'%' if stop_is_pct else ''}"
+        f" broker={args.broker}"
     )
 
     strategy = NiftyOIDirectional(
@@ -777,6 +800,7 @@ Examples:
         profit_target_is_pct=target_is_pct,
         stop_loss=stop_val,
         stop_loss_is_pct=stop_is_pct,
+        broker=args.broker,
     )
 
     try:
