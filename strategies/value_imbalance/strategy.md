@@ -689,6 +689,7 @@ Either triggers a full exit (in addition to the standard per-trade/global P&L gu
 | Flag | Default | Description |
 |---|---|---|
 | `--live` | off (dry run) | Enable real order placement |
+| `--broker BROKER` | `dhan` | Execution broker (`dhan`, `zerodha`, `kotak`). Market data remains on Dhan |
 | `--lots N` | `1` | Lots per leg (CE and PE symmetric) |
 | `--start-time HH:MM` | `09:20` | Session start monitoring time (IST) |
 | `--st-period N` | `10` | Straddle premium Supertrend period |
@@ -749,6 +750,7 @@ The strategy supports two rolling trigger variants selectable via CLI or the das
 | Flag | Default | Description |
 |---|---|---|
 | `--live` | off (dry run) | Enable real order placement |
+| `--broker BROKER` | `dhan` | Execution broker (`dhan`, `zerodha`, `kotak`). Market data remains on Dhan |
 | `--lots N` | `1` | Initial lot size per leg |
 | `--roll-type TYPE` | `points` | Rolling trigger variant: `points` (fixed buffer pts) or `percentage` (rolling trigger %) |
 | `--roll-buffer PTS` | `35.0` | Custom ATM shift buffer in points for `points` variant |

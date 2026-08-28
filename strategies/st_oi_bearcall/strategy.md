@@ -73,6 +73,7 @@ IDLE ──(index 3m Supertrend bearish)──► WATCHING ──(all 3 confirme
 | Flag | Default | Description |
 |---|---|---|
 | `--live` | off | Live orders; default is dry run |
+| `--broker` | `dhan` | Execution broker (`dhan`, `zerodha`, `kotak`). Market data remains on Dhan |
 | `--symbol` | `NIFTY` | Underlying (also accepts `BANKNIFTY`) |
 | `--index-interval` | `3` | Index candle timeframe in minutes (resampled from 1-min) |
 | `--index-st-period` | `10` | Index Supertrend length |

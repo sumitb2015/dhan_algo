@@ -70,6 +70,7 @@ Additional exit conditions (always active):
 | Flag | Default | Description |
 |---|---|---|
 | `--live` | off (dry run) | Enable real order placement |
+| `--broker BROKER` | `dhan` | Execution broker (`dhan`, `zerodha`, `kotak`). Market data remains on Dhan |
 | `--lots N` | `1` | Lots per leg |
 | `--start-time HH:MM` | `09:30` | Session start time IST |
 | `--pcr-threshold X` | `1.5` | PCR level above which to sell PE; CE entry threshold is `1/X` |

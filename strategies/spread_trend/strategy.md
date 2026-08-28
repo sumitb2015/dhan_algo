@@ -43,6 +43,7 @@ Both indicators must agree — a single indicator flip does not trigger a trade.
 | Flag | Default | Description |
 |---|---|---|
 | `--live` | off (dry run) | Enable real order placement |
+| `--broker BROKER` | `dhan` | Execution broker (`dhan`, `zerodha`, `kotak`). Market data remains on Dhan |
 | `--symbol SYM` | `NIFTY` | Underlying index (`NIFTY`, `BANKNIFTY`) |
 | `--interval MIN` | `5` | Candle interval in minutes (`1`, `3`, `5`) |
 | `--ema-period N` | `20` | EMA period used for trend filter |

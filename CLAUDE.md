@@ -113,6 +113,8 @@ Delete `.next\dev`, **not** all of `.next` — the latter also holds the product
 login.py                    # OAuth flow + token caching (access_token.json)
 lib/
   dhan_helper.py            # Core DhanHelper class — all strategies use this
+  execution_broker.py       # ExecutionBroker front (dhan/zerodha/kotak) for option strategies
+  strategy_risk.py          # resolve_exit_qty / resolve_exit_qty_broker safe exit sizing
   strategy_state_helper.py  # save_strategy_state() / check_shutdown_trigger()
   zerodha/                  # Kite session + margin/basket-margin helpers
   kotak/                    # Kotak Neo session (TOTP+MPIN), response unwrapping, margin/positions
@@ -333,3 +335,9 @@ the scalper terminals and as copy-trade children that mirror Dhan fills.
   lot, 10 per CRUDEOILM). Always send a position's reported `netQty` verbatim when squaring off.
   MCX options are `OPTFUT` in both masters — the equity `OPTIDX`/`OPTSTK` filter drops them.
 - The startup OTM hedge (`copy_trade_hedge.py`) is **Zerodha-only** by design.
+- **Strategy Broker Selector**: Option-selling strategies accept `--broker {dhan,zerodha,kotak}`.
+  Market data (LTP, option chain, technical indicators, expiries) always originates from `DhanHelper`,
+  while orders are routed through `ExecutionBroker.create(broker, helper, underlying)`.
+  Zerodha and Kotak stop-loss exits are purely software-managed (in-memory polling/WS loops), not resting broker orders.
+  Multi-instance exit safety across all brokers is managed via `resolve_exit_qty_broker()`. Pre-flight
+  session checks via `scripts/tools/verify_broker_session.py` prevent launch with dead tokens.
