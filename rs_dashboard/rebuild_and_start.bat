@@ -1,11 +1,10 @@
 @echo off
 setlocal enabledelayedexpansion
-cd /d "C:\dhan_algo\dhan_algo"
 
 echo ============================================
 echo  Pulling latest changes from master...
 echo ============================================
-call git pull origin master
+call git -C "C:\dhan_algo\dhan_algo" pull origin master
 if errorlevel 1 (
     echo.
     echo git pull failed. Aborting startup.
