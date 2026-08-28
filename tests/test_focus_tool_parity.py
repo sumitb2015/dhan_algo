@@ -47,6 +47,16 @@ def check(name, got, want):
         failures.append(f'{name}\n    expected: {want!r}\n    got:      {got!r}')
 
 
+try:
+    import pytest
+
+    @pytest.fixture
+    def cases():
+        return load_cases()
+except ImportError:
+    pass
+
+
 def load_cases():
     with io.open(CASES_FILE, encoding='utf-8') as f:
         return json.load(f)

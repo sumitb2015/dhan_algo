@@ -1,343 +1,183 @@
-# DhanHQ Python SDK - Complete Integration
+# Dhan Algo Trading & Quantitative Dashboard
 
-A comprehensive Python library for DhanHQ trading with helper functions, security lookup, and F&O convenience methods.
+A high-performance algorithmic trading library and quantitative research platform wrapping the **DhanHQ**, **Zerodha Kite Connect**, and **Kotak Neo** broker APIs for live F&O strategy execution, accompanied by a real-time **Next.js 16 (App Router)** analytics dashboard.
 
 ---
 
-## 📁 Project Structure
+## 🌟 Key Capabilities
+
+- **Multi-Broker Live Execution**: Integrated execution across DhanHQ, Zerodha Kite, and Kotak Neo with automated copy-trading and unified position tracking.
+- **Automated F&O Strategy Engine**: Production-ready strategies for NIFTY, BANKNIFTY, SENSEX, and MCX CRUDEOILM with dynamic strike adjustments, scalp locks, multi-cycle management, and emergency inversion guards.
+- **Next.js Quantitative Terminal (`rs_dashboard/`)**:
+  - **Live Scalper & Advanced Scalper**: Real-time Greeks, order tickets, multi-leg execution, and instant square-off.
+  - **Options Analytics**: IV history, options premium bar, straddle/strangle matrix, open interest profiles, and volume footprints.
+  - **Relative Strength & Market Breadth**: Nifty 50/500 RS screeners, RRG charts, sector breadth, and diffusion indices.
+  - **Portfolio & Trader's Diary**: Real-time MTM tracking, FIFO trade matching, charges breakdown, and interactive equity curves.
+- **Fast Security Master Cache**: 288K+ cached instruments with $O(1)$ in-memory lookups for equity, indices, futures, and option contracts.
+- **WebSocket Streaming**: High-throughput live tick streaming bridges for equity, options, indices, and order fill events.
+
+---
+
+## 📁 Repository Structure
 
 ```
 dhan_algo/
-├── debug/                        # Debug and utility scripts
-│   ├── debug_*.py               # Various debug utilities
-│   ├── check_*.py               # Validation checks
-│   └── inspect_*.py             # Inspection scripts
+├── lib/                             # Core Python libraries
+│   ├── dhan_helper.py               # Central DhanHQ abstraction & market feed engine
+│   ├── execution_broker.py          # Unified Multi-Broker interface (Dhan / Zerodha / Kotak)
+│   ├── strategy_risk.py             # Safe multi-instance exit sizing & risk guards
+│   ├── strategy_state_helper.py     # Strategy lifecycle state bridge (JSON + IPC triggers)
+│   ├── zerodha/                     # Kite Connect session & margin calculations
+│   └── kotak/                       # Kotak Neo session (TOTP + MPIN) & order routing
 │
-├── temp_data/                    # Temporary data (CSVs, Excel, Zips)
-│   ├── Nifty500_Report*.csv     # Generated reports
-│   ├── nifty50_stock_analysis_report*.csv
-│   ├── nifty500_stock_analysis_report*.csv
-│   └── *.zip                    # Large archives
+├── strategies/                      # Algorithmic Trading Strategies
+│   ├── value_imbalance/             # Advanced Imbalance, Straddles, Strangles, VWAP & Delta Neutral
+│   ├── spread_trend/                # Trend-following Credit Spreads (EMA20 + Supertrend)
+│   ├── st_oi_bearcall/              # Dual Supertrend + OI Short-Buildup Bear Call Spread
+│   ├── oi_directional/              # OI imbalance + PCR-driven directional option selling
+│   ├── crudeoil/                    # MCX CRUDEOILM (Supertrend trailing, Renko SAR, VWAP+ST, ORB)
+│   ├── intraday_equity/             # Nifty-50 cash VWAP+RS automated trader
+│   └── momentum_investing/          # Nifty-500 multi-day composite RS momentum portfolio
 │
-├── docs/                         # Documentation
-│   ├── DHAN_HELPER_REFERENCE.md        # Complete API reference
-│   ├── SECURITY_LOOKUP_GUIDE.md        # Security ID lookup guide
-│   ├── FNO_CONVENIENCE_METHODS.md      # F&O convenience methods
-│   ├── OPTION_CHAIN_QUICK_REF.md       # Option chain usage
-│   ├── JUPYTER_NOTEBOOK_GUIDE.md       # Jupyter setup guide
-│   ├── NOTEBOOK_READY.md               # Quick start guide
-│   └── DHAN_HELPER_UPDATE_SUMMARY.md   # Change log
+├── rs_dashboard/                    # Next.js 16 Quantitative Dashboard
+│   ├── app/                         # App router pages & 45+ API routes
+│   ├── components/                  # Dark/light themed quant components (Recharts, Lightweight Charts)
+│   └── lib/                         # Client caches, token managers, broker position transformers
 │
-├── tests/                        # Automated unit tests
-│   ├── test_security_lookup.py         # Security lookup tests
-│   ├── test_fno_convenience.py         # F&O convenience tests
-│   └── test_dhan_helper.py             # General helper tests
+├── scripts/                         # Tools & Data Pipeline
+│   ├── downloader/                  # Historical EOD & intraday data downloaders
+│   ├── analysis/                    # Backtests, screeners, reports, and tearsheets
+│   ├── data_utils/                  # Parquet converter, resampling, and indicator append
+│   └── tools/                       # WebSocket bridges, CSP scanners, and copy-trade bridges
 │
-├── examples/                     # Usage examples
-│   ├── example_option_chain_workflow.py  # Complete option chain workflow
-│   └── dhan_helper_quick_ref.py          # Quick reference snippets
-│
-├── scripts/                      # Integration and data scripts (organized by functionality)
-│   ├── downloader/               # Spot Daily, Intraday, & Futures downloaders
-│   ├── analysis/                 # Report generators and volatility distribution analysis
-│   ├── data_utils/               # Indicator append, Parquet convert, & resampling tools
-│   ├── tools/                    # Options trackers & portfolio tools
-│   └── testing/                  # Websocket testing & validation checks
-│
-├── login.py                      # Authentication handler
-├── master_list.csv              # Security master list (Cached)
-├── .env                         # Environment variables
-└── requirements.txt              # Project dependencies
+├── tests/                           # Unit, parity, and integration test suite
+├── login.py                         # DhanHQ OAuth login & token caching
+├── master_list.csv                  # Cached 288K+ security master dataset
+├── requirements.txt                 # Python dependencies
+└── .env                             # API credentials (gitignored)
 ```
 
 ---
 
-## 🚀 Quick Start
+## 🚀 Getting Started
 
-### 1. Installation
+### 1. Prerequisites
+- **Python**: `3.10` - `3.12`
+- **Node.js**: `>= 20.x`
+- **Package Managers**: `uv` or `pip`, `npm`
+
+---
+
+### 2. Python Environment Setup
 
 ```bash
+# Clone the repository
+git clone git@github.com:sumitb2015/dhan_algo.git
+cd dhan_algo
+
+# Create and activate virtual environment using uv (recommended) or python venv:
+uv venv --python 3.12 venv
+source venv/bin/activate    # On Windows: .\venv\Scripts\activate
+
 # Install dependencies
-pip install dhanhq pandas python-dotenv pyotp
-
-# Or use the virtual environment
-.\venv\Scripts\activate
-```
-
-### 2. Setup Environment
-
-Create `.env` file:
-```env
-CLIENT_ID=your_client_id_here
-```
-
-### 3. Basic Usage
-
-```python
-from login import get_dhan_client
-from lib.dhan_helper import DhanHelper
-
-# Initialize
-dhan = get_dhan_client()
-helper = DhanHelper(dhan)
-
-# Get fund balance
-balance = helper.get_available_funds()
-print(f"Available: Rs. {balance}")
-
-# Find security ID
-stock = helper.get_equity_id("TCS")
-print(f"TCS Security ID: {stock['SECURITY_ID']}")
-
-# Get option quote (one-liner!)
-expiries = helper.get_expiry_list(13, "IDX_I")
-ltp = helper.get_option_ltp("NIFTY", 23000, "CE", expiries[0])
-print(f"Option LTP: Rs. {ltp}")
+uv pip install -r requirements.txt
+uv pip install --no-deps openstatz==0.4.1
+uv pip install --no-deps "git+https://github.com/Kotak-Neo/Kotak-neo-api-v2.git@539b6022c2c5fe138d6d0a893bbe554cacca10b6"
 ```
 
 ---
 
-## 📚 Core Features
-
-### 1. Security ID Lookup (288K+ Securities)
-```python
-# Equity lookup
-hdfc = helper.get_equity_id("HDFC")
-
-# Index lookup
-nifty = helper.get_index_id("NIFTY 50")
-
-# Option lookup
-option = helper.get_option_id("NIFTY", 23000, "CE", "2026-01-30")
-
-# Fuzzy search
-results = helper.search_symbols("BANK", limit=10)
-```
-
-### 2. F&O Convenience Methods
-```python
-# Get option quote (combines lookup + quote fetch)
-quote = helper.get_option_quote("NIFTY", 23000, "CE", expiry)
-
-# Get option LTP (even simpler)
-ltp = helper.get_option_ltp("NIFTY", 23000, "CE", expiry)
-
-# Future quotes
-future_ltp = helper.get_future_ltp("NIFTY", expiry)
-```
-
-### 3. Market Data
-```python
-# LTP
-ltp = helper.get_ltp("1333", "NSE_EQ")
-
-# OHLC
-ohlc = helper.get_ohlc(1333, "NSE_EQ")
-
-# Option chain
-chain = helper.get_option_chain(13, expiry, "IDX_I")
-```
-
-### 4. Order Management
-```python
-# Place order
-order_id = helper.place_order(
-    security_id="1333",
-    exchange_segment=helper.NSE,
-    transaction_type=helper.BUY,
-    quantity=10,
-    order_type=helper.MARKET,
-    product_type=helper.INTRA
-)
-
-# Get order status
-status = helper.get_order_status(order_id)
-
-# Cancel order
-helper.cancel_order(order_id)
-```
-
-### 5. Portfolio & Positions
-```python
-# Get positions
-positions = helper.get_positions()
-
-# Get holdings
-holdings = helper.get_holdings()
-
-# Get trade book
-trades = helper.get_trade_book()
-```
-
----
-
-## 📖 Documentation
-
-| Document | Description |
-|----------|-------------|
-| [DHAN_HELPER_REFERENCE.md](docs/DHAN_HELPER_REFERENCE.md) | Complete API reference for all 40+ methods |
-| [SECURITY_LOOKUP_GUIDE.md](docs/SECURITY_LOOKUP_GUIDE.md) | How to find security IDs |
-| [FNO_CONVENIENCE_METHODS.md](docs/FNO_CONVENIENCE_METHODS.md) | F&O one-liner methods |
-| [JUPYTER_NOTEBOOK_GUIDE.md](docs/JUPYTER_NOTEBOOK_GUIDE.md) | Jupyter setup and usage |
-
----
-
-## 🧪 Testing
-
-Run tests from the `tests/` directory:
+### 3. Dashboard Setup (`rs_dashboard`)
 
 ```bash
-# Test security lookup
-python tests/test_security_lookup.py
-
-# Test F&O convenience methods
-python tests/test_fno_convenience.py
-
-# Test all helper functions
-python tests/test_dhan_helper.py
+cd rs_dashboard
+npm install
+npm run dev   # Dashboard accessible at http://localhost:3000
 ```
 
 ---
 
-## 📓 Jupyter Notebook
+### 4. Configuration (`.env`)
 
-Launch the comprehensive testing notebook:
+Create `.env` at the project root with your DhanHQ API credentials:
+
+```env
+client_id=YOUR_DHAN_CLIENT_ID
+api_key=YOUR_DHAN_API_KEY
+api_secret=YOUR_DHAN_API_SECRET
+```
+
+*(Optional: Create `.env.zerodha` and `.env.kotak` if using multi-broker features or copy-trading.)*
+
+Authenticate your Dhan session (access tokens are valid for ~24 hours):
+```bash
+python login.py
+```
+
+---
+
+## 📈 Running Strategies
+
+All strategies support both **Dry Run** (simulated orders) and **Live Trading** (`--live`):
 
 ```bash
-.\venv\Scripts\python.exe -m jupyter notebook notebooks/DhanHQ_SDK_Complete_Testing.ipynb
-```
+# 1. Advanced Value Imbalance Strangle (Winner Roll ATM mode)
+python strategies/value_imbalance/nifty_advanced_imbalance.py --entry-type strangle --mode winner_roll_atm
 
-The notebook includes 13 sections covering all API functions with examples.
+# 2. Spread Trend Bear Call / Bull Put Credit Spread (Live with 1 lot)
+python strategies/spread_trend/nifty_spread_trend.py --live --lots 1
 
----
+# 3. Dual Supertrend + OI Bear Call
+python strategies/st_oi_bearcall/nifty_st_oi_bearcall.py --lots 2
 
-## 🎯 Key Methods Summary
+# 4. Crude Oil MCX Futures (VWAP + Supertrend Trailing)
+python strategies/crudeoil/crudeoilm_vwap_supertrend.py --live --lots 1
 
-### Security Lookup (6 methods)
-- `get_security_id()` - Flexible search
-- `get_equity_id()` - Quick equity lookup
-- `get_index_id()` - Quick index lookup
-- `get_option_id()` - Find option contracts
-- `get_future_id()` - Find future contracts
-- `search_symbols()` - Fuzzy search
-
-### F&O Convenience (4 methods)
-- `get_option_quote()` - Option quote in one call
-- `get_option_ltp()` - Option LTP in one call
-- `get_future_quote()` - Future quote in one call
-- `get_future_ltp()` - Future LTP in one call
-
-### Fund Management (1 method)
-- `get_available_funds()` - Available margin
-
-### Portfolio (3 methods)
-- `get_positions()` - Current positions
-- `get_holdings()` - Current holdings
-- `get_trade_book()` - Trade history
-
-### Order Management (5 methods)
-- `place_order()` - Place new order
-- `get_order_status()` - Get order details
-- `modify_order()` - Modify existing order
-- `cancel_order()` - Cancel order
-- `get_order_list()` - All orders
-
-### Market Data (6 methods)
-- `get_ltp()` - Last traded price
-- `get_ohlc()` - OHLC data
-- `get_ticker_data()` - Ticker data
-- `get_quote_data()` - Quote data
-- `get_option_chain()` - Option chain
-- `get_expiry_list()` - Available expiries
-
-### Historical Data (3 methods)
-- `get_historical_daily_data()` - Daily candles
-- `get_intraday_minute_data()` - Intraday candles
-- `get_expired_options_data()` - Expired options data
-
-### Forever Orders (2 methods)
-- `place_forever_order()` - Place GTT order
-- `get_forever_orders()` - Get GTT orders
-
-### Utilities (2 methods)
-- `epoch_to_datetime()` - Convert timestamps
-- `open_browser_for_tpin()` - eDIS authorization
-
-**Total: 40+ helper methods**
-
----
-
-## 🔑 Environment Variables
-
-Required in `.env`:
-```env
-CLIENT_ID=your_dhan_client_id
-```
-
-Optional:
-```env
-REDIRECT_URI=http://localhost:8000
+# 5. Multi-Day Momentum Investing Portfolio Rebalance
+python strategies/momentum_investing/nifty500_momentum.py --once
 ```
 
 ---
 
-## 📦 Dependencies
+## 📊 Live WebSocket Bridges & Background Daemons
 
-- `dhanhq` - DhanHQ Python SDK
-- `pandas` - Data manipulation
-- `python-dotenv` - Environment variables
-- `pyotp` - TOTP generation
-- `jupyter` - Notebook interface (optional)
+Run market tick bridges to stream high-frequency data into shared memory/disk for the dashboard:
 
----
+```bash
+# Stream Nifty 50 cash equity ticks
+python scripts/tools/live_equity_ws.py
 
-## 🎓 Examples
+# Stream F&O option ticks
+python scripts/tools/live_options_ws.py
 
-See `examples/` directory for:
-- Complete option chain workflow
-- Quick reference code snippets
-- Common usage patterns
+# Multi-broker Copy Trade Bridge
+python scripts/tools/copy_trade_bridge.py
+```
 
 ---
 
-## 🐛 Debugging
+## 🧪 Running Tests
 
-Debug scripts in `tests/`:
-- `debug_oc.py` - Debug option chain
-- `debug_quote_response.py` - Debug quote API
-- `debug_hist.py` - Debug historical data
-- `debug_market.py` - Debug market data
+```bash
+# Run pure unit & logic test suites (safe to run anytime)
+pytest tests/test_strategy_risk.py tests/test_pivots.py tests/test_intraday_signals.py
+pytest tests/test_orb_logic.py tests/test_copy_trade_kotak_rejection.py tests/test_crudeoil_vwap_st_logic.py
 
----
-
-## 📝 Notes
-
-- **Master List**: 288,256 securities cached in memory for fast lookups
-- **Exchange Segments**: NSE_EQ, NSE_FNO, BSE_EQ, BSE_FNO, etc.
-- **Data API**: Some functions require Dhan Data API subscription
-- **Caching**: First security lookup loads CSV (~1s), subsequent lookups are instant
+# Run dashboard TypeScript tests
+cd rs_dashboard && npm test
+```
 
 ---
 
-## 🤝 Contributing
+## 🛡️ Risk Management & Architecture Principles
 
-This is a personal project. Feel free to fork and customize for your needs.
-
----
-
-## 📄 License
-
-This project uses the DhanHQ Python SDK. Refer to DhanHQ's terms of service.
+- **Safe Exit Sizing (`lib/strategy_risk.py`)**: Sizing logic avoids relying on raw broker net positions to prevent multi-instance conflicts on shared strikes.
+- **Inversion Guard**: Strangle strategies strictly validate `CE strike > PE strike`; crossing triggers an emergency square-off and a fresh cycle reset.
+- **IPC State Bridge**: Strategies save runtime metrics to `debug/<strategy>_state.json` every cycle; the dashboard coordinates graceful stops via `debug/<strategy>_shutdown.trigger`.
+- **Intraday Auto-Square-Off**: Hardcoded auto-exit at **15:17 IST** across all intraday strategies.
 
 ---
 
-## 🔗 Links
+## 📄 License & Disclaimer
 
-- [DhanHQ Documentation](https://dhanhq.co/docs/DhanHQ-py/)
-- [DhanHQ GitHub](https://github.com/dhan-oss/DhanHQ-py)
-- [API Reference](https://api.dhan.co/v2/)
-
----
-
-**Last Updated**: 2026-01-23  
-**Version**: 2.0 (Complete Integration with Security Lookup & F&O Convenience Methods)
+This project is for educational, research, and personal algorithmic trading purposes. Algorithmic and derivative trading involves significant financial risk. Validate all strategies in simulated/dry-run mode before deploying real capital.
