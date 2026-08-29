@@ -15,6 +15,7 @@ from lib.dhan_helper import DhanHelper
 import json
 DEBUG_DIR = os.path.join(PROJECT_ROOT, "debug")
 STATUS_FILE = os.path.join(DEBUG_DIR, "options_refresh_status.json")
+STOP_FILE = os.path.join(DEBUG_DIR, "options_refresh_stop.trigger")
 
 def _write_status(message: str, done: bool = False, error: str | None = None) -> None:
     try:
@@ -30,6 +31,19 @@ def _write_status(message: str, done: bool = False, error: str | None = None) ->
             json.dump(status, f)
     except Exception:
         pass
+
+def _check_stop() -> bool:
+    if os.path.exists(STOP_FILE):
+        try:
+            os.unlink(STOP_FILE)
+        except Exception:
+            pass
+        return True
+    return False
+
+def _is_valid_file(file_path: str) -> bool:
+    """Check if file exists and has non-empty content."""
+    return os.path.exists(file_path) and os.path.getsize(file_path) > 0
 
 # Configure Logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -181,20 +195,17 @@ def build_expiry_list(helper: DhanHelper, symbol: str) -> list[str]:
 
 
 def main():
+    if _check_stop():
+        _write_status("Stopped by user", done=True)
+        return
+
     _write_status("Initialising…")
     try:
-        dhan = get_dhan_client()
-        if not dhan:
-            logger.error("Dhan login failed.")
-            _write_status("Failed: login failed", done=True, error="Dhan login failed")
-            return
-        helper = DhanHelper(dhan)
-
         watchlist = {
             "NIFTY": {"id": 13, "segment": "NSE_FNO", "instrument": "OPTIDX"}
         }
 
-        # Relative strikes: ATM, ATM±1 … ATM±10
+        # Relative strikes: ATM, ATM±1 … ATM±10 (21 total relative strikes)
         strikes = ["ATM"]
         for i in range(1, 11):
             strikes.append(f"ATM+{i}")
@@ -202,8 +213,23 @@ def main():
 
         required_data = ["open", "high", "low", "close", "volume", "oi", "strike", "iv", "spot"]
 
+        dhan = get_dhan_client()
+        if not dhan:
+            logger.error("Dhan login failed.")
+            _write_status("Failed: login failed", done=True, error="Dhan login failed")
+            return
+        helper = DhanHelper(dhan)
+
+        total_downloaded = 0
+        total_skipped = 0
+
         for name, info in watchlist.items():
-            logger.info(f"Processing {name}...")
+            if _check_stop():
+                _write_status("Stopped by user", done=True)
+                return
+
+            logger.info(f"Checking options data for {name}...")
+            _write_status(f"Checking existing files for {name}…")
 
             # Build the full expiry list: history (rule-based) + future (master list)
             expiries = build_expiry_list(helper, name)
@@ -211,77 +237,118 @@ def main():
                 logger.error(f"No expiries found for {name}. Skipping.")
                 continue
 
-            total_exp = len(expiries)
-            for idx, expiry in enumerate(expiries, 1):
-                expiry_dt = datetime.strptime(expiry, "%Y-%m-%d")
-                # Each file covers exactly its own contract week: from_date → expiry.
-                # Post-expiry days belong to the next week's contract.
-                to_date = expiry
-                from_date = (expiry_dt - timedelta(days=7)).strftime("%Y-%m-%d")
-
-                logger.info(f"--- Processing Expiry: {expiry} (Data {from_date} → {to_date}) ---")
-                _write_status(f"Expiry {expiry} ({idx}/{total_exp})")
-
+            # Identify all missing tasks upfront to avoid redundant loop cycles
+            missing_tasks = []
+            for expiry in expiries:
                 for strike_rel in strikes:
-                    # e.g.  Options Data/NIFTY/ATM/2026-07-28.csv
-                    save_dir = os.path.join("Options Data", name, strike_rel)
+                    save_dir = os.path.join(PROJECT_ROOT, "Options Data", name, strike_rel)
                     os.makedirs(save_dir, exist_ok=True)
                     file_path = os.path.join(save_dir, f"{expiry}.csv")
 
-                    if os.path.exists(file_path):
-                        logger.info(f"Skipping {name} {strike_rel} {expiry} - File exists.")
-                        continue
-
-                    logger.info(f"Downloading: {name} | {strike_rel} | Expiry: {expiry}...")
-                    _write_status(f"Downloading {name} {strike_rel} {expiry} ({idx}/{total_exp})")
-
-                    all_data = []
-                    for o_type in ["CALL", "PUT"]:
-                        df = helper.get_expired_options_data(
-                            security_id=info["id"],
-                            exchange_segment=info["segment"],
-                            instrument_type=info["instrument"],
-                            expiry_flag="WEEK",
-                            expiry_code=1,  # Near Week relative to date range
-                            strike=strike_rel,
-                            drv_option_type=o_type,
-                            required_data=required_data,
-                            from_date=from_date,
-                            to_date=to_date,
-                            interval=1
-                        )
-                        if df.empty and helper.is_fatal_error(helper.last_api_error):
-                            err = helper.last_api_error
-                            msg = (f"Dhan API error {err.get('code') or '?'} "
-                                   f"({err.get('type', '')}): {err.get('message', '')}")
-                            logger.error(f"Fatal API error — aborting: {msg}")
-                            _write_status(f"Error: {msg}", done=True, error=msg)
-                            return
-                        if not df.empty:
-                            if 'option_type' not in df.columns:
-                                df['option_type'] = "CE" if o_type == "CALL" else "PE"
-                            else:
-                                df['option_type'] = df['option_type'].apply(
-                                    lambda x: "CE" if x == "CALL" else "PE"
-                                )
-                            all_data.append(df)
-                        time.sleep(0.2)  # Respect rate limits
-
-                    if all_data:
-                        final_df = pd.concat(all_data, ignore_index=True)
-                        final_df['strike_relative'] = strike_rel
-                        cols = (
-                            ['datetime', 'option_type', 'strike_relative'] +
-                            [c for c in final_df.columns
-                             if c not in ['datetime', 'option_type', 'strike_relative']]
-                        )
-                        final_df = final_df[cols]
-                        final_df.to_csv(file_path, index=False)
-                        logger.info(f"Saved: {file_path} ({len(final_df)} rows)")
+                    if _is_valid_file(file_path):
+                        total_skipped += 1
                     else:
-                        logger.warning(f"No data for {name} {strike_rel} {expiry}")
+                        missing_tasks.append((expiry, strike_rel, save_dir, file_path))
 
-        _write_status("Done", done=True)
+            total_expected = len(expiries) * len(strikes)
+            if not missing_tasks:
+                msg = f"All {len(expiries)} expiries ({total_expected} files) already exist for {name}. Skipping download."
+                logger.info(msg)
+                _write_status(f"All options data already up to date ({len(expiries)} expiries present)", done=True)
+                continue
+
+            unique_missing_expiries = sorted(list(set(t[0] for t in missing_tasks)), reverse=True)
+            logger.info(
+                f"[{name}] {len(missing_tasks)} files missing across {len(unique_missing_expiries)}/{len(expiries)} expiries. "
+                f"({total_skipped} files already present)."
+            )
+
+            # Process only the missing tasks
+            for task_idx, (expiry, strike_rel, save_dir, file_path) in enumerate(missing_tasks, 1):
+                if _check_stop():
+                    logger.info("Stop trigger detected. Exiting gracefully.")
+                    _write_status("Stopped by user", done=True)
+                    return
+
+                if _is_valid_file(file_path):
+                    continue
+
+                expiry_dt = datetime.strptime(expiry, "%Y-%m-%d")
+                to_date = expiry
+                from_date = (expiry_dt - timedelta(days=7)).strftime("%Y-%m-%d")
+
+                status_msg = f"Downloading {name} {strike_rel} {expiry} ({task_idx}/{len(missing_tasks)})"
+                logger.info(status_msg)
+                _write_status(status_msg)
+
+                all_data = []
+                for o_type in ["CALL", "PUT"]:
+                    if _check_stop():
+                        _write_status("Stopped by user", done=True)
+                        return
+
+                    df = helper.get_expired_options_data(
+                        security_id=info["id"],
+                        exchange_segment=info["segment"],
+                        instrument_type=info["instrument"],
+                        expiry_flag="WEEK",
+                        expiry_code=1,  # Near Week relative to date range
+                        strike=strike_rel,
+                        drv_option_type=o_type,
+                        required_data=required_data,
+                        from_date=from_date,
+                        to_date=to_date,
+                        interval=1
+                    )
+                    if df.empty and helper.is_fatal_error(helper.last_api_error):
+                        err = helper.last_api_error
+                        msg = (f"Dhan API error {err.get('code') or '?'} "
+                               f"({err.get('type', '')}): {err.get('message', '')}")
+                        logger.error(f"Fatal API error — aborting: {msg}")
+                        _write_status(f"Error: {msg}", done=True, error=msg)
+                        return
+                    if not df.empty:
+                        if 'option_type' not in df.columns:
+                            df['option_type'] = "CE" if o_type == "CALL" else "PE"
+                        else:
+                            df['option_type'] = df['option_type'].apply(
+                                lambda x: "CE" if x == "CALL" else "PE"
+                            )
+                        all_data.append(df)
+                    time.sleep(0.2)  # Respect rate limits
+
+                if all_data:
+                    final_df = pd.concat(all_data, ignore_index=True)
+                    final_df['strike_relative'] = strike_rel
+                    cols = (
+                        ['datetime', 'option_type', 'strike_relative'] +
+                        [c for c in final_df.columns
+                         if c not in ['datetime', 'option_type', 'strike_relative']]
+                    )
+                    final_df = final_df[cols]
+                    final_df.to_csv(file_path, index=False)
+                    total_downloaded += 1
+                    logger.info(f"Saved: {file_path} ({len(final_df)} rows)")
+                else:
+                    logger.warning(f"No data for {name} {strike_rel} {expiry}")
+
+        # If new files were downloaded, sync to SQLite DB
+        if total_downloaded > 0:
+            try:
+                _write_status(f"Syncing {total_downloaded} new files to SQLite database…")
+                logger.info("Updating SQLite database with newly downloaded files...")
+                from scripts.analysis.convert_options_to_sqlite import main as sync_sqlite
+                sync_sqlite()
+            except Exception as e:
+                logger.warning(f"Failed to sync SQLite database: {e}")
+
+        final_msg = (
+            f"Done: Downloaded {total_downloaded} files, skipped {total_skipped} existing files"
+            if total_downloaded > 0
+            else f"All options data already up to date ({total_skipped} files verified)"
+        )
+        logger.info(final_msg)
+        _write_status(final_msg, done=True)
     except Exception as e:
         logger.error(f"Downloader failed: {e}")
         _write_status(f"Error: {e}", done=True, error=str(e))

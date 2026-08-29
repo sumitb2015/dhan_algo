@@ -6,9 +6,22 @@ import { isPidRunning } from '@/lib/processCheck';
 
 const PROJECT_ROOT = path.resolve(process.cwd(), '..');
 const DEBUG_DIR    = path.join(PROJECT_ROOT, 'debug');
-const PYTHON_EXE   = path.join(PROJECT_ROOT, 'venv', 'Scripts', 'pythonw.exe');
 const SCRIPT_PATH  = path.join(PROJECT_ROOT, 'scripts', 'downloader', 'download_expired_options.py');
 const STATUS_FILE  = path.join(DEBUG_DIR, 'options_refresh_status.json');
+const STOP_FILE    = path.join(DEBUG_DIR, 'options_refresh_stop.trigger');
+
+function getPythonExe(): string {
+  const candidates = [
+    path.join(PROJECT_ROOT, 'venv', 'Scripts', 'pythonw.exe'),
+    path.join(PROJECT_ROOT, 'venv', 'Scripts', 'python.exe'),
+    path.join(PROJECT_ROOT, 'venv', 'bin', 'python3'),
+    path.join(PROJECT_ROOT, 'venv', 'bin', 'python'),
+  ];
+  for (const c of candidates) {
+    if (fs.existsSync(c)) return c;
+  }
+  return process.platform === 'win32' ? 'python' : 'python3';
+}
 
 function readStatus() {
   try {
@@ -44,9 +57,13 @@ export async function POST(): Promise<NextResponse> {
     return NextResponse.json({ error: 'Already running', pid: existing.pid }, { status: 409 });
   }
 
+  if (fs.existsSync(STOP_FILE)) {
+    try { fs.unlinkSync(STOP_FILE); } catch { /* ignore */ }
+  }
   if (!fs.existsSync(DEBUG_DIR)) fs.mkdirSync(DEBUG_DIR, { recursive: true });
 
-  const child = spawn(PYTHON_EXE, [SCRIPT_PATH], {
+  const pythonExe = getPythonExe();
+  const child = spawn(pythonExe, [SCRIPT_PATH], {
     cwd: PROJECT_ROOT,
     detached: true,
     stdio: 'ignore',
@@ -63,4 +80,10 @@ export async function POST(): Promise<NextResponse> {
   } catch { /* non-fatal */ }
 
   return NextResponse.json({ started: true, pid: child.pid });
+}
+
+export async function DELETE(): Promise<NextResponse> {
+  if (!fs.existsSync(DEBUG_DIR)) fs.mkdirSync(DEBUG_DIR, { recursive: true });
+  fs.writeFileSync(STOP_FILE, '1');
+  return NextResponse.json({ stopped: true });
 }

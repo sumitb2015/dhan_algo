@@ -115,6 +115,12 @@ export default function DataRefreshPanel({ open, onClose, onRefreshComplete }: D
     } catch { /* ignore */ }
   }, []);
 
+  const stopOptDownload = useCallback(async () => {
+    try {
+      await fetch('/api/options-refresh', { method: 'DELETE' });
+    } catch { /* ignore */ }
+  }, []);
+
   const startOptDownload = useCallback(async () => {
     try {
       const res = await fetch('/api/options-refresh', { method: 'POST' });
@@ -259,24 +265,46 @@ export default function DataRefreshPanel({ open, onClose, onRefreshComplete }: D
             {optStatus?.running ? (
               <div className="w-full flex items-center justify-between bg-sky-950/20 border border-sky-500/20 rounded-xl h-11 px-4 text-sky-400">
                 <div className="flex items-center gap-2 text-sm font-semibold">
-                  <RefreshCw className="h-4 w-4 animate-spin" />
-                  <span className="font-mono text-[11px] truncate max-w-[280px]" title={optStatus.message}>
+                  <RefreshCw className="h-4 w-4 animate-spin shrink-0" />
+                  <span className="font-mono text-[11px] truncate max-w-[200px]" title={optStatus.message}>
                     {optStatus.message || 'Downloading…'}
                   </span>
                 </div>
+                <Button
+                  onClick={stopOptDownload}
+                  size="sm"
+                  variant="destructive"
+                  className="h-7 px-2.5 text-xs gap-1"
+                >
+                  <Square className="h-3 w-3" />
+                  Stop
+                </Button>
               </div>
             ) : (
-              <Button
-                onClick={startOptDownload}
-                className="w-full flex items-center justify-between bg-sky-500/10 hover:bg-sky-500/15 text-sky-400 border border-sky-500/30 rounded-xl h-11 px-4"
-                variant="ghost"
-                title="Download expired weekly options 1-min data since 2021"
-              >
-                <div className="flex items-center gap-2 font-semibold text-sm">
-                  <Download className="h-4 w-4" />
-                  Download Expired Options
-                </div>
-              </Button>
+              <div>
+                <Button
+                  onClick={startOptDownload}
+                  className="w-full flex items-center justify-between bg-sky-500/10 hover:bg-sky-500/15 text-sky-400 border border-sky-500/30 rounded-xl h-11 px-4"
+                  variant="ghost"
+                  title="Download expired weekly options 1-min data since 2021 (skips existing files)"
+                >
+                  <div className="flex items-center gap-2 font-semibold text-sm">
+                    <Download className="h-4 w-4" />
+                    Download Expired Options
+                  </div>
+                  {optStatus?.done && !optStatus?.error && (
+                    <span className="text-[10px] text-emerald-400 flex items-center gap-1 font-mono">
+                      <CheckCircle2 className="h-3 w-3" />
+                      Up to date
+                    </span>
+                  )}
+                </Button>
+                {optStatus?.message && !optStatus?.running && (
+                  <p className="text-[10px] text-zinc-400 font-mono mt-1 px-1 truncate" title={optStatus.message}>
+                    {optStatus.message}
+                  </p>
+                )}
+              </div>
             )}
           </div>
         </div>
