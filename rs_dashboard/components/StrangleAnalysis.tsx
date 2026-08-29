@@ -7,6 +7,7 @@ import {
   ReferenceLine, ResponsiveContainer, Legend, Cell,
 } from 'recharts';
 import { getCached, setCached } from '@/lib/clientCache';
+import StrangleValidityReportModal from '@/components/StrangleValidityReportModal';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -285,6 +286,7 @@ export default function StrangleAnalysis() {
   const [dateFilter, setDateFilter] = useState<'all' | '3y' | '2y' | '1y'>('all');
   const [regime, setRegime] = useState<RegimeKey>('all');
   const [selectedOffset, setSelectedOffset] = useState<number>(2);
+  const [showReportModal, setShowReportModal] = useState(false);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   // Derive the active offset and regime's data
@@ -300,7 +302,20 @@ export default function StrangleAnalysis() {
     }
     try {
       const res = await fetch('/api/strangle-analysis');
-      if (res.status === 404) { setLoadState('not_generated'); return; }
+      if (res.status === 404) {
+        setLoadState('not_generated');
+        // Check if background job is running
+        const sRes = await fetch('/api/strangle-analysis?status=true');
+        if (sRes.ok) {
+          const s: StatusData = await sRes.json();
+          if (s.status === 'running') {
+            setRegenerating(true);
+            setRegenProgress(s.pct ?? 0);
+            setRegenMessage(s.message ?? '');
+          }
+        }
+        return;
+      }
       if (!res.ok) { if (!cached) setLoadState('error'); return; }
       const json = await res.json();
       if (json.error) { setLoadState('not_generated'); return; }
@@ -312,34 +327,65 @@ export default function StrangleAnalysis() {
     }
   }, []);
 
-  useEffect(() => { fetchData(); }, [fetchData]);
-
-  useEffect(() => {
-    return () => { if (pollRef.current) clearInterval(pollRef.current); };
-  }, []);
-
-  const startRegen = async () => {
-    setRegenerating(true);
-    setRegenProgress(0);
-    setRegenMessage('Starting…');
-    await fetch('/api/strangle-analysis', { method: 'POST', body: JSON.stringify({ action: 'regenerate' }) });
+  const startPolling = useCallback(() => {
+    if (pollRef.current) return;
     pollRef.current = setInterval(async () => {
       try {
         const res = await fetch('/api/strangle-analysis?status=true');
+        if (!res.ok) return;
         const s: StatusData = await res.json();
         setRegenProgress(s.pct ?? 0);
         setRegenMessage(s.message ?? '');
         if (s.status === 'done') {
-          clearInterval(pollRef.current!);
+          if (pollRef.current) {
+            clearInterval(pollRef.current);
+            pollRef.current = null;
+          }
           setRegenerating(false);
           await fetchData();
         } else if (s.status === 'error') {
-          clearInterval(pollRef.current!);
+          if (pollRef.current) {
+            clearInterval(pollRef.current);
+            pollRef.current = null;
+          }
           setRegenerating(false);
           setRegenMessage(`Error: ${s.message}`);
         }
       } catch { /* keep polling */ }
     }, 2000);
+  }, [fetchData]);
+
+  useEffect(() => {
+    fetchData();
+    // Check initial status to see if background job is running
+    fetch('/api/strangle-analysis?status=true')
+      .then((r) => (r.ok ? r.json() : null))
+      .then((s: StatusData | null) => {
+        if (s?.status === 'running') {
+          setRegenerating(true);
+          setRegenProgress(s.pct ?? 0);
+          setRegenMessage(s.message ?? '');
+          startPolling();
+        }
+      })
+      .catch(() => {});
+
+    return () => {
+      if (pollRef.current) {
+        clearInterval(pollRef.current);
+        pollRef.current = null;
+      }
+    };
+  }, [fetchData, startPolling]);
+
+  const startRegen = async () => {
+    setRegenerating(true);
+    setRegenProgress(0);
+    setRegenMessage('Starting…');
+    try {
+      await fetch('/api/strangle-analysis', { method: 'POST', body: JSON.stringify({ action: 'regenerate' }) });
+    } catch { /* ignore */ }
+    startPolling();
   };
 
   // Filter monthly trend by date filter
@@ -515,6 +561,19 @@ export default function StrangleAnalysis() {
           {regimeToggle}
           {offsetSelector}
           {dateFilterToggle}
+
+          {/* Analyse Report Button */}
+          <button
+            onClick={() => setShowReportModal(true)}
+            className="flex items-center gap-1.5 px-3 py-1 text-[10px] font-mono font-bold bg-sky-500/15 hover:bg-sky-500/25 border border-sky-500/30 text-sky-400 rounded-lg transition-colors shadow-sm"
+            title="Open strangle validity audit & intelligence report"
+          >
+            <svg className="w-3 h-3 text-sky-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+            </svg>
+            Analyse Report
+          </button>
+
           {regenerateControl}
         </div>
       </div>
@@ -1164,6 +1223,15 @@ export default function StrangleAnalysis() {
           Day high/low are proxies (CE high + PE high per candle)
         </div>
       </div>
+
+      {/* ── Validity & Intelligence Report Modal ─────────────────────────────── */}
+      <StrangleValidityReportModal
+        isOpen={showReportModal}
+        onClose={() => setShowReportModal(false)}
+        fullData={fullData}
+        activeRegime={regime}
+        selectedOffset={selectedOffset}
+      />
     </div>
   );
 }
