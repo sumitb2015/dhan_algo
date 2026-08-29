@@ -83,6 +83,7 @@ temp_data/
 *.csv
 *.xlsx
 *.zip
+!stocks_indices_data.zip
 *.whl
 *.parquet
 *.log
