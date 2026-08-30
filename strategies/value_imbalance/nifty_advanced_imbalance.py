@@ -14,6 +14,7 @@ from lib.dhan_helper import DhanHelper
 from lib.strategy_state_helper import save_strategy_state, check_shutdown_trigger, exit_if_market_closed, parse_target_spec, instance_log_suffix
 from lib.strategy_risk import resolve_exit_qty_broker
 from lib.execution_broker import ExecutionBroker, ExecutionBrokerError
+from lib.recovery_reweight import enter_recovery_leg, recovery_stop_price
 
 # Setup Logging
 project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -54,6 +55,7 @@ class NiftyAdvancedImbalance:
                  use_premium=False, target_premium=50.0,
                  start_time="09:20", loser_ratio_lots=1,
                  leg_sl_pct=0.20,
+                 recovery_reweight=False, recovery_sl_pct=0.30,
                  trail_start_rs=500.0, trail_gap_rs=300.0,
                  scalp_floor_pct=0.0, multi_cycle=False, cycle_cooldown=300,
                  state_key="nifty_advanced_imbalance", broker="dhan"):
@@ -83,6 +85,8 @@ class NiftyAdvancedImbalance:
         self.start_time = start_time
         self.loser_ratio_lots = loser_ratio_lots
         self.leg_sl_pct = leg_sl_pct
+        self.recovery_reweight = bool(recovery_reweight)
+        self.recovery_sl_pct = recovery_sl_pct
         self.trail_start_rs = trail_start_rs
         self.trail_gap_rs = trail_gap_rs
         self.scalp_floor_pct = float(scalp_floor_pct)
@@ -156,6 +160,15 @@ class NiftyAdvancedImbalance:
         self.initial_ce_entry_price = 0.0
         self.initial_pe_entry_price = 0.0
 
+        # Recovery Reweight state (--recovery-reweight, reentry_straddle mode only).
+        # None when no recovery leg is open; otherwise
+        # {'id', 'strike', 'avg_price', 'sl', 'qty'} for a long option bought one
+        # strike further OTM than the short leg that just stopped out. While a
+        # side's recovery leg is open, that side's normal short-leg re-entry is
+        # suppressed — see _handle_reentry_sl_and_entry().
+        self.ce_recovery = None
+        self.pe_recovery = None
+
     def sleep_cooldown(self, seconds, reason="Cooldown"):
         """Shutdown-aware sleep for cooldowns and delays with UI status updates."""
         for remaining in range(seconds, 0, -1):
@@ -214,6 +227,10 @@ class NiftyAdvancedImbalance:
             "ce_original_entry_premium": self.ce_original_entry_premium,
             "pe_original_entry_premium": self.pe_original_entry_premium,
             "leg_sl_pct": self.leg_sl_pct,
+            "recovery_reweight": self.recovery_reweight,
+            "recovery_sl_pct": self.recovery_sl_pct,
+            "ce_recovery": self.ce_recovery,
+            "pe_recovery": self.pe_recovery,
             "trail_active": self.trail_active,
             "trail_start_rs": self.trail_start_rs,
             "trail_gap_rs": self.trail_gap_rs,
@@ -301,8 +318,17 @@ class NiftyAdvancedImbalance:
             wing_ltp = self.helper.get_ltp(str(wing['id']), exchange="NSE_FNO", instrument="OPTIDX")
             if wing_ltp > 0:
                 wing_pnl += (wing_ltp - wing['buy_price']) * (wing['lots'] * self.nifty_lot_size)
-                
-        return self.realized_pnl + ce_unrealized + pe_unrealized + wing_pnl
+
+        # Recovery Reweight legs are also long options: (Current - Entry) * Qty
+        recovery_pnl = 0.0
+        for recovery in (self.ce_recovery, self.pe_recovery):
+            if not recovery:
+                continue
+            recovery_ltp = self.helper.get_ltp(str(recovery['id']), exchange="NSE_FNO", instrument="OPTIDX")
+            if recovery_ltp > 0:
+                recovery_pnl += (recovery_ltp - recovery['avg_price']) * recovery['qty']
+
+        return self.realized_pnl + ce_unrealized + pe_unrealized + wing_pnl + recovery_pnl
 
     def log_state(self, nifty_spot, ce_ltp, pe_ltp, ce_val, pe_val, diff_pct, total_pnl):
         # Determine active threshold
@@ -355,6 +381,13 @@ class NiftyAdvancedImbalance:
     def _handle_reentry_sl_and_entry(self, ce_ltp: float, pe_ltp: float):
         """Per-leg independent SL exit and re-entry for reentry_straddle mode."""
 
+        # --- Recovery Reweight: manage any open recovery legs first, so a leg
+        # that stops out this same tick is free to enter a fresh recovery leg
+        # below rather than being blocked by its own just-closed one. ---
+        if self.recovery_reweight:
+            self._check_recovery_exit("CE")
+            self._check_recovery_exit("PE")
+
         # --- CE: Stop Loss Check ---
         if self.ce_active and ce_ltp >= self.ce_sl:
             logger.warning(
@@ -396,6 +429,8 @@ class NiftyAdvancedImbalance:
                 self.ce_avg_price = 0.0
                 self.ce_lots = 0
                 self.ce_active = False
+                if self.recovery_reweight:
+                    self._enter_recovery("CE", closed_qty)
 
         # --- PE: Stop Loss Check ---
         if self.pe_active and pe_ltp >= self.pe_sl:
@@ -438,9 +473,11 @@ class NiftyAdvancedImbalance:
                 self.pe_avg_price = 0.0
                 self.pe_lots = 0
                 self.pe_active = False
+                if self.recovery_reweight:
+                    self._enter_recovery("PE", closed_qty)
 
         # --- CE: Re-entry Check ---
-        if not self.ce_active and ce_ltp > 0 and ce_ltp <= self.ce_original_entry_premium:
+        if not self.ce_active and not self.ce_recovery and ce_ltp > 0 and ce_ltp <= self.ce_original_entry_premium:
             logger.info(
                 f"CE Re-entry! LTP {ce_ltp:.2f} <= original entry {self.ce_original_entry_premium:.2f}"
             )
@@ -463,7 +500,7 @@ class NiftyAdvancedImbalance:
                 logger.info(f"CE Re-entered at {actual_entry:.2f} | New SL: {self.ce_sl:.2f}")
 
         # --- PE: Re-entry Check ---
-        if not self.pe_active and pe_ltp > 0 and pe_ltp <= self.pe_original_entry_premium:
+        if not self.pe_active and not self.pe_recovery and pe_ltp > 0 and pe_ltp <= self.pe_original_entry_premium:
             logger.info(
                 f"PE Re-entry! LTP {pe_ltp:.2f} <= original entry {self.pe_original_entry_premium:.2f}"
             )
@@ -484,6 +521,112 @@ class NiftyAdvancedImbalance:
                 self.pe_sl = round(actual_entry * (1 + self.leg_sl_pct), 2)
                 self.pe_active = True
                 logger.info(f"PE Re-entered at {actual_entry:.2f} | New SL: {self.pe_sl:.2f}")
+
+    def _enter_recovery(self, opt_type: str, qty: int):
+        """Recovery Reweight (--recovery-reweight): after `opt_type`'s short leg
+        just stopped out, buy a fresh long option one strike further OTM,
+        betting the stop-out marks a real trend rather than noise. Suppresses
+        that side's normal short-leg re-entry until the recovery leg exits
+        (see the re-entry checks above)."""
+        if qty <= 0:
+            logger.warning(f"Recovery Reweight: nothing to recover for {opt_type} (qty={qty}). Skipping.")
+            return
+
+        stopped_strike = self.ce_strike if opt_type == "CE" else self.pe_strike
+        recovery_strike = next_otm_strike(stopped_strike, opt_type, strike_step=50)
+
+        quote = self.helper.option("NIFTY", recovery_strike, opt_type)
+        if self.is_quote_invalid(quote):
+            logger.error(
+                f"Recovery Reweight: no valid quote for {opt_type} {recovery_strike}. "
+                f"Skipping recovery entry — {opt_type} side stays flat this tick."
+            )
+            return
+        new_id, price, _, _, _ = self._extract_quote_fields(quote, recovery_strike, opt_type)
+        if not new_id or not price or price <= 0:
+            logger.error(f"Recovery Reweight: invalid quote fields for {opt_type} {recovery_strike}. Skipping.")
+            return
+
+        entry_price = price
+        if not self.dry_run:
+            result = enter_recovery_leg(
+                self.broker, "NIFTY", self.expiry, stopped_strike, opt_type, qty,
+                strike_step=50, log=logger,
+            )
+            if not result:
+                return  # enter_recovery_leg already logged the failure
+            entry_price = self.get_execution_price(result['order_id'], price)
+        else:
+            logger.info(f"[DRY RUN] Recovery Reweight: would buy {opt_type} {recovery_strike} qty={qty} @ ~{price:.2f}")
+
+        try:
+            self.helper.subscribe_instruments([("NSE_FNO", str(new_id), 15)])
+        except Exception as e:
+            logger.error(f"Recovery Reweight: WS subscribe failed for {new_id}: {e}")
+
+        recovery = {
+            'id': new_id, 'strike': recovery_strike, 'avg_price': entry_price,
+            'sl': recovery_stop_price(entry_price, self.recovery_sl_pct), 'qty': qty,
+        }
+        if opt_type == "CE":
+            self.ce_recovery = recovery
+        else:
+            self.pe_recovery = recovery
+        logger.info(
+            f"Recovery Reweight: {opt_type} recovery leg opened at {recovery_strike} "
+            f"(stopped leg was {stopped_strike}) qty={qty} entry={entry_price:.2f} "
+            f"SL={recovery['sl']:.2f}"
+        )
+
+    def _check_recovery_exit(self, opt_type: str):
+        """SL-only exit for an open Recovery Reweight leg — v1 has no separate
+        target, the leg rides with the trend until stopped. Once it closes, the
+        stopped side's normal short-leg re-entry check (above) resumes."""
+        recovery = self.ce_recovery if opt_type == "CE" else self.pe_recovery
+        if not recovery:
+            return
+        ltp = self.helper.get_ltp(str(recovery['id']), exchange="NSE_FNO", instrument="OPTIDX")
+        if ltp <= 0 or ltp > recovery['sl']:
+            return
+
+        logger.warning(
+            f"Recovery Reweight: {opt_type} recovery leg SL hit! LTP {ltp:.2f} <= "
+            f"SL {recovery['sl']:.2f} (bought at {recovery['avg_price']:.2f})"
+        )
+        actual_exit = ltp
+        if not self.dry_run:
+            own_qty = recovery['qty']
+            qty_to_sell, net_qty = resolve_exit_qty_broker(
+                self.broker, recovery['strike'], self.expiry, opt_type, own_qty, "SELL", logger)
+            if qty_to_sell > 0:
+                sell_oid = self.broker.sell(recovery['strike'], self.expiry, opt_type, qty_to_sell)
+                if sell_oid:
+                    actual_exit = self.get_execution_price(sell_oid, ltp)
+                    logger.info(
+                        f"Recovery {opt_type} exit for {qty_to_sell} qty "
+                        f"(own {own_qty}, broker net {net_qty}): {sell_oid}"
+                    )
+                else:
+                    logger.critical(
+                        f"Recovery {opt_type} exit order FAILED (sell returned None). "
+                        f"Clearing tracking to prevent a duplicate order. Verify {opt_type} recovery position manually!"
+                    )
+            else:
+                logger.warning(f"Recovery {opt_type} net qty {net_qty} — nothing to close.")
+        else:
+            logger.info(f"[DRY RUN] Recovery {opt_type} exit at {actual_exit:.2f}")
+
+        realized = (actual_exit - recovery['avg_price']) * recovery['qty']
+        self.realized_pnl += realized
+        logger.info(f"Recovery {opt_type} leg closed at {actual_exit:.2f}. Leg realized: {realized:+.2f}.")
+        try:
+            self.helper.unsubscribe_instruments([("NSE_FNO", str(recovery['id']), 15)])
+        except Exception:
+            pass
+        if opt_type == "CE":
+            self.ce_recovery = None
+        else:
+            self.pe_recovery = None
 
     def exit_all_positions(self, reason):
         logger.warning(f"!!! EXITING ALL POSITIONS: {reason} !!!")
@@ -535,8 +678,41 @@ class NiftyAdvancedImbalance:
                             self.helper.wait_for_fill(wing_exit_id, timeout=5)
                 except Exception as e:
                     logger.error(f"Exit PE Wing strike {wing['strike']} Error: {e}")
+
+            # 3. Sell back any open Recovery Reweight legs (also long options)
+            for opt_type, recovery in (("CE", self.ce_recovery), ("PE", self.pe_recovery)):
+                if not recovery:
+                    continue
+                try:
+                    own_qty = recovery['qty']
+                    qty_to_sell, net_qty = resolve_exit_qty_broker(
+                        self.broker, recovery['strike'], self.expiry, opt_type, own_qty, "SELL", logger)
+                    if qty_to_sell > 0:
+                        recovery_exit_id = self.broker.sell(recovery['strike'], self.expiry, opt_type, qty_to_sell)
+                        logger.info(
+                            f"{opt_type} recovery leg {recovery['strike']} exit order placed for "
+                            f"{qty_to_sell} qty (own {own_qty}, broker net {net_qty}): {recovery_exit_id}"
+                        )
+                        if recovery_exit_id and not self.dry_run:
+                            self.helper.wait_for_fill(recovery_exit_id, timeout=5)
+                except Exception as e:
+                    logger.error(f"Exit {opt_type} recovery leg {recovery['strike']} Error: {e}")
         else:
             logger.info(f"[DRY RUN] Simulating Exit of all positions.")
+
+        # Recovery tracking always clears on a full exit, dry-run or live — the
+        # leg is gone either way, and stale tracking would block re-entry checks
+        # (or double-close) on the next cycle.
+        for opt_type in ("CE", "PE"):
+            recovery = self.ce_recovery if opt_type == "CE" else self.pe_recovery
+            if not recovery:
+                continue
+            try:
+                self.helper.unsubscribe_instruments([("NSE_FNO", str(recovery['id']), 15)])
+            except Exception:
+                pass
+        self.ce_recovery = None
+        self.pe_recovery = None
 
     def reset_session(self):
         """Resets session-specific variables for a new entry cycle."""
@@ -556,6 +732,17 @@ class NiftyAdvancedImbalance:
         for wing in self.pe_wings:
             try: self.helper.unsubscribe_instruments([("NSE_FNO", str(wing['id']), 15)])
             except Exception: pass
+
+        # Defensive: exit_all_positions() already closes and clears any open
+        # Recovery Reweight leg before every reset_session() call in run(), but
+        # clear it here too so a stray leftover can never survive into a new cycle.
+        for recovery in (self.ce_recovery, self.pe_recovery):
+            if not recovery:
+                continue
+            try: self.helper.unsubscribe_instruments([("NSE_FNO", str(recovery['id']), 15)])
+            except Exception: pass
+        self.ce_recovery = None
+        self.pe_recovery = None
 
         self.ce_strike = None
         self.pe_strike = None
@@ -1078,8 +1265,12 @@ class NiftyAdvancedImbalance:
                 if self.mode == "reentry_straddle":
                     # Periodic logging
                     if time.time() - last_log_time >= 5:
-                        ce_status = f"ACTIVE SL:{self.ce_sl:.1f}" if self.ce_active else f"FLAT(reenter@<={self.ce_original_entry_premium:.1f})"
-                        pe_status = f"ACTIVE SL:{self.pe_sl:.1f}" if self.pe_active else f"FLAT(reenter@<={self.pe_original_entry_premium:.1f})"
+                        ce_status = (f"ACTIVE SL:{self.ce_sl:.1f}" if self.ce_active
+                                     else f"RECOVERY@{self.ce_recovery['strike']} SL:{self.ce_recovery['sl']:.1f}" if self.ce_recovery
+                                     else f"FLAT(reenter@<={self.ce_original_entry_premium:.1f})")
+                        pe_status = (f"ACTIVE SL:{self.pe_sl:.1f}" if self.pe_active
+                                     else f"RECOVERY@{self.pe_recovery['strike']} SL:{self.pe_recovery['sl']:.1f}" if self.pe_recovery
+                                     else f"FLAT(reenter@<={self.pe_original_entry_premium:.1f})")
                         logger.info(
                             f"ReentryStraddle | CE:{ce_ltp:.1f} [{ce_status}] | "
                             f"PE:{pe_ltp:.1f} [{pe_status}] | "
@@ -1444,6 +1635,9 @@ Available Adjustment Modes:
                      stopped leg re-enters when its premium returns to the original entry level;
                      global profit/SL targets and straddle-shift exit still apply
                      (requires --entry-type straddle)
+                     Add --recovery-reweight to instead buy a fresh long option one strike
+                     further OTM on a leg's SL hit (own SL via --recovery-sl-pct), betting the
+                     stop-out marks a real trend rather than noise to fade.
 
 Examples:
   # Dry run with value-balanced winner roll adjustment
@@ -1515,6 +1709,13 @@ Examples:
     parser.add_argument("--leg-sl-pct", type=float, default=0.20, metavar="PCT",
                         help="Per-leg stop loss as a fraction of entry premium in reentry_straddle mode "
                              "(default: 0.20 = 20%%). E.g. 0.30 triggers SL at 130%% of entry price.")
+    parser.add_argument("--recovery-reweight", action="store_true", default=False,
+                        help="reentry_straddle mode only: on a leg's SL hit, buy a fresh long option one "
+                             "strike further OTM instead of just waiting to re-sell the same short leg "
+                             "(see lib/recovery_reweight.py). Default: False (plain re-entry).")
+    parser.add_argument("--recovery-sl-pct", type=float, default=0.30, metavar="PCT",
+                        help="Stop loss for a recovery leg, as a fraction below its entry price "
+                             "(default: 0.30 = 30%%). Only used with --recovery-reweight.")
     parser.add_argument("--trail-start-rs", type=float, default=500.0, metavar="INR",
                         help="Activate trailing SL once MTM profit reaches this many rupees (default: 500)")
     parser.add_argument("--trail-gap-rs", type=float, default=300.0, metavar="INR",
@@ -1579,6 +1780,16 @@ Examples:
 
     if args.leg_sl_pct <= 0:
         _errors.append(f"--leg-sl-pct must be > 0, got {args.leg_sl_pct}.")
+
+    # --recovery-reweight / --recovery-sl-pct only apply to reentry_straddle
+    if args.recovery_reweight and args.mode != "reentry_straddle":
+        _errors.append(
+            f"--recovery-reweight has no effect in --mode {args.mode} (only used with reentry_straddle)."
+        )
+    if args.recovery_sl_pct != 0.30 and not args.recovery_reweight:
+        _errors.append(f"--recovery-sl-pct {args.recovery_sl_pct} has no effect without --recovery-reweight.")
+    if args.recovery_sl_pct <= 0 or args.recovery_sl_pct >= 1:
+        _errors.append(f"--recovery-sl-pct must be between 0 and 1 (exclusive), got {args.recovery_sl_pct}.")
 
     # --max-lots has no effect in reentry_straddle (always re-enters at initial lot size)
     if args.mode == "reentry_straddle" and args.max_lots != 4:
@@ -1695,6 +1906,8 @@ Examples:
         start_time=args.start_time,
         loser_ratio_lots=args.loser_ratio_lots,
         leg_sl_pct=args.leg_sl_pct,
+        recovery_reweight=args.recovery_reweight,
+        recovery_sl_pct=args.recovery_sl_pct,
         trail_start_rs=args.trail_start_rs,
         trail_gap_rs=args.trail_gap_rs,
         scalp_floor_pct=args.scalp_floor_pct,
