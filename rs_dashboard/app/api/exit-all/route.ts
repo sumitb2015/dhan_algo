@@ -4,6 +4,7 @@ import fs from 'fs';
 import { execSync } from 'child_process';
 import { getDhanCredentials } from '@/lib/dhanToken';
 import { DEBUG_DIR, allStateKeys, isStrategyRunning } from '@/lib/strategyRegistry';
+import { runPythonJson, PROJECT_ROOT } from '@/lib/pyExec';
 
 const DHAN_POSITIONS = 'https://api.dhan.co/v2/positions';
 const DHAN_ORDERS = 'https://api.dhan.co/v2/orders';
@@ -97,6 +98,27 @@ async function exitFnoOnly(clientId: string, token: string): Promise<{ ok: boole
   }
 
   return { ok: errors.length === 0, error: errors.length ? errors.join('; ') : null };
+}
+
+/** Flatten every open position on one child broker (Kotak/Zerodha) by shelling out to
+ *  scripts/tools/exit_all_broker_positions.py — strategies launched with --broker
+ *  kotak/zerodha (lib/execution_broker.py) hold their positions at that broker, not
+ *  Dhan, so the Dhan-only sweep above never touches them. Failure here (broker not
+ *  logged in, no positions, etc.) is reported but never blocks the rest of exit-all —
+ *  this is a best-effort addition to the Dhan sweep, not a replacement for it. */
+async function exitChildBroker(broker: 'kotak' | 'zerodha'): Promise<{ ok: boolean; closed: number; error: string | null }> {
+  try {
+    const script = path.join(PROJECT_ROOT, 'scripts', 'tools', 'exit_all_broker_positions.py');
+    const result = await runPythonJson<{ status: string; closed: unknown[]; errors: string[] }>(
+      script, [broker], 30_000);
+    if (result.status === 'error') {
+      return { ok: false, closed: 0, error: result.errors?.join('; ') || 'unknown error' };
+    }
+    return { ok: result.status === 'ok', closed: result.closed?.length ?? 0,
+             error: result.errors?.length ? result.errors.join('; ') : null };
+  } catch (err) {
+    return { ok: false, closed: 0, error: String((err as Error).message ?? err) };
+  }
 }
 
 function forceKillPid(pid: number): boolean {
@@ -218,6 +240,29 @@ export async function POST(req: NextRequest) {
       console.error('[exit-all] Dhan broker exit error:', brokerError);
     }
 
+    // ── Step 1b: Child-broker exit (Kotak/Zerodha) ───────────────────────
+    // Strategies launched with --broker kotak/zerodha hold positions at that
+    // broker, not Dhan — Step 1 above never sees them. A full nuclear exit
+    // (not the scalper's F&O-only scope) must flatten those too, or Step 2's
+    // force-kill below orphans a live position with no process managing it.
+    // Best-effort: a broker that was never logged in for the day reports an
+    // error here but does not fail the overall exit-all call.
+    const childBrokerResults: Record<string, { ok: boolean; closed: number; error: string | null }> = {};
+    if (!fnoOnly) {
+      const [kotakResult, zerodhaResult] = await Promise.all([
+        exitChildBroker('kotak'),
+        exitChildBroker('zerodha'),
+      ]);
+      childBrokerResults.kotak = kotakResult;
+      childBrokerResults.zerodha = zerodhaResult;
+      if (!kotakResult.ok && kotakResult.error) {
+        console.error('[exit-all] Kotak child broker exit:', kotakResult.error);
+      }
+      if (!zerodhaResult.ok && zerodhaResult.error) {
+        console.error('[exit-all] Zerodha child broker exit:', zerodhaResult.error);
+      }
+    }
+
     // â”€â”€ Step 2: Sync all strategy processes â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     // Broker-side exit orders/cancellations from Step 1 are already in flight
     // (atomic under the default path; async MARKET orders under scope:'fno').
@@ -267,6 +312,7 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({
       success: brokerExit,
       broker_exit: brokerExit,
+      child_broker_exit: childBrokerResults,
       killed,
       trigger_fallback: triggerFallback,
       error: brokerError,
