@@ -4,7 +4,8 @@ import React, { useState, useEffect, useCallback, useRef } from 'react';
 import {
   Layers, RefreshCw, TrendingUp, TrendingDown, AlertTriangle,
   Power, ShieldOff, Activity, Zap, LayoutList, ChevronDown, ChevronRight, Shield,
-  Repeat, CheckCircle2, XCircle, Play, Square, ChevronsDownUp, ChevronsUpDown
+  Repeat, CheckCircle2, XCircle, Play, Square, ChevronsDownUp, ChevronsUpDown,
+  Sprout, Flame, Rocket, Boxes, ListTree,
 } from 'lucide-react';
 import StrategyRowWide from '@/components/StrategyRowWide';
 import NavBar from '@/components/NavBar';
@@ -27,6 +28,32 @@ const TXT_EYEBROW = 'text-[9px] font-bold uppercase tracking-[0.14em]';
 const TXT_LABEL = 'text-[10px] font-semibold uppercase tracking-wide';
 const TXT_CAPTION = 'text-[11px] font-semibold';
 const TXT_STAT = 'text-sm font-bold font-mono tabular-nums leading-tight';
+
+type GroupMode = 'underlying' | 'type';
+
+/** Client-side mirror of lib/strategyRegistry.ts's LOGIC_GROUPS — kept separate because
+ * that module is server-only (imports `fs`/`path`), so it can't be imported into this
+ * 'use client' page. Only the display metadata lives here; `meta.logicGroup` (the key)
+ * comes from the strategy itself via /api/strategies. Keys must stay in sync. */
+const LOGIC_GROUPS: Record<string, { title: string; tagline: string; icon: React.ElementType; accent: string }> = {
+  harvest: { title: 'Premium Harvest', tagline: 'Sell & hold — theta does the work', icon: Sprout, accent: 'emerald' },
+  rotation: { title: 'Roll & Rotate', tagline: 'Exit a decaying leg into a fresh strike', icon: Repeat, accent: 'sky' },
+  volatility: { title: 'Volatility Adaptive', tagline: 'Entry and hedge gated by the vol regime', icon: Activity, accent: 'violet' },
+  directional: { title: 'Directional Options', tagline: 'Trend + OI-confirmed spreads and sells', icon: TrendingUp, accent: 'amber' },
+  futures_trend: { title: 'Futures Trend', tagline: 'Ride MCX momentum in one direction', icon: Flame, accent: 'orange' },
+  momentum: { title: 'Equity Momentum', tagline: 'Relative-strength stock rotation', icon: Rocket, accent: 'fuchsia' },
+};
+const OTHER_LOGIC_GROUP = { title: 'Other', tagline: 'Uncategorised', icon: Boxes, accent: 'zinc' };
+
+const ACCENT_CLASSES: Record<string, { icon: string; iconBg: string; iconBorder: string; ring: string }> = {
+  emerald: { icon: 'text-emerald-400', iconBg: 'bg-emerald-500/10', iconBorder: 'border-emerald-500/25', ring: 'hover:border-emerald-700/60' },
+  sky: { icon: 'text-sky-400', iconBg: 'bg-sky-500/10', iconBorder: 'border-sky-500/25', ring: 'hover:border-sky-700/60' },
+  violet: { icon: 'text-violet-400', iconBg: 'bg-violet-500/10', iconBorder: 'border-violet-500/25', ring: 'hover:border-violet-700/60' },
+  amber: { icon: 'text-amber-400', iconBg: 'bg-amber-500/10', iconBorder: 'border-amber-500/25', ring: 'hover:border-amber-700/60' },
+  orange: { icon: 'text-orange-400', iconBg: 'bg-orange-500/10', iconBorder: 'border-orange-500/25', ring: 'hover:border-orange-700/60' },
+  fuchsia: { icon: 'text-fuchsia-400', iconBg: 'bg-fuchsia-500/10', iconBorder: 'border-fuchsia-500/25', ring: 'hover:border-fuchsia-700/60' },
+  zinc: { icon: 'text-zinc-400', iconBg: 'bg-zinc-500/10', iconBorder: 'border-zinc-500/25', ring: 'hover:border-zinc-700/60' },
+};
 
 interface IndexQuote { ltp: number; prevClose: number }
 interface IndexTicker { nifty: IndexQuote | null; vix: IndexQuote | null }
@@ -113,6 +140,9 @@ export default function StrategiesPlusPage() {
   const [exitingAll, setExitingAll] = useState(false);
 
   const [viewMode, setViewMode] = useState<'active' | 'all'>('active');
+  // 'underlying' groups by instrument exposure (NIFTY/CRUDEOILM/...); 'type' groups by
+  // trading logic (Premium Harvest, Futures Trend, ...) — see LOGIC_GROUPS below.
+  const [groupMode, setGroupMode] = useState<GroupMode>('underlying');
 
   // Groups default to open only when something inside is running, so the page opens on
   // live strategies and folds everything else away behind its index header.
@@ -554,12 +584,24 @@ export default function StrategiesPlusPage() {
     row => (row.state?.status !== 'STOPPED' ? [row.state] : []),
   );
 
+  // Same grouping helper, keyed by trading-logic type instead of instrument — the
+  // "By Strategy Type" view. `groupByUnderlying` buckets a missing key under 'OTHER',
+  // which OTHER_LOGIC_GROUP below renders a label for.
+  const groupedByLogicList = groupByUnderlying<InstanceRow>(
+    displayList,
+    row => row.meta?.logicGroup,
+    row => (row.state?.status !== 'STOPPED' ? [row.state] : []),
+  );
+
+  const activeGroupedList = groupMode === 'type' ? groupedByLogicList : groupedList;
+
   // Pin auto-opened groups so a group does not fold up the moment its last run stops.
+  // Runs for both grouping dimensions — their keys never collide ('NIFTY' vs 'harvest').
   useEffect(() => {
-    groups.ensureOpen(groupedList.filter(g => g.runningCount > 0).map(g => g.underlying));
-    // groupedList is rebuilt every poll; ensureOpen no-ops once the groups are decided.
+    groups.ensureOpen(activeGroupedList.filter(g => g.runningCount > 0).map(g => g.underlying));
+    // activeGroupedList is rebuilt every poll; ensureOpen no-ops once the groups are decided.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [groupedList.map(g => `${g.underlying}:${g.runningCount > 0}`).join(','), groups]);
+  }, [activeGroupedList.map(g => `${g.underlying}:${g.runningCount > 0}`).join(','), groups]);
 
   return (
     <div className="flex flex-col flex-1 w-full bg-black min-h-screen text-zinc-300">
@@ -773,35 +815,49 @@ export default function StrategiesPlusPage() {
             </TabsList>
           </Tabs>
 
-          {/* Expand / collapse every index group */}
+          {/* Grouping dimension: by instrument exposure, or by trading-logic type */}
+          <Tabs value={groupMode} onValueChange={(v) => setGroupMode(v as GroupMode)}>
+            <TabsList className="bg-zinc-900 border border-zinc-800">
+              <Tooltip>
+                <TooltipTrigger render={<TabsTrigger value="underlying" className="gap-1.5"><ListTree className="h-3 w-3" />Underlying</TabsTrigger>} />
+                <TooltipContent>Group by instrument exposure</TooltipContent>
+              </Tooltip>
+              <Tooltip>
+                <TooltipTrigger render={<TabsTrigger value="type" className="gap-1.5"><Boxes className="h-3 w-3" />Strategy Type</TabsTrigger>} />
+                <TooltipContent>Group by trading logic</TooltipContent>
+              </Tooltip>
+            </TabsList>
+          </Tabs>
+
+          {/* Expand / collapse every group in the active dimension */}
           <ToggleGroup variant="outline" size="sm" className="bg-zinc-900/60 border border-zinc-800 rounded-lg">
             <Tooltip>
               <TooltipTrigger
                 render={
                   <ToggleGroupItem
                     value="expand"
-                    onClick={() => groups.setAll(groupedList.map(g => g.underlying), true)}
+                    onClick={() => groups.setAll(activeGroupedList.map(g => g.underlying), true)}
                     className="text-zinc-500 data-checked:bg-transparent"
                   >
                     <ChevronsUpDown className="h-3 w-3" />
                   </ToggleGroupItem>
                 }
               />
-              <TooltipContent>Expand every index group</TooltipContent>
+              <TooltipContent>Expand every group</TooltipContent>
             </Tooltip>
             <Tooltip>
               <TooltipTrigger
                 render={
                   <ToggleGroupItem
                     value="collapse"
-                    onClick={() => groups.setAll(groupedList.map(g => g.underlying), false)}
+                    onClick={() => groups.setAll(activeGroupedList.map(g => g.underlying), false)}
                     className="text-zinc-500 data-checked:bg-transparent"
                   >
                     <ChevronsDownUp className="h-3 w-3" />
                   </ToggleGroupItem>
                 }
               />
-              <TooltipContent>Collapse every index group</TooltipContent>
+              <TooltipContent>Collapse every group</TooltipContent>
             </Tooltip>
           </ToggleGroup>
 
@@ -1197,6 +1253,56 @@ export default function StrategiesPlusPage() {
           </div>
         ) : (
           <div className="w-full">
+            {/* ── Strategy-type hub: one card per trading logic, mirrors the group headers below ── */}
+            {groupMode === 'type' && (
+              <div className="px-4 py-4 border-b border-zinc-900">
+                <div className="flex items-baseline justify-between mb-3">
+                  <div>
+                    <h2 className="text-base font-bold text-white tracking-tight">
+                      {activeGroupedList.length} Strategy Types
+                    </h2>
+                    <p className={`${TXT_CAPTION} font-normal text-zinc-500 mt-0.5`}>
+                      {instanceRows.length} strateg{instanceRows.length === 1 ? 'y' : 'ies'} across {activeGroupedList.length} logic group{activeGroupedList.length === 1 ? '' : 's'}
+                    </p>
+                  </div>
+                </div>
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+                  {activeGroupedList.map(({ underlying: groupKey, items: rows, runningCount: groupRunning }) => {
+                    const info = LOGIC_GROUPS[groupKey] ?? OTHER_LOGIC_GROUP;
+                    const a = ACCENT_CLASSES[info.accent] ?? ACCENT_CLASSES.zinc;
+                    const Icon = info.icon;
+                    const open = groups.isOpen(groupKey, groupRunning > 0);
+                    return (
+                      <button
+                        key={groupKey}
+                        type="button"
+                        onClick={() => groups.toggle(groupKey, open)}
+                        aria-expanded={open}
+                        className={`group flex flex-col items-start text-left gap-2 rounded-2xl border border-zinc-800 bg-zinc-900/50 p-4 transition-colors ${a.ring}`}
+                      >
+                        <div className={`flex items-center justify-center w-9 h-9 rounded-lg ${a.iconBg} border ${a.iconBorder} shrink-0`}>
+                          <Icon className={`h-4 w-4 ${a.icon}`} />
+                        </div>
+                        <h3 className="text-sm font-bold text-white tracking-tight">{info.title}</h3>
+                        <p className={`${TXT_CAPTION} font-normal text-zinc-500 leading-snug -mt-1`}>{info.tagline}</p>
+                        <div className="flex items-center gap-2 mt-1">
+                          <span className={`${TXT_LABEL} text-zinc-600 normal-case`}>
+                            {rows.length} strateg{rows.length === 1 ? 'y' : 'ies'}
+                          </span>
+                          {groupRunning > 0 && (
+                            <span className={`flex items-center gap-1 ${TXT_LABEL} normal-case text-emerald-400`}>
+                              <span className="h-1.5 w-1.5 rounded-full bg-emerald-500 animate-pulse" />
+                              {groupRunning} running
+                            </span>
+                          )}
+                        </div>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+
             {/* Table header */}
             <div className="flex items-center gap-0 px-4 py-1.5 border-b border-zinc-800 bg-zinc-900/60 sticky top-0 z-10">
               <div className="w-[90px] shrink-0 text-xs font-bold text-white">Status</div>
@@ -1208,21 +1314,25 @@ export default function StrategiesPlusPage() {
               <div className="shrink-0 w-[160px] text-xs font-bold text-white">Actions</div>
             </div>
 
-            {/* Strategy rows, grouped by underlying */}
-            {groupedList.map(({ underlying, items: rows, runningCount: groupRunning }) => {
-              const open = groups.isOpen(underlying, groupRunning > 0);
+            {/* Strategy rows, grouped by the active dimension (underlying or logic type) */}
+            {activeGroupedList.map(({ underlying: groupKey, items: rows, runningCount: groupRunning }) => {
+              const open = groups.isOpen(groupKey, groupRunning > 0);
+              const typeInfo = groupMode === 'type' ? (LOGIC_GROUPS[groupKey] ?? OTHER_LOGIC_GROUP) : null;
               return (
-                <div key={underlying}>
+                <div key={groupKey}>
                   <button
                     type="button"
-                    onClick={() => groups.toggle(underlying, open)}
+                    onClick={() => groups.toggle(groupKey, open)}
                     aria-expanded={open}
                     className="w-full flex items-center gap-2 px-4 py-1.5 bg-zinc-900 border-y border-zinc-800 text-left hover:bg-zinc-800/70 transition-colors"
                   >
                     {open
                       ? <ChevronDown className="h-3.5 w-3.5 text-zinc-400 shrink-0" />
                       : <ChevronRight className="h-3.5 w-3.5 text-zinc-400 shrink-0" />}
-                    <span className="text-xs font-bold text-white tracking-wide">{underlying}</span>
+                    <span className="text-xs font-bold text-white tracking-wide">{typeInfo ? typeInfo.title : groupKey}</span>
+                    {typeInfo && (
+                      <span className={`${TXT_CAPTION} font-normal text-zinc-500 hidden sm:inline`}>{typeInfo.tagline}</span>
+                    )}
                     <span className={`${TXT_LABEL} text-zinc-500 normal-case`}>
                       {rows.length} strateg{rows.length === 1 ? 'y' : 'ies'}
                     </span>

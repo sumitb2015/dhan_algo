@@ -117,7 +117,9 @@ export async function GET() {
           name: meta.name,
           // /strategies and /strategies-plus both group by this. Object.entries above
           // preserves the registry's key order, so group order follows the registry too.
-          underlying: meta.underlying
+          underlying: meta.underlying,
+          // The "By Strategy Type" grouping alternative on /strategies-plus.
+          logicGroup: meta.logicGroup
         },
         // `state` is the primary instance, kept for backward compatibility: /strategies
         // (StrategyCard) predates multi-instance and reads this field directly — dropping

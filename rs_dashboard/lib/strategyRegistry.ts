@@ -17,90 +17,143 @@ export const DEBUG_DIR = path.join(PROJECT_ROOT, 'debug');
  * page follows this object's key order, so place a new entry next to its siblings rather
  * than maintaining a separate ordering list.
  */
+/**
+ * Trading-logic taxonomy for the /strategies-plus "By Strategy Type" grouping view —
+ * an alternative to grouping by `underlying`, for when the question is "what kind of
+ * edge am I running" rather than "what am I exposed to". Order here controls card order.
+ */
+export const LOGIC_GROUPS: Record<string, { title: string; tagline: string; icon: string }> = {
+  harvest: {
+    title: 'Premium Harvest',
+    tagline: 'Sell & hold — theta does the work',
+    icon: 'Sprout',
+  },
+  rotation: {
+    title: 'Roll & Rotate',
+    tagline: 'Exit a decaying leg into a fresh strike',
+    icon: 'Repeat',
+  },
+  volatility: {
+    title: 'Volatility Adaptive',
+    tagline: 'Entry and hedge gated by the vol regime',
+    icon: 'Activity',
+  },
+  directional: {
+    title: 'Directional Options',
+    tagline: 'Trend + OI-confirmed spreads and sells',
+    icon: 'TrendingUp',
+  },
+  futures_trend: {
+    title: 'Futures Trend',
+    tagline: 'Ride MCX momentum in one direction',
+    icon: 'Flame',
+  },
+  momentum: {
+    title: 'Equity Momentum',
+    tagline: 'Relative-strength stock rotation',
+    icon: 'Rocket',
+  },
+};
+
 export const STRATEGIES_METADATA: Record<string, {
   name: string;
   path: string;
   underlying: string;
+  logicGroup: keyof typeof LOGIC_GROUPS;
   execBrokerEligible?: boolean;
 }> = {
   nifty_advanced_imbalance: {
     name: 'Nifty Advanced Imbalance',
     underlying: 'NIFTY',
+    logicGroup: 'harvest',
     path: path.join(PROJECT_ROOT, 'strategies', 'value_imbalance', 'nifty_advanced_imbalance.py'),
     execBrokerEligible: true,
   },
   nifty_delta_neutral: {
     name: 'Nifty Delta Neutral (0.5 Delta)',
     underlying: 'NIFTY',
+    logicGroup: 'volatility',
     path: path.join(PROJECT_ROOT, 'strategies', 'value_imbalance', 'nifty_delta_neutral.py'),
     execBrokerEligible: true,
   },
   nifty_value_imbalance_straddle: {
     name: 'Nifty Value Imbalance Straddle',
     underlying: 'NIFTY',
+    logicGroup: 'harvest',
     path: path.join(PROJECT_ROOT, 'strategies', 'value_imbalance', 'nifty_value_imbalance_straddle.py'),
     execBrokerEligible: true,
   },
   nifty_value_imbalance_strangle: {
     name: 'Nifty Value Imbalance Strangle',
     underlying: 'NIFTY',
+    logicGroup: 'harvest',
     path: path.join(PROJECT_ROOT, 'strategies', 'value_imbalance', 'nifty_value_imbalance_strangle.py'),
     execBrokerEligible: true,
   },
   nifty_vwap_1min_straddle: {
     name: 'Nifty VWAP 1-Min Straddle',
     underlying: 'NIFTY',
+    logicGroup: 'harvest',
     path: path.join(PROJECT_ROOT, 'strategies', 'value_imbalance', 'nifty_vwap_1min_straddle.py'),
     execBrokerEligible: true,
   },
   nifty_vix_straddle: {
     name: 'Nifty VIX-Filtered Straddle',
     underlying: 'NIFTY',
+    logicGroup: 'volatility',
     path: path.join(PROJECT_ROOT, 'strategies', 'value_imbalance', 'nifty_vix_straddle.py'),
     execBrokerEligible: true,
   },
   nifty_spread_trend: {
     name: 'Nifty Spread Trend-Following',
     underlying: 'NIFTY',
+    logicGroup: 'directional',
     path: path.join(PROJECT_ROOT, 'strategies', 'spread_trend', 'nifty_spread_trend.py'),
     execBrokerEligible: true,
   },
   nifty_oi_directional: {
     name: 'Nifty OI Directional',
     underlying: 'NIFTY',
+    logicGroup: 'directional',
     path: path.join(PROJECT_ROOT, 'strategies', 'oi_directional', 'nifty_oi_directional.py'),
     execBrokerEligible: true,
   },
   nifty_st_oi_bearcall: {
     name: 'Nifty ST+OI Bear Call Spread',
     underlying: 'NIFTY',
+    logicGroup: 'directional',
     path: path.join(PROJECT_ROOT, 'strategies', 'st_oi_bearcall', 'nifty_st_oi_bearcall.py'),
     execBrokerEligible: true,
   },
   nifty_rolling_straddle: {
     name: 'Nifty Rolling Short Straddle',
     underlying: 'NIFTY',
+    logicGroup: 'rotation',
     path: path.join(PROJECT_ROOT, 'strategies', 'value_imbalance', 'nifty_rolling_straddle.py'),
     execBrokerEligible: true,
   },
   crudeoilm_supertrend: {
     name: 'CrudeOil Mini Supertrend',
     underlying: 'CRUDEOILM',
+    logicGroup: 'futures_trend',
     path: path.join(PROJECT_ROOT, 'strategies', 'crudeoil', 'crudeoilm_supertrend.py')
   },
   crudeoilm_renko_sar: {
     name: 'CrudeOil Mini Renko SAR',
     underlying: 'CRUDEOILM',
+    logicGroup: 'futures_trend',
     path: path.join(PROJECT_ROOT, 'strategies', 'crudeoil', 'crudeoilm_renko_sar.py')
   },
   crudeoilm_vwap_supertrend: {
     name: 'CrudeOil Mini VWAP + Supertrend',
     underlying: 'CRUDEOILM',
+    logicGroup: 'futures_trend',
     path: path.join(PROJECT_ROOT, 'strategies', 'crudeoil', 'crudeoilm_vwap_supertrend.py')
   },
   crudeoilm_orb: {
     name: 'CrudeOil Mini ORB + Pivot Stop',
     underlying: 'CRUDEOILM',
+    logicGroup: 'futures_trend',
     path: path.join(PROJECT_ROOT, 'strategies', 'crudeoil', 'crudeoilm_orb.py')
   },
   // The only MULTI-SYMBOL strategy here: it tracks all 50 Nifty names and may hold several
@@ -111,6 +164,7 @@ export const STRATEGIES_METADATA: Record<string, {
   nifty50_vwap_rs: {
     name: 'Nifty 50 Intraday VWAP + RS',
     underlying: 'NIFTY 50',
+    logicGroup: 'momentum',
     path: path.join(PROJECT_ROOT, 'strategies', 'intraday_equity', 'nifty50_vwap_rs.py')
   },
   // The only positional / multi-day / CNC-delivery strategy here. Unlike every entry above,
@@ -119,6 +173,7 @@ export const STRATEGIES_METADATA: Record<string, {
   nifty500_momentum: {
     name: 'Nifty 500 Momentum Portfolio',
     underlying: 'NIFTY 500',
+    logicGroup: 'momentum',
     path: path.join(PROJECT_ROOT, 'strategies', 'momentum_investing', 'nifty500_momentum.py')
   },
 };
