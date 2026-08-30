@@ -290,6 +290,13 @@ class NiftyOvernightFly:
 
         self.ce_short = {'id': ce_id, 'strike': atm, 'avg_price': ce_entry, 'qty': qty}
         self.pe_short = {'id': pe_id, 'strike': atm, 'avg_price': pe_entry, 'qty': qty}
+        # Mark the position open as soon as the short legs exist, not once the
+        # whole entry (incl. hedges) finishes — otherwise a hedge-phase failure
+        # that also fails to fully unwind (exit_all_positions returns False)
+        # would leave position_open=False while ce_short/pe_short are still
+        # populated, and the main loop's "not position_open" branch would try
+        # to enter a SECOND straddle on top of the still-live first one.
+        self.position_open = True
 
         # Hedge distance derives from what we actually collected, not the quote
         # we saw before placing the order.
@@ -347,7 +354,6 @@ class NiftyOvernightFly:
         except Exception as e:
             logger.error(f"WebSocket subscribe failed: {e}")
 
-        self.position_open = True
         self.entry_date = date.today().isoformat()
         self.save_position()
         logger.info(
@@ -363,7 +369,15 @@ class NiftyOvernightFly:
         """A short leg's SL hit: buy it back, drag its hedge one step toward the
         new ATM, and sell a fresh short leg there — capped at
         --max-rolls-per-leg. Past the cap, the leg is left flat for the rest
-        of the cycle; its hedge stays on, still bounding risk on that side."""
+        of the cycle; its hedge stays on, still bounding risk on that side.
+
+        Every step is all-or-nothing: on an order failure the leg it would
+        have touched is left exactly as it was (still tracked, still live)
+        and the function returns immediately. This must never proceed to
+        open a NEW position while believing a FAILED close already
+        happened — that doubles exposure with half of it untracked. The
+        next tick's SL check re-evaluates and retries automatically.
+        """
         leg = self.ce_short if opt_type == "CE" else self.pe_short
         hedge = self.ce_hedge if opt_type == "CE" else self.pe_hedge
         qty = leg['qty']
@@ -373,13 +387,16 @@ class NiftyOvernightFly:
             qty_to_buy, net_qty = resolve_exit_qty_broker(
                 self.broker, leg['strike'], self.expiry, opt_type, qty, "BUY", logger)
             if qty_to_buy <= 0:
-                logger.warning(f"{opt_type} short net qty {net_qty} — nothing to close.")
+                logger.warning(f"{opt_type} short net qty {net_qty} — nothing to close (already flat at broker).")
             else:
                 oid = self.broker.buy(leg['strike'], self.expiry, opt_type, qty_to_buy, product=PRODUCT)
-                if oid:
-                    actual_exit = self.get_execution_price(oid, ltp)
-                else:
-                    logger.critical(f"{opt_type} short SL exit FAILED (buy returned None). Verify {opt_type} position manually!")
+                if not oid:
+                    logger.critical(
+                        f"{opt_type} short SL exit order FAILED at {leg['strike']} — leg is STILL OPEN "
+                        f"and remains tracked. Will retry next tick. Verify {opt_type} manually if this repeats!"
+                    )
+                    return
+                actual_exit = self.get_execution_price(oid, ltp)
         else:
             logger.info(f"[DRY RUN] {opt_type} short SL exit at {actual_exit:.2f}")
 
@@ -404,6 +421,21 @@ class NiftyOvernightFly:
             self.save_position()
             return
 
+        if hedge is None:
+            # A prior roll's hedge drag never recovered (close/re-buy failed).
+            # Selling a fresh short with no hedge behind it would violate the
+            # "never run unhedged" invariant this strategy exists to keep.
+            logger.critical(
+                f"{opt_type} has no hedge tracked (an earlier hedge drag never recovered) — refusing to "
+                f"re-sell {opt_type} short until the hedge is fixed manually. {opt_type} stays flat."
+            )
+            if opt_type == "CE":
+                self.ce_short = None
+            else:
+                self.pe_short = None
+            self.save_position()
+            return
+
         # Resolve the new ATM strike and drag the hedge one step toward it.
         spot = self.helper.get_ltp("NIFTY", exchange="IDX_I", instrument="INDEX")
         new_strike = int(round(spot / STRIKE_STEP) * STRIKE_STEP) if spot > 0 else leg['strike']
@@ -419,10 +451,12 @@ class NiftyOvernightFly:
             self._drag_hedge(opt_type, hedge, new_hedge_strike, qty)
             hedge = self.ce_hedge if opt_type == "CE" else self.pe_hedge
             if hedge is None:
-                # _drag_hedge already logged CRITICAL — that side is unhedged.
-                # Still try to re-sell the short below rather than leaving it
-                # doubly flat, but the operator must fix the hedge manually.
-                pass
+                logger.critical(
+                    f"{opt_type} hedge drag left {opt_type} UNHEDGED — refusing to re-sell {opt_type} "
+                    f"short until the hedge is fixed manually. {opt_type} stays flat."
+                )
+                self.save_position()
+                return
 
         # Sell a fresh short leg at the new ATM strike.
         new_id, new_price = self._get_quote(new_strike, opt_type)
@@ -438,13 +472,7 @@ class NiftyOvernightFly:
         entry_price = new_price
         if not self.dry_run:
             oid = self.broker.sell(new_strike, self.expiry, opt_type, qty, product=PRODUCT)
-            if oid:
-                entry_price = self.get_execution_price(oid, new_price)
-                try:
-                    self.helper.subscribe_instruments([("NSE_FNO", str(new_id), 15)])
-                except Exception as e:
-                    logger.error(f"WebSocket subscribe failed for {new_id}: {e}")
-            else:
+            if not oid:
                 logger.critical(f"{opt_type} re-sell after roll FAILED — {opt_type} side stays flat. Verify manually!")
                 if opt_type == "CE":
                     self.ce_short = None
@@ -452,6 +480,11 @@ class NiftyOvernightFly:
                     self.pe_short = None
                 self.save_position()
                 return
+            entry_price = self.get_execution_price(oid, new_price)
+            try:
+                self.helper.subscribe_instruments([("NSE_FNO", str(new_id), 15)])
+            except Exception as e:
+                logger.error(f"WebSocket subscribe failed for {new_id}: {e}")
         else:
             logger.info(f"[DRY RUN] Re-sell {opt_type} at {new_strike} @ ~{new_price:.2f}")
 
@@ -463,6 +496,20 @@ class NiftyOvernightFly:
             self.ce_short = new_leg
         else:
             self.pe_short = new_leg
+
+        # CE/PE inversion guard (see root CLAUDE.md's repo-wide convention). Each
+        # side rolls independently to the current ATM on its own SL trigger, so
+        # in principle a fast enough whipsaw could put the two short strikes the
+        # wrong way around. Never trade an inverted straddle unsupervised.
+        if self.ce_short and self.pe_short and self.ce_short['strike'] <= self.pe_short['strike']:
+            logger.critical(
+                f"Strike inversion after roll! CE {self.ce_short['strike']} <= PE {self.pe_short['strike']}. "
+                f"Emergency unwind."
+            )
+            self.exit_all_positions("Strike inversion after roll — emergency unwind")
+            self.save_state(status="STOPPED (inversion)")
+            return
+
         self.save_position()
         logger.info(
             f"{opt_type} rolled to {new_strike} @ {entry_price:.2f} | "
@@ -471,21 +518,32 @@ class NiftyOvernightFly:
 
     def _drag_hedge(self, opt_type, hedge, new_hedge_strike, qty):
         """Close the old hedge leg and open a new one one strike closer to ATM.
-        Sets self.ce_hedge/pe_hedge to None (and logs CRITICAL) if the new
-        hedge can't be resolved or bought — the short leg re-sold right after
-        this is then temporarily UNHEDGED until an operator intervenes."""
-        hedge_exit = self._get_quote(hedge['strike'], opt_type)[1] or 0.0
+
+        All-or-nothing on the close: if closing the old hedge fails (or there's
+        nothing left to close per the broker), the ORIGINAL hedge is left
+        exactly as it was — never orphaned, never marked closed on a guess.
+        Only sets self.ce_hedge/pe_hedge to None (and logs CRITICAL) once the
+        old hedge DID close but the new one couldn't be resolved or bought —
+        that half genuinely can't be made atomic over the wire, and the short
+        leg re-sold right after this returning None must refuse to proceed
+        (see roll_leg)."""
         if not self.dry_run:
             qty_to_sell, net_qty = resolve_exit_qty_broker(
                 self.broker, hedge['strike'], self.expiry, opt_type, qty, "SELL", logger)
-            if qty_to_sell > 0:
-                oid = self.broker.sell(hedge['strike'], self.expiry, opt_type, qty_to_sell, product=PRODUCT)
-                if oid:
-                    hedge_exit = self.get_execution_price(oid, hedge_exit)
-                else:
-                    logger.error(f"{opt_type} hedge close-out at {hedge['strike']} FAILED — old hedge may still be live, verify manually.")
+            if qty_to_sell <= 0:
+                logger.warning(f"{opt_type} hedge net qty {net_qty} — nothing to close (already flat at broker). Keeping tracked hedge as-is.")
+                return
+            oid = self.broker.sell(hedge['strike'], self.expiry, opt_type, qty_to_sell, product=PRODUCT)
+            if not oid:
+                logger.error(f"{opt_type} hedge close-out at {hedge['strike']} FAILED — leaving hedge in place, not dragged this cycle.")
+                return
+            hedge_exit = self.get_execution_price(oid, self._get_quote(hedge['strike'], opt_type)[1] or hedge['avg_price'])
         else:
             logger.info(f"[DRY RUN] Drag {opt_type} hedge {hedge['strike']} -> {new_hedge_strike}")
+            hedge_exit = self._get_quote(hedge['strike'], opt_type)[1] or hedge['avg_price']
+
+        # The old hedge is now genuinely closed — only past this point is it
+        # safe to stop tracking it and try to open the replacement.
         self.realized_pnl += (hedge_exit - hedge['avg_price']) * qty
         try:
             self.helper.unsubscribe_instruments([("NSE_FNO", str(hedge['id']), 15)])
@@ -526,14 +584,27 @@ class NiftyOvernightFly:
 
     # ── exit ─────────────────────────────────────────────────────────────
 
-    def exit_all_positions(self, reason):
+    def exit_all_positions(self, reason) -> bool:
         """Closes whichever of the four legs are currently set — safe to call
         as a full exit, or as an emergency unwind mid-entry when only some
-        legs got placed."""
+        legs got placed.
+
+        A leg is only cleared from tracking once its close order was actually
+        accepted (or the broker confirms nothing is left to close). A leg
+        whose close order fails or throws stays tracked — position_open stays
+        True and save_position() keeps recording it — so a failed exit can
+        NEVER silently present as flat. Returns True iff every leg is now
+        closed; callers should treat False as "still open, will need to
+        retry" rather than assuming the position is gone.
+        """
         logger.warning(f"!!! EXITING OVERNIGHT FLY: {reason} !!!")
-        for opt_type, leg in (("CE", self.ce_short), ("PE", self.pe_short)):
+        any_still_open = False
+
+        for opt_type in ("CE", "PE"):
+            leg = self.ce_short if opt_type == "CE" else self.pe_short
             if not leg:
                 continue
+            closed = True
             try:
                 qty_to_buy, net_qty = resolve_exit_qty_broker(
                     self.broker, leg['strike'], self.expiry, opt_type, leg['qty'], "BUY", logger)
@@ -543,14 +614,32 @@ class NiftyOvernightFly:
                         logger.info(f"{opt_type} short {leg['strike']} exit placed for {qty_to_buy} qty (own {leg['qty']}, broker net {net_qty}): {oid}")
                         if oid:
                             self.helper.wait_for_fill(oid, timeout=5)
+                        else:
+                            logger.critical(f"{opt_type} short {leg['strike']} exit order FAILED — leg remains tracked, must retry.")
+                            closed = False
                     else:
                         logger.info(f"[DRY RUN] {opt_type} short {leg['strike']} exit simulated")
             except Exception as e:
                 logger.error(f"Exit {opt_type} short leg {leg['strike']} error: {e}")
+                closed = False
 
-        for opt_type, leg in (("CE", self.ce_hedge), ("PE", self.pe_hedge)):
+            if closed:
+                try:
+                    self.helper.unsubscribe_instruments([("NSE_FNO", str(leg['id']), 15)])
+                except Exception:
+                    pass
+                if opt_type == "CE":
+                    self.ce_short = None
+                else:
+                    self.pe_short = None
+            else:
+                any_still_open = True
+
+        for opt_type in ("CE", "PE"):
+            leg = self.ce_hedge if opt_type == "CE" else self.pe_hedge
             if not leg:
                 continue
+            closed = True
             try:
                 qty_to_sell, net_qty = resolve_exit_qty_broker(
                     self.broker, leg['strike'], self.expiry, opt_type, leg['qty'], "SELL", logger)
@@ -560,20 +649,38 @@ class NiftyOvernightFly:
                         logger.info(f"{opt_type} hedge {leg['strike']} exit placed for {qty_to_sell} qty (own {leg['qty']}, broker net {net_qty}): {oid}")
                         if oid:
                             self.helper.wait_for_fill(oid, timeout=5)
+                        else:
+                            logger.critical(f"{opt_type} hedge {leg['strike']} exit order FAILED — leg remains tracked, must retry.")
+                            closed = False
                     else:
                         logger.info(f"[DRY RUN] {opt_type} hedge {leg['strike']} exit simulated")
             except Exception as e:
                 logger.error(f"Exit {opt_type} hedge leg {leg['strike']} error: {e}")
+                closed = False
 
-        for leg in (self.ce_short, self.pe_short, self.ce_hedge, self.pe_hedge):
-            if leg:
+            if closed:
                 try:
                     self.helper.unsubscribe_instruments([("NSE_FNO", str(leg['id']), 15)])
                 except Exception:
                     pass
+                if opt_type == "CE":
+                    self.ce_hedge = None
+                else:
+                    self.pe_hedge = None
+            else:
+                any_still_open = True
+
+        if any_still_open:
+            logger.critical(
+                "EXIT INCOMPLETE — at least one leg failed to close and remains tracked/live. "
+                "position_open stays True so the position file reflects reality; retry required."
+            )
+            self.save_position()
+            return False
 
         self._reset_position_state()
         self.save_position()
+        return True
 
     # ── dashboard state ──────────────────────────────────────────────────
 
@@ -619,9 +726,16 @@ class NiftyOvernightFly:
         while True:
             if check_shutdown_trigger(self.state_key):
                 logger.info("UI Shutdown Request.")
+                fully_closed = True
                 if self.position_open:
-                    self.exit_all_positions("UI Shutdown Request")
-                self.save_state(status="STOPPED")
+                    fully_closed = self.exit_all_positions("UI Shutdown Request")
+                self.save_state(status="STOPPED" if fully_closed else "STOPPED (EXIT INCOMPLETE — VERIFY MANUALLY)")
+                if not fully_closed:
+                    logger.critical(
+                        "Process is exiting on shutdown request but at least one leg did NOT confirm "
+                        "closed. The position file still shows it as open for the next restart to pick "
+                        "up — verify the broker account manually before assuming this is flat."
+                    )
                 sys.exit(0)
 
             if not self.dry_run and not self.helper.is_market_open():
@@ -661,28 +775,40 @@ class NiftyOvernightFly:
                 if ltp > 0 and ltp >= leg['sl']:
                     self.roll_leg(opt_type, ltp)
 
+            # Re-derive P&L after the roll loop — a roll can materially change
+            # realized_pnl, and the trailing-stop decision below must not act on
+            # a stale pre-roll number.
+            if self.position_open:
+                total_pnl = self._calculate_pnl()
+
             # Trailing stop — rupee MTM basis, continuous across rolls (total_pnl
             # already folds in realized_pnl, so a roll's booked loss/gain is
             # absorbed automatically).
-            if not self.trail_active and total_pnl >= self.trail_start_rs:
+            if self.position_open and not self.trail_active and total_pnl >= self.trail_start_rs:
                 self.trail_active = True
                 self.best_pnl = total_pnl
                 logger.info(f"Trail SL activated at {total_pnl:+.0f} (arm {self.trail_start_rs:.0f}, gap {self.trail_gap_rs:.0f})")
-            if self.trail_active:
+            if self.position_open and self.trail_active:
                 if total_pnl > self.best_pnl:
                     self.best_pnl = total_pnl
                 trail_exit = self.best_pnl - self.trail_gap_rs
                 if total_pnl < trail_exit:
-                    self.exit_all_positions(
+                    fully_closed = self.exit_all_positions(
                         f"Trailing SL hit! PnL {total_pnl:+.0f} < exit {trail_exit:+.0f} (best {self.best_pnl:+.0f})"
                     )
-                    self.save_state(status="WAITING", spot=spot, total_pnl=0.0)
+                    if fully_closed:
+                        self.save_state(status="WAITING", spot=spot, total_pnl=0.0)
+                    else:
+                        self.save_state(status="RUNNING (exit retry pending)", spot=spot, total_pnl=self._calculate_pnl())
 
             # Expiry-day close — the ONE day this position squares off, unlike
             # every other intraday strategy's daily 15:17 rule.
             if self.position_open and dte == 0 and current_time_str >= self.eod_exit_time:
-                self.exit_all_positions(f"Expiry day close at {current_time_str}")
-                self.save_state(status="WAITING", spot=spot, total_pnl=0.0)
+                fully_closed = self.exit_all_positions(f"Expiry day close at {current_time_str}")
+                if fully_closed:
+                    self.save_state(status="WAITING", spot=spot, total_pnl=0.0)
+                else:
+                    self.save_state(status="RUNNING (exit retry pending)", spot=spot, total_pnl=self._calculate_pnl())
 
             time.sleep(2)
 
@@ -800,6 +926,7 @@ Examples:
         strat.run()
     except KeyboardInterrupt:
         logger.warning("KeyboardInterrupt detected. Gracefully exiting and squaring off all positions...")
+        fully_closed = True
         if strat.position_open:
-            strat.exit_all_positions("KeyboardInterrupt / Manual Stop")
-        strat.save_state(status="STOPPED")
+            fully_closed = strat.exit_all_positions("KeyboardInterrupt / Manual Stop")
+        strat.save_state(status="STOPPED" if fully_closed else "STOPPED (EXIT INCOMPLETE — VERIFY MANUALLY)")
