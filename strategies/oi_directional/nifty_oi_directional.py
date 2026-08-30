@@ -547,6 +547,7 @@ class NiftyOIDirectional:
     # ── main strategy loop ───────────────────────────────────────────────────
 
     def run(self):
+        exit_if_market_closed(self.helper, self.dry_run)
         logger.info("=== STARTING NIFTY OI-DIRECTIONAL STRATEGY ===")
         logger.info(
             f"Config: Mode={'LIVE' if not self.dry_run else 'DRY'} | Lots={self.lots}"
