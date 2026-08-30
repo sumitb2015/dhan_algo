@@ -55,7 +55,7 @@ class NiftyAdvancedImbalance:
                  use_premium=False, target_premium=50.0,
                  start_time="09:20", loser_ratio_lots=1,
                  leg_sl_pct=0.20,
-                 recovery_reweight=False, recovery_sl_pct=0.30,
+                 recovery_reweight=False, recovery_sl_pct=0.30, recovery_max_per_cycle=2,
                  trail_start_rs=500.0, trail_gap_rs=300.0,
                  scalp_floor_pct=0.0, multi_cycle=False, cycle_cooldown=300,
                  state_key="nifty_advanced_imbalance", broker="dhan"):
@@ -87,6 +87,7 @@ class NiftyAdvancedImbalance:
         self.leg_sl_pct = leg_sl_pct
         self.recovery_reweight = bool(recovery_reweight)
         self.recovery_sl_pct = recovery_sl_pct
+        self.recovery_max_per_cycle = int(recovery_max_per_cycle)
         self.trail_start_rs = trail_start_rs
         self.trail_gap_rs = trail_gap_rs
         self.scalp_floor_pct = float(scalp_floor_pct)
@@ -168,6 +169,12 @@ class NiftyAdvancedImbalance:
         # suppressed — see _handle_reentry_sl_and_entry().
         self.ce_recovery = None
         self.pe_recovery = None
+        # Per-cycle attempt counters — a choppy session can stop a recovery leg
+        # out, let the short leg resume, and get stopped into recovery again
+        # repeatedly; --recovery-max-per-cycle bounds how many times each side
+        # will do this before it falls back to plain re-entry-on-premium only.
+        self.ce_recovery_count = 0
+        self.pe_recovery_count = 0
 
     def sleep_cooldown(self, seconds, reason="Cooldown"):
         """Shutdown-aware sleep for cooldowns and delays with UI status updates."""
@@ -229,8 +236,11 @@ class NiftyAdvancedImbalance:
             "leg_sl_pct": self.leg_sl_pct,
             "recovery_reweight": self.recovery_reweight,
             "recovery_sl_pct": self.recovery_sl_pct,
+            "recovery_max_per_cycle": self.recovery_max_per_cycle,
             "ce_recovery": self.ce_recovery,
             "pe_recovery": self.pe_recovery,
+            "ce_recovery_count": self.ce_recovery_count,
+            "pe_recovery_count": self.pe_recovery_count,
             "trail_active": self.trail_active,
             "trail_start_rs": self.trail_start_rs,
             "trail_gap_rs": self.trail_gap_rs,
@@ -532,6 +542,15 @@ class NiftyAdvancedImbalance:
             logger.warning(f"Recovery Reweight: nothing to recover for {opt_type} (qty={qty}). Skipping.")
             return
 
+        count = self.ce_recovery_count if opt_type == "CE" else self.pe_recovery_count
+        if count >= self.recovery_max_per_cycle:
+            logger.warning(
+                f"Recovery Reweight: {opt_type} recovery cap reached "
+                f"({count}/{self.recovery_max_per_cycle} this cycle) — leaving {opt_type} flat, "
+                f"will resume normal re-entry-on-premium watch instead."
+            )
+            return
+
         stopped_strike = self.ce_strike if opt_type == "CE" else self.pe_strike
         recovery_strike = next_otm_strike(stopped_strike, opt_type, strike_step=50)
 
@@ -570,12 +589,16 @@ class NiftyAdvancedImbalance:
         }
         if opt_type == "CE":
             self.ce_recovery = recovery
+            self.ce_recovery_count += 1
+            count_label = f"{self.ce_recovery_count}/{self.recovery_max_per_cycle}"
         else:
             self.pe_recovery = recovery
+            self.pe_recovery_count += 1
+            count_label = f"{self.pe_recovery_count}/{self.recovery_max_per_cycle}"
         logger.info(
             f"Recovery Reweight: {opt_type} recovery leg opened at {recovery_strike} "
-            f"(stopped leg was {stopped_strike}) qty={qty} entry={entry_price:.2f} "
-            f"SL={recovery['sl']:.2f}"
+            f"(stopped leg was {stopped_strike}, attempt {count_label} this cycle) "
+            f"qty={qty} entry={entry_price:.2f} SL={recovery['sl']:.2f}"
         )
 
     def _check_recovery_exit(self, opt_type: str):
@@ -743,6 +766,8 @@ class NiftyAdvancedImbalance:
             except Exception: pass
         self.ce_recovery = None
         self.pe_recovery = None
+        self.ce_recovery_count = 0
+        self.pe_recovery_count = 0
 
         self.ce_strike = None
         self.pe_strike = None
@@ -1637,7 +1662,8 @@ Available Adjustment Modes:
                      (requires --entry-type straddle)
                      Add --recovery-reweight to instead buy a fresh long option one strike
                      further OTM on a leg's SL hit (own SL via --recovery-sl-pct), betting the
-                     stop-out marks a real trend rather than noise to fade.
+                     stop-out marks a real trend rather than noise to fade. Capped at
+                     --recovery-max-per-cycle attempts per side per cycle (default: 2).
 
 Examples:
   # Dry run with value-balanced winner roll adjustment
@@ -1716,6 +1742,12 @@ Examples:
     parser.add_argument("--recovery-sl-pct", type=float, default=0.30, metavar="PCT",
                         help="Stop loss for a recovery leg, as a fraction below its entry price "
                              "(default: 0.30 = 30%%). Only used with --recovery-reweight.")
+    parser.add_argument("--recovery-max-per-cycle", type=int, default=2, metavar="N",
+                        help="Max recovery-leg attempts per side per cycle (default: 2). A choppy "
+                             "session can stop a recovery leg out and let the short leg resume, "
+                             "then get stopped into recovery again repeatedly; once a side hits "
+                             "this cap it falls back to plain re-entry-on-premium for the rest of "
+                             "the cycle. Only used with --recovery-reweight.")
     parser.add_argument("--trail-start-rs", type=float, default=500.0, metavar="INR",
                         help="Activate trailing SL once MTM profit reaches this many rupees (default: 500)")
     parser.add_argument("--trail-gap-rs", type=float, default=300.0, metavar="INR",
@@ -1790,6 +1822,10 @@ Examples:
         _errors.append(f"--recovery-sl-pct {args.recovery_sl_pct} has no effect without --recovery-reweight.")
     if args.recovery_sl_pct <= 0 or args.recovery_sl_pct >= 1:
         _errors.append(f"--recovery-sl-pct must be between 0 and 1 (exclusive), got {args.recovery_sl_pct}.")
+    if args.recovery_max_per_cycle != 2 and not args.recovery_reweight:
+        _errors.append(f"--recovery-max-per-cycle {args.recovery_max_per_cycle} has no effect without --recovery-reweight.")
+    if args.recovery_max_per_cycle < 1:
+        _errors.append(f"--recovery-max-per-cycle must be >= 1, got {args.recovery_max_per_cycle}.")
 
     # --max-lots has no effect in reentry_straddle (always re-enters at initial lot size)
     if args.mode == "reentry_straddle" and args.max_lots != 4:
@@ -1908,6 +1944,7 @@ Examples:
         leg_sl_pct=args.leg_sl_pct,
         recovery_reweight=args.recovery_reweight,
         recovery_sl_pct=args.recovery_sl_pct,
+        recovery_max_per_cycle=args.recovery_max_per_cycle,
         trail_start_rs=args.trail_start_rs,
         trail_gap_rs=args.trail_gap_rs,
         scalp_floor_pct=args.scalp_floor_pct,
