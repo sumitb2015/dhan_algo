@@ -53,6 +53,11 @@ export const LOGIC_GROUPS: Record<string, { title: string; tagline: string; icon
     tagline: 'Relative-strength stock rotation',
     icon: 'Rocket',
   },
+  overnight_hedge: {
+    title: 'Overnight Hedge',
+    tagline: 'Hedged straddle held past the close',
+    icon: 'Moon',
+  },
 };
 
 export const STRATEGIES_METADATA: Record<string, {
@@ -175,6 +180,19 @@ export const STRATEGIES_METADATA: Record<string, {
     underlying: 'NIFTY 500',
     logicGroup: 'momentum',
     path: path.join(PROJECT_ROOT, 'strategies', 'momentum_investing', 'nifty500_momentum.py')
+  },
+  // The only OVERNIGHT options strategy here: it deliberately does NOT flatten at the
+  // usual 15:17 intraday cutoff, holding a hedged short straddle from the day before
+  // expiry through to expiry day. Unlike nifty500_momentum, Stop DOES flatten it (no
+  // supervising process = no one managing the rolls/SL on a live short straddle) —
+  // position state persists in debug/nifty_overnight_fly_position.json so a restart
+  // reconciles the open hedge instead of re-entering blind.
+  nifty_overnight_fly: {
+    name: 'Nifty Overnight Fly',
+    underlying: 'NIFTY',
+    logicGroup: 'overnight_hedge',
+    path: path.join(PROJECT_ROOT, 'strategies', 'overnight_fly', 'nifty_overnight_fly.py'),
+    execBrokerEligible: true,
   },
 };
 
