@@ -121,6 +121,31 @@ def main():
     write_status('RUNNING', subscribed=n, index=args.index, started_at=started_at)
     print('[live_equity_ws] WebSocket connected. Writing quotes every 2 s…', flush=True)
 
+    # ── Stall watchdog ───────────────────────────────────────────────────────
+    # The SDK's own reconnect only fires once `feed.run()` returns, and it
+    # returns either on a fatal error (429/401/403) or once the underlying
+    # `websockets` library's ping/pong keepalive (20s interval + 20s timeout)
+    # notices the socket is dead — up to ~40s of frozen prices before a
+    # reconnect even starts. A silent connection death (dropped Wi-Fi, NAT
+    # idle-timeout — no clean close frame) shows no error at all, so the
+    # dashboard panel just sits on stale numbers until that keepalive expires.
+    #
+    # During market hours at least a handful of the 50 stocks should tick
+    # every couple of seconds, so "every single LTP identical for this long"
+    # is itself the signal — cheaper and faster than waiting on the socket
+    # layer to notice. Forcing close_connection() here hands control back to
+    # dhan_helper.py's run_ws() outer loop, which reconnects with a bounded
+    # ~5s (+jitter) backoff instead of the open-ended wait.
+    STALL_SEC = 20
+    last_tick_signature = None
+    last_tick_change_ts = time.monotonic()
+
+    def market_open(now_ist: datetime) -> bool:
+        if now_ist.weekday() >= 5:
+            return False
+        t = now_ist.time()
+        return (9, 15) <= (t.hour, t.minute) <= (15, 30)
+
     # Yesterday's close, keyed "<IST date>:<symbol>", populated by the first
     # genuine (non-flipped) tick seen each day and reused after that.
     #
@@ -194,6 +219,27 @@ def main():
                 'quotes': quotes,
             })
             write_status('RUNNING', subscribed=n, index=args.index, started_at=started_at)
+
+            # Every LTP identical to the previous cycle, for STALL_SEC, during
+            # market hours: the socket is dead but hasn't told anyone yet.
+            now_monotonic = time.monotonic()
+            signature = tuple(sorted((sym, q['ltp']) for sym, q in quotes.items()))
+            if signature != last_tick_signature:
+                last_tick_signature = signature
+                last_tick_change_ts = now_monotonic
+            elif (market_open(datetime.now(IST))
+                  and now_monotonic - last_tick_change_ts > STALL_SEC):
+                print(f'[live_equity_ws] No tick movement for {STALL_SEC}s during market '
+                      f'hours — forcing reconnect.', flush=True)
+                try:
+                    if getattr(helper, 'feed', None):
+                        helper.feed.close_connection()
+                except Exception as e:
+                    print(f'[live_equity_ws] WARNING: forced close_connection failed: {e}', flush=True)
+                # Reset so we don't fire again immediately while the outer
+                # reconnect loop (dhan_helper.py's run_ws) is still working —
+                # the next real signature change re-arms the watchdog.
+                last_tick_change_ts = now_monotonic
 
             time.sleep(2)
 
