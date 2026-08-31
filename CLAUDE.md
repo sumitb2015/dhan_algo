@@ -189,7 +189,11 @@ Non-obvious route behaviors:
 - `strategies/` / `saved-strategies/` — start/stop strategy processes via `spawn`; read state files and cross-check PIDs.
 - `refresh/`, `futures-refresh/`, `options-refresh/`, `backfill/`, `crudeoil-oi-collector/` — spawn the matching Python script, poll its `debug/*_status.json`, stop via `debug/*_stop.trigger`.
 - `copy-trade/` — start/stop/status UI for `scripts/tools/copy_trade_bridge.py` (the Multi-broker copy-trade bridge below): POST `{action:"start"}` spawns it detached, POST `{action:"stop"}` writes `debug/copy_trade_stop.trigger`, GET reports RUNNING/STARTING/STALE/STOPPED off a 20s heartbeat staleness check against `debug/copy_trade_status.json`.
-- `kotak-pnl/` — the Trader's Diary's Kotak source. Kotak Neo has **no historical trade endpoint** (`trade_report()` takes no dates and returns only the current day), so unlike the Dhan side this is not a broker sync: the user drops statement exports into `debug/kotak_pnl_reports/` and POST `{action:"import"}` runs `scripts/tools/import_kotak_pnl_reports.py` over them. Two formats, and the precedence matters: a **Transaction Statement** (sheet `On Market`) is one row per fill and is FIFO-matched into exact daily P&L; a **Gain/Loss** export is per-scrip over a date range with no per-trade date, so it collapses to one end-stamped point. Where both cover the same dates the transaction statement wins — not just for granularity, but because **the Gain/Loss F&O export omits the commodity segment entirely** (on the first real pair it hid −₹5,048 of MCX crude). Read that script's docstring before touching either parser: the Gain/Loss "Realised P&L" column is already net of GST/brokerage/misc (true gross is the separate `Gross P&L (T + (C + D + E))` column), and the transaction statement's "Total Charges" *excludes* STT while the Gain/Loss column of the same name includes it.
+- `kotak-pnl/` — the Trader's Diary's Kotak source. Not a broker sync (Kotak Neo has no historical
+  trade endpoint) — the user drops statement exports into `debug/kotak_pnl_reports/` and POST
+  `{action:"import"}` runs `scripts/tools/import_kotak_pnl_reports.py` over them. Two import
+  formats with import-precedence and P&L-column-semantics traps — see
+  [docs/API_GOTCHAS.md](docs/API_GOTCHAS.md) before touching either parser.
 - `exit-all/`, `pnl-exit/`, `quiktrade/`, `crudeoil/kotak-order/` — square off positions / place quick trades: real-money endpoints.
 - `csp-scan/` — spawns `scripts/tools/csp_scanner.py` (screening only, no orders); `csp-tracked/sell` and `csp-watchlist/exit` place and exit **real** cash-secured-put orders via `scripts/tools/csp_watchlist.py`, then track fills/strike-rolls in `lib/cspTracked.ts`'s JSON store — reconciled against broker truth by `csp-tracked/reconcile` and `csp-tracked/sync`.
 
@@ -241,7 +245,8 @@ inside the token system.
 
 **Skills for recurring work** — read the matching skill before starting, each is
 distilled from 7-10 repeat bug-fix commits:
-`dhan-broker-positions` (scalper terminals, broker payloads, P&L, close/exit orders),
+`dhan-broker-positions` (scalper terminals, broker payloads, P&L, MTM history, close/exit orders),
+`dhan-options-analytics-page` (Positions/Straddle/Strangle Analysis: draft legs, margin/ROI, validity modals),
 `dhan-live-chart` (lightweight-charts canvas charts and polled series),
 `dhan-polling-guards` (poll loops, caches, JSON read-modify-write, process spawns),
 `dhan-theme-tokens` (the theme system), `dhan-commit-on-blur` (free-typed inputs
@@ -261,13 +266,12 @@ These are not obvious and have caused runtime errors in the past (see [GEMINI.md
 - **Always pass `instrument=`** (e.g. `"INDEX"`, `"EQUITY"`, `"OPTIDX"`) to `get_ltp()` / `find_*` to prevent the helper from defaulting to `"EQUITY"` and logging "Security not found" warnings.
 - **NIFTY symbol**: use `"NIFTY"` (not `"NIFTY 50"`). Exchange `"IDX_I"` is mapped internally to `"NSE"` for master list lookups.
 - **NIFTY options underlying ID is `26000`**, not `13` (which is the Nifty 50 index security ID used for spot price and expiry list calls).
-- **SENSEX splits three ways and every wrong combination fails silently.** Option chain + expiry list key on security id **`1` / `BSE_FNO`**; the index's own id `51` is only for spot/candles, and those are served under **`IDX_I`** — `BSE_IDX` returns `DH-905` for history and an empty payload for quotes, so `get_ltp("SENSEX", exchange="BSE")` returns `0.0`. Pass the numeric id, never the bare symbol (which resolves to `51` and yields an empty chain). The tables in `scripts/tools/options_data_fetch.py` and `options_chart_fetch.py` encode this. When re-probing, note `get_option_chain` caches 5 s on `(security_id, expiry)` — a bad combination can appear to work off a prior call's cache entry.
 - **Market feed WebSocket**: use `feed.run()` inside the background thread. `feed.run_forever()` returns immediately in the current SDK, causing a reconnection loop.
 - **Lot sizes are dynamic** — fetch with `helper.get_lot_size("NIFTY")`. For index symbols, this automatically queries derivative contracts to return the option lot size, not the index placeholder of `1`.
-- **Previous day levels**: use `helper.get_prev_day_levels("NIFTY")` — do not inline `get_historical_data()` calls for PDH/PDL/PDC. (It reads the returned row's actual date rather than assuming row-count offsets — Dhan's DAILY endpoint doesn't publish today's row until the session closes, so a fixed "step back N rows" offset returns the wrong day intraday.)
-- **Data API failures are silent by default** — historical/intraday data methods return empty results on API errors (e.g. `DH-902` when the Data API subscription lapses). Check `helper.last_api_error` after an empty response before concluding "no data" / "up to date"; scripts that report freshness must surface it.
-- **`find_future()` must filter out expired contracts before picking nearest.** Dhan's master list keeps expired futures rows for days after expiry, sorted by expiry date — picking the earliest-sorted match without an `SM_EXPIRY_DATE >= today` filter can resolve a dead security ID with no live OHLC/quote data.
-- **`get_option_chain()`'s per-strike `oc[strike]['ce'/'pe']` dict names the previous-day close field `previous_close_price`, not `previous_close`.** `previous_oi` (OI) is spelled as you'd expect — only the close field has the `_price` suffix. Reading `previous_close` silently returns `None`/0 with no error, which then reads as "no previous close" everywhere downstream (e.g. a buildup-classifier's prev-day fallback going permanently 0%). This exact typo has been copied between scripts more than once (`live_options_ws.py`, `focus_tool_ws.py`) — verify the field name against a live response before trusting it in new code.
+- **Previous day levels**: use `helper.get_prev_day_levels("NIFTY")` — do not inline `get_historical_data()` calls for PDH/PDL/PDC.
+- **Data API failures are silent by default** — check `helper.last_api_error` after an empty response before concluding "no data".
+
+Several more of these have caused real bugs and are non-obvious enough to need the full story — **read [docs/API_GOTCHAS.md](docs/API_GOTCHAS.md) before touching SENSEX instrument ids, the option-chain `previous_close_price` field, `find_future()`'s expiry filtering, or diagnosing a `DH-905` order failure.**
 
 ## Strategy Conventions
 
@@ -320,20 +324,10 @@ the scalper terminals and as copy-trade children that mirror Dhan fills.
   scope. The safety invariants live in `ChildBroker` so the two cannot drift: a reducing order is
   never margin-blocked, unknown margin fails OPEN, a stale position snapshot fails OPEN, and the
   fast path (WS callback thread) never makes an HTTP call.
-- **Kotak quirks** (all handled in `lib/kotak/`): auth failures and "no data" arrive as 200-OK
-  bodies (`stCode 5203` = empty book, not an error); positions report no net quantity (compute it
-  from the four `cf*`/`fl*` legs); strikes are ×100 scaled in the scrip master; the REST base URL
-  is per-user and comes from the login response; the SDK issues every HTTP call with **no
-  timeout**, so `lib.kotak.authentication.install_timeouts()` must run before any API use.
-- **Kotak expiry epochs differ per segment.** `nse_fo`/`bse_fo` use a **1980-based epoch** (add 10
-  calendar years). `mcx_fo` does **not** — its timestamps are a genuine epoch and must be read in
-  **UTC** (Kotak stamps 23:59:59 UTC, so local parsing rolls every expiry forward a day). Applying
-  the NSE rule to commodities returns 2036. Both branches live in
-  `scripts/tools/kotak_instruments_cache.py`.
-- **MCX quantity semantics are broker-specific and differ by 100x.** Dhan takes MCX order quantity
-  in **lots** (its master reports `LOT_SIZE=1`); Kotak's `qt` is **absolute** (100 per CRUDEOIL
-  lot, 10 per CRUDEOILM). Always send a position's reported `netQty` verbatim when squaring off.
-  MCX options are `OPTFUT` in both masters — the equity `OPTIDX`/`OPTSTK` filter drops them.
+- **Kotak has several non-obvious quirks** (200-OK error bodies, no net-quantity field, ×100 scaled
+  strikes, per-segment expiry epoch differences, and MCX quantity semantics that differ 100x from
+  Dhan's) — see [docs/API_GOTCHAS.md](docs/API_GOTCHAS.md) before touching `lib/kotak/`,
+  `scripts/tools/kotak_instruments_cache.py`, or any Kotak MCX order sizing.
 - The startup OTM hedge (`copy_trade_hedge.py`) is **Zerodha-only** by design.
 - **Strategy Broker Selector**: Option-selling strategies accept `--broker {dhan,zerodha,kotak}`.
   Market data (LTP, option chain, technical indicators, expiries) always originates from `DhanHelper`,

@@ -33,6 +33,15 @@ from `rs_dashboard`, even if the trading logic itself is correct.
    `rs_dashboard/app/api/strategies/route.ts` mapping `STRATEGY_KEY` → display name
    + absolute script path (`path.join(PROJECT_ROOT, 'strategies', ...)`). Without
    this the script runs fine standalone but the dashboard never lists it.
+4. **Broker-selectable execution** — every option-selling strategy added since
+   `1e6516c` accepts `--broker {dhan,zerodha,kotak}` (default `dhan`) and routes
+   orders through `ExecutionBroker.create(broker, helper, underlying)` instead of
+   calling `helper.place_entry`/`close_position` directly. Market data still always
+   comes from `DhanHelper` regardless of the order broker. Mark the strategy
+   `execBrokerEligible: true` in `rs_dashboard/lib/strategyRegistry.ts` so the
+   dashboard's BrokerSelector shows up for it, and use
+   `resolve_exit_qty_broker()` (not `resolve_exit_qty()`) for exit sizing once a
+   strategy is broker-selectable.
 
 `STRATEGY_KEY` must be identical (byte-for-byte) across the Python file, the
 `route.ts` metadata key, and the `debug/*_state.json` / `*_shutdown.trigger`
@@ -85,3 +94,10 @@ filenames — a mismatch silently breaks the bridge with no error.
   running instance, the first one to exit will flatten the other's leg too. Use
   `lib/strategy_risk.py`'s `resolve_exit_qty(helper, security_id, own_qty, side)`,
   which clamps to what *this* strategy opened.
+- Continuing execution after a `broker.buy()`/`sell()` call fails (or returns a
+  rejected/error status) instead of returning/aborting immediately. A logged
+  CRITICAL/ERROR that execution then walks past is worse than a crash — the leg
+  silently falls out of every P&L/exit/state-file calculation from that point on,
+  and for a roll/reentry path can double exposure by opening a fresh leg on top of
+  one that was never actually closed. Every order call on a real-risk path needs
+  its result checked before the next line runs (`c51eff6`, `nifty_overnight_fly.py`).

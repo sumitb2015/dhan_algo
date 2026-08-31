@@ -1,6 +1,6 @@
 ---
 name: dhan-broker-positions
-description: Use when working on the Scalper / Advanced Scalper order tickets, reading a broker positions or trade-book payload, computing position P&L or CE/PE values, sizing an exit, or placing a close/square-off order. Covers Dhan, Zerodha and Kotak. Read before touching Scalper.tsx, AdvancedScalper.tsx, positionLegs.ts, or any /api/scalper, /api/exit-all or quiktrade route.
+description: Use when working on the Scalper / Advanced Scalper order tickets, reading a broker positions or trade-book payload, computing position P&L or CE/PE values, sizing an exit, reconstructing an MTM history curve, or placing a close/square-off order. Covers Dhan, Zerodha and Kotak. Read before touching Scalper.tsx, AdvancedScalper.tsx, MtmChart.tsx, positionLegs.ts, scalper_mtm_history.py, or any /api/scalper, /api/exit-all or quiktrade route.
 ---
 
 # Dhan Broker Positions & P&L
@@ -20,6 +20,8 @@ multipliers, or close-order product inline. Every one of them already has a help
   positions/payoff/analytics surfaces built on `lib/positionLegs.ts`.
 - Adding a broker, or extending an existing one to a new segment (MCX, BSE F&O).
 - Any route under `app/api/scalper/`, `app/api/exit-all/`, `app/api/options/quiktrade/`.
+- `components/MtmChart.tsx`, `scripts/tools/scalper_mtm_history.py`, or any change
+  reconstructing a historical/intraday P&L series from position snapshots.
 - Reviewing a P&L number that "looks off by a round factor" — that is almost always
   the MCX multiplier below.
 
@@ -93,7 +95,26 @@ inflated its side instead of offsetting the shorts on it. The CE/PE symbol-suffi
 fallback also ran on non-F&O rows, classifying RELIANCE as a PE leg. Gate side
 detection on segment, not on the symbol suffix. (`7188f64`)
 
-### 6. Scope bulk exits
+### 6. MTM history must key on full position identity, across expiries, with carry-forward
+`scalper_mtm_history.py` reconstructs a day's P&L curve from periodic position
+snapshots. Keying a symbol's book by trading symbol alone collided two different
+expiries of the same underlying into one series — a fresh Thursday-expiry entry read
+as a continuation of the just-expired Tuesday one. Key by full position identity
+(symbol **and** expiry, same idea as `positionKey()`), not just symbol.
+
+A position still open from a prior snapshot but missing from the current poll (broker
+hasn't refreshed yet, not actually closed) needs its mark **forward-filled** from the
+last known price, not treated as flat/closed — a real open position was briefly
+reported at zero P&L. Kotak additionally has both a raw broker-shape and an
+already-`kotakShape.ts`-normalized representation reaching this code at different
+call sites, plus futures rows needing their own resolution path separate from
+options — check which shape you're holding before reading a field. The same
+carry-forward-across-expiry issue exists in `lib/positionLegs.ts` for the Options
+Analytics positions table — filter by the row's own expiry, don't assume "still in
+the broker book" means "still in this expiry's book". (`f33e65b`, `ca7fcd3`, `e4233fd`,
+`c355717`)
+
+### 7. Scope bulk exits
 `/api/exit-all` defaults to an unconditional `DELETE /v2/positions`, which liquidates
 equity holdings alongside F&O. The terminals must send `scope:'fno'`, which closes
 only NSE_FNO/BSE_FNO positions and cancels only F&O orders via per-position REST

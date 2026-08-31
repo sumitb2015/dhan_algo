@@ -137,6 +137,21 @@ This applies to every `detached: true` spawn in the dashboard, not just this
 one — grep `detached: true` in `app/api/` before assuming a restart cleared
 anything.
 
+### 9. A WebSocket bridge needs its own stall watchdog — the SDK's reconnect is too slow
+`live_equity_ws.py`'s only reconnect path went through `feed.run()` returning, which
+only happens on a fatal error (429/401/403) or once the `websockets` library's own
+20s+20s ping/pong keepalive notices a silently-dead socket (dropped Wi-Fi, NAT
+idle-timeout — no clean close frame) — up to ~40s of frozen LTPs with no error logged
+at all. Track a signature of the latest tick across all subscribed symbols each write
+cycle; if it hasn't changed in ~20s during market hours, force
+`helper.feed.close_connection()` so `dhan_helper.py`'s outer reconnect loop takes over
+with its bounded ~5s backoff instead of waiting on the socket layer. (`50390fa`)
+
+This applies to every bridge under `scripts/tools/live_*_ws.py`
+(`live_equity_ws.py`, `live_options_ws.py`, `live_indices_ws.py`,
+`live_positions_ws.py`), not just the one it was first added to — check whether a
+sibling bridge has the same gap before assuming only the one you're editing needs it.
+
 ## Before You Ship
 - Can two tabs run this at once? What happens if they do?
 - If this spawns something, what stops a second spawn during the startup window?
