@@ -46,6 +46,19 @@ def test_dedup_wanted_union_and_richest_feed_type():
           best[('1', '25')] == (1, '25', 21))
 
 
+def test_dedup_wanted_skips_malformed_entry():
+    """Regression test: one malformed instrument entry (wrong length, from a
+    corrupted or version-skewed wanted_*.json) must not abort the whole union —
+    it used to raise ValueError uncaught, killing the hub for every consumer."""
+    entries = [
+        {'consumer': 'a', 'instruments': [[1, '25', 17], ['not', 'a', 'triple', 'oops']]},
+        {'consumer': 'b', 'instruments': [[0, '13', 17]]},
+    ]
+    best = market_data_hub._dedup_wanted(entries)
+    check('a malformed entry is skipped without raising, good entries still union',
+          set(best.keys()) == {('1', '25'), ('0', '13')})
+
+
 def test_compute_subscribe_delta_new_instrument():
     current = {}
     wanted = {('1', '25'): (1, '25', 17)}
@@ -90,6 +103,7 @@ def test_compute_subscribe_delta_removal():
 
 def run():
     test_dedup_wanted_union_and_richest_feed_type()
+    test_dedup_wanted_skips_malformed_entry()
     test_compute_subscribe_delta_new_instrument()
     test_compute_subscribe_delta_feed_type_upgrade()
     test_compute_subscribe_delta_no_upgrade_needed()

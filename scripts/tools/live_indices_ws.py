@@ -184,7 +184,7 @@ def main():
     hub_client.register_wanted('live_indices', instruments)
 
     deadline = time.monotonic() + 10
-    while time.monotonic() < deadline and not hub_client.read_live_data():
+    while time.monotonic() < deadline and not hub_client.has_own_ticks(instruments):
         time.sleep(0.5)  # wait for the hub's first tick batch
 
     # ── Restore session open baseline if same calendar day ───────────────────

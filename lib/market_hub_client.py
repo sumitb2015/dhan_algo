@@ -38,6 +38,7 @@ HUB_DIR = os.path.join(ROOT, 'debug', 'market_hub')
 # recreating the double-spawn race this design otherwise prevents.
 LOCK_STALE_MS = 45_000          # 15s margin over HUB_STARTUP_TIMEOUT_SEC=30s
 HEARTBEAT_STALE_SEC = 10        # hub writes a heartbeat ~every 3s; 10s = 3 missed cycles
+STARTING_TIMEOUT_SEC = 60       # generous cap on STARTING itself; real startup is 13-15s
 WANTED_STALE_SEC = 60           # hard backstop GC even if the pid check is ever wrong
 
 # The hub's own startup (master-list load + login + WS connect) was observed taking
@@ -110,11 +111,22 @@ def _atomic_read(path: str):
 
 
 def is_pid_running(pid) -> bool:
+    """True iff `pid` is alive AND is (or still looks like) one of our own
+    python processes — not just any process that happens to hold that PID.
+
+    A bare psutil.pid_exists(pid) doesn't guard against PID reuse: once a
+    process exits, the OS is free to hand its PID to a completely unrelated
+    process. rs_dashboard/lib/processCheck.ts's isPidRunning() already checks
+    the process image name for exactly this reason; mirror it here with
+    psutil rather than shelling out to tasklist/ps."""
     if not pid:
         return False
     try:
-        return psutil.pid_exists(int(pid))
-    except (TypeError, ValueError):
+        pid = int(pid)
+        if not psutil.pid_exists(pid):
+            return False
+        return 'python' in psutil.Process(pid).name().lower()
+    except (TypeError, ValueError, psutil.NoSuchProcess, psutil.AccessDenied):
         return False
 
 
@@ -124,19 +136,23 @@ def is_hub_alive() -> bool:
     """True iff hub_status.json names a live pid that's either RUNNING with a
     recent heartbeat, or still STARTING at all.
 
-    STARTING gets no heartbeat-freshness requirement, only a PID-liveness check.
-    The real hub writes STARTING once as its very first statement, then does
-    master-list load + login + WS connect (observed live: 10-15s+) before its next
-    write, when it flips to RUNNING. HEARTBEAT_STALE_SEC (10s) is shorter than that
-    gap — requiring a fresh heartbeat during STARTING meant a caller whose own
-    pre-hub REST work (e.g. focus_tool_ws.py's prev-day-chain fetch with 429
-    retries) took long enough to reach ensure_hub_running() after the original
-    STARTING write had gone stale, but before RUNNING was ever written, saw
-    "not alive" with a free lock and spawned a SECOND hub — confirmed live (two
-    real Dhan connections) and reproduced by
-    scripts/testing/test_market_hub_multiprocess_race.py. A hub that is merely
-    slow to finish starting is not the same as a hub that crashed; PID-liveness
-    alone is the right signal for "still legitimately starting."
+    STARTING gets no heartbeat-freshness requirement, only a PID-liveness check
+    (plus a generous STARTING_TIMEOUT_SEC cap — see below). The real hub writes
+    STARTING once as its very first statement, then does master-list load + login
+    + WS connect (observed live: 10-15s+) before its next write, when it flips to
+    RUNNING. HEARTBEAT_STALE_SEC (10s) is shorter than that gap — requiring a
+    fresh heartbeat during STARTING meant a caller whose own pre-hub REST work
+    (e.g. focus_tool_ws.py's prev-day-chain fetch with 429 retries) took long
+    enough to reach ensure_hub_running() after the original STARTING write had
+    gone stale, but before RUNNING was ever written, saw "not alive" with a free
+    lock and spawned a SECOND hub — confirmed live (two real Dhan connections)
+    and reproduced by scripts/testing/test_market_hub_multiprocess_race.py. A hub
+    that is merely slow to finish starting is not the same as a hub that crashed;
+    PID-liveness alone is the right signal for "still legitimately starting" —
+    bounded by STARTING_TIMEOUT_SEC so a hub that hangs before ever reaching
+    RUNNING (e.g. a network call in get_dhan_client() with no timeout) is
+    eventually treated as dead and respawned, rather than blocking every future
+    caller forever on PID-liveness alone.
 
     RUNNING still requires heartbeat freshness — by then the hub is in its normal
     ~3s registry-scan/heartbeat cadence, so a stale heartbeat there really does
@@ -151,7 +167,11 @@ def is_hub_alive() -> bool:
     if not is_pid_running(status.get('pid')):
         return False
     if status['status'] == 'STARTING':
-        return True
+        try:
+            started_at = datetime.fromisoformat(status['started_at'])
+        except (KeyError, ValueError):
+            return True  # can't tell how long it's been — don't force a respawn on that alone
+        return (datetime.now() - started_at).total_seconds() < STARTING_TIMEOUT_SEC
     try:
         last_update = datetime.fromisoformat(status['last_update'])
     except (KeyError, ValueError):
@@ -281,7 +301,14 @@ def list_live_registry_entries():
         path = os.path.join(HUB_DIR, name)
         entry = _atomic_read(path)
         if not entry:
-            continue
+            # A live bridge rewrites this file every ~5s; a None here can be a
+            # transient read racing that write (the same PermissionError window
+            # _atomic_read's docstring documents), not the consumer actually
+            # being gone. One immediate retry closes a window measured in
+            # milliseconds without adding a real delay to the scan.
+            entry = _atomic_read(path)
+            if not entry:
+                continue
         if not is_pid_running(entry.get('pid')):
             continue
         try:
@@ -325,6 +352,21 @@ def read_live_data() -> dict:
     if not data:
         return {}
     return data.get('ticks', {})
+
+
+def has_own_ticks(instruments) -> bool:
+    """True iff read_live_data() already has at least one tick for THIS caller's
+    own instruments specifically — not just any data from any consumer.
+
+    A bare `bool(read_live_data())` used by every bridge's startup "wait for the
+    hub's first tick batch" loop returns True the instant the hub has ticks for
+    ANY already-running consumer, even though the hub's registry scan (every
+    REGISTRY_SCAN_SEC) hasn't necessarily diff-subscribed THIS caller's
+    just-registered instruments yet. That let a bridge declare itself RUNNING
+    before its own data had actually arrived, producing a few seconds of spurious
+    "no tick received" warnings and stale/zero values right after every startup."""
+    ticks = read_live_data()
+    return any(tick_key(seg, sid) in ticks for seg, sid, *_ in instruments)
 
 
 def live_data_updated_at():

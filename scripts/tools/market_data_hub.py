@@ -74,7 +74,13 @@ def _dedup_wanted(entries):
     superset — cheaper than subscribing the same instrument twice."""
     best = {}
     for entry in entries:
-        for seg, sid, feed_type in entry.get('instruments', []):
+        for item in entry.get('instruments', []):
+            try:
+                seg, sid, feed_type = item
+            except (ValueError, TypeError):
+                log.warning('Skipping malformed instrument entry from %s: %r',
+                            entry.get('consumer'), item)
+                continue
             key = (str(seg), str(sid))
             if key not in best or feed_type > best[key][2]:
                 best[key] = (seg, sid, feed_type)
@@ -169,87 +175,103 @@ def main():
 
             now = time.monotonic()
 
-            # ── Registry scan: union wanted_*.json, diff-subscribe the delta ──────
-            if now - last_scan >= REGISTRY_SCAN_SEC:
-                last_scan = now
-                entries = hub_client.list_live_registry_entries()
-                wanted = _dedup_wanted(entries)
+            try:
+                # ── Registry scan: union wanted_*.json, diff-subscribe the delta ──
+                if now - last_scan >= REGISTRY_SCAN_SEC:
+                    last_scan = now
+                    entries = hub_client.list_live_registry_entries()
+                    wanted = _dedup_wanted(entries)
 
-                to_add, to_remove_keys, to_remove = _compute_subscribe_delta(current, wanted)
+                    to_add, to_remove_keys, to_remove = _compute_subscribe_delta(current, wanted)
 
-                if to_add:
-                    if helper.subscribe_instruments(to_add):
-                        for seg, sid, feed_type in to_add:
-                            current[(str(seg), str(sid))] = (seg, sid, feed_type)
-                        log.info('Subscribed %d new instrument(s), %d total.',
-                                  len(to_add), len(current))
-                    # else: feed not ready yet — leave out of `current` so the next
-                    # scan retries automatically.
+                    if to_add:
+                        if helper.subscribe_instruments(to_add):
+                            for seg, sid, feed_type in to_add:
+                                current[(str(seg), str(sid))] = (seg, sid, feed_type)
+                            log.info('Subscribed %d new instrument(s), %d total.',
+                                      len(to_add), len(current))
+                        # else: feed not ready yet — leave out of `current` so the
+                        # next scan retries automatically.
 
-                if to_remove:
-                    if helper.unsubscribe_instruments(to_remove):
+                    if to_remove:
+                        ok = helper.unsubscribe_instruments(to_remove)
+                        # Pop from `current` regardless of the return value.
+                        # unsubscribe_instruments() already drops these from
+                        # DhanHelper's own ws_instruments unconditionally, before
+                        # attempting the feed call — so on a transient feed-call
+                        # failure they're already gone from what a reconnect would
+                        # replay. Popping only on success left `current` believing
+                        # instruments nobody wants were still subscribed, and since
+                        # to_add only re-adds a key that's NOT in current, they were
+                        # never resubscribed either — permanently stale instruments
+                        # with no error surfaced.
                         for key in to_remove_keys:
                             current.pop(key, None)
-                        log.info('Unsubscribed %d instrument(s) no longer wanted, %d total.',
-                                  len(to_remove), len(current))
+                        log.info('Unsubscribed %d instrument(s) no longer wanted, %d total%s.',
+                                  len(to_remove), len(current), '' if ok else ' (feed call reported failure)')
 
-                write_status('RUNNING', started_at, subscribed_count=len(current),
-                             active_consumers=[e['consumer'] for e in entries])
+                    write_status('RUNNING', started_at, subscribed_count=len(current),
+                                 active_consumers=[e['consumer'] for e in entries])
 
-                # ── Stall watchdog (centralized) ──────────────────────────────
-                # Signature over every currently-subscribed instrument's LTP. With
-                # ~hundreds of instruments unioned across 4 consumers instead of one
-                # bridge's own small universe, a genuinely dead socket is somewhat
-                # more likely to still show 1-2 laggard "moving" values from partial
-                # buffered packets before the connection is fully recognized as gone
-                # — a known trade-off of centralizing this, documented rather than
-                # solved by hardcoding specific "canary" instrument IDs into what is
-                # otherwise a generic, domain-agnostic multiplexer.
-                if current:
-                    subscribed_keys = {hub_client.tick_key(seg, sid) for seg, sid in current}
-                    with merged_lock:
-                        signature = tuple(sorted(
-                            (key, round(float(tick.get('LTP') or tick.get('last_price') or 0), 2))
-                            for key, tick in merged_ticks.items()
-                            if key in subscribed_keys
-                        ))
-                    if signature != last_tick_signature:
-                        last_tick_signature = signature
-                        last_tick_change_ts = now
-                    elif (market_open(datetime.now(IST))
-                          and now - last_tick_change_ts > STALL_SEC):
-                        log.warning('No tick movement for %ss during market hours — '
-                                    'forcing reconnect.', STALL_SEC)
-                        try:
-                            if getattr(helper, 'feed', None):
-                                helper.feed.close_connection()
-                        except Exception as e:
-                            log.warning('Forced close_connection failed: %s', e)
-                        last_tick_change_ts = now
+                    # ── Stall watchdog (centralized) ──────────────────────────────
+                    # Signature over every currently-subscribed instrument's LTP.
+                    # With ~hundreds of instruments unioned across 4 consumers
+                    # instead of one bridge's own small universe, a genuinely dead
+                    # socket is somewhat more likely to still show 1-2 laggard
+                    # "moving" values from partial buffered packets before the
+                    # connection is fully recognized as gone — a known trade-off of
+                    # centralizing this, documented rather than solved by
+                    # hardcoding specific "canary" instrument IDs into what is
+                    # otherwise a generic, domain-agnostic multiplexer.
+                    if current:
+                        subscribed_keys = {hub_client.tick_key(seg, sid) for seg, sid in current}
+                        with merged_lock:
+                            signature = tuple(sorted(
+                                (key, round(float(tick.get('LTP') or tick.get('last_price') or 0), 2))
+                                for key, tick in merged_ticks.items()
+                                if key in subscribed_keys
+                            ))
+                        if signature != last_tick_signature:
+                            last_tick_signature = signature
+                            last_tick_change_ts = now
+                        elif (market_open(datetime.now(IST))
+                              and now - last_tick_change_ts > STALL_SEC):
+                            log.warning('No tick movement for %ss during market hours — '
+                                        'forcing reconnect.', STALL_SEC)
+                            try:
+                                if getattr(helper, 'feed', None):
+                                    helper.feed.close_connection()
+                            except Exception as e:
+                                log.warning('Forced close_connection failed: %s', e)
+                            last_tick_change_ts = now
 
-            # ── Tick write (debounced) ────────────────────────────────────────────
-            if dirty.wait(timeout=0.25):
-                dirty.clear()
-                time.sleep(0.02)  # let a burst of same-tick packets settle
-                if now - last_write >= WRITE_MIN_INTERVAL_SEC:
-                    last_write = now
-                    with merged_lock:
-                        # Deep-copy the inner per-instrument dicts, not just the
-                        # outer dict — on_message mutates them in place
-                        # (merged_ticks[key].update(msg)), and a shallow
-                        # dict(merged_ticks) shares those same inner dict objects.
-                        # json.dump() below runs outside this lock; if a packet
-                        # for an already-copied instrument arrives mid-serialize
-                        # and adds a new key, the encoder can raise
-                        # "RuntimeError: dictionary changed size during
-                        # iteration" on a dict that's still being mutated by the
-                        # feed thread — uncaught (only PermissionError/OSError
-                        # are caught in _atomic_write), which kills the whole hub.
-                        snapshot = {k: dict(v) for k, v in merged_ticks.items()}
-                    hub_client._atomic_write(hub_client.hub_live_data_file(), {
-                        'updated_at': datetime.now().isoformat(),
-                        'ticks': snapshot,
-                    })
+                # ── Tick write (debounced) ────────────────────────────────────────
+                if dirty.wait(timeout=0.25):
+                    dirty.clear()
+                    time.sleep(0.02)  # let a burst of same-tick packets settle
+                    if now - last_write >= WRITE_MIN_INTERVAL_SEC:
+                        last_write = now
+                        with merged_lock:
+                            # Deep-copy the inner per-instrument dicts, not just
+                            # the outer dict — on_message mutates them in place
+                            # (merged_ticks[key].update(msg)), and a shallow
+                            # dict(merged_ticks) shares those same inner dict
+                            # objects. json.dump() below runs outside this lock;
+                            # if a packet for an already-copied instrument
+                            # arrives mid-serialize and adds a new key, the
+                            # encoder can raise "RuntimeError: dictionary
+                            # changed size during iteration" on a dict still
+                            # being mutated by the feed thread.
+                            snapshot = {k: dict(v) for k, v in merged_ticks.items()}
+                        hub_client._atomic_write(hub_client.hub_live_data_file(), {
+                            'updated_at': datetime.now().isoformat(),
+                            'ticks': snapshot,
+                        })
+            except Exception as e:
+                # One bad cycle (a registry file racing a write, a transient SDK
+                # error, ...) must not take down the shared connection for all 4
+                # consumers — log and retry on the next loop iteration.
+                log.error('Unhandled error in main loop, continuing: %s', e)
     except KeyboardInterrupt:
         log.info('Interrupted — exiting.')
 

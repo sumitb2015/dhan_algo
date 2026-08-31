@@ -192,6 +192,81 @@ def test_atomic_read_tolerates_windows_permission_error(tmp):
           hub_client._atomic_read(path) == {'status': 'RUNNING'})
 
 
+def test_is_pid_running_rejects_non_python_process(tmp):
+    """Regression test: a bare psutil.pid_exists() doesn't guard against PID
+    reuse — once a process exits, the OS can hand its PID to any unrelated
+    process. is_pid_running() must also check the process looks like python."""
+    import psutil as _psutil
+
+    class _FakeProc:
+        def __init__(self, pid):
+            pass
+        def name(self):
+            return 'explorer.exe'
+
+    original_process = _psutil.Process
+    original_pid_exists = _psutil.pid_exists
+    _psutil.Process = _FakeProc
+    _psutil.pid_exists = lambda pid: True
+    try:
+        check('is_pid_running() rejects a live pid whose process is not python',
+              hub_client.is_pid_running(os.getpid()) is False)
+    finally:
+        _psutil.Process = original_process
+        _psutil.pid_exists = original_pid_exists
+
+
+def test_is_hub_alive_false_when_starting_too_long(tmp):
+    import datetime
+    old_start = (datetime.datetime.now()
+                 - datetime.timedelta(seconds=hub_client.STARTING_TIMEOUT_SEC + 5)).isoformat()
+    hub_client._atomic_write(hub_client.hub_status_file(), {
+        'status': 'STARTING', 'pid': os.getpid(),
+        'started_at': old_start, 'last_update': old_start,
+    })
+    check('is_hub_alive() is False for STARTING that has run past STARTING_TIMEOUT_SEC',
+          hub_client.is_hub_alive() is False)
+
+
+def test_list_live_registry_entries_retries_transient_read_failure(tmp):
+    """Regression test: a momentary PermissionError reading one bridge's
+    wanted-file (a real, documented Windows race around another process's
+    os.replace()) must not make the hub treat a still-live consumer as gone."""
+    hub_client.register_wanted('flaky', [(1, '111', 17)])
+    path = hub_client._wanted_file('flaky')
+
+    real_open = open
+    calls = {'n': 0}
+
+    def flaky_open(p, *a, **kw):
+        if p == path and calls['n'] == 0:
+            calls['n'] += 1
+            raise PermissionError(13, 'Permission denied')
+        return real_open(p, *a, **kw)
+
+    import builtins
+    builtins.open = flaky_open
+    try:
+        entries = hub_client.list_live_registry_entries()
+    finally:
+        builtins.open = real_open
+
+    check('a transient read failure on the first attempt is retried and the '
+          'consumer is still included', any(e['consumer'] == 'flaky' for e in entries))
+
+
+def test_has_own_ticks(tmp):
+    hub_client._atomic_write(hub_client.hub_live_data_file(), {
+        'updated_at': '2026-01-01T00:00:00',
+        'ticks': {hub_client.tick_key(1, '25'): {'LTP': 3080.0}},
+    })
+    check('has_own_ticks is True when one of the queried instruments has a tick',
+          hub_client.has_own_ticks([(1, '25', 17), (2, '999', 21)]) is True)
+    check('has_own_ticks is False when none of the queried instruments have a tick '
+          '(even though the hub has data for something else)',
+          hub_client.has_own_ticks([(0, '13', 17)]) is False)
+
+
 def test_tick_key_disambiguates_cross_segment_collision():
     """Regression test for a live-confirmed data-correctness bug: ADANIENT
     (NSE_EQ, security_id 25) and BANKNIFTY (IDX, security_id 25) share the same
@@ -258,6 +333,10 @@ def run():
     with_temp_hub_dir(test_is_hub_alive_false_when_starting_but_dead_pid)
     with_temp_hub_dir(test_is_hub_alive_true_when_fresh)
     with_temp_hub_dir(test_atomic_read_tolerates_windows_permission_error)
+    with_temp_hub_dir(test_is_pid_running_rejects_non_python_process)
+    with_temp_hub_dir(test_is_hub_alive_false_when_starting_too_long)
+    with_temp_hub_dir(test_list_live_registry_entries_retries_transient_read_failure)
+    with_temp_hub_dir(test_has_own_ticks)
     test_tick_key_disambiguates_cross_segment_collision()
     test_tick_merge_semantics()
 
