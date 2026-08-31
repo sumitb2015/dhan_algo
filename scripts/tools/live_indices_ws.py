@@ -30,6 +30,7 @@ sys.path.insert(0, ROOT)
 
 from login import get_dhan_client
 from lib.dhan_helper import DhanHelper
+from lib import market_hub_client as hub_client
 
 DEBUG_DIR        = os.path.join(ROOT, 'debug')
 HISTORY_FILE     = os.path.join(DEBUG_DIR, 'live_indices_history.json')
@@ -175,8 +176,16 @@ def main():
 
     print(f'[live_indices_ws] Subscribing to {n} indices...', flush=True)
 
-    helper.start_websocket(instruments)
-    time.sleep(3)  # wait for connection + first tick batch
+    # Market data now comes from the shared market_data_hub.py process — see
+    # lib/market_hub_client.py. All 26 indices subscribe unconditionally here,
+    # matching current behavior exactly (the "selection" file below has always been
+    # output-side filtering only, never a real subscribe/unsubscribe).
+    hub_client.ensure_hub_running()
+    hub_client.register_wanted('live_indices', instruments)
+
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline and not hub_client.read_live_data():
+        time.sleep(0.5)  # wait for the hub's first tick batch
 
     # ── Restore session open baseline if same calendar day ───────────────────
     session_date = datetime.now().strftime('%Y-%m-%d')
@@ -212,8 +221,16 @@ def main():
     all_syms       = set(sid_to_symbol.values())
     initial_active = (initial_sel & all_syms) if initial_sel is not None else all_syms
     write_status('RUNNING', subscribed=len(initial_active), started_at=started_at)
-    print('[live_indices_ws] WebSocket connected. Writing history every '
+    print('[live_indices_ws] Registered with market data hub. Writing history every '
           f'{args.interval}s...', flush=True)
+
+    # Stall detection lives in the hub now; this bridge only needs to notice if the
+    # hub's shared tick file has gone stale and re-trigger ensure_hub_running() (a
+    # no-op unless the hub process itself died — see live_equity_ws.py for the same
+    # pattern, applied identically here).
+    HUB_STALE_SEC = 8
+    HUB_CHECK_INTERVAL_SEC = 5
+    last_hub_check = time.monotonic()
 
     try:
         while True:
@@ -224,7 +241,15 @@ def main():
                 except OSError:
                     pass
                 print('[live_indices_ws] Stop trigger detected - exiting.', flush=True)
+                hub_client.unregister_wanted('live_indices')
                 break
+
+            now_monotonic = time.monotonic()
+            if now_monotonic - last_hub_check >= HUB_CHECK_INTERVAL_SEC:
+                last_hub_check = now_monotonic
+                hub_updated = hub_client.live_data_updated_at()
+                if hub_updated is None or time.time() - hub_updated > HUB_STALE_SEC:
+                    hub_client.ensure_hub_running()
 
             # ── Determine active symbols from selection file ──────────────────
             selection = read_selection()
@@ -232,9 +257,10 @@ def main():
             active_symbols = (selection & all_syms) if selection is not None else all_syms
 
             # ── Collect snapshot for ALL subscribed (keeps last_known complete) ─
+            live_ticks = hub_client.read_live_data()
             snapshot: dict[str, float] = {}
             for sid, sym in sid_to_symbol.items():
-                tick = helper.live_data.get(sid)
+                tick = live_ticks.get(sid)
                 if tick:
                     ltp = float(tick.get('LTP') or tick.get('last_price') or 0)
                     if ltp > 0:
@@ -282,6 +308,7 @@ def main():
 
     except KeyboardInterrupt:
         print('[live_indices_ws] KeyboardInterrupt - shutting down.', flush=True)
+        hub_client.unregister_wanted('live_indices')
     finally:
         write_status('STOPPED', subscribed=0, started_at=started_at)
         print('[live_indices_ws] Stopped.', flush=True)
