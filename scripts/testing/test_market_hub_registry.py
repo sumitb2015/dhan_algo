@@ -137,6 +137,36 @@ def test_is_hub_alive_true_when_fresh(tmp):
           hub_client.is_hub_alive() is True)
 
 
+def test_atomic_read_tolerates_windows_permission_error(tmp):
+    """Regression test: live_options_ws.py crashed with an uncaught PermissionError
+    reading hub_status.json while the hub was mid os.replace() on Windows (confirmed
+    during manual end-to-end testing). _atomic_read must swallow this, not raise."""
+    hub_client._atomic_write(hub_client.hub_status_file(), {'status': 'RUNNING'})
+    path = hub_client.hub_status_file()
+
+    real_open = open
+    def flaky_open(p, *a, **kw):
+        if p == path:
+            raise PermissionError(13, 'Permission denied')
+        return real_open(p, *a, **kw)
+
+    import builtins
+    builtins.open = flaky_open
+    try:
+        result = hub_client._atomic_read(path)
+    finally:
+        builtins.open = real_open
+
+    check('_atomic_read returns None (not raise) on a transient PermissionError',
+          result is None)
+    check('is_hub_alive() tolerates the same transient error via _atomic_read',
+          hub_client.is_hub_alive() is False)  # a genuinely fresh healthy status
+    # would exist afterward via the earlier write, confirming the FOLLOW-UP read
+    # (not raising) recovers cleanly:
+    check('a subsequent normal read recovers once the lock clears',
+          hub_client._atomic_read(path) == {'status': 'RUNNING'})
+
+
 def test_tick_merge_semantics():
     """The hub reuses DhanHelper._on_ws_message unmodified — regression-guard that
     merge (not replace) semantics still hold, since the hub's whole design assumes it."""
@@ -168,6 +198,7 @@ def run():
     with_temp_hub_dir(test_is_hub_alive_false_when_dead_pid)
     with_temp_hub_dir(test_is_hub_alive_false_when_stale_heartbeat)
     with_temp_hub_dir(test_is_hub_alive_true_when_fresh)
+    with_temp_hub_dir(test_atomic_read_tolerates_windows_permission_error)
     test_tick_merge_semantics()
 
     print(f'\n{len(PASS)} passed, {len(FAIL)} failed')

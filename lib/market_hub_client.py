@@ -58,24 +58,37 @@ def _wanted_file(consumer_name: str) -> str:
 
 
 def _atomic_write(path: str, data: dict):
+    """Never raises — a dropped write (e.g. transient Windows file-lock contention,
+    the same race _atomic_read tolerates) just means this cycle's write is skipped;
+    every writer in this module runs on a loop and retries on its next cycle."""
     os.makedirs(os.path.dirname(path), exist_ok=True)
     tmp = path + '.tmp'
-    with open(tmp, 'w') as f:
-        json.dump(data, f)
-    os.replace(tmp, path)
+    try:
+        with open(tmp, 'w') as f:
+            json.dump(data, f)
+        os.replace(tmp, path)
+    except (PermissionError, OSError):
+        pass
 
 
 def _atomic_read(path: str):
     """Returns the parsed JSON dict, or None if missing/corrupt/mid-write.
 
     A reader can observe a momentarily-absent file (hub cold-start, or a writer
-    between unlink and the atomic os.replace on some filesystems) — never raise,
-    every caller in this module treats None as "nothing there yet".
+    between unlink and the atomic os.replace on some filesystems). On Windows,
+    a reader can also observe a transient PermissionError if it opens the file in
+    the narrow window where another process still holds a handle open during its
+    own os.replace() — os.replace is atomic with respect to the FILE CONTENTS a
+    reader sees, but Windows file-locking semantics can still deny a concurrent
+    open() for a few milliseconds around the rename (confirmed live: crashed
+    live_options_ws.py with an uncaught PermissionError reading hub_status.json).
+    Every caller in this module treats None as "nothing there yet" — this must
+    never raise.
     """
     try:
         with open(path) as f:
             return json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError):
+    except (FileNotFoundError, json.JSONDecodeError, PermissionError):
         return None
 
 
