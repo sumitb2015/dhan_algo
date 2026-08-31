@@ -247,6 +247,11 @@ def main():
             now_monotonic = time.monotonic()
             if now_monotonic - last_hub_check >= HUB_CHECK_INTERVAL_SEC:
                 last_hub_check = now_monotonic
+                # Refresh the registry entry on this cadence (well under
+                # WANTED_STALE_SEC=60s) — see live_equity_ws.py for why a
+                # register-once-at-startup bridge silently ages out of the hub's
+                # stale-registry backstop after a hub restart.
+                hub_client.register_wanted('live_indices', instruments)
                 hub_updated = hub_client.live_data_updated_at()
                 if hub_updated is None or time.time() - hub_updated > HUB_STALE_SEC:
                     hub_client.ensure_hub_running()
@@ -260,7 +265,7 @@ def main():
             live_ticks = hub_client.read_live_data()
             snapshot: dict[str, float] = {}
             for sid, sym in sid_to_symbol.items():
-                tick = live_ticks.get(sid)
+                tick = live_ticks.get(hub_client.tick_key(IDX, sid))
                 if tick:
                     ltp = float(tick.get('LTP') or tick.get('last_price') or 0)
                     if ltp > 0:

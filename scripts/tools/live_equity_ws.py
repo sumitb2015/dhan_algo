@@ -169,6 +169,15 @@ def main():
             now_monotonic = time.monotonic()
             if now_monotonic - last_hub_check >= HUB_CHECK_INTERVAL_SEC:
                 last_hub_check = now_monotonic
+                # Refresh the registry entry's mtime/pid on this same cadence (well
+                # under WANTED_STALE_SEC=60s) — register_wanted() was previously
+                # only called once at startup, so a long-running bridge's entry
+                # silently aged past the hub's stale-registry backstop and got
+                # dropped from the union even though the bridge was still alive and
+                # still wanted its instruments. Confirmed live: after a hub restart,
+                # all 4 bridges sat at 0 subscribed indefinitely because their
+                # minutes-old wanted_*.json files were treated as orphaned.
+                hub_client.register_wanted('live_equity', instruments)
                 hub_updated = hub_client.live_data_updated_at()
                 if hub_updated is None or time.time() - hub_updated > HUB_STALE_SEC:
                     # Idempotent — a no-op if the hub is alive and merely mid-backoff;
@@ -181,7 +190,7 @@ def main():
             for key in [k for k in prev_close_cache if not k.startswith(f'{day}:')]:
                 del prev_close_cache[key]
             for sid, sym in sid_to_symbol.items():
-                tick = live_ticks.get(sid)
+                tick = live_ticks.get(hub_client.tick_key(NSE_EQ, sid))
                 if not tick:
                     continue
 

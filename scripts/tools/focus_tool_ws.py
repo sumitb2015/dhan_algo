@@ -406,7 +406,7 @@ def main():
 
     live_ticks = hub_client.read_live_data()
     for u, s in state.items():
-        idx_initial = live_ticks.get(s['sid'])
+        idx_initial = live_ticks.get(hub_client.tick_key(IDX, s['sid']))
         if idx_initial:
             initial_ltp = _f(idx_initial.get('LTP') or idx_initial.get('last_price'))
             print(f'[focus_tool_ws] {u}: index tick received — LTP={initial_ltp:.2f}', flush=True)
@@ -444,6 +444,11 @@ def main():
             now_monotonic = time.monotonic()
             if now_monotonic - last_hub_check >= HUB_CHECK_INTERVAL_SEC:
                 last_hub_check = now_monotonic
+                # Refresh the registry entry on this cadence (well under
+                # WANTED_STALE_SEC=60s) — see live_equity_ws.py for why a
+                # register-once-at-startup bridge silently ages out of the hub's
+                # stale-registry backstop after a hub restart.
+                hub_client.register_wanted('focus_tool', instruments)
                 hub_updated = hub_client.live_data_updated_at()
                 if hub_updated is None or time.time() - hub_updated > HUB_STALE_SEC:
                     hub_client.ensure_hub_running()
@@ -460,7 +465,8 @@ def main():
             payload: dict = {'type': 'quotes', 'updated_at': now_iso}
 
             for u, s in state.items():
-                idx_tick = live_ticks.get(s['sid'])
+                option_feed_segment = OPTION_FEED_SEGMENT[s['exchange']]
+                idx_tick = live_ticks.get(hub_client.tick_key(IDX, s['sid']))
                 if idx_tick:
                     live_spot = _f(idx_tick.get('LTP') or idx_tick.get('last_price'))
                     if live_spot > 0:
@@ -470,7 +476,7 @@ def main():
                 fut_payload = None
                 if s.get('fut'):
                     f_meta = s['fut']
-                    f_tick = live_ticks.get(f_meta['sid'])
+                    f_tick = live_ticks.get(hub_client.tick_key(option_feed_segment, f_meta['sid']))
                     if f_tick:
                         f_ltp = _f(f_tick.get('LTP') or f_tick.get('last_price'))
                         f_prev = _f(f_tick.get('prev_close') or f_tick.get('close') or f_tick.get('previous_close_price'))
@@ -498,7 +504,7 @@ def main():
                             strikes_data[sk_key] = {
                                 'strike': meta['strike'], 'ce': dict(empty_leg), 'pe': dict(empty_leg),
                             }
-                        tick = live_ticks.get(sid_key)
+                        tick = live_ticks.get(hub_client.tick_key(option_feed_segment, sid_key))
                         if tick:
                             ltp = _f(tick.get('LTP') or tick.get('last_price'))
                             oi = int(tick.get('OI', 0) or tick.get('oi', 0) or 0)

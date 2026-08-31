@@ -127,6 +127,31 @@ def test_is_hub_alive_false_when_stale_heartbeat(tmp):
           hub_client.is_hub_alive() is False)
 
 
+def test_is_hub_alive_true_when_starting_even_with_stale_heartbeat(tmp):
+    """Regression test for the live-confirmed double-spawn bug: the real hub writes
+    STARTING once immediately, then goes silent for its slow master-list-load phase
+    (10-15s+ observed live) before ever writing RUNNING — longer than
+    HEARTBEAT_STALE_SEC. A caller reaching ensure_hub_running() after that gap must
+    still see the hub as alive (it's just slow, not dead), or it double-spawns."""
+    import datetime
+    stale_ts = (datetime.datetime.now() - datetime.timedelta(seconds=hub_client.HEARTBEAT_STALE_SEC + 5)).isoformat()
+    hub_client._atomic_write(hub_client.hub_status_file(), {
+        'status': 'STARTING', 'pid': os.getpid(), 'last_update': stale_ts,
+    })
+    check('is_hub_alive() is True for STARTING + a live pid, even with a stale heartbeat',
+          hub_client.is_hub_alive() is True)
+
+
+def test_is_hub_alive_false_when_starting_but_dead_pid(tmp):
+    hub_client._atomic_write(hub_client.hub_status_file(), {
+        'status': 'STARTING', 'pid': 999_999_999,
+        'last_update': __import__('datetime').datetime.now().isoformat(),
+    })
+    check('is_hub_alive() is still False for STARTING if the pid is dead '
+          '(a crashed startup, not a slow one)',
+          hub_client.is_hub_alive() is False)
+
+
 def test_is_hub_alive_true_when_fresh(tmp):
     import datetime
     hub_client._atomic_write(hub_client.hub_status_file(), {
@@ -167,6 +192,38 @@ def test_atomic_read_tolerates_windows_permission_error(tmp):
           hub_client._atomic_read(path) == {'status': 'RUNNING'})
 
 
+def test_tick_key_disambiguates_cross_segment_collision():
+    """Regression test for a live-confirmed data-correctness bug: ADANIENT
+    (NSE_EQ, security_id 25) and BANKNIFTY (IDX, security_id 25) share the same
+    raw id. Under bare-sid keying (what DhanHelper.live_data itself uses), the
+    hub's shared tick dict let one instrument's tick silently overwrite the
+    other's — BANKNIFTY's spot briefly showed ADANIENT's LTP on the Focus Tool
+    page. tick_key() must produce distinct keys for the same raw id under
+    different segments."""
+    NSE_EQ, IDX = 1, 0
+    adanient_key = hub_client.tick_key(NSE_EQ, '25')
+    banknifty_key = hub_client.tick_key(IDX, '25')
+    check('tick_key gives ADANIENT (NSE_EQ, 25) and BANKNIFTY (IDX, 25) distinct keys',
+          adanient_key != banknifty_key)
+
+    # Simulate the hub's own on_message merge logic against both keys and confirm
+    # neither overwrites the other.
+    merged = {}
+    for seg, sid, msg in [
+        (NSE_EQ, 25, {'exchange_segment': NSE_EQ, 'security_id': 25, 'LTP': 3092.60}),
+        (IDX, 25, {'exchange_segment': IDX, 'security_id': 25, 'LTP': 57402.50}),
+    ]:
+        key = hub_client.tick_key(seg, sid)
+        if key in merged:
+            merged[key].update(msg)
+        else:
+            merged[key] = dict(msg)
+    check('after both instruments tick, ADANIENT keeps its own LTP',
+          merged[adanient_key]['LTP'] == 3092.60)
+    check('after both instruments tick, BANKNIFTY keeps its own LTP (not clobbered)',
+          merged[banknifty_key]['LTP'] == 57402.50)
+
+
 def test_tick_merge_semantics():
     """The hub reuses DhanHelper._on_ws_message unmodified — regression-guard that
     merge (not replace) semantics still hold, since the hub's whole design assumes it."""
@@ -197,8 +254,11 @@ def run():
     with_temp_hub_dir(test_read_live_data_roundtrip)
     with_temp_hub_dir(test_is_hub_alive_false_when_dead_pid)
     with_temp_hub_dir(test_is_hub_alive_false_when_stale_heartbeat)
+    with_temp_hub_dir(test_is_hub_alive_true_when_starting_even_with_stale_heartbeat)
+    with_temp_hub_dir(test_is_hub_alive_false_when_starting_but_dead_pid)
     with_temp_hub_dir(test_is_hub_alive_true_when_fresh)
     with_temp_hub_dir(test_atomic_read_tolerates_windows_permission_error)
+    test_tick_key_disambiguates_cross_segment_collision()
     test_tick_merge_semantics()
 
     print(f'\n{len(PASS)} passed, {len(FAIL)} failed')

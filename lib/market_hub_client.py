@@ -34,7 +34,15 @@ HUB_DIR = os.path.join(ROOT, 'debug', 'market_hub')
 LOCK_STALE_MS = 30_000          # mirrors app/api/options/live/route.ts's LOCK_STALE_MS
 HEARTBEAT_STALE_SEC = 10        # hub writes a heartbeat ~every 3s; 10s = 3 missed cycles
 WANTED_STALE_SEC = 60           # hard backstop GC even if the pid check is ever wrong
-SPAWN_WAIT_TIMEOUT_SEC = 10     # how long a caller waits for a racing spawn to finish
+
+# The hub's own startup (master-list load + login + WS connect) was observed taking
+# up to ~13-15s live — both of these must comfortably exceed that, or a second
+# caller can win the lock (or give up waiting) before the first caller's freshly
+# spawned hub ever reports itself alive, causing a genuine double-spawn. This was
+# caught by live testing (two "Market data hub starting" lines ~15s apart, then two
+# interleaved sets of subscribe/unsubscribe logs — two real Dhan connections).
+HUB_STARTUP_TIMEOUT_SEC = 30    # how long the spawning caller holds the lock, polling
+SPAWN_WAIT_TIMEOUT_SEC = 30     # how long a losing caller waits before giving up
 
 
 def hub_status_file() -> str:
@@ -104,7 +112,26 @@ def is_pid_running(pid) -> bool:
 # --- Hub liveness / spawn -------------------------------------------------
 
 def is_hub_alive() -> bool:
-    """True iff hub_status.json names a live pid with a recent heartbeat.
+    """True iff hub_status.json names a live pid that's either RUNNING with a
+    recent heartbeat, or still STARTING at all.
+
+    STARTING gets no heartbeat-freshness requirement, only a PID-liveness check.
+    The real hub writes STARTING once as its very first statement, then does
+    master-list load + login + WS connect (observed live: 10-15s+) before its next
+    write, when it flips to RUNNING. HEARTBEAT_STALE_SEC (10s) is shorter than that
+    gap — requiring a fresh heartbeat during STARTING meant a caller whose own
+    pre-hub REST work (e.g. focus_tool_ws.py's prev-day-chain fetch with 429
+    retries) took long enough to reach ensure_hub_running() after the original
+    STARTING write had gone stale, but before RUNNING was ever written, saw
+    "not alive" with a free lock and spawned a SECOND hub — confirmed live (two
+    real Dhan connections) and reproduced by
+    scripts/testing/test_market_hub_multiprocess_race.py. A hub that is merely
+    slow to finish starting is not the same as a hub that crashed; PID-liveness
+    alone is the right signal for "still legitimately starting."
+
+    RUNNING still requires heartbeat freshness — by then the hub is in its normal
+    ~3s registry-scan/heartbeat cadence, so a stale heartbeat there really does
+    mean something's wrong (hung, deadlocked) even though the PID is still alive.
 
     The status file is data, not a lock — this only ever gates whether to spawn a
     new hub, never used to prevent a race (see ensure_hub_running's atomic lock).
@@ -114,6 +141,8 @@ def is_hub_alive() -> bool:
         return False
     if not is_pid_running(status.get('pid')):
         return False
+    if status['status'] == 'STARTING':
+        return True
     try:
         last_update = datetime.fromisoformat(status['last_update'])
     except (KeyError, ValueError):
@@ -174,7 +203,16 @@ def ensure_hub_running():
     """Idempotent — safe to call from any bridge's startup AND periodically from its
     main loop, so a hub that dies mid-session gets respawned without restarting the
     bridge. Never raises; a transient failure here just means the next periodic call
-    (or the caller's own staleness check on read_live_data()) tries again."""
+    (or the caller's own staleness check on read_live_data()) tries again.
+
+    Holds the spawn lock for the ENTIRE duration of the hub's startup (until it
+    reports itself alive, or HUB_STARTUP_TIMEOUT_SEC elapses) rather than releasing
+    it right after Popen() returns. Releasing early leaves a window — the hub's own
+    master-list load alone can take over 10s — where a second caller sees "not
+    alive yet" and a free lock, and spawns a second hub. Confirmed live: two hub
+    processes running concurrently, each with its own real Dhan WebSocket
+    connection, defeating the entire point of this module.
+    """
     if is_hub_alive():
         return
     if not _acquire_spawn_lock():
@@ -189,6 +227,13 @@ def ensure_hub_running():
         if is_hub_alive():  # double-check: the lock holder may have finished already
             return
         _spawn_hub()
+        deadline = time.monotonic() + HUB_STARTUP_TIMEOUT_SEC
+        while time.monotonic() < deadline:
+            if is_hub_alive():
+                return
+            time.sleep(0.5)
+        # Timed out still holding the lock — release below regardless (never block
+        # forever) so a subsequent call can retry rather than deadlock permanently.
     finally:
         _release_spawn_lock()
 
@@ -242,10 +287,31 @@ def list_live_registry_entries():
 
 # --- Shared ticks (read side) ----------------------------------------------
 
+def tick_key(exchange_segment, security_id) -> str:
+    """Composite key for the shared tick dict — segment AND security_id, never
+    security_id alone.
+
+    DhanHelper.live_data (lib/dhan_helper.py) keys purely by raw security_id, with
+    no segment. That was safe when every bridge had its own isolated DhanHelper
+    instance subscribed to only one kind of instrument space (equity-only, index-
+    only, or options+index+VIX) — no single bridge's own instrument set ever mixed
+    segments enough to collide. The shared hub subscribes across ALL 4 bridges'
+    segments at once, and Dhan's security IDs are only unique WITHIN a segment:
+    confirmed live, ADANIENT (NSE_EQ, id 25) and BANKNIFTY (IDX, id 25) share the
+    same raw id — under bare-sid keying, whichever ticked most recently silently
+    overwrote the other's entry, so BANKNIFTY's spot briefly showed ADANIENT's LTP
+    on the Focus Tool page. market_data_hub.py maintains its own merged-tick dict
+    keyed by tick_key(), independent of (and not reading from) helper.live_data,
+    specifically to avoid this. Every reader must look up by tick_key(seg, sid),
+    never by bare sid."""
+    return f'{exchange_segment}:{security_id}'
+
+
 def read_live_data() -> dict:
-    """Returns {security_id: tick_dict}. Empty dict if the hub hasn't written yet or
-    the file is momentarily unreadable — callers already treat a missing tick per
-    instrument as "no data this cycle" (pre-existing behavior), so this never raises."""
+    """Returns {tick_key(segment, security_id): tick_dict}. Empty dict if the hub
+    hasn't written yet or the file is momentarily unreadable — callers already
+    treat a missing tick per instrument as "no data this cycle" (pre-existing
+    behavior), so this never raises."""
     data = _atomic_read(hub_live_data_file())
     if not data:
         return {}

@@ -31,12 +31,23 @@ def check(name, condition):
 
 
 class SpawnRecorder:
-    """Replaces hub_client._spawn_hub for the duration of a test."""
-    def __init__(self):
+    """Replaces hub_client._spawn_hub for the duration of a test. By default
+    simulates a hub that becomes healthy immediately (writes a fresh status file),
+    since ensure_hub_running() now holds the spawn lock and polls is_hub_alive()
+    until the hub reports itself alive — a mock that never does that would block
+    the real HUB_STARTUP_TIMEOUT_SEC (30s) on every test. Pass become_alive=False
+    to simulate a spawn that never reports healthy (tests the timeout path)."""
+    def __init__(self, become_alive=True):
         self.calls = 0
+        self.become_alive = become_alive
 
     def __call__(self):
         self.calls += 1
+        if self.become_alive:
+            hub_client._atomic_write(hub_client.hub_status_file(), {
+                'status': 'RUNNING', 'pid': os.getpid(),
+                'last_update': datetime.datetime.now().isoformat(),
+            })
 
 
 def with_temp_hub_dir(fn):
@@ -120,12 +131,86 @@ def test_stale_lock_is_stolen_and_spawns(tmp, recorder):
           not os.path.exists(hub_client.hub_lock_file()))
 
 
+def test_spawn_lock_held_until_hub_healthy_prevents_double_spawn(tmp, recorder):
+    """Direct regression test for the live-confirmed bug: ensure_hub_running() used
+    to release the spawn lock immediately after Popen() returned, before the spawned
+    hub ever reported itself alive. A slow-starting hub (master-list load alone took
+    >10s live) left a window where a second concurrent caller saw "not alive yet"
+    AND a free lock, and spawned a duplicate hub — two real Dhan connections."""
+    import threading
+
+    original_startup_timeout = hub_client.HUB_STARTUP_TIMEOUT_SEC
+    hub_client.HUB_STARTUP_TIMEOUT_SEC = 5  # bound the test's own runtime
+
+    # Simulate a SLOW hub: recorder.__call__ does NOT write a status file itself;
+    # a background thread writes it after a delay, standing in for the real hub's
+    # own slow startup (master-list load, login, WS connect).
+    slow_recorder = SpawnRecorder(become_alive=False)
+    hub_client._spawn_hub = slow_recorder
+
+    def slow_hub_becomes_healthy_after_delay():
+        time.sleep(0.5)
+        hub_client._atomic_write(hub_client.hub_status_file(), {
+            'status': 'RUNNING', 'pid': os.getpid(),
+            'last_update': datetime.datetime.now().isoformat(),
+        })
+
+    results = {}
+
+    def caller_a():
+        results['a'] = None
+        hub_client.ensure_hub_running()
+
+    def caller_b():
+        time.sleep(0.1)  # start just after A has acquired the lock and spawned
+        hub_client.ensure_hub_running()
+
+    try:
+        healer = threading.Thread(target=slow_hub_becomes_healthy_after_delay)
+        ta = threading.Thread(target=caller_a)
+        tb = threading.Thread(target=caller_b)
+        healer.start()
+        ta.start()
+        tb.start()
+        healer.join()
+        ta.join()
+        tb.join()
+    finally:
+        hub_client.HUB_STARTUP_TIMEOUT_SEC = original_startup_timeout
+
+    check('two concurrent ensure_hub_running() callers against a slow-starting hub '
+          'result in exactly ONE spawn, not two', slow_recorder.calls == 1)
+    check('the lock is released after the (simulated) hub becomes healthy',
+          not os.path.exists(hub_client.hub_lock_file()))
+
+
+def test_spawn_lock_released_after_startup_timeout(tmp, recorder):
+    """If the spawned hub never reports healthy at all, ensure_hub_running() must
+    still release the lock eventually (bounded by HUB_STARTUP_TIMEOUT_SEC) rather
+    than deadlocking every future call."""
+    original_startup_timeout = hub_client.HUB_STARTUP_TIMEOUT_SEC
+    hub_client.HUB_STARTUP_TIMEOUT_SEC = 0.3  # bound the test's own runtime
+
+    never_alive = SpawnRecorder(become_alive=False)
+    hub_client._spawn_hub = never_alive
+    try:
+        hub_client.ensure_hub_running()
+    finally:
+        hub_client.HUB_STARTUP_TIMEOUT_SEC = original_startup_timeout
+
+    check('a spawn that never reports healthy still releases the lock after '
+          'HUB_STARTUP_TIMEOUT_SEC (no permanent deadlock)',
+          not os.path.exists(hub_client.hub_lock_file()))
+
+
 def run():
     with_temp_hub_dir(test_spawns_when_nothing_running)
     with_temp_hub_dir(test_noop_when_hub_already_healthy)
     with_temp_hub_dir(test_spawns_when_hub_status_names_dead_pid)
     with_temp_hub_dir(test_lock_prevents_double_spawn_when_held_fresh)
     with_temp_hub_dir(test_stale_lock_is_stolen_and_spawns)
+    with_temp_hub_dir(test_spawn_lock_held_until_hub_healthy_prevents_double_spawn)
+    with_temp_hub_dir(test_spawn_lock_released_after_startup_timeout)
 
     print(f'\n{len(PASS)} passed, {len(FAIL)} failed')
     return len(FAIL) == 0

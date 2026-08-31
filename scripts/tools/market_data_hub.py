@@ -95,8 +95,32 @@ def main():
 
     helper = DhanHelper(dhan)
 
+    # The hub maintains its OWN merged-tick dict, keyed by tick_key(segment, sid)
+    # — deliberately NOT reading from helper.live_data, which DhanHelper keys by
+    # raw security_id alone. That's safe for a single bridge subscribed to only
+    # one kind of instrument space, but the hub subscribes across every segment at
+    # once, and Dhan's security IDs are only unique WITHIN a segment (confirmed
+    # live: ADANIENT/NSE_EQ and BANKNIFTY/IDX both use id 25 — see
+    # lib.market_hub_client.tick_key's docstring for the full story). Replicating
+    # DhanHelper._on_ws_message's merge-not-replace behavior here, just keyed
+    # correctly.
+    merged_ticks: dict = {}
+    merged_lock = threading.Lock()
     dirty = threading.Event()
-    helper.start_websocket([], on_message=lambda inst, msg: dirty.set())
+
+    def on_message(inst, msg):
+        seg = msg.get('exchange_segment')
+        sid = msg.get('security_id')
+        if sid is not None:
+            key = hub_client.tick_key(seg, sid)
+            with merged_lock:
+                if key in merged_ticks:
+                    merged_ticks[key].update(msg)
+                else:
+                    merged_ticks[key] = dict(msg)
+        dirty.set()
+
+    helper.start_websocket([], on_message=on_message)
 
     # Wait for the feed object to actually exist before the first registry scan —
     # subscribe_instruments()/unsubscribe_instruments() no-op with a warning until
@@ -168,12 +192,13 @@ def main():
                 # solved by hardcoding specific "canary" instrument IDs into what is
                 # otherwise a generic, domain-agnostic multiplexer.
                 if current:
-                    subscribed_sids = {sid for _seg, sid in current}
-                    signature = tuple(sorted(
-                        (sid, round(float(tick.get('LTP') or tick.get('last_price') or 0), 2))
-                        for sid, tick in helper.live_data.items()
-                        if sid in subscribed_sids
-                    ))
+                    subscribed_keys = {hub_client.tick_key(seg, sid) for seg, sid in current}
+                    with merged_lock:
+                        signature = tuple(sorted(
+                            (key, round(float(tick.get('LTP') or tick.get('last_price') or 0), 2))
+                            for key, tick in merged_ticks.items()
+                            if key in subscribed_keys
+                        ))
                     if signature != last_tick_signature:
                         last_tick_signature = signature
                         last_tick_change_ts = now
@@ -194,8 +219,8 @@ def main():
                 time.sleep(0.02)  # let a burst of same-tick packets settle
                 if now - last_write >= WRITE_MIN_INTERVAL_SEC:
                     last_write = now
-                    with helper._ws_lock:
-                        snapshot = dict(helper.live_data)
+                    with merged_lock:
+                        snapshot = dict(merged_ticks)
                     hub_client._atomic_write(hub_client.hub_live_data_file(), {
                         'updated_at': datetime.now().isoformat(),
                         'ticks': snapshot,
