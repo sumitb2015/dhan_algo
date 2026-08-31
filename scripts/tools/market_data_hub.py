@@ -81,6 +81,22 @@ def _dedup_wanted(entries):
     return best  # {(seg, sid): (seg, sid, feed_type)}
 
 
+def _compute_subscribe_delta(current: dict, wanted: dict):
+    """Diff the hub's confirmed-subscribed set against this scan's union.
+
+    A key already in `current` is re-added to `to_add` when the union's
+    richest feed type for it (see _dedup_wanted) is now higher than what's
+    actually subscribed — otherwise a later consumer needing Full never gets
+    it once an earlier consumer's lower Quote/Ticker request already claimed
+    the key, silently degrading that consumer's data forever with no error.
+    """
+    to_add = [v for k, v in wanted.items()
+              if k not in current or current[k][2] < v[2]]
+    to_remove_keys = [k for k in current if k not in wanted]
+    to_remove = [current[k] for k in to_remove_keys]
+    return to_add, to_remove_keys, to_remove
+
+
 def main():
     os.makedirs(hub_client.HUB_DIR, exist_ok=True)
     started_at = datetime.now().isoformat()
@@ -159,9 +175,7 @@ def main():
                 entries = hub_client.list_live_registry_entries()
                 wanted = _dedup_wanted(entries)
 
-                to_add = [v for k, v in wanted.items() if k not in current]
-                to_remove_keys = [k for k in current if k not in wanted]
-                to_remove = [current[k] for k in to_remove_keys]
+                to_add, to_remove_keys, to_remove = _compute_subscribe_delta(current, wanted)
 
                 if to_add:
                     if helper.subscribe_instruments(to_add):
@@ -220,7 +234,18 @@ def main():
                 if now - last_write >= WRITE_MIN_INTERVAL_SEC:
                     last_write = now
                     with merged_lock:
-                        snapshot = dict(merged_ticks)
+                        # Deep-copy the inner per-instrument dicts, not just the
+                        # outer dict — on_message mutates them in place
+                        # (merged_ticks[key].update(msg)), and a shallow
+                        # dict(merged_ticks) shares those same inner dict objects.
+                        # json.dump() below runs outside this lock; if a packet
+                        # for an already-copied instrument arrives mid-serialize
+                        # and adds a new key, the encoder can raise
+                        # "RuntimeError: dictionary changed size during
+                        # iteration" on a dict that's still being mutated by the
+                        # feed thread — uncaught (only PermissionError/OSError
+                        # are caught in _atomic_write), which kills the whole hub.
+                        snapshot = {k: dict(v) for k, v in merged_ticks.items()}
                     hub_client._atomic_write(hub_client.hub_live_data_file(), {
                         'updated_at': datetime.now().isoformat(),
                         'ticks': snapshot,

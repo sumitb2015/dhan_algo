@@ -31,7 +31,12 @@ HUB_SCRIPT = os.path.join(ROOT, 'scripts', 'tools', 'market_data_hub.py')
 # from it at call time (not baked in at import time) so the redirect actually takes.
 HUB_DIR = os.path.join(ROOT, 'debug', 'market_hub')
 
-LOCK_STALE_MS = 30_000          # mirrors app/api/options/live/route.ts's LOCK_STALE_MS
+# Must stay comfortably above HUB_STARTUP_TIMEOUT_SEC (below) — the spawning
+# caller holds this lock for up to HUB_STARTUP_TIMEOUT_SEC while the hub starts.
+# With no margin, a legitimate in-progress spawn taking close to that long could
+# have its own lock stolen as "stale" by another caller right before finishing,
+# recreating the double-spawn race this design otherwise prevents.
+LOCK_STALE_MS = 45_000          # 15s margin over HUB_STARTUP_TIMEOUT_SEC=30s
 HEARTBEAT_STALE_SEC = 10        # hub writes a heartbeat ~every 3s; 10s = 3 missed cycles
 WANTED_STALE_SEC = 60           # hard backstop GC even if the pid check is ever wrong
 
@@ -91,12 +96,16 @@ def _atomic_read(path: str):
     open() for a few milliseconds around the rename (confirmed live: crashed
     live_options_ws.py with an uncaught PermissionError reading hub_status.json).
     Every caller in this module treats None as "nothing there yet" — this must
-    never raise.
+    never raise. UnicodeDecodeError is included alongside the JSON/OS errors
+    above: it's a ValueError, not an OSError, so it would otherwise slip past
+    this guard if a reader ever catches a writer mid-way through a non-atomic
+    partial write on a filesystem where os.replace's atomicity guarantee is
+    weaker than assumed.
     """
     try:
         with open(path) as f:
             return json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError, PermissionError):
+    except (FileNotFoundError, json.JSONDecodeError, PermissionError, UnicodeDecodeError):
         return None
 
 
