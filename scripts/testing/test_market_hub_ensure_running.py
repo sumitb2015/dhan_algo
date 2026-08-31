@@ -184,6 +184,75 @@ def test_spawn_lock_held_until_hub_healthy_prevents_double_spawn(tmp, recorder):
           not os.path.exists(hub_client.hub_lock_file()))
 
 
+def test_stale_but_alive_hub_is_killed_before_respawn(tmp, recorder):
+    """Regression test for the live-confirmed accumulation bug: a hub whose heartbeat
+    went stale (WS hiccup, stuck retry loop) but whose process never actually died
+    used to be left running while a replacement spawned on top of it — repeated over
+    a session this accumulated up to 7 concurrent hub processes, each holding its own
+    real Dhan WebSocket connection. ensure_hub_running() must terminate the old pid
+    before spawning a new one."""
+    import psutil as psutil_module
+
+    hub_client._atomic_write(hub_client.hub_status_file(), {
+        'status': 'RUNNING', 'pid': os.getpid(),  # alive (it's this test process)
+        'last_update': (datetime.datetime.now()
+                         - datetime.timedelta(seconds=hub_client.HEARTBEAT_STALE_SEC + 5)
+                         ).isoformat(),  # but stale
+    })
+
+    terminated = []
+    original_process = psutil_module.Process
+
+    class FakeProcess:
+        def __init__(self, pid):
+            self.pid = pid
+
+        def name(self):
+            return 'python.exe'
+
+        def terminate(self):
+            terminated.append(self.pid)
+
+    psutil_module.Process = FakeProcess
+    try:
+        hub_client.ensure_hub_running()
+    finally:
+        psutil_module.Process = original_process
+
+    check('a stale-but-alive hub pid is terminated before a replacement is spawned',
+          terminated == [os.getpid()])
+    check('a replacement hub is spawned after the stale one is killed',
+          recorder.calls == 1)
+
+
+def test_dead_pid_is_not_sent_a_terminate(tmp, recorder):
+    """_kill_stale_hub must not call psutil.Process() for a pid that's already dead —
+    is_pid_running() gates it first. (The default SpawnRecorder writes a healthy status
+    naming THIS test process's own pid once the spawn happens, and ensure_hub_running's
+    own post-spawn health poll legitimately calls psutil.Process on that — so this
+    checks the dead pid specifically was never passed, not that Process was never
+    called at all.)"""
+    import psutil as psutil_module
+
+    dead_pid = 999_999_999
+    hub_client._atomic_write(hub_client.hub_status_file(), {
+        'status': 'RUNNING', 'pid': dead_pid,
+        'last_update': datetime.datetime.now().isoformat(),
+    })
+
+    called = []
+    original_process = psutil_module.Process
+    psutil_module.Process = lambda pid: called.append(pid) or original_process(pid)
+    try:
+        hub_client.ensure_hub_running()
+    finally:
+        psutil_module.Process = original_process
+
+    check('a dead pid is never passed to psutil.Process/terminate', dead_pid not in called)
+    check('a replacement hub is still spawned for a dead pid',
+          recorder.calls == 1)
+
+
 def test_spawn_lock_released_after_startup_timeout(tmp, recorder):
     """If the spawned hub never reports healthy at all, ensure_hub_running() must
     still release the lock eventually (bounded by HUB_STARTUP_TIMEOUT_SEC) rather
@@ -210,6 +279,8 @@ def run():
     with_temp_hub_dir(test_lock_prevents_double_spawn_when_held_fresh)
     with_temp_hub_dir(test_stale_lock_is_stolen_and_spawns)
     with_temp_hub_dir(test_spawn_lock_held_until_hub_healthy_prevents_double_spawn)
+    with_temp_hub_dir(test_stale_but_alive_hub_is_killed_before_respawn)
+    with_temp_hub_dir(test_dead_pid_is_not_sent_a_terminate)
     with_temp_hub_dir(test_spawn_lock_released_after_startup_timeout)
 
     print(f'\n{len(PASS)} passed, {len(FAIL)} failed')

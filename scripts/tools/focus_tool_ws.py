@@ -455,11 +455,12 @@ def main():
 
             hub_mtime = hub_client.live_data_updated_at()
             if hub_mtime is None or hub_mtime == last_seen_hub_mtime:
-                time.sleep(0.05)
+                time.sleep(0.015)
                 continue
             last_seen_hub_mtime = hub_mtime
-            time.sleep(0.02)  # let a tick's multi-packet burst settle before reading
-
+            # No extra settle sleep here: the hub already coalesces bursts
+            # (its own dirty.wait + settle) before it atomically writes the
+            # snapshot, so this file is always complete once the mtime changes.
             live_ticks = hub_client.read_live_data()
             now_iso = datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z')
             payload: dict = {'type': 'quotes', 'updated_at': now_iso}

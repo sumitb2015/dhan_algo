@@ -40,7 +40,7 @@ from lib import market_hub_client as hub_client
 IST = ZoneInfo('Asia/Kolkata')
 
 REGISTRY_SCAN_SEC = 3          # how often to re-union wanted_*.json and diff-subscribe
-WRITE_MIN_INTERVAL_SEC = 0.15  # ceiling on live_data.json write frequency (~6.6/s)
+WRITE_MIN_INTERVAL_SEC = 0.05  # ceiling on live_data.json write frequency (~20/s)
 STALL_SEC = 20                 # centralized version of live_equity_ws.py's watchdog
 FEED_READY_TIMEOUT_SEC = 10
 STOP_TRIGGER = os.path.join(hub_client.HUB_DIR, 'hub_stop.trigger')

@@ -214,6 +214,22 @@ def _release_spawn_lock():
         pass
 
 
+def _kill_stale_hub(status: dict):
+    """is_hub_alive() said no (stale heartbeat / STARTING timeout) but the recorded
+    pid is still a live python process — it's hung, not dead. Kill it before spawning
+    a replacement, or the old one can keep running and reconnect its own Dhan WS later,
+    leaving two live hub processes writing the same files. Confirmed live: repeated
+    WS hiccups (no-close-frame, DNS blips) each triggered a respawn on top of the last
+    hung hub instead of replacing it, accumulating up to 7 concurrent hub processes."""
+    pid = status.get('pid')
+    if not is_pid_running(pid):
+        return
+    try:
+        psutil.Process(int(pid)).terminate()
+    except (psutil.NoSuchProcess, psutil.AccessDenied, TypeError, ValueError):
+        pass
+
+
 def _spawn_hub():
     os.makedirs(HUB_DIR, exist_ok=True)
     log_fd = open(hub_log_file(), 'a')
@@ -255,6 +271,9 @@ def ensure_hub_running():
     try:
         if is_hub_alive():  # double-check: the lock holder may have finished already
             return
+        status = _atomic_read(hub_status_file())
+        if status:
+            _kill_stale_hub(status)
         _spawn_hub()
         deadline = time.monotonic() + HUB_STARTUP_TIMEOUT_SEC
         while time.monotonic() < deadline:
