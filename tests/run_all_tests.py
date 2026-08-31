@@ -30,7 +30,8 @@ TEST_MODULES = [
     "test_15_indicators",
     "test_16_comparison",
     "test_17_traders_control",
-    "test_18_expired_options"
+    "test_18_expired_options",
+    "test_19_market_hub"
 ]
 
 def main():
