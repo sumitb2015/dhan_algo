@@ -1,0 +1,16 @@
+{
+  "ticks_entry_fixed_keys": [
+    "t"
+  ],
+  "top_level_keys": [
+    "available",
+    "catalogue",
+    "categories",
+    "labels",
+    "ltps",
+    "opens",
+    "session_date",
+    "ticks",
+    "updated_at"
+  ]
+}

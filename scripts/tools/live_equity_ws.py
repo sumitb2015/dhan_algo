@@ -25,6 +25,7 @@ sys.path.insert(0, ROOT)
 
 from login import get_dhan_client
 from lib.dhan_helper import DhanHelper
+from lib import market_hub_client as hub_client
 
 DEBUG_DIR    = os.path.join(ROOT, 'debug')
 QUOTES_FILE  = os.path.join(DEBUG_DIR, 'live_equity_quotes.json')
@@ -115,36 +116,29 @@ def main():
         write_status('ERROR', index=args.index, started_at=started_at)
         sys.exit(1)
 
-    helper.start_websocket(instruments)
-    time.sleep(3)  # wait for connection + first tick batch
+    # Market data now comes from the shared market_data_hub.py process rather than
+    # this bridge's own WebSocket connection — see lib/market_hub_client.py. The hub
+    # is spawned lazily (idempotent) and re-spawned automatically if it ever dies
+    # mid-session; ensure_hub_running() is called here and again periodically below.
+    hub_client.ensure_hub_running()
+    hub_client.register_wanted('live_equity', instruments)
+
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline and not hub_client.read_live_data():
+        time.sleep(0.5)  # wait for the hub's first tick batch
 
     write_status('RUNNING', subscribed=n, index=args.index, started_at=started_at)
-    print('[live_equity_ws] WebSocket connected. Writing quotes every 2 s…', flush=True)
+    print('[live_equity_ws] Registered with market data hub. Writing quotes every 2 s…', flush=True)
 
-    # ── Stall watchdog ───────────────────────────────────────────────────────
-    # The SDK's own reconnect only fires once `feed.run()` returns, and it
-    # returns either on a fatal error (429/401/403) or once the underlying
-    # `websockets` library's ping/pong keepalive (20s interval + 20s timeout)
-    # notices the socket is dead — up to ~40s of frozen prices before a
-    # reconnect even starts. A silent connection death (dropped Wi-Fi, NAT
-    # idle-timeout — no clean close frame) shows no error at all, so the
-    # dashboard panel just sits on stale numbers until that keepalive expires.
-    #
-    # During market hours at least a handful of the 50 stocks should tick
-    # every couple of seconds, so "every single LTP identical for this long"
-    # is itself the signal — cheaper and faster than waiting on the socket
-    # layer to notice. Forcing close_connection() here hands control back to
-    # dhan_helper.py's run_ws() outer loop, which reconnects with a bounded
-    # ~5s (+jitter) backoff instead of the open-ended wait.
-    STALL_SEC = 20
-    last_tick_signature = None
-    last_tick_change_ts = time.monotonic()
-
-    def market_open(now_ist: datetime) -> bool:
-        if now_ist.weekday() >= 5:
-            return False
-        t = now_ist.time()
-        return (9, 15) <= (t.hour, t.minute) <= (15, 30)
+    # Stall detection (dead-but-silent hub connection, or a dead hub process itself)
+    # is now centralized in market_data_hub.py — see its STALL_SEC watchdog. This
+    # bridge's own responsibility is narrower: notice if the hub's shared tick file
+    # has gone stale and re-trigger ensure_hub_running(), which is a no-op if the hub
+    # is merely mid-reconnect-backoff (still alive, still heartbeating) and a real
+    # respawn only if the hub process itself died.
+    HUB_STALE_SEC = 8
+    HUB_CHECK_INTERVAL_SEC = 5
+    last_hub_check = time.monotonic()
 
     # Yesterday's close, keyed "<IST date>:<symbol>", populated by the first
     # genuine (non-flipped) tick seen each day and reused after that.
@@ -169,14 +163,25 @@ def main():
                 except OSError:
                     pass
                 print('[live_equity_ws] Stop trigger detected — exiting.', flush=True)
+                hub_client.unregister_wanted('live_equity')
                 break
 
+            now_monotonic = time.monotonic()
+            if now_monotonic - last_hub_check >= HUB_CHECK_INTERVAL_SEC:
+                last_hub_check = now_monotonic
+                hub_updated = hub_client.live_data_updated_at()
+                if hub_updated is None or time.time() - hub_updated > HUB_STALE_SEC:
+                    # Idempotent — a no-op if the hub is alive and merely mid-backoff;
+                    # only actually respawns if the hub process itself died.
+                    hub_client.ensure_hub_running()
+
+            live_ticks = hub_client.read_live_data()
             quotes: dict[str, dict] = {}
             day = ist_today()
             for key in [k for k in prev_close_cache if not k.startswith(f'{day}:')]:
                 del prev_close_cache[key]
             for sid, sym in sid_to_symbol.items():
-                tick = helper.live_data.get(sid)
+                tick = live_ticks.get(sid)
                 if not tick:
                     continue
 
@@ -220,31 +225,11 @@ def main():
             })
             write_status('RUNNING', subscribed=n, index=args.index, started_at=started_at)
 
-            # Every LTP identical to the previous cycle, for STALL_SEC, during
-            # market hours: the socket is dead but hasn't told anyone yet.
-            now_monotonic = time.monotonic()
-            signature = tuple(sorted((sym, q['ltp']) for sym, q in quotes.items()))
-            if signature != last_tick_signature:
-                last_tick_signature = signature
-                last_tick_change_ts = now_monotonic
-            elif (market_open(datetime.now(IST))
-                  and now_monotonic - last_tick_change_ts > STALL_SEC):
-                print(f'[live_equity_ws] No tick movement for {STALL_SEC}s during market '
-                      f'hours — forcing reconnect.', flush=True)
-                try:
-                    if getattr(helper, 'feed', None):
-                        helper.feed.close_connection()
-                except Exception as e:
-                    print(f'[live_equity_ws] WARNING: forced close_connection failed: {e}', flush=True)
-                # Reset so we don't fire again immediately while the outer
-                # reconnect loop (dhan_helper.py's run_ws) is still working —
-                # the next real signature change re-arms the watchdog.
-                last_tick_change_ts = now_monotonic
-
             time.sleep(2)
 
     except KeyboardInterrupt:
         print('[live_equity_ws] KeyboardInterrupt — shutting down.', flush=True)
+        hub_client.unregister_wanted('live_equity')
     finally:
         write_status('STOPPED', subscribed=0, index=args.index, started_at=started_at)
         print('[live_equity_ws] Stopped.', flush=True)
