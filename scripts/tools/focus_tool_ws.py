@@ -4,17 +4,21 @@ Live WebSocket bridge for the Focus Tool terminal (straddles/strangles page).
 Unlike scripts/tools/live_options_ws.py (one bridge process per broker, one
 underlying at a time — built for AdvancedScalper's single-select dropdown),
 the Focus Tool shows NIFTY, BANKNIFTY and SENSEX rows concurrently, so this
-bridge subscribes to all three underlyings' option ladders in ONE WebSocket
-connection (DhanHelper.start_websocket() already multiplexes an arbitrary
-instrument list over a single socket) and pushes one combined payload keyed
-by underlying.
+bridge subscribes to all three underlyings' option ladders and pushes one
+combined payload keyed by underlying.
 
-This is deliberately standalone — it shares no files, ports, or process
-lifecycle with live_options_ws.py, so nothing here can affect AdvancedScalper,
-Scalper or Baskets. Like the Zerodha scalper bridge, it always sources market
-data from Dhan regardless of which broker Focus Tool has selected for order
-routing — an option's LTP is the exchange's, not the broker's, and Zerodha's
-own quote API needs a separately-billed data pack this project doesn't use.
+Market data comes from the shared market_data_hub.py process (see
+lib/market_hub_client.py) rather than this bridge opening its own Dhan
+connection — Dhan caps concurrent WebSocket connections per account, and this
+was one of several dashboard processes that used to each hold their own.
+This bridge still owns its own output files/status/stop-trigger/push-server
+lifecycle independently of live_options_ws.py, so nothing here can affect
+AdvancedScalper, Scalper or Baskets — only the underlying market-data
+connection is now shared, not the process itself. Like the Zerodha scalper
+bridge, it always sources market data from Dhan regardless of which broker
+Focus Tool has selected for order routing — an option's LTP is the
+exchange's, not the broker's, and Zerodha's own quote API needs a
+separately-billed data pack this project doesn't use.
 
 Usage:
     venv\\Scripts\\python.exe scripts/tools/focus_tool_ws.py \\
@@ -43,6 +47,7 @@ sys.path.insert(0, ROOT)
 from login import get_dhan_client
 from lib.dhan_helper import DhanHelper
 from scripts.tools.premarket_data import _find_nearest_future
+from lib import market_hub_client as hub_client
 
 DEBUG_DIR    = os.path.join(ROOT, 'debug')
 QUOTES_FILE  = os.path.join(DEBUG_DIR, 'focus_tool_ws_quotes_dhan.json')
@@ -388,12 +393,20 @@ def main():
         write_status('ERROR', expiries=expiries, started_at=started_at, ws_port=ws_port)
         sys.exit(1)
 
-    dirty = threading.Event()
-    helper.start_websocket(instruments, on_message=lambda inst, msg: dirty.set())
-    time.sleep(3)
+    # Market data now comes from the shared market_data_hub.py process — see
+    # lib/market_hub_client.py. Changing any underlying's expiry from the UI still
+    # respawns this whole 3-underlying process (unchanged route.ts behavior); the
+    # fresh process re-registers, and the hub converges the delta on its next scan.
+    hub_client.ensure_hub_running()
+    hub_client.register_wanted('focus_tool', instruments)
 
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline and not hub_client.read_live_data():
+        time.sleep(0.5)  # wait for the hub's first tick batch
+
+    live_ticks = hub_client.read_live_data()
     for u, s in state.items():
-        idx_initial = helper.live_data.get(s['sid'])
+        idx_initial = live_ticks.get(s['sid'])
         if idx_initial:
             initial_ltp = _f(idx_initial.get('LTP') or idx_initial.get('last_price'))
             print(f'[focus_tool_ws] {u}: index tick received — LTP={initial_ltp:.2f}', flush=True)
@@ -408,29 +421,46 @@ def main():
     last_pushed = None
     last_file_write = 0.0
 
+    # Substitute for the old in-process dirty flag: poll the hub's shared
+    # live_data.json mtime cheaply (no JSON parse), only paying for a full read +
+    # snapshot rebuild when it has actually changed — see live_options_ws.py for
+    # the identical pattern and rationale.
+    last_seen_hub_mtime = None
+    HUB_STALE_SEC = 8
+    HUB_CHECK_INTERVAL_SEC = 5
+    last_hub_check = time.monotonic()
+
     try:
         while True:
-            # Event-driven pacing: wake instantly on a market tick, or every
-            # 250ms as a heartbeat for the stop-trigger check. After a wake,
-            # sleep 20ms so a multi-packet burst (Full + OI + PrevClose) across
-            # three underlyings coalesces into one snapshot build + push.
-            if dirty.wait(timeout=0.25):
-                dirty.clear()
-                time.sleep(0.02)
-
             if os.path.exists(STOP_TRIGGER):
                 try:
                     os.remove(STOP_TRIGGER)
                 except OSError:
                     pass
                 print('[focus_tool_ws] Stop trigger detected — exiting.', flush=True)
+                hub_client.unregister_wanted('focus_tool')
                 break
 
+            now_monotonic = time.monotonic()
+            if now_monotonic - last_hub_check >= HUB_CHECK_INTERVAL_SEC:
+                last_hub_check = now_monotonic
+                hub_updated = hub_client.live_data_updated_at()
+                if hub_updated is None or time.time() - hub_updated > HUB_STALE_SEC:
+                    hub_client.ensure_hub_running()
+
+            hub_mtime = hub_client.live_data_updated_at()
+            if hub_mtime is None or hub_mtime == last_seen_hub_mtime:
+                time.sleep(0.05)
+                continue
+            last_seen_hub_mtime = hub_mtime
+            time.sleep(0.02)  # let a tick's multi-packet burst settle before reading
+
+            live_ticks = hub_client.read_live_data()
             now_iso = datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z')
             payload: dict = {'type': 'quotes', 'updated_at': now_iso}
 
             for u, s in state.items():
-                idx_tick = helper.live_data.get(s['sid'])
+                idx_tick = live_ticks.get(s['sid'])
                 if idx_tick:
                     live_spot = _f(idx_tick.get('LTP') or idx_tick.get('last_price'))
                     if live_spot > 0:
@@ -440,7 +470,7 @@ def main():
                 fut_payload = None
                 if s.get('fut'):
                     f_meta = s['fut']
-                    f_tick = helper.live_data.get(f_meta['sid'])
+                    f_tick = live_ticks.get(f_meta['sid'])
                     if f_tick:
                         f_ltp = _f(f_tick.get('LTP') or f_tick.get('last_price'))
                         f_prev = _f(f_tick.get('prev_close') or f_tick.get('close') or f_tick.get('previous_close_price'))
@@ -468,7 +498,7 @@ def main():
                             strikes_data[sk_key] = {
                                 'strike': meta['strike'], 'ce': dict(empty_leg), 'pe': dict(empty_leg),
                             }
-                        tick = helper.live_data.get(sid_key)
+                        tick = live_ticks.get(sid_key)
                         if tick:
                             ltp = _f(tick.get('LTP') or tick.get('last_price'))
                             oi = int(tick.get('OI', 0) or tick.get('oi', 0) or 0)
@@ -535,6 +565,7 @@ def main():
 
     except KeyboardInterrupt:
         print('[focus_tool_ws] KeyboardInterrupt — shutting down.', flush=True)
+        hub_client.unregister_wanted('focus_tool')
     finally:
         push_server.stop()
         write_status('STOPPED', expiries=expiries, subscribed=0, started_at=started_at, ws_port=None)
