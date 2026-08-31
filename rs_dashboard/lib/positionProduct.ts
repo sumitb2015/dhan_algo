@@ -35,9 +35,54 @@ export function positionProduct(pos: Record<string, unknown>): string {
  *
  * Keying those by symbol alone makes two same-symbol rows share one guard, so
  * closing either deletes the other's protection while it is still open.
+ *
+ * Dhan can also report the SAME (symbol, product) as two separate rows in one
+ * /positions response — a closed leg (positionType `CLOSED`, netQty 0, kept
+ * only for its realized P&L) plus a freshly reopened leg (`LONG`/`SHORT`) on
+ * the same strike within the same session. Symbol+product alone collapses
+ * those into one React key (and one shared guard/close-spinner slot), so fold
+ * in `positionType` when the broker reports one; Zerodha/Kotak rows don't
+ * carry this field and are unaffected.
  */
 export function positionKey(pos: Record<string, unknown>): string {
-  return `${String(pos.tradingSymbol ?? '')}::${positionProduct(pos)}`;
+  const positionType = String(pos.positionType ?? '').trim().toUpperCase();
+  const suffix = positionType ? `::${positionType}` : '';
+  return `${String(pos.tradingSymbol ?? '')}::${positionProduct(pos)}${suffix}`;
+}
+
+/**
+ * Collapse duplicate Dhan position rows.
+ *
+ * Dhan's /positions endpoint has been observed returning the exact same open
+ * leg twice in one response — same securityId, exchangeSegment, productType
+ * AND positionType, not two genuine legs (a closed-then-reopened pair would
+ * differ in positionType and is left alone by this). Rendering both doesn't
+ * just collide on the React key: every P&L/margin total this codebase sums
+ * over the positions list would double-count that leg too. securityId is
+ * Dhan's only stable per-contract identifier, so rows without one (Zerodha/
+ * Kotak, keyed by trading symbol instead) pass through untouched. Keeps the
+ * last occurrence — Dhan lists duplicates adjacently and they're otherwise
+ * identical, so which copy survives doesn't matter.
+ */
+export function dedupePositions(rows: Record<string, unknown>[]): Record<string, unknown>[] {
+  const indexByKey = new Map<string, number>();
+  const out: Record<string, unknown>[] = [];
+  for (const row of rows) {
+    const secId = String(row.securityId ?? row.security_id ?? '');
+    if (!secId) {
+      out.push(row);
+      continue;
+    }
+    const key = `${secId}::${String(row.exchangeSegment ?? row.exchange ?? '')}::${positionProduct(row)}::${String(row.positionType ?? '').trim().toUpperCase()}`;
+    const existingIdx = indexByKey.get(key);
+    if (existingIdx === undefined) {
+      indexByKey.set(key, out.length);
+      out.push(row);
+    } else {
+      out[existingIdx] = row;
+    }
+  }
+  return out;
 }
 
 /**

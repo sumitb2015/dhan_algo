@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
 import { dhanGet } from '@/lib/dhanToken';
+import { dedupePositions } from '@/lib/positionProduct';
 
 // Direct Dhan REST call — replaces the scalper_api.py subprocess and its
 // ~10s Python cold-start. The per-row Close button awaits this route before
@@ -7,7 +8,7 @@ import { dhanGet } from '@/lib/dhanToken';
 export async function GET(): Promise<NextResponse> {
   try {
     const data = await dhanGet('/positions');
-    return NextResponse.json({ success: true, data: Array.isArray(data) ? data : [] });
+    return NextResponse.json({ success: true, data: dedupePositions(Array.isArray(data) ? data as Record<string, unknown>[] : []) });
   } catch (err) {
     console.error('[/api/scalper/positions] error:', err);
     return NextResponse.json({ success: false, error: 'Failed to fetch positions', detail: String((err as Error).message) }, { status: 500 });

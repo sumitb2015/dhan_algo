@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
 import { dhanGet } from '@/lib/dhanToken';
+import { dedupePositions } from '@/lib/positionProduct';
 
 // Direct Dhan REST calls (same pattern as scalper/fast-order). The previous
 // implementation spawned scalper_api.py per poll, paying ~10s of Python
@@ -20,7 +21,7 @@ export async function GET(): Promise<NextResponse> {
 
     return NextResponse.json({
       success: true,
-      positions: Array.isArray(positions) ? positions : [],
+      positions: dedupePositions(Array.isArray(positions) ? positions as Record<string, unknown>[] : []),
       positionsError,
       orders: Array.isArray(orders) ? orders : [],
       trades: Array.isArray(trades) ? trades : [],
