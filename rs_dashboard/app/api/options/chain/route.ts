@@ -63,18 +63,7 @@ export async function GET(request: NextRequest) {
         const instruments = JSON.parse(raw) as { strike: number; expiry: string; instrument_type: 'CE' | 'PE' }[];
         const filtered = instruments.filter(x => x.expiry === expiry);
         
-        const oc: Record<string, { ce: { previous_close: number }; pe: { previous_close: number } }> = {};
-        for (const inst of filtered) {
-          const strikeKey = String(Math.round(inst.strike));
-          if (!oc[strikeKey]) {
-            oc[strikeKey] = {
-              ce: { previous_close: 0 },
-              pe: { previous_close: 0 }
-            };
-          }
-        }
-        
-        // Try to read spot from live quotes if available, otherwise default to 0
+        // Try to read spot and quotes from live quotes if available for this expiry
         let spot = 0;
         try {
           const quotesFile = path.join(PROJECT_ROOT, 'debug', `live_options_quotes_${QUOTE_SOURCE[broker] ?? broker}.json`);
@@ -84,16 +73,28 @@ export async function GET(request: NextRequest) {
           }
         } catch {}
         
-        // No NIFTY-specific magic-number fallback here — a stale spot=0 is
-        // a truthful "not yet available" for any underlying, whereas a
-        // fixed guess would be actively wrong for e.g. SENSEX (~82,000).
-        const data: ChainResponse = { chain: { oc }, spot };
-        return NextResponse.json({ success: true, data }, {
-          headers: { 'Cache-Control': 'no-store' }
-        });
+        // If live quotes file has quotes for this exact expiry and spot is valid, serve it immediately.
+        // Otherwise, fall through to the live Dhan option chain fetch so non-nearest expiries
+        // or expiries not currently tracked by the single-expiry WS bridge return full live market data.
+        if (spot > 0) {
+          const oc: Record<string, { ce: { previous_close: number }; pe: { previous_close: number } }> = {};
+          for (const inst of filtered) {
+            const strikeKey = String(Math.round(inst.strike));
+            if (!oc[strikeKey]) {
+              oc[strikeKey] = {
+                ce: { previous_close: 0 },
+                pe: { previous_close: 0 }
+              };
+            }
+          }
+          const data: ChainResponse = { chain: { oc }, spot };
+          return NextResponse.json({ success: true, data }, {
+            headers: { 'Cache-Control': 'no-store' }
+          });
+        }
       }
     } catch (err) {
-      console.error('[/api/options/chain] Failed to read Zerodha instruments for chain:', err);
+      console.error(`[/api/options/chain] Failed to read ${broker} instruments for chain:`, err);
     }
   }
 

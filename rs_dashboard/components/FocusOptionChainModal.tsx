@@ -13,6 +13,7 @@
 
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { cn } from '@/lib/utils';
+import { type Broker } from '@/hooks/useBrokerSelector';
 import { FocusModal } from './FocusTool';
 
 const FOCUS_RING = 'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500/60 focus-visible:ring-offset-1 focus-visible:ring-offset-zinc-950';
@@ -126,12 +127,13 @@ function OIBar({ pct, side }: { pct: number; side: 'ce' | 'pe' }) {
 // ─── Main ─────────────────────────────────────────────────────────
 
 export default function FocusOptionChainModal({
-  isOpen, onClose, expiries,
+  isOpen, onClose, expiries, broker,
 }: {
   isOpen: boolean;
   onClose: () => void;
   /** NIFTY expiries, nearest first — FocusTool's own expiries.NIFTY. */
   expiries: string[];
+  broker?: Broker;
 }) {
   const [expiry, setExpiry]           = useState('');
   const [wings, setWings]             = useState<Wings>(10);
@@ -151,10 +153,12 @@ export default function FocusOptionChainModal({
 
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
-  // Default to the nearest expiry once the list arrives; don't clobber a
-  // user-picked expiry on a later re-render of the same `expiries` prop.
+  // Default to the nearest expiry once the list arrives or if current expiry is not in list;
+  // don't clobber a user-picked expiry on a later re-render of the same `expiries` prop.
   useEffect(() => {
-    if (!expiry && expiries.length > 0) setExpiry(expiries[0]);
+    if ((!expiry || (expiries.length > 0 && !expiries.includes(expiry))) && expiries.length > 0) {
+      setExpiry(expiries[0]);
+    }
   }, [expiries, expiry]);
 
   useEffect(() => {
@@ -209,7 +213,8 @@ export default function FocusOptionChainModal({
     if (!expiry) return;
     setLoading(true);
     try {
-      const res  = await fetch(`/api/options/chain?underlying=${UNDERLYING}&expiry=${expiry}`);
+      const url = `/api/options/chain?underlying=${UNDERLYING}&expiry=${expiry}${broker ? `&broker=${broker}` : ''}`;
+      const res  = await fetch(url);
       const json = await res.json() as {
         success: boolean;
         data?: { chain: { oc?: Record<string, RawChainEntry> }; spot: number };
