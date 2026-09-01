@@ -2,10 +2,32 @@ import path from 'path';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
 
+import fs from 'fs';
+
 const execFileAsync = promisify(execFile);
 
 export const PROJECT_ROOT = path.resolve(process.cwd(), '..');
-export const PYTHON_EXE = path.join(PROJECT_ROOT, 'venv', 'Scripts', 'pythonw.exe');
+
+function resolvePythonExe(): string {
+  const candidates = process.platform === 'win32'
+    ? [
+        path.join(PROJECT_ROOT, 'venv', 'Scripts', 'pythonw.exe'),
+        path.join(PROJECT_ROOT, 'venv', 'Scripts', 'python.exe'),
+      ]
+    : [
+        path.join(PROJECT_ROOT, 'venv', 'bin', 'python3'),
+        path.join(PROJECT_ROOT, 'venv', 'bin', 'python'),
+        path.join(PROJECT_ROOT, 'venv', 'Scripts', 'pythonw.exe'),
+        path.join(PROJECT_ROOT, 'venv', 'Scripts', 'python.exe'),
+      ];
+
+  for (const candidate of candidates) {
+    if (fs.existsSync(candidate)) return candidate;
+  }
+  return process.platform === 'win32' ? 'python' : 'python3';
+}
+
+export const PYTHON_EXE = resolvePythonExe();
 
 /**
  * Run a Python script asynchronously (never blocks the Node event loop,

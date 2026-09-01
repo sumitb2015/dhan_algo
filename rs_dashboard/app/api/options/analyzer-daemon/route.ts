@@ -3,11 +3,10 @@ import path from 'path';
 import fs from 'fs';
 import { spawn } from 'child_process';
 import { isPidRunning } from '@/lib/processCheck';
+import { PROJECT_ROOT, PYTHON_EXE } from '@/lib/pyExec';
 import { ANALYTICS_UNDERLYINGS, type AnalyticsUnderlying } from '@/lib/analyticsUnderlyings';
 
-const PROJECT_ROOT   = path.resolve(process.cwd(), '..');
 const DEBUG_DIR      = path.join(PROJECT_ROOT, 'debug');
-const PYTHON_EXE     = path.join(PROJECT_ROOT, 'venv', 'Scripts', 'pythonw.exe');
 const SCRIPT_PATH    = path.join(PROJECT_ROOT, 'scripts', 'tools', 'antigravity_options_analyzer.py');
 const STATUS_FILE    = path.join(DEBUG_DIR, 'options_analyzer_status.json');
 const STOP_TRIGGER   = path.join(DEBUG_DIR, 'options_analyzer_stop.trigger');

@@ -4,10 +4,9 @@ import fs from 'fs';
 import net from 'net';
 import { spawn } from 'child_process';
 import { isPidRunning } from '@/lib/processCheck';
+import { PROJECT_ROOT, PYTHON_EXE } from '@/lib/pyExec';
 
-const PROJECT_ROOT   = path.resolve(process.cwd(), '..');
 const DEBUG_DIR      = path.join(PROJECT_ROOT, 'debug');
-const PYTHON_EXE     = path.join(PROJECT_ROOT, 'venv', 'Scripts', 'pythonw.exe');
 const BRIDGE_SCRIPT  = path.join(PROJECT_ROOT, 'scripts', 'tools', 'live_options_ws.py');
 const ZERODHA_BRIDGE_SCRIPT = path.join(PROJECT_ROOT, 'scripts', 'tools', 'live_options_ws_zerodha.py');
 

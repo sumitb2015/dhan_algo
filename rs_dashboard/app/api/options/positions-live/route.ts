@@ -4,16 +4,15 @@ import path from 'path';
 import { spawn, execFile } from 'child_process';
 import { promisify } from 'util';
 import { isPidRunning } from '@/lib/processCheck';
+import { PROJECT_ROOT, PYTHON_EXE } from '@/lib/pyExec';
 
 const execFileAsync = promisify(execFile);
 
-const PROJECT_ROOT   = path.resolve(process.cwd(), '..');
 const DEBUG_DIR      = path.join(PROJECT_ROOT, 'debug');
 const DATA_FILE      = path.join(DEBUG_DIR, 'live_positions_data.json');
 const STATUS_FILE    = path.join(DEBUG_DIR, 'live_positions_status.json');
 const STOP_TRIGGER   = path.join(DEBUG_DIR, 'live_positions_stop.trigger');
-const PYTHON_EXE      = path.join(PROJECT_ROOT, 'venv', 'Scripts', 'pythonw.exe');
-const PYTHON_SYNC     = path.join(PROJECT_ROOT, 'venv', 'Scripts', 'python.exe');
+const PYTHON_SYNC    = PYTHON_EXE;
 const BRIDGE_SCRIPT   = path.join(PROJECT_ROOT, 'scripts', 'tools', 'live_positions_ws.py');
 const HISTORY_SCRIPT  = path.join(PROJECT_ROOT, 'scripts', 'tools', 'positions_history.py');
 const LIVE_SCRIPT     = path.join(PROJECT_ROOT, 'scripts', 'tools', 'positions_live_data.py');

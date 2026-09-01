@@ -191,6 +191,10 @@ function firstChildPid(parentPid: number): number | null {
  * Retries briefly since the child may not be visible to WMI for a few hundred ms after spawn.
  */
 export async function resolveWorkerPid(launcherPid: number, timeoutMs = 3000): Promise<{ pid: number; startTime: string } | null> {
+  if (process.platform !== 'win32') {
+    return { pid: launcherPid, startTime: '' };
+  }
+
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     const childPid = firstChildPid(launcherPid);
@@ -203,5 +207,5 @@ export async function resolveWorkerPid(launcherPid: number, timeoutMs = 3000): P
   // No child found within the window (e.g. a venv without the launcher stub) — the
   // launcher process itself is the real worker.
   const startTime = getPidStartTime(launcherPid);
-  return startTime ? { pid: launcherPid, startTime } : null;
+  return startTime ? { pid: launcherPid, startTime } : { pid: launcherPid, startTime: '' };
 }

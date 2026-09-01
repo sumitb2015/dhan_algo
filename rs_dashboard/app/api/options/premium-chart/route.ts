@@ -3,10 +3,10 @@ import path from 'path';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
 
+import { PROJECT_ROOT, PYTHON_EXE } from '@/lib/pyExec';
+
 const execFileAsync = promisify(execFile);
 
-const PROJECT_ROOT   = path.resolve(process.cwd(), '..');
-const PYTHON_EXE     = path.join(PROJECT_ROOT, 'venv', 'Scripts', 'pythonw.exe');
 const PREMIUM_SCRIPT = path.join(PROJECT_ROOT, 'scripts', 'tools', 'tradebook_premium.py');
 
 // Polled every 30s by OptionsPositionsTab with zero prior caching — a fresh spawn on

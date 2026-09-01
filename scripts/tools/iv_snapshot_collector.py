@@ -271,10 +271,18 @@ def main():
         log.info('Not a trading day (%s) — exiting without collecting', ist_now().date().isoformat())
         return
 
-    dhan = get_dhan_client()
-    if not dhan:
-        log.error('Auth failed — run login.py to refresh the access token')
-        sys.exit(1)
+    dhan = None
+    while not dhan:
+        try:
+            dhan = get_dhan_client()
+        except Exception:
+            dhan = None
+        if not dhan:
+            if not args.ignore_market_hours and is_after_close(ist_now()):
+                log.error('Market closed before valid auth token was provided — exiting')
+                sys.exit(1)
+            log.warning('Auth failed / token expired — waiting for login.py / dashboard login (retrying in 15s)...')
+            time.sleep(15)
 
     helper = DhanHelper(dhan)
 

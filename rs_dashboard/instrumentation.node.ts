@@ -6,12 +6,9 @@
 import path from 'path';
 import fs from 'fs';
 import { spawn, execSync } from 'child_process';
+import { PROJECT_ROOT, PYTHON_EXE } from './lib/pyExec';
 
-const PROJECT_ROOT = path.resolve(process.cwd(), '..');
 const DEBUG_DIR    = path.join(PROJECT_ROOT, 'debug');
-// pythonw.exe runs without a console window on Windows. The collector writes logs
-// directly to its log file (not sys.stderr), so windowless mode works fine.
-const PYTHON_EXE   = path.join(PROJECT_ROOT, 'venv', 'Scripts', 'pythonw.exe');
 const COLLECTOR    = path.join(PROJECT_ROOT, 'scripts', 'tools', 'iv_snapshot_collector.py');
 const PID_FILE     = path.join(DEBUG_DIR, 'iv_snapshot_collector.pid');
 const STOP_TRIGGER = path.join(DEBUG_DIR, 'iv_snapshots_stop.trigger');
