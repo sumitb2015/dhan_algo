@@ -2127,13 +2127,13 @@ function FocusRowCardImpl({
 
   return (
     <div className={cn(
-      'rounded-xl border bg-zinc-900/60 p-4 flex flex-col gap-3',
+      'rounded-xl border bg-zinc-900/60 p-3 flex flex-col gap-2',
       !flat
         ? 'border-emerald-500/40 border-l-[3px] border-l-emerald-500'
         : 'border-zinc-800 hover:border-zinc-700/60',
     )}>
       {/* Header Info */}
-      <div className="flex items-center justify-between border-b border-zinc-800/80 pb-2">
+      <div className="flex items-center justify-between border-b border-zinc-800/80 pb-1.5">
         <div className="flex flex-col">
           <span className="text-xs font-bold text-white tracking-wide">{row.underlying}</span>
           <span className="text-[10px] text-zinc-500 font-mono mt-0.5">
@@ -2164,7 +2164,7 @@ function FocusRowCardImpl({
       </div>
 
       {/* Timing and DTE */}
-      <div className="grid grid-cols-2 gap-2 text-xs">
+      <div className="grid grid-cols-2 gap-x-2 gap-y-1 text-xs">
         <div className="flex items-center gap-1.5">
           <span className="text-[8px] font-black text-zinc-500 w-9">ENTRY</span>
           <TimeInput value={row.entryTime} onChange={v => onUpdate({ entryTime: v })} />
@@ -2173,7 +2173,7 @@ function FocusRowCardImpl({
           <span className="text-[8px] font-black text-zinc-500 w-9">EXIT</span>
           <TimeInput value={row.exitTime} onChange={v => onUpdate({ exitTime: v })} />
         </div>
-        <div className="col-span-2 flex items-center gap-1.5 mt-0.5">
+        <div className="flex items-center gap-1.5">
           <span className="text-[8px] font-black text-zinc-500 w-9">EXPY</span>
           <select
             value={row.expiry || expiries[0] || ''}
@@ -2182,12 +2182,12 @@ function FocusRowCardImpl({
             title={expiryLocked
               ? 'Locked while a leg is open — exit it first, or use the shift chevrons to roll it'
               : 'Which listed expiry this row trades'}
-            className="text-[9px] font-bold h-5 px-1 border border-zinc-700 rounded bg-zinc-900 text-zinc-200 focus:outline-none focus:border-violet-500 disabled:opacity-50 disabled:cursor-not-allowed"
+            className="text-[9px] font-bold h-5 px-1 border border-zinc-700 rounded bg-zinc-900 text-zinc-200 focus:outline-none focus:border-violet-500 disabled:opacity-50 disabled:cursor-not-allowed w-full"
           >
             {expiries.map(e => <option key={e} value={e}>{e}</option>)}
           </select>
         </div>
-        <div className="col-span-2 flex items-center gap-1.5 mt-0.5">
+        <div className="flex items-center gap-1.5">
           <span className="text-[8px] font-black text-zinc-500 w-9" title="Active only while trading the nearest expiry">DTE</span>
           <div className="flex gap-1">
             {(['Any', '0', '1', '0+1'] as FocusDte[]).map(d => (
@@ -2197,7 +2197,7 @@ function FocusRowCardImpl({
                 disabled={!onNearestExpiry}
                 title={!onNearestExpiry ? 'DTE only applies when trading the nearest expiry' : undefined}
                 className={cn(
-                  'text-[9px] font-extrabold px-1.5 py-0.5 rounded cursor-pointer transition-colors disabled:opacity-40 disabled:cursor-not-allowed',
+                  'text-[9px] font-extrabold px-1 py-0.5 rounded cursor-pointer transition-colors disabled:opacity-40 disabled:cursor-not-allowed',
                   row.dte === d ? 'bg-violet-600 text-oncolor' : 'bg-zinc-800 text-zinc-500 hover:bg-zinc-700',
                   FOCUS_RING,
                 )}
@@ -2208,7 +2208,7 @@ function FocusRowCardImpl({
       </div>
 
       {/* Strike + LTP readout */}
-      <div className="grid grid-cols-[1fr_auto] gap-3 bg-zinc-950/30 rounded-xl p-3 border border-zinc-800/50">
+      <div className="grid grid-cols-[1fr_auto] gap-3 bg-zinc-950/30 rounded-xl p-2.5 border border-zinc-800/50">
         <div className="flex flex-col gap-0.5">
           <span className="text-[8px] font-black text-zinc-500 uppercase tracking-wider">CE / PE Strike</span>
           <span className="font-mono font-bold text-zinc-200 text-sm">
@@ -2228,13 +2228,13 @@ function FocusRowCardImpl({
       </div>
 
       {/* Strike editor */}
-      <div className="bg-zinc-950/20 border border-zinc-800/40 rounded-xl p-3">
+      <div className="bg-zinc-950/20 border border-zinc-800/40 rounded-xl p-2.5">
         <StrikeEditor row={row} live={live} step={step} onUpdate={onUpdate} onShift={onShift} shiftDisabled={busy} onBlocked={onBlocked} workerHold={workerHold}
           buildupWsActive={buildupWsActive} buildupExpiryHint={buildupExpiryHint} />
       </div>
 
       {/* CE and PE Legs */}
-      <div className="flex flex-col gap-2 bg-zinc-950/20 border border-zinc-800/40 rounded-xl p-3">
+      <div className="flex flex-col gap-1.5 bg-zinc-950/20 border border-zinc-800/40 rounded-xl p-2.5">
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2">
             <span className="text-[9px] font-black text-emerald-400">CE</span>
@@ -2290,32 +2290,34 @@ function FocusRowCardImpl({
       </div>
 
       {/* Level Exits */}
-      <div className="flex flex-col gap-1 text-[11px]">
-        <div className="flex justify-between items-center">
-          <span className="text-rose-400 text-[9px] font-black">H&uarr;</span>
-          <RuleNumStepper value={row.levelHigh} onCommit={v => onUpdate({ levelHigh: v })} className="w-14 h-6" />
+      <div className="flex flex-col gap-1.5 bg-zinc-950/20 border border-zinc-800/40 rounded-xl p-2.5">
+        <div className="grid grid-cols-2 gap-x-3 gap-y-1">
+          <div className="flex justify-between items-center gap-1">
+            <span className="text-rose-400 text-[9px] font-black">H&uarr;</span>
+            <RuleNumStepper value={row.levelHigh} onCommit={v => onUpdate({ levelHigh: v })} className="w-16 h-6" />
+          </div>
+          <div className="flex justify-between items-center gap-1">
+            <span className="text-emerald-400 text-[9px] font-black">L&darr;</span>
+            <RuleNumStepper value={row.levelLow} onCommit={v => onUpdate({ levelLow: v })} className="w-16 h-6" />
+          </div>
+          <div className="flex justify-between items-center gap-1">
+            <span className="text-amber-400 text-[9px] font-black">SL ₹</span>
+            <RuleNumInput value={row.slRupees} onCommit={v => onUpdate({ slRupees: v })} className="w-16 h-6" />
+          </div>
+          <div className="flex justify-between items-center gap-1">
+            <span className="text-amber-500 text-[9px] font-black">SL &times;</span>
+            <RuleNumInput value={row.slMultiplier} onCommit={v => onUpdate({ slMultiplier: v })} className="w-16 h-6" />
+          </div>
+          <div className="flex justify-between items-center gap-1">
+            <span className="text-emerald-400 text-[9px] font-black" title="Exit CE alone on its own premium multiple, independent of PE and of SL × above">CE &times;</span>
+            <RuleNumInput value={row.ceSlMultiplier ?? '1.2'} onCommit={v => onUpdate({ ceSlMultiplier: v })} className="w-16 h-6" />
+          </div>
+          <div className="flex justify-between items-center gap-1">
+            <span className="text-rose-400 text-[9px] font-black" title="Exit PE alone on its own premium multiple, independent of CE and of SL × above">PE &times;</span>
+            <RuleNumInput value={row.peSlMultiplier ?? '1.2'} onCommit={v => onUpdate({ peSlMultiplier: v })} className="w-16 h-6" />
+          </div>
         </div>
-        <div className="flex justify-between items-center mt-1">
-          <span className="text-emerald-400 text-[9px] font-black">L&darr;</span>
-          <RuleNumStepper value={row.levelLow} onCommit={v => onUpdate({ levelLow: v })} className="w-14 h-6" />
-        </div>
-        <div className="flex justify-between items-center mt-1">
-          <span className="text-amber-400 text-[9px] font-black">SL ₹</span>
-          <RuleNumInput value={row.slRupees} onCommit={v => onUpdate({ slRupees: v })} className="w-20 h-6" />
-        </div>
-        <div className="flex justify-between items-center mt-1">
-          <span className="text-amber-500 text-[9px] font-black">SL &times;</span>
-          <RuleNumInput value={row.slMultiplier} onCommit={v => onUpdate({ slMultiplier: v })} className="w-20 h-6" />
-        </div>
-        <div className="flex justify-between items-center mt-1">
-          <span className="text-emerald-400 text-[9px] font-black" title="Exit CE alone on its own premium multiple, independent of PE and of SL × above">CE &times;</span>
-          <RuleNumInput value={row.ceSlMultiplier ?? '1.2'} onCommit={v => onUpdate({ ceSlMultiplier: v })} className="w-20 h-6" />
-        </div>
-        <div className="flex justify-between items-center mt-1">
-          <span className="text-rose-400 text-[9px] font-black" title="Exit PE alone on its own premium multiple, independent of CE and of SL × above">PE &times;</span>
-          <RuleNumInput value={row.peSlMultiplier ?? '1.2'} onCommit={v => onUpdate({ peSlMultiplier: v })} className="w-20 h-6" />
-        </div>
-        <div className="flex justify-between items-center mt-1">
+        <div className="flex flex-wrap items-center gap-1.5 border-t border-zinc-800/60 pt-1.5">
           <SwitchToggle checked={row.levelVw} onChange={v => onUpdate({ levelVw: v })} label="VW"
             title="Exit when the combined premium crosses its session-open VWAP against you" />
           {row.levelVw && (
@@ -2339,7 +2341,7 @@ function FocusRowCardImpl({
               </span>
             </>
           )}
-          <div className="flex gap-2">
+          <div className="flex gap-2 ml-auto">
             <button
               onClick={() => onUpdate(row, true)}
               className={cn('text-[9px] font-bold text-emerald-400 border border-emerald-500/30 px-1.5 py-0.5 rounded hover:bg-emerald-500/10', FOCUS_RING)}
@@ -2357,20 +2359,20 @@ function FocusRowCardImpl({
       </div>
 
       {/* Row Control Actions */}
-      <div className="flex justify-end gap-2 border-t border-zinc-800/80 pt-2.5 mt-1">
+      <div className="flex justify-end gap-1.5 border-t border-zinc-800/80 pt-2">
         {(row.status === 'draft' || row.status === 'exited') && (
-          <button onClick={onArm} className={cn('text-xs font-bold px-3 py-1.5 rounded-lg bg-violet-600 text-oncolor hover:bg-violet-500', FOCUS_RING)}>
+          <button onClick={onArm} className={cn('text-[11px] font-bold px-2.5 py-1 rounded-lg bg-violet-600 text-oncolor hover:bg-violet-500', FOCUS_RING)}>
             Arm Row
           </button>
         )}
         {row.status === 'armed' && (
-          <button onClick={onDisarm} className={cn('text-xs font-bold px-3 py-1.5 rounded-lg bg-zinc-700 text-zinc-200 hover:bg-zinc-600', FOCUS_RING)}>
+          <button onClick={onDisarm} className={cn('text-[11px] font-bold px-2.5 py-1 rounded-lg bg-zinc-700 text-zinc-200 hover:bg-zinc-600', FOCUS_RING)}>
             Disarm
           </button>
         )}
         <button onClick={() => onExit('ALL')} disabled={flat || !canTrade}
           title={flat ? 'Nothing open on this row' : 'Close every open leg of this row at market'}
-          className={cn('text-xs font-extrabold px-3 py-1.5 rounded-lg bg-rose-600 text-oncolor hover:bg-rose-500 disabled:opacity-40 disabled:cursor-not-allowed', FOCUS_RING)}>
+          className={cn('text-[11px] font-extrabold px-2.5 py-1 rounded-lg bg-rose-600 text-oncolor hover:bg-rose-500 disabled:opacity-40 disabled:cursor-not-allowed', FOCUS_RING)}>
           Exit All
         </button>
       </div>
@@ -4814,7 +4816,7 @@ export default function FocusTool() {
                 lot={lotSizes[u]} dte={dteFor(expiries[u]?.[0] ?? '')} wsLive={wsLive}
               />
 
-              <div className={cn("bg-zinc-900/60 border border-zinc-800 rounded-2xl overflow-hidden", viewMode === 'cards' ? 'p-4' : '')}>
+              <div className={cn("bg-zinc-900/60 border border-zinc-800 rounded-2xl overflow-hidden", viewMode === 'cards' ? 'p-3' : '')}>
                 {viewMode === 'cards' ? (
                   rows.length === 0 ? (
                     <div className="py-12 text-center flex flex-col items-center justify-center gap-2">
@@ -4823,7 +4825,7 @@ export default function FocusTool() {
                       <span className="text-xs text-zinc-600">Click &ldquo;Add Row&rdquo; to schedule a straddle or strangle entry.</span>
                     </div>
                   ) : (
-                    <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                    <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4 gap-3">
                       {rows.map(row => {
                         const { buildupWsActive, buildupExpiryHint } = rowBuildupWsFlags(
                           row, wsLive,
