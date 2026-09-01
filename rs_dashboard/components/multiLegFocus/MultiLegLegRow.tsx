@@ -21,13 +21,14 @@ interface MultiLegLegRowProps {
   allStrikes: number[];
   ltp: number;
   editable: boolean;
+  exiting: boolean;
   onChange: (patch: Partial<MultiLegLeg>) => void;
   onRemove: () => void;
   onExit: () => void;
 }
 
 export default function MultiLegLegRow({
-  leg, allStrikes, ltp, editable, onChange, onRemove, onExit,
+  leg, allStrikes, ltp, editable, exiting, onChange, onRemove, onExit,
 }: MultiLegLegRowProps) {
   const pnl = leg.fill ? legPnl(leg, ltp) : 0;
   const pnlColor = pnl > 0 ? 'text-emerald-400' : pnl < 0 ? 'text-rose-400' : 'text-zinc-400';
@@ -80,9 +81,9 @@ export default function MultiLegLegRow({
       </td>
       <td className="px-2 py-2 text-center">
         {leg.status === 'OPEN' ? (
-          <button onClick={onExit} aria-label="Exit this leg" title="Exit this leg"
-            className={`text-[10px] font-bold text-rose-400 hover:text-rose-300 px-1.5 py-0.5 rounded border border-rose-500/30 hover:bg-rose-500/10 ${FOCUS_RING}`}>
-            EXIT
+          <button onClick={onExit} disabled={exiting} aria-label="Exit this leg" title="Exit this leg"
+            className={`text-[10px] font-bold text-rose-400 hover:text-rose-300 px-1.5 py-0.5 rounded border border-rose-500/30 hover:bg-rose-500/10 disabled:opacity-50 disabled:cursor-not-allowed ${FOCUS_RING}`}>
+            {exiting ? 'Exiting…' : 'EXIT'}
           </button>
         ) : editable ? (
           <button onClick={onRemove} aria-label="Remove leg" title="Remove leg"

@@ -328,6 +328,7 @@ export default function MultiLegFocus() {
         setBasketId(open.id);
         setUnderlying(open.underlying as Underlying);
         setExpiry(open.expiry);
+        setBroker(open.broker as Broker);
         setPresetKey(open.presetKey ?? null);
         setLegs(open.legs);
       })
@@ -338,9 +339,15 @@ export default function MultiLegFocus() {
   const totalPnl = useMemo(() => basketTotalPnl(legs, ltpFor), [legs, ltpFor]);
 
   const [exiting, setExiting] = useState<Set<string>>(new Set());
+  const exitingRef = useRef<Set<string>>(new Set());
 
   const exitOneLeg = useCallback(async (leg: MultiLegLeg): Promise<boolean> => {
     if (leg.status !== 'OPEN') return true;
+    // Synchronous re-entry guard: React state updates are async, so two rapid
+    // calls could both observe `exiting` as "not yet exiting" before either
+    // write lands. A ref mutation is visible to the very next call immediately.
+    if (exitingRef.current.has(leg.id)) return false;
+    exitingRef.current.add(leg.id);
     setExiting(prev => new Set([...prev, leg.id]));
     setLegs(prev => prev.map(l => (l.id === leg.id ? { ...l, status: 'CLOSING' as const } : l)));
     const label = `${leg.side === 'B' ? 'BUY' : 'SELL'} ${leg.strike} ${leg.option}`;
@@ -391,6 +398,7 @@ export default function MultiLegFocus() {
       setLegs(prev => prev.map(l => (l.id === leg.id ? { ...l, status: 'OPEN' as const } : l)));
       return false;
     } finally {
+      exitingRef.current.delete(leg.id);
       setExiting(prev => { const next = new Set(prev); next.delete(leg.id); return next; });
     }
   }, [broker, addToast]);
@@ -531,6 +539,7 @@ export default function MultiLegFocus() {
                 allStrikes={allStrikes}
                 ltp={ltpFor(leg)}
                 editable={!hasPlacedLeg}
+                exiting={exiting.has(leg.id)}
                 onChange={patch => updateLeg(leg.id, patch)}
                 onRemove={() => removeLeg(leg.id)}
                 onExit={() => exitLeg(leg.id)}
