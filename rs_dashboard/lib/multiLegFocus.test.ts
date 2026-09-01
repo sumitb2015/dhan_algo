@@ -100,3 +100,14 @@ test('findLegPosition reports flat for a leg with no orderRef yet', () => {
   const leg: MultiLegLeg = { id: '1', side: 'S', option: 'CE', strike: 24000, lots: 1, type: 'MARKET', status: 'DRAFT' };
   assert.deepStrictEqual(findLegPosition('dhan', leg, []), { kind: 'flat' });
 });
+
+test('findLegPosition ignores a CLOSED/zero-qty Dhan row and matches the genuinely live one for the same securityId', () => {
+  const leg: MultiLegLeg = { id: '1', side: 'S', option: 'CE', strike: 24000, lots: 1, type: 'MARKET', status: 'OPEN', orderRef: { securityId: '999' } };
+  const rows = [
+    { securityId: '999', tradingSymbol: 'NIFTY24721C24000', productType: 'MARGIN', netQty: 0, positionType: 'CLOSED' },
+    { securityId: '999', tradingSymbol: 'NIFTY24721C24000', productType: 'MARGIN', netQty: -75, positionType: 'SHORT' },
+  ];
+  const match = findLegPosition('dhan', leg, rows);
+  assert.strictEqual(match.kind, 'match');
+  if (match.kind === 'match') assert.strictEqual(match.row.positionType, 'SHORT');
+});

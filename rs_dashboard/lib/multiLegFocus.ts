@@ -113,10 +113,22 @@ export function findLegPosition(
   if (!leg.orderRef) return { kind: 'flat' };
 
   if (broker === 'dhan' && leg.orderRef.securityId) {
-    const matches = rows.filter(r => String(r.securityId ?? '') === leg.orderRef!.securityId);
-    if (matches.length === 0) return { kind: 'flat' };
-    if (matches.length > 1) return { kind: 'ambiguous', count: matches.length };
-    return { kind: 'match', row: matches[0] };
+    // A CLOSED/zero-qty row can legitimately sit alongside a freshly reopened
+    // row for the same securityId within one session (close-then-reopen at
+    // the same strike is a documented workflow on this page). Only rows
+    // representing a genuinely live position should count toward the
+    // match/ambiguous decision — see lib/positionProduct.ts's positionKey
+    // doc comment for the same Dhan quirk in the scalper terminals.
+    const live = rows.filter(r => {
+      if (String(r.securityId ?? '') !== leg.orderRef!.securityId) return false;
+      const positionType = String(r.positionType ?? '').trim().toUpperCase();
+      if (positionType === 'CLOSED') return false;
+      if ((Number(r.netQty) || 0) === 0) return false;
+      return true;
+    });
+    if (live.length === 0) return { kind: 'flat' };
+    if (live.length > 1) return { kind: 'ambiguous', count: live.length };
+    return { kind: 'match', row: live[0] };
   }
 
   if (leg.orderRef.symbol) {
