@@ -1006,7 +1006,7 @@ In `rs_dashboard/components/MultiLegFocus.tsx`, add below the `clearBasket` call
         }, strikeMap);
         if (!req) {
           addToast('error', `${label} — no order identifier resolved`, 'Strike lookup not ready yet — basket stopped');
-          working = working.map(l => (l.id === leg.id || placedIds.includes(l.id) ? l : { ...l, status: 'FAILED' as const }));
+          working = working.map(l => (placedIds.includes(l.id) ? l : { ...l, status: 'FAILED' as const }));
           setLegs(working); persistBasket(working, basketId);
           await rollbackPlacedLegs(placedIds, working);
           return;
@@ -1027,14 +1027,17 @@ In `rs_dashboard/components/MultiLegFocus.tsx`, add below the `clearBasket` call
             placedIds.push(leg.id);
             addToast('success', `${label} placed`, `ID: ${j.order_id}`);
           } else {
-            working = working.map(l => (l.id === leg.id ? { ...l, status: 'FAILED' as const } : l));
+            // Mark the failing leg AND every leg not yet attempted as FAILED —
+            // leaving them at 'PLACING' would strand them there forever, since
+            // the loop returns immediately and never revisits them.
+            working = working.map(l => (placedIds.includes(l.id) ? l : { ...l, status: 'FAILED' as const }));
             addToast('error', `${label} failed — basket stopped`, j.error ?? 'Unknown error');
             setLegs(working); persistBasket(working, basketId);
             await rollbackPlacedLegs(placedIds, working);
             return;
           }
         } catch (e) {
-          working = working.map(l => (l.id === leg.id ? { ...l, status: 'FAILED' as const } : l));
+          working = working.map(l => (placedIds.includes(l.id) ? l : { ...l, status: 'FAILED' as const }));
           addToast('error', `${label} UNCONFIRMED — basket stopped`, `Check Orders before retrying: ${String(e)}`);
           setLegs(working); persistBasket(working, basketId);
           await rollbackPlacedLegs(placedIds, working);
