@@ -85,6 +85,7 @@ const NAV_GROUPS = [
       { href: '/focus-tool', label: 'Ultimate Scalper Terminal', desc: 'Straddles & strangles terminal — timed entry, level exits, real-money armed orders' },
       { href: '/options/quiktrade', label: 'QuikTrade', desc: 'OI buildup quadrants, live positions & P&L' },
       { href: '/baskets', label: 'Baskets', desc: 'Predefined option strategies with payoff diagram & quick basket order entry' },
+      { href: '/multi-leg-focus', label: 'Multi-Leg Focus', desc: 'N-leg strategy builder from presets — live P&L monitor with manual exits' },
       { href: '/strategy-builder', label: 'Strategy Builder', desc: 'Build & track multi-leg NIFTY options strategies' },
       { href: '/csp-screener', label: 'CSP Screener', desc: 'Scan Nifty 500 F&O stocks for cash-secured-put candidates, track & roll positions' },
       { href: '/cash-secured-puts', label: 'Cash Secured Puts', desc: 'Track underlyings, sell PUTs, monitor active orders & trades' },
