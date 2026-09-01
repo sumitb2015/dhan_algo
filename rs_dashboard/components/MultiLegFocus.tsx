@@ -288,6 +288,126 @@ export default function MultiLegFocus() {
     }
   }, [legs, expiry, hasAuthenticatedBroker, lotSize, underlying, confirmPlace, broker, strikeMap, basketId, addToast, persistBasket, rollbackPlacedLegs, ltpFor]);
 
+  const legsRef = useRef(legs); useEffect(() => { legsRef.current = legs; }, [legs]);
+
+  useEffect(() => {
+    if (!legs.some(l => l.status === 'OPEN')) return;
+    let cancelled = false;
+
+    const poll = async () => {
+      try {
+        const res = await fetch(scalperRoute(broker, 'positions'));
+        const j = await res.json() as { success: boolean; data?: Record<string, unknown>[] };
+        if (cancelled || !j.success || !j.data) return;
+        const rows = j.data;
+        setLegs(prev => prev.map(leg => {
+          if (leg.status !== 'OPEN') return leg;
+          const match = findLegPosition(broker, leg, rows);
+          const absQty = match.kind === 'match' ? Math.abs(Number(match.row.netQty) || 0) : (match.kind === 'flat' ? 0 : null);
+          return reconcileLegFillDown(leg, absQty);
+        }));
+      } catch {
+        // transient network/broker error — leave the ledger untouched this tick
+      }
+    };
+
+    poll();
+    const id = setInterval(poll, 3000);
+    return () => { cancelled = true; clearInterval(id); };
+  }, [broker, legs.some(l => l.status === 'OPEN')]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ── Restore the most recently updated open basket on mount ───────
+  useEffect(() => {
+    fetch('/api/multi-leg-focus/baskets')
+      .then(r => r.json())
+      .then((j: { success: boolean; data?: MultiLegBasket[] }) => {
+        if (!j.success || !j.data?.length) return;
+        const open = [...j.data].filter(b => b.legs.some(l => l.status === 'OPEN' || l.status === 'PLACING'))
+          .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))[0];
+        if (!open) return;
+        setBasketId(open.id);
+        setUnderlying(open.underlying as Underlying);
+        setExpiry(open.expiry);
+        setPresetKey(open.presetKey ?? null);
+        setLegs(open.legs);
+      })
+      .catch(() => {});
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const totalPnl = useMemo(() => basketTotalPnl(legs, ltpFor), [legs, ltpFor]);
+
+  const [exiting, setExiting] = useState<Set<string>>(new Set());
+
+  const exitOneLeg = useCallback(async (leg: MultiLegLeg): Promise<boolean> => {
+    if (leg.status !== 'OPEN') return true;
+    setExiting(prev => new Set([...prev, leg.id]));
+    setLegs(prev => prev.map(l => (l.id === leg.id ? { ...l, status: 'CLOSING' as const } : l)));
+    const label = `${leg.side === 'B' ? 'BUY' : 'SELL'} ${leg.strike} ${leg.option}`;
+
+    try {
+      const res = await fetch(scalperRoute(broker, 'positions'));
+      const j = await res.json() as { success: boolean; data?: Record<string, unknown>[] };
+      if (!j.success || !j.data) {
+        addToast('error', `Cannot exit ${label}`, 'Failed to fetch live positions — try again');
+        setLegs(prev => prev.map(l => (l.id === leg.id ? { ...l, status: 'OPEN' as const } : l)));
+        return false;
+      }
+      const match = findLegPosition(broker, leg, j.data);
+      if (match.kind !== 'match') {
+        // Never fall back to the local ledger qty once the broker match fails —
+        // guessing the exit size here is exactly what the ownership rule forbids.
+        addToast('error', `Cannot exit ${label}`, match.kind === 'ambiguous' ? `${match.count} rows share this symbol — close manually from Orders/Positions` : 'No matching broker position found — it may already be closed');
+        setLegs(prev => prev.map(l => (l.id === leg.id ? { ...l, status: match.kind === 'flat' ? 'CLOSED' as const : 'OPEN' as const } : l)));
+        return match.kind === 'flat';
+      }
+      const netQty = Number(match.row.netQty) || 0;
+      if (netQty === 0) {
+        addToast('success', `${label} already flat`);
+        setLegs(prev => prev.map(l => (l.id === leg.id ? { ...l, status: 'CLOSED' as const, fill: { qty: 0, avgPrice: l.fill?.avgPrice ?? 0 } } : l)));
+        return true;
+      }
+      const product = positionProduct(match.row);
+      const closeFields = broker === 'dhan' ? { productType: product } : { product };
+      const side = netQty > 0 ? 'SELL' : 'BUY';
+      const qty = Math.abs(netQty);
+      const orderUrl = broker === 'dhan' ? '/api/scalper/fast-order' : scalperRoute(broker, 'order');
+      const body = broker === 'dhan'
+        ? { securityId: leg.orderRef?.securityId, quantity: qty, side, orderType: 'MARKET', exchangeSegment: match.row.exchangeSegment ?? 'NSE_FNO', ...closeFields }
+        : { tradingsymbol: leg.orderRef?.symbol, quantity: qty, side, orderType: 'MARKET', exchange: match.row.exchange ?? 'NFO', ...closeFields };
+
+      const res2 = await fetch(orderUrl, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+      const j2 = await res2.json() as { success: boolean; order_id?: string; error?: string };
+      if (j2.success) {
+        addToast('success', `Exited ${label}`, `ID: ${j2.order_id}`);
+        setLegs(prev => prev.map(l => (l.id === leg.id ? { ...l, status: 'CLOSED' as const, fill: { qty: 0, avgPrice: l.fill?.avgPrice ?? 0 } } : l)));
+        return true;
+      }
+      addToast('error', `Exit failed for ${label}`, j2.error ?? 'Unknown error');
+      setLegs(prev => prev.map(l => (l.id === leg.id ? { ...l, status: 'OPEN' as const } : l)));
+      return false;
+    } catch (e) {
+      addToast('error', `Exit UNCONFIRMED for ${label}`, `Check Orders/Positions manually: ${String(e)}`);
+      setLegs(prev => prev.map(l => (l.id === leg.id ? { ...l, status: 'OPEN' as const } : l)));
+      return false;
+    } finally {
+      setExiting(prev => { const next = new Set(prev); next.delete(leg.id); return next; });
+    }
+  }, [broker, addToast]);
+
+  const exitLeg = useCallback((id: string) => {
+    const leg = legsRef.current.find(l => l.id === id);
+    if (leg) exitOneLeg(leg).then(() => persistBasket(legsRef.current, basketId));
+  }, [exitOneLeg, persistBasket, basketId]);
+
+  const exitBasket = useCallback(async () => {
+    const ordered = sortLegsForExit(legsRef.current.filter(l => l.status === 'OPEN'));
+    for (const leg of ordered) {
+      await exitOneLeg(leg);
+    }
+    persistBasket(legsRef.current, basketId);
+  }, [exitOneLeg, persistBasket, basketId]);
+
   return (
     <div className="min-h-screen bg-zinc-950">
       <NavBar />
@@ -362,6 +482,19 @@ export default function MultiLegFocus() {
               {placing ? 'Placing…' : confirmPlace ? 'Click again to confirm' : 'Place Basket'}
             </button>
           )}
+          {legs.some(l => l.status === 'OPEN' || l.status === 'CLOSING') && (
+            <>
+              <span className={`h-7 flex items-center px-2.5 rounded-lg text-xs font-bold font-mono tabular-nums border ${
+                totalPnl >= 0 ? 'text-emerald-400 border-emerald-500/30 bg-emerald-500/5' : 'text-rose-400 border-rose-500/30 bg-rose-500/5'
+              }`}>
+                {totalPnl >= 0 ? '+' : ''}{fmtMoney(totalPnl)}
+              </span>
+              <button onClick={exitBasket}
+                className={`h-7 px-3 text-[11px] font-bold rounded-lg border border-rose-500/40 text-rose-400 hover:bg-rose-500/10 hover:text-rose-300 ${FOCUS_RING}`}>
+                Exit Basket
+              </button>
+            </>
+          )}
         </div>
       </div>
 
@@ -400,7 +533,7 @@ export default function MultiLegFocus() {
                 editable={!hasPlacedLeg}
                 onChange={patch => updateLeg(leg.id, patch)}
                 onRemove={() => removeLeg(leg.id)}
-                onExit={() => {}}
+                onExit={() => exitLeg(leg.id)}
               />
             ))}
           </tbody>
