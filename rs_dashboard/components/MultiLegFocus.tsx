@@ -21,6 +21,9 @@ import { closeOrderProduct } from '@/lib/positionProduct';
 const UNDERLYINGS = ['NIFTY', 'BANKNIFTY', 'SENSEX'] as const;
 type Underlying = typeof UNDERLYINGS[number];
 
+const DEFAULT_INDEX_STEP: Record<Underlying, number> = { NIFTY: 50, BANKNIFTY: 100, SENSEX: 100 };
+const DEFAULT_INDEX_SPOT: Record<Underlying, number> = { NIFTY: 24000, BANKNIFTY: 51000, SENSEX: 79000 };
+
 function fmtMoney(n: number): string {
   return `${n < 0 ? '-' : ''}₹${Math.abs(n).toLocaleString('en-IN', { maximumFractionDigits: 0 })}`;
 }
@@ -38,12 +41,20 @@ export default function MultiLegFocus() {
 
   const { liveQuotes } = useLiveOptionsWS(expiry, broker, authenticatedBrokers, underlying);
   const spot = liveQuotes?.spot ?? chainSpot;
-  const step = useMemo(() => strikeStep(allStrikes), [allStrikes]);
+  const step = useMemo(() => (allStrikes.length > 1 ? strikeStep(allStrikes) : DEFAULT_INDEX_STEP[underlying]), [allStrikes, underlying]);
   const atmStrike = useMemo(() => {
-    if (spot > 0) return nearestStrike(allStrikes, spot);
-    if (allStrikes.length > 0) return allStrikes[Math.floor(allStrikes.length / 2)];
-    return null;
-  }, [allStrikes, spot]);
+    const s = spot > 0 ? spot : (chainSpot > 0 ? chainSpot : DEFAULT_INDEX_SPOT[underlying]);
+    if (allStrikes.length > 0) return nearestStrike(allStrikes, s);
+    return Math.round(s / step) * step;
+  }, [allStrikes, spot, chainSpot, step, underlying]);
+
+  const effectiveStrikes = useMemo(() => {
+    if (allStrikes.length > 0) return allStrikes;
+    const base = atmStrike ?? DEFAULT_INDEX_SPOT[underlying];
+    const synth: number[] = [];
+    for (let i = -20; i <= 20; i++) synth.push(base + i * step);
+    return synth;
+  }, [allStrikes, atmStrike, step, underlying]);
 
   const ltpFor = useCallback((leg: MultiLegLeg): number => {
     const entry = liveQuotes?.strikes?.[String(leg.strike)];
@@ -142,27 +153,21 @@ export default function MultiLegFocus() {
       addToast('error', 'Not supported here', `${tpl.name} needs a second expiry — use the Baskets page for calendar/diagonal spreads`);
       return;
     }
-    if (atmStrike == null) {
-      addToast('error', 'Cannot apply template', 'Option chain not loaded yet — retry in a moment');
-      return;
-    }
+    const atm = atmStrike ?? (spot > 0 ? Math.round(spot / step) * step : DEFAULT_INDEX_SPOT[underlying]);
     setPresetKey(tpl.key);
-    setLegs(resolveTemplateLegs(tpl, atmStrike, allStrikes, step));
+    setLegs(resolveTemplateLegs(tpl, atm, effectiveStrikes, step));
     setBasketId(null);
-  }, [hasPlacedLeg, atmStrike, allStrikes, step, addToast]);
+  }, [hasPlacedLeg, atmStrike, spot, step, underlying, effectiveStrikes, addToast]);
 
   const addBlankLeg = useCallback(() => {
     if (hasPlacedLeg) return;
-    if (atmStrike == null) {
-      addToast('error', 'Cannot add leg', 'Option chain not loaded yet — retry in a moment');
-      return;
-    }
+    const atm = atmStrike ?? (spot > 0 ? Math.round(spot / step) * step : DEFAULT_INDEX_SPOT[underlying]);
     setPresetKey(null);
     setLegs(prev => [...prev, ...resolveTemplateLegs(
       { key: 'manual', name: 'Manual', legs: [{ side: 'B', option: 'CE', offset: 0, ratio: 1 }] },
-      atmStrike, allStrikes, step,
+      atm, effectiveStrikes, step,
     )]);
-  }, [hasPlacedLeg, atmStrike, allStrikes, step, addToast]);
+  }, [hasPlacedLeg, atmStrike, spot, step, underlying, effectiveStrikes]);
 
   const removeLeg = useCallback((id: string) => {
     if (hasPlacedLeg) return;
@@ -658,7 +663,7 @@ export default function MultiLegFocus() {
               <MultiLegLegRow
                 key={leg.id}
                 leg={leg}
-                allStrikes={allStrikes}
+                allStrikes={effectiveStrikes}
                 ltp={ltpFor(leg)}
                 editable={!hasPlacedLeg}
                 exiting={exiting.has(leg.id)}
