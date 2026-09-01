@@ -39,7 +39,11 @@ export default function MultiLegFocus() {
   const { liveQuotes } = useLiveOptionsWS(expiry, broker, authenticatedBrokers, underlying);
   const spot = liveQuotes?.spot ?? chainSpot;
   const step = useMemo(() => strikeStep(allStrikes), [allStrikes]);
-  const atmStrike = useMemo(() => (spot > 0 ? nearestStrike(allStrikes, spot) : null), [allStrikes, spot]);
+  const atmStrike = useMemo(() => {
+    if (spot > 0) return nearestStrike(allStrikes, spot);
+    if (allStrikes.length > 0) return allStrikes[Math.floor(allStrikes.length / 2)];
+    return null;
+  }, [allStrikes, spot]);
 
   const ltpFor = useCallback((leg: MultiLegLeg): number => {
     const entry = liveQuotes?.strikes?.[String(leg.strike)];
@@ -92,10 +96,19 @@ export default function MultiLegFocus() {
     if (!expiry) return;
     fetch(`/api/options/chain?underlying=${underlying}&expiry=${expiry}&broker=${broker}`)
       .then(r => r.json())
-      .then((j: { success: boolean; data?: { strikes?: number[]; spot?: number } }) => {
-        if (j.success && j.data) {
-          setAllStrikes(j.data.strikes ?? []);
-          setChainSpot(j.data.spot ?? 0);
+      .then((j: { success: boolean; data?: { chain?: { oc?: Record<string, unknown> } | Record<string, unknown>; strikes?: number[]; spot?: number } }) => {
+        if (!j.success || !j.data) return;
+        const oc = (j.data.chain as { oc?: Record<string, unknown> })?.oc ?? j.data.chain;
+        if (oc && typeof oc === 'object') {
+          const strikes = Object.keys(oc).map(Number).filter(n => !isNaN(n) && n > 0).sort((a, b) => a - b);
+          if (strikes.length > 0) {
+            setAllStrikes(strikes);
+          }
+        } else if (Array.isArray(j.data.strikes) && j.data.strikes.length > 0) {
+          setAllStrikes(j.data.strikes);
+        }
+        if (Number(j.data.spot) > 0) {
+          setChainSpot(Number(j.data.spot));
         }
       })
       .catch(() => {});
@@ -111,6 +124,12 @@ export default function MultiLegFocus() {
         if (j.success && j.data) {
           setStrikeMap(j.data.strikes ?? {});
           setLotSize(j.data.lotSize ?? null);
+          if (j.data.strikes) {
+            const strikesFromLookup = Object.keys(j.data.strikes).map(Number).filter(n => !isNaN(n) && n > 0).sort((a, b) => a - b);
+            if (strikesFromLookup.length > 0) {
+              setAllStrikes(prev => (prev.length > 0 ? prev : strikesFromLookup));
+            }
+          }
         }
       })
       .catch(() => {});
