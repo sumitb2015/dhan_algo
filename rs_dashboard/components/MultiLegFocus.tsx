@@ -150,6 +150,144 @@ export default function MultiLegFocus() {
     setLegs([]); setPresetKey(null); setBasketId(null);
   }, [hasPlacedLeg]);
 
+  const [placing, setPlacing] = useState(false);
+  const [confirmPlace, setConfirmPlace] = useState(false);
+  const placingRef = useRef(false);
+
+  const persistBasket = useCallback((nextLegs: MultiLegLeg[], id: string | null) => {
+    const body: Partial<MultiLegBasket> & { id?: string } = {
+      id: id ?? undefined, underlying, expiry, broker, presetKey: presetKey ?? undefined, legs: nextLegs,
+    };
+    fetch('/api/multi-leg-focus/baskets', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+    })
+      .then(r => r.json())
+      .then((j: { success: boolean; data?: MultiLegBasket[] }) => {
+        if (j.success && j.data && !id) {
+          const created = j.data[j.data.length - 1];
+          if (created) setBasketId(created.id);
+        }
+      })
+      .catch(() => {});
+  }, [underlying, expiry, broker, presetKey]);
+
+  // Best-effort flatten of already-placed legs when a basket stops mid-way —
+  // ported from Baskets.tsx's rollbackPlacedLegs, adapted to MultiLegLeg.
+  const rollbackPlacedLegs = useCallback(async (placedIds: string[], currentLegs: MultiLegLeg[]) => {
+    if (!placedIds.length) return;
+    addToast('error', `Auto-flattening ${placedIds.length} placed leg(s)`, 'Reversing with market orders — verify in Orders/Positions after');
+    for (const id of [...placedIds].reverse()) {
+      const leg = currentLegs.find(l => l.id === id);
+      if (!leg?.fill) continue;
+      const label = `${leg.side === 'B' ? 'BUY' : 'SELL'} ${leg.strike} ${leg.option}`;
+      const reverseReq = resolveOrderRequest(broker, {
+        side: leg.side === 'B' ? 'S' : 'B', option: leg.option, strike: leg.strike, qty: leg.fill.qty, type: 'MARKET', underlying,
+        productType: 'MARGIN',
+      }, strikeMap);
+      if (!reverseReq) {
+        addToast('error', `Could not auto-reverse ${label}`, 'No order identifier — close manually from Orders/Positions');
+        continue;
+      }
+      try {
+        const res = await fetch(reverseReq.url, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(reverseReq.body),
+        });
+        const j = await res.json() as { success: boolean; order_id?: string; error?: string };
+        if (j.success) addToast('success', `Reversed ${label}`, `ID: ${j.order_id}`);
+        else addToast('error', `Reverse failed for ${label}`, `${j.error ?? 'Unknown error'} — close manually from Orders/Positions`);
+      } catch (e) {
+        addToast('error', `Reverse UNCONFIRMED for ${label}`, `Close manually from Orders/Positions: ${String(e)}`);
+      }
+    }
+  }, [broker, underlying, strikeMap, addToast]);
+
+  const placeBasket = useCallback(async () => {
+    if (!legs.length || !expiry) return;
+    if (!hasAuthenticatedBroker) {
+      addToast('error', 'No broker logged in', 'Log in before placing a basket');
+      return;
+    }
+    if (!lotSize || lotSize <= 0) {
+      addToast('error', 'Cannot place basket', `Lot size for ${underlying} not resolved yet — retry in a moment`);
+      return;
+    }
+    for (const leg of legs) {
+      if (leg.type === 'LIMIT' && (!leg.price || leg.price <= 0)) {
+        addToast('error', 'Invalid limit price', `${leg.side === 'B' ? 'Buy' : 'Sell'} ${leg.strike} ${leg.option}`);
+        return;
+      }
+    }
+    if (!confirmPlace) {
+      setConfirmPlace(true);
+      setTimeout(() => setConfirmPlace(false), 4000);
+      return;
+    }
+    setConfirmPlace(false);
+    if (placingRef.current) return;
+    placingRef.current = true;
+    setPlacing(true);
+
+    const ordered = sortLegsForPlacement(legs);
+    let working: MultiLegLeg[] = legs.map(l => ({ ...l, status: 'PLACING' as const }));
+    const placedIds: string[] = [];
+
+    try {
+      for (const leg of ordered) {
+        const label = `${leg.side === 'B' ? 'BUY' : 'SELL'} ${leg.strike} ${leg.option}`;
+        const qty = leg.lots * lotSize;
+        const req = resolveOrderRequest(broker, {
+          side: leg.side, option: leg.option, strike: leg.strike, qty, type: leg.type,
+          price: leg.type === 'LIMIT' ? leg.price : undefined, underlying, productType: 'MARGIN',
+        }, strikeMap);
+        if (!req) {
+          addToast('error', `${label} — no order identifier resolved`, 'Strike lookup not ready yet — basket stopped');
+          working = working.map(l => (placedIds.includes(l.id) ? l : { ...l, status: 'FAILED' as const }));
+          setLegs(working); persistBasket(working, basketId);
+          await rollbackPlacedLegs(placedIds, working);
+          return;
+        }
+        try {
+          const res = await fetch(req.url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(req.body) });
+          const j = await res.json() as { success: boolean; order_id?: string; error?: string };
+          if (j.success) {
+            const orderRef = broker === 'dhan' ? { securityId: String(req.body.securityId) } : { symbol: String(req.body.tradingsymbol) };
+            // The order routes only return order_id, never a fill price — a MARKET
+            // order's ack isn't its fill (see dhan-terminal-position-ownership).
+            // Use the live LTP at send-time as the entry estimate, same convention
+            // FocusRowFill.ceEntry/peEntry documents for FocusTool.
+            const avgPrice = leg.type === 'LIMIT' ? (leg.price ?? ltpFor(leg)) : ltpFor(leg);
+            working = working.map(l => (l.id === leg.id
+              ? { ...l, status: 'OPEN' as const, fill: { qty, avgPrice }, orderRef }
+              : l));
+            placedIds.push(leg.id);
+            addToast('success', `${label} placed`, `ID: ${j.order_id}`);
+          } else {
+            // Mark the failing leg AND every leg not yet attempted as FAILED —
+            // leaving them at 'PLACING' would strand them there forever, since
+            // the loop returns immediately and never revisits them.
+            working = working.map(l => (placedIds.includes(l.id) ? l : { ...l, status: 'FAILED' as const }));
+            addToast('error', `${label} failed — basket stopped`, j.error ?? 'Unknown error');
+            setLegs(working); persistBasket(working, basketId);
+            await rollbackPlacedLegs(placedIds, working);
+            return;
+          }
+        } catch (e) {
+          working = working.map(l => (placedIds.includes(l.id) ? l : { ...l, status: 'FAILED' as const }));
+          addToast('error', `${label} UNCONFIRMED — basket stopped`, `Check Orders before retrying: ${String(e)}`);
+          setLegs(working); persistBasket(working, basketId);
+          await rollbackPlacedLegs(placedIds, working);
+          return;
+        }
+      }
+      setLegs(working);
+      persistBasket(working, basketId);
+      addToast('success', `Basket complete: ${placedIds.length}/${legs.length} legs placed`);
+    } finally {
+      placingRef.current = false;
+      setPlacing(false);
+    }
+  }, [legs, expiry, hasAuthenticatedBroker, lotSize, underlying, confirmPlace, broker, strikeMap, basketId, addToast, persistBasket, rollbackPlacedLegs, ltpFor]);
+
   return (
     <div className="min-h-screen bg-zinc-950">
       <NavBar />
@@ -214,6 +352,14 @@ export default function MultiLegFocus() {
             <button onClick={clearBasket}
               className={`h-7 px-2.5 inline-flex items-center gap-1 text-[11px] font-bold rounded-lg border border-zinc-700 text-zinc-400 hover:text-rose-300 hover:bg-zinc-800 ${FOCUS_RING}`}>
               <X className="w-3 h-3" /> Clear
+            </button>
+          )}
+          {legs.length > 0 && !hasPlacedLeg && (
+            <button onClick={placeBasket} disabled={placing}
+              className={`h-7 ml-auto px-3 inline-flex items-center gap-1 text-[11px] font-bold rounded-lg border transition-all disabled:opacity-50 ${
+                confirmPlace ? 'bg-amber-500/20 border-amber-500/50 text-amber-200' : 'bg-emerald-500/10 border-emerald-500/40 text-emerald-300 hover:bg-emerald-500/20'
+              } ${FOCUS_RING}`}>
+              {placing ? 'Placing…' : confirmPlace ? 'Click again to confirm' : 'Place Basket'}
             </button>
           )}
         </div>
