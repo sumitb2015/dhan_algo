@@ -332,8 +332,7 @@ export default function MultiLegFocus() {
       const legsPayload = basket.legs.map(leg => {
         const strikeEntry = strikes[String(leg.strike)];
         const resolvedSecId = leg.orderRef?.securityId || (leg.option === 'CE' ? strikeEntry?.ceId : strikeEntry?.peId);
-        const currentLtp = ltpFor(basket, leg);
-        const price = (leg.fill?.avgPrice && leg.fill.avgPrice > 0) ? leg.fill.avgPrice : (currentLtp > 0 ? currentLtp : (leg.price ?? 0));
+        const price = (leg.fill?.avgPrice && leg.fill.avgPrice > 0) ? leg.fill.avgPrice : (leg.price ?? 0);
         const qty = leg.fill?.qty && leg.fill.qty > 0 ? leg.fill.qty : (leg.lots * lotSize);
 
         return {
@@ -376,12 +375,21 @@ export default function MultiLegFocus() {
         })
         .catch(() => {});
     }
-  }, [lookupCache, ltpFor]);
+  }, [lookupCache]);
+
+  // Composition-only signature (underlying/expiry/strikes/side/lots/orderRef) —
+  // live LTP ticks do not change margin requirements. Keying the margin fetch
+  // on basket composition prevents rapid refiring and Dhan 429 rate limit errors.
+  const basketsCompositionSignature = useMemo(() => {
+    return baskets.map(b =>
+      `${b.id}:${b.underlying}:${b.expiry}:${b.legs.map(l => `${l.side}-${l.option}-${l.strike}x${l.lots}-${l.status}-${l.orderRef?.securityId || ''}`).join('|')}`
+    ).join(';');
+  }, [baskets]);
 
   useEffect(() => {
-    const timer = setTimeout(fetchMarginsForBaskets, 400);
+    const timer = setTimeout(fetchMarginsForBaskets, 500);
     return () => clearTimeout(timer);
-  }, [baskets, lookupCache, fetchMarginsForBaskets]);
+  }, [basketsCompositionSignature, lookupCache, fetchMarginsForBaskets]);
 
   // ── Persist Basket Helper ─────────────────────────────────────────
   const persistBasket = useCallback((basket: MultiLegBasket) => {
