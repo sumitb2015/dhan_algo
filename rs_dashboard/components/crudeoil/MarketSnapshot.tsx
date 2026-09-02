@@ -119,7 +119,7 @@ export default function MarketSnapshot({
             label="Expected Range"
             hint="Straddle breakevens: ATM strike ± the straddle premium. Outside this band the straddle seller loses."
             value={atmStraddle && atm ? `${fmtNum(atm - atmStraddle)} – ${fmtNum(atm + atmStraddle)}` : '—'}
-            sub={atmStraddle ? `width ${fmtNum(2 * atmStraddle, 1)}` : undefined}
+            sub={atmStraddle && spot > 0 ? `±${((atmStraddle / spot) * 100).toFixed(2)}% (${fmtNum(2 * atmStraddle, 1)} wide)` : atmStraddle ? `width ${fmtNum(2 * atmStraddle, 1)}` : undefined}
           />
           <Tile
             label="ATM IV"

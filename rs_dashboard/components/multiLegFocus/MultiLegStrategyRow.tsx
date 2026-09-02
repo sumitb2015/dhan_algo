@@ -42,6 +42,7 @@ export interface MultiLegStrategyRowProps {
   lotSize: number | null;
   step: number;
   atmStrike: number;
+  spot?: number;
   ltpFor: (leg: MultiLegLeg) => number;
   ltpForStrike?: (strike: number, option: 'CE' | 'PE') => number;
   onUpdate: (patch: Partial<MultiLegBasket>) => void;
@@ -84,6 +85,7 @@ export default function MultiLegStrategyRow({
   lotSize,
   step,
   atmStrike,
+  spot,
   ltpFor,
   ltpForStrike,
   onUpdate,
@@ -171,8 +173,12 @@ export default function MultiLegStrategyRow({
 
   const breakevensDisplay = useMemo(() => {
     if (!payoffResult || payoffResult.breakevens.length === 0) return 'None';
-    return payoffResult.breakevens.map(b => Math.round(b).toLocaleString('en-IN')).join(' — ');
-  }, [payoffResult]);
+    return payoffResult.breakevens.map(b => {
+      const pct = spot && spot > 0 ? ((b - spot) / spot) * 100 : null;
+      const pctStr = pct !== null ? ` (${pct >= 0 ? '+' : ''}${pct.toFixed(1)}%)` : '';
+      return `${Math.round(b).toLocaleString('en-IN')}${pctStr}`;
+    }).join(' — ');
+  }, [payoffResult, spot]);
 
   const maxProfitDisplay = useMemo(() => {
     if (!payoffResult) return '—';
@@ -581,6 +587,7 @@ export default function MultiLegStrategyRow({
                       key={leg.id}
                       leg={leg}
                       allStrikes={allStrikes}
+                      spot={spot}
                       ltp={ltpFor(leg)}
                       editable={!hasPlacedLeg}
                       exiting={exitingLegs.has(leg.id)}

@@ -1168,6 +1168,7 @@ export default function MultiLegFocus() {
                 lotSize={lotSize}
                 step={step}
                 atmStrike={atmStrike}
+                spot={spot}
                 ltpFor={leg => ltpFor(basket, leg)}
                 ltpForStrike={(strk, opt) => {
                   const pair = `${basket.underlying}:${basket.expiry}`;

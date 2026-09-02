@@ -25,6 +25,7 @@ interface MultiLegLegRowProps {
   leg: MultiLegLeg;
   allStrikes: number[];
   ltp: number;
+  spot?: number;
   editable: boolean;
   exiting: boolean;
   margin?: number;
@@ -35,7 +36,7 @@ interface MultiLegLegRowProps {
 }
 
 export default function MultiLegLegRow({
-  leg, allStrikes, ltp, editable, exiting, margin, onChange, onRemove, onExit, onOpenAddLots,
+  leg, allStrikes, ltp, spot, editable, exiting, margin, onChange, onRemove, onExit, onOpenAddLots,
 }: MultiLegLegRowProps) {
   const pnl = leg.fill ? legPnl(leg, ltp) : 0;
   const pnlColor = pnl > 0 ? 'text-emerald-400' : pnl < 0 ? 'text-rose-400' : 'text-zinc-400';
@@ -69,6 +70,9 @@ export default function MultiLegLegRow({
         {legPrice > 0 && (
           <span className="block text-[10px] font-mono text-zinc-400 mt-0.5 tabular-nums" title={`Individual Leg Breakeven: ${legBE.toFixed(2)}`}>
             BE: {legBE.toFixed(1)}
+            {spot && spot > 0 && (
+              <span className="text-zinc-500"> ({legBE >= spot ? '+' : ''}{(((legBE - spot) / spot) * 100).toFixed(1)}%)</span>
+            )}
           </span>
         )}
       </td>

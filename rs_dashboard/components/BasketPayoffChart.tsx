@@ -161,14 +161,18 @@ export default function BasketPayoffChart({ points, breakevens, spot, rightWing 
         </g>
       )}
 
-      {breakevens.map(be => (
-        <g key={be}>
-          <circle cx={sx(be)} cy={zeroY} r={4} fill="#fbbf24" stroke={chrome.surface} strokeWidth={2} />
-          <text x={sx(be)} y={zeroY - 8} textAnchor="middle" fontSize={9.5} fill="#fbbf24" className="font-mono">
-            {be.toLocaleString('en-IN', { maximumFractionDigits: 0 })}
-          </text>
-        </g>
-      ))}
+      {breakevens.map(be => {
+        const pct = spot > 0 ? ((be - spot) / spot) * 100 : null;
+        const pctStr = pct !== null ? ` (${pct >= 0 ? '+' : ''}${pct.toFixed(1)}%)` : '';
+        return (
+          <g key={be}>
+            <circle cx={sx(be)} cy={zeroY} r={4} fill="#fbbf24" stroke={chrome.surface} strokeWidth={2} />
+            <text x={sx(be)} y={zeroY - 8} textAnchor="middle" fontSize={9.5} fill="#fbbf24" className="font-mono">
+              {be.toLocaleString('en-IN', { maximumFractionDigits: 0 })}{pctStr}
+            </text>
+          </g>
+        );
+      })}
 
       {hover && (
         <g pointerEvents="none">

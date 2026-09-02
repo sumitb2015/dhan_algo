@@ -313,6 +313,7 @@ export default function OptionsBuildupTab({ expiry }: { expiry: string }) {
         <StatTile
           label="Breakeven Range"
           value={straddle > 0 && spot > 0 ? `${(spot - straddle).toFixed(0)} – ${(spot + straddle).toFixed(0)}` : '—'}
+          sub={straddle > 0 && spot > 0 ? `±${(straddle / spot * 100).toFixed(1)}% from spot (${spot.toLocaleString('en-IN')})` : undefined}
           color="text-zinc-200"
           accent="border-zinc-700/60"
         />

@@ -38,10 +38,12 @@ interface Props {
   livePnl?: number | null;
   /** Margin blocked by the book overall (account-wide), used as the Profit % denominator when standaloneMargin is unavailable (e.g. a book spanning multiple expiries). */
   usedMargin?: number | null;
+  /** Current underlying spot price to compute distance from breakevens. */
+  spot?: number | null;
 }
 
 export default function PayoffMetricStrip({
-  stats, lotSize, standaloneMargin, standaloneMarginReason, marginAvailable, livePnl, usedMargin,
+  stats, lotSize, standaloneMargin, standaloneMarginReason, marginAvailable, livePnl, usedMargin, spot,
 }: Props) {
   const lossUnlimited = stats.maxLoss === 'Unlimited';
   const profitUnlimited = stats.maxProfit === 'Unlimited';
@@ -136,7 +138,11 @@ export default function PayoffMetricStrip({
         <StatChip
           label="Breakeven"
           value={stats.breakevensExpiry.length
-            ? stats.breakevensExpiry.map((b) => Math.round(b).toLocaleString('en-IN')).join(', ')
+            ? stats.breakevensExpiry.map((b) => {
+                const pct = spot && spot > 0 ? ((b - spot) / spot) * 100 : null;
+                const pctStr = pct !== null ? ` (${pct >= 0 ? '+' : ''}${pct.toFixed(1)}%)` : '';
+                return `${Math.round(b).toLocaleString('en-IN')}${pctStr}`;
+              }).join(', ')
             : '—'}
           color="text-amber-400"
         />

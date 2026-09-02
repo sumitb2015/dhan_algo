@@ -21,7 +21,9 @@ function fmtRupee(n: number): string {
 }
 
 function fmtPct(n: number, spot: number): string {
-  return `${((n - spot) / spot * 100).toFixed(1)}%`;
+  if (!spot || spot <= 0) return '0.0%';
+  const diff = ((n - spot) / spot) * 100;
+  return `${diff >= 0 ? '+' : ''}${diff.toFixed(1)}%`;
 }
 
 function TileLabel({ children }: { children: React.ReactNode }) {

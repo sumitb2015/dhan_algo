@@ -354,14 +354,18 @@ export default function PositionsPayoffChart({
         <line x1={PAD.left} x2={W - PAD.right} y1={zeroY} y2={zeroY} stroke="#52525b" strokeWidth={1.25} />
 
         {/* Breakevens */}
-        {breakevens.filter((b) => b >= xLo && b <= xHi).map((be) => (
-          <g key={`be${be}`}>
-            <circle cx={sx(be)} cy={zeroY} r={4} fill="#f59e0b" stroke="#18181b" strokeWidth={2} />
-            <text x={sx(be)} y={zeroY - 9} textAnchor="middle" fontSize={9.5} fill="#f59e0b" className="font-mono">
-              {be.toLocaleString('en-IN', { maximumFractionDigits: 0 })}
-            </text>
-          </g>
-        ))}
+        {breakevens.filter((b) => b >= xLo && b <= xHi).map((be) => {
+          const pct = spot > 0 ? ((be - spot) / spot) * 100 : null;
+          const pctStr = pct !== null ? ` (${pct >= 0 ? '+' : ''}${pct.toFixed(1)}%)` : '';
+          return (
+            <g key={`be${be}`}>
+              <circle cx={sx(be)} cy={zeroY} r={4} fill="#f59e0b" stroke="#18181b" strokeWidth={2} />
+              <text x={sx(be)} y={zeroY - 9} textAnchor="middle" fontSize={9.5} fill="#f59e0b" className="font-mono">
+                {be.toLocaleString('en-IN', { maximumFractionDigits: 0 })}{pctStr}
+              </text>
+            </g>
+          );
+        })}
 
         {/* Current price */}
         {spot >= xLo && spot <= xHi && (

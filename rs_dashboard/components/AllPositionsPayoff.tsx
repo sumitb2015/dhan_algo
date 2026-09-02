@@ -102,7 +102,11 @@ function UnderlyingCard({
           <StatChip
             label="Breakeven"
             value={stats.breakevensExpiry.length
-              ? stats.breakevensExpiry.map((b) => Math.round(b).toLocaleString('en-IN')).join(', ')
+              ? stats.breakevensExpiry.map((b) => {
+                  const pct = spot > 0 ? ((b - spot) / spot) * 100 : null;
+                  const pctStr = pct !== null ? ` (${pct >= 0 ? '+' : ''}${pct.toFixed(1)}%)` : '';
+                  return `${Math.round(b).toLocaleString('en-IN')}${pctStr}`;
+                }).join(', ')
               : '—'}
             color="text-amber-400"
           />

@@ -752,7 +752,11 @@ export default function Baskets() {
           <div className="grid grid-cols-3 divide-x divide-zinc-800 border-b border-zinc-800">
             <MetricTile label="Breakeven"
               value={payoff && payoff.breakevens.length
-                ? payoff.breakevens.map(b => b.toLocaleString('en-IN', { maximumFractionDigits: 1 })).join(' / ')
+                ? payoff.breakevens.map(b => {
+                    const pct = spot > 0 ? ((b - spot) / spot) * 100 : null;
+                    const pctStr = pct !== null ? ` (${pct >= 0 ? '+' : ''}${pct.toFixed(1)}%)` : '';
+                    return `${b.toLocaleString('en-IN', { maximumFractionDigits: 1 })}${pctStr}`;
+                  }).join(' / ')
                 : '—'} />
             <MetricTile label="Risk : Reward"
               value={riskReward != null ? `1 : ${riskReward.toFixed(2)}` : '—'} />

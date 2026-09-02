@@ -1098,7 +1098,7 @@ export default function PositionsAnalysis({ underlying }: { underlying: Analytic
             {stats && tab !== 'intraday' && <PayoffMetricStrip
               stats={stats} lotSize={lotSize ?? 0}
               standaloneMargin={standaloneMargin} standaloneMarginReason={standaloneMarginReason}
-              marginAvailable={funds} livePnl={rollup.total} usedMargin={usedMargin} />}
+              marginAvailable={funds} livePnl={rollup.total} usedMargin={usedMargin} spot={spot} />}
 
             {draftStats && tab !== 'intraday' && (
               <div className="rounded-xl border-l-2 border-violet-600">
@@ -1108,7 +1108,7 @@ export default function PositionsAnalysis({ underlying }: { underlying: Analytic
                 <PayoffMetricStrip
                   stats={draftStats} lotSize={lotSize ?? 0}
                   standaloneMargin={null} standaloneMarginReason="Draft preview — margin not computed"
-                  marginAvailable={funds} />
+                  marginAvailable={funds} spot={spot} />
               </div>
             )}
 
@@ -1226,7 +1226,7 @@ export default function PositionsAnalysis({ underlying }: { underlying: Analytic
                 {intradayStats && <PayoffMetricStrip
                   stats={intradayStats} lotSize={lotSize ?? 0}
                   standaloneMargin={null} standaloneMarginReason="Margin sizing shown only on the combined view"
-                  marginAvailable={funds} livePnl={intradayRollup.total} usedMargin={usedMargin} />}
+                  marginAvailable={funds} livePnl={intradayRollup.total} usedMargin={usedMargin} spot={spot} />}
 
                 <div className="rounded-xl border border-zinc-800 bg-zinc-950 p-3">
                   <PositionsPayoffChart
