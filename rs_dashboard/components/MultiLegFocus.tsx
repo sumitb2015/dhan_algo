@@ -1,9 +1,9 @@
 'use client';
 
 import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
-import { Plus, RefreshCw, Layers, ClipboardList, X } from 'lucide-react';
+import { Plus, RefreshCw, Layers, ClipboardList } from 'lucide-react';
 import NavBar from './NavBar';
-import { type Toast, FOCUS_RING, TabTable, type SortState } from './Scalper';
+import { type Toast, FOCUS_RING } from './Scalper';
 import { useLiveOptionsWS } from '@/lib/useLiveOptionsWS';
 import { useBrokerSelector, scalperRoute, BROKER_LABELS, type Broker } from '@/hooks/useBrokerSelector';
 import {
@@ -12,6 +12,7 @@ import {
 import { sortLegsForPlacement, resolveOrderRequest, type StrikeIdentifier } from '@/lib/basketOrders';
 import StrategyCardGrid from './basket/StrategyCardGrid';
 import MultiLegStrategyRow from './multiLegFocus/MultiLegStrategyRow';
+import OrdersTradesModal from './multiLegFocus/OrdersTradesModal';
 import {
   resolveTemplateLegs, reconcileLegWithBroker, sortLegsForExit, findLegPosition,
   computeLegTrailingSL, computeStrategyMetrics, checkStrategyRisk,
@@ -74,19 +75,12 @@ export default function MultiLegFocus() {
     return () => clearInterval(interval);
   }, [pollFunds]);
 
-  // ── Orders & Tradebook Modal State ────────────────────────────────
+  // ── Orders & Tradebook State ──────────────────────────────────────
   const [showOrdersModal, setShowOrdersModal] = useState(false);
-  const [ordersTab, setOrdersTab] = useState<'orders' | 'trades'>('orders');
   const [ordersData, setOrdersData] = useState<Record<string, unknown>[]>([]);
   const [tradesData, setTradesData] = useState<Record<string, unknown>[]>([]);
   const [ordersLoading, setOrdersLoading] = useState(false);
   const [ordersError, setOrdersError] = useState<string | null>(null);
-  const [tableSort, setTableSort] = useState<SortState>({ key: 'createTime', dir: 'desc' });
-  const [orderFilterText, setOrderFilterText] = useState('');
-
-  const handleTableSort = useCallback((key: string) => {
-    setTableSort(prev => (prev.key === key ? { key, dir: prev.dir === 'desc' ? 'asc' : 'desc' } : { key, dir: 'desc' }));
-  }, []);
 
   const fetchOrdersAndTrades = useCallback(async () => {
     setOrdersLoading(true);
@@ -113,37 +107,6 @@ export default function MultiLegFocus() {
       setOrdersLoading(false);
     }
   }, [broker]);
-
-  // Poll orders & trades every 4 seconds while modal is open
-  useEffect(() => {
-    if (!showOrdersModal) return;
-    fetchOrdersAndTrades();
-    const interval = setInterval(fetchOrdersAndTrades, 4000);
-    return () => clearInterval(interval);
-  }, [showOrdersModal, fetchOrdersAndTrades]);
-
-  // Close modal on Escape key
-  useEffect(() => {
-    if (!showOrdersModal) return;
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') setShowOrdersModal(false);
-    };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-  }, [showOrdersModal]);
-
-  // Filtered orders/trades data
-  const filteredOrderData = useMemo(() => {
-    const raw = ordersTab === 'orders' ? ordersData : tradesData;
-    if (!orderFilterText.trim()) return raw;
-    const q = orderFilterText.trim().toLowerCase();
-    return raw.filter(item => {
-      const sym = String(item.tradingSymbol ?? item.symbol ?? '').toLowerCase();
-      const st = String(item.orderStatus ?? item.status ?? '').toLowerCase();
-      const side = String(item.transactionType ?? item.side ?? '').toLowerCase();
-      return sym.includes(q) || st.includes(q) || side.includes(q);
-    });
-  }, [ordersTab, ordersData, tradesData, orderFilterText]);
 
   // ── Expiries and Market Data by Underlying ─────────────────────────
   const [expiriesMap, setExpiriesMap] = useState<Record<string, string[]>>({});
@@ -937,7 +900,7 @@ export default function MultiLegFocus() {
 
     const poll = async () => {
       const anyPlaced = basketsRef.current.some(b => b.legs.some(l => l.orderRef != null));
-      if (!anyPlaced) return;
+      if (!anyPlaced && !showOrdersModal) return;
 
       try {
         const res = await fetch(scalperRoute(broker, 'poll'));
@@ -947,56 +910,65 @@ export default function MultiLegFocus() {
           positions?: Record<string, unknown>[];
           orders?: Record<string, unknown>[];
           trades?: Record<string, unknown>[];
+          positionsError?: string | null;
+          error?: string;
         };
-        if (cancelled || !j.success) return;
+        if (cancelled) return;
+        if (!j.success) {
+          if (j.error || j.positionsError) setOrdersError(j.error || j.positionsError || null);
+          return;
+        }
+        setOrdersError(null);
         const rows = j.positions ?? j.data ?? [];
         if (Array.isArray(j.orders)) setOrdersData(j.orders);
         if (Array.isArray(j.trades)) setTradesData(j.trades);
 
-        setBaskets(prevBaskets => {
-          let anyChange = false;
-          const nextBaskets = prevBaskets.map(basket => {
-            let basketChange = false;
-            const pair = `${basket.underlying}:${basket.expiry}`;
-            const lotSize = lookupCache[pair]?.lotSize ?? (basket.underlying === 'NIFTY' ? 65 : 15);
+        if (anyPlaced) {
+          setBaskets(prevBaskets => {
+            let anyChange = false;
+            const nextBaskets = prevBaskets.map(basket => {
+              let basketChange = false;
+              const pair = `${basket.underlying}:${basket.expiry}`;
+              const lotSize = lookupCache[pair]?.lotSize ?? (basket.underlying === 'NIFTY' ? 65 : 15);
 
-            const nextLegs = basket.legs.map(leg => {
-              if (!leg.orderRef) return leg;
-              const match = findLegPosition(broker, leg, rows);
-              const reconciled = reconcileLegWithBroker(leg, match, leg.lots * lotSize, lotSize);
+              const nextLegs = basket.legs.map(leg => {
+                if (!leg.orderRef) return leg;
+                const match = findLegPosition(broker, leg, rows);
+                const reconciled = reconcileLegWithBroker(leg, match, leg.lots * lotSize, lotSize);
 
-              if (
-                reconciled.status !== leg.status ||
-                reconciled.lots !== leg.lots ||
-                reconciled.fill?.qty !== leg.fill?.qty ||
-                reconciled.fill?.avgPrice !== leg.fill?.avgPrice
-              ) {
-                basketChange = true;
-                anyChange = true;
-                return reconciled;
+                if (
+                  reconciled.status !== leg.status ||
+                  reconciled.lots !== leg.lots ||
+                  reconciled.fill?.qty !== leg.fill?.qty ||
+                  reconciled.fill?.avgPrice !== leg.fill?.avgPrice
+                ) {
+                  basketChange = true;
+                  anyChange = true;
+                  return reconciled;
+                }
+                return leg;
+              });
+
+              if (basketChange) {
+                const updated = { ...basket, legs: nextLegs, updatedAt: new Date().toISOString() };
+                persistBasket(updated);
+                return updated;
               }
-              return leg;
+              return basket;
             });
 
-            if (basketChange) {
-              const updated = { ...basket, legs: nextLegs, updatedAt: new Date().toISOString() };
-              persistBasket(updated);
-              return updated;
-            }
-            return basket;
+            return anyChange ? nextBaskets : prevBaskets;
           });
-
-          return anyChange ? nextBaskets : prevBaskets;
-        });
-      } catch {
-        // network jitter
+        }
+      } catch (err) {
+        if (!cancelled) setOrdersError(String((err as Error).message));
       }
     };
 
     poll();
     const interval = setInterval(poll, 3000);
     return () => { cancelled = true; clearInterval(interval); };
-  }, [broker, lookupCache, persistBasket]);
+  }, [broker, showOrdersModal, lookupCache, persistBasket]);
 
   // ── Automated Risk Watcher: SL, TP, Trailing SL, Strategy Target/SL ─
   const triggeredLegExitsRef = useRef<Set<string>>(new Set());
@@ -1304,132 +1276,16 @@ export default function MultiLegFocus() {
       </div>
 
       {/* Full-Width Orders & Tradebook Modal */}
-      {showOrdersModal && (
-        <div
-          className="fixed inset-0 z-50 flex items-center justify-center p-4 md:p-6 bg-oncolor-dark/80 backdrop-blur-sm"
-          onClick={e => {
-            if (e.target === e.currentTarget) setShowOrdersModal(false);
-          }}
-        >
-          <div className="w-full max-w-6xl max-h-[88vh] bg-zinc-900 border border-zinc-700 rounded-2xl p-5 flex flex-col gap-4 shadow-2xl text-white overflow-hidden animate-in fade-in zoom-in-95 duration-150">
-            {/* Modal Header */}
-            <div className="flex items-center justify-between border-b border-zinc-800 pb-3 shrink-0">
-              <div className="flex items-center gap-3">
-                <div className="flex items-center gap-2">
-                  <ClipboardList className="w-5 h-5 text-sky-400" />
-                  <h2 className="text-sm font-bold uppercase tracking-wider text-zinc-100">
-                    Broker Orders &amp; Trades
-                  </h2>
-                </div>
-                <span className="px-2 py-0.5 rounded text-[11px] font-bold bg-zinc-800 border border-zinc-700 text-zinc-300 uppercase">
-                  {BROKER_LABELS[broker]}
-                </span>
-                <span className="text-[11px] text-zinc-500 hidden sm:inline">
-                  Every order and trade on this account today
-                </span>
-              </div>
-
-              <div className="flex items-center gap-2">
-                <button
-                  type="button"
-                  onClick={fetchOrdersAndTrades}
-                  disabled={ordersLoading}
-                  className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-lg border border-zinc-700 bg-zinc-800 hover:bg-zinc-700 text-zinc-200 transition-colors disabled:opacity-50 cursor-pointer ${FOCUS_RING}`}
-                  title="Refresh order book and tradebook"
-                >
-                  <RefreshCw className={`w-3.5 h-3.5 ${ordersLoading ? 'animate-spin' : ''}`} />
-                  Refresh
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setShowOrdersModal(false)}
-                  className={`p-1.5 text-zinc-400 hover:text-white rounded-lg hover:bg-zinc-800 transition-colors cursor-pointer ${FOCUS_RING}`}
-                  title="Close (Esc)"
-                  aria-label="Close"
-                >
-                  <X className="w-5 h-5" />
-                </button>
-              </div>
-            </div>
-
-            {/* Tabs & Filter Bar */}
-            <div className="flex items-center justify-between gap-3 flex-wrap shrink-0">
-              <div className="flex items-center gap-1 bg-zinc-950 p-1 rounded-xl border border-zinc-800">
-                <button
-                  type="button"
-                  onClick={() => {
-                    setOrdersTab('orders');
-                    setTableSort({ key: 'createTime', dir: 'desc' });
-                  }}
-                  className={`px-3 py-1.5 text-xs font-bold rounded-lg transition-all cursor-pointer ${
-                    ordersTab === 'orders'
-                      ? 'bg-zinc-800 text-white shadow-sm border border-zinc-700'
-                      : 'text-zinc-400 hover:text-zinc-200'
-                  }`}
-                >
-                  Order Book ({ordersData.length})
-                </button>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setOrdersTab('trades');
-                    setTableSort({ key: 'createTime', dir: 'desc' });
-                  }}
-                  className={`px-3 py-1.5 text-xs font-bold rounded-lg transition-all cursor-pointer ${
-                    ordersTab === 'trades'
-                      ? 'bg-zinc-800 text-white shadow-sm border border-zinc-700'
-                      : 'text-zinc-400 hover:text-zinc-200'
-                  }`}
-                >
-                  Tradebook ({tradesData.length})
-                </button>
-              </div>
-
-              <div className="flex items-center gap-2">
-                <input
-                  type="text"
-                  placeholder="Filter by symbol / side / status…"
-                  value={orderFilterText}
-                  onChange={e => setOrderFilterText(e.target.value)}
-                  className="h-8 bg-zinc-950 border border-zinc-800 text-zinc-200 placeholder-zinc-600 text-xs rounded-lg px-2.5 w-56 focus:outline-none focus:border-zinc-600 font-mono"
-                />
-                {orderFilterText && (
-                  <button
-                    type="button"
-                    onClick={() => setOrderFilterText('')}
-                    className="text-xs text-zinc-400 hover:text-zinc-200 cursor-pointer"
-                  >
-                    Clear
-                  </button>
-                )}
-              </div>
-            </div>
-
-            {/* Table Container */}
-            <div className="flex-1 overflow-auto border border-zinc-800 rounded-xl bg-zinc-950/50 min-h-[300px]">
-              {ordersError ? (
-                <div className="p-4 text-xs text-rose-400 font-mono bg-rose-500/10 border border-rose-500/20 rounded-lg m-4">
-                  Error loading {ordersTab}: {ordersError}
-                </div>
-              ) : ordersLoading && (ordersTab === 'orders' ? ordersData.length === 0 : tradesData.length === 0) ? (
-                <div className="flex flex-col items-center justify-center py-24 gap-3">
-                  <RefreshCw className="w-6 h-6 text-zinc-600 animate-spin" />
-                  <span className="text-xs text-zinc-500">
-                    Loading {ordersTab === 'orders' ? 'order book' : 'tradebook'} from {BROKER_LABELS[broker]}…
-                  </span>
-                </div>
-              ) : (
-                <TabTable
-                  tab={ordersTab}
-                  data={filteredOrderData}
-                  sort={tableSort}
-                  onSort={handleTableSort}
-                />
-              )}
-            </div>
-          </div>
-        </div>
-      )}
+      <OrdersTradesModal
+        isOpen={showOrdersModal}
+        onClose={() => setShowOrdersModal(false)}
+        broker={broker}
+        ordersData={ordersData}
+        tradesData={tradesData}
+        isLoading={ordersLoading}
+        error={ordersError}
+        onRefresh={fetchOrdersAndTrades}
+      />
     </div>
   );
 }
