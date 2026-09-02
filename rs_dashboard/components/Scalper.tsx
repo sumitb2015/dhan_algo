@@ -422,13 +422,21 @@ export default function Scalper() {
       // Back-calculate from unrealizedProfit so the table shows a value
       // even before the live WS bridge enriches the row, and for positions
       // on expiries / segments the bridge isn't watching.
+      //
+      // Requires unrealized !== 0: a genuinely unknown price (Kotak reports
+      // unrealizedProfit=0 whenever it has no LTP at all — see kotakShape.ts)
+      // must not be treated as "flat at zero P&L". Deriving an LTP from
+      // buyAvg/sellAvg when unrealized is trivially 0 manufactured a fake
+      // price that looked live, silently pinned the leg's contribution to
+      // the P&L total at 0, and made an open position on an off-selection
+      // expiry read as a small loss instead of "price unknown".
       const brokerLtp = Number(row.lastTradedPrice);
       let withLtp: typeof pos = row;
       if ((!brokerLtp || !Number.isFinite(brokerLtp)) && netQty !== 0) {
         const unrealized = Number(row.unrealizedProfit);
         const buyAvg     = Number(row.buyAvg);
         const sellAvg    = Number(row.sellAvg);
-        if (Number.isFinite(unrealized) && mult > 0) {
+        if (unrealized !== 0 && Number.isFinite(unrealized) && mult > 0) {
           const derivedLtp = netQty > 0
             ? buyAvg  + unrealized / (netQty  * mult)
             : sellAvg - unrealized / (Math.abs(netQty) * mult);

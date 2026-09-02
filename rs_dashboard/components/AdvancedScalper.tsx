@@ -301,14 +301,25 @@ export default function AdvancedScalper() {
       // Back-calculate from unrealizedProfit so the table shows a value
       // even before the live WS bridge enriches the row, and for positions
       // on expiries / segments the bridge isn't watching (monthly options,
-      // equities, Kotak positions with ltp=0 from their API).
+      // equities).
+      //
+      // Requires unrealized !== 0: Kotak reports unrealizedProfit=0
+      // whenever it has no LTP at all (see kotakShape.ts) — that is
+      // "unknown", not "flat at zero P&L". Deriving an LTP from
+      // buyAvg/sellAvg in that case manufactured a fake price that looked
+      // live and silently pinned the leg's contribution to the P&L total
+      // at 0. A Kotak position on an expiry other than the one currently
+      // selected here (the live-quotes WS bridge only tracks one expiry at
+      // a time) has exactly this shape: it now shows LTP "—" / unreal "0"
+      // and is flagged by hasUnknownLtp below instead of quietly
+      // understating the total by the size of the open leg.
       const brokerLtp = Number(row.lastTradedPrice);
       let withLtp: typeof pos = row;
       if ((!brokerLtp || !Number.isFinite(brokerLtp)) && netQty !== 0) {
         const unrealized = Number(row.unrealizedProfit);
         const buyAvg     = Number(row.buyAvg);
         const sellAvg    = Number(row.sellAvg);
-        if (Number.isFinite(unrealized) && mult > 0) {
+        if (unrealized !== 0 && Number.isFinite(unrealized) && mult > 0) {
           const derivedLtp = netQty > 0
             ? buyAvg  + unrealized / (netQty  * mult)
             : sellAvg - unrealized / (Math.abs(netQty) * mult);
@@ -404,6 +415,17 @@ export default function AdvancedScalper() {
 
   const totalPnl = useMemo(() => enrichedPositions.reduce((sum, p) =>
     sum + (Number(p.realizedProfit) || 0) + (Number(p.unrealizedProfit) || 0), 0),
+    [enrichedPositions]);
+
+  // Open legs with no real LTP at all (Kotak, whose positions payload never
+  // carries one, on an expiry other than the one currently selected above —
+  // the live-quotes WS bridge only tracks one expiry at a time). Their
+  // unrealizedProfit is silently 0, so totalPnl understates the true P&L by
+  // exactly the size of these legs. Surface the gap instead of letting the
+  // pill look complete when it isn't — switching the expiry dropdown to the
+  // flagged leg's own expiry restores its live price.
+  const unknownLtpCount = useMemo(() => enrichedPositions.filter(p =>
+    Number(p.netQty) !== 0 && !(Number(p.lastTradedPrice) > 0)).length,
     [enrichedPositions]);
 
   const totalUnrealizedPnl = useMemo(() => enrichedPositions.reduce((sum, p) =>
@@ -2222,6 +2244,14 @@ export default function AdvancedScalper() {
               <span className="font-bold text-sm tabular-nums">
                 {totalPnl >= 0 ? '+' : ''}₹{totalPnl.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
               </span>
+              {unknownLtpCount > 0 && (
+                <span
+                  className="text-[10px] font-extrabold uppercase bg-amber-950/80 border border-amber-700/60 text-amber-400 px-1.5 py-0.5 rounded"
+                  title={`${unknownLtpCount} open leg${unknownLtpCount > 1 ? 's' : ''} have no live price (Kotak position on an expiry other than the one selected above) — this total does not include ${unknownLtpCount > 1 ? 'their' : 'its'} unrealized P&L. Switch the expiry dropdown to see it.`}
+                >
+                  ⚠ {unknownLtpCount} LTP UNKNOWN
+                </span>
+              )}
             </div>
 
             {/* Total CE & PE Value Summary Pill */}
