@@ -168,26 +168,28 @@ def get_dhan_client():
             from dhanhq import DhanContext
             dhan_context = DhanContext(client_id, access_token)
             dhan = dhanhq(dhan_context)
-            
-            # --- Active Verification Bypassed for Performance ---
-            # res = dhan.get_holdings()
-            # is_invalid = False
-            # if isinstance(res, dict):
-            #     error_msg = str(res.get('error_message', '') or res.get('remarks', '')).lower()
-            #     if 'invalid' in error_msg and 'token' in error_msg:
-            #         is_invalid = True
-            #     elif res.get('status') == 'error' and 'token' in str(res.get('remarks', '')).lower():
-            #         is_invalid = True
-            # 
-            # if is_invalid:
-            #     print("Cached token is rejected by the server (Invalid Token). Forcing re-login.")
-            #     access_token = get_new_access_token()
-            #     if access_token:
-            #         dhan_context = DhanContext(client_id, access_token)
-            #         dhan = dhanhq(dhan_context)
-            #     else:
-            #         return None
-            
+
+            # Cached expiryTime is not authoritative — Dhan can revoke a token
+            # server-side before its claimed expiry (e.g. a newer login replaces
+            # it), so a lightweight call is needed to catch that case.
+            res = dhan.get_holdings()
+            is_invalid = False
+            if isinstance(res, dict):
+                error_msg = str(res.get('error_message', '') or res.get('remarks', '')).lower()
+                if 'invalid' in error_msg and 'token' in error_msg:
+                    is_invalid = True
+                elif res.get('status') == 'failure' and 'token' in str(res.get('remarks', '')).lower():
+                    is_invalid = True
+
+            if is_invalid:
+                print("Cached token is rejected by the server (Invalid Token). Forcing re-login.")
+                access_token = get_new_access_token_via_totp() or get_new_access_token()
+                if access_token:
+                    dhan_context = DhanContext(client_id, access_token)
+                    dhan = dhanhq(dhan_context)
+                else:
+                    return None
+
             return dhan
 
         except Exception as e:
