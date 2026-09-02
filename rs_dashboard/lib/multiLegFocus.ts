@@ -96,6 +96,58 @@ export function sortLegsForExit<T extends { side: LegSide }>(legs: T[]): T[] {
   return [...legs.filter(l => l.side === 'S'), ...legs.filter(l => l.side === 'B')];
 }
 
+export type MultiLegMatch =
+  | { kind: 'match'; row: Record<string, unknown> }
+  | { kind: 'flat' }
+  | { kind: 'not_found' }
+  | { kind: 'ambiguous'; count: number };
+
+/**
+ * Reconciles a leg against broker positions.
+ * - If broker has a live matching row (netQty != 0):
+ *   Ensures status is 'OPEN' and updates fill quantity and average price from broker truth.
+ * - If broker explicitly reports the position closed/flat:
+ *   Marks status as 'CLOSED' and zeroes fill quantity.
+ * - If broker position is not found or ambiguous:
+ *   Leaves the leg untouched (handles API propagation lag after order placement).
+ */
+export function reconcileLegWithBroker(
+  leg: MultiLegLeg,
+  match: MultiLegMatch,
+  maxQty?: number | null,
+): MultiLegLeg {
+  if (match.kind === 'match') {
+    const brokerQty = Math.abs(Number(match.row.netQty) || 0);
+    if (brokerQty > 0) {
+      const brokerAvg = Number(match.row.sellAvg || match.row.buyAvg || match.row.costPrice || 0);
+      const avgPrice = brokerAvg > 0 ? brokerAvg : (leg.fill?.avgPrice ?? 0);
+      const cap = maxQty ?? (leg.fill?.qty && leg.fill.qty > 0 ? leg.fill.qty : 0);
+      const qty = cap > 0 ? Math.min(brokerQty, cap) : brokerQty;
+      return {
+        ...leg,
+        status: 'OPEN',
+        fill: { qty, avgPrice },
+      };
+    }
+    return {
+      ...leg,
+      status: 'CLOSED',
+      fill: { qty: 0, avgPrice: leg.fill?.avgPrice ?? 0 },
+    };
+  }
+
+  if (match.kind === 'flat') {
+    return {
+      ...leg,
+      status: 'CLOSED',
+      fill: { qty: 0, avgPrice: leg.fill?.avgPrice ?? 0 },
+    };
+  }
+
+  // 'not_found' or 'ambiguous' -> leave untouched
+  return leg;
+}
+
 /**
  * Locates a leg's own live broker position row.
  *
@@ -109,18 +161,16 @@ export function findLegPosition(
   broker: string,
   leg: MultiLegLeg,
   rows: Record<string, unknown>[],
-): LiveMatch {
-  if (!leg.orderRef) return { kind: 'flat' };
+): MultiLegMatch {
+  if (!leg.orderRef) return { kind: 'not_found' };
 
   if (broker === 'dhan' && leg.orderRef.securityId) {
-    // A CLOSED/zero-qty row can legitimately sit alongside a freshly reopened
-    // row for the same securityId within one session (close-then-reopen at
-    // the same strike is a documented workflow on this page). Only rows
-    // representing a genuinely live position should count toward the
-    // match/ambiguous decision — see lib/positionProduct.ts's positionKey
-    // doc comment for the same Dhan quirk in the scalper terminals.
-    const live = rows.filter(r => {
-      if (String(r.securityId ?? '') !== leg.orderRef!.securityId) return false;
+    const matchingSecId = rows.filter(r => String(r.securityId ?? '') === leg.orderRef!.securityId);
+    if (matchingSecId.length === 0) {
+      // Row not in positions array at all — broker hasn't booked it yet or API omitted it
+      return { kind: 'not_found' };
+    }
+    const live = matchingSecId.filter(r => {
       const positionType = String(r.positionType ?? '').trim().toUpperCase();
       if (positionType === 'CLOSED') return false;
       if ((Number(r.netQty) || 0) === 0) return false;
@@ -132,11 +182,17 @@ export function findLegPosition(
   }
 
   if (leg.orderRef.symbol) {
-    return findLivePosition(rows, { tradingSymbol: leg.orderRef.symbol });
+    const live = findLivePosition(rows, { tradingSymbol: leg.orderRef.symbol });
+    if (live.kind === 'flat') {
+      const anyMatch = rows.some(r => String(r.tradingSymbol ?? '') === leg.orderRef!.symbol);
+      return anyMatch ? { kind: 'flat' } : { kind: 'not_found' };
+    }
+    return live;
   }
-  return { kind: 'flat' };
+  return { kind: 'not_found' };
 }
 
 // Re-exported for callers that only need to inspect a matched row's product
 // without importing lib/positionProduct.ts separately.
 export { positionProduct };
+

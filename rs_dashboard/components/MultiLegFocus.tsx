@@ -13,7 +13,7 @@ import { sortLegsForPlacement, resolveOrderRequest, type StrikeIdentifier } from
 import StrategyCardGrid from './basket/StrategyCardGrid';
 import MultiLegLegRow from './multiLegFocus/MultiLegLegRow';
 import {
-  resolveTemplateLegs, reconcileLegFillDown, legPnl, basketTotalPnl, sortLegsForExit, findLegPosition,
+  resolveTemplateLegs, reconcileLegFillDown, reconcileLegWithBroker, legPnl, basketTotalPnl, sortLegsForExit, findLegPosition,
   positionProduct, type MultiLegLeg, type MultiLegBasket,
 } from '@/lib/multiLegFocus';
 import { closeOrderProduct } from '@/lib/positionProduct';
@@ -375,7 +375,7 @@ export default function MultiLegFocus() {
   const legsRef = useRef(legs); useEffect(() => { legsRef.current = legs; }, [legs]);
 
   useEffect(() => {
-    if (!legs.some(l => l.status === 'OPEN')) return;
+    if (!legs.some(l => l.orderRef != null)) return;
     let cancelled = false;
 
     const poll = async () => {
@@ -384,12 +384,27 @@ export default function MultiLegFocus() {
         const j = await res.json() as { success: boolean; data?: Record<string, unknown>[] };
         if (cancelled || !j.success || !j.data) return;
         const rows = j.data;
-        setLegs(prev => prev.map(leg => {
-          if (leg.status !== 'OPEN') return leg;
-          const match = findLegPosition(broker, leg, rows);
-          const absQty = match.kind === 'match' ? Math.abs(Number(match.row.netQty) || 0) : (match.kind === 'flat' ? 0 : null);
-          return reconcileLegFillDown(leg, absQty);
-        }));
+        setLegs(prev => {
+          let anyChange = false;
+          const next = prev.map(leg => {
+            if (!leg.orderRef) return leg;
+            const match = findLegPosition(broker, leg, rows);
+            const reconciled = reconcileLegWithBroker(leg, match, lotSize ? leg.lots * lotSize : null);
+            if (
+              reconciled.status !== leg.status ||
+              reconciled.fill?.qty !== leg.fill?.qty ||
+              reconciled.fill?.avgPrice !== leg.fill?.avgPrice
+            ) {
+              anyChange = true;
+              return reconciled;
+            }
+            return leg;
+          });
+          if (anyChange) {
+            persistBasket(next, basketId);
+          }
+          return anyChange ? next : prev;
+        });
       } catch {
         // transient network/broker error — leave the ledger untouched this tick
       }
@@ -398,7 +413,7 @@ export default function MultiLegFocus() {
     poll();
     const id = setInterval(poll, 3000);
     return () => { cancelled = true; clearInterval(id); };
-  }, [broker, legs.some(l => l.status === 'OPEN')]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [broker, basketId, lotSize, persistBasket, legs.some(l => l.orderRef != null)]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── Restore the most recently updated open basket on mount ───────
   useEffect(() => {
@@ -406,7 +421,7 @@ export default function MultiLegFocus() {
       .then(r => r.json())
       .then((j: { success: boolean; data?: MultiLegBasket[] }) => {
         if (!j.success || !j.data?.length) return;
-        const open = [...j.data].filter(b => b.legs.some(l => l.status === 'OPEN' || l.status === 'PLACING'))
+        const open = [...j.data].filter(b => b.legs.some(l => l.status === 'OPEN' || l.status === 'PLACING' || l.orderRef != null))
           .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))[0];
         if (!open) return;
         // Validate the persisted broker/underlying against the known-valid

@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert';
 import {
-  resolveTemplateLegs, reconcileLegFillDown, legPnl, basketTotalPnl, sortLegsForExit, findLegPosition,
+  resolveTemplateLegs, reconcileLegFillDown, reconcileLegWithBroker, legPnl, basketTotalPnl, sortLegsForExit, findLegPosition,
   type MultiLegLeg,
 } from './multiLegFocus.ts';
 import type { StrategyTemplate } from './basketStrategies.ts';
@@ -96,9 +96,23 @@ test('findLegPosition matches a non-Dhan leg by symbol and product', () => {
   assert.strictEqual(match.kind, 'match');
 });
 
-test('findLegPosition reports flat for a leg with no orderRef yet', () => {
+test('findLegPosition reports not_found for a leg with no orderRef yet', () => {
   const leg: MultiLegLeg = { id: '1', side: 'S', option: 'CE', strike: 24000, lots: 1, type: 'MARKET', status: 'DRAFT' };
-  assert.deepStrictEqual(findLegPosition('dhan', leg, []), { kind: 'flat' });
+  assert.deepStrictEqual(findLegPosition('dhan', leg, []), { kind: 'not_found' });
+});
+
+test('findLegPosition reports not_found when Dhan securityId is not in rows array (placement propagation lag)', () => {
+  const leg: MultiLegLeg = { id: '1', side: 'S', option: 'PE', strike: 23500, lots: 1, type: 'MARKET', status: 'OPEN', orderRef: { securityId: '47298' } };
+  const rows = [{ securityId: '47331', tradingSymbol: 'NIFTY-Sep2026-24300-CE', productType: 'MARGIN', netQty: -65 }];
+  const match = findLegPosition('dhan', leg, rows);
+  assert.strictEqual(match.kind, 'not_found');
+});
+
+test('findLegPosition reports flat when Dhan securityId is present with netQty 0 or positionType CLOSED', () => {
+  const leg: MultiLegLeg = { id: '1', side: 'S', option: 'PE', strike: 23500, lots: 1, type: 'MARKET', status: 'OPEN', orderRef: { securityId: '47298' } };
+  const rows = [{ securityId: '47298', tradingSymbol: 'NIFTY-Sep2026-23500-PE', productType: 'MARGIN', netQty: 0, positionType: 'CLOSED' }];
+  const match = findLegPosition('dhan', leg, rows);
+  assert.strictEqual(match.kind, 'flat');
 });
 
 test('findLegPosition ignores a CLOSED/zero-qty Dhan row and matches the genuinely live one for the same securityId', () => {
@@ -111,3 +125,21 @@ test('findLegPosition ignores a CLOSED/zero-qty Dhan row and matches the genuine
   assert.strictEqual(match.kind, 'match');
   if (match.kind === 'match') assert.strictEqual(match.row.positionType, 'SHORT');
 });
+
+test('reconcileLegWithBroker self-heals a leg falsely marked CLOSED back to OPEN when broker has it active', () => {
+  const leg: MultiLegLeg = { id: '1', side: 'S', option: 'PE', strike: 23500, lots: 1, type: 'MARKET', status: 'CLOSED', fill: { qty: 0, avgPrice: 70 }, orderRef: { securityId: '47298' } };
+  const match = { kind: 'match' as const, row: { securityId: '47298', netQty: -65, sellAvg: 72.05 } };
+  const reconciled = reconcileLegWithBroker(leg, match, 65);
+  assert.strictEqual(reconciled.status, 'OPEN');
+  assert.strictEqual(reconciled.fill?.qty, 65);
+  assert.strictEqual(reconciled.fill?.avgPrice, 72.05);
+});
+
+test('reconcileLegWithBroker leaves leg untouched when match is not_found', () => {
+  const leg: MultiLegLeg = { id: '1', side: 'S', option: 'PE', strike: 23500, lots: 1, type: 'MARKET', status: 'OPEN', fill: { qty: 65, avgPrice: 72.3 }, orderRef: { securityId: '47298' } };
+  const match = { kind: 'not_found' as const };
+  const reconciled = reconcileLegWithBroker(leg, match, 65);
+  assert.strictEqual(reconciled.status, 'OPEN');
+  assert.strictEqual(reconciled.fill?.qty, 65);
+});
+
