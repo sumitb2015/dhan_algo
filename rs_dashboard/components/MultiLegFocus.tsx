@@ -1,7 +1,7 @@
 'use client';
 
 import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
-import { Plus, X } from 'lucide-react';
+import { Plus, X, RefreshCw } from 'lucide-react';
 import NavBar from './NavBar';
 import { type Toast, FOCUS_RING } from './Scalper';
 import { useLiveOptionsWS } from '@/lib/useLiveOptionsWS';
@@ -36,11 +36,13 @@ export default function MultiLegFocus() {
   const [expiry, setExpiry] = useState('');
   const [allStrikes, setAllStrikes] = useState<number[]>([]);
   const [chainSpot, setChainSpot] = useState(0);
+  const [chainQuotes, setChainQuotes] = useState<Record<string, { ce: number; pe: number }>>({});
+  const [chainLoading, setChainLoading] = useState(false);
   const [strikeMap, setStrikeMap] = useState<Record<string, StrikeIdentifier>>({});
   const [lotSize, setLotSize] = useState<number | null>(null);
 
-  const { liveQuotes } = useLiveOptionsWS(expiry, broker, authenticatedBrokers, underlying);
-  const spot = liveQuotes?.spot ?? chainSpot;
+  const { liveQuotes, bridgeStatus, transport } = useLiveOptionsWS(expiry, broker, authenticatedBrokers, underlying);
+  const spot = (liveQuotes?.spot && liveQuotes.spot > 0) ? liveQuotes.spot : chainSpot;
   const step = useMemo(() => (allStrikes.length > 1 ? strikeStep(allStrikes) : DEFAULT_INDEX_STEP[underlying]), [allStrikes, underlying]);
   const atmStrike = useMemo(() => {
     const s = spot > 0 ? spot : (chainSpot > 0 ? chainSpot : DEFAULT_INDEX_SPOT[underlying]);
@@ -57,9 +59,18 @@ export default function MultiLegFocus() {
   }, [allStrikes, atmStrike, step, underlying]);
 
   const ltpFor = useCallback((leg: MultiLegLeg): number => {
-    const entry = liveQuotes?.strikes?.[String(leg.strike)];
-    return (leg.option === 'CE' ? entry?.ce?.ltp : entry?.pe?.ltp) ?? 0;
-  }, [liveQuotes]);
+    // 1. Prioritize real-time WebSocket tick if active and fresh
+    const liveEntry = liveQuotes?.strikes?.[String(leg.strike)];
+    const liveLtp = (leg.option === 'CE' ? liveEntry?.ce?.ltp : liveEntry?.pe?.ltp) ?? 0;
+    if (liveLtp > 0) return liveLtp;
+
+    // 2. Fall back to REST option chain snapshot prices
+    const chainEntry = chainQuotes[String(leg.strike)];
+    const chainLtp = (leg.option === 'CE' ? chainEntry?.ce : chainEntry?.pe) ?? 0;
+    if (chainLtp > 0) return chainLtp;
+
+    return 0;
+  }, [liveQuotes, chainQuotes]);
 
   const [category, setCategory] = useState<StrategyCategory>('Range Bound');
   const [presetKey, setPresetKey] = useState<string | null>(null);
@@ -102,19 +113,33 @@ export default function MultiLegFocus() {
       .catch(() => {});
   }, [broker, underlying, hasPlacedLeg]);
 
-  // ── Option chain: strikes + spot ─────────────────────────────────
-  useEffect(() => {
+  // ── Option chain: strikes + spot + quotes ─────────────────────────
+  const fetchChain = useCallback(() => {
     if (!expiry) return;
+    setChainLoading(true);
     fetch(`/api/options/chain?underlying=${underlying}&expiry=${expiry}&broker=${broker}`)
       .then(r => r.json())
       .then((j: { success: boolean; data?: { chain?: { oc?: Record<string, unknown> } | Record<string, unknown>; strikes?: number[]; spot?: number } }) => {
         if (!j.success || !j.data) return;
-        const oc = (j.data.chain as { oc?: Record<string, unknown> })?.oc ?? j.data.chain;
+        const oc = (j.data.chain as { oc?: Record<string, unknown> })?.oc ?? (j.data.chain as Record<string, unknown> | undefined);
         if (oc && typeof oc === 'object') {
           const strikes = Object.keys(oc).map(Number).filter(n => !isNaN(n) && n > 0).sort((a, b) => a - b);
           if (strikes.length > 0) {
             setAllStrikes(strikes);
           }
+          const quotes: Record<string, { ce: number; pe: number }> = {};
+          for (const [sk, entryRaw] of Object.entries(oc)) {
+            const strikeNum = Math.round(parseFloat(sk));
+            if (isNaN(strikeNum)) continue;
+            const entry = entryRaw as {
+              ce?: { last_price?: number; ltp?: number; previous_close_price?: number; previous_close?: number };
+              pe?: { last_price?: number; ltp?: number; previous_close_price?: number; previous_close?: number };
+            };
+            const ce = Number(entry?.ce?.last_price || entry?.ce?.ltp || entry?.ce?.previous_close_price || entry?.ce?.previous_close || 0);
+            const pe = Number(entry?.pe?.last_price || entry?.pe?.ltp || entry?.pe?.previous_close_price || entry?.pe?.previous_close || 0);
+            quotes[String(strikeNum)] = { ce, pe };
+          }
+          setChainQuotes(quotes);
         } else if (Array.isArray(j.data.strikes) && j.data.strikes.length > 0) {
           setAllStrikes(j.data.strikes);
         }
@@ -122,8 +147,33 @@ export default function MultiLegFocus() {
           setChainSpot(Number(j.data.spot));
         }
       })
-      .catch(() => {});
+      .catch(() => {})
+      .finally(() => setChainLoading(false));
   }, [broker, underlying, expiry]);
+
+  useEffect(() => {
+    fetchChain();
+  }, [fetchChain]);
+
+  // Periodic REST poll when live WebSocket quotes are not available
+  useEffect(() => {
+    if (liveQuotes && Object.keys(liveQuotes.strikes ?? {}).length > 0) return;
+    if (!expiry) return;
+    const interval = setInterval(fetchChain, 10_000);
+    return () => clearInterval(interval);
+  }, [fetchChain, liveQuotes, expiry]);
+
+  // ── Auto-start live options bridge (WebSocket tick pusher) ──────
+  useEffect(() => {
+    if (!expiry || !hasAuthenticatedBroker) return;
+    for (const b of authenticatedBrokers) {
+      fetch('/api/options/live', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'start', underlying, expiry, numStrikes: 30, broker: b }),
+      }).catch(() => {});
+    }
+  }, [expiry, underlying, authenticatedBrokers, hasAuthenticatedBroker]);
 
   // ── Strike -> order-identifier lookup ────────────────────────────
   useEffect(() => {
@@ -574,6 +624,25 @@ export default function MultiLegFocus() {
           </select>
           <span className="h-8 flex items-center px-2.5 rounded-lg text-xs font-bold font-mono tabular-nums bg-zinc-900 border border-zinc-700 text-zinc-200">
             Spot {spot > 0 ? spot.toLocaleString('en-IN', { maximumFractionDigits: 1 }) : '—'}
+          </span>
+          <button
+            type="button"
+            onClick={fetchChain}
+            disabled={chainLoading}
+            title="Refresh option chain quotes"
+            className={`h-8 px-2.5 inline-flex items-center gap-1.5 text-xs font-semibold rounded-lg bg-zinc-900 border border-zinc-700 text-zinc-300 hover:text-white hover:bg-zinc-800 disabled:opacity-50 ${FOCUS_RING}`}
+          >
+            <RefreshCw className={`w-3.5 h-3.5 ${chainLoading ? 'animate-spin text-emerald-400' : ''}`} />
+            <span>Refresh</span>
+          </button>
+          <span
+            className={`h-8 flex items-center px-2 text-[11px] font-bold font-mono rounded-lg border ${
+              bridgeStatus?.status === 'RUNNING' && liveQuotes
+                ? 'text-emerald-400 bg-emerald-500/10 border-emerald-500/20'
+                : 'text-zinc-400 bg-zinc-900 border-zinc-700'
+            }`}
+          >
+            {bridgeStatus?.status === 'RUNNING' && liveQuotes ? '● WS Live' : 'REST Chain'}
           </span>
         </div>
 
