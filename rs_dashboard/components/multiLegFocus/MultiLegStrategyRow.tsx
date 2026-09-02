@@ -544,26 +544,35 @@ export default function MultiLegStrategyRow({
             <div className="overflow-x-auto">
               <table className="w-full table-fixed text-xs">
                 <colgroup>
-                  <col className="w-[7%]" /><col className="w-[6%]" /><col className="w-[10%]" />
-                  <col className="w-[6%]" /><col className="w-[8%]" /><col className="w-[7%]" />
-                  <col className="w-[13%]" /><col className="w-[13%]" /><col className="w-[5%]" />
-                  <col className="w-[10%]" /><col className="w-[8%]" /><col className="w-[4%]" /><col className="w-[3%]" />
+                  <col className="w-[5%]" />
+                  <col className="w-[5%]" />
+                  <col className="w-[8%]" />
+                  <col className="w-[5%]" />
+                  <col className="w-[7%]" />
+                  <col className="w-[6%]" />
+                  <col className="w-[10%]" />
+                  <col className="w-[10%]" />
+                  <col className="w-[4%]" />
+                  <col className="w-[10%]" />
+                  <col className="w-[8%]" />
+                  <col className="w-[6%]" />
+                  <col className="w-[16%]" />
                 </colgroup>
                 <thead>
                   <tr className="text-xs font-bold text-white border-b border-zinc-800 bg-zinc-800">
-                    <th className="px-3 py-2 text-left">Side</th>
-                    <th className="px-2 py-2 text-left">CE/PE</th>
+                    <th className="px-2 py-2 text-left">Side</th>
+                    <th className="px-1.5 py-2 text-left">CE/PE</th>
                     <th className="px-2 py-2 text-left">Strike</th>
-                    <th className="px-2 py-2 text-left">Lots</th>
+                    <th className="px-1.5 py-2 text-center">Lots</th>
                     <th className="px-2 py-2 text-left">Type</th>
                     <th className="px-2 py-2 text-right">LTP</th>
                     <th className="px-2 py-2 text-left">SL</th>
                     <th className="px-2 py-2 text-left">TP</th>
-                    <th className="px-2 py-2 text-center">Trail</th>
+                    <th className="px-1 py-2 text-center">Trail</th>
                     <th className="px-2 py-2 text-right">Margin</th>
                     <th className="px-2 py-2 text-right">P&L</th>
-                    <th className="px-2 py-2 text-center">Status</th>
-                    <th className="px-2 py-2 text-center"></th>
+                    <th className="px-1.5 py-2 text-center">Status</th>
+                    <th className="px-2 py-2 text-center">Action</th>
                   </tr>
                 </thead>
                 <tbody>

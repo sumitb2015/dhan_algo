@@ -1,12 +1,12 @@
 'use client';
 
 import React from 'react';
-import { X } from 'lucide-react';
+import { X, Plus } from 'lucide-react';
 import { legPnl, computeLegTrailingSL, type MultiLegLeg } from '@/lib/multiLegFocus';
 import { FOCUS_RING } from '@/components/Scalper';
 import RuleNumInput from './RuleNumInput';
 
-const SELECT_CLASS = `h-8 bg-zinc-900 border border-zinc-700 text-zinc-200 text-xs font-semibold rounded-lg px-2 focus:outline-none focus:border-emerald-500 disabled:opacity-50 disabled:cursor-not-allowed ${FOCUS_RING}`;
+const SELECT_CLASS = `h-7 bg-zinc-900 border border-zinc-700 text-zinc-200 text-xs font-semibold rounded px-1.5 focus:outline-none focus:border-emerald-500 disabled:opacity-50 disabled:cursor-not-allowed w-full ${FOCUS_RING}`;
 
 const STATUS_STYLE: Record<MultiLegLeg['status'], string> = {
   DRAFT:   'bg-zinc-800 text-zinc-400 border-zinc-700',
@@ -46,21 +46,21 @@ export default function MultiLegLegRow({
 
   return (
     <tr className="border-b border-zinc-800/60 hover:bg-zinc-900/30 transition-colors">
-      <td className="px-3 py-2">
+      <td className="px-2 py-1.5">
         <select value={leg.side} disabled={!editable} className={SELECT_CLASS}
           onChange={e => onChange({ side: e.target.value as MultiLegLeg['side'] })}>
           <option value="B">BUY</option>
           <option value="S">SELL</option>
         </select>
       </td>
-      <td className="px-2 py-2">
+      <td className="px-1.5 py-1.5">
         <select value={leg.option} disabled={!editable} className={SELECT_CLASS}
           onChange={e => onChange({ option: e.target.value as MultiLegLeg['option'] })}>
           <option value="CE">CE</option>
           <option value="PE">PE</option>
         </select>
       </td>
-      <td className="px-2 py-2">
+      <td className="px-2 py-1.5">
         <select value={leg.strike} disabled={!editable} className={SELECT_CLASS}
           onChange={e => onChange({ strike: Number(e.target.value) })}>
           {!allStrikes.includes(leg.strike) && <option value={leg.strike}>{leg.strike}</option>}
@@ -72,36 +72,36 @@ export default function MultiLegLegRow({
           </span>
         )}
       </td>
-      <td className="px-2 py-2">
+      <td className="px-1.5 py-1.5 text-center">
         <input type="number" min={1} value={leg.lots} disabled={!editable}
           onChange={e => onChange({ lots: Math.max(1, Number(e.target.value) || 1) })}
-          className={`h-8 w-16 bg-zinc-900 border border-zinc-700 text-zinc-200 text-xs font-mono rounded-lg px-2 text-center focus:outline-none focus:border-emerald-500 disabled:opacity-50 ${FOCUS_RING}`} />
+          className={`h-7 w-12 bg-zinc-900 border border-zinc-700 text-zinc-200 text-xs font-mono rounded px-1 text-center focus:outline-none focus:border-emerald-500 disabled:opacity-50 ${FOCUS_RING}`} />
       </td>
-      <td className="px-2 py-2">
+      <td className="px-2 py-1.5">
         <select value={leg.type} disabled={!editable} className={SELECT_CLASS}
           onChange={e => onChange({ type: e.target.value as MultiLegLeg['type'] })}>
           <option value="MARKET">MARKET</option>
           <option value="LIMIT">LIMIT</option>
         </select>
       </td>
-      <td className="px-2 py-2 text-right font-mono text-xs text-zinc-300 tabular-nums">
+      <td className="px-2 py-1.5 text-right font-mono text-xs text-zinc-300 tabular-nums">
         {ltp > 0 ? ltp.toFixed(2) : '—'}
       </td>
       {/* SL Column */}
-      <td className="px-2 py-2">
+      <td className="px-2 py-1.5">
         <div className="flex flex-col gap-0.5">
           <div className="flex items-center gap-1">
             <RuleNumInput
               value={leg.sl}
               onCommit={val => onChange({ sl: val })}
               placeholder={leg.slType === 'price' ? 'Price' : 'Pts'}
-              className="w-16 h-7 text-rose-300 placeholder-rose-900/40"
+              className="w-14 h-7 text-rose-300 placeholder-rose-900/40"
               title="Stop Loss (in points or price)"
             />
             <button
               type="button"
               onClick={() => onChange({ slType: leg.slType === 'price' ? 'pts' : 'price' })}
-              className="h-7 px-1.5 text-[10px] font-mono font-bold rounded border border-zinc-700 bg-zinc-800 text-zinc-400 hover:text-white"
+              className="h-7 px-1 text-[10px] font-mono font-bold rounded border border-zinc-700 bg-zinc-800 text-zinc-400 hover:text-white"
               title="Toggle between Points and Price"
             >
               {leg.slType === 'price' ? '₹' : 'pts'}
@@ -115,20 +115,20 @@ export default function MultiLegLegRow({
         </div>
       </td>
       {/* TP Column */}
-      <td className="px-2 py-2">
+      <td className="px-2 py-1.5">
         <div className="flex flex-col gap-0.5">
           <div className="flex items-center gap-1">
             <RuleNumInput
               value={leg.tp}
               onCommit={val => onChange({ tp: val })}
               placeholder={leg.tpType === 'price' ? 'Price' : 'Pts'}
-              className="w-16 h-7 text-emerald-300 placeholder-emerald-900/40"
+              className="w-14 h-7 text-emerald-300 placeholder-emerald-900/40"
               title="Take Profit (in points or price)"
             />
             <button
               type="button"
               onClick={() => onChange({ tpType: leg.tpType === 'price' ? 'pts' : 'price' })}
-              className="h-7 px-1.5 text-[10px] font-mono font-bold rounded border border-zinc-700 bg-zinc-800 text-zinc-400 hover:text-white"
+              className="h-7 px-1 text-[10px] font-mono font-bold rounded border border-zinc-700 bg-zinc-800 text-zinc-400 hover:text-white"
               title="Toggle between Points and Price"
             >
               {leg.tpType === 'price' ? '₹' : 'pts'}
@@ -142,8 +142,8 @@ export default function MultiLegLegRow({
         </div>
       </td>
       {/* Trail Column (1 rupee step) */}
-      <td className="px-2 py-2 text-center">
-        <label className="inline-flex items-center gap-1 cursor-pointer select-none text-[11px] font-semibold" title="Trailing SL: tightens SL by ₹1 for every ₹1 favorable move">
+      <td className="px-1 py-1.5 text-center">
+        <label className="inline-flex items-center gap-0.5 cursor-pointer select-none text-[11px] font-semibold" title="Trailing SL: tightens SL by ₹1 for every ₹1 favorable move">
           <input
             type="checkbox"
             checked={!!leg.trail}
@@ -156,7 +156,7 @@ export default function MultiLegLegRow({
         </label>
       </td>
       {/* Margin Column: Blocked for OPEN, Required for DRAFT */}
-      <td className="px-2 py-2 text-right">
+      <td className="px-2 py-1.5 text-right">
         {leg.status === 'CLOSED' ? (
           <span className="text-zinc-600 font-mono text-xs">—</span>
         ) : margin != null && margin > 0 ? (
@@ -174,26 +174,26 @@ export default function MultiLegLegRow({
           <span className="text-zinc-600 font-mono text-xs">—</span>
         )}
       </td>
-      <td className="px-2 py-2 text-right font-mono text-xs font-bold tabular-nums">
+      <td className="px-2 py-1.5 text-right font-mono text-xs font-bold tabular-nums">
         {leg.fill ? <span className={pnlColor}>{pnl >= 0 ? '+' : ''}{pnl.toFixed(0)}</span> : <span className="text-zinc-600">—</span>}
       </td>
-      <td className="px-2 py-2 text-center">
+      <td className="px-1.5 py-1.5 text-center">
         <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded border ${STATUS_STYLE[leg.status]}`}>
           {leg.status}
         </span>
       </td>
-      <td className="px-2 py-2 text-center">
+      <td className="px-2 py-1.5 text-center">
         {leg.status === 'OPEN' ? (
-          <div className="flex items-center justify-center gap-1.5">
+          <div className="flex items-center justify-center gap-1.5 whitespace-nowrap">
             {onOpenAddLots && (
               <button
                 type="button"
                 onClick={onOpenAddLots}
                 disabled={exiting}
                 title="Add lots to this open position"
-                className={`text-[10px] font-bold text-emerald-400 hover:text-emerald-300 px-1.5 py-0.5 rounded border border-emerald-500/30 hover:bg-emerald-500/10 disabled:opacity-50 ${FOCUS_RING}`}
+                className={`h-6 px-2 text-[10px] font-bold text-emerald-400 hover:text-emerald-300 rounded border border-emerald-500/30 hover:bg-emerald-500/10 disabled:opacity-50 transition-colors inline-flex items-center gap-0.5 ${FOCUS_RING}`}
               >
-                + ADD
+                <Plus className="w-2.5 h-2.5" /> ADD
               </button>
             )}
             <button
@@ -202,7 +202,7 @@ export default function MultiLegLegRow({
               disabled={exiting}
               aria-label="Exit this leg"
               title="Exit this leg"
-              className={`text-[10px] font-bold text-rose-400 hover:text-rose-300 px-1.5 py-0.5 rounded border border-rose-500/30 hover:bg-rose-500/10 disabled:opacity-50 disabled:cursor-not-allowed ${FOCUS_RING}`}
+              className={`h-6 px-2.5 text-[10px] font-bold text-rose-400 hover:text-rose-300 rounded border border-rose-500/30 hover:bg-rose-500/10 disabled:opacity-50 disabled:cursor-not-allowed transition-colors ${FOCUS_RING}`}
             >
               {exiting ? 'Exiting…' : 'EXIT'}
             </button>
