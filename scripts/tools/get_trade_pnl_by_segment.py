@@ -175,11 +175,24 @@ def annotate_trades(trades: list) -> None:
         t['charges'] = round(trade_charges(t), 2)
         t['statutoryCharges'] = round(trade_statutory_charges(t), 2)
         t['securityId'] = SECURITY_ID_MERGES.get(str(t.get('securityId', '')), str(t.get('securityId', '')))
+        # Normalize here, once, so every downstream consumer (merge_live_trades' dedup,
+        # the persisted trade log) can just read t['exchangeTradeId'] — Dhan's settled
+        # trade-history endpoint and its live trade-book endpoint don't reliably agree on
+        # which of these two field names carries the id (scripts/tools/get_crudeoil_trades_data.py
+        # and get_holdings_data.py already carry this same fallback for that reason).
+        t['exchangeTradeId'] = str(t.get('exchangeTradeId') or t.get('tradeId') or '')
 
 
 def log_entry_to_internal(t: dict) -> dict:
     """Convert a stored trade-log entry (display shape) back to the internal/raw-ish shape the compute
-    pipeline uses — enables incremental sync to reuse stored trades without refetching 2 years of data."""
+    pipeline uses — enables incremental sync to reuse stored trades without refetching 2 years of data.
+
+    Must carry exchangeTradeId through this round-trip: merge_live_trades() dedupes today's re-fetched
+    live trade-book rows against this reloaded set by exchangeTradeId, and a stored entry with none of
+    its own can never match, so the same trade gets appended again on the next incremental sync. This
+    is not hypothetical — it duplicated a real SELL and a real BUY in production (see debug output from
+    the 2026-09-02 Trader's Diary showing 28 trades where only 26 were genuinely distinct).
+    """
     return {
         'exchangeTime': t.get('time', ''),
         'segment': t.get('segment', 'OTHER'),
@@ -194,6 +207,7 @@ def log_entry_to_internal(t: dict) -> dict:
         'drvOptionType': t.get('optionType') if t.get('optionType') else 'NA',
         'drvStrikePrice': t.get('strikePrice') or 0.0,
         'drvExpiryDate': t.get('expiryDate') if t.get('expiryDate') else 'NA',
+        'exchangeTradeId': t.get('exchangeTradeId') or '',
     }
 
 
@@ -596,6 +610,9 @@ def main():
         'optionType': t.get('drvOptionType') if t.get('drvOptionType') not in (None, 'NA') else None,
         'strikePrice': t.get('drvStrikePrice') if t.get('drvStrikePrice') else None,
         'expiryDate': t.get('drvExpiryDate') if t.get('drvExpiryDate') not in (None, 'NA') else None,
+        # Round-tripped through log_entry_to_internal() on the next incremental sync so
+        # merge_live_trades() can still dedupe this trade against a freshly re-fetched trade book.
+        'exchangeTradeId': t.get('exchangeTradeId') or '',
     } for t in log_source]
 
     output = {
