@@ -876,10 +876,11 @@ export default function MultiLegFocus() {
             const nextLegs = basket.legs.map(leg => {
               if (!leg.orderRef) return leg;
               const match = findLegPosition(broker, leg, rows);
-              const reconciled = reconcileLegWithBroker(leg, match, leg.lots * lotSize);
+              const reconciled = reconcileLegWithBroker(leg, match, leg.lots * lotSize, lotSize);
 
               if (
                 reconciled.status !== leg.status ||
+                reconciled.lots !== leg.lots ||
                 reconciled.fill?.qty !== leg.fill?.qty ||
                 reconciled.fill?.avgPrice !== leg.fill?.avgPrice
               ) {

@@ -303,6 +303,7 @@ export function reconcileLegWithBroker(
   leg: MultiLegLeg,
   match: MultiLegMatch,
   maxQty?: number | null,
+  lotSize?: number | null,
 ): MultiLegLeg {
   if (match.kind === 'match') {
     const brokerQty = Math.abs(Number(match.row.netQty) || 0);
@@ -311,8 +312,10 @@ export function reconcileLegWithBroker(
       const avgPrice = brokerAvg > 0 ? brokerAvg : (leg.fill?.avgPrice ?? 0);
       const cap = maxQty ?? (leg.fill?.qty && leg.fill.qty > 0 ? leg.fill.qty : 0);
       const qty = cap > 0 ? Math.min(brokerQty, cap) : brokerQty;
+      const lots = (lotSize && lotSize > 0) ? Math.max(1, Math.round(qty / lotSize)) : leg.lots;
       return {
         ...leg,
+        lots,
         status: 'OPEN',
         fill: { qty, avgPrice },
       };

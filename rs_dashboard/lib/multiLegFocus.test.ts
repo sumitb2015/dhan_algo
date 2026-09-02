@@ -144,6 +144,15 @@ test('reconcileLegWithBroker leaves leg untouched when match is not_found', () =
   assert.strictEqual(reconciled.fill?.qty, 65);
 });
 
+test('reconcileLegWithBroker updates lots to match broker filled qty / lotSize', () => {
+  const leg: MultiLegLeg = { id: '1', side: 'S', option: 'CE', strike: 24300, lots: 2, type: 'MARKET', status: 'OPEN', fill: { qty: 65, avgPrice: 56.4 }, orderRef: { securityId: '47331' } };
+  const match = { kind: 'match' as const, row: { securityId: '47331', netQty: -65, sellAvg: 56.4 } };
+  const reconciled = reconcileLegWithBroker(leg, match, 130, 65);
+  assert.strictEqual(reconciled.status, 'OPEN');
+  assert.strictEqual(reconciled.fill?.qty, 65);
+  assert.strictEqual(reconciled.lots, 1);
+});
+
 test('computeLegTrailingSL: Sell leg triggers hard SL and TP correctly', () => {
   const leg: MultiLegLeg = {
     id: '1', side: 'S', option: 'PE', strike: 23500, lots: 1, type: 'MARKET', status: 'OPEN',
