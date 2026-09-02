@@ -90,13 +90,17 @@ export default function MultiLegFocus() {
   // ── Option chain: strikes + spot ─────────────────────────────────
   useEffect(() => {
     if (!expiry) return;
+    const requestedUnderlying = underlying;
+    const requestedExpiry = expiry;
     fetch(`/api/options/chain?underlying=${underlying}&expiry=${expiry}&broker=${broker}`)
       .then(r => r.json())
-      .then((j: { success: boolean; data?: { strikes?: number[]; spot?: number } }) => {
-        if (j.success && j.data) {
-          setAllStrikes(j.data.strikes ?? []);
-          setChainSpot(j.data.spot ?? 0);
-        }
+      .then((j: { success: boolean; data?: { chain?: { oc?: Record<string, unknown> }; spot?: number } }) => {
+        if (requestedUnderlying !== underlyingRef.current || requestedExpiry !== expiryRef.current) return;
+        if (!j.success || !j.data?.chain?.oc) return;
+        const oc = j.data.chain.oc;
+        const strikes = Object.keys(oc).map(Number).filter(n => !isNaN(n)).sort((a, b) => a - b);
+        setAllStrikes(strikes);
+        setChainSpot(j.data.spot ?? 0);
       })
       .catch(() => {});
   }, [broker, underlying, expiry]);
