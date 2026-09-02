@@ -19,7 +19,7 @@ export interface MultiLegLeg {
   type: 'MARKET' | 'LIMIT';
   price?: number;              // manual override, only used when type === 'LIMIT'
   /** This basket's own fill ledger for this leg — never derived from broker net qty. */
-  fill?: { qty: number; avgPrice: number };
+  fill?: { qty: number; avgPrice: number; orderId?: string };
   /** Captured from the order response at placement time; used to match this
    *  leg's own broker position row on every monitoring poll. */
   orderRef?: { securityId?: string; symbol?: string };

@@ -402,13 +402,18 @@ export default function MultiLegFocus() {
   }, [persistBasket]);
 
   const deleteBasket = useCallback((basketId: string) => {
+    const target = basketsRef.current.find(b => b.id === basketId);
+    if (target && target.legs.some(l => l.status === 'OPEN' || l.status === 'PLACING' || l.status === 'CLOSING')) {
+      addToast('error', 'Cannot delete active strategy', 'Exit all open positions before deleting this row.');
+      return;
+    }
     setBaskets(prev => prev.filter(b => b.id !== basketId));
     fetch('/api/multi-leg-focus/baskets', {
       method: 'DELETE',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ id: basketId }),
     }).catch(() => {});
-  }, []);
+  }, [addToast]);
 
   // ── Add Strategy (from template or blank) ──────────────────────────
   const [category, setCategory] = useState<StrategyCategory>('Range Bound');
@@ -664,6 +669,188 @@ export default function MultiLegFocus() {
       setExitingMap(prev => ({ ...prev, [basketId]: false }));
     }
   }, [exitOneLeg]);
+
+  // ── Add Lots to Existing Position Leg ─────────────────────────────
+  const addLotsToLeg = useCallback(async (basketId: string, params: {
+    legId: string;
+    lots: number;
+    orderType: 'MARKET' | 'LIMIT';
+    limitPrice?: number;
+    newSl?: number;
+    newTp?: number;
+  }) => {
+    const basket = basketsRef.current.find(b => b.id === basketId);
+    if (!basket) return;
+    const leg = basket.legs.find(l => l.id === params.legId);
+    if (!leg) return;
+
+    if (!hasAuthenticatedBroker) {
+      addToast('error', 'No broker logged in', 'Log in before placing orders');
+      return;
+    }
+
+    const pair = `${basket.underlying}:${basket.expiry}`;
+    const lookup = lookupCache[pair];
+    const lotSize = lookup?.lotSize ?? (basket.underlying === 'NIFTY' ? 65 : basket.underlying === 'BANKNIFTY' ? 15 : 10);
+    const strikeMap = lookup?.strikes ?? {};
+
+    const qty = params.lots * lotSize;
+    const label = `${leg.side === 'B' ? 'BUY' : 'SELL'} ${leg.strike} ${leg.option}`;
+
+    const req = resolveOrderRequest(broker, {
+      side: leg.side,
+      option: leg.option,
+      strike: leg.strike,
+      qty,
+      type: params.orderType,
+      price: params.orderType === 'LIMIT' ? params.limitPrice : undefined,
+      underlying: basket.underlying as Underlying,
+      productType: 'MARGIN',
+    }, strikeMap);
+
+    if (!req) {
+      addToast('error', `Order failed for ${label}`, 'Could not resolve security identifier');
+      return;
+    }
+
+    try {
+      const res = await fetch(req.url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(req.body),
+      });
+      const j = await res.json() as { success: boolean; order_id?: string; securityId?: string; symbol?: string; price?: number; error?: string };
+
+      if (j.success) {
+        const currentLtp = ltpFor(basket, leg);
+        const fillPrice = (j.price && j.price > 0)
+          ? j.price
+          : ((params.limitPrice && params.limitPrice > 0)
+            ? params.limitPrice
+            : (currentLtp > 0 ? currentLtp : (leg.price ?? 0)));
+
+        const oldQty = (leg.fill?.qty && leg.fill.qty > 0) ? leg.fill.qty : (leg.lots * lotSize);
+        const oldAvg = (leg.fill?.avgPrice && leg.fill.avgPrice > 0) ? leg.fill.avgPrice : (leg.price || currentLtp);
+        const newTotalQty = oldQty + qty;
+        const newAvgPrice = ((oldAvg * oldQty) + (fillPrice * qty)) / newTotalQty;
+        const newLots = leg.lots + params.lots;
+
+        const updatedLegs = basket.legs.map(l => {
+          if (l.id !== leg.id) return l;
+          return {
+            ...l,
+            lots: newLots,
+            price: newAvgPrice,
+            ...(params.newSl !== undefined ? { sl: params.newSl } : {}),
+            ...(params.newTp !== undefined ? { tp: params.newTp } : {}),
+            fill: {
+              qty: newTotalQty,
+              avgPrice: newAvgPrice,
+              orderId: j.order_id ?? l.fill?.orderId,
+            },
+          };
+        });
+
+        updateBasket(basket.id, { legs: updatedLegs });
+        addToast('success', `Added ${params.lots} lot(s) to ${label}`, `New Avg: ₹${newAvgPrice.toFixed(2)} (${newLots} lots total)`);
+        pollFunds();
+        fetchMarginsForBaskets();
+      } else {
+        addToast('error', `Add lots failed for ${label}`, j.error ?? 'Unknown broker error');
+      }
+    } catch (e) {
+      addToast('error', `Add lots failed for ${label}`, String(e));
+    }
+  }, [broker, hasAuthenticatedBroker, lookupCache, ltpFor, updateBasket, addToast, pollFunds, fetchMarginsForBaskets]);
+
+  // ── Add New Leg to Active Basket ──────────────────────────────────
+  const addNewLegToBasket = useCallback(async (basketId: string, params: {
+    side: 'B' | 'S';
+    option: 'CE' | 'PE';
+    strike: number;
+    lots: number;
+    orderType: 'MARKET' | 'LIMIT';
+    limitPrice?: number;
+  }) => {
+    const basket = basketsRef.current.find(b => b.id === basketId);
+    if (!basket) return;
+
+    if (!hasAuthenticatedBroker) {
+      addToast('error', 'No broker logged in', 'Log in before placing orders');
+      return;
+    }
+
+    const pair = `${basket.underlying}:${basket.expiry}`;
+    const lookup = lookupCache[pair];
+    const lotSize = lookup?.lotSize ?? (basket.underlying === 'NIFTY' ? 65 : basket.underlying === 'BANKNIFTY' ? 15 : 10);
+    const strikeMap = lookup?.strikes ?? {};
+
+    const qty = params.lots * lotSize;
+    const label = `${params.side === 'B' ? 'BUY' : 'SELL'} ${params.strike} ${params.option}`;
+
+    const req = resolveOrderRequest(broker, {
+      side: params.side,
+      option: params.option,
+      strike: params.strike,
+      qty,
+      type: params.orderType,
+      price: params.orderType === 'LIMIT' ? params.limitPrice : undefined,
+      underlying: basket.underlying as Underlying,
+      productType: 'MARGIN',
+    }, strikeMap);
+
+    if (!req) {
+      addToast('error', `Order failed for ${label}`, 'Could not resolve security identifier');
+      return;
+    }
+
+    try {
+      const res = await fetch(req.url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(req.body),
+      });
+      const j = await res.json() as { success: boolean; order_id?: string; securityId?: string; symbol?: string; price?: number; error?: string };
+
+      if (j.success) {
+        const chain = chainData[pair];
+        const q = chain?.quotes?.[String(params.strike)];
+        const curLtp = (params.option === 'CE' ? q?.ce : q?.pe) ?? 0;
+        const fillPrice = (j.price && j.price > 0)
+          ? j.price
+          : ((params.limitPrice && params.limitPrice > 0) ? params.limitPrice : curLtp);
+
+        const newLeg: MultiLegLeg = {
+          id: `mll_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`,
+          side: params.side,
+          option: params.option,
+          strike: params.strike,
+          lots: params.lots,
+          type: params.orderType,
+          price: fillPrice,
+          status: 'OPEN',
+          fill: {
+            qty,
+            avgPrice: fillPrice,
+            orderId: j.order_id,
+          },
+          orderRef: {
+            securityId: j.securityId ?? (req.body.securityId as string | undefined),
+            symbol: j.symbol ?? (req.body.tradingsymbol as string | undefined),
+          },
+        };
+
+        updateBasket(basket.id, { legs: [...basket.legs, newLeg] });
+        addToast('success', `Added new leg ${label}`, `Filled @ ₹${fillPrice.toFixed(2)} (${params.lots} lots)`);
+        pollFunds();
+        fetchMarginsForBaskets();
+      } else {
+        addToast('error', `Add leg failed for ${label}`, j.error ?? 'Unknown broker error');
+      }
+    } catch (e) {
+      addToast('error', `Add leg failed for ${label}`, String(e));
+    }
+  }, [broker, hasAuthenticatedBroker, lookupCache, chainData, updateBasket, addToast, pollFunds, fetchMarginsForBaskets]);
 
   // ── Broker Positions Poller across ALL Baskets ─────────────────────
   useEffect(() => {
@@ -982,11 +1169,19 @@ export default function MultiLegFocus() {
                 step={step}
                 atmStrike={atmStrike}
                 ltpFor={leg => ltpFor(basket, leg)}
+                ltpForStrike={(strk, opt) => {
+                  const pair = `${basket.underlying}:${basket.expiry}`;
+                  const chain = chainData[pair];
+                  const q = chain?.quotes?.[String(strk)];
+                  return (opt === 'CE' ? q?.ce : q?.pe) ?? 0;
+                }}
                 onUpdate={patch => updateBasket(basket.id, patch)}
                 onDelete={() => deleteBasket(basket.id)}
                 onPlace={() => placeBasket(basket.id)}
                 onExit={() => exitBasket(basket.id)}
                 onExitLeg={leg => exitOneLeg(basket.id, leg)}
+                onAddLots={params => addLotsToLeg(basket.id, params)}
+                onAddNewLeg={params => addNewLegToBasket(basket.id, params)}
                 placing={!!placingMap[basket.id]}
                 exiting={!!exitingMap[basket.id]}
                 exitingLegs={exitingLegs}

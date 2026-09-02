@@ -6,6 +6,8 @@ import {
 } from 'lucide-react';
 import MultiLegLegRow from './MultiLegLegRow';
 import RuleNumInput from './RuleNumInput';
+import AddLotsModal from './AddLotsModal';
+import AddNewLegModal from './AddNewLegModal';
 import {
   computeLegTrailingSL, computeStrategyMetrics, checkStrategyRisk,
   type MultiLegBasket, type MultiLegLeg, type StrategyRiskConfig,
@@ -41,11 +43,28 @@ export interface MultiLegStrategyRowProps {
   step: number;
   atmStrike: number;
   ltpFor: (leg: MultiLegLeg) => number;
+  ltpForStrike?: (strike: number, option: 'CE' | 'PE') => number;
   onUpdate: (patch: Partial<MultiLegBasket>) => void;
   onDelete: () => void;
   onPlace: () => Promise<void>;
   onExit: () => Promise<void>;
   onExitLeg: (leg: MultiLegLeg) => Promise<void>;
+  onAddLots?: (params: {
+    legId: string;
+    lots: number;
+    orderType: 'MARKET' | 'LIMIT';
+    limitPrice?: number;
+    newSl?: number;
+    newTp?: number;
+  }) => Promise<void>;
+  onAddNewLeg?: (params: {
+    side: 'B' | 'S';
+    option: 'CE' | 'PE';
+    strike: number;
+    lots: number;
+    orderType: 'MARKET' | 'LIMIT';
+    limitPrice?: number;
+  }) => Promise<void>;
   placing: boolean;
   exiting: boolean;
   exitingLegs: Set<string>;
@@ -66,11 +85,14 @@ export default function MultiLegStrategyRow({
   step,
   atmStrike,
   ltpFor,
+  ltpForStrike,
   onUpdate,
   onDelete,
   onPlace,
   onExit,
   onExitLeg,
+  onAddLots,
+  onAddNewLeg,
   placing,
   exiting,
   exitingLegs,
@@ -81,9 +103,15 @@ export default function MultiLegStrategyRow({
 }: MultiLegStrategyRowProps) {
   const [expanded, setExpanded] = useState(true);
   const [confirmPlace, setConfirmPlace] = useState(false);
+  const [selectedLegForAddLots, setSelectedLegForAddLots] = useState<MultiLegLeg | null>(null);
+  const [isAddNewLegModalOpen, setIsAddNewLegModalOpen] = useState<boolean>(false);
 
   const hasPlacedLeg = useMemo(() => {
     return basket.legs.some(l => l.status !== 'DRAFT');
+  }, [basket.legs]);
+
+  const hasActivePositions = useMemo(() => {
+    return basket.legs.some(l => l.status === 'OPEN' || l.status === 'PLACING' || l.status === 'CLOSING');
   }, [basket.legs]);
 
   const basketStatus = useMemo(() => {
@@ -333,22 +361,42 @@ export default function MultiLegStrategyRow({
 
           {/* Open Strategy Actions */}
           {basket.legs.some(l => l.status === 'OPEN' || l.status === 'CLOSING') && (
-            <button
-              type="button"
-              onClick={onExit}
-              disabled={exiting}
-              className={`h-7 px-3 text-[11px] font-bold rounded-lg border border-rose-500/40 text-rose-400 hover:bg-rose-500/10 hover:text-rose-300 disabled:opacity-50 ${FOCUS_RING}`}
-            >
-              {exiting ? 'Exiting…' : 'Exit Strategy'}
-            </button>
+            <div className="flex items-center gap-1.5">
+              {onAddNewLeg && (
+                <button
+                  type="button"
+                  onClick={() => setIsAddNewLegModalOpen(true)}
+                  title="Add a new leg to this active strategy"
+                  className={`h-7 px-2.5 inline-flex items-center gap-1 text-[11px] font-bold rounded-lg border border-emerald-500/40 bg-emerald-500/10 text-emerald-300 hover:bg-emerald-500/20 ${FOCUS_RING}`}
+                >
+                  <Plus className="w-3 h-3" /> Add Leg
+                </button>
+              )}
+              <button
+                type="button"
+                onClick={onExit}
+                disabled={exiting}
+                className={`h-7 px-3 text-[11px] font-bold rounded-lg border border-rose-500/40 text-rose-400 hover:bg-rose-500/10 hover:text-rose-300 disabled:opacity-50 ${FOCUS_RING}`}
+              >
+                {exiting ? 'Exiting…' : 'Exit Strategy'}
+              </button>
+            </div>
           )}
 
-          {/* Delete Row button */}
+          {/* Delete Row button — strictly disabled when positions are active to prevent losing tracking */}
           <button
             type="button"
-            onClick={onDelete}
-            title="Delete this strategy row"
-            className="p-1 text-zinc-500 hover:text-rose-400 transition-colors"
+            onClick={() => {
+              if (hasActivePositions) return;
+              onDelete();
+            }}
+            disabled={hasActivePositions}
+            title={hasActivePositions ? "Cannot delete strategy row while positions are active — exit positions first" : "Delete this strategy row"}
+            className={`p-1 transition-colors ${
+              hasActivePositions
+                ? "text-zinc-700 cursor-not-allowed opacity-30"
+                : "text-zinc-500 hover:text-rose-400"
+            }`}
           >
             <Trash2 className="w-4 h-4" />
           </button>
@@ -531,6 +579,7 @@ export default function MultiLegStrategyRow({
                       onChange={patch => updateLeg(leg.id, patch)}
                       onRemove={() => removeLeg(leg.id)}
                       onExit={() => onExitLeg(leg)}
+                      onOpenAddLots={() => setSelectedLegForAddLots(leg)}
                     />
                   ))}
                 </tbody>
@@ -538,6 +587,34 @@ export default function MultiLegStrategyRow({
             </div>
           )}
         </div>
+      )}
+
+      {/* Add Lots Modal */}
+      {selectedLegForAddLots && onAddLots && (
+        <AddLotsModal
+          isOpen={!!selectedLegForAddLots}
+          onClose={() => setSelectedLegForAddLots(null)}
+          leg={selectedLegForAddLots}
+          basket={basket}
+          lotSize={lotSize ?? 65}
+          currentLtp={ltpFor(selectedLegForAddLots)}
+          broker={broker}
+          onConfirm={onAddLots}
+        />
+      )}
+
+      {/* Add New Leg Modal */}
+      {isAddNewLegModalOpen && onAddNewLeg && (
+        <AddNewLegModal
+          isOpen={isAddNewLegModalOpen}
+          onClose={() => setIsAddNewLegModalOpen(false)}
+          basket={basket}
+          allStrikes={allStrikes}
+          atmStrike={atmStrike}
+          lotSize={lotSize ?? 65}
+          ltpForStrike={ltpForStrike ?? ((s, o) => 0)}
+          onAddLeg={onAddNewLeg}
+        />
       )}
     </div>
   );

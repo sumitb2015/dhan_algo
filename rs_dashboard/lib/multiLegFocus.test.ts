@@ -248,4 +248,39 @@ test('checkStrategyRisk triggers Target and SL in both points and percentage mod
   assert.strictEqual(checkStrategyRisk(lossMetrics, { slValue: 30, slUnit: 'pts', armed: true, targetUnit: 'pts' }), null);
 });
 
+test('weighted average entry price recomputes accurately when adding lots to an existing leg', () => {
+  const initialQty = 65;
+  const initialAvg = 58.60;
+  const addedQty = 65;
+  const fillPrice = 61.40;
+
+  const newTotalQty = initialQty + addedQty;
+  const newAvgPrice = ((initialAvg * initialQty) + (fillPrice * addedQty)) / newTotalQty;
+
+  assert.strictEqual(newTotalQty, 130);
+  assert.strictEqual(Math.round(newAvgPrice * 100) / 100, 60.00);
+
+  // When updating leg fill with new average price, points-based SL/TP dynamically re-anchors
+  const leg: MultiLegLeg = {
+    id: '1',
+    side: 'S',
+    option: 'CE',
+    strike: 24300,
+    lots: 2,
+    type: 'MARKET',
+    status: 'OPEN',
+    fill: { qty: newTotalQty, avgPrice: newAvgPrice },
+    sl: 15,
+    slType: 'pts',
+    tp: 30,
+    tpType: 'pts',
+  };
+
+  const evalResult = computeLegTrailingSL(leg, 55.00);
+  // For SELL leg: SL is entry + 15 = 75, TP is entry - 30 = 30
+  assert.strictEqual(evalResult.initialSLPrice, 75.00);
+  assert.strictEqual(evalResult.tpPrice, 30.00);
+});
+
+
 

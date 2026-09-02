@@ -31,10 +31,11 @@ interface MultiLegLegRowProps {
   onChange: (patch: Partial<MultiLegLeg>) => void;
   onRemove: () => void;
   onExit: () => void;
+  onOpenAddLots?: () => void;
 }
 
 export default function MultiLegLegRow({
-  leg, allStrikes, ltp, editable, exiting, margin, onChange, onRemove, onExit,
+  leg, allStrikes, ltp, editable, exiting, margin, onChange, onRemove, onExit, onOpenAddLots,
 }: MultiLegLegRowProps) {
   const pnl = leg.fill ? legPnl(leg, ltp) : 0;
   const pnlColor = pnl > 0 ? 'text-emerald-400' : pnl < 0 ? 'text-rose-400' : 'text-zinc-400';
@@ -183,10 +184,29 @@ export default function MultiLegLegRow({
       </td>
       <td className="px-2 py-2 text-center">
         {leg.status === 'OPEN' ? (
-          <button onClick={onExit} disabled={exiting} aria-label="Exit this leg" title="Exit this leg"
-            className={`text-[10px] font-bold text-rose-400 hover:text-rose-300 px-1.5 py-0.5 rounded border border-rose-500/30 hover:bg-rose-500/10 disabled:opacity-50 disabled:cursor-not-allowed ${FOCUS_RING}`}>
-            {exiting ? 'Exiting…' : 'EXIT'}
-          </button>
+          <div className="flex items-center justify-center gap-1.5">
+            {onOpenAddLots && (
+              <button
+                type="button"
+                onClick={onOpenAddLots}
+                disabled={exiting}
+                title="Add lots to this open position"
+                className={`text-[10px] font-bold text-emerald-400 hover:text-emerald-300 px-1.5 py-0.5 rounded border border-emerald-500/30 hover:bg-emerald-500/10 disabled:opacity-50 ${FOCUS_RING}`}
+              >
+                + ADD
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={onExit}
+              disabled={exiting}
+              aria-label="Exit this leg"
+              title="Exit this leg"
+              className={`text-[10px] font-bold text-rose-400 hover:text-rose-300 px-1.5 py-0.5 rounded border border-rose-500/30 hover:bg-rose-500/10 disabled:opacity-50 disabled:cursor-not-allowed ${FOCUS_RING}`}
+            >
+              {exiting ? 'Exiting…' : 'EXIT'}
+            </button>
+          </div>
         ) : editable ? (
           <button onClick={onRemove} aria-label="Remove leg" title="Remove leg"
             className={`w-6 h-6 inline-flex items-center justify-center text-zinc-500 hover:text-rose-300 ${FOCUS_RING}`}>
