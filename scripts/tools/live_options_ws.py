@@ -387,7 +387,7 @@ def main():
     elif is_sensex:
         underlying_sid = '51'
         underlying_exchange = 'BSE'
-        underlying_seg = 'NSE_IDX'
+        underlying_seg = 'BSE_IDX'
         chain_symbol = '1'
         chain_seg = 'BSE_FNO'
         opt_inst = 'OPTIDX'

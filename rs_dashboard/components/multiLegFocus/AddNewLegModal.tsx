@@ -49,7 +49,7 @@ export default function AddNewLegModal({
     : (basket.underlying === 'NIFTY' ? 65
       : basket.underlying === 'BANKNIFTY' ? 15
       : basket.underlying === 'SENSEX' ? 20
-      : (basket.underlying === 'CRUDEOIL' ? 1 : 1));
+      : (basket.broker === 'dhan' ? 1 : basket.underlying === 'CRUDEOIL' ? 100 : 10));
   const totalQty = lots * effectiveLot;
 
   const handleSubmit = async (e: React.FormEvent) => {

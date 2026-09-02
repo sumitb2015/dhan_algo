@@ -40,6 +40,18 @@ const DEFAULT_INDEX_SPOT: Record<Underlying, number> = {
 
 const ALL_STRATEGY_TEMPLATES: StrategyTemplate[] = Object.values(STRATEGY_CATEGORIES).flat();
 
+/** Fallback lot size used only until `/api/scalper/lookup` populates the real
+ *  broker value in lookupCache — must stay in sync with each underlying's
+ *  actual contract size (and, for CRUDEOIL/CRUDEOILM, Dhan's qty semantics
+ *  which differ 100x from other brokers). */
+function fallbackLotSize(underlying: Underlying, broker: Broker): number {
+  if (underlying === 'NIFTY') return 65;
+  if (underlying === 'BANKNIFTY') return 15;
+  if (underlying === 'SENSEX') return 20;
+  if (broker === 'dhan') return 1;
+  return underlying === 'CRUDEOIL' ? 100 : 10;
+}
+
 function fmtMoney(n: number): string {
   return `${n < 0 ? '-' : ''}₹${Math.abs(n).toLocaleString('en-IN', { maximumFractionDigits: 0 })}`;
 }
@@ -296,7 +308,7 @@ export default function MultiLegFocus() {
               setLookupCache(prev => ({
                 ...prev,
                 [pair]: {
-                  lotSize: j.data!.lotSize ?? (u === 'NIFTY' ? 65 : u === 'BANKNIFTY' ? 15 : 10),
+                  lotSize: j.data!.lotSize ?? fallbackLotSize(u, broker),
                   strikes: j.data!.strikes ?? {},
                 },
               }));
@@ -378,7 +390,7 @@ export default function MultiLegFocus() {
       if (!basket.legs || basket.legs.length === 0 || !basket.expiry) continue;
       const pair = `${basket.underlying}:${basket.expiry}`;
       const lookup = lookupCache[pair];
-      const lotSize = lookup?.lotSize ?? (basket.underlying === 'NIFTY' ? 65 : basket.underlying === 'BANKNIFTY' ? 15 : 10);
+      const lotSize = lookup?.lotSize ?? fallbackLotSize(basket.underlying as Underlying, broker);
       const strikes = lookup?.strikes ?? {};
 
       const legsPayload = basket.legs.map(leg => {
@@ -591,7 +603,7 @@ export default function MultiLegFocus() {
 
     const pair = `${basket.underlying}:${basket.expiry}`;
     const lookup = lookupCache[pair];
-    const lotSize = lookup?.lotSize ?? (basket.underlying === 'NIFTY' ? 65 : basket.underlying === 'BANKNIFTY' ? 15 : 10);
+    const lotSize = lookup?.lotSize ?? fallbackLotSize(basket.underlying as Underlying, broker);
     const strikeMap = lookup?.strikes ?? {};
 
     setPlacingMap(prev => ({ ...prev, [basketId]: true }));
@@ -798,7 +810,7 @@ export default function MultiLegFocus() {
 
     const pair = `${basket.underlying}:${basket.expiry}`;
     const lookup = lookupCache[pair];
-    const lotSize = lookup?.lotSize ?? (basket.underlying === 'NIFTY' ? 65 : basket.underlying === 'BANKNIFTY' ? 15 : 10);
+    const lotSize = lookup?.lotSize ?? fallbackLotSize(basket.underlying as Underlying, broker);
     const strikeMap = lookup?.strikes ?? {};
 
     const qty = params.lots * lotSize;
@@ -890,7 +902,7 @@ export default function MultiLegFocus() {
 
     const pair = `${basket.underlying}:${basket.expiry}`;
     const lookup = lookupCache[pair];
-    const lotSize = lookup?.lotSize ?? (basket.underlying === 'NIFTY' ? 65 : basket.underlying === 'BANKNIFTY' ? 15 : 10);
+    const lotSize = lookup?.lotSize ?? fallbackLotSize(basket.underlying as Underlying, broker);
     const strikeMap = lookup?.strikes ?? {};
 
     const qty = params.lots * lotSize;
@@ -996,7 +1008,7 @@ export default function MultiLegFocus() {
             const nextBaskets = prevBaskets.map(basket => {
               let basketChange = false;
               const pair = `${basket.underlying}:${basket.expiry}`;
-              const lotSize = lookupCacheRef.current[pair]?.lotSize ?? (basket.underlying === 'NIFTY' ? 65 : 15);
+              const lotSize = lookupCacheRef.current[pair]?.lotSize ?? fallbackLotSize(basket.underlying as Underlying, broker);
 
               const nextLegs = basket.legs.map(leg => {
                 if (!leg.orderRef) return leg;
@@ -1323,12 +1335,7 @@ export default function MultiLegFocus() {
             const step = strikeStep(allStrikes) || DEFAULT_INDEX_STEP[basket.underlying as Underlying] || 50;
             const spot = chain?.spot ?? DEFAULT_INDEX_SPOT[basket.underlying as Underlying] ?? 24000;
             const atmStrike = nearestStrike(allStrikes, spot) ?? (Math.round(spot / step) * step);
-            const lotSize = lookup?.lotSize ?? (
-              basket.underlying === 'NIFTY' ? 65
-              : basket.underlying === 'BANKNIFTY' ? 15
-              : basket.underlying === 'SENSEX' ? 20
-              : (broker === 'dhan' ? 1 : basket.underlying === 'CRUDEOIL' ? 100 : 10)
-            );
+            const lotSize = lookup?.lotSize ?? fallbackLotSize(basket.underlying as Underlying, broker);
 
             return (
               <MultiLegStrategyRow
