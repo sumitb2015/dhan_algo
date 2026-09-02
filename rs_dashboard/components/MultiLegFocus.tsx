@@ -124,7 +124,7 @@ export default function MultiLegFocus() {
 
   // ── Expiries and Market Data by Underlying ─────────────────────────
   const [expiriesMap, setExpiriesMap] = useState<Record<string, string[]>>({});
-  const [chainData, setChainData] = useState<Record<string, { spot: number; strikes: number[]; quotes: Record<string, { ce: number; pe: number }> }>>({});
+  const [chainData, setChainData] = useState<Record<string, { spot: number; strikes: number[]; quotes: Record<string, { ce: number; pe: number }>; prevClose?: number }>>({});
   const [lookupCache, setLookupCache] = useState<Record<string, { lotSize: number; strikes: Record<string, StrikeIdentifier> }>>({});
   const lookupCacheRef = useRef(lookupCache);
   useEffect(() => { lookupCacheRef.current = lookupCache; }, [lookupCache]);
@@ -175,9 +175,19 @@ export default function MultiLegFocus() {
   }, [activeExpiry, activeUnderlying, authenticatedBrokers, hasAuthenticatedBroker, broker]);
 
   // ── Spot & Previous Close for Header Ticker ────────────────────────
+  // /api/scalper/nifty-prev-close only knows NIFTY/BANKNIFTY/SENSEX — for any
+  // other underlying it silently falls back to NIFTY's prev close, which would
+  // compare e.g. CRUDEOIL's spot against NIFTY's previous close. Only use it
+  // for the underlyings it actually supports; commodities get their prev_close
+  // from the per-underlying option chain fetch instead (chainData[pair]).
+  const INDEX_UNDERLYINGS = new Set<Underlying>(['NIFTY', 'BANKNIFTY', 'SENSEX']);
   const [spotPrevClose, setSpotPrevClose] = useState<number>(0);
 
   useEffect(() => {
+    if (!INDEX_UNDERLYINGS.has(activeUnderlying)) {
+      setSpotPrevClose(0);
+      return;
+    }
     fetch(`/api/scalper/nifty-prev-close?underlying=${activeUnderlying}`)
       .then(r => r.json())
       .then((j: { success: boolean; prevClose?: number }) => {
@@ -194,17 +204,23 @@ export default function MultiLegFocus() {
     return chainData[pair]?.spot ?? 0;
   }, [liveQuotes?.spot, chainData, activeUnderlying, activeExpiry]);
 
+  const effectivePrevClose = useMemo(() => {
+    if (INDEX_UNDERLYINGS.has(activeUnderlying)) return spotPrevClose;
+    const pair = `${activeUnderlying}:${activeExpiry}`;
+    return chainData[pair]?.prevClose ?? 0;
+  }, [activeUnderlying, activeExpiry, spotPrevClose, chainData]);
+
   const spotChange = useMemo(() => {
     if (activeSpot <= 0) return 0;
-    if (spotPrevClose > 0) return activeSpot - spotPrevClose;
+    if (effectivePrevClose > 0) return activeSpot - effectivePrevClose;
     return liveQuotes?.spot_change ?? 0;
-  }, [activeSpot, spotPrevClose, liveQuotes?.spot_change]);
+  }, [activeSpot, effectivePrevClose, liveQuotes?.spot_change]);
 
   const spotChangePct = useMemo(() => {
     if (activeSpot <= 0) return 0;
-    if (spotPrevClose > 0) return ((activeSpot - spotPrevClose) / spotPrevClose) * 100;
+    if (effectivePrevClose > 0) return ((activeSpot - effectivePrevClose) / effectivePrevClose) * 100;
     return liveQuotes?.spot_change_pct ?? 0;
-  }, [activeSpot, spotPrevClose, liveQuotes?.spot_change_pct]);
+  }, [activeSpot, effectivePrevClose, liveQuotes?.spot_change_pct]);
 
   // Fetch expiries for all underlyings on mount or broker change
   useEffect(() => {
@@ -254,12 +270,13 @@ export default function MultiLegFocus() {
 
       fetch(`/api/options/chain?underlying=${u}&expiry=${exp}&broker=${broker}`)
         .then(r => r.json())
-        .then((j: { success: boolean; data?: { chain?: { oc?: Record<string, unknown> } | Record<string, unknown>; strikes?: number[]; spot?: number } }) => {
+        .then((j: { success: boolean; data?: { chain?: { oc?: Record<string, unknown> } | Record<string, unknown>; strikes?: number[]; spot?: number; prev_close?: number } }) => {
           if (!j.success || !j.data) return;
           const oc = (j.data.chain as { oc?: Record<string, unknown> })?.oc ?? (j.data.chain as Record<string, unknown> | undefined);
           let strikes: number[] = [];
           const quotes: Record<string, { ce: number; pe: number }> = {};
           let spot = Number(j.data.spot) || 0;
+          const prevClose = Number(j.data.prev_close) || 0;
 
           if (oc && typeof oc === 'object') {
             strikes = Object.keys(oc).map(Number).filter(n => !isNaN(n) && n > 0).sort((a, b) => a - b);
@@ -284,6 +301,7 @@ export default function MultiLegFocus() {
               spot: spot > 0 ? spot : (prev[pair]?.spot ?? 0),
               strikes: strikes.length > 0 ? strikes : (prev[pair]?.strikes ?? []),
               quotes: { ...(prev[pair]?.quotes ?? {}), ...quotes },
+              prevClose: prevClose > 0 ? prevClose : prev[pair]?.prevClose,
             },
           }));
         })
@@ -1175,13 +1193,13 @@ export default function MultiLegFocus() {
             {activeSpot > 0 && (
               <div
                 className="h-8 flex items-baseline gap-2 px-3 rounded-lg bg-zinc-900 border border-zinc-700/80 font-mono tabular-nums shadow-sm"
-                title={`${activeUnderlying} Spot from ${liveQuotes?.spot ? 'WebSocket Live Feed' : 'Option Chain'} | Prev Close: ${spotPrevClose > 0 ? spotPrevClose.toFixed(2) : '—'}`}
+                title={`${activeUnderlying} Spot from ${liveQuotes?.spot ? 'WebSocket Live Feed' : 'Option Chain'} | Prev Close: ${effectivePrevClose > 0 ? effectivePrevClose.toFixed(2) : '—'}`}
               >
                 <span className="text-[11px] font-bold text-zinc-400 tracking-wider">{activeUnderlying}</span>
                 <span className="text-sm font-bold text-white">
                   {activeSpot.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
                 </span>
-                {spotPrevClose > 0 && (
+                {(effectivePrevClose > 0 || liveQuotes?.spot_change !== undefined) && (
                   <span className={`text-xs font-semibold flex items-center gap-0.5 ${spotChange >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
                     <span>{spotChange >= 0 ? '▲' : '▼'}</span>
                     <span>{Math.abs(spotChange).toFixed(2)}</span>
