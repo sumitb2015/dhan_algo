@@ -168,6 +168,8 @@ export async function dhanPut(
 
 /**
  * Authenticated DELETE against the Dhan REST API (used for order cancellations).
+ * Dhan v2 requires dhanClientId in the JSON body (same as PUT) — sending only
+ * the header is not sufficient and results in a DH-904 Invalid Request error.
  */
 export async function dhanDelete(apiPath: string, timeoutMs = 10_000): Promise<unknown> {
   const { clientId, token } = getDhanCredentials();
@@ -176,8 +178,10 @@ export async function dhanDelete(apiPath: string, timeoutMs = 10_000): Promise<u
     headers: {
       'access-token': token,
       'client-id': clientId,
+      'Content-Type': 'application/json',
       'Accept': 'application/json',
     },
+    body: JSON.stringify({ dhanClientId: clientId }),
     signal: AbortSignal.timeout(timeoutMs),
   });
   if (!res.ok) {
@@ -187,7 +191,13 @@ export async function dhanDelete(apiPath: string, timeoutMs = 10_000): Promise<u
       try {
         const json = JSON.parse(text) as Record<string, unknown>;
         detail = String(json.errorMessage ?? json.remarks ?? json.message ?? JSON.stringify(json));
-      } catch {}
+      } catch {
+        if (text.includes("CloudFront wasn't able to resolve the origin domain name")) {
+          detail = 'HTTP 502 Bad Gateway (Dhan CloudFront origin DNS failure — broker outage)';
+        } else if (res.status === 502) {
+          detail = 'HTTP 502 Bad Gateway (Dhan backend servers unavailable)';
+        }
+      }
     } catch {}
     throw new Error(`Dhan DELETE ${apiPath} failed: ${detail}`);
   }
