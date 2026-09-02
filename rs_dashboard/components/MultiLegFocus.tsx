@@ -308,7 +308,7 @@ export default function MultiLegFocus() {
               setLookupCache(prev => ({
                 ...prev,
                 [pair]: {
-                  lotSize: j.data!.lotSize ?? fallbackLotSize(u, broker),
+                  lotSize: j.data!.lotSize ?? fallbackLotSize(u as Underlying, broker),
                   strikes: j.data!.strikes ?? {},
                 },
               }));
