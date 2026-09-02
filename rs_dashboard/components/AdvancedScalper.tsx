@@ -82,6 +82,13 @@ export default function AdvancedScalper() {
   // Security ID map per strike — enables fast-order (no Python per order)
   const [strikeMap, setStrikeMap]   = useState<Record<string, { ceId?: string; peId?: string; ceSymbol?: string; peSymbol?: string }>>({});
   const { broker, setBroker, authenticatedBrokers } = useBrokerSelector();
+  // tradingSymbol -> {expiry, strike, side} across EVERY Kotak expiry for the
+  // selected underlying, not just the one in the dropdown. Kotak's positions
+  // payload carries a symbol and nothing else (no expiry/strike/side — see
+  // kotakShape.ts), so a leg on a non-selected expiry can only be identified
+  // by looking its symbol up here. Feeds the off-expiry live-price request
+  // below (see /api/options/live's `watchExtra` action).
+  const [kotakSymbolMap, setKotakSymbolMap] = useState<Record<string, { expiry: string; strike: number; side: 'CE' | 'PE' }>>({});
   // null until the lookup resolves it from DhanHelper.get_lot_size(). Never seed
   // this with a literal: exchange lot sizes get revised (NIFTY has been 75 and is
   // 65 today), and a seeded value is indistinguishable from a resolved one — it
@@ -345,6 +352,41 @@ export default function AdvancedScalper() {
     });
   }, [positionsData]);
 
+  // Open Kotak legs whose own expiry isn't the one selected in the dropdown
+  // above — the live-quotes WS bridge only tracks one expiry's strikes by
+  // default, so these have no live price at all otherwise (Kotak's
+  // positions payload never carries an LTP — see kotakShape.ts). Asked for
+  // by tradingSymbol -> the shared kotakSymbolMap resolves it to a real
+  // expiry/strike/side.
+  const offExpiryKotakRequests = useMemo(() => {
+    if (broker !== 'kotak') return [];
+    const out: { expiry: string; strike: number; side: 'CE' | 'PE' }[] = [];
+    const seen = new Set<string>();
+    for (const pos of positionsData) {
+      if (Number(pos.netQty) === 0) continue;
+      const info = kotakSymbolMap[String(pos.tradingSymbol ?? '')];
+      if (!info || info.expiry === expiry) continue;
+      const key = `${info.expiry}|${info.strike}|${info.side}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push({ expiry: info.expiry, strike: info.strike, side: info.side });
+    }
+    return out;
+  }, [broker, positionsData, kotakSymbolMap, expiry]);
+
+  // Tells the (always-Dhan) live-quotes bridge to also track the off-expiry
+  // legs above, so their real LTP shows up in liveQuotes.extra. A full
+  // replace each call (see the route's own comment) — nothing to clean up
+  // here when a leg closes, it just stops being sent.
+  useEffect(() => {
+    if (offExpiryKotakRequests.length === 0) return;
+    fetch('/api/options/live', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'watchExtra', underlying, requests: offExpiryKotakRequests }),
+    }).catch(() => {});
+  }, [offExpiryKotakRequests, underlying]);
+
   // liveQuotes is a brand-new object reference on every WS-coalesced tick
   // (the bridge re-parses a full snapshot every message), so this would
   // otherwise recompute — and hand out a fresh object for — every position
@@ -356,28 +398,40 @@ export default function AdvancedScalper() {
   // re-rendering rows whose numbers didn't move.
   const enrichedPositionsPrevRef = useRef<Record<string, Record<string, unknown>>>({});
   const computeEnrichedRow = (pos: Record<string, unknown>): Record<string, unknown> => {
-    if (!liveQuotes?.strikes || Object.keys(secIdToStrikeSide).length === 0) return pos;
-    const secId = positionJoinKey(pos);
-    const mapping = secIdToStrikeSide[secId];
-    if (!mapping) return pos;
-
-    const strikeData = liveQuotes.strikes[String(mapping.strike)];
-    if (!strikeData) return pos;
-
-    const liveLtp = strikeData[mapping.side]?.ltp ?? 0;
-    if (liveLtp <= 0) return pos;
-
     const netQty = Number(pos.netQty);
     const buyAvg = Number(pos.buyAvg);
     const sellAvg = Number(pos.sellAvg);
     const mult = contractMultiplier(pos);
-    const unrealizedProfit = netQty === 0
-      ? Number(pos.unrealizedProfit)
-      : netQty > 0
-        ? mult * netQty * (liveLtp - buyAvg)
-        : mult * Math.abs(netQty) * (sellAvg - liveLtp);
+    const applyLtp = (liveLtp: number): Record<string, unknown> => {
+      const unrealizedProfit = netQty === 0
+        ? Number(pos.unrealizedProfit)
+        : netQty > 0
+          ? mult * netQty * (liveLtp - buyAvg)
+          : mult * Math.abs(netQty) * (sellAvg - liveLtp);
+      return { ...pos, lastTradedPrice: liveLtp, unrealizedProfit };
+    };
 
-    return { ...pos, lastTradedPrice: liveLtp, unrealizedProfit };
+    if (liveQuotes?.strikes && Object.keys(secIdToStrikeSide).length > 0) {
+      const mapping = secIdToStrikeSide[positionJoinKey(pos)];
+      const liveLtp = mapping ? liveQuotes.strikes[String(mapping.strike)]?.[mapping.side]?.ltp ?? 0 : 0;
+      if (liveLtp > 0) return applyLtp(liveLtp);
+    }
+
+    // Off-expiry leg (Kotak only): the row's tradingSymbol isn't in the
+    // currently-selected expiry's strikeMap above, so resolve it via the
+    // full-underlying kotakSymbolMap instead and read its price from the
+    // bridge's separately-tracked `extra` bucket (see offExpiryKotakRequests
+    // / the /api/options/live `watchExtra` action that populates it).
+    if (broker === 'kotak' && liveQuotes?.extra) {
+      const info = kotakSymbolMap[String(pos.tradingSymbol ?? '')];
+      if (info) {
+        const sideKey = info.side.toLowerCase() as 'ce' | 'pe';
+        const extraLtp = liveQuotes.extra[info.expiry]?.[String(info.strike)]?.[sideKey]?.ltp ?? 0;
+        if (extraLtp > 0) return applyLtp(extraLtp);
+      }
+    }
+
+    return pos;
   };
   /* eslint-disable react-hooks/refs --
    * Read-then-write a plain cache ref inside useMemo to reuse unchanged row
@@ -407,10 +461,11 @@ export default function AdvancedScalper() {
     return out;
     // computeEnrichedRow deliberately omitted below: it's a fresh closure every
     // render but pure w.r.t. these same deps (only reads liveQuotes/
-    // secIdToStrikeSide, both already listed), so this recomputes exactly when
-    // it needs to without thrashing on its own identity every render.
+    // secIdToStrikeSide/broker/kotakSymbolMap, all already listed), so this
+    // recomputes exactly when it needs to without thrashing on its own
+    // identity every render.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [realizedFixedPositions, liveQuotes, secIdToStrikeSide, positionJoinKey]);
+  }, [realizedFixedPositions, liveQuotes, secIdToStrikeSide, positionJoinKey, broker, kotakSymbolMap]);
   /* eslint-enable react-hooks/refs */
 
   const totalPnl = useMemo(() => enrichedPositions.reduce((sum, p) =>
@@ -803,6 +858,22 @@ export default function AdvancedScalper() {
       })
       .catch(() => {});
   }, [expiry, broker, underlying]);
+
+  // Full-underlying Kotak symbol -> {expiry, strike, side} map (every cached
+  // expiry, not just the selected one) — see kotakSymbolMap's declaration.
+  // Only Kotak needs this: Dhan and Zerodha positions already carry their
+  // own live/derivable price regardless of which expiry is on screen.
+  useEffect(() => {
+    if (broker !== 'kotak') return;
+    let cancelled = false;
+    fetch(`/api/scalper/kotak/symbol-lookup?underlying=${underlying}`)
+      .then(r => r.json())
+      .then((j: { success: boolean; data?: Record<string, { expiry: string; strike: number; side: 'CE' | 'PE' }> }) => {
+        if (!cancelled && j.success && j.data) setKotakSymbolMap(j.data);
+      })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, [broker, underlying]);
 
   // Live quotes arrive via useLiveOptionsWS (direct WebSocket push from the
   // Python bridge, rAF-coalesced; falls back to 100ms HTTP polling if the WS

@@ -210,6 +210,11 @@ export interface LiveQuotes {
   atm: number;
   straddle_premium: number;
   strikes: Record<string, StrikeData>;
+  /** Off-expiry contracts the bridge was separately asked to track (see
+   *  /api/options/live's `watchExtra` action) — {expiry: {strike: {ce/pe: {ltp}}}}.
+   *  Namespaced by expiry so a strike number shared with the main tracked
+   *  expiry never collides with it. LTP only — no OI/buildup/prev-close. */
+  extra?: Record<string, Record<string, { ce?: { ltp: number }; pe?: { ltp: number } }>>;
 }
 
 export interface BridgeStatus {

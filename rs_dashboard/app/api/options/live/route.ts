@@ -30,6 +30,7 @@ function filesFor(broker: Broker) {
     status:  path.join(DEBUG_DIR, `live_options_status_${broker}.json`),
     stop:    path.join(DEBUG_DIR, `live_options_stop_${broker}.trigger`),
     log:     path.join(DEBUG_DIR, `live_options_log_${broker}.log`),
+    extra:   path.join(DEBUG_DIR, `live_options_extra_${broker}.json`),
   };
 }
 
@@ -243,6 +244,44 @@ export async function POST(request: NextRequest) {
     } finally {
       releaseStartLock(lockPath);
     }
+  }
+
+  // ── Watch extra (off-selected-expiry) contracts ─────────────────────────
+  // Lets a page ask the bridge to also track contracts outside the expiry it
+  // was started with — e.g. an open Kotak position whose own expiry isn't
+  // the one currently selected in the scalper UI. Kotak's positions payload
+  // never carries an LTP at all (see kotakShape.ts), so without this the leg
+  // has no live price until the user manually switches the expiry dropdown.
+  if (action === 'watchExtra') {
+    // Always the Dhan bridge: Kotak has no tick bridge of its own (see
+    // normalizeBroker above) and an option's LTP is exchange-set, not
+    // broker-set, so Dhan's feed answers for any broker's position.
+    const broker = 'dhan' as Broker;
+    const underlying = String(body.underlying ?? 'NIFTY').toUpperCase();
+    const requests = Array.isArray(body.requests) ? body.requests : [];
+
+    const clean: { underlying: string; expiry: string; strike: number; side: 'CE' | 'PE' }[] = [];
+    for (const r of requests) {
+      if (!r || typeof r !== 'object') continue;
+      const req = r as Record<string, unknown>;
+      const expiry = String(req.expiry ?? '');
+      const strike = Number(req.strike);
+      const side = String(req.side ?? '').toUpperCase();
+      if (!expiry || !Number.isFinite(strike) || (side !== 'CE' && side !== 'PE')) continue;
+      clean.push({ underlying, expiry, strike, side });
+    }
+
+    // Full replace, not an incremental add: the caller sends its complete
+    // current need every call, so a leg that's since closed drops out on the
+    // page's own next poll instead of this file only ever growing. The
+    // Python side separately remembers what it already resolved, so a
+    // request that reappears a moment later doesn't re-trigger a lookup.
+    try {
+      fs.writeFileSync(filesFor(broker).extra, JSON.stringify({ requests: clean }));
+    } catch (err) {
+      return NextResponse.json({ success: false, error: String((err as Error).message ?? err) }, { status: 500 });
+    }
+    return NextResponse.json({ success: true, count: clean.length });
   }
 
   return NextResponse.json({ success: false, error: 'Unknown action' }, { status: 400 });

@@ -36,6 +36,12 @@ from dhanhq.marketfeed import MarketFeed
 DEBUG_DIR    = os.path.join(ROOT, 'debug')
 QUOTES_FILE  = os.path.join(DEBUG_DIR, 'live_options_quotes_dhan.json')
 HISTORY_FILE = os.path.join(DEBUG_DIR, 'live_options_history_dhan.json')
+# Dashboard-written requests for contracts OUTSIDE the expiry this bridge is
+# tracking — e.g. a Kotak position on an expiry other than the one selected in
+# the scalper UI. Kotak's own positions payload never carries an LTP (see
+# kotakShape.ts), so those legs have no live price at all unless this bridge
+# subscribes to them too. See the extra-instrument handling in main().
+EXTRA_FILE   = os.path.join(DEBUG_DIR, 'live_options_extra_dhan.json')
 STATUS_FILE  = os.path.join(DEBUG_DIR, 'live_options_status_dhan.json')
 STOP_TRIGGER = os.path.join(DEBUG_DIR, 'live_options_stop_dhan.trigger')
 
@@ -394,7 +400,7 @@ def main():
             if opt is None:
                 continue
             sid = str(int(opt['SECURITY_ID']))
-            sid_map[sid] = {'strike': int(strike), 'type': opt_type}
+            sid_map[sid] = {'strike': int(strike), 'type': opt_type, 'expiry': args.expiry}
             instruments.append((option_feed_segment, sid, FULL))
 
     # Subscribe to underlying index (spot canary) and India VIX
@@ -434,6 +440,11 @@ def main():
     last_pushed = None
     last_file_write = 0.0
     last_history_write = 0.0
+    last_extra_check = 0.0
+    # (expiry, strike, side) tuples already attempted, successful or not — a
+    # contract that fails to resolve (bad strike/expiry combo) is not retried
+    # every 3s forever.
+    resolved_extra: set = set()
     # Each history tick is serialized to JSON ONCE when it's captured (~20KB,
     # ~1ms). The writer thread only joins the pre-serialized strings and writes
     # the ~6MB file. Never re-json.dumps the whole 300-snapshot history:
@@ -472,6 +483,50 @@ def main():
                 print('[live_options_ws] Stop trigger detected — exiting.', flush=True)
                 break
 
+            # Off-expiry extra instruments (see EXTRA_FILE comment above). Cheap
+            # to poll — the file is tiny and this is gated to once per 3s.
+            extra_check_ts = time.time()
+            if extra_check_ts - last_extra_check >= 3.0:
+                last_extra_check = extra_check_ts
+                try:
+                    if os.path.exists(EXTRA_FILE):
+                        with open(EXTRA_FILE, 'r') as f:
+                            extra_req = json.load(f)
+                        new_instruments = []
+                        for r in (extra_req.get('requests') or []):
+                            try:
+                                req_expiry = str(r.get('expiry') or '')
+                                req_strike = float(r.get('strike'))
+                                req_side = str(r.get('side') or '').upper()
+                                req_underlying = str(r.get('underlying') or args.underlying).upper()
+                            except (TypeError, ValueError):
+                                continue
+                            if (not req_expiry or req_side not in ('CE', 'PE')
+                                    or req_underlying != args.underlying or req_expiry == args.expiry):
+                                continue
+                            dedupe_key = (req_expiry, int(req_strike), req_side)
+                            if dedupe_key in resolved_extra:
+                                continue
+                            resolved_extra.add(dedupe_key)
+                            opt = helper.find_option(args.underlying, req_expiry, req_strike, req_side,
+                                                      exchange=underlying_exchange)
+                            if opt is None:
+                                print(f'[live_options_ws] WARN: could not resolve extra contract '
+                                      f'{args.underlying} {req_expiry} {req_strike}{req_side}', flush=True)
+                                continue
+                            sid = str(int(opt['SECURITY_ID']))
+                            if sid in sid_map:
+                                continue
+                            sid_map[sid] = {'strike': int(req_strike), 'type': req_side, 'expiry': req_expiry}
+                            new_instruments.append((option_feed_segment, sid, FULL))
+                        if new_instruments:
+                            helper.start_websocket(new_instruments)
+                            n = len(sid_map)
+                            print(f'[live_options_ws] Added {len(new_instruments)} extra off-expiry '
+                                  f'contract(s) — now tracking {n} total.', flush=True)
+                except Exception as e:
+                    print(f'[live_options_ws] WARN: extra-instrument check failed: {e}', flush=True)
+
             # Update spot from index canary
             idx_tick = helper.live_data.get(underlying_sid)
             if idx_tick:
@@ -497,7 +552,23 @@ def main():
 
             # Build per-strike quotes
             strikes_data: dict[str, dict] = {}
+            # Off-expiry extra contracts (see EXTRA_FILE), keyed separately by
+            # their own expiry so a strike number that also exists in the main
+            # tracked expiry never collides with it — {expiry: {strike: {ce/pe: {ltp}}}}.
+            # LTP only: prev_meta_map / buildup baselines are scoped to the main
+            # expiry and don't apply here.
+            extra_data: dict[str, dict[str, dict]] = {}
             for sid, meta in sid_map.items():
+                if meta.get('expiry', args.expiry) != args.expiry:
+                    tick = helper.live_data.get(sid)
+                    ltp = _f(tick.get('LTP') or tick.get('last_price')) if tick else 0.0
+                    if ltp <= 0:
+                        continue
+                    exp_bucket = extra_data.setdefault(meta['expiry'], {})
+                    sk_bucket = exp_bucket.setdefault(str(meta['strike']), {})
+                    sk_bucket[meta['type'].lower()] = {'ltp': round(ltp, 2)}
+                    continue
+
                 sk_key = str(meta['strike'])
                 if sk_key not in strikes_data:
                     strikes_data[sk_key] = {
@@ -568,6 +639,7 @@ def main():
                 'straddle_premium':  straddle,
                 'strikes':           strikes_data,
                 'vix':               vix_data,
+                'extra':             extra_data,
             }
 
             now_ts = time.time()
