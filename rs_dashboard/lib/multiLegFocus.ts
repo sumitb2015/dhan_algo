@@ -6,7 +6,7 @@
 // be used for Dhan legs as-is).
 
 import { nearestStrike, type LegSide, type OptionType, type StrategyTemplate } from './basketStrategies.ts';
-import { positionProduct, findLivePosition, type LiveMatch } from './positionProduct.ts';
+import { positionProduct, findLivePosition } from './positionProduct.ts';
 
 export type MultiLegStatus = 'DRAFT' | 'PLACING' | 'OPEN' | 'CLOSING' | 'CLOSED' | 'FAILED';
 
