@@ -330,7 +330,7 @@ export default function LoginPage() {
     <div className="relative min-h-screen overflow-hidden bg-zinc-950 flex items-center justify-center px-4">
 
       {/* Layer 1 — animated floating paths */}
-      <div className="absolute inset-0 opacity-50">
+      <div className="pointer-events-none absolute inset-0 overflow-hidden opacity-40 select-none">
         <FloatingPaths position={1} />
         <FloatingPaths position={-1} />
       </div>
