@@ -19,31 +19,10 @@ export interface StrikeHistoryPoint {
   iv: number;
 }
 
-export interface StrikeHistoryMeta {
-  initialSpot: number;
-  latestSpot: number;
-  spotChange: number;
-  spotChangePct: number;
-  initialStrike: number;
-  latestStrike: number;
-  minStrike: number;
-  maxStrike: number;
-  distinctStrikes: number[];
-  initialClose: number;
-  latestClose: number;
-  minClose: number;
-  maxClose: number;
-  decay: number;
-  decayPct: number;
-  tradingDays: string[];
-  totalDays: number;
-}
-
 interface StrikeHistoryPayload {
   expiry: string;
   strikeRelative: string;
   optionType: 'CE' | 'PE';
-  meta?: StrikeHistoryMeta;
   points: StrikeHistoryPoint[];
   error?: string;
 }

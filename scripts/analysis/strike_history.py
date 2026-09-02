@@ -90,49 +90,12 @@ def fetch_series(
         for dt, o, h, l, c, strike_val, spot, oi, volume, iv in rows
     ]
 
-    meta = {}
-    if points:
-        spots = [p["spot"] for p in points if p["spot"]]
-        strikes = [p["strike"] for p in points if p["strike"]]
-        closes = [p["close"] for p in points if p["close"] is not None]
-        trading_days = sorted(list(set(p["datetime"][:10] for p in points)))
-        init_spot = points[0]["spot"] or 0.0
-        last_spot = points[-1]["spot"] or 0.0
-        spot_change = last_spot - init_spot
-        spot_change_pct = (spot_change / init_spot * 100) if init_spot else 0.0
-
-        init_close = points[0]["close"] or 0.0
-        last_close = points[-1]["close"] or 0.0
-        decay = last_close - init_close
-        decay_pct = (decay / init_close * 100) if init_close else 0.0
-
-        meta = {
-            "initialSpot": init_spot,
-            "latestSpot": last_spot,
-            "spotChange": round(spot_change, 2),
-            "spotChangePct": round(spot_change_pct, 2),
-            "initialStrike": points[0]["strike"],
-            "latestStrike": points[-1]["strike"],
-            "minStrike": min(strikes) if strikes else 0.0,
-            "maxStrike": max(strikes) if strikes else 0.0,
-            "distinctStrikes": sorted(list(set(strikes))),
-            "initialClose": init_close,
-            "latestClose": last_close,
-            "minClose": min(closes) if closes else 0.0,
-            "maxClose": max(closes) if closes else 0.0,
-            "decay": round(decay, 2),
-            "decayPct": round(decay_pct, 2),
-            "tradingDays": trading_days,
-            "totalDays": len(trading_days),
-        }
-
     return {
         "expiry": expiry,
         "strikeMode": "fixed" if (strike is not None and strike > 0) else "relative",
         "strike": strike if (strike is not None and strike > 0) else (points[-1]["strike"] if points else None),
         "strikeRelative": strike_relative,
         "optionType": option_type,
-        "meta": meta,
         "points": points,
     }
 

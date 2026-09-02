@@ -105,7 +105,8 @@ function fmtPrice(n: number): string {
   return `₹${n.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 }
 
-function fmtOi(n: number): string {
+function fmtOi(n: number | null | undefined): string {
+  if (n == null) return '—';
   if (n >= 1e7) return `${(n / 1e7).toFixed(2)}Cr`;
   if (n >= 1e5) return `${(n / 1e5).toFixed(2)}L`;
   if (n >= 1e3) return `${(n / 1e3).toFixed(1)}K`;
@@ -228,7 +229,7 @@ const StrikeHistoryTooltip = ({ active, payload }: StrikeHistoryTooltipProps) =>
       <div className="flex justify-between gap-8 mb-1">
         <span className="text-zinc-400 font-sans">Strike</span>
         <span className="text-zinc-200 font-bold tabular-nums">
-          {row.strike.toLocaleString('en-IN')} {row.optionType}
+          {(row.strike ?? 0).toLocaleString('en-IN')} {row.optionType}
           <span className={`ml-1.5 text-[10px] font-medium ${isOTM ? 'text-amber-400' : 'text-purple-400'}`}>
             ({distAbs < 25 ? 'ATM' : `${Math.round(distAbs)} ${isOTM ? 'OTM' : 'ITM'}`})
           </span>
@@ -334,6 +335,11 @@ export default function StrikeHistoryTab({
     return points.filter(p => dateSet.has(p.datetime.slice(0, 10)));
   }, [points, timeline]);
 
+  // True lifetime entry price (unaffected by the 1D/5D/10D timeline filter) —
+  // used for "Total Decay" so it always means decay since the option's tracked
+  // start, not since the start of whichever range is currently selected.
+  const trueEntryOpen = useMemo(() => points[0]?.open ?? 0, [points]);
+
   // 2. Resample timeline points into interval buckets (1m, 5m, 15m, 1h)
   const { rows, dayBoundaries, daySummaries } = useMemo(() => {
     if (!timelinePoints.length) return { rows: [], dayBoundaries: [], daySummaries: [] };
@@ -435,7 +441,7 @@ export default function StrikeHistoryTab({
       const dte = allTradingDates.length - 1 - dayIdx;
       const decayDay = last.close - first.open;
       const decayDayPct = first.open ? (decayDay / first.open) * 100 : 0;
-      const cumDecayPct = initialEntryOpen ? ((last.close - initialEntryOpen) / initialEntryOpen) * 100 : 0;
+      const cumDecayPct = trueEntryOpen ? ((last.close - trueEntryOpen) / trueEntryOpen) * 100 : 0;
 
       return {
         date,
@@ -458,7 +464,7 @@ export default function StrikeHistoryTab({
     });
 
     return { rows: aggregated, dayBoundaries: boundaries, daySummaries: summaries };
-  }, [timelinePoints, interval, optionType]);
+  }, [timelinePoints, interval, optionType, trueEntryOpen]);
 
   // Overall metadata for context
   const contextMeta = useMemo<ContextMeta | null>(() => {
@@ -556,8 +562,8 @@ export default function StrikeHistoryTab({
 
   const firstRow = rows[0];
   const lastRow = rows[rows.length - 1];
-  const activeSpot = hoveredRow ? hoveredRow.spot : lastRow?.spot ?? 0;
-  const activeStrike = hoveredRow ? hoveredRow.strike : lastRow?.strike ?? 0;
+  const activeSpot = (hoveredRow ? hoveredRow.spot : lastRow?.spot) ?? 0;
+  const activeStrike = (hoveredRow ? hoveredRow.strike : lastRow?.strike) ?? 0;
 
   const totalDecayVal = contextMeta?.decay ?? 0;
   const totalDecayPct = contextMeta?.decayPct ?? 0;
@@ -574,7 +580,7 @@ export default function StrikeHistoryTab({
   const distAbs = Math.abs(distSpot);
   const moneynessBadge = distAbs < 25 ? 'ATM' : `${Math.round(distAbs)} pts ${isOTM ? 'OTM' : 'ITM'}`;
 
-  const gridProps = { strokeDasharray: '3 6', stroke: '#20202399', vertical: false as const };
+  const gridProps = { strokeDasharray: '3 6', stroke: 'var(--chart-grid)', vertical: false as const };
   const xAxisProps = {
     dataKey: 'idx' as const,
     tickFormatter: (idx: number) => {
@@ -582,9 +588,9 @@ export default function StrikeHistoryTab({
       if (!r) return '';
       return timeline === '1D' ? r.time : `${r.date.slice(5)} ${r.time}`;
     },
-    tick: { fontSize: 10, fill: '#a1a1aa', fontWeight: 500 as const, fontFamily: 'var(--font-mono)' },
+    tick: { fontSize: 10, fill: 'var(--chart-tick)', fontWeight: 500 as const, fontFamily: 'var(--font-mono)' },
     tickLine: false,
-    axisLine: { stroke: '#27272a' },
+    axisLine: { stroke: 'var(--chart-axis)' },
     interval: 'preserveStartEnd' as const,
     minTickGap: 50,
   };
@@ -801,10 +807,10 @@ export default function StrikeHistoryTab({
               {hoveredRow.date} {hoveredRow.time}
             </span>
             <span>
-              Spot: <strong className="text-cyan-400">₹{hoveredRow.spot.toLocaleString('en-IN')}</strong>
+              Spot: <strong className="text-cyan-400">₹{(hoveredRow.spot ?? 0).toLocaleString('en-IN')}</strong>
             </span>
             <span>
-              Strike: <strong className="text-white">{hoveredRow.strike.toLocaleString('en-IN')} {optionType}</strong>
+              Strike: <strong className="text-white">{(hoveredRow.strike ?? 0).toLocaleString('en-IN')} {optionType}</strong>
             </span>
             <span>
               O: <strong className="text-zinc-200">{fmtPrice(hoveredRow.open)}</strong> H:{' '}
@@ -899,7 +905,7 @@ export default function StrikeHistoryTab({
             {/* Left Y-Axis: Option Premium */}
             <YAxis
               yAxisId="price"
-              tick={{ fontSize: 10, fill: '#a1a1aa', fontWeight: 500, fontFamily: 'var(--font-mono)' }}
+              tick={{ fontSize: 10, fill: 'var(--chart-tick)', fontWeight: 500, fontFamily: 'var(--font-mono)' }}
               tickLine={false}
               axisLine={false}
               width={54}
@@ -912,7 +918,7 @@ export default function StrikeHistoryTab({
                 yAxisId="spot"
                 orientation="right"
                 domain={['dataMin - 40', 'dataMax + 40']}
-                tick={{ fontSize: 10, fill: '#06b6d4', fontWeight: 500, fontFamily: 'var(--font-mono)' }}
+                tick={{ fontSize: 10, fill: 'var(--chart-tick)', fontWeight: 500, fontFamily: 'var(--font-mono)' }}
                 tickLine={false}
                 axisLine={false}
                 width={58}
@@ -920,20 +926,20 @@ export default function StrikeHistoryTab({
               />
             )}
 
-            <Tooltip content={<StrikeHistoryTooltip />} cursor={{ stroke: '#3f3f46', strokeWidth: 1, strokeDasharray: '4 4' }} />
+            <Tooltip content={<StrikeHistoryTooltip />} cursor={{ stroke: 'var(--chart-axis)', strokeWidth: 1, strokeDasharray: '4 4' }} />
 
             {/* Entry Baseline */}
             {showBaseline && firstRow && (
               <ReferenceLine
                 yAxisId="price"
                 y={firstRow.open}
-                stroke="#71717a"
+                stroke="var(--chart-tick)"
                 strokeDasharray="4 4"
                 strokeWidth={1}
                 label={{
                   value: `Entry: ₹${firstRow.open.toFixed(2)}`,
                   position: 'right',
-                  fill: '#a1a1aa',
+                  fill: 'var(--chart-tick)',
                   fontSize: 10,
                   fontWeight: 600,
                 }}
@@ -946,13 +952,13 @@ export default function StrikeHistoryTab({
                 key={b.idx}
                 yAxisId="price"
                 x={b.idx}
-                stroke="#3f3f46"
+                stroke="var(--chart-axis)"
                 strokeDasharray="2 4"
                 strokeWidth={1}
                 label={{
                   value: `${b.date.slice(5)} (${b.dte} DTE)`,
                   position: 'top',
-                  fill: '#71717a',
+                  fill: 'var(--chart-tick)',
                   fontSize: 9,
                   fontWeight: 600,
                 }}
@@ -970,7 +976,7 @@ export default function StrikeHistoryTab({
                 strokeWidth={2}
                 fill="url(#strikeHistoryFill)"
                 dot={false}
-                activeDot={{ r: 4, fill: accent.line, stroke: '#09090b', strokeWidth: 2 }}
+                activeDot={{ r: 4, fill: accent.line, stroke: 'var(--chart-tooltip-bg)', strokeWidth: 2 }}
                 isAnimationActive={false}
               />
             ) : (
@@ -993,7 +999,7 @@ export default function StrikeHistoryTab({
                 strokeWidth={1.5}
                 strokeDasharray="3 3"
                 dot={false}
-                activeDot={{ r: 3, fill: '#06b6d4', stroke: '#09090b', strokeWidth: 1.5 }}
+                activeDot={{ r: 3, fill: '#06b6d4', stroke: 'var(--chart-tooltip-bg)', strokeWidth: 1.5 }}
                 isAnimationActive={false}
               />
             )}
@@ -1036,7 +1042,7 @@ export default function StrikeHistoryTab({
             <XAxis {...xAxisProps} hide />
             <YAxis
               yAxisId="vol"
-              tick={{ fontSize: 9, fill: '#71717a', fontFamily: 'var(--font-mono)' }}
+              tick={{ fontSize: 9, fill: 'var(--chart-tick)', fontFamily: 'var(--font-mono)' }}
               tickLine={false}
               axisLine={false}
               width={48}
@@ -1046,7 +1052,7 @@ export default function StrikeHistoryTab({
               yAxisId="iv"
               orientation="right"
               domain={[0, 'auto']}
-              tick={{ fontSize: 9, fill: '#06b6d4', fontFamily: 'var(--font-mono)' }}
+              tick={{ fontSize: 9, fill: 'var(--chart-tick)', fontFamily: 'var(--font-mono)' }}
               tickLine={false}
               axisLine={false}
               width={38}
@@ -1102,7 +1108,7 @@ export default function StrikeHistoryTab({
                   <th className="px-3 py-2.5 text-right">Day Close</th>
                   <th className="px-3 py-2.5 text-right">Day Decay (₹)</th>
                   <th className="px-3 py-2.5 text-right">Day Decay (%)</th>
-                  <th className="px-3 py-2.5 text-right">Total Decay (%)</th>
+                  <th className="px-3 py-2.5 text-right">Total Decay % (Since Entry)</th>
                   <th className="px-3 py-2.5 text-right">Volume</th>
                   <th className="px-3 py-2.5 text-right">OI</th>
                 </tr>
@@ -1113,7 +1119,7 @@ export default function StrikeHistoryTab({
                     <td className="px-3 py-2 font-bold text-zinc-200">{s.date}</td>
                     <td className="px-3 py-2 text-zinc-400">{s.dte} DTE</td>
                     <td className="px-3 py-2 text-cyan-400">
-                      ₹{s.spotClose.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                      ₹{(s.spotClose ?? 0).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
                       <span
                         className={`ml-1.5 text-[10px] ${s.spotChange >= 0 ? 'text-emerald-400' : 'text-red-400'}`}
                       >
@@ -1122,7 +1128,7 @@ export default function StrikeHistoryTab({
                       </span>
                     </td>
                     <td className="px-3 py-2 font-bold text-white">
-                      {s.strike.toLocaleString('en-IN')} {optionType}
+                      {(s.strike ?? 0).toLocaleString('en-IN')} {optionType}
                     </td>
                     <td className="px-3 py-2 text-right text-zinc-300">{fmtPrice(s.open)}</td>
                     <td className="px-3 py-2 text-right text-zinc-300">{fmtPrice(s.high)}</td>
