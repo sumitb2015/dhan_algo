@@ -24,15 +24,33 @@ export interface MultiLegLeg {
    *  leg's own broker position row on every monitoring poll. */
   orderRef?: { securityId?: string; symbol?: string };
   status: MultiLegStatus;
+
+  // ── Leg-wise Stop Loss, Take Profit, and Trailing SL ─────────────
+  sl?: number;                 // Stop Loss (points or absolute price)
+  slType?: 'pts' | 'price';    // Default: 'pts'
+  tp?: number;                 // Take Profit (points or absolute price)
+  tpType?: 'pts' | 'price';    // Default: 'pts'
+  trail?: boolean;             // Trailing SL enabled (1 rupee trailing step)
+  bestPrice?: number;          // Peak favorable price tracked for trailing SL
+}
+
+export interface StrategyRiskConfig {
+  targetValue?: number;
+  targetUnit: 'pts' | 'pct';   // Points or Percentage
+  slValue?: number;
+  slUnit: 'pts' | 'pct';       // Points or Percentage
+  armed: boolean;              // Whether strategy-level auto-exit is armed
 }
 
 export interface MultiLegBasket {
   id: string;
+  name?: string;
   underlying: string;
   expiry: string;
   broker: string;
   presetKey?: string;
   legs: MultiLegLeg[];
+  riskConfig?: StrategyRiskConfig;
   createdAt: string;
   updatedAt: string;
 }
@@ -87,6 +105,176 @@ export function legPnl(leg: MultiLegLeg, ltp: number): number {
 
 export function basketTotalPnl(legs: MultiLegLeg[], ltpFor: (leg: MultiLegLeg) => number): number {
   return legs.reduce((sum, l) => sum + legPnl(l, ltpFor(l)), 0);
+}
+
+export interface LegTrailingEvaluation {
+  initialSLPrice: number | null;
+  effectiveSL: number | null;
+  tpPrice: number | null;
+  newBestPrice: number | null;
+  triggered: 'SL' | 'TRAIL_SL' | 'TP' | null;
+}
+
+/**
+ * Computes the effective Stop Loss (with 1-rupee trailing step if enabled)
+ * and Take Profit price for an open option leg, and determines if either threshold is breached.
+ */
+export function computeLegTrailingSL(
+  leg: MultiLegLeg,
+  ltp: number,
+): LegTrailingEvaluation {
+  const result: LegTrailingEvaluation = {
+    initialSLPrice: null,
+    effectiveSL: null,
+    tpPrice: null,
+    newBestPrice: leg.bestPrice ?? null,
+    triggered: null,
+  };
+
+  if (!leg.fill || leg.fill.avgPrice <= 0 || ltp <= 0) {
+    return result;
+  }
+
+  const entry = leg.fill.avgPrice;
+  const isBuy = leg.side === 'B';
+
+  // 1. Initial SL Price
+  if (leg.sl != null && leg.sl > 0) {
+    const slType = leg.slType ?? 'pts';
+    result.initialSLPrice = slType === 'price' ? leg.sl : (isBuy ? entry - leg.sl : entry + leg.sl);
+  }
+
+  // 2. TP Price
+  if (leg.tp != null && leg.tp > 0) {
+    const tpType = leg.tpType ?? 'pts';
+    result.tpPrice = tpType === 'price' ? leg.tp : (isBuy ? entry + leg.tp : entry - leg.tp);
+  }
+
+  // 3. Trailing SL (1:1 trail for every 1 rupee favorable move)
+  if (result.initialSLPrice != null) {
+    let effectiveSL = result.initialSLPrice;
+
+    if (leg.trail) {
+      const initialRisk = Math.abs(result.initialSLPrice - entry);
+      const prevBest = leg.bestPrice ?? entry;
+      // For buy: favorable is higher LTP. For sell: favorable is lower LTP.
+      const currentBest = isBuy ? Math.max(prevBest, ltp) : Math.min(prevBest, ltp);
+      result.newBestPrice = currentBest;
+
+      // Trailing SL price: 1 rupee trail per 1 rupee favorable movement
+      const trailSL = isBuy ? currentBest - initialRisk : currentBest + initialRisk;
+
+      // Only tighten the stop, never widen
+      effectiveSL = isBuy ? Math.max(result.initialSLPrice, trailSL) : Math.min(result.initialSLPrice, trailSL);
+    }
+
+    result.effectiveSL = effectiveSL;
+
+    // Check SL breach
+    const slHit = isBuy ? ltp <= effectiveSL : ltp >= effectiveSL;
+    if (slHit) {
+      const trailActive = !!leg.trail && (isBuy ? effectiveSL > result.initialSLPrice : effectiveSL < result.initialSLPrice);
+      result.triggered = trailActive ? 'TRAIL_SL' : 'SL';
+      return result;
+    }
+  }
+
+  // 4. Check TP breach
+  if (result.tpPrice != null) {
+    const tpHit = isBuy ? ltp >= result.tpPrice : ltp <= result.tpPrice;
+    if (tpHit) {
+      result.triggered = 'TP';
+      return result;
+    }
+  }
+
+  return result;
+}
+
+export interface StrategyMetrics {
+  combinedEntryPts: number;
+  combinedCurrentPts: number;
+  pnlPts: number;
+  pnlPct: number;
+  totalPnlRupees: number;
+}
+
+/**
+ * Computes combined strategy metrics (points, percentage, and total rupee P&L).
+ * Sells contribute positive credit (profit on decay), Buys contribute debit (profit on rise).
+ */
+export function computeStrategyMetrics(
+  legs: MultiLegLeg[],
+  ltpFor: (leg: MultiLegLeg) => number,
+): StrategyMetrics {
+  let combinedEntryPts = 0;
+  let combinedCurrentPts = 0;
+  let pnlPts = 0;
+  let totalPnlRupees = 0;
+  let netCreditDebit = 0;
+
+  for (const leg of legs) {
+    const ltp = ltpFor(leg);
+    const entry = leg.fill?.avgPrice ?? (leg.price && leg.price > 0 ? leg.price : ltp);
+    const isBuy = leg.side === 'B';
+    const lots = leg.lots || 1;
+
+    combinedEntryPts += entry * lots;
+    combinedCurrentPts += ltp * lots;
+    netCreditDebit += (isBuy ? -entry : entry) * lots;
+
+    const legPoints = isBuy ? (ltp - entry) * lots : (entry - ltp) * lots;
+    pnlPts += legPoints;
+
+    if (leg.fill && leg.fill.qty > 0) {
+      const perUnit = isBuy ? ltp - leg.fill.avgPrice : leg.fill.avgPrice - ltp;
+      totalPnlRupees += perUnit * leg.fill.qty;
+    }
+  }
+
+  const capitalPts = Math.abs(netCreditDebit) > 0 ? Math.abs(netCreditDebit) : combinedEntryPts;
+  const pnlPct = capitalPts > 0 ? (pnlPts / capitalPts) * 100 : 0;
+
+  return {
+    combinedEntryPts: Math.round(combinedEntryPts * 100) / 100,
+    combinedCurrentPts: Math.round(combinedCurrentPts * 100) / 100,
+    pnlPts: Math.round(pnlPts * 100) / 100,
+    pnlPct: Math.round(pnlPct * 100) / 100,
+    totalPnlRupees: Math.round(totalPnlRupees * 100) / 100,
+  };
+}
+
+/**
+ * Evaluates whether the strategy-level Target or Stop Loss has been reached.
+ * Supports thresholds configured in either points or percentage terms.
+ */
+export function checkStrategyRisk(
+  metrics: StrategyMetrics,
+  config?: StrategyRiskConfig | null,
+): 'TARGET' | 'SL' | null {
+  if (!config || !config.armed) return null;
+
+  // 1. Check Target
+  if (config.targetValue != null && config.targetValue > 0) {
+    if (config.targetUnit === 'pts' && metrics.pnlPts >= config.targetValue) {
+      return 'TARGET';
+    }
+    if (config.targetUnit === 'pct' && metrics.pnlPct >= config.targetValue) {
+      return 'TARGET';
+    }
+  }
+
+  // 2. Check Stop Loss
+  if (config.slValue != null && config.slValue > 0) {
+    if (config.slUnit === 'pts' && metrics.pnlPts <= -config.slValue) {
+      return 'SL';
+    }
+    if (config.slUnit === 'pct' && metrics.pnlPct <= -config.slValue) {
+      return 'SL';
+    }
+  }
+
+  return null;
 }
 
 /** SELL legs first, then BUY legs — closing a SELL leg is a risk-reducing BUY,

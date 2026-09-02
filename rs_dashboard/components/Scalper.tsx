@@ -205,6 +205,8 @@ export interface LiveQuotes {
   underlying?: string;
   expiry?: string;
   spot: number;
+  spot_change?: number;
+  spot_change_pct?: number;
   atm: number;
   straddle_premium: number;
   strikes: Record<string, StrikeData>;

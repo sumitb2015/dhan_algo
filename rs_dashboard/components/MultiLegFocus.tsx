@@ -1,20 +1,21 @@
 'use client';
 
 import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
-import { Plus, X, RefreshCw } from 'lucide-react';
+import { Plus, RefreshCw, Layers } from 'lucide-react';
 import NavBar from './NavBar';
 import { type Toast, FOCUS_RING } from './Scalper';
 import { useLiveOptionsWS } from '@/lib/useLiveOptionsWS';
-import { useBrokerSelector, scalperRoute, BROKER_LABELS, BROKERS, type Broker } from '@/hooks/useBrokerSelector';
+import { useBrokerSelector, scalperRoute, BROKER_LABELS, type Broker } from '@/hooks/useBrokerSelector';
 import {
   STRATEGY_CATEGORIES, type StrategyCategory, type StrategyTemplate, nearestStrike, strikeStep,
 } from '@/lib/basketStrategies';
 import { sortLegsForPlacement, resolveOrderRequest, type StrikeIdentifier } from '@/lib/basketOrders';
 import StrategyCardGrid from './basket/StrategyCardGrid';
-import MultiLegLegRow from './multiLegFocus/MultiLegLegRow';
+import MultiLegStrategyRow from './multiLegFocus/MultiLegStrategyRow';
 import {
-  resolveTemplateLegs, reconcileLegFillDown, reconcileLegWithBroker, legPnl, basketTotalPnl, sortLegsForExit, findLegPosition,
-  positionProduct, type MultiLegLeg, type MultiLegBasket,
+  resolveTemplateLegs, reconcileLegWithBroker, sortLegsForExit, findLegPosition,
+  computeLegTrailingSL, computeStrategyMetrics, checkStrategyRisk,
+  positionProduct, type MultiLegLeg, type MultiLegBasket, type StrategyRiskConfig, type MultiLegStatus,
 } from '@/lib/multiLegFocus';
 import { closeOrderProduct } from '@/lib/positionProduct';
 
@@ -30,52 +31,11 @@ function fmtMoney(n: number): string {
 
 export default function MultiLegFocus() {
   const { broker, setBroker, authenticatedBrokers, hasAuthenticatedBroker } = useBrokerSelector();
-  const [underlying, setUnderlying] = useState<Underlying>('NIFTY');
 
-  const [expiries, setExpiries] = useState<string[]>([]);
-  const [expiry, setExpiry] = useState('');
-  const [allStrikes, setAllStrikes] = useState<number[]>([]);
-  const [chainSpot, setChainSpot] = useState(0);
-  const [chainQuotes, setChainQuotes] = useState<Record<string, { ce: number; pe: number }>>({});
-  const [chainLoading, setChainLoading] = useState(false);
-  const [strikeMap, setStrikeMap] = useState<Record<string, StrikeIdentifier>>({});
-  const [lotSize, setLotSize] = useState<number | null>(null);
-
-  const { liveQuotes, bridgeStatus, transport } = useLiveOptionsWS(expiry, broker, authenticatedBrokers, underlying);
-  const spot = (liveQuotes?.spot && liveQuotes.spot > 0) ? liveQuotes.spot : chainSpot;
-  const step = useMemo(() => (allStrikes.length > 1 ? strikeStep(allStrikes) : DEFAULT_INDEX_STEP[underlying]), [allStrikes, underlying]);
-  const atmStrike = useMemo(() => {
-    const s = spot > 0 ? spot : (chainSpot > 0 ? chainSpot : DEFAULT_INDEX_SPOT[underlying]);
-    if (allStrikes.length > 0) return nearestStrike(allStrikes, s);
-    return Math.round(s / step) * step;
-  }, [allStrikes, spot, chainSpot, step, underlying]);
-
-  const effectiveStrikes = useMemo(() => {
-    if (allStrikes.length > 0) return allStrikes;
-    const base = atmStrike ?? DEFAULT_INDEX_SPOT[underlying];
-    const synth: number[] = [];
-    for (let i = -20; i <= 20; i++) synth.push(base + i * step);
-    return synth;
-  }, [allStrikes, atmStrike, step, underlying]);
-
-  const ltpFor = useCallback((leg: MultiLegLeg): number => {
-    // 1. Prioritize real-time WebSocket tick if active and fresh
-    const liveEntry = liveQuotes?.strikes?.[String(leg.strike)];
-    const liveLtp = (leg.option === 'CE' ? liveEntry?.ce?.ltp : liveEntry?.pe?.ltp) ?? 0;
-    if (liveLtp > 0) return liveLtp;
-
-    // 2. Fall back to REST option chain snapshot prices
-    const chainEntry = chainQuotes[String(leg.strike)];
-    const chainLtp = (leg.option === 'CE' ? chainEntry?.ce : chainEntry?.pe) ?? 0;
-    if (chainLtp > 0) return chainLtp;
-
-    return 0;
-  }, [liveQuotes, chainQuotes]);
-
-  const [category, setCategory] = useState<StrategyCategory>('Range Bound');
-  const [presetKey, setPresetKey] = useState<string | null>(null);
-  const [legs, setLegs] = useState<MultiLegLeg[]>([]);
-  const [basketId, setBasketId] = useState<string | null>(null);
+  // Multi-Basket State: list of all strategies
+  const [baskets, setBaskets] = useState<MultiLegBasket[]>([]);
+  const basketsRef = useRef<MultiLegBasket[]>([]);
+  useEffect(() => { basketsRef.current = baskets; }, [baskets]);
 
   const [toasts, setToasts] = useState<Toast[]>([]);
   const addToast = useCallback((type: 'success' | 'error', message: string, detail?: string) => {
@@ -84,528 +44,757 @@ export default function MultiLegFocus() {
     setTimeout(() => setToasts(prev => prev.filter(t => t.id !== id)), type === 'error' ? 7000 : 3000);
   }, []);
 
-  const expiryRef = useRef(''); useEffect(() => { expiryRef.current = expiry; }, [expiry]);
-  const underlyingRef = useRef<Underlying>(underlying); useEffect(() => { underlyingRef.current = underlying; }, [underlying]);
+  // ── Broker Margin / Funds Information ──────────────────────────────
+  const [fundsData, setFundsData] = useState<{ available: number; used: number } | null>(null);
+  const [basketMargins, setBasketMargins] = useState<Record<string, {
+    legMargins: Record<string, number>;
+    basketMargin: number;
+    overallMargin: number;
+    hedgeBenefit: number;
+    spanMargin: number;
+    exposureMargin: number;
+  }>>({});
 
-  // Any leg already placed (has an orderRef) locks the whole editor — a basket
-  // is placed once, then only monitored/exited, never edited mid-flight.
-  const hasPlacedLeg = legs.some(l => l.status !== 'DRAFT');
-
-  // ── Expiries: reload on broker/underlying change ────────────────
-  useEffect(() => {
-    fetch(`/api/options/expiries?underlying=${underlying}&broker=${broker}`)
+  const pollFunds = useCallback(() => {
+    fetch(scalperRoute(broker, 'funds'))
       .then(r => r.json())
-      .then((j: { success: boolean; data?: string[] }) => {
-        if (j.success && j.data?.length) {
-          setExpiries(j.data);
-          // Never move the expiry out from under a placed/open basket — its
-          // legs' orderRefs and LTP lookups still belong to the OLD expiry;
-          // silently switching would read the wrong expiry's quotes with no
-          // indication anything is wrong. Expiry selection is already
-          // disabled in the UI once hasPlacedLeg; this closes the same door
-          // in the data layer.
-          setExpiry(prev => {
-            if (hasPlacedLeg && prev) return prev;
-            return j.data!.includes(prev) ? prev : j.data![0];
-          });
+      .then((j: { success: boolean; data?: Record<string, unknown> }) => {
+        if (j.success && j.data) {
+          const available = Number(j.data.availabelBalance ?? j.data.availableBalance ?? 0);
+          const used = Number(j.data.utilizedAmount ?? j.data.usedMargin ?? j.data.marginUsed ?? 0);
+          setFundsData({ available, used });
         }
       })
       .catch(() => {});
-  }, [broker, underlying, hasPlacedLeg]);
-
-  // ── Option chain: strikes + spot + quotes ─────────────────────────
-  const fetchChain = useCallback(() => {
-    if (!expiry) return;
-    setChainLoading(true);
-    fetch(`/api/options/chain?underlying=${underlying}&expiry=${expiry}&broker=${broker}`)
-      .then(r => r.json())
-      .then((j: { success: boolean; data?: { chain?: { oc?: Record<string, unknown> } | Record<string, unknown>; strikes?: number[]; spot?: number } }) => {
-        if (!j.success || !j.data) return;
-        const oc = (j.data.chain as { oc?: Record<string, unknown> })?.oc ?? (j.data.chain as Record<string, unknown> | undefined);
-        if (oc && typeof oc === 'object') {
-          const strikes = Object.keys(oc).map(Number).filter(n => !isNaN(n) && n > 0).sort((a, b) => a - b);
-          if (strikes.length > 0) {
-            setAllStrikes(strikes);
-          }
-          const quotes: Record<string, { ce: number; pe: number }> = {};
-          for (const [sk, entryRaw] of Object.entries(oc)) {
-            const strikeNum = Math.round(parseFloat(sk));
-            if (isNaN(strikeNum)) continue;
-            const entry = entryRaw as {
-              ce?: { last_price?: number; ltp?: number; previous_close_price?: number; previous_close?: number };
-              pe?: { last_price?: number; ltp?: number; previous_close_price?: number; previous_close?: number };
-            };
-            const ce = Number(entry?.ce?.last_price || entry?.ce?.ltp || entry?.ce?.previous_close_price || entry?.ce?.previous_close || 0);
-            const pe = Number(entry?.pe?.last_price || entry?.pe?.ltp || entry?.pe?.previous_close_price || entry?.pe?.previous_close || 0);
-            quotes[String(strikeNum)] = { ce, pe };
-          }
-          setChainQuotes(quotes);
-        } else if (Array.isArray(j.data.strikes) && j.data.strikes.length > 0) {
-          setAllStrikes(j.data.strikes);
-        }
-        if (Number(j.data.spot) > 0) {
-          setChainSpot(Number(j.data.spot));
-        }
-      })
-      .catch(() => {})
-      .finally(() => setChainLoading(false));
-  }, [broker, underlying, expiry]);
+  }, [broker]);
 
   useEffect(() => {
-    fetchChain();
-  }, [fetchChain]);
-
-  // Periodic REST poll when live WebSocket quotes are not available
-  useEffect(() => {
-    if (liveQuotes && Object.keys(liveQuotes.strikes ?? {}).length > 0) return;
-    if (!expiry) return;
-    const interval = setInterval(fetchChain, 10_000);
+    pollFunds();
+    const interval = setInterval(pollFunds, 12000);
     return () => clearInterval(interval);
-  }, [fetchChain, liveQuotes, expiry]);
+  }, [pollFunds]);
 
-  // ── Auto-start live options bridge (WebSocket tick pusher) ──────
+  // ── Expiries and Market Data by Underlying ─────────────────────────
+  const [expiriesMap, setExpiriesMap] = useState<Record<string, string[]>>({});
+  const [chainData, setChainData] = useState<Record<string, { spot: number; strikes: number[]; quotes: Record<string, { ce: number; pe: number }> }>>({});
+  const [lookupCache, setLookupCache] = useState<Record<string, { lotSize: number; strikes: Record<string, StrikeIdentifier> }>>({});
+
+  // Active / Primary underlying & expiry for WebSocket streaming
+  const activeUnderlying = useMemo(() => {
+    const open = baskets.find(b => b.legs.some(l => l.status === 'OPEN'));
+    return (open?.underlying as Underlying) ?? (baskets[0]?.underlying as Underlying) ?? 'NIFTY';
+  }, [baskets]);
+
+  const activeExpiry = useMemo(() => {
+    const open = baskets.find(b => b.legs.some(l => l.status === 'OPEN'));
+    return open?.expiry ?? baskets[0]?.expiry ?? expiriesMap[activeUnderlying]?.[0] ?? '';
+  }, [baskets, expiriesMap, activeUnderlying]);
+
+  const { liveQuotes, bridgeStatus } = useLiveOptionsWS(activeExpiry, broker, authenticatedBrokers, activeUnderlying);
+
+  // ── Start / Stop Live Options WS Bridge ───────────────────────────
   useEffect(() => {
-    if (!expiry || !hasAuthenticatedBroker) return;
-    for (const b of authenticatedBrokers) {
+    if (!activeExpiry || !activeUnderlying) return;
+
+    const brokersToStart = authenticatedBrokers.length > 0
+      ? authenticatedBrokers
+      : (hasAuthenticatedBroker ? [broker] : ['dhan' as Broker]);
+
+    for (const b of brokersToStart) {
       fetch('/api/options/live', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action: 'start', underlying, expiry, numStrikes: 30, broker: b }),
+        body: JSON.stringify({ action: 'start', underlying: activeUnderlying, expiry: activeExpiry, numStrikes: 35, broker: b }),
       }).catch(() => {});
     }
-  }, [expiry, underlying, authenticatedBrokers, hasAuthenticatedBroker]);
 
-  // ── Strike -> order-identifier lookup ────────────────────────────
+    return () => {
+      fetch('/api/options/live', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'stop', brokers: brokersToStart }),
+      }).catch(() => {});
+    };
+  }, [activeExpiry, activeUnderlying, authenticatedBrokers, hasAuthenticatedBroker, broker]);
+
+  // ── Spot & Previous Close for Header Ticker ────────────────────────
+  const [spotPrevClose, setSpotPrevClose] = useState<number>(0);
+
   useEffect(() => {
-    if (!expiry) { setStrikeMap({}); return; }
-    const lookupUrl = `${scalperRoute(broker, 'lookup')}?underlying=${underlying}&expiry=${expiry}`;
-    fetch(lookupUrl)
+    fetch(`/api/scalper/nifty-prev-close?underlying=${activeUnderlying}`)
       .then(r => r.json())
-      .then((j: { success: boolean; data?: { lotSize?: number; strikes?: Record<string, StrikeIdentifier> } }) => {
-        if (j.success && j.data) {
-          setStrikeMap(j.data.strikes ?? {});
-          setLotSize(j.data.lotSize ?? null);
-          if (j.data.strikes) {
-            const strikesFromLookup = Object.keys(j.data.strikes).map(Number).filter(n => !isNaN(n) && n > 0).sort((a, b) => a - b);
-            if (strikesFromLookup.length > 0) {
-              setAllStrikes(prev => (prev.length > 0 ? prev : strikesFromLookup));
-            }
-          }
+      .then((j: { success: boolean; prevClose?: number }) => {
+        if (j.success && j.prevClose && j.prevClose > 0) {
+          setSpotPrevClose(j.prevClose);
         }
       })
       .catch(() => {});
-  }, [broker, underlying, expiry]);
+  }, [activeUnderlying]);
 
-  // ── Preset -> legs ────────────────────────────────────────────────
-  const applyTemplate = useCallback((tpl: StrategyTemplate) => {
-    if (hasPlacedLeg) return;
-    if (tpl.legs.some(l => l.expiryRole === 'far')) {
-      addToast('error', 'Not supported here', `${tpl.name} needs a second expiry — use the Baskets page for calendar/diagonal spreads`);
-      return;
+  const activeSpot = useMemo(() => {
+    if (liveQuotes?.spot && liveQuotes.spot > 0) return liveQuotes.spot;
+    const pair = `${activeUnderlying}:${activeExpiry}`;
+    return chainData[pair]?.spot ?? 0;
+  }, [liveQuotes?.spot, chainData, activeUnderlying, activeExpiry]);
+
+  const spotChange = useMemo(() => {
+    if (activeSpot <= 0) return 0;
+    if (spotPrevClose > 0) return activeSpot - spotPrevClose;
+    return liveQuotes?.spot_change ?? 0;
+  }, [activeSpot, spotPrevClose, liveQuotes?.spot_change]);
+
+  const spotChangePct = useMemo(() => {
+    if (activeSpot <= 0) return 0;
+    if (spotPrevClose > 0) return ((activeSpot - spotPrevClose) / spotPrevClose) * 100;
+    return liveQuotes?.spot_change_pct ?? 0;
+  }, [activeSpot, spotPrevClose, liveQuotes?.spot_change_pct]);
+
+  // Fetch expiries for all underlyings on mount or broker change
+  useEffect(() => {
+    for (const u of UNDERLYINGS) {
+      fetch(`/api/options/expiries?underlying=${u}&broker=${broker}`)
+        .then(r => r.json())
+        .then((j: { success: boolean; data?: string[] }) => {
+          if (j.success && j.data?.length) {
+            setExpiriesMap(prev => ({ ...prev, [u]: j.data! }));
+          }
+        })
+        .catch(() => {});
     }
-    const atm = atmStrike ?? (spot > 0 ? Math.round(spot / step) * step : DEFAULT_INDEX_SPOT[underlying]);
-    setPresetKey(tpl.key);
-    setLegs(resolveTemplateLegs(tpl, atm, effectiveStrikes, step));
-    setBasketId(null);
-  }, [hasPlacedLeg, atmStrike, spot, step, underlying, effectiveStrikes, addToast]);
+  }, [broker]);
 
-  const addBlankLeg = useCallback(() => {
-    if (hasPlacedLeg) return;
-    const atm = atmStrike ?? (spot > 0 ? Math.round(spot / step) * step : DEFAULT_INDEX_SPOT[underlying]);
-    setPresetKey(null);
-    setLegs(prev => [...prev, ...resolveTemplateLegs(
-      { key: 'manual', name: 'Manual', legs: [{ side: 'B', option: 'CE', offset: 0, ratio: 1 }] },
-      atm, effectiveStrikes, step,
-    )]);
-  }, [hasPlacedLeg, atmStrike, spot, step, underlying, effectiveStrikes]);
+  // Auto-backfill empty expiry on initial baskets once expiriesMap resolves
+  useEffect(() => {
+    setBaskets(prev => {
+      let changed = false;
+      const next = prev.map(b => {
+        if (!b.expiry && expiriesMap[b.underlying]?.[0]) {
+          changed = true;
+          return { ...b, expiry: expiriesMap[b.underlying][0], updatedAt: new Date().toISOString() };
+        }
+        return b;
+      });
+      return changed ? next : prev;
+    });
+  }, [expiriesMap]);
 
-  const removeLeg = useCallback((id: string) => {
-    if (hasPlacedLeg) return;
-    setLegs(prev => prev.filter(l => l.id !== id));
-  }, [hasPlacedLeg]);
+  // Fetch chain data for all unique (underlying, expiry) pairs needed by current baskets
+  const fetchAllChains = useCallback(() => {
+    const pairs = new Set<string>();
+    for (const b of basketsRef.current) {
+      if (b.underlying && b.expiry) {
+        pairs.add(`${b.underlying}:${b.expiry}`);
+      }
+    }
+    // Also include active if not present
+    if (activeUnderlying && activeExpiry) {
+      pairs.add(`${activeUnderlying}:${activeExpiry}`);
+    }
 
-  const updateLeg = useCallback((id: string, patch: Partial<MultiLegLeg>) => {
-    if (hasPlacedLeg) return;
-    setLegs(prev => prev.map(l => (l.id === id ? { ...l, ...patch } : l)));
-  }, [hasPlacedLeg]);
+    for (const pair of pairs) {
+      const [u, exp] = pair.split(':');
+      if (!u || !exp) continue;
 
-  const clearBasket = useCallback(() => {
-    if (hasPlacedLeg) return;
-    setLegs([]); setPresetKey(null); setBasketId(null);
-  }, [hasPlacedLeg]);
+      fetch(`/api/options/chain?underlying=${u}&expiry=${exp}&broker=${broker}`)
+        .then(r => r.json())
+        .then((j: { success: boolean; data?: { chain?: { oc?: Record<string, unknown> } | Record<string, unknown>; strikes?: number[]; spot?: number } }) => {
+          if (!j.success || !j.data) return;
+          const oc = (j.data.chain as { oc?: Record<string, unknown> })?.oc ?? (j.data.chain as Record<string, unknown> | undefined);
+          let strikes: number[] = [];
+          const quotes: Record<string, { ce: number; pe: number }> = {};
+          let spot = Number(j.data.spot) || 0;
 
-  const [placing, setPlacing] = useState(false);
-  const [confirmPlace, setConfirmPlace] = useState(false);
-  const placingRef = useRef(false);
+          if (oc && typeof oc === 'object') {
+            strikes = Object.keys(oc).map(Number).filter(n => !isNaN(n) && n > 0).sort((a, b) => a - b);
+            for (const [sk, entryRaw] of Object.entries(oc)) {
+              const strikeNum = Math.round(parseFloat(sk));
+              if (isNaN(strikeNum)) continue;
+              const entry = entryRaw as {
+                ce?: { last_price?: number; ltp?: number; previous_close_price?: number; previous_close?: number };
+                pe?: { last_price?: number; ltp?: number; previous_close_price?: number; previous_close?: number };
+              };
+              const ce = Number(entry?.ce?.last_price || entry?.ce?.ltp || entry?.ce?.previous_close_price || entry?.ce?.previous_close || 0);
+              const pe = Number(entry?.pe?.last_price || entry?.pe?.ltp || entry?.pe?.previous_close_price || entry?.pe?.previous_close || 0);
+              quotes[String(strikeNum)] = { ce, pe };
+            }
+          } else if (Array.isArray(j.data.strikes) && j.data.strikes.length > 0) {
+            strikes = j.data.strikes;
+          }
 
-  const persistBasket = useCallback((nextLegs: MultiLegLeg[], id: string | null) => {
-    const body: Partial<MultiLegBasket> & { id?: string } = {
-      id: id ?? undefined, underlying, expiry, broker, presetKey: presetKey ?? undefined, legs: nextLegs,
-    };
-    fetch('/api/multi-leg-focus/baskets', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
-    })
+          setChainData(prev => ({
+            ...prev,
+            [pair]: {
+              spot: spot > 0 ? spot : (prev[pair]?.spot ?? 0),
+              strikes: strikes.length > 0 ? strikes : (prev[pair]?.strikes ?? []),
+              quotes: { ...(prev[pair]?.quotes ?? {}), ...quotes },
+            },
+          }));
+        })
+        .catch(() => {});
+
+      // Also ensure lookup data (lot size & strike map) is loaded
+      if (!lookupCache[pair]) {
+        const lookupUrl = broker === 'dhan'
+          ? `/api/scalper/lookup?underlying=${u}&expiry=${exp}`
+          : scalperRoute(broker, `lookup?underlying=${u}&expiry=${exp}`);
+        fetch(lookupUrl)
+          .then(r => r.json())
+          .then((j: { success: boolean; data?: { lotSize?: number; strikes?: Record<string, StrikeIdentifier> } }) => {
+            if (j.success && j.data) {
+              setLookupCache(prev => ({
+                ...prev,
+                [pair]: {
+                  lotSize: j.data!.lotSize ?? (u === 'NIFTY' ? 65 : u === 'BANKNIFTY' ? 15 : 10),
+                  strikes: j.data!.strikes ?? {},
+                },
+              }));
+            }
+          })
+          .catch(() => {});
+      }
+    }
+  }, [broker, activeUnderlying, activeExpiry, lookupCache]);
+
+  useEffect(() => {
+    fetchAllChains();
+    const interval = setInterval(fetchAllChains, 3000);
+    return () => clearInterval(interval);
+  }, [fetchAllChains]);
+
+  // ── Restore saved baskets on mount ─────────────────────────────────
+  useEffect(() => {
+    fetch('/api/multi-leg-focus/baskets')
       .then(r => r.json())
       .then((j: { success: boolean; data?: MultiLegBasket[] }) => {
-        if (j.success && j.data && !id) {
-          const created = j.data[j.data.length - 1];
-          if (created) setBasketId(created.id);
+        if (j.success && Array.isArray(j.data) && j.data.length > 0) {
+          setBaskets(j.data);
+        } else {
+          // If no baskets stored yet, create a default Short Strangle draft row
+          const pair = `${activeUnderlying}:${activeExpiry}`;
+          const chain = chainData[pair];
+          const allStrikes = chain?.strikes?.length ? chain.strikes : [23600, 23800, 24000, 24200, 24400];
+          const step = strikeStep(allStrikes) || DEFAULT_INDEX_STEP[activeUnderlying] || 50;
+          const spot = chain?.spot ?? DEFAULT_INDEX_SPOT[activeUnderlying] ?? 24000;
+          const atm = nearestStrike(allStrikes, spot) ?? (Math.round(spot / step) * step);
+
+          const initialBasket: MultiLegBasket = {
+            id: `basket-${Date.now()}`,
+            name: 'Short Strangle',
+            underlying: activeUnderlying,
+            expiry: activeExpiry,
+            broker,
+            presetKey: 'short-strangle',
+            legs: [
+              { id: '1', side: 'S', option: 'CE', strike: atm + step, lots: 1, type: 'MARKET', status: 'DRAFT' },
+              { id: '2', side: 'S', option: 'PE', strike: atm - step, lots: 1, type: 'MARKET', status: 'DRAFT' },
+            ],
+            createdAt: new Date().toISOString(),
+            updatedAt: new Date().toISOString(),
+          };
+          setBaskets([initialBasket]);
         }
       })
-      .catch(() => addToast('error', 'Basket not saved locally', 'Your legs are live at the broker — do not rely on this page to track them until you reload and confirm they reappear'));
-  }, [underlying, expiry, broker, presetKey, addToast]);
+      .catch(() => {});
+  }, [broker]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Best-effort flatten of already-placed legs when a basket stops mid-way —
-  // ported from Baskets.tsx's rollbackPlacedLegs, adapted to MultiLegLeg.
-  const rollbackPlacedLegs = useCallback(async (placedIds: string[], currentLegs: MultiLegLeg[]) => {
-    if (!placedIds.length) return;
-    addToast('error', `Auto-flattening ${placedIds.length} placed leg(s)`, 'Reversing with market orders — verify in Orders/Positions after');
-    for (const id of [...placedIds].reverse()) {
-      const leg = currentLegs.find(l => l.id === id);
-      if (!leg?.fill) continue;
-      const label = `${leg.side === 'B' ? 'BUY' : 'SELL'} ${leg.strike} ${leg.option}`;
-      const reverseReq = resolveOrderRequest(broker, {
-        side: leg.side === 'B' ? 'S' : 'B', option: leg.option, strike: leg.strike, qty: leg.fill.qty, type: 'MARKET', underlying,
-        productType: 'MARGIN',
-      }, strikeMap);
-      if (!reverseReq) {
-        addToast('error', `Could not auto-reverse ${label}`, 'No order identifier — close manually from Orders/Positions');
-        continue;
-      }
-      try {
-        const res = await fetch(reverseReq.url, {
-          method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(reverseReq.body),
-        });
-        const j = await res.json() as { success: boolean; order_id?: string; error?: string };
-        if (j.success) addToast('success', `Reversed ${label}`, `ID: ${j.order_id}`);
-        else addToast('error', `Reverse failed for ${label}`, `${j.error ?? 'Unknown error'} — close manually from Orders/Positions`);
-      } catch (e) {
-        addToast('error', `Reverse UNCONFIRMED for ${label}`, `Close manually from Orders/Positions: ${String(e)}`);
-      }
+  // ── LTP Resolver per Basket & Leg ─────────────────────────────────
+  const ltpFor = useCallback((basket: MultiLegBasket, leg: MultiLegLeg): number => {
+    // 1. If WebSocket quotes match this basket's underlying & expiry:
+    const targetUnderlying = liveQuotes?.underlying ?? activeUnderlying;
+    const targetExpiry = liveQuotes?.expiry ?? activeExpiry;
+    if (liveQuotes?.strikes && basket.underlying === targetUnderlying && basket.expiry === targetExpiry) {
+      const liveEntry = liveQuotes.strikes[String(leg.strike)];
+      const liveLtp = (leg.option === 'CE' ? liveEntry?.ce?.ltp : liveEntry?.pe?.ltp) ?? 0;
+      if (liveLtp > 0) return liveLtp;
     }
-  }, [broker, underlying, strikeMap, addToast]);
 
-  const placeBasket = useCallback(async () => {
-    if (!legs.length || !expiry) return;
+    // 2. Chain quotes lookup
+    const pair = `${basket.underlying}:${basket.expiry}`;
+    const chain = chainData[pair];
+    if (chain?.quotes) {
+      const q = chain.quotes[String(leg.strike)];
+      const val = (leg.option === 'CE' ? q?.ce : q?.pe) ?? 0;
+      if (val > 0) return val;
+    }
+
+    return 0;
+  }, [liveQuotes, activeUnderlying, activeExpiry, chainData]);
+
+  // ── Margin Calculator across Baskets ──────────────────────────────
+  const fetchMarginsForBaskets = useCallback(() => {
+    for (const basket of basketsRef.current) {
+      if (!basket.legs || basket.legs.length === 0 || !basket.expiry) continue;
+      const pair = `${basket.underlying}:${basket.expiry}`;
+      const lookup = lookupCache[pair];
+      const lotSize = lookup?.lotSize ?? (basket.underlying === 'NIFTY' ? 65 : basket.underlying === 'BANKNIFTY' ? 15 : 10);
+      const strikes = lookup?.strikes ?? {};
+
+      const legsPayload = basket.legs.map(leg => {
+        const strikeEntry = strikes[String(leg.strike)];
+        const resolvedSecId = leg.orderRef?.securityId || (leg.option === 'CE' ? strikeEntry?.ceId : strikeEntry?.peId);
+        const currentLtp = ltpFor(basket, leg);
+        const price = (leg.fill?.avgPrice && leg.fill.avgPrice > 0) ? leg.fill.avgPrice : (currentLtp > 0 ? currentLtp : (leg.price ?? 0));
+        const qty = leg.fill?.qty && leg.fill.qty > 0 ? leg.fill.qty : (leg.lots * lotSize);
+
+        return {
+          id: leg.id,
+          side: leg.side,
+          option: leg.option,
+          strike: leg.strike,
+          lots: leg.lots,
+          quantity: qty,
+          price,
+          securityId: resolvedSecId,
+          status: leg.status,
+        };
+      });
+
+      fetch('/api/multi-leg-focus/margin', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          underlying: basket.underlying,
+          expiry: basket.expiry,
+          legs: legsPayload,
+        }),
+      })
+        .then(r => r.json())
+        .then((j: { success: boolean; data?: {
+          legMargins: Record<string, number>;
+          basketMargin: number;
+          overallMargin: number;
+          hedgeBenefit: number;
+          spanMargin: number;
+          exposureMargin: number;
+        } }) => {
+          if (j.success && j.data) {
+            setBasketMargins(prev => ({
+              ...prev,
+              [basket.id]: j.data!,
+            }));
+          }
+        })
+        .catch(() => {});
+    }
+  }, [lookupCache, ltpFor]);
+
+  useEffect(() => {
+    const timer = setTimeout(fetchMarginsForBaskets, 400);
+    return () => clearTimeout(timer);
+  }, [baskets, lookupCache, fetchMarginsForBaskets]);
+
+  // ── Persist Basket Helper ─────────────────────────────────────────
+  const persistBasket = useCallback((basket: MultiLegBasket) => {
+    fetch('/api/multi-leg-focus/baskets', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(basket),
+    }).catch(() => {});
+  }, []);
+
+  const updateBasket = useCallback((basketId: string, patch: Partial<MultiLegBasket>) => {
+    setBaskets(prev => {
+      const next = prev.map(b => (b.id === basketId ? { ...b, ...patch, updatedAt: new Date().toISOString() } : b));
+      const target = next.find(b => b.id === basketId);
+      if (target) persistBasket(target);
+      return next;
+    });
+  }, [persistBasket]);
+
+  const deleteBasket = useCallback((basketId: string) => {
+    setBaskets(prev => prev.filter(b => b.id !== basketId));
+    fetch('/api/multi-leg-focus/baskets', {
+      method: 'DELETE',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id: basketId }),
+    }).catch(() => {});
+  }, []);
+
+  // ── Add Strategy (from template or blank) ──────────────────────────
+  const [category, setCategory] = useState<StrategyCategory>('Range Bound');
+
+  const addStrategy = useCallback((template?: StrategyTemplate) => {
+    const u: Underlying = 'NIFTY';
+    const exp = expiriesMap[u]?.[0] ?? '';
+    const pair = `${u}:${exp}`;
+    const strikes = chainData[pair]?.strikes?.length ? chainData[pair].strikes : [23600, 23800, 24000, 24200, 24400];
+    const spot = chainData[pair]?.spot ?? DEFAULT_INDEX_SPOT[u];
+    const step = DEFAULT_INDEX_STEP[u];
+    const atm = nearestStrike(strikes, spot) ?? 24000;
+
+    const tpl = template ?? {
+      key: 'custom',
+      name: 'Custom Strategy',
+      legs: [
+        { side: 'S' as const, option: 'CE' as const, offset: 2, ratio: 1 },
+        { side: 'S' as const, option: 'PE' as const, offset: -2, ratio: 1 },
+      ],
+    };
+
+    const newBasket: MultiLegBasket = {
+      id: `mlf_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`,
+      name: tpl.name,
+      underlying: u,
+      expiry: exp,
+      broker,
+      presetKey: tpl.key,
+      legs: resolveTemplateLegs(tpl, atm, strikes, step),
+      riskConfig: {
+        targetValue: undefined,
+        targetUnit: 'pts',
+        slValue: undefined,
+        slUnit: 'pts',
+        armed: false,
+      },
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    };
+
+    setBaskets(prev => [...prev, newBasket]);
+    persistBasket(newBasket);
+    addToast('success', `Added ${tpl.name} Strategy`, `Underlying: ${u} · Ready in Draft`);
+  }, [expiriesMap, chainData, broker, persistBasket, addToast]);
+
+  // ── Global P&L Across All Baskets ─────────────────────────────────
+  const overallTotalPnl = useMemo(() => {
+    let sum = 0;
+    for (const b of baskets) {
+      const metrics = computeStrategyMetrics(b.legs, l => ltpFor(b, l));
+      sum += metrics.totalPnlRupees;
+    }
+    return sum;
+  }, [baskets, ltpFor]);
+
+  const activeStrategiesCount = useMemo(() => {
+    return baskets.filter(b => b.legs.some(l => l.status === 'OPEN')).length;
+  }, [baskets]);
+
+  // ── Placement & Exits per Basket ──────────────────────────────────
+  const [placingMap, setPlacingMap] = useState<Record<string, boolean>>({});
+  const [exitingMap, setExitingMap] = useState<Record<string, boolean>>({});
+  const [exitingLegs, setExitingLegs] = useState<Set<string>>(new Set());
+  const exitingLegsRef = useRef<Set<string>>(new Set());
+
+  const placeBasket = useCallback(async (basketId: string) => {
+    const basket = basketsRef.current.find(b => b.id === basketId);
+    if (!basket || !basket.legs.length || !basket.expiry) return;
+
     if (!hasAuthenticatedBroker) {
-      addToast('error', 'No broker logged in', 'Log in before placing a basket');
+      addToast('error', 'No broker logged in', 'Log in before placing orders');
       return;
     }
-    if (!lotSize || lotSize <= 0) {
-      addToast('error', 'Cannot place basket', `Lot size for ${underlying} not resolved yet — retry in a moment`);
-      return;
-    }
-    for (const leg of legs) {
-      if (leg.type === 'LIMIT' && (!leg.price || leg.price <= 0)) {
-        addToast('error', 'Invalid limit price', `${leg.side === 'B' ? 'Buy' : 'Sell'} ${leg.strike} ${leg.option}`);
-        return;
-      }
-    }
-    if (!confirmPlace) {
-      setConfirmPlace(true);
-      setTimeout(() => setConfirmPlace(false), 4000);
-      return;
-    }
-    setConfirmPlace(false);
-    if (placingRef.current) return;
-    placingRef.current = true;
-    setPlacing(true);
 
-    const ordered = sortLegsForPlacement(legs);
-    let working: MultiLegLeg[] = legs.map(l => ({ ...l, status: 'PLACING' as const }));
-    const placedIds: string[] = [];
+    const pair = `${basket.underlying}:${basket.expiry}`;
+    const lookup = lookupCache[pair];
+    const lotSize = lookup?.lotSize ?? (basket.underlying === 'NIFTY' ? 65 : basket.underlying === 'BANKNIFTY' ? 15 : 10);
+    const strikeMap = lookup?.strikes ?? {};
+
+    setPlacingMap(prev => ({ ...prev, [basketId]: true }));
+
+    const ordered = sortLegsForPlacement(basket.legs);
+    let working: MultiLegLeg[] = basket.legs.map(l => ({ ...l, status: 'PLACING' as MultiLegStatus }));
+    updateBasket(basketId, { legs: working });
 
     try {
       for (const leg of ordered) {
         const label = `${leg.side === 'B' ? 'BUY' : 'SELL'} ${leg.strike} ${leg.option}`;
         const qty = leg.lots * lotSize;
         const req = resolveOrderRequest(broker, {
-          side: leg.side, option: leg.option, strike: leg.strike, qty, type: leg.type,
-          price: leg.type === 'LIMIT' ? leg.price : undefined, underlying, productType: 'MARGIN',
+          side: leg.side,
+          option: leg.option,
+          strike: leg.strike,
+          qty,
+          type: leg.type,
+          price: leg.type === 'LIMIT' ? leg.price : undefined,
+          underlying: basket.underlying as Underlying,
+          productType: 'MARGIN',
         }, strikeMap);
+
         if (!req) {
-          addToast('error', `${label} — no order identifier resolved`, 'Strike lookup not ready yet — basket stopped');
-          working = working.map(l => (placedIds.includes(l.id) ? l : { ...l, status: 'FAILED' as const }));
-          setLegs(working); persistBasket(working, basketId);
-          await rollbackPlacedLegs(placedIds, working);
-          return;
+          addToast('error', `${label} — no order identifier resolved`, 'Strike lookup not ready yet');
+          working = working.map(l => (l.id === leg.id ? { ...l, status: 'FAILED' as MultiLegStatus } : l));
+          updateBasket(basketId, { legs: working });
+          continue;
         }
+
         try {
-          const res = await fetch(req.url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(req.body) });
-          const j = await res.json() as { success: boolean; order_id?: string; error?: string };
+          const res = await fetch(req.url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(req.body),
+          });
+          const j = await res.json() as { success: boolean; order_id?: string; securityId?: string; symbol?: string; price?: number; error?: string };
+
           if (j.success) {
-            const orderRef = broker === 'dhan' ? { securityId: String(req.body.securityId) } : { symbol: String(req.body.tradingsymbol) };
-            // The order routes only return order_id, never a fill price — a MARKET
-            // order's ack isn't its fill (see dhan-terminal-position-ownership).
-            // Use the live LTP at send-time as the entry estimate, same convention
-            // FocusRowFill.ceEntry/peEntry documents for FocusTool.
-            const avgPrice = leg.type === 'LIMIT' ? (leg.price ?? ltpFor(leg)) : ltpFor(leg);
-            working = working.map(l => (l.id === leg.id
-              ? { ...l, status: 'OPEN' as const, fill: { qty, avgPrice }, orderRef }
-              : l));
-            placedIds.push(leg.id);
-            addToast('success', `${label} placed`, `ID: ${j.order_id}`);
+            const currentLtp = ltpFor(basket, leg);
+            const fillPrice = (j.price && j.price > 0) ? j.price : (currentLtp > 0 ? currentLtp : (leg.price ?? 0));
+            const secId = j.securityId ?? (req.body.securityId as string | undefined);
+            const sym = j.symbol ?? (req.body.tradingsymbol as string | undefined);
+
+            working = working.map(l => {
+              if (l.id !== leg.id) return l;
+              return {
+                ...l,
+                status: 'OPEN' as MultiLegStatus,
+                fill: { qty, avgPrice: fillPrice },
+                orderRef: { securityId: secId, symbol: sym },
+              };
+            });
+            addToast('success', `Placed ${label}`, `ID: ${j.order_id ?? 'OK'}`);
           } else {
-            // Mark the failing leg AND every leg not yet attempted as FAILED —
-            // leaving them at 'PLACING' would strand them there forever, since
-            // the loop returns immediately and never revisits them.
-            working = working.map(l => (placedIds.includes(l.id) ? l : { ...l, status: 'FAILED' as const }));
-            addToast('error', `${label} failed — basket stopped`, j.error ?? 'Unknown error');
-            setLegs(working); persistBasket(working, basketId);
-            await rollbackPlacedLegs(placedIds, working);
-            return;
+            working = working.map(l => (l.id === leg.id ? { ...l, status: 'FAILED' as MultiLegStatus } : l));
+            addToast('error', `Rejected ${label}`, j.error ?? 'Unknown broker error');
           }
+          updateBasket(basketId, { legs: working });
         } catch (e) {
-          working = working.map(l => (placedIds.includes(l.id) ? l : { ...l, status: 'FAILED' as const }));
-          addToast('error', `${label} UNCONFIRMED — basket stopped`, `Check Orders before retrying: ${String(e)}`);
-          setLegs(working); persistBasket(working, basketId);
-          await rollbackPlacedLegs(placedIds, working);
-          return;
+          working = working.map(l => (l.id === leg.id ? { ...l, status: 'FAILED' as MultiLegStatus } : l));
+          updateBasket(basketId, { legs: working });
+          addToast('error', `Order failed for ${label}`, String(e));
         }
       }
-      setLegs(working);
-      persistBasket(working, basketId);
-      addToast('success', `Basket complete: ${placedIds.length}/${legs.length} legs placed`);
     } finally {
-      placingRef.current = false;
-      setPlacing(false);
+      setPlacingMap(prev => ({ ...prev, [basketId]: false }));
+      pollFunds();
+      fetchMarginsForBaskets();
     }
-  }, [legs, expiry, hasAuthenticatedBroker, lotSize, underlying, confirmPlace, broker, strikeMap, basketId, addToast, persistBasket, rollbackPlacedLegs, ltpFor]);
+  }, [broker, hasAuthenticatedBroker, lookupCache, updateBasket, ltpFor, addToast, pollFunds, fetchMarginsForBaskets]);
 
-  const legsRef = useRef(legs); useEffect(() => { legsRef.current = legs; }, [legs]);
+  const exitOneLeg = useCallback(async (basketId: string, leg: MultiLegLeg) => {
+    if (exitingLegsRef.current.has(leg.id)) return;
+    exitingLegsRef.current.add(leg.id);
+    setExitingLegs(prev => new Set(prev).add(leg.id));
 
+    const label = `${leg.side === 'B' ? 'BUY' : 'SELL'} ${leg.strike} ${leg.option}`;
+    const basket = basketsRef.current.find(b => b.id === basketId);
+
+    try {
+      const res = await fetch(scalperRoute(broker, 'positions'));
+      const j = await res.json() as { success: boolean; data?: Record<string, unknown>[] };
+      const rows = j.success && Array.isArray(j.data) ? j.data : [];
+      const match = findLegPosition(broker, leg, rows);
+
+      if (match.kind === 'flat') {
+        updateBasket(basketId, {
+          legs: basketsRef.current.find(b => b.id === basketId)?.legs.map(l => (l.id === leg.id ? { ...l, status: 'CLOSED' as const, fill: { qty: 0, avgPrice: l.fill?.avgPrice ?? 0 } } : l)) ?? [],
+        });
+        addToast('success', `${label} already flat at broker`, 'Updated status to CLOSED');
+        return;
+      }
+
+      if (match.kind !== 'match') {
+        addToast('error', `Cannot exit ${label}`, 'Could not match broker position');
+        return;
+      }
+
+      const netQty = Number(match.row.netQty ?? 0);
+      const expectedSign = leg.side === 'B' ? 1 : -1;
+      if (Math.sign(netQty) !== expectedSign) {
+        addToast(
+          'error',
+          `Cannot exit ${label}`,
+          `Broker position sign mismatch (netQty ${netQty}) for a ${leg.side === 'B' ? 'BUY' : 'SELL'} leg — check Orders/Positions`,
+        );
+        return;
+      }
+
+      // Safe sizing: clamped to what this leg opened, clamped by what broker shows
+      const brokerAbs = Math.abs(netQty);
+      const ownQty = leg.fill?.qty && leg.fill.qty > 0 ? leg.fill.qty : brokerAbs;
+      const qty = Math.min(ownQty, brokerAbs);
+      if (qty <= 0) {
+        addToast('error', `Cannot exit ${label}`, 'Resolved exit quantity is zero');
+        return;
+      }
+
+      const side = leg.side === 'B' ? 'SELL' : 'BUY';
+      const product = positionProduct(match.row);
+      const productPayload = closeOrderProduct(broker, product);
+
+      if (!productPayload) {
+        addToast('error', `Cannot exit ${label}`, `Unsupported product "${product}"`);
+        return;
+      }
+
+      const orderUrl = broker === 'dhan' ? '/api/scalper/fast-order' : scalperRoute(broker, 'order');
+      const body = broker === 'dhan'
+        ? { securityId: leg.orderRef?.securityId, quantity: qty, side, orderType: 'MARKET', exchangeSegment: match.row.exchangeSegment ?? (basket?.underlying === 'SENSEX' ? 'BSE_FNO' : 'NSE_FNO'), ...productPayload.fields }
+        : { tradingsymbol: leg.orderRef?.symbol, quantity: qty, side, orderType: 'MARKET', exchange: match.row.exchange ?? (basket?.underlying === 'SENSEX' ? 'BFO' : 'NFO'), ...productPayload.fields };
+
+      const res2 = await fetch(orderUrl, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+      const j2 = await res2.json() as { success: boolean; order_id?: string; error?: string };
+
+      if (j2.success) {
+        addToast('success', `Exited ${label}`, `ID: ${j2.order_id}`);
+        updateBasket(basketId, {
+          legs: basketsRef.current.find(b => b.id === basketId)?.legs.map(l => (l.id === leg.id ? { ...l, status: 'CLOSED' as const, fill: { qty: 0, avgPrice: l.fill?.avgPrice ?? 0 } } : l)) ?? [],
+        });
+      } else {
+        addToast('error', `Exit failed for ${label}`, j2.error ?? 'Unknown error');
+      }
+    } catch (e) {
+      addToast('error', `Exit unconfirmed for ${label}`, String(e));
+    } finally {
+      exitingLegsRef.current.delete(leg.id);
+      setExitingLegs(prev => {
+        const next = new Set(prev);
+        next.delete(leg.id);
+        return next;
+      });
+      pollFunds();
+      fetchMarginsForBaskets();
+    }
+  }, [broker, updateBasket, addToast, pollFunds, fetchMarginsForBaskets]);
+
+  const exitingBasketsRef = useRef<Set<string>>(new Set());
+
+  const exitBasket = useCallback(async (basketId: string) => {
+    if (exitingBasketsRef.current.has(basketId)) return;
+    exitingBasketsRef.current.add(basketId);
+    setExitingMap(prev => ({ ...prev, [basketId]: true }));
+
+    try {
+      const basket = basketsRef.current.find(b => b.id === basketId);
+      if (!basket) return;
+      const openLegs = sortLegsForExit(basket.legs.filter(l => l.status === 'OPEN' || l.status === 'CLOSING'));
+      for (const leg of openLegs) {
+        await exitOneLeg(basketId, leg);
+      }
+    } finally {
+      exitingBasketsRef.current.delete(basketId);
+      setExitingMap(prev => ({ ...prev, [basketId]: false }));
+    }
+  }, [exitOneLeg]);
+
+  // ── Broker Positions Poller across ALL Baskets ─────────────────────
   useEffect(() => {
-    if (!legs.some(l => l.orderRef != null)) return;
     let cancelled = false;
 
     const poll = async () => {
+      const anyPlaced = basketsRef.current.some(b => b.legs.some(l => l.orderRef != null));
+      if (!anyPlaced) return;
+
       try {
         const res = await fetch(scalperRoute(broker, 'positions'));
         const j = await res.json() as { success: boolean; data?: Record<string, unknown>[] };
         if (cancelled || !j.success || !j.data) return;
         const rows = j.data;
-        setLegs(prev => {
+
+        setBaskets(prevBaskets => {
           let anyChange = false;
-          const next = prev.map(leg => {
-            if (!leg.orderRef) return leg;
-            const match = findLegPosition(broker, leg, rows);
-            const reconciled = reconcileLegWithBroker(leg, match, lotSize ? leg.lots * lotSize : null);
-            if (
-              reconciled.status !== leg.status ||
-              reconciled.fill?.qty !== leg.fill?.qty ||
-              reconciled.fill?.avgPrice !== leg.fill?.avgPrice
-            ) {
-              anyChange = true;
-              return reconciled;
+          const nextBaskets = prevBaskets.map(basket => {
+            let basketChange = false;
+            const pair = `${basket.underlying}:${basket.expiry}`;
+            const lotSize = lookupCache[pair]?.lotSize ?? (basket.underlying === 'NIFTY' ? 65 : 15);
+
+            const nextLegs = basket.legs.map(leg => {
+              if (!leg.orderRef) return leg;
+              const match = findLegPosition(broker, leg, rows);
+              const reconciled = reconcileLegWithBroker(leg, match, leg.lots * lotSize);
+
+              if (
+                reconciled.status !== leg.status ||
+                reconciled.fill?.qty !== leg.fill?.qty ||
+                reconciled.fill?.avgPrice !== leg.fill?.avgPrice
+              ) {
+                basketChange = true;
+                anyChange = true;
+                return reconciled;
+              }
+              return leg;
+            });
+
+            if (basketChange) {
+              const updated = { ...basket, legs: nextLegs, updatedAt: new Date().toISOString() };
+              persistBasket(updated);
+              return updated;
             }
-            return leg;
+            return basket;
           });
-          if (anyChange) {
-            persistBasket(next, basketId);
-          }
-          return anyChange ? next : prev;
+
+          return anyChange ? nextBaskets : prevBaskets;
         });
       } catch {
-        // transient network/broker error — leave the ledger untouched this tick
+        // network jitter
       }
     };
 
     poll();
-    const id = setInterval(poll, 3000);
-    return () => { cancelled = true; clearInterval(id); };
-  }, [broker, basketId, lotSize, persistBasket, legs.some(l => l.orderRef != null)]); // eslint-disable-line react-hooks/exhaustive-deps
+    const interval = setInterval(poll, 3000);
+    return () => { cancelled = true; clearInterval(interval); };
+  }, [broker, lookupCache, persistBasket]);
 
-  // ── Restore the most recently updated open basket on mount ───────
+  // ── Automated Risk Watcher: SL, TP, Trailing SL, Strategy Target/SL ─
+  const triggeredLegExitsRef = useRef<Set<string>>(new Set());
+  const triggeredStrategyExitsRef = useRef<Set<string>>(new Set());
+
   useEffect(() => {
-    fetch('/api/multi-leg-focus/baskets')
-      .then(r => r.json())
-      .then((j: { success: boolean; data?: MultiLegBasket[] }) => {
-        if (!j.success || !j.data?.length) return;
-        const open = [...j.data].filter(b => b.legs.some(l => l.status === 'OPEN' || l.status === 'PLACING' || l.orderRef != null))
-          .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))[0];
-        if (!open) return;
-        // Validate the persisted broker/underlying against the known-valid
-        // sets before applying them — a bad value here silently corrupts
-        // global state (scalperRoute builds a nonsense path, positions
-        // polling and exits fail silently for what the UI still shows as an
-        // open basket).
-        const validUnderlying = (UNDERLYINGS as readonly string[]).includes(open.underlying);
-        const validBroker = (BROKERS as readonly string[]).includes(open.broker);
-        if (!validUnderlying || !validBroker) {
-          addToast('error', 'Could not restore a saved basket', 'Invalid underlying/broker in saved data');
-          return;
+    for (const basket of baskets) {
+      const openLegs = basket.legs.filter(l => l.status === 'OPEN' && l.fill);
+      if (openLegs.length === 0) {
+        triggeredStrategyExitsRef.current.delete(basket.id);
+        continue;
+      }
+
+      // 1. Strategy Target and SL
+      if (basket.riskConfig?.armed && !triggeredStrategyExitsRef.current.has(basket.id) && !exitingMap[basket.id]) {
+        const metrics = computeStrategyMetrics(basket.legs, l => ltpFor(basket, l));
+        const decision = checkStrategyRisk(metrics, basket.riskConfig);
+
+        if (decision === 'TARGET') {
+          triggeredStrategyExitsRef.current.add(basket.id);
+          addToast('success', `${basket.name ?? 'Strategy'} Target Reached`, `Closed basket at ${metrics.pnlPts >= 0 ? '+' : ''}${metrics.pnlPts.toFixed(1)} pts (${metrics.pnlPct >= 0 ? '+' : ''}${metrics.pnlPct.toFixed(1)}%)`);
+          exitBasket(basket.id);
+          continue;
+        } else if (decision === 'SL') {
+          triggeredStrategyExitsRef.current.add(basket.id);
+          addToast('error', `${basket.name ?? 'Strategy'} Stop Loss Reached`, `Closed basket at ${metrics.pnlPts.toFixed(1)} pts (${metrics.pnlPct.toFixed(1)}%)`);
+          exitBasket(basket.id);
+          continue;
         }
-        setBasketId(open.id);
-        setUnderlying(open.underlying as Underlying);
-        setExpiry(open.expiry);
-        setBroker(open.broker as Broker);
-        setPresetKey(open.presetKey ?? null);
-        setLegs(open.legs);
-      })
-      .catch(() => {});
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  const totalPnl = useMemo(() => basketTotalPnl(legs, ltpFor), [legs, ltpFor]);
-
-  const [exiting, setExiting] = useState<Set<string>>(new Set());
-  const exitingRef = useRef<Set<string>>(new Set());
-
-  // Result channel for exitOneLeg: alongside the ok/fail outcome it returns the
-  // exact legs array it just computed and committed to legsRef, so callers can
-  // persist THAT array instead of reading legsRef.current a tick too early
-  // (before React has committed the setLegs update and the legsRef-sync effect
-  // has re-run) — see Important #5 in the final review.
-  const exitOneLeg = useCallback(async (leg: MultiLegLeg): Promise<{ ok: boolean; legs: MultiLegLeg[] }> => {
-    // Re-read the live leg from legsRef by id rather than trusting whatever
-    // (possibly stale) leg object the caller passed in — a second click on
-    // "Exit Basket" mid-flight must not act on a stale snapshot.
-    const cur = legsRef.current.find(l => l.id === leg.id);
-    if (!cur || cur.status !== 'OPEN') return { ok: true, legs: legsRef.current };
-    // Synchronous re-entry guard: React state updates are async, so two rapid
-    // calls could both observe `exiting` as "not yet exiting" before either
-    // write lands. A ref mutation is visible to the very next call immediately.
-    if (exitingRef.current.has(cur.id)) return { ok: false, legs: legsRef.current };
-    exitingRef.current.add(cur.id);
-    setExiting(prev => new Set([...prev, cur.id]));
-
-    // Computes the next legs array off legsRef.current (the most recently
-    // known state, updated synchronously here rather than waiting on the
-    // legsRef-sync effect), commits it via setLegs, and returns it so the
-    // caller can persist exactly what was just computed.
-    const applyStatus = (status: MultiLegLeg['status'], fill?: MultiLegLeg['fill']): MultiLegLeg[] => {
-      const next = legsRef.current.map(l => (l.id === cur.id ? { ...l, status, ...(fill !== undefined ? { fill } : {}) } : l));
-      legsRef.current = next;
-      setLegs(next);
-      return next;
-    };
-
-    let resultLegs = applyStatus('CLOSING');
-    const label = `${cur.side === 'B' ? 'BUY' : 'SELL'} ${cur.strike} ${cur.option}`;
-
-    try {
-      const res = await fetch(scalperRoute(broker, 'positions'));
-      const j = await res.json() as { success: boolean; data?: Record<string, unknown>[] };
-      if (!j.success || !j.data) {
-        addToast('error', `Cannot exit ${label}`, 'Failed to fetch live positions — try again');
-        resultLegs = applyStatus('OPEN');
-        return { ok: false, legs: resultLegs };
-      }
-      const match = findLegPosition(broker, cur, j.data);
-      if (match.kind !== 'match') {
-        // Never fall back to the local ledger qty once the broker match fails —
-        // guessing the exit size here is exactly what the ownership rule forbids.
-        addToast('error', `Cannot exit ${label}`, match.kind === 'ambiguous' ? `${match.count} rows share this symbol — close manually from Orders/Positions` : 'No matching broker position found — it may already be closed');
-        resultLegs = applyStatus(match.kind === 'flat' ? 'CLOSED' : 'OPEN');
-        return { ok: match.kind === 'flat', legs: resultLegs };
-      }
-      const netQty = Number(match.row.netQty) || 0;
-      if (netQty === 0) {
-        addToast('success', `${label} already flat`);
-        resultLegs = applyStatus('CLOSED', { qty: 0, avgPrice: cur.fill?.avgPrice ?? 0 });
-        return { ok: true, legs: resultLegs };
       }
 
-      // This basket's own ledger governs its own exits — never size off the
-      // full broker net quantity, which can include a sibling basket's (or a
-      // running strategy's) leg sharing this same securityId/strike.
-      const own = cur.fill?.qty ?? 0;
-      const qty = own > 0 ? Math.min(own, Math.abs(netQty)) : Math.abs(netQty);
-      const side = cur.side === 'B' ? 'SELL' : 'BUY';
-      // Sanity check: this leg's own side must agree with the broker row's
-      // sign (a BUY/long leg should show netQty > 0, a SELL/short leg should
-      // show netQty < 0). A contradiction means the row we matched does not
-      // actually reflect this leg's position — block rather than trade blindly.
-      const expectedSign = cur.side === 'B' ? 1 : -1;
-      if (Math.sign(netQty) !== expectedSign) {
-        addToast('error', `Cannot exit ${label}`, `Broker position sign mismatch (netQty ${netQty}) for a ${cur.side === 'B' ? 'BUY' : 'SELL'} leg — close manually from Orders/Positions`);
-        resultLegs = applyStatus('OPEN');
-        return { ok: false, legs: resultLegs };
-      }
+      // 2. Leg-wise SL, TP, and Trailing SL
+      let bestUpdated = false;
+      const updatedLegs = basket.legs.map(leg => {
+        if (leg.status !== 'OPEN' || !leg.fill) return leg;
+        const ltp = ltpFor(basket, leg);
+        if (ltp <= 0) return leg;
 
-      const product = positionProduct(match.row);
-      const productPayload = closeOrderProduct(broker, product);
-      if (!productPayload) {
-        addToast('error', `Cannot exit ${label}`, `Unsupported product "${product}" — close this leg from Orders/Positions`);
-        resultLegs = applyStatus('OPEN');
-        return { ok: false, legs: resultLegs };
-      }
-      const orderUrl = broker === 'dhan' ? '/api/scalper/fast-order' : scalperRoute(broker, 'order');
-      const body = broker === 'dhan'
-        ? { securityId: cur.orderRef?.securityId, quantity: qty, side, orderType: 'MARKET', exchangeSegment: match.row.exchangeSegment ?? 'NSE_FNO', ...productPayload.fields }
-        : { tradingsymbol: cur.orderRef?.symbol, quantity: qty, side, orderType: 'MARKET', exchange: match.row.exchange ?? 'NFO', ...productPayload.fields };
+        const evalResult = computeLegTrailingSL(leg, ltp);
 
-      const res2 = await fetch(orderUrl, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
-      const j2 = await res2.json() as { success: boolean; order_id?: string; error?: string };
-      if (j2.success) {
-        addToast('success', `Exited ${label}`, `ID: ${j2.order_id}`);
-        resultLegs = applyStatus('CLOSED', { qty: 0, avgPrice: cur.fill?.avgPrice ?? 0 });
-        return { ok: true, legs: resultLegs };
+        if (evalResult.newBestPrice !== leg.bestPrice && evalResult.newBestPrice != null) {
+          bestUpdated = true;
+          leg = { ...leg, bestPrice: evalResult.newBestPrice };
+        }
+
+        if (evalResult.triggered && !triggeredLegExitsRef.current.has(leg.id) && !exitingLegsRef.current.has(leg.id)) {
+          triggeredLegExitsRef.current.add(leg.id);
+          const label = `${leg.side === 'B' ? 'BUY' : 'SELL'} ${leg.strike} ${leg.option}`;
+          const trigMsg =
+            evalResult.triggered === 'TRAIL_SL'
+              ? `Trailing SL Hit at ₹${ltp.toFixed(2)} (Stop: ₹${evalResult.effectiveSL?.toFixed(2)})`
+              : evalResult.triggered === 'SL'
+              ? `Stop Loss Hit at ₹${ltp.toFixed(2)} (Stop: ₹${evalResult.effectiveSL?.toFixed(2)})`
+              : `Take Profit Hit at ₹${ltp.toFixed(2)} (Target: ₹${evalResult.tpPrice?.toFixed(2)})`;
+
+          addToast(evalResult.triggered === 'TP' ? 'success' : 'error', `${label} Triggered`, trigMsg);
+          exitOneLeg(basket.id, leg);
+        }
+
+        return leg;
+      });
+
+      if (bestUpdated) {
+        updateBasket(basket.id, { legs: updatedLegs });
       }
-      addToast('error', `Exit failed for ${label}`, j2.error ?? 'Unknown error');
-      resultLegs = applyStatus('OPEN');
-      return { ok: false, legs: resultLegs };
-    } catch (e) {
-      addToast('error', `Exit UNCONFIRMED for ${label}`, `Check Orders/Positions manually: ${String(e)}`);
-      resultLegs = applyStatus('OPEN');
-      return { ok: false, legs: resultLegs };
-    } finally {
-      exitingRef.current.delete(cur.id);
-      setExiting(prev => { const next = new Set(prev); next.delete(cur.id); return next; });
     }
-  }, [broker, addToast]);
-
-  const exitLeg = useCallback((id: string) => {
-    const leg = legsRef.current.find(l => l.id === id);
-    if (!leg) return;
-    exitOneLeg(leg).then(({ legs: nextLegs }) => persistBasket(nextLegs, basketId));
-  }, [exitOneLeg, persistBasket, basketId]);
-
-  const [exitingBasket, setExitingBasket] = useState(false);
-  const exitingBasketRef = useRef(false);
-
-  const exitBasket = useCallback(async () => {
-    // Basket-level re-entry guard, checked/set synchronously before any await —
-    // a second click on "Exit Basket" mid-flight must not start a second loop
-    // over a stale leg snapshot.
-    if (exitingBasketRef.current) return;
-    exitingBasketRef.current = true;
-    setExitingBasket(true);
-    try {
-      const ordered = sortLegsForExit(legsRef.current.filter(l => l.status === 'OPEN'));
-      let lastLegs = legsRef.current;
-      for (const leg of ordered) {
-        const result = await exitOneLeg(leg);
-        lastLegs = result.legs;
-      }
-      persistBasket(lastLegs, basketId);
-    } finally {
-      exitingBasketRef.current = false;
-      setExitingBasket(false);
-    }
-  }, [exitOneLeg, persistBasket, basketId]);
-
-  // Escape hatch out of a terminal state: every leg CLOSED/FAILED (a
-  // completed exit or a rolled-back failed placement), or a basket restored
-  // stuck at PLACING (page closed mid-placement — no OPEN leg exists to
-  // trigger the polling effect and no Exit Basket button renders for it).
-  const canStartNewBasket = hasPlacedLeg && legs.length > 0 && !legs.some(l => l.status === 'OPEN' || l.status === 'CLOSING');
-
-  const startNewBasket = useCallback(() => {
-    const reset = () => { setLegs([]); setPresetKey(null); setBasketId(null); };
-    if (basketId) {
-      fetch('/api/multi-leg-focus/baskets', {
-        method: 'DELETE', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: basketId }),
-      }).catch(() => {}).finally(reset);
-    } else {
-      reset();
-    }
-  }, [basketId]);
+  }, [baskets, ltpFor, exitingMap, exitBasket, exitOneLeg, updateBasket, addToast]);
 
   return (
-    <div className="min-h-screen bg-zinc-950">
+    <div className="min-h-screen bg-zinc-950 text-zinc-100">
       <NavBar />
 
+      {/* Floating Notifications */}
       <div className="fixed top-16 right-4 z-50 flex flex-col gap-2 pointer-events-none">
         {toasts.map(t => (
           <div key={t.id} className={`pointer-events-auto px-4 py-3 rounded-xl border text-sm font-semibold shadow-2xl max-w-xs ${
@@ -623,142 +812,193 @@ export default function MultiLegFocus() {
         </div>
       )}
 
-      <div className="sticky top-0 z-10 border-b border-zinc-800 bg-zinc-950/95 backdrop-blur px-4 py-2">
-        <div className="flex items-center gap-2 flex-wrap">
-          <select value={broker} onChange={e => setBroker(e.target.value as Broker)}
-            className={`h-8 bg-zinc-900 border border-zinc-700 text-zinc-200 text-xs font-semibold rounded-lg px-2.5 focus:outline-none focus:border-emerald-500 ${FOCUS_RING}`}>
-            {(Object.keys(BROKER_LABELS) as Broker[]).map(b => <option key={b} value={b}>{BROKER_LABELS[b]}</option>)}
-          </select>
-          <select value={underlying} onChange={e => setUnderlying(e.target.value as Underlying)} disabled={hasPlacedLeg}
-            className={`h-8 bg-zinc-900 border border-zinc-700 text-zinc-200 text-xs font-semibold rounded-lg px-2.5 focus:outline-none focus:border-emerald-500 disabled:opacity-50 ${FOCUS_RING}`}>
-            {UNDERLYINGS.map(u => <option key={u} value={u}>{u}</option>)}
-          </select>
-          <select value={expiry} onChange={e => setExpiry(e.target.value)} disabled={hasPlacedLeg}
-            className={`h-8 bg-zinc-900 border border-zinc-700 text-zinc-200 text-xs font-semibold rounded-lg px-2.5 focus:outline-none focus:border-emerald-500 disabled:opacity-50 ${FOCUS_RING}`}>
-            {expiries.map(e => <option key={e} value={e}>{e}</option>)}
-          </select>
-          <span className="h-8 flex items-center px-2.5 rounded-lg text-xs font-bold font-mono tabular-nums bg-zinc-900 border border-zinc-700 text-zinc-200">
-            Spot {spot > 0 ? spot.toLocaleString('en-IN', { maximumFractionDigits: 1 }) : '—'}
-          </span>
-          <button
-            type="button"
-            onClick={fetchChain}
-            disabled={chainLoading}
-            title="Refresh option chain quotes"
-            className={`h-8 px-2.5 inline-flex items-center gap-1.5 text-xs font-semibold rounded-lg bg-zinc-900 border border-zinc-700 text-zinc-300 hover:text-white hover:bg-zinc-800 disabled:opacity-50 ${FOCUS_RING}`}
-          >
-            <RefreshCw className={`w-3.5 h-3.5 ${chainLoading ? 'animate-spin text-emerald-400' : ''}`} />
-            <span>Refresh</span>
-          </button>
-          <span
-            className={`h-8 flex items-center px-2 text-[11px] font-bold font-mono rounded-lg border ${
+      {/* Top Global Command Bar */}
+      <div className="sticky top-0 z-30 bg-zinc-950/95 backdrop-blur border-b border-zinc-800 px-4 py-3">
+        <div className="flex items-center justify-between gap-4 flex-wrap">
+          <div className="flex items-center gap-3">
+            <h1 className="text-sm font-bold tracking-wide uppercase text-white flex items-center gap-1.5">
+              <Layers className="w-4 h-4 text-emerald-400" />
+              Multi-Leg Strategy Focus
+            </h1>
+            <span className="text-xs text-zinc-400 font-semibold">
+              {activeStrategiesCount} Running · {baskets.length} Total
+            </span>
+
+            {/* Live Spot Ticker from WebSocket */}
+            {activeSpot > 0 && (
+              <div
+                className="h-8 flex items-baseline gap-2 px-3 rounded-lg bg-zinc-900 border border-zinc-700/80 font-mono tabular-nums shadow-sm"
+                title={`${activeUnderlying} Spot from ${liveQuotes?.spot ? 'WebSocket Live Feed' : 'Option Chain'} | Prev Close: ${spotPrevClose > 0 ? spotPrevClose.toFixed(2) : '—'}`}
+              >
+                <span className="text-[11px] font-bold text-zinc-400 tracking-wider">{activeUnderlying}</span>
+                <span className="text-sm font-bold text-white">
+                  {activeSpot.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                </span>
+                {spotPrevClose > 0 && (
+                  <span className={`text-xs font-semibold flex items-center gap-0.5 ${spotChange >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
+                    <span>{spotChange >= 0 ? '▲' : '▼'}</span>
+                    <span>{Math.abs(spotChange).toFixed(2)}</span>
+                    <span className="text-[11px] opacity-90">({spotChange >= 0 ? '+' : ''}{spotChangePct.toFixed(2)}%)</span>
+                  </span>
+                )}
+              </div>
+            )}
+          </div>
+
+          <div className="flex items-center gap-3 flex-wrap">
+            {/* Broker Selector */}
+            <div className="flex items-center gap-1.5">
+              <span className="text-xs text-zinc-400 font-semibold">Broker:</span>
+              <select
+                value={broker}
+                onChange={e => setBroker(e.target.value as Broker)}
+                className="h-8 bg-zinc-900 border border-zinc-700 text-zinc-200 text-xs font-bold rounded-lg px-2 focus:outline-none focus:border-emerald-500"
+              >
+                {Object.entries(BROKER_LABELS).map(([k, v]) => (
+                  <option key={k} value={k}>{v}</option>
+                ))}
+              </select>
+            </div>
+
+            {/* Broker Margin / Funds Information */}
+            {fundsData && (
+              <div className="flex items-center gap-2">
+                <span
+                  className="h-8 flex items-center gap-1.5 px-2.5 rounded-lg text-xs font-bold font-mono tabular-nums bg-zinc-900 border border-zinc-700 text-zinc-200"
+                  title="Available Margin / Cash from Broker"
+                >
+                  <span className="text-zinc-400 font-medium text-[11px]">Avail Margin:</span>
+                  <span className="text-emerald-400 font-bold">{fmtMoney(fundsData.available)}</span>
+                </span>
+                <span
+                  className="h-8 flex items-center gap-1.5 px-2.5 rounded-lg text-xs font-bold font-mono tabular-nums bg-zinc-900 border border-zinc-700 text-zinc-200"
+                  title="Used / Blocked Margin from Broker"
+                >
+                  <span className="text-zinc-400 font-medium text-[11px]">Used Margin:</span>
+                  <span className="text-amber-400 font-bold">{fmtMoney(fundsData.used)}</span>
+                </span>
+              </div>
+            )}
+
+            {/* Overall P&L */}
+            <span className={`h-8 flex items-center px-3 rounded-lg text-xs font-bold font-mono tabular-nums border ${
+              overallTotalPnl >= 0 ? 'text-emerald-400 border-emerald-500/30 bg-emerald-500/5' : 'text-rose-400 border-rose-500/30 bg-rose-500/5'
+            }`}>
+              Total P&L: {overallTotalPnl >= 0 ? '+' : ''}{fmtMoney(overallTotalPnl)}
+            </span>
+
+            {/* + Add Strategy Button */}
+            <button
+              type="button"
+              onClick={() => addStrategy()}
+              className={`h-8 px-3 inline-flex items-center gap-1.5 text-xs font-bold rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white transition-colors ${FOCUS_RING}`}
+            >
+              <Plus className="w-3.5 h-3.5" />
+              New Strategy Row
+            </button>
+
+            {/* Manual Refresh Button */}
+            <button
+              type="button"
+              onClick={() => {
+                fetchAllChains();
+                pollFunds();
+                fetchMarginsForBaskets();
+              }}
+              title="Refresh quotes and margins"
+              className={`h-8 w-8 flex items-center justify-center rounded-lg border border-zinc-700 bg-zinc-900 text-zinc-400 hover:text-white ${FOCUS_RING}`}
+            >
+              <RefreshCw className="w-3.5 h-3.5" />
+            </button>
+
+            {/* WS Live Badge */}
+            <span className={`h-8 flex items-center px-2 text-[11px] font-bold font-mono rounded-lg border ${
               bridgeStatus?.status === 'RUNNING' && liveQuotes
                 ? 'text-emerald-400 bg-emerald-500/10 border-emerald-500/20'
                 : 'text-zinc-400 bg-zinc-900 border-zinc-700'
-            }`}
-          >
-            {bridgeStatus?.status === 'RUNNING' && liveQuotes ? '● WS Live' : 'REST Chain'}
-          </span>
+            }`}>
+              {bridgeStatus?.status === 'RUNNING' && liveQuotes ? '● WS Live' : 'REST Chain'}
+            </span>
+          </div>
         </div>
 
-        <div className="mt-2 pt-2 border-t border-zinc-800">
+        {/* Strategy Templates Bar — NEVER disabled so user can always add another strategy! */}
+        <div className="mt-2.5 pt-2.5 border-t border-zinc-800/80">
+          <div className="flex items-center justify-between mb-1.5">
+            <span className="text-[11px] font-bold text-zinc-400 uppercase tracking-wider">
+              Quick Add Strategy Presets
+            </span>
+            <span className="text-[10px] text-zinc-500">
+              Click any strategy to instantiate a new independent parallel row
+            </span>
+          </div>
           <StrategyCardGrid
             category={category}
             onCategoryChange={setCategory}
-            selectedKey={presetKey}
-            onSelectTemplate={applyTemplate}
-            disabled={hasPlacedLeg}
+            selectedKey={null}
+            onSelectTemplate={addStrategy}
+            disabled={false}
           />
         </div>
       </div>
 
-      <div className="px-4 py-3 border-b border-zinc-800 bg-zinc-900/40">
-        <div className="flex items-center gap-2 flex-wrap">
-          <span className="text-xs font-bold text-zinc-300 uppercase tracking-widest">
-            Legs{legs.length > 0 ? ` · ${legs.length}` : ''}
-          </span>
-          <button onClick={addBlankLeg} disabled={hasPlacedLeg}
-            className={`h-7 px-2.5 inline-flex items-center gap-1 text-[11px] font-bold rounded-lg border border-zinc-700 text-zinc-200 hover:bg-zinc-800 disabled:opacity-40 ${FOCUS_RING}`}>
-            <Plus className="w-3 h-3" /> Add Leg
-          </button>
-          {legs.length > 0 && !hasPlacedLeg && (
-            <button onClick={clearBasket}
-              className={`h-7 px-2.5 inline-flex items-center gap-1 text-[11px] font-bold rounded-lg border border-zinc-700 text-zinc-400 hover:text-rose-300 hover:bg-zinc-800 ${FOCUS_RING}`}>
-              <X className="w-3 h-3" /> Clear
+      {/* Main Container: Parallel Strategy Rows */}
+      <div className="p-4 flex flex-col gap-4 max-w-[1700px] mx-auto">
+        {baskets.length === 0 ? (
+          <div className="flex flex-col items-center justify-center py-24 gap-3 border border-zinc-800/60 rounded-xl bg-zinc-900/20">
+            <Layers className="w-10 h-10 text-zinc-600" />
+            <p className="text-sm font-semibold text-zinc-300">No Active or Draft Strategies</p>
+            <p className="text-xs text-zinc-500">Click &ldquo;New Strategy Row&rdquo; or pick a preset above to run strategies in parallel.</p>
+            <button
+              type="button"
+              onClick={() => addStrategy()}
+              className="mt-2 h-8 px-4 inline-flex items-center gap-1.5 text-xs font-bold rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white"
+            >
+              <Plus className="w-3.5 h-3.5" /> Add First Strategy
             </button>
-          )}
-          {legs.length > 0 && !hasPlacedLeg && (
-            <button onClick={placeBasket} disabled={placing}
-              className={`h-7 ml-auto px-3 inline-flex items-center gap-1 text-[11px] font-bold rounded-lg border transition-all disabled:opacity-50 ${
-                confirmPlace ? 'bg-amber-500/20 border-amber-500/50 text-amber-200' : 'bg-emerald-500/10 border-emerald-500/40 text-emerald-300 hover:bg-emerald-500/20'
-              } ${FOCUS_RING}`}>
-              {placing ? 'Placing…' : confirmPlace ? 'Click again to confirm' : 'Place Basket'}
-            </button>
-          )}
-          {legs.some(l => l.status === 'OPEN' || l.status === 'CLOSING') && (
-            <>
-              <span className={`h-7 flex items-center px-2.5 rounded-lg text-xs font-bold font-mono tabular-nums border ${
-                totalPnl >= 0 ? 'text-emerald-400 border-emerald-500/30 bg-emerald-500/5' : 'text-rose-400 border-rose-500/30 bg-rose-500/5'
-              }`}>
-                {totalPnl >= 0 ? '+' : ''}{fmtMoney(totalPnl)}
-              </span>
-              <button onClick={exitBasket} disabled={exitingBasket}
-                className={`h-7 px-3 text-[11px] font-bold rounded-lg border border-rose-500/40 text-rose-400 hover:bg-rose-500/10 hover:text-rose-300 disabled:opacity-50 ${FOCUS_RING}`}>
-                {exitingBasket ? 'Exiting…' : 'Exit Basket'}
-              </button>
-            </>
-          )}
-          {canStartNewBasket && (
-            <button onClick={startNewBasket}
-              className={`h-7 ml-auto px-3 inline-flex items-center gap-1 text-[11px] font-bold rounded-lg border border-zinc-700 text-zinc-200 hover:bg-zinc-800 ${FOCUS_RING}`}>
-              New Basket
-            </button>
-          )}
-        </div>
-      </div>
+          </div>
+        ) : (
+          baskets.map((basket, idx) => {
+            const pair = `${basket.underlying}:${basket.expiry}`;
+            const chain = chainData[pair];
+            const lookup = lookupCache[pair];
+            const expiries = expiriesMap[basket.underlying] ?? [];
+            const allStrikes = chain?.strikes?.length ? chain.strikes : [23600, 23800, 24000, 24200, 24400];
+            const step = strikeStep(allStrikes) || DEFAULT_INDEX_STEP[basket.underlying as Underlying] || 50;
+            const spot = chain?.spot ?? DEFAULT_INDEX_SPOT[basket.underlying as Underlying] ?? 24000;
+            const atmStrike = nearestStrike(allStrikes, spot) ?? (Math.round(spot / step) * step);
+            const lotSize = lookup?.lotSize ?? (basket.underlying === 'NIFTY' ? 65 : basket.underlying === 'BANKNIFTY' ? 15 : 10);
 
-      {legs.length === 0 ? (
-        <div className="flex flex-col items-center justify-center py-20 gap-1.5">
-          <p className="text-sm font-semibold text-zinc-400">No legs yet</p>
-          <p className="text-xs text-zinc-500">Pick a predefined strategy above or add legs manually</p>
-        </div>
-      ) : (
-        <table className="w-full table-fixed text-xs">
-          <colgroup>
-            <col className="w-[10%]" /><col className="w-[8%]" /><col className="w-[14%]" />
-            <col className="w-[8%]" /><col className="w-[12%]" /><col className="w-[12%]" />
-            <col className="w-[14%]" /><col className="w-[12%]" /><col className="w-[10%]" />
-          </colgroup>
-          <thead>
-            <tr className="text-xs font-bold text-white border-b border-zinc-800 bg-zinc-800">
-              <th className="px-3 py-2.5 text-left">Side</th>
-              <th className="px-2 py-2.5 text-left">CE/PE</th>
-              <th className="px-2 py-2.5 text-left">Strike</th>
-              <th className="px-2 py-2.5 text-left">Lots</th>
-              <th className="px-2 py-2.5 text-left">Type</th>
-              <th className="px-2 py-2.5 text-right">LTP</th>
-              <th className="px-2 py-2.5 text-right">P&L</th>
-              <th className="px-2 py-2.5 text-center">Status</th>
-              <th className="px-2 py-2.5 text-center"></th>
-            </tr>
-          </thead>
-          <tbody>
-            {legs.map(leg => (
-              <MultiLegLegRow
-                key={leg.id}
-                leg={leg}
-                allStrikes={effectiveStrikes}
-                ltp={ltpFor(leg)}
-                editable={!hasPlacedLeg}
-                exiting={exiting.has(leg.id)}
-                onChange={patch => updateLeg(leg.id, patch)}
-                onRemove={() => removeLeg(leg.id)}
-                onExit={() => exitLeg(leg.id)}
+            return (
+              <MultiLegStrategyRow
+                key={basket.id}
+                basket={basket}
+                index={idx}
+                broker={broker}
+                hasAuthenticatedBroker={hasAuthenticatedBroker}
+                expiries={expiries}
+                allStrikes={allStrikes}
+                lotSize={lotSize}
+                step={step}
+                atmStrike={atmStrike}
+                ltpFor={leg => ltpFor(basket, leg)}
+                onUpdate={patch => updateBasket(basket.id, patch)}
+                onDelete={() => deleteBasket(basket.id)}
+                onPlace={() => placeBasket(basket.id)}
+                onExit={() => exitBasket(basket.id)}
+                onExitLeg={leg => exitOneLeg(basket.id, leg)}
+                placing={!!placingMap[basket.id]}
+                exiting={!!exitingMap[basket.id]}
+                exitingLegs={exitingLegs}
+                legMargins={basketMargins[basket.id]?.legMargins}
+                basketMargin={basketMargins[basket.id]?.basketMargin}
+                overallMargin={basketMargins[basket.id]?.overallMargin}
+                hedgeBenefit={basketMargins[basket.id]?.hedgeBenefit}
               />
-            ))}
-          </tbody>
-        </table>
-      )}
+            );
+          })
+        )}
+      </div>
     </div>
   );
 }

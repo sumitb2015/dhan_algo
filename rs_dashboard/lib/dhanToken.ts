@@ -73,3 +73,37 @@ export async function dhanGet(apiPath: string, timeoutMs = 10_000): Promise<unkn
   }
   return res.json();
 }
+
+/**
+ * Authenticated POST against the Dhan REST API. Returns the parsed JSON body.
+ * Auto-injects dhanClientId into the body. Throws on non-2xx.
+ */
+export async function dhanPost(
+  apiPath: string,
+  payload: Record<string, unknown> = {},
+  timeoutMs = 10_000,
+): Promise<unknown> {
+  const { clientId, token } = getDhanCredentials();
+  const body = { ...payload, dhanClientId: clientId };
+  const res = await fetch(`${DHAN_BASE}${apiPath}`, {
+    method: 'POST',
+    headers: {
+      'access-token': token,
+      'client-id': clientId,
+      'Content-Type': 'application/json',
+      'Accept': 'application/json',
+    },
+    body: JSON.stringify(body),
+    signal: AbortSignal.timeout(timeoutMs),
+  });
+  if (!res.ok) {
+    let detail = `HTTP ${res.status}`;
+    try {
+      const json = await res.json() as Record<string, unknown>;
+      detail = String(json.errorMessage ?? json.remarks ?? json.message ?? JSON.stringify(json));
+    } catch {}
+    throw new Error(`Dhan POST ${apiPath} failed: ${detail}`);
+  }
+  return res.json();
+}
+

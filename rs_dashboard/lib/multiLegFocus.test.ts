@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert';
 import {
   resolveTemplateLegs, reconcileLegFillDown, reconcileLegWithBroker, legPnl, basketTotalPnl, sortLegsForExit, findLegPosition,
+  computeLegTrailingSL, computeStrategyMetrics, checkStrategyRisk, type StrategyMetrics,
   type MultiLegLeg,
 } from './multiLegFocus.ts';
 import type { StrategyTemplate } from './basketStrategies.ts';
@@ -142,4 +143,109 @@ test('reconcileLegWithBroker leaves leg untouched when match is not_found', () =
   assert.strictEqual(reconciled.status, 'OPEN');
   assert.strictEqual(reconciled.fill?.qty, 65);
 });
+
+test('computeLegTrailingSL: Sell leg triggers hard SL and TP correctly', () => {
+  const leg: MultiLegLeg = {
+    id: '1', side: 'S', option: 'PE', strike: 23500, lots: 1, type: 'MARKET', status: 'OPEN',
+    fill: { qty: 65, avgPrice: 70 },
+    sl: 10, slType: 'pts', tp: 20, tpType: 'pts',
+  };
+  // Entry: 70 -> SL price is 80, TP price is 50
+  assert.strictEqual(computeLegTrailingSL(leg, 75).triggered, null);
+  assert.strictEqual(computeLegTrailingSL(leg, 80).triggered, 'SL');
+  assert.strictEqual(computeLegTrailingSL(leg, 81).triggered, 'SL');
+  assert.strictEqual(computeLegTrailingSL(leg, 50).triggered, 'TP');
+  assert.strictEqual(computeLegTrailingSL(leg, 49).triggered, 'TP');
+});
+
+test('computeLegTrailingSL: Sell leg trailing at 1 rupee step tightens SL and triggers TRAIL_SL', () => {
+  const leg: MultiLegLeg = {
+    id: '1', side: 'S', option: 'PE', strike: 23500, lots: 1, type: 'MARKET', status: 'OPEN',
+    fill: { qty: 65, avgPrice: 70 },
+    sl: 10, slType: 'pts', trail: true,
+  };
+  // Entry 70, initial SL is 80 (risk = 10 pts).
+  // Price drops favorably to 65 (drop of 5 rupees):
+  const eval1 = computeLegTrailingSL(leg, 65);
+  assert.strictEqual(eval1.newBestPrice, 65);
+  assert.strictEqual(eval1.effectiveSL, 75); // 65 + 10 = 75 (trailed down by exactly 5 rupees)
+  assert.strictEqual(eval1.triggered, null);
+
+  // Next tick with bestPrice tracked at 65:
+  const trailedLeg = { ...leg, bestPrice: 65 };
+  // If price bounces back to 74 (below 75):
+  assert.strictEqual(computeLegTrailingSL(trailedLeg, 74).triggered, null);
+  // If price rises to 75 (hits trailing SL):
+  const eval2 = computeLegTrailingSL(trailedLeg, 75);
+  assert.strictEqual(eval2.triggered, 'TRAIL_SL');
+  assert.strictEqual(eval2.effectiveSL, 75);
+});
+
+test('computeLegTrailingSL: Buy leg trailing at 1 rupee step tightens SL upward', () => {
+  const leg: MultiLegLeg = {
+    id: '1', side: 'B', option: 'CE', strike: 24300, lots: 1, type: 'MARKET', status: 'OPEN',
+    fill: { qty: 65, avgPrice: 50 },
+    sl: 10, slType: 'pts', trail: true,
+  };
+  // Entry 50, initial SL is 40 (risk = 10 pts).
+  // Price rises favorably to 58 (gain of 8 rupees):
+  const eval1 = computeLegTrailingSL(leg, 58);
+  assert.strictEqual(eval1.newBestPrice, 58);
+  assert.strictEqual(eval1.effectiveSL, 48); // 58 - 10 = 48 (trailed up by exactly 8 rupees)
+  assert.strictEqual(eval1.triggered, null);
+
+  const trailedLeg = { ...leg, bestPrice: 58 };
+  // Price drops to 48:
+  assert.strictEqual(computeLegTrailingSL(trailedLeg, 48).triggered, 'TRAIL_SL');
+});
+
+test('computeStrategyMetrics computes combined points and percentage accurately', () => {
+  const legs: MultiLegLeg[] = [
+    { id: '1', side: 'S', option: 'CE', strike: 24300, lots: 1, type: 'MARKET', status: 'OPEN', fill: { qty: 65, avgPrice: 56.40 } },
+    { id: '2', side: 'S', option: 'PE', strike: 23500, lots: 1, type: 'MARKET', status: 'OPEN', fill: { qty: 65, avgPrice: 72.05 } },
+  ];
+  // Total entry points: 56.40 + 72.05 = 128.45 pts
+  const ltpFor = (l: MultiLegLeg) => (l.option === 'CE' ? 50.00 : 60.00);
+  // CE gained +6.40 pts, PE gained +12.05 pts -> total points P&L = +18.45 pts
+  const metrics = computeStrategyMetrics(legs, ltpFor);
+  assert.strictEqual(metrics.combinedEntryPts, 128.45);
+  assert.strictEqual(metrics.combinedCurrentPts, 110.00);
+  assert.strictEqual(Math.round(metrics.pnlPts * 100) / 100, 18.45);
+  assert.strictEqual(Math.round(metrics.pnlPct * 100) / 100, 14.36); // (18.45 / 128.45) * 100
+  assert.strictEqual(metrics.totalPnlRupees, 18.45 * 65);
+});
+
+test('checkStrategyRisk triggers Target and SL in both points and percentage modes', () => {
+  const metrics: StrategyMetrics = {
+    combinedEntryPts: 100,
+    combinedCurrentPts: 80,
+    pnlPts: 20,
+    pnlPct: 20,
+    totalPnlRupees: 1300,
+  };
+
+  // Points mode Target
+  assert.strictEqual(checkStrategyRisk(metrics, { targetValue: 15, targetUnit: 'pts', armed: true, slUnit: 'pts' }), 'TARGET');
+  assert.strictEqual(checkStrategyRisk(metrics, { targetValue: 25, targetUnit: 'pts', armed: true, slUnit: 'pts' }), null);
+
+  // Percentage mode Target
+  assert.strictEqual(checkStrategyRisk(metrics, { targetValue: 18, targetUnit: 'pct', armed: true, slUnit: 'pct' }), 'TARGET');
+  assert.strictEqual(checkStrategyRisk(metrics, { targetValue: 25, targetUnit: 'pct', armed: true, slUnit: 'pct' }), null);
+
+  // Armed false returns null even if threshold reached
+  assert.strictEqual(checkStrategyRisk(metrics, { targetValue: 15, targetUnit: 'pts', armed: false, slUnit: 'pts' }), null);
+
+  // SL test
+  const lossMetrics: StrategyMetrics = {
+    combinedEntryPts: 100,
+    combinedCurrentPts: 125,
+    pnlPts: -25,
+    pnlPct: -25,
+    totalPnlRupees: -1625,
+  };
+  assert.strictEqual(checkStrategyRisk(lossMetrics, { slValue: 20, slUnit: 'pts', armed: true, targetUnit: 'pts' }), 'SL');
+  assert.strictEqual(checkStrategyRisk(lossMetrics, { slValue: 20, slUnit: 'pct', armed: true, targetUnit: 'pct' }), 'SL');
+  assert.strictEqual(checkStrategyRisk(lossMetrics, { slValue: 30, slUnit: 'pts', armed: true, targetUnit: 'pts' }), null);
+});
+
 
