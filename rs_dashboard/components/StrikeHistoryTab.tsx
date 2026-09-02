@@ -498,34 +498,40 @@ export default function StrikeHistoryTab({
   }, [contextMeta, onContextMetaChange]);
 
   // Handle Chart Hover
-  const handleMouseMove = useCallback(
-    (e: { activePayload?: TooltipPayloadItem[] }) => {
-      if (e && e.activePayload && e.activePayload.length) {
-        const row = e.activePayload[0].payload;
-        setHoveredRow(row);
-        if (onHoverContextChange) {
-          const decayFromOpen = row.openInitial ? row.close - row.openInitial : 0;
-          const decayFromOpenPct = row.openInitial ? (decayFromOpen / row.openInitial) * 100 : 0;
-          onHoverContextChange({
-            datetime: row.datetime,
-            date: row.date,
-            time: row.time,
-            spot: row.spot,
-            strike: row.strike,
-            open: row.open,
-            high: row.high,
-            low: row.low,
-            close: row.close,
-            oi: row.oi,
-            volume: row.volume,
-            iv: row.iv,
-            decayFromOpen,
-            decayFromOpenPct,
-          });
+  type ChartMouseMoveHandler = NonNullable<React.ComponentProps<typeof ComposedChart>['onMouseMove']>;
+
+  const handleMouseMove: ChartMouseMoveHandler = useCallback(
+    (nextState) => {
+      if (nextState && nextState.isTooltipActive) {
+        const rawIdx = nextState.activeIndex ?? nextState.activeTooltipIndex;
+        const idx = typeof rawIdx === 'number' ? rawIdx : typeof rawIdx === 'string' ? parseInt(rawIdx, 10) : -1;
+        const row = rows[idx];
+        if (row) {
+          setHoveredRow(row);
+          if (onHoverContextChange) {
+            const decayFromOpen = row.openInitial ? row.close - row.openInitial : 0;
+            const decayFromOpenPct = row.openInitial ? (decayFromOpen / row.openInitial) * 100 : 0;
+            onHoverContextChange({
+              datetime: row.datetime,
+              date: row.date,
+              time: row.time,
+              spot: row.spot,
+              strike: row.strike,
+              open: row.open,
+              high: row.high,
+              low: row.low,
+              close: row.close,
+              oi: row.oi,
+              volume: row.volume,
+              iv: row.iv,
+              decayFromOpen,
+              decayFromOpenPct,
+            });
+          }
         }
       }
     },
-    [onHoverContextChange]
+    [rows, onHoverContextChange]
   );
 
   const handleMouseLeave = useCallback(() => {
