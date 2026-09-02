@@ -23,6 +23,7 @@ import sys
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
+import numpy as np
 import pandas as pd
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -188,24 +189,56 @@ def _vwap(df: pd.DataFrame) -> pd.Series:
     return cum_pv / cum_vol.replace(0, pd.NA)
 
 
+def _wilder_atr(high: np.ndarray, low: np.ndarray, close: np.ndarray, period: int) -> np.ndarray:
+    """Wilder's Average True Range — reimplemented so this module doesn't require the
+    talib C extension, which is frequently missing (it needs the TA-Lib system library
+    compiled and on the path, not just a pip install) and is already treated as optional
+    everywhere else in this codebase (lib/dhan_helper.py's HAS_TALIB flag,
+    lib/zerodha/indicators.py's pandas_ta fallback).
+
+    Matches talib.ATR(timeperiod=period) exactly: NaN for the first `period` bars, then
+    the standard Wilder recursive smoothing. First True Range has no prior close to diff
+    against, so it's just the day's H-L range, same as talib's convention.
+    """
+    n = len(close)
+    atr = np.full(n, np.nan)
+    if n == 0:
+        return atr
+
+    tr = np.empty(n)
+    tr[0] = high[0] - low[0]
+    if n > 1:
+        prev_close = close[:-1]
+        tr[1:] = np.maximum.reduce([
+            high[1:] - low[1:],
+            np.abs(high[1:] - prev_close),
+            np.abs(low[1:] - prev_close),
+        ])
+
+    if n <= period:
+        return atr
+
+    atr[period] = tr[1:period + 1].mean()
+    for i in range(period + 1, n):
+        atr[i] = (atr[i - 1] * (period - 1) + tr[i]) / period
+    return atr
+
+
 def _supertrend(high: pd.Series, low: pd.Series, close: pd.Series, length: int = 10, multiplier: float = 3.0) -> tuple[pd.Series, pd.Series]:
     """Returns (value, direction) where direction is 1 while price is in an uptrend and -1
     while in a downtrend, same length/multiplier defaults as before.
 
-    talib has no native SUPERTREND function — only ATR — so this implements the standard
+    No native SUPERTREND primitive is used — only ATR — so this implements the standard
     reference band-flip algorithm (the same one TradingView's built-in Supertrend uses) on top
-    of talib.ATR() for the ATR component, rather than pandas_ta's supertrend(). talib's ATR uses
-    Wilder's smoothing, the textbook definition; band continuation (a band only ever tightens
-    toward price while the trend holds, and only resets on a flip) is applied by hand below."""
-    import numpy as np
-    import talib
-
+    of _wilder_atr() for the ATR component, rather than pandas_ta's supertrend(). Band
+    continuation (a band only ever tightens toward price while the trend holds, and only
+    resets on a flip) is applied by hand below."""
     h = high.to_numpy(dtype=float)
     l = low.to_numpy(dtype=float)
     c = close.to_numpy(dtype=float)
     n = len(c)
 
-    atr = talib.ATR(h, l, c, timeperiod=length)
+    atr = _wilder_atr(h, l, c, length)
     hl2 = (h + l) / 2
     basic_upper = hl2 + multiplier * atr
     basic_lower = hl2 - multiplier * atr
@@ -345,9 +378,6 @@ def _compute_confluence(
     symbol: str,
     symbol_type: str,
 ) -> dict:
-    import numpy as np
-    import talib
-
     if candles_df.empty:
         return {}
 
@@ -360,11 +390,11 @@ def _compute_confluence(
     warm_l = warm_df["low"].to_numpy(dtype=float)
     n_warm = len(warm_c)
     if n_warm >= 14:
-        atr_arr = talib.ATR(warm_h, warm_l, warm_c, timeperiod=14)
+        atr_arr = _wilder_atr(warm_h, warm_l, warm_c, 14)
         valid_atr = atr_arr[~np.isnan(atr_arr)]
         atr = float(valid_atr[-1]) if len(valid_atr) > 0 else float(warm_h[-1] - warm_l[-1])
     elif n_warm >= 2:
-        atr_arr = talib.ATR(warm_h, warm_l, warm_c, timeperiod=n_warm - 1)
+        atr_arr = _wilder_atr(warm_h, warm_l, warm_c, n_warm - 1)
         valid_atr = atr_arr[~np.isnan(atr_arr)]
         atr = float(valid_atr[-1]) if len(valid_atr) > 0 else float(warm_h[-1] - warm_l[-1])
     else:
