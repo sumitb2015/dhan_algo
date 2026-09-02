@@ -18,6 +18,7 @@ import type { StrikeHistoryPoint } from '@/app/api/options/strike-history/route'
 export type TimelineOption = '1D' | '5D' | '10D' | 'ALL';
 export type IntervalOption = '1m' | '5m' | '15m' | '1h';
 export type ChartStyle = 'area' | 'candles';
+export type StrikeSelectionMode = 'fixed' | 'relative';
 
 export interface ContextMeta {
   currentSpot: number;
@@ -57,7 +58,9 @@ export interface HoverContext {
 
 interface Props {
   expiry: string;
-  strikeRelative: string;
+  strikeMode: StrikeSelectionMode;
+  fixedStrike?: number | null;
+  strikeRelative?: string;
   optionType: 'CE' | 'PE';
   onContextMetaChange?: (meta: ContextMeta) => void;
   onHoverContextChange?: (hover: HoverContext | null) => void;
@@ -257,7 +260,9 @@ const StrikeHistoryTooltip = ({ active, payload }: StrikeHistoryTooltipProps) =>
 
 export default function StrikeHistoryTab({
   expiry,
-  strikeRelative,
+  strikeMode,
+  fixedStrike,
+  strikeRelative = 'ATM',
   optionType,
   onContextMetaChange,
   onHoverContextChange,
@@ -277,9 +282,12 @@ export default function StrikeHistoryTab({
   // Active point for top ticker inspection
   const [hoveredRow, setHoveredRow] = useState<AggregatedRow | null>(null);
 
-  // Fetch 1-min raw data whenever expiry, strikeRelative, or optionType changes
+  // Fetch 1-min raw data whenever parameters change
   useEffect(() => {
-    if (!expiry || !strikeRelative || !optionType) return;
+    if (!expiry || !optionType) return;
+    if (strikeMode === 'fixed' && (!fixedStrike || fixedStrike <= 0)) return;
+    if (strikeMode === 'relative' && !strikeRelative) return;
+
     const controller = new AbortController();
 
     queueMicrotask(() => {
@@ -287,13 +295,14 @@ export default function StrikeHistoryTab({
       setError('');
     });
 
-    const normalizedRelative = encodeURIComponent(strikeRelative.trim());
-    fetch(
-      `/api/options/strike-history?expiry=${expiry}&strikeRelative=${normalizedRelative}&optionType=${optionType}`,
-      {
-        signal: controller.signal,
-      }
-    )
+    const url =
+      strikeMode === 'fixed'
+        ? `/api/options/strike-history?expiry=${expiry}&strike=${fixedStrike}&optionType=${optionType}`
+        : `/api/options/strike-history?expiry=${expiry}&strikeRelative=${encodeURIComponent((strikeRelative ?? '').trim())}&optionType=${optionType}`;
+
+    fetch(url, {
+      signal: controller.signal,
+    })
       .then(r => r.json())
       .then(j => {
         if (j.success && j.points) {
@@ -310,7 +319,7 @@ export default function StrikeHistoryTab({
       .finally(() => setLoading(false));
 
     return () => controller.abort();
-  }, [expiry, strikeRelative, optionType]);
+  }, [expiry, strikeMode, fixedStrike, strikeRelative, optionType]);
 
   // 1. Filter raw points by selected timeline (1D, 5D, 10D, ALL)
   const timelinePoints = useMemo(() => {
@@ -501,7 +510,7 @@ export default function StrikeHistoryTab({
   type ChartMouseMoveHandler = NonNullable<React.ComponentProps<typeof ComposedChart>['onMouseMove']>;
 
   const handleMouseMove: ChartMouseMoveHandler = useCallback(
-    (nextState) => {
+    nextState => {
       if (nextState && nextState.isTooltipActive) {
         const rawIdx = nextState.activeIndex ?? nextState.activeTooltipIndex;
         const idx = typeof rawIdx === 'number' ? rawIdx : typeof rawIdx === 'string' ? parseInt(rawIdx, 10) : -1;
@@ -563,8 +572,7 @@ export default function StrikeHistoryTab({
   const isCall = optionType === 'CE';
   const isOTM = isCall ? distSpot > 0 : distSpot < 0;
   const distAbs = Math.abs(distSpot);
-  const moneynessBadge =
-    distAbs < 25 ? 'ATM' : `${Math.round(distAbs)} pts ${isOTM ? 'OTM' : 'ITM'}`;
+  const moneynessBadge = distAbs < 25 ? 'ATM' : `${Math.round(distAbs)} pts ${isOTM ? 'OTM' : 'ITM'}`;
 
   const gridProps = { strokeDasharray: '3 6', stroke: '#20202399', vertical: false as const };
   const xAxisProps = {
@@ -725,9 +733,13 @@ export default function StrikeHistoryTab({
         <div className="relative flex items-stretch gap-6 px-5 py-4 flex-wrap">
           {/* Specific Strike */}
           <PulseStat
-            label="Specific Strike"
+            label={strikeMode === 'fixed' ? 'Fixed Strike' : 'Rolling Strike'}
             value={`${activeStrike.toLocaleString('en-IN')} ${optionType}`}
-            sub={`${strikeRelative} · ${moneynessBadge}`}
+            sub={
+              strikeMode === 'fixed'
+                ? `Constant strike · ${moneynessBadge}`
+                : `${strikeRelative} · ${moneynessBadge}`
+            }
             color={accent.text}
           />
 
@@ -819,7 +831,11 @@ export default function StrikeHistoryTab({
           </div>
         ) : (
           <div className="flex items-center justify-between w-full text-zinc-500 font-sans text-[11px]">
-            <span>Hover anywhere on the chart to inspect underlying spot, exact strike, and decay rates at that bar.</span>
+            <span>
+              {strikeMode === 'fixed'
+                ? `Tracking constant fixed strike ${activeStrike.toLocaleString('en-IN')} ${optionType} across entire expiry.`
+                : `Tracking rolling ${strikeRelative} offset as spot moves across expiry.`}
+            </span>
             <span className="font-mono text-zinc-400">
               {daysCount} Days · {rows.length} {interval} Bars · Expiry: {expiry}
             </span>
@@ -832,11 +848,14 @@ export default function StrikeHistoryTab({
         <div className="flex items-center justify-between mb-4 flex-wrap gap-3">
           <div>
             <p className="text-[9px] font-bold text-zinc-500 uppercase tracking-[0.16em] mb-1">
-              Decay Curve · {strikeRelative} {optionType}
+              Decay Curve ·{' '}
+              {strikeMode === 'fixed'
+                ? `${activeStrike.toLocaleString('en-IN')} (Fixed Strike)`
+                : `${strikeRelative} (Rolling Offset)`}{' '}
+              {optionType}
             </p>
             <p className="text-sm font-bold text-white tracking-tight">
-              {activeStrike ? `${activeStrike.toLocaleString('en-IN')} ${optionType}` : strikeRelative} — Option Price
-              &amp; Underlying Spot
+              {activeStrike.toLocaleString('en-IN')} {optionType} — Option Price &amp; Underlying Spot
             </p>
             <p className="text-[10px] text-zinc-500 mt-0.5">
               {interval} bars · {timeline} timeframe · {expiry} expiry · {daysCount} trading days

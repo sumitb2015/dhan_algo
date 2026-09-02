@@ -53,6 +53,12 @@ interface ExpiriesPayload {
   error?: string;
 }
 
+interface StrikesPayload {
+  expiry: string;
+  strikes: number[];
+  error?: string;
+}
+
 export async function GET(request: NextRequest) {
   const { searchParams } = new URL(request.url);
   const mode = searchParams.get('mode');
@@ -74,29 +80,64 @@ export async function GET(request: NextRequest) {
     }
   }
 
+  if (mode === 'strikes') {
+    const expiry = (searchParams.get('expiry') ?? '').trim();
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(expiry)) {
+      return NextResponse.json({ success: false, error: 'invalid expiry format (expected YYYY-MM-DD)' }, { status: 400 });
+    }
+    try {
+      const parsed = await dedupe(`strike-history:strikes:${expiry}`, () =>
+        runPythonJson<StrikesPayload>(SCRIPT, ['--list-strikes', '--expiry', expiry], 30_000)
+      );
+      if (parsed.error) {
+        return NextResponse.json({ success: false, error: parsed.error }, { status: 500 });
+      }
+      const response = NextResponse.json({ success: true, expiry, strikes: parsed.strikes });
+      response.headers.set('Cache-Control', 'public, s-maxage=300, stale-while-revalidate=600');
+      return response;
+    } catch (err) {
+      console.error('[/api/options/strike-history?mode=strikes] error:', err);
+      return NextResponse.json({ success: false, error: String(err) }, { status: 500 });
+    }
+  }
+
   const expiry = (searchParams.get('expiry') ?? '').trim();
+  const strikeParam = searchParams.get('strike');
   const rawRelative = (searchParams.get('strikeRelative') ?? '').trim();
-  const strikeRelative = rawRelative.toUpperCase().replace(/\s+/g, '+');
   const optionType = (searchParams.get('optionType') ?? '').trim().toUpperCase();
 
   if (!/^\d{4}-\d{2}-\d{2}$/.test(expiry)) {
     return NextResponse.json({ success: false, error: 'invalid expiry format (expected YYYY-MM-DD)' }, { status: 400 });
   }
-  if (!STRIKE_RELATIVE_RE.test(strikeRelative)) {
-    return NextResponse.json({ success: false, error: `invalid strikeRelative "${rawRelative}". Expected ATM or ATM±[1-10]` }, { status: 400 });
-  }
   if (optionType !== 'CE' && optionType !== 'PE') {
     return NextResponse.json({ success: false, error: 'invalid optionType (expected CE or PE)' }, { status: 400 });
   }
 
+  const strikeNum = strikeParam ? parseFloat(strikeParam) : null;
+  const isFixed = strikeNum !== null && !isNaN(strikeNum) && strikeNum > 0;
+  const strikeRelative = rawRelative ? rawRelative.toUpperCase().replace(/\s+/g, '+') : '';
+
+  if (!isFixed && !STRIKE_RELATIVE_RE.test(strikeRelative)) {
+    return NextResponse.json(
+      {
+        success: false,
+        error: `invalid strike or strikeRelative. Provide strike (e.g. 24000) or strikeRelative (e.g. ATM+2)`,
+      },
+      { status: 400 }
+    );
+  }
+
   try {
-    const key = `strike-history:${expiry}:${strikeRelative}:${optionType}`;
+    const key = isFixed
+      ? `strike-history:${expiry}:fixed:${strikeNum}:${optionType}`
+      : `strike-history:${expiry}:rel:${strikeRelative}:${optionType}`;
+
+    const args = isFixed
+      ? ['--expiry', expiry, '--strike', String(strikeNum), '--option-type', optionType]
+      : ['--expiry', expiry, '--strike-relative', strikeRelative, '--option-type', optionType];
+
     const parsed = await dedupe(key, () =>
-      runPythonJson<StrikeHistoryPayload>(
-        SCRIPT,
-        ['--expiry', expiry, '--strike-relative', strikeRelative, '--option-type', optionType],
-        45_000
-      )
+      runPythonJson<StrikeHistoryPayload>(SCRIPT, args, 45_000)
     );
 
     if (parsed.error) {

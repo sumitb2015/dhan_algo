@@ -29,19 +29,47 @@ def list_expiries() -> dict:
     return {"expiries": expiries}
 
 
-def fetch_series(expiry: str, strike_relative: str, option_type: str) -> dict:
-    strike_relative = strike_relative.strip().upper().replace(" ", "+")
-    option_type = option_type.strip().upper()
-
+def list_strikes(expiry: str) -> dict:
     conn = sqlite3.connect(str(DB_PATH))
     try:
         cursor = conn.execute(
-            "SELECT datetime, open, high, low, close, strike, spot, oi, volume, iv "
-            "FROM option_prices "
-            "WHERE expiry = ? AND strike_relative = ? AND option_type = ? "
-            "ORDER BY datetime",
-            (expiry, strike_relative, option_type),
+            "SELECT DISTINCT strike FROM option_prices WHERE expiry = ? ORDER BY strike ASC",
+            (expiry,),
         )
+        strikes = [row[0] for row in cursor.fetchall()]
+    finally:
+        conn.close()
+    return {"expiry": expiry, "strikes": strikes}
+
+
+def fetch_series(
+    expiry: str,
+    option_type: str,
+    strike_relative: str | None = None,
+    strike: float | None = None,
+) -> dict:
+    option_type = option_type.strip().upper()
+    if strike_relative:
+        strike_relative = strike_relative.strip().upper().replace(" ", "+")
+
+    conn = sqlite3.connect(str(DB_PATH))
+    try:
+        if strike is not None and strike > 0:
+            cursor = conn.execute(
+                "SELECT datetime, open, high, low, close, strike, spot, oi, volume, iv "
+                "FROM option_prices "
+                "WHERE expiry = ? AND option_type = ? AND strike = ? "
+                "ORDER BY datetime",
+                (expiry, option_type, strike),
+            )
+        else:
+            cursor = conn.execute(
+                "SELECT datetime, open, high, low, close, strike, spot, oi, volume, iv "
+                "FROM option_prices "
+                "WHERE expiry = ? AND strike_relative = ? AND option_type = ? "
+                "ORDER BY datetime",
+                (expiry, strike_relative, option_type),
+            )
         rows = cursor.fetchall()
     finally:
         conn.close()
@@ -53,13 +81,13 @@ def fetch_series(expiry: str, strike_relative: str, option_type: str) -> dict:
             "high": h,
             "low": l,
             "close": c,
-            "strike": strike,
+            "strike": strike_val,
             "spot": spot,
             "oi": oi,
             "volume": volume,
             "iv": iv,
         }
-        for dt, o, h, l, c, strike, spot, oi, volume, iv in rows
+        for dt, o, h, l, c, strike_val, spot, oi, volume, iv in rows
     ]
 
     meta = {}
@@ -100,6 +128,8 @@ def fetch_series(expiry: str, strike_relative: str, option_type: str) -> dict:
 
     return {
         "expiry": expiry,
+        "strikeMode": "fixed" if (strike is not None and strike > 0) else "relative",
+        "strike": strike if (strike is not None and strike > 0) else (points[-1]["strike"] if points else None),
         "strikeRelative": strike_relative,
         "optionType": option_type,
         "meta": meta,
@@ -110,7 +140,9 @@ def fetch_series(expiry: str, strike_relative: str, option_type: str) -> dict:
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--list-expiries", action="store_true")
+    parser.add_argument("--list-strikes", action="store_true")
     parser.add_argument("--expiry")
+    parser.add_argument("--strike", type=float)
     parser.add_argument("--strike-relative")
     parser.add_argument("--option-type", choices=["CE", "PE"])
     args = parser.parse_args()
@@ -119,11 +151,27 @@ def main() -> None:
         print(json.dumps(list_expiries()))
         return
 
-    if not args.expiry or not args.strike_relative or not args.option_type:
-        print(json.dumps({"error": "--expiry, --strike-relative and --option-type are required"}))
+    if args.list_strikes:
+        if not args.expiry:
+            print(json.dumps({"error": "--expiry is required for --list-strikes"}))
+            sys.exit(1)
+        print(json.dumps(list_strikes(args.expiry)))
+        return
+
+    if not args.expiry or not args.option_type or (not args.strike_relative and not args.strike):
+        print(json.dumps({"error": "--expiry, --option-type, and either --strike or --strike-relative are required"}))
         sys.exit(1)
 
-    print(json.dumps(fetch_series(args.expiry, args.strike_relative, args.option_type)))
+    print(
+        json.dumps(
+            fetch_series(
+                expiry=args.expiry,
+                option_type=args.option_type,
+                strike_relative=args.strike_relative,
+                strike=args.strike,
+            )
+        )
+    )
 
 
 if __name__ == "__main__":
