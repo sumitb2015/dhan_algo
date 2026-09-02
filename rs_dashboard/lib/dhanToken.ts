@@ -66,8 +66,17 @@ export async function dhanGet(apiPath: string, timeoutMs = 10_000): Promise<unkn
   if (!res.ok) {
     let detail = `HTTP ${res.status}`;
     try {
-      const json = await res.json() as Record<string, unknown>;
-      detail = String(json.errorMessage ?? json.remarks ?? json.message ?? JSON.stringify(json));
+      const text = await res.text();
+      try {
+        const json = JSON.parse(text) as Record<string, unknown>;
+        detail = String(json.errorMessage ?? json.remarks ?? json.message ?? JSON.stringify(json));
+      } catch {
+        if (text.includes("CloudFront wasn't able to resolve the origin domain name")) {
+          detail = 'HTTP 502 Bad Gateway (Dhan CloudFront origin DNS failure — broker outage)';
+        } else if (res.status === 502) {
+          detail = 'HTTP 502 Bad Gateway (Dhan backend servers unavailable)';
+        }
+      }
     } catch {}
     throw new Error(`Dhan GET ${apiPath} failed: ${detail}`);
   }
@@ -99,8 +108,17 @@ export async function dhanPost(
   if (!res.ok) {
     let detail = `HTTP ${res.status}`;
     try {
-      const json = await res.json() as Record<string, unknown>;
-      detail = String(json.errorMessage ?? json.remarks ?? json.message ?? JSON.stringify(json));
+      const text = await res.text();
+      try {
+        const json = JSON.parse(text) as Record<string, unknown>;
+        detail = String(json.errorMessage ?? json.remarks ?? json.message ?? JSON.stringify(json));
+      } catch {
+        if (text.includes("CloudFront wasn't able to resolve the origin domain name")) {
+          detail = 'HTTP 502 Bad Gateway (Dhan CloudFront origin DNS failure — broker outage)';
+        } else if (res.status === 502) {
+          detail = 'HTTP 502 Bad Gateway (Dhan backend servers unavailable)';
+        }
+      }
     } catch {}
     throw new Error(`Dhan POST ${apiPath} failed: ${detail}`);
   }

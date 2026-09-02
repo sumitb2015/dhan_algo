@@ -12,7 +12,11 @@ export async function GET(): Promise<NextResponse> {
     const [positions, orders, trades] = await Promise.all([
       dhanGet('/positions').catch(err => {
         positionsError = String(err?.message ?? err);
-        console.error('[/api/scalper/poll] positions fetch failed:', err);
+        if (positionsError.includes('502') || positionsError.includes('503') || positionsError.includes('504')) {
+          console.warn('[/api/scalper/poll] upstream broker unavailable:', positionsError);
+        } else {
+          console.error('[/api/scalper/poll] positions fetch failed:', err);
+        }
         return null;
       }),
       dhanGet('/orders').catch(() => []),
