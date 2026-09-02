@@ -125,3 +125,73 @@ export async function dhanPost(
   return res.json();
 }
 
+/**
+ * Authenticated PUT against the Dhan REST API (used for order modifications).
+ */
+export async function dhanPut(
+  apiPath: string,
+  payload: Record<string, unknown> = {},
+  timeoutMs = 10_000,
+): Promise<unknown> {
+  const { clientId, token } = getDhanCredentials();
+  const body = { ...payload, dhanClientId: clientId };
+  const res = await fetch(`${DHAN_BASE}${apiPath}`, {
+    method: 'PUT',
+    headers: {
+      'access-token': token,
+      'client-id': clientId,
+      'Content-Type': 'application/json',
+      'Accept': 'application/json',
+    },
+    body: JSON.stringify(body),
+    signal: AbortSignal.timeout(timeoutMs),
+  });
+  if (!res.ok) {
+    let detail = `HTTP ${res.status}`;
+    try {
+      const text = await res.text();
+      try {
+        const json = JSON.parse(text) as Record<string, unknown>;
+        detail = String(json.errorMessage ?? json.remarks ?? json.message ?? JSON.stringify(json));
+      } catch {
+        if (text.includes("CloudFront wasn't able to resolve the origin domain name")) {
+          detail = 'HTTP 502 Bad Gateway (Dhan CloudFront origin DNS failure — broker outage)';
+        } else if (res.status === 502) {
+          detail = 'HTTP 502 Bad Gateway (Dhan backend servers unavailable)';
+        }
+      }
+    } catch {}
+    throw new Error(`Dhan PUT ${apiPath} failed: ${detail}`);
+  }
+  return res.json();
+}
+
+/**
+ * Authenticated DELETE against the Dhan REST API (used for order cancellations).
+ */
+export async function dhanDelete(apiPath: string, timeoutMs = 10_000): Promise<unknown> {
+  const { clientId, token } = getDhanCredentials();
+  const res = await fetch(`${DHAN_BASE}${apiPath}`, {
+    method: 'DELETE',
+    headers: {
+      'access-token': token,
+      'client-id': clientId,
+      'Accept': 'application/json',
+    },
+    signal: AbortSignal.timeout(timeoutMs),
+  });
+  if (!res.ok) {
+    let detail = `HTTP ${res.status}`;
+    try {
+      const text = await res.text();
+      try {
+        const json = JSON.parse(text) as Record<string, unknown>;
+        detail = String(json.errorMessage ?? json.remarks ?? json.message ?? JSON.stringify(json));
+      } catch {}
+    } catch {}
+    throw new Error(`Dhan DELETE ${apiPath} failed: ${detail}`);
+  }
+  return res.json();
+}
+
+
