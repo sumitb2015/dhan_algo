@@ -294,6 +294,11 @@ export type MultiLegMatch =
  * Reconciles a leg against broker positions.
  * - If broker has a live matching row (netQty != 0):
  *   Ensures status is 'OPEN' and updates fill quantity and average price from broker truth.
+ *   The cap (maxQty) only applies **downward**: if the broker shows LESS than expected we
+ *   respect it (partial fill, or a sibling strategy consumed some contracts). If broker shows
+ *   MORE than this basket expected, we trust the broker and update lots upward — this handles
+ *   the case where a new limit order fills after the leg was first created (e.g. a pending
+ *   order placed via the Orders modal that later executes at a better price).
  * - If broker explicitly reports the position closed/flat:
  *   Marks status as 'CLOSED' and zeroes fill quantity.
  * - If broker position is not found or ambiguous:
@@ -310,8 +315,12 @@ export function reconcileLegWithBroker(
     if (brokerQty > 0) {
       const brokerAvg = Number(match.row.sellAvg || match.row.buyAvg || match.row.costPrice || 0);
       const avgPrice = brokerAvg > 0 ? brokerAvg : (leg.fill?.avgPrice ?? 0);
-      const cap = maxQty ?? (leg.fill?.qty && leg.fill.qty > 0 ? leg.fill.qty : 0);
-      const qty = cap > 0 ? Math.min(brokerQty, cap) : brokerQty;
+
+      // Broker is the source of truth for quantity — always trust it fully.
+      // We intentionally do NOT cap upward: a pending limit order that fills after
+      // the leg was registered will show more qty on the broker than the leg's local
+      // state, and the leg's lots/fill should be updated to reflect reality.
+      const qty = brokerQty;
       const lots = (lotSize && lotSize > 0) ? Math.max(1, Math.round(qty / lotSize)) : leg.lots;
       return {
         ...leg,

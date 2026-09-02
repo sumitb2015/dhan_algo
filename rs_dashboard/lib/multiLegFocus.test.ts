@@ -153,6 +153,20 @@ test('reconcileLegWithBroker updates lots to match broker filled qty / lotSize',
   assert.strictEqual(reconciled.lots, 1);
 });
 
+test('reconcileLegWithBroker updates lots UPWARD when a pending limit order fills beyond the registered leg qty', () => {
+  // Regression test: leg was registered as 1 lot (65 contracts), but the user placed a
+  // separate limit order for the same strike via the Orders modal. That order filled,
+  // and the broker now shows netQty = -130 (2 lots). The leg's local state still has
+  // lots: 1 and maxQty = 65. The fix: broker is source of truth — update upward.
+  const leg: MultiLegLeg = { id: '1', side: 'S', option: 'PE', strike: 23500, lots: 1, type: 'MARKET', status: 'OPEN', fill: { qty: 65, avgPrice: 110 }, orderRef: { securityId: '47298' } };
+  const match = { kind: 'match' as const, row: { securityId: '47298', netQty: -130, sellAvg: 108.5 } };
+  const reconciled = reconcileLegWithBroker(leg, match, 65 /* maxQty = 1 lot */, 65);
+  assert.strictEqual(reconciled.status, 'OPEN');
+  assert.strictEqual(reconciled.fill?.qty, 130);  // 2 lots worth, from broker
+  assert.strictEqual(reconciled.lots, 2);           // lots updated upward
+  assert.strictEqual(reconciled.fill?.avgPrice, 108.5);
+});
+
 test('computeLegTrailingSL: Sell leg triggers hard SL and TP correctly', () => {
   const leg: MultiLegLeg = {
     id: '1', side: 'S', option: 'PE', strike: 23500, lots: 1, type: 'MARKET', status: 'OPEN',
