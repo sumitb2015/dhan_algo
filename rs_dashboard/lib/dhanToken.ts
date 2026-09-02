@@ -163,6 +163,8 @@ export async function dhanPut(
     } catch {}
     throw new Error(`Dhan PUT ${apiPath} failed: ${detail}`);
   }
+  // 204 No Content is a valid success — res.json() would throw on an empty body.
+  if (res.status === 204) return {};
   return res.json();
 }
 
@@ -201,6 +203,9 @@ export async function dhanDelete(apiPath: string, timeoutMs = 10_000): Promise<u
     } catch {}
     throw new Error(`Dhan DELETE ${apiPath} failed: ${detail}`);
   }
+  // 204 No Content is a valid success — res.json() would throw on an empty body,
+  // causing the UI to show "cancel failed" even though the order was cancelled.
+  if (res.status === 204) return {};
   return res.json();
 }
 

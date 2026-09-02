@@ -112,6 +112,8 @@ export default function MultiLegFocus() {
   const [expiriesMap, setExpiriesMap] = useState<Record<string, string[]>>({});
   const [chainData, setChainData] = useState<Record<string, { spot: number; strikes: number[]; quotes: Record<string, { ce: number; pe: number }> }>>({});
   const [lookupCache, setLookupCache] = useState<Record<string, { lotSize: number; strikes: Record<string, StrikeIdentifier> }>>({});
+  const lookupCacheRef = useRef(lookupCache);
+  useEffect(() => { lookupCacheRef.current = lookupCache; }, [lookupCache]);
 
   // Active / Primary underlying & expiry for WebSocket streaming
   const activeUnderlying = useMemo(() => {
@@ -267,7 +269,7 @@ export default function MultiLegFocus() {
         .catch(() => {});
 
       // Also ensure lookup data (lot size & strike map) is loaded
-      if (!lookupCache[pair]) {
+      if (!lookupCacheRef.current[pair]) {
         const lookupUrl = broker === 'dhan'
           ? `/api/scalper/lookup?underlying=${u}&expiry=${exp}`
           : scalperRoute(broker, `lookup?underlying=${u}&expiry=${exp}`);
@@ -287,7 +289,7 @@ export default function MultiLegFocus() {
           .catch(() => {});
       }
     }
-  }, [broker, activeUnderlying, activeExpiry, lookupCache]);
+  }, [broker, activeUnderlying, activeExpiry]);
 
   useEffect(() => {
     fetchAllChains();
@@ -777,7 +779,8 @@ export default function MultiLegFocus() {
         const newAvgPrice = ((oldAvg * oldQty) + (fillPrice * qty)) / newTotalQty;
         const newLots = leg.lots + params.lots;
 
-        const updatedLegs = basket.legs.map(l => {
+        const latestLegs = basketsRef.current.find(b => b.id === basket.id)?.legs ?? basket.legs;
+        const updatedLegs = latestLegs.map(l => {
           if (l.id !== leg.id) return l;
           return {
             ...l,
@@ -882,7 +885,8 @@ export default function MultiLegFocus() {
           },
         };
 
-        updateBasket(basket.id, { legs: [...basket.legs, newLeg] });
+        const latestLegs = basketsRef.current.find(b => b.id === basket.id)?.legs ?? basket.legs;
+        updateBasket(basket.id, { legs: [...latestLegs, newLeg] });
         addToast('success', `Added new leg ${label}`, `Filled @ ₹${fillPrice.toFixed(2)} (${params.lots} lots)`);
         pollFunds();
         fetchMarginsForBaskets();
@@ -929,7 +933,7 @@ export default function MultiLegFocus() {
             const nextBaskets = prevBaskets.map(basket => {
               let basketChange = false;
               const pair = `${basket.underlying}:${basket.expiry}`;
-              const lotSize = lookupCache[pair]?.lotSize ?? (basket.underlying === 'NIFTY' ? 65 : 15);
+              const lotSize = lookupCacheRef.current[pair]?.lotSize ?? (basket.underlying === 'NIFTY' ? 65 : 15);
 
               const nextLegs = basket.legs.map(leg => {
                 if (!leg.orderRef) return leg;
@@ -968,7 +972,7 @@ export default function MultiLegFocus() {
     poll();
     const interval = setInterval(poll, 3000);
     return () => { cancelled = true; clearInterval(interval); };
-  }, [broker, showOrdersModal, lookupCache, persistBasket]);
+  }, [broker, showOrdersModal, persistBasket]);
 
   // ── Automated Risk Watcher: SL, TP, Trailing SL, Strategy Target/SL ─
   const triggeredLegExitsRef = useRef<Set<string>>(new Set());

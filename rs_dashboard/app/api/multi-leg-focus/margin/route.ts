@@ -34,7 +34,7 @@ interface MarginCacheEntry {
 const marginCache = new Map<string, MarginCacheEntry>();
 const CACHE_TTL_MS = 60_000; // 60s cache — margin requirements do not change on rapid ticks
 
-const inflightMargins = new Map<string, Promise<Record<string, unknown>>>();
+const inflightMargins = new Map<string, Promise<MarginCacheEntry['data']>>();
 
 export async function POST(req: NextRequest): Promise<NextResponse> {
   try {
@@ -172,7 +172,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       };
     })();
 
-    inflightMargins.set(cacheKey, computePromise as Promise<Record<string, unknown>>);
+    inflightMargins.set(cacheKey, computePromise);
     const resultData = await computePromise.finally(() => inflightMargins.delete(cacheKey));
 
     marginCache.set(cacheKey, { data: resultData, ts: Date.now() });
