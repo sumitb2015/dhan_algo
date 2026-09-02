@@ -4,7 +4,7 @@ import { PROJECT_ROOT, runPythonJson, dedupe } from '@/lib/pyExec';
 
 const SCRIPT = path.join(PROJECT_ROOT, 'scripts', 'analysis', 'strike_history.py');
 
-const STRIKE_RELATIVE_RE = /^ATM([+-](?:[1-9]|10))?$/;
+const STRIKE_RELATIVE_RE = /^ATM([+-](?:[1-9]|10))?$/i;
 
 export interface StrikeHistoryPoint {
   datetime: string;
@@ -19,10 +19,31 @@ export interface StrikeHistoryPoint {
   iv: number;
 }
 
+export interface StrikeHistoryMeta {
+  initialSpot: number;
+  latestSpot: number;
+  spotChange: number;
+  spotChangePct: number;
+  initialStrike: number;
+  latestStrike: number;
+  minStrike: number;
+  maxStrike: number;
+  distinctStrikes: number[];
+  initialClose: number;
+  latestClose: number;
+  minClose: number;
+  maxClose: number;
+  decay: number;
+  decayPct: number;
+  tradingDays: string[];
+  totalDays: number;
+}
+
 interface StrikeHistoryPayload {
   expiry: string;
   strikeRelative: string;
   optionType: 'CE' | 'PE';
+  meta?: StrikeHistoryMeta;
   points: StrikeHistoryPoint[];
   error?: string;
 }
@@ -53,18 +74,19 @@ export async function GET(request: NextRequest) {
     }
   }
 
-  const expiry = searchParams.get('expiry') ?? '';
-  const strikeRelative = searchParams.get('strikeRelative') ?? '';
-  const optionType = searchParams.get('optionType') ?? '';
+  const expiry = (searchParams.get('expiry') ?? '').trim();
+  const rawRelative = (searchParams.get('strikeRelative') ?? '').trim();
+  const strikeRelative = rawRelative.toUpperCase().replace(/\s+/g, '+');
+  const optionType = (searchParams.get('optionType') ?? '').trim().toUpperCase();
 
   if (!/^\d{4}-\d{2}-\d{2}$/.test(expiry)) {
-    return NextResponse.json({ success: false, error: 'invalid expiry' }, { status: 400 });
+    return NextResponse.json({ success: false, error: 'invalid expiry format (expected YYYY-MM-DD)' }, { status: 400 });
   }
   if (!STRIKE_RELATIVE_RE.test(strikeRelative)) {
-    return NextResponse.json({ success: false, error: 'invalid strikeRelative' }, { status: 400 });
+    return NextResponse.json({ success: false, error: `invalid strikeRelative "${rawRelative}". Expected ATM or ATM±[1-10]` }, { status: 400 });
   }
   if (optionType !== 'CE' && optionType !== 'PE') {
-    return NextResponse.json({ success: false, error: 'invalid optionType' }, { status: 400 });
+    return NextResponse.json({ success: false, error: 'invalid optionType (expected CE or PE)' }, { status: 400 });
   }
 
   try {

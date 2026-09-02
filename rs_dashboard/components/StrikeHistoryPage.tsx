@@ -1,7 +1,7 @@
 'use client';
 
-import React, { useState, useEffect } from 'react';
-import StrikeHistoryTab from './StrikeHistoryTab';
+import React, { useState, useEffect, useMemo } from 'react';
+import StrikeHistoryTab, { type ContextMeta, type HoverContext } from './StrikeHistoryTab';
 
 const UNDERLYING = 'NIFTY';
 
@@ -12,16 +12,22 @@ const OFFSETS = [
 ];
 
 export default function StrikeHistoryPage() {
-  const [expiry, setExpiry]     = useState('');
+  const [expiry, setExpiry] = useState('');
   const [expiries, setExpiries] = useState<string[]>([]);
   const [expiriesLoading, setExpiriesLoading] = useState(false);
   const [strikeRelative, setStrikeRelative] = useState('ATM');
   const [optionType, setOptionType] = useState<'CE' | 'PE'>('CE');
   const [error, setError] = useState('');
 
+  // Live contextual states fed back from the chart
+  const [contextMeta, setContextMeta] = useState<ContextMeta | null>(null);
+  const [hoverContext, setHoverContext] = useState<HoverContext | null>(null);
+
   useEffect(() => {
-    setExpiriesLoading(true);
-    setError('');
+    queueMicrotask(() => {
+      setExpiriesLoading(true);
+      setError('');
+    });
 
     fetch('/api/options/strike-history?mode=expiries')
       .then(r => r.json())
@@ -37,10 +43,43 @@ export default function StrikeHistoryPage() {
       .finally(() => setExpiriesLoading(false));
   }, []);
 
+  // Compute reference ATM strike for dropdown labels
+  const atmRefStrike = useMemo(() => {
+    if (!contextMeta?.currentSpot) return null;
+    return Math.round(contextMeta.currentSpot / 50) * 50;
+  }, [contextMeta?.currentSpot]);
+
+  const offsetToStrike = (offset: string): number | null => {
+    if (!atmRefStrike) return null;
+    if (offset === 'ATM') return atmRefStrike;
+    const match = offset.match(/^ATM([+-]\d+)$/);
+    if (!match) return null;
+    const delta = parseInt(match[1], 10) * 50;
+    return atmRefStrike + delta;
+  };
+
+  // Active displayed values (hovered or latest)
+  const activeSpot = hoverContext ? hoverContext.spot : contextMeta?.currentSpot ?? 0;
+  const activeStrike = hoverContext ? hoverContext.strike : contextMeta?.specificStrike ?? null;
+  const spotChange = contextMeta?.spotChange ?? 0;
+  const spotChangePct = contextMeta?.spotChangePct ?? 0;
+
+  // Moneyness text
+  const moneynessText = useMemo(() => {
+    if (!activeStrike || !activeSpot) return '';
+    const diff = activeStrike - activeSpot;
+    const isCall = optionType === 'CE';
+    const isOTM = isCall ? diff > 0 : diff < 0;
+    const absDiff = Math.abs(diff);
+    if (absDiff < 25) return 'ATM';
+    return `${Math.round(absDiff)} pts ${isOTM ? 'OTM' : 'ITM'}`;
+  }, [activeStrike, activeSpot, optionType]);
+
   return (
     <div className="flex flex-col min-h-screen bg-zinc-950 text-white">
-      <div className="sticky top-0 z-10 flex items-center justify-between gap-3 flex-wrap
-                      px-6 py-3 border-b border-zinc-800 bg-zinc-950/95 backdrop-blur">
+      {/* ── Sticky Header ────────────────────────────────────────── */}
+      <div className="sticky top-0 z-20 flex items-center justify-between gap-3 flex-wrap px-6 py-3 border-b border-zinc-800 bg-zinc-950/95 backdrop-blur">
+        {/* Title / Domain */}
         <div className="flex items-center gap-3">
           <div className="flex items-center justify-center w-8 h-8 rounded-lg bg-emerald-500/10 border border-emerald-500/25 shrink-0">
             <svg width="15" height="15" viewBox="0 0 24 24" fill="none" className="text-emerald-400">
@@ -52,47 +91,101 @@ export default function StrikeHistoryPage() {
             <p className="text-[9px] font-bold text-emerald-500 uppercase tracking-[0.18em] mb-0.5">
               Options · {UNDERLYING}
             </p>
-            <h1 className="text-sm font-bold text-white tracking-tight leading-none">Strike History</h1>
+            <h1 className="text-sm font-bold text-white tracking-tight leading-none">Strike History &amp; Decay</h1>
             <p className="text-[10px] text-zinc-500 font-medium mt-1">
-              1-minute close price of one strike across its expiry lifetime
+              Historical decay curve, multi-timeframe OHLC &amp; underlying spot tracking
             </p>
           </div>
         </div>
 
+        {/* Center Live Tickers: Spot & Strike */}
+        {activeSpot > 0 && (
+          <div className="flex items-center gap-2 flex-wrap">
+            {/* Underlying Spot Badge */}
+            <div className="flex items-center gap-2 px-3 py-1.5 rounded-xl bg-zinc-900/80 border border-cyan-500/25">
+              <span className="w-2 h-2 rounded-full bg-cyan-400 animate-pulse" />
+              <div className="flex flex-col font-mono leading-tight">
+                <span className="text-[9px] text-zinc-400 uppercase tracking-wider font-sans font-bold">
+                  {hoverContext ? `Spot @ ${hoverContext.time}` : 'NIFTY Spot'}
+                </span>
+                <span className="text-xs font-bold text-cyan-400 tabular-nums">
+                  ₹{activeSpot.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                  {!hoverContext && (
+                    <span
+                      className={`ml-1.5 text-[10px] ${spotChange >= 0 ? 'text-emerald-400' : 'text-red-400'}`}
+                    >
+                      ({spotChange >= 0 ? '+' : ''}
+                      {spotChange.toFixed(1)} / {spotChangePct.toFixed(1)}%)
+                    </span>
+                  )}
+                </span>
+              </div>
+            </div>
+
+            {/* Specific Strike Badge */}
+            {activeStrike && (
+              <div className="flex items-center gap-2 px-3 py-1.5 rounded-xl bg-zinc-900/80 border border-zinc-700">
+                <div className="flex flex-col font-mono leading-tight">
+                  <span className="text-[9px] text-zinc-400 uppercase tracking-wider font-sans font-bold">
+                    Chosen Strike
+                  </span>
+                  <span className="text-xs font-bold text-white tabular-nums flex items-center gap-1.5">
+                    {activeStrike.toLocaleString('en-IN')} {optionType}
+                    <span className="text-[10px] px-1 py-0.2 rounded bg-zinc-800 text-emerald-400 font-medium font-sans">
+                      {strikeRelative} · {moneynessText}
+                    </span>
+                  </span>
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* Right Controls: Expiry, Strike, Option Type */}
         <div className="flex items-center gap-2 flex-wrap">
           {expiry && (
-            <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[10px] font-bold
-                             bg-zinc-900 text-zinc-400 border border-zinc-700 font-mono tracking-wide">
+            <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[10px] font-bold bg-zinc-900 text-zinc-400 border border-zinc-700 font-mono tracking-wide">
               DATA: {expiry}
             </span>
           )}
 
+          {/* Expiry Select */}
           <div className="flex items-center gap-1.5">
             <span className="text-[10px] text-zinc-500 font-bold uppercase tracking-widest">Expiry</span>
             <select
               value={expiry}
               onChange={e => setExpiry(e.target.value)}
               disabled={expiriesLoading}
-              className="bg-zinc-900 border border-zinc-700 text-zinc-200 text-xs font-mono font-semibold
-                         rounded-lg px-2.5 py-1.5 focus:outline-none focus:border-emerald-500
-                         disabled:opacity-50 tabular-nums"
+              className="bg-zinc-900 border border-zinc-700 text-zinc-200 text-xs font-mono font-semibold rounded-lg px-2.5 py-1.5 focus:outline-none focus:border-emerald-500 disabled:opacity-50 tabular-nums"
             >
-              {expiries.map(e => <option key={e} value={e}>{e}</option>)}
+              {expiries.map(e => (
+                <option key={e} value={e}>
+                  {e}
+                </option>
+              ))}
             </select>
           </div>
 
+          {/* Strike Select with Dynamic Absolute Strike Labels */}
           <div className="flex items-center gap-1.5">
             <span className="text-[10px] text-zinc-500 font-bold uppercase tracking-widest">Strike</span>
             <select
               value={strikeRelative}
               onChange={e => setStrikeRelative(e.target.value)}
-              className="bg-zinc-900 border border-zinc-700 text-zinc-200 text-xs font-mono font-semibold
-                         rounded-lg px-2.5 py-1.5 focus:outline-none focus:border-emerald-500 tabular-nums"
+              className="bg-zinc-900 border border-zinc-700 text-zinc-200 text-xs font-mono font-semibold rounded-lg px-2.5 py-1.5 focus:outline-none focus:border-emerald-500 tabular-nums"
             >
-              {OFFSETS.map(o => <option key={o} value={o}>{o}</option>)}
+              {OFFSETS.map(o => {
+                const s = offsetToStrike(o);
+                return (
+                  <option key={o} value={o}>
+                    {o} {s ? `(${s.toLocaleString('en-IN')})` : ''}
+                  </option>
+                );
+              })}
             </select>
           </div>
 
+          {/* Option Type CE / PE Toggle */}
           <div className="flex items-center gap-1 bg-zinc-900 border border-zinc-800 p-0.5 rounded-lg">
             {(['CE', 'PE'] as const).map(t => (
               <button
@@ -119,9 +212,16 @@ export default function StrikeHistoryPage() {
         </div>
       )}
 
+      {/* Main Tab Content */}
       <div className="flex-1 flex flex-col gap-4 px-6 py-5">
         {expiry ? (
-          <StrikeHistoryTab expiry={expiry} strikeRelative={strikeRelative} optionType={optionType} />
+          <StrikeHistoryTab
+            expiry={expiry}
+            strikeRelative={strikeRelative}
+            optionType={optionType}
+            onContextMetaChange={setContextMeta}
+            onHoverContextChange={setHoverContext}
+          />
         ) : (
           !expiriesLoading && (
             <div className="flex items-center justify-center py-24 text-zinc-500 text-sm">
