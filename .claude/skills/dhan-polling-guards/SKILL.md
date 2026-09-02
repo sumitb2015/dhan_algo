@@ -152,6 +152,24 @@ This applies to every bridge under `scripts/tools/live_*_ws.py`
 `live_positions_ws.py`), not just the one it was first added to — check whether a
 sibling bridge has the same gap before assuming only the one you're editing needs it.
 
+### 10. A `useEffect` interval that depends on a ref-worthy value restarts on every resolution
+`MultiLegFocus`'s chain-fetch and broker-positions pollers listed a lookup cache
+(populated as lot sizes resolve, one at a time) as a `useEffect` dependency. Each
+resolution changed the cache reference, which tore down and recreated the
+`setInterval` — so the poll never reached a steady cadence, it kept restarting
+from tick zero. Anything read only to make a decision inside the interval
+callback, not to control when the effect itself should re-run, belongs in a ref
+read from inside the callback, not in the dependency array. (`49bd98e`)
+
+### 11. Don't let a fast poll and a slow poll share one rate-limited path
+Margin (expensive, changes slowly) was originally recomputed on every price-tick
+poll in `MultiLegFocus`, multiplying call volume into Dhan's per-account rate
+bucket (Guard 6) and tripping 429s that then read as "margin unavailable" on a
+perfectly fine basket. Give a slow-changing value its own interval and cache,
+decoupled from whatever fast poll happens to trigger the page's render — don't
+piggyback an expensive recompute onto a fast poll just because they're in the
+same component. (`ae935c7`)
+
 ## Before You Ship
 - Can two tabs run this at once? What happens if they do?
 - If this spawns something, what stops a second spawn during the startup window?

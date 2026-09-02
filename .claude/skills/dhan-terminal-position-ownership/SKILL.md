@@ -1,6 +1,6 @@
 ---
 name: dhan-terminal-position-ownership
-description: Use when a dashboard terminal (like FocusTool) has multiple rows or multiple execution engines (browser tab + server-side worker) that can each hold a position on the same underlying/strike, when sizing an exit or P&L off a broker position, when locking a strike selector because "a position is open", or when implementing a strike roll/shift that closes one leg and reopens another.
+description: Use when a dashboard terminal (like FocusTool or MultiLegFocus) has multiple rows/legs or multiple execution engines (browser tab + server-side worker) that can each hold a position on the same underlying/strike, when sizing an exit or P&L off a broker position, when locking a strike selector because "a position is open", or when implementing a strike roll/shift that closes one leg and reopens another.
 ---
 
 # Terminal Position Ownership & Strike Rolls
@@ -12,6 +12,9 @@ things (rows in a table, a browser tab vs. a server worker) resolve onto the
 same strike is one broker position away from one of them stomping the
 other. `FocusTool.tsx` hit this same bug shape seven times across ~10
 commits (`36144ad`, `2afbf1f`, `9e5b527`, `af5d9ea`, `13b0fef`, `8a44d49`).
+`MultiLegFocus.tsx` / `lib/multiLegFocus.ts` — the N-leg options basket
+builder — hit the reconciliation half of the same shape (`5a70b1f`,
+`d922a56`, `eed3868`); see Invariant 6.
 The Scalper/AdvancedScalper equivalent for pure broker-payload math (MCX
 multipliers, product identity) is `dhan-broker-positions` — this skill is
 about *who owns* a position, not what a payload field means.
@@ -100,11 +103,39 @@ control to the tab — that process can still trade, so a handover is exactly
 the double-driving the STALE check exists to catch; silence in that state
 must read as "danger," not "safe to take over."
 
+### 6. Reconciliation needs a propagation grace window, and trusts broker qty downward *and* upward from its own ledger
+`MultiLegFocus` reconciles each leg against the broker's position book on a poll
+tick. Two more failure shapes showed up here beyond Invariant 2's "never grow the
+ledger from broker state" (that rule still holds for *ownership* — never adopt a
+strike this leg didn't open):
+- A leg placed seconds ago can still show as flat in the broker's position book —
+  order ack races the position-book write. Reconciling immediately reads that as
+  "closed" and drops a live leg. Give a fresh leg a grace window (as in Invariant 2)
+  before trusting an absent broker position as a real close. (`5a70b1f`)
+- Once a leg is confirmed open, the artificial cap some early code applied — never
+  let the ledger qty exceed what this leg's own orders opened — was wrong for
+  *this leg's own* quantity: a partial fill completing, or a broker-side lot
+  adjustment, is real movement in a position this leg does own, not another row's
+  leg leaking in. For a leg already attributed to this row, trust the broker qty
+  fully (both directions) rather than clamping it against a stale local snapshot.
+  (`d922a56`, `eed3868` — sync leg lots to the broker's filled quantity on every
+  reconciliation pass)
+
+### 7. Re-read shared state after an `await`, not from a pre-await snapshot
+`addLotsToLeg` / `addNewLegToBasket` merged their result into a `basket.legs`
+array captured *before* an `await` (an order placement, a lookup). A concurrent
+reconciliation poll (this skill's own poll tick) can write to the same basket
+while the await is in flight; merging into the stale pre-await snapshot silently
+reverts whatever the poller just wrote. Re-read the current ref
+(`basketsRef.current`) after the await completes and merge into *that*. (`49bd98e`
+— see `dhan-polling-guards` for the sibling stale-closure fix in the same commit)
+
 ## Before You Ship
 - Does every lock/exit/P&L decision route through an ownership check
   (ledger + worker-hold), not a raw broker position/netQty read?
 - Does reconciliation only ever shrink the ledger, never grow it from broker
-  state?
+  state — *except* for a leg already owned by this row, where broker qty is the
+  full source of truth in both directions once past its propagation grace window?
 - Does fill confirmation look up the broker position for the *order's
   target symbol*, not a cached/pinned position reference?
 - Is a strike shift's reopen gated on the close having fully filled?

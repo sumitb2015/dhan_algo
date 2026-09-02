@@ -182,7 +182,7 @@ Strategies write their live state to `debug/<strategy_key>_state.json` every loo
 
 ### Next.js Dashboard (`rs_dashboard/`)
 
-App Router layout under `app/`. ~30 pages, ~48 API routes, still growing — **run `ls rs_dashboard/app` and `ls rs_dashboard/app/api` for the authoritative current list before assuming a page/route does or doesn't exist.** API route folders generally match page folders. Domains: RS/screening (`/`, movers, scanner, rrg, breadth, …), options (in the `app/(options)` route group on disk — URLs unchanged), live/intraday (live, scalper, advanced-scalper, futures), strategy ops (strategies, strategy-builder, backtest), portfolio/reports, `/login`.
+App Router layout under `app/`. ~43 pages, ~72 API routes, still growing — **run `ls rs_dashboard/app` and `ls rs_dashboard/app/api` for the authoritative current list before assuming a page/route does or doesn't exist.** API route folders generally match page folders. Domains: RS/screening (`/`, movers, scanner, rrg, breadth, …), options (in the `app/(options)` route group on disk — URLs unchanged), live/intraday (live, scalper, advanced-scalper, futures), strategy ops (strategies, strategy-builder, backtest), portfolio/reports, `/login`.
 
 Non-obvious route behaviors:
 - `live-equity/`, `live-indices/`, `live-normalized-1min*/` — manage the Python WebSocket bridges; POST `{action:"stop"}` writes the matching `debug/*_stop.trigger`.
@@ -195,6 +195,11 @@ Non-obvious route behaviors:
   formats with import-precedence and P&L-column-semantics traps — see
   [docs/API_GOTCHAS.md](docs/API_GOTCHAS.md) before touching either parser.
 - `exit-all/`, `pnl-exit/`, `quiktrade/`, `crudeoil/kotak-order/` — square off positions / place quick trades: real-money endpoints.
+- `multi-leg-focus/` — N-leg options basket builder (`components/MultiLegFocus.tsx`,
+  `lib/multiLegFocus.ts`): sequenced order placement with rollback, `api/multi-leg-focus/baskets/`
+  persists the basket JSON, `api/multi-leg-focus/margin/` polls broker margin on its own
+  interval decoupled from price ticks. Real-money endpoint. Read `dhan-terminal-position-ownership`
+  (ledger/reconciliation) and `dhan-polling-guards` (poller/stale-closure pitfalls) before touching it.
 - `csp-scan/` — spawns `scripts/tools/csp_scanner.py` (screening only, no orders); `csp-tracked/sell` and `csp-watchlist/exit` place and exit **real** cash-secured-put orders via `scripts/tools/csp_watchlist.py`, then track fills/strike-rolls in `lib/cspTracked.ts`'s JSON store — reconciled against broker truth by `csp-tracked/reconcile` and `csp-tracked/sync`.
 
 **lib/ files** (`rs_dashboard/lib/`) — the ones with non-obvious behavior:
