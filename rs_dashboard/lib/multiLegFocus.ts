@@ -40,6 +40,19 @@ export interface MultiLegLeg {
   bestPrice?: number;          // Peak favorable price tracked for trailing SL
 }
 
+/** Fallback lot size used only until `/api/scalper/lookup` populates the real
+ *  broker value — must stay in sync with each underlying's actual contract
+ *  size (and, for CRUDEOIL/CRUDEOILM, Dhan's qty semantics which differ 100x
+ *  from other brokers). Single source of truth shared by MultiLegFocus.tsx,
+ *  AddLotsModal.tsx, and AddNewLegModal.tsx. */
+export function fallbackLotSize(underlying: string, broker: string): number {
+  if (underlying === 'NIFTY') return 65;
+  if (underlying === 'BANKNIFTY') return 15;
+  if (underlying === 'SENSEX') return 20;
+  if (broker === 'dhan') return 1;
+  return underlying === 'CRUDEOIL' ? 100 : 10;
+}
+
 export interface StrategyRiskConfig {
   targetValue?: number;
   targetUnit: 'pts' | 'pct';   // Points or Percentage

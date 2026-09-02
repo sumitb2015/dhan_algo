@@ -15,7 +15,7 @@ import MultiLegStrategyRow from './multiLegFocus/MultiLegStrategyRow';
 import OrdersTradesModal from './multiLegFocus/OrdersTradesModal';
 import {
   resolveTemplateLegs, reconcileLegWithBroker, sortLegsForExit, findLegPosition,
-  computeLegTrailingSL, computeStrategyMetrics, checkStrategyRisk,
+  computeLegTrailingSL, computeStrategyMetrics, checkStrategyRisk, fallbackLotSize,
   positionProduct, type MultiLegLeg, type MultiLegBasket, type StrategyRiskConfig, type MultiLegStatus,
 } from '@/lib/multiLegFocus';
 import { closeOrderProduct } from '@/lib/positionProduct';
@@ -39,18 +39,6 @@ const DEFAULT_INDEX_SPOT: Record<Underlying, number> = {
 };
 
 const ALL_STRATEGY_TEMPLATES: StrategyTemplate[] = Object.values(STRATEGY_CATEGORIES).flat();
-
-/** Fallback lot size used only until `/api/scalper/lookup` populates the real
- *  broker value in lookupCache — must stay in sync with each underlying's
- *  actual contract size (and, for CRUDEOIL/CRUDEOILM, Dhan's qty semantics
- *  which differ 100x from other brokers). */
-function fallbackLotSize(underlying: Underlying, broker: Broker): number {
-  if (underlying === 'NIFTY') return 65;
-  if (underlying === 'BANKNIFTY') return 15;
-  if (underlying === 'SENSEX') return 20;
-  if (broker === 'dhan') return 1;
-  return underlying === 'CRUDEOIL' ? 100 : 10;
-}
 
 function fmtMoney(n: number): string {
   return `${n < 0 ? '-' : ''}₹${Math.abs(n).toLocaleString('en-IN', { maximumFractionDigits: 0 })}`;
@@ -142,12 +130,17 @@ export default function MultiLegFocus() {
   useEffect(() => { lookupCacheRef.current = lookupCache; }, [lookupCache]);
 
   const [selectedUnderlying, setSelectedUnderlying] = useState<Underlying>('NIFTY');
+  // Set once the user explicitly clicks an underlying pill — from then on their
+  // choice wins over whatever basket happens to be first/open (previously a
+  // pill click was inert as soon as any basket existed).
+  const [hasManualUnderlying, setHasManualUnderlying] = useState(false);
 
   // Active / Primary underlying & expiry for WebSocket streaming
   const activeUnderlying = useMemo(() => {
+    if (hasManualUnderlying) return selectedUnderlying;
     const open = baskets.find(b => b.legs.some(l => l.status === 'OPEN'));
     return (open?.underlying as Underlying) ?? (baskets[0]?.underlying as Underlying) ?? selectedUnderlying;
-  }, [baskets, selectedUnderlying]);
+  }, [baskets, selectedUnderlying, hasManualUnderlying]);
 
   const activeExpiry = useMemo(() => {
     const open = baskets.find(b => b.legs.some(l => l.status === 'OPEN'));
@@ -418,6 +411,7 @@ export default function MultiLegFocus() {
         body: JSON.stringify({
           underlying: basket.underlying,
           expiry: basket.expiry,
+          broker,
           legs: legsPayload,
         }),
       })
@@ -439,7 +433,7 @@ export default function MultiLegFocus() {
         })
         .catch(() => {});
     }
-  }, [lookupCache]);
+  }, [lookupCache, broker]);
 
   // Composition-only signature (underlying/expiry/strikes/side/lots/orderRef) —
   // live LTP ticks do not change margin requirements. Keying the margin fetch
@@ -483,8 +477,12 @@ export default function MultiLegFocus() {
             if (tpl) {
               newLegs = resolveTemplateLegs(tpl, newAtm, strikes, step);
             } else {
-              const oldSpot = DEFAULT_INDEX_SPOT[b.underlying as Underlying] ?? spot;
-              const diff = newAtm - oldSpot;
+              const oldPair = `${b.underlying}:${b.expiry}`;
+              const oldStrikes = chainData[oldPair]?.strikes?.length ? chainData[oldPair].strikes : [];
+              const oldSpot = chainData[oldPair]?.spot ?? DEFAULT_INDEX_SPOT[b.underlying as Underlying] ?? spot;
+              const oldStep = DEFAULT_INDEX_STEP[b.underlying as Underlying] ?? 50;
+              const oldAtm = nearestStrike(oldStrikes, oldSpot) ?? (Math.round(oldSpot / oldStep) * oldStep);
+              const diff = newAtm - oldAtm;
               newLegs = b.legs.map(l => ({
                 ...l,
                 strike: Math.round((l.strike + diff) / step) * step,
@@ -1160,7 +1158,7 @@ export default function MultiLegFocus() {
                 <button
                   key={u}
                   type="button"
-                  onClick={() => setSelectedUnderlying(u)}
+                  onClick={() => { setSelectedUnderlying(u); setHasManualUnderlying(true); }}
                   className={`px-2 py-1 text-[11px] font-bold rounded-md transition-colors ${
                     activeUnderlying === u
                       ? 'bg-zinc-700 text-white shadow-sm'

@@ -2,7 +2,7 @@
 
 import React, { useState } from 'react';
 import { X, Plus } from 'lucide-react';
-import type { MultiLegBasket } from '@/lib/multiLegFocus';
+import { fallbackLotSize, type MultiLegBasket } from '@/lib/multiLegFocus';
 import { FOCUS_RING } from '@/components/Scalper';
 
 interface AddNewLegModalProps {
@@ -44,12 +44,7 @@ export default function AddNewLegModal({
   if (!isOpen || !basket) return null;
 
   const currentLtp = ltpForStrike(strike, option);
-  const effectiveLot = lotSize > 0
-    ? lotSize
-    : (basket.underlying === 'NIFTY' ? 65
-      : basket.underlying === 'BANKNIFTY' ? 15
-      : basket.underlying === 'SENSEX' ? 20
-      : (basket.broker === 'dhan' ? 1 : basket.underlying === 'CRUDEOIL' ? 100 : 10));
+  const effectiveLot = lotSize > 0 ? lotSize : fallbackLotSize(basket.underlying, basket.broker);
   const totalQty = lots * effectiveLot;
 
   const handleSubmit = async (e: React.FormEvent) => {

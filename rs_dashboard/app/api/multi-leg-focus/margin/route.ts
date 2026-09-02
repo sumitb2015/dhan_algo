@@ -16,6 +16,7 @@ interface LegInput {
 interface MarginRequest {
   underlying: string;
   expiry: string;
+  broker?: string;
   legs: LegInput[];
 }
 
@@ -54,13 +55,16 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     }
 
     const underlying = (body.underlying || 'NIFTY').toUpperCase();
+    const broker = body.broker || 'dhan';
     const isSensex = underlying === 'SENSEX';
     const isCrude = underlying === 'CRUDEOIL' || underlying === 'CRUDEOILM';
     const exchangeSegment = isSensex ? 'BSE_FNO' : (isCrude ? 'MCX_COMM' : 'NSE_FNO');
 
     // Composition-only cache key: strike/side/quantity/securityId (NO live LTP).
-    // Rapid price ticks do not change SPAN/exposure requirements.
-    const cacheKey = `${underlying}:${body.expiry}:${body.legs.map(l =>
+    // Rapid price ticks do not change SPAN/exposure requirements. Broker is
+    // included because the same crude quantity means lots on Dhan but barrels
+    // elsewhere (see crudeMult below).
+    const cacheKey = `${underlying}:${broker}:${body.expiry}:${body.legs.map(l =>
       `${l.id}:${l.side}:${l.strike}:${l.quantity}:${l.securityId || ''}:${l.status || ''}`
     ).join('|')}`;
 
@@ -78,7 +82,10 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     const computePromise = (async () => {
       const legMargins: Record<string, number> = {};
       const defaultSpot = underlying === 'BANKNIFTY' ? 51000 : underlying === 'SENSEX' ? 79000 : isCrude ? 8500 : 24000;
-      const crudeMult = underlying === 'CRUDEOIL' ? 100 : underlying === 'CRUDEOILM' ? 10 : 1;
+      // Dhan's crude quantity is in lots and needs scaling to barrels for rupee
+      // math; every other broker already sends quantity in barrels (see
+      // lib/multiLegFocus.ts's fallbackLotSize), so no further scaling there.
+      const crudeMult = broker !== 'dhan' ? 1 : (underlying === 'CRUDEOIL' ? 100 : underlying === 'CRUDEOILM' ? 10 : 1);
 
       // 1. Calculate margin for each leg
       for (const leg of body.legs) {
