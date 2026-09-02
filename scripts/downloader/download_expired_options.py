@@ -90,6 +90,33 @@ def _valid_expiry(date_str: str) -> str:
     return date_str
 
 
+def _safe_from_date(expiry: str, all_expiries: list[str]) -> str:
+    """
+    Pick a from_date for the expiry_flag="WEEK", expiry_code=1 ("near week
+    relative to date") fetch that never lands on the immediately preceding
+    weekly expiry's own date.
+
+    NIFTY weeklies are exactly 7 calendar days apart, so the naive
+    `expiry - 7 days` almost always equals the prior week's expiry date. On
+    that date, "near week" resolves to the PRIOR (0-DTE, about-to-expire)
+    contract rather than the target one, silently mislabeling that day's
+    data as if it belonged to `expiry`. Starting the window the day after
+    the prior expiry keeps every fetched date strictly inside the target
+    contract's own life.
+    """
+    expiry_dt = datetime.strptime(expiry, "%Y-%m-%d")
+    default_from = expiry_dt - timedelta(days=7)
+
+    earlier = [e for e in all_expiries if e < expiry]
+    if earlier:
+        prev_expiry_dt = datetime.strptime(max(earlier), "%Y-%m-%d")
+        earliest_safe = prev_expiry_dt + timedelta(days=1)
+        if earliest_safe > default_from:
+            default_from = min(earliest_safe, expiry_dt)
+
+    return default_from.strftime("%Y-%m-%d")
+
+
 def generate_historical_expiries(symbol: str, start_date: datetime, end_date: datetime) -> list[str]:
     """
     Generates weekly expiry dates using NSE weekday rules for the historical
@@ -273,9 +300,8 @@ def main():
                 if _is_valid_file(file_path):
                     continue
 
-                expiry_dt = datetime.strptime(expiry, "%Y-%m-%d")
                 to_date = expiry
-                from_date = (expiry_dt - timedelta(days=7)).strftime("%Y-%m-%d")
+                from_date = _safe_from_date(expiry, expiries)
 
                 status_msg = f"Downloading {name} {strike_rel} {expiry} ({task_idx}/{len(missing_tasks)})"
                 logger.info(status_msg)
