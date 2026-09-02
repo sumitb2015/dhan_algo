@@ -199,6 +199,13 @@ export default function MultiLegStrategyRow({
     return payoffResult.maxProfit > 0 ? `+${fmtMoney(payoffResult.maxProfit)}` : fmtMoney(payoffResult.maxProfit);
   }, [payoffResult]);
 
+  // Max profit as a % of margin blocked — a return-on-capital measure, since
+  // rupee P&L alone doesn't say whether a trade is worth the margin it ties up.
+  const maxProfitPctOfMargin = useMemo(() => {
+    if (!payoffResult || payoffResult.maxProfitUnlimited || !basketMargin || basketMargin <= 0) return null;
+    return (payoffResult.maxProfit / basketMargin) * 100;
+  }, [payoffResult, basketMargin]);
+
   const maxLossDisplay = useMemo(() => {
     if (!payoffResult) return '—';
     if (payoffResult.maxLossUnlimited) return 'Unlimited';
@@ -332,7 +339,12 @@ export default function MultiLegStrategyRow({
               <span className="text-zinc-700">·</span>
               <div className="flex items-center gap-1">
                 <span className="text-zinc-500 text-[10px] uppercase font-semibold">Max P/L:</span>
-                <span className="text-emerald-400 font-bold">{maxProfitDisplay}</span>
+                <span className="text-emerald-400 font-bold">
+                  {maxProfitDisplay}
+                  {maxProfitPctOfMargin != null && (
+                    <span className="text-[10px] opacity-80"> ({maxProfitPctOfMargin >= 0 ? '+' : ''}{maxProfitPctOfMargin.toFixed(1)}% of margin)</span>
+                  )}
+                </span>
                 <span className="text-zinc-600">/</span>
                 <span className="text-rose-400 font-bold">{maxLossDisplay}</span>
               </div>
@@ -464,9 +476,14 @@ export default function MultiLegStrategyRow({
                     <span className="font-mono text-zinc-100 font-bold">{breakevensDisplay}</span>
                   </div>
                   <div className="h-4 w-px bg-zinc-800" />
-                  <div className="flex items-center gap-1.5" title="Maximum Theoretical Profit Possible">
+                  <div className="flex items-center gap-1.5" title="Maximum Theoretical Profit Possible, as % of margin blocked = return on capital">
                     <span className="text-zinc-400 text-[11px] font-semibold uppercase tracking-wider">Max Profit:</span>
-                    <span className="font-mono text-emerald-400 font-bold">{maxProfitDisplay}</span>
+                    <span className="font-mono text-emerald-400 font-bold">
+                      {maxProfitDisplay}
+                      {maxProfitPctOfMargin != null && (
+                        <span className="ml-1 text-[10px] opacity-80">({maxProfitPctOfMargin >= 0 ? '+' : ''}{maxProfitPctOfMargin.toFixed(1)}%)</span>
+                      )}
+                    </span>
                   </div>
                   <div className="h-4 w-px bg-zinc-800" />
                   <div className="flex items-center gap-1.5" title="Maximum Theoretical Loss Possible">
