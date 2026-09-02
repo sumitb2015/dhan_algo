@@ -50,6 +50,7 @@ export default function AddNewLegModal({
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (lots <= 0 || submitting) return;
+    if (orderType === 'LIMIT' && (limitPrice <= 0 || isNaN(limitPrice))) return;
 
     setSubmitting(true);
     try {
