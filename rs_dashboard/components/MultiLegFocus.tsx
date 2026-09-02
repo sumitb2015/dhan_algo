@@ -944,7 +944,8 @@ export default function MultiLegFocus() {
                   reconciled.status !== leg.status ||
                   reconciled.lots !== leg.lots ||
                   reconciled.fill?.qty !== leg.fill?.qty ||
-                  reconciled.fill?.avgPrice !== leg.fill?.avgPrice
+                  reconciled.fill?.avgPrice !== leg.fill?.avgPrice ||
+                  reconciled.closedFill?.exitPrice !== leg.closedFill?.exitPrice
                 ) {
                   basketChange = true;
                   anyChange = true;

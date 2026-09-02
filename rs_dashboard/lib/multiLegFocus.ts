@@ -20,6 +20,12 @@ export interface MultiLegLeg {
   price?: number;              // manual override, only used when type === 'LIMIT'
   /** This basket's own fill ledger for this leg — never derived from broker net qty. */
   fill?: { qty: number; avgPrice: number; orderId?: string };
+  /** Captured once the broker reports this leg flat, from the closing side's
+   *  average price (buyAvg/sellAvg) and the matched qty on that round trip.
+   *  `fill.qty` zeroes on close (it sizes further exits), so P&L math for a
+   *  CLOSED leg reads this instead of drifting off live LTP against a
+   *  zeroed quantity — see reconcileLegWithBroker and legPnl. */
+  closedFill?: { qty: number; exitPrice: number };
   /** Captured from the order response at placement time; used to match this
    *  leg's own broker position row on every monitoring poll. */
   orderRef?: { securityId?: string; symbol?: string };
@@ -96,8 +102,21 @@ export function reconcileLegFillDown(leg: MultiLegLeg, brokerAbsQty: number | nu
   };
 }
 
-/** This leg's own P&L against `ltp`, sized off its own fill ledger only. */
+/**
+ * This leg's own P&L against `ltp`, sized off its own fill ledger only.
+ * A CLOSED leg ignores `ltp` (it's no longer a live position) and instead
+ * uses the frozen `closedFill` captured at reconciliation time — `fill.qty`
+ * is zeroed on close, so sizing off it here would read 0 P&L for a leg that
+ * banked a real profit or loss.
+ */
 export function legPnl(leg: MultiLegLeg, ltp: number): number {
+  if (leg.status === 'CLOSED') {
+    if (!leg.closedFill || !leg.fill) return 0;
+    const perUnit = leg.side === 'B'
+      ? leg.closedFill.exitPrice - leg.fill.avgPrice
+      : leg.fill.avgPrice - leg.closedFill.exitPrice;
+    return perUnit * leg.closedFill.qty;
+  }
   if (!leg.fill || leg.fill.qty <= 0) return 0;
   const perUnit = leg.side === 'B' ? ltp - leg.fill.avgPrice : leg.fill.avgPrice - ltp;
   return perUnit * leg.fill.qty;
@@ -214,22 +233,26 @@ export function computeStrategyMetrics(
   let netCreditDebit = 0;
 
   for (const leg of legs) {
-    const ltp = ltpFor(leg);
-    const entry = leg.fill?.avgPrice ?? (leg.price && leg.price > 0 ? leg.price : ltp);
     const isBuy = leg.side === 'B';
     const lots = leg.lots || 1;
+    const entry = leg.fill?.avgPrice ?? (leg.price && leg.price > 0 ? leg.price : ltpFor(leg));
+
+    // A CLOSED leg is no longer live — pricing it off ltpFor() would drift
+    // the points/percentage figures against a live market the position no
+    // longer has exposure to, while the rupee total (below, via legPnl)
+    // correctly freezes at the realized close. Freeze "current" here too:
+    // the actual exit price once known, entry (i.e. zero movement) until it is.
+    const isClosed = leg.status === 'CLOSED';
+    const current = isClosed ? (leg.closedFill ? leg.closedFill.exitPrice : entry) : ltpFor(leg);
 
     combinedEntryPts += entry * lots;
-    combinedCurrentPts += ltp * lots;
+    combinedCurrentPts += current * lots;
     netCreditDebit += (isBuy ? -entry : entry) * lots;
 
-    const legPoints = isBuy ? (ltp - entry) * lots : (entry - ltp) * lots;
+    const legPoints = isBuy ? (current - entry) * lots : (entry - current) * lots;
     pnlPts += legPoints;
 
-    if (leg.fill && leg.fill.qty > 0) {
-      const perUnit = isBuy ? ltp - leg.fill.avgPrice : leg.fill.avgPrice - ltp;
-      totalPnlRupees += perUnit * leg.fill.qty;
-    }
+    totalPnlRupees += legPnl(leg, current);
   }
 
   const capitalPts = Math.abs(netCreditDebit) > 0 ? Math.abs(netCreditDebit) : combinedEntryPts;
@@ -286,9 +309,32 @@ export function sortLegsForExit<T extends { side: LegSide }>(legs: T[]): T[] {
 
 export type MultiLegMatch =
   | { kind: 'match'; row: Record<string, unknown> }
-  | { kind: 'flat' }
+  | { kind: 'flat'; row?: Record<string, unknown> }
   | { kind: 'not_found' }
   | { kind: 'ambiguous'; count: number };
+
+/**
+ * Derives a leg's realized closing fill from a flat/closed broker position
+ * row's `buyQty`/`sellQty`/`buyAvg`/`sellAvg`. On a fully round-tripped
+ * position both sides are populated: this leg's entry was booked on its own
+ * `leg.side`, so the close happened on the opposite side — a BUY leg's exit
+ * price is the row's `sellAvg` (what it was sold back at), a SELL leg's is
+ * `buyAvg` (what it was bought back at). Same field family Scalper.tsx already
+ * reads for its realizedProfit-on-flat-position fix (components/Scalper.tsx).
+ */
+function closedFillFromRow(
+  row: Record<string, unknown> | undefined,
+  isBuy: boolean,
+): { qty: number; exitPrice: number } | undefined {
+  if (!row) return undefined;
+  const buyQty = Number(row.buyQty) || 0;
+  const sellQty = Number(row.sellQty) || 0;
+  const qty = Math.min(buyQty, sellQty);
+  if (qty <= 0) return undefined;
+  const exitPrice = Number(isBuy ? row.sellAvg : row.buyAvg) || 0;
+  if (exitPrice <= 0) return undefined;
+  return { qty, exitPrice };
+}
 
 /**
  * Reconciles a leg against broker positions.
@@ -300,7 +346,8 @@ export type MultiLegMatch =
  *   the case where a new limit order fills after the leg was first created (e.g. a pending
  *   order placed via the Orders modal that later executes at a better price).
  * - If broker explicitly reports the position closed/flat:
- *   Marks status as 'CLOSED' and zeroes fill quantity.
+ *   Marks status as 'CLOSED', zeroes fill quantity, and — when the row is available —
+ *   captures `closedFill` (see closedFillFromRow) so P&L stays at the realized number.
  * - If broker position is not found or ambiguous:
  *   Leaves the leg untouched (handles API propagation lag after order placement).
  */
@@ -333,6 +380,7 @@ export function reconcileLegWithBroker(
       ...leg,
       status: 'CLOSED',
       fill: { qty: 0, avgPrice: leg.fill?.avgPrice ?? 0 },
+      closedFill: closedFillFromRow(match.row, leg.side === 'B') ?? leg.closedFill,
     };
   }
 
@@ -341,6 +389,7 @@ export function reconcileLegWithBroker(
       ...leg,
       status: 'CLOSED',
       fill: { qty: 0, avgPrice: leg.fill?.avgPrice ?? 0 },
+      closedFill: closedFillFromRow(match.row, leg.side === 'B') ?? leg.closedFill,
     };
   }
 
@@ -376,7 +425,10 @@ export function findLegPosition(
       if ((Number(r.netQty) || 0) === 0) return false;
       return true;
     });
-    if (live.length === 0) return { kind: 'flat' };
+    // Not live — but the row itself (buyQty/sellQty/buyAvg/sellAvg) is still
+    // the only place the realized close price can come from; hand it back
+    // rather than discarding it, so reconcileLegWithBroker can capture it.
+    if (live.length === 0) return { kind: 'flat', row: matchingSecId[0] };
     if (live.length > 1) return { kind: 'ambiguous', count: live.length };
     return { kind: 'match', row: live[0] };
   }
@@ -384,8 +436,8 @@ export function findLegPosition(
   if (leg.orderRef.symbol) {
     const live = findLivePosition(rows, { tradingSymbol: leg.orderRef.symbol });
     if (live.kind === 'flat') {
-      const anyMatch = rows.some(r => String(r.tradingSymbol ?? '') === leg.orderRef!.symbol);
-      return anyMatch ? { kind: 'flat' } : { kind: 'not_found' };
+      const flatRow = rows.find(r => String(r.tradingSymbol ?? '') === leg.orderRef!.symbol);
+      return flatRow ? { kind: 'flat', row: flatRow } : { kind: 'not_found' };
     }
     return live;
   }

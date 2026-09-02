@@ -305,5 +305,83 @@ test('weighted average entry price recomputes accurately when adding lots to an 
   assert.strictEqual(evalResult.tpPrice, 30.00);
 });
 
+// ── Closed-leg P&L regression (dashboard showed "+₹0 (+11.5%)" for a
+//    fully-closed basket: totalPnlRupees fell to 0 once fill.qty was zeroed
+//    on close, while pnlPct kept moving off live LTP against the frozen
+//    entry price, producing a nonzero % alongside a zero rupee figure) ────
+
+test('findLegPosition returns the closed row on a flat Dhan leg, not just the kind', () => {
+  const leg: MultiLegLeg = { id: '1', side: 'S', option: 'PE', strike: 23500, lots: 1, type: 'MARKET', status: 'OPEN', orderRef: { securityId: '47298' } };
+  const rows = [{ securityId: '47298', tradingSymbol: 'NIFTY-Sep2026-23500-PE', productType: 'MARGIN', netQty: 0, positionType: 'CLOSED', buyQty: 65, sellQty: 65, buyAvg: 60.1, sellAvg: 72.05 }];
+  const match = findLegPosition('dhan', leg, rows);
+  assert.strictEqual(match.kind, 'flat');
+  if (match.kind === 'flat') assert.strictEqual(match.row?.buyAvg, 60.1);
+});
+
+test('reconcileLegWithBroker captures closedFill from a flat row (SELL leg exits at buyAvg)', () => {
+  const leg: MultiLegLeg = { id: '1', side: 'S', option: 'PE', strike: 23500, lots: 1, type: 'MARKET', status: 'OPEN', fill: { qty: 65, avgPrice: 72.05 }, orderRef: { securityId: '47298' } };
+  const match = { kind: 'flat' as const, row: { securityId: '47298', buyQty: 65, sellQty: 65, buyAvg: 60.1, sellAvg: 72.05 } };
+  const reconciled = reconcileLegWithBroker(leg, match);
+  assert.strictEqual(reconciled.status, 'CLOSED');
+  assert.strictEqual(reconciled.fill?.qty, 0);
+  assert.strictEqual(reconciled.fill?.avgPrice, 72.05); // entry preserved
+  assert.deepStrictEqual(reconciled.closedFill, { qty: 65, exitPrice: 60.1 }); // bought back to cover
+});
+
+test('reconcileLegWithBroker captures closedFill from a match row that just went flat (BUY leg exits at sellAvg)', () => {
+  const leg: MultiLegLeg = { id: '1', side: 'B', option: 'CE', strike: 24300, lots: 1, type: 'MARKET', status: 'OPEN', fill: { qty: 65, avgPrice: 50 }, orderRef: { securityId: '47331' } };
+  const match = { kind: 'match' as const, row: { securityId: '47331', netQty: 0, buyQty: 65, sellQty: 65, buyAvg: 50, sellAvg: 58 } };
+  const reconciled = reconcileLegWithBroker(leg, match);
+  assert.strictEqual(reconciled.status, 'CLOSED');
+  assert.deepStrictEqual(reconciled.closedFill, { qty: 65, exitPrice: 58 }); // sold to close
+});
+
+test('reconcileLegWithBroker leaves closedFill undefined when the flat row carries no buy/sell qty (non-Dhan brokers that drop flat rows)', () => {
+  const leg: MultiLegLeg = { id: '1', side: 'S', option: 'PE', strike: 23500, lots: 1, type: 'MARKET', status: 'OPEN', fill: { qty: 65, avgPrice: 72.05 }, orderRef: { symbol: 'X' } };
+  const reconciled = reconcileLegWithBroker(leg, { kind: 'flat' });
+  assert.strictEqual(reconciled.status, 'CLOSED');
+  assert.strictEqual(reconciled.closedFill, undefined);
+});
+
+test('legPnl: a CLOSED leg uses the frozen closedFill, ignoring the live ltp argument entirely', () => {
+  const leg: MultiLegLeg = {
+    id: '1', side: 'S', option: 'PE', strike: 23500, lots: 1, type: 'MARKET', status: 'CLOSED',
+    fill: { qty: 0, avgPrice: 72.05 }, closedFill: { qty: 65, exitPrice: 60.1 },
+  };
+  // Sold at 72.05, bought back at 60.1 -> +11.95/unit * 65 = 776.75, regardless of where ltp is now
+  assert.strictEqual(Math.round(legPnl(leg, 999) * 100) / 100, 776.75);
+  assert.strictEqual(legPnl(leg, 999), legPnl(leg, 0));
+});
+
+test('legPnl: a CLOSED leg with no closedFill yet (transient post-exit state) reads 0, not a stale ltp-based figure', () => {
+  const leg: MultiLegLeg = { id: '1', side: 'S', option: 'PE', strike: 23500, lots: 1, type: 'MARKET', status: 'CLOSED', fill: { qty: 0, avgPrice: 72.05 } };
+  assert.strictEqual(legPnl(leg, 40), 0);
+});
+
+test('computeStrategyMetrics: a closed basket reports a rupee total and percentage that agree, not "+0 (+11.5%)"', () => {
+  const legs: MultiLegLeg[] = [
+    { id: '1', side: 'S', option: 'CE', strike: 24300, lots: 1, type: 'MARKET', status: 'CLOSED', fill: { qty: 0, avgPrice: 56.40 }, closedFill: { qty: 65, exitPrice: 50.00 } },
+    { id: '2', side: 'S', option: 'PE', strike: 23500, lots: 1, type: 'MARKET', status: 'CLOSED', fill: { qty: 0, avgPrice: 72.05 }, closedFill: { qty: 65, exitPrice: 60.00 } },
+  ];
+  // A live ltpFor that would drift the figures if it were still consulted for closed legs.
+  const ltpFor = () => 999;
+  const metrics = computeStrategyMetrics(legs, ltpFor);
+  assert.strictEqual(Math.round(metrics.pnlPts * 100) / 100, 18.45); // (56.40-50)+(72.05-60)
+  assert.strictEqual(metrics.totalPnlRupees, 18.45 * 65);
+  // Rupees and percentage must be consistent: totalPnlRupees > 0 implies pnlPct > 0 here.
+  assert.ok(metrics.totalPnlRupees > 0 && metrics.pnlPct > 0);
+});
+
+test('computeStrategyMetrics: a closed leg with no closedFill freezes at zero movement instead of drifting off live ltp', () => {
+  const legs: MultiLegLeg[] = [
+    { id: '1', side: 'S', option: 'CE', strike: 24300, lots: 1, type: 'MARKET', status: 'CLOSED', fill: { qty: 0, avgPrice: 56.40 } },
+  ];
+  const ltpFor = () => 30; // if this leaked into the calc it would show a large phantom gain
+  const metrics = computeStrategyMetrics(legs, ltpFor);
+  assert.strictEqual(metrics.pnlPts, 0);
+  assert.strictEqual(metrics.pnlPct, 0);
+  assert.strictEqual(metrics.totalPnlRupees, 0);
+});
+
 
 
