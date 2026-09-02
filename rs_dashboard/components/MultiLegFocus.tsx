@@ -20,11 +20,25 @@ import {
 } from '@/lib/multiLegFocus';
 import { closeOrderProduct } from '@/lib/positionProduct';
 
-const UNDERLYINGS = ['NIFTY', 'BANKNIFTY', 'SENSEX'] as const;
+const UNDERLYINGS = ['NIFTY', 'BANKNIFTY', 'SENSEX', 'CRUDEOIL', 'CRUDEOILM'] as const;
 type Underlying = typeof UNDERLYINGS[number];
 
-const DEFAULT_INDEX_STEP: Record<Underlying, number> = { NIFTY: 50, BANKNIFTY: 100, SENSEX: 100 };
-const DEFAULT_INDEX_SPOT: Record<Underlying, number> = { NIFTY: 24000, BANKNIFTY: 51000, SENSEX: 79000 };
+const DEFAULT_INDEX_STEP: Record<Underlying, number> = {
+  NIFTY: 50,
+  BANKNIFTY: 100,
+  SENSEX: 100,
+  CRUDEOIL: 50,
+  CRUDEOILM: 50,
+};
+const DEFAULT_INDEX_SPOT: Record<Underlying, number> = {
+  NIFTY: 24000,
+  BANKNIFTY: 51000,
+  SENSEX: 79000,
+  CRUDEOIL: 8500,
+  CRUDEOILM: 8500,
+};
+
+const ALL_STRATEGY_TEMPLATES: StrategyTemplate[] = Object.values(STRATEGY_CATEGORIES).flat();
 
 function fmtMoney(n: number): string {
   return `${n < 0 ? '-' : ''}₹${Math.abs(n).toLocaleString('en-IN', { maximumFractionDigits: 0 })}`;
@@ -115,11 +129,13 @@ export default function MultiLegFocus() {
   const lookupCacheRef = useRef(lookupCache);
   useEffect(() => { lookupCacheRef.current = lookupCache; }, [lookupCache]);
 
+  const [selectedUnderlying, setSelectedUnderlying] = useState<Underlying>('NIFTY');
+
   // Active / Primary underlying & expiry for WebSocket streaming
   const activeUnderlying = useMemo(() => {
     const open = baskets.find(b => b.legs.some(l => l.status === 'OPEN'));
-    return (open?.underlying as Underlying) ?? (baskets[0]?.underlying as Underlying) ?? 'NIFTY';
-  }, [baskets]);
+    return (open?.underlying as Underlying) ?? (baskets[0]?.underlying as Underlying) ?? selectedUnderlying;
+  }, [baskets, selectedUnderlying]);
 
   const activeExpiry = useMemo(() => {
     const open = baskets.find(b => b.legs.some(l => l.status === 'OPEN'));
@@ -438,12 +454,49 @@ export default function MultiLegFocus() {
 
   const updateBasket = useCallback((basketId: string, patch: Partial<MultiLegBasket>) => {
     setBaskets(prev => {
-      const next = prev.map(b => (b.id === basketId ? { ...b, ...patch, updatedAt: new Date().toISOString() } : b));
+      const next = prev.map(b => {
+        if (b.id !== basketId) return b;
+        if (patch.underlying && patch.underlying !== b.underlying) {
+          const newUnderlying = patch.underlying as Underlying;
+          const newExp = expiriesMap[newUnderlying]?.[0] ?? '';
+          const pair = `${newUnderlying}:${newExp}`;
+          const strikes = chainData[pair]?.strikes?.length ? chainData[pair].strikes : [];
+          const spot = chainData[pair]?.spot ?? DEFAULT_INDEX_SPOT[newUnderlying] ?? 24000;
+          const step = DEFAULT_INDEX_STEP[newUnderlying] ?? 50;
+          const newAtm = nearestStrike(strikes, spot) ?? (Math.round(spot / step) * step);
+
+          let newLegs = b.legs;
+          if (b.legs.every(l => l.status === 'DRAFT')) {
+            const tpl = ALL_STRATEGY_TEMPLATES.find(t => t.key === b.presetKey);
+            if (tpl) {
+              newLegs = resolveTemplateLegs(tpl, newAtm, strikes, step);
+            } else {
+              const oldSpot = DEFAULT_INDEX_SPOT[b.underlying as Underlying] ?? spot;
+              const diff = newAtm - oldSpot;
+              newLegs = b.legs.map(l => ({
+                ...l,
+                strike: Math.round((l.strike + diff) / step) * step,
+              }));
+            }
+          }
+
+          return {
+            ...b,
+            ...patch,
+            underlying: newUnderlying,
+            expiry: newExp,
+            legs: newLegs,
+            updatedAt: new Date().toISOString(),
+          };
+        }
+
+        return { ...b, ...patch, updatedAt: new Date().toISOString() };
+      });
       const target = next.find(b => b.id === basketId);
       if (target) persistBasket(target);
       return next;
     });
-  }, [persistBasket]);
+  }, [expiriesMap, chainData, persistBasket]);
 
   const deleteBasket = useCallback((basketId: string) => {
     const target = basketsRef.current.find(b => b.id === basketId);
@@ -462,14 +515,14 @@ export default function MultiLegFocus() {
   // ── Add Strategy (from template or blank) ──────────────────────────
   const [category, setCategory] = useState<StrategyCategory>('Range Bound');
 
-  const addStrategy = useCallback((template?: StrategyTemplate) => {
-    const u: Underlying = 'NIFTY';
+  const addStrategy = useCallback((template?: StrategyTemplate, targetUnderlying?: Underlying) => {
+    const u: Underlying = targetUnderlying ?? selectedUnderlying ?? 'NIFTY';
     const exp = expiriesMap[u]?.[0] ?? '';
     const pair = `${u}:${exp}`;
-    const strikes = chainData[pair]?.strikes?.length ? chainData[pair].strikes : [23600, 23800, 24000, 24200, 24400];
+    const strikes = chainData[pair]?.strikes?.length ? chainData[pair].strikes : [];
     const spot = chainData[pair]?.spot ?? DEFAULT_INDEX_SPOT[u];
     const step = DEFAULT_INDEX_STEP[u];
-    const atm = nearestStrike(strikes, spot) ?? 24000;
+    const atm = nearestStrike(strikes, spot) ?? (Math.round(spot / step) * step);
 
     const tpl = template ?? {
       key: 'custom',
@@ -502,17 +555,20 @@ export default function MultiLegFocus() {
     setBaskets(prev => [...prev, newBasket]);
     persistBasket(newBasket);
     addToast('success', `Added ${tpl.name} Strategy`, `Underlying: ${u} · Ready in Draft`);
-  }, [expiriesMap, chainData, broker, persistBasket, addToast]);
+  }, [selectedUnderlying, expiriesMap, chainData, broker, persistBasket, addToast]);
 
   // ── Global P&L Across All Baskets ─────────────────────────────────
   const overallTotalPnl = useMemo(() => {
     let sum = 0;
     for (const b of baskets) {
-      const metrics = computeStrategyMetrics(b.legs, l => ltpFor(b, l));
+      const crudeMult = broker === 'dhan'
+        ? (b.underlying === 'CRUDEOIL' ? 100 : b.underlying === 'CRUDEOILM' ? 10 : 1)
+        : 1;
+      const metrics = computeStrategyMetrics(b.legs, l => ltpFor(b, l), crudeMult);
       sum += metrics.totalPnlRupees;
     }
     return sum;
-  }, [baskets, ltpFor]);
+  }, [baskets, ltpFor, broker]);
 
   const activeStrategiesCount = useMemo(() => {
     return baskets.filter(b => b.legs.some(l => l.status === 'OPEN')).length;
@@ -664,10 +720,17 @@ export default function MultiLegFocus() {
         return;
       }
 
+      const isSensex = basket?.underlying === 'SENSEX';
+      const isCrude = basket?.underlying === 'CRUDEOIL' || basket?.underlying === 'CRUDEOILM';
+      const defaultSegDhan = isSensex ? 'BSE_FNO' : (isCrude ? 'MCX_COMM' : 'NSE_FNO');
+      const defaultExchOther = broker === 'kotak'
+        ? (isSensex ? 'bse_fo' : (isCrude ? 'mcx_fo' : 'nse_fo'))
+        : (isSensex ? 'BFO' : (isCrude ? 'MCX' : 'NFO'));
+
       const orderUrl = broker === 'dhan' ? '/api/scalper/fast-order' : scalperRoute(broker, 'order');
       const body = broker === 'dhan'
-        ? { securityId: leg.orderRef?.securityId, quantity: qty, side, orderType: 'MARKET', exchangeSegment: match.row.exchangeSegment ?? (basket?.underlying === 'SENSEX' ? 'BSE_FNO' : 'NSE_FNO'), ...productPayload.fields }
-        : { tradingsymbol: leg.orderRef?.symbol, quantity: qty, side, orderType: 'MARKET', exchange: match.row.exchange ?? (basket?.underlying === 'SENSEX' ? 'BFO' : 'NFO'), ...productPayload.fields };
+        ? { securityId: leg.orderRef?.securityId, quantity: qty, side, orderType: 'MARKET', exchangeSegment: match.row.exchangeSegment ?? defaultSegDhan, ...productPayload.fields }
+        : { tradingsymbol: leg.orderRef?.symbol, quantity: qty, side, orderType: 'MARKET', exchange: match.row.exchange ?? defaultExchOther, ...productPayload.fields };
 
       const res2 = await fetch(orderUrl, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
       const j2 = await res2.json() as { success: boolean; order_id?: string; error?: string };
@@ -989,7 +1052,10 @@ export default function MultiLegFocus() {
 
       // 1. Strategy Target and SL
       if (basket.riskConfig?.armed && !triggeredStrategyExitsRef.current.has(basket.id) && !exitingMap[basket.id]) {
-        const metrics = computeStrategyMetrics(basket.legs, l => ltpFor(basket, l));
+        const crudeMult = broker === 'dhan'
+          ? (basket.underlying === 'CRUDEOIL' ? 100 : basket.underlying === 'CRUDEOILM' ? 10 : 1)
+          : 1;
+        const metrics = computeStrategyMetrics(basket.legs, l => ltpFor(basket, l), crudeMult);
         const decision = checkStrategyRisk(metrics, basket.riskConfig);
 
         if (decision === 'TARGET') {
@@ -1075,6 +1141,25 @@ export default function MultiLegFocus() {
             <span className="text-xs text-zinc-400 font-semibold">
               {activeStrategiesCount} Running · {baskets.length} Total
             </span>
+
+            {/* Underlying Ticker Selector Pills */}
+            <div className="flex items-center gap-0.5 bg-zinc-900 p-0.5 rounded-lg border border-zinc-800">
+              {UNDERLYINGS.map(u => (
+                <button
+                  key={u}
+                  type="button"
+                  onClick={() => setSelectedUnderlying(u)}
+                  className={`px-2 py-1 text-[11px] font-bold rounded-md transition-colors ${
+                    activeUnderlying === u
+                      ? 'bg-zinc-700 text-white shadow-sm'
+                      : 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/50'
+                  }`}
+                  title={`Focus on ${u} options & spot`}
+                >
+                  {u}
+                </button>
+              ))}
+            </div>
 
             {/* Live Spot Ticker from WebSocket */}
             {activeSpot > 0 && (
@@ -1238,7 +1323,12 @@ export default function MultiLegFocus() {
             const step = strikeStep(allStrikes) || DEFAULT_INDEX_STEP[basket.underlying as Underlying] || 50;
             const spot = chain?.spot ?? DEFAULT_INDEX_SPOT[basket.underlying as Underlying] ?? 24000;
             const atmStrike = nearestStrike(allStrikes, spot) ?? (Math.round(spot / step) * step);
-            const lotSize = lookup?.lotSize ?? (basket.underlying === 'NIFTY' ? 65 : basket.underlying === 'BANKNIFTY' ? 15 : 10);
+            const lotSize = lookup?.lotSize ?? (
+              basket.underlying === 'NIFTY' ? 65
+              : basket.underlying === 'BANKNIFTY' ? 15
+              : basket.underlying === 'SENSEX' ? 20
+              : (broker === 'dhan' ? 1 : basket.underlying === 'CRUDEOIL' ? 100 : 10)
+            );
 
             return (
               <MultiLegStrategyRow

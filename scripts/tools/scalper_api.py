@@ -27,6 +27,8 @@ UNDERLYING_EXCHANGE = {
     'BANKNIFTY': 'NSE',
     'FINNIFTY':  'NSE',
     'SENSEX':    'BSE',
+    'CRUDEOIL':  'MCX',
+    'CRUDEOILM': 'MCX',
 }
 
 
@@ -82,12 +84,15 @@ def main():
     helper = DhanHelper(dhan)
 
     if args.cmd == 'lookup':
-        exchange = UNDERLYING_EXCHANGE.get(args.underlying.upper(), 'NSE')
+        under = args.underlying.upper()
+        exchange = UNDERLYING_EXCHANGE.get(under, 'NSE')
+        is_crude = under in ('CRUDEOIL', 'CRUDEOILM')
         df = helper._load_master_list()
+        inst_filter = ['OPTFUT', 'OPTCOM'] if is_crude else ['OPTIDX', 'OPTSTK']
         mask = (
             (df['EXCH_ID'] == exchange) &
-            (df['INSTRUMENT'].isin(['OPTIDX', 'OPTSTK'])) &
-            (df['UNDERLYING_SYMBOL'] == args.underlying.upper()) &
+            (df['INSTRUMENT'].isin(inst_filter)) &
+            (df['UNDERLYING_SYMBOL'] == under) &
             (df['SM_EXPIRY_DATE'] == args.expiry)
         )
         rows = df[mask][['STRIKE_PRICE', 'OPTION_TYPE', 'SECURITY_ID']].copy()
@@ -100,13 +105,17 @@ def main():
         # does not degrade gracefully — it silently mis-sizes every order placed
         # from the terminal. If it cannot be resolved, say so and let the UI
         # refuse to size rather than guess.
-        lot_size = helper.get_lot_size(args.underlying.upper())
-        if not lot_size or lot_size <= 1:
-            print(json.dumps({
-                'success': False,
-                'error': f'Could not resolve lot size for {args.underlying} (got {lot_size!r})',
-            }))
-            sys.exit(0)
+        # MCX contracts report LOT_SIZE=1 because Dhan order quantity is expressed in lots.
+        if is_crude:
+            lot_size = 1
+        else:
+            lot_size = helper.get_lot_size(under)
+            if not lot_size or lot_size <= 1:
+                print(json.dumps({
+                    'success': False,
+                    'error': f'Could not resolve lot size for {args.underlying} (got {lot_size!r})',
+                }))
+                sys.exit(0)
 
         strikes: dict = {}
         for _, row in rows.iterrows():
@@ -171,12 +180,15 @@ def main():
         print(json.dumps({'success': True, 'data': out}))
 
     elif args.cmd == 'order':
-        exchange = UNDERLYING_EXCHANGE.get(args.underlying.upper(), 'NSE')
+        under = args.underlying.upper()
+        exchange = UNDERLYING_EXCHANGE.get(under, 'NSE')
+        is_crude = under in ('CRUDEOIL', 'CRUDEOILM')
 
         # Find the option — find_option() defaults to instrument='OPTIDX';
-        # a stock underlying's contract is OPTSTK instead.
-        sec = helper.find_option(args.underlying, args.expiry, args.strike, args.option, exchange=exchange)
-        if not sec:
+        # a stock underlying's contract is OPTSTK, commodity is OPTFUT.
+        inst = 'OPTFUT' if is_crude else 'OPTIDX'
+        sec = helper.find_option(args.underlying, args.expiry, args.strike, args.option, exchange=exchange, instrument=inst)
+        if not sec and not is_crude:
             sec = helper.find_option(args.underlying, args.expiry, args.strike, args.option, exchange=exchange, instrument='OPTSTK')
         if not sec:
             print(json.dumps({
@@ -195,7 +207,7 @@ def main():
         except (TypeError, ValueError):
             lot_size = 0
         if lot_size <= 0:
-            lot_size = helper.get_lot_size(args.underlying.upper()) or 0
+            lot_size = 1 if is_crude else (helper.get_lot_size(under) or 0)
         if lot_size <= 0:
             print(json.dumps({
                 'success': False,
@@ -204,10 +216,17 @@ def main():
             sys.exit(0)
         qty = args.lots * lot_size
 
+        if is_crude:
+            seg = 'MCX_COMM'
+        elif exchange == 'BSE':
+            seg = 'BSE_FNO'
+        else:
+            seg = 'NSE_FNO'
+
         # Place the order
         order_id = helper.place_order(
             security_id=str(int(sec['SECURITY_ID'])),
-            exchange_segment='BSE_FNO' if exchange == 'BSE' else 'NSE_FNO',
+            exchange_segment=seg,
             transaction_type=args.side.upper(),
             quantity=qty,
             order_type=args.type.upper(),

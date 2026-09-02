@@ -22,7 +22,7 @@ const CACHE_BROKERS: Record<string, { supported: Set<string>; script: string }> 
     script: 'zerodha_instruments_cache.py',
   },
   kotak: {
-    supported: new Set(['NIFTY', 'BANKNIFTY', 'FINNIFTY', 'SENSEX']),
+    supported: new Set(['NIFTY', 'BANKNIFTY', 'FINNIFTY', 'SENSEX', 'CRUDEOIL', 'CRUDEOILM']),
     script: 'kotak_instruments_cache.py',
   },
 };

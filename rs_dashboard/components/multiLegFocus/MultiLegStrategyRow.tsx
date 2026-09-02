@@ -16,7 +16,7 @@ import { computePayoff, type PayoffLeg, type PayoffResult } from '@/lib/basketSt
 import { FOCUS_RING } from '@/components/Scalper';
 import type { Broker } from '@/hooks/useBrokerSelector';
 
-const UNDERLYINGS = ['NIFTY', 'BANKNIFTY', 'SENSEX'] as const;
+const UNDERLYINGS = ['NIFTY', 'BANKNIFTY', 'SENSEX', 'CRUDEOIL', 'CRUDEOILM'] as const;
 type Underlying = typeof UNDERLYINGS[number];
 
 const STATUS_STYLE: Record<string, string> = {
@@ -126,8 +126,23 @@ export default function MultiLegStrategyRow({
     return 'DRAFT';
   }, [basket.legs]);
 
-  const stratMetrics = useMemo(() => computeStrategyMetrics(basket.legs, ltpFor), [basket.legs, ltpFor]);
+  const crudeMult = broker === 'dhan'
+    ? (basket.underlying === 'CRUDEOIL' ? 100 : basket.underlying === 'CRUDEOILM' ? 10 : 1)
+    : 1;
+
+  const stratMetrics = useMemo(
+    () => computeStrategyMetrics(basket.legs, ltpFor, crudeMult),
+    [basket.legs, ltpFor, crudeMult],
+  );
   const totalPnl = stratMetrics.totalPnlRupees;
+
+  const defaultLotSize = useMemo(() => {
+    if (lotSize && lotSize > 0) return lotSize;
+    if (basket.underlying === 'NIFTY') return 65;
+    if (basket.underlying === 'BANKNIFTY') return 15;
+    if (basket.underlying === 'SENSEX') return 20;
+    return broker === 'dhan' ? 1 : (basket.underlying === 'CRUDEOIL' ? 100 : 10);
+  }, [lotSize, basket.underlying, broker]);
 
   // ── Payoff: Breakevens, Max Profit, Max Loss ───────────────────────
   const payoffResult: PayoffResult | null = useMemo(() => {
@@ -135,18 +150,16 @@ export default function MultiLegStrategyRow({
     const activeLegs = basket.legs.filter(l => l.status !== 'CLOSED');
     if (activeLegs.length === 0) return null;
 
-    const effectiveLot = (lotSize && lotSize > 0)
-      ? lotSize
-      : (basket.underlying === 'NIFTY' ? 65 : basket.underlying === 'BANKNIFTY' ? 15 : 10);
+    const payoffMultiplier = (broker === 'dhan' && (basket.underlying === 'CRUDEOIL' || basket.underlying === 'CRUDEOILM')) ? crudeMult : 1;
 
     const payoffLegs: PayoffLeg[] = activeLegs.map(l => {
       const currentLtp = ltpFor(l);
       const premium = (l.fill?.avgPrice && l.fill.avgPrice > 0)
         ? l.fill.avgPrice
         : (currentLtp > 0 ? currentLtp : (l.price || 0));
-      const qty = (l.fill?.qty && l.fill.qty > 0)
+      const qty = ((l.fill?.qty && l.fill.qty > 0)
         ? l.fill.qty
-        : (l.lots * effectiveLot);
+        : (l.lots * defaultLotSize)) * payoffMultiplier;
       return {
         side: l.side,
         option: l.option,
@@ -592,6 +605,7 @@ export default function MultiLegStrategyRow({
                       editable={!hasPlacedLeg}
                       exiting={exitingLegs.has(leg.id)}
                       margin={legMargins?.[leg.id]}
+                      multiplier={crudeMult}
                       onChange={patch => updateLeg(leg.id, patch)}
                       onRemove={() => removeLeg(leg.id)}
                       onExit={() => onExitLeg(leg)}
@@ -612,7 +626,7 @@ export default function MultiLegStrategyRow({
           onClose={() => setSelectedLegForAddLots(null)}
           leg={selectedLegForAddLots}
           basket={basket}
-          lotSize={lotSize ?? 65}
+          lotSize={defaultLotSize}
           currentLtp={ltpFor(selectedLegForAddLots)}
           broker={broker}
           onConfirm={onAddLots}
@@ -627,7 +641,7 @@ export default function MultiLegStrategyRow({
           basket={basket}
           allStrikes={allStrikes}
           atmStrike={atmStrike}
-          lotSize={lotSize ?? 65}
+          lotSize={defaultLotSize}
           ltpForStrike={ltpForStrike ?? ((s, o) => 0)}
           onAddLeg={onAddNewLeg}
         />

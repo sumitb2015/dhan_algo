@@ -26,7 +26,7 @@ const CACHE_TTL = 10_000; // 10 s
 // filled in by the live-quote feed, never by this route.
 const CACHE_BROKERS: Record<string, Set<string>> = {
   zerodha: new Set(['NIFTY', 'BANKNIFTY', 'SENSEX']),
-  kotak: new Set(['NIFTY', 'BANKNIFTY', 'FINNIFTY', 'SENSEX']),
+  kotak: new Set(['NIFTY', 'BANKNIFTY', 'FINNIFTY', 'SENSEX', 'CRUDEOIL', 'CRUDEOILM']),
 };
 
 // Kotak has no live-quote bridge of its own, and it does not need one: an

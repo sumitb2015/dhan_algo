@@ -48,14 +48,18 @@ export function resolveOrderRequest(
     ? Math.round(leg.price * 20) / 20   // snap to 0.05 tick
     : undefined;
 
+  const isSensex = leg.underlying === 'SENSEX';
+  const isCrude = leg.underlying === 'CRUDEOIL' || leg.underlying === 'CRUDEOILM';
+
   if (broker === 'dhan') {
     const securityId = leg.option === 'CE' ? ident.ceId : ident.peId;
     if (!securityId) return null;
+    const exchangeSegment = isSensex ? 'BSE_FNO' : (isCrude ? 'MCX_COMM' : 'NSE_FNO');
     return {
       broker, url: '/api/scalper/fast-order',
       body: {
         securityId, quantity: leg.qty, side, orderType: leg.type,
-        exchangeSegment: leg.underlying === 'SENSEX' ? 'BSE_FNO' : 'NSE_FNO',
+        exchangeSegment,
         productType: leg.productType,
         ...(limitPrice != null ? { price: limitPrice } : {}),
       },
@@ -67,8 +71,8 @@ export function resolveOrderRequest(
   const tradingsymbol = leg.option === 'CE' ? ident.ceSymbol : ident.peSymbol;
   if (!tradingsymbol) return null;
   const exchange = broker === 'kotak'
-    ? (leg.underlying === 'SENSEX' ? 'bse_fo' : 'nse_fo')
-    : (leg.underlying === 'SENSEX' ? 'BFO' : 'NFO');
+    ? (isSensex ? 'bse_fo' : (isCrude ? 'mcx_fo' : 'nse_fo'))
+    : (isSensex ? 'BFO' : (isCrude ? 'MCX' : 'NFO'));
   return {
     broker, url: `/api/scalper/${broker}/order`,
     body: {

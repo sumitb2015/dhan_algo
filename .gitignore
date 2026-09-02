@@ -54,6 +54,7 @@ debug/**/*.log.bak
 # chart. Same single-level blind spot as above: debug/*.json never matched this
 # subtree, so they were committed and then churned on every poll.
 debug/intraday_bars/
+debug/market_hub/
 
 # Nested clones under scratch/
 scratch/rrg-lite-clone/

@@ -44,7 +44,12 @@ export default function AddNewLegModal({
   if (!isOpen || !basket) return null;
 
   const currentLtp = ltpForStrike(strike, option);
-  const effectiveLot = lotSize > 0 ? lotSize : (basket.underlying === 'NIFTY' ? 65 : basket.underlying === 'BANKNIFTY' ? 15 : 10);
+  const effectiveLot = lotSize > 0
+    ? lotSize
+    : (basket.underlying === 'NIFTY' ? 65
+      : basket.underlying === 'BANKNIFTY' ? 15
+      : basket.underlying === 'SENSEX' ? 20
+      : (basket.underlying === 'CRUDEOIL' ? 1 : 1));
   const totalQty = lots * effectiveLot;
 
   const handleSubmit = async (e: React.FormEvent) => {

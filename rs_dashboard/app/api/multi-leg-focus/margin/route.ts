@@ -54,7 +54,9 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     }
 
     const underlying = (body.underlying || 'NIFTY').toUpperCase();
-    const exchangeSegment = underlying === 'SENSEX' ? 'BSE_FNO' : 'NSE_FNO';
+    const isSensex = underlying === 'SENSEX';
+    const isCrude = underlying === 'CRUDEOIL' || underlying === 'CRUDEOILM';
+    const exchangeSegment = isSensex ? 'BSE_FNO' : (isCrude ? 'MCX_COMM' : 'NSE_FNO');
 
     // Composition-only cache key: strike/side/quantity/securityId (NO live LTP).
     // Rapid price ticks do not change SPAN/exposure requirements.
@@ -75,7 +77,8 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
 
     const computePromise = (async () => {
       const legMargins: Record<string, number> = {};
-      const defaultSpot = underlying === 'BANKNIFTY' ? 51000 : underlying === 'SENSEX' ? 79000 : 24000;
+      const defaultSpot = underlying === 'BANKNIFTY' ? 51000 : underlying === 'SENSEX' ? 79000 : isCrude ? 8500 : 24000;
+      const crudeMult = underlying === 'CRUDEOIL' ? 100 : underlying === 'CRUDEOILM' ? 10 : 1;
 
       // 1. Calculate margin for each leg
       for (const leg of body.legs) {
@@ -86,7 +89,9 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
 
         // BUY leg: broker margin is the option premium (cash debit)
         if (leg.side === 'B') {
-          const premium = Math.round((leg.price || 0) * leg.quantity * 100) / 100;
+          // On Dhan, crude quantity is in lots, so scale by barrel multiplier for rupee cash debit
+          const mult = isCrude ? crudeMult : 1;
+          const premium = Math.round((leg.price || 0) * leg.quantity * mult * 100) / 100;
           legMargins[leg.id] = premium;
           continue;
         }
@@ -117,8 +122,9 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
           }
         }
 
-        // Fallback estimate for index options (~10-11% of underlying contract value)
-        const estimatedMargin = Math.round(defaultSpot * leg.quantity * 0.11);
+        // Fallback estimate (~11-12% of underlying contract value)
+        const mult = isCrude ? crudeMult : 1;
+        const estimatedMargin = Math.round(defaultSpot * leg.quantity * mult * 0.12);
         legMargins[leg.id] = estimatedMargin;
       }
 

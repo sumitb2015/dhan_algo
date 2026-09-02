@@ -29,6 +29,7 @@ interface MultiLegLegRowProps {
   editable: boolean;
   exiting: boolean;
   margin?: number;
+  multiplier?: number;
   onChange: (patch: Partial<MultiLegLeg>) => void;
   onRemove: () => void;
   onExit: () => void;
@@ -36,9 +37,9 @@ interface MultiLegLegRowProps {
 }
 
 export default function MultiLegLegRow({
-  leg, allStrikes, ltp, spot, editable, exiting, margin, onChange, onRemove, onExit, onOpenAddLots,
+  leg, allStrikes, ltp, spot, editable, exiting, margin, multiplier = 1, onChange, onRemove, onExit, onOpenAddLots,
 }: MultiLegLegRowProps) {
-  const pnl = leg.fill ? legPnl(leg, ltp) : 0;
+  const pnl = leg.fill ? legPnl(leg, ltp, multiplier) : 0;
   const pnlColor = pnl > 0 ? 'text-emerald-400' : pnl < 0 ? 'text-rose-400' : 'text-zinc-400';
   const trailingEval = computeLegTrailingSL(leg, ltp);
 

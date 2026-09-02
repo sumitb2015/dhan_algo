@@ -53,7 +53,12 @@ export default function AddLotsModal({
     ? limitPrice
     : (currentLtp > 0 ? currentLtp : (leg?.price || 0));
 
-  const effectiveLot = lotSize > 0 ? lotSize : (basket?.underlying === 'NIFTY' ? 65 : basket?.underlying === 'BANKNIFTY' ? 15 : 10);
+  const effectiveLot = lotSize > 0
+    ? lotSize
+    : (basket?.underlying === 'NIFTY' ? 65
+      : basket?.underlying === 'BANKNIFTY' ? 15
+      : basket?.underlying === 'SENSEX' ? 20
+      : (broker === 'dhan' ? 1 : basket?.underlying === 'CRUDEOIL' ? 100 : 10));
   const currentQty = (leg?.fill?.qty && leg.fill.qty > 0) ? leg.fill.qty : ((leg?.lots || 1) * effectiveLot);
   const currentAvg = (leg?.fill?.avgPrice && leg.fill.avgPrice > 0) ? leg.fill.avgPrice : (leg?.price || currentLtp);
   const addQty = addLots * effectiveLot;

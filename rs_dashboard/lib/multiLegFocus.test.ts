@@ -383,5 +383,27 @@ test('computeStrategyMetrics: a closed leg with no closedFill freezes at zero mo
   assert.strictEqual(metrics.totalPnlRupees, 0);
 });
 
+test('legPnl scales by multiplier for Dhan commodity contracts where qty is in lots', () => {
+  const leg: MultiLegLeg = {
+    id: '1', side: 'S', option: 'CE', strike: 8500, lots: 1, type: 'MARKET', status: 'OPEN',
+    fill: { qty: 1, avgPrice: 85.0 }, // 1 lot on Dhan
+  };
+  // (85.0 - 75.0) * 1 lot * 100 barrels/lot = 1000 rupees
+  assert.strictEqual(legPnl(leg, 75.0, 100), 1000);
+  // CRUDEOILM: 10 barrels/lot -> (85.0 - 75.0) * 1 * 10 = 100 rupees
+  assert.strictEqual(legPnl(leg, 75.0, 10), 100);
+});
+
+test('computeStrategyMetrics applies commodity multiplier to rupee P&L', () => {
+  const legs: MultiLegLeg[] = [
+    { id: '1', side: 'S', option: 'CE', strike: 8500, lots: 1, type: 'MARKET', status: 'OPEN', fill: { qty: 1, avgPrice: 80 } },
+    { id: '2', side: 'S', option: 'PE', strike: 8500, lots: 1, type: 'MARKET', status: 'OPEN', fill: { qty: 1, avgPrice: 80 } },
+  ];
+  const ltpFor = () => 70; // both legs gain 10 pts = 20 pts total
+  const metrics = computeStrategyMetrics(legs, ltpFor, 100);
+  assert.strictEqual(metrics.pnlPts, 20);
+  assert.strictEqual(metrics.totalPnlRupees, 2000); // 20 pts * 1 qty * 100 mult
+});
+
 
 

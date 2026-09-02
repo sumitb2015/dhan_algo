@@ -109,21 +109,21 @@ export function reconcileLegFillDown(leg: MultiLegLeg, brokerAbsQty: number | nu
  * is zeroed on close, so sizing off it here would read 0 P&L for a leg that
  * banked a real profit or loss.
  */
-export function legPnl(leg: MultiLegLeg, ltp: number): number {
+export function legPnl(leg: MultiLegLeg, ltp: number, multiplier: number = 1): number {
   if (leg.status === 'CLOSED') {
     if (!leg.closedFill || !leg.fill) return 0;
     const perUnit = leg.side === 'B'
       ? leg.closedFill.exitPrice - leg.fill.avgPrice
       : leg.fill.avgPrice - leg.closedFill.exitPrice;
-    return perUnit * leg.closedFill.qty;
+    return perUnit * leg.closedFill.qty * multiplier;
   }
   if (!leg.fill || leg.fill.qty <= 0) return 0;
   const perUnit = leg.side === 'B' ? ltp - leg.fill.avgPrice : leg.fill.avgPrice - ltp;
-  return perUnit * leg.fill.qty;
+  return perUnit * leg.fill.qty * multiplier;
 }
 
-export function basketTotalPnl(legs: MultiLegLeg[], ltpFor: (leg: MultiLegLeg) => number): number {
-  return legs.reduce((sum, l) => sum + legPnl(l, ltpFor(l)), 0);
+export function basketTotalPnl(legs: MultiLegLeg[], ltpFor: (leg: MultiLegLeg) => number, multiplier: number = 1): number {
+  return legs.reduce((sum, l) => sum + legPnl(l, ltpFor(l), multiplier), 0);
 }
 
 export interface LegTrailingEvaluation {
@@ -225,6 +225,7 @@ export interface StrategyMetrics {
 export function computeStrategyMetrics(
   legs: MultiLegLeg[],
   ltpFor: (leg: MultiLegLeg) => number,
+  multiplier: number = 1,
 ): StrategyMetrics {
   let combinedEntryPts = 0;
   let combinedCurrentPts = 0;
@@ -252,7 +253,7 @@ export function computeStrategyMetrics(
     const legPoints = isBuy ? (current - entry) * lots : (entry - current) * lots;
     pnlPts += legPoints;
 
-    totalPnlRupees += legPnl(leg, current);
+    totalPnlRupees += legPnl(leg, current, multiplier);
   }
 
   const capitalPts = Math.abs(netCreditDebit) > 0 ? Math.abs(netCreditDebit) : combinedEntryPts;

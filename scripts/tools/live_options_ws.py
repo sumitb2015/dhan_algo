@@ -50,6 +50,7 @@ MAX_HISTORY  = 300   # ~10 min at 2s ticks
 # MarketFeed constants
 NSE_FNO     = 2   # NSE F&O segment
 BSE_FNO     = 8   # BSE F&O segment
+MCX_COMM    = 5   # MCX Commodity segment
 IDX         = 0   # Index segment (shared across exchanges, differentiated by security ID)
 FULL        = 21  # Full packet — includes OI
 FEED_QUOTE  = 17  # Quote packet — LTP + OHLC + volume (includes prev_close)
@@ -64,29 +65,29 @@ UNDERLYING_SIDS = {
     'SENSEX':    '51',
 }
 
-# Cash-market exchange each underlying's options trade on — everything here
-# is NSE except SENSEX, which is a BSE index.
+# Cash-market exchange each underlying's options trade on
 UNDERLYING_EXCHANGE = {
     'NIFTY':     'NSE',
     'BANKNIFTY': 'NSE',
     'FINNIFTY':  'NSE',
     'SENSEX':    'BSE',
+    'CRUDEOIL':  'MCX',
+    'CRUDEOILM': 'MCX',
 }
 
 # WS market-feed option-segment code per underlying's exchange
 OPTION_FEED_SEGMENT = {
     'NSE': NSE_FNO,
     'BSE': BSE_FNO,
+    'MCX': MCX_COMM,
 }
 
 OHLC_URL = 'https://api.dhan.co/v2/marketfeed/ohlc'
 
 
-def _fetch_prev_closes(dhan, underlying_sid: str, underlying_exchange: str = 'NSE') -> dict:
-    """Fetch previous-session closes for both VIX (always NSE) and the underlying
-    index — the underlying may be on NSE_IDX or BSE_IDX depending on exchange."""
-    closes = {underlying_sid: 0.0, VIX_SID: 0.0}
-    underlying_seg = 'NSE_IDX' if underlying_exchange == 'NSE' else 'BSE_IDX'
+def _fetch_prev_closes(dhan, underlying_sid: str, underlying_seg: str = 'NSE_IDX') -> dict:
+    """Fetch previous-session closes for both VIX (always NSE) and the underlying, plus initial spot LTP."""
+    closes = {underlying_sid: 0.0, VIX_SID: 0.0, 'spot': 0.0}
     try:
         token     = dhan.dhan_http.access_token
         client_id = dhan.dhan_http.client_id
@@ -112,11 +113,15 @@ def _fetch_prev_closes(dhan, underlying_sid: str, underlying_exchange: str = 'NS
                 val   = float(ohlc.get('close') or 0)
                 if val > 0:
                     closes[sid] = round(val, 2)
+            u_entry = (data.get(underlying_seg, {}) or {}).get(underlying_sid, {}) or {}
+            lp = float(u_entry.get('last_price') or 0)
+            if lp > 0:
+                closes['spot'] = round(lp, 2)
     except Exception as e:
         print(f'[live_options_ws] WARN: prev_closes fetch failed: {e}', flush=True)
     return closes
 
-def _fetch_prev_meta(helper, underlying: str, expiry: str, exchange_segment: str = 'IDX_I', attempts: int = 5, delay: float = 5.0) -> dict:
+def _fetch_prev_meta(helper, chain_symbol: str, expiry: str, exchange_segment: str = 'IDX_I', attempts: int = 5, delay: float = 5.0) -> dict:
     """Fetch previous-day OI and previous-day Close per strike/side from option chain (at startup).
 
     Retries on transient failures (429s, empty chain) since a single missed
@@ -133,7 +138,7 @@ def _fetch_prev_meta(helper, underlying: str, expiry: str, exchange_segment: str
     for attempt in range(attempts):
         prev_meta: dict = {}
         try:
-            chain = helper.get_option_chain(underlying, expiry, exchange_segment=exchange_segment)
+            chain = helper.get_option_chain(chain_symbol, expiry, exchange_segment=exchange_segment)
             for strike_str, data in ((chain or {}).get('oc') or {}).items():
                 strike = int(float(strike_str))
                 ce_data = data.get('ce') or {}
@@ -174,7 +179,7 @@ def _classify_buildup(change_pct: float, oi_chg_pct: float) -> str:
 
 
 # Strike step per underlying
-STRIKE_STEP = {'NIFTY': 50, 'BANKNIFTY': 100, 'FINNIFTY': 50, 'SENSEX': 100}
+STRIKE_STEP = {'NIFTY': 50, 'BANKNIFTY': 100, 'FINNIFTY': 50, 'SENSEX': 100, 'CRUDEOIL': 50, 'CRUDEOILM': 50}
 
 
 def _f(val, default: float = 0.0) -> float:
@@ -326,7 +331,7 @@ class QuotePushServer:
 def main():
     parser = argparse.ArgumentParser(description='Live options WebSocket bridge')
     parser.add_argument('--underlying', default='NIFTY',
-                        choices=['NIFTY', 'BANKNIFTY', 'FINNIFTY', 'SENSEX'])
+                        choices=['NIFTY', 'BANKNIFTY', 'FINNIFTY', 'SENSEX', 'CRUDEOIL', 'CRUDEOILM'])
     parser.add_argument('--expiry', required=True,
                         help='Expiry date YYYY-MM-DD')
     parser.add_argument('--num-strikes', type=int, default=10,
@@ -357,31 +362,74 @@ def main():
         sys.exit(1)
 
     helper = DhanHelper(dhan)
-    step = STRIKE_STEP.get(args.underlying, 50)
-    underlying_sid = UNDERLYING_SIDS.get(args.underlying.upper(), '13')
-    underlying_exchange = UNDERLYING_EXCHANGE.get(args.underlying.upper(), 'NSE')
-    underlying_seg = 'IDX_I' if underlying_exchange == 'NSE' else 'BSE_IDX'
+    under = args.underlying.upper()
+    is_crude = under in ('CRUDEOIL', 'CRUDEOILM')
+    is_sensex = under == 'SENSEX'
+    step = STRIKE_STEP.get(under, 50)
+
+    fut_sid = None
+    if is_crude:
+        from scripts.tools.premarket_data import _find_nearest_future
+        fut = _find_nearest_future(helper, under, exchange="MCX", instrument="FUTCOM")
+        if not fut:
+            print(f'[live_options_ws] ERROR: {under} future contract not found', flush=True)
+            write_status('ERROR', underlying=args.underlying, expiry=args.expiry,
+                         started_at=started_at, ws_port=ws_port)
+            sys.exit(1)
+        fut_sid = str(int(fut["SECURITY_ID"]))
+        underlying_sid = fut_sid
+        underlying_exchange = 'MCX'
+        underlying_seg = 'MCX_COMM'
+        chain_symbol = fut_sid
+        chain_seg = 'MCX_COMM'
+        opt_inst = 'OPTFUT'
+        canary_feed_seg = MCX_COMM
+    elif is_sensex:
+        underlying_sid = '51'
+        underlying_exchange = 'BSE'
+        underlying_seg = 'NSE_IDX'
+        chain_symbol = '1'
+        chain_seg = 'BSE_FNO'
+        opt_inst = 'OPTIDX'
+        canary_feed_seg = IDX
+    else:
+        underlying_sid = UNDERLYING_SIDS.get(under, '13')
+        underlying_exchange = 'NSE'
+        underlying_seg = 'NSE_IDX'
+        chain_symbol = under
+        chain_seg = 'IDX_I'
+        opt_inst = 'OPTIDX'
+        canary_feed_seg = IDX
 
     # Fetch prev_closes once at startup — used for % change throughout the session
-    closes = _fetch_prev_closes(dhan, underlying_sid, underlying_exchange)
+    closes = _fetch_prev_closes(dhan, underlying_sid, underlying_seg)
     underlying_prev_close = closes.get(underlying_sid, 0.0)
     vix_prev_close = closes.get(VIX_SID, 0.0)
     print(f'[live_options_ws] prev_closes: underlying={underlying_prev_close}, VIX={vix_prev_close}', flush=True)
 
     # Fetch prev-day OI & Close per strike once at startup — baseline for buildup labels
-    prev_meta_map = _fetch_prev_meta(helper, args.underlying, args.expiry, exchange_segment=underlying_seg)
+    prev_meta_map = _fetch_prev_meta(helper, chain_symbol, args.expiry, exchange_segment=chain_seg)
     print(f'[live_options_ws] prev_meta baseline: {len(prev_meta_map)} strikes', flush=True)
 
-    # Get spot to determine ATM — retry on transient REST failures (429s):
-    # spot=0 here means zero strikes resolved and a crippled session.
+    # Get spot to determine ATM — prefer snapshot from closes, fall back to REST
     print('[live_options_ws] Fetching spot price…', flush=True)
-    spot = 0.0
-    for attempt in range(5):
-        spot = helper.get_ltp(args.underlying, exchange=underlying_exchange, instrument='INDEX') or 0.0
-        if spot > 0:
-            break
-        print(f'[live_options_ws] WARN: spot fetch failed (attempt {attempt + 1}/5), retrying in 5s…', flush=True)
-        time.sleep(5)
+    spot = float(closes.get('spot', 0.0))
+    if spot <= 0:
+        for attempt in range(5):
+            if is_crude and fut_sid is not None:
+                ohlc_raw = helper.get_ohlc_data({"MCX_COMM": [int(fut_sid)]})
+                entry = (ohlc_raw or {}).get("MCX_COMM", {}).get(str(fut_sid), {})
+                spot = float(entry.get("last_price") or 0.0)
+                if not spot:
+                    spot = helper.get_ltp(int(fut_sid), exchange='MCX', instrument='FUTCOM') or 0.0
+            elif is_sensex:
+                spot = helper.get_ltp(51, exchange='NSE', instrument='INDEX') or 0.0
+            else:
+                spot = helper.get_ltp(args.underlying, exchange=underlying_exchange, instrument='INDEX') or 0.0
+            if spot > 0:
+                break
+            print(f'[live_options_ws] WARN: spot fetch failed (attempt {attempt + 1}/5), retrying in 5s…', flush=True)
+            time.sleep(5)
     atm  = round(spot / step) * step if spot > 0 else 0
     print(f'[live_options_ws] Spot={spot:.2f} ATM={atm} step={step}', flush=True)
 
@@ -396,16 +444,17 @@ def main():
     print(f'[live_options_ws] Resolving {len(strikes) * 2} option contracts…', flush=True)
     for strike in strikes:
         for opt_type in ('CE', 'PE'):
-            opt = helper.find_option(args.underlying, args.expiry, float(strike), opt_type, exchange=underlying_exchange)
+            opt = helper.find_option(args.underlying, args.expiry, float(strike), opt_type, exchange=underlying_exchange, instrument=opt_inst)
             if opt is None:
                 continue
             sid = str(int(opt['SECURITY_ID']))
             sid_map[sid] = {'strike': int(strike), 'type': opt_type, 'expiry': args.expiry}
             instruments.append((option_feed_segment, sid, FULL))
 
-    # Subscribe to underlying index (spot canary) and India VIX
-    instruments.append((IDX, underlying_sid, FEED_QUOTE))
-    instruments.append((IDX, VIX_SID, FEED_QUOTE))
+    # Subscribe to underlying index/future (spot canary) and India VIX
+    instruments.append((canary_feed_seg, underlying_sid, FEED_QUOTE))
+    if not is_crude:
+        instruments.append((IDX, VIX_SID, FEED_QUOTE))
 
     n = len(sid_map)  # actual option contracts (excludes index canary + VIX)
     print(f'[live_options_ws] Subscribing to {n} option contracts + index canary…', flush=True)
@@ -509,7 +558,7 @@ def main():
                                 continue
                             resolved_extra.add(dedupe_key)
                             opt = helper.find_option(args.underlying, req_expiry, req_strike, req_side,
-                                                      exchange=underlying_exchange)
+                                                      exchange=underlying_exchange, instrument=opt_inst)
                             if opt is None:
                                 print(f'[live_options_ws] WARN: could not resolve extra contract '
                                       f'{args.underlying} {req_expiry} {req_strike}{req_side}', flush=True)
