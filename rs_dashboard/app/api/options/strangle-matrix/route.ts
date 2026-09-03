@@ -1,8 +1,9 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { fetchUnderlyingExpiries, fetchUnderlyingChain } from '@/lib/ultimateScannerDhan';
+import { fetchUnderlyingExpiries, fetchUnderlyingChain, fetchNettedMargin, type MarginLeg } from '@/lib/ultimateScannerDhan';
 import { parseChainQuotes, calculateDte, STRIKE_STEPS, LOT_SIZES } from '@/lib/ultimateScannerEngine';
 import { computeStrangleAtOffset, type StrangleCell } from '@/lib/strangleMath';
 import type { UnderlyingType } from '@/lib/ultimateScannerTypes';
+import { dedupe } from '@/lib/pyExec';
 
 const MAX_EXPIRIES = 5;
 const MAX_OFFSET = 15;
@@ -49,98 +50,138 @@ export async function GET(request: NextRequest) {
     }
 
     try {
-      const allExpiries = await fetchUnderlyingExpiries(underlying, paceKey);
-      const targetExpiries = allExpiries.slice(0, MAX_EXPIRIES);
-      if (targetExpiries.length === 0) {
-        throw new Error('No expiries available');
-      }
-
-      // Fetch every expiry's chain concurrently
-      const chainResults = await Promise.all(
-        targetExpiries.map(expiry =>
-          fetchUnderlyingChain(underlying, expiry, paceKey).catch(() => ({
-            chain: {},
-            spot: 0,
-            prevClose: 0,
-          }))
-        ),
-      );
-
-      const step = STRIKE_STEPS[underlying] || 50;
-      const lotSize = LOT_SIZES[underlying] || 65;
-
-      const spot = chainResults.find(r => r.spot > 0)?.spot ?? 0;
-      const prevClose = chainResults.find(r => r.prevClose > 0)?.prevClose ?? spot;
-      const change = spot > 0 && prevClose > 0 ? Math.round((spot - prevClose) * 100) / 100 : 0;
-      const changePct = prevClose > 0 ? Math.round((change / prevClose) * 10000) / 100 : 0;
-
-      // Precompute per-expiry values once
-      const precomputed = targetExpiries.map((expiry, i) => {
-        const { chain, spot: expirySpot } = chainResults[i];
-        const effectiveSpot = expirySpot > 0 ? expirySpot : spot;
-        if (effectiveSpot <= 0) {
-          return { quotes: null, atmStrike: 0, dte: 0 };
+      // The margin-enrichment pass below can add several seconds to a cache
+      // miss; without this, two requests racing the same miss (a second
+      // browser tab, or a poll tick firing just as the cache expires) would
+      // each independently rebuild the whole grid and double the Dhan calls
+      // (chain fetches AND margin calls) in flight at once.
+      const data = await dedupe(`build:${cacheKey}`, async (): Promise<StrangleMatrixData> => {
+        const allExpiries = await fetchUnderlyingExpiries(underlying, paceKey);
+        const targetExpiries = allExpiries.slice(0, MAX_EXPIRIES);
+        if (targetExpiries.length === 0) {
+          throw new Error('No expiries available');
         }
-        const { quotes, strikes } = parseChainQuotes(chain);
-        if (strikes.length === 0) {
-          return { quotes: null, atmStrike: 0, dte: 0 };
-        }
-        const atmStrike = strikes.reduce((prev, curr) =>
-          Math.abs(curr - effectiveSpot) < Math.abs(prev - effectiveSpot) ? curr : prev
+
+        // Fetch every expiry's chain concurrently
+        const chainResults = await Promise.all(
+          targetExpiries.map(expiry =>
+            fetchUnderlyingChain(underlying, expiry, paceKey).catch(() => ({
+              chain: {},
+              spot: 0,
+              prevClose: 0,
+            }))
+          ),
         );
-        const dte = calculateDte(expiry);
-        return { quotes, atmStrike, dte };
-      });
 
-      if (spot <= 0) {
-        throw new Error('No chain data available for any expiry');
-      }
+        const step = STRIKE_STEPS[underlying] || 50;
+        const lotSize = LOT_SIZES[underlying] || 65;
 
-      // Overall ATM strike
-      const primaryAtm = precomputed[0]?.atmStrike || Math.round(spot / step) * step;
+        const spot = chainResults.find(r => r.spot > 0)?.spot ?? 0;
+        const prevClose = chainResults.find(r => r.prevClose > 0)?.prevClose ?? spot;
+        const change = spot > 0 && prevClose > 0 ? Math.round((spot - prevClose) * 100) / 100 : 0;
+        const changePct = prevClose > 0 ? Math.round((change / prevClose) * 10000) / 100 : 0;
 
-      const expiries = targetExpiries.map((expiry, i) => ({
-        expiry,
-        dte: precomputed[i].dte,
-        atmStrike: precomputed[i].atmStrike || primaryAtm,
-      }));
-
-      const rows: { offset: number; cells: (StrangleCell | null)[] }[] = [];
-
-      for (let offset = 1; offset <= MAX_OFFSET; offset++) {
-        const cells: (StrangleCell | null)[] = targetExpiries.map((expiry, i) => {
-          if (!precomputed[i].quotes) return null;
-          const { quotes, atmStrike, dte } = precomputed[i];
-          if (quotes === null || atmStrike <= 0) return null;
-          const { spot: expirySpot } = chainResults[i];
-          return computeStrangleAtOffset({
-            underlying,
-            atmStrike,
-            offset,
-            step,
-            spot: expirySpot > 0 ? expirySpot : spot,
-            dte,
-            lotSize,
-            chainQuotes: quotes,
-          });
+        // Precompute per-expiry values once
+        const precomputed = targetExpiries.map((expiry, i) => {
+          const { chain, spot: expirySpot } = chainResults[i];
+          const effectiveSpot = expirySpot > 0 ? expirySpot : spot;
+          if (effectiveSpot <= 0) {
+            return { quotes: null, atmStrike: 0, dte: 0 };
+          }
+          const { quotes, strikes } = parseChainQuotes(chain);
+          if (strikes.length === 0) {
+            return { quotes: null, atmStrike: 0, dte: 0 };
+          }
+          const atmStrike = strikes.reduce((prev, curr) =>
+            Math.abs(curr - effectiveSpot) < Math.abs(prev - effectiveSpot) ? curr : prev
+          );
+          const dte = calculateDte(expiry);
+          return { quotes, atmStrike, dte };
         });
-        rows.push({ offset, cells });
-      }
 
-      const todayIso = new Date().toISOString().split('T')[0];
-      const data: StrangleMatrixData = {
-        underlying,
-        spot,
-        prevClose,
-        change,
-        changePct,
-        atmStrike: primaryAtm,
-        step,
-        lotSize,
-        dataDate: todayIso,
-        expiries,
-        rows,
-      };
+        if (spot <= 0) {
+          throw new Error('No chain data available for any expiry');
+        }
+
+        // Overall ATM strike
+        const primaryAtm = precomputed[0]?.atmStrike || Math.round(spot / step) * step;
+
+        const expiries = targetExpiries.map((expiry, i) => ({
+          expiry,
+          dte: precomputed[i].dte,
+          atmStrike: precomputed[i].atmStrike || primaryAtm,
+        }));
+
+        const rows: { offset: number; cells: (StrangleCell | null)[] }[] = [];
+
+        for (let offset = 1; offset <= MAX_OFFSET; offset++) {
+          const cells: (StrangleCell | null)[] = targetExpiries.map((expiry, i) => {
+            const { quotes, atmStrike, dte } = precomputed[i];
+            if (!quotes || atmStrike <= 0) return null;
+            const { spot: expirySpot } = chainResults[i];
+            return computeStrangleAtOffset({
+              underlying,
+              atmStrike,
+              offset,
+              step,
+              spot: expirySpot > 0 ? expirySpot : spot,
+              dte,
+              lotSize,
+              chainQuotes: quotes,
+            });
+          });
+          rows.push({ offset, cells });
+        }
+
+        // Every cell's estMargin is a flat per-underlying constant — good
+        // enough to compute the whole 5-expiry x 15-offset grid cheaply, but
+        // not the real netted SPAN+exposure margin Dhan would actually block.
+        // Replace it with the real figure (via Dhan's own multi-leg margin
+        // calculator) for the top candidates by RoM — capped and sequential,
+        // paced to respect Dhan's rate limit. This only runs on a cache miss
+        // (~every 10s at most, not per 4s poll), so the added latency is
+        // bounded and rare.
+        const ENRICH_TOP_N = 8;
+        const candidates = rows
+          .flatMap(row => row.cells.map((cell, expiryIdx) => ({ cell, dte: precomputed[expiryIdx]?.dte ?? 1 })))
+          .filter((c): c is { cell: StrangleCell; dte: number } => c.cell !== null)
+          .sort((a, b) => b.cell.romPct - a.cell.romPct)
+          .slice(0, ENRICH_TOP_N);
+
+        for (let i = 0; i < candidates.length; i++) {
+          const { cell, dte } = candidates[i];
+          if (!cell.putSecurityId || !cell.callSecurityId) continue;
+          const legs: MarginLeg[] = [
+            { side: 'SELL', securityId: cell.putSecurityId, quantity: lotSize },
+            { side: 'SELL', securityId: cell.callSecurityId, quantity: lotSize },
+          ];
+          const liveMargin = await fetchNettedMargin(underlying, legs);
+          if (liveMargin !== null) {
+            cell.estMargin = liveMargin;
+            cell.romPct = Math.round((cell.netPremium / liveMargin) * 100 * 100) / 100;
+            cell.romAnnualizedPct = Math.round((cell.romPct / Math.max(0.5, dte)) * 365);
+            cell.marginSource = 'live';
+          }
+          if (i < candidates.length - 1) {
+            await new Promise(resolve => setTimeout(resolve, 1100));
+          }
+        }
+
+        const todayIso = new Date().toISOString().split('T')[0];
+        return {
+          underlying,
+          spot,
+          prevClose,
+          change,
+          changePct,
+          atmStrike: primaryAtm,
+          step,
+          lotSize,
+          dataDate: todayIso,
+          expiries,
+          rows,
+        };
+      });
 
       serverCache.set(cacheKey, { data, ts: Date.now(), ttl: LIVE_CACHE_TTL_MS });
 
@@ -164,4 +205,3 @@ export async function GET(request: NextRequest) {
     return NextResponse.json({ success: false, error: String((err as Error).message ?? err) }, { status: 500 });
   }
 }
-

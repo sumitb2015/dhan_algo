@@ -1,5 +1,5 @@
 import type { UnderlyingType } from './ultimateScannerTypes';
-import { estimatePopAndDelta } from './ultimateScannerEngine.ts';
+import { estimatePopAndDelta, LOT_SIZES, STRIKE_STEPS } from './ultimateScannerEngine.ts';
 
 export interface ChainStrikeQuote {
   strike: number;
@@ -29,7 +29,12 @@ export interface StrangleCell {
   callLtp: number;
   netPremium: number;         // Total net credit in ₹ for 1 lot
   netPremiumPoints: number;   // Net premium in index points
-  estMargin: number;          // Flat per-strategy margin estimate in ₹
+  estMargin: number;          // Margin in ₹ — a flat per-strategy estimate
+                               // unless marginSource is 'live'
+  marginSource?: 'live' | 'estimate'; // 'live' = priced via Dhan's multi-leg
+                               // margin calculator for this exact strike pair;
+                               // absent/'estimate' = flat formula, not the real
+                               // netted SPAN+exposure figure
   romPct: number;             // Return on Margin % per expiry cycle
   romAnnualizedPct: number;   // Annualized RoM %
   distancePct: number;        // Nearer leg's distance from spot, % OTM
@@ -49,18 +54,6 @@ export interface StrangleCell {
   putSecurityId?: string;
   callSecurityId?: string;
 }
-
-export const LOT_SIZES: Record<UnderlyingType, number> = {
-  NIFTY: 65,
-  SENSEX: 10,
-  BANKNIFTY: 15,
-};
-
-export const STRIKE_STEPS: Record<UnderlyingType, number> = {
-  NIFTY: 50,
-  SENSEX: 100,
-  BANKNIFTY: 100,
-};
 
 const BASE_MARGINS: Record<UnderlyingType, number> = {
   NIFTY: 120000,
