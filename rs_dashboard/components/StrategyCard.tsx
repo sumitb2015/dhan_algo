@@ -339,6 +339,23 @@ function StrategyCard({ meta, state, onRefresh, selectedBroker }: StrategyCardPr
   // the worst drawdown from -13.1% to -18.1%, so it must be an opt-out, never a default.
   const [momentumRegime, setMomentumRegime] = useState<boolean>(true);
 
+  // Nifty Delta Strangle (Weekly) — sizing is EITHER an explicit lot count OR margin-based
+  // auto-sizing against Target Capital; the script's own --lots default is None (auto).
+  const [dsAutoLots, setDsAutoLots] = useState<boolean>(true);
+  const [dsLots, setDsLots] = useState<number>(1);
+  const [dsMinLots, setDsMinLots] = useState<number>(1);
+  const [dsTargetCapital, setDsTargetCapital] = useState<number>(400000);
+  const [dsEntryDelta, setDsEntryDelta] = useState<number>(0.15);
+  const [dsRollUpDelta, setDsRollUpDelta] = useState<number>(0.35);
+  const [dsRollDownDelta, setDsRollDownDelta] = useState<number>(0.08);
+  const [dsPremiumSymmetryMin, setDsPremiumSymmetryMin] = useState<number>(0.80);
+  const [dsEntryWeekday, setDsEntryWeekday] = useState<number>(2);
+  const [dsExitWeekday, setDsExitWeekday] = useState<number>(1);
+  const [dsExitTime, setDsExitTime] = useState<string>('15:15');
+  const [dsPollInterval, setDsPollInterval] = useState<number>(60);
+  const [dsHardSlMultiple, setDsHardSlMultiple] = useState<number>(3.0);
+  const [dsNoHardSl, setDsNoHardSl] = useState<boolean>(false);
+
   const spreadTrendNoIndicators =
     meta.key === 'nifty_spread_trend' && !useEma && !useSupertrend;
 
@@ -421,6 +438,12 @@ function StrategyCard({ meta, state, onRefresh, selectedBroker }: StrategyCardPr
         args.push('--contract-size', String(cvsContractSize));
         args.push('--target-profit', String(cvsTargetInr));
         args.push('--stop-loss', String(cvsStopInr));
+      } else if (meta.key === 'nifty_delta_strangle') {
+        // Weekly delta-managed carry: no daily Target/Stop-Loss or Start Time at all — sizing
+        // is either an explicit lot count (--lots overrides) or margin-based auto-sizing
+        // against Target Capital, floored at Min Lots either way.
+        args.push('--target-capital', String(dsTargetCapital));
+        if (!dsAutoLots) args.push('--lots', String(dsLots));
       } else {
         args.push('--lots', String(lots));
         args.push('--target-profit', profitTarget.trim());
@@ -549,6 +572,18 @@ function StrategyCard({ meta, state, onRefresh, selectedBroker }: StrategyCardPr
         args.push('--cooldown-minutes', String(stOiCooldownMinutes));
         if (!exitOnSignalFlip) args.push('--no-exit-on-signal-flip');
         if (!exitOnOptionStFlip) args.push('--no-exit-on-option-st-flip');
+      } else if (meta.key === 'nifty_delta_strangle') {
+        args.push('--min-lots', String(dsMinLots));
+        args.push('--entry-delta', String(dsEntryDelta));
+        args.push('--roll-up-delta', String(dsRollUpDelta));
+        args.push('--roll-down-delta', String(dsRollDownDelta));
+        args.push('--premium-symmetry-min', String(dsPremiumSymmetryMin));
+        args.push('--entry-weekday', String(dsEntryWeekday));
+        args.push('--exit-weekday', String(dsExitWeekday));
+        args.push('--exit-time', dsExitTime);
+        args.push('--poll-interval', String(dsPollInterval));
+        args.push('--hard-sl-multiple', String(dsHardSlMultiple));
+        if (dsNoHardSl) args.push('--no-hard-sl');
       } else if (meta.key === 'nifty_rolling_straddle') {
         args.push('--roll-type', rollType);
         if (rollType === 'percentage') {
@@ -764,6 +799,22 @@ function StrategyCard({ meta, state, onRefresh, selectedBroker }: StrategyCardPr
               <span className="text-[9px] text-zinc-600">exposure: {cvsLots * cvsContractSize} barrels</span>
             </div>
           </>
+        ) : meta.key === 'nifty_delta_strangle' ? (
+          <div className={fieldCls}>
+            <FieldLabel text="Sizing" tip="Auto: margin-based sizing against Target Capital (the script's own default). Manual: an explicit lot count via --lots, bypassing auto-sizing entirely." />
+            <div className="flex items-center gap-2 h-7">
+              <input
+                type="checkbox"
+                id={`ds-auto-lots-${meta.key}`}
+                checked={dsAutoLots}
+                onChange={(e) => setDsAutoLots(e.target.checked)}
+                className="h-3.5 w-3.5 rounded border-zinc-800 bg-zinc-900 accent-emerald-500"
+              />
+              <label htmlFor={`ds-auto-lots-${meta.key}`} className="text-white font-semibold text-xs">
+                Auto (Target Capital)
+              </label>
+            </div>
+          </div>
         ) : (
           <div className={fieldCls}>
             <FieldLabel text="Lots" tip="Number of lot-sized units traded per leg at entry (multiplied by the instrument's live lot size)." />
@@ -781,6 +832,25 @@ function StrategyCard({ meta, state, onRefresh, selectedBroker }: StrategyCardPr
               </span>
             )}
           </div>
+        )}
+
+        {meta.key === 'nifty_delta_strangle' && (
+          <>
+            <div className={fieldCls}>
+              <FieldLabel text="Target Capital ₹" tip="Margin budget the auto-sizer allocates lots against. Still sent when Sizing is Manual, but ignored in favor of the explicit Lots override." />
+              <Input type="number" value={dsTargetCapital} onChange={(e) => setDsTargetCapital(parseInt(e.target.value) || 400000)} className={inputCls} disabled={!dsAutoLots} />
+            </div>
+            {!dsAutoLots && (
+              <div className={fieldCls}>
+                <FieldLabel text="Lots" tip="Explicit lot count, bypasses margin-based auto-sizing entirely." />
+                <Input type="number" value={dsLots} onChange={(e) => setDsLots(parseInt(e.target.value) || 1)} min={1} max={20} className={inputCls} />
+              </div>
+            )}
+            <div className={fieldCls}>
+              <FieldLabel text="Min Lots" tip="Floor the auto-sizer will never size below, even if margin is tight." />
+              <Input type="number" value={dsMinLots} onChange={(e) => setDsMinLots(parseInt(e.target.value) || 1)} min={1} className={inputCls} />
+            </div>
+          </>
         )}
 
         {(meta.key === 'nifty_value_imbalance_straddle' ||
@@ -834,7 +904,7 @@ function StrategyCard({ meta, state, onRefresh, selectedBroker }: StrategyCardPr
           </>
         )}
 
-        {meta.key !== 'nifty_spread_trend' && meta.key !== 'crudeoilm_supertrend' && meta.key !== 'crudeoilm_renko_sar' && meta.key !== 'crudeoilm_vwap_supertrend' && meta.key !== 'crudeoilm_orb' && meta.key !== 'nifty_st_oi_bearcall' && meta.key !== 'nifty500_momentum' && (
+        {meta.key !== 'nifty_spread_trend' && meta.key !== 'crudeoilm_supertrend' && meta.key !== 'crudeoilm_renko_sar' && meta.key !== 'crudeoilm_vwap_supertrend' && meta.key !== 'crudeoilm_orb' && meta.key !== 'nifty_st_oi_bearcall' && meta.key !== 'nifty500_momentum' && meta.key !== 'nifty_delta_strangle' && (
           <div className={fieldCls}>
             <FieldLabel text="Start Time" tip="Time (HH:MM IST) the strategy begins monitoring for entries." />
             <Input type="text" value={startTime} onChange={(e) => setStartTime(e.target.value)} placeholder="09:20" className={inputCls} />
@@ -945,7 +1015,7 @@ function StrategyCard({ meta, state, onRefresh, selectedBroker }: StrategyCardPr
           </>
         )}
 
-        {meta.key !== 'crudeoilm_renko_sar' && meta.key !== 'crudeoilm_supertrend' && meta.key !== 'crudeoilm_vwap_supertrend' && meta.key !== 'crudeoilm_orb' && meta.key !== 'nifty500_momentum' && (
+        {meta.key !== 'crudeoilm_renko_sar' && meta.key !== 'crudeoilm_supertrend' && meta.key !== 'crudeoilm_vwap_supertrend' && meta.key !== 'crudeoilm_orb' && meta.key !== 'nifty500_momentum' && meta.key !== 'nifty_delta_strangle' && (
           <>
             <div className={fieldCls}>
               <FieldLabel text="Target ₹" tip="Daily cumulative profit target in INR, or a percentage of entry premium collected e.g. '25%'; strategy squares off and stops once reached." />
@@ -955,6 +1025,74 @@ function StrategyCard({ meta, state, onRefresh, selectedBroker }: StrategyCardPr
             <div className={fieldCls}>
               <FieldLabel text="Stop Loss ₹" tip="Daily cumulative stop loss in INR, or a percentage of entry premium collected e.g. '25%'; strategy squares off and stops once breached." />
               <Input type="text" inputMode="decimal" value={stopLoss} onChange={(e) => setStopLoss(e.target.value)} placeholder="25% or 4000" className={inputCls} />
+            </div>
+          </>
+        )}
+
+        {meta.key === 'nifty_delta_strangle' && (
+          <>
+            <div className={fieldCls}>
+              <FieldLabel text="Entry Delta" tip="Each leg is sold at the strike whose |delta| is closest to this from below (--entry-delta)." />
+              <Input type="number" value={dsEntryDelta} onChange={(e) => setDsEntryDelta(parseFloat(e.target.value) || 0.15)} min={0.01} max={0.5} step={0.01} className={inputCls} />
+            </div>
+            <div className={fieldCls}>
+              <FieldLabel text="Roll-Up Delta" tip="A leg whose |delta| reaches this is bought back and re-sold fresh at Entry Delta (--roll-up-delta)." />
+              <Input type="number" value={dsRollUpDelta} onChange={(e) => setDsRollUpDelta(parseFloat(e.target.value) || 0.35)} min={0.01} max={1} step={0.01} className={inputCls} />
+            </div>
+            <div className={fieldCls}>
+              <FieldLabel text="Roll-Down Delta" tip="A leg whose |delta| decays below this is rolled the same way — too far OTM to collect meaningful premium (--roll-down-delta)." />
+              <Input type="number" value={dsRollDownDelta} onChange={(e) => setDsRollDownDelta(parseFloat(e.target.value) || 0.08)} min={0} max={1} step={0.01} className={inputCls} />
+            </div>
+            <div className={fieldCls}>
+              <FieldLabel text="Premium Symmetry Min" tip="min(CE,PE premium)/max(CE,PE premium) required at Wednesday entry only; a lopsided strangle skips that week's entry (--premium-symmetry-min)." />
+              <Input type="number" value={dsPremiumSymmetryMin} onChange={(e) => setDsPremiumSymmetryMin(parseFloat(e.target.value) || 0.80)} min={0} max={1} step={0.05} className={inputCls} />
+            </div>
+            <div className={fieldCls}>
+              <FieldLabel text="Entry Weekday" tip="Weekday the strangle is sold (--entry-weekday). Default Wednesday." />
+              <Select value={String(dsEntryWeekday)} onValueChange={(v) => v && setDsEntryWeekday(parseInt(v))}>
+                <SelectTrigger className={inputCls}><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  {['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'].map((d, i) => (
+                    <SelectItem key={i} value={String(i)}>{d}</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+            <div className={fieldCls}>
+              <FieldLabel text="Exit Weekday" tip="Weekday both legs are bought back and the strategy goes idle (--exit-weekday). Default Tuesday." />
+              <Select value={String(dsExitWeekday)} onValueChange={(v) => v && setDsExitWeekday(parseInt(v))}>
+                <SelectTrigger className={inputCls}><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  {['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'].map((d, i) => (
+                    <SelectItem key={i} value={String(i)}>{d}</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+            <div className={fieldCls}>
+              <FieldLabel text="Exit Time" tip="Time (HH:MM IST) on Exit Weekday the position is closed (--exit-time)." />
+              <Input type="text" value={dsExitTime} onChange={(e) => setDsExitTime(e.target.value)} placeholder="15:15" className={inputCls} />
+            </div>
+            <div className={fieldCls}>
+              <FieldLabel text="Poll Interval (s)" tip="How often delta is checked against the roll thresholds while a position is open (--poll-interval)." />
+              <Input type="number" value={dsPollInterval} onChange={(e) => setDsPollInterval(parseInt(e.target.value) || 60)} min={5} step={5} className={inputCls} />
+            </div>
+            <div className={fieldCls}>
+              <FieldLabel text="Hard SL Multiple" tip="Dhan-only resting SL-M order at entry_premium × this multiple, per leg — a dead-man's-switch backstop, not the normal exit path (--hard-sl-multiple)." />
+              <Input type="number" value={dsHardSlMultiple} onChange={(e) => setDsHardSlMultiple(parseFloat(e.target.value) || 3.0)} min={1} step={0.5} className={inputCls} disabled={dsNoHardSl} />
+            </div>
+            <div className={fieldCls}>
+              <FieldLabel text="Hard SL Backstop" tip="OFF disables the resting SL-M backstop entirely (--no-hard-sl). Zerodha/Kotak never have one regardless — poll interval is the only protection there." />
+              <div className="flex items-center gap-2 h-7">
+                <input
+                  type="checkbox"
+                  id={`ds-hard-sl-${meta.key}`}
+                  checked={!dsNoHardSl}
+                  onChange={(e) => setDsNoHardSl(!e.target.checked)}
+                  className="h-3.5 w-3.5 rounded border-zinc-800 bg-zinc-900 accent-emerald-500"
+                />
+                <label htmlFor={`ds-hard-sl-${meta.key}`} className="text-white font-semibold text-xs">Enabled</label>
+              </div>
             </div>
           </>
         )}
