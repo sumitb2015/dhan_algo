@@ -19,6 +19,7 @@ import {
   Filter,
   CalendarClock,
   Target,
+  Square,
 } from 'lucide-react';
 import type {
   StrategyType,
@@ -86,8 +87,12 @@ export default function ScannerStep({
   // pure client-side filter over `scanResult.candidates` (see `displayedCandidates`
   // below), so switching strategy pills never needs a fresh Dhan chain spawn.
   const scanRequestId = React.useRef(0);
+  const scanAbortController = React.useRef<AbortController | null>(null);
   const handleRunScan = useCallback(async (activeRom?: number) => {
     const requestId = ++scanRequestId.current;
+    scanAbortController.current?.abort();
+    const controller = new AbortController();
+    scanAbortController.current = controller;
     setLoading(true);
     setError(null);
     try {
@@ -109,6 +114,7 @@ export default function ScannerStep({
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),
+        signal: controller.signal,
       });
 
       const data = (await res.json()) as ScanResponse;
@@ -123,11 +129,23 @@ export default function ScannerStep({
       }
     } catch (err: unknown) {
       if (requestId !== scanRequestId.current) return;
+      if (err instanceof DOMException && err.name === 'AbortError') {
+        // User-initiated stop — not an error worth surfacing.
+        return;
+      }
       setError(String((err as Error).message || err));
     } finally {
       if (requestId === scanRequestId.current) setLoading(false);
     }
   }, [underlying, expiry, minRom, minDistancePct, maxDistancePct, riskProfile, sortBy, onScanDataDate]);
+
+  const handleStopScan = useCallback(() => {
+    scanAbortController.current?.abort();
+    // Bump the request id so the aborted request's in-flight finally/catch,
+    // if it already raced past the abort check, can't flip loading back on.
+    scanRequestId.current += 1;
+    setLoading(false);
+  }, []);
 
   // Fetch the available expiries whenever the underlying changes (Nifty and
   // Sensex trade different expiry calendars) and default to the nearest one.
@@ -150,6 +168,7 @@ export default function ScannerStep({
   // Initial scan on mount
   useEffect(() => {
     handleRunScan(1.0);
+    return () => { scanAbortController.current?.abort(); };
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Strategy selection handler: purely client-side filter, no re-scan.
@@ -266,6 +285,15 @@ export default function ScannerStep({
               <RefreshCw className={`w-3.5 h-3.5 ${loading ? 'animate-spin' : ''}`} />
               {loading ? 'Scanning Chains...' : 'Scan Option Chains'}
             </button>
+            {loading && (
+              <button
+                onClick={handleStopScan}
+                className="flex items-center gap-2 px-3.5 py-2 rounded-xl bg-red-950/60 hover:bg-red-900/60 border border-red-800/60 text-red-300 text-xs font-bold transition-all"
+              >
+                <Square className="w-3 h-3 fill-current" />
+                Stop
+              </button>
+            )}
           </div>
         </div>
 
@@ -542,8 +570,18 @@ export default function ScannerStep({
         </div>
       )}
 
+      {/* ── Scan Stopped Before First Result ───────────────────────── */}
+      {!loading && !scanResult && (
+        <div className="bg-zinc-900/80 border border-zinc-800 rounded-3xl p-10 text-center flex flex-col items-center justify-center gap-3">
+          <p className="text-sm font-bold text-white">Scan stopped</p>
+          <p className="text-xs text-zinc-400 max-w-md">
+            No results yet — click &ldquo;Scan Option Chains&rdquo; to run it again.
+          </p>
+        </div>
+      )}
+
       {/* ── Empty Filter Results ───────────────────────────────────── */}
-      {!loading && displayedCandidates.length === 0 && (
+      {!loading && scanResult && displayedCandidates.length === 0 && (
         <div className="bg-zinc-900/80 border border-zinc-800 rounded-3xl p-10 text-center flex flex-col items-center justify-center gap-3">
           <p className="text-sm font-bold text-white">No setups matched current threshold</p>
           <p className="text-xs text-zinc-400 max-w-md">

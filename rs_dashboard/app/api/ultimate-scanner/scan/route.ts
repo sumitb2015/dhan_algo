@@ -98,6 +98,9 @@ export async function POST(request: NextRequest): Promise<NextResponse<ScanRespo
     const ENRICH_TOP_N = 12;
     const enrichCount = Math.min(ENRICH_TOP_N, shortlisted.length);
     for (let i = 0; i < enrichCount; i++) {
+      // The client's Stop button aborts this request — no point spending more
+      // Dhan margin calls (or the pacing delay) once nobody is waiting on them.
+      if (request.signal.aborted) break;
       const candidate = shortlisted[i];
       const legs: MarginLeg[] = candidate.legs.map(leg => ({
         side: leg.side,
