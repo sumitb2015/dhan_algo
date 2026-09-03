@@ -24,9 +24,10 @@ function writeSessions(sessions: Record<string, unknown>) {
 
 /** Writes the shared Dhan access_token.json used by both the dashboard and Python scripts. */
 export function writeDhanTokenFile(accessToken: string, clientId: string, expiryTime: string) {
+  const createdAt = new Date().toISOString();
   fs.writeFileSync(
     TOKEN_FILE,
-    JSON.stringify({ accessToken, clientId, expiryTime }, null, 2)
+    JSON.stringify({ accessToken, clientId, expiryTime, createdAt }, null, 2)
   );
 }
 
@@ -54,12 +55,62 @@ export function createDashboardSession(clientId: string, remember: boolean): str
   return cookieParts.join('; ');
 }
 
-/** True if access_token.json holds a non-expired Dhan access token. */
+function getSessionStartIst(now = new Date()): Date {
+  const istOffsetMs = (5 * 60 + 30) * 60 * 1000;
+  const istNow = new Date(now.getTime() + istOffsetMs);
+  const year = istNow.getUTCFullYear();
+  const month = istNow.getUTCMonth();
+  const date = istNow.getUTCDate();
+  const hour = istNow.getUTCHours();
+
+  let sessionStartUtc = new Date(Date.UTC(year, month, date, 0, 30, 0, 0));
+  if (hour < 6) {
+    sessionStartUtc = new Date(sessionStartUtc.getTime() - 24 * 60 * 60 * 1000);
+  }
+  return sessionStartUtc;
+}
+
+function getTokenIssuedAt(data: { createdAt?: string; accessToken?: string; expiryTime?: string }): Date | null {
+  if (data.createdAt) {
+    const d = new Date(data.createdAt);
+    if (!isNaN(d.getTime())) return d;
+  }
+  if (data.accessToken && typeof data.accessToken === 'string' && data.accessToken.includes('.')) {
+    try {
+      const parts = data.accessToken.split('.');
+      if (parts[1]) {
+        const payload = JSON.parse(Buffer.from(parts[1], 'base64').toString('utf8'));
+        if (payload.iat && typeof payload.iat === 'number') {
+          return new Date(payload.iat * 1000);
+        }
+      }
+    } catch {
+      // ignore
+    }
+  }
+  if (data.expiryTime) {
+    const d = new Date(data.expiryTime);
+    if (!isNaN(d.getTime())) {
+      return new Date(d.getTime() - 24 * 60 * 60 * 1000);
+    }
+  }
+  return null;
+}
+
+/** True if access_token.json holds a non-expired Dhan access token from the current trading session. */
 export function isDhanTokenValid(): boolean {
   try {
     const data = JSON.parse(fs.readFileSync(TOKEN_FILE, 'utf8'));
     if (!data.accessToken) return false;
     if (data.expiryTime && new Date(data.expiryTime) < new Date()) return false;
+
+    const issuedAt = getTokenIssuedAt(data);
+    if (issuedAt) {
+      const sessionStart = getSessionStartIst();
+      if (issuedAt < sessionStart) {
+        return false;
+      }
+    }
     return true;
   } catch {
     return false;

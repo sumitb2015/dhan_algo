@@ -1,9 +1,17 @@
 import os
+import sys
+import base64
 import requests
 import json
 import pyotp
+import argparse
+from datetime import datetime, timezone, timedelta
+from typing import Optional, Dict, Any
 from dhanhq import dhanhq, DhanLogin
 from dotenv import load_dotenv
+
+# Indian Standard Time (UTC+5:30)
+IST = timezone(timedelta(hours=5, minutes=30))
 
 # Load environment variables
 # TOKEN_FILE path absolute relative to this script for notebook compatibility
@@ -15,6 +23,106 @@ ENV_FILE = os.path.join(BASE_DIR, ".env")
 load_dotenv(ENV_FILE)
 
 LAST_TOTP_ERROR = None
+
+
+def get_token_issue_time(token_data: Dict[str, Any]) -> Optional[datetime]:
+    """
+    Extracts the token issuance datetime (in IST) from createdAt, JWT iat, or expiryTime.
+    """
+    # 1. Explicit createdAt field
+    created_at = token_data.get("createdAt")
+    if created_at:
+        try:
+            dt = datetime.fromisoformat(created_at)
+            return dt.astimezone(IST) if dt.tzinfo else dt.replace(tzinfo=IST)
+        except Exception:
+            pass
+
+    # 2. Extract iat from JWT payload
+    access_token = token_data.get("accessToken")
+    if access_token and isinstance(access_token, str) and "." in access_token:
+        try:
+            parts = access_token.split(".")
+            if len(parts) >= 2:
+                payload_b64 = parts[1]
+                payload_b64 += "=" * ((4 - len(payload_b64) % 4) % 4)
+                payload = json.loads(base64.urlsafe_b64decode(payload_b64.encode("utf-8")).decode("utf-8"))
+                iat = payload.get("iat")
+                if iat and isinstance(iat, (int, float)):
+                    return datetime.fromtimestamp(iat, tz=IST)
+        except Exception:
+            pass
+
+    # 3. Fallback: Dhan tokens are issued for ~24h, so estimate from expiryTime
+    expiry_str = token_data.get("expiryTime")
+    if expiry_str:
+        try:
+            dt = datetime.fromisoformat(expiry_str)
+            dt_ist = dt.astimezone(IST) if dt.tzinfo else dt.replace(tzinfo=IST)
+            return dt_ist - timedelta(hours=24)
+        except Exception:
+            pass
+
+    return None
+
+
+def get_current_session_start(now: Optional[datetime] = None) -> datetime:
+    """
+    Returns the start time of the current trading session in IST.
+    Dhan resets auth sessions daily around 05:00 - 06:00 AM IST.
+    If the current time is >= 06:00 AM IST, today's session started at 06:00 AM today.
+    If before 06:00 AM IST, the session belongs to yesterday's 06:00 AM cutoff.
+    """
+    if now is None:
+        now = datetime.now(IST)
+    elif now.tzinfo is None:
+        now = now.replace(tzinfo=IST)
+    else:
+        now = now.astimezone(IST)
+
+    if now.hour >= 6:
+        return now.replace(hour=6, minute=0, second=0, microsecond=0)
+    else:
+        yesterday = now - timedelta(days=1)
+        return yesterday.replace(hour=6, minute=0, second=0, microsecond=0)
+
+
+def is_token_from_current_session(token_data: Dict[str, Any], now: Optional[datetime] = None) -> bool:
+    """
+    Returns True only if the token exists, is not expired, AND was issued
+    during the current trading session (after today's 06:00 AM IST cutoff).
+    Tokens from previous calendar days/sessions are considered stale.
+    """
+    if not token_data or not token_data.get("accessToken"):
+        return False
+
+    if now is None:
+        now = datetime.now(IST)
+    elif now.tzinfo is None:
+        now = now.replace(tzinfo=IST)
+    else:
+        now = now.astimezone(IST)
+
+    # 1. Check expiration timestamp
+    expiry_str = token_data.get("expiryTime")
+    if expiry_str:
+        try:
+            expiry_dt = datetime.fromisoformat(expiry_str)
+            expiry_ist = expiry_dt.astimezone(IST) if expiry_dt.tzinfo else expiry_dt.replace(tzinfo=IST)
+            if now >= expiry_ist:
+                return False
+        except Exception:
+            return False
+
+    # 2. Check issuance session window
+    issued_dt = get_token_issue_time(token_data)
+    if issued_dt:
+        session_start = get_current_session_start(now)
+        if issued_dt < session_start:
+            return False
+
+    return True
+
 
 def get_new_access_token():
     """
@@ -71,7 +179,8 @@ def get_new_access_token():
             # Ensure dhanClientId is stored correctly from .env (the raw API response
             # may put a phone number in 'clientId' — always persist the correct Dhan ID)
             dhan_client_id = os.getenv("client_id", "")
-            token_res_to_save = {**token_res, "dhanClientId": dhan_client_id}
+            created_at_iso = datetime.now(IST).isoformat()
+            token_res_to_save = {**token_res, "dhanClientId": dhan_client_id, "createdAt": created_at_iso}
             with open(TOKEN_FILE, 'w') as f:
                 json.dump(token_res_to_save, f)
             print("Successfully obtained and saved Access Token!")
@@ -83,6 +192,7 @@ def get_new_access_token():
     except Exception as e:
         print(f"Failed to get access token: {e}")
         return None
+
 
 def get_new_access_token_via_totp():
     """
@@ -110,7 +220,8 @@ def get_new_access_token_via_totp():
 
         access_token = token_res.get('accessToken')
         if access_token:
-            token_res_to_save = {**token_res, "dhanClientId": client_id}
+            created_at_iso = datetime.now(IST).isoformat()
+            token_res_to_save = {**token_res, "dhanClientId": client_id, "createdAt": created_at_iso}
             with open(TOKEN_FILE, 'w') as f:
                 json.dump(token_res_to_save, f)
             print("Successfully obtained and saved Access Token via TOTP autologin!")
@@ -125,29 +236,29 @@ def get_new_access_token_via_totp():
         return None
 
 
-def get_dhan_client():
+def get_dhan_client(force_login: bool = False):
     """
     Initializes the Dhan client using a cached token or a new login.
+    If the cached token is from a previous day/session or expired, automatically forces a fresh login.
     """
-    from datetime import datetime
     client_id = os.getenv("client_id")
     access_token = None
 
-    if os.path.exists(TOKEN_FILE):
+    if not force_login and os.path.exists(TOKEN_FILE):
         try:
             with open(TOKEN_FILE, 'r') as f:
                 data = json.load(f)
+            
+            if is_token_from_current_session(data):
                 access_token = data.get('accessToken')
-                expiry_str = data.get('expiryTime')
-                
-                if expiry_str:
-                    expiry_dt = datetime.fromisoformat(expiry_str)
-                    now = datetime.now(expiry_dt.tzinfo) if expiry_dt.tzinfo else datetime.now()
-                    if now > expiry_dt:
-                        print(f"Cached token expired on {expiry_str}. Forcing re-login.")
-                        access_token = None
-                    else:
-                        print(f"Using cached access token (Valid until: {expiry_str})")
+                expiry_str = data.get('expiryTime', 'N/A')
+                print(f"Using cached access token (Valid until: {expiry_str})")
+            else:
+                expiry_str = data.get('expiryTime', 'N/A')
+                issued_dt = get_token_issue_time(data)
+                issued_str = issued_dt.strftime('%Y-%m-%d %H:%M:%S IST') if issued_dt else 'unknown'
+                print(f"Cached token is from a previous session (Issued: {issued_str}, Expiry: {expiry_str}). Forcing fresh morning login.")
+                access_token = None
         except Exception as e:
             print(f"Error reading token cache: {e}")
             access_token = None
@@ -156,7 +267,6 @@ def get_dhan_client():
         access_token = get_new_access_token_via_totp()
 
     if not access_token:
-        import sys
         if not sys.stdin.isatty():
             print("ERROR: Access token expired, TOTP autologin unavailable, and no TTY for interactive login. Run login.py manually first.")
             return None
@@ -167,8 +277,6 @@ def get_dhan_client():
             # SDK 2.0.2 initialization using DhanContext
             from dhanhq import DhanContext
             dhan_context = DhanContext(client_id, access_token)
-            dhan = dhanhq(dhan_context)
-
             # Cached expiryTime is not authoritative — Dhan can revoke a token
             # server-side before its claimed expiry (e.g. a newer login replaces
             # it), so a lightweight call is needed to catch that case.
@@ -191,14 +299,22 @@ def get_dhan_client():
                     return None
 
             return dhan
-
         except Exception as e:
             print(f"Failed to initialize Dhan client: {e}")
     
     return None
 
+
 if __name__ == "__main__":
-    dhan = get_dhan_client()
+    parser = argparse.ArgumentParser(description="Dhan login and token generator")
+    parser.add_argument("--force", "-f", action="store_true", help="Force new login even if a cached token exists")
+    args = parser.parse_args()
+
+    dhan = get_dhan_client(force_login=args.force)
     if dhan:
         print("\nLogin Successful!")
-        print(dhan.get_holdings())
+        try:
+            holdings = dhan.get_holdings()
+            print("Holdings check:", "OK" if isinstance(holdings, list) or (isinstance(holdings, dict) and holdings.get("status") != "error") else holdings)
+        except Exception as e:
+            print(f"Holdings check error: {e}")

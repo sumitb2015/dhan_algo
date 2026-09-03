@@ -2,43 +2,49 @@
 Runs Dhan's TOTP-based autologin (PIN + TOTP, no browser) and caches the token.
 Called by the Next.js /api/auth/autologin route.
 
-Usage: python dhan_autologin.py
+Usage: python dhan_autologin.py [--force]
 Output: JSON on stdout — {"success": true, "clientId": "...", "expiryTime": "..."}
         or {"success": false, "error": "<message>"}
 """
 import sys
 import os
 import json
+import argparse
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, PROJECT_ROOT)
 
 
-def _cached_token_if_valid():
-    """Mirrors login.get_dhan_client()'s cache check, so autologin doesn't
-    force a fresh TOTP token generation (Dhan throttles this to once every
-    2 minutes) when the cached one is still valid."""
+def _cached_token_if_valid(force: bool = False):
+    """Mirrors login.get_dhan_client()'s cache check. Reuses the cached token only
+    if it was issued during the current trading session (after 06:00 AM IST) and is
+    not expired, avoiding Dhan's 2-minute TOTP generation throttle for intra-day calls.
+    Morning calls with previous-session tokens always force a fresh login."""
+    if force:
+        return None
+
     import login
-    from datetime import datetime
 
     if not os.path.exists(login.TOKEN_FILE):
         return None
     try:
         with open(login.TOKEN_FILE, 'r') as f:
             token_data = json.load(f)
-        expiry_str = token_data.get('expiryTime')
-        if not token_data.get('accessToken') or not expiry_str:
-            return None
-        expiry_dt = datetime.fromisoformat(expiry_str)
-        now = datetime.now(expiry_dt.tzinfo) if expiry_dt.tzinfo else datetime.now()
-        return token_data if now < expiry_dt else None
+        if login.is_token_from_current_session(token_data):
+            return token_data
+        return None
     except Exception:
         return None
 
 
 def main():
+    parser = argparse.ArgumentParser(description="Dhan TOTP autologin")
+    parser.add_argument("--force", "-f", action="store_true", help="Force new login even if a cached token exists")
+    args = parser.parse_args()
+
     import login
 
-    token_data = _cached_token_if_valid()
+    token_data = _cached_token_if_valid(force=args.force)
 
     if not token_data:
         access_token = login.get_new_access_token_via_totp()

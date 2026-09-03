@@ -3737,8 +3737,14 @@ class DhanHelper:
         retrying other symbols/windows will fail identically."""
         if not err:
             return False
-        return (err.get("code") in ("DH-901", "DH-902")
-                or err.get("type") in ("Invalid_Access", "Invalid_Authentication"))
+        code = str(err.get("code", "")).upper()
+        err_type = str(err.get("type", "")).lower()
+        msg = str(err.get("message", "")).lower()
+        return (code in ("DH-901", "DH-902", "DH-906")
+                or err_type in ("invalid_access", "invalid_authentication")
+                or "invalid token" in msg
+                or "token expired" in msg
+                or "unauthorized" in msg)
 
     def get_intraday_minute_data(self,
                                    security_id: Union[str, int],
