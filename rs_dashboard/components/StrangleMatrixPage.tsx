@@ -10,7 +10,6 @@ import {
   LineChart, Line, AreaChart, Area, BarChart, Bar,
   XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Legend, ReferenceLine
 } from 'recharts';
-import NavBar from './NavBar';
 import type { StrangleCell } from '@/lib/strangleMath';
 import type { UnderlyingType, RiskProfile } from '@/lib/ultimateScannerTypes';
 
@@ -808,7 +807,8 @@ export default function StrangleMatrixPage() {
 
   return (
     <div className="flex flex-col min-h-screen bg-zinc-950 text-white font-sans selection:bg-emerald-500/30">
-      <NavBar />
+      {/* NavBar is rendered once by app/(options)/layout.tsx for every page
+          in this route group — do not render it again here. */}
 
       {/* ─── Sticky Control Header ────────────────────────────────────────── */}
       <header className="sticky top-0 z-30 flex items-center justify-between gap-3 flex-wrap px-6 py-3 border-b border-zinc-800 bg-zinc-950/95 backdrop-blur">
