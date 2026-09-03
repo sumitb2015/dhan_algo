@@ -2,7 +2,7 @@ import type { Metadata } from 'next';
 import SeasonalityHeatmap from '@/components/SeasonalityHeatmap';
 
 export const metadata: Metadata = {
-  title: 'Market Seasonality',
+  title: 'Seasonality Heatmap & Calendar Patterns',
 };
 
 export default function SeasonalityPage() {
