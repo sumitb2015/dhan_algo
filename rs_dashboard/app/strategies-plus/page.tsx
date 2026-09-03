@@ -1,18 +1,18 @@
 'use client';
 
-import React, { useState, useEffect, useCallback, useRef } from 'react';
+import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import {
   Layers, RefreshCw, TrendingUp, TrendingDown, AlertTriangle,
   Power, ShieldOff, Activity, Zap, LayoutList, ChevronDown, ChevronRight, Shield,
   Repeat, CheckCircle2, XCircle, Play, Square, ChevronsDownUp, ChevronsUpDown,
-  Sprout, Flame, Rocket, Boxes, ListTree, Moon,
+  Sprout, Flame, Rocket, Boxes, ListTree, Moon, Clock, Calendar, Sun,
 } from 'lucide-react';
 import StrategyRowWide from '@/components/StrategyRowWide';
 import NavBar from '@/components/NavBar';
 import BrokerSelector from '@/components/BrokerSelector';
 import { usePortfolio } from '@/lib/usePortfolio';
 import { useBrokerSelector } from '@/hooks/useBrokerSelector';
-import { useGroupCollapse, groupByUnderlying } from '@/lib/useStrategyGroups';
+import { useGroupCollapse, groupByUnderlying, signedInr, inr } from '@/lib/useStrategyGroups';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -22,19 +22,16 @@ import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group';
 import { Tooltip, TooltipTrigger, TooltipContent } from '@/components/ui/tooltip';
 
-// Named type scale — keeps the file's micro font sizes consistent instead of
-// scattering ad hoc text-[Npx] values (see dhan-terminal-polish skill).
-const TXT_EYEBROW = 'text-[9px] font-bold uppercase tracking-[0.14em]';
-const TXT_LABEL = 'text-[10px] font-semibold uppercase tracking-wide';
+// Named typography tokens
+const TXT_EYEBROW = 'text-[9px] font-bold uppercase tracking-[0.16em]';
+const TXT_LABEL = 'text-[10px] font-semibold uppercase tracking-wider';
 const TXT_CAPTION = 'text-[11px] font-semibold';
 const TXT_STAT = 'text-sm font-bold font-mono tabular-nums leading-tight';
 
-type GroupMode = 'underlying' | 'type';
+type GroupMode = 'timeframe' | 'underlying' | 'type';
+type HorizonFilter = 'all' | 'intraday' | 'positional';
 
-/** Client-side mirror of lib/strategyRegistry.ts's LOGIC_GROUPS — kept separate because
- * that module is server-only (imports `fs`/`path`), so it can't be imported into this
- * 'use client' page. Only the display metadata lives here; `meta.logicGroup` (the key)
- * comes from the strategy itself via /api/strategies. Keys must stay in sync. */
+/** Client-side mirror of lib/strategyRegistry.ts's LOGIC_GROUPS */
 const LOGIC_GROUPS: Record<string, { title: string; tagline: string; icon: React.ElementType; accent: string }> = {
   harvest: { title: 'Premium Harvest', tagline: 'Sell & hold — theta does the work', icon: Sprout, accent: 'emerald' },
   rotation: { title: 'Roll & Rotate', tagline: 'Exit a decaying leg into a fresh strike', icon: Repeat, accent: 'sky' },
@@ -46,15 +43,40 @@ const LOGIC_GROUPS: Record<string, { title: string; tagline: string; icon: React
 };
 const OTHER_LOGIC_GROUP = { title: 'Other', tagline: 'Uncategorised', icon: Boxes, accent: 'zinc' };
 
-const ACCENT_CLASSES: Record<string, { icon: string; iconBg: string; iconBorder: string; ring: string }> = {
-  emerald: { icon: 'text-emerald-400', iconBg: 'bg-emerald-500/10', iconBorder: 'border-emerald-500/25', ring: 'hover:border-emerald-700/60' },
-  sky: { icon: 'text-sky-400', iconBg: 'bg-sky-500/10', iconBorder: 'border-sky-500/25', ring: 'hover:border-sky-700/60' },
-  violet: { icon: 'text-violet-400', iconBg: 'bg-violet-500/10', iconBorder: 'border-violet-500/25', ring: 'hover:border-violet-700/60' },
-  amber: { icon: 'text-amber-400', iconBg: 'bg-amber-500/10', iconBorder: 'border-amber-500/25', ring: 'hover:border-amber-700/60' },
-  orange: { icon: 'text-orange-400', iconBg: 'bg-orange-500/10', iconBorder: 'border-orange-500/25', ring: 'hover:border-orange-700/60' },
-  fuchsia: { icon: 'text-fuchsia-400', iconBg: 'bg-fuchsia-500/10', iconBorder: 'border-fuchsia-500/25', ring: 'hover:border-fuchsia-700/60' },
-  zinc: { icon: 'text-zinc-400', iconBg: 'bg-zinc-500/10', iconBorder: 'border-zinc-500/25', ring: 'hover:border-zinc-700/60' },
-  cyan: { icon: 'text-cyan-400', iconBg: 'bg-cyan-500/10', iconBorder: 'border-cyan-500/25', ring: 'hover:border-cyan-700/60' },
+/** Time Horizon definitions for grouping */
+const TIMEFRAME_GROUPS: Record<string, { title: string; tagline: string; icon: React.ElementType; accent: string; badge: string }> = {
+  intraday: {
+    title: 'Intraday Strategies',
+    tagline: 'F&O & MCX futures with mandatory intraday square-off (15:17 IST / 23:25 MCX)',
+    icon: Clock,
+    accent: 'amber',
+    badge: '⚡ INTRADAY',
+  },
+  positional: {
+    title: 'Positional & Multi-Day',
+    tagline: 'Multi-day CNC momentum portfolio, overnight hedged straddles, and weekly delta management',
+    icon: Calendar,
+    accent: 'violet',
+    badge: '🌙 POSITIONAL',
+  },
+};
+const OTHER_TIMEFRAME_GROUP = {
+  title: 'Other Strategies',
+  tagline: 'Flexible holding horizon',
+  icon: Boxes,
+  accent: 'zinc',
+  badge: 'OTHER',
+};
+
+const ACCENT_CLASSES: Record<string, { icon: string; iconBg: string; iconBorder: string; ring: string; badge: string }> = {
+  emerald: { icon: 'text-emerald-400', iconBg: 'bg-emerald-500/10', iconBorder: 'border-emerald-500/25', ring: 'hover:border-emerald-700/60', badge: 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30' },
+  sky:     { icon: 'text-sky-400',     iconBg: 'bg-sky-500/10',     iconBorder: 'border-sky-500/25',     ring: 'hover:border-sky-700/60',     badge: 'bg-sky-500/15 text-sky-300 border-sky-500/30' },
+  violet:  { icon: 'text-violet-400',  iconBg: 'bg-violet-500/10',  iconBorder: 'border-violet-500/25',  ring: 'hover:border-violet-700/60',  badge: 'bg-violet-500/15 text-violet-300 border-violet-500/30' },
+  amber:   { icon: 'text-amber-400',   iconBg: 'bg-amber-500/10',   iconBorder: 'border-amber-500/25',   ring: 'hover:border-amber-700/60',   badge: 'bg-amber-500/15 text-amber-300 border-amber-500/30' },
+  orange:  { icon: 'text-orange-400',  iconBg: 'bg-orange-500/10',  iconBorder: 'border-orange-500/25',  ring: 'hover:border-orange-700/60',  badge: 'bg-orange-500/15 text-orange-300 border-orange-500/30' },
+  fuchsia: { icon: 'text-fuchsia-400', iconBg: 'bg-fuchsia-500/10', iconBorder: 'border-fuchsia-500/25', ring: 'hover:border-fuchsia-700/60', badge: 'bg-fuchsia-500/15 text-fuchsia-300 border-fuchsia-500/30' },
+  zinc:    { icon: 'text-zinc-400',    iconBg: 'bg-zinc-500/10',    iconBorder: 'border-zinc-500/25',    ring: 'hover:border-zinc-700/60',    badge: 'bg-zinc-500/15 text-zinc-300 border-zinc-500/30' },
+  cyan:    { icon: 'text-cyan-400',    iconBg: 'bg-cyan-500/10',    iconBorder: 'border-cyan-500/25',    ring: 'hover:border-cyan-700/60',    badge: 'bg-cyan-500/15 text-cyan-300 border-cyan-500/30' },
 };
 
 interface IndexQuote { ltp: number; prevClose: number }
@@ -71,8 +93,6 @@ interface PnlGuardStatus {
   enableKillSwitch?: boolean;
 }
 
-// Keep in sync with CHILD_BROKERS in components/CopyTrade.tsx and
-// BROKER_CLASSES in scripts/tools/child_brokers.py.
 const CHILD_BROKERS = ['zerodha', 'kotak'] as const;
 type ChildBroker = typeof CHILD_BROKERS[number];
 const CHILD_BROKER_LABELS: Record<ChildBroker, string> = { zerodha: 'Zerodha', kotak: 'Kotak' };
@@ -92,8 +112,6 @@ interface CopyTradeStatus {
   detail?: string;
   started_at?: string;
   last_update?: string;
-  /** Per-broker init failures from the bridge — a child listed here receives
-   *  no fills, however healthy the rest of the panel looks. */
   broker_failures?: Record<string, string>;
 }
 interface CopyTradeLogEntry {
@@ -101,7 +119,6 @@ interface CopyTradeLogEntry {
   order_no: string;
   parent_symbol?: string;
   child_symbol?: string;
-  /** Legacy alias for child_symbol, still written by the bridge. */
   zerodha_symbol?: string;
   side?: string;
   parent_qty?: number;
@@ -117,7 +134,6 @@ interface CopyTradeLogEntry {
 const DEFAULT_COPY_TRADE_CHILDREN: CopyTradeChild[] =
   CHILD_BROKERS.map(broker => ({ broker, multiplier: 1, enabled: false }));
 
-/** The stored children, back-filled so every known broker has a row to render. */
 function withAllBrokers(children: CopyTradeChild[]): CopyTradeChild[] {
   return CHILD_BROKERS.map(broker =>
     children.find(c => c.broker === broker) ?? { broker, multiplier: 1, enabled: false });
@@ -132,7 +148,6 @@ export default function StrategiesPlusPage() {
   const [error, setError] = useState<string | null>(null);
 
   const { portfolio, loading: portfolioLoading, refresh: fetchPortfolio } = usePortfolio();
-
   const [indexTicker, setIndexTicker] = useState<IndexTicker | null>(null);
 
   const [confirmStopAll, setConfirmStopAll] = useState(false);
@@ -142,20 +157,13 @@ export default function StrategiesPlusPage() {
   const [exitingAll, setExitingAll] = useState(false);
 
   const [viewMode, setViewMode] = useState<'active' | 'all'>('active');
-  // 'underlying' groups by instrument exposure (NIFTY/CRUDEOILM/...); 'type' groups by
-  // trading logic (Premium Harvest, Futures Trend, ...) — see LOGIC_GROUPS below.
-  const [groupMode, setGroupMode] = useState<GroupMode>('underlying');
+  const [groupMode, setGroupMode] = useState<GroupMode>('timeframe');
+  const [horizonFilter, setHorizonFilter] = useState<HorizonFilter>('all');
 
-  // Groups default to open only when something inside is running, so the page opens on
-  // live strategies and folds everything else away behind its index header.
   const groups = useGroupCollapse();
 
-  // Client-side-only until the user actually launches them: instance ids the user has
-  // asked to add via "+ Add run" but that have no debug/<key>_<id>_state.json yet.
   const [pendingInstances, setPendingInstances] = useState<Record<string, string[]>>({});
 
-  // Once a pending instance shows up in a poll (it has a real state file), drop it from
-  // the pending list — the real data takes over rendering that row from here on.
   useEffect(() => {
     setPendingInstances(prev => {
       let changed = false;
@@ -170,9 +178,6 @@ export default function StrategiesPlusPage() {
     });
   }, [strategies]);
 
-  // The 2s poll replaces `strategies` with a fresh object every tick. Reading it through a
-  // ref keeps addInstance referentially stable, so the memoized rows (which compare props by
-  // content) don't all re-render on every poll just because this callback was rebuilt.
   const strategiesRef = useRef(strategies);
   strategiesRef.current = strategies;
 
@@ -186,7 +191,6 @@ export default function StrategiesPlusPage() {
       while (existingIds.has(String(n))) n++;
       return { ...prev, [key]: [...(prev[key] || []), String(n)] };
     });
-    // The new blank config row is only visible in "all" view since it starts STOPPED.
     setViewMode('all');
   }, []);
 
@@ -217,7 +221,6 @@ export default function StrategiesPlusPage() {
     setTimeout(() => setToasts(prev => prev.filter(t => t.id !== id)), 5000);
   };
 
-  // Stable reference so memoized StrategyRowWide rows don't re-render on every poll
   const fetchStrategies = useCallback(async (showLoading = false) => {
     if (showLoading) setLoading(true);
     try {
@@ -233,8 +236,6 @@ export default function StrategiesPlusPage() {
   }, []);
 
   const removeInstance = useCallback(async (key: string, instanceId: string) => {
-    // Drop the client-side pending entry first so a never-launched row disappears
-    // immediately (it has no server-side files to delete).
     setPendingInstances(prev => {
       const remaining = (prev[key] || []).filter(id => id !== instanceId);
       const next = { ...prev };
@@ -254,8 +255,6 @@ export default function StrategiesPlusPage() {
     } finally {
       fetchStrategies(false);
     }
-    // addToast only touches state setters, so it is safe to omit from deps; keeping the
-    // dep list stable is what preserves row memoization across the 2s poll.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [fetchStrategies]);
 
@@ -263,7 +262,7 @@ export default function StrategiesPlusPage() {
     fetchStrategies(true);
     const iv = setInterval(() => fetchStrategies(false), 2000);
     return () => clearInterval(iv);
-  }, []);
+  }, [fetchStrategies]);
 
   const fetchIndexTicker = useCallback(async () => {
     try {
@@ -424,7 +423,7 @@ export default function StrategiesPlusPage() {
     }
   };
 
-  /* ── Trade Replication (Dhan → Zerodha copy trading) ── */
+  /* ── Trade Replication ── */
   const fetchCopyTradeConfig = useCallback(async () => {
     try {
       const res = await fetch('/api/copy-trade/config');
@@ -477,8 +476,6 @@ export default function StrategiesPlusPage() {
   };
 
   const updateCopyTradeChild = async (broker: ChildBroker, patch: Partial<CopyTradeChild>) => {
-    // Always POST the FULL children list: the route replaces the array wholesale,
-    // so sending only the edited child would silently disable the others.
     const nextChildren = withAllBrokers(copyTradeConfig.children)
       .map(c => (c.broker === broker ? { ...c, ...patch } : c));
     setCopyTradeConfig(prev => ({ ...prev, children: nextChildren }));
@@ -542,7 +539,6 @@ export default function StrategiesPlusPage() {
     }
   };
 
-  /* ── Toast colors ── */
   const toastColor: Record<ToastType, string> = {
     success: 'bg-emerald-950/90 border-emerald-500/40 text-emerald-300',
     error:   'bg-red-950/90 border-red-500/40 text-red-300',
@@ -552,9 +548,6 @@ export default function StrategiesPlusPage() {
   const strategyList = Object.entries(strategies);
 
   type InstanceRow = { key: string; instanceId: string; meta: any; state: any };
-  // Primary row first, then duplicates in natural order. Object key order can't be relied
-  // on here: JS lists integer-like keys ("2", "10") before string keys, so the raw order
-  // would put duplicate rows ABOVE the original they were cloned from.
   const byInstanceId = (a: InstanceRow, b: InstanceRow) =>
     a.instanceId === '' ? -1
     : b.instanceId === '' ? 1
@@ -574,70 +567,97 @@ export default function StrategiesPlusPage() {
       }));
     return [...rows, ...pendingRows].sort(byInstanceId);
   });
-  const activeList = instanceRows.filter(row => row.state?.status !== 'STOPPED');
-  const displayList = viewMode === 'active' ? activeList : instanceRows;
 
-  // Group rows by underlying. Order follows displayList, which follows the registry's key
-  // order — so group order is controlled by where a strategy sits in STRATEGIES_METADATA.
-  // Each row is already one instance, so a running row contributes exactly its own state.
-  const groupedList = groupByUnderlying<InstanceRow>(
+  // Filter by Horizon
+  const horizonFilteredRows = useMemo(() => {
+    if (horizonFilter === 'all') return instanceRows;
+    return instanceRows.filter(r => (r.meta?.timeframe || 'intraday') === horizonFilter);
+  }, [instanceRows, horizonFilter]);
+
+  const activeList = horizonFilteredRows.filter(row => row.state?.status !== 'STOPPED');
+  const displayList = viewMode === 'active' ? activeList : horizonFilteredRows;
+
+  // Group by Timeframe (Intraday vs Positional)
+  const groupedByTimeframeList = groupByUnderlying<InstanceRow>(
+    displayList,
+    row => row.meta?.timeframe || 'intraday',
+    row => (row.state?.status !== 'STOPPED' ? [row.state] : []),
+  );
+
+  // Group by Underlying
+  const groupedByUnderlyingList = groupByUnderlying<InstanceRow>(
     displayList,
     row => row.meta?.underlying,
     row => (row.state?.status !== 'STOPPED' ? [row.state] : []),
   );
 
-  // Same grouping helper, keyed by trading-logic type instead of instrument — the
-  // "By Strategy Type" view. `groupByUnderlying` buckets a missing key under 'OTHER',
-  // which OTHER_LOGIC_GROUP below renders a label for.
+  // Group by Strategy Logic Type
   const groupedByLogicList = groupByUnderlying<InstanceRow>(
     displayList,
     row => row.meta?.logicGroup,
     row => (row.state?.status !== 'STOPPED' ? [row.state] : []),
   );
 
-  const activeGroupedList = groupMode === 'type' ? groupedByLogicList : groupedList;
+  const activeGroupedList =
+    groupMode === 'timeframe'
+      ? groupedByTimeframeList
+      : groupMode === 'type'
+      ? groupedByLogicList
+      : groupedByUnderlyingList;
 
-  // Pin auto-opened groups so a group does not fold up the moment its last run stops.
-  // Runs for both grouping dimensions — their keys never collide ('NIFTY' vs 'harvest').
+  // Pin auto-opened groups
   useEffect(() => {
     groups.ensureOpen(activeGroupedList.filter(g => g.runningCount > 0).map(g => g.underlying));
-    // activeGroupedList is rebuilt every poll; ensureOpen no-ops once the groups are decided.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeGroupedList.map(g => `${g.underlying}:${g.runningCount > 0}`).join(','), groups]);
 
-  return (
-    <div className="flex flex-col flex-1 w-full bg-black min-h-screen text-zinc-300">
+  // Horizon Counts
+  const intradayTotal = instanceRows.filter(r => (r.meta?.timeframe || 'intraday') === 'intraday').length;
+  const positionalTotal = instanceRows.filter(r => r.meta?.timeframe === 'positional').length;
+  const intradayRunning = instanceRows.filter(r => (r.meta?.timeframe || 'intraday') === 'intraday' && r.state?.status !== 'STOPPED').length;
+  const positionalRunning = instanceRows.filter(r => r.meta?.timeframe === 'positional' && r.state?.status !== 'STOPPED').length;
 
+  return (
+    <div className="flex flex-col flex-1 w-full bg-zinc-950 min-h-screen text-zinc-300">
       {/* ── Toast stack ── */}
       <div className="fixed top-4 right-4 z-50 flex flex-col gap-2 pointer-events-none">
         {toasts.map(t => (
-          <div key={t.id} className={`px-4 py-2.5 rounded-lg border text-sm font-medium shadow-xl backdrop-blur-sm animate-in fade-in slide-in-from-right-4 duration-300 ${toastColor[t.type]}`}>
+          <div key={t.id} className={`px-4 py-2.5 rounded-xl border text-xs font-semibold shadow-2xl backdrop-blur-md animate-in fade-in slide-in-from-right-4 duration-300 ${toastColor[t.type]}`}>
             {t.message}
           </div>
         ))}
       </div>
 
-      {/* ── Identity header ── */}
-      <header className="w-full border-b border-zinc-900 bg-zinc-950/90 backdrop-blur-md px-4 py-2.5 flex items-center gap-4 z-20 flex-wrap">
-        <div className="flex items-center gap-2.5 shrink-0">
-          <div className="h-8 w-8 rounded-lg bg-gradient-to-tr from-emerald-600 to-teal-400 flex items-center justify-center shadow-md shadow-emerald-500/10 shrink-0">
-            <Layers className="h-4 w-4 text-oncolor" />
+      {/* ── Sticky Navigation & Control Header ── */}
+      <header className="sticky top-0 z-30 w-full border-b border-zinc-800 bg-zinc-950/95 backdrop-blur px-5 py-2.5 flex items-center justify-between gap-4 flex-wrap">
+        <div className="flex items-center gap-3 shrink-0">
+          <div className="flex items-center justify-center w-8 h-8 rounded-lg bg-emerald-500/10 border border-emerald-500/25 shrink-0">
+            <Layers className="h-4 w-4 text-emerald-400" />
           </div>
           <div>
-            <p className={`${TXT_EYEBROW} text-emerald-500 leading-none mb-0.5`}>Options · Control Center</p>
-            <h1 className="text-sm font-bold tracking-tight text-white leading-none">Strategies+</h1>
+            <div className="flex items-center gap-2">
+              <p className="text-[9px] font-bold text-emerald-400 uppercase tracking-[0.18em]">
+                Algo Execution · Control Center
+              </p>
+              <span className="text-[9px] font-mono font-bold bg-emerald-500/10 text-emerald-400 border border-emerald-500/25 px-1.5 py-0.2 rounded">
+                HUB
+              </span>
+            </div>
+            <h1 className="text-sm font-bold tracking-tight text-white leading-none mt-0.5">
+              Strategies+ Manager
+            </h1>
           </div>
         </div>
 
         <NavBar />
 
-        <div className="flex items-center gap-3 ml-auto shrink-0">
+        <div className="flex items-center gap-3 shrink-0">
           <BrokerSelector
             broker={broker}
             setBroker={setBroker}
             authenticatedBrokers={authenticatedBrokers}
           />
-          {/* Live NIFTY + India VIX ticker */}
+          {/* Live NIFTY + India VIX ticker capsules */}
           {([
             { key: 'NIFTY', q: indexTicker?.nifty, decimals: 2 },
             { key: 'VIX', q: indexTicker?.vix, decimals: 2 },
@@ -647,52 +667,58 @@ export default function StrategiesPlusPage() {
             const chgPct = q.prevClose > 0 ? (chg / q.prevClose) * 100 : 0;
             const isUp = chg >= 0;
             return (
-              <div key={key} className="flex items-baseline gap-2 bg-zinc-900/60 border border-zinc-800 rounded-lg px-3 py-1">
-                <span className={`${TXT_LABEL} text-zinc-500`}>{key}</span>
-                <span className={`${TXT_STAT} text-white`}>
+              <div key={key} className="flex items-baseline gap-2 bg-zinc-900 border border-zinc-800 rounded-xl px-3 py-1 text-xs">
+                <span className="text-[10px] font-bold text-zinc-400 uppercase tracking-wider">{key}</span>
+                <span className="font-mono font-bold text-white tabular-nums">
                   {q.ltp.toLocaleString('en-IN', { minimumFractionDigits: decimals, maximumFractionDigits: decimals })}
                 </span>
                 {q.prevClose > 0 && (
-                  <span className={`flex items-baseline gap-1 ${TXT_CAPTION} font-mono tabular-nums ${isUp ? 'text-emerald-400' : 'text-rose-400'}`}>
+                  <span className={`flex items-baseline gap-1 text-[11px] font-mono tabular-nums ${isUp ? 'text-emerald-400' : 'text-rose-400'}`}>
                     <span>{isUp ? '▲' : '▼'}</span>
                     <span>{Math.abs(chg).toFixed(2)}</span>
-                    <span className="text-zinc-500">({isUp ? '+' : ''}{chgPct.toFixed(2)}%)</span>
+                    <span className="text-zinc-500 font-normal">({isUp ? '+' : ''}{chgPct.toFixed(2)}%)</span>
                   </span>
                 )}
               </div>
             );
           })}
-        </div>
 
-        <Tooltip>
-          <TooltipTrigger
-            render={
-              <button onClick={() => fetchStrategies(true)}
-                className="p-1.5 border border-zinc-800 rounded-lg bg-zinc-900/40 text-zinc-500 hover:text-white hover:border-zinc-700 transition-all active:scale-95">
-                <RefreshCw className="h-3.5 w-3.5" />
-              </button>
-            }
-          />
-          <TooltipContent>Refresh strategy list</TooltipContent>
-        </Tooltip>
+          <Tooltip>
+            <TooltipTrigger
+              render={
+                <button
+                  onClick={() => fetchStrategies(true)}
+                  className="p-2 border border-zinc-800 rounded-xl bg-zinc-900 text-zinc-400 hover:text-white hover:border-zinc-700 transition-all active:scale-95"
+                >
+                  <RefreshCw className="h-3.5 w-3.5" />
+                </button>
+              }
+            />
+            <TooltipContent>Refresh strategy status</TooltipContent>
+          </Tooltip>
+        </div>
       </header>
 
-      {/* ── Book strip: P&L / margin summary card ── */}
-      <div className="w-full border-b border-zinc-900 bg-zinc-950/60 px-4 py-2.5 flex items-center justify-between gap-4 flex-wrap">
-
-        <div className="flex items-center gap-4 flex-wrap rounded-xl border border-zinc-800 bg-zinc-900/50 px-4 py-2">
-          <div className="flex items-center gap-2">
-            {portfolioLoading && !portfolio ? (
-              <RefreshCw className="h-4 w-4 text-zinc-600 animate-spin" />
-            ) : pnlPositive ? (
-              <TrendingUp className="h-4 w-4 text-emerald-400" />
-            ) : (
-              <TrendingDown className="h-4 w-4 text-red-400" />
-            )}
+      {/* ── Executive Book Strip (Hero P&L & Safety Console) ── */}
+      <div className="w-full border-b border-zinc-800 bg-zinc-900/40 px-5 py-3 flex items-center justify-between gap-4 flex-wrap">
+        {/* Left: Financial Status Cluster */}
+        <div className="flex items-center gap-4 flex-wrap bg-zinc-900/80 border border-zinc-800 rounded-2xl px-4 py-2.5 shadow-sm">
+          <div className="flex items-center gap-3">
+            <div className={`w-8 h-8 rounded-xl flex items-center justify-center border ${
+              pnlPositive ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-400' : 'bg-rose-500/10 border-rose-500/30 text-rose-400'
+            }`}>
+              {portfolioLoading && !portfolio ? (
+                <RefreshCw className="h-4 w-4 text-zinc-500 animate-spin" />
+              ) : pnlPositive ? (
+                <TrendingUp className="h-4 w-4 text-emerald-400" />
+              ) : (
+                <TrendingDown className="h-4 w-4 text-rose-400" />
+              )}
+            </div>
             <div className="flex flex-col">
-              <span className={`${TXT_EYEBROW} text-zinc-500 leading-none`}>Total P&amp;L</span>
-              <span className={`text-lg font-bold font-mono tabular-nums leading-tight ${
-                portfolio ? (pnlPositive ? 'text-emerald-400' : 'text-red-400') : 'text-zinc-700'
+              <span className={`${TXT_EYEBROW} text-zinc-400 leading-none`}>Combined P&amp;L</span>
+              <span className={`text-lg font-mono font-extrabold tabular-nums tracking-tight ${
+                portfolio ? (pnlPositive ? 'text-emerald-400' : 'text-rose-400') : 'text-zinc-500'
               }`}>
                 {portfolio
                   ? `${pnlPositive ? '+' : ''}₹${pnl.toLocaleString('en-IN', { minimumFractionDigits: 0, maximumFractionDigits: 0 })}`
@@ -705,29 +731,29 @@ export default function StrategiesPlusPage() {
             <>
               <Separator orientation="vertical" className="h-8 bg-zinc-800" />
               <div className="flex flex-col">
-                <span className={`${TXT_EYEBROW} text-zinc-500 leading-none`}>Realized</span>
-                <span className={`${TXT_STAT} ${portfolio.total_realized_pnl >= 0 ? 'text-emerald-500' : 'text-red-500'}`}>
+                <span className={`${TXT_EYEBROW} text-zinc-400 leading-none`}>Realized</span>
+                <span className={`text-xs font-mono font-bold tabular-nums ${portfolio.total_realized_pnl >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
                   {portfolio.total_realized_pnl >= 0 ? '+' : ''}₹{portfolio.total_realized_pnl.toLocaleString('en-IN', { minimumFractionDigits: 0 })}
                 </span>
               </div>
               <Separator orientation="vertical" className="h-8 bg-zinc-800" />
               <div className="flex flex-col">
-                <span className={`${TXT_EYEBROW} text-zinc-500 leading-none`}>Unrealized</span>
-                <span className={`${TXT_STAT} ${portfolio.total_unrealized_pnl >= 0 ? 'text-emerald-500' : 'text-red-500'}`}>
+                <span className={`${TXT_EYEBROW} text-zinc-400 leading-none`}>Unrealized</span>
+                <span className={`text-xs font-mono font-bold tabular-nums ${portfolio.total_unrealized_pnl >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
                   {portfolio.total_unrealized_pnl >= 0 ? '+' : ''}₹{portfolio.total_unrealized_pnl.toLocaleString('en-IN', { minimumFractionDigits: 0 })}
                 </span>
               </div>
               <Separator orientation="vertical" className="h-8 bg-zinc-800" />
               <div className="flex flex-col">
-                <span className={`${TXT_EYEBROW} text-zinc-500 leading-none`}>Margin Avail</span>
-                <span className={`${TXT_STAT} text-white`}>
+                <span className={`${TXT_EYEBROW} text-zinc-400 leading-none`}>Margin Avail</span>
+                <span className="text-xs font-mono font-bold text-white tabular-nums">
                   ₹{portfolio.available_funds.toLocaleString('en-IN', { minimumFractionDigits: 0 })}
                 </span>
               </div>
               <Separator orientation="vertical" className="h-8 bg-zinc-800" />
               <div className="flex flex-col">
-                <span className={`${TXT_EYEBROW} text-zinc-500 leading-none`}>Positions</span>
-                <span className={`${TXT_STAT} text-white`}>{portfolio.positions.length}</span>
+                <span className={`${TXT_EYEBROW} text-zinc-400 leading-none`}>Positions</span>
+                <span className="text-xs font-mono font-bold text-sky-300 tabular-nums">{portfolio.positions.length}</span>
               </div>
             </>
           )}
@@ -735,117 +761,144 @@ export default function StrategiesPlusPage() {
           <Tooltip>
             <TooltipTrigger
               render={
-                <button onClick={fetchPortfolio} disabled={portfolioLoading}
-                  className="p-1 rounded text-zinc-600 hover:text-zinc-300 transition-colors disabled:opacity-40">
-                  <RefreshCw className={`h-3 w-3 ${portfolioLoading ? 'animate-spin' : ''}`} />
+                <button
+                  onClick={fetchPortfolio}
+                  disabled={portfolioLoading}
+                  className="p-1 rounded text-zinc-500 hover:text-zinc-200 transition-colors disabled:opacity-40"
+                >
+                  <RefreshCw className={`h-3.5 w-3.5 ${portfolioLoading ? 'animate-spin' : ''}`} />
                 </button>
               }
             />
-            <TooltipContent>Refresh P&amp;L</TooltipContent>
+            <TooltipContent>Refresh Broker Balance &amp; P&amp;L</TooltipContent>
           </Tooltip>
 
           {portfolio && !portfolio.success && (
-            <div className="flex items-center gap-1.5 px-2 py-1 rounded-md bg-amber-500/10 border border-amber-500/30">
+            <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-amber-500/10 border border-amber-500/30">
               <AlertTriangle className="h-3 w-3 text-amber-400 shrink-0" />
-              <span className={`${TXT_CAPTION} text-amber-400`}>
-                Token expired — run <code className="font-mono bg-amber-500/10 px-0.5 rounded">login.py</code>
+              <span className="text-[11px] font-mono text-amber-300">
+                Token expired — run <code className="bg-amber-500/15 px-1 py-0.2 rounded font-bold">login.py</code>
               </span>
             </div>
           )}
         </div>
 
-        {/* Right: filters + safety controls */}
-        <div className="flex items-center gap-2 shrink-0 flex-wrap">
-
-          {/* P&L Guard toggle */}
+        {/* Right: Operational Controls & Safety Dock */}
+        <div className="flex items-center gap-2.5 shrink-0 flex-wrap">
+          {/* P&L Guard Drawer Toggle */}
           <Button
             variant="outline"
             size="sm"
             onClick={() => setShowPnlGuard(v => !v)}
-            className={`gap-1.5 ${TXT_CAPTION} rounded-lg ${
+            className={`gap-1.5 text-xs font-bold rounded-xl transition-all ${
               showPnlGuard
-                ? 'bg-amber-900/30 border-amber-600/50 text-amber-300 hover:bg-amber-900/40 hover:text-amber-200'
-                : 'bg-zinc-900/60 border-zinc-700/60 text-zinc-400 hover:border-zinc-600 hover:text-zinc-200'
+                ? 'bg-amber-500/20 border-amber-500/40 text-amber-300'
+                : 'bg-zinc-900 border-zinc-800 text-zinc-400 hover:text-zinc-200'
             }`}
           >
-            <Shield className="h-3 w-3" />
+            <Shield className="h-3.5 w-3.5" />
             P&amp;L Guard
             {pnlGuardStatus?.pnlExitStatus === 'ACTIVE' && (
-              <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 shrink-0" />
+              <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 shrink-0 animate-pulse" />
             )}
             <ChevronDown className={`h-3 w-3 transition-transform duration-200 ${showPnlGuard ? 'rotate-180' : ''}`} />
           </Button>
 
-          {/* Trade Replication toggle */}
+          {/* Trade Replication Drawer Toggle */}
           <Button
             variant="outline"
             size="sm"
             onClick={() => setShowCopyTrade(v => !v)}
-            className={`gap-1.5 ${TXT_CAPTION} rounded-lg ${
+            className={`gap-1.5 text-xs font-bold rounded-xl transition-all ${
               showCopyTrade
-                ? 'bg-sky-900/30 border-sky-600/50 text-sky-300 hover:bg-sky-900/40 hover:text-sky-200'
-                : 'bg-zinc-900/60 border-zinc-700/60 text-zinc-400 hover:border-zinc-600 hover:text-zinc-200'
+                ? 'bg-sky-500/20 border-sky-500/40 text-sky-300'
+                : 'bg-zinc-900 border-zinc-800 text-zinc-400 hover:text-zinc-200'
             }`}
           >
-            <Repeat className="h-3 w-3" />
+            <Repeat className="h-3.5 w-3.5" />
             Replication
             {copyTradeConfig.armed && (
-              <span className="h-1.5 w-1.5 rounded-full bg-red-400 animate-pulse shrink-0" title="Armed — live" />
+              <span className="h-1.5 w-1.5 rounded-full bg-red-400 animate-pulse shrink-0" title="Armed — live orders active" />
             )}
             <ChevronDown className={`h-3 w-3 transition-transform duration-200 ${showCopyTrade ? 'rotate-180' : ''}`} />
           </Button>
 
-          {/* View mode */}
+          {/* View Filter (Active vs All) */}
           <Tabs value={viewMode} onValueChange={(v) => setViewMode(v as 'active' | 'all')}>
-            <TabsList className="bg-zinc-900 border border-zinc-800">
-              <TabsTrigger value="active" className="gap-1.5">
+            <TabsList className="bg-zinc-900 border border-zinc-800 p-1 rounded-xl h-auto">
+              <TabsTrigger value="active" className="gap-1.5 text-xs font-bold font-mono px-3 py-1 rounded-lg">
                 <Zap className="h-3 w-3" />
                 Active
                 {runningCount > 0 && (
-                  <Badge variant="secondary" className="h-4 px-1.5 bg-emerald-500/20 text-emerald-300 border-0">
+                  <Badge variant="secondary" className="h-4 px-1.5 bg-emerald-500/20 text-emerald-300 border-0 text-[10px] font-mono font-bold">
                     {runningCount}
                   </Badge>
                 )}
               </TabsTrigger>
-              <TabsTrigger value="all" className="gap-1.5">
+              <TabsTrigger value="all" className="gap-1.5 text-xs font-bold font-mono px-3 py-1 rounded-lg">
                 <LayoutList className="h-3 w-3" />
                 All
-                <Badge variant="secondary" className="h-4 px-1.5 bg-zinc-800 text-zinc-400 border-0">
+                <Badge variant="secondary" className="h-4 px-1.5 bg-zinc-800 text-zinc-400 border-0 text-[10px] font-mono font-bold">
                   {instanceRows.length}
                 </Badge>
               </TabsTrigger>
             </TabsList>
           </Tabs>
 
-          {/* Grouping dimension: by instrument exposure, or by trading-logic type */}
+          {/* Grouping Dimension: Timeframe (Intraday/Positional), Underlying, or Type */}
           <Tabs value={groupMode} onValueChange={(v) => setGroupMode(v as GroupMode)}>
-            <TabsList className="bg-zinc-900 border border-zinc-800">
+            <TabsList className="bg-zinc-900 border border-zinc-800 p-1 rounded-xl h-auto">
               <Tooltip>
-                <TooltipTrigger render={<TabsTrigger value="underlying" className="gap-1.5"><ListTree className="h-3 w-3" />Underlying</TabsTrigger>} />
-                <TooltipContent>Group by instrument exposure</TooltipContent>
+                <TooltipTrigger
+                  render={
+                    <TabsTrigger value="timeframe" className="gap-1.5 text-xs font-bold font-mono px-2.5 py-1 rounded-lg">
+                      <Clock className="h-3 w-3 text-amber-400" />
+                      Horizon
+                    </TabsTrigger>
+                  }
+                />
+                <TooltipContent>Group by Time Horizon (⚡ Intraday vs 🌙 Positional)</TooltipContent>
               </Tooltip>
               <Tooltip>
-                <TooltipTrigger render={<TabsTrigger value="type" className="gap-1.5"><Boxes className="h-3 w-3" />Strategy Type</TabsTrigger>} />
-                <TooltipContent>Group by trading logic</TooltipContent>
+                <TooltipTrigger
+                  render={
+                    <TabsTrigger value="underlying" className="gap-1.5 text-xs font-bold font-mono px-2.5 py-1 rounded-lg">
+                      <ListTree className="h-3 w-3 text-sky-400" />
+                      Underlying
+                    </TabsTrigger>
+                  }
+                />
+                <TooltipContent>Group by Underlying Exposure (NIFTY, CRUDEOILM, NIFTY 500)</TooltipContent>
+              </Tooltip>
+              <Tooltip>
+                <TooltipTrigger
+                  render={
+                    <TabsTrigger value="type" className="gap-1.5 text-xs font-bold font-mono px-2.5 py-1 rounded-lg">
+                      <Boxes className="h-3 w-3 text-violet-400" />
+                      Type
+                    </TabsTrigger>
+                  }
+                />
+                <TooltipContent>Group by Trading Logic Category</TooltipContent>
               </Tooltip>
             </TabsList>
           </Tabs>
 
-          {/* Expand / collapse every group in the active dimension */}
-          <ToggleGroup variant="outline" size="sm" className="bg-zinc-900/60 border border-zinc-800 rounded-lg">
+          {/* Expand / Collapse Toggle */}
+          <ToggleGroup variant="outline" size="sm" className="bg-zinc-900 border border-zinc-800 rounded-xl p-0.5">
             <Tooltip>
               <TooltipTrigger
                 render={
                   <ToggleGroupItem
                     value="expand"
                     onClick={() => groups.setAll(activeGroupedList.map(g => g.underlying), true)}
-                    className="text-zinc-500 data-checked:bg-transparent"
+                    className="text-zinc-400 hover:text-white data-checked:bg-transparent h-7 w-7 p-0"
                   >
-                    <ChevronsUpDown className="h-3 w-3" />
+                    <ChevronsUpDown className="h-3.5 w-3.5" />
                   </ToggleGroupItem>
                 }
               />
-              <TooltipContent>Expand every group</TooltipContent>
+              <TooltipContent>Expand all sections</TooltipContent>
             </Tooltip>
             <Tooltip>
               <TooltipTrigger
@@ -853,36 +906,29 @@ export default function StrategiesPlusPage() {
                   <ToggleGroupItem
                     value="collapse"
                     onClick={() => groups.setAll(activeGroupedList.map(g => g.underlying), false)}
-                    className="text-zinc-500 data-checked:bg-transparent"
+                    className="text-zinc-400 hover:text-white data-checked:bg-transparent h-7 w-7 p-0"
                   >
-                    <ChevronsDownUp className="h-3 w-3" />
+                    <ChevronsDownUp className="h-3.5 w-3.5" />
                   </ToggleGroupItem>
                 }
               />
-              <TooltipContent>Collapse every group</TooltipContent>
+              <TooltipContent>Collapse all sections</TooltipContent>
             </Tooltip>
           </ToggleGroup>
 
-          <div className="flex items-center gap-1.5 px-2">
-            <Activity className={`h-3.5 w-3.5 ${runningCount > 0 ? 'text-emerald-500' : 'text-zinc-700'}`} />
-            <span className={`${TXT_CAPTION} text-zinc-300`}>
-              {runningCount} / {instanceRows.length} running
-            </span>
-          </div>
-
-          {/* Danger dock — safety-critical actions get a hairline boundary of their own */}
-          <div className="flex items-center gap-1.5 rounded-xl border border-red-950/60 bg-red-950/10 px-1.5 py-1">
+          {/* Safety Action Dock */}
+          <div className="flex items-center gap-1.5 rounded-xl border border-rose-950/80 bg-rose-950/20 px-2 py-1">
             <Button
               variant="outline"
               size="sm"
               onClick={handleStopAll}
               disabled={stoppingAll || runningCount === 0}
-              className={`gap-1.5 ${TXT_CAPTION} rounded-lg ${
+              className={`gap-1.5 text-xs font-bold font-mono rounded-xl ${
                 confirmStopAll
-                  ? 'bg-orange-600/20 border-orange-500 text-orange-300 animate-pulse'
+                  ? 'bg-amber-500/20 border-amber-500 text-amber-300 animate-pulse'
                   : stoppingAll
-                  ? 'bg-zinc-900 border-zinc-700 text-zinc-500'
-                  : 'bg-zinc-900/60 border-zinc-700/60 text-zinc-400 hover:border-zinc-600 hover:text-zinc-200'
+                  ? 'bg-zinc-900 border-zinc-800 text-zinc-500'
+                  : 'bg-zinc-900 border-zinc-800 text-zinc-400 hover:text-zinc-200'
               }`}
               title="Gracefully stop all running strategies (write shutdown triggers)"
             >
@@ -895,14 +941,14 @@ export default function StrategiesPlusPage() {
               size="sm"
               onClick={handleExitAll}
               disabled={exitingAll}
-              className={`gap-1.5 ${TXT_CAPTION} rounded-lg border ${
+              className={`gap-1.5 text-xs font-bold font-mono rounded-xl border ${
                 exitingAll
-                  ? 'bg-red-900/40 border-red-800 text-red-400'
+                  ? 'bg-rose-900/40 border-rose-800 text-rose-400'
                   : confirmExitAll
-                  ? 'bg-red-600 border-red-500 text-oncolor animate-pulse shadow-lg shadow-red-500/20'
-                  : 'bg-red-950/60 border-red-900/60 text-red-400 hover:bg-red-900/40 hover:border-red-700 hover:text-red-300'
+                  ? 'bg-rose-600 border-rose-500 text-white animate-pulse shadow-lg shadow-rose-500/30'
+                  : 'bg-rose-950/70 border-rose-900 text-rose-400 hover:bg-rose-900/50 hover:text-rose-200'
               }`}
-              title="Immediately liquidate ALL positions at broker level (DELETE /positions)"
+              title="Emergency flatten: close ALL active positions at broker level"
             >
               {exitingAll ? <RefreshCw className="h-3 w-3 animate-spin" /> : <ShieldOff className="h-3 w-3" />}
               {exitingAll ? 'Exiting…' : confirmExitAll ? 'Confirm EXIT ALL?' : 'EXIT ALL Positions'}
@@ -911,78 +957,126 @@ export default function StrategiesPlusPage() {
         </div>
       </div>
 
-      {/* ── P&L Guard Panel ── */}
-      {showPnlGuard && (
-        <div className="w-full border-b border-zinc-900 bg-zinc-950/60 px-4 py-3">
-          <div className="flex items-center gap-4 flex-wrap rounded-xl border border-zinc-800/60 bg-zinc-950/40 px-4 py-2.5">
+      {/* ── Sub-Filter Ribbon (Horizon Pills: All / Intraday / Positional) ── */}
+      <div className="w-full border-b border-zinc-800/80 bg-zinc-950/60 px-5 py-2 flex items-center justify-between gap-4 flex-wrap">
+        <div className="flex items-center gap-2 flex-wrap">
+          <span className="text-[10px] font-bold text-zinc-400 uppercase tracking-widest mr-1">Filter Horizon:</span>
+          {(
+            [
+              { key: 'all', label: 'All Horizons', count: instanceRows.length, running: runningCount, icon: Layers },
+              { key: 'intraday', label: '⚡ Intraday Only', count: intradayTotal, running: intradayRunning, icon: Clock },
+              { key: 'positional', label: '🌙 Positional & Multi-Day', count: positionalTotal, running: positionalRunning, icon: Calendar },
+            ] as const
+          ).map(({ key, label, count, running, icon: Icon }) => (
+            <button
+              key={key}
+              onClick={() => setHorizonFilter(key)}
+              className={`flex items-center gap-2 px-3 py-1 rounded-xl text-xs font-mono font-bold transition-all ${
+                horizonFilter === key
+                  ? key === 'intraday'
+                    ? 'bg-amber-500/15 text-amber-300 border border-amber-500/30'
+                    : key === 'positional'
+                    ? 'bg-violet-500/15 text-violet-300 border border-violet-500/30'
+                    : 'bg-emerald-500/15 text-emerald-300 border border-emerald-500/30'
+                  : 'bg-zinc-900/60 text-zinc-400 border border-zinc-800 hover:text-zinc-200'
+              }`}
+            >
+              <Icon className="h-3.5 w-3.5" />
+              <span>{label}</span>
+              <span className="text-[10px] text-zinc-400 font-normal">({count})</span>
+              {running > 0 && (
+                <span className="inline-flex items-center gap-1 text-[10px] text-emerald-400 font-bold bg-emerald-500/10 px-1.5 py-0.2 rounded">
+                  <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 animate-pulse" />
+                  {running}
+                </span>
+              )}
+            </button>
+          ))}
+        </div>
 
-            {/* Status chip */}
+        <div className="flex items-center gap-2 text-xs font-mono text-zinc-400">
+          <Activity className={`h-3.5 w-3.5 ${runningCount > 0 ? 'text-emerald-400' : 'text-zinc-600'}`} />
+          <span>
+            <strong className="text-white">{runningCount}</strong> / {instanceRows.length} active process{runningCount === 1 ? '' : 'es'}
+          </span>
+        </div>
+      </div>
+
+      {/* ── P&L Guard Drawer Panel ── */}
+      {showPnlGuard && (
+        <div className="w-full border-b border-zinc-800 bg-zinc-900/60 px-5 py-3.5 animate-in fade-in slide-in-from-top-2 duration-200">
+          <div className="flex items-center gap-4 flex-wrap rounded-2xl border border-zinc-800 bg-zinc-950/80 px-4 py-3 shadow-inner">
             <div className="flex items-center gap-2 shrink-0">
               {pnlGuardLoading ? (
-                <RefreshCw className="h-3.5 w-3.5 text-zinc-600 animate-spin" />
+                <RefreshCw className="h-3.5 w-3.5 text-zinc-500 animate-spin" />
               ) : pnlGuardStatus?.pnlExitStatus === 'ACTIVE' ? (
-                <Badge className={`gap-1.5 ${TXT_CAPTION} bg-emerald-500/10 border border-emerald-500/30 text-emerald-400 rounded-full`}>
-                  <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 shrink-0" />
-                  ACTIVE
-                  {pnlGuardStatus.profit ? ` ₹${pnlGuardStatus.profit.toLocaleString('en-IN')} profit` : ''}
-                  {pnlGuardStatus.profit && pnlGuardStatus.loss ? ' /' : ''}
-                  {pnlGuardStatus.loss ? ` ₹${pnlGuardStatus.loss.toLocaleString('en-IN')} loss` : ''}
+                <Badge className="gap-1.5 text-xs font-mono font-bold bg-emerald-500/15 border border-emerald-500/30 text-emerald-400 rounded-xl px-2.5 py-1">
+                  <span className="h-2 w-2 rounded-full bg-emerald-400 shrink-0 animate-pulse" />
+                  GUARD ACTIVE
+                  {pnlGuardStatus.profit ? ` · Target +₹${pnlGuardStatus.profit.toLocaleString('en-IN')}` : ''}
+                  {pnlGuardStatus.loss ? ` · Stop -₹${pnlGuardStatus.loss.toLocaleString('en-IN')}` : ''}
                 </Badge>
               ) : pnlGuardStatus ? (
-                <Badge variant="outline" className={`${TXT_CAPTION} bg-zinc-800 border-zinc-700 text-zinc-500 rounded-full`}>
-                  INACTIVE
+                <Badge variant="outline" className="text-xs font-mono font-bold bg-zinc-800 border-zinc-700 text-zinc-400 rounded-xl px-2.5 py-1">
+                  GUARD INACTIVE
                 </Badge>
               ) : (
-                <span className={`${TXT_CAPTION} text-zinc-600`}>—</span>
+                <span className="text-xs text-zinc-500 font-mono">—</span>
               )}
             </div>
 
             <Separator orientation="vertical" className="h-6 bg-zinc-800 shrink-0" />
 
-            {/* Profit target */}
-            <div className="flex items-center gap-1.5 shrink-0">
-              <span className={`${TXT_LABEL} text-zinc-500`}>Profit</span>
+            <div className="flex items-center gap-2 shrink-0">
+              <span className="text-xs font-bold text-zinc-400 font-mono uppercase">Profit Target</span>
               <div className="flex items-center gap-1">
-                <span className={`${TXT_CAPTION} text-zinc-500`}>₹</span>
+                <span className="text-xs text-zinc-400 font-mono">₹</span>
                 <Input
                   type="number"
                   min="0"
                   value={profitValue}
                   onChange={e => setProfitValue(e.target.value)}
                   placeholder="e.g. 5000"
-                  className="bg-zinc-900 border-zinc-700 text-white h-7 w-24 text-[11px] font-mono tabular-nums"
+                  className="bg-zinc-900 border-zinc-700 text-white h-8 w-24 text-xs font-mono tabular-nums rounded-lg"
                 />
               </div>
             </div>
 
-            {/* Loss limit */}
-            <div className="flex items-center gap-1.5 shrink-0">
-              <span className={`${TXT_LABEL} text-zinc-500`}>Loss</span>
+            <div className="flex items-center gap-2 shrink-0">
+              <span className="text-xs font-bold text-zinc-400 font-mono uppercase">Loss Limit</span>
               <div className="flex items-center gap-1">
-                <span className={`${TXT_CAPTION} text-zinc-500`}>₹</span>
+                <span className="text-xs text-zinc-400 font-mono">₹</span>
                 <Input
                   type="number"
                   min="0"
                   value={lossValue}
                   onChange={e => setLossValue(e.target.value)}
                   placeholder="e.g. 3000"
-                  className="bg-zinc-900 border-zinc-700 text-white h-7 w-24 text-[11px] font-mono tabular-nums"
+                  className="bg-zinc-900 border-zinc-700 text-white h-8 w-24 text-xs font-mono tabular-nums rounded-lg"
                 />
               </div>
             </div>
 
             <Separator orientation="vertical" className="h-6 bg-zinc-800 shrink-0" />
 
-            {/* Product type pills */}
-            <div className="flex items-center gap-1.5 shrink-0">
-              <span className={`${TXT_LABEL} text-zinc-500`}>Type</span>
-              <ToggleGroup variant="outline" size="sm" spacing={0} value={productTypes}
+            <div className="flex items-center gap-2 shrink-0">
+              <span className="text-xs font-bold text-zinc-400 font-mono uppercase">Product</span>
+              <ToggleGroup
+                variant="outline"
+                size="sm"
+                spacing={0}
+                value={productTypes}
                 onValueChange={(next: string[]) => {
                   if (next.length === 0) return;
                   setProductTypes(next);
-                }}>
+                }}
+              >
                 {(['INTRADAY', 'DELIVERY'] as const).map(pt => (
-                  <ToggleGroupItem key={pt} value={pt} className={`${TXT_LABEL} px-2.5 data-checked:bg-zinc-700 data-checked:text-white data-checked:border-zinc-500 text-zinc-600 border-zinc-800`}>
+                  <ToggleGroupItem
+                    key={pt}
+                    value={pt}
+                    className="text-xs font-mono font-bold px-2.5 data-checked:bg-zinc-700 data-checked:text-white data-checked:border-zinc-500 text-zinc-400 border-zinc-800"
+                  >
                     {pt}
                   </ToggleGroupItem>
                 ))}
@@ -991,39 +1085,36 @@ export default function StrategiesPlusPage() {
 
             <Separator orientation="vertical" className="h-6 bg-zinc-800 shrink-0" />
 
-            {/* Kill switch toggle */}
             <label className="flex items-center gap-2 cursor-pointer shrink-0">
               <Checkbox
                 checked={enableKillSwitch}
                 onCheckedChange={(v) => setEnableKillSwitch(v === true)}
-                className="data-checked:bg-red-600 data-checked:border-red-500 border-zinc-600"
+                className="data-checked:bg-rose-600 data-checked:border-rose-500 border-zinc-600 rounded"
               />
-              <span className={`${TXT_LABEL} text-zinc-500`}>Kill switch on trigger</span>
+              <span className="text-xs font-semibold text-zinc-300">Kill switch on trigger</span>
             </label>
 
             <Separator orientation="vertical" className="h-6 bg-zinc-800 shrink-0" />
 
-            {/* Set button */}
             <Button
               size="sm"
               onClick={handleSetPnl}
               disabled={settingPnl}
-              className={`gap-1.5 ${TXT_CAPTION} rounded-lg bg-emerald-900/40 border border-emerald-700/60 text-emerald-300 hover:bg-emerald-800/40 hover:border-emerald-600`}
+              className="gap-1.5 text-xs font-mono font-bold rounded-xl bg-emerald-500/15 hover:bg-emerald-500/25 border border-emerald-500/30 text-emerald-300"
             >
               {settingPnl ? <RefreshCw className="h-3 w-3 animate-spin" /> : <Shield className="h-3 w-3" />}
               {settingPnl ? 'Setting…' : 'Set Guard'}
             </Button>
 
-            {/* Clear button */}
             <Button
               variant="outline"
               size="sm"
               onClick={handleClearPnl}
               disabled={clearingPnl}
-              className={`gap-1.5 ${TXT_CAPTION} rounded-lg ${
+              className={`gap-1.5 text-xs font-mono font-bold rounded-xl ${
                 confirmClear
-                  ? 'bg-red-600 border-red-500 text-oncolor animate-pulse'
-                  : 'bg-zinc-900/60 border-zinc-700/60 text-zinc-500 hover:border-red-800 hover:text-red-400'
+                  ? 'bg-rose-600 border-rose-500 text-white animate-pulse'
+                  : 'bg-zinc-900 border-zinc-800 text-zinc-400 hover:text-rose-400'
               }`}
             >
               {clearingPnl ? <RefreshCw className="h-3 w-3 animate-spin" /> : null}
@@ -1033,57 +1124,43 @@ export default function StrategiesPlusPage() {
         </div>
       )}
 
-      {/* ── Trade Replication Panel ── */}
+      {/* ── Trade Replication Drawer Panel ── */}
       {showCopyTrade && (
-        <div className="w-full border-b border-zinc-900 bg-zinc-950/60 px-4 py-3 flex flex-col gap-3">
-
+        <div className="w-full border-b border-zinc-800 bg-zinc-900/60 px-5 py-3.5 flex flex-col gap-3 animate-in fade-in slide-in-from-top-2 duration-200">
           {copyTradeConfig.armed && copyTradeStatus?.status !== 'RUNNING' && (
-            <div className="flex items-center gap-2 px-3 py-2 rounded-lg bg-red-950/60 border border-red-800/60">
-              <AlertTriangle className="h-3.5 w-3.5 text-red-400 shrink-0" />
-              <span className={`${TXT_CAPTION} text-red-300`}>
-                Armed but the bridge is not running — the child account is NOT protected right now. Start the bridge or disarm.
+            <div className="flex items-center gap-2 px-3 py-2 rounded-xl bg-rose-950/70 border border-rose-800/60">
+              <AlertTriangle className="h-4 w-4 text-rose-400 shrink-0" />
+              <span className="text-xs text-rose-300 font-medium">
+                Armed but replication bridge is STOPPED — child accounts are NOT receiving copy fills. Start bridge or disarm.
               </span>
             </div>
           )}
 
-          <div className="flex items-center gap-4 flex-wrap rounded-xl border border-zinc-800/60 bg-zinc-950/40 px-4 py-2.5">
-            {/* Bridge status chip */}
+          <div className="flex items-center gap-4 flex-wrap rounded-2xl border border-zinc-800 bg-zinc-950/80 px-4 py-3 shadow-inner">
             <div className="flex items-center gap-2 shrink-0">
               {copyTradeStatus?.status === 'RUNNING' ? (
-                <Badge className={`gap-1.5 ${TXT_CAPTION} bg-emerald-500/10 border border-emerald-500/30 text-emerald-400 rounded-full`}>
-                  <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 shrink-0" />
-                  LISTENING
+                <Badge className="gap-1.5 text-xs font-mono font-bold bg-emerald-500/15 border border-emerald-500/30 text-emerald-400 rounded-xl px-2.5 py-1">
+                  <span className="h-2 w-2 rounded-full bg-emerald-400 shrink-0 animate-pulse" />
+                  BRIDGE LISTENING
                 </Badge>
               ) : copyTradeStatus?.status === 'STARTING' ? (
-                <Badge className={`gap-1.5 ${TXT_CAPTION} bg-amber-500/10 border border-amber-500/30 text-amber-400 rounded-full`}>
+                <Badge className="gap-1.5 text-xs font-mono font-bold bg-amber-500/15 border border-amber-500/30 text-amber-400 rounded-xl px-2.5 py-1">
                   <RefreshCw className="h-3 w-3 animate-spin" />
                   STARTING
                 </Badge>
-              ) : copyTradeStatus?.status === 'STALE' ? (
-                <Badge className={`gap-1.5 ${TXT_CAPTION} bg-red-500/10 border border-red-500/30 text-red-400 rounded-full animate-pulse`}
-                  title="Bridge process exists but its heartbeat stopped — it is NOT replicating. Restart it.">
-                  <AlertTriangle className="h-3 w-3" />
-                  STALE
-                </Badge>
-              ) : copyTradeStatus?.status === 'ERROR' ? (
-                <Badge className={`gap-1.5 ${TXT_CAPTION} bg-red-500/10 border border-red-500/30 text-red-400 rounded-full`} title={copyTradeStatus.detail}>
-                  <AlertTriangle className="h-3 w-3" />
-                  ERROR
-                </Badge>
               ) : (
-                <Badge variant="outline" className={`${TXT_CAPTION} bg-zinc-800 border-zinc-700 text-zinc-500 rounded-full`}>
-                  STOPPED
+                <Badge variant="outline" className="text-xs font-mono font-bold bg-zinc-800 border-zinc-700 text-zinc-400 rounded-xl px-2.5 py-1">
+                  BRIDGE STOPPED
                 </Badge>
               )}
             </div>
 
-            {/* Bridge start/stop */}
             <Button
               variant="outline"
               size="sm"
               onClick={handleToggleCopyTradeBridge}
               disabled={togglingBridge}
-              className={`gap-1.5 ${TXT_CAPTION} rounded-lg bg-zinc-900/60 border-zinc-700/60 text-zinc-400 hover:border-zinc-600 hover:text-zinc-200`}
+              className="gap-1.5 text-xs font-mono font-bold rounded-xl bg-zinc-900 border-zinc-700 text-zinc-300 hover:text-white"
             >
               {copyTradeBridgeRunning ? <Square className="h-3 w-3" /> : <Play className="h-3 w-3" />}
               {copyTradeBridgeRunning ? 'Stop Bridge' : 'Start Bridge'}
@@ -1091,24 +1168,14 @@ export default function StrategiesPlusPage() {
 
             <Separator orientation="vertical" className="h-6 bg-zinc-800 shrink-0" />
 
-            {/* One row per child account */}
-            <span className={`${TXT_LABEL} text-zinc-500 shrink-0`}>Children</span>
+            <span className="text-xs font-bold text-zinc-400 font-mono uppercase">Child Accounts</span>
             {withAllBrokers(copyTradeConfig.children).map(child => {
               const failure = copyTradeStatus?.broker_failures?.[child.broker];
               return (
-                <div key={child.broker} className="flex items-center gap-1.5 shrink-0">
-                  <Badge
-                    variant="outline"
-                    className={`${TXT_CAPTION} rounded-md ${
-                      failure
-                        ? 'bg-red-950/60 border-red-800 text-red-300'
-                        : 'bg-zinc-900 border-zinc-700 text-white'
-                    }`}
-                    title={failure ? `Bridge could not start this child: ${failure}` : undefined}
-                  >
-                    {CHILD_BROKER_LABELS[child.broker]}{failure ? ' — DOWN' : ''}
-                  </Badge>
-
+                <div key={child.broker} className="flex items-center gap-2 shrink-0 bg-zinc-900 border border-zinc-800 rounded-xl px-3 py-1">
+                  <span className="text-xs font-bold font-mono text-white">
+                    {CHILD_BROKER_LABELS[child.broker]}{failure ? ' (DOWN)' : ''}
+                  </span>
                   <div className="flex items-center gap-1">
                     <Input
                       type="number"
@@ -1119,20 +1186,17 @@ export default function StrategiesPlusPage() {
                         const n = parseInt(e.target.value, 10);
                         if (Number.isInteger(n) && n > 0) updateCopyTradeChild(child.broker, { multiplier: n });
                       }}
-                      title={`${CHILD_BROKER_LABELS[child.broker]} quantity multiplier`}
-                      className="bg-zinc-900 border-zinc-700 text-white h-7 w-12 text-[11px] font-mono tabular-nums px-1.5"
+                      className="bg-zinc-950 border-zinc-700 text-white h-7 w-12 text-xs font-mono tabular-nums px-1 rounded"
                     />
-                    <span className={`${TXT_CAPTION} text-zinc-500`}>x</span>
+                    <span className="text-xs text-zinc-400 font-mono">x</span>
                   </div>
-
                   <div
                     onClick={() => updateCopyTradeChild(child.broker, { enabled: !child.enabled })}
-                    title={child.enabled ? 'Enabled — receives replicated fills' : 'Disabled'}
                     className={`relative w-8 h-4 rounded-full transition-colors cursor-pointer ${
-                      child.enabled ? 'bg-sky-600' : 'bg-zinc-700'
+                      child.enabled ? 'bg-sky-500' : 'bg-zinc-700'
                     }`}
                   >
-                    <div className={`absolute top-0.5 h-3 w-3 rounded-full bg-oncolor shadow transition-transform ${
+                    <div className={`absolute top-0.5 h-3 w-3 rounded-full bg-white shadow transition-transform ${
                       child.enabled ? 'translate-x-4' : 'translate-x-0.5'
                     }`} />
                   </div>
@@ -1142,27 +1206,25 @@ export default function StrategiesPlusPage() {
 
             <Separator orientation="vertical" className="h-6 bg-zinc-800 shrink-0" />
 
-            {/* Arm / Disarm */}
             {copyTradeConfig.armed ? (
               <Button
                 variant="destructive"
                 size="sm"
                 onClick={handleDisarmReplication}
-                className={`gap-1.5 ${TXT_CAPTION} rounded-lg bg-red-950/60 border border-red-900/60 text-red-400 hover:bg-red-900/40 hover:border-red-700 hover:text-red-300`}
+                className="gap-1.5 text-xs font-mono font-bold rounded-xl bg-rose-950/80 border border-rose-800 text-rose-400 hover:bg-rose-900/60 hover:text-rose-200"
               >
                 <ShieldOff className="h-3 w-3" />
-                STOP Replication (Armed)
+                DISARM REPLICATION
               </Button>
             ) : (
               <Button
                 size="sm"
                 onClick={handleArmReplication}
                 disabled={arming || !copyTradeConfig.children.some(c => c.enabled)}
-                title={!copyTradeConfig.children.some(c => c.enabled) ? 'Enable at least one child account first' : undefined}
-                className={`gap-1.5 ${TXT_CAPTION} rounded-lg ${
+                className={`gap-1.5 text-xs font-mono font-bold rounded-xl ${
                   confirmArm
-                    ? 'bg-red-600 border border-red-500 text-oncolor animate-pulse shadow-lg shadow-red-500/20'
-                    : 'bg-emerald-900/40 border border-emerald-700/60 text-emerald-300 hover:bg-emerald-800/40 hover:border-emerald-600'
+                    ? 'bg-rose-600 border border-rose-500 text-white animate-pulse shadow-lg shadow-rose-500/20'
+                    : 'bg-emerald-500/15 hover:bg-emerald-500/25 border border-emerald-500/30 text-emerald-300'
                 }`}
               >
                 {arming ? <RefreshCw className="h-3 w-3 animate-spin" /> : <Repeat className="h-3 w-3" />}
@@ -1171,52 +1233,35 @@ export default function StrategiesPlusPage() {
             )}
           </div>
 
-          {/* Activity feed */}
-          <div className="border border-zinc-800 rounded-lg bg-zinc-950/60 max-h-40 overflow-y-auto">
+          {/* Activity Feed */}
+          <div className="border border-zinc-800 rounded-xl bg-zinc-950/80 max-h-36 overflow-y-auto font-mono text-xs">
             {copyTradeLog.length === 0 ? (
-              <div className={`px-3 py-2 ${TXT_CAPTION} text-zinc-600`}>No replication activity yet.</div>
+              <div className="px-4 py-2.5 text-zinc-500 font-sans text-xs">No replication events recorded.</div>
             ) : (
-              <div className="divide-y divide-zinc-800/50">
-                {[...copyTradeLog].reverse().slice(0, 30).map((entry, i) => (
-                  <div key={`${entry.order_no}-${entry.ts}-${i}`} className={`flex items-center gap-2 px-3 py-1.5 ${TXT_CAPTION} font-normal`}>
+              <div className="divide-y divide-zinc-800/60">
+                {[...copyTradeLog].reverse().slice(0, 20).map((entry, i) => (
+                  <div key={`${entry.order_no}-${entry.ts}-${i}`} className="flex items-center gap-2.5 px-4 py-1.5">
                     {entry.result === 'success' || entry.result === 'safety_exit' ? (
-                      <CheckCircle2 className={`h-3 w-3 shrink-0 ${entry.result === 'safety_exit' ? 'text-amber-400' : 'text-emerald-400'}`} />
-                    ) : entry.result === 'error' || entry.result === 'safety_exit_error' ? (
-                      <XCircle className="h-3 w-3 text-red-400 shrink-0" />
+                      <CheckCircle2 className="h-3.5 w-3.5 text-emerald-400 shrink-0" />
                     ) : (
-                      <span className="h-3 w-3 rounded-full border border-zinc-600 shrink-0" />
+                      <XCircle className="h-3.5 w-3.5 text-rose-400 shrink-0" />
                     )}
-                    <span className="text-zinc-600 shrink-0 font-mono tabular-nums">
-                      {new Date(entry.ts).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', second: '2-digit' })}
+                    <span className="text-zinc-500 tabular-nums">
+                      {new Date(entry.ts).toLocaleTimeString('en-IN')}
                     </span>
-                    {(entry.result === 'safety_exit' || entry.result === 'safety_exit_error') && (
-                      <span className="flex items-center gap-1 px-1.5 py-0.5 rounded bg-amber-500/10 border border-amber-500/30 text-amber-400 text-[10px] font-bold shrink-0">
-                        <Shield className="h-2.5 w-2.5" /> SAFETY-NET
-                      </span>
-                    )}
-                    {/* With more than one child, which broker a line refers to
-                        is no longer implicit — show it. */}
                     {entry.broker && (
-                      <span className="shrink-0 px-1.5 py-0.5 rounded bg-zinc-800 text-zinc-400 text-[10px] font-bold uppercase">
+                      <span className="px-1.5 py-0.2 rounded bg-zinc-800 text-zinc-300 text-[10px] font-bold uppercase">
                         {entry.broker}
                       </span>
                     )}
-                    <span className="text-zinc-300 font-medium truncate">
-                      {entry.side} {entry.child_qty ?? entry.parent_qty} {entry.child_symbol ?? entry.zerodha_symbol ?? entry.parent_symbol}
+                    <span className="text-zinc-200 font-semibold truncate">
+                      {entry.side} {entry.child_qty ?? entry.parent_qty} {entry.child_symbol ?? entry.parent_symbol}
                     </span>
-                    <span className={`shrink-0 ${
-                      entry.result === 'success' || entry.result === 'safety_exit' ? 'text-emerald-500'
-                        : entry.result === 'error' || entry.result === 'safety_exit_error' ? 'text-red-500'
-                        : 'text-zinc-500'
+                    <span className={`ml-auto text-[11px] ${
+                      entry.result === 'success' ? 'text-emerald-400 font-bold' : 'text-zinc-400'
                     }`}>
-                      {entry.result === 'logged_only' ? 'logged (not armed)'
-                        : entry.result === 'skipped' ? entry.error
-                        : entry.result === 'safety_exit' ? 'parent flat — force-closed'
-                        : entry.result}
+                      {entry.result}
                     </span>
-                    {entry.child_order_id && (
-                      <span className="text-zinc-600 truncate">→ {entry.child_order_id}</span>
-                    )}
                   </div>
                 ))}
               </div>
@@ -1225,156 +1270,196 @@ export default function StrategiesPlusPage() {
         </div>
       )}
 
-      {/* ── Main Table ── */}
-      <main className="flex-1 w-full">
+      {/* ── Main Strategy Matrix ── */}
+      <main className="flex-1 w-full max-w-[1720px] mx-auto px-5 py-4">
         {loading && strategyList.length === 0 ? (
-          <div className="flex flex-col items-center justify-center p-16 min-h-[260px]">
-            <RefreshCw className="h-6 w-6 text-emerald-500 animate-spin" />
-            <span className="text-zinc-600 text-xs mt-3">Connecting to strategy API…</span>
+          <div className="flex flex-col items-center justify-center p-16 min-h-[300px] gap-3">
+            <RefreshCw className="h-8 w-8 text-emerald-400 animate-spin" />
+            <span className="text-zinc-400 text-xs font-mono">Syncing algorithmic strategy states…</span>
           </div>
         ) : error ? (
-          <div className="flex flex-col items-center justify-center p-12 text-center min-h-[260px]">
-            <p className="text-sm font-semibold text-red-400">Connection Failed</p>
-            <p className="text-xs text-zinc-600 mt-1">{error}</p>
+          <div className="flex flex-col items-center justify-center p-12 text-center min-h-[300px] bg-zinc-900/40 border border-zinc-800 rounded-2xl">
+            <p className="text-sm font-bold text-rose-400 font-mono">Connection Failed</p>
+            <p className="text-xs text-zinc-400 mt-1">{error}</p>
           </div>
         ) : viewMode === 'active' && activeList.length === 0 ? (
-          <div className="flex flex-col items-center justify-center p-16 min-h-[260px] gap-3">
-            <div className="h-12 w-12 rounded-full bg-zinc-900 border border-zinc-800 flex items-center justify-center">
-              <Activity className="h-5 w-5 text-zinc-700" />
+          <div className="flex flex-col items-center justify-center p-16 min-h-[320px] gap-3 bg-zinc-900/30 border border-zinc-800 rounded-2xl text-center">
+            <div className="h-12 w-12 rounded-2xl bg-zinc-900 border border-zinc-800 flex items-center justify-center text-zinc-500">
+              <Activity className="h-6 w-6" />
             </div>
-            <p className="text-sm font-semibold text-zinc-500">No strategies running</p>
-            <p className="text-xs text-zinc-700">Switch to <strong className="text-zinc-500">All</strong> to configure and launch a strategy</p>
+            <p className="text-sm font-bold text-zinc-300">No Active Strategy Processes</p>
+            <p className="text-xs text-zinc-400 max-w-sm">
+              There are currently no live trading processes running. Switch to <strong className="text-white font-mono">All</strong> view to launch or configure a strategy.
+            </p>
             <Button
               variant="outline"
               onClick={() => setViewMode('all')}
-              className="mt-1 gap-1.5 rounded-lg border-zinc-700 bg-zinc-900 text-zinc-400 hover:text-white hover:border-zinc-600 text-xs font-semibold"
+              className="mt-2 gap-2 rounded-xl border-zinc-700 bg-zinc-900 text-zinc-300 hover:text-white text-xs font-bold font-mono"
             >
               <LayoutList className="h-3.5 w-3.5" />
-              Show All Strategies
+              View All Available Strategies
             </Button>
           </div>
         ) : (
-          <div className="w-full">
-            {/* ── Strategy-type hub: one card per trading logic, mirrors the group headers below ── */}
-            {groupMode === 'type' && (
-              <div className="px-4 py-4 border-b border-zinc-900">
-                <div className="flex items-baseline justify-between mb-3">
-                  <div>
-                    <h2 className="text-base font-bold text-white tracking-tight">
-                      {activeGroupedList.length} Strategy Types
-                    </h2>
-                    <p className={`${TXT_CAPTION} font-normal text-zinc-500 mt-0.5`}>
-                      {instanceRows.length} strateg{instanceRows.length === 1 ? 'y' : 'ies'} across {activeGroupedList.length} logic group{activeGroupedList.length === 1 ? '' : 's'}
-                    </p>
-                  </div>
-                </div>
-                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
-                  {activeGroupedList.map(({ underlying: groupKey, items: rows, runningCount: groupRunning }) => {
-                    const info = LOGIC_GROUPS[groupKey] ?? OTHER_LOGIC_GROUP;
-                    const a = ACCENT_CLASSES[info.accent] ?? ACCENT_CLASSES.zinc;
-                    const Icon = info.icon;
-                    const open = groups.isOpen(groupKey, groupRunning > 0);
-                    return (
-                      <button
-                        key={groupKey}
-                        type="button"
-                        onClick={() => groups.toggle(groupKey, open)}
-                        aria-expanded={open}
-                        className={`group flex flex-col items-start text-left gap-2 rounded-2xl border border-zinc-800 bg-zinc-900/50 p-4 transition-colors ${a.ring}`}
-                      >
-                        <div className={`flex items-center justify-center w-9 h-9 rounded-lg ${a.iconBg} border ${a.iconBorder} shrink-0`}>
-                          <Icon className={`h-4 w-4 ${a.icon}`} />
-                        </div>
-                        <h3 className="text-sm font-bold text-white tracking-tight">{info.title}</h3>
-                        <p className={`${TXT_CAPTION} font-normal text-zinc-500 leading-snug -mt-1`}>{info.tagline}</p>
-                        <div className="flex items-center gap-2 mt-1">
-                          <span className={`${TXT_LABEL} text-zinc-600 normal-case`}>
+          <div className="w-full space-y-4">
+            {/* ── Time Horizon Hub Overview (Visible in Horizon group mode) ── */}
+            {groupMode === 'timeframe' && (
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-3.5 mb-4">
+                {activeGroupedList.map(({ underlying: groupKey, items: rows, runningCount: groupRunning, pnl: groupPnl }) => {
+                  const info = TIMEFRAME_GROUPS[groupKey] ?? OTHER_TIMEFRAME_GROUP;
+                  const a = ACCENT_CLASSES[info.accent] ?? ACCENT_CLASSES.zinc;
+                  const Icon = info.icon;
+                  const open = groups.isOpen(groupKey, groupRunning > 0);
+                  return (
+                    <button
+                      key={groupKey}
+                      type="button"
+                      onClick={() => groups.toggle(groupKey, open)}
+                      aria-expanded={open}
+                      className={`group relative flex items-start gap-3.5 rounded-2xl border border-zinc-800 bg-zinc-900/60 p-4 text-left transition-all duration-200 overflow-hidden ${a.ring}`}
+                    >
+                      <div className={`flex items-center justify-center w-10 h-10 rounded-xl ${a.iconBg} border ${a.iconBorder} shrink-0 mt-0.5`}>
+                        <Icon className={`h-5 w-5 ${a.icon}`} />
+                      </div>
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center justify-between gap-2 mb-1">
+                          <span className={`text-[9px] font-mono font-bold px-2 py-0.5 rounded border ${a.badge}`}>
+                            {info.badge}
+                          </span>
+                          <span className="text-xs font-mono font-bold text-zinc-400">
                             {rows.length} strateg{rows.length === 1 ? 'y' : 'ies'}
                           </span>
-                          {groupRunning > 0 && (
-                            <span className={`flex items-center gap-1 ${TXT_LABEL} normal-case text-emerald-400`}>
-                              <span className="h-1.5 w-1.5 rounded-full bg-emerald-500 animate-pulse" />
-                              {groupRunning} running
+                        </div>
+                        <h3 className="text-sm font-bold text-white tracking-tight">{info.title}</h3>
+                        <p className="text-[11px] text-zinc-400 font-medium leading-snug mt-0.5 line-clamp-2">
+                          {info.tagline}
+                        </p>
+                        <div className="flex items-center gap-3 mt-2 font-mono text-xs">
+                          {groupRunning > 0 ? (
+                            <span className="flex items-center gap-1.5 text-emerald-400 font-bold">
+                              <span className="h-2 w-2 rounded-full bg-emerald-400 animate-pulse" />
+                              {groupRunning} Live
+                            </span>
+                          ) : (
+                            <span className="text-zinc-500 font-medium">0 running</span>
+                          )}
+                          {groupRunning > 0 && groupPnl !== 0 && (
+                            <span className={`font-bold tabular-nums ${groupPnl >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
+                              P&amp;L: {signedInr(groupPnl)}
                             </span>
                           )}
                         </div>
-                      </button>
-                    );
-                  })}
-                </div>
+                      </div>
+                    </button>
+                  );
+                })}
               </div>
             )}
 
-            {/* Table header */}
-            <div className="flex items-center gap-0 px-4 py-1.5 border-b border-zinc-800 bg-zinc-900/60 sticky top-0 z-10">
-              <div className="w-[90px] shrink-0 text-xs font-bold text-white">Status</div>
-              <div className="w-[240px] shrink-0 text-xs font-bold text-white">Strategy</div>
+            {/* ── Table Column Header Bar ── */}
+            <div className="flex items-center gap-0 px-4 py-2 border border-zinc-800 bg-zinc-800 rounded-xl">
+              <div className="w-[90px] shrink-0 text-xs font-bold text-white font-sans">Status</div>
+              <div className="w-[250px] shrink-0 text-xs font-bold text-white font-sans">Strategy &amp; Mode</div>
               <div className="w-px mx-2" />
-              <div className="flex-1 text-xs font-bold text-white">Live Data</div>
-              <div className="shrink-0 w-[80px] text-right text-xs font-bold text-white">P&amp;L</div>
+              <div className="flex-1 text-xs font-bold text-white font-sans">Live Position &amp; Parameters</div>
+              <div className="shrink-0 w-[90px] text-right text-xs font-bold text-white font-sans">Session P&amp;L</div>
               <div className="w-px mx-3" />
-              <div className="shrink-0 w-[160px] text-xs font-bold text-white">Actions</div>
+              <div className="shrink-0 w-[170px] text-xs font-bold text-white font-sans text-right pr-2">Execution Actions</div>
             </div>
 
-            {/* Strategy rows, grouped by the active dimension (underlying or logic type) */}
-            {activeGroupedList.map(({ underlying: groupKey, items: rows, runningCount: groupRunning }) => {
-              const open = groups.isOpen(groupKey, groupRunning > 0);
-              const typeInfo = groupMode === 'type' ? (LOGIC_GROUPS[groupKey] ?? OTHER_LOGIC_GROUP) : null;
-              return (
-                <div key={groupKey}>
-                  <button
-                    type="button"
-                    onClick={() => groups.toggle(groupKey, open)}
-                    aria-expanded={open}
-                    className="w-full flex items-center gap-2 px-4 py-1.5 bg-zinc-900 border-y border-zinc-800 text-left hover:bg-zinc-800/70 transition-colors"
-                  >
-                    {open
-                      ? <ChevronDown className="h-3.5 w-3.5 text-zinc-400 shrink-0" />
-                      : <ChevronRight className="h-3.5 w-3.5 text-zinc-400 shrink-0" />}
-                    <span className="text-xs font-bold text-white tracking-wide">{typeInfo ? typeInfo.title : groupKey}</span>
-                    {typeInfo && (
-                      <span className={`${TXT_CAPTION} font-normal text-zinc-500 hidden sm:inline`}>{typeInfo.tagline}</span>
-                    )}
-                    <span className={`${TXT_LABEL} text-zinc-500 normal-case`}>
-                      {rows.length} strateg{rows.length === 1 ? 'y' : 'ies'}
-                    </span>
-                    {groupRunning > 0 && (
-                      <span className={`flex items-center gap-1 ${TXT_LABEL} normal-case text-emerald-400`}>
-                        <span className="h-1.5 w-1.5 rounded-full bg-emerald-500 animate-pulse" />
-                        {groupRunning} running
-                      </span>
-                    )}
-                  </button>
-                  {open && (
-                    <div className="divide-y divide-zinc-800/30">
-                      {rows.map(({ key, instanceId, meta, state }) => (
-                        <StrategyRowWide
-                          key={`${key}:${instanceId}`}
-                          meta={meta}
-                          state={state}
-                          onRefresh={fetchStrategies}
-                          instanceId={instanceId || undefined}
-                          onAddInstance={instanceId === '' ? addInstance : undefined}
-                          onRemoveInstance={instanceId === '' ? undefined : removeInstance}
-                          selectedBroker={broker}
-                        />
-                      ))}
-                    </div>
-                  )}
-                </div>
-              );
-            })}
+            {/* ── Strategy Grouped Sections ── */}
+            <div className="space-y-4">
+              {activeGroupedList.map(({ underlying: groupKey, items: rows, runningCount: groupRunning, pnl: groupPnl }) => {
+                const open = groups.isOpen(groupKey, groupRunning > 0);
+                const isTimeframe = groupMode === 'timeframe';
+                const tfInfo = isTimeframe ? (TIMEFRAME_GROUPS[groupKey] ?? OTHER_TIMEFRAME_GROUP) : null;
+                const typeInfo = groupMode === 'type' ? (LOGIC_GROUPS[groupKey] ?? OTHER_LOGIC_GROUP) : null;
 
-            {/* "All" mode: hint to switch to active when strategies are running */}
+                const displayTitle = tfInfo ? tfInfo.title : typeInfo ? typeInfo.title : groupKey;
+                const displayTagline = tfInfo ? tfInfo.tagline : typeInfo ? typeInfo.tagline : null;
+                const accent = tfInfo?.accent ?? typeInfo?.accent ?? 'sky';
+                const a = ACCENT_CLASSES[accent] ?? ACCENT_CLASSES.zinc;
+
+                return (
+                  <div key={groupKey} className="rounded-2xl border border-zinc-800 bg-zinc-900/40 overflow-hidden shadow-sm">
+                    {/* Section Header Button */}
+                    <button
+                      type="button"
+                      onClick={() => groups.toggle(groupKey, open)}
+                      aria-expanded={open}
+                      className="w-full flex items-center justify-between gap-3 px-4 py-2.5 bg-zinc-900/90 hover:bg-zinc-800/80 border-b border-zinc-800 transition-colors text-left"
+                    >
+                      <div className="flex items-center gap-2.5 min-w-0">
+                        {open ? (
+                          <ChevronDown className="h-4 w-4 text-zinc-400 shrink-0" />
+                        ) : (
+                          <ChevronRight className="h-4 w-4 text-zinc-400 shrink-0" />
+                        )}
+                        <span className="text-xs font-bold text-white tracking-wide font-mono uppercase">
+                          {displayTitle}
+                        </span>
+                        {displayTagline && (
+                          <span className="text-[11px] text-zinc-400 font-sans hidden md:inline truncate">
+                            · {displayTagline}
+                          </span>
+                        )}
+                      </div>
+
+                      <div className="flex items-center gap-3 shrink-0 font-mono text-xs">
+                        <span className="text-zinc-400 font-semibold">
+                          {rows.length} strateg{rows.length === 1 ? 'y' : 'ies'}
+                        </span>
+                        {groupRunning > 0 && (
+                          <span className="flex items-center gap-1.5 text-emerald-400 font-bold bg-emerald-500/10 border border-emerald-500/25 px-2 py-0.5 rounded-lg">
+                            <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 animate-pulse" />
+                            {groupRunning} Live
+                          </span>
+                        )}
+                        {groupRunning > 0 && groupPnl !== 0 && (
+                          <span className={`font-bold tabular-nums ${groupPnl >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
+                            {signedInr(groupPnl)}
+                          </span>
+                        )}
+                      </div>
+                    </button>
+
+                    {/* Section Strategy Rows */}
+                    {open && (
+                      <div className="divide-y divide-zinc-800/50 bg-zinc-950/60">
+                        {rows.map(({ key, instanceId, meta, state }) => (
+                          <StrategyRowWide
+                            key={`${key}:${instanceId}`}
+                            meta={meta}
+                            state={state}
+                            onRefresh={fetchStrategies}
+                            instanceId={instanceId || undefined}
+                            onAddInstance={instanceId === '' ? addInstance : undefined}
+                            onRemoveInstance={instanceId === '' ? undefined : removeInstance}
+                            selectedBroker={broker}
+                          />
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+
+            {/* Hint in "All" view */}
             {viewMode === 'all' && runningCount > 0 && (
-              <div className="px-4 py-2.5 border-t border-zinc-800/40 bg-zinc-950/40 flex items-center gap-2">
-                <span className="h-1.5 w-1.5 rounded-full bg-emerald-500 animate-pulse shrink-0" />
-                <span className="text-[10px] text-zinc-500">
-                  {runningCount} strateg{runningCount === 1 ? 'y' : 'ies'} running —{' '}
-                  <button onClick={() => setViewMode('active')} className="text-emerald-400 hover:text-emerald-300 font-semibold underline underline-offset-2">
-                    switch to Active view
-                  </button>
-                </span>
+              <div className="px-4 py-3 border border-zinc-800/80 rounded-2xl bg-zinc-900/30 flex items-center justify-between gap-3 text-xs font-mono">
+                <div className="flex items-center gap-2 text-zinc-400">
+                  <span className="h-2 w-2 rounded-full bg-emerald-400 animate-pulse shrink-0" />
+                  <span>
+                    <strong className="text-white">{runningCount}</strong> strateg{runningCount === 1 ? 'y' : 'ies'} actively executing in the market.
+                  </span>
+                </div>
+                <button
+                  onClick={() => setViewMode('active')}
+                  className="text-emerald-400 hover:text-emerald-300 font-bold underline underline-offset-4"
+                >
+                  Switch to Active View →
+                </button>
               </div>
             )}
           </div>

@@ -119,7 +119,9 @@ export async function GET() {
           // preserves the registry's key order, so group order follows the registry too.
           underlying: meta.underlying,
           // The "By Strategy Type" grouping alternative on /strategies-plus.
-          logicGroup: meta.logicGroup
+          logicGroup: meta.logicGroup,
+          // Time horizon: 'intraday' vs 'positional'
+          timeframe: meta.timeframe
         },
         // `state` is the primary instance, kept for backward compatibility: /strategies
         // (StrategyCard) predates multi-instance and reads this field directly — dropping

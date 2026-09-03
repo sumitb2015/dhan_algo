@@ -65,12 +65,14 @@ export const STRATEGIES_METADATA: Record<string, {
   path: string;
   underlying: string;
   logicGroup: keyof typeof LOGIC_GROUPS;
+  timeframe: 'intraday' | 'positional';
   execBrokerEligible?: boolean;
 }> = {
   nifty_advanced_imbalance: {
     name: 'Nifty Advanced Imbalance',
     underlying: 'NIFTY',
     logicGroup: 'harvest',
+    timeframe: 'intraday',
     path: path.join(PROJECT_ROOT, 'strategies', 'value_imbalance', 'nifty_advanced_imbalance.py'),
     execBrokerEligible: true,
   },
@@ -78,6 +80,7 @@ export const STRATEGIES_METADATA: Record<string, {
     name: 'Nifty Delta Neutral (0.5 Delta)',
     underlying: 'NIFTY',
     logicGroup: 'volatility',
+    timeframe: 'intraday',
     path: path.join(PROJECT_ROOT, 'strategies', 'value_imbalance', 'nifty_delta_neutral.py'),
     execBrokerEligible: true,
   },
@@ -85,6 +88,7 @@ export const STRATEGIES_METADATA: Record<string, {
     name: 'Nifty Value Imbalance Straddle',
     underlying: 'NIFTY',
     logicGroup: 'harvest',
+    timeframe: 'intraday',
     path: path.join(PROJECT_ROOT, 'strategies', 'value_imbalance', 'nifty_value_imbalance_straddle.py'),
     execBrokerEligible: true,
   },
@@ -92,6 +96,7 @@ export const STRATEGIES_METADATA: Record<string, {
     name: 'Nifty Value Imbalance Strangle',
     underlying: 'NIFTY',
     logicGroup: 'harvest',
+    timeframe: 'intraday',
     path: path.join(PROJECT_ROOT, 'strategies', 'value_imbalance', 'nifty_value_imbalance_strangle.py'),
     execBrokerEligible: true,
   },
@@ -99,6 +104,7 @@ export const STRATEGIES_METADATA: Record<string, {
     name: 'Nifty VWAP 1-Min Straddle',
     underlying: 'NIFTY',
     logicGroup: 'harvest',
+    timeframe: 'intraday',
     path: path.join(PROJECT_ROOT, 'strategies', 'value_imbalance', 'nifty_vwap_1min_straddle.py'),
     execBrokerEligible: true,
   },
@@ -106,6 +112,7 @@ export const STRATEGIES_METADATA: Record<string, {
     name: 'Nifty VIX-Filtered Straddle',
     underlying: 'NIFTY',
     logicGroup: 'volatility',
+    timeframe: 'intraday',
     path: path.join(PROJECT_ROOT, 'strategies', 'value_imbalance', 'nifty_vix_straddle.py'),
     execBrokerEligible: true,
   },
@@ -113,6 +120,7 @@ export const STRATEGIES_METADATA: Record<string, {
     name: 'Nifty Spread Trend-Following',
     underlying: 'NIFTY',
     logicGroup: 'directional',
+    timeframe: 'intraday',
     path: path.join(PROJECT_ROOT, 'strategies', 'spread_trend', 'nifty_spread_trend.py'),
     execBrokerEligible: true,
   },
@@ -120,6 +128,7 @@ export const STRATEGIES_METADATA: Record<string, {
     name: 'Nifty OI Directional',
     underlying: 'NIFTY',
     logicGroup: 'directional',
+    timeframe: 'intraday',
     path: path.join(PROJECT_ROOT, 'strategies', 'oi_directional', 'nifty_oi_directional.py'),
     execBrokerEligible: true,
   },
@@ -127,6 +136,7 @@ export const STRATEGIES_METADATA: Record<string, {
     name: 'Nifty ST+OI Bear Call Spread',
     underlying: 'NIFTY',
     logicGroup: 'directional',
+    timeframe: 'intraday',
     path: path.join(PROJECT_ROOT, 'strategies', 'st_oi_bearcall', 'nifty_st_oi_bearcall.py'),
     execBrokerEligible: true,
   },
@@ -134,6 +144,7 @@ export const STRATEGIES_METADATA: Record<string, {
     name: 'Nifty Rolling Short Straddle',
     underlying: 'NIFTY',
     logicGroup: 'rotation',
+    timeframe: 'intraday',
     path: path.join(PROJECT_ROOT, 'strategies', 'value_imbalance', 'nifty_rolling_straddle.py'),
     execBrokerEligible: true,
   },
@@ -141,6 +152,7 @@ export const STRATEGIES_METADATA: Record<string, {
     name: 'Nifty Delta Strangle (Weekly)',
     underlying: 'NIFTY',
     logicGroup: 'rotation',
+    timeframe: 'positional',
     path: path.join(PROJECT_ROOT, 'strategies', 'delta_strangle', 'nifty_delta_strangle.py'),
     execBrokerEligible: true,
   },
@@ -148,24 +160,28 @@ export const STRATEGIES_METADATA: Record<string, {
     name: 'CrudeOil Mini Supertrend',
     underlying: 'CRUDEOILM',
     logicGroup: 'futures_trend',
+    timeframe: 'intraday',
     path: path.join(PROJECT_ROOT, 'strategies', 'crudeoil', 'crudeoilm_supertrend.py')
   },
   crudeoilm_renko_sar: {
     name: 'CrudeOil Mini Renko SAR',
     underlying: 'CRUDEOILM',
     logicGroup: 'futures_trend',
+    timeframe: 'intraday',
     path: path.join(PROJECT_ROOT, 'strategies', 'crudeoil', 'crudeoilm_renko_sar.py')
   },
   crudeoilm_vwap_supertrend: {
     name: 'CrudeOil Mini VWAP + Supertrend',
     underlying: 'CRUDEOILM',
     logicGroup: 'futures_trend',
+    timeframe: 'intraday',
     path: path.join(PROJECT_ROOT, 'strategies', 'crudeoil', 'crudeoilm_vwap_supertrend.py')
   },
   crudeoilm_orb: {
     name: 'CrudeOil Mini ORB + Pivot Stop',
     underlying: 'CRUDEOILM',
     logicGroup: 'futures_trend',
+    timeframe: 'intraday',
     path: path.join(PROJECT_ROOT, 'strategies', 'crudeoil', 'crudeoilm_orb.py')
   },
   // The only MULTI-SYMBOL strategy here: it tracks all 50 Nifty names and may hold several
@@ -177,6 +193,7 @@ export const STRATEGIES_METADATA: Record<string, {
     name: 'Nifty 50 Intraday VWAP + RS',
     underlying: 'NIFTY 50',
     logicGroup: 'momentum',
+    timeframe: 'intraday',
     path: path.join(PROJECT_ROOT, 'strategies', 'intraday_equity', 'nifty50_vwap_rs.py')
   },
   // The only positional / multi-day / CNC-delivery strategy here. Unlike every entry above,
@@ -186,6 +203,7 @@ export const STRATEGIES_METADATA: Record<string, {
     name: 'Nifty 500 Momentum Portfolio',
     underlying: 'NIFTY 500',
     logicGroup: 'momentum',
+    timeframe: 'positional',
     path: path.join(PROJECT_ROOT, 'strategies', 'momentum_investing', 'nifty500_momentum.py')
   },
   // The only OVERNIGHT options strategy here: it deliberately does NOT flatten at the
@@ -198,6 +216,7 @@ export const STRATEGIES_METADATA: Record<string, {
     name: 'Nifty Overnight Fly',
     underlying: 'NIFTY',
     logicGroup: 'overnight_hedge',
+    timeframe: 'positional',
     path: path.join(PROJECT_ROOT, 'strategies', 'overnight_fly', 'nifty_overnight_fly.py'),
     execBrokerEligible: true,
   },
