@@ -264,11 +264,12 @@ interface CellDetailModalProps {
   lotSize: number;
   lots: number;
   unit: 'pts' | 'inr';
+  lastPolledAt: string | null;
   onClose: () => void;
 }
 
 function CellDetailModal({
-  cell, expiry, dte, underlying, spot, lotSize, lots, unit, onClose
+  cell, expiry, dte, underlying, spot, lotSize, lots, unit, lastPolledAt, onClose
 }: CellDetailModalProps) {
   const [copied, setCopied] = useState(false);
 
@@ -459,7 +460,16 @@ function CellDetailModal({
 
           {/* Margin & Sizing Notes */}
           <div className="p-3 rounded-xl bg-zinc-900/60 border border-zinc-800/80 flex items-center justify-between text-zinc-400 text-[11px]">
-            <span>Est. Blocked SPAN Margin:</span>
+            <span className="flex items-center gap-1.5">
+              {cell.marginSource === 'live' ? 'Live SPAN Margin' : 'Est. Blocked SPAN Margin'}
+              {cell.marginSource === 'live' && (
+                <span
+                  className="w-1.5 h-1.5 rounded-full bg-emerald-400"
+                  title="Priced via Dhan's margin calculator, not the flat estimate"
+                />
+              )}
+              :
+            </span>
             <span className="font-mono font-bold text-zinc-200">
               ₹{totalMargin.toLocaleString('en-IN')} ({lots} lot{lots > 1 ? 's' : ''} × {lotSize} qty)
             </span>
@@ -468,13 +478,20 @@ function CellDetailModal({
 
         {/* Footer */}
         <div className="px-6 py-3.5 border-t border-zinc-800 bg-zinc-900/70 flex items-center justify-between">
-          <button
-            onClick={handleCopyOrder}
-            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-200 text-xs font-semibold transition-colors cursor-pointer"
-          >
-            {copied ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5 text-zinc-400" />}
-            <span>{copied ? 'Copied to Clipboard!' : 'Copy Trade Legs'}</span>
-          </button>
+          <div className="flex items-center gap-3">
+            <button
+              onClick={handleCopyOrder}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-200 text-xs font-semibold transition-colors cursor-pointer"
+            >
+              {copied ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5 text-zinc-400" />}
+              <span>{copied ? 'Copied to Clipboard!' : 'Copy Trade Legs'}</span>
+            </button>
+            {lastPolledAt && (
+              <span className="text-[10px] text-zinc-500 font-mono">
+                Prices as of {new Date(lastPolledAt).toLocaleTimeString('en-IN')} — refreshes live while open
+              </span>
+            )}
+          </div>
 
           <button
             onClick={onClose}
@@ -583,6 +600,23 @@ export default function StrangleMatrixPage() {
     };
   }, [fetchMatrix, paused]);
 
+  // Keep the drilldown modal's cell in sync with each new poll — without
+  // this, "Copy Trade Legs" can copy LTPs from whenever the modal was
+  // opened, tens of seconds stale, with nothing on screen to warn the user.
+  useEffect(() => {
+    if (!selectedModal || !data?.rows || !data.expiries) return;
+    const expIdx = data.expiries.findIndex(e => e.expiry === selectedModal.expiry);
+    if (expIdx === -1) return;
+    const row = data.rows.find(r => r.offset === selectedModal.cell.offset);
+    const freshCell = row?.cells[expIdx];
+    if (freshCell && freshCell !== selectedModal.cell) {
+      setSelectedModal(prev => (prev ? { ...prev, cell: freshCell } : prev));
+    }
+    // Only re-sync off `data` — re-running when selectedModal itself changes
+    // (e.g. right after opening) would be a no-op loop.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [data]);
+
   const visibleRows = useMemo(() => {
     if (!data?.rows) return [];
     return data.rows
@@ -595,7 +629,10 @@ export default function StrangleMatrixPage() {
       });
   }, [data, offsetRowCount, minDistancePct, maxDistancePct]);
 
-  // Derived Summary Highlights
+  // Derived Summary Highlights — must respect the same active filters as the
+  // matrix cells (offset depth, distance range, risk profile, Min RoM%), or
+  // the "Top Pick" tiles can surface a cell the filtered table doesn't even
+  // show. Same defect class already fixed once for getCellVisuals.
   const topStats = useMemo(() => {
     if (!data?.rows || data.rows.length === 0) return null;
 
@@ -604,20 +641,26 @@ export default function StrangleMatrixPage() {
     let safestCell: StrangleCell | null = null;
     let safestExpiry = '';
 
-    data.rows.forEach(r => {
-      r.cells.forEach((c, idx) => {
-        if (!c) return;
-        const exp = data.expiries?.[idx]?.expiry ?? '';
-        if (!bestRomCell || c.romPct > bestRomCell.romPct) {
-          bestRomCell = c;
-          bestRomExpiry = exp;
-        }
-        if (c.romPct >= 1.0 && (!safestCell || c.popPct > safestCell.popPct)) {
-          safestCell = c;
-          safestExpiry = exp;
-        }
+    data.rows
+      .filter(r => r.offset <= offsetRowCount)
+      .forEach(r => {
+        r.cells.forEach((c, idx) => {
+          if (!c) return;
+          if (c.distancePct < minDistancePct || c.distancePct > maxDistancePct) return;
+          if (!passesRiskProfile(c, riskProfile)) return;
+          if (c.romPct < minRomPct) return;
+
+          const exp = data.expiries?.[idx]?.expiry ?? '';
+          if (!bestRomCell || c.romPct > bestRomCell.romPct) {
+            bestRomCell = c;
+            bestRomExpiry = exp;
+          }
+          if (!safestCell || c.popPct > safestCell.popPct) {
+            safestCell = c;
+            safestExpiry = exp;
+          }
+        });
       });
-    });
 
     return {
       bestRomCell: bestRomCell as StrangleCell | null,
@@ -625,7 +668,7 @@ export default function StrangleMatrixPage() {
       safestCell: safestCell as StrangleCell | null,
       safestExpiry,
     };
-  }, [data]);
+  }, [data, offsetRowCount, minDistancePct, maxDistancePct, riskProfile, minRomPct]);
 
   // Derived Chart Datasets
   const curveChartData = useMemo(() => {
@@ -724,8 +767,11 @@ export default function StrangleMatrixPage() {
 
     if (cell.romPct >= greatRomPct) {
       return {
-        bg: 'bg-emerald-950/40 hover:bg-emerald-900/50',
-        border: 'border-emerald-600/50 hover:border-emerald-500',
+        // emerald-500-based (not emerald-950) so the tint reads clearly against
+        // the dark-mode page ground, not just in light mode — matches the
+        // Great/Good legend swatches in CellDetailModal above.
+        bg: 'bg-emerald-500/25 hover:bg-emerald-500/35',
+        border: 'border-emerald-500/60 hover:border-emerald-400',
         text: 'text-emerald-300',
         muted: false,
         isGreat: true,
@@ -735,8 +781,8 @@ export default function StrangleMatrixPage() {
 
     if (cell.romPct >= goodRomPct) {
       return {
-        bg: 'bg-emerald-950/20 hover:bg-emerald-900/30',
-        border: 'border-emerald-700/30 hover:border-emerald-600/50',
+        bg: 'bg-emerald-500/10 hover:bg-emerald-500/20',
+        border: 'border-emerald-500/30 hover:border-emerald-500/50',
         text: 'text-emerald-400',
         muted: false,
         isGreat: false,
@@ -942,6 +988,14 @@ export default function StrangleMatrixPage() {
             sub={lastPolledAt ? `Updated ${new Date(lastPolledAt).toLocaleTimeString('en-IN')}` : 'Polling...'}
             icon={Activity}
             color="text-zinc-300"
+            badge={data?.stale ? (
+              <span
+                className="px-1.5 py-0.5 rounded text-[9px] font-bold bg-amber-500/20 text-amber-300 border border-amber-500/40"
+                title="Dhan's live feed is unreachable — showing the last successful snapshot, not current prices"
+              >
+                STALE
+              </span>
+            ) : undefined}
           />
         </div>
 
@@ -1314,13 +1368,13 @@ export default function StrangleMatrixPage() {
               <div className="h-72 w-full pt-2">
                 <ResponsiveContainer width="100%" height="100%">
                   <LineChart data={curveChartData}>
-                    <CartesianGrid strokeDasharray="3 3" stroke="#27272a" vertical={false} />
-                    <XAxis dataKey="offset" stroke="#71717a" tick={{ fill: '#a1a1aa', fontSize: 10 }} />
-                    <YAxis stroke="#71717a" tick={{ fill: '#a1a1aa', fontSize: 10 }} tickFormatter={v => `${v}%`} />
-                    <Tooltip
-                      contentStyle={{ backgroundColor: '#09090b', borderColor: '#27272a', borderRadius: '0.75rem', fontSize: '11px' }}
-                      labelStyle={{ color: '#ffffff', fontWeight: 'bold' }}
-                    />
+                    {/* Grid/axis/tooltip chrome intentionally carries no stroke/fill/contentStyle —
+                        app/globals.css themes Recharts chrome globally by class name (dhan-theme-tokens skill);
+                        hardcoding hex here would be dead code that silently disagrees with the theme. */}
+                    <CartesianGrid strokeDasharray="3 3" vertical={false} />
+                    <XAxis dataKey="offset" tick={{ fontSize: 10 }} />
+                    <YAxis tick={{ fontSize: 10 }} tickFormatter={v => `${v}%`} />
+                    <Tooltip />
                     <Legend wrapperStyle={{ fontSize: '11px', paddingTop: '8px' }} />
                     {data.expiries.map((e, idx) => {
                       const colors = ['#10b981', '#06b6d4', '#8b5cf6', '#f59e0b', '#ec4899'];
@@ -1357,13 +1411,10 @@ export default function StrangleMatrixPage() {
               <div className="h-72 w-full pt-2">
                 <ResponsiveContainer width="100%" height="100%">
                   <AreaChart data={curveChartData}>
-                    <CartesianGrid strokeDasharray="3 3" stroke="#27272a" vertical={false} />
-                    <XAxis dataKey="offset" stroke="#71717a" tick={{ fill: '#a1a1aa', fontSize: 10 }} />
-                    <YAxis stroke="#71717a" tick={{ fill: '#a1a1aa', fontSize: 10 }} tickFormatter={v => unit === 'inr' ? `₹${(v/1000).toFixed(0)}k` : `${v}`} />
-                    <Tooltip
-                      contentStyle={{ backgroundColor: '#09090b', borderColor: '#27272a', borderRadius: '0.75rem', fontSize: '11px' }}
-                      labelStyle={{ color: '#ffffff', fontWeight: 'bold' }}
-                    />
+                    <CartesianGrid strokeDasharray="3 3" vertical={false} />
+                    <XAxis dataKey="offset" tick={{ fontSize: 10 }} />
+                    <YAxis tick={{ fontSize: 10 }} tickFormatter={v => unit === 'inr' ? `₹${(v/1000).toFixed(0)}k` : `${v}`} />
+                    <Tooltip />
                     <Legend wrapperStyle={{ fontSize: '11px', paddingTop: '8px' }} />
                     {data.expiries.map((e, idx) => {
                       const colors = ['#10b981', '#06b6d4', '#8b5cf6', '#f59e0b', '#ec4899'];
@@ -1405,13 +1456,10 @@ export default function StrangleMatrixPage() {
             <div className="h-80 w-full pt-2">
               <ResponsiveContainer width="100%" height="100%">
                 <LineChart data={breakevenChartData}>
-                  <CartesianGrid strokeDasharray="3 3" stroke="#27272a" vertical={false} />
-                  <XAxis dataKey="offset" stroke="#71717a" tick={{ fill: '#a1a1aa', fontSize: 10 }} />
-                  <YAxis domain={['auto', 'auto']} stroke="#71717a" tick={{ fill: '#a1a1aa', fontSize: 10 }} />
-                  <Tooltip
-                    contentStyle={{ backgroundColor: '#09090b', borderColor: '#27272a', borderRadius: '0.75rem', fontSize: '11px' }}
-                    labelStyle={{ color: '#ffffff', fontWeight: 'bold' }}
-                  />
+                  <CartesianGrid strokeDasharray="3 3" vertical={false} />
+                  <XAxis dataKey="offset" tick={{ fontSize: 10 }} />
+                  <YAxis domain={['auto', 'auto']} tick={{ fontSize: 10 }} />
+                  <Tooltip />
                   <Legend wrapperStyle={{ fontSize: '11px', paddingTop: '8px' }} />
                   <ReferenceLine y={currentSpot} stroke="#f59e0b" strokeDasharray="4 4" label={{ value: `Spot: ${currentSpot}`, fill: '#f59e0b', fontSize: 10, position: 'insideTopRight' }} />
                   <Line type="monotone" dataKey="upperBe" name="Upper Breakeven" stroke="#06b6d4" strokeWidth={2} dot={{ r: 3 }} />
@@ -1440,6 +1488,7 @@ export default function StrangleMatrixPage() {
         lotSize={currentLotSize}
         lots={lots}
         unit={unit}
+        lastPolledAt={lastPolledAt}
         onClose={() => setSelectedModal(null)}
       />
     </div>

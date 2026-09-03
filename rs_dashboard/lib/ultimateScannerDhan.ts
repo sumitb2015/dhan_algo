@@ -131,7 +131,11 @@ export async function fetchUnderlyingChain(
   spot: number;
   prevClose: number;
 }> {
-  const cacheKey = `scanner-chain:${underlying}:${expiry}`;
+  // Keyed by paceKey too: two callers with the same underlying/expiry but
+  // different pacing lanes must not dedupe onto one another's in-flight
+  // request, or the second caller's request runs under the FIRST caller's
+  // spaced() lane — silently defeating whichever caller asked for isolation.
+  const cacheKey = `scanner-chain:${paceKey ?? 'default'}:${underlying}:${expiry}`;
   const parsed = await dedupe(cacheKey, () =>
     spaced(paceKey ?? `dhan-spawn:${underlying}`, () =>
       runPythonJson<{
@@ -221,7 +225,7 @@ export async function fetchNettedMargin(
 
 export async function fetchUnderlyingExpiries(underlying: string, paceKey?: string): Promise<string[]> {
   try {
-    const parsed = await dedupe(`scanner-expiries:${underlying}`, () =>
+    const parsed = await dedupe(`scanner-expiries:${paceKey ?? 'default'}:${underlying}`, () =>
       spaced(paceKey ?? `dhan-spawn:${underlying}`, () =>
         runPythonJson<{ expiries?: string[] }>(
           FETCH_SCRIPT,
