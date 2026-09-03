@@ -350,6 +350,7 @@ function StrategyCard({ meta, state, onRefresh, selectedBroker }: StrategyCardPr
   const [dsRollDownDelta, setDsRollDownDelta] = useState<number>(0.08);
   const [dsPremiumSymmetryMin, setDsPremiumSymmetryMin] = useState<number>(0.80);
   const [dsEntryWeekday, setDsEntryWeekday] = useState<number>(2);
+  const [dsEntryTime, setDsEntryTime] = useState<string>('09:20');
   const [dsExitWeekday, setDsExitWeekday] = useState<number>(1);
   const [dsExitTime, setDsExitTime] = useState<string>('15:15');
   const [dsPollInterval, setDsPollInterval] = useState<number>(60);
@@ -579,6 +580,7 @@ function StrategyCard({ meta, state, onRefresh, selectedBroker }: StrategyCardPr
         args.push('--roll-down-delta', String(dsRollDownDelta));
         args.push('--premium-symmetry-min', String(dsPremiumSymmetryMin));
         args.push('--entry-weekday', String(dsEntryWeekday));
+        args.push('--entry-time', dsEntryTime);
         args.push('--exit-weekday', String(dsExitWeekday));
         args.push('--exit-time', dsExitTime);
         args.push('--poll-interval', String(dsPollInterval));
@@ -1057,6 +1059,10 @@ function StrategyCard({ meta, state, onRefresh, selectedBroker }: StrategyCardPr
                   ))}
                 </SelectContent>
               </Select>
+            </div>
+            <div className={fieldCls}>
+              <FieldLabel text="Entry Time" tip="No entry attempted before this time (HH:MM IST) on Entry Weekday, even if the market is open (--entry-time)." />
+              <Input type="text" value={dsEntryTime} onChange={(e) => setDsEntryTime(e.target.value)} placeholder="09:20" className={inputCls} />
             </div>
             <div className={fieldCls}>
               <FieldLabel text="Exit Weekday" tip="Weekday both legs are bought back and the strategy goes idle (--exit-weekday). Default Tuesday." />

@@ -8,13 +8,17 @@ positions across a full week and rolls legs purely on absolute *delta* drift.
 ## Weekly cycle
 
 ```
-Wed (entry, before exit-time)   Mon-Tue (monitoring/rolling)   Tue (exit)
+Wed (entry, from --entry-time)  Mon-Tue (monitoring/rolling)   Tue (exit)
         |                              |                            |
         v                              v                            v
    sell 0.15-delta            roll any leg whose |delta|      buy back both legs,
    CE + PE on expiry[1]       hits >=0.35 or <0.08, on the    go IDLE until next Wed
    (skip nearest expiry)      SAME stored expiry
 ```
+
+No entry is attempted before `--entry-time` (HH:MM IST, default `09:20`) on the entry
+weekday, even if the market is already open — this only gates the earliest attempt; a
+market-closed or no-qualifying-strike miss still retries every poll until end of day.
 
 The traded expiry is always `helper.get_expiries("NIFTY")[1]` — the expiry
 *after* the soonest one listed, roughly 13 days out at entry. The scheduled

@@ -144,6 +144,7 @@ class NiftyDeltaStrangle:
         roll_down_delta: float = 0.08,
         premium_symmetry_min: float = 0.80,
         entry_weekday: int = 2,   # Wednesday
+        entry_time: str = "09:20",
         exit_weekday: int = 1,    # Tuesday
         exit_time: str = "15:15",
         poll_interval: int = 60,
@@ -162,6 +163,7 @@ class NiftyDeltaStrangle:
         self.roll_down_delta = roll_down_delta
         self.premium_symmetry_min = premium_symmetry_min
         self.entry_weekday = entry_weekday
+        self.entry_time = entry_time
         self.exit_weekday = exit_weekday
         self.exit_time = exit_time
         self.poll_interval = poll_interval
@@ -425,6 +427,8 @@ class NiftyDeltaStrangle:
         if now.weekday() != self.entry_weekday:
             return
         if not self.helper.is_market_open():
+            return
+        if now.strftime("%H:%M") < self.entry_time:
             return
 
         expiries = self.helper.get_expiries("NIFTY")
@@ -771,6 +775,8 @@ Examples:
     p.add_argument("--roll-down-delta", type=float, default=0.08)
     p.add_argument("--premium-symmetry-min", type=float, default=0.80)
     p.add_argument("--entry-weekday", type=int, default=2, help="0=Mon .. 6=Sun (default 2=Wed)")
+    p.add_argument("--entry-time", default="09:20", metavar="HH:MM",
+                   help="no entry attempted before this time on the entry weekday")
     p.add_argument("--exit-weekday", type=int, default=1, help="0=Mon .. 6=Sun (default 1=Tue)")
     p.add_argument("--exit-time", default="15:15", metavar="HH:MM")
     p.add_argument("--poll-interval", type=int, default=60, metavar="SECS")
@@ -790,7 +796,7 @@ Examples:
     logger.info(f"  Broker      : {args.broker}")
     logger.info(f"  Sizing      : {'fixed ' + str(args.lots) + ' lot(s)' if args.lots else f'auto (target Rs {args.target_capital:,.0f})'}")
     logger.info(f"  Entry delta : {args.entry_delta}  Roll up/down: {args.roll_up_delta}/{args.roll_down_delta}")
-    logger.info(f"  Schedule    : entry weekday {args.entry_weekday}, exit weekday {args.exit_weekday} @ {args.exit_time}")
+    logger.info(f"  Schedule    : entry weekday {args.entry_weekday} @ {args.entry_time}, exit weekday {args.exit_weekday} @ {args.exit_time}")
     logger.info("=" * 60)
 
     strat = NiftyDeltaStrangle(
@@ -805,6 +811,7 @@ Examples:
         roll_down_delta=args.roll_down_delta,
         premium_symmetry_min=args.premium_symmetry_min,
         entry_weekday=args.entry_weekday,
+        entry_time=args.entry_time,
         exit_weekday=args.exit_weekday,
         exit_time=args.exit_time,
         poll_interval=args.poll_interval,

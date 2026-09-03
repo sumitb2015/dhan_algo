@@ -235,6 +235,7 @@ function StrategyRowWide({ meta, state, onRefresh, instanceId, onAddInstance, on
   const [dsRollDownDelta, setDsRollDownDelta] = useState(0.08);
   const [dsPremiumSymmetryMin, setDsPremiumSymmetryMin] = useState(0.80);
   const [dsEntryWeekday, setDsEntryWeekday] = useState(2);
+  const [dsEntryTime, setDsEntryTime] = useState('09:20');
   const [dsExitWeekday, setDsExitWeekday] = useState(1);
   const [dsExitTime, setDsExitTime] = useState('15:15');
   const [dsPollInterval, setDsPollInterval] = useState(60);
@@ -468,6 +469,7 @@ function StrategyRowWide({ meta, state, onRefresh, instanceId, onAddInstance, on
         args.push('--roll-down-delta', String(dsRollDownDelta));
         args.push('--premium-symmetry-min', String(dsPremiumSymmetryMin));
         args.push('--entry-weekday', String(dsEntryWeekday));
+        args.push('--entry-time', dsEntryTime);
         args.push('--exit-weekday', String(dsExitWeekday));
         args.push('--exit-time', dsExitTime);
         args.push('--poll-interval', String(dsPollInterval));
@@ -1178,6 +1180,10 @@ function StrategyRowWide({ meta, state, onRefresh, instanceId, onAddInstance, on
                   ))}
                 </SelectContent>
               </Select>
+            </div>
+            <div className={fieldCls}>
+              <FieldLabel text="Entry Time" tip="No entry attempted before this time (HH:MM IST) on Entry Weekday, even if the market is open." />
+              <Input type="text" value={dsEntryTime} onChange={e => setDsEntryTime(e.target.value)} placeholder="09:20" className={inputCls} style={{ width: 72 }} />
             </div>
             <div className={fieldCls}>
               <FieldLabel text="Exit Weekday" tip="Weekday both legs are bought back and the strategy goes idle. Default Tuesday." />
