@@ -17,6 +17,8 @@ import {
   LayoutGrid,
   Table as TableIcon,
   Filter,
+  CalendarClock,
+  Target,
 } from 'lucide-react';
 import type {
   StrategyType,
@@ -53,11 +55,17 @@ export default function ScannerStep({
   onScanDataDate,
 }: ScannerStepProps) {
   // ── Filters State ───────────────────────────────────────────────────
-  const [underlying, setUnderlying] = useState<UnderlyingType | 'ALL'>('ALL');
+  // Nifty and Sensex trade different weekly/monthly expiry calendars, so the
+  // scanner works one contract (underlying + expiry) at a time rather than a
+  // combined "Nifty + Sensex" scan.
+  const [underlying, setUnderlying] = useState<UnderlyingType>('NIFTY');
+  const [expiry, setExpiry] = useState<string>('');
+  const [expiryOptions, setExpiryOptions] = useState<string[]>([]);
+  const [expiryLoading, setExpiryLoading] = useState(false);
   // Default to 1.0% min RoM to accommodate current 11.34 VIX environment
   const [minRom, setMinRom] = useState<number>(1.0);
   const [minDistancePct, setMinDistancePct] = useState<number>(0.5);
-  const [maxDistancePct, setMaxDistancePct] = useState<number>(6.0);
+  const [maxDistancePct, setMaxDistancePct] = useState<number>(5.0);
   const [riskProfile, setRiskProfile] = useState<RiskProfile>('all');
   
   // Strategy filter: 'ALL' or specific strategy ID array
@@ -87,6 +95,7 @@ export default function ScannerStep({
 
       const payload: Partial<ScanFilters> = {
         underlying,
+        expiry: expiry || undefined,
         minRom: targetRom,
         minDistancePct,
         maxDistancePct,
@@ -118,7 +127,25 @@ export default function ScannerStep({
     } finally {
       if (requestId === scanRequestId.current) setLoading(false);
     }
-  }, [underlying, minRom, minDistancePct, maxDistancePct, riskProfile, sortBy, onScanDataDate]);
+  }, [underlying, expiry, minRom, minDistancePct, maxDistancePct, riskProfile, sortBy, onScanDataDate]);
+
+  // Fetch the available expiries whenever the underlying changes (Nifty and
+  // Sensex trade different expiry calendars) and default to the nearest one.
+  useEffect(() => {
+    let cancelled = false;
+    setExpiryLoading(true);
+    fetch(`/api/ultimate-scanner/expiries?underlying=${underlying}`)
+      .then(res => res.json())
+      .then((data: { success: boolean; expiries?: string[] }) => {
+        if (cancelled) return;
+        const list = Array.isArray(data.expiries) ? data.expiries : [];
+        setExpiryOptions(list);
+        setExpiry(prev => (list.includes(prev) ? prev : (list[0] ?? '')));
+      })
+      .catch(() => { if (!cancelled) setExpiryOptions([]); })
+      .finally(() => { if (!cancelled) setExpiryLoading(false); });
+    return () => { cancelled = true; };
+  }, [underlying]);
 
   // Initial scan on mount
   useEffect(() => {
@@ -174,30 +201,27 @@ export default function ScannerStep({
           </span>
         </div>
 
-        {/* Spot Tickers Card */}
+        {/* Active Contract Card */}
         <div className="bg-zinc-900/80 border border-zinc-800 rounded-2xl p-4 flex items-center justify-between">
           <div className="flex items-center gap-3">
             <div className="w-10 h-10 rounded-xl bg-emerald-500/10 border border-emerald-500/20 flex items-center justify-center">
               <TrendingUp className="w-5 h-5 text-emerald-400" />
             </div>
             <div>
-              <p className="text-[10px] font-bold text-zinc-500 uppercase tracking-wider">Spot Prices</p>
-              <div className="flex items-center gap-3 mt-0.5">
-                <div className="text-xs font-medium">
-                  <span className="text-zinc-400">NIFTY: </span>
-                  <span className="text-white font-bold tabular-nums">
-                    {scanResult?.spotPrices?.NIFTY ? scanResult.spotPrices.NIFTY.toLocaleString('en-IN') : '23,873'}
-                  </span>
-                </div>
-                <div className="text-xs font-medium">
-                  <span className="text-zinc-400">SENSEX: </span>
-                  <span className="text-white font-bold tabular-nums">
-                    {scanResult?.spotPrices?.SENSEX ? scanResult.spotPrices.SENSEX.toLocaleString('en-IN') : '78,200'}
-                  </span>
-                </div>
+              <p className="text-[10px] font-bold text-zinc-500 uppercase tracking-wider">Active Contract</p>
+              <div className="flex items-baseline gap-2">
+                <span className="text-xl font-bold text-white tabular-nums">
+                  {scanResult?.spotPrices?.[underlying]
+                    ? scanResult.spotPrices[underlying].toLocaleString('en-IN')
+                    : '—'}
+                </span>
+                <span className="text-xs font-semibold text-zinc-400">{underlying}</span>
               </div>
             </div>
           </div>
+          <span className="px-2.5 py-1 text-[11px] font-bold rounded-lg bg-emerald-500/15 text-emerald-300 border border-emerald-500/30 font-mono">
+            {expiry || (expiryLoading ? 'Loading…' : '—')}
+          </span>
         </div>
 
         {/* Process Status & Watchlist Link */}
@@ -229,7 +253,11 @@ export default function ScannerStep({
             <Sliders className="w-5 h-5 text-emerald-400" />
             <h2 className="text-sm font-bold text-white tracking-wide">Scanner Preferences &amp; Risk Sizing</h2>
           </div>
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-3">
+            <span className="text-[10px] font-mono text-zinc-500">
+              Scanning <span className="text-zinc-300 font-bold">{underlying}</span>
+              {expiry && <> expiring <span className="text-zinc-300 font-bold">{expiry}</span></>}
+            </span>
             <button
               onClick={() => handleRunScan()}
               disabled={loading}
@@ -243,13 +271,14 @@ export default function ScannerStep({
 
         {/* Filters Grid */}
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-5">
-          {/* 1. Underlying Selector */}
+          {/* 1. Contract Selection: Underlying + Expiry */}
           <div className="flex flex-col gap-1.5">
-            <label className="text-[11px] font-bold text-zinc-400 uppercase tracking-wider">
-              Index Underlying
+            <label className="text-[11px] font-bold text-zinc-400 uppercase tracking-wider flex items-center gap-1.5">
+              <CalendarClock className="w-3.5 h-3.5 text-emerald-400" />
+              Contract
             </label>
             <div className="flex items-center gap-1 bg-zinc-950 border border-zinc-800 p-1 rounded-xl">
-              {(['ALL', 'NIFTY', 'SENSEX'] as const).map(u => (
+              {(['NIFTY', 'SENSEX'] as const).map(u => (
                 <button
                   key={u}
                   onClick={() => setUnderlying(u)}
@@ -259,10 +288,23 @@ export default function ScannerStep({
                       : 'text-zinc-400 hover:text-white'
                   }`}
                 >
-                  {u === 'ALL' ? 'Nifty + Sensex' : u}
+                  {u}
                 </button>
               ))}
             </div>
+            <select
+              value={expiry}
+              onChange={e => setExpiry(e.target.value)}
+              disabled={expiryLoading || expiryOptions.length === 0}
+              className="w-full bg-zinc-950 border border-zinc-800 text-white rounded-xl px-2.5 py-1.5 text-xs font-mono focus:outline-none focus:border-emerald-500 disabled:opacity-50 disabled:cursor-wait"
+            >
+              {expiryOptions.length === 0 && (
+                <option value="">{expiryLoading ? 'Loading expiries…' : 'No expiries found'}</option>
+              )}
+              {expiryOptions.map(exp => (
+                <option key={exp} value={exp}>{exp}</option>
+              ))}
+            </select>
           </div>
 
           {/* 2. Return on Margin (RoM %) Slider */}
@@ -301,39 +343,48 @@ export default function ScannerStep({
             </div>
           </div>
 
-          {/* 3. Distance Threshold (% OTM) Slider */}
-          <div className="flex flex-col gap-1.5">
+          {/* 3. Distance Threshold (% OTM) — Min & Max */}
+          <div className="flex flex-col gap-2">
             <div className="flex items-center justify-between">
-              <label className="text-[11px] font-bold text-zinc-400 uppercase tracking-wider">
+              <label className="text-[11px] font-bold text-zinc-400 uppercase tracking-wider flex items-center gap-1.5">
+                <Target className="w-3.5 h-3.5 text-cyan-400" />
                 Distance Threshold
               </label>
               <span className="text-xs font-bold text-cyan-400 tabular-nums bg-cyan-500/10 px-2 py-0.5 rounded border border-cyan-500/20">
-                {minDistancePct.toFixed(1)}% - {maxDistancePct.toFixed(1)}% OTM
+                {minDistancePct.toFixed(1)}% – {maxDistancePct.toFixed(1)}% OTM
               </span>
             </div>
-            <input
-              type="range"
-              min="0.2"
-              max="5.0"
-              step="0.3"
-              value={minDistancePct}
-              onChange={e => setMinDistancePct(parseFloat(e.target.value))}
-              className="w-full accent-cyan-500 cursor-pointer h-1.5 bg-zinc-800 rounded-lg mt-1"
-            />
-            <div className="flex justify-between items-center gap-1 mt-1">
-              {[0.2, 0.5, 1.0, 2.0].map(val => (
-                <button
-                  key={val}
-                  onClick={() => setMinDistancePct(val)}
-                  className={`px-1.5 py-0.5 rounded text-[10px] font-mono border transition-all ${
-                    minDistancePct === val
-                      ? 'bg-cyan-500/20 text-cyan-400 border-cyan-500/40'
-                      : 'bg-zinc-950 text-zinc-500 border-zinc-800 hover:text-zinc-300'
-                  }`}
-                >
-                  &ge;{val}% OTM
-                </button>
-              ))}
+            <div className="flex flex-col gap-1">
+              <span className="text-[9px] text-zinc-500">Min</span>
+              <input
+                type="range"
+                min="0.2"
+                max="4.5"
+                step="0.3"
+                value={minDistancePct}
+                onChange={e => {
+                  const v = parseFloat(e.target.value);
+                  setMinDistancePct(v);
+                  if (v > maxDistancePct) setMaxDistancePct(v);
+                }}
+                className="w-full accent-cyan-500 cursor-pointer h-1.5 bg-zinc-800 rounded-lg"
+              />
+            </div>
+            <div className="flex flex-col gap-1">
+              <span className="text-[9px] text-zinc-500">Max</span>
+              <input
+                type="range"
+                min="1.0"
+                max="5.0"
+                step="0.5"
+                value={maxDistancePct}
+                onChange={e => {
+                  const v = parseFloat(e.target.value);
+                  setMaxDistancePct(v);
+                  if (v < minDistancePct) setMinDistancePct(v);
+                }}
+                className="w-full accent-cyan-500 cursor-pointer h-1.5 bg-zinc-800 rounded-lg"
+              />
             </div>
           </div>
 
@@ -499,7 +550,7 @@ export default function ScannerStep({
             In low VIX regimes (11.34), option premiums are tighter. Try setting Min RoM to &ge;0.5% or 1.0%, or lowering the distance threshold to 0.5% OTM.
           </p>
           <button
-            onClick={() => { setMinRom(0.5); setMinDistancePct(0.5); handleRunScan(0.5); }}
+            onClick={() => { setMinRom(0.5); setMinDistancePct(0.2); setMaxDistancePct(5.0); handleRunScan(0.5); }}
             className="mt-2 px-4 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold"
           >
             Auto-Tune for Low VIX (&ge;0.5% RoM)

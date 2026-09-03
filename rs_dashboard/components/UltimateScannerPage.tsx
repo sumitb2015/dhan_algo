@@ -155,7 +155,7 @@ export default function UltimateScannerPage() {
 
       {/* ── Toast Notification ───────────────────────────────────────── */}
       {toast && (
-        <div className="fixed top-5 right-5 z-50 animate-bounce">
+        <div className="fixed top-5 right-5 z-50 animate-in fade-in slide-in-from-top-2 duration-300">
           <div
             className={`px-4 py-2.5 rounded-xl text-xs font-bold shadow-2xl flex items-center gap-2 border ${
               toast.type === 'success'
@@ -180,7 +180,7 @@ export default function UltimateScannerPage() {
           <div>
             <div className="flex items-center gap-2">
               <span className="text-[9px] font-bold text-emerald-500 uppercase tracking-[0.18em]">
-                Process Driven &bull; Options Strategy Discovery
+                Live Nifty &amp; Sensex Option-Chain Scanner
               </span>
               <span className="text-amber-300 font-bold uppercase tracking-wide text-[10px] bg-amber-500/10 px-2 py-0.5 rounded border border-amber-500/20">
                 DATA: {dataDate}

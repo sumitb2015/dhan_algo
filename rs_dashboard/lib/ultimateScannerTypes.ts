@@ -73,7 +73,7 @@ export interface WatchlistItem extends ScannedStrategy {
 }
 
 export interface ScanFilters {
-  underlying: UnderlyingType | 'ALL';
+  underlying: UnderlyingType;
   expiry?: string;
   minRom: number;              // Minimum RoM % (e.g. 1.5%)
   minDistancePct: number;      // Minimum distance from spot % (e.g. 1.0%)
