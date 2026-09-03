@@ -14,11 +14,13 @@ import {
   CheckCircle,
   ArrowRight,
   ShieldCheck,
+  BookOpen,
 } from 'lucide-react';
 import NavBar from './NavBar';
 import ScannerStep from './ultimateScanner/ScannerStep';
 import WatchlistStep from './ultimateScanner/WatchlistStep';
 import WorkflowGuideStep from './ultimateScanner/WorkflowGuideStep';
+import ReadmeModal from './ultimateScanner/ReadmeModal';
 import type {
   ScannedStrategy,
   WatchlistItem,
@@ -31,6 +33,7 @@ export default function UltimateScannerPage() {
   const [watchlist, setWatchlist] = useState<WatchlistItem[]>([]);
   const [toast, setToast] = useState<{ message: string; type: 'success' | 'info' | 'error' } | null>(null);
   const [dataDate, setDataDate] = useState<string>(() => new Date().toISOString().split('T')[0]);
+  const [showReadme, setShowReadme] = useState(false);
   const tradeInFlight = React.useRef(false);
 
   const showToast = (message: string, type: 'success' | 'info' | 'error' = 'success') => {
@@ -192,50 +195,62 @@ export default function UltimateScannerPage() {
           </div>
         </div>
 
-        {/* 3-Step Process Subpage Stepper */}
-        <div className="flex items-center gap-1 bg-zinc-900 border border-zinc-800 p-1 rounded-xl shadow-inner">
+        <div className="flex items-center gap-3">
           <button
-            onClick={() => setActiveTab('scanner')}
-            className={`flex items-center gap-2 px-3.5 py-1.5 rounded-lg text-xs font-bold transition-all ${
-              activeTab === 'scanner'
-                ? 'bg-emerald-600 text-white shadow-md shadow-emerald-900/40'
-                : 'text-zinc-400 hover:text-white'
-            }`}
+            onClick={() => setShowReadme(true)}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-zinc-900 hover:bg-zinc-800 border border-zinc-800 text-xs font-semibold text-zinc-300 hover:text-white transition-all"
           >
-            <Search className="w-3.5 h-3.5" />
-            <span>Step 1: Scanner</span>
+            <BookOpen className="w-3.5 h-3.5 text-emerald-400" />
+            Readme
           </button>
 
-          <button
-            onClick={() => setActiveTab('watchlist')}
-            className={`flex items-center gap-2 px-3.5 py-1.5 rounded-lg text-xs font-bold transition-all ${
-              activeTab === 'watchlist'
-                ? 'bg-emerald-600 text-white shadow-md shadow-emerald-900/40'
-                : 'text-zinc-400 hover:text-white'
-            }`}
-          >
-            <Eye className="w-3.5 h-3.5" />
-            <span>Step 2: Watchlist</span>
-            {watchlist.length > 0 && (
-              <span className="px-1.5 py-0.5 rounded-full text-[10px] bg-zinc-950 text-emerald-400 font-extrabold border border-emerald-500/30">
-                {watchlist.length}
-              </span>
-            )}
-          </button>
+          {/* 3-Step Process Subpage Stepper */}
+          <div className="flex items-center gap-1 bg-zinc-900 border border-zinc-800 p-1 rounded-xl shadow-inner">
+            <button
+              onClick={() => setActiveTab('scanner')}
+              className={`flex items-center gap-2 px-3.5 py-1.5 rounded-lg text-xs font-bold transition-all ${
+                activeTab === 'scanner'
+                  ? 'bg-emerald-600 text-white shadow-md shadow-emerald-900/40'
+                  : 'text-zinc-400 hover:text-white'
+              }`}
+            >
+              <Search className="w-3.5 h-3.5" />
+              <span>Step 1: Scanner</span>
+            </button>
 
-          <button
-            onClick={() => setActiveTab('guide')}
-            className={`flex items-center gap-2 px-3.5 py-1.5 rounded-lg text-xs font-bold transition-all ${
-              activeTab === 'guide'
-                ? 'bg-emerald-600 text-white shadow-md shadow-emerald-900/40'
-                : 'text-zinc-400 hover:text-white'
-            }`}
-          >
-            <HelpCircle className="w-3.5 h-3.5" />
-            <span>Process Guide</span>
-          </button>
+            <button
+              onClick={() => setActiveTab('watchlist')}
+              className={`flex items-center gap-2 px-3.5 py-1.5 rounded-lg text-xs font-bold transition-all ${
+                activeTab === 'watchlist'
+                  ? 'bg-emerald-600 text-white shadow-md shadow-emerald-900/40'
+                  : 'text-zinc-400 hover:text-white'
+              }`}
+            >
+              <Eye className="w-3.5 h-3.5" />
+              <span>Step 2: Watchlist</span>
+              {watchlist.length > 0 && (
+                <span className="px-1.5 py-0.5 rounded-full text-[10px] bg-zinc-950 text-emerald-400 font-extrabold border border-emerald-500/30">
+                  {watchlist.length}
+                </span>
+              )}
+            </button>
+
+            <button
+              onClick={() => setActiveTab('guide')}
+              className={`flex items-center gap-2 px-3.5 py-1.5 rounded-lg text-xs font-bold transition-all ${
+                activeTab === 'guide'
+                  ? 'bg-emerald-600 text-white shadow-md shadow-emerald-900/40'
+                  : 'text-zinc-400 hover:text-white'
+              }`}
+            >
+              <HelpCircle className="w-3.5 h-3.5" />
+              <span>Process Guide</span>
+            </button>
+          </div>
         </div>
       </div>
+
+      {showReadme && <ReadmeModal onClose={() => setShowReadme(false)} />}
 
       {/* ── Main Tab Content ─────────────────────────────────────────── */}
       <main className="flex-1 flex flex-col px-6 py-6 max-w-7xl mx-auto w-full">
