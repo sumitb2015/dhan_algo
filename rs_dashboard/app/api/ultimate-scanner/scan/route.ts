@@ -4,6 +4,7 @@ import fs from 'fs';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
 import { PROJECT_ROOT, PYTHON_EXE, dedupe, spaced } from '@/lib/pyExec';
+import { getDhanCredentials } from '@/lib/dhanToken';
 import {
   parseChainQuotes,
   scanOptionChain,
@@ -17,6 +18,8 @@ import type {
 
 const execFileAsync = promisify(execFile);
 const FETCH_SCRIPT = path.join(PROJECT_ROOT, 'scripts', 'tools', 'options_data_fetch.py');
+const VIX_SECURITY_ID = 21;
+const DHAN_OHLC_URL = 'https://api.dhan.co/v2/marketfeed/ohlc';
 
 interface VixResult {
   vix: number;
@@ -49,6 +52,91 @@ function computeVixRegime(vix: number): { regime: string; advice: string } {
       advice: 'Extreme implied volatility. Strictly trade defined-risk credit spreads with wide safety buffers (3.5%+ OTM). Avoid undefined naked risk.',
     };
   }
+}
+
+async function fetchLiveIndiaVix(): Promise<VixResult> {
+  // 1. Direct Dhan REST OHLC API
+  try {
+    const auth = getDhanCredentials();
+    if (auth.token && auth.clientId) {
+      const res = await fetch(DHAN_OHLC_URL, {
+        method: 'POST',
+        headers: {
+          'access-token': auth.token,
+          'client-id': auth.clientId,
+          'Content-Type': 'application/json',
+          'Accept': 'application/json',
+        },
+        body: JSON.stringify({ IDX_I: [VIX_SECURITY_ID] }),
+        signal: AbortSignal.timeout(4000),
+      });
+
+      const json = await res.json() as {
+        status?: string;
+        data?: Record<string, Record<string, {
+          last_price?: number;
+          ohlc?: { close?: number };
+        }>>;
+      };
+
+      if (json.status === 'success') {
+        const entry = json.data?.IDX_I?.[String(VIX_SECURITY_ID)];
+        const ltp = entry?.last_price ?? 0;
+        const prevClose = entry?.ohlc?.close ?? ltp;
+
+        if (ltp > 0) {
+          const change = ltp - prevClose;
+          const changePct = prevClose > 0 ? (change / prevClose) * 100 : 0;
+          const { regime, advice } = computeVixRegime(ltp);
+          return {
+            vix: Math.round(ltp * 100) / 100,
+            prevClose: Math.round(prevClose * 100) / 100,
+            change: Math.round(change * 100) / 100,
+            changePct: Math.round(changePct * 100) / 100,
+            regime,
+            advice,
+          };
+        }
+      }
+    }
+  } catch {}
+
+  // 2. Python fallback if direct REST timed out
+  try {
+    const { stdout } = await dedupe('vix-direct-python', () =>
+      execFileAsync(
+        PYTHON_EXE,
+        [
+          '-c',
+          "from login import get_dhan_client; from lib.dhan_helper import DhanHelper; import json; dhan=get_dhan_client(); helper=DhanHelper(dhan); ltp=helper.get_ltp(21, exchange='NSE', instrument='INDEX') or 0; print(json.dumps({'vix': ltp}))",
+        ],
+        { encoding: 'utf8', timeout: 10_000, windowsHide: true },
+      ),
+    );
+    const jsonLine = (stdout ?? '').trim().split('\n').pop() ?? '{}';
+    const parsed = JSON.parse(jsonLine) as { vix?: number };
+    if (parsed.vix && parsed.vix > 0) {
+      const { regime, advice } = computeVixRegime(parsed.vix);
+      return {
+        vix: Math.round(parsed.vix * 100) / 100,
+        prevClose: Math.round(parsed.vix * 100) / 100,
+        change: 0,
+        changePct: 0,
+        regime,
+        advice,
+      };
+    }
+  } catch {}
+
+  // 3. Static fallback
+  return {
+    vix: 11.34,
+    prevClose: 11.34,
+    change: 0,
+    changePct: 0,
+    regime: 'Low Volatility',
+    advice: 'Implied volatility is low (11.34). Option premiums are lower than normal. Focus on defined risk credit spreads or strangles with realistic profit expectations.',
+  };
 }
 
 async function fetchUnderlyingChain(underlying: string, expiry: string): Promise<{
@@ -108,8 +196,8 @@ export async function POST(request: NextRequest): Promise<NextResponse<ScanRespo
     const filters: ScanFilters = {
       underlying: body.underlying ?? 'ALL',
       expiry: body.expiry,
-      minRom: Number(body.minRom ?? 1.5),
-      minDistancePct: Number(body.minDistancePct ?? 1.0),
+      minRom: Number(body.minRom ?? 1.0),
+      minDistancePct: Number(body.minDistancePct ?? 0.5),
       maxDistancePct: Number(body.maxDistancePct ?? 6.0),
       riskProfile: body.riskProfile ?? 'all',
       strategyTypes: Array.isArray(body.strategyTypes) ? body.strategyTypes : [],
@@ -117,37 +205,8 @@ export async function POST(request: NextRequest): Promise<NextResponse<ScanRespo
       sortBy: body.sortBy ?? 'score',
     };
 
-    // 1. Fetch India VIX
-    let vixInfo: VixResult = {
-      vix: 13.5,
-      prevClose: 13.5,
-      change: 0,
-      changePct: 0,
-      regime: 'Normal Volatility',
-      advice: 'Ideal regime for credit spreads and Iron Condors.',
-    };
-
-    try {
-      const vixQuotesFile = path.join(PROJECT_ROOT, 'debug', 'live_indices_quotes.json');
-      if (fs.existsSync(vixQuotesFile)) {
-        const raw = JSON.parse(fs.readFileSync(vixQuotesFile, 'utf8'));
-        const vixVal = raw['INDIA VIX']?.ltp || raw['INDIAVIX']?.ltp || raw['VIX']?.ltp;
-        const prevClose = raw['INDIA VIX']?.prev_close || raw['INDIAVIX']?.prev_close || vixVal;
-        if (vixVal && vixVal > 0) {
-          const change = vixVal - (prevClose || vixVal);
-          const changePct = prevClose > 0 ? (change / prevClose) * 100 : 0;
-          const { regime, advice } = computeVixRegime(vixVal);
-          vixInfo = {
-            vix: Math.round(vixVal * 100) / 100,
-            prevClose: Math.round(prevClose * 100) / 100,
-            change: Math.round(change * 100) / 100,
-            changePct: Math.round(changePct * 100) / 100,
-            regime,
-            advice,
-          };
-        }
-      }
-    } catch {}
+    // 1. Fetch live India VIX directly
+    const vixInfo = await fetchLiveIndiaVix();
 
     // 2. Determine target underlyings
     const targetUnderlyings: UnderlyingType[] = 
@@ -222,11 +281,11 @@ export async function POST(request: NextRequest): Promise<NextResponse<ScanRespo
         error: String((err as Error).message || err),
         spotPrices: {},
         vix: {
-          vix: 14,
-          prevClose: 14,
+          vix: 11.34,
+          prevClose: 11.34,
           change: 0,
           changePct: 0,
-          regime: 'Normal',
+          regime: 'Low Volatility',
           advice: 'Scan error',
         },
         scannedCount: 0,

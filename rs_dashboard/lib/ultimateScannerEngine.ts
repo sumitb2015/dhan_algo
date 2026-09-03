@@ -140,7 +140,7 @@ export function estimatePopAndDelta(
   ivPct: number,
   isCall: boolean,
 ): { delta: number; popOtm: number } {
-  const iv = (ivPct > 0 ? ivPct : 14) / 100;
+  const iv = (ivPct > 0 ? ivPct : 12) / 100;
   const t = Math.max(0.01, dte / 365);
   const sigmaRootT = iv * Math.sqrt(t);
   
@@ -152,7 +152,6 @@ export function estimatePopAndDelta(
   const d1 = (Math.log(spot / strike) + (0.065 + 0.5 * iv * iv) * t) / sigmaRootT;
   const d2 = d1 - sigmaRootT;
 
-  // Standard Normal CDF approximation
   const normalCdf = (x: number) => {
     const a1 = 0.254829592, a2 = -0.284496736, a3 = 1.421413741, a4 = -1.453152027, a5 = 1.061405429;
     const p = 0.3275911;
@@ -184,7 +183,7 @@ export function scanOptionChain(
   chainQuotes: Record<number, ChainStrikeQuote>,
   strikes: number[],
   filters: ScanFilters,
-  vix = 14,
+  vix = 11.34,
 ): ScannedStrategy[] {
   if (!spot || spot <= 0 || strikes.length < 5) return [];
 
@@ -197,7 +196,7 @@ export function scanOptionChain(
   );
 
   const selectedStrats = new Set(filters.strategyTypes);
-  const scanAll = selectedStrats.size === 0;
+  const scanAll = selectedStrats.size === 0 || selectedStrats.has('all' as StrategyType);
 
   // Wing width configurations based on underlying
   const spreadWings = underlying === 'NIFTY' ? [50, 100, 150, 200] : [100, 200, 300, 400];
@@ -224,7 +223,7 @@ export function scanOptionChain(
 
     for (const shortStrike of putStrikes) {
       const shortQuote = chainQuotes[shortStrike]?.pe;
-      if (!shortQuote || shortQuote.ltp <= 1.0) continue;
+      if (!shortQuote || shortQuote.ltp <= 0.8) continue;
 
       const distPts = spot - shortStrike;
       const distPct = (distPts / spot) * 100;
@@ -235,23 +234,20 @@ export function scanOptionChain(
         if (!longQuote || longQuote.ltp <= 0.05) continue;
 
         const netCreditPts = shortQuote.ltp - longQuote.ltp;
-        if (netCreditPts <= 0.5) continue;
+        if (netCreditPts <= 0.4) continue;
 
         const netPremiumTotal = netCreditPts * lotSize;
         const maxLossPts = wing - netCreditPts;
         const maxLossTotal = maxLossPts * lotSize;
         
-        // Margin for hedged credit spread ~ ₹24k - ₹35k depending on wing
-        const estMargin = Math.max(18000, wing * lotSize * 0.95 + 5000);
+        const estMargin = Math.max(18000, wing * lotSize * 0.95 + 4000);
         const romPct = (netPremiumTotal / estMargin) * 100;
         const romAnnualizedPct = (romPct / Math.max(1, dte)) * 365;
 
         const { delta, popOtm } = estimatePopAndDelta(spot, shortStrike, dte, shortQuote.iv || vix, false);
         const pop = Math.min(96, Math.max(50, popOtm));
         const riskTier = pop >= 78 ? 'Conservative' : pop >= 65 ? 'Moderate' : 'Aggressive';
-        
-        // Composite score
-        const score = Math.round(Math.min(100, (romPct * 4.5) + (pop * 0.4) + (distPct * 4)));
+        const score = Math.round(Math.min(100, (romPct * 5.0) + (pop * 0.4) + (distPct * 3)));
 
         evaluateCandidate({
           id: `bps_${underlying}_${shortStrike}_${longStrike}_${expiry}`,
@@ -296,7 +292,7 @@ export function scanOptionChain(
 
     for (const shortStrike of callStrikes) {
       const shortQuote = chainQuotes[shortStrike]?.ce;
-      if (!shortQuote || shortQuote.ltp <= 1.0) continue;
+      if (!shortQuote || shortQuote.ltp <= 0.8) continue;
 
       const distPts = shortStrike - spot;
       const distPct = (distPts / spot) * 100;
@@ -307,20 +303,20 @@ export function scanOptionChain(
         if (!longQuote || longQuote.ltp <= 0.05) continue;
 
         const netCreditPts = shortQuote.ltp - longQuote.ltp;
-        if (netCreditPts <= 0.5) continue;
+        if (netCreditPts <= 0.4) continue;
 
         const netPremiumTotal = netCreditPts * lotSize;
         const maxLossPts = wing - netCreditPts;
         const maxLossTotal = maxLossPts * lotSize;
         
-        const estMargin = Math.max(18000, wing * lotSize * 0.95 + 5000);
+        const estMargin = Math.max(18000, wing * lotSize * 0.95 + 4000);
         const romPct = (netPremiumTotal / estMargin) * 100;
         const romAnnualizedPct = (romPct / Math.max(1, dte)) * 365;
 
         const { delta, popOtm } = estimatePopAndDelta(spot, shortStrike, dte, shortQuote.iv || vix, true);
         const pop = Math.min(96, Math.max(50, popOtm));
         const riskTier = pop >= 78 ? 'Conservative' : pop >= 65 ? 'Moderate' : 'Aggressive';
-        const score = Math.round(Math.min(100, (romPct * 4.5) + (pop * 0.4) + (distPct * 4)));
+        const score = Math.round(Math.min(100, (romPct * 5.0) + (pop * 0.4) + (distPct * 3)));
 
         evaluateCandidate({
           id: `bcs_${underlying}_${shortStrike}_${longStrike}_${expiry}`,
@@ -366,11 +362,11 @@ export function scanOptionChain(
 
     for (const shortPut of putCandidates) {
       const shortPutQuote = chainQuotes[shortPut]?.pe;
-      if (!shortPutQuote || shortPutQuote.ltp <= 1.5) continue;
+      if (!shortPutQuote || shortPutQuote.ltp <= 1.0) continue;
 
       for (const shortCall of callCandidates) {
         const shortCallQuote = chainQuotes[shortCall]?.ce;
-        if (!shortCallQuote || shortCallQuote.ltp <= 1.5) continue;
+        if (!shortCallQuote || shortCallQuote.ltp <= 1.0) continue;
 
         const putDistPct = ((spot - shortPut) / spot) * 100;
         const callDistPct = ((shortCall - spot) / spot) * 100;
@@ -388,17 +384,17 @@ export function scanOptionChain(
           const callCredit = shortCallQuote.ltp - longCallQuote.ltp;
           const totalCreditPts = putCredit + callCredit;
 
-          if (totalCreditPts <= 1.0) continue;
+          if (totalCreditPts <= 0.8) continue;
 
           const netPremiumTotal = totalCreditPts * lotSize;
           const maxLossTotal = (wing - totalCreditPts) * lotSize;
-          const estMargin = Math.max(30000, wing * lotSize * 1.1 + 8000);
+          const estMargin = Math.max(28000, wing * lotSize * 1.05 + 6000);
           const romPct = (netPremiumTotal / estMargin) * 100;
           const romAnnualizedPct = (romPct / Math.max(1, dte)) * 365;
 
           const pop = Math.min(94, Math.max(50, 100 - (totalCreditPts / wing) * 90));
           const riskTier = pop >= 75 ? 'Conservative' : pop >= 62 ? 'Moderate' : 'Aggressive';
-          const score = Math.round(Math.min(100, (romPct * 5.0) + (pop * 0.4) + (minDistPct * 5)));
+          const score = Math.round(Math.min(100, (romPct * 5.0) + (pop * 0.4) + (minDistPct * 4)));
 
           evaluateCandidate({
             id: `ic_${underlying}_${shortPut}_${shortCall}_${wing}_${expiry}`,
@@ -442,16 +438,75 @@ export function scanOptionChain(
   // 4. SHORT STRANGLE (OTM Naked Sell Both Sides)
   // ─────────────────────────────────────────────────────────────────
   if (scanAll || selectedStrats.has('short_strangle')) {
-    const putCandidates = strikes.filter(s => s < spot && s <= atmStrike - step);
-    const callCandidates = strikes.filter(s => s > spot && s >= atmStrike + step);
+    // 1) Systematic symmetric & near-symmetric strangles (1 to 10 strike steps away from ATM)
+    for (let offset = 1; offset <= 10; offset++) {
+      const shortPut = atmStrike - offset * step;
+      const shortCall = atmStrike + offset * step;
+
+      const shortPutQuote = chainQuotes[shortPut]?.pe;
+      const shortCallQuote = chainQuotes[shortCall]?.ce;
+      if (!shortPutQuote || !shortCallQuote || shortPutQuote.ltp <= 1.0 || shortCallQuote.ltp <= 1.0) continue;
+
+      const putDistPct = ((spot - shortPut) / spot) * 100;
+      const callDistPct = ((shortCall - spot) / spot) * 100;
+      const minDistPct = Math.min(putDistPct, callDistPct);
+
+      const totalCreditPts = shortPutQuote.ltp + shortCallQuote.ltp;
+      const netPremiumTotal = totalCreditPts * lotSize;
+      const estMargin = underlying === 'NIFTY' ? 120000 : underlying === 'SENSEX' ? 95000 : 130000;
+      const romPct = (netPremiumTotal / estMargin) * 100;
+      const romAnnualizedPct = (romPct / Math.max(1, dte)) * 365;
+
+      const pop = Math.min(94, Math.max(50, 88 - (1.0 / (minDistPct + 0.1)) * 10));
+      const riskTier = minDistPct >= 2.5 ? 'Conservative' : minDistPct >= 1.2 ? 'Moderate' : 'Aggressive';
+      const score = Math.round(Math.min(100, (romPct * 6.0) + (pop * 0.4) + (minDistPct * 5)));
+
+      evaluateCandidate({
+        id: `strangle_${underlying}_${shortPut}_${shortCall}_${expiry}`,
+        name: `Short Strangle (${shortPut} PE / ${shortCall} CE [±${offset * step}pts])`,
+        type: 'short_strangle',
+        underlying,
+        expiry,
+        dte,
+        spot,
+        legs: [
+          { strike: shortPut, option: 'PE', side: 'SELL', ltp: shortPutQuote.ltp, lots: 1, lotSize, securityId: shortPutQuote.securityId },
+          { strike: shortCall, option: 'CE', side: 'SELL', ltp: shortCallQuote.ltp, lots: 1, lotSize, securityId: shortCallQuote.securityId },
+        ],
+        netPremium: Math.round(netPremiumTotal),
+        netPremiumPoints: Math.round(totalCreditPts * 100) / 100,
+        estMargin: Math.round(estMargin),
+        romPct: Math.round(romPct * 100) / 100,
+        romAnnualizedPct: Math.round(romAnnualizedPct),
+        distancePct: Math.round(minDistPct * 100) / 100,
+        distancePoints: Math.round(Math.min(spot - shortPut, shortCall - spot)),
+        popPct: Math.round(pop),
+        maxProfit: Math.round(netPremiumTotal),
+        maxLoss: 0,
+        maxLossUnlimited: true,
+        riskRewardRatio: 0,
+        breakevens: [shortPut - totalCreditPts, shortCall + totalCreditPts],
+        deltaNet: 0.0,
+        sentiment: 'Range-Bound',
+        riskTier,
+        score,
+        createdAt: new Date().toISOString(),
+      });
+    }
+
+    // 2) Also scan cross-strike OTM combinations
+    const putCandidates = strikes.filter(s => s < spot && s <= atmStrike - step && s >= atmStrike - 12 * step);
+    const callCandidates = strikes.filter(s => s > spot && s >= atmStrike + step && s <= atmStrike + 12 * step);
 
     for (const shortPut of putCandidates) {
       const shortPutQuote = chainQuotes[shortPut]?.pe;
-      if (!shortPutQuote || shortPutQuote.ltp <= 2.0) continue;
+      if (!shortPutQuote || shortPutQuote.ltp <= 1.5) continue;
 
       for (const shortCall of callCandidates) {
+        if (Math.abs((spot - shortPut) - (shortCall - spot)) > 3 * step) continue; // Keep relatively balanced
+
         const shortCallQuote = chainQuotes[shortCall]?.ce;
-        if (!shortCallQuote || shortCallQuote.ltp <= 2.0) continue;
+        if (!shortCallQuote || shortCallQuote.ltp <= 1.5) continue;
 
         const putDistPct = ((spot - shortPut) / spot) * 100;
         const callDistPct = ((shortCall - spot) / spot) * 100;
@@ -464,8 +519,8 @@ export function scanOptionChain(
         const romAnnualizedPct = (romPct / Math.max(1, dte)) * 365;
 
         const pop = Math.min(92, Math.max(50, 85 - (1.0 / (minDistPct + 0.1)) * 10));
-        const riskTier = minDistPct >= 3.0 ? 'Moderate' : 'Aggressive';
-        const score = Math.round(Math.min(100, (romPct * 4.0) + (pop * 0.3) + (minDistPct * 5)));
+        const riskTier = minDistPct >= 2.5 ? 'Conservative' : minDistPct >= 1.2 ? 'Moderate' : 'Aggressive';
+        const score = Math.round(Math.min(100, (romPct * 5.0) + (pop * 0.3) + (minDistPct * 5)));
 
         evaluateCandidate({
           id: `strangle_${underlying}_${shortPut}_${shortCall}_${expiry}`,
@@ -503,14 +558,67 @@ export function scanOptionChain(
   }
 
   // ─────────────────────────────────────────────────────────────────
-  // 5. NAKED PUT / CASH SECURED PUT (CSP)
+  // 5. SHORT STRADDLE (ATM Naked Sell)
+  // ─────────────────────────────────────────────────────────────────
+  if (scanAll || selectedStrats.has('short_straddle')) {
+    const atmCandidates = [atmStrike - step, atmStrike, atmStrike + step].filter(s => chainQuotes[s]);
+    for (const straddleStrike of atmCandidates) {
+      const q = chainQuotes[straddleStrike];
+      if (!q || !q.ce?.ltp || !q.pe?.ltp) continue;
+
+      const totalCreditPts = q.ce.ltp + q.pe.ltp;
+      const netPremiumTotal = totalCreditPts * lotSize;
+      const estMargin = underlying === 'NIFTY' ? 125000 : 98000;
+      const romPct = (netPremiumTotal / estMargin) * 100;
+      const romAnnualizedPct = (romPct / Math.max(1, dte)) * 365;
+      const distPct = (Math.abs(spot - straddleStrike) / spot) * 100;
+
+      const pop = 58;
+      const score = Math.round(Math.min(100, (romPct * 4.0) + 40));
+
+      evaluateCandidate({
+        id: `straddle_${underlying}_${straddleStrike}_${expiry}`,
+        name: `Short Straddle (${straddleStrike} CE + PE)`,
+        type: 'short_straddle',
+        underlying,
+        expiry,
+        dte,
+        spot,
+        legs: [
+          { strike: straddleStrike, option: 'PE', side: 'SELL', ltp: q.pe.ltp, lots: 1, lotSize, securityId: q.pe.securityId },
+          { strike: straddleStrike, option: 'CE', side: 'SELL', ltp: q.ce.ltp, lots: 1, lotSize, securityId: q.ce.securityId },
+        ],
+        netPremium: Math.round(netPremiumTotal),
+        netPremiumPoints: Math.round(totalCreditPts * 100) / 100,
+        estMargin: Math.round(estMargin),
+        romPct: Math.round(romPct * 100) / 100,
+        romAnnualizedPct: Math.round(romAnnualizedPct),
+        distancePct: Math.round(distPct * 100) / 100,
+        distancePoints: Math.round(Math.abs(spot - straddleStrike)),
+        popPct: pop,
+        maxProfit: Math.round(netPremiumTotal),
+        maxLoss: 0,
+        maxLossUnlimited: true,
+        riskRewardRatio: 0,
+        breakevens: [straddleStrike - totalCreditPts, straddleStrike + totalCreditPts],
+        deltaNet: 0.0,
+        sentiment: 'Range-Bound',
+        riskTier: 'Aggressive',
+        score,
+        createdAt: new Date().toISOString(),
+      });
+    }
+  }
+
+  // ─────────────────────────────────────────────────────────────────
+  // 6. NAKED PUT / CASH SECURED PUT (CSP)
   // ─────────────────────────────────────────────────────────────────
   if (scanAll || selectedStrats.has('naked_put')) {
     const putStrikes = strikes.filter(s => s < spot && s <= atmStrike);
 
     for (const strike of putStrikes) {
       const quote = chainQuotes[strike]?.pe;
-      if (!quote || quote.ltp <= 2.0) continue;
+      if (!quote || quote.ltp <= 1.5) continue;
 
       const distPts = spot - strike;
       const distPct = (distPts / spot) * 100;
@@ -558,7 +666,7 @@ export function scanOptionChain(
   }
 
   // ─────────────────────────────────────────────────────────────────
-  // 6. JADE LIZARD
+  // 7. JADE LIZARD
   // ─────────────────────────────────────────────────────────────────
   if (scanAll || selectedStrats.has('jade_lizard')) {
     const putStrikes = strikes.filter(s => s < spot && s <= atmStrike - step);
@@ -566,11 +674,11 @@ export function scanOptionChain(
 
     for (const shortPut of putStrikes) {
       const shortPutQuote = chainQuotes[shortPut]?.pe;
-      if (!shortPutQuote || shortPutQuote.ltp <= 2.0) continue;
+      if (!shortPutQuote || shortPutQuote.ltp <= 1.5) continue;
 
       for (const shortCall of callStrikes) {
         const shortCallQuote = chainQuotes[shortCall]?.ce;
-        if (!shortCallQuote || shortCallQuote.ltp <= 2.0) continue;
+        if (!shortCallQuote || shortCallQuote.ltp <= 1.5) continue;
 
         for (const wing of spreadWings.slice(0, 2)) {
           const longCall = shortCall + wing;

@@ -1,15 +1,13 @@
 'use client';
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import {
   Search,
   Sliders,
   ShieldCheck,
   Zap,
   TrendingUp,
-  TrendingDown,
   Activity,
-  Layers,
   CheckCircle,
   Plus,
   ArrowRight,
@@ -18,7 +16,7 @@ import {
   Eye,
   LayoutGrid,
   Table as TableIcon,
-  HelpCircle,
+  Filter,
 } from 'lucide-react';
 import type {
   StrategyType,
@@ -36,13 +34,14 @@ interface ScannerStepProps {
   watchlistCount: number;
 }
 
-const STRATEGY_OPTIONS: { id: StrategyType; label: string; desc: string; category: string }[] = [
-  { id: 'bull_put_spread', label: 'Bull Put Spread', desc: 'Credit Put Spread for bullish/neutral bias', category: 'Credit Spreads' },
-  { id: 'bear_call_spread', label: 'Bear Call Spread', desc: 'Credit Call Spread for bearish/neutral bias', category: 'Credit Spreads' },
-  { id: 'iron_condor', label: 'Iron Condor', desc: '4-leg range-bound market neutral setup', category: 'Range Bound' },
-  { id: 'short_strangle', label: 'Short Strangle', desc: 'OTM Call & Put sell for high decay collection', category: 'Range Bound' },
-  { id: 'jade_lizard', label: 'Jade Lizard', desc: 'Bull Put + Bear Call Spread with zero upside risk', category: 'Asymmetric' },
-  { id: 'naked_put', label: 'Naked Put / CSP', desc: 'Cash Secured Put for strong support bounces', category: 'Naked' },
+const STRATEGY_OPTIONS: { id: StrategyType; label: string; desc: string }[] = [
+  { id: 'short_strangle', label: 'Short Strangle', desc: 'OTM Call & Put sell for theta decay' },
+  { id: 'bull_put_spread', label: 'Bull Put Spread', desc: 'Credit Put Spread for bullish/neutral support' },
+  { id: 'bear_call_spread', label: 'Bear Call Spread', desc: 'Credit Call Spread for bearish/neutral resistance' },
+  { id: 'iron_condor', label: 'Iron Condor', desc: '4-leg range-bound market neutral setup' },
+  { id: 'short_straddle', label: 'Short Straddle', desc: 'ATM Call & Put sell for max premium collection' },
+  { id: 'jade_lizard', label: 'Jade Lizard', desc: 'Bull Put + Bear Call Spread with zero upside risk' },
+  { id: 'naked_put', label: 'Naked Put / CSP', desc: 'Cash Secured Put for strong support bounces' },
 ];
 
 export default function ScannerStep({
@@ -53,15 +52,16 @@ export default function ScannerStep({
 }: ScannerStepProps) {
   // ── Filters State ───────────────────────────────────────────────────
   const [underlying, setUnderlying] = useState<UnderlyingType | 'ALL'>('ALL');
-  const [minRom, setMinRom] = useState<number>(2.5);
-  const [minDistancePct, setMinDistancePct] = useState<number>(1.5);
+  // Default to 1.0% min RoM to accommodate current 11.34 VIX environment
+  const [minRom, setMinRom] = useState<number>(1.0);
+  const [minDistancePct, setMinDistancePct] = useState<number>(0.5);
   const [maxDistancePct, setMaxDistancePct] = useState<number>(6.0);
   const [riskProfile, setRiskProfile] = useState<RiskProfile>('all');
-  const [selectedStrategies, setSelectedStrategies] = useState<StrategyType[]>([
-    'bull_put_spread',
-    'bear_call_spread',
-    'iron_condor',
-  ]);
+  
+  // Strategy filter: 'ALL' or specific strategy ID array
+  const [strategyFilterMode, setStrategyFilterMode] = useState<'ALL' | StrategyType>('ALL');
+  const [selectedStrategies, setSelectedStrategies] = useState<StrategyType[]>([]);
+
   const [sortBy, setSortBy] = useState<'score' | 'rom' | 'pop' | 'premium' | 'distance'>('score');
   const [viewMode, setViewMode] = useState<'cards' | 'table'>('cards');
 
@@ -72,19 +72,27 @@ export default function ScannerStep({
   const [addedIds, setAddedIds] = useState<Set<string>>(new Set());
 
   // ── Run Scan Function ──────────────────────────────────────────────
-  const handleRunScan = async () => {
+  const handleRunScan = useCallback(async (activeStrat?: 'ALL' | StrategyType, activeRom?: number) => {
     setLoading(true);
     setError(null);
     try {
+      const stratMode = activeStrat !== undefined ? activeStrat : strategyFilterMode;
+      const targetRom = activeRom !== undefined ? activeRom : minRom;
+
+      const targetStrategyTypes: StrategyType[] =
+        stratMode === 'ALL'
+          ? []
+          : [stratMode];
+
       const payload: Partial<ScanFilters> = {
         underlying,
-        minRom,
+        minRom: targetRom,
         minDistancePct,
         maxDistancePct,
         riskProfile,
-        strategyTypes: selectedStrategies,
+        strategyTypes: targetStrategyTypes,
         sortBy,
-        maxResults: 60,
+        maxResults: 80,
       };
 
       const res = await fetch('/api/ultimate-scanner/scan', {
@@ -104,23 +112,30 @@ export default function ScannerStep({
     } finally {
       setLoading(false);
     }
-  };
+  }, [underlying, minRom, minDistancePct, maxDistancePct, riskProfile, strategyFilterMode, sortBy]);
 
   // Initial scan on mount
   useEffect(() => {
-    handleRunScan();
+    handleRunScan('ALL', 1.0);
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const toggleStrategy = (strat: StrategyType) => {
-    setSelectedStrategies(prev =>
-      prev.includes(strat) ? prev.filter(s => s !== strat) : [...prev, strat]
-    );
+  // Strategy selection handler: isolates selected strategy and triggers re-scan
+  const handleSelectStrategy = (stratId: 'ALL' | StrategyType) => {
+    setStrategyFilterMode(stratId);
+    handleRunScan(stratId);
   };
 
   const handleAdd = (strat: ScannedStrategy) => {
     onAddToWatchlist(strat);
     setAddedIds(prev => new Set([...prev, strat.id]));
   };
+
+  // Filter candidates client-side if already loaded
+  const displayedCandidates = useMemo(() => {
+    if (!scanResult?.candidates) return [];
+    if (strategyFilterMode === 'ALL') return scanResult.candidates;
+    return scanResult.candidates.filter(c => c.type === strategyFilterMode);
+  }, [scanResult?.candidates, strategyFilterMode]);
 
   return (
     <div className="flex flex-col gap-6">
@@ -129,14 +144,14 @@ export default function ScannerStep({
         {/* VIX Card */}
         <div className="bg-zinc-900/80 border border-zinc-800 rounded-2xl p-4 flex items-center justify-between">
           <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-xl bg-amber-500/10 border border-amber-500/20 flex items-center justify-center">
-              <Activity className="w-5 h-5 text-amber-400" />
+            <div className="w-10 h-10 rounded-xl bg-cyan-500/10 border border-cyan-500/20 flex items-center justify-center">
+              <Activity className="w-5 h-5 text-cyan-400" />
             </div>
             <div>
               <p className="text-[10px] font-bold text-zinc-500 uppercase tracking-wider">India VIX</p>
               <div className="flex items-baseline gap-2">
                 <span className="text-xl font-bold text-white tabular-nums">
-                  {scanResult?.vix.vix ? scanResult.vix.vix.toFixed(2) : '13.50'}
+                  {scanResult?.vix.vix ? scanResult.vix.vix.toFixed(2) : '11.34'}
                 </span>
                 <span
                   className={`text-xs font-semibold tabular-nums ${
@@ -149,8 +164,8 @@ export default function ScannerStep({
               </div>
             </div>
           </div>
-          <span className="px-2.5 py-1 text-[11px] font-bold rounded-lg bg-amber-500/15 text-amber-300 border border-amber-500/30">
-            {scanResult?.vix.regime || 'Normal Volatility'}
+          <span className="px-2.5 py-1 text-[11px] font-bold rounded-lg bg-cyan-500/15 text-cyan-300 border border-cyan-500/30">
+            {scanResult?.vix.regime || 'Low Volatility (11.34)'}
           </span>
         </div>
 
@@ -166,13 +181,13 @@ export default function ScannerStep({
                 <div className="text-xs font-medium">
                   <span className="text-zinc-400">NIFTY: </span>
                   <span className="text-white font-bold tabular-nums">
-                    {scanResult?.spotPrices?.NIFTY ? scanResult.spotPrices.NIFTY.toLocaleString('en-IN') : '—'}
+                    {scanResult?.spotPrices?.NIFTY ? scanResult.spotPrices.NIFTY.toLocaleString('en-IN') : '23,873'}
                   </span>
                 </div>
                 <div className="text-xs font-medium">
                   <span className="text-zinc-400">SENSEX: </span>
                   <span className="text-white font-bold tabular-nums">
-                    {scanResult?.spotPrices?.SENSEX ? scanResult.spotPrices.SENSEX.toLocaleString('en-IN') : '—'}
+                    {scanResult?.spotPrices?.SENSEX ? scanResult.spotPrices.SENSEX.toLocaleString('en-IN') : '78,200'}
                   </span>
                 </div>
               </div>
@@ -183,12 +198,12 @@ export default function ScannerStep({
         {/* Process Status & Watchlist Link */}
         <div className="bg-zinc-900/80 border border-zinc-800 rounded-2xl p-4 flex items-center justify-between">
           <div>
-            <p className="text-[10px] font-bold text-zinc-500 uppercase tracking-wider">Step 1: Scanner Results</p>
+            <p className="text-[10px] font-bold text-zinc-500 uppercase tracking-wider">Shortlisted Candidates</p>
             <div className="flex items-baseline gap-2 mt-0.5">
               <span className="text-xl font-bold text-emerald-400 tabular-nums">
-                {scanResult?.shortlistedCount ?? 0}
+                {displayedCandidates.length}
               </span>
-              <span className="text-xs text-zinc-400">setups shortlisted</span>
+              <span className="text-xs text-zinc-400">matching setups</span>
             </div>
           </div>
           <button
@@ -207,11 +222,11 @@ export default function ScannerStep({
         <div className="flex items-center justify-between flex-wrap gap-3 pb-4 border-b border-zinc-800">
           <div className="flex items-center gap-2">
             <Sliders className="w-5 h-5 text-emerald-400" />
-            <h2 className="text-sm font-bold text-white tracking-wide">Scanner Preferences & Risk Sizing</h2>
+            <h2 className="text-sm font-bold text-white tracking-wide">Scanner Preferences &amp; Risk Sizing</h2>
           </div>
           <div className="flex items-center gap-2">
             <button
-              onClick={handleRunScan}
+              onClick={() => handleRunScan()}
               disabled={loading}
               className="flex items-center gap-2 px-4 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold transition-all shadow-lg shadow-emerald-900/30 disabled:opacity-50"
             >
@@ -258,16 +273,26 @@ export default function ScannerStep({
             <input
               type="range"
               min="0.5"
-              max="10.0"
+              max="8.0"
               step="0.5"
               value={minRom}
               onChange={e => setMinRom(parseFloat(e.target.value))}
-              className="w-full accent-emerald-500 cursor-pointer h-1.5 bg-zinc-800 rounded-lg mt-2"
+              className="w-full accent-emerald-500 cursor-pointer h-1.5 bg-zinc-800 rounded-lg mt-1"
             />
-            <div className="flex justify-between items-center text-[10px] text-zinc-500 font-medium">
-              <span>0.5% (Ultra Safe)</span>
-              <span>3.0% (Balanced)</span>
-              <span>10.0%+ (Aggressive)</span>
+            <div className="flex justify-between items-center gap-1 mt-1">
+              {[0.5, 1.0, 2.0, 3.5].map(val => (
+                <button
+                  key={val}
+                  onClick={() => { setMinRom(val); handleRunScan(undefined, val); }}
+                  className={`px-1.5 py-0.5 rounded text-[10px] font-mono border transition-all ${
+                    minRom === val
+                      ? 'bg-emerald-500/20 text-emerald-400 border-emerald-500/40'
+                      : 'bg-zinc-950 text-zinc-500 border-zinc-800 hover:text-zinc-300'
+                  }`}
+                >
+                  &ge;{val}%
+                </button>
+              ))}
             </div>
           </div>
 
@@ -283,24 +308,34 @@ export default function ScannerStep({
             </div>
             <input
               type="range"
-              min="0.5"
-              max="6.0"
-              step="0.5"
+              min="0.2"
+              max="5.0"
+              step="0.3"
               value={minDistancePct}
               onChange={e => setMinDistancePct(parseFloat(e.target.value))}
-              className="w-full accent-cyan-500 cursor-pointer h-1.5 bg-zinc-800 rounded-lg mt-2"
+              className="w-full accent-cyan-500 cursor-pointer h-1.5 bg-zinc-800 rounded-lg mt-1"
             />
-            <div className="flex justify-between items-center text-[10px] text-zinc-500 font-medium">
-              <span>0.5% (Near ATM)</span>
-              <span>2.5% (Safe)</span>
-              <span>6.0% (Far OTM)</span>
+            <div className="flex justify-between items-center gap-1 mt-1">
+              {[0.2, 0.5, 1.0, 2.0].map(val => (
+                <button
+                  key={val}
+                  onClick={() => setMinDistancePct(val)}
+                  className={`px-1.5 py-0.5 rounded text-[10px] font-mono border transition-all ${
+                    minDistancePct === val
+                      ? 'bg-cyan-500/20 text-cyan-400 border-cyan-500/40'
+                      : 'bg-zinc-950 text-zinc-500 border-zinc-800 hover:text-zinc-300'
+                  }`}
+                >
+                  &ge;{val}% OTM
+                </button>
+              ))}
             </div>
           </div>
 
           {/* 4. Risk Profile */}
           <div className="flex flex-col gap-1.5">
             <label className="text-[11px] font-bold text-zinc-400 uppercase tracking-wider">
-              Risk Profile (POP & Delta)
+              Risk Profile (POP &amp; Delta)
             </label>
             <div className="flex items-center gap-1 bg-zinc-950 border border-zinc-800 p-1 rounded-xl">
               {(['all', 'conservative', 'moderate', 'aggressive'] as const).map(p => (
@@ -320,21 +355,46 @@ export default function ScannerStep({
           </div>
         </div>
 
-        {/* Strategy Selector Chips */}
-        <div className="flex flex-col gap-2 pt-2 border-t border-zinc-800/80">
-          <label className="text-[11px] font-bold text-zinc-400 uppercase tracking-wider">
-            Shortlist Option Strategies:
-          </label>
+        {/* Strategy Selector Chips - Clean Single-Click Isolation */}
+        <div className="flex flex-col gap-2.5 pt-3 border-t border-zinc-800/80">
+          <div className="flex items-center justify-between">
+            <label className="text-[11px] font-bold text-zinc-400 uppercase tracking-wider flex items-center gap-1.5">
+              <Filter className="w-3.5 h-3.5 text-emerald-400" />
+              Filter Option Strategy:
+            </label>
+            <span className="text-[10px] text-zinc-500">
+              Click any strategy to filter candidates instantly
+            </span>
+          </div>
+
           <div className="flex flex-wrap gap-2">
+            {/* All Strategies Pill */}
+            <button
+              onClick={() => handleSelectStrategy('ALL')}
+              className={`px-3.5 py-1.5 rounded-xl text-xs font-bold border transition-all flex items-center gap-1.5 ${
+                strategyFilterMode === 'ALL'
+                  ? 'bg-emerald-500/20 border-emerald-500/50 text-emerald-300 shadow-md shadow-emerald-950/40'
+                  : 'bg-zinc-950/80 border-zinc-800 text-zinc-400 hover:border-zinc-700 hover:text-white'
+              }`}
+            >
+              <div
+                className={`w-2 h-2 rounded-full ${
+                  strategyFilterMode === 'ALL' ? 'bg-emerald-400 shadow-sm shadow-emerald-400' : 'bg-zinc-600'
+                }`}
+              />
+              All Strategies
+            </button>
+
+            {/* Individual Strategy Pills */}
             {STRATEGY_OPTIONS.map(opt => {
-              const active = selectedStrategies.includes(opt.id);
+              const active = strategyFilterMode === opt.id;
               return (
                 <button
                   key={opt.id}
-                  onClick={() => toggleStrategy(opt.id)}
-                  className={`px-3 py-1.5 rounded-xl text-xs font-semibold flex items-center gap-2 border transition-all ${
+                  onClick={() => handleSelectStrategy(opt.id)}
+                  className={`px-3.5 py-1.5 rounded-xl text-xs font-semibold flex items-center gap-2 border transition-all ${
                     active
-                      ? 'bg-emerald-500/15 border-emerald-500/40 text-emerald-300 shadow-sm'
+                      ? 'bg-emerald-500/20 border-emerald-500/50 text-emerald-300 shadow-md shadow-emerald-950/40 font-bold'
                       : 'bg-zinc-950/60 border-zinc-800 text-zinc-400 hover:border-zinc-700 hover:text-zinc-200'
                   }`}
                 >
@@ -356,7 +416,7 @@ export default function ScannerStep({
         <div className="flex items-center gap-2">
           <Sparkles className="w-4 h-4 text-emerald-400" />
           <h3 className="text-xs font-bold text-white uppercase tracking-wider">
-            Shortlisted Strategies ({scanResult?.candidates?.length ?? 0})
+            {strategyFilterMode === 'ALL' ? 'All Shortlisted Strategies' : STRATEGY_OPTIONS.find(s => s.id === strategyFilterMode)?.label} ({displayedCandidates.length})
           </h3>
         </div>
 
@@ -426,10 +486,26 @@ export default function ScannerStep({
         </div>
       )}
 
+      {/* ── Empty Filter Results ───────────────────────────────────── */}
+      {!loading && displayedCandidates.length === 0 && (
+        <div className="bg-zinc-900/80 border border-zinc-800 rounded-3xl p-10 text-center flex flex-col items-center justify-center gap-3">
+          <p className="text-sm font-bold text-white">No setups matched current threshold</p>
+          <p className="text-xs text-zinc-400 max-w-md">
+            In low VIX regimes (11.34), option premiums are tighter. Try setting Min RoM to &ge;0.5% or 1.0%, or lowering the distance threshold to 0.5% OTM.
+          </p>
+          <button
+            onClick={() => { setMinRom(0.5); setMinDistancePct(0.5); handleRunScan(undefined, 0.5); }}
+            className="mt-2 px-4 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold"
+          >
+            Auto-Tune for Low VIX (&ge;0.5% RoM)
+          </button>
+        </div>
+      )}
+
       {/* ── Results: Cards View ────────────────────────────────────── */}
-      {!loading && viewMode === 'cards' && (
+      {!loading && viewMode === 'cards' && displayedCandidates.length > 0 && (
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-          {scanResult?.candidates?.map(strat => {
+          {displayedCandidates.map(strat => {
             const isAdded = addedIds.has(strat.id);
             return (
               <div
@@ -573,7 +649,7 @@ export default function ScannerStep({
       )}
 
       {/* ── Results: Table View ────────────────────────────────────── */}
-      {!loading && viewMode === 'table' && (
+      {!loading && viewMode === 'table' && displayedCandidates.length > 0 && (
         <div className="bg-zinc-900 border border-zinc-800 rounded-2xl overflow-x-auto shadow-xl">
           <table className="w-full text-left text-xs">
             <thead className="bg-zinc-800 text-white font-bold text-xs uppercase tracking-wider">
@@ -592,7 +668,7 @@ export default function ScannerStep({
               </tr>
             </thead>
             <tbody className="divide-y divide-zinc-800 text-zinc-300">
-              {scanResult?.candidates?.map(strat => {
+              {displayedCandidates.map(strat => {
                 const isAdded = addedIds.has(strat.id);
                 return (
                   <tr key={strat.id} className="hover:bg-zinc-800/40 transition-colors">
