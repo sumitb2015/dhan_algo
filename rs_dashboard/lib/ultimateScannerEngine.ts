@@ -5,7 +5,7 @@ import type {
   ScannedStrategy,
   ScanFilters,
 } from './ultimateScannerTypes';
-import { computeStrangleAtOffset, type ChainStrikeQuote, type StrangleCell } from './strangleMath';
+import { computeStrangleAtOffset, type ChainStrikeQuote, type StrangleCell } from './strangleMath.ts';
 
 export const LOT_SIZES: Record<UnderlyingType, number> = {
   NIFTY: 65,
