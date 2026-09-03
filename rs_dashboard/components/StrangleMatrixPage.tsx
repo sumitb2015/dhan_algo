@@ -711,6 +711,17 @@ export default function StrangleMatrixPage() {
       };
     }
 
+    if (cell.romPct < minRomPct) {
+      return {
+        bg: 'bg-zinc-900/30',
+        border: 'border-zinc-800/60',
+        text: 'text-zinc-500',
+        muted: true,
+        isGreat: false,
+        isGood: false,
+      };
+    }
+
     if (cell.romPct >= greatRomPct) {
       return {
         bg: 'bg-emerald-950/40 hover:bg-emerald-900/50',
