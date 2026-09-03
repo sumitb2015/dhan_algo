@@ -23,6 +23,7 @@ const STRATEGY_LOG_DIRS: Record<string, string> = {
   nifty_intraday_vwap_straddle:  'intraday_vwap',
   nifty_vwap_1min_straddle:      'vwap_1min',
   nifty_rolling_straddle:        'rolling_straddle',
+  nifty_delta_strangle:          'delta_strangle',
   nifty_oi_directional:          'oi_directional',
   nifty_vix_straddle:            'vix_straddle',
   nifty_st_oi_bearcall:          'st_oi_bearcall',

@@ -137,6 +137,13 @@ export const STRATEGIES_METADATA: Record<string, {
     path: path.join(PROJECT_ROOT, 'strategies', 'value_imbalance', 'nifty_rolling_straddle.py'),
     execBrokerEligible: true,
   },
+  nifty_delta_strangle: {
+    name: 'Nifty Delta Strangle (Weekly)',
+    underlying: 'NIFTY',
+    logicGroup: 'rotation',
+    path: path.join(PROJECT_ROOT, 'strategies', 'delta_strangle', 'nifty_delta_strangle.py'),
+    execBrokerEligible: true,
+  },
   crudeoilm_supertrend: {
     name: 'CrudeOil Mini Supertrend',
     underlying: 'CRUDEOILM',
