@@ -277,6 +277,7 @@ def get_dhan_client(force_login: bool = False):
             # SDK 2.0.2 initialization using DhanContext
             from dhanhq import DhanContext
             dhan_context = DhanContext(client_id, access_token)
+            dhan = dhanhq(dhan_context)
             # Cached expiryTime is not authoritative — Dhan can revoke a token
             # server-side before its claimed expiry (e.g. a newer login replaces
             # it), so a lightweight call is needed to catch that case.
