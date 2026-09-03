@@ -53,7 +53,7 @@ test('computeStrangleAtOffset: returns null when the put leg quote is missing', 
   assert.strictEqual(cell, null);
 });
 
-test('computeStrangleAtOffset: returns null when a leg is too illiquid (ltp <= 1.0)', () => {
+test('computeStrangleAtOffset: returns null when a leg is too illiquid (ltp <= 0.05)', () => {
   const cell = computeStrangleAtOffset({
     underlying: 'NIFTY',
     atmStrike: 100,
@@ -62,7 +62,7 @@ test('computeStrangleAtOffset: returns null when a leg is too illiquid (ltp <= 1
     spot: 100,
     dte: 7,
     lotSize: 1,
-    chainQuotes: quotes({ 80: { pe: 0.5 }, 120: { ce: 5 } }),
+    chainQuotes: quotes({ 80: { pe: 0.05 }, 120: { ce: 5 } }),
   });
   assert.strictEqual(cell, null);
 });

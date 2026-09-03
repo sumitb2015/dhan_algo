@@ -1,5 +1,5 @@
 import type { UnderlyingType } from './ultimateScannerTypes';
-import { estimatePopAndDelta } from './ultimateScannerEngine';
+import { estimatePopAndDelta } from './ultimateScannerEngine.ts';
 
 export interface ChainStrikeQuote {
   strike: number;
