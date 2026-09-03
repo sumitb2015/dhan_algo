@@ -256,7 +256,10 @@ distilled from 7-10 repeat bug-fix commits:
 `dhan-polling-guards` (poll loops, caches, JSON read-modify-write, process spawns),
 `dhan-theme-tokens` (the theme system), `dhan-commit-on-blur` (free-typed inputs
 must commit on blur/Enter so mid-edit values cannot fire live rules), plus
-`dhan-dashboard-page`, `dhan-new-strategy` and `dhan-quant-terminal-page`. Run
+`dhan-dashboard-page`, `dhan-new-strategy` and `dhan-quant-terminal-page`,
+`dhan-auth-token-lifecycle` (login.py/session.ts cached-token validation and the
+daily 06:00 IST session cutoff), `dhan-expired-options-data` (expired-options
+downloader/SQLite pipeline and the Strike History page built on it). Run
 `dhan-context-audit` periodically (not tied to any one change) to review CLAUDE.md
 and this skill library itself against recent commits.
 
