@@ -209,15 +209,15 @@ OTM strangles decay faster in percentage terms (~45-48% daily vs 35% for ATM) an
 
                 <div className="overflow-x-auto rounded-lg border border-zinc-800 font-mono">
                   <table className="w-full text-xs">
-                    <thead className="bg-zinc-950 text-zinc-400">
+                    <thead className="bg-zinc-800">
                       <tr>
-                        <th className="text-left px-3 py-2 text-white font-sans">Offset & Strike Distance</th>
-                        <th className="text-right px-3 py-2">Avg Open</th>
-                        <th className="text-right px-3 py-2">Median</th>
-                        <th className="text-right px-3 py-2 text-sky-400">Daily Decay %</th>
-                        <th className="text-right px-3 py-2 text-emerald-400">Seller Win %</th>
-                        <th className="text-right px-3 py-2 text-amber-400">0-DTE Decay %</th>
-                        <th className="text-right px-3 py-2">0-DTE Range</th>
+                        <th className="text-left px-3 py-2 text-xs font-bold text-white font-sans">Offset & Strike Distance</th>
+                        <th className="text-right px-3 py-2 text-xs font-bold text-white">Avg Open</th>
+                        <th className="text-right px-3 py-2 text-xs font-bold text-white">Median</th>
+                        <th className="text-right px-3 py-2 text-xs font-bold text-sky-400">Daily Decay %</th>
+                        <th className="text-right px-3 py-2 text-xs font-bold text-emerald-400">Seller Win %</th>
+                        <th className="text-right px-3 py-2 text-xs font-bold text-amber-400">0-DTE Decay %</th>
+                        <th className="text-right px-3 py-2 text-xs font-bold text-white">0-DTE Range</th>
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-zinc-800/60 bg-zinc-900/30">
@@ -280,14 +280,14 @@ OTM strangles decay faster in percentage terms (~45-48% daily vs 35% for ATM) an
 
                 <div className="overflow-x-auto rounded-lg border border-zinc-800 font-mono">
                   <table className="w-full text-xs">
-                    <thead className="bg-zinc-950 text-zinc-400">
+                    <thead className="bg-zinc-800">
                       <tr>
-                        <th className="text-left px-3 py-2 text-white font-sans">DTE & Timing</th>
-                        <th className="text-right px-3 py-2">Avg Open</th>
-                        <th className="text-right px-3 py-2">Median</th>
-                        <th className="text-right px-3 py-2 text-sky-400">Avg Decay %</th>
-                        <th className="text-right px-3 py-2 text-emerald-400">Seller Win %</th>
-                        <th className="text-right px-3 py-2">Avg Intraday Range</th>
+                        <th className="text-left px-3 py-2 text-xs font-bold text-white font-sans">DTE & Timing</th>
+                        <th className="text-right px-3 py-2 text-xs font-bold text-white">Avg Open</th>
+                        <th className="text-right px-3 py-2 text-xs font-bold text-white">Median</th>
+                        <th className="text-right px-3 py-2 text-xs font-bold text-sky-400">Avg Decay %</th>
+                        <th className="text-right px-3 py-2 text-xs font-bold text-emerald-400">Seller Win %</th>
+                        <th className="text-right px-3 py-2 text-xs font-bold text-white">Avg Intraday Range</th>
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-zinc-800/60 bg-zinc-900/30">
