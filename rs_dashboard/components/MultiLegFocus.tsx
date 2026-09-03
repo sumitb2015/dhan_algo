@@ -1,7 +1,7 @@
 'use client';
 
 import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
-import { Plus, RefreshCw, Layers, ClipboardList } from 'lucide-react';
+import { Plus, RefreshCw, Layers, ClipboardList, ListTree } from 'lucide-react';
 import NavBar from './NavBar';
 import { type Toast, FOCUS_RING } from './Scalper';
 import { useLiveOptionsWS } from '@/lib/useLiveOptionsWS';
@@ -13,6 +13,7 @@ import { sortLegsForPlacement, resolveOrderRequest, type StrikeIdentifier } from
 import StrategyCardGrid from './basket/StrategyCardGrid';
 import MultiLegStrategyRow from './multiLegFocus/MultiLegStrategyRow';
 import OrdersTradesModal from './multiLegFocus/OrdersTradesModal';
+import MultiLegOptionChainModal from './multiLegFocus/MultiLegOptionChainModal';
 import {
   resolveTemplateLegs, reconcileLegWithBroker, sortLegsForExit, findLegPosition,
   computeLegTrailingSL, computeStrategyMetrics, checkStrategyRisk, fallbackLotSize,
@@ -91,6 +92,7 @@ export default function MultiLegFocus() {
 
   // ── Orders & Tradebook State ──────────────────────────────────────
   const [showOrdersModal, setShowOrdersModal] = useState(false);
+  const [showChainModal, setShowChainModal] = useState(false);
   const [ordersData, setOrdersData] = useState<Record<string, unknown>[]>([]);
   const [tradesData, setTradesData] = useState<Record<string, unknown>[]>([]);
   const [ordersLoading, setOrdersLoading] = useState(false);
@@ -1271,6 +1273,17 @@ export default function MultiLegFocus() {
               )}
             </button>
 
+            {/* Option Chain & Greeks Button */}
+            <button
+              type="button"
+              onClick={() => setShowChainModal(true)}
+              className={`h-8 px-3 inline-flex items-center gap-1.5 text-xs font-bold rounded-lg border border-zinc-700 bg-zinc-900 hover:bg-zinc-800 text-zinc-200 hover:text-white transition-colors cursor-pointer ${FOCUS_RING}`}
+              title="View option chain with Greeks (IV, Delta, Theta, Gamma, Vega)"
+            >
+              <ListTree className="w-3.5 h-3.5 text-violet-400" />
+              <span>Option Chain</span>
+            </button>
+
             {/* + Add Strategy Button */}
             <button
               type="button"
@@ -1403,6 +1416,15 @@ export default function MultiLegFocus() {
         isLoading={ordersLoading}
         error={ordersError}
         onRefresh={fetchOrdersAndTrades}
+      />
+
+      {/* Option Chain & Greeks Modal */}
+      <MultiLegOptionChainModal
+        isOpen={showChainModal}
+        onClose={() => setShowChainModal(false)}
+        underlying={activeUnderlying}
+        expiriesMap={expiriesMap}
+        broker={broker}
       />
     </div>
   );
