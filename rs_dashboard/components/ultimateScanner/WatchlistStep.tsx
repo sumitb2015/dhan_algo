@@ -190,7 +190,7 @@ export default function WatchlistStep({
                 <span className="text-xs font-bold text-zinc-400 uppercase tracking-wider">Strategy Legs</span>
                 <div className="bg-zinc-950 border border-zinc-800 rounded-2xl overflow-hidden">
                   <table className="w-full text-left text-xs">
-                    <thead className="bg-zinc-800 text-white font-bold text-[11px] uppercase">
+                    <thead className="bg-zinc-800 text-white font-bold text-xs uppercase tracking-wider">
                       <tr>
                         <th className="py-2.5 px-3">Side</th>
                         <th className="py-2.5 px-3">Strike</th>

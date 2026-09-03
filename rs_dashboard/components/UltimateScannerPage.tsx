@@ -30,6 +30,8 @@ export default function UltimateScannerPage() {
   const [activeTab, setActiveTab] = useState<'scanner' | 'watchlist' | 'guide'>('scanner');
   const [watchlist, setWatchlist] = useState<WatchlistItem[]>([]);
   const [toast, setToast] = useState<{ message: string; type: 'success' | 'info' | 'error' } | null>(null);
+  const [dataDate, setDataDate] = useState<string>(() => new Date().toISOString().split('T')[0]);
+  const tradeInFlight = React.useRef(false);
 
   const showToast = (message: string, type: 'success' | 'info' | 'error' = 'success') => {
     setToast({ message, type });
@@ -107,6 +109,10 @@ export default function UltimateScannerPage() {
 
   // ── Bridge to Multi-Leg Focus ───────────────────────────────────────
   const handleTradeInMultiLegFocus = async (item: ScannedStrategy | WatchlistItem) => {
+    // Guards against a double-click double-POSTing this real-money-adjacent
+    // basket-creation endpoint before the redirect away from the page lands.
+    if (tradeInFlight.current) return;
+    tradeInFlight.current = true;
     try {
       showToast(`Preparing ${item.name} for Multi-Leg Focus...`, 'info');
 
@@ -139,6 +145,7 @@ export default function UltimateScannerPage() {
       router.push('/multi-leg-focus');
     } catch (err) {
       showToast(`Failed to transfer to Multi-Leg Focus: ${String(err)}`, 'error');
+      tradeInFlight.current = false;
     }
   };
 
@@ -175,8 +182,8 @@ export default function UltimateScannerPage() {
               <span className="text-[9px] font-bold text-emerald-500 uppercase tracking-[0.18em]">
                 Process Driven &bull; Options Strategy Discovery
               </span>
-              <span className="text-amber-300 font-bold uppercase tracking-wide text-[10px] bg-amber-500/10 px-2 py-0.2 rounded border border-amber-500/20">
-                DATA: {new Date().toISOString().split('T')[0]}
+              <span className="text-amber-300 font-bold uppercase tracking-wide text-[10px] bg-amber-500/10 px-2 py-0.5 rounded border border-amber-500/20">
+                DATA: {dataDate}
               </span>
             </div>
             <h1 className="text-base font-bold text-white tracking-tight leading-none mt-0.5">
@@ -210,7 +217,7 @@ export default function UltimateScannerPage() {
             <Eye className="w-3.5 h-3.5" />
             <span>Step 2: Watchlist</span>
             {watchlist.length > 0 && (
-              <span className="px-1.5 py-0.2 rounded-full text-[10px] bg-zinc-950 text-emerald-400 font-extrabold border border-emerald-500/30">
+              <span className="px-1.5 py-0.5 rounded-full text-[10px] bg-zinc-950 text-emerald-400 font-extrabold border border-emerald-500/30">
                 {watchlist.length}
               </span>
             )}
@@ -238,6 +245,7 @@ export default function UltimateScannerPage() {
             onTradeInMultiLegFocus={handleTradeInMultiLegFocus}
             onNavigateToWatchlist={() => setActiveTab('watchlist')}
             watchlistCount={watchlist.length}
+            onScanDataDate={setDataDate}
           />
         )}
 

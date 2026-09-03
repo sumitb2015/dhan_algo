@@ -1,9 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import path from 'path';
-import fs from 'fs';
-import { execFile } from 'child_process';
-import { promisify } from 'util';
-import { PROJECT_ROOT, PYTHON_EXE, dedupe, spaced } from '@/lib/pyExec';
+import { PROJECT_ROOT, runPythonJson, dedupe, spaced } from '@/lib/pyExec';
 import { getDhanCredentials } from '@/lib/dhanToken';
 import {
   parseChainQuotes,
@@ -16,7 +13,6 @@ import type {
   UnderlyingType,
 } from '@/lib/ultimateScannerTypes';
 
-const execFileAsync = promisify(execFile);
 const FETCH_SCRIPT = path.join(PROJECT_ROOT, 'scripts', 'tools', 'options_data_fetch.py');
 const VIX_SECURITY_ID = 21;
 const DHAN_OHLC_URL = 'https://api.dhan.co/v2/marketfeed/ohlc';
@@ -103,18 +99,15 @@ async function fetchLiveIndiaVix(): Promise<VixResult> {
 
   // 2. Python fallback if direct REST timed out
   try {
-    const { stdout } = await dedupe('vix-direct-python', () =>
-      execFileAsync(
-        PYTHON_EXE,
+    const parsed = await dedupe('vix-direct-python', () =>
+      runPythonJson<{ vix?: number }>(
+        '-c',
         [
-          '-c',
           "from login import get_dhan_client; from lib.dhan_helper import DhanHelper; import json; dhan=get_dhan_client(); helper=DhanHelper(dhan); ltp=helper.get_ltp(21, exchange='NSE', instrument='INDEX') or 0; print(json.dumps({'vix': ltp}))",
         ],
-        { encoding: 'utf8', timeout: 10_000, windowsHide: true },
+        10_000,
       ),
     );
-    const jsonLine = (stdout ?? '').trim().split('\n').pop() ?? '{}';
-    const parsed = JSON.parse(jsonLine) as { vix?: number };
     if (parsed.vix && parsed.vix > 0) {
       const { regime, advice } = computeVixRegime(parsed.vix);
       return {
@@ -145,23 +138,16 @@ async function fetchUnderlyingChain(underlying: string, expiry: string): Promise
   prevClose: number;
 }> {
   const cacheKey = `scanner-chain:${underlying}:${expiry}`;
-  const { stdout } = await dedupe(cacheKey, () =>
+  const parsed = await dedupe(cacheKey, () =>
     spaced(`dhan-spawn:${underlying}`, () =>
-      execFileAsync(
-        PYTHON_EXE,
-        [FETCH_SCRIPT, 'chain', '--underlying', underlying, '--expiry', expiry],
-        { encoding: 'utf8', timeout: 45_000, windowsHide: true },
-      ),
+      runPythonJson<{
+        chain?: Record<string, unknown>;
+        spot?: number;
+        prev_close?: number;
+        error?: string;
+      }>(FETCH_SCRIPT, ['chain', '--underlying', underlying, '--expiry', expiry], 45_000),
     ),
   );
-
-  const jsonLine = (stdout ?? '').trim().split('\n').pop() ?? '{}';
-  const parsed = JSON.parse(jsonLine) as {
-    chain?: Record<string, unknown>;
-    spot?: number;
-    prev_close?: number;
-    error?: string;
-  };
 
   return {
     chain: parsed.chain ?? {},
@@ -172,17 +158,15 @@ async function fetchUnderlyingChain(underlying: string, expiry: string): Promise
 
 async function fetchUnderlyingExpiries(underlying: string): Promise<string[]> {
   try {
-    const { stdout } = await dedupe(`scanner-expiries:${underlying}`, () =>
+    const parsed = await dedupe(`scanner-expiries:${underlying}`, () =>
       spaced(`dhan-spawn:${underlying}`, () =>
-        execFileAsync(
-          PYTHON_EXE,
-          [FETCH_SCRIPT, 'expiries', '--underlying', underlying],
-          { encoding: 'utf8', timeout: 30_000, windowsHide: true },
+        runPythonJson<{ expiries?: string[] }>(
+          FETCH_SCRIPT,
+          ['expiries', '--underlying', underlying],
+          30_000,
         ),
       ),
     );
-    const jsonLine = (stdout ?? '').trim().split('\n').pop() ?? '{}';
-    const parsed = JSON.parse(jsonLine) as { expiries?: string[] };
     return parsed.expiries ?? [];
   } catch {
     return [];
@@ -205,31 +189,37 @@ export async function POST(request: NextRequest): Promise<NextResponse<ScanRespo
       sortBy: body.sortBy ?? 'score',
     };
 
-    // 1. Fetch live India VIX directly
-    const vixInfo = await fetchLiveIndiaVix();
-
     // 2. Determine target underlyings
-    const targetUnderlyings: UnderlyingType[] = 
+    const targetUnderlyings: UnderlyingType[] =
       filters.underlying === 'ALL'
         ? ['NIFTY', 'SENSEX']
         : [filters.underlying];
+
+    // Fetch VIX and every underlying's chain concurrently — `spaced()` already
+    // keys pacing per underlying, so nothing here needs to serialize across them.
+    const [vixInfo, ...perUnderlying] = await Promise.all([
+      fetchLiveIndiaVix(),
+      ...targetUnderlyings.map(async (u) => {
+        let targetExpiry = filters.expiry;
+        if (!targetExpiry) {
+          const expiries = await fetchUnderlyingExpiries(u);
+          targetExpiry = expiries[0];
+        }
+        if (!targetExpiry) return null;
+
+        const { chain, spot } = await fetchUnderlyingChain(u, targetExpiry);
+        return { u, targetExpiry, chain, spot };
+      }),
+    ]);
 
     const spotPrices: Record<string, number> = {};
     const allCandidates: ScannedStrategy[] = [];
     let scannedCount = 0;
     let totalCombos = 0;
 
-    for (const u of targetUnderlyings) {
-      // Resolve expiry
-      let targetExpiry = filters.expiry;
-      if (!targetExpiry) {
-        const expiries = await fetchUnderlyingExpiries(u);
-        targetExpiry = expiries[0];
-      }
-
-      if (!targetExpiry) continue;
-
-      const { chain, spot } = await fetchUnderlyingChain(u, targetExpiry);
+    for (const entry of perUnderlying) {
+      if (!entry) continue;
+      const { u, targetExpiry, chain, spot } = entry;
       if (spot > 0) {
         spotPrices[u] = spot;
       }
@@ -238,7 +228,7 @@ export async function POST(request: NextRequest): Promise<NextResponse<ScanRespo
       if (strikes.length > 0) {
         scannedCount += strikes.length;
         totalCombos += strikes.length * (strikes.length - 1);
-        
+
         const found = scanOptionChain(
           u,
           targetExpiry,
