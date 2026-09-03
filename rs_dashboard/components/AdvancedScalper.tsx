@@ -1423,7 +1423,17 @@ export default function AdvancedScalper() {
         // (with its guard intact) but no longer bound to this box.
         updateBox(boxId, { strike: newStrike, limitPrice: '' });
 
-        // 3. Place order on new strike
+        // 3. Place order on new strike — inherit the original position's product
+        // (MARGIN/INTRADAY) so a shifted positional/margin trade stays MARGIN rather
+        // than accidentally opening as INTRADAY and causing unbalanced hedging.
+        const origProduct = positionProduct(pos);
+        const resolvedProductDhan = (origProduct === 'MARGIN' || origProduct === 'INTRADAY' || origProduct === 'CNC')
+          ? origProduct
+          : productType;
+        const resolvedProductOther = origProduct === 'MARGIN'
+          ? 'NRML'
+          : (origProduct === 'INTRADAY' ? 'MIS' : (productType === 'MARGIN' ? 'NRML' : 'MIS'));
+
         const newSecEntry = strikeMap[String(newStrike)];
         let res: Response;
         if (broker !== 'dhan') {
@@ -1444,7 +1454,7 @@ export default function AdvancedScalper() {
               side: sideToOpen,
               orderType: 'MARKET',
               exchange,
-              product: productType === 'MARGIN' ? 'NRML' : 'MIS',
+              product: resolvedProductOther,
             }),
           });
         } else {
@@ -1459,7 +1469,7 @@ export default function AdvancedScalper() {
                 side: sideToOpen,
                 orderType: 'MARKET',
                 exchangeSegment: underlying === 'SENSEX' ? 'BSE_FNO' : 'NSE_FNO',
-                productType,
+                productType: resolvedProductDhan,
               }),
             });
           } else {

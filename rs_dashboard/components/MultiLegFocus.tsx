@@ -396,6 +396,30 @@ export default function MultiLegFocus() {
       .catch(() => {});
   }, [broker]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // ── Register all off-selected-expiry basket legs with watchExtra ────
+  useEffect(() => {
+    const extraRequests: { underlying: string; expiry: string; strike: number; side: 'CE' | 'PE' }[] = [];
+    for (const b of baskets) {
+      if (!b.expiry || !b.underlying) continue;
+      for (const l of b.legs) {
+        if (l.strike && (l.option === 'CE' || l.option === 'PE')) {
+          extraRequests.push({
+            underlying: b.underlying,
+            expiry: b.expiry,
+            strike: l.strike,
+            side: l.option,
+          });
+        }
+      }
+    }
+    if (extraRequests.length === 0) return;
+    fetch('/api/options/live', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'watchExtra', underlying: activeUnderlying, requests: extraRequests }),
+    }).catch(() => {});
+  }, [baskets, activeUnderlying]);
+
   // ── LTP Resolver per Basket & Leg ─────────────────────────────────
   const ltpFor = useCallback((basket: MultiLegBasket, leg: MultiLegLeg): number => {
     // 1. If WebSocket quotes match this basket's underlying & expiry:
@@ -407,7 +431,14 @@ export default function MultiLegFocus() {
       if (liveLtp > 0) return liveLtp;
     }
 
-    // 2. Chain quotes lookup
+    // 2. If WebSocket quotes have off-expiry live tick from watchExtra:
+    if (liveQuotes?.extra && liveQuotes.extra[basket.expiry]) {
+      const expEntry = liveQuotes.extra[basket.expiry][String(leg.strike)];
+      const extraLtp = (leg.option === 'CE' ? expEntry?.ce?.ltp : expEntry?.pe?.ltp) ?? 0;
+      if (extraLtp > 0) return extraLtp;
+    }
+
+    // 3. Chain quotes lookup fallback
     const pair = `${basket.underlying}:${basket.expiry}`;
     const chain = chainData[pair];
     if (chain?.quotes) {

@@ -229,6 +229,7 @@ export interface StrategyMetrics {
   pnlPts: number;
   pnlPct: number;
   totalPnlRupees: number;
+  hasUnpricedLegs: boolean;
 }
 
 /**
@@ -245,6 +246,7 @@ export function computeStrategyMetrics(
   let pnlPts = 0;
   let totalPnlRupees = 0;
   let netCreditDebit = 0;
+  let unpricedCount = 0;
 
   for (const leg of legs) {
     const isBuy = leg.side === 'B';
@@ -257,7 +259,18 @@ export function computeStrategyMetrics(
     // correctly freezes at the realized close. Freeze "current" here too:
     // the actual exit price once known, entry (i.e. zero movement) until it is.
     const isClosed = leg.status === 'CLOSED';
-    const current = isClosed ? (leg.closedFill ? leg.closedFill.exitPrice : entry) : ltpFor(leg);
+    const rawLtp = ltpFor(leg);
+
+    // CRITICAL GUARD: If an OPEN/PLACING leg has no valid quote (rawLtp <= 0),
+    // NEVER treat current price as 0.00! Doing so fabricates phantom 100% gains on SELL legs
+    // or -100% losses on BUY legs, falsely triggering automated Targets or Stop Losses.
+    // Instead, freeze 'current' at 'entry' (0 movement) and flag hasUnpricedLegs.
+    if (!isClosed && (rawLtp == null || rawLtp <= 0 || isNaN(rawLtp))) {
+      unpricedCount++;
+    }
+    const current = isClosed
+      ? (leg.closedFill ? leg.closedFill.exitPrice : entry)
+      : (rawLtp > 0 ? rawLtp : entry);
 
     combinedEntryPts += entry * lots;
     combinedCurrentPts += current * lots;
@@ -278,6 +291,7 @@ export function computeStrategyMetrics(
     pnlPts: Math.round(pnlPts * 100) / 100,
     pnlPct: Math.round(pnlPct * 100) / 100,
     totalPnlRupees: Math.round(totalPnlRupees * 100) / 100,
+    hasUnpricedLegs: unpricedCount > 0,
   };
 }
 
@@ -290,6 +304,9 @@ export function checkStrategyRisk(
   config?: StrategyRiskConfig | null,
 ): 'TARGET' | 'SL' | null {
   if (!config || !config.armed) return null;
+
+  // CRITICAL GUARD: Never trigger strategy Target or Stop Loss if any open leg is unpriced / missing market data
+  if (metrics.hasUnpricedLegs) return null;
 
   // 1. Check Target
   if (config.targetValue != null && config.targetValue > 0) {

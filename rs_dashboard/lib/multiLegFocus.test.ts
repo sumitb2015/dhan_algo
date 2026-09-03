@@ -403,6 +403,26 @@ test('computeStrategyMetrics applies commodity multiplier to rupee P&L', () => {
   const metrics = computeStrategyMetrics(legs, ltpFor, 100);
   assert.strictEqual(metrics.pnlPts, 20);
   assert.strictEqual(metrics.totalPnlRupees, 2000); // 20 pts * 1 qty * 100 mult
+  assert.strictEqual(metrics.hasUnpricedLegs, false);
+});
+
+test('computeStrategyMetrics: unpriced open legs (ltp <= 0) freeze at entry and flag hasUnpricedLegs, preventing false 100% gain', () => {
+  const legs: MultiLegLeg[] = [
+    { id: '1', side: 'S', option: 'CE', strike: 24700, lots: 2, type: 'MARKET', status: 'OPEN', fill: { qty: 130, avgPrice: 32.7 } },
+    { id: '2', side: 'S', option: 'PE', strike: 23300, lots: 2, type: 'MARKET', status: 'OPEN', fill: { qty: 130, avgPrice: 30.95 } },
+  ];
+  // If LTP lookup returns 0 (e.g. rate-limit or delayed quote feed):
+  const ltpFor = () => 0;
+  const metrics = computeStrategyMetrics(legs, ltpFor);
+  assert.strictEqual(metrics.hasUnpricedLegs, true);
+  // PnL points must NOT be +127.3 pts (which would be +100% false decay); it must be 0
+  assert.strictEqual(metrics.pnlPts, 0);
+  assert.strictEqual(metrics.pnlPct, 0);
+  assert.strictEqual(metrics.totalPnlRupees, 0);
+
+  // checkStrategyRisk must refuse to fire Target or SL when hasUnpricedLegs is true
+  assert.strictEqual(checkStrategyRisk(metrics, { targetValue: 10, targetUnit: 'pts', armed: true, slUnit: 'pts' }), null);
+  assert.strictEqual(checkStrategyRisk(metrics, { slValue: 10, slUnit: 'pts', armed: true, targetUnit: 'pts' }), null);
 });
 
 
