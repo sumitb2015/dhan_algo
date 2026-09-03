@@ -5,6 +5,7 @@ import type {
   ScannedStrategy,
   ScanFilters,
 } from './ultimateScannerTypes';
+import { computeStrangleAtOffset, type ChainStrikeQuote, type StrangleCell } from './strangleMath';
 
 export const LOT_SIZES: Record<UnderlyingType, number> = {
   NIFTY: 65,
@@ -17,26 +18,6 @@ export const STRIKE_STEPS: Record<UnderlyingType, number> = {
   SENSEX: 100,
   BANKNIFTY: 100,
 };
-
-export interface ChainStrikeQuote {
-  strike: number;
-  ce: {
-    ltp: number;
-    oi?: number;
-    oiChange?: number;
-    iv?: number;
-    delta?: number;
-    securityId?: string;
-  };
-  pe: {
-    ltp: number;
-    oi?: number;
-    oiChange?: number;
-    iv?: number;
-    delta?: number;
-    securityId?: string;
-  };
-}
 
 export function parseChainQuotes(
   rawChain: Record<string, unknown>,
@@ -445,55 +426,48 @@ export function scanOptionChain(
 
     // 1) Systematic symmetric & near-symmetric strangles (1 strike step out to maxOffsetSteps)
     for (let offset = 1; offset <= maxOffsetSteps; offset++) {
-      const shortPut = atmStrike - offset * step;
-      const shortCall = atmStrike + offset * step;
+      const cell: StrangleCell | null = computeStrangleAtOffset({
+        underlying,
+        atmStrike,
+        offset,
+        step,
+        spot,
+        dte,
+        lotSize,
+        chainQuotes,
+      });
+      if (!cell) continue;
 
-      const shortPutQuote = chainQuotes[shortPut]?.pe;
-      const shortCallQuote = chainQuotes[shortCall]?.ce;
-      if (!shortPutQuote || !shortCallQuote || shortPutQuote.ltp <= 1.0 || shortCallQuote.ltp <= 1.0) continue;
-
-      const putDistPct = ((spot - shortPut) / spot) * 100;
-      const callDistPct = ((shortCall - spot) / spot) * 100;
-      const minDistPct = Math.min(putDistPct, callDistPct);
-
-      const totalCreditPts = shortPutQuote.ltp + shortCallQuote.ltp;
-      const netPremiumTotal = totalCreditPts * lotSize;
-      const estMargin = underlying === 'NIFTY' ? 120000 : underlying === 'SENSEX' ? 95000 : 130000;
-      const romPct = (netPremiumTotal / estMargin) * 100;
-      const romAnnualizedPct = (romPct / Math.max(1, dte)) * 365;
-
-      const pop = Math.min(94, Math.max(50, 88 - (1.0 / (minDistPct + 0.1)) * 10));
-      const riskTier = minDistPct >= 2.5 ? 'Conservative' : minDistPct >= 1.2 ? 'Moderate' : 'Aggressive';
-      const score = Math.round(Math.min(100, (romPct * 6.0) + (pop * 0.4) + (minDistPct * 5)));
+      const score = Math.round(Math.min(100, (cell.romPct * 6.0) + (cell.popPct * 0.4) + (cell.distancePct * 5)));
 
       evaluateCandidate({
-        id: `strangle_${underlying}_${shortPut}_${shortCall}_${expiry}`,
-        name: `Short Strangle (${shortPut} PE / ${shortCall} CE [±${offset * step}pts])`,
+        id: `strangle_${underlying}_${cell.putStrike}_${cell.callStrike}_${expiry}`,
+        name: `Short Strangle (${cell.putStrike} PE / ${cell.callStrike} CE [±${offset * step}pts])`,
         type: 'short_strangle',
         underlying,
         expiry,
         dte,
         spot,
         legs: [
-          { strike: shortPut, option: 'PE', side: 'SELL', ltp: shortPutQuote.ltp, lots: 1, lotSize, securityId: shortPutQuote.securityId },
-          { strike: shortCall, option: 'CE', side: 'SELL', ltp: shortCallQuote.ltp, lots: 1, lotSize, securityId: shortCallQuote.securityId },
+          { strike: cell.putStrike, option: 'PE', side: 'SELL', ltp: cell.putLtp, lots: 1, lotSize, securityId: cell.putSecurityId },
+          { strike: cell.callStrike, option: 'CE', side: 'SELL', ltp: cell.callLtp, lots: 1, lotSize, securityId: cell.callSecurityId },
         ],
-        netPremium: Math.round(netPremiumTotal),
-        netPremiumPoints: Math.round(totalCreditPts * 100) / 100,
-        estMargin: Math.round(estMargin),
-        romPct: Math.round(romPct * 100) / 100,
-        romAnnualizedPct: Math.round(romAnnualizedPct),
-        distancePct: Math.round(minDistPct * 100) / 100,
-        distancePoints: Math.round(Math.min(spot - shortPut, shortCall - spot)),
-        popPct: Math.round(pop),
-        maxProfit: Math.round(netPremiumTotal),
+        netPremium: cell.netPremium,
+        netPremiumPoints: cell.netPremiumPoints,
+        estMargin: cell.estMargin,
+        romPct: cell.romPct,
+        romAnnualizedPct: cell.romAnnualizedPct,
+        distancePct: cell.distancePct,
+        distancePoints: cell.distancePoints,
+        popPct: cell.popPct,
+        maxProfit: cell.netPremium,
         maxLoss: 0,
         maxLossUnlimited: true,
         riskRewardRatio: 0,
-        breakevens: [shortPut - totalCreditPts, shortCall + totalCreditPts],
+        breakevens: cell.breakevens,
         deltaNet: 0.0,
         sentiment: 'Range-Bound',
-        riskTier,
+        riskTier: cell.riskTier,
         score,
         createdAt: new Date().toISOString(),
       });
