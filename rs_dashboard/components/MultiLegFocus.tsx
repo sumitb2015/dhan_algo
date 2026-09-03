@@ -90,6 +90,28 @@ export default function MultiLegFocus() {
     return () => clearInterval(interval);
   }, [pollFunds]);
 
+  // ── India VIX Ticker ────────────────────────────────────────────────
+  const [vixData, setVixData] = useState<{ vix: number; prevClose: number } | null>(null);
+
+  useEffect(() => {
+    const pollVix = () => {
+      fetch('/api/scalper/vix')
+        .then(r => r.json())
+        .then((j: { success: boolean; vix?: number; prevClose?: number }) => {
+          if (j.success && j.vix !== undefined && j.prevClose !== undefined) {
+            setVixData({ vix: j.vix, prevClose: j.prevClose });
+          }
+        })
+        .catch(() => {});
+    };
+    pollVix();
+    const interval = setInterval(pollVix, 60_000);
+    return () => clearInterval(interval);
+  }, []);
+
+  const vixChange = vixData ? vixData.vix - vixData.prevClose : 0;
+  const vixChangePct = vixData && vixData.prevClose > 0 ? (vixChange / vixData.prevClose) * 100 : 0;
+
   // ── Orders & Tradebook State ──────────────────────────────────────
   const [showOrdersModal, setShowOrdersModal] = useState(false);
   const [showChainModal, setShowChainModal] = useState(false);
@@ -1208,6 +1230,22 @@ export default function MultiLegFocus() {
                     <span className="text-[11px] opacity-90">({spotChange >= 0 ? '+' : ''}{spotChangePct.toFixed(2)}%)</span>
                   </span>
                 )}
+              </div>
+            )}
+
+            {/* India VIX Ticker */}
+            {vixData && (
+              <div
+                className="h-8 flex items-baseline gap-2 px-3 rounded-lg bg-zinc-900 border border-zinc-700/80 font-mono tabular-nums shadow-sm"
+                title={`India VIX | Prev Close: ${vixData.prevClose.toFixed(2)}`}
+              >
+                <span className="text-[11px] font-bold text-zinc-400 tracking-wider">VIX</span>
+                <span className="text-sm font-bold text-white">{vixData.vix.toFixed(2)}</span>
+                <span className={`text-xs font-semibold flex items-center gap-0.5 ${vixChange >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
+                  <span>{vixChange >= 0 ? '▲' : '▼'}</span>
+                  <span>{Math.abs(vixChange).toFixed(2)}</span>
+                  <span className="text-[11px] opacity-90">({vixChange >= 0 ? '+' : ''}{vixChangePct.toFixed(2)}%)</span>
+                </span>
               </div>
             )}
           </div>

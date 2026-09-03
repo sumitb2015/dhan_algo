@@ -28,7 +28,7 @@ const STRIKE_STEP: Record<Underlying, number> = {
   CRUDEOILM: 50,
 };
 
-const POLL_MS = 20_000;
+const POLL_MS = 60_000;
 const WING_OPTIONS = [5, 10, 15] as const;
 type Wings = typeof WING_OPTIONS[number];
 
