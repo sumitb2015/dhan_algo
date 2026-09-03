@@ -16,8 +16,11 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Relative Strength Scanner | Nifty 50 & Nifty 500 Mansfield RS",
-  description: "Advanced analytics dashboard for Nifty index members using Mansfield Relative Strength methodology",
+  title: {
+    default: "Relative Strength Scanner | Nifty 50 & Nifty 500 Mansfield RS",
+    template: "%s | Dhan Algo",
+  },
+  description: "Advanced analytics dashboard for Nifty index members and F&O derivatives trading",
 };
 
 /**
