@@ -1,7 +1,9 @@
 import { NextRequest, NextResponse } from 'next/server';
-import path from 'path';
-import { PROJECT_ROOT, runPythonJson, dedupe, spaced } from '@/lib/pyExec';
-import { getDhanCredentials } from '@/lib/dhanToken';
+import {
+  fetchLiveIndiaVix,
+  fetchUnderlyingChain,
+  fetchUnderlyingExpiries,
+} from '@/lib/ultimateScannerDhan';
 import {
   parseChainQuotes,
   scanOptionChain,
@@ -10,216 +12,46 @@ import type {
   ScanFilters,
   ScanResponse,
   ScannedStrategy,
-  UnderlyingType,
 } from '@/lib/ultimateScannerTypes';
-
-const FETCH_SCRIPT = path.join(PROJECT_ROOT, 'scripts', 'tools', 'options_data_fetch.py');
-const VIX_SECURITY_ID = 21;
-const DHAN_OHLC_URL = 'https://api.dhan.co/v2/marketfeed/ohlc';
-
-interface VixResult {
-  vix: number;
-  prevClose: number;
-  change: number;
-  changePct: number;
-  regime: string;
-  advice: string;
-}
-
-function computeVixRegime(vix: number): { regime: string; advice: string } {
-  if (vix <= 12.5) {
-    return {
-      regime: 'Low Volatility',
-      advice: 'Premiums are low. Prioritize tight Bull Put / Bear Call spreads or calendar spreads. Strangles require larger moves for safety.',
-    };
-  } else if (vix <= 16.5) {
-    return {
-      regime: 'Normal / Ideal Volatility',
-      advice: 'Ideal regime for range-bound credit spreads, Iron Condors, and short strangles. Healthy premium decay with balanced risk.',
-    };
-  } else if (vix <= 22.0) {
-    return {
-      regime: 'Elevated Volatility',
-      advice: 'High premium collection opportunities. Use wider wings on Iron Condors and seek 2.5%+ OTM distance for credit spreads.',
-    };
-  } else {
-    return {
-      regime: 'High Volatility / Panic',
-      advice: 'Extreme implied volatility. Strictly trade defined-risk credit spreads with wide safety buffers (3.5%+ OTM). Avoid undefined naked risk.',
-    };
-  }
-}
-
-async function fetchLiveIndiaVix(): Promise<VixResult> {
-  // 1. Direct Dhan REST OHLC API
-  try {
-    const auth = getDhanCredentials();
-    if (auth.token && auth.clientId) {
-      const res = await fetch(DHAN_OHLC_URL, {
-        method: 'POST',
-        headers: {
-          'access-token': auth.token,
-          'client-id': auth.clientId,
-          'Content-Type': 'application/json',
-          'Accept': 'application/json',
-        },
-        body: JSON.stringify({ IDX_I: [VIX_SECURITY_ID] }),
-        signal: AbortSignal.timeout(4000),
-      });
-
-      const json = await res.json() as {
-        status?: string;
-        data?: Record<string, Record<string, {
-          last_price?: number;
-          ohlc?: { close?: number };
-        }>>;
-      };
-
-      if (json.status === 'success') {
-        const entry = json.data?.IDX_I?.[String(VIX_SECURITY_ID)];
-        const ltp = entry?.last_price ?? 0;
-        const prevClose = entry?.ohlc?.close ?? ltp;
-
-        if (ltp > 0) {
-          const change = ltp - prevClose;
-          const changePct = prevClose > 0 ? (change / prevClose) * 100 : 0;
-          const { regime, advice } = computeVixRegime(ltp);
-          return {
-            vix: Math.round(ltp * 100) / 100,
-            prevClose: Math.round(prevClose * 100) / 100,
-            change: Math.round(change * 100) / 100,
-            changePct: Math.round(changePct * 100) / 100,
-            regime,
-            advice,
-          };
-        }
-      }
-    }
-  } catch {}
-
-  // 2. Python fallback if direct REST timed out
-  try {
-    const parsed = await dedupe('vix-direct-python', () =>
-      runPythonJson<{ vix?: number }>(
-        '-c',
-        [
-          "from login import get_dhan_client; from lib.dhan_helper import DhanHelper; import json; dhan=get_dhan_client(); helper=DhanHelper(dhan); ltp=helper.get_ltp(21, exchange='NSE', instrument='INDEX') or 0; print(json.dumps({'vix': ltp}))",
-        ],
-        10_000,
-      ),
-    );
-    if (parsed.vix && parsed.vix > 0) {
-      const { regime, advice } = computeVixRegime(parsed.vix);
-      return {
-        vix: Math.round(parsed.vix * 100) / 100,
-        prevClose: Math.round(parsed.vix * 100) / 100,
-        change: 0,
-        changePct: 0,
-        regime,
-        advice,
-      };
-    }
-  } catch {}
-
-  // 3. Static fallback
-  return {
-    vix: 11.34,
-    prevClose: 11.34,
-    change: 0,
-    changePct: 0,
-    regime: 'Low Volatility',
-    advice: 'Implied volatility is low (11.34). Option premiums are lower than normal. Focus on defined risk credit spreads or strangles with realistic profit expectations.',
-  };
-}
-
-async function fetchUnderlyingChain(underlying: string, expiry: string): Promise<{
-  chain: Record<string, unknown>;
-  spot: number;
-  prevClose: number;
-}> {
-  const cacheKey = `scanner-chain:${underlying}:${expiry}`;
-  const parsed = await dedupe(cacheKey, () =>
-    spaced(`dhan-spawn:${underlying}`, () =>
-      runPythonJson<{
-        chain?: Record<string, unknown>;
-        spot?: number;
-        prev_close?: number;
-        error?: string;
-      }>(FETCH_SCRIPT, ['chain', '--underlying', underlying, '--expiry', expiry], 45_000),
-    ),
-  );
-
-  return {
-    chain: parsed.chain ?? {},
-    spot: parsed.spot ?? 0,
-    prevClose: parsed.prev_close ?? 0,
-  };
-}
-
-async function fetchUnderlyingExpiries(underlying: string): Promise<string[]> {
-  try {
-    const parsed = await dedupe(`scanner-expiries:${underlying}`, () =>
-      spaced(`dhan-spawn:${underlying}`, () =>
-        runPythonJson<{ expiries?: string[] }>(
-          FETCH_SCRIPT,
-          ['expiries', '--underlying', underlying],
-          30_000,
-        ),
-      ),
-    );
-    return parsed.expiries ?? [];
-  } catch {
-    return [];
-  }
-}
 
 export async function POST(request: NextRequest): Promise<NextResponse<ScanResponse>> {
   try {
     const body = await request.json() as Partial<ScanFilters> & { broker?: string };
-    
+
     const filters: ScanFilters = {
-      underlying: body.underlying ?? 'ALL',
+      underlying: body.underlying ?? 'NIFTY',
       expiry: body.expiry,
       minRom: Number(body.minRom ?? 1.0),
       minDistancePct: Number(body.minDistancePct ?? 0.5),
-      maxDistancePct: Number(body.maxDistancePct ?? 6.0),
+      maxDistancePct: Number(body.maxDistancePct ?? 5.0),
       riskProfile: body.riskProfile ?? 'all',
       strategyTypes: Array.isArray(body.strategyTypes) ? body.strategyTypes : [],
       maxResults: Number(body.maxResults ?? 60),
       sortBy: body.sortBy ?? 'score',
     };
 
-    // 2. Determine target underlyings
-    const targetUnderlyings: UnderlyingType[] =
-      filters.underlying === 'ALL'
-        ? ['NIFTY', 'SENSEX']
-        : [filters.underlying];
+    const u = filters.underlying;
 
-    // Fetch VIX and every underlying's chain concurrently — `spaced()` already
-    // keys pacing per underlying, so nothing here needs to serialize across them.
-    const [vixInfo, ...perUnderlying] = await Promise.all([
-      fetchLiveIndiaVix(),
-      ...targetUnderlyings.map(async (u) => {
-        let targetExpiry = filters.expiry;
-        if (!targetExpiry) {
-          const expiries = await fetchUnderlyingExpiries(u);
-          targetExpiry = expiries[0];
-        }
-        if (!targetExpiry) return null;
-
-        const { chain, spot } = await fetchUnderlyingChain(u, targetExpiry);
-        return { u, targetExpiry, chain, spot };
-      }),
-    ]);
+    // Fetch VIX and the underlying's chain concurrently.
+    const [vixInfo, resolvedExpiry, chainResult] = await (async () => {
+      let targetExpiry = filters.expiry;
+      const [vix, expiryList] = await Promise.all([
+        fetchLiveIndiaVix(),
+        targetExpiry ? Promise.resolve<string[]>([]) : fetchUnderlyingExpiries(u),
+      ]);
+      if (!targetExpiry) targetExpiry = expiryList[0];
+      if (!targetExpiry) return [vix, undefined, null] as const;
+      const chain = await fetchUnderlyingChain(u, targetExpiry);
+      return [vix, targetExpiry, chain] as const;
+    })();
 
     const spotPrices: Record<string, number> = {};
     const allCandidates: ScannedStrategy[] = [];
     let scannedCount = 0;
     let totalCombos = 0;
 
-    for (const entry of perUnderlying) {
-      if (!entry) continue;
-      const { u, targetExpiry, chain, spot } = entry;
+    if (resolvedExpiry && chainResult) {
+      const { chain, spot } = chainResult;
       if (spot > 0) {
         spotPrices[u] = spot;
       }
@@ -231,7 +63,7 @@ export async function POST(request: NextRequest): Promise<NextResponse<ScanRespo
 
         const found = scanOptionChain(
           u,
-          targetExpiry,
+          resolvedExpiry,
           spot,
           quotes,
           strikes,
