@@ -122,14 +122,18 @@ export async function fetchLiveIndiaVix(): Promise<VixResult> {
   };
 }
 
-export async function fetchUnderlyingChain(underlying: string, expiry: string): Promise<{
+export async function fetchUnderlyingChain(
+  underlying: string,
+  expiry: string,
+  paceKey?: string,
+): Promise<{
   chain: Record<string, unknown>;
   spot: number;
   prevClose: number;
 }> {
   const cacheKey = `scanner-chain:${underlying}:${expiry}`;
   const parsed = await dedupe(cacheKey, () =>
-    spaced(`dhan-spawn:${underlying}`, () =>
+    spaced(paceKey ?? `dhan-spawn:${underlying}`, () =>
       runPythonJson<{
         chain?: Record<string, unknown>;
         spot?: number;
@@ -215,10 +219,10 @@ export async function fetchNettedMargin(
   }
 }
 
-export async function fetchUnderlyingExpiries(underlying: string): Promise<string[]> {
+export async function fetchUnderlyingExpiries(underlying: string, paceKey?: string): Promise<string[]> {
   try {
     const parsed = await dedupe(`scanner-expiries:${underlying}`, () =>
-      spaced(`dhan-spawn:${underlying}`, () =>
+      spaced(paceKey ?? `dhan-spawn:${underlying}`, () =>
         runPythonJson<{ expiries?: string[] }>(
           FETCH_SCRIPT,
           ['expiries', '--underlying', underlying],

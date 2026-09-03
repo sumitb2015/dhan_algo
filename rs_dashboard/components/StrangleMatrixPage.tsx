@@ -69,8 +69,9 @@ export default function StrangleMatrixPage() {
   // Poll loop, paused while the tab is hidden or the user pauses manually —
   // matches this repo's polling-guard convention (dhan-polling-guards skill).
   useEffect(() => {
-    fetchMatrix();
     if (paused) return;
+
+    fetchMatrix();
 
     let intervalId: ReturnType<typeof setInterval> | null = null;
 
@@ -315,30 +316,50 @@ export default function StrangleMatrixPage() {
                 </tr>
               </thead>
               <tbody className="divide-y divide-zinc-800 text-zinc-300">
-                {visibleRows.map(row => (
-                  <tr key={row.offset} className="hover:bg-zinc-800/40 transition-colors group">
-                    <td className="py-3 px-4 font-bold text-white sticky left-0 bg-zinc-900 group-hover:bg-zinc-800/40 z-10">
-                      ATM±{row.offset}
-                    </td>
-                    {row.cells.map((cell, i) => {
-                      const tone = cellTone(cell);
-                      return (
-                        <td key={data.expiries![i].expiry} className={`py-3 px-4 text-right tabular-nums ${tone.bg}`}>
-                          {cell ? (
-                            <>
-                              <div className={`font-bold ${tone.text}`}>₹{cell.netPremium.toLocaleString('en-IN')}</div>
-                              <div className="text-[10px] text-zinc-500">{cell.romPct.toFixed(2)}%</div>
-                            </>
-                          ) : (
-                            <span className={tone.text}>—</span>
-                          )}
-                        </td>
-                      );
-                    })}
-                  </tr>
-                ))}
+                {visibleRows.map(row => {
+                  // Strikes differ slightly per expiry (each has its own ATM
+                  // strike) — show the nearest expiry's pair as a subtitle,
+                  // and note that the pair varies by expiry.
+                  const repCell = row.cells.find(c => c !== null) ?? null;
+                  return (
+                    <tr key={row.offset} className="hover:bg-zinc-800/40 transition-colors group">
+                      <td className="py-3 px-4 font-bold text-white sticky left-0 bg-zinc-900 group-hover:bg-zinc-800/40 z-10">
+                        ATM±{row.offset}
+                        {repCell && (
+                          <div
+                            className="text-[10px] font-normal text-zinc-500 normal-case"
+                            title="Strikes vary slightly by expiry — nearest expiry shown"
+                          >
+                            {repCell.putStrike} / {repCell.callStrike}
+                          </div>
+                        )}
+                      </td>
+                      {row.cells.map((cell, i) => {
+                        const tone = cellTone(cell);
+                        return (
+                          <td key={data.expiries![i].expiry} className={`py-3 px-4 text-right tabular-nums ${tone.bg}`}>
+                            {cell ? (
+                              <>
+                                <div className={`font-bold ${tone.text}`}>₹{cell.netPremium.toLocaleString('en-IN')}</div>
+                                <div className="text-[10px] text-zinc-500">{cell.romPct.toFixed(2)}%</div>
+                                <div className="text-[10px] text-zinc-500">{cell.distancePct.toFixed(2)}% OTM</div>
+                              </>
+                            ) : (
+                              <span className={tone.text}>—</span>
+                            )}
+                          </td>
+                        );
+                      })}
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
+            {visibleRows.length === 0 && (
+              <div className="py-10 text-center text-xs text-zinc-500">
+                No offsets match the current filters.
+              </div>
+            )}
           </div>
         )}
       </main>
