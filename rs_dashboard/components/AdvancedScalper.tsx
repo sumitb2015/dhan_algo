@@ -1424,15 +1424,18 @@ export default function AdvancedScalper() {
         updateBox(boxId, { strike: newStrike, limitPrice: '' });
 
         // 3. Place order on new strike — inherit the original position's product
-        // (MARGIN/INTRADAY) so a shifted positional/margin trade stays MARGIN rather
-        // than accidentally opening as INTRADAY and causing unbalanced hedging.
+        // so a shifted positional/margin trade stays positional rather than
+        // accidentally opening as intraday and causing unbalanced hedging.
+        // positionProduct() already normalises Dhan (MARGIN/INTRADAY/CNC) and
+        // Zerodha/Kotak (NRML/MIS/CNC) onto the broker's own native vocabulary,
+        // so both must be recognised here — not just Dhan's.
         const origProduct = positionProduct(pos);
         const resolvedProductDhan = (origProduct === 'MARGIN' || origProduct === 'INTRADAY' || origProduct === 'CNC')
           ? origProduct
-          : productType;
-        const resolvedProductOther = origProduct === 'MARGIN'
-          ? 'NRML'
-          : (origProduct === 'INTRADAY' ? 'MIS' : (productType === 'MARGIN' ? 'NRML' : 'MIS'));
+          : (origProduct === 'NRML' ? 'MARGIN' : (origProduct === 'MIS' ? 'INTRADAY' : productType));
+        const resolvedProductOther = (origProduct === 'NRML' || origProduct === 'MIS' || origProduct === 'CNC')
+          ? origProduct
+          : (origProduct === 'MARGIN' ? 'NRML' : (origProduct === 'INTRADAY' ? 'MIS' : (productType === 'MARGIN' ? 'NRML' : 'MIS')));
 
         const newSecEntry = strikeMap[String(newStrike)];
         let res: Response;

@@ -264,11 +264,15 @@ export async function POST(request: NextRequest) {
     for (const r of requests) {
       if (!r || typeof r !== 'object') continue;
       const req = r as Record<string, unknown>;
+      // Each leg carries its own underlying (a caller can watch legs across
+      // several underlyings in one call) — fall back to the top-level default
+      // only when a leg omits it, rather than overwriting every leg with it.
+      const reqUnderlying = req.underlying ? String(req.underlying).toUpperCase() : underlying;
       const expiry = String(req.expiry ?? '');
       const strike = Number(req.strike);
       const side = String(req.side ?? '').toUpperCase();
       if (!expiry || !Number.isFinite(strike) || (side !== 'CE' && side !== 'PE')) continue;
-      clean.push({ underlying, expiry, strike, side });
+      clean.push({ underlying: reqUnderlying, expiry, strike, side });
     }
 
     // Full replace, not an incremental add: the caller sends its complete
