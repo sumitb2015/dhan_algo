@@ -36,7 +36,8 @@ const SECTIONS: { icon: React.ElementType; title: string; body: string[] }[] = [
     icon: Target,
     title: 'Read a candidate',
     body: [
-      'Each card shows RoM % (and its annualized figure), net credit, estimated margin, probability of profit, distance from spot, and the individual legs with live LTPs, breakevens, and a risk tier.',
+      'Each card shows RoM % (and its annualized figure), margin, probability of profit, distance from spot, and the individual legs with live LTPs, breakevens, and a risk tier.',
+      'A green dot next to "Live Margin" means that figure came from Dhan\'s own margin calculator for this exact combo — accurate, but only priced for the top candidates shown (fetching it for every combo evaluated would be far too slow). Cards without the dot show "Est. Margin" — a flat per-strategy formula, useful for ranking but not the real number your broker would block.',
     ],
   },
   {

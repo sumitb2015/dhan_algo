@@ -3,6 +3,8 @@ import {
   fetchLiveIndiaVix,
   fetchUnderlyingChain,
   fetchUnderlyingExpiries,
+  fetchNettedMargin,
+  type MarginLeg,
 } from '@/lib/ultimateScannerDhan';
 import {
   parseChainQuotes,
@@ -84,6 +86,37 @@ export async function POST(request: NextRequest): Promise<NextResponse<ScanRespo
     });
 
     const shortlisted = allCandidates.slice(0, filters.maxResults);
+
+    // Every candidate's estMargin is a flat per-strategy formula (e.g. a fixed
+    // ₹120,000 for any 1-lot NIFTY strangle) — good enough to filter/rank the
+    // full combinatorial search cheaply, but not the real netted margin Dhan
+    // would actually block. Replace it with the real figure (via Dhan's own
+    // multi-leg margin calculator) for the top candidates actually shown to
+    // the user. Capped and sequential, paced to respect Dhan's ~1 req/s limit —
+    // doing this for every evaluated combo (100s) would blow both the request's
+    // time budget and the rate limit.
+    const ENRICH_TOP_N = 12;
+    const enrichCount = Math.min(ENRICH_TOP_N, shortlisted.length);
+    for (let i = 0; i < enrichCount; i++) {
+      const candidate = shortlisted[i];
+      const legs: MarginLeg[] = candidate.legs.map(leg => ({
+        side: leg.side,
+        securityId: leg.securityId ?? '',
+        quantity: leg.lots * leg.lotSize,
+      }));
+      if (legs.some(leg => !leg.securityId)) continue;
+
+      const liveMargin = await fetchNettedMargin(candidate.underlying, legs);
+      if (liveMargin !== null) {
+        candidate.estMargin = liveMargin;
+        candidate.romPct = Math.round((candidate.netPremium / liveMargin) * 100 * 100) / 100;
+        candidate.romAnnualizedPct = Math.round((candidate.romPct / Math.max(1, candidate.dte)) * 365);
+        candidate.marginSource = 'live';
+      }
+      if (i < enrichCount - 1) {
+        await new Promise(resolve => setTimeout(resolve, 1100));
+      }
+    }
 
     return NextResponse.json({
       success: true,

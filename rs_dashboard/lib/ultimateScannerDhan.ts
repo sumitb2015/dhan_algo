@@ -5,6 +5,7 @@ import { getDhanCredentials } from '@/lib/dhanToken';
 const FETCH_SCRIPT = path.join(PROJECT_ROOT, 'scripts', 'tools', 'options_data_fetch.py');
 const VIX_SECURITY_ID = 21;
 const DHAN_OHLC_URL = 'https://api.dhan.co/v2/marketfeed/ohlc';
+const MARGIN_CALCULATOR_URL = 'https://api.dhan.co/v2/margincalculator/multi';
 
 export interface VixResult {
   vix: number;
@@ -143,6 +144,75 @@ export async function fetchUnderlyingChain(underlying: string, expiry: string): 
     spot: parsed.spot ?? 0,
     prevClose: parsed.prev_close ?? 0,
   };
+}
+
+export interface MarginLeg {
+  side: 'BUY' | 'SELL';
+  securityId: string;
+  quantity: number; // lots * lotSize
+}
+
+/**
+ * Real netted margin for an exact multi-leg combo, via Dhan's own
+ * /margincalculator/multi (portfolio-netted SPAN + exposure — the same figure
+ * Dhan's Strategy Builder and this dashboard's Multi-Leg Focus panel show).
+ * Used to replace the scanner engine's flat per-strategy margin estimate
+ * (e.g. a fixed ₹120,000 for any 1-lot NIFTY strangle) with the real
+ * lot-size-aware figure for the handful of top candidates actually shown to
+ * the user — calling this for every combo evaluated during the bulk scan
+ * (100s of candidates) would blow both the request's time budget and Dhan's
+ * rate limit, so callers must cap how many candidates they enrich.
+ *
+ * Returns null (never throws) on any failure — callers fall back to the
+ * existing estimate rather than losing the candidate.
+ */
+export async function fetchNettedMargin(
+  underlying: string,
+  legs: MarginLeg[],
+): Promise<number | null> {
+  if (legs.length === 0) return null;
+  try {
+    const auth = getDhanCredentials();
+    if (!auth.token || !auth.clientId) return null;
+
+    const exchangeSegment = underlying === 'SENSEX' ? 'BSE_FNO' : 'NSE_FNO';
+    const scripList = legs.map(leg => ({
+      exchangeSegment,
+      transactionType: leg.side,
+      quantity: leg.quantity,
+      productType: 'MARGIN',
+      securityId: leg.securityId,
+      price: 0,
+    }));
+
+    const res = await fetch(MARGIN_CALCULATOR_URL, {
+      method: 'POST',
+      headers: {
+        'access-token': auth.token,
+        'client-id': auth.clientId,
+        'Content-Type': 'application/json',
+        'Accept': 'application/json',
+      },
+      body: JSON.stringify({
+        includePosition: false,
+        includeOrders: false,
+        scripList,
+      }),
+      signal: AbortSignal.timeout(6000),
+    });
+
+    const json = await res.json() as {
+      status?: string;
+      data?: { totalMargin?: number };
+    };
+    const totalMargin = json.data?.totalMargin;
+    if (json.status === 'success' && typeof totalMargin === 'number' && totalMargin > 0) {
+      return Math.round(totalMargin * 100) / 100;
+    }
+    return null;
+  } catch {
+    return null;
+  }
 }
 
 export async function fetchUnderlyingExpiries(underlying: string): Promise<string[]> {
