@@ -25,7 +25,8 @@ on the SAME expiry selected at entry — the expiry is never re-selected mid-wee
   Either condition closes that leg and re-sells a fresh leg at --entry-delta on
   the same expiry. No premium-symmetry re-check on a roll (only at entry). After
   a roll, the CE>PE inversion guard is re-checked against the OTHER leg's current
-  strike; a violation flattens BOTH legs immediately (EMERGENCY_FLATTENED).
+  strike; a violation flattens BOTH legs and pauses new entries for 5 minutes
+  (EMERGENCY_FLATTENED, per CLAUDE.md's documented inversion-guard convention).
 
 Exit: both legs closed on --exit-weekday (default Tuesday) at/after --exit-time
 (default 15:15 IST) — not the universal 15:17 intraday trigger, since this
@@ -34,9 +35,16 @@ strategy carries MARGIN product overnight and isn't racing broker EOD square-off
 Order product is MARGIN (overnight carry), NOT the ExecutionBroker default of
 INTRADAY — every buy()/sell() call here passes product="MARGIN" explicitly.
 
+Every buy-to-close is confirmed filled (helper.wait_for_fill on Dhan; polled
+broker.get_owned_net_qty() on Zerodha/Kotak) before its leg is cleared, rolled,
+or reused — an unconfirmed close leaves the leg tracked and the strategy in a
+dedicated UNWINDING (naked leg from a failed entry) or FLATTENING (partial
+exit_all) status, so a stuck close can never be papered over by opening a
+fresh leg on top of it.
+
 State survives restarts via debug/<state_key>_portfolio.json (expiry, strikes,
-lots, SL order ids, roll counts) — reloaded before the loop starts; an open
-position is resumed directly into monitoring, never blindly re-entered.
+lots, lot size, SL order ids, roll counts) — reloaded before the loop starts;
+an open position is resumed directly into monitoring, never blindly re-entered.
 
 Usage (dry run by default — no real orders without --live):
     venv\\Scripts\\python.exe strategies/delta_strangle/nifty_delta_strangle.py
@@ -51,7 +59,7 @@ import os
 import sys
 import time
 import traceback
-from datetime import datetime
+from datetime import datetime, timedelta
 
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 sys.path.insert(0, PROJECT_ROOT)
@@ -166,13 +174,22 @@ class NiftyDeltaStrangle:
         self.lot_size = 0
 
         # Position state (persisted).
-        self.status = "IDLE"          # IDLE | ENTERED
+        # IDLE: flat. ENTERED: normal open position. UNWINDING: a naked leg left by a
+        # failed second-leg entry, being closed. FLATTENING: exit_all() closed at least
+        # one leg but not all — retrying the rest; monitor()'s refill logic never runs
+        # in this status so a stuck leg can't be "fixed" by reopening the other side.
+        self.status = "IDLE"
         self.expiry = None
         self.lots = 0
         self.entry_date = None
         self.legs = {"ce": None, "pe": None}   # each: {strike, entry_premium, entry_delta, sl_order_id, last_delta}
         self.roll_count = {"ce": 0, "pe": 0}
         self.last_alert = ""
+        # Set after an emergency flatten (post-roll inversion). CLAUDE.md's documented
+        # strangle inversion-guard convention is "emergency exit + 5-minute pause + fresh
+        # cycle" — attempt_entry() honors this so a chain that's still misbehaving isn't
+        # re-entered on the very next poll.
+        self.cooldown_until = None
 
     # ── portfolio persistence ───────────────────────────────────────────────
     @property
@@ -199,10 +216,21 @@ class NiftyDeltaStrangle:
         self.roll_count = data.get("roll_count", {"ce": 0, "pe": 0})
         self.entry_date = data.get("entry_date")
 
-        logger.info(f"Restored portfolio: status={self.status} expiry={self.expiry} "
-                    f"lots={self.lots} ce={self.legs.get('ce')} pe={self.legs.get('pe')}")
+        if self.status in ("ENTERED", "UNWINDING", "FLATTENING"):
+            # Exit sizing (own_qty = lots * lot_size) must match what was actually sold
+            # at entry, not whatever NSE's lot size happens to be at restart time — a
+            # mid-week lot-size revision would otherwise silently corrupt exit qty math.
+            # A fresh entry always re-fetches the live lot size in run(), before this
+            # call, so this only overrides while an existing position is open.
+            persisted_lot_size = data.get("lot_size")
+            if persisted_lot_size:
+                self.lot_size = int(persisted_lot_size)
 
-        if self.status == "ENTERED" and not self.dry_run:
+        logger.info(f"Restored portfolio: status={self.status} expiry={self.expiry} "
+                    f"lots={self.lots} lot_size={self.lot_size} "
+                    f"ce={self.legs.get('ce')} pe={self.legs.get('pe')}")
+
+        if self.status in ("ENTERED", "UNWINDING", "FLATTENING") and not self.dry_run:
             self._reconcile_against_broker()
 
     def save_portfolio(self) -> None:
@@ -280,18 +308,51 @@ class NiftyDeltaStrangle:
         fn = self.broker.sell if side == "SELL" else self.broker.buy
         return fn(strike, self.expiry, opt_type, qty, product="MARGIN")
 
-    def _close_leg_qty(self, side: str) -> int:
-        """Quantity to buy-to-close this leg, clamped by broker truth (live) or
-        trusted at face value (dry run, where the broker has no paper position)."""
+    def _resolve_close(self, side: str) -> tuple:
+        """(qty, net_before) to buy-to-close this leg. qty is clamped by broker
+        truth (live) or trusted at face value (dry run, where the broker has no
+        paper position). net_before is the broker's net qty just before the
+        close order, used by _confirm_close() to verify the fill actually landed."""
         leg = self.legs.get(side)
         if not leg or not leg.get("strike"):
-            return 0
+            return 0, 0
         own_qty = self.lots * self.lot_size
         if self.dry_run:
-            return own_qty
-        qty, _ = resolve_exit_qty_broker(
+            return own_qty, 0
+        qty, net_before = resolve_exit_qty_broker(
             self.broker, leg["strike"], self.expiry, side.upper(), own_qty, "BUY", logger)
-        return qty
+        return qty, net_before
+
+    def _confirm_close(self, side: str, strike: int, oid, qty_closed: int, net_before: int) -> bool:
+        """Block until a buy-to-close order is actually confirmed filled.
+
+        A closing order's return value is just an order id — treating that as
+        "closed" and moving on (clearing the leg, rolling into a new strike, or
+        going flat) would leave a real short live and untracked the moment the
+        order is rejected, partially filled, or still pending. Every caller that
+        clears/overwrites a leg after a close MUST gate on this returning True.
+        """
+        if self.dry_run:
+            return True
+        if not oid:
+            return False
+        if self.broker_name == "dhan":
+            return self.helper.wait_for_fill(oid, timeout=15)
+        # Zerodha/Kotak have no generic wait_for_fill; poll the broker's own net
+        # qty for this leg until it reflects the close. Comparing against
+        # net_before + qty_closed (not a blind ==0) keeps this correct even
+        # when another instance shares the same strike.
+        expected_after = net_before + qty_closed
+        deadline = time.time() + 15
+        while time.time() < deadline:
+            time.sleep(1)
+            try:
+                net_after = self.broker.get_owned_net_qty(strike, self.expiry, side.upper())
+            except Exception:
+                continue
+            if net_after == expected_after:
+                return True
+        return False
 
     def _cancel_sl(self, side: str) -> None:
         leg = self.legs.get(side)
@@ -357,6 +418,10 @@ class NiftyDeltaStrangle:
     # ── entry ────────────────────────────────────────────────────────────────
     def attempt_entry(self) -> None:
         now = datetime.now()
+        if self.cooldown_until and now < self.cooldown_until:
+            logger.info(f"In post-emergency-flatten cooldown until {self.cooldown_until:%H:%M:%S} — skipping.")
+            return
+        self.cooldown_until = None
         if now.weekday() != self.entry_weekday:
             return
         if not self.helper.is_market_open():
@@ -409,12 +474,22 @@ class NiftyDeltaStrangle:
         pe_oid = self._place("SELL", pe_strike, "PE", qty)
         if not pe_oid:
             logger.critical(f"PE leg placement FAILED after CE leg was sold ({ce_strike}). "
-                             f"Closing the naked CE leg immediately.")
-            close_qty = qty if self.dry_run else resolve_exit_qty_broker(
-                self.broker, ce_strike, expiry, "CE", qty, "BUY", logger)[0]
-            if close_qty > 0:
-                self._place("BUY", ce_strike, "CE", close_qty)
-            self.expiry = None
+                             f"Marking CE as an unwind-pending naked leg — NOT a normal position.")
+            # Record the naked CE leg and switch to UNWINDING *before* attempting the
+            # close, so a crash or a failed/unconfirmed close is never silently lost —
+            # it stays tracked as an open leg rather than vanishing from state while
+            # still live on the broker. UNWINDING is deliberately distinct from ENTERED:
+            # loop_once() routes it to retry_unwind() only, so monitor()'s flat-leg
+            # refill logic never mistakes the missing PE for a leg to re-sell.
+            self.expiry = expiry
+            self.lots = lots
+            self.legs = {"ce": {"strike": ce_strike, "entry_premium": ce_premium,
+                                 "entry_delta": ce_delta, "last_delta": ce_delta, "sl_order_id": None},
+                         "pe": None}
+            self.status = "UNWINDING"
+            self.last_alert = f"PE leg failed after CE {ce_strike} sold — unwinding naked CE"
+            self.save_portfolio()
+            self.retry_unwind()
             return
 
         self.lots = lots
@@ -439,9 +514,20 @@ class NiftyDeltaStrangle:
         old_strike = leg["strike"]
         logger.info(f"ROLL {opt_type} {old_strike} (delta {leg.get('last_delta')}) — closing and re-selecting.")
 
-        close_qty = self._close_leg_qty(side)
+        close_qty, net_before = self._resolve_close(side)
         if close_qty > 0:
-            self._place("BUY", old_strike, opt_type, close_qty)
+            oid = self._place("BUY", old_strike, opt_type, close_qty)
+            if not self._confirm_close(side, old_strike, oid, close_qty, net_before):
+                # The old short is still live and untracked-risk if we proceed to sell a
+                # NEW leg or clear this one now — leave it exactly as-is (still tracked
+                # at old_strike) so the next poll's monitor() retries the same roll,
+                # instead of doubling up on this side.
+                logger.critical(f"Roll of {opt_type} {old_strike}: buy-to-close did NOT confirm "
+                                 f"(order {oid}). Leaving leg tracked at {old_strike} — will retry "
+                                 f"next poll rather than risk a second short on top of it.")
+                self.last_alert = f"UNCONFIRMED close on {opt_type} {old_strike} during roll — retrying"
+                self.save_portfolio()
+                return
         self._cancel_sl(side)
 
         new_strike, new_premium, new_delta = pick_leg(chain_df, side, self.entry_delta)
@@ -463,6 +549,7 @@ class NiftyDeltaStrangle:
                                  f"{other_side.upper()} {other_strike}. EMERGENCY FLATTEN.")
                 self.legs[side] = None
                 self.exit_all("EMERGENCY_FLATTENED — post-roll inversion")
+                self.cooldown_until = datetime.now() + timedelta(minutes=5)
                 return
 
         qty = self.lots * self.lot_size
@@ -489,6 +576,15 @@ class NiftyDeltaStrangle:
             return
 
         for side in ("ce", "pe"):
+            # roll_leg() below can call exit_all()/EMERGENCY_FLATTEN mid-loop (post-roll
+            # inversion on the FIRST side processed) or leave a close unconfirmed and
+            # awaiting retry — either way self.status is no longer ENTERED and self.expiry/
+            # self.lots may now be None/0. Stop rather than process the other side against
+            # now-stale/nonexistent position state (e.g. selling qty=0*lot_size, or
+            # resolving strikes against an expiry we've already gone flat on).
+            if self.status != "ENTERED":
+                return
+
             leg = self.legs.get(side)
             if not leg or not leg.get("strike"):
                 # Leg was left flat by a failed roll — try to refill it now.
@@ -531,22 +627,40 @@ class NiftyDeltaStrangle:
     # ── exit ─────────────────────────────────────────────────────────────────
     def exit_all(self, reason: str) -> None:
         logger.info(f"EXIT ALL | reason={reason}")
+        all_confirmed = True
         for side in ("ce", "pe"):
             leg = self.legs.get(side)
             if not leg or not leg.get("strike"):
                 continue
-            qty = self._close_leg_qty(side)
+            qty, net_before = self._resolve_close(side)
             if qty > 0:
-                self._place("BUY", leg["strike"], side.upper(), qty)
+                oid = self._place("BUY", leg["strike"], side.upper(), qty)
+                if not self._confirm_close(side, leg["strike"], oid, qty, net_before):
+                    logger.critical(f"Exit-all: buy-to-close for {side.upper()} {leg['strike']} did "
+                                     f"NOT confirm (order {oid}). Leaving that leg tracked so the "
+                                     f"next poll retries it, rather than going flat while it's still live.")
+                    all_confirmed = False
+                    continue
             self._cancel_sl(side)
+            self.legs[side] = None
 
-        self.legs = {"ce": None, "pe": None}
+        self.last_alert = reason
+        if not all_confirmed:
+            # FLATTENING is a dedicated status (distinct from ENTERED) precisely so
+            # monitor()'s "leg is None -> refill it" logic can never run while a leg
+            # here is still stuck open awaiting a retry — refilling the confirmed-closed
+            # side here would recreate the very imbalance/inversion this exit was meant
+            # to resolve, while the stuck side is still live. loop_once() routes
+            # FLATTENING straight back into another exit_all() attempt, nothing else.
+            self.status = "FLATTENING"
+            self.save_portfolio()
+            return
+
         self.status = "IDLE"
         self.expiry = None
         self.lots = 0
         self.entry_date = None
         self.roll_count = {"ce": 0, "pe": 0}
-        self.last_alert = reason
         self.save_portfolio()
 
     def check_scheduled_exit(self) -> None:
@@ -554,10 +668,29 @@ class NiftyDeltaStrangle:
         if now.weekday() == self.exit_weekday and now.strftime("%H:%M") >= self.exit_time:
             self.exit_all("Scheduled Tuesday exit")
 
+    def retry_unwind(self) -> None:
+        """UNWINDING-only: keep trying to close the single naked leg left behind
+        by a failed second-leg entry. Never touches the other (already-None) side."""
+        side = "ce" if self.legs.get("ce") else ("pe" if self.legs.get("pe") else None)
+        if side is None:
+            logger.warning("retry_unwind() called with no naked leg tracked — going IDLE.")
+            self.status = "IDLE"
+            self.expiry = None
+            self.lots = 0
+            self.save_portfolio()
+            return
+        self.exit_all(self.last_alert or f"Unwinding naked {side.upper()}")
+        if self.status == "IDLE":
+            self.last_alert = f"Unwind of naked {side.upper()} confirmed flat."
+
     # ── main cycle ───────────────────────────────────────────────────────────
     def loop_once(self) -> None:
         if self.status == "IDLE":
             self.attempt_entry()
+        elif self.status == "UNWINDING":
+            self.retry_unwind()
+        elif self.status == "FLATTENING":
+            self.exit_all(self.last_alert or "Retrying incomplete exit")
         elif self.status == "ENTERED":
             self.monitor()
             if self.status == "ENTERED":   # monitor() may have emergency-flattened us

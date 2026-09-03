@@ -54,12 +54,40 @@ the chain:
 A roll does **not** re-check premium symmetry against the other leg — only
 delta drives it. After a roll, the CE>PE inversion guard is re-checked
 against the *other* leg's current strike; a violation triggers
-`EMERGENCY_FLATTENED` — both legs are closed immediately and the strategy
-goes IDLE, rather than attempting further rolls that week.
+`EMERGENCY_FLATTENED` — both legs are closed and the strategy goes idle for
+a 5-minute cooldown before it's eligible to re-enter, per CLAUDE.md's
+documented inversion-guard convention (emergency exit + 5-minute pause +
+fresh cycle).
 
 If a roll can't find a qualifying new strike (or the re-sell order fails),
 that leg is left flat rather than forced into a bad strike — the next poll's
 `monitor()` pass retries filling it.
+
+## Order-close confirmation and status machine
+
+A buy-to-close order's return value is just an order id, not proof the short
+is actually gone. Every place a leg gets closed — a roll, the scheduled
+Tuesday exit, or an emergency flatten — blocks on `_confirm_close()` before
+treating that leg as flat: `helper.wait_for_fill()` on Dhan, or polling
+`broker.get_owned_net_qty()` against the expected post-close net (not a
+blind `== 0`, since another instance can share the same strike) on
+Zerodha/Kotak.
+
+If a close doesn't confirm, the leg is left exactly as tracked — never
+cleared, never rolled into a new strike — and the strategy enters one of two
+dedicated statuses so `monitor()`'s "leg is `None` → refill it" logic can
+never run against a leg that's still stuck open:
+
+- **`UNWINDING`**: a single naked leg left by a failed second-leg entry
+  (CE sold, PE rejected). Every poll retries closing just that leg via
+  `retry_unwind()`.
+- **`FLATTENING`**: an `exit_all()` (scheduled exit or emergency flatten)
+  that closed at least one leg but not all. Every poll retries `exit_all()`
+  again until every leg confirms closed, then the strategy goes `IDLE`.
+
+Both statuses are dead ends for `attempt_entry()` and `monitor()` — nothing
+else happens while either is active, so a stuck close can't be "fixed" by
+opening a fresh leg on top of it.
 
 ## Order product and exit sizing
 
