@@ -619,7 +619,12 @@ export default function StrangleMatrixPage() {
       });
     });
 
-    return { bestRomCell, bestRomExpiry, safestCell, safestExpiry };
+    return {
+      bestRomCell: bestRomCell as StrangleCell | null,
+      bestRomExpiry,
+      safestCell: safestCell as StrangleCell | null,
+      safestExpiry,
+    };
   }, [data]);
 
   // Derived Chart Datasets
@@ -1429,4 +1434,3 @@ export default function StrangleMatrixPage() {
     </div>
   );
 }
-
