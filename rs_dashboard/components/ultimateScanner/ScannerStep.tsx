@@ -32,6 +32,7 @@ interface ScannerStepProps {
   onTradeInMultiLegFocus: (candidate: ScannedStrategy) => void;
   onNavigateToWatchlist: () => void;
   watchlistCount: number;
+  onScanDataDate?: (date: string) => void;
 }
 
 const STRATEGY_OPTIONS: { id: StrategyType; label: string; desc: string }[] = [
@@ -49,6 +50,7 @@ export default function ScannerStep({
   onTradeInMultiLegFocus,
   onNavigateToWatchlist,
   watchlistCount,
+  onScanDataDate,
 }: ScannerStepProps) {
   // ── Filters State ───────────────────────────────────────────────────
   const [underlying, setUnderlying] = useState<UnderlyingType | 'ALL'>('ALL');
@@ -72,17 +74,16 @@ export default function ScannerStep({
   const [addedIds, setAddedIds] = useState<Set<string>>(new Set());
 
   // ── Run Scan Function ──────────────────────────────────────────────
-  const handleRunScan = useCallback(async (activeStrat?: 'ALL' | StrategyType, activeRom?: number) => {
+  // Always requests every strategy type — narrowing to a single strategy is a
+  // pure client-side filter over `scanResult.candidates` (see `displayedCandidates`
+  // below), so switching strategy pills never needs a fresh Dhan chain spawn.
+  const scanRequestId = React.useRef(0);
+  const handleRunScan = useCallback(async (activeRom?: number) => {
+    const requestId = ++scanRequestId.current;
     setLoading(true);
     setError(null);
     try {
-      const stratMode = activeStrat !== undefined ? activeStrat : strategyFilterMode;
       const targetRom = activeRom !== undefined ? activeRom : minRom;
-
-      const targetStrategyTypes: StrategyType[] =
-        stratMode === 'ALL'
-          ? []
-          : [stratMode];
 
       const payload: Partial<ScanFilters> = {
         underlying,
@@ -90,7 +91,7 @@ export default function ScannerStep({
         minDistancePct,
         maxDistancePct,
         riskProfile,
-        strategyTypes: targetStrategyTypes,
+        strategyTypes: [],
         sortBy,
         maxResults: 80,
       };
@@ -102,27 +103,31 @@ export default function ScannerStep({
       });
 
       const data = (await res.json()) as ScanResponse;
+      // Drop stale responses from an older, slower request that resolves after
+      // a newer one already landed.
+      if (requestId !== scanRequestId.current) return;
       if (data.success) {
         setScanResult(data);
+        if (data.dataDate) onScanDataDate?.(data.dataDate);
       } else {
         setError(data.error || 'Failed to scan option chains');
       }
     } catch (err: unknown) {
+      if (requestId !== scanRequestId.current) return;
       setError(String((err as Error).message || err));
     } finally {
-      setLoading(false);
+      if (requestId === scanRequestId.current) setLoading(false);
     }
-  }, [underlying, minRom, minDistancePct, maxDistancePct, riskProfile, strategyFilterMode, sortBy]);
+  }, [underlying, minRom, minDistancePct, maxDistancePct, riskProfile, sortBy, onScanDataDate]);
 
   // Initial scan on mount
   useEffect(() => {
-    handleRunScan('ALL', 1.0);
+    handleRunScan(1.0);
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Strategy selection handler: isolates selected strategy and triggers re-scan
+  // Strategy selection handler: purely client-side filter, no re-scan.
   const handleSelectStrategy = (stratId: 'ALL' | StrategyType) => {
     setStrategyFilterMode(stratId);
-    handleRunScan(stratId);
   };
 
   const handleAdd = (strat: ScannedStrategy) => {
@@ -283,7 +288,7 @@ export default function ScannerStep({
               {[0.5, 1.0, 2.0, 3.5].map(val => (
                 <button
                   key={val}
-                  onClick={() => { setMinRom(val); handleRunScan(undefined, val); }}
+                  onClick={() => { setMinRom(val); handleRunScan(val); }}
                   className={`px-1.5 py-0.5 rounded text-[10px] font-mono border transition-all ${
                     minRom === val
                       ? 'bg-emerald-500/20 text-emerald-400 border-emerald-500/40'
@@ -494,7 +499,7 @@ export default function ScannerStep({
             In low VIX regimes (11.34), option premiums are tighter. Try setting Min RoM to &ge;0.5% or 1.0%, or lowering the distance threshold to 0.5% OTM.
           </p>
           <button
-            onClick={() => { setMinRom(0.5); setMinDistancePct(0.5); handleRunScan(undefined, 0.5); }}
+            onClick={() => { setMinRom(0.5); setMinDistancePct(0.5); handleRunScan(0.5); }}
             className="mt-2 px-4 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold"
           >
             Auto-Tune for Low VIX (&ge;0.5% RoM)
@@ -575,7 +580,7 @@ export default function ScannerStep({
                       >
                         <div className="flex items-center gap-2">
                           <span
-                            className={`text-[10px] font-bold px-1.5 py-0.2 rounded ${
+                            className={`text-[10px] font-bold px-1.5 py-0.5 rounded ${
                               leg.side === 'SELL' ? 'bg-red-500/20 text-red-400' : 'bg-emerald-500/20 text-emerald-400'
                             }`}
                           >

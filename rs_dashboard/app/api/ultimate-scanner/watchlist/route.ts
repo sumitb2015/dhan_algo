@@ -28,7 +28,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
       return NextResponse.json({ success: false, error: 'candidate required' }, { status: 400 });
     }
 
-    const items = addToWatchlist(body.candidate, body.options);
+    const items = await addToWatchlist(body.candidate, body.options);
     return NextResponse.json({ success: true, data: items });
   } catch (err) {
     console.error('[/api/ultimate-scanner/watchlist POST]', err);
@@ -47,7 +47,7 @@ export async function PATCH(request: NextRequest): Promise<NextResponse> {
       return NextResponse.json({ success: false, error: 'id and patch required' }, { status: 400 });
     }
 
-    const items = updateWatchlistItem(body.id, body.patch);
+    const items = await updateWatchlistItem(body.id, body.patch);
     return NextResponse.json({ success: true, data: items });
   } catch (err) {
     console.error('[/api/ultimate-scanner/watchlist PATCH]', err);
@@ -64,7 +64,7 @@ export async function DELETE(request: NextRequest): Promise<NextResponse> {
       return NextResponse.json({ success: false, error: 'id parameter required' }, { status: 400 });
     }
 
-    const items = deleteWatchlistItem(id);
+    const items = await deleteWatchlistItem(id);
     return NextResponse.json({ success: true, data: items });
   } catch (err) {
     console.error('[/api/ultimate-scanner/watchlist DELETE]', err);

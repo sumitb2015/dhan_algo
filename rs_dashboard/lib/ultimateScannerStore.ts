@@ -35,72 +35,88 @@ export function writeWatchlist(items: WatchlistItem[]): void {
   });
 }
 
+// Serializes read-modify-write mutations against WATCHLIST_FILE so concurrent
+// requests (two tabs, a rapid double-click) can't both read the pre-mutation
+// array and have the second write silently clobber the first's change.
+let writeQueue: Promise<unknown> = Promise.resolve();
+
+function mutateWatchlist<T>(mutator: (items: WatchlistItem[]) => { items: WatchlistItem[]; result: T }): Promise<T> {
+  const run = writeQueue.then(() => {
+    const { items, result } = mutator(readWatchlist());
+    writeWatchlist(items);
+    return result;
+  });
+  writeQueue = run.catch(() => {});
+  return run;
+}
+
 /**
  * Add a scanned candidate strategy into the watchlist with default entry/exit rules.
  */
 export function addToWatchlist(
   candidate: ScannedStrategy,
   options?: Partial<Omit<WatchlistItem, keyof ScannedStrategy>>,
-): WatchlistItem[] {
-  const items = readWatchlist();
-  const now = new Date().toISOString();
-  
-  // Check if identical setup already exists
-  const existingIndex = items.findIndex(
-    item => item.underlying === candidate.underlying &&
-            item.expiry === candidate.expiry &&
-            item.type === candidate.type &&
-            JSON.stringify(item.legs.map(l => ({ s: l.strike, o: l.option, d: l.side }))) ===
-            JSON.stringify(candidate.legs.map(l => ({ s: l.strike, o: l.option, d: l.side })))
-  );
+): Promise<WatchlistItem[]> {
+  return mutateWatchlist(items => {
+    const now = new Date().toISOString();
 
-  const watchlistItem: WatchlistItem = {
-    ...candidate,
-    id: candidate.id || `us_watch_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`,
-    targetProfitPct: options?.targetProfitPct ?? 50,
-    stopLossPct: options?.stopLossPct ?? 100,
-    trailingSl: options?.trailingSl ?? false,
-    trailingSlOffsetPct: options?.trailingSlOffsetPct ?? 20,
-    expiryAutoExitTime: options?.expiryAutoExitTime ?? '15:15',
-    orderType: options?.orderType ?? 'MARKET',
-    status: options?.status ?? 'WATCHING',
-    currentNetPremium: candidate.netPremium,
-    currentPnl: 0,
-    currentPnlPct: 0,
-    notes: options?.notes ?? '',
-    addedAt: now,
-    lastUpdated: now,
-  };
+    // Check if identical setup already exists
+    const existingIndex = items.findIndex(
+      item => item.underlying === candidate.underlying &&
+              item.expiry === candidate.expiry &&
+              item.type === candidate.type &&
+              JSON.stringify(item.legs.map(l => ({ s: l.strike, o: l.option, d: l.side }))) ===
+              JSON.stringify(candidate.legs.map(l => ({ s: l.strike, o: l.option, d: l.side })))
+    );
 
-  if (existingIndex >= 0) {
-    items[existingIndex] = { ...items[existingIndex], ...watchlistItem, lastUpdated: now };
-  } else {
-    items.unshift(watchlistItem);
-  }
+    const watchlistItem: WatchlistItem = {
+      ...candidate,
+      id: candidate.id || `us_watch_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`,
+      targetProfitPct: options?.targetProfitPct ?? 50,
+      stopLossPct: options?.stopLossPct ?? 100,
+      trailingSl: options?.trailingSl ?? false,
+      trailingSlOffsetPct: options?.trailingSlOffsetPct ?? 20,
+      expiryAutoExitTime: options?.expiryAutoExitTime ?? '15:15',
+      orderType: options?.orderType ?? 'MARKET',
+      status: options?.status ?? 'WATCHING',
+      currentNetPremium: candidate.netPremium,
+      currentPnl: 0,
+      currentPnlPct: 0,
+      notes: options?.notes ?? '',
+      addedAt: now,
+      lastUpdated: now,
+    };
 
-  writeWatchlist(items);
-  return items;
+    if (existingIndex >= 0) {
+      items[existingIndex] = { ...items[existingIndex], ...watchlistItem, lastUpdated: now };
+    } else {
+      items.unshift(watchlistItem);
+    }
+
+    return { items, result: items };
+  });
 }
 
 export function updateWatchlistItem(
   id: string,
   patch: Partial<WatchlistItem>,
-): WatchlistItem[] {
-  const items = readWatchlist();
-  const idx = items.findIndex(item => item.id === id);
-  if (idx >= 0) {
-    items[idx] = {
-      ...items[idx],
-      ...patch,
-      lastUpdated: new Date().toISOString(),
-    };
-    writeWatchlist(items);
-  }
-  return items;
+): Promise<WatchlistItem[]> {
+  return mutateWatchlist(items => {
+    const idx = items.findIndex(item => item.id === id);
+    if (idx >= 0) {
+      items[idx] = {
+        ...items[idx],
+        ...patch,
+        lastUpdated: new Date().toISOString(),
+      };
+    }
+    return { items, result: items };
+  });
 }
 
-export function deleteWatchlistItem(id: string): WatchlistItem[] {
-  const items = readWatchlist().filter(item => item.id !== id);
-  writeWatchlist(items);
-  return items;
+export function deleteWatchlistItem(id: string): Promise<WatchlistItem[]> {
+  return mutateWatchlist(items => {
+    const filtered = items.filter(item => item.id !== id);
+    return { items: filtered, result: filtered };
+  });
 }
