@@ -438,8 +438,13 @@ export function scanOptionChain(
   // 4. SHORT STRANGLE (OTM Naked Sell Both Sides)
   // ─────────────────────────────────────────────────────────────────
   if (scanAll || selectedStrats.has('short_strangle')) {
-    // 1) Systematic symmetric & near-symmetric strangles (1 to 10 strike steps away from ATM)
-    for (let offset = 1; offset <= 10; offset++) {
+    // Search radius must track the user's actual maxDistancePct — a hardcoded
+    // step cap here silently made distances beyond it unreachable regardless
+    // of what the UI's Distance Threshold slider allowed the user to request.
+    const maxOffsetSteps = Math.max(10, Math.ceil((spot * filters.maxDistancePct / 100) / step) + 1);
+
+    // 1) Systematic symmetric & near-symmetric strangles (1 strike step out to maxOffsetSteps)
+    for (let offset = 1; offset <= maxOffsetSteps; offset++) {
       const shortPut = atmStrike - offset * step;
       const shortCall = atmStrike + offset * step;
 
@@ -495,8 +500,8 @@ export function scanOptionChain(
     }
 
     // 2) Also scan cross-strike OTM combinations
-    const putCandidates = strikes.filter(s => s < spot && s <= atmStrike - step && s >= atmStrike - 12 * step);
-    const callCandidates = strikes.filter(s => s > spot && s >= atmStrike + step && s <= atmStrike + 12 * step);
+    const putCandidates = strikes.filter(s => s < spot && s <= atmStrike - step && s >= atmStrike - maxOffsetSteps * step);
+    const callCandidates = strikes.filter(s => s > spot && s >= atmStrike + step && s <= atmStrike + maxOffsetSteps * step);
 
     for (const shortPut of putCandidates) {
       const shortPutQuote = chainQuotes[shortPut]?.pe;
