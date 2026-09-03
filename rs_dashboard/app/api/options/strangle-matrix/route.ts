@@ -23,8 +23,16 @@ export async function GET(request: NextRequest) {
 
     // Fetch every expiry's chain concurrently — same pattern as
     // /api/ultimate-scanner/scan's VIX+chain Promise.all.
+    // Wrap each fetch with its own catch so one bad expiry degrades to null
+    // cells for that column instead of failing the whole matrix.
     const chainResults = await Promise.all(
-      targetExpiries.map(expiry => fetchUnderlyingChain(underlying, expiry)),
+      targetExpiries.map(expiry =>
+        fetchUnderlyingChain(underlying, expiry).catch(() => ({
+          chain: {},
+          spot: 0,
+          prevClose: 0,
+        }))
+      ),
     );
 
     const step = STRIKE_STEPS[underlying];
@@ -34,10 +42,28 @@ export async function GET(request: NextRequest) {
     // non-zero one returned.
     const spot = chainResults.find(r => r.spot > 0)?.spot ?? 0;
 
-    const expiries = targetExpiries.map((expiry, i) => ({
+    const expiries = targetExpiries.map((expiry) => ({
       expiry,
       dte: calculateDte(expiry),
     }));
+
+    // Precompute per-expiry values (parseChainQuotes, atmStrike, dte) once,
+    // before the offset loop, to avoid 15× recomputation per expiry.
+    const precomputed = targetExpiries.map((expiry, i) => {
+      const { chain, spot: expirySpot } = chainResults[i];
+      if (expirySpot <= 0) {
+        return { quotes: null, atmStrike: null, dte: 0 };
+      }
+      const { quotes, strikes } = parseChainQuotes(chain);
+      if (strikes.length === 0) {
+        return { quotes: null, atmStrike: null, dte: 0 };
+      }
+      const atmStrike = strikes.reduce((prev, curr) =>
+        Math.abs(curr - expirySpot) < Math.abs(prev - expirySpot) ? curr : prev
+      );
+      const dte = calculateDte(expiry);
+      return { quotes, atmStrike, dte };
+    });
 
     const rows: { offset: number; cells: (StrangleCell | null)[] }[] = [];
 
@@ -46,18 +72,15 @@ export async function GET(request: NextRequest) {
         const cells: (StrangleCell | null)[] = targetExpiries.map((expiry, i) => {
           const { chain, spot: expirySpot } = chainResults[i];
           if (expirySpot <= 0) return null;
-          const { quotes, strikes } = parseChainQuotes(chain);
-          if (strikes.length === 0) return null;
-          const atmStrike = strikes.reduce((prev, curr) =>
-            Math.abs(curr - expirySpot) < Math.abs(prev - expirySpot) ? curr : prev
-          );
+          const { quotes, atmStrike, dte } = precomputed[i];
+          if (quotes === null || atmStrike === null) return null;
           return computeStrangleAtOffset({
             underlying,
             atmStrike,
             offset,
             step,
             spot: expirySpot,
-            dte: calculateDte(expiry),
+            dte,
             lotSize,
             chainQuotes: quotes,
           });
