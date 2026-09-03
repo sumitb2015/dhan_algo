@@ -38,7 +38,11 @@ export interface ScannedStrategy {
   legs: ScannedLeg[];
   netPremium: number;         // Total net credit in ₹ (for 1 lot default or selected lots)
   netPremiumPoints: number;   // Net premium in index points
-  estMargin: number;          // Estimated margin requirement in ₹
+  estMargin: number;          // Margin requirement in ₹ — a flat per-strategy estimate
+                               // unless marginSource is 'live'
+  marginSource?: 'live' | 'estimate'; // 'live' = priced via Dhan's multi-leg margin
+                               // calculator for this exact combo; absent/'estimate' =
+                               // flat formula, not the real netted SPAN+exposure figure
   romPct: number;             // Return on Margin % per expiry cycle
   romAnnualizedPct: number;   // Annualized RoM %
   distancePct: number;        // Short strike distance from spot (% OTM)

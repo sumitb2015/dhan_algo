@@ -605,7 +605,12 @@ export default function ScannerStep({
                     <p className="text-[9px] text-zinc-400">({strat.netPremiumPoints.toFixed(1)} pts)</p>
                   </div>
                   <div>
-                    <p className="text-[9px] font-bold text-zinc-500 uppercase">Est. Margin</p>
+                    <p className="text-[9px] font-bold text-zinc-500 uppercase flex items-center justify-center gap-1">
+                      {strat.marginSource === 'live' ? 'Live Margin' : 'Est. Margin'}
+                      {strat.marginSource === 'live' && (
+                        <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" title="Priced via Dhan's margin calculator" />
+                      )}
+                    </p>
                     <p className="text-xs font-bold text-zinc-300 tabular-nums mt-0.5">
                       ₹{(strat.estMargin / 1000).toFixed(0)}k
                     </p>
@@ -738,7 +743,12 @@ export default function ScannerStep({
                       ₹{strat.netPremium.toLocaleString('en-IN')}
                     </td>
                     <td className="py-3 px-3 text-right tabular-nums">
-                      ₹{(strat.estMargin / 1000).toFixed(0)}k
+                      <span className="inline-flex items-center gap-1">
+                        ₹{(strat.estMargin / 1000).toFixed(0)}k
+                        {strat.marginSource === 'live' && (
+                          <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" title="Priced via Dhan's margin calculator" />
+                        )}
+                      </span>
                     </td>
                     <td className="py-3 px-3 text-right font-bold text-emerald-400 tabular-nums">
                       {strat.romPct.toFixed(1)}%
