@@ -29,6 +29,7 @@ interface StrangleMatrixResponse {
   dataDate?: string;
   expiries?: { expiry: string; dte: number; atmStrike?: number }[];
   rows?: { offset: number; cells: (StrangleCell | null)[] }[];
+  marginSweep?: { total: number; live: number; sweeping: boolean };
   stale?: boolean;
 }
 
@@ -957,6 +958,24 @@ export default function StrangleMatrixPage() {
           <span className="text-[10px] font-mono font-bold text-amber-300 px-2.5 py-1.5 rounded-lg bg-zinc-900 border border-zinc-800 uppercase tracking-wide">
             DATA: {data?.dataDate || 'TODAY'}
           </span>
+
+          {/* Live Margin Sweep Progress — background job fetches Dhan's real
+              SPAN+exposure margin for every grid cell over ~1 req/s; this
+              shows how much of the grid currently has the exact figure vs.
+              the flat per-underlying estimate. */}
+          {data?.marginSweep && data.marginSweep.total > 0 && (
+            <span
+              className={`text-[10px] font-mono font-bold px-2.5 py-1.5 rounded-lg bg-zinc-900 border uppercase tracking-wide ${
+                data.marginSweep.live >= data.marginSweep.total
+                  ? 'text-emerald-300 border-emerald-500/30'
+                  : 'text-zinc-400 border-zinc-800'
+              }`}
+              title="Cells priced with Dhan's real multi-leg margin calculator vs. the flat per-underlying estimate"
+            >
+              LIVE MARGIN: {data.marginSweep.live}/{data.marginSweep.total}
+              {data.marginSweep.sweeping && data.marginSweep.live < data.marginSweep.total ? '…' : ''}
+            </span>
+          )}
 
           {/* Pause / Resume Button */}
           <button

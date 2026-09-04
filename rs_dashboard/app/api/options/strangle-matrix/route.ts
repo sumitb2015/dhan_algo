@@ -1,9 +1,10 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { fetchUnderlyingExpiries, fetchUnderlyingChain, fetchNettedMargin, type MarginLeg } from '@/lib/ultimateScannerDhan';
+import { fetchUnderlyingExpiries, fetchUnderlyingChain } from '@/lib/ultimateScannerDhan';
 import { parseChainQuotes, calculateDte, STRIKE_STEPS, LOT_SIZES } from '@/lib/ultimateScannerEngine';
 import { computeStrangleAtOffset, type StrangleCell } from '@/lib/strangleMath';
 import type { UnderlyingType } from '@/lib/ultimateScannerTypes';
 import { dedupe } from '@/lib/pyExec';
+import { getCachedMargin, triggerMarginSweep, sweepStats } from '@/lib/marginSweep';
 
 const MAX_EXPIRIES = 5;
 const MAX_OFFSET = 15;
@@ -20,6 +21,7 @@ interface StrangleMatrixData {
   dataDate: string;
   expiries: { expiry: string; dte: number; atmStrike: number }[];
   rows: { offset: number; cells: (StrangleCell | null)[] }[];
+  marginSweep: { total: number; live: number; sweeping: boolean };
   stale?: boolean;
 }
 
@@ -136,36 +138,31 @@ export async function GET(request: NextRequest) {
         // Every cell's estMargin is a flat per-underlying constant — good
         // enough to compute the whole 5-expiry x 15-offset grid cheaply, but
         // not the real netted SPAN+exposure margin Dhan would actually block.
-        // Replace it with the real figure (via Dhan's own multi-leg margin
-        // calculator) for the top candidates by RoM — capped and sequential,
-        // paced to respect Dhan's rate limit. This only runs on a cache miss
-        // (~every 10s at most, not per 4s poll), so the added latency is
-        // bounded and rare.
-        const ENRICH_TOP_N = 8;
-        const candidates = rows
+        // Overlay the real figure wherever a background sweep (marginSweep.ts)
+        // has already fetched it via Dhan's own multi-leg margin calculator,
+        // then kick off (or continue) that sweep for whatever's still stale —
+        // fire-and-forget, not awaited, so this request never blocks on it.
+        // At ~1 req/s a full 75-cell grid takes ~80s; the sweep runs across
+        // requests/poll ticks rather than inside any single one of them.
+        const allCells = rows
           .flatMap(row => row.cells.map((cell, expiryIdx) => ({ cell, dte: precomputed[expiryIdx]?.dte ?? 1 })))
-          .filter((c): c is { cell: StrangleCell; dte: number } => c.cell !== null)
-          .sort((a, b) => b.cell.romPct - a.cell.romPct)
-          .slice(0, ENRICH_TOP_N);
+          .filter((c): c is { cell: StrangleCell; dte: number } => c.cell !== null);
 
-        for (let i = 0; i < candidates.length; i++) {
-          const { cell, dte } = candidates[i];
-          if (!cell.putSecurityId || !cell.callSecurityId) continue;
-          const legs: MarginLeg[] = [
-            { side: 'SELL', securityId: cell.putSecurityId, quantity: lotSize },
-            { side: 'SELL', securityId: cell.callSecurityId, quantity: lotSize },
-          ];
-          const liveMargin = await fetchNettedMargin(underlying, legs);
+        for (const { cell, dte } of allCells) {
+          const liveMargin = getCachedMargin(underlying, cell.putSecurityId, cell.callSecurityId);
           if (liveMargin !== null) {
             cell.estMargin = liveMargin;
             cell.romPct = Math.round((cell.netPremium / liveMargin) * 100 * 100) / 100;
             cell.romAnnualizedPct = Math.round((cell.romPct / Math.max(0.5, dte)) * 365);
             cell.marginSource = 'live';
           }
-          if (i < candidates.length - 1) {
-            await new Promise(resolve => setTimeout(resolve, 1100));
-          }
         }
+
+        const sweepCandidates = allCells
+          .filter(c => c.cell.putSecurityId && c.cell.callSecurityId)
+          .map(c => ({ putSecurityId: c.cell.putSecurityId!, callSecurityId: c.cell.callSecurityId! }));
+        triggerMarginSweep(underlying, lotSize, sweepCandidates);
+        const marginSweep = sweepStats(underlying, sweepCandidates);
 
         const todayIso = new Date().toISOString().split('T')[0];
         return {
@@ -180,6 +177,7 @@ export async function GET(request: NextRequest) {
           dataDate: todayIso,
           expiries,
           rows,
+          marginSweep,
         };
       });
 
