@@ -77,15 +77,44 @@ export async function POST(request: NextRequest): Promise<NextResponse<ScanRespo
     }
 
     // Sort combined results
-    allCandidates.sort((a, b) => {
+    const sortCandidates = (a: ScannedStrategy, b: ScannedStrategy) => {
       if (filters.sortBy === 'rom') return b.romPct - a.romPct;
       if (filters.sortBy === 'pop') return b.popPct - a.popPct;
       if (filters.sortBy === 'premium') return b.netPremium - a.netPremium;
       if (filters.sortBy === 'distance') return b.distancePct - a.distancePct;
       return b.score - a.score;
-    });
+    };
+    allCandidates.sort(sortCandidates);
 
-    const shortlisted = allCandidates.slice(0, filters.maxResults);
+    // A flat maxResults cut here, applied before the client's strategy-type
+    // pills filter this same response (see ScannerStep.tsx — switching pills
+    // never refetches), silently starves any type whose margin formula gives
+    // it a structurally lower RoM%/score than cheap-margin verticals. A
+    // Short Strangle needs ~₹120k margin vs a Bull Put/Bear Call Spread's
+    // ~₹18k, so spreads and Iron Condors fill every slot in the global top-N
+    // and the Short Strangle pill shows zero candidates even when real ones
+    // exist (verified against /options/strangle-matrix, which computes the
+    // same short_strangle math unfiltered and shows plenty). Guarantee every
+    // type keeps a minimum slice before the combined cap.
+    const perTypeGuarantee = Math.max(10, Math.ceil(filters.maxResults / 5));
+    const seenIds = new Set<string>();
+    const shortlisted: ScannedStrategy[] = [];
+    for (const c of allCandidates) {
+      if (shortlisted.length >= filters.maxResults) break;
+      shortlisted.push(c);
+      seenIds.add(c.id);
+    }
+    const perTypeCounts = new Map<string, number>();
+    for (const c of shortlisted) perTypeCounts.set(c.type, (perTypeCounts.get(c.type) ?? 0) + 1);
+    for (const c of allCandidates) {
+      if (seenIds.has(c.id)) continue;
+      const count = perTypeCounts.get(c.type) ?? 0;
+      if (count >= perTypeGuarantee) continue;
+      shortlisted.push(c);
+      seenIds.add(c.id);
+      perTypeCounts.set(c.type, count + 1);
+    }
+    shortlisted.sort(sortCandidates);
 
     // Every candidate's estMargin is a flat per-strategy formula (e.g. a fixed
     // ₹120,000 for any 1-lot NIFTY strangle) — good enough to filter/rank the
