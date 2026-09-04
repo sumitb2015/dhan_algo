@@ -28,6 +28,13 @@ const STATUS_STYLE: Record<string, string> = {
   FAILED:  'bg-rose-500/10 text-rose-400 border-rose-500/20',
 };
 
+// Matches the broker badge colors already used in StrategyCard.tsx / StrategyRowWide.tsx.
+const BROKER_STYLE: Record<string, string> = {
+  dhan:    'bg-emerald-500/10 text-emerald-400 border-emerald-500/20',
+  zerodha: 'bg-sky-500/10 text-sky-400 border-sky-500/20',
+  kotak:   'bg-amber-500/10 text-amber-400 border-amber-500/20',
+};
+
 function fmtMoney(n: number): string {
   return `${n < 0 ? '-' : ''}₹${Math.abs(n).toLocaleString('en-IN', { maximumFractionDigits: 0 })}`;
 }
@@ -300,7 +307,9 @@ export default function MultiLegStrategyRow({
                always route through it regardless of the page-level broker selector, so it needs
                its own label or switching that selector looks like it does nothing. */}
             <span
-              className="text-[10px] font-bold px-1.5 py-0.5 rounded border bg-zinc-800 text-zinc-300 border-zinc-700 uppercase tracking-wider"
+              className={`text-[10px] font-bold px-1.5 py-0.5 rounded border uppercase tracking-wider ${
+                BROKER_STYLE[basket.broker] ?? 'bg-zinc-800 text-zinc-300 border-zinc-700'
+              }`}
               title="This strategy's orders always route through this broker, regardless of the broker selected above"
             >
               {BROKER_LABELS[basket.broker as Broker] ?? basket.broker}
