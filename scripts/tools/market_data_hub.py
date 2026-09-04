@@ -1,26 +1,38 @@
 """
-Market Data Hub — the single shared Dhan WebSocket connection for the dashboard's
-read-only quote bridges.
+Market Data Hub — a single shared Dhan WebSocket connection for 3 of the
+dashboard's read-only quote bridges.
 
-live_equity_ws.py, live_indices_ws.py, live_options_ws.py (Dhan) and focus_tool_ws.py
-each used to call helper.start_websocket() themselves, opening 4 independent Dhan
-connections. Dhan caps concurrent WebSocket connections per account, and opening
-several of these dashboard pages at once was hitting that cap. This process owns the
-ONE connection; each bridge registers what it wants via lib/market_hub_client.py and
-reads merged ticks back from this hub's shared live_data.json.
+live_equity_ws.py, live_indices_ws.py and focus_tool_ws.py each used to call
+helper.start_websocket() themselves, opening 3 independent Dhan connections
+(Dhan caps concurrent WebSocket connections per account at 5 — see
+docs.dhanhq.co/api/v2/guides/live-market-feed — and a live strategy or two
+running alongside these dashboard pages already eats into that headroom).
+This process owns ONE connection for those 3; each bridge registers what it
+wants via lib/market_hub_client.py and reads merged ticks back from this
+hub's shared live_data.json.
 
-Not involved: live_positions_ws.py, focus_tool_rows_worker.py, copy_trade_bridge.py,
-live_options_ws_zerodha.py, or any live strategy — all keep their own independent
-connections (see the plan doc for why: order-placing paths shouldn't depend on IPC to
-a separate process for their price feed).
+Deliberately NOT migrated: live_options_ws.py. It is the direct price feed
+for Scalper.tsx/AdvancedScalper.tsx's local WS push server (sub-millisecond
+tick delivery per useLiveOptionsWS.ts) — routing it through this hub's
+file-IPC hop (settle sleep + write-interval throttle + poll-mtime on the
+consumer side) measurably increases that latency for zero benefit once the
+other 3 bridges are off Dhan's connection count. It also carries SENSEX/
+CRUDEOIL/CRUDEOILM branching this hub's implementation never picked up. Keep
+it on its own direct connection.
+
+Also not involved (unchanged, independent connections, and out of scope by
+design): live_positions_ws.py, copy_trade_bridge.py, live_options_ws_zerodha.py,
+or any live strategy — order-placing paths shouldn't depend on IPC to a
+separate process for their price feed. focus_tool_rows_worker.py doesn't open
+a WebSocket at all (reads spot via REST get_ltp), so it was never in scope.
 
 Usage:
     venv\\Scripts\\python.exe scripts/tools/market_data_hub.py
 
-Not meant to be started manually in normal operation — each of the 4 bridges calls
-lib.market_hub_client.ensure_hub_running() at startup and periodically thereafter, so
-the hub is spawned (and respawned if it dies) automatically. Stop gracefully by writing
-debug/market_hub/hub_stop.trigger.
+Not meant to be started manually in normal operation — each of the 3 bridges
+calls lib.market_hub_client.ensure_hub_running() at startup and periodically
+thereafter, so the hub is spawned (and respawned if it dies) automatically.
+Stop gracefully by writing debug/market_hub/hub_stop.trigger.
 """
 import os
 import sys
@@ -215,7 +227,7 @@ def main():
 
                     # ── Stall watchdog (centralized) ──────────────────────────────
                     # Signature over every currently-subscribed instrument's LTP.
-                    # With ~hundreds of instruments unioned across 4 consumers
+                    # With ~hundreds of instruments unioned across 3 consumers
                     # instead of one bridge's own small universe, a genuinely dead
                     # socket is somewhat more likely to still show 1-2 laggard
                     # "moving" values from partial buffered packets before the

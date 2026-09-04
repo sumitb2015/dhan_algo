@@ -1,14 +1,20 @@
 """
 Shared client for the Market Data Hub (scripts/tools/market_data_hub.py).
 
-Four dashboard bridges (live_equity_ws.py, live_indices_ws.py, live_options_ws.py,
-focus_tool_ws.py) used to each open their own independent Dhan WebSocket connection.
-Dhan caps concurrent connections per account, and opening several live dashboard pages
-at once was hitting that cap. The hub owns exactly ONE DhanHelper/WebSocket connection;
-each bridge becomes a thin consumer that tells the hub what it wants (via a registry
-file) and reads merged ticks back (via a shared live-data file), using the same
-file-based IPC idiom already used everywhere else in this repo (debug/*.json,
-temp-write + os.replace, stop-trigger files) rather than introducing a new dependency.
+Three dashboard bridges (live_equity_ws.py, live_indices_ws.py, focus_tool_ws.py)
+used to each open their own independent Dhan WebSocket connection. Dhan caps
+concurrent connections per account at 5 (docs.dhanhq.co/api/v2/guides/live-market-feed),
+and opening several live dashboard pages alongside a running strategy or two was
+eating into that headroom. The hub owns exactly ONE DhanHelper/WebSocket connection
+for these 3; each bridge becomes a thin consumer that tells the hub what it wants
+(via a registry file) and reads merged ticks back (via a shared live-data file),
+using the same file-based IPC idiom already used everywhere else in this repo
+(debug/*.json, temp-write + os.replace, stop-trigger files) rather than introducing
+a new dependency.
+
+live_options_ws.py is NOT a hub consumer — see market_data_hub.py's docstring for
+why (it's Scalper/AdvancedScalper's sub-millisecond price feed; routing it through
+this file-IPC hop would add latency for no remaining connection-count benefit).
 
 This module intentionally does not import lib/dhan_helper.py — it has no opinion on
 market data itself, only on hub discovery/liveness/registry bookkeeping, so it stays
@@ -350,7 +356,7 @@ def tick_key(exchange_segment, security_id) -> str:
     no segment. That was safe when every bridge had its own isolated DhanHelper
     instance subscribed to only one kind of instrument space (equity-only, index-
     only, or options+index+VIX) — no single bridge's own instrument set ever mixed
-    segments enough to collide. The shared hub subscribes across ALL 4 bridges'
+    segments enough to collide. The shared hub subscribes across ALL 3 bridges'
     segments at once, and Dhan's security IDs are only unique WITHIN a segment:
     confirmed live, ADANIENT (NSE_EQ, id 25) and BANKNIFTY (IDX, id 25) share the
     same raw id — under bare-sid keying, whichever ticked most recently silently
