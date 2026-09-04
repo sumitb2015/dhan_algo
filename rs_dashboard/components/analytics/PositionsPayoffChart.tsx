@@ -12,6 +12,7 @@
  */
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { ZoomIn, ZoomOut, Maximize2, Minimize2, AlertTriangle } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
@@ -217,7 +218,7 @@ export default function PositionsPayoffChart({
 
   const tooltipLeft = sx(readoutSpot) > W * 0.6;
 
-  return (
+  const chart = (
     <div ref={boxRef} className={cn('w-full', full && 'fixed inset-0 z-50 overflow-auto bg-zinc-950 p-6')}>
       {/* Legend + controls */}
       <div className="mb-3 flex flex-wrap items-center justify-between gap-3 border-b border-zinc-800/80 pb-2.5">
@@ -426,4 +427,12 @@ export default function PositionsPayoffChart({
       </svg>
     </div>
   );
+
+  // A card ancestor with backdrop-blur (or any filter/backdrop-filter) creates a
+  // CSS containing block for `position: fixed` descendants, which traps the
+  // "full screen" overlay inside the card's own box instead of the viewport.
+  // Portaling to <body> escapes that regardless of what filters an ancestor
+  // card applies.
+  if (full && typeof document !== 'undefined') return createPortal(chart, document.body);
+  return chart;
 }
