@@ -7,7 +7,7 @@ import { type Toast, FOCUS_RING } from './Scalper';
 import { useLiveOptionsWS } from '@/lib/useLiveOptionsWS';
 import { useBrokerSelector, scalperRoute, BROKER_LABELS, type Broker } from '@/hooks/useBrokerSelector';
 import {
-  STRATEGY_CATEGORIES, type StrategyCategory, type StrategyTemplate, nearestStrike, strikeStep,
+  STRATEGY_CATEGORIES, type StrategyCategory, type StrategyTemplate, type OptionType, nearestStrike, strikeStep,
 } from '@/lib/basketStrategies';
 import { sortLegsForPlacement, resolveOrderRequest, type StrikeIdentifier } from '@/lib/basketOrders';
 import StrategyCardGrid from './basket/StrategyCardGrid';
@@ -109,8 +109,6 @@ export default function MultiLegFocus() {
     return () => clearInterval(interval);
   }, []);
 
-  const vixChange = vixData ? vixData.vix - vixData.prevClose : 0;
-  const vixChangePct = vixData && vixData.prevClose > 0 ? (vixChange / vixData.prevClose) * 100 : 0;
 
   // ── Orders & Tradebook State ──────────────────────────────────────
   const [showOrdersModal, setShowOrdersModal] = useState(false);
@@ -167,19 +165,21 @@ export default function MultiLegFocus() {
   }, [baskets, selectedUnderlying, hasManualUnderlying]);
 
   const activeExpiry = useMemo(() => {
-    const open = baskets.find(b => b.legs.some(l => l.status === 'OPEN'));
-    return open?.expiry ?? baskets[0]?.expiry ?? expiriesMap[activeUnderlying]?.[0] ?? '';
-  }, [baskets, expiriesMap, activeUnderlying]);
+    return expiriesMap[activeUnderlying]?.[0] ?? '';
+  }, [expiriesMap, activeUnderlying]);
 
-  const { liveQuotes, bridgeStatus } = useLiveOptionsWS(activeExpiry, broker, authenticatedBrokers, activeUnderlying);
+  const authKey = Array.from(
+    new Set(authenticatedBrokers.map(b => (b === 'kotak' ? 'dhan' : b))),
+  ).sort().join(',');
+
+  const { liveQuotes, bridgeStatus, lastUpdated, transport } = useLiveOptionsWS(activeExpiry, broker, authenticatedBrokers, activeUnderlying);
 
   // ── Start / Stop Live Options WS Bridge ───────────────────────────
   useEffect(() => {
     if (!activeExpiry || !activeUnderlying) return;
 
-    const brokersToStart = authenticatedBrokers.length > 0
-      ? authenticatedBrokers
-      : (hasAuthenticatedBroker ? [broker] : ['dhan' as Broker]);
+    const brokersToStart = authKey.split(',').filter(Boolean) as Broker[];
+    if (!brokersToStart.length) brokersToStart.push('dhan');
 
     for (const b of brokersToStart) {
       fetch('/api/options/live', {
@@ -196,7 +196,7 @@ export default function MultiLegFocus() {
         body: JSON.stringify({ action: 'stop', brokers: brokersToStart }),
       }).catch(() => {});
     };
-  }, [activeExpiry, activeUnderlying, authenticatedBrokers, hasAuthenticatedBroker, broker]);
+  }, [activeExpiry, activeUnderlying, authKey]);
 
   // ── Spot & Previous Close for Header Ticker ────────────────────────
   // /api/scalper/nifty-prev-close only knows NIFTY/BANKNIFTY/SENSEX — for any
@@ -235,16 +235,69 @@ export default function MultiLegFocus() {
   }, [activeUnderlying, activeExpiry, spotPrevClose, chainData]);
 
   const spotChange = useMemo(() => {
-    if (activeSpot <= 0) return 0;
-    if (effectivePrevClose > 0) return activeSpot - effectivePrevClose;
-    return liveQuotes?.spot_change ?? 0;
+    if (liveQuotes && liveQuotes.spot_change !== undefined && liveQuotes.spot_change !== 0) {
+      return liveQuotes.spot_change;
+    }
+    if (activeSpot > 0 && effectivePrevClose > 0) return activeSpot - effectivePrevClose;
+    return 0;
   }, [activeSpot, effectivePrevClose, liveQuotes?.spot_change]);
 
   const spotChangePct = useMemo(() => {
-    if (activeSpot <= 0) return 0;
-    if (effectivePrevClose > 0) return ((activeSpot - effectivePrevClose) / effectivePrevClose) * 100;
-    return liveQuotes?.spot_change_pct ?? 0;
+    if (liveQuotes && liveQuotes.spot_change_pct !== undefined && liveQuotes.spot_change_pct !== 0) {
+      return liveQuotes.spot_change_pct;
+    }
+    if (activeSpot > 0 && effectivePrevClose > 0) return ((activeSpot - effectivePrevClose) / effectivePrevClose) * 100;
+    return 0;
   }, [activeSpot, effectivePrevClose, liveQuotes?.spot_change_pct]);
+
+  const liveVix = liveQuotes?.vix;
+  const currentVix = (liveVix && liveVix.ltp > 0) ? liveVix.ltp : (vixData?.vix ?? 0);
+  const currentVixPrevClose = (liveVix && (liveVix.prev_close ?? 0) > 0) ? liveVix.prev_close! : (vixData?.prevClose ?? 0);
+  const vixChange = (liveVix && liveVix.change !== undefined && liveVix.change !== 0)
+    ? liveVix.change
+    : (currentVix > 0 && currentVixPrevClose > 0)
+    ? currentVix - currentVixPrevClose
+    : (vixData ? vixData.vix - vixData.prevClose : 0);
+  const vixChangePct = (liveVix && liveVix.change_pct !== undefined && liveVix.change_pct !== 0)
+    ? liveVix.change_pct
+    : (currentVixPrevClose > 0)
+    ? (vixChange / currentVixPrevClose) * 100
+    : 0;
+
+  // ── Pricing helpers for Quick Add Presets Grid ─────────────────────
+  const activePair = `${activeUnderlying}:${activeExpiry}`;
+  const activeChain = chainData[activePair];
+  const gridStrikes = useMemo(() => {
+    if (activeChain?.strikes?.length) return activeChain.strikes;
+    if (liveQuotes?.strikes) {
+      const keys = Object.keys(liveQuotes.strikes).map(Number).filter(n => !isNaN(n)).sort((a, b) => a - b);
+      if (keys.length) return keys;
+    }
+    return [23600, 23800, 24000, 24200, 24400];
+  }, [activeChain?.strikes, liveQuotes?.strikes]);
+
+  const gridStep = useMemo(() => strikeStep(gridStrikes) || DEFAULT_INDEX_STEP[activeUnderlying] || 50, [gridStrikes, activeUnderlying]);
+  const gridAtm = useMemo(() => (activeSpot > 0 ? nearestStrike(gridStrikes, activeSpot) : null), [gridStrikes, activeSpot]);
+
+  const autoPremium = useCallback((strike: number, option: OptionType, legExpiry?: string): number => {
+    const key = String(strike);
+    const side = option === 'CE' ? 'ce' : 'pe';
+    if (legExpiry != null && legExpiry !== activeExpiry) {
+      const extraLtp = liveQuotes?.extra?.[legExpiry]?.[key]?.[side]?.ltp ?? 0;
+      if (extraLtp > 0) return extraLtp;
+    }
+    const liveLtp = liveQuotes?.strikes?.[key]?.[side]?.ltp ?? 0;
+    if (liveLtp > 0) return liveLtp;
+
+    const pair = `${activeUnderlying}:${legExpiry || activeExpiry}`;
+    const chain = chainData[pair];
+    if (chain?.quotes) {
+      const q = chain.quotes[key];
+      const val = (side === 'ce' ? q?.ce : q?.pe) ?? 0;
+      if (val > 0) return val;
+    }
+    return 0;
+  }, [liveQuotes, activeExpiry, activeUnderlying, chainData]);
 
   // Fetch expiries for all underlyings on mount or broker change
   useEffect(() => {
@@ -1404,6 +1457,12 @@ export default function MultiLegFocus() {
             selectedKey={null}
             onSelectTemplate={addStrategy}
             disabled={false}
+            atmStrike={gridAtm}
+            step={gridStep}
+            allStrikes={gridStrikes}
+            autoPremium={autoPremium}
+            frontExpiry={activeExpiry}
+            farExpiry={expiriesMap[activeUnderlying]?.[1] ?? ''}
           />
         </div>
       </div>
@@ -1431,8 +1490,10 @@ export default function MultiLegFocus() {
             const expiries = expiriesMap[basket.underlying] ?? [];
             const allStrikes = chain?.strikes?.length ? chain.strikes : [23600, 23800, 24000, 24200, 24400];
             const step = strikeStep(allStrikes) || DEFAULT_INDEX_STEP[basket.underlying as Underlying] || 50;
-            const spot = chain?.spot ?? DEFAULT_INDEX_SPOT[basket.underlying as Underlying] ?? 24000;
-            const atmStrike = nearestStrike(allStrikes, spot) ?? (Math.round(spot / step) * step);
+            const rowSpot = (basket.underlying === activeUnderlying && liveQuotes?.spot && liveQuotes.spot > 0)
+              ? liveQuotes.spot
+              : (chain?.spot ?? DEFAULT_INDEX_SPOT[basket.underlying as Underlying] ?? 24000);
+            const atmStrike = nearestStrike(allStrikes, rowSpot) ?? (Math.round(rowSpot / step) * step);
             const lotSize = lookup?.lotSize ?? fallbackLotSize(basket.underlying as Underlying, broker);
 
             return (
@@ -1447,12 +1508,22 @@ export default function MultiLegFocus() {
                 lotSize={lotSize}
                 step={step}
                 atmStrike={atmStrike}
-                spot={spot}
+                spot={rowSpot}
                 ltpFor={leg => ltpFor(basket, leg)}
                 ltpForStrike={(strk, opt) => {
+                  const key = String(strk);
+                  const side = opt === 'CE' ? 'ce' : 'pe';
+                  if (basket.underlying === activeUnderlying && basket.expiry === activeExpiry) {
+                    const liveLtp = liveQuotes?.strikes?.[key]?.[side]?.ltp ?? 0;
+                    if (liveLtp > 0) return liveLtp;
+                  }
+                  if (liveQuotes?.extra?.[basket.expiry]) {
+                    const extraLtp = liveQuotes.extra[basket.expiry]?.[key]?.[side]?.ltp ?? 0;
+                    if (extraLtp > 0) return extraLtp;
+                  }
                   const pair = `${basket.underlying}:${basket.expiry}`;
                   const chain = chainData[pair];
-                  const q = chain?.quotes?.[String(strk)];
+                  const q = chain?.quotes?.[key];
                   return (opt === 'CE' ? q?.ce : q?.pe) ?? 0;
                 }}
                 onUpdate={patch => updateBasket(basket.id, patch)}
