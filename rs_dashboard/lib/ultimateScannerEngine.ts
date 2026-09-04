@@ -714,7 +714,15 @@ export function scanOptionChain(
     }
   }
 
-  // Sort candidates by chosen criterion
+  // Sort candidates by chosen criterion. Deliberately NOT sliced to
+  // filters.maxResults here — the caller (app/api/ultimate-scanner/scan's
+  // POST handler) merges this per-expiry list with other expiries and
+  // applies its own per-strategy-type guarantee before capping to
+  // maxResults. Slicing here truncated to the global top-N by score before
+  // that guarantee ever saw the full pool, so cheap-margin types (Bull
+  // Put/Bear Call Spreads, Iron Condor) silently squeezed out
+  // higher-margin/lower-score types like Short Strangle even when they had
+  // valid candidates within the requested RoM/distance filters.
   candidates.sort((a, b) => {
     if (filters.sortBy === 'rom') return b.romPct - a.romPct;
     if (filters.sortBy === 'pop') return b.popPct - a.popPct;
@@ -723,5 +731,5 @@ export function scanOptionChain(
     return b.score - a.score;
   });
 
-  return candidates.slice(0, filters.maxResults || 50);
+  return candidates;
 }
