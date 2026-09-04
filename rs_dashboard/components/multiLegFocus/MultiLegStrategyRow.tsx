@@ -77,7 +77,9 @@ export interface MultiLegStrategyRowProps {
   exiting: boolean;
   exitingLegs: Set<string>;
   legMargins?: Record<string, number>;
+  legMarginSource?: Record<string, 'live' | 'estimate'>;
   basketMargin?: number;
+  basketMarginSource?: 'live' | 'estimate';
   overallMargin?: number;
   hedgeBenefit?: number;
   availableFunds?: number;
@@ -107,7 +109,9 @@ export default function MultiLegStrategyRow({
   exiting,
   exitingLegs,
   legMargins,
+  legMarginSource,
   basketMargin,
+  basketMarginSource,
   overallMargin,
   hedgeBenefit,
   availableFunds,
@@ -496,6 +500,24 @@ export default function MultiLegStrategyRow({
                 <span className="font-mono text-zinc-200 font-bold">
                   {basketMargin && basketMargin > 0 ? fmtMoney(basketMargin) : '—'}
                 </span>
+                {basketMargin != null && basketMargin > 0 && (
+                  <span
+                    className={`text-[9px] font-bold px-1.5 py-0.5 rounded uppercase tracking-wide ${
+                      basketMarginSource === 'live'
+                        ? 'bg-emerald-500/15 text-emerald-300 border border-emerald-500/30'
+                        : 'bg-amber-500/15 text-amber-300 border border-amber-500/30'
+                    }`}
+                    title={
+                      basketMarginSource === 'live'
+                        ? "Real SPAN+exposure margin from Dhan's multi-leg margin calculator"
+                        : broker !== 'dhan'
+                          ? `${broker} has no live margin-calculator API — this is a flat ~12% estimate`
+                          : 'Flat ~12% estimate — a leg is not yet resolved to a security ID or the live calculator call failed'
+                    }
+                  >
+                    {basketMarginSource === 'live' ? 'Live' : 'Est.'}
+                  </span>
+                )}
                 {hedgeBenefit != null && hedgeBenefit > 0 && (
                   <span className="text-[10px] text-emerald-400 font-mono" title={`Hedge Benefit: ${fmtMoney(hedgeBenefit)} (Standalone: ${overallMargin ? fmtMoney(overallMargin) : ''})`}>
                     (-{fmtMoney(hedgeBenefit)})

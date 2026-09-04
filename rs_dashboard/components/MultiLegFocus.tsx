@@ -64,7 +64,9 @@ export default function MultiLegFocus() {
   const [fundsData, setFundsData] = useState<{ available: number; used: number } | null>(null);
   const [basketMargins, setBasketMargins] = useState<Record<string, {
     legMargins: Record<string, number>;
+    legMarginSource: Record<string, 'live' | 'estimate'>;
     basketMargin: number;
+    basketMarginSource: 'live' | 'estimate';
     overallMargin: number;
     hedgeBenefit: number;
     spanMargin: number;
@@ -555,7 +557,9 @@ export default function MultiLegFocus() {
         .then(r => r.json())
         .then((j: { success: boolean; data?: {
           legMargins: Record<string, number>;
+          legMarginSource: Record<string, 'live' | 'estimate'>;
           basketMargin: number;
+          basketMarginSource: 'live' | 'estimate';
           overallMargin: number;
           hedgeBenefit: number;
           spanMargin: number;
@@ -1716,7 +1720,9 @@ export default function MultiLegFocus() {
                 exiting={!!exitingMap[basket.id]}
                 exitingLegs={exitingLegs}
                 legMargins={basketMargins[basket.id]?.legMargins}
+                legMarginSource={basketMargins[basket.id]?.legMarginSource}
                 basketMargin={basketMargins[basket.id]?.basketMargin}
+                basketMarginSource={basketMargins[basket.id]?.basketMarginSource}
                 overallMargin={basketMargins[basket.id]?.overallMargin}
                 hedgeBenefit={basketMargins[basket.id]?.hedgeBenefit}
                 availableFunds={fundsData?.available}

@@ -198,6 +198,18 @@ function paceMarginCall<T>(fn: () => Promise<T>): Promise<T> {
   return run;
 }
 
+/**
+ * Exposes the same account-wide margin-calculator lane to callers that hit
+ * Dhan's margin endpoints directly (e.g. multi-leg-focus's per-leg + basket
+ * calls via dhanPost) rather than through fetchNettedMargin(). Without this,
+ * that route's own burst of calls could race the strangle-matrix sweep or
+ * the ultimate-scanner's enrichment and collectively exceed the account's
+ * rate limit even though each caller individually looks well-behaved.
+ */
+export function pacedMarginCall<T>(fn: () => Promise<T>): Promise<T> {
+  return paceMarginCall(fn);
+}
+
 export async function fetchNettedMargin(
   underlying: string,
   legs: MarginLeg[],

@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { dhanPost } from '@/lib/dhanToken';
+import { pacedMarginCall } from '@/lib/ultimateScannerDhan';
 
 interface LegInput {
   id: string;
@@ -23,13 +24,27 @@ interface MarginRequest {
 interface MarginCacheEntry {
   data: {
     legMargins: Record<string, number>;
+    legMarginSource: Record<string, 'live' | 'estimate'>;
     basketMargin: number;
+    basketMarginSource: 'live' | 'estimate';
     overallMargin: number;
     hedgeBenefit: number;
     spanMargin: number;
     exposureMargin: number;
   };
   ts: number;
+}
+
+/** One retry after a short delay before giving up and falling back to the
+ * flat estimate — absorbs a single transient timeout/network blip without
+ * needing the whole basket to wait for the estimate on every such blip. */
+async function withOneRetry<T>(fn: () => Promise<T>): Promise<T> {
+  try {
+    return await fn();
+  } catch {
+    await new Promise(resolve => setTimeout(resolve, 300));
+    return fn();
+  }
 }
 
 const marginCache = new Map<string, MarginCacheEntry>();
@@ -45,7 +60,9 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
         success: true,
         data: {
           legMargins: {},
+          legMarginSource: {},
           basketMargin: 0,
+          basketMarginSource: 'live',
           overallMargin: 0,
           hedgeBenefit: 0,
           spanMargin: 0,
@@ -81,43 +98,60 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
 
     const computePromise = (async () => {
       const legMargins: Record<string, number> = {};
+      const legMarginSource: Record<string, 'live' | 'estimate'> = {};
       const defaultSpot = underlying === 'BANKNIFTY' ? 51000 : underlying === 'SENSEX' ? 79000 : isCrude ? 8500 : 24000;
       // Dhan's crude quantity is in lots and needs scaling to barrels for rupee
       // math; every other broker already sends quantity in barrels (see
       // lib/multiLegFocus.ts's fallbackLotSize), so no further scaling there.
       const crudeMult = broker !== 'dhan' ? 1 : (underlying === 'CRUDEOIL' ? 100 : underlying === 'CRUDEOILM' ? 10 : 1);
+      // Dhan's margin calculator is the only one of the three brokers this
+      // dashboard supports that exposes a real SPAN+exposure endpoint —
+      // Zerodha/Kotak legs always fall back to the flat estimate below, by
+      // necessity rather than failure. legMarginSource still reports that
+      // accurately as 'estimate' so the UI doesn't claim a live figure it
+      // doesn't have.
+      const hasLiveMarginApi = broker === 'dhan';
 
       // 1. Calculate margin for each leg
       for (const leg of body.legs) {
         if (leg.status === 'CLOSED' || leg.quantity <= 0) {
           legMargins[leg.id] = 0;
+          legMarginSource[leg.id] = 'live';
           continue;
         }
 
-        // BUY leg: broker margin is the option premium (cash debit)
+        // BUY leg: broker margin is the option premium (cash debit) — this
+        // IS the real figure, not an estimate; no margin call needed.
         if (leg.side === 'B') {
           // On Dhan, crude quantity is in lots, so scale by barrel multiplier for rupee cash debit
           const mult = isCrude ? crudeMult : 1;
           const premium = Math.round((leg.price || 0) * leg.quantity * mult * 100) / 100;
           legMargins[leg.id] = premium;
+          legMarginSource[leg.id] = 'live';
           continue;
         }
 
         // SELL leg: writing option requires SPAN + exposure margin
-        if (leg.securityId) {
+        if (hasLiveMarginApi && leg.securityId) {
           try {
-            const res = await dhanPost('/margincalculator', {
+            // Shares the same account-wide lane as the strangle-matrix
+            // sweep and the ultimate-scanner's enrichment (pacedMarginCall
+            // in ultimateScannerDhan.ts) — without this, this route's own
+            // per-leg calls could race those and collectively exceed
+            // Dhan's rate limit even though each looks well-paced alone.
+            const res = await pacedMarginCall(() => withOneRetry(() => dhanPost('/margincalculator', {
               securityId: String(leg.securityId),
               exchangeSegment,
               transactionType: 'SELL',
               quantity: leg.quantity,
               productType: 'MARGIN',
               price: Number(leg.price) || 0,
-            }) as Record<string, unknown>;
+            }))) as Record<string, unknown>;
 
             const totalMargin = Number(res?.totalMargin ?? 0);
             if (totalMargin > 0) {
               legMargins[leg.id] = Math.round(totalMargin);
+              legMarginSource[leg.id] = 'live';
               continue;
             }
           } catch (e) {
@@ -129,22 +163,29 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
           }
         }
 
-        // Fallback estimate (~11-12% of underlying contract value)
+        // Fallback estimate (~11-12% of underlying contract value) — used
+        // only when a live figure genuinely isn't available: non-Dhan
+        // broker, leg not yet resolved to a securityId, or the calculator
+        // call itself failed after a retry.
         const mult = isCrude ? crudeMult : 1;
         const estimatedMargin = Math.round(defaultSpot * leg.quantity * mult * 0.12);
         legMargins[leg.id] = estimatedMargin;
+        legMarginSource[leg.id] = 'estimate';
       }
 
       // 2. Calculate portfolio/basket margin with netting
       const activeLegsWithSecId = body.legs.filter(
         l => l.status !== 'CLOSED' && l.quantity > 0 && l.securityId
       );
+      const allActiveLegsHaveSecId = activeLegsWithSecId.length ===
+        body.legs.filter(l => l.status !== 'CLOSED' && l.quantity > 0).length;
 
       let basketMargin = 0;
+      let basketMarginSource: 'live' | 'estimate' = 'estimate';
       let spanMargin = 0;
       let exposureMargin = 0;
 
-      if (activeLegsWithSecId.length > 0) {
+      if (hasLiveMarginApi && activeLegsWithSecId.length > 0) {
         try {
           const scripList = activeLegsWithSecId.map(l => ({
             securityId: String(l.securityId),
@@ -155,21 +196,27 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
             price: Number(l.price) || 0,
           }));
 
-          const multiRes = await dhanPost('/margincalculator/multi', {
+          const multiRes = await pacedMarginCall(() => withOneRetry(() => dhanPost('/margincalculator/multi', {
             includePosition: false,
             includeOrders: false,
             scripList,
-          }) as Record<string, unknown>;
+          }))) as Record<string, unknown>;
 
           basketMargin = Math.round(Number(multiRes?.totalMargin ?? 0));
           spanMargin = Math.round(Number(multiRes?.spanMargin ?? 0));
           exposureMargin = Math.round(Number(multiRes?.exposure ?? 0));
+          // Only a true basket-wide netted figure counts as 'live' — if any
+          // active leg was missing a securityId, this call only covered
+          // part of the basket and the number is not the real netted total.
+          basketMarginSource = allActiveLegsHaveSecId ? 'live' : 'estimate';
         } catch {
           // Fallback: sum of leg margins
           basketMargin = Object.values(legMargins).reduce((a, b) => a + b, 0);
+          basketMarginSource = 'estimate';
         }
       } else {
         basketMargin = Object.values(legMargins).reduce((a, b) => a + b, 0);
+        basketMarginSource = 'estimate';
       }
 
       const overallMargin = Object.values(legMargins).reduce((a, b) => a + b, 0);
@@ -177,7 +224,9 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
 
       return {
         legMargins,
+        legMarginSource,
         basketMargin,
+        basketMarginSource,
         overallMargin,
         hedgeBenefit,
         spanMargin,
