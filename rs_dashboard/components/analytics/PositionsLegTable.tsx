@@ -20,8 +20,8 @@ import type { PositionLeg, UnparseableLeg } from '@/lib/positionLegs';
 import { fmtExpiryShort } from '@/components/crudeoil/format';
 import { partialCloseChips, type ClosePct } from '@/lib/partialQty';
 
-const TH = 'bg-zinc-800/90 px-2 py-1.5 text-[10px] font-bold uppercase tracking-wide text-white whitespace-nowrap';
-const TD = 'px-2 py-1.5 font-mono text-[11px] tabular-nums text-zinc-200 whitespace-nowrap';
+const TH = 'bg-zinc-800 px-2 py-1.5 text-[10px] font-bold uppercase tracking-wider text-white whitespace-nowrap';
+const TD = 'px-2 py-1.5 font-mono text-[10.5px] tabular-nums text-zinc-200 whitespace-nowrap';
 
 export type PositionSortKey =
   | 'instrument'
@@ -64,7 +64,7 @@ function SortHeader({
     >
       <div className={cn('inline-flex items-center gap-1', align === 'right' ? 'justify-end' : align === 'left' ? 'justify-start' : 'justify-center')}>
         <span>{label}</span>
-        <span className={cn('text-[10px]', active ? 'text-sky-400 font-bold' : 'text-zinc-500')}>
+        <span className={cn('text-[9px]', active ? 'text-sky-400 font-bold' : 'text-zinc-500')}>
           {active ? (dir === 'asc' ? '▲' : '▼') : '↕'}
         </span>
       </div>
@@ -147,8 +147,8 @@ function ExitChips({
 
   if (closing) {
     return (
-      <span className="inline-flex items-center gap-1 text-[10px] text-zinc-400">
-        <Loader2 className="h-3 w-3 animate-spin" /> Closing…
+      <span className="inline-flex items-center gap-1 font-mono text-[9px] text-zinc-400">
+        <Loader2 className="h-2.5 w-2.5 animate-spin" /> Closing…
       </span>
     );
   }
@@ -171,12 +171,12 @@ function ExitChips({
             onClose(c.pct);
           }}
           className={cn(
-            'rounded border px-1.5 py-0.5 font-mono text-[10px] font-bold transition-colors disabled:cursor-not-allowed disabled:opacity-30',
+            'h-5 rounded border px-1.5 font-mono text-[9px] font-bold leading-none transition-all disabled:cursor-not-allowed disabled:opacity-25',
             armedPct === c.pct
-              ? 'border-rose-500 bg-rose-500/20 text-rose-200 hover:bg-rose-500/30'
+              ? 'border-rose-500 bg-rose-500/25 text-rose-200 shadow-sm animate-pulse'
               : c.pct === 100
-                ? 'border-zinc-600 bg-zinc-800 text-zinc-200 hover:border-rose-600 hover:text-rose-300'
-                : 'border-zinc-700 bg-zinc-900 text-zinc-400 hover:border-zinc-500 hover:text-zinc-200',
+                ? 'border-zinc-700 bg-zinc-800 text-zinc-200 hover:border-rose-600 hover:bg-rose-950/40 hover:text-rose-300'
+                : 'border-zinc-800 bg-zinc-900/90 text-zinc-400 hover:border-zinc-600 hover:text-zinc-200',
           )}
         >
           {armedPct === c.pct ? 'Confirm?' : c.pct === 100 ? 'Exit' : `${c.pct}%`}
@@ -200,8 +200,8 @@ function AddChips({
 
   if (adding) {
     return (
-      <span className="inline-flex items-center gap-1 text-[10px] text-zinc-400">
-        <Loader2 className="h-3 w-3 animate-spin" /> Adding…
+      <span className="inline-flex items-center gap-1 font-mono text-[9px] text-zinc-400">
+        <Loader2 className="h-2.5 w-2.5 animate-spin" /> Adding…
       </span>
     );
   }
@@ -217,20 +217,44 @@ function AddChips({
   };
 
   return (
-    <div className="flex items-center gap-1">
-      <button type="button" onClick={() => setLots((l) => Math.max(1, l - 1))}
-        className="h-5 w-5 rounded border border-zinc-700 bg-zinc-900 text-[10px] text-zinc-400 hover:text-zinc-200">−</button>
-      <span className="w-4 text-center font-mono text-[10px] text-zinc-300">{lots}</span>
-      <button type="button" onClick={() => setLots((l) => l + 1)}
-        className="h-5 w-5 rounded border border-zinc-700 bg-zinc-900 text-[10px] text-zinc-400 hover:text-zinc-200">+</button>
-      <button type="button" onClick={() => fire('BUY')}
-        className={cn('rounded border px-1.5 py-0.5 font-mono text-[10px] font-bold transition-colors',
-          armed === 'BUY' ? 'border-sky-400 bg-sky-500/25 text-sky-100 hover:bg-sky-500/35' : 'border-sky-800 bg-sky-950 text-sky-300 hover:bg-sky-900')}>
+    <div className="flex items-center gap-0.5">
+      <button
+        type="button"
+        onClick={() => setLots((l) => Math.max(1, l - 1))}
+        className="flex h-4.5 w-4.5 items-center justify-center rounded border border-zinc-750 bg-zinc-900 font-mono text-[9px] text-zinc-400 transition-colors hover:border-zinc-600 hover:text-zinc-200"
+      >
+        −
+      </button>
+      <span className="w-3 text-center font-mono text-[9.5px] font-bold text-zinc-300">{lots}</span>
+      <button
+        type="button"
+        onClick={() => setLots((l) => l + 1)}
+        className="flex h-4.5 w-4.5 items-center justify-center rounded border border-zinc-750 bg-zinc-900 font-mono text-[9px] text-zinc-400 transition-colors hover:border-zinc-600 hover:text-zinc-200"
+      >
+        +
+      </button>
+      <button
+        type="button"
+        onClick={() => fire('BUY')}
+        className={cn(
+          'h-5 rounded border px-1 font-mono text-[9px] font-bold leading-none transition-colors ml-0.5',
+          armed === 'BUY'
+            ? 'border-sky-400 bg-sky-500/30 text-sky-100 shadow-sm animate-pulse'
+            : 'border-sky-800/70 bg-sky-950/80 text-sky-300 hover:bg-sky-900 hover:border-sky-600'
+        )}
+      >
         {armed === 'BUY' ? 'Confirm?' : 'B'}
       </button>
-      <button type="button" onClick={() => fire('SELL')}
-        className={cn('rounded border px-1.5 py-0.5 font-mono text-[10px] font-bold transition-colors',
-          armed === 'SELL' ? 'border-rose-500 bg-rose-500/20 text-rose-200 hover:bg-rose-500/30' : 'border-rose-800 bg-rose-950 text-rose-300 hover:bg-rose-900')}>
+      <button
+        type="button"
+        onClick={() => fire('SELL')}
+        className={cn(
+          'h-5 rounded border px-1 font-mono text-[9px] font-bold leading-none transition-colors',
+          armed === 'SELL'
+            ? 'border-rose-500 bg-rose-500/30 text-rose-100 shadow-sm animate-pulse'
+            : 'border-rose-800/70 bg-rose-950/80 text-rose-300 hover:bg-rose-900 hover:border-rose-600'
+        )}
+      >
         {armed === 'SELL' ? 'Confirm?' : 'S'}
       </button>
     </div>
@@ -323,17 +347,17 @@ export default function PositionsLegTable({
         </div>
       )}
 
-      <div className="overflow-x-auto rounded-xl border border-zinc-800">
+      <div className="overflow-x-auto rounded-xl border border-zinc-800/80 bg-zinc-950/40 shadow-inner">
         <table className="w-full border-collapse">
           <thead>
-            <tr>
+            <tr className="border-b border-zinc-800">
               {selectable && (
-                <th className={cn(TH, 'text-left')}>
+                <th className={cn(TH, 'w-7 min-w-[28px] text-center')}>
                   <input
                     type="checkbox"
                     checked={allSelected}
                     onChange={() => onToggleSelectAll?.(allKeys)}
-                    className="h-3.5 w-3.5 cursor-pointer rounded-sm accent-sky-500 hover:ring-2 hover:ring-sky-500/50"
+                    className="h-3 w-3 cursor-pointer rounded-sm accent-sky-500 hover:ring-2 hover:ring-sky-500/50"
                     aria-label={allSelected ? 'Deselect all legs' : 'Select all legs'}
                   />
                 </th>
@@ -351,54 +375,56 @@ export default function PositionsLegTable({
               {onClose && <th className={cn(TH, 'text-right')}>Actions</th>}
             </tr>
           </thead>
-          <tbody>
+          <tbody className="divide-y divide-zinc-850/60">
             {sortedLegs.map((l) => {
               const key = legKey(l);
               const p = legPnl(l);
               const lots = lotSize > 0 ? l.qtyLots / lotSize : null;
               return (
-                <tr key={key} className="border-b border-zinc-800/70 transition-colors even:bg-zinc-900/40 hover:bg-zinc-800/60"
+                <tr key={key} className="transition-colors even:bg-zinc-900/25 hover:bg-zinc-800/40"
                     title={`${l.display.tradingSymbol} · ${l.display.productType}`}>
                   {selectable && (
-                    <td className={cn(TD, 'text-left')}>
+                    <td className={cn(TD, 'text-center')}>
                       <input
                         type="checkbox"
                         checked={selectedKeys!.has(key)}
                         onChange={() => onToggleSelect!(key)}
-                        className="h-3.5 w-3.5 cursor-pointer rounded-sm accent-sky-500 hover:ring-2 hover:ring-sky-500/50"
+                        className="h-3 w-3 cursor-pointer rounded-sm accent-sky-500 hover:ring-2 hover:ring-sky-500/50"
                         aria-label={`Select ${l.strike} ${l.type} for bulk exit`}
                       />
                     </td>
                   )}
-                  <td className={cn(TD, 'text-left')}>
+                  <td className={cn(TD, 'text-left font-medium')}>
                     <span className={cn(
-                      'mr-1.5 inline-block rounded px-1 py-px text-[8px] font-bold',
-                      l.side === 'SELL' ? 'bg-rose-500/15 text-rose-300' : 'bg-sky-500/15 text-sky-300',
+                      'mr-1.5 inline-flex items-center justify-center rounded px-1 py-0.25 text-[8.5px] font-bold leading-none',
+                      l.side === 'SELL'
+                        ? 'border border-rose-500/30 bg-rose-500/15 text-rose-300'
+                        : 'border border-sky-500/30 bg-sky-500/15 text-sky-300',
                     )}>
                       {l.side === 'SELL' ? 'S' : 'B'}
                     </span>
-                    <span className="text-zinc-100">{l.strike.toLocaleString('en-IN')} {l.type}</span>
+                    <span className="font-semibold text-zinc-100">{l.strike.toLocaleString('en-IN')} {l.type}</span>
                   </td>
-                  <td className={TD}>{l.expiry ? fmtExpiryShort(l.expiry) : '—'}</td>
-                  <td className={TD}>{l.display.netQty.toLocaleString('en-IN')}</td>
-                  <td className={TD}>
+                  <td className={cn(TD, 'text-center text-zinc-400')}>{l.expiry ? fmtExpiryShort(l.expiry) : '—'}</td>
+                  <td className={cn(TD, 'text-center')}>{l.display.netQty.toLocaleString('en-IN')}</td>
+                  <td className={cn(TD, 'text-center text-zinc-300')}>
                     {lots === null ? '—' : Number.isInteger(lots) ? lots : lots.toFixed(2)}
                   </td>
-                  <td className={TD}>{l.display.entryAvg.toFixed(2)}</td>
-                  <td className={TD}>{l.display.ltp === null ? '—' : l.display.ltp.toFixed(2)}</td>
-                  <td className={cn(TD, pnlColor(p.booked))}>{fmtInr(p.booked)}</td>
-                  <td className={cn(TD, p.unbooked === null ? 'text-zinc-500' : pnlColor(p.unbooked))}>
+                  <td className={cn(TD, 'text-center text-zinc-300')}>{l.display.entryAvg.toFixed(2)}</td>
+                  <td className={cn(TD, 'text-center')}>{l.display.ltp === null ? '—' : l.display.ltp.toFixed(2)}</td>
+                  <td className={cn(TD, 'text-center', pnlColor(p.booked))}>{fmtInr(p.booked)}</td>
+                  <td className={cn(TD, 'text-center', p.unbooked === null ? 'text-zinc-500' : pnlColor(p.unbooked))}>
                     {p.unbooked === null ? '—' : fmtInr(p.unbooked)}
                   </td>
-                  <td className={cn(TD, 'font-bold', p.total === null ? 'text-zinc-500' : pnlColor(p.total))}>
+                  <td className={cn(TD, 'text-center font-bold', p.total === null ? 'text-zinc-500' : pnlColor(p.total))}>
                     {p.total === null ? '—' : fmtInr(p.total)}
                   </td>
-                  <td className={cn(TD, p.totalPct === null ? 'text-zinc-500' : pnlColor(p.totalPct))}>
+                  <td className={cn(TD, 'text-center font-semibold', p.totalPct === null ? 'text-zinc-500' : pnlColor(p.totalPct))}>
                     {p.totalPct === null ? '—' : `${p.totalPct >= 0 ? '+' : ''}${p.totalPct.toFixed(1)}%`}
                   </td>
                   {onClose && (
                     <td className={cn(TD, 'text-right')}>
-                      <div className="flex items-center justify-end gap-2">
+                      <div className="flex items-center justify-end gap-1.5">
                         {onAdd && (
                           <AddChips
                             adding={addingKeys?.has(key) ?? false}

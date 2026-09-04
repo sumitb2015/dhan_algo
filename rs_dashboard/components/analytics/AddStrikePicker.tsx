@@ -113,59 +113,63 @@ export default function AddStrikePicker({ broker, underlying, strikeStep, spot, 
   };
 
   return (
-    <div className="flex flex-wrap items-center gap-2 rounded border border-zinc-800 bg-zinc-900 px-2 py-1.5">
-      <span className="text-[10px] font-bold uppercase tracking-widest text-zinc-400">Add Strike</span>
+    <div className="flex flex-wrap items-center gap-2 rounded-xl border border-zinc-800/80 bg-zinc-950/60 p-2.5 shadow-inner">
+      <span className="text-[9.5px] font-bold uppercase tracking-wider text-zinc-400">Add Strike</span>
 
       <select value={expiry} onChange={(e) => setExpiry(e.target.value)}
-        className="rounded border border-zinc-700 bg-zinc-950 px-1.5 py-1 font-mono text-xs text-zinc-200">
+        className="rounded-lg border border-zinc-750 bg-zinc-900 px-2 py-1 font-mono text-xs font-semibold text-zinc-200 shadow-sm transition-colors hover:border-zinc-600 focus:outline-none focus:ring-1 focus:ring-sky-500/50">
         {expiries.map((e) => <option key={e} value={e}>{fmtExpiryShort(e)}</option>)}
       </select>
 
       <select value={strike ?? ''} onChange={(e) => setStrike(Number(e.target.value))}
         disabled={!visibleStrikes.length}
-        className="rounded border border-zinc-700 bg-zinc-950 px-1.5 py-1 font-mono text-xs text-zinc-200 disabled:opacity-40">
+        className="rounded-lg border border-zinc-750 bg-zinc-900 px-2 py-1 font-mono text-xs font-semibold text-zinc-200 shadow-sm transition-colors hover:border-zinc-600 focus:outline-none focus:ring-1 focus:ring-sky-500/50 disabled:opacity-40">
         {visibleStrikes.map((s) => <option key={s} value={s}>{s.toLocaleString('en-IN')}</option>)}
       </select>
 
-      <div className="flex overflow-hidden rounded border border-zinc-700">
+      <div className="flex overflow-hidden rounded-lg border border-zinc-750 bg-zinc-900 p-0.5 shadow-sm">
         {(['CE', 'PE'] as const).map((t) => (
           <button key={t} type="button" onClick={() => setOptType(t)}
-            className={cn('px-2 py-1 font-mono text-[10px] font-bold transition-colors',
-              optType === t ? 'bg-sky-500/20 text-sky-300 hover:bg-sky-500/30' : 'bg-zinc-950 text-zinc-500 hover:text-zinc-300')}>
+            className={cn('rounded-md px-2.5 py-0.5 font-mono text-[10px] font-bold transition-all',
+              optType === t ? 'bg-sky-500/20 text-sky-200 shadow-sm border border-sky-500/40' : 'text-zinc-400 hover:text-zinc-200')}>
             {t}
           </button>
         ))}
       </div>
 
-      <div className="flex items-center gap-1">
+      <div className="flex items-center gap-1 rounded-lg border border-zinc-750 bg-zinc-900 px-1 py-0.5 shadow-sm">
         <button type="button" onClick={() => setLots((l) => Math.max(1, l - 1))}
-          className="h-6 w-6 rounded border border-zinc-700 bg-zinc-950 text-xs text-zinc-300 hover:text-zinc-100">−</button>
-        <span className="w-6 text-center font-mono text-xs text-zinc-200">{lots}</span>
+          className="flex h-5 w-5 items-center justify-center rounded border border-zinc-700 bg-zinc-800 font-mono text-xs text-zinc-300 transition-colors hover:border-zinc-500 hover:text-white">−</button>
+        <span className="w-5 text-center font-mono text-xs font-bold text-zinc-200">{lots}</span>
         <button type="button" onClick={() => setLots((l) => l + 1)}
-          className="h-6 w-6 rounded border border-zinc-700 bg-zinc-950 text-xs text-zinc-300 hover:text-zinc-100">+</button>
+          className="flex h-5 w-5 items-center justify-center rounded border border-zinc-700 bg-zinc-800 font-mono text-xs text-zinc-300 transition-colors hover:border-zinc-500 hover:text-white">+</button>
       </div>
 
       {placing ? (
-        <span className="inline-flex items-center gap-1 text-[10px] text-zinc-400">
-          <Loader2 className="h-3 w-3 animate-spin" /> Placing…
+        <span className="inline-flex items-center gap-1.5 font-mono text-[10px] text-zinc-400">
+          <Loader2 className="h-3 w-3 animate-spin text-sky-400" /> Placing…
         </span>
       ) : (
-        <div className="flex gap-1">
+        <div className="flex gap-1.5">
           <button type="button" disabled={!ready} onClick={() => place('BUY')}
-            className={cn('rounded border px-2 py-1 font-mono text-[10px] font-bold transition-colors disabled:cursor-not-allowed disabled:opacity-30',
-              armed === 'BUY' ? 'border-sky-400 bg-sky-500/25 text-sky-100 hover:bg-sky-500/35' : 'border-sky-800 bg-sky-950 text-sky-300 hover:bg-sky-900')}>
+            className={cn('rounded-lg border px-2.5 py-1 font-mono text-[10px] font-bold transition-all shadow-sm disabled:cursor-not-allowed disabled:opacity-30',
+              armed === 'BUY'
+                ? 'border-sky-400 bg-sky-500/30 text-sky-100 animate-pulse'
+                : 'border-sky-800/80 bg-sky-950/80 text-sky-300 hover:bg-sky-900 hover:border-sky-600')}>
             {armed === 'BUY' ? 'Confirm?' : 'Buy'}
           </button>
           <button type="button" disabled={!ready} onClick={() => place('SELL')}
-            className={cn('rounded border px-2 py-1 font-mono text-[10px] font-bold transition-colors disabled:cursor-not-allowed disabled:opacity-30',
-              armed === 'SELL' ? 'border-rose-500 bg-rose-500/20 text-rose-200 hover:bg-rose-500/30' : 'border-rose-800 bg-rose-950 text-rose-300 hover:bg-rose-900')}>
+            className={cn('rounded-lg border px-2.5 py-1 font-mono text-[10px] font-bold transition-all shadow-sm disabled:cursor-not-allowed disabled:opacity-30',
+              armed === 'SELL'
+                ? 'border-rose-500 bg-rose-500/30 text-rose-100 animate-pulse'
+                : 'border-rose-800/80 bg-rose-950/80 text-rose-300 hover:bg-rose-900 hover:border-rose-600')}>
             {armed === 'SELL' ? 'Confirm?' : 'Sell'}
           </button>
         </div>
       )}
 
       {!mapLoading && expiry && !visibleStrikes.length && (
-        <span className="text-[10px] text-amber-400">No strikes loaded for this expiry</span>
+        <span className="text-[10px] text-amber-400 font-medium">No strikes loaded for this expiry</span>
       )}
     </div>
   );

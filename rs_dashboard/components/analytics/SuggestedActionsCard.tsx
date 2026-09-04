@@ -38,7 +38,7 @@ export default function SuggestedActionsCard({ suggestions, legs, closingKeys, l
   if (!suggestions.length) return null;
 
   return (
-    <section className="space-y-2 rounded-xl border border-sky-900 bg-sky-950/20 p-3">
+    <section className="space-y-2.5 rounded-xl border border-sky-800/40 bg-sky-950/20 p-3 shadow-inner backdrop-blur-sm">
       <div className="flex items-center gap-1.5">
         <Sparkles className="h-3.5 w-3.5 text-sky-400" />
         <h2 className="text-xs font-bold uppercase tracking-wider text-sky-300">Suggested Actions</h2>
@@ -49,23 +49,23 @@ export default function SuggestedActionsCard({ suggestions, legs, closingKeys, l
         const closing = leg ? closingKeys.has(legKeyOf(leg)) : false;
         const armed = armedId === s.id;
         return (
-          <div key={s.id} className="rounded-lg border border-zinc-800 bg-zinc-950 p-3">
+          <div key={s.id} className="rounded-lg border border-zinc-800/80 bg-zinc-950/80 p-3 shadow-sm">
             <div className="flex flex-wrap items-start justify-between gap-2">
               <div className="min-w-0 flex-1">
                 <div className="font-mono text-xs font-bold text-zinc-100">
                   {s.action === 'CLOSE' ? 'Close' : `Trim ${s.pct}%`} {s.strike.toLocaleString('en-IN')} {s.type}
-                  <span className="ml-1.5 text-[10px] font-normal text-zinc-500">{s.expiry}</span>
+                  <span className="ml-1.5 text-[10px] font-medium text-zinc-400">{s.expiry}</span>
                 </div>
                 <p className="mt-1 text-[11px] leading-relaxed text-zinc-400">{s.rationale}</p>
               </div>
 
               <div className="flex shrink-0 items-center gap-1.5">
                 {!leg ? (
-                  <span className="flex items-center gap-1 rounded border border-amber-800 bg-amber-950 px-2 py-1 text-[10px] font-bold text-amber-300">
-                    <AlertTriangle className="h-3 w-3" /> Position no longer open
+                  <span className="flex items-center gap-1 rounded-lg border border-amber-800/80 bg-amber-950/80 px-2 py-1 text-[10px] font-bold text-amber-300">
+                    <AlertTriangle className="h-3 w-3 text-amber-400" /> Position no longer open
                   </span>
                 ) : closing ? (
-                  <span className="text-[10px] text-zinc-400">Closing…</span>
+                  <span className="font-mono text-[10px] text-zinc-400">Closing…</span>
                 ) : (
                   <button type="button"
                     onClick={() => {
@@ -73,15 +73,15 @@ export default function SuggestedActionsCard({ suggestions, legs, closingKeys, l
                       setArmedId(null);
                       onConfirm(leg, s.pct);
                     }}
-                    className={cn('rounded border px-2 py-1 font-mono text-[10px] font-bold transition-colors',
+                    className={cn('rounded-lg border px-2.5 py-1 font-mono text-[10px] font-bold transition-all shadow-sm',
                       armed
-                        ? 'border-rose-500 bg-rose-500/20 text-rose-200 hover:bg-rose-500/30'
-                        : 'border-emerald-700 bg-emerald-950 text-emerald-300 hover:bg-emerald-900')}>
+                        ? 'border-rose-500 bg-rose-500/25 text-rose-200 animate-pulse'
+                        : 'border-emerald-700/80 bg-emerald-950/80 text-emerald-300 hover:bg-emerald-900 hover:border-emerald-500')}>
                     {armed ? 'Confirm?' : 'Confirm'}
                   </button>
                 )}
                 <button type="button" onClick={() => onDismiss(s.id)}
-                  className="rounded border border-zinc-700 bg-zinc-900 px-2 py-1 font-mono text-[10px] font-bold text-zinc-400 hover:text-zinc-200">
+                  className="rounded-lg border border-zinc-750 bg-zinc-900 px-2.5 py-1 font-mono text-[10px] font-bold text-zinc-400 shadow-sm transition-colors hover:border-zinc-600 hover:text-zinc-200">
                   Dismiss
                 </button>
               </div>

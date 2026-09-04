@@ -48,39 +48,44 @@ export default function AnalyzeModal({
       role="dialog"
       aria-modal="true"
       aria-label="Position analysis"
-      className="fixed inset-0 z-50 flex items-center justify-center bg-oncolor-dark/70 p-4 backdrop-blur-sm"
+      className="fixed inset-0 z-50 flex items-center justify-center bg-oncolor-dark/80 p-4 backdrop-blur-md"
       onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}
     >
-      <div className="flex max-h-[85vh] w-full max-w-xl flex-col overflow-hidden rounded-xl border border-zinc-700 bg-zinc-900 shadow-2xl">
-        <div className="flex items-center gap-2 border-b border-zinc-800 px-4 py-3">
-          <Sparkles className="h-4 w-4 text-sky-400" />
-          <h2 className="text-sm font-bold text-zinc-100">Antigravity Position Analysis</h2>
-          <span className="rounded border border-sky-800 bg-sky-950/60 px-1.5 py-0.5 font-mono text-[10px] font-bold text-sky-300">
-            Risk &amp; Adjustment Engine
-          </span>
+      <div className="flex max-h-[85vh] w-full max-w-xl flex-col overflow-hidden rounded-2xl border border-zinc-700/80 bg-zinc-900/95 shadow-2xl backdrop-blur-xl">
+        <div className="flex items-center gap-2.5 border-b border-zinc-800/80 px-5 py-3.5 bg-zinc-950/60">
+          <div className="flex h-7 w-7 items-center justify-center rounded-lg border border-sky-500/30 bg-sky-500/10">
+            <Sparkles className="h-4 w-4 text-sky-400" />
+          </div>
+          <div>
+            <h2 className="text-sm font-bold text-zinc-100">Antigravity Position Analysis</h2>
+            <span className="text-[10px] font-semibold text-sky-400">
+              Risk &amp; Adjustment Engine
+            </span>
+          </div>
           <button type="button" onClick={onClose} aria-label="Close"
-            className="ml-auto rounded p-1 text-zinc-500 hover:bg-zinc-800 hover:text-zinc-200">
+            className="ml-auto rounded-lg p-1.5 text-zinc-400 hover:bg-zinc-800 hover:text-white transition-colors">
             <X className="h-4 w-4" />
           </button>
         </div>
 
-        <div className="space-y-3 overflow-y-auto px-4 py-4">
+        <div className="space-y-3.5 overflow-y-auto px-5 py-4">
           {loading && (
-            <div className="flex items-center gap-2 py-8 text-sm text-zinc-400">
+            <div className="flex items-center gap-2.5 py-8 text-sm text-zinc-300">
               <Loader2 className="h-4 w-4 animate-spin text-sky-400" /> Reviewing open positions &amp; Greeks risk profile…
             </div>
           )}
 
           {!loading && error && (
-            <div className="flex items-start gap-2 rounded border border-rose-800 bg-rose-950 px-3 py-2 text-xs text-rose-300">
-              <AlertTriangle className="mt-px h-3.5 w-3.5 shrink-0" /> {error}
+            <div className="flex items-start gap-2 rounded-xl border border-rose-800/80 bg-rose-950/40 px-3.5 py-2.5 text-xs text-rose-300">
+              <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-rose-400" />
+              <span>{error}</span>
             </div>
           )}
 
           {!loading && !error && summary && (
-            <div className="rounded-lg border border-zinc-800 bg-zinc-950 px-3.5 py-3 text-xs leading-relaxed text-zinc-300 space-y-1">
-              <div className="flex items-center gap-1.5 font-bold text-zinc-200">
-                <ShieldCheck className="h-3.5 w-3.5 text-emerald-400" />
+            <div className="rounded-xl border border-zinc-800/80 bg-zinc-950/80 p-3.5 text-xs leading-relaxed text-zinc-300 space-y-1.5 shadow-sm">
+              <div className="flex items-center gap-1.5 font-bold text-zinc-100">
+                <ShieldCheck className="h-4 w-4 text-emerald-400" />
                 <span>Executive Risk Summary</span>
               </div>
               <p className="text-zinc-400">{summary}</p>

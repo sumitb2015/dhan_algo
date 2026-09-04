@@ -220,58 +220,63 @@ export default function PositionsPayoffChart({
   return (
     <div ref={boxRef} className={cn('w-full', full && 'fixed inset-0 z-50 overflow-auto bg-zinc-950 p-6')}>
       {/* Legend + controls */}
-      <div className="mb-2 flex flex-wrap items-center gap-3">
-        {model.maxOi > 0 && (
-          <span className="text-[10px] font-bold uppercase tracking-widest text-zinc-400">
-            OI at {Math.round(spot).toLocaleString('en-IN')}
-          </span>
-        )}
-        <div className="ml-auto flex items-center gap-3">
+      <div className="mb-3 flex flex-wrap items-center justify-between gap-3 border-b border-zinc-800/80 pb-2.5">
+        <div className="flex flex-wrap items-center gap-3">
+          {model.maxOi > 0 && (
+            <span className="text-[9.5px] font-bold uppercase tracking-wider text-zinc-400">
+              OI at {Math.round(spot).toLocaleString('en-IN')}
+            </span>
+          )}
           {model.line && (
-            <span className="flex items-center gap-1.5 text-[11px] text-zinc-300">
-              <span className="inline-block h-0.5 w-4 bg-emerald-400" /> On Expiry ({expiryLabel})
+            <span className="flex items-center gap-1.5 text-[11px] font-medium text-zinc-300">
+              <span className="inline-block h-1 w-3.5 rounded-full bg-emerald-400" /> Expiry ({expiryLabel})
             </span>
           )}
           {model.targetLine && (
-            <span className="flex items-center gap-1.5 text-[11px] text-zinc-300">
-              <span className="inline-block h-0.5 w-4 bg-sky-400" /> On {targetLabel}
+            <span className="flex items-center gap-1.5 text-[11px] font-medium text-zinc-300">
+              <span className="inline-block h-1 w-3.5 rounded-full bg-sky-400" /> {targetLabel}
             </span>
           )}
           {model.draftLine && (
-            <span className="flex items-center gap-1.5 text-[11px] text-zinc-300">
-              <span className="inline-block h-0.5 w-4 border-t-2 border-dashed border-violet-400" /> With Draft
+            <span className="flex items-center gap-1.5 text-[11px] font-medium text-zinc-300">
+              <span className="inline-block h-1 w-3.5 rounded-full border-t border-dashed border-violet-400" /> With Draft
             </span>
           )}
+        </div>
+
+        <div className="flex items-center gap-1.5">
           <button
             type="button"
             onClick={onToggleOi}
             className={cn(
-              'rounded border px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider transition-colors',
+              'rounded-lg border px-2.5 py-1 text-[10px] font-bold uppercase tracking-wider transition-all shadow-sm',
               showOi
-                ? 'border-violet-500 bg-violet-500/15 text-violet-300 hover:bg-violet-500/25'
-                : 'border-zinc-700 bg-zinc-900 text-zinc-400 hover:text-zinc-200',
+                ? 'border-violet-500/50 bg-violet-500/20 text-violet-200'
+                : 'border-zinc-800 bg-zinc-900 text-zinc-400 hover:border-zinc-700 hover:text-zinc-200',
             )}
           >
             Open Interest
           </button>
-          <button type="button" onClick={onZoomOut} disabled={!canZoomOut} title="Zoom out"
-            className="rounded border border-zinc-700 bg-zinc-900 p-1 text-zinc-400 hover:text-zinc-200 disabled:opacity-40">
-            <ZoomOut className="h-3.5 w-3.5" />
-          </button>
-          <button type="button" onClick={onZoomIn} disabled={!canZoomIn} title="Zoom in"
-            className="rounded border border-zinc-700 bg-zinc-900 p-1 text-zinc-400 hover:text-zinc-200 disabled:opacity-40">
-            <ZoomIn className="h-3.5 w-3.5" />
-          </button>
-          <button type="button" onClick={() => setFull((f) => !f)} title={full ? 'Exit full screen' : 'Full screen'}
-            className="rounded border border-zinc-700 bg-zinc-900 p-1 text-zinc-400 hover:text-zinc-200">
-            {full ? <Minimize2 className="h-3.5 w-3.5" /> : <Maximize2 className="h-3.5 w-3.5" />}
-          </button>
+          <div className="flex items-center rounded-lg border border-zinc-750 bg-zinc-900 p-0.5 shadow-sm">
+            <button type="button" onClick={onZoomOut} disabled={!canZoomOut} title="Zoom out"
+              className="rounded p-1 text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200 transition-colors disabled:opacity-30">
+              <ZoomOut className="h-3.5 w-3.5" />
+            </button>
+            <button type="button" onClick={onZoomIn} disabled={!canZoomIn} title="Zoom in"
+              className="rounded p-1 text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200 transition-colors disabled:opacity-30">
+              <ZoomIn className="h-3.5 w-3.5" />
+            </button>
+            <button type="button" onClick={() => setFull((f) => !f)} title={full ? 'Exit full screen' : 'Full screen'}
+              className="rounded p-1 text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200 transition-colors">
+              {full ? <Minimize2 className="h-3.5 w-3.5" /> : <Maximize2 className="h-3.5 w-3.5" />}
+            </button>
+          </div>
         </div>
       </div>
 
       {ivWarning && (
-        <div className="mb-2 flex items-start gap-2 rounded border border-amber-800 bg-amber-950 px-2.5 py-1.5 text-[11px] text-amber-300">
-          <AlertTriangle className="mt-px h-3.5 w-3.5 shrink-0" />
+        <div className="mb-2.5 flex items-start gap-2 rounded-xl border border-amber-800/80 bg-amber-950/40 px-3 py-2 text-[11px] text-amber-300">
+          <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-amber-400" />
           <span>{ivWarning}</span>
         </div>
       )}
@@ -360,7 +365,7 @@ export default function PositionsPayoffChart({
           return (
             <g key={`be${be}`}>
               <circle cx={sx(be)} cy={zeroY} r={4} fill="#f59e0b" stroke="#18181b" strokeWidth={2} />
-              <text x={sx(be)} y={zeroY - 9} textAnchor="middle" fontSize={9.5} fill="#f59e0b" className="font-mono">
+              <text x={sx(be)} y={zeroY - 9} textAnchor="middle" fontSize={9.5} fill="#f59e0b" className="font-mono font-medium">
                 {be.toLocaleString('en-IN', { maximumFractionDigits: 0 })}{pctStr}
               </text>
             </g>
@@ -392,26 +397,26 @@ export default function PositionsPayoffChart({
             {draftPnl !== null && (
               <circle cx={sx(readoutSpot)} cy={sy(draftPnl)} r={4} fill="#a78bfa" stroke="#18181b" strokeWidth={2} />
             )}
-            <g transform={`translate(${tooltipLeft ? sx(readoutSpot) - 140 : sx(readoutSpot) + 10}, ${PAD.top + 4})`}>
-              <rect width={130}
-                height={26 + (expiryPnl !== null ? 16 : 0) + (targetPnl !== null ? 16 : 0) + (draftPnl !== null ? 16 : 0)}
-                rx={6} fill="#ffffff" fillOpacity={0.12} stroke="#3f3f46" strokeOpacity={0.7} />
-              <text x={9} y={15} fontSize={10} fill="#000000" className="font-mono">
+            <g transform={`translate(${tooltipLeft ? sx(readoutSpot) - 148 : sx(readoutSpot) + 12}, ${PAD.top + 4})`}>
+              <rect width={136}
+                height={28 + (expiryPnl !== null ? 16 : 0) + (targetPnl !== null ? 16 : 0) + (draftPnl !== null ? 16 : 0)}
+                rx={8} fill="#09090b" fillOpacity={0.92} stroke="#3f3f46" strokeWidth={1} />
+              <text x={10} y={16} fontSize={10} fill="#d4d4d8" fontWeight={600} className="font-mono">
                 At {readoutSpot.toLocaleString('en-IN', { maximumFractionDigits: 0 })}
               </text>
               {expiryPnl !== null && (
-                <text x={9} y={30} fontSize={12} fontWeight={700} className="font-mono"
-                  fill={expiryPnl >= 0 ? '#10b981' : '#ef4444'}>
+                <text x={10} y={32} fontSize={11.5} fontWeight={700} className="font-mono"
+                  fill={expiryPnl >= 0 ? '#34d399' : '#f87171'}>
                   Expiry {fmtInrCompact(expiryPnl)}
                 </text>
               )}
               {targetPnl !== null && (
-                <text x={9} y={30 + (expiryPnl !== null ? 16 : 0)} fontSize={12} fontWeight={700} className="font-mono" fill="#38bdf8">
+                <text x={10} y={32 + (expiryPnl !== null ? 16 : 0)} fontSize={11.5} fontWeight={700} className="font-mono" fill="#38bdf8">
                   {targetLabel} {fmtInrCompact(targetPnl)}
                 </text>
               )}
               {draftPnl !== null && (
-                <text x={9} y={30 + (expiryPnl !== null ? 16 : 0) + (targetPnl !== null ? 16 : 0)} fontSize={12} fontWeight={700} className="font-mono" fill="#a78bfa">
+                <text x={10} y={32 + (expiryPnl !== null ? 16 : 0) + (targetPnl !== null ? 16 : 0)} fontSize={11.5} fontWeight={700} className="font-mono" fill="#c084fc">
                   Draft {fmtInrCompact(draftPnl)}
                 </text>
               )}

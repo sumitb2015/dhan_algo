@@ -19,10 +19,10 @@ export function StatChip({
   label: string; value: React.ReactNode; sub?: string; color?: string; title?: string;
 }) {
   return (
-    <div className="flex min-w-[104px] flex-col border-r border-zinc-800/80 px-4 last:border-r-0" title={title}>
-      <span className="text-[10px] font-bold uppercase tracking-widest text-zinc-400">{label}</span>
-      <span className={cn('font-mono text-sm font-bold tabular-nums', color ?? 'text-zinc-100')}>{value}</span>
-      {sub && <span className="text-[10px] text-zinc-500">{sub}</span>}
+    <div className="flex min-w-[96px] flex-col border-r border-zinc-800/80 px-3.5 py-0.5 last:border-r-0" title={title}>
+      <span className="text-[9.5px] font-bold uppercase tracking-wider text-zinc-400">{label}</span>
+      <span className={cn('font-mono text-sm font-bold tabular-nums tracking-tight', color ?? 'text-zinc-100')}>{value}</span>
+      {sub && <span className="text-[9.5px] font-medium text-zinc-500">{sub}</span>}
     </div>
   );
 }
@@ -60,10 +60,10 @@ export default function PayoffMetricStrip({
   const netPremiumPct = marginBasis !== null && marginBasis > 0 ? (stats.netPremium / marginBasis) * 100 : null;
 
   return (
-    <div className="flex flex-col gap-3 rounded-2xl border border-zinc-800 bg-zinc-900/60 px-3 py-3.5 backdrop-blur-sm">
+    <div className="flex flex-col gap-3 rounded-2xl border border-zinc-800/80 bg-zinc-900/50 p-4 backdrop-blur-md shadow-sm">
       {/* Group 1: shape of the position's outcome — what can happen, and how likely. */}
-      <div className="flex flex-wrap items-center gap-y-2 border-l-2 border-sky-700 pl-2">
-        <span className="mr-1 shrink-0 text-[9px] font-bold uppercase tracking-widest text-zinc-500">
+      <div className="flex flex-wrap items-center gap-y-2 border-l-2 border-sky-500 pl-2.5">
+        <span className="mr-1.5 shrink-0 text-[9px] font-extrabold uppercase tracking-widest text-sky-400">
           Risk Shape
         </span>
         <StatChip
@@ -148,11 +148,11 @@ export default function PayoffMetricStrip({
         />
       </div>
 
-      <div className="border-t border-zinc-800" />
+      <div className="border-t border-zinc-800/80" />
 
       {/* Group 2: what the book costs / is worth right now — capital, not outcome. */}
-      <div className="flex flex-wrap items-center gap-y-2 border-l-2 border-amber-700 pl-2">
-        <span className="mr-1 shrink-0 text-[9px] font-bold uppercase tracking-widest text-zinc-500">
+      <div className="flex flex-wrap items-center gap-y-2 border-l-2 border-amber-500 pl-2.5">
+        <span className="mr-1.5 shrink-0 text-[9px] font-extrabold uppercase tracking-widest text-amber-400">
           Capital
         </span>
         <StatChip label="Time Value" value={fmtInr(stats.timeValue)} />

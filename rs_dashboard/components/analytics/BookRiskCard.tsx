@@ -30,10 +30,10 @@ function Tile({
   label: string; value: string; sub?: React.ReactNode; color?: string; title?: string;
 }) {
   return (
-    <div className="min-w-[180px] flex-1 rounded-xl border border-zinc-800 bg-zinc-950/60 px-4 py-3" title={title}>
-      <div className="text-[10px] font-bold uppercase tracking-widest text-zinc-400">{label}</div>
-      <div className={cn('mt-1 font-mono text-xl font-bold tabular-nums', color ?? 'text-zinc-100')}>{value}</div>
-      {sub && <div className="mt-0.5 text-[11px] text-zinc-500">{sub}</div>}
+    <div className="min-w-[180px] flex-1 rounded-xl border border-zinc-800/80 bg-zinc-950/60 p-3.5 shadow-inner transition-colors hover:border-zinc-700/80" title={title}>
+      <div className="text-[9.5px] font-bold uppercase tracking-wider text-zinc-400">{label}</div>
+      <div className={cn('mt-1 font-mono text-lg font-bold tabular-nums tracking-tight', color ?? 'text-zinc-100')}>{value}</div>
+      {sub && <div className="mt-0.5 text-[10.5px] font-medium text-zinc-500">{sub}</div>}
     </div>
   );
 }
@@ -47,13 +47,13 @@ interface Props {
 
 export default function BookRiskCard({ exposure, capital, nav, stopMultiple }: Props) {
   return (
-    <section className="rounded-2xl border border-zinc-800 bg-zinc-900/60 p-4 backdrop-blur-sm">
+    <section className="rounded-2xl border border-zinc-800/80 bg-zinc-900/50 p-4 backdrop-blur-md shadow-sm">
       <div className="mb-3 flex flex-wrap items-center gap-2">
-        <span className="h-1.5 w-1.5 rounded-full bg-amber-500" />
+        <span className="h-2 w-2 rounded-full bg-amber-400 shadow-[0_0_8px_rgba(251,191,36,0.6)]" />
         <h2 className="text-xs font-bold uppercase tracking-wider text-white">Book Risk</h2>
         {exposure.overAllocated && (
-          <span className="ml-auto flex items-center gap-1.5 rounded-full border border-rose-700 bg-rose-950 px-2.5 py-0.5 text-[10px] font-bold uppercase tracking-wider text-rose-300">
-            <AlertTriangle className="h-3 w-3" />
+          <span className="ml-auto flex items-center gap-1.5 rounded-full border border-rose-700/80 bg-rose-950/80 px-2.5 py-0.5 text-[10px] font-bold uppercase tracking-wider text-rose-300 shadow-sm animate-pulse">
+            <AlertTriangle className="h-3 w-3 text-rose-400" />
             Over-Allocated / High Concentration
           </span>
         )}

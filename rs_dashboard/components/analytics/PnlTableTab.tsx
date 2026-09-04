@@ -85,62 +85,61 @@ export default function PnlTableTab({ legs, spot, strikeStep, expiry }: Props) {
   }
 
   return (
-    <div className="space-y-3">
-      <div className="flex flex-wrap items-center gap-4">
+    <div className="space-y-3.5">
+      <div className="flex flex-wrap items-center gap-4 rounded-xl border border-zinc-800/80 bg-zinc-950/60 p-3 shadow-inner">
         <div className="flex items-center gap-1.5">
-          <span className="text-[10px] font-bold uppercase tracking-widest text-zinc-400">Range</span>
+          <span className="text-[9.5px] font-bold uppercase tracking-wider text-zinc-400">Range</span>
           {RANGE_OPTIONS.map((r) => (
             <button key={r} type="button" onClick={() => setRangePct(r)}
               className={cn(
-                'rounded border px-2 py-0.5 font-mono text-[10px] font-bold transition-colors',
+                'rounded-lg border px-2 py-0.5 font-mono text-[10px] font-bold transition-all shadow-sm',
                 rangePct === r
-                  ? 'border-sky-500 bg-sky-500/15 text-sky-300 hover:bg-sky-500/25'
-                  : 'border-zinc-700 bg-zinc-900 text-zinc-400 hover:text-zinc-200',
+                  ? 'border-sky-500/50 bg-sky-500/20 text-sky-200'
+                  : 'border-zinc-800 bg-zinc-900 text-zinc-400 hover:border-zinc-700 hover:text-zinc-200',
               )}>
               ±{(r * 100).toFixed(0)}%
             </button>
           ))}
         </div>
         <div className="flex items-center gap-1.5">
-          <span className="text-[10px] font-bold uppercase tracking-widest text-zinc-400">Vol</span>
+          <span className="text-[9.5px] font-bold uppercase tracking-wider text-zinc-400">Vol</span>
           {IV_OPTIONS.map((o) => (
             <button key={o.label} type="button" onClick={() => setIvMultiplier(o.value)}
               className={cn(
-                'rounded border px-2 py-0.5 font-mono text-[10px] font-bold transition-colors',
+                'rounded-lg border px-2 py-0.5 font-mono text-[10px] font-bold transition-all shadow-sm',
                 ivMultiplier === o.value
-                  ? 'border-violet-500 bg-violet-500/15 text-violet-300 hover:bg-violet-500/25'
-                  : 'border-zinc-700 bg-zinc-900 text-zinc-400 hover:text-zinc-200',
+                  ? 'border-violet-500/50 bg-violet-500/20 text-violet-200'
+                  : 'border-zinc-800 bg-zinc-900 text-zinc-400 hover:border-zinc-700 hover:text-zinc-200',
               )}>
               {o.label}
             </button>
           ))}
         </div>
-        <span className="text-[10px] text-zinc-500">
-          Priced to {fmtExpiryShort(expiry)}. The final column settles intrinsically; earlier columns use
-          Black-Scholes at each leg&apos;s live IV{ivMultiplier !== 1 ? `, scaled ${ivMultiplier}×` : ''}.
+        <span className="text-[10.5px] text-zinc-400">
+          Priced to <strong className="text-zinc-200">{fmtExpiryShort(expiry)}</strong>. Final column settles intrinsically; earlier columns use live IV{ivMultiplier !== 1 ? ` (${ivMultiplier}×)` : ''}.
         </span>
       </div>
 
-      <div className="max-h-[520px] overflow-auto rounded border border-zinc-800">
+      <div className="max-h-[520px] overflow-auto rounded-xl border border-zinc-800/80 bg-zinc-950/40 shadow-inner">
         <table className="w-full border-collapse">
           <thead className="sticky top-0 z-10">
-            <tr>
-              <th className="sticky left-0 z-20 bg-zinc-800 px-2.5 py-2 text-xs font-bold text-white">Spot</th>
+            <tr className="border-b border-zinc-800">
+              <th className="sticky left-0 z-20 bg-zinc-800 px-3 py-2 text-[10px] font-bold uppercase tracking-wider text-white">Spot</th>
               {grid.dates.map((d) => (
-                <th key={d} className="bg-zinc-800 px-2 py-2 text-xs font-bold text-white whitespace-nowrap">
+                <th key={d} className="bg-zinc-800 px-2.5 py-2 text-[10px] font-bold uppercase tracking-wider text-white whitespace-nowrap text-center">
                   {fmtExpiryShort(d)}
                 </th>
               ))}
             </tr>
           </thead>
-          <tbody>
+          <tbody className="divide-y divide-zinc-850/60">
             {grid.rows.map((rowSpot, ri) => {
               const isNearSpot = Math.abs(rowSpot - spot) <= strikeStep / 2;
               return (
-                <tr key={rowSpot}>
+                <tr key={rowSpot} className="transition-colors hover:bg-zinc-800/30">
                   <td className={cn(
-                    'sticky left-0 z-10 border-r border-zinc-700 px-2.5 py-1 font-mono text-xs font-bold tabular-nums',
-                    isNearSpot ? 'bg-sky-950 text-sky-300' : 'bg-zinc-900 text-zinc-300',
+                    'sticky left-0 z-10 border-r border-zinc-800/80 px-3 py-1 font-mono text-xs font-bold tabular-nums',
+                    isNearSpot ? 'bg-sky-950 text-sky-300 border-l-2 border-l-sky-400' : 'bg-zinc-900 text-zinc-300',
                   )}>
                     {rowSpot.toLocaleString('en-IN')}
                   </td>
@@ -148,7 +147,7 @@ export default function PnlTableTab({ legs, spot, strikeStep, expiry }: Props) {
                     <td key={ci}
                       style={{ backgroundColor: cellColor(pnl, maxAbs) }}
                       className={cn(
-                        'px-2 py-1 text-center font-mono text-[11px] tabular-nums',
+                        'px-2 py-1 text-center font-mono text-[10.5px] font-medium tabular-nums',
                         pnl >= 0 ? 'text-emerald-200' : 'text-red-200',
                       )}>
                       {fmtCell(pnl)}
