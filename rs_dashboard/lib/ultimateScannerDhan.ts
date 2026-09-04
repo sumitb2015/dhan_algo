@@ -227,6 +227,7 @@ export async function fetchNettedMargin(
           'Accept': 'application/json',
         },
         body: JSON.stringify({
+          dhanClientId: auth.clientId,
           includePosition: false,
           includeOrders: false,
           scripList,
@@ -239,17 +240,25 @@ export async function fetchNettedMargin(
         return null;
       }
 
+      // Dhan returns the margin figures as a flat 200-OK object —
+      // {clientId, totalMargin, spanMargin, exposure, ...} — with no
+      // {status:'success', data:{...}} envelope. An error (e.g. DH-905) also
+      // comes back as JSON, just without totalMargin, so check the field
+      // itself rather than a status wrapper that doesn't exist.
       const json = await res.json() as {
-        status?: string;
-        data?: { totalMargin?: number };
+        totalMargin?: number;
+        errorCode?: string;
+        errorMessage?: string;
       };
-      const totalMargin = json.data?.totalMargin;
       // A clean response means the account isn't currently throttled here —
       // relax the gap back toward baseline rather than staying at whatever
       // backoff a prior 429 left it at.
       marginGapMs = Math.max(MARGIN_BASE_GAP_MS, Math.round(marginGapMs * 0.7));
-      if (json.status === 'success' && typeof totalMargin === 'number' && totalMargin > 0) {
-        return Math.round(totalMargin * 100) / 100;
+      if (typeof json.totalMargin === 'number' && json.totalMargin > 0) {
+        return Math.round(json.totalMargin * 100) / 100;
+      }
+      if (json.errorCode) {
+        console.warn(`[fetchNettedMargin] ${underlying} ${json.errorCode}: ${json.errorMessage}`);
       }
       return null;
     } catch {

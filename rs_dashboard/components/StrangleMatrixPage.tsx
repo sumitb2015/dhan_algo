@@ -960,20 +960,26 @@ export default function StrangleMatrixPage() {
           </span>
 
           {/* Live Margin Sweep Progress — background job fetches Dhan's real
-              SPAN+exposure margin for every grid cell over ~1 req/s; this
-              shows how much of the grid currently has the exact figure vs.
-              the flat per-underlying estimate. */}
+              SPAN+exposure margin for every grid cell over ~1 req/s; this is
+              the confirmation that the whole grid is priced off Dhan's real
+              margin calculator rather than the flat per-underlying estimate. */}
           {data?.marginSweep && data.marginSweep.total > 0 && (
             <span
-              className={`text-[10px] font-mono font-bold px-2.5 py-1.5 rounded-lg bg-zinc-900 border uppercase tracking-wide ${
+              className={`flex items-center gap-1.5 text-[10px] font-mono font-bold px-2.5 py-1.5 rounded-lg bg-zinc-900 border uppercase tracking-wide ${
                 data.marginSweep.live >= data.marginSweep.total
-                  ? 'text-emerald-300 border-emerald-500/30'
-                  : 'text-zinc-400 border-zinc-800'
+                  ? 'text-emerald-300 border-emerald-500/40'
+                  : 'text-amber-300 border-zinc-800'
               }`}
               title="Cells priced with Dhan's real multi-leg margin calculator vs. the flat per-underlying estimate"
             >
-              LIVE MARGIN: {data.marginSweep.live}/{data.marginSweep.total}
-              {data.marginSweep.sweeping && data.marginSweep.live < data.marginSweep.total ? '…' : ''}
+              {data.marginSweep.live >= data.marginSweep.total ? (
+                <>
+                  <Check className="w-3 h-3" />
+                  ALL MARGINS LIVE ({data.marginSweep.total})
+                </>
+              ) : (
+                <>LIVE MARGIN: {data.marginSweep.live}/{data.marginSweep.total}{data.marginSweep.sweeping ? '…' : ''}</>
+              )}
             </span>
           )}
 
