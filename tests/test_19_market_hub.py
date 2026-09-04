@@ -107,9 +107,18 @@ def run(helper=None):
     ok = True
     procs = []
     try:
-        # Clean slate — don't inherit state from a previous manual run.
-        for f in (EQUITY_QUOTES_FILE, EQUITY_STATUS_FILE, INDICES_HISTORY_FILE,
-                  INDICES_STATUS_FILE, FOCUS_TOOL_QUOTES_FILE, FOCUS_TOOL_STATUS_FILE):
+        # Clean slate — don't inherit state from a previous manual or automated
+        # run. Stop triggers matter here as much as quotes/status: _cleanup()
+        # below writes them unconditionally in its `finally`, including on an
+        # early failure (e.g. expiry resolution) before any bridge is even
+        # spawned — a leftover trigger from that prior run then kills the next
+        # run's live_equity_ws.py/live_indices_ws.py within ~3s of starting,
+        # before either ever reaches RUNNING. Confirmed live: exactly this
+        # sequence, traced via debug/market_hub/hub.log showing both bridges'
+        # instruments subscribed then immediately unsubscribed 3s later.
+        for f in (EQUITY_QUOTES_FILE, EQUITY_STATUS_FILE, EQUITY_STOP_TRIGGER,
+                  INDICES_HISTORY_FILE, INDICES_STATUS_FILE, INDICES_STOP_TRIGGER,
+                  FOCUS_TOOL_QUOTES_FILE, FOCUS_TOOL_STATUS_FILE, FOCUS_TOOL_STOP_TRIGGER):
             try:
                 os.remove(f)
             except OSError:
@@ -131,11 +140,33 @@ def run(helper=None):
 
         nifty_expiry = local_helper.get_nearest_expiry('NIFTY')
         banknifty_expiry = local_helper.get_nearest_expiry('BANKNIFTY')
-        sensex_expiry = local_helper.get_nearest_expiry('SENSEX')
+        # SENSEX is the one underlying where get_nearest_expiry()/get_expiries()
+        # is the WRONG call: the bare symbol resolves through the master list to
+        # the index's own security id (51, IDX_I), whose option-chain/expiry-list
+        # API returns nothing. The chain keys on security id 1 / BSE_FNO instead —
+        # same mapping scripts/tools/options_data_fetch.py's UNDERLYINGS dict uses,
+        # and the same trap docs/API_GOTCHAS.md documents for SENSEX. Confirmed
+        # live: get_nearest_expiry('SENSEX') returned None here on first write of
+        # this test, exactly as that doc predicts for the wrong id/segment pair.
+        sensex_expiries = local_helper.get_expiry_list(under_security_id=1, under_exchange_segment='BSE_FNO')
+        sensex_expiry = sensex_expiries[0] if sensex_expiries else None
         if not (nifty_expiry and banknifty_expiry and sensex_expiry):
             print('[test_19] FAIL: could not resolve expiries for NIFTY/BANKNIFTY/SENSEX '
                   f'(got {nifty_expiry!r}, {banknifty_expiry!r}, {sensex_expiry!r})')
             return False
+
+        # hub.log is opened in append mode by market_data_hub.py and persists
+        # across every past run (manual or automated) in this checkout — it is
+        # NOT rotated per-run. Recording this run's start offset before
+        # spawning anything means the "exactly one hub startup" check below
+        # only counts starts caused BY this run, not accumulated history from
+        # earlier sessions. Confirmed live: without this, a prior run's own
+        # hub startups (e.g. its own step-3 kill-and-recover cycle) get
+        # double-counted as false "multiple hub processes" failures.
+        try:
+            hub_log_start_offset = os.path.getsize(hub_client.hub_log_file())
+        except OSError:
+            hub_log_start_offset = 0
 
         print('[test_19] Starting live_equity_ws.py, live_indices_ws.py, focus_tool_ws.py…')
         p_equity = subprocess.Popen([PYTHON_EXE, EQUITY_SCRIPT], cwd=ROOT,
@@ -162,9 +193,11 @@ def run(helper=None):
                   f'{STARTUP_TIMEOUT_SEC}s')
             return False
 
-        # 1. Exactly one hub startup.
+        # 1. Exactly one hub startup (counting only what THIS run wrote — see
+        # hub_log_start_offset above).
         try:
             with open(hub_client.hub_log_file()) as f:
+                f.seek(hub_log_start_offset)
                 hub_log_text = f.read()
         except OSError:
             hub_log_text = ''
