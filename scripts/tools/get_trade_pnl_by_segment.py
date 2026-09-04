@@ -555,11 +555,22 @@ def main():
     process_segment_trades(by_security_equity, segment_totals, symbol_rows, open_positions_by_security, from_date, daily_events, matcher=day_priority_match, segment_daily_events=segment_daily_events)
 
     # F&O / Commodity: same-day square-offs, so the shorter window is complete — no need for 2 years.
-    # Group by (securityId, customSymbol) to prevent contract reuse collisions across months.
+    # Group by securityId ALONE (same pattern as the equity grouping above) — NOT (securityId,
+    # customSymbol). That tuple key was meant to guard against contract-reuse collisions, but Dhan's
+    # two trade endpoints disagree on both the field name and the format for the very same contract:
+    # get_trade_history (settled) has customSymbol="NIFTY 22 SEP 24700 CALL" and no tradingSymbol at
+    # all; get_trade_book (live, today) has customSymbol=null and tradingSymbol="NIFTY-Sep2026-24700-CE"
+    # for that identical securityId — confirmed live against both endpoints on 2026-09-04. A position
+    # opened on one day and closed on another therefore split into two different customSymbol buckets
+    # purely from which endpoint happened to supply each trade, silently stranding the closing trade's
+    # realized P&L as "still open". securityId alone is Dhan's actual stable identifier for a contract
+    # (confirmed against master_list.csv: every distinct strike/expiry combination has a distinct
+    # securityId, so no real collision protection is lost) and is already what the equity grouping
+    # above relies on with no customSymbol pairing.
     by_security_fno_comm = defaultdict(list)
     for t in windowed_trades:
         if t['segment'] in ('FNO', 'COMMODITY'):
-            by_security_fno_comm[(t['securityId'], t['customSymbol'])].append(t)
+            by_security_fno_comm[t['securityId']].append(t)
     process_segment_trades(by_security_fno_comm, segment_totals, symbol_rows, open_positions_by_security, from_date, daily_events, segment_daily_events=segment_daily_events)
 
     def aggregate_daily_pnl(daily_evs, trades_list):
