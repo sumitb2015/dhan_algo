@@ -1,10 +1,11 @@
 'use client';
 
 import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
+import { useRouter } from 'next/navigation';
 import {
   Activity, Sliders, RefreshCw, Pause, Play, BookOpen, X,
   Layers, TrendingUp, TrendingDown, Shield, Zap, Info,
-  Copy, Check, ChevronRight, BarChart2, Eye, Compass, Target, Sparkles
+  Copy, Check, ChevronRight, BarChart2, Eye, Compass, Target, Sparkles, Send
 } from 'lucide-react';
 import {
   LineChart, Line, AreaChart, Area, BarChart, Bar,
@@ -12,6 +13,7 @@ import {
 } from 'recharts';
 import type { StrangleCell } from '@/lib/strangleMath';
 import type { UnderlyingType, RiskProfile } from '@/lib/ultimateScannerTypes';
+import type { MultiLegBasket } from '@/lib/multiLegFocus';
 
 interface StrangleMatrixResponse {
   success: boolean;
@@ -265,10 +267,13 @@ interface CellDetailModalProps {
   unit: 'pts' | 'inr';
   lastPolledAt: string | null;
   onClose: () => void;
+  onEnter: () => void;
+  entering: boolean;
+  enterError: string | null;
 }
 
 function CellDetailModal({
-  cell, expiry, dte, underlying, spot, lotSize, lots, unit, lastPolledAt, onClose
+  cell, expiry, dte, underlying, spot, lotSize, lots, unit, lastPolledAt, onClose, onEnter, entering, enterError
 }: CellDetailModalProps) {
   const [copied, setCopied] = useState(false);
 
@@ -490,14 +495,27 @@ function CellDetailModal({
                 Prices as of {new Date(lastPolledAt).toLocaleTimeString('en-IN')} — refreshes live while open
               </span>
             )}
+            {enterError && (
+              <span className="text-[10px] text-rose-400 font-semibold">{enterError}</span>
+            )}
           </div>
 
-          <button
-            onClick={onClose}
-            className="px-4 py-1.5 rounded-lg bg-emerald-500 hover:bg-emerald-400 text-zinc-950 text-xs font-bold transition-colors cursor-pointer"
-          >
-            Close
-          </button>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={onEnter}
+              disabled={entering}
+              className="flex items-center gap-1.5 px-4 py-1.5 rounded-lg bg-cyan-500 hover:bg-cyan-400 disabled:opacity-60 disabled:cursor-not-allowed text-zinc-950 text-xs font-bold transition-colors cursor-pointer"
+            >
+              <Send className="w-3.5 h-3.5" />
+              <span>{entering ? 'Preparing…' : 'Enter'}</span>
+            </button>
+            <button
+              onClick={onClose}
+              className="px-4 py-1.5 rounded-lg bg-emerald-500 hover:bg-emerald-400 text-zinc-950 text-xs font-bold transition-colors cursor-pointer"
+            >
+              Close
+            </button>
+          </div>
         </div>
       </div>
     </div>
@@ -506,6 +524,7 @@ function CellDetailModal({
 
 // ─── Main Component ─────────────────────────────────────────────────────────
 export default function StrangleMatrixPage() {
+  const router = useRouter();
   const [underlying, setUnderlying] = useState<UnderlyingType>('NIFTY');
   const [data, setData] = useState<StrangleMatrixResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -537,6 +556,42 @@ export default function StrangleMatrixPage() {
     expiry: string;
     dte: number;
   } | null>(null);
+
+  // Enter-trade (send to Multi-Leg Focus) state
+  const [entering, setEntering] = useState(false);
+  const [enterError, setEnterError] = useState<string | null>(null);
+  const tradeInFlight = useRef(false);
+
+  const handleEnterTrade = useCallback(async () => {
+    if (!selectedModal || tradeInFlight.current) return;
+    tradeInFlight.current = true;
+    setEntering(true);
+    setEnterError(null);
+    try {
+      const { cell, expiry } = selectedModal;
+      const basket: Partial<MultiLegBasket> = {
+        name: `ATM±${cell.offset} Short Strangle (${expiry})`,
+        underlying,
+        expiry,
+        broker: 'dhan',
+        presetKey: 'short-strangle',
+        legs: [
+          { id: '1', side: 'S', option: 'PE', strike: cell.putStrike, lots, type: 'MARKET', status: 'DRAFT' },
+          { id: '2', side: 'S', option: 'CE', strike: cell.callStrike, lots, type: 'MARKET', status: 'DRAFT' },
+        ],
+      };
+      await fetch('/api/multi-leg-focus/baskets', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(basket),
+      });
+      router.push('/multi-leg-focus');
+    } catch (err) {
+      setEnterError(`Failed to send to Multi-Leg Focus: ${String(err)}`);
+      setEntering(false);
+      tradeInFlight.current = false;
+    }
+  }, [selectedModal, underlying, lots, router]);
 
   const pollRequestId = useRef(0);
 
@@ -1230,6 +1285,7 @@ export default function StrangleMatrixPage() {
                             key={expiryObj.expiry}
                             onClick={() => {
                               if (cell) {
+                                setEnterError(null);
                                 setSelectedModal({
                                   cell,
                                   expiry: expiryObj.expiry,
@@ -1490,6 +1546,9 @@ export default function StrangleMatrixPage() {
         unit={unit}
         lastPolledAt={lastPolledAt}
         onClose={() => setSelectedModal(null)}
+        onEnter={handleEnterTrade}
+        entering={entering}
+        enterError={enterError}
       />
     </div>
   );
