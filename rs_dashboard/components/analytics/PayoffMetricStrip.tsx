@@ -19,7 +19,7 @@ export function StatChip({
   label: string; value: React.ReactNode; sub?: string; color?: string; title?: string;
 }) {
   return (
-    <div className="flex min-w-[104px] flex-col border-r border-zinc-800 px-4 last:border-r-0" title={title}>
+    <div className="flex min-w-[104px] flex-col border-r border-zinc-800/80 px-4 last:border-r-0" title={title}>
       <span className="text-[10px] font-bold uppercase tracking-widest text-zinc-400">{label}</span>
       <span className={cn('font-mono text-sm font-bold tabular-nums', color ?? 'text-zinc-100')}>{value}</span>
       {sub && <span className="text-[10px] text-zinc-500">{sub}</span>}
@@ -60,7 +60,7 @@ export default function PayoffMetricStrip({
   const netPremiumPct = marginBasis !== null && marginBasis > 0 ? (stats.netPremium / marginBasis) * 100 : null;
 
   return (
-    <div className="flex flex-col gap-3 rounded-xl border border-zinc-800 bg-zinc-900 px-2 py-3">
+    <div className="flex flex-col gap-3 rounded-2xl border border-zinc-800 bg-zinc-900/60 px-3 py-3.5 backdrop-blur-sm">
       {/* Group 1: shape of the position's outcome — what can happen, and how likely. */}
       <div className="flex flex-wrap items-center gap-y-2 border-l-2 border-sky-700 pl-2">
         <span className="mr-1 shrink-0 text-[9px] font-bold uppercase tracking-widest text-zinc-500">

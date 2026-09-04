@@ -20,8 +20,8 @@ import type { PositionLeg, UnparseableLeg } from '@/lib/positionLegs';
 import { fmtExpiryShort } from '@/components/crudeoil/format';
 import { partialCloseChips, type ClosePct } from '@/lib/partialQty';
 
-const TH = 'bg-zinc-800 px-1.5 py-2 text-xs font-bold text-white whitespace-nowrap';
-const TD = 'px-1.5 py-2 font-mono text-xs tabular-nums text-zinc-200 whitespace-nowrap';
+const TH = 'bg-zinc-800/90 px-2 py-1.5 text-[10px] font-bold uppercase tracking-wide text-white whitespace-nowrap';
+const TD = 'px-2 py-1.5 font-mono text-[11px] tabular-nums text-zinc-200 whitespace-nowrap';
 
 export type PositionSortKey =
   | 'instrument'
@@ -323,7 +323,7 @@ export default function PositionsLegTable({
         </div>
       )}
 
-      <div className="overflow-x-auto">
+      <div className="overflow-x-auto rounded-xl border border-zinc-800">
         <table className="w-full border-collapse">
           <thead>
             <tr>
@@ -357,7 +357,7 @@ export default function PositionsLegTable({
               const p = legPnl(l);
               const lots = lotSize > 0 ? l.qtyLots / lotSize : null;
               return (
-                <tr key={key} className="border-b border-zinc-800 hover:bg-zinc-900"
+                <tr key={key} className="border-b border-zinc-800/70 transition-colors even:bg-zinc-900/40 hover:bg-zinc-800/60"
                     title={`${l.display.tradingSymbol} · ${l.display.productType}`}>
                   {selectable && (
                     <td className={cn(TD, 'text-left')}>
@@ -372,7 +372,7 @@ export default function PositionsLegTable({
                   )}
                   <td className={cn(TD, 'text-left')}>
                     <span className={cn(
-                      'mr-1.5 inline-block rounded px-1 py-px text-[9px] font-bold',
+                      'mr-1.5 inline-block rounded px-1 py-px text-[8px] font-bold',
                       l.side === 'SELL' ? 'bg-rose-500/15 text-rose-300' : 'bg-sky-500/15 text-sky-300',
                     )}>
                       {l.side === 'SELL' ? 'S' : 'B'}

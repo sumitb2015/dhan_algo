@@ -13,7 +13,7 @@
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import Link from 'next/link';
-import { ArrowLeft, RefreshCw, AlertTriangle, Loader2, Sparkles } from 'lucide-react';
+import { ArrowLeft, RefreshCw, AlertTriangle, Loader2, Sparkles, LineChart } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { useBrokerSelector, scalperRoute, BROKER_LABELS, type Broker } from '@/hooks/useBrokerSelector';
 import {
@@ -836,31 +836,42 @@ export default function PositionsAnalysis({ underlying }: { underlying: Analytic
   const curveHi = expiryCurve.length ? expiryCurve[expiryCurve.length - 1].spot : spot * 1.05;
 
   return (
-    <div className="min-h-screen text-zinc-300">
+    <div className="min-h-screen bg-zinc-950 text-zinc-300">
       {/* Sticky header */}
-      <div className="sticky top-0 z-30 border-b border-zinc-800 bg-zinc-950/80 px-4 py-3 backdrop-blur-md">
-        <div className="mx-auto flex flex-wrap items-center gap-3">
-          <h1 className="text-sm font-bold text-white">{underlying} Analysis</h1>
-          <span className="rounded bg-zinc-800 px-2 py-0.5 font-mono text-xs text-zinc-400">
+      <div className="sticky top-0 z-30 border-b border-zinc-800 bg-zinc-950/95 px-4 py-3 backdrop-blur-md">
+        <div className="mx-auto flex flex-wrap items-center gap-2.5">
+          <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-emerald-500/25 bg-emerald-500/10">
+            <LineChart className="h-4 w-4 text-emerald-400" />
+          </div>
+          <div className="mr-1">
+            <p className="mb-0.5 text-[9px] font-bold uppercase tracking-[0.18em] text-emerald-500">
+              Options · Positions Analysis
+            </p>
+            <h1 className="text-sm font-bold leading-none tracking-tight text-white">{underlying}</h1>
+          </div>
+
+          <span className="rounded-md border border-zinc-800 bg-zinc-900/80 px-2 py-1 font-mono text-[10px] text-zinc-400">
             DATA: {dataDate ?? '—'}
           </span>
           {spot > 0 && (
             <span className={cn(
-              'rounded border px-2 py-0.5 font-mono text-xs font-bold tabular-nums',
+              'rounded-md border px-2 py-1 font-mono text-xs font-bold tabular-nums',
               spotChangePct >= 0
-                ? 'border-emerald-500 bg-emerald-500/10 text-emerald-400'
-                : 'border-red-500 bg-red-500/10 text-red-400',
+                ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-400'
+                : 'border-red-500/40 bg-red-500/10 text-red-400',
             )}>
               {spot.toLocaleString('en-IN', { maximumFractionDigits: 2 })} ({spotChangePct >= 0 ? '+' : ''}{spotChangePct.toFixed(2)}%)
             </span>
           )}
-          <span className="font-mono text-[11px] text-zinc-500">Lot {lotSize ?? '—'}</span>
+          <span className="rounded-md border border-zinc-800 bg-zinc-900/80 px-2 py-1 font-mono text-[10px] text-zinc-500">
+            Lot {lotSize ?? '—'}
+          </span>
 
           {availableBrokers.length > 1 && (
             <select
               value={broker}
               onChange={(e) => setBroker(e.target.value as Broker)}
-              className="rounded border border-zinc-700 bg-zinc-900 px-2 py-1 text-xs text-zinc-200"
+              className="rounded-md border border-zinc-700 bg-zinc-900 px-2 py-1.5 text-xs font-medium text-zinc-200 transition-colors hover:border-zinc-600"
             >
               {availableBrokers.map((b) => <option key={b} value={b}>{BROKER_LABELS[b]}</option>)}
             </select>
@@ -868,7 +879,7 @@ export default function PositionsAnalysis({ underlying }: { underlying: Analytic
 
           {(funds !== null || usedMargin !== null) && (
             <div
-              className="flex items-center gap-2 rounded border border-zinc-800 bg-zinc-900 px-2 py-1 font-mono text-[10px]"
+              className="flex items-center gap-2 rounded-md border border-zinc-800 bg-zinc-900/80 px-2.5 py-1 font-mono text-[10px]"
               title={`${BROKER_LABELS[broker]} portfolio margin — used vs. available`}
             >
               <span className="text-zinc-500">Margin</span>
@@ -889,16 +900,16 @@ export default function PositionsAnalysis({ underlying }: { underlying: Analytic
           )}
 
           <button type="button" onClick={loadPositions}
-            className="flex items-center gap-1 rounded border border-zinc-700 bg-zinc-900 px-2 py-1 text-xs text-zinc-300 transition-colors hover:border-zinc-600 hover:bg-zinc-800 hover:text-white">
+            className="flex items-center gap-1 rounded-md border border-zinc-700 bg-zinc-900 px-2.5 py-1.5 text-xs font-medium text-zinc-300 transition-colors hover:border-zinc-600 hover:bg-zinc-800 hover:text-white">
             <RefreshCw className="h-3 w-3" /> Refresh
           </button>
           <button type="button" onClick={handleAnalyze} disabled={analyzing}
-            className="flex items-center gap-1 rounded border border-sky-800 bg-sky-950 px-2 py-1 text-xs font-bold text-sky-300 hover:bg-sky-900 disabled:opacity-50">
+            className="flex items-center gap-1 rounded-md border border-sky-800 bg-sky-950 px-2.5 py-1.5 text-xs font-bold text-sky-300 transition-colors hover:bg-sky-900 disabled:opacity-50">
             <Sparkles className="h-3 w-3" /> {analyzing ? 'Analyzing…' : 'Analyze'}
           </button>
           <button type="button" onClick={handleToggleSentinel} disabled={sentinelToggling}
             className={cn(
-              'flex items-center gap-1.5 rounded border px-2 py-1 text-xs font-bold transition-colors disabled:opacity-50',
+              'flex items-center gap-1.5 rounded-md border px-2.5 py-1.5 text-xs font-bold transition-colors disabled:opacity-50',
               sentinelRunning
                 ? 'border-emerald-700 bg-emerald-950/80 text-emerald-300 hover:bg-emerald-900'
                 : 'border-zinc-700 bg-zinc-900 text-zinc-400 hover:text-zinc-200',
@@ -909,13 +920,13 @@ export default function PositionsAnalysis({ underlying }: { underlying: Analytic
             {sentinelRunning ? 'Sentinel: ON' : 'Sentinel: OFF'}
           </button>
           {refreshedAt && (
-            <span className="font-mono text-[10px] text-zinc-500">
+            <span className="font-mono text-[10px] text-zinc-600">
               {refreshedAt.toLocaleTimeString('en-IN', { hour12: false })}
             </span>
           )}
 
           <Link href="/options-analytics"
-            className="ml-auto flex items-center gap-1 text-xs text-zinc-400 hover:text-white">
+            className="ml-auto flex items-center gap-1 text-xs font-medium text-zinc-400 transition-colors hover:text-white">
             <ArrowLeft className="h-3.5 w-3.5" /> Back to Positions
           </Link>
         </div>
@@ -956,14 +967,15 @@ export default function PositionsAnalysis({ underlying }: { underlying: Analytic
             onConfirm={handleCloseLeg}
             onDismiss={(id) => setDismissedSuggestionIds((prev) => new Set(prev).add(id))}
           />
-          <section className="space-y-3 rounded-xl border border-zinc-800 bg-zinc-950 p-3">
+          <section className="space-y-3 rounded-2xl border border-zinc-800 bg-zinc-900/60 p-4 backdrop-blur-sm">
             <div className="flex items-center gap-2">
+              <span className="h-1.5 w-1.5 rounded-full bg-emerald-500" />
               <h2 className="text-xs font-bold uppercase tracking-wider text-white">{underlying} Positions</h2>
               {chainLoading && <Loader2 className="h-3 w-3 animate-spin text-zinc-500" />}
               <span className="ml-auto font-mono text-[11px] text-zinc-500">{visibleLegs.length} leg(s)</span>
               {visibleLegs.length > 0 && (
                 <button type="button" onClick={() => handleExitScope(`scope:${expiryFilter}`, visibleLegs)}
-                  className={cn('rounded border px-2 py-0.5 font-mono text-[10px] font-bold transition-colors',
+                  className={cn('rounded-md border px-2 py-0.5 font-mono text-[10px] font-bold transition-colors',
                     confirmExitExpiry === `scope:${expiryFilter}`
                       ? 'border-rose-500 bg-rose-500/20 text-rose-200 hover:bg-rose-500/30'
                       : 'border-rose-800 bg-rose-950 text-rose-300 hover:bg-rose-900')}>
@@ -1016,22 +1028,22 @@ export default function PositionsAnalysis({ underlying }: { underlying: Analytic
               </div>
             )}
 
-            <div className="flex flex-wrap gap-4 rounded border border-zinc-800 bg-zinc-900 px-3 py-2">
-              <div>
-                <div className="text-[10px] font-bold uppercase tracking-widest text-zinc-400">Booked</div>
-                <div className={cn('font-mono text-sm font-bold tabular-nums', pnlColor(rollup.booked))}>
+            <div className="flex flex-wrap gap-2">
+              <div className="min-w-[110px] flex-1 rounded-xl border border-zinc-800 bg-zinc-950/60 px-3 py-2">
+                <div className="text-[9px] font-bold uppercase tracking-widest text-zinc-500">Booked</div>
+                <div className={cn('mt-0.5 font-mono text-sm font-bold tabular-nums', pnlColor(rollup.booked))}>
                   {fmtInr(rollup.booked)}
                 </div>
               </div>
-              <div>
-                <div className="text-[10px] font-bold uppercase tracking-widest text-zinc-400">Unbooked</div>
-                <div className={cn('font-mono text-sm font-bold tabular-nums', pnlColor(rollup.unbooked))}>
+              <div className="min-w-[110px] flex-1 rounded-xl border border-zinc-800 bg-zinc-950/60 px-3 py-2">
+                <div className="text-[9px] font-bold uppercase tracking-widest text-zinc-500">Unbooked</div>
+                <div className={cn('mt-0.5 font-mono text-sm font-bold tabular-nums', pnlColor(rollup.unbooked))}>
                   {fmtInr(rollup.unbooked)}
                 </div>
               </div>
-              <div>
-                <div className="text-[10px] font-bold uppercase tracking-widest text-zinc-400">Total P&amp;L</div>
-                <div className={cn('font-mono text-sm font-bold tabular-nums', pnlColor(rollup.total))}>
+              <div className="min-w-[110px] flex-1 rounded-xl border border-l-2 border-zinc-800 border-l-sky-600 bg-zinc-950/60 px-3 py-2">
+                <div className="text-[9px] font-bold uppercase tracking-widest text-zinc-500">Total P&amp;L</div>
+                <div className={cn('mt-0.5 font-mono text-sm font-bold tabular-nums', pnlColor(rollup.total))}>
                   {fmtInr(rollup.total)}
                 </div>
               </div>
@@ -1080,12 +1092,12 @@ export default function PositionsAnalysis({ underlying }: { underlying: Analytic
 
           {/* ── Right: analytics ────────────────────────────────────────── */}
           <section className="space-y-4">
-            <div className="flex items-center gap-1 border-b border-zinc-800">
+            <div className="flex items-center gap-1 rounded-xl border border-zinc-800 bg-zinc-900/60 p-1 backdrop-blur-sm">
               {([['payoff', 'Payoff Graph'], ['greeks', 'Greeks'], ['pnl', 'P&L Table'], ['intraday', 'Intraday (MIS)']] as const).map(([id, label]) => (
                 <button key={id} type="button" onClick={() => setTab(id)}
                   className={cn(
-                    'px-3 py-2 text-xs font-bold transition-colors',
-                    tab === id ? 'border-b-2 border-sky-500 text-white hover:bg-zinc-900' : 'text-zinc-400 hover:text-zinc-200',
+                    'rounded-lg px-3 py-1.5 text-xs font-bold transition-colors',
+                    tab === id ? 'bg-zinc-800 text-white shadow-sm' : 'text-zinc-400 hover:bg-zinc-800/60 hover:text-zinc-200',
                   )}>
                   {label}
                 </button>
@@ -1113,7 +1125,7 @@ export default function PositionsAnalysis({ underlying }: { underlying: Analytic
             )}
 
             {tab === 'payoff' && (
-              <div className="rounded-xl border border-zinc-800 bg-zinc-950 p-3">
+              <div className="rounded-2xl border border-zinc-800 bg-zinc-900/60 p-4 backdrop-blur-sm">
                 <PositionsPayoffChart
                   height={440}
                   expiryCurve={expiryCurve}
@@ -1194,20 +1206,20 @@ export default function PositionsAnalysis({ underlying }: { underlying: Analytic
             )}
 
             {tab === 'greeks' && (
-              <div className="rounded-xl border border-zinc-800 bg-zinc-950 p-3">
+              <div className="rounded-2xl border border-zinc-800 bg-zinc-900/60 p-4 backdrop-blur-sm">
                 <GreeksTab legs={pricedLegs} lotSize={lotSize ?? 0} spot={spot} />
               </div>
             )}
 
             {tab === 'pnl' && (
-              <div className="rounded-xl border border-zinc-800 bg-zinc-950 p-3">
+              <div className="rounded-2xl border border-zinc-800 bg-zinc-900/60 p-4 backdrop-blur-sm">
                 <PnlTableTab legs={pricedLegs} spot={spot} strikeStep={strikeStep} expiry={finalExpiry ?? ''} />
               </div>
             )}
 
             {tab === 'intraday' && (
               <div className="space-y-4">
-                <div className="space-y-3 rounded-xl border border-zinc-800 bg-zinc-950 p-3">
+                <div className="space-y-3 rounded-2xl border border-zinc-800 bg-zinc-900/60 p-4 backdrop-blur-sm">
                   <AddStrikePicker
                     broker={broker} underlying={underlying} strikeStep={strikeStep} spot={spot} lotSize={lotSize}
                     onPlaced={(label, orderId) => {
@@ -1228,7 +1240,7 @@ export default function PositionsAnalysis({ underlying }: { underlying: Analytic
                   standaloneMargin={null} standaloneMarginReason="Margin sizing shown only on the combined view"
                   marginAvailable={funds} livePnl={intradayRollup.total} usedMargin={usedMargin} spot={spot} />}
 
-                <div className="rounded-xl border border-zinc-800 bg-zinc-950 p-3">
+                <div className="rounded-2xl border border-zinc-800 bg-zinc-900/60 p-4 backdrop-blur-sm">
                   <PositionsPayoffChart
                     height={440}
                     expiryCurve={intradayCurve}
