@@ -266,6 +266,28 @@ def fetch_all_quotes(helper: DhanHelper, security_ids: list) -> dict:
     return quotes
 
 
+def select_near_month_futstk(df_master: pd.DataFrame) -> pd.DataFrame:
+    """
+    Pick the near-month FUTSTK contract per underlying, preferring NSE over BSE.
+
+    BSE's stock-futures segment carries essentially no real trading volume (all
+    liquidity is on NSE), so picking BSE purely because it expires a few days
+    sooner starves Volume/Turnover for the stock even though OI/Price still
+    resolve. Only fall back to BSE when the underlying has no unexpired NSE
+    listing at all. Shared by the OI snapshot downloader and the live-quote
+    fetcher so both agree on which contract "the near month" means.
+    """
+    futstk = df_master[df_master["INSTRUMENT"] == "FUTSTK"].copy()
+    # Exclude test contracts (symbols starting with a digit)
+    futstk = futstk[~futstk["UNDERLYING_SYMBOL"].str[0].str.isdigit()]
+    futstk["SM_EXPIRY_DATE"] = pd.to_datetime(futstk["SM_EXPIRY_DATE"])
+    futstk = futstk[futstk["SM_EXPIRY_DATE"] >= pd.Timestamp(datetime.now().date())]
+    futstk["_exch_rank"] = (futstk["EXCH_ID"].str.upper() != "NSE").astype(int)
+    return (futstk.sort_values(["UNDERLYING_SYMBOL", "_exch_rank", "SM_EXPIRY_DATE"])
+                  .drop_duplicates("UNDERLYING_SYMBOL", keep="first")
+                  .drop(columns=["_exch_rank"]))
+
+
 def download_futstk_oi_snapshot(helper: DhanHelper, daily_url: str, headers: dict, save_dir: str):
     """
     Fetch near-month FUTSTK daily OI for all F&O stocks and write a classification snapshot.
@@ -281,21 +303,7 @@ def download_futstk_oi_snapshot(helper: DhanHelper, daily_url: str, headers: dic
     print("\n>>> STOCK FUTURES OI SNAPSHOT <<<")
 
     df_master = helper._load_master_list()
-    futstk = df_master[df_master["INSTRUMENT"] == "FUTSTK"].copy()
-    # Exclude test contracts (symbols starting with a digit)
-    futstk = futstk[~futstk["UNDERLYING_SYMBOL"].str[0].str.isdigit()]
-    futstk["SM_EXPIRY_DATE"] = pd.to_datetime(futstk["SM_EXPIRY_DATE"])
-    # Keep near-month only: lowest future expiry per underlying (including expiry day itself)
-    futstk = futstk[futstk["SM_EXPIRY_DATE"] >= pd.Timestamp(datetime.now().date())]
-    # Prefer NSE over BSE when both list the same underlying — BSE's stock-futures
-    # segment carries essentially no real trading volume (all liquidity is on NSE),
-    # so picking BSE's contract purely because it expires a few days sooner starves
-    # Volume/Turnover for the stock even though OI/Price still resolve. Only fall
-    # back to BSE when the underlying has no unexpired NSE listing at all.
-    futstk["_exch_rank"] = (futstk["EXCH_ID"].str.upper() != "NSE").astype(int)
-    near_month = (futstk.sort_values(["UNDERLYING_SYMBOL", "_exch_rank", "SM_EXPIRY_DATE"])
-                  .drop_duplicates("UNDERLYING_SYMBOL", keep="first")
-                  .drop(columns=["_exch_rank"]))
+    near_month = select_near_month_futstk(df_master)
 
     total = len(near_month)
     today_str  = datetime.now().strftime("%Y-%m-%d")

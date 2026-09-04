@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import path from 'path';
 import fs from 'fs';
+import { getLiveFuturesQuotes } from '@/lib/futuresLiveQuotes';
 
 const PROJECT_ROOT = path.resolve(process.cwd(), '..');
 
@@ -15,6 +16,8 @@ export interface OIRow {
   oiChgPct: number;
   category?: string;
   dataDate?: string;
+  /** True when `price`/`priceChgPct` were overlaid with a live LTP rather than the EOD snapshot value. */
+  isLivePrice?: boolean;
 }
 
 export interface OIBuildupResponse {
@@ -70,6 +73,25 @@ function sortByAbsOI(rows: OIRow[]): OIRow[] {
   return [...rows].sort((a, b) => Math.abs(b.oiChgPct) - Math.abs(a.oiChgPct));
 }
 
+// Overlays a live LTP onto each row's EOD Price/PriceChgPct. The snapshot's
+// PriceChgPct was computed against the previous session's close, so recompute
+// it from that same close (backed out of the stored price/pct) rather than
+// leaving a live price paired with a stale EOD percentage.
+function applyLiveQuotes(rows: OIRow[], liveQuotes: Record<string, number>): OIRow[] {
+  return rows.map(r => {
+    const ltp = liveQuotes[r.symbol];
+    if (!ltp || ltp <= 0 || r.price <= 0 || r.priceChgPct <= -100) return r;
+    const prevClose = r.price / (1 + r.priceChgPct / 100);
+    if (!(prevClose > 0)) return r;
+    return {
+      ...r,
+      price: ltp,
+      priceChgPct: ((ltp - prevClose) / prevClose) * 100,
+      isLivePrice: true,
+    };
+  });
+}
+
 // ─── GET handler ──────────────────────────────────────────────────────────────
 
 export async function GET() {
@@ -85,7 +107,11 @@ export async function GET() {
   }
 
   try {
-    const allRows = await parseSnapshot(filePath);
+    const rawRows = await parseSnapshot(filePath);
+    const liveQuotes = await getLiveFuturesQuotes();
+    const allRows = Object.keys(liveQuotes).length > 0
+      ? applyLiveQuotes(rawRows, liveQuotes)
+      : rawRows;
     const filterSort = (cat: string): OIRow[] =>
       sortByAbsOI(allRows.filter(r => r.category === cat));
 
