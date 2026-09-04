@@ -14,7 +14,7 @@ import {
 } from '@/lib/multiLegFocus';
 import { computePayoff, type PayoffLeg, type PayoffResult } from '@/lib/basketStrategies';
 import { FOCUS_RING } from '@/components/Scalper';
-import type { Broker } from '@/hooks/useBrokerSelector';
+import { BROKER_LABELS, type Broker } from '@/hooks/useBrokerSelector';
 
 const UNDERLYINGS = ['NIFTY', 'BANKNIFTY', 'SENSEX', 'CRUDEOIL', 'CRUDEOILM'] as const;
 type Underlying = typeof UNDERLYINGS[number];
@@ -295,6 +295,15 @@ export default function MultiLegStrategyRow({
             </span>
             <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded border ${STATUS_STYLE[basketStatus]}`}>
               {basketStatus}
+            </span>
+            {/* This strategy is permanently bound to whichever broker created it — fills/exits
+               always route through it regardless of the page-level broker selector, so it needs
+               its own label or switching that selector looks like it does nothing. */}
+            <span
+              className="text-[10px] font-bold px-1.5 py-0.5 rounded border bg-zinc-800 text-zinc-300 border-zinc-700 uppercase tracking-wider"
+              title="This strategy's orders always route through this broker, regardless of the broker selected above"
+            >
+              {BROKER_LABELS[basket.broker as Broker] ?? basket.broker}
             </span>
           </div>
 
