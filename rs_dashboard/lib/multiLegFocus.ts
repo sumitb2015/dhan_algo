@@ -369,36 +369,48 @@ function closedFillFromRow(
 
 /**
  * Reconciles a leg against broker positions.
+ *
+ * Dhan nets every position by securityId, not by strategy — two baskets that
+ * both sell the same strike/expiry share ONE broker position. So the broker's
+ * netQty is a POOLED total that can include a sibling basket's contribution,
+ * never just this leg's own. This function must never let that pooled number
+ * overwrite this leg's own entitlement upward — only ever clamp it DOWN, when
+ * the broker shows less than this leg expects (a genuine partial fill, or
+ * something outside this basket reduced the shared position, e.g. a sibling's
+ * exit or manual intervention). Getting this backwards is exactly how one
+ * basket's leg silently inherits another basket's quantity and P&L.
+ *
+ * - A leg already CLOSED is left untouched — never resurrected back to OPEN
+ *   just because the broker still shows a live (pooled) position, since that
+ *   liveness may now belong entirely to a sibling basket sharing the strike.
  * - If broker has a live matching row (netQty != 0):
- *   Ensures status is 'OPEN' and updates fill quantity and average price from broker truth.
- *   The cap (maxQty) only applies **downward**: if the broker shows LESS than expected we
- *   respect it (partial fill, or a sibling strategy consumed some contracts). If broker shows
- *   MORE than this basket expected, we trust the broker and update lots upward — this handles
- *   the case where a new limit order fills after the leg was first created (e.g. a pending
- *   order placed via the Orders modal that later executes at a better price).
+ *   Ensures status is 'OPEN'. Quantity is this leg's own last-known fill (or
+ *   `ownQtyHint`, e.g. lots × lot size, if it has none yet), clamped down to
+ *   whatever the broker actually shows — never inflated up to the broker's
+ *   pooled total.
  * - If broker explicitly reports the position closed/flat:
- *   Marks status as 'CLOSED', zeroes fill quantity, and — when the row is available —
- *   captures `closedFill` (see closedFillFromRow) so P&L stays at the realized number.
+ *   Marks status as 'CLOSED', zeroes fill quantity, and — when the row is
+ *   available — captures `closedFill` (see closedFillFromRow) so P&L stays
+ *   at the realized number.
  * - If broker position is not found or ambiguous:
  *   Leaves the leg untouched (handles API propagation lag after order placement).
  */
 export function reconcileLegWithBroker(
   leg: MultiLegLeg,
   match: MultiLegMatch,
-  maxQty?: number | null,
+  ownQtyHint?: number | null,
   lotSize?: number | null,
 ): MultiLegLeg {
+  if (leg.status === 'CLOSED') return leg;
+
   if (match.kind === 'match') {
     const brokerQty = Math.abs(Number(match.row.netQty) || 0);
     if (brokerQty > 0) {
       const brokerAvg = Number(match.row.sellAvg || match.row.buyAvg || match.row.costPrice || 0);
       const avgPrice = brokerAvg > 0 ? brokerAvg : (leg.fill?.avgPrice ?? 0);
 
-      // Broker is the source of truth for quantity — always trust it fully.
-      // We intentionally do NOT cap upward: a pending limit order that fills after
-      // the leg was registered will show more qty on the broker than the leg's local
-      // state, and the leg's lots/fill should be updated to reflect reality.
-      const qty = brokerQty;
+      const ownQty = (leg.fill?.qty && leg.fill.qty > 0) ? leg.fill.qty : (ownQtyHint ?? brokerQty);
+      const qty = Math.min(ownQty, brokerQty);
       const lots = (lotSize && lotSize > 0) ? Math.max(1, Math.round(qty / lotSize)) : leg.lots;
       return {
         ...leg,

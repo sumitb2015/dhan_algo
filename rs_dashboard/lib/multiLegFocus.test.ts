@@ -127,13 +127,16 @@ test('findLegPosition ignores a CLOSED/zero-qty Dhan row and matches the genuine
   if (match.kind === 'match') assert.strictEqual(match.row.positionType, 'SHORT');
 });
 
-test('reconcileLegWithBroker self-heals a leg falsely marked CLOSED back to OPEN when broker has it active', () => {
+test('reconcileLegWithBroker never resurrects a CLOSED leg, even when broker still shows the (pooled) position active', () => {
+  // Was previously a "self-heal" — but a broker position can now be shared
+  // with a sibling basket on the same strike, so "broker still shows it
+  // active" no longer proves THIS leg is still open; it may just be the
+  // sibling's share. Resurrecting on that evidence would double-claim it.
   const leg: MultiLegLeg = { id: '1', side: 'S', option: 'PE', strike: 23500, lots: 1, type: 'MARKET', status: 'CLOSED', fill: { qty: 0, avgPrice: 70 }, orderRef: { securityId: '47298' } };
   const match = { kind: 'match' as const, row: { securityId: '47298', netQty: -65, sellAvg: 72.05 } };
   const reconciled = reconcileLegWithBroker(leg, match, 65);
-  assert.strictEqual(reconciled.status, 'OPEN');
-  assert.strictEqual(reconciled.fill?.qty, 65);
-  assert.strictEqual(reconciled.fill?.avgPrice, 72.05);
+  assert.strictEqual(reconciled.status, 'CLOSED');
+  assert.strictEqual(reconciled.fill?.qty, 0);
 });
 
 test('reconcileLegWithBroker leaves leg untouched when match is not_found', () => {
@@ -153,18 +156,41 @@ test('reconcileLegWithBroker updates lots to match broker filled qty / lotSize',
   assert.strictEqual(reconciled.lots, 1);
 });
 
-test('reconcileLegWithBroker updates lots UPWARD when a pending limit order fills beyond the registered leg qty', () => {
-  // Regression test: leg was registered as 1 lot (65 contracts), but the user placed a
-  // separate limit order for the same strike via the Orders modal. That order filled,
-  // and the broker now shows netQty = -130 (2 lots). The leg's local state still has
-  // lots: 1 and maxQty = 65. The fix: broker is source of truth — update upward.
+test('reconcileLegWithBroker never inflates qty upward to match a broker position larger than this leg\'s own', () => {
+  // Was previously "update upward, broker is source of truth" — but Dhan nets
+  // by securityId, so a broker position larger than this leg's own fill can
+  // now mean a SIBLING basket added to the same strike, not that this leg's
+  // own order grew. Inflating here would silently make this leg claim the
+  // sibling's quantity (and P&L) as its own. Stay clamped to this leg's own
+  // last-known qty; only ever shrink if the broker shows LESS than that.
   const leg: MultiLegLeg = { id: '1', side: 'S', option: 'PE', strike: 23500, lots: 1, type: 'MARKET', status: 'OPEN', fill: { qty: 65, avgPrice: 110 }, orderRef: { securityId: '47298' } };
   const match = { kind: 'match' as const, row: { securityId: '47298', netQty: -130, sellAvg: 108.5 } };
-  const reconciled = reconcileLegWithBroker(leg, match, 65 /* maxQty = 1 lot */, 65);
+  const reconciled = reconcileLegWithBroker(leg, match, 65 /* ownQtyHint = 1 lot */, 65);
   assert.strictEqual(reconciled.status, 'OPEN');
-  assert.strictEqual(reconciled.fill?.qty, 130);  // 2 lots worth, from broker
-  assert.strictEqual(reconciled.lots, 2);           // lots updated upward
-  assert.strictEqual(reconciled.fill?.avgPrice, 108.5);
+  assert.strictEqual(reconciled.fill?.qty, 65);   // stays this leg's own qty, not the pooled 130
+  assert.strictEqual(reconciled.lots, 1);           // lots stays put too
+  assert.strictEqual(reconciled.fill?.avgPrice, 108.5); // broker's avg price is still trusted (not ownership-sensitive)
+});
+
+test('reconcileLegWithBroker clamps this leg\'s own qty DOWN when the shared broker position shrinks below it', () => {
+  // A sibling basket's exit (or manual intervention) reduced the pooled
+  // position from 130 to 65 — below what THIS leg alone expected (65 is
+  // exactly this leg's own share, so nothing changes here; but if the pool
+  // dropped below 65, e.g. to 30, this leg must shrink to 30 too, since that's
+  // all that's actually left for anyone to claim).
+  const leg: MultiLegLeg = { id: '1', side: 'S', option: 'PE', strike: 23500, lots: 1, type: 'MARKET', status: 'OPEN', fill: { qty: 65, avgPrice: 110 }, orderRef: { securityId: '47298' } };
+  const match = { kind: 'match' as const, row: { securityId: '47298', netQty: -30, sellAvg: 108.5 } };
+  const reconciled = reconcileLegWithBroker(leg, match, 65, 65);
+  assert.strictEqual(reconciled.status, 'OPEN');
+  assert.strictEqual(reconciled.fill?.qty, 30);
+});
+
+test('reconcileLegWithBroker uses ownQtyHint (lots × lotSize) for a leg with no recorded fill yet, still clamped by broker', () => {
+  const leg: MultiLegLeg = { id: '1', side: 'S', option: 'PE', strike: 23500, lots: 2, type: 'MARKET', status: 'PLACING', orderRef: { securityId: '47298' } };
+  const match = { kind: 'match' as const, row: { securityId: '47298', netQty: -195, sellAvg: 108.5 } };
+  const reconciled = reconcileLegWithBroker(leg, match, 130 /* 2 lots */, 65);
+  assert.strictEqual(reconciled.status, 'OPEN');
+  assert.strictEqual(reconciled.fill?.qty, 130); // clamped to ownQtyHint, not the pooled 195
 });
 
 test('computeLegTrailingSL: Sell leg triggers hard SL and TP correctly', () => {
