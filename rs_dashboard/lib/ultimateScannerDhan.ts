@@ -174,53 +174,88 @@ export interface MarginLeg {
  * Returns null (never throws) on any failure — callers fall back to the
  * existing estimate rather than losing the candidate.
  */
+// Account-wide pacer + 429 backoff for Dhan's margin calculator.
+//
+// Dhan's rate limit applies per account, not per caller. Every
+// fetchNettedMargin() call — regardless of which route or underlying
+// triggered it — funnels through this single lane, so independent
+// self-paced loops (the ultimate-scanner's top-N enrichment, the
+// strangle-matrix background sweep, any future caller) can't each assume
+// they own the full ~1 req/s budget and stack on top of one another.
+// On a 429 the gap grows (capped) and decays back to baseline on success,
+// so a burst of load elsewhere backs this off automatically instead of
+// hammering a bucket that's already throttling the account.
+const MARGIN_BASE_GAP_MS = 1_100;
+const MARGIN_MAX_GAP_MS = 20_000;
+let marginPaceChain: Promise<unknown> = Promise.resolve();
+let marginGapMs = MARGIN_BASE_GAP_MS;
+
+function paceMarginCall<T>(fn: () => Promise<T>): Promise<T> {
+  const run = marginPaceChain.then(fn);
+  marginPaceChain = run
+    .then(() => new Promise(resolve => setTimeout(resolve, marginGapMs)))
+    .catch(() => new Promise(resolve => setTimeout(resolve, marginGapMs)));
+  return run;
+}
+
 export async function fetchNettedMargin(
   underlying: string,
   legs: MarginLeg[],
 ): Promise<number | null> {
   if (legs.length === 0) return null;
-  try {
-    const auth = getDhanCredentials();
-    if (!auth.token || !auth.clientId) return null;
+  return paceMarginCall(async () => {
+    try {
+      const auth = getDhanCredentials();
+      if (!auth.token || !auth.clientId) return null;
 
-    const exchangeSegment = underlying === 'SENSEX' ? 'BSE_FNO' : 'NSE_FNO';
-    const scripList = legs.map(leg => ({
-      exchangeSegment,
-      transactionType: leg.side,
-      quantity: leg.quantity,
-      productType: 'MARGIN',
-      securityId: leg.securityId,
-      price: 0,
-    }));
+      const exchangeSegment = underlying === 'SENSEX' ? 'BSE_FNO' : 'NSE_FNO';
+      const scripList = legs.map(leg => ({
+        exchangeSegment,
+        transactionType: leg.side,
+        quantity: leg.quantity,
+        productType: 'MARGIN',
+        securityId: leg.securityId,
+        price: 0,
+      }));
 
-    const res = await fetch(MARGIN_CALCULATOR_URL, {
-      method: 'POST',
-      headers: {
-        'access-token': auth.token,
-        'client-id': auth.clientId,
-        'Content-Type': 'application/json',
-        'Accept': 'application/json',
-      },
-      body: JSON.stringify({
-        includePosition: false,
-        includeOrders: false,
-        scripList,
-      }),
-      signal: AbortSignal.timeout(6000),
-    });
+      const res = await fetch(MARGIN_CALCULATOR_URL, {
+        method: 'POST',
+        headers: {
+          'access-token': auth.token,
+          'client-id': auth.clientId,
+          'Content-Type': 'application/json',
+          'Accept': 'application/json',
+        },
+        body: JSON.stringify({
+          includePosition: false,
+          includeOrders: false,
+          scripList,
+        }),
+        signal: AbortSignal.timeout(6000),
+      });
 
-    const json = await res.json() as {
-      status?: string;
-      data?: { totalMargin?: number };
-    };
-    const totalMargin = json.data?.totalMargin;
-    if (json.status === 'success' && typeof totalMargin === 'number' && totalMargin > 0) {
-      return Math.round(totalMargin * 100) / 100;
+      if (res.status === 429) {
+        marginGapMs = Math.min(MARGIN_MAX_GAP_MS, marginGapMs * 2);
+        return null;
+      }
+
+      const json = await res.json() as {
+        status?: string;
+        data?: { totalMargin?: number };
+      };
+      const totalMargin = json.data?.totalMargin;
+      // A clean response means the account isn't currently throttled here —
+      // relax the gap back toward baseline rather than staying at whatever
+      // backoff a prior 429 left it at.
+      marginGapMs = Math.max(MARGIN_BASE_GAP_MS, Math.round(marginGapMs * 0.7));
+      if (json.status === 'success' && typeof totalMargin === 'number' && totalMargin > 0) {
+        return Math.round(totalMargin * 100) / 100;
+      }
+      return null;
+    } catch {
+      return null;
     }
-    return null;
-  } catch {
-    return null;
-  }
+  });
 }
 
 export async function fetchUnderlyingExpiries(underlying: string, paceKey?: string): Promise<string[]> {

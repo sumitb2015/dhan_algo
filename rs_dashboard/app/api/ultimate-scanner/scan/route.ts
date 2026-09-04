@@ -121,14 +121,17 @@ export async function POST(request: NextRequest): Promise<NextResponse<ScanRespo
     // full combinatorial search cheaply, but not the real netted margin Dhan
     // would actually block. Replace it with the real figure (via Dhan's own
     // multi-leg margin calculator) for the top candidates actually shown to
-    // the user. Capped and sequential, paced to respect Dhan's ~1 req/s limit —
-    // doing this for every evaluated combo (100s) would blow both the request's
-    // time budget and the rate limit.
+    // the user. Capped and sequential — doing this for every evaluated combo
+    // (100s) would blow the request's time budget. Pacing/backoff against
+    // Dhan's account-wide rate limit lives once, centrally, inside
+    // fetchNettedMargin() (see ultimateScannerDhan.ts) — it's shared with
+    // every other caller (e.g. the strangle-matrix background sweep), so no
+    // extra delay is added here.
     const ENRICH_TOP_N = 12;
     const enrichCount = Math.min(ENRICH_TOP_N, shortlisted.length);
     for (let i = 0; i < enrichCount; i++) {
       // The client's Stop button aborts this request — no point spending more
-      // Dhan margin calls (or the pacing delay) once nobody is waiting on them.
+      // Dhan margin calls once nobody is waiting on them.
       if (request.signal.aborted) break;
       const candidate = shortlisted[i];
       const legs: MarginLeg[] = candidate.legs.map(leg => ({
@@ -144,9 +147,6 @@ export async function POST(request: NextRequest): Promise<NextResponse<ScanRespo
         candidate.romPct = Math.round((candidate.netPremium / liveMargin) * 100 * 100) / 100;
         candidate.romAnnualizedPct = Math.round((candidate.romPct / Math.max(1, candidate.dte)) * 365);
         candidate.marginSource = 'live';
-      }
-      if (i < enrichCount - 1) {
-        await new Promise(resolve => setTimeout(resolve, 1100));
       }
     }
 
