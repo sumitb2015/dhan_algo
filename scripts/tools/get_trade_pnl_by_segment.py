@@ -122,7 +122,7 @@ def fetch_all_trades(dhan, from_date: str, to_date: str) -> list:
     return rows
 
 
-def fetch_today_trade_book(dhan) -> list:
+def fetch_today_trade_book(dhan, helper=None) -> list:
     """get_trade_history (used by fetch_all_trades) reflects settled/contract-note trades and lags
     same-day fills — Dhan typically doesn't surface today's trades there until EOD processing. get_trade_book
     (no date range) has no such lag: it returns today's executed trades live. Overlaying it is what makes
@@ -135,15 +135,40 @@ def fetch_today_trade_book(dhan) -> list:
         data = res.get('data', []) if isinstance(res, dict) else []
         if not isinstance(data, list):
             return []
-        # customSymbol is null on trade-book rows (only populated once contract notes settle) —
-        # fall back to tradingSymbol so today's trades don't show a blank symbol in the log.
+        # customSymbol is null on trade-book rows (only populated once contract notes settle).
+        # It MUST resolve to the same string get_trade_history's settled customSymbol uses for
+        # the same securityId — process_segment_trades groups FNO/COMMODITY trades by
+        # (securityId, customSymbol), and Dhan's own raw tradingSymbol ("NIFTY 22 SEP 24700 CALL")
+        # does not match the settled customSymbol format ("NIFTY-Sep2026-24700-CE") for the same
+        # contract. That split a still-open prior-day position from its same-day closing trade into
+        # two separate FIFO groups, silently stranding real closed-today P&L as "still open" —
+        # confirmed live on 2026-09-04: one contract's ~Rs 1,060 same-day realized gain vanished
+        # from the day's total this way. Resolve the settled-format symbol from the master list by
+        # securityId instead, so a trade-book row's key always matches its later settled counterpart.
+        # tradingSymbol is now only a last-resort fallback if the master-list lookup itself fails.
         for t in data:
-            if not t.get('customSymbol'):
-                t['customSymbol'] = t.get('tradingSymbol', '')
+            if t.get('customSymbol'):
+                continue
+            resolved = _lookup_symbol_name(helper, t.get('securityId')) if helper is not None else None
+            t['customSymbol'] = resolved or t.get('tradingSymbol', '')
         return data
     except Exception as e:
         print(f"[get_trade_pnl_by_segment] trade book fetch failed: {e}", file=sys.stderr)
         return []
+
+
+def _lookup_symbol_name(helper, security_id) -> str:
+    """Settled-format display symbol (e.g. "NIFTY-Sep2026-24700-CE") for a raw securityId, from the
+    master list DhanHelper already holds in memory — same access pattern as
+    scripts/tools/live_options_tracker.py's get_valid_expiries(). Returns '' on any failure (missing
+    id, master list not loaded, wrong dtype) so callers can fall back without this raising."""
+    try:
+        sid = int(security_id)
+        ml = helper._master_list
+        match = ml.loc[ml['SECURITY_ID'] == sid, 'SYMBOL_NAME']
+        return str(match.iloc[0]) if not match.empty else ''
+    except Exception:
+        return ''
 
 
 def merge_live_trades(existing: list, live: list) -> list:
@@ -485,7 +510,7 @@ def main():
         print(f"[get_trade_pnl_by_segment] {len(all_trades)} trades fetched", file=sys.stderr)
         annotate_trades(all_trades)
 
-    live_today = fetch_today_trade_book(dhan)
+    live_today = fetch_today_trade_book(dhan, helper=helper)
     if live_today:
         annotate_trades(live_today)
         before = len(all_trades)
