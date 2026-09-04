@@ -727,6 +727,12 @@ export default function MultiLegFocus() {
   const [exitingLegs, setExitingLegs] = useState<Set<string>>(new Set());
   const exitingLegsRef = useRef<Set<string>>(new Set());
 
+  // One-shot-per-occurrence dedup for the "broker qty grew beyond this leg's
+  // own tracked qty" warning — the poll runs every 3s, so without this the
+  // same warning would re-fire every tick for as long as the gap persists.
+  // Cleared for a leg once the gap resolves (leg exits, or catches back up).
+  const underAllocatedWarnedRef = useRef<Set<string>>(new Set());
+
   const placeBasket = useCallback(async (basketId: string) => {
     const basket = basketsRef.current.find(b => b.id === basketId);
     if (!basket || !basket.legs.length || !basket.expiry) return;
@@ -767,21 +773,42 @@ export default function MultiLegFocus() {
     let working: MultiLegLeg[] = basket.legs.map(l => ({ ...l, status: 'PLACING' as MultiLegStatus }));
     updateBasket(basketId, { legs: working });
 
-    type PlacedLeg = { legId: string; label: string; side: 'B' | 'S'; option: OptionType; strike: number; qty: number };
+    type PlacedLeg = { legId: string; label: string; side: 'B' | 'S'; option: OptionType; strike: number; qty: number; type: 'MARKET' | 'LIMIT' };
     const placedLegs: PlacedLeg[] = [];
 
     // Flattens whatever already filled in this call by firing opposite-side
     // MARKET orders for each — best-effort, since a rejected or
     // network-unconfirmed reversal can't otherwise be undone from here.
     // Mirrors Baskets.tsx's rollbackPlacedLegs; MultiLegFocus never had one.
+    //
+    // A MARKET leg is safe to assume filled the instant its order response
+    // reports success (that's what MARKET means), so it's safe to reverse
+    // automatically. A LIMIT leg is NOT — "accepted" only means the broker is
+    // holding a resting order that may not have filled yet. Firing an
+    // opposite-side MARKET order against a LIMIT leg that never filled would
+    // itself create a fresh naked position (in the opposite direction) while
+    // the original resting order stays live and could still fill later —
+    // exactly the failure this rollback exists to prevent. So LIMIT legs are
+    // surfaced for the user to check/cancel manually instead of auto-reversed.
     const rollbackPlacedLegs = async () => {
       if (!placedLegs.length) return;
-      addToast(
-        'error',
-        `Auto-flattening ${placedLegs.length} placed leg(s)`,
-        'A later leg in this strategy was rejected — reversing what already filled so nothing is left naked. Verify in Orders/Positions after.',
-      );
-      for (const p of [...placedLegs].reverse()) {
+      const marketLegs = placedLegs.filter(p => p.type === 'MARKET');
+      const limitLegs = placedLegs.filter(p => p.type === 'LIMIT');
+      if (marketLegs.length) {
+        addToast(
+          'error',
+          `Auto-flattening ${marketLegs.length} placed leg(s)`,
+          'A later leg in this strategy was rejected — reversing what already filled so nothing is left naked. Verify in Orders/Positions after.',
+        );
+      }
+      if (limitLegs.length) {
+        addToast(
+          'error',
+          `${limitLegs.length} placed LIMIT leg(s) NOT auto-reversed`,
+          `${limitLegs.map(p => p.label).join(', ')} — a resting limit order may not have filled yet; check Orders and cancel/close manually.`,
+        );
+      }
+      for (const p of [...marketLegs].reverse()) {
         const reverseReq = resolveOrderRequest(broker, {
           side: p.side === 'B' ? 'S' : 'B', option: p.option, strike: p.strike, qty: p.qty, type: 'MARKET',
           underlying: basket.underlying as Underlying, productType: 'MARGIN',
@@ -859,7 +886,7 @@ export default function MultiLegFocus() {
             });
             updateBasket(basketId, { legs: working });
             addToast('success', `Placed ${label}`, `ID: ${j.order_id ?? 'OK'}`);
-            placedLegs.push({ legId: leg.id, label, side: leg.side, option: leg.option, strike: leg.strike, qty });
+            placedLegs.push({ legId: leg.id, label, side: leg.side, option: leg.option, strike: leg.strike, qty, type: leg.type });
           } else {
             working = working.map(l => (l.id === leg.id ? { ...l, status: 'FAILED' as MultiLegStatus } : l));
             updateBasket(basketId, { legs: working });
@@ -900,10 +927,13 @@ export default function MultiLegFocus() {
       const match = findLegPosition(broker, leg, rows, fallbackSecId);
       const securityId = leg.orderRef?.securityId ?? fallbackSecId;
 
-      // Persist a resolved fallback securityId onto the leg immediately — so a
-      // failed/retried exit (or the next poll reconciliation) doesn't have to
-      // re-resolve it, and this leg stops being permanently unmatchable.
-      if (fallbackSecId && !leg.orderRef?.securityId) {
+      // Persist a resolved fallback securityId onto the leg — but only once
+      // findLegPosition has actually CONFIRMED it against a live broker row
+      // (match or flat), not merely resolved it from the strike/expiry chain
+      // cache. That cache can be stale (chain shifted, wrong pair briefly
+      // resolved); binding the leg to an unconfirmed id would mask a real
+      // lookup failure as if it had been validated.
+      if (fallbackSecId && !leg.orderRef?.securityId && (match.kind === 'match' || match.kind === 'flat')) {
         updateBasket(basketId, {
           legs: basketsRef.current.find(b => b.id === basketId)?.legs.map(l =>
             (l.id === leg.id ? { ...l, orderRef: { ...l.orderRef, securityId: fallbackSecId } } : l)
@@ -1224,6 +1254,11 @@ export default function MultiLegFocus() {
         if (Array.isArray(j.trades)) setTradesData(j.trades);
 
         if (anyPlaced) {
+          // Collected outside setBaskets's updater (which React can invoke more
+          // than once, e.g. under Strict Mode) so the toast side-effect below
+          // fires exactly once per real poll tick, not once per updater call.
+          const underAllocatedWarnings: { label: string; ownQty: number; brokerQty: number }[] = [];
+
           setBaskets(prevBaskets => {
             let anyChange = false;
             const nextBaskets = prevBaskets.map(basket => {
@@ -1243,8 +1278,35 @@ export default function MultiLegFocus() {
                 // so it stops being permanently unmatchable for future exits.
                 // reconcileLegWithBroker can return the same object reference
                 // (not_found/ambiguous branch) — never mutate it, always copy.
-                if (fallbackSecId && !reconciled.orderRef?.securityId) {
+                // Only bind it once CONFIRMED against a live row (match/flat) —
+                // the strike/expiry chain cache this id came from can be stale,
+                // and binding on an unconfirmed id would mask that silently.
+                if (fallbackSecId && !reconciled.orderRef?.securityId && (match.kind === 'match' || match.kind === 'flat')) {
                   reconciled = { ...reconciled, orderRef: { ...reconciled.orderRef, securityId: fallbackSecId } };
+                }
+
+                // reconcileLegWithBroker deliberately never inflates this leg's
+                // qty up to match the broker (a shared position could belong
+                // partly to a sibling basket) — but silently ignoring a real gap
+                // is its own risk: it may just as well be a manual top-up on
+                // THIS leg's own position (e.g. via the Orders modal) that the
+                // app now has no way to attribute automatically. Surface it
+                // instead of staying silent, once per occurrence.
+                if (match.kind === 'match' && leg.status !== 'CLOSED') {
+                  const brokerQty = Math.abs(Number(match.row.netQty) || 0);
+                  const ownQty = (leg.fill?.qty && leg.fill.qty > 0) ? leg.fill.qty : leg.lots * lotSize;
+                  const warnKey = `${basket.id}:${leg.id}`;
+                  if (brokerQty > ownQty) {
+                    if (!underAllocatedWarnedRef.current.has(warnKey)) {
+                      underAllocatedWarnedRef.current.add(warnKey);
+                      underAllocatedWarnings.push({
+                        label: `${leg.side === 'B' ? 'BUY' : 'SELL'} ${leg.strike} ${leg.option}`,
+                        ownQty, brokerQty,
+                      });
+                    }
+                  } else {
+                    underAllocatedWarnedRef.current.delete(warnKey);
+                  }
                 }
 
                 if (
@@ -1272,6 +1334,14 @@ export default function MultiLegFocus() {
 
             return anyChange ? nextBaskets : prevBaskets;
           });
+
+          for (const w of underAllocatedWarnings) {
+            addToast(
+              'error',
+              `${w.label}: broker shows more than this strategy's own record`,
+              `This strategy tracks ${w.ownQty}, broker shows ${w.brokerQty} for this strike — could be a manual top-up on this leg, or a sibling strategy sharing the strike. Check Orders/Positions.`,
+            );
+          }
         }
       } catch (err) {
         if (!cancelled) setOrdersError(String((err as Error).message));
@@ -1281,7 +1351,7 @@ export default function MultiLegFocus() {
     poll();
     const interval = setInterval(poll, 3000);
     return () => { cancelled = true; clearInterval(interval); };
-  }, [broker, showOrdersModal, persistBasket, resolveDhanSecurityId]);
+  }, [broker, showOrdersModal, persistBasket, resolveDhanSecurityId, addToast]);
 
   // ── Automated Risk Watcher: SL, TP, Trailing SL, Strategy Target/SL ─
   const triggeredLegExitsRef = useRef<Set<string>>(new Set());
