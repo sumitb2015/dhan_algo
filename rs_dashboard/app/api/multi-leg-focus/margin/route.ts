@@ -37,11 +37,17 @@ interface MarginCacheEntry {
 
 /** One retry after a short delay before giving up and falling back to the
  * flat estimate — absorbs a single transient timeout/network blip without
- * needing the whole basket to wait for the estimate on every such blip. */
+ * needing the whole basket to wait for the estimate on every such blip.
+ * Never retries a 429: it's the shared pacer's job (pacedMarginCall in
+ * ultimateScannerDhan.ts) to back off and re-space subsequent calls after a
+ * rate limit — an immediate 300ms retry is faster than the pacer's own
+ * baseline cadence and would almost certainly re-hit the same throttle,
+ * wasting the retry and holding up every other queued caller behind it. */
 async function withOneRetry<T>(fn: () => Promise<T>): Promise<T> {
   try {
     return await fn();
-  } catch {
+  } catch (err) {
+    if ((err as { status?: number })?.status === 429) throw err;
     await new Promise(resolve => setTimeout(resolve, 300));
     return fn();
   }

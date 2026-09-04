@@ -120,7 +120,11 @@ export async function dhanPost(
         }
       }
     } catch {}
-    throw new Error(`Dhan POST ${apiPath} failed: ${detail}`);
+    // Tag the HTTP status onto the thrown error so callers that need to
+    // react specifically to a 429 (e.g. the shared margin-calculator pacer
+    // in ultimateScannerDhan.ts) can do so without string-matching the
+    // message — status codes are stable, translated error text isn't.
+    throw Object.assign(new Error(`Dhan POST ${apiPath} failed: ${detail}`), { status: res.status });
   }
   return res.json();
 }

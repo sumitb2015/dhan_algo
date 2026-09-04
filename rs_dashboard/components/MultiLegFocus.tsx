@@ -517,6 +517,17 @@ export default function MultiLegFocus() {
   }, [liveQuotes, activeUnderlying, activeExpiry, chainData]);
 
   // ── Margin Calculator across Baskets ──────────────────────────────
+  // Composition-only signature per basket (underlying/expiry/strikes/side/
+  // lots/resolved securityId/broker) — live LTP ticks do not change margin
+  // requirements. Tracked per basket ID, not just joined across all baskets:
+  // fetchMarginsForBaskets fires once for every basket whenever ANY basket's
+  // composition changes (they share one effect trigger below), so without
+  // this per-basket check, editing one basket would re-fetch margin for
+  // every OTHER open basket too — multiplying Dhan calls through the shared
+  // account-wide pacer (ultimateScannerDhan.ts's pacedMarginCall) for
+  // baskets that didn't actually change.
+  const lastFetchedMarginSignatureRef = useRef<Record<string, string>>({});
+
   const fetchMarginsForBaskets = useCallback(() => {
     for (const basket of basketsRef.current) {
       if (!basket.legs || basket.legs.length === 0 || !basket.expiry) continue;
@@ -544,6 +555,15 @@ export default function MultiLegFocus() {
         };
       });
 
+      // Include the *resolved* securityId (not just leg.orderRef?.securityId)
+      // so a leg going from unresolved -> resolved as lookupCache populates
+      // is treated as a real composition change, not skipped as unchanged.
+      const signature = `${broker}:${basket.underlying}:${basket.expiry}:${legsPayload.map(l =>
+        `${l.side}-${l.option}-${l.strike}x${l.lots}-${l.status}-${l.securityId || ''}`
+      ).join('|')}`;
+      if (lastFetchedMarginSignatureRef.current[basket.id] === signature) continue;
+      lastFetchedMarginSignatureRef.current[basket.id] = signature;
+
       fetch('/api/multi-leg-focus/margin', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -570,9 +590,17 @@ export default function MultiLegFocus() {
               ...prev,
               [basket.id]: j.data!,
             }));
+          } else {
+            // Not delivered — un-mark this signature so a later trigger
+            // (any basket's composition change, or an explicit re-fetch
+            // after placing/exiting) retries it instead of leaving this
+            // basket's margin stale indefinitely.
+            delete lastFetchedMarginSignatureRef.current[basket.id];
           }
         })
-        .catch(() => {});
+        .catch(() => {
+          delete lastFetchedMarginSignatureRef.current[basket.id];
+        });
     }
   }, [lookupCache, broker]);
 
@@ -656,6 +684,13 @@ export default function MultiLegFocus() {
       return;
     }
     setBaskets(prev => prev.filter(b => b.id !== basketId));
+    setBasketMargins(prev => {
+      if (!(basketId in prev)) return prev;
+      const next = { ...prev };
+      delete next[basketId];
+      return next;
+    });
+    delete lastFetchedMarginSignatureRef.current[basketId];
     fetch('/api/multi-leg-focus/baskets', {
       method: 'DELETE',
       headers: { 'Content-Type': 'application/json' },

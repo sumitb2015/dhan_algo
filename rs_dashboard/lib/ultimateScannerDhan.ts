@@ -190,11 +190,36 @@ const MARGIN_MAX_GAP_MS = 20_000;
 let marginPaceChain: Promise<unknown> = Promise.resolve();
 let marginGapMs = MARGIN_BASE_GAP_MS;
 
+function isRateLimited(err: unknown): boolean {
+  return typeof err === 'object' && err !== null && (err as { status?: number }).status === 429;
+}
+
+// 429 backoff-growth and post-success relaxation live HERE, centrally, so
+// they apply uniformly to every caller of this lane — not just calls made
+// directly inside fetchNettedMargin's own fetch(). A caller signals a 429 by
+// throwing an error with a `.status === 429` property (dhanPost tags its
+// thrown errors this way; fetchNettedMargin's own fetch() does the same
+// below). Without this centralization, a 429 hit by a caller going through
+// dhanPost (e.g. multi-leg-focus's margin route) would never grow the gap —
+// only fetchNettedMargin's inline fetch() could react to its own 429s,
+// leaving the two caller families asymmetric.
 function paceMarginCall<T>(fn: () => Promise<T>): Promise<T> {
-  const run = marginPaceChain.then(fn);
-  marginPaceChain = run
-    .then(() => new Promise(resolve => setTimeout(resolve, marginGapMs)))
-    .catch(() => new Promise(resolve => setTimeout(resolve, marginGapMs)));
+  const run = marginPaceChain.then(async () => {
+    try {
+      const result = await fn();
+      marginGapMs = Math.max(MARGIN_BASE_GAP_MS, Math.round(marginGapMs * 0.7));
+      return result;
+    } catch (err) {
+      if (isRateLimited(err)) {
+        marginGapMs = Math.min(MARGIN_MAX_GAP_MS, marginGapMs * 2);
+      }
+      throw err;
+    }
+  });
+  marginPaceChain = run.then(
+    () => new Promise<void>(resolve => setTimeout(resolve, marginGapMs)),
+    () => new Promise<void>(resolve => setTimeout(resolve, marginGapMs)),
+  );
   return run;
 }
 
@@ -215,8 +240,14 @@ export async function fetchNettedMargin(
   legs: MarginLeg[],
 ): Promise<number | null> {
   if (legs.length === 0) return null;
-  return paceMarginCall(async () => {
-    try {
+  try {
+    // paceMarginCall does the 429 growth/relax bookkeeping itself (it
+    // inspects whatever this fn throws) — a 429 here is reported by
+    // throwing a tagged error, not by returning null directly, so the pacer
+    // actually sees it. The outer try/catch below converts that (and any
+    // other failure) back to null, preserving this function's "never
+    // throws" contract for its callers.
+    return await paceMarginCall(async () => {
       const auth = getDhanCredentials();
       if (!auth.token || !auth.clientId) return null;
 
@@ -248,8 +279,7 @@ export async function fetchNettedMargin(
       });
 
       if (res.status === 429) {
-        marginGapMs = Math.min(MARGIN_MAX_GAP_MS, marginGapMs * 2);
-        return null;
+        throw Object.assign(new Error('Dhan margin calculator rate limited (429)'), { status: 429 });
       }
 
       // Dhan returns the margin figures as a flat 200-OK object —
@@ -262,10 +292,6 @@ export async function fetchNettedMargin(
         errorCode?: string;
         errorMessage?: string;
       };
-      // A clean response means the account isn't currently throttled here —
-      // relax the gap back toward baseline rather than staying at whatever
-      // backoff a prior 429 left it at.
-      marginGapMs = Math.max(MARGIN_BASE_GAP_MS, Math.round(marginGapMs * 0.7));
       if (typeof json.totalMargin === 'number' && json.totalMargin > 0) {
         return Math.round(json.totalMargin * 100) / 100;
       }
@@ -273,10 +299,10 @@ export async function fetchNettedMargin(
         console.warn(`[fetchNettedMargin] ${underlying} ${json.errorCode}: ${json.errorMessage}`);
       }
       return null;
-    } catch {
-      return null;
-    }
-  });
+    });
+  } catch {
+    return null;
+  }
 }
 
 export async function fetchUnderlyingExpiries(underlying: string, paceKey?: string): Promise<string[]> {
