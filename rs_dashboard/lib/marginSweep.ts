@@ -22,7 +22,7 @@
 //     through, including this one.
 import { fetchNettedMargin, type MarginLeg } from '@/lib/ultimateScannerDhan';
 
-const MARGIN_TTL_MS = 5 * 60_000; // SPAN/exposure margin does not swing on rapid ticks
+const MARGIN_TTL_MS = 10 * 60_000; // SPAN/exposure margin does not swing on rapid ticks
 const IDLE_ABORT_MS = 30_000; // stop feeding an underlying nobody's polling anymore
 
 interface MarginCacheEntry {
