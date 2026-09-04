@@ -151,6 +151,17 @@ export default function MultiLegFocus() {
   const lookupCacheRef = useRef(lookupCache);
   useEffect(() => { lookupCacheRef.current = lookupCache; }, [lookupCache]);
 
+  // Fallback securityId for a Dhan leg whose orderRef never captured one (or
+  // lost it) — re-resolves from the strike/expiry chain lookup rather than
+  // trusting only what was recorded at placement time, so a leg like that
+  // isn't permanently unmatchable/unexitable. Dhan-only: every other broker
+  // matches by trading symbol instead (see findLegPosition).
+  const resolveDhanSecurityId = useCallback((b: MultiLegBasket, l: MultiLegLeg): string | undefined => {
+    const pair = `${b.underlying}:${b.expiry}`;
+    const strikeEntry = lookupCacheRef.current[pair]?.strikes?.[String(l.strike)];
+    return l.option === 'CE' ? strikeEntry?.ceId : strikeEntry?.peId;
+  }, []);
+
   const [selectedUnderlying, setSelectedUnderlying] = useState<Underlying>('NIFTY');
   // Set once the user explicitly clicks an underlying pill — from then on their
   // choice wins over whatever basket happens to be first/open (previously a
@@ -725,6 +736,26 @@ export default function MultiLegFocus() {
       return;
     }
 
+    // Pre-trade margin gate — block placement outright rather than letting a
+    // leg-by-leg sequence run into a mid-strategy margin rejection with no
+    // warning (that's exactly how a naked leg gets left open: one leg fills,
+    // the next is rejected for margin, and the strategy just stops there).
+    // Only blocks when margin has actually been computed for this exact
+    // composition (fetchMarginsForBaskets runs reactively as legs are
+    // edited); if it hasn't resolved yet, placement proceeds and the
+    // broker's own reject is the backstop — same as MultiLegStrategyRow's
+    // button-level check, kept here too since the button state can be stale.
+    const requiredMargin = basketMargins[basketId]?.basketMargin;
+    const availableFunds = fundsData?.available;
+    if (requiredMargin != null && availableFunds != null && requiredMargin > availableFunds) {
+      addToast(
+        'error',
+        'Insufficient margin — placement blocked',
+        `This strategy needs ~${fmtMoney(requiredMargin)} but only ${fmtMoney(availableFunds)} is available. Add funds or reduce lots before placing.`,
+      );
+      return;
+    }
+
     const pair = `${basket.underlying}:${basket.expiry}`;
     const lookup = lookupCache[pair];
     const lotSize = lookup?.lotSize ?? fallbackLotSize(basket.underlying as Underlying, broker);
@@ -735,6 +766,50 @@ export default function MultiLegFocus() {
     const ordered = sortLegsForPlacement(basket.legs);
     let working: MultiLegLeg[] = basket.legs.map(l => ({ ...l, status: 'PLACING' as MultiLegStatus }));
     updateBasket(basketId, { legs: working });
+
+    type PlacedLeg = { legId: string; label: string; side: 'B' | 'S'; option: OptionType; strike: number; qty: number };
+    const placedLegs: PlacedLeg[] = [];
+
+    // Flattens whatever already filled in this call by firing opposite-side
+    // MARKET orders for each — best-effort, since a rejected or
+    // network-unconfirmed reversal can't otherwise be undone from here.
+    // Mirrors Baskets.tsx's rollbackPlacedLegs; MultiLegFocus never had one.
+    const rollbackPlacedLegs = async () => {
+      if (!placedLegs.length) return;
+      addToast(
+        'error',
+        `Auto-flattening ${placedLegs.length} placed leg(s)`,
+        'A later leg in this strategy was rejected — reversing what already filled so nothing is left naked. Verify in Orders/Positions after.',
+      );
+      for (const p of [...placedLegs].reverse()) {
+        const reverseReq = resolveOrderRequest(broker, {
+          side: p.side === 'B' ? 'S' : 'B', option: p.option, strike: p.strike, qty: p.qty, type: 'MARKET',
+          underlying: basket.underlying as Underlying, productType: 'MARGIN',
+        }, strikeMap);
+        if (!reverseReq) {
+          addToast('error', `Could not auto-reverse ${p.label}`, 'No order identifier — close manually from Orders/Positions');
+          continue;
+        }
+        try {
+          const res = await fetch(reverseReq.url, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(reverseReq.body),
+          });
+          const j = await res.json() as { success: boolean; order_id?: string; error?: string };
+          if (j.success) {
+            addToast('success', `Reversed ${p.label}`, `ID: ${j.order_id}`);
+            updateBasket(basketId, {
+              legs: basketsRef.current.find(b => b.id === basketId)?.legs.map(l =>
+                (l.id === p.legId ? { ...l, status: 'CLOSED' as MultiLegStatus, fill: { qty: 0, avgPrice: l.fill?.avgPrice ?? 0 } } : l)
+              ) ?? [],
+            });
+          } else {
+            addToast('error', `Reverse failed for ${p.label}`, `${j.error ?? 'Unknown error'} — close manually from Orders/Positions`);
+          }
+        } catch (e) {
+          addToast('error', `Reverse UNCONFIRMED for ${p.label}`, `Close manually from Orders/Positions: ${String(e)}`);
+        }
+      }
+    };
 
     try {
       for (const leg of ordered) {
@@ -752,10 +827,11 @@ export default function MultiLegFocus() {
         }, strikeMap);
 
         if (!req) {
-          addToast('error', `${label} — no order identifier resolved`, 'Strike lookup not ready yet');
+          addToast('error', `${label} — no order identifier resolved`, 'Strike lookup not ready yet — strategy stopped');
           working = working.map(l => (l.id === leg.id ? { ...l, status: 'FAILED' as MultiLegStatus } : l));
           updateBasket(basketId, { legs: working });
-          continue;
+          await rollbackPlacedLegs();
+          return;
         }
 
         try {
@@ -781,16 +857,22 @@ export default function MultiLegFocus() {
                 orderRef: { securityId: secId, symbol: sym },
               };
             });
+            updateBasket(basketId, { legs: working });
             addToast('success', `Placed ${label}`, `ID: ${j.order_id ?? 'OK'}`);
+            placedLegs.push({ legId: leg.id, label, side: leg.side, option: leg.option, strike: leg.strike, qty });
           } else {
             working = working.map(l => (l.id === leg.id ? { ...l, status: 'FAILED' as MultiLegStatus } : l));
-            addToast('error', `Rejected ${label}`, j.error ?? 'Unknown broker error');
+            updateBasket(basketId, { legs: working });
+            addToast('error', `Rejected ${label} — strategy stopped`, j.error ?? 'Unknown broker error');
+            await rollbackPlacedLegs();
+            return;
           }
-          updateBasket(basketId, { legs: working });
         } catch (e) {
           working = working.map(l => (l.id === leg.id ? { ...l, status: 'FAILED' as MultiLegStatus } : l));
           updateBasket(basketId, { legs: working });
-          addToast('error', `Order failed for ${label}`, String(e));
+          addToast('error', `Order failed for ${label} — strategy stopped`, String(e));
+          await rollbackPlacedLegs();
+          return;
         }
       }
     } finally {
@@ -798,7 +880,7 @@ export default function MultiLegFocus() {
       pollFunds();
       fetchMarginsForBaskets();
     }
-  }, [broker, hasAuthenticatedBroker, lookupCache, updateBasket, ltpFor, addToast, pollFunds, fetchMarginsForBaskets]);
+  }, [broker, hasAuthenticatedBroker, lookupCache, updateBasket, ltpFor, addToast, pollFunds, fetchMarginsForBaskets, basketMargins, fundsData]);
 
   const exitOneLeg = useCallback(async (basketId: string, leg: MultiLegLeg) => {
     if (exitingLegsRef.current.has(leg.id)) return;
@@ -812,7 +894,22 @@ export default function MultiLegFocus() {
       const res = await fetch(scalperRoute(broker, 'positions'));
       const j = await res.json() as { success: boolean; data?: Record<string, unknown>[] };
       const rows = j.success && Array.isArray(j.data) ? j.data : [];
-      const match = findLegPosition(broker, leg, rows);
+      const fallbackSecId = (broker === 'dhan' && basket && !leg.orderRef?.securityId)
+        ? resolveDhanSecurityId(basket, leg)
+        : undefined;
+      const match = findLegPosition(broker, leg, rows, fallbackSecId);
+      const securityId = leg.orderRef?.securityId ?? fallbackSecId;
+
+      // Persist a resolved fallback securityId onto the leg immediately — so a
+      // failed/retried exit (or the next poll reconciliation) doesn't have to
+      // re-resolve it, and this leg stops being permanently unmatchable.
+      if (fallbackSecId && !leg.orderRef?.securityId) {
+        updateBasket(basketId, {
+          legs: basketsRef.current.find(b => b.id === basketId)?.legs.map(l =>
+            (l.id === leg.id ? { ...l, orderRef: { ...l.orderRef, securityId: fallbackSecId } } : l)
+          ) ?? [],
+        });
+      }
 
       if (match.kind === 'flat') {
         updateBasket(basketId, {
@@ -865,7 +962,7 @@ export default function MultiLegFocus() {
 
       const orderUrl = broker === 'dhan' ? '/api/scalper/fast-order' : scalperRoute(broker, 'order');
       const body = broker === 'dhan'
-        ? { securityId: leg.orderRef?.securityId, quantity: qty, side, orderType: 'MARKET', exchangeSegment: match.row.exchangeSegment ?? defaultSegDhan, ...productPayload.fields }
+        ? { securityId, quantity: qty, side, orderType: 'MARKET', exchangeSegment: match.row.exchangeSegment ?? defaultSegDhan, ...productPayload.fields }
         : { tradingsymbol: leg.orderRef?.symbol, quantity: qty, side, orderType: 'MARKET', exchange: match.row.exchange ?? defaultExchOther, ...productPayload.fields };
 
       const res2 = await fetch(orderUrl, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
@@ -891,7 +988,7 @@ export default function MultiLegFocus() {
       pollFunds();
       fetchMarginsForBaskets();
     }
-  }, [broker, updateBasket, addToast, pollFunds, fetchMarginsForBaskets]);
+  }, [broker, updateBasket, addToast, pollFunds, fetchMarginsForBaskets, resolveDhanSecurityId]);
 
   const exitingBasketsRef = useRef<Set<string>>(new Set());
 
@@ -1136,15 +1233,27 @@ export default function MultiLegFocus() {
 
               const nextLegs = basket.legs.map(leg => {
                 if (!leg.orderRef) return leg;
-                const match = findLegPosition(broker, leg, rows);
-                const reconciled = reconcileLegWithBroker(leg, match, leg.lots * lotSize, lotSize);
+                const fallbackSecId = (broker === 'dhan' && !leg.orderRef.securityId)
+                  ? resolveDhanSecurityId(basket, leg)
+                  : undefined;
+                const match = findLegPosition(broker, leg, rows, fallbackSecId);
+                let reconciled = reconcileLegWithBroker(leg, match, leg.lots * lotSize, lotSize);
+                // Self-heal a leg that only ever recorded a symbol/no securityId
+                // (see resolveDhanSecurityId) as soon as the poll resolves one,
+                // so it stops being permanently unmatchable for future exits.
+                // reconcileLegWithBroker can return the same object reference
+                // (not_found/ambiguous branch) — never mutate it, always copy.
+                if (fallbackSecId && !reconciled.orderRef?.securityId) {
+                  reconciled = { ...reconciled, orderRef: { ...reconciled.orderRef, securityId: fallbackSecId } };
+                }
 
                 if (
                   reconciled.status !== leg.status ||
                   reconciled.lots !== leg.lots ||
                   reconciled.fill?.qty !== leg.fill?.qty ||
                   reconciled.fill?.avgPrice !== leg.fill?.avgPrice ||
-                  reconciled.closedFill?.exitPrice !== leg.closedFill?.exitPrice
+                  reconciled.closedFill?.exitPrice !== leg.closedFill?.exitPrice ||
+                  reconciled.orderRef?.securityId !== leg.orderRef?.securityId
                 ) {
                   basketChange = true;
                   anyChange = true;
@@ -1172,7 +1281,7 @@ export default function MultiLegFocus() {
     poll();
     const interval = setInterval(poll, 3000);
     return () => { cancelled = true; clearInterval(interval); };
-  }, [broker, showOrdersModal, persistBasket]);
+  }, [broker, showOrdersModal, persistBasket, resolveDhanSecurityId]);
 
   // ── Automated Risk Watcher: SL, TP, Trailing SL, Strategy Target/SL ─
   const triggeredLegExitsRef = useRef<Set<string>>(new Set());
@@ -1540,6 +1649,7 @@ export default function MultiLegFocus() {
                 basketMargin={basketMargins[basket.id]?.basketMargin}
                 overallMargin={basketMargins[basket.id]?.overallMargin}
                 hedgeBenefit={basketMargins[basket.id]?.hedgeBenefit}
+                availableFunds={fundsData?.available}
               />
             );
           })

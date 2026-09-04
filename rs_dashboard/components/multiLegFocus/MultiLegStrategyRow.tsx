@@ -80,6 +80,7 @@ export interface MultiLegStrategyRowProps {
   basketMargin?: number;
   overallMargin?: number;
   hedgeBenefit?: number;
+  availableFunds?: number;
 }
 
 export default function MultiLegStrategyRow({
@@ -109,6 +110,7 @@ export default function MultiLegStrategyRow({
   basketMargin,
   overallMargin,
   hedgeBenefit,
+  availableFunds,
 }: MultiLegStrategyRowProps) {
   const [expanded, setExpanded] = useState(true);
   const [confirmPlace, setConfirmPlace] = useState(false);
@@ -272,7 +274,16 @@ export default function MultiLegStrategyRow({
     onUpdate({ legs: [...basket.legs, newLeg] });
   }, [hasPlacedLeg, atmStrike, allStrikes, basket.legs, onUpdate]);
 
+  // Only blocks once margin has actually been computed for this exact
+  // composition — before that resolves, `basketMargin` is undefined and this
+  // stays false so a fresh strategy isn't blocked on a number that hasn't
+  // loaded yet. onPlace (MultiLegFocus.tsx's placeBasket) re-checks the same
+  // condition right before firing orders, so a stale/disabled-but-clicked
+  // button can't bypass it.
+  const insufficientMargin = basketMargin != null && availableFunds != null && basketMargin > availableFunds;
+
   const handlePlace = () => {
+    if (insufficientMargin) return;
     if (!confirmPlace) {
       setConfirmPlace(true);
       setTimeout(() => setConfirmPlace(false), 4000);
@@ -395,14 +406,19 @@ export default function MultiLegStrategyRow({
                 <button
                   type="button"
                   onClick={handlePlace}
-                  disabled={placing}
+                  disabled={placing || insufficientMargin}
+                  title={insufficientMargin
+                    ? `Needs ~${fmtMoney(basketMargin!)} margin but only ${fmtMoney(availableFunds!)} is available`
+                    : undefined}
                   className={`h-7 px-3 inline-flex items-center gap-1 text-[11px] font-bold rounded-lg border transition-all disabled:opacity-50 ${
-                    confirmPlace
+                    insufficientMargin
+                      ? 'bg-rose-500/10 border-rose-500/40 text-rose-300'
+                      : confirmPlace
                       ? 'bg-amber-500/20 border-amber-500/50 text-amber-200'
                       : 'bg-emerald-500/10 border-emerald-500/40 text-emerald-300 hover:bg-emerald-500/20'
                   } ${FOCUS_RING}`}
                 >
-                  {placing ? 'Placing…' : confirmPlace ? 'Confirm Place?' : 'Place Basket'}
+                  {placing ? 'Placing…' : insufficientMargin ? 'Insufficient Margin' : confirmPlace ? 'Confirm Place?' : 'Place Basket'}
                 </button>
               )}
             </>

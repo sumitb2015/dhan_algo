@@ -441,11 +441,18 @@ export function findLegPosition(
   broker: string,
   leg: MultiLegLeg,
   rows: Record<string, unknown>[],
+  // Falls back to a freshly-resolved securityId (from the strike/expiry chain
+  // lookup, independent of whatever this leg's orderRef captured at placement
+  // time) when orderRef.securityId is missing — a leg that only ever recorded
+  // a symbol (or lost its securityId to a bug) would otherwise be permanently
+  // unmatchable, since Dhan positions carry no trading symbol to fall back to.
+  fallbackSecurityId?: string,
 ): MultiLegMatch {
-  if (!leg.orderRef) return { kind: 'not_found' };
+  const dhanSecId = leg.orderRef?.securityId || (broker === 'dhan' ? fallbackSecurityId : undefined);
+  if (!leg.orderRef && !dhanSecId) return { kind: 'not_found' };
 
-  if (broker === 'dhan' && leg.orderRef.securityId) {
-    const matchingSecId = rows.filter(r => String(r.securityId ?? '') === leg.orderRef!.securityId);
+  if (broker === 'dhan' && dhanSecId) {
+    const matchingSecId = rows.filter(r => String(r.securityId ?? '') === dhanSecId);
     if (matchingSecId.length === 0) {
       // Row not in positions array at all — broker hasn't booked it yet or API omitted it
       return { kind: 'not_found' };
@@ -464,7 +471,7 @@ export function findLegPosition(
     return { kind: 'match', row: live[0] };
   }
 
-  if (leg.orderRef.symbol) {
+  if (leg.orderRef?.symbol) {
     const live = findLivePosition(rows, { tradingSymbol: leg.orderRef.symbol });
     if (live.kind === 'flat') {
       const flatRow = rows.find(r => String(r.tradingSymbol ?? '') === leg.orderRef!.symbol);
