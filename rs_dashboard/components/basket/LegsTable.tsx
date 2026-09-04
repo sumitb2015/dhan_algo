@@ -88,12 +88,14 @@ export default function LegsTable({
             </tr>
           </thead>
           <tbody>
-            {legs.map(leg => {
+            {legs.map((leg, rowIndex) => {
               const ltp = autoPremium(leg.strike, leg.option, leg.expiry);
               const isFar = leg.expiry !== frontExpiry;
               const canToggle = !!farExpiry && farExpiry !== frontExpiry;
               return (
-                <tr key={leg.id} className="border-b border-zinc-800/60 hover:bg-zinc-900/30 transition-colors">
+                <tr key={leg.id} className={`border-b border-zinc-800/60 hover:bg-zinc-900/40 transition-colors ${
+                  rowIndex % 2 === 1 ? 'bg-zinc-900/20' : ''
+                }`}>
                   <td className="px-3 py-2.5">
                     <button onClick={() => onUpdateLeg(leg.id, { side: leg.side === 'B' ? 'S' : 'B' })}
                       title={leg.side === 'B' ? 'Buy — click to flip to Sell' : 'Sell — click to flip to Buy'}

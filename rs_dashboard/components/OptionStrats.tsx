@@ -13,7 +13,7 @@ import { useBrokerSelector, scalperRoute, type Broker } from '@/hooks/useBrokerS
 import { fetchMarginSummary, type MarginSummary } from '@/lib/optionsMargin';
 import { useLiveOptionsWS } from '@/lib/useLiveOptionsWS';
 import {
-  type SavedBasket, loadSavedBaskets, persistSavedBaskets, legToOffset, offsetToStrike,
+  type SavedBasket, loadSavedBaskets, saveBasketRemote, deleteBasketRemote, newBasketId, legToOffset, offsetToStrike,
 } from '@/lib/basketStorage';
 import SavedBasketsPanel from './basket/SavedBasketsPanel';
 import type { Toast } from './Scalper';
@@ -208,11 +208,6 @@ export default function OptionStrats() {
     loadSavedBaskets().then(setSaved);
   }, []);
 
-  const persistSaved = (next: SavedBasket[]) => {
-    setSaved(next);
-    persistSavedBaskets(next).catch(() => addToast('error', 'Failed to save baskets', 'Changes may not persist — check the server'));
-  };
-
   const saveBasket = useCallback(() => {
     const name = saveName.trim();
     if (!name || !legs.length) {
@@ -223,9 +218,10 @@ export default function OptionStrats() {
       addToast('error', 'Cannot save yet', 'Wait for the option chain to load so ATM is known');
       return;
     }
-    const isUpdate = saved.some((s) => s.name === name);
+    const existing = saved.find((s) => s.name === name);
+    const id = existing?.id ?? newBasketId();
     const entry: SavedBasket = {
-      name, category: 'Bullish', strategy: null, multiplier: 1, underlying: UNDERLYING,
+      id, name, category: 'Bullish', strategy: null, multiplier: 1, underlying: UNDERLYING,
       legs: legs.map((l) => ({
         side: l.side === 'BUY' ? 'B' : 'S',
         option: l.type,
@@ -234,13 +230,42 @@ export default function OptionStrats() {
         offset: legToOffset(l.strike, atmStrike, STRIKE_STEP),
       })),
     };
-    persistSaved([...saved.filter((s) => s.name !== name), entry]);
+    setSaved((prev) => [...prev.filter((s) => s.id !== id), entry]);
+    saveBasketRemote(entry).catch(() => addToast('error', 'Failed to save basket', 'Changes may not persist — check the server'));
     // Keep the name filled in (rather than clearing it) so pressing Save again
     // — e.g. after tweaking a loaded basket's legs — overwrites this same
     // basket instead of demanding the name be retyped every time.
     setSaveName(name);
-    addToast('success', isUpdate ? `Basket "${name}" updated` : `Basket "${name}" saved`);
+    addToast('success', existing ? `Basket "${name}" updated` : `Basket "${name}" saved`);
   }, [saveName, legs, atmStrike, saved, addToast]);
+
+  const deleteSavedBasket = useCallback((id: string) => {
+    setSaved((prev) => prev.filter((s) => s.id !== id));
+    deleteBasketRemote(id).catch(() => addToast('error', 'Failed to delete basket', 'Change may not persist — check the server'));
+  }, [addToast]);
+
+  const renameSavedBasket = useCallback((id: string, name: string) => {
+    const trimmed = name.trim();
+    if (!trimmed) return;
+    setSaved((prev) => {
+      const target = prev.find((s) => s.id === id);
+      if (!target) return prev;
+      const renamed = { ...target, name: trimmed };
+      saveBasketRemote(renamed).catch(() => addToast('error', 'Failed to rename basket', 'Change may not persist — check the server'));
+      return prev.map((s) => (s.id === id ? renamed : s));
+    });
+  }, [addToast]);
+
+  const duplicateSavedBasket = useCallback((id: string) => {
+    setSaved((prev) => {
+      const target = prev.find((s) => s.id === id);
+      if (!target) return prev;
+      const copy: SavedBasket = { ...target, id: newBasketId(), name: `${target.name} copy` };
+      saveBasketRemote(copy).catch(() => addToast('error', 'Failed to duplicate basket', 'Change may not persist — check the server'));
+      addToast('success', `Duplicated as "${copy.name}"`);
+      return [...prev, copy];
+    });
+  }, [addToast]);
 
   const loadBasket = useCallback((b: SavedBasket) => {
     if (b.underlying !== UNDERLYING) {
@@ -663,7 +688,9 @@ export default function OptionStrats() {
               open={saveOpen}
               onToggleOpen={() => setSaveOpen((o) => !o)}
               onLoad={loadBasket}
-              onDelete={(name) => persistSaved(saved.filter((s) => s.name !== name))}
+              onDelete={deleteSavedBasket}
+              onRename={renameSavedBasket}
+              onDuplicate={duplicateSavedBasket}
             />
           </div>
           <CardContent className="space-y-2 pt-4">

@@ -7,6 +7,7 @@ import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
 import { formatFundsValue, type ChainOcEntry, type Toast } from './Scalper';
 import { useLiveOptionsWS } from '@/lib/useLiveOptionsWS';
+import { fetchMarginSummary, type MarginSummary } from '@/lib/optionsMargin';
 import { useBrokerSelector, scalperRoute, BROKER_LABELS, type Broker } from '@/hooks/useBrokerSelector';
 import {
   STRATEGY_CATEGORIES, type StrategyCategory, type StrategyTemplate,
@@ -14,7 +15,7 @@ import {
   computePayoff, nearestStrike, strikeStep, daysToExpiry,
 } from '@/lib/basketStrategies';
 import {
-  type SavedBasket, loadSavedBaskets, persistSavedBaskets, legToOffset, offsetToStrike,
+  type SavedBasket, loadSavedBaskets, saveBasketRemote, deleteBasketRemote, newBasketId, legToOffset, offsetToStrike,
 } from '@/lib/basketStorage';
 import { sortLegsForPlacement, resolveOrderRequest, type StrikeIdentifier } from '@/lib/basketOrders';
 import { useCopyTrade, CopyTradeControls } from './CopyTrade';
@@ -27,6 +28,11 @@ import BasketActivityTabs from './basket/BasketActivityTabs';
 const UNDERLYINGS = ['NIFTY', 'BANKNIFTY', 'SENSEX'] as const;
 type Underlying = typeof UNDERLYINGS[number];
 
+// Micro type scale used across the toolbar/tiles — named so the sizes read as
+// a deliberate scale instead of a scatter of arbitrary text-[Npx] values.
+const TXT_LABEL = 'text-[10px]'; // field labels, badges, uppercase tags
+const TXT_VALUE = 'text-xs';     // compact readouts: selects, price tiles
+
 function fmtMoney(n: number): string {
   return `₹${Math.abs(n).toLocaleString('en-IN', { maximumFractionDigits: 0 })}`;
 }
@@ -37,9 +43,35 @@ function MetricTile({ label, value, tone = 'neutral' }: {
   const color = tone === 'profit' ? 'text-emerald-400' : tone === 'loss' ? 'text-rose-400' : 'text-zinc-100';
   return (
     <div className="px-4 py-3">
-      <p className="text-[10px] uppercase tracking-widest text-zinc-500 font-bold">{label}</p>
+      <p className={`${TXT_LABEL} uppercase tracking-widest text-zinc-500 font-bold`}>{label}</p>
       <p className={`text-sm font-bold font-mono tabular-nums mt-1 leading-tight ${color}`}>{value}</p>
     </div>
+  );
+}
+
+// Spot-price trend glyph — history sampled off its own slow interval (not the
+// live-tick path) into a ref, redrawn on its own timer, so it doesn't add
+// per-tick render cost. See dhan-terminal-polish's Sparkline recipe.
+function Sparkline({ history }: { history: number[] }) {
+  const [, setTick] = useState(0);
+  useEffect(() => {
+    const id = setInterval(() => setTick(t => t + 1), 1500);
+    return () => clearInterval(id);
+  }, []);
+  if (history.length < 2) return null;
+  const lo = Math.min(...history), hi = Math.max(...history);
+  const span = hi - lo || 1;
+  const w = 44, h = 14;
+  const points = history.map((v, i) => {
+    const x = (i / (history.length - 1)) * w;
+    const y = h - ((v - lo) / span) * h;
+    return `${x.toFixed(1)},${y.toFixed(1)}`;
+  }).join(' ');
+  const rising = history[history.length - 1] >= history[0];
+  return (
+    <svg viewBox={`0 0 ${w} ${h}`} width={w} height={h} className={rising ? 'text-emerald-400' : 'text-rose-400'}>
+      <polyline points={points} fill="none" stroke="currentColor" strokeWidth={1.25} strokeLinejoin="round" strokeLinecap="round" />
+    </svg>
   );
 }
 
@@ -100,6 +132,21 @@ export default function Baskets() {
   const chainReadyForRef = useRef<{ underlying: string; expiry: string } | null>(null);
 
   const spot = liveQuotes?.spot ?? chainSpot;
+
+  // Spot sparkline history — sampled off its own slow interval (not the
+  // tick-driven WS updates), read through a ref kept in sync every render so
+  // the interval always sees the latest spot without closing over a stale one.
+  const spotRef = useRef(spot);
+  spotRef.current = spot;
+  const [spotHistory, setSpotHistory] = useState<number[]>([]);
+  useEffect(() => {
+    const id = setInterval(() => {
+      if (spotRef.current > 0) setSpotHistory(prev => [...prev.slice(-19), spotRef.current]);
+    }, 3000);
+    return () => clearInterval(id);
+  }, []);
+  useEffect(() => { setSpotHistory([]); }, [underlying]);
+
   const step = useMemo(() => strikeStep(allStrikes), [allStrikes]);
   const atmStrike = useMemo(
     () => (spot > 0 ? nearestStrike(allStrikes, spot) : null),
@@ -362,6 +409,37 @@ export default function Baskets() {
   // legs outside trading hours even though the chain itself loaded fine.
   const premiumsUnavailable = legs.length > 0 && legs.every(l => effectivePremium(l) <= 0);
 
+  // ── Margin preview ───────────────────────────────────────────────
+  // Composition-only signature (side/option/strike/lots, no price) — legs gets
+  // a new array identity on every live-tick premium update, and keying the
+  // margin fetch on legs itself would refire the margin call on every tick
+  // (the same bug already fixed once in OptionStrats.tsx for this exact API).
+  const legsSignature = useMemo(
+    () => legs.map(l => `${l.side}-${l.option}-${l.strike}x${l.lots}-${l.expiry}`).join('|'),
+    [legs]);
+
+  const [margin, setMargin] = useState<MarginSummary | null>(null);
+  const [marginLoading, setMarginLoading] = useState(false);
+
+  useEffect(() => {
+    if (!legs.length || !expiry || hasMixedExpiry || !lotSize) {
+      setMargin(null);
+      return;
+    }
+    const ac = new AbortController();
+    setMarginLoading(true);
+    fetchMarginSummary(
+      underlying, expiry,
+      legs.map(l => ({
+        strike: l.strike, type: l.option, side: l.side === 'B' ? 'BUY' as const : 'SELL' as const,
+        qtyLots: l.lots * multiplier, price: effectivePremium(l),
+      })),
+      ac.signal,
+    ).then(setMargin).finally(() => setMarginLoading(false));
+    return () => ac.abort();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [legsSignature, underlying, expiry, hasMixedExpiry, lotSize, multiplier]);
+
   // ── Order placement ─────────────────────────────────────────────
   type PlacedLeg = { label: string; side: 'B' | 'S'; option: OptionType; strike: number; qty: number; expiry: string };
 
@@ -470,11 +548,6 @@ export default function Baskets() {
   }, [legs, expiry, farExpiry, confirmPlace, multiplier, lotSize, strikeMap, farStrikeMap, broker, underlying, effectivePremium, addToast, hasAuthenticatedBroker, rollbackPlacedLegs]);
 
   // ── Save / load ───────────────────────────────────────────────
-  const persistSaved = (next: SavedBasket[]) => {
-    setSaved(next);
-    persistSavedBaskets(next).catch(() => addToast('error', 'Failed to save baskets', 'Changes may not persist — check the server'));
-  };
-
   const saveBasket = () => {
     const name = saveName.trim();
     if (!name || !legs.length) {
@@ -485,20 +558,51 @@ export default function Baskets() {
       addToast('error', 'Cannot save yet', 'Wait for the option chain to load so ATM is known');
       return;
     }
-    const isUpdate = saved.some(s => s.name === name);
+    // Same name → overwrite that basket's id (matches the prior name-based
+    // semantics); a new name always creates a new record.
+    const existing = saved.find(s => s.name === name);
+    const id = existing?.id ?? newBasketId();
     const entry: SavedBasket = {
-      name, category, strategy, multiplier, underlying,
+      id, name, category, strategy, multiplier, underlying,
       legs: legs.map(({ side, option, strike, lots, type, expiry: legExpiry }) => ({
         side, option, lots, type, offset: legToOffset(strike, atmStrike, step),
         ...(legExpiry === farExpiry && farExpiry !== expiry ? { expiryRole: 'far' as const } : {}),
       })),
     };
-    persistSaved([...saved.filter(s => s.name !== name), entry]);
+    setSaved(prev => [...prev.filter(s => s.id !== id), entry]);
+    saveBasketRemote(entry).catch(() => addToast('error', 'Failed to save basket', 'Changes may not persist — check the server'));
     // Keep the name filled in (rather than clearing it) so pressing Save again
     // — e.g. after tweaking a loaded basket's legs — overwrites this same
     // basket instead of demanding the name be retyped every time.
     setSaveName(name);
-    addToast('success', isUpdate ? `Basket "${name}" updated` : `Basket "${name}" saved`);
+    addToast('success', existing ? `Basket "${name}" updated` : `Basket "${name}" saved`);
+  };
+
+  const deleteSavedBasket = (id: string) => {
+    setSaved(prev => prev.filter(s => s.id !== id));
+    deleteBasketRemote(id).catch(() => addToast('error', 'Failed to delete basket', 'Change may not persist — check the server'));
+  };
+
+  const renameSavedBasket = (id: string, name: string) => {
+    const trimmed = name.trim();
+    if (!trimmed) return;
+    setSaved(prev => {
+      const target = prev.find(s => s.id === id);
+      if (!target) return prev;
+      const renamed = { ...target, name: trimmed };
+      saveBasketRemote(renamed).catch(() => addToast('error', 'Failed to rename basket', 'Change may not persist — check the server'));
+      if (saveName === target.name) setSaveName(trimmed);
+      return prev.map(s => (s.id === id ? renamed : s));
+    });
+  };
+
+  const duplicateSavedBasket = (id: string) => {
+    const target = saved.find(s => s.id === id);
+    if (!target) return;
+    const copy: SavedBasket = { ...target, id: newBasketId(), name: `${target.name} copy` };
+    setSaved(prev => [...prev, copy]);
+    saveBasketRemote(copy).catch(() => addToast('error', 'Failed to duplicate basket', 'Change may not persist — check the server'));
+    addToast('success', `Duplicated as "${copy.name}"`);
   };
 
   // Holds a basket whose underlying didn't match the current selection at the
@@ -595,38 +699,42 @@ export default function Baskets() {
           </div>
 
           <div className="flex items-center gap-2 flex-wrap">
-            <select value={underlying} onChange={e => setUnderlying(e.target.value as Underlying)}
-              className="h-8 bg-zinc-900 border border-zinc-700 text-zinc-200 text-xs font-semibold rounded-lg px-2.5 focus:outline-none focus:border-emerald-500">
-              {UNDERLYINGS.map(u => <option key={u} value={u}>{u}</option>)}
-            </select>
-
-            {authenticatedBrokers.length > 1 && (
-              <select value={broker} onChange={e => setBroker(e.target.value as Broker)}
-                className="h-8 bg-zinc-900 border border-zinc-700 text-zinc-200 text-xs font-semibold rounded-lg px-2.5 focus:outline-none focus:border-emerald-500">
-                {authenticatedBrokers.map(b => <option key={b} value={b}>{BROKER_LABELS[b]}</option>)}
+            {/* Instrument cluster: what's being traded */}
+            <div className="flex items-center gap-1.5 bg-zinc-950/40 border border-zinc-800/60 rounded-xl px-2 py-1">
+              <select value={underlying} onChange={e => setUnderlying(e.target.value as Underlying)}
+                className={`h-7 bg-zinc-900 border border-zinc-700 text-zinc-200 ${TXT_VALUE} font-semibold rounded-lg px-2 focus:outline-none focus:border-emerald-500`}>
+                {UNDERLYINGS.map(u => <option key={u} value={u}>{u}</option>)}
               </select>
-            )}
 
-            {/* Dhan → Zerodha trade replication (arm/disarm + multiplier) */}
-            <CopyTradeControls copyTrade={copyTrade} />
-
-            <select value={expiry} onChange={e => setExpiry(e.target.value)}
-              className="h-8 bg-zinc-900 border border-zinc-700 text-zinc-200 text-xs font-semibold rounded-lg px-2.5 focus:outline-none focus:border-emerald-500">
-              {expiries.map(ex => <option key={ex} value={ex}>{ex}</option>)}
-            </select>
-
-            {category === 'Calendar' && (
-              <div className="flex items-center gap-1.5 h-8 bg-zinc-900 border border-fuchsia-500/40 rounded-lg pl-2 pr-1">
-                <span className="text-[10px] font-bold text-fuchsia-300 uppercase tracking-wider">Far</span>
-                <select value={farExpiry} onChange={e => setFarExpiry(e.target.value)}
-                  className="h-6 bg-transparent text-zinc-200 text-xs font-semibold rounded px-1 focus:outline-none">
-                  {expiries.filter(ex => ex !== expiry).map(ex => <option key={ex} value={ex}>{ex}</option>)}
+              {authenticatedBrokers.length > 1 && (
+                <select value={broker} onChange={e => setBroker(e.target.value as Broker)}
+                  className={`h-7 bg-zinc-900 border border-zinc-700 text-zinc-200 ${TXT_VALUE} font-semibold rounded-lg px-2 focus:outline-none focus:border-emerald-500`}>
+                  {authenticatedBrokers.map(b => <option key={b} value={b}>{BROKER_LABELS[b]}</option>)}
                 </select>
-              </div>
-            )}
+              )}
 
-            <div className="flex items-center gap-2 h-8 bg-zinc-900 border border-zinc-700 rounded-lg px-2">
-              <span className="text-[10px] font-bold text-zinc-400 uppercase tracking-wider">Multiplier</span>
+              {/* Dhan → Zerodha trade replication (arm/disarm + multiplier) */}
+              <CopyTradeControls copyTrade={copyTrade} />
+
+              <select value={expiry} onChange={e => setExpiry(e.target.value)}
+                className={`h-7 bg-zinc-900 border border-zinc-700 text-zinc-200 ${TXT_VALUE} font-semibold rounded-lg px-2 focus:outline-none focus:border-emerald-500`}>
+                {expiries.map(ex => <option key={ex} value={ex}>{ex}</option>)}
+              </select>
+
+              {category === 'Calendar' && (
+                <div className="flex items-center gap-1.5 h-7 bg-zinc-900 border border-fuchsia-500/40 rounded-lg pl-2 pr-1">
+                  <span className={`${TXT_LABEL} font-bold text-fuchsia-300 uppercase tracking-wider`}>Far</span>
+                  <select value={farExpiry} onChange={e => setFarExpiry(e.target.value)}
+                    className={`h-6 bg-transparent text-zinc-200 ${TXT_VALUE} font-semibold rounded px-1 focus:outline-none`}>
+                    {expiries.filter(ex => ex !== expiry).map(ex => <option key={ex} value={ex}>{ex}</option>)}
+                  </select>
+                </div>
+              )}
+            </div>
+
+            {/* Sizing cluster */}
+            <div className="flex items-center gap-2 h-9 bg-zinc-950/40 border border-zinc-800/60 rounded-xl px-2">
+              <span className={`${TXT_LABEL} font-bold text-zinc-400 uppercase tracking-wider`}>Multiplier</span>
               <div className="inline-flex items-center rounded-lg border border-zinc-800 bg-zinc-950/60 overflow-hidden">
                 <button onClick={() => setMultiplier(m => Math.max(1, m - 1))}
                   className="w-7 h-7 flex items-center justify-center text-zinc-500 hover:text-zinc-200 hover:bg-zinc-800 transition-colors">
@@ -640,32 +748,36 @@ export default function Baskets() {
               </div>
             </div>
 
-            <div className="flex items-center gap-1.5">
-              <span className={`w-2 h-2 rounded-full ${
-                bridgeStatus.status === 'RUNNING'  ? 'bg-emerald-400 animate-pulse' :
-                bridgeStatus.status === 'STARTING' ? 'bg-yellow-400 animate-pulse'  :
-                bridgeStatus.status === 'ERROR'    ? 'bg-rose-400'                  : 'bg-zinc-600'
-              }`} />
-              <span className={`text-[9px] font-bold px-1 py-0.5 rounded border ${
-                transport === 'ws' ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20' : 'bg-zinc-800 text-zinc-500 border-zinc-700'
-              }`}>
-                {transport === 'ws' ? 'WS' : 'HTTP'}
-              </span>
-              {lastUpdated && <span className="text-[10px] text-zinc-500 font-mono">{lastUpdated}</span>}
+            {/* Market cluster: feed status, spot (with trend), funds */}
+            <div className="flex items-center gap-2 h-9 bg-zinc-950/40 border border-zinc-800/60 rounded-xl px-2.5">
+              <div className="flex items-center gap-1.5">
+                <span className={`w-2 h-2 rounded-full ${
+                  bridgeStatus.status === 'RUNNING'  ? 'bg-emerald-400 animate-pulse' :
+                  bridgeStatus.status === 'STARTING' ? 'bg-yellow-400 animate-pulse'  :
+                  bridgeStatus.status === 'ERROR'    ? 'bg-rose-400'                  : 'bg-zinc-600'
+                }`} />
+                <span className={`text-[9px] font-bold px-1 py-0.5 rounded border ${
+                  transport === 'ws' ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20' : 'bg-zinc-800 text-zinc-500 border-zinc-700'
+                }`}>
+                  {transport === 'ws' ? 'WS' : 'HTTP'}
+                </span>
+                {lastUpdated && <span className={`${TXT_LABEL} text-zinc-500 font-mono`}>{lastUpdated}</span>}
+              </div>
+
+              {spot > 0 && (
+                <span className={`flex items-center gap-2 ${TXT_VALUE} font-bold font-mono tabular-nums text-zinc-200`}>
+                  {underlying}&nbsp;{spot.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                  <Sparkline history={spotHistory} />
+                </span>
+              )}
+
+              {fundsData && Number.isFinite(Number(fundsData.availabelBalance)) && (
+                <span className={`flex items-center gap-1.5 ${TXT_VALUE} font-bold font-mono tabular-nums text-zinc-200`}>
+                  <Wallet className="w-3 h-3 text-sky-400" />
+                  Rs. {formatFundsValue(Number(fundsData.availabelBalance))}
+                </span>
+              )}
             </div>
-
-            {spot > 0 && (
-              <span className="h-8 flex items-center px-2.5 rounded-lg text-xs font-bold font-mono tabular-nums bg-zinc-900 border border-zinc-700 text-zinc-200">
-                {underlying}&nbsp;{spot.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-              </span>
-            )}
-
-            {fundsData && Number.isFinite(Number(fundsData.availabelBalance)) && (
-              <span className="h-8 flex items-center gap-1.5 px-2.5 rounded-lg text-xs font-bold font-mono tabular-nums bg-zinc-900 border border-zinc-700 text-zinc-200">
-                <Wallet className="w-3 h-3 text-sky-400" />
-                Rs. {formatFundsValue(Number(fundsData.availabelBalance))}
-              </span>
-            )}
           </div>
         </div>
 
@@ -705,7 +817,9 @@ export default function Baskets() {
               open={saveOpen}
               onToggleOpen={() => setSaveOpen(o => !o)}
               onLoad={loadBasket}
-              onDelete={name => persistSaved(saved.filter(s => s.name !== name))}
+              onDelete={deleteSavedBasket}
+              onRename={renameSavedBasket}
+              onDuplicate={duplicateSavedBasket}
             />
           </div>
 
@@ -762,6 +876,12 @@ export default function Baskets() {
               value={riskReward != null ? `1 : ${riskReward.toFixed(2)}` : '—'} />
             <MetricTile label="Days Left" value={daysLeft ?? '—'} />
           </div>
+          <div className="grid grid-cols-2 divide-x divide-zinc-800 border-b border-zinc-800">
+            <MetricTile label="Margin Required"
+              tone={margin && margin.available_funds > 0 && margin.total_margin > margin.available_funds ? 'loss' : 'neutral'}
+              value={marginLoading ? '…' : margin ? fmtMoney(margin.total_margin) : '—'} />
+            <MetricTile label="Available Funds" value={marginLoading ? '…' : margin ? fmtMoney(margin.available_funds) : '—'} />
+          </div>
 
           <div className="p-4">
             <BasketPayoffChart
@@ -777,7 +897,10 @@ export default function Baskets() {
               }
             />
             <p className="text-[10px] text-zinc-600 mt-2">
-              Expiry payoff only (no T+0 curve) · margin calculation not available from broker
+              Expiry payoff only (no T+0 curve)
+              {margin && margin.available_funds > 0 && margin.total_margin > margin.available_funds && (
+                <span className="text-amber-400 font-semibold"> · margin required exceeds available funds</span>
+              )}
             </p>
           </div>
         </Card>

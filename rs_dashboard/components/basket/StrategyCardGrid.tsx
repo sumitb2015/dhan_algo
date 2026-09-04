@@ -39,10 +39,10 @@ function StrategyGlyph({ template }: { template: StrategyTemplate }) {
     }).join('');
   }, [template]);
   return (
-    <svg viewBox="0 0 80 36" className="w-full h-12" aria-label="Schematic expiry payoff shape" role="img">
+    <svg viewBox="0 0 80 36" className="w-full h-12 text-emerald-400" aria-label="Schematic expiry payoff shape" role="img">
       <title>Schematic expiry payoff shape, not live pricing</title>
       <line x1={4} x2={76} y1={18} y2={18} stroke={chrome.baseline} strokeWidth={1} strokeDasharray="2 2" />
-      <path d={path} fill="none" stroke="#34d399" strokeWidth={1.75} />
+      <path d={path} fill="none" stroke="currentColor" strokeWidth={1.75} />
     </svg>
   );
 }
@@ -71,9 +71,10 @@ export default function StrategyCardGrid({
       <div className="flex flex-col gap-1.5 flex-none pt-0.5">
         {CATEGORIES.map(cat => (
           <button key={cat} onClick={() => onCategoryChange(cat)}
-            className={`px-4 py-1.5 text-xs font-bold rounded-lg border text-left transition-all ${
+            className={`relative px-4 py-1.5 text-xs font-bold rounded-lg border text-left transition-all ${
               category === cat ? CATEGORY_COLORS[cat] : 'border-zinc-800 bg-zinc-900/40 text-zinc-300 hover:text-zinc-100'
             }`}>
+            {category === cat && <span className="absolute left-0 top-1.5 bottom-1.5 w-0.5 rounded-full bg-current" />}
             {cat}
           </button>
         ))}
