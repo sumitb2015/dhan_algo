@@ -310,9 +310,14 @@ def download_futstk_oi_snapshot(helper: DhanHelper, daily_url: str, headers: dic
             _write_status(f"Stock futures OI: {i + 1}/{total}...")
             print(f"  [{i + 1}/{total}] processed (last: {symbol})")
 
+        # Most F&O stock futures now list under EXCH_ID 'BSE' in the master list —
+        # sending NSE_FNO for a BSE security id gets rejected as DH-905, so the
+        # segment must follow the row, not be hardcoded to NSE.
+        segment = "BSE_FNO" if str(row.get("EXCH_ID", "")).upper() == "BSE" else "NSE_FNO"
+
         # Fetch last 10 calendar days of daily data for this contract
         df_daily = fetch_daily_chunk(
-            daily_url, headers, sec_id, "NSE_FNO", from_date, to_date,
+            daily_url, headers, sec_id, segment, from_date, to_date,
             instrument="FUTSTK"
         )
 
