@@ -80,6 +80,42 @@ export default function Baskets() {
 
   const [fundsData, setFundsData] = useState<Record<string, number> | null>(null);
 
+  // ── India VIX Ticker ────────────────────────────────────────────
+  const [vixData, setVixData] = useState<{ vix: number; prevClose: number } | null>(null);
+
+  useEffect(() => {
+    const pollVix = () => {
+      fetch('/api/scalper/vix')
+        .then(r => r.json())
+        .then((j: { success: boolean; vix?: number; prevClose?: number }) => {
+          if (j.success && j.vix !== undefined && j.prevClose !== undefined) {
+            setVixData({ vix: j.vix, prevClose: j.prevClose });
+          }
+        })
+        .catch(() => {});
+    };
+    pollVix();
+    const interval = setInterval(pollVix, 60_000);
+    return () => clearInterval(interval);
+  }, []);
+
+  const liveVix = liveQuotes?.vix;
+  const currentVix = (liveVix && liveVix.ltp > 0) ? liveVix.ltp : (vixData?.vix ?? 0);
+  const currentVixPrevClose = (liveVix && (liveVix.prev_close ?? 0) > 0) ? liveVix.prev_close! : (vixData?.prevClose ?? 0);
+  const vixChange = (liveVix && liveVix.change !== undefined && liveVix.change !== 0)
+    ? liveVix.change
+    : (currentVix > 0 && currentVixPrevClose > 0)
+    ? currentVix - currentVixPrevClose
+    : 0;
+  const vixChangePct = (liveVix && liveVix.change_pct !== undefined && liveVix.change_pct !== 0)
+    ? liveVix.change_pct
+    : (currentVixPrevClose > 0)
+    ? (vixChange / currentVixPrevClose) * 100
+    : 0;
+
+  const spotChange = liveQuotes?.spot_change ?? 0;
+  const spotChangePct = liveQuotes?.spot_change_pct ?? 0;
+
   const legCounterRef  = useRef(0);
   const placingRef     = useRef(false);
   const expiryRef      = useRef('');
@@ -234,18 +270,40 @@ export default function Baskets() {
         body: JSON.stringify({ action: 'stop', brokers: authenticatedBrokers }),
       }).catch(() => {});
     };
-  }, [expiry, underlying, broker, authenticatedBrokers]);
+  }, [expiry, underlying, authenticatedBrokers]);
+
+  // ── Watch extra off-selected-expiry contracts (Calendar/Diagonal legs) ──
+  useEffect(() => {
+    const farLegs = legs.filter(l => l.expiry && l.expiry !== expiry);
+    if (!farLegs.length) return;
+
+    const requests = farLegs.map(l => ({
+      underlying,
+      expiry: l.expiry,
+      strike: l.strike,
+      side: l.option,
+    }));
+
+    fetch('/api/options/live', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'watchExtra', underlying, requests }),
+    }).catch(() => {});
+  }, [legs, expiry, underlying]);
 
   // ── Pricing helpers ─────────────────────────────────────────────
-  // Live/prev-close quotes are only fetched for the front expiry — a far-month
-  // (Calendar/Diagonal) leg has no quote source here, so it returns 0 and must
-  // be priced manually in the Price column.
+  // Live/prev-close quotes for the front expiry, plus extra-contract quotes for far expiries.
   const autoPremium = useCallback((strike: number, option: OptionType, legExpiry?: string): number => {
-    if (legExpiry != null && legExpiry !== expiry) return 0;
     const key = String(strike);
-    const live = liveQuotes?.strikes?.[key]?.[option === 'CE' ? 'ce' : 'pe']?.ltp ?? 0;
+    const side = option === 'CE' ? 'ce' : 'pe';
+    if (legExpiry != null && legExpiry !== expiry) {
+      const extraLtp = liveQuotes?.extra?.[legExpiry]?.[key]?.[side]?.ltp ?? 0;
+      if (extraLtp > 0) return extraLtp;
+      return 0;
+    }
+    const live = liveQuotes?.strikes?.[key]?.[side]?.ltp ?? 0;
     if (live > 0) return live;
-    return prevClose[key]?.[option === 'CE' ? 'ce' : 'pe'] ?? 0;
+    return prevClose[key]?.[side] ?? 0;
   }, [liveQuotes, prevClose, expiry]);
 
   const effectivePremium = useCallback((leg: BasketLeg): number => {
@@ -655,9 +713,39 @@ export default function Baskets() {
             </div>
 
             {spot > 0 && (
-              <span className="h-8 flex items-center px-2.5 rounded-lg text-xs font-bold font-mono tabular-nums bg-zinc-900 border border-zinc-700 text-zinc-200">
-                {underlying}&nbsp;{spot.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-              </span>
+              <div
+                className="h-8 flex items-baseline gap-2 px-3 rounded-lg bg-zinc-900 border border-zinc-700 font-mono tabular-nums"
+                title={`${underlying} Spot from ${liveQuotes?.spot ? 'WebSocket Live Feed' : 'Option Chain'}`}
+              >
+                <span className="text-[10px] font-bold text-zinc-400 tracking-wider uppercase">{underlying}</span>
+                <span className="text-xs font-bold text-white">
+                  {spot.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                </span>
+                {spotChange !== 0 && (
+                  <span className={`text-[11px] font-semibold flex items-center gap-0.5 ${spotChange >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
+                    <span>{spotChange >= 0 ? '▲' : '▼'}</span>
+                    <span>{Math.abs(spotChange).toFixed(2)}</span>
+                    <span className="text-[10px] opacity-90">({spotChange >= 0 ? '+' : ''}{spotChangePct.toFixed(2)}%)</span>
+                  </span>
+                )}
+              </div>
+            )}
+
+            {currentVix > 0 && (
+              <div
+                className="h-8 flex items-baseline gap-2 px-3 rounded-lg bg-zinc-900 border border-zinc-700 font-mono tabular-nums"
+                title={`India VIX | Prev Close: ${currentVixPrevClose > 0 ? currentVixPrevClose.toFixed(2) : '—'}`}
+              >
+                <span className="text-[10px] font-bold text-zinc-400 tracking-wider">VIX</span>
+                <span className="text-xs font-bold text-white">{currentVix.toFixed(2)}</span>
+                {vixChange !== 0 && (
+                  <span className={`text-[11px] font-semibold flex items-center gap-0.5 ${vixChange >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
+                    <span>{vixChange >= 0 ? '▲' : '▼'}</span>
+                    <span>{Math.abs(vixChange).toFixed(2)}</span>
+                    <span className="text-[10px] opacity-90">({vixChange >= 0 ? '+' : ''}{vixChangePct.toFixed(2)}%)</span>
+                  </span>
+                )}
+              </div>
             )}
 
             {fundsData && Number.isFinite(Number(fundsData.availabelBalance)) && (
@@ -676,6 +764,12 @@ export default function Baskets() {
             selectedKey={strategy}
             onSelectTemplate={applyTemplate}
             disabled={atmStrike == null}
+            atmStrike={atmStrike}
+            step={step}
+            allStrikes={allStrikes}
+            autoPremium={autoPremium}
+            frontExpiry={expiry}
+            farExpiry={farExpiry}
           />
         </div>
       </div>

@@ -110,14 +110,16 @@ def _fetch_prev_closes(dhan, underlying_sid: str, underlying_exchange: str = 'NS
     startup). A single missed fetch would otherwise leave spot/VIX % change pinned
     at 0.00 for the bridge's entire lifetime, since this value is only fetched once
     at startup with no retry during the main loop."""
-    underlying_seg = 'NSE_IDX' if underlying_exchange == 'NSE' else 'BSE_IDX'
+    underlying_seg = 'IDX_I'
     for attempt in range(attempts):
         closes = {underlying_sid: 0.0, VIX_SID: 0.0}
         try:
             token     = dhan.dhan_http.access_token
             client_id = dhan.dhan_http.client_id
-            body_map = {'NSE_IDX': [int(VIX_SID)]}
+            body_map = {'IDX_I': [int(VIX_SID)]}
             body_map.setdefault(underlying_seg, []).append(int(underlying_sid))
+            for k in body_map:
+                body_map[k] = list(set(body_map[k]))
             body = json.dumps(body_map).encode()
             req  = urllib.request.Request(
                 OHLC_URL, data=body, method='POST',
@@ -132,7 +134,7 @@ def _fetch_prev_closes(dhan, underlying_sid: str, underlying_exchange: str = 'NS
                 res = json.loads(resp.read())
             if res.get('status') == 'success':
                 data = res.get('data', {}) or {}
-                for sid, seg in ((underlying_sid, underlying_seg), (VIX_SID, 'NSE_IDX')):
+                for sid, seg in ((underlying_sid, underlying_seg), (VIX_SID, 'IDX_I')):
                     entry = (data.get(seg, {}) or {}).get(sid, {}) or {}
                     ohlc  = entry.get('ohlc') or {}
                     val   = float(ohlc.get('close') or 0)

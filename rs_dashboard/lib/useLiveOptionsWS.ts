@@ -33,7 +33,7 @@ const FALLBACK_POLL_MS = 100;    // HTTP polling cadence when WS is down
 const WS_RETRY_BASE_MS = 500;    // reconnect backoff: 0.5s → 1s → 2s → 5s cap
 const WS_RETRY_MAX_MS  = 5000;
 const WS_FAILS_TO_POLL = 3;      // consecutive WS failures before HTTP fallback
-const STALE_MS         = 10_000; // reject quotes older than this
+const STALE_MS         = 60_000; // reject HTTP fallback quotes older than this (60s)
 
 export type Broker = 'dhan' | 'zerodha' | 'kotak';
 
@@ -100,11 +100,11 @@ function runChannel(
   let lastStatusKey = '';
 
   // ── Shared guards (same semantics as the original poll loop) ──
-  const acceptQuotes = (q: LiveQuotes | null): boolean => {
+  const acceptQuotes = (q: LiveQuotes | null, isWs = false): boolean => {
     if (!q) return false;
     if (q.expiry && q.expiry !== expiry) return false;
     if (q.underlying && q.underlying !== underlying) return false;
-    if (q.updated_at) {
+    if (!isWs && q.updated_at) {
       const ageMs = Date.now() - new Date(q.updated_at).getTime();
       if (!(ageMs <= STALE_MS)) return false;   // NaN-safe: fail stale
     }
@@ -132,7 +132,7 @@ function runChannel(
       .then(r => r.json())
       .then((j: { success: boolean; status: StatusWithPort; quotes: LiveQuotes }) => {
         if (disposed || !j.success) return;
-        if (acceptQuotes(j.quotes)) {
+        if (acceptQuotes(j.quotes, false)) {
           latestRef.quotes = j.quotes;
           scheduleFlush();
         }
@@ -178,7 +178,7 @@ function runChannel(
       lastWsMsgAt = Date.now();
       try {
         const q = JSON.parse(ev.data as string) as LiveQuotes;
-        if (acceptQuotes(q)) {
+        if (acceptQuotes(q, true)) {
           latestRef.quotes = q;
           scheduleFlush();
         }

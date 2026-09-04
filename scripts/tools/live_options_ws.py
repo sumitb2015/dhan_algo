@@ -85,14 +85,17 @@ OPTION_FEED_SEGMENT = {
 OHLC_URL = 'https://api.dhan.co/v2/marketfeed/ohlc'
 
 
-def _fetch_prev_closes(dhan, underlying_sid: str, underlying_seg: str = 'NSE_IDX') -> dict:
-    """Fetch previous-session closes for both VIX (always NSE) and the underlying, plus initial spot LTP."""
+def _fetch_prev_closes(dhan, underlying_sid: str, underlying_seg: str = 'IDX_I') -> dict:
+    """Fetch previous-session closes for both VIX (always IDX_I) and the underlying, plus initial spot LTP."""
     closes = {underlying_sid: 0.0, VIX_SID: 0.0, 'spot': 0.0}
     try:
         token     = dhan.dhan_http.access_token
         client_id = dhan.dhan_http.client_id
-        body_map = {'NSE_IDX': [int(VIX_SID)]}
+        body_map = {'IDX_I': [int(VIX_SID)]}
         body_map.setdefault(underlying_seg, []).append(int(underlying_sid))
+        # Ensure unique IDs per segment
+        for k in body_map:
+            body_map[k] = list(set(body_map[k]))
         body = json.dumps(body_map).encode()
         req  = urllib.request.Request(
             OHLC_URL, data=body, method='POST',
@@ -107,7 +110,7 @@ def _fetch_prev_closes(dhan, underlying_sid: str, underlying_seg: str = 'NSE_IDX
             res = json.loads(resp.read())
         if res.get('status') == 'success':
             data = res.get('data', {}) or {}
-            for sid, seg in ((underlying_sid, underlying_seg), (VIX_SID, 'NSE_IDX')):
+            for sid, seg in ((underlying_sid, underlying_seg), (VIX_SID, 'IDX_I')):
                 entry = (data.get(seg, {}) or {}).get(sid, {}) or {}
                 ohlc  = entry.get('ohlc') or {}
                 val   = float(ohlc.get('close') or 0)
@@ -387,7 +390,7 @@ def main():
     elif is_sensex:
         underlying_sid = '51'
         underlying_exchange = 'BSE'
-        underlying_seg = 'BSE_IDX'
+        underlying_seg = 'IDX_I'
         chain_symbol = '1'
         chain_seg = 'BSE_FNO'
         opt_inst = 'OPTIDX'
@@ -395,7 +398,7 @@ def main():
     else:
         underlying_sid = UNDERLYING_SIDS.get(under, '13')
         underlying_exchange = 'NSE'
-        underlying_seg = 'NSE_IDX'
+        underlying_seg = 'IDX_I'
         chain_symbol = under
         chain_seg = 'IDX_I'
         opt_inst = 'OPTIDX'
