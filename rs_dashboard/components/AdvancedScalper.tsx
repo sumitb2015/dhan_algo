@@ -2565,6 +2565,7 @@ export default function AdvancedScalper() {
           ) : activeTab === 'positions' ? (
             <PositionsTable
               data={enrichedPositions}
+              broker={broker}
               guards={posGuards}
               closingPositions={closingPositions}
               onGuardChange={handleGuardChange}

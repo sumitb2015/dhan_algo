@@ -1959,6 +1959,7 @@ export default function Scalper() {
           ) : activeTab === 'positions' ? (
             <PositionsTable
               data={enrichedPositions}
+              broker={broker}
               guards={posGuards}
               closingPositions={closingPositions}
               onGuardChange={handleGuardChange}
@@ -2458,6 +2459,7 @@ export function GuardInput({ value, onCommit, colorCls, focusBorderCls, disabled
 
 export interface PositionsTableProps {
   data: Record<string, unknown>[];
+  broker: Broker;
   /** Keyed by lib/positionProduct's `positionKey` — (symbol, product), NOT symbol
    *  alone. The same symbol can be open under two products, and they are separate
    *  positions with separate guards. */
@@ -2488,21 +2490,30 @@ export interface PositionsTableProps {
 const GUARD_PRESET_PCTS = [10, 15, 20, 25, 30];
 
 /**
- * Best-effort expiry for one position row, broker-agnostic. Dhan's raw
- * `/positions` payload passes through with its native `drvExpiryDate` intact
- * (see lib/positionLegs.ts's resolveContract, which prefers the same field);
- * Kotak's trading symbol carries a full day+month+year prefix that
- * `parseTradingSymbol` already decodes for the payoff-engine legs. Zerodha's
- * monthly-expiry symbols carry no day at all, so those legitimately resolve
- * to null — shown as '—' rather than guessed.
+ * Best-effort expiry for one position row. Dhan's raw `/positions` payload
+ * passes through with its native `drvExpiryDate` intact (see
+ * lib/positionLegs.ts's resolveContract, which prefers the same field).
+ *
+ * The trading-symbol fallback is Kotak-only, deliberately: its compact form
+ * always carries an explicit day (`CRUDEOILM17AUG264150CE`), which is what
+ * `parseTradingSymbol`'s regex assumes. Zerodha's monthly-expiry symbols have
+ * no day at all (`NIFTY26JUL23900PE` — YY+MON+STRIKE), so the same regex
+ * misreads its year digits as a day and its leading strike digits as a year,
+ * fabricating a wrong past-dated expiry (e.g. "2023-07-26", strike 900)
+ * instead of the correct "no day info" null. Gate the fallback on broker
+ * rather than trying to make the shared regex disambiguate an inherently
+ * ambiguous digit run.
  */
-function resolveRowExpiry(row: Record<string, unknown>, tradingSymbol: string): string | null {
-  return normalizeExpiry(row.drvExpiryDate) ?? parseTradingSymbol(tradingSymbol)?.expiry ?? null;
+function resolveRowExpiry(row: Record<string, unknown>, tradingSymbol: string, broker: Broker): string | null {
+  const native = normalizeExpiry(row.drvExpiryDate);
+  if (native) return native;
+  return broker === 'kotak' ? (parseTradingSymbol(tradingSymbol)?.expiry ?? null) : null;
 }
 
 interface PositionRowProps {
   row: Record<string, unknown>;
   rowKey: string;
+  broker: Broker;
   guard?: PositionGuard;
   isClosing: boolean;
   onGuardChange: (positionKey: string, field: 'target' | 'sl', value: string) => void;
@@ -2524,11 +2535,12 @@ interface PositionRowProps {
  * this comparator useful rather than a no-op.
  */
 function positionRowPropsEqual(prev: PositionRowProps, next: PositionRowProps): boolean {
-  return prev.row === next.row && prev.guard === next.guard && prev.isClosing === next.isClosing;
+  return prev.row === next.row && prev.guard === next.guard && prev.isClosing === next.isClosing
+    && prev.broker === next.broker;
 }
 
 const PositionRow = React.memo(function PositionRow({
-  row, rowKey, guard, isClosing, onGuardChange, onTrailToggle, onClose, onAddLeg, lotSizeFor, onClosePartial,
+  row, rowKey, broker, guard, isClosing, onGuardChange, onTrailToggle, onClose, onAddLeg, lotSizeFor, onClosePartial,
 }: PositionRowProps) {
   const sym = String(row.tradingSymbol ?? '');
   const netQty = Number(row.netQty);
@@ -2574,7 +2586,7 @@ const PositionRow = React.memo(function PositionRow({
           {sym}
         </div>
       </td>
-      <td className="px-3 py-2 whitespace-nowrap font-mono text-zinc-400">{resolveRowExpiry(row, sym) ?? '—'}</td>
+      <td className="px-3 py-2 whitespace-nowrap font-mono text-zinc-400">{resolveRowExpiry(row, sym, broker) ?? '—'}</td>
       <td className="px-3 py-2 whitespace-nowrap font-mono text-right tabular-nums text-zinc-300">{netQty}</td>
       <td className="px-3 py-2 whitespace-nowrap font-mono text-right tabular-nums text-zinc-300">{buyAvg > 0 ? buyAvg.toFixed(2) : '—'}</td>
       <td className="px-3 py-2 whitespace-nowrap font-mono text-right tabular-nums text-zinc-300">{sellAvg > 0 ? sellAvg.toFixed(2) : '—'}</td>
@@ -2755,7 +2767,7 @@ const PositionRow = React.memo(function PositionRow({
   );
 }, positionRowPropsEqual);
 
-export const PositionsTable = React.memo(function PositionsTable({ data, guards, closingPositions, onGuardChange, onTrailToggle, onClose, onAddLeg, lotSizeFor, onClosePartial, sort, onSort, error }: PositionsTableProps) {
+export const PositionsTable = React.memo(function PositionsTable({ data, broker, guards, closingPositions, onGuardChange, onTrailToggle, onClose, onAddLeg, lotSizeFor, onClosePartial, sort, onSort, error }: PositionsTableProps) {
   // The broker positions API does not guarantee a stable row order between
   // polls, so with no explicit column sort applied ('none') the rows would
   // otherwise reshuffle on every 5s refresh. Pin each row to the order it was
@@ -2813,6 +2825,7 @@ export const PositionsTable = React.memo(function PositionsTable({ data, guards,
               key={rowKey}
               row={row}
               rowKey={rowKey}
+              broker={broker}
               guard={guards[rowKey]}
               isClosing={closingPositions.has(rowKey)}
               onGuardChange={onGuardChange}
