@@ -1,11 +1,16 @@
 'use client';
 
-// 8-chart grid of the heaviest NIFTY constituents by index weight (the standard
-// proxy for market cap here — see NIFTY_TOP10_BY_WEIGHT in lib/nifty50.ts, the
-// same list the Advanced Scalper's Top-10 panel uses), each showing its daily
-// candles via the existing /api/equity-candles feed.
+// Two 8-chart grids on one page, switched by a Stocks/Indices submenu:
+//  - Stocks: the heaviest NIFTY constituents by index weight (the standard
+//    proxy for market cap here — see NIFTY_TOP10_BY_WEIGHT in lib/nifty50.ts,
+//    the same list Advanced Scalper's Top-10 panel uses), sliced to 8.
+//  - Indices: the 8 headline sectoral/benchmark indices, same set and order as
+//    Advanced Scalper's Top Markets panel (app/api/scalper/top-indices/route.ts)
+//    minus India VIX and Crude Oil, which have no daily index-level chart here.
+// Both tabs render via the existing /api/equity-candles feed and
+// LightweightCandlestickChart — no new data plumbing.
 
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import { RefreshCw, LayoutGrid } from 'lucide-react';
 import type { EquityCandlesResponse } from '@/app/api/equity-candles/route';
 import { NIFTY_TOP10_BY_WEIGHT } from '@/lib/nifty50';
@@ -13,7 +18,37 @@ import { cn } from '@/lib/utils';
 import NavBar from './NavBar';
 import LightweightCandlestickChart from './LightweightCandlestickChart';
 
-const TOP8 = NIFTY_TOP10_BY_WEIGHT.slice(0, 8);
+interface Tile {
+  symbol: string;
+  name: string;
+  /** Shown next to the rank badge — index weight % for stocks, omitted for indices. */
+  sub?: string;
+}
+
+const TOP8_STOCKS: Tile[] = NIFTY_TOP10_BY_WEIGHT.slice(0, 8).map((s) => ({
+  symbol: s.symbol,
+  name: s.name,
+  sub: `${s.weight.toFixed(2)}% wt`,
+}));
+
+// Keys/labels match KNOWN_INDICES in lib/dataLoader.ts, which is what
+// /api/equity-candles resolves an index symbol against.
+const TOP8_INDICES: Tile[] = [
+  { symbol: 'NIFTY50', name: 'Nifty 50' },
+  { symbol: 'BANKNIFTY', name: 'Bank Nifty' },
+  { symbol: 'FINNIFTY', name: 'Fin Nifty' },
+  { symbol: 'NIFTYIT', name: 'Nifty IT' },
+  { symbol: 'NIFTY_AUTO', name: 'Nifty Auto' },
+  { symbol: 'NIFTY_PHARMA', name: 'Nifty Pharma' },
+  { symbol: 'NIFTY_METAL', name: 'Nifty Metal' },
+  { symbol: 'NIFTY_REALTY', name: 'Nifty Realty' },
+];
+
+type Tab = 'stocks' | 'indices';
+const TABS: { key: Tab; label: string; tiles: Tile[] }[] = [
+  { key: 'stocks', label: 'Stocks', tiles: TOP8_STOCKS },
+  { key: 'indices', label: 'Indices', tiles: TOP8_INDICES },
+];
 
 const PERIODS = ['1M', '3M', '6M', '1Y', '2Y', 'ALL'] as const;
 type Period = typeof PERIODS[number];
@@ -30,20 +65,26 @@ const PERIOD_DAYS: Record<Period, number | null> = {
   ALL: null,
 };
 
+const ALL_TILES = [...TOP8_STOCKS, ...TOP8_INDICES];
+
 export default function TopMarketCapCharts() {
+  const [tab, setTab] = useState<Tab>('stocks');
   const [period, setPeriod] = useState<Period>('6M');
-  // Bumped on period-button click to snap all 8 tiles back to that window,
+  // Bumped on period-button click to snap all tiles back to that window,
   // without disturbing a user's in-progress pan/zoom on any single tile.
   const [viewToken, setViewToken] = useState(0);
   const [data, setData] = useState<Record<string, EquityCandlesResponse>>({});
   const [loading, setLoading] = useState(false);
   const [lastFetched, setLastFetched] = useState<Date | null>(null);
 
+  // Both tabs' symbols are fetched together up front — 16 local CSV reads,
+  // cached server-side by dataLoader, so there is no cost to having the other
+  // tab's data ready before the user switches to it.
   const fetchAll = useCallback(async () => {
     setLoading(true);
     try {
       const results = await Promise.all(
-        TOP8.map(async ({ symbol }) => {
+        ALL_TILES.map(async ({ symbol }) => {
           try {
             const res = await fetch(`/api/equity-candles?symbol=${encodeURIComponent(symbol)}`);
             const json: EquityCandlesResponse = await res.json();
@@ -70,6 +111,7 @@ export default function TopMarketCapCharts() {
     setViewToken((t) => t + 1);
   }, []);
 
+  const tiles = useMemo(() => TABS.find((t) => t.key === tab)!.tiles, [tab]);
   const dataDate = Object.values(data).find((d) => d.dataDate)?.dataDate ?? null;
 
   return (
@@ -80,12 +122,30 @@ export default function TopMarketCapCharts() {
           <div className="h-6 w-6 rounded-md bg-gradient-to-tr from-emerald-600 to-teal-500 flex items-center justify-center shrink-0">
             <LayoutGrid className="h-3.5 w-3.5 text-white" />
           </div>
-          <span className="text-[14px] font-bold tracking-tight text-white">Top 8 by Market Cap</span>
+          <span className="text-[14px] font-bold tracking-tight text-white">Top 8 Charts</span>
         </div>
 
         <div className="w-px h-5 bg-zinc-800 hidden sm:block" />
 
         <NavBar />
+
+        {/* Stocks / Indices submenu */}
+        <div className="flex items-center bg-zinc-900 border border-zinc-800 p-0.5 rounded-lg text-[11px] gap-0.5">
+          {TABS.map((t) => (
+            <button
+              key={t.key}
+              onClick={() => setTab(t.key)}
+              className={cn(
+                'px-2.5 py-1 font-semibold rounded transition-all cursor-pointer',
+                tab === t.key
+                  ? 'bg-emerald-500/15 text-emerald-300'
+                  : 'text-zinc-300 hover:text-white'
+              )}
+            >
+              {t.label}
+            </button>
+          ))}
+        </div>
 
         {/* Period selector */}
         <div className="flex items-center bg-zinc-900 border border-zinc-800 p-0.5 rounded-lg text-[11px] gap-0.5 ml-auto">
@@ -129,7 +189,7 @@ export default function TopMarketCapCharts() {
       {/* Body: 8-tile grid — 1 col on mobile, 2 on tablet, 4 on desktop (2 rows) */}
       <div className="flex-1 min-h-0 p-4">
         <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-3">
-          {TOP8.map((s, i) => {
+          {tiles.map((s, i) => {
             const resp = data[s.symbol];
             return (
               <div
@@ -139,7 +199,7 @@ export default function TopMarketCapCharts() {
                 <div className="flex items-center justify-between px-1 pb-1 shrink-0">
                   <span className="text-xs font-bold text-white">{s.name}</span>
                   <span className="text-[10px] text-zinc-500 font-mono tabular-nums">
-                    #{i + 1} &middot; {s.weight.toFixed(2)}% wt
+                    #{i + 1}{s.sub ? ` · ${s.sub}` : ''}
                   </span>
                 </div>
                 <div className="flex-1 min-h-0">
