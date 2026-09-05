@@ -11,7 +11,7 @@
 // LightweightCandlestickChart — no new data plumbing.
 
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
-import { RefreshCw, LayoutGrid } from 'lucide-react';
+import { RefreshCw, LayoutGrid, Maximize2, X } from 'lucide-react';
 import type { EquityCandlesResponse } from '@/app/api/equity-candles/route';
 import { NIFTY_TOP10_BY_WEIGHT } from '@/lib/nifty50';
 import { cn } from '@/lib/utils';
@@ -67,6 +67,8 @@ const PERIOD_DAYS: Record<Period, number | null> = {
 
 const ALL_TILES = [...TOP8_STOCKS, ...TOP8_INDICES];
 
+const FOCUS_RING = 'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500/60 focus-visible:ring-offset-1 focus-visible:ring-offset-zinc-950';
+
 export default function TopMarketCapCharts() {
   const [tab, setTab] = useState<Tab>('stocks');
   const [period, setPeriod] = useState<Period>('6M');
@@ -76,6 +78,9 @@ export default function TopMarketCapCharts() {
   const [data, setData] = useState<Record<string, EquityCandlesResponse>>({});
   const [loading, setLoading] = useState(false);
   const [lastFetched, setLastFetched] = useState<Date | null>(null);
+  // Symbol of the tile shown fullscreen, or null when the grid is showing.
+  // Looked up by symbol rather than index so it survives a tab switch.
+  const [maximized, setMaximized] = useState<string | null>(null);
 
   // Both tabs' symbols are fetched together up front — 16 local CSV reads,
   // cached server-side by dataLoader, so there is no cost to having the other
@@ -106,6 +111,14 @@ export default function TopMarketCapCharts() {
 
   useEffect(() => { fetchAll(); }, [fetchAll]);
 
+  // Escape closes the fullscreen chart, same as clicking the backdrop or the X.
+  useEffect(() => {
+    if (!maximized) return;
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setMaximized(null); };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [maximized]);
+
   const handlePeriodClick = useCallback((p: Period) => {
     setPeriod(p);
     setViewToken((t) => t + 1);
@@ -113,6 +126,12 @@ export default function TopMarketCapCharts() {
 
   const tiles = useMemo(() => TABS.find((t) => t.key === tab)!.tiles, [tab]);
   const dataDate = Object.values(data).find((d) => d.dataDate)?.dataDate ?? null;
+
+  // The maximized symbol always belongs to the currently visible tab's list —
+  // the maximize button only appears on rendered tiles — so its rank comes
+  // from that same list.
+  const maximizedIndex = maximized ? tiles.findIndex((t) => t.symbol === maximized) : -1;
+  const maximizedTile = maximizedIndex >= 0 ? tiles[maximizedIndex] : null;
 
   return (
     <div className="flex flex-col flex-1 w-full bg-black min-h-screen text-white">
@@ -139,7 +158,8 @@ export default function TopMarketCapCharts() {
                 'px-2.5 py-1 font-semibold rounded transition-all cursor-pointer',
                 tab === t.key
                   ? 'bg-emerald-500/15 text-emerald-300'
-                  : 'text-zinc-300 hover:text-white'
+                  : 'text-zinc-300 hover:text-white',
+                FOCUS_RING
               )}
             >
               {t.label}
@@ -157,7 +177,8 @@ export default function TopMarketCapCharts() {
                 'px-2.5 py-1 font-semibold rounded transition-all cursor-pointer',
                 period === p
                   ? 'bg-emerald-500/15 text-emerald-300'
-                  : 'text-zinc-300 hover:text-white'
+                  : 'text-zinc-300 hover:text-white',
+                FOCUS_RING
               )}
             >
               {p}
@@ -180,7 +201,12 @@ export default function TopMarketCapCharts() {
         <button
           onClick={fetchAll}
           disabled={loading}
-          className="h-7 w-7 flex items-center justify-center rounded-lg border border-zinc-800 bg-zinc-900 text-zinc-300 hover:text-white hover:bg-zinc-800 transition-all disabled:opacity-40 cursor-pointer"
+          title="Refresh"
+          aria-label="Refresh"
+          className={cn(
+            'h-7 w-7 flex items-center justify-center rounded-lg border border-zinc-800 bg-zinc-900 text-zinc-300 hover:text-white hover:bg-zinc-800 transition-all disabled:opacity-40 cursor-pointer',
+            FOCUS_RING
+          )}
         >
           <RefreshCw className={cn('h-3.5 w-3.5', loading && 'animate-spin')} />
         </button>
@@ -194,13 +220,26 @@ export default function TopMarketCapCharts() {
             return (
               <div
                 key={s.symbol}
-                className="flex flex-col h-[320px] bg-zinc-950/60 border border-zinc-900 rounded-xl p-2"
+                className="group relative flex flex-col h-[320px] bg-zinc-950/60 border border-zinc-900 rounded-xl p-2"
               >
                 <div className="flex items-center justify-between px-1 pb-1 shrink-0">
                   <span className="text-xs font-bold text-white">{s.name}</span>
-                  <span className="text-[10px] text-zinc-500 font-mono tabular-nums">
-                    #{i + 1}{s.sub ? ` · ${s.sub}` : ''}
-                  </span>
+                  <div className="flex items-center gap-1.5">
+                    <span className="text-[10px] text-zinc-500 font-mono tabular-nums">
+                      #{i + 1}{s.sub ? ` · ${s.sub}` : ''}
+                    </span>
+                    <button
+                      onClick={() => setMaximized(s.symbol)}
+                      title="Maximize"
+                      aria-label={`Maximize ${s.name} chart`}
+                      className={cn(
+                        'opacity-0 group-hover:opacity-100 focus-visible:opacity-100 transition-opacity h-5 w-5 flex items-center justify-center rounded border border-zinc-800 bg-zinc-900 text-zinc-400 hover:text-white hover:bg-zinc-800 cursor-pointer',
+                        FOCUS_RING
+                      )}
+                    >
+                      <Maximize2 className="h-3 w-3" />
+                    </button>
+                  </div>
                 </div>
                 <div className="flex-1 min-h-0">
                   {resp && resp.success && resp.candles.length > 0 ? (
@@ -220,6 +259,55 @@ export default function TopMarketCapCharts() {
           })}
         </div>
       </div>
+
+      {/* Fullscreen chart overlay */}
+      {maximizedTile && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center p-4 sm:p-8 bg-oncolor-dark/80 backdrop-blur-sm"
+          onClick={() => setMaximized(null)}
+        >
+          <div
+            className="relative flex flex-col w-full h-full max-w-6xl bg-zinc-950 border border-zinc-800 rounded-2xl p-4"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between pb-2 shrink-0">
+              <div className="flex items-baseline gap-2">
+                <span className="text-sm font-bold text-white">{maximizedTile.name}</span>
+                <span className="text-[11px] text-zinc-500 font-mono tabular-nums">
+                  #{maximizedIndex + 1}{maximizedTile.sub ? ` · ${maximizedTile.sub}` : ''}
+                </span>
+              </div>
+              <button
+                onClick={() => setMaximized(null)}
+                title="Close"
+                aria-label="Close fullscreen chart"
+                className={cn(
+                  'h-7 w-7 flex items-center justify-center rounded-lg border border-zinc-800 bg-zinc-900 text-zinc-300 hover:text-white hover:bg-zinc-800 cursor-pointer',
+                  FOCUS_RING
+                )}
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+            <div className="flex-1 min-h-0">
+              {(() => {
+                const resp = data[maximizedTile.symbol];
+                return resp && resp.success && resp.candles.length > 0 ? (
+                  <LightweightCandlestickChart
+                    candles={resp.candles}
+                    initialBars={PERIOD_DAYS[period]}
+                    viewToken={viewToken}
+                  />
+                ) : (
+                  <div className="w-full h-full flex items-center justify-center text-zinc-500 text-sm">
+                    {loading ? 'Loading…' : resp?.error ?? 'No data'}
+                  </div>
+                );
+              })()}
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
