@@ -10,6 +10,7 @@ import { useBrokerSelector, scalperRoute, BROKER_LABELS, type Broker } from '@/h
 import { contractMultiplier, scaleBrokerPnl } from '@/lib/positionPnl';
 import { partialCloseChips } from '@/lib/partialQty';
 import { positionKey, positionProduct, findLivePosition, closeOrderProduct } from '@/lib/positionProduct';
+import { normalizeExpiry, parseTradingSymbol } from '@/lib/positionLegs';
 import { cn } from '@/lib/utils';
 
 // Visible keyboard-only focus ring for every clickable control on this page and
@@ -2486,6 +2487,19 @@ export interface PositionsTableProps {
  *  a mix of % and point chips read ambiguously on options priced ₹5–₹400. */
 const GUARD_PRESET_PCTS = [10, 15, 20, 25, 30];
 
+/**
+ * Best-effort expiry for one position row, broker-agnostic. Dhan's raw
+ * `/positions` payload passes through with its native `drvExpiryDate` intact
+ * (see lib/positionLegs.ts's resolveContract, which prefers the same field);
+ * Kotak's trading symbol carries a full day+month+year prefix that
+ * `parseTradingSymbol` already decodes for the payoff-engine legs. Zerodha's
+ * monthly-expiry symbols carry no day at all, so those legitimately resolve
+ * to null — shown as '—' rather than guessed.
+ */
+function resolveRowExpiry(row: Record<string, unknown>, tradingSymbol: string): string | null {
+  return normalizeExpiry(row.drvExpiryDate) ?? parseTradingSymbol(tradingSymbol)?.expiry ?? null;
+}
+
 interface PositionRowProps {
   row: Record<string, unknown>;
   rowKey: string;
@@ -2560,6 +2574,7 @@ const PositionRow = React.memo(function PositionRow({
           {sym}
         </div>
       </td>
+      <td className="px-3 py-2 whitespace-nowrap font-mono text-zinc-400">{resolveRowExpiry(row, sym) ?? '—'}</td>
       <td className="px-3 py-2 whitespace-nowrap font-mono text-right tabular-nums text-zinc-300">{netQty}</td>
       <td className="px-3 py-2 whitespace-nowrap font-mono text-right tabular-nums text-zinc-300">{buyAvg > 0 ? buyAvg.toFixed(2) : '—'}</td>
       <td className="px-3 py-2 whitespace-nowrap font-mono text-right tabular-nums text-zinc-300">{sellAvg > 0 ? sellAvg.toFixed(2) : '—'}</td>
@@ -2774,6 +2789,7 @@ export const PositionsTable = React.memo(function PositionsTable({ data, guards,
       <thead className="sticky top-0 bg-zinc-800 z-10">
         <tr>
           <SortableTH sortKey="tradingSymbol" currentSort={sort} onSort={onSort}>Symbol</SortableTH>
+          <th className="px-3 py-2.5 text-xs font-bold text-white text-left whitespace-nowrap">Expiry</th>
           <SortableTH sortKey="netQty" currentSort={sort} onSort={onSort} align="right">Qty</SortableTH>
           <SortableTH sortKey="buyAvg" currentSort={sort} onSort={onSort} align="right">Buy Avg</SortableTH>
           <SortableTH sortKey="sellAvg" currentSort={sort} onSort={onSort} align="right">Sell Avg</SortableTH>
