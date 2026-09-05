@@ -4,9 +4,9 @@
 //  - Stocks: the heaviest NIFTY constituents by index weight (the standard
 //    proxy for market cap here — see NIFTY_TOP10_BY_WEIGHT in lib/nifty50.ts,
 //    the same list Advanced Scalper's Top-10 panel uses), sliced to 8.
-//  - Indices: the 8 headline sectoral/benchmark indices, same set and order as
-//    Advanced Scalper's Top Markets panel (app/api/scalper/top-indices/route.ts)
-//    minus India VIX and Crude Oil, which have no daily index-level chart here.
+//  - Indices: the 8 headline sectoral/benchmark indices, same set as Advanced
+//    Scalper's Top Markets panel (app/api/scalper/top-indices/route.ts) minus
+//    Crude Oil, which has no daily index-level chart here.
 // Both tabs render via the existing /api/equity-candles feed and
 // LightweightCandlestickChart — no new data plumbing.
 
@@ -36,7 +36,7 @@ const TOP8_STOCKS: Tile[] = NIFTY_TOP10_BY_WEIGHT.slice(0, 8).map((s) => ({
 const TOP8_INDICES: Tile[] = [
   { symbol: 'NIFTY50', name: 'Nifty 50' },
   { symbol: 'BANKNIFTY', name: 'Bank Nifty' },
-  { symbol: 'FINNIFTY', name: 'Fin Nifty' },
+  { symbol: 'INDIA_VIX', name: 'India VIX' },
   { symbol: 'NIFTYIT', name: 'Nifty IT' },
   { symbol: 'NIFTY_AUTO', name: 'Nifty Auto' },
   { symbol: 'NIFTY_PHARMA', name: 'Nifty Pharma' },
