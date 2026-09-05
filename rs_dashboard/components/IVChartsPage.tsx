@@ -434,7 +434,7 @@ export default function IVChartsPage() {
           <div className="flex flex-col items-center justify-center h-64 gap-3">
             <p className="text-sm text-zinc-400 font-medium text-center max-w-md">{error}</p>
             <p className="text-xs text-zinc-500 font-mono">
-              venv\Scripts\python.exe scripts/tools/iv_snapshot_collector.py
+              python scripts/tools/iv_snapshot_collector.py (after activating the venv)
             </p>
           </div>
         )}

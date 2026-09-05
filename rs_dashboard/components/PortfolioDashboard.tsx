@@ -1192,8 +1192,8 @@ export default function PortfolioDashboard() {
                 <AlertTriangle className="h-3.5 w-3.5 text-amber-400 shrink-0" />
                 <span className="text-xs text-amber-400">
                   Access token expired — run{' '}
-                  <code className="font-mono bg-amber-500/10 px-1 rounded">venv\Scripts\python.exe login.py</code>{' '}
-                  to re-login
+                  <code className="font-mono bg-amber-500/10 px-1 rounded">python login.py</code>{' '}
+                  (after activating the venv) to re-login
                 </span>
               </div>
             )}

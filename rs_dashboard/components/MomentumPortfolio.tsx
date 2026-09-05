@@ -339,8 +339,9 @@ function BacktestPanel({ bt }: { bt: BacktestSummary | null }) {
       <div className="bg-zinc-900 border border-zinc-800 rounded px-3 py-2 text-xs text-zinc-500">
         No backtest report yet. Generate one with{' '}
         <code className="text-zinc-400">
-          venv\Scripts\python.exe scripts/analysis/backtest_momentum_portfolio.py
-        </code>
+          python scripts/analysis/backtest_momentum_portfolio.py
+        </code>{' '}
+        (after activating the venv)
       </div>
     );
   }

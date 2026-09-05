@@ -3,10 +3,10 @@ import path from 'path';
 import fs from 'fs';
 import { spawn } from 'child_process';
 import { isPidRunning } from '@/lib/processCheck';
+import { PYTHON_EXE } from '@/lib/pyExec';
 
 const PROJECT_ROOT   = path.resolve(process.cwd(), '..');
 const DEBUG_DIR      = path.join(PROJECT_ROOT, 'debug');
-const PYTHON_EXE     = path.join(PROJECT_ROOT, 'venv', 'Scripts', 'pythonw.exe');
 const COLLECTOR      = path.join(PROJECT_ROOT, 'scripts', 'tools', 'crudeoil_oi_collector.py');
 const STATUS_FILE    = path.join(DEBUG_DIR, 'crudeoil_oi_collector_status.json');
 const STOP_TRIGGER   = path.join(DEBUG_DIR, 'crudeoil_oi_stop.trigger');

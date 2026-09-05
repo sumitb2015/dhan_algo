@@ -7,10 +7,10 @@ import { clearIndicesCache } from '@/app/api/indices-performance/route';
 import { clearMoversCache } from '@/app/api/movers/route';
 import { clearBreadthCache } from '@/app/api/breadth/route';
 import { isPidRunning } from '@/lib/processCheck';
+import { PYTHON_EXE } from '@/lib/pyExec';
 
 const PROJECT_ROOT  = path.resolve(process.cwd(), '..');
 const DEBUG_DIR     = path.join(PROJECT_ROOT, 'debug');
-const PYTHON_EXE    = path.join(PROJECT_ROOT, 'venv', 'Scripts', 'pythonw.exe');
 const SCRIPT_PATH   = path.join(PROJECT_ROOT, 'scripts', 'downloader', 'refresh_dashboard_data.py');
 const STATUS_FILE   = path.join(DEBUG_DIR, 'refresh_status.json');
 const STOP_FILE     = path.join(DEBUG_DIR, 'refresh_stop.trigger');

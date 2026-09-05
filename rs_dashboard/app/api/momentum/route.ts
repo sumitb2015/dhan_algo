@@ -111,7 +111,7 @@ export async function GET(request: NextRequest) {
       exists: false,
       backtest,   // the ruleset's track record is worth showing even before it has ever run
       message: 'The momentum strategy has not been run yet. Start it from the Strategies page, '
-        + 'or run it once with: venv\\Scripts\\python.exe strategies/momentum_investing/nifty500_momentum.py --once',
+        + 'or run it once with (after activating the venv): python strategies/momentum_investing/nifty500_momentum.py --once',
     });
   }
 

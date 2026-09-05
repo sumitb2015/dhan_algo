@@ -2,11 +2,11 @@
 import path from 'path';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
+import { PYTHON_EXE } from '@/lib/pyExec';
 
 const execFileAsync = promisify(execFile);
 
 const PROJECT_ROOT = path.resolve(process.cwd(), '..');
-const PYTHON_EXE = path.join(PROJECT_ROOT, 'venv', 'Scripts', 'pythonw.exe');
 const SCRIPT = path.join(PROJECT_ROOT, 'scripts', 'tools', 'get_portfolio_pnl.py');
 
 export async function GET() {

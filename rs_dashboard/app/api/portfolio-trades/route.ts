@@ -4,9 +4,9 @@ import path from 'path';
 import { spawn } from 'child_process';
 import { readNifty50Index } from '@/lib/dataLoader';
 import { isPidRunning } from '@/lib/processCheck';
+import { PYTHON_EXE } from '@/lib/pyExec';
 
 const PROJECT_ROOT = path.resolve(process.cwd(), '..');
-const PYTHON_EXE = path.join(PROJECT_ROOT, 'venv', 'Scripts', 'pythonw.exe');
 const SCRIPT = path.join(PROJECT_ROOT, 'scripts', 'tools', 'get_trade_pnl_by_segment.py');
 const DEBUG_DIR = path.join(PROJECT_ROOT, 'debug');
 const TRADE_HISTORY_FILE = path.join(DEBUG_DIR, 'portfolio_trade_history.json');

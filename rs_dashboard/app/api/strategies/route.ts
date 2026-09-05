@@ -3,13 +3,23 @@ import path from 'path';
 import fs from 'fs';
 import { execSync, spawn } from 'child_process';
 import { isPidRunning, isPidRunningAt, resolveWorkerPid } from '@/lib/processCheck';
-import { runPythonJson } from '@/lib/pyExec';
+import { runPythonJson, PYTHON_EXE } from '@/lib/pyExec';
 import {
   PROJECT_ROOT, DEBUG_DIR, STRATEGIES_METADATA, pidMetaPath, isStrategyRunning,
   isValidInstanceId, stateKeyFor, discoverInstanceIds,
 } from '@/lib/strategyRegistry';
 
-const PYTHON_EXE = path.join(PROJECT_ROOT, 'venv', 'Scripts', 'pythonw.exe');
+// Force-kills the strategy process tree. Strategies are always spawned with
+// `detached: true` (see the `start` action below), so on POSIX the PID is also
+// its own process group leader — `kill -9 -PID` (negative PID) targets the whole
+// group, mirroring what `taskkill /T` does on Windows.
+function forceKillProcessTree(pid: number) {
+  if (process.platform === 'win32') {
+    execSync(`taskkill /PID ${pid} /T /F`, { stdio: 'pipe', windowsHide: true });
+  } else {
+    execSync(`kill -9 -${pid}`, { stdio: 'pipe' });
+  }
+}
 
 /**
  * Day P&L to carry into the initial state file when (re)starting a strategy.
@@ -389,10 +399,10 @@ export async function POST(request: NextRequest) {
       if (!pid || !isStrategyRunning(pid, stateKey)) {
         return NextResponse.json({ success: true, message: 'Process is not running' });
       }
-      // /T kills the process tree (child processes too); /F forces termination
-      // taskkill exits non-zero if the process is already gone — that's fine, swallow it
+      // Kills the process tree (child processes too) and forces termination.
+      // Exits non-zero if the process is already gone — that's fine, swallow it.
       try {
-        execSync(`taskkill /PID ${pid} /T /F`, { stdio: 'pipe', windowsHide: true });
+        forceKillProcessTree(pid);
       } catch {
         // Ignore — check below whether the process is actually gone
       }
@@ -435,9 +445,9 @@ export async function POST(request: NextRequest) {
       let killedPid: number | null = null;
       if (pid && isStrategyRunning(pid, stateKey)) {
         try {
-          execSync(`taskkill /PID ${pid} /T /F`, { stdio: 'pipe', windowsHide: true });
+          forceKillProcessTree(pid);
         } catch {
-          // taskkill exits non-zero when the process is already gone; the check below decides.
+          // Exits non-zero when the process is already gone; the check below decides.
         }
         if (isPidRunning(pid)) {
           return NextResponse.json(
