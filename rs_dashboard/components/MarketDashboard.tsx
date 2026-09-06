@@ -37,6 +37,7 @@ import {
   Cpu,
   ExternalLink,
   Gauge,
+  Grid,
   Layers,
   LayoutDashboard,
   Radar,
@@ -52,6 +53,12 @@ import type { MoverResult, MoversResponse } from '@/app/api/movers/route';
 import type { DashboardBreadthResponse } from '@/app/api/dashboard/breadth/route';
 import type { BrokerPortfolio, DashboardPortfolioResponse, DashboardPosition } from '@/app/api/dashboard/portfolio/route';
 import { BROKER_LABELS, type Broker } from '@/hooks/useBrokerSelector';
+import {
+  TerminalCommandPaletteModal,
+  PillarsNavigationRibbon,
+  SectionQuickLinks,
+  TerminalSiteDirectory,
+} from './TerminalNavigationDirectory';
 
 // ─── Poll cadences (dhan-polling-guards skill) ────────────────────────────────
 const INDEX_POLL_MS = 5_000;       // cheap: one batched broker quote call
@@ -75,15 +82,16 @@ const FEATURED_STRATEGY_KEYS = [
 ];
 
 // ─── Bloomberg Function Keys ──────────────────────────────────────────────────
-const FUNCTION_KEYS = [
+const FUNCTION_KEYS: { key: string; label: string; href?: string; isModal?: boolean }[] = [
   { key: 'F1', label: 'SCALPER', href: '/scalper' },
   { key: 'F2', label: 'STRATEGIES', href: '/strategies' },
   { key: 'F3', label: 'SCANNER', href: '/scanner' },
   { key: 'F4', label: 'PORTFOLIO', href: '/portfolio' },
   { key: 'F5', label: 'BREADTH', href: '/breadth' },
   { key: 'F6', label: 'LIVE CHARTS', href: '/options/live-charts' },
-  { key: 'F7', label: 'OPTIONS', href: '/options/premium-bar' },
+  { key: 'F7', label: 'OPTIONS', href: '/options-analytics' },
   { key: 'F8', label: 'DIARY', href: '/portfolio/diary' },
+  { key: 'F9', label: 'DIRECTORY (⌘K)', isModal: true },
 ];
 
 // ─── Strategy Types ───────────────────────────────────────────────────────────
@@ -597,6 +605,22 @@ function OptionsVolatilityIntelligence({
           </div>
         </div>
       </div>
+
+      <SectionQuickLinks
+        categoryLabel="OPTIONS &amp; VOL DESKS"
+        links={[
+          { label: 'Options Analytics Hub', href: '/options-analytics', badge: 'CORE' },
+          { label: 'ATM Straddle Decay', href: '/straddle-analysis' },
+          { label: 'OTM Strangle Tracking', href: '/strangle-analysis' },
+          { label: 'Combined Premium Bar', href: '/options/premium-bar' },
+          { label: 'IV Surface & History', href: '/iv-charts' },
+          { label: 'Trending OI Buildup', href: '/trending-oi', badge: 'REALTIME' },
+          { label: 'Strike OI Profile', href: '/nifty-oi-profile' },
+          { label: 'Historical Expiry Moves', href: '/expiry-analysis' },
+          { label: 'MCX Crude Oil Desk', href: '/options/crudeoil', badge: 'MCX' },
+          { label: 'Cash-Secured Puts (CSP)', href: '/cash-secured-puts', badge: 'INCOME' },
+        ]}
+      />
     </TerminalPanel>
   );
 }
@@ -696,6 +720,17 @@ function AlgoStrategiesDesk({
           );
         })}
       </div>
+
+      <SectionQuickLinks
+        categoryLabel="ALGO ECOSYSTEM"
+        links={[
+          { label: 'Live Bots Desk', href: '/strategies', badge: 'LIVE' },
+          { label: 'Quantitative Strategy Builder', href: '/strategy-builder', badge: 'BUILDER' },
+          { label: 'Historical Backtest Engine', href: '/backtest' },
+          { label: 'Multi-Broker Algo Desk', href: '/strategies-plus' },
+          { label: 'Nifty 500 Momentum Portfolio', href: '/momentum', badge: 'CNC' },
+        ]}
+      />
     </TerminalPanel>
   );
 }
@@ -834,6 +869,19 @@ function BreadthPanel({ data, loading }: { data: DashboardBreadthResponse | null
           })}
         </div>
       )}
+
+      <SectionQuickLinks
+        categoryLabel="BREADTH &amp; REGIME DESKS"
+        links={[
+          { label: 'Comprehensive Breadth', href: '/breadth', badge: 'MACRO' },
+          { label: 'Intraday Tick Breadth', href: '/breadth-intraday' },
+          { label: 'Sector Diffusion Index', href: '/diffusion' },
+          { label: 'Distribution Days', href: '/distribution' },
+          { label: 'RRG Quadrant Rotation', href: '/rrg' },
+          { label: 'Seasonality Edge Analytics', href: '/seasonality' },
+          { label: 'Pre-Market Setup & Cues', href: '/premarket' },
+        ]}
+      />
     </TerminalPanel>
   );
 }
@@ -1536,6 +1584,19 @@ function SeparatedPositionsSection({
           </div>
         )}
       </div>
+
+      <SectionQuickLinks
+        categoryLabel="FAST EXECUTION DESKS"
+        links={[
+          { label: 'Pro Scalper Terminal', href: '/scalper', badge: '1-CLICK' },
+          { label: 'Advanced Scalper', href: '/advanced-scalper', badge: 'LADDER' },
+          { label: 'Options QuikTrade', href: '/options/quiktrade', badge: 'FAST' },
+          { label: 'Intraday Fast Terminal', href: '/terminal' },
+          { label: 'Focus VWAP Desk', href: '/focus-tool' },
+          { label: 'Multi-Leg Spreads & Baskets', href: '/baskets' },
+          { label: 'Multi-Leg Focus Desk', href: '/multi-leg-focus' },
+        ]}
+      />
     </TerminalPanel>
   );
 }
@@ -1555,6 +1616,25 @@ export default function MarketDashboard() {
   const [strategies, setStrategies] = useState<StrategiesResponse | null>(null);
   const [clock, setClock] = useState('');
   const [marketSession, setMarketSession] = useState(getMarketSessionInfo());
+  const [directoryModalOpen, setDirectoryModalOpen] = useState(false);
+
+  // Global keyboard shortcut: ⌘K, Ctrl+K, F9, or / to open directory modal
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
+        e.preventDefault();
+        setDirectoryModalOpen(prev => !prev);
+      } else if (e.key === 'F9') {
+        e.preventDefault();
+        setDirectoryModalOpen(prev => !prev);
+      } else if (e.key === '/' && !['INPUT', 'TEXTAREA'].includes((e.target as HTMLElement)?.tagName)) {
+        e.preventDefault();
+        setDirectoryModalOpen(true);
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, []);
 
   // Real-time IST Clock & Market Status
   useEffect(() => {
@@ -1735,14 +1815,26 @@ export default function MarketDashboard() {
           <div className="flex items-center gap-2">
             <span className="text-amber-500 font-bold uppercase tracking-wider">TERMINAL COMMANDS:</span>
             {FUNCTION_KEYS.map(fk => (
-              <Link
-                key={fk.key}
-                href={fk.href}
-                className="inline-flex items-center gap-1 rounded border border-zinc-800 bg-zinc-900/80 px-2 py-0.5 text-zinc-300 transition-colors hover:border-amber-500/50 hover:bg-amber-500/10 hover:text-amber-400"
-              >
-                <span className="text-amber-400 font-bold">{fk.key}</span>
-                <span>{fk.label}</span>
-              </Link>
+              fk.isModal ? (
+                <button
+                  key={fk.key}
+                  type="button"
+                  onClick={() => setDirectoryModalOpen(true)}
+                  className="inline-flex items-center gap-1 rounded border border-amber-500/40 bg-amber-500/10 px-2 py-0.5 text-amber-300 transition-colors hover:border-amber-500 hover:bg-amber-500/20 cursor-pointer font-bold"
+                >
+                  <span className="text-amber-400 font-bold">{fk.key}</span>
+                  <span>{fk.label}</span>
+                </button>
+              ) : (
+                <Link
+                  key={fk.key}
+                  href={fk.href!}
+                  className="inline-flex items-center gap-1 rounded border border-zinc-800 bg-zinc-900/80 px-2 py-0.5 text-zinc-300 transition-colors hover:border-amber-500/50 hover:bg-amber-500/10 hover:text-amber-400"
+                >
+                  <span className="text-amber-400 font-bold">{fk.key}</span>
+                  <span>{fk.label}</span>
+                </Link>
+              )
             ))}
           </div>
 
@@ -1750,6 +1842,15 @@ export default function MarketDashboard() {
             <span>DHAN ALGO QUANT DESK</span>
             <span className="text-zinc-700">|</span>
             <span className="text-amber-400 font-semibold">{connectedCount} OF 3 BROKERS LIVE</span>
+            <span className="text-zinc-700">|</span>
+            <button
+              type="button"
+              onClick={() => setDirectoryModalOpen(true)}
+              className="flex items-center gap-1 text-amber-400 hover:text-amber-300 font-bold transition-colors cursor-pointer"
+            >
+              <span>35+ TOOLS</span>
+              <ChevronRight className="h-3 w-3" />
+            </button>
           </div>
         </div>
       </div>
@@ -1801,8 +1902,22 @@ export default function MarketDashboard() {
             <Clock className="h-3 w-3 text-amber-400" />
             {clock || '--:--:--'} IST
           </span>
+
+          {/* Quick Jump Directory Launcher */}
+          <button
+            type="button"
+            onClick={() => setDirectoryModalOpen(true)}
+            className="flex items-center gap-1.5 rounded-md border border-amber-500/40 bg-amber-500/15 px-2.5 py-1 font-mono text-[10px] font-bold text-amber-300 hover:bg-amber-500/25 transition-colors shadow-sm cursor-pointer"
+            title="Search and jump to any trading desk or analytics tool (⌘K)"
+          >
+            <Grid className="h-3 w-3 text-amber-400" />
+            <span>APPS (⌘K)</span>
+          </button>
         </div>
       </div>
+
+      {/* ─── Sub-Header Quantitative Pillars Ribbon ──────────────────────────── */}
+      <PillarsNavigationRibbon onOpenDirectory={() => setDirectoryModalOpen(true)} />
 
       {/* ─── Main Content Canvas ─────────────────────────────────────────────── */}
       <div className="flex flex-1 flex-col gap-4 px-6 py-5">
@@ -1810,211 +1925,251 @@ export default function MarketDashboard() {
         <IndexStrip data={indices} />
 
         {/* 2. Portfolio Balance Sheet & Institutional Tiles */}
-        <TerminalPanel
-          title="Consolidated Portfolio Balance Sheet"
-          icon={Briefcase}
-          href="/portfolio"
-          badge={
-            <span className="rounded bg-amber-500/10 px-1.5 py-0.5 font-mono text-[9px] font-semibold text-amber-400">
-              MULTI-BROKER
-            </span>
-          }
-          meta={
-            portfolio?.updatedAt
-              ? 'SYNCED: ' +
-                new Date(portfolio.updatedAt).toLocaleTimeString('en-IN', {
-                  hour12: false,
-                  timeZone: 'Asia/Kolkata',
-                }) +
-                ' IST'
-              : undefined
-          }
-        >
-          <div className="flex flex-col gap-4 p-3.5">
-            <div className="grid gap-2.5 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6">
-              <StatTile
-                label="Total Portfolio Value"
-                value={fmtINRCompact(portfolioValue)}
-                sub={holdingsValue !== null ? `incl. ${fmtINRCompact(holdingsValue)} delivery` : 'margin base'}
-                tone="accent"
-              />
-              <StatTile
-                label="Available Capital"
-                value={fmtINRCompact(totals?.availableBalance)}
-                sub="free spendable buffer"
-              />
-              <StatTile
-                label="Margin Utilized"
-                value={fmtINRCompact(totals?.utilizedMargin)}
-                sub={`${totalMarginUtilPercent.toFixed(1)}% of total margin base`}
-                progress={{
-                  percent: totalMarginUtilPercent,
-                  colorClass: totalMarginUtilPercent > 80 ? 'bg-red-500' : 'bg-amber-400',
-                }}
-              />
-              <StatTile
-                label="Collateral Base"
-                value={fmtINRCompact(totalCollateral)}
-                sub="pledged backing option writes"
-              />
-              <StatTile
-                label="Open Unrealized P&L"
-                value={fmtSignedINR(totals?.unrealizedPnl)}
-                sub={
-                  totals && totals.unpricedPositions > 0
-                    ? `${totals.openPositions} legs · ${totals.unpricedPositions} unpriced`
-                    : `${totals?.openPositions ?? 0} active legs`
-                }
-                tone={(totals?.unrealizedPnl ?? 0) >= 0 ? 'up' : 'down'}
-              />
-              <StatTile
-                label="Net Day P&L"
-                value={fmtSignedINR(totals?.totalPnl)}
-                sub={`realized ${fmtSignedINR(totals?.realizedPnl)}`}
-                tone={(totals?.totalPnl ?? 0) >= 0 ? 'up' : 'down'}
-              />
-            </div>
-
-            {/* Broker Accounts Grid */}
-            <div className="flex flex-col gap-2">
-              <div className="flex items-center justify-between border-t border-zinc-800 pt-3">
-                <span className="text-[10px] font-bold uppercase tracking-[0.16em] text-zinc-400">
-                  CONNECTED BROKER CAPITALS &amp; MARGIN RATIOS
-                </span>
-                <span className="font-mono text-[10px] text-zinc-500">
-                  {connectedCount} of 3 brokers connected
-                </span>
+        <div id="section-portfolio" className="scroll-mt-28">
+          <TerminalPanel
+            title="Consolidated Portfolio Balance Sheet"
+            icon={Briefcase}
+            href="/portfolio"
+            badge={
+              <span className="rounded bg-amber-500/10 px-1.5 py-0.5 font-mono text-[9px] font-semibold text-amber-400">
+                MULTI-BROKER
+              </span>
+            }
+            meta={
+              portfolio?.updatedAt
+                ? 'SYNCED: ' +
+                  new Date(portfolio.updatedAt).toLocaleTimeString('en-IN', {
+                    hour12: false,
+                    timeZone: 'Asia/Kolkata',
+                  }) +
+                  ' IST'
+                : undefined
+            }
+          >
+            <div className="flex flex-col gap-4 p-3.5">
+              <div className="grid gap-2.5 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6">
+                <StatTile
+                  label="Total Portfolio Value"
+                  value={fmtINRCompact(portfolioValue)}
+                  sub={holdingsValue !== null ? `incl. ${fmtINRCompact(holdingsValue)} delivery` : 'margin base'}
+                  tone="accent"
+                />
+                <StatTile
+                  label="Available Capital"
+                  value={fmtINRCompact(totals?.availableBalance)}
+                  sub="free spendable buffer"
+                />
+                <StatTile
+                  label="Margin Utilized"
+                  value={fmtINRCompact(totals?.utilizedMargin)}
+                  sub={`${totalMarginUtilPercent.toFixed(1)}% of total margin base`}
+                  progress={{
+                    percent: totalMarginUtilPercent,
+                    colorClass: totalMarginUtilPercent > 80 ? 'bg-red-500' : 'bg-amber-400',
+                  }}
+                />
+                <StatTile
+                  label="Collateral Base"
+                  value={fmtINRCompact(totalCollateral)}
+                  sub="pledged backing option writes"
+                />
+                <StatTile
+                  label="Open Unrealized P&L"
+                  value={fmtSignedINR(totals?.unrealizedPnl)}
+                  sub={
+                    totals && totals.unpricedPositions > 0
+                      ? `${totals.openPositions} legs · ${totals.unpricedPositions} unpriced`
+                      : `${totals?.openPositions ?? 0} active legs`
+                  }
+                  tone={(totals?.unrealizedPnl ?? 0) >= 0 ? 'up' : 'down'}
+                />
+                <StatTile
+                  label="Net Day P&L"
+                  value={fmtSignedINR(totals?.totalPnl)}
+                  sub={`realized ${fmtSignedINR(totals?.realizedPnl)}`}
+                  tone={(totals?.totalPnl ?? 0) >= 0 ? 'up' : 'down'}
+                />
               </div>
 
-              {brokers.length === 0 ? (
-                <EmptyRow>Loading broker account balances…</EmptyRow>
-              ) : (
-                <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
-                  {brokers.map(b => (
-                    <BrokerAccountCard
-                      key={b.broker}
-                      b={b}
-                      holdingsValue={b.broker === 'dhan' ? holdingsValue : null}
-                    />
-                  ))}
+              {/* Broker Accounts Grid */}
+              <div className="flex flex-col gap-2">
+                <div className="flex items-center justify-between border-t border-zinc-800 pt-3">
+                  <span className="text-[10px] font-bold uppercase tracking-[0.16em] text-zinc-400">
+                    CONNECTED BROKER CAPITALS &amp; MARGIN RATIOS
+                  </span>
+                  <span className="font-mono text-[10px] text-zinc-500">
+                    {connectedCount} of 3 brokers connected
+                  </span>
                 </div>
-              )}
+
+                {brokers.length === 0 ? (
+                  <EmptyRow>Loading broker account balances…</EmptyRow>
+                ) : (
+                  <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+                    {brokers.map(b => (
+                      <BrokerAccountCard
+                        key={b.broker}
+                        b={b}
+                        holdingsValue={b.broker === 'dhan' ? holdingsValue : null}
+                      />
+                    ))}
+                  </div>
+                )}
+              </div>
             </div>
-          </div>
-        </TerminalPanel>
+
+            <SectionQuickLinks
+              categoryLabel="CAPITAL & AUDIT DESKS"
+              links={[
+                { label: 'Multi-Broker Portfolio', href: '/portfolio', badge: 'OVERVIEW' },
+                { label: "Trader's Diary", href: '/portfolio/diary', badge: 'PNL' },
+                { label: 'Win/Loss Analytics', href: '/portfolio/stats' },
+                { label: 'Trade Audit Log', href: '/portfolio/trades' },
+                { label: 'Weekly Target Matrix', href: '/portfolio/weekly-target' },
+                { label: 'Daily EOD Reports', href: '/reports' },
+              ]}
+            />
+          </TerminalPanel>
+        </div>
 
         {/* 3. Algorithmic Trading Bots Execution Desk */}
-        <AlgoStrategiesDesk data={strategies} />
+        <div id="section-algos" className="scroll-mt-28">
+          <AlgoStrategiesDesk data={strategies} />
+        </div>
 
         {/* 4. Options Volatility & Market Regime Intelligence */}
-        <OptionsVolatilityIntelligence niftyLtp={niftyLtp} vixLtp={vixLtp} />
+        <div id="section-options" className="scroll-mt-28">
+          <OptionsVolatilityIntelligence niftyLtp={niftyLtp} vixLtp={vixLtp} />
+        </div>
 
-        {/* 5. Market Breadth Visualizer */}
-        <BreadthPanel data={breadth} loading={breadthLoading} />
+        {/* 5 & 6. Market Breadth & Technical Screening */}
+        <div id="section-screening" className="flex flex-col gap-4 scroll-mt-28">
+          <BreadthPanel data={breadth} loading={breadthLoading} />
 
-        {/* 6. Market Movers: Top Gainers & Top Losers */}
-        <div className="flex flex-col gap-3">
-          <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-zinc-800 bg-zinc-900/60 px-4 py-2.5">
-            <div className="flex flex-wrap items-center gap-2.5">
-              <span className="font-mono text-xs font-bold uppercase tracking-wider text-amber-400">
-                MARKET MOVERS
-              </span>
-              <span className="rounded border border-zinc-700 bg-zinc-800 px-2 py-0.5 font-mono text-[10px] font-bold text-zinc-300">
-                {moversIndex === 'nifty50' ? 'NIFTY 50' : 'NIFTY 500'}
-              </span>
-              {movers?.dataDate && (
-                <span className="rounded border border-amber-500/30 bg-amber-500/10 px-2 py-0.5 font-mono text-[10px] font-bold text-amber-300">
-                  DATA: {movers.dataDate}
+          {/* Market Movers: Top Gainers & Top Losers */}
+          <div className="flex flex-col gap-3">
+            <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-zinc-800 bg-zinc-900/60 px-4 py-2.5">
+              <div className="flex flex-wrap items-center gap-2.5">
+                <span className="font-mono text-xs font-bold uppercase tracking-wider text-amber-400">
+                  MARKET MOVERS
                 </span>
-              )}
-              <span className="rounded border border-zinc-800 bg-zinc-950 px-2 py-0.5 font-mono text-[10px] text-zinc-400">
-                {marketSession.isWeekend ? 'WEEKEND (EOD CLOSE)' : movers?.liveQuotesMeta ? `LIVE INTRADAY (${movers.liveQuotesMeta.count} QUOTES)` : 'EOD CLOSE'}
-              </span>
-            </div>
-
-            <div className="flex items-center gap-2">
-              {/* Segmented index toggle */}
-              <div className="inline-flex rounded-md border border-zinc-800 bg-zinc-950 p-0.5 font-mono text-xs">
-                <button
-                  type="button"
-                  onClick={() => setMoversIndex('nifty50')}
-                  className={`rounded px-3 py-1 text-[11px] font-bold transition-colors ${
-                    moversIndex === 'nifty50'
-                      ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 shadow-sm'
-                      : 'text-zinc-400 hover:text-zinc-200 border border-transparent'
-                  }`}
-                >
-                  NIFTY 50
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setMoversIndex('nifty500')}
-                  className={`rounded px-3 py-1 text-[11px] font-bold transition-colors ${
-                    moversIndex === 'nifty500'
-                      ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 shadow-sm'
-                      : 'text-zinc-400 hover:text-zinc-200 border border-transparent'
-                  }`}
-                >
-                  NIFTY 500
-                </button>
+                <span className="rounded border border-zinc-700 bg-zinc-800 px-2 py-0.5 font-mono text-[10px] font-bold text-zinc-300">
+                  {moversIndex === 'nifty50' ? 'NIFTY 50' : 'NIFTY 500'}
+                </span>
+                {movers?.dataDate && (
+                  <span className="rounded border border-amber-500/30 bg-amber-500/10 px-2 py-0.5 font-mono text-[10px] font-bold text-amber-300">
+                    DATA: {movers.dataDate}
+                  </span>
+                )}
+                <span className="rounded border border-zinc-800 bg-zinc-950 px-2 py-0.5 font-mono text-[10px] text-zinc-400">
+                  {marketSession.isWeekend ? 'WEEKEND (EOD CLOSE)' : movers?.liveQuotesMeta ? `LIVE INTRADAY (${movers.liveQuotesMeta.count} QUOTES)` : 'EOD CLOSE'}
+                </span>
               </div>
 
-              {/* Sync / Refresh Button */}
-              <button
-                type="button"
-                onClick={() => fetchMovers(true)}
-                disabled={moversLoading || moversSyncing}
-                className="flex items-center gap-1.5 rounded-md border border-zinc-800 bg-zinc-900 px-3 py-1 font-mono text-[11px] font-semibold text-zinc-300 hover:border-emerald-500/40 hover:text-emerald-400 transition-colors disabled:opacity-50"
-                title="Force refresh movers from underlying data"
-              >
-                <RefreshCw className={`h-3 w-3 ${moversSyncing || moversLoading ? 'animate-spin text-emerald-400' : 'text-zinc-400'}`} />
-                <span>{moversSyncing ? 'SYNCING...' : 'SYNC'}</span>
-              </button>
+              <div className="flex items-center gap-2">
+                {/* Segmented index toggle */}
+                <div className="inline-flex rounded-md border border-zinc-800 bg-zinc-950 p-0.5 font-mono text-xs">
+                  <button
+                    type="button"
+                    onClick={() => setMoversIndex('nifty50')}
+                    className={`rounded px-3 py-1 text-[11px] font-bold transition-colors ${
+                      moversIndex === 'nifty50'
+                        ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 shadow-sm'
+                        : 'text-zinc-400 hover:text-zinc-200 border border-transparent'
+                    }`}
+                  >
+                    NIFTY 50
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setMoversIndex('nifty500')}
+                    className={`rounded px-3 py-1 text-[11px] font-bold transition-colors ${
+                      moversIndex === 'nifty500'
+                        ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 shadow-sm'
+                        : 'text-zinc-400 hover:text-zinc-200 border border-transparent'
+                    }`}
+                  >
+                    NIFTY 500
+                  </button>
+                </div>
 
-              <Link
-                href="/movers"
-                className="flex items-center gap-1 rounded-md border border-zinc-800 bg-zinc-900 px-3 py-1 font-mono text-[11px] font-bold text-zinc-300 hover:border-zinc-700 hover:text-white transition-colors"
-                title="Open Advanced Market Movers Screener & Analytics"
-              >
-                <span>SCREENER</span>
-                <ChevronRight className="h-3 w-3 text-zinc-400" />
-              </Link>
+                {/* Sync / Refresh Button */}
+                <button
+                  type="button"
+                  onClick={() => fetchMovers(true)}
+                  disabled={moversLoading || moversSyncing}
+                  className="flex items-center gap-1.5 rounded-md border border-zinc-800 bg-zinc-900 px-3 py-1 font-mono text-[11px] font-semibold text-zinc-300 hover:border-emerald-500/40 hover:text-emerald-400 transition-colors disabled:opacity-50"
+                  title="Force refresh movers from underlying data"
+                >
+                  <RefreshCw className={`h-3 w-3 ${moversSyncing || moversLoading ? 'animate-spin text-emerald-400' : 'text-zinc-400'}`} />
+                  <span>{moversSyncing ? 'SYNCING...' : 'SYNC'}</span>
+                </button>
+
+                <Link
+                  href="/movers"
+                  className="flex items-center gap-1 rounded-md border border-zinc-800 bg-zinc-900 px-3 py-1 font-mono text-[11px] font-bold text-zinc-300 hover:border-zinc-700 hover:text-white transition-colors"
+                  title="Open Advanced Market Movers Screener & Analytics"
+                >
+                  <span>SCREENER</span>
+                  <ChevronRight className="h-3 w-3 text-zinc-400" />
+                </Link>
+              </div>
             </div>
-          </div>
 
-          <div className="grid gap-4 lg:grid-cols-2">
-            <TerminalPanel
-              title={`Top Gainers (${moversIndex === 'nifty50' ? 'Nifty 50' : 'Nifty 500'})`}
-              icon={TrendingUp}
-              href="/movers"
-              badge={
-                <span className="rounded bg-emerald-500/10 px-1.5 py-0.5 font-mono text-[9px] font-semibold text-emerald-400">
-                  MOMENTUM
-                </span>
-              }
-              meta={movers?.dataDate ? `SESSION: ${movers.dataDate}` : 'EOD'}
-            >
-              <MoverTable rows={gainers} direction="up" loading={moversLoading} />
-            </TerminalPanel>
+            <div className="grid gap-4 lg:grid-cols-2">
+              <TerminalPanel
+                title={`Top Gainers (${moversIndex === 'nifty50' ? 'Nifty 50' : 'Nifty 500'})`}
+                icon={TrendingUp}
+                href="/movers"
+                badge={
+                  <span className="rounded bg-emerald-500/10 px-1.5 py-0.5 font-mono text-[9px] font-semibold text-emerald-400">
+                    MOMENTUM
+                  </span>
+                }
+                meta={movers?.dataDate ? `SESSION: ${movers.dataDate}` : 'EOD'}
+              >
+                <MoverTable rows={gainers} direction="up" loading={moversLoading} />
+              </TerminalPanel>
 
-            <TerminalPanel
-              title={`Top Losers (${moversIndex === 'nifty50' ? 'Nifty 50' : 'Nifty 500'})`}
-              icon={TrendingDown}
-              href="/movers"
-              badge={
-                <span className="rounded bg-red-500/10 px-1.5 py-0.5 font-mono text-[9px] font-semibold text-red-400">
-                  PULLBACK
-                </span>
-              }
-              meta={movers?.dataDate ? `SESSION: ${movers.dataDate}` : 'EOD'}
-            >
-              <MoverTable rows={losers} direction="down" loading={moversLoading} />
-            </TerminalPanel>
+              <TerminalPanel
+                title={`Top Losers (${moversIndex === 'nifty50' ? 'Nifty 50' : 'Nifty 500'})`}
+                icon={TrendingDown}
+                href="/movers"
+                badge={
+                  <span className="rounded bg-red-500/10 px-1.5 py-0.5 font-mono text-[9px] font-semibold text-red-400">
+                    PULLBACK
+                  </span>
+                }
+                meta={movers?.dataDate ? `SESSION: ${movers.dataDate}` : 'EOD'}
+              >
+                <MoverTable rows={losers} direction="down" loading={moversLoading} />
+              </TerminalPanel>
+            </div>
+
+            <div className="overflow-hidden rounded-xl border border-zinc-800 bg-zinc-950">
+              <SectionQuickLinks
+                categoryLabel="SCREENING & ORDER FLOW"
+                links={[
+                  { label: 'Market Movers Terminal', href: '/movers', badge: 'SURGE' },
+                  { label: 'RS Movers Plus', href: '/movers-plus' },
+                  { label: 'Mansfield RS Scanner', href: '/scanner', badge: 'ALPHA' },
+                  { label: 'Ultimate Multi-Factor', href: '/ultimate-scanner' },
+                  { label: 'RRG Sector Rotation', href: '/rrg' },
+                  { label: 'Volume Footprint', href: '/volume-footprint' },
+                  { label: 'Tick Breadth', href: '/breadth-intraday' },
+                ]}
+              />
+            </div>
           </div>
         </div>
 
         {/* 7. Separated Open Positions Section (Dedicated Per Broker) */}
-        <SeparatedPositionsSection brokers={brokers} portfolioTotals={totals} />
+        <div id="section-desks" className="scroll-mt-28">
+          <SeparatedPositionsSection brokers={brokers} portfolioTotals={totals} />
+        </div>
+
+        {/* 8. Institutional Terminal Site Directory (All 35+ Tools) */}
+        <TerminalSiteDirectory onOpenDirectory={() => setDirectoryModalOpen(true)} />
 
         {/* ─── Terminal Footer Telemetry ───────────────────────────────────────── */}
         <div className="flex flex-wrap items-center justify-between gap-3 border-t border-zinc-800/80 pt-3 font-mono text-[10px] text-zinc-500">
@@ -2038,6 +2193,12 @@ export default function MarketDashboard() {
           </div>
         </div>
       </div>
+
+      {/* Searchable Command Palette Directory Modal (⌘K, /, F9) */}
+      <TerminalCommandPaletteModal
+        open={directoryModalOpen}
+        onClose={() => setDirectoryModalOpen(false)}
+      />
     </div>
   );
 }
