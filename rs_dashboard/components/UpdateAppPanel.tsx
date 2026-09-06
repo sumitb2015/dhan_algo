@@ -18,6 +18,7 @@ interface RepoStatus {
   behind?: number;
   dirty?: boolean;
   incomingCommits?: string[];
+  isProd?: boolean;
   error?: string;
 }
 
@@ -27,6 +28,7 @@ interface PullResult {
   updated?: boolean;
   needsRestart?: boolean;
   changedFiles?: string[];
+  isProd?: boolean;
   error?: string;
 }
 
@@ -164,6 +166,17 @@ export default function UpdateAppPanel({ open, onClose }: UpdateAppPanelProps) {
             </Button>
           </div>
 
+          {status?.isProd && (
+            <div className="flex items-start gap-2 px-3 py-2 rounded-lg border border-indigo-500/25 bg-indigo-950/20 text-xs text-indigo-300">
+              <AlertTriangle className="h-3.5 w-3.5 shrink-0 mt-0.5" />
+              <span>
+                Running via <code className="text-indigo-200">npm start</code> — any pull
+                will need a manual rebuild and restart to actually take effect; the page
+                won&apos;t reload automatically.
+              </span>
+            </div>
+          )}
+
           {status?.dirty && (
             <div className="flex items-start gap-2 px-3 py-2 rounded-lg border border-amber-500/25 bg-amber-950/20 text-xs text-amber-400">
               <AlertTriangle className="h-3.5 w-3.5 shrink-0 mt-0.5" />
@@ -213,11 +226,20 @@ export default function UpdateAppPanel({ open, onClose }: UpdateAppPanelProps) {
                 <div className="flex items-start gap-2 px-3 py-2.5 rounded-lg border border-amber-500/30 bg-amber-950/20 text-xs text-amber-400">
                   <AlertTriangle className="h-3.5 w-3.5 shrink-0 mt-0.5" />
                   <div className="space-y-1">
-                    <p className="font-semibold">Pulled — restart needed</p>
-                    <p className="text-amber-400/80">
-                      {result.changedFiles?.filter((f) => f.endsWith('package.json') || f.endsWith('package-lock.json') || f.endsWith('next.config.ts')).join(', ')}{' '}
-                      changed. Stop and restart <code className="text-amber-300">npm run dev</code> for this to take effect.
-                    </p>
+                    <p className="font-semibold">Pulled — rebuild needed</p>
+                    {result.isProd ? (
+                      <p className="text-amber-400/80">
+                        Running via <code className="text-amber-300">npm start</code> — it
+                        serves a pre-built bundle, so this won&apos;t take effect until you
+                        stop it, run <code className="text-amber-300">npm run build</code>,
+                        then <code className="text-amber-300">npm start</code> again.
+                      </p>
+                    ) : (
+                      <p className="text-amber-400/80">
+                        {result.changedFiles?.filter((f) => f.endsWith('package.json') || f.endsWith('package-lock.json') || f.endsWith('next.config.ts')).join(', ')}{' '}
+                        changed. Stop and restart <code className="text-amber-300">npm run dev</code> for this to take effect.
+                      </p>
+                    )}
                   </div>
                 </div>
               ) : result.updated ? (

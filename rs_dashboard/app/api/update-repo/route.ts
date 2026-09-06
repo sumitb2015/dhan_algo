@@ -7,6 +7,12 @@ const RESTART_SENSITIVE_FILES = new Set([
   'rs_dashboard/next.config.ts',
 ]);
 
+// `next start` serves a pre-built .next bundle — it doesn't watch files or
+// recompile like `next dev` does, so *any* pulled source change is invisible
+// until a manual `npm run build` + restart, not just the dependency/config
+// files that matter under `next dev`.
+const isProd = process.env.NODE_ENV === 'production';
+
 async function currentBranch(): Promise<string | null> {
   const res = await runGit(['rev-parse', '--abbrev-ref', 'HEAD']);
   return res.ok ? res.stdout : null;
@@ -43,7 +49,7 @@ export async function GET() {
     if (logRes.ok && logRes.stdout) incomingCommits = logRes.stdout.split('\n');
   }
 
-  return NextResponse.json({ success: true, branch, ahead, behind, dirty, incomingCommits });
+  return NextResponse.json({ success: true, branch, ahead, behind, dirty, incomingCommits, isProd });
 }
 
 /** POST — pull with --ff-only. Never merges or rebases: if the branch has
@@ -76,8 +82,10 @@ export async function POST() {
     const diffRes = await runGit(['diff', '--name-only', before, after]);
     if (diffRes.ok && diffRes.stdout) {
       changedFiles = diffRes.stdout.split('\n');
-      needsRestart = changedFiles.some((f) => RESTART_SENSITIVE_FILES.has(f));
     }
+    // Under `next start`, every pulled file needs a rebuild — there's no file
+    // watcher to fall back on. Under `next dev`, only these specific files do.
+    needsRestart = isProd || changedFiles.some((f) => RESTART_SENSITIVE_FILES.has(f));
   }
 
   return NextResponse.json({
@@ -86,5 +94,6 @@ export async function POST() {
     updated,
     needsRestart,
     changedFiles,
+    isProd,
   });
 }
