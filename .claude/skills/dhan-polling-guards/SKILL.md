@@ -100,6 +100,29 @@ Static data — strike ladders, CE/PE security ids, expiry lists — is already 
 `master_list.csv`. Read it from there and keep the API call as a fallback for an
 expiry missing from the master. (`867ad07`)
 
+The Node side hit the same shape with the margin calculator: the strangle-matrix
+background sweep paced itself locally (~1.1s between calls) and so did the
+ultimate-scanner's top-N margin enrichment, each unaware of the other — together
+they could exceed Dhan's real account-wide limit even though each thought it was
+alone. Fix: move pacing *into* the shared call itself (`fetchNettedMargin()` in
+`lib/ultimateScannerDhan.ts`), not into each caller — a single account-wide queue
+with 429-aware backoff (grows the gap, capped at 20s, on a 429; relaxes toward
+baseline on success) that every caller funnels through. A follow-up code review
+(`587f9b3`) found the backoff growth/relax logic still lived partly in one
+caller's own fetch handler instead of the shared pacer, so a 429 hit through a
+*different* caller never grew the shared gap — centralize the growth/relax state
+in the pacer, driven by a `.status` tag on the thrown error, not in whichever
+caller happens to hit the 429 first. Also: don't retry a 429 after a short fixed
+delay (faster than the pacer's own cadence, near-guaranteed to re-hit the same
+throttle) — skip the retry and let the pacer's backoff handle it. (`82b6472`,
+`bb1f8cd`, `587f9b3`)
+
+Separately, when several independent consumers (open baskets, grid cells) share
+one effect trigger for "refetch this account-wide resource," keep a per-consumer
+signature so only the one that actually changed re-fetches — a shared trigger
+re-queues *everyone* through the same pacer on every edit, multiplying the
+latency the pacer already adds. (`587f9b3`, `fetchMarginsForBaskets`)
+
 ### 7. Surface the error instead of reporting "no data"
 Data API methods return empty on failure. A `DH-902` subscription lapse or an auth
 failure otherwise reads as "no data / market may have been closed". Thread
@@ -121,10 +144,12 @@ sees `RUNNING` with a matching broker and returns "already running" without
 spawning anything new).
 
 Diagnose with the OS, not the UI: `Get-CimInstance Win32_Process -Filter
-"Name='pythonw.exe'"` (PowerShell) filtered on the script's command line shows
-every live instance and its actual start time — compare that against when a
-code fix landed to tell whether you're looking at a fresh process or a stale
-one still running the old code. To clear a stuck one without a hard kill,
+"Name='pythonw.exe'"` (PowerShell) or `pgrep -fa python` (Linux/macOS) filtered
+on the script's command line shows every live instance and its actual start
+time — compare that against when a code fix landed to tell whether you're
+looking at a fresh process or a stale one still running the old code. See
+`dhan-cross-platform` for the equivalent split on killing (not just listing) a
+process. To clear a stuck one without a hard kill,
 write the same stop-trigger file the app's own Stop button writes
 (`debug/focus_tool_rows_worker_stop.trigger`) and confirm the process list goes
 empty — cleaner than `Stop-Process`, since it lets the worker exit through its

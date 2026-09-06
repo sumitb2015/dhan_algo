@@ -45,6 +45,24 @@ the Data API subscription lapses), with no exception raised. Check
 `helper.last_api_error` after an empty response before concluding "no data" / "up to
 date"; scripts that report freshness must surface it.
 
+## `/v2/margincalculator/multi` needs a manually-injected `dhanClientId`, and returns a flat envelope
+
+Unlike `dhanPost()` in `dhanToken.ts` (which auto-injects `dhanClientId` into
+every request body), a hand-rolled `fetch()` against the margin calculator will
+not — and the endpoint fails with `DH-905 "dhanClientId is required"` on every
+call if it's missing, which reads as "margin calculator down" rather than a bad
+request. `lib/ultimateScannerDhan.ts`'s `fetchNettedMargin()` shipped this way
+and silently fell back to a flat estimate on every call from day one (confirmed:
+flat estimate ₹120,000 vs. real margin ₹198,975 for the same NIFTY ATM
+strangle) until `bb1f8cd` caught it.
+
+The response is also **not** the `{status:'success', data:{...}}` envelope used
+elsewhere — it's a flat 200-OK object: `{clientId, totalMargin, spanMargin,
+exposure, ...}`. Read `totalMargin` directly; `multi-leg-focus/margin/route.ts`
+already parses this correctly and is the reference implementation. See
+`dhan-polling-guards` guard 6 for the account-wide pacing this endpoint also
+needs.
+
 ## DH-905 is IP-whitelist-only on transaction endpoints
 
 `DH-905 "Invalid IP"` is enforced **only** on transaction endpoints (POST `/v2/orders`,

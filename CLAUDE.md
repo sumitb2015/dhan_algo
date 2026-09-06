@@ -259,7 +259,9 @@ must commit on blur/Enter so mid-edit values cannot fire live rules), plus
 `dhan-dashboard-page`, `dhan-new-strategy` and `dhan-quant-terminal-page`,
 `dhan-auth-token-lifecycle` (login.py/session.ts cached-token validation and the
 daily 06:00 IST session cutoff), `dhan-expired-options-data` (expired-options
-downloader/SQLite pipeline and the Strike History page built on it). Run
+downloader/SQLite pipeline and the Strike History page built on it),
+`dhan-cross-platform` (Python spawn paths, process kill, and GPU-composited
+animations that work on Windows but break on Linux). Run
 `dhan-context-audit` periodically (not tied to any one change) to review CLAUDE.md
 and this skill library itself against recent commits.
 
