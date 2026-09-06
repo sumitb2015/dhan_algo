@@ -261,7 +261,8 @@ must commit on blur/Enter so mid-edit values cannot fire live rules), plus
 daily 06:00 IST session cutoff), `dhan-expired-options-data` (expired-options
 downloader/SQLite pipeline and the Strike History page built on it),
 `dhan-cross-platform` (Python spawn paths, process kill, and GPU-composited
-animations that work on Windows but break on Linux). Run
+animations that work on Windows but break on Linux), `dhan-payoff-diagrams`
+(payoff-curve math and the hand-rolled SVG chart family). Run
 `dhan-context-audit` periodically (not tied to any one change) to review CLAUDE.md
 and this skill library itself against recent commits.
 

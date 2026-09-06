@@ -106,6 +106,17 @@ A canvas cannot read CSS variables. `lib/chartTheme.ts` exposes `useChartChrome(
 which returns the palette as plain values and re-renders on theme change. See the
 `dhan-live-chart` skill for how to apply it without recreating the chart.
 
+### Hand-rolled SVG (not recharts) — same hook as canvas, not the recharts trick
+A one-off SVG chart built from raw `<path>`/`<line>`/`<text>` (not recharts'
+`<ComposedChart>` etc.) gets none of the global class-name CSS rules above — there
+are no `.recharts-*` classes to hook into. Use `useChartChrome()` here too and pass
+its plain string values as presentation-attribute props (`stroke={chrome.gridline}`),
+exactly as for canvas. `components/BasketPayoffChart.tsx` does this correctly;
+`components/analytics/PositionsPayoffChart.tsx` and `components/strategy/
+PayoffDiagram.tsx` — built later, copying its layout — dropped the hook and
+hardcoded dark-theme hex instead, so they don't flip in light mode. See
+`dhan-payoff-diagrams` for the full writeup.
+
 ## Injected `<style>` Blocks
 `components/PanelStyles.tsx` is the worked example: the whole `lc-*` design system is
 driven by `--lc-*` tokens declared in both palette blocks — surfaces, hairlines, text

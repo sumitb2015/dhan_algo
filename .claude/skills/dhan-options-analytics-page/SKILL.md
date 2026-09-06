@@ -1,6 +1,6 @@
 ---
 name: dhan-options-analytics-page
-description: Use when working on Positions Analysis, Straddle Analysis, or Strangle Analysis — the multi-leg options book pages under rs_dashboard/components/{PositionsAnalysis,StraddleAnalysis,StrangleAnalysis}.tsx and analytics/. Covers the draft ("what-if") leg builder, the payoff-chart draft overlay, margin/ROI stats, and the historical validity-report modals. Not for the live order-placing terminals (Scalper/AdvancedScalper) — that's dhan-broker-positions.
+description: Use when working on Positions Analysis, Straddle Analysis, or Strangle Analysis — the multi-leg options book pages under rs_dashboard/components/{PositionsAnalysis,StraddleAnalysis,StrangleAnalysis}.tsx and analytics/. Covers the draft ("what-if") leg builder, the payoff-chart draft overlay, margin/ROI stats, and the historical validity-report modals. Not for the live order-placing terminals (Scalper/AdvancedScalper) — that's dhan-broker-positions. Not for the payoff chart's own math/rendering — that's dhan-payoff-diagrams.
 ---
 
 # Dhan Options Analytics Page
