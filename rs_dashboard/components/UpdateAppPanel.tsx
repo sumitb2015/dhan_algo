@@ -2,7 +2,7 @@
 
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import {
-  GitPullRequest, RefreshCw, CheckCircle2, XCircle, AlertTriangle, GitCommitHorizontal,
+  GitPullRequest, RefreshCw, CheckCircle2, XCircle, AlertTriangle, GitCommitHorizontal, Hammer,
 } from 'lucide-react';
 import {
   Sheet, SheetContent, SheetHeader, SheetTitle, SheetDescription,
@@ -10,6 +10,7 @@ import {
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Separator } from '@/components/ui/separator';
+import { Card, CardContent } from '@/components/ui/card';
 
 interface RepoStatus {
   success: boolean;
@@ -45,6 +46,7 @@ export default function UpdateAppPanel({ open, onClose }: UpdateAppPanelProps) {
   const [pulling, setPulling] = useState(false);
   const [result, setResult] = useState<PullResult | null>(null);
   const [reloading, setReloading] = useState(false);
+  const [restartAnnounce, setRestartAnnounce] = useState(false);
   const reloadTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const checkStatus = useCallback(async () => {
@@ -87,6 +89,12 @@ export default function UpdateAppPanel({ open, onClose }: UpdateAppPanelProps) {
       } else if (json.success) {
         await checkStatus();
       }
+      // A successful pull that needs a manual rebuild is easy to miss as just
+      // another line in the sheet — announce it as a modal so it can't be
+      // scrolled past or closed along with the sheet unnoticed.
+      if (json.success && json.updated && json.needsRestart) {
+        setRestartAnnounce(true);
+      }
     } catch {
       setResult({ success: false, error: 'Could not reach the server' });
     } finally {
@@ -94,11 +102,19 @@ export default function UpdateAppPanel({ open, onClose }: UpdateAppPanelProps) {
     }
   };
 
+  useEffect(() => {
+    if (!restartAnnounce) return;
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setRestartAnnounce(false); };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [restartAnnounce]);
+
   const behind = status?.behind ?? 0;
   const ahead = status?.ahead ?? 0;
   const canPull = status?.success && behind > 0 && !pulling && !reloading;
 
   return (
+    <>
     <Sheet open={open} onOpenChange={(v) => { if (!v) onClose(); }}>
       <SheetContent
         side="right"
@@ -234,25 +250,15 @@ export default function UpdateAppPanel({ open, onClose }: UpdateAppPanelProps) {
                 )}
 
                 {result.needsRestart && (
-                  <div className="flex items-start gap-2 px-3 py-2.5 rounded-lg border border-amber-500/30 bg-amber-950/20 text-xs text-amber-400">
-                    <AlertTriangle className="h-3.5 w-3.5 shrink-0 mt-0.5" />
-                    <div className="space-y-1">
-                      <p className="font-semibold">Pulled{result.merged ? ' (merged)' : ''} — rebuild needed</p>
-                      {result.isProd ? (
-                        <p className="text-amber-400/80">
-                          Running via <code className="text-amber-300">npm start</code> — it
-                          serves a pre-built bundle, so this won&apos;t take effect until you
-                          stop it, run <code className="text-amber-300">npm run build</code>,
-                          then <code className="text-amber-300">npm start</code> again.
-                        </p>
-                      ) : (
-                        <p className="text-amber-400/80">
-                          {result.changedFiles?.filter((f) => f.endsWith('package.json') || f.endsWith('package-lock.json') || f.endsWith('next.config.ts')).join(', ')}{' '}
-                          changed. Stop and restart <code className="text-amber-300">npm run dev</code> for this to take effect.
-                        </p>
-                      )}
-                    </div>
-                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setRestartAnnounce(true)}
+                    className="w-full flex items-center gap-2 px-3 py-2 rounded-lg border border-amber-500/30 bg-amber-950/20 text-xs text-amber-400 hover:bg-amber-950/30 transition text-left"
+                  >
+                    <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
+                    <span className="flex-1 font-semibold">Pulled{result.merged ? ' (merged)' : ''} — rebuild needed</span>
+                    <span className="text-amber-400/70 underline">View steps</span>
+                  </button>
                 )}
 
                 {result.stashConflict && (
@@ -289,5 +295,56 @@ export default function UpdateAppPanel({ open, onClose }: UpdateAppPanelProps) {
         </div>
       </SheetContent>
     </Sheet>
+
+    {/* Rebuild-required announcement — a successful pull that needs a manual
+        rebuild is easy to miss as an inline line in the sheet, so it also
+        interrupts as a modal the user has to explicitly dismiss. */}
+    {restartAnnounce && (
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-label="Rebuild required"
+        className="fixed inset-0 z-[60] flex items-center justify-center bg-oncolor-dark/70 p-4 backdrop-blur-sm"
+        onClick={(e) => { if (e.target === e.currentTarget) setRestartAnnounce(false); }}
+      >
+        <Card className="w-full max-w-sm border border-amber-500/30 bg-zinc-900 shadow-2xl">
+          <CardContent className="flex flex-col gap-4 py-1">
+            <div className="flex items-center gap-3">
+              <div className="flex size-10 shrink-0 items-center justify-center rounded-full border border-amber-800 bg-amber-950">
+                <Hammer className="size-5 text-amber-400" />
+              </div>
+              <div className="min-w-0">
+                <div className="text-sm font-bold text-zinc-100">Rebuild required</div>
+                <div className="mt-0.5 text-xs text-zinc-400">
+                  {result?.merged ? 'Pulled and merged from GitHub' : 'Pulled from GitHub'}
+                </div>
+              </div>
+            </div>
+
+            <div className="rounded-lg border border-amber-500/25 bg-amber-950/20 px-3 py-2.5 text-xs leading-relaxed text-amber-300">
+              {result?.isProd ? (
+                <>
+                  Running via <code className="text-amber-200">npm start</code> — it serves a
+                  pre-built bundle, so this pull won&apos;t take effect until you stop it, run{' '}
+                  <code className="text-amber-200">npm run build</code>, then{' '}
+                  <code className="text-amber-200">npm start</code> again.
+                </>
+              ) : (
+                <>
+                  {result?.changedFiles?.filter((f) => f.endsWith('package.json') || f.endsWith('package-lock.json') || f.endsWith('next.config.ts')).join(', ')}{' '}
+                  changed. Stop and restart <code className="text-amber-200">npm run dev</code> for
+                  this to take effect.
+                </>
+              )}
+            </div>
+
+            <Button autoFocus size="sm" className="w-full" onClick={() => setRestartAnnounce(false)}>
+              Got it
+            </Button>
+          </CardContent>
+        </Card>
+      </div>
+    )}
+    </>
   );
 }
