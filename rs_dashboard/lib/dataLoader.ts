@@ -45,6 +45,12 @@ function cacheSet<T>(key: string, data: T): void {
   cache.set(key, { data, ts: Date.now() });
 }
 
+function isWeekend(dateStr: string): boolean {
+  if (!dateStr || dateStr.length < 10) return false;
+  const day = new Date(dateStr.slice(0, 10) + 'T00:00:00').getDay();
+  return day === 0 || day === 6; // 0=Sun, 6=Sat
+}
+
 // ─── Stock CSV Reader ─────────────────────────────────────────────────────────
 function parseAndPatchStockRows(symbol: string, content: string): OHLCVRow[] {
   try {
@@ -59,6 +65,7 @@ function parseAndPatchStockRows(symbol: string, content: string): OHLCVRow[] {
         close: parseFloat(r.Close),
         volume: parseFloat(r.Volume) || 0,
       }))
+      .filter((r) => !isWeekend(r.date))
       .sort((a, b) => a.date.localeCompare(b.date));
 
     // Apply live-quote patch so today's data is accurate during market hours.
@@ -174,7 +181,8 @@ function parseNifty50CSV(filePath: string): OHLCVRow[] {
         low: parseFloat(r.Low) || 0,
         close: parseFloat(r.Close),
         volume: parseFloat(r.Volume) || 0,
-      }));
+      }))
+      .filter((r) => !isWeekend(r.date));
   } catch {
     return [];
   }
@@ -247,6 +255,7 @@ export async function readNifty500Index(symbols: string[]): Promise<OHLCVRow[]> 
             close: parseFloat(r.Close),
             volume: parseFloat(r.Volume) || 0,
           }))
+          .filter((r) => !isWeekend(r.date))
           .sort((a, b) => a.date.localeCompare(b.date));
         if (parsed.length > 0) {
           const todayIST = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
@@ -510,6 +519,7 @@ export function readIndexCSV(meta: IndexMeta): OHLCVRow[] {
         close:  parseFloat(r.Close),
         volume: parseFloat(r.Volume) || 0,
       }))
+      .filter((r) => !isWeekend(r.date))
       .sort((a, b) => a.date.localeCompare(b.date));
 
     // Carry forward/patch today's row so that alignByDate doesn't drop today's data point

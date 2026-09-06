@@ -21,7 +21,7 @@
  *   - Instant Contract & Strike Search across open positions
  */
 
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import Link from 'next/link';
 import {
   Activity,
@@ -30,6 +30,7 @@ import {
   ArrowUpRight,
   Bot,
   Briefcase,
+  ChevronRight,
   CircleDot,
   Clock,
   Compass,
@@ -39,6 +40,7 @@ import {
   Layers,
   LayoutDashboard,
   Radar,
+  RefreshCw,
   Search,
   ShieldCheck,
   TrendingDown,
@@ -225,19 +227,20 @@ function getMarketSessionInfo() {
   const minute = ist.getMinutes();
   const timeNum = hour * 60 + minute;
 
-  if (day === 0 || day === 6) {
-    return { status: 'CLOSED', label: 'WEEKEND CLOSED', tone: 'neutral' as const };
+  const isWeekend = day === 0 || day === 6;
+  if (isWeekend) {
+    return { status: 'CLOSED', label: 'WEEKEND CLOSED', tone: 'neutral' as const, isWeekend: true };
   }
   if (timeNum >= 540 && timeNum < 555) {
-    return { status: 'PRE-OPEN', label: 'PRE-OPEN SESSION', tone: 'accent' as const };
+    return { status: 'PRE-OPEN', label: 'PRE-OPEN SESSION', tone: 'accent' as const, isWeekend: false };
   }
   if (timeNum >= 555 && timeNum <= 930) {
-    return { status: 'OPEN', label: 'MARKET LIVE', tone: 'live' as const };
+    return { status: 'OPEN', label: 'MARKET LIVE', tone: 'live' as const, isWeekend: false };
   }
   if (timeNum > 930 && timeNum <= 940) {
-    return { status: 'POST', label: 'POST-CLOSING', tone: 'neutral' as const };
+    return { status: 'POST', label: 'POST-CLOSING', tone: 'neutral' as const, isWeekend: false };
   }
-  return { status: 'EOD', label: 'AFTER-HOURS / EOD', tone: 'neutral' as const };
+  return { status: 'EOD', label: 'AFTER-HOURS / EOD', tone: 'neutral' as const, isWeekend: false };
 }
 
 function getVixRegime(vix: number | null | undefined) {
@@ -837,9 +840,27 @@ function BreadthPanel({ data, loading }: { data: DashboardBreadthResponse | null
 
 // ─── Zero-Gap Market Movers Tables ────────────────────────────────────────────
 
-function MoverTable({ rows, direction }: { rows: MoverResult[]; direction: 'up' | 'down' }) {
+function MoverTable({
+  rows,
+  direction,
+  loading,
+}: {
+  rows: MoverResult[];
+  direction: 'up' | 'down';
+  loading?: boolean;
+}) {
+  if (loading && rows.length === 0) {
+    return (
+      <div className="p-4 space-y-2">
+        {[...Array(6)].map((_, i) => (
+          <div key={i} className="h-8 w-full bg-zinc-800/40 animate-pulse rounded" />
+        ))}
+      </div>
+    );
+  }
+
   if (rows.length === 0) {
-    return <EmptyRow>No data available — sync today quotes to refresh</EmptyRow>;
+    return <EmptyRow>No mover records available for this index</EmptyRow>;
   }
 
   return (
@@ -847,6 +868,7 @@ function MoverTable({ rows, direction }: { rows: MoverResult[]; direction: 'up' 
       <table className="w-full border-collapse text-left">
         <thead>
           <tr className="bg-zinc-800">
+            <th className="w-8 px-2 py-2 text-center text-xs font-bold text-white">#</th>
             <th className="px-3 py-2 text-xs font-bold text-white">Symbol &amp; Sector</th>
             <th className="px-3 py-2 text-right text-xs font-bold text-white">LTP</th>
             <th className="px-3 py-2 text-right text-xs font-bold text-white">Chg %</th>
@@ -855,13 +877,16 @@ function MoverTable({ rows, direction }: { rows: MoverResult[]; direction: 'up' 
           </tr>
         </thead>
         <tbody className="divide-y divide-zinc-800 font-mono text-xs">
-          {rows.map(row => {
+          {rows.map((row, idx) => {
             const volHigh = row.volumeRatio >= 2.0;
             const rsiOverbought = (row.rsi14 ?? 0) >= 70;
             const rsiOversold = (row.rsi14 ?? 0) <= 30 && (row.rsi14 ?? 0) > 0;
 
             return (
               <tr key={row.symbol} className="transition-colors hover:bg-zinc-800/50">
+                <td className="w-8 px-2 py-2 text-center font-mono text-[11px] font-semibold text-zinc-500">
+                  {idx + 1}
+                </td>
                 <td className="px-3 py-2">
                   <div className="flex flex-col">
                     <span className="font-bold text-zinc-100">{row.symbol}</span>
@@ -871,7 +896,7 @@ function MoverTable({ rows, direction }: { rows: MoverResult[]; direction: 'up' 
                   </div>
                 </td>
 
-                <td className="px-3 py-2 text-right tabular-nums text-zinc-200">
+                <td className="px-3 py-2 text-right tabular-nums text-zinc-200 font-semibold">
                   {fmtNum(row.latestClose, 2)}
                 </td>
 
@@ -1520,6 +1545,9 @@ function SeparatedPositionsSection({
 export default function MarketDashboard() {
   const [indices, setIndices] = useState<TopIndicesResponse | null>(null);
   const [movers, setMovers] = useState<MoversResponse | null>(null);
+  const [moversIndex, setMoversIndex] = useState<'nifty50' | 'nifty500'>('nifty50');
+  const [moversLoading, setMoversLoading] = useState(true);
+  const [moversSyncing, setMoversSyncing] = useState(false);
   const [breadth, setBreadth] = useState<DashboardBreadthResponse | null>(null);
   const [breadthLoading, setBreadthLoading] = useState(true);
   const [portfolio, setPortfolio] = useState<DashboardPortfolioResponse | null>(null);
@@ -1565,25 +1593,25 @@ export default function MarketDashboard() {
     };
   }, []);
 
-  useEffect(() => {
-    let seq = 0;
-    let stopped = false;
-    async function load() {
-      const mine = ++seq;
-      try {
-        const res = await fetch('/api/movers?index=nifty500');
-        const json = (await res.json()) as { success: boolean; data: MoversResponse };
-        if (stopped || mine !== seq) return;
-        if (json?.success && json.data) setMovers(json.data);
-      } catch {}
+  const fetchMovers = useCallback(async (bust = false) => {
+    if (bust) setMoversSyncing(true);
+    else setMoversLoading(true);
+    try {
+      const url = bust ? `/api/movers?index=${moversIndex}&bust` : `/api/movers?index=${moversIndex}`;
+      const res = await fetch(url);
+      const json = (await res.json()) as { success: boolean; data: MoversResponse };
+      if (json?.success && json.data) setMovers(json.data);
+    } catch {} finally {
+      setMoversLoading(false);
+      setMoversSyncing(false);
     }
-    load();
-    const id = setInterval(load, MOVERS_POLL_MS);
-    return () => {
-      stopped = true;
-      clearInterval(id);
-    };
-  }, []);
+  }, [moversIndex]);
+
+  useEffect(() => {
+    fetchMovers(false);
+    const id = setInterval(() => fetchMovers(false), MOVERS_POLL_MS);
+    return () => clearInterval(id);
+  }, [fetchMovers]);
 
   useEffect(() => {
     let seq = 0;
@@ -1885,34 +1913,104 @@ export default function MarketDashboard() {
         <BreadthPanel data={breadth} loading={breadthLoading} />
 
         {/* 6. Market Movers: Top Gainers & Top Losers */}
-        <div className="grid gap-4 lg:grid-cols-2">
-          <TerminalPanel
-            title="Top Gainers (Nifty 500)"
-            icon={TrendingUp}
-            href="/movers"
-            badge={
-              <span className="rounded bg-emerald-500/10 px-1.5 py-0.5 font-mono text-[9px] font-semibold text-emerald-400">
-                MOMENTUM
+        <div className="flex flex-col gap-3">
+          <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-zinc-800 bg-zinc-900/60 px-4 py-2.5">
+            <div className="flex flex-wrap items-center gap-2.5">
+              <span className="font-mono text-xs font-bold uppercase tracking-wider text-amber-400">
+                MARKET MOVERS
               </span>
-            }
-            meta={movers?.liveQuotesMeta ? `live quote count: ${movers.liveQuotesMeta.count}` : 'EOD patched'}
-          >
-            <MoverTable rows={gainers} direction="up" />
-          </TerminalPanel>
+              <span className="rounded border border-zinc-700 bg-zinc-800 px-2 py-0.5 font-mono text-[10px] font-bold text-zinc-300">
+                {moversIndex === 'nifty50' ? 'NIFTY 50' : 'NIFTY 500'}
+              </span>
+              {movers?.dataDate && (
+                <span className="rounded border border-amber-500/30 bg-amber-500/10 px-2 py-0.5 font-mono text-[10px] font-bold text-amber-300">
+                  DATA: {movers.dataDate}
+                </span>
+              )}
+              <span className="rounded border border-zinc-800 bg-zinc-950 px-2 py-0.5 font-mono text-[10px] text-zinc-400">
+                {marketSession.isWeekend ? 'WEEKEND (EOD CLOSE)' : movers?.liveQuotesMeta ? `LIVE INTRADAY (${movers.liveQuotesMeta.count} QUOTES)` : 'EOD CLOSE'}
+              </span>
+            </div>
 
-          <TerminalPanel
-            title="Top Losers (Nifty 500)"
-            icon={TrendingDown}
-            href="/movers"
-            badge={
-              <span className="rounded bg-red-500/10 px-1.5 py-0.5 font-mono text-[9px] font-semibold text-red-400">
-                PULLBACK
-              </span>
-            }
-            meta={movers?.liveQuotesMeta ? `live quote count: ${movers.liveQuotesMeta.count}` : 'EOD patched'}
-          >
-            <MoverTable rows={losers} direction="down" />
-          </TerminalPanel>
+            <div className="flex items-center gap-2">
+              {/* Segmented index toggle */}
+              <div className="inline-flex rounded-md border border-zinc-800 bg-zinc-950 p-0.5 font-mono text-xs">
+                <button
+                  type="button"
+                  onClick={() => setMoversIndex('nifty50')}
+                  className={`rounded px-3 py-1 text-[11px] font-bold transition-colors ${
+                    moversIndex === 'nifty50'
+                      ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 shadow-sm'
+                      : 'text-zinc-400 hover:text-zinc-200 border border-transparent'
+                  }`}
+                >
+                  NIFTY 50
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setMoversIndex('nifty500')}
+                  className={`rounded px-3 py-1 text-[11px] font-bold transition-colors ${
+                    moversIndex === 'nifty500'
+                      ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 shadow-sm'
+                      : 'text-zinc-400 hover:text-zinc-200 border border-transparent'
+                  }`}
+                >
+                  NIFTY 500
+                </button>
+              </div>
+
+              {/* Sync / Refresh Button */}
+              <button
+                type="button"
+                onClick={() => fetchMovers(true)}
+                disabled={moversLoading || moversSyncing}
+                className="flex items-center gap-1.5 rounded-md border border-zinc-800 bg-zinc-900 px-3 py-1 font-mono text-[11px] font-semibold text-zinc-300 hover:border-emerald-500/40 hover:text-emerald-400 transition-colors disabled:opacity-50"
+                title="Force refresh movers from underlying data"
+              >
+                <RefreshCw className={`h-3 w-3 ${moversSyncing || moversLoading ? 'animate-spin text-emerald-400' : 'text-zinc-400'}`} />
+                <span>{moversSyncing ? 'SYNCING...' : 'SYNC'}</span>
+              </button>
+
+              <Link
+                href="/movers"
+                className="flex items-center gap-1 rounded-md border border-zinc-800 bg-zinc-900 px-3 py-1 font-mono text-[11px] font-bold text-zinc-300 hover:border-zinc-700 hover:text-white transition-colors"
+                title="Open Advanced Market Movers Screener & Analytics"
+              >
+                <span>SCREENER</span>
+                <ChevronRight className="h-3 w-3 text-zinc-400" />
+              </Link>
+            </div>
+          </div>
+
+          <div className="grid gap-4 lg:grid-cols-2">
+            <TerminalPanel
+              title={`Top Gainers (${moversIndex === 'nifty50' ? 'Nifty 50' : 'Nifty 500'})`}
+              icon={TrendingUp}
+              href="/movers"
+              badge={
+                <span className="rounded bg-emerald-500/10 px-1.5 py-0.5 font-mono text-[9px] font-semibold text-emerald-400">
+                  MOMENTUM
+                </span>
+              }
+              meta={movers?.dataDate ? `SESSION: ${movers.dataDate}` : 'EOD'}
+            >
+              <MoverTable rows={gainers} direction="up" loading={moversLoading} />
+            </TerminalPanel>
+
+            <TerminalPanel
+              title={`Top Losers (${moversIndex === 'nifty50' ? 'Nifty 50' : 'Nifty 500'})`}
+              icon={TrendingDown}
+              href="/movers"
+              badge={
+                <span className="rounded bg-red-500/10 px-1.5 py-0.5 font-mono text-[9px] font-semibold text-red-400">
+                  PULLBACK
+                </span>
+              }
+              meta={movers?.dataDate ? `SESSION: ${movers.dataDate}` : 'EOD'}
+            >
+              <MoverTable rows={losers} direction="down" loading={moversLoading} />
+            </TerminalPanel>
+          </div>
         </div>
 
         {/* 7. Separated Open Positions Section (Dedicated Per Broker) */}
