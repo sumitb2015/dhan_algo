@@ -368,7 +368,10 @@ function GroupRow({ g, marginBase }: { g: PositionGroup; marginBase: number | nu
   return (
     <tr className="transition-colors hover:bg-zinc-800/50">
       <td className="px-3 py-2">
-        <div className="font-mono text-xs font-bold text-zinc-100">{g.underlying}</div>
+        <div className="flex items-center gap-1.5">
+          <span className="font-mono text-[9px] font-bold uppercase tracking-[0.1em] text-amber-400">{BROKER_LABELS[g.broker]}</span>
+          <span className="font-mono text-xs font-bold text-zinc-100">{g.underlying}</span>
+        </div>
         <div className="font-mono text-[10px] text-zinc-500">{g.expiry ?? 'unknown expiry'}{g.dte !== null ? ` · ${g.dte}d` : ''}</div>
       </td>
       <td className="px-3 py-2">
@@ -380,7 +383,10 @@ function GroupRow({ g, marginBase }: { g: PositionGroup; marginBase: number | nu
       <td className="px-3 py-2 text-right font-mono text-xs tabular-nums text-zinc-300">{fmtINRCompact(g.assignmentExposure)}</td>
       <td className="px-3 py-2 text-right">
         <div className="font-mono text-xs font-bold tabular-nums text-amber-400">{fmtINRCompact(g.marginBlocked)}</div>
-        <div className="font-mono text-[9px] text-zinc-500">{g.marginSource === 'live' ? 'live calc' : 'estimate'}{pctOfBase !== null ? ` · ${pctOfBase.toFixed(1)}%` : ''}</div>
+        <div className="font-mono text-[9px] text-zinc-500">
+          {g.marginSource === 'live' ? 'live calc' : g.marginSource === 'live-cross-broker' ? 'live via Dhan SPAN' : 'estimate'}
+          {pctOfBase !== null ? ` · ${pctOfBase.toFixed(1)}%` : ''}
+        </div>
       </td>
     </tr>
   );
@@ -678,10 +684,10 @@ export default function MarginAllocator() {
               <StatTile label="Total Utilized" value={fmtINRCompact(totals?.utilizedMargin ?? null)} tone="neutral" />
               <StatTile label="Margin Base" value={fmtINRCompact(totals?.totalBalance ?? null)} tone="accent" />
               <StatTile
-                label="Blocked by Structures (Dhan)"
+                label="Blocked by Structures"
                 value={fmtINRCompact(allocator?.groups.reduce((a, g) => a + g.marginBlocked, 0) ?? null)}
                 tone="neutral"
-                sub={`${allocator?.groups.length ?? 0} live structure${allocator?.groups.length === 1 ? '' : 's'}`}
+                sub={`${allocator?.groups.length ?? 0} live structure${allocator?.groups.length === 1 ? '' : 's'} · Dhan + Kotak`}
               />
             </div>
             <div className="grid gap-3 md:grid-cols-3">
@@ -695,20 +701,28 @@ export default function MarginAllocator() {
 
         {/* ─── 2. Margin blocked by structure ─────────────────────────────── */}
         <TerminalPanel
-          title="Margin Blocked by Position Structure (Dhan)"
+          title="Margin Blocked by Position Structure"
           icon={Layers}
-          meta={dhanFunds ? `Idle: ${fmtINRCompact(dhanFunds.availableBalance)}` : undefined}
+          meta={
+            <div className="flex items-center gap-2">
+              {allocator?.brokers.map((b) => (
+                <Badge key={b.broker} tone={b.connected ? 'emerald' : 'zinc'}>
+                  {BROKER_LABELS[b.broker]}{b.connected ? '' : ' OFFLINE'}
+                </Badge>
+              ))}
+            </div>
+          }
         >
           {!allocator?.connected ? (
-            <EmptyRow>Dhan session not active — authenticate to see live position structures.</EmptyRow>
+            <EmptyRow>No Dhan or Kotak session active — authenticate a broker to see live position structures.</EmptyRow>
           ) : !allocator.groups.length ? (
-            <EmptyRow>No open Dhan option positions right now — full margin base is idle.</EmptyRow>
+            <EmptyRow>No open Dhan/Kotak option positions right now — full margin base is idle.</EmptyRow>
           ) : (
             <div className="overflow-x-auto">
               <table className="w-full border-collapse text-left">
                 <thead>
                   <tr className="bg-zinc-800">
-                    <th className="px-3 py-2 text-xs font-bold text-white">Underlying / Expiry</th>
+                    <th className="px-3 py-2 text-xs font-bold text-white">Broker / Underlying / Expiry</th>
                     <th className="px-3 py-2 text-xs font-bold text-white">Structure</th>
                     <th className="px-3 py-2 text-xs font-bold text-white">Legs</th>
                     <th className="px-3 py-2 text-xs font-bold text-white text-right">Credit Collected</th>
@@ -718,7 +732,11 @@ export default function MarginAllocator() {
                 </thead>
                 <tbody className="divide-y divide-zinc-800 font-mono text-xs">
                   {allocator.groups.map((g, i) => (
-                    <GroupRow key={`${g.underlying}-${g.expiry}-${i}`} g={g} marginBase={dhanFunds?.totalBalance ?? null} />
+                    <GroupRow
+                      key={`${g.broker}-${g.underlying}-${g.expiry}-${i}`}
+                      g={g}
+                      marginBase={allocator.brokers.find((b) => b.broker === g.broker)?.funds?.totalBalance ?? null}
+                    />
                   ))}
                 </tbody>
                 <tfoot>
@@ -744,7 +762,7 @@ export default function MarginAllocator() {
               <span>
                 {allocator.unparseable.length} position{allocator.unparseable.length === 1 ? '' : 's'} could not be classified
                 (equity/futures or unrecognised symbol shape) — excluded from the table above, not from margin utilized:{' '}
-                {allocator.unparseable.map((u) => u.tradingSymbol).join(', ')}
+                {allocator.unparseable.map((u) => `${BROKER_LABELS[u.broker]} ${u.tradingSymbol}`).join(', ')}
               </span>
             </div>
           ) : null}

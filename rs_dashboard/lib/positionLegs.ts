@@ -149,6 +149,36 @@ export function parseTradingSymbol(symbol: string): ParsedSymbol | null {
     };
   }
 
+  // Kotak Neo's own /quick/user/positions trdSym — a THIRD shape, purely
+  // numeric, distinct from the DD-MON-YY compact form above (observed live:
+  // "NIFTY2692224600CE" -> 2026-09-22, strike 24600):
+  //   SYMBOL + YY(2) + M(1-2 digits, no leading zero) + DD(2) + STRIKE + CE|PE
+  // Month width is ambiguous by construction — September is one digit,
+  // October-December are two — so both widths are tried and, when more than
+  // one yields a calendar-valid date, whichever lands closest to today wins:
+  // every strategy this repo runs holds near-week/near-month positions
+  // (CLAUDE.md), never a contract many months out, so the far reading is
+  // always the wrong one when both parse.
+  const numeric = /^([A-Z]+?)(\d+)(CE|PE)$/.exec(s);
+  if (numeric) {
+    const [, root, digits, type] = numeric;
+    const now = Date.now();
+    let best: { expiry: string; strike: number; diffMs: number } | null = null;
+    for (const monthLen of [1, 2]) {
+      const strikeStart = 2 + monthLen + 2;
+      if (digits.length < strikeStart + 3) continue; // leave room for a plausible strike
+      const yy = digits.slice(0, 2);
+      const month = parseInt(digits.slice(2, 2 + monthLen), 10);
+      const day = parseInt(digits.slice(2 + monthLen, strikeStart), 10);
+      const strike = parseFloat(digits.slice(strikeStart));
+      if (!(month >= 1 && month <= 12) || !(day >= 1 && day <= 31) || !(strike > 0)) continue;
+      const expiry = `20${yy}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+      const diffMs = Math.abs(new Date(expiry).getTime() - now);
+      if (!best || diffMs < best.diffMs) best = { expiry, strike, diffMs };
+    }
+    if (best) return { underlying: root, strike: best.strike, type: type as OptType, expiry: best.expiry };
+  }
+
   return null;
 }
 
