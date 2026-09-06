@@ -33,6 +33,7 @@ import { closeLeg } from '@/lib/legClose';
 import { placeOptionOrder } from '@/lib/optionOrder';
 import { fetchStrikeMap } from '@/lib/strikeLookup';
 import { legKey } from '@/components/analytics/PositionsLegTable';
+import NavBar from './NavBar';
 import type { ClosePct } from '@/lib/partialQty';
 import { isIntradayProduct } from '@/lib/positionProduct';
 import type { Suggestion } from '@/app/api/options/suggestions/route';
@@ -929,6 +930,9 @@ export default function PositionsAnalysis({ underlying }: { underlying: Analytic
             className="ml-auto flex items-center gap-1.5 rounded-lg border border-zinc-800 bg-zinc-900/60 px-2.5 py-1 text-xs font-medium text-zinc-400 transition-all hover:border-zinc-700 hover:bg-zinc-850 hover:text-white">
             <ArrowLeft className="h-3 w-3" /> Back to Positions
           </Link>
+
+          <span className="w-px h-5 bg-zinc-800 shrink-0" />
+          <NavBar />
         </div>
       </div>
 

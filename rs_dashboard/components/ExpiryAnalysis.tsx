@@ -20,6 +20,7 @@ import {
 import { TrendingUp } from 'lucide-react';
 import type { WeeklyBucket, DailyStats, DailyRow } from '@/app/api/expiry-analysis/route';
 import { cachedFetch } from '@/lib/clientCache';
+import NavBar from './NavBar';
 
 // ─── Nifty 50 constituents + index ────────────────────────────────────────────
 const SYMBOL_OPTIONS: { value: string; label: string; group: string }[] = [
@@ -629,6 +630,8 @@ export default function ExpiryAnalysis() {
             DATA: {dataEnd}
           </span>
         )}
+        <span className="w-px h-5 bg-zinc-800 shrink-0" />
+        <NavBar />
       </header>
 
       <main className="p-4 space-y-4 mx-auto">

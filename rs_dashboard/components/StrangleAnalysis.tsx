@@ -8,6 +8,7 @@ import {
 } from 'recharts';
 import { getCached, setCached } from '@/lib/clientCache';
 import StrangleValidityReportModal from '@/components/StrangleValidityReportModal';
+import NavBar from './NavBar';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -638,16 +639,25 @@ export default function StrangleAnalysis() {
   // ── Loading & Error States ──────────────────────────────────────────────────
   if (loadState === 'loading') {
     return (
-      <div className="min-h-screen bg-zinc-950 flex flex-col items-center justify-center gap-3">
-        <div className="w-8 h-8 border-2 border-zinc-700 border-t-emerald-400 rounded-full animate-spin" />
-        <p className="text-sm text-zinc-400 font-medium">Loading strangle analysis…</p>
+      <div className="min-h-screen bg-zinc-950 flex flex-col">
+        <div className="flex items-center justify-end px-6 py-2 border-b border-zinc-800">
+          <NavBar />
+        </div>
+        <div className="flex-1 flex flex-col items-center justify-center gap-3">
+          <div className="w-8 h-8 border-2 border-zinc-700 border-t-emerald-400 rounded-full animate-spin" />
+          <p className="text-sm text-zinc-400 font-medium">Loading strangle analysis…</p>
+        </div>
       </div>
     );
   }
 
   if (loadState === 'not_generated') {
     return (
-      <div className="min-h-screen bg-zinc-950 flex flex-col items-center justify-center p-6">
+      <div className="min-h-screen bg-zinc-950 flex flex-col">
+        <div className="flex items-center justify-end px-6 py-2 border-b border-zinc-800">
+          <NavBar />
+        </div>
+        <div className="flex-1 flex flex-col items-center justify-center p-6">
         <div className="max-w-md w-full relative bg-zinc-900/70 border border-zinc-800 rounded-2xl p-8 text-center overflow-hidden shadow-2xl">
           <div className="pointer-events-none absolute -top-24 left-1/2 -translate-x-1/2 w-[400px] h-[200px] bg-sky-500/[0.08] blur-3xl rounded-full" />
           <div className="relative">
@@ -681,14 +691,20 @@ export default function StrangleAnalysis() {
             )}
           </div>
         </div>
+        </div>
       </div>
     );
   }
 
   if (loadState === 'error' || !fullData || !data) {
     return (
-      <div className="min-h-screen bg-zinc-950 flex items-center justify-center p-6 text-rose-400 text-sm">
-        Failed to load strangle analysis data. Please check server logs or click regenerate.
+      <div className="min-h-screen bg-zinc-950 flex flex-col">
+        <div className="flex items-center justify-end px-6 py-2 border-b border-zinc-800">
+          <NavBar />
+        </div>
+        <div className="flex-1 flex items-center justify-center p-6 text-rose-400 text-sm">
+          Failed to load strangle analysis data. Please check server logs or click regenerate.
+        </div>
       </div>
     );
   }
@@ -879,6 +895,9 @@ export default function StrangleAnalysis() {
               Regenerate
             </button>
           )}
+
+          <span className="w-px h-5 bg-zinc-800 shrink-0" />
+          <NavBar />
         </div>
       </div>
 

@@ -28,6 +28,7 @@ import {
 import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group';
 import { AlertTriangle, Plus, RefreshCw, RotateCcw, ShoppingBasket, Trash2 } from 'lucide-react';
 import { cn } from '@/lib/utils';
+import NavBar from './NavBar';
 
 const UNDERLYING = 'NIFTY';
 // PREVIEW ONLY — scales the payoff curve/heatmap for the moment before
@@ -625,6 +626,9 @@ export default function OptionStrats() {
               <TabsTrigger value="graph">Graph</TabsTrigger>
             </TabsList>
           </Tabs>
+
+          <span className="w-px h-5 bg-zinc-800 shrink-0" />
+          <NavBar />
         </div>
       </div>
 

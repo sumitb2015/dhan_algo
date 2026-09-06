@@ -2,6 +2,7 @@
 
 import React, { useState, useEffect } from 'react';
 import OptionsPremiumBarTab from './OptionsPremiumBarTab';
+import NavBar from './NavBar';
 
 const UNDERLYING = 'NIFTY';
 
@@ -70,6 +71,9 @@ export default function OptionsPremiumBarPage() {
               {expiries.map(e => <option key={e} value={e}>{e}</option>)}
             </select>
           </div>
+
+          <span className="w-px h-5 bg-zinc-800 shrink-0" />
+          <NavBar />
         </div>
       </div>
 

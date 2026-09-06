@@ -21,6 +21,7 @@ import ChainTable from './crudeoil/ChainTable';
 import ConfirmDialog from './crudeoil/ConfirmDialog';
 import MarketSnapshot from './crudeoil/MarketSnapshot';
 import TradeTicketBar from './crudeoil/TradeTicketBar';
+import NavBar from './NavBar';
 import {
   computeMaxPain, daysToExpiry, fmtExpiryLong, fmtExpiryShort, fmtNum,
   parseStrikeEntries, pctColor, pctSign, sideIV, todayIso,
@@ -1256,6 +1257,9 @@ export default function CrudeOilOptions() {
               <ArrowLeft />
               Nifty Options
             </Link>
+
+            <span className="w-px h-5 bg-zinc-800 shrink-0" />
+            <NavBar />
           </div>
         </header>
 

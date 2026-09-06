@@ -20,6 +20,7 @@ import { Badge } from '@/components/ui/badge';
 import { Card } from '@/components/ui/card';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { cn } from '@/lib/utils';
+import NavBar from './NavBar';
 
 // ── Types ────────────────────────────────────────────────────────────
 
@@ -387,6 +388,9 @@ export default function OptionsDeltaPage() {
             <Download className="h-3.5 w-3.5" />
             Export
           </Button>
+
+          <span className="w-px h-5 bg-zinc-800 shrink-0" />
+          <NavBar />
         </div>
       </div>
 

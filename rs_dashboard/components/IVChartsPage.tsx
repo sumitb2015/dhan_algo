@@ -6,6 +6,7 @@ import {
   Tooltip, ResponsiveContainer, ReferenceLine, Brush,
 } from 'recharts';
 import { cachedFetch } from '@/lib/clientCache';
+import NavBar from './NavBar';
 
 // ─── Palette ──────────────────────────────────────────────────────
 // Categorical pair validated for dark surfaces (OKLCH L in 0.48–0.67,
@@ -401,12 +402,16 @@ export default function IVChartsPage() {
             </div>
           </div>
 
-          {updatedAt && (
-            <span className="flex items-center gap-1.5 text-[10px] font-semibold text-zinc-500">
-              <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
-              Updated {updatedAt}
-            </span>
-          )}
+          <div className="flex items-center gap-3">
+            {updatedAt && (
+              <span className="flex items-center gap-1.5 text-[10px] font-semibold text-zinc-500">
+                <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
+                Updated {updatedAt}
+              </span>
+            )}
+            <span className="w-px h-5 bg-zinc-800 shrink-0" />
+            <NavBar />
+          </div>
         </div>
 
         {/* Stays up for any past session, not just the first fallback response —

@@ -6,6 +6,7 @@ import StrikeHistoryTab, {
   type HoverContext,
   type StrikeSelectionMode,
 } from './StrikeHistoryTab';
+import NavBar from './NavBar';
 
 const UNDERLYING = 'NIFTY';
 
@@ -306,6 +307,9 @@ export default function StrikeHistoryPage() {
               </button>
             ))}
           </div>
+
+          <span className="w-px h-5 bg-zinc-800 shrink-0" />
+          <NavBar />
         </div>
       </div>
 

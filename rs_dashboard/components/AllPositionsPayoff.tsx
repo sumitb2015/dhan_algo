@@ -21,6 +21,7 @@ import { buildInstrumentIndex, type InstrumentRow } from '@/lib/positionLegs';
 import { useUnderlyingPayoff } from '@/lib/useUnderlyingPayoff';
 import { todayIso, fmtExpiryShort } from '@/components/crudeoil/format';
 import type { ScalperPosition } from '@/lib/zerodhaShape';
+import NavBar from './NavBar';
 
 import PositionsPayoffChart, { pnlAt } from '@/components/analytics/PositionsPayoffChart';
 import { StatChip } from '@/components/analytics/PayoffMetricStrip';
@@ -314,6 +315,9 @@ export default function AllPositionsPayoff() {
             className="flex items-center gap-1 text-xs font-semibold text-zinc-400 hover:text-white">
             Positions Analytics <ArrowRight className="h-3 w-3" />
           </Link>
+
+          <span className="w-px h-5 bg-zinc-800 shrink-0" />
+          <NavBar />
         </div>
       </div>
 
