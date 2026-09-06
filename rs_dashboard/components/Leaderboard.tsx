@@ -64,6 +64,9 @@ function Sparkline({ data }: { data: number[] }) {
   const last = data[data.length - 1];
   const first = data[0];
   const isUp = last >= first;
+  // Series colour tied to actual price direction — the CLAUDE.md "saturated
+  // data colour" exception, not chrome, so it stays a direct hex pair rather
+  // than the page's amber accent.
   const color = isUp ? '#10b981' : '#ef4444';
   const lastX = pad + ((data.length - 1) / denom) * (width - pad * 2);
   const lastY = pad + (1 - (last - min) / range) * (height - pad * 2);
@@ -234,10 +237,10 @@ export default function Leaderboard({
   const totalPages = Math.max(1, Math.ceil(processedData.length / pageSize));
 
   const SortIcon = ({ field }: { field: SortField }) => {
-    if (sortField !== field) return <ChevronDown className="inline h-3 w-3 ml-0.5 opacity-20" />;
+    if (sortField !== field) return <ChevronDown className="inline h-3 w-3 ml-0.5 text-zinc-500" />;
     return sortOrder === 'asc'
-      ? <ChevronUp className="inline h-3.5 w-3.5 ml-0.5 text-emerald-400" />
-      : <ChevronDown className="inline h-3.5 w-3.5 ml-0.5 text-emerald-400" />;
+      ? <ChevronUp className="inline h-3.5 w-3.5 ml-0.5 text-amber-400" />
+      : <ChevronDown className="inline h-3.5 w-3.5 ml-0.5 text-amber-400" />;
   };
 
   const gradeStyle: Record<string, string> = {
@@ -247,11 +250,12 @@ export default function Leaderboard({
     D: 'bg-red-500/10 text-red-400 border border-red-500/25',
   };
 
+  // Flat fills, not gradients — the Bloomberg style has no gradients anywhere.
   const scoreBarStyle = (score: number) => {
-    if (score >= 80) return 'bg-gradient-to-r from-emerald-500 to-teal-400';
-    if (score >= 60) return 'bg-gradient-to-r from-blue-500 to-indigo-400';
+    if (score >= 80) return 'bg-emerald-500';
+    if (score >= 60) return 'bg-blue-500';
     if (score >= 40) return 'bg-zinc-500';
-    return 'bg-gradient-to-r from-red-600 to-orange-500';
+    return 'bg-red-500';
   };
 
   const pctColor = (val: number) => val >= 0 ? 'text-emerald-400' : 'text-red-400';
@@ -265,9 +269,9 @@ export default function Leaderboard({
   };
 
   return (
-    <div className="flex flex-col h-full rounded-2xl border border-zinc-800/80 bg-zinc-950/60 backdrop-blur-md overflow-hidden">
+    <div className="flex flex-col h-full rounded-xl border border-zinc-800 bg-zinc-900/70 overflow-hidden">
       {/* ── Quick Presets ── */}
-      <div className="flex-none px-3 pt-3 pb-2 border-b border-zinc-800/60 bg-zinc-900/10">
+      <div className="flex-none px-3 pt-3 pb-2 border-b border-amber-500/25 bg-zinc-950/60">
         <div className="flex items-center gap-1.5 flex-wrap">
           {QUICK_PRESETS.map((preset) => (
             <Button
@@ -278,8 +282,8 @@ export default function Leaderboard({
               size="xs"
               className={`gap-1 rounded-lg text-[11px] font-semibold h-6 ${
                 activePreset === preset.id
-                  ? 'bg-emerald-500/15 text-emerald-400 border-emerald-500/30 hover:bg-emerald-500/20'
-                  : 'bg-zinc-900/60 text-zinc-500 border-zinc-800 hover:text-zinc-300 hover:border-zinc-700'
+                  ? 'bg-amber-500/15 text-amber-400 border-amber-500/30 hover:bg-amber-500/20'
+                  : 'bg-zinc-900 text-zinc-500 border-zinc-800 hover:text-zinc-300 hover:border-zinc-700'
               }`}
             >
               {preset.icon}
@@ -334,7 +338,7 @@ export default function Leaderboard({
               placeholder="Search..."
               value={search}
               onChange={(e) => { setSearch(e.target.value); setPage(1); }}
-              className="pl-8 h-7 border-zinc-800 bg-zinc-900/60 text-white placeholder:text-zinc-600 text-xs rounded-lg focus-visible:ring-emerald-500/40"
+              className="pl-8 h-7 border-zinc-800 bg-zinc-900/60 text-white placeholder:text-zinc-600 text-xs rounded-lg focus-visible:ring-amber-500/40"
             />
           </div>
 
@@ -361,7 +365,7 @@ export default function Leaderboard({
           </div>
 
           <Select value={selectedSector} onValueChange={(v) => { if (v) { setSelectedSector(v); setPage(1); } }}>
-            <SelectTrigger className="h-7 w-auto min-w-[110px] border-zinc-800 bg-zinc-900/60 text-zinc-300 text-xs rounded-lg focus-visible:ring-emerald-500/40">
+            <SelectTrigger className="h-7 w-auto min-w-[110px] border-zinc-800 bg-zinc-900/60 text-zinc-300 text-xs rounded-lg focus-visible:ring-amber-500/40">
               <SelectValue placeholder="All Sectors" />
             </SelectTrigger>
             <SelectContent>
@@ -373,7 +377,7 @@ export default function Leaderboard({
           </Select>
 
           <Select value={selectedRating} onValueChange={(v) => { if (v) { setSelectedRating(v); setPage(1); } }}>
-            <SelectTrigger className="h-7 w-auto min-w-[100px] border-zinc-800 bg-zinc-900/60 text-zinc-300 text-xs rounded-lg focus-visible:ring-emerald-500/40">
+            <SelectTrigger className="h-7 w-auto min-w-[100px] border-zinc-800 bg-zinc-900/60 text-zinc-300 text-xs rounded-lg focus-visible:ring-amber-500/40">
               <SelectValue placeholder="All Grades" />
             </SelectTrigger>
             <SelectContent>
@@ -391,32 +395,34 @@ export default function Leaderboard({
       <div className="flex-1 min-h-0 overflow-auto">
         <table className="w-full text-left border-collapse" style={{ minWidth: 720 }}>
           <thead className="sticky top-0 z-10">
-            <tr className="border-b border-zinc-800/80 bg-zinc-950/95 backdrop-blur-sm text-[10px] font-semibold uppercase tracking-wider text-zinc-500 select-none">
+            {/* text-xs font-bold text-white on solid bg-zinc-800 — CLAUDE.md's
+                dashboard table-header rule, not specific to this page. */}
+            <tr className="bg-zinc-800 text-xs font-bold text-white uppercase tracking-wide select-none">
               <th className="py-2.5 px-2 w-8 text-center">★</th>
-              <th className="py-2.5 px-3 cursor-pointer hover:text-zinc-200 transition-colors whitespace-nowrap" onClick={() => handleSort('symbol')}>
+              <th className="py-2.5 px-3 cursor-pointer hover:text-amber-300 transition-colors whitespace-nowrap" onClick={() => handleSort('symbol')}>
                 Symbol <SortIcon field="symbol" />
               </th>
-              <th className="py-2.5 px-2 text-center cursor-pointer hover:text-zinc-200 transition-colors" onClick={() => handleSort('rsRank')} title="RS Rank (1 = strongest)">
+              <th className="py-2.5 px-2 text-center cursor-pointer hover:text-amber-300 transition-colors" onClick={() => handleSort('rsRank')} title="RS Rank (1 = strongest)">
                 Rank <SortIcon field="rsRank" />
               </th>
-              <th className="py-2.5 px-2 text-center cursor-pointer hover:text-zinc-200 transition-colors" onClick={() => handleSort('rsScore')}>
+              <th className="py-2.5 px-2 text-center cursor-pointer hover:text-amber-300 transition-colors" onClick={() => handleSort('rsScore')}>
                 Score <SortIcon field="rsScore" />
               </th>
               <th className="py-2.5 px-2 text-center">Grade</th>
-              <th className="py-2.5 px-2 text-center cursor-pointer hover:text-zinc-200 transition-colors" onClick={() => handleSort('rsChange1W')} title="RS momentum: 5-day RS change">
+              <th className="py-2.5 px-2 text-center cursor-pointer hover:text-amber-300 transition-colors" onClick={() => handleSort('rsChange1W')} title="RS momentum: 5-day RS change">
                 RS Mom <SortIcon field="rsChange1W" />
               </th>
-              <th className="py-2.5 px-2 text-right cursor-pointer hover:text-zinc-200 transition-colors" onClick={() => handleSort('latestClose')}>
+              <th className="py-2.5 px-2 text-right cursor-pointer hover:text-amber-300 transition-colors" onClick={() => handleSort('latestClose')}>
                 Close <SortIcon field="latestClose" />
               </th>
-              <th className="py-2.5 px-2 text-right cursor-pointer hover:text-zinc-200 transition-colors" onClick={() => handleSort('priceChange1D')}>
+              <th className="py-2.5 px-2 text-right cursor-pointer hover:text-amber-300 transition-colors" onClick={() => handleSort('priceChange1D')}>
                 1D <SortIcon field="priceChange1D" />
               </th>
-              <th className="py-2.5 px-2 text-right cursor-pointer hover:text-zinc-200 transition-colors" onClick={() => handleSort('priceChange3M')}>
+              <th className="py-2.5 px-2 text-right cursor-pointer hover:text-amber-300 transition-colors" onClick={() => handleSort('priceChange3M')}>
                 3M <SortIcon field="priceChange3M" />
               </th>
               <th
-                className="py-2.5 px-2 text-right cursor-pointer hover:text-zinc-200 transition-colors whitespace-nowrap"
+                className="py-2.5 px-2 text-right cursor-pointer hover:text-amber-300 transition-colors whitespace-nowrap"
                 onClick={() => handleSort('pctFrom52WHigh')}
                 title="% below 52-week high (0% = at 52W high)"
               >
@@ -442,8 +448,8 @@ export default function Leaderboard({
                   <tr
                     key={item.symbol}
                     onClick={() => onSelectSymbol(item.symbol)}
-                    className={`cursor-pointer hover:bg-zinc-900/40 transition-all duration-100 select-none ${
-                      isSelected ? 'bg-emerald-950/20 border-l-2 border-l-emerald-500' : 'border-l-2 border-l-transparent'
+                    className={`cursor-pointer hover:bg-zinc-800/40 transition-colors duration-100 select-none ${
+                      isSelected ? 'bg-amber-500/10 border-l-2 border-l-amber-500' : 'border-l-2 border-l-transparent'
                     }`}
                   >
                     {/* Favorite */}
@@ -458,7 +464,7 @@ export default function Leaderboard({
                       <div className="flex items-center gap-1.5">
                         <span className="font-bold text-white tracking-wide text-sm leading-none">{item.symbol}</span>
                         {item.isRSNewHigh && (
-                          <span className="inline-flex items-center gap-0.5 text-[9px] font-black px-1.5 py-0.5 rounded bg-purple-500/15 text-purple-400 border border-purple-500/25 uppercase tracking-wide leading-none">
+                          <span className="inline-flex items-center gap-0.5 text-[9px] font-bold px-1.5 py-0.5 rounded bg-purple-500/15 text-purple-400 border border-purple-500/25 uppercase tracking-wide leading-none">
                             <Zap className="h-2.5 w-2.5" />NH
                           </span>
                         )}
@@ -476,7 +482,7 @@ export default function Leaderboard({
                     {/* RS Score */}
                     <td className="py-2.5 px-2">
                       <div className="flex flex-col items-center gap-1 min-w-[52px]">
-                        <span className="font-black text-white text-sm leading-none">{item.rsScore}</span>
+                        <span className="font-bold text-white text-sm leading-none">{item.rsScore}</span>
                         <div className="w-full h-1 bg-zinc-800 rounded-full overflow-hidden">
                           <div className={`h-full rounded-full ${scoreBarStyle(item.rsScore)}`} style={{ width: `${item.rsScore}%` }} />
                         </div>
@@ -485,7 +491,7 @@ export default function Leaderboard({
 
                     {/* Grade */}
                     <td className="py-2.5 px-2 text-center">
-                      <Badge className={`text-[11px] font-black px-2 h-5 rounded-full ${gradeStyle[item.rsRating]}`}>
+                      <Badge className={`text-[11px] font-bold px-2 h-5 rounded-full ${gradeStyle[item.rsRating]}`}>
                         {item.rsRating}
                       </Badge>
                     </td>
@@ -518,7 +524,7 @@ export default function Leaderboard({
                       <div className="flex flex-col items-end gap-0.5">
                         <span>{pctFrom52W >= 0 ? '0.0%' : `${pctFrom52W.toFixed(1)}%`}</span>
                         {pctFrom52W >= -2 && (
-                          <span className="text-[9px] text-emerald-500/80 leading-none">@ hi</span>
+                          <span className="text-[9px] text-emerald-400 leading-none">@ hi</span>
                         )}
                       </div>
                     </td>

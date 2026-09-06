@@ -72,9 +72,9 @@ export default function RSChart({ symbol, indexType, lookback }: RSChartProps) {
 
   if (!symbol) {
     return (
-      <div className="flex flex-col items-center justify-center rounded-2xl border border-zinc-800/80 bg-zinc-950/60 backdrop-blur-md p-10 text-center text-zinc-500 min-h-[350px] w-full">
-        <div className="mb-4 p-3.5 rounded-full bg-zinc-900/60 border border-zinc-850 shadow-inner">
-          <BarChart2 className="h-7 w-7 text-emerald-500/85 animate-pulse" />
+      <div className="flex flex-col items-center justify-center rounded-xl border border-zinc-800 bg-zinc-900/70 p-10 text-center text-zinc-500 min-h-[350px] w-full">
+        <div className="mb-4 p-3.5 rounded-full bg-zinc-900 border border-zinc-800">
+          <BarChart2 className="h-7 w-7 text-amber-400 animate-pulse" />
         </div>
         <p className="text-sm font-semibold text-zinc-300">Select a Stock to Begin Analysis</p>
         <p className="text-xs text-zinc-500 max-w-sm mt-1.5 leading-relaxed">
@@ -92,7 +92,7 @@ export default function RSChart({ symbol, indexType, lookback }: RSChartProps) {
       const rsLineFormatted = `${rsLineVal >= 0 ? '+' : ''}${(rsLineVal * 100).toFixed(2)}%`;
 
       return (
-        <div className="rounded-xl border border-zinc-800 bg-zinc-950/95 p-3.5 shadow-2xl backdrop-blur-md text-xs font-mono text-zinc-300 border-l-4 border-l-emerald-500">
+        <div className="rounded-xl border border-zinc-800 bg-zinc-950/95 p-3.5 shadow-2xl backdrop-blur-md text-xs font-mono text-zinc-300 border-l-4 border-l-amber-500">
           <div className="border-b border-zinc-850 pb-2 mb-2 font-sans font-bold text-white text-xs">
             {new Date(point.date).toLocaleDateString('en-US', { day: 'numeric', month: 'short', year: 'numeric' })}
           </div>
@@ -123,16 +123,16 @@ export default function RSChart({ symbol, indexType, lookback }: RSChartProps) {
   };
 
   return (
-    <div className="flex flex-col rounded-2xl border border-zinc-800/80 bg-zinc-950/60 backdrop-blur-md p-6 overflow-hidden w-full shadow-lg">
+    <div className="flex flex-col rounded-xl border border-zinc-800 bg-zinc-900/70 shadow-sm p-6 overflow-hidden w-full">
       {/* Chart Header */}
-      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 mb-6 pb-4 border-b border-zinc-900/60">
+      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 mb-6 pb-4 border-b border-amber-500/25">
         <div className="flex items-start gap-3">
-          <div className="p-2 bg-emerald-500/10 border border-emerald-500/20 rounded-xl text-emerald-400 mt-0.5">
+          <div className="p-2 bg-amber-500/10 border border-amber-500/25 rounded-lg text-amber-400 mt-0.5">
             <TrendingUp className="h-5 w-5" />
           </div>
           <div>
             <div className="flex items-baseline gap-2">
-              <h2 className="text-xl font-black text-white tracking-wide uppercase">{symbol}</h2>
+              <h2 className="text-xl font-bold text-white tracking-wide uppercase">{symbol}</h2>
               <span className="text-xs text-zinc-500 font-semibold font-mono">
                 vs {indexType === 'nifty50' ? 'NIFTY 50 INDEX' : 'NIFTY 500 INDEX'}
               </span>
@@ -167,12 +167,12 @@ export default function RSChart({ symbol, indexType, lookback }: RSChartProps) {
         {/* View Mode & Period Selector Group */}
         <div className="flex flex-wrap items-center gap-3 self-start sm:self-auto">
           {/* View Switcher */}
-          <div className="flex items-center bg-zinc-900/60 border border-zinc-850 p-1 rounded-xl shadow-inner">
+          <div className="flex items-center bg-zinc-900 border border-zinc-800 p-1 rounded-lg">
             <button
               onClick={() => setViewMode('split')}
               className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-bold rounded-lg transition-all duration-150 active:scale-95 ${
                 viewMode === 'split'
-                  ? 'bg-zinc-800 text-white border border-zinc-700 shadow'
+                  ? 'bg-amber-500/15 text-amber-400 border border-amber-500/30 shadow'
                   : 'text-zinc-500 hover:text-zinc-300'
               }`}
               title="Split View (Stacked Charts)"
@@ -184,7 +184,7 @@ export default function RSChart({ symbol, indexType, lookback }: RSChartProps) {
               onClick={() => setViewMode('overlay')}
               className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-bold rounded-lg transition-all duration-150 active:scale-95 ${
                 viewMode === 'overlay'
-                  ? 'bg-zinc-800 text-white border border-zinc-700 shadow'
+                  ? 'bg-amber-500/15 text-amber-400 border border-amber-500/30 shadow'
                   : 'text-zinc-500 hover:text-zinc-300'
               }`}
               title="Overlay View (Dual Axis Chart)"
@@ -196,7 +196,7 @@ export default function RSChart({ symbol, indexType, lookback }: RSChartProps) {
               onClick={() => setViewMode('ratio')}
               className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-bold rounded-lg transition-all duration-150 active:scale-95 ${
                 viewMode === 'ratio'
-                  ? 'bg-zinc-800 text-white border border-zinc-700 shadow'
+                  ? 'bg-amber-500/15 text-amber-400 border border-amber-500/30 shadow'
                   : 'text-zinc-500 hover:text-zinc-300'
               }`}
               title="Ratio View (Simple Stock / Index Ratio)"
@@ -207,14 +207,14 @@ export default function RSChart({ symbol, indexType, lookback }: RSChartProps) {
           </div>
 
           {/* Period Selector */}
-          <div className="flex items-center gap-1 bg-zinc-900/60 border border-zinc-850 p-1.5 rounded-xl shadow-inner">
+          <div className="flex items-center gap-1 bg-zinc-900 border border-zinc-800 p-1.5 rounded-lg">
             {(['1w', '1m', '3m', '6m', '1y', '2y'] as const).map((p) => (
               <button
                 key={p}
                 onClick={() => setPeriod(p)}
                 className={`px-3 py-1 text-xs font-bold rounded-lg uppercase tracking-wider transition-all duration-150 active:scale-95 ${
                   period === p
-                    ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 shadow'
+                    ? 'bg-amber-500/15 text-amber-400 border border-amber-500/30 shadow'
                     : 'text-zinc-500 hover:text-zinc-300'
                 }`}
               >
@@ -240,7 +240,7 @@ export default function RSChart({ symbol, indexType, lookback }: RSChartProps) {
       {loading ? (
         <div className="flex items-center justify-center min-h-[380px] w-full">
           <div className="flex flex-col items-center gap-3">
-            <RefreshCw className="h-7 w-7 text-emerald-500 animate-spin" />
+            <RefreshCw className="h-7 w-7 text-amber-400 animate-spin" />
             <span className="text-zinc-500 text-xs font-medium">Re-aligning prices and calculating Mansfield line...</span>
           </div>
         </div>
@@ -466,7 +466,7 @@ export default function RSChart({ symbol, indexType, lookback }: RSChartProps) {
             {/* RS Status */}
             <div className={`rounded-xl border px-3 py-2.5 text-xs ${summary.currentRS >= 0 ? 'border-emerald-500/25 bg-emerald-950/20' : 'border-red-500/20 bg-red-950/10'}`}>
               <div className="text-zinc-500 text-[10px] uppercase tracking-wide font-semibold mb-1">RS Status</div>
-              <div className={`font-black text-sm ${summary.currentRS >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+              <div className={`font-bold text-sm ${summary.currentRS >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
                 {summary.currentRS >= 0 ? 'Outperforming' : 'Underperforming'}
               </div>
               <div className="text-zinc-500 text-[10px] mt-0.5">
@@ -481,7 +481,7 @@ export default function RSChart({ symbol, indexType, lookback }: RSChartProps) {
               : 'border-zinc-700/40 bg-zinc-900/30'
             }`}>
               <div className="text-zinc-500 text-[10px] uppercase tracking-wide font-semibold mb-1">RS Strength</div>
-              <div className={`font-black text-sm ${
+              <div className={`font-bold text-sm ${
                 Math.abs(summary.currentRS) > 0.15 ? 'text-amber-400'
                 : Math.abs(summary.currentRS) > 0.05 ? 'text-blue-400'
                 : 'text-zinc-400'
@@ -500,7 +500,7 @@ export default function RSChart({ symbol, indexType, lookback }: RSChartProps) {
               : 'border-zinc-700/40 bg-zinc-900/30'
             }`}>
               <div className="text-zinc-500 text-[10px] uppercase tracking-wide font-semibold mb-1">Price vs RS</div>
-              <div className={`font-black text-sm ${
+              <div className={`font-bold text-sm ${
                 summary.priceChangePct >= 0 && summary.currentRS >= 0 ? 'text-emerald-400'
                 : summary.priceChangePct < 0 && summary.currentRS >= 0 ? 'text-blue-400'
                 : 'text-zinc-400'
@@ -523,7 +523,7 @@ export default function RSChart({ symbol, indexType, lookback }: RSChartProps) {
               : 'border-zinc-700/40 bg-zinc-900/30'
             }`}>
               <div className="text-zinc-500 text-[10px] uppercase tracking-wide font-semibold mb-1">Signal</div>
-              <div className={`font-black text-sm leading-tight ${
+              <div className={`font-bold text-sm leading-tight ${
                 summary.currentRS >= 0.05 ? 'text-emerald-400'
                 : summary.priceChangePct < 0 && summary.currentRS >= 0 ? 'text-cyan-400'
                 : summary.currentRS < -0.1 ? 'text-red-400'

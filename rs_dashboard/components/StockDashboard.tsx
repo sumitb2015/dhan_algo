@@ -213,19 +213,22 @@ export default function StockDashboard() {
     : null;
 
   return (
-    <div className="flex flex-col h-screen overflow-hidden bg-black text-zinc-150">
-      {/* ── Header ── */}
-      <header className="flex-none w-full border-b border-zinc-900 bg-zinc-950/60 backdrop-blur-md px-5 py-2.5 flex items-center gap-4 z-20 flex-wrap">
+    <div className="flex flex-col h-screen overflow-hidden bg-zinc-950 text-white">
+      {/* ── Sticky Header (dhan-bloomberg-dashboard-page formula) ── */}
+      <header className="flex-none w-full border-b border-zinc-800 bg-zinc-950/95 backdrop-blur px-5 py-2.5 flex items-center gap-4 z-20 flex-wrap">
         {/* Brand */}
         <div className="flex items-center gap-3 shrink-0">
-          <div className="h-9 w-9 rounded-xl bg-gradient-to-tr from-emerald-600 to-teal-400 flex items-center justify-center shadow-lg shadow-emerald-500/10">
-            <Layers className="h-4.5 w-4.5 text-white" />
+          <div className="h-8 w-8 rounded-lg bg-amber-500/10 border border-amber-500/25 flex items-center justify-center shrink-0">
+            <Layers className="h-4 w-4 text-amber-400" />
           </div>
           <div>
-            <h1 className="text-base font-bold tracking-tight bg-gradient-to-r from-white via-zinc-200 to-zinc-500 bg-clip-text text-transparent leading-none">
+            <p className="text-[9px] font-bold text-amber-400 uppercase tracking-[0.18em] mb-0.5">
+              Analytics · Relative Strength
+            </p>
+            <h1 className="text-sm font-bold text-white tracking-tight leading-none">
               Relative Strength Scanner
             </h1>
-            <p className="text-[10px] text-zinc-600 font-medium mt-0.5">Mansfield RS Line · NSE Equities</p>
+            <p className="text-[10px] text-zinc-500 font-medium mt-1">Mansfield RS Line · NSE Equities</p>
           </div>
         </div>
 
@@ -236,13 +239,13 @@ export default function StockDashboard() {
         <div className="flex items-center gap-2 flex-wrap ml-auto">
 
           {/* Lookback */}
-          <div className="flex items-center bg-zinc-900/80 border border-zinc-800 p-0.5 rounded-xl">
+          <div className="flex items-center bg-zinc-900 border border-zinc-800 p-0.5 rounded-lg">
             {([50, 100, 252] as const).map((lb) => (
               <button
                 key={lb}
                 onClick={() => setLookback(lb)}
-                className={`px-2.5 py-1.5 text-xs font-semibold rounded-lg transition-all ${
-                  lookback === lb ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20' : 'text-zinc-500 hover:text-zinc-300'
+                className={`px-2.5 py-1.5 text-xs font-semibold rounded-md transition-colors ${
+                  lookback === lb ? 'bg-amber-500/15 text-amber-400 border border-amber-500/30' : 'text-zinc-500 hover:text-zinc-300 border border-transparent'
                 }`}
                 title={`RS Lookback: ${lb} trading days`}
               >
@@ -252,13 +255,13 @@ export default function StockDashboard() {
           </div>
 
           {/* Index Selector */}
-          <div className="flex items-center bg-zinc-900/80 border border-zinc-800 p-0.5 rounded-xl">
+          <div className="flex items-center bg-zinc-900 border border-zinc-800 p-0.5 rounded-lg">
             {(['nifty50', 'nifty500'] as const).map((idx) => (
               <button
                 key={idx}
                 onClick={() => setIndexType(idx)}
-                className={`px-3 py-1.5 text-xs font-semibold rounded-lg transition-all ${
-                  indexType === idx ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20' : 'text-zinc-500 hover:text-zinc-300'
+                className={`px-3 py-1.5 text-xs font-semibold rounded-md transition-colors ${
+                  indexType === idx ? 'bg-amber-500/15 text-amber-400 border border-amber-500/30' : 'text-zinc-500 hover:text-zinc-300 border border-transparent'
                 }`}
               >
                 {idx === 'nifty50' ? 'Nifty 50' : 'Nifty 500'}
@@ -269,19 +272,19 @@ export default function StockDashboard() {
           {/* Auto-refresh dropdown */}
           <DropdownMenu>
             <DropdownMenuTrigger
-              render={<button className={cn(buttonVariants({ variant: 'outline', size: 'sm' }), 'gap-1.5 rounded-xl text-xs h-8', autoRefresh ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-400 hover:bg-emerald-500/15' : 'border-zinc-800 bg-zinc-900/60 text-zinc-400 hover:text-zinc-200')} />}
+              render={<button className={cn(buttonVariants({ variant: 'outline', size: 'sm' }), 'gap-1.5 rounded-lg text-xs h-8', autoRefresh ? 'bg-amber-500/15 border-amber-500/30 text-amber-400 hover:bg-amber-500/20' : 'border-zinc-800 bg-zinc-900 text-zinc-400 hover:text-zinc-200')} />}
             >
               {autoRefresh ? <Wifi className="h-3.5 w-3.5" /> : <WifiOff className="h-3.5 w-3.5" />}
               <span>{autoRefresh ? `${autoRefresh}m` : 'Auto'}</span>
-              {countdownDisplay && <span className="font-mono text-[10px] opacity-80 tabular-nums">{countdownDisplay}</span>}
-              <ChevronDown className="h-3 w-3 opacity-50" />
+              {countdownDisplay && <span className="font-mono text-[10px] text-zinc-400 tabular-nums">{countdownDisplay}</span>}
+              <ChevronDown className="h-3 w-3 text-zinc-500" />
             </DropdownMenuTrigger>
             <DropdownMenuContent align="end" className="min-w-[160px]">
               <DropdownMenuLabel className="text-[10px] uppercase tracking-wider">Auto-Refresh</DropdownMenuLabel>
               <DropdownMenuSeparator />
               <DropdownMenuItem
                 onClick={() => setAutoRefresh(null)}
-                className={!autoRefresh ? 'text-emerald-400' : ''}
+                className={!autoRefresh ? 'text-amber-400' : ''}
               >
                 Off
               </DropdownMenuItem>
@@ -289,7 +292,7 @@ export default function StockDashboard() {
                 <DropdownMenuItem
                   key={min}
                   onClick={() => setAutoRefresh(min)}
-                  className={autoRefresh === min ? 'text-emerald-400' : ''}
+                  className={autoRefresh === min ? 'text-amber-400' : ''}
                 >
                   Every {min} minutes
                 </DropdownMenuItem>
@@ -302,21 +305,21 @@ export default function StockDashboard() {
             <Tooltip>
               <TooltipTrigger
                 onClick={handleRefresh}
-                render={<button className={cn(buttonVariants({ variant: 'outline', size: 'icon' }), 'border-zinc-800 bg-zinc-900/40 text-zinc-400 hover:text-white hover:border-zinc-700 rounded-xl h-8 w-8')} />}
+                render={<button className={cn(buttonVariants({ variant: 'outline', size: 'icon' }), 'border-zinc-800 bg-zinc-900 text-zinc-400 hover:text-amber-400 hover:border-amber-500/40 rounded-lg h-8 w-8')} />}
               >
-                <RefreshCw className={`h-3.5 w-3.5 ${(syncing || refreshStatus.running || loadingStocks) ? 'animate-spin text-emerald-400' : ''}`} />
+                <RefreshCw className={`h-3.5 w-3.5 ${(syncing || refreshStatus.running || loadingStocks) ? 'animate-spin text-amber-400' : ''}`} />
               </TooltipTrigger>
               <TooltipContent>Refresh dashboard data</TooltipContent>
             </Tooltip>
             {lastUpdatedDisplay && (
-              <span className="text-[10px] text-zinc-600 font-mono hidden sm:block tabular-nums">
+              <span className="text-[10px] text-zinc-500 font-mono hidden sm:block tabular-nums">
                 {lastUpdatedDisplay}
               </span>
             )}
           </div>
 
           {/* IST Clock + Market Status */}
-          <div className="flex items-center gap-2 px-3 py-1.5 rounded-xl border border-zinc-800/60 bg-zinc-900/40">
+          <div className="flex items-center gap-2 px-3 py-1.5 rounded-lg border border-zinc-800 bg-zinc-900">
             <div className={`w-1.5 h-1.5 rounded-full ${marketOpen ? 'bg-emerald-400 animate-pulse' : 'bg-zinc-600'}`} />
             <Clock className="h-3 w-3 text-zinc-500" />
             <span className="font-mono text-xs text-zinc-300 tabular-nums">{istTime || '--:--:--'}</span>
@@ -350,11 +353,11 @@ export default function StockDashboard() {
         {/* Left Panel */}
         <div className="flex flex-col min-h-0 w-[42%] shrink-0">
           <div className="flex-none flex items-center justify-between mb-2">
-            <div className="flex items-center bg-zinc-900/80 border border-zinc-800 p-0.5 rounded-xl gap-0.5">
+            <div className="flex items-center bg-zinc-900 border border-zinc-800 p-0.5 rounded-lg gap-0.5">
               <button
                 onClick={() => setActiveTab('leaderboard')}
-                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold transition-all ${
-                  activeTab === 'leaderboard' ? 'bg-zinc-800 text-white border border-zinc-700' : 'text-zinc-500 hover:text-zinc-300'
+                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-semibold transition-colors ${
+                  activeTab === 'leaderboard' ? 'bg-amber-500/15 text-amber-400 border border-amber-500/30' : 'text-zinc-500 hover:text-zinc-300 border border-transparent'
                 }`}
               >
                 <List className="h-3.5 w-3.5" />
@@ -362,27 +365,27 @@ export default function StockDashboard() {
               </button>
               <button
                 onClick={() => setActiveTab('heatmap')}
-                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold transition-all ${
-                  activeTab === 'heatmap' ? 'bg-zinc-800 text-white border border-zinc-700' : 'text-zinc-500 hover:text-zinc-300'
+                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-semibold transition-colors ${
+                  activeTab === 'heatmap' ? 'bg-amber-500/15 text-amber-400 border border-amber-500/30' : 'text-zinc-500 hover:text-zinc-300 border border-transparent'
                 }`}
               >
                 <LayoutGrid className="h-3.5 w-3.5" />
                 Sectors
               </button>
             </div>
-            <div className="text-[10px] text-zinc-600 font-mono">{stocks.length} assets</div>
+            <div className="text-[10px] text-zinc-500 font-mono">{stocks.length} assets</div>
           </div>
 
           <div className="flex-1 min-h-0 overflow-hidden">
             {loadingStocks ? (
-              <div className="flex flex-col items-center justify-center h-full rounded-2xl border border-zinc-800/80 bg-zinc-950/60 backdrop-blur-md">
-                <RefreshCw className="h-7 w-7 text-emerald-500 animate-spin" />
+              <div className="flex flex-col items-center justify-center h-full rounded-xl border border-zinc-800 bg-zinc-900/70">
+                <RefreshCw className="h-7 w-7 text-amber-400 animate-spin" />
                 <span className="text-zinc-500 text-xs mt-3 text-center px-4">Computing Mansfield RS ratios...</span>
               </div>
             ) : stocksError ? (
-              <div className="flex flex-col items-center justify-center h-full rounded-2xl border border-red-500/20 bg-red-950/10 text-center">
+              <div className="flex flex-col items-center justify-center h-full rounded-xl border border-red-500/20 bg-red-950/20 text-center">
                 <p className="text-sm font-semibold text-red-400">Failed to load</p>
-                <p className="text-xs text-zinc-600 mt-1 px-4">{stocksError}</p>
+                <p className="text-xs text-zinc-500 mt-1 px-4">{stocksError}</p>
               </div>
             ) : activeTab === 'leaderboard' ? (
               <Leaderboard
