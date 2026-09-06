@@ -64,6 +64,14 @@ def get_margin_snapshot(client) -> Tuple[Optional[Dict], Optional[str]]:
     """
     try:
         res = client.limits(segment='ALL', exchange='ALL', product='ALL')
+    except TypeError:
+        # kotakneoapi v3 (the successor SDK to this pinned v2 fork) made
+        # limits() parameterless — it always returns the full cross-segment
+        # snapshot, which is exactly what 'ALL'/'ALL'/'ALL' was already asking for.
+        try:
+            res = client.limits()
+        except Exception as e:
+            return None, str(e)
     except Exception as e:
         return None, str(e)
     err = error_message(res)

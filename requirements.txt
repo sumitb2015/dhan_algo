@@ -126,19 +126,31 @@ PyJWT==2.13.0
 
 # Kotak Neo SDK (copy-trade child + selectable scalper broker).
 #
-# MUST be installed with --no-deps. The SDK hard-pins pandas==2.2.3,
-# numpy==2.1.0, urllib3==1.26.14, certifi==2022.12.7, idna==2.10 and
-# websockets==8.1 -- installing it normally downgrades pandas/numpy and breaks
-# the entire dashboard data stack. Its real runtime needs are requests, six,
-# websocket-client and jwt (all above); pandas is touched only in
-# api/scrip_search.py, which we never call (the master CSV is downloaded
-# directly). The websockets pin is spurious -- HSWebSocketLib uses
-# websocket-client's WebSocketApp, not the asyncio websockets package.
+# v3 (package "kotakneoapi", still imported as `neo_api_client`) supersedes
+# the legacy git-pinned "neo-api-client" v2 fork this used to be. Migrated
+# 2026-09-06 -- verified end-to-end against the live account (cached-session
+# restore, a fresh totp_login()/totp_validate(), and real margin/positions
+# reads all round-tripped correctly under v3).
 #
-#   venv\Scripts\python.exe -m pip install --no-deps \
-#     "git+https://github.com/Kotak-Neo/Kotak-neo-api-v2.git@539b6022c2c5fe138d6d0a893bbe554cacca10b6"
+# MUST be installed with --no-deps. It declares pandas>=2.2,<3 and
+# numpy>=1.26,<3 -- installing it normally would downgrade this venv's
+# pandas 3.0.0 to <3 and break the dashboard data stack (same failure mode as
+# openstatz below). In practice pandas 3.0.0 works fine with it; the pin is
+# just conservative packaging, unverified by us against 3.0.0 at the
+# maintainer's end.
 #
-# neo-api-client @ git+https://github.com/Kotak-Neo/Kotak-neo-api-v2.git@539b6022c2c5fe138d6d0a893bbe554cacca10b6
+# Its real runtime needs beyond --no-deps are httpx[http2], websocket-client,
+# websockets and PyJWT (all already above). The four below are pure-additive
+# (no pandas/numpy conflict) so they install normally as part of this file;
+# only the SDK itself needs the separate --no-deps command:
+#
+#   venv\Scripts\python.exe -m pip install --no-deps kotakneoapi==3.0.6
+#
+# kotakneoapi==3.0.6
+h2==4.4.1
+structlog==26.1.0
+tenacity==9.1.4
+python-decouple==3.8
 
 # ── Backtest reporting (scripts/analysis/backtest_momentum_portfolio.py) ──────
 plotly==6.9.0
