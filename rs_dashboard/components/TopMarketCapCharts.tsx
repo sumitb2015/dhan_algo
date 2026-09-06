@@ -73,15 +73,29 @@ const ALL_TILES = [...TOP8_STOCKS, ...TOP8_INDICES];
  * % change — dataLoader.ts patches today's row from live intraday quotes
  * before the EOD CSV lands, so the last candle is already "current" during
  * market hours, not just yesterday's settle.
+ *
+ * `liveOverride`, when present, replaces the (possibly stale) candle close
+ * with a fresh LTP fetched on demand by the Refresh button — see
+ * /api/top-mcap-charts/live-quotes. The prior candle stays the % baseline
+ * either way; it's yesterday's already-finalized close, so it doesn't need
+ * refreshing.
  */
-function quoteFor(resp: EquityCandlesResponse | undefined): { ltp: number; changePct: number | null } | null {
+function quoteFor(
+  resp: EquityCandlesResponse | undefined,
+  liveOverride?: number,
+): { ltp: number; changePct: number | null } | null {
   const candles = resp?.candles;
   if (!candles || candles.length === 0) return null;
-  const ltp = candles[candles.length - 1].close;
+  const ltp = liveOverride && liveOverride > 0 ? liveOverride : candles[candles.length - 1].close;
   if (candles.length < 2) return { ltp, changePct: null };
   const prevClose = candles[candles.length - 2].close;
   const changePct = prevClose > 0 ? ((ltp - prevClose) / prevClose) * 100 : null;
   return { ltp, changePct };
+}
+
+interface LiveQuotesResponse {
+  success: boolean;
+  ltps: Record<string, number>;
 }
 
 const FOCUS_RING = 'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500/60 focus-visible:ring-offset-1 focus-visible:ring-offset-zinc-950';
@@ -93,6 +107,7 @@ export default function TopMarketCapCharts() {
   // without disturbing a user's in-progress pan/zoom on any single tile.
   const [viewToken, setViewToken] = useState(0);
   const [data, setData] = useState<Record<string, EquityCandlesResponse>>({});
+  const [liveLtp, setLiveLtp] = useState<Record<string, number>>({});
   const [loading, setLoading] = useState(false);
   const [lastFetched, setLastFetched] = useState<Date | null>(null);
   // Symbol of the tile shown fullscreen, or null when the grid is showing.
@@ -105,20 +120,34 @@ export default function TopMarketCapCharts() {
   const fetchAll = useCallback(async () => {
     setLoading(true);
     try {
-      const results = await Promise.all(
-        ALL_TILES.map(async ({ symbol }) => {
+      const [results] = await Promise.all([
+        Promise.all(
+          ALL_TILES.map(async ({ symbol }) => {
+            try {
+              const res = await fetch(`/api/equity-candles?symbol=${encodeURIComponent(symbol)}`);
+              const json: EquityCandlesResponse = await res.json();
+              return [symbol, json] as const;
+            } catch (err) {
+              return [
+                symbol,
+                { success: false, symbol, candles: [], dataDate: null, error: String(err) } as EquityCandlesResponse,
+              ] as const;
+            }
+          })
+        ),
+        // Fresh LTP on demand — /api/equity-candles alone would just re-serve
+        // whatever debug/today_quotes.json last had. Best-effort: a failure
+        // here still leaves the (possibly-stale) candle-derived price shown.
+        (async () => {
           try {
-            const res = await fetch(`/api/equity-candles?symbol=${encodeURIComponent(symbol)}`);
-            const json: EquityCandlesResponse = await res.json();
-            return [symbol, json] as const;
-          } catch (err) {
-            return [
-              symbol,
-              { success: false, symbol, candles: [], dataDate: null, error: String(err) } as EquityCandlesResponse,
-            ] as const;
+            const res = await fetch('/api/top-mcap-charts/live-quotes');
+            const json: LiveQuotesResponse = await res.json();
+            setLiveLtp(json.ltps ?? {});
+          } catch {
+            /* keep whatever liveLtp already had */
           }
-        })
-      );
+        })(),
+      ]);
       setData(Object.fromEntries(results));
       setLastFetched(new Date());
     } finally {
@@ -234,7 +263,7 @@ export default function TopMarketCapCharts() {
         <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-3">
           {tiles.map((s, i) => {
             const resp = data[s.symbol];
-            const q = quoteFor(resp);
+            const q = quoteFor(resp, liveLtp[s.symbol]);
             return (
               <div
                 key={s.symbol}
@@ -302,7 +331,7 @@ export default function TopMarketCapCharts() {
               <div className="flex items-baseline gap-2">
                 <span className="text-sm font-bold text-white">{maximizedTile.name}</span>
                 {(() => {
-                  const q = quoteFor(data[maximizedTile.symbol]);
+                  const q = quoteFor(data[maximizedTile.symbol], liveLtp[maximizedTile.symbol]);
                   return q && (
                     <>
                       <span className="text-sm font-semibold text-zinc-300 tabular-nums font-mono">
