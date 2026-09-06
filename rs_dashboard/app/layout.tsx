@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import ThemeInit from "@/components/ThemeInit";
+import Sidebar from "@/components/Sidebar";
 import Script from "next/script";
 import "./globals.css";
 
@@ -52,6 +53,10 @@ export default function RootLayout({
       </head>
       <body className="min-h-full flex flex-col">
         <ThemeInit />
+        {/* Mounted once here (not per-page inside NavBar) so it never
+            unmounts/remounts — and its open-section state never resets —
+            on navigation between pages that don't share a layout. */}
+        <Sidebar />
         <TooltipProvider>{children}</TooltipProvider>
       </body>
     </html>

@@ -373,6 +373,10 @@ body {
   background-position: 0 0, 0 0, 0 0, -0.5px -0.5px, -0.5px -0.5px;
   font-family: var(--font-geist-sans), Arial, sans-serif;
   overflow-x: hidden;
+  /* Set by components/Sidebar.tsx to its current rendered width; reset to 0
+     when the sidebar unmounts (e.g. the unauthenticated /login page). */
+  padding-left: var(--sidebar-w, 0px);
+  transition: padding-left 200ms ease-out;
 }
 
 /* Custom Sleek Scrollbars */
