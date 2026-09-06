@@ -1,15 +1,17 @@
 'use client';
 import { useRouter } from 'next/navigation';
 import { useState } from 'react';
-import { DatabaseZap, RefreshCw } from 'lucide-react';
+import { DatabaseZap, GitPullRequest, RefreshCw } from 'lucide-react';
 import { useRefreshStatus } from '@/lib/useRefreshStatus';
 import { Tooltip, TooltipContent, TooltipTrigger } from './ui/tooltip';
 import DataRefreshPanel from './DataRefreshPanel';
+import UpdateAppPanel from './UpdateAppPanel';
 import ThemeToggle from './ThemeToggle';
 
 export default function NavBar() {
   const router = useRouter();
   const [syncPanelOpen, setSyncPanelOpen] = useState(false);
+  const [updatePanelOpen, setUpdatePanelOpen] = useState(false);
   const sync = useRefreshStatus();
 
   async function handleDisconnect() {
@@ -50,6 +52,18 @@ export default function NavBar() {
               : 'Sync latest market data from Dhan API'}
         </TooltipContent>
       </Tooltip>
+      <Tooltip>
+        <TooltipTrigger
+          onClick={() => setUpdatePanelOpen(true)}
+          render={<button className="flex items-center gap-1.5 px-2.5 border border-zinc-700/60 dark:border-zinc-800 bg-zinc-900 text-zinc-100 dark:text-zinc-300 hover:text-indigo-400 hover:border-indigo-500/40 rounded-xl text-xs h-7 cursor-pointer font-medium transition-all" />}
+        >
+          <GitPullRequest className="h-3.5 w-3.5" />
+          Update
+        </TooltipTrigger>
+        <TooltipContent>
+          Pull the latest changes from GitHub
+        </TooltipContent>
+      </Tooltip>
       <button
         onClick={handleDisconnect}
         className="px-3 py-1.8 text-xs font-semibold rounded-lg text-zinc-100 dark:text-zinc-400 hover:text-red-700 dark:hover:text-red-400 hover:bg-red-500/10 border border-transparent hover:border-red-500/20 active:scale-[0.98] transition-all duration-200 whitespace-nowrap cursor-pointer"
@@ -62,6 +76,11 @@ export default function NavBar() {
       open={syncPanelOpen}
       onClose={() => setSyncPanelOpen(false)}
       onRefreshComplete={() => router.refresh()}
+    />
+
+    <UpdateAppPanel
+      open={updatePanelOpen}
+      onClose={() => setUpdatePanelOpen(false)}
     />
     </>
   );
