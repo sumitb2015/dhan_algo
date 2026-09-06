@@ -20,6 +20,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import Link from 'next/link';
 import {
+  Activity,
   AlertTriangle,
   Banknote,
   CircleDot,
@@ -37,6 +38,7 @@ import {
 } from 'lucide-react';
 import type { BrokerPortfolio, DashboardPortfolioResponse } from '@/app/api/dashboard/portfolio/route';
 import type { MarginAllocatorResponse, PositionGroup } from '@/app/api/margin-allocator/route';
+import type { MarketTrendResponse } from '@/app/api/margin-allocator/trend/route';
 import type { ScanResponse, ScannedStrategy, StrategyType, UnderlyingType } from '@/lib/ultimateScannerTypes';
 import { BROKER_LABELS, type Broker } from '@/hooks/useBrokerSelector';
 import NavBar from './NavBar';
@@ -194,10 +196,11 @@ interface CspRow {
 // ─── Unified opportunity ranking + allocation ─────────────────────────────────
 
 type RiskClass = 'defined' | 'undefined' | 'assignment';
+type MarketTrend = 'bullish' | 'bearish' | 'neutral';
 
 interface RankedCandidate {
   key: string;
-  source: 'condor' | 'strangle_straddle' | 'csp';
+  strategyType: StrategyType | 'csp';
   label: string;
   underlying: string;
   expiry: string;
@@ -217,11 +220,36 @@ interface AllocatedCandidate extends RankedCandidate {
   creditExpected: number;
 }
 
-function fromScannedStrategy(s: ScannedStrategy): RankedCandidate {
+/**
+ * Bull Put Spread and the naked-put side of a Jade Lizard both lose their
+ * edge (or worse) on a sharp drop, so both are "aligned" with a bullish
+ * market read; Bear Call Spread and Reverse Jade Lizard's naked call side
+ * are the mirror. Iron Condor/Butterfly/Strangle/Straddle are direction-
+ * neutral by construction and are deliberately absent from this map — they
+ * get no directional multiplier at all, never a 1.0 default that reads as
+ * "considered neutral," since they were never scored against a direction.
+ */
+const DIRECTIONAL_BIAS: Partial<Record<StrategyType, MarketTrend>> = {
+  bull_put_spread: 'bullish',
+  jade_lizard: 'bullish',
+  bear_call_spread: 'bearish',
+  reverse_jade_lizard: 'bearish',
+};
+
+/** >1 rewards a candidate whose bias agrees with the market's own EMA20+Supertrend
+ * read; <1 penalizes one fighting it. Never a hard filter — a counter-trend
+ * spread still shows up, just ranked lower, so nothing vanishes silently. */
+function directionalScoreMultiplier(strategyType: RankedCandidate['strategyType'], trend: MarketTrend): number {
+  const bias = DIRECTIONAL_BIAS[strategyType as StrategyType];
+  if (!bias || trend === 'neutral') return 1;
+  return bias === trend ? 1.15 : 0.8;
+}
+
+function fromScannedStrategy(s: ScannedStrategy, trend: MarketTrend): RankedCandidate {
   const legsSummary = s.legs.map((l) => `${l.side === 'SELL' ? '-' : '+'}${l.strike}${l.option}`).join(' / ');
   return {
     key: s.id,
-    source: s.type === 'iron_condor' ? 'condor' : 'strangle_straddle',
+    strategyType: s.type,
     label: `${s.underlying} ${s.name}`,
     underlying: s.underlying,
     expiry: s.expiry,
@@ -230,7 +258,7 @@ function fromScannedStrategy(s: ScannedStrategy): RankedCandidate {
     creditPerUnit: s.netPremium,
     popPct: s.popPct,
     romAnnualizedPct: s.romAnnualizedPct,
-    score: s.score,
+    score: Math.round(s.score * directionalScoreMultiplier(s.type, trend)),
     riskType: s.maxLossUnlimited ? 'undefined' : 'defined',
     detail: legsSummary,
   };
@@ -239,7 +267,7 @@ function fromScannedStrategy(s: ScannedStrategy): RankedCandidate {
 function fromCspRow(r: CspRow): RankedCandidate {
   return {
     key: `csp-${r.symbol}-${r.strike}-${r.expiry}`,
-    source: 'csp',
+    strategyType: 'csp',
     label: `${r.symbol} ${r.strike}PE CSP`,
     underlying: r.symbol,
     expiry: r.expiry,
@@ -262,40 +290,52 @@ function fromCspRow(r: CspRow): RankedCandidate {
  *
  * Within a category: diversify first (one unit of every candidate the budget
  * can fit, best score first), then spend leftover budget scaling the winners.
- * `maxPerUnderlyingFraction` additionally stops one underlying's cluster of
- * near-identical strike variants (a scan naturally returns many) from eating
- * the whole category — a real allocator diversifies across underlyings too,
- * not just across strikes of the same trade.
+ * Two independent concentration caps apply together:
+ *  - `maxPerUnderlyingFraction` stops one underlying (across every strategy
+ *    type combined) from eating the whole category.
+ *  - `maxPerTypeFraction` additionally stops one *strategy type* on one
+ *    underlying — e.g. a dozen near-identical Bear Call Spread strike
+ *    variants on SENSEX, which a scan naturally returns many of — from
+ *    filling that underlying's whole share by itself. Without this, the
+ *    underlying cap alone is satisfied by ten clones of the same trade,
+ *    which is concentration wearing a diversification costume.
  */
 function buildAllocationPlan(
   candidates: RankedCandidate[],
   budget: number,
   maxPerUnderlyingFraction = 0.6,
+  maxPerTypeFraction = 0.35,
 ): { plan: AllocatedCandidate[]; used: number } {
   const sorted = [...candidates].filter((c) => c.marginPerUnit > 0).sort((a, b) => b.score - a.score);
   const underlyingCap = budget * maxPerUnderlyingFraction;
+  const typeCap = budget * maxPerTypeFraction;
   const usedByUnderlying = new Map<string, number>();
+  const usedByType = new Map<string, number>();
   let used = 0;
   const plan: AllocatedCandidate[] = [];
 
-  const tryFit = (marginPerUnit: number, underlying: string) => {
+  const tryFit = (marginPerUnit: number, underlying: string, strategyType: string) => {
+    const typeKey = `${underlying}:${strategyType}`;
     const u = usedByUnderlying.get(underlying) ?? 0;
+    const t = usedByType.get(typeKey) ?? 0;
     if (u + marginPerUnit > underlyingCap) return false;
+    if (t + marginPerUnit > typeCap) return false;
     if (used + marginPerUnit > budget) return false;
     used += marginPerUnit;
     usedByUnderlying.set(underlying, u + marginPerUnit);
+    usedByType.set(typeKey, t + marginPerUnit);
     return true;
   };
 
   for (const c of sorted) {
-    if (!tryFit(c.marginPerUnit, c.underlying)) continue;
+    if (!tryFit(c.marginPerUnit, c.underlying, c.strategyType)) continue;
     plan.push({ ...c, units: 1, marginUsed: c.marginPerUnit, creditExpected: c.creditPerUnit });
   }
 
   // Second pass: scale up already-selected winners with leftover budget.
   for (const item of plan) {
     if (budget - used < budget * 0.03) break;
-    if (!tryFit(item.marginPerUnit, item.underlying)) continue;
+    if (!tryFit(item.marginPerUnit, item.underlying, item.strategyType)) continue;
     item.units += 1;
     item.marginUsed += item.marginPerUnit;
     item.creditExpected += item.creditPerUnit;
@@ -481,6 +521,7 @@ export default function MarginAllocator() {
   const [cspScannedAt, setCspScannedAt] = useState<string | null>(null);
   const [cspScanning, setCspScanning] = useState(false);
   const [riskPreset, setRiskPreset] = useState<(typeof RISK_PRESETS)[number]['key']>('balanced');
+  const [marketTrend, setMarketTrend] = useState<MarketTrendResponse | null>(null);
   const [clock, setClock] = useState('');
 
   useEffect(() => {
@@ -516,6 +557,14 @@ export default function MarginAllocator() {
         setCspScanning(Boolean(json.running));
       }
     } catch { /* transient */ }
+  }, []);
+
+  const loadTrend = useCallback(async () => {
+    try {
+      const res = await fetch('/api/margin-allocator/trend');
+      const json = await res.json();
+      setMarketTrend(json ?? null);
+    } catch { /* transient — next poll retries */ }
   }, []);
 
   /**
@@ -556,8 +605,17 @@ export default function MarginAllocator() {
           minDistancePct: 0.5,
           maxDistancePct: 6.0,
           riskProfile: 'all',
-          strategyTypes: ['iron_condor', 'short_strangle', 'short_straddle'] as StrategyType[],
-          maxResults: 50,
+          // The full credit-generating template set from the Baskets page
+          // (/baskets, lib/basketStrategies.ts) — debit/directional buys
+          // (Buy Call, Long Straddle, ratio backspreads, calendars, …) are
+          // deliberately excluded: this page deploys idle margin for yield,
+          // not directional bets, and every one of these is a strategy a
+          // real trader could place from the Baskets page today.
+          strategyTypes: [
+            'iron_condor', 'iron_butterfly', 'short_strangle', 'short_straddle',
+            'bull_put_spread', 'bear_call_spread', 'jade_lizard', 'reverse_jade_lizard',
+          ] as StrategyType[],
+          maxResults: 80,
           sortBy: 'score',
         }),
       });
@@ -591,6 +649,7 @@ export default function MarginAllocator() {
   useEffect(() => { loadPortfolio(); const id = setInterval(loadPortfolio, PORTFOLIO_POLL_MS); return () => clearInterval(id); }, [loadPortfolio]);
   useEffect(() => { loadAllocator(); const id = setInterval(loadAllocator, ALLOCATOR_POLL_MS); return () => clearInterval(id); }, [loadAllocator]);
   useEffect(() => { loadCsp(); }, [loadCsp]);
+  useEffect(() => { loadTrend(); }, [loadTrend]);
   useEffect(() => { runAllScans(); }, [runAllScans]);
   // Poll CSP status only while a scan is actually running (10-min sweep) — avoid hammering it otherwise.
   useEffect(() => {
@@ -603,6 +662,7 @@ export default function MarginAllocator() {
   const dhanFunds = allocator?.funds ?? null;
   const preset = RISK_PRESETS.find((p) => p.key === riskPreset)!;
   const deployableBudget = dhanFunds ? Math.max(0, dhanFunds.availableBalance * preset.fraction) : 0;
+  const trend: MarketTrend = marketTrend?.trend ?? 'neutral';
 
   const allScanCandidates = useMemo(
     () => Object.values(scans).flatMap((s) => s?.candidates ?? []),
@@ -610,17 +670,32 @@ export default function MarginAllocator() {
   );
   const vixInfo = useMemo(() => Object.values(scans).find((s) => s?.vix)?.vix ?? null, [scans]);
 
-  const condorCandidatesAll = useMemo(
+  // High VIX means richer absolute premium per unit of margin, so the
+  // undefined-risk (naked strangle/straddle/lizard) sub-budget is allowed to
+  // use its FULL share of the risk preset's own naked cap; low VIX pulls it
+  // down toward defined-risk spreads instead, since thin premium isn't worth
+  // undefined risk. This only ever narrows the preset's naked allowance, never
+  // widens past it — the risk preset (Conservative/Balanced/Aggressive)
+  // remains the hard ceiling the user chose.
+  const VIX_UNDEFINED_TILT: Record<string, number> = {
+    'Low Volatility': 0.5,
+    'Normal / Ideal Volatility': 0.85,
+    'Elevated Volatility': 1.0,
+    'High Volatility / Panic': 1.0,
+  };
+  const vixTilt = vixInfo ? (VIX_UNDEFINED_TILT[vixInfo.regime] ?? 0.85) : 0.85;
+
+  const definedRiskCandidatesAll = useMemo(
     () => allScanCandidates
-      .filter((c) => c.type === 'iron_condor' && c.dte >= MIN_DTE_FOR_YIELD && c.dte <= MAX_DTE_FOR_YIELD)
-      .map(fromScannedStrategy),
-    [allScanCandidates],
+      .filter((c) => !c.maxLossUnlimited && c.dte >= MIN_DTE_FOR_YIELD && c.dte <= MAX_DTE_FOR_YIELD)
+      .map((c) => fromScannedStrategy(c, trend)),
+    [allScanCandidates, trend],
   );
-  const strangleCandidatesAll = useMemo(
+  const undefinedRiskCandidatesAll = useMemo(
     () => allScanCandidates
-      .filter((c) => (c.type === 'short_strangle' || c.type === 'short_straddle') && c.dte >= MIN_DTE_FOR_YIELD && c.dte <= MAX_DTE_FOR_YIELD)
-      .map(fromScannedStrategy),
-    [allScanCandidates],
+      .filter((c) => c.maxLossUnlimited && c.dte >= MIN_DTE_FOR_YIELD && c.dte <= MAX_DTE_FOR_YIELD)
+      .map((c) => fromScannedStrategy(c, trend)),
+    [allScanCandidates, trend],
   );
   const cspCandidatesAll = useMemo(
     // csp_scanner.py already floors at MIN_DTE=5 server-side; the upper bound still applies here.
@@ -629,13 +704,14 @@ export default function MarginAllocator() {
   );
 
   const matchesFilter = useCallback((c: RankedCandidate) => displayFilter === 'ALL' || c.underlying === displayFilter, [displayFilter]);
-  const condorCandidates = useMemo(() => condorCandidatesAll.filter(matchesFilter), [condorCandidatesAll, matchesFilter]);
-  const strangleCandidates = useMemo(() => strangleCandidatesAll.filter(matchesFilter), [strangleCandidatesAll, matchesFilter]);
+  const definedRiskCandidates = useMemo(() => definedRiskCandidatesAll.filter(matchesFilter), [definedRiskCandidatesAll, matchesFilter]);
+  const undefinedRiskCandidates = useMemo(() => undefinedRiskCandidatesAll.filter(matchesFilter), [undefinedRiskCandidatesAll, matchesFilter]);
 
   // Deployable budget splits into three risk-category sub-budgets BEFORE
   // allocation — this is what actually enforces "don't put it all in one
   // trade class," not a cap applied after the fact inside one merged pool.
-  const strangleBudget = deployableBudget * preset.undefinedCap;
+  const effectiveUndefinedCap = preset.undefinedCap * vixTilt;
+  const strangleBudget = deployableBudget * effectiveUndefinedCap;
   const remainingBudget = Math.max(0, deployableBudget - strangleBudget);
   const condorBudget = remainingBudget * 0.6;
   const cspBudget = remainingBudget * 0.4;
@@ -647,8 +723,8 @@ export default function MarginAllocator() {
   // underlying selected there is nothing left to diversify across, and
   // capping it anyway would just strand budget undeployed for no reason.
   const perUnderlyingCap = displayFilter === 'ALL' ? 0.6 : 1;
-  const condorPlan = useMemo(() => buildAllocationPlan(condorCandidates, condorBudget, perUnderlyingCap), [condorCandidates, condorBudget, perUnderlyingCap]);
-  const stranglePlan = useMemo(() => buildAllocationPlan(strangleCandidates, strangleBudget, perUnderlyingCap), [strangleCandidates, strangleBudget, perUnderlyingCap]);
+  const condorPlan = useMemo(() => buildAllocationPlan(definedRiskCandidates, condorBudget, perUnderlyingCap), [definedRiskCandidates, condorBudget, perUnderlyingCap]);
+  const stranglePlan = useMemo(() => buildAllocationPlan(undefinedRiskCandidates, strangleBudget, perUnderlyingCap), [undefinedRiskCandidates, strangleBudget, perUnderlyingCap]);
   const cspPlan = useMemo(() => buildAllocationPlan(cspCandidatesAll, cspBudget), [cspCandidatesAll, cspBudget]);
 
   const allocationPlan = useMemo(
@@ -833,9 +909,53 @@ export default function MarginAllocator() {
             </div>
             <p className="font-mono text-[10px] text-zinc-500">
               A buffer is deliberately left un-deployed ({(100 - preset.fraction * 100).toFixed(0)}% of idle margin) and
-              undefined-risk (naked straddle/strangle) exposure is capped at {(preset.undefinedCap * 100).toFixed(0)}% of the
-              deployable budget — no single-trade or single-risk-class concentration, regardless of how attractive one setup scores.
+              undefined-risk (naked straddle/strangle/lizard) exposure is capped at {(preset.undefinedCap * 100).toFixed(0)}% of the
+              deployable budget as an absolute ceiling — no single-trade or single-risk-class concentration, regardless of how
+              attractive one setup scores. The VIX read below tunes actual usage within that ceiling, never past it.
             </p>
+          </div>
+        </TerminalPanel>
+
+        {/* ─── 3b. Market read driving the plan below ─────────────────────── */}
+        <TerminalPanel title="Market Read: VIX Regime &amp; Trend" icon={Activity}>
+          <div className="grid gap-3 p-3.5 sm:grid-cols-2">
+            <div className="rounded-lg border border-zinc-800 bg-zinc-950 p-3.5">
+              <div className="flex items-center justify-between">
+                <span className="text-[10px] font-bold uppercase tracking-[0.15em] text-zinc-500">India VIX</span>
+                {vixInfo ? <Badge tone="amber">{vixInfo.regime}</Badge> : <Badge tone="zinc">LOADING</Badge>}
+              </div>
+              <div className="font-mono text-lg font-bold leading-none tabular-nums text-amber-400 mt-2">
+                {vixInfo ? vixInfo.vix.toFixed(2) : '—'}
+              </div>
+              <p className="font-mono text-[10px] text-zinc-500 mt-2">{vixInfo?.advice ?? 'Waiting on the NIFTY/SENSEX scan…'}</p>
+              <p className="font-mono text-[10px] text-zinc-400 mt-1.5 border-t border-zinc-800 pt-1.5">
+                Naked-risk budget dialed to <span className="text-amber-400 font-bold">{(effectiveUndefinedCap * 100).toFixed(0)}%</span> of
+                deployable (of a {(preset.undefinedCap * 100).toFixed(0)}% preset ceiling) — {vixTilt >= 1
+                  ? 'richer premium at this VIX level earns the full naked allowance.'
+                  : 'thin premium at this VIX level, so more goes to defined-risk spreads instead.'}
+              </p>
+            </div>
+            <div className="rounded-lg border border-zinc-800 bg-zinc-950 p-3.5">
+              <div className="flex items-center justify-between">
+                <span className="text-[10px] font-bold uppercase tracking-[0.15em] text-zinc-500">NIFTY Trend (EMA20 + Supertrend)</span>
+                <Badge tone={trend === 'bullish' ? 'emerald' : trend === 'bearish' ? 'red' : 'zinc'}>{trend.toUpperCase()}</Badge>
+              </div>
+              <div className="font-mono text-lg font-bold leading-none tabular-nums text-zinc-100 mt-2">
+                {marketTrend?.lastClose ? marketTrend.lastClose.toLocaleString('en-IN') : '—'}
+                {marketTrend?.ema20 ? <span className="text-zinc-500 text-xs font-normal"> vs EMA20 {marketTrend.ema20.toLocaleString('en-IN')}</span> : null}
+              </div>
+              <p className="font-mono text-[10px] text-zinc-500 mt-2">
+                {marketTrend?.asOf ? `As of ${marketTrend.asOf} EOD.` : 'Loading NIFTY daily history…'}{' '}
+                {trend === 'neutral'
+                  ? 'EMA20 and Supertrend disagree right now, so no directional tilt is applied.'
+                  : `Both EMA20 and Supertrend agree ${trend} — also used as the shared read for SENSEX (no local SENSEX daily history).`}
+              </p>
+              <p className="font-mono text-[10px] text-zinc-400 mt-1.5 border-t border-zinc-800 pt-1.5">
+                {trend === 'neutral'
+                  ? 'Bull Put, Bear Call, Jade Lizard and Reverse Jade Lizard score unchanged — Iron Condor/Butterfly/Strangle/Straddle are never affected, they’re direction-neutral by construction.'
+                  : `${trend === 'bullish' ? 'Bull Put Spread and Jade Lizard' : 'Bear Call Spread and Reverse Jade Lizard'} setups are scored up (trend-aligned); the opposite-direction setups are scored down, never hidden.`}
+              </p>
+            </div>
           </div>
         </TerminalPanel>
 
@@ -899,18 +1019,20 @@ export default function MarginAllocator() {
           <div className="flex items-start gap-2 border-t border-zinc-800 px-3.5 py-2.5 font-mono text-[10px] text-zinc-500">
             <ShieldAlert className="h-3.5 w-3.5 shrink-0 text-amber-400" />
             <span>
-              No option-selling strategy is risk-free. &quot;Iron Condor&quot; rows are defined-risk (loss capped at the wing width);
-              &quot;Short Strangle/Straddle&quot; rows are undefined-risk (loss theoretically unbounded on a large adverse move) and are
-              exactly what CLAUDE.md&apos;s straddle/strangle inversion guard and the 15:17 IST auto-exit exist to contain if run live;
-              &quot;CSP&quot; rows carry assignment risk (you may be required to buy the stock at the strike). PoP and Ann. RoM are model
-              estimates from live IV/OI, not guarantees.
+              No option-selling strategy is risk-free. Iron Condor/Butterfly and Bull Put/Bear Call Spread rows are defined-risk
+              (loss capped at the wing width); Short Strangle/Straddle and Jade Lizard rows are undefined-risk (loss theoretically
+              unbounded on a large adverse move) and are exactly what CLAUDE.md&apos;s straddle/strangle inversion guard and the
+              15:17 IST auto-exit exist to contain if run live; CSP rows carry assignment risk (you may be required to buy the
+              stock at the strike). Every structure here is also on the Baskets page (/baskets) — this panel is Baskets&apos;
+              credit-generating templates, ranked by live VIX regime and NIFTY&apos;s own trend, not a different strategy universe.
+              PoP and Ann. RoM are model estimates from live IV/OI, not guarantees.
             </span>
           </div>
         </TerminalPanel>
 
         {/* ─── 5. Opportunity feeds ─────────────────────────────────────────── */}
         <TerminalPanel
-          title="Defined-Risk: Iron Condors"
+          title="Defined-Risk: Spreads, Condors & Butterflies"
           icon={Shield}
           href="/ultimate-scanner"
           meta={
@@ -921,15 +1043,15 @@ export default function MarginAllocator() {
           }
         >
           <OpportunityTable
-            rows={condorCandidates.slice(0, 12)}
-            emptyLabel={scanLoading ? 'Scanning chain…' : `No Iron Condor setup within ${MIN_DTE_FOR_YIELD}-${MAX_DTE_FOR_YIELD} days met the filters.`}
+            rows={definedRiskCandidates.slice(0, 12)}
+            emptyLabel={scanLoading ? 'Scanning chain…' : `No defined-risk setup within ${MIN_DTE_FOR_YIELD}-${MAX_DTE_FOR_YIELD} days met the filters.`}
           />
         </TerminalPanel>
 
-        <TerminalPanel title="Undefined-Risk: Short Strangles / Straddles" icon={Sparkles} href="/ultimate-scanner">
+        <TerminalPanel title="Undefined-Risk: Strangles, Straddles & Lizards" icon={Sparkles} href="/ultimate-scanner">
           <OpportunityTable
-            rows={strangleCandidates.slice(0, 12)}
-            emptyLabel={scanLoading ? 'Scanning chain…' : `No Short Strangle/Straddle setup within ${MIN_DTE_FOR_YIELD}-${MAX_DTE_FOR_YIELD} days met the filters.`}
+            rows={undefinedRiskCandidates.slice(0, 12)}
+            emptyLabel={scanLoading ? 'Scanning chain…' : `No undefined-risk setup within ${MIN_DTE_FOR_YIELD}-${MAX_DTE_FOR_YIELD} days met the filters.`}
           />
         </TerminalPanel>
 
