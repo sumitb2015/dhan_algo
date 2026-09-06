@@ -156,10 +156,22 @@ function computeYearMDD(curve: { date: string; cumulative_pnl: number }[], year:
 
 function StatCard({ label, value, sub, color = '' }: { label: string; value: string; sub?: string; color?: string }) {
   return (
-    <div className="bg-zinc-900 border border-zinc-800 rounded-lg p-3">
-      <div className="text-[10px] font-bold text-zinc-500 uppercase tracking-wider mb-1">{label}</div>
-      <div className={`text-base font-bold leading-tight ${color || 'text-zinc-100'}`}>{value}</div>
-      {sub && <div className="text-[10px] text-zinc-500 mt-0.5">{sub}</div>}
+    <div className="bg-zinc-900/60 border border-zinc-800 rounded-xl p-3 transition-colors hover:border-zinc-700">
+      <div className="text-[9px] font-bold text-zinc-500 uppercase tracking-[0.14em] mb-1">{label}</div>
+      <div className={`text-base font-mono font-bold tabular-nums leading-tight ${color || 'text-zinc-100'}`}>{value}</div>
+      {sub && <div className="text-[10px] text-zinc-500 mt-0.5 font-medium">{sub}</div>}
+    </div>
+  );
+}
+
+function PulseStat({ label, value, sub, color = 'text-white', size = 'text-2xl' }: {
+  label: string; value: string; sub?: string; color?: string; size?: string;
+}) {
+  return (
+    <div className="flex flex-col min-w-0">
+      <span className="text-[9px] font-bold text-zinc-500 uppercase tracking-[0.14em] mb-0.5">{label}</span>
+      <span className={`${size} font-mono font-bold tabular-nums leading-none ${color}`}>{value}</span>
+      {sub && <span className="text-[10px] text-zinc-500 mt-1 font-medium">{sub}</span>}
     </div>
   );
 }
@@ -216,7 +228,7 @@ function LegCard({
   const tgtOn = leg.leg_target_pct > 0;
 
   return (
-    <div className="bg-zinc-900 border border-zinc-800 rounded-lg p-3 flex flex-col gap-2">
+    <div className="bg-zinc-900/70 border border-zinc-800 rounded-xl p-3 flex flex-col gap-2">
       {/* Row 1: label + remove */}
       <div className="flex items-center justify-between">
         <span className="text-[10px] font-bold text-zinc-500">LEG {index + 1}</span>
@@ -378,7 +390,7 @@ function YearwiseTable({ monthlyPnl, equityCurve }: {
   }
 
   return (
-    <div className="bg-zinc-900 border border-zinc-800 rounded-lg overflow-hidden">
+    <div className="bg-zinc-900/60 border border-zinc-800 rounded-2xl overflow-hidden">
       <div className="overflow-x-auto">
         <table className="text-xs whitespace-nowrap w-full">
           <thead>
@@ -447,7 +459,7 @@ function FullReportTable({ cycles, lotSize }: { cycles: CycleResult[]; lotSize: 
 
   return (
     <div>
-      <div className="bg-zinc-900 border border-zinc-800 rounded-lg overflow-hidden">
+      <div className="bg-zinc-900/60 border border-zinc-800 rounded-2xl overflow-hidden">
         <div className="overflow-x-auto">
           <table className="text-xs whitespace-nowrap w-full">
             <thead>
@@ -656,31 +668,48 @@ export default function BacktestPage() {
   const s = result?.summary;
 
   return (
-    <div className="h-screen flex flex-col bg-zinc-950 text-zinc-100">
+    <div className="h-screen flex flex-col bg-zinc-950 text-white">
       {/* Header */}
-      <div className="shrink-0 z-40 bg-zinc-950/90 backdrop-blur border-b border-zinc-800 px-4 py-2">
-        <div className="flex items-center justify-between flex-wrap gap-2">
-          <NavBar />
-          <div className="flex items-center gap-3">
-            <span className="text-xs font-bold text-zinc-100 tracking-wide">OPTIONS BACKTEST</span>
-            {result && s && (
-              <span className="text-[10px] font-bold text-zinc-500 bg-zinc-900 border border-zinc-800 rounded px-2 py-0.5">
-                {s.traded_cycles} TRADES · {startDate} → {endDate}
-              </span>
-            )}
+      <div className="shrink-0 z-40 flex items-center justify-between gap-3 flex-wrap
+                      px-6 py-3 border-b border-zinc-800 bg-zinc-950/95 backdrop-blur">
+        <div className="flex items-center gap-3">
+          <div className="flex items-center justify-center w-8 h-8 rounded-lg bg-emerald-500/10 border border-emerald-500/25 shrink-0">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" className="text-emerald-400">
+              <path d="M3 3v18h18" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" opacity="0.4" />
+              <path d="M7 15l4-5 3 3 6-8" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" />
+            </svg>
           </div>
+          <div>
+            <p className="text-[9px] font-bold text-emerald-500 uppercase tracking-[0.18em] mb-0.5">
+              Backtest · NIFTY
+            </p>
+            <h1 className="text-sm font-bold text-white tracking-tight leading-none">Options Strategy Backtester</h1>
+            <p className="text-[10px] text-zinc-500 font-medium mt-1">
+              Multi-leg CE/PE strategies simulated across historical expiry cycles
+            </p>
+          </div>
+        </div>
+
+        <div className="flex items-center gap-3">
+          {result && s && (
+            <span className="text-[10px] font-bold text-zinc-400 bg-zinc-900 border border-zinc-800 rounded-lg px-2.5 py-1.5 font-mono tabular-nums">
+              {s.traded_cycles} TRADES · {startDate} &rarr; {endDate}
+            </span>
+          )}
+          <span className="w-px h-5 bg-zinc-800 shrink-0" />
+          <NavBar />
         </div>
       </div>
 
       <div className="flex gap-0 flex-1 min-h-0">
         {/* ── Left: Config panel ── */}
-        <div className="w-72 shrink-0 border-r border-zinc-800 bg-zinc-950 flex flex-col overflow-y-auto">
-          <div className="p-3 flex flex-col gap-4">
+        <div className="w-72 shrink-0 border-r border-zinc-800 bg-zinc-950 flex flex-col min-h-0">
+          <div className="flex-1 overflow-y-auto p-3 flex flex-col gap-3">
 
             {/* Leg Builder */}
-            <div>
+            <div className="bg-zinc-900/40 border border-zinc-800/60 rounded-xl p-3">
               <div className="flex items-center justify-between mb-2">
-                <div className="text-[10px] font-bold text-zinc-400 uppercase tracking-widest">Leg Builder</div>
+                <div className="text-[9px] font-bold text-zinc-500 uppercase tracking-[0.16em]">Leg Builder</div>
                 <button
                   onClick={addLeg}
                   className="text-[10px] font-bold text-emerald-400 hover:text-emerald-300 bg-emerald-500/10 border border-emerald-500/20 rounded px-2 py-0.5 transition-colors"
@@ -703,8 +732,8 @@ export default function BacktestPage() {
             </div>
 
             {/* Strategy-level controls */}
-            <div className="border-t border-zinc-800 pt-3 flex flex-col gap-3">
-              <div className="text-[10px] font-bold text-zinc-500 uppercase tracking-widest">Strategy</div>
+            <div className="bg-zinc-900/40 border border-zinc-800/60 rounded-xl p-3 flex flex-col gap-3">
+              <div className="text-[9px] font-bold text-zinc-500 uppercase tracking-[0.16em]">Strategy</div>
               <FormField label="Lot Size">
                 <input type="number" min={1} className={inputCls} value={lotSize}
                   onChange={e => setLotSize(Number(e.target.value))} />
@@ -746,8 +775,8 @@ export default function BacktestPage() {
             </div>
 
             {/* Timing */}
-            <div className="border-t border-zinc-800 pt-3 flex flex-col gap-3">
-              <div className="text-[10px] font-bold text-zinc-500 uppercase tracking-widest">Timing</div>
+            <div className="bg-zinc-900/40 border border-zinc-800/60 rounded-xl p-3 flex flex-col gap-3">
+              <div className="text-[9px] font-bold text-zinc-500 uppercase tracking-[0.16em]">Timing</div>
               <FormField label="Strategy Type">
                 <Toggle
                   value={strategyType}
@@ -777,7 +806,7 @@ export default function BacktestPage() {
             </div>
 
             {/* Costs */}
-            <div className="border-t border-zinc-800 pt-3 flex flex-col gap-3">
+            <div className="bg-zinc-900/40 border border-zinc-800/60 rounded-xl p-3 flex flex-col gap-3">
               <label className="flex items-center gap-2 cursor-pointer select-none">
                 <input
                   type="checkbox"
@@ -803,8 +832,8 @@ export default function BacktestPage() {
             </div>
 
             {/* Date range */}
-            <div className="border-t border-zinc-800 pt-3 flex flex-col gap-3">
-              <div className="text-[10px] font-bold text-zinc-500 uppercase tracking-widest">Period</div>
+            <div className="bg-zinc-900/40 border border-zinc-800/60 rounded-xl p-3 flex flex-col gap-3">
+              <div className="text-[9px] font-bold text-zinc-500 uppercase tracking-[0.16em]">Period</div>
               <FormField label="Start Date">
                 <input type="date" className={inputCls} value={startDate}
                   onChange={e => setStartDate(e.target.value)} />
@@ -814,20 +843,21 @@ export default function BacktestPage() {
                   onChange={e => setEndDate(e.target.value)} />
               </FormField>
             </div>
+          </div>
 
-            <button
-              onClick={runBacktest}
-              disabled={loading || legs.length === 0}
-              className="mt-1 w-full py-2.5 rounded-lg text-xs font-bold bg-emerald-600 hover:bg-emerald-500 disabled:opacity-40 disabled:cursor-not-allowed text-oncolor transition-colors"
-            >
-              {loading ? 'Running...' : 'Run Backtest'}
-            </button>
-
+          <div className="shrink-0 border-t border-zinc-800 bg-zinc-950/95 backdrop-blur p-3 flex flex-col gap-2">
             {error && (
               <div className="text-[11px] text-red-400 bg-red-500/10 border border-red-500/20 rounded-md p-2 break-words">
                 {error}
               </div>
             )}
+            <button
+              onClick={runBacktest}
+              disabled={loading || legs.length === 0}
+              className="w-full py-2.5 rounded-lg text-xs font-bold bg-emerald-600 hover:bg-emerald-500 disabled:opacity-40 disabled:cursor-not-allowed text-oncolor transition-colors shadow-lg shadow-emerald-500/10"
+            >
+              {loading ? 'Running...' : 'Run Backtest'}
+            </button>
           </div>
         </div>
 
@@ -835,46 +865,85 @@ export default function BacktestPage() {
         <div className="flex-1 overflow-y-auto">
           {!result && !loading && (
             <div className="flex flex-col items-center justify-center h-full text-zinc-600">
-              <div className="text-5xl mb-4">📊</div>
-              <div className="text-sm font-bold">Configure legs and run a backtest</div>
-              <div className="text-xs mt-1">Year-wise returns, stats, equity curve, and full report appear here</div>
+              <div className="flex items-center justify-center w-14 h-14 rounded-2xl bg-emerald-500/10 border border-emerald-500/20 mb-4">
+                <svg width="26" height="26" viewBox="0 0 24 24" fill="none" className="text-emerald-500/60">
+                  <path d="M3 3v18h18" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+                  <path d="M7 15l4-5 3 3 6-8" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+                </svg>
+              </div>
+              <div className="text-sm font-bold text-zinc-400">Configure legs and run a backtest</div>
+              <div className="text-xs mt-1 text-zinc-600">Year-wise returns, stats, equity curve, and full report appear here</div>
             </div>
           )}
 
           {loading && (
             <div className="flex flex-col items-center justify-center h-full text-zinc-500">
-              <div className="text-sm font-bold animate-pulse">Running backtest...</div>
-              <div className="text-xs mt-2">Simulating {legs.length} leg{legs.length > 1 ? 's' : ''} across expiry cycles...</div>
+              <div className="w-6 h-6 border-2 border-zinc-700 border-t-emerald-400 rounded-full animate-spin mb-4" />
+              <div className="text-sm font-bold text-zinc-300">Running backtest…</div>
+              <div className="text-xs mt-2">Simulating {legs.length} leg{legs.length > 1 ? 's' : ''} across expiry cycles…</div>
             </div>
           )}
 
           {result && s && (
             <div className="p-5 flex flex-col gap-6">
 
-              {/* ── Enhanced Stats ── */}
-              <div>
-                <div className="text-[10px] font-bold text-zinc-500 uppercase tracking-widest mb-3">Overall Performance</div>
-                <div className="grid grid-cols-3 sm:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-2">
-                  <StatCard
+              {/* ── Pulse ribbon: headline KPIs ── */}
+              <div className="relative overflow-hidden rounded-2xl border border-zinc-800 bg-zinc-900/60">
+                <div className={`pointer-events-none absolute inset-0 bg-gradient-to-r ${
+                  s.total_pnl >= 0 ? 'from-emerald-500/[0.06]' : 'from-red-500/[0.06]'
+                } via-transparent to-blue-500/[0.04]`} />
+                <div className="relative flex items-stretch gap-6 px-5 py-4 flex-wrap">
+                  <PulseStat
                     label="Overall Profit"
                     value={fmtPnl(s.total_pnl)}
                     color={s.total_pnl >= 0 ? 'text-emerald-400' : 'text-red-400'}
                   />
-                  <StatCard
-                    label="No. of Trades"
-                    value={String(s.traded_cycles)}
-                    sub={`of ${s.total_cycles} cycles`}
+                  <div className="w-px bg-zinc-800 self-stretch" />
+                  <PulseStat
+                    label="Win Rate"
+                    value={`${s.win_rate.toFixed(1)}%`}
+                    sub={`${s.wins}W / ${s.losses}L`}
+                    color={s.win_rate >= 50 ? 'text-emerald-400' : 'text-red-400'}
                   />
+                  <div className="w-px bg-zinc-800 self-stretch" />
+                  <PulseStat
+                    label="Max Drawdown"
+                    value={`₹${fmt(s.max_drawdown)}`}
+                    sub={s.max_drawdown_days != null ? `${s.max_drawdown_days} days` : undefined}
+                    color="text-amber-400"
+                  />
+                  <div className="ml-auto flex items-center gap-5 flex-wrap">
+                    <PulseStat
+                      label="Trades"
+                      value={String(s.traded_cycles)}
+                      sub={`of ${s.total_cycles} cycles`}
+                      size="text-sm"
+                      color="text-zinc-200"
+                    />
+                    <PulseStat
+                      label="Return / Max DD"
+                      value={s.return_maxdd_ratio != null ? s.return_maxdd_ratio.toFixed(2) : '—'}
+                      size="text-sm"
+                      color={s.return_maxdd_ratio != null && s.return_maxdd_ratio >= 1 ? 'text-emerald-400' : 'text-zinc-300'}
+                    />
+                    <PulseStat
+                      label="Reward : Risk"
+                      value={s.reward_risk_ratio != null ? s.reward_risk_ratio.toFixed(2) : '—'}
+                      size="text-sm"
+                      color={s.reward_risk_ratio != null && s.reward_risk_ratio >= 1 ? 'text-emerald-400' : 'text-zinc-300'}
+                    />
+                  </div>
+                </div>
+              </div>
+
+              {/* ── Detailed Stats ── */}
+              <div>
+                <div className="text-[9px] font-bold text-zinc-500 uppercase tracking-[0.16em] mb-3">Detailed Stats</div>
+                <div className="grid grid-cols-3 sm:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-2">
                   <StatCard
                     label="Avg Profit / Trade"
                     value={fmtPnl(s.avg_pnl)}
                     color={s.avg_pnl >= 0 ? 'text-emerald-400' : 'text-red-400'}
-                  />
-                  <StatCard
-                    label="Win %"
-                    value={`${s.win_rate.toFixed(1)}%`}
-                    sub={`${s.wins} wins`}
-                    color={s.win_rate >= 50 ? 'text-emerald-400' : 'text-red-400'}
                   />
                   <StatCard
                     label="Loss %"
@@ -901,22 +970,6 @@ export default function BacktestPage() {
                     label="Max Loss (Single)"
                     value={fmtPnl(s.max_loss)}
                     color="text-red-400"
-                  />
-                  <StatCard
-                    label="Max Drawdown"
-                    value={`₹${fmt(s.max_drawdown)}`}
-                    sub={s.max_drawdown_days != null ? `${s.max_drawdown_days} days` : undefined}
-                    color="text-amber-400"
-                  />
-                  <StatCard
-                    label="Return / Max DD"
-                    value={s.return_maxdd_ratio != null ? s.return_maxdd_ratio.toFixed(2) : '—'}
-                    color={s.return_maxdd_ratio != null && s.return_maxdd_ratio >= 1 ? 'text-emerald-400' : 'text-zinc-400'}
-                  />
-                  <StatCard
-                    label="Reward : Risk"
-                    value={s.reward_risk_ratio != null ? s.reward_risk_ratio.toFixed(2) : '—'}
-                    color={s.reward_risk_ratio != null && s.reward_risk_ratio >= 1 ? 'text-emerald-400' : 'text-zinc-400'}
                   />
                   <StatCard
                     label="Expectancy Ratio"
@@ -949,7 +1002,7 @@ export default function BacktestPage() {
               {/* ── Year-wise Returns ── */}
               {Object.keys(result.monthly_pnl).length > 0 && (
                 <div>
-                  <div className="text-[10px] font-bold text-zinc-500 uppercase tracking-widest mb-3">Year-wise Returns</div>
+                  <div className="text-[9px] font-bold text-zinc-500 uppercase tracking-[0.16em] mb-3">Year-wise Returns</div>
                   <YearwiseTable monthlyPnl={result.monthly_pnl} equityCurve={result.equity_curve} />
                 </div>
               )}
@@ -959,7 +1012,7 @@ export default function BacktestPage() {
 
               {/* ── Full Report ── */}
               <div>
-                <div className="text-[10px] font-bold text-zinc-500 uppercase tracking-widest mb-3">
+                <div className="text-[9px] font-bold text-zinc-500 uppercase tracking-[0.16em] mb-3">
                   Full Report ({result.cycles.filter(c => c.exit_reason !== 'NO_ENTRY').length} trades)
                 </div>
                 <FullReportTable cycles={result.cycles} lotSize={lotSize} />
