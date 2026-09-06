@@ -371,7 +371,7 @@ body {
   background-image: var(--body-image);
   background-size: 100% 100%, 100% 100%, 100% 100%, 32px 32px, 32px 32px;
   background-position: 0 0, 0 0, 0 0, -0.5px -0.5px, -0.5px -0.5px;
-  font-family: var(--font-geist-sans), Arial, sans-serif;
+  font-family: var(--font-sans), Arial, sans-serif;
   overflow-x: hidden;
   /* Set by components/Sidebar.tsx to its current rendered width; reset to 0
      when the sidebar unmounts (e.g. the unauthenticated /login page). */
