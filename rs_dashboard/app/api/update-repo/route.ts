@@ -52,9 +52,13 @@ export async function GET() {
   return NextResponse.json({ success: true, branch, ahead, behind, dirty, incomingCommits, isProd });
 }
 
-/** POST — pull with --ff-only. Never merges or rebases: if the branch has
- * diverged, or a dirty working tree would be overwritten, git refuses on its
- * own and we just surface that message rather than trying to resolve it. */
+/** POST — sync local master with origin no matter how it has diverged.
+ * Uncommitted local changes are auto-stashed before pulling and restored
+ * after, fast-forward is tried first, and only falls back to a real merge
+ * commit when local commits exist that a fast-forward can't reconcile. A
+ * failure at either the merge or the stash-restore step is surfaced, never
+ * silently discarded — the stash is only dropped once it has been cleanly
+ * reapplied. */
 export async function POST() {
   const branch = await currentBranch();
   if (!branch) {
@@ -64,12 +68,51 @@ export async function POST() {
   const beforeRes = await runGit(['rev-parse', 'HEAD']);
   const before = beforeRes.ok ? beforeRes.stdout : null;
 
-  const pullRes = await runGit(['pull', '--ff-only', 'origin', branch], 60_000);
-  if (!pullRes.ok) {
-    return NextResponse.json(
-      { success: false, error: pullRes.stderr || pullRes.stdout || 'git pull failed' },
-      { status: 409 },
-    );
+  const fetchRes = await runGit(['fetch', 'origin', branch], 60_000);
+  if (!fetchRes.ok) {
+    return NextResponse.json({ success: false, error: fetchRes.stderr || 'git fetch failed' }, { status: 502 });
+  }
+
+  const dirtyRes = await runGit(['status', '--porcelain']);
+  const dirty = dirtyRes.ok && dirtyRes.stdout.length > 0;
+
+  let stashed = false;
+  if (dirty) {
+    const stashRes = await runGit(['stash', 'push', '-u', '-m', 'update-app-auto-stash']);
+    if (!stashRes.ok) {
+      return NextResponse.json(
+        { success: false, error: stashRes.stderr || 'Could not stash local changes before pulling' },
+        { status: 409 },
+      );
+    }
+    stashed = !/no local changes to save/i.test(stashRes.stdout);
+  }
+
+  // Fast-forward first — the clean, no-merge-commit path when local history
+  // hasn't diverged from origin. Only reached for local commits ahead of
+  // origin as well as behind it; a dirty-but-not-diverged tree already went
+  // through the stash above and fast-forwards cleanly.
+  let mergeRes = await runGit(['merge', '--ff-only', `origin/${branch}`]);
+  let mergedWithCommit = false;
+  if (!mergeRes.ok) {
+    mergeRes = await runGit(['merge', `origin/${branch}`, '--no-edit'], 60_000);
+    mergedWithCommit = mergeRes.ok;
+    if (!mergeRes.ok) {
+      await runGit(['merge', '--abort']);
+      if (stashed) await runGit(['stash', 'pop']);
+      return NextResponse.json(
+        { success: false, error: mergeRes.stderr || mergeRes.stdout || 'git merge failed — resolve manually' },
+        { status: 409 },
+      );
+    }
+  }
+
+  let stashConflict = false;
+  if (stashed) {
+    const popRes = await runGit(['stash', 'pop']);
+    // Leave the stash in place on failure — nothing is lost, but it needs a
+    // manual `git stash pop` and conflict resolution.
+    stashConflict = !popRes.ok;
   }
 
   const afterRes = await runGit(['rev-parse', 'HEAD']);
@@ -90,10 +133,14 @@ export async function POST() {
 
   return NextResponse.json({
     success: true,
-    message: pullRes.stdout || 'Already up to date.',
+    message: stashConflict
+      ? 'Pulled, but restoring your local changes hit a conflict. They are safe — resolve with `git stash pop` manually.'
+      : (mergeRes.stdout || 'Already up to date.'),
     updated,
     needsRestart,
     changedFiles,
+    merged: mergedWithCommit,
+    stashConflict,
     isProd,
   });
 }

@@ -28,6 +28,8 @@ interface PullResult {
   updated?: boolean;
   needsRestart?: boolean;
   changedFiles?: string[];
+  merged?: boolean;
+  stashConflict?: boolean;
   isProd?: boolean;
   error?: string;
 }
@@ -181,8 +183,9 @@ export default function UpdateAppPanel({ open, onClose }: UpdateAppPanelProps) {
             <div className="flex items-start gap-2 px-3 py-2 rounded-lg border border-amber-500/25 bg-amber-950/20 text-xs text-amber-400">
               <AlertTriangle className="h-3.5 w-3.5 shrink-0 mt-0.5" />
               <span>
-                You have uncommitted local changes. A pull only ever fast-forwards —
-                it will fail loudly rather than overwrite anything if that&apos;s a problem.
+                You have uncommitted local changes. Pulling will stash them first and
+                restore them after — if the same lines changed upstream, the restore
+                will need manual conflict resolution, but nothing is discarded.
               </span>
             </div>
           )}
@@ -222,37 +225,53 @@ export default function UpdateAppPanel({ open, onClose }: UpdateAppPanelProps) {
           {/* Result */}
           {result && (
             result.success ? (
-              result.needsRestart ? (
-                <div className="flex items-start gap-2 px-3 py-2.5 rounded-lg border border-amber-500/30 bg-amber-950/20 text-xs text-amber-400">
-                  <AlertTriangle className="h-3.5 w-3.5 shrink-0 mt-0.5" />
-                  <div className="space-y-1">
-                    <p className="font-semibold">Pulled — rebuild needed</p>
-                    {result.isProd ? (
-                      <p className="text-amber-400/80">
-                        Running via <code className="text-amber-300">npm start</code> — it
-                        serves a pre-built bundle, so this won&apos;t take effect until you
-                        stop it, run <code className="text-amber-300">npm run build</code>,
-                        then <code className="text-amber-300">npm start</code> again.
-                      </p>
-                    ) : (
-                      <p className="text-amber-400/80">
-                        {result.changedFiles?.filter((f) => f.endsWith('package.json') || f.endsWith('package-lock.json') || f.endsWith('next.config.ts')).join(', ')}{' '}
-                        changed. Stop and restart <code className="text-amber-300">npm run dev</code> for this to take effect.
-                      </p>
-                    )}
+              <div className="space-y-2">
+                {result.updated && !result.needsRestart && !result.stashConflict && (
+                  <div className="flex items-center gap-2 px-3 py-2.5 rounded-lg border border-emerald-500/25 bg-emerald-950/20 text-xs text-emerald-400 font-semibold">
+                    {reloading ? <RefreshCw className="h-3.5 w-3.5 animate-spin" /> : <CheckCircle2 className="h-3.5 w-3.5" />}
+                    {reloading ? 'Reloading…' : `Updated${result.merged ? ' (merged)' : ''} — reloading`}
                   </div>
-                </div>
-              ) : result.updated ? (
-                <div className="flex items-center gap-2 px-3 py-2.5 rounded-lg border border-emerald-500/25 bg-emerald-950/20 text-xs text-emerald-400 font-semibold">
-                  {reloading ? <RefreshCw className="h-3.5 w-3.5 animate-spin" /> : <CheckCircle2 className="h-3.5 w-3.5" />}
-                  {reloading ? 'Reloading…' : 'Updated — reloading'}
-                </div>
-              ) : (
-                <div className="flex items-center gap-2 px-3 py-2.5 rounded-lg border border-zinc-800 bg-zinc-900/60 text-xs text-zinc-400">
-                  <CheckCircle2 className="h-3.5 w-3.5 text-zinc-500" />
-                  {result.message}
-                </div>
-              )
+                )}
+
+                {result.needsRestart && (
+                  <div className="flex items-start gap-2 px-3 py-2.5 rounded-lg border border-amber-500/30 bg-amber-950/20 text-xs text-amber-400">
+                    <AlertTriangle className="h-3.5 w-3.5 shrink-0 mt-0.5" />
+                    <div className="space-y-1">
+                      <p className="font-semibold">Pulled{result.merged ? ' (merged)' : ''} — rebuild needed</p>
+                      {result.isProd ? (
+                        <p className="text-amber-400/80">
+                          Running via <code className="text-amber-300">npm start</code> — it
+                          serves a pre-built bundle, so this won&apos;t take effect until you
+                          stop it, run <code className="text-amber-300">npm run build</code>,
+                          then <code className="text-amber-300">npm start</code> again.
+                        </p>
+                      ) : (
+                        <p className="text-amber-400/80">
+                          {result.changedFiles?.filter((f) => f.endsWith('package.json') || f.endsWith('package-lock.json') || f.endsWith('next.config.ts')).join(', ')}{' '}
+                          changed. Stop and restart <code className="text-amber-300">npm run dev</code> for this to take effect.
+                        </p>
+                      )}
+                    </div>
+                  </div>
+                )}
+
+                {result.stashConflict && (
+                  <div className="flex items-start gap-2 px-3 py-2.5 rounded-lg border border-amber-500/30 bg-amber-950/20 text-xs text-amber-400">
+                    <AlertTriangle className="h-3.5 w-3.5 shrink-0 mt-0.5" />
+                    <div className="space-y-1">
+                      <p className="font-semibold">Local changes need manual restore</p>
+                      <p className="text-amber-400/80">{result.message}</p>
+                    </div>
+                  </div>
+                )}
+
+                {!result.updated && (
+                  <div className="flex items-center gap-2 px-3 py-2.5 rounded-lg border border-zinc-800 bg-zinc-900/60 text-xs text-zinc-400">
+                    <CheckCircle2 className="h-3.5 w-3.5 text-zinc-500" />
+                    {result.message}
+                  </div>
+                )}
+              </div>
             ) : (
               <div className="flex items-start gap-2 px-3 py-2.5 rounded-lg border border-red-500/25 bg-red-950/20 text-xs text-red-400 font-mono whitespace-pre-wrap break-all">
                 <XCircle className="h-3.5 w-3.5 shrink-0 mt-0.5" />
@@ -264,8 +283,9 @@ export default function UpdateAppPanel({ open, onClose }: UpdateAppPanelProps) {
 
         {/* Footer */}
         <div className="flex-none px-5 py-3 border-t border-zinc-800/60 text-[10px] text-zinc-600">
-          Pulls with <code className="text-zinc-500">--ff-only</code> — never merges or rebases.
-          Diverged history or a conflicting local change fails loudly instead of guessing.
+          Fast-forwards when possible, otherwise merges origin into <code className="text-zinc-500">master</code>.
+          Uncommitted local changes are stashed before pulling and restored after — a
+          conflict at either step is surfaced, never silently discarded.
         </div>
       </SheetContent>
     </Sheet>
