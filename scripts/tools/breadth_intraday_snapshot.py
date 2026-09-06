@@ -13,11 +13,24 @@ Logs go to stderr.
 import sys
 import os
 import json
+import time
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, ROOT)
 
 MASTER_LIST = os.path.join(ROOT, 'master_list.csv')
+
+# Instruments per quote_data call, and the pause between calls (Dhan's quote
+# bucket is ~1 req/s account-wide — see the dhan-polling-guards skill).
+#
+# CHUNK is empirical, not documented. Measured 2026-09-06 against a live
+# account: 100 and 150 instruments in one NSE_EQ quote_data call both succeed;
+# 200 comes back {'status': 'failure', 'data': ''} with error_code, error_type
+# and error_message ALL None — a silent rejection that names no limit and looks
+# identical to an auth or rate-limit failure. 100 keeps a wide margin under the
+# observed boundary.
+CHUNK = 100
+REQUEST_GAP_S = 1.2
 
 
 def build_security_id_map(symbols):
@@ -67,45 +80,65 @@ def main():
         return
 
     sid_to_symbol = {v: k for k, v in sid_map.items()}
-    res = helper.dhan.quote_data(securities={"NSE_EQ": list(sid_map.values())})
-    if not isinstance(res, dict) or res.get('status') != 'success':
-        print(json.dumps({'error': f'quote_data failed: {res}'}))
-        return
-
-    raw = res.get('data', {})
-    if isinstance(raw, dict) and 'data' in raw:
-        raw = raw['data']
-    segment_data = raw.get('NSE_EQ', raw) if isinstance(raw, dict) else {}
-    if not isinstance(segment_data, dict):
-        print(json.dumps({'error': 'unexpected quote_data shape'}))
-        return
+    all_sids = list(sid_map.values())
 
     out = {}
-    for sid_str, ticker in segment_data.items():
-        if not isinstance(ticker, dict):
-            continue
-        try:
-            sid = int(sid_str)
-        except ValueError:
-            continue
-        sym = sid_to_symbol.get(sid)
-        if not sym:
+    errors = []
+    # Dhan's quote endpoint caps a single request well below a Nifty 500 sweep,
+    # so batch rather than sending the whole list — and pace the batches, since
+    # the quote bucket is ~1 req/s account-wide. A <=CHUNK request is a single
+    # unpaced call, so the Nifty 50 / Bank Nifty callers behave exactly as before.
+    for start in range(0, len(all_sids), CHUNK):
+        chunk = all_sids[start:start + CHUNK]
+        if start:
+            time.sleep(REQUEST_GAP_S)
+
+        res = helper.dhan.quote_data(securities={"NSE_EQ": chunk})
+        if not isinstance(res, dict) or res.get('status') != 'success':
+            errors.append(f'quote_data failed: {str(res)[:200]}')
             continue
 
-        ltp = float(ticker.get('last_price', 0) or 0)
-        ohlc = ticker.get('ohlc', {}) or {}
-        prev_close = float(ticker.get('close', 0) or ohlc.get('close', 0) or 0)
-        if ltp <= 0 or prev_close <= 0:
+        raw = res.get('data', {})
+        if isinstance(raw, dict) and 'data' in raw:
+            raw = raw['data']
+        segment_data = raw.get('NSE_EQ', raw) if isinstance(raw, dict) else {}
+        if not isinstance(segment_data, dict):
+            errors.append('unexpected quote_data shape')
             continue
 
-        if ltp > prev_close:
-            direction = 'up'
-        elif ltp < prev_close:
-            direction = 'down'
-        else:
-            direction = 'flat'
+        for sid_str, ticker in segment_data.items():
+            if not isinstance(ticker, dict):
+                continue
+            try:
+                sid = int(sid_str)
+            except ValueError:
+                continue
+            sym = sid_to_symbol.get(sid)
+            if not sym:
+                continue
 
-        out[sym] = {'ltp': ltp, 'prevClose': prev_close, 'direction': direction}
+            ltp = float(ticker.get('last_price', 0) or 0)
+            ohlc = ticker.get('ohlc', {}) or {}
+            prev_close = float(ticker.get('close', 0) or ohlc.get('close', 0) or 0)
+            if ltp <= 0 or prev_close <= 0:
+                continue
+
+            if ltp > prev_close:
+                direction = 'up'
+            elif ltp < prev_close:
+                direction = 'down'
+            else:
+                direction = 'flat'
+
+            out[sym] = {'ltp': ltp, 'prevClose': prev_close, 'direction': direction}
+
+    # Only a total failure is an error: a partial sweep still yields usable
+    # breadth, and reporting {"error": ...} would throw all of it away.
+    if not out:
+        print(json.dumps({'error': errors[0] if errors else 'no quotes returned'}))
+        return
+    for err in errors:
+        sys.stderr.write(f'[breadth_intraday_snapshot] partial failure: {err}\n')
 
     print(json.dumps(out))
 

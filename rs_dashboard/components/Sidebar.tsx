@@ -15,6 +15,7 @@ import {
   ChevronRight,
   ChevronsLeft,
   ChevronsRight,
+  LayoutDashboard,
 } from 'lucide-react';
 import {
   Collapsible,
@@ -23,12 +24,22 @@ import {
 } from './ui/collapsible';
 import { Tooltip, TooltipContent, TooltipTrigger } from './ui/tooltip';
 
+// Standalone top-level entry — the landing page after login. Deliberately not
+// inside a group: it is the one route that should always be one click away,
+// and a collapsed group would bury it.
+const HOME_LINK = {
+  href: '/',
+  label: 'Dashboard',
+  icon: LayoutDashboard,
+  desc: 'Market terminal — indices, movers, breadth and multi-broker portfolio',
+};
+
 const NAV_GROUPS = [
   {
     label: 'Equity',
     icon: TrendingUp,
     links: [
-      { href: '/', label: 'RS Scanner', desc: 'Relative strength scanner vs Nifty index' },
+      { href: '/rs-scanner', label: 'RS Scanner', desc: 'Relative strength scanner vs Nifty index' },
       { href: '/scanner', label: 'Scanner', desc: 'Custom criteria and queries scanner' },
       { href: '/movers', label: 'Movers', desc: 'Top gainers, losers & volume breakouts' },
       { href: '/movers-plus', label: 'Movers+', desc: 'Multi-timeframe activity dashboard' },
@@ -239,6 +250,35 @@ export default function Sidebar() {
       </div>
 
       <nav className="flex-1 overflow-y-auto overflow-x-hidden py-1.5 flex flex-col gap-0.5 px-1.5">
+        <Tooltip>
+          <TooltipTrigger
+            render={
+              <Link
+                href={HOME_LINK.href}
+                aria-label={HOME_LINK.label}
+                className={cn(
+                  'flex items-center gap-2 rounded-lg text-xs font-medium transition-all duration-150 border',
+                  collapsed ? 'justify-center h-8' : 'px-2 py-1.8',
+                  pathname === HOME_LINK.href
+                    ? 'bg-amber-500/20 text-zinc-100 dark:text-amber-300 border-amber-500/50 font-semibold'
+                    : 'border-transparent text-zinc-100 dark:text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800/40 hover:border-zinc-700/40'
+                )}
+              />
+            }
+          >
+            <HOME_LINK.icon
+              className={cn(
+                'h-4 w-4 shrink-0 transition-colors duration-150',
+                pathname === HOME_LINK.href
+                  ? 'text-amber-800 dark:text-amber-400'
+                  : 'text-zinc-200 dark:text-zinc-400'
+              )}
+            />
+            {!collapsed && <span className="truncate">{HOME_LINK.label}</span>}
+          </TooltipTrigger>
+          <TooltipContent side="right">{HOME_LINK.desc}</TooltipContent>
+        </Tooltip>
+        <div className="my-1 h-px bg-zinc-850 shrink-0" />
         {NAV_GROUPS.map((group) => {
           const Icon = group.icon;
           const active = isGroupActive(group);
