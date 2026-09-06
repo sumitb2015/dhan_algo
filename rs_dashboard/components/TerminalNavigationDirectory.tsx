@@ -346,6 +346,13 @@ export const TERMINAL_PILLARS: TerminalPillarGroup[] = [
         hot: true,
       },
       {
+        name: 'Margin Allocator',
+        href: '/margin-allocator',
+        badge: 'YIELD',
+        desc: 'Idle margin by broker, blocked margin by straddle/strangle/condor structure, and near-dated deployment plan',
+        hot: true,
+      },
+      {
         name: "Trader's Diary & Journal",
         href: '/portfolio/diary',
         badge: 'DIARY',
