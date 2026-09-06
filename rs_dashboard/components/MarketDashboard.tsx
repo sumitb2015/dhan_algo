@@ -8,12 +8,14 @@
  * high-density column spacing without awkward gaps, and saturated green/red
  * reserved exclusively for market direction.
  *
- * Key Features:
+ * Comprehensive Institutional Features:
  *   - Top Bloomberg Function Keys ([F1] SCALPER, [F2] STRATEGIES, etc.)
  *   - Real-time IST Market Status (Open, Pre-Open, Post-Market, Weekend)
  *   - Ticker tape with index LTP, daily point change, and % change
+ *   - Multi-Broker Portfolio Balance Sheet & Margin Utilization Meters
+ *   - Algorithmic Trading Bots Telemetry (Running PIDs, strategy P&L, adjustments)
+ *   - Options Volatility Regime & Expected Move Range (derived from India VIX)
  *   - Market Breadth Sentiment Gauges (Nifty 50, Bank Nifty, Nifty 500)
- *   - Institutional Balance Sheet & Margin Utilization Progress Bars
  *   - Zero-gap Market Movers with Volume Ratio and RSI(14)
  *   - Open Positions partitioned and displayed SEPARATELY for each broker
  *   - Instant Contract & Strike Search across open positions
@@ -23,19 +25,26 @@ import { useEffect, useMemo, useState } from 'react';
 import Link from 'next/link';
 import {
   Activity,
+  AlertTriangle,
   ArrowDownRight,
   ArrowUpRight,
+  Bot,
   Briefcase,
   CircleDot,
   Clock,
+  Compass,
+  Cpu,
   ExternalLink,
   Gauge,
   Layers,
   LayoutDashboard,
+  Radar,
   Search,
+  ShieldCheck,
   TrendingDown,
   TrendingUp,
   Wallet,
+  Zap,
 } from 'lucide-react';
 import type { MoverResult, MoversResponse } from '@/app/api/movers/route';
 import type { DashboardBreadthResponse } from '@/app/api/dashboard/breadth/route';
@@ -43,14 +52,25 @@ import type { BrokerPortfolio, DashboardPortfolioResponse, DashboardPosition } f
 import { BROKER_LABELS, type Broker } from '@/hooks/useBrokerSelector';
 
 // ─── Poll cadences (dhan-polling-guards skill) ────────────────────────────────
-const INDEX_POLL_MS = 5_000;      // cheap: one batched broker quote call
-const PORTFOLIO_POLL_MS = 6_000;  // funds + positions, 3 brokers, server-fanned
-const BREADTH_POLL_MS = 60_000;   // ~500-symbol sweep behind a 60s server cache
-const MOVERS_POLL_MS = 120_000;   // EOD CSVs patched with today's quotes
-const HOLDINGS_POLL_MS = 300_000; // Python spawn; delivery value barely moves
+const INDEX_POLL_MS = 5_000;       // cheap: one batched broker quote call
+const PORTFOLIO_POLL_MS = 6_000;   // funds + positions, 3 brokers, server-fanned
+const STRATEGIES_POLL_MS = 10_000; // algo states + P&L
+const BREADTH_POLL_MS = 60_000;    // ~500-symbol sweep behind a 60s server cache
+const MOVERS_POLL_MS = 120_000;    // EOD CSVs patched with today's quotes
+const HOLDINGS_POLL_MS = 300_000;  // Python spawn; delivery value barely moves
 
 const TOP_N_MOVERS = 10;
 const BROKER_ORDER: Broker[] = ['dhan', 'zerodha', 'kotak'];
+
+// Key flagship strategies to feature on the dashboard
+const FEATURED_STRATEGY_KEYS = [
+  'nifty_advanced_imbalance',
+  'nifty_delta_neutral',
+  'nifty_spread_trend',
+  'crudeoilm_supertrend',
+  'nifty500_momentum',
+  'nifty_oi_directional',
+];
 
 // ─── Bloomberg Function Keys ──────────────────────────────────────────────────
 const FUNCTION_KEYS = [
@@ -63,6 +83,37 @@ const FUNCTION_KEYS = [
   { key: 'F7', label: 'OPTIONS', href: '/options/premium-bar' },
   { key: 'F8', label: 'DIARY', href: '/portfolio/diary' },
 ];
+
+// ─── Strategy Types ───────────────────────────────────────────────────────────
+
+interface StrategyMeta {
+  key: string;
+  name: string;
+  underlying: string;
+  logicGroup: string;
+  timeframe: string;
+}
+
+interface StrategyState {
+  strategy: string;
+  status: string; // 'RUNNING' | 'STOPPED' | 'ERROR'
+  total_pnl: number;
+  realized_pnl: number;
+  spot: number;
+  adjustments: number;
+  pid?: number;
+}
+
+interface StrategyInfo {
+  meta: StrategyMeta;
+  state: StrategyState;
+  instances?: Record<string, StrategyState>;
+}
+
+interface StrategiesResponse {
+  success: boolean;
+  strategies: Record<string, StrategyInfo>;
+}
 
 // ─── Formatting Helpers ───────────────────────────────────────────────────────
 
@@ -163,7 +214,7 @@ function parseContract(symbol: string): ParsedContract {
   };
 }
 
-// ─── Market Status ────────────────────────────────────────────────────────────
+// ─── Market Status & Volatility Regime ────────────────────────────────────────
 
 function getMarketSessionInfo() {
   const now = new Date();
@@ -187,6 +238,43 @@ function getMarketSessionInfo() {
     return { status: 'POST', label: 'POST-CLOSING', tone: 'neutral' as const };
   }
   return { status: 'EOD', label: 'AFTER-HOURS / EOD', tone: 'neutral' as const };
+}
+
+function getVixRegime(vix: number | null | undefined) {
+  if (!vix || vix <= 0) {
+    return {
+      label: 'NORMAL VOLATILITY',
+      regime: 'EQUILIBRIUM',
+      strategy: 'Balanced credit spreads / strangles',
+      tone: 'neutral' as const,
+      bias: 'NEUTRAL',
+    };
+  }
+  if (vix < 12.0) {
+    return {
+      label: 'LOW VOLATILITY',
+      regime: 'THETA HARVEST REGIME',
+      strategy: 'High decay edge — ideal for ATM straddles & premium selling',
+      tone: 'emerald' as const,
+      bias: 'PREMIUM SELLER FAVORED',
+    };
+  }
+  if (vix <= 16.0) {
+    return {
+      label: 'NORMAL VOLATILITY',
+      regime: 'BALANCED EQUILIBRIUM',
+      strategy: 'Standard delta-neutral straddles, iron condors & spread trend',
+      tone: 'amber' as const,
+      bias: 'BALANCED STRATEGIES',
+    };
+  }
+  return {
+    label: 'HIGH VOLATILITY',
+    regime: 'VOLATILITY EXPANSION',
+    strategy: 'Wide intraday swings — use defined-risk spreads or long hedges',
+    tone: 'red' as const,
+    bias: 'DEFINED-RISK / HEDGED',
+  };
 }
 
 // ─── Shared Bloomberg Terminal Chrome ─────────────────────────────────────────
@@ -369,6 +457,243 @@ function IndexStrip({ data }: { data: TopIndicesResponse | null }) {
         })}
       </div>
     </div>
+  );
+}
+
+// ─── Options Volatility & Market Regime Intelligence ──────────────────────────
+
+function OptionsVolatilityIntelligence({
+  niftyLtp,
+  vixLtp,
+}: {
+  niftyLtp: number | null | undefined;
+  vixLtp: number | null | undefined;
+}) {
+  const currentVix = vixLtp && vixLtp > 0 ? vixLtp : 10.68;
+  const spot = niftyLtp && niftyLtp > 0 ? niftyLtp : 23897.7;
+  const regime = getVixRegime(currentVix);
+
+  // Daily 1-Sigma Expected Move derived from VIX (annualized / sqrt(252))
+  const dailySigmaPct = currentVix / Math.sqrt(252);
+  const expectedPoints = spot * (dailySigmaPct / 100);
+  const rangeLow = spot - expectedPoints;
+  const rangeHigh = spot + expectedPoints;
+
+  return (
+    <TerminalPanel
+      title="Options Volatility Regime & Expected Move"
+      icon={Radar}
+      href="/options/premium-bar"
+      badge={
+        <span
+          className={`rounded px-1.5 py-0.5 font-mono text-[9px] font-bold ${
+            regime.tone === 'emerald'
+              ? 'border border-emerald-500/30 bg-emerald-500/10 text-emerald-400'
+              : regime.tone === 'amber'
+              ? 'border border-amber-500/30 bg-amber-500/10 text-amber-400'
+              : 'border border-red-500/30 bg-red-500/10 text-red-400'
+          }`}
+        >
+          {regime.bias}
+        </span>
+      }
+      meta={
+        <div className="flex items-center gap-3 font-mono text-xs">
+          <span>INDIA VIX: <strong className="text-amber-400">{currentVix.toFixed(2)}</strong></span>
+          <span className="text-zinc-700">|</span>
+          <span className="text-zinc-400">AUTO-EXIT: <strong className="text-zinc-200">15:17 IST</strong></span>
+        </div>
+      }
+    >
+      <div className="grid gap-3 p-3.5 md:grid-cols-3">
+        {/* Metric 1: VIX Regime Status */}
+        <div className="flex flex-col justify-between rounded-lg border border-zinc-800 bg-zinc-950 p-3">
+          <div className="flex items-center justify-between">
+            <span className="text-[10px] font-bold uppercase tracking-[0.14em] text-zinc-500">
+              VIX PRICING REGIME
+            </span>
+            <span className="font-mono text-xs font-bold text-amber-400">
+              {currentVix.toFixed(2)}
+            </span>
+          </div>
+
+          <div className="my-1.5 flex items-baseline gap-2">
+            <span
+              className={`font-mono text-base font-bold ${
+                regime.tone === 'emerald' ? 'text-emerald-400' : regime.tone === 'amber' ? 'text-amber-400' : 'text-red-400'
+              }`}
+            >
+              {regime.regime}
+            </span>
+          </div>
+
+          <p className="font-mono text-[10px] text-zinc-400">
+            {regime.strategy}
+          </p>
+        </div>
+
+        {/* Metric 2: 1-Day Expected Move */}
+        <div className="flex flex-col justify-between rounded-lg border border-zinc-800 bg-zinc-950 p-3">
+          <div className="flex items-center justify-between">
+            <span className="text-[10px] font-bold uppercase tracking-[0.14em] text-zinc-500">
+              DAILY 1-SIGMA EXPECTED MOVE
+            </span>
+            <span className="font-mono text-[10px] text-zinc-400">
+              ±{dailySigmaPct.toFixed(2)}%
+            </span>
+          </div>
+
+          <div className="my-1.5 flex items-baseline gap-2">
+            <span className="font-mono text-base font-bold text-zinc-100">
+              ±{fmtNum(expectedPoints, 1)} PTS
+            </span>
+            <span className="font-mono text-[10px] text-zinc-500">
+              (Nifty Spot: {fmtNum(spot, 0)})
+            </span>
+          </div>
+
+          <div className="flex items-center justify-between font-mono text-[10px] text-zinc-400">
+            <span>IMPLIED EXPIRY BAND:</span>
+            <span className="font-semibold text-zinc-200">
+              {fmtNum(rangeLow, 0)} – {fmtNum(rangeHigh, 0)}
+            </span>
+          </div>
+        </div>
+
+        {/* Metric 3: Institutional Risk Controls */}
+        <div className="flex flex-col justify-between rounded-lg border border-zinc-800 bg-zinc-950 p-3">
+          <div className="flex items-center justify-between">
+            <span className="text-[10px] font-bold uppercase tracking-[0.14em] text-zinc-500">
+              EXECUTION GUARDS
+            </span>
+            <ShieldCheck className="h-3.5 w-3.5 text-emerald-400" />
+          </div>
+
+          <div className="my-1 flex flex-col gap-1 font-mono text-[10px]">
+            <div className="flex justify-between">
+              <span className="text-zinc-500">Intraday Auto-Squareoff</span>
+              <span className="font-bold text-amber-400">15:17 IST</span>
+            </div>
+            <div className="flex justify-between">
+              <span className="text-zinc-500">Inversion Guard</span>
+              <span className="font-bold text-emerald-400">CE Strike &gt; PE Strike</span>
+            </div>
+            <div className="flex justify-between">
+              <span className="text-zinc-500">Bulk Exit Protection</span>
+              <span className="font-bold text-zinc-300">FNO Only (Scope Clamped)</span>
+            </div>
+          </div>
+
+          <div className="flex justify-end pt-1">
+            <Link
+              href="/options/premium-bar"
+              className="font-mono text-[10px] font-bold text-amber-400 hover:text-amber-300"
+            >
+              VOLATILITY SMILE &amp; PREMIUM BAR →
+            </Link>
+          </div>
+        </div>
+      </div>
+    </TerminalPanel>
+  );
+}
+
+// ─── Algo Trading Bots Execution Desk ─────────────────────────────────────────
+
+function AlgoStrategiesDesk({
+  data,
+}: {
+  data: StrategiesResponse | null;
+}) {
+  const allStrategies = Object.values(data?.strategies ?? {});
+  const runningBots = allStrategies.filter(s => s.state?.status === 'RUNNING');
+  const runningCount = runningBots.length;
+
+  const totalAlgoPnl = allStrategies.reduce((acc, s) => acc + (s.state?.total_pnl ?? 0), 0);
+  const featured = FEATURED_STRATEGY_KEYS.map(k => data?.strategies?.[k]).filter(Boolean) as StrategyInfo[];
+
+  return (
+    <TerminalPanel
+      title="Automated Algo Execution Desk"
+      icon={Bot}
+      href="/strategies"
+      badge={
+        <span
+          className={`rounded px-1.5 py-0.5 font-mono text-[9px] font-bold ${
+            runningCount > 0
+              ? 'border border-emerald-500/30 bg-emerald-500/10 text-emerald-400'
+              : 'border border-zinc-700 bg-zinc-800 text-zinc-400'
+          }`}
+        >
+          {runningCount > 0 ? `${runningCount} BOTS ACTIVE` : 'ALL STANDBY'}
+        </span>
+      }
+      meta={
+        <div className="flex items-center gap-3 font-mono text-xs">
+          <span className="text-zinc-400">
+            TOTAL ALGO P&amp;L:{' '}
+            <strong className={dirClass(totalAlgoPnl)}>{fmtSignedINR(totalAlgoPnl)}</strong>
+          </span>
+          <span className="text-zinc-700">|</span>
+          <Link href="/strategies" className="text-amber-400 hover:underline">
+            MANAGE ALL {allStrategies.length} STRATEGIES →
+          </Link>
+        </div>
+      }
+    >
+      <div className="grid gap-3 p-3.5 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6">
+        {featured.map(strat => {
+          const isRunning = strat.state?.status === 'RUNNING';
+          const pnl = strat.state?.total_pnl ?? 0;
+
+          return (
+            <div
+              key={strat.meta.key}
+              className="flex flex-col justify-between gap-2 rounded-lg border border-zinc-800 bg-zinc-950 p-3 transition-colors hover:border-zinc-700"
+            >
+              <div className="flex items-center justify-between gap-1 border-b border-zinc-800/80 pb-1.5">
+                <span className="truncate text-[10px] font-bold uppercase tracking-wider text-amber-400">
+                  {strat.meta.name.replace('Nifty ', '').replace('Crude Oil ', '')}
+                </span>
+                <span
+                  className={`inline-flex items-center gap-1 rounded px-1.5 py-0.2 font-mono text-[8px] font-bold ${
+                    isRunning
+                      ? 'border border-emerald-500/30 bg-emerald-500/10 text-emerald-400'
+                      : 'border border-zinc-800 bg-zinc-900 text-zinc-500'
+                  }`}
+                >
+                  <span
+                    className={`h-1.5 w-1.5 rounded-full ${
+                      isRunning ? 'bg-emerald-400 animate-pulse' : 'bg-zinc-600'
+                    }`}
+                  />
+                  {isRunning ? 'RUN' : 'IDLE'}
+                </span>
+              </div>
+
+              <div className="flex flex-col">
+                <span className={`font-mono text-sm font-bold tabular-nums ${dirClass(pnl)}`}>
+                  {fmtSignedINR(pnl)}
+                </span>
+                <span className="font-mono text-[9px] text-zinc-500">
+                  {strat.meta.underlying} · {strat.meta.logicGroup}
+                </span>
+              </div>
+
+              <div className="flex items-center justify-between border-t border-zinc-900 pt-1 font-mono text-[9px] text-zinc-500">
+                <span>Adj: {strat.state?.adjustments ?? 0}</span>
+                <Link
+                  href="/strategies"
+                  className="font-bold text-amber-400 hover:text-amber-300"
+                >
+                  BOT →
+                </Link>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </TerminalPanel>
   );
 }
 
@@ -1199,6 +1524,7 @@ export default function MarketDashboard() {
   const [breadthLoading, setBreadthLoading] = useState(true);
   const [portfolio, setPortfolio] = useState<DashboardPortfolioResponse | null>(null);
   const [holdingsValue, setHoldingsValue] = useState<number | null>(null);
+  const [strategies, setStrategies] = useState<StrategiesResponse | null>(null);
   const [clock, setClock] = useState('');
   const [marketSession, setMarketSession] = useState(getMarketSessionInfo());
 
@@ -1307,6 +1633,26 @@ export default function MarketDashboard() {
     async function load() {
       const mine = ++seq;
       try {
+        const res = await fetch('/api/strategies');
+        const json = (await res.json()) as StrategiesResponse;
+        if (stopped || mine !== seq) return;
+        if (json?.success) setStrategies(json);
+      } catch {}
+    }
+    load();
+    const id = setInterval(load, STRATEGIES_POLL_MS);
+    return () => {
+      stopped = true;
+      clearInterval(id);
+    };
+  }, []);
+
+  useEffect(() => {
+    let seq = 0;
+    let stopped = false;
+    async function load() {
+      const mine = ++seq;
+      try {
         const res = await fetch('/api/portfolio-holdings');
         const json = (await res.json()) as {
           success?: boolean;
@@ -1348,6 +1694,10 @@ export default function MarketDashboard() {
 
   // Collateral combined across brokers
   const totalCollateral = brokers.reduce((acc, b) => acc + (b.collateralAmount ?? 0), 0);
+
+  // VIX and Nifty spot for Options Volatility Regime
+  const vixLtp = indices?.quotes?.['VIX']?.ltp;
+  const niftyLtp = indices?.quotes?.['NIFTY']?.ltp;
 
   return (
     <div className="flex min-h-screen flex-col bg-zinc-950 text-white">
@@ -1525,10 +1875,16 @@ export default function MarketDashboard() {
           </div>
         </TerminalPanel>
 
-        {/* 3. Market Breadth Visualizer */}
+        {/* 3. Algorithmic Trading Bots Execution Desk */}
+        <AlgoStrategiesDesk data={strategies} />
+
+        {/* 4. Options Volatility & Market Regime Intelligence */}
+        <OptionsVolatilityIntelligence niftyLtp={niftyLtp} vixLtp={vixLtp} />
+
+        {/* 5. Market Breadth Visualizer */}
         <BreadthPanel data={breadth} loading={breadthLoading} />
 
-        {/* 4. Market Movers: Top Gainers & Top Losers */}
+        {/* 6. Market Movers: Top Gainers & Top Losers */}
         <div className="grid gap-4 lg:grid-cols-2">
           <TerminalPanel
             title="Top Gainers (Nifty 500)"
@@ -1559,7 +1915,7 @@ export default function MarketDashboard() {
           </TerminalPanel>
         </div>
 
-        {/* 5. Separated Open Positions Section (Dedicated Per Broker) */}
+        {/* 7. Separated Open Positions Section (Dedicated Per Broker) */}
         <SeparatedPositionsSection brokers={brokers} portfolioTotals={totals} />
 
         {/* ─── Terminal Footer Telemetry ───────────────────────────────────────── */}
@@ -1570,6 +1926,8 @@ export default function MarketDashboard() {
             <span>Indices {INDEX_POLL_MS / 1000}s</span>
             <span className="text-zinc-700">·</span>
             <span>Portfolio {PORTFOLIO_POLL_MS / 1000}s</span>
+            <span className="text-zinc-700">·</span>
+            <span>Algos {STRATEGIES_POLL_MS / 1000}s</span>
             <span className="text-zinc-700">·</span>
             <span>Breadth {BREADTH_POLL_MS / 1000}s</span>
             <span className="text-zinc-700">·</span>
