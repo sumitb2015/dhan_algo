@@ -256,7 +256,8 @@ distilled from 7-10 repeat bug-fix commits:
 `dhan-polling-guards` (poll loops, caches, JSON read-modify-write, process spawns),
 `dhan-theme-tokens` (the theme system), `dhan-commit-on-blur` (free-typed inputs
 must commit on blur/Enter so mid-edit values cannot fire live rules), plus
-`dhan-dashboard-page`, `dhan-new-strategy` and `dhan-quant-terminal-page`,
+`dhan-dashboard-page`, `dhan-new-strategy`, `dhan-quant-terminal-page` and
+`dhan-bloomberg-dashboard-page`,
 `dhan-auth-token-lifecycle` (login.py/session.ts cached-token validation and the
 daily 06:00 IST session cutoff), `dhan-expired-options-data` (expired-options
 downloader/SQLite pipeline and the Strike History page built on it),
@@ -267,6 +268,8 @@ animations that work on Windows but break on Linux), `dhan-payoff-diagrams`
 and this skill library itself against recent commits.
 
 **"Quant-terminal" chart pages**: several pages (Options Premium Bar, Futures, IV Charts, Straddle/Strangle Analysis, Breadth, Live Charts) share a chart-driven dark-glass redesign built around `recharts`. Use the `dhan-quant-terminal-page` skill when building or redesigning a page into this style — it documents the sticky-header shell, chart-panel/tooltip conventions, and the reference implementation to copy from.
+
+**Bloomberg-style dashboard (`/`)**: the post-login landing page (`MarketDashboard.tsx`) is a third, distinct visual genre from the two above — a non-chart overview of ticker strips, stat tiles, per-broker cards, and badges. Use the `dhan-bloomberg-dashboard-page` skill before touching it or building something in the same style; it documents the panel shell, the semantic accent-color table, and a recurring un-tokenized-color mistake (`text-amber-500`/`text-emerald-500` etc. silently bypass the theme system — always cap accent text at `-400`).
 
 ---
 
