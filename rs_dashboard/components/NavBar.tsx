@@ -24,7 +24,7 @@ export default function NavBar() {
       <Tooltip>
         <TooltipTrigger
           onClick={() => setSyncPanelOpen(true)}
-          render={<button className="flex items-center gap-1.5 px-2.5 border border-zinc-700/60 dark:border-zinc-800 bg-zinc-900 text-zinc-100 dark:text-zinc-300 hover:text-black dark:hover:text-emerald-400 hover:border-emerald-500/40 rounded-xl text-xs h-7 cursor-pointer font-medium transition-all" />}
+          render={<button className="flex items-center gap-1.5 px-2.5 border border-zinc-700/60 dark:border-zinc-800 bg-zinc-900 text-zinc-100 dark:text-zinc-300 hover:text-emerald-400 hover:border-emerald-500/40 rounded-xl text-xs h-7 cursor-pointer font-medium transition-all" />}
         >
           <DatabaseZap className="h-3.5 w-3.5" />
           Sync Data

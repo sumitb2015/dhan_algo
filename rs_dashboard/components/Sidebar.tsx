@@ -283,14 +283,14 @@ export default function Sidebar() {
                     className={cn(
                       "group flex items-center gap-2 w-full rounded-lg px-2 py-1.8 text-xs font-medium transition-all duration-150 outline-none cursor-pointer select-none border",
                       active
-                        ? "bg-emerald-500/20 text-black dark:text-emerald-300 border-emerald-500/50 shadow-[0_0_12px_rgba(16,185,129,0.06)] font-semibold"
-                        : "border-transparent text-zinc-100 dark:text-zinc-400 hover:text-black dark:hover:text-zinc-100 hover:bg-zinc-800/40 hover:border-zinc-700/40"
+                        ? "bg-emerald-500/20 text-zinc-100 dark:text-emerald-300 border-emerald-500/50 shadow-[0_0_12px_rgba(16,185,129,0.06)] font-semibold"
+                        : "border-transparent text-zinc-100 dark:text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800/40 hover:border-zinc-700/40"
                     )}
                   />
                 }
               >
                 <Icon className={cn("h-4 w-4 shrink-0 transition-colors duration-150", active ? "text-emerald-800 dark:text-emerald-400" : "text-zinc-200 dark:text-zinc-400")} />
-                <span className={cn("truncate", active ? "text-black dark:text-emerald-300 font-semibold" : "text-zinc-100 dark:text-zinc-200 font-medium")}>
+                <span className={cn("truncate", active ? "text-zinc-100 dark:text-emerald-300 font-semibold" : "text-zinc-100 dark:text-zinc-200 font-medium")}>
                   {group.label}
                 </span>
                 <ChevronRight
@@ -312,7 +312,7 @@ export default function Sidebar() {
                                 "flex items-center gap-2 rounded-lg py-1.25 pr-2 pl-7 text-xs font-medium transition-all duration-150 border",
                                 isLinkActive
                                   ? "bg-emerald-500/15 text-emerald-950 dark:text-emerald-300 border-emerald-500/30 font-semibold"
-                                  : "border-transparent text-zinc-200 dark:text-zinc-400 hover:text-black dark:hover:text-zinc-100 hover:bg-zinc-800/40"
+                                  : "border-transparent text-zinc-200 dark:text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800/40"
                               )}
                             />
                           }
