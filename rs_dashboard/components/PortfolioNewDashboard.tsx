@@ -55,9 +55,9 @@ interface AllocationEntry { name: string; value: number; color: string }
 interface PerformancePoint {
   date: string;
   totalCurrentValue: number;
+  equityValue: number;
+  etfValue: number;
   synthetic: boolean;
-  portfolioPct: number;
-  niftyPct: number | null;
 }
 
 // ─── Constants ────────────────────────────────────────────────────────────────
@@ -765,10 +765,10 @@ export default function PortfolioNewDashboard() {
           </div>
         </div>
 
-        {/* Performance vs Nifty 50 (equity portion) */}
+        {/* Portfolio value history (equity/ETF split) */}
         <div className="bg-zinc-900 border border-zinc-800 rounded-lg p-4">
           <div className="flex items-center justify-between flex-wrap gap-2 mb-2">
-            <span className="text-[10px] font-bold uppercase tracking-widest text-amber-400">Equity vs Nifty 50</span>
+            <span className="text-[10px] font-bold uppercase tracking-widest text-amber-400">Portfolio Value History</span>
             {performancePoints.length > 0 && (
               <span className="text-[10px] font-mono text-zinc-600">
                 Since {performancePoints[0].date} · {performancePoints.length} day{performancePoints.length !== 1 ? 's' : ''}
@@ -802,14 +802,15 @@ export default function PortfolioNewDashboard() {
                 <LineChart data={performancePoints} margin={{ top: 4, right: 8, left: -16, bottom: 0 }}>
                   <CartesianGrid strokeDasharray="3 3" stroke="#27272a" />
                   <XAxis dataKey="date" tick={{ fontSize: 10, fill: '#71717a' }} minTickGap={40} />
-                  <YAxis tick={{ fontSize: 10, fill: '#71717a' }} tickFormatter={(v: number) => `${v.toFixed(0)}%`} />
+                  <YAxis tick={{ fontSize: 10, fill: '#71717a' }} tickFormatter={(v: number) => fmtINR(v)} />
                   <ReTooltip
                     contentStyle={{ background: '#09090b', border: '1px solid #27272a', borderRadius: 8, fontSize: 11 }}
-                    formatter={(v: any, name: any) => [`${Number(v).toFixed(2)}%`, name]}
+                    formatter={(v: any, name: any) => [fmtINR(Number(v)), name]}
                   />
                   <Legend wrapperStyle={{ fontSize: 11 }} />
-                  <Line type="monotone" dataKey="portfolioPct" name="Equity" stroke="#f59e0b" strokeWidth={2} dot={performancePoints.length < 2} isAnimationActive={performancePoints.length > 1} />
-                  <Line type="monotone" dataKey="niftyPct" name="Nifty 50" stroke="#818cf8" strokeWidth={2} dot={performancePoints.length < 2} isAnimationActive={performancePoints.length > 1} />
+                  <Line type="monotone" dataKey="totalCurrentValue" name="Total Portfolio" stroke="#818cf8" strokeWidth={2} dot={performancePoints.length < 2} isAnimationActive={performancePoints.length > 1} />
+                  <Line type="monotone" dataKey="equityValue" name="Equity" stroke="#10b981" strokeWidth={1.5} dot={performancePoints.length < 2} isAnimationActive={performancePoints.length > 1} />
+                  <Line type="monotone" dataKey="etfValue" name="ETF" stroke="#f59e0b" strokeWidth={1.5} dot={performancePoints.length < 2} isAnimationActive={performancePoints.length > 1} />
                 </LineChart>
               </ResponsiveContainer>
             </div>
