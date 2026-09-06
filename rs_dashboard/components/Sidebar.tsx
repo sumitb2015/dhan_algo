@@ -12,15 +12,15 @@ import {
   Briefcase,
   LineChart,
   Zap,
+  ChevronRight,
   ChevronsLeft,
   ChevronsRight,
 } from 'lucide-react';
 import {
-  DropdownMenu,
-  DropdownMenuTrigger,
-  DropdownMenuContent,
-  DropdownMenuItem,
-} from './ui/dropdown-menu';
+  Collapsible,
+  CollapsibleTrigger,
+  CollapsibleContent,
+} from './ui/collapsible';
 import { Tooltip, TooltipContent, TooltipTrigger } from './ui/tooltip';
 
 const NAV_GROUPS = [
@@ -152,10 +152,20 @@ function readStoredCollapsed(): boolean {
   }
 }
 
+/** Which top-level group (by label) contains the current route — that group
+ * starts expanded so the active page's section is never hidden on load. */
+function findActiveGroupLabel(pathname: string): string | null {
+  return NAV_GROUPS.find((g) => g.links.some((l) => l.href === pathname))?.label ?? null;
+}
+
 export default function Sidebar() {
   const pathname = usePathname();
   const mounted = useMounted();
   const [collapsed, setCollapsed] = useState(readStoredCollapsed);
+  const [openGroups, setOpenGroups] = useState(() => {
+    const active = findActiveGroupLabel(pathname);
+    return active ? new Set([active]) : new Set<string>();
+  });
 
   useEffect(() => {
     if (!mounted) return;
@@ -169,6 +179,21 @@ export default function Sidebar() {
 
   const isGroupActive = (group: typeof NAV_GROUPS[0]) =>
     group.links.some((link) => link.href === pathname);
+
+  const setGroupOpen = (label: string, open: boolean) => {
+    setOpenGroups((prev) => {
+      const next = new Set(prev);
+      if (open) next.add(label); else next.delete(label);
+      return next;
+    });
+  };
+
+  /** Collapsed rail has no room for a submenu — expand the rail and open
+   * that group's section instead of trying to render a tree at 56px. */
+  const expandAndOpenGroup = (label: string) => {
+    setCollapsed(false);
+    setGroupOpen(label, true);
+  };
 
   if (!mounted) return null;
 
@@ -201,72 +226,90 @@ export default function Sidebar() {
         {NAV_GROUPS.map((group) => {
           const Icon = group.icon;
           const active = isGroupActive(group);
-          const trigger = (
-            <button
-              className={cn(
-                "group flex items-center gap-2 w-full rounded-lg px-2 py-1.8 text-xs font-bold transition-all duration-150 outline-none cursor-pointer select-none",
-                collapsed && "justify-center px-0 h-8",
-                active
-                  ? "bg-emerald-500/20 text-black dark:text-emerald-300 border border-emerald-500/50 shadow-[0_0_12px_rgba(16,185,129,0.06)] font-extrabold"
-                  : "border border-transparent text-zinc-100 dark:text-zinc-400 hover:text-black dark:hover:text-zinc-100 hover:bg-zinc-800/40 hover:border-zinc-700/40"
-              )}
-            />
-          );
-          return (
-            <DropdownMenu key={group.label}>
-              {collapsed ? (
-                <Tooltip>
-                  <TooltipTrigger render={<DropdownMenuTrigger render={trigger} />}>
-                    <Icon className={cn("h-4 w-4 shrink-0 transition-colors duration-150", active ? "text-emerald-800 dark:text-emerald-400" : "text-zinc-200 dark:text-zinc-400")} />
-                  </TooltipTrigger>
-                  <TooltipContent side="right">{group.label}</TooltipContent>
-                </Tooltip>
-              ) : (
-                <DropdownMenuTrigger render={trigger}>
-                  <Icon className={cn("h-4 w-4 shrink-0 transition-colors duration-150", active ? "text-emerald-800 dark:text-emerald-400" : "text-zinc-200 dark:text-zinc-400")} />
-                  <span className={cn("truncate", active ? "text-black dark:text-emerald-300 font-extrabold" : "text-zinc-100 dark:text-zinc-200 font-bold")}>
-                    {group.label}
-                  </span>
-                </DropdownMenuTrigger>
-              )}
-              <DropdownMenuContent
-                side="right"
-                align="start"
-                sideOffset={8}
-                className="min-w-[240px] max-w-[280px] max-h-[calc(100vh-4rem)] overflow-y-auto overscroll-contain bg-zinc-900 border border-zinc-700/60 rounded-xl shadow-2xl p-1.5 gap-1 flex flex-col z-50"
-              >
-                {group.links.map((link) => {
-                  const isLinkActive = pathname === link.href;
-                  return (
-                    <DropdownMenuItem
-                      key={link.href}
-                      render={
-                        <Link
-                          href={link.href}
-                          className="w-full flex flex-col items-start text-left cursor-pointer p-2 transition-all duration-150 rounded-lg"
-                        />
-                      }
+
+          // Collapsed rail: no room to show a tree at 56px, so a click just
+          // expands the rail and opens this group's section instead.
+          if (collapsed) {
+            return (
+              <Tooltip key={group.label}>
+                <TooltipTrigger
+                  onClick={() => expandAndOpenGroup(group.label)}
+                  render={
+                    <button
                       className={cn(
-                        "cursor-pointer text-zinc-100 dark:text-zinc-300 hover:text-black dark:hover:text-zinc-100 hover:bg-zinc-100 dark:hover:bg-zinc-800",
-                        isLinkActive && "bg-emerald-500/15 text-emerald-950 dark:text-emerald-300 hover:text-black dark:hover:text-emerald-200 hover:bg-emerald-500/20 focus:bg-emerald-500/20"
+                        "flex items-center justify-center h-8 rounded-lg transition-all duration-150 outline-none cursor-pointer select-none border",
+                        active
+                          ? "bg-emerald-500/20 border-emerald-500/50"
+                          : "border-transparent hover:bg-zinc-800/40 hover:border-zinc-700/40"
                       )}
-                    >
-                      <div className="flex items-center justify-between w-full">
-                        <span className={cn("text-xs font-bold transition-colors", isLinkActive ? "text-emerald-950 dark:text-emerald-300 font-extrabold" : "text-zinc-100 dark:text-zinc-200")}>
-                          {link.label}
-                        </span>
-                        {isLinkActive && <span className="h-1.5 w-1.5 rounded-full bg-emerald-600 dark:bg-emerald-500 animate-pulse" />}
-                      </div>
-                      {link.desc && (
-                        <span className={cn("text-[10px] font-normal leading-tight mt-0.5 block transition-colors", isLinkActive ? "text-emerald-900 dark:text-emerald-400/70" : "text-zinc-400")}>
-                          {link.desc}
-                        </span>
-                      )}
-                    </DropdownMenuItem>
-                  );
-                })}
-              </DropdownMenuContent>
-            </DropdownMenu>
+                    />
+                  }
+                >
+                  <Icon className={cn("h-4 w-4 shrink-0 transition-colors duration-150", active ? "text-emerald-800 dark:text-emerald-400" : "text-zinc-200 dark:text-zinc-400")} />
+                </TooltipTrigger>
+                <TooltipContent side="right">{group.label}</TooltipContent>
+              </Tooltip>
+            );
+          }
+
+          const open = openGroups.has(group.label);
+
+          return (
+            <Collapsible
+              key={group.label}
+              open={open}
+              onOpenChange={(o) => setGroupOpen(group.label, o)}
+            >
+              <CollapsibleTrigger
+                render={
+                  <button
+                    className={cn(
+                      "group flex items-center gap-2 w-full rounded-lg px-2 py-1.8 text-xs font-bold transition-all duration-150 outline-none cursor-pointer select-none border",
+                      active
+                        ? "bg-emerald-500/20 text-black dark:text-emerald-300 border-emerald-500/50 shadow-[0_0_12px_rgba(16,185,129,0.06)] font-extrabold"
+                        : "border-transparent text-zinc-100 dark:text-zinc-400 hover:text-black dark:hover:text-zinc-100 hover:bg-zinc-800/40 hover:border-zinc-700/40"
+                    )}
+                  />
+                }
+              >
+                <Icon className={cn("h-4 w-4 shrink-0 transition-colors duration-150", active ? "text-emerald-800 dark:text-emerald-400" : "text-zinc-200 dark:text-zinc-400")} />
+                <span className={cn("truncate", active ? "text-black dark:text-emerald-300 font-extrabold" : "text-zinc-100 dark:text-zinc-200 font-bold")}>
+                  {group.label}
+                </span>
+                <ChevronRight
+                  aria-hidden="true"
+                  className={cn("ml-auto h-3.5 w-3.5 shrink-0 text-zinc-500 transition-transform duration-150", open && "rotate-90")}
+                />
+              </CollapsibleTrigger>
+              <CollapsibleContent>
+                <div className="flex flex-col gap-0.5 pt-0.5 pb-0.5">
+                  {group.links.map((link) => {
+                    const isLinkActive = pathname === link.href;
+                    return (
+                      <Tooltip key={link.href}>
+                        <TooltipTrigger
+                          render={
+                            <Link
+                              href={link.href}
+                              className={cn(
+                                "flex items-center gap-2 rounded-lg py-1.25 pr-2 pl-7 text-xs font-bold transition-all duration-150 border",
+                                isLinkActive
+                                  ? "bg-emerald-500/15 text-emerald-950 dark:text-emerald-300 border-emerald-500/30"
+                                  : "border-transparent text-zinc-200 dark:text-zinc-400 hover:text-black dark:hover:text-zinc-100 hover:bg-zinc-800/40"
+                              )}
+                            />
+                          }
+                        >
+                          <span className="truncate">{link.label}</span>
+                          {isLinkActive && <span className="ml-auto h-1.5 w-1.5 rounded-full bg-emerald-600 dark:bg-emerald-500 animate-pulse shrink-0" />}
+                        </TooltipTrigger>
+                        {link.desc && <TooltipContent side="right">{link.desc}</TooltipContent>}
+                      </Tooltip>
+                    );
+                  })}
+                </div>
+              </CollapsibleContent>
+            </Collapsible>
           );
         })}
       </nav>
