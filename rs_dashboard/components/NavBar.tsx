@@ -6,7 +6,6 @@ import { useRefreshStatus } from '@/lib/useRefreshStatus';
 import { Tooltip, TooltipContent, TooltipTrigger } from './ui/tooltip';
 import DataRefreshPanel from './DataRefreshPanel';
 import ThemeToggle from './ThemeToggle';
-import Sidebar from './Sidebar';
 
 export default function NavBar() {
   const router = useRouter();
@@ -20,7 +19,6 @@ export default function NavBar() {
 
   return (
     <>
-    <Sidebar />
     <div className="flex items-center gap-1 shrink-0">
       <ThemeToggle />
       <Tooltip>

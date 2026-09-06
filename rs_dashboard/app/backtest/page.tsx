@@ -656,9 +656,9 @@ export default function BacktestPage() {
   const s = result?.summary;
 
   return (
-    <div className="min-h-screen bg-zinc-950 text-zinc-100">
+    <div className="h-screen flex flex-col bg-zinc-950 text-zinc-100">
       {/* Header */}
-      <div className="sticky top-0 z-40 bg-zinc-950/90 backdrop-blur border-b border-zinc-800 px-4 py-2">
+      <div className="shrink-0 z-40 bg-zinc-950/90 backdrop-blur border-b border-zinc-800 px-4 py-2">
         <div className="flex items-center justify-between flex-wrap gap-2">
           <NavBar />
           <div className="flex items-center gap-3">
@@ -672,7 +672,7 @@ export default function BacktestPage() {
         </div>
       </div>
 
-      <div className="flex gap-0 h-[calc(100vh-53px)]">
+      <div className="flex gap-0 flex-1 min-h-0">
         {/* ── Left: Config panel ── */}
         <div className="w-72 shrink-0 border-r border-zinc-800 bg-zinc-950 flex flex-col overflow-y-auto">
           <div className="p-3 flex flex-col gap-4">

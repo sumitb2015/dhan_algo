@@ -160,6 +160,7 @@ function findActiveGroupLabel(pathname: string): string | null {
 
 export default function Sidebar() {
   const pathname = usePathname();
+  const isLoginPage = pathname === '/login';
   const mounted = useMounted();
   const [collapsed, setCollapsed] = useState(readStoredCollapsed);
   const [openGroups, setOpenGroups] = useState(() => {
@@ -167,15 +168,30 @@ export default function Sidebar() {
     return active ? new Set([active]) : new Set<string>();
   });
 
+  // Sidebar is mounted once in the root layout, so it persists across every
+  // client-side navigation — re-derive (rather than only initialize) which
+  // group should be open whenever the route changes, so navigating into a
+  // page whose section is currently collapsed doesn't hide it. Adjusted
+  // during render (React's documented pattern for this) rather than in an
+  // effect, so it takes effect in the same commit as the route change.
+  const [prevPathname, setPrevPathname] = useState(pathname);
+  if (pathname !== prevPathname) {
+    setPrevPathname(pathname);
+    const active = findActiveGroupLabel(pathname);
+    if (active) {
+      setOpenGroups((prev) => (prev.has(active) ? prev : new Set(prev).add(active)));
+    }
+  }
+
   useEffect(() => {
-    if (!mounted) return;
+    if (!mounted || isLoginPage) return;
     const w = collapsed ? COLLAPSED_W : EXPANDED_W;
     document.documentElement.style.setProperty('--sidebar-w', `${w}px`);
     try { localStorage.setItem(STORAGE_KEY, collapsed ? '1' : '0'); } catch { /* ignore */ }
     return () => {
       document.documentElement.style.setProperty('--sidebar-w', '0px');
     };
-  }, [collapsed, mounted]);
+  }, [collapsed, mounted, isLoginPage]);
 
   const isGroupActive = (group: typeof NAV_GROUPS[0]) =>
     group.links.some((link) => link.href === pathname);
@@ -195,7 +211,7 @@ export default function Sidebar() {
     setGroupOpen(label, true);
   };
 
-  if (!mounted) return null;
+  if (!mounted || isLoginPage) return null;
 
   const sidebar = (
     <aside
@@ -236,6 +252,7 @@ export default function Sidebar() {
                   onClick={() => expandAndOpenGroup(group.label)}
                   render={
                     <button
+                      aria-label={group.label}
                       className={cn(
                         "flex items-center justify-center h-8 rounded-lg transition-all duration-150 outline-none cursor-pointer select-none border",
                         active
