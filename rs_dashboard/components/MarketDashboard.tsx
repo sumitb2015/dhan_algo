@@ -59,6 +59,7 @@ import {
   SectionQuickLinks,
   TerminalSiteDirectory,
 } from './TerminalNavigationDirectory';
+import NavBar from './NavBar';
 
 // ─── Poll cadences (dhan-polling-guards skill) ────────────────────────────────
 const INDEX_POLL_MS = 5_000;       // cheap: one batched broker quote call
@@ -1913,6 +1914,11 @@ export default function MarketDashboard() {
             <Grid className="h-3 w-3 text-amber-400" />
             <span>APPS (⌘K)</span>
           </button>
+
+          {/* Standard Navigation Bar (White/Dark Theme Toggle, Sync Data, Update, Disconnect) */}
+          <div className="flex items-center pl-1 border-l border-zinc-800">
+            <NavBar />
+          </div>
         </div>
       </div>
 
