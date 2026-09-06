@@ -45,6 +45,27 @@ the Data API subscription lapses), with no exception raised. Check
 `helper.last_api_error` after an empty response before concluding "no data" / "up to
 date"; scripts that report freshness must surface it.
 
+## `quote_data()` silently rejects a large instrument batch
+
+`quote_data(securities={"NSE_EQ": [...]})` has an undocumented per-request instrument
+cap well below the 1000 the API docs imply. Measured 2026-09-06 against a live account:
+100 and 150 ids in one call both succeed, 200 comes back as
+
+```python
+{'status': 'failure', 'remarks': {'error_code': None, 'error_type': None, 'error_message': None}, 'data': ''}
+```
+
+— every diagnostic field `None`, so an over-sized batch is indistinguishable from an auth
+or rate-limit failure. The symptom downstream is a whole basket reading as zero while a
+smaller basket in the same sweep looks fine (this is how it first showed up: the Nifty 50
+breadth tile read `0 scanned` while Nifty 500 read `298`, because the oversized first chunk
+carried every Nifty 50 name).
+
+Batch at <= 100 ids per call and pace the calls ~1.2s apart (the quote bucket is ~1 req/s
+account-wide). `scripts/tools/breadth_intraday_snapshot.py` does both; copy its loop rather
+than sending a whole index constituent list in one request. Treat a partial sweep as usable
+data — bail with an error only when *no* chunk returned anything.
+
 ## `/v2/margincalculator/multi` needs a manually-injected `dhanClientId`, and returns a flat envelope
 
 Unlike `dhanPost()` in `dhanToken.ts` (which auto-injects `dhanClientId` into
