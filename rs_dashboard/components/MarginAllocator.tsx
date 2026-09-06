@@ -394,6 +394,26 @@ function GroupRow({ g, marginBase }: { g: PositionGroup; marginBase: number | nu
 
 // ─── Opportunity card ──────────────────────────────────────────────────────────
 
+/** Scopes both the allocation plan and the two index opportunity tables to
+ * NIFTY, SENSEX, or both — shared state so the plan and the tables it draws
+ * from never show a different underlying scope than what's selected. */
+function UnderlyingFilterToggle({ value, onChange }: { value: UnderlyingType | 'ALL'; onChange: (v: UnderlyingType | 'ALL') => void }) {
+  return (
+    <div className="flex items-center gap-1">
+      {(['ALL', ...SCAN_UNDERLYINGS] as const).map((u) => (
+        <button
+          key={u}
+          type="button"
+          onClick={() => onChange(u)}
+          className={`rounded px-2 py-0.5 font-mono text-[10px] font-bold ${value === u ? 'bg-amber-500/20 text-amber-300' : 'text-zinc-500 hover:text-zinc-300'}`}
+        >
+          {u}
+        </button>
+      ))}
+    </div>
+  );
+}
+
 function riskBadge(riskType: RiskClass) {
   if (riskType === 'defined') return <Badge tone="emerald">DEFINED RISK</Badge>;
   if (riskType === 'assignment') return <Badge tone="sky">ASSIGNMENT RISK</Badge>;
@@ -620,8 +640,15 @@ export default function MarginAllocator() {
   const condorBudget = remainingBudget * 0.6;
   const cspBudget = remainingBudget * 0.4;
 
-  const condorPlan = useMemo(() => buildAllocationPlan(condorCandidatesAll, condorBudget), [condorCandidatesAll, condorBudget]);
-  const stranglePlan = useMemo(() => buildAllocationPlan(strangleCandidatesAll, strangleBudget), [strangleCandidatesAll, strangleBudget]);
+  // The plan draws from the SAME filtered pool as the two tables below it —
+  // picking "NIFTY" here means the plan only ever proposes NIFTY setups, not
+  // just that the tables happen to display NIFTY rows. The per-underlying
+  // concentration cap only makes sense in "ALL" mode — with a single
+  // underlying selected there is nothing left to diversify across, and
+  // capping it anyway would just strand budget undeployed for no reason.
+  const perUnderlyingCap = displayFilter === 'ALL' ? 0.6 : 1;
+  const condorPlan = useMemo(() => buildAllocationPlan(condorCandidates, condorBudget, perUnderlyingCap), [condorCandidates, condorBudget, perUnderlyingCap]);
+  const stranglePlan = useMemo(() => buildAllocationPlan(strangleCandidates, strangleBudget, perUnderlyingCap), [strangleCandidates, strangleBudget, perUnderlyingCap]);
   const cspPlan = useMemo(() => buildAllocationPlan(cspCandidatesAll, cspBudget), [cspCandidatesAll, cspBudget]);
 
   const allocationPlan = useMemo(
@@ -813,7 +840,12 @@ export default function MarginAllocator() {
         </TerminalPanel>
 
         {/* ─── 4. Recommended allocation plan ──────────────────────────────── */}
-        <TerminalPanel title="Recommended Allocation Plan" icon={Target} badge={<Badge tone="amber">{riskPreset.toUpperCase()}</Badge>}>
+        <TerminalPanel
+          title="Recommended Allocation Plan"
+          icon={Target}
+          badge={<Badge tone="amber">{riskPreset.toUpperCase()}</Badge>}
+          meta={<UnderlyingFilterToggle value={displayFilter} onChange={setDisplayFilter} />}
+        >
           {!dhanFunds || deployableBudget <= 0 ? (
             <EmptyRow>No deployable Dhan margin right now.</EmptyRow>
           ) : !allocationPlan.length ? (
@@ -883,16 +915,7 @@ export default function MarginAllocator() {
           href="/ultimate-scanner"
           meta={
             <div className="flex items-center gap-2">
-              {(['ALL', ...SCAN_UNDERLYINGS] as const).map((u) => (
-                <button
-                  key={u}
-                  type="button"
-                  onClick={() => setDisplayFilter(u)}
-                  className={`rounded px-2 py-0.5 font-mono text-[10px] font-bold ${displayFilter === u ? 'bg-amber-500/20 text-amber-300' : 'text-zinc-500 hover:text-zinc-300'}`}
-                >
-                  {u}
-                </button>
-              ))}
+              <UnderlyingFilterToggle value={displayFilter} onChange={setDisplayFilter} />
               {vixInfo ? <span className="text-zinc-500">VIX {vixInfo.vix.toFixed(2)} · {vixInfo.regime}</span> : null}
             </div>
           }
