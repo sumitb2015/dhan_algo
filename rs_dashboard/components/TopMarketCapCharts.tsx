@@ -17,6 +17,7 @@ import { NIFTY_TOP10_BY_WEIGHT } from '@/lib/nifty50';
 import { cn } from '@/lib/utils';
 import NavBar from './NavBar';
 import LightweightCandlestickChart from './LightweightCandlestickChart';
+import { fmtPrice, PctPill } from './LiveTickerPanel';
 
 interface Tile {
   symbol: string;
@@ -66,6 +67,22 @@ const PERIOD_DAYS: Record<Period, number | null> = {
 };
 
 const ALL_TILES = [...TOP8_STOCKS, ...TOP8_INDICES];
+
+/**
+ * Last candle's close as the current price, vs. the prior candle's close for
+ * % change — dataLoader.ts patches today's row from live intraday quotes
+ * before the EOD CSV lands, so the last candle is already "current" during
+ * market hours, not just yesterday's settle.
+ */
+function quoteFor(resp: EquityCandlesResponse | undefined): { ltp: number; changePct: number | null } | null {
+  const candles = resp?.candles;
+  if (!candles || candles.length === 0) return null;
+  const ltp = candles[candles.length - 1].close;
+  if (candles.length < 2) return { ltp, changePct: null };
+  const prevClose = candles[candles.length - 2].close;
+  const changePct = prevClose > 0 ? ((ltp - prevClose) / prevClose) * 100 : null;
+  return { ltp, changePct };
+}
 
 const FOCUS_RING = 'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500/60 focus-visible:ring-offset-1 focus-visible:ring-offset-zinc-950';
 
@@ -217,14 +234,25 @@ export default function TopMarketCapCharts() {
         <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-3">
           {tiles.map((s, i) => {
             const resp = data[s.symbol];
+            const q = quoteFor(resp);
             return (
               <div
                 key={s.symbol}
                 className="group relative flex flex-col h-[320px] bg-zinc-950/60 border border-zinc-900 rounded-xl p-2"
               >
                 <div className="flex items-center justify-between px-1 pb-1 shrink-0">
-                  <span className="text-xs font-bold text-white">{s.name}</span>
-                  <div className="flex items-center gap-1.5">
+                  <div className="flex items-baseline gap-1.5 min-w-0">
+                    <span className="text-xs font-bold text-white truncate">{s.name}</span>
+                    {q && (
+                      <>
+                        <span className="text-xs font-semibold text-zinc-300 tabular-nums font-mono whitespace-nowrap">
+                          {fmtPrice(q.ltp)}
+                        </span>
+                        <PctPill v={q.changePct} />
+                      </>
+                    )}
+                  </div>
+                  <div className="flex items-center gap-1.5 shrink-0">
                     <span className="text-[10px] text-zinc-500 font-mono tabular-nums">
                       #{i + 1}{s.sub ? ` · ${s.sub}` : ''}
                     </span>
@@ -273,6 +301,17 @@ export default function TopMarketCapCharts() {
             <div className="flex items-center justify-between pb-2 shrink-0">
               <div className="flex items-baseline gap-2">
                 <span className="text-sm font-bold text-white">{maximizedTile.name}</span>
+                {(() => {
+                  const q = quoteFor(data[maximizedTile.symbol]);
+                  return q && (
+                    <>
+                      <span className="text-sm font-semibold text-zinc-300 tabular-nums font-mono">
+                        {fmtPrice(q.ltp)}
+                      </span>
+                      <PctPill v={q.changePct} />
+                    </>
+                  );
+                })()}
                 <span className="text-[11px] text-zinc-500 font-mono tabular-nums">
                   #{maximizedIndex + 1}{maximizedTile.sub ? ` · ${maximizedTile.sub}` : ''}
                 </span>
