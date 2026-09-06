@@ -27,6 +27,7 @@ interface LegResult {
   option_type: string;
   position: string;
   strike: number;
+  lots: number;
   entry_price: number | null;
   exit_price: number | null;
   pnl: number;
@@ -540,8 +541,7 @@ function FullReportTable({ cycles, lotSize }: { cycles: CycleResult[]; lotSize: 
                           </span>
                         </td>
                         <td className="px-2 py-1 text-right font-mono text-zinc-400">
-                          {/* lots * lot_size displayed as qty — shown as lots only, lot_size applied in P&L */}
-                          {lotSize}
+                          {(leg.lots ?? 1) * lotSize}
                         </td>
                         <td className={`px-3 py-1 text-right font-mono border-l border-zinc-800 ${isCall ? 'text-sky-300' : 'text-amber-300'}`}>
                           {fmtNum(leg.entry_price)}
@@ -916,7 +916,7 @@ export default function BacktestPage() {
                     <PulseStat
                       label="Trades"
                       value={String(s.traded_cycles)}
-                      sub={`of ${s.total_cycles} cycles`}
+                      sub={`of ${s.total_cycles} evaluated`}
                       size="text-sm"
                       color="text-zinc-200"
                     />
