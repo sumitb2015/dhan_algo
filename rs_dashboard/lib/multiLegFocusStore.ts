@@ -45,15 +45,15 @@ export function upsertBasket(basket: Partial<MultiLegBasket> & { id?: string }):
     baskets[idx] = { ...baskets[idx], ...basket, updatedAt: now } as MultiLegBasket;
   } else {
     baskets.push({
+      ...basket,
       id: basket.id ?? newBasketId(),
       underlying: basket.underlying ?? 'NIFTY',
       expiry: basket.expiry ?? '',
       broker: basket.broker ?? 'dhan',
-      presetKey: basket.presetKey,
       legs: basket.legs ?? [],
       createdAt: now,
       updatedAt: now,
-    });
+    } as MultiLegBasket);
   }
   writeBaskets(baskets);
   return baskets;

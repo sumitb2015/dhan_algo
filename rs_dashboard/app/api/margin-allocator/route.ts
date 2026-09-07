@@ -5,6 +5,7 @@ import { kotakGet, kotakLimits, kotakRows, KOTAK_PATHS, isKotakTokenValid } from
 import { shapeKotakPosition, shapeKotakFunds } from '@/lib/kotakShape';
 import { dedupePositions } from '@/lib/positionProduct';
 import { buildPositionLegs, parseTradingSymbol, type PositionLeg } from '@/lib/positionLegs';
+import { aggregateLegs, classifyStructure, type GroupLeg } from '@/lib/positionStructure';
 import { calculateDte } from '@/lib/ultimateScannerEngine';
 import { lookupChainLegData, type ChainOc } from '@/lib/optionsStrategy';
 import type { ScalperPosition } from '@/lib/zerodhaShape';
@@ -22,15 +23,6 @@ import type { ScalperPosition } from '@/lib/zerodhaShape';
 
 type MarginBroker = 'dhan' | 'kotak';
 const MARGIN_BROKERS: MarginBroker[] = ['dhan', 'kotak'];
-
-export interface GroupLeg {
-  strike: number;
-  type: 'CE' | 'PE';
-  side: 'BUY' | 'SELL';
-  qty: number;
-  avgPrice: number;
-  securityId: string | null;
-}
 
 export interface PositionGroup {
   broker: MarginBroker;
@@ -72,81 +64,6 @@ export interface MarginAllocatorResponse {
   groups: PositionGroup[];
   unparseable: { broker: MarginBroker; tradingSymbol: string; reason: string }[];
   error?: string;
-}
-
-/**
- * Classify an aggregated (strike, type) leg set into the structure it forms.
- *
- * Deliberately coarse — this covers every shape the value_imbalance /
- * spread_trend / oi_directional strategies (CLAUDE.md) actually build.
- * Anything more exotic (butterflies, jade lizards, multi-strike scale-ins)
- * falls into 'Custom Combo' rather than being mis-labeled.
- */
-function classifyStructure(legs: GroupLeg[]): { structure: string; riskType: 'defined' | 'undefined' } {
-  const shortCE = legs.filter((l) => l.type === 'CE' && l.side === 'SELL');
-  const shortPE = legs.filter((l) => l.type === 'PE' && l.side === 'SELL');
-  const longCE = legs.filter((l) => l.type === 'CE' && l.side === 'BUY');
-  const longPE = legs.filter((l) => l.type === 'PE' && l.side === 'BUY');
-
-  if (shortCE.length === 1 && shortPE.length === 1 && longCE.length === 1 && longPE.length === 1) {
-    if (longCE[0].strike > shortCE[0].strike && longPE[0].strike < shortPE[0].strike) {
-      return { structure: 'Iron Condor', riskType: 'defined' };
-    }
-  }
-  if (shortCE.length === 1 && shortPE.length === 1 && longCE.length === 0 && longPE.length === 0) {
-    return shortCE[0].strike === shortPE[0].strike
-      ? { structure: 'Short Straddle', riskType: 'undefined' }
-      : { structure: 'Short Strangle', riskType: 'undefined' };
-  }
-  if (shortCE.length === 1 && longCE.length === 1 && shortPE.length === 0 && longPE.length === 0) {
-    return longCE[0].strike > shortCE[0].strike
-      ? { structure: 'Bear Call Spread', riskType: 'defined' }
-      : { structure: 'Custom Call Combo', riskType: 'defined' };
-  }
-  if (shortPE.length === 1 && longPE.length === 1 && shortCE.length === 0 && longCE.length === 0) {
-    return longPE[0].strike < shortPE[0].strike
-      ? { structure: 'Bull Put Spread', riskType: 'defined' }
-      : { structure: 'Custom Put Combo', riskType: 'defined' };
-  }
-  if (shortCE.length >= 1 && shortPE.length === 0 && longCE.length === 0 && longPE.length === 0) {
-    return { structure: 'Naked Call', riskType: 'undefined' };
-  }
-  if (shortPE.length >= 1 && shortCE.length === 0 && longCE.length === 0 && longPE.length === 0) {
-    return { structure: 'Cash-Secured / Naked Put', riskType: 'undefined' };
-  }
-  if (longCE.length >= 1 || longPE.length >= 1) {
-    return { structure: 'Long Options / Hedge', riskType: 'defined' };
-  }
-  return {
-    structure: 'Custom Combo',
-    riskType: shortCE.length + shortPE.length > longCE.length + longPE.length ? 'undefined' : 'defined',
-  };
-}
-
-function aggregateLegs(bucketLegs: PositionLeg[]): GroupLeg[] {
-  const map = new Map<string, GroupLeg & { signedQty: number }>();
-  for (const leg of bucketLegs) {
-    const key = `${leg.strike}:${leg.type}`;
-    const signedQty = (leg.side === 'SELL' ? -1 : 1) * leg.qtyLots;
-    const existing = map.get(key);
-    if (existing) {
-      const newSigned = existing.signedQty + signedQty;
-      existing.signedQty = newSigned;
-      existing.qty = Math.abs(newSigned);
-      existing.side = newSigned < 0 ? 'SELL' : 'BUY';
-      existing.avgPrice = (existing.avgPrice + leg.price) / 2;
-      if (!existing.securityId) existing.securityId = leg.securityId;
-    } else {
-      map.set(key, {
-        strike: leg.strike, type: leg.type, side: leg.side,
-        qty: leg.qtyLots, avgPrice: leg.price, securityId: leg.securityId,
-        signedQty,
-      });
-    }
-  }
-  return [...map.values()]
-    .filter((l) => l.qty > 0)
-    .map((l): GroupLeg => ({ strike: l.strike, type: l.type, side: l.side, qty: l.qty, avgPrice: l.avgPrice, securityId: l.securityId }));
 }
 
 // MCX quantity semantics differ 100x between Dhan and Kotak (CLAUDE.md's

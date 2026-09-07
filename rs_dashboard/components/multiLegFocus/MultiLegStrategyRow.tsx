@@ -129,6 +129,17 @@ export default function MultiLegStrategyRow({
     return basket.legs.some(l => l.status === 'OPEN' || l.status === 'PLACING' || l.status === 'CLOSING');
   }, [basket.legs]);
 
+  // This basket's fill ledger for an auto-adopted leg is seeded from the
+  // broker's full netQty at that strike at the moment it was discovered —
+  // a best-effort claim, not proof of sole ownership, since Dhan/Kotak net
+  // by security/symbol across every engine sharing the account (see
+  // MultiLegLeg.autoAdopted's doc comment). Surfaced here rather than
+  // silently trusted, so the user checks before an Exit on this leg assumes
+  // the whole broker quantity is this strategy's own.
+  const hasUnverifiedAutoAdopt = useMemo(() => {
+    return basket.legs.some(l => l.autoAdopted && l.status !== 'CLOSED');
+  }, [basket.legs]);
+
   const basketStatus = useMemo(() => {
     if (basket.legs.length === 0) return 'DRAFT';
     if (basket.legs.some(l => l.status === 'PLACING')) return 'PLACING';
@@ -313,7 +324,7 @@ export default function MultiLegStrategyRow({
 
           <div className="flex items-center gap-2">
             <span className="text-xs font-bold text-zinc-100 uppercase tracking-wider">
-              {basket.presetKey ? basket.presetKey.replace(/-/g, ' ') : `Strategy #${index + 1}`}
+              {basket.presetKey ? basket.presetKey.replace(/-/g, ' ') : (basket.name ?? `Strategy #${index + 1}`)}
             </span>
             <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded border ${STATUS_STYLE[basketStatus]}`}>
               {basketStatus}
@@ -329,6 +340,14 @@ export default function MultiLegStrategyRow({
             >
               {BROKER_LABELS[basket.broker as Broker] ?? basket.broker}
             </span>
+            {hasUnverifiedAutoAdopt && (
+              <span
+                className="text-[10px] font-bold px-1.5 py-0.5 rounded border uppercase tracking-wider bg-amber-500/10 text-amber-400 border-amber-500/20 flex items-center gap-1"
+                title="This position was found already open on your broker account, not placed from here. Its quantity is the broker's full position at this strike — if another strategy or session also holds part of it, Exit here could close more than intended. Verify sole ownership before exiting."
+              >
+                <AlertTriangle className="w-3 h-3" /> Auto-Detected
+              </span>
+            )}
           </div>
 
           {/* Underlying Selector */}
