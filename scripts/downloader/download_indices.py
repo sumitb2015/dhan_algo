@@ -24,6 +24,12 @@ os.makedirs(INDICES_DIR, exist_ok=True)
 
 # All indices to download (Nifty 50=13 and Nifty 500=19 are handled by refresh_dashboard_data.py)
 INDICES = [
+    # BSE index, not NSE — but Dhan still serves its daily candles under
+    # IDX_I/INDEX like every NSE index here (BSE_IDX returns nothing, see
+    # lib/dhan_helper.py's get_prev_day_levels comment, verified 2026-08-16).
+    # Consumed by rs_dashboard's /api/margin-allocator/trend for SENSEX's own
+    # EMA20+Supertrend read instead of borrowing NIFTY's.
+    {"id": 51, "name": "SENSEX",            "label": "BSE Sensex"},
     {"id": 38, "name": "NIFTY_NEXT50",      "label": "Nifty Next 50"},
     {"id": 17, "name": "NIFTY_100",          "label": "Nifty 100"},
     {"id": 18, "name": "NIFTY_200",          "label": "Nifty 200"},
@@ -55,8 +61,14 @@ INDICES = [
 
 
 def normalize_df(df: pd.DataFrame) -> pd.DataFrame:
+    # historical_daily_data() returns the raw Dhan payload with an epoch-seconds
+    # "timestamp" column (not "start_time") — missing this mapping meant the
+    # branch below never fired and the frame kept its meaningless positional
+    # RangeIndex as "Datetime" once written to CSV. Only ever surfaced when a
+    # symbol needed a full fresh download (a brand-new index, or --force);
+    # an incremental append with existing correctly-dated rows masked it.
     rename_map = {
-        "start_time": "Datetime", "start_time": "Datetime",
+        "start_time": "Datetime", "timestamp": "Datetime",
         "open": "Open", "high": "High", "low": "Low",
         "close": "Close", "volume": "Volume",
     }

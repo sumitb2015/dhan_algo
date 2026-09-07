@@ -212,6 +212,11 @@ interface RankedCandidate {
   score: number;
   riskType: RiskClass;
   detail: string;
+  /** Net position delta per unit (signed: +bullish/-bearish exposure), straight
+   *  from the scan engine's own Greeks. Null for CSP rows — csp_scanner.py
+   *  doesn't compute one, so they're excluded from the portfolio delta gauge
+   *  below rather than silently counted as flat (0) exposure they may not have. */
+  deltaNet: number | null;
 }
 
 interface AllocatedCandidate extends RankedCandidate {
@@ -245,6 +250,61 @@ function directionalScoreMultiplier(strategyType: RankedCandidate['strategyType'
   return bias === trend ? 1.15 : 0.8;
 }
 
+/**
+ * Naked-risk budget tilt from India VIX Percentile (trailing 1Y from
+ * MarginAllocator/trend), multiplied onto the risk preset's own naked-risk
+ * ceiling — see `effectiveUndefinedCap` below, which never lets this widen
+ * past that ceiling. Piecewise-linear over three zones that mirror the
+ * tastytrade IV-Rank/Percentile premium-selling convention: full size above
+ * the 50th percentile, half-size 30-50, avoid below 30 (thin premium doesn't
+ * compensate for undefined-risk tail exposure). Kept continuous rather than
+ * a hard step so a candidate at percentile 29 isn't cliff-edged against one
+ * at 31 — but the floor is deliberately low (0.15, not the old 0.5) so the
+ * "avoid" zone actually throttles naked selling instead of merely halving it.
+ */
+function interpolatePiecewise(anchors: readonly (readonly [number, number])[], x: number): number {
+  const clamped = Math.min(anchors[anchors.length - 1][0], Math.max(anchors[0][0], x));
+  for (let i = 1; i < anchors.length; i++) {
+    const [x0, y0] = anchors[i - 1];
+    const [x1, y1] = anchors[i];
+    if (clamped <= x1) return y0 + (y1 - y0) * ((clamped - x0) / (x1 - x0));
+  }
+  return anchors[anchors.length - 1][1];
+}
+
+const VIX_TILT_ANCHORS: readonly [number, number][] = [
+  [0, 0.15],
+  [30, 0.35],
+  [50, 0.65],
+  [100, 1.0],
+];
+function vixPercentileToNakedTilt(percentile: number): number {
+  return interpolatePiecewise(VIX_TILT_ANCHORS, percentile);
+}
+
+/**
+ * Total-deployable-budget multiplier from VIX Percentile — separate lever
+ * from `vixPercentileToNakedTilt` above, which only re-splits an already-
+ * fixed budget between naked and defined risk. This one shrinks the budget
+ * itself, and only at the extreme high end (≥85th percentile — "panic"
+ * territory in the absolute-regime bucket naming below). Rationale: entering
+ * FRESH option-selling positions while VIX is still actively spiking is the
+ * mistake behind Volmageddon-style short-vol blowups — premium is richest
+ * exactly when parameter/repricing uncertainty is highest, so a Kelly-VIX
+ * hybrid sizing approach cuts total size there rather than over-betting on
+ * a premium level that may still be actively repricing. Flat at 1.0 below
+ * the 85th percentile — this is not a second naked-risk throttle, ordinary
+ * "rich premium" territory is left alone.
+ */
+const VIX_DEPLOY_ANCHORS: readonly [number, number][] = [
+  [0, 1.0],
+  [85, 1.0],
+  [100, 0.6],
+];
+function vixPercentileToDeployMultiplier(percentile: number): number {
+  return interpolatePiecewise(VIX_DEPLOY_ANCHORS, percentile);
+}
+
 function fromScannedStrategy(s: ScannedStrategy, trend: MarketTrend): RankedCandidate {
   const legsSummary = s.legs.map((l) => `${l.side === 'SELL' ? '-' : '+'}${l.strike}${l.option}`).join(' / ');
   return {
@@ -261,6 +321,7 @@ function fromScannedStrategy(s: ScannedStrategy, trend: MarketTrend): RankedCand
     score: Math.round(s.score * directionalScoreMultiplier(s.type, trend)),
     riskType: s.maxLossUnlimited ? 'undefined' : 'defined',
     detail: legsSummary,
+    deltaNet: s.deltaNet,
   };
 }
 
@@ -279,7 +340,28 @@ function fromCspRow(r: CspRow): RankedCandidate {
     score: r.score,
     riskType: 'assignment',
     detail: r.rationale,
+    deltaNet: null,
   };
+}
+
+/**
+ * NIFTY and SENSEX are ~99%-correlated large-cap benchmark indices — they
+ * move together on all but the rarest sessions (the same premise the trend
+ * route already relies on to borrow NIFTY's read for SENSEX). A plan holding
+ * 60% margin in NIFTY Bull Put Spreads and another 60% in SENSEX Bull Put
+ * Spreads is not diversified — it's the same directional bet on Indian
+ * large-caps, doubled. Concentration caps below therefore key off this
+ * *correlation group*, not the raw underlying string, so NIFTY+SENSEX
+ * exposure is capped as ONE combined bucket. Every other underlying (single
+ * F&O stocks from the CSP scanner) is its own group — cross-stock
+ * correlation is a separate, unaddressed concern.
+ */
+const CORRELATION_GROUPS: Record<string, string> = {
+  NIFTY: 'INDEX_BETA',
+  SENSEX: 'INDEX_BETA',
+};
+function correlationGroup(underlying: string): string {
+  return CORRELATION_GROUPS[underlying] ?? underlying;
 }
 
 /**
@@ -291,14 +373,16 @@ function fromCspRow(r: CspRow): RankedCandidate {
  * Within a category: diversify first (one unit of every candidate the budget
  * can fit, best score first), then spend leftover budget scaling the winners.
  * Two independent concentration caps apply together:
- *  - `maxPerUnderlyingFraction` stops one underlying (across every strategy
- *    type combined) from eating the whole category.
- *  - `maxPerTypeFraction` additionally stops one *strategy type* on one
- *    underlying — e.g. a dozen near-identical Bear Call Spread strike
- *    variants on SENSEX, which a scan naturally returns many of — from
- *    filling that underlying's whole share by itself. Without this, the
- *    underlying cap alone is satisfied by ten clones of the same trade,
- *    which is concentration wearing a diversification costume.
+ *  - `maxPerUnderlyingFraction` stops one *correlation group* (see
+ *    `correlationGroup` above — NIFTY+SENSEX combined, everything else
+ *    individually) from eating the whole category.
+ *  - `maxPerTypeFraction` additionally stops one *strategy type* within one
+ *    correlation group — e.g. Bear Call Spread on NIFTY plus Bear Call
+ *    Spread on SENSEX, which a scan naturally returns many strike variants
+ *    of on each — from filling that group's whole share by itself. Without
+ *    this, the group cap alone is satisfied by ten clones of the same
+ *    directional bet, which is concentration wearing a diversification
+ *    costume.
  */
 function buildAllocationPlan(
   candidates: RankedCandidate[],
@@ -315,14 +399,15 @@ function buildAllocationPlan(
   const plan: AllocatedCandidate[] = [];
 
   const tryFit = (marginPerUnit: number, underlying: string, strategyType: string) => {
-    const typeKey = `${underlying}:${strategyType}`;
-    const u = usedByUnderlying.get(underlying) ?? 0;
+    const group = correlationGroup(underlying);
+    const typeKey = `${group}:${strategyType}`;
+    const u = usedByUnderlying.get(group) ?? 0;
     const t = usedByType.get(typeKey) ?? 0;
     if (u + marginPerUnit > underlyingCap) return false;
     if (t + marginPerUnit > typeCap) return false;
     if (used + marginPerUnit > budget) return false;
     used += marginPerUnit;
-    usedByUnderlying.set(underlying, u + marginPerUnit);
+    usedByUnderlying.set(group, u + marginPerUnit);
     usedByType.set(typeKey, t + marginPerUnit);
     return true;
   };
@@ -661,8 +746,19 @@ export default function MarginAllocator() {
   const totals = portfolio?.totals ?? null;
   const dhanFunds = allocator?.funds ?? null;
   const preset = RISK_PRESETS.find((p) => p.key === riskPreset)!;
-  const deployableBudget = dhanFunds ? Math.max(0, dhanFunds.availableBalance * preset.fraction) : 0;
+  // Panic-zone throttle on TOTAL capital committed, on top of (not instead
+  // of) the preset's own fraction — see vixPercentileToDeployMultiplier.
+  const deployMultiplier = marketTrend?.vixPercentile != null ? vixPercentileToDeployMultiplier(marketTrend.vixPercentile) : 1;
+  const deployableBudget = dhanFunds ? Math.max(0, dhanFunds.availableBalance * preset.fraction * deployMultiplier) : 0;
   const trend: MarketTrend = marketTrend?.trend ?? 'neutral';
+  // SENSEX gets its own EMA20+Supertrend read once Historical Data/Indices/
+  // SENSEX.csv exists (download_indices.py --name SENSEX); falls back to
+  // NIFTY's read otherwise — see trend/route.ts header comment.
+  const sensexTrend: MarketTrend = marketTrend?.sensex?.trend ?? trend;
+  const trendForUnderlying = useCallback(
+    (underlying: string): MarketTrend => (underlying === 'SENSEX' ? sensexTrend : trend),
+    [trend, sensexTrend],
+  );
 
   const allScanCandidates = useMemo(
     () => Object.values(scans).flatMap((s) => s?.candidates ?? []),
@@ -677,25 +773,38 @@ export default function MarginAllocator() {
   // undefined risk. This only ever narrows the preset's naked allowance, never
   // widens past it — the risk preset (Conservative/Balanced/Aggressive)
   // remains the hard ceiling the user chose.
-  const VIX_UNDEFINED_TILT: Record<string, number> = {
-    'Low Volatility': 0.5,
+  //
+  // Driven by VIX PERCENTILE (trailing 252 sessions from the local India VIX
+  // history) via vixPercentileToNakedTilt above, not the scan API's
+  // absolute-level regime bucket — 11 VIX means something very different
+  // after a year mostly above 20 than after a year mostly below 12, and a
+  // fixed threshold can't tell those apart. Percentile is preferred over
+  // rank here because a single old spike doesn't keep depressing it for the
+  // rest of the lookback window the way rank would. Falls back to the
+  // absolute-level regime only when the local VIX history hasn't loaded yet
+  // — kept intentionally conservative (a 0.3 floor, not 0.5) to echo the same
+  // "avoid thin premium" spirit as the percentile curve's own low end.
+  const VIX_REGIME_FALLBACK_TILT: Record<string, number> = {
+    'Low Volatility': 0.3,
     'Normal / Ideal Volatility': 0.85,
     'Elevated Volatility': 1.0,
     'High Volatility / Panic': 1.0,
   };
-  const vixTilt = vixInfo ? (VIX_UNDEFINED_TILT[vixInfo.regime] ?? 0.85) : 0.85;
+  const vixTilt = marketTrend?.vixPercentile != null
+    ? vixPercentileToNakedTilt(marketTrend.vixPercentile)
+    : vixInfo ? (VIX_REGIME_FALLBACK_TILT[vixInfo.regime] ?? 0.85) : 0.85;
 
   const definedRiskCandidatesAll = useMemo(
     () => allScanCandidates
       .filter((c) => !c.maxLossUnlimited && c.dte >= MIN_DTE_FOR_YIELD && c.dte <= MAX_DTE_FOR_YIELD)
-      .map((c) => fromScannedStrategy(c, trend)),
-    [allScanCandidates, trend],
+      .map((c) => fromScannedStrategy(c, trendForUnderlying(c.underlying))),
+    [allScanCandidates, trendForUnderlying],
   );
   const undefinedRiskCandidatesAll = useMemo(
     () => allScanCandidates
       .filter((c) => c.maxLossUnlimited && c.dte >= MIN_DTE_FOR_YIELD && c.dte <= MAX_DTE_FOR_YIELD)
-      .map((c) => fromScannedStrategy(c, trend)),
-    [allScanCandidates, trend],
+      .map((c) => fromScannedStrategy(c, trendForUnderlying(c.underlying))),
+    [allScanCandidates, trendForUnderlying],
   );
   const cspCandidatesAll = useMemo(
     // csp_scanner.py already floors at MIN_DTE=5 server-side; the upper bound still applies here.
@@ -736,6 +845,24 @@ export default function MarginAllocator() {
 
   const totalCreditExpected = allocationPlan.reduce((a, p) => a + p.creditExpected, 0);
   const utilizationOfDeployable = deployableBudget > 0 ? (allocationUsed / deployableBudget) * 100 : 0;
+
+  // Portfolio-level delta exposure — margin alone doesn't show this: a
+  // NIFTY Bull Put Spread and a SENSEX Bull Put Spread can each fit under
+  // the correlation-group margin cap yet still stack the SAME directional
+  // delta bet across two ~99%-correlated indices, which margin accounting
+  // can't see. Deliberately informational only (no hard cap wired into
+  // buildAllocationPlan yet) — CSP legs are excluded since csp_scanner.py
+  // doesn't compute a delta, not because they carry none.
+  const cspInPlan = allocationPlan.some((p) => p.riskType === 'assignment');
+  const netDeltaExposure = allocationPlan.reduce((a, p) => a + (p.deltaNet ?? 0) * p.units, 0);
+
+  // Tail-hedge reserve — informational nudge, not an executed order (this
+  // page recommends, it never places trades). Sized off naked-risk margin
+  // specifically, since that's the book with theoretically unbounded loss on
+  // a gap move; a cheap far-OTM index put is the standard convex hedge for
+  // exactly this (see Volmageddon post-mortems: a cheap hedge should blunt
+  // catastrophic-failure risk, not chase raw tail correlation).
+  const tailHedgeReserve = usedUndefined * 0.05;
 
   const dataDate = new Date().toISOString().split('T')[0];
 
@@ -874,13 +1001,15 @@ export default function MarginAllocator() {
         {/* ─── 3. Deployable capital + risk dial ──────────────────────────── */}
         <TerminalPanel title="Deployable Idle Capital" icon={Gauge}>
           <div className="flex flex-col gap-3 p-3.5">
-            <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+            <div className="grid grid-cols-2 gap-3 sm:grid-cols-5">
               <StatTile label="Dhan Idle Margin" value={fmtINRCompact(dhanFunds?.availableBalance ?? null)} tone="up" />
               <StatTile
                 label="Deployable Budget"
                 value={fmtINRCompact(deployableBudget)}
                 tone="accent"
-                sub={`${(preset.fraction * 100).toFixed(0)}% of idle margin · ${preset.label}`}
+                sub={deployMultiplier < 1
+                  ? `${(preset.fraction * 100).toFixed(0)}% × ${(deployMultiplier * 100).toFixed(0)}% panic throttle · ${preset.label}`
+                  : `${(preset.fraction * 100).toFixed(0)}% of idle margin · ${preset.label}`}
               />
               <StatTile
                 label="Recommended Plan Uses"
@@ -889,6 +1018,12 @@ export default function MarginAllocator() {
                 tone="neutral"
               />
               <StatTile label="Expected Credit (Plan)" value={fmtINRCompact(totalCreditExpected)} tone="up" sub={`${allocationPlan.length} setup${allocationPlan.length === 1 ? '' : 's'}`} />
+              <StatTile
+                label="Tail Hedge Reserve"
+                value={fmtINRCompact(tailHedgeReserve)}
+                tone="neutral"
+                sub="suggested, not auto-placed — 5% of naked margin"
+              />
             </div>
             <div className="flex flex-wrap items-center gap-2">
               <span className="font-mono text-[10px] font-bold uppercase tracking-[0.14em] text-zinc-500">Allocation Posture</span>
@@ -912,27 +1047,45 @@ export default function MarginAllocator() {
               undefined-risk (naked straddle/strangle/lizard) exposure is capped at {(preset.undefinedCap * 100).toFixed(0)}% of the
               deployable budget as an absolute ceiling — no single-trade or single-risk-class concentration, regardless of how
               attractive one setup scores. The VIX read below tunes actual usage within that ceiling, never past it.
+              {deployMultiplier < 1 && (
+                <> Above the 85th VIX percentile, TOTAL deployable capital is additionally throttled to {(deployMultiplier * 100).toFixed(0)}%
+                {' '}of the preset&apos;s own share — committing fresh naked/defined-risk capital into a still-repricing panic spike is the
+                {' '}mistake behind short-vol blowups like Feb 2018&apos;s Volmageddon, not a bar to raise premium quality alone.</>
+              )}
+              {' '}A Tail Hedge Reserve (5% of naked margin used) is suggested alongside the plan below, not spent by it — consider a cheap
+              far-OTM NIFTY/SENSEX put from Baskets sized to that reserve as convex insurance against a gap move on the naked book.
             </p>
           </div>
         </TerminalPanel>
 
         {/* ─── 3b. Market read driving the plan below ─────────────────────── */}
         <TerminalPanel title="Market Read: VIX Regime &amp; Trend" icon={Activity}>
-          <div className="grid gap-3 p-3.5 sm:grid-cols-2">
+          <div className="grid gap-3 p-3.5 sm:grid-cols-2 lg:grid-cols-3">
             <div className="rounded-lg border border-zinc-800 bg-zinc-950 p-3.5">
               <div className="flex items-center justify-between">
                 <span className="text-[10px] font-bold uppercase tracking-[0.15em] text-zinc-500">India VIX</span>
                 {vixInfo ? <Badge tone="amber">{vixInfo.regime}</Badge> : <Badge tone="zinc">LOADING</Badge>}
               </div>
-              <div className="font-mono text-lg font-bold leading-none tabular-nums text-amber-400 mt-2">
-                {vixInfo ? vixInfo.vix.toFixed(2) : '—'}
+              <div className="flex items-baseline gap-2 mt-2">
+                <span className="font-mono text-lg font-bold leading-none tabular-nums text-amber-400">
+                  {vixInfo ? vixInfo.vix.toFixed(2) : '—'}
+                </span>
+                {marketTrend?.vixPercentile != null && (
+                  <span className="font-mono text-[10px] text-zinc-500">
+                    {marketTrend.vixPercentile.toFixed(0)}th percentile · {marketTrend.vixRank?.toFixed(0)}% rank (trailing 1Y)
+                  </span>
+                )}
+                {marketTrend?.vixPercentile != null && marketTrend.vixPercentile < 30 && <Badge tone="red">AVOID ZONE</Badge>}
               </div>
               <p className="font-mono text-[10px] text-zinc-500 mt-2">{vixInfo?.advice ?? 'Waiting on the NIFTY/SENSEX scan…'}</p>
               <p className="font-mono text-[10px] text-zinc-400 mt-1.5 border-t border-zinc-800 pt-1.5">
                 Naked-risk budget dialed to <span className="text-amber-400 font-bold">{(effectiveUndefinedCap * 100).toFixed(0)}%</span> of
-                deployable (of a {(preset.undefinedCap * 100).toFixed(0)}% preset ceiling) — {vixTilt >= 1
-                  ? 'richer premium at this VIX level earns the full naked allowance.'
-                  : 'thin premium at this VIX level, so more goes to defined-risk spreads instead.'}
+                deployable (of a {(preset.undefinedCap * 100).toFixed(0)}% preset ceiling), driven by{' '}
+                {marketTrend?.vixPercentile != null ? "today's VIX percentile vs its own trailing year" : "today's absolute VIX regime (percentile still loading)"} — {vixTilt >= 0.9
+                  ? 'richer premium relative to its own range earns close to the full naked allowance.'
+                  : vixTilt <= 0.35
+                    ? 'below the 30th percentile, volatility is cheap relative to its own range and naked selling is throttled hard, not just discounted — thin premium doesn’t compensate for undefined-risk tail exposure.'
+                    : 'a moderate read partway up its own trailing range, so the naked allowance sits proportionally between the half-size floor and the full ceiling.'}
               </p>
             </div>
             <div className="rounded-lg border border-zinc-800 bg-zinc-950 p-3.5">
@@ -948,12 +1101,34 @@ export default function MarginAllocator() {
                 {marketTrend?.asOf ? `As of ${marketTrend.asOf} EOD.` : 'Loading NIFTY daily history…'}{' '}
                 {trend === 'neutral'
                   ? 'EMA20 and Supertrend disagree right now, so no directional tilt is applied.'
-                  : `Both EMA20 and Supertrend agree ${trend} — also used as the shared read for SENSEX (no local SENSEX daily history).`}
+                  : `Both EMA20 and Supertrend agree ${trend}.`}
               </p>
               <p className="font-mono text-[10px] text-zinc-400 mt-1.5 border-t border-zinc-800 pt-1.5">
                 {trend === 'neutral'
-                  ? 'Bull Put, Bear Call, Jade Lizard and Reverse Jade Lizard score unchanged — Iron Condor/Butterfly/Strangle/Straddle are never affected, they’re direction-neutral by construction.'
-                  : `${trend === 'bullish' ? 'Bull Put Spread and Jade Lizard' : 'Bear Call Spread and Reverse Jade Lizard'} setups are scored up (trend-aligned); the opposite-direction setups are scored down, never hidden.`}
+                  ? 'NIFTY Bull Put, Bear Call, Jade Lizard and Reverse Jade Lizard score unchanged — Iron Condor/Butterfly/Strangle/Straddle are never affected, they’re direction-neutral by construction.'
+                  : `NIFTY ${trend === 'bullish' ? 'Bull Put Spread and Jade Lizard' : 'Bear Call Spread and Reverse Jade Lizard'} setups are scored up (trend-aligned); the opposite-direction setups are scored down, never hidden.`}
+              </p>
+            </div>
+            <div className="rounded-lg border border-zinc-800 bg-zinc-950 p-3.5">
+              <div className="flex items-center justify-between">
+                <span className="text-[10px] font-bold uppercase tracking-[0.15em] text-zinc-500">SENSEX Trend (EMA20 + Supertrend)</span>
+                <Badge tone={sensexTrend === 'bullish' ? 'emerald' : sensexTrend === 'bearish' ? 'red' : 'zinc'}>{sensexTrend.toUpperCase()}</Badge>
+              </div>
+              <div className="font-mono text-lg font-bold leading-none tabular-nums text-zinc-100 mt-2">
+                {marketTrend?.sensex ? marketTrend.sensex.lastClose.toLocaleString('en-IN') : marketTrend?.lastClose ? marketTrend.lastClose.toLocaleString('en-IN') : '—'}
+                {marketTrend?.sensex
+                  ? <span className="text-zinc-500 text-xs font-normal"> vs EMA20 {marketTrend.sensex.ema20.toLocaleString('en-IN')}</span>
+                  : marketTrend?.ema20 ? <span className="text-zinc-500 text-xs font-normal"> vs EMA20 {marketTrend.ema20.toLocaleString('en-IN')} (NIFTY, borrowed)</span> : null}
+              </div>
+              <p className="font-mono text-[10px] text-zinc-500 mt-2">
+                {marketTrend?.sensex
+                  ? `As of ${marketTrend.sensex.asOf} EOD — SENSEX's own read.`
+                  : `No local SENSEX daily history yet (run download_indices.py --name SENSEX) — borrowing NIFTY's ${trend} read; NSE/BSE benchmarks move together on all but the rarest sessions.`}
+              </p>
+              <p className="font-mono text-[10px] text-zinc-400 mt-1.5 border-t border-zinc-800 pt-1.5">
+                {sensexTrend === 'neutral'
+                  ? 'SENSEX Bull Put, Bear Call, Jade Lizard and Reverse Jade Lizard score unchanged.'
+                  : `SENSEX ${sensexTrend === 'bullish' ? 'Bull Put Spread and Jade Lizard' : 'Bear Call Spread and Reverse Jade Lizard'} setups are scored up (trend-aligned); the opposite-direction setups are scored down, never hidden.`}
               </p>
             </div>
           </div>
@@ -1016,6 +1191,20 @@ export default function MarginAllocator() {
               </table>
             </div>
           )}
+          {allocationPlan.length > 0 && (
+            <div className="flex items-center justify-between gap-2 border-t border-zinc-800 px-3.5 py-2 font-mono text-[10px]">
+              <span className="text-zinc-500">
+                Net Portfolio Delta (Condor + Strangle legs{cspInPlan ? ', excl. CSP — not delta-modeled' : ''}):
+              </span>
+              <span className={`font-bold ${Math.abs(netDeltaExposure) < 0.15 ? 'text-zinc-300' : netDeltaExposure > 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                {netDeltaExposure > 0 ? '+' : ''}{netDeltaExposure.toFixed(2)} {Math.abs(netDeltaExposure) >= 0.15 && (
+                  displayFilter === 'ALL'
+                    ? `(${netDeltaExposure > 0 ? 'net bullish' : 'net bearish'} stack across NIFTY+SENSEX — check it's intentional, not two correlated bets read as diversified)`
+                    : `(${netDeltaExposure > 0 ? 'net bullish' : 'net bearish'} stack on ${displayFilter} — check it's intentional)`
+                )}
+              </span>
+            </div>
+          )}
           <div className="flex items-start gap-2 border-t border-zinc-800 px-3.5 py-2.5 font-mono text-[10px] text-zinc-500">
             <ShieldAlert className="h-3.5 w-3.5 shrink-0 text-amber-400" />
             <span>
@@ -1024,8 +1213,9 @@ export default function MarginAllocator() {
               unbounded on a large adverse move) and are exactly what CLAUDE.md&apos;s straddle/strangle inversion guard and the
               15:17 IST auto-exit exist to contain if run live; CSP rows carry assignment risk (you may be required to buy the
               stock at the strike). Every structure here is also on the Baskets page (/baskets) — this panel is Baskets&apos;
-              credit-generating templates, ranked by live VIX regime and NIFTY&apos;s own trend, not a different strategy universe.
-              PoP and Ann. RoM are model estimates from live IV/OI, not guarantees.
+              credit-generating templates, ranked by live VIX regime and each underlying&apos;s own trend, not a different strategy
+              universe. PoP and Ann. RoM are model estimates from live IV/OI, not guarantees. Net Portfolio Delta and the Tail
+              Hedge Reserve above are informational gauges, not enforced caps or executed orders.
             </span>
           </div>
         </TerminalPanel>
