@@ -297,13 +297,15 @@ async function classifyBroker(
 // had. The generation stamp makes an order fill drop this entry too, instead
 // of shadowing the eviction the order route just performed.
 const CACHE_TTL_MS = 3_000;
-let cache: { ts: number; gen: number; body: MarginAllocatorResponse } | null = null;
+let cache: { ts: number; gen: string; body: MarginAllocatorResponse } | null = null;
 
 export async function GET(req: NextRequest) {
-  // Read at the start of the request: if an order lands while the fan-out
-  // below is still running, this entry is born stale and the next reader
-  // rebuilds rather than trusting it.
-  const gen = brokerCacheGeneration();
+  // Stamped against MARGIN_BROKERS only: this route never reads Zerodha, so
+  // a Zerodha fill must not throw away a body whose inputs it cannot have
+  // changed. Read at the start of the request, so that if an order does land
+  // while the fan-out below is still running, this entry is born stale and
+  // the next reader rebuilds rather than trusting it.
+  const gen = brokerCacheGeneration(MARGIN_BROKERS);
   if (cache && Date.now() - cache.ts < CACHE_TTL_MS && cache.gen === gen) {
     return NextResponse.json(cache.body);
   }

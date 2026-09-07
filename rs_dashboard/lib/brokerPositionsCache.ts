@@ -49,16 +49,31 @@ const inflight = new Map<string, Promise<unknown>>();
 // route evicted it, silently undoing the invalidation.
 const epoch = new Map<string, number>();
 
-// Bumped on every invalidation, across all brokers. Routes that memoize a
-// whole assembled response (dashboard/portfolio, margin-allocator) stamp
-// their entry with the generation read at the START of the request and
-// discard it once this moves, so an order fill invalidates their outer cache
-// too. Without this, evicting the inner entry accomplishes nothing for them:
-// they return their own memoized body before ever consulting this module.
-let generation = 0;
+// Per-broker invalidation counters. A route that memoizes a whole assembled
+// response stamps its entry with the generation read at the START of the
+// request and discards it once that moves, so an order fill invalidates the
+// route's outer cache too. Without this, evicting the inner entry
+// accomplishes nothing for such a route: it returns its own memoized body
+// before ever consulting this module.
+//
+// Counted per broker rather than globally so a route is only disturbed by
+// the brokers it actually reads — margin-allocator covers Dhan and Kotak
+// only, and a global counter made every Zerodha order throw away its cache
+// and re-run per-group option-chain and margin lookups for data that could
+// not have changed.
+const generations = new Map<CachedBroker, number>();
 
-export function brokerCacheGeneration(): number {
-  return generation;
+/**
+ * Opaque stamp for the brokers a caller depends on. Compare stamps with
+ * `===`; any difference means at least one of those brokers was invalidated.
+ * A string (not a sum) so two brokers' counters cannot add up to a colliding
+ * value and hide an invalidation. Order-independent.
+ */
+export function brokerCacheGeneration(brokers: readonly CachedBroker[]): string {
+  return [...brokers]
+    .sort()
+    .map(broker => `${broker}:${generations.get(broker) ?? 0}`)
+    .join('|');
 }
 
 // dhanGet/kiteGet/kotakGet all throw on a broker-reported failure (verified:
@@ -110,8 +125,8 @@ export function getCachedFunds<T>(broker: CachedBroker, fetcher: () => Promise<T
 //      fresh one instead of joining a fetch that began before it;
 //   3. bump the epoch, so that orphaned in-flight fetch cannot write its
 //      pre-order result back into the cache when it eventually settles.
-// The generation bump does the same job for the routes that memoize a whole
-// assembled response.
+// Bumping this broker's generation does the same job for routes that memoize
+// a whole assembled response.
 export function invalidateBrokerCache(broker: CachedBroker): void {
   for (const kind of ['positions', 'funds'] as const) {
     const key = `${broker}:${kind}`;
@@ -119,5 +134,5 @@ export function invalidateBrokerCache(broker: CachedBroker): void {
     inflight.delete(key);
     epoch.set(key, (epoch.get(key) ?? 0) + 1);
   }
-  generation++;
+  generations.set(broker, (generations.get(broker) ?? 0) + 1);
 }
