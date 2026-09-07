@@ -4,7 +4,7 @@ import { isDhanTokenValid } from '@/lib/session';
 import { kotakGet, kotakLimits, kotakRows, KOTAK_PATHS, isKotakTokenValid } from '@/lib/kotakToken';
 import { shapeKotakPosition, shapeKotakFunds } from '@/lib/kotakShape';
 import { dedupePositions } from '@/lib/positionProduct';
-import { getCachedPositions, getCachedFunds } from '@/lib/brokerPositionsCache';
+import { getCachedPositions, getCachedFunds, brokerCacheGeneration } from '@/lib/brokerPositionsCache';
 import { buildPositionLegs, parseTradingSymbol, type PositionLeg } from '@/lib/positionLegs';
 import { aggregateLegs, classifyStructure, type GroupLeg } from '@/lib/positionStructure';
 import { calculateDte } from '@/lib/ultimateScannerEngine';
@@ -285,11 +285,26 @@ async function classifyBroker(
   };
 }
 
-const CACHE_TTL_MS = 5_000;
-let cache: { ts: number; body: MarginAllocatorResponse } | null = null;
+// Unlike dashboard/portfolio, this route keeps a whole-response cache: it is
+// not just assembling fetched rows, it runs classifyBroker() per broker,
+// which makes its own HTTP calls out to /api/options/chain and
+// /api/multi-leg-focus/margin for every position group. Re-running that on
+// every poll would be genuinely expensive.
+//
+// 3s rather than the original 5s because the positions behind it can now
+// themselves be up to lib/brokerPositionsCache's 2s TTL old, and the two
+// windows stack — 2 + 3 keeps the worst-case age at the 5s this route always
+// had. The generation stamp makes an order fill drop this entry too, instead
+// of shadowing the eviction the order route just performed.
+const CACHE_TTL_MS = 3_000;
+let cache: { ts: number; gen: number; body: MarginAllocatorResponse } | null = null;
 
 export async function GET(req: NextRequest) {
-  if (cache && Date.now() - cache.ts < CACHE_TTL_MS) {
+  // Read at the start of the request: if an order lands while the fan-out
+  // below is still running, this entry is born stale and the next reader
+  // rebuilds rather than trusting it.
+  const gen = brokerCacheGeneration();
+  if (cache && Date.now() - cache.ts < CACHE_TTL_MS && cache.gen === gen) {
     return NextResponse.json(cache.body);
   }
 
@@ -330,6 +345,6 @@ export async function GET(req: NextRequest) {
     unparseable,
   };
 
-  if (brokers.some((b) => b.connected && !b.error)) cache = { ts: Date.now(), body };
+  if (brokers.some((b) => b.connected && !b.error)) cache = { ts: Date.now(), gen, body };
   return NextResponse.json(body);
 }

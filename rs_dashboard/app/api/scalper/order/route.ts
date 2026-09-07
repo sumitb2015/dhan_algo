@@ -67,7 +67,12 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       try {
         const lines = String(e.stdout).trim().split('\n').filter(Boolean);
         const jsonLine = lines[lines.length - 1] ?? '{}';
-        return NextResponse.json(JSON.parse(jsonLine));
+        const recovered = JSON.parse(jsonLine);
+        // execFile rejects on the 30s timeout, but the script may already have
+        // placed the order and printed its success line before being killed —
+        // that is a real fill, so it has to evict like the happy path does.
+        if (recovered.success) invalidateBrokerCache('dhan');
+        return NextResponse.json(recovered);
       } catch {}
     }
     console.error('[/api/scalper/order] error:', e.message, e.stderr ?? '');

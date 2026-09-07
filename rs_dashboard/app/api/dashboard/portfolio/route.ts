@@ -77,9 +77,12 @@ export interface DashboardPortfolioResponse {
   };
 }
 
-const CACHE_TTL_MS = 3_000;
-let cache: { ts: number; body: DashboardPortfolioResponse } | null = null;
-
+// No whole-response cache here: every upstream call already goes through
+// lib/brokerPositionsCache (shared TTL + in-flight dedup), so a second
+// request within the window costs a little summarize() CPU rather than any
+// broker traffic. Memoizing the assembled body on top of that only stacked a
+// second staleness window onto the first, and shadowed the eviction that
+// order routes perform after a fill.
 function num(v: unknown): number {
   const n = Number(v);
   return Number.isFinite(n) ? n : 0;
@@ -284,10 +287,6 @@ async function loadKotak(): Promise<BrokerPortfolio> {
 }
 
 export async function GET() {
-  if (cache && Date.now() - cache.ts < CACHE_TTL_MS) {
-    return NextResponse.json(cache.body);
-  }
-
   const brokers = await Promise.all([loadDhan(), loadZerodha(), loadKotak()]);
 
   const totals = brokers.reduce(
@@ -311,9 +310,5 @@ export async function GET() {
     totals,
   };
 
-  // Only cache when at least one broker actually answered — caching an
-  // all-failed fan-out would serve the blank panel for the full TTL after the
-  // token behind it is refreshed.
-  if (brokers.some(b => b.connected && !b.error)) cache = { ts: Date.now(), body };
   return NextResponse.json(body);
 }

@@ -11,6 +11,16 @@
 // `await`s racing for the same data. The in-flight map below (same shape as
 // lib/pyExec.ts's dedupe(), copied locally since this has nothing to do with
 // spawning Python) collapses those into one shared promise.
+//
+// Every caller of a given key receives the SAME object reference, so a
+// consumer must treat what it gets back as read-only. Today none of them
+// mutate it (dedupePositions/scaleBrokerPnl/shapeKotakPosition/
+// buildPositionLegs all build new objects); a consumer that starts editing
+// rows in place would silently corrupt what every other route sees.
+//
+// Scalper's own position reads deliberately do NOT go through this cache —
+// they gate real-money decisions (the Close button's exit sizing and
+// ProfitLock's SL/target detection) and must stay live on every poll.
 
 type CachedBroker = 'dhan' | 'zerodha' | 'kotak';
 
@@ -39,6 +49,18 @@ const inflight = new Map<string, Promise<unknown>>();
 // route evicted it, silently undoing the invalidation.
 const epoch = new Map<string, number>();
 
+// Bumped on every invalidation, across all brokers. Routes that memoize a
+// whole assembled response (dashboard/portfolio, margin-allocator) stamp
+// their entry with the generation read at the START of the request and
+// discard it once this moves, so an order fill invalidates their outer cache
+// too. Without this, evicting the inner entry accomplishes nothing for them:
+// they return their own memoized body before ever consulting this module.
+let generation = 0;
+
+export function brokerCacheGeneration(): number {
+  return generation;
+}
+
 // dhanGet/kiteGet/kotakGet all throw on a broker-reported failure (verified:
 // dhanGet on !res.ok, kiteGet on status==='error', kotakGet via
 // raiseIfError()) rather than resolving with a success:false envelope, so a
@@ -53,15 +75,16 @@ async function cached<T>(key: string, fetcher: () => Promise<T>): Promise<T> {
 
   const startEpoch = epoch.get(key) ?? 0;
   const run = (async () => {
-    // Re-check: another caller may have populated the cache while this one
-    // was waiting to be scheduled (between the check above and this line).
-    const fresh = cache.get(key) as Entry<T> | undefined;
-    if (fresh && Date.now() - fresh.ts < TTL_MS) return fresh.data;
-
     const data = await fetcher();
     if ((epoch.get(key) ?? 0) === startEpoch) cache.set(key, { data, ts: Date.now() });
     return data;
-  })().finally(() => inflight.delete(key));
+  })().finally(() => {
+    // Only clear our own entry. invalidateBrokerCache() drops in-flight
+    // fetches from the map so post-order callers don't join a pre-order one,
+    // which means a newer fetch may already be registered under this key by
+    // the time this older one settles.
+    if (inflight.get(key) === run) inflight.delete(key);
+  });
 
   inflight.set(key, run);
   return run;
@@ -75,17 +98,26 @@ export function getCachedFunds<T>(broker: CachedBroker, fetcher: () => Promise<T
   return cached(`${broker}:funds`, fetcher);
 }
 
-// Called by order-placing/exit routes right after the broker confirms an
-// order, so the next Dashboard/Margin Allocator poll sees the change
-// immediately instead of waiting out the TTL. An order moves both margin-used
-// and positions together, so both keys are always evicted — there is no
-// caller that wants only one. Also bumps the epoch (see above) so a fetch
-// already in flight when this runs cannot silently repopulate the cache with
-// its pre-invalidation result.
+// Called by order-placing/exit/cancel routes once the broker confirms, so the
+// next Dashboard/Margin Allocator poll reflects the change rather than a
+// pre-order snapshot. An order moves both margin-used and positions together
+// (and cancelling a resting order releases blocked margin), so both keys are
+// always evicted — no caller wants only one.
+//
+// Three things have to happen for the eviction to actually be observable:
+//   1. drop the cached entry;
+//   2. drop any in-flight fetch, so a caller arriving after the fill starts a
+//      fresh one instead of joining a fetch that began before it;
+//   3. bump the epoch, so that orphaned in-flight fetch cannot write its
+//      pre-order result back into the cache when it eventually settles.
+// The generation bump does the same job for the routes that memoize a whole
+// assembled response.
 export function invalidateBrokerCache(broker: CachedBroker): void {
   for (const kind of ['positions', 'funds'] as const) {
     const key = `${broker}:${kind}`;
     cache.delete(key);
+    inflight.delete(key);
     epoch.set(key, (epoch.get(key) ?? 0) + 1);
   }
+  generation++;
 }

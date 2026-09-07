@@ -71,6 +71,8 @@ export async function DELETE(req: NextRequest) {
     }
 
     const result = await runPythonJson<OrderResult>(SCRIPT, ['cancel', '--order-id', String(orderId)], 20_000);
+    // Cancelling a resting order releases the margin it was blocking.
+    if (result.success) invalidateBrokerCache('dhan');
     return NextResponse.json(result, { status: result.success ? 200 : 500 });
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
