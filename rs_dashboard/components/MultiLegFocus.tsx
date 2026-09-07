@@ -1303,26 +1303,52 @@ export default function MultiLegFocus() {
       // session) that this tool has never seen before.
       const anyPlaced = basketsRef.current.some(b => b.legs.some(l => l.orderRef != null));
 
+      type PollJson = {
+        success: boolean;
+        data?: Record<string, unknown>[];
+        positions?: Record<string, unknown>[];
+        orders?: Record<string, unknown>[];
+        trades?: Record<string, unknown>[];
+        positionsError?: string | null;
+        error?: string;
+      };
+
       try {
-        const res = await fetch(scalperRoute(broker, 'poll'));
-        const j = await res.json() as {
-          success: boolean;
-          data?: Record<string, unknown>[];
-          positions?: Record<string, unknown>[];
-          orders?: Record<string, unknown>[];
-          trades?: Record<string, unknown>[];
-          positionsError?: string | null;
-          error?: string;
-        };
+        // A basket can carry a different broker than whatever is currently
+        // selected in the toolbar (e.g. a Dhan strategy tracked while Kotak
+        // is selected — every basket is shown regardless of the selector).
+        // Reconciling every basket against only the selected broker's rows
+        // means an exit made on a non-selected broker's leg is never
+        // observed, so it stays stuck OPEN forever. Poll every broker any
+        // tracked basket actually uses, not just the selected one.
+        const pollBrokers = new Set<Broker>([broker, ...basketsRef.current.map(b => b.broker as Broker)]);
+        const results = await Promise.all(
+          Array.from(pollBrokers).map(async (b) => {
+            try {
+              const res = await fetch(scalperRoute(b, 'poll'));
+              const j = await res.json() as PollJson;
+              if (!j.success) return { broker: b, rows: null as Record<string, unknown>[] | null, j: null as PollJson | null, error: j.error || j.positionsError || null };
+              return { broker: b, rows: j.positions ?? j.data ?? [], j, error: null as string | null };
+            } catch (e) {
+              return { broker: b, rows: null as Record<string, unknown>[] | null, j: null as PollJson | null, error: String((e as Error).message) };
+            }
+          }),
+        );
         if (cancelled) return;
-        if (!j.success) {
-          if (j.error || j.positionsError) setOrdersError(j.error || j.positionsError || null);
-          return;
+
+        const rowsByBroker: Partial<Record<Broker, Record<string, unknown>[]>> = {};
+        for (const r of results) {
+          if (r.rows) rowsByBroker[r.broker] = r.rows;
         }
-        setOrdersError(null);
-        const rows = j.positions ?? j.data ?? [];
-        if (Array.isArray(j.orders)) setOrdersData(j.orders);
-        if (Array.isArray(j.trades)) setTradesData(j.trades);
+
+        const selectedResult = results.find(r => r.broker === broker);
+        setOrdersError(selectedResult?.error ?? null);
+        if (selectedResult?.j) {
+          if (Array.isArray(selectedResult.j.orders)) setOrdersData(selectedResult.j.orders);
+          if (Array.isArray(selectedResult.j.trades)) setTradesData(selectedResult.j.trades);
+        }
+
+        const rows = rowsByBroker[broker] ?? [];
 
         // ── Auto-adopt broker positions no basket already claims ──────
         // Runs every tick regardless of `anyPlaced` — a position opened
@@ -1410,14 +1436,15 @@ export default function MultiLegFocus() {
             const nextBaskets = prevBaskets.map(basket => {
               let basketChange = false;
               const pair = `${basket.underlying}:${basket.expiry}`;
-              const lotSize = lookupCacheRef.current[pair]?.lotSize ?? fallbackLotSize(basket.underlying as Underlying, broker);
+              const lotSize = lookupCacheRef.current[pair]?.lotSize ?? fallbackLotSize(basket.underlying as Underlying, basket.broker);
+              const basketRows = rowsByBroker[basket.broker as Broker] ?? [];
 
               const nextLegs = basket.legs.map(leg => {
                 if (!leg.orderRef) return leg;
-                const fallbackSecId = (broker === 'dhan' && !leg.orderRef.securityId)
+                const fallbackSecId = (basket.broker === 'dhan' && !leg.orderRef.securityId)
                   ? resolveDhanSecurityId(basket, leg)
                   : undefined;
-                const match = findLegPosition(broker, leg, rows, fallbackSecId);
+                const match = findLegPosition(basket.broker, leg, basketRows, fallbackSecId);
                 let reconciled = reconcileLegWithBroker(leg, match, leg.lots * lotSize, lotSize);
                 // Self-heal a leg that only ever recorded a symbol/no securityId
                 // (see resolveDhanSecurityId) as soon as the poll resolves one,
