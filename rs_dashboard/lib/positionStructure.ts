@@ -44,6 +44,9 @@ export function classifyStructure(legs: GroupLeg[]): { structure: string; riskTy
     if (longCE[0].strike > shortCE[0].strike && longPE[0].strike < shortPE[0].strike) {
       return { structure: 'Iron Condor', riskType: 'defined' };
     }
+    if (longCE[0].strike < shortCE[0].strike && longPE[0].strike > shortPE[0].strike) {
+      return { structure: 'Batman', riskType: 'undefined' };
+    }
   }
   if (shortCE.length === 1 && shortPE.length === 1 && longCE.length === 0 && longPE.length === 0) {
     return shortCE[0].strike === shortPE[0].strike

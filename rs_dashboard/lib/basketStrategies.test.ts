@@ -106,3 +106,40 @@ test('daysToExpiry counts calendar days, 0 on the expiry date itself', () => {
 test('daysToExpiry returns null for an unparseable expiry string', () => {
   assert.strictEqual(daysToExpiry('not-a-date'), null);
 });
+
+test('STRATEGY_CATEGORIES: Range Bound includes Batman alongside Iron Condor', () => {
+  const { STRATEGY_CATEGORIES } = require('./basketStrategies.ts');
+  const rangeBound = STRATEGY_CATEGORIES['Range Bound'];
+  const icIndex = rangeBound.findIndex((s: any) => s.key === 'iron-condor');
+  const batmanIndex = rangeBound.findIndex((s: any) => s.key === 'batman');
+  assert.ok(icIndex >= 0, 'iron-condor must exist in Range Bound');
+  assert.ok(batmanIndex >= 0, 'batman must exist in Range Bound');
+  const batman = rangeBound[batmanIndex];
+  assert.strictEqual(batman.name, 'Batman');
+  assert.strictEqual(batman.legs.length, 4);
+});
+
+test('computePayoff: Batman strategy has dual profit peaks (ears) and undefined tail risk', () => {
+  const batmanLegs = [
+    { side: 'B' as const, option: 'CE' as const, strike: 110, premium: 5, qty: 1 },
+    { side: 'S' as const, option: 'CE' as const, strike: 120, premium: 2, qty: 2 },
+    { side: 'B' as const, option: 'PE' as const, strike: 90,  premium: 5, qty: 1 },
+    { side: 'S' as const, option: 'PE' as const, strike: 80,  premium: 2, qty: 2 },
+  ];
+  const res = computePayoff(batmanLegs, 60, 140, 81);
+  assert.strictEqual(res.maxLossUnlimited, true);
+  assert.strictEqual(res.leftWing, 'loss');
+  assert.strictEqual(res.rightWing, 'loss');
+
+  // Peak at lower short strike (80)
+  const p80 = res.points.find(p => Math.abs(p.x - 80) < 0.1);
+  // Peak at upper short strike (120)
+  const p120 = res.points.find(p => Math.abs(p.x - 120) < 0.1);
+  // Valley / plateau at ATM (100)
+  const p100 = res.points.find(p => Math.abs(p.x - 100) < 0.1);
+
+  assert.ok(p80 && p120 && p100);
+  assert.ok(p80.y > p100.y, 'Lower short strike (80) must be a peak above center');
+  assert.ok(p120.y > p100.y, 'Upper short strike (120) must be a peak above center');
+  assert.strictEqual(p80.y, p120.y, 'Symmetric Batman strategy has equal height ears');
+});

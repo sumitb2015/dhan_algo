@@ -53,6 +53,10 @@ export const STRATEGY_CATEGORIES: Record<StrategyCategory, StrategyTemplate[]> =
       { side: 'S', option: 'CE', offset: 3, ratio: 1 }, { side: 'B', option: 'CE', offset: 6, ratio: 1 },
       { side: 'S', option: 'PE', offset: -3, ratio: 1 }, { side: 'B', option: 'PE', offset: -6, ratio: 1 },
     ] },
+    { key: 'batman',            name: 'Batman',                 legs: [
+      { side: 'B', option: 'CE', offset: 2, ratio: 1 }, { side: 'S', option: 'CE', offset: 4, ratio: 2 },
+      { side: 'B', option: 'PE', offset: -2, ratio: 1 }, { side: 'S', option: 'PE', offset: -4, ratio: 2 },
+    ] },
     { key: 'iron-butterfly',    name: 'Iron Butterfly',         legs: [
       { side: 'S', option: 'CE', offset: 0, ratio: 1 }, { side: 'B', option: 'CE', offset: 4, ratio: 1 },
       { side: 'S', option: 'PE', offset: 0, ratio: 1 }, { side: 'B', option: 'PE', offset: -4, ratio: 1 },

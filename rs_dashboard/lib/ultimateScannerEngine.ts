@@ -416,6 +416,114 @@ export function scanOptionChain(
   }
 
   // ─────────────────────────────────────────────────────────────────
+  // 3b. BATMAN (4-Leg Double Ratio Spread with Dual Profit Peaks)
+  // ─────────────────────────────────────────────────────────────────
+  if (scanAll || selectedStrats.has('batman')) {
+    const putCandidates = strikes.filter(s => s < spot && s <= atmStrike - step);
+    const callCandidates = strikes.filter(s => s > spot && s >= atmStrike + step);
+
+    for (const longPut of putCandidates) {
+      const longPutQuote = chainQuotes[longPut]?.pe;
+      if (!longPutQuote || longPutQuote.ltp <= 1.0) continue;
+
+      for (const longCall of callCandidates) {
+        // Keep Batman balanced around spot (within 4 strike steps)
+        if (Math.abs((spot - longPut) - (longCall - spot)) > 4 * step) continue;
+
+        const longCallQuote = chainQuotes[longCall]?.ce;
+        if (!longCallQuote || longCallQuote.ltp <= 1.0) continue;
+
+        for (const wing of spreadWings.slice(0, 3)) {
+          const shortPut = longPut - wing;
+          const shortCall = longCall + wing;
+          const shortPutQuote = chainQuotes[shortPut]?.pe;
+          const shortCallQuote = chainQuotes[shortCall]?.ce;
+
+          if (!shortPutQuote || !shortCallQuote) continue;
+          if (shortPutQuote.ltp <= 0.3 || shortCallQuote.ltp <= 0.3) continue;
+
+          // Put ratio: Buy 1 longPut, Sell 2 shortPut
+          // Call ratio: Buy 1 longCall, Sell 2 shortCall
+          const putCredit = (2 * shortPutQuote.ltp) - longPutQuote.ltp;
+          const callCredit = (2 * shortCallQuote.ltp) - longCallQuote.ltp;
+          const totalCreditPts = putCredit + callCredit;
+
+          // Neither wing should be a significant debit spread, and overall trade must yield positive net credit
+          if (putCredit < -1.0 || callCredit < -1.0) continue;
+          if (totalCreditPts <= 0.4) continue;
+
+          const netPremiumTotal = totalCreditPts * lotSize;
+          const baseMargin = underlying === 'NIFTY' ? 130000 : underlying === 'BANKNIFTY' ? 140000 : 105000;
+          const estMargin = baseMargin;
+          const romPct = (netPremiumTotal / estMargin) * 100;
+          const romAnnualizedPct = (romPct / Math.max(1, dte)) * 365;
+
+          const shortPutDistPct = ((spot - shortPut) / spot) * 100;
+          const shortCallDistPct = ((shortCall - spot) / spot) * 100;
+          const minDistPct = Math.min(shortPutDistPct, shortCallDistPct);
+          const minDistPts = Math.min(spot - shortPut, shortCall - spot);
+
+          // Max profit at the short strikes ("ears")
+          const maxProfitTotal = (wing + totalCreditPts) * lotSize;
+
+          // Breakevens
+          const lowerBe = Math.round((shortPut - (wing + totalCreditPts)) * 100) / 100;
+          const upperBe = Math.round((shortCall + (wing + totalCreditPts)) * 100) / 100;
+
+          const { delta: peDelta } = estimatePopAndDelta(spot, shortPut, dte, shortPutQuote.iv || vix, false);
+          const { delta: ceDelta } = estimatePopAndDelta(spot, shortCall, dte, shortCallQuote.iv || vix, true);
+
+          let pop: number;
+          if (Math.abs(peDelta) > 0 && Math.abs(ceDelta) > 0) {
+            const rawPop = (1 - Math.abs(peDelta) - Math.abs(ceDelta)) * 100;
+            const bufferBonus = Math.min(15, ((wing + totalCreditPts) / spot) * 100 * 2);
+            pop = Math.min(96, Math.max(55, Math.round(rawPop + bufferBonus)));
+          } else {
+            pop = Math.min(94, Math.max(55, Math.round(80 + minDistPct * 3)));
+          }
+
+          const riskTier = minDistPct >= 3.0 && pop >= 75 ? 'Conservative' : minDistPct >= 1.8 && pop >= 62 ? 'Moderate' : 'Aggressive';
+          const score = Math.round(Math.min(100, (romPct * 5.0) + (pop * 0.35) + (minDistPct * 4)));
+
+          evaluateCandidate({
+            id: `batman_${underlying}_${shortPut}_${longPut}_${longCall}_${shortCall}_${expiry}`,
+            name: `Batman (${shortPut}P/${longPut}P/${longCall}C/${shortCall}C [±${wing}])`,
+            type: 'batman',
+            underlying,
+            expiry,
+            dte,
+            spot,
+            legs: [
+              { strike: shortPut, option: 'PE', side: 'SELL', ltp: shortPutQuote.ltp, lots: 2, lotSize, securityId: shortPutQuote.securityId },
+              { strike: longPut, option: 'PE', side: 'BUY', ltp: longPutQuote.ltp, lots: 1, lotSize, securityId: longPutQuote.securityId },
+              { strike: longCall, option: 'CE', side: 'BUY', ltp: longCallQuote.ltp, lots: 1, lotSize, securityId: longCallQuote.securityId },
+              { strike: shortCall, option: 'CE', side: 'SELL', ltp: shortCallQuote.ltp, lots: 2, lotSize, securityId: shortCallQuote.securityId },
+            ],
+            netPremium: Math.round(netPremiumTotal),
+            netPremiumPoints: Math.round(totalCreditPts * 100) / 100,
+            estMargin: Math.round(estMargin),
+            romPct: Math.round(romPct * 100) / 100,
+            romAnnualizedPct: Math.round(romAnnualizedPct),
+            distancePct: Math.round(minDistPct * 100) / 100,
+            distancePoints: Math.round(minDistPts),
+            popPct: Math.round(pop),
+            maxProfit: Math.round(maxProfitTotal),
+            maxLoss: 0,
+            maxLossUnlimited: true,
+            riskRewardRatio: 0,
+            breakevens: [lowerBe, upperBe],
+            deltaNet: 0.0,
+            sentiment: 'Range-Bound',
+            riskTier,
+            score,
+            createdAt: new Date().toISOString(),
+          });
+        }
+      }
+    }
+  }
+
+  // ─────────────────────────────────────────────────────────────────
   // 4. SHORT STRANGLE (OTM Naked Sell Both Sides)
   // ─────────────────────────────────────────────────────────────────
   if (scanAll || selectedStrats.has('short_strangle')) {

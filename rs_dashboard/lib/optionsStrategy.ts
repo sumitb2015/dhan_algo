@@ -79,6 +79,21 @@ export const STRATEGY_TEMPLATES: StrategyTemplate[] = [
     ],
   },
   {
+    id: 'batman', name: 'Batman', undefinedRisk: true,
+    params: [
+      { key: 'N', label: 'Inner buy offset (strikes)', default: 2, min: 1, max: 10, step: 1 },
+      { key: 'W', label: 'Spread width (strikes)', default: 2, min: 1, max: 5, step: 1 },
+    ],
+    legs: (p) => [
+      // Call side: Buy inner call (qtyRatio 1), Sell outer call (qtyRatio 2)
+      { offsetStrikes: +p.N, type: 'CE', side: 'BUY', qtyRatio: 1 },
+      { offsetStrikes: +(p.N + p.W), type: 'CE', side: 'SELL', qtyRatio: 2 },
+      // Put side: Buy inner put (qtyRatio 1), Sell outer put (qtyRatio 2)
+      { offsetStrikes: -p.N, type: 'PE', side: 'BUY', qtyRatio: 1 },
+      { offsetStrikes: -(p.N + p.W), type: 'PE', side: 'SELL', qtyRatio: 2 },
+    ],
+  },
+  {
     id: 'jade_lizard', name: 'Jade Lizard', undefinedRisk: true,
     params: [
       { key: 'N', label: 'Short offset (strikes)', default: 2, min: 1, max: 10, step: 1 },
@@ -100,21 +115,6 @@ export const STRATEGY_TEMPLATES: StrategyTemplate[] = [
       { offsetStrikes: +p.N, type: 'CE', side: 'SELL', qtyRatio: 1 }, // naked call — no upside protection
       { offsetStrikes: -p.N, type: 'PE', side: 'SELL', qtyRatio: 1 },
       { offsetStrikes: -(p.N + p.W), type: 'PE', side: 'BUY', qtyRatio: 1 },
-    ],
-  },
-  {
-    id: 'batman', name: 'Batman', undefinedRisk: true,
-    params: [
-      { key: 'N', label: 'Inner buy offset (strikes)', default: 5, min: 1, max: 10, step: 1 },
-      { key: 'W', label: 'Spread width (strikes)', default: 1, min: 1, max: 5, step: 1 },
-    ],
-    legs: (p) => [
-      // Call side: Buy inner call (qtyRatio 1), Sell outer call (qtyRatio 2)
-      { offsetStrikes: +p.N, type: 'CE', side: 'BUY', qtyRatio: 1 },
-      { offsetStrikes: +(p.N + p.W), type: 'CE', side: 'SELL', qtyRatio: 2 },
-      // Put side: Buy inner put (qtyRatio 1), Sell outer put (qtyRatio 2)
-      { offsetStrikes: -p.N, type: 'PE', side: 'BUY', qtyRatio: 1 },
-      { offsetStrikes: -(p.N + p.W), type: 'PE', side: 'SELL', qtyRatio: 2 },
     ],
   },
   {

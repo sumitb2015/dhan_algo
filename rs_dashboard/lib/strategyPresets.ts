@@ -92,6 +92,17 @@ export const STRATEGY_PRESETS: StrategyPreset[] = [
     ],
   },
   {
+    id: 'batman',
+    label: 'Batman',
+    category: 'neutral',
+    legs: [
+      { option_type: 'CE', action: 'BUY', atmOffset: 2, lots: 1 },
+      { option_type: 'CE', action: 'SELL', atmOffset: 4, lots: 2 },
+      { option_type: 'PE', action: 'BUY', atmOffset: -2, lots: 1 },
+      { option_type: 'PE', action: 'SELL', atmOffset: -4, lots: 2 },
+    ],
+  },
+  {
     id: 'butterfly',
     label: 'Butterfly (Calls)',
     category: 'neutral',

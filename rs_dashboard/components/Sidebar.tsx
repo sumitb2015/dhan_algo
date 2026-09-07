@@ -64,7 +64,6 @@ const NAV_GROUPS = [
       { href: '/trending-oi', label: 'Trending OI', desc: 'Chain-wide OI/LTP interval table with call/put diff, direction & sentiment' },
       { href: '/futures', label: 'Futures', desc: 'OI buildup & short/long coverage analysis' },
       { href: '/iv-charts', label: 'IV Charts', desc: 'Implied Volatility history & skew' },
-      { href: '/options/crudeoil', label: 'Crude Oil Options', desc: 'Max pain, PCR & live option chain for MCX Crude Oil' },
     ],
   },
   {
@@ -95,6 +94,7 @@ const NAV_GROUPS = [
       { href: '/advanced-scalper', label: 'Advanced Scalper', desc: 'Configurable 2-5 box scalper with per-box CE/PE, strike & lot presets' },
       { href: '/focus-tool', label: 'Ultimate Scalper Terminal', desc: 'Straddles & strangles terminal — timed entry, level exits, real-money armed orders' },
       { href: '/options/quiktrade', label: 'QuikTrade', desc: 'OI buildup quadrants, live positions & P&L' },
+      { href: '/options/crudeoil', label: 'Crude Oil Options', desc: 'Max pain, PCR & live option chain for MCX Crude Oil' },
       { href: '/baskets', label: 'Baskets', desc: 'Predefined option strategies with payoff diagram & quick basket order entry' },
       { href: '/multi-leg-focus', label: 'Multi-Leg Focus', desc: 'N-leg strategy builder from presets — live P&L monitor with manual exits' },
       { href: '/strategy-builder', label: 'Strategy Builder', desc: 'Build & track multi-leg NIFTY options strategies' },

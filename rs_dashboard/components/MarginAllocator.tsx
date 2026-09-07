@@ -721,7 +721,7 @@ export default function MarginAllocator() {
           // not directional bets, and every one of these is a strategy a
           // real trader could place from the Baskets page today.
           strategyTypes: [
-            'iron_condor', 'iron_butterfly', 'short_strangle', 'short_straddle',
+            'iron_condor', 'batman', 'iron_butterfly', 'short_strangle', 'short_straddle',
             'bull_put_spread', 'bear_call_spread', 'jade_lizard', 'reverse_jade_lizard',
           ] as StrategyType[],
           maxResults: 80,
