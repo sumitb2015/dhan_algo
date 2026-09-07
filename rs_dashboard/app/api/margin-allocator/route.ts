@@ -4,6 +4,7 @@ import { isDhanTokenValid } from '@/lib/session';
 import { kotakGet, kotakLimits, kotakRows, KOTAK_PATHS, isKotakTokenValid } from '@/lib/kotakToken';
 import { shapeKotakPosition, shapeKotakFunds } from '@/lib/kotakShape';
 import { dedupePositions } from '@/lib/positionProduct';
+import { getCachedPositions, getCachedFunds } from '@/lib/brokerPositionsCache';
 import { buildPositionLegs, parseTradingSymbol, type PositionLeg } from '@/lib/positionLegs';
 import { aggregateLegs, classifyStructure, type GroupLeg } from '@/lib/positionStructure';
 import { calculateDte } from '@/lib/ultimateScannerEngine';
@@ -80,8 +81,8 @@ interface RawFundsAndPositions {
 
 async function loadDhanRaw(): Promise<RawFundsAndPositions> {
   const [fundsRes, posRes] = await Promise.allSettled([
-    dhanGet('/fundlimit'),
-    dhanGet('/positions'),
+    getCachedFunds('dhan', () => dhanGet('/fundlimit')),
+    getCachedPositions('dhan', () => dhanGet('/positions')),
   ]);
 
   let funds: MarginAllocatorFunds | null = null;
@@ -110,8 +111,8 @@ async function loadDhanRaw(): Promise<RawFundsAndPositions> {
 
 async function loadKotakRaw(): Promise<RawFundsAndPositions> {
   const [limitsRes, posRes] = await Promise.allSettled([
-    kotakLimits(),
-    kotakGet(KOTAK_PATHS.positions),
+    getCachedFunds('kotak', () => kotakLimits()),
+    getCachedPositions('kotak', () => kotakGet(KOTAK_PATHS.positions)),
   ]);
 
   let funds: MarginAllocatorFunds | null = null;

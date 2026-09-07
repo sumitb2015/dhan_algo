@@ -7,6 +7,7 @@ import { shapeZerodhaPosition } from '@/lib/zerodhaShape';
 import { shapeKotakPosition, shapeKotakFunds } from '@/lib/kotakShape';
 import { dedupePositions } from '@/lib/positionProduct';
 import { contractMultiplier, scaleBrokerPnl } from '@/lib/positionPnl';
+import { getCachedPositions, getCachedFunds } from '@/lib/brokerPositionsCache';
 import type { Broker } from '@/hooks/useBrokerSelector';
 
 // Funds + open-position P&L for every connected broker, in one call.
@@ -185,8 +186,8 @@ async function loadDhan(): Promise<BrokerPortfolio> {
   const out = emptyBroker('dhan', true);
 
   const [fundsRes, posRes] = await Promise.allSettled([
-    dhanGet('/fundlimit'),
-    dhanGet('/positions'),
+    getCachedFunds('dhan', () => dhanGet('/fundlimit')),
+    getCachedPositions('dhan', () => dhanGet('/positions')),
   ]);
 
   if (fundsRes.status === 'fulfilled') {
@@ -217,8 +218,8 @@ async function loadZerodha(): Promise<BrokerPortfolio> {
   const out = emptyBroker('zerodha', true);
 
   const [marginsRes, posRes] = await Promise.allSettled([
-    kiteGet('/user/margins'),
-    kiteGet('/portfolio/positions'),
+    getCachedFunds('zerodha', () => kiteGet('/user/margins')),
+    getCachedPositions('zerodha', () => kiteGet('/portfolio/positions')),
   ]);
 
   if (marginsRes.status === 'fulfilled') {
@@ -256,8 +257,8 @@ async function loadKotak(): Promise<BrokerPortfolio> {
   const out = emptyBroker('kotak', true);
 
   const [limitsRes, posRes] = await Promise.allSettled([
-    kotakLimits(),
-    kotakGet(KOTAK_PATHS.positions),
+    getCachedFunds('kotak', () => kotakLimits()),
+    getCachedPositions('kotak', () => kotakGet(KOTAK_PATHS.positions)),
   ]);
 
   if (limitsRes.status === 'fulfilled') {
