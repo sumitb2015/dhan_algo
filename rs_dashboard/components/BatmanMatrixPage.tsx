@@ -606,11 +606,15 @@ export default function BatmanMatrixPage() {
           { id: '4', side: 'S', option: 'CE', strike: cell.shortCallStrike, lots: lots * 2, type: 'MARKET', status: 'DRAFT' },
         ],
       };
-      await fetch('/api/multi-leg-focus/baskets', {
+      const res = await fetch('/api/multi-leg-focus/baskets', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(basket),
       });
+      if (!res.ok) {
+        const json = (await res.json().catch(() => ({}))) as { error?: string };
+        throw new Error(json.error || `HTTP ${res.status}`);
+      }
       router.push('/multi-leg-focus');
     } catch (err) {
       setEnterError(`Failed to send to Multi-Leg Focus: ${String(err)}`);
@@ -1336,13 +1340,11 @@ export default function BatmanMatrixPage() {
               <div className="h-80 w-full pt-2">
                 <ResponsiveContainer width="100%" height="100%">
                   <LineChart data={curveChartData} margin={{ top: 10, right: 20, left: 0, bottom: 20 }}>
-                    <CartesianGrid strokeDasharray="3 6" stroke="#27272a" vertical={false} />
-                    <XAxis dataKey="offset" stroke="#71717a" tick={{ fill: '#a1a1aa', fontSize: 10 }} />
-                    <YAxis stroke="#71717a" tick={{ fill: '#a1a1aa', fontSize: 10 }} unit="%" />
-                    <Tooltip
-                      contentStyle={{ backgroundColor: '#09090b', borderColor: '#3f3f46', borderRadius: '0.75rem', fontSize: '11px' }}
-                    />
-                    <Legend wrapperStyle={{ fontSize: '11px', paddingTop: '10px' }} />
+                    <CartesianGrid strokeDasharray="3 3" vertical={false} />
+                    <XAxis dataKey="offset" tick={{ fontSize: 10 }} />
+                    <YAxis tick={{ fontSize: 10 }} tickFormatter={v => `${v}%`} />
+                    <Tooltip />
+                    <Legend wrapperStyle={{ fontSize: '11px', paddingTop: '8px' }} />
                     {data?.expiries?.map((exp, i) => {
                       const colors = ['#10b981', '#06b6d4', '#8b5cf6', '#f59e0b', '#ec4899'];
                       return (
@@ -1375,13 +1377,11 @@ export default function BatmanMatrixPage() {
               <div className="h-80 w-full pt-2">
                 <ResponsiveContainer width="100%" height="100%">
                   <LineChart data={curveChartData} margin={{ top: 10, right: 20, left: 0, bottom: 20 }}>
-                    <CartesianGrid strokeDasharray="3 6" stroke="#27272a" vertical={false} />
-                    <XAxis dataKey="offset" stroke="#71717a" tick={{ fill: '#a1a1aa', fontSize: 10 }} />
-                    <YAxis stroke="#71717a" tick={{ fill: '#a1a1aa', fontSize: 10 }} />
-                    <Tooltip
-                      contentStyle={{ backgroundColor: '#09090b', borderColor: '#3f3f46', borderRadius: '0.75rem', fontSize: '11px' }}
-                    />
-                    <Legend wrapperStyle={{ fontSize: '11px', paddingTop: '10px' }} />
+                    <CartesianGrid strokeDasharray="3 3" vertical={false} />
+                    <XAxis dataKey="offset" tick={{ fontSize: 10 }} />
+                    <YAxis tick={{ fontSize: 10 }} tickFormatter={v => unit === 'inr' ? `₹${(v/1000).toFixed(0)}k` : `${v}`} />
+                    <Tooltip />
+                    <Legend wrapperStyle={{ fontSize: '11px', paddingTop: '8px' }} />
                     {data?.expiries?.map((exp, i) => {
                       const colors = ['#06b6d4', '#10b981', '#f59e0b', '#8b5cf6', '#ec4899'];
                       return (
@@ -1421,14 +1421,12 @@ export default function BatmanMatrixPage() {
             <div className="h-96 w-full pt-2">
               <ResponsiveContainer width="100%" height="100%">
                 <AreaChart data={breakevenChartData} margin={{ top: 10, right: 20, left: 10, bottom: 20 }}>
-                  <CartesianGrid strokeDasharray="3 6" stroke="#27272a" vertical={false} />
-                  <XAxis dataKey="offset" stroke="#71717a" tick={{ fill: '#a1a1aa', fontSize: 10 }} />
-                  <YAxis stroke="#71717a" tick={{ fill: '#a1a1aa', fontSize: 10 }} domain={['dataMin - 200', 'dataMax + 200']} />
-                  <Tooltip
-                    contentStyle={{ backgroundColor: '#09090b', borderColor: '#3f3f46', borderRadius: '0.75rem', fontSize: '11px' }}
-                  />
-                  <Legend wrapperStyle={{ fontSize: '11px', paddingTop: '10px' }} />
-                  <ReferenceLine y={currentSpot} stroke="#f59e0b" strokeDasharray="4 4" label={{ value: 'SPOT', fill: '#f59e0b', fontSize: 10 }} />
+                  <CartesianGrid strokeDasharray="3 3" vertical={false} />
+                  <XAxis dataKey="offset" tick={{ fontSize: 10 }} />
+                  <YAxis tick={{ fontSize: 10 }} domain={['dataMin - 200', 'dataMax + 200']} />
+                  <Tooltip />
+                  <Legend wrapperStyle={{ fontSize: '11px', paddingTop: '8px' }} />
+                  <ReferenceLine y={currentSpot} stroke="#f59e0b" strokeDasharray="4 4" label={{ value: 'SPOT', fill: '#f59e0b', fontSize: 10, position: 'insideTopRight' }} />
                   <Area type="monotone" dataKey="upperBe" name="Upper Breakeven" stroke="#06b6d4" fill="#06b6d4" fillOpacity={0.15} />
                   <Area type="monotone" dataKey="shortCall" name="Short Call (Ear)" stroke="#38bdf8" fill="#38bdf8" fillOpacity={0.2} />
                   <Area type="monotone" dataKey="shortPut" name="Short Put (Ear)" stroke="#c084fc" fill="#c084fc" fillOpacity={0.2} />
