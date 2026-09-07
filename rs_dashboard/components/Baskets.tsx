@@ -202,6 +202,15 @@ export default function Baskets() {
   }, [broker]);
 
   // ── Per-expiry: chain + lookup + live feed ──────────────────────
+  // authenticatedBrokers is a brand-new array reference every time
+  // /api/auth/broker-status resolves, even when unchanged from the initial
+  // ['dhan'] useBrokerSelector starts with — depending on the array itself
+  // below made this effect's cleanup (stop) and a fresh run (start) fire back
+  // to back shortly after every mount, and since neither fetch is awaited the
+  // OLD stop could land after the NEW start had already spawned a bridge,
+  // killing it within seconds (see the identical fix + full writeup in
+  // Scalper.tsx/AdvancedScalper.tsx's own WS-bridge-lifecycle effect).
+  const authenticatedBrokersKey = authenticatedBrokers.join(',');
   useEffect(() => {
     if (!expiry) return;
 
@@ -255,7 +264,8 @@ export default function Baskets() {
       })
       .catch(() => {});
 
-    for (const b of authenticatedBrokers) {
+    const brokers = authenticatedBrokersKey.split(',').filter(Boolean);
+    for (const b of brokers) {
       fetch('/api/options/live', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -267,10 +277,10 @@ export default function Baskets() {
       fetch('/api/options/live', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action: 'stop', brokers: authenticatedBrokers }),
+        body: JSON.stringify({ action: 'stop', brokers }),
       }).catch(() => {});
     };
-  }, [expiry, underlying, authenticatedBrokers]);
+  }, [expiry, underlying, authenticatedBrokersKey]);
 
   // ── Watch extra off-selected-expiry contracts (Calendar/Diagonal legs) ──
   useEffect(() => {

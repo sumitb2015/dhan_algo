@@ -794,6 +794,23 @@ export default function AdvancedScalper() {
 
   // ─── useEffect 2c: WS bridge lifecycle ────────────────────────────
 
+  // useBrokerSelector's authenticatedBrokers is a brand-new array reference
+  // every time /api/auth/broker-status resolves (BROKERS.filter(...) or a
+  // fresh ['dhan'] literal), even when its contents are unchanged from the
+  // initial ['dhan'] the hook starts with. That happens exactly once, a beat
+  // after mount — and with the raw array as a dependency below, React saw a
+  // "changed" dependency and ran this effect's cleanup (stop) immediately
+  // followed by a fresh run (start). Both fetches are unawaited, so the OLD
+  // cleanup's stop request could land on the server AFTER the NEW run's start
+  // had already spawned a fresh bridge process — which then saw the
+  // just-written stop-trigger on its very next poll and exited within
+  // seconds of starting. Kotak positions have no LTP fallback of their own
+  // (see kotakShape.ts), so this manifested as Kotak LTP/P&L stuck at 0/0
+  // while Dhan positions partly masked the same dead feed via their
+  // back-derived-from-unrealizedProfit fallback. Same fix useLiveOptionsWS.ts
+  // already applies to this exact array (its own `authKey`): depend on a
+  // stable joined string, not the array reference.
+  const authenticatedBrokersKey = authenticatedBrokers.join(',');
   useEffect(() => {
     if (!expiry) return;
 
@@ -801,7 +818,8 @@ export default function AdvancedScalper() {
     // runs independently on its own port/files (see useLiveOptionsWS), so
     // switching the broker selector never spawns or kills a process. That is
     // also why `broker` is not a dependency here.
-    for (const b of authenticatedBrokers) {
+    const brokers = authenticatedBrokersKey.split(',').filter(Boolean);
+    for (const b of brokers) {
       fetch('/api/options/live', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -814,10 +832,10 @@ export default function AdvancedScalper() {
       fetch('/api/options/live', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action: 'stop', brokers: authenticatedBrokers }),
+        body: JSON.stringify({ action: 'stop', brokers }),
       }).catch(() => {});
     };
-  }, [expiry, underlying, authenticatedBrokers]);
+  }, [expiry, underlying, authenticatedBrokersKey]);
 
   // Start the shared Nifty-50 equity bridge when the Top 10 panel is switched
   // on. The route is idempotent — it returns "Bridge already running" without
