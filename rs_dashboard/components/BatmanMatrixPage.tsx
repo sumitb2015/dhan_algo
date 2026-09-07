@@ -886,8 +886,6 @@ export default function BatmanMatrixPage() {
 
   return (
     <div className="flex flex-col min-h-screen bg-zinc-950 text-white font-sans selection:bg-emerald-500/30">
-      <NavBar />
-
       {/* ─── Sticky Control Header ────────────────────────────────────────── */}
       <header className="sticky top-0 z-30 flex items-center justify-between gap-3 flex-wrap px-6 py-3 border-b border-zinc-800 bg-zinc-950/95 backdrop-blur">
         <div className="flex items-center gap-3">
@@ -1023,6 +1021,9 @@ export default function BatmanMatrixPage() {
               DATA: {data.dataDate}
             </span>
           )}
+
+          <span className="w-px h-5 bg-zinc-800 shrink-0" />
+          <NavBar />
         </div>
       </header>
 
@@ -1252,12 +1253,17 @@ export default function BatmanMatrixPage() {
 
         {/* ── TAB 1: MATRIX VIEW ─────────────────────────────────────────── */}
         {!isLoading && data?.expiries && data.rows && activeTab === 'matrix' && (
-          <div className="bg-zinc-900 border border-zinc-800 rounded-2xl overflow-hidden shadow-2xl">
+          <div className="bg-zinc-900 border border-zinc-800 rounded-2xl overflow-x-auto shadow-2xl">
             <table className="w-full text-left text-xs border-collapse">
-              <thead className="bg-zinc-800 text-white font-bold text-xs uppercase tracking-wider sticky top-[105px] z-10 shadow-sm">
-                <tr>
-                  <th className="py-3 px-4 border-r border-zinc-700/80 w-36">
-                    Inner Offset (ATM±N)
+              <thead className="bg-zinc-800 text-white font-bold text-xs uppercase tracking-wider sticky top-0 z-20">
+                <tr className="border-b border-zinc-700">
+                  <th className="py-3.5 px-4 sticky left-0 bg-zinc-800 z-30 min-w-[180px] shadow-sm border-r border-zinc-700">
+                    <div className="flex items-center gap-1.5">
+                      <span>Inner Offset (ATM±N)</span>
+                    </div>
+                    <div className="text-[10px] font-normal text-zinc-400 normal-case mt-0.5">
+                      Span from ATM ({currentSpot ? `Spot: ${currentSpot.toLocaleString('en-IN')}` : ''})
+                    </div>
                   </th>
                   {data?.expiries?.map((exp, i) => (
                     <th key={exp.expiry} className="py-3 px-3 text-center border-r border-zinc-700/80 min-w-[170px]">
@@ -1273,9 +1279,9 @@ export default function BatmanMatrixPage() {
               </thead>
               <tbody className="divide-y divide-zinc-800/80 text-zinc-300">
                 {visibleRows.map(row => (
-                  <tr key={row.offset} className="hover:bg-zinc-800/30 transition-colors">
+                  <tr key={row.offset} className="hover:bg-zinc-800/40 transition-colors group">
                     {/* Y-Axis Label */}
-                    <td className="py-3 px-4 font-mono border-r border-zinc-800 bg-zinc-950/40">
+                    <td className="py-3 px-4 font-mono sticky left-0 bg-zinc-900 group-hover:bg-zinc-850 z-10 border-r border-zinc-800">
                       <div className="flex flex-col">
                         <span className="font-bold text-white text-xs">ATM±{row.offset}</span>
                         <span className="text-[10px] text-zinc-400">
