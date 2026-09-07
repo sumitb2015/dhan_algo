@@ -369,13 +369,12 @@ export default function Scalper() {
   const spot = liveQuotes?.spot ?? chainSpot;
   const atm  = spot > 0 ? Math.round(spot / strikeStep) * strikeStep : 0;
 
-  const visibleStrikes = useMemo(() => {
-    if (!allStrikes.length) return allStrikes;
-    if (atm === 0) return allStrikes.slice(0, 21);
-    const idx = allStrikes.reduce((best, sk, i) =>
-      Math.abs(sk - atm) < Math.abs(allStrikes[best] - atm) ? i : best, 0);
-    return allStrikes.slice(Math.max(0, idx - 10), idx + 11);
-  }, [allStrikes, atm]);
+  // The strike dropdown shows every strike the option chain lists — no ATM
+  // window. It used to be clipped to ATM ± 10, well inside what the live-quotes
+  // bridge already subscribes to (ATM ± 30, see live_options_ws.py's
+  // --num-strikes), so the clip was purely a UI restriction, not a live-data
+  // limit — a native <select> handles a long option list fine.
+  const visibleStrikes = allStrikes;
 
   const ceLtp = ceStrike != null ? (liveQuotes?.strikes?.[String(ceStrike)]?.ce?.ltp ?? 0) : 0;
   const peLtp = peStrike != null ? (liveQuotes?.strikes?.[String(peStrike)]?.pe?.ltp ?? 0) : 0;
