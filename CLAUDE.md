@@ -201,6 +201,8 @@ Non-obvious route behaviors:
   interval decoupled from price ticks. Real-money endpoint. Read `dhan-terminal-position-ownership`
   (ledger/reconciliation) and `dhan-polling-guards` (poller/stale-closure pitfalls) before touching it.
 - `csp-scan/` — spawns `scripts/tools/csp_scanner.py` (screening only, no orders); `csp-tracked/sell` and `csp-watchlist/exit` place and exit **real** cash-secured-put orders via `scripts/tools/csp_watchlist.py`, then track fills/strike-rolls in `lib/cspTracked.ts`'s JSON store — reconciled against broker truth by `csp-tracked/reconcile` and `csp-tracked/sync`.
+- `margin-allocator/` — capital-deployment desk (`components/MarginAllocator.tsx`): classifies live Dhan/Kotak option positions into structures (straddle/strangle/spread/condor/naked), reads India VIX percentile + per-underlying trend (`margin-allocator/trend/`), and ranks/sizes Baskets credit-strategy templates against a risk budget. Read-only/planning — it doesn't place orders itself. See `dhan-margin-allocator`.
+- `update-repo/` — the NavBar "Update App" button: fetches origin, auto-stashes dirty local state, fast-forwards or merges, and reports whether the running process needs a rebuild/restart. See `dhan-app-self-update` before changing restart-detection or merge logic.
 
 **lib/ files** (`rs_dashboard/lib/`) — the ones with non-obvious behavior:
 - `pyExec.ts` — `runPythonJson()` (async venv-Python spawn, parses last stdout line as JSON) + `dedupe()` in-flight dedup + `PROJECT_ROOT`/`PYTHON_EXE`. Use this from API routes; don't hand-roll `spawnSync` (blocks the Node event loop)
@@ -263,7 +265,11 @@ daily 06:00 IST session cutoff), `dhan-expired-options-data` (expired-options
 downloader/SQLite pipeline and the Strike History page built on it),
 `dhan-cross-platform` (Python spawn paths, process kill, and GPU-composited
 animations that work on Windows but break on Linux), `dhan-payoff-diagrams`
-(payoff-curve math and the hand-rolled SVG chart family). Run
+(payoff-curve math and the hand-rolled SVG chart family), `dhan-margin-allocator`
+(capital-deployment desk: position-structure classification, VIX/trend sizing,
+credit-strategy ranking), `dhan-sidebar-nav` (the global collapsible sidebar's
+mount lifecycle and open-group state), `dhan-app-self-update` (the in-dashboard
+git-pull Update App feature and its rebuild/restart detection). Run
 `dhan-context-audit` periodically (not tied to any one change) to review CLAUDE.md
 and this skill library itself against recent commits.
 

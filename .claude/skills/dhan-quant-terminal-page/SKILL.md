@@ -31,7 +31,27 @@ A quant-terminal page is two components:
 2. **`<Name>Tab.tsx`** (or multiple tabs) — the actual chart(s): data fetching for that
    view, `recharts` components, tooltips, stat tiles, view-mode toggle.
 
-## Sticky Header (page shell)
+## Sticky Header (page shell) — exactly two levels
+
+The header is **one row**: page title/eyebrow on the left, all selectors plus
+`<NavBar />` inline on the right, separated by a `w-px h-5 bg-zinc-800`
+divider. It used to be three levels — a shared `app/(options)/layout.tsx`
+rendered its own NavBar-only strip *above* each page's own title row and tab
+row — but that stacked a 3rd header band on top of two the page already had,
+so three same-day commits (`a9a768c`, `08b0c67`, `ff44171`) collapsed it back
+to two across every page under `app/(options)/`. `layout.tsx` now renders
+nothing but a bare `<div>` wrapper — see its own comment before reintroducing
+anything into it. **`<NavBar />` belongs inline inside each page's own sticky
+header**, at the far right after a divider, never in a shared layout wrapper:
+
+```tsx
+<span className="w-px h-5 bg-zinc-800 shrink-0" />
+<NavBar />
+```
+
+If you're building a new page in this family and find yourself reaching for
+the options layout to host a header element, stop — put it in the page's own
+header row instead; the layout is intentionally inert.
 
 ```tsx
 <div className="flex flex-col min-h-screen bg-zinc-950 text-white">
@@ -111,3 +131,6 @@ Bar/area cursor: `cursor={{ fill: '#27272a', opacity: 0.5 }}`. Line cursor:
 - Applying an opacity modifier to a text class instead of dropping to a dimmer solid zinc
   shade — this is the single most common regression when copying old table-style code into
   a new chart page.
+- Adding a header element to `app/(options)/layout.tsx` instead of inline in the page's own
+  sticky header — the layout is deliberately inert (see the header section above); putting
+  anything back into it reintroduces the 3-level header this family was fixed away from.
