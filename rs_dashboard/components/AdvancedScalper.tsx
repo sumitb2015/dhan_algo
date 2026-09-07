@@ -93,7 +93,7 @@ function StatTile({
       title={title}
     >
       <span className="text-[9px] font-bold uppercase tracking-[0.15em] text-zinc-500 whitespace-nowrap">{label}</span>
-      <span className={`font-mono text-base font-bold leading-none tabular-nums ${valueClass}`}>{value}</span>
+      <span className={`font-mono text-lg font-bold leading-none tabular-nums ${valueClass}`}>{value}</span>
       {sub ? <span className="font-mono text-[10px] text-zinc-500 truncate">{sub}</span> : null}
     </div>
   );
@@ -1964,7 +1964,7 @@ export default function AdvancedScalper() {
       </div>
 
       {/* Sticky header */}
-      <div className="sticky top-0 z-10 border-b border-amber-500/20 bg-zinc-950/95 backdrop-blur px-4 py-2 shadow-md">
+      <div className="sticky top-0 z-10 border-b border-amber-500/25 bg-zinc-950/95 backdrop-blur px-4 py-2 shadow-md">
         <div className="flex items-center justify-between gap-3 flex-nowrap overflow-x-auto">
           <div className="flex items-center gap-3 flex-nowrap shrink-0">
             <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-amber-500/30 bg-amber-500/10 shadow-inner">
@@ -2113,7 +2113,7 @@ export default function AdvancedScalper() {
         </div>
 
         {/* P&L Guard bar — always visible; controls themselves are Dhan-only (see below) */}
-        <div className="mt-2 pt-2 border-t border-amber-500/20">
+        <div className="mt-2 pt-2 border-t border-amber-500/25">
           {(() => {
             const isActive = pnlGuardStatus?.pnlExitStatus === 'ACTIVE';
             // Dhan may echo loss back as the negative level it was stored at rather
