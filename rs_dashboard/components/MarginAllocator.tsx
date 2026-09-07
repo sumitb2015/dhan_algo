@@ -71,6 +71,10 @@ function fmtPct(v: number | null | undefined, dp = 1): string {
   if (v === null || v === undefined || !Number.isFinite(v)) return '—';
   return `${v.toFixed(dp)}%`;
 }
+function fmtBreakevens(levels: number[]): string {
+  if (!levels.length) return '—';
+  return levels.map((l) => Math.round(l).toLocaleString('en-IN')).join(' / ');
+}
 
 // ─── Shared shell primitives (copied verbatim from MarketDashboard.tsx) ───────
 
@@ -217,12 +221,23 @@ interface RankedCandidate {
    *  doesn't compute one, so they're excluded from the portfolio delta gauge
    *  below rather than silently counted as flat (0) exposure they may not have. */
   deltaNet: number | null;
+  /** Max loss per unit in ₹, negative or 0. Null means unlimited (undefined-risk
+   *  strangle/straddle/naked side) — never coerce this to a number, the allocation
+   *  table's Max Loss column depends on the null check to render "Unlimited". */
+  maxLossPerUnit: number | null;
+  /** Breakeven spot/strike level(s) in index points — one for a single-sided
+   *  structure (naked put/call, CSP), two for a symmetric spread/condor/straddle. */
+  breakevens: number[];
 }
 
 interface AllocatedCandidate extends RankedCandidate {
   units: number;
   marginUsed: number;
   creditExpected: number;
+  /** maxLossPerUnit scaled by units. Null (unlimited) is sticky — once any unit
+   *  is unlimited-risk the total is unlimited, it never becomes "unlimited plus
+   *  a number." */
+  maxLossTotal: number | null;
 }
 
 /**
@@ -322,6 +337,8 @@ function fromScannedStrategy(s: ScannedStrategy, trend: MarketTrend): RankedCand
     riskType: s.maxLossUnlimited ? 'undefined' : 'defined',
     detail: legsSummary,
     deltaNet: s.deltaNet,
+    maxLossPerUnit: s.maxLossUnlimited ? null : s.maxLoss,
+    breakevens: s.breakevens,
   };
 }
 
@@ -341,6 +358,12 @@ function fromCspRow(r: CspRow): RankedCandidate {
     riskType: 'assignment',
     detail: r.rationale,
     deltaNet: null,
+    // CSP "max loss" isn't a hard cap the way a spread's wing width is — it's
+    // the textbook assignment-to-zero scenario (you're put the stock at strike,
+    // it then goes to ₹0): capitalRequired is strike*lotSize (csp_scanner.py),
+    // so the loss floor is that minus the premium already collected.
+    maxLossPerUnit: -(r.capitalRequired - r.premiumTotal),
+    breakevens: [r.strike - r.premium],
   };
 }
 
@@ -414,7 +437,7 @@ function buildAllocationPlan(
 
   for (const c of sorted) {
     if (!tryFit(c.marginPerUnit, c.underlying, c.strategyType)) continue;
-    plan.push({ ...c, units: 1, marginUsed: c.marginPerUnit, creditExpected: c.creditPerUnit });
+    plan.push({ ...c, units: 1, marginUsed: c.marginPerUnit, creditExpected: c.creditPerUnit, maxLossTotal: c.maxLossPerUnit });
   }
 
   // Second pass: scale up already-selected winners with leftover budget.
@@ -424,6 +447,7 @@ function buildAllocationPlan(
     item.units += 1;
     item.marginUsed += item.marginPerUnit;
     item.creditExpected += item.creditPerUnit;
+    if (item.maxLossTotal !== null && item.maxLossPerUnit !== null) item.maxLossTotal += item.maxLossPerUnit;
   }
 
   plan.sort((a, b) => b.marginUsed - a.marginUsed);
@@ -1156,6 +1180,8 @@ export default function MarginAllocator() {
                     <th className="px-3 py-2 text-xs font-bold text-white text-right">DTE</th>
                     <th className="px-3 py-2 text-xs font-bold text-white text-right">Margin Used</th>
                     <th className="px-3 py-2 text-xs font-bold text-white text-right">Credit Expected</th>
+                    <th className="px-3 py-2 text-xs font-bold text-white text-right">Max Loss</th>
+                    <th className="px-3 py-2 text-xs font-bold text-white text-right">Breakeven</th>
                     <th className="px-3 py-2 text-xs font-bold text-white text-right">PoP</th>
                     <th className="px-3 py-2 text-xs font-bold text-white text-right">Ann. RoM</th>
                   </tr>
@@ -1172,6 +1198,10 @@ export default function MarginAllocator() {
                       <td className="px-3 py-2 text-right tabular-nums text-zinc-300">{p.dte}d</td>
                       <td className="px-3 py-2 text-right tabular-nums text-amber-400">{fmtINRCompact(p.marginUsed)}</td>
                       <td className="px-3 py-2 text-right tabular-nums text-emerald-400">{fmtINRCompact(p.creditExpected)}</td>
+                      <td className="px-3 py-2 text-right tabular-nums text-red-400">
+                        {p.maxLossTotal === null ? 'Unlimited' : fmtINRCompact(p.maxLossTotal)}
+                      </td>
+                      <td className="px-3 py-2 text-right tabular-nums text-zinc-300">{fmtBreakevens(p.breakevens)}</td>
                       <td className="px-3 py-2 text-right tabular-nums text-zinc-300">{fmtPct(p.popPct)}</td>
                       <td className="px-3 py-2 text-right tabular-nums text-amber-400">{fmtPct(p.romAnnualizedPct)}</td>
                     </tr>
@@ -1185,7 +1215,12 @@ export default function MarginAllocator() {
                     </td>
                     <td className="px-3 py-2 text-right font-mono text-xs tabular-nums text-amber-400">{fmtINRCompact(allocationUsed)}</td>
                     <td className="px-3 py-2 text-right font-mono text-xs tabular-nums text-emerald-400">{fmtINRCompact(totalCreditExpected)}</td>
-                    <td colSpan={2} />
+                    <td className="px-3 py-2 text-right font-mono text-xs tabular-nums text-red-400">
+                      {allocationPlan.some((p) => p.maxLossTotal === null)
+                        ? 'Unlimited'
+                        : fmtINRCompact(allocationPlan.reduce((sum, p) => sum + (p.maxLossTotal ?? 0), 0))}
+                    </td>
+                    <td colSpan={3} />
                   </tr>
                 </tfoot>
               </table>
@@ -1215,7 +1250,9 @@ export default function MarginAllocator() {
               stock at the strike). Every structure here is also on the Baskets page (/baskets) — this panel is Baskets&apos;
               credit-generating templates, ranked by live VIX regime and each underlying&apos;s own trend, not a different strategy
               universe. PoP and Ann. RoM are model estimates from live IV/OI, not guarantees. Net Portfolio Delta and the Tail
-              Hedge Reserve above are informational gauges, not enforced caps or executed orders.
+              Hedge Reserve above are informational gauges, not enforced caps or executed orders. Max Loss totals the allocated
+              units at the structure&apos;s own worst case — for a CSP that&apos;s the textbook assignment-to-₹0 scenario, not a
+              likely outcome. Breakeven is the underlying level(s) where the position turns from profit to loss at expiry.
             </span>
           </div>
         </TerminalPanel>
