@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import path from 'path';
 import { PROJECT_ROOT, runPythonJson } from '@/lib/pyExec';
 import { readTracked, writeTracked } from '@/lib/cspTracked';
+import { invalidateBrokerCache } from '@/lib/brokerPositionsCache';
 
 const SCRIPT = path.join(PROJECT_ROOT, 'scripts', 'tools', 'csp_watchlist.py');
 
@@ -105,6 +106,7 @@ export async function POST(req: NextRequest) {
       fresh.realizedPnl = (fresh.avgPrice - exitPrice) * filledQty;
     }
     writeTracked(rows);
+    invalidateBrokerCache('dhan');
 
     return NextResponse.json({
       success: true,

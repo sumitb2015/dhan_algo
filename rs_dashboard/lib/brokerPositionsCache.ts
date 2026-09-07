@@ -30,6 +30,15 @@ interface Entry<T> {
 const cache = new Map<string, Entry<unknown>>();
 const inflight = new Map<string, Promise<unknown>>();
 
+// Bumped by invalidateBrokerCache(). A fetch captures the epoch for its key
+// before awaiting the broker call; if that epoch has moved on by the time the
+// fetch resolves, an invalidation happened while it was in flight, and the
+// (now possibly pre-order-stale) result must not be written back into the
+// cache — otherwise a poll that started just before an order fills could
+// still repopulate the cache with the pre-fill snapshot right after the order
+// route evicted it, silently undoing the invalidation.
+const epoch = new Map<string, number>();
+
 // dhanGet/kiteGet/kotakGet all throw on a broker-reported failure (verified:
 // dhanGet on !res.ok, kiteGet on status==='error', kotakGet via
 // raiseIfError()) rather than resolving with a success:false envelope, so a
@@ -42,6 +51,7 @@ async function cached<T>(key: string, fetcher: () => Promise<T>): Promise<T> {
   const existing = inflight.get(key);
   if (existing) return existing as Promise<T>;
 
+  const startEpoch = epoch.get(key) ?? 0;
   const run = (async () => {
     // Re-check: another caller may have populated the cache while this one
     // was waiting to be scheduled (between the check above and this line).
@@ -49,7 +59,7 @@ async function cached<T>(key: string, fetcher: () => Promise<T>): Promise<T> {
     if (fresh && Date.now() - fresh.ts < TTL_MS) return fresh.data;
 
     const data = await fetcher();
-    cache.set(key, { data, ts: Date.now() });
+    if ((epoch.get(key) ?? 0) === startEpoch) cache.set(key, { data, ts: Date.now() });
     return data;
   })().finally(() => inflight.delete(key));
 
@@ -67,17 +77,15 @@ export function getCachedFunds<T>(broker: CachedBroker, fetcher: () => Promise<T
 
 // Called by order-placing/exit routes right after the broker confirms an
 // order, so the next Dashboard/Margin Allocator poll sees the change
-// immediately instead of waiting out the TTL. Evicting early is always safe —
-// it only ever makes the cache MORE accurate (worst case, the next reader
-// just pays for a real fetch it would have paid for anyway once the TTL
-// expired). Never call this from a hot read path (e.g. Scalper's own
-// position reads stay uncached entirely — see brokerPositionsCache's module
-// comment and the Phase 2 plan for why).
-export function invalidateBrokerCache(broker: CachedBroker, kind?: 'positions' | 'funds'): void {
-  if (kind) {
-    cache.delete(`${broker}:${kind}`);
-    return;
+// immediately instead of waiting out the TTL. An order moves both margin-used
+// and positions together, so both keys are always evicted — there is no
+// caller that wants only one. Also bumps the epoch (see above) so a fetch
+// already in flight when this runs cannot silently repopulate the cache with
+// its pre-invalidation result.
+export function invalidateBrokerCache(broker: CachedBroker): void {
+  for (const kind of ['positions', 'funds'] as const) {
+    const key = `${broker}:${kind}`;
+    cache.delete(key);
+    epoch.set(key, (epoch.get(key) ?? 0) + 1);
   }
-  cache.delete(`${broker}:positions`);
-  cache.delete(`${broker}:funds`);
 }
