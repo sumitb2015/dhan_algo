@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import { kotakGet, kotakPost, kotakRows, KOTAK_PATHS } from '@/lib/kotakToken';
 import { shapeKotakPosition } from '@/lib/kotakShape';
+import { invalidateBrokerCache } from '@/lib/brokerPositionsCache';
 
 export async function POST(): Promise<NextResponse> {
   const closed: string[] = [];
@@ -38,6 +39,9 @@ export async function POST(): Promise<NextResponse> {
       }
     }
 
+    // Invalidate even on a partial failure — some legs can close while others
+    // error out, and `closed` being non-empty still means positions moved.
+    if (closed.length > 0) invalidateBrokerCache('kotak');
     return NextResponse.json({ success: errors.length === 0, closed, errors });
   } catch (err) {
     console.error('[scalper/kotak/exit-all] error:', err);

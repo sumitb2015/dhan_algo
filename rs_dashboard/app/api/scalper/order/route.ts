@@ -3,6 +3,7 @@ import path from 'path';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
 import { PYTHON_EXE } from '@/lib/pyExec';
+import { invalidateBrokerCache } from '@/lib/brokerPositionsCache';
 
 const execFileAsync = promisify(execFile);
 
@@ -56,6 +57,8 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     const parsed = JSON.parse(jsonLine);
     if (parsed.error && !parsed.success) {
       console.error('[/api/scalper/order] script error:', parsed.error);
+    } else if (parsed.success) {
+      invalidateBrokerCache('dhan');
     }
     return NextResponse.json(parsed);
   } catch (err: unknown) {

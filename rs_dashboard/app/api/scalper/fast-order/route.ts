@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getDhanCredentials } from '@/lib/dhanToken';
+import { invalidateBrokerCache } from '@/lib/brokerPositionsCache';
 
 const DHAN_ORDERS = 'https://api.dhan.co/v2/orders';
 
@@ -94,6 +95,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     // Dhan order API returns {orderId, orderStatus:"TRANSIT"} on success — no "status" field
     const orderId = String(json.orderId ?? (json.data as Record<string, unknown> | undefined)?.orderId ?? '');
     if (orderId) {
+      invalidateBrokerCache('dhan');
       return NextResponse.json({ success: true, order_id: orderId });
     }
 

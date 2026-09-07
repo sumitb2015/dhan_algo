@@ -64,3 +64,20 @@ export function getCachedPositions<T>(broker: CachedBroker, fetcher: () => Promi
 export function getCachedFunds<T>(broker: CachedBroker, fetcher: () => Promise<T>): Promise<T> {
   return cached(`${broker}:funds`, fetcher);
 }
+
+// Called by order-placing/exit routes right after the broker confirms an
+// order, so the next Dashboard/Margin Allocator poll sees the change
+// immediately instead of waiting out the TTL. Evicting early is always safe —
+// it only ever makes the cache MORE accurate (worst case, the next reader
+// just pays for a real fetch it would have paid for anyway once the TTL
+// expired). Never call this from a hot read path (e.g. Scalper's own
+// position reads stay uncached entirely — see brokerPositionsCache's module
+// comment and the Phase 2 plan for why).
+export function invalidateBrokerCache(broker: CachedBroker, kind?: 'positions' | 'funds'): void {
+  if (kind) {
+    cache.delete(`${broker}:${kind}`);
+    return;
+  }
+  cache.delete(`${broker}:positions`);
+  cache.delete(`${broker}:funds`);
+}

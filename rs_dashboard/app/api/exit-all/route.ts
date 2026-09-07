@@ -5,6 +5,7 @@ import { execSync } from 'child_process';
 import { getDhanCredentials } from '@/lib/dhanToken';
 import { DEBUG_DIR, allStateKeys, isStrategyRunning } from '@/lib/strategyRegistry';
 import { runPythonJson, PROJECT_ROOT } from '@/lib/pyExec';
+import { invalidateBrokerCache } from '@/lib/brokerPositionsCache';
 
 const DHAN_POSITIONS = 'https://api.dhan.co/v2/positions';
 const DHAN_ORDERS = 'https://api.dhan.co/v2/orders';
@@ -240,6 +241,10 @@ export async function POST(req: NextRequest) {
       console.error('[exit-all] Dhan broker exit error:', brokerError);
     }
 
+    // Invalidate even on a partial failure — exitFnoOnly() can close some
+    // legs and fail on others, so "not fully ok" still means positions moved.
+    invalidateBrokerCache('dhan');
+
     // ── Step 1b: Child-broker exit (Kotak/Zerodha) ───────────────────────
     // Strategies launched with --broker kotak/zerodha hold positions at that
     // broker, not Dhan — Step 1 above never sees them. A full nuclear exit
@@ -261,6 +266,8 @@ export async function POST(req: NextRequest) {
       if (!zerodhaResult.ok && zerodhaResult.error) {
         console.error('[exit-all] Zerodha child broker exit:', zerodhaResult.error);
       }
+      invalidateBrokerCache('kotak');
+      invalidateBrokerCache('zerodha');
     }
 
     // â”€â”€ Step 2: Sync all strategy processes â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€

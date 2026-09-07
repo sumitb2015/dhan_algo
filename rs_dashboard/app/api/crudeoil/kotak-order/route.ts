@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { kotakPost, KOTAK_PATHS } from '@/lib/kotakToken';
+import { invalidateBrokerCache } from '@/lib/brokerPositionsCache';
 
 /**
  * Multi-leg MARKET order placement on Kotak Neo for MCX crude options, used by
@@ -100,6 +101,10 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       results.push({ success: false, error: String((err as Error).message ?? err), symbol });
     }
   }
+
+  // Invalidate even on a partial failure — a basket can place some legs and
+  // reject others, and any placed leg still means positions moved.
+  if (results.some(r => r.success)) invalidateBrokerCache('kotak');
 
   const failures = results.filter(r => !r.success);
   if (failures.length) {
