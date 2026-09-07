@@ -2,7 +2,7 @@
 
 import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import NavBar from './NavBar';
-import { Zap, RefreshCw, Shield, ShieldOff, Plus, Scissors, Wallet } from 'lucide-react';
+import { Zap, RefreshCw, Shield, ShieldOff, Plus, Scissors, Wallet, ListOrdered, TrendingUp, TrendingDown } from 'lucide-react';
 import {
   OptionPanel, PositionsTable, TabTable, FundsView, formatFundsValue, pollPositionFlat, pollPositionReduced,
   type ChainOcEntry, type Toast,
@@ -60,6 +60,43 @@ function isFnoSegment(pos: Record<string, unknown>): boolean {
   const seg = String(pos.exchangeSegment ?? pos.exchange ?? '').toUpperCase();
   if (seg.startsWith('MCX')) return false;
   return seg.includes('FNO') || seg.includes('FO');
+}
+
+// ─── Bloomberg-terminal chrome (matches MarketDashboard.tsx's StatTile — see
+// the dhan-bloomberg-dashboard-page skill). Declared locally since this is
+// the only order-entry page adopting the look; the read-only dashboard's copy
+// stays the canonical reference implementation. ───────────────────────────
+
+function StatTile({
+  label,
+  value,
+  sub,
+  tone = 'neutral',
+  title,
+}: {
+  label: string;
+  value: string;
+  sub?: React.ReactNode;
+  tone?: 'neutral' | 'up' | 'down' | 'accent';
+  title?: string;
+}) {
+  const valueClass =
+    tone === 'up' ? 'text-emerald-400'
+    // rose, not red — matches every P&L-down color in Scalper.tsx/PositionsTable.
+    : tone === 'down' ? 'text-rose-400'
+    : tone === 'accent' ? 'text-amber-400'
+    : 'text-zinc-100';
+
+  return (
+    <div
+      className="flex min-w-[128px] flex-col justify-between gap-1 rounded-lg border border-zinc-800 bg-zinc-950 px-3 py-2 transition-colors hover:border-zinc-700"
+      title={title}
+    >
+      <span className="text-[9px] font-bold uppercase tracking-[0.15em] text-zinc-500 whitespace-nowrap">{label}</span>
+      <span className={`font-mono text-base font-bold leading-none tabular-nums ${valueClass}`}>{value}</span>
+      {sub ? <span className="font-mono text-[10px] text-zinc-500 truncate">{sub}</span> : null}
+    </div>
+  );
 }
 
 // ─── Main Component ───────────────────────────────────────────────
@@ -1927,19 +1964,24 @@ export default function AdvancedScalper() {
       </div>
 
       {/* Sticky header */}
-      <div className="sticky top-0 z-10 border-b border-zinc-800 bg-zinc-950/95 backdrop-blur px-4 py-2">
+      <div className="sticky top-0 z-10 border-b border-amber-500/20 bg-zinc-950/95 backdrop-blur px-4 py-2 shadow-md">
         <div className="flex items-center justify-between gap-3 flex-nowrap overflow-x-auto">
           <div className="flex items-center gap-3 flex-nowrap shrink-0">
+            <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-amber-500/30 bg-amber-500/10 shadow-inner">
+              <Zap className="h-5 w-5 text-amber-400" />
+            </div>
             <div className="shrink-0 whitespace-nowrap">
-              <h1 className="text-sm font-bold text-white tracking-tight flex items-center gap-1.5">
-                <Zap className="w-3.5 h-3.5 text-yellow-400" />
-                {underlying} ADVANCED SCALPER
+              <span className="text-[10px] font-bold uppercase tracking-[0.2em] text-amber-400">
+                ADVANCED SCALPER
+              </span>
+              <h1 className="text-sm font-bold leading-none tracking-tight text-white flex items-center gap-2 mt-0.5">
+                {underlying}
+                <span className="font-mono text-xs font-bold tabular-nums text-zinc-300">
+                  {spot > 0
+                    ? spot.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+                    : 'Loading…'}
+                </span>
               </h1>
-              <p className="text-xs font-bold font-mono tabular-nums text-zinc-200">
-                {spot > 0
-                  ? `${underlying} ${spot.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
-                  : 'Loading…'}
-              </p>
             </div>
             <div className="shrink-0"><NavBar /></div>
           </div>
@@ -2059,10 +2101,10 @@ export default function AdvancedScalper() {
               <button
                 type="button"
                 onClick={() => setActiveTab('funds')}
-                className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-bold font-mono tabular-nums bg-zinc-900 border border-zinc-700 text-zinc-200 hover:border-zinc-500 hover:text-white transition-colors min-w-[110px] justify-center shrink-0 whitespace-nowrap"
+                className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-bold font-mono tabular-nums bg-amber-500/10 border border-amber-500/30 text-amber-300 hover:bg-amber-500/20 transition-colors min-w-[110px] justify-center shrink-0 whitespace-nowrap"
                 title={`Available margin (${BROKER_LABELS[broker]}) — click to view funds breakdown`}
               >
-                <Wallet className="w-3 h-3 text-sky-400" />
+                <Wallet className="w-3 h-3 text-amber-400" />
                 ₹{formatFundsValue(Number(fundsData.availabelBalance) || 0)}
               </button>
             )}
@@ -2071,7 +2113,7 @@ export default function AdvancedScalper() {
         </div>
 
         {/* P&L Guard bar — always visible; controls themselves are Dhan-only (see below) */}
-        <div className="mt-2 pt-2 border-t border-zinc-800">
+        <div className="mt-2 pt-2 border-t border-amber-500/20">
           {(() => {
             const isActive = pnlGuardStatus?.pnlExitStatus === 'ACTIVE';
             // Dhan may echo loss back as the negative level it was stored at rather
@@ -2086,8 +2128,8 @@ export default function AdvancedScalper() {
             return (
               <div className="flex items-center gap-3 flex-nowrap overflow-x-auto pb-1">
                 <div className="flex items-center gap-3 flex-nowrap shrink-0 bg-zinc-950/40 border border-zinc-800/60 rounded-xl px-3 py-1.5">
-                <span className={cn('flex items-center gap-1', TXT_VALUE, 'font-bold text-zinc-500 uppercase tracking-wider shrink-0 whitespace-nowrap')}>
-                  <Shield className="w-3 h-3" /> P&amp;L Guard
+                <span className={cn('flex items-center gap-1', TXT_VALUE, 'font-bold text-amber-400 uppercase tracking-wider shrink-0 whitespace-nowrap')}>
+                  <Shield className="w-3 h-3 text-amber-400" /> P&amp;L Guard
                 </span>
 
                 {broker !== 'dhan' ? (
@@ -2330,94 +2372,64 @@ export default function AdvancedScalper() {
         const chgPct = prevSpot > 0 ? (chg / prevSpot) * 100 : 0;
         const isUp   = chg >= 0;
         return (
-          <div className="flex flex-wrap justify-center items-center gap-3 px-4 pb-1 pt-0 select-none">
-            {/* Real-time Total P&L Pill (Left Side of CE Value) */}
-            <div className={`flex items-center gap-2 bg-zinc-900/80 border rounded-2xl px-4 py-2.5 shadow-lg font-mono text-xs ${
-              totalPnl > 0
-                ? 'border-emerald-500/40 bg-emerald-950/40 text-emerald-300'
-                : totalPnl < 0
-                ? 'border-rose-500/40 bg-rose-950/40 text-rose-300'
-                : 'border-zinc-800 text-zinc-400'
-            }`} title="Combined Realized + Unrealized P&L across open positions">
-              <span className="text-[10px] font-extrabold uppercase bg-zinc-950 border border-zinc-800 px-1.5 py-0.5 rounded text-zinc-400">
-                P&amp;L
-              </span>
-              <span className="font-bold text-sm tabular-nums">
-                {totalPnl >= 0 ? '+' : ''}₹{totalPnl.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-              </span>
-              {unknownLtpCount > 0 && (
-                <span
-                  className="text-[10px] font-extrabold uppercase bg-amber-950/80 border border-amber-700/60 text-amber-400 px-1.5 py-0.5 rounded"
-                  title={`${unknownLtpCount} open leg${unknownLtpCount > 1 ? 's' : ''} have no live price (Kotak position on an expiry other than the one selected above) — this total does not include ${unknownLtpCount > 1 ? 'their' : 'its'} unrealized P&L. Switch the expiry dropdown to see it.`}
-                >
+          <div className="flex flex-wrap justify-center items-stretch gap-2.5 px-4 pb-2.5 pt-1 select-none">
+            {/* Real-time Total P&L */}
+            <StatTile
+              label="TOTAL P&L"
+              value={`${totalPnl >= 0 ? '+' : ''}₹${totalPnl.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`}
+              tone={totalPnl > 0 ? 'up' : totalPnl < 0 ? 'down' : 'neutral'}
+              title="Combined Realized + Unrealized P&L across open positions"
+              sub={unknownLtpCount > 0 ? (
+                <span className="inline-flex items-center gap-1 rounded border border-amber-500/30 bg-amber-500/10 px-1 py-0.5 text-[9px] font-bold text-amber-400">
                   ⚠ {unknownLtpCount} LTP UNKNOWN
                 </span>
-              )}
-            </div>
+              ) : undefined}
+            />
 
-            {/* Total CE & PE Value Summary Pill */}
-            <div className="flex items-center gap-2.5 bg-zinc-900/80 border border-zinc-800 rounded-2xl px-4 py-2.5 shadow-lg font-mono text-xs">
-              {/* Total CE Value */}
-              <div className="flex items-center gap-1.5" title="Net Call Value = Sum(short CE Qty × Price) − Sum(long CE Qty × Price)">
-                <span className="text-[10px] font-extrabold uppercase text-emerald-400 bg-emerald-950/80 border border-emerald-800/60 px-1.5 py-0.5 rounded">
-                  CE Val
-                </span>
-                <span className="font-bold text-emerald-300 tabular-nums">
-                  ₹{totalCEVal.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-                </span>
-              </div>
+            {/* Total CE Value */}
+            <StatTile
+              label="CE VAL"
+              value={`₹${totalCEVal.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`}
+              tone="up"
+              title="Net Call Value = Sum(short CE Qty × Price) − Sum(long CE Qty × Price)"
+            />
 
-              <span className="text-zinc-700 font-sans">|</span>
+            {/* Total PE Value */}
+            <StatTile
+              label="PE VAL"
+              value={`₹${totalPEVal.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`}
+              tone="down"
+              title="Net Put Value = Sum(short PE Qty × Price) − Sum(long PE Qty × Price)"
+            />
 
-              {/* Total PE Value */}
-              <div className="flex items-center gap-1.5" title="Net Put Value = Sum(short PE Qty × Price) − Sum(long PE Qty × Price)">
-                <span className="text-[10px] font-extrabold uppercase text-rose-400 bg-rose-950/80 border border-rose-800/60 px-1.5 py-0.5 rounded">
-                  PE Val
-                </span>
-                <span className="font-bold text-rose-300 tabular-nums">
-                  ₹{totalPEVal.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-                </span>
-              </div>
+            {/* PE / CE value ratio — scale-free skew between the two sides */}
+            <StatTile
+              label="PE / CE"
+              value={peCeRatio == null ? '—' : `${peCeRatio.toFixed(2)}x`}
+              tone="accent"
+              title="Ratio = Total PE Value ÷ Total CE Value. 1.00 = balanced, above 1 = PE-heavy, below 1 = CE-heavy. Shows — when the CE side is flat."
+            />
 
-              <span className="text-zinc-700 font-sans">|</span>
+            {/* Difference (CE - PE) */}
+            <StatTile
+              label="DIFF (CE−PE)"
+              value={`${cePeDiff >= 0 ? '+' : ''}₹${cePeDiff.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`}
+              tone={cePeDiff > 0 ? 'up' : cePeDiff < 0 ? 'down' : 'neutral'}
+              title="Difference = Total CE Value - Total PE Value"
+            />
 
-              {/* PE / CE value ratio — scale-free skew between the two sides */}
-              <div className="flex items-center gap-1.5" title="Ratio = Total PE Value ÷ Total CE Value. 1.00 = balanced, above 1 = PE-heavy, below 1 = CE-heavy. Shows — when the CE side is flat.">
-                <span className="text-[10px] font-extrabold uppercase text-amber-400 bg-amber-950/80 border border-amber-800/60 px-1.5 py-0.5 rounded">
-                  PE/CE
-                </span>
-                <span className="font-bold text-zinc-200 tabular-nums">
-                  {peCeRatio == null ? '—' : `${peCeRatio.toFixed(2)}x`}
-                </span>
-              </div>
-
-              <span className="text-zinc-700 font-sans">|</span>
-
-              {/* Difference (CE - PE) */}
-              <div className="flex items-center gap-1.5" title="Difference = Total CE Value - Total PE Value">
-                <span className="text-[10px] font-extrabold uppercase text-zinc-400 bg-zinc-950 border border-zinc-800 px-1.5 py-0.5 rounded">
-                  Diff (CE-PE)
-                </span>
-                <span className={`font-bold tabular-nums ${
-                  cePeDiff > 0 ? 'text-emerald-400' : cePeDiff < 0 ? 'text-rose-400' : 'text-zinc-400'
-                }`}>
-                  {cePeDiff >= 0 ? '+' : ''}₹{cePeDiff.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-                </span>
-              </div>
-            </div>
-
-            {/* Index Spot Price Pill */}
-            <div className="flex items-baseline gap-3 bg-zinc-900/60 border border-zinc-800 rounded-2xl px-6 py-2">
-              <span className="text-xs font-bold text-zinc-500 uppercase tracking-widest">{underlying}</span>
-              <span className="text-3xl font-bold font-mono tabular-nums text-white">
+            {/* Index Spot Price ticker */}
+            <div className="flex min-w-[220px] items-center gap-4 rounded-lg border border-amber-500/25 bg-zinc-950 px-4 py-2 shadow-inner">
+              <span className="text-[9px] font-bold uppercase tracking-[0.15em] text-amber-400">{underlying}</span>
+              <span className="font-mono text-2xl font-bold leading-none tabular-nums text-zinc-100">
                 {spot.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
               </span>
               {prevSpot > 0 && (
-                <div className={`flex items-baseline gap-1.5 text-sm font-semibold font-mono tabular-nums ${isUp ? 'text-emerald-400' : 'text-rose-400'}`}>
-                  <span>{isUp ? '▲' : '▼'}</span>
+                <span className={`flex items-center gap-1 font-mono text-[11px] font-semibold tabular-nums ${isUp ? 'text-emerald-400' : 'text-rose-400'}`}>
+                  {isUp ? <TrendingUp className="h-3.5 w-3.5" /> : <TrendingDown className="h-3.5 w-3.5" />}
                   <span>{Math.abs(chg).toFixed(2)}</span>
-                  <span className="text-xs opacity-80">({isUp ? '+' : ''}{chgPct.toFixed(2)}%)</span>
-                </div>
+                  <span className="text-zinc-600">({isUp ? '+' : ''}{chgPct.toFixed(2)}%)</span>
+                </span>
               )}
             </div>
           </div>
@@ -2512,7 +2524,7 @@ export default function AdvancedScalper() {
         <div className="mx-4 mb-3 flex items-center justify-between gap-3 bg-violet-950/70 border border-violet-700/60 rounded-xl px-4 py-2.5 shadow-lg">
           <div className="flex items-center gap-3 flex-wrap">
             <span className="flex items-center gap-1.5 text-xs font-bold text-violet-300 uppercase tracking-wider">
-              <Zap className="w-4 h-4 text-yellow-400" /> MULTI-LEG STRATEGY ({combinedStrategyStats.openLegsCount} LEGS ACTIVE)
+              <Zap className="w-4 h-4 text-amber-400" /> MULTI-LEG STRATEGY ({combinedStrategyStats.openLegsCount} LEGS ACTIVE)
             </span>
             <span className="text-xs font-mono text-zinc-300">
               Entry Capital Value: <strong className="text-white">₹{combinedStrategyStats.entryCapitalSum.toFixed(0)}</strong>
@@ -2539,8 +2551,12 @@ export default function AdvancedScalper() {
       )}
 
       {/* Bottom tabs panel */}
-      <div className="flex-1 flex flex-col mx-4 mb-4 bg-zinc-900/60 border border-zinc-800 rounded-2xl overflow-hidden">
-        <div className="flex items-center gap-1 px-4 py-2.5 border-b border-zinc-800 bg-zinc-900/40">
+      <div className="flex-1 flex flex-col mx-4 mb-4 rounded-xl border border-zinc-800 bg-zinc-900/70 shadow-sm overflow-hidden">
+        <div className="flex items-center gap-1 px-3.5 py-2.5 border-b border-amber-500/25 bg-zinc-950/60">
+          <span className="flex items-center gap-1.5 text-[11px] font-bold uppercase tracking-[0.16em] text-amber-400 mr-2 shrink-0 whitespace-nowrap">
+            <ListOrdered className="h-3.5 w-3.5 text-amber-400" />
+            BOOK
+          </span>
           {([
             ['positions', positionsData] as const,
             ['orders',    ordersData]    as const,
@@ -2550,10 +2566,10 @@ export default function AdvancedScalper() {
           ]).map(([tab, data]) => (
             <button key={tab} onClick={() => { setActiveTab(tab as typeof activeTab); setTableSort({ key: 'none', dir: 'asc' }); }}
               className={cn(
-                'px-3 py-1.5 text-xs font-semibold rounded-lg transition-all capitalize',
+                'px-3 py-1.5 text-xs font-semibold rounded-lg transition-all capitalize border',
                 activeTab === tab
-                  ? 'bg-zinc-700 text-zinc-100 border border-zinc-600'
-                  : 'text-zinc-500 hover:text-zinc-300',
+                  ? 'bg-amber-500/15 text-amber-300 border-amber-500/30'
+                  : 'text-zinc-500 border-transparent hover:text-zinc-300',
                 FOCUS_RING,
               )}>
               {tab}{data.length > 0 ? ` (${data.length})` : ''}
