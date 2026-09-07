@@ -8,6 +8,7 @@ interface BasketPayoffChartProps {
   breakevens: number[];
   spot: number;
   rightWing?: 'profit' | 'loss' | null;
+  leftWing?: 'loss' | null;
   emptyReason?: string;
 }
 
@@ -36,7 +37,7 @@ function niceTicks(lo: number, hi: number, count: number): number[] {
   return ticks;
 }
 
-export default function BasketPayoffChart({ points, breakevens, spot, rightWing = null, emptyReason }: BasketPayoffChartProps) {
+export default function BasketPayoffChart({ points, breakevens, spot, rightWing = null, leftWing = null, emptyReason }: BasketPayoffChartProps) {
   const svgRef = useRef<SVGSVGElement | null>(null);
   const [hover, setHover] = useState<{ x: number; y: number } | null>(null);
   const chrome = useChartChrome();
@@ -98,6 +99,11 @@ export default function BasketPayoffChart({ points, breakevens, spot, rightWing 
   const continuationColor = rightWing === 'profit' ? '#34d399' : '#fb7185';
   const continuationY = Math.max(PAD.top + 12, Math.min(H - PAD.bottom - 8, sy(rightEdgePoint.y)));
 
+  // leftWing is always 'loss' (never 'profit' — the underlying's floor at 0 caps
+  // a net long put's profit, so there's no downside-unlimited-profit case).
+  const leftEdgePoint = points[0];
+  const leftContinuationY = Math.max(PAD.top + 12, Math.min(H - PAD.bottom - 8, sy(leftEdgePoint.y)));
+
   return (
     <svg
       ref={svgRef}
@@ -148,6 +154,16 @@ export default function BasketPayoffChart({ points, breakevens, spot, rightWing 
             fill="none" stroke={continuationColor} strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" />
           <text x={W - PAD.right - 5} y={Math.max(PAD.top + 9, continuationY - 8)} textAnchor="end" fontSize={9.5} fill={continuationColor} className="font-mono font-bold">
             unlimited {rightWing}
+          </text>
+        </g>
+      )}
+
+      {leftWing && (
+        <g aria-label={`Left-side ${leftWing} continues beyond the displayed range`}>
+          <path d={`M${PAD.left + 18},${leftContinuationY} L${PAD.left + 3},${leftContinuationY} M${PAD.left + 8},${leftContinuationY - 5} L${PAD.left + 3},${leftContinuationY} L${PAD.left + 8},${leftContinuationY + 5}`}
+            fill="none" stroke="#fb7185" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" />
+          <text x={PAD.left + 5} y={Math.max(PAD.top + 9, leftContinuationY - 8)} textAnchor="start" fontSize={9.5} fill="#fb7185" className="font-mono font-bold">
+            unlimited {leftWing}
           </text>
         </g>
       )}

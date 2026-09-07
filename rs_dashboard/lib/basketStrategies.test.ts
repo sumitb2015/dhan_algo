@@ -14,7 +14,7 @@ test('legPnlAtExpiry: long put OTM loses only the premium paid', () => {
   assert.strictEqual(legPnlAtExpiry(leg, 120), -10); // (0 - 5) * qty(2)
 });
 
-test('computePayoff: short straddle has bounded profit and unlimited right-side loss', () => {
+test('computePayoff: short straddle has bounded profit and unlimited loss on BOTH sides', () => {
   const legs = [
     { side: 'S' as const, option: 'CE' as const, strike: 100, premium: 5, qty: 1 },
     { side: 'S' as const, option: 'PE' as const, strike: 100, premium: 5, qty: 1 },
@@ -24,6 +24,10 @@ test('computePayoff: short straddle has bounded profit and unlimited right-side 
   assert.strictEqual(result.maxProfitUnlimited, false);
   assert.strictEqual(result.maxLossUnlimited, true);
   assert.strictEqual(result.rightWing, 'loss');
+  // Net short puts carry unlimited loss on the downside too (a position fact
+  // derived from net signed quantity, not the sampled curve's finite shape) —
+  // matches the convention in lib/optionsStrategy.ts used elsewhere in the app.
+  assert.strictEqual(result.leftWing, 'loss');
   assert.ok(Math.abs(result.maxProfit - 10) < 1e-6);
   assert.strictEqual(result.breakevens.length, 2);
   assert.ok(Math.abs(result.breakevens[0] - 90) < 1);
@@ -42,7 +46,7 @@ test('computePayoff: bull call spread has bounded profit AND bounded loss', () =
   assert.ok(Math.abs(result.maxProfit - 15) < 1e-6); // (120-100) - 5 net debit
 });
 
-test('computePayoff: long put profit is bounded by the zero underlying floor', () => {
+test('computePayoff: long put profit is bounded by the zero underlying floor, no unlimited case either side', () => {
   const result = computePayoff([
     { side: 'B' as const, option: 'PE' as const, strike: 100, premium: 5, qty: 1 },
   ], 50, 150, 101);
@@ -51,25 +55,30 @@ test('computePayoff: long put profit is bounded by the zero underlying floor', (
   assert.strictEqual(result.maxProfit, 95);
   assert.strictEqual(result.maxLoss, -5);
   assert.strictEqual(result.rightWing, null);
+  assert.strictEqual(result.leftWing, null);
 });
 
-test('computePayoff: short put loss is bounded by the zero underlying floor', () => {
+// A naked short put carries unlimited loss on the downside by the same
+// position-fact convention as a naked short call on the upside — spot=0 is a
+// technical floor, not a risk ceiling a trader should see as "bounded."
+test('computePayoff: short put has unlimited left-side (downside) loss', () => {
   const result = computePayoff([
     { side: 'S' as const, option: 'PE' as const, strike: 100, premium: 5, qty: 1 },
   ], 50, 150, 101);
   assert.strictEqual(result.maxProfitUnlimited, false);
-  assert.strictEqual(result.maxLossUnlimited, false);
+  assert.strictEqual(result.maxLossUnlimited, true);
   assert.strictEqual(result.maxProfit, 5);
-  assert.strictEqual(result.maxLoss, -95);
   assert.strictEqual(result.rightWing, null);
+  assert.strictEqual(result.leftWing, 'loss');
 });
 
-test('computePayoff: short call keeps unlimited right-side loss', () => {
+test('computePayoff: short call keeps unlimited right-side loss, no left-side case', () => {
   const result = computePayoff([
     { side: 'S' as const, option: 'CE' as const, strike: 100, premium: 5, qty: 1 },
   ], 50, 150, 101);
   assert.strictEqual(result.maxLossUnlimited, true);
   assert.strictEqual(result.rightWing, 'loss');
+  assert.strictEqual(result.leftWing, null);
 });
 
 test('nearestStrike picks the closest listed strike', () => {

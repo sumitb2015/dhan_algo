@@ -347,25 +347,68 @@ export default function Baskets() {
     setLegs(prev => prev.map(l => (l.id === id ? { ...l, ...patch } : l)));
   }, []);
 
-  const stepStrike = useCallback((id: string, dir: 1 | -1) => {
-    setLegs(prev => prev.map(l => {
-      if (l.id !== id) return l;
-      const idx = allStrikes.indexOf(l.strike);
-      const nextIdx = idx < 0 ? -1 : idx + dir;
-      if (nextIdx < 0 || nextIdx >= allStrikes.length) return l;
-      return { ...l, strike: allStrikes[nextIdx], price: '' };
-    }));
+  // A leg with the same (strike, option, side) as another leg is a redundant
+  // duplicate row — the SAME strike with opposite sides (a buy and a sell) is a
+  // legitimate, intentional combo (e.g. ratio spreads) and must stay allowed.
+  // This only guards against a new/stepped leg silently landing on top of an
+  // existing leg with the identical side+option.
+  const nextAvailableStrike = useCallback((
+    fromStrike: number, dir: 1 | -1, option: OptionType, side: BasketLeg['side'], excludeId: string | null, currentLegs: BasketLeg[],
+  ): number | null => {
+    const occupied = new Set(
+      currentLegs.filter(l => l.id !== excludeId && l.option === option && l.side === side).map(l => l.strike)
+    );
+    const idx = allStrikes.indexOf(fromStrike);
+    if (idx < 0) return occupied.has(fromStrike) ? null : fromStrike;
+    let nextIdx = idx + dir;
+    while (nextIdx >= 0 && nextIdx < allStrikes.length && occupied.has(allStrikes[nextIdx])) {
+      nextIdx += dir;
+    }
+    if (nextIdx < 0 || nextIdx >= allStrikes.length) return null;
+    return allStrikes[nextIdx];
   }, [allStrikes]);
+
+  const stepStrike = useCallback((id: string, dir: 1 | -1) => {
+    setLegs(prev => {
+      const leg = prev.find(l => l.id === id);
+      if (!leg) return prev;
+      const idx = allStrikes.indexOf(leg.strike);
+      if (idx < 0) return prev;
+      const nextStrike = nextAvailableStrike(leg.strike, dir, leg.option, leg.side, id, prev);
+      if (nextStrike == null) return prev;
+      return prev.map(l => (l.id === id ? { ...l, strike: nextStrike, price: '' } : l));
+    });
+  }, [allStrikes, nextAvailableStrike]);
 
   const addLeg = useCallback(() => {
     if (atmStrike == null) {
       addToast('error', 'Strikes still loading');
       return;
     }
-    setLegs(prev => [...prev, {
-      id: newLegId(), side: 'B', option: 'CE', strike: atmStrike, lots: 1, type: 'MARKET', price: '', expiry,
-    }]);
-  }, [atmStrike, expiry, addToast]);
+    setLegs(prev => {
+      // New legs default to Buy CE — skip strikes already used by another Buy CE
+      // leg (an exact duplicate), searching outward (up then down) from ATM.
+      // A strike already used by a SELL CE leg is untouched here — buy+sell at
+      // the same strike is fine.
+      const occupied = new Set(prev.filter(l => l.option === 'CE' && l.side === 'B').map(l => l.strike));
+      let strike = atmStrike;
+      if (occupied.has(strike)) {
+        const atmIdx = allStrikes.indexOf(atmStrike);
+        let found: number | null = null;
+        for (let d = 1; atmIdx >= 0 && d < allStrikes.length; d++) {
+          const up = allStrikes[atmIdx + d];
+          const down = allStrikes[atmIdx - d];
+          if (up !== undefined && !occupied.has(up)) { found = up; break; }
+          if (down !== undefined && !occupied.has(down)) { found = down; break; }
+          if (up === undefined && down === undefined) break;
+        }
+        if (found != null) strike = found;
+      }
+      return [...prev, {
+        id: newLegId(), side: 'B', option: 'CE', strike, lots: 1, type: 'MARKET', price: '', expiry,
+      }];
+    });
+  }, [atmStrike, allStrikes, expiry, addToast]);
 
   const removeLeg = useCallback((id: string) => {
     setLegs(prev => prev.filter(l => l.id !== id));
@@ -872,6 +915,8 @@ export default function Baskets() {
               points={payoff?.points ?? []}
               breakevens={payoff?.breakevens ?? []}
               spot={spot}
+              rightWing={payoff?.rightWing ?? null}
+              leftWing={payoff?.leftWing ?? null}
               emptyReason={
                 hasMixedExpiry
                   ? 'Calendar/Diagonal legs expire on different dates — no single expiry payoff to chart. Track P&L from the Positions tab instead.'
