@@ -586,6 +586,20 @@ export default function BatmanMatrixPage() {
   const [enterError, setEnterError] = useState<string | null>(null);
   const tradeInFlight = useRef(false);
 
+  const isLoading = (!data || data.underlying !== underlying || data.wing !== wing) && !error;
+
+  const handleUnderlyingChange = (u: UnderlyingType) => {
+    if (u === underlying) return;
+    setData(null);
+    setUnderlying(u);
+  };
+
+  const handleWingChange = (w: number) => {
+    if (w === wing) return;
+    setData(null);
+    setWing(w);
+  };
+
   const handleEnterTrade = useCallback(async () => {
     if (!selectedModal || tradeInFlight.current) return;
     tradeInFlight.current = true;
@@ -912,7 +926,7 @@ export default function BatmanMatrixPage() {
             {(['NIFTY', 'BANKNIFTY', 'SENSEX'] as const).map(u => (
               <button
                 key={u}
-                onClick={() => setUnderlying(u)}
+                onClick={() => handleUnderlyingChange(u)}
                 className={`px-3 py-1 text-xs font-bold rounded-md transition-all cursor-pointer ${
                   underlying === u
                     ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 shadow-sm'
@@ -930,7 +944,7 @@ export default function BatmanMatrixPage() {
             {[1, 2, 3, 4].map(w => (
               <button
                 key={w}
-                onClick={() => setWing(w)}
+                onClick={() => handleWingChange(w)}
                 className={`px-2 py-1 text-xs font-mono font-bold rounded-md transition-all cursor-pointer ${
                   wing === w
                     ? 'bg-cyan-500/20 text-cyan-300 border border-cyan-500/40 shadow-sm'
@@ -996,11 +1010,11 @@ export default function BatmanMatrixPage() {
           {/* Manual Refresh */}
           <button
             onClick={() => fetchMatrix(true)}
-            disabled={refreshing}
+            disabled={refreshing || isLoading}
             className="p-1.5 rounded-lg bg-zinc-900 border border-zinc-800 text-zinc-400 hover:text-white transition-all cursor-pointer disabled:opacity-50"
             title="Refresh now"
           >
-            <RefreshCw className={`w-3.5 h-3.5 ${refreshing ? 'animate-spin text-emerald-400' : ''}`} />
+            <RefreshCw className={`w-3.5 h-3.5 ${refreshing || isLoading ? 'animate-spin text-emerald-400' : ''}`} />
           </button>
 
           {/* Data Date Chip */}
@@ -1228,8 +1242,16 @@ export default function BatmanMatrixPage() {
           </div>
         )}
 
+        {/* Loading Spinner */}
+        {isLoading && (
+          <div className="flex flex-col items-center justify-center gap-3 py-24 text-zinc-400 text-xs">
+            <RefreshCw className="w-6 h-6 animate-spin text-emerald-400" />
+            <span>Scanning option chains and computing cross-expiry Batman matrix…</span>
+          </div>
+        )}
+
         {/* ── TAB 1: MATRIX VIEW ─────────────────────────────────────────── */}
-        {activeTab === 'matrix' && (
+        {!isLoading && data?.expiries && data.rows && activeTab === 'matrix' && (
           <div className="bg-zinc-900 border border-zinc-800 rounded-2xl overflow-hidden shadow-2xl">
             <table className="w-full text-left text-xs border-collapse">
               <thead className="bg-zinc-800 text-white font-bold text-xs uppercase tracking-wider sticky top-[105px] z-10 shadow-sm">
@@ -1325,7 +1347,7 @@ export default function BatmanMatrixPage() {
         )}
 
         {/* ── TAB 2: TERM STRUCTURE CURVES ───────────────────────────────── */}
-        {activeTab === 'curves' && (
+        {!isLoading && data?.expiries && data.rows && activeTab === 'curves' && (
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
             {/* RoM% vs DTE Curve */}
             <div className="bg-zinc-900 border border-zinc-800 rounded-2xl p-5 space-y-3">
@@ -1404,7 +1426,7 @@ export default function BatmanMatrixPage() {
         )}
 
         {/* ── TAB 3: BREAKEVEN CORRIDORS ──────────────────────────────────── */}
-        {activeTab === 'breakevens' && (
+        {!isLoading && data?.expiries && data.rows && activeTab === 'breakevens' && (
           <div className="bg-zinc-900 border border-zinc-800 rounded-2xl p-5 space-y-4">
             <div className="flex items-center justify-between">
               <div>
