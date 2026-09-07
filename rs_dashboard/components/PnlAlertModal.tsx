@@ -17,13 +17,11 @@ export default function PnlAlertModal() {
   const up = pending.totalPnl >= 0;
   return (
     <div
-      role="dialog"
-      aria-modal="true"
+      role="status"
       aria-label="P&L alert"
-      className="fixed inset-0 z-[70] flex items-center justify-center bg-oncolor-dark/70 p-4 backdrop-blur-sm"
-      onClick={(e) => { if (e.target === e.currentTarget) dismiss(); }}
+      className="fixed bottom-4 right-4 z-[70] w-full max-w-sm pointer-events-none"
     >
-      <Card className="w-full max-w-sm border border-amber-500/30 bg-zinc-900 shadow-2xl">
+      <Card className="pointer-events-auto border border-amber-500/30 bg-zinc-900 shadow-2xl">
         <CardContent className="flex flex-col gap-4 py-1">
           <div>
             <div className="text-xs font-bold uppercase tracking-wide text-zinc-500">
@@ -40,23 +38,7 @@ export default function PnlAlertModal() {
             <span className="font-mono font-bold text-zinc-100">{pending.openPositions}</span>
           </div>
 
-          <div className="flex items-center justify-between rounded-lg border border-zinc-800 bg-zinc-950/60 px-3 py-2 text-sm">
-            <span className="text-zinc-400">NIFTY</span>
-            {pending.nifty ? (
-              <span className="font-mono">
-                <span className="font-bold text-zinc-100">{pending.nifty.ltp.toLocaleString('en-IN')}</span>
-                {pending.nifty.changePct != null && (
-                  <span className={`ml-2 ${pending.nifty.changePct >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
-                    {pending.nifty.changePct >= 0 ? '+' : ''}{pending.nifty.changePct.toFixed(2)}%
-                  </span>
-                )}
-              </span>
-            ) : (
-              <span className="text-zinc-600">—</span>
-            )}
-          </div>
-
-          <Button autoFocus size="sm" className="w-full" onClick={dismiss}>
+          <Button size="sm" className="w-full" onClick={dismiss}>
             Got it
           </Button>
         </CardContent>

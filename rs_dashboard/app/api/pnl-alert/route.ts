@@ -6,14 +6,11 @@ import { readPnlAlertState, writePnlAlertState, istToday } from '@/lib/pnlAlertS
 // fixed daily threshold, so it fires repeatedly in both directions.
 const ALERT_STEP_INR = 1000;
 
-interface NiftyQuote { ltp: number; changePct: number | null }
-
 export interface PnlAlertResponse {
   success: boolean;
   updatedAt: string;
   totalPnl: number;
   openPositions: number;
-  nifty: NiftyQuote | null;
   alert: boolean;
   delta?: number;
   baseline: number;
@@ -30,15 +27,13 @@ export async function GET(request: NextRequest) {
   // forward it explicitly or these internal calls 401.
   const cookie = request.headers.get('cookie') ?? '';
 
-  const [portfolioRes, indicesRes] = await Promise.allSettled([
-    fetch(new URL('/api/dashboard/portfolio', request.url), { headers: { cookie } }),
-    fetch(new URL('/api/scalper/top-indices', request.url), { headers: { cookie } }),
-  ]);
+  const portfolioRes = await fetch(new URL('/api/dashboard/portfolio', request.url), { headers: { cookie } })
+    .catch(() => null);
 
   let totalPnl: number | null = null;
   let openPositions = 0;
-  if (portfolioRes.status === 'fulfilled' && portfolioRes.value.ok) {
-    const json = await portfolioRes.value.json();
+  if (portfolioRes?.ok) {
+    const json = await portfolioRes.json();
     if (json?.success) {
       const totals = { totalPnl: json.totals.totalPnl as number, openPositions: json.totals.openPositions as number };
       totalPnl = totals.totalPnl;
@@ -50,13 +45,6 @@ export async function GET(request: NextRequest) {
   if (usingFallback) {
     totalPnl = lastGoodTotals?.totalPnl ?? 0;
     openPositions = lastGoodTotals?.openPositions ?? 0;
-  }
-
-  let nifty: NiftyQuote | null = null;
-  if (indicesRes.status === 'fulfilled' && indicesRes.value.ok) {
-    const json = await indicesRes.value.json();
-    const q = json?.quotes?.NIFTY;
-    if (q) nifty = { ltp: q.ltp, changePct: q.change_pct };
   }
 
   const today = istToday();
@@ -90,7 +78,6 @@ export async function GET(request: NextRequest) {
     updatedAt: new Date().toISOString(),
     totalPnl: totalPnl!,
     openPositions,
-    nifty,
     alert,
     delta,
     baseline: state.baseline,
