@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert';
 import {
-  legPnlAtExpiry, computePayoff, nearestStrike, strikeStep, daysToExpiry,
+  legPnlAtExpiry, computePayoff, nearestStrike, strikeStep, daysToExpiry, STRATEGY_CATEGORIES,
 } from './basketStrategies.ts';
 
 test('legPnlAtExpiry: short call ITM loses intrinsic minus premium collected', () => {
@@ -108,7 +108,6 @@ test('daysToExpiry returns null for an unparseable expiry string', () => {
 });
 
 test('STRATEGY_CATEGORIES: Range Bound includes Batman alongside Iron Condor', () => {
-  const { STRATEGY_CATEGORIES } = require('./basketStrategies.ts');
   const rangeBound = STRATEGY_CATEGORIES['Range Bound'];
   const icIndex = rangeBound.findIndex((s: any) => s.key === 'iron-condor');
   const batmanIndex = rangeBound.findIndex((s: any) => s.key === 'batman');

@@ -77,6 +77,7 @@ const NAV_GROUPS = [
       { href: '/straddle-analysis', label: 'Straddle Analysis', desc: 'ATM straddle premium patterns by weekday, DTE & regime' },
       { href: '/strangle-analysis', label: 'Strangle Analysis', desc: 'OTM strangle premium patterns by offset, weekday, DTE & regime' },
       { href: '/options/strangle-matrix', label: 'Live Strangle Matrix', desc: 'Live ATM-offset strangle premiums across expiries, ranked by RoM%' },
+      { href: '/options/batman-matrix', label: 'Live Batman Matrix', desc: 'Live double ratio spread matrix across expiries with dual profit peaks (ears)' },
       { href: '/options/strike-history', label: 'Strike History', desc: '1-minute close price line chart for one strike across its expiry lifetime' },
       { href: '/option-strats', label: 'Option Strats', desc: 'Multi-leg P&L heatmap analyzer — strike × date, IV-adjustable' },
       { href: '/option-strats-stocks', label: 'Option Strats (Stocks)', desc: 'Same P&L heatmap analyzer for Nifty 50 F&O stocks' },
