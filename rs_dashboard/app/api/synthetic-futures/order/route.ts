@@ -34,7 +34,7 @@ interface ExecutedLegResult {
   side: string;
   quantity: number;
   orderId?: string;
-  status: 'FILLED' | 'TRANSIT' | 'FAILED';
+  status: 'FILLED' | 'TRANSIT' | 'FAILED' | 'SKIPPED';
   error?: string;
 }
 
@@ -495,7 +495,23 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   const orderIds: string[] = [];
 
   // Sequential execution to guarantee BUY fills before SELL leg is submitted for basket margin!
+  // Abort remaining legs on the first failure — a failed BUY (e.g. the protective hedge)
+  // must never be followed by its dependent SELL leg going out naked.
+  let aborted = false;
   for (const leg of sortedLegs) {
+    if (aborted) {
+      executedResults.push({
+        role: leg.role,
+        optionType: leg.optionType,
+        strike: leg.strike,
+        side: leg.side,
+        quantity: leg.quantity,
+        status: 'SKIPPED',
+        error: 'Not submitted — an earlier leg in this basket failed',
+      });
+      continue;
+    }
+
     const exec = await placeBrokerLeg(broker, dhanToken, dhanClientId, leg);
     if (exec.orderId) {
       orderIds.push(exec.orderId);
@@ -509,6 +525,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
         status: 'TRANSIT',
       });
     } else {
+      aborted = true;
       executedResults.push({
         role: leg.role,
         optionType: leg.optionType,
@@ -523,7 +540,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
 
   invalidateBrokerCache(broker);
 
-  const hasFailure = executedResults.some(r => r.status === 'FAILED');
+  const hasFailure = executedResults.some(r => r.status === 'FAILED' || r.status === 'SKIPPED');
 
   return NextResponse.json({
     success: !hasFailure,

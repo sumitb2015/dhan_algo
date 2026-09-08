@@ -76,7 +76,7 @@ interface SyntheticLeg {
   securityId?: string;
   tradingSymbol?: string;
   orderId?: string;
-  status?: 'FILLED' | 'TRANSIT' | 'REJECTED' | 'CANCELLED' | 'FAILED';
+  status?: 'FILLED' | 'TRANSIT' | 'REJECTED' | 'CANCELLED' | 'FAILED' | 'SKIPPED';
   statusMessage?: string;
   productType: ProductType;
   exchangeSegment: string;
@@ -196,6 +196,13 @@ function fmtSignedINR(n: number | null | undefined): string {
   if (n == null || isNaN(n)) return '—';
   const prefix = n > 0 ? '+₹' : n < 0 ? '-₹' : '₹';
   return prefix + Math.abs(n).toLocaleString('en-IN', { maximumFractionDigits: 0 });
+}
+
+// A leg the order route never placed (it FAILED or was SKIPPED after an earlier
+// leg failed) never went live at the broker — treat it the same as REJECTED so it's
+// excluded from P&L, monitoring, and (critically) from flatten's exit-order legs.
+function mapExecStatus(execStatus?: string): SyntheticLeg['status'] {
+  return execStatus === 'FAILED' || execStatus === 'SKIPPED' ? 'REJECTED' : 'TRANSIT';
 }
 
 // ─── Main Component ─────────────────────────────────────────────────────────
@@ -616,10 +623,22 @@ export default function SyntheticFuturesScalper() {
       });
 
       const json = await res.json();
-      if (!json.success) {
+      const execLegs = (json.legs as Array<{ role?: string; orderId?: string; status?: string; error?: string }> | undefined) ?? [];
+      const anyLegLive = execLegs.some(l => l.orderId);
+
+      if (!anyLegLive) {
+        // Nothing reached the broker — safe to bail without touching activePosition.
         addToast('error', 'Execution Failed', json.error || 'Broker rejected order');
         addLog('ERROR', `Synthetic ${direction} Failed: ${json.error || 'Unknown error'}`);
         return;
+      }
+
+      if (!json.success) {
+        // Some legs are now LIVE at the broker even though the basket as a whole
+        // failed — we must still track them (below) so they get P&L, SL/target
+        // monitoring and a flatten button instead of becoming an orphaned position.
+        addToast('error', 'PARTIAL FILL — review & flatten', json.error || 'One or more legs failed; the rest are live at the broker');
+        addLog('ERROR', `Synthetic ${direction} PARTIAL FILL: ${json.error || 'Unknown error'}`);
       }
 
       // Build active synthetic position state
@@ -648,7 +667,7 @@ export default function SyntheticFuturesScalper() {
             securityId: strikeMap[String(longHedgeStrike)]?.peId,
             tradingSymbol: strikeMap[String(longHedgeStrike)]?.peSymbol,
             orderId: hedgeExec?.orderId,
-            status: hedgeExec?.status === 'FAILED' ? 'REJECTED' : 'TRANSIT',
+            status: mapExecStatus(hedgeExec?.status),
             statusMessage: hedgeExec?.error,
             productType,
             exchangeSegment: exchSeg,
@@ -668,7 +687,7 @@ export default function SyntheticFuturesScalper() {
           securityId: strikeMap[String(atmStrike)]?.ceId,
           tradingSymbol: strikeMap[String(atmStrike)]?.ceSymbol,
           orderId: ceExec?.orderId,
-          status: ceExec?.status === 'FAILED' ? 'REJECTED' : 'TRANSIT',
+          status: mapExecStatus(ceExec?.status),
           statusMessage: ceExec?.error,
           productType,
           exchangeSegment: exchSeg,
@@ -687,7 +706,7 @@ export default function SyntheticFuturesScalper() {
           securityId: strikeMap[String(atmStrike)]?.peId,
           tradingSymbol: strikeMap[String(atmStrike)]?.peSymbol,
           orderId: peExec?.orderId,
-          status: peExec?.status === 'FAILED' ? 'REJECTED' : 'TRANSIT',
+          status: mapExecStatus(peExec?.status),
           statusMessage: peExec?.error,
           productType,
           exchangeSegment: exchSeg,
@@ -708,7 +727,7 @@ export default function SyntheticFuturesScalper() {
             securityId: strikeMap[String(shortHedgeStrike)]?.ceId,
             tradingSymbol: strikeMap[String(shortHedgeStrike)]?.ceSymbol,
             orderId: hedgeExec?.orderId,
-            status: hedgeExec?.status === 'FAILED' ? 'REJECTED' : 'TRANSIT',
+            status: mapExecStatus(hedgeExec?.status),
             statusMessage: hedgeExec?.error,
             productType,
             exchangeSegment: exchSeg,
@@ -728,7 +747,7 @@ export default function SyntheticFuturesScalper() {
           securityId: strikeMap[String(atmStrike)]?.peId,
           tradingSymbol: strikeMap[String(atmStrike)]?.peSymbol,
           orderId: peExec?.orderId,
-          status: peExec?.status === 'FAILED' ? 'REJECTED' : 'TRANSIT',
+          status: mapExecStatus(peExec?.status),
           statusMessage: peExec?.error,
           productType,
           exchangeSegment: exchSeg,
@@ -747,7 +766,7 @@ export default function SyntheticFuturesScalper() {
           securityId: strikeMap[String(atmStrike)]?.ceId,
           tradingSymbol: strikeMap[String(atmStrike)]?.ceSymbol,
           orderId: ceExec?.orderId,
-          status: ceExec?.status === 'FAILED' ? 'REJECTED' : 'TRANSIT',
+          status: mapExecStatus(ceExec?.status),
           statusMessage: ceExec?.error,
           productType,
           exchangeSegment: exchSeg,
@@ -773,7 +792,9 @@ export default function SyntheticFuturesScalper() {
       };
 
       setActivePosition(newPos);
-      addToast('success', `Synthetic ${dirLabel} Entered!`, `Entry Synth Price: ₹${fmtNum(syntheticFuturePrice, 2)}`);
+      if (json.success) {
+        addToast('success', `Synthetic ${dirLabel} Entered!`, `Entry Synth Price: ₹${fmtNum(syntheticFuturePrice, 2)}`);
+      }
       addLog(
         'ENTRY',
         `Entered Synthetic ${direction} @ ${fmtNum(syntheticFuturePrice, 2)} (${lots} lots · ATM ${atmStrike})`,
@@ -895,10 +916,13 @@ export default function SyntheticFuturesScalper() {
       return false;
     }
 
-    // If all legs were rejected or failed, clear state without placing broker exit orders
-    const allRejected = activePosition.legs.every(l => l.status === 'REJECTED' || l.status === 'FAILED');
-    if (allRejected) {
-      addToast('info', 'Position Cleared', 'All legs were rejected; resetting position state.');
+    // Only FILLED/TRANSIT legs are actually live at the broker. A leg the order
+    // route never placed, or that got rejected/cancelled later, must NOT get an
+    // exit order — submitting one would open a brand-new position instead of
+    // closing one that was never there.
+    const liveLegs = activePosition.legs.filter(l => l.status === 'FILLED' || l.status === 'TRANSIT' || l.status == null);
+    if (liveLegs.length === 0) {
+      addToast('info', 'Position Cleared', 'No legs are live at the broker; resetting position state.');
       handleClearPosition();
       return true;
     }
@@ -911,8 +935,8 @@ export default function SyntheticFuturesScalper() {
     addToast('info', `Flattening Synthetic Position…`, `Reason: ${reason}`);
 
     try {
-      // Build exit legs: reverse transaction type
-      const legsToExit = activePosition.legs.map(l => ({
+      // Build exit legs: reverse transaction type — only for legs actually live at the broker
+      const legsToExit = liveLegs.map(l => ({
         securityId: l.securityId,
         tradingSymbol: l.tradingSymbol,
         quantity: l.qty,
@@ -940,7 +964,7 @@ export default function SyntheticFuturesScalper() {
         return false;
       }
 
-      const totalClosedPnl = activePosition.legs.reduce((acc, l) => acc + l.pnl, 0);
+      const totalClosedPnl = liveLegs.reduce((acc, l) => acc + l.pnl, 0);
       addToast(
         'success',
         'Synthetic Position Flattened!',
