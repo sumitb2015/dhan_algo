@@ -637,6 +637,20 @@ export default function StrangleAnalysis() {
     });
   }, [fullData, regime]);
 
+  // The live builder has no dependency on the historical dataset below (it fetches
+  // its own option chain) — rendered identically in every load state so it isn't
+  // blocked behind a slow/failed/not-yet-generated historical fetch.
+  const liveBuilderSection = (
+    <SectionCard
+      eyebrow="Live"
+      title="Live Strangle Builder"
+      sub="Stage a strangle against the current NIFTY chain — payoff, margin, and probability of profit"
+      glow="violet"
+    >
+      <LiveBuilderPanel underlying="NIFTY" />
+    </SectionCard>
+  );
+
   // ── Loading & Error States ──────────────────────────────────────────────────
   if (loadState === 'loading') {
     return (
@@ -644,9 +658,12 @@ export default function StrangleAnalysis() {
         <div className="flex items-center justify-end px-6 py-2 border-b border-zinc-800">
           <NavBar />
         </div>
-        <div className="flex-1 flex flex-col items-center justify-center gap-3">
-          <div className="w-8 h-8 border-2 border-zinc-700 border-t-emerald-400 rounded-full animate-spin" />
-          <p className="text-sm text-zinc-400 font-medium">Loading strangle analysis…</p>
+        <div className="flex-1 flex flex-col gap-5 px-6 py-5 max-w-[1680px] w-full mx-auto">
+          {liveBuilderSection}
+          <div className="flex-1 flex flex-col items-center justify-center gap-3">
+            <div className="w-8 h-8 border-2 border-zinc-700 border-t-emerald-400 rounded-full animate-spin" />
+            <p className="text-sm text-zinc-400 font-medium">Loading strangle analysis…</p>
+          </div>
         </div>
       </div>
     );
@@ -658,7 +675,9 @@ export default function StrangleAnalysis() {
         <div className="flex items-center justify-end px-6 py-2 border-b border-zinc-800">
           <NavBar />
         </div>
-        <div className="flex-1 flex flex-col items-center justify-center p-6">
+        <div className="flex-1 flex flex-col gap-5 px-6 py-5 max-w-[1680px] w-full mx-auto">
+          {liveBuilderSection}
+          <div className="flex-1 flex flex-col items-center justify-center p-6">
         <div className="max-w-md w-full relative bg-zinc-900/70 border border-zinc-800 rounded-2xl p-8 text-center overflow-hidden shadow-2xl">
           <div className="pointer-events-none absolute -top-24 left-1/2 -translate-x-1/2 w-[400px] h-[200px] bg-sky-500/[0.08] blur-3xl rounded-full" />
           <div className="relative">
@@ -692,6 +711,7 @@ export default function StrangleAnalysis() {
             )}
           </div>
         </div>
+          </div>
         </div>
       </div>
     );
@@ -703,8 +723,11 @@ export default function StrangleAnalysis() {
         <div className="flex items-center justify-end px-6 py-2 border-b border-zinc-800">
           <NavBar />
         </div>
-        <div className="flex-1 flex items-center justify-center p-6 text-rose-400 text-sm">
-          Failed to load strangle analysis data. Please check server logs or click regenerate.
+        <div className="flex-1 flex flex-col gap-5 px-6 py-5 max-w-[1680px] w-full mx-auto">
+          {liveBuilderSection}
+          <div className="flex-1 flex items-center justify-center p-6 text-rose-400 text-sm">
+            Failed to load strangle analysis data. Please check server logs or click regenerate.
+          </div>
         </div>
       </div>
     );
@@ -930,15 +953,7 @@ export default function StrangleAnalysis() {
           </div>
         )}
 
-        {/* ── Live Strangle Builder ─────────────────────────────────────────── */}
-        <SectionCard
-          eyebrow="Live"
-          title="Live Strangle Builder"
-          sub="Stage a strangle against the current NIFTY chain — payoff, margin, and probability of profit"
-          glow="violet"
-        >
-          <LiveBuilderPanel underlying="NIFTY" />
-        </SectionCard>
+        {liveBuilderSection}
 
         {/* ── Market Pulse Hero Cards ───────────────────────────────────────── */}
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3.5">

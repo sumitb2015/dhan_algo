@@ -26,6 +26,7 @@ import {
   Clock,
   RefreshCw,
   ExternalLink,
+  Trash2,
 } from 'lucide-react';
 import { useLiveOptionsWS, type Broker } from '@/lib/useLiveOptionsWS';
 import { useBrokerSelector } from '@/hooks/useBrokerSelector';
@@ -66,6 +67,7 @@ interface SyntheticLeg {
   role: 'MAIN_CE' | 'MAIN_PE' | 'HEDGE';
   optionType: 'CE' | 'PE';
   strike: number;
+  expiry?: string;
   side: 'BUY' | 'SELL';
   qty: number;
   entryPrice: number;
@@ -73,6 +75,9 @@ interface SyntheticLeg {
   pnl: number;
   securityId?: string;
   tradingSymbol?: string;
+  orderId?: string;
+  status?: 'FILLED' | 'TRANSIT' | 'REJECTED' | 'CANCELLED' | 'FAILED';
+  statusMessage?: string;
   productType: ProductType;
   exchangeSegment: string;
 }
@@ -245,6 +250,11 @@ export default function SyntheticFuturesScalper() {
             ...parsed,
             peakPoints: parsed.peakPoints ?? 0,
             peakPnl: parsed.peakPnl ?? 0,
+            legs: parsed.legs.map(l => ({
+              ...l,
+              expiry: l.expiry || parsed.expiry,
+              status: l.status || 'TRANSIT',
+            })),
           });
         }
       }
@@ -624,10 +634,12 @@ export default function SyntheticFuturesScalper() {
 
       if (direction === 'LONG') {
         if (hedgeEnabled && hedgeOffset > 0) {
+          const hedgeExec = (json.legs as Array<{ role?: string; orderId?: string; status?: string; error?: string }> | undefined)?.find(l => l.role === 'HEDGE');
           initialLegs.push({
             role: 'HEDGE',
             optionType: 'PE',
             strike: longHedgeStrike,
+            expiry,
             side: 'BUY',
             qty: totalQty,
             entryPrice: longHedgePeLtp,
@@ -635,14 +647,19 @@ export default function SyntheticFuturesScalper() {
             pnl: 0,
             securityId: strikeMap[String(longHedgeStrike)]?.peId,
             tradingSymbol: strikeMap[String(longHedgeStrike)]?.peSymbol,
+            orderId: hedgeExec?.orderId,
+            status: hedgeExec?.status === 'FAILED' ? 'REJECTED' : 'TRANSIT',
+            statusMessage: hedgeExec?.error,
             productType,
             exchangeSegment: exchSeg,
           });
         }
+        const ceExec = (json.legs as Array<{ role?: string; orderId?: string; status?: string; error?: string }> | undefined)?.find(l => l.role === 'MAIN_CE');
         initialLegs.push({
           role: 'MAIN_CE',
           optionType: 'CE',
           strike: atmStrike,
+          expiry,
           side: 'BUY',
           qty: totalQty,
           entryPrice: atmCeLtp,
@@ -650,13 +667,18 @@ export default function SyntheticFuturesScalper() {
           pnl: 0,
           securityId: strikeMap[String(atmStrike)]?.ceId,
           tradingSymbol: strikeMap[String(atmStrike)]?.ceSymbol,
+          orderId: ceExec?.orderId,
+          status: ceExec?.status === 'FAILED' ? 'REJECTED' : 'TRANSIT',
+          statusMessage: ceExec?.error,
           productType,
           exchangeSegment: exchSeg,
         });
+        const peExec = (json.legs as Array<{ role?: string; orderId?: string; status?: string; error?: string }> | undefined)?.find(l => l.role === 'MAIN_PE');
         initialLegs.push({
           role: 'MAIN_PE',
           optionType: 'PE',
           strike: atmStrike,
+          expiry,
           side: 'SELL',
           qty: totalQty,
           entryPrice: atmPeLtp,
@@ -664,15 +686,20 @@ export default function SyntheticFuturesScalper() {
           pnl: 0,
           securityId: strikeMap[String(atmStrike)]?.peId,
           tradingSymbol: strikeMap[String(atmStrike)]?.peSymbol,
+          orderId: peExec?.orderId,
+          status: peExec?.status === 'FAILED' ? 'REJECTED' : 'TRANSIT',
+          statusMessage: peExec?.error,
           productType,
           exchangeSegment: exchSeg,
         });
       } else {
         if (hedgeEnabled && hedgeOffset > 0) {
+          const hedgeExec = (json.legs as Array<{ role?: string; orderId?: string; status?: string; error?: string }> | undefined)?.find(l => l.role === 'HEDGE');
           initialLegs.push({
             role: 'HEDGE',
             optionType: 'CE',
             strike: shortHedgeStrike,
+            expiry,
             side: 'BUY',
             qty: totalQty,
             entryPrice: shortHedgeCeLtp,
@@ -680,14 +707,19 @@ export default function SyntheticFuturesScalper() {
             pnl: 0,
             securityId: strikeMap[String(shortHedgeStrike)]?.ceId,
             tradingSymbol: strikeMap[String(shortHedgeStrike)]?.ceSymbol,
+            orderId: hedgeExec?.orderId,
+            status: hedgeExec?.status === 'FAILED' ? 'REJECTED' : 'TRANSIT',
+            statusMessage: hedgeExec?.error,
             productType,
             exchangeSegment: exchSeg,
           });
         }
+        const peExec = (json.legs as Array<{ role?: string; orderId?: string; status?: string; error?: string }> | undefined)?.find(l => l.role === 'MAIN_PE');
         initialLegs.push({
           role: 'MAIN_PE',
           optionType: 'PE',
           strike: atmStrike,
+          expiry,
           side: 'BUY',
           qty: totalQty,
           entryPrice: atmPeLtp,
@@ -695,13 +727,18 @@ export default function SyntheticFuturesScalper() {
           pnl: 0,
           securityId: strikeMap[String(atmStrike)]?.peId,
           tradingSymbol: strikeMap[String(atmStrike)]?.peSymbol,
+          orderId: peExec?.orderId,
+          status: peExec?.status === 'FAILED' ? 'REJECTED' : 'TRANSIT',
+          statusMessage: peExec?.error,
           productType,
           exchangeSegment: exchSeg,
         });
+        const ceExec = (json.legs as Array<{ role?: string; orderId?: string; status?: string; error?: string }> | undefined)?.find(l => l.role === 'MAIN_CE');
         initialLegs.push({
           role: 'MAIN_CE',
           optionType: 'CE',
           strike: atmStrike,
+          expiry,
           side: 'SELL',
           qty: totalQty,
           entryPrice: atmCeLtp,
@@ -709,6 +746,9 @@ export default function SyntheticFuturesScalper() {
           pnl: 0,
           securityId: strikeMap[String(atmStrike)]?.ceId,
           tradingSymbol: strikeMap[String(atmStrike)]?.ceSymbol,
+          orderId: ceExec?.orderId,
+          status: ceExec?.status === 'FAILED' ? 'REJECTED' : 'TRANSIT',
+          statusMessage: ceExec?.error,
           productType,
           exchangeSegment: exchSeg,
         });
@@ -748,12 +788,119 @@ export default function SyntheticFuturesScalper() {
     }
   };
 
+  // ── Clear / Reset Position State ──────────────────────────────────────────
+  const handleClearPosition = () => {
+    setActivePosition(null);
+    try {
+      localStorage.removeItem('dhan_algo.synthetic_position');
+    } catch {}
+    addToast('info', 'Position Cleared', 'Active synthetic state reset');
+    addLog('EXIT', 'Reset active synthetic position state');
+  };
+
+  // ── Poll broker order status for active synthetic legs ─────────────────────
+  useEffect(() => {
+    if (!activePosition || activePosition.legs.length === 0) return;
+
+    let cancelled = false;
+    async function checkOrderStatus() {
+      try {
+        const pollUrl =
+          broker === 'kotak'
+            ? '/api/scalper/kotak/poll'
+            : broker === 'zerodha'
+              ? '/api/scalper/zerodha/poll'
+              : '/api/scalper/poll';
+
+        const res = await fetch(pollUrl);
+        const json = await res.json();
+        if (!json.success || !Array.isArray(json.orders)) return;
+
+        if (cancelled) return;
+
+        const orderList = json.orders as Array<{
+          orderId?: string | number;
+          order_id?: string | number;
+          nOrdNo?: string | number;
+          tradingSymbol?: string;
+          tradingsymbol?: string;
+          orderStatus?: string;
+          status?: string;
+          ordSt?: string;
+          rejRsn?: string;
+          reason?: string;
+        }>;
+
+        setActivePosition(prev => {
+          if (!prev) return null;
+          let changed = false;
+          const nextLegs = prev.legs.map(leg => {
+            const match = orderList.find(o => {
+              const oId = String(o.orderId ?? o.order_id ?? o.nOrdNo ?? '');
+              if (leg.orderId && oId && leg.orderId === oId) return true;
+              const sym = String(o.tradingSymbol ?? o.tradingsymbol ?? '');
+              if (leg.tradingSymbol && sym && leg.tradingSymbol === sym) return true;
+              return false;
+            });
+
+            if (!match) return leg;
+
+            const rawStatus = String(match.orderStatus ?? match.status ?? match.ordSt ?? '').toUpperCase();
+            let mappedStatus: SyntheticLeg['status'] = leg.status ?? 'TRANSIT';
+            if (rawStatus.includes('REJECT') || rawStatus.includes('FAILED')) {
+              mappedStatus = 'REJECTED';
+            } else if (rawStatus.includes('TRADED') || rawStatus.includes('FILL') || rawStatus.includes('COMPLETE')) {
+              mappedStatus = 'FILLED';
+            } else if (rawStatus.includes('CANCEL')) {
+              mappedStatus = 'CANCELLED';
+            } else if (rawStatus.includes('TRANSIT') || rawStatus.includes('PEND') || rawStatus.includes('OPEN')) {
+              mappedStatus = 'TRANSIT';
+            }
+
+            const rejReason = match.rejRsn ?? match.reason;
+
+            if (mappedStatus !== leg.status || (rejReason && rejReason !== leg.statusMessage)) {
+              changed = true;
+              return {
+                ...leg,
+                status: mappedStatus,
+                statusMessage: rejReason || leg.statusMessage,
+              };
+            }
+            return leg;
+          });
+
+          if (!changed) return prev;
+          return {
+            ...prev,
+            legs: nextLegs,
+          };
+        });
+      } catch {}
+    }
+
+    checkOrderStatus();
+    const interval = setInterval(checkOrderStatus, 3000);
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
+  }, [activePosition?.id, broker]);
+
   // ── 8. Flatten / Exit Synthetic Position ───────────────────────────────────
   const handleFlattenSynthetic = async (reason = 'Manual Exit'): Promise<boolean> => {
     if (inFlightRef.current) return false;
     if (!activePosition || activePosition.legs.length === 0) {
       addToast('info', 'No active synthetic position to flatten');
       return false;
+    }
+
+    // If all legs were rejected or failed, clear state without placing broker exit orders
+    const allRejected = activePosition.legs.every(l => l.status === 'REJECTED' || l.status === 'FAILED');
+    if (allRejected) {
+      addToast('info', 'Position Cleared', 'All legs were rejected; resetting position state.');
+      handleClearPosition();
+      return true;
     }
 
     inFlightRef.current = true;
@@ -1704,6 +1851,23 @@ export default function SyntheticFuturesScalper() {
           </div>
 
           <div className="flex items-center gap-3">
+            {/* Clear / Reset State Button */}
+            {activePosition && (
+              <button
+                onClick={() => {
+                  if (confirm('Clear synthetic position tracking? This will reset local state without sending broker exit orders.')) {
+                    handleClearPosition();
+                  }
+                }}
+                disabled={inFlight}
+                className="flex items-center gap-1.5 px-3 py-2 rounded-lg border border-zinc-700 bg-zinc-800/80 hover:bg-zinc-700 text-zinc-300 text-xs font-bold disabled:opacity-30 cursor-pointer transition-all active:scale-[0.98]"
+                title="Clear local tracking state (useful if orders were rejected by broker)"
+              >
+                <Trash2 className="h-3.5 w-3.5 text-zinc-400" />
+                CLEAR STATE
+              </button>
+            )}
+
             {/* Flip Position Button */}
             <button
               onClick={handleReversePosition}
@@ -1759,6 +1923,18 @@ export default function SyntheticFuturesScalper() {
                     {fmtSignedINR(activePnl)}
                   </strong>
                 </span>
+                <button
+                  onClick={() => {
+                    if (confirm('Clear synthetic position tracking? This will reset local state without sending broker exit orders.')) {
+                      handleClearPosition();
+                    }
+                  }}
+                  title="Clear synthetic position tracking without placing broker orders"
+                  className="ml-2 flex items-center gap-1 rounded border border-zinc-700 bg-zinc-800 hover:bg-zinc-700 px-2 py-0.5 text-[11px] text-zinc-300 transition-colors cursor-pointer"
+                >
+                  <Trash2 className="h-3 w-3 text-zinc-400" />
+                  Reset
+                </button>
               </div>
             )}
           </div>
@@ -1770,6 +1946,8 @@ export default function SyntheticFuturesScalper() {
                   <th className="px-4 py-2.5 text-xs font-bold text-white">Leg Role</th>
                   <th className="px-4 py-2.5 text-xs font-bold text-white">Side</th>
                   <th className="px-4 py-2.5 text-xs font-bold text-white">Contract / Strike</th>
+                  <th className="px-4 py-2.5 text-xs font-bold text-white">Expiry</th>
+                  <th className="px-4 py-2.5 text-xs font-bold text-white">Status</th>
                   <th className="px-4 py-2.5 text-right text-xs font-bold text-white">Qty</th>
                   <th className="px-4 py-2.5 text-right text-xs font-bold text-white">Entry Avg</th>
                   <th className="px-4 py-2.5 text-right text-xs font-bold text-white">LTP</th>
@@ -1805,6 +1983,36 @@ export default function SyntheticFuturesScalper() {
                       <td className="px-4 py-2.5 font-bold text-zinc-100">
                         {activePosition.underlying} {leg.strike} {leg.optionType}
                       </td>
+                      <td className="px-4 py-2.5 text-zinc-300 font-mono">
+                        {leg.expiry || activePosition.expiry || '—'}
+                      </td>
+                      <td className="px-4 py-2.5">
+                        <div className="flex flex-col gap-0.5">
+                          <span
+                            className={`inline-flex items-center gap-1 w-fit rounded px-1.5 py-0.5 text-[10px] font-bold ${
+                              leg.status === 'FILLED'
+                                ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/25'
+                                : leg.status === 'TRANSIT'
+                                  ? 'bg-sky-500/10 text-sky-400 border border-sky-500/25 animate-pulse'
+                                  : leg.status === 'REJECTED' || leg.status === 'FAILED'
+                                    ? 'bg-red-500/10 text-red-400 border border-red-500/25'
+                                    : 'bg-zinc-800 text-zinc-400 border border-zinc-700'
+                            }`}
+                          >
+                            {leg.status || 'FILLED'}
+                          </span>
+                          {leg.statusMessage && (
+                            <span className="text-[10px] text-red-400 max-w-[180px] truncate" title={leg.statusMessage}>
+                              {leg.statusMessage}
+                            </span>
+                          )}
+                          {leg.orderId && (
+                            <span className="text-[9px] text-zinc-500 font-mono">
+                              #{leg.orderId}
+                            </span>
+                          )}
+                        </div>
+                      </td>
                       <td className="px-4 py-2.5 text-right tabular-nums text-zinc-200">
                         {leg.qty}
                       </td>
@@ -1825,7 +2033,7 @@ export default function SyntheticFuturesScalper() {
                   ))
                 ) : (
                   <tr>
-                    <td colSpan={7} className="px-4 py-8 text-center text-zinc-500 font-mono text-xs">
+                    <td colSpan={9} className="px-4 py-8 text-center text-zinc-500 font-mono text-xs">
                       No active synthetic legs open. Click BUY or SELL above to initiate a synthetic trade.
                     </td>
                   </tr>

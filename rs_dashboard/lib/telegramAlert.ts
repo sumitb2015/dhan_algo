@@ -4,11 +4,22 @@ import fs from 'fs';
 const PROJECT_ROOT = path.resolve(process.cwd(), '..');
 const ENV_FILE = path.join(PROJECT_ROOT, '.env');
 
-interface Creds { botToken: string; chatId: string }
+interface Creds { botToken: string; chatId: string; fileMtimeMs: number }
 let credsCache: Creds | null = null;
 
+/**
+ * Cached like lib/dhanToken.ts's getDhanCredentials() — invalidated on the
+ * .env file's mtime changing, not just held forever. The documented setup
+ * flow is "add these two keys to .env" while the dashboard may already be
+ * running; without mtime invalidation, the first no-op lookup before the
+ * keys exist would cache empty credentials for the life of the process.
+ */
 function readCreds(): Creds {
-  if (credsCache) return credsCache;
+  let fileMtimeMs = 0;
+  try { fileMtimeMs = fs.statSync(ENV_FILE).mtimeMs; } catch { /* .env missing */ }
+
+  if (credsCache && credsCache.fileMtimeMs === fileMtimeMs) return credsCache;
+
   let botToken = '';
   let chatId = '';
   try {
@@ -18,7 +29,7 @@ function readCreds(): Creds {
     botToken = tokenMatch?.[1]?.trim() ?? '';
     chatId = chatMatch?.[1]?.trim() ?? '';
   } catch { /* .env missing — treat as unconfigured */ }
-  credsCache = { botToken, chatId };
+  credsCache = { botToken, chatId, fileMtimeMs };
   return credsCache;
 }
 
