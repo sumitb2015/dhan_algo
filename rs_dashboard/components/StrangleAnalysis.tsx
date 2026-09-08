@@ -8,6 +8,7 @@ import {
 } from 'recharts';
 import { getCached, setCached } from '@/lib/clientCache';
 import StrangleValidityReportModal from '@/components/StrangleValidityReportModal';
+import LiveBuilderPanel from '@/components/analytics/LiveBuilderPanel';
 import NavBar from './NavBar';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -928,6 +929,16 @@ export default function StrangleAnalysis() {
             </span>
           </div>
         )}
+
+        {/* ── Live Strangle Builder ─────────────────────────────────────────── */}
+        <SectionCard
+          eyebrow="Live"
+          title="Live Strangle Builder"
+          sub="Stage a strangle against the current NIFTY chain — payoff, margin, and probability of profit"
+          glow="violet"
+        >
+          <LiveBuilderPanel underlying="NIFTY" />
+        </SectionCard>
 
         {/* ── Market Pulse Hero Cards ───────────────────────────────────────── */}
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3.5">
