@@ -29,6 +29,13 @@ export interface ChartPoint {
   spotClose: number | null;
 }
 
+export interface RolloverPoint {
+  date: string;
+  nearOi: number;
+  nextOi: number;
+  rolloverPct: number;
+}
+
 export interface FuturesResponse {
   success: boolean;
   dataDate: string;
@@ -39,6 +46,10 @@ export interface FuturesResponse {
   charts: {
     NIFTY: ChartPoint[];
     BANKNIFTY: ChartPoint[];
+  };
+  rollover: {
+    NIFTY: RolloverPoint[];
+    BANKNIFTY: RolloverPoint[];
   };
   error?: string;
 }
@@ -95,8 +106,7 @@ function fmtLabel(expiry: string): string {
   return `${months[parseInt(m) - 1]} ${parseInt(d)}`;
 }
 
-function niftySpotClose(): number | null {
-  const p = path.join(PROJECT_ROOT, 'Historical Data', 'NIFTY_50_Daily_5Y.csv');
+function spotCloseFromCsv(p: string): number | null {
   if (!fs.existsSync(p)) return null;
   const lines = fs.readFileSync(p, 'utf-8').trim().split('\n');
   if (lines.length < 2) return null;
@@ -105,6 +115,14 @@ function niftySpotClose(): number | null {
   if (closeIdx === -1) return null;
   const last = lines[lines.length - 1].split(',');
   return parseFloat(last[closeIdx]) || null;
+}
+
+function niftySpotClose(): number | null {
+  return spotCloseFromCsv(path.join(PROJECT_ROOT, 'Historical Data', 'NIFTY_50_Daily_5Y.csv'));
+}
+
+function bankNiftySpotClose(): number | null {
+  return spotCloseFromCsv(path.join(PROJECT_ROOT, 'Historical Data', 'Indices', 'BANKNIFTY.csv'));
 }
 
 function readSpotDailySeries(n: number): { date: string; close: number }[] {
@@ -245,6 +263,39 @@ function buildContracts(
   return result.sort((a, b) => a.expiry.localeCompare(b.expiry));
 }
 
+// ─── Rollover analytics ───────────────────────────────────────────────────────
+
+/**
+ * Near-month -> next-month OI migration %, day by day. A date only produces a
+ * point once BOTH contracts have OI that day — before the next contract starts
+ * trading there's nothing to roll into yet, so the series naturally starts
+ * partway through the daily rows rather than at day 1.
+ */
+function computeRolloverSeries(dailyRows: Row[]): RolloverPoint[] {
+  const expiries = [...new Set(dailyRows.map(r => r.contract))].sort();
+  const [nearExpiry, nextExpiry] = expiries;
+  if (!nearExpiry || !nextExpiry) return [];
+
+  const oiByDate = (expiry: string) => {
+    const map = new Map<string, number>();
+    for (const r of dailyRows) {
+      if (r.contract === expiry && r.oi > 0) map.set(toDate(r.datetime), r.oi);
+    }
+    return map;
+  };
+
+  const nearMap = oiByDate(nearExpiry);
+  const nextMap = oiByDate(nextExpiry);
+
+  const points: RolloverPoint[] = [];
+  for (const [date, nearOi] of nearMap) {
+    const nextOi = nextMap.get(date);
+    if (nextOi === undefined) continue;
+    points.push({ date, nearOi, nextOi, rolloverPct: (nextOi / (nearOi + nextOi)) * 100 });
+  }
+  return points.sort((a, b) => a.date.localeCompare(b.date));
+}
+
 // ─── Route handler ────────────────────────────────────────────────────────────
 
 export async function GET() {
@@ -264,6 +315,7 @@ export async function GET() {
         dataDate: '',
         instruments: { NIFTY: [], BANKNIFTY: [] },
         charts: { NIFTY: [], BANKNIFTY: [] },
+        rollover: { NIFTY: [], BANKNIFTY: [] },
         error: 'No futures data found. Run scripts/downloader/download_futures_manual.py first.',
       });
     }
@@ -276,7 +328,10 @@ export async function GET() {
     );
 
     const niftyContracts = buildContracts(niftyRows, niftyDaily, spotClose, true);
-    const bnfContracts = buildContracts(bnfRows, bnfDaily, null, false);
+    const bnfContracts = buildContracts(bnfRows, bnfDaily, bankNiftySpotClose(), true);
+
+    const niftyRollover = computeRolloverSeries(niftyDaily);
+    const bnfRollover = computeRolloverSeries(bnfDaily);
 
     const spotSeries = readSpotDailySeries(7);
     const niftyChart = buildDailyChart(niftyDaily, spotSeries, 7);
@@ -293,6 +348,7 @@ export async function GET() {
       dataDate,
       instruments: { NIFTY: niftyContracts, BANKNIFTY: bnfContracts },
       charts: { NIFTY: niftyChart, BANKNIFTY: bnfChart },
+      rollover: { NIFTY: niftyRollover, BANKNIFTY: bnfRollover },
     });
   } catch (e: unknown) {
     return NextResponse.json<FuturesResponse>({
@@ -300,6 +356,7 @@ export async function GET() {
       dataDate: '',
       instruments: { NIFTY: [], BANKNIFTY: [] },
       charts: { NIFTY: [], BANKNIFTY: [] },
+      rollover: { NIFTY: [], BANKNIFTY: [] },
       error: e instanceof Error ? e.message : 'Unknown error',
     });
   }
