@@ -116,7 +116,13 @@ export default function MultiLegStrategyRow({
   hedgeBenefit,
   availableFunds,
 }: MultiLegStrategyRowProps) {
-  const [expanded, setExpanded] = useState(true);
+  // Existing/already-placed positions default collapsed (this page can carry
+  // several parallel strategies, most of them just sitting open) — the user
+  // expands via the chevron when they want the legs table. A brand-new DRAFT
+  // basket (built from a preset or "New Strategy Row") stays expanded since
+  // the user is actively configuring its legs. Lazy-init only: placing a
+  // basket after mount must not yank it closed on the user mid-interaction.
+  const [expanded, setExpanded] = useState(() => !basket.legs.some(l => l.status !== 'DRAFT'));
   const [confirmPlace, setConfirmPlace] = useState(false);
   const [selectedLegForAddLots, setSelectedLegForAddLots] = useState<MultiLegLeg | null>(null);
   const [isAddNewLegModalOpen, setIsAddNewLegModalOpen] = useState<boolean>(false);
