@@ -308,9 +308,13 @@ export default function MultiLegStrategyRow({
 
   return (
     <div className="border border-zinc-800 bg-zinc-900/50 rounded-xl overflow-hidden shadow-lg transition-all">
-      {/* Strategy Header Bar */}
-      <div className="px-4 py-3 bg-zinc-900/90 border-b border-zinc-800 flex items-center justify-between gap-3 flex-wrap">
-        <div className="flex items-center gap-3 flex-wrap">
+      {/* Strategy Header Bar — the collapsed state's entire summary, so this
+         must never wrap to a second line: flex-nowrap everywhere here, with a
+         horizontal scroll escape hatch only if a viewport is genuinely too
+         narrow to fit it (full detail is one click away via the chevron, this
+         row's job is just the at-a-glance summary). */}
+      <div className="px-3 py-2 bg-zinc-900/90 border-b border-zinc-800 flex items-center justify-between gap-3 flex-nowrap overflow-x-auto">
+        <div className="flex items-center gap-2.5 flex-nowrap shrink-0">
           <button
             type="button"
             onClick={() => setExpanded(prev => !prev)}
@@ -348,38 +352,47 @@ export default function MultiLegStrategyRow({
             )}
           </div>
 
-          {/* Underlying Selector */}
-          <div className="flex items-center gap-1">
-            <label className="text-[10px] text-zinc-400 font-semibold uppercase">Index:</label>
-            <select
-              value={basket.underlying}
-              disabled={hasPlacedLeg}
-              onChange={e => onUpdate({ underlying: e.target.value })}
-              className="h-7 bg-zinc-950 border border-zinc-700 text-zinc-200 text-xs font-bold rounded px-2 focus:outline-none focus:border-emerald-500 disabled:opacity-60"
-            >
-              {UNDERLYINGS.map(u => <option key={u} value={u}>{u}</option>)}
-            </select>
-          </div>
+          {/* Underlying + Expiry — a placed basket can't change either (the
+             disabled selects below were just dead weight eating header width
+             on every already-open row, which is most rows most of the time),
+             so show them as plain compact text once placed and keep the real
+             editable dropdowns only for a still-DRAFT basket. */}
+          {hasPlacedLeg ? (
+            <span className="text-xs font-bold text-zinc-300 whitespace-nowrap">
+              {basket.underlying} <span className="text-zinc-600">·</span> {basket.expiry}
+            </span>
+          ) : (
+            <>
+              <div className="flex items-center gap-1">
+                <label className="text-[10px] text-zinc-400 font-semibold uppercase">Index:</label>
+                <select
+                  value={basket.underlying}
+                  onChange={e => onUpdate({ underlying: e.target.value })}
+                  className="h-7 bg-zinc-950 border border-zinc-700 text-zinc-200 text-xs font-bold rounded px-2 focus:outline-none focus:border-emerald-500"
+                >
+                  {UNDERLYINGS.map(u => <option key={u} value={u}>{u}</option>)}
+                </select>
+              </div>
 
-          {/* Expiry Selector */}
-          <div className="flex items-center gap-1">
-            <label className="text-[10px] text-zinc-400 font-semibold uppercase">Expiry:</label>
-            <select
-              value={basket.expiry}
-              disabled={hasPlacedLeg}
-              onChange={e => onUpdate({ expiry: e.target.value })}
-              className="h-7 bg-zinc-950 border border-zinc-700 text-zinc-200 text-xs font-bold rounded px-2 focus:outline-none focus:border-emerald-500 disabled:opacity-60"
-            >
-              {!expiries.includes(basket.expiry) && basket.expiry && (
-                <option value={basket.expiry}>{basket.expiry}</option>
-              )}
-              {expiries.map(exp => <option key={exp} value={exp}>{exp}</option>)}
-            </select>
-          </div>
+              <div className="flex items-center gap-1">
+                <label className="text-[10px] text-zinc-400 font-semibold uppercase">Expiry:</label>
+                <select
+                  value={basket.expiry}
+                  onChange={e => onUpdate({ expiry: e.target.value })}
+                  className="h-7 bg-zinc-950 border border-zinc-700 text-zinc-200 text-xs font-bold rounded px-2 focus:outline-none focus:border-emerald-500"
+                >
+                  {!expiries.includes(basket.expiry) && basket.expiry && (
+                    <option value={basket.expiry}>{basket.expiry}</option>
+                  )}
+                  {expiries.map(exp => <option key={exp} value={exp}>{exp}</option>)}
+                </select>
+              </div>
+            </>
+          )}
         </div>
 
         {/* Right Side: Breakevens, Max P/L, Total P&L & Strategy Actions */}
-        <div className="flex items-center gap-2 flex-wrap">
+        <div className="flex items-center gap-2 flex-nowrap shrink-0">
           {payoffResult && (
             <div className="hidden md:flex items-center gap-2 px-2.5 py-1 rounded-lg bg-zinc-950 border border-zinc-800 text-xs font-mono" title="Strategy Payoff: Breakevens & Max Profit / Loss">
               <div className="flex items-center gap-1">
