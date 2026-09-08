@@ -30,9 +30,11 @@ export interface GroupLeg {
  * Classify an aggregated (strike, type) leg set into the structure it forms.
  *
  * Deliberately coarse — this covers every shape the value_imbalance /
- * spread_trend / oi_directional strategies (CLAUDE.md) actually build.
- * Anything more exotic (butterflies, jade lizards, multi-strike scale-ins)
- * falls into 'Custom Combo' rather than being mis-labeled.
+ * spread_trend / oi_directional strategies (CLAUDE.md) actually build, plus
+ * the single-type (Call/Put) Butterfly template from the Baskets page
+ * (lib/basketStrategies.ts). Anything more exotic (jade lizards, broken-wing
+ * ratio combos, multi-strike scale-ins) falls into 'Custom Combo' or
+ * 'Long Options / Hedge' rather than being mis-labeled as a clean butterfly.
  */
 export function classifyStructure(legs: GroupLeg[]): { structure: string; riskType: 'defined' | 'undefined' } {
   const shortCE = legs.filter((l) => l.type === 'CE' && l.side === 'SELL');
@@ -62,6 +64,33 @@ export function classifyStructure(legs: GroupLeg[]): { structure: string; riskTy
     return longPE[0].strike < shortPE[0].strike
       ? { structure: 'Bull Put Spread', riskType: 'defined' }
       : { structure: 'Custom Put Combo', riskType: 'defined' };
+  }
+  // Single-type Butterfly: one short body strike flanked by two long wing
+  // strikes of the same option type, symmetric (equal distance each side)
+  // and in the classic 1:2:1 quantity ratio — anything looser (skewed
+  // wings, mismatched quantities) is a broken-wing/ratio combo, not a clean
+  // butterfly, and is deliberately left to fall through below.
+  if (shortCE.length === 1 && longCE.length === 2 && shortPE.length === 0 && longPE.length === 0) {
+    const [lowCE, highCE] = [...longCE].sort((a, b) => a.strike - b.strike);
+    const body = shortCE[0];
+    if (
+      lowCE.strike < body.strike && body.strike < highCE.strike &&
+      body.strike - lowCE.strike === highCE.strike - body.strike &&
+      lowCE.qty === highCE.qty && body.qty === lowCE.qty + highCE.qty
+    ) {
+      return { structure: 'Call Butterfly', riskType: 'defined' };
+    }
+  }
+  if (shortPE.length === 1 && longPE.length === 2 && shortCE.length === 0 && longCE.length === 0) {
+    const [lowPE, highPE] = [...longPE].sort((a, b) => a.strike - b.strike);
+    const body = shortPE[0];
+    if (
+      lowPE.strike < body.strike && body.strike < highPE.strike &&
+      body.strike - lowPE.strike === highPE.strike - body.strike &&
+      lowPE.qty === highPE.qty && body.qty === lowPE.qty + highPE.qty
+    ) {
+      return { structure: 'Put Butterfly', riskType: 'defined' };
+    }
   }
   if (shortCE.length >= 1 && shortPE.length === 0 && longCE.length === 0 && longPE.length === 0) {
     return { structure: 'Naked Call', riskType: 'undefined' };
