@@ -274,9 +274,12 @@ export default function Baskets() {
 
   useEffect(() => {
     if (!farExpiry || farExpiry === expiry) { setFarStrikeMap({}); return; }
+    const requestedUnderlying = underlying;
+    const requestedFarExpiry = farExpiry;
     fetch(`${scalperRoute(broker, 'lookup')}?underlying=${underlying}&expiry=${farExpiry}`)
       .then(r => r.json())
       .then((j: { success: boolean; data?: { strikes: Record<string, StrikeIdentifier> } }) => {
+        if (requestedUnderlying !== underlyingRef.current || requestedFarExpiry !== farExpiryRef.current) return;
         if (j.success && j.data) setFarStrikeMap(j.data.strikes);
       })
       .catch(() => {});
@@ -321,6 +324,7 @@ export default function Baskets() {
     fetch(`${scalperRoute(broker, 'lookup')}?underlying=${underlying}&expiry=${expiry}`)
       .then(r => r.json())
       .then((j: { success: boolean; data?: { lotSize: number; strikes: Record<string, StrikeIdentifier> } }) => {
+        if (requestedUnderlying !== underlyingRef.current || requestedExpiryForChain !== expiryRef.current) return;
         if (j.success && j.data) {
           setStrikeMap(j.data.strikes);
           setLotSize(Number(j.data.lotSize) > 0 ? Number(j.data.lotSize) : null);
@@ -412,7 +416,7 @@ export default function Baskets() {
       const leg = prev.find(l => l.id === id);
       if (!leg) return prev;
       const nextStrike = nextAvailableStrike(leg.strike, dir, leg.option, leg.side, id, prev);
-      return nextStrike == null ? prev : prev.map(l => (l.id === id ? { ...l, strike: nextStrike, price: '' } : l));
+      return (nextStrike == null || nextStrike === leg.strike) ? prev : prev.map(l => (l.id === id ? { ...l, strike: nextStrike, price: '' } : l));
     });
   }, [nextAvailableStrike]);
 
@@ -484,12 +488,22 @@ export default function Baskets() {
         side: p.side === 'B' ? 'S' : 'B', option: p.option, strike: p.strike, qty: p.qty, type: 'MARKET', underlying,
         productType: 'MARGIN',
       }, p.expiry === farExpiry ? farStrikeMap : strikeMap);
-      if (reverseReq) fetch(reverseReq.url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(reverseReq.body) }).catch(() => {});
+      if (!reverseReq) { addToast('error', `UNCONFIRMED — could not build reversal for ${p.label}`); continue; }
+      try {
+        const res = await fetch(reverseReq.url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(reverseReq.body) });
+        const j = await res.json() as { success: boolean; error?: string };
+        addToast(j.success ? 'success' : 'error', j.success ? `Reversed ${p.label}` : `Reverse failed for ${p.label} — ${j.error ?? 'unknown error'}`);
+      } catch {
+        addToast('error', `UNCONFIRMED — reversal request failed for ${p.label}`);
+      }
     }
-  }, [broker, strikeMap, farStrikeMap, farExpiry, underlying]);
+  }, [broker, strikeMap, farStrikeMap, farExpiry, underlying, addToast]);
 
   const placeBasket = useCallback(async () => {
-    if (!legs.length || !expiry || !hasAuthenticatedBroker || !lotSize) return;
+    if (!legs.length) { addToast('error', 'Add at least one leg'); return; }
+    if (!expiry) { addToast('error', 'Select an expiry'); return; }
+    if (!hasAuthenticatedBroker) { addToast('error', 'No broker logged in'); return; }
+    if (!lotSize) { addToast('error', 'Lot size not resolved yet'); return; }
     if (!confirmPlace) { setConfirmPlace(true); setTimeout(() => setConfirmPlace(false), 4500); return; }
     setConfirmPlace(false);
     if (placingRef.current) return;
@@ -513,10 +527,15 @@ export default function Baskets() {
     } finally { placingRef.current = false; setPlacing(false); }
   }, [legs, expiry, farExpiry, confirmPlace, multiplier, lotSize, strikeMap, farStrikeMap, broker, underlying, effectivePremium, addToast, hasAuthenticatedBroker, rollbackPlacedLegs]);
 
-  const persistSaved = (next: SavedBasket[]) => { setSaved(next); persistSavedBaskets(next).catch(() => {}); };
+  const persistSaved = (next: SavedBasket[]) => {
+    setSaved(next);
+    persistSavedBaskets(next).catch(() => addToast('error', 'Failed to save basket preset — change was not persisted'));
+  };
   const saveBasket = () => {
     const name = saveName.trim();
-    if (!name || !legs.length || atmStrike == null) return;
+    if (!name) { addToast('error', 'Enter a basket name'); return; }
+    if (!legs.length) { addToast('error', 'Nothing to save'); return; }
+    if (atmStrike == null) { addToast('error', 'Wait for the option chain to load'); return; }
     const entry: SavedBasket = {
       name, category, strategy, multiplier, underlying,
       legs: legs.map(({ side, option, strike, lots, type, expiry: legExpiry }) => ({
@@ -531,14 +550,18 @@ export default function Baskets() {
 
   const pendingLoadRef = useRef<SavedBasket | null>(null);
   const applyLoadedBasket = useCallback((b: SavedBasket, atm: number, strikes: number[]) => {
+    if (b.legs.some(l => l.expiryRole === 'far') && (!farExpiryRef.current || farExpiryRef.current === expiryRef.current)) {
+      addToast('error', 'Secondary expiry required');
+      return;
+    }
     setCategory(b.category); setStrategy(b.strategy); setMultiplier(b.multiplier);
     setLegs(b.legs.map(l => ({
       id: newLegId(), side: l.side, option: l.option, lots: l.lots, type: l.type,
       strike: offsetToStrike(l.offset, atm, strikes, step), price: '',
-      expiry: l.expiryRole === 'far' ? (farExpiryRef.current || expiryRef.current) : expiryRef.current,
+      expiry: l.expiryRole === 'far' ? farExpiryRef.current : expiryRef.current,
     })));
     setSaveOpen(false); setSaveName(b.name);
-  }, [step]);
+  }, [step, addToast]);
 
   const loadBasket = (b: SavedBasket) => {
     if (b.underlying !== underlying) { pendingLoadRef.current = b; setUnderlying(b.underlying as Underlying); return; }
@@ -548,7 +571,7 @@ export default function Baskets() {
 
   useEffect(() => {
     const pending = pendingLoadRef.current;
-    if (pending && pending.underlying === underlying && atmStrike != null && allStrikes.length && chainReadyForRef.current?.underlying === underlying) {
+    if (pending && pending.underlying === underlying && atmStrike != null && allStrikes.length && chainReadyForRef.current?.underlying === underlying && chainReadyForRef.current?.expiry === expiry) {
       pendingLoadRef.current = null; applyLoadedBasket(pending, atmStrike, allStrikes);
     }
   }, [underlying, expiry, atmStrike, allStrikes, applyLoadedBasket]);
@@ -878,7 +901,7 @@ export default function Baskets() {
                     <button
                       type="button"
                       onClick={placeBasket}
-                      disabled={placing || !hasAuthenticatedBroker}
+                      disabled={placing || !hasAuthenticatedBroker || !lotSize}
                       className={`flex items-center gap-2 px-5 py-2 rounded-lg font-mono text-xs font-bold transition-all shadow-md cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed ${
                         confirmPlace
                           ? 'bg-emerald-500 hover:bg-emerald-400 text-zinc-950 animate-pulse'
