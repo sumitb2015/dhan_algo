@@ -32,6 +32,7 @@ export interface BrokerPortfolio {
   /** Spendable cash, when the broker distinguishes it from collateral. */
   cashBalance: number | null;
   openPositions: number;
+  closedPositions: number;
   /**
    * Open legs whose mark could not be established, so they contribute 0 to
    * `unrealizedPnl`. Kotak's positions payload carries no last-traded price and
@@ -59,6 +60,11 @@ export interface DashboardPosition {
   unrealizedPnl: number;
   realizedPnl: number;
   totalPnl: number;
+  isOpen: boolean;
+  buyQty: number;
+  sellQty: number;
+  buyAvg: number;
+  sellAvg: number;
 }
 
 export interface DashboardPortfolioResponse {
@@ -70,6 +76,7 @@ export interface DashboardPortfolioResponse {
     utilizedMargin: number;
     totalBalance: number;
     openPositions: number;
+    closedPositions: number;
     unpricedPositions: number;
     unrealizedPnl: number;
     realizedPnl: number;
@@ -98,6 +105,7 @@ function emptyBroker(broker: Broker, connected: boolean, error?: string): Broker
     collateralAmount: null,
     cashBalance: null,
     openPositions: 0,
+    closedPositions: 0,
     unpricedPositions: 0,
     unrealizedPnl: 0,
     realizedPnl: 0,
@@ -118,6 +126,7 @@ function emptyBroker(broker: Broker, connected: boolean, error?: string): Broker
 function summarize(broker: Broker, rows: Record<string, unknown>[]): {
   positions: DashboardPosition[];
   openPositions: number;
+  closedPositions: number;
   unpricedPositions: number;
   unrealizedPnl: number;
   realizedPnl: number;
@@ -126,6 +135,7 @@ function summarize(broker: Broker, rows: Record<string, unknown>[]): {
   let unrealizedPnl = 0;
   let realizedPnl = 0;
   let openPositions = 0;
+  let closedPositions = 0;
   let unpricedPositions = 0;
 
   for (const raw of rows) {
@@ -133,15 +143,29 @@ function summarize(broker: Broker, rows: Record<string, unknown>[]): {
     const netQty = num(row.netQty);
     const unrealized = num(row.unrealizedProfit);
     const realized = num(row.realizedProfit);
+    const buyQty = num(row.buyQty);
+    const sellQty = num(row.sellQty);
+    const buyAvg = num(row.buyAvg);
+    const sellAvg = num(row.sellAvg);
+
+    // Skip entirely untouched rows with zero activity
+    if (netQty === 0 && buyQty === 0 && sellQty === 0 && realized === 0 && unrealized === 0) {
+      continue;
+    }
 
     unrealizedPnl += unrealized;
     realizedPnl += realized;
-    // A netted-out (flat) row still carries realized P&L for the day, so it
-    // belongs in the totals — but it is not an open position.
-    if (netQty === 0) continue;
-    openPositions++;
 
-    const avgPrice = netQty > 0 ? num(row.buyAvg) : num(row.sellAvg);
+    const isOpen = netQty !== 0;
+    if (isOpen) {
+      openPositions++;
+    } else {
+      closedPositions++;
+    }
+
+    const avgPrice = isOpen
+      ? (netQty > 0 ? buyAvg : sellAvg)
+      : (buyAvg > 0 && sellAvg > 0 ? (buyAvg + sellAvg) / 2 : (buyAvg || sellAvg));
 
     // Dhan's /positions payload carries NO last-traded price at all (confirmed
     // against a live book: buyAvg/sellAvg/costPrice/unrealizedProfit only), so
@@ -159,10 +183,10 @@ function summarize(broker: Broker, rows: Record<string, unknown>[]): {
     const lastPrice =
       reported > 0
         ? reported
-        : unrealized !== 0 && avgPrice > 0
+        : isOpen && unrealized !== 0 && avgPrice > 0
           ? avgPrice + unrealized / (netQty * mult)
           : 0;
-    if (lastPrice <= 0) unpricedPositions++;
+    if (isOpen && lastPrice <= 0) unpricedPositions++;
 
     positions.push({
       broker,
@@ -175,13 +199,24 @@ function summarize(broker: Broker, rows: Record<string, unknown>[]): {
       unrealizedPnl: unrealized,
       realizedPnl: realized,
       totalPnl: unrealized + realized,
+      isOpen,
+      buyQty,
+      sellQty,
+      buyAvg,
+      sellAvg,
     });
   }
 
-  // Biggest loser first: on a risk screen the position that needs attention
-  // should never be below the fold.
-  positions.sort((a, b) => a.totalPnl - b.totalPnl);
-  return { positions, openPositions, unpricedPositions, unrealizedPnl, realizedPnl };
+  // Open positions first (sorted by totalPnl ascending, biggest loser first),
+  // followed by closed positions (sorted by realizedPnl ascending, biggest loser first).
+  positions.sort((a, b) => {
+    if (a.isOpen !== b.isOpen) {
+      return a.isOpen ? -1 : 1;
+    }
+    return a.totalPnl - b.totalPnl;
+  });
+
+  return { positions, openPositions, closedPositions, unpricedPositions, unrealizedPnl, realizedPnl };
 }
 
 async function loadDhan(): Promise<BrokerPortfolio> {
@@ -295,12 +330,13 @@ export async function GET() {
       utilizedMargin: acc.utilizedMargin + (b.utilizedMargin ?? 0),
       totalBalance: acc.totalBalance + (b.totalBalance ?? 0),
       openPositions: acc.openPositions + b.openPositions,
+      closedPositions: acc.closedPositions + (b.closedPositions ?? 0),
       unpricedPositions: acc.unpricedPositions + b.unpricedPositions,
       unrealizedPnl: acc.unrealizedPnl + b.unrealizedPnl,
       realizedPnl: acc.realizedPnl + b.realizedPnl,
       totalPnl: acc.totalPnl + b.totalPnl,
     }),
-    { availableBalance: 0, utilizedMargin: 0, totalBalance: 0, openPositions: 0, unpricedPositions: 0, unrealizedPnl: 0, realizedPnl: 0, totalPnl: 0 },
+    { availableBalance: 0, utilizedMargin: 0, totalBalance: 0, openPositions: 0, closedPositions: 0, unpricedPositions: 0, unrealizedPnl: 0, realizedPnl: 0, totalPnl: 0 },
   );
 
   const body: DashboardPortfolioResponse = {

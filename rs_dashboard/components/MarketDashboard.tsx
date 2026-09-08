@@ -1133,10 +1133,18 @@ function BrokerAccountCard({
             )}
           </dl>
 
-          <div className="grid grid-cols-3 gap-2 rounded border border-zinc-800/80 bg-zinc-900/60 p-2 font-mono text-[10px]">
+          <div className="grid grid-cols-4 gap-2 rounded border border-zinc-800/80 bg-zinc-900/60 p-2 font-mono text-[10px]">
             <div>
-              <p className="text-zinc-500">Open Legs</p>
-              <p className="font-bold text-zinc-200">{b.openPositions}</p>
+              <p className="text-zinc-500">Positions</p>
+              <p className="font-bold text-zinc-200">
+                {b.openPositions} <span className="text-[9px] font-normal text-zinc-400">({b.closedPositions ?? 0} clsd)</span>
+              </p>
+            </div>
+            <div>
+              <p className="text-zinc-500">Realized</p>
+              <p className={`font-semibold tabular-nums ${dirClass(b.realizedPnl)}`}>
+                {fmtSignedINR(b.realizedPnl)}
+              </p>
             </div>
             <div>
               <p className="text-zinc-500">Unrealized</p>
@@ -1145,9 +1153,9 @@ function BrokerAccountCard({
               </p>
             </div>
             <div>
-              <p className="text-zinc-500">Realized</p>
-              <p className={`font-semibold tabular-nums ${dirClass(b.realizedPnl)}`}>
-                {fmtSignedINR(b.realizedPnl)}
+              <p className="text-zinc-500">Net Day P&amp;L</p>
+              <p className={`font-bold tabular-nums ${dirClass(b.totalPnl)}`}>
+                {fmtSignedINR(b.totalPnl)}
               </p>
             </div>
           </div>
@@ -1182,15 +1190,18 @@ function BrokerPositionsTable({
   broker,
   positions,
   brokerSummary,
+  statusFilter,
 }: {
   broker: Broker;
   positions: DashboardPosition[];
   brokerSummary?: BrokerPortfolio;
+  statusFilter?: 'all' | 'open' | 'closed';
 }) {
   if (positions.length === 0) {
+    const filterLabel = statusFilter === 'open' ? 'open ' : statusFilter === 'closed' ? 'closed ' : '';
     return (
       <div className="flex flex-col items-center justify-center p-6 text-center font-mono text-xs text-zinc-500">
-        <p>No active positions held in {BROKER_LABELS[broker]}.</p>
+        <p>No {filterLabel}positions held in {BROKER_LABELS[broker]}.</p>
         <Link
           href={`/scalper?broker=${broker}`}
           className="mt-2 text-[11px] font-bold text-amber-400 hover:underline"
@@ -1203,19 +1214,19 @@ function BrokerPositionsTable({
 
   // Calculate broker-level subtotals
   const totalQty = positions.reduce((acc, p) => acc + p.netQty, 0);
-  const totalUnrealized = positions.reduce((acc, p) => acc + p.unrealizedPnl, 0);
+  const totalUnrealized = positions.reduce((acc, p) => acc + (p.isOpen ? p.unrealizedPnl : 0), 0);
   const totalRealized = positions.reduce((acc, p) => acc + p.realizedPnl, 0);
-  const totalPnl = positions.reduce((acc, p) => acc + p.totalPnl, 0);
+  const totalPnl = totalUnrealized + totalRealized;
 
   return (
     <div className="overflow-x-auto">
       <table className="w-full border-collapse text-left">
         <thead>
           <tr className="bg-zinc-800">
-            <th className="px-3 py-2 text-center text-xs font-bold text-white">Side</th>
+            <th className="px-3 py-2 text-center text-xs font-bold text-white">Status</th>
             <th className="px-3 py-2 text-left text-xs font-bold text-white">Contract / Strike</th>
             <th className="px-3 py-2 text-center text-xs font-bold text-white">Product</th>
-            <th className="px-3 py-2 text-right text-xs font-bold text-white">Qty</th>
+            <th className="px-3 py-2 text-right text-xs font-bold text-white">Net Qty</th>
             <th className="px-3 py-2 text-right text-xs font-bold text-white">Avg Price</th>
             <th className="px-3 py-2 text-right text-xs font-bold text-white">LTP</th>
             <th className="px-3 py-2 text-right text-xs font-bold text-white">Unrealized</th>
@@ -1227,31 +1238,43 @@ function BrokerPositionsTable({
         <tbody className="divide-y divide-zinc-800 font-mono text-xs">
           {positions.map(p => {
             const parsed = parseContract(p.tradingSymbol);
+            const isClosed = !p.isOpen || p.netQty === 0;
             const isBuy = p.netQty > 0;
             const hasLtp = p.lastPrice > 0;
+            const isMcx =
+              String(p.exchange).toUpperCase().includes('MCX') ||
+              p.tradingSymbol.toUpperCase().includes('CRUDE');
 
             return (
               <tr
-                key={`${p.broker}:${p.tradingSymbol}:${p.productType}`}
-                className="transition-colors hover:bg-zinc-800/40"
+                key={`${p.broker}:${p.tradingSymbol}:${p.productType}:${isClosed ? 'closed' : 'open'}:${p.realizedPnl}`}
+                className={`transition-colors ${isClosed ? 'bg-zinc-950/40 hover:bg-zinc-800/30' : 'hover:bg-zinc-800/40'}`}
               >
-                {/* Side Tag */}
+                {/* Status / Side Tag */}
                 <td className="px-3 py-2 text-center">
-                  <span
-                    className={`inline-block rounded px-1.5 py-0.5 text-[10px] font-bold ${
-                      isBuy
-                        ? 'border border-emerald-500/30 bg-emerald-500/10 text-emerald-400'
-                        : 'border border-red-500/30 bg-red-500/10 text-red-400'
-                    }`}
-                  >
-                    {isBuy ? 'BUY' : 'SELL'}
-                  </span>
+                  {isClosed ? (
+                    <span className="inline-block rounded border border-zinc-700 bg-zinc-800/90 px-1.5 py-0.5 text-[10px] font-bold text-zinc-400">
+                      CLOSED
+                    </span>
+                  ) : (
+                    <span
+                      className={`inline-block rounded px-1.5 py-0.5 text-[10px] font-bold ${
+                        isBuy
+                          ? 'border border-emerald-500/30 bg-emerald-500/10 text-emerald-400'
+                          : 'border border-red-500/30 bg-red-500/10 text-red-400'
+                      }`}
+                    >
+                      {isBuy ? 'BUY' : 'SELL'}
+                    </span>
+                  )}
                 </td>
 
                 {/* Contract / Strike */}
                 <td className="px-3 py-2">
                   <div className="flex items-center gap-2">
-                    <span className="font-bold text-zinc-100">{parsed.displaySymbol}</span>
+                    <span className={`font-bold ${isClosed ? 'text-zinc-300' : 'text-zinc-100'}`}>
+                      {parsed.displaySymbol}
+                    </span>
                     {parsed.type && (
                       <span
                         className={`rounded px-1.5 py-0.2 text-[9px] font-bold ${
@@ -1277,40 +1300,74 @@ function BrokerPositionsTable({
                   </span>
                 </td>
 
-                {/* Qty */}
-                <td
-                  className={`px-3 py-2 text-right font-bold tabular-nums ${
-                    isBuy ? 'text-emerald-400' : 'text-red-400'
-                  }`}
-                >
-                  {isBuy ? `+${p.netQty}` : p.netQty}
+                {/* Net Qty */}
+                <td className="px-3 py-2 text-right tabular-nums">
+                  {isClosed ? (
+                    <div className="flex flex-col items-end">
+                      <span className="text-zinc-500 font-mono">0</span>
+                      {p.buyQty || p.sellQty ? (
+                        <span className="text-[9px] text-zinc-600 font-mono">
+                          {p.buyQty || p.sellQty} {isMcx ? 'bbl' : 'traded'}
+                        </span>
+                      ) : null}
+                    </div>
+                  ) : (
+                    <span
+                      className={`font-bold ${
+                        isBuy ? 'text-emerald-400' : 'text-red-400'
+                      }`}
+                    >
+                      {isBuy ? `+${p.netQty}` : p.netQty}
+                    </span>
+                  )}
                 </td>
 
                 {/* Avg Price */}
                 <td className="px-3 py-2 text-right tabular-nums text-zinc-300">
-                  ₹{fmtNum(p.avgPrice, 2)}
+                  {isClosed && (p.buyAvg > 0 || p.sellAvg > 0) ? (
+                    <div className="flex flex-col items-end text-[10px] text-zinc-400 leading-tight">
+                      <span>B: ₹{fmtNum(p.buyAvg, 2)}</span>
+                      <span>S: ₹{fmtNum(p.sellAvg, 2)}</span>
+                    </div>
+                  ) : (
+                    `₹${fmtNum(p.avgPrice, 2)}`
+                  )}
                 </td>
 
                 {/* LTP */}
                 <td
                   className="px-3 py-2 text-right tabular-nums text-zinc-200"
                   title={
-                    hasLtp
+                    isClosed
+                      ? 'Position closed/squared off'
+                      : hasLtp
                       ? undefined
                       : 'Broker returns no LTP. Excluded from P&L to prevent strike-marking distortion.'
                   }
                 >
-                  {hasLtp ? `₹${fmtNum(p.lastPrice, 2)}` : <span className="text-zinc-600">—</span>}
+                  {isClosed ? (
+                    <span className="text-zinc-600">—</span>
+                  ) : hasLtp ? (
+                    `₹${fmtNum(p.lastPrice, 2)}`
+                  ) : (
+                    <span className="text-zinc-600">—</span>
+                  )}
                 </td>
 
                 {/* Unrealized P&L */}
-                <td className={`px-3 py-2 text-right tabular-nums ${dirClass(p.unrealizedPnl)}`}>
-                  {hasLtp || p.unrealizedPnl !== 0 ? fmtSignedINR(p.unrealizedPnl) : <span className="text-zinc-600">—</span>}
+                <td className={`px-3 py-2 text-right tabular-nums ${isClosed ? 'text-zinc-600' : dirClass(p.unrealizedPnl)}`}>
+                  {isClosed ? (
+                    <span className="text-zinc-600">—</span>
+                  ) : hasLtp || p.unrealizedPnl !== 0 ? (
+                    fmtSignedINR(p.unrealizedPnl)
+                  ) : (
+                    <span className="text-zinc-600">—</span>
+                  )}
                 </td>
 
                 {/* Realized P&L */}
                 <td className={`px-3 py-2 text-right tabular-nums ${dirClass(p.realizedPnl)}`}>
-                  {fmtSignedINR(p.realizedPnl)}
+                  {p.realizedPnl !== 0 ? fmtSignedINR(p.realizedPnl) : <span className="text-zinc-600">₹0</span>}
                 </td>
 
                 {/* Total P&L */}
@@ -1324,7 +1381,7 @@ function BrokerPositionsTable({
                     href={`/scalper?broker=${p.broker}&symbol=${parsed.underlying}`}
                     className="inline-flex items-center rounded border border-zinc-700 bg-zinc-800 px-2 py-0.5 text-[10px] font-bold text-zinc-300 transition-colors hover:border-amber-500/40 hover:text-amber-400"
                   >
-                    TRADE
+                    {isClosed ? 'RE-TRADE' : 'TRADE'}
                   </Link>
                 </td>
               </tr>
@@ -1334,13 +1391,13 @@ function BrokerPositionsTable({
         <tfoot>
           <tr className="border-t-2 border-zinc-700 bg-zinc-950 font-mono text-xs font-bold">
             <td colSpan={3} className="px-3 py-2 text-zinc-400">
-              SUBTOTAL ({positions.length} LEGS)
+              SUBTOTAL ({positions.length} {positions.length === 1 ? 'POSITION' : 'POSITIONS'})
             </td>
             <td className="px-3 py-2 text-right tabular-nums text-zinc-200">
-              {totalQty}
+              {totalQty !== 0 ? (totalQty > 0 ? `+${totalQty}` : totalQty) : '0'}
             </td>
             <td colSpan={2} className="px-3 py-2 text-right text-zinc-500">
-              {brokerSummary?.unpricedPositions && brokerSummary.unpricedPositions > 0 ? (
+              {brokerSummary?.unpricedPositions && brokerSummary.unpricedPositions > 0 && statusFilter !== 'closed' ? (
                 <span className="text-amber-400">
                   {brokerSummary.unpricedPositions} leg(s) unpriced
                 </span>
@@ -1380,6 +1437,7 @@ function SeparatedPositionsSection({
   portfolioTotals?: DashboardPortfolioResponse['totals'];
 }) {
   const [activeTab, setActiveTab] = useState<'all' | Broker>('all');
+  const [statusFilter, setStatusFilter] = useState<'all' | 'open' | 'closed'>('all');
   const [searchQuery, setSearchQuery] = useState('');
 
   // Extract all positions count
@@ -1387,9 +1445,12 @@ function SeparatedPositionsSection({
     return brokers.flatMap(b => b.positions);
   }, [brokers]);
 
+  const openCount = allPositions.filter(p => p.isOpen).length;
+  const closedCount = allPositions.filter(p => !p.isOpen).length;
+
   return (
     <TerminalPanel
-      title="Open Positions (Per Broker)"
+      title="Broker Positions Book (Open & Closed)"
       icon={Layers}
       href="/portfolio"
       badge={
@@ -1398,22 +1459,31 @@ function SeparatedPositionsSection({
         </span>
       }
       meta={
-        <div className="flex items-center gap-3">
-          <span>{allPositions.length} TOTAL LEGS</span>
+        <div className="flex items-center gap-3 font-mono text-xs">
+          <span>{openCount} OPEN · {closedCount} CLOSED</span>
           <span className="text-zinc-600">|</span>
-          <span className={`font-bold tabular-nums ${dirClass(portfolioTotals?.unrealizedPnl)}`}>
-            OPEN: {fmtSignedINR(portfolioTotals?.unrealizedPnl)}
+          <span className="text-zinc-400">
+            OPEN: <strong className={dirClass(portfolioTotals?.unrealizedPnl)}>{fmtSignedINR(portfolioTotals?.unrealizedPnl)}</strong>
+          </span>
+          <span className="text-zinc-600">|</span>
+          <span className="text-zinc-400">
+            BOOKED: <strong className={dirClass(portfolioTotals?.realizedPnl)}>{fmtSignedINR(portfolioTotals?.realizedPnl)}</strong>
+          </span>
+          <span className="text-zinc-600">|</span>
+          <span className="text-zinc-400">
+            NET: <strong className={dirClass(portfolioTotals?.totalPnl)}>{fmtSignedINR(portfolioTotals?.totalPnl)}</strong>
           </span>
         </div>
       }
     >
       <div className="flex flex-col gap-4 p-3.5">
-        {/* Controls Bar: Broker Selector Tabs + Search Box */}
+        {/* Controls Bar: Broker Selector Tabs + Status Filter + Search Box */}
         <div className="flex flex-wrap items-center justify-between gap-3 border-b border-zinc-800 pb-3">
           <div className="flex flex-wrap items-center gap-1.5">
             <button
+              type="button"
               onClick={() => setActiveTab('all')}
-              className={`rounded-lg px-3 py-1.5 font-mono text-xs font-bold transition-colors ${
+              className={`rounded-lg px-3 py-1.5 font-mono text-xs font-bold transition-colors cursor-pointer ${
                 activeTab === 'all'
                   ? 'border border-amber-500/40 bg-amber-500/15 text-amber-400'
                   : 'border border-zinc-800 bg-zinc-950 text-zinc-400 hover:text-zinc-200'
@@ -1430,8 +1500,9 @@ function SeparatedPositionsSection({
               return (
                 <button
                   key={key}
+                  type="button"
                   onClick={() => setActiveTab(key)}
-                  className={`flex items-center gap-1.5 rounded-lg px-3 py-1.5 font-mono text-xs font-bold transition-colors ${
+                  className={`flex items-center gap-1.5 rounded-lg px-3 py-1.5 font-mono text-xs font-bold transition-colors cursor-pointer ${
                     isSelected
                       ? 'border border-amber-500/40 bg-amber-500/15 text-amber-400'
                       : 'border border-zinc-800 bg-zinc-950 text-zinc-400 hover:text-zinc-200'
@@ -1449,15 +1520,56 @@ function SeparatedPositionsSection({
             })}
           </div>
 
-          <div className="relative min-w-[220px]">
-            <Search className="absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-zinc-500" />
-            <input
-              type="text"
-              placeholder="Search strike, CE/PE, symbol…"
-              value={searchQuery}
-              onChange={e => setSearchQuery(e.target.value)}
-              className="w-full rounded-lg border border-zinc-800 bg-zinc-950 py-1.5 pl-8 pr-3 font-mono text-xs text-zinc-100 placeholder-zinc-500 focus:border-amber-500/50 focus:outline-none"
-            />
+          <div className="flex flex-wrap items-center gap-2.5">
+            {/* Status Filter Toggle */}
+            <div className="flex items-center rounded-lg border border-zinc-800 bg-zinc-950 p-0.5 font-mono text-xs">
+              <button
+                type="button"
+                onClick={() => setStatusFilter('all')}
+                className={`rounded-md px-2.5 py-1 text-[11px] font-bold transition-colors cursor-pointer ${
+                  statusFilter === 'all'
+                    ? 'border border-amber-500/40 bg-amber-500/15 text-amber-400'
+                    : 'text-zinc-400 hover:text-zinc-200'
+                }`}
+              >
+                ALL ({allPositions.length})
+              </button>
+              <button
+                type="button"
+                onClick={() => setStatusFilter('open')}
+                className={`flex items-center gap-1.5 rounded-md px-2.5 py-1 text-[11px] font-bold transition-colors cursor-pointer ${
+                  statusFilter === 'open'
+                    ? 'border border-emerald-500/40 bg-emerald-500/15 text-emerald-400'
+                    : 'text-zinc-400 hover:text-zinc-200'
+                }`}
+              >
+                <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" />
+                OPEN ({openCount})
+              </button>
+              <button
+                type="button"
+                onClick={() => setStatusFilter('closed')}
+                className={`flex items-center gap-1.5 rounded-md px-2.5 py-1 text-[11px] font-bold transition-colors cursor-pointer ${
+                  statusFilter === 'closed'
+                    ? 'border border-sky-500/40 bg-sky-500/15 text-sky-400'
+                    : 'text-zinc-400 hover:text-zinc-200'
+                }`}
+              >
+                <span className="h-1.5 w-1.5 rounded-full bg-zinc-500" />
+                CLOSED ({closedCount})
+              </button>
+            </div>
+
+            <div className="relative min-w-[200px]">
+              <Search className="absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-zinc-500" />
+              <input
+                type="text"
+                placeholder="Search strike, CE/PE, crude, symbol…"
+                value={searchQuery}
+                onChange={e => setSearchQuery(e.target.value)}
+                className="w-full rounded-lg border border-zinc-800 bg-zinc-950 py-1.5 pl-8 pr-3 font-mono text-xs text-zinc-100 placeholder-zinc-500 focus:border-amber-500/50 focus:outline-none"
+              />
+            </div>
           </div>
         </div>
 
@@ -1466,11 +1578,17 @@ function SeparatedPositionsSection({
           <div className="flex flex-col gap-6">
             {BROKER_ORDER.map(brokerKey => {
               const brokerData = brokers.find(b => b.broker === brokerKey);
-              const brokerPositions = (brokerData?.positions ?? []).filter(p =>
-                searchQuery
-                  ? p.tradingSymbol.toUpperCase().includes(searchQuery.trim().toUpperCase())
-                  : true
-              );
+              const brokerPositions = (brokerData?.positions ?? []).filter(p => {
+                if (statusFilter === 'open' && !p.isOpen) return false;
+                if (statusFilter === 'closed' && p.isOpen) return false;
+                if (!searchQuery) return true;
+                const q = searchQuery.trim().toUpperCase();
+                return (
+                  p.tradingSymbol.toUpperCase().includes(q) ||
+                  p.exchange.toUpperCase().includes(q) ||
+                  p.productType.toUpperCase().includes(q)
+                );
+              });
 
               return (
                 <div
@@ -1488,7 +1606,7 @@ function SeparatedPositionsSection({
                           {BROKER_LABELS[brokerKey]} Book
                         </span>
                         <span className="ml-2 rounded border border-zinc-700 bg-zinc-800 px-1.5 py-0.2 font-mono text-[9px] font-semibold text-zinc-400">
-                          {brokerPositions.length} LEGS
+                          {brokerData?.openPositions ?? 0} OPEN · {brokerData?.closedPositions ?? 0} CLOSED
                         </span>
                       </div>
                     </div>
@@ -1504,9 +1622,16 @@ function SeparatedPositionsSection({
                           </span>
                           <span className="text-zinc-600">|</span>
                           <span className="text-zinc-400">
-                            P&amp;L:{' '}
+                            Day P&amp;L:{' '}
                             <strong className={dirClass(brokerData.totalPnl)}>
                               {fmtSignedINR(brokerData.totalPnl)}
+                            </strong>
+                          </span>
+                          <span className="text-zinc-600">|</span>
+                          <span className="text-zinc-400">
+                            Booked:{' '}
+                            <strong className={dirClass(brokerData.realizedPnl)}>
+                              {fmtSignedINR(brokerData.realizedPnl)}
                             </strong>
                           </span>
                         </>
@@ -1528,6 +1653,7 @@ function SeparatedPositionsSection({
                     broker={brokerKey}
                     positions={brokerPositions}
                     brokerSummary={brokerData}
+                    statusFilter={statusFilter}
                   />
                 </div>
               );
@@ -1540,11 +1666,17 @@ function SeparatedPositionsSection({
           <div className="rounded-xl border border-zinc-800 bg-zinc-950/80 overflow-hidden shadow-sm">
             {(() => {
               const brokerData = brokers.find(b => b.broker === activeTab);
-              const brokerPositions = (brokerData?.positions ?? []).filter(p =>
-                searchQuery
-                  ? p.tradingSymbol.toUpperCase().includes(searchQuery.trim().toUpperCase())
-                  : true
-              );
+              const brokerPositions = (brokerData?.positions ?? []).filter(p => {
+                if (statusFilter === 'open' && !p.isOpen) return false;
+                if (statusFilter === 'closed' && p.isOpen) return false;
+                if (!searchQuery) return true;
+                const q = searchQuery.trim().toUpperCase();
+                return (
+                  p.tradingSymbol.toUpperCase().includes(q) ||
+                  p.exchange.toUpperCase().includes(q) ||
+                  p.productType.toUpperCase().includes(q)
+                );
+              });
 
               return (
                 <div>
@@ -1553,16 +1685,23 @@ function SeparatedPositionsSection({
                       <span className="font-mono text-xs font-bold uppercase tracking-wider text-amber-400">
                         {BROKER_LABELS[activeTab]} Dedicated Book
                       </span>
-                      <span className="rounded bg-zinc-800 px-1.5 py-0.2 font-mono text-[9px] font-bold text-zinc-400">
-                        {brokerPositions.length} LEGS
+                      <span className="rounded border border-zinc-700 bg-zinc-800 px-1.5 py-0.2 font-mono text-[9px] font-semibold text-zinc-400">
+                        {brokerData?.openPositions ?? 0} OPEN · {brokerData?.closedPositions ?? 0} CLOSED
                       </span>
                     </div>
 
                     <div className="flex items-center gap-3 font-mono text-xs">
                       <span className="text-zinc-400">
-                        Net P&amp;L:{' '}
+                        Day P&amp;L:{' '}
                         <strong className={dirClass(brokerData?.totalPnl)}>
                           {fmtSignedINR(brokerData?.totalPnl)}
+                        </strong>
+                      </span>
+                      <span className="text-zinc-600">|</span>
+                      <span className="text-zinc-400">
+                        Booked:{' '}
+                        <strong className={dirClass(brokerData?.realizedPnl)}>
+                          {fmtSignedINR(brokerData?.realizedPnl)}
                         </strong>
                       </span>
                       <Link
@@ -1578,6 +1717,7 @@ function SeparatedPositionsSection({
                     broker={activeTab}
                     positions={brokerPositions}
                     brokerSummary={brokerData}
+                    statusFilter={statusFilter}
                   />
                 </div>
               );
@@ -1968,31 +2108,32 @@ export default function MarketDashboard() {
                 <StatTile
                   label="Margin Utilized"
                   value={fmtINRCompact(totals?.utilizedMargin)}
-                  sub={`${totalMarginUtilPercent.toFixed(1)}% of total margin base`}
+                  sub={`${totalMarginUtilPercent.toFixed(1)}% util · ${fmtINRCompact(totalCollateral)} pledged`}
                   progress={{
                     percent: totalMarginUtilPercent,
                     colorClass: totalMarginUtilPercent > 80 ? 'bg-red-500' : 'bg-amber-400',
                   }}
                 />
                 <StatTile
-                  label="Collateral Base"
-                  value={fmtINRCompact(totalCollateral)}
-                  sub="pledged backing option writes"
+                  label="Booked Realized P&L"
+                  value={fmtSignedINR(totals?.realizedPnl)}
+                  sub={`${totals?.closedPositions ?? 0} closed positions today`}
+                  tone={(totals?.realizedPnl ?? 0) >= 0 ? 'up' : 'down'}
                 />
                 <StatTile
                   label="Open Unrealized P&L"
                   value={fmtSignedINR(totals?.unrealizedPnl)}
                   sub={
                     totals && totals.unpricedPositions > 0
-                      ? `${totals.openPositions} legs · ${totals.unpricedPositions} unpriced`
+                      ? `${totals.openPositions} active legs · ${totals.unpricedPositions} unpriced`
                       : `${totals?.openPositions ?? 0} active legs`
                   }
                   tone={(totals?.unrealizedPnl ?? 0) >= 0 ? 'up' : 'down'}
                 />
                 <StatTile
-                  label="Net Day P&L"
+                  label="Net Day P&L (Total)"
                   value={fmtSignedINR(totals?.totalPnl)}
-                  sub={`realized ${fmtSignedINR(totals?.realizedPnl)}`}
+                  sub={`realized (${fmtSignedINR(totals?.realizedPnl)}) + open (${fmtSignedINR(totals?.unrealizedPnl)})`}
                   tone={(totals?.totalPnl ?? 0) >= 0 ? 'up' : 'down'}
                 />
               </div>
