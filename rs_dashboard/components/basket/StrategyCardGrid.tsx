@@ -158,11 +158,11 @@ export default function StrategyCardGrid({
   atmStrike, step, allStrikes, autoPremium, frontExpiry, farExpiry,
 }: StrategyCardGridProps) {
   return (
-    <div className="flex items-start gap-3 flex-wrap">
-      <div className="flex flex-col gap-1.5 flex-none pt-0.5">
+    <div className="flex flex-col gap-2">
+      <div className="flex flex-wrap gap-1.5">
         {CATEGORIES.map(cat => (
           <button key={cat} onClick={() => onCategoryChange(cat)}
-            className={`px-4 py-1.5 text-xs font-bold rounded-lg border text-left transition-all ${
+            className={`px-3 py-1 text-xs font-bold rounded-lg border transition-all ${
               category === cat ? CATEGORY_COLORS[cat] : 'border-zinc-800 bg-zinc-900/40 text-zinc-300 hover:text-zinc-100'
             }`}>
             {cat}
@@ -170,7 +170,7 @@ export default function StrategyCardGrid({
         ))}
       </div>
 
-      <div className="flex-1 flex gap-2.5 overflow-x-auto pb-1 min-w-0">
+      <div className="flex gap-2.5 overflow-x-auto pb-1 min-w-0">
         {STRATEGY_CATEGORIES[category].map(tpl => {
           const legsInfo = resolveTemplateLegs(
             tpl, atmStrike, step, allStrikes, autoPremium, frontExpiry, farExpiry,
