@@ -9,14 +9,15 @@ import { useChartChrome } from '@/lib/chartTheme';
 
 const CATEGORIES = Object.keys(STRATEGY_CATEGORIES) as StrategyCategory[];
 
-const CATEGORY_COLORS: Record<StrategyCategory, string> = {
-  Bullish:       'bg-emerald-500/10 text-emerald-300 border-emerald-500/40',
-  Bearish:       'bg-rose-500/10 text-rose-300 border-rose-500/40',
-  'Range Bound': 'bg-amber-500/10 text-amber-300 border-amber-500/40',
-  'Big Move':    'bg-sky-500/10 text-sky-300 border-sky-500/40',
-  'Ratio Spreads': 'bg-violet-500/10 text-violet-300 border-violet-500/40',
-  Lizard:          'bg-lime-500/10 text-lime-300 border-lime-500/40',
-  Calendar:        'bg-fuchsia-500/10 text-fuchsia-300 border-fuchsia-500/40',
+// Strict Bloomberg skill: accent text colors stop at -400, never -500+
+const CATEGORY_STYLES: Record<StrategyCategory, { active: string; dot: string }> = {
+  Bullish:       { active: 'border-emerald-500/40 bg-emerald-500/15 text-emerald-400', dot: 'bg-emerald-400' },
+  Bearish:       { active: 'border-red-500/40 bg-red-500/15 text-red-400',       dot: 'bg-red-400' },
+  'Range Bound': { active: 'border-amber-500/40 bg-amber-500/15 text-amber-400',     dot: 'bg-amber-400' },
+  'Big Move':    { active: 'border-sky-500/40 bg-sky-500/15 text-sky-400',         dot: 'bg-sky-400' },
+  'Ratio Spreads': { active: 'border-violet-500/40 bg-violet-500/15 text-violet-400', dot: 'bg-violet-400' },
+  Lizard:        { active: 'border-lime-500/40 bg-lime-500/15 text-lime-400',       dot: 'bg-lime-400' },
+  Calendar:      { active: 'border-fuchsia-500/40 bg-fuchsia-500/15 text-fuchsia-400', dot: 'bg-fuchsia-400' },
 };
 
 interface LegLiveInfo {
@@ -113,9 +114,9 @@ function StrategyGlyph({
   }, [template, legsInfo]);
 
   return (
-    <svg viewBox="0 0 80 36" className="w-full h-10" aria-label="Strategy payoff shape" role="img">
+    <svg viewBox="0 0 80 36" className="w-full h-9" aria-label="Strategy payoff shape" role="img">
       <line x1={4} x2={76} y1={18} y2={18} stroke={chrome.baseline} strokeWidth={1} strokeDasharray="2 2" />
-      <path d={path} fill="none" stroke="#34d399" strokeWidth={1.75} />
+      <path d={path} fill="none" stroke="#34d399" strokeWidth={1.75} strokeLinecap="round" strokeLinejoin="round" />
     </svg>
   );
 }
@@ -127,15 +128,15 @@ function formatLegSummary(
   if (legsInfo) {
     return legsInfo.legs.map(leg => {
       const priceStr = leg.ltp > 0 ? ` ₹${leg.ltp.toFixed(1)}` : '';
-      const farStr = leg.expiryRole === 'far' ? ' far' : '';
-      return `${leg.side === 'B' ? 'Buy' : 'Sell'} ${leg.strike} ${leg.option}${priceStr}${farStr}`;
+      const farStr = leg.expiryRole === 'far' ? ' FAR' : '';
+      return `${leg.side === 'B' ? 'BUY' : 'SELL'} ${leg.strike} ${leg.option}${priceStr}${farStr}`;
     }).join(' · ');
   }
 
   return template.legs.map(leg => {
     const relativeStrike = leg.offset === 0 ? 'ATM' : `${leg.offset > 0 ? '+' : ''}${leg.offset}`;
-    const expiry = leg.expiryRole === 'far' ? ' far' : '';
-    return `${leg.side === 'B' ? 'Buy' : 'Sell'} ${leg.ratio} ${relativeStrike} ${leg.option}${expiry}`;
+    const expiry = leg.expiryRole === 'far' ? ' FAR' : '';
+    return `${leg.side === 'B' ? 'BUY' : 'SELL'} ${leg.ratio} ${relativeStrike} ${leg.option}${expiry}`;
   }).join(' · ');
 }
 
@@ -158,50 +159,92 @@ export default function StrategyCardGrid({
   atmStrike, step, allStrikes, autoPremium, frontExpiry, farExpiry,
 }: StrategyCardGridProps) {
   return (
-    <div className="flex flex-col gap-2">
-      <div className="flex flex-wrap gap-1.5">
-        {CATEGORIES.map(cat => (
-          <button key={cat} onClick={() => onCategoryChange(cat)}
-            className={`px-3 py-1 text-xs font-bold rounded-lg border transition-all ${
-              category === cat ? CATEGORY_COLORS[cat] : 'border-zinc-800 bg-zinc-900/40 text-zinc-300 hover:text-zinc-100'
-            }`}>
-            {cat}
-          </button>
-        ))}
+    <div className="flex flex-col gap-2.5">
+      {/* Category Pills Bar */}
+      <div className="flex items-center justify-between gap-2 flex-wrap">
+        <div className="flex flex-wrap items-center gap-1.5 p-1 rounded-lg border border-zinc-800/80 bg-zinc-950/80 shadow-inner">
+          {CATEGORIES.map(cat => {
+            const isCatActive = category === cat;
+            const style = CATEGORY_STYLES[cat];
+            return (
+              <button
+                key={cat}
+                type="button"
+                onClick={() => onCategoryChange(cat)}
+                className={`flex items-center gap-1.5 px-2.5 py-1 text-[10px] font-mono font-bold uppercase tracking-wider rounded-md border transition-all ${
+                  isCatActive
+                    ? `${style.active} shadow-sm`
+                    : 'border-transparent bg-transparent text-zinc-400 hover:text-zinc-200 hover:border-zinc-800 hover:bg-zinc-900/50'
+                }`}
+              >
+                <span className={`w-1.5 h-1.5 rounded-full ${isCatActive ? style.dot : 'bg-zinc-600'}`} />
+                {cat}
+                <span className="text-[9px] opacity-70 font-mono">({STRATEGY_CATEGORIES[cat].length})</span>
+              </button>
+            );
+          })}
+        </div>
+
+        <div className="font-mono text-[10px] text-zinc-400 hidden sm:flex items-center gap-2">
+          <span>ATM: <strong className="text-amber-400">{atmStrike ?? '—'}</strong></span>
+          <span className="text-zinc-700">|</span>
+          <span>STEP: <strong className="text-zinc-300">{step ?? '—'}</strong></span>
+        </div>
       </div>
 
-      <div className="flex gap-2.5 overflow-x-auto pb-1 min-w-0">
+      {/* Horizontal Scroll Strategy Cards */}
+      <div className="flex gap-2.5 overflow-x-auto pb-1.5 min-w-0 scrollbar-thin">
         {STRATEGY_CATEGORIES[category].map(tpl => {
           const legsInfo = resolveTemplateLegs(
             tpl, atmStrike, step, allStrikes, autoPremium, frontExpiry, farExpiry,
           );
           const composition = formatLegSummary(tpl, legsInfo);
+          const isSelected = selectedKey === tpl.key;
 
           return (
-            <button key={tpl.key} onClick={() => onSelectTemplate(tpl)} aria-label={`${tpl.name}: ${composition}`}
+            <button
+              key={tpl.key}
+              type="button"
+              onClick={() => onSelectTemplate(tpl)}
+              aria-label={`${tpl.name}: ${composition}`}
               title={composition}
               disabled={disabled}
-              className={`flex-none w-52 p-3 rounded-xl border transition-all text-left disabled:opacity-40 flex flex-col justify-between ${
-                selectedKey === tpl.key
-                  ? 'border-emerald-500/50 bg-emerald-500/5'
-                  : 'border-zinc-800 bg-zinc-900/40 hover:border-zinc-600'
-              }`}>
+              className={`flex-none w-56 p-3 rounded-xl border transition-all text-left disabled:opacity-40 flex flex-col justify-between group ${
+                isSelected
+                  ? 'border-amber-500/60 bg-amber-500/10 shadow-sm shadow-amber-500/10 ring-1 ring-amber-500/30'
+                  : 'border-zinc-800 bg-zinc-950/80 hover:border-zinc-700 hover:bg-zinc-900/60'
+              }`}
+            >
               <div>
-                <StrategyGlyph template={tpl} legsInfo={legsInfo} />
-                <div className="flex items-center justify-between gap-1 mt-1">
-                  <p className="text-xs font-bold text-zinc-200 leading-tight truncate">{tpl.name}</p>
-                  {legsInfo && legsInfo.allPriced && (
-                    <span className={`text-[10px] font-mono font-bold px-1.5 py-0.5 rounded border whitespace-nowrap shrink-0 ${
+                <div className="flex items-center justify-between gap-1.5 mb-1.5">
+                  <p className="text-xs font-bold text-zinc-200 font-mono tracking-tight leading-tight truncate group-hover:text-amber-300 transition-colors">
+                    {tpl.name}
+                  </p>
+                  {legsInfo && legsInfo.allPriced ? (
+                    <span className={`text-[9px] font-mono font-bold px-1.5 py-0.5 rounded border whitespace-nowrap shrink-0 tabular-nums ${
                       legsInfo.netPremium >= 0
                         ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30'
-                        : 'bg-rose-500/10 text-rose-400 border-rose-500/30'
+                        : 'bg-red-500/10 text-red-400 border-red-500/30'
                     }`}>
-                      {legsInfo.netPremium >= 0 ? 'Cr' : 'Db'} ₹{Math.abs(legsInfo.netPremium).toFixed(1)}
+                      {legsInfo.netPremium >= 0 ? 'CR' : 'DB'} ₹{Math.abs(legsInfo.netPremium).toFixed(1)}
+                    </span>
+                  ) : (
+                    <span className="text-[9px] font-mono text-zinc-500 border border-zinc-800 px-1 py-0.5 rounded">
+                      {tpl.legs.length}L
                     </span>
                   )}
                 </div>
+
+                <div className="bg-zinc-900/40 rounded-lg p-1 border border-zinc-800/40 my-1">
+                  <StrategyGlyph template={tpl} legsInfo={legsInfo} />
+                </div>
               </div>
-              <p className="text-[10px] leading-snug text-zinc-400 mt-2 line-clamp-2 font-mono">{composition}</p>
+
+              <div className="mt-2 pt-2 border-t border-zinc-800/60">
+                <p className="text-[10px] leading-snug text-zinc-400 font-mono line-clamp-2">
+                  {composition}
+                </p>
+              </div>
             </button>
           );
         })}
