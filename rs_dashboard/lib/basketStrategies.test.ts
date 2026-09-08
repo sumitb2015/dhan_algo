@@ -142,3 +142,34 @@ test('computePayoff: Batman strategy has dual profit peaks (ears) and undefined 
   assert.ok(p120.y > p100.y, 'Upper short strike (120) must be a peak above center');
   assert.strictEqual(p80.y, p120.y, 'Symmetric Batman strategy has equal height ears');
 });
+
+test('STRATEGY_CATEGORIES: Range Bound includes single-type Call and Put Butterfly', () => {
+  const rangeBound = STRATEGY_CATEGORIES['Range Bound'];
+  const callBfly = rangeBound.find((s: any) => s.key === 'call-butterfly');
+  const putBfly = rangeBound.find((s: any) => s.key === 'put-butterfly');
+  assert.ok(callBfly, 'call-butterfly must exist in Range Bound');
+  assert.ok(putBfly, 'put-butterfly must exist in Range Bound');
+  assert.ok(callBfly!.legs.every((l: any) => l.option === 'CE'), 'Call Butterfly must use only calls');
+  assert.ok(putBfly!.legs.every((l: any) => l.option === 'PE'), 'Put Butterfly must use only puts');
+  assert.strictEqual(callBfly!.legs.length, 3);
+  assert.strictEqual(putBfly!.legs.length, 3);
+});
+
+test('computePayoff: Call Butterfly is defined-risk with a single peak at the body strike', () => {
+  const callButterflyLegs = [
+    { side: 'B' as const, option: 'CE' as const, strike: 80,  premium: 22, qty: 1 },
+    { side: 'S' as const, option: 'CE' as const, strike: 100, premium: 6,  qty: 2 },
+    { side: 'B' as const, option: 'CE' as const, strike: 120, premium: 1,  qty: 1 },
+  ];
+  const res = computePayoff(callButterflyLegs, 60, 140, 81);
+  assert.strictEqual(res.maxProfitUnlimited, false);
+  assert.strictEqual(res.maxLossUnlimited, false);
+  assert.strictEqual(res.leftWing, null);
+  assert.strictEqual(res.rightWing, null);
+
+  const p80 = res.points.find(p => Math.abs(p.x - 80) < 0.1);
+  const p100 = res.points.find(p => Math.abs(p.x - 100) < 0.1);
+  const p120 = res.points.find(p => Math.abs(p.x - 120) < 0.1);
+  assert.ok(p80 && p100 && p120);
+  assert.ok(p100.y > p80.y && p100.y > p120.y, 'Body strike (100) must be the peak');
+});

@@ -61,6 +61,12 @@ export const STRATEGY_CATEGORIES: Record<StrategyCategory, StrategyTemplate[]> =
       { side: 'S', option: 'CE', offset: 0, ratio: 1 }, { side: 'B', option: 'CE', offset: 4, ratio: 1 },
       { side: 'S', option: 'PE', offset: 0, ratio: 1 }, { side: 'B', option: 'PE', offset: -4, ratio: 1 },
     ] },
+    { key: 'call-butterfly',    name: 'Call Butterfly',         legs: [
+      { side: 'B', option: 'CE', offset: -4, ratio: 1 }, { side: 'S', option: 'CE', offset: 0, ratio: 2 }, { side: 'B', option: 'CE', offset: 4, ratio: 1 },
+    ] },
+    { key: 'put-butterfly',     name: 'Put Butterfly',          legs: [
+      { side: 'B', option: 'PE', offset: 4, ratio: 1 }, { side: 'S', option: 'PE', offset: 0, ratio: 2 }, { side: 'B', option: 'PE', offset: -4, ratio: 1 },
+    ] },
   ],
   'Big Move': [
     { key: 'long-straddle',     name: 'Long Straddle',          legs: [{ side: 'B', option: 'CE', offset: 0, ratio: 1 }, { side: 'B', option: 'PE', offset: 0, ratio: 1 }] },
