@@ -1,5 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getDhanCredentials } from '@/lib/dhanToken';
+import { kotakPost, KOTAK_PATHS, isKotakTokenValid } from '@/lib/kotakToken';
+import { kitePost, isZerodhaTokenValid } from '@/lib/zerodhaToken';
 import { invalidateBrokerCache } from '@/lib/brokerPositionsCache';
 
 const DHAN_ORDERS = 'https://api.dhan.co/v2/orders';
@@ -12,8 +14,8 @@ interface StrikeIdentifier {
 }
 
 export interface SyntheticLegSpec {
-  role: 'MAIN_CE' | 'MAIN_PE' | 'HEDGE';
-  optionType: 'CE' | 'PE';
+  role: 'MAIN_CE' | 'MAIN_PE' | 'HEDGE' | 'EXIT';
+  optionType: 'CE' | 'PE' | '';
   strike: number;
   side: 'BUY' | 'SELL';
   quantity: number;
@@ -34,6 +36,92 @@ interface ExecutedLegResult {
   orderId?: string;
   status: 'FILLED' | 'TRANSIT' | 'FAILED';
   error?: string;
+}
+
+function toKotakExchange(segment: string, isSensex: boolean): string {
+  if (isSensex || segment.toLowerCase().includes('bse')) return 'bse_fo';
+  return 'nse_fo';
+}
+
+function toZerodhaExchange(segment: string, isSensex: boolean): string {
+  if (isSensex || segment.toUpperCase().includes('BSE')) return 'BFO';
+  return 'NFO';
+}
+
+async function placeKotakLeg(leg: SyntheticLegSpec): Promise<{ orderId?: string; error?: string }> {
+  if (!leg.tradingSymbol) {
+    return { error: `Missing Kotak tradingsymbol for ${leg.strike} ${leg.optionType}` };
+  }
+
+  const isLimit = leg.orderType === 'LIMIT';
+  const tickPrice = isLimit && leg.price ? (Math.round(leg.price / 0.05) * 0.05).toFixed(2) : '0';
+  const product = leg.productType === 'MARGIN' ? 'NRML' : 'MIS';
+  const es = toKotakExchange(leg.exchangeSegment, leg.exchangeSegment.toLowerCase().includes('bse'));
+
+  try {
+    const json = await kotakPost(KOTAK_PATHS.placeOrder, {
+      es,
+      pc: product,
+      pr: tickPrice,
+      pt: isLimit ? 'L' : 'MKT',
+      qt: String(Math.abs(leg.quantity)),
+      rt: 'DAY',
+      ts: leg.tradingSymbol,
+      tt: leg.side === 'BUY' ? 'B' : 'S',
+      am: 'NO',
+      dq: '0',
+      mp: '0',
+      pf: 'N',
+      tp: '0',
+      os: 'NEOTRADEAPI',
+    });
+
+    const data = (typeof json.data === 'object' && json.data !== null ? json.data : {}) as Record<string, unknown>;
+    const orderId = json.nOrdNo ?? data.nOrdNo;
+    if (json.stat === 'Ok' && orderId) {
+      return { orderId: String(orderId) };
+    }
+    const errMsg = String(json.errMsg ?? json.message ?? JSON.stringify(json));
+    return { error: errMsg };
+  } catch (err) {
+    return { error: String((err as Error).message ?? err) };
+  }
+}
+
+async function placeZerodhaLeg(leg: SyntheticLegSpec): Promise<{ orderId?: string; error?: string }> {
+  if (!leg.tradingSymbol) {
+    return { error: `Missing Zerodha tradingsymbol for ${leg.strike} ${leg.optionType}` };
+  }
+
+  const isLimit = leg.orderType === 'LIMIT';
+  const product = leg.productType === 'MARGIN' ? 'NRML' : 'MIS';
+  const exchange = toZerodhaExchange(leg.exchangeSegment, leg.exchangeSegment.toUpperCase().includes('BSE'));
+
+  try {
+    const params: Record<string, string | number> = {
+      tradingsymbol: leg.tradingSymbol,
+      exchange,
+      transaction_type: leg.side,
+      order_type: isLimit ? 'LIMIT' : 'MARKET',
+      quantity: Math.abs(leg.quantity),
+      product,
+      validity: 'DAY',
+    };
+    if (isLimit && leg.price) {
+      params.price = Number(leg.price);
+    } else {
+      params.market_protection = -1;
+    }
+
+    const data = (await kitePost('/orders/regular', params)) as { order_id?: string; orderId?: string };
+    const orderId = data?.order_id ?? data?.orderId;
+    if (orderId) {
+      return { orderId: String(orderId) };
+    }
+    return { error: 'No order_id returned from Kite' };
+  } catch (err) {
+    return { error: String((err as Error).message ?? err) };
+  }
 }
 
 async function placeDhanLeg(
@@ -86,6 +174,22 @@ async function placeDhanLeg(
   }
 }
 
+async function placeBrokerLeg(
+  broker: 'dhan' | 'zerodha' | 'kotak',
+  dhanToken: string,
+  dhanClientId: string,
+  leg: SyntheticLegSpec,
+): Promise<{ orderId?: string; error?: string }> {
+  if (broker === 'dhan') {
+    return placeDhanLeg(dhanToken, dhanClientId, leg);
+  } else if (broker === 'kotak') {
+    return placeKotakLeg(leg);
+  } else if (broker === 'zerodha') {
+    return placeZerodhaLeg(leg);
+  }
+  return { error: `Unsupported broker: ${broker}` };
+}
+
 export async function POST(req: NextRequest): Promise<NextResponse> {
   const body = (await req.json()) as {
     action: 'enter' | 'exit';
@@ -129,7 +233,12 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   } = body;
 
   const isSensex = underlying === 'SENSEX';
-  const defaultExchangeSegment = isSensex ? 'BSE_FNO' : 'NSE_FNO';
+  const defaultExchangeSegment =
+    broker === 'kotak'
+      ? isSensex ? 'bse_fo' : 'nse_fo'
+      : broker === 'zerodha'
+        ? isSensex ? 'BFO' : 'NFO'
+        : isSensex ? 'BSE_FNO' : 'NSE_FNO';
 
   // ───────────────────────────────────────────────────────────────────────────
   // EXIT / FLATTEN ACTION
@@ -139,58 +248,74 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       return NextResponse.json({ success: false, error: 'No legs provided for exit' }, { status: 400 });
     }
 
+    let dhanToken = '';
+    let dhanClientId = '';
     if (broker === 'dhan') {
-      const { clientId, token } = getDhanCredentials();
-      if (!token) {
+      const creds = getDhanCredentials();
+      if (!creds.token) {
         return NextResponse.json({ success: false, error: 'No valid Dhan credentials' }, { status: 401 });
       }
-
-      const results: ExecutedLegResult[] = [];
-
-      // Margin-safe exit ordering:
-      // Execute BUY orders first (covering short option legs) so margin requirement drops to zero,
-      // before executing SELL orders (liquidating long option/hedge legs).
-      const sortedExitLegs = [
-        ...legsToExit.filter(l => l.side === 'BUY'),
-        ...legsToExit.filter(l => l.side === 'SELL'),
-      ];
-
-      for (const leg of sortedExitLegs) {
-        if (!leg.securityId) continue;
-        const res = await placeDhanLeg(token, clientId, {
-          role: 'MAIN_CE',
-          optionType: 'CE',
-          strike: 0,
-          side: leg.side,
-          quantity: Math.abs(leg.quantity),
-          securityId: leg.securityId,
-          orderType: 'MARKET',
-          productType: (leg.productType as 'INTRADAY' | 'MARGIN') || 'INTRADAY',
-          exchangeSegment: leg.exchangeSegment || defaultExchangeSegment,
-        });
-
-        results.push({
-          role: 'EXIT',
-          optionType: '',
-          strike: 0,
-          side: leg.side,
-          quantity: Math.abs(leg.quantity),
-          orderId: res.orderId,
-          status: res.orderId ? 'TRANSIT' : 'FAILED',
-          error: res.error,
-        });
+      dhanToken = creds.token;
+      dhanClientId = creds.clientId;
+    } else if (broker === 'kotak') {
+      if (!isKotakTokenValid()) {
+        return NextResponse.json({
+          success: false,
+          error: 'Kotak Neo session expired or missing. Please refresh Kotak token via autologin.',
+        }, { status: 401 });
       }
+    } else if (broker === 'zerodha') {
+      if (!isZerodhaTokenValid()) {
+        return NextResponse.json({
+          success: false,
+          error: 'Zerodha session expired or missing. Please refresh Zerodha token via autologin.',
+        }, { status: 401 });
+      }
+    }
 
-      invalidateBrokerCache('dhan');
-      const allSuccess = results.every(r => r.orderId);
-      return NextResponse.json({
-        success: allSuccess,
-        action: 'exit',
-        results,
+    const results: ExecutedLegResult[] = [];
+
+    // Margin-safe exit ordering:
+    // Execute BUY orders first (covering short option legs) so margin requirement drops to zero,
+    // before executing SELL orders (liquidating long option/hedge legs).
+    const sortedExitLegs = [
+      ...legsToExit.filter(l => l.side === 'BUY'),
+      ...legsToExit.filter(l => l.side === 'SELL'),
+    ];
+
+    for (const leg of sortedExitLegs) {
+      const res = await placeBrokerLeg(broker, dhanToken, dhanClientId, {
+        role: 'EXIT',
+        optionType: '',
+        strike: 0,
+        side: leg.side,
+        quantity: Math.abs(leg.quantity),
+        securityId: leg.securityId,
+        tradingSymbol: leg.tradingSymbol,
+        orderType: 'MARKET',
+        productType: (leg.productType as 'INTRADAY' | 'MARGIN') || 'INTRADAY',
+        exchangeSegment: leg.exchangeSegment || defaultExchangeSegment,
+      });
+
+      results.push({
+        role: 'EXIT',
+        optionType: '',
+        strike: 0,
+        side: leg.side,
+        quantity: Math.abs(leg.quantity),
+        orderId: res.orderId,
+        status: res.orderId ? 'TRANSIT' : 'FAILED',
+        error: res.error,
       });
     }
 
-    return NextResponse.json({ success: false, error: `Direct exit for broker ${broker} is not implemented` }, { status: 400 });
+    invalidateBrokerCache(broker);
+    const allSuccess = results.every(r => r.orderId);
+    return NextResponse.json({
+      success: allSuccess,
+      action: 'exit',
+      results,
+    });
   }
 
   // ───────────────────────────────────────────────────────────────────────────
@@ -204,10 +329,24 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   const legsToBuild: SyntheticLegSpec[] = [];
 
   const atmIdent = strikeMap[String(atmStrike)];
-  if (!atmIdent || !atmIdent.ceId || !atmIdent.peId) {
+  if (!atmIdent) {
     return NextResponse.json({
       success: false,
-      error: `ATM Strike ${atmStrike} CE/PE identifiers missing in strike lookup`,
+      error: `ATM Strike ${atmStrike} not found in strike identifiers lookup for ${broker}`,
+    }, { status: 400 });
+  }
+
+  if (broker === 'dhan' && (!atmIdent.ceId || !atmIdent.peId)) {
+    return NextResponse.json({
+      success: false,
+      error: `ATM Strike ${atmStrike} CE/PE Dhan security IDs missing in strike lookup`,
+    }, { status: 400 });
+  }
+
+  if ((broker === 'kotak' || broker === 'zerodha') && (!atmIdent.ceSymbol || !atmIdent.peSymbol)) {
+    return NextResponse.json({
+      success: false,
+      error: `ATM Strike ${atmStrike} CE/PE trading symbols missing for ${broker}. Please ensure option instruments are cached.`,
     }, { status: 400 });
   }
 
@@ -217,10 +356,11 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     if (hedgeEnabled && hedgeOffset > 0) {
       const hedgeStrike = atmStrike - hedgeOffset;
       const hedgeIdent = strikeMap[String(hedgeStrike)];
-      if (!hedgeIdent?.peId) {
+      const hasHedge = broker === 'dhan' ? Boolean(hedgeIdent?.peId) : Boolean(hedgeIdent?.peSymbol);
+      if (!hasHedge) {
         return NextResponse.json({
           success: false,
-          error: `Protective hedge strike ${hedgeStrike} PE not found in strike lookup. Aborting for margin safety.`,
+          error: `Protective hedge strike ${hedgeStrike} PE not found in ${broker} strike lookup. Aborting for margin safety.`,
         }, { status: 400 });
       }
       legsToBuild.push({
@@ -229,7 +369,8 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
         strike: hedgeStrike,
         side: 'BUY',
         quantity: totalQty,
-        securityId: hedgeIdent.peId,
+        securityId: hedgeIdent?.peId,
+        tradingSymbol: hedgeIdent?.peSymbol,
         orderType,
         productType,
         exchangeSegment: defaultExchangeSegment,
@@ -244,6 +385,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       side: 'BUY',
       quantity: totalQty,
       securityId: atmIdent.ceId,
+      tradingSymbol: atmIdent.ceSymbol,
       orderType,
       productType,
       exchangeSegment: defaultExchangeSegment,
@@ -257,6 +399,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       side: 'SELL',
       quantity: totalQty,
       securityId: atmIdent.peId,
+      tradingSymbol: atmIdent.peSymbol,
       orderType,
       productType,
       exchangeSegment: defaultExchangeSegment,
@@ -267,10 +410,11 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     if (hedgeEnabled && hedgeOffset > 0) {
       const hedgeStrike = atmStrike + hedgeOffset;
       const hedgeIdent = strikeMap[String(hedgeStrike)];
-      if (!hedgeIdent?.ceId) {
+      const hasHedge = broker === 'dhan' ? Boolean(hedgeIdent?.ceId) : Boolean(hedgeIdent?.ceSymbol);
+      if (!hasHedge) {
         return NextResponse.json({
           success: false,
-          error: `Protective hedge strike ${hedgeStrike} CE not found in strike lookup. Aborting for margin safety.`,
+          error: `Protective hedge strike ${hedgeStrike} CE not found in ${broker} strike lookup. Aborting for margin safety.`,
         }, { status: 400 });
       }
       legsToBuild.push({
@@ -279,7 +423,8 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
         strike: hedgeStrike,
         side: 'BUY',
         quantity: totalQty,
-        securityId: hedgeIdent.ceId,
+        securityId: hedgeIdent?.ceId,
+        tradingSymbol: hedgeIdent?.ceSymbol,
         orderType,
         productType,
         exchangeSegment: defaultExchangeSegment,
@@ -294,6 +439,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       side: 'BUY',
       quantity: totalQty,
       securityId: atmIdent.peId,
+      tradingSymbol: atmIdent.peSymbol,
       orderType,
       productType,
       exchangeSegment: defaultExchangeSegment,
@@ -307,6 +453,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       side: 'SELL',
       quantity: totalQty,
       securityId: atmIdent.ceId,
+      tradingSymbol: atmIdent.ceSymbol,
       orderType,
       productType,
       exchangeSegment: defaultExchangeSegment,
@@ -319,61 +466,74 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     ...legsToBuild.filter(l => l.side === 'SELL'),
   ];
 
+  let dhanToken = '';
+  let dhanClientId = '';
   if (broker === 'dhan') {
-    const { clientId, token } = getDhanCredentials();
-    if (!token) {
+    const creds = getDhanCredentials();
+    if (!creds.token) {
       return NextResponse.json({ success: false, error: 'No valid Dhan credentials' }, { status: 401 });
     }
-
-    const executedResults: ExecutedLegResult[] = [];
-    const orderIds: string[] = [];
-
-    // Sequential execution to guarantee BUY fills before SELL leg is submitted for basket margin!
-    for (const leg of sortedLegs) {
-      const exec = await placeDhanLeg(token, clientId, leg);
-      if (exec.orderId) {
-        orderIds.push(exec.orderId);
-        executedResults.push({
-          role: leg.role,
-          optionType: leg.optionType,
-          strike: leg.strike,
-          side: leg.side,
-          quantity: leg.quantity,
-          orderId: exec.orderId,
-          status: 'TRANSIT',
-        });
-      } else {
-        executedResults.push({
-          role: leg.role,
-          optionType: leg.optionType,
-          strike: leg.strike,
-          side: leg.side,
-          quantity: leg.quantity,
-          status: 'FAILED',
-          error: exec.error,
-        });
-      }
+    dhanToken = creds.token;
+    dhanClientId = creds.clientId;
+  } else if (broker === 'kotak') {
+    if (!isKotakTokenValid()) {
+      return NextResponse.json({
+        success: false,
+        error: 'Kotak Neo session expired or missing. Please refresh Kotak token via autologin.',
+      }, { status: 401 });
     }
-
-    invalidateBrokerCache('dhan');
-
-    const hasFailure = executedResults.some(r => r.status === 'FAILED');
-
-    return NextResponse.json({
-      success: !hasFailure,
-      direction,
-      atmStrike,
-      lots,
-      lotSize,
-      totalQty,
-      orderIds,
-      legs: executedResults,
-      error: hasFailure ? 'One or more legs failed to execute' : undefined,
-    });
+  } else if (broker === 'zerodha') {
+    if (!isZerodhaTokenValid()) {
+      return NextResponse.json({
+        success: false,
+        error: 'Zerodha session expired or missing. Please refresh Zerodha token via autologin.',
+      }, { status: 401 });
+    }
   }
 
+  const executedResults: ExecutedLegResult[] = [];
+  const orderIds: string[] = [];
+
+  // Sequential execution to guarantee BUY fills before SELL leg is submitted for basket margin!
+  for (const leg of sortedLegs) {
+    const exec = await placeBrokerLeg(broker, dhanToken, dhanClientId, leg);
+    if (exec.orderId) {
+      orderIds.push(exec.orderId);
+      executedResults.push({
+        role: leg.role,
+        optionType: leg.optionType,
+        strike: leg.strike,
+        side: leg.side,
+        quantity: leg.quantity,
+        orderId: exec.orderId,
+        status: 'TRANSIT',
+      });
+    } else {
+      executedResults.push({
+        role: leg.role,
+        optionType: leg.optionType,
+        strike: leg.strike,
+        side: leg.side,
+        quantity: leg.quantity,
+        status: 'FAILED',
+        error: exec.error,
+      });
+    }
+  }
+
+  invalidateBrokerCache(broker);
+
+  const hasFailure = executedResults.some(r => r.status === 'FAILED');
+
   return NextResponse.json({
-    success: false,
-    error: `Broker ${broker} not yet supported in direct multi-leg execution`,
-  }, { status: 400 });
+    success: !hasFailure,
+    direction,
+    atmStrike,
+    lots,
+    lotSize,
+    totalQty,
+    orderIds,
+    legs: executedResults,
+    error: hasFailure ? `One or more ${broker} legs failed: ${executedResults.filter(r => r.error).map(r => r.error).join('; ')}` : undefined,
+  });
 }

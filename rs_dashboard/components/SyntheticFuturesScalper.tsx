@@ -337,7 +337,13 @@ export default function SyntheticFuturesScalper() {
     if (!expiry) return;
     async function loadLookup() {
       try {
-        const res = await fetch(`/api/scalper/lookup?underlying=${underlying}&expiry=${expiry}`);
+        const lookupUrl =
+          broker === 'kotak'
+            ? `/api/scalper/kotak/lookup?underlying=${underlying}&expiry=${expiry}`
+            : broker === 'zerodha'
+              ? `/api/scalper/zerodha/lookup?underlying=${underlying}&expiry=${expiry}`
+              : `/api/scalper/lookup?underlying=${underlying}&expiry=${expiry}`;
+        const res = await fetch(lookupUrl);
         const json = await res.json();
         if (json.success && json.data) {
           if (json.data.lotSize) setLotSize(json.data.lotSize);
@@ -348,7 +354,7 @@ export default function SyntheticFuturesScalper() {
       }
     }
     loadLookup();
-  }, [underlying, expiry]);
+  }, [underlying, expiry, broker]);
 
   // ── 4. Ensure Options Live Bridge is active ─────────────────────────────────
   useEffect(() => {
@@ -554,6 +560,22 @@ export default function SyntheticFuturesScalper() {
       return;
     }
 
+    // Verify option contracts are loaded for the active broker
+    const atmEntry = strikeMap[String(atmStrike)];
+    const hasAtm =
+      broker === 'dhan'
+        ? Boolean(atmEntry?.ceId && atmEntry?.peId)
+        : Boolean(atmEntry?.ceSymbol && atmEntry?.peSymbol);
+
+    if (!hasAtm) {
+      addToast(
+        'error',
+        'Option Contracts Loading…',
+        `Option contracts for ATM ${atmStrike} on ${broker.toUpperCase()} not loaded yet. Please wait a moment.`
+      );
+      return;
+    }
+
     inFlightRef.current = true;
     setInFlight(true);
     setVisualFlash(direction);
@@ -593,7 +615,12 @@ export default function SyntheticFuturesScalper() {
       // Build active synthetic position state
       const totalQty = lots * lotSize;
       const initialLegs: SyntheticLeg[] = [];
-      const exchSeg = underlying === 'SENSEX' ? 'BSE_FNO' : 'NSE_FNO';
+      const exchSeg =
+        broker === 'kotak'
+          ? underlying === 'SENSEX' ? 'bse_fo' : 'nse_fo'
+          : broker === 'zerodha'
+            ? underlying === 'SENSEX' ? 'BFO' : 'NFO'
+            : underlying === 'SENSEX' ? 'BSE_FNO' : 'NSE_FNO';
 
       if (direction === 'LONG') {
         if (hedgeEnabled && hedgeOffset > 0) {
