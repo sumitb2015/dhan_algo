@@ -28,6 +28,7 @@ import asyncio
 import argparse
 import threading
 import urllib.request
+import psutil
 from datetime import datetime, timezone
 
 from websockets.asyncio.server import serve as ws_serve, broadcast as ws_broadcast
@@ -233,6 +234,20 @@ def atomic_write(path: str, data: dict) -> bool:
 
 def write_status(status: str, underlying: str = '', expiry: str = '',
                  subscribed: int = 0, started_at: str = '', ws_port=None):
+    # See the identical guard in live_options_ws.py's write_status() for the
+    # full rationale: a bridge still mid-startup when a restart races it can
+    # write a late, stale status that clobbers a fresher, already-RUNNING
+    # bridge's entry. Once a still-alive pid has reached RUNNING, its
+    # ownership of the status file is exclusive — only that pid may write here.
+    try:
+        with open(STATUS_FILE) as f:
+            current = json.load(f)
+        owner_pid = int(current.get('pid') or 0)
+        if (current.get('status') == 'RUNNING' and owner_pid and owner_pid != os.getpid()
+                and psutil.pid_exists(owner_pid)):
+            return
+    except Exception:
+        pass
     try:
         atomic_write(STATUS_FILE, {
             'status': status,
