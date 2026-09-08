@@ -47,6 +47,15 @@ import NavBar from './NavBar';
 const PORTFOLIO_POLL_MS = 8_000;
 const ALLOCATOR_POLL_MS = 15_000;
 const BROKER_ORDER: Broker[] = ['dhan', 'zerodha', 'kotak'];
+// Same per-broker accent already used for the broker badge on Baskets/Multi-Leg
+// Focus (MultiLegStrategyRow's BROKER_STYLE, StrategyCard.tsx, StrategyRowWide.tsx)
+// — every broker label here was hardcoded amber regardless of which broker it
+// named, so the Dhan and Kotak cards/rows read identically at a glance.
+const BROKER_ACCENT: Record<Broker, string> = {
+  dhan: 'text-emerald-400',
+  zerodha: 'text-sky-400',
+  kotak: 'text-amber-400',
+};
 // BANKNIFTY weeklies were discontinued by NSE — /api/ultimate-scanner/expiries
 // (and the scanner UI itself) only supports NIFTY/SENSEX, so that's the whole
 // selector here too.
@@ -467,7 +476,7 @@ function BrokerMarginCard({ b }: { b: BrokerPortfolio }) {
       <div className="flex items-center justify-between pb-2 border-b border-zinc-800">
         <div className="flex items-center gap-2">
           <CircleDot className={`h-3 w-3 ${isConnected ? 'text-emerald-500' : 'text-zinc-600'}`} />
-          <span className="text-[11px] font-bold uppercase tracking-[0.15em] text-amber-400">{BROKER_LABELS[b.broker]}</span>
+          <span className={`text-[11px] font-bold uppercase tracking-[0.15em] ${BROKER_ACCENT[b.broker]}`}>{BROKER_LABELS[b.broker]}</span>
         </div>
         <Badge tone={isConnected ? 'emerald' : 'zinc'}>{isConnected ? 'ONLINE' : 'OFFLINE'}</Badge>
       </div>
@@ -518,7 +527,7 @@ function GroupRow({ g, marginBase }: { g: PositionGroup; marginBase: number | nu
     <tr className="transition-colors hover:bg-zinc-800/50">
       <td className="px-3 py-2">
         <div className="flex items-center gap-1.5">
-          <span className="font-mono text-[9px] font-bold uppercase tracking-[0.1em] text-amber-400">{BROKER_LABELS[g.broker]}</span>
+          <span className={`font-mono text-[9px] font-bold uppercase tracking-[0.1em] ${BROKER_ACCENT[g.broker]}`}>{BROKER_LABELS[g.broker]}</span>
           <span className="font-mono text-xs font-bold text-zinc-100">{g.underlying}</span>
         </div>
         <div className="font-mono text-[10px] text-zinc-500">{g.expiry ?? 'unknown expiry'}{g.dte !== null ? ` · ${g.dte}d` : ''}</div>
