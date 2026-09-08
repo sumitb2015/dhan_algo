@@ -39,10 +39,14 @@ interface ExecutedLegResult {
 }
 
 function toKotakExchange(segment: string, isSensex: boolean): string {
+  if (segment.toLowerCase().includes('mcx')) return 'mcx_fo';
   if (isSensex || segment.toLowerCase().includes('bse')) return 'bse_fo';
   return 'nse_fo';
 }
 
+// Zerodha has no MCX crude support — the POST guard below rejects broker
+// 'zerodha' for CRUDEOIL/CRUDEOILM before a leg can ever reach this function,
+// so it only ever needs to distinguish BSE from NSE.
 function toZerodhaExchange(segment: string, isSensex: boolean): string {
   if (isSensex || segment.toUpperCase().includes('BSE')) return 'BFO';
   return 'NFO';
@@ -194,7 +198,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   const body = (await req.json()) as {
     action: 'enter' | 'exit';
     broker?: 'dhan' | 'zerodha' | 'kotak';
-    underlying: 'NIFTY' | 'SENSEX' | 'BANKNIFTY';
+    underlying: 'NIFTY' | 'SENSEX' | 'BANKNIFTY' | 'CRUDEOIL' | 'CRUDEOILM';
     expiry: string;
     direction?: 'LONG' | 'SHORT';
     atmStrike?: number;
@@ -233,8 +237,21 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   } = body;
 
   const isSensex = underlying === 'SENSEX';
-  const defaultExchangeSegment =
-    broker === 'kotak'
+  const isCrude = underlying === 'CRUDEOIL' || underlying === 'CRUDEOILM';
+
+  // Zerodha has no MCX crude contracts (confirmed: /api/options/expiries
+  // 400s CRUDEOIL/CRUDEOILM for it) — fail loudly instead of routing an
+  // order through toZerodhaExchange's NSE/BSE-only fallback.
+  if (isCrude && broker === 'zerodha') {
+    return NextResponse.json({
+      success: false,
+      error: `Zerodha does not support ${underlying} — use Dhan or Kotak`,
+    }, { status: 400 });
+  }
+
+  const defaultExchangeSegment = isCrude
+    ? (broker === 'kotak' ? 'mcx_fo' : 'MCX_COMM')
+    : broker === 'kotak'
       ? isSensex ? 'bse_fo' : 'nse_fo'
       : broker === 'zerodha'
         ? isSensex ? 'BFO' : 'NFO'

@@ -46,6 +46,31 @@ function getHistoricalSensexClose(): number {
   return 0;
 }
 
+// Shared by CRUDEOIL/CRUDEOILM, which have no historical-CSV close to fall
+// back to (unlike NIFTY/SENSEX above) — just the script's own prev_close,
+// with a last-resort literal if even that call fails.
+function buildIndexQuote(
+  res: PromiseSettledResult<{ spot?: number; prev_close?: number; error?: string } | null>,
+  symbol: string,
+  name: string,
+  fallbackPrev: number,
+): IndexQuote {
+  let spot = 0;
+  let prev = fallbackPrev;
+  if (res.status === 'fulfilled' && res.value && !res.value.error) {
+    spot = Number(res.value.spot ?? 0);
+    if (Number(res.value.prev_close ?? 0) > 0) prev = Number(res.value.prev_close);
+  }
+  if (spot <= 0) spot = prev;
+  let change = 0;
+  let changePct = 0;
+  if (prev > 0 && spot > 0) {
+    change = Math.round((spot - prev) * 100) / 100;
+    changePct = Math.round(((spot - prev) / prev) * 10000) / 100;
+  }
+  return { symbol, name, spot, prevClose: prev, change, changePct };
+}
+
 export async function GET() {
   if (cachedQuotes && Date.now() - cachedQuotes.ts < CACHE_TTL_MS) {
     return NextResponse.json({
@@ -58,7 +83,7 @@ export async function GET() {
   const quotes: Record<string, IndexQuote> = {};
 
   try {
-    const [niftyRes, sensexRes] = await Promise.allSettled([
+    const [niftyRes, sensexRes, crudeoilRes, crudeoilmRes] = await Promise.allSettled([
       dedupe('indices:nifty', () =>
         spaced('dhan-indices:nifty', () =>
           runPythonJson<{
@@ -79,6 +104,31 @@ export async function GET() {
             change_pct?: number;
             error?: string;
           }>(FETCH_SCRIPT, ['ltp', '--underlying', 'SENSEX'], 15_000)
+        )
+      ),
+      // CRUDEOIL/CRUDEOILM have no spot index — 'ltp' resolves the nearest
+      // MCX FUTCOM contract and returns its own OHLC prev-close, so there's
+      // no local historical-CSV fallback to read the way NIFTY/SENSEX have.
+      dedupe('indices:crudeoil', () =>
+        spaced('dhan-indices:crudeoil', () =>
+          runPythonJson<{
+            spot?: number;
+            prev_close?: number;
+            change?: number;
+            change_pct?: number;
+            error?: string;
+          }>(FETCH_SCRIPT, ['ltp', '--underlying', 'CRUDEOIL'], 15_000)
+        )
+      ),
+      dedupe('indices:crudeoilm', () =>
+        spaced('dhan-indices:crudeoilm', () =>
+          runPythonJson<{
+            spot?: number;
+            prev_close?: number;
+            change?: number;
+            change_pct?: number;
+            error?: string;
+          }>(FETCH_SCRIPT, ['ltp', '--underlying', 'CRUDEOILM'], 15_000)
         )
       ),
     ]);
@@ -144,6 +194,9 @@ export async function GET() {
       change: sensexChange,
       changePct: sensexPct,
     };
+
+    quotes.CRUDEOIL = buildIndexQuote(crudeoilRes, 'CRUDEOIL', 'Crude Oil', 6000);
+    quotes.CRUDEOILM = buildIndexQuote(crudeoilmRes, 'CRUDEOILM', 'Crude Oil Mini', 6000);
 
     cachedQuotes = { data: quotes, ts: Date.now() };
 

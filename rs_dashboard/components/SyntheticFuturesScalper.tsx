@@ -34,7 +34,16 @@ import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip
 
 // ─── Types & Interfaces ──────────────────────────────────────────────────────
 
-type Underlying = 'NIFTY' | 'SENSEX' | 'BANKNIFTY';
+type Underlying = 'NIFTY' | 'SENSEX' | 'BANKNIFTY' | 'CRUDEOIL' | 'CRUDEOILM';
+
+// CRUDEOIL's own strike ladder lists every 50 (e.g. 8250), and CRUDEOILM's
+// every 50 too, but the 50-only rungs trade thin — this desk only ever
+// touches the 100-multiple strikes on either contract. Zerodha also has no
+// MCX support (confirmed: /api/options/expiries 400s CRUDEOIL/CRUDEOILM for
+// it), so the broker pill below disables it whenever one of these is active.
+function isCrudeUnderlying(u: Underlying): boolean {
+  return u === 'CRUDEOIL' || u === 'CRUDEOILM';
+}
 type SyntheticDirection = 'LONG' | 'SHORT';
 type SlMode = 'POINTS' | 'RUPEES';
 type OrderMode = 'MARKET' | 'LIMIT';
@@ -218,6 +227,15 @@ export default function SyntheticFuturesScalper() {
   // Broker selector hook
   const { broker, setBroker, authenticatedBrokers } = useBrokerSelector();
 
+  // Zerodha has no MCX crude contracts (its expiries lookup 400s for
+  // CRUDEOIL/CRUDEOILM) — bounce back to Dhan rather than let the user sit
+  // on a broker that can never place this underlying's orders.
+  useEffect(() => {
+    if (isCrudeUnderlying(underlying) && broker === 'zerodha') {
+      setBroker('dhan');
+    }
+  }, [underlying, broker, setBroker]);
+
   // Indices ticker data
   const [indices, setIndices] = useState<Record<string, IndexQuote>>({});
   const [indicesLoading, setIndicesLoading] = useState(false);
@@ -384,9 +402,14 @@ export default function SyntheticFuturesScalper() {
   }, [underlying, expiry, broker]);
 
   // ── 5. Derived Market Metrics ──────────────────────────────────────────────
+  const isCrude = isCrudeUnderlying(underlying);
+  // Both CRUDEOIL and CRUDEOILM already fall into the 100-step branch here —
+  // that's what keeps the ATM/hedge strikes on the liquid 100-multiple ladder.
   const strikeStep = underlying === 'NIFTY' ? 50 : 100;
 
-  // Dynamic wing offset distances tailored to underlying index step
+  // Dynamic wing offset distances tailored to underlying index step. Every
+  // offset in the non-NIFTY list is already a multiple of 100, so combined
+  // with a 100-multiple ATM strike, hedge strikes stay on the liquid ladder.
   const wingOffsets = useMemo(() => {
     return underlying === 'NIFTY'
       ? [100, 150, 200, 250, 300, 400]
@@ -405,10 +428,10 @@ export default function SyntheticFuturesScalper() {
   const liveSpot =
     liveQuotes?.spot && liveQuotes.spot > 0
       ? liveQuotes.spot
-      : indices[underlying]?.spot ?? (underlying === 'NIFTY' ? 23635.1 : 75577.58);
+      : indices[underlying]?.spot ?? (underlying === 'NIFTY' ? 23635.1 : isCrude ? 6000 : 75577.58);
 
   const prevClose =
-    indices[underlying]?.prevClose ?? (underlying === 'NIFTY' ? 23779.15 : 76132.81);
+    indices[underlying]?.prevClose ?? (underlying === 'NIFTY' ? 23779.15 : isCrude ? 6000 : 76132.81);
 
   const spotChange =
     liveQuotes?.spot_change != null
@@ -422,14 +445,20 @@ export default function SyntheticFuturesScalper() {
         ? ((liveSpot - prevClose) / prevClose) * 100
         : 0;
 
-  // Real-time ATM Strike
+  // Real-time ATM Strike. CRUDEOIL/CRUDEOILM deliberately never trust
+  // liveQuotes.atm — the WS bridge computes that server-side off a 50-point
+  // step (scripts/tools/live_options_ws.py's STRIKE_STEP), which can land on
+  // a thin 50-only strike like 8250. Recomputing locally with strikeStep
+  // (100 here) keeps it on the liquid ladder; the bridge still subscribes to
+  // every 50-point strike around ATM, so the 100-multiple we land on is
+  // always among the ticks it streams.
   const atmStrike = useMemo(() => {
-    if (liveQuotes?.atm && liveQuotes.atm > 0) return liveQuotes.atm;
+    if (!isCrude && liveQuotes?.atm && liveQuotes.atm > 0) return liveQuotes.atm;
     if (liveSpot > 0) {
       return Math.round(liveSpot / strikeStep) * strikeStep;
     }
-    return underlying === 'NIFTY' ? 23650 : 75600;
-  }, [liveQuotes?.atm, liveSpot, strikeStep, underlying]);
+    return underlying === 'NIFTY' ? 23650 : isCrude ? 6000 : 75600;
+  }, [liveQuotes?.atm, liveSpot, strikeStep, underlying, isCrude]);
 
   // Option quotes for ATM
   const atmQuotes = liveQuotes?.strikes?.[String(atmStrike)];
@@ -644,8 +673,9 @@ export default function SyntheticFuturesScalper() {
       // Build active synthetic position state
       const totalQty = lots * lotSize;
       const initialLegs: SyntheticLeg[] = [];
-      const exchSeg =
-        broker === 'kotak'
+      const exchSeg = isCrude
+        ? (broker === 'kotak' ? 'mcx_fo' : 'MCX_COMM') // zerodha has no MCX support; blocked from selecting this underlying
+        : broker === 'kotak'
           ? underlying === 'SENSEX' ? 'bse_fo' : 'nse_fo'
           : broker === 'zerodha'
             ? underlying === 'SENSEX' ? 'BFO' : 'NFO'
@@ -1230,7 +1260,7 @@ export default function SyntheticFuturesScalper() {
           <div className="flex flex-wrap items-center gap-3">
             {/* Underlying Pill Toggle */}
             <div className="flex items-center rounded-lg border border-zinc-800 bg-zinc-900/90 p-0.5 text-xs font-mono">
-              {(['NIFTY', 'SENSEX', 'BANKNIFTY'] as Underlying[]).map(u => (
+              {(['NIFTY', 'SENSEX', 'BANKNIFTY', 'CRUDEOIL', 'CRUDEOILM'] as Underlying[]).map(u => (
                 <button
                   key={u}
                   onClick={() => setUnderlying(u)}
@@ -1265,19 +1295,26 @@ export default function SyntheticFuturesScalper() {
             <div className="flex items-center gap-1.5 text-xs">
               <span className="text-[11px] font-bold text-zinc-400 uppercase">Broker</span>
               <div className="flex items-center rounded-lg border border-zinc-800 bg-zinc-900 p-0.5 font-mono text-[11px]">
-                {(['dhan', 'zerodha', 'kotak'] as Broker[]).map(b => (
-                  <button
-                    key={b}
-                    onClick={() => setBroker(b)}
-                    className={`px-2.5 py-0.5 rounded uppercase font-bold transition-all ${
-                      broker === b
-                        ? 'bg-zinc-800 text-zinc-100'
-                        : 'text-zinc-400 hover:text-zinc-200'
-                    }`}
-                  >
-                    {b}
-                  </button>
-                ))}
+                {(['dhan', 'zerodha', 'kotak'] as Broker[]).map(b => {
+                  const disabled = b === 'zerodha' && isCrude;
+                  return (
+                    <button
+                      key={b}
+                      disabled={disabled}
+                      title={disabled ? 'Zerodha has no MCX crude support' : undefined}
+                      onClick={() => setBroker(b)}
+                      className={`px-2.5 py-0.5 rounded uppercase font-bold transition-all ${
+                        broker === b
+                          ? 'bg-zinc-800 text-zinc-100'
+                          : disabled
+                            ? 'text-zinc-700 cursor-not-allowed'
+                            : 'text-zinc-400 hover:text-zinc-200'
+                      }`}
+                    >
+                      {b}
+                    </button>
+                  );
+                })}
               </div>
             </div>
           </div>
