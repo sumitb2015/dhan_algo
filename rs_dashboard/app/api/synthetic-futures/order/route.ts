@@ -3,6 +3,7 @@ import { getDhanCredentials } from '@/lib/dhanToken';
 import { kotakPost, KOTAK_PATHS, isKotakTokenValid } from '@/lib/kotakToken';
 import { kitePost, isZerodhaTokenValid } from '@/lib/zerodhaToken';
 import { invalidateBrokerCache } from '@/lib/brokerPositionsCache';
+import { exchangeSegmentFor, isCrudeUnderlying, type SyntheticFuturesUnderlying } from '@/lib/syntheticFuturesSegments';
 
 const DHAN_ORDERS = 'https://api.dhan.co/v2/orders';
 
@@ -236,8 +237,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     legsToExit = [],
   } = body;
 
-  const isSensex = underlying === 'SENSEX';
-  const isCrude = underlying === 'CRUDEOIL' || underlying === 'CRUDEOILM';
+  const isCrude = isCrudeUnderlying(underlying);
 
   // Zerodha has no MCX crude contracts (confirmed: /api/options/expiries
   // 400s CRUDEOIL/CRUDEOILM for it) — fail loudly instead of routing an
@@ -249,13 +249,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     }, { status: 400 });
   }
 
-  const defaultExchangeSegment = isCrude
-    ? (broker === 'kotak' ? 'mcx_fo' : 'MCX_COMM')
-    : broker === 'kotak'
-      ? isSensex ? 'bse_fo' : 'nse_fo'
-      : broker === 'zerodha'
-        ? isSensex ? 'BFO' : 'NFO'
-        : isSensex ? 'BSE_FNO' : 'NSE_FNO';
+  const defaultExchangeSegment = exchangeSegmentFor(broker, underlying as SyntheticFuturesUnderlying);
 
   // ───────────────────────────────────────────────────────────────────────────
   // EXIT / FLATTEN ACTION
@@ -311,7 +305,10 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
         tradingSymbol: leg.tradingSymbol,
         orderType: 'MARKET',
         productType: (leg.productType as 'INTRADAY' | 'MARGIN') || 'INTRADAY',
-        exchangeSegment: leg.exchangeSegment || defaultExchangeSegment,
+        // Always the server's own fresh mapping for this request's broker/underlying —
+        // never the client-stored value from whenever the leg was opened, which could
+        // predate a later fix to the segment mapping and route a real exit order wrong.
+        exchangeSegment: defaultExchangeSegment,
       });
 
       results.push({

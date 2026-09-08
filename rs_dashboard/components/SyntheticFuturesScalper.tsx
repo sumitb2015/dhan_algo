@@ -31,6 +31,7 @@ import {
 import { useLiveOptionsWS, type Broker } from '@/lib/useLiveOptionsWS';
 import { useBrokerSelector } from '@/hooks/useBrokerSelector';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
+import { exchangeSegmentFor, isCrudeUnderlying } from '@/lib/syntheticFuturesSegments';
 
 // ─── Types & Interfaces ──────────────────────────────────────────────────────
 
@@ -38,12 +39,10 @@ type Underlying = 'NIFTY' | 'SENSEX' | 'BANKNIFTY' | 'CRUDEOIL' | 'CRUDEOILM';
 
 // CRUDEOIL's own strike ladder lists every 50 (e.g. 8250), and CRUDEOILM's
 // every 50 too, but the 50-only rungs trade thin — this desk only ever
-// touches the 100-multiple strikes on either contract. Zerodha also has no
-// MCX support (confirmed: /api/options/expiries 400s CRUDEOIL/CRUDEOILM for
-// it), so the broker pill below disables it whenever one of these is active.
-function isCrudeUnderlying(u: Underlying): boolean {
-  return u === 'CRUDEOIL' || u === 'CRUDEOILM';
-}
+// touches the 100-multiple strikes on either contract. Last-resort literal
+// used only when both the live feed and the indices API are unavailable.
+const CRUDE_FALLBACK_PRICE = 6000;
+
 type SyntheticDirection = 'LONG' | 'SHORT';
 type SlMode = 'POINTS' | 'RUPEES';
 type OrderMode = 'MARKET' | 'LIMIT';
@@ -236,6 +235,13 @@ export default function SyntheticFuturesScalper() {
     }
   }, [underlying, broker, setBroker]);
 
+  // Derived synchronously (not just via the effect above) so every
+  // broker-dependent effect/handler below sees the corrected broker on the
+  // SAME render the underlying pill flips to crude — otherwise the lookup
+  // effect fires one request against Zerodha (which 400s for MCX crude)
+  // before the effect above corrects `broker` on the next render.
+  const effectiveBroker: Broker = isCrudeUnderlying(underlying) && broker === 'zerodha' ? 'dhan' : broker;
+
   // Indices ticker data
   const [indices, setIndices] = useState<Record<string, IndexQuote>>({});
   const [indicesLoading, setIndicesLoading] = useState(false);
@@ -304,7 +310,7 @@ export default function SyntheticFuturesScalper() {
   // WebSocket Live Options Feed
   const { liveQuotes, bridgeStatus, transport } = useLiveOptionsWS(
     expiry,
-    broker,
+    effectiveBroker,
     authenticatedBrokers,
     underlying
   );
@@ -326,10 +332,14 @@ export default function SyntheticFuturesScalper() {
   }, []);
 
   // ── 1. Fetch Headline Indices ──────────────────────────────────────────────
+  // Always returns NIFTY + SENSEX (the header ticker needs both regardless of
+  // the selected underlying); passing `underlying` only tells the route
+  // whether to also fetch a CRUDEOIL/CRUDEOILM quote — it's a no-op query
+  // param for any other value, so it's safe to always include.
   const fetchIndices = useCallback(async () => {
     try {
       setIndicesLoading(true);
-      const res = await fetch('/api/synthetic-futures/indices');
+      const res = await fetch(`/api/synthetic-futures/indices?underlying=${underlying}`);
       const json = (await res.json()) as { success: boolean; quotes?: Record<string, IndexQuote> };
       if (json.success && json.quotes) {
         setIndices(json.quotes);
@@ -339,7 +349,7 @@ export default function SyntheticFuturesScalper() {
     } finally {
       setIndicesLoading(false);
     }
-  }, []);
+  }, [underlying]);
 
   useEffect(() => {
     fetchIndices();
@@ -373,9 +383,9 @@ export default function SyntheticFuturesScalper() {
     async function loadLookup() {
       try {
         const lookupUrl =
-          broker === 'kotak'
+          effectiveBroker === 'kotak'
             ? `/api/scalper/kotak/lookup?underlying=${underlying}&expiry=${expiry}`
-            : broker === 'zerodha'
+            : effectiveBroker === 'zerodha'
               ? `/api/scalper/zerodha/lookup?underlying=${underlying}&expiry=${expiry}`
               : `/api/scalper/lookup?underlying=${underlying}&expiry=${expiry}`;
         const res = await fetch(lookupUrl);
@@ -389,7 +399,7 @@ export default function SyntheticFuturesScalper() {
       }
     }
     loadLookup();
-  }, [underlying, expiry, broker]);
+  }, [underlying, expiry, effectiveBroker]);
 
   // ── 4. Ensure Options Live Bridge is active ─────────────────────────────────
   useEffect(() => {
@@ -397,9 +407,9 @@ export default function SyntheticFuturesScalper() {
     fetch('/api/options/live', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ action: 'start', underlying, expiry, broker }),
+      body: JSON.stringify({ action: 'start', underlying, expiry, broker: effectiveBroker }),
     }).catch(() => {});
-  }, [underlying, expiry, broker]);
+  }, [underlying, expiry, effectiveBroker]);
 
   // ── 5. Derived Market Metrics ──────────────────────────────────────────────
   const isCrude = isCrudeUnderlying(underlying);
@@ -428,10 +438,10 @@ export default function SyntheticFuturesScalper() {
   const liveSpot =
     liveQuotes?.spot && liveQuotes.spot > 0
       ? liveQuotes.spot
-      : indices[underlying]?.spot ?? (underlying === 'NIFTY' ? 23635.1 : isCrude ? 6000 : 75577.58);
+      : indices[underlying]?.spot ?? (underlying === 'NIFTY' ? 23635.1 : isCrude ? CRUDE_FALLBACK_PRICE : 75577.58);
 
   const prevClose =
-    indices[underlying]?.prevClose ?? (underlying === 'NIFTY' ? 23779.15 : isCrude ? 6000 : 76132.81);
+    indices[underlying]?.prevClose ?? (underlying === 'NIFTY' ? 23779.15 : isCrude ? CRUDE_FALLBACK_PRICE : 76132.81);
 
   const spotChange =
     liveQuotes?.spot_change != null
@@ -457,7 +467,7 @@ export default function SyntheticFuturesScalper() {
     if (liveSpot > 0) {
       return Math.round(liveSpot / strikeStep) * strikeStep;
     }
-    return underlying === 'NIFTY' ? 23650 : isCrude ? 6000 : 75600;
+    return underlying === 'NIFTY' ? 23650 : isCrude ? CRUDE_FALLBACK_PRICE : 75600;
   }, [liveQuotes?.atm, liveSpot, strikeStep, underlying, isCrude]);
 
   // Option quotes for ATM
@@ -609,7 +619,7 @@ export default function SyntheticFuturesScalper() {
     // Verify option contracts are loaded for the active broker
     const atmEntry = strikeMap[String(atmStrike)];
     const hasAtm =
-      broker === 'dhan'
+      effectiveBroker === 'dhan'
         ? Boolean(atmEntry?.ceId && atmEntry?.peId)
         : Boolean(atmEntry?.ceSymbol && atmEntry?.peSymbol);
 
@@ -617,7 +627,7 @@ export default function SyntheticFuturesScalper() {
       addToast(
         'error',
         'Option Contracts Loading…',
-        `Option contracts for ATM ${atmStrike} on ${broker.toUpperCase()} not loaded yet. Please wait a moment.`
+        `Option contracts for ATM ${atmStrike} on ${effectiveBroker.toUpperCase()} not loaded yet. Please wait a moment.`
       );
       return;
     }
@@ -636,7 +646,7 @@ export default function SyntheticFuturesScalper() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           action: 'enter',
-          broker,
+          broker: effectiveBroker,
           underlying,
           expiry,
           direction,
@@ -673,13 +683,7 @@ export default function SyntheticFuturesScalper() {
       // Build active synthetic position state
       const totalQty = lots * lotSize;
       const initialLegs: SyntheticLeg[] = [];
-      const exchSeg = isCrude
-        ? (broker === 'kotak' ? 'mcx_fo' : 'MCX_COMM') // zerodha has no MCX support; blocked from selecting this underlying
-        : broker === 'kotak'
-          ? underlying === 'SENSEX' ? 'bse_fo' : 'nse_fo'
-          : broker === 'zerodha'
-            ? underlying === 'SENSEX' ? 'BFO' : 'NFO'
-            : underlying === 'SENSEX' ? 'BSE_FNO' : 'NSE_FNO';
+      const exchSeg = exchangeSegmentFor(effectiveBroker, underlying);
 
       if (direction === 'LONG') {
         if (hedgeEnabled && hedgeOffset > 0) {
@@ -857,9 +861,9 @@ export default function SyntheticFuturesScalper() {
     async function checkOrderStatus() {
       try {
         const pollUrl =
-          broker === 'kotak'
+          effectiveBroker === 'kotak'
             ? '/api/scalper/kotak/poll'
-            : broker === 'zerodha'
+            : effectiveBroker === 'zerodha'
               ? '/api/scalper/zerodha/poll'
               : '/api/scalper/poll';
 
@@ -936,7 +940,7 @@ export default function SyntheticFuturesScalper() {
       cancelled = true;
       clearInterval(interval);
     };
-  }, [activePosition?.id, broker]);
+  }, [activePosition?.id, effectiveBroker]);
 
   // ── 8. Flatten / Exit Synthetic Position ───────────────────────────────────
   const handleFlattenSynthetic = async (reason = 'Manual Exit'): Promise<boolean> => {
@@ -980,7 +984,7 @@ export default function SyntheticFuturesScalper() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           action: 'exit',
-          broker,
+          broker: effectiveBroker,
           underlying: activePosition.underlying,
           expiry: activePosition.expiry,
           legsToExit,
@@ -1304,7 +1308,7 @@ export default function SyntheticFuturesScalper() {
                       title={disabled ? 'Zerodha has no MCX crude support' : undefined}
                       onClick={() => setBroker(b)}
                       className={`px-2.5 py-0.5 rounded uppercase font-bold transition-all ${
-                        broker === b
+                        effectiveBroker === b
                           ? 'bg-zinc-800 text-zinc-100'
                           : disabled
                             ? 'text-zinc-700 cursor-not-allowed'

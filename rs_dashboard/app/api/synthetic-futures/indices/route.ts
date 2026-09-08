@@ -1,4 +1,4 @@
-import { NextResponse } from 'next/server';
+import { NextRequest, NextResponse } from 'next/server';
 import path from 'path';
 import fs from 'fs';
 import { PROJECT_ROOT, runPythonJson, dedupe, spaced } from '@/lib/pyExec';
@@ -18,7 +18,20 @@ interface IndexQuote {
   low?: number;
 }
 
-let cachedQuotes: { data: Record<string, IndexQuote>; ts: number } | null = null;
+type LtpResult = { spot?: number; prev_close?: number; change?: number; change_pct?: number; error?: string } | null;
+
+// NIFTY + SENSEX feed the always-visible ticker strip, so every request
+// fetches both. CRUDEOIL/CRUDEOILM are only ever needed when that's the
+// underlying actually selected on the page, so they're fetched on demand via
+// ?underlying= rather than unconditionally quadrupling the Python spawns
+// (and MCX_COMM API calls) on every ~4s poll from every open tab.
+const CRUDE_SYMBOLS = new Set(['CRUDEOIL', 'CRUDEOILM']);
+const CRUDE_NAMES: Record<string, string> = { CRUDEOIL: 'Crude Oil', CRUDEOILM: 'Crude Oil Mini' };
+
+// Keyed by the extra crude symbol requested (or 'base' for none) rather than
+// true per-symbol caching — bounded to 3 possible keys, simple, and still
+// eliminates the unconditional 4-spawns-per-poll cost.
+const cache = new Map<string, { data: Record<string, IndexQuote>; ts: number }>();
 const CACHE_TTL_MS = 2500; // 2.5 seconds cache
 
 function getHistoricalNiftyClose(): number {
@@ -46,11 +59,8 @@ function getHistoricalSensexClose(): number {
   return 0;
 }
 
-// Shared by CRUDEOIL/CRUDEOILM, which have no historical-CSV close to fall
-// back to (unlike NIFTY/SENSEX above) — just the script's own prev_close,
-// with a last-resort literal if even that call fails.
 function buildIndexQuote(
-  res: PromiseSettledResult<{ spot?: number; prev_close?: number; error?: string } | null>,
+  res: PromiseSettledResult<LtpResult>,
   symbol: string,
   name: string,
   fallbackPrev: number,
@@ -71,134 +81,49 @@ function buildIndexQuote(
   return { symbol, name, spot, prevClose: prev, change, changePct };
 }
 
-export async function GET() {
-  if (cachedQuotes && Date.now() - cachedQuotes.ts < CACHE_TTL_MS) {
+function fetchLtp(underlying: string): Promise<LtpResult> {
+  return dedupe(`indices:${underlying.toLowerCase()}`, () =>
+    spaced(`dhan-indices:${underlying.toLowerCase()}`, () =>
+      runPythonJson<LtpResult>(FETCH_SCRIPT, ['ltp', '--underlying', underlying], 15_000)
+    )
+  );
+}
+
+export async function GET(request: NextRequest) {
+  const requested = (request.nextUrl.searchParams.get('underlying') ?? '').toUpperCase();
+  const extraSymbol = CRUDE_SYMBOLS.has(requested) ? requested : null;
+  const cacheKey = extraSymbol ?? 'base';
+
+  const hit = cache.get(cacheKey);
+  if (hit && Date.now() - hit.ts < CACHE_TTL_MS) {
     return NextResponse.json({
       success: true,
-      quotes: cachedQuotes.data,
-      updatedAt: new Date(cachedQuotes.ts).toISOString(),
+      quotes: hit.data,
+      updatedAt: new Date(hit.ts).toISOString(),
     });
   }
 
   const quotes: Record<string, IndexQuote> = {};
 
   try {
-    const [niftyRes, sensexRes, crudeoilRes, crudeoilmRes] = await Promise.allSettled([
-      dedupe('indices:nifty', () =>
-        spaced('dhan-indices:nifty', () =>
-          runPythonJson<{
-            spot?: number;
-            prev_close?: number;
-            change?: number;
-            change_pct?: number;
-            error?: string;
-          }>(FETCH_SCRIPT, ['ltp', '--underlying', 'NIFTY'], 15_000)
-        )
-      ),
-      dedupe('indices:sensex', () =>
-        spaced('dhan-indices:sensex', () =>
-          runPythonJson<{
-            spot?: number;
-            prev_close?: number;
-            change?: number;
-            change_pct?: number;
-            error?: string;
-          }>(FETCH_SCRIPT, ['ltp', '--underlying', 'SENSEX'], 15_000)
-        )
-      ),
+    const [niftyRes, sensexRes, extraRes] = await Promise.allSettled([
+      fetchLtp('NIFTY'),
+      fetchLtp('SENSEX'),
       // CRUDEOIL/CRUDEOILM have no spot index — 'ltp' resolves the nearest
       // MCX FUTCOM contract and returns its own OHLC prev-close, so there's
       // no local historical-CSV fallback to read the way NIFTY/SENSEX have.
-      dedupe('indices:crudeoil', () =>
-        spaced('dhan-indices:crudeoil', () =>
-          runPythonJson<{
-            spot?: number;
-            prev_close?: number;
-            change?: number;
-            change_pct?: number;
-            error?: string;
-          }>(FETCH_SCRIPT, ['ltp', '--underlying', 'CRUDEOIL'], 15_000)
-        )
-      ),
-      dedupe('indices:crudeoilm', () =>
-        spaced('dhan-indices:crudeoilm', () =>
-          runPythonJson<{
-            spot?: number;
-            prev_close?: number;
-            change?: number;
-            change_pct?: number;
-            error?: string;
-          }>(FETCH_SCRIPT, ['ltp', '--underlying', 'CRUDEOILM'], 15_000)
-        )
-      ),
+      // Only fetched when actually requested — see CRUDE_SYMBOLS above.
+      extraSymbol ? fetchLtp(extraSymbol) : Promise.resolve(null),
     ]);
 
-    // Handle NIFTY
-    let niftySpot = 0;
-    let niftyPrev = getHistoricalNiftyClose() || 23779.15;
-    let niftyChange = 0;
-    let niftyPct = 0;
+    quotes.NIFTY = buildIndexQuote(niftyRes, 'NIFTY', 'NIFTY 50', getHistoricalNiftyClose() || 23779.15);
+    quotes.SENSEX = buildIndexQuote(sensexRes, 'SENSEX', 'SENSEX', getHistoricalSensexClose() || 76132.81);
 
-    if (niftyRes.status === 'fulfilled' && niftyRes.value && !niftyRes.value.error) {
-      niftySpot = Number(niftyRes.value.spot ?? 0);
-      if (Number(niftyRes.value.prev_close ?? 0) > 0) {
-        niftyPrev = Number(niftyRes.value.prev_close);
-      }
+    if (extraSymbol) {
+      quotes[extraSymbol] = buildIndexQuote(extraRes, extraSymbol, CRUDE_NAMES[extraSymbol], 6000);
     }
 
-    if (niftySpot <= 0) {
-      niftySpot = niftyPrev;
-    }
-
-    if (niftyPrev > 0 && niftySpot > 0) {
-      niftyChange = Math.round((niftySpot - niftyPrev) * 100) / 100;
-      niftyPct = Math.round(((niftySpot - niftyPrev) / niftyPrev) * 10000) / 100;
-    }
-
-    quotes.NIFTY = {
-      symbol: 'NIFTY',
-      name: 'NIFTY 50',
-      spot: niftySpot,
-      prevClose: niftyPrev,
-      change: niftyChange,
-      changePct: niftyPct,
-    };
-
-    // Handle SENSEX
-    let sensexSpot = 0;
-    let sensexPrev = getHistoricalSensexClose() || 76132.81;
-    let sensexChange = 0;
-    let sensexPct = 0;
-
-    if (sensexRes.status === 'fulfilled' && sensexRes.value && !sensexRes.value.error) {
-      sensexSpot = Number(sensexRes.value.spot ?? 0);
-      if (Number(sensexRes.value.prev_close ?? 0) > 0) {
-        sensexPrev = Number(sensexRes.value.prev_close);
-      }
-    }
-
-    if (sensexSpot <= 0) {
-      sensexSpot = sensexPrev;
-    }
-
-    if (sensexPrev > 0 && sensexSpot > 0) {
-      sensexChange = Math.round((sensexSpot - sensexPrev) * 100) / 100;
-      sensexPct = Math.round(((sensexSpot - sensexPrev) / sensexPrev) * 10000) / 100;
-    }
-
-    quotes.SENSEX = {
-      symbol: 'SENSEX',
-      name: 'SENSEX',
-      spot: sensexSpot,
-      prevClose: sensexPrev,
-      change: sensexChange,
-      changePct: sensexPct,
-    };
-
-    quotes.CRUDEOIL = buildIndexQuote(crudeoilRes, 'CRUDEOIL', 'Crude Oil', 6000);
-    quotes.CRUDEOILM = buildIndexQuote(crudeoilmRes, 'CRUDEOILM', 'Crude Oil Mini', 6000);
-
-    cachedQuotes = { data: quotes, ts: Date.now() };
+    cache.set(cacheKey, { data: quotes, ts: Date.now() });
 
     return NextResponse.json({
       success: true,
