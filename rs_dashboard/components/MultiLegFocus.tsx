@@ -18,7 +18,7 @@ import {
   resolveTemplateLegs, reconcileLegWithBroker, sortLegsForExit, findLegPosition,
   computeLegTrailingSL, computeStrategyMetrics, checkStrategyRisk, fallbackLotSize,
   positionProduct, findUntrackedGroups, basketFromUntrackedGroup, untrackedGroupSignature,
-  legsFromUntrackedGroup, structureNameForBasket,
+  legsFromUntrackedGroup, structureNameForBasket, computeBasketStatus,
   type MultiLegLeg, type MultiLegBasket, type StrategyRiskConfig, type MultiLegStatus,
 } from '@/lib/multiLegFocus';
 import { closeOrderProduct } from '@/lib/positionProduct';
@@ -1596,6 +1596,22 @@ export default function MultiLegFocus() {
     }
   }, [baskets, ltpFor, exitingMap, exitBasket, exitOneLeg, updateBasket, addToast]);
 
+  // Open/draft/placing rows stay put; fully-exited (every leg CLOSED) rows sink
+  // to the bottom so a long-running page doesn't bury active positions under
+  // its own trade history. Array#sort is stable (ES2019+), so relative order
+  // within each group is preserved exactly as baskets were created/updated.
+  const sortedBaskets = useMemo(() => {
+    return [...baskets].sort((a, b) => {
+      const aExited = computeBasketStatus(a.legs) === 'CLOSED' ? 1 : 0;
+      const bExited = computeBasketStatus(b.legs) === 'CLOSED' ? 1 : 0;
+      return aExited - bExited;
+    });
+  }, [baskets]);
+  const firstExitedIdx = useMemo(
+    () => sortedBaskets.findIndex(b => computeBasketStatus(b.legs) === 'CLOSED'),
+    [sortedBaskets],
+  );
+
   return (
     <div className="min-h-screen bg-zinc-950 text-zinc-100">
       <NavBar />
@@ -1835,7 +1851,7 @@ export default function MultiLegFocus() {
             </button>
           </div>
         ) : (
-          baskets.map((basket, idx) => {
+          sortedBaskets.map((basket, idx) => {
             const pair = `${basket.underlying}:${basket.expiry}`;
             const chain = chainData[pair];
             const lookup = lookupCache[pair];
@@ -1849,8 +1865,14 @@ export default function MultiLegFocus() {
             const lotSize = lookup?.lotSize ?? fallbackLotSize(basket.underlying as Underlying, broker);
 
             return (
-              <MultiLegStrategyRow
-                key={basket.id}
+              <React.Fragment key={basket.id}>
+                {idx === firstExitedIdx && (
+                  <div className="flex items-center gap-2 pt-1">
+                    <span className="text-[10px] font-bold uppercase tracking-wider text-zinc-500">Exited</span>
+                    <div className="flex-1 h-px bg-zinc-800" />
+                  </div>
+                )}
+                <MultiLegStrategyRow
                 basket={basket}
                 index={idx}
                 broker={broker}
@@ -1895,7 +1917,8 @@ export default function MultiLegFocus() {
                 overallMargin={basketMargins[basket.id]?.overallMargin}
                 hedgeBenefit={basketMargins[basket.id]?.hedgeBenefit}
                 availableFunds={fundsData?.available}
-              />
+                />
+              </React.Fragment>
             );
           })
         )}

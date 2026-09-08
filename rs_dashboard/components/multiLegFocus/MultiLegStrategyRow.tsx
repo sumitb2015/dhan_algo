@@ -9,7 +9,7 @@ import RuleNumInput from './RuleNumInput';
 import AddLotsModal from './AddLotsModal';
 import AddNewLegModal from './AddNewLegModal';
 import {
-  computeLegTrailingSL, computeStrategyMetrics, checkStrategyRisk,
+  computeLegTrailingSL, computeStrategyMetrics, checkStrategyRisk, computeBasketStatus,
   type MultiLegBasket, type MultiLegLeg, type StrategyRiskConfig,
 } from '@/lib/multiLegFocus';
 import { computePayoff, type PayoffLeg, type PayoffResult } from '@/lib/basketStrategies';
@@ -146,15 +146,7 @@ export default function MultiLegStrategyRow({
     return basket.legs.some(l => l.autoAdopted && l.status !== 'CLOSED');
   }, [basket.legs]);
 
-  const basketStatus = useMemo(() => {
-    if (basket.legs.length === 0) return 'DRAFT';
-    if (basket.legs.some(l => l.status === 'PLACING')) return 'PLACING';
-    if (basket.legs.some(l => l.status === 'CLOSING')) return 'CLOSING';
-    if (basket.legs.some(l => l.status === 'OPEN')) return 'OPEN';
-    if (basket.legs.every(l => l.status === 'CLOSED')) return 'CLOSED';
-    if (basket.legs.some(l => l.status === 'FAILED')) return 'FAILED';
-    return 'DRAFT';
-  }, [basket.legs]);
+  const basketStatus = useMemo(() => computeBasketStatus(basket.legs), [basket.legs]);
 
   const crudeMult = broker === 'dhan'
     ? (basket.underlying === 'CRUDEOIL' ? 100 : basket.underlying === 'CRUDEOILM' ? 10 : 1)

@@ -653,6 +653,21 @@ export function structureNameForBasket(basket: MultiLegBasket): string {
   return classifyStructure(liveLegs).structure;
 }
 
+/** Aggregate status for a whole basket from its legs' individual statuses, in
+ *  priority order — PLACING/CLOSING/OPEN outrank a stray leftover DRAFT leg
+ *  alongside them, and CLOSED only wins when every leg agrees. Shared by
+ *  MultiLegStrategyRow (row header badge) and MultiLegFocus (grouping open
+ *  vs. exited rows) so the two can't drift apart. */
+export function computeBasketStatus(legs: MultiLegLeg[]): MultiLegStatus {
+  if (legs.length === 0) return 'DRAFT';
+  if (legs.some(l => l.status === 'PLACING')) return 'PLACING';
+  if (legs.some(l => l.status === 'CLOSING')) return 'CLOSING';
+  if (legs.some(l => l.status === 'OPEN')) return 'OPEN';
+  if (legs.every(l => l.status === 'CLOSED')) return 'CLOSED';
+  if (legs.some(l => l.status === 'FAILED')) return 'FAILED';
+  return 'DRAFT';
+}
+
 // Re-exported for callers that only need to inspect a matched row's product
 // without importing lib/positionProduct.ts separately.
 export { positionProduct };
