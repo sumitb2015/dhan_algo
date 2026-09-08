@@ -93,6 +93,7 @@ const NAV_GROUPS = [
       { href: '/options-analytics/live', label: 'Live Payoff', desc: 'Live combined payoff diagram for every underlying with open option positions' },
       { href: '/scalper', label: 'Scalper', desc: 'Multi-window active trading & scalping order ticket' },
       { href: '/advanced-scalper', label: 'Advanced Scalper', desc: 'Configurable 2-5 box scalper with per-box CE/PE, strike & lot presets' },
+      { href: '/synthetic-futures', label: 'Synthetic Futures', desc: 'Futuristic ATM synthetic futures scalper with 1-click execution, hedging wings, trailing SL & WebSocket ticks' },
       { href: '/focus-tool', label: 'Ultimate Scalper Terminal', desc: 'Straddles & strangles terminal — timed entry, level exits, real-money armed orders' },
       { href: '/options/quiktrade', label: 'QuikTrade', desc: 'OI buildup quadrants, live positions & P&L' },
       { href: '/options/crudeoil', label: 'Crude Oil Options', desc: 'Max pain, PCR & live option chain for MCX Crude Oil' },

@@ -84,6 +84,13 @@ export const TERMINAL_PILLARS: TerminalPillarGroup[] = [
         hot: true,
       },
       {
+        name: 'Synthetic Futures Scalper',
+        href: '/synthetic-futures',
+        badge: 'QUANT',
+        desc: '1-Click ATM synthetic long/short execution, auto-hedging wings & trailing SL',
+        hot: true,
+      },
+      {
         name: 'Options QuikTrade',
         href: '/options/quiktrade',
         badge: 'FAST',
