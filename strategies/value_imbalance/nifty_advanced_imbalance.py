@@ -15,6 +15,7 @@ from lib.strategy_state_helper import save_strategy_state, check_shutdown_trigge
 from lib.strategy_risk import resolve_exit_qty_broker
 from lib.execution_broker import ExecutionBroker, ExecutionBrokerError
 from lib.recovery_reweight import enter_recovery_leg, recovery_stop_price
+from lib.telegram_alert import notify
 
 # Setup Logging
 project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -202,6 +203,9 @@ class NiftyAdvancedImbalance:
         case where the headline IS the open cycle.
         """
         cycle_pnl = total_pnl if cycle_pnl is None else cycle_pnl
+        if status == "STOPPED" and not getattr(self, "_stopped_notified", False):
+            self._stopped_notified = True
+            notify(f"[{self.state_key}] Strategy stopped.")
         state_dict = {
             "strategy": "nifty_advanced_imbalance",
             "status": status,
@@ -653,6 +657,7 @@ class NiftyAdvancedImbalance:
 
     def exit_all_positions(self, reason):
         logger.warning(f"!!! EXITING ALL POSITIONS: {reason} !!!")
+        notify(f"[{self.state_key}] Exiting all positions: {reason}")
         if not self.dry_run:
             # 1. Buy back short options (only this strategy's own quantity)
             if self.ce_id:

@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { readPnlAlertState, writePnlAlertState, istToday } from '@/lib/pnlAlertState';
+import { sendTelegramAlert } from '@/lib/telegramAlert';
 
 // Alerts whenever combined day P&L (all brokers) moves ALERT_STEP_INR away
 // from wherever it was at the last alert — a moving baseline, not a single
@@ -70,6 +71,10 @@ export async function GET(request: NextRequest) {
       // what prevents re-showing the same alert on every subsequent poll.
       state = { date: today, baseline: totalPnl!, updatedAt: new Date().toISOString() };
       writePnlAlertState(state);
+      const arrow = diff >= 0 ? '📈' : '📉';
+      void sendTelegramAlert(
+        `${arrow} Day P&L moved ${diff >= 0 ? '+' : ''}₹${diff.toFixed(0)} to ₹${totalPnl!.toFixed(0)} (${openPositions} open positions)`
+      );
     }
   }
 

@@ -3,6 +3,7 @@ import path from 'path';
 import { PROJECT_ROOT, runPythonJson } from '@/lib/pyExec';
 import { readTracked, writeTracked, newTrackedId, type TrackedCsp } from '@/lib/cspTracked';
 import { invalidateBrokerCache } from '@/lib/brokerPositionsCache';
+import { sendTelegramAlert } from '@/lib/telegramAlert';
 
 const SCRIPT = path.join(PROJECT_ROOT, 'scripts', 'tools', 'csp_watchlist.py');
 
@@ -110,6 +111,10 @@ export async function POST(req: NextRequest) {
     rows.push(newRow);
     writeTracked(rows);
     invalidateBrokerCache('dhan');
+    void sendTelegramAlert(
+      `🔁 CSP roll — entry leg filled: ${newRow.symbol} ${newRow.strike}PE ${newRow.expiry} x${newRow.qty}` +
+        (typeof result.tradedPrice === 'number' ? ` @ ₹${result.tradedPrice.toFixed(2)}` : '')
+    );
 
     return NextResponse.json({
       success: true,
