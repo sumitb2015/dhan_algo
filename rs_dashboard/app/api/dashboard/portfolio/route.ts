@@ -8,6 +8,7 @@ import { shapeKotakPosition, shapeKotakFunds } from '@/lib/kotakShape';
 import { dedupePositions } from '@/lib/positionProduct';
 import { contractMultiplier, scaleBrokerPnl } from '@/lib/positionPnl';
 import { getCachedPositions, getCachedFunds } from '@/lib/brokerPositionsCache';
+import { joinKotakLtp } from '@/lib/kotakLtpJoin';
 import type { Broker } from '@/hooks/useBrokerSelector';
 
 // Funds + open-position P&L for every connected broker, in one call.
@@ -313,6 +314,20 @@ async function loadKotak(): Promise<BrokerPortfolio> {
   if (posRes.status === 'fulfilled') {
     const rows = kotakRows(posRes.value).map(shapeKotakPosition);
     Object.assign(out, summarize('kotak', rows as unknown as Record<string, unknown>[]));
+
+    // Kotak's payload has no LTP of its own — join one from Dhan's option
+    // chain (dhan-broker-positions invariant 3) so the balance sheet doesn't
+    // render every Kotak leg as unpriced merely because the broker itself
+    // never reports a mark. Best-effort: a failure here leaves legs exactly
+    // as unpriced as they already were, it never regresses a leg that was
+    // otherwise fine.
+    try {
+      await joinKotakLtp(out.positions);
+      out.unpricedPositions = out.positions.filter(p => p.isOpen && p.lastPrice <= 0).length;
+      out.unrealizedPnl = out.positions.reduce((sum, p) => sum + p.unrealizedPnl, 0);
+    } catch (e) {
+      out.error = [out.error, `ltp-join: ${String(e).slice(0, 120)}`].filter(Boolean).join(' · ');
+    }
   } else {
     out.error = [out.error, `positions: ${String(posRes.reason).slice(0, 120)}`].filter(Boolean).join(' · ');
   }
