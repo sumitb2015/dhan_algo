@@ -157,6 +157,22 @@ Rule 3, adapted to "don't inject a row" rather than "don't trust a REST field":
   Gating the existing `if (liveIdx)` on `isGenuineQuoteRow(liveIdx)` too was the
   entire fix; the already-correct carry-forward branch does the rest.
 
+**Consumer-side gotcha with the carry-forward fallback**: it exists so Scanner's
+date-alignment doesn't drop a genuine today row on the stock side while the index
+side has nothing yet — so, unlike the stock path, it does not stay silent; it pushes
+a full **exact duplicate** of the prior row (`{...last, date: todayIST}` — every
+field, not just close) under today's date. Any OTHER consumer that treats "last row
+vs the row before it" as the % baseline (Top Market Cap Charts' `quoteFor()` in
+`TopMarketCapCharts.tsx`, found and fixed 2026-09-09) will see `close === prevClose`
+and report a guaranteed `0.00%` for every index tile pre-market — not because the
+index was flat, but because the "previous" row it compared against is a byte-for-byte
+copy of itself. **If you compute a day-over-day % change from `readIndexCSV`/
+`readNifty50Index`/etc.'s output anywhere else, walk back past a trailing row whose
+open/high/low/close all exactly equal the row before it** before treating that
+prior row as the real baseline (see `isCarryForwardPlaceholder()` in
+`TopMarketCapCharts.tsx` for the reference check) — don't just take `rows[-2]`
+unconditionally.
+
 ## Before You Ship
 - Does a new "vs previous close" panel source its data from Dhan only (Rule 1)?
 - Does any new close/flip guard gate on **time-of-day**, not on `close === ltp`
@@ -168,3 +184,6 @@ Rule 3, adapted to "don't inject a row" rather than "don't trust a REST field":
 - If the new code reads through `lib/dataLoader.ts`'s CSV + live-quote-patch path
   rather than calling Dhan directly, does it (or the shared patch function it calls)
   use `isGenuineQuoteRow()` rather than a narrower ad hoc check (Rule 4)?
+- If it computes a % baseline from `rows[-2]` off an index-reader function
+  (`readIndexCSV`/`readNifty50Index`/etc.), does it first check for and skip past a
+  trailing carry-forward duplicate row, rather than trusting `rows[-2]` blindly?

@@ -68,8 +68,8 @@ const OITooltip = ({ active, payload, label }: Record<string, unknown>) => {
         <span className="text-white font-bold tabular-nums">{fmtOI(peOI)}</span>
       </div>
       <div className="mt-2 pt-2 border-t border-zinc-800 flex justify-between gap-8">
-        <span className="text-zinc-400">PCR</span>
-        <span className="text-yellow-400 font-bold tabular-nums">{pcr}</span>
+        <span className="text-zinc-400 font-mono">PCR</span>
+        <span className="text-amber-400 font-bold font-mono tabular-nums">{pcr}</span>
       </div>
     </div>
   );
@@ -184,7 +184,7 @@ export default function CrudeOilCumulativeOITab({ expiry: _expiry }: { expiry: s
   const spot   = last?.spot  ?? 0;
   const pcr    = ceOI > 0 ? peOI / ceOI : 0;
 
-  const pcrColor  = pcr > 1.3 ? 'text-emerald-400' : pcr > 0 && pcr < 0.7 ? 'text-red-400' : 'text-yellow-400';
+  const pcrColor  = pcr > 1.3 ? 'text-emerald-400' : pcr > 0 && pcr < 0.7 ? 'text-red-400' : 'text-amber-400';
   const pcrLabel  = pcr > 1.3 ? 'Bullish' : pcr > 0 && pcr < 0.7 ? 'Bearish' : 'Neutral';
   const diffColor = diff > 0 ? 'text-emerald-400' : diff < 0 ? 'text-red-400' : 'text-zinc-400';
   const diffLabel = diff > 0 ? 'PE dominant' : diff < 0 ? 'CE dominant' : undefined;

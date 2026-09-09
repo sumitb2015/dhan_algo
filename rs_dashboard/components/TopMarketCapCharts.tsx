@@ -12,7 +12,7 @@
 
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import { RefreshCw, LayoutGrid, Maximize2, X } from 'lucide-react';
-import type { EquityCandlesResponse } from '@/app/api/equity-candles/route';
+import type { EquityCandlesResponse, CandleRow } from '@/app/api/equity-candles/route';
 import { NIFTY_TOP10_BY_WEIGHT } from '@/lib/nifty50';
 import { cn } from '@/lib/utils';
 import NavBar from './NavBar';
@@ -69,16 +69,33 @@ const PERIOD_DAYS: Record<Period, number | null> = {
 const ALL_TILES = [...TOP8_STOCKS, ...TOP8_INDICES];
 
 /**
- * Last candle's close as the current price, vs. the prior candle's close for
- * % change — dataLoader.ts patches today's row from live intraday quotes
- * before the EOD CSV lands, so the last candle is already "current" during
- * market hours, not just yesterday's settle.
+ * True if `curr` is dataLoader.ts's index-reader carry-forward placeholder —
+ * a full OHLCV duplicate of `prev` pushed under today's date so Scanner's
+ * date-alignment doesn't drop a genuine today row on the stock side (see
+ * readNifty50Index/readIndexCSV). It is NOT a real session: before there is
+ * a genuine live quote for the index, every field is copied verbatim from
+ * the prior row. Per dhan-prevclose-pct-change Rule 4, treating it as a real
+ * session for % change collapses every index tile to a guaranteed 0.00% —
+ * `curr.close === prev.close` because it's literally the same number, not
+ * because the index was flat.
+ */
+function isCarryForwardPlaceholder(curr: CandleRow, prev: CandleRow): boolean {
+  return curr.open === prev.open && curr.high === prev.high &&
+    curr.low === prev.low && curr.close === prev.close;
+}
+
+/**
+ * Last candle's close as the current price, vs. the prior REAL candle's
+ * close for % change — dataLoader.ts patches today's row from live intraday
+ * quotes before the EOD CSV lands, so the last candle is already "current"
+ * during market hours, not just yesterday's settle.
  *
  * `liveOverride`, when present, replaces the (possibly stale) candle close
  * with a fresh LTP fetched on demand by the Refresh button — see
  * /api/top-mcap-charts/live-quotes. The prior candle stays the % baseline
  * either way; it's yesterday's already-finalized close, so it doesn't need
- * refreshing.
+ * refreshing. "Prior candle" walks back past any carry-forward
+ * placeholder(s) at the tail first — see isCarryForwardPlaceholder.
  */
 function quoteFor(
   resp: EquityCandlesResponse | undefined,
@@ -88,7 +105,12 @@ function quoteFor(
   if (!candles || candles.length === 0) return null;
   const ltp = liveOverride && liveOverride > 0 ? liveOverride : candles[candles.length - 1].close;
   if (candles.length < 2) return { ltp, changePct: null };
-  const prevClose = candles[candles.length - 2].close;
+
+  let baseIdx = candles.length - 2;
+  while (baseIdx > 0 && isCarryForwardPlaceholder(candles[baseIdx + 1], candles[baseIdx])) {
+    baseIdx--;
+  }
+  const prevClose = candles[baseIdx].close;
   const changePct = prevClose > 0 ? ((ltp - prevClose) / prevClose) * 100 : null;
   return { ltp, changePct };
 }

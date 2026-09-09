@@ -2,16 +2,15 @@
 
 import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import Link from 'next/link';
-import { AlertCircle, ArrowLeft, Fuel, Loader2 } from 'lucide-react';
+import { useRouter } from 'next/navigation';
+import { AlertCircle, ArrowLeft, Clock, Fuel, Loader2 } from 'lucide-react';
 
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { Badge } from '@/components/ui/badge';
-import { buttonVariants } from '@/components/ui/button';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group';
 import { TooltipProvider } from '@/components/ui/tooltip';
-import { cn } from '@/lib/utils';
 
 import CrudeOilOITab from './CrudeOilOITab';
 import CrudeOilCumulativeOITab from './CrudeOilCumulativeOITab';
@@ -77,6 +76,8 @@ function crudeSymbolUnderlying(symbol: string): CrudeUnderlying | null {
 // ─── Main Component ───────────────────────────────────────────────
 
 export default function CrudeOilOptions() {
+  const router = useRouter();
+
   // ─── Underlying selection ──────────────────────────────────────────
   const [underlying, setUnderlying]   = useState<CrudeUnderlying>('CRUDEOIL');
   const underlyingLabel               = CRUDE_UNDERLYING_LABELS[underlying];
@@ -141,6 +142,37 @@ export default function CrudeOilOptions() {
   }>({ broker: 'dhan', positions: [], orders: [], trades: [], error: null, loaded: false });
   const [activeActivityTab, setActiveActivityTab] = useState<ActivityTab>('positions');
   const tradesIntervalRef = useRef<NodeJS.Timeout | null>(null);
+
+  const [clock, setClock] = useState('');
+  useEffect(() => {
+    const update = () => {
+      const now = new Date();
+      const utc = now.getTime() + now.getTimezoneOffset() * 60000;
+      const ist = new Date(utc + 5.5 * 3600000);
+      setClock(ist.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false }));
+    };
+    update();
+    const interval = setInterval(update, 1000);
+    return () => clearInterval(interval);
+  }, []);
+
+  const mcxSession = useMemo(() => {
+    const now = new Date();
+    const utc = now.getTime() + now.getTimezoneOffset() * 60000;
+    const ist = new Date(utc + 5.5 * 3600000);
+    const day = ist.getDay();
+    const hour = ist.getHours();
+    const minute = ist.getMinutes();
+    const timeNum = hour * 60 + minute;
+
+    if (day === 0 || day === 6) {
+      return { status: 'CLOSED', label: 'MCX WEEKEND CLOSED', tone: 'neutral' as const };
+    }
+    if (timeNum >= 540 && timeNum <= 1410) { // 09:00 to 23:30
+      return { status: 'OPEN', label: 'MCX LIVE 09:00–23:30', tone: 'live' as const };
+    }
+    return { status: 'CLOSED', label: 'MCX SESSION CLOSED', tone: 'neutral' as const };
+  }, [clock]);
 
   // ─── Background pricing for the OTHER underlying's open positions ──────
   // The Positions tab lists both CRUDEOIL and CRUDEOILM regardless of which
@@ -1061,6 +1093,20 @@ export default function CrudeOilOptions() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [crudePositions, tradesLoading, bookIsCurrent, book.error]);
 
+  // ─── Keyboard Shortcut: F10 → Nifty Options ────────────────────────────
+  // Matches the "[F10] NIFTY OPTIONS" label on the header link below.
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (['INPUT', 'TEXTAREA', 'SELECT'].includes((e.target as HTMLElement)?.tagName)) return;
+      if (e.key === 'F10') {
+        e.preventDefault();
+        router.push('/options');
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [router]);
+
   // ─── Auto-exit monitor: check SL/Target thresholds each poll tick ─────────────────
   // When breached, set pendingConfirm so the user sees a dialog BEFORE any order fires.
   useEffect(() => {
@@ -1140,181 +1186,271 @@ export default function CrudeOilOptions() {
 
   return (
     <TooltipProvider>
-      <div className="min-h-screen bg-zinc-950 text-zinc-100">
-        {/* ─── Header ─────────────────────────────────────────────────── */}
-        <header className="sticky top-0 z-30 flex flex-wrap items-center gap-3 border-b border-zinc-800 bg-zinc-950/80 px-4 py-3 backdrop-blur-md">
-          <div className="flex shrink-0 items-center gap-2.5">
-            <div className="flex size-8 items-center justify-center rounded-lg bg-gradient-to-br from-amber-500 to-orange-700 shadow">
-              <Fuel className="size-4 text-white" />
+      <div className="min-h-screen bg-zinc-950 text-zinc-100 flex flex-col font-sans selection:bg-amber-500/20 selection:text-amber-300">
+        {/* ─── Sticky Bloomberg Terminal Header ────────────────────────── */}
+        <header className="sticky top-0 z-30 flex flex-wrap items-center justify-between gap-3 border-b border-amber-500/20 bg-zinc-950/95 px-4 lg:px-6 py-2.5 backdrop-blur shadow-md">
+          {/* Title Block */}
+          <div className="flex items-center gap-3">
+            <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-amber-500/30 bg-amber-500/10 shadow-inner">
+              <Fuel className="h-5 w-5 text-amber-400" />
             </div>
             <div>
-              <div className="text-sm font-bold leading-none text-zinc-100">{underlyingLabel} Options</div>
-              <div className="mt-0.5 text-[10px] text-zinc-500">MCX · {underlying}</div>
+              <div className="flex items-center gap-2 mb-0.5">
+                <span className="text-[10px] font-bold uppercase tracking-[0.2em] text-amber-400 font-mono">
+                  BLOOMBERG TERMINAL · COMMODITY DESK
+                </span>
+                <span className="text-[10px] text-zinc-600">/</span>
+                <span className="font-mono text-[9px] text-zinc-400">MCX CRUDE v2.4</span>
+              </div>
+              <h1 className="text-sm lg:text-base font-bold leading-none tracking-tight text-white">
+                {underlyingLabel} Options Matrix
+              </h1>
             </div>
           </div>
 
-          <Select
-            value={underlying}
-            onValueChange={(v) => { if (typeof v === 'string' && v) setUnderlying(v as CrudeUnderlying); }}
-          >
-            <SelectTrigger size="sm" className="min-w-36 font-mono">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              {CRUDE_UNDERLYINGS.map(u => (
-                <SelectItem key={u} value={u} className="font-mono">
-                  {CRUDE_UNDERLYING_LABELS[u]}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
+          {/* Telemetry Strip & Quick Controls */}
+          <div className="flex flex-wrap items-center gap-2.5">
+            {/* Market Session Status */}
+            <div className="flex items-center gap-1.5 rounded-md border border-zinc-800 bg-zinc-900 px-2.5 py-1 font-mono text-[10px] font-semibold">
+              <span
+                className={`h-2 w-2 rounded-full ${
+                  mcxSession.tone === 'live'
+                    ? 'bg-emerald-400 animate-pulse'
+                    : 'bg-zinc-500'
+                }`}
+              />
+              <span className={mcxSession.tone === 'live' ? 'text-emerald-300' : 'text-zinc-400'}>
+                {mcxSession.label}
+              </span>
+            </div>
 
-          <div className="flex flex-wrap items-center gap-2">
-            <Badge
-              variant="outline"
-              className={`font-mono tabular-nums ${
-                changePct > 0
-                  ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-400'
-                  : changePct < 0
-                    ? 'border-red-500/40 bg-red-500/10 text-red-400'
-                    : 'border-zinc-700 bg-zinc-900 text-zinc-300'
-              }`}
-            >
-              SPOT {spot > 0 ? fmtNum(spot, 1) : '—'}
-            </Badge>
-            {spot > 0 && prevClose > 0 && (
-              <Badge variant="outline" className={`border-zinc-700 bg-zinc-900 font-mono tabular-nums ${pctColor(changePct)}`}>
-                {change >= 0 ? '+' : ''}{fmtNum(change, 1)} ({pctSign(changePct)})
-              </Badge>
-            )}
-            <Badge variant="outline" className="border-amber-500/40 bg-amber-500/10 font-mono tabular-nums text-amber-300">
-              ATM {stats.atm ? fmtNum(stats.atm) : '—'}
-            </Badge>
-            <Badge variant="outline" className="border-zinc-700 bg-zinc-900 font-mono tabular-nums text-zinc-300">
-              EXP {fmtExpiryShort(expiry)}{dte !== null && dte >= 0 ? ` · ${dte}d` : ''}
-            </Badge>
-            <Badge variant="outline" className="border-zinc-700 bg-zinc-900 font-mono tabular-nums text-zinc-400">
-              LOT {lotSize}
-            </Badge>
-            <Badge variant="outline" className="border-zinc-700 bg-zinc-900 font-mono text-zinc-400">
-              DATA: {todayIso()}
-            </Badge>
-          </div>
+            {/* Live IST Clock */}
+            <div className="hidden sm:flex items-center gap-1.5 rounded-md border border-zinc-800 bg-zinc-900 px-2.5 py-1 font-mono text-[10px] text-zinc-400">
+              <Clock className="h-3 w-3 text-amber-400" />
+              <span className="tabular-nums font-bold text-zinc-200">{clock || '--:--:--'} IST</span>
+            </div>
 
-          <div className="ml-auto flex flex-wrap items-center gap-3">
-            <span className="flex items-center gap-1.5 text-[11px] text-zinc-500">
-              {loading ? (
-                <Loader2 className="size-3 animate-spin text-zinc-400" />
-              ) : (
-                <span className={`inline-block size-1.5 rounded-full ${stale ? 'animate-pulse bg-amber-400' : 'bg-emerald-400'}`} />
+            {/* Spot Quote Badge */}
+            <div className={`flex items-center gap-1.5 rounded-md border px-2.5 py-1 font-mono text-[10px] font-bold tabular-nums ${
+              changePct > 0
+                ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-400'
+                : changePct < 0
+                ? 'border-red-500/40 bg-red-500/10 text-red-400'
+                : 'border-zinc-800 bg-zinc-900 text-zinc-300'
+            }`}>
+              <span className="text-zinc-500 font-normal">FUT SPOT:</span>
+              <span>{spot > 0 ? `₹${fmtNum(spot, 1)}` : '—'}</span>
+              {spot > 0 && prevClose > 0 && (
+                <span className={`text-[9px] ${pctColor(changePct)}`}>
+                  ({pctSign(changePct)})
+                </span>
               )}
-              {stale ? <span className="font-semibold text-amber-400">stale — retrying</span> : <span>live</span>}
-              <span className="tabular-nums">· {lastUpdated ?? '—'} · 15s</span>
-            </span>
+            </div>
 
-            <Select
-              value={broker}
-              onValueChange={(v) => { if (typeof v === 'string' && v) setBroker(v as CrudeBroker); }}
+            {/* ATM Strike Badge */}
+            <div className="flex items-center gap-1 rounded-md border border-amber-500/30 bg-amber-500/10 px-2.5 py-1 font-mono text-[10px] font-bold text-amber-300">
+              <span className="text-zinc-500 font-normal">ATM:</span>
+              <span>{stats.atm ? fmtNum(stats.atm) : '—'}</span>
+            </div>
+
+            {/* Expiry Badge */}
+            <div className="hidden md:flex items-center gap-1 rounded-md border border-zinc-800 bg-zinc-900 px-2.5 py-1 font-mono text-[10px] font-bold text-zinc-300">
+              <span className="text-zinc-500 font-normal">EXP:</span>
+              <span>{fmtExpiryShort(expiry)}</span>
+              {dte !== null && dte >= 0 && (
+                <span className="text-amber-400 font-bold ml-0.5">· {dte}d</span>
+              )}
+            </div>
+
+            {/* Contract Lot Badge */}
+            <div className="hidden lg:flex items-center gap-1 rounded-md border border-zinc-800 bg-zinc-900 px-2.5 py-1 font-mono text-[10px] text-zinc-400">
+              <span className="text-zinc-500">LOT:</span>
+              <span className="text-zinc-200 font-bold tabular-nums">{lotSize} BBL</span>
+            </div>
+
+            {/* DATA Date */}
+            <div className="hidden xl:flex items-center gap-1 rounded-md border border-zinc-800 bg-zinc-900 px-2 py-1 font-mono text-[10px] text-zinc-400">
+              <span className="text-zinc-500">DATA:</span>
+              <span className="text-zinc-300">{todayIso()}</span>
+            </div>
+
+            {/* Live Feed Status */}
+            <div className="flex items-center gap-1.5 rounded-md border border-zinc-800 bg-zinc-900 px-2 py-1 text-[10px] font-mono text-zinc-400">
+              {loading ? (
+                <Loader2 className="h-3 w-3 animate-spin text-amber-400" />
+              ) : (
+                <span className={`h-1.5 w-1.5 rounded-full ${stale ? 'bg-amber-400 animate-pulse' : 'bg-emerald-400'}`} />
+              )}
+              <span className={stale ? 'text-amber-400 font-bold' : 'text-zinc-300 font-semibold'}>
+                {stale ? 'RETRYING' : 'LIVE 15s'}
+              </span>
+              <span className="text-zinc-600 hidden sm:inline">· {lastUpdated ?? '—'}</span>
+            </div>
+
+            {/* Back to Nifty Options */}
+            <Link
+              href="/options"
+              className="flex items-center gap-1.5 rounded-md border border-zinc-700 bg-zinc-900/80 px-2.5 py-1 font-mono text-[10px] font-bold text-zinc-300 hover:text-amber-300 hover:border-amber-500/40 hover:bg-amber-500/10 transition-colors"
             >
-              <SelectTrigger size="sm" className="min-w-32 font-mono">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                {CRUDE_BROKERS.map(b => (
-                  <SelectItem key={b} value={b} className="font-mono">
-                    {CRUDE_BROKER_LABELS[b]}
-                    {brokerAuth && !brokerAuth[b] && <span className="ml-1.5 text-zinc-500">(no session)</span>}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-
-            {expiries.length === 0 ? (
-              <Loader2 className="size-3.5 animate-spin text-zinc-500" />
-            ) : (
-              <Select
-                value={expiry}
-                onValueChange={(v) => { if (typeof v === 'string' && v) setExpiry(v); }}
-              >
-                <SelectTrigger size="sm" className="min-w-40 font-mono">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  {expiries.map(exp => (
-                    <SelectItem key={exp} value={exp} className="font-mono">
-                      {fmtExpiryLong(exp)}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            )}
-
-            {/* Styled as a button but it navigates, so it stays a real link. Feeding it
-                through Base UI's Button (render={<Link/>}) would need nativeButton={false},
-                which stamps role="button" on the anchor and hides it from screen readers'
-                link semantics. buttonVariants gives identical styling with none of that. */}
-            <Link href="/options" className={cn(buttonVariants({ variant: 'outline', size: 'sm' }))}>
-              <ArrowLeft />
-              Nifty Options
+              <ArrowLeft className="h-3 w-3" />
+              <span>[F10] NIFTY OPTIONS</span>
             </Link>
 
-            <span className="w-px h-5 bg-zinc-800 shrink-0" />
+            <span className="h-5 w-px bg-zinc-800 shrink-0" />
             <NavBar />
           </div>
         </header>
 
-        <main className="flex flex-col gap-4 px-4 py-5">
+        {/* ─── Command Ribbon: Underlying Family, Expiry, Broker & Views ── */}
+        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-zinc-800 bg-zinc-950/80 px-4 lg:px-6 py-2 backdrop-blur">
+          <div className="flex flex-wrap items-center gap-3">
+            {/* Segmented Underlying Selector */}
+            <div className="flex items-center rounded-lg border border-zinc-800 bg-zinc-900/90 p-0.5 font-mono">
+              {CRUDE_UNDERLYINGS.map(u => {
+                const active = underlying === u;
+                return (
+                  <button
+                    key={u}
+                    type="button"
+                    onClick={() => setUnderlying(u)}
+                    className={`px-3 py-1 text-xs font-bold rounded transition-all cursor-pointer ${
+                      active
+                        ? 'bg-amber-500/20 text-amber-300 border border-amber-500/40 shadow-sm'
+                        : 'text-zinc-400 hover:text-white'
+                    }`}
+                  >
+                    {CRUDE_UNDERLYING_LABELS[u]}
+                  </button>
+                );
+              })}
+            </div>
+
+            {/* Expiry Dropdown */}
+            <div className="flex items-center gap-1.5 font-mono text-xs">
+              <span className="text-[10px] font-bold uppercase tracking-wider text-zinc-500">EXPIRY:</span>
+              {expiries.length === 0 ? (
+                <Loader2 className="size-3.5 animate-spin text-zinc-500" />
+              ) : (
+                <Select
+                  value={expiry}
+                  onValueChange={(v) => { if (typeof v === 'string' && v) setExpiry(v); }}
+                >
+                  <SelectTrigger size="sm" className="min-w-36 font-mono text-xs bg-zinc-900 border-zinc-700">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent className="bg-zinc-950 border-zinc-800">
+                    {expiries.map(exp => (
+                      <SelectItem key={exp} value={exp} className="font-mono text-xs">
+                        {fmtExpiryLong(exp)}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              )}
+            </div>
+
+            {/* Broker Selector */}
+            <div className="flex items-center gap-1.5 font-mono text-xs">
+              <span className="text-[10px] font-bold uppercase tracking-wider text-zinc-500">BROKER:</span>
+              <Select
+                value={broker}
+                onValueChange={(v) => { if (typeof v === 'string' && v) setBroker(v as CrudeBroker); }}
+              >
+                <SelectTrigger size="sm" className="min-w-32 font-mono text-xs bg-zinc-900 border-zinc-700">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent className="bg-zinc-950 border-zinc-800">
+                  {CRUDE_BROKERS.map(b => (
+                    <SelectItem key={b} value={b} className="font-mono text-xs">
+                      {CRUDE_BROKER_LABELS[b]}
+                      {brokerAuth && !brokerAuth[b] && <span className="ml-1.5 text-zinc-500">(no session)</span>}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+          </div>
+
+          {/* View Mode Segmented Tabs */}
+          <div className="flex items-center rounded-lg border border-zinc-800 bg-zinc-900/90 p-0.5 font-mono text-xs">
+            {[
+              { id: 'chain', label: 'OPTION CHAIN' },
+              { id: 'oi', label: 'OPEN INTEREST' },
+              { id: 'cumulative', label: 'CUMULATIVE OI' },
+            ].map(tab => {
+              const active = activeTab === tab.id;
+              return (
+                <button
+                  key={tab.id}
+                  type="button"
+                  onClick={() => setActiveTab(tab.id as typeof activeTab)}
+                  className={`px-3 py-1 text-[11px] font-bold uppercase tracking-wider rounded transition-all cursor-pointer ${
+                    active
+                      ? 'bg-amber-500/20 text-amber-300 border border-amber-500/40 shadow-sm'
+                      : 'text-zinc-400 hover:text-white'
+                  }`}
+                >
+                  {tab.label}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+
+        {/* ─── Main Workspace Body ───────────────────────────────────── */}
+        <main className="flex-1 flex flex-col gap-4 p-4 lg:p-6">
           {brokerAuth && !brokerAuth[broker] && (
-            <Alert variant="destructive" className="border-amber-500/40 bg-amber-500/10">
-              <AlertCircle />
-              <AlertTitle>No {brokerLabel} session</AlertTitle>
-              <AlertDescription>
-                Chain data still loads (it comes from Dhan either way), but orders and the position book
-                for {brokerLabel} are unavailable until you log in.
+            <Alert variant="destructive" className="border-amber-500/40 bg-amber-500/10 font-mono">
+              <AlertCircle className="text-amber-400" />
+              <AlertTitle className="text-amber-300 font-bold uppercase tracking-wider text-xs">
+                NO {brokerLabel.toUpperCase()} SESSION DETECTED
+              </AlertTitle>
+              <AlertDescription className="text-zinc-300 text-xs">
+                Market data is streaming via Dhan Data API, but order execution and positions tracking for {brokerLabel} require an active broker login.
               </AlertDescription>
             </Alert>
           )}
 
           {isKotak && kotakSymbolsError && (
-            <Alert variant="destructive" className="border-red-500/40 bg-red-500/10">
-              <AlertCircle />
-              <AlertTitle>Kotak contract lookup failed</AlertTitle>
-              <AlertDescription>
-                {kotakSymbolsError} — trading buttons stay disabled until strikes can be resolved to Kotak symbols.
+            <Alert variant="destructive" className="border-red-500/40 bg-red-500/10 font-mono">
+              <AlertCircle className="text-red-400" />
+              <AlertTitle className="text-red-300 font-bold uppercase tracking-wider text-xs">
+                KOTAK CONTRACT LOOKUP FAILURE
+              </AlertTitle>
+              <AlertDescription className="text-zinc-300 text-xs">
+                {kotakSymbolsError} — execution buttons remain locked until contracts map to Kotak instrument tokens.
               </AlertDescription>
             </Alert>
           )}
 
           {error && (
-            <Alert variant="destructive" className="border-red-500/40 bg-red-500/10">
-              <AlertCircle />
-              <AlertTitle>Option chain unavailable</AlertTitle>
-              <AlertDescription>{error}</AlertDescription>
+            <Alert variant="destructive" className="border-red-500/40 bg-red-500/10 font-mono">
+              <AlertCircle className="text-red-400" />
+              <AlertTitle className="text-red-300 font-bold uppercase tracking-wider text-xs">
+                OPTION CHAIN DATA ERROR
+              </AlertTitle>
+              <AlertDescription className="text-zinc-300 text-xs">{error}</AlertDescription>
             </Alert>
           )}
 
           {orderMessage && (
             <Alert
               variant={orderMessage.isError ? 'destructive' : 'default'}
-              className={orderMessage.isError
-                ? 'border-red-500/40 bg-red-500/10'
-                : 'border-emerald-500/40 bg-emerald-500/10 text-emerald-300'}
+              className={`font-mono text-xs ${
+                orderMessage.isError
+                  ? 'border-red-500/40 bg-red-500/10 text-red-300'
+                  : 'border-emerald-500/40 bg-emerald-500/10 text-emerald-300'
+              }`}
             >
-              <AlertCircle />
-              <AlertTitle>{orderMessage.isError ? 'Order failed' : 'Order update'}</AlertTitle>
-              <AlertDescription className={orderMessage.isError ? undefined : 'text-emerald-300'}>
+              <AlertCircle className={orderMessage.isError ? 'text-red-400' : 'text-emerald-400'} />
+              <AlertTitle className="font-bold uppercase tracking-wider">
+                {orderMessage.isError ? 'ORDER REJECTED / FAILED' : 'ORDER CONFIRMED'}
+              </AlertTitle>
+              <AlertDescription className={orderMessage.isError ? 'text-red-200' : 'text-emerald-200'}>
                 {orderMessage.text}
               </AlertDescription>
             </Alert>
           )}
-
-          <Tabs value={activeTab} onValueChange={(v) => setActiveTab(v as typeof activeTab)}>
-            <TabsList variant="line" className="border-b border-zinc-800">
-              <TabsTrigger value="chain">Option Chain</TabsTrigger>
-              <TabsTrigger value="oi">Open Interest</TabsTrigger>
-              <TabsTrigger value="cumulative">Cumulative OI</TabsTrigger>
-            </TabsList>
-          </Tabs>
 
           {showChainMeta && (
             <MarketSnapshot
@@ -1343,25 +1479,34 @@ export default function CrudeOilOptions() {
                 onExitAll={handleExitAll}
               />
 
-              <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-zinc-800 bg-zinc-900 px-3 py-2">
+              {/* Strikes Wing Filter Toolbar */}
+              <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-zinc-800 bg-zinc-950/70 px-3.5 py-2">
                 <div className="flex items-center gap-2">
-                  <span className="text-[10px] font-bold uppercase tracking-wider text-zinc-500">Strikes around ATM</span>
-                  <ToggleGroup
-                    value={[String(wings)]}
-                    onValueChange={(v) => { if (v[0]) setWings(Number(v[0]) as Wings); }}
-                    variant="outline"
-                    size="sm"
-                    spacing={0}
-                  >
-                    {WING_OPTIONS.map(w => (
-                      <ToggleGroupItem key={w} value={String(w)} className="tabular-nums">
-                        ±{w}
-                      </ToggleGroupItem>
-                    ))}
-                  </ToggleGroup>
+                  <span className="text-[10px] font-bold uppercase tracking-[0.16em] text-zinc-400 font-mono">
+                    STRIKES AROUND ATM:
+                  </span>
+                  <div className="flex items-center rounded-lg border border-zinc-800 bg-zinc-900 p-0.5 font-mono">
+                    {WING_OPTIONS.map(w => {
+                      const active = wings === w;
+                      return (
+                        <button
+                          key={w}
+                          type="button"
+                          onClick={() => setWings(w)}
+                          className={`px-2.5 py-0.5 text-xs font-bold rounded transition-colors cursor-pointer ${
+                            active
+                              ? 'bg-amber-500/20 text-amber-300 border border-amber-500/40'
+                              : 'text-zinc-400 hover:text-zinc-200'
+                          }`}
+                        >
+                          ±{w}
+                        </button>
+                      );
+                    })}
+                  </div>
                 </div>
-                <span className="text-[11px] tabular-nums text-zinc-500">
-                  {rows.length} rows · {brokerLabel} · ticket {qtyLabel}
+                <span className="text-[11px] font-mono tabular-nums text-zinc-400">
+                  {rows.length} ROWS · ROUTING: <span className="text-amber-300 font-bold">{brokerLabel.toUpperCase()}</span> · TICKET: <span className="text-zinc-200 font-bold">{qtyLabel}</span>
                 </span>
               </div>
 
@@ -1376,10 +1521,12 @@ export default function CrudeOilOptions() {
               />
 
               {tradesError && (
-                <Alert variant="destructive" className="border-red-500/40 bg-red-500/10">
-                  <AlertCircle />
-                  <AlertTitle>Positions feed unavailable</AlertTitle>
-                  <AlertDescription>{tradesError}</AlertDescription>
+                <Alert variant="destructive" className="border-red-500/40 bg-red-500/10 font-mono">
+                  <AlertCircle className="text-red-400" />
+                  <AlertTitle className="text-red-300 font-bold uppercase tracking-wider text-xs">
+                    POSITIONS FEED UNAVAILABLE
+                  </AlertTitle>
+                  <AlertDescription className="text-zinc-300 text-xs">{tradesError}</AlertDescription>
                 </Alert>
               )}
 

@@ -77,8 +77,8 @@ const OITooltip = ({ active, payload, label }: Record<string, unknown>) => {
       </div>
       {(row?.ceOI ?? 0) > 0 && (
         <div className="mt-2 pt-2 border-t border-zinc-800 flex justify-between gap-8">
-          <span className="text-zinc-400">PCR</span>
-          <span className="text-yellow-400 font-bold tabular-nums">
+          <span className="text-zinc-400 font-mono">PCR</span>
+          <span className="text-amber-400 font-bold font-mono tabular-nums">
             {((row?.peOI ?? 0) / (row?.ceOI ?? 1)).toFixed(2)}
           </span>
         </div>
@@ -229,7 +229,7 @@ export default function CrudeOilOITab({ expiry }: { expiry: string }) {
 
   const pcrColor  = chainPCR > 1.3 ? 'text-emerald-400'
                   : chainPCR > 0 && chainPCR < 0.7 ? 'text-red-400'
-                  : 'text-yellow-400';
+                  : 'text-amber-400';
   const pcrLabel  = chainPCR > 1.3 ? 'Bullish' : chainPCR < 0.7 && chainPCR > 0 ? 'Bearish' : 'Neutral';
 
   const xAxisProps = {
