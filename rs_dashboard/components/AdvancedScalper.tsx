@@ -1048,12 +1048,18 @@ export default function AdvancedScalper() {
 
   // ─── placeOrder ───────────────────────────────────────────────────
 
-  const placeOrder = useCallback(async (boxId: string, side: 'BUY' | 'SELL') => {
+  const placeOrder = useCallback(async (boxId: string, side: 'BUY' | 'SELL', opts?: { forceMarket?: boolean }) => {
     const box = boxes.find(b => b.id === boxId);
     if (!box || !box.strike || !expiry) return;
     if (orderInFlightRef.current.has(boxId)) return;
 
-    if (orderMode === 'LIMIT') {
+    // Hotkey trades are always MARKET, regardless of the box's current
+    // Market/Limit toggle — a one-click hotkey firing a resting LIMIT order at
+    // a stale typed price would not behave like the "instant fill" the keys
+    // promise.
+    const mode = opts?.forceMarket ? 'MARKET' : orderMode;
+
+    if (mode === 'LIMIT') {
       const priceNum = Number(box.limitPrice);
       if (!box.limitPrice || isNaN(priceNum) || priceNum <= 0) {
         addToast('error', 'Enter a valid limit price');
@@ -1093,10 +1099,10 @@ export default function AdvancedScalper() {
             tradingsymbol: symbol,
             quantity: box.lots * lotSize,
             side,
-            orderType: orderMode,
+            orderType: mode,
             exchange,
             product: productType === 'MARGIN' ? 'NRML' : 'MIS',
-            ...(orderMode === 'LIMIT' ? { price: Number(box.limitPrice) } : {}),
+            ...(mode === 'LIMIT' ? { price: Number(box.limitPrice) } : {}),
           }),
         });
       } else {
@@ -1109,17 +1115,17 @@ export default function AdvancedScalper() {
               securityId: secId,
               quantity: box.lots * lotSize,
               side,
-              orderType: orderMode,
+              orderType: mode,
               exchangeSegment: underlying === 'SENSEX' ? 'BSE_FNO' : 'NSE_FNO',
               productType,
-              ...(orderMode === 'LIMIT' ? { price: Number(box.limitPrice) } : {}),
+              ...(mode === 'LIMIT' ? { price: Number(box.limitPrice) } : {}),
             }),
           });
         } else {
           const body: Record<string, unknown> = {
-            underlying, expiry, strike: box.strike, option: box.side, side, lots: box.lots, type: orderMode,
+            underlying, expiry, strike: box.strike, option: box.side, side, lots: box.lots, type: mode,
           };
-          if (orderMode === 'LIMIT') body.price = Number(box.limitPrice);
+          if (mode === 'LIMIT') body.price = Number(box.limitPrice);
           res = await fetch('/api/scalper/order', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -1130,7 +1136,7 @@ export default function AdvancedScalper() {
 
       const j = await res.json() as { success: boolean; order_id?: string; error?: string };
       if (j.success) {
-        addToast('success', `${side} ${box.side} placed`, `ID: ${j.order_id}`);
+        addToast('success', `${side} ${box.side} placed`, opts?.forceMarket ? `Hotkey market order · ID: ${j.order_id}` : `ID: ${j.order_id}`);
         setTimeout(fetchTabData, 1000);
       } else {
         addToast('error', `${side} ${box.side} failed`, j.error ?? 'Unknown error');
@@ -1142,6 +1148,65 @@ export default function AdvancedScalper() {
       setOrderPendingBoxes(prev => { const s = new Set(prev); s.delete(boxId); return s; });
     }
   }, [boxes, expiry, underlying, lotSize, strikeMap, orderMode, productType, broker, addToast, fetchTabData]);
+
+  // ─── Hotkey trading (one-click MARKET orders) ──────────────────────
+  // ArrowUp/ArrowLeft act on the first CE box, ArrowDown/ArrowRight on the
+  // first PE box — "first" so this still resolves sensibly if a user has
+  // added extra boxes of the same side. Always MARKET regardless of the
+  // Market/Limit toggle (see placeOrder's `forceMarket`).
+  const handleHotkeyTrade = useCallback((optionSide: 'CE' | 'PE', tradeSide: 'BUY' | 'SELL') => {
+    const box = boxes.find(b => b.side === optionSide);
+    if (!box) {
+      addToast('error', `No ${optionSide} panel`, `Add a ${optionSide === 'CE' ? 'Calls' : 'Puts'} panel first`);
+      return;
+    }
+    if (!box.strike) {
+      addToast('error', `${tradeSide} ${optionSide} failed`, 'Select a strike on that panel first');
+      return;
+    }
+    placeOrder(box.id, tradeSide, { forceMarket: true });
+  }, [boxes, placeOrder, addToast]);
+
+  // Kept current via a ref so the keydown listener below can be registered
+  // exactly once and never torn down/re-added on every box/price update —
+  // see commit bd0f305 for why that churn matters on a live-ticking page.
+  const handleHotkeyTradeRef = useRef(handleHotkeyTrade);
+  useEffect(() => { handleHotkeyTradeRef.current = handleHotkeyTrade; });
+
+  // Keyboard bindings: ↑ Buy Call, ← Sell Call, ↓ Buy Put, → Sell Put.
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      // Never hijack arrow keys while the user is typing/scrolling a field
+      // (lots, limit price, strike <select>, etc.), and ignore OS auto-repeat
+      // from a held key so one press can never fire a stream of market orders.
+      if (['INPUT', 'TEXTAREA', 'SELECT'].includes((e.target as HTMLElement)?.tagName)) return;
+      if (e.repeat || e.ctrlKey || e.metaKey || e.altKey) return;
+
+      switch (e.key) {
+        case 'ArrowUp':
+          e.preventDefault();
+          handleHotkeyTradeRef.current('CE', 'BUY');
+          break;
+        case 'ArrowLeft':
+          e.preventDefault();
+          handleHotkeyTradeRef.current('CE', 'SELL');
+          break;
+        case 'ArrowDown':
+          e.preventDefault();
+          handleHotkeyTradeRef.current('PE', 'BUY');
+          break;
+        case 'ArrowRight':
+          e.preventDefault();
+          handleHotkeyTradeRef.current('PE', 'SELL');
+          break;
+        default:
+          return;
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, []); // empty deps — listener registered once for component lifetime
 
   // ─── Per-position close ───────────────────────────────────────────
 
@@ -2034,6 +2099,16 @@ export default function AdvancedScalper() {
               )}>
               TOP 10 {showTop10 ? 'ON' : 'OFF'}
             </button>
+
+            {/* Hotkey legend — these fire real MARKET orders on the first
+                CE/PE box regardless of the Market/Limit toggle above, so the
+                bindings need to stay visible, not just discoverable via docs. */}
+            <span
+              title={'Hotkeys (ignored while typing in a field):\n↑ Buy Call · ← Sell Call\n↓ Buy Put · → Sell Put\nAll one-click MARKET orders.'}
+              className="flex items-center gap-1 px-2.5 py-1.5 text-[10px] font-bold rounded-lg
+                         border border-amber-700/40 bg-amber-950/30 text-amber-400 shrink-0 whitespace-nowrap cursor-help">
+              ⌨ ↑BUY CE · ←SELL CE · ↓BUY PE · →SELL PE
+            </span>
           </div>
 
             {/* Bridge status dot + transport badge + timestamp */}
