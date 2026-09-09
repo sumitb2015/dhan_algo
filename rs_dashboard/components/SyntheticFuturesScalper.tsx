@@ -1272,6 +1272,17 @@ export default function SyntheticFuturesScalper() {
   }, [syntheticFuturePrice, activePosition, stopLoss, target, trailingEnabled, trailTrigger, trailStep, slMode, inFlight]);
 
   // ── 11. Keyboard Shortcuts (B: Buy, S: Sell, X: Flatten) ───────────────────
+  // Use stable refs for the handler functions so the listener is registered
+  // exactly once and is never torn down/re-added on every price-tick render.
+  const handleEnterSyntheticRef = useRef(handleEnterSynthetic);
+  const handleFlattenSyntheticRef = useRef(handleFlattenSynthetic);
+  useEffect(() => {
+    handleEnterSyntheticRef.current = handleEnterSynthetic;
+  });
+  useEffect(() => {
+    handleFlattenSyntheticRef.current = handleFlattenSynthetic;
+  });
+
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       // Ignore when user is focused inside an input or textarea
@@ -1279,19 +1290,19 @@ export default function SyntheticFuturesScalper() {
 
       if ((e.key === 'b' || e.key === 'B') && !e.ctrlKey && !e.metaKey) {
         e.preventDefault();
-        handleEnterSynthetic('LONG');
+        handleEnterSyntheticRef.current('LONG');
       } else if ((e.key === 's' || e.key === 'S') && !e.ctrlKey && !e.metaKey) {
         e.preventDefault();
-        handleEnterSynthetic('SHORT');
+        handleEnterSyntheticRef.current('SHORT');
       } else if ((e.key === 'x' || e.key === 'X') && !e.ctrlKey && !e.metaKey) {
         e.preventDefault();
-        handleFlattenSynthetic('Hotkey [X] Triggered');
+        handleFlattenSyntheticRef.current('Hotkey [X] Triggered');
       }
     };
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [handleEnterSynthetic, handleFlattenSynthetic]);
+  }, []); // empty deps — listener registered once for component lifetime
 
   // Current Active P&L
   const activePnl = activePosition ? activePosition.legs.reduce((acc, l) => acc + l.pnl, 0) : 0;
