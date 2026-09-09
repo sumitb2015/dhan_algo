@@ -2,6 +2,7 @@
 
 import React from 'react';
 import { cn } from '@/lib/utils';
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 
 export function TerminalPanel({
   title,
@@ -61,10 +62,12 @@ export function StatTile({
     : tone === 'accent' ? 'text-amber-400'
     : 'text-zinc-100';
 
-  return (
+  const tile = (
     <div
-      title={tooltip}
-      className="flex flex-col justify-between gap-1.5 rounded-lg border border-zinc-800/80 bg-zinc-950/80 px-3 py-2.5 transition-colors hover:border-zinc-700"
+      // Focusable only when there's a tooltip to expose — otherwise this stays
+      // a plain (non-tabbable) tile.
+      tabIndex={tooltip ? 0 : undefined}
+      className="flex flex-col justify-between gap-1.5 rounded-lg border border-zinc-800/80 bg-zinc-950/80 px-3 py-2.5 transition-colors hover:border-zinc-700 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-amber-400/60"
     >
       <div className="flex items-center justify-between">
         <span className="text-[9px] font-bold uppercase tracking-[0.16em] text-zinc-500">{label}</span>
@@ -94,5 +97,16 @@ export function StatTile({
         </div>
       )}
     </div>
+  );
+
+  if (!tooltip) return tile;
+
+  // Keyboard/screen-reader accessible hint — a native `title` attribute
+  // doesn't reliably fire on keyboard focus or expose to assistive tech.
+  return (
+    <Tooltip>
+      <TooltipTrigger render={tile} />
+      <TooltipContent>{tooltip}</TooltipContent>
+    </Tooltip>
   );
 }

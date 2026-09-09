@@ -21,6 +21,7 @@ import ConfirmDialog from './crudeoil/ConfirmDialog';
 import MarketSnapshot from './crudeoil/MarketSnapshot';
 import TradeTicketBar from './crudeoil/TradeTicketBar';
 import NavBar from './NavBar';
+import { isMcxLive } from '@/lib/marketHours';
 import {
   computeMaxPain, daysToExpiry, fmtExpiryLong, fmtExpiryShort, fmtNum,
   parseStrikeEntries, pctColor, pctSign, sideIV, todayIso,
@@ -158,20 +159,13 @@ export default function CrudeOilOptions() {
 
   const mcxSession = useMemo(() => {
     const now = new Date();
-    const utc = now.getTime() + now.getTimezoneOffset() * 60000;
-    const ist = new Date(utc + 5.5 * 3600000);
-    const day = ist.getDay();
-    const hour = ist.getHours();
-    const minute = ist.getMinutes();
-    const timeNum = hour * 60 + minute;
-
-    if (day === 0 || day === 6) {
+    const ist = new Date(now.toLocaleString('en-US', { timeZone: 'Asia/Kolkata' }));
+    if (ist.getDay() === 0 || ist.getDay() === 6) {
       return { status: 'CLOSED', label: 'MCX WEEKEND CLOSED', tone: 'neutral' as const };
     }
-    if (timeNum >= 540 && timeNum <= 1410) { // 09:00 to 23:30
-      return { status: 'OPEN', label: 'MCX LIVE 09:00–23:30', tone: 'live' as const };
-    }
-    return { status: 'CLOSED', label: 'MCX SESSION CLOSED', tone: 'neutral' as const };
+    return isMcxLive(now)
+      ? { status: 'OPEN', label: 'MCX LIVE 09:00–23:30', tone: 'live' as const }
+      : { status: 'CLOSED', label: 'MCX SESSION CLOSED', tone: 'neutral' as const };
   }, [clock]);
 
   // ─── Background pricing for the OTHER underlying's open positions ──────
@@ -1268,8 +1262,10 @@ export default function CrudeOilOptions() {
               <span className="text-zinc-200 font-bold tabular-nums">{lotSize} BBL</span>
             </div>
 
-            {/* DATA Date */}
-            <div className="hidden xl:flex items-center gap-1 rounded-md border border-zinc-800 bg-zinc-900 px-2 py-1 font-mono text-[10px] text-zinc-400">
+            {/* DATA Date — always visible (CLAUDE.md: every market-data page must
+               show a DATA chip so users always know the currency of the data on
+               screen, regardless of viewport width). */}
+            <div className="flex items-center gap-1 rounded-md border border-zinc-800 bg-zinc-900 px-2 py-1 font-mono text-[10px] text-zinc-400">
               <span className="text-zinc-500">DATA:</span>
               <span className="text-zinc-300">{todayIso()}</span>
             </div>

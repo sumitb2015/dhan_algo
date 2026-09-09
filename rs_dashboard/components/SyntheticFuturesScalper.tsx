@@ -343,14 +343,6 @@ export default function SyntheticFuturesScalper() {
     } catch {}
   }, [activePosition]);
 
-  // Keep the partial-flatten lot picker inside [1, position.lots] — a fresh
-  // entry, a prior partial close, or a roll can all change the lot count
-  // out from under a stale value.
-  useEffect(() => {
-    if (!activePosition) return;
-    setCloseLots(prev => Math.min(Math.max(1, prev), activePosition.lots));
-  }, [activePosition?.id, activePosition?.lots]);
-
   // Logs & Toasts
   const [logs, setLogs] = useState<LogEvent[]>([]);
   const [toasts, setToasts] = useState<Toast[]>([]);
@@ -1296,16 +1288,20 @@ export default function SyntheticFuturesScalper() {
       // target (never above what's actually live — a leg already clamped down
       // by broker reconciliation exits whatever it still has).
       const legKey = (l: SyntheticLeg) => l.securityId || l.tradingSymbol || '';
+      const closedQtyByLeg = new Map<string, number>();
       const legsToExit = liveLegs
-        .map(l => ({
-          key: legKey(l),
-          securityId: l.securityId,
-          tradingSymbol: l.tradingSymbol,
-          quantity: isPartial ? Math.min(l.qty, targetQty) : l.qty,
-          side: l.side === 'BUY' ? ('SELL' as const) : ('BUY' as const),
-          productType: l.productType,
-          exchangeSegment: l.exchangeSegment,
-        }))
+        .map(l => {
+          const quantity = isPartial ? Math.min(l.qty, targetQty) : l.qty;
+          if (quantity > 0) closedQtyByLeg.set(legKey(l), quantity);
+          return {
+            securityId: l.securityId,
+            tradingSymbol: l.tradingSymbol,
+            quantity,
+            side: l.side === 'BUY' ? ('SELL' as const) : ('BUY' as const),
+            productType: l.productType,
+            exchangeSegment: l.exchangeSegment,
+          };
+        })
         .filter(l => l.quantity > 0);
 
       const res = await fetch('/api/synthetic-futures/order', {
@@ -1316,7 +1312,7 @@ export default function SyntheticFuturesScalper() {
           broker: effectiveBroker,
           underlying: currentPos.underlying,
           expiry: currentPos.expiry,
-          legsToExit: legsToExit.map(({ key, ...rest }) => rest),
+          legsToExit,
         }),
       });
 
@@ -1327,31 +1323,40 @@ export default function SyntheticFuturesScalper() {
         return false;
       }
 
-      const closedQtyByLeg = new Map(legsToExit.map(l => [l.key, l.quantity]));
       const totalClosedPnl = liveLegs.reduce((acc, l) => {
         const closedQty = closedQtyByLeg.get(legKey(l)) ?? 0;
         return acc + (l.qty > 0 ? (l.pnl * closedQty) / l.qty : 0);
       }, 0);
 
+      // Marked-to-LTP, not the broker's confirmed fill price for the closed
+      // slice — flag it as an estimate rather than implying a booked figure.
+      const pnlLabel = isPartial ? 'Est. Net P&L' : 'Net P&L';
       addToast(
         'success',
         isPartial ? `Closed ${targetLots} Lot(s)!` : 'Synthetic Position Flattened!',
-        `Net P&L: ${fmtSignedINR(totalClosedPnl)} · Reason: ${reason}`
+        `${pnlLabel}: ${fmtSignedINR(totalClosedPnl)} · Reason: ${reason}`
       );
       addLog(
         'EXIT',
-        `${isPartial ? `Partially closed ${targetLots}/${currentPos.lots} lots of` : 'Flattened'} Synthetic (${reason}): Net P&L ${fmtSignedINR(totalClosedPnl)}`
+        `${isPartial ? `Partially closed ${targetLots}/${currentPos.lots} lots of` : 'Flattened'} Synthetic (${reason}): ${pnlLabel} ${fmtSignedINR(totalClosedPnl)}`
       );
 
       if (isPartial) {
-        const remainingLots = currentPos.lots - targetLots;
         setActivePosition(prev => {
           if (!prev) return prev;
           const nextLegs = prev.legs.map(l => {
             const closedQty = closedQtyByLeg.get(legKey(l)) ?? 0;
             return closedQty > 0 ? { ...l, qty: Math.max(0, l.qty - closedQty) } : l;
           });
-          return { ...prev, lots: remainingLots, legs: nextLegs };
+          // Derive the position's lot count from what's actually left on the
+          // main legs rather than a blind `lots - targetLots` subtraction — a
+          // leg that drifted out of lockstep with the others (e.g. a prior
+          // add-lots order whose fill partially rejected) must not have that
+          // shortfall hidden behind an optimistic label.
+          const mainLegs = nextLegs.filter(l => l.role !== 'HEDGE' && l.qty > 0);
+          const impliedLots =
+            mainLegs.length > 0 ? Math.min(...mainLegs.map(l => Math.floor(l.qty / prev.lotSize))) : 0;
+          return { ...prev, lots: impliedLots, legs: nextLegs };
         });
       } else {
         setActivePosition(null);
@@ -2381,40 +2386,47 @@ export default function SyntheticFuturesScalper() {
               </button>
             )}
 
-            {/* Partial Flatten — close a subset of lots, keep the rest open */}
-            {activePosition && activePosition.lots > 1 && (
-              <div className="flex items-center gap-1 bg-zinc-900 border border-zinc-800 rounded-lg p-1">
-                <span className="text-[10px] font-bold text-zinc-400 px-1">CLOSE</span>
-                <button
-                  onClick={() => setCloseLots(l => Math.max(1, l - 1))}
-                  disabled={inFlight}
-                  className="px-1.5 py-0.5 rounded text-zinc-300 hover:bg-zinc-800 text-xs font-bold disabled:opacity-30 cursor-pointer"
-                >
-                  −
-                </button>
-                <span className="w-5 text-center text-[11px] font-mono font-bold text-zinc-100">
-                  {closeLots}
-                </span>
-                <button
-                  onClick={() => setCloseLots(l => Math.min(activePosition.lots - 1, l + 1))}
-                  disabled={inFlight}
-                  className="px-1.5 py-0.5 rounded text-zinc-300 hover:bg-zinc-800 text-xs font-bold disabled:opacity-30 cursor-pointer"
-                >
-                  +
-                </button>
-                <span className="text-[10px] text-zinc-500 px-1 whitespace-nowrap">
-                  / {activePosition.lots} lots
-                </span>
-                <button
-                  onClick={() => handleFlattenSynthetic('Manual Partial Close', closeLots)}
-                  disabled={inFlight || closeLots >= activePosition.lots}
-                  className="ml-1 flex items-center gap-1 px-2.5 py-1 rounded-lg border border-orange-500/40 bg-orange-500/10 hover:bg-orange-500/20 text-orange-400 text-[11px] font-bold disabled:opacity-30 cursor-pointer transition-all active:scale-[0.98] whitespace-nowrap"
-                  title={`Close ${closeLots} of ${activePosition.lots} lots, keep the remaining ${activePosition.lots - closeLots} open`}
-                >
-                  FLATTEN {closeLots}
-                </button>
-              </div>
-            )}
+            {/* Partial Flatten — close a subset of lots, keep the rest open.
+               closeLots is clamped to [1, position.lots] here at render time
+               (not via a state-syncing effect) so a fresh entry, a prior
+               partial close, or a roll can never leave a stale value picked
+               before the position's lot count changed. */}
+            {activePosition && activePosition.lots > 1 && (() => {
+              const effectiveCloseLots = Math.min(Math.max(1, closeLots), activePosition.lots);
+              return (
+                <div className="flex items-center gap-1 bg-zinc-900 border border-zinc-800 rounded-lg p-1">
+                  <span className="text-[10px] font-bold text-zinc-400 px-1">CLOSE</span>
+                  <button
+                    onClick={() => setCloseLots(Math.max(1, effectiveCloseLots - 1))}
+                    disabled={inFlight}
+                    className="px-1.5 py-0.5 rounded text-zinc-300 hover:bg-zinc-800 text-xs font-bold disabled:opacity-30 cursor-pointer"
+                  >
+                    −
+                  </button>
+                  <span className="w-5 text-center text-[11px] font-mono font-bold text-zinc-100">
+                    {effectiveCloseLots}
+                  </span>
+                  <button
+                    onClick={() => setCloseLots(Math.min(activePosition.lots - 1, effectiveCloseLots + 1))}
+                    disabled={inFlight}
+                    className="px-1.5 py-0.5 rounded text-zinc-300 hover:bg-zinc-800 text-xs font-bold disabled:opacity-30 cursor-pointer"
+                  >
+                    +
+                  </button>
+                  <span className="text-[10px] text-zinc-500 px-1 whitespace-nowrap">
+                    / {activePosition.lots} lots
+                  </span>
+                  <button
+                    onClick={() => handleFlattenSynthetic('Manual Partial Close', effectiveCloseLots)}
+                    disabled={inFlight || effectiveCloseLots >= activePosition.lots}
+                    className="ml-1 flex items-center gap-1 px-2.5 py-1 rounded-lg border border-orange-500/40 bg-orange-500/10 hover:bg-orange-500/20 text-orange-400 text-[11px] font-bold disabled:opacity-30 cursor-pointer transition-all active:scale-[0.98] whitespace-nowrap"
+                    title={`Close ${effectiveCloseLots} of ${activePosition.lots} lots, keep the remaining ${activePosition.lots - effectiveCloseLots} open`}
+                  >
+                    FLATTEN {effectiveCloseLots}
+                  </button>
+                </div>
+              );
+            })()}
 
             {/* Emergency Flatten All Button */}
             <button
