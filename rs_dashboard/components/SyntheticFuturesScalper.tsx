@@ -88,6 +88,11 @@ interface SyntheticLeg {
   statusMessage?: string;
   productType: ProductType;
   exchangeSegment: string;
+  // Epoch ms of the most recent qty change (fresh open or an add-lots merge).
+  // Broker-position reconciliation gives a leg this recent a grace window —
+  // the position book lags a fresh fill and would otherwise read as "never
+  // filled" and clamp qty to 0.
+  openedAt?: number;
 }
 
 interface ActiveSyntheticPosition {
@@ -211,6 +216,33 @@ function fmtSignedINR(n: number | null | undefined): string {
 // excluded from P&L, monitoring, and (critically) from flatten's exit-order legs.
 function mapExecStatus(execStatus?: string): SyntheticLeg['status'] {
   return execStatus === 'FAILED' || execStatus === 'SKIPPED' ? 'REJECTED' : 'TRANSIT';
+}
+
+// securityId (dhan) / tradingSymbol (kotak, zerodha, and as a dhan fallback)
+// -> absolute net broker qty, used ONLY to reconcile the client-side leg
+// ledger DOWN (never up — see dhan-terminal-position-ownership skill). The
+// ledger itself (built from what this terminal's own orders opened) stays
+// the sizing authority for exits; this just catches drift from partial
+// fills, since order status polling only reports FILLED/REJECTED/etc., never
+// actual filled quantity.
+//
+// Deliberately a pure transform, not its own fetch: /api/scalper/{,kotak/,
+// zerodha/}poll — already polled every 3s by the order-status effect below —
+// returns `positions` in the same response as `orders`. A second poll hitting
+// a dedicated /positions route would double this page's call volume against
+// Dhan's account-wide rate bucket (shared with every other open dashboard
+// tab) for data already sitting in the response we just fetched.
+function buildPositionQtyMap(positions: unknown): Map<string, number> {
+  const map = new Map<string, number>();
+  if (!Array.isArray(positions)) return map;
+  for (const p of positions as Array<Record<string, unknown>>) {
+    const netQty = Math.abs(Number(p.netQty ?? 0));
+    const secId = String(p.securityId ?? '');
+    const sym = String(p.tradingSymbol ?? '');
+    if (secId) map.set(`id:${secId}`, (map.get(`id:${secId}`) ?? 0) + netQty);
+    if (sym) map.set(`sym:${sym}`, (map.get(`sym:${sym}`) ?? 0) + netQty);
+  }
+  return map;
 }
 
 // ─── Main Component ─────────────────────────────────────────────────────────
@@ -667,6 +699,18 @@ export default function SyntheticFuturesScalper() {
         );
         return;
       }
+      // ATM has moved since entry — adding here would silently split the
+      // position across two strikes with no way to tell the user their
+      // "single synthetic" is now a mixed-strike combo. Force a flatten
+      // first rather than merge legs that don't share a strike.
+      if (currentPos.atmStrike !== atmStrike) {
+        addToast(
+          'error',
+          'Strike Conflict',
+          `Active position is at ATM ${currentPos.atmStrike}, market ATM is now ${atmStrike}. Flatten or reset before adding at a new strike.`
+        );
+        return;
+      }
     }
 
     const isAddingLots = Boolean(currentPos && currentPos.direction === direction);
@@ -854,6 +898,9 @@ export default function SyntheticFuturesScalper() {
         });
       }
 
+      const nowTs = Date.now();
+      for (const leg of initialLegs) leg.openedAt = nowTs;
+
       let finalTotalLots = lots;
       let finalSynthPrice = syntheticFuturePrice;
 
@@ -948,6 +995,9 @@ export default function SyntheticFuturesScalper() {
               status: combinedStatus,
               statusMessage: newLeg.statusMessage || existing.statusMessage,
               role: existing.role || newLeg.role,
+              // qty just grew — give the broker position book the same
+              // grace window a fresh leg gets before reconciliation trusts it.
+              openedAt: nowTs,
             };
           } else {
             mergedLegs.push({ ...newLeg });
@@ -960,11 +1010,25 @@ export default function SyntheticFuturesScalper() {
             ? syntheticFuturePrice - weightedSyntheticPrice
             : weightedSyntheticPrice - syntheticFuturePrice;
 
+        // `hedged` means the WHOLE position is protected — if either the
+        // original entry or this add-on skipped the hedge leg, the merged
+        // position only has partial coverage and must not report as hedged
+        // (prev OR-ing this in overstated protection: 1 hedged lot + 1
+        // unhedged lot showed as "hedged" for the full 2-lot position).
+        const fullyHedged = prev.hedged && hedgeEnabled;
+        if (prev.hedged !== hedgeEnabled) {
+          addToast(
+            'info',
+            'Partial Hedge Coverage',
+            `This add-on's hedge setting (${hedgeEnabled ? 'ON' : 'OFF'}) differs from the existing position's — only part of the combined position is protected.`
+          );
+        }
+
         const updatedPos: ActiveSyntheticPosition = {
           ...prev,
           lots: totalLots,
           entrySyntheticPrice: weightedSyntheticPrice,
-          hedged: prev.hedged || hedgeEnabled,
+          hedged: fullyHedged,
           legs: mergedLegs,
           peakPoints: Math.max(0, pointsDiff),
           peakPnl: Math.max(0, totalPnl),
@@ -1016,11 +1080,28 @@ export default function SyntheticFuturesScalper() {
     addLog('EXIT', 'Reset active synthetic position state');
   };
 
-  // ── Poll broker order status for active synthetic legs ─────────────────────
+  // ── Poll broker order status + reconcile leg qty for active synthetic legs ─
+  // One poll of /api/scalper/{,kotak/,zerodha/}poll drives both: order status
+  // (FILLED/REJECTED/etc, as before) AND a broker-position qty reconciliation
+  // — that route already returns `positions` alongside `orders` in the same
+  // response, so folding reconciliation in here costs zero extra Dhan calls
+  // (a separate positions poll would double this page's call volume against
+  // Dhan's account-wide rate bucket, shared with every other open dashboard
+  // tab — see dhan-polling-guards guard 6).
+  //
+  // Reconciliation itself follows dhan-terminal-position-ownership: the
+  // client ledger stays the sizing authority for Flatten, broker qty only
+  // ever clamps it DOWN (never up — a broker qty larger than the ledger
+  // belongs to something else, e.g. another strategy sharing the strike),
+  // and a leg gets a grace window after opening/growing (`openedAt`) before
+  // an absent/short broker position is trusted — order ack races the
+  // position-book write.
   useEffect(() => {
     if (!activePosition || activePosition.legs.length === 0) return;
 
     let cancelled = false;
+    const GRACE_MS = 20000;
+
     async function checkOrderStatus() {
       try {
         const pollUrl =
@@ -1048,6 +1129,11 @@ export default function SyntheticFuturesScalper() {
           rejRsn?: string;
           reason?: string;
         }>;
+        // Absent on a failed positions leg of the same response (Promise.all
+        // partial failure) — an empty/missing map just means no leg matches
+        // below, so every leg's qty passes through unclamped this tick.
+        const posMap = buildPositionQtyMap(json.positions);
+        const clampNotices: Array<{ label: string; from: number; to: number }> = [];
 
         setActivePosition(prev => {
           if (!prev) return null;
@@ -1061,31 +1147,55 @@ export default function SyntheticFuturesScalper() {
               return false;
             });
 
-            if (!match) return leg;
+            let nextLeg = leg;
 
-            const rawStatus = String(match.orderStatus ?? match.status ?? match.ordSt ?? '').toUpperCase();
-            let mappedStatus: SyntheticLeg['status'] = leg.status ?? 'TRANSIT';
-            if (rawStatus.includes('REJECT') || rawStatus.includes('FAILED')) {
-              mappedStatus = 'REJECTED';
-            } else if (rawStatus.includes('TRADED') || rawStatus.includes('FILL') || rawStatus.includes('COMPLETE')) {
-              mappedStatus = 'FILLED';
-            } else if (rawStatus.includes('CANCEL')) {
-              mappedStatus = 'CANCELLED';
-            } else if (rawStatus.includes('TRANSIT') || rawStatus.includes('PEND') || rawStatus.includes('OPEN')) {
-              mappedStatus = 'TRANSIT';
+            if (match) {
+              const rawStatus = String(match.orderStatus ?? match.status ?? match.ordSt ?? '').toUpperCase();
+              let mappedStatus: SyntheticLeg['status'] = leg.status ?? 'TRANSIT';
+              if (rawStatus.includes('REJECT') || rawStatus.includes('FAILED')) {
+                mappedStatus = 'REJECTED';
+              } else if (rawStatus.includes('TRADED') || rawStatus.includes('FILL') || rawStatus.includes('COMPLETE')) {
+                mappedStatus = 'FILLED';
+              } else if (rawStatus.includes('CANCEL')) {
+                mappedStatus = 'CANCELLED';
+              } else if (rawStatus.includes('TRANSIT') || rawStatus.includes('PEND') || rawStatus.includes('OPEN')) {
+                mappedStatus = 'TRANSIT';
+              }
+
+              const rejReason = match.rejRsn ?? match.reason;
+
+              if (mappedStatus !== leg.status || (rejReason && rejReason !== leg.statusMessage)) {
+                changed = true;
+                nextLeg = { ...leg, status: mappedStatus, statusMessage: rejReason || leg.statusMessage };
+              }
             }
 
-            const rejReason = match.rejRsn ?? match.reason;
-
-            if (mappedStatus !== leg.status || (rejReason && rejReason !== leg.statusMessage)) {
-              changed = true;
-              return {
-                ...leg,
-                status: mappedStatus,
-                statusMessage: rejReason || leg.statusMessage,
-              };
+            // Qty reconciliation — only for legs live at the broker, past
+            // their grace window, and identifiable in this tick's position map.
+            if (
+              (nextLeg.status === 'FILLED' || nextLeg.status === 'TRANSIT' || nextLeg.status == null) &&
+              nextLeg.qty > 0
+            ) {
+              const age = nextLeg.openedAt ? Date.now() - nextLeg.openedAt : Infinity;
+              if (age >= GRACE_MS) {
+                const key = nextLeg.securityId
+                  ? `id:${nextLeg.securityId}`
+                  : nextLeg.tradingSymbol
+                    ? `sym:${nextLeg.tradingSymbol}`
+                    : '';
+                if (key && posMap.has(key)) {
+                  const brokerQty = posMap.get(key)!;
+                  const clampedQty = Math.min(nextLeg.qty, brokerQty);
+                  if (clampedQty !== nextLeg.qty) {
+                    changed = true;
+                    clampNotices.push({ label: `${nextLeg.role} ${nextLeg.strike}${nextLeg.optionType}`, from: nextLeg.qty, to: clampedQty });
+                    nextLeg = { ...nextLeg, qty: clampedQty };
+                  }
+                }
+              }
             }
-            return leg;
+
+            return nextLeg;
           });
 
           if (!changed) return prev;
@@ -1096,6 +1206,22 @@ export default function SyntheticFuturesScalper() {
           activePositionRef.current = updated;
           return updated;
         });
+
+        for (const notice of clampNotices) {
+          if (notice.to === 0) {
+            addToast(
+              'error',
+              'Leg Closed At Broker',
+              `${notice.label} tracked ${notice.from} qty but shows flat at the broker — dropped from tracked size. Verify manually.`
+            );
+          } else {
+            addToast(
+              'info',
+              'Position Size Corrected',
+              `${notice.label} tracked ${notice.from}, broker shows ${notice.to} — ledger adjusted down to match.`
+            );
+          }
+        }
       } catch {}
     }
 
@@ -1120,7 +1246,12 @@ export default function SyntheticFuturesScalper() {
     // route never placed, or that got rejected/cancelled later, must NOT get an
     // exit order — submitting one would open a brand-new position instead of
     // closing one that was never there.
-    const liveLegs = currentPos.legs.filter(l => l.status === 'FILLED' || l.status === 'TRANSIT' || l.status == null);
+    // qty <= 0 excludes legs the broker-reconciliation pass above has
+    // already clamped to flat — sending a 0-qty exit order is a pointless
+    // broker round-trip (or a reject) for a leg that isn't actually open.
+    const liveLegs = currentPos.legs.filter(
+      l => (l.status === 'FILLED' || l.status === 'TRANSIT' || l.status == null) && l.qty > 0
+    );
     if (liveLegs.length === 0) {
       addToast('info', 'Position Cleared', 'No legs are live at the broker; resetting position state.');
       handleClearPosition();
