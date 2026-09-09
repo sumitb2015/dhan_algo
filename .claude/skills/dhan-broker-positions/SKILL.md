@@ -39,6 +39,7 @@ multipliers, or close-order product inline. Every one of them already has a help
 | Per-broker endpoint routing | `hooks/useBrokerSelector.ts` - `scalperRoute()`, `brokerRoute()` |
 | Partial square-off quantities | `lib/partialQty.ts` |
 | Kotak LTP join for a read-only summary page (no live WS bridge available) | `lib/kotakLtpJoin.ts` - `joinKotakLtp()` |
+| Sharing a positions/funds fetch across pages (display/aggregation reads only — never an order-sizing read) | `lib/brokerPositionsCache.ts` - see `dhan-broker-cache` |
 
 `brokerRoute()` takes a **map**, never a positional pair — a positional call once
 silently routed a third broker to Dhan's endpoint, i.e. traded the wrong account.

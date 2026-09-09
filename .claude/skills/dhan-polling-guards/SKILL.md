@@ -123,6 +123,14 @@ signature so only the one that actually changed re-fetches — a shared trigger
 re-queues *everyone* through the same pacer on every edit, multiplying the
 latency the pacer already adds. (`587f9b3`, `fetchMarginsForBaskets`)
 
+The same "several independent pollers, one rate-limited account" shape applies to
+plain broker positions/funds reads, not just option-chain/margin calls — Dashboard,
+Margin Allocator, Scalper and Multi-Leg Focus each polled the same broker's
+positions/funds on their own timer. `lib/brokerPositionsCache.ts` is the shared,
+invalidate-on-fill cache for that specific case — see `dhan-broker-cache` for when a
+route may use it (display/aggregation reads) versus must not (anything sizing a real
+order off the response).
+
 ### 7. Surface the error instead of reporting "no data"
 Data API methods return empty on failure. A `DH-902` subscription lapse or an auth
 failure otherwise reads as "no data / market may have been closed". Thread
