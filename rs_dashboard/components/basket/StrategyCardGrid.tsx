@@ -195,11 +195,15 @@ export default function StrategyCardGrid({
       {/* Horizontal Scroll Strategy Cards */}
       <div className="flex gap-2.5 overflow-x-auto pb-1.5 min-w-0 scrollbar-thin">
         {STRATEGY_CATEGORIES[category].map(tpl => {
-          const legsInfo = resolveTemplateLegs(
-            tpl, atmStrike, step, allStrikes, autoPremium, frontExpiry, farExpiry,
-          );
-          const composition = formatLegSummary(tpl, legsInfo);
           const isSelected = selectedKey === tpl.key;
+          // Live premiums (and the option-chain lookups behind autoPremium)
+          // are only resolved for the selected card — the rest show their
+          // static offset composition and schematic glyph until picked, so
+          // browsing the grid doesn't churn live prices for every template.
+          const legsInfo = isSelected
+            ? resolveTemplateLegs(tpl, atmStrike, step, allStrikes, autoPremium, frontExpiry, farExpiry)
+            : null;
+          const composition = formatLegSummary(tpl, legsInfo);
 
           return (
             <button
