@@ -707,7 +707,7 @@ export default function SyntheticFuturesScalper() {
         addToast(
           'error',
           'Strike Conflict',
-          `Active position is at ATM ${currentPos.atmStrike}, market ATM is now ${atmStrike}. Flatten or reset before adding at a new strike.`
+          `Active position is at ATM ${currentPos.atmStrike}, market ATM is now ${atmStrike}. Use ROLL TO ATM to flatten and re-enter here, or flatten manually first.`
         );
         return;
       }
@@ -1332,6 +1332,31 @@ export default function SyntheticFuturesScalper() {
     }
     setTimeout(() => {
       handleEnterSynthetic(targetDirection);
+    }, 400);
+  };
+
+  // ── 9b. Roll Position to Current ATM (same direction) ──────────────────────
+  // The Strike Conflict guard in handleEnterSynthetic blocks re-entering at a
+  // drifted ATM without an explicit flatten first, so a user who is still
+  // bullish/bearish but has watched the market walk away from their entry
+  // strike has no way forward except two manual clicks. This is the one-click
+  // version: flatten the old-strike legs, then re-enter fresh at the new ATM
+  // in the SAME direction — mirrors handleReversePosition, minus the flip.
+  const handleRollToAtm = async () => {
+    const currentPos = activePositionRef.current || activePosition;
+    if (!currentPos) return;
+    const fromStrike = currentPos.atmStrike;
+    const toStrike = atmStrike;
+    if (fromStrike === toStrike) return;
+    const direction = currentPos.direction;
+    addToast('info', `Rolling ${direction} to ATM ${toStrike}…`, `Closing ATM ${fromStrike} first`);
+    const ok = await handleFlattenSynthetic(`Rolling ATM ${fromStrike} → ${toStrike}`);
+    if (!ok) {
+      addToast('error', 'Roll Aborted', 'Could not safely flatten current position first');
+      return;
+    }
+    setTimeout(() => {
+      handleEnterSynthetic(direction);
     }, 400);
   };
 
@@ -2288,6 +2313,21 @@ export default function SyntheticFuturesScalper() {
               <RotateCcw className="h-3.5 w-3.5" />
               FLIP POSITION
             </button>
+
+            {/* Roll to ATM Button — only appears once the market has actually
+               drifted off the position's entry strike; flattens and re-enters
+               same direction in one click instead of two manual steps. */}
+            {activePosition && activePosition.atmStrike !== atmStrike && (
+              <button
+                onClick={handleRollToAtm}
+                disabled={inFlight}
+                className="flex items-center gap-1.5 px-3.5 py-2 rounded-lg border border-amber-500/30 bg-amber-500/10 hover:bg-amber-500/20 text-amber-400 text-xs font-bold disabled:opacity-30 cursor-pointer transition-all active:scale-[0.98]"
+                title={`Flatten ATM ${activePosition.atmStrike} and re-enter ${activePosition.direction} at ATM ${atmStrike}`}
+              >
+                <RefreshCw className="h-3.5 w-3.5" />
+                ROLL TO ATM {atmStrike}
+              </button>
+            )}
 
             {/* Emergency Flatten All Button */}
             <button
