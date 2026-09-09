@@ -269,9 +269,13 @@ animations that work on Windows but break on Linux), `dhan-payoff-diagrams`
 (capital-deployment desk: position-structure classification, VIX/trend sizing,
 credit-strategy ranking), `dhan-sidebar-nav` (the global collapsible sidebar's
 mount lifecycle and open-group state), `dhan-app-self-update` (the in-dashboard
-git-pull Update App feature and its rebuild/restart detection). Run
-`dhan-context-audit` periodically (not tied to any one change) to review CLAUDE.md
-and this skill library itself against recent commits.
+git-pull Update App feature and its rebuild/restart detection),
+`dhan-prevclose-pct-change` (previous-close / % change computation for any
+index, stock or futures panel — Dhan-only sourcing, the 15:30 close-flip trap,
+and showing a meaningful move before the 09:15 open without a hardcoded
+holiday calendar). Run `dhan-context-audit` periodically (not tied to any one
+change) to review CLAUDE.md and this skill library itself against recent
+commits.
 
 **"Quant-terminal" chart pages**: several pages (Options Premium Bar, Futures, IV Charts, Straddle/Strangle Analysis, Breadth, Live Charts) share a chart-driven dark-glass redesign built around `recharts`. Use the `dhan-quant-terminal-page` skill when building or redesigning a page into this style — it documents the sticky-header shell, chart-panel/tooltip conventions, and the reference implementation to copy from.
 

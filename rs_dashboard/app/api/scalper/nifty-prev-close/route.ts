@@ -1,20 +1,22 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { readNifty50Index } from '@/lib/dataLoader';
 import { getDhanCredentials } from '@/lib/dhanToken';
-import { kiteGet } from '@/lib/zerodhaToken';
 
 // Previous close for the scalper header spot ticker — must come from a LIVE
 // source: the historical CSV is only as fresh as the last dashboard-data
 // refresh, and a stale CSV made the scalper header show yesterday's move in
-// the wrong direction (spot vs a 2-day-old close). Order of preference:
-// Dhan OHLC -> Kite OHLC -> CSV (NIFTY only — no CSV/Kite source for SENSEX yet).
+// the wrong direction (spot vs a 2-day-old close). Dhan is the only broker
+// used for market-data ingestion here — Zerodha/Kite is never queried for
+// calculation inputs, even as a fallback, so every number on this panel
+// depends on exactly one broker session. Order of preference:
+// Dhan OHLC -> CSV (NIFTY only — no CSV source for SENSEX yet).
 
 const DHAN_OHLC_URL = 'https://api.dhan.co/v2/marketfeed/ohlc';
 
-type UnderlyingConfig = { sid: number; dhanSeg: 'IDX_I' | 'BSE_IDX'; kiteSymbol?: string };
+type UnderlyingConfig = { sid: number; dhanSeg: 'IDX_I' | 'BSE_IDX' };
 const UNDERLYINGS: Record<string, UnderlyingConfig> = {
-  NIFTY:     { sid: 13, dhanSeg: 'IDX_I', kiteSymbol: 'NSE:NIFTY 50' },
-  BANKNIFTY: { sid: 25, dhanSeg: 'IDX_I', kiteSymbol: 'NSE:NIFTY BANK' },
+  NIFTY:     { sid: 13, dhanSeg: 'IDX_I' },
+  BANKNIFTY: { sid: 25, dhanSeg: 'IDX_I' },
   SENSEX:    { sid: 51, dhanSeg: 'BSE_IDX' },
 };
 
@@ -37,7 +39,7 @@ function istMinutesOfDay(): number {
 const MARKET_CLOSE_IST_MIN = 15 * 60 + 30;
 
 /**
- * Both brokers' OHLC `close` field means "previous day's close" while the session
+ * Dhan's OHLC `close` field means "previous day's close" while the session
  * is live, then flips to TODAY's close once the 15:30 bell rings. Taken at face
  * value after the bell it makes prevClose === spot, and the header renders a
  * ▲0.00 (0.00%) move for the rest of the day — and because the result is cached
@@ -84,18 +86,6 @@ async function fromDhan(cfg: UnderlyingConfig): Promise<{ close: number; lastPri
   }
 }
 
-async function fromKite(kiteSymbol: string): Promise<{ close: number; lastPrice: number } | null> {
-  try {
-    const data = await kiteGet(`/quote/ohlc?i=${encodeURIComponent(kiteSymbol)}`) as
-      Record<string, { last_price?: number; ohlc?: { close?: number } }>;
-    const quote = data?.[kiteSymbol];
-    const close = quote?.ohlc?.close ?? 0;
-    return close > 0 ? { close, lastPrice: quote?.last_price ?? 0 } : null;
-  } catch {
-    return null;
-  }
-}
-
 function fromCsv(): { prevClose: number; date: string } | null {
   try {
     const rows = readNifty50Index();
@@ -126,14 +116,6 @@ export async function GET(request: NextRequest) {
   if (dhan !== null && isGenuinePrevClose(dhan.close, dhan.lastPrice)) {
     cache.set(cacheKey, { prevClose: dhan.close, source: 'dhan' });
     return NextResponse.json({ success: true, prevClose: dhan.close, source: 'dhan' });
-  }
-
-  if (cfg.kiteSymbol) {
-    const kite = await fromKite(cfg.kiteSymbol);
-    if (kite !== null && isGenuinePrevClose(kite.close, kite.lastPrice)) {
-      cache.set(cacheKey, { prevClose: kite.close, source: 'zerodha' });
-      return NextResponse.json({ success: true, prevClose: kite.close, source: 'zerodha' });
-    }
   }
 
   if (underlying === 'NIFTY') {

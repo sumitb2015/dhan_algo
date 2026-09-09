@@ -52,6 +52,25 @@ function isWeekend(dateStr: string): boolean {
 }
 
 // ─── Stock CSV Reader ─────────────────────────────────────────────────────────
+/**
+ * True if a live-quote row looks like real intraday OHLC rather than a bare
+ * LTP snapshot — mirrors scripts/downloader/fetch_today_quotes.py's own
+ * `_is_genuine_ohlc` exactly, because both sides read the same
+ * debug/today_quotes.json and need to agree on what counts as "no real
+ * session yet." Two shapes show up pre-market, depending on which fallback
+ * the Python side took for that symbol: stocks read back open/high/low all
+ * 0 with only `close` populated (Dhan's per-equity OHLC batch endpoint has
+ * nothing to report before the 09:15 bell); indices instead read back
+ * open === high === low === close with volume 0 (the script's own
+ * `_ltp_to_ohlcv` fallback). Per dhan-prevclose-pct-change: before there is
+ * a real "today", don't treat one as if it existed.
+ */
+function isGenuineQuoteRow(row: OHLCVRow): boolean {
+  if (row.open <= 0 || row.high <= 0 || row.low <= 0) return false;
+  if (row.open === row.high && row.high === row.low && row.low === row.close && row.volume === 0) return false;
+  return true;
+}
+
 function parseAndPatchStockRows(symbol: string, content: string): OHLCVRow[] {
   try {
     const rows = parseCSV(content);
@@ -88,9 +107,26 @@ function parseAndPatchStockRows(symbol: string, content: string): OHLCVRow[] {
     // live quotes file can carry a stale Saturday/Sunday snapshot forward.
     if (isTradingDay && (todayMissingFromCSV || todayCloseStale)) {
       const liveRow = getTodayQuoteRow(symbol);
-      if (liveRow) {
+      // Pre-market (before Dhan computes a real intraday range), the feed's
+      // open/high/low read back 0 with only `close` populated — a bare LTP
+      // snapshot, not a genuine session (see fetch_today_quotes.py's own
+      // _is_genuine_ohlc, which this mirrors). Same principle as
+      // dhan-prevclose-pct-change: before there is a real "today", don't
+      // synthesize one. Treating that as a real row here made every mover's
+      // 1D% collapse to 0.00% (close === prev.close, open/high/low all 0 so
+      // every fallback in pctChg1D bottoms out at "no data"), and worse,
+      // patched a literal 0 into `low`, corrupting 52-week-low and NR4/NR7
+      // for every symbol until the real intraday range showed up.
+      const isGenuineSession = !!liveRow && isGenuineQuoteRow(liveRow);
+      if (liveRow && isGenuineSession) {
         if (todayMissingFromCSV) {
-          parsed.push(liveRow);
+          // Live quotes never carry a meaningful intraday volume figure (the
+          // feed reports 0) — fall back to the last known day's volume so
+          // volumeRatio isn't computed against a 0 and forced to 0.
+          parsed.push({
+            ...liveRow,
+            volume: liveRow.volume > 0 ? liveRow.volume : (last?.volume ?? liveRow.volume),
+          });
         } else {
           // Update close (and volume) in-place; keep CSV open/high/low
           // as they may already reflect the full intraday range.
@@ -102,7 +138,22 @@ function parseAndPatchStockRows(symbol: string, content: string): OHLCVRow[] {
             volume: liveRow.volume > 0 ? liveRow.volume : last!.volume,
           };
         }
+      } else if (liveRow && todayCloseStale) {
+        // Not a genuine session, but the CSV already has a (stale-close) row
+        // for today — still worth refreshing just the close/volume from the
+        // live LTP so 1D% reflects the latest price, without touching
+        // high/low from a payload that carries no real range.
+        parsed[parsed.length - 1] = {
+          ...last!,
+          close: liveRow.close,
+          volume: liveRow.volume > 0 ? liveRow.volume : last!.volume,
+        };
       }
+      // todayMissingFromCSV + !isGenuineSession: leave `parsed` ending at the
+      // last real completed session. Every downstream calc (1D%, 52W hi/lo,
+      // NR4/NR7) then naturally compares that session against the one before
+      // it — exactly the dhan-prevclose-pct-change pre-market pattern — with
+      // no special-casing needed at the call site.
     }
 
     return parsed;
@@ -214,10 +265,12 @@ export function readNifty50Index(): OHLCVRow[] {
     const todayDay = new Date(todayIST + 'T00:00:00').getDay(); // 0=Sun,6=Sat
     if (todayDay >= 1 && todayDay <= 5) {
       const liveIdx = getTodayQuoteRow('_NIFTY50_INDEX');
-      if (liveIdx) {
+      if (liveIdx && isGenuineQuoteRow(liveIdx)) {
         parsed.push({ ...liveIdx, date: todayIST });
       } else {
-        // Carry forward last known close until real data arrives
+        // No real session yet (pre-market bare-LTP snapshot, or no quote at
+        // all) — carry forward last known close rather than pushing a
+        // flat/degenerate row that would corrupt RS-vs-index calculations.
         parsed.push({ ...last, date: todayIST });
       }
     }
@@ -264,7 +317,7 @@ export async function readNifty500Index(symbols: string[]): Promise<OHLCVRow[]> 
             const todayDay = new Date(todayIST + 'T00:00:00').getDay();
             if (todayDay >= 1 && todayDay <= 5) {
               const liveIdx = getTodayQuoteRow('_NIFTY500_INDEX');
-              if (liveIdx) {
+              if (liveIdx && isGenuineQuoteRow(liveIdx)) {
                 parsed.push({ ...liveIdx, date: todayIST });
               } else {
                 parsed.push({ ...last500, date: todayIST });
@@ -347,7 +400,7 @@ export function readNifty500IndexSync(): OHLCVRow[] {
           const todayDay = new Date(todayIST + 'T00:00:00').getDay();
           if (todayDay >= 1 && todayDay <= 5) {
             const liveIdx = getTodayQuoteRow('_NIFTY500_INDEX');
-            if (liveIdx) {
+            if (liveIdx && isGenuineQuoteRow(liveIdx)) {
               parsed.push({ ...liveIdx, date: todayIST });
             } else {
               parsed.push({ ...last500, date: todayIST });
@@ -529,7 +582,7 @@ export function readIndexCSV(meta: IndexMeta): OHLCVRow[] {
       const todayDay = new Date(todayIST + 'T00:00:00').getDay();
       if (todayDay >= 1 && todayDay <= 5) {
         const liveIdx = getTodayQuoteRow(meta.key);
-        if (liveIdx) {
+        if (liveIdx && isGenuineQuoteRow(liveIdx)) {
           parsed.push({ ...liveIdx, date: todayIST });
         } else {
           parsed.push({ ...last, date: todayIST });
