@@ -474,6 +474,14 @@ export default function SyntheticFuturesScalper() {
     setHedgeOffset(prev => (validOffsets.includes(prev) ? prev : 200));
   }, [underlying]);
 
+  // Whether liveSpot below is backed by a real quote (WS tick or a resolved
+  // indices fetch) rather than the hardcoded placeholder constant. On a fresh
+  // page load — before either has arrived — that placeholder can sit far
+  // enough from a restored position's real entry price to look like a
+  // stop-loss/target breach; gates the auto-exit watcher (§10) below so it
+  // never fires off a fabricated price.
+  const pricesReady = Boolean((liveQuotes?.spot && liveQuotes.spot > 0) || indices[underlying]?.spot);
+
   // Spot price: prioritize live options WS tick, then indices snapshot
   const liveSpot =
     liveQuotes?.spot && liveQuotes.spot > 0
@@ -1419,7 +1427,12 @@ export default function SyntheticFuturesScalper() {
 
   // ── 10. Trailing Stop Loss & Auto-Exit Rule Watcher ─────────────────────────
   useEffect(() => {
-    if (!activePosition || inFlight) return;
+    // pricesReady guards against firing on the hardcoded placeholder price a
+    // fresh page load starts with — right after a refresh, a restored
+    // position's real entrySyntheticPrice vs. that placeholder can look like
+    // a huge, fabricated stop-loss/target breach before any real quote has
+    // arrived. See the pricesReady comment above for the incident this fixes.
+    if (!activePosition || inFlight || !pricesReady) return;
 
     const currentSynth = syntheticFuturePrice;
     const capturedPoints =
@@ -1482,7 +1495,7 @@ export default function SyntheticFuturesScalper() {
         }
       }
     }
-  }, [syntheticFuturePrice, activePosition, stopLoss, target, trailingEnabled, trailTrigger, trailStep, slMode, inFlight]);
+  }, [syntheticFuturePrice, activePosition, stopLoss, target, trailingEnabled, trailTrigger, trailStep, slMode, inFlight, pricesReady]);
 
   // ── 11. Keyboard Shortcuts (B: Buy, S: Sell, X: Flatten) ───────────────────
   // Use stable refs for the handler functions so the listener is registered
