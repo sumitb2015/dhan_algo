@@ -329,6 +329,9 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       success: allSuccess,
       action: 'exit',
       results,
+      error: allSuccess
+        ? undefined
+        : results.filter(r => r.error).map(r => r.error).join('; ') || 'One or more close orders failed at broker',
     });
   }
 

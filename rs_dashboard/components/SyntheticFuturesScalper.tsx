@@ -266,6 +266,7 @@ export default function SyntheticFuturesScalper() {
 
   // Active Synthetic Position State
   const [activePosition, setActivePosition] = useState<ActiveSyntheticPosition | null>(null);
+  const activePositionRef = useRef<ActiveSyntheticPosition | null>(null);
   const [inFlight, setInFlight] = useState<boolean>(false);
   const inFlightRef = useRef<boolean>(false);
   const [visualFlash, setVisualFlash] = useState<'LONG' | 'SHORT' | 'EXIT' | null>(null);
@@ -277,8 +278,9 @@ export default function SyntheticFuturesScalper() {
       if (saved) {
         const parsed = JSON.parse(saved) as ActiveSyntheticPosition;
         if (parsed && parsed.id && Array.isArray(parsed.legs) && parsed.legs.length > 0) {
-          setActivePosition({
+          const restored: ActiveSyntheticPosition = {
             ...parsed,
+            lots: parsed.lots || 1,
             peakPoints: parsed.peakPoints ?? 0,
             peakPnl: parsed.peakPnl ?? 0,
             legs: parsed.legs.map(l => ({
@@ -286,14 +288,17 @@ export default function SyntheticFuturesScalper() {
               expiry: l.expiry || parsed.expiry,
               status: l.status || 'TRANSIT',
             })),
-          });
+          };
+          activePositionRef.current = restored;
+          setActivePosition(restored);
         }
       }
     } catch {}
   }, []);
 
-  // Persist active synthetic position to localStorage
+  // Persist active synthetic position to localStorage & sync ref
   useEffect(() => {
+    activePositionRef.current = activePosition;
     try {
       if (activePosition) {
         localStorage.setItem('dhan_algo.synthetic_position', JSON.stringify(activePosition));
@@ -502,7 +507,7 @@ export default function SyntheticFuturesScalper() {
 
   // ── 6. Update Active Position Live Telemetry ───────────────────────────────
   useEffect(() => {
-    if (!activePosition) return;
+    if (!activePositionRef.current && !activePosition) return;
 
     setActivePosition(prev => {
       if (!prev) return null;
@@ -534,12 +539,14 @@ export default function SyntheticFuturesScalper() {
       const newPeakPoints = Math.max(prev.peakPoints, pointsDiff);
       const newPeakPnl = Math.max(prev.peakPnl, totalPnl);
 
-      return {
+      const next: ActiveSyntheticPosition = {
         ...prev,
         legs: updatedLegs,
         peakPoints: newPeakPoints,
         peakPnl: newPeakPnl,
       };
+      activePositionRef.current = next;
+      return next;
     });
   }, [syntheticFuturePrice, liveQuotes]);
 
@@ -632,13 +639,53 @@ export default function SyntheticFuturesScalper() {
       return;
     }
 
+    const currentPos = activePositionRef.current || activePosition;
+
+    // Check position compatibility
+    if (currentPos) {
+      if (currentPos.underlying !== underlying) {
+        addToast(
+          'error',
+          'Underlying Conflict',
+          `An active position in ${currentPos.underlying} is currently open. Please flatten or reset it before trading ${underlying}.`
+        );
+        return;
+      }
+      if (currentPos.expiry && expiry && currentPos.expiry !== expiry) {
+        addToast(
+          'error',
+          'Expiry Conflict',
+          `An active position in expiry ${currentPos.expiry} is open. Please flatten or reset it before trading ${expiry}.`
+        );
+        return;
+      }
+      if (currentPos.direction !== direction) {
+        addToast(
+          'error',
+          'Direction Conflict',
+          `You already hold an active ${currentPos.direction} position. Use "FLIP POSITION" to reverse or close it first.`
+        );
+        return;
+      }
+    }
+
+    const isAddingLots = Boolean(currentPos && currentPos.direction === direction);
+    const dirLabel = direction === 'LONG' ? 'BULLISH LONG' : 'BEARISH SHORT';
+
     inFlightRef.current = true;
     setInFlight(true);
     setVisualFlash(direction);
     setTimeout(() => setVisualFlash(null), 1200);
 
-    const dirLabel = direction === 'LONG' ? 'BULLISH LONG' : 'BEARISH SHORT';
-    addToast('info', `Firing Synthetic ${dirLabel}…`, `${lots} Lots @ ATM ${atmStrike}`);
+    if (isAddingLots) {
+      addToast(
+        'info',
+        `Adding ${lots} Lot(s) to Synthetic ${dirLabel}…`,
+        `Current: ${currentPos!.lots} Lots · Target: ${currentPos!.lots + lots} Lots @ ATM ${atmStrike}`
+      );
+    } else {
+      addToast('info', `Firing Synthetic ${dirLabel}…`, `${lots} Lots @ ATM ${atmStrike}`);
+    }
 
     try {
       const res = await fetch('/api/synthetic-futures/order', {
@@ -807,33 +854,148 @@ export default function SyntheticFuturesScalper() {
         });
       }
 
-      const newPos: ActiveSyntheticPosition = {
-        id: `synth-${Date.now()}`,
-        direction,
-        underlying,
-        expiry,
-        atmStrike,
-        lots,
-        lotSize,
-        entrySyntheticPrice: syntheticFuturePrice,
-        enteredAt: new Date().toLocaleTimeString('en-GB', { hour12: false }),
-        hedged: hedgeEnabled,
-        hedgeOffset,
-        productType,
-        legs: initialLegs,
-        peakPoints: 0,
-        peakPnl: 0,
-      };
+      let finalTotalLots = lots;
+      let finalSynthPrice = syntheticFuturePrice;
 
-      setActivePosition(newPos);
-      if (json.success) {
-        addToast('success', `Synthetic ${dirLabel} Entered!`, `Entry Synth Price: ₹${fmtNum(syntheticFuturePrice, 2)}`);
+      setActivePosition(prev => {
+        if (!prev || prev.direction !== direction || prev.underlying !== underlying) {
+          const freshPos: ActiveSyntheticPosition = {
+            id: `synth-${Date.now()}`,
+            direction,
+            underlying,
+            expiry,
+            atmStrike,
+            lots,
+            lotSize,
+            entrySyntheticPrice: syntheticFuturePrice,
+            enteredAt: new Date().toLocaleTimeString('en-GB', { hour12: false }),
+            hedged: hedgeEnabled,
+            hedgeOffset,
+            productType,
+            legs: initialLegs,
+            peakPoints: 0,
+            peakPnl: 0,
+          };
+          activePositionRef.current = freshPos;
+          finalTotalLots = lots;
+          finalSynthPrice = syntheticFuturePrice;
+          return freshPos;
+        }
+
+        // Merge with existing position
+        const prevLots = prev.lots || 1;
+        const addedLots = lots;
+        const totalLots = prevLots + addedLots;
+        finalTotalLots = totalLots;
+
+        const weightedSyntheticPrice =
+          prev.entrySyntheticPrice > 0 && syntheticFuturePrice > 0
+            ? (prev.entrySyntheticPrice * prevLots + syntheticFuturePrice * addedLots) / totalLots
+            : syntheticFuturePrice || prev.entrySyntheticPrice;
+        finalSynthPrice = weightedSyntheticPrice;
+
+        const mergedLegs: SyntheticLeg[] = prev.legs.map(l => ({ ...l }));
+
+        for (const newLeg of initialLegs) {
+          if (newLeg.status === 'REJECTED' || newLeg.status === 'FAILED' || newLeg.status === 'SKIPPED') {
+            const existingIdx = mergedLegs.findIndex(
+              l =>
+                (l.securityId && newLeg.securityId && l.securityId === newLeg.securityId) ||
+                (l.strike === newLeg.strike && l.optionType === newLeg.optionType && l.side === newLeg.side)
+            );
+            if (existingIdx === -1) {
+              mergedLegs.push({ ...newLeg });
+            }
+            continue;
+          }
+
+          const matchIndex = mergedLegs.findIndex(
+            l =>
+              (l.securityId && newLeg.securityId && l.securityId === newLeg.securityId) ||
+              (l.strike === newLeg.strike && l.optionType === newLeg.optionType && l.side === newLeg.side)
+          );
+
+          if (matchIndex >= 0) {
+            const existing = mergedLegs[matchIndex];
+            const isExistingLive = existing.status === 'FILLED' || existing.status === 'TRANSIT' || existing.status == null;
+            const combinedQty = isExistingLive ? existing.qty + newLeg.qty : newLeg.qty;
+            const combinedEntryPrice =
+              isExistingLive && combinedQty > 0
+                ? (existing.entryPrice * existing.qty + newLeg.entryPrice * newLeg.qty) / combinedQty
+                : newLeg.entryPrice;
+
+            const currentLtp = (newLeg.currentLtp > 0 ? newLeg.currentLtp : existing.currentLtp) || 0;
+            const combinedPnl =
+              existing.side === 'BUY'
+                ? (currentLtp - combinedEntryPrice) * combinedQty
+                : (combinedEntryPrice - currentLtp) * combinedQty;
+
+            const combinedOrderId = isExistingLive
+              ? [existing.orderId, newLeg.orderId].filter(Boolean).join(', ')
+              : newLeg.orderId;
+            const combinedStatus =
+              existing.status === 'FILLED' || newLeg.status === 'FILLED'
+                ? 'FILLED'
+                : newLeg.status || existing.status || 'TRANSIT';
+
+            mergedLegs[matchIndex] = {
+              ...existing,
+              qty: combinedQty,
+              entryPrice: combinedEntryPrice,
+              currentLtp,
+              pnl: combinedPnl,
+              orderId: combinedOrderId,
+              status: combinedStatus,
+              statusMessage: newLeg.statusMessage || existing.statusMessage,
+              role: existing.role || newLeg.role,
+            };
+          } else {
+            mergedLegs.push({ ...newLeg });
+          }
+        }
+
+        const totalPnl = mergedLegs.reduce((acc, l) => acc + l.pnl, 0);
+        const pointsDiff =
+          direction === 'LONG'
+            ? syntheticFuturePrice - weightedSyntheticPrice
+            : weightedSyntheticPrice - syntheticFuturePrice;
+
+        const updatedPos: ActiveSyntheticPosition = {
+          ...prev,
+          lots: totalLots,
+          entrySyntheticPrice: weightedSyntheticPrice,
+          hedged: prev.hedged || hedgeEnabled,
+          legs: mergedLegs,
+          peakPoints: Math.max(0, pointsDiff),
+          peakPnl: Math.max(0, totalPnl),
+        };
+        activePositionRef.current = updatedPos;
+        return updatedPos;
+      });
+
+      if (isAddingLots) {
+        if (json.success) {
+          addToast(
+            'success',
+            `Added ${lots} Lot(s) to Synthetic ${dirLabel}!`,
+            `Total: ${finalTotalLots} Lots · New Avg Synth: ₹${fmtNum(finalSynthPrice, 2)}`
+          );
+        }
+        addLog(
+          'ENTRY',
+          `Added ${lots} lots to Synthetic ${direction} (Total: ${finalTotalLots} lots) @ avg ₹${fmtNum(finalSynthPrice, 2)}`,
+          `Orders: ${(json.orderIds || []).join(', ')}`
+        );
+      } else {
+        if (json.success) {
+          addToast('success', `Synthetic ${dirLabel} Entered!`, `Entry Synth Price: ₹${fmtNum(syntheticFuturePrice, 2)}`);
+        }
+        addLog(
+          'ENTRY',
+          `Entered Synthetic ${direction} @ ${fmtNum(syntheticFuturePrice, 2)} (${lots} lots · ATM ${atmStrike})`,
+          `Orders: ${(json.orderIds || []).join(', ')}`
+        );
       }
-      addLog(
-        'ENTRY',
-        `Entered Synthetic ${direction} @ ${fmtNum(syntheticFuturePrice, 2)} (${lots} lots · ATM ${atmStrike})`,
-        `Orders: ${(json.orderIds || []).join(', ')}`
-      );
     } catch (err) {
       addToast('error', 'Execution Error', String(err));
       addLog('ERROR', `Network error executing synthetic ${direction}: ${String(err)}`);
@@ -846,6 +1008,7 @@ export default function SyntheticFuturesScalper() {
   // ── Clear / Reset Position State ──────────────────────────────────────────
   const handleClearPosition = () => {
     setActivePosition(null);
+    activePositionRef.current = null;
     try {
       localStorage.removeItem('dhan_algo.synthetic_position');
     } catch {}
@@ -892,7 +1055,7 @@ export default function SyntheticFuturesScalper() {
           const nextLegs = prev.legs.map(leg => {
             const match = orderList.find(o => {
               const oId = String(o.orderId ?? o.order_id ?? o.nOrdNo ?? '');
-              if (leg.orderId && oId && leg.orderId === oId) return true;
+              if (leg.orderId && oId && (leg.orderId === oId || leg.orderId.split(',').map(s => s.trim()).includes(oId))) return true;
               const sym = String(o.tradingSymbol ?? o.tradingsymbol ?? '');
               if (leg.tradingSymbol && sym && leg.tradingSymbol === sym) return true;
               return false;
@@ -926,10 +1089,12 @@ export default function SyntheticFuturesScalper() {
           });
 
           if (!changed) return prev;
-          return {
+          const updated: ActiveSyntheticPosition = {
             ...prev,
             legs: nextLegs,
           };
+          activePositionRef.current = updated;
+          return updated;
         });
       } catch {}
     }
@@ -945,7 +1110,8 @@ export default function SyntheticFuturesScalper() {
   // ── 8. Flatten / Exit Synthetic Position ───────────────────────────────────
   const handleFlattenSynthetic = async (reason = 'Manual Exit'): Promise<boolean> => {
     if (inFlightRef.current) return false;
-    if (!activePosition || activePosition.legs.length === 0) {
+    const currentPos = activePositionRef.current || activePosition;
+    if (!currentPos || currentPos.legs.length === 0) {
       addToast('info', 'No active synthetic position to flatten');
       return false;
     }
@@ -954,7 +1120,7 @@ export default function SyntheticFuturesScalper() {
     // route never placed, or that got rejected/cancelled later, must NOT get an
     // exit order — submitting one would open a brand-new position instead of
     // closing one that was never there.
-    const liveLegs = activePosition.legs.filter(l => l.status === 'FILLED' || l.status === 'TRANSIT' || l.status == null);
+    const liveLegs = currentPos.legs.filter(l => l.status === 'FILLED' || l.status === 'TRANSIT' || l.status == null);
     if (liveLegs.length === 0) {
       addToast('info', 'Position Cleared', 'No legs are live at the broker; resetting position state.');
       handleClearPosition();
@@ -985,8 +1151,8 @@ export default function SyntheticFuturesScalper() {
         body: JSON.stringify({
           action: 'exit',
           broker: effectiveBroker,
-          underlying: activePosition.underlying,
-          expiry: activePosition.expiry,
+          underlying: currentPos.underlying,
+          expiry: currentPos.expiry,
           legsToExit,
         }),
       });
@@ -1007,6 +1173,7 @@ export default function SyntheticFuturesScalper() {
       addLog('EXIT', `Flattened Synthetic (${reason}): Net P&L ${fmtSignedINR(totalClosedPnl)}`);
 
       setActivePosition(null);
+      activePositionRef.current = null;
       try {
         localStorage.removeItem('dhan_algo.synthetic_position');
       } catch {}
@@ -1023,8 +1190,9 @@ export default function SyntheticFuturesScalper() {
 
   // ── 9. Flip / Reverse Position ─────────────────────────────────────────────
   const handleReversePosition = async () => {
-    if (!activePosition) return;
-    const targetDirection: SyntheticDirection = activePosition.direction === 'LONG' ? 'SHORT' : 'LONG';
+    const currentPos = activePositionRef.current || activePosition;
+    if (!currentPos) return;
+    const targetDirection: SyntheticDirection = currentPos.direction === 'LONG' ? 'SHORT' : 'LONG';
     addToast('info', `Flipping Position to ${targetDirection}…`);
     const ok = await handleFlattenSynthetic('Reversing Position');
     if (!ok) {
@@ -1264,19 +1432,26 @@ export default function SyntheticFuturesScalper() {
           <div className="flex flex-wrap items-center gap-3">
             {/* Underlying Pill Toggle */}
             <div className="flex items-center rounded-lg border border-zinc-800 bg-zinc-900/90 p-0.5 text-xs font-mono">
-              {(['NIFTY', 'SENSEX', 'BANKNIFTY', 'CRUDEOIL', 'CRUDEOILM'] as Underlying[]).map(u => (
-                <button
-                  key={u}
-                  onClick={() => setUnderlying(u)}
-                  className={`px-3 py-1 rounded-md font-bold transition-all ${
-                    underlying === u
-                      ? 'bg-zinc-800 text-zinc-100 shadow-sm'
-                      : 'text-zinc-400 hover:text-zinc-200'
-                  }`}
-                >
-                  {u}
-                </button>
-              ))}
+              {(['NIFTY', 'SENSEX', 'BANKNIFTY', 'CRUDEOIL', 'CRUDEOILM'] as Underlying[]).map(u => {
+                const isLocked = Boolean(activePosition && activePosition.underlying !== u);
+                return (
+                  <button
+                    key={u}
+                    disabled={isLocked}
+                    title={isLocked ? `Active position open in ${activePosition!.underlying}. Flatten or reset it first.` : undefined}
+                    onClick={() => setUnderlying(u)}
+                    className={`px-3 py-1 rounded-md font-bold transition-all ${
+                      underlying === u
+                        ? 'bg-zinc-800 text-zinc-100 shadow-sm'
+                        : isLocked
+                          ? 'text-zinc-600 cursor-not-allowed opacity-40'
+                          : 'text-zinc-400 hover:text-zinc-200'
+                    }`}
+                  >
+                    {u}
+                  </button>
+                );
+              })}
             </div>
 
             {/* Expiry Selector */}
@@ -1284,8 +1459,12 @@ export default function SyntheticFuturesScalper() {
               <span className="text-[11px] font-bold text-zinc-400 uppercase">Expiry</span>
               <select
                 value={expiry}
+                disabled={Boolean(activePosition)}
+                title={activePosition ? `Active position open in expiry ${activePosition.expiry}. Flatten or reset it first.` : undefined}
                 onChange={e => setExpiry(e.target.value)}
-                className="rounded-lg border border-zinc-800 bg-zinc-900 px-2.5 py-1 text-xs font-mono font-bold text-zinc-100 focus:outline-none focus:border-emerald-500/50"
+                className={`rounded-lg border border-zinc-800 bg-zinc-900 px-2.5 py-1 text-xs font-mono font-bold text-zinc-100 focus:outline-none focus:border-emerald-500/50 ${
+                  activePosition ? 'cursor-not-allowed opacity-60' : ''
+                }`}
               >
                 {expiries.map(exp => (
                   <option key={exp} value={exp}>
@@ -1300,7 +1479,14 @@ export default function SyntheticFuturesScalper() {
               <span className="text-[11px] font-bold text-zinc-400 uppercase">Broker</span>
               <div className="flex items-center rounded-lg border border-zinc-800 bg-zinc-900 p-0.5 font-mono text-[11px]">
                 {(['dhan', 'zerodha', 'kotak'] as Broker[]).map(b => {
-                  const disabled = b === 'zerodha' && isCrude;
+                  const crudeDisabled = b === 'zerodha' && isCrude;
+                  const posDisabled = Boolean(activePosition && effectiveBroker !== b);
+                  const disabled = crudeDisabled || posDisabled;
+                  const title = crudeDisabled
+                    ? 'Zerodha has no MCX crude support'
+                    : posDisabled
+                      ? `Active position open on ${effectiveBroker.toUpperCase()}. Flatten or reset it first.`
+                      : undefined;
                   return (
                     <button
                       key={b}
@@ -1489,7 +1675,7 @@ export default function SyntheticFuturesScalper() {
                       : 'border border-red-500/40 bg-red-500/20 text-red-300'
                   }`}
                 >
-                  {activePosition.direction} SYNTHETIC
+                  {activePosition.direction} SYNTHETIC · {activePosition.lots}x {activePosition.lots === 1 ? 'LOT' : 'LOTS'}
                 </span>
               ) : (
                 <span className="text-[10px] text-zinc-500">FLAT / NO POSITION</span>
@@ -1646,11 +1832,20 @@ export default function SyntheticFuturesScalper() {
             {/* Big Action Button */}
             <button
               onClick={() => handleEnterSynthetic('LONG')}
-              disabled={inFlight}
-              className="w-full py-3.5 px-4 rounded-xl font-mono text-sm font-bold tracking-wider uppercase text-emerald-950 bg-emerald-400 hover:bg-emerald-300 active:scale-[0.99] disabled:opacity-50 transition-all shadow-[0_0_25px_rgba(16,185,129,0.35)] hover:shadow-[0_0_35px_rgba(16,185,129,0.5)] flex items-center justify-center gap-2 cursor-pointer"
+              disabled={inFlight || (activePosition != null && activePosition.direction !== 'LONG')}
+              title={
+                activePosition && activePosition.direction !== 'LONG'
+                  ? 'Active SHORT position open. Close or flip position first.'
+                  : undefined
+              }
+              className={`w-full py-3.5 px-4 rounded-xl font-mono text-sm font-bold tracking-wider uppercase text-emerald-950 bg-emerald-400 hover:bg-emerald-300 active:scale-[0.99] disabled:opacity-50 transition-all shadow-[0_0_25px_rgba(16,185,129,0.35)] hover:shadow-[0_0_35px_rgba(16,185,129,0.5)] flex items-center justify-center gap-2 cursor-pointer ${
+                activePosition && activePosition.direction !== 'LONG' ? 'cursor-not-allowed opacity-40' : ''
+              }`}
             >
               <Zap className="h-4 w-4 fill-emerald-950" />
-              BUY SYNTHETIC (LONG)
+              {activePosition && activePosition.direction === 'LONG'
+                ? `+ ADD ${lots} ${lots === 1 ? 'LOT' : 'LOTS'} (LONG)`
+                : 'BUY SYNTHETIC (LONG)'}
               <span className="text-[11px] opacity-75 font-normal tracking-normal border border-emerald-900/40 rounded px-1.5 py-0.2 bg-emerald-500/30">
                 KEY [B]
               </span>
@@ -1726,11 +1921,20 @@ export default function SyntheticFuturesScalper() {
             {/* Big Action Button */}
             <button
               onClick={() => handleEnterSynthetic('SHORT')}
-              disabled={inFlight}
-              className="w-full py-3.5 px-4 rounded-xl font-mono text-sm font-bold tracking-wider uppercase text-white bg-red-600 hover:bg-red-500 active:scale-[0.99] disabled:opacity-50 transition-all shadow-[0_0_25px_rgba(239,68,68,0.35)] hover:shadow-[0_0_35px_rgba(239,68,68,0.5)] flex items-center justify-center gap-2 cursor-pointer"
+              disabled={inFlight || (activePosition != null && activePosition.direction !== 'SHORT')}
+              title={
+                activePosition && activePosition.direction !== 'SHORT'
+                  ? 'Active LONG position open. Close or flip position first.'
+                  : undefined
+              }
+              className={`w-full py-3.5 px-4 rounded-xl font-mono text-sm font-bold tracking-wider uppercase text-white bg-red-600 hover:bg-red-500 active:scale-[0.99] disabled:opacity-50 transition-all shadow-[0_0_25px_rgba(239,68,68,0.35)] hover:shadow-[0_0_35px_rgba(239,68,68,0.5)] flex items-center justify-center gap-2 cursor-pointer ${
+                activePosition && activePosition.direction !== 'SHORT' ? 'cursor-not-allowed opacity-40' : ''
+              }`}
             >
               <Zap className="h-4 w-4 fill-white" />
-              SELL SYNTHETIC (SHORT)
+              {activePosition && activePosition.direction === 'SHORT'
+                ? `+ ADD ${lots} ${lots === 1 ? 'LOT' : 'LOTS'} (SHORT)`
+                : 'SELL SYNTHETIC (SHORT)'}
               <span className="text-[11px] opacity-75 font-normal tracking-normal border border-red-300/40 rounded px-1.5 py-0.2 bg-red-700/50">
                 KEY [S]
               </span>
@@ -1968,7 +2172,7 @@ export default function SyntheticFuturesScalper() {
               </span>
               {activePosition && (
                 <span className="rounded bg-zinc-800 px-1.5 py-0.2 text-[10px] font-mono text-zinc-400">
-                  {activePosition.legs.length} LEGS
+                  {activePosition.legs.length} LEGS · {activePosition.lots} {activePosition.lots === 1 ? 'LOT' : 'LOTS'} ({activePosition.lots * activePosition.lotSize} QTY)
                 </span>
               )}
             </div>
