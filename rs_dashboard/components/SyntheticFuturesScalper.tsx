@@ -211,6 +211,22 @@ function fmtSignedINR(n: number | null | undefined): string {
   return prefix + Math.abs(n).toLocaleString('en-IN', { maximumFractionDigits: 0 });
 }
 
+// Identifies a leg for matching against broker payloads / other legs —
+// securityId (Dhan) or tradingSymbol (Kotak, Zerodha, and as a Dhan fallback).
+function legKey(l: SyntheticLeg): string {
+  return l.securityId || l.tradingSymbol || '';
+}
+
+// The position's lot count, derived from what's actually live on the main
+// (non-hedge) legs rather than trusted as a single tracked scalar — a leg
+// that drifted out of lockstep with its siblings (a prior add-lots order
+// whose fill partially rejected, or a manual per-leg top-up) must not have
+// that mismatch hidden behind an optimistic label.
+function impliedLotsFromLegs(legs: SyntheticLeg[], lotSize: number): number {
+  const mainLegs = legs.filter(l => l.role !== 'HEDGE' && l.qty > 0);
+  return mainLegs.length > 0 ? Math.min(...mainLegs.map(l => Math.floor(l.qty / lotSize))) : 0;
+}
+
 // A leg the order route never placed (it FAILED or was SKIPPED after an earlier
 // leg failed) never went live at the broker — treat it the same as REJECTED so it's
 // excluded from P&L, monitoring, and (critically) from flatten's exit-order legs.
@@ -283,6 +299,10 @@ export default function SyntheticFuturesScalper() {
   // Lots to close on a partial flatten — clamped to the active position's
   // lot count whenever it changes (e.g. after a prior partial close shrinks it).
   const [closeLots, setCloseLots] = useState<number>(1);
+  // Per-leg "lots to add" picker in the Active Position Leg Book table, keyed
+  // by the same securityId/tradingSymbol key used everywhere else a leg needs
+  // identifying. Missing entries default to 1 lot.
+  const [addLotsByLeg, setAddLotsByLeg] = useState<Record<string, number>>({});
   const [productType, setProductType] = useState<ProductType>('INTRADAY');
   const [orderMode, setOrderMode] = useState<OrderMode>('MARKET');
   const [limitBuffer, setLimitBuffer] = useState<string>('0.5');
@@ -1295,7 +1315,6 @@ export default function SyntheticFuturesScalper() {
       // at the broker. On a partial close, cap each leg's exit qty at the lot
       // target (never above what's actually live — a leg already clamped down
       // by broker reconciliation exits whatever it still has).
-      const legKey = (l: SyntheticLeg) => l.securityId || l.tradingSymbol || '';
       const closedQtyByLeg = new Map<string, number>();
       const legsToExit = liveLegs
         .map(l => {
@@ -1356,15 +1375,7 @@ export default function SyntheticFuturesScalper() {
             const closedQty = closedQtyByLeg.get(legKey(l)) ?? 0;
             return closedQty > 0 ? { ...l, qty: Math.max(0, l.qty - closedQty) } : l;
           });
-          // Derive the position's lot count from what's actually left on the
-          // main legs rather than a blind `lots - targetLots` subtraction — a
-          // leg that drifted out of lockstep with the others (e.g. a prior
-          // add-lots order whose fill partially rejected) must not have that
-          // shortfall hidden behind an optimistic label.
-          const mainLegs = nextLegs.filter(l => l.role !== 'HEDGE' && l.qty > 0);
-          const impliedLots =
-            mainLegs.length > 0 ? Math.min(...mainLegs.map(l => Math.floor(l.qty / prev.lotSize))) : 0;
-          return { ...prev, lots: impliedLots, legs: nextLegs };
+          return { ...prev, lots: impliedLotsFromLegs(nextLegs, prev.lotSize), legs: nextLegs };
         });
       } else {
         setActivePosition(null);
@@ -1378,6 +1389,74 @@ export default function SyntheticFuturesScalper() {
       addToast('error', 'Exit Error', String(err));
       addLog('ERROR', `Error flattening position: ${String(err)}`);
       return false;
+    } finally {
+      inFlightRef.current = false;
+      setInFlight(false);
+    }
+  };
+
+  // ── 8b. Add Lots to a Single Leg ────────────────────────────────────────────
+  // Grows one leg of the open position in place (same side, more quantity)
+  // without touching its siblings — e.g. topping up just the hedge, or just
+  // the leg that fell behind after a prior add-lots order partially rejected.
+  const handleAddLotsToLeg = async (leg: SyntheticLeg, addLots: number) => {
+    if (inFlightRef.current) return;
+    const currentPos = activePositionRef.current || activePosition;
+    if (!currentPos) return;
+    if (!(leg.status === 'FILLED' || leg.status === 'TRANSIT' || leg.status == null) || leg.qty <= 0) {
+      addToast('error', 'Leg Not Live', 'This leg is not live at the broker — nothing to add to.');
+      return;
+    }
+    if (addLots <= 0) return;
+
+    const addQty = addLots * currentPos.lotSize;
+    const targetLeg = legKey(leg);
+
+    inFlightRef.current = true;
+    setInFlight(true);
+    addToast('info', `Adding ${addLots} Lot(s) to ${leg.role} ${leg.strike}${leg.optionType}…`, `${leg.side} ${addQty} qty`);
+
+    try {
+      const res = await fetch('/api/synthetic-futures/order', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          action: 'addLeg',
+          broker: effectiveBroker,
+          underlying: currentPos.underlying,
+          expiry: currentPos.expiry,
+          orderType: orderMode,
+          legToAdd: {
+            securityId: leg.securityId,
+            tradingSymbol: leg.tradingSymbol,
+            side: leg.side,
+            quantity: addQty,
+            productType: leg.productType,
+            exchangeSegment: leg.exchangeSegment,
+          },
+        }),
+      });
+
+      const json = await res.json();
+      if (!json.success || !json.orderId) {
+        addToast('error', 'Add Lots Failed', json.error || 'Broker rejected the order');
+        addLog('ERROR', `Add ${addLots} Lot(s) to ${leg.role} Failed: ${json.error || 'Unknown error'}`);
+        return;
+      }
+
+      setActivePosition(prev => {
+        if (!prev) return prev;
+        const nextLegs = prev.legs.map(l =>
+          legKey(l) === targetLeg ? { ...l, qty: l.qty + addQty, openedAt: Date.now() } : l
+        );
+        return { ...prev, lots: impliedLotsFromLegs(nextLegs, prev.lotSize), legs: nextLegs };
+      });
+
+      addToast('success', `Added ${addLots} Lot(s) to ${leg.role}!`, `${leg.strike}${leg.optionType} · +${addQty} qty`);
+      addLog('ENTRY', `Added ${addLots} Lot(s) (+${addQty} qty) to ${leg.role} ${leg.strike}${leg.optionType}`);
+    } catch (err) {
+      addToast('error', 'Add Lots Error', String(err));
+      addLog('ERROR', `Error adding lots to ${leg.role}: ${String(err)}`);
     } finally {
       inFlightRef.current = false;
       setInFlight(false);
@@ -2515,6 +2594,7 @@ export default function SyntheticFuturesScalper() {
                   <th className="px-4 py-2.5 text-right text-xs font-bold text-white">Entry Avg</th>
                   <th className="px-4 py-2.5 text-right text-xs font-bold text-white">LTP</th>
                   <th className="px-4 py-2.5 text-right text-xs font-bold text-white">P&L</th>
+                  <th className="px-4 py-2.5 text-right text-xs font-bold text-white">Add Lots</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-zinc-800 font-mono text-xs">
@@ -2592,11 +2672,54 @@ export default function SyntheticFuturesScalper() {
                       >
                         {fmtSignedINR(leg.pnl)}
                       </td>
+                      <td className="px-4 py-2.5">
+                        {(() => {
+                          const isLive =
+                            (leg.status === 'FILLED' || leg.status === 'TRANSIT' || leg.status == null) &&
+                            leg.qty > 0;
+                          if (!isLive) {
+                            return <div className="text-right text-zinc-600">—</div>;
+                          }
+                          const key = legKey(leg);
+                          const addLots = addLotsByLeg[key] ?? 1;
+                          return (
+                            <div className="flex items-center justify-end gap-1">
+                              <button
+                                onClick={() =>
+                                  setAddLotsByLeg(prev => ({ ...prev, [key]: Math.max(1, addLots - 1) }))
+                                }
+                                disabled={inFlight}
+                                className="px-1 py-0.5 rounded text-zinc-400 hover:bg-zinc-800 text-xs font-bold disabled:opacity-30 cursor-pointer"
+                              >
+                                −
+                              </button>
+                              <span className="w-4 text-center text-[11px] font-mono font-bold text-zinc-100">
+                                {addLots}
+                              </span>
+                              <button
+                                onClick={() => setAddLotsByLeg(prev => ({ ...prev, [key]: addLots + 1 }))}
+                                disabled={inFlight}
+                                className="px-1 py-0.5 rounded text-zinc-400 hover:bg-zinc-800 text-xs font-bold disabled:opacity-30 cursor-pointer"
+                              >
+                                +
+                              </button>
+                              <button
+                                onClick={() => handleAddLotsToLeg(leg, addLots)}
+                                disabled={inFlight}
+                                title={`Add ${addLots} lot(s) (${addLots * activePosition.lotSize} qty) to this ${leg.role} leg only — siblings untouched`}
+                                className="ml-1 rounded border border-emerald-500/40 bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-400 px-2 py-0.5 text-[10px] font-bold disabled:opacity-30 cursor-pointer transition-all active:scale-[0.98] whitespace-nowrap"
+                              >
+                                + ADD
+                              </button>
+                            </div>
+                          );
+                        })()}
+                      </td>
                     </tr>
                   ))
                 ) : (
                   <tr>
-                    <td colSpan={9} className="px-4 py-8 text-center text-zinc-500 font-mono text-xs">
+                    <td colSpan={10} className="px-4 py-8 text-center text-zinc-500 font-mono text-xs">
                       No active synthetic legs open. Click BUY or SELL above to initiate a synthetic trade.
                     </td>
                   </tr>

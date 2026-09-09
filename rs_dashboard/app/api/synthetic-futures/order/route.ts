@@ -15,7 +15,7 @@ interface StrikeIdentifier {
 }
 
 export interface SyntheticLegSpec {
-  role: 'MAIN_CE' | 'MAIN_PE' | 'HEDGE' | 'EXIT';
+  role: 'MAIN_CE' | 'MAIN_PE' | 'HEDGE' | 'EXIT' | 'ADD_LEG';
   optionType: 'CE' | 'PE' | '';
   strike: number;
   side: 'BUY' | 'SELL';
@@ -197,7 +197,7 @@ async function placeBrokerLeg(
 
 export async function POST(req: NextRequest): Promise<NextResponse> {
   const body = (await req.json()) as {
-    action: 'enter' | 'exit';
+    action: 'enter' | 'exit' | 'addLeg';
     broker?: 'dhan' | 'zerodha' | 'kotak';
     underlying: 'NIFTY' | 'SENSEX' | 'BANKNIFTY' | 'CRUDEOIL' | 'CRUDEOILM';
     expiry: string;
@@ -218,6 +218,18 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       productType?: string;
       exchangeSegment?: string;
     }>;
+    // A single already-open leg to grow in place — same side, more quantity.
+    // Used to top up one leg of an existing position (e.g. just the hedge,
+    // or just the lagging leg of a mismatched combo) without touching the
+    // others, unlike 'enter' which always places the whole basket.
+    legToAdd?: {
+      securityId?: string;
+      tradingSymbol?: string;
+      side: 'BUY' | 'SELL';
+      quantity: number;
+      productType?: string;
+      exchangeSegment?: string;
+    };
   };
 
   const {
@@ -235,6 +247,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     orderType = 'MARKET',
     strikeMap = {},
     legsToExit = [],
+    legToAdd,
   } = body;
 
   const isCrude = isCrudeUnderlying(underlying);
@@ -332,6 +345,67 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       error: allSuccess
         ? undefined
         : results.filter(r => r.error).map(r => r.error).join('; ') || 'One or more close orders failed at broker',
+    });
+  }
+
+  // ───────────────────────────────────────────────────────────────────────────
+  // ADD LEG ACTION — grow one already-open leg of an existing position
+  // (same side, more quantity), without touching its siblings.
+  // ───────────────────────────────────────────────────────────────────────────
+  if (action === 'addLeg') {
+    if (!legToAdd || !legToAdd.quantity || legToAdd.quantity <= 0) {
+      return NextResponse.json({ success: false, error: 'Invalid leg to add' }, { status: 400 });
+    }
+
+    let dhanToken = '';
+    let dhanClientId = '';
+    if (broker === 'dhan') {
+      const creds = getDhanCredentials();
+      if (!creds.token) {
+        return NextResponse.json({ success: false, error: 'No valid Dhan credentials' }, { status: 401 });
+      }
+      dhanToken = creds.token;
+      dhanClientId = creds.clientId;
+    } else if (broker === 'kotak') {
+      if (!isKotakTokenValid()) {
+        return NextResponse.json({
+          success: false,
+          error: 'Kotak Neo session expired or missing. Please refresh Kotak token via autologin.',
+        }, { status: 401 });
+      }
+    } else if (broker === 'zerodha') {
+      if (!isZerodhaTokenValid()) {
+        return NextResponse.json({
+          success: false,
+          error: 'Zerodha session expired or missing. Please refresh Zerodha token via autologin.',
+        }, { status: 401 });
+      }
+    }
+
+    const exec = await placeBrokerLeg(broker, dhanToken, dhanClientId, {
+      role: 'ADD_LEG',
+      optionType: '',
+      strike: 0,
+      side: legToAdd.side,
+      quantity: Math.abs(legToAdd.quantity),
+      securityId: legToAdd.securityId,
+      tradingSymbol: legToAdd.tradingSymbol,
+      orderType,
+      productType: (legToAdd.productType as 'INTRADAY' | 'MARGIN') || productType,
+      // Always the server's own fresh mapping for this request's broker/underlying —
+      // same rule as the exit path above, never the client-stored value from
+      // whenever the leg was first opened.
+      exchangeSegment: defaultExchangeSegment,
+    });
+
+    invalidateBrokerCache(broker);
+
+    return NextResponse.json({
+      success: Boolean(exec.orderId),
+      action: 'addLeg',
+      orderId: exec.orderId,
+      quantity: Math.abs(legToAdd.quantity),
+      error: exec.error,
     });
   }
 
