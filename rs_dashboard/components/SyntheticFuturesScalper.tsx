@@ -349,6 +349,19 @@ export default function SyntheticFuturesScalper() {
   // effect below, never to trigger a render itself.
   const autoExitFailRef = useRef<{ positionId: string; count: number; cooldownUntil: number } | null>(null);
 
+  // Guards the auto-exit watcher (§10) against firing on the first few price
+  // ticks after a page load or hard refresh — the HTTP fallback poll (100 ms
+  // cadence) can resolve quotes from the stale live_options_quotes.json within
+  // milliseconds of mount, making synthPriceReady flip true before the feed
+  // has truly stabilised. A restored position's peakPoints may bake in a tight
+  // trailing-SL floor that fires immediately on that first transient price read
+  // (e.g. peakPoints=35, trailTrigger=20, trailStep=10 → floor at 10 pts; if
+  // the first synthetic price lands at 5 pts from entry the exit fires before
+  // the user has even seen the page). This ref records the epoch-ms of the
+  // last localStorage restore / fresh entry so §10 can suppress its first
+  // AUTO_EXIT_WARMUP_MS milliseconds of checks.
+  const autoExitWarmupUntilRef = useRef<number>(Date.now() + 8000);
+
   // Restore active synthetic position from localStorage on mount
   useEffect(() => {
     try {
@@ -1030,6 +1043,12 @@ export default function SyntheticFuturesScalper() {
       const nowTs = Date.now();
       for (const leg of initialLegs) leg.openedAt = nowTs;
 
+      // Reset the auto-exit warmup window so the §10 watcher can't fire for
+      // 8 s from now — the fill confirmation and first subsequent price tick
+      // can arrive at nearly the same instant, and a fast market move during
+      // that race could read capturedPoints well below any trailing-SL floor.
+      autoExitWarmupUntilRef.current = Date.now() + 8000;
+
       let finalTotalLots = lots;
       let finalSynthPrice = syntheticFuturePrice;
 
@@ -1632,6 +1651,17 @@ export default function SyntheticFuturesScalper() {
     // loss/target breach that never actually happened — see the
     // synthPriceReady comment above for the incident this fixes.
     if (!activePosition || inFlight || !synthPriceReady) return;
+
+    // Warm-up gate: suppress all automatic exits for the first few seconds
+    // after a page load / hard refresh. The HTTP fallback poll can deliver
+    // quotes from the stale JSON cache within milliseconds of mount, making
+    // synthPriceReady true before the live feed has genuinely stabilised. A
+    // restored position's peakPoints can then arm a trailing-SL floor that
+    // fires on the very first transient price read — before the user has even
+    // seen the page. 8 seconds gives the WebSocket bridge time to connect and
+    // deliver a real tick, while still reacting promptly to genuine breaches
+    // once the feed is warm.
+    if (Date.now() < autoExitWarmupUntilRef.current) return;
 
     // Reset the failure/cooldown tracker on a new position id (a fresh
     // entry after the last one closed or was cleared starts with a clean
