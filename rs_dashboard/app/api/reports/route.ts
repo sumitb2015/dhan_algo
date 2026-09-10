@@ -3,9 +3,9 @@ import path from 'path';
 import fs from 'fs';
 import { spawn } from 'child_process';
 import { isPidRunning } from '@/lib/processCheck';
+import { PYTHON_EXE } from '@/lib/pyExec';
 
 const PROJECT_ROOT = path.resolve(process.cwd(), '..');
-const PYTHON_EXE = path.join(PROJECT_ROOT, 'venv', 'Scripts', 'pythonw.exe');
 
 type Category = 'analysis' | 'screener' | 'portfolio' | 'tools';
 

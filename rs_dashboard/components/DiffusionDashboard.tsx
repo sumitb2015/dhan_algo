@@ -13,6 +13,7 @@ import {
 } from 'recharts';
 import type { DiffusionResponse } from '@/app/api/diffusion/route';
 import { cachedFetch } from '@/lib/clientCache';
+import NavBar from './NavBar';
 
 // ─── Indicator catalogue ──────────────────────────────────────────────────────
 
@@ -305,6 +306,8 @@ export default function DiffusionDashboard() {
             {data.totalScanned} stocks
           </span>
         )}
+        <span className={`w-px h-5 bg-zinc-800 shrink-0 ${data ? '' : 'ml-auto'}`} />
+        <NavBar />
       </div>
 
       <div className="flex flex-1 overflow-hidden">

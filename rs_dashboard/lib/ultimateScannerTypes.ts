@@ -2,6 +2,7 @@ export type StrategyType =
   | 'bull_put_spread'
   | 'bear_call_spread'
   | 'iron_condor'
+  | 'batman'
   | 'iron_butterfly'
   | 'short_strangle'
   | 'short_straddle'

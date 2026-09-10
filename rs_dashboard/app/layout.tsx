@@ -1,12 +1,22 @@
 import type { Metadata } from "next";
-import { Geist, Geist_Mono } from "next/font/google";
+import { Inter, Geist_Mono } from "next/font/google";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import ThemeInit from "@/components/ThemeInit";
+import Sidebar from "@/components/Sidebar";
+import PnlAlertModal from "@/components/PnlAlertModal";
 import Script from "next/script";
 import "./globals.css";
 
-const geistSans = Geist({
-  variable: "--font-geist-sans",
+// Inter over Geist: hand-tuned hinting for small UI text (this app's sidebar
+// and tables run 11-12px), which is what this app needs most.
+// Named `--font-sans` (not `--font-geist-sans`) to match the `--font-sans`
+// bridge already declared in globals.css's `@theme inline` block — that var
+// was previously never actually set by anything, so the `font-sans` utility
+// (applied explicitly in several components, e.g. BreadthAnalysis.tsx
+// tooltips) only worked by accident, via inheriting body's own explicit
+// font-family rule rather than resolving its own theme token.
+const inter = Inter({
+  variable: "--font-sans",
   subsets: ["latin"],
 });
 
@@ -44,7 +54,7 @@ export default function RootLayout({
   return (
     <html
       lang="en"
-      className={`${geistSans.variable} ${geistMono.variable} dark h-full antialiased`}
+      className={`${inter.variable} ${geistMono.variable} dark h-full antialiased`}
       suppressHydrationWarning
     >
       <head>
@@ -52,6 +62,13 @@ export default function RootLayout({
       </head>
       <body className="min-h-full flex flex-col">
         <ThemeInit />
+        {/* Mounted once here (not per-page inside NavBar) so it never
+            unmounts/remounts — and its open-section state never resets —
+            on navigation between pages that don't share a layout. */}
+        <Sidebar />
+        {/* Mounted once here (not per-page) so the ₹1000 P&L-move poll runs
+            continuously across navigation, same rationale as <Sidebar /> above. */}
+        <PnlAlertModal />
         <TooltipProvider>{children}</TooltipProvider>
       </body>
     </html>

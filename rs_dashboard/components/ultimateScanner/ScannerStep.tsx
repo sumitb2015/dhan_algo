@@ -43,6 +43,7 @@ const STRATEGY_OPTIONS: { id: StrategyType; label: string; desc: string }[] = [
   { id: 'bull_put_spread', label: 'Bull Put Spread', desc: 'Credit Put Spread for bullish/neutral support' },
   { id: 'bear_call_spread', label: 'Bear Call Spread', desc: 'Credit Call Spread for bearish/neutral resistance' },
   { id: 'iron_condor', label: 'Iron Condor', desc: '4-leg range-bound market neutral setup' },
+  { id: 'batman', label: 'Batman', desc: '4-leg double ratio spread with dual profit peaks (ears)' },
   { id: 'short_straddle', label: 'Short Straddle', desc: 'ATM Call & Put sell for max premium collection' },
   { id: 'jade_lizard', label: 'Jade Lizard', desc: 'Bull Put + Bear Call Spread with zero upside risk' },
   { id: 'naked_put', label: 'Naked Put / CSP', desc: 'Cash Secured Put for strong support bounces' },
@@ -678,7 +679,7 @@ export default function ScannerStep({
                               leg.side === 'SELL' ? 'bg-red-500/20 text-red-400' : 'bg-emerald-500/20 text-emerald-400'
                             }`}
                           >
-                            {leg.side}
+                            {leg.side} {leg.lots > 1 ? `${leg.lots}x` : ''}
                           </span>
                           <span className="text-white font-bold">{leg.strike}</span>
                           <span className={leg.option === 'CE' ? 'text-emerald-400' : 'text-red-400'}>
@@ -775,7 +776,7 @@ export default function ScannerStep({
                     <td className="py-3 px-3">{strat.underlying}</td>
                     <td className="py-3 px-3 font-mono">{strat.expiry}</td>
                     <td className="py-3 px-3 font-mono">
-                      {strat.legs.map(l => `${l.side}${l.strike}${l.option}`).join(' / ')}
+                      {strat.legs.map(l => `${l.lots > 1 ? `${l.lots}x ` : ''}${l.side}${l.strike}${l.option}`).join(' / ')}
                     </td>
                     <td className="py-3 px-3 text-right font-bold text-emerald-400 tabular-nums">
                       ₹{strat.netPremium.toLocaleString('en-IN')}

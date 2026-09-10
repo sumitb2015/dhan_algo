@@ -7,6 +7,7 @@ import { StranglePanel } from '@/components/StranglePanel';
 import { StrategyPanel } from '@/components/StrategyPanel';
 import { PanelStyles } from '@/components/PanelStyles';
 import { type ChartUnderlying } from '@/lib/underlyings';
+import NavBar from './NavBar';
 
 const LAYOUTS = [1, 2] as const;
 type LayoutCount = (typeof LAYOUTS)[number];
@@ -132,6 +133,10 @@ export default function LiveOptionsChartsPage() {
           <h1 className="lc-header-title">
             Live <span className="lc-header-accent">{SPREAD_LABELS[spreadType]}</span> Chart
           </h1>
+          <div className="lc-header-controls">
+            <span className="lc-header-divider" />
+            <NavBar />
+          </div>
           <div className="lc-header-glow" aria-hidden="true" />
         </header>
 
@@ -173,7 +178,7 @@ export default function LiveOptionsChartsPage() {
         /* ── Page shell ─────────────────────────────────────────────── */
         .lc-page {
           display: flex;
-          height: calc(100vh - var(--navbar-height, 40px));
+          height: 100vh;
           background: #080b14;
           color: #e2e8f0;
           font-family: 'Inter', 'Geist', system-ui, sans-serif;
@@ -412,6 +417,10 @@ export default function LiveOptionsChartsPage() {
         .lc-header {
           position: relative;
           flex-shrink: 0;
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          gap: 12px;
           padding: 10px 16px 8px;
           background: linear-gradient(135deg, rgba(49, 46, 129, 0.4) 0%, rgba(88, 28, 135, 0.25) 50%, rgba(8, 11, 20, 0) 100%);
           border-bottom: 1px solid rgba(99, 102, 241, 0.15);
@@ -449,6 +458,26 @@ export default function LiveOptionsChartsPage() {
           -webkit-background-clip: text;
           -webkit-text-fill-color: transparent;
           background-clip: text;
+        }
+
+        .lc-header-controls {
+          position: relative;
+          z-index: 1;
+          display: flex;
+          align-items: center;
+          gap: 8px;
+          flex-shrink: 0;
+        }
+
+        .lc-header-divider {
+          width: 1px;
+          height: 20px;
+          background: rgba(255, 255, 255, 0.12);
+          flex-shrink: 0;
+        }
+
+        :root:not(.dark) .lc-header-divider {
+          background: #e2e8f0;
         }
 
         .lc-header-glow {

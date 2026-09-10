@@ -2,11 +2,10 @@ import { NextRequest, NextResponse } from 'next/server';
 import path from 'path';
 import fs from 'fs';
 import { spawn } from 'child_process';
-import { PROJECT_ROOT } from '@/lib/pyExec';
+import { PROJECT_ROOT, PYTHON_EXE } from '@/lib/pyExec';
 import { isPidRunning } from '@/lib/processCheck';
 
 const DEBUG_DIR    = path.join(PROJECT_ROOT, 'debug');
-const PYTHON_EXE   = path.join(PROJECT_ROOT, 'venv', 'Scripts', 'pythonw.exe');
 const SCRIPT       = path.join(PROJECT_ROOT, 'scripts', 'tools', 'csp_scanner.py');
 const STATUS_FILE  = path.join(DEBUG_DIR, 'csp_scan_status.json');
 const RESULTS_FILE = path.join(DEBUG_DIR, 'csp_scan_results.json');

@@ -3,10 +3,10 @@ import path from 'path';
 import fs from 'fs';
 import { spawn } from 'child_process';
 import { isPidRunning } from '@/lib/processCheck';
+import { PYTHON_EXE } from '@/lib/pyExec';
 
 const PROJECT_ROOT = path.resolve(process.cwd(), '..');
 const DEBUG_DIR    = path.join(PROJECT_ROOT, 'debug');
-const PYTHON_EXE   = path.join(PROJECT_ROOT, 'venv', 'Scripts', 'pythonw.exe');
 const SCRIPT_PATH  = path.join(PROJECT_ROOT, 'scripts', 'downloader', 'download_futures_manual.py');
 const STATUS_FILE  = path.join(DEBUG_DIR, 'futures_refresh_status.json');
 

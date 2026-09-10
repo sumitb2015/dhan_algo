@@ -21,40 +21,39 @@ function formatOIChange(val: number): string {
 }
 
 export default function OIChangeProfileChart({ strikes, atmStrike }: Props) {
-  // Find maximum absolute OI change across strikes for scaling
-  const maxAbsChange = Math.max(
-    ...strikes.flatMap((s) => [Math.abs(s.ce_oi_change), Math.abs(s.pe_oi_change)]),
-    1
-  );
+  // Net delta OI per strike: call OI change minus put OI change. Positive means
+  // calls are building (or puts unwinding) faster than the reverse — net bullish
+  // positioning pressure at that strike; negative is the mirror (net bearish).
+  const netDeltas = strikes.map((s) => s.ce_oi_change - s.pe_oi_change);
+  const maxAbsDelta = Math.max(...netDeltas.map((d) => Math.abs(d)), 1);
 
   return (
     <div className="w-full h-full flex flex-col bg-zinc-950/80 border border-zinc-800/80 rounded-xl p-3 shadow-inner overflow-hidden">
       {/* Header */}
       <div className="flex items-center justify-between pb-2 border-b border-zinc-800/60 mb-2">
         <div className="flex items-center gap-2">
-          <span className="font-bold text-zinc-100 text-xs tracking-wide">Daily OI Change</span>
-          <span className="text-[10px] text-zinc-400 font-mono">Positioning</span>
+          <span className="font-bold text-zinc-100 text-xs tracking-wide">Net Delta OI</span>
+          <span className="text-[10px] text-zinc-400 font-mono" title="Net Δ = Call OI Chg − Put OI Chg">
+            CE Chg − PE Chg
+          </span>
         </div>
         <div className="flex items-center gap-3 text-[10px] font-semibold">
           <span className="flex items-center gap-1 text-emerald-400">
-            <span className="w-2 h-2 rounded-full bg-emerald-400 inline-block" /> CE Chg (Left)
+            <span className="w-2 h-2 rounded-full bg-emerald-400 inline-block" /> Net Call Buildup
           </span>
           <span className="flex items-center gap-1 text-rose-400">
-            <span className="w-2 h-2 rounded-full bg-rose-400 inline-block" /> PE Chg (Right)
+            <span className="w-2 h-2 rounded-full bg-rose-400 inline-block" /> Net Put Buildup
           </span>
         </div>
       </div>
 
       {/* Strike Rows Container */}
       <div className="flex-1 overflow-y-auto space-y-1.5 pr-1 scrollbar-thin scrollbar-thumb-zinc-800">
-        {strikes.map((row) => {
+        {strikes.map((row, idx) => {
           const isATM = row.strike === atmStrike;
-
-          const cePct = Math.min(100, Math.max(0, (Math.abs(row.ce_oi_change) / maxAbsChange) * 100));
-          const pePct = Math.min(100, Math.max(0, (Math.abs(row.pe_oi_change) / maxAbsChange) * 100));
-
-          const ceIsPositive = row.ce_oi_change >= 0;
-          const peIsPositive = row.pe_oi_change >= 0;
+          const netDelta = netDeltas[idx];
+          const isPositive = netDelta >= 0;
+          const pct = Math.min(100, (Math.abs(netDelta) / maxAbsDelta) * 100);
 
           return (
             <div
@@ -65,28 +64,7 @@ export default function OIChangeProfileChart({ strikes, atmStrike }: Props) {
                   : 'hover:bg-zinc-900/80 text-zinc-300'
               }`}
             >
-              {/* LEFT COLUMN: Call OI Change (Green / Unwinding Slate) */}
-              <div className="col-span-5 flex items-center justify-end gap-1.5 h-5 relative">
-                <span
-                  className={`text-[10px] font-mono z-10 select-none ${
-                    ceIsPositive ? 'text-emerald-400' : 'text-slate-400'
-                  }`}
-                >
-                  {formatOIChange(row.ce_oi_change)}
-                </span>
-                <div className="w-full bg-zinc-900/60 rounded h-3.5 flex justify-end overflow-hidden relative">
-                  <div
-                    className={`h-full rounded-l transition-all duration-300 ${
-                      ceIsPositive
-                        ? 'bg-emerald-500/90'
-                        : 'bg-slate-500/60 opacity-80 border-r border-emerald-400/40'
-                    }`}
-                    style={{ width: `${cePct}%` }}
-                  />
-                </div>
-              </div>
-
-              {/* CENTER COLUMN: Strike Price */}
+              {/* LEFT COLUMN: Strike Price */}
               <div className="col-span-2 text-center font-bold text-[11px] relative flex items-center justify-center">
                 <span
                   className={`px-1 rounded ${
@@ -99,24 +77,32 @@ export default function OIChangeProfileChart({ strikes, atmStrike }: Props) {
                 </span>
               </div>
 
-              {/* RIGHT COLUMN: Put OI Change (Red / Unwinding Slate) */}
-              <div className="col-span-5 flex items-center justify-start gap-1.5 h-5 relative">
-                <div className="w-full bg-zinc-900/60 rounded h-3.5 flex justify-start overflow-hidden relative">
-                  <div
-                    className={`h-full rounded-r transition-all duration-300 ${
-                      peIsPositive
-                        ? 'bg-rose-500/90'
-                        : 'bg-slate-500/60 opacity-80 border-l border-rose-400/40'
-                    }`}
-                    style={{ width: `${pePct}%` }}
-                  />
+              {/* CENTER COLUMN: Bidirectional net delta bar, diverging from a center line */}
+              <div className="col-span-7 h-3.5 relative">
+                <div className="absolute inset-0 bg-zinc-900/60 rounded overflow-hidden">
+                  <div className="absolute left-1/2 top-0 bottom-0 w-px bg-zinc-700" />
+                  {isPositive ? (
+                    <div
+                      className="absolute top-0 bottom-0 left-1/2 rounded-r bg-emerald-500/90"
+                      style={{ width: `${pct / 2}%` }}
+                    />
+                  ) : (
+                    <div
+                      className="absolute top-0 bottom-0 right-1/2 rounded-l bg-rose-500/90"
+                      style={{ width: `${pct / 2}%` }}
+                    />
+                  )}
                 </div>
+              </div>
+
+              {/* RIGHT COLUMN: Net delta value */}
+              <div className="col-span-3 flex items-center justify-end">
                 <span
-                  className={`text-[10px] font-mono z-10 select-none ${
-                    peIsPositive ? 'text-rose-400' : 'text-slate-400'
+                  className={`text-[10px] font-mono z-10 select-none font-semibold ${
+                    isPositive ? 'text-emerald-400' : 'text-rose-400'
                   }`}
                 >
-                  {formatOIChange(row.pe_oi_change)}
+                  {formatOIChange(netDelta)}
                 </span>
               </div>
             </div>

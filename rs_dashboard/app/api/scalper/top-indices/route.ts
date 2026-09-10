@@ -1,6 +1,5 @@
 import { NextResponse } from 'next/server';
 import { getDhanCredentials } from '@/lib/dhanToken';
-import { kiteGet } from '@/lib/zerodhaToken';
 import path from 'path';
 import { dedupe, runPythonJson, PROJECT_ROOT } from '@/lib/pyExec';
 
@@ -19,28 +18,34 @@ const OPTIONS_FETCH = path.join(PROJECT_ROOT, 'scripts', 'tools', 'options_data_
 // returns last_price and ohlc.close together for a whole batch in one call,
 // which is exactly what's needed.
 //
-// Kite is the PRIMARY source, which is not the obvious choice (Dhan is the
-// default broker) but is the only correct one. Two behaviours measured on
-// 2026-07-30 decide it:
+// Dhan is the ONLY source — Zerodha/Kite must never be used for market-data
+// ingestion here (Dhan is the account of record for every calculation in this
+// dashboard; Kite was previously used as a primary source for this panel, but
+// that made every number on it depend on a second broker's session being
+// alive). The two Dhan quirks that previously motivated a Kite fallback are
+// handled directly instead:
 //
 //  1. Dhan's `ohlc.close` flips from yesterday's close to TODAY's close the
-//     moment the 15:30 bell rings. At 14:5x NIFTY read close=24250.20 (correct,
-//     yesterday) giving +0.19%; at 15:36 the same field read 24317.15 — equal to
-//     the last price — collapsing every row to 0.00%. Kite's `ohlc.close` stayed
-//     on 24250.20 and kept reporting the true +0.28%.
+//     moment the 15:30 bell rings (measured 2026-07-30: at 14:5x NIFTY read
+//     close=24250.20, correct; at 15:36 the same field read 24317.15 — equal
+//     to the last price). Handled by `rejectFlippedClose` plus `prevCloseCache`:
+//     a genuine close captured earlier in the session (or before 09:15, when
+//     `ltp === close` is expected rather than a flip) is cached and reused for
+//     the rest of the day, so a later flip can't overwrite it with a blank.
+//     If nothing was ever cached today (e.g. the server started after 15:30),
+//     `close` is unrecoverable — the flip already happened — so `fromDhan`
+//     falls back to the daily-candle endpoint (`fetchLatestPrevClose`) for
+//     yesterday's genuine close instead of N/A.
 //  2. Dhan answers BSE_IDX with HTTP 200 but an EMPTY data object for this
-//     account, so it cannot serve SENSEX at all. Kite returns it as BSE:SENSEX.
+//     account, so it cannot serve SENSEX — SENSEX is simply not in the row
+//     list below (dropped in favour of MCX crude oil).
 //
-// So Kite serves last_price + prev close for all ten rows in one call, correct
-// both during and after the session. Dhan remains a fallback for last_price
-// only, guarded by explicit flip-detection (see rejectFlippedClose) so a
-// post-close Dhan `close` can never be passed off as yesterday's.
-//
-// Yesterday's close changes once per trading day, so it is additionally cached
-// per IST date: if Kite answered at any point today, a later Kite outage still
-// yields correct percentages rather than blank ones.
+// Yesterday's close changes once per trading day, so it is cached per IST
+// date: once a genuine value is captured, a later same-day flip still yields
+// a correct percentage rather than a blank one.
 
 const DHAN_OHLC_URL = 'https://api.dhan.co/v2/marketfeed/ohlc';
+const DHAN_HISTORICAL_URL = 'https://api.dhan.co/v2/charts/historical';
 
 interface IndexDef {
   /** Stable key used by the UI. */
@@ -48,8 +53,6 @@ interface IndexDef {
   label: string;
   /** Dhan security id; null when it must be resolved at runtime (rolling futures). */
   dhanSid: number | null;
-  /** Kite instrument string. Empty when Kite cannot serve this row. */
-  kiteSymbol: string;
   /** Dhan segment. MCX_COMM rows are commodity futures, not indices. */
   segment?: 'IDX_I' | 'MCX_COMM';
   /** Underlying to resolve a nearest-future security id for, via `futsid`. */
@@ -62,21 +65,18 @@ interface IndexDef {
 // SENSEX was removed in favour of MCX crude oil. Note the panel is therefore no
 // longer purely indices — CRUDEOIL is the nearest MCX futures contract.
 const INDICES: IndexDef[] = [
-  { key: 'NIFTY',     label: 'Nifty 50',     dhanSid: 13, kiteSymbol: 'NSE:NIFTY 50' },
-  { key: 'BANKNIFTY', label: 'Bank Nifty',   dhanSid: 25, kiteSymbol: 'NSE:NIFTY BANK' },
-  { key: 'FINNIFTY',  label: 'Fin Services', dhanSid: 27, kiteSymbol: 'NSE:NIFTY FIN SERVICE' },
-  { key: 'IT',        label: 'IT',           dhanSid: 29, kiteSymbol: 'NSE:NIFTY IT' },
-  { key: 'AUTO',      label: 'Auto',         dhanSid: 14, kiteSymbol: 'NSE:NIFTY AUTO' },
-  { key: 'PHARMA',    label: 'Pharma',       dhanSid: 32, kiteSymbol: 'NSE:NIFTY PHARMA' },
-  { key: 'METAL',     label: 'Metal',        dhanSid: 31, kiteSymbol: 'NSE:NIFTY METAL' },
-  { key: 'REALTY',    label: 'Realty',       dhanSid: 34, kiteSymbol: 'NSE:NIFTY REALTY' },
-  { key: 'VIX',       label: 'India VIX',    dhanSid: 21, kiteSymbol: 'NSE:INDIA VIX' },
+  { key: 'NIFTY',     label: 'Nifty 50',     dhanSid: 13 },
+  { key: 'BANKNIFTY', label: 'Bank Nifty',   dhanSid: 25 },
+  { key: 'FINNIFTY',  label: 'Fin Services', dhanSid: 27 },
+  { key: 'IT',        label: 'IT',           dhanSid: 29 },
+  { key: 'AUTO',      label: 'Auto',         dhanSid: 14 },
+  { key: 'PHARMA',    label: 'Pharma',       dhanSid: 32 },
+  { key: 'METAL',     label: 'Metal',        dhanSid: 31 },
+  { key: 'REALTY',    label: 'Realty',       dhanSid: 34 },
+  { key: 'VIX',       label: 'India VIX',    dhanSid: 21 },
   // Crude has no spot index and its contract ROLLS MONTHLY, so the security id
-  // cannot be hardcoded — it is resolved once per IST day (see crudeSid below).
-  // Kite is skipped for this row: its MCX tradingsymbol embeds the expiry
-  // (MCX:CRUDEOIL25AUGFUT), which would need an instruments dump to build, so
-  // Dhan serves it directly from the MCX_COMM segment instead.
-  { key: 'CRUDEOIL',  label: 'Crude Oil',    dhanSid: null, kiteSymbol: '',
+  // cannot be hardcoded — it is resolved once per IST day (see getFutSid below).
+  { key: 'CRUDEOIL',  label: 'Crude Oil',    dhanSid: null,
     segment: 'MCX_COMM', futUnderlying: 'CRUDEOIL' },
 ];
 
@@ -176,9 +176,45 @@ function prunePrevCloseCache(day: string): void {
  * reported as unknown instead. It only arises on the Dhan fallback path with no
  * cached close for the day, and it errs toward "unknown" rather than a wrong
  * number, which is the direction to err on an order-entry screen.
+ *
+ * Before today's 15:30 bell, `close` still holds whatever the LAST flip wrote
+ * — which is exactly yesterday's close, whether that's being read mid-session
+ * (LTP has since moved away from it) or before market open (LTP hasn't moved
+ * yet, so `ltp === close` is the EXPECTED state, not a flip artifact). Applying
+ * the equality check pre-market rejected a correct prev_close as "flipped" on
+ * every call before 09:15 whenever Dhan alone was serving the panel, zeroing
+ * out % change for every row. So `close` is trusted unconditionally any time
+ * before 15:30 today; the equality check only guards the window from the bell
+ * itself onward, when `close` has just flipped to today's own value.
  */
-function rejectFlippedClose(ltp: number, close: number): number {
-  return close > 0 && close !== ltp ? close : 0;
+function rejectFlippedClose(ltp: number, close: number, istMinutes: number = istMinutesOfDay()): number {
+  if (close <= 0) return 0;
+  if (istMinutes < MARKET_CLOSE_IST_MIN) return close;
+  return close !== ltp ? close : 0;
+}
+
+function istMinutesOfDay(): number {
+  const hhmm = new Date().toLocaleTimeString('en-GB', {
+    timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit', hour12: false,
+  });
+  const [h, m] = hhmm.split(':').map(Number);
+  return h * 60 + m;
+}
+
+const MARKET_CLOSE_IST_MIN = 15 * 60 + 30;
+// NSE cash/index session opens 09:15 IST. Before this, there is no "today" to
+// compare against — see fromDhanPrevSessionChange for what's shown instead.
+const MARKET_OPEN_IST_MIN = 9 * 60 + 15;
+
+/** Resolve each def to a concrete Dhan security id + segment, dropping any
+ *  rolling-futures row whose id hasn't been resolved yet. */
+function resolveSids(defs: IndexDef[]): { def: IndexDef; sid: number; segment: string }[] {
+  const resolved: { def: IndexDef; sid: number; segment: string }[] = [];
+  for (const def of defs) {
+    const sid = def.dhanSid ?? getFutSid(def);
+    if (sid) resolved.push({ def, sid, segment: def.segment ?? 'IDX_I' });
+  }
+  return resolved;
 }
 
 function mkQuote(ltp: number, prevClose: number, source: string): Quote | null {
@@ -190,34 +226,7 @@ function mkQuote(ltp: number, prevClose: number, source: string): Quote | null {
 }
 
 /**
- * Kite: last_price + yesterday's close for every row, in one request.
- * Correct both during and after the session — the primary source.
- */
-async function fromKite(defs: IndexDef[]): Promise<Record<string, Quote>> {
-  const out: Record<string, Quote> = {};
-  if (defs.length === 0) return out;
-
-  const qs = defs.map(d => `i=${encodeURIComponent(d.kiteSymbol)}`).join('&');
-  const data = (await kiteGet(`/quote/ohlc?${qs}`)) as
-    Record<string, { last_price?: number; ohlc?: { close?: number } }>;
-
-  const day = istToday();
-  prunePrevCloseCache(day);
-  for (const def of defs) {
-    const row = data?.[def.kiteSymbol];
-    if (!row) continue;
-    const ltp = Number(row.last_price ?? 0);
-    const close = Number(row.ohlc?.close ?? 0);
-    if (close > 0) prevCloseCache.set(`${day}:${def.key}`, close);
-    const q = mkQuote(ltp, close, 'kite');
-    if (q) out[def.key] = q;
-  }
-  return out;
-}
-
-/**
- * Dhan: last_price only, for the NSE rows. Fallback when Kite is unavailable
- * (its token expires daily around 06:00 IST).
+ * Dhan: last_price + prev close for every row, in one request.
  *
  * Prefers a prev close cached earlier today; otherwise falls back to Dhan's own
  * `close` but only after flip-detection, so a post-close value is dropped rather
@@ -227,16 +236,15 @@ async function fromDhan(wanted: IndexDef[]): Promise<Record<string, Quote>> {
   const out: Record<string, Quote> = {};
   if (wanted.length === 0) return out;
 
+  const day = istToday();
+  prunePrevCloseCache(day);
+
   const { clientId, token } = getDhanCredentials();
   if (!token) return out;
 
   // Resolve any rolling-futures ids first, then group by segment: Dhan's OHLC
   // endpoint takes several segments in ONE request, so crude costs no extra call.
-  const resolved: { def: IndexDef; sid: number; segment: string }[] = [];
-  for (const def of wanted) {
-    const sid = def.dhanSid ?? getFutSid(def);
-    if (sid) resolved.push({ def, sid, segment: def.segment ?? 'IDX_I' });
-  }
+  const resolved = resolveSids(wanted);
   if (resolved.length === 0) return out;
 
   const body: Record<string, number[]> = {};
@@ -266,19 +274,185 @@ async function fromDhan(wanted: IndexDef[]): Promise<Record<string, Quote>> {
     throw new Error(`ohlc ${res.status}: ${JSON.stringify(json.Data ?? json.status).slice(0, 120)}`);
   }
 
-  const day = istToday();
+  const nowMin = istMinutesOfDay();
+
   for (const { def, sid, segment } of resolved) {
     const row = json.data?.[segment]?.[String(sid)];
     if (!row) continue;
     const ltp = Number(row.last_price ?? 0);
     const cached = prevCloseCache.get(`${day}:${def.key}`);
-    const fresh = rejectFlippedClose(ltp, Number(row.ohlc?.close ?? 0));
+    const fresh = rejectFlippedClose(ltp, Number(row.ohlc?.close ?? 0), nowMin);
+    let prev = cached ?? fresh;
+    let source = cached ? 'dhan+cache' : 'dhan';
+
+    // Post-close with nothing cached from earlier today (e.g. the server was
+    // only started after 15:30): `close` now holds TODAY's close — the flip
+    // already happened — so no reading of it can recover yesterday's value.
+    // Fall back to the same daily-candle source `fromDhanPrevSessionChange`
+    // uses pre-market (see `fetchLatestPrevClose` for why this needs a
+    // different row-selection rule than that function).
+    if (prev === 0 && nowMin >= MARKET_CLOSE_IST_MIN) {
+      try {
+        const instrument = segment === 'MCX_COMM' ? 'FUTCOM' : 'INDEX';
+        const prevClose = await fetchLatestPrevClose(sid, segment, instrument, day);
+        if (prevClose) {
+          prev = prevClose;
+          source = 'dhan-prevsession';
+        }
+      } catch {
+        // Leave prev at 0 — mkQuote reports change_pct: null, the honest outcome.
+      }
+      await new Promise(r => setTimeout(r, HISTORICAL_STAGGER_MS));
+    }
+
     // Cache a genuine close so a later flip (or an MCX session that runs past
     // the NSE bell) still yields a correct percentage rather than a blank one.
-    if (!cached && fresh > 0) prevCloseCache.set(`${day}:${def.key}`, fresh);
-    const prev = cached ?? fresh;
-    const q = mkQuote(ltp, prev, cached ? 'dhan+cache' : 'dhan');
+    if (!cached && prev > 0) prevCloseCache.set(`${day}:${def.key}`, prev);
+    const q = mkQuote(ltp, prev, source);
     if (q) out[def.key] = q;
+  }
+  return out;
+}
+
+// Previous-session % change, keyed "<IST date>:<index key>". Computed once
+// pre-market and reused for the rest of the pre-market window — the value it
+// answers ("how did yesterday's session close vs the one before") cannot
+// change again until tomorrow, so there is no reason to re-fetch it on every
+// poll of a panel that gets hit every few seconds.
+const prevDayChangeCache = new Map<string, Quote>();
+
+function prunePrevDayChangeCache(day: string): void {
+  for (const key of prevDayChangeCache.keys()) {
+    if (!key.startsWith(`${day}:`)) prevDayChangeCache.delete(key);
+  }
+}
+
+// Wide enough to survive the longest realistic NSE/MCX gap (a long weekend
+// butted up against a holiday) while staying a small, fast request.
+const LOOKBACK_DAYS = 12;
+// Dhan's ~1 req/s guidance applies to the batched OHLC endpoint under
+// continuous polling; this path runs once a day (cached below) but still
+// issues one historical request per row, so a small stagger avoids bursting
+// nine requests in the same instant.
+const HISTORICAL_STAGGER_MS = 150;
+
+/**
+ * Fetches daily-candle closes for the last `LOOKBACK_DAYS` calendar days, as
+ * {date, close} rows in IST-date order (oldest first). Dhan's daily-candle
+ * endpoint only ever returns rows for days the exchange actually traded, so
+ * callers get weekend/holiday skipping for free — no local calendar needed.
+ */
+async function fetchDailyCloses(
+  sid: number, segment: string, instrument: string,
+): Promise<{ date: string; close: number }[] | null> {
+  const { clientId, token } = getDhanCredentials();
+  if (!token) return null;
+
+  const to = new Date();
+  const from = new Date(to);
+  from.setDate(from.getDate() - LOOKBACK_DAYS);
+  const fmt = (d: Date) => d.toISOString().slice(0, 10);
+
+  const res = await fetch(DHAN_HISTORICAL_URL, {
+    method: 'POST',
+    headers: {
+      'access-token': token,
+      'client-id': clientId,
+      'Content-Type': 'application/json',
+      Accept: 'application/json',
+    },
+    body: JSON.stringify({
+      securityId: String(sid),
+      exchangeSegment: segment,
+      instrument,
+      oi: false,
+      fromDate: fmt(from),
+      toDate: fmt(to),
+    }),
+    signal: AbortSignal.timeout(8000),
+  });
+  const json = (await res.json()) as { close?: number[]; timestamp?: number[]; remarks?: unknown };
+  const closes = json.close ?? [];
+  const timestamps = json.timestamp ?? [];
+  if (closes.length === 0 || closes.length !== timestamps.length) return null;
+
+  return timestamps.map((ts, i) => ({
+    date: new Date(ts * 1000).toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' }),
+    close: closes[i],
+  }));
+}
+
+/**
+ * Before 09:15 IST there is no "today" yet — `fromDhan`'s live LTP still
+ * mirrors yesterday's close (nothing has traded), so its % change is a
+ * mathematically correct but useless 0.00% for every row. Pre-market, show
+ * something informative instead: yesterday's full-session move against the
+ * trading day before it (e.g. Friday vs Thursday across a weekend, or across
+ * a holiday).
+ */
+async function fetchPrevSessionChange(
+  sid: number, segment: string, instrument: string, today: string,
+): Promise<{ ltp: number; prevClose: number } | null> {
+  // Same-day row filtered out: this call site only makes sense over
+  // COMPLETED sessions strictly before today (not observed pre-market, but
+  // guarded regardless — see fetchLatestPrevClose for the post-close case,
+  // where today's own row, once Dhan publishes it, is exactly what's wanted).
+  const rows = (await fetchDailyCloses(sid, segment, instrument))?.filter(r => r.date < today);
+  if (!rows || rows.length < 2) return null;
+  const last = rows[rows.length - 1];
+  const prev = rows[rows.length - 2];
+  return last.close > 0 && prev.close > 0 ? { ltp: last.close, prevClose: prev.close } : null;
+}
+
+/**
+ * Yesterday's close for `fromDhan`'s post-close fallback.
+ *
+ * Verified 2026-09-10: Dhan's daily candle for TODAY is not published at the
+ * close bell — still absent from this endpoint at 20:17 IST, ~5h after close.
+ * So the most recent row strictly before today already IS the correct
+ * prevClose; no "last two rows" comparison is needed here (unlike
+ * `fetchPrevSessionChange` above, this call site already has a genuine live
+ * `ltp` from the OHLC batch call in `fromDhan` — it only needs one number).
+ */
+async function fetchLatestPrevClose(
+  sid: number, segment: string, instrument: string, today: string,
+): Promise<number | null> {
+  const rows = (await fetchDailyCloses(sid, segment, instrument))?.filter(r => r.date < today);
+  if (!rows || rows.length === 0) return null;
+  const last = rows[rows.length - 1];
+  return last.close > 0 ? last.close : null;
+}
+
+async function fromDhanPrevSessionChange(wanted: IndexDef[]): Promise<Record<string, Quote>> {
+  const out: Record<string, Quote> = {};
+  if (wanted.length === 0) return out;
+
+  const day = istToday();
+  prunePrevDayChangeCache(day);
+
+  const resolved = resolveSids(wanted);
+  for (const { def, sid, segment } of resolved) {
+    const cacheKey = `${day}:${def.key}`;
+    const cached = prevDayChangeCache.get(cacheKey);
+    if (cached) {
+      out[def.key] = cached;
+      continue;
+    }
+    try {
+      const instrument = segment === 'MCX_COMM' ? 'FUTCOM' : 'INDEX';
+      const change = await fetchPrevSessionChange(sid, segment, instrument, day);
+      if (change) {
+        const q = mkQuote(change.ltp, change.prevClose, 'dhan-prevsession');
+        if (q) {
+          prevDayChangeCache.set(cacheKey, q);
+          out[def.key] = q;
+        }
+      }
+    } catch {
+      // Leave this row out — GET() below has no per-row error channel, and a
+      // missing row (rather than a stale/wrong one) is the honest outcome.
+    }
+    await new Promise(r => setTimeout(r, HISTORICAL_STAGGER_MS));
   }
   return out;
 }
@@ -290,27 +464,12 @@ export async function GET() {
 
   const errors: string[] = [];
   let quotes: Record<string, Quote> = {};
+  const preMarket = istMinutesOfDay() < MARKET_OPEN_IST_MIN;
 
   try {
-    // Rows with no Kite symbol (crude) are excluded — asking Kite for an empty
-    // instrument string makes it reject the whole batch, blanking all ten rows.
-    quotes = await fromKite(INDICES.filter(d => d.kiteSymbol));
+    quotes = preMarket ? await fromDhanPrevSessionChange(INDICES) : await fromDhan(INDICES);
   } catch (e) {
-    errors.push(`kite: ${String(e).slice(0, 120)}`);
-  }
-
-  // Dhan serves whatever Kite could not — normally just crude, so this is one
-  // extra call rather than a fallback for the whole panel.
-  const missing = INDICES.filter(d => !quotes[d.key]);
-  if (missing.length > 0) {
-    try {
-      const dhan = await fromDhan(missing);
-      for (const def of missing) {
-        if (dhan[def.key]) quotes[def.key] = dhan[def.key];
-      }
-    } catch (e) {
-      errors.push(`dhan: ${String(e).slice(0, 120)}`);
-    }
+    errors.push(`dhan: ${String(e).slice(0, 120)}`);
   }
 
   const body = {

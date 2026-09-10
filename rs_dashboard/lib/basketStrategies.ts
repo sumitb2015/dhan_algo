@@ -53,9 +53,19 @@ export const STRATEGY_CATEGORIES: Record<StrategyCategory, StrategyTemplate[]> =
       { side: 'S', option: 'CE', offset: 3, ratio: 1 }, { side: 'B', option: 'CE', offset: 6, ratio: 1 },
       { side: 'S', option: 'PE', offset: -3, ratio: 1 }, { side: 'B', option: 'PE', offset: -6, ratio: 1 },
     ] },
+    { key: 'batman',            name: 'Batman',                 legs: [
+      { side: 'B', option: 'CE', offset: 2, ratio: 1 }, { side: 'S', option: 'CE', offset: 4, ratio: 2 },
+      { side: 'B', option: 'PE', offset: -2, ratio: 1 }, { side: 'S', option: 'PE', offset: -4, ratio: 2 },
+    ] },
     { key: 'iron-butterfly',    name: 'Iron Butterfly',         legs: [
       { side: 'S', option: 'CE', offset: 0, ratio: 1 }, { side: 'B', option: 'CE', offset: 4, ratio: 1 },
       { side: 'S', option: 'PE', offset: 0, ratio: 1 }, { side: 'B', option: 'PE', offset: -4, ratio: 1 },
+    ] },
+    { key: 'call-butterfly',    name: 'Call Butterfly',         legs: [
+      { side: 'B', option: 'CE', offset: -4, ratio: 1 }, { side: 'S', option: 'CE', offset: 0, ratio: 2 }, { side: 'B', option: 'CE', offset: 4, ratio: 1 },
+    ] },
+    { key: 'put-butterfly',     name: 'Put Butterfly',          legs: [
+      { side: 'B', option: 'PE', offset: 4, ratio: 1 }, { side: 'S', option: 'PE', offset: 0, ratio: 2 }, { side: 'B', option: 'PE', offset: -4, ratio: 1 },
     ] },
   ],
   'Big Move': [
@@ -146,8 +156,10 @@ export interface PayoffResult {
   maxLoss: number;          // negative number; ignored when maxLossUnlimited
   maxProfitUnlimited: boolean;
   maxLossUnlimited: boolean;
-  /** Direction in which the displayed curve continues beyond the right edge. */
+  /** Direction in which the displayed curve continues beyond the right edge (upside). */
   rightWing: 'profit' | 'loss' | null;
+  /** Direction in which the displayed curve continues beyond the left edge (downside). Never 'profit' — a net long put's profit is capped because spot can't go below 0, so there's no downside-unlimited-profit case. */
+  leftWing: 'loss' | null;
   netPremium: number;       // >0 net credit received, <0 net debit paid (total ₹)
 }
 
@@ -171,30 +183,46 @@ export function computePayoff(legs: PayoffLeg[], lo: number, hi: number, samples
     }
   }
 
-  // Beyond the outermost strike the curve is linear. The underlying cannot
-  // trade below zero, so the left wing is always bounded at x=0; only the
-  // right wing can be genuinely unlimited.
+  // "Unlimited" is a position fact, not a curve-shape guess: derive it from net
+  // signed quantity per option type, not from the sampled curve's slope (which
+  // is always finite by construction and would silently report a bounded number
+  // for a naked short). Positive = net short that option type.
+  const netCallQty = legs.filter(l => l.option === 'CE').reduce((s, l) => s + (l.side === 'S' ? l.qty : -l.qty), 0);
+  const netPutQty  = legs.filter(l => l.option === 'PE').reduce((s, l) => s + (l.side === 'S' ? l.qty : -l.qty), 0);
+
+  const upsideUnlimitedLoss    = netCallQty > 0;
+  const upsideUnlimitedProfit  = netCallQty < 0;
+  // The underlying's floor is 0, so a net long put's profit is capped — there is
+  // no downside-unlimited-profit case, only downside-unlimited-loss (net short puts).
+  const downsideUnlimitedLoss  = netPutQty > 0;
+
+  const maxProfitUnlimited = upsideUnlimitedProfit;
+  const maxLossUnlimited   = upsideUnlimitedLoss || downsideUnlimitedLoss;
+  const rightWing: 'profit' | 'loss' | null = upsideUnlimitedProfit ? 'profit' : upsideUnlimitedLoss ? 'loss' : null;
+  const leftWing: 'loss' | null = downsideUnlimitedLoss ? 'loss' : null;
+
+  // When a side is bounded (not flagged unlimited above), its true cap sits
+  // beyond the plotted [lo, hi] window — at spot->0 downside, or past the
+  // outermost strike upside (payoff is flat out there) — not just whatever the
+  // sampled points happen to cover. Only pull those boundary values in when
+  // that side isn't already unlimited, so a genuinely unbounded side keeps
+  // reporting Infinity/-Infinity rather than a misleadingly finite number.
   const pnlAt = (x: number) => legs.reduce((sum, l) => sum + legPnlAtExpiry(l, x), 0);
   const strikes = legs.map(l => l.strike);
-  const far = Math.max(hi, ...strikes) * 2 + 1000;
-  const slopeUpWing = pnlAt(far + 1) - pnlAt(far);
-  const upWingPnl = pnlAt(far);
-  // Do not infer the downside endpoint from the plotted range: the actual
-  // lower bound of an index/equity underlying is zero.
-  const downWingPnl = pnlAt(0);
+  const far = strikes.length ? Math.max(hi, ...strikes) * 2 + 1000 : hi;
+  const candidates = points.map(p => p.y);
+  if (!maxProfitUnlimited && !upsideUnlimitedLoss) candidates.push(pnlAt(far));
+  if (!downsideUnlimitedLoss) candidates.push(pnlAt(0));
 
-  let maxProfit = Math.max(...points.map(p => p.y), upWingPnl, downWingPnl);
-  let maxLoss   = Math.min(...points.map(p => p.y), upWingPnl, downWingPnl);
-  const maxProfitUnlimited = slopeUpWing > 1e-9;
-  const maxLossUnlimited   = slopeUpWing < -1e-9;
-  const rightWing = slopeUpWing > 1e-9 ? 'profit' : slopeUpWing < -1e-9 ? 'loss' : null;
+  let maxProfit = Math.max(...candidates);
+  let maxLoss   = Math.min(...candidates);
   if (maxProfitUnlimited) maxProfit = Infinity;
   if (maxLossUnlimited) maxLoss = -Infinity;
 
   const netPremium = legs.reduce((sum, l) =>
     sum + (l.side === 'S' ? l.premium : -l.premium) * l.qty, 0);
 
-  return { points, breakevens, maxProfit, maxLoss, maxProfitUnlimited, maxLossUnlimited, rightWing, netPremium };
+  return { points, breakevens, maxProfit, maxLoss, maxProfitUnlimited, maxLossUnlimited, rightWing, leftWing, netPremium };
 }
 
 /** Nearest listed strike to a target price. */

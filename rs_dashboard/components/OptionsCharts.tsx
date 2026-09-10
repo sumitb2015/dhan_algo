@@ -3,6 +3,7 @@
 import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import Link from 'next/link';
 import { Download } from 'lucide-react';
+import NavBar from './NavBar';
 import { cachedFetch } from '@/lib/clientCache';
 import {
   AreaChart, Area, LineChart, Line, BarChart, Bar, Cell, XAxis, YAxis, CartesianGrid,
@@ -849,6 +850,9 @@ export default function OptionsCharts() {
           )}
 
           {(activeTab === 'premium' || activeTab === 'multistrike' || activeTab === 'pcdiff') && <StatusBadge status={bridgeStatus.status} />}
+
+          <span className="w-px h-5 bg-zinc-800 mx-1 shrink-0" />
+          <NavBar />
         </div>
       </div>
 

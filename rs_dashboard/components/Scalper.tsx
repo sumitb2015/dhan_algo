@@ -10,6 +10,7 @@ import { useBrokerSelector, scalperRoute, BROKER_LABELS, type Broker } from '@/h
 import { contractMultiplier, scaleBrokerPnl } from '@/lib/positionPnl';
 import { partialCloseChips } from '@/lib/partialQty';
 import { positionKey, positionProduct, findLivePosition, closeOrderProduct } from '@/lib/positionProduct';
+import { normalizeExpiry, parseTradingSymbol } from '@/lib/positionLegs';
 import { cn } from '@/lib/utils';
 
 // Visible keyboard-only focus ring for every clickable control on this page and
@@ -368,13 +369,12 @@ export default function Scalper() {
   const spot = liveQuotes?.spot ?? chainSpot;
   const atm  = spot > 0 ? Math.round(spot / strikeStep) * strikeStep : 0;
 
-  const visibleStrikes = useMemo(() => {
-    if (!allStrikes.length) return allStrikes;
-    if (atm === 0) return allStrikes.slice(0, 21);
-    const idx = allStrikes.reduce((best, sk, i) =>
-      Math.abs(sk - atm) < Math.abs(allStrikes[best] - atm) ? i : best, 0);
-    return allStrikes.slice(Math.max(0, idx - 10), idx + 11);
-  }, [allStrikes, atm]);
+  // The strike dropdown shows every strike the option chain lists — no ATM
+  // window. It used to be clipped to ATM ± 10, well inside what the live-quotes
+  // bridge already subscribes to (ATM ± 30, see live_options_ws.py's
+  // --num-strikes), so the clip was purely a UI restriction, not a live-data
+  // limit — a native <select> handles a long option list fine.
+  const visibleStrikes = allStrikes;
 
   const ceLtp = ceStrike != null ? (liveQuotes?.strikes?.[String(ceStrike)]?.ce?.ltp ?? 0) : 0;
   const peLtp = peStrike != null ? (liveQuotes?.strikes?.[String(peStrike)]?.pe?.ltp ?? 0) : 0;
@@ -671,6 +671,23 @@ export default function Scalper() {
 
   // ─── useEffect 2c: WS bridge lifecycle ────────────────────────────
 
+  // useBrokerSelector's authenticatedBrokers is a brand-new array reference
+  // every time /api/auth/broker-status resolves (BROKERS.filter(...) or a
+  // fresh ['dhan'] literal), even when its contents are unchanged from the
+  // initial ['dhan'] the hook starts with. That happens exactly once, a beat
+  // after mount — and with the raw array as a dependency below, React saw a
+  // "changed" dependency and ran this effect's cleanup (stop) immediately
+  // followed by a fresh run (start). Both fetches are unawaited, so the OLD
+  // cleanup's stop request could land on the server AFTER the NEW run's start
+  // had already spawned a fresh bridge process — which then saw the
+  // just-written stop-trigger on its very next poll and exited within
+  // seconds of starting. Kotak positions have no LTP fallback of their own
+  // (see kotakShape.ts), so this manifested as Kotak LTP/P&L stuck at 0/0
+  // while Dhan positions partly masked the same dead feed via their
+  // back-derived-from-unrealizedProfit fallback. Same fix useLiveOptionsWS.ts
+  // already applies to this exact array (its own `authKey`): depend on a
+  // stable joined string, not the array reference.
+  const authenticatedBrokersKey = authenticatedBrokers.join(',');
   useEffect(() => {
     if (!expiry) return;
 
@@ -678,7 +695,8 @@ export default function Scalper() {
     // runs independently on its own port/files (see useLiveOptionsWS), so
     // switching the broker selector never spawns or kills a process. That is
     // also why `broker` is not a dependency here.
-    for (const b of authenticatedBrokers) {
+    const brokers = authenticatedBrokersKey.split(',').filter(Boolean);
+    for (const b of brokers) {
       fetch('/api/options/live', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -691,10 +709,10 @@ export default function Scalper() {
       fetch('/api/options/live', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action: 'stop', brokers: authenticatedBrokers }),
+        body: JSON.stringify({ action: 'stop', brokers }),
       }).catch(() => {});
     };
-  }, [expiry, underlying, authenticatedBrokers]);
+  }, [expiry, underlying, authenticatedBrokersKey]);
 
   // Re-resolves strikeMap (Dhan securityId / Zerodha tradingsymbol per strike)
   // whenever the expiry OR the selected broker changes. Order routing is
@@ -1958,6 +1976,7 @@ export default function Scalper() {
           ) : activeTab === 'positions' ? (
             <PositionsTable
               data={enrichedPositions}
+              broker={broker}
               guards={posGuards}
               closingPositions={closingPositions}
               onGuardChange={handleGuardChange}
@@ -2457,6 +2476,7 @@ export function GuardInput({ value, onCommit, colorCls, focusBorderCls, disabled
 
 export interface PositionsTableProps {
   data: Record<string, unknown>[];
+  broker: Broker;
   /** Keyed by lib/positionProduct's `positionKey` — (symbol, product), NOT symbol
    *  alone. The same symbol can be open under two products, and they are separate
    *  positions with separate guards. */
@@ -2480,15 +2500,44 @@ export interface PositionsTableProps {
   // genuinely returning zero positions — lets the empty state say so instead
   // of implying the account is flat.
   error?: string | null;
+  /** Multi-select checkboxes for a bulk "Exit Selected" action. Optional —
+   *  omitted entirely (as in the basic Scalper terminal) hides the checkbox
+   *  column rather than rendering it disabled. Keyed by the same `positionKey`
+   *  as `guards`/`closingPositions`. */
+  selected?: Set<string>;
+  onToggleSelect?: (positionKey: string) => void;
+  onToggleSelectAll?: () => void;
 }
 
 /** Quick Target / SL chips in the positions table. Percent-only by design —
  *  a mix of % and point chips read ambiguously on options priced ₹5–₹400. */
 const GUARD_PRESET_PCTS = [10, 15, 20, 25, 30];
 
+/**
+ * Best-effort expiry for one position row. Dhan's raw `/positions` payload
+ * passes through with its native `drvExpiryDate` intact (see
+ * lib/positionLegs.ts's resolveContract, which prefers the same field).
+ *
+ * The trading-symbol fallback is Kotak-only, deliberately: its compact form
+ * always carries an explicit day (`CRUDEOILM17AUG264150CE`), which is what
+ * `parseTradingSymbol`'s regex assumes. Zerodha's monthly-expiry symbols have
+ * no day at all (`NIFTY26JUL23900PE` — YY+MON+STRIKE), so the same regex
+ * misreads its year digits as a day and its leading strike digits as a year,
+ * fabricating a wrong past-dated expiry (e.g. "2023-07-26", strike 900)
+ * instead of the correct "no day info" null. Gate the fallback on broker
+ * rather than trying to make the shared regex disambiguate an inherently
+ * ambiguous digit run.
+ */
+function resolveRowExpiry(row: Record<string, unknown>, tradingSymbol: string, broker: Broker): string | null {
+  const native = normalizeExpiry(row.drvExpiryDate);
+  if (native) return native;
+  return broker === 'kotak' ? (parseTradingSymbol(tradingSymbol)?.expiry ?? null) : null;
+}
+
 interface PositionRowProps {
   row: Record<string, unknown>;
   rowKey: string;
+  broker: Broker;
   guard?: PositionGuard;
   isClosing: boolean;
   onGuardChange: (positionKey: string, field: 'target' | 'sl', value: string) => void;
@@ -2497,6 +2546,8 @@ interface PositionRowProps {
   onAddLeg: (pos: Record<string, unknown>) => void;
   lotSizeFor?: (row: Record<string, unknown>) => number | null;
   onClosePartial?: (pos: Record<string, unknown>, units: number, pct: number) => void;
+  selected?: boolean;
+  onToggleSelect?: (positionKey: string) => void;
 }
 
 /**
@@ -2510,11 +2561,13 @@ interface PositionRowProps {
  * this comparator useful rather than a no-op.
  */
 function positionRowPropsEqual(prev: PositionRowProps, next: PositionRowProps): boolean {
-  return prev.row === next.row && prev.guard === next.guard && prev.isClosing === next.isClosing;
+  return prev.row === next.row && prev.guard === next.guard && prev.isClosing === next.isClosing
+    && prev.broker === next.broker && prev.selected === next.selected;
 }
 
 const PositionRow = React.memo(function PositionRow({
-  row, rowKey, guard, isClosing, onGuardChange, onTrailToggle, onClose, onAddLeg, lotSizeFor, onClosePartial,
+  row, rowKey, broker, guard, isClosing, onGuardChange, onTrailToggle, onClose, onAddLeg, lotSizeFor, onClosePartial,
+  selected, onToggleSelect,
 }: PositionRowProps) {
   const sym = String(row.tradingSymbol ?? '');
   const netQty = Number(row.netQty);
@@ -2552,6 +2605,18 @@ const PositionRow = React.memo(function PositionRow({
 
   return (
     <tr className={`hover:bg-zinc-800/40 transition-colors ${isClosing ? 'opacity-40' : ''} ${guard?.triggered ? 'bg-zinc-800/20' : ''}`}>
+      {onToggleSelect && (
+        <td className="px-2 py-2 text-center">
+          <input
+            type="checkbox"
+            checked={selected ?? false}
+            onChange={() => onToggleSelect(rowKey)}
+            disabled={netQty === 0}
+            title={netQty === 0 ? 'Position is flat' : `Select ${sym} for bulk exit`}
+            className="w-4 h-4 accent-rose-500 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
+          />
+        </td>
+      )}
       <td className="px-3 py-2 whitespace-nowrap font-mono text-zinc-300">
         <div className="flex items-center gap-1.5">
           {hasGuard && !guard.triggered && (
@@ -2560,6 +2625,7 @@ const PositionRow = React.memo(function PositionRow({
           {sym}
         </div>
       </td>
+      <td className="px-3 py-2 whitespace-nowrap font-mono text-zinc-400">{resolveRowExpiry(row, sym, broker) ?? '—'}</td>
       <td className="px-3 py-2 whitespace-nowrap font-mono text-right tabular-nums text-zinc-300">{netQty}</td>
       <td className="px-3 py-2 whitespace-nowrap font-mono text-right tabular-nums text-zinc-300">{buyAvg > 0 ? buyAvg.toFixed(2) : '—'}</td>
       <td className="px-3 py-2 whitespace-nowrap font-mono text-right tabular-nums text-zinc-300">{sellAvg > 0 ? sellAvg.toFixed(2) : '—'}</td>
@@ -2740,7 +2806,7 @@ const PositionRow = React.memo(function PositionRow({
   );
 }, positionRowPropsEqual);
 
-export const PositionsTable = React.memo(function PositionsTable({ data, guards, closingPositions, onGuardChange, onTrailToggle, onClose, onAddLeg, lotSizeFor, onClosePartial, sort, onSort, error }: PositionsTableProps) {
+export const PositionsTable = React.memo(function PositionsTable({ data, broker, guards, closingPositions, onGuardChange, onTrailToggle, onClose, onAddLeg, lotSizeFor, onClosePartial, sort, onSort, error, selected, onToggleSelect, onToggleSelectAll }: PositionsTableProps) {
   // The broker positions API does not guarantee a stable row order between
   // polls, so with no explicit column sort applied ('none') the rows would
   // otherwise reshuffle on every 5s refresh. Pin each row to the order it was
@@ -2756,6 +2822,20 @@ export const PositionsTable = React.memo(function PositionsTable({ data, guards,
     }
     return [...data].sort((a, b) => (order.get(positionKey(a))! - order.get(positionKey(b))!));
   }, [data, sort]);
+
+  // Only rows with an open (non-flat) position are selectable, matching the
+  // per-row checkbox's own disabled condition. Computed unconditionally
+  // (ahead of the empty-state early return below) since it's hook-backed —
+  // conditionally skipping it would violate the Rules of Hooks.
+  const selectableKeys = useMemo(
+    () => sortedData.filter(r => Number(r.netQty) !== 0).map(r => positionKey(r)),
+    [sortedData]);
+  const headerCbRef = useRef<HTMLInputElement>(null);
+  const allSelected = selectableKeys.length > 0 && selectableKeys.every(k => selected?.has(k));
+  const someSelected = !allSelected && selectableKeys.some(k => selected?.has(k));
+  useEffect(() => {
+    if (headerCbRef.current) headerCbRef.current.indeterminate = someSelected;
+  }, [someSelected]);
 
   if (!data.length) {
     return (
@@ -2773,7 +2853,21 @@ export const PositionsTable = React.memo(function PositionsTable({ data, guards,
     <table className="w-full text-xs">
       <thead className="sticky top-0 bg-zinc-800 z-10">
         <tr>
+          {onToggleSelectAll && (
+            <th className="px-2 py-2.5 text-center">
+              <input
+                ref={headerCbRef}
+                type="checkbox"
+                checked={allSelected}
+                onChange={onToggleSelectAll}
+                disabled={selectableKeys.length === 0}
+                title="Select all open positions"
+                className="w-4 h-4 accent-rose-500 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
+              />
+            </th>
+          )}
           <SortableTH sortKey="tradingSymbol" currentSort={sort} onSort={onSort}>Symbol</SortableTH>
+          <th className="px-3 py-2.5 text-xs font-bold text-white text-left whitespace-nowrap">Expiry</th>
           <SortableTH sortKey="netQty" currentSort={sort} onSort={onSort} align="right">Qty</SortableTH>
           <SortableTH sortKey="buyAvg" currentSort={sort} onSort={onSort} align="right">Buy Avg</SortableTH>
           <SortableTH sortKey="sellAvg" currentSort={sort} onSort={onSort} align="right">Sell Avg</SortableTH>
@@ -2797,6 +2891,7 @@ export const PositionsTable = React.memo(function PositionsTable({ data, guards,
               key={rowKey}
               row={row}
               rowKey={rowKey}
+              broker={broker}
               guard={guards[rowKey]}
               isClosing={closingPositions.has(rowKey)}
               onGuardChange={onGuardChange}
@@ -2805,6 +2900,8 @@ export const PositionsTable = React.memo(function PositionsTable({ data, guards,
               onAddLeg={onAddLeg}
               lotSizeFor={lotSizeFor}
               onClosePartial={onClosePartial}
+              selected={selected?.has(rowKey) ?? false}
+              onToggleSelect={onToggleSelect}
             />
           );
         })}

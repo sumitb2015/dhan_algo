@@ -9,7 +9,7 @@ import RuleNumInput from './RuleNumInput';
 import AddLotsModal from './AddLotsModal';
 import AddNewLegModal from './AddNewLegModal';
 import {
-  computeLegTrailingSL, computeStrategyMetrics, checkStrategyRisk,
+  computeLegTrailingSL, computeStrategyMetrics, checkStrategyRisk, computeBasketStatus,
   type MultiLegBasket, type MultiLegLeg, type StrategyRiskConfig,
 } from '@/lib/multiLegFocus';
 import { computePayoff, type PayoffLeg, type PayoffResult } from '@/lib/basketStrategies';
@@ -116,7 +116,13 @@ export default function MultiLegStrategyRow({
   hedgeBenefit,
   availableFunds,
 }: MultiLegStrategyRowProps) {
-  const [expanded, setExpanded] = useState(true);
+  // Existing/already-placed positions default collapsed (this page can carry
+  // several parallel strategies, most of them just sitting open) — the user
+  // expands via the chevron when they want the legs table. A brand-new DRAFT
+  // basket (built from a preset or "New Strategy Row") stays expanded since
+  // the user is actively configuring its legs. Lazy-init only: placing a
+  // basket after mount must not yank it closed on the user mid-interaction.
+  const [expanded, setExpanded] = useState(() => !basket.legs.some(l => l.status !== 'DRAFT'));
   const [confirmPlace, setConfirmPlace] = useState(false);
   const [selectedLegForAddLots, setSelectedLegForAddLots] = useState<MultiLegLeg | null>(null);
   const [isAddNewLegModalOpen, setIsAddNewLegModalOpen] = useState<boolean>(false);
@@ -129,15 +135,18 @@ export default function MultiLegStrategyRow({
     return basket.legs.some(l => l.status === 'OPEN' || l.status === 'PLACING' || l.status === 'CLOSING');
   }, [basket.legs]);
 
-  const basketStatus = useMemo(() => {
-    if (basket.legs.length === 0) return 'DRAFT';
-    if (basket.legs.some(l => l.status === 'PLACING')) return 'PLACING';
-    if (basket.legs.some(l => l.status === 'CLOSING')) return 'CLOSING';
-    if (basket.legs.some(l => l.status === 'OPEN')) return 'OPEN';
-    if (basket.legs.every(l => l.status === 'CLOSED')) return 'CLOSED';
-    if (basket.legs.some(l => l.status === 'FAILED')) return 'FAILED';
-    return 'DRAFT';
+  // This basket's fill ledger for an auto-adopted leg is seeded from the
+  // broker's full netQty at that strike at the moment it was discovered —
+  // a best-effort claim, not proof of sole ownership, since Dhan/Kotak net
+  // by security/symbol across every engine sharing the account (see
+  // MultiLegLeg.autoAdopted's doc comment). Surfaced here rather than
+  // silently trusted, so the user checks before an Exit on this leg assumes
+  // the whole broker quantity is this strategy's own.
+  const hasUnverifiedAutoAdopt = useMemo(() => {
+    return basket.legs.some(l => l.autoAdopted && l.status !== 'CLOSED');
   }, [basket.legs]);
+
+  const basketStatus = useMemo(() => computeBasketStatus(basket.legs), [basket.legs]);
 
   const crudeMult = broker === 'dhan'
     ? (basket.underlying === 'CRUDEOIL' ? 100 : basket.underlying === 'CRUDEOILM' ? 10 : 1)
@@ -299,9 +308,13 @@ export default function MultiLegStrategyRow({
 
   return (
     <div className="border border-zinc-800 bg-zinc-900/50 rounded-xl overflow-hidden shadow-lg transition-all">
-      {/* Strategy Header Bar */}
-      <div className="px-4 py-3 bg-zinc-900/90 border-b border-zinc-800 flex items-center justify-between gap-3 flex-wrap">
-        <div className="flex items-center gap-3 flex-wrap">
+      {/* Strategy Header Bar — the collapsed state's entire summary, so this
+         must never wrap to a second line: flex-nowrap everywhere here, with a
+         horizontal scroll escape hatch only if a viewport is genuinely too
+         narrow to fit it (full detail is one click away via the chevron, this
+         row's job is just the at-a-glance summary). */}
+      <div className="px-3 py-2 bg-zinc-900/90 border-b border-zinc-800 flex items-center justify-between gap-3 flex-nowrap overflow-x-auto">
+        <div className="flex items-center gap-2.5 flex-nowrap shrink-0">
           <button
             type="button"
             onClick={() => setExpanded(prev => !prev)}
@@ -313,7 +326,7 @@ export default function MultiLegStrategyRow({
 
           <div className="flex items-center gap-2">
             <span className="text-xs font-bold text-zinc-100 uppercase tracking-wider">
-              {basket.presetKey ? basket.presetKey.replace(/-/g, ' ') : `Strategy #${index + 1}`}
+              {basket.presetKey ? basket.presetKey.replace(/-/g, ' ') : (basket.name ?? `Strategy #${index + 1}`)}
             </span>
             <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded border ${STATUS_STYLE[basketStatus]}`}>
               {basketStatus}
@@ -329,40 +342,57 @@ export default function MultiLegStrategyRow({
             >
               {BROKER_LABELS[basket.broker as Broker] ?? basket.broker}
             </span>
+            {hasUnverifiedAutoAdopt && (
+              <span
+                className="text-[10px] font-bold px-1.5 py-0.5 rounded border uppercase tracking-wider bg-amber-500/10 text-amber-400 border-amber-500/20 flex items-center gap-1"
+                title="This position was found already open on your broker account, not placed from here. Its quantity is the broker's full position at this strike — if another strategy or session also holds part of it, Exit here could close more than intended. Verify sole ownership before exiting."
+              >
+                <AlertTriangle className="w-3 h-3" /> Auto-Detected
+              </span>
+            )}
           </div>
 
-          {/* Underlying Selector */}
-          <div className="flex items-center gap-1">
-            <label className="text-[10px] text-zinc-400 font-semibold uppercase">Index:</label>
-            <select
-              value={basket.underlying}
-              disabled={hasPlacedLeg}
-              onChange={e => onUpdate({ underlying: e.target.value })}
-              className="h-7 bg-zinc-950 border border-zinc-700 text-zinc-200 text-xs font-bold rounded px-2 focus:outline-none focus:border-emerald-500 disabled:opacity-60"
-            >
-              {UNDERLYINGS.map(u => <option key={u} value={u}>{u}</option>)}
-            </select>
-          </div>
+          {/* Underlying + Expiry — a placed basket can't change either (the
+             disabled selects below were just dead weight eating header width
+             on every already-open row, which is most rows most of the time),
+             so show them as plain compact text once placed and keep the real
+             editable dropdowns only for a still-DRAFT basket. */}
+          {hasPlacedLeg ? (
+            <span className="text-xs font-bold text-zinc-300 whitespace-nowrap">
+              {basket.underlying} <span className="text-zinc-600">·</span> {basket.expiry}
+            </span>
+          ) : (
+            <>
+              <div className="flex items-center gap-1">
+                <label className="text-[10px] text-zinc-400 font-semibold uppercase">Index:</label>
+                <select
+                  value={basket.underlying}
+                  onChange={e => onUpdate({ underlying: e.target.value })}
+                  className="h-7 bg-zinc-950 border border-zinc-700 text-zinc-200 text-xs font-bold rounded px-2 focus:outline-none focus:border-emerald-500"
+                >
+                  {UNDERLYINGS.map(u => <option key={u} value={u}>{u}</option>)}
+                </select>
+              </div>
 
-          {/* Expiry Selector */}
-          <div className="flex items-center gap-1">
-            <label className="text-[10px] text-zinc-400 font-semibold uppercase">Expiry:</label>
-            <select
-              value={basket.expiry}
-              disabled={hasPlacedLeg}
-              onChange={e => onUpdate({ expiry: e.target.value })}
-              className="h-7 bg-zinc-950 border border-zinc-700 text-zinc-200 text-xs font-bold rounded px-2 focus:outline-none focus:border-emerald-500 disabled:opacity-60"
-            >
-              {!expiries.includes(basket.expiry) && basket.expiry && (
-                <option value={basket.expiry}>{basket.expiry}</option>
-              )}
-              {expiries.map(exp => <option key={exp} value={exp}>{exp}</option>)}
-            </select>
-          </div>
+              <div className="flex items-center gap-1">
+                <label className="text-[10px] text-zinc-400 font-semibold uppercase">Expiry:</label>
+                <select
+                  value={basket.expiry}
+                  onChange={e => onUpdate({ expiry: e.target.value })}
+                  className="h-7 bg-zinc-950 border border-zinc-700 text-zinc-200 text-xs font-bold rounded px-2 focus:outline-none focus:border-emerald-500"
+                >
+                  {!expiries.includes(basket.expiry) && basket.expiry && (
+                    <option value={basket.expiry}>{basket.expiry}</option>
+                  )}
+                  {expiries.map(exp => <option key={exp} value={exp}>{exp}</option>)}
+                </select>
+              </div>
+            </>
+          )}
         </div>
 
         {/* Right Side: Breakevens, Max P/L, Total P&L & Strategy Actions */}
-        <div className="flex items-center gap-2 flex-wrap">
+        <div className="flex items-center gap-2 flex-nowrap shrink-0">
           {payoffResult && (
             <div className="hidden md:flex items-center gap-2 px-2.5 py-1 rounded-lg bg-zinc-950 border border-zinc-800 text-xs font-mono" title="Strategy Payoff: Breakevens & Max Profit / Loss">
               <div className="flex items-center gap-1">

@@ -2,10 +2,10 @@ import { NextResponse } from 'next/server';
 import { spawn } from 'child_process';
 import fs from 'fs';
 import path from 'path';
+import { PYTHON_EXE } from '@/lib/pyExec';
 
 // ── paths ──────────────────────────────────────────────────────────────
 const PROJECT_ROOT    = path.resolve(process.cwd(), '..');
-const PYTHON_EXE      = path.join(PROJECT_ROOT, 'venv', 'Scripts', 'pythonw.exe');
 const PREMARKET_PY    = path.join(PROJECT_ROOT, 'scripts', 'tools', 'premarket_data.py');
 const TOKEN_FILE      = path.join(PROJECT_ROOT, 'access_token.json');
 const DHAN_OHLC_URL   = 'https://api.dhan.co/v2/marketfeed/ohlc';

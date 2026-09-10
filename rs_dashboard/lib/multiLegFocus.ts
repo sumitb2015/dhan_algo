@@ -7,6 +7,9 @@
 
 import { nearestStrike, type LegSide, type OptionType, type StrategyTemplate } from './basketStrategies.ts';
 import { positionProduct, findLivePosition } from './positionProduct.ts';
+import { buildPositionLegs, symbolMatchesUnderlying } from './positionLegs.ts';
+import { aggregateLegs, classifyStructure, type GroupLeg } from './positionStructure.ts';
+import type { ScalperPosition } from './zerodhaShape.ts';
 
 export type MultiLegStatus = 'DRAFT' | 'PLACING' | 'OPEN' | 'CLOSING' | 'CLOSED' | 'FAILED';
 
@@ -30,6 +33,14 @@ export interface MultiLegLeg {
    *  leg's own broker position row on every monitoring poll. */
   orderRef?: { securityId?: string; symbol?: string };
   status: MultiLegStatus;
+  /** Set when this leg's ledger was seeded from a broker position discovered
+   *  already open (see findUntrackedGroups) rather than one this basket
+   *  placed itself. `fill.qty` in that case is the broker's full netQty at
+   *  that strike, which is a best-effort claim, not a proven sole ownership
+   *  — the broker nets by securityId, so another engine could hold part of
+   *  the same strike unbeknownst to this basket. Surfaced in the UI so the
+   *  user verifies before exiting (see dhan-terminal-position-ownership). */
+  autoAdopted?: boolean;
 
   // ── Leg-wise Stop Loss, Take Profit, and Trailing SL ─────────────
   sl?: number;                 // Stop Loss (points or absolute price)
@@ -492,6 +503,169 @@ export function findLegPosition(
     return live;
   }
   return { kind: 'not_found' };
+}
+
+export interface UntrackedGroup {
+  underlying: string;
+  expiry: string;
+  structure: string;
+  legs: GroupLeg[];
+}
+
+/**
+ * Finds broker option positions that no basket's leg already claims, grouped
+ * by (underlying, expiry) and classified into a structure name — so a
+ * straddle/strangle opened outside this tool (e.g. from Scalper) can be
+ * auto-adopted into a new basket instead of staying invisible forever.
+ *
+ * Deliberately the mirror image of reconcileLegWithBroker's rule: that
+ * function only ever clamps an EXISTING leg's own quantity down, never up,
+ * because a pooled broker row can include a sibling basket's contribution
+ * (see its header comment). This function never touches an existing leg at
+ * all — it only looks at rows nothing ACTIVE in `baskets` already claims.
+ * The claim set deliberately excludes CLOSED legs: a CLOSED leg no longer
+ * holds any broker quantity, so it poses no double-counting risk, and
+ * excluding it lets a contract that was auto-tracked, closed, and genuinely
+ * re-opened later (a routine same-day re-entry) be discovered again instead
+ * of staying permanently "claimed" by a leg that no longer represents a
+ * live position.
+ */
+export function findUntrackedGroups(
+  rows: Record<string, unknown>[],
+  baskets: MultiLegBasket[],
+  broker: string,
+  knownUnderlyings: readonly string[],
+): UntrackedGroup[] {
+  const claimedSecurityIds = new Set<string>();
+  const claimedSymbols = new Set<string>();
+  for (const basket of baskets) {
+    for (const leg of basket.legs) {
+      if (leg.status === 'CLOSED') continue;
+      if (leg.orderRef?.securityId) claimedSecurityIds.add(leg.orderRef.securityId);
+      if (leg.orderRef?.symbol) claimedSymbols.add(leg.orderRef.symbol);
+    }
+  }
+
+  const { legs } = buildPositionLegs(rows as unknown as ScalperPosition[], { raw: broker === 'dhan' ? rows : undefined });
+
+  const unclaimed = legs.filter((leg) => {
+    if (broker === 'dhan') {
+      return !leg.securityId || !claimedSecurityIds.has(leg.securityId);
+    }
+    return !leg.display.tradingSymbol || !claimedSymbols.has(leg.display.tradingSymbol);
+  });
+
+  const buckets = new Map<string, { underlying: string; expiry: string; legs: typeof unclaimed }>();
+  for (const leg of unclaimed) {
+    if (!leg.expiry) continue;
+    const underlying = knownUnderlyings.find((u) => symbolMatchesUnderlying(leg.display.tradingSymbol, u));
+    if (!underlying) continue;
+    const key = `${underlying}::${leg.expiry}`;
+    const bucket = buckets.get(key);
+    if (bucket) bucket.legs.push(leg);
+    else buckets.set(key, { underlying, expiry: leg.expiry, legs: [leg] });
+  }
+
+  const groups: UntrackedGroup[] = [];
+  for (const { underlying, expiry, legs: bucketLegs } of buckets.values()) {
+    const aggLegs = aggregateLegs(bucketLegs);
+    if (!aggLegs.length) continue;
+    const { structure } = classifyStructure(aggLegs);
+    groups.push({ underlying, expiry, structure, legs: aggLegs });
+  }
+  return groups;
+}
+
+/** Stable signature for an untracked group, for session-level dedupe of what
+ *  has already been auto-adopted — sorted so leg order never matters. */
+export function untrackedGroupSignature(group: UntrackedGroup): string {
+  return group.legs
+    .map((l) => l.securityId || l.symbol || `${l.strike}:${l.type}`)
+    .sort()
+    .join('|');
+}
+
+/** Builds fresh OPEN `MultiLegLeg`s from an auto-detected untracked group's
+ *  aggregated legs — the broker's own qty/avgPrice become each leg's fill
+ *  ledger from the start, exactly as if this basket had placed and filled
+ *  the orders itself. Shared by `basketFromUntrackedGroup` (new basket) and
+ *  the poller's merge path (append to an existing basket on the same
+ *  underlying+expiry, so a strangle whose two legs are discovered on
+ *  different poll ticks still ends up as one strategy, not two). */
+export function legsFromUntrackedGroup(group: UntrackedGroup, broker: string, lotSize: number): MultiLegLeg[] {
+  return group.legs.map((gl) => ({
+    id: newLegId(),
+    side: gl.side === 'SELL' ? 'S' : 'B',
+    option: gl.type,
+    strike: gl.strike,
+    lots: Math.max(1, Math.round(gl.qty / (lotSize || 1))),
+    type: 'MARKET',
+    status: 'OPEN',
+    fill: { qty: gl.qty, avgPrice: gl.avgPrice },
+    orderRef: broker === 'dhan'
+      ? { securityId: gl.securityId ?? undefined }
+      : { symbol: gl.symbol ?? undefined },
+    autoAdopted: true,
+  }));
+}
+
+/** Builds a new OPEN basket from an auto-detected untracked group. */
+export function basketFromUntrackedGroup(
+  group: UntrackedGroup,
+  broker: string,
+  lotSize: number,
+): MultiLegBasket {
+  const now = new Date().toISOString();
+  return {
+    id: `mlfu_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`,
+    name: group.structure,
+    underlying: group.underlying,
+    expiry: group.expiry,
+    broker,
+    legs: legsFromUntrackedGroup(group, broker, lotSize),
+    riskConfig: { targetUnit: 'pts', slUnit: 'pts', armed: false },
+    createdAt: now,
+    updatedAt: now,
+  };
+}
+
+/**
+ * Re-classifies a basket's structure name from its own currently-live legs —
+ * used after merging a newly-discovered leg into an existing basket, so e.g.
+ * a "Naked Call" basket that a same-expiry short PE just landed in relabels
+ * itself "Short Strangle" instead of keeping a now-stale name. `qty` is a
+ * dummy 1 for every leg: classifyStructure only compares strike/type/side
+ * shape, never quantity, so the real fill size is irrelevant here.
+ */
+export function structureNameForBasket(basket: MultiLegBasket): string {
+  const liveLegs: GroupLeg[] = basket.legs
+    .filter((l) => l.status !== 'CLOSED')
+    .map((l) => ({
+      strike: l.strike,
+      type: l.option,
+      side: l.side === 'S' ? 'SELL' : 'BUY',
+      qty: 1,
+      avgPrice: l.fill?.avgPrice ?? l.price ?? 0,
+      securityId: l.orderRef?.securityId ?? null,
+      symbol: l.orderRef?.symbol ?? null,
+    }));
+  if (!liveLegs.length) return basket.name ?? 'Strategy';
+  return classifyStructure(liveLegs).structure;
+}
+
+/** Aggregate status for a whole basket from its legs' individual statuses, in
+ *  priority order — PLACING/CLOSING/OPEN outrank a stray leftover DRAFT leg
+ *  alongside them, and CLOSED only wins when every leg agrees. Shared by
+ *  MultiLegStrategyRow (row header badge) and MultiLegFocus (grouping open
+ *  vs. exited rows) so the two can't drift apart. */
+export function computeBasketStatus(legs: MultiLegLeg[]): MultiLegStatus {
+  if (legs.length === 0) return 'DRAFT';
+  if (legs.some(l => l.status === 'PLACING')) return 'PLACING';
+  if (legs.some(l => l.status === 'CLOSING')) return 'CLOSING';
+  if (legs.some(l => l.status === 'OPEN')) return 'OPEN';
+  if (legs.every(l => l.status === 'CLOSED')) return 'CLOSED';
+  if (legs.some(l => l.status === 'FAILED')) return 'FAILED';
+  return 'DRAFT';
 }
 
 // Re-exported for callers that only need to inspect a matched row's product

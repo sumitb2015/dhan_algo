@@ -22,6 +22,7 @@ import asyncio
 import argparse
 import threading
 import urllib.request
+import psutil
 from datetime import datetime, date, timezone
 
 from websockets.asyncio.server import serve as ws_serve, broadcast as ws_broadcast
@@ -85,43 +86,58 @@ OPTION_FEED_SEGMENT = {
 OHLC_URL = 'https://api.dhan.co/v2/marketfeed/ohlc'
 
 
-def _fetch_prev_closes(dhan, underlying_sid: str, underlying_seg: str = 'IDX_I') -> dict:
-    """Fetch previous-session closes for both VIX (always IDX_I) and the underlying, plus initial spot LTP."""
+def _fetch_prev_closes(dhan, underlying_sid: str, underlying_seg: str = 'IDX_I',
+                        attempts: int = 4, delay: float = 3.0) -> dict:
+    """Fetch previous-session closes for both VIX (always IDX_I) and the underlying, plus initial spot LTP.
+
+    Retries on transient failures (verified in production: a 429 here from a
+    second bridge starting concurrently and competing for the account's rate
+    limit). This is a single startup call with no later opportunity to
+    recover — spot_chg/spot_chg_pct further down default to 0.0, not null, so
+    a bridge that misses this once shows a flat 0.00 / 0.00% change for its
+    ENTIRE session until manually restarted. Mirrors the retry loop already
+    used for the spot fetch below.
+    """
     closes = {underlying_sid: 0.0, VIX_SID: 0.0, 'spot': 0.0}
-    try:
-        token     = dhan.dhan_http.access_token
-        client_id = dhan.dhan_http.client_id
-        body_map = {'IDX_I': [int(VIX_SID)]}
-        body_map.setdefault(underlying_seg, []).append(int(underlying_sid))
-        # Ensure unique IDs per segment
-        for k in body_map:
-            body_map[k] = list(set(body_map[k]))
-        body = json.dumps(body_map).encode()
-        req  = urllib.request.Request(
-            OHLC_URL, data=body, method='POST',
-            headers={
-                'access-token':  token,
-                'client-id':     client_id,
-                'Content-Type':  'application/json',
-                'Accept':        'application/json',
-            },
-        )
-        with urllib.request.urlopen(req, timeout=6) as resp:
-            res = json.loads(resp.read())
-        if res.get('status') == 'success':
-            data = res.get('data', {}) or {}
-            for sid, seg in ((underlying_sid, underlying_seg), (VIX_SID, 'IDX_I')):
-                entry = (data.get(seg, {}) or {}).get(sid, {}) or {}
-                ohlc  = entry.get('ohlc') or {}
-                val   = float(ohlc.get('close') or 0)
-                if val > 0:
-                    closes[sid] = round(val, 2)
-            u_entry = (data.get(underlying_seg, {}) or {}).get(underlying_sid, {}) or {}
-            lp = float(u_entry.get('last_price') or 0)
-            if lp > 0:
-                closes['spot'] = round(lp, 2)
-    except Exception as e:
-        print(f'[live_options_ws] WARN: prev_closes fetch failed: {e}', flush=True)
+    for attempt in range(attempts):
+        try:
+            token     = dhan.dhan_http.access_token
+            client_id = dhan.dhan_http.client_id
+            body_map = {'IDX_I': [int(VIX_SID)]}
+            body_map.setdefault(underlying_seg, []).append(int(underlying_sid))
+            # Ensure unique IDs per segment
+            for k in body_map:
+                body_map[k] = list(set(body_map[k]))
+            body = json.dumps(body_map).encode()
+            req  = urllib.request.Request(
+                OHLC_URL, data=body, method='POST',
+                headers={
+                    'access-token':  token,
+                    'client-id':     client_id,
+                    'Content-Type':  'application/json',
+                    'Accept':        'application/json',
+                },
+            )
+            with urllib.request.urlopen(req, timeout=6) as resp:
+                res = json.loads(resp.read())
+            if res.get('status') == 'success':
+                data = res.get('data', {}) or {}
+                for sid, seg in ((underlying_sid, underlying_seg), (VIX_SID, 'IDX_I')):
+                    entry = (data.get(seg, {}) or {}).get(sid, {}) or {}
+                    ohlc  = entry.get('ohlc') or {}
+                    val   = float(ohlc.get('close') or 0)
+                    if val > 0:
+                        closes[sid] = round(val, 2)
+                u_entry = (data.get(underlying_seg, {}) or {}).get(underlying_sid, {}) or {}
+                lp = float(u_entry.get('last_price') or 0)
+                if lp > 0:
+                    closes['spot'] = round(lp, 2)
+                if closes[underlying_sid] > 0:
+                    return closes
+        except Exception as e:
+            print(f'[live_options_ws] WARN: prev_closes fetch failed (attempt {attempt + 1}/{attempts}): {e}', flush=True)
+        if attempt < attempts - 1:
+            time.sleep(delay)
     return closes
 
 def _fetch_prev_meta(helper, chain_symbol: str, expiry: str, exchange_segment: str = 'IDX_I', attempts: int = 5, delay: float = 5.0) -> dict:
@@ -228,6 +244,27 @@ def atomic_write(path: str, data: dict) -> bool:
 
 def write_status(status: str, underlying: str = '', expiry: str = '',
                  subscribed: int = 0, started_at: str = '', ws_port=None):
+    # A bridge that's still starting up (resolving contracts, retrying a
+    # rate-limited prev-close fetch, etc.) doesn't watch the stop trigger
+    # until its main loop begins, so a restart that races a slow startup can
+    # leave TWO processes briefly alive: a fresh one that reaches RUNNING
+    # quickly, and the old one still grinding through its own startup, which
+    # then writes its own (often failed) status LATE — silently overwriting
+    # the fresh, healthy bridge's RUNNING entry with stale/wrong info.
+    # Verified in production: this left the status file (and its ws_port)
+    # pointed at a dead process for 20+ seconds while a different, correct
+    # bridge was actually live and ticking. Once a still-alive pid has
+    # reached RUNNING, its ownership of the status file is exclusive — only
+    # that same pid may write here again.
+    try:
+        with open(STATUS_FILE) as f:
+            current = json.load(f)
+        owner_pid = int(current.get('pid') or 0)
+        if (current.get('status') == 'RUNNING' and owner_pid and owner_pid != os.getpid()
+                and psutil.pid_exists(owner_pid)):
+            return
+    except Exception:
+        pass
     try:
         atomic_write(STATUS_FILE, {
             'status': status,

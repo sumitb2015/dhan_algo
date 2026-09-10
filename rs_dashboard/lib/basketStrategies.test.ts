@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert';
 import {
-  legPnlAtExpiry, computePayoff, nearestStrike, strikeStep, daysToExpiry,
+  legPnlAtExpiry, computePayoff, nearestStrike, strikeStep, daysToExpiry, STRATEGY_CATEGORIES,
 } from './basketStrategies.ts';
 
 test('legPnlAtExpiry: short call ITM loses intrinsic minus premium collected', () => {
@@ -14,7 +14,7 @@ test('legPnlAtExpiry: long put OTM loses only the premium paid', () => {
   assert.strictEqual(legPnlAtExpiry(leg, 120), -10); // (0 - 5) * qty(2)
 });
 
-test('computePayoff: short straddle has bounded profit and unlimited right-side loss', () => {
+test('computePayoff: short straddle has bounded profit and unlimited loss on BOTH sides', () => {
   const legs = [
     { side: 'S' as const, option: 'CE' as const, strike: 100, premium: 5, qty: 1 },
     { side: 'S' as const, option: 'PE' as const, strike: 100, premium: 5, qty: 1 },
@@ -24,6 +24,10 @@ test('computePayoff: short straddle has bounded profit and unlimited right-side 
   assert.strictEqual(result.maxProfitUnlimited, false);
   assert.strictEqual(result.maxLossUnlimited, true);
   assert.strictEqual(result.rightWing, 'loss');
+  // Net short puts carry unlimited loss on the downside too (a position fact
+  // derived from net signed quantity, not the sampled curve's finite shape) —
+  // matches the convention in lib/optionsStrategy.ts used elsewhere in the app.
+  assert.strictEqual(result.leftWing, 'loss');
   assert.ok(Math.abs(result.maxProfit - 10) < 1e-6);
   assert.strictEqual(result.breakevens.length, 2);
   assert.ok(Math.abs(result.breakevens[0] - 90) < 1);
@@ -42,7 +46,7 @@ test('computePayoff: bull call spread has bounded profit AND bounded loss', () =
   assert.ok(Math.abs(result.maxProfit - 15) < 1e-6); // (120-100) - 5 net debit
 });
 
-test('computePayoff: long put profit is bounded by the zero underlying floor', () => {
+test('computePayoff: long put profit is bounded by the zero underlying floor, no unlimited case either side', () => {
   const result = computePayoff([
     { side: 'B' as const, option: 'PE' as const, strike: 100, premium: 5, qty: 1 },
   ], 50, 150, 101);
@@ -51,25 +55,30 @@ test('computePayoff: long put profit is bounded by the zero underlying floor', (
   assert.strictEqual(result.maxProfit, 95);
   assert.strictEqual(result.maxLoss, -5);
   assert.strictEqual(result.rightWing, null);
+  assert.strictEqual(result.leftWing, null);
 });
 
-test('computePayoff: short put loss is bounded by the zero underlying floor', () => {
+// A naked short put carries unlimited loss on the downside by the same
+// position-fact convention as a naked short call on the upside — spot=0 is a
+// technical floor, not a risk ceiling a trader should see as "bounded."
+test('computePayoff: short put has unlimited left-side (downside) loss', () => {
   const result = computePayoff([
     { side: 'S' as const, option: 'PE' as const, strike: 100, premium: 5, qty: 1 },
   ], 50, 150, 101);
   assert.strictEqual(result.maxProfitUnlimited, false);
-  assert.strictEqual(result.maxLossUnlimited, false);
+  assert.strictEqual(result.maxLossUnlimited, true);
   assert.strictEqual(result.maxProfit, 5);
-  assert.strictEqual(result.maxLoss, -95);
   assert.strictEqual(result.rightWing, null);
+  assert.strictEqual(result.leftWing, 'loss');
 });
 
-test('computePayoff: short call keeps unlimited right-side loss', () => {
+test('computePayoff: short call keeps unlimited right-side loss, no left-side case', () => {
   const result = computePayoff([
     { side: 'S' as const, option: 'CE' as const, strike: 100, premium: 5, qty: 1 },
   ], 50, 150, 101);
   assert.strictEqual(result.maxLossUnlimited, true);
   assert.strictEqual(result.rightWing, 'loss');
+  assert.strictEqual(result.leftWing, null);
 });
 
 test('nearestStrike picks the closest listed strike', () => {
@@ -96,4 +105,71 @@ test('daysToExpiry counts calendar days, 0 on the expiry date itself', () => {
 
 test('daysToExpiry returns null for an unparseable expiry string', () => {
   assert.strictEqual(daysToExpiry('not-a-date'), null);
+});
+
+test('STRATEGY_CATEGORIES: Range Bound includes Batman alongside Iron Condor', () => {
+  const rangeBound = STRATEGY_CATEGORIES['Range Bound'];
+  const icIndex = rangeBound.findIndex((s: any) => s.key === 'iron-condor');
+  const batmanIndex = rangeBound.findIndex((s: any) => s.key === 'batman');
+  assert.ok(icIndex >= 0, 'iron-condor must exist in Range Bound');
+  assert.ok(batmanIndex >= 0, 'batman must exist in Range Bound');
+  const batman = rangeBound[batmanIndex];
+  assert.strictEqual(batman.name, 'Batman');
+  assert.strictEqual(batman.legs.length, 4);
+});
+
+test('computePayoff: Batman strategy has dual profit peaks (ears) and undefined tail risk', () => {
+  const batmanLegs = [
+    { side: 'B' as const, option: 'CE' as const, strike: 110, premium: 5, qty: 1 },
+    { side: 'S' as const, option: 'CE' as const, strike: 120, premium: 2, qty: 2 },
+    { side: 'B' as const, option: 'PE' as const, strike: 90,  premium: 5, qty: 1 },
+    { side: 'S' as const, option: 'PE' as const, strike: 80,  premium: 2, qty: 2 },
+  ];
+  const res = computePayoff(batmanLegs, 60, 140, 81);
+  assert.strictEqual(res.maxLossUnlimited, true);
+  assert.strictEqual(res.leftWing, 'loss');
+  assert.strictEqual(res.rightWing, 'loss');
+
+  // Peak at lower short strike (80)
+  const p80 = res.points.find(p => Math.abs(p.x - 80) < 0.1);
+  // Peak at upper short strike (120)
+  const p120 = res.points.find(p => Math.abs(p.x - 120) < 0.1);
+  // Valley / plateau at ATM (100)
+  const p100 = res.points.find(p => Math.abs(p.x - 100) < 0.1);
+
+  assert.ok(p80 && p120 && p100);
+  assert.ok(p80.y > p100.y, 'Lower short strike (80) must be a peak above center');
+  assert.ok(p120.y > p100.y, 'Upper short strike (120) must be a peak above center');
+  assert.strictEqual(p80.y, p120.y, 'Symmetric Batman strategy has equal height ears');
+});
+
+test('STRATEGY_CATEGORIES: Range Bound includes single-type Call and Put Butterfly', () => {
+  const rangeBound = STRATEGY_CATEGORIES['Range Bound'];
+  const callBfly = rangeBound.find((s: any) => s.key === 'call-butterfly');
+  const putBfly = rangeBound.find((s: any) => s.key === 'put-butterfly');
+  assert.ok(callBfly, 'call-butterfly must exist in Range Bound');
+  assert.ok(putBfly, 'put-butterfly must exist in Range Bound');
+  assert.ok(callBfly!.legs.every((l: any) => l.option === 'CE'), 'Call Butterfly must use only calls');
+  assert.ok(putBfly!.legs.every((l: any) => l.option === 'PE'), 'Put Butterfly must use only puts');
+  assert.strictEqual(callBfly!.legs.length, 3);
+  assert.strictEqual(putBfly!.legs.length, 3);
+});
+
+test('computePayoff: Call Butterfly is defined-risk with a single peak at the body strike', () => {
+  const callButterflyLegs = [
+    { side: 'B' as const, option: 'CE' as const, strike: 80,  premium: 22, qty: 1 },
+    { side: 'S' as const, option: 'CE' as const, strike: 100, premium: 6,  qty: 2 },
+    { side: 'B' as const, option: 'CE' as const, strike: 120, premium: 1,  qty: 1 },
+  ];
+  const res = computePayoff(callButterflyLegs, 60, 140, 81);
+  assert.strictEqual(res.maxProfitUnlimited, false);
+  assert.strictEqual(res.maxLossUnlimited, false);
+  assert.strictEqual(res.leftWing, null);
+  assert.strictEqual(res.rightWing, null);
+
+  const p80 = res.points.find(p => Math.abs(p.x - 80) < 0.1);
+  const p100 = res.points.find(p => Math.abs(p.x - 100) < 0.1);
+  const p120 = res.points.find(p => Math.abs(p.x - 120) < 0.1);
+  assert.ok(p80 && p100 && p120);
+  assert.ok(p100.y > p80.y && p100.y > p120.y, 'Body strike (100) must be the peak');
 });

@@ -13,8 +13,8 @@ same strike is one broker position away from one of them stomping the
 other. `FocusTool.tsx` hit this same bug shape seven times across ~10
 commits (`36144ad`, `2afbf1f`, `9e5b527`, `af5d9ea`, `13b0fef`, `8a44d49`).
 `MultiLegFocus.tsx` / `lib/multiLegFocus.ts` — the N-leg options basket
-builder — hit the reconciliation half of the same shape (`5a70b1f`,
-`d922a56`, `eed3868`); see Invariant 6.
+builder — hit the reconciliation half of the same shape (`5a70b1f`, `eed3868`,
+`d922a56` → reverted by `af96a1f`/`8f86f20`); see Invariant 6.
 The Scalper/AdvancedScalper equivalent for pure broker-payload math (MCX
 multipliers, product identity) is `dhan-broker-positions` — this skill is
 about *who owns* a position, not what a payload field means.
@@ -103,23 +103,35 @@ control to the tab — that process can still trade, so a handover is exactly
 the double-driving the STALE check exists to catch; silence in that state
 must read as "danger," not "safe to take over."
 
-### 6. Reconciliation needs a propagation grace window, and trusts broker qty downward *and* upward from its own ledger
+### 6. Reconciliation needs a propagation grace window, and clamps DOWN ONLY — this policy flip-flopped once, don't flip it back
 `MultiLegFocus` reconciles each leg against the broker's position book on a poll
-tick. Two more failure shapes showed up here beyond Invariant 2's "never grow the
-ledger from broker state" (that rule still holds for *ownership* — never adopt a
-strike this leg didn't open):
+tick (`reconcileLegWithBroker` in `lib/multiLegFocus.ts`).
 - A leg placed seconds ago can still show as flat in the broker's position book —
   order ack races the position-book write. Reconciling immediately reads that as
   "closed" and drops a live leg. Give a fresh leg a grace window (as in Invariant 2)
   before trusting an absent broker position as a real close. (`5a70b1f`)
-- Once a leg is confirmed open, the artificial cap some early code applied — never
-  let the ledger qty exceed what this leg's own orders opened — was wrong for
-  *this leg's own* quantity: a partial fill completing, or a broker-side lot
-  adjustment, is real movement in a position this leg does own, not another row's
-  leg leaking in. For a leg already attributed to this row, trust the broker qty
-  fully (both directions) rather than clamping it against a stale local snapshot.
-  (`d922a56`, `eed3868` — sync leg lots to the broker's filled quantity on every
-  reconciliation pass)
+- **Ledger qty is clamped DOWN to broker qty, never inflated up — this is the
+  same rule as Invariant 2, and it was briefly reverted for this leg's *own*
+  quantity, which caused a real incident.** `d922a56` argued that once a leg is
+  confirmed open, its own partial fills/lot adjustments are real movement, not
+  another row's leg leaking in, and switched to trusting broker qty fully in
+  *both* directions. That reasoning was wrong: Dhan nets by security ID across
+  *every* basket, so a leg's "own" broker row can silently include a sibling
+  basket's contribution the moment they share a strike — this is exactly what
+  happened in production ("24700 CE was already in a previous strangle, my new
+  one just merged into it"). `af96a1f` reverted to clamp-down-only: qty is
+  `Math.min(ownQty, brokerQty)` where `ownQty` is the leg's own last-known fill
+  (or `ownQtyHint` — e.g. lots × lot size — on first reconciliation, before any
+  fill is recorded), never the broker's pooled total. A leg already `CLOSED` is
+  also left untouched rather than resurrected just because the broker still
+  shows a live (possibly sibling-owned) position. `8f86f20` added a rate-limited
+  warning (once per occurrence, not every poll tick) when a leg's tracked qty is
+  clamped below broker qty, since that gap can be a legitimate manual top-up the
+  app has no way to auto-attribute now that positions can be shared — surface it
+  rather than silently doing nothing. **Do not reintroduce `d922a56`'s upward
+  trust for this leg's own quantity** — the dashboard reconciler has no
+  Python-side `resolve_exit_qty` safety net behind it; the clamp *is* the safety
+  net. (`d922a56` → `af96a1f`, `8f86f20`)
 
 ### 7. Re-read shared state after an `await`, not from a pre-await snapshot
 `addLotsToLeg` / `addNewLegToBasket` merged their result into a `basket.legs`
@@ -134,8 +146,8 @@ reverts whatever the poller just wrote. Re-read the current ref
 - Does every lock/exit/P&L decision route through an ownership check
   (ledger + worker-hold), not a raw broker position/netQty read?
 - Does reconciliation only ever shrink the ledger, never grow it from broker
-  state — *except* for a leg already owned by this row, where broker qty is the
-  full source of truth in both directions once past its propagation grace window?
+  state — including for a leg already owned by this row? (Broker qty is never
+  trusted upward, even for "its own" leg — see Invariant 6's `d922a56` history.)
 - Does fill confirmation look up the broker position for the *order's
   target symbol*, not a cached/pinned position reference?
 - Is a strike shift's reopen gated on the close having fully filled?

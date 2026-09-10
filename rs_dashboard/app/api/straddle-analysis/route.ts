@@ -2,10 +2,10 @@ import { NextRequest, NextResponse } from 'next/server';
 import path from 'path';
 import fs from 'fs';
 import { spawn } from 'child_process';
+import { PYTHON_EXE } from '@/lib/pyExec';
 
 const PROJECT_ROOT = path.resolve(process.cwd(), '..');
 const DEBUG_DIR    = path.join(PROJECT_ROOT, 'debug');
-const PYTHON_EXE   = path.join(PROJECT_ROOT, 'venv', 'Scripts', 'pythonw.exe');
 const SCRIPT_PATH  = path.join(PROJECT_ROOT, 'scripts', 'analysis', 'straddle_premium_analysis.py');
 const DATA_FILE    = path.join(DEBUG_DIR, 'straddle_premium_analysis.json');
 const STATUS_FILE  = path.join(DEBUG_DIR, 'straddle_analysis_status.json');

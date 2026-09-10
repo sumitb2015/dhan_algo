@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { dhanPost } from '@/lib/dhanToken';
 import { pacedMarginCall } from '@/lib/ultimateScannerDhan';
+import { getDhanStrikeLookup } from '@/lib/dhanStrikeLookup';
 
 interface LegInput {
   id: string;
@@ -31,6 +32,12 @@ interface MarginCacheEntry {
     hedgeBenefit: number;
     spanMargin: number;
     exposureMargin: number;
+    /** 'dhan' when the numbers above came from Dhan's real calculator even
+     * though the basket trades on a different broker (cross-priced — see
+     * getDhanStrikeLookup). Lets a caller show "live, priced via Dhan" for a
+     * Kotak/Zerodha basket instead of conflating it with the broker's own
+     * (nonexistent) live figure. */
+    pricingBroker: string;
   };
   ts: number;
 }
@@ -73,6 +80,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
           hedgeBenefit: 0,
           spanMargin: 0,
           exposureMargin: 0,
+          pricingBroker: body?.broker || 'dhan',
         },
       });
     }
@@ -111,12 +119,28 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       // lib/multiLegFocus.ts's fallbackLotSize), so no further scaling there.
       const crudeMult = broker !== 'dhan' ? 1 : (underlying === 'CRUDEOIL' ? 100 : underlying === 'CRUDEOILM' ? 10 : 1);
       // Dhan's margin calculator is the only one of the three brokers this
-      // dashboard supports that exposes a real SPAN+exposure endpoint —
-      // Zerodha/Kotak legs always fall back to the flat estimate below, by
-      // necessity rather than failure. legMarginSource still reports that
-      // accurately as 'estimate' so the UI doesn't claim a live figure it
-      // doesn't have.
+      // dashboard supports that exposes a real SPAN+exposure endpoint. For a
+      // Kotak/Zerodha basket this does NOT mean falling back to a flat,
+      // hedge-blind estimate by default: NSE/BSE option contracts are the
+      // same instrument regardless of which broker trades them, so — exactly
+      // like the cross-broker pattern in app/api/margin-allocator/route.ts —
+      // this looks up the SAME strikes' real Dhan security ids and prices the
+      // whole basket through Dhan's netted calculator anyway. A flat estimate
+      // is reserved for crude (MCX quantity semantics differ 100x across
+      // brokers per CLAUDE.md — not safe to cross-price) or when the Dhan
+      // lookup itself fails (expiry not yet in the master list, etc).
       const hasLiveMarginApi = broker === 'dhan';
+      const crossPriceViaDhan = !hasLiveMarginApi && !isCrude;
+      const dhanLookup = crossPriceViaDhan ? await getDhanStrikeLookup(underlying, body.expiry) : null;
+      const canPriceViaDhan = hasLiveMarginApi || dhanLookup !== null;
+
+      const dhanSecIdFor = (leg: LegInput): string | undefined => {
+        if (hasLiveMarginApi) return leg.securityId;
+        if (!dhanLookup) return undefined;
+        const entry = dhanLookup.strikes[String(leg.strike)];
+        const id = leg.option === 'CE' ? entry?.ceId : entry?.peId;
+        return id ? String(id) : undefined;
+      };
 
       // 1. Calculate margin for each leg
       for (const leg of body.legs) {
@@ -138,7 +162,8 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
         }
 
         // SELL leg: writing option requires SPAN + exposure margin
-        if (hasLiveMarginApi && leg.securityId) {
+        const dhanSecId = canPriceViaDhan ? dhanSecIdFor(leg) : undefined;
+        if (dhanSecId) {
           try {
             // Shares the same account-wide lane as the strangle-matrix
             // sweep and the ultimate-scanner's enrichment (pacedMarginCall
@@ -146,7 +171,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
             // per-leg calls could race those and collectively exceed
             // Dhan's rate limit even though each looks well-paced alone.
             const res = await pacedMarginCall(() => withOneRetry(() => dhanPost('/margincalculator', {
-              securityId: String(leg.securityId),
+              securityId: dhanSecId,
               exchangeSegment,
               transactionType: 'SELL',
               quantity: leg.quantity,
@@ -170,9 +195,9 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
         }
 
         // Fallback estimate (~11-12% of underlying contract value) — used
-        // only when a live figure genuinely isn't available: non-Dhan
-        // broker, leg not yet resolved to a securityId, or the calculator
-        // call itself failed after a retry.
+        // only when a live figure genuinely isn't available: crude, leg not
+        // yet resolved to a (Dhan) securityId, the Dhan strike lookup failed,
+        // or the calculator call itself failed after a retry.
         const mult = isCrude ? crudeMult : 1;
         const estimatedMargin = Math.round(defaultSpot * leg.quantity * mult * 0.12);
         legMargins[leg.id] = estimatedMargin;
@@ -180,21 +205,23 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       }
 
       // 2. Calculate portfolio/basket margin with netting
-      const activeLegsWithSecId = body.legs.filter(
-        l => l.status !== 'CLOSED' && l.quantity > 0 && l.securityId
-      );
-      const allActiveLegsHaveSecId = activeLegsWithSecId.length ===
-        body.legs.filter(l => l.status !== 'CLOSED' && l.quantity > 0).length;
+      const activeLegs = body.legs.filter(l => l.status !== 'CLOSED' && l.quantity > 0);
+      const activeLegsWithSecId = canPriceViaDhan
+        ? activeLegs
+          .map(l => ({ leg: l, dhanSecId: dhanSecIdFor(l) }))
+          .filter((x): x is { leg: LegInput; dhanSecId: string } => !!x.dhanSecId)
+        : [];
+      const allActiveLegsHaveSecId = activeLegsWithSecId.length === activeLegs.length;
 
       let basketMargin = 0;
       let basketMarginSource: 'live' | 'estimate' = 'estimate';
       let spanMargin = 0;
       let exposureMargin = 0;
 
-      if (hasLiveMarginApi && activeLegsWithSecId.length > 0) {
+      if (canPriceViaDhan && activeLegsWithSecId.length > 0) {
         try {
-          const scripList = activeLegsWithSecId.map(l => ({
-            securityId: String(l.securityId),
+          const scripList = activeLegsWithSecId.map(({ leg: l, dhanSecId }) => ({
+            securityId: dhanSecId,
             exchangeSegment,
             transactionType: l.side === 'B' ? 'BUY' : 'SELL',
             quantity: l.quantity,
@@ -212,8 +239,9 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
           spanMargin = Math.round(Number(multiRes?.spanMargin ?? 0));
           exposureMargin = Math.round(Number(multiRes?.exposure ?? 0));
           // Only a true basket-wide netted figure counts as 'live' — if any
-          // active leg was missing a securityId, this call only covered
-          // part of the basket and the number is not the real netted total.
+          // active leg was missing a (Dhan) securityId, this call only
+          // covered part of the basket and the number is not the real
+          // netted total.
           basketMarginSource = allActiveLegsHaveSecId ? 'live' : 'estimate';
         } catch {
           // Fallback: sum of leg margins
@@ -237,6 +265,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
         hedgeBenefit,
         spanMargin,
         exposureMargin,
+        pricingBroker: canPriceViaDhan ? 'dhan' : broker,
       };
     })();
 

@@ -555,22 +555,25 @@ def main():
         print(f"\n  [INFO] {skipped_ltp_only} quote(s) are LTP-only (no real OHLC) — kept in "
               f"today_quotes.json but not written to CSV")
 
-    print(f"\n  Updating stock CSVs...")
-    appended, updated, errors = update_stock_csvs(csv_quotes, today)
-    print(f"  OK Stocks: {appended} appended, {updated} updated, {errors} errors")
+    if not is_trading_day():
+        print(f"\n  [INFO] Weekend/non-trading day ({today}) — skipping CSV upsert to protect historical daily bars.")
+    else:
+        print(f"\n  Updating stock CSVs...")
+        appended, updated, errors = update_stock_csvs(csv_quotes, today)
+        print(f"  OK Stocks: {appended} appended, {updated} updated, {errors} errors")
 
-    # ── Write today's row into index EOD CSVs ────────────────────────────────
-    print(f"\n  Updating index CSVs...")
-    for today_key, ohlcv in csv_quotes.items():
-        if today_key == "_NIFTY50_INDEX":
-            # Nifty 50 has two CSVs to update (1Y and 5Y)
-            p1, l1 = INDEX_CSV_MAP["_NIFTY50_INDEX"]
-            p2, l2 = INDEX_CSV_MAP["_NIFTY50_INDEX_5Y"]
-            update_index_csv(p1, l1, ohlcv, today)
-            update_index_csv(p2, l2, ohlcv, today)
-        elif today_key in INDEX_CSV_MAP:
-            p, l = INDEX_CSV_MAP[today_key]
-            update_index_csv(p, l, ohlcv, today)
+        # ── Write today's row into index EOD CSVs ────────────────────────────────
+        print(f"\n  Updating index CSVs...")
+        for today_key, ohlcv in csv_quotes.items():
+            if today_key == "_NIFTY50_INDEX":
+                # Nifty 50 has two CSVs to update (1Y and 5Y)
+                p1, l1 = INDEX_CSV_MAP["_NIFTY50_INDEX"]
+                p2, l2 = INDEX_CSV_MAP["_NIFTY50_INDEX_5Y"]
+                update_index_csv(p1, l1, ohlcv, today)
+                update_index_csv(p2, l2, ohlcv, today)
+            elif today_key in INDEX_CSV_MAP:
+                p, l = INDEX_CSV_MAP[today_key]
+                update_index_csv(p, l, ohlcv, today)
 
     # ── Write today_quotes.json (used by dataLoader.ts in-memory patch) ──────
     output = {

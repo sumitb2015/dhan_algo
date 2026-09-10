@@ -4,6 +4,7 @@ import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react'
 import { AlertCircle, RefreshCw, BarChart2, CheckSquare, Square, Info, Layers, Settings, Activity, ZapOff } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { motion, AnimatePresence } from 'framer-motion';
+import NavBar from './NavBar';
 
 // Types
 interface OptionContractData {
@@ -531,6 +532,8 @@ export default function OptionsAnalyzer() {
           </div>
         )}
 
+        <span className="w-px h-5 bg-zinc-800 shrink-0 ml-auto" />
+        <NavBar />
       </header>
 
       {/* Main Content Wrapper */}

@@ -1,10 +1,10 @@
 import type { Metadata } from 'next';
-import StockDashboard from '@/components/StockDashboard';
+import MarketDashboard from '@/components/MarketDashboard';
 
 export const metadata: Metadata = {
-  title: 'Relative Strength Dashboard',
+  title: 'Terminal',
 };
 
 export default function Home() {
-  return <StockDashboard />;
+  return <MarketDashboard />;
 }

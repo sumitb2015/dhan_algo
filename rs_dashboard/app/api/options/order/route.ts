@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import path from 'path';
 import fs from 'fs';
+import { invalidateBrokerCache } from '@/lib/brokerPositionsCache';
 
 const PROJECT_ROOT = path.resolve(process.cwd(), '..');
 const TOKEN_FILE   = path.join(PROJECT_ROOT, 'access_token.json');
@@ -135,6 +136,10 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
 
     const results = await Promise.all(orderPromises);
     const failures = results.filter(r => !r.success);
+
+    // Invalidate even on a partial failure — a basket can place some legs
+    // and reject others, and any placed leg still means positions moved.
+    if (results.some(r => r.success)) invalidateBrokerCache('dhan');
 
     if (failures.length > 0) {
       return NextResponse.json({

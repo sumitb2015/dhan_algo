@@ -60,9 +60,28 @@ def main():
         except Exception:
             token_data = {}
 
+    # The token file's own client-id key has drifted across writers: login.py's
+    # OAuth/TOTP paths write "dhanClientId", but the dashboard's manual-connect
+    # route (rs_dashboard/lib/session.ts writeDhanTokenFile) writes "clientId" —
+    # so a token file last written by that path has no "dhanClientId" at all.
+    # Reading only "dhanClientId" then returns None here while the rest of the
+    # response still reports success, which lets the Next.js route decide
+    # enterDashboard=true without ever getting a client id to sign the session
+    # cookie with — no Set-Cookie is sent, and the browser bounces straight
+    # back from "/" to "/login" after a "successful" autologin.
+    #
+    # .env's client_id is the authoritative id anyway (it's what get_dhan_client()
+    # hands to DhanContext for every API call), so prefer it and fall back to
+    # whichever key the cached file happens to carry.
+    client_id = (
+        os.getenv("client_id")
+        or token_data.get("dhanClientId")
+        or token_data.get("clientId")
+    )
+
     print(json.dumps({
         "success": True,
-        "clientId": token_data.get("dhanClientId"),
+        "clientId": client_id,
         "expiryTime": token_data.get("expiryTime"),
     }))
 

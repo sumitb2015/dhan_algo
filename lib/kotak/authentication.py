@@ -66,8 +66,6 @@ def install_timeouts():
     if _timeouts_installed:
         return
     import requests
-    import neo_api_client.rest as _neo_rest
-    import neo_api_client.api.scrip_search as _neo_scrip
 
     class _TimeoutRequests:
         @staticmethod
@@ -80,8 +78,17 @@ def install_timeouts():
             kwargs.setdefault('timeout', HTTP_TIMEOUT)
             return requests.post(*args, **kwargs)
 
-    _neo_rest.requests = _TimeoutRequests
-    _neo_scrip.requests = _TimeoutRequests
+    try:
+        import neo_api_client.rest as _neo_rest
+        _neo_rest.requests = _TimeoutRequests
+        import neo_api_client.api.scrip_search as _neo_scrip
+        _neo_scrip.requests = _TimeoutRequests
+    except ImportError:
+        # kotakneoapi v3 (the successor SDK to this pinned v2 fork) dropped
+        # the `api` subpackage (moved to `services/`) and switched transport
+        # from `requests` to `httpx`, which already applies its own 30s
+        # default timeout — there is nothing left here to patch on v3.
+        pass
     _timeouts_installed = True
 
 

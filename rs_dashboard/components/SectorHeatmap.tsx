@@ -17,11 +17,12 @@ function sectorHealthColor(avgScore: number): string {
   return 'text-red-400';
 }
 
+// Flat fills, not gradients — the Bloomberg style has no gradients anywhere.
 function sectorBarColor(avgScore: number): string {
-  if (avgScore >= 70) return 'bg-gradient-to-r from-emerald-600 to-teal-400';
-  if (avgScore >= 50) return 'bg-gradient-to-r from-blue-600 to-indigo-400';
+  if (avgScore >= 70) return 'bg-emerald-500';
+  if (avgScore >= 50) return 'bg-blue-500';
   if (avgScore >= 30) return 'bg-zinc-600';
-  return 'bg-gradient-to-r from-red-700 to-red-500';
+  return 'bg-red-500';
 }
 
 export default function SectorHeatmap({ data, selectedSymbol, onSelectSymbol }: SectorHeatmapProps) {
@@ -58,7 +59,10 @@ export default function SectorHeatmap({ data, selectedSymbol, onSelectSymbol }: 
 
   const getTileClasses = (score: number, isSelected: boolean) => {
     let base = 'relative flex flex-col justify-between p-2.5 rounded-xl border text-center transition-all duration-150 select-none cursor-pointer ';
-    if (isSelected) base += 'ring-2 ring-white/70 scale-[1.04] z-10 shadow-lg ';
+    // ring-oncolor, not ring-white: "white" is the flipping brightest-text
+    // token (near-black in light mode per CLAUDE.md), which would turn a
+    // selection glow into a dark ring. oncolor is genuinely fixed white.
+    if (isSelected) base += 'ring-2 ring-oncolor/70 scale-[1.04] z-10 shadow-lg ';
 
     if (score >= 80) return base + 'bg-emerald-500/12 text-emerald-300 border-emerald-500/35 hover:bg-emerald-500/22 hover:shadow-emerald-500/15 hover:shadow-lg';
     if (score >= 60) return base + 'bg-blue-500/12 text-blue-300 border-blue-500/30 hover:bg-blue-500/18 hover:shadow-blue-500/12 hover:shadow-lg';
@@ -67,13 +71,13 @@ export default function SectorHeatmap({ data, selectedSymbol, onSelectSymbol }: 
   };
 
   return (
-    <div className="flex flex-col rounded-2xl border border-zinc-800/80 bg-zinc-950/60 backdrop-blur-md p-6 overflow-hidden">
-      {/* Controls */}
-      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 border-b border-zinc-800/60 pb-5 mb-5">
+    <div className="flex flex-col rounded-xl border border-zinc-800 bg-zinc-900/70 overflow-hidden">
+      {/* Header (dhan-bloomberg-dashboard-page panel formula) */}
+      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 border-b border-amber-500/25 bg-zinc-950/60 px-5 py-3">
         <div className="flex items-center gap-2">
-          <Grid className="h-4.5 w-4.5 text-emerald-500" />
-          <h2 className="text-base font-bold text-white tracking-wide">Sector Heatmap</h2>
-          <span className="text-[10px] text-zinc-500 bg-zinc-900 border border-zinc-800 px-1.5 py-0.5 rounded-full font-mono">
+          <Grid className="h-3.5 w-3.5 text-amber-400" />
+          <h2 className="text-[11px] font-bold uppercase tracking-[0.16em] text-amber-400">Sector Heatmap</h2>
+          <span className="text-[10px] text-zinc-500 bg-zinc-900 border border-zinc-800 px-1.5 py-0.5 rounded font-mono">
             Sorted by avg RS strength
           </span>
         </div>
@@ -84,7 +88,7 @@ export default function SectorHeatmap({ data, selectedSymbol, onSelectSymbol }: 
             placeholder="Search symbol..."
             value={searchTerm}
             onChange={(e) => setSearchTerm(e.target.value)}
-            className="px-3 py-1.5 border border-zinc-800 rounded-xl bg-zinc-900/60 text-white placeholder-zinc-500 text-xs focus:outline-none focus:ring-1 focus:ring-emerald-500/50"
+            className="px-3 py-1.5 border border-zinc-800 rounded-lg bg-zinc-900 text-white placeholder-zinc-500 text-xs focus:outline-none focus:ring-1 focus:ring-amber-500/50"
           />
 
           <div className="flex items-center gap-2 text-xs">
@@ -95,7 +99,7 @@ export default function SectorHeatmap({ data, selectedSymbol, onSelectSymbol }: 
               max="100"
               value={minScore}
               onChange={(e) => setMinScore(Number(e.target.value))}
-              className="w-20 accent-emerald-500 cursor-pointer"
+              className="w-20 accent-amber-500 cursor-pointer"
             />
             <span className="font-mono text-zinc-300 w-6 text-right">{minScore}</span>
           </div>
@@ -103,7 +107,7 @@ export default function SectorHeatmap({ data, selectedSymbol, onSelectSymbol }: 
       </div>
 
       {/* Heatmap Grid */}
-      <div className="flex-1 overflow-y-auto max-h-[620px] pr-1 space-y-5">
+      <div className="flex-1 overflow-y-auto max-h-[620px] px-5 pt-5 pr-4 space-y-5">
         {Object.keys(groupedSectors).length === 0 ? (
           <div className="text-center py-12 text-zinc-500 text-sm">No stocks match the selected criteria.</div>
         ) : (
@@ -126,7 +130,7 @@ export default function SectorHeatmap({ data, selectedSymbol, onSelectSymbol }: 
                   {/* Avg RS Score */}
                   <div className="flex items-center gap-1.5">
                     <span className="text-[10px] text-zinc-600">Avg RS:</span>
-                    <span className={`text-xs font-black font-mono ${sectorHealthColor(avgScore)}`}>{avgScore}</span>
+                    <span className={`text-xs font-bold font-mono ${sectorHealthColor(avgScore)}`}>{avgScore}</span>
                     <div className="w-20 h-1 bg-zinc-800 rounded-full overflow-hidden">
                       <div className={`h-full rounded-full ${sectorBarColor(avgScore)}`} style={{ width: `${avgScore}%` }} />
                     </div>
@@ -161,7 +165,12 @@ export default function SectorHeatmap({ data, selectedSymbol, onSelectSymbol }: 
                         {/* Symbol + Score */}
                         <div className="flex items-start justify-between gap-1">
                           <span className="font-bold text-white text-[11px] tracking-wide leading-none">{stock.symbol}</span>
-                          <span className="text-[9px] font-black font-mono px-1 py-0.5 rounded bg-black/40 leading-none">
+                          {/* bg-oncolor-dark, not bg-black: this scrim sits on
+                              a saturated tile fill and must stay dark in both
+                              themes to keep the score legible — bg-black
+                              flips to near-white in light mode and would wash
+                              out instead of darkening. */}
+                          <span className="text-[9px] font-bold font-mono px-1 py-0.5 rounded bg-oncolor-dark/40 leading-none">
                             {stock.rsScore}
                           </span>
                         </div>
@@ -192,7 +201,7 @@ export default function SectorHeatmap({ data, selectedSymbol, onSelectSymbol }: 
       </div>
 
       {/* Legend */}
-      <div className="border-t border-zinc-900 mt-5 pt-4 flex flex-wrap items-center justify-between gap-3 text-[10px] text-zinc-500">
+      <div className="border-t border-zinc-800 mt-5 px-5 pt-4 pb-5 flex flex-wrap items-center justify-between gap-3 text-[10px] text-zinc-500">
         <div className="flex items-center gap-1.5">
           <Eye className="h-3.5 w-3.5" />
           <span>Click a tile to view its RS chart. Sectors sorted strongest first.</span>

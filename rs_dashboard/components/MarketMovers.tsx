@@ -181,9 +181,14 @@ function TR({ children, highlight, className }: { children: React.ReactNode; hig
   );
 }
 
-// ─── Quant Terminal Card & Headers ──────────────────────────────────────────
+// ─── Terminal Panel (dhan-bloomberg-dashboard-page formula) ─────────────────
+// The title and the header's hairline rule are always amber — the terminal's
+// own identity color, and the one constant that makes every panel on the page
+// read as one instrument. `accent` only tints the small icon glyph, which is
+// free to carry a per-panel meaning (Gainers vs Losers, Bull vs Bear volume)
+// the way MarketDashboard's simpler, non-paired panels never needed to.
 function CardPanel({
-  title, eyebrow, count, icon: Icon, accent = 'text-emerald-400', children,
+  title, eyebrow, count, icon: Icon, accent = 'text-amber-400', children,
   className, maxHeight, headerRight,
 }: {
   title: string; eyebrow?: string; count?: number | string; icon?: React.ElementType;
@@ -191,9 +196,12 @@ function CardPanel({
   headerRight?: React.ReactNode;
 }) {
   return (
-    <div className={cn('bg-zinc-900/60 border border-zinc-800 rounded-2xl overflow-hidden flex flex-col', className)}>
-      <div className="flex items-center justify-between gap-3 px-5 py-3.5 border-b border-zinc-800 bg-zinc-950/40 shrink-0">
+    <div className={cn('bg-zinc-900/70 border border-zinc-800 rounded-xl shadow-sm overflow-hidden flex flex-col', className)}>
+      <div className="flex items-center justify-between gap-3 px-3.5 py-2.5 border-b border-amber-500/25 bg-zinc-950/60 shrink-0">
         <div className="flex items-center gap-2.5">
+          {/* Chip stays neutral so per-panel accent icons (Gainers vs Losers,
+              Bull vs Bear volume) read clearly — the amber hairline below is
+              this page's one constant chrome motif, not the chip color. */}
           {Icon && (
             <div className="flex items-center justify-center w-7 h-7 rounded-lg bg-zinc-900 border border-zinc-700/60 shrink-0">
               <Icon className={cn('h-3.5 w-3.5', accent)} />
@@ -206,7 +214,7 @@ function CardPanel({
               </p>
             )}
             <div className="flex items-center gap-2">
-              <h3 className="text-sm font-bold text-zinc-100 tracking-tight leading-none">{title}</h3>
+              <h3 className="text-[11px] font-bold uppercase tracking-[0.16em] text-amber-400 leading-none">{title}</h3>
               {count !== undefined && (
                 <span className="text-[10px] font-mono font-bold px-1.5 py-0.5 rounded bg-zinc-800 text-zinc-300 border border-zinc-700">
                   {count}
@@ -508,8 +516,12 @@ function NRBreakoutTable({ nr4, nr7 }: { nr4: MoverResult[]; nr7: MoverResult[] 
                 <TD className="text-zinc-400 max-w-[120px] truncate text-[11px]">{r.sector || '—'}</TD>
                 <TD right className="text-zinc-200">{fmtPrice(r.latestClose)}</TD>
                 <TD right>
+                  {/* 3=hot uses the full chrome accent, 2=lukewarm gets a
+                      distinct neutral rather than a second un-tokenized amber
+                      step (dhan-bloomberg-dashboard-page: text accents cap at
+                      -400) — zinc-300 reads as "worth a look", not "graded". */}
                   <span className={cn('text-xs font-bold font-mono',
-                    score === 3 ? 'text-amber-400' : score === 2 ? 'text-amber-500' : 'text-zinc-500')}>
+                    score === 3 ? 'text-amber-400' : score === 2 ? 'text-zinc-300' : 'text-zinc-600')}>
                     {'★'.repeat(score) + '☆'.repeat(3 - score)}
                   </span>
                 </TD>
@@ -800,11 +812,11 @@ export default function MarketMovers() {
       {/* ─── Sticky Header ───────────────────────────────────────────────── */}
       <header className="sticky top-0 z-20 flex items-center justify-between gap-3 flex-wrap px-6 py-3 border-b border-zinc-800 bg-zinc-950/95 backdrop-blur">
         <div className="flex items-center gap-3">
-          <div className="flex items-center justify-center w-8 h-8 rounded-lg bg-emerald-500/10 border border-emerald-500/25 shrink-0">
-            <TrendingUp className="w-4 h-4 text-emerald-400" />
+          <div className="flex items-center justify-center w-8 h-8 rounded-lg bg-amber-500/10 border border-amber-500/25 shrink-0">
+            <TrendingUp className="w-4 h-4 text-amber-400" />
           </div>
           <div>
-            <p className="text-[9px] font-bold text-emerald-500 uppercase tracking-[0.18em] mb-0.5">
+            <p className="text-[9px] font-bold text-amber-400 uppercase tracking-[0.18em] mb-0.5">
               Analytics · Cross-Sectional Momentum
             </p>
             <h1 className="text-sm font-bold text-white tracking-tight leading-none">
@@ -829,7 +841,7 @@ export default function MarketMovers() {
                 className={cn(
                   'px-3 py-1 text-xs font-mono font-bold rounded-md transition-colors uppercase tracking-wider',
                   indexType === t
-                    ? 'bg-emerald-500/15 text-emerald-400 border border-emerald-500/30'
+                    ? 'bg-amber-500/15 text-amber-400 border border-amber-500/30'
                     : 'text-zinc-400 hover:text-zinc-200 border border-transparent'
                 )}
               >
@@ -856,10 +868,10 @@ export default function MarketMovers() {
           <button
             onClick={() => fetchData(true, true)}
             disabled={loading}
-            className="h-7 w-7 flex items-center justify-center rounded-lg border border-zinc-800 bg-zinc-900 text-zinc-400 hover:text-emerald-400 hover:border-emerald-500/40 transition-colors disabled:opacity-50"
+            className="h-7 w-7 flex items-center justify-center rounded-lg border border-zinc-800 bg-zinc-900 text-zinc-400 hover:text-amber-400 hover:border-amber-500/40 transition-colors disabled:opacity-50"
             title="Force refresh data"
           >
-            <RefreshCw className={cn('h-3.5 w-3.5', loading && 'animate-spin text-emerald-400')} />
+            <RefreshCw className={cn('h-3.5 w-3.5', loading && 'animate-spin text-amber-400')} />
           </button>
         </div>
       </header>
@@ -933,7 +945,7 @@ export default function MarketMovers() {
         {/* Loading State */}
         {loading && !data && (
           <div className="flex flex-col items-center justify-center py-28 gap-3">
-            <div className="w-8 h-8 border-2 border-zinc-700 border-t-emerald-400 rounded-full animate-spin" />
+            <div className="w-8 h-8 border-2 border-zinc-700 border-t-amber-400 rounded-full animate-spin" />
             <p className="text-sm text-zinc-400 font-medium">Computing market movers across {indexType.toUpperCase()}…</p>
           </div>
         )}
@@ -1040,7 +1052,7 @@ export default function MarketMovers() {
                       className={cn(
                         'flex items-center gap-2 px-3.5 py-1.5 rounded-lg text-xs font-semibold transition-all',
                         isActive
-                          ? 'bg-emerald-500/15 text-emerald-400 border border-emerald-500/30 shadow-sm'
+                          ? 'bg-amber-500/15 text-amber-400 border border-amber-500/30 shadow-sm'
                           : 'text-zinc-400 hover:text-zinc-200 border border-transparent'
                       )}
                     >
@@ -1132,7 +1144,7 @@ export default function MarketMovers() {
                   title="Sector Rotation & Performance"
                   eyebrow="Relative Strength Across Industries"
                   icon={Layers}
-                  accent="text-emerald-400"
+                  accent="text-amber-400"
                   headerRight={
                     <div className="flex items-center bg-zinc-900 border border-zinc-800 p-0.5 rounded-lg">
                       {(['1D', '1W', '1M'] as const).map(m => (
@@ -1142,7 +1154,7 @@ export default function MarketMovers() {
                           className={cn(
                             'px-2.5 py-1 text-xs font-mono font-bold rounded transition-colors',
                             sectorMetric === m
-                              ? 'bg-emerald-500/15 text-emerald-400 border border-emerald-500/30'
+                              ? 'bg-amber-500/15 text-amber-400 border border-amber-500/30'
                               : 'text-zinc-400 hover:text-zinc-200 border border-transparent'
                           )}
                         >
@@ -1203,7 +1215,7 @@ export default function MarketMovers() {
                   eyebrow="Market Breadth By Industry"
                   count={sectorStats.length}
                   icon={BarChart2}
-                  accent="text-emerald-400"
+                  accent="text-amber-400"
                 >
                   <table className="w-full border-collapse">
                     <thead>
@@ -1349,11 +1361,11 @@ export default function MarketMovers() {
                 <div className="bg-zinc-900/60 border border-zinc-800 rounded-2xl p-4 flex flex-col gap-3">
                   <div className="flex items-center justify-between gap-3 flex-wrap">
                     <div className="flex items-center gap-2">
-                      <Filter className="w-4 h-4 text-emerald-400" />
+                      <Filter className="w-4 h-4 text-amber-400" />
                       <h4 className="text-xs font-bold text-zinc-100 uppercase tracking-wider">Multi-Factor Screening Criteria</h4>
                     </div>
                     <span className="text-xs font-mono text-zinc-400">
-                      Matches: <strong className="text-emerald-400">{screenerResults.length}</strong> / {data.allMovers.length} stocks
+                      Matches: <strong className="text-amber-400">{screenerResults.length}</strong> / {data.allMovers.length} stocks
                     </span>
                   </div>
 
@@ -1408,7 +1420,7 @@ export default function MarketMovers() {
                           className={cn(
                             'px-2.5 py-1 text-xs font-mono font-bold rounded transition-colors',
                             screenerDuration === tf
-                              ? 'bg-emerald-500/15 text-emerald-400 border border-emerald-500/30'
+                              ? 'bg-amber-500/15 text-amber-400 border border-amber-500/30'
                               : 'text-zinc-500 hover:text-zinc-300'
                           )}
                         >
@@ -1423,7 +1435,7 @@ export default function MarketMovers() {
                       <select
                         value={screenerSector}
                         onChange={e => setScreenerSector(e.target.value)}
-                        className="bg-zinc-900 border border-zinc-800 text-zinc-200 text-xs rounded-lg px-2.5 py-1 focus:outline-none focus:border-emerald-500"
+                        className="bg-zinc-900 border border-zinc-800 text-zinc-200 text-xs rounded-lg px-2.5 py-1 focus:outline-none focus:border-amber-400"
                       >
                         <option value="ALL">All Sectors</option>
                         {distinctSectors.map(s => (
@@ -1438,7 +1450,7 @@ export default function MarketMovers() {
                       <select
                         value={screenerRsiFilter}
                         onChange={e => setScreenerRsiFilter(e.target.value as typeof screenerRsiFilter)}
-                        className="bg-zinc-900 border border-zinc-800 text-zinc-200 text-xs rounded-lg px-2.5 py-1 focus:outline-none focus:border-emerald-500"
+                        className="bg-zinc-900 border border-zinc-800 text-zinc-200 text-xs rounded-lg px-2.5 py-1 focus:outline-none focus:border-amber-400"
                       >
                         <option value="ALL">All RSI</option>
                         <option value="OB">&gt; 70 Overbought</option>
@@ -1453,7 +1465,7 @@ export default function MarketMovers() {
                       <select
                         value={screenerMaFilter}
                         onChange={e => setScreenerMaFilter(e.target.value as typeof screenerMaFilter)}
-                        className="bg-zinc-900 border border-zinc-800 text-zinc-200 text-xs rounded-lg px-2.5 py-1 focus:outline-none focus:border-emerald-500"
+                        className="bg-zinc-900 border border-zinc-800 text-zinc-200 text-xs rounded-lg px-2.5 py-1 focus:outline-none focus:border-amber-400"
                       >
                         <option value="ALL">All MA States</option>
                         <option value="ABOVE_200">&gt; 200D SMA</option>
@@ -1469,7 +1481,7 @@ export default function MarketMovers() {
                   eyebrow="Custom Cross-Sectional Filter"
                   count={screenerResults.length}
                   icon={Filter}
-                  accent="text-emerald-400"
+                  accent="text-amber-400"
                   maxHeight="580px"
                 >
                   <table className="w-full border-collapse">

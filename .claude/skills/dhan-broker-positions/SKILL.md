@@ -20,6 +20,8 @@ multipliers, or close-order product inline. Every one of them already has a help
   positions/payoff/analytics surfaces built on `lib/positionLegs.ts`.
 - Adding a broker, or extending an existing one to a new segment (MCX, BSE F&O).
 - Any route under `app/api/scalper/`, `app/api/exit-all/`, `app/api/options/quiktrade/`.
+- `app/api/dashboard/portfolio/route.ts` (the Consolidated Portfolio Balance Sheet) or
+  any other read-only summary surface that lists Kotak positions.
 - `components/MtmChart.tsx`, `scripts/tools/scalper_mtm_history.py`, or any change
   reconstructing a historical/intraday P&L series from position snapshots.
 - Reviewing a P&L number that "looks off by a round factor" — that is almost always
@@ -36,6 +38,8 @@ multipliers, or close-order product inline. Every one of them already has a help
 | Real (not order-quantity) lot size | `lib/lotSize.ts` - `resolveLotSize()` |
 | Per-broker endpoint routing | `hooks/useBrokerSelector.ts` - `scalperRoute()`, `brokerRoute()` |
 | Partial square-off quantities | `lib/partialQty.ts` |
+| Kotak LTP join for a read-only summary page (no live WS bridge available) | `lib/kotakLtpJoin.ts` - `joinKotakLtp()` |
+| Sharing a positions/funds fetch across pages (display/aggregation reads only — never an order-sizing read) | `lib/brokerPositionsCache.ts` - see `dhan-broker-cache` |
 
 `brokerRoute()` takes a **map**, never a positional pair — a positional call once
 silently routed a third broker to Dhan's endpoint, i.e. traded the wrong account.
@@ -79,6 +83,29 @@ target/SL and P&L guards, so it was not cosmetic.
 Resolve LTP only from real `ltp`/`lastPrice` keys, leave it `0` when unknown, and
 join live quotes onto the row by `trdSym` off the shared Dhan feed (an option LTP is
 exchange-set, not broker-set). (`c6ffb22`)
+
+**Two different join implementations exist for this, pick by surface, not by copying
+whichever one you find first:**
+- The **Scalper terminals** (`AdvancedScalper.tsx`, `Scalper.tsx`) already have a live
+  options-quotes WS bridge running for the on-screen expiry, so they join against that
+  in-memory feed plus `kotakSymbolMap` (from `/api/scalper/kotak/symbol-lookup`) for
+  legs on an off-screen expiry — see the `offExpiryKotakRequests` /
+  `kotakSymbolToStrikeByUnderlying` machinery in `AdvancedScalper.tsx` and the mirror
+  of it in `CrudeOilOptions.tsx`. Reach for this pattern when the page is already
+  driving a live chain/WS bridge for its own display.
+- A **read-only summary page with no chain on screen** (the dashboard's Consolidated
+  Portfolio Balance Sheet, `app/api/dashboard/portfolio/route.ts`) has no running WS
+  bridge to join against and no business starting one just to price a table. Use
+  `lib/kotakLtpJoin.ts`'s `joinKotakLtp()` instead: it resolves each unpriced leg's
+  expiry/strike/side via the same on-disk instrument cache the symbol-lookup route
+  reads (`kotak_instruments_cache.py`'s output — **never** decode Kotak's own
+  trading-symbol format yourself; it has two different encodings, compact-monthly vs
+  single-char-month weekly, and getting the epoch math right from a regex is exactly
+  what that cache script exists to avoid re-deriving), groups the resulting legs by
+  `(underlying, expiry)` so each distinct expiry costs exactly one Dhan option-chain
+  fetch, and shares its dedupe/pacing keys with `/api/options/chain` so it can't
+  double up on Dhan's option-chain rate limit against a concurrently open chain page.
+  (2026-09-09)
 
 Related Kotak quirks live in `lib/kotak/` on the Python side: auth failures and empty
 books arrive as 200 OK (`stCode 5203`), net quantity must be computed from the four
@@ -129,6 +156,9 @@ leg. Use `lib/strategy_risk.py`'s `resolve_exit_qty(helper, security_id, own_qty
 ## Before You Ship
 - Did any new rupee figure skip `scaleBrokerPnl()` / `contractMultiplier()`?
 - Does every close/exit order carry a product resolved from the position?
+- If pricing an unpriced Kotak leg, did you use the WS-bridge join (a page already
+  driving a live chain) or `joinKotakLtp()` (a read-only summary page) rather than
+  decoding Kotak's trading-symbol format yourself?
 - Is the change broker-agnostic? Dhan is the only broker with a numeric `securityId`;
   everything else joins by trading symbol, so branch on `broker !== 'dhan'` rather
   than on a specific broker name.

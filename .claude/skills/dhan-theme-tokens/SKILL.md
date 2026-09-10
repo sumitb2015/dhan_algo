@@ -106,6 +106,17 @@ A canvas cannot read CSS variables. `lib/chartTheme.ts` exposes `useChartChrome(
 which returns the palette as plain values and re-renders on theme change. See the
 `dhan-live-chart` skill for how to apply it without recreating the chart.
 
+### Hand-rolled SVG (not recharts) — same hook as canvas, not the recharts trick
+A one-off SVG chart built from raw `<path>`/`<line>`/`<text>` (not recharts'
+`<ComposedChart>` etc.) gets none of the global class-name CSS rules above — there
+are no `.recharts-*` classes to hook into. Use `useChartChrome()` here too and pass
+its plain string values as presentation-attribute props (`stroke={chrome.gridline}`),
+exactly as for canvas. `components/BasketPayoffChart.tsx` does this correctly;
+`components/analytics/PositionsPayoffChart.tsx` and `components/strategy/
+PayoffDiagram.tsx` — built later, copying its layout — dropped the hook and
+hardcoded dark-theme hex instead, so they don't flip in light mode. See
+`dhan-payoff-diagrams` for the full writeup.
+
 ## Injected `<style>` Blocks
 `components/PanelStyles.tsx` is the worked example: the whole `lc-*` design system is
 driven by `--lc-*` tokens declared in both palette blocks — surfaces, hairlines, text
@@ -132,3 +143,26 @@ on pages without a NavBar (e.g. `/login`), where `ThemeToggle` never mounts.
 Toggle both themes and check: modal scrims still dim, chart tooltips are legible,
 table headers read as headers, and no surface has gone flat. Grep for regressions:
 `grep -rn 'bg-black/\|#[0-9a-f]\{6\}' app components` in `rs_dashboard/`.
+
+## Common Mistakes
+- **Reaching for `text-black` to mean "always readable dark text on a hover
+  background."** `text-black`/`bg-black` are tokens (`--color-black` →
+  `--c-black`), and they're **inverted** — `--c-black` resolves to near-white
+  in light mode. `d716d6d` found this exact bug: `hover:text-black` on
+  inactive sidebar rows and active-group text looked correct while writing it,
+  but in light mode turned near-white text onto a light hover background —
+  invisible. Confirmed via `getComputedStyle` returning `rgb(248, 250, 252)`.
+  For "must render dark regardless of theme," use `text-oncolor-dark` (see
+  CLAUDE.md), never `text-black`/`text-white`.
+- **Assuming every step of a Tailwind color ramp resolves correctly just
+  because some steps do.** The same commit found `text-emerald-600`/`-700`
+  independently returning a bogus near-black value via `getComputedStyle`,
+  while `emerald-200/300/400` (this app's actual curated accent steps) and
+  Tailwind's own untouched defaults resolved fine — a likely Tailwind v4 quirk
+  where partially overriding a ramp's shades in `@theme inline` shadows the
+  untouched shades' own defaults, specific to the `text-` utility (`bg-emerald-600`
+  elsewhere was unaffected). When a color looks wrong in one mode only, verify
+  the actual computed style in the browser rather than trusting the class name
+  reads as reasonable — see `dhan-bloomberg-dashboard-page`'s `-500`+ accent-text
+  rule for the same "verify computed style, don't trust the class" method
+  applied to a different bad-color-step bug.

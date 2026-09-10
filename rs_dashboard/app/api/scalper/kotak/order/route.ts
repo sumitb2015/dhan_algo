@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { kotakPost, KOTAK_PATHS } from '@/lib/kotakToken';
+import { invalidateBrokerCache } from '@/lib/brokerPositionsCache';
 
 /** Products this route will book. CO/BO are excluded — Neo holds its own exit
  *  order against them, which a plain market order would leave dangling. */
@@ -82,6 +83,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     const data = (typeof json.data === 'object' && json.data !== null ? json.data : {}) as Record<string, unknown>;
     const orderId = json.nOrdNo ?? data.nOrdNo;
     if (json.stat === 'Ok' && orderId) {
+      invalidateBrokerCache('kotak');
       return NextResponse.json({ success: true, order_id: String(orderId) });
     }
     // kotakPost already throws on an error-shaped body; reaching here means the

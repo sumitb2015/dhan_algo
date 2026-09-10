@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
 import { kiteGet, kitePost } from '@/lib/zerodhaToken';
+import { invalidateBrokerCache } from '@/lib/brokerPositionsCache';
 
 export async function POST(): Promise<NextResponse> {
   const closed: string[] = [];
@@ -30,6 +31,9 @@ export async function POST(): Promise<NextResponse> {
       }
     }
 
+    // Invalidate even on a partial failure — some legs can close while others
+    // error out, and `closed` being non-empty still means positions moved.
+    if (closed.length > 0) invalidateBrokerCache('zerodha');
     return NextResponse.json({ success: errors.length === 0, closed, errors });
   } catch (err) {
     console.error('[scalper/zerodha/exit-all] error:', err);

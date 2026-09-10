@@ -26,6 +26,7 @@ import {
 } from '@/components/ui/combobox';
 import { AlertTriangle, Plus, RefreshCw, RotateCcw, ShoppingBasket, Trash2 } from 'lucide-react';
 import { cn } from '@/lib/utils';
+import NavBar from './NavBar';
 
 // Stock F&O order placement is Dhan-only today — /api/options/chain and
 // /api/options/expiries both 400 for Zerodha on any underlying outside
@@ -471,6 +472,9 @@ export default function OptionStratsStock() {
               <TabsTrigger value="graph">Graph</TabsTrigger>
             </TabsList>
           </Tabs>
+
+          <span className="w-px h-5 bg-zinc-800 shrink-0" />
+          <NavBar />
         </div>
       </div>
 

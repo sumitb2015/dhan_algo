@@ -2,7 +2,7 @@
 
 import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import NavBar from './NavBar';
-import { Zap, RefreshCw, Shield, ShieldOff, Plus, Scissors, Wallet } from 'lucide-react';
+import { Zap, RefreshCw, Shield, ShieldOff, Plus, Scissors, Wallet, Sigma } from 'lucide-react';
 import {
   OptionPanel, PositionsTable, TabTable, FundsView, formatFundsValue, pollPositionFlat, pollPositionReduced,
   type ChainOcEntry, type Toast,
@@ -20,6 +20,7 @@ import { cn } from '@/lib/utils';
 import TopWeightStocks from './TopWeightStocks';
 import TopIndices from './TopIndices';
 import MtmChart, { useMtmHistory } from './MtmChart';
+import ScalperGreeksModal from './analytics/ScalperGreeksModal';
 
 // ─── Types ────────────────────────────────────────────────────────
 
@@ -112,6 +113,7 @@ export default function AdvancedScalper() {
   // Top-10-by-weight stocks panel. Off by default so no equity bridge is
   // spawned unless it's actually wanted.
   const [showTop10, setShowTop10] = useState(false);
+  const [showGreeks, setShowGreeks] = useState(false);
   const boxCounterRef = useRef(2);
   const [boxes, setBoxes] = useState<BoxConfig[]>([
     { id: 'box-1', side: 'CE', strike: null, lots: 1, limitPrice: '' },
@@ -132,6 +134,12 @@ export default function AdvancedScalper() {
   // positions poll, so without this the second click would fire a different
   // set of orders than the first click previewed.
   const armedHalfPlanRef = useRef<{ legs: HalfLeg[]; skipped: string[] } | null>(null);
+
+  // Row checkboxes + "Exit Selected". Keyed by lib/positionProduct's
+  // `positionKey`, same as posGuards/closingPositions.
+  const [selectedPositions, setSelectedPositions] = useState<Set<string>>(new Set());
+  const [confirmExitSelected, setConfirmExitSelected] = useState(false);
+  const [exitingSelected, setExitingSelected] = useState(false);
 
   // Bottom tabs
   const [activeTab, setActiveTab]       = useState<'positions' | 'orders' | 'trades' | 'funds' | 'mtm'>('positions');
@@ -221,13 +229,12 @@ export default function AdvancedScalper() {
   const spot = liveQuotes?.spot ?? chainSpot;
   const atm  = spot > 0 ? Math.round(spot / strikeStep) * strikeStep : 0;
 
-  const visibleStrikes = useMemo(() => {
-    if (!allStrikes.length) return allStrikes;
-    if (atm === 0) return allStrikes.slice(0, 21);
-    const idx = allStrikes.reduce((best, sk, i) =>
-      Math.abs(sk - atm) < Math.abs(allStrikes[best] - atm) ? i : best, 0);
-    return allStrikes.slice(Math.max(0, idx - 10), idx + 11);
-  }, [allStrikes, atm]);
+  // The strike dropdown shows every strike the option chain lists — no ATM
+  // window. It used to be clipped to ATM ± 10, well inside what the live-quotes
+  // bridge already subscribes to (ATM ± 30, see live_options_ws.py's
+  // --num-strikes), so the clip was purely a UI restriction, not a live-data
+  // limit — a native <select> handles a long option list fine.
+  const visibleStrikes = allStrikes;
 
   // True once the lookup for the current expiry has returned security IDs —
   // gates ordering so a click can never silently fall back to the slow
@@ -794,6 +801,23 @@ export default function AdvancedScalper() {
 
   // ─── useEffect 2c: WS bridge lifecycle ────────────────────────────
 
+  // useBrokerSelector's authenticatedBrokers is a brand-new array reference
+  // every time /api/auth/broker-status resolves (BROKERS.filter(...) or a
+  // fresh ['dhan'] literal), even when its contents are unchanged from the
+  // initial ['dhan'] the hook starts with. That happens exactly once, a beat
+  // after mount — and with the raw array as a dependency below, React saw a
+  // "changed" dependency and ran this effect's cleanup (stop) immediately
+  // followed by a fresh run (start). Both fetches are unawaited, so the OLD
+  // cleanup's stop request could land on the server AFTER the NEW run's start
+  // had already spawned a fresh bridge process — which then saw the
+  // just-written stop-trigger on its very next poll and exited within
+  // seconds of starting. Kotak positions have no LTP fallback of their own
+  // (see kotakShape.ts), so this manifested as Kotak LTP/P&L stuck at 0/0
+  // while Dhan positions partly masked the same dead feed via their
+  // back-derived-from-unrealizedProfit fallback. Same fix useLiveOptionsWS.ts
+  // already applies to this exact array (its own `authKey`): depend on a
+  // stable joined string, not the array reference.
+  const authenticatedBrokersKey = authenticatedBrokers.join(',');
   useEffect(() => {
     if (!expiry) return;
 
@@ -801,7 +825,8 @@ export default function AdvancedScalper() {
     // runs independently on its own port/files (see useLiveOptionsWS), so
     // switching the broker selector never spawns or kills a process. That is
     // also why `broker` is not a dependency here.
-    for (const b of authenticatedBrokers) {
+    const brokers = authenticatedBrokersKey.split(',').filter(Boolean);
+    for (const b of brokers) {
       fetch('/api/options/live', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -814,10 +839,10 @@ export default function AdvancedScalper() {
       fetch('/api/options/live', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action: 'stop', brokers: authenticatedBrokers }),
+        body: JSON.stringify({ action: 'stop', brokers }),
       }).catch(() => {});
     };
-  }, [expiry, underlying, authenticatedBrokers]);
+  }, [expiry, underlying, authenticatedBrokersKey]);
 
   // Start the shared Nifty-50 equity bridge when the Top 10 panel is switched
   // on. The route is idempotent — it returns "Bridge already running" without
@@ -1031,12 +1056,18 @@ export default function AdvancedScalper() {
 
   // ─── placeOrder ───────────────────────────────────────────────────
 
-  const placeOrder = useCallback(async (boxId: string, side: 'BUY' | 'SELL') => {
+  const placeOrder = useCallback(async (boxId: string, side: 'BUY' | 'SELL', opts?: { forceMarket?: boolean }) => {
     const box = boxes.find(b => b.id === boxId);
     if (!box || !box.strike || !expiry) return;
     if (orderInFlightRef.current.has(boxId)) return;
 
-    if (orderMode === 'LIMIT') {
+    // Hotkey trades are always MARKET, regardless of the box's current
+    // Market/Limit toggle — a one-click hotkey firing a resting LIMIT order at
+    // a stale typed price would not behave like the "instant fill" the keys
+    // promise.
+    const mode = opts?.forceMarket ? 'MARKET' : orderMode;
+
+    if (mode === 'LIMIT') {
       const priceNum = Number(box.limitPrice);
       if (!box.limitPrice || isNaN(priceNum) || priceNum <= 0) {
         addToast('error', 'Enter a valid limit price');
@@ -1076,10 +1107,10 @@ export default function AdvancedScalper() {
             tradingsymbol: symbol,
             quantity: box.lots * lotSize,
             side,
-            orderType: orderMode,
+            orderType: mode,
             exchange,
             product: productType === 'MARGIN' ? 'NRML' : 'MIS',
-            ...(orderMode === 'LIMIT' ? { price: Number(box.limitPrice) } : {}),
+            ...(mode === 'LIMIT' ? { price: Number(box.limitPrice) } : {}),
           }),
         });
       } else {
@@ -1092,17 +1123,17 @@ export default function AdvancedScalper() {
               securityId: secId,
               quantity: box.lots * lotSize,
               side,
-              orderType: orderMode,
+              orderType: mode,
               exchangeSegment: underlying === 'SENSEX' ? 'BSE_FNO' : 'NSE_FNO',
               productType,
-              ...(orderMode === 'LIMIT' ? { price: Number(box.limitPrice) } : {}),
+              ...(mode === 'LIMIT' ? { price: Number(box.limitPrice) } : {}),
             }),
           });
         } else {
           const body: Record<string, unknown> = {
-            underlying, expiry, strike: box.strike, option: box.side, side, lots: box.lots, type: orderMode,
+            underlying, expiry, strike: box.strike, option: box.side, side, lots: box.lots, type: mode,
           };
-          if (orderMode === 'LIMIT') body.price = Number(box.limitPrice);
+          if (mode === 'LIMIT') body.price = Number(box.limitPrice);
           res = await fetch('/api/scalper/order', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -1113,7 +1144,7 @@ export default function AdvancedScalper() {
 
       const j = await res.json() as { success: boolean; order_id?: string; error?: string };
       if (j.success) {
-        addToast('success', `${side} ${box.side} placed`, `ID: ${j.order_id}`);
+        addToast('success', `${side} ${box.side} placed`, opts?.forceMarket ? `Hotkey market order · ID: ${j.order_id}` : `ID: ${j.order_id}`);
         setTimeout(fetchTabData, 1000);
       } else {
         addToast('error', `${side} ${box.side} failed`, j.error ?? 'Unknown error');
@@ -1125,6 +1156,65 @@ export default function AdvancedScalper() {
       setOrderPendingBoxes(prev => { const s = new Set(prev); s.delete(boxId); return s; });
     }
   }, [boxes, expiry, underlying, lotSize, strikeMap, orderMode, productType, broker, addToast, fetchTabData]);
+
+  // ─── Hotkey trading (one-click MARKET orders) ──────────────────────
+  // ArrowUp/ArrowLeft act on the first CE box, ArrowDown/ArrowRight on the
+  // first PE box — "first" so this still resolves sensibly if a user has
+  // added extra boxes of the same side. Always MARKET regardless of the
+  // Market/Limit toggle (see placeOrder's `forceMarket`).
+  const handleHotkeyTrade = useCallback((optionSide: 'CE' | 'PE', tradeSide: 'BUY' | 'SELL') => {
+    const box = boxes.find(b => b.side === optionSide);
+    if (!box) {
+      addToast('error', `No ${optionSide} panel`, `Add a ${optionSide === 'CE' ? 'Calls' : 'Puts'} panel first`);
+      return;
+    }
+    if (!box.strike) {
+      addToast('error', `${tradeSide} ${optionSide} failed`, 'Select a strike on that panel first');
+      return;
+    }
+    placeOrder(box.id, tradeSide, { forceMarket: true });
+  }, [boxes, placeOrder, addToast]);
+
+  // Kept current via a ref so the keydown listener below can be registered
+  // exactly once and never torn down/re-added on every box/price update —
+  // see commit bd0f305 for why that churn matters on a live-ticking page.
+  const handleHotkeyTradeRef = useRef(handleHotkeyTrade);
+  useEffect(() => { handleHotkeyTradeRef.current = handleHotkeyTrade; });
+
+  // Keyboard bindings: ↑ Buy Call, ← Sell Call, ↓ Buy Put, → Sell Put.
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      // Never hijack arrow keys while the user is typing/scrolling a field
+      // (lots, limit price, strike <select>, etc.), and ignore OS auto-repeat
+      // from a held key so one press can never fire a stream of market orders.
+      if (['INPUT', 'TEXTAREA', 'SELECT'].includes((e.target as HTMLElement)?.tagName)) return;
+      if (e.repeat || e.ctrlKey || e.metaKey || e.altKey) return;
+
+      switch (e.key) {
+        case 'ArrowUp':
+          e.preventDefault();
+          handleHotkeyTradeRef.current('CE', 'BUY');
+          break;
+        case 'ArrowLeft':
+          e.preventDefault();
+          handleHotkeyTradeRef.current('CE', 'SELL');
+          break;
+        case 'ArrowDown':
+          e.preventDefault();
+          handleHotkeyTradeRef.current('PE', 'BUY');
+          break;
+        case 'ArrowRight':
+          e.preventDefault();
+          handleHotkeyTradeRef.current('PE', 'SELL');
+          break;
+        default:
+          return;
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, []); // empty deps — listener registered once for component lifetime
 
   // ─── Per-position close ───────────────────────────────────────────
 
@@ -1688,6 +1778,88 @@ export default function AdvancedScalper() {
     }
   }, [halfAllPlan, halvingAll, confirmHalfAll, closePosition, addToast, fetchTabData]);
 
+  // ─── Row checkboxes + Exit Selected ────────────────────────────────
+
+  const handleToggleSelect = useCallback((posKey: string) => {
+    setSelectedPositions(prev => {
+      const next = new Set(prev);
+      if (next.has(posKey)) next.delete(posKey); else next.add(posKey);
+      return next;
+    });
+  }, []);
+
+  const openPositionKeys = useMemo(
+    () => enrichedPositions.filter(p => Number(p.netQty) !== 0).map(p => positionKey(p)),
+    [enrichedPositions]);
+
+  const handleToggleSelectAll = useCallback(() => {
+    setSelectedPositions(prev => {
+      const allSelected = openPositionKeys.length > 0 && openPositionKeys.every(k => prev.has(k));
+      return allSelected ? new Set() : new Set(openPositionKeys);
+    });
+  }, [openPositionKeys]);
+
+  // A position that goes flat (or drops out of the book) between selection
+  // and click must drop out of the selection too — otherwise a stale key
+  // lingers checked forever (nothing can ever uncheck it) and inflates the
+  // "N selected" count the confirm button shows.
+  useEffect(() => {
+    setSelectedPositions(prev => {
+      if (prev.size === 0) return prev;
+      const live = new Set(openPositionKeys);
+      let changed = false;
+      const next = new Set<string>();
+      for (const k of prev) {
+        if (live.has(k)) next.add(k); else changed = true;
+      }
+      return changed ? next : prev;
+    });
+  }, [openPositionKeys]);
+
+  const exitSelectedLegs = useMemo(
+    () => enrichedPositions.filter(p => Number(p.netQty) !== 0 && selectedPositions.has(positionKey(p))),
+    [enrichedPositions, selectedPositions]);
+
+  // Sequential, same rationale as handleHalfAll: closePosition re-reads the
+  // live book per leg, and firing every selected leg's market order at once
+  // risks the broker's rate limit on exactly the requests that must not drop.
+  const handleExitSelected = useCallback(async () => {
+    if (!exitSelectedLegs.length || exitingSelected) return;
+    if (!confirmExitSelected) {
+      setConfirmExitSelected(true);
+      setTimeout(() => setConfirmExitSelected(false), 3000);
+      return;
+    }
+    setConfirmExitSelected(false);
+    setExitingSelected(true);
+    const legs = exitSelectedLegs;
+    let closed = 0;
+    let alreadyFlat = 0;
+    const failed: string[] = [];
+    try {
+      for (const pos of legs) {
+        const sym = String(pos.tradingSymbol ?? '');
+        const r = await closePosition(pos, 'Bulk Selected');
+        if (!r.ok) failed.push(sym);
+        else if (r.closedUnits > 0) closed++;
+        else alreadyFlat++;
+      }
+      if (failed.length) {
+        addToast('error', `Exited ${closed} of ${legs.length} selected leg${legs.length === 1 ? '' : 's'}`,
+          `Failed: ${failed.join(', ')} — check manually`);
+      } else {
+        addToast('success', `Exited ${closed} selected leg${closed === 1 ? '' : 's'}`,
+          alreadyFlat > 0 ? `${alreadyFlat} already flat` : undefined);
+      }
+      setSelectedPositions(new Set());
+    } catch (e) {
+      addToast('error', 'Exit Selected aborted', String(e));
+    } finally {
+      setExitingSelected(false);
+      setTimeout(fetchTabData, 1000);
+    }
+  }, [exitSelectedLegs, exitingSelected, confirmExitSelected, closePosition, addToast, fetchTabData]);
+
   // `posKey` is the composite (symbol, product) key from lib/positionProduct,
   // NOT a trading symbol — see the posGuards declaration.
   const handleGuardChange = useCallback((posKey: string, field: 'target' | 'sl', value: string) => {
@@ -2017,6 +2189,29 @@ export default function AdvancedScalper() {
               )}>
               TOP 10 {showTop10 ? 'ON' : 'OFF'}
             </button>
+
+            {/* Scan the whole open book (every underlying/expiry for the
+                selected broker) and show combined portfolio greeks — same
+                data pipeline as the Positions Analysis pages. */}
+            <button onClick={() => setShowGreeks(true)}
+              title="Scan open positions and compute combined portfolio Greeks"
+              className={cn(
+                'flex items-center gap-1.5 px-3 py-1.5 text-xs font-bold rounded-lg border transition-all shrink-0 whitespace-nowrap',
+                'bg-zinc-900 border-zinc-700 text-zinc-400 hover:text-violet-300 hover:border-violet-500/40',
+                FOCUS_RING,
+              )}>
+              <Sigma className="w-3 h-3" /> GREEKS
+            </button>
+
+            {/* Hotkey legend — these fire real MARKET orders on the first
+                CE/PE box regardless of the Market/Limit toggle above, so the
+                bindings need to stay visible, not just discoverable via docs. */}
+            <span
+              title={'Hotkeys (ignored while typing in a field):\n↑ Buy Call · ← Sell Call\n↓ Buy Put · → Sell Put\nAll one-click MARKET orders.'}
+              className="flex items-center gap-1 px-2.5 py-1.5 text-[10px] font-bold rounded-lg
+                         border border-amber-700/40 bg-amber-950/30 text-amber-400 shrink-0 whitespace-nowrap cursor-help">
+              ⌨ ↑BUY CE · ←SELL CE · ↓BUY PE · →SELL PE
+            </span>
           </div>
 
             {/* Bridge status dot + transport badge + timestamp */}
@@ -2273,6 +2468,30 @@ export default function AdvancedScalper() {
                     : confirmHalfAll
                     ? `Confirm 50% on ${halfAllPlan.legs.length} leg${halfAllPlan.legs.length === 1 ? '' : 's'}?`
                     : `Close 50% All${halfAllPlan.legs.length ? ` (${halfAllPlan.legs.length})` : ''}`}
+                </button>
+
+                {/* Exit only the checked rows from the positions table below */}
+                <button onClick={handleExitSelected} disabled={exitingSelected || exitSelectedLegs.length === 0}
+                  className={cn(
+                    'flex items-center gap-1.5 px-3 py-1.5 rounded-lg', TXT_CAPTION, 'font-bold border transition-all active:scale-95 disabled:opacity-40 disabled:cursor-not-allowed shrink-0 whitespace-nowrap',
+                    exitingSelected
+                      ? 'bg-red-900/40 border-red-800 text-red-400'
+                      : confirmExitSelected
+                      ? 'bg-red-600 border-red-500 text-oncolor animate-pulse shadow-lg shadow-red-500/20'
+                      : 'bg-red-950/60 border-red-900/60 text-red-400 hover:bg-red-900/40 hover:border-red-700 hover:text-red-300',
+                    FOCUS_RING,
+                  )}
+                  title={
+                    exitSelectedLegs.length === 0
+                      ? 'Check rows in the positions table to enable this'
+                      : `Market close: ${exitSelectedLegs.map(p => String(p.tradingSymbol ?? '')).join(', ')}`
+                  }>
+                  {exitingSelected ? <RefreshCw className="h-3 w-3 animate-spin" /> : <ShieldOff className="h-3 w-3" />}
+                  {exitingSelected
+                    ? 'Exiting…'
+                    : confirmExitSelected
+                    ? `Confirm exit ${exitSelectedLegs.length}?`
+                    : `Exit Selected${exitSelectedLegs.length ? ` (${exitSelectedLegs.length})` : ''}`}
                 </button>
 
                 {/* Exit ALL Positions (broker-level nuclear) */}
@@ -2565,6 +2784,7 @@ export default function AdvancedScalper() {
           ) : activeTab === 'positions' ? (
             <PositionsTable
               data={enrichedPositions}
+              broker={broker}
               guards={posGuards}
               closingPositions={closingPositions}
               onGuardChange={handleGuardChange}
@@ -2576,6 +2796,9 @@ export default function AdvancedScalper() {
               sort={tableSort}
               onSort={handleTableSort}
               error={positionsError}
+              selected={selectedPositions}
+              onToggleSelect={handleToggleSelect}
+              onToggleSelectAll={handleToggleSelectAll}
             />
           ) : (
             <TabTable
@@ -2587,6 +2810,13 @@ export default function AdvancedScalper() {
           )}
         </div>
       </div>
+
+      <ScalperGreeksModal
+        open={showGreeks}
+        onClose={() => setShowGreeks(false)}
+        rawPositions={positionsData}
+        broker={broker}
+      />
     </div>
   );
 }

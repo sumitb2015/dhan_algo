@@ -14,6 +14,7 @@ import { useBrokerSelector, scalperRoute, BROKER_LABELS, type Broker } from '@/h
 import { ANALYTICS_UNDERLYINGS, underlyingOfSymbol, type AnalyticsUnderlying } from '@/lib/analyticsUnderlyings';
 import { todayIso } from '@/components/crudeoil/format';
 import type { ScalperPosition } from '@/lib/zerodhaShape';
+import NavBar from './NavBar';
 
 const BROKERS: Broker[] = ['dhan', 'kotak'];
 const POLL_MS = 5_000;
@@ -129,6 +130,8 @@ export default function PositionsAnalyticsHome() {
               {refreshedAt.toLocaleTimeString('en-IN', { hour12: false })}
             </span>
           )}
+          <span className="w-px h-5 bg-zinc-800 shrink-0 ml-auto" />
+          <NavBar />
         </div>
       </div>
 

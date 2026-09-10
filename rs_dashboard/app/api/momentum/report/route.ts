@@ -50,7 +50,7 @@ export async function GET(request: NextRequest) {
       {
         success: false,
         error: `${report.file} not found. Generate it with: `
-          + 'venv\\Scripts\\python.exe scripts/analysis/backtest_momentum_portfolio.py',
+          + '(after activating the venv) python scripts/analysis/backtest_momentum_portfolio.py',
       },
       { status: 404 }
     );

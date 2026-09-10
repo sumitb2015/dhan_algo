@@ -1,44 +1,13 @@
 'use client';
 
 import React from 'react';
+import { Activity } from 'lucide-react';
 
-import { Card, CardContent } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
-import { Separator } from '@/components/ui/separator';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { fmtIV, fmtNum, fmtOI, fmtVol, pctColor, pctSign } from './format';
+import { TerminalPanel, StatTile } from './TerminalPanel';
 import type { ChainStats } from './types';
-
-function Tile({
-  label,
-  hint,
-  value,
-  sub,
-  subClass = 'text-zinc-400',
-}: {
-  label: string;
-  hint: string;
-  value: React.ReactNode;
-  sub?: React.ReactNode;
-  subClass?: string;
-}) {
-  return (
-    <div className="flex min-w-0 flex-col gap-1 px-3 py-2">
-      <Tooltip>
-        <TooltipTrigger
-          render={
-            <span className="w-fit cursor-help text-[10px] font-bold uppercase tracking-widest text-zinc-500 underline decoration-zinc-700 decoration-dotted underline-offset-4">
-              {label}
-            </span>
-          }
-        />
-        <TooltipContent>{hint}</TooltipContent>
-      </Tooltip>
-      <span className="truncate text-base font-bold tabular-nums text-zinc-100">{value}</span>
-      <span className={`truncate text-[11px] tabular-nums ${subClass}`}>{sub ?? '—'}</span>
-    </div>
-  );
-}
 
 export default function MarketSnapshot({
   spot,
@@ -66,102 +35,113 @@ export default function MarketSnapshot({
     : atmCeIV ?? atmPeIV;
   const ivSkew = atmCeIV !== null && atmPeIV !== null ? atmCeIV - atmPeIV : null;
 
-  const oiTotal    = totalCEOI + totalPEOI;
+  const oiTotal = totalCEOI + totalPEOI;
   const callSharePct = oiTotal > 0 ? (totalCEOI / oiTotal) * 100 : 50;
 
-  const sentiment = pcr === null
-    ? { text: '—', cls: 'text-zinc-500' }
-    : pcr > 1.2 ? { text: 'Bullish', cls: 'text-emerald-400' }
-    : pcr < 0.8 ? { text: 'Bearish', cls: 'text-red-400' }
-    : { text: 'Neutral', cls: 'text-zinc-400' };
+  const sentiment: { text: string; tone: 'up' | 'down' | 'neutral' } =
+    pcr === null
+      ? { text: '—', tone: 'neutral' }
+      : pcr > 1.2
+      ? { text: 'Bullish (Put Writers)', tone: 'up' }
+      : pcr < 0.8
+      ? { text: 'Bearish (Call Writers)', tone: 'down' }
+      : { text: 'Neutral / Balanced', tone: 'neutral' };
 
   const painGap = maxPain !== null && spot > 0 ? maxPain - spot : null;
 
   return (
-    <Card className="bg-zinc-900">
-      <CardContent className="px-0">
-        <div className="grid grid-cols-2 divide-x divide-y divide-zinc-800 sm:grid-cols-4 xl:grid-cols-8 xl:divide-y-0">
-          <Tile
+    <TerminalPanel
+      title="MCX MARKET TELEMETRY & VOLATILITY MATRIX"
+      icon={Activity}
+      meta={`EXPIRY: ${expiryLabel}${dte !== null && dte >= 0 ? ` · ${dte}D DTE` : ''}`}
+    >
+      <div className="flex flex-col">
+        {/* 8-Column StatTile Grid */}
+        <div className="grid grid-cols-2 divide-x divide-y divide-zinc-800/80 sm:grid-cols-4 xl:grid-cols-8 xl:divide-y-0 bg-zinc-950/40 p-2 gap-y-2">
+          <StatTile
             label="Spot (Fut)"
-            hint="Live CRUDEOIL futures price. Crude options are priced off the futures contract, not a spot index."
             value={spot ? `₹${fmtNum(spot, 1)}` : '—'}
-            sub={spot && change !== 0 ? `${change >= 0 ? '+' : ''}${fmtNum(change, 1)} (${pctSign(changePct)})` : 'Fetching…'}
-            subClass={pctColor(changePct)}
+            sub={spot && change !== 0 ? `${change >= 0 ? '+' : ''}${fmtNum(change, 1)} (${pctSign(changePct)})` : 'Fetching quote…'}
+            tone={changePct > 0 ? 'up' : changePct < 0 ? 'down' : 'neutral'}
+            tooltip="Live CRUDEOIL futures price. Crude options price off the futures contract on MCX."
           />
-          <Tile
-            label="ATM"
-            hint="Strike nearest the futures price, rounded to the ₹100 strike grid."
+          <StatTile
+            label="ATM Strike"
             value={atm ? fmtNum(atm) : '—'}
             sub={atm && spot ? `${spot > atm ? '+' : ''}${fmtNum(spot - atm, 1)} from spot` : undefined}
+            tone="accent"
+            tooltip="Strike nearest futures price, rounded to the ₹100 strike ladder"
           />
-          <Tile
-            label="PCR"
-            hint="Put-Call Ratio = total put OI ÷ total call OI across the whole chain. Above 1.2 reads bullish (put writers dominant), below 0.8 bearish."
+          <StatTile
+            label="PCR Ratio"
             value={pcr !== null ? pcr.toFixed(3) : '—'}
             sub={sentiment.text}
-            subClass={sentiment.cls}
+            tone={sentiment.tone}
+            tooltip="Put-Call Ratio (Total Put OI ÷ Total Call OI). Above 1.2 bullish, below 0.8 bearish."
           />
-          <Tile
+          <StatTile
             label="Max Pain"
-            hint="Strike at which the total payout to option buyers is smallest — where writers would most like the contract to settle."
             value={maxPain !== null ? fmtNum(maxPain) : '—'}
             sub={painGap !== null ? `${painGap >= 0 ? '+' : ''}${fmtNum(painGap, 1)} from spot` : undefined}
-            subClass={painGap === null ? 'text-zinc-400' : painGap > 0 ? 'text-emerald-400' : painGap < 0 ? 'text-red-400' : 'text-zinc-400'}
+            tone={painGap === null ? 'neutral' : painGap > 0 ? 'up' : painGap < 0 ? 'down' : 'neutral'}
+            tooltip="Strike at which the total payout to option buyers is minimized at expiry"
           />
-          <Tile
+          <StatTile
             label="ATM Straddle"
-            hint="Combined ATM call + put premium. This is what the market charges for the expected move to expiry."
             value={atmStraddle ? `₹${fmtNum(atmStraddle, 1)}` : '—'}
-            sub={impliedMovePct !== null ? `± ${impliedMovePct.toFixed(2)}% implied move` : undefined}
-            subClass="text-cyan-400"
+            sub={impliedMovePct !== null ? `±${impliedMovePct.toFixed(2)}% implied move` : undefined}
+            tone="accent"
+            tooltip="Combined ATM call + put premium — market implied pricing for move to expiry"
           />
-          <Tile
+          <StatTile
             label="Expected Range"
-            hint="Straddle breakevens: ATM strike ± the straddle premium. Outside this band the straddle seller loses."
             value={atmStraddle && atm ? `${fmtNum(atm - atmStraddle)} – ${fmtNum(atm + atmStraddle)}` : '—'}
-            sub={atmStraddle && spot > 0 ? `±${((atmStraddle / spot) * 100).toFixed(2)}% (${fmtNum(2 * atmStraddle, 1)} wide)` : atmStraddle ? `width ${fmtNum(2 * atmStraddle, 1)}` : undefined}
+            sub={atmStraddle ? `Corridor: ${fmtNum(2 * atmStraddle, 1)} pts` : undefined}
+            tone="neutral"
+            tooltip="Straddle breakevens (ATM ± straddle premium). Pin band for option writers."
           />
-          <Tile
-            label="ATM IV"
-            hint="Mean of the ATM call and put implied volatilities. Skew is CE IV − PE IV: positive means calls are bid richer than puts."
+          <StatTile
+            label="ATM IV & Skew"
             value={fmtIV(atmIV)}
-            sub={ivSkew !== null ? `skew ${ivSkew >= 0 ? '+' : ''}${ivSkew.toFixed(1)}` : undefined}
-            subClass={ivSkew === null ? 'text-zinc-400' : ivSkew > 0 ? 'text-blue-400' : 'text-red-400'}
+            sub={ivSkew !== null ? `Skew ${ivSkew >= 0 ? '+' : ''}${ivSkew.toFixed(1)}%` : undefined}
+            tone="neutral"
+            tooltip="Average ATM Call & Put implied volatility. Skew is CE IV minus PE IV."
           />
-          <Tile
+          <StatTile
             label="Days to Expiry"
-            hint="Calendar days from today to the selected expiry. Theta decay accelerates sharply in the final week."
-            value={dte === null ? '—' : dte <= 0 ? 'Today' : `${dte}d`}
+            value={dte === null ? '—' : dte <= 0 ? 'Today' : `${dte} DAYS`}
             sub={expiryLabel}
+            tone="neutral"
+            tooltip="Calendar days remaining until contract expiry"
           />
         </div>
 
-        <Separator className="bg-zinc-800" />
-
-        {/* OI bias meter — one bar beats three separate OI tiles for reading balance at a glance */}
-        <div className="flex flex-col gap-3 px-4 py-3 lg:flex-row lg:items-center lg:gap-6">
+        {/* OI Bias Meter Strip */}
+        <div className="flex flex-col gap-3 border-t border-zinc-800 bg-zinc-950/80 px-4 py-3 lg:flex-row lg:items-center lg:gap-6">
           <div className="min-w-0 flex-1">
-            <div className="mb-1.5 flex items-center justify-between text-[10px] font-bold uppercase tracking-widest">
-              <span className="text-blue-400">Call OI {fmtOI(totalCEOI)}</span>
+            <div className="mb-1.5 flex items-center justify-between text-[10px] font-bold uppercase tracking-[0.16em]">
+              <span className="font-mono text-sky-400">Call OI {fmtOI(totalCEOI)}</span>
               <Tooltip>
                 <TooltipTrigger
                   render={
-                    <span className="cursor-help text-zinc-500">
-                      OI Balance
+                    <span className="cursor-help text-zinc-500 font-mono">
+                      OI BALANCE · CALLS VS PUTS
                     </span>
                   }
                 />
                 <TooltipContent>
-                  Share of total open interest sitting in calls vs puts. A call-heavy chain caps rallies; a put-heavy chain cushions falls.
+                  Share of total open interest sitting in calls vs puts across all active strikes.
                 </TooltipContent>
               </Tooltip>
-              <span className="text-red-400">{fmtOI(totalPEOI)} Put OI</span>
+              <span className="font-mono text-red-400">{fmtOI(totalPEOI)} Put OI</span>
             </div>
+
             <div className="flex h-2.5 w-full overflow-hidden rounded-full bg-zinc-800">
-              <div className="bg-blue-500 transition-all duration-500" style={{ width: `${callSharePct}%` }} />
+              <div className="bg-sky-500 transition-all duration-500" style={{ width: `${callSharePct}%` }} />
               <div className="bg-red-500 transition-all duration-500" style={{ width: `${100 - callSharePct}%` }} />
             </div>
-            <div className="mt-1.5 flex items-center justify-between text-[10px] tabular-nums text-zinc-500">
+
+            <div className="mt-1.5 flex items-center justify-between font-mono text-[10px] tabular-nums text-zinc-400">
               <span>{callSharePct.toFixed(1)}% calls</span>
               <span>Vol · CE {fmtVol(totalCEVol)} / PE {fmtVol(totalPEVol)}</span>
               <span>{(100 - callSharePct).toFixed(1)}% puts</span>
@@ -172,26 +152,26 @@ export default function MarketSnapshot({
             <Tooltip>
               <TooltipTrigger
                 render={
-                  <Badge variant="outline" className="cursor-help border-blue-500/40 bg-blue-500/10 font-mono tabular-nums text-blue-300">
-                    RESISTANCE {resistanceStrike !== null ? fmtNum(resistanceStrike) : '—'} · {fmtOI(resistanceOI)}
+                  <Badge variant="outline" className="cursor-help border-sky-500/40 bg-sky-500/10 font-mono tabular-nums text-sky-300">
+                    CALL WALL (RES) {resistanceStrike !== null ? fmtNum(resistanceStrike) : '—'} · {fmtOI(resistanceOI)}
                   </Badge>
                 }
               />
-              <TooltipContent>Strike with the highest call OI across the entire chain — the wall sellers defend on the way up.</TooltipContent>
+              <TooltipContent>Strike with the highest call OI across the chain — key resistance ceiling.</TooltipContent>
             </Tooltip>
             <Tooltip>
               <TooltipTrigger
                 render={
                   <Badge variant="outline" className="cursor-help border-red-500/40 bg-red-500/10 font-mono tabular-nums text-red-300">
-                    SUPPORT {supportStrike !== null ? fmtNum(supportStrike) : '—'} · {fmtOI(supportOI)}
+                    PUT WALL (SUPP) {supportStrike !== null ? fmtNum(supportStrike) : '—'} · {fmtOI(supportOI)}
                   </Badge>
                 }
               />
-              <TooltipContent>Strike with the highest put OI across the entire chain — the floor put writers defend on the way down.</TooltipContent>
+              <TooltipContent>Strike with the highest put OI across the chain — key support floor.</TooltipContent>
             </Tooltip>
           </div>
         </div>
-      </CardContent>
-    </Card>
+      </div>
+    </TerminalPanel>
   );
 }

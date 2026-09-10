@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import path from 'path';
 import fs from 'fs';
+import { invalidateBrokerCache } from '@/lib/brokerPositionsCache';
 
 const PROJECT_ROOT = path.resolve(process.cwd(), '..');
 const TOKEN_FILE   = path.join(PROJECT_ROOT, 'access_token.json');
@@ -60,6 +61,10 @@ export async function DELETE(req: NextRequest): Promise<NextResponse> {
 
     // Dhan returns 202 with orderId on successful cancel
     if (res.ok || String(json.status).toUpperCase() === 'SUCCESS' || json.orderId) {
+      // Positions don't move, but a resting order was blocking margin, and
+      // cancelling releases it — the funds figure both consumer pages show
+      // is now stale.
+      invalidateBrokerCache('dhan');
       return NextResponse.json({ success: true, orderId });
     }
 

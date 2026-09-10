@@ -18,7 +18,7 @@ import os
 import json
 import math
 import argparse
-from datetime import datetime, date, timedelta
+from datetime import datetime, date, time, timedelta
 from dataclasses import dataclass, field
 from typing import Optional, List, Dict, Tuple
 from collections import defaultdict
@@ -31,6 +31,9 @@ VIX_PATH = os.path.join(PROJECT_ROOT, "Historical Data", "Indices", "INDIA_VIX.c
 
 MONTH_NAMES = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
                "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+
+EXPIRY_TIME = time(15, 30)   # NSE close — the moment contracts actually expire
+STRIKE_STEP = 50.0           # NIFTY strike interval
 
 
 # ---------------------------------------------------------------------------
@@ -88,8 +91,10 @@ def _load_vix() -> Dict[str, float]:
         for _, row in df.iterrows():
             d = str(row["Datetime"])[:10]
             vix[d] = float(row["Close"])
-    except Exception:
-        pass
+    except Exception as e:
+        # Non-fatal: VIX is reporting-only. Warn on stderr so a missing file is
+        # visible rather than silently blanking the VIX column of every trade.
+        print(f"warning: could not load VIX from {VIX_PATH}: {e}", file=sys.stderr)
     return vix
 
 
@@ -459,10 +464,10 @@ def _simulate_one_day(
         try:
             if "+" in strike_str:
                 offset = int(strike_str.split("+")[1])
-                return atm_strike + offset * 50.0
+                return atm_strike + offset * STRIKE_STEP
             elif "-" in strike_str:
                 offset = int(strike_str.split("-")[1])
-                return atm_strike - offset * 50.0
+                return atm_strike - offset * STRIKE_STEP
         except Exception:
             pass
         return atm_strike
@@ -475,7 +480,7 @@ def _simulate_one_day(
         # Use open_ price: AlgoTest enters at the first available price of the entry bar
         if not entered and t >= entry_time:
             entry_spot_ref = prev_bar.spot if prev_bar else bar.spot
-            atm_strike = round(entry_spot_ref / 50.0) * 50.0
+            atm_strike = round(entry_spot_ref / STRIKE_STEP) * STRIKE_STEP
             ref_bar = prev_bar if prev_bar else bar
             
             # Fetch all available option prices for the entry time boundary
@@ -575,23 +580,26 @@ def _simulate_one_day(
             if not state.is_open:
                 continue
             leg_open, leg_high, leg_low, leg_close = leg_prices[i]
+            # The trigger level is where the market touched; the fill is that level
+            # degraded by slippage, same as every other exit path.
+            slip = slip_sell_exit if leg.position == "sell" else slip_buy_exit
 
             if leg.leg_sl_pct > 0:
                 if leg.position == "sell" and leg_high >= state.entry_price * (1 + leg.leg_sl_pct / 100):
-                    state.exit_price = state.entry_price * (1 + leg.leg_sl_pct / 100)
+                    state.exit_price = state.entry_price * (1 + leg.leg_sl_pct / 100) * slip
                     state.exit_reason = "LEG_SL"
                     state.struck_sl = True
                 elif leg.position == "buy" and leg_low <= state.entry_price * (1 - leg.leg_sl_pct / 100):
-                    state.exit_price = state.entry_price * (1 - leg.leg_sl_pct / 100)
+                    state.exit_price = state.entry_price * (1 - leg.leg_sl_pct / 100) * slip
                     state.exit_reason = "LEG_SL"
                     state.struck_sl = True
             if state.is_open and leg.leg_target_pct > 0:
                 if leg.position == "sell" and leg_low <= state.entry_price * (1 - leg.leg_target_pct / 100):
-                    state.exit_price = state.entry_price * (1 - leg.leg_target_pct / 100)
+                    state.exit_price = state.entry_price * (1 - leg.leg_target_pct / 100) * slip
                     state.exit_reason = "LEG_TARGET"
                     state.struck_target = True
                 elif leg.position == "buy" and leg_high >= state.entry_price * (1 + leg.leg_target_pct / 100):
-                    state.exit_price = state.entry_price * (1 + leg.leg_target_pct / 100)
+                    state.exit_price = state.entry_price * (1 + leg.leg_target_pct / 100) * slip
                     state.exit_reason = "LEG_TARGET"
                     state.struck_target = True
 
@@ -727,6 +735,7 @@ def run_backtest(leg_configs: List[LegConfig], cycles: List[ExpiryCycle],
     cumulative_pnl = 0.0
     total_commission = 0.0
     peak_equity    = 0.0
+    peak_date      = ""   # date the running peak was set — start of any drawdown from it
     max_drawdown   = 0.0
     max_dd_start   = ""
     max_dd_end     = ""
@@ -739,8 +748,17 @@ def run_backtest(leg_configs: List[LegConfig], cycles: List[ExpiryCycle],
         expiry_dt = _parse_date(cycle.expiry_date)
 
         if len(cycle.bars) < 5:
-            trade_results.append(_no_entry_result(cycle.expiry_date, cycle.expiry_date, cumulative_pnl))
-            equity_curve.append({"date": cycle.expiry_date, "cumulative_pnl": round(cumulative_pnl, 2)})
+            # Cycles are loaded up to end+40d so that contracts expiring just past the
+            # window still cover its final days. One with no usable bars may therefore
+            # lie wholly outside [start, end] — reporting it there would inflate the
+            # evaluated count and hang a flat point off the end of the equity curve.
+            bar_dates = {b.dt.date() for b in cycle.bars}
+            in_window = (any(start <= d <= end for d in bar_dates) if bar_dates
+                         else start <= expiry_dt <= end)
+            if in_window:
+                trade_results.append(_no_entry_result(cycle.expiry_date))
+                equity_curve.append(_equity_point(cycle.expiry_date, cumulative_pnl,
+                                                  None, peak_equity))
             continue
 
         # Group bars by calendar date
@@ -760,8 +778,8 @@ def run_backtest(leg_configs: List[LegConfig], cycles: List[ExpiryCycle],
 
         # Filter trade_dates to only include trading dates within start and end limits
         trade_dates = [d for d in trade_dates if start <= d <= end]
-
-        any_traded_this_cycle = False
+        if not trade_dates:
+            continue  # cycle lies wholly outside the requested window
 
         for trade_date in trade_dates:
             if trade_date in seen_dates:
@@ -771,11 +789,16 @@ def run_backtest(leg_configs: List[LegConfig], cycles: List[ExpiryCycle],
             if len(day_bars) < 3:
                 continue
 
-            # Calendar days to expiry from this trade date (used for BS repricing)
-            dte = max(0, (expiry_dt - trade_date).days)
+            # Time to expiry measured from the entry moment, in fractional days.
+            # Whole calendar days would make this 0 for every expiry-day trade, which
+            # collapses Black-Scholes to intrinsic and gives every OTM strike an
+            # identical delta of 0 — breaking delta-based strike selection outright.
+            entry_moment  = datetime.combine(trade_date, entry_time)
+            expiry_moment = datetime.combine(expiry_dt, EXPIRY_TIME)
+            dte = max((expiry_moment - entry_moment).total_seconds() / 86400.0, 0.0)
             sim = _simulate_one_day(
                 day_bars, **sim_kwargs,
-                days_to_expiry=float(dte),
+                days_to_expiry=dte,
                 strike_lookup=cycle.strike_lookup
             )
 
@@ -783,18 +806,12 @@ def run_backtest(leg_configs: List[LegConfig], cycles: List[ExpiryCycle],
             vix = vix_map.get(entry_date_str)
 
             if not sim["entered"]:
-                trade_results.append(_no_entry_result(cycle.expiry_date, entry_date_str, cumulative_pnl))
-                day_spot = day_bars[0].spot if day_bars else 0.0
-                dd = cumulative_pnl - peak_equity
-                equity_curve.append({
-                    "date": entry_date_str,
-                    "cumulative_pnl": round(cumulative_pnl, 2),
-                    "spot": round(day_spot, 2),
-                    "drawdown": round(dd, 2)
-                })
+                trade_results.append(_no_entry_result(cycle.expiry_date))
+                day_spot = day_bars[0].spot if day_bars else None
+                equity_curve.append(_equity_point(entry_date_str, cumulative_pnl,
+                                                  day_spot, peak_equity))
                 continue
 
-            any_traded_this_cycle = True
             entry_dt  = sim["entry_dt"]
             exit_dt   = sim["exit_dt"]
             leg_states = sim["leg_states"]
@@ -816,6 +833,7 @@ def run_backtest(leg_configs: List[LegConfig], cycles: List[ExpiryCycle],
                     "option_type": leg.option_type,
                     "position": leg.position,
                     "strike": state.strike,
+                    "lots": leg.lots,
                     "entry_price": round(state.entry_price, 2),
                     "exit_price": round(state.exit_price, 2),
                     "pnl": round(leg_pnl, 2),
@@ -824,10 +842,15 @@ def run_backtest(leg_configs: List[LegConfig], cycles: List[ExpiryCycle],
 
             net_pnl -= commission
             cumulative_pnl += net_pnl
-            peak_equity = max(peak_equity, cumulative_pnl)
+            if not peak_date:
+                peak_date = entry_date_str  # equity was flat at 0 until the first trade
+            if cumulative_pnl > peak_equity:
+                peak_equity = cumulative_pnl
+                peak_date = entry_date_str
             drawdown = peak_equity - cumulative_pnl
             if drawdown > max_drawdown:
                 max_drawdown = drawdown
+                max_dd_start = peak_date
                 max_dd_end = entry_date_str
 
             if drawdown > 0:
@@ -858,17 +881,8 @@ def run_backtest(leg_configs: List[LegConfig], cycles: List[ExpiryCycle],
                 "is_complete":   cycle.is_complete,
                 "legs":          leg_results,
             })
-            dd = cumulative_pnl - peak_equity
-            equity_curve.append({
-                "date": entry_date_str,
-                "cumulative_pnl": round(cumulative_pnl, 2),
-                "spot": round(sim["entry_spot"], 2),
-                "drawdown": round(dd, 2)
-            })
-
-        if not any_traded_this_cycle and not trade_dates:
-            trade_results.append(_no_entry_result(cycle.expiry_date, cycle.expiry_date, cumulative_pnl))
-            equity_curve.append({"date": cycle.expiry_date, "cumulative_pnl": round(cumulative_pnl, 2)})
+            equity_curve.append(_equity_point(entry_date_str, cumulative_pnl,
+                                              sim["entry_spot"], peak_equity))
 
     # --- Summary stats ---
     traded = [c for c in trade_results if c["exit_reason"] != "NO_ENTRY"]
@@ -927,7 +941,7 @@ def run_backtest(leg_configs: List[LegConfig], cycles: List[ExpiryCycle],
     }
 
 
-def _no_entry_result(expiry_date: str, entry_date_str: str, cumulative_pnl: float) -> dict:
+def _no_entry_result(expiry_date: str) -> dict:
     return {
         "expiry_date":   expiry_date,
         "entry_dt":      None,
@@ -940,6 +954,18 @@ def _no_entry_result(expiry_date: str, entry_date_str: str, cumulative_pnl: floa
         "exit_reason":   "NO_ENTRY",
         "is_complete":   False,
         "legs":          [],
+    }
+
+
+def _equity_point(date_str: str, cumulative_pnl: float,
+                  spot: Optional[float], peak_equity: float) -> dict:
+    """One equity-curve point. Every point carries the same keys so the chart
+    never sees a half-shaped row; spot is None (a gap) when no bar supplied one."""
+    return {
+        "date":           date_str,
+        "cumulative_pnl": round(cumulative_pnl, 2),
+        "spot":           round(spot, 2) if spot else None,
+        "drawdown":       round(cumulative_pnl - peak_equity, 2),
     }
 
 

@@ -14,6 +14,7 @@ from lib.dhan_helper import DhanHelper
 from lib.strategy_state_helper import save_strategy_state, check_shutdown_trigger, exit_if_market_closed, parse_target_spec, instance_log_suffix
 from lib.strategy_risk import resolve_exit_qty_broker
 from lib.execution_broker import ExecutionBroker, ExecutionBrokerError
+from lib.telegram_alert import notify
 
 # Setup Logging
 project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -147,6 +148,9 @@ class ValueImbalanceStrategy:
         )
 
     def save_state(self, nifty_spot, ce_ltp, pe_ltp, total_pnl, status="RUNNING"):
+        if status == "STOPPED" and not getattr(self, "_stopped_notified", False):
+            self._stopped_notified = True
+            notify(f"[{self.state_key}] Strategy stopped.")
         state_dict = {
             "strategy": "nifty_value_imbalance_straddle",
             "status": status,
@@ -293,6 +297,7 @@ class ValueImbalanceStrategy:
 
     def exit_all_positions(self, reason):
         logger.warning(f"!!! EXITING ALL POSITIONS: {reason} !!!")
+        notify(f"[{self.state_key}] Exiting all positions: {reason}")
         ce_exit_price, pe_exit_price = 0.0, 0.0
         if not self.dry_run:
             if self.ce_id:

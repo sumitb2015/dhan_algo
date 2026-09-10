@@ -59,6 +59,20 @@ easy-to-regress piece of logic — read this before touching it again.
    independently persist `access_token.json` — a new write path that skips
    `createdAt` breaks the primary tier of the issuance-time fallback for tokens it
    creates.
+7. **The token file's client-id key has drifted across writers — read both, and
+   prefer `.env`'s `client_id` over either.** `login.py`'s OAuth/TOTP paths write
+   `dhanClientId`; the dashboard's manual-connect route (`session.ts`'s
+   `writeDhanTokenFile`) writes `clientId` instead. `7098f02` found
+   `scripts/tools/dhan_autologin.py` reading only `dhanClientId`: against a token
+   file last written by the dashboard's path, that returned `null` for a
+   `success: true` response, which let `api/auth/autologin/route.ts` decide
+   `enterDashboard = true` from `success` alone while its separate `clientId`-truthy
+   check silently skipped minting the session cookie — the browser reported
+   success and then bounced straight back to `/login`. `.env`'s `client_id` is
+   authoritative regardless (it's what `get_dhan_client()` hands to
+   `DhanContext`), so any new reader of the client id should try it first and
+   fall back to `dhanClientId` then `clientId` — the same fallback
+   `lib/dhanToken.ts` already uses for this key.
 
 ## Common Mistakes
 - Adding a token-validity check that only compares `expiryTime` — always add the
@@ -69,3 +83,11 @@ easy-to-regress piece of logic — read this before touching it again.
   needs is actually constructed in that code path first.
 - Forgetting `force_login` / equivalent bypass — `get_dhan_client(force_login=True)`
   must skip the cache read entirely, not just fail validation and fall through.
+- Reading only `dhanClientId` (or only `clientId`) from `access_token.json` — the
+  key depends on which writer last touched the file; try `.env`'s `client_id`
+  first, then both keys as fallback (invariant 7).
+- Checking a downstream boolean (like a cookie-worthy `clientId`) as a *separate*
+  condition from the overall `success` flag when deciding whether to tell the
+  frontend to proceed — a response can report `success: true` while the field a
+  later step actually needs is `null`, silently skipping that step while the
+  caller still thinks everything worked.

@@ -18,14 +18,18 @@ wrong" or "path resolves to nowhere" bugs.
 - Building any data table in a dashboard component.
 
 ## Path Resolution
-Every API route that touches the Python side computes:
+Every API route that touches the Python side imports the shared helpers rather
+than rebuilding them — the dev machine may be Windows or Linux, and only
+`lib/pyExec.ts` probes both venv layouts (see `dhan-cross-platform`):
 ```ts
-const PROJECT_ROOT = path.resolve(process.cwd(), '..');   // one level above rs_dashboard/
-const DEBUG_DIR    = path.join(PROJECT_ROOT, 'debug');
-const PYTHON_EXE   = path.join(PROJECT_ROOT, 'venv', 'Scripts', 'pythonw.exe');
+import { PYTHON_EXE, PROJECT_ROOT } from '@/lib/pyExec';
+const DEBUG_DIR = path.join(PROJECT_ROOT, 'debug');
 ```
-Never hardcode `../../` or an absolute Windows path — `process.cwd()` is
-`rs_dashboard/` when Next.js runs, so `PROJECT_ROOT` is always one `resolve('..')` up.
+Never hardcode `../../`, an absolute Windows path, or
+`path.join(PROJECT_ROOT, 'venv', 'Scripts', 'pythonw.exe')` directly — the
+latter is Windows-only and was the exact bug swept out of 21 routes in
+`e2fceeb`. `process.cwd()` is `rs_dashboard/` when Next.js runs, so
+`PROJECT_ROOT` is always one `resolve('..')` up.
 
 ## Spawn-a-Python-Script Pattern
 Long-running or scriptable Python work (refresh, live bridges, backtests) is
@@ -126,7 +130,7 @@ instead of composing a new card/table look.
 |---|---|
 | New page | `app/<route>/page.tsx` importing a `components/<Name>.tsx` client component |
 | New API route | `app/api/<name>/route.ts`, `PROJECT_ROOT` at top |
-| Spawn Python job | `spawn(PYTHON_EXE, [...])`, status file in `debug/`, `_stop.trigger` to cancel |
+| Spawn Python job | `spawn(PYTHON_EXE, [...])` (import from `lib/pyExec.ts`), status file in `debug/`, `_stop.trigger` to cancel |
 | One-click Buy/Sell button | `POST /api/scalper/order` (strike/expiry) or `/api/scalper/fast-order` (security ID) |
 | Read CSV data | `lib/dataLoader.ts` (`readStockCSV`, `readNifty50Index`, `readNifty500Index`) — patches today's row from `debug/today_quotes.json` |
 | Shared TA math | `lib/indicators.ts` |

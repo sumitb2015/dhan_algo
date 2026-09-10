@@ -3,11 +3,11 @@ import path from 'path';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
 import { createDashboardSession, writeDhanTokenFile } from '@/lib/session';
+import { PYTHON_EXE } from '@/lib/pyExec';
 
 const execFileAsync = promisify(execFile);
 
 const PROJECT_ROOT    = path.resolve(process.cwd(), '..');
-const PYTHON_EXE      = path.join(PROJECT_ROOT, 'venv', 'Scripts', 'pythonw.exe');
 const VALIDATE_SCRIPT = path.join(PROJECT_ROOT, 'scripts', 'tools', 'validate_token.py');
 
 export async function POST(req: NextRequest): Promise<NextResponse> {

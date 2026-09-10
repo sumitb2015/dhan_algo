@@ -17,6 +17,45 @@ const ZERODHA_BRIDGE_SCRIPT = path.join(PROJECT_ROOT, 'scripts', 'tools', 'live_
 // would only duplicate the subscription.
 type Broker = 'dhan' | 'zerodha';
 
+// ── Multi-viewer stop guard ──────────────────────────────────────────────
+// AdvancedScalper/Scalper/FocusTool/OptionsCharts/Baskets/OptionStrats/
+// MultiLegFocus all share ONE bridge process per broker and each fires
+// action:'stop' from its own unmount/dependency-change cleanup. With no
+// coordination, tab B viewing the same broker went dark the instant tab A
+// navigated away (or A's expiry/underlying/auth-key effect merely re-ran) —
+// A's cleanup killed the bridge B was still reading from. GET is a heartbeat
+// (useLiveOptionsWS status-polls every 5s per broker as long as it's
+// mounted): a stop is honored only if no GET for that broker landed after
+// the stop was requested, on a delay comfortably longer than that 5s poll.
+const STOP_GRACE_MS = 7000;
+const lastSeenByBroker: Partial<Record<Broker, number>> = {};
+const pendingStopByBroker: Partial<Record<Broker, ReturnType<typeof setTimeout>>> = {};
+
+function markSeen(broker: Broker): void {
+  lastSeenByBroker[broker] = Date.now();
+}
+
+function cancelPendingStop(broker: Broker): void {
+  const timer = pendingStopByBroker[broker];
+  if (timer) {
+    clearTimeout(timer);
+    delete pendingStopByBroker[broker];
+  }
+}
+
+/** Schedules the stop-trigger write instead of performing it inline, so a
+ *  heartbeat from another still-mounted viewer (see above) can cancel it. */
+function scheduleStop(broker: Broker): void {
+  cancelPendingStop(broker);
+  const requestedAt = Date.now();
+  pendingStopByBroker[broker] = setTimeout(() => {
+    delete pendingStopByBroker[broker];
+    const lastSeen = lastSeenByBroker[broker] ?? 0;
+    if (lastSeen > requestedAt) return; // another viewer polled since — stay up
+    try { fs.writeFileSync(filesFor(broker).stop, ''); } catch { /* best effort */ }
+  }, STOP_GRACE_MS);
+}
+
 function normalizeBroker(value: unknown): Broker {
   return String(value ?? 'dhan').toLowerCase() === 'zerodha' ? 'zerodha' : 'dhan';
 }
@@ -113,6 +152,7 @@ export async function GET(request: NextRequest) {
   const broker         = normalizeBroker(request.nextUrl.searchParams.get('broker'));
   const includeHistory = request.nextUrl.searchParams.get('history') === '1';
   const checkPid       = request.nextUrl.searchParams.get('checkPid') === '1';
+  markSeen(broker); // any GET is a live viewer — see the stop-guard block above
   const files = filesFor(broker);
 
   const quotes  = readJson(files.quotes)  as Record<string, unknown> | null;
@@ -153,9 +193,9 @@ export async function POST(request: NextRequest) {
       ? (body.brokers as unknown[]).map(normalizeBroker)
       : [normalizeBroker(body.broker)];
     for (const broker of brokers) {
-      fs.writeFileSync(filesFor(broker).stop, '');
+      scheduleStop(broker);
     }
-    return NextResponse.json({ success: true, message: 'Stop trigger written', brokers });
+    return NextResponse.json({ success: true, message: 'Stop scheduled', brokers });
   }
 
   // ── Start ────────────────────────────────────────────────────────────────
@@ -169,6 +209,12 @@ export async function POST(request: NextRequest) {
     if (!expiry) {
       return NextResponse.json({ success: false, error: 'expiry required' }, { status: 400 });
     }
+
+    // A fresh start always wins over a stop scheduled by some other viewer's
+    // cleanup — cancel it outright rather than waiting for a heartbeat to
+    // race it, and mark this broker seen immediately.
+    cancelPendingStop(broker);
+    markSeen(broker);
 
     // Everything below is a check-then-act on the status file, and a freshly
     // spawned bridge needs a second or two before it writes one. Concurrent starts

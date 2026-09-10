@@ -3,7 +3,7 @@ import assert from 'node:assert';
 import {
   buildPayoffCurve, buildMultiExpiryCurve, buildTargetPayoffCurve,
   computePayoffStats, bsPrice, impliedVolFromPrice, daysBetweenDates,
-  legsMissingIv, findBreakevens, DEFAULT_SPAN_PCT,
+  legsMissingIv, findBreakevens, DEFAULT_SPAN_PCT, STRATEGY_TEMPLATES,
   type ResolvedLeg,
 } from './optionsStrategy.ts';
 
@@ -205,4 +205,19 @@ test('with time left, a short strangle is worth less than at expiry near the pea
 test('findBreakevens interpolates zero crossings and ignores non-crossings', () => {
   assert.deepStrictEqual(findBreakevens([{ spot: 10, pnl: -10 }, { spot: 20, pnl: 10 }]), [15]);
   assert.deepStrictEqual(findBreakevens([{ spot: 10, pnl: 5 }, { spot: 20, pnl: 10 }]), []);
+});
+
+test('STRATEGY_TEMPLATES: batman template generates 4 legs with 1:2 ratio and undefined risk', () => {
+  const batman = STRATEGY_TEMPLATES.find(t => t.id === 'batman');
+  assert.ok(batman, 'batman template should exist');
+  assert.strictEqual(batman.undefinedRisk, true);
+
+  const legs = batman.legs({ N: 2, W: 2 });
+  assert.strictEqual(legs.length, 4);
+  assert.deepStrictEqual(legs, [
+    { offsetStrikes: 2, type: 'CE', side: 'BUY', qtyRatio: 1 },
+    { offsetStrikes: 4, type: 'CE', side: 'SELL', qtyRatio: 2 },
+    { offsetStrikes: -2, type: 'PE', side: 'BUY', qtyRatio: 1 },
+    { offsetStrikes: -4, type: 'PE', side: 'SELL', qtyRatio: 2 },
+  ]);
 });

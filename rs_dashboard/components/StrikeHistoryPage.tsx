@@ -6,6 +6,7 @@ import StrikeHistoryTab, {
   type HoverContext,
   type StrikeSelectionMode,
 } from './StrikeHistoryTab';
+import NavBar from './NavBar';
 
 const UNDERLYING = 'NIFTY';
 
@@ -306,6 +307,9 @@ export default function StrikeHistoryPage() {
               </button>
             ))}
           </div>
+
+          <span className="w-px h-5 bg-zinc-800 shrink-0" />
+          <NavBar />
         </div>
       </div>
 
@@ -327,12 +331,15 @@ export default function StrikeHistoryPage() {
             onContextMetaChange={setContextMeta}
             onHoverContextChange={setHoverContext}
           />
+        ) : expiriesLoading ? (
+          <div className="flex flex-col items-center justify-center py-24 gap-3">
+            <div className="w-6 h-6 border-2 border-zinc-700 border-t-emerald-400 rounded-full animate-spin" />
+            <p className="text-sm text-zinc-400 font-medium">Loading expiries…</p>
+          </div>
         ) : (
-          !expiriesLoading && (
-            <div className="flex items-center justify-center py-24 text-zinc-500 text-sm">
-              Please select an expiry to display strike history.
-            </div>
-          )
+          <div className="flex items-center justify-center py-24 text-zinc-500 text-sm">
+            Please select an expiry to display strike history.
+          </div>
         )}
       </div>
     </div>

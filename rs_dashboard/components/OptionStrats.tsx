@@ -28,6 +28,7 @@ import {
 import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group';
 import { AlertTriangle, Plus, RefreshCw, RotateCcw, ShoppingBasket, Trash2 } from 'lucide-react';
 import { cn } from '@/lib/utils';
+import NavBar from './NavBar';
 
 const UNDERLYING = 'NIFTY';
 // PREVIEW ONLY — scales the payoff curve/heatmap for the moment before
@@ -114,9 +115,19 @@ export default function OptionStrats() {
   // matches every other consumer of this feed (Baskets, Scalper, ...), so the
   // tradeoff (closing this tab can stop a bridge another open tab still wants)
   // is pre-existing app-wide behavior, not something new here.
+  // authenticatedBrokers is a brand-new array reference every time
+  // /api/auth/broker-status resolves, even when unchanged from the initial
+  // ['dhan'] useBrokerSelector starts with — depending on the array itself
+  // below made this effect's cleanup (stop) and a fresh run (start) fire back
+  // to back shortly after every mount, and since neither fetch is awaited the
+  // OLD stop could land after the NEW start had already spawned a bridge,
+  // killing it within seconds (see the identical fix + full writeup in
+  // Scalper.tsx/AdvancedScalper.tsx's own WS-bridge-lifecycle effect).
+  const authenticatedBrokersKey = authenticatedBrokers.join(',');
   useEffect(() => {
     if (!liveMode || !selectedExpiry) return;
-    for (const b of authenticatedBrokers) {
+    const brokers = authenticatedBrokersKey.split(',').filter(Boolean);
+    for (const b of brokers) {
       fetch('/api/options/live', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -127,10 +138,10 @@ export default function OptionStrats() {
       fetch('/api/options/live', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action: 'stop', brokers: authenticatedBrokers }),
+        body: JSON.stringify({ action: 'stop', brokers }),
       }).catch(() => {});
     };
-  }, [liveMode, selectedExpiry, authenticatedBrokers]);
+  }, [liveMode, selectedExpiry, authenticatedBrokersKey]);
 
   const spot = liveMode && liveQuotes?.spot ? liveQuotes.spot : staticSpot;
   const chainOc = useMemo(() => {
@@ -625,6 +636,9 @@ export default function OptionStrats() {
               <TabsTrigger value="graph">Graph</TabsTrigger>
             </TabsList>
           </Tabs>
+
+          <span className="w-px h-5 bg-zinc-800 shrink-0" />
+          <NavBar />
         </div>
       </div>
 

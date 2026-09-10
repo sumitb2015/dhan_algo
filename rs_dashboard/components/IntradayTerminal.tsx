@@ -160,10 +160,10 @@ export default function IntradayTerminal() {
     return showAll ? list : list.slice(0, 18);
   }, [state?.candidates, sortKey, showAll]);
 
-  const dayPnl = state?.pnl.day ?? 0;
+  const dayPnl = state?.pnl?.day ?? 0;
   const equity = (state?.equity_curve ?? []).map((p) => ({ ts: p.ts, pnl: p.day_pnl }));
-  const selectedCandidate = state?.candidates.find((c) => c.symbol === selected) ?? null;
-  const selectedPosition = state?.positions.find((p) => p.symbol === selected) ?? null;
+  const selectedCandidate = state?.candidates?.find((c) => c.symbol === selected) ?? null;
+  const selectedPosition = state?.positions?.find((p) => p.symbol === selected) ?? null;
 
   return (
     <div className="flex flex-col min-h-screen bg-zinc-950 text-white">
@@ -233,19 +233,19 @@ export default function IntradayTerminal() {
         <div className="mt-2.5 pt-2.5 border-t border-zinc-800/60 flex items-center gap-6 flex-wrap">
           <Stat label="Day P&L" value={fmtInr(dayPnl)}
                 tone={dayPnl > 0 ? 'up' : dayPnl < 0 ? 'down' : 'neutral'} />
-          <Stat label="Realised" value={fmtInr(state?.pnl.realized ?? 0)}
-                tone={(state?.pnl.realized ?? 0) >= 0 ? 'up' : 'down'} />
-          <Stat label="Unrealised" value={fmtInr(state?.pnl.unrealized ?? 0)}
-                tone={(state?.pnl.unrealized ?? 0) >= 0 ? 'up' : 'down'} />
-          <Stat label="Positions" value={`${state?.risk.open ?? 0}/${state?.risk.max_positions ?? 0}`} />
-          <Stat label="Trades" value={`${state?.risk.trades_today ?? 0}/${state?.risk.max_trades ?? 0}`} />
-          <Stat label="Deployed" value={fmtInr(state?.risk.deployed ?? 0)}
-                hint={`Cap ${fmtInr(state?.risk.max_deployed ?? 0)}`} />
-          <Stat label="Risk / trade" value={fmtInr(state?.risk.risk_per_trade ?? 0)} />
+          <Stat label="Realised" value={fmtInr(state?.pnl?.realized ?? 0)}
+                tone={(state?.pnl?.realized ?? 0) >= 0 ? 'up' : 'down'} />
+          <Stat label="Unrealised" value={fmtInr(state?.pnl?.unrealized ?? 0)}
+                tone={(state?.pnl?.unrealized ?? 0) >= 0 ? 'up' : 'down'} />
+          <Stat label="Positions" value={`${state?.risk?.open ?? 0}/${state?.risk?.max_positions ?? 0}`} />
+          <Stat label="Trades" value={`${state?.risk?.trades_today ?? 0}/${state?.risk?.max_trades ?? 0}`} />
+          <Stat label="Deployed" value={fmtInr(state?.risk?.deployed ?? 0)}
+                hint={`Cap ${fmtInr(state?.risk?.max_deployed ?? 0)}`} />
+          <Stat label="Risk / trade" value={fmtInr(state?.risk?.risk_per_trade ?? 0)} />
           <Stat
-            label={state?.benchmark.symbol ?? 'NIFTY'}
-            value={`${fmt(state?.benchmark.ltp, 1)} (${fmt(state?.benchmark.day_pct, 2)}%)`}
-            tone={(state?.benchmark.day_pct ?? 0) >= 0 ? 'up' : 'down'}
+            label={state?.benchmark?.symbol ?? 'NIFTY'}
+            value={`${fmt(state?.benchmark?.ltp, 1)} (${fmt(state?.benchmark?.day_pct, 2)}%)`}
+            tone={(state?.benchmark?.day_pct ?? 0) >= 0 ? 'up' : 'down'}
           />
           <Stat label="Tradeable now" value={intel.regime ? `${intel.regime.tradeable}/${intel.regime.universe}` : '—'}
                 tone={(intel.regime?.tradeable ?? 0) > 0 ? 'up' : 'neutral'} />
@@ -263,7 +263,7 @@ export default function IntradayTerminal() {
             </span>
           </div>
         )}
-        {state?.pnl.priced === false && (
+        {state?.pnl?.priced === false && (
           <div className="mt-2 rounded-lg bg-amber-500/10 border border-amber-500/30 px-3 py-1.5 text-[11px] text-amber-300">
             An open position has no live price — the daily risk check is paused rather than acting on a partial mark.
           </div>

@@ -3,6 +3,7 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import QuikTradeQuadrants from './QuikTradeQuadrants';
 import QuikTradePositions from './QuikTradePositions';
+import NavBar from './NavBar';
 
 const UNDERLYING = 'NIFTY';
 const PNL_POLL_MS = 5_000;
@@ -113,6 +114,9 @@ export default function QuikTradeTab() {
           >
             {expiries.map(e => <option key={e} value={e}>{e}</option>)}
           </select>
+
+          <span className="w-px h-5 bg-zinc-800 shrink-0" />
+          <NavBar />
         </div>
       </div>
 

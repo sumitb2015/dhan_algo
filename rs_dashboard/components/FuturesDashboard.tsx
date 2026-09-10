@@ -2,15 +2,17 @@
 
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import NavBar from '@/components/NavBar';
-import { Activity, RefreshCw, AlertCircle, Loader2, Download } from 'lucide-react';
+import { Activity, RefreshCw, AlertCircle, Loader2, Download, ChevronDown, ChevronUp, CandlestickChart } from 'lucide-react';
 import {
   ComposedChart, Area, Line, XAxis, YAxis, CartesianGrid,
   Tooltip, Legend, ResponsiveContainer,
 } from 'recharts';
-import type { ContractStats, ChartPoint, FuturesResponse } from '@/app/api/futures/route';
+import type { ContractStats, ChartPoint, RolloverPoint, FuturesResponse } from '@/app/api/futures/route';
 import type { FuturesRefreshStatus } from '@/app/api/futures-refresh/route';
+import type { CandleData } from '@/app/api/nifty-oi-profile/route';
 import OIBuildupDashboard from '@/components/OIBuildupDashboard';
 import FuturesBasketCards from '@/components/FuturesBasketCards';
+import FuturesCandleChart from '@/components/FuturesCandleChart';
 
 // ─── Formatters ───────────────────────────────────────────────────────────────
 
@@ -210,9 +212,9 @@ function MarketPulseRibbon({
 
 // ─── ContractTable ────────────────────────────────────────────────────────────
 
-function ContractTable({ name, contracts }: { name: string; contracts: ContractStats[] }) {
+function ContractTable({ contracts }: { contracts: ContractStats[] }) {
   const labels = ['Near', 'Mid', 'Far'];
-  const showBasisCoc = name === 'NIFTY';
+  const showBasisCoc = contracts.some(c => c.basis !== null);
   const thCls  = 'px-3 py-2 text-xs font-bold text-white whitespace-nowrap text-left';
   const thRCls = 'px-3 py-2 text-xs font-bold text-white whitespace-nowrap text-right';
 
@@ -442,16 +444,190 @@ function SpotFutureChart({ points, name }: { points: ChartPoint[]; name: string 
   );
 }
 
+// ─── Rollover Panel (recharts, quant-terminal style) ───────────────────────────
+
+const RolloverTooltip = ({ active, payload, label }: Record<string, unknown>) => {
+  if (!active || !Array.isArray(payload) || !payload.length) return null;
+  const row = (payload as Array<{ payload: RolloverPoint }>)[0]?.payload;
+  if (!row) return null;
+  return (
+    <div className="bg-zinc-950/98 border border-zinc-700/70 rounded-xl px-4 py-3 text-xs shadow-2xl backdrop-blur min-w-[180px] font-mono">
+      <p className="text-zinc-300 font-bold mb-2 tabular-nums font-sans">{String(label)}</p>
+      <div className="flex justify-between gap-8 mb-2">
+        <span className="text-amber-400 font-semibold font-sans">Rolled</span>
+        <span className="text-white font-bold tabular-nums">{row.rolloverPct.toFixed(1)}%</span>
+      </div>
+      <div className="pt-2 border-t border-zinc-800 space-y-1">
+        <div className="flex justify-between gap-8">
+          <span className="text-zinc-400 font-sans">Near OI</span>
+          <span className="text-zinc-200 tabular-nums">{fmtLakh(row.nearOi)}</span>
+        </div>
+        <div className="flex justify-between gap-8">
+          <span className="text-zinc-400 font-sans">Next OI</span>
+          <span className="text-zinc-200 tabular-nums">{fmtLakh(row.nextOi)}</span>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+function RolloverPanel({
+  name, points, nearLabel, nextLabel, daysToExpiry,
+}: {
+  name: string;
+  points: RolloverPoint[];
+  nearLabel?: string;
+  nextLabel?: string;
+  daysToExpiry: number | null;
+}) {
+  if (!points.length) return null;
+
+  const fmtDate = (d: string) => {
+    const dt = new Date(d + 'T00:00:00');
+    return dt.toLocaleDateString('en', { day: 'numeric', month: 'short' });
+  };
+  const chartData = points.map(p => ({ ...p, dateLabel: fmtDate(p.date) }));
+  const latest = points[points.length - 1];
+  const isRolloverWeek = daysToExpiry !== null && daysToExpiry >= 0 && daysToExpiry <= 5;
+
+  const gridProps = { strokeDasharray: '3 6', stroke: '#20202399', vertical: false as const };
+  const tickStyle = { fontSize: 10, fill: '#a1a1aa', fontWeight: 500 as const, fontFamily: 'var(--font-mono)' };
+
+  return (
+    <div className="relative bg-zinc-900/60 border border-zinc-800 rounded-2xl p-5 overflow-hidden">
+      <div className="pointer-events-none absolute -top-24 left-1/2 -translate-x-1/2 w-[520px] h-[280px] bg-amber-500/[0.05] blur-3xl rounded-full" />
+
+      <ChartHeader
+        eyebrow="Rollover"
+        title={`${name} Near → Next Rollover`}
+        sub={`${nearLabel ?? 'Near'} → ${nextLabel ?? 'Next'} · last ${points.length} sessions`}
+        legend={
+          <div className="flex items-center gap-2">
+            {isRolloverWeek && (
+              <span className="text-[10px] px-1.5 py-0.5 rounded bg-amber-950/80 text-amber-400 border border-amber-800/50">
+                Rollover Week
+              </span>
+            )}
+            <span className="!text-lg font-mono !font-bold text-white tabular-nums">
+              {latest.rolloverPct.toFixed(1)}%
+            </span>
+          </div>
+        }
+      />
+
+      <ResponsiveContainer width="100%" height={220}>
+        <ComposedChart data={chartData} margin={{ top: 8, right: 16, left: 0, bottom: 0 }}>
+          <defs>
+            <linearGradient id={`fill-rollover-${name}`} x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0%" stopColor="#f59e0b" stopOpacity={0.35} />
+              <stop offset="100%" stopColor="#f59e0b" stopOpacity={0.02} />
+            </linearGradient>
+          </defs>
+          <CartesianGrid {...gridProps} />
+          <XAxis dataKey="dateLabel" tick={tickStyle} tickLine={false} axisLine={{ stroke: '#27272a' }}
+            interval="preserveStartEnd" minTickGap={18} />
+          <YAxis
+            domain={[0, 100]}
+            tick={tickStyle}
+            tickLine={false}
+            axisLine={false}
+            width={40}
+            tickFormatter={(v: number) => `${v}%`}
+          />
+          <Tooltip content={<RolloverTooltip />} cursor={{ stroke: '#3f3f46', strokeWidth: 1, strokeDasharray: '4 4' }} />
+          <Area
+            type="monotone"
+            dataKey="rolloverPct"
+            name="Rolled %"
+            stroke="#f59e0b"
+            strokeWidth={2.5}
+            fill={`url(#fill-rollover-${name})`}
+            dot={false}
+            activeDot={{ r: 5, fill: '#f59e0b', stroke: '#451a03', strokeWidth: 2 }}
+          />
+        </ComposedChart>
+      </ResponsiveContainer>
+    </div>
+  );
+}
+
+// ─── Intraday Candlestick Section (lazy-loaded on expand) ─────────────────────
+
+function FuturesCandleSection({ name }: { name: string }) {
+  const [open, setOpen] = useState(false);
+  const [candles, setCandles] = useState<CandleData[] | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const res = await fetch(`/api/futures/candles?symbol=${name}&days=5`);
+      const json = await res.json();
+      if (!json.success) throw new Error(json.error ?? 'Failed to load candles');
+      setCandles(json.candles ?? []);
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setLoading(false);
+    }
+  }, [name]);
+
+  const handleToggle = () => {
+    const next = !open;
+    setOpen(next);
+    if (next && candles === null && !loading) load();
+  };
+
+  return (
+    <div className="border border-zinc-800 rounded-xl overflow-hidden">
+      <button
+        onClick={handleToggle}
+        className="w-full flex items-center justify-between px-3 py-2 bg-zinc-900/60 hover:bg-zinc-800/60 transition-colors text-xs font-semibold text-zinc-300"
+      >
+        <span className="flex items-center gap-2">
+          <CandlestickChart className="h-3.5 w-3.5 text-sky-400" />
+          5-Minute Chart
+        </span>
+        {open ? <ChevronUp className="h-3.5 w-3.5" /> : <ChevronDown className="h-3.5 w-3.5" />}
+      </button>
+      {open && (
+        <div className="p-3 bg-zinc-950/40">
+          {loading && (
+            <div className="flex items-center justify-center gap-2 text-xs text-zinc-500 py-16">
+              <Loader2 className="h-4 w-4 animate-spin" /> Loading candles…
+            </div>
+          )}
+          {error && !loading && (
+            <div className="flex items-center gap-2 text-xs text-rose-400 py-8 justify-center">
+              <AlertCircle className="h-4 w-4" /> {error}
+              <button onClick={load} className="ml-2 underline hover:text-rose-300">Retry</button>
+            </div>
+          )}
+          {!loading && !error && candles && (
+            <div className="h-[480px]">
+              <FuturesCandleChart candles={candles} symbolName={`${name} Futures`} />
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ─── InstrumentSection ────────────────────────────────────────────────────────
 
 function InstrumentSection({
   name,
   contracts,
   chartPoints,
+  rolloverPoints,
 }: {
   name: string;
   contracts: ContractStats[];
   chartPoints: ChartPoint[];
+  rolloverPoints: RolloverPoint[];
 }) {
   return (
     <section className="border-t border-zinc-800 pt-6">
@@ -461,9 +637,17 @@ function InstrumentSection({
         <span className="text-[10px] text-zinc-600 font-medium">{contracts.length} contracts</span>
       </div>
       <div className="space-y-3">
-        <ContractTable name={name} contracts={contracts} />
+        <ContractTable contracts={contracts} />
         <SpotFutureChart points={chartPoints} name={name} />
-        {name === 'NIFTY' && <CoCCallout contracts={contracts} />}
+        {contracts.some(c => c.coc !== null) && <CoCCallout contracts={contracts} />}
+        <RolloverPanel
+          name={name}
+          points={rolloverPoints}
+          nearLabel={contracts[0]?.label}
+          nextLabel={contracts[1]?.label}
+          daysToExpiry={contracts[0]?.daysToExpiry ?? null}
+        />
+        <FuturesCandleSection name={name} />
       </div>
     </section>
   );
@@ -580,6 +764,7 @@ export default function FuturesDashboard() {
               name="NIFTY"
               contracts={data.instruments.NIFTY}
               chartPoints={data.charts?.NIFTY ?? []}
+              rolloverPoints={data.rollover?.NIFTY ?? []}
             />
 
             {/* BANKNIFTY instrument section */}
@@ -587,6 +772,7 @@ export default function FuturesDashboard() {
               name="BANKNIFTY"
               contracts={data.instruments.BANKNIFTY}
               chartPoints={data.charts?.BANKNIFTY ?? []}
+              rolloverPoints={data.rollover?.BANKNIFTY ?? []}
             />
 
             {/* OI Buildup */}

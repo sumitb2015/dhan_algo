@@ -2,11 +2,12 @@
 import path from 'path';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
+import { PYTHON_EXE } from '@/lib/pyExec';
+import { invalidateBrokerCache } from '@/lib/brokerPositionsCache';
 
 const execFileAsync = promisify(execFile);
 
 const PROJECT_ROOT   = path.resolve(process.cwd(), '..');
-const PYTHON_EXE     = path.join(PROJECT_ROOT, 'venv', 'Scripts', 'pythonw.exe');
 const SCALPER_SCRIPT = path.join(PROJECT_ROOT, 'scripts', 'tools', 'scalper_api.py');
 
 export async function POST(req: NextRequest): Promise<NextResponse> {
@@ -56,6 +57,8 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     const parsed = JSON.parse(jsonLine);
     if (parsed.error && !parsed.success) {
       console.error('[/api/scalper/order] script error:', parsed.error);
+    } else if (parsed.success) {
+      invalidateBrokerCache('dhan');
     }
     return NextResponse.json(parsed);
   } catch (err: unknown) {
@@ -64,7 +67,12 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       try {
         const lines = String(e.stdout).trim().split('\n').filter(Boolean);
         const jsonLine = lines[lines.length - 1] ?? '{}';
-        return NextResponse.json(JSON.parse(jsonLine));
+        const recovered = JSON.parse(jsonLine);
+        // execFile rejects on the 30s timeout, but the script may already have
+        // placed the order and printed its success line before being killed —
+        // that is a real fill, so it has to evict like the happy path does.
+        if (recovered.success) invalidateBrokerCache('dhan');
+        return NextResponse.json(recovered);
       } catch {}
     }
     console.error('[/api/scalper/order] error:', e.message, e.stderr ?? '');

@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import path from 'path';
 import { PROJECT_ROOT, runPythonJson } from '@/lib/pyExec';
+import { invalidateBrokerCache } from '@/lib/brokerPositionsCache';
 
 const SCRIPT = path.join(PROJECT_ROOT, 'scripts', 'tools', 'csp_watchlist.py');
 
@@ -53,6 +54,7 @@ export async function POST(req: NextRequest) {
     }
 
     const result = await runPythonJson<OrderResult>(SCRIPT, args, 20_000);
+    if (result.success) invalidateBrokerCache('dhan');
     return NextResponse.json(result, { status: result.success ? 200 : 500 });
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
@@ -69,6 +71,8 @@ export async function DELETE(req: NextRequest) {
     }
 
     const result = await runPythonJson<OrderResult>(SCRIPT, ['cancel', '--order-id', String(orderId)], 20_000);
+    // Cancelling a resting order releases the margin it was blocking.
+    if (result.success) invalidateBrokerCache('dhan');
     return NextResponse.json(result, { status: result.success ? 200 : 500 });
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);

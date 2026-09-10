@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { kitePost } from '@/lib/zerodhaToken';
+import { invalidateBrokerCache } from '@/lib/brokerPositionsCache';
 
 /** Products this route will book. CO/BO are excluded — Kite holds its own exit
  *  order against them, which a plain market order would leave dangling. */
@@ -72,6 +73,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     }
 
     const data = await kitePost('/orders/regular', params) as { order_id: string };
+    invalidateBrokerCache('zerodha');
     return NextResponse.json({ success: true, order_id: data.order_id });
   } catch (err) {
     console.error('[scalper/zerodha/order] error:', err);

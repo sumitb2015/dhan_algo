@@ -14,6 +14,7 @@ import {
 import type { StrangleCell } from '@/lib/strangleMath';
 import type { UnderlyingType, RiskProfile } from '@/lib/ultimateScannerTypes';
 import type { MultiLegBasket } from '@/lib/multiLegFocus';
+import NavBar from './NavBar';
 
 interface StrangleMatrixResponse {
   success: boolean;
@@ -863,9 +864,6 @@ export default function StrangleMatrixPage() {
 
   return (
     <div className="flex flex-col min-h-screen bg-zinc-950 text-white font-sans selection:bg-emerald-500/30">
-      {/* NavBar is rendered once by app/(options)/layout.tsx for every page
-          in this route group — do not render it again here. */}
-
       {/* ─── Sticky Control Header ────────────────────────────────────────── */}
       <header className="sticky top-0 z-30 flex items-center justify-between gap-3 flex-wrap px-6 py-3 border-b border-zinc-800 bg-zinc-950/95 backdrop-blur">
         <div className="flex items-center gap-3">
@@ -1001,6 +999,9 @@ export default function StrangleMatrixPage() {
           >
             <RefreshCw className={`h-3.5 w-3.5 ${refreshing ? 'animate-spin text-emerald-400' : ''}`} />
           </button>
+
+          <span className="w-px h-5 bg-zinc-800 shrink-0" />
+          <NavBar />
         </div>
       </header>
 

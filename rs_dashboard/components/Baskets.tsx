@@ -2,7 +2,10 @@
 
 import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
 import NavBar from './NavBar';
-import { ShoppingBasket, RefreshCw, Wallet } from 'lucide-react';
+import {
+  ShoppingBasket, RefreshCw, Wallet, Clock, Layers, SlidersHorizontal,
+  TrendingUp
+} from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
 import { formatFundsValue, type ChainOcEntry, type Toast } from './Scalper';
@@ -31,16 +34,132 @@ function fmtMoney(n: number): string {
   return `₹${Math.abs(n).toLocaleString('en-IN', { maximumFractionDigits: 0 })}`;
 }
 
-function MetricTile({ label, value, tone = 'neutral' }: {
-  label: string; value: React.ReactNode; tone?: 'neutral' | 'profit' | 'loss';
+function TerminalPanel({
+  title,
+  icon: Icon,
+  meta,
+  badge,
+  action,
+  children,
+  className = '',
+}: {
+  title: string;
+  icon: React.ComponentType<{ className?: string }>;
+  meta?: React.ReactNode;
+  badge?: React.ReactNode;
+  action?: React.ReactNode;
+  children: React.ReactNode;
+  className?: string;
 }) {
-  const color = tone === 'profit' ? 'text-emerald-400' : tone === 'loss' ? 'text-rose-400' : 'text-zinc-100';
   return (
-    <div className="px-4 py-3">
-      <p className="text-[10px] uppercase tracking-widest text-zinc-500 font-bold">{label}</p>
-      <p className={`text-sm font-bold font-mono tabular-nums mt-1 leading-tight ${color}`}>{value}</p>
+    <section className={`flex flex-col rounded-xl border border-zinc-800 bg-zinc-900/70 shadow-sm overflow-hidden ${className}`}>
+      <header className="flex items-center justify-between gap-3 border-b border-amber-500/25 bg-zinc-950/60 px-3.5 py-2.5 shrink-0">
+        <div className="flex items-center gap-2">
+          <span className="flex items-center gap-1.5 text-[11px] font-bold uppercase tracking-[0.16em] text-amber-400">
+            <Icon className="h-3.5 w-3.5 text-amber-400" />
+            {title}
+          </span>
+          {badge}
+        </div>
+        <div className="flex items-center gap-2">
+          {action}
+          {meta ? <div className="font-mono text-[11px] text-zinc-400">{meta}</div> : null}
+        </div>
+      </header>
+      <div className="flex-1 min-h-0">{children}</div>
+    </section>
+  );
+}
+
+function StatTile({
+  label,
+  value,
+  sub,
+  progress,
+  tone = 'neutral',
+  tooltip,
+}: {
+  label: string;
+  value: string;
+  sub?: string;
+  progress?: { percent: number; colorClass?: string };
+  tone?: 'neutral' | 'up' | 'down' | 'accent';
+  tooltip?: string;
+}) {
+  const valueClass =
+    tone === 'up' ? 'text-emerald-400'
+    : tone === 'down' ? 'text-red-400'
+    : tone === 'accent' ? 'text-amber-400'
+    : 'text-zinc-100';
+
+  return (
+    <div
+      title={tooltip}
+      className="flex flex-col justify-between gap-1.5 rounded-lg border border-zinc-800 bg-zinc-950 px-3 py-2.5 transition-colors hover:border-zinc-700"
+    >
+      <div className="flex items-center justify-between">
+        <span className="text-[9px] font-bold uppercase tracking-[0.16em] text-zinc-500">{label}</span>
+        {progress && (
+          <span className="font-mono text-[9px] font-semibold text-zinc-400">
+            {progress.percent.toFixed(1)}%
+          </span>
+        )}
+      </div>
+
+      <div className={`font-mono text-base font-bold leading-none tabular-nums ${valueClass}`}>
+        {value}
+      </div>
+
+      {progress && (
+        <div className="h-1.5 w-full overflow-hidden rounded-full bg-zinc-800">
+          <div
+            className={`h-full transition-all duration-500 ${progress.colorClass ?? 'bg-amber-400'}`}
+            style={{ width: `${Math.min(Math.max(progress.percent, 0), 100)}%` }}
+          />
+        </div>
+      )}
+
+      {sub ? <span className="font-mono text-[10px] text-zinc-500 truncate">{sub}</span> : null}
     </div>
   );
+}
+
+function getMarketSessionInfo() {
+  const now = new Date();
+  const utc = now.getTime() + now.getTimezoneOffset() * 60000;
+  const ist = new Date(utc + 5.5 * 3600000);
+  const day = ist.getDay(); 
+  const hour = ist.getHours();
+  const minute = ist.getMinutes();
+  const timeNum = hour * 60 + minute;
+
+  const isWeekend = day === 0 || day === 6;
+  if (isWeekend) {
+    return { status: 'CLOSED', label: 'WEEKEND CLOSED', tone: 'neutral' as const };
+  }
+  if (timeNum >= 540 && timeNum < 555) {
+    return { status: 'PRE-OPEN', label: 'PRE-OPEN SESSION', tone: 'accent' as const };
+  }
+  if (timeNum >= 555 && timeNum <= 930) {
+    return { status: 'OPEN', label: 'MARKET LIVE', tone: 'live' as const };
+  }
+  if (timeNum > 930 && timeNum <= 940) {
+    return { status: 'POST', label: 'POST-CLOSING', tone: 'neutral' as const };
+  }
+  return { status: 'EOD', label: 'AFTER-HOURS / EOD', tone: 'neutral' as const };
+}
+
+function getVixRegime(vix: number | null | undefined) {
+  if (!vix || vix <= 0) {
+    return { label: 'NORMAL VOL', regime: 'EQUILIBRIUM', tone: 'neutral' as const };
+  }
+  if (vix < 12.0) {
+    return { label: 'LOW VOL', regime: 'THETA HARVEST', tone: 'emerald' as const };
+  }
+  if (vix <= 16.0) {
+    return { label: 'NORMAL VOL', regime: 'BALANCED', tone: 'amber' as const };
+  }
+  return { label: 'HIGH VOL', regime: 'EXPANSION', tone: 'red' as const };
 }
 
 export default function Baskets() {
@@ -49,8 +168,6 @@ export default function Baskets() {
 
   const [expiries, setExpiries] = useState<string[]>([]);
   const [expiry, setExpiry]     = useState('');
-  // Far-month expiry — only relevant to Calendar/Diagonal templates, whose
-  // far leg trades a later expiry than the page's main (front) expiry.
   const [farExpiry, setFarExpiry] = useState('');
 
   const [allStrikes, setAllStrikes] = useState<number[]>([]);
@@ -58,9 +175,6 @@ export default function Baskets() {
   const [chainSpot, setChainSpot]   = useState(0);
   const [strikeMap, setStrikeMap]   = useState<Record<string, StrikeIdentifier>>({});
   const [farStrikeMap, setFarStrikeMap] = useState<Record<string, StrikeIdentifier>>({});
-  // null until the lookup resolves it from DhanHelper.get_lot_size(). Not seeded
-  // with a literal: NIFTY has been 75 and is 65 today, and this multiplies into
-  // every leg's order quantity below.
   const [lotSize, setLotSize]       = useState<number | null>(null);
 
   const { liveQuotes, bridgeStatus, lastUpdated, transport } = useLiveOptionsWS(expiry, broker, authenticatedBrokers, underlying);
@@ -80,19 +194,27 @@ export default function Baskets() {
 
   const [fundsData, setFundsData] = useState<Record<string, number> | null>(null);
 
-  // ── India VIX Ticker ────────────────────────────────────────────
-  const [vixData, setVixData] = useState<{ vix: number; prevClose: number } | null>(null);
+  const [clock, setClock] = useState('');
+  useEffect(() => {
+    const update = () => {
+      const now = new Date();
+      const utc = now.getTime() + now.getTimezoneOffset() * 60000;
+      const ist = new Date(utc + 5.5 * 3600000);
+      setClock(ist.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false }));
+    };
+    update();
+    const interval = setInterval(update, 1000);
+    return () => clearInterval(interval);
+  }, []);
 
+  const marketSession = getMarketSessionInfo();
+
+  const [vixData, setVixData] = useState<{ vix: number; prevClose: number } | null>(null);
   useEffect(() => {
     const pollVix = () => {
-      fetch('/api/scalper/vix')
-        .then(r => r.json())
-        .then((j: { success: boolean; vix?: number; prevClose?: number }) => {
-          if (j.success && j.vix !== undefined && j.prevClose !== undefined) {
-            setVixData({ vix: j.vix, prevClose: j.prevClose });
-          }
-        })
-        .catch(() => {});
+      fetch('/api/scalper/vix').then(r => r.json()).then((j: { success: boolean; vix?: number; prevClose?: number }) => {
+        if (j.success && j.vix !== undefined && j.prevClose !== undefined) setVixData({ vix: j.vix, prevClose: j.prevClose });
+      }).catch(() => {});
     };
     pollVix();
     const interval = setInterval(pollVix, 60_000);
@@ -102,16 +224,9 @@ export default function Baskets() {
   const liveVix = liveQuotes?.vix;
   const currentVix = (liveVix && liveVix.ltp > 0) ? liveVix.ltp : (vixData?.vix ?? 0);
   const currentVixPrevClose = (liveVix && (liveVix.prev_close ?? 0) > 0) ? liveVix.prev_close! : (vixData?.prevClose ?? 0);
-  const vixChange = (liveVix && liveVix.change !== undefined && liveVix.change !== 0)
-    ? liveVix.change
-    : (currentVix > 0 && currentVixPrevClose > 0)
-    ? currentVix - currentVixPrevClose
-    : 0;
-  const vixChangePct = (liveVix && liveVix.change_pct !== undefined && liveVix.change_pct !== 0)
-    ? liveVix.change_pct
-    : (currentVixPrevClose > 0)
-    ? (vixChange / currentVixPrevClose) * 100
-    : 0;
+  const vixChange = (liveVix && liveVix.change !== undefined && liveVix.change !== 0) ? liveVix.change : (currentVix > 0 && currentVixPrevClose > 0 ? currentVix - currentVixPrevClose : 0);
+  const vixChangePct = (liveVix && liveVix.change_pct !== undefined && liveVix.change_pct !== 0) ? liveVix.change_pct : (currentVixPrevClose > 0 ? (vixChange / currentVixPrevClose) * 100 : 0);
+  const vixRegime = getVixRegime(currentVix);
 
   const spotChange = liveQuotes?.spot_change ?? 0;
   const spotChangePct = liveQuotes?.spot_change_pct ?? 0;
@@ -124,22 +239,11 @@ export default function Baskets() {
   useEffect(() => { farExpiryRef.current = farExpiry; }, [farExpiry]);
   const underlyingRef  = useRef<Underlying>(underlying);
   useEffect(() => { underlyingRef.current = underlying; }, [underlying]);
-
-  // Tags which (underlying, expiry) the current allStrikes/atmStrike actually
-  // belong to. Needed because on the render where `underlying` flips, the
-  // per-expiry effect's setAllStrikes([]) reset and this component's other
-  // effects (e.g. the cross-underlying load completion effect below) all fire
-  // in the same commit but read pre-reset closure values — without this tag,
-  // a load-basket triggered underlying switch can momentarily see the OLD
-  // underlying's still-non-null atmStrike/allStrikes and wrongly re-anchor a
-  // saved basket to the previous underlying's strikes.
   const chainReadyForRef = useRef<{ underlying: string; expiry: string } | null>(null);
 
   const spot = liveQuotes?.spot ?? chainSpot;
   const step = useMemo(() => strikeStep(allStrikes), [allStrikes]);
-  const atmStrike = useMemo(
-    () => (spot > 0 ? nearestStrike(allStrikes, spot) : null),
-    [allStrikes, spot]);
+  const atmStrike = useMemo(() => (spot > 0 ? nearestStrike(allStrikes, spot) : null), [allStrikes, spot]);
 
   const addToast = useCallback((type: 'success' | 'error', message: string, detail?: string) => {
     const id = `${Date.now()}-${Math.random()}`;
@@ -149,12 +253,8 @@ export default function Baskets() {
 
   const copyTrade = useCopyTrade(addToast);
 
-  // ── Bootstrap: saved baskets ────────────────────────────────────
-  useEffect(() => {
-    loadSavedBaskets().then(setSaved);
-  }, []);
+  useEffect(() => { loadSavedBaskets().then(setSaved); }, []);
 
-  // ── Expiries: reload on broker/underlying change ────────────────
   useEffect(() => {
     fetch(`/api/options/expiries?underlying=${underlying}&broker=${broker}`)
       .then(r => r.json())
@@ -167,21 +267,16 @@ export default function Baskets() {
       .catch(() => {});
   }, [broker, underlying]);
 
-  // ── Far expiry: defaults to the next available expiry after `expiry` ───
   useEffect(() => {
     if (!expiries.length) return;
-    setFarExpiry(prev => (prev && prev !== expiry && expiries.includes(prev))
-      ? prev
-      : (expiries.find(e => e !== expiry) ?? expiry));
+    setFarExpiry(prev => (prev && prev !== expiry && expiries.includes(prev)) ? prev : (expiries.find(e => e !== expiry) ?? expiry));
   }, [expiries, expiry]);
 
-  // ── Far expiry strike/order-identifier lookup (Calendar/Diagonal legs) ──
   useEffect(() => {
     if (!farExpiry || farExpiry === expiry) { setFarStrikeMap({}); return; }
     const requestedUnderlying = underlying;
     const requestedFarExpiry = farExpiry;
-    const lookupUrl = `${scalperRoute(broker, 'lookup')}?underlying=${underlying}&expiry=${farExpiry}`;
-    fetch(lookupUrl)
+    fetch(`${scalperRoute(broker, 'lookup')}?underlying=${underlying}&expiry=${farExpiry}`)
       .then(r => r.json())
       .then((j: { success: boolean; data?: { strikes: Record<string, StrikeIdentifier> } }) => {
         if (requestedUnderlying !== underlyingRef.current || requestedFarExpiry !== farExpiryRef.current) return;
@@ -190,28 +285,18 @@ export default function Baskets() {
       .catch(() => {});
   }, [farExpiry, expiry, underlying, broker]);
 
-  // ── Funds tile: reload on broker change ──────────────────────────
   useEffect(() => {
-    const url = scalperRoute(broker, 'funds');
-    fetch(url)
+    fetch(scalperRoute(broker, 'funds'))
       .then(r => r.json())
-      .then((j: { success: boolean; data?: Record<string, number> }) => {
-        setFundsData(j.success ? (j.data ?? null) : null);
-      })
+      .then((j: { success: boolean; data?: Record<string, number> }) => setFundsData(j.success ? (j.data ?? null) : null))
       .catch(() => setFundsData(null));
   }, [broker]);
 
-  // ── Per-expiry: chain + lookup + live feed ──────────────────────
+  const authenticatedBrokersKey = authenticatedBrokers.join(',');
   useEffect(() => {
     if (!expiry) return;
-
     chainReadyForRef.current = null;
-    setLegs([]);
-    setStrategy(null);
-    setAllStrikes([]);
-    setPrevClose({});
-    setStrikeMap({});
-    setChainSpot(0);
+    setLegs([]); setStrategy(null); setAllStrikes([]); setPrevClose({}); setStrikeMap({}); setChainSpot(0);
 
     const requestedUnderlying = underlying;
     const requestedExpiryForChain = expiry;
@@ -223,12 +308,8 @@ export default function Baskets() {
         const oc = j.data.chain.oc;
         const strikes = Object.keys(oc).map(Number).filter(n => !isNaN(n)).sort((a, b) => a - b);
         setAllStrikes(strikes);
-
         const pc: Record<string, { ce: number; pe: number }> = {};
         for (const [sk, entry] of Object.entries(oc)) {
-          // Dhan keys the chain by a 6-decimal float string ("23950.000000") but
-          // every lookup here (and the live-quote map) keys by the plain integer
-          // strike, so normalise or the prev-close fallback silently never hits.
           pc[String(Number(sk))] = {
             ce: entry.ce?.previous_close_price ?? entry.ce?.previous_close ?? 0,
             pe: entry.pe?.previous_close_price ?? entry.pe?.previous_close ?? 0,
@@ -240,50 +321,38 @@ export default function Baskets() {
       })
       .catch(() => {});
 
-    const requestedUnderlyingForLookup = underlying;
-    const requestedExpiry = expiry;
-    const lookupUrl = `${scalperRoute(broker, 'lookup')}?underlying=${underlying}&expiry=${expiry}`;
-    fetch(lookupUrl)
+    fetch(`${scalperRoute(broker, 'lookup')}?underlying=${underlying}&expiry=${expiry}`)
       .then(r => r.json())
       .then((j: { success: boolean; data?: { lotSize: number; strikes: Record<string, StrikeIdentifier> } }) => {
-        if (requestedUnderlyingForLookup !== underlyingRef.current || requestedExpiry !== expiryRef.current) return;
+        if (requestedUnderlying !== underlyingRef.current || requestedExpiryForChain !== expiryRef.current) return;
         if (j.success && j.data) {
           setStrikeMap(j.data.strikes);
-          // Only accept a usable lot size; null keeps placement blocked below.
           setLotSize(Number(j.data.lotSize) > 0 ? Number(j.data.lotSize) : null);
         }
       })
       .catch(() => {});
 
-    for (const b of authenticatedBrokers) {
+    const brokers = authenticatedBrokersKey.split(',').filter(Boolean);
+    for (const b of brokers) {
       fetch('/api/options/live', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ action: 'start', underlying, expiry, numStrikes: 30, broker: b }),
       }).catch(() => {});
     }
-
     return () => {
       fetch('/api/options/live', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action: 'stop', brokers: authenticatedBrokers }),
+        body: JSON.stringify({ action: 'stop', brokers }),
       }).catch(() => {});
     };
-  }, [expiry, underlying, authenticatedBrokers]);
+  }, [expiry, underlying, authenticatedBrokersKey, broker]);
 
-  // ── Watch extra off-selected-expiry contracts (Calendar/Diagonal legs) ──
   useEffect(() => {
     const farLegs = legs.filter(l => l.expiry && l.expiry !== expiry);
     if (!farLegs.length) return;
-
-    const requests = farLegs.map(l => ({
-      underlying,
-      expiry: l.expiry,
-      strike: l.strike,
-      side: l.option,
-    }));
-
+    const requests = farLegs.map(l => ({ underlying, expiry: l.expiry, strike: l.strike, side: l.option }));
     fetch('/api/options/live', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -291,19 +360,15 @@ export default function Baskets() {
     }).catch(() => {});
   }, [legs, expiry, underlying]);
 
-  // ── Pricing helpers ─────────────────────────────────────────────
-  // Live/prev-close quotes for the front expiry, plus extra-contract quotes for far expiries.
   const autoPremium = useCallback((strike: number, option: OptionType, legExpiry?: string): number => {
     const key = String(strike);
     const side = option === 'CE' ? 'ce' : 'pe';
     if (legExpiry != null && legExpiry !== expiry) {
       const extraLtp = liveQuotes?.extra?.[legExpiry]?.[key]?.[side]?.ltp ?? 0;
-      if (extraLtp > 0) return extraLtp;
-      return 0;
+      return extraLtp > 0 ? extraLtp : 0;
     }
     const live = liveQuotes?.strikes?.[key]?.[side]?.ltp ?? 0;
-    if (live > 0) return live;
-    return prevClose[key]?.[side] ?? 0;
+    return live > 0 ? live : (prevClose[key]?.[side] ?? 0);
   }, [liveQuotes, prevClose, expiry]);
 
   const effectivePremium = useCallback((leg: BasketLeg): number => {
@@ -312,16 +377,14 @@ export default function Baskets() {
     return autoPremium(leg.strike, leg.option, leg.expiry);
   }, [autoPremium]);
 
-  // ── Leg operations ──────────────────────────────────────────────
   const newLegId = () => `leg-${++legCounterRef.current}`;
-
   const applyTemplate = useCallback((tpl: StrategyTemplate) => {
     if (atmStrike == null || !allStrikes.length) {
-      addToast('error', 'Strikes still loading', 'Wait for the option chain, then pick a strategy');
+      addToast('error', 'Option chain still initializing');
       return;
     }
     if (tpl.legs.some(l => l.expiryRole === 'far') && (!farExpiry || farExpiry === expiry)) {
-      addToast('error', 'Need a second expiry', 'This strategy needs a far-month expiry — only one expiry is available right now');
+      addToast('error', 'Secondary expiry required');
       return;
     }
     setStrategy(tpl.key);
@@ -337,33 +400,49 @@ export default function Baskets() {
     setLegs(prev => prev.map(l => (l.id === id ? { ...l, ...patch } : l)));
   }, []);
 
-  const stepStrike = useCallback((id: string, dir: 1 | -1) => {
-    setLegs(prev => prev.map(l => {
-      if (l.id !== id) return l;
-      const idx = allStrikes.indexOf(l.strike);
-      const nextIdx = idx < 0 ? -1 : idx + dir;
-      if (nextIdx < 0 || nextIdx >= allStrikes.length) return l;
-      return { ...l, strike: allStrikes[nextIdx], price: '' };
-    }));
+  const nextAvailableStrike = useCallback((
+    fromStrike: number, dir: 1 | -1, option: OptionType, side: BasketLeg['side'], excludeId: string | null, currentLegs: BasketLeg[],
+  ): number | null => {
+    const occupied = new Set(currentLegs.filter(l => l.id !== excludeId && l.option === option && l.side === side).map(l => l.strike));
+    const idx = allStrikes.indexOf(fromStrike);
+    if (idx < 0) return occupied.has(fromStrike) ? null : fromStrike;
+    let nextIdx = idx + dir;
+    while (nextIdx >= 0 && nextIdx < allStrikes.length && occupied.has(allStrikes[nextIdx])) nextIdx += dir;
+    return (nextIdx < 0 || nextIdx >= allStrikes.length) ? null : allStrikes[nextIdx];
   }, [allStrikes]);
 
+  const stepStrike = useCallback((id: string, dir: 1 | -1) => {
+    setLegs(prev => {
+      const leg = prev.find(l => l.id === id);
+      if (!leg) return prev;
+      const nextStrike = nextAvailableStrike(leg.strike, dir, leg.option, leg.side, id, prev);
+      return (nextStrike == null || nextStrike === leg.strike) ? prev : prev.map(l => (l.id === id ? { ...l, strike: nextStrike, price: '' } : l));
+    });
+  }, [nextAvailableStrike]);
+
   const addLeg = useCallback(() => {
-    if (atmStrike == null) {
-      addToast('error', 'Strikes still loading');
-      return;
-    }
-    setLegs(prev => [...prev, {
-      id: newLegId(), side: 'B', option: 'CE', strike: atmStrike, lots: 1, type: 'MARKET', price: '', expiry,
-    }]);
-  }, [atmStrike, expiry, addToast]);
+    if (atmStrike == null) { addToast('error', 'Option chain loading'); return; }
+    setLegs(prev => {
+      const occupied = new Set(prev.filter(l => l.option === 'CE' && l.side === 'B').map(l => l.strike));
+      let strike = atmStrike;
+      if (occupied.has(strike)) {
+        const atmIdx = allStrikes.indexOf(atmStrike);
+        let found: number | null = null;
+        for (let d = 1; atmIdx >= 0 && d < allStrikes.length; d++) {
+          const up = allStrikes[atmIdx + d];
+          const down = allStrikes[atmIdx - d];
+          if (up !== undefined && !occupied.has(up)) { found = up; break; }
+          if (down !== undefined && !occupied.has(down)) { found = down; break; }
+          if (up === undefined && down === undefined) break;
+        }
+        if (found != null) strike = found;
+      }
+      return [...prev, { id: newLegId(), side: 'B', option: 'CE', strike, lots: 1, type: 'MARKET', price: '', expiry }];
+    });
+  }, [atmStrike, allStrikes, expiry, addToast]);
 
-  const removeLeg = useCallback((id: string) => {
-    setLegs(prev => prev.filter(l => l.id !== id));
-  }, []);
+  const removeLeg = useCallback((id: string) => { setLegs(prev => prev.filter(l => l.id !== id)); }, []);
 
-  // Load an already-open position's strike/option into the leg table so the
-  // user can scale in (same strike) or hedge (new strike) via "Place Basket".
-  // Side defaults to match the position's current direction (short stays short).
   const addLegFromPosition = useCallback((pos: Record<string, unknown>) => {
     const sym = String(pos.tradingSymbol ?? '');
     let match: { strike: number; option: OptionType } | null = null;
@@ -371,34 +450,21 @@ export default function Baskets() {
       if (entry.ceSymbol === sym) { match = { strike: Number(strikeStr), option: 'CE' }; break; }
       if (entry.peSymbol === sym) { match = { strike: Number(strikeStr), option: 'PE' }; break; }
     }
-    if (!match) {
-      addToast('error', 'Could not match position to a strike', sym);
-      return;
-    }
+    if (!match) { addToast('error', 'Could not resolve position strike', sym); return; }
     const netQty = Number(pos.netQty) || 0;
     const side = netQty < 0 ? 'S' : 'B';
-    setLegs(prev => [...prev, {
-      id: newLegId(), side, option: match!.option, strike: match!.strike, lots: 1, type: 'MARKET', price: '', expiry,
-    }]);
-    addToast('success', `Added ${side === 'S' ? 'Sell' : 'Buy'} ${match.option} ${match.strike} leg`, 'Adjust lots, then Place Basket');
+    setLegs(prev => [...prev, { id: newLegId(), side, option: match!.option, strike: match!.strike, lots: 1, type: 'MARKET', price: '', expiry }]);
+    addToast('success', `Staged ${side === 'S' ? 'Sell' : 'Buy'} ${match.option} ${match.strike} leg`);
   }, [strikeMap, expiry, addToast]);
 
-  // ── Payoff + metrics ────────────────────────────────────────────
-  // Empty until the lot size resolves — a payoff curve scaled by a guessed lot
-  // size reads as real numbers and would misstate every rupee figure on screen.
   const payoffLegs = useMemo<PayoffLeg[]>(() => (lotSize ? legs.map(l => ({
     side: l.side, option: l.option, strike: l.strike,
     premium: effectivePremium(l), qty: l.lots * multiplier * lotSize,
   })) : []), [legs, multiplier, lotSize, effectivePremium]);
 
-  // Calendar/Diagonal legs expire on different dates — expiry-intrinsic payoff
-  // math (computePayoff) is meaningless for a leg that's still alive, so the
-  // chart is skipped entirely rather than shown wrong.
   const hasMixedExpiry = useMemo(() => legs.some(l => l.expiry !== expiry), [legs, expiry]);
-
   const payoff = useMemo(() => {
-    if (hasMixedExpiry) return null;
-    if (!payoffLegs.length || payoffLegs.some(l => l.premium <= 0)) return null;
+    if (hasMixedExpiry || !payoffLegs.length || payoffLegs.some(l => l.premium <= 0)) return null;
     const strikes = payoffLegs.map(l => l.strike);
     const center = spot > 0 ? spot : (Math.min(...strikes) + Math.max(...strikes)) / 2;
     const lo = Math.min(Math.min(...strikes) - 6 * step, center * 0.94);
@@ -407,143 +473,69 @@ export default function Baskets() {
   }, [payoffLegs, spot, step, hasMixedExpiry]);
 
   const riskReward = useMemo(() => {
-    if (!payoff || payoff.maxProfitUnlimited || payoff.maxLossUnlimited) return null;
-    if (payoff.maxLoss >= 0) return null;
+    if (!payoff || payoff.maxProfitUnlimited || payoff.maxLossUnlimited || payoff.maxLoss >= 0) return null;
     return payoff.maxProfit / Math.abs(payoff.maxLoss);
   }, [payoff]);
 
   const daysLeft = useMemo(() => (expiry ? daysToExpiry(expiry) : null), [expiry]);
-
-  // True once legs exist but none of them have any premium (neither live WS
-  // nor the chain's previous_close) — almost always means the market is
-  // closed, since Dhan's option-chain API can return previous_close=0 for
-  // legs outside trading hours even though the chain itself loaded fine.
   const premiumsUnavailable = legs.length > 0 && legs.every(l => effectivePremium(l) <= 0);
 
-  // ── Order placement ─────────────────────────────────────────────
   type PlacedLeg = { label: string; side: 'B' | 'S'; option: OptionType; strike: number; qty: number; expiry: string };
-
-  // Flattens already-filled legs of a basket that stopped mid-way by firing
-  // opposite-side MARKET orders for each — best-effort, since a rejected or
-  // network-unconfirmed leg can't otherwise be undone from this UI.
   const rollbackPlacedLegs = useCallback(async (placed: PlacedLeg[]) => {
     if (!placed.length) return;
-    addToast('error', `Auto-flattening ${placed.length} placed leg(s)`, 'Reversing with market orders — verify in Orders/Positions after');
     for (const p of [...placed].reverse()) {
       const reverseReq = resolveOrderRequest(broker, {
         side: p.side === 'B' ? 'S' : 'B', option: p.option, strike: p.strike, qty: p.qty, type: 'MARKET', underlying,
         productType: 'MARGIN',
       }, p.expiry === farExpiry ? farStrikeMap : strikeMap);
-      if (!reverseReq) {
-        addToast('error', `Could not auto-reverse ${p.label}`, 'No order identifier — close manually from Orders/Positions');
-        continue;
-      }
+      if (!reverseReq) { addToast('error', `UNCONFIRMED — could not build reversal for ${p.label}`); continue; }
       try {
-        const res = await fetch(reverseReq.url, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(reverseReq.body),
-        });
-        const j = await res.json() as { success: boolean; order_id?: string; error?: string };
-        if (j.success) addToast('success', `Reversed ${p.label}`, `ID: ${j.order_id}`);
-        else addToast('error', `Reverse failed for ${p.label}`, `${j.error ?? 'Unknown error'} — close manually from Orders/Positions`);
-      } catch (e) {
-        addToast('error', `Reverse UNCONFIRMED for ${p.label}`, `Close manually from Orders/Positions: ${String(e)}`);
+        const res = await fetch(reverseReq.url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(reverseReq.body) });
+        const j = await res.json() as { success: boolean; error?: string };
+        addToast(j.success ? 'success' : 'error', j.success ? `Reversed ${p.label}` : `Reverse failed for ${p.label} — ${j.error ?? 'unknown error'}`);
+      } catch {
+        addToast('error', `UNCONFIRMED — reversal request failed for ${p.label}`);
       }
     }
   }, [broker, strikeMap, farStrikeMap, farExpiry, underlying, addToast]);
 
   const placeBasket = useCallback(async () => {
-    if (!legs.length || !expiry) return;
-    if (!hasAuthenticatedBroker) {
-      addToast('error', 'No broker logged in', 'Log in to Dhan or Zerodha before placing a basket');
-      return;
-    }
-    // Every leg's quantity is lots × multiplier × lot size, so an unresolved lot
-    // size means the whole basket's size is unknown. Refuse rather than guess.
-    if (!lotSize || lotSize <= 0) {
-      addToast('error', 'Cannot place basket', `Lot size for ${underlying} not resolved yet — retry in a moment`);
-      return;
-    }
-    if (!confirmPlace) {
-      setConfirmPlace(true);
-      setTimeout(() => setConfirmPlace(false), 4000);
-      return;
-    }
+    if (!legs.length) { addToast('error', 'Add at least one leg'); return; }
+    if (!expiry) { addToast('error', 'Select an expiry'); return; }
+    if (!hasAuthenticatedBroker) { addToast('error', 'No broker logged in'); return; }
+    if (!lotSize) { addToast('error', 'Lot size not resolved yet'); return; }
+    if (!confirmPlace) { setConfirmPlace(true); setTimeout(() => setConfirmPlace(false), 4500); return; }
     setConfirmPlace(false);
     if (placingRef.current) return;
-
     for (const leg of legs) {
-      if (leg.type === 'LIMIT' && effectivePremium(leg) <= 0) {
-        addToast('error', 'Invalid limit price', `${leg.side === 'B' ? 'Buy' : 'Sell'} ${leg.strike} ${leg.option}`);
-        return;
-      }
+      if (leg.type === 'LIMIT' && effectivePremium(leg) <= 0) { addToast('error', 'Invalid limit price'); return; }
     }
-
-    placingRef.current = true;
-    setPlacing(true);
-
+    placingRef.current = true; setPlacing(true);
     const ordered = sortLegsForPlacement(legs);
     const placedLegs: PlacedLeg[] = [];
     try {
       for (const leg of ordered) {
-        const label = `${leg.side === 'B' ? 'BUY' : 'SELL'} ${leg.strike} ${leg.option}`;
         const qty = leg.lots * multiplier * lotSize;
-        const price = leg.type === 'LIMIT' ? effectivePremium(leg) : undefined;
-
-        const legStrikeMap = leg.expiry === farExpiry ? farStrikeMap : strikeMap;
-        const req = resolveOrderRequest(broker, { side: leg.side, option: leg.option, strike: leg.strike, qty, type: leg.type, price, underlying, productType: 'MARGIN' }, legStrikeMap);
-        if (!req) {
-          addToast('error', `${label} — no order identifier resolved`, 'Strike lookup not ready yet — basket stopped');
-          await rollbackPlacedLegs(placedLegs);
-          return;
-        }
-
-        try {
-          const res = await fetch(req.url, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(req.body),
-          });
-          const j = await res.json() as { success: boolean; order_id?: string; error?: string };
-          if (j.success) {
-            placedLegs.push({ label, side: leg.side, option: leg.option, strike: leg.strike, qty, expiry: leg.expiry });
-            addToast('success', `${label} placed`, `ID: ${j.order_id}`);
-          } else {
-            addToast('error', `${label} failed — basket stopped`, j.error ?? 'Unknown error');
-            await rollbackPlacedLegs(placedLegs);
-            return;
-          }
-        } catch (e) {
-          addToast('error', `${label} UNCONFIRMED — basket stopped`, `Check Orders before retrying: ${String(e)}`);
-          await rollbackPlacedLegs(placedLegs);
-          return;
-        }
+        const req = resolveOrderRequest(broker, { side: leg.side, option: leg.option, strike: leg.strike, qty, type: leg.type, price: leg.type === 'LIMIT' ? effectivePremium(leg) : undefined, underlying, productType: 'MARGIN' }, leg.expiry === farExpiry ? farStrikeMap : strikeMap);
+        if (!req) { await rollbackPlacedLegs(placedLegs); return; }
+        const res = await fetch(req.url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(req.body) });
+        const j = await res.json() as { success: boolean; order_id?: string; error?: string };
+        if (j.success) placedLegs.push({ label: `${leg.side} ${leg.strike}`, side: leg.side, option: leg.option, strike: leg.strike, qty, expiry: leg.expiry });
+        else { await rollbackPlacedLegs(placedLegs); return; }
       }
-      addToast('success', `Basket complete: ${placedLegs.length}/${legs.length} legs placed`);
-    } finally {
-      placingRef.current = false;
-      setPlacing(false);
-    }
+      addToast('success', `Basket complete: ${placedLegs.length}/${legs.length} legs transmitted`);
+    } finally { placingRef.current = false; setPlacing(false); }
   }, [legs, expiry, farExpiry, confirmPlace, multiplier, lotSize, strikeMap, farStrikeMap, broker, underlying, effectivePremium, addToast, hasAuthenticatedBroker, rollbackPlacedLegs]);
 
-  // ── Save / load ───────────────────────────────────────────────
   const persistSaved = (next: SavedBasket[]) => {
     setSaved(next);
-    persistSavedBaskets(next).catch(() => addToast('error', 'Failed to save baskets', 'Changes may not persist — check the server'));
+    persistSavedBaskets(next).catch(() => addToast('error', 'Failed to save basket preset — change was not persisted'));
   };
-
   const saveBasket = () => {
     const name = saveName.trim();
-    if (!name || !legs.length) {
-      addToast('error', !legs.length ? 'Nothing to save — add legs first' : 'Enter a basket name');
-      return;
-    }
-    if (atmStrike == null) {
-      addToast('error', 'Cannot save yet', 'Wait for the option chain to load so ATM is known');
-      return;
-    }
-    const isUpdate = saved.some(s => s.name === name);
+    if (!name) { addToast('error', 'Enter a basket name'); return; }
+    if (!legs.length) { addToast('error', 'Nothing to save'); return; }
+    if (atmStrike == null) { addToast('error', 'Wait for the option chain to load'); return; }
     const entry: SavedBasket = {
       name, category, strategy, multiplier, underlying,
       legs: legs.map(({ side, option, strike, lots, type, expiry: legExpiry }) => ({
@@ -552,332 +544,503 @@ export default function Baskets() {
       })),
     };
     persistSaved([...saved.filter(s => s.name !== name), entry]);
-    // Keep the name filled in (rather than clearing it) so pressing Save again
-    // — e.g. after tweaking a loaded basket's legs — overwrites this same
-    // basket instead of demanding the name be retyped every time.
     setSaveName(name);
-    addToast('success', isUpdate ? `Basket "${name}" updated` : `Basket "${name}" saved`);
+    addToast('success', `Preset "${name}" saved`);
   };
 
-  // Holds a basket whose underlying didn't match the current selection at the
-  // moment Load was clicked. The effect below finishes applying it once the
-  // newly-selected underlying's chain (atmStrike/allStrikes) is ready — the
-  // user clicks Load once, even across an underlying switch.
   const pendingLoadRef = useRef<SavedBasket | null>(null);
-
   const applyLoadedBasket = useCallback((b: SavedBasket, atm: number, strikes: number[]) => {
     if (b.legs.some(l => l.expiryRole === 'far') && (!farExpiryRef.current || farExpiryRef.current === expiryRef.current)) {
-      addToast('error', 'Need a second expiry', `"${b.name}" has a far-month leg — only one expiry is available right now, so it can't be re-anchored correctly`);
+      addToast('error', 'Secondary expiry required');
       return;
     }
-    setCategory(b.category);
-    setStrategy(b.strategy);
-    setMultiplier(b.multiplier);
+    setCategory(b.category); setStrategy(b.strategy); setMultiplier(b.multiplier);
     setLegs(b.legs.map(l => ({
-      id: newLegId(),
-      side: l.side, option: l.option, lots: l.lots, type: l.type,
-      strike: offsetToStrike(l.offset, atm, strikes, step),
-      price: '',
-      expiry: l.expiryRole === 'far' ? (farExpiryRef.current || expiryRef.current) : expiryRef.current,
+      id: newLegId(), side: l.side, option: l.option, lots: l.lots, type: l.type,
+      strike: offsetToStrike(l.offset, atm, strikes, step), price: '',
+      expiry: l.expiryRole === 'far' ? farExpiryRef.current : expiryRef.current,
     })));
-    setSaveOpen(false);
-    setSaveName(b.name);
-    addToast('success', `Basket "${b.name}" loaded`, `Re-anchored to current ATM ${atm}`);
+    setSaveOpen(false); setSaveName(b.name);
   }, [step, addToast]);
 
   const loadBasket = (b: SavedBasket) => {
-    if (b.underlying !== underlying) {
-      pendingLoadRef.current = b;
-      setUnderlying(b.underlying as Underlying);
-      addToast('success', `Switched underlying to ${b.underlying}`, `Loading basket "${b.name}" once its chain is ready`);
-      return;
-    }
-    if (atmStrike == null || !allStrikes.length) {
-      addToast('error', 'Chain not loaded yet', 'Wait for strikes to load, then load the basket');
-      return;
-    }
+    if (b.underlying !== underlying) { pendingLoadRef.current = b; setUnderlying(b.underlying as Underlying); return; }
+    if (atmStrike == null || !allStrikes.length) return;
     applyLoadedBasket(b, atmStrike, allStrikes);
   };
 
-  // Completes a cross-underlying load once the new underlying's chain settles.
-  // Gated on chainReadyForRef (not just atmStrike/allStrikes being non-empty):
-  // on the render where `underlying` flips, allStrikes/atmStrike can still
-  // hold the PREVIOUS underlying's non-null values (the per-expiry effect's
-  // reset only lands on the next render), so a null-check alone would
-  // re-anchor the basket to the wrong underlying's strikes. chainReadyForRef
-  // is a ref (mutates synchronously, no extra render needed) that's cleared
-  // at the top of that same effect and only re-armed once the chain fetch
-  // for the *current* underlying+expiry has actually resolved.
   useEffect(() => {
     const pending = pendingLoadRef.current;
-    if (!pending || pending.underlying !== underlying) return;
-    if (atmStrike == null || !allStrikes.length) return;
-    const ready = chainReadyForRef.current;
-    if (!ready || ready.underlying !== underlying || ready.expiry !== expiry) return;
-    pendingLoadRef.current = null;
-    applyLoadedBasket(pending, atmStrike, allStrikes);
+    if (pending && pending.underlying === underlying && atmStrike != null && allStrikes.length && chainReadyForRef.current?.underlying === underlying && chainReadyForRef.current?.expiry === expiry) {
+      pendingLoadRef.current = null; applyLoadedBasket(pending, atmStrike, allStrikes);
+    }
   }, [underlying, expiry, atmStrike, allStrikes, applyLoadedBasket]);
 
   const totalQty = legs.reduce((s, l) => s + l.lots, 0) * multiplier;
 
-  // ── Render ──────────────────────────────────────────────────────
   return (
-    <div className="flex flex-col min-h-screen bg-zinc-950 text-white">
+    <div className="flex flex-col min-h-screen bg-zinc-950 text-white selection:bg-amber-500/20 selection:text-amber-300 font-sans">
       <div className="fixed top-4 right-4 z-50 flex flex-col gap-2 pointer-events-none">
         {toasts.map(t => (
-          <div key={t.id} className={`pointer-events-auto px-4 py-3 rounded-xl border text-sm font-semibold shadow-2xl max-w-xs ${
-            t.type === 'success' ? 'bg-emerald-900/95 border-emerald-500/40 text-emerald-200' : 'bg-rose-900/95 border-rose-500/40 text-rose-200'
-          }`}>
-            <p>{t.message}</p>
-            {t.detail && <p className="text-xs opacity-70 mt-0.5 font-mono">{t.detail}</p>}
+          <div key={t.id} className={`pointer-events-auto px-3.5 py-2.5 rounded-xl border text-xs font-mono shadow-2xl max-w-sm backdrop-blur transition-all ${t.type === 'success' ? 'bg-zinc-950/95 border-emerald-500/40 text-emerald-300' : 'bg-zinc-950/95 border-red-500/40 text-red-300'}`}>
+            <div className="flex items-center gap-2"><span className={`w-2 h-2 rounded-full shrink-0 ${t.type === 'success' ? 'bg-emerald-400' : 'bg-red-400'}`} /><p className="font-bold leading-tight">{t.message}</p></div>
           </div>
         ))}
       </div>
 
       {authChecked && !hasAuthenticatedBroker && (
-        <div className="z-20 bg-amber-900/95 border-b border-amber-500/40 px-4 py-2 text-center">
-          <p className="text-xs font-bold text-amber-200">
-            No broker logged in — log in to Dhan or Zerodha to fetch live data and place orders.
+        <div className="z-30 bg-amber-950/90 border-b border-amber-500/30 px-4 py-2 text-center">
+          <p className="text-xs font-mono font-bold text-amber-300">
+            NO BROKER LOGGED IN — Log in to Dhan or Zerodha to stream real-time ticks and execute orders.
           </p>
         </div>
       )}
 
-      <div className="sticky top-0 z-10 border-b border-zinc-800 bg-zinc-950/95 backdrop-blur px-4 py-2">
-        <div className="flex items-center justify-between gap-3 flex-wrap">
-          <div className="flex items-center gap-3">
-            <h1 className="text-sm font-bold text-white tracking-tight flex items-center gap-1.5">
-              <ShoppingBasket className="w-3.5 h-3.5 text-emerald-400" />
-              BASKETS
+      {/* ─── Sticky Bloomberg Terminal Header ────────────────────────── */}
+      <div className="sticky top-0 z-20 flex flex-wrap items-center justify-between gap-3 border-b border-amber-500/20 bg-zinc-950/95 px-4 lg:px-6 py-2.5 backdrop-blur shadow-md">
+        {/* Title Block */}
+        <div className="flex items-center gap-3">
+          <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-amber-500/30 bg-amber-500/10 shadow-inner">
+            <ShoppingBasket className="h-5 w-5 text-amber-400" />
+          </div>
+          <div>
+            <div className="flex items-center gap-2 mb-0.5">
+              <span className="text-[10px] font-bold uppercase tracking-[0.2em] text-amber-400">
+                BLOOMBERG TERMINAL · OPTIONS DESK
+              </span>
+              <span className="text-[10px] text-zinc-600">/</span>
+              <span className="font-mono text-[9px] text-zinc-400">BASKET ARCHITECT v2.4</span>
+            </div>
+            <h1 className="text-sm lg:text-base font-bold leading-none tracking-tight text-white">
+              Institutional Multi-Leg Basket Terminal
             </h1>
-            <NavBar />
-          </div>
-
-          <div className="flex items-center gap-2 flex-wrap">
-            <select value={underlying} onChange={e => setUnderlying(e.target.value as Underlying)}
-              className="h-8 bg-zinc-900 border border-zinc-700 text-zinc-200 text-xs font-semibold rounded-lg px-2.5 focus:outline-none focus:border-emerald-500">
-              {UNDERLYINGS.map(u => <option key={u} value={u}>{u}</option>)}
-            </select>
-
-            {authenticatedBrokers.length > 1 && (
-              <select value={broker} onChange={e => setBroker(e.target.value as Broker)}
-                className="h-8 bg-zinc-900 border border-zinc-700 text-zinc-200 text-xs font-semibold rounded-lg px-2.5 focus:outline-none focus:border-emerald-500">
-                {authenticatedBrokers.map(b => <option key={b} value={b}>{BROKER_LABELS[b]}</option>)}
-              </select>
-            )}
-
-            {/* Dhan → Zerodha trade replication (arm/disarm + multiplier) */}
-            <CopyTradeControls copyTrade={copyTrade} />
-
-            <select value={expiry} onChange={e => setExpiry(e.target.value)}
-              className="h-8 bg-zinc-900 border border-zinc-700 text-zinc-200 text-xs font-semibold rounded-lg px-2.5 focus:outline-none focus:border-emerald-500">
-              {expiries.map(ex => <option key={ex} value={ex}>{ex}</option>)}
-            </select>
-
-            {category === 'Calendar' && (
-              <div className="flex items-center gap-1.5 h-8 bg-zinc-900 border border-fuchsia-500/40 rounded-lg pl-2 pr-1">
-                <span className="text-[10px] font-bold text-fuchsia-300 uppercase tracking-wider">Far</span>
-                <select value={farExpiry} onChange={e => setFarExpiry(e.target.value)}
-                  className="h-6 bg-transparent text-zinc-200 text-xs font-semibold rounded px-1 focus:outline-none">
-                  {expiries.filter(ex => ex !== expiry).map(ex => <option key={ex} value={ex}>{ex}</option>)}
-                </select>
-              </div>
-            )}
-
-            <div className="flex items-center gap-2 h-8 bg-zinc-900 border border-zinc-700 rounded-lg px-2">
-              <span className="text-[10px] font-bold text-zinc-400 uppercase tracking-wider">Multiplier</span>
-              <div className="inline-flex items-center rounded-lg border border-zinc-800 bg-zinc-950/60 overflow-hidden">
-                <button onClick={() => setMultiplier(m => Math.max(1, m - 1))}
-                  className="w-7 h-7 flex items-center justify-center text-zinc-500 hover:text-zinc-200 hover:bg-zinc-800 transition-colors">
-                  <span className="text-xs font-bold">−</span>
-                </button>
-                <span className="font-mono font-bold text-xs tabular-nums text-center px-1 w-5 inline-block">{multiplier}</span>
-                <button onClick={() => setMultiplier(m => Math.min(20, m + 1))}
-                  className="w-7 h-7 flex items-center justify-center text-zinc-500 hover:text-zinc-200 hover:bg-zinc-800 transition-colors">
-                  <span className="text-xs font-bold">+</span>
-                </button>
-              </div>
-            </div>
-
-            <div className="flex items-center gap-1.5">
-              <span className={`w-2 h-2 rounded-full ${
-                bridgeStatus.status === 'RUNNING'  ? 'bg-emerald-400 animate-pulse' :
-                bridgeStatus.status === 'STARTING' ? 'bg-yellow-400 animate-pulse'  :
-                bridgeStatus.status === 'ERROR'    ? 'bg-rose-400'                  : 'bg-zinc-600'
-              }`} />
-              <span className={`text-[9px] font-bold px-1 py-0.5 rounded border ${
-                transport === 'ws' ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20' : 'bg-zinc-800 text-zinc-500 border-zinc-700'
-              }`}>
-                {transport === 'ws' ? 'WS' : 'HTTP'}
-              </span>
-              {lastUpdated && <span className="text-[10px] text-zinc-500 font-mono">{lastUpdated}</span>}
-            </div>
-
-            {spot > 0 && (
-              <div
-                className="h-8 flex items-baseline gap-2 px-3 rounded-lg bg-zinc-900 border border-zinc-700 font-mono tabular-nums"
-                title={`${underlying} Spot from ${liveQuotes?.spot ? 'WebSocket Live Feed' : 'Option Chain'}`}
-              >
-                <span className="text-[10px] font-bold text-zinc-400 tracking-wider uppercase">{underlying}</span>
-                <span className="text-xs font-bold text-white">
-                  {spot.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-                </span>
-                {spotChange !== 0 && (
-                  <span className={`text-[11px] font-semibold flex items-center gap-0.5 ${spotChange >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
-                    <span>{spotChange >= 0 ? '▲' : '▼'}</span>
-                    <span>{Math.abs(spotChange).toFixed(2)}</span>
-                    <span className="text-[10px] opacity-90">({spotChange >= 0 ? '+' : ''}{spotChangePct.toFixed(2)}%)</span>
-                  </span>
-                )}
-              </div>
-            )}
-
-            {currentVix > 0 && (
-              <div
-                className="h-8 flex items-baseline gap-2 px-3 rounded-lg bg-zinc-900 border border-zinc-700 font-mono tabular-nums"
-                title={`India VIX | Prev Close: ${currentVixPrevClose > 0 ? currentVixPrevClose.toFixed(2) : '—'}`}
-              >
-                <span className="text-[10px] font-bold text-zinc-400 tracking-wider">VIX</span>
-                <span className="text-xs font-bold text-white">{currentVix.toFixed(2)}</span>
-                {vixChange !== 0 && (
-                  <span className={`text-[11px] font-semibold flex items-center gap-0.5 ${vixChange >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
-                    <span>{vixChange >= 0 ? '▲' : '▼'}</span>
-                    <span>{Math.abs(vixChange).toFixed(2)}</span>
-                    <span className="text-[10px] opacity-90">({vixChange >= 0 ? '+' : ''}{vixChangePct.toFixed(2)}%)</span>
-                  </span>
-                )}
-              </div>
-            )}
-
-            {fundsData && Number.isFinite(Number(fundsData.availabelBalance)) && (
-              <span className="h-8 flex items-center gap-1.5 px-2.5 rounded-lg text-xs font-bold font-mono tabular-nums bg-zinc-900 border border-zinc-700 text-zinc-200">
-                <Wallet className="w-3 h-3 text-sky-400" />
-                Rs. {formatFundsValue(Number(fundsData.availabelBalance))}
-              </span>
-            )}
           </div>
         </div>
 
-        <div className="mt-2 pt-2 border-t border-zinc-800">
-          <StrategyCardGrid
-            category={category}
-            onCategoryChange={setCategory}
-            selectedKey={strategy}
-            onSelectTemplate={applyTemplate}
-            disabled={atmStrike == null}
-            atmStrike={atmStrike}
-            step={step}
-            allStrikes={allStrikes}
-            autoPremium={autoPremium}
-            frontExpiry={expiry}
-            farExpiry={farExpiry}
-          />
-        </div>
-      </div>
-
-      <div className="flex-1 grid grid-cols-1 xl:grid-cols-2 gap-4 p-4 items-start">
-        <Card className="overflow-hidden">
-          <LegsTable
-            legs={legs}
-            atmStrike={atmStrike}
-            allStrikes={allStrikes}
-            autoPremium={autoPremium}
-            frontExpiry={expiry}
-            farExpiry={farExpiry}
-            onUpdateLeg={updateLeg}
-            onStepStrike={stepStrike}
-            onAddLeg={addLeg}
-            onRemoveLeg={removeLeg}
-            onClearAll={() => { setLegs([]); setStrategy(null); }}
-          />
-
-          <div className="flex items-center gap-2 px-4 py-2 border-t border-zinc-800 bg-zinc-900/40 flex-wrap">
-            <SavedBasketsPanel
-              saveName={saveName}
-              onSaveNameChange={setSaveName}
-              onSave={saveBasket}
-              saved={saved}
-              open={saveOpen}
-              onToggleOpen={() => setSaveOpen(o => !o)}
-              onLoad={loadBasket}
-              onDelete={name => persistSaved(saved.filter(s => s.name !== name))}
+        {/* Telemetry Strip & Quick Controls */}
+        <div className="flex flex-wrap items-center gap-2.5">
+          {/* Market Session Status */}
+          <div className="flex items-center gap-1.5 rounded-md border border-zinc-800 bg-zinc-900 px-2.5 py-1 font-mono text-[10px] font-semibold">
+            <span
+              className={`h-2 w-2 rounded-full ${
+                marketSession.tone === 'live'
+                  ? 'bg-emerald-400 animate-pulse'
+                  : marketSession.tone === 'accent'
+                  ? 'bg-amber-400'
+                  : 'bg-zinc-500'
+              }`}
             />
+            <span className={marketSession.tone === 'live' ? 'text-emerald-400' : 'text-zinc-300'}>
+              {marketSession.label}
+            </span>
           </div>
 
-          {legs.length > 0 && (
-            <div className="flex items-center gap-3 px-4 py-3 border-t border-zinc-800 bg-zinc-950/30 flex-wrap">
-              <Button onClick={placeBasket} disabled={placing || !hasAuthenticatedBroker}
-                className={`${confirmPlace ? 'animate-pulse' : ''}`}>
-                {placing ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <ShoppingBasket className="w-3.5 h-3.5" />}
-                {placing ? 'Placing…' : !hasAuthenticatedBroker ? 'No broker logged in' : confirmPlace ? `Confirm ${legs.length} legs ×${multiplier}?` : 'Place Basket'}
-              </Button>
-              <Button size="sm" variant="outline" disabled={placing}
-                onClick={() => { setLegs([]); setStrategy(null); setConfirmPlace(false); }}
-                className="h-9 px-3 text-[11px] border-rose-500/40 text-rose-400 hover:bg-rose-500/10 hover:text-rose-300 hover:border-rose-400/60 transition-all">
-                Clear All
-              </Button>
-              <div className="ml-auto text-[11px] text-zinc-500 leading-snug text-right">
-                <p className="font-semibold text-zinc-400">{totalQty} lots{lotSize ? ` · ${totalQty * lotSize} qty total` : ''}</p>
-                <p>Buys placed before sells · {lotSize ? `${lotSize} qty per lot` : 'lot size loading…'}</p>
-                {premiumsUnavailable && (
-                  <p className="text-amber-400 font-semibold mt-0.5">
-                    No live/previous-close premium from broker — market may be closed. MARKET orders will still fill at the broker&apos;s prevailing price; enter a Price manually to preview payoff.
-                  </p>
-                )}
-              </div>
+          {/* Live IST Clock */}
+          <span className="flex items-center gap-1.5 rounded-md border border-amber-500/30 bg-amber-500/10 px-2.5 py-1 font-mono text-[10px] font-bold text-amber-400 shadow-sm">
+            <Clock className="h-3 w-3 text-amber-400" />
+            {clock || '--:--:--'} IST
+          </span>
+
+          {/* Broker Selector */}
+          {authenticatedBrokers.length > 1 && (
+            <select
+              value={broker}
+              onChange={e => setBroker(e.target.value as Broker)}
+              className="h-7 bg-zinc-900 border border-zinc-700 text-zinc-200 text-xs font-mono font-semibold rounded-md px-2 focus:outline-none focus:border-amber-500/60"
+            >
+              {authenticatedBrokers.map(b => (
+                <option key={b} value={b}>{BROKER_LABELS[b]}</option>
+              ))}
+            </select>
+          )}
+
+          {/* Copy-trade controls */}
+          <CopyTradeControls copyTrade={copyTrade} />
+
+          {/* Live WebSocket / HTTP status */}
+          <div className="flex items-center gap-1.5 px-2 py-1 rounded-md border border-zinc-800 bg-zinc-900 font-mono text-[10px]">
+            <span className={`w-2 h-2 rounded-full ${
+              bridgeStatus.status === 'RUNNING'  ? 'bg-emerald-400 animate-pulse' :
+              bridgeStatus.status === 'STARTING' ? 'bg-amber-400 animate-pulse'  :
+              bridgeStatus.status === 'ERROR'    ? 'bg-red-400'                  : 'bg-zinc-600'
+            }`} />
+            <span className={transport === 'ws' ? 'text-emerald-400 font-bold' : 'text-zinc-400'}>
+              {transport === 'ws' ? 'WS LIVE' : 'HTTP'}
+            </span>
+            {lastUpdated && <span className="text-zinc-500 hidden sm:inline">{lastUpdated}</span>}
+          </div>
+
+          {/* Spot Quote Chip */}
+          {spot > 0 && (
+            <div
+              className="h-7 flex items-baseline gap-2 px-2.5 rounded-md bg-zinc-900 border border-zinc-700 font-mono tabular-nums text-xs"
+              title={`${underlying} Spot from ${liveQuotes?.spot ? 'WebSocket Stream' : 'Option Chain Snapshot'}`}
+            >
+              <span className="text-[10px] font-bold text-amber-400 uppercase">{underlying}</span>
+              <span className="font-bold text-white">
+                {spot.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+              </span>
+              {spotChange !== 0 && (
+                <span className={`text-[10px] font-semibold flex items-center gap-0.5 ${spotChange >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                  <span>{spotChange >= 0 ? '▲' : '▼'}</span>
+                  <span>{Math.abs(spotChange).toFixed(1)}</span>
+                  <span>({spotChange >= 0 ? '+' : ''}{spotChangePct.toFixed(2)}%)</span>
+                </span>
+              )}
             </div>
           )}
-        </Card>
 
-        <Card className="overflow-hidden">
-          <div className="px-4 py-3 border-b border-zinc-800 bg-zinc-900/40 flex items-baseline justify-between">
-            <span className="text-xs font-bold text-zinc-300 uppercase tracking-widest">Payoff at Expiry</span>
-            <span className="text-[10px] text-zinc-500">premiums from live LTP — override in the Price column</span>
-          </div>
+          {/* VIX Chip */}
+          {currentVix > 0 && (
+            <div
+              className="h-7 flex items-center gap-1.5 px-2.5 rounded-md bg-zinc-900 border border-zinc-700 font-mono tabular-nums text-xs"
+              title={`India VIX · Previous Close: ${currentVixPrevClose > 0 ? currentVixPrevClose.toFixed(2) : '—'}`}
+            >
+              <span className="text-[10px] font-bold text-zinc-400">VIX</span>
+              <span className="font-bold text-white">{currentVix.toFixed(2)}</span>
+              {vixChange !== 0 && (
+                <span className={`text-[10px] font-semibold ${vixChange >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                  ({vixChange >= 0 ? '+' : ''}{vixChangePct.toFixed(1)}%)
+                </span>
+              )}
+              <span className={`rounded px-1 py-0.2 text-[8px] font-bold border uppercase ${
+                vixRegime.tone === 'emerald'
+                  ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-400'
+                  : vixRegime.tone === 'amber'
+                  ? 'border-amber-500/40 bg-amber-500/10 text-amber-400'
+                  : 'border-red-500/40 bg-red-500/10 text-red-400'
+              }`}>
+                {vixRegime.regime}
+              </span>
+            </div>
+          )}
 
-          <div className="grid grid-cols-3 divide-x divide-zinc-800 border-b border-zinc-800">
-            <MetricTile label="Net Premium"
-              tone={!payoff ? 'neutral' : payoff.netPremium >= 0 ? 'profit' : 'loss'}
-              value={payoff ? `${payoff.netPremium >= 0 ? 'Credit' : 'Debit'} ${fmtMoney(payoff.netPremium)}` : '—'} />
-            <MetricTile label="Max Profit" tone="profit"
-              value={!payoff ? '—' : payoff.maxProfitUnlimited ? 'Unlimited' : fmtMoney(payoff.maxProfit)} />
-            <MetricTile label="Max Loss" tone="loss"
-              value={!payoff ? '—' : payoff.maxLossUnlimited ? 'Unlimited' : fmtMoney(payoff.maxLoss)} />
-          </div>
-          <div className="grid grid-cols-3 divide-x divide-zinc-800 border-b border-zinc-800">
-            <MetricTile label="Breakeven"
-              value={payoff && payoff.breakevens.length
-                ? payoff.breakevens.map(b => {
-                    const pct = spot > 0 ? ((b - spot) / spot) * 100 : null;
-                    const pctStr = pct !== null ? ` (${pct >= 0 ? '+' : ''}${pct.toFixed(1)}%)` : '';
-                    return `${b.toLocaleString('en-IN', { maximumFractionDigits: 1 })}${pctStr}`;
-                  }).join(' / ')
-                : '—'} />
-            <MetricTile label="Risk : Reward"
-              value={riskReward != null ? `1 : ${riskReward.toFixed(2)}` : '—'} />
-            <MetricTile label="Days Left" value={daysLeft ?? '—'} />
-          </div>
+          {/* Available Margin Balance */}
+          {fundsData && Number.isFinite(Number(fundsData.availabelBalance)) && (
+            <span className="h-7 flex items-center gap-1.5 px-2.5 rounded-md text-xs font-mono font-bold tabular-nums bg-zinc-900 border border-zinc-700 text-zinc-200">
+              <Wallet className="w-3 h-3 text-sky-400" />
+              <span>₹{formatFundsValue(Number(fundsData.availabelBalance))}</span>
+            </span>
+          )}
 
-          <div className="p-4">
-            <BasketPayoffChart
-              points={payoff?.points ?? []}
-              breakevens={payoff?.breakevens ?? []}
-              spot={spot}
-              emptyReason={
-                hasMixedExpiry
-                  ? 'Calendar/Diagonal legs expire on different dates — no single expiry payoff to chart. Track P&L from the Positions tab instead.'
-                  : premiumsUnavailable
-                  ? 'No premium data from broker — market may be closed. Enter prices manually in the Price column to preview payoff.'
-                  : undefined
-              }
-            />
-            <p className="text-[10px] text-zinc-600 mt-2">
-              Expiry payoff only (no T+0 curve) · margin calculation not available from broker
-            </p>
+          {/* Global Navigation Bar */}
+          <div className="flex items-center pl-1 border-l border-zinc-800">
+            <NavBar />
           </div>
-        </Card>
+        </div>
       </div>
 
-      <div className="p-4 pt-0">
+      {/* ─── Command Ribbon: Underlying, Expiries & Multipliers ────────── */}
+      <div className="border-b border-zinc-800 bg-zinc-950/80 px-4 lg:px-6 py-2 flex items-center justify-between gap-3 flex-wrap">
+        <div className="flex items-center gap-3 flex-wrap">
+          {/* Underlying Segmented Buttons */}
+          <div className="flex items-center gap-1 p-0.5 rounded-lg border border-zinc-800 bg-zinc-950">
+            {UNDERLYINGS.map(u => {
+              const isSelected = underlying === u;
+              return (
+                <button
+                  key={u}
+                  type="button"
+                  onClick={() => setUnderlying(u)}
+                  className={`px-3 py-1 text-xs font-mono font-bold rounded-md transition-all cursor-pointer ${
+                    isSelected
+                      ? 'border border-amber-500/50 bg-amber-500/15 text-amber-300 shadow-sm'
+                      : 'text-zinc-400 hover:text-zinc-200 border border-transparent'
+                  }`}
+                >
+                  {u}
+                </button>
+              );
+            })}
+          </div>
+
+          {/* Front Expiry Dropdown */}
+          <div className="flex items-center gap-1.5 h-8 bg-zinc-900 border border-zinc-700 rounded-lg px-2 shadow-inner">
+            <span className="text-[10px] font-bold text-zinc-400 uppercase tracking-wider font-mono">EXPIRY</span>
+            <select
+              value={expiry}
+              onChange={e => setExpiry(e.target.value)}
+              className="bg-transparent text-zinc-100 text-xs font-mono font-bold rounded focus:outline-none cursor-pointer"
+            >
+              {expiries.map(ex => (
+                <option key={ex} value={ex} className="bg-zinc-900 text-zinc-100">{ex}</option>
+              ))}
+            </select>
+          </div>
+
+          {/* Far Expiry Selector (shown for Calendar strategies or multi-expiry legs) */}
+          {(category === 'Calendar' || hasMixedExpiry) && (
+            <div className="flex items-center gap-1.5 h-8 bg-zinc-900 border border-fuchsia-500/40 rounded-lg px-2 shadow-inner">
+              <span className="text-[10px] font-bold text-fuchsia-400 uppercase tracking-wider font-mono">FAR EXPIRY</span>
+              <select
+                value={farExpiry}
+                onChange={e => setFarExpiry(e.target.value)}
+                className="bg-transparent text-zinc-100 text-xs font-mono font-bold rounded focus:outline-none cursor-pointer"
+              >
+                {expiries.filter(ex => ex !== expiry).map(ex => (
+                  <option key={ex} value={ex} className="bg-zinc-900 text-zinc-100">{ex}</option>
+                ))}
+              </select>
+            </div>
+          )}
+
+          {/* Multiplier Stepper */}
+          <div className="flex items-center gap-2 h-8 bg-zinc-900 border border-zinc-700 rounded-lg px-2 shadow-inner">
+            <span className="text-[10px] font-bold text-zinc-400 uppercase tracking-wider font-mono">MULTIPLIER</span>
+            <div className="inline-flex items-center rounded-md border border-zinc-800 bg-zinc-950 overflow-hidden">
+              <button
+                type="button"
+                onClick={() => setMultiplier(m => Math.max(1, m - 1))}
+                className="w-6 h-6 flex items-center justify-center text-zinc-400 hover:text-white hover:bg-zinc-800 transition-colors"
+              >
+                <span className="text-xs font-bold font-mono">−</span>
+              </button>
+              <span className="font-mono font-bold text-xs tabular-nums text-center px-2 text-amber-400 min-w-[28px] inline-block">
+                {multiplier}×
+              </span>
+              <button
+                type="button"
+                onClick={() => setMultiplier(m => Math.min(20, m + 1))}
+                className="w-6 h-6 flex items-center justify-center text-zinc-400 hover:text-white hover:bg-zinc-800 transition-colors"
+              >
+                <span className="text-xs font-bold font-mono">+</span>
+              </button>
+            </div>
+          </div>
+        </div>
+
+        {/* Quick Staging Status */}
+        <div className="font-mono text-xs text-zinc-400 hidden md:flex items-center gap-3">
+          <span>Staged Legs: <strong className="text-zinc-100">{legs.length}</strong></span>
+          <span className="text-zinc-700">|</span>
+          <span>Total Lots: <strong className="text-zinc-100">{totalQty}</strong></span>
+          <span className="text-zinc-700">|</span>
+          <span>Contracts: <strong className="text-zinc-100">{lotSize ? totalQty * lotSize : '—'}</strong></span>
+        </div>
+      </div>
+
+      {/* ─── Main Content Canvas ──────────────────────────────────────── */}
+      <div className="flex-1 flex flex-col gap-4 p-4 lg:p-6">
+        {/* Panel 1: Strategy Templates Catalog */}
+        <TerminalPanel
+          title="STRATEGY TEMPLATES & PAYOFF ARCHITECT"
+          icon={Layers}
+          meta={`ATM: ${atmStrike ?? '—'} · STEP: ${step ?? '—'}`}
+          badge={
+            <span className="rounded px-1.5 py-0.5 font-mono text-[9px] font-bold border border-zinc-700 bg-zinc-800 text-zinc-400">
+              {STRATEGY_CATEGORIES[category].length} TEMPLATES
+            </span>
+          }
+        >
+          <div className="p-3.5">
+            <StrategyCardGrid
+              category={category}
+              onCategoryChange={setCategory}
+              selectedKey={strategy}
+              onSelectTemplate={applyTemplate}
+              disabled={atmStrike == null}
+              atmStrike={atmStrike}
+              step={step}
+              allStrikes={allStrikes}
+              autoPremium={autoPremium}
+              frontExpiry={expiry}
+              farExpiry={farExpiry}
+            />
+          </div>
+        </TerminalPanel>
+
+        {/* Panel 2 & 3: Two-Column Workspace (Legs Builder + Payoff Analytics) */}
+        <div className="grid grid-cols-1 xl:grid-cols-12 gap-4 items-start">
+          {/* Left Column: Basket Legs Builder */}
+          <div className="xl:col-span-6 flex flex-col gap-4">
+            <TerminalPanel
+              title="BASKET LEGS BUILDER & STAGING DOCK"
+              icon={SlidersHorizontal}
+              meta={`${legs.length} LEGS · ${totalQty} LOTS · ${lotSize ? totalQty * lotSize : 0} QTY`}
+              badge={
+                strategy ? (
+                  <span className="rounded px-1.5 py-0.5 font-mono text-[9px] font-bold border border-amber-500/30 bg-amber-500/10 text-amber-400">
+                    {strategy.toUpperCase()}
+                  </span>
+                ) : null
+              }
+            >
+              {/* Legs Table Component */}
+              <LegsTable
+                legs={legs}
+                atmStrike={atmStrike}
+                allStrikes={allStrikes}
+                autoPremium={autoPremium}
+                frontExpiry={expiry}
+                farExpiry={farExpiry}
+                onUpdateLeg={updateLeg}
+                onStepStrike={stepStrike}
+                onAddLeg={addLeg}
+                onRemoveLeg={removeLeg}
+                onClearAll={() => { setLegs([]); setStrategy(null); }}
+              />
+
+              {/* Saved Presets Dock */}
+              <div className="px-3.5 py-2.5 border-t border-zinc-800 bg-zinc-950/50">
+                <SavedBasketsPanel
+                  saveName={saveName}
+                  onSaveNameChange={setSaveName}
+                  onSave={saveBasket}
+                  saved={saved}
+                  open={saveOpen}
+                  onToggleOpen={() => setSaveOpen(o => !o)}
+                  onLoad={loadBasket}
+                  onDelete={name => persistSaved(saved.filter(s => s.name !== name))}
+                />
+              </div>
+
+              {/* Execution Action Dock */}
+              {legs.length > 0 && (
+                <div className="flex items-center justify-between gap-3 px-3.5 py-3 border-t border-zinc-800 bg-zinc-950/80 flex-wrap">
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <button
+                      type="button"
+                      onClick={placeBasket}
+                      disabled={placing || !hasAuthenticatedBroker || !lotSize}
+                      className={`flex items-center gap-2 px-5 py-2 rounded-lg font-mono text-xs font-bold transition-all shadow-md cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed ${
+                        confirmPlace
+                          ? 'bg-emerald-500 hover:bg-emerald-400 text-zinc-950 animate-pulse'
+                          : 'bg-amber-500 hover:bg-amber-400 text-zinc-950 shadow-amber-500/20 active:scale-[0.98]'
+                      }`}
+                    >
+                      {placing ? (
+                        <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                      ) : (
+                        <ShoppingBasket className="w-3.5 h-3.5" />
+                      )}
+                      <span>
+                        {placing
+                          ? 'TRANSMITTING BASKET...'
+                          : !hasAuthenticatedBroker
+                          ? 'NO BROKER LOGGED IN'
+                          : confirmPlace
+                          ? `CONFIRM TRANSMIT: ${legs.length} LEGS ×${multiplier}?`
+                          : 'TRANSMIT BASKET ORDERS'}
+                      </span>
+                    </button>
+
+                    <button
+                      type="button"
+                      disabled={placing}
+                      onClick={() => { setLegs([]); setStrategy(null); setConfirmPlace(false); }}
+                      className="px-3 py-2 text-[11px] font-mono font-bold rounded-lg border border-zinc-700 text-zinc-400 hover:text-red-400 hover:border-red-500/40 hover:bg-red-500/10 transition-all cursor-pointer"
+                    >
+                      CLEAR ALL
+                    </button>
+                  </div>
+
+                  <div className="text-[11px] font-mono text-zinc-500 leading-snug text-right">
+                    <p className="font-bold text-zinc-300">
+                      {totalQty} lots{lotSize ? ` · ${totalQty * lotSize} total quantity` : ''}
+                    </p>
+                    <p className="text-[10px] text-zinc-500">
+                      Buys sequenced ahead of sells for margin relief · {lotSize ? `${lotSize} qty/lot` : 'resolving lot...'}
+                    </p>
+                    {premiumsUnavailable && (
+                      <p className="text-amber-400 font-semibold text-[10px] mt-0.5">
+                        Warning: No live quotes from broker (market closed). Enter prices manually to preview payoff.
+                      </p>
+                    )}
+                  </div>
+                </div>
+              )}
+            </TerminalPanel>
+          </div>
+
+          {/* Right Column: Payoff Analytics & Risk Profile */}
+          <div className="xl:col-span-6 flex flex-col gap-4">
+            <TerminalPanel
+              title="EXPIRY PAYOFF ANALYTICS & RISK PROFILE"
+              icon={TrendingUp}
+              meta={payoff ? (payoff.netPremium >= 0 ? 'NET CREDIT' : 'NET DEBIT') : 'EXPIRY MODEL'}
+            >
+              <div className="flex flex-col">
+                {/* 3x2 StatTile Grid */}
+                <div className="grid grid-cols-2 sm:grid-cols-3 gap-2 p-3.5 border-b border-zinc-800 bg-zinc-950/40">
+                  <StatTile
+                    label="Net Premium"
+                    tone={!payoff ? 'neutral' : payoff.netPremium >= 0 ? 'up' : 'down'}
+                    value={payoff ? `${payoff.netPremium >= 0 ? 'Credit' : 'Debit'} ${fmtMoney(payoff.netPremium)}` : '—'}
+                    sub={payoff && lotSize ? `₹${(Math.abs(payoff.netPremium) / (totalQty * lotSize)).toFixed(2)} / unit` : undefined}
+                    tooltip="Net premium received (Credit) or paid (Debit) for the staged basket"
+                  />
+                  <StatTile
+                    label="Max Profit"
+                    tone="up"
+                    value={!payoff ? '—' : payoff.maxProfitUnlimited ? 'Unlimited' : fmtMoney(payoff.maxProfit)}
+                    sub={payoff?.maxProfitUnlimited ? 'Uncapped upside' : payoff ? 'Capped at target' : undefined}
+                    tooltip="Theoretical maximum gain at contract expiry"
+                  />
+                  <StatTile
+                    label="Max Loss"
+                    tone="down"
+                    value={!payoff ? '—' : payoff.maxLossUnlimited ? 'Unlimited' : fmtMoney(payoff.maxLoss)}
+                    sub={payoff?.maxLossUnlimited ? 'Defined-risk hedge advised' : payoff ? 'Defined downside' : undefined}
+                    tooltip="Theoretical maximum risk at contract expiry"
+                  />
+                  <StatTile
+                    label="Breakeven Corridor"
+                    tone="accent"
+                    value={payoff && payoff.breakevens.length
+                      ? payoff.breakevens.map(b => b.toLocaleString('en-IN', { maximumFractionDigits: 0 })).join(' / ')
+                      : '—'}
+                    sub={payoff && payoff.breakevens.length === 2
+                      ? `${Math.abs(payoff.breakevens[1] - payoff.breakevens[0]).toFixed(0)} pts corridor`
+                      : payoff && payoff.breakevens.length === 1 && spot > 0
+                      ? `${(((payoff.breakevens[0] - spot) / spot) * 100).toFixed(1)}% from spot`
+                      : undefined}
+                    tooltip="Points where the strategy breaks even at expiry"
+                  />
+                  <StatTile
+                    label="Risk : Reward"
+                    tone="neutral"
+                    value={riskReward != null ? `1 : ${riskReward.toFixed(2)}` : '—'}
+                    sub={riskReward != null ? (riskReward >= 1 ? 'Positive expectancy' : 'Debit profile') : undefined}
+                    tooltip="Ratio of maximum risk to maximum profit"
+                  />
+                  <StatTile
+                    label="Expiry & Days Left"
+                    tone="neutral"
+                    value={daysLeft != null ? `${daysLeft} DAYS` : '—'}
+                    sub={`${expiry || 'Front'} · VIX ${currentVix.toFixed(2)}`}
+                    tooltip="Calendar days remaining until contract expiry"
+                  />
+                </div>
+
+                {/* Payoff Chart Canvas */}
+                <div className="p-3.5">
+                  <div className="rounded-xl border border-zinc-800/80 bg-zinc-950/80 p-2 shadow-inner">
+                    <BasketPayoffChart
+                      points={payoff?.points ?? []}
+                      breakevens={payoff?.breakevens ?? []}
+                      spot={spot}
+                      rightWing={payoff?.rightWing ?? null}
+                      leftWing={payoff?.leftWing ?? null}
+                      emptyReason={
+                        hasMixedExpiry
+                          ? 'Calendar/Diagonal legs expire on different dates — no single expiry payoff to chart. Track P&L from the Positions tab instead.'
+                          : premiumsUnavailable
+                          ? 'No premium data from broker — market may be closed. Enter prices manually in the Price column to preview payoff.'
+                          : undefined
+                      }
+                    />
+                  </div>
+                  <div className="flex items-center justify-between text-[10px] font-mono text-zinc-500 mt-2 px-1">
+                    <span>Expiry intrinsic settlement model</span>
+                    <span>Live LTP quotes with manual override</span>
+                  </div>
+                </div>
+              </div>
+            </TerminalPanel>
+          </div>
+        </div>
+
+        {/* Panel 4: Activity Blotter (Positions / Orders / Trades) */}
         <BasketActivityTabs broker={broker} onAddLeg={addLegFromPosition} />
       </div>
     </div>
