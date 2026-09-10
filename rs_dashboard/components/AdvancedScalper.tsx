@@ -2,7 +2,7 @@
 
 import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import NavBar from './NavBar';
-import { Zap, RefreshCw, Shield, ShieldOff, Plus, Scissors, Wallet } from 'lucide-react';
+import { Zap, RefreshCw, Shield, ShieldOff, Plus, Scissors, Wallet, Sigma } from 'lucide-react';
 import {
   OptionPanel, PositionsTable, TabTable, FundsView, formatFundsValue, pollPositionFlat, pollPositionReduced,
   type ChainOcEntry, type Toast,
@@ -20,6 +20,7 @@ import { cn } from '@/lib/utils';
 import TopWeightStocks from './TopWeightStocks';
 import TopIndices from './TopIndices';
 import MtmChart, { useMtmHistory } from './MtmChart';
+import ScalperGreeksModal from './analytics/ScalperGreeksModal';
 
 // ─── Types ────────────────────────────────────────────────────────
 
@@ -112,6 +113,7 @@ export default function AdvancedScalper() {
   // Top-10-by-weight stocks panel. Off by default so no equity bridge is
   // spawned unless it's actually wanted.
   const [showTop10, setShowTop10] = useState(false);
+  const [showGreeks, setShowGreeks] = useState(false);
   const boxCounterRef = useRef(2);
   const [boxes, setBoxes] = useState<BoxConfig[]>([
     { id: 'box-1', side: 'CE', strike: null, lots: 1, limitPrice: '' },
@@ -2100,6 +2102,19 @@ export default function AdvancedScalper() {
               TOP 10 {showTop10 ? 'ON' : 'OFF'}
             </button>
 
+            {/* Scan the whole open book (every underlying/expiry for the
+                selected broker) and show combined portfolio greeks — same
+                data pipeline as the Positions Analysis pages. */}
+            <button onClick={() => setShowGreeks(true)}
+              title="Scan open positions and compute combined portfolio Greeks"
+              className={cn(
+                'flex items-center gap-1.5 px-3 py-1.5 text-xs font-bold rounded-lg border transition-all shrink-0 whitespace-nowrap',
+                'bg-zinc-900 border-zinc-700 text-zinc-400 hover:text-violet-300 hover:border-violet-500/40',
+                FOCUS_RING,
+              )}>
+              <Sigma className="w-3 h-3" /> GREEKS
+            </button>
+
             {/* Hotkey legend — these fire real MARKET orders on the first
                 CE/PE box regardless of the Market/Limit toggle above, so the
                 bindings need to stay visible, not just discoverable via docs. */}
@@ -2680,6 +2695,13 @@ export default function AdvancedScalper() {
           )}
         </div>
       </div>
+
+      <ScalperGreeksModal
+        open={showGreeks}
+        onClose={() => setShowGreeks(false)}
+        rawPositions={positionsData}
+        broker={broker}
+      />
     </div>
   );
 }
