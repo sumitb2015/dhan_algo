@@ -111,6 +111,18 @@ interface ActiveSyntheticPosition {
   legs: SyntheticLeg[];
   peakPoints: number;
   peakPnl: number;
+  // The broker this position's legs were actually placed with — NOT
+  // necessarily the currently-selected broker. `broker` (from
+  // useBrokerSelector) is a single site-wide localStorage value shared by
+  // every scalper page; the user can switch it on another page or it can
+  // reset before that persisted value loads back in, and Dhan legs carry a
+  // securityId while Kotak/Zerodha legs carry only a tradingSymbol. Routing
+  // flatten/add-lot/reconcile calls off the currently-selected broker instead
+  // of this field would exit-order a Kotak-native leg through Dhan's
+  // securityId-only path (or vice versa), which always fails — see
+  // handleFlattenSynthetic. Optional only because a position saved before
+  // this field existed won't have it; every write path below sets it.
+  broker?: Broker;
 }
 
 interface LogEvent {
@@ -325,6 +337,17 @@ export default function SyntheticFuturesScalper() {
   const [inFlight, setInFlight] = useState<boolean>(false);
   const inFlightRef = useRef<boolean>(false);
   const [visualFlash, setVisualFlash] = useState<'LONG' | 'SHORT' | 'EXIT' | null>(null);
+
+  // Tracks repeated AUTOMATIC flatten failures (stop-loss/target/trailing-SL
+  // in §10 below) per position id — without this, a flatten that fails for a
+  // structural reason (e.g. a leg with no securityId/tradingSymbol for the
+  // broker it's being routed through) retries on every single price tick
+  // (multiple times a second) forever, hammering the broker's order endpoint
+  // and spamming toasts. A manual Flatten click always bypasses this — it's
+  // a deliberate one-off action a user can just see fail, not something to
+  // rate-limit. Not reactive state on purpose: it only needs to gate the
+  // effect below, never to trigger a render itself.
+  const autoExitFailRef = useRef<{ positionId: string; count: number; cooldownUntil: number } | null>(null);
 
   // Restore active synthetic position from localStorage on mount
   useEffect(() => {
@@ -788,6 +811,23 @@ export default function SyntheticFuturesScalper() {
         );
         return;
       }
+      // A position's legs are placed with whichever broker was selected at
+      // entry (Dhan legs carry a securityId, Kotak/Zerodha carry only a
+      // tradingSymbol) — the broker selector is one localStorage value
+      // shared site-wide, so it can drift out from under an open position
+      // (switched on another scalper page, or reset before its persisted
+      // value re-loads). Merging more lots in under a different broker here
+      // than the position's own would build a basket no single flatten call
+      // could ever close — see the broker field comment on
+      // ActiveSyntheticPosition for the failure this guard prevents.
+      if (currentPos.broker && currentPos.broker !== effectiveBroker) {
+        addToast(
+          'error',
+          'Broker Conflict',
+          `Active position was opened on ${currentPos.broker.toUpperCase()}, but ${effectiveBroker.toUpperCase()} is selected now. Switch back to ${currentPos.broker.toUpperCase()} to add to it, or flatten it first.`
+        );
+        return;
+      }
       // ATM has moved since entry — adding here would silently split the
       // position across two strikes with no way to tell the user their
       // "single synthetic" is now a mixed-strike combo. Force a flatten
@@ -1011,6 +1051,7 @@ export default function SyntheticFuturesScalper() {
             legs: initialLegs,
             peakPoints: 0,
             peakPnl: 0,
+            broker: effectiveBroker,
           };
           activePositionRef.current = freshPos;
           finalTotalLots = lots;
@@ -1121,6 +1162,11 @@ export default function SyntheticFuturesScalper() {
           legs: mergedLegs,
           peakPoints: Math.max(0, pointsDiff),
           peakPnl: Math.max(0, totalPnl),
+          // Backfills a pre-broker-field legacy position the first time it's
+          // touched; the Broker Conflict guard above already required a match
+          // whenever prev.broker was actually known, so this can only ever
+          // set it, never silently overwrite a known value with a wrong one.
+          broker: prev.broker ?? effectiveBroker,
         };
         activePositionRef.current = updatedPos;
         return updatedPos;
@@ -1191,12 +1237,19 @@ export default function SyntheticFuturesScalper() {
     let cancelled = false;
     const GRACE_MS = 20000;
 
+    // This position's own broker, not whatever's currently selected — see
+    // the broker field comment on ActiveSyntheticPosition. Otherwise
+    // reconciliation would poll the wrong broker's order/position book
+    // entirely (e.g. polling Dhan for a Kotak-native position) and never
+    // match a single leg.
+    const pollBroker = activePosition.broker ?? effectiveBroker;
+
     async function checkOrderStatus() {
       try {
         const pollUrl =
-          effectiveBroker === 'kotak'
+          pollBroker === 'kotak'
             ? '/api/scalper/kotak/poll'
-            : effectiveBroker === 'zerodha'
+            : pollBroker === 'zerodha'
               ? '/api/scalper/zerodha/poll'
               : '/api/scalper/poll';
 
@@ -1320,7 +1373,7 @@ export default function SyntheticFuturesScalper() {
       cancelled = true;
       clearInterval(interval);
     };
-  }, [activePosition?.id, effectiveBroker]);
+  }, [activePosition?.id, activePosition?.broker, effectiveBroker]);
 
   // ── 8. Flatten / Exit Synthetic Position ───────────────────────────────────
   // partialLots, when given and smaller than the position's full lot count,
@@ -1389,12 +1442,16 @@ export default function SyntheticFuturesScalper() {
         })
         .filter(l => l.quantity > 0);
 
+      // Route through the broker THIS position's legs were actually placed
+      // with, not whatever's currently selected in the UI — see the broker
+      // field comment on ActiveSyntheticPosition. Falls back to
+      // effectiveBroker only for a position saved before that field existed.
       const res = await fetch('/api/synthetic-futures/order', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           action: 'exit',
-          broker: effectiveBroker,
+          broker: currentPos.broker ?? effectiveBroker,
           underlying: currentPos.underlying,
           expiry: currentPos.expiry,
           legsToExit,
@@ -1480,7 +1537,9 @@ export default function SyntheticFuturesScalper() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           action: 'addLeg',
-          broker: effectiveBroker,
+          // This leg's own broker, not whatever's currently selected — see
+          // the broker field comment on ActiveSyntheticPosition.
+          broker: currentPos.broker ?? effectiveBroker,
           underlying: currentPos.underlying,
           expiry: currentPos.expiry,
           orderType: orderMode,
@@ -1574,6 +1633,22 @@ export default function SyntheticFuturesScalper() {
     // synthPriceReady comment above for the incident this fixes.
     if (!activePosition || inFlight || !synthPriceReady) return;
 
+    // Reset the failure/cooldown tracker on a new position id (a fresh
+    // entry after the last one closed or was cleared starts with a clean
+    // slate) so a prior position's exhausted retries never bleed into this
+    // one's.
+    const AUTO_EXIT_MAX_ATTEMPTS = 3;
+    const AUTO_EXIT_COOLDOWN_MS = 15000;
+    const rec = autoExitFailRef.current;
+    if (rec && rec.positionId !== activePosition.id) {
+      autoExitFailRef.current = null;
+    }
+    const activeRec = autoExitFailRef.current;
+    if (activeRec) {
+      if (activeRec.count >= AUTO_EXIT_MAX_ATTEMPTS) return; // gave up on this position — see the toast fired when this was set
+      if (Date.now() < activeRec.cooldownUntil) return; // still cooling down since the last failed attempt
+    }
+
     const currentSynth = syntheticFuturePrice;
     const capturedPoints =
       activePosition.direction === 'LONG'
@@ -1587,14 +1662,40 @@ export default function SyntheticFuturesScalper() {
     const trailTrigVal = parseFloat(trailTrigger) || 0;
     const trailStepVal = parseFloat(trailStep) || 0;
 
+    // Wraps every automatic handleFlattenSynthetic call in this effect: on
+    // failure, arms a cooldown (and, after enough failures, gives up
+    // entirely for this position) instead of letting the very next price
+    // tick retry immediately. See the autoExitFailRef comment above for why
+    // this exists.
+    const positionId = activePosition.id;
+    const attemptAutoFlatten = (reason: string) => {
+      handleFlattenSynthetic(reason).then(ok => {
+        if (ok) {
+          autoExitFailRef.current = null;
+          return;
+        }
+        const prevCount = autoExitFailRef.current?.positionId === positionId ? autoExitFailRef.current.count : 0;
+        const nextCount = prevCount + 1;
+        autoExitFailRef.current = { positionId, count: nextCount, cooldownUntil: Date.now() + AUTO_EXIT_COOLDOWN_MS };
+        if (nextCount >= AUTO_EXIT_MAX_ATTEMPTS) {
+          addToast(
+            'error',
+            'Auto-Exit Disabled',
+            `Automatic exit failed ${nextCount} times in a row (${reason}) — giving up to avoid hammering the broker. Close this position manually (check the broker it was opened on) or use Clear Position.`
+          );
+          addLog('ERROR', `Auto-exit gave up after ${nextCount} failed attempts: ${reason}`);
+        }
+      });
+    };
+
     // Check Stop Loss
     if (slVal > 0) {
       if (slMode === 'POINTS' && capturedPoints <= -slVal) {
-        handleFlattenSynthetic(`Stop Loss Hit (-${slVal} pts)`);
+        attemptAutoFlatten(`Stop Loss Hit (-${slVal} pts)`);
         return;
       }
       if (slMode === 'RUPEES' && currentPnl <= -slVal) {
-        handleFlattenSynthetic(`Stop Loss Hit (-₹${slVal})`);
+        attemptAutoFlatten(`Stop Loss Hit (-₹${slVal})`);
         return;
       }
     }
@@ -1602,11 +1703,11 @@ export default function SyntheticFuturesScalper() {
     // Check Profit Target
     if (tgtVal > 0) {
       if (slMode === 'POINTS' && capturedPoints >= tgtVal) {
-        handleFlattenSynthetic(`Target Reached (+${tgtVal} pts)`);
+        attemptAutoFlatten(`Target Reached (+${tgtVal} pts)`);
         return;
       }
       if (slMode === 'RUPEES' && currentPnl >= tgtVal) {
-        handleFlattenSynthetic(`Target Reached (+₹${tgtVal})`);
+        attemptAutoFlatten(`Target Reached (+₹${tgtVal})`);
         return;
       }
     }
@@ -1620,7 +1721,7 @@ export default function SyntheticFuturesScalper() {
           const stepsBeyond = Math.floor((activePosition.peakPoints - trailTrigVal) / trailStepVal);
           const trailingStopPoint = (stepsBeyond * trailStepVal); // locked in profit points
           if (capturedPoints <= trailingStopPoint) {
-            handleFlattenSynthetic(`Trailing SL Hit (Locked ${trailingStopPoint} pts)`);
+            attemptAutoFlatten(`Trailing SL Hit (Locked ${trailingStopPoint} pts)`);
             return;
           }
         }
@@ -1629,13 +1730,13 @@ export default function SyntheticFuturesScalper() {
           const stepsBeyond = Math.floor((activePosition.peakPnl - trailTrigVal) / trailStepVal);
           const trailingStopPnl = (stepsBeyond * trailStepVal);
           if (currentPnl <= trailingStopPnl) {
-            handleFlattenSynthetic(`Trailing SL Hit (Locked ₹${trailingStopPnl})`);
+            attemptAutoFlatten(`Trailing SL Hit (Locked ₹${trailingStopPnl})`);
             return;
           }
         }
       }
     }
-  }, [syntheticFuturePrice, activePosition, stopLoss, target, trailingEnabled, trailTrigger, trailStep, slMode, inFlight, synthPriceReady]);
+  }, [syntheticFuturePrice, activePosition, stopLoss, target, trailingEnabled, trailTrigger, trailStep, slMode, inFlight, synthPriceReady, addToast, addLog]);
 
   // ── 11. Keyboard Shortcuts (B: Buy, S: Sell, X: Flatten) ───────────────────
   // Use stable refs for the handler functions so the listener is registered
@@ -1864,18 +1965,26 @@ export default function SyntheticFuturesScalper() {
               <div className="flex items-center rounded-lg border border-zinc-800 bg-zinc-900 p-0.5 font-mono text-[11px]">
                 {(['dhan', 'zerodha', 'kotak'] as Broker[]).map(b => {
                   const crudeDisabled = b === 'zerodha' && isCrude;
-                  const posDisabled = Boolean(activePosition && effectiveBroker !== b);
+                  // Lock against the position's OWN broker (set at entry), not
+                  // just "whatever's currently selected" — otherwise switching
+                  // broker while a position is open (this pill was already
+                  // supposed to prevent that) plus a legacy position missing
+                  // the field could both still let effectiveBroker drift away
+                  // from the broker the open legs actually live on. See the
+                  // broker field comment on ActiveSyntheticPosition.
+                  const positionBroker = activePosition?.broker ?? effectiveBroker;
+                  const posDisabled = Boolean(activePosition && positionBroker !== b);
                   const disabled = crudeDisabled || posDisabled;
                   const title = crudeDisabled
                     ? 'Zerodha has no MCX crude support'
                     : posDisabled
-                      ? `Active position open on ${effectiveBroker.toUpperCase()}. Flatten or reset it first.`
+                      ? `Active position open on ${positionBroker.toUpperCase()}. Flatten or reset it first.`
                       : undefined;
                   return (
                     <button
                       key={b}
                       disabled={disabled}
-                      title={disabled ? 'Zerodha has no MCX crude support' : undefined}
+                      title={title}
                       onClick={() => setBroker(b)}
                       className={`px-2.5 py-0.5 rounded uppercase font-bold transition-all ${
                         effectiveBroker === b
