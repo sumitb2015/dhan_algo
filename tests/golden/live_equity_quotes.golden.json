@@ -1,0 +1,17 @@
+{
+  "quotes_value_keys": [
+    "change",
+    "change_pct",
+    "high",
+    "low",
+    "ltp",
+    "open",
+    "prev_close",
+    "volume"
+  ],
+  "top_level_keys": [
+    "count",
+    "quotes",
+    "updated_at"
+  ]
+}
