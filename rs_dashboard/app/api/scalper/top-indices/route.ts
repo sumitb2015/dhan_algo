@@ -32,6 +32,10 @@ const OPTIONS_FETCH = path.join(PROJECT_ROOT, 'scripts', 'tools', 'options_data_
 //     a genuine close captured earlier in the session (or before 09:15, when
 //     `ltp === close` is expected rather than a flip) is cached and reused for
 //     the rest of the day, so a later flip can't overwrite it with a blank.
+//     If nothing was ever cached today (e.g. the server started after 15:30),
+//     `close` is unrecoverable — the flip already happened — so `fromDhan`
+//     falls back to the daily-candle endpoint (`fetchLatestPrevClose`) for
+//     yesterday's genuine close instead of N/A.
 //  2. Dhan answers BSE_IDX with HTTP 200 but an EMPTY data object for this
 //     account, so it cannot serve SENSEX — SENSEX is simply not in the row
 //     list below (dropped in favour of MCX crude oil).
@@ -270,17 +274,41 @@ async function fromDhan(wanted: IndexDef[]): Promise<Record<string, Quote>> {
     throw new Error(`ohlc ${res.status}: ${JSON.stringify(json.Data ?? json.status).slice(0, 120)}`);
   }
 
+  const nowMin = istMinutesOfDay();
+
   for (const { def, sid, segment } of resolved) {
     const row = json.data?.[segment]?.[String(sid)];
     if (!row) continue;
     const ltp = Number(row.last_price ?? 0);
     const cached = prevCloseCache.get(`${day}:${def.key}`);
-    const fresh = rejectFlippedClose(ltp, Number(row.ohlc?.close ?? 0));
+    const fresh = rejectFlippedClose(ltp, Number(row.ohlc?.close ?? 0), nowMin);
+    let prev = cached ?? fresh;
+    let source = cached ? 'dhan+cache' : 'dhan';
+
+    // Post-close with nothing cached from earlier today (e.g. the server was
+    // only started after 15:30): `close` now holds TODAY's close — the flip
+    // already happened — so no reading of it can recover yesterday's value.
+    // Fall back to the same daily-candle source `fromDhanPrevSessionChange`
+    // uses pre-market (see `fetchLatestPrevClose` for why this needs a
+    // different row-selection rule than that function).
+    if (prev === 0 && nowMin >= MARKET_CLOSE_IST_MIN) {
+      try {
+        const instrument = segment === 'MCX_COMM' ? 'FUTCOM' : 'INDEX';
+        const prevClose = await fetchLatestPrevClose(sid, segment, instrument, day);
+        if (prevClose) {
+          prev = prevClose;
+          source = 'dhan-prevsession';
+        }
+      } catch {
+        // Leave prev at 0 — mkQuote reports change_pct: null, the honest outcome.
+      }
+      await new Promise(r => setTimeout(r, HISTORICAL_STAGGER_MS));
+    }
+
     // Cache a genuine close so a later flip (or an MCX session that runs past
     // the NSE bell) still yields a correct percentage rather than a blank one.
-    if (!cached && fresh > 0) prevCloseCache.set(`${day}:${def.key}`, fresh);
-    const prev = cached ?? fresh;
-    const q = mkQuote(ltp, prev, cached ? 'dhan+cache' : 'dhan');
+    if (!cached && prev > 0) prevCloseCache.set(`${day}:${def.key}`, prev);
+    const q = mkQuote(ltp, prev, source);
     if (q) out[def.key] = q;
   }
   return out;
@@ -309,18 +337,14 @@ const LOOKBACK_DAYS = 12;
 const HISTORICAL_STAGGER_MS = 150;
 
 /**
- * Before 09:15 IST there is no "today" yet — `fromDhan`'s live LTP still
- * mirrors yesterday's close (nothing has traded), so its % change is a
- * mathematically correct but useless 0.00% for every row. Pre-market, show
- * something informative instead: yesterday's full-session move against the
- * trading day before it (e.g. Friday vs Thursday across a weekend, or across
- * a holiday) — Dhan's daily-candle endpoint only ever returns rows for days
- * the exchange actually traded, so a wide enough calendar lookback (`LOOKBACK_DAYS`)
- * automatically skips weekends and holidays without needing a local calendar.
+ * Fetches daily-candle closes for the last `LOOKBACK_DAYS` calendar days, as
+ * {date, close} rows in IST-date order (oldest first). Dhan's daily-candle
+ * endpoint only ever returns rows for days the exchange actually traded, so
+ * callers get weekend/holiday skipping for free — no local calendar needed.
  */
-async function fetchPrevSessionChange(
-  sid: number, segment: string, instrument: string, today: string,
-): Promise<{ ltp: number; prevClose: number } | null> {
+async function fetchDailyCloses(
+  sid: number, segment: string, instrument: string,
+): Promise<{ date: string; close: number }[] | null> {
   const { clientId, token } = getDhanCredentials();
   if (!token) return null;
 
@@ -352,19 +376,51 @@ async function fetchPrevSessionChange(
   const timestamps = json.timestamp ?? [];
   if (closes.length === 0 || closes.length !== timestamps.length) return null;
 
-  // Drop a same-day row if Dhan ever includes one (not observed pre-market,
-  // but the rest of this function only makes sense over COMPLETED sessions).
-  const rows = timestamps
-    .map((ts, i) => ({
-      date: new Date(ts * 1000).toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' }),
-      close: closes[i],
-    }))
-    .filter(r => r.date < today);
+  return timestamps.map((ts, i) => ({
+    date: new Date(ts * 1000).toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' }),
+    close: closes[i],
+  }));
+}
 
-  if (rows.length < 2) return null;
+/**
+ * Before 09:15 IST there is no "today" yet — `fromDhan`'s live LTP still
+ * mirrors yesterday's close (nothing has traded), so its % change is a
+ * mathematically correct but useless 0.00% for every row. Pre-market, show
+ * something informative instead: yesterday's full-session move against the
+ * trading day before it (e.g. Friday vs Thursday across a weekend, or across
+ * a holiday).
+ */
+async function fetchPrevSessionChange(
+  sid: number, segment: string, instrument: string, today: string,
+): Promise<{ ltp: number; prevClose: number } | null> {
+  // Same-day row filtered out: this call site only makes sense over
+  // COMPLETED sessions strictly before today (not observed pre-market, but
+  // guarded regardless — see fetchLatestPrevClose for the post-close case,
+  // where today's own row, once Dhan publishes it, is exactly what's wanted).
+  const rows = (await fetchDailyCloses(sid, segment, instrument))?.filter(r => r.date < today);
+  if (!rows || rows.length < 2) return null;
   const last = rows[rows.length - 1];
   const prev = rows[rows.length - 2];
   return last.close > 0 && prev.close > 0 ? { ltp: last.close, prevClose: prev.close } : null;
+}
+
+/**
+ * Yesterday's close for `fromDhan`'s post-close fallback.
+ *
+ * Verified 2026-09-10: Dhan's daily candle for TODAY is not published at the
+ * close bell — still absent from this endpoint at 20:17 IST, ~5h after close.
+ * So the most recent row strictly before today already IS the correct
+ * prevClose; no "last two rows" comparison is needed here (unlike
+ * `fetchPrevSessionChange` above, this call site already has a genuine live
+ * `ltp` from the OHLC batch call in `fromDhan` — it only needs one number).
+ */
+async function fetchLatestPrevClose(
+  sid: number, segment: string, instrument: string, today: string,
+): Promise<number | null> {
+  const rows = (await fetchDailyCloses(sid, segment, instrument))?.filter(r => r.date < today);
+  if (!rows || rows.length === 0) return null;
+  const last = rows[rows.length - 1];
+  return last.close > 0 ? last.close : null;
 }
 
 async function fromDhanPrevSessionChange(wanted: IndexDef[]): Promise<Record<string, Quote>> {
