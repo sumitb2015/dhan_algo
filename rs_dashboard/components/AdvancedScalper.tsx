@@ -135,6 +135,12 @@ export default function AdvancedScalper() {
   // set of orders than the first click previewed.
   const armedHalfPlanRef = useRef<{ legs: HalfLeg[]; skipped: string[] } | null>(null);
 
+  // Row checkboxes + "Exit Selected". Keyed by lib/positionProduct's
+  // `positionKey`, same as posGuards/closingPositions.
+  const [selectedPositions, setSelectedPositions] = useState<Set<string>>(new Set());
+  const [confirmExitSelected, setConfirmExitSelected] = useState(false);
+  const [exitingSelected, setExitingSelected] = useState(false);
+
   // Bottom tabs
   const [activeTab, setActiveTab]       = useState<'positions' | 'orders' | 'trades' | 'funds' | 'mtm'>('positions');
   const [positionsData, setPositionsData] = useState<Record<string, unknown>[]>([]);
@@ -1772,6 +1778,88 @@ export default function AdvancedScalper() {
     }
   }, [halfAllPlan, halvingAll, confirmHalfAll, closePosition, addToast, fetchTabData]);
 
+  // ─── Row checkboxes + Exit Selected ────────────────────────────────
+
+  const handleToggleSelect = useCallback((posKey: string) => {
+    setSelectedPositions(prev => {
+      const next = new Set(prev);
+      if (next.has(posKey)) next.delete(posKey); else next.add(posKey);
+      return next;
+    });
+  }, []);
+
+  const openPositionKeys = useMemo(
+    () => enrichedPositions.filter(p => Number(p.netQty) !== 0).map(p => positionKey(p)),
+    [enrichedPositions]);
+
+  const handleToggleSelectAll = useCallback(() => {
+    setSelectedPositions(prev => {
+      const allSelected = openPositionKeys.length > 0 && openPositionKeys.every(k => prev.has(k));
+      return allSelected ? new Set() : new Set(openPositionKeys);
+    });
+  }, [openPositionKeys]);
+
+  // A position that goes flat (or drops out of the book) between selection
+  // and click must drop out of the selection too — otherwise a stale key
+  // lingers checked forever (nothing can ever uncheck it) and inflates the
+  // "N selected" count the confirm button shows.
+  useEffect(() => {
+    setSelectedPositions(prev => {
+      if (prev.size === 0) return prev;
+      const live = new Set(openPositionKeys);
+      let changed = false;
+      const next = new Set<string>();
+      for (const k of prev) {
+        if (live.has(k)) next.add(k); else changed = true;
+      }
+      return changed ? next : prev;
+    });
+  }, [openPositionKeys]);
+
+  const exitSelectedLegs = useMemo(
+    () => enrichedPositions.filter(p => Number(p.netQty) !== 0 && selectedPositions.has(positionKey(p))),
+    [enrichedPositions, selectedPositions]);
+
+  // Sequential, same rationale as handleHalfAll: closePosition re-reads the
+  // live book per leg, and firing every selected leg's market order at once
+  // risks the broker's rate limit on exactly the requests that must not drop.
+  const handleExitSelected = useCallback(async () => {
+    if (!exitSelectedLegs.length || exitingSelected) return;
+    if (!confirmExitSelected) {
+      setConfirmExitSelected(true);
+      setTimeout(() => setConfirmExitSelected(false), 3000);
+      return;
+    }
+    setConfirmExitSelected(false);
+    setExitingSelected(true);
+    const legs = exitSelectedLegs;
+    let closed = 0;
+    let alreadyFlat = 0;
+    const failed: string[] = [];
+    try {
+      for (const pos of legs) {
+        const sym = String(pos.tradingSymbol ?? '');
+        const r = await closePosition(pos, 'Bulk Selected');
+        if (!r.ok) failed.push(sym);
+        else if (r.closedUnits > 0) closed++;
+        else alreadyFlat++;
+      }
+      if (failed.length) {
+        addToast('error', `Exited ${closed} of ${legs.length} selected leg${legs.length === 1 ? '' : 's'}`,
+          `Failed: ${failed.join(', ')} — check manually`);
+      } else {
+        addToast('success', `Exited ${closed} selected leg${closed === 1 ? '' : 's'}`,
+          alreadyFlat > 0 ? `${alreadyFlat} already flat` : undefined);
+      }
+      setSelectedPositions(new Set());
+    } catch (e) {
+      addToast('error', 'Exit Selected aborted', String(e));
+    } finally {
+      setExitingSelected(false);
+      setTimeout(fetchTabData, 1000);
+    }
+  }, [exitSelectedLegs, exitingSelected, confirmExitSelected, closePosition, addToast, fetchTabData]);
+
   // `posKey` is the composite (symbol, product) key from lib/positionProduct,
   // NOT a trading symbol — see the posGuards declaration.
   const handleGuardChange = useCallback((posKey: string, field: 'target' | 'sl', value: string) => {
@@ -2382,6 +2470,30 @@ export default function AdvancedScalper() {
                     : `Close 50% All${halfAllPlan.legs.length ? ` (${halfAllPlan.legs.length})` : ''}`}
                 </button>
 
+                {/* Exit only the checked rows from the positions table below */}
+                <button onClick={handleExitSelected} disabled={exitingSelected || exitSelectedLegs.length === 0}
+                  className={cn(
+                    'flex items-center gap-1.5 px-3 py-1.5 rounded-lg', TXT_CAPTION, 'font-bold border transition-all active:scale-95 disabled:opacity-40 disabled:cursor-not-allowed shrink-0 whitespace-nowrap',
+                    exitingSelected
+                      ? 'bg-red-900/40 border-red-800 text-red-400'
+                      : confirmExitSelected
+                      ? 'bg-red-600 border-red-500 text-oncolor animate-pulse shadow-lg shadow-red-500/20'
+                      : 'bg-red-950/60 border-red-900/60 text-red-400 hover:bg-red-900/40 hover:border-red-700 hover:text-red-300',
+                    FOCUS_RING,
+                  )}
+                  title={
+                    exitSelectedLegs.length === 0
+                      ? 'Check rows in the positions table to enable this'
+                      : `Market close: ${exitSelectedLegs.map(p => String(p.tradingSymbol ?? '')).join(', ')}`
+                  }>
+                  {exitingSelected ? <RefreshCw className="h-3 w-3 animate-spin" /> : <ShieldOff className="h-3 w-3" />}
+                  {exitingSelected
+                    ? 'Exiting…'
+                    : confirmExitSelected
+                    ? `Confirm exit ${exitSelectedLegs.length}?`
+                    : `Exit Selected${exitSelectedLegs.length ? ` (${exitSelectedLegs.length})` : ''}`}
+                </button>
+
                 {/* Exit ALL Positions (broker-level nuclear) */}
                 <button onClick={handleExitAll} disabled={exitingAll}
                   className={cn(
@@ -2684,6 +2796,9 @@ export default function AdvancedScalper() {
               sort={tableSort}
               onSort={handleTableSort}
               error={positionsError}
+              selected={selectedPositions}
+              onToggleSelect={handleToggleSelect}
+              onToggleSelectAll={handleToggleSelectAll}
             />
           ) : (
             <TabTable

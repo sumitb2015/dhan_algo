@@ -2500,6 +2500,13 @@ export interface PositionsTableProps {
   // genuinely returning zero positions — lets the empty state say so instead
   // of implying the account is flat.
   error?: string | null;
+  /** Multi-select checkboxes for a bulk "Exit Selected" action. Optional —
+   *  omitted entirely (as in the basic Scalper terminal) hides the checkbox
+   *  column rather than rendering it disabled. Keyed by the same `positionKey`
+   *  as `guards`/`closingPositions`. */
+  selected?: Set<string>;
+  onToggleSelect?: (positionKey: string) => void;
+  onToggleSelectAll?: () => void;
 }
 
 /** Quick Target / SL chips in the positions table. Percent-only by design —
@@ -2539,6 +2546,8 @@ interface PositionRowProps {
   onAddLeg: (pos: Record<string, unknown>) => void;
   lotSizeFor?: (row: Record<string, unknown>) => number | null;
   onClosePartial?: (pos: Record<string, unknown>, units: number, pct: number) => void;
+  selected?: boolean;
+  onToggleSelect?: (positionKey: string) => void;
 }
 
 /**
@@ -2553,11 +2562,12 @@ interface PositionRowProps {
  */
 function positionRowPropsEqual(prev: PositionRowProps, next: PositionRowProps): boolean {
   return prev.row === next.row && prev.guard === next.guard && prev.isClosing === next.isClosing
-    && prev.broker === next.broker;
+    && prev.broker === next.broker && prev.selected === next.selected;
 }
 
 const PositionRow = React.memo(function PositionRow({
   row, rowKey, broker, guard, isClosing, onGuardChange, onTrailToggle, onClose, onAddLeg, lotSizeFor, onClosePartial,
+  selected, onToggleSelect,
 }: PositionRowProps) {
   const sym = String(row.tradingSymbol ?? '');
   const netQty = Number(row.netQty);
@@ -2595,6 +2605,18 @@ const PositionRow = React.memo(function PositionRow({
 
   return (
     <tr className={`hover:bg-zinc-800/40 transition-colors ${isClosing ? 'opacity-40' : ''} ${guard?.triggered ? 'bg-zinc-800/20' : ''}`}>
+      {onToggleSelect && (
+        <td className="px-2 py-2 text-center">
+          <input
+            type="checkbox"
+            checked={selected ?? false}
+            onChange={() => onToggleSelect(rowKey)}
+            disabled={netQty === 0}
+            title={netQty === 0 ? 'Position is flat' : `Select ${sym} for bulk exit`}
+            className="w-4 h-4 accent-rose-500 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
+          />
+        </td>
+      )}
       <td className="px-3 py-2 whitespace-nowrap font-mono text-zinc-300">
         <div className="flex items-center gap-1.5">
           {hasGuard && !guard.triggered && (
@@ -2784,7 +2806,7 @@ const PositionRow = React.memo(function PositionRow({
   );
 }, positionRowPropsEqual);
 
-export const PositionsTable = React.memo(function PositionsTable({ data, broker, guards, closingPositions, onGuardChange, onTrailToggle, onClose, onAddLeg, lotSizeFor, onClosePartial, sort, onSort, error }: PositionsTableProps) {
+export const PositionsTable = React.memo(function PositionsTable({ data, broker, guards, closingPositions, onGuardChange, onTrailToggle, onClose, onAddLeg, lotSizeFor, onClosePartial, sort, onSort, error, selected, onToggleSelect, onToggleSelectAll }: PositionsTableProps) {
   // The broker positions API does not guarantee a stable row order between
   // polls, so with no explicit column sort applied ('none') the rows would
   // otherwise reshuffle on every 5s refresh. Pin each row to the order it was
@@ -2800,6 +2822,20 @@ export const PositionsTable = React.memo(function PositionsTable({ data, broker,
     }
     return [...data].sort((a, b) => (order.get(positionKey(a))! - order.get(positionKey(b))!));
   }, [data, sort]);
+
+  // Only rows with an open (non-flat) position are selectable, matching the
+  // per-row checkbox's own disabled condition. Computed unconditionally
+  // (ahead of the empty-state early return below) since it's hook-backed —
+  // conditionally skipping it would violate the Rules of Hooks.
+  const selectableKeys = useMemo(
+    () => sortedData.filter(r => Number(r.netQty) !== 0).map(r => positionKey(r)),
+    [sortedData]);
+  const headerCbRef = useRef<HTMLInputElement>(null);
+  const allSelected = selectableKeys.length > 0 && selectableKeys.every(k => selected?.has(k));
+  const someSelected = !allSelected && selectableKeys.some(k => selected?.has(k));
+  useEffect(() => {
+    if (headerCbRef.current) headerCbRef.current.indeterminate = someSelected;
+  }, [someSelected]);
 
   if (!data.length) {
     return (
@@ -2817,6 +2853,19 @@ export const PositionsTable = React.memo(function PositionsTable({ data, broker,
     <table className="w-full text-xs">
       <thead className="sticky top-0 bg-zinc-800 z-10">
         <tr>
+          {onToggleSelectAll && (
+            <th className="px-2 py-2.5 text-center">
+              <input
+                ref={headerCbRef}
+                type="checkbox"
+                checked={allSelected}
+                onChange={onToggleSelectAll}
+                disabled={selectableKeys.length === 0}
+                title="Select all open positions"
+                className="w-4 h-4 accent-rose-500 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
+              />
+            </th>
+          )}
           <SortableTH sortKey="tradingSymbol" currentSort={sort} onSort={onSort}>Symbol</SortableTH>
           <th className="px-3 py-2.5 text-xs font-bold text-white text-left whitespace-nowrap">Expiry</th>
           <SortableTH sortKey="netQty" currentSort={sort} onSort={onSort} align="right">Qty</SortableTH>
@@ -2851,6 +2900,8 @@ export const PositionsTable = React.memo(function PositionsTable({ data, broker,
               onAddLeg={onAddLeg}
               lotSizeFor={lotSizeFor}
               onClosePartial={onClosePartial}
+              selected={selected?.has(rowKey) ?? false}
+              onToggleSelect={onToggleSelect}
             />
           );
         })}
