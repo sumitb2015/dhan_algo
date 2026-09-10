@@ -498,8 +498,7 @@ export default function SyntheticFuturesScalper() {
   // indices fetch) rather than the hardcoded placeholder constant. On a fresh
   // page load — before either has arrived — that placeholder can sit far
   // enough from a restored position's real entry price to look like a
-  // stop-loss/target breach; gates the auto-exit watcher (§10) below so it
-  // never fires off a fabricated price.
+  // stop-loss/target breach.
   const pricesReady = Boolean((liveQuotes?.spot && liveQuotes.spot > 0) || indices[underlying]?.spot);
 
   // Spot price: prioritize live options WS tick, then indices snapshot
@@ -542,6 +541,21 @@ export default function SyntheticFuturesScalper() {
   const atmQuotes = liveQuotes?.strikes?.[String(atmStrike)];
   const atmCeLtp = atmQuotes?.ce?.ltp ?? 0;
   const atmPeLtp = atmQuotes?.pe?.ltp ?? 0;
+
+  // Whether syntheticFuturePrice below reflects a genuine ATM CE−PE
+  // calculation rather than its raw-spot fallback (used before the option
+  // premiums have arrived — see syntheticFuturePrice just below). pricesReady
+  // alone is NOT enough here: the indices snapshot/WS spot tick typically
+  // resolves before the options WS bridge has subscribed and ticked every
+  // strike, so there's a real window right after a page load/refresh where
+  // pricesReady is already true but atmCeLtp/atmPeLtp are still 0. During
+  // that window syntheticFuturePrice silently equals raw spot, which can sit
+  // many points away from a restored position's real entrySyntheticPrice
+  // (that was computed off actual CE−PE premiums) — comparing the two reads
+  // as a fabricated points swing. This gates both the live telemetry peak
+  // tracking (§6) and the auto-exit watcher (§10) so neither can arm a
+  // trailing stop or fire a stop-loss/target flatten off that fallback.
+  const synthPriceReady = pricesReady && atmCeLtp > 0 && atmPeLtp > 0;
 
   // Live Synthetic Future Price: ATM + CE_ltp - PE_ltp
   const syntheticFuturePrice = useMemo(() => {
@@ -599,7 +613,16 @@ export default function SyntheticFuturesScalper() {
       });
 
       const totalPnl = updatedLegs.reduce((acc, l) => acc + l.pnl, 0);
-      const newPeakPoints = Math.max(prev.peakPoints, pointsDiff);
+      // Gated on synthPriceReady: pointsDiff is derived from the
+      // whole-market syntheticFuturePrice, which silently falls back to raw
+      // spot before ATM CE/PE premiums arrive (e.g. right after a page
+      // load/refresh). Feeding that fallback into Math.max would permanently
+      // ratchet peakPoints up to a fabricated value — Math.max never comes
+      // back down — which then arms the trailing-SL watcher (§10) on a false
+      // baseline as soon as real quotes land. totalPnl/newPeakPnl are safe
+      // without this gate: they're built from each leg's own LTP, which is
+      // already resistant to missing ticks (see updatedLegs above).
+      const newPeakPoints = synthPriceReady ? Math.max(prev.peakPoints, pointsDiff) : prev.peakPoints;
       const newPeakPnl = Math.max(prev.peakPnl, totalPnl);
 
       const next: ActiveSyntheticPosition = {
@@ -611,7 +634,7 @@ export default function SyntheticFuturesScalper() {
       activePositionRef.current = next;
       return next;
     });
-  }, [syntheticFuturePrice, liveQuotes]);
+  }, [syntheticFuturePrice, liveQuotes, synthPriceReady]);
 
   // Trailing SL Live Telemetry Status
   const trailingStatus = useMemo(() => {
@@ -700,6 +723,41 @@ export default function SyntheticFuturesScalper() {
         `Option contracts for ATM ${atmStrike} on ${effectiveBroker.toUpperCase()} not loaded yet. Please wait a moment.`
       );
       return;
+    }
+
+    // hasAtm only confirms the contract identifiers (securityId/tradingSymbol)
+    // are loaded, not that a live premium has ticked in yet. Every leg below
+    // stores entryPrice directly from atmCeLtp/atmPeLtp (or, when merging into
+    // an existing position, blends it into that position's average via
+    // weightedSyntheticPrice/combinedEntryPrice) — a 0 here would either seed
+    // a fresh position with a fabricated ₹0 cost basis (an instant, enormous
+    // fake profit once the real premium ticks in) or silently drag down a
+    // running position's real average entry price. Block the order rather
+    // than let either happen.
+    if (!synthPriceReady) {
+      addToast(
+        'error',
+        'Option Premiums Loading…',
+        `ATM ${atmStrike} CE/PE ticks not live yet on ${effectiveBroker.toUpperCase()} — please wait a moment before firing.`
+      );
+      return;
+    }
+
+    // Same zero-price risk as above, but for the hedge wing: it's a
+    // different strike than ATM, so synthPriceReady (which only checks the
+    // ATM CE/PE) doesn't cover it. Only the wing this direction actually buys
+    // matters — a LONG synthetic never touches shortHedgeCeLtp and vice versa.
+    if (hedgeEnabled && hedgeOffset > 0) {
+      const hedgeLtp = direction === 'LONG' ? longHedgePeLtp : shortHedgeCeLtp;
+      const hedgeStrike = direction === 'LONG' ? longHedgeStrike : shortHedgeStrike;
+      if (hedgeLtp <= 0) {
+        addToast(
+          'error',
+          'Hedge Premium Loading…',
+          `Hedge strike ${hedgeStrike} ${direction === 'LONG' ? 'PE' : 'CE'} premium not live yet — please wait a moment before firing.`
+        );
+        return;
+      }
     }
 
     const currentPos = activePositionRef.current || activePosition;
@@ -1506,12 +1564,15 @@ export default function SyntheticFuturesScalper() {
 
   // ── 10. Trailing Stop Loss & Auto-Exit Rule Watcher ─────────────────────────
   useEffect(() => {
-    // pricesReady guards against firing on the hardcoded placeholder price a
-    // fresh page load starts with — right after a refresh, a restored
-    // position's real entrySyntheticPrice vs. that placeholder can look like
-    // a huge, fabricated stop-loss/target breach before any real quote has
-    // arrived. See the pricesReady comment above for the incident this fixes.
-    if (!activePosition || inFlight || !pricesReady) return;
+    // synthPriceReady (not just pricesReady) guards against firing on a
+    // fabricated synthetic price a fresh page load/refresh starts with —
+    // pricesReady alone (spot present) still leaves a window where
+    // syntheticFuturePrice is silently the raw-spot fallback because the ATM
+    // CE/PE premiums haven't ticked in yet. Comparing that fallback against
+    // a restored position's real entrySyntheticPrice looks like a huge stop
+    // loss/target breach that never actually happened — see the
+    // synthPriceReady comment above for the incident this fixes.
+    if (!activePosition || inFlight || !synthPriceReady) return;
 
     const currentSynth = syntheticFuturePrice;
     const capturedPoints =
@@ -1574,7 +1635,7 @@ export default function SyntheticFuturesScalper() {
         }
       }
     }
-  }, [syntheticFuturePrice, activePosition, stopLoss, target, trailingEnabled, trailTrigger, trailStep, slMode, inFlight, pricesReady]);
+  }, [syntheticFuturePrice, activePosition, stopLoss, target, trailingEnabled, trailTrigger, trailStep, slMode, inFlight, synthPriceReady]);
 
   // ── 11. Keyboard Shortcuts (B: Buy, S: Sell, X: Flatten) ───────────────────
   // Use stable refs for the handler functions so the listener is registered
@@ -1611,10 +1672,17 @@ export default function SyntheticFuturesScalper() {
 
   // Current Active P&L
   const activePnl = activePosition ? activePosition.legs.reduce((acc, l) => acc + l.pnl, 0) : 0;
+  // null (renders as "—") rather than a number computed off the raw-spot
+  // fallback — same synthPriceReady gate as §6/§10, purely for the header
+  // stat this time: showing a fabricated points swing here doesn't place an
+  // order, but it did mislead a user into manually hitting Flatten on a
+  // healthy position before this was gated.
   const activePoints = activePosition
-    ? activePosition.direction === 'LONG'
-      ? syntheticFuturePrice - activePosition.entrySyntheticPrice
-      : activePosition.entrySyntheticPrice - syntheticFuturePrice
+    ? synthPriceReady
+      ? activePosition.direction === 'LONG'
+        ? syntheticFuturePrice - activePosition.entrySyntheticPrice
+        : activePosition.entrySyntheticPrice - syntheticFuturePrice
+      : null
     : 0;
 
   return (
@@ -2015,7 +2083,7 @@ export default function SyntheticFuturesScalper() {
                     Points Captured:{' '}
                     <strong
                       className={`tabular-nums ${
-                        activePoints >= 0 ? 'text-emerald-400' : 'text-red-400'
+                        activePoints == null ? 'text-zinc-400' : activePoints >= 0 ? 'text-emerald-400' : 'text-red-400'
                       }`}
                     >
                       {fmtSignedNum(activePoints, 2)} pts
@@ -2554,7 +2622,7 @@ export default function SyntheticFuturesScalper() {
               <div className="flex items-center gap-3 font-mono text-xs">
                 <span className="text-zinc-400">
                   Points Captured:{' '}
-                  <strong className={activePoints >= 0 ? 'text-emerald-400' : 'text-red-400'}>
+                  <strong className={activePoints == null ? 'text-zinc-400' : activePoints >= 0 ? 'text-emerald-400' : 'text-red-400'}>
                     {fmtSignedNum(activePoints, 2)}
                   </strong>
                 </span>
