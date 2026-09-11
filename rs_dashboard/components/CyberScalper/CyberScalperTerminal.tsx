@@ -17,8 +17,7 @@ import {
 import { cn } from '@/lib/utils';
 import CyberBiasRadar from './CyberBiasRadar';
 import CyberOrderPad from './CyberOrderPad';
-import CyberChart, { Candle, SeriesPoint, SpreadPoint } from './CyberChart';
-import CyberPositionsPanel, { PositionItem, ScalpLogItem } from './CyberPositionsPanel';
+import CyberPositionsPanel, { PositionItem, PositionGuard, ScalpLogItem } from './CyberPositionsPanel';
 import { cyberAudio } from '@/lib/cyberAudio';
 import { contractMultiplier, scaleBrokerPnl } from '@/lib/positionPnl';
 import { useBrokerSelector, scalperRoute, BROKER_LABELS, type Broker } from '@/hooks/useBrokerSelector';
@@ -50,12 +49,16 @@ export default function CyberScalperTerminal() {
 
   // Live Data Feed
   const [feedData, setFeedData] = useState<any>(null);
+  const feedDataRef = useRef<any>(null);
+  useEffect(() => { feedDataRef.current = feedData; }, [feedData]);
+
   const [isLoading, setIsLoading] = useState(true);
   const [feedError, setFeedError] = useState<string | null>(null);
   const [lastTickTime, setLastTickTime] = useState<string>('');
 
-  // Positions & Orders
+  // Positions, Guards (TP / SL / Trailing) & Logs
   const [positions, setPositions] = useState<PositionItem[]>([]);
+  const [guards, setGuards] = useState<Record<string, PositionGuard>>({});
   const [logs, setLogs] = useState<ScalpLogItem[]>([]);
   const [isExecuting, setIsExecuting] = useState(false);
 
@@ -135,17 +138,14 @@ export default function CyberScalperTerminal() {
       if (requestedBroker !== brokerRef.current) return;
       if (json.success && Array.isArray(json.positions)) {
         const rawPositions = json.positions;
+        const currentFeed = feedDataRef.current;
         const mapped: PositionItem[] = rawPositions.map((p: any) => {
           const qty = Number(p.netQty || 0);
           const buyAvg = Number(p.buyAvg || p.costPrice || 0);
           const sellAvg = Number(p.sellAvg || 0);
+          // For SHORT positions, buyAvg is 0 and sellAvg is the entry price.
+          const avgPrice = qty < 0 ? (sellAvg || buyAvg) : (buyAvg || sellAvg);
 
-          // Dhan's /positions API omits lastTradedPrice entirely (see AdvancedScalper.tsx /
-          // Scalper.tsx and the dhan-broker-positions skill) — p.ltp / p.lastPrice are never
-          // populated on the raw payload, so reading them directly always renders "---". Back-
-          // derive from unrealizedProfit the same way those terminals do. MCX P&L must be
-          // rescaled by the barrels-per-lot multiplier FIRST (Dhan reports it unscaled), or the
-          // derived LTP lands a hundredth of the way back from the entry price.
           const mult = contractMultiplier(p);
           const scaled = scaleBrokerPnl(p, mult);
           const unrealized = Number(scaled.unrealizedProfit) || 0;
@@ -159,20 +159,67 @@ export default function CyberScalperTerminal() {
             if (Number.isFinite(derived) && derived > 0) ltp = derived;
           }
 
-          const pnl = qty !== 0 ? unrealized : realized;
-          const points = buyAvg > 0 && ltp > 0 ? (qty > 0 ? ltp - buyAvg : buyAvg - ltp) : 0;
+          // Join live market LTP from feedData if broker returns 0 (essential for Kotak/Zerodha):
+          if (!ltp && currentFeed) {
+            const symUpper = String(p.tradingSymbol || '').toUpperCase();
+            const secId = String(p.securityId || '');
+
+            // 1. Future contract match (e.g. CRUDEOILM21SEP26FUT)
+            if (
+              currentFeed.future?.ltp && (
+                symUpper.includes('FUT') ||
+                symUpper === String(currentFeed.future.trading_symbol || '').toUpperCase() ||
+                secId === String(currentFeed.future.security_id || '')
+              )
+            ) {
+              ltp = Number(currentFeed.future.ltp) || 0;
+            }
+            // 2. CE contract match
+            else if (
+              currentFeed.options?.ce?.ltp && (
+                symUpper === String(currentFeed.options.ce.trading_symbol || '').toUpperCase() ||
+                secId === String(currentFeed.options.ce.security_id || '')
+              )
+            ) {
+              ltp = Number(currentFeed.options.ce.ltp) || 0;
+            }
+            // 3. PE contract match
+            else if (
+              currentFeed.options?.pe?.ltp && (
+                symUpper === String(currentFeed.options.pe.trading_symbol || '').toUpperCase() ||
+                secId === String(currentFeed.options.pe.security_id || '')
+              )
+            ) {
+              ltp = Number(currentFeed.options.pe.ltp) || 0;
+            }
+            // 4. Spot fallback if matches underlying symbol
+            else if (currentFeed.spot && symUpper.includes(symbol)) {
+              ltp = Number(currentFeed.spot) || 0;
+            }
+          }
+
+          const points = avgPrice > 0 && ltp > 0
+            ? (qty > 0 ? ltp - avgPrice : avgPrice - ltp)
+            : 0;
+
+          // Recompute P&L if broker reported 0 but we have points and open quantity:
+          let pnl = qty !== 0 ? unrealized : realized;
+          if (pnl === 0 && points !== 0 && qty !== 0) {
+            pnl = points * Math.abs(qty) * (mult > 0 ? mult : 1);
+          }
+
+          const posId = String(p.securityId || p.tradingSymbol || Math.random());
 
           return {
-            id: String(p.securityId || p.tradingSymbol || Math.random()),
+            id: posId,
             tradingSymbol: String(p.tradingSymbol || p.securityId || 'POSITION'),
             securityId: p.securityId ? String(p.securityId) : undefined,
-            productType: String(p.productType || 'INTRADAY'),
-            // Dhan's shape names this field exchangeSegment; Kotak/Zerodha's
-            // shapers (lib/kotakShape.ts, lib/zerodhaShape.ts) name it exchange —
-            // check both, same as AdvancedScalper.tsx / Scalper.tsx.
+            productType: String(p.productType || p.prod || 'INTRADAY'),
             exchangeSegment: String(p.exchangeSegment ?? p.exchange ?? 'NSE_FNO'),
             netQty: qty,
             buyAvg,
+            sellAvg,
+            avgPrice,
             ltp,
             pnl,
             points,
@@ -441,6 +488,177 @@ export default function CyberScalperTerminal() {
     }
   };
 
+  // ─── Guard Management: Target, Stop Loss & Trailing SL ─────────────
+  const handleGuardChange = useCallback((posKey: string, field: 'target' | 'sl', val: string) => {
+    setGuards((prev) => ({
+      ...prev,
+      [posKey]: {
+        target: field === 'target' ? val : (prev[posKey]?.target ?? ''),
+        sl: field === 'sl' ? val : (prev[posKey]?.sl ?? ''),
+        trailEnabled: prev[posKey]?.trailEnabled ?? false,
+        bestPrice: prev[posKey]?.bestPrice ?? 0,
+        triggered: false,
+      },
+    }));
+  }, []);
+
+  const handleToggleTrail = useCallback((posKey: string) => {
+    cyberAudio.click();
+    setGuards((prev) => {
+      const cur = prev[posKey];
+      const nextActive = !cur?.trailEnabled;
+      return {
+        ...prev,
+        [posKey]: {
+          target: cur?.target ?? '',
+          sl: cur?.sl ?? '',
+          trailEnabled: nextActive,
+          bestPrice: cur?.bestPrice ?? 0,
+          triggered: false,
+        },
+      };
+    });
+  }, []);
+
+  const handleSetPresetPts = useCallback((pos: PositionItem, type: 'TP' | 'SL', pts: number) => {
+    cyberAudio.click();
+    const isLong = pos.netQty > 0;
+    const entry = pos.avgPrice > 0 ? pos.avgPrice : (isLong ? pos.buyAvg : (pos.sellAvg || pos.ltp));
+    if (entry <= 0) return;
+
+    if (type === 'TP') {
+      const tpPrice = isLong ? entry + pts : entry - pts;
+      handleGuardChange(pos.id, 'target', tpPrice.toFixed(2));
+      addLog('BUY', `Target set for ${pos.tradingSymbol}: +${pts} pts (₹${tpPrice.toFixed(2)})`);
+    } else {
+      const slPrice = isLong ? entry - pts : entry + pts;
+      handleGuardChange(pos.id, 'sl', slPrice.toFixed(2));
+      addLog('SELL', `Stop Loss set for ${pos.tradingSymbol}: -${pts} pts (₹${slPrice.toFixed(2)})`);
+    }
+  }, [handleGuardChange]);
+
+  const handleToggleTrailAll = useCallback(() => {
+    cyberAudio.click();
+    const active = positions.filter((p) => p.netQty !== 0);
+    if (active.length === 0) return;
+    const anyOff = active.some((p) => !guards[p.id]?.trailEnabled);
+    setGuards((prev) => {
+      const next = { ...prev };
+      active.forEach((p) => {
+        next[p.id] = {
+          target: prev[p.id]?.target ?? '',
+          sl: prev[p.id]?.sl ?? '',
+          trailEnabled: anyOff,
+          bestPrice: prev[p.id]?.bestPrice ?? 0,
+          triggered: false,
+        };
+      });
+      return next;
+    });
+    addLog('BUY', anyOff ? 'Trailing SL enabled on all open positions' : 'Trailing SL disabled on all positions');
+  }, [positions, guards]);
+
+  // ─── Automated Risk Watcher (TP, SL, Trailing SL) ───────────────────
+  useEffect(() => {
+    const active = positions.filter((p) => p.netQty !== 0);
+    if (active.length === 0) return;
+
+    const peakUpdates: Record<string, number> = {};
+
+    for (const pos of active) {
+      const guard = guards[pos.id];
+      if (!guard || guard.triggered) continue;
+
+      const ltp = pos.ltp;
+      if (!ltp || ltp <= 0) continue;
+
+      const isLong = pos.netQty > 0;
+      const entryPrice = pos.avgPrice > 0 ? pos.avgPrice : (isLong ? pos.buyAvg : (pos.sellAvg || 0));
+      if (entryPrice <= 0) continue;
+
+      // 1. Take Profit (Target) check
+      const targetNum = parseFloat(guard.target);
+      if (!isNaN(targetNum) && targetNum > 0) {
+        if ((isLong && ltp >= targetNum) || (!isLong && ltp <= targetNum)) {
+          guard.triggered = true;
+          cyberAudio.exit();
+          addLog(
+            'EXIT',
+            `TARGET HIT: +${pos.points.toFixed(2)} pts!`,
+            `Closed ${pos.tradingSymbol} @ ₹${ltp.toFixed(2)} (Target: ₹${targetNum.toFixed(2)})`
+          );
+          handleClosePosition(pos);
+          continue;
+        }
+      }
+
+      // 2. Trailing Stop Loss or Hard Stop Loss check
+      const slNum = parseFloat(guard.sl);
+      if (!isNaN(slNum) && slNum > 0) {
+        const initialRisk = Math.abs(entryPrice - slNum);
+
+        if (guard.trailEnabled) {
+          const currentBest = guard.bestPrice || entryPrice;
+          const newBest = isLong ? Math.max(currentBest, ltp) : Math.min(currentBest, ltp);
+          if (newBest !== currentBest) {
+            peakUpdates[pos.id] = newBest;
+          }
+
+          const effectiveBest = peakUpdates[pos.id] ?? newBest;
+          const trailFloor = isLong ? effectiveBest - initialRisk : effectiveBest + initialRisk;
+          const isTrailActive = isLong ? trailFloor > slNum : trailFloor < slNum;
+
+          if (isTrailActive) {
+            if ((isLong && ltp <= trailFloor) || (!isLong && ltp >= trailFloor)) {
+              guard.triggered = true;
+              cyberAudio.exit();
+              addLog(
+                'EXIT',
+                `TRAILING STOP TRIGGERED!`,
+                `Closed ${pos.tradingSymbol} @ ₹${ltp.toFixed(2)} (Locked floor: ₹${trailFloor.toFixed(2)})`
+              );
+              handleClosePosition(pos);
+              continue;
+            }
+          } else if ((isLong && ltp <= slNum) || (!isLong && ltp >= slNum)) {
+            guard.triggered = true;
+            cyberAudio.error();
+            addLog(
+              'ERROR',
+              `STOP LOSS HIT!`,
+              `Closed ${pos.tradingSymbol} @ ₹${ltp.toFixed(2)} (SL: ₹${slNum.toFixed(2)})`
+            );
+            handleClosePosition(pos);
+            continue;
+          }
+        } else {
+          // Hard SL (no trailing)
+          if ((isLong && ltp <= slNum) || (!isLong && ltp >= slNum)) {
+            guard.triggered = true;
+            cyberAudio.error();
+            addLog(
+              'ERROR',
+              `STOP LOSS HIT!`,
+              `Closed ${pos.tradingSymbol} @ ₹${ltp.toFixed(2)} (SL: ₹${slNum.toFixed(2)})`
+            );
+            handleClosePosition(pos);
+            continue;
+          }
+        }
+      }
+    }
+
+    if (Object.keys(peakUpdates).length > 0) {
+      setGuards((prev) => {
+        const next = { ...prev };
+        for (const [id, best] of Object.entries(peakUpdates)) {
+          if (next[id]) next[id] = { ...next[id], bestPrice: best };
+        }
+        return next;
+      });
+    }
+  }, [positions, guards, handleClosePosition]);
+
   // Global Keyboard Shortcuts (B = Buy Call, S = Buy Put, X = Flatten All)
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -678,23 +896,17 @@ export default function CyberScalperTerminal() {
           onFlattenAll={handleFlattenAll}
           openPositionsCount={positions.filter((p) => p.netQty !== 0).length}
         />
-
-        {/* 3. INTERACTIVE CHART WITH EMA 9, EMA 20, VWAP & SPREAD DELTA */}
-        <CyberChart
-          candles={feedData?.candles || []}
-          ema9Series={feedData?.series?.ema9 || []}
-          ema20Series={feedData?.series?.ema20 || []}
-          vwapSeries={feedData?.series?.vwap || []}
-          spreadSeries={feedData?.series?.spread || []}
-          symbol={symbol}
-          interval={timeframe}
-        />
-
-        {/* 4. POSITIONS TABLE & LIVE TELEMETRY LOG */}
+        {/* 3. POSITIONS TABLE WITH TARGET, SL, TRAILING & LIVE TELEMETRY LOG */}
         <CyberPositionsPanel
           positions={positions}
           logs={logs}
+          guards={guards}
+          onGuardChange={handleGuardChange}
+          onToggleTrail={handleToggleTrail}
+          onSetPresetPts={handleSetPresetPts}
+          onToggleTrailAll={handleToggleTrailAll}
           onClosePosition={handleClosePosition}
+          onFlattenAll={handleFlattenAll}
           isExecuting={isExecuting}
         />
 
