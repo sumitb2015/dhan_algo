@@ -118,7 +118,7 @@ export default function AdvancedScalper() {
 
   // Trading controls
   const [orderMode, setOrderMode] = useState<'MARKET' | 'LIMIT'>('MARKET');
-  const [productType, setProductType] = useState<'INTRADAY' | 'MARGIN'>('INTRADAY');
+  const [productType, setProductType] = useState<'INTRADAY' | 'MARGIN'>('MARGIN');
 
   // Top-10-by-weight stocks panel. Off by default so no equity bridge is
   // spawned unless it's actually wanted.
