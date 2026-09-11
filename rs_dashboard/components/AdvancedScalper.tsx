@@ -2,7 +2,7 @@
 
 import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import NavBar from './NavBar';
-import { Zap, RefreshCw, Shield, ShieldOff, Plus, Scissors, Wallet, Sigma } from 'lucide-react';
+import { Zap, RefreshCw, Shield, ShieldOff, Plus, Scissors, Wallet, Sigma, ListTree } from 'lucide-react';
 import {
   OptionPanel, PositionsTable, TabTable, FundsView, formatFundsValue, pollPositionFlat, pollPositionReduced,
   resolveRowExpiry,
@@ -22,6 +22,7 @@ import TopWeightStocks from './TopWeightStocks';
 import TopIndices from './TopIndices';
 import MtmChart, { useMtmHistory } from './MtmChart';
 import ScalperGreeksModal from './analytics/ScalperGreeksModal';
+import AdvancedScalperOptionChainModal from './AdvancedScalperOptionChainModal';
 
 // ─── Types ────────────────────────────────────────────────────────
 
@@ -123,6 +124,7 @@ export default function AdvancedScalper() {
   // spawned unless it's actually wanted.
   const [showTop10, setShowTop10] = useState(false);
   const [showGreeks, setShowGreeks] = useState(false);
+  const [showChain, setShowChain] = useState(false);
   const boxCounterRef = useRef(2);
   const [boxes, setBoxes] = useState<BoxConfig[]>([
     { id: 'box-1', side: 'CE', strike: null, lots: 1, limitPrice: '' },
@@ -2286,6 +2288,18 @@ export default function AdvancedScalper() {
               <Sigma className="w-3 h-3" /> GREEKS
             </button>
 
+            {/* Read-only option chain reference for the currently-selected
+                underlying — see AdvancedScalperOptionChainModal.tsx. */}
+            <button onClick={() => setShowChain(true)}
+              title={`View the ${underlying} option chain`}
+              className={cn(
+                'flex items-center gap-1.5 px-3 py-1.5 text-xs font-bold rounded-lg border transition-all shrink-0 whitespace-nowrap',
+                'bg-zinc-900 border-zinc-700 text-zinc-400 hover:text-violet-300 hover:border-violet-500/40',
+                FOCUS_RING,
+              )}>
+              <ListTree className="w-3 h-3" /> CHAIN
+            </button>
+
             {/* Hotkey legend — these fire real MARKET orders on the first
                 CE/PE box regardless of the Market/Limit toggle above, so the
                 bindings need to stay visible, not just discoverable via docs. */}
@@ -2898,6 +2912,13 @@ export default function AdvancedScalper() {
         open={showGreeks}
         onClose={() => setShowGreeks(false)}
         rawPositions={positionsData}
+        broker={broker}
+      />
+
+      <AdvancedScalperOptionChainModal
+        isOpen={showChain}
+        onClose={() => setShowChain(false)}
+        underlying={underlying}
         broker={broker}
       />
     </div>
