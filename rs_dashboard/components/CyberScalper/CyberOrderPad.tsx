@@ -30,6 +30,21 @@ interface OptionContract {
   ltp: number;
 }
 
+interface FutureContract {
+  security_id: string | null;
+  trading_symbol: string | null;
+  display_name?: string | null;
+  expiry?: string;
+  lot_size?: number;
+  ltp: number;
+}
+
+/** Underlyings whose future contract IS the tradeable instrument (not just an options
+ * underlying) — currently only CRUDEOILM, per the feed script's commodity resolution.
+ * Gates the Futures/Options mode toggle so it doesn't appear for symbols with no
+ * `future` data behind it. */
+const FUTURES_CAPABLE_SYMBOLS = new Set(['CRUDEOILM']);
+
 interface OrderPadProps {
   symbol: string;
   spot: number;
@@ -41,6 +56,7 @@ interface OrderPadProps {
     ce?: OptionContract;
     pe?: OptionContract;
   } | null;
+  future?: FutureContract | null;
   bias: string;
   isExecuting: boolean;
   onExecuteTrade: (params: {
@@ -66,6 +82,7 @@ export default function CyberOrderPad({
   symbol,
   spot,
   options,
+  future,
   bias,
   isExecuting,
   onExecuteTrade,
@@ -73,7 +90,7 @@ export default function CyberOrderPad({
   openPositionsCount,
 }: OrderPadProps) {
   // Settings
-  const [tradeMode, setTradeMode] = useState<'OPTIONS' | 'DIRECT'>('OPTIONS');
+  const [tradeMode, setTradeMode] = useState<'OPTIONS' | 'FUTURES'>('OPTIONS');
   const [lots, setLots] = useState<number>(1);
   const [tempLots, setTempLots] = useState<string>('1');
   const [productType, setProductType] = useState<'INTRADAY' | 'MARGIN'>('INTRADAY');
@@ -82,7 +99,18 @@ export default function CyberOrderPad({
   const [slPts, setSlPts] = useState<number | null>(5);
   const [safetyLock, setSafetyLock] = useState<boolean>(false); // false = Instant 1-click execution!
 
-  const lotSize = options?.lot_size || 65;
+  const futuresCapable = FUTURES_CAPABLE_SYMBOLS.has(symbol) && !!future;
+
+  // Switching symbol away from a futures-capable one (or FUTURES mode having no data
+  // for the new symbol) must not leave the pad stuck trying to trade a future that
+  // doesn't exist for whatever is now selected.
+  useEffect(() => {
+    if (!futuresCapable && tradeMode === 'FUTURES') setTradeMode('OPTIONS');
+  }, [futuresCapable, tradeMode]);
+
+  const effectiveMode = futuresCapable ? tradeMode : 'OPTIONS';
+
+  const lotSize = effectiveMode === 'FUTURES' ? (future?.lot_size || 1) : (options?.lot_size || 65);
   const totalQty = lots * lotSize;
 
   // Dhan's MCX order quantity is itself denominated in lots (get_lot_size returns 1 for
@@ -126,7 +154,7 @@ export default function CyberOrderPad({
 
     await onExecuteTrade({
       direction: 'BUY',
-      contractType: tradeMode === 'OPTIONS' ? 'CE' : 'DIRECT',
+      contractType: 'CE',
       securityId: ceContract?.security_id || undefined,
       tradingSymbol: ceContract?.trading_symbol || undefined,
       strike: ceContract?.strike || atmStrike,
@@ -152,8 +180,8 @@ export default function CyberOrderPad({
     }
 
     await onExecuteTrade({
-      direction: tradeMode === 'OPTIONS' ? 'BUY' : 'SELL',
-      contractType: tradeMode === 'OPTIONS' ? 'PE' : 'DIRECT',
+      direction: 'BUY',
+      contractType: 'PE',
       securityId: peContract?.security_id || undefined,
       tradingSymbol: peContract?.trading_symbol || undefined,
       strike: peContract?.strike || atmStrike,
@@ -163,6 +191,58 @@ export default function CyberOrderPad({
       orderType,
       productType,
       price: peContract?.ltp || spot,
+      targetPts: targetPts || undefined,
+      slPts: slPts || undefined,
+    });
+  };
+
+  // LONG the future contract directly (not an option leg)
+  const handleBuyFuture = async () => {
+    if (isExecuting) return;
+    cyberAudio.buy();
+
+    if (safetyLock) {
+      const confirmAction = window.confirm(`EXECUTE INSTANT LONG: ${lots} Lot(s) (${totalQty} Qty) of ${future?.display_name || `${symbol} FUT`}?`);
+      if (!confirmAction) return;
+    }
+
+    await onExecuteTrade({
+      direction: 'BUY',
+      contractType: 'DIRECT',
+      securityId: future?.security_id || undefined,
+      tradingSymbol: future?.trading_symbol || undefined,
+      expiry: future?.expiry,
+      lots,
+      qty: totalQty,
+      orderType,
+      productType,
+      price: future?.ltp || spot,
+      targetPts: targetPts || undefined,
+      slPts: slPts || undefined,
+    });
+  };
+
+  // SHORT the future contract directly
+  const handleSellFuture = async () => {
+    if (isExecuting) return;
+    cyberAudio.sell();
+
+    if (safetyLock) {
+      const confirmAction = window.confirm(`EXECUTE INSTANT SHORT: ${lots} Lot(s) (${totalQty} Qty) of ${future?.display_name || `${symbol} FUT`}?`);
+      if (!confirmAction) return;
+    }
+
+    await onExecuteTrade({
+      direction: 'SELL',
+      contractType: 'DIRECT',
+      securityId: future?.security_id || undefined,
+      tradingSymbol: future?.trading_symbol || undefined,
+      expiry: future?.expiry,
+      lots,
+      qty: totalQty,
+      orderType,
+      productType,
+      price: future?.ltp || spot,
       targetPts: targetPts || undefined,
       slPts: slPts || undefined,
     });
@@ -196,14 +276,47 @@ export default function CyberOrderPad({
               </span>
             </h2>
             <p className="text-[10px] text-zinc-400 font-mono">
-              ATM Strike: <b className="text-white">{atmStrike}</b> · Expiry:{' '}
-              <b className="text-zinc-200">{options?.expiry || 'Active'}</b>
+              {effectiveMode === 'FUTURES' ? (
+                <>
+                  Contract: <b className="text-white">{future?.trading_symbol || symbol}</b> · Expiry:{' '}
+                  <b className="text-zinc-200">{future?.expiry || 'Active'}</b>
+                </>
+              ) : (
+                <>
+                  ATM Strike: <b className="text-white">{atmStrike}</b> · Expiry:{' '}
+                  <b className="text-zinc-200">{options?.expiry || 'Active'}</b>
+                </>
+              )}
             </p>
           </div>
         </div>
 
         {/* Safety Lock & Hotkeys indicator */}
         <div className="flex items-center gap-2">
+          {/* Futures/Options mode toggle — only for symbols with a tradeable future
+              contract of their own (currently CRUDEOILM). */}
+          {futuresCapable && (
+            <div className="flex items-center bg-zinc-950 border border-zinc-800 rounded-lg p-0.5">
+              {(['OPTIONS', 'FUTURES'] as const).map((m) => (
+                <button
+                  key={m}
+                  onClick={() => {
+                    cyberAudio.click();
+                    setTradeMode(m);
+                  }}
+                  className={cn(
+                    'px-2 py-1 rounded text-[10px] font-mono font-bold transition-all',
+                    effectiveMode === m
+                      ? 'bg-cyan-500/20 text-cyan-300 border border-cyan-500/40'
+                      : 'text-zinc-400 hover:text-white'
+                  )}
+                >
+                  {m}
+                </button>
+              ))}
+            </div>
+          )}
+
           <button
             onClick={() => {
               cyberAudio.click();
@@ -236,6 +349,107 @@ export default function CyberOrderPad({
       </div>
 
       {/* BIG BUY & SELL ACTION BUTTONS */}
+      {effectiveMode === 'FUTURES' ? (
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+          {/* LONG the future */}
+          <button
+            onClick={handleBuyFuture}
+            disabled={isExecuting}
+            className={cn(
+              'group relative overflow-hidden rounded-2xl p-5 border-2 text-left transition-all duration-200 cursor-pointer active:scale-[0.98] select-none',
+              'bg-gradient-to-br from-emerald-950/80 via-zinc-950/90 to-emerald-900/40',
+              'border-emerald-500/60 hover:border-emerald-400 hover:shadow-2xl hover:shadow-emerald-500/20',
+              isBullish && 'ring-2 ring-emerald-400/40'
+            )}
+          >
+            <div className="absolute -top-12 -right-12 w-28 h-28 rounded-full bg-emerald-500/20 blur-xl group-hover:bg-emerald-500/30 transition-all pointer-events-none" />
+
+            <div className="flex items-start justify-between mb-3">
+              <div>
+                <div className="flex items-center gap-2 mb-1">
+                  <span className="px-2 py-0.5 rounded bg-emerald-500/20 border border-emerald-500/40 text-emerald-300 font-mono text-[10px] font-black uppercase tracking-wider">
+                    HOTKEY [B]
+                  </span>
+                  {isBullish && (
+                    <span className="text-[10px] font-mono text-emerald-400 font-bold flex items-center gap-1">
+                      <Sparkles className="w-3 h-3" /> STRONGLY RECOMMENDED
+                    </span>
+                  )}
+                </div>
+                <h3 className="text-xl lg:text-2xl font-black text-white tracking-tight flex items-center gap-2">
+                  <span>LONG FUTURE</span>
+                  <ArrowUpRight className="w-6 h-6 text-emerald-400 group-hover:translate-x-1 group-hover:-translate-y-1 transition-transform" />
+                </h3>
+              </div>
+
+              <div className="text-right">
+                <span className="text-[10px] font-mono text-zinc-400 uppercase">FUT LTP</span>
+                <div className="text-2xl lg:text-3xl font-mono font-black text-emerald-400">
+                  ₹{future?.ltp ? future.ltp.toFixed(2) : '---'}
+                </div>
+              </div>
+            </div>
+
+            <div className="flex items-center justify-between pt-3 border-t border-emerald-900/40 text-xs font-mono">
+              <div className="text-zinc-300 font-medium">
+                Target: <b className="text-white">{future?.display_name || `${symbol} FUT`}</b>
+              </div>
+              <div className="text-emerald-300 font-bold">
+                {lots} Lot{lots > 1 ? 's' : ''} ({totalQty} Qty) · ₹{(lots * contractSize * (future?.ltp || 0)).toLocaleString('en-IN', { maximumFractionDigits: 0 })}
+              </div>
+            </div>
+          </button>
+
+          {/* SHORT the future */}
+          <button
+            onClick={handleSellFuture}
+            disabled={isExecuting}
+            className={cn(
+              'group relative overflow-hidden rounded-2xl p-5 border-2 text-left transition-all duration-200 cursor-pointer active:scale-[0.98] select-none',
+              'bg-gradient-to-br from-rose-950/80 via-zinc-950/90 to-rose-900/40',
+              'border-rose-500/60 hover:border-rose-400 hover:shadow-2xl hover:shadow-rose-500/20',
+              isBearish && 'ring-2 ring-rose-400/40'
+            )}
+          >
+            <div className="absolute -top-12 -right-12 w-28 h-28 rounded-full bg-rose-500/20 blur-xl group-hover:bg-rose-500/30 transition-all pointer-events-none" />
+
+            <div className="flex items-start justify-between mb-3">
+              <div>
+                <div className="flex items-center gap-2 mb-1">
+                  <span className="px-2 py-0.5 rounded bg-rose-500/20 border border-rose-500/40 text-rose-300 font-mono text-[10px] font-black uppercase tracking-wider">
+                    HOTKEY [S]
+                  </span>
+                  {isBearish && (
+                    <span className="text-[10px] font-mono text-rose-400 font-bold flex items-center gap-1">
+                      <Sparkles className="w-3 h-3" /> STRONGLY RECOMMENDED
+                    </span>
+                  )}
+                </div>
+                <h3 className="text-xl lg:text-2xl font-black text-white tracking-tight flex items-center gap-2">
+                  <span>SHORT FUTURE</span>
+                  <ArrowDownRight className="w-6 h-6 text-rose-400 group-hover:translate-x-1 group-hover:translate-y-1 transition-transform" />
+                </h3>
+              </div>
+
+              <div className="text-right">
+                <span className="text-[10px] font-mono text-zinc-400 uppercase">FUT LTP</span>
+                <div className="text-2xl lg:text-3xl font-mono font-black text-rose-400">
+                  ₹{future?.ltp ? future.ltp.toFixed(2) : '---'}
+                </div>
+              </div>
+            </div>
+
+            <div className="flex items-center justify-between pt-3 border-t border-rose-900/40 text-xs font-mono">
+              <div className="text-zinc-300 font-medium">
+                Target: <b className="text-white">{future?.display_name || `${symbol} FUT`}</b>
+              </div>
+              <div className="text-rose-300 font-bold">
+                {lots} Lot{lots > 1 ? 's' : ''} ({totalQty} Qty) · ₹{(lots * contractSize * (future?.ltp || 0)).toLocaleString('en-IN', { maximumFractionDigits: 0 })}
+              </div>
+            </div>
+          </button>
+        </div>
+      ) : (
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
         {/* BIG BUY (CALL / LONG) BUTTON */}
         <button
@@ -339,6 +553,7 @@ export default function CyberOrderPad({
           </div>
         </button>
       </div>
+      )}
 
       {/* QUICK SCALP CONFIGURATION CONTROLS */}
       <div className="grid grid-cols-1 md:grid-cols-3 gap-3 pt-2">

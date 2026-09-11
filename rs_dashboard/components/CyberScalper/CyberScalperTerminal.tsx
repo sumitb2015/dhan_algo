@@ -507,6 +507,7 @@ export default function CyberScalperTerminal() {
           symbol={symbol}
           spot={spot}
           options={feedData?.options || null}
+          future={feedData?.future || null}
           bias={feedData?.live?.bias || 'NEUTRAL'}
           isExecuting={isExecuting}
           onExecuteTrade={handleExecuteTrade}

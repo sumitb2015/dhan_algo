@@ -282,6 +282,30 @@ def find_atm_options(
     }
 
 
+def find_future_contract(helper: DhanHelper, underlying: str, spot_price: float) -> dict | None:
+    """
+    Resolves the nearest-expiry future contract for a commodity underlying (CRUDEOIL /
+    CRUDEOILM). Unlike find_atm_options, there is no strike to pick -- the future IS the
+    tradeable instrument, and its own candle series (already fetched for the chart) is
+    its live price, so no extra get_ltp() call is needed here.
+    """
+    sym = underlying.upper()
+    row = helper.find_future(sym, exchange="MCX", instrument="FUTCOM")
+    if not row:
+        return None
+    return {
+        "security_id": str(row.get("SECURITY_ID", "")),
+        "trading_symbol": str(row.get("SYMBOL_NAME", "")),
+        "display_name": str(row.get("DISPLAY_NAME", row.get("SYMBOL_NAME", ""))),
+        "expiry": str(row.get("SM_EXPIRY_DATE", "")),
+        # Same convention as find_atm_options' lot_size: Dhan's MCX order quantity is
+        # itself denominated in lots (get_lot_size returns 1), not barrels-per-lot --
+        # the frontend applies MCX_LOT_MULTIPLIER separately for notional display.
+        "lot_size": helper.get_lot_size(sym),
+        "ltp": clean_float(spot_price),
+    }
+
+
 def main():
     parser = argparse.ArgumentParser(description="Cyber Scalper 9/20 EMA & VWAP Data Feed")
     parser.add_argument("--symbol", default="NIFTY", help="Symbol (NIFTY, BANKNIFTY, SENSEX, CRUDEOIL, etc.)")
@@ -452,6 +476,16 @@ def main():
         except Exception as e:
             sys.stderr.write(f"Options resolution failed: {e}\n")
 
+    # Resolve the future contract itself -- commodity underlyings only (CRUDEOIL /
+    # CRUDEOILM). Lets the frontend offer a Futures/Options trade-mode toggle instead of
+    # always routing orders through the ATM option leg.
+    future_info = None
+    if sym_type == "commodity":
+        try:
+            future_info = find_future_contract(helper, symbol, latest_close)
+        except Exception as e:
+            sys.stderr.write(f"Future contract resolution failed: {e}\n")
+
     response = {
         "success": True,
         "dataDate": str(latest_date),
@@ -480,6 +514,7 @@ def main():
             "spread": spread_series,
         },
         "options": options_info,
+        "future": future_info,
     }
 
     print(json.dumps(response, allow_nan=False))
