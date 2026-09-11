@@ -19,40 +19,51 @@ type Broker = 'dhan' | 'zerodha';
 
 // ── Multi-viewer stop guard ──────────────────────────────────────────────
 // AdvancedScalper/Scalper/FocusTool/OptionsCharts/Baskets/OptionStrats/
-// MultiLegFocus all share ONE bridge process per broker and each fires
-// action:'stop' from its own unmount/dependency-change cleanup. With no
-// coordination, tab B viewing the same broker went dark the instant tab A
-// navigated away (or A's expiry/underlying/auth-key effect merely re-ran) —
-// A's cleanup killed the bridge B was still reading from. GET is a heartbeat
-// (useLiveOptionsWS status-polls every 5s per broker as long as it's
-// mounted): a stop is honored only if no GET for that broker landed after
+// MultiLegFocus all share ONE bridge process per (broker, underlying) and
+// each fires action:'stop' from its own unmount/dependency-change cleanup.
+// With no coordination, tab B viewing the same (broker, underlying) went
+// dark the instant tab A navigated away (or A's expiry/auth-key effect
+// merely re-ran) — A's cleanup killed the bridge B was still reading from.
+// GET is a heartbeat (useLiveOptionsWS status-polls every 5s as long as
+// it's mounted): a stop is honored only if no GET for that key landed after
 // the stop was requested, on a delay comfortably longer than that 5s poll.
+//
+// Keyed by `${broker}:${underlying}`, not broker alone — each underlying now
+// runs its own independent bridge process (see filesFor below), so a NIFTY
+// page's heartbeat must never keep a CRUDEOIL bridge alive (or cancel its
+// stop) just because they share a broker.
 const STOP_GRACE_MS = 7000;
-const lastSeenByBroker: Partial<Record<Broker, number>> = {};
-const pendingStopByBroker: Partial<Record<Broker, ReturnType<typeof setTimeout>>> = {};
+const lastSeenByKey: Record<string, number> = {};
+const pendingStopByKey: Record<string, ReturnType<typeof setTimeout>> = {};
 
-function markSeen(broker: Broker): void {
-  lastSeenByBroker[broker] = Date.now();
+function bridgeKey(broker: Broker, underlying: string): string {
+  return `${broker}:${underlying}`;
 }
 
-function cancelPendingStop(broker: Broker): void {
-  const timer = pendingStopByBroker[broker];
+function markSeen(broker: Broker, underlying: string): void {
+  lastSeenByKey[bridgeKey(broker, underlying)] = Date.now();
+}
+
+function cancelPendingStop(broker: Broker, underlying: string): void {
+  const key = bridgeKey(broker, underlying);
+  const timer = pendingStopByKey[key];
   if (timer) {
     clearTimeout(timer);
-    delete pendingStopByBroker[broker];
+    delete pendingStopByKey[key];
   }
 }
 
 /** Schedules the stop-trigger write instead of performing it inline, so a
  *  heartbeat from another still-mounted viewer (see above) can cancel it. */
-function scheduleStop(broker: Broker): void {
-  cancelPendingStop(broker);
+function scheduleStop(broker: Broker, underlying: string): void {
+  cancelPendingStop(broker, underlying);
+  const key = bridgeKey(broker, underlying);
   const requestedAt = Date.now();
-  pendingStopByBroker[broker] = setTimeout(() => {
-    delete pendingStopByBroker[broker];
-    const lastSeen = lastSeenByBroker[broker] ?? 0;
+  pendingStopByKey[key] = setTimeout(() => {
+    delete pendingStopByKey[key];
+    const lastSeen = lastSeenByKey[key] ?? 0;
     if (lastSeen > requestedAt) return; // another viewer polled since — stay up
-    try { fs.writeFileSync(filesFor(broker).stop, ''); } catch { /* best effort */ }
+    try { fs.writeFileSync(filesFor(broker, underlying).stop, ''); } catch { /* best effort */ }
   }, STOP_GRACE_MS);
 }
 
@@ -60,16 +71,33 @@ function normalizeBroker(value: unknown): Broker {
   return String(value ?? 'dhan').toLowerCase() === 'zerodha' ? 'zerodha' : 'dhan';
 }
 
-/** Each broker's bridge is fully independent — its own quotes/status/history
- *  files and stop trigger — so starting/stopping one never touches the other. */
-function filesFor(broker: Broker) {
+// The union of both bridge scripts' own argparse `choices` (live_options_ws.py
+// adds CRUDEOIL/CRUDEOILM over the Zerodha script's set). `underlying` now
+// flows straight into a filesystem path (see filesFor below) — unlike
+// `broker`, which was always a fixed 2-value type with no injection surface,
+// an unconstrained `underlying` string would let a caller path-traverse out
+// of DEBUG_DIR (`../../etc/whatever` survives `.toLowerCase()` untouched).
+// Anything outside this allowlist folds to 'NIFTY', mirroring normalizeBroker's
+// same fold-to-a-safe-default shape rather than rejecting the request outright.
+const KNOWN_UNDERLYINGS = new Set(['NIFTY', 'BANKNIFTY', 'FINNIFTY', 'SENSEX', 'CRUDEOIL', 'CRUDEOILM']);
+
+function normalizeUnderlying(value: unknown): string {
+  const s = String(value ?? 'NIFTY').toUpperCase();
+  return KNOWN_UNDERLYINGS.has(s) ? s : 'NIFTY';
+}
+
+/** Each (broker, underlying) pair's bridge is fully independent — its own
+ *  quotes/status/history files and stop trigger — so starting/stopping one
+ *  never touches another underlying's process, even on the same broker. */
+function filesFor(broker: Broker, underlying: string) {
+  const suffix = `${broker}_${underlying.toLowerCase()}`;
   return {
-    quotes:  path.join(DEBUG_DIR, `live_options_quotes_${broker}.json`),
-    history: path.join(DEBUG_DIR, `live_options_history_${broker}.json`),
-    status:  path.join(DEBUG_DIR, `live_options_status_${broker}.json`),
-    stop:    path.join(DEBUG_DIR, `live_options_stop_${broker}.trigger`),
-    log:     path.join(DEBUG_DIR, `live_options_log_${broker}.log`),
-    extra:   path.join(DEBUG_DIR, `live_options_extra_${broker}.json`),
+    quotes:  path.join(DEBUG_DIR, `live_options_quotes_${suffix}.json`),
+    history: path.join(DEBUG_DIR, `live_options_history_${suffix}.json`),
+    status:  path.join(DEBUG_DIR, `live_options_status_${suffix}.json`),
+    stop:    path.join(DEBUG_DIR, `live_options_stop_${suffix}.trigger`),
+    log:     path.join(DEBUG_DIR, `live_options_log_${suffix}.log`),
+    extra:   path.join(DEBUG_DIR, `live_options_extra_${suffix}.json`),
   };
 }
 
@@ -133,8 +161,8 @@ function readJson(file: string): unknown {
 
 /** Writes the stop trigger and waits (bounded, polling with a fresh PID check
  *  each time) for the process to actually exit, instead of a blind fixed sleep. */
-async function stopAndWait(broker: Broker, pid: number, maxWaitMs = 3000): Promise<void> {
-  fs.writeFileSync(filesFor(broker).stop, '');
+async function stopAndWait(broker: Broker, underlying: string, pid: number, maxWaitMs = 3000): Promise<void> {
+  fs.writeFileSync(filesFor(broker, underlying).stop, '');
   const deadline = Date.now() + maxWaitMs;
   while (Date.now() < deadline) {
     if (!isPidRunning(pid, true)) return;
@@ -150,10 +178,11 @@ async function stopAndWait(broker: Broker, pid: number, maxWaitMs = 3000): Promi
  *  ?history=1. */
 export async function GET(request: NextRequest) {
   const broker         = normalizeBroker(request.nextUrl.searchParams.get('broker'));
+  const underlying     = normalizeUnderlying(request.nextUrl.searchParams.get('underlying'));
   const includeHistory = request.nextUrl.searchParams.get('history') === '1';
   const checkPid       = request.nextUrl.searchParams.get('checkPid') === '1';
-  markSeen(broker); // any GET is a live viewer — see the stop-guard block above
-  const files = filesFor(broker);
+  markSeen(broker, underlying); // any GET is a live viewer — see the stop-guard block above
+  const files = filesFor(broker, underlying);
 
   const quotes  = readJson(files.quotes)  as Record<string, unknown> | null;
   const history = includeHistory ? (readJson(files.history) as Record<string, unknown> | null) : null;
@@ -178,9 +207,9 @@ export async function GET(request: NextRequest) {
   });
 }
 
-/** POST — start or stop a broker's WebSocket bridge. Each broker's bridge is
- *  independent: starting/stopping one never affects the other's running
- *  process, so a broker switch in the UI never spawns/kills anything. */
+/** POST — start or stop a (broker, underlying) WebSocket bridge. Each pair's
+ *  bridge is independent: starting/stopping one never affects another
+ *  underlying's — or another broker's — running process. */
 export async function POST(request: NextRequest) {
   const body   = await request.json().catch(() => ({})) as Record<string, unknown>;
   const action = String(body.action ?? '');
@@ -189,22 +218,23 @@ export async function POST(request: NextRequest) {
 
   // ── Stop ─────────────────────────────────────────────────────────────────
   if (action === 'stop') {
+    const underlying = normalizeUnderlying(body.underlying);
     const brokers: Broker[] = Array.isArray(body.brokers)
       ? (body.brokers as unknown[]).map(normalizeBroker)
       : [normalizeBroker(body.broker)];
     for (const broker of brokers) {
-      scheduleStop(broker);
+      scheduleStop(broker, underlying);
     }
-    return NextResponse.json({ success: true, message: 'Stop scheduled', brokers });
+    return NextResponse.json({ success: true, message: 'Stop scheduled', brokers, underlying });
   }
 
   // ── Start ────────────────────────────────────────────────────────────────
   if (action === 'start') {
-    const underlying = String(body.underlying ?? 'NIFTY').toUpperCase();
+    const underlying = normalizeUnderlying(body.underlying);
     const expiry     = String(body.expiry ?? '');
     const numStrikes = Number(body.numStrikes ?? 10);
     const broker     = normalizeBroker(body.broker);
-    const files      = filesFor(broker);
+    const files      = filesFor(broker, underlying);
 
     if (!expiry) {
       return NextResponse.json({ success: false, error: 'expiry required' }, { status: 400 });
@@ -212,9 +242,9 @@ export async function POST(request: NextRequest) {
 
     // A fresh start always wins over a stop scheduled by some other viewer's
     // cleanup — cancel it outright rather than waiting for a heartbeat to
-    // race it, and mark this broker seen immediately.
-    cancelPendingStop(broker);
-    markSeen(broker);
+    // race it, and mark this (broker, underlying) seen immediately.
+    cancelPendingStop(broker, underlying);
+    markSeen(broker, underlying);
 
     // Everything below is a check-then-act on the status file, and a freshly
     // spawned bridge needs a second or two before it writes one. Concurrent starts
@@ -223,27 +253,29 @@ export async function POST(request: NextRequest) {
     // afternoon, all subscribed to the feed and all writing the same files.
     // findFreePort compounded it: it binds, closes, then returns, so racing callers
     // are handed the SAME port. The lock serializes the whole sequence.
-    const lockPath = path.join(DEBUG_DIR, `live_options_start_${broker}.lock`);
+    const lockPath = path.join(DEBUG_DIR, `live_options_start_${broker}_${underlying.toLowerCase()}.lock`);
     if (!acquireStartLock(lockPath)) {
       return NextResponse.json({ success: true, message: 'Bridge start already in progress' });
     }
 
     try {
-      // Prevent duplicate bridge for this broker. STARTING counts as live: it is
-      // the provisional record written below, before Python reports RUNNING.
+      // Prevent duplicate bridge for this (broker, underlying). STARTING counts
+      // as live: it is the provisional record written below, before Python
+      // reports RUNNING.
       const status = readJson(files.status) as Record<string, unknown> | null;
       const active = status && status.pid &&
         (status.status === 'RUNNING' || status.status === 'STARTING') &&
         isPidRunning(Number(status.pid));
 
-      if (active && status.underlying === underlying && status.expiry === expiry) {
+      if (active && status.expiry === expiry) {
         return NextResponse.json({ success: true, message: 'Bridge already running', pid: status.pid });
       }
 
-      // Stop this broker's existing bridge first (different underlying/expiry) —
-      // the OTHER broker's bridge, if any, is never touched.
+      // Stop this (broker, underlying)'s existing bridge first (a different
+      // expiry was requested) — every other (broker, underlying) pair's
+      // process, if any, is never touched.
       if (active) {
-        await stopAndWait(broker, Number(status!.pid));
+        await stopAndWait(broker, underlying, Number(status!.pid));
       }
 
       if (fs.existsSync(files.stop)) fs.unlinkSync(files.stop);
@@ -303,7 +335,7 @@ export async function POST(request: NextRequest) {
     // normalizeBroker above) and an option's LTP is exchange-set, not
     // broker-set, so Dhan's feed answers for any broker's position.
     const broker = 'dhan' as Broker;
-    const underlying = String(body.underlying ?? 'NIFTY').toUpperCase();
+    const underlying = normalizeUnderlying(body.underlying);
     const requests = Array.isArray(body.requests) ? body.requests : [];
 
     const clean: { underlying: string; expiry: string; strike: number; side: 'CE' | 'PE' }[] = [];
@@ -313,7 +345,7 @@ export async function POST(request: NextRequest) {
       // Each leg carries its own underlying (a caller can watch legs across
       // several underlyings in one call) — fall back to the top-level default
       // only when a leg omits it, rather than overwriting every leg with it.
-      const reqUnderlying = req.underlying ? String(req.underlying).toUpperCase() : underlying;
+      const reqUnderlying = req.underlying ? normalizeUnderlying(req.underlying) : underlying;
       const expiry = String(req.expiry ?? '');
       const strike = Number(req.strike);
       const side = String(req.side ?? '').toUpperCase();
@@ -321,13 +353,36 @@ export async function POST(request: NextRequest) {
       clean.push({ underlying: reqUnderlying, expiry, strike, side });
     }
 
-    // Full replace, not an incremental add: the caller sends its complete
-    // current need every call, so a leg that's since closed drops out on the
-    // page's own next poll instead of this file only ever growing. The
-    // Python side separately remembers what it already resolved, so a
-    // request that reappears a moment later doesn't re-trigger a lookup.
+    // Each underlying now has its own independent bridge process (and its
+    // own extra-instruments file), so group by resolved underlying and write
+    // one file per group — a CRUDEOIL page's watchExtra call must never
+    // touch NIFTY's file, and vice versa. Full replace within each group,
+    // not an incremental add: the caller sends its complete current need
+    // for that group every call, so a leg that's since closed drops out on
+    // the page's own next poll instead of a file only ever growing — the
+    // call's own top-level `underlying` is always included (even with zero
+    // requests) so it always gets this full-replace treatment, down to
+    // empty. A SECONDARY underlying that was present in some earlier call
+    // but absent from this one is left untouched rather than cleared —
+    // the same coarseness the single shared file had before this change
+    // (last writer for that underlying wins), just scoped per underlying
+    // instead of globally. The Python side separately remembers what it
+    // already resolved, so a request that reappears a moment later doesn't
+    // re-trigger a lookup.
+    const byUnderlying = new Map<string, typeof clean>();
+    // Always include the call's own top-level underlying, even with zero
+    // requests — otherwise a page whose off-expiry legs have ALL closed
+    // (so `clean` no longer has any entry for its own underlying) could
+    // never clear that underlying's file back to empty.
+    byUnderlying.set(underlying, []);
+    for (const req of clean) {
+      const group = byUnderlying.get(req.underlying);
+      if (group) group.push(req); else byUnderlying.set(req.underlying, [req]);
+    }
     try {
-      fs.writeFileSync(filesFor(broker).extra, JSON.stringify({ requests: clean }));
+      for (const [reqUnderlying, group] of byUnderlying) {
+        fs.writeFileSync(filesFor(broker, reqUnderlying).extra, JSON.stringify({ requests: group }));
+      }
     } catch (err) {
       return NextResponse.json({ success: false, error: String((err as Error).message ?? err) }, { status: 500 });
     }

@@ -138,7 +138,7 @@ export default function OptionStrats() {
       fetch('/api/options/live', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action: 'stop', brokers }),
+        body: JSON.stringify({ action: 'stop', brokers, underlying: UNDERLYING }),
       }).catch(() => {});
     };
   }, [liveMode, selectedExpiry, authenticatedBrokersKey]);

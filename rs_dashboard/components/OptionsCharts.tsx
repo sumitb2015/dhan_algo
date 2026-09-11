@@ -492,7 +492,7 @@ export default function OptionsCharts() {
 
   // ── Poll live data ────────────────────────────────────────────────
   const pollLive = useCallback(() => {
-    fetch('/api/options/live?history=1&checkPid=1')
+    fetch(`/api/options/live?history=1&checkPid=1&underlying=${UNDERLYING}`)
       .then(r => r.json())
       .then((j: {
         success: boolean;
@@ -569,7 +569,7 @@ export default function OptionsCharts() {
       await fetch('/api/options/live', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action: 'stop' }),
+        body: JSON.stringify({ action: 'stop', underlying: UNDERLYING }),
       });
       setTimeout(pollLive, 800);
     } finally {

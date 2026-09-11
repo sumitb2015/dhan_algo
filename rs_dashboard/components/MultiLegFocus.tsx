@@ -230,7 +230,7 @@ export default function MultiLegFocus() {
       fetch('/api/options/live', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action: 'stop', brokers: brokersToStart }),
+        body: JSON.stringify({ action: 'stop', brokers: brokersToStart, underlying: activeUnderlying }),
       }).catch(() => {});
     };
   }, [activeExpiry, activeUnderlying, authKey]);

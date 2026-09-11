@@ -505,6 +505,19 @@ export default function SyntheticFuturesScalper() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ action: 'start', underlying, expiry, broker: effectiveBroker }),
     }).catch(() => {});
+
+    // Stop when underlying/expiry/broker changes or the page unmounts — each
+    // underlying now runs its own independent bridge process, so an
+    // abandoned one (this effect previously had no cleanup at all) would
+    // otherwise keep running forever with nothing left to ever target and
+    // stop it.
+    return () => {
+      fetch('/api/options/live', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'stop', brokers: [effectiveBroker], underlying }),
+      }).catch(() => {});
+    };
   }, [underlying, expiry, effectiveBroker]);
 
   // ── 5. Derived Market Metrics ──────────────────────────────────────────────

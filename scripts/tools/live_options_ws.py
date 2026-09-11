@@ -380,6 +380,20 @@ def main():
                         help='Localhost WebSocket push server port (default 8765)')
     args = parser.parse_args()
 
+    # Redirect every output file to this run's own (broker, underlying) pair
+    # so concurrent bridges for different underlyings never share — and
+    # corrupt — each other's quotes/status/history/extra/stop-trigger files.
+    # `global` is required here, not optional: write_status() below is a
+    # top-level function (not nested in main()), so it has no lexical access
+    # to a plain local reassignment of STATUS_FILE.
+    global QUOTES_FILE, HISTORY_FILE, EXTRA_FILE, STATUS_FILE, STOP_TRIGGER
+    suffix = args.underlying.lower()
+    QUOTES_FILE  = os.path.join(DEBUG_DIR, f'live_options_quotes_dhan_{suffix}.json')
+    HISTORY_FILE = os.path.join(DEBUG_DIR, f'live_options_history_dhan_{suffix}.json')
+    EXTRA_FILE   = os.path.join(DEBUG_DIR, f'live_options_extra_dhan_{suffix}.json')
+    STATUS_FILE  = os.path.join(DEBUG_DIR, f'live_options_status_dhan_{suffix}.json')
+    STOP_TRIGGER = os.path.join(DEBUG_DIR, f'live_options_stop_dhan_{suffix}.trigger')
+
     os.makedirs(DEBUG_DIR, exist_ok=True)
     started_at = datetime.now().isoformat()
 

@@ -855,7 +855,7 @@ export default function AdvancedScalper() {
       fetch('/api/options/live', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action: 'stop', brokers }),
+        body: JSON.stringify({ action: 'stop', brokers, underlying }),
       }).catch(() => {});
     };
   }, [expiry, underlying, authenticatedBrokersKey]);

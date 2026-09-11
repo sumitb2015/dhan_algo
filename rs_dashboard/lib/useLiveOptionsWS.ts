@@ -128,7 +128,7 @@ function runChannel(
 
   // ── HTTP fallback poll ──
   const httpPoll = () => {
-    fetch(`/api/options/live?broker=${broker}`)
+    fetch(`/api/options/live?broker=${broker}&underlying=${underlying}`)
       .then(r => r.json())
       .then((j: { success: boolean; status: StatusWithPort; quotes: LiveQuotes }) => {
         if (disposed || !j.success) return;
@@ -220,7 +220,7 @@ function runChannel(
 
   // ── Status poll: bridge status chip + ws_port discovery (5s) ──
   const statusPoll = () => {
-    fetch(`/api/options/live?checkPid=1&broker=${broker}`)
+    fetch(`/api/options/live?checkPid=1&broker=${broker}&underlying=${underlying}`)
       .then(r => r.json())
       .then((j: { success: boolean; status: StatusWithPort }) => {
         if (disposed || !j.success || !j.status) return;
