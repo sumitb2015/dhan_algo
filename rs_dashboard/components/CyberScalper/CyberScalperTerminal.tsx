@@ -18,6 +18,7 @@ import { cn } from '@/lib/utils';
 import CyberBiasRadar from './CyberBiasRadar';
 import CyberOrderPad from './CyberOrderPad';
 import CyberPositionsPanel, { PositionItem, PositionGuard, ScalpLogItem } from './CyberPositionsPanel';
+import { matchTradesFifo, type ExitedPositionItem } from '@/lib/fifoPositions';
 import { cyberAudio } from '@/lib/cyberAudio';
 import { contractMultiplier, scaleBrokerPnl } from '@/lib/positionPnl';
 import { useBrokerSelector, scalperRoute, BROKER_LABELS, type Broker } from '@/hooks/useBrokerSelector';
@@ -58,6 +59,7 @@ export default function CyberScalperTerminal() {
 
   // Positions, Guards (TP / SL / Trailing) & Logs
   const [positions, setPositions] = useState<PositionItem[]>([]);
+  const [exitedPositions, setExitedPositions] = useState<ExitedPositionItem[]>([]);
   const [guards, setGuards] = useState<Record<string, PositionGuard>>({});
   const [logs, setLogs] = useState<ScalpLogItem[]>([]);
   const [isExecuting, setIsExecuting] = useState(false);
@@ -139,12 +141,32 @@ export default function CyberScalperTerminal() {
       if (json.success && Array.isArray(json.positions)) {
         const rawPositions = json.positions;
         const currentFeed = feedDataRef.current;
+
+        // Perform FIFO trade matching to resolve true active open entry prices & exited trades
+        let fifoOpenMap: Record<string, any> = {};
+        if (Array.isArray(json.trades) && json.trades.length > 0) {
+          const fifoRes = matchTradesFifo(json.trades);
+          fifoOpenMap = fifoRes.openMap;
+          if (fifoRes.exitedList.length > 0) {
+            setExitedPositions(fifoRes.exitedList);
+          }
+        }
+
         const mapped: PositionItem[] = rawPositions.map((p: any) => {
           const qty = Number(p.netQty || 0);
           const buyAvg = Number(p.buyAvg || p.costPrice || 0);
           const sellAvg = Number(p.sellAvg || 0);
-          // For SHORT positions, buyAvg is 0 and sellAvg is the entry price.
-          const avgPrice = qty < 0 ? (sellAvg || buyAvg) : (buyAvg || sellAvg);
+
+          const sym = String(p.tradingSymbol || p.securityId || 'POSITION');
+          const prd = String(p.productType || p.prod || 'INTRADAY');
+          const posId = `${sym}_${prd}`;
+
+          // If FIFO resolved the exact entry price for this open position, use it!
+          // Otherwise fall back to the broker's position avg (sellAvg for short, buyAvg for long)
+          const fifoOpen = fifoOpenMap[sym] || fifoOpenMap[String(p.tradingSymbol || '')];
+          const avgPrice = fifoOpen && fifoOpen.qty === Math.abs(qty) && fifoOpen.avgPrice > 0
+            ? fifoOpen.avgPrice
+            : (qty < 0 ? (sellAvg || buyAvg) : (buyAvg || sellAvg));
 
           const mult = contractMultiplier(p);
           const scaled = scaleBrokerPnl(p, mult);
@@ -161,7 +183,7 @@ export default function CyberScalperTerminal() {
 
           // Join live market LTP from feedData if broker returns 0 (essential for Kotak/Zerodha):
           if (!ltp && currentFeed) {
-            const symUpper = String(p.tradingSymbol || '').toUpperCase();
+            const symUpper = sym.toUpperCase();
             const secId = String(p.securityId || '');
 
             // 1. Future contract match (e.g. CRUDEOILM21SEP26FUT)
@@ -202,15 +224,10 @@ export default function CyberScalperTerminal() {
             ? (qty > 0 ? ltp - avgPrice : avgPrice - ltp)
             : 0;
 
-          // Recompute P&L if broker reported 0 but we have points and open quantity:
-          let pnl = qty !== 0 ? unrealized : realized;
-          if (pnl === 0 && points !== 0 && qty !== 0) {
-            pnl = points * Math.abs(qty) * (mult > 0 ? mult : 1);
-          }
-
-          const sym = String(p.tradingSymbol || p.securityId || 'POSITION');
-          const prd = String(p.productType || p.prod || 'INTRADAY');
-          const posId = `${sym}_${prd}`;
+          // Pure active open position unrealized P&L
+          let pnl = qty !== 0
+            ? (points !== 0 ? points * Math.abs(qty) * (mult > 0 ? mult : 1) : unrealized)
+            : realized;
 
           return {
             id: posId,
@@ -901,6 +918,7 @@ export default function CyberScalperTerminal() {
         {/* 3. POSITIONS TABLE WITH TARGET, SL, TRAILING & LIVE TELEMETRY LOG */}
         <CyberPositionsPanel
           positions={positions}
+          exitedPositions={exitedPositions}
           logs={logs}
           guards={guards}
           onGuardChange={handleGuardChange}
