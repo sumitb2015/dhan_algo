@@ -21,6 +21,7 @@ import { parseTradingSymbol } from '@/lib/positionLegs';
 import { cn } from '@/lib/utils';
 import TopWeightStocks from './TopWeightStocks';
 import TopIndices from './TopIndices';
+import { useLiveTickerPoll, isStale } from '@/lib/useLiveTickerPoll';
 import MtmChart, { useMtmHistory } from './MtmChart';
 import ScalperGreeksModal from './analytics/ScalperGreeksModal';
 import AdvancedScalperOptionChainModal from './AdvancedScalperOptionChainModal';
@@ -52,6 +53,23 @@ interface HalfLeg {
 
 const UNDERLYINGS = ['NIFTY', 'BANKNIFTY', 'SENSEX'] as const;
 const STRIKE_STEP: Record<string, number> = { NIFTY: 50, BANKNIFTY: 100, SENSEX: 100 };
+
+// India VIX chip in the header — sourced from /api/scalper/top-indices,
+// which as of the WS-hub migration serves this row off the shared
+// market_data_hub.py WebSocket (via live_indices_ws.py's
+// live_indices_quotes.json snapshot), not a REST poll. See that route's
+// `fromHub`.
+interface HeaderIndicesResponse {
+  updated_at: string;
+  quotes: Record<string, { ltp: number; prev_close: number; change_pct: number | null }>;
+}
+// Module scope so useLiveTickerPoll's identity check treats this as stable
+// across renders (see that hook's own doc comment on why an inline arrow
+// would restart the poll loop every render).
+function pickVixLtp(d: HeaderIndicesResponse): Record<string, number> {
+  const ltp = d?.quotes?.VIX?.ltp;
+  return typeof ltp === 'number' && ltp > 0 ? { VIX: ltp } : {};
+}
 
 /**
  * True for index/stock F&O segments across all three brokers (Dhan NSE_FNO /
@@ -523,6 +541,14 @@ export default function AdvancedScalper() {
   // Anchored on the trade book's own realized total, not totalPnl — see useMtmHistory for why.
   const { data: mtmHistory, stats: mtmStats, source: mtmSource } = useMtmHistory(broker, tradesData, positionsData, totalUnrealizedPnl);
 
+  // Header India VIX chip — always polling regardless of the Top 10 toggle,
+  // unlike TopIndices (which carries VIX among nine rows but only mounts,
+  // and only starts live_indices_ws.py, while that panel is shown).
+  const { data: vixData, now: vixNow } = useLiveTickerPoll<HeaderIndicesResponse>('/api/scalper/top-indices', pickVixLtp);
+  const vix = vixData?.quotes?.VIX;
+  const vixTickMs = vixData?.updated_at ? new Date(vixData.updated_at).getTime() : NaN;
+  const vixStale = isStale(vixTickMs, vixNow);
+
   // Combined Multi-Leg Premium Tracking & Strategy Stats
   const combinedStrategyStats = useMemo(() => {
     let openLegsCount = 0;
@@ -887,18 +913,19 @@ export default function AdvancedScalper() {
     }).catch(() => {});
   }, [showTop10]);
 
-  // Same idempotent start for the indices bridge that now feeds Top 10
-  // Markets' 9 NSE-index rows (see /api/scalper/top-indices' `fromHub`).
-  // Also shared with the Normalized Charts tab — same "never stop from here"
-  // rationale as the equity bridge above.
+  // Same idempotent start for the indices bridge that feeds Top 10 Markets'
+  // 9 NSE-index rows AND the header's India VIX chip below (both read
+  // /api/scalper/top-indices' `fromHub`) — unconditional on mount, unlike
+  // the equity bridge above, since the VIX chip is always visible regardless
+  // of the Top 10 toggle. Also shared with the Normalized Charts tab — same
+  // "never stop from here" rationale as the equity bridge.
   useEffect(() => {
-    if (!showTop10) return;
     fetch('/api/live-indices', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ action: 'start' }),
     }).catch(() => {});
-  }, [showTop10]);
+  }, []);
 
   // Re-resolves strikeMap (Dhan securityId / Zerodha tradingsymbol per strike)
   // whenever the expiry OR the selected broker changes. Order routing is
@@ -2737,6 +2764,32 @@ export default function AdvancedScalper() {
                   <span>{Math.abs(chg).toFixed(2)}</span>
                   <span className="text-xs opacity-80">({isUp ? '+' : ''}{chgPct.toFixed(2)}%)</span>
                 </div>
+              )}
+            </div>
+
+            {/* India VIX Pill — WS-hub sourced, see pickVixLtp above. */}
+            <div
+              className="flex items-baseline gap-2.5 bg-zinc-900/60 border border-zinc-800 rounded-2xl px-5 py-2"
+              title={vixStale ? 'VIX feed is stale — the indices WebSocket bridge may be starting up or has stalled' : 'India VIX, live via the shared market-data WebSocket hub'}
+            >
+              <span className="text-xs font-bold text-zinc-500 uppercase tracking-widest">VIX</span>
+              {vix ? (
+                <>
+                  <span className={`text-xl font-bold font-mono tabular-nums ${vixStale ? 'text-zinc-500' : 'text-white'}`}>
+                    {vix.ltp.toFixed(2)}
+                  </span>
+                  {vix.change_pct != null && (
+                    <span className={`flex items-baseline gap-1 text-xs font-semibold font-mono tabular-nums ${
+                      vixStale ? 'text-zinc-500' : vix.change_pct >= 0 ? 'text-emerald-400' : 'text-rose-400'
+                    }`}>
+                      <span>{vix.change_pct >= 0 ? '▲' : '▼'}</span>
+                      <span>({vix.change_pct >= 0 ? '+' : ''}{vix.change_pct.toFixed(2)}%)</span>
+                    </span>
+                  )}
+                  {vixStale && <span className="text-[9px] font-bold text-amber-500 uppercase">stale</span>}
+                </>
+              ) : (
+                <span className="text-xs text-zinc-500 animate-pulse">loading…</span>
               )}
             </div>
           </div>
