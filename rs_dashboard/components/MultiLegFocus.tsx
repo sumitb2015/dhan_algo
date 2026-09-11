@@ -804,6 +804,16 @@ export default function MultiLegFocus() {
   // Cleared for a leg once the gap resolves (leg exits, or catches back up).
   const underAllocatedWarnedRef = useRef<Set<string>>(new Set());
 
+  // Persistent (not one-shot) per-leg record of the SAME gap the toast above
+  // reports once — the toast is easy to miss or dismiss, and by design
+  // reconcileLegWithBroker never lets the displayed qty/lots reflect the
+  // broker's true pooled total (Invariant 6 — see dhan-terminal-position-
+  // ownership skill), so without this the row itself goes back to silently
+  // showing only this basket's own smaller number with no visible sign that
+  // the broker actually holds more at that strike. Rebuilt fresh every poll
+  // tick (not merged) so a resolved gap disappears from the row immediately.
+  const [legQtyWarnings, setLegQtyWarnings] = useState<Record<string, { ownQty: number; brokerQty: number }>>({});
+
   // Session-only dedup for auto-adopted untracked positions — keyed by a
   // stable signature of the group's securityIds/symbols (untrackedGroupSignature)
   // so the same broker position isn't turned into a second basket on the next
@@ -1454,6 +1464,10 @@ export default function MultiLegFocus() {
           // than once, e.g. under Strict Mode) so the toast side-effect below
           // fires exactly once per real poll tick, not once per updater call.
           const underAllocatedWarnings: { label: string; ownQty: number; brokerQty: number }[] = [];
+          // Persistent per-leg version of the same gap, rebuilt fresh every
+          // tick (not merged with the previous one) — see legQtyWarnings'
+          // declaration for why this exists alongside the one-shot toast above.
+          const nextLegQtyWarnings: Record<string, { ownQty: number; brokerQty: number }> = {};
 
           setBaskets(prevBaskets => {
             let anyChange = false;
@@ -1494,6 +1508,7 @@ export default function MultiLegFocus() {
                   const ownQty = (leg.fill?.qty && leg.fill.qty > 0) ? leg.fill.qty : leg.lots * lotSize;
                   const warnKey = `${basket.id}:${leg.id}`;
                   if (brokerQty > ownQty) {
+                    nextLegQtyWarnings[warnKey] = { ownQty, brokerQty };
                     if (!underAllocatedWarnedRef.current.has(warnKey)) {
                       underAllocatedWarnedRef.current.add(warnKey);
                       underAllocatedWarnings.push({
@@ -1530,6 +1545,14 @@ export default function MultiLegFocus() {
             });
 
             return anyChange ? nextBaskets : prevBaskets;
+          });
+
+          setLegQtyWarnings(prev => {
+            const prevKeys = Object.keys(prev);
+            const nextKeys = Object.keys(nextLegQtyWarnings);
+            const same = prevKeys.length === nextKeys.length && prevKeys.every(k =>
+              prev[k].ownQty === nextLegQtyWarnings[k]?.ownQty && prev[k].brokerQty === nextLegQtyWarnings[k]?.brokerQty);
+            return same ? prev : nextLegQtyWarnings;
           });
 
           for (const w of underAllocatedWarnings) {
@@ -1941,6 +1964,7 @@ export default function MultiLegFocus() {
                 overallMargin={basketMargins[basket.id]?.overallMargin}
                 hedgeBenefit={basketMargins[basket.id]?.hedgeBenefit}
                 availableFunds={fundsData?.available}
+                legQtyWarnings={legQtyWarnings}
                 />
               </React.Fragment>
             );

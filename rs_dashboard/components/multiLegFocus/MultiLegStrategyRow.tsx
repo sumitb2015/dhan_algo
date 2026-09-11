@@ -83,6 +83,8 @@ export interface MultiLegStrategyRowProps {
   overallMargin?: number;
   hedgeBenefit?: number;
   availableFunds?: number;
+  /** Keyed `${basketId}:${legId}` — see MultiLegFocus.tsx's legQtyWarnings. */
+  legQtyWarnings?: Record<string, { ownQty: number; brokerQty: number }>;
 }
 
 export default function MultiLegStrategyRow({
@@ -115,6 +117,7 @@ export default function MultiLegStrategyRow({
   overallMargin,
   hedgeBenefit,
   availableFunds,
+  legQtyWarnings,
 }: MultiLegStrategyRowProps) {
   // Existing/already-placed positions default collapsed (this page can carry
   // several parallel strategies, most of them just sitting open) — the user
@@ -713,6 +716,7 @@ export default function MultiLegStrategyRow({
                       onRemove={() => removeLeg(leg.id)}
                       onExit={() => onExitLeg(leg)}
                       onOpenAddLots={() => setSelectedLegForAddLots(leg)}
+                      qtyWarning={legQtyWarnings?.[`${basket.id}:${leg.id}`]}
                     />
                   ))}
                 </tbody>

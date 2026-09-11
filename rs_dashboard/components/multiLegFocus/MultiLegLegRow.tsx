@@ -1,7 +1,7 @@
 'use client';
 
 import React from 'react';
-import { X, Plus } from 'lucide-react';
+import { X, Plus, AlertTriangle } from 'lucide-react';
 import { legPnl, computeLegTrailingSL, type MultiLegLeg } from '@/lib/multiLegFocus';
 import { FOCUS_RING } from '@/components/Scalper';
 import RuleNumInput from './RuleNumInput';
@@ -34,10 +34,17 @@ interface MultiLegLegRowProps {
   onRemove: () => void;
   onExit: () => void;
   onOpenAddLots?: () => void;
+  /** Set when the broker shows more quantity at this strike than this
+   *  strategy's own tracked qty — see MultiLegFocus.tsx's legQtyWarnings and
+   *  the dhan-terminal-position-ownership skill's Invariant 6: the displayed
+   *  qty/lots deliberately never inflate to match the broker's pooled total
+   *  (it can include a sibling strategy's contribution), so this is the only
+   *  visible sign of the gap once the one-shot toast has scrolled away. */
+  qtyWarning?: { ownQty: number; brokerQty: number };
 }
 
 export default function MultiLegLegRow({
-  leg, allStrikes, ltp, spot, editable, exiting, margin, multiplier = 1, onChange, onRemove, onExit, onOpenAddLots,
+  leg, allStrikes, ltp, spot, editable, exiting, margin, multiplier = 1, onChange, onRemove, onExit, onOpenAddLots, qtyWarning,
 }: MultiLegLegRowProps) {
   const pnl = leg.fill ? legPnl(leg, ltp, multiplier) : 0;
   const pnlColor = pnl > 0 ? 'text-emerald-400' : pnl < 0 ? 'text-rose-400' : 'text-zinc-400';
@@ -81,6 +88,14 @@ export default function MultiLegLegRow({
         <input type="number" min={1} value={leg.lots} disabled={!editable}
           onChange={e => onChange({ lots: Math.max(1, Number(e.target.value) || 1) })}
           className={`h-7 w-12 bg-zinc-900 border border-zinc-700 text-zinc-200 text-xs font-mono rounded px-1 text-center focus:outline-none focus:border-emerald-500 disabled:opacity-50 ${FOCUS_RING}`} />
+        {qtyWarning && (
+          <span
+            className="mt-0.5 flex items-center justify-center gap-0.5 text-[9px] font-bold text-amber-400"
+            title={`This strategy tracks ${qtyWarning.ownQty} qty, broker shows ${qtyWarning.brokerQty} at this strike — could be a manual top-up on this leg, or a sibling strategy sharing the strike. Check Orders/Positions.`}
+          >
+            <AlertTriangle className="w-2.5 h-2.5" /> Broker: {qtyWarning.brokerQty}
+          </span>
+        )}
       </td>
       <td className="px-2 py-1.5">
         <select value={leg.type} disabled={!editable} className={SELECT_CLASS}
