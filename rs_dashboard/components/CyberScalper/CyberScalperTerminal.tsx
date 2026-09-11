@@ -264,7 +264,10 @@ export default function CyberScalperTerminal() {
     let brokerExchange = symbol === 'SENSEX' ? 'BSE_FNO' : symbol.includes('CRUDE') ? 'MCX_COMM' : 'NSE_FNO';
     if (broker !== 'dhan') {
       if (params.contractType === 'DIRECT') {
-        // Kotak futures: use the resolved near-month FUT trading symbol
+        // Kotak futures: use the resolved near-month FUT trading symbol.
+        // Dhan's MCX lot_size is always 1 (it orders by lots, not barrels), so
+        // params.qty = lots × 1. Kotak Neo requires absolute barrels, so we must
+        // multiply: e.g. 2 lots × 10 barrels/lot = 20 for CRUDEOILM.
         brokerTradingSymbol = brokerFuture?.trading_symbol;
         brokerExchange = brokerFuture?.exchange_segment ?? 'mcx_fo';
         if (!brokerTradingSymbol) {
@@ -273,6 +276,8 @@ export default function CyberScalperTerminal() {
           alert(`Cannot place order: Kotak future contract not resolved yet — try again in a moment`);
           return;
         }
+        // Scale lots → absolute barrels for the Kotak Neo order API
+        params = { ...params, qty: params.lots * (brokerFuture?.lot_size ?? 10) };
       } else {
         const entry = params.strike != null ? brokerStrikeMap[String(params.strike)] : undefined;
         brokerTradingSymbol = entry?.[params.contractType === 'CE' ? 'ceSymbol' : 'peSymbol'];
