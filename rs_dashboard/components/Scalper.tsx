@@ -72,66 +72,6 @@ export function RiskRail({ totalPnl, target, stop }: {
   );
 }
 
-/**
- * A live premium's trend over the last ~60-90s — a scalper reads momentum,
- * not just level. Unlike FocusTool.tsx's Sparkline (which reads history
- * sampled externally into a ref by its one parent), this one owns its own
- * sampling: OptionPanel is rendered by both Scalper.tsx and
- * AdvancedScalper.tsx, so a self-contained component that only needs the
- * current `value`/`trendValue` as plain number props — and samples them into
- * its own ref on its own interval — avoids making every parent implement the
- * same sampling ref independently. Colored by the sign of `trendValue`'s own
- * trend (the row's P&L, when available) rather than the plotted value's
- * direction, since a rising premium can mean the position is winning (long)
- * or losing (short) depending on side. Renders nothing until 2+ samples.
- */
-function Sparkline({ value, trendValue }: { value: number; trendValue?: number }) {
-  // Write-only "keep fresh for the interval closure" refs, synced from an
-  // effect rather than assigned during render (unsafe under React's rules).
-  // The sampled series themselves live in state, not refs — reading a ref's
-  // .current during render is unsafe.
-  const valueRef = useRef(value);
-  useEffect(() => { valueRef.current = value; }, [value]);
-  const trendValueRef = useRef(trendValue);
-  useEffect(() => { trendValueRef.current = trendValue; }, [trendValue]);
-  const [history, setHistory] = useState<number[]>([]);
-  const [trend, setTrend] = useState<number[]>([]);
-  useEffect(() => {
-    const id = setInterval(() => {
-      if (valueRef.current > 0) {
-        setHistory(h => (h.length >= 50 ? [...h.slice(1), valueRef.current] : [...h, valueRef.current]));
-      }
-      if (trendValueRef.current != null) {
-        const tv = trendValueRef.current;
-        setTrend(t => (t.length >= 50 ? [...t.slice(1), tv] : [...t, tv]));
-      }
-    }, 1500);
-    return () => clearInterval(id);
-  }, []);
-  // OptionPanel (this component's only parent, in both Scalper.tsx and
-  // AdvancedScalper.tsx) re-renders on every WS tick since it needs the live
-  // `value`/`trendValue` — but `history`/`trend` only actually change every
-  // 1.5s via the sampling interval above, so the min/max/points work is
-  // memoized to run once per real data change, not once per tick.
-  const pts = useMemo(() => {
-    if (history.length < 2) return null;
-    const w = 64, h = 18;
-    const min = Math.min(...history), max = Math.max(...history);
-    const span = max - min || 1;
-    return history.map((v, i) =>
-      `${(i / (history.length - 1)) * w},${h - ((v - min) / span) * h}`).join(' ');
-  }, [history]);
-  if (!pts) return null;
-  const w = 64, h = 18;
-  const trendGood = trend.length >= 2 ? trend[trend.length - 1] >= trend[0] : null;
-  const colorClass = trendGood == null ? 'text-zinc-500' : trendGood ? 'text-emerald-400' : 'text-rose-400';
-  return (
-    <svg viewBox={`0 0 ${w} ${h}`} width={w} height={h} className={cn(colorClass, 'inline-block')} aria-hidden="true">
-      <polyline points={pts} fill="none" stroke="currentColor" strokeWidth="1.5"
-        strokeLinecap="round" strokeLinejoin="round" opacity="0.85" />
-    </svg>
-  );
-}
 
 // A MARKET close order being accepted by the broker doesn't guarantee it filled.
 // Polls the live positions book a few times so callers that chain a follow-up
@@ -709,7 +649,7 @@ export default function Scalper() {
       fetch('/api/options/live', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action: 'stop', brokers }),
+        body: JSON.stringify({ action: 'stop', brokers, underlying }),
       }).catch(() => {});
     };
   }, [expiry, underlying, authenticatedBrokersKey]);
@@ -2260,7 +2200,7 @@ export const OptionPanel = React.memo(function OptionPanel({
           <p className="text-3xl font-bold font-mono tabular-nums text-white leading-none">
             {fmtLTP(ltp)}
           </p>
-          <Sparkline value={ltp} trendValue={pnl} />
+
         </div>
         {pct !== null ? (
           <p className={`text-sm font-semibold font-mono mt-1.5 ${isPos(pct) ? 'text-emerald-400' : 'text-rose-400'}`}>
@@ -2528,7 +2468,7 @@ const GUARD_PRESET_PCTS = [10, 15, 20, 25, 30];
  * rather than trying to make the shared regex disambiguate an inherently
  * ambiguous digit run.
  */
-function resolveRowExpiry(row: Record<string, unknown>, tradingSymbol: string, broker: Broker): string | null {
+export function resolveRowExpiry(row: Record<string, unknown>, tradingSymbol: string, broker: Broker): string | null {
   const native = normalizeExpiry(row.drvExpiryDate);
   if (native) return native;
   return broker === 'kotak' ? (parseTradingSymbol(tradingSymbol)?.expiry ?? null) : null;
