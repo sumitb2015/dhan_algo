@@ -1,10 +1,13 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { readBaskets, upsertBasket, deleteBasket } from '@/lib/multiLegFocusStore';
+import { upsertBasket, deleteBasket, pruneStaleClosedBaskets } from '@/lib/multiLegFocusStore';
 import type { MultiLegBasket } from '@/lib/multiLegFocus';
 
 export async function GET(): Promise<NextResponse> {
   try {
-    return NextResponse.json({ success: true, data: readBaskets() });
+    // Yesterday's (or older) fully-closed strategies never need to show up
+    // again — clear them out on read so the page only ever carries today's
+    // history plus whatever's still open. See pruneStaleClosedBaskets().
+    return NextResponse.json({ success: true, data: pruneStaleClosedBaskets() });
   } catch (err) {
     console.error('[/api/multi-leg-focus/baskets GET]', err);
     return NextResponse.json({ success: false, error: String(err) }, { status: 500 });

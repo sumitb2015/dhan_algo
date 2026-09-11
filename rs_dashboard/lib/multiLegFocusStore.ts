@@ -1,6 +1,7 @@
 import path from 'path';
 import fs from 'fs';
 import { PROJECT_ROOT } from '@/lib/pyExec';
+import { istToday } from './pnlAlertState';
 import type { MultiLegBasket } from './multiLegFocus';
 
 const STORE_FILE = path.join(PROJECT_ROOT, 'debug', 'multi_leg_baskets.json');
@@ -63,6 +64,30 @@ export function deleteBasket(id: string): MultiLegBasket[] {
   const baskets = readBaskets().filter(b => b.id !== id);
   writeBaskets(baskets);
   return baskets;
+}
+
+function istDateOf(iso: string): string {
+  return new Date(iso).toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
+}
+
+function isFullyClosed(basket: MultiLegBasket): boolean {
+  return basket.legs.length > 0 && basket.legs.every(l => l.status === 'CLOSED');
+}
+
+/** Drops any basket whose every leg is CLOSED and whose last update (the
+ *  reconciliation tick that closed its final leg, or a manual exit) landed on
+ *  a previous IST calendar day — a strategy exited today keeps showing all
+ *  day, then is gone the next time this is called after midnight IST. Runs
+ *  on every GET (see the baskets route) rather than a separate scheduled job,
+ *  so the store never accumulates more than one day of finished history. A
+ *  basket with any still-open/placing/closing leg is never touched here,
+ *  regardless of age. */
+export function pruneStaleClosedBaskets(): MultiLegBasket[] {
+  const baskets = readBaskets();
+  const today = istToday();
+  const kept = baskets.filter(b => !(isFullyClosed(b) && istDateOf(b.updatedAt) < today));
+  if (kept.length !== baskets.length) writeBaskets(kept);
+  return kept;
 }
 
 let _basketSeq = 0;
