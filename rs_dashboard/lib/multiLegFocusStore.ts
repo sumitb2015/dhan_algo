@@ -1,7 +1,7 @@
 import path from 'path';
 import fs from 'fs';
 import { PROJECT_ROOT } from '@/lib/pyExec';
-import { istToday } from './pnlAlertState';
+
 import type { MultiLegBasket } from './multiLegFocus';
 
 const STORE_FILE = path.join(PROJECT_ROOT, 'debug', 'multi_leg_baskets.json');
@@ -68,6 +68,10 @@ export function deleteBasket(id: string): MultiLegBasket[] {
 
 function istDateOf(iso: string): string {
   return new Date(iso).toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
+}
+
+function istToday(): string {
+  return new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
 }
 
 function isFullyClosed(basket: MultiLegBasket): boolean {
