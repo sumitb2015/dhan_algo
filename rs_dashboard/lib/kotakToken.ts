@@ -84,6 +84,14 @@ export function getKotakSession(): KotakSession {
     const { baseUrl, editToken, editSid, serverId, ucc } = cache;
     return { baseUrl, editToken, editSid, serverId, ucc };
   }
+  // Kotak is an optional broker — the token file legitimately not existing
+  // (never run kotak_autologin.py) is routine, not a bug. Without this
+  // check, fs.readFileSync below throws a raw ENOENT with a stack trace
+  // pointing into a minified Next.js server chunk instead of here — see the
+  // matching comment in zerodhaToken.ts's getZerodhaCredentials().
+  if (!fs.existsSync(TOKEN_FILE)) {
+    throw new Error('No Kotak session — run kotak_autologin.py');
+  }
   const raw = JSON.parse(fs.readFileSync(TOKEN_FILE, 'utf8')) as Record<string, string>;
   if (!raw.edit_token || !raw.edit_sid || !raw.base_url) {
     throw new Error('No Kotak session — run kotak_autologin.py');

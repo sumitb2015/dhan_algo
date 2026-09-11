@@ -48,12 +48,26 @@ function readApiKey(): string {
  */
 export function getZerodhaCredentials(): { apiKey: string; accessToken: string } {
   let fileMtimeMs = 0;
-  try { fileMtimeMs = fs.statSync(TOKEN_FILE).mtimeMs; } catch { /* fall through to full read below */ }
+  try { fileMtimeMs = fs.statSync(TOKEN_FILE).mtimeMs; } catch { /* fall through to the clean-error read below */ }
 
   if (cache && cache.fileMtimeMs === fileMtimeMs && Date.now() - cache.ts < TOKEN_TTL) {
     return { apiKey: cache.apiKey, accessToken: cache.accessToken };
   }
-  const raw = JSON.parse(fs.readFileSync(TOKEN_FILE, 'utf8')) as { accessToken: string };
+
+  // Zerodha is an optional broker — plenty of sessions never run
+  // zerodha_autologin.py, so the token file legitimately not existing is
+  // routine, not a bug. Without this check, fs.readFileSync below throws a
+  // raw ENOENT whose stack trace points into a minified Next.js server
+  // chunk instead of here, which is what every poll-route caller's
+  // console.error(...) ends up printing — a scary-looking crash trace for
+  // an entirely expected "not connected" state, on every single poll.
+  if (!fs.existsSync(TOKEN_FILE)) {
+    throw new Error('No Zerodha session — run scripts/tools/zerodha_autologin.py');
+  }
+  const raw = JSON.parse(fs.readFileSync(TOKEN_FILE, 'utf8')) as { accessToken?: string };
+  if (!raw.accessToken) {
+    throw new Error('No Zerodha session — run scripts/tools/zerodha_autologin.py');
+  }
   const apiKey = readApiKey();
   cache = { apiKey, accessToken: raw.accessToken, ts: Date.now(), fileMtimeMs };
   return { apiKey: cache.apiKey, accessToken: cache.accessToken };
