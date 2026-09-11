@@ -509,6 +509,15 @@ export default function AdvancedScalper() {
       positionFilter === 'open' ? Number(p.netQty) !== 0 : Number(p.netQty) === 0);
   }, [enrichedPositions, positionFilter]);
 
+  // P&L for whichever filter is currently selected — same realized+unrealized
+  // formula as totalPnl above, just scoped to the rows actually on screen. For
+  // 'all' this equals totalPnl exactly; kept separate rather than reusing
+  // totalPnl directly so the filter chip's number and the filter's row set
+  // can never silently drift apart from each other.
+  const displayedPnl = useMemo(() => displayedPositions.reduce((sum, p) =>
+    sum + (Number(p.realizedProfit) || 0) + (Number(p.unrealizedProfit) || 0), 0),
+    [displayedPositions]);
+
   // Open legs with no real LTP at all (Kotak, whose positions payload never
   // carries one, on an expiry other than the one currently selected above —
   // the live-quotes WS bridge only tracks one expiry at a time). Their
@@ -2874,21 +2883,37 @@ export default function AdvancedScalper() {
           {/* Open/Closed/All filter — only meaningful for the positions tab,
               which is the only one mixing live legs with netQty-0 rows the
               broker keeps returning for the rest of the session after a
-              square-off. */}
+              square-off. P&L chip alongside it always reflects whichever
+              filter is currently selected (see displayedPnl). */}
           {activeTab === 'positions' && (
-            <div className="ml-auto flex items-center gap-1 bg-zinc-950 border border-zinc-800 rounded-lg p-0.5">
-              {(['all', 'open', 'closed'] as const).map(f => (
-                <button key={f} onClick={() => setPositionFilter(f)}
-                  className={cn(
-                    'px-2.5 py-1 text-xs font-bold rounded-md capitalize transition-all cursor-pointer',
-                    positionFilter === f
-                      ? 'bg-zinc-700 text-zinc-100'
-                      : 'text-zinc-500 hover:text-zinc-300',
-                    FOCUS_RING,
-                  )}>
-                  {f}
-                </button>
-              ))}
+            <div className="ml-auto flex items-center gap-2">
+              <span
+                title={`Realized + unrealized P&L for the ${positionFilter} rows currently shown`}
+                className={cn(
+                  'px-2.5 py-1 text-xs font-bold font-mono tabular-nums rounded-lg border whitespace-nowrap',
+                  displayedPnl > 0
+                    ? 'border-emerald-500/40 bg-emerald-950/40 text-emerald-300'
+                    : displayedPnl < 0
+                      ? 'border-rose-500/40 bg-rose-950/40 text-rose-300'
+                      : 'border-zinc-800 bg-zinc-950 text-zinc-400',
+                )}>
+                {positionFilter.toUpperCase()} P&amp;L: {displayedPnl >= 0 ? '+' : ''}
+                ₹{displayedPnl.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+              </span>
+              <div className="flex items-center gap-1 bg-zinc-950 border border-zinc-800 rounded-lg p-0.5">
+                {(['all', 'open', 'closed'] as const).map(f => (
+                  <button key={f} onClick={() => setPositionFilter(f)}
+                    className={cn(
+                      'px-2.5 py-1 text-xs font-bold rounded-md capitalize transition-all cursor-pointer',
+                      positionFilter === f
+                        ? 'bg-zinc-700 text-zinc-100'
+                        : 'text-zinc-500 hover:text-zinc-300',
+                      FOCUS_RING,
+                    )}>
+                    {f}
+                  </button>
+                ))}
+              </div>
             </div>
           )}
 
