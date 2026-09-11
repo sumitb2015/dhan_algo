@@ -206,6 +206,17 @@ export default function AdvancedScalper() {
   const closingInFlightRef = useRef<Set<string>>(new Set());
   const expiryRef = useRef('');
   useEffect(() => { expiryRef.current = expiry; }, [expiry]);
+  // Latest-broker guard for the positions/orders/trades/funds pollers below:
+  // fetchTabData/pollTabData/pollFunds each capture `broker` in their own
+  // closure, but a request issued just before a broker switch can still
+  // resolve after it. Without checking this ref in the response handler, that
+  // stale response would repopulate positionsData with the PREVIOUS broker's
+  // rows right after the broker-switch effect cleared them — and closePosition
+  // / the guard loop act on whatever's in positionsRef.current, so the wrong
+  // broker's positions could briefly be shown (and acted on) under the newly
+  // selected broker.
+  const brokerRef = useRef(broker);
+  useEffect(() => { brokerRef.current = broker; }, [broker]);
 
   // NOTE: a position never gets a target or SL on its own. Every level in
   // `posGuards` is one the user typed or clicked onto that specific row.
@@ -974,9 +985,15 @@ export default function AdvancedScalper() {
 
   const fetchTabData = useCallback(() => {
     setTabLoading(true);
+    const requestedBroker = broker;
     fetch(scalperRoute(broker, 'all'))
       .then(r => r.json())
       .then((j: { success: boolean; positions?: Record<string, unknown>[]; positionsError?: string | null; orders?: Record<string, unknown>[]; trades?: Record<string, unknown>[]; funds?: Record<string, any>; pnl_guard?: any }) => {
+        // Broker was switched while this request was in flight — the
+        // broker-switch effect already cleared state for the new broker;
+        // applying this response now would repopulate it with the old
+        // broker's rows. See brokerRef's declaration.
+        if (requestedBroker !== brokerRef.current) return;
         if (j.success) {
           setPositionsData(j.positions ?? []);
           setPositionsError(j.positionsError ?? null);
@@ -991,9 +1008,11 @@ export default function AdvancedScalper() {
   }, [broker]);
 
   const pollTabData = useCallback(() => {
+    const requestedBroker = broker;
     fetch(scalperRoute(broker, 'poll'))
       .then(r => r.json())
       .then((j: { success: boolean; positions?: Record<string, unknown>[]; positionsError?: string | null; orders?: Record<string, unknown>[]; trades?: Record<string, unknown>[] }) => {
+        if (requestedBroker !== brokerRef.current) return;
         if (j.success) {
           setPositionsData(j.positions ?? []);
           setPositionsError(j.positionsError ?? null);
@@ -1005,9 +1024,11 @@ export default function AdvancedScalper() {
   }, [broker]);
 
   const pollFunds = useCallback(() => {
+    const requestedBroker = broker;
     fetch(scalperRoute(broker, 'funds'))
       .then(r => r.json())
       .then((j: { success: boolean; data?: Record<string, any> }) => {
+        if (requestedBroker !== brokerRef.current) return;
         if (j.success) setFundsData(j.data ?? null);
       })
       .catch(() => {});
