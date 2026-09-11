@@ -125,6 +125,9 @@ export default function AdvancedScalper() {
   const [showTop10, setShowTop10] = useState(false);
   const [showGreeks, setShowGreeks] = useState(false);
   const [showChain, setShowChain] = useState(false);
+  // Positions tab filter — defaults to 'all' so this doesn't change existing
+  // behavior for anyone until they opt into narrowing the view.
+  const [positionFilter, setPositionFilter] = useState<'all' | 'open' | 'closed'>('all');
   const boxCounterRef = useRef(2);
   const [boxes, setBoxes] = useState<BoxConfig[]>([
     { id: 'box-1', side: 'CE', strike: null, lots: 1, limitPrice: '' },
@@ -496,6 +499,15 @@ export default function AdvancedScalper() {
   const totalPnl = useMemo(() => enrichedPositions.reduce((sum, p) =>
     sum + (Number(p.realizedProfit) || 0) + (Number(p.unrealizedProfit) || 0), 0),
     [enrichedPositions]);
+
+  // Positions tab display filter only — deliberately applied after
+  // totalPnl/enrichedPositions above, which must stay over the FULL set
+  // (realized P&L needs the closed legs too, not just what's on screen).
+  const displayedPositions = useMemo(() => {
+    if (positionFilter === 'all') return enrichedPositions;
+    return enrichedPositions.filter(p =>
+      positionFilter === 'open' ? Number(p.netQty) !== 0 : Number(p.netQty) === 0);
+  }, [enrichedPositions, positionFilter]);
 
   // Open legs with no real LTP at all (Kotak, whose positions payload never
   // carries one, on an expiry other than the one currently selected above —
@@ -2858,9 +2870,32 @@ export default function AdvancedScalper() {
               {tab}{data.length > 0 ? ` (${data.length})` : ''}
             </button>
           ))}
+
+          {/* Open/Closed/All filter — only meaningful for the positions tab,
+              which is the only one mixing live legs with netQty-0 rows the
+              broker keeps returning for the rest of the session after a
+              square-off. */}
+          {activeTab === 'positions' && (
+            <div className="ml-auto flex items-center gap-1 bg-zinc-950 border border-zinc-800 rounded-lg p-0.5">
+              {(['all', 'open', 'closed'] as const).map(f => (
+                <button key={f} onClick={() => setPositionFilter(f)}
+                  className={cn(
+                    'px-2.5 py-1 text-xs font-bold rounded-md capitalize transition-all cursor-pointer',
+                    positionFilter === f
+                      ? 'bg-zinc-700 text-zinc-100'
+                      : 'text-zinc-500 hover:text-zinc-300',
+                    FOCUS_RING,
+                  )}>
+                  {f}
+                </button>
+              ))}
+            </div>
+          )}
+
           <button onClick={fetchTabData} disabled={tabLoading}
             className={cn(
-              'ml-auto flex items-center gap-1 px-2.5 py-1.5 text-xs font-semibold rounded-lg',
+              activeTab === 'positions' ? 'flex' : 'ml-auto flex',
+              'items-center gap-1 px-2.5 py-1.5 text-xs font-semibold rounded-lg',
               'border border-zinc-700 bg-zinc-900 text-zinc-400 hover:text-zinc-200',
               'transition-all disabled:opacity-50', FOCUS_RING,
             )}>
@@ -2880,7 +2915,7 @@ export default function AdvancedScalper() {
             />
           ) : activeTab === 'positions' ? (
             <PositionsTable
-              data={enrichedPositions}
+              data={displayedPositions}
               broker={broker}
               guards={posGuards}
               closingPositions={closingPositions}
