@@ -779,14 +779,14 @@ export default function MultiLegFocus() {
   const overallTotalPnl = useMemo(() => {
     let sum = 0;
     for (const b of baskets) {
-      const crudeMult = broker === 'dhan'
+      const crudeMult = b.broker === 'dhan'
         ? (b.underlying === 'CRUDEOIL' ? 100 : b.underlying === 'CRUDEOILM' ? 10 : 1)
         : 1;
       const metrics = computeStrategyMetrics(b.legs, l => ltpFor(b, l), crudeMult);
       sum += metrics.totalPnlRupees;
     }
     return sum;
-  }, [baskets, ltpFor, broker]);
+  }, [baskets, ltpFor]);
 
   const activeStrategiesCount = useMemo(() => {
     return baskets.filter(b => b.legs.some(l => l.status === 'OPEN')).length;
@@ -1587,7 +1587,7 @@ export default function MultiLegFocus() {
 
       // 1. Strategy Target and SL
       if (basket.riskConfig?.armed && !triggeredStrategyExitsRef.current.has(basket.id) && !exitingMap[basket.id]) {
-        const crudeMult = broker === 'dhan'
+        const crudeMult = basket.broker === 'dhan'
           ? (basket.underlying === 'CRUDEOIL' ? 100 : basket.underlying === 'CRUDEOILM' ? 10 : 1)
           : 1;
         const metrics = computeStrategyMetrics(basket.legs, l => ltpFor(basket, l), crudeMult);
