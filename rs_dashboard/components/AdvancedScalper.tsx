@@ -5,6 +5,7 @@ import NavBar from './NavBar';
 import { Zap, RefreshCw, Shield, ShieldOff, Plus, Scissors, Wallet, Sigma } from 'lucide-react';
 import {
   OptionPanel, PositionsTable, TabTable, FundsView, formatFundsValue, pollPositionFlat, pollPositionReduced,
+  resolveRowExpiry,
   type ChainOcEntry, type Toast,
   type PnlGuardStatus, type PositionGuard, type SortState,
   FOCUS_RING, TXT_LABEL, TXT_VALUE, TXT_CAPTION, RiskRail,
@@ -44,6 +45,14 @@ interface HalfLeg {
   /** Absolute units to close — already rounded down to whole lots. */
   units: number;
   lots: number;
+}
+
+/** An Add-leg click armed against an expiry the terminal just switched to —
+ *  see handleAddLeg and the effect that drains this. */
+interface PendingAddLeg {
+  expiry: string;
+  joinKey: string;
+  sym: string;
 }
 
 const UNDERLYINGS = ['NIFTY', 'BANKNIFTY', 'SENSEX'] as const;
@@ -134,6 +143,13 @@ export default function AdvancedScalper() {
   // positions poll, so without this the second click would fire a different
   // set of orders than the first click previewed.
   const armedHalfPlanRef = useRef<{ legs: HalfLeg[]; skipped: string[] } | null>(null);
+
+  // Add-leg on a position whose expiry isn't the one currently selected: the
+  // terminal must switch expiry first (placeOrder resolves contracts off the
+  // CURRENTLY selected expiry's strikeMap, so a box can't trade an off-expiry
+  // strike without the switch), then wait for that expiry's strikeMap to load
+  // before populating the box. See handleAddLeg + the effect that drains this.
+  const pendingAddLegRef = useRef<PendingAddLeg | null>(null);
 
   // Row checkboxes + "Exit Selected". Keyed by lib/positionProduct's
   // `positionKey`, same as posGuards/closingPositions.
@@ -1026,19 +1042,11 @@ export default function AdvancedScalper() {
     setBoxes(prev => (prev.length > MIN_BOXES ? prev.filter(b => b.id !== id) : prev));
   }, [boxes, boxSecId, positionsBySecId, addToast]);
 
-  // Pre-fill an existing empty box (or add a new one) from an open position so the
-  // user can scale in (same strike) or add a hedge (new strike) via the order panel.
-  const handleAddLeg = useCallback((pos: Record<string, unknown>) => {
-    const sym = String(pos.tradingSymbol ?? '');
-    // Resolve through the same broker-aware join the positions table uses.
-    // Scanning strikeMap for ceSymbol/peSymbol matched nothing on Dhan — its
-    // lookup returns securityIds only (scalper_api.py emits ceId/peId, no
-    // symbols), so every Add click on the primary broker failed here.
-    const mapping = secIdToStrikeSide[positionJoinKey(pos)];
-    if (!mapping) { addToast('error', 'Could not match position to a strike', sym); return; }
-    const strike = mapping.strike;
-    const side: 'CE' | 'PE' = mapping.side === 'ce' ? 'CE' : 'PE';
-
+  // Fill an existing empty box (or add a new one) with a resolved strike/side
+  // so the user can scale in (same strike) or add a hedge (new strike) via
+  // the order panel. Shared by handleAddLeg's fast path and its deferred
+  // off-expiry path below.
+  const placeLegInBox = useCallback((side: 'CE' | 'PE', strike: number) => {
     const emptyBox = boxes.find(b => b.side === side && b.strike == null);
     if (emptyBox) {
       updateBox(emptyBox.id, { strike });
@@ -1052,7 +1060,69 @@ export default function AdvancedScalper() {
     boxCounterRef.current += 1;
     setBoxes(prev => [...prev, { id: `box-${boxCounterRef.current}`, side, strike, lots: 1, limitPrice: '' }]);
     addToast('success', `${side} panel set to ${strike}`, 'Pick Buy/Sell and lots to add this leg');
-  }, [secIdToStrikeSide, positionJoinKey, boxes, updateBox, addToast]);
+  }, [boxes, updateBox, addToast]);
+
+  // Pre-fill a box from an open position's strike. `secIdToStrikeSide` only
+  // covers whichever expiry is currently selected (strikeMap is fetched and
+  // reset per-expiry — see the strikeMap-loading effect below), so a position
+  // held on a DIFFERENT expiry than what's on screen always misses here on
+  // the first try — regardless of broker, strike, or symbol format. When that
+  // happens, resolve the position's own expiry (Dhan/Kotak only — Zerodha's
+  // symbol format can't be resolved this way, see resolveRowExpiry), switch
+  // the terminal to it, and defer placing the leg until that expiry's
+  // strikeMap has loaded and re-confirms the match via the same join
+  // placeOrder itself relies on (see the pendingAddLegRef-draining effect).
+  const handleAddLeg = useCallback((pos: Record<string, unknown>) => {
+    const sym = String(pos.tradingSymbol ?? '');
+    const joinKey = positionJoinKey(pos);
+
+    const mapping = secIdToStrikeSide[joinKey];
+    if (mapping) {
+      placeLegInBox(mapping.side === 'ce' ? 'CE' : 'PE', mapping.strike);
+      return;
+    }
+
+    const posExpiry = resolveRowExpiry(pos, sym, broker);
+    if (!posExpiry || posExpiry === expiry) {
+      addToast('error', 'Could not match position to a strike', sym);
+      return;
+    }
+    if (!expiries.includes(posExpiry)) {
+      addToast('error', `${sym} is on ${posExpiry}`, 'That expiry is not currently listed (expired/rolled?) — refresh Positions');
+      return;
+    }
+
+    pendingAddLegRef.current = { expiry: posExpiry, joinKey, sym };
+    addToast('success', `Switching terminal to ${posExpiry} for ${sym}`, 'This changes the expiry (and option chain) for the whole terminal, and resets other order boxes');
+    setExpiry(posExpiry);
+  }, [secIdToStrikeSide, positionJoinKey, broker, expiries, expiry, placeLegInBox, addToast, setExpiry]);
+
+  // Drains a pending off-expiry Add-leg (armed by handleAddLeg above) once the
+  // expiry it switched to has actually loaded a strikeMap — never populates a
+  // box from the expiry-switch guess itself, only from a fresh, re-confirmed
+  // join, so a stale/failed lookup fails loudly instead of risking a
+  // wrong-contract order.
+  useEffect(() => {
+    const pending = pendingAddLegRef.current;
+    if (!pending) return;
+    if (pending.expiry !== expiry) {
+      // The dropdown moved off the target expiry before this fired (a manual
+      // change, or a second Add-leg click targeting a different expiry) —
+      // drop it rather than populate a box against an expiry the user didn't
+      // ask for anymore.
+      pendingAddLegRef.current = null;
+      return;
+    }
+    if (Object.keys(strikeMap).length === 0) return; // still loading this expiry's map
+
+    pendingAddLegRef.current = null;
+    const mapping = secIdToStrikeSide[pending.joinKey];
+    if (!mapping) {
+      addToast('error', 'Could not match position to a strike after switching expiry', pending.sym);
+      return;
+    }
+    placeLegInBox(mapping.side === 'ce' ? 'CE' : 'PE', mapping.strike);
+  }, [expiry, strikeMap, secIdToStrikeSide, placeLegInBox, addToast]);
 
   // ─── placeOrder ───────────────────────────────────────────────────
 
